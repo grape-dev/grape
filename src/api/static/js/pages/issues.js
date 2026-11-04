@@ -29,6 +29,7 @@ let _taskView = 'board';       // 'list' | 'board'
 const _TASKS_PER_PAGE = 30;   // Issue #926：每屏条数（服务端 per_page，原前端切片 15 改服务端分页）
 let _tasksHasMore = false;    // Issue #926：服务端 has_more（false 时停止无限滚动）
 let _tasksLoading = false;    // Issue #926：分页请求进行中（防重复触发）
+let _taskReqSeq = 0;         // Issue #926：请求序号——重置类请求使旧在途响应失效（防闸门吞请求/错序渲染）
 let _tasksTotal = 0;          // Issue #926：服务端 total（含 PR 伪卡片）
 let _taskObs = null;          // Issue #926：IntersectionObserver 实例
 let _taskPollTimer = null;    // 场景识别轮询定时器
@@ -85,6 +86,7 @@ function toggleTasksMode() {
 function _resetTaskListAndLoad() {
   _taskPage = 1;
   _tasksAll = [];
+  _tasksTotal = 0;   // Issue #926：切换瞬间清 total，避免显示旧口径计数
   _tasksHasMore = false;
   loadTasks();
 }
@@ -278,6 +280,10 @@ function loadTasks(opts) {
   _loadTasksSortPref(repoKey);
   const _append = !!(opts && opts.append);
   const _merge = !!(opts && opts.merge);
+  // Issue #926：滚动追加并发去重；重置/轮询类请求不再被 _tasksLoading 闸门静默吞掉——
+  // 通过 _taskReqSeq 使旧在途响应作废，先发者被后发重置请求取代（切筛选必然重拉第 1 屏）
+  if (_append && _tasksLoading) return;
+  const _seq = ++_taskReqSeq;
   // Issue #926：merge（轮询刷新）固定取第 1 屏做增量对账；append（滚动）取当前页码
   const _reqPage = _merge ? 1 : _taskPage;
   // 「仓库全部」视图：服务端分页 + q/statuses 过滤（Issue #926）
@@ -305,18 +311,31 @@ function loadTasks(opts) {
   }
   _tasksLoading = true;
   API.get(apiUrl).then(d => {
+    if (_seq !== _taskReqSeq) { _tasksLoading = false; return; }  // 已被更新的重置请求取代，丢弃
     if (window._currentView !== 'tasks') { _tasksLoading = false; return; }  // stale guard
     _tasksLoading = false;
     const _items = d.issues || d.tasks || [];
     if (_usePaging && (d.page !== undefined)) {
+      // Issue #926：轮询 merge 只取第 1 屏——已滚动超过第 1 屏（_taskPage>2）时
+      // total 仍以服务端为准，但 has_more/已删除项清除只能按本地已加载量对账，
+      // 避免第 1 屏口径覆盖深滚动状态（误停滚动/误删未加载行）
       _tasksTotal = d.total || 0;
-      _tasksHasMore = !!d.has_more;
+      var _beyondFirst = (_taskPage > 2);
+      _tasksHasMore = _beyondFirst ? (_tasksAll.length < _tasksTotal) : !!d.has_more;
     } else {
       _tasksTotal = _items.length;
       _tasksHasMore = false;
     }
+    // Issue #926：成功后才推进页码（_taskPage = 下一屏页码）；失败不推进 → 重试不跳屏
+    if (_usePaging && !_merge) _taskPage = _reqPage + 1;
     if (_append || (opts && opts.merge)) {
-      // Issue #926：按 id 去重合并——已有项原地更新字段（轮询刷新不整表重排），新项尾部追加
+      // Issue #926：按 id 去重合并——已有项原地更新字段（轮询刷新不整表重排），新项尾部追加；
+      // 仍在第 1 屏（未滚动）时同步清除已删除项（第 1 屏对账口径）
+      if (opts && opts.merge && _taskPage <= 2) {
+        var _liveIds = {};
+        _items.forEach(t => { _liveIds[t.id] = true; });
+        _tasksAll = _tasksAll.filter(t => _liveIds[t.id]);
+      }
       const _byId = {};
       _tasksAll.forEach(t => { _byId[t.id] = t; });
       _items.forEach(t => {
@@ -390,6 +409,7 @@ function loadTasks(opts) {
     }
   }).catch(e => {
     _tasksLoading = false;
+    if (_seq !== _taskReqSeq) return;  // 已被更新的重置请求取代，静默丢弃
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
     window._pendingTaskDetailId = null;  // Issue #175: 清理待打开详情（loadTasks 失败时不残留）
@@ -1210,7 +1230,7 @@ function _observeTaskSentinel() {
   const _loadNext = function() {
     if (!_tasksHasMore || _tasksLoading) return;
     if (window._currentView !== 'tasks') return;  // stale guard
-    _taskPage++;
+    // Issue #926：页码推进移入 loadTasks 成功回调（失败不推进，重试不跳屏）
     loadTasks({append: true});
   };
   if (!('IntersectionObserver' in window)) {
@@ -1351,9 +1371,17 @@ function _renderTaskAttachments(taskId, atts) {
 function _loadTaskAttachments(taskId, forceRefresh) {
   // Issue #648：详情卡片自带 attachments 字段（详情/统一列表 API 新增）时直接渲染，
   // 免二次请求；上传/删除后 forceRefresh=true 强制走端点刷新拿最新清单。
+  // Issue #926：分页列表瘦身不回 attachments 清单（仅 attachments_count）——
+  // count=0 免请求直渲空清单，count>0 走 /issues/{id}/attachments 异步填充（到货各自渲染）
   var t = window._currentDetailTask;
-  if (!forceRefresh && t && Array.isArray(t.attachments)) {
+  if (!forceRefresh && t && Array.isArray(t.attachments) && t.attachments.length) {
     _renderTaskAttachments(taskId, t.attachments);
+    return;
+  }
+  if (!forceRefresh && t && typeof t.attachments_count === 'number' && t.attachments_count === 0 &&
+      !(Array.isArray(t.attachments) && t.attachments.length)) {
+    // count=0（分页瘦身行 / PR 伪卡片）免请求直渲空清单
+    _renderTaskAttachments(taskId, []);
     return;
   }
   API.get('/issues/' + taskId + '/attachments').then(function(data) {

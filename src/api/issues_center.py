@@ -2547,6 +2547,24 @@ def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
     return False
 
 
+def _attach_count(owner: str, repo: str, issue_number) -> int:
+    """Issue #926：仅统计附件数量（分页列表瘦身）。
+
+    与 _attach_list 同存储口径，但跳过 URL 预签名与元数据 dict 构造。
+    """
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage:
+        prefix_key = _attach_obs_key(owner, repo, issue_number, "")
+        items, _ = storage.list_objects_with_meta(prefix_key)
+        return sum(1 for item in items if item["key"].rsplit("/", 1)[-1])
+    attach_dir = _attach_base_dir(owner, repo, issue_number)
+    if os.path.isdir(attach_dir):
+        return sum(1 for f in os.listdir(attach_dir)
+                   if os.path.isfile(os.path.join(attach_dir, f)))
+    return 0
+
+
 def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     """列出附件。返回 [{filename, url, size, is_image}]。"""
     from src.storage import get_storage

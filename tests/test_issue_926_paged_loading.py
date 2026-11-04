@@ -3,7 +3,9 @@
 覆盖 /api/issues/{o}/{r}：
 - q / statuses 服务端过滤（issue 行 + PR 伪卡片同口径）
 - PR 伪卡片并入统一 LIMIT/OFFSET 分页窗口（total 计入、逐页无重复无丢失）
-- 分页响应瘦身（attachments 只回 count）；per_page=0 全量兼容保持
+- 分页响应瘦身（不回 attachments 清单，仅 attachments_count）；per_page=0 全量兼容保持
+- statuses 全非法值 → 400（与 status pattern 校验口径一致）
+- default 模式深分页 + PR 卡交错：无重复无丢失（窗口化取数）
 """
 import os, sys
 
@@ -106,17 +108,20 @@ class TestIssue926PagedLoading:
         d2 = self._get("?mode=time&per_page=50&statuses=completed").json()
         assert len(d2["issues"]) == 2
         assert all(it["status"] == "completed" for it in d2["issues"])
-        # 白名单外的值被忽略（防注入/脏参数）
+        # 白名单外的值被忽略（防注入/脏参数，合法值仍生效）
         d3 = self._get("?mode=time&per_page=50&statuses=completed,evil").json()
         assert len(d3["issues"]) == 2
+        # 全非法值：与 status 参数 pattern 校验口径一致 → 400（而非静默退化为无过滤）
+        d4 = self._get("?mode=time&per_page=50&statuses=evil,evil2")
+        assert d4.status_code == 400
 
     def test_paged_attachments_slimmed(self):
         self._mk_many(6300, 3, "processing")
         d = self._get("?mode=time&per_page=2&page=1").json()
         assert len(d["issues"]) == 2
         for it in d["issues"]:
-            assert it.get("attachments") == []          # 分页模式不再内联清单
-            assert "attachments_count" in it            # 只回 count
+            assert "attachments" not in it          # 分页模式不内联清单字段（前端按 count 异步填充）
+            assert isinstance(it.get("attachments_count"), int)  # 只回 count
         # per_page=0 全量兼容：attachments 仍为完整清单
         d0 = self._get("?mode=time&recent_terminal=0").json()
         assert all(isinstance(it.get("attachments"), list) for it in d0["issues"])
@@ -144,3 +149,45 @@ class TestIssue926PagedLoading:
         d = self._get("?mode=default&per_page=6&page=1").json()
         sts = [it["status"] for it in d["issues"]]
         assert sts == ["active", "active", "processing", "processing", "completed", "completed"]
+
+    def test_default_mode_awaiting_pending_not_lost(self):
+        """Issue #926 复审：default 模式 SQL/Python 排序口径统一为 4 级（含 awaiting_input/pending_review），
+        旧版 awaiting_input 行被排入终态桶后可能永不出现在任何页——现按 4 级序逐页无丢失。"""
+        self._mk_many(6550, 2, "awaiting_input")
+        self._mk_many(6560, 2, "pending_review")
+        self._mk_many(6570, 2, "active")
+        self._mk_many(6580, 2, "processing")
+        seen, pg = [], 1
+        while True:
+            d = self._get(f"?mode=default&per_page=2&page={pg}").json()
+            seen.extend([(it["issue_number"], it["status"]) for it in d["issues"]])
+            if not d["has_more"]:
+                break
+            pg += 1
+            assert pg < 30
+        assert len(seen) == 8 and len(set(n for n, _ in seen)) == 8
+        # 逐页滚动序遵循 default 状态优先序（active=0 < processing=1 < awaiting_input=2 < pending_review=3 < 终态=4）
+        pri = {"active": 0, "processing": 1, "awaiting_input": 2, "pending_review": 3, "completed": 4}
+        seq = [pri[s] for _, s in seen]
+        assert seq == sorted(seq), f"页间滚动序违背 default 状态优先序: {seq}"
+
+    def test_default_mode_deep_pages_with_pr_cards(self):
+        """Issue #926 复审：default 模式深分页 + PR 卡交错合并（窗口化取数）无重复无丢失。"""
+        self._mk_many(6600, 12, "processing")
+        self._mk_many(6612, 4, "awaiting_input")   # 第 2 级，与 processing 行跨页交错
+        self._mk_pr_events([31, 32])               # PR 伪卡并入合并序
+        seen, prs, pg = [], [], 1
+        while True:
+            d = self._get(f"?mode=default&per_page=3&page={pg}").json()
+            for it in d["issues"]:
+                if it.get("is_pr_event"):
+                    prs.append(it["issue_number"])
+                else:
+                    seen.append(it["issue_number"])
+            if not d["has_more"]:
+                break
+            pg += 1
+            assert pg < 30
+        assert d["total"] == 18
+        assert len(seen) == 16 and len(set(seen)) == 16   # 16 条 issue 行不丢不重
+        assert sorted(prs) == [31, 32]                    # 2 张 PR 卡恰好各出现一次

@@ -584,6 +584,28 @@ def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
     return []
 
 
+def _issue_attachments_count(repo_keys: list[str], issue_number) -> int:
+    """Issue #926：仅取附件数量（分页瘦身专用）。
+
+    与 _issue_attachments 同探测口径（按 repo_key 顺序，首个命中即返回），
+    但跳过 _attach_list 的 URL 预签名/元数据构造，深列表页 I/O 显著低于全量取清单。
+    """
+    if issue_number is None or str(issue_number).strip() == "":
+        return 0
+    from src.api.issues_center import _attach_count
+    from src.repo_key import split_owner_repo
+    for rk in repo_keys or []:
+        try:
+            owner, rname = split_owner_repo(rk)
+            n = _attach_count(owner, rname, str(issue_number))
+        except Exception as e:
+            log.warning(f"issues: count attachments failed repo={rk} #{issue_number}: {e}")
+            continue
+        if n:
+            return n
+    return 0
+
+
 def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
     """读 event.json 组装 pipeline 路线图（跨 provider 双查）。"""
     from src.api.event_archive import load_event_json
@@ -2116,12 +2138,27 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
     _order_by = f"created_at {_order_dir}"
     if mode == "default":
-        _order_by = f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 ELSE 2 END, created_at {_order_dir}"
+        # Issue #926：与 issues_list / _merge_sort_items 同源（_status_order_sql），
+        # 修复旧版仅 3 桶（active/processing/else）与 Python 4 级优先序口径不一致
+        _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
     issues_out = _query_tasks(where, params, _order_by, include_user_id=False)
     return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
 
 
 _STATUS_PRIORITY = {"active": 0, "processing": 1, "awaiting_input": 2, "pending_review": 3}
+
+
+def _status_order_sql() -> str:
+    """Issue #926：default 模式状态优先序的 SQL CASE 片段（单一事实源）。
+
+    与 Python 侧 _STATUS_PRIORITY 同源派生（终态兜底 4），消除 SQL CASE /
+    _STATUS_PRIORITY / 前端映射三处口径复制导致的霰弹式同改风险。
+    """
+    _cases = " ".join(
+        f"WHEN status='{_st}' THEN {_pr}"
+        for _st, _pr in sorted(_STATUS_PRIORITY.items(), key=lambda kv: kv[1])
+    )
+    return f"CASE {_cases} ELSE 4 END"
 
 
 def _merge_sort_items(items: list[dict], mode: str, sort_order: str) -> None:
@@ -2194,9 +2231,13 @@ def list_repo_issues(owner: str, repo: str,
     if statuses:
         _allowed = {"active", "processing", "awaiting_input", "pending_review", "completed", "cancelled"}
         statuses_set = {s.strip() for s in statuses.split(",") if s.strip()} & _allowed
-        if statuses_set:
-            clauses.append(f"status IN ({','.join('?' * len(statuses_set))})")
-            params.extend(sorted(statuses_set))
+        if not statuses_set:
+            # Issue #926：全部为白名单外值时与 status 参数 pattern 校验（400）口径一致，
+            # 显式拒绝而非静默退化为无过滤
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "statuses 参数不含任何合法状态值（active/processing/awaiting_input/pending_review/completed/cancelled）"})
+        clauses.append(f"status IN ({','.join('?' * len(statuses_set))})")
+        params.extend(sorted(statuses_set))
     # Issue #926：q 搜索（标题/编号子串，大小写不敏感）
     if q:
         clauses.append("(LOWER(title) LIKE ? OR CAST(issue_number AS TEXT) LIKE ?)")
@@ -2212,9 +2253,7 @@ def list_repo_issues(owner: str, repo: str,
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
     _order_by = f"created_at {_order_dir}"
     if mode == "default":
-        _order_by = (f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 "
-                     f"WHEN status='awaiting_input' THEN 2 WHEN status='pending_review' THEN 3 "
-                     f"ELSE 4 END, created_at {_order_dir}")
+        _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
 
     _total = None
     _page_row_count = None
@@ -2238,12 +2277,17 @@ def list_repo_issues(owner: str, repo: str,
             _total = 0
         _total += len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
         _offset = (page - 1) * per_page
-        # issue 行窗口：offset..offset+per_page+pr_count（PR 卡在合并序中至多挤掉 pr_count 条 issue 行）
+        # Issue #926：窗口化取数（替代深页 0..offset+per_page+pr 全前缀拉取，O(page) 而非 O(offset)）。
+        # 合并序中 issue 行的全局位次 p 满足 seq-pr ≤ p ≤ seq（pr=PR 卡总数），故页窗口
+        # [_offset, _offset+per_page) 内的 issue 行其 seq 必落在 [max(0,_offset-pr), _offset+per_page)；
+        # 本地合并列表（窗口 issue 行 + 全部 PR 卡）排序后，前缀恰有 min(_offset, pr) 条
+        # 全局位次 < _offset 的多余项，从该位置切片即得全局页窗口。
+        _pr_count = len(pr_items)
         issues = _query_tasks(where, params, _order_by, include_user_id=True,
-                              limit=_offset + per_page + len(pr_items), offset=0)
+                              limit=per_page + _pr_count, offset=max(0, _offset - _pr_count))
         _merged = list(issues) + list(pr_items)
         _merge_sort_items(_merged, mode, sort_order)
-        _page = _merged[_offset:_offset + per_page]
+        _page = _merged[min(_offset, _pr_count):][:per_page]
         issues = [it for it in _page if not it.get("is_pr_event")]
         _page_pr = [it for it in _page if it.get("is_pr_event")]
         _page_row_count = len(_page)
@@ -2301,14 +2345,19 @@ def list_repo_issues(owner: str, repo: str,
         # Issue #648：统一列表卡片带附件清单（无附件为 []，前端附件区直接消费）
         # PR 订阅伪卡片（is_pr_event）编号与 GitCode PR 对应，不是 issue 附件目录编号；
         # PR 号与同仓 issue 号重合时会命中错误附件目录，显式置 [] 防错配
-        # Issue #926 + #648 合并口径：附件清单走仓库级批量映射（_attach_map，避免逐卡 OBS list），
-        # 分页模式瘦身只回 attachments_count（清单由 /attachments 按需拉）。
+        # Issue #926 + #648 合并口径：附件清单走仓库级批量映射（_attach_map，避免逐卡 OBS list）；
+        # 分页模式瘦身——不回 attachments 清单（仅 attachments_count），计数直接取批量映射长度
+        # （无需再走 _issue_attachments_count 的 URL 预签名/元数据构造成本），前端按 count
+        # 判定 count=0 免请求直渲 / count>0 走 /issues/{id}/attachments 异步填充。
         if it.get("is_pr_event"):
             it["attachments"] = []
             it["attachments_count"] = 0
         else:
             _att = _attach_map.get(str(_num or ""), [])
-            it["attachments"] = [] if per_page > 0 else _att
+            if per_page > 0:
+                it.pop("attachments", None)
+            else:
+                it["attachments"] = _att
             it["attachments_count"] = len(_att)
 
     # PR 订阅事件伪卡片混入（Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
