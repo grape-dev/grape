@@ -100,6 +100,127 @@ def _codegraph_available() -> bool:
     return shutil.which("codegraph") is not None
 
 
+_codegraph_warned = False
+
+
+def _warn_codegraph_missing(repo_key: str):
+    """Issue #666（M1）：codegraph 缺失显式告警——首次 generate 输出完整告警（含影响与恢复指引），
+    后续仅一行简讯（决策：告警时机=首次 generate，避免每次刷新刷屏，也避免启动期空告警）。
+
+    影响：project-info 降级生成（Architecture/Key Files 仅模块级候选，推断性质），
+    下游 Spec 的 Affected Modules 将依赖降级候选；恢复：安装 codegraph 后
+    should_refresh 会因 degraded 标记自动触发全量重建。
+    """
+    global _codegraph_warned
+    if _codegraph_warned:
+        log.warning(f"project-info: codegraph unavailable for {repo_key}, degraded (candidates from git tree/API)")
+        return
+    _codegraph_warned = True
+    log.warning(
+        f"project-info: codegraph NOT INSTALLED (repo={repo_key}) -- degraded generation. "
+        "Impact: project-graph/capabilities fall back to module-level candidates inferred from "
+        "git tree + API paths (marked as inferred, not full analysis); downstream Spec "
+        "Affected Modules will rely on these candidates. "
+        "Recovery: install codegraph (see scripts/install-codegraph.sh, "
+        "npm package @colbymchenry/codegraph), then the next refresh rebuilds full baseline "
+        "(degraded meta triggers should_refresh automatically)."
+    )
+
+
+# Issue #666（M2）：降级路径模块级候选——git tree 拉取参数（env 可调）
+_DEGRADED_TREE_MAX_ENTRIES = int(os.environ.get("PROJECT_INFO_DEGRADED_TREE_ENTRIES", "200"))
+_DEGRADED_TREE_KEY_DIRS = ("src", "app", "lib", "packages", "server", "worker", "scripts", "tests")
+
+
+def _git_tree_paths(repo_key: str, token: str = "") -> list[str]:
+    """Issue #666（M2）：bare mirror git ls-tree 拉目录结构（best-effort，失败返回空）。
+
+    - ref 候选：origin/HEAD → origin/main → origin/master；
+    - 顶层一级 + 关键目录（src/ 等）二级展开；条目数上限 _DEGRADED_TREE_MAX_ENTRIES。
+    """
+    base = _repo_base_dir(repo_key)
+    if not os.path.isdir(base):
+        return []
+    ref = ""
+    for _ref in ("origin/HEAD", "origin/main", "origin/master"):
+        c, out, _e = _run(["git", "--git-dir", base, "ls-tree", "--name-only", _ref], timeout=60)
+        if c == 0 and (out or "").strip():
+            ref = _ref
+            top = [l.strip().rstrip("/") for l in out.splitlines() if l.strip()]
+            break
+    else:
+        return []
+    entries = list(top)
+    for d in top:
+        if d in _DEGRADED_TREE_KEY_DIRS and len(entries) < _DEGRADED_TREE_MAX_ENTRIES:
+            c, out, _e = _run(["git", "--git-dir", base, "ls-tree", "--name-only", ref, d], timeout=60)
+            if c == 0:
+                for l in (out or "").splitlines():
+                    p = l.strip()
+                    if p and len(entries) < _DEGRADED_TREE_MAX_ENTRIES:
+                        entries.append(p)
+    return entries
+
+
+def _api_tree_paths(repo_key: str, owner: str, rname: str, token: str = "") -> list[str]:
+    """Issue #666（M2）：git tree 不可用时 GitCode API contents 拉根路径（best-effort）。"""
+    paths = []
+    try:
+        from src.repo import Repo
+        _repo = Repo(repo_key)
+        tok = token or _repo.bot_token
+        if not tok:
+            return []
+        import urllib.request, json as _json
+        _api = _repo.api_base
+        _headers = {"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"}
+        for _p in ("", "src"):
+            req = urllib.request.Request(
+                f"{_api}/repos/{owner}/{rname}/contents/{_p}", headers=_headers)
+            data = _json.load(urllib.request.urlopen(req, timeout=20))
+            if isinstance(data, dict):
+                data = data.get("tree") or data.get("entries") or []
+            for it in data or []:
+                if isinstance(it, dict) and it.get("path"):
+                    paths.append(it["path"])
+                elif isinstance(it, str) and it:
+                    paths.append(it)
+            if len(paths) >= _DEGRADED_TREE_MAX_ENTRIES:
+                break
+    except Exception:
+        return []
+    return paths[:_DEGRADED_TREE_MAX_ENTRIES]
+
+
+def _degraded_candidates_md(repo_key: str, token: str = "") -> tuple[str, str, str, str]:
+    """Issue #666（M2）：降级路径模块级候选。
+
+    返回 (architecture, modules, key_files, source)；无可用来源时三项均为空串（渲染为 N/A）、
+    source 为空（meta.note 不标候选来源）。候选仅作推断线索，标注为 inferred，不替代全量分析。
+    """
+    owner, rname = split_owner_repo(repo_key)
+    paths = _git_tree_paths(repo_key, token)
+    source = "git tree" if paths else ""
+    if not paths:
+        paths = _api_tree_paths(repo_key, owner, rname, token)
+        source = "GitCode API" if paths else ""
+    if not paths:
+        return "", "", "", ""
+    top_dirs = sorted({p.split("/")[0] for p in paths if "/" in p})
+    top_files = sorted(p for p in paths if "/" not in p)
+    modules_md = "\n".join(
+        f"- `{d}/` (module candidate, inferred from {source}; responsibility to be confirmed)"
+        for d in top_dirs)
+    arch_md = (
+        "codegraph 不可用，降级生成——基于 {src} 的目录结构推断模块划分（inferred，非全量分析）：\n"
+        + "\n".join(f"- 顶层目录（模块候选）：{d}/" for d in top_dirs)
+    ).format(src=source)
+    kf_lines = [f"- {p}" for p in top_files[:_DEGRADED_TREE_MAX_ENTRIES]]
+    kf_lines += [f"- {p}" for p in paths if "/" in p][:_DEGRADED_TREE_MAX_ENTRIES - len(kf_lines)]
+    key_files_md = f"（降级：来自 {source} 的路径候选，inferred）\n" + "\n".join(kf_lines)
+    return arch_md, modules_md, key_files_md, source
+
+
 def _read_meta(repo_key: str) -> dict:
     try:
         p = os.path.join(_pi_dir(repo_key), _META_FILE)
@@ -454,11 +575,20 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         pass
 
     if not _codegraph_available():
-        log.warning(f"project-info: codegraph unavailable for {repo_key}, degraded")
+        # Issue #666（M1）：显式告警（首次 generate 完整告警，含影响与恢复指引）
+        _warn_codegraph_missing(repo_key)
+        # Issue #666（M2）：降级路径模块级候选（git tree 优先，API 兜底，无来源回落 N/A）
+        arch_md, modules_md, key_files_md, cand_source = _degraded_candidates_md(repo_key, token)
+        if not cand_source:
+            arch_md = "codegraph 不可用，降级生成"
         meta["degraded"] = True
-        meta["note"] = "codegraph unavailable, generated from README + GitCode API"
+        note = "codegraph unavailable, generated from README + GitCode API"
+        if cand_source:
+            note += f"; module candidates from {cand_source} (inferred)"
+        meta["note"] = note
         _write_meta(repo_key, meta)
-        _write_file(repo_key, _GRAPH_FILE, _build_graph_md(repo_key, meta, "codegraph 不可用，降级生成", "N/A", "N/A", "N/A"))
+        _write_file(repo_key, _GRAPH_FILE,
+                    _build_graph_md(repo_key, meta, arch_md, modules_md, "N/A", key_files_md))
         _write_file(repo_key, _CAP_FILE, _build_capabilities_md(repo_key, meta, "N/A", "N/A", "N/A"))
         return {"ok": True, "degraded": True, "reason": "codegraph unavailable"}
 

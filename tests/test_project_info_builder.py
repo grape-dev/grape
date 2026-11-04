@@ -465,3 +465,89 @@ class TestDefaultBranchDrivesWorktree:
         assert "reset --hard" not in joined
         assert "codegraph sync" in joined
 
+
+
+class TestDegradedModuleCandidates:
+    """Issue #666 (M2)：codegraph 不可用时降级路径模块级候选（非全 N/A）。"""
+
+    def _degraded_build(self, monkeypatch, caplog=None):
+        import logging
+        import src.project_info.builder as b
+        b._codegraph_warned = False
+        monkeypatch.setattr(b, "_codegraph_available", lambda: False)
+        if caplog is not None:
+            with caplog.at_level(logging.WARNING, logger="devops-bot"):
+                r = b.build_project_info("gitcode:org/test")
+        else:
+            r = b.build_project_info("gitcode:org/test")
+        return r
+
+    def test_degraded_with_git_tree_candidates(self, _tmp_workspace, monkeypatch):
+        """git tree 可用 → 降级 graph 含模块级候选（Architecture/Modules/Key Files 非 N/A）。"""
+        import src.project_info.builder as b
+        monkeypatch.setattr(b, "_git_tree_paths",
+                            lambda repo_key, token="": ["src", "scripts", "README.md",
+                                                        "src/config.py", "src/api", "src/worker_package.py"])
+        r = self._degraded_build(monkeypatch)
+        assert r["degraded"] is True
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
+        graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
+        assert "module candidate" in graph
+        assert "src/" in graph
+        assert "src/config.py" in graph          # Key Files depth-2 展开非 N/A
+        assert "inferred" in graph               # 候选标注为推断
+        assert "（降级：来自 git tree 的路径候选" in graph
+        meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
+        assert meta["degraded"] is True
+        assert "git tree" in meta["note"]
+
+    def test_degraded_api_fallback(self, _tmp_workspace, monkeypatch):
+        """git tree 不可用 → GitCode API 兜底，来源标注 GitCode API。"""
+        import src.project_info.builder as b
+        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key, token="": [])
+        monkeypatch.setattr(b, "_api_tree_paths",
+                            lambda repo_key, owner, rname, token="": ["src", "src/main.py", "README.md"])
+        r = self._degraded_build(monkeypatch)
+        assert r["degraded"] is True
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
+        graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
+        assert "GitCode API" in graph
+        assert "module candidate" in graph
+        meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
+        assert "GitCode API" in meta["note"]
+
+    def test_degraded_no_source_falls_back(self, _tmp_workspace, monkeypatch):
+        """git tree 与 API 均不可用 → 回落现状（N/A + 降级说明），不崩溃。"""
+        import src.project_info.builder as b
+        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key, token="": [])
+        monkeypatch.setattr(b, "_api_tree_paths", lambda repo_key, owner, rname, token="": [])
+        r = self._degraded_build(monkeypatch)
+        assert r["degraded"] is True
+        from src.repo_key import workspace_repo_dir
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
+        graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
+        assert "codegraph 不可用，降级生成" in graph
+        meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
+        assert "codegraph" in meta["note"]
+        assert "module candidates from" not in meta["note"]
+
+    def test_warn_codegraph_missing_once(self, _tmp_workspace, monkeypatch, caplog):
+        """Issue #666 (M1)：告警一次性——首次 generate 完整告警，第二次仅简讯。"""
+        import logging
+        import src.project_info.builder as b
+        caplog.set_level(logging.WARNING, logger="devops-bot")
+        b._codegraph_warned = False
+        monkeypatch.setattr(b, "_codegraph_available", lambda: False)
+        monkeypatch.setattr(b, "_degraded_candidates_md", lambda repo_key, token="": ("", "", "", ""))
+        b.build_project_info("gitcode:org/a")
+        full = [r for r in caplog.records if "codegraph NOT INSTALLED" in r.getMessage()]
+        assert len(full) == 1
+        assert "Recovery" in full[0].getMessage()
+        caplog.clear()
+        b.build_project_info("gitcode:org/b")
+        full = [r for r in caplog.records if "codegraph NOT INSTALLED" in r.getMessage()]
+        assert len(full) == 0
+        short = [r for r in caplog.records if "codegraph unavailable" in r.getMessage()]
+        assert len(short) == 1
