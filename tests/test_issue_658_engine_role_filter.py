@@ -102,38 +102,38 @@ def _mk_scene(scene_id, agent_type, engine_ids):
 # ===== engine_role_tags 解析（双轨）=====
 
 class TestEngineRoleTags:
-    def test_default_mapping(self):
-        assert es.engine_role_tags("opencode") == ["coding", "issue", "qa"]
-        assert es.engine_role_tags("codearts") == ["coding", "issue", "qa"]
-        assert es.engine_role_tags("hermes") == ["vod", "chat", "sre"]
+    def test_no_type_default_all_unrestricted(self):
+        # #658 修订：已知类型不再有默认角色映射，默认不限角色
+        assert es.engine_role_tags("opencode") is None
+        assert es.engine_role_tags("codearts") is None
+        assert es.engine_role_tags("hermes") is None
+        assert es.engine_role_tags("codex") is None
 
     def test_explicit_overrides_default(self):
         tags = '["vod"]'
         assert es.engine_role_tags("codearts", tags) == ["vod"]
         assert es.engine_role_tags("codearts", '["VOD", " Chat "]') == ["vod", "chat"]
 
-    def test_unknown_type_unrestricted(self):
-        # 未知引擎类型（codex/cursor/自定义）且未显式声明 → None（不限角色，存量零配置兼容）
-        assert es.engine_role_tags("codex") is None
-        assert es.engine_role_tags("my-custom-engine") is None
-
     def test_invalid_json_falls_back(self):
-        assert es.engine_role_tags("hermes", "not-json") == ["vod", "chat", "sre"]
+        # 声明非法 JSON 时按未声明处理 → None（不限角色）
+        assert es.engine_role_tags("hermes", "not-json") is None
 
 
 # ===== pick_engine 角色硬过滤（legacy 派发）=====
 
 class TestPickEngineRoleFilter:
-    def test_issue90_vod_not_dispatched_to_codearts(self):
-        """#90 反例：vod 节点绑定 codearts 引擎 → 角色硬过滤后无候选 → None（不静默降级）。"""
-        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-ca"))
+    def test_issue90_vod_not_dispatched_to_declared_coding_only(self):
+        """#90 反例（修订口径）：显式声明 role_tags=['coding'] 的引擎绑到 vod 节点 → 无候选 → None。"""
+        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-ca"),
+                        role_tags='["coding"]')
         _mk_scene("test-658-neg", "vod", [ca])
         assert es.pick_engine("owner/repo", "vod", scene_id="test-658-neg") is None
 
-    def test_vod_not_dispatched_to_opencode_either(self):
+    def test_vod_dispatched_to_undeclared_opencode(self):
+        """修订口径：未声明 role_tags 的 opencode 默认不限角色，可服务 vod。"""
         oc = _mk_engine("opencode", credential_id=_mk_cred("b658-oc"))
         _mk_scene("test-658-oc", "vod", [oc])
-        assert es.pick_engine("owner/repo", "vod", scene_id="test-658-oc") is None
+        assert es.pick_engine("owner/repo", "vod", scene_id="test-658-oc") == oc
 
     def test_vod_matches_hermes(self):
         hm = _mk_engine("hermes", credential_id=_mk_cred("b658-hm"))
@@ -146,9 +146,10 @@ class TestPickEngineRoleFilter:
         _mk_scene("test-658-cd", "coding", [oc, ca])
         assert es.pick_engine("owner/repo", "coding", scene_id="test-658-cd") == min(oc, ca)
 
-    def test_codearts_excluded_vod_keeps_hermes(self):
-        """混合候选：codearts 被角色过滤剔除，hermes 命中。"""
-        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-ca3"))
+    def test_declared_coding_excluded_vod_keeps_hermes(self):
+        """混合候选（修订口径）：显式声明 coding-only 的被过滤剔除，未声明的 hermes 命中。"""
+        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-ca3"),
+                        role_tags='["coding"]')
         hm = _mk_engine("hermes", credential_id=_mk_cred("b658-hm3"))
         _mk_scene("test-658-mix", "vod", [ca, hm])
         assert es.pick_engine("owner/repo", "vod", scene_id="test-658-mix") == hm
@@ -170,9 +171,10 @@ class TestPickEngineRoleFilter:
 # ===== get_scene_pool_engine_ids 角色硬过滤（plugin 广播收口）=====
 
 class TestScenePoolRoleFilter:
-    def test_issue90_vod_codearts_pool_none(self):
-        """#90 反例：场景 vod 节点绑定 codearts → 池角色过滤后无候选 → None（显式失败）。"""
-        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-ca5"))
+    def test_issue90_vod_declared_coding_pool_none(self):
+        """#90 反例（修订口径）：场景 vod 节点绑定显式 coding-only 引擎 → 无候选 → None。"""
+        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-ca5"),
+                        role_tags='["coding"]')
         _mk_scene("test-658-pool-neg", "vod", [ca])
         assert es.get_scene_pool_engine_ids("test-658-pool-neg", "vod",
                                             repo_key="owner/repo", user_id=1) is None
@@ -249,12 +251,13 @@ class TestClaimByTagRoleGuard:
             agent_type=pool_tag, skill="issue", pool_agent_type=pool_tag,
             pool_tag=pool_tag)
 
-    def test_codearts_cannot_claim_vod_task(self):
-        """#90 反例（广播队列）：codearts 引擎（默认角色 coding/issue/qa）不得认领 vod 任务。"""
-        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-cl-ca"))
+    def test_declared_coding_only_cannot_claim_vod_task(self):
+        """#90 反例（广播队列，修订口径）：显式声明 coding-only 的引擎不得认领 vod 任务。"""
+        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-cl-ca"),
+                        role_tags='["coding"]')
         task = self._enqueue_pool_task("a", "vod", 65801)
         assert service.claim_by_tag("all", ca) is None
-        assert service.get_task(task)["status"] == "queued", "vod 任务不得被 codearts 认领"
+        assert service.get_task(task)["status"] == "queued"
 
     def test_hermes_claims_vod_task(self):
         hm = _mk_engine("hermes", credential_id=_mk_cred("b658-cl-hm"))
@@ -269,8 +272,9 @@ class TestClaimByTagRoleGuard:
         assert got and got["id"] == task
 
     def test_role_guard_skips_mismatch_keeps_queue(self):
-        """队首 vod 任务被 codearts 跳过后，队尾 coding 任务仍可被认领（不阻塞队列）。"""
-        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-cl-ca3"))
+        """队首 vod 任务被显式 coding-only 引擎跳过后，队尾 coding 任务仍可被认领。"""
+        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-cl-ca3"),
+                        role_tags='["coding"]')
         vod_task = self._enqueue_pool_task("d", "vod", 65804)
         import datetime
         _old = (datetime.datetime.now(datetime.timezone.utc)).isoformat()
@@ -280,8 +284,9 @@ class TestClaimByTagRoleGuard:
         assert service.get_task(vod_task)["status"] == "queued"
 
     def test_bound_claim_role_mismatch_rejected(self):
-        """bound claim（expected）：角色不匹配 → fail-closed 拒绝。"""
-        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-cl-ca4"))
+        """bound claim（expected）：显式声明角色不匹配 → fail-closed 拒绝。"""
+        ca = _mk_engine("codearts", credential_id=_mk_cred("b658-cl-ca4"),
+                        role_tags='["coding"]')
         task = self._enqueue_pool_task("f", "vod", 65806)
         got = service.claim_by_tag("all", ca, expected_task_id=task, expected_event_seq=65806)
         assert got is None

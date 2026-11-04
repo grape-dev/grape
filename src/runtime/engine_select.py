@@ -28,14 +28,12 @@ _PRIO_REPO = 10
 _PRIO_GLOBAL = 50
 _PRIO_LOCAL = 90
 
-# ===== Issue #658：引擎角色（role_tags）与节点角色（agent_type）硬匹配 =====
-# 引擎类型 → 默认角色集（帮助文档分工：opencode/codearts→Coding/Issue/QA、hermes→VOD/Chat/SRE）。
-# 引擎注册可显式声明 role_tags 覆盖默认映射；未声明且类型不在映射内 → None（不限角色，存量零配置兼容）。
-_DEFAULT_ENGINE_ROLE_TAGS = {
-    "opencode": ["coding", "issue", "qa"],
-    "codearts": ["coding", "issue", "qa"],
-    "hermes": ["vod", "chat", "sre"],
-}
+# ===== Issue #658 修订（2026-11-03 用户裁定）：引擎角色不按类型默认映射 =====
+# 撤销 opencode/codearts/hermes 的类型刻板映射——引擎能力与引擎类型无关，
+# 所有引擎默认不限角色；仅显式声明 role_tags 时才按声明硬过滤。
+# （类型默认映射曾把 hermes 锁在 vod/chat/sre、opencode 锁在 coding/issue/qa，
+# 误伤跨类型绑定的合法场景；保留显式声明轨，默认口径 = 不限。）
+_DEFAULT_ENGINE_ROLE_TAGS: dict = {}
 
 # 已知节点角色全集（认领侧守卫仅对角色类 pool_tag 生效；自定义路由 tag 如 "b520tag"
 # 不是角色，不受角色硬过滤约束）
