@@ -2664,7 +2664,10 @@ grape-admin（Spring Boot + Vue3）是最先需要接入的非 Python 服务：
 | 运维端点 | `GET /internal/gsb/services`（全量 + `age_seconds` / `alive`）、`GET /internal/gsb/services/{name}`（单服务发现，过期返回 404），集群模式走 `X-Service-Token` 认证 |
 | 注册表能力 | 新增 `list_all_services()`（含离线/过期行）与 `purge_stale()`（心跳超时收敛为 offline，保留行便于排查） |
 | 客户端 | 新增 `event` 映射与四进程实际端口回退；传输层故障（ConnectError/超时/协议错）按 `env → 注册表 → 本机` 顺序切换候选地址，HTTP 4xx/5xx 不重试 |
-| 测试 | `tests/test_gsb_registry.py` + `tests/test_gsb_service.py`，共 17 例（注册/心跳/超时/注销/端点/地址解析/故障切换） |
+| 测试 | `tests/kernel/test_gsb_registry.py` + `tests/kernel/test_gsb_service.py`，共 22 例（注册/心跳/超时/注销/端点/地址解析/故障切换/旧库补列/非幂等不重放） |
+| 旧库升级 | `_ensure_table()` 对早期无 `version` 列的注册表补一次 `ADD COLUMN`（列已存在时忽略），避免旧库上注册被吞成无限重试 |
+| 重放安全 | 非幂等请求（POST/PUT/PATCH/DELETE）只在连接期错误（ConnectError/ConnectTimeout）时切换候选；读超时/协议错误直接抛出，防止 `update_issue_state`、`log_obs` 等写操作被重复执行 |
+| 状态收敛 | 心跳循环每 20 拍（≈10min）调用一次 `purge_stale()`，兜住 `kill -9` 后残留的 online 行 |
 
 实测（本机四进程重启后）：
 

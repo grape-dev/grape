@@ -35,10 +35,21 @@ HEARTBEAT_TIMEOUT = 90
 
 
 def _ensure_table():
-    """幂等建表（每次 register 时调用，CREATE IF NOT EXISTS）。"""
+    """幂等建表（每次 register 时调用，CREATE IF NOT EXISTS）。
+
+    旧库升级：GSB 早期版本的建表语句没有 version 列，``CREATE TABLE IF NOT
+    EXISTS`` 不会给已存在的表补列，直接 INSERT version 会失败（注册被吞成无限
+    重试）。这里补一次 best-effort 的 ADD COLUMN，列已存在时忽略报错。
+    """
     with session_manager.db_lock:
         c = session_manager.db.cursor()
         c.execute(_REGISTRY_DDL)
+        try:
+            c.execute(
+                "ALTER TABLE gsb_service_registry ADD COLUMN version TEXT DEFAULT '1'"
+            )
+        except Exception:  # noqa: BLE001 - 列已存在（SQLite/MySQL 报错文案不同）
+            pass
         session_manager.db.commit()
 
 

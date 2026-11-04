@@ -47,11 +47,15 @@ from src.kernel.gsb.registry import (
     heartbeat_service,
     list_all_services,
     list_services,
+    purge_stale,
     register_service,
 )
 
 # 心跳间隔（秒）——设计稿 30s；超时 3 个周期（registry.HEARTBEAT_TIMEOUT）
 HEARTBEAT_INTERVAL = 30
+
+# 每 N 拍心跳顺带收敛一次注册表（N × 30s ≈ 10min）
+PURGE_EVERY_N_BEATS = 20
 
 # 进程角色 → GSB 服务名。worker 进程对外就是 runtime 域（与 GRAPE_RUNTIME_URL 对齐）
 _ROLE_TO_SERVICE = {
@@ -249,7 +253,13 @@ class GsbService:
             log.warning(f"GSB deregister failed: service={self.name} err={type(e).__name__}: {e}")
 
     async def _heartbeat_loop(self) -> None:
-        """心跳循环：立即打一次，之后每 30s；未注册成功则顺带重试注册（自愈）。"""
+        """心跳循环：立即打一次，之后每 30s；未注册成功则顺带重试注册（自愈）。
+
+        每 ``PURGE_EVERY_N_BEATS`` 拍顺带收敛一次注册表状态（把心跳超时的
+        online 行标 offline），否则进程 kill -9 后注册表会长期显示 online。
+        收敛是 best-effort，失败只记日志，不影响心跳。
+        """
+        beats = 0
         while not self._stopping:
             try:
                 if not self._registered:
@@ -263,6 +273,16 @@ class GsbService:
                 if now - self._last_register_error > _REGISTER_RETRY_BACKOFF:
                     self._last_register_error = now
                     log.warning(f"GSB heartbeat failed: service={self.name} err={type(e).__name__}: {e}")
+
+            beats += 1
+            if beats % PURGE_EVERY_N_BEATS == 0:
+                try:
+                    purged = purge_stale()
+                    if purged:
+                        log.info(f"GSB purge_stale: {purged} stale service(s) marked offline")
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"GSB purge_stale failed: {type(e).__name__}: {e}")
+
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
             except asyncio.CancelledError:

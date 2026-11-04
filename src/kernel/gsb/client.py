@@ -55,6 +55,8 @@ _URL_CACHE_TTL = 30
 
 # 只有传输层错误才换候选地址重试；HTTPStatusError 属于业务响应，直接抛出
 _TRANSPORT_ERRORS: tuple = ()
+# 连接阶段错误 = 请求肯定没送到服务端，任何方法都可安全切换候选
+_CONNECT_ERRORS: tuple = ()
 if httpx:
     _TRANSPORT_ERRORS = (
         httpx.ConnectError,
@@ -63,6 +65,10 @@ if httpx:
         httpx.RemoteProtocolError,
         httpx.NetworkError,
     )
+    _CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+# 幂等方法：读超时/协议错误后重放不会产生重复副作用
+_IDEMPOTENT_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
 class GsbClient:
@@ -149,6 +155,17 @@ class GsbClient:
                 return resp
             except Exception as exc:  # noqa: BLE001
                 if _TRANSPORT_ERRORS and isinstance(exc, _TRANSPORT_ERRORS):
+                    # 非幂等请求只在“连接期失败”时切换候选：
+                    # 读超时/协议错误意味着请求可能已被服务端执行（update_issue_state、
+                    # log_obs 等都是写），换地址重放会重复写。
+                    if method not in _IDEMPOTENT_METHODS and not isinstance(
+                        exc, _CONNECT_ERRORS
+                    ):
+                        log.warning(
+                            f"GSB no failover for {method} {path}: "
+                            f"url={base} err={type(exc).__name__} (request may have been applied)"
+                        )
+                        raise
                     last_exc = exc
                     log.warning(
                         f"GSB transport failed: service={self.service_name} url={base} "

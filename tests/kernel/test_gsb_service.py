@@ -244,3 +244,115 @@ def test_client_does_not_failover_on_http_status_error(monkeypatch):
         client.get("/internal/ping")
 
     assert calls == ["http://one-host:38083/internal/ping"]
+
+def test_client_post_does_not_failover_on_read_timeout(monkeypatch):
+    """非幂等请求在读超时后不得切候选重放（请求可能已被服务端执行）。"""
+    monkeypatch.setenv("GRAPE_RUNTIME_URL", "http://dead-host:38083")
+    registry.register_service("runtime", "http://alive-host:38083")
+
+    calls: list[str] = []
+
+    class FakeHTTP:
+        def request(self, method, url, headers=None, **kwargs):
+            calls.append(url)
+            raise httpx.ReadTimeout("read timed out")
+
+    client = GsbClient("runtime", caller_name="mgmt")
+    client._http = FakeHTTP()
+
+    with pytest.raises(httpx.ReadTimeout):
+        client.post("/internal/issues/state", json_data={"state": "done"})
+
+    assert calls == ["http://dead-host:38083/internal/issues/state"]
+
+
+def test_client_post_failovers_on_connect_error(monkeypatch):
+    """连接期失败可安全切换：请求还没到服务端。"""
+    monkeypatch.setenv("GRAPE_RUNTIME_URL", "http://dead-host:38083")
+    registry.register_service("runtime", "http://alive-host:38083")
+
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeHTTP:
+        def request(self, method, url, headers=None, **kwargs):
+            calls.append(url)
+            if "dead-host" in url:
+                raise httpx.ConnectError("connection refused")
+            return FakeResponse()
+
+    client = GsbClient("runtime", caller_name="mgmt")
+    client._http = FakeHTTP()
+
+    assert client.post("/internal/issues/state", json_data={}) == {"ok": True}
+    assert calls == [
+        "http://dead-host:38083/internal/issues/state",
+        "http://alive-host:38083/internal/issues/state",
+    ]
+
+
+def test_client_get_failovers_on_read_timeout(monkeypatch):
+    """幂等 GET 读超时仍可切候选（无重复副作用）。"""
+    monkeypatch.setenv("GRAPE_RUNTIME_URL", "http://dead-host:38083")
+    registry.register_service("runtime", "http://alive-host:38083")
+
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeHTTP:
+        def request(self, method, url, headers=None, **kwargs):
+            calls.append(url)
+            if "dead-host" in url:
+                raise httpx.ReadTimeout("read timed out")
+            return FakeResponse()
+
+    client = GsbClient("runtime", caller_name="mgmt")
+    client._http = FakeHTTP()
+
+    assert client.get("/internal/ping") == {"ok": True}
+    assert calls == [
+        "http://dead-host:38083/internal/ping",
+        "http://alive-host:38083/internal/ping",
+    ]
+
+
+def test_heartbeat_loop_runs_periodic_purge(monkeypatch):
+    """心跳循环每 PURGE_EVERY_N_BEATS 拍收敛一次注册表（死进程行标 offline）。"""
+    purged: list[int] = []
+    monkeypatch.setattr(
+        "src.kernel.gsb.router.purge_stale",
+        lambda: purged.append(1) or 0,
+        raising=True,
+    )
+    monkeypatch.setattr("src.kernel.gsb.router.PURGE_EVERY_N_BEATS", 1, raising=True)
+    monkeypatch.setattr(
+        "src.kernel.gsb.router.heartbeat_service", lambda name: None, raising=True
+    )
+
+    app = FastAPI()
+    svc = init_gsb(app, "mgmt")
+    svc._registered = True
+
+    async def _stop(_delay):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("src.kernel.gsb.router.asyncio.sleep", _stop, raising=True)
+
+    asyncio.run(svc._heartbeat_loop())
+    assert len(purged) == 1

@@ -127,3 +127,34 @@ def test_deregister_marks_offline_but_keeps_row():
 def test_discover_unknown_service_returns_empty():
     assert registry.discover_service("nope") == {}
     assert registry.list_services() == []
+
+def test_ensure_table_adds_version_column_to_legacy_table():
+    """旧库升级：早期建表没有 version 列，_ensure_table 必须补列后注册才不失败。
+
+    回归背景：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，而 register_service
+    的 INSERT 显式写 version → 旧库上注册会一直被 try/except 吞掉重试。
+    """
+    with session_manager.db_lock:
+        c = session_manager.db.cursor()
+        c.execute("DROP TABLE IF EXISTS gsb_service_registry")
+        c.execute(
+            """
+            CREATE TABLE gsb_service_registry (
+                service_name   TEXT PRIMARY KEY,
+                base_url       TEXT NOT NULL,
+                health_url     TEXT,
+                status         TEXT DEFAULT 'online',
+                last_heartbeat REAL DEFAULT 0,
+                metadata       TEXT DEFAULT '{}'
+            )
+            """
+        )
+        session_manager.db.commit()
+
+    registry.register_service(
+        "unit-legacy", "http://127.0.0.1:38081", version="2.2.0"
+    )
+
+    svc = registry.discover_service("unit-legacy")
+    assert svc["version"] == "2.2.0"
+    assert svc["base_url"] == "http://127.0.0.1:38081"
