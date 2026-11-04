@@ -55,12 +55,79 @@ def derive_feedback_status(stage: str, task_status: str = "") -> str:
                                               FEEDBACK_STATUS_OPEN)
 
 
+def _fetch_external_issue_state(repo_key: str, issue_number, token: str) -> str:
+    """拉取外部 VCS Issue 的 state（open/closed）；失败/不支持返回 ''（调用方跳过）。"""
+    if not repo_key or not issue_number or not token:
+        return ""
+    import urllib.parse
+    from src.api.feedback_issue_converter import _repo_target, _provider_module
+    provider, owner, repo = _repo_target(repo_key)
+    if not owner or not repo:
+        return ""
+    try:
+        mod = _provider_module(provider)
+        url = (f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
+               f"{urllib.parse.quote(repo, safe='')}/issues/{issue_number}")
+        resp = mod.request("GET", url, token, None) or {}
+        return (resp.get("state") or "").strip().lower()
+    except Exception as e:
+        log.warning(f"feedback status sync: fetch external issue failed "
+                    f"({repo_key}#{issue_number}): {e}")
+        return ""
+
+
+def sync_external_feedback_statuses(limit: int = 20) -> int:
+    """user 反馈状态联动（Issue #673 QA S1 修复）。
+
+    user 反馈转换后指向外部 GitCode Issue，内部 issue 表无映射（issue_id 为空），
+    `sync_feedback_statuses` 的内部 JOIN 无法覆盖 → 这里按 issue_url/issue_number
+    拉取外部 Issue 状态联动：closed → closed（只升不降，open 不回退状态）。
+    由 feedback reconcile 周期与内部同步一起调用。
+    """
+    updated = 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT f.id, f.status, f.repo_key, f.issue_number FROM user_feedback f "
+                "WHERE f.source='user' AND f.issue_url!='' "
+                "AND (f.issue_id IS NULL OR f.issue_id=0) AND f.is_deleted=0 "
+                "AND f.status NOT IN ('closed') "
+                "ORDER BY f.id LIMIT ?",
+                (limit,))
+            rows = c.fetchall()
+        if not rows:
+            return 0
+        from src.api.feedback_issue_converter import _repo_bot_token
+        tokens = {}
+        for fid, _cur, repo_key, number in rows:
+            repo_key = repo_key or ""
+            if repo_key not in tokens:
+                tokens[repo_key] = _repo_bot_token(repo_key)
+            state = _fetch_external_issue_state(repo_key, number, tokens[repo_key])
+            if state != "closed":
+                continue
+            with db_lock:
+                db.execute("UPDATE user_feedback SET status=? WHERE id=? AND is_deleted=0",
+                           (FEEDBACK_STATUS_CLOSED, fid))
+                db.commit()
+            updated += 1
+        if updated:
+            log.info(f"feedback status sync (external): {updated} rows updated")
+    except Exception as e:
+        log.warning(f"feedback status sync (external) failed: {e}")
+    return updated
+
+
 def sync_feedback_statuses(limit: int = 200) -> int:
     """联动同步：user_feedback.status ← 关联 issue 的 (stage, status)。
 
     范围：已转换（issue_url 非空）且带内部 issue_id 的反馈；
     规则：推导状态 rank 高于当前状态才更新（只升不降，不覆盖 admin 手工终态）。
     返回更新条数。由 feedback reconcile 周期调用（#673），#22 通知机制复用本函数同一口径。
+
+    边界：source='user' 反馈转换生成的是外部 GitCode Issue（无内部 issue 行），
+    由 `sync_external_feedback_statuses` 拉取外部状态联动，不在本 JOIN 范围内。
     """
     updated = 0
     try:

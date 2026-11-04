@@ -155,10 +155,14 @@ def convert_pending_feedback(limit: int = 20) -> dict:
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()
 
-    # 幂等组：同 (task_id, skill_name, title)，只建一个 Issue，组内全部回写
+    # 幂等组：agent 反馈同 (task_id, skill_name, title) 共用一个 Issue，组内全部回写；
+    # user 反馈按行独立（task_id/skill_name 常为空，跨用户同标题不得并组，Issue #673 QA S2）
     groups = {}
     for row in rows:
-        key = (row["task_id"], row["skill_name"], row["title"])
+        if (row.get("source") or "agent") == "user":
+            key = ("user", row["id"])
+        else:
+            key = (row["task_id"], row["skill_name"], row["title"])
         groups.setdefault(key, []).append(row)
 
     for key, group in groups.items():
@@ -209,12 +213,10 @@ def _resolve_target(row):
     """
     scope = (row.get("skill_scope") or "").lower()
     kind = (row.get("feedback_kind") or "").lower()
-    if (row.get("source") or "agent") == "user":
-        # 用户反馈（Issue #673）：一律按反馈所属仓库路由（带 repo_key 才会进入待转换队列）
-        provider, owner, repo = _repo_target(row.get("repo_key") or "")
-        token = _repo_bot_token(row.get("repo_key") or "")
-        return (provider, owner, repo, token)
-    if scope != "official" and kind not in _OFFICIAL_COMPONENT_KINDS:
+    # 用户反馈（Issue #673）：一律按反馈所属仓库路由（带 repo_key 才会进入待转换队列），
+    # 与 repo/user 技能类同路（语义一致，合并分支避免路由规则膨胀）
+    is_user = (row.get("source") or "agent") == "user"
+    if is_user or (scope != "official" and kind not in _OFFICIAL_COMPONENT_KINDS):
         provider, owner, repo = _repo_target(row.get("repo_key") or "")
         token = _repo_bot_token(row.get("repo_key") or "")
         return (provider, owner, repo, token)
@@ -239,7 +241,7 @@ def _build_issue_body(row: dict) -> str:
     if (row.get("source") or "agent") == "user":
         # 用户反馈（Issue #673）：来源/提交人/仓库/事件 + 反馈内容
         lines = [
-            f"> 来源：用户反馈（source=user）",
+            "> 来源：用户反馈（source=user）",
             f"- 反馈ID：{row['id']}",
             f"- 提交人：{row.get('username') or '-'}",
             f"- 仓库：{row['repo_key'] or '-'}",
@@ -274,10 +276,17 @@ def _build_issue_body(row: dict) -> str:
 # ===================== reconcile worker =====================
 
 def _sync_statuses():
-    """reconcile 周期内的反馈状态联动同步（导入放函数内避免循环依赖风险）。"""
+    """reconcile 周期内的反馈状态联动同步（导入放函数内避免循环依赖风险）。
+
+    内部 issue 映射同步 + user 反馈外部 Issue 状态拉取（Issue #673 QA S1）。
+    """
     try:
-        from src.api.feedback_status import sync_feedback_statuses
+        from src.api.feedback_status import (
+            sync_feedback_statuses,
+            sync_external_feedback_statuses,
+        )
         sync_feedback_statuses()
+        sync_external_feedback_statuses()
     except Exception:
         log.exception("feedback status sync in reconcile failed")
 

@@ -13,11 +13,14 @@ init_database()  # issue 表按需建（本用例组需要 issue 单表 join）
 from src.api.feedback_status import (
     derive_feedback_status,
     sync_feedback_statuses,
+    sync_external_feedback_statuses,
     FEEDBACK_STATUS_OPEN,
     FEEDBACK_STATUS_IN_PROGRESS,
     FEEDBACK_STATUS_RESOLVED,
     FEEDBACK_STATUS_CLOSED,
 )
+from unittest import mock
+import src.api.feedback_status as fstat
 
 
 def _insert_feedback(status="open", issue_url="", issue_id=None, source="user"):
@@ -122,3 +125,65 @@ class TestSyncFeedbackStatuses:
         finally:
             _cleanup_feedback(f1, f2)
             _cleanup_issue(iid)
+
+
+class TestSyncExternalFeedbackStatuses:
+    """user 反馈外部 Issue 状态联动（Issue #673 QA S1 修复）。"""
+
+    def test_closed_external_upgrades(self):
+        fid = _insert_feedback(status="open", issue_url="https://gitcode.com/o/r/issues/9")
+        try:
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   return_value="closed"), \
+                 mock.patch("src.api.feedback_issue_converter._repo_bot_token",
+                            return_value="B"):
+                updated = sync_external_feedback_statuses()
+            assert updated >= 1
+            with db_lock:
+                st = db.execute("SELECT status FROM user_feedback WHERE id=?",
+                                (fid,)).fetchone()[0]
+            assert st == FEEDBACK_STATUS_CLOSED
+        finally:
+            _cleanup_feedback(fid)
+
+    def test_open_external_no_downgrade(self):
+        fid = _insert_feedback(status="resolved", issue_url="https://gitcode.com/o/r/issues/10")
+        try:
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   return_value="open"), \
+                 mock.patch("src.api.feedback_issue_converter._repo_bot_token",
+                            return_value="B"):
+                sync_external_feedback_statuses()
+            with db_lock:
+                st = db.execute("SELECT status FROM user_feedback WHERE id=?",
+                                (fid,)).fetchone()[0]
+            assert st == "resolved"
+        finally:
+            _cleanup_feedback(fid)
+
+    def test_skips_unconverted_and_mapped(self):
+        """issue_url='' 或带内部 issue_id 映射的行不进外部拉取。"""
+        unconverted = _insert_feedback(status="open", issue_url="")
+        mapped = _insert_feedback(status="open", issue_url="u", issue_id=12345)
+        try:
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   return_value="closed") as m, \
+                 mock.patch("src.api.feedback_issue_converter._repo_bot_token",
+                            return_value="B"):
+                sync_external_feedback_statuses()
+            ids_fetched = [c[0][1] for c in m.call_args_list]
+            assert unconverted not in ids_fetched
+            assert mapped not in ids_fetched
+        finally:
+            _cleanup_feedback(unconverted, mapped)
+
+    def test_closed_row_not_refetched(self):
+        """已 closed 的行不再发起外部拉取（省 API 调用）。"""
+        fid = _insert_feedback(status="closed", issue_url="https://gitcode.com/o/r/issues/11")
+        try:
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   return_value="closed") as m:
+                sync_external_feedback_statuses()
+            assert not m.called
+        finally:
+            _cleanup_feedback(fid)

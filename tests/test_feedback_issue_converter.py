@@ -227,6 +227,41 @@ class TestFeedbackIssueConverter:
         finally:
             _cleanup(fid)
 
+    def test_user_feedback_same_title_not_merged(self):
+        """user 反馈幂等组按行独立：不同用户同标题不并组，各自建 Issue（QA S2）。"""
+        f1 = _insert(source="user", title="同题", repo_key="gitcode:o/r", username="alice")
+        f2 = _insert(source="user", title="同题", repo_key="gitcode:o/r", username="bob")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 31, "url": "uv"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")):
+                conv.convert_pending_feedback(limit=10)
+            assert m.call_count == 2
+            bodies = [c[0][5] for c in m.call_args_list]
+            assert any("alice" in b for b in bodies)
+            assert any("bob" in b for b in bodies)
+        finally:
+            _cleanup(f1, f2)
+
+    def test_agent_feedback_same_title_still_grouped(self):
+        """agent 反馈仍按 (task_id, skill_name, title) 共用一个 Issue。"""
+        f1 = _insert(source="agent", title="agent同题", task_id="t-31", skill_name="sk",
+                     skill_scope="repo", repo_key="gitcode:o/r")
+        f2 = _insert(source="agent", title="agent同题", task_id="t-31", skill_name="sk",
+                     skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 32, "url": "uw"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")):
+                conv.convert_pending_feedback(limit=10)
+            assert m.call_count == 1
+        finally:
+            _cleanup(f1, f2)
+
     def test_deleted_excluded(self):
         """软删除的 agent 反馈不入选。"""
         fid = _insert(source="agent", title="删", task_id="t-7",
