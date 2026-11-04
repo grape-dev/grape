@@ -1314,6 +1314,10 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     if check_scene_name_exists(name=body.name, scope=body.scope, repo_key=repo_key):
         raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
 
+    # Issue #955：市场场景写侧同样校验节点 id 角色枚举（market apply 会拷贝
+    # 节点进 repo 场景，不能留脏数据入库通道）
+    _validate_scene_node_roles(body.nodes)
+
     nodes_json = json.dumps(body.nodes, ensure_ascii=False)
 
     try:
@@ -1381,6 +1385,10 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
     if scene.get("scope") == "official":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可编辑"})
+
+    # Issue #955：市场场景更新同样校验节点 id 角色枚举（与 create 口径一致）
+    if body.nodes:
+        _validate_scene_node_roles(body.nodes)
 
     nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
 
@@ -1748,13 +1756,16 @@ class ApplySceneRequest(BaseModel):
 def _validate_scene_node_roles(nodes: list):
     """Issue #955：场景节点 id（角色名）枚举校验。
 
-    节点 id 必须属于已知 Agent 角色全集（engine_select._KNOWN_AGENT_ROLES ∪ {"chat"}），
-    非法值 → 400（报错含非法值与合法全集），防止非标准角色名落库导致派发
-    引擎绑定静默失效（读侧按 id 优先匹配）。tag 保留为展示用阶段名（可为
-    中文等任意展示值），不参与角色匹配，存量场景不受影响。
+    节点 id 必须属于已知 Agent 角色全集（engine_select.KNOWN_AGENT_ROLES，
+    含 chat），非法值 → 400（报错含非法值与合法全集），防止非标准角色名落库
+    导致派发引擎绑定静默失效（读侧按 id 优先匹配）。tag 保留为展示用阶段名
+    （可为中文等任意展示值），不参与角色匹配，存量场景不受影响。
+
+    Spec 注明（Issue #955）：空 id / 非 dict 节点静默放行——为兼容存量
+    tag-only 节点与历史数据（此类节点无角色名可校验，读侧走 tag 兜底）。
     """
-    from src.runtime.engine_select import _KNOWN_AGENT_ROLES
-    _roles = set(_KNOWN_AGENT_ROLES) | {"chat"}
+    from src.runtime.engine_select import KNOWN_AGENT_ROLES
+    _roles = set(KNOWN_AGENT_ROLES)
     for node in nodes:
         _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
         if _id and _id not in _roles:
@@ -1779,10 +1790,11 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """
     from src.session_manager import db, db_lock
     from src.repo_key import from_repo_key
+    from src.runtime.engine_select import node_agent_role
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
         # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
-        tag = node.get("id") or node.get("tag") or ""
+        tag = node_agent_role(node)
         eids = node.get("engine_runtime_ids") or []
         if not tag:
             continue
@@ -2034,6 +2046,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
+    from src.runtime.engine_select import node_agent_role
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
@@ -2059,7 +2072,9 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         # Issue #524: Pass 1——先逐节点解析引擎选择（只读，不落库），产出结构化回执
         _pending = []  # (node_receipt, agent_type, skill, runtime_id)
         for node in nodes:
-            agent_type = node.get("tag") or node.get("id", "")
+            # Issue #955：节点 id 即角色名（id 优先、tag 兜底）——tag 为中文阶段名
+            # 的节点在 apply 路径也按 id 角色解析引擎绑定，不再取展示 tag
+            agent_type = node_agent_role(node)
             skill = node.get("skill", "")
             if not agent_type or not skill:
                 continue

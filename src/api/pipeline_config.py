@@ -528,11 +528,12 @@ def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 
     Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），
     tag 为展示用阶段名（可为中文等任意值）；存量非标准 tag 场景按 id 匹配。
     """
+    from src.runtime.engine_select import node_matches_agent_role
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         return None
     for node in cfg.get("nodes", []):
-        if node.get("id") == tag or node.get("tag") == tag:
+        if node_matches_agent_role(node, tag):
             return node
     return None
 
@@ -860,8 +861,9 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
     node = None
     # Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），tag 为展示
     # 阶段名；非标准 tag（如中文阶段名）的存量场景按 id 匹配恢复引擎绑定
+    from src.runtime.engine_select import node_matches_agent_role
     for n in cfg.get("nodes") or []:
-        if n.get("id") == agent_type or n.get("tag") == agent_type:
+        if node_matches_agent_role(n, agent_type):
             node = n
             break
     if node is None:

@@ -1,8 +1,8 @@
 """Issue #955：场景节点 tag 无角色枚举校验导致派发引擎绑定静默失效。
 
 验证点：
-1. 写侧：_validate_scene_node_roles / create_scene / update_scene 对节点 id
-   （角色名）做枚举校验（∈ _KNOWN_AGENT_ROLES ∪ {"chat"}），非法 → 400
+1. 写侧：_validate_scene_node_roles / create_scene / update_scene / market
+   create/update 对节点 id（角色名）做枚举校验（∈ engine_select.KNOWN_AGENT_ROLES），非法 → 400
    （报错含非法值与角色全集）；tag=中文阶段名 + id=角色名正常放行。
 2. 读侧：get_scene_engine_binding / get_node_by_tag 改 id 优先、tag 兜底，
    非标准 tag（中文阶段名）场景的引擎绑定恢复。
@@ -137,13 +137,13 @@ class TestSceneNodeRoleValidation:
         assert "bad_role" in ei.value.detail["message"]
 
     def test_role_source_single_definition(self):
-        """角色全集统一引用 engine_select._KNOWN_AGENT_ROLES，避免重复定义漂移。"""
+        """角色全集统一引用 engine_select.KNOWN_AGENT_ROLES，避免重复定义漂移。"""
         from src.api.routes.scenes import _validate_scene_node_roles
-        from src.runtime.engine_select import _KNOWN_AGENT_ROLES
+        from src.runtime.engine_select import KNOWN_AGENT_ROLES
         with pytest.raises(HTTPException) as ei:
             _validate_scene_node_roles([{"id": "drift_probe_role", "tag": "x"}])
         msg = ei.value.detail["message"]
-        for role in _KNOWN_AGENT_ROLES:
+        for role in KNOWN_AGENT_ROLES:
             assert role in msg
 
 
@@ -260,3 +260,95 @@ class TestValidateSceneEngineIdsCapability:
                 [{"tag": "sre", "enabled": True, "engine_runtime_ids": []}],
                 "gitcode:955/repo")
         assert ei.value.status_code == 400
+
+
+class TestMarketSceneRoleValidation:
+    """Issue #955 QA 复审：market create/update 同样挂载节点 id 角色枚举校验。"""
+
+    def test_market_create_invalid_role_400(self):
+        from src.api.routes.scenes import create_market_scene, CreateMarketSceneRequest
+        body = CreateMarketSceneRequest(
+            name="mkt955bad",
+            nodes=[{"id": "prepare", "tag": "准备工作", "skill": "vod"}])
+        with pytest.raises(HTTPException) as ei:
+            create_market_scene(body, user={"username": "tester", "id": 1}, repo="955/repo")
+        assert ei.value.status_code == 400
+        assert "prepare" in ei.value.detail["message"]
+
+    def test_market_update_invalid_role_400(self, monkeypatch):
+        from src.api.routes.scenes import update_market_scene, UpdateMarketSceneRequest
+        import src.user.db as user_db
+        monkeypatch.setattr(user_db, "get_scene_market_by_id",
+                            lambda mid: {"id": mid, "scope": "repo", "name": "mkt"})
+        body = UpdateMarketSceneRequest(
+            nodes=[{"id": "bad_role", "tag": "阶段", "skill": "vod"}])
+        with pytest.raises(HTTPException) as ei:
+            update_market_scene(955001, body, user={"username": "tester", "id": 1})
+        assert ei.value.status_code == 400
+        assert "bad_role" in ei.value.detail["message"]
+
+    def test_market_update_empty_nodes_skips_validation(self):
+        """nodes 为空（不更新节点）→ 跳过校验，不误伤纯元数据更新。"""
+        from src.api.routes.scenes import _validate_scene_node_roles
+        _validate_scene_node_roles([])
+
+
+class TestNodeAgentRoleHelper:
+    """Issue #955 QA 复审：id 优先、tag 兜底 helper 统一三处重复匹配逻辑。"""
+
+    def test_id_first_tag_fallback(self):
+        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        node = {"id": "vod", "tag": "准备工作"}
+        assert node_agent_role(node) == "vod"
+        assert node_matches_agent_role(node, "vod") is True
+        assert node_matches_agent_role(node, "准备工作") is True
+
+    def test_tag_only_legacy_node(self):
+        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        node = {"tag": "sre"}
+        assert node_agent_role(node) == "sre"
+        assert node_matches_agent_role(node, "sre") is True
+
+    def test_non_dict_and_empty_role(self):
+        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        assert node_agent_role("not-a-node") == ""
+        assert node_matches_agent_role({"id": "vod"}, "") is False
+        assert node_matches_agent_role(None, "vod") is False
+
+
+class TestApplySceneIdFirst:
+    """Issue #955 QA 复审（Spec 关键）：apply_scene 引擎解析按 id 优先取 agent_type。"""
+
+    def test_apply_scene_agent_type_from_id_not_display_tag(self, monkeypatch):
+        """tag=中文阶段名 + id=vod 的节点在 apply 路径 agent_type 取 'vod'。"""
+        import src.api.pipeline_config as pc
+        import src.api.routes.scenes as scenes_mod
+
+        eng = _mk_engine("opencode-955ap", credential_id=_mk_cred("c-955ap"),
+                         cap_tags=("vod",))
+        _mk_scene("s955-apply", [
+            {"id": "vod", "tag": "准备工作", "skill": "vod", "mode": "emit",
+             "next": "done", "handoff": "complete", "engine_runtime_ids": [eng]}])
+
+        monkeypatch.setattr(scenes_mod, "_resolve_repo_key", lambda r: "gitcode:955/repo")
+        monkeypatch.setattr(pc, "get_pipeline_config", lambda sid, repo_key="": {
+            "name": sid, "nodes": [{
+                "id": "vod", "tag": "准备工作", "skill": "vod", "mode": "emit",
+                "next": "done", "handoff": "complete",
+                "engine_runtime_ids": [eng], "enabled": True}]})
+
+        recorded = []
+
+        import src.api.session_store as session_store
+        monkeypatch.setattr(
+            session_store, "upsert_agent_session",
+            lambda **kw: recorded.append(kw))
+
+        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        result = apply_scene("955", "repo", ApplySceneRequest(scene_id="s955-apply"),
+                             user={"username": "tester", "id": 1})
+        assert result.get("updated", 0) >= 1
+        assert recorded, "apply_scene should upsert agent session"
+        assert all(r.get("agent_type") == "vod" for r in recorded), (
+            f"agent_type 应取节点 id（vod），实际: {[r.get('agent_type') for r in recorded]}")
+        assert not any(r.get("agent_type") == "准备工作" for r in recorded)
