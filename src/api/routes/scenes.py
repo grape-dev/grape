@@ -2509,9 +2509,10 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                 for f in (body.custom_fields or []) if isinstance(f, dict) and f.get("keep_value")
             }
             for _f in _custom_fields:
-                # keep_value（掩码未改）或 secret 空值（清空无效）→ 保留旧值
+                # keep_value（掩码未改）/ secret 空值或 "********" 掩码回显（清空无效；
+                # Issue #885 前端占位掩码回传）→ 保留旧值
                 if ((_f["name"] in _keep_map)
-                        or (_f.get("is_secret") and not _f.get("value"))) \
+                        or (_f.get("is_secret") and (not _f.get("value") or _f.get("value") == "********"))) \
                         and _f["name"] in _old_map:
                     _f["value"] = _old_map[_f["name"]]
         except Exception:

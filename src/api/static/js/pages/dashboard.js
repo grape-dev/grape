@@ -1079,11 +1079,20 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
     row.innerHTML = _nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" value="' + _val + '">' +
-      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(!i)return;if(i.getAttribute(\'data-keep-value\')===\'1\'){window._cfRevealSecretField(i,b);return;}i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="adv-del" onclick="this.parentElement.remove()">×</button>') +
       (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
+    // Issue #885：密钥占位行（已配置未改动）→ 标记 keep_value（保存不回传明文）；
+    // 眼睛按钮走 reveal 按需取回；用户一旦输入即清除标记
+    if (_isSec && !_val && hasValue) {
+      var _vEl = document.getElementById(valId);
+      if (_vEl) {
+        _vEl.setAttribute('data-keep-value', '1');
+        _vEl.addEventListener('input', function() { _vEl.removeAttribute('data-keep-value'); });
+      }
+    }
   };
 
 window._createNewBranchInline = function(owner, name) {
@@ -2228,11 +2237,19 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
     row.innerHTML = _nameEl +
       '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
-      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(!i)return;if(i.getAttribute(\'data-keep-value\')===\'1\'){window._cfRevealSecretField(i,b);return;}i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>') +
       (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
+    // Issue #885：密钥占位行（已配置未改动）→ 标记 keep_value（保存不回传明文）
+    if (_isSec && !_val && hasValue) {
+      var _vEl = document.getElementById(valId);
+      if (_vEl) {
+        _vEl.setAttribute('data-keep-value', '1');
+        _vEl.addEventListener('input', function() { _vEl.removeAttribute('data-keep-value'); });
+      }
+    }
   };
 
   window._createNewBranchInline = function(owner, name) {
@@ -2461,6 +2478,8 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
   }).catch(function() { window._linkedRepoOptions = []; });
 
   API.get('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name)).then(function(d) {
+    // Issue #885：密钥占位 reveal 上下文（眼睛按钮按需取回明文用）
+    window._cfAdvCtx = { sceneId: sceneId, repoParam: owner + '/' + name };
     var sel = document.getElementById('advWorkBranchInline');
     if (sel) {
       sel.innerHTML = '<option value="' + (d.work_branch || 'main') + '">' + (d.work_branch || 'main') + '</option>';

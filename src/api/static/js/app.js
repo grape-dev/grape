@@ -90,14 +90,67 @@ function _cfCollectFields(prefix) {
       if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
     }
     const isSec = vEl.type === 'password';
+    // Issue #885：密钥占位行（data-keep-value）值未变更 → 提交 keep_value，服务端保留旧值
+    const keepValue = vEl.getAttribute('data-keep-value') === '1';
     // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
     const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
       .map(cb => cb.value);
     const scope = checked.length ? checked : ['all'];
-    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset });
+    const item = { name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset };
+    if (keepValue) item.keep_value = true;
+    fields.push(item);
   }
   return { fields: fields };
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Issue #885：场景密钥类自定义变量明文按需取回（对齐 #474 credentials reveal）
+// GET advanced-options 对 is_secret 字段已占位返回（value:"" + has_value），
+// 前端对已配置未改动的密钥行标记 data-keep-value；点击眼睛按钮时走本流程：
+// 二次确认（重输 Grape 密码）→ POST reveal → 明文当次回填并清除 keep 标记。
+// 上下文 window._cfAdvCtx = { sceneId, repoParam } 由加载高级选项时设置。
+// ═══════════════════════════════════════════════════════════════
+window._cfRevealSecretField = function(input, btn) {
+  if (!input) return;
+  var row = input.closest ? input.closest('.adv-kv') : null;
+  var nEl = row ? row.querySelector('.adv-kv-key') : null;
+  var staticEl = row ? row.querySelector('.adv-kv-key-static') : null;
+  var name = nEl ? (nEl.value || '').trim() : (staticEl ? (staticEl.textContent || '').trim() : '');
+  var ctx = window._cfAdvCtx || {};
+  if (!name || !ctx.sceneId || !ctx.repoParam) {
+    if (window.app && app.showToast) app.showToast('当前上下文不支持取回明文');
+    return;
+  }
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = '<div style="background:#fff;border-radius:16px;padding:24px;min-width:300px;max-width:380px;box-shadow:0 12px 48px rgba(0,0,0,.15)">' +
+    '<div style="font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:8px">查看明文：' + name + '</div>' +
+    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">查看密钥明文需重新输入 Grape 密码确认，读取动作将记入审计日志。</div>' +
+    '<input id="cfRevealPwd" type="password" placeholder="Grape 密码" style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;margin-bottom:16px">' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+      '<button class="ap-btn" onclick="this.closest(\'[style*=fixed]\').remove()">取消</button>' +
+      '<button class="ap-btn" id="cfRevealConfirmBtn">确认</button>' +
+    '</div></div>';
+  document.body.appendChild(overlay);
+  var pwdInput = document.getElementById('cfRevealPwd');
+  if (pwdInput) pwdInput.focus();
+  document.getElementById('cfRevealConfirmBtn').onclick = function() {
+    var pwd = (document.getElementById('cfRevealPwd') || {}).value || '';
+    API.post('/scenes/' + encodeURIComponent(ctx.sceneId) + '/advanced-options/reveal?repo=' + encodeURIComponent(ctx.repoParam),
+      { name: name, password: pwd })
+      .then(function(d) {
+        overlay.remove();
+        input.value = (d && d.value) || '';
+        input.type = 'text';
+        input.removeAttribute('data-keep-value');
+        if (btn) btn.textContent = '🙈';
+      })
+      .catch(function(e) {
+        overlay.remove();
+        if (window.app && app.showToast) app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '取回明文失败');
+      });
+  };
+};
 
 const app = (() => {
   const $ = id => document.getElementById(id);

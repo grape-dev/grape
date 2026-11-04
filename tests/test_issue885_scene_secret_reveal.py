@@ -228,6 +228,48 @@ class TestWriteSideCompatibility:
         by_name = {f["name"]: f for f in opts["custom_fields"]}
         assert by_name["DEPLOY_KEY"]["value"] == "ultra-secret-885"
 
+    def test_save_mask_placeholder_keeps_stored_value(self):
+        """前端 "********" 掩码回显（占位渲染）回传 → 服务端保留旧值（不覆盖为掩码串）。"""
+        body = {
+            "work_branch": "main",
+            "custom_fields": [
+                {"name": "DEPLOY_KEY", "value": "********", "is_secret": True},
+                {"name": "PLAIN_ENV", "value": "prod", "is_secret": False},
+            ],
+        }
+        r = client.put(f"/api/scenes/{SCENE}/advanced-options",
+                       params={"repo": REPO_PARAM}, json=body, headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT advanced_options FROM devops_pipeline_scene WHERE scene_id=?", (SCENE,))
+            row = c.fetchone()
+        import json as _json
+        opts = _json.loads(row[0])
+        by_name = {f["name"]: f for f in opts["custom_fields"]}
+        assert by_name["DEPLOY_KEY"]["value"] == "ultra-secret-885"
+
+    def test_save_keep_value_flag_keeps_stored_value(self):
+        """data-keep-value 行提交 keep_value:true（值未变更不回传明文）→ 保留旧值。"""
+        body = {
+            "work_branch": "main",
+            "custom_fields": [
+                {"name": "DEPLOY_KEY", "value": "unchanged-echo", "is_secret": True, "keep_value": True},
+                {"name": "PLAIN_ENV", "value": "prod", "is_secret": False},
+            ],
+        }
+        r = client.put(f"/api/scenes/{SCENE}/advanced-options",
+                       params={"repo": REPO_PARAM}, json=body, headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT advanced_options FROM devops_pipeline_scene WHERE scene_id=?", (SCENE,))
+            row = c.fetchone()
+        import json as _json
+        opts = _json.loads(row[0])
+        by_name = {f["name"]: f for f in opts["custom_fields"]}
+        assert by_name["DEPLOY_KEY"]["value"] == "ultra-secret-885"
+
 
 if __name__ == "__main__":
     unittest.main()
