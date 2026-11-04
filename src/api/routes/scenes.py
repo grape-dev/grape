@@ -2334,6 +2334,18 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "变量名不能为空"})
 
+    # 二次确认：重新输入当前密码（与 #474 reveal 一致，密码校验前置于字段枚举之前，
+    # 防止无正确密码探测密钥字段存在性/配置状态）
+    from src.auth.password import verify_password
+    from src.auth.grape_account_db import get_grape_account_by_id
+    account = get_grape_account_by_id(user["id"]) or {}
+    password_hash = account.get("password_hash") or ""
+    if not password_hash:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "请先设置 Grape 密码后再取回明文", "need_set_password": True})
+    if not verify_password(body.password or "", password_hash):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "当前密码错误"})
+
     # 读取场景存储的 custom_fields（明文在库内，接口层不下发）
     try:
         with db_lock:
@@ -2365,17 +2377,6 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
     value = target.get("value") or ""
     if not value:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "该配置项未配置值"})
-
-    # 二次确认：重新输入当前密码（与 #474 reveal 一致）
-    from src.auth.password import verify_password
-    from src.auth.grape_account_db import get_grape_account_by_id
-    account = get_grape_account_by_id(user["id"]) or {}
-    password_hash = account.get("password_hash") or ""
-    if not password_hash:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "请先设置 Grape 密码后再取回明文", "need_set_password": True})
-    if not verify_password(body.password or "", password_hash):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "当前密码错误"})
 
     # 高频取回告警：窗口内已达阈值 → 拒绝并提示（复用 #474 计数表）
     if _count_reveals_in_window(user["id"]) >= _REVEAL_MAX_PER_WINDOW:

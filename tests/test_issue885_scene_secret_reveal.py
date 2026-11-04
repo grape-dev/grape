@@ -121,6 +121,52 @@ class TestSceneSecretReveal:
             assert r.status_code == 400, r.text
             assert "密码" in r.json()["detail"]["message"]
 
+    def test_reveal_password_checked_before_field_enumeration(self):
+        """对齐 #474：密码校验前置于字段枚举——密码错误时即便字段不存在也先报密码错误。"""
+        for field in ("NOT_EXIST", "DEPLOY_KEY"):
+            r = client.post(f"/api/scenes/{SCENE}/advanced-options/reveal",
+                            params={"repo": REPO_PARAM},
+                            json={"name": field, "password": "wrong-pass"},
+                            headers=_headers)
+            assert r.status_code == 400, r.text
+            assert "密码" in r.json()["detail"]["message"]
+
+    def test_reveal_need_set_password(self):
+        """未设置 Grape 密码的账号 → 400 + need_set_password（Plan 列明用例）。"""
+        from src.api.jwt_utils import create_access_token
+        uid = None
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_accounts WHERE username='test_885_nopwd'")
+            c.execute(
+                "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
+                "VALUES (?,NULL,'',?,1,0)",
+                ("test_885_nopwd", "test_885_nopwd"))
+            db.commit()
+            uid = c.lastrowid
+        try:
+            headers_nopwd = {
+                "Authorization": "Bearer " + create_access_token(uid, "test_885_nopwd", 0)}
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "INSERT INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) "
+                    "VALUES (?,?,?,?,1,1)", (uid, RK, "org", "scene885"))
+                db.commit()
+            r = client.post(f"/api/scenes/{SCENE}/advanced-options/reveal",
+                            params={"repo": REPO_PARAM},
+                            json={"name": "DEPLOY_KEY", "password": "whatever"},
+                            headers=headers_nopwd)
+            assert r.status_code == 400, r.text
+            assert r.json()["detail"].get("need_set_password") is True
+            assert "密码" in r.json()["detail"]["message"]
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key=?", (uid, RK))
+                c.execute("DELETE FROM grape_accounts WHERE username='test_885_nopwd'")
+                db.commit()
+
     def test_reveal_returns_plaintext_once_with_no_store(self):
         r = client.post(f"/api/scenes/{SCENE}/advanced-options/reveal",
                         params={"repo": REPO_PARAM},

@@ -2213,7 +2213,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description, hasValue) {
+  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description, hasValue) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');

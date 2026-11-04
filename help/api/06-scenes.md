@@ -316,6 +316,7 @@
 |------|------|:---:|------|
 | `work_branch` | string | 否 | 工作分支（默认 main） |
 | `custom_fields` | list | 否 | 自定义 key:value 数组 `[{key, value}]` |
+| `custom_fields[].keep_value` | bool | 否 | Issue #885：密钥字段值未变更时置 `true`，服务端保留库内旧值（不回传明文；`is_secret` 空值或 `"********"` 掩码回显同样保留旧值） |
 
 | Path | `{scene_id}` |
 | 出参 | `{"ok": true}` |
