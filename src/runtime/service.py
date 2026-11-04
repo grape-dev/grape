@@ -1065,7 +1065,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
-        _task_span, _ = start_task_span("task.enqueue", {
+        # span 名带业务标识（task_id + agent_type）：trace 列表的 rootTraceName 从抽象的
+        # "task.enqueue" 变成可读的 "task t_xxx vod enqueue"——排查时按 SeqID/task_id 一眼定位
+        _task_span, _ = start_task_span(f"task {task_id} {agent_type or 'task'} enqueue", {
             "task_id": task_id, "agent_type": agent_type, "skill": skill,
             "repo_key": repo_key, "issue_id": issue_id, "runtime_id": runtime_id,
             "pool_tag": pool_tag, "pipeline_trace_id": _pipeline_tid,
@@ -2552,7 +2554,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     # 覆盖 complete 与 fail 两个终态（fail_task 单独埋同款）。未启用/坏数据 → 零影响。
     try:
         from src.observability.otel import start_task_span
-        _fin_span, _ = start_task_span("task.finish", {
+        _fin_span, _ = start_task_span(f"task {task_id} finish", {
             "task_id": task_id, "exit_code": exit_code,
             "result_len": len(result_text or ""),
             "outcome": "completed",
@@ -3156,7 +3158,7 @@ def fail_task(task_id, error, exit_code=-1):
     # MR-2（2026-11-05）：task.finish span（fail 终态，与 complete_task 同款串联）
     try:
         from src.observability.otel import start_task_span
-        _fin_span, _ = start_task_span("task.finish", {
+        _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
             "task_id": task_id, "exit_code": exit_code,
             "outcome": "failed", "error_head": str(error or "")[:200],
         }, trace_context=(get_task(task_id) or {}).get("trace_context") or "")

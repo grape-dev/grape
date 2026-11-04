@@ -2177,7 +2177,7 @@ async def _execute_task(client, task, engine_name: str = ""):
     _exec_span = None
     try:
         from src.observability.otel import start_task_span
-        _exec_span, _ = start_task_span("task.execute", {
+        _exec_span, _ = start_task_span(f"task {tid} execute {engine_name or ''}", {
             "task_id": tid, "engine": engine_name, "agent_type": task.get("agent_type", ""),
             "skill": task.get("skill", ""), "repo_key": task.get("repo_key", ""),
             "attempts": task.get("attempts", 0),
