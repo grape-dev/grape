@@ -2139,22 +2139,21 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 是否使用「用户自己的 GitCode token」：用于 401 时区分「用户登录失效」（引导重新绑定）
     # 与「仓库 bot token 失效」（提示检查仓库 Bot Token 配置）两套文案。
     _using_user_token = (not _preauth_token) and (not _is_github)
-    # Issue #343: assignee 优先用 GitCode/GitHub 登录名（external_login），
-    # 而非 grape 平台 username——GitCode 侧 assignee 必须是平台登录名
-    if body.assignee and body.assignee.strip():
-        assignee = body.assignee.strip()
-    else:
-        assignee = user["username"]  # 默认 fallback
-        # 尝试从 external_identities 查真实 GitCode/GitHub 登录名
-        try:
-            from src.domains.mgmt.auth.grape_account_db import get_user_identities
-            _provider_name = "github" if _is_github else "gitcode"
-            for ident in get_user_identities(user["id"]):
-                if ident.get("provider") == _provider_name and ident.get("external_login"):
-                    assignee = ident["external_login"]
-                    break
-        except Exception:
-            pass  # 查不到就用 grape username fallback
+    # Issue #649: assignee 不再默认填创建者——非成员默认指派会触发上游 403，
+    # 误导排查方向。不传 assignee 时留空，由仓库方后续分派；显式传入时走下方成员资格预校验。
+    assignee = (body.assignee or "").strip()
+    # 内部流程（场景归属 issue_creator / pipeline 事件创建人）仍需要创建者的平台登录名，
+    # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
+    _creator_login = user["username"]
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        _provider_name = "github" if _is_github else "gitcode"
+        for ident in get_user_identities(user["id"]):
+            if ident.get("provider") == _provider_name and ident.get("external_login"):
+                _creator_login = ident["external_login"]
+                break
+    except Exception:
+        pass  # 查不到就用 grape username fallback
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
