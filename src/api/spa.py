@@ -8,12 +8,19 @@ NoCacheStaticMiddleware、i18n boost 注入、auth 页面、SPA catch-all、
 不提供前端页面。
 """
 import json as _json_mod
+import logging
 import os
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+
+log = logging.getLogger(__name__)
+
+# Faro 上报反代上游（Alloy faro.receiver，build-004）。可用 env 覆盖。
+_FARO_UPSTREAM = os.environ.get(
+    "GRAPE_FARO_UPSTREAM", "http://192.168.0.39:12347/collect")
 
 
 def install_spa_routes(app: FastAPI) -> None:
@@ -207,6 +214,28 @@ document.documentElement.classList.remove('i18n-loading');})();
             html = f.read()
         html = _inject_email_configured(html)
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
+
+    @app.post("/faro/collect")
+    async def faro_collect_proxy(request: Request):
+        """Faro 上报反代 → Alloy faro.receiver（LGTM 前端 RUM，2026-11-04）。
+
+        同源路径，避免浏览器直连 Alloy 内网地址 + 硬编码 host。
+        透传 JSON body（gzip 由 SDK 自带 transport 处理），非 2xx 原样透传状态码。
+        """
+        import httpx
+        body = await request.body()
+        headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+        if request.headers.get("content-encoding"):
+            headers["Content-Encoding"] = request.headers["content-encoding"]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                upstream = await client.post(
+                    _FARO_UPSTREAM, content=body, headers=headers)
+            return Response(content=upstream.content, status_code=upstream.status_code,
+                            media_type="application/json")
+        except Exception as e:
+            log.warning(f"faro collect proxy error: {e}")
+            return Response(content='{"error":"faro upstream unavailable"}', status_code=502)
 
     @app.get("/")
     async def serve_spa():
