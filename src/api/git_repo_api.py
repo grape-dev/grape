@@ -292,10 +292,14 @@ def list_branches(owner: str, repo: str, per_page: int = Query(50, ge=1, le=100)
                     _repo_token(owner, repo, user, p))
 
 
-@router.get("/{owner}/{repo}/commits", operation_id="gitrepo_commits", summary="Commit history", description="Lists the repository commit history from the Git provider.")
+@router.get("/{owner}/{repo}/commits", operation_id="gitrepo_commits", summary="Commit history (optional sha/ref filter)", description="Lists repository commit history from the Git provider. Optional sha query filters by branch/tag/commit sha (e.g. weekly-10); omitted = default branch (backward compatible). Nonexistent ref passes through the upstream 404 (Issue #734 semantics).")
 def list_commits(owner: str, repo: str, per_page: int = Query(20, ge=1, le=100),
+                 sha: str = Query("", description="分支名/tag/commit sha，空=默认分支"),
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/commits", {"per_page": per_page}, p),
+    params = {"per_page": per_page}
+    if sha:
+        params["sha"] = sha
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/commits", params, p),
                     _repo_token(owner, repo, user, p))
 
 

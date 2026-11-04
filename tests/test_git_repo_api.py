@@ -1049,3 +1049,24 @@ def test_pulls_files_diff_json_string_with_empty_diff_wrapped(monkeypatch, _clie
     assert r.status_code == 200
     f = r.json()[0]
     assert f["patch"]["diff"] == payload
+
+
+def test_commits_sha_ref_filter_passthrough(gitcode_calls, _client):
+    """Issue #899：commits 端点可选 sha 查询参数透传上游（分支名/tag/commit sha），
+    使 `grape git-repo commits --sha <ref>` 可核对非默认分支（如 weekly-10）。
+    缺省不传 sha 时 URL 不含 sha 参数（向后兼容：默认分支历史）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    # 传 sha → 透传 sha=weekly-10
+    assert _get(client, f"{base}/commits?per_page=5&sha=weekly-10").status_code == 200
+    last = gitcode_calls[-1]["url"]
+    assert "/commits" in last and "sha=weekly-10" in last and "per_page=5" in last
+    # 缺省 → 不带 sha 参数（兼容回归）
+    assert _get(client, f"{base}/commits?per_page=5").status_code == 200
+    last = gitcode_calls[-1]["url"]
+    assert "/commits" in last and "sha=" not in last
+    # sha 也接受完整 commit sha / tag（同一透传路径）
+    assert _get(client, f"{base}/commits?sha=v1.0.0").status_code == 200
+    assert "sha=v1.0.0" in gitcode_calls[-1]["url"]
+    assert _get(client, f"{base}/commits?sha=c0ffee0000").status_code == 200
+    assert "sha=c0ffee0000" in gitcode_calls[-1]["url"]
