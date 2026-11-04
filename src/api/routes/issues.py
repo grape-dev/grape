@@ -2220,6 +2220,23 @@ def list_repo_issues(owner: str, repo: str,
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
     repo_keys = _repo_keys_of(owner, repo)
+    # Issue #926 性能补丁（2026-11-04 压测）：repo 可能同时映射 gitcode/github 两个 key
+    # （镜像仓），而 `repo_key IN (a,b)` 会让排序退化成"两个分支各自有序再归并"——
+    # 表达式索引只能逐个分支用上，最终仍建临时 B-TREE（20 万行深页 131ms，单 key 为 1ms）。
+    # 空 key 对结果零贡献，先剔掉只留有数据的 key；IN 退化为单值/少值时可走有序索引。
+    try:
+        from src.session_manager import db as _db, db_lock as _lock
+        _live = []
+        for _k in repo_keys:
+            with _lock:
+                _c = _db.cursor()
+                _c.execute("SELECT 1 FROM issue WHERE repo_key=? LIMIT 1", (_k,))
+                if _c.fetchone():
+                    _live.append(_k)
+        if _live:
+            repo_keys = _live
+    except Exception:
+        pass
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
     params: list = list(repo_keys)
@@ -2267,15 +2284,22 @@ def list_repo_issues(owner: str, repo: str,
     if per_page > 0:
         # ---- 真分页（Issue #926：PR 伪卡片并入统一窗口）----
         from src.session_manager import db, db_lock
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
-                _total = c.fetchone()[0]
-        except Exception as e:
-            log.warning(f"issues: count failed: {e}")
-            _total = 0
-        _total += len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
+        # Issue #926 性能补丁（2026-11-04 压测）：q 走 `LOWER(title) LIKE '%kw%'`，前后
+        # 通配符下任何普通索引都用不上——5 万行 COUNT 74ms、20 万行约 300ms，占一次搜索
+        # 请求的大头。q 模式不返精确 total（total=null），has_more 按"本页是否满页"推断
+        # （最多多探一次空页，前端已按 has_more 终止）；无 q 时 COUNT 走索引，保持精确值。
+        if q:
+            _total = None
+        else:
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
+                    _total = c.fetchone()[0]
+            except Exception as e:
+                log.warning(f"issues: count failed: {e}")
+                _total = 0
+            _total += len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
         _offset = (page - 1) * per_page
         # 性能守卫（2026-11-04 压测）：default 模式第一排序键是状态优先级 CASE
         # （_status_order_sql），无法免排序；偏移越深单页越贵（issue 表 20 万行时
@@ -2379,6 +2403,10 @@ def list_repo_issues(owner: str, repo: str,
     if _total is not None:
         return {"issues": issues, "total": _total, "page": page, "per_page": per_page,
                 "has_more": (page - 1) * per_page + (_page_row_count or 0) < _total}
+    if per_page > 0:
+        # q 模式（不精确 total）：满页即认为还有下一页，最多多探一次空页
+        return {"issues": issues, "total": None, "page": page, "per_page": per_page,
+                "has_more": (_page_row_count or 0) >= per_page}
     return {"issues": issues, "total": len(issues)}
 
 

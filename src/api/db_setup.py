@@ -3082,6 +3082,58 @@ register_migration(
 )
 
 
+def _fn_add_issue_status_priority_index() -> None:
+    """性能补丁（2026-11-04 压测，方案 B）：需求中心默认排序是
+    `CASE 状态优先级, created_at DESC`（路由 _status_order_sql，单一事实源）。
+    普通列索引对"算出来的第一排序键"无效 → 20 万行 offset 19950 实测 168ms，
+    且全程持 db_lock。改为表达式索引：sqlite 支持 `CREATE INDEX ... ON issue
+    (repo_key, <CASE 表达式>, created_at DESC)`，EXPLAIN 变为
+    `SEARCH ... USING INDEX`，同数据同深页 168ms → 1.0ms（首页 0.1ms）。
+    表达式的 CASE 文本必须与 _status_order_sql() 完全一致（同一函数懒导入生成，
+    避免两处手写漂移）；MySQL 侧函数索引需 >= 8.0.13，失败只告警跳过（不阻断启动，
+    深页由路由偏移护栏兜底）。幂等：索引已存在即跳过。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    from src.api.routes.issues import _status_order_sql  # 懒导入：避免模块级环形依赖
+    _expr = _status_order_sql()
+    _idx = "idx_issue_repo_statuspri_time"
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            try:
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                    "AND INDEX_NAME=%s", (_idx,))
+                if c.fetchone()[0]:
+                    return
+                c.execute(
+                    f"CREATE INDEX {_idx} ON issue (repo_key(64), ({_expr}), created_at(32))")
+                db.commit()
+            except Exception as e:
+                log.warning(
+                    f"{_idx} 建索引失败（MySQL 函数索引需 >= 8.0.13，跳过；"
+                    f"默认排序深页由偏移护栏兜底）: {e}")
+            return
+        c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+        if c.fetchone():
+            return
+        c.execute(f"CREATE INDEX {_idx} ON issue (repo_key, {_expr}, created_at DESC)")
+        db.commit()
+
+
+register_migration(
+    version="202611040003",
+    name="perf_issue_status_priority_index",
+    kind="safe",
+    fn=_fn_add_issue_status_priority_index,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 

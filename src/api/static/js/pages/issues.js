@@ -319,9 +319,13 @@ function loadTasks(opts) {
       // Issue #926：轮询 merge 只取第 1 屏——已滚动超过第 1 屏（_taskPage>2）时
       // total 仍以服务端为准，但 has_more/已删除项清除只能按本地已加载量对账，
       // 避免第 1 屏口径覆盖深滚动状态（误停滚动/误删未加载行）
-      _tasksTotal = d.total || 0;
+      // Issue #926 性能补丁：q 模式服务端不返精确 total（null，避免 LIKE 全表 COUNT），
+      // 深滚动时以服务端 has_more 为准；无 q 时仍是精确 total。
+      _tasksTotal = (d.total === null || d.total === undefined) ? null : d.total;
       var _beyondFirst = (_taskPage > 2);
-      _tasksHasMore = _beyondFirst ? (_tasksAll.length < _tasksTotal) : !!d.has_more;
+      _tasksHasMore = _beyondFirst
+        ? (_tasksTotal === null ? !!d.has_more : (_tasksAll.length < _tasksTotal))
+        : !!d.has_more;
     } else {
       _tasksTotal = _items.length;
       _tasksHasMore = false;
