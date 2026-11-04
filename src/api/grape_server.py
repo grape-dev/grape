@@ -407,6 +407,13 @@ metrics_middleware(app)
 if metrics_enabled():
     start_metrics_server()
 
+# OTel HTTP spans（2026-11-05 MR-1）：LGTM Traces 接入，A 进程入口
+try:
+    from src.observability.otel import instrument_fastapi
+    instrument_fastapi(app, "grape-server-a")
+except Exception:
+    pass
+
 from src.api.middleware import install_request_middleware
 install_request_middleware(app)
 
