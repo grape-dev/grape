@@ -224,8 +224,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #887：direct 端执行前一致性硬校验——绑定 skill 未物化而工位本地缓存
         # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。
         # 契约键缺失（物化异常降级）→ 显式告警后放行，不静默当作通过。
-        from src.runtime.skill_materialize import (SKILL_CONSISTENCY_KEY as _SCK,
-                                                    skill_mismatch_error as _sme)
+        try:
+            from src.runtime.skill_materialize import (SKILL_CONSISTENCY_KEY as _SCK,
+                                                        skill_mismatch_error as _sme)
+        except Exception:  # noqa: BLE001 - 门禁依赖缺失不得中断执行链
+            _SCK = "_skill_consistency"
+            def _sme(sv):
+                return ("[skill_mismatch] "
+                        + str((sv or {}).get("reason") or "skill consistency check failed"))
         _sv_887 = evt.get(_SCK) or {}
         if not _sv_887:
             log.warning(f"Exec agent: seq={seq} skill consistency verdict missing "

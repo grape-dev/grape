@@ -368,17 +368,6 @@ def resolve_scene_node_skill_id(repo_key: str, agent_type: str,
     return 0
 
 
-def start_direct_agent(fn, args, name=""):
-    """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
-    future = _DIRECT_POOL.submit(fn, *args)
-    # 从 args 中提取 seq（约定第一个参数是 repo_key，第二个是 seq）
-    seq = args[1] if len(args) > 1 else 0
-    if seq:
-        with _DIRECT_FUTURES_LOCK:
-            _DIRECT_FUTURES[seq] = future
-    return future
-
-
 def _task_insert_row(_cols, **kw):
     """按 agent_tasks 列清单顺序组装 INSERT 值。
 
