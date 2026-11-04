@@ -9,10 +9,10 @@
 
 ## 范围
 - `src/api/static/css/app.css`：hover 触发区域桥接 + `.chat-msg-recalled` 链接配色覆盖。
-- `tests/frontend/`：新增 CSS 静态回归测试。
+- `tests/js/`：新增 CSS 静态回归测试。
 - Out of scope：撤回语义（二次确认→删除+终止执行+提示占位+重新编辑追加）、后端、i18n、chat.js（CSS 足以保证可达，无需 JS 改动）。
 
 ## 验收标准
 1. 鼠标气泡→按钮全程按钮保持显示、可点击（hover 命中区覆盖气泡-按钮间隙）。
 2. 撤回提示条「重新编辑」浅色背景对比度 ≥4.5:1（`var(--a)` #3168e0 on `var(--bg)` #f5f6f8 = 4.64:1，实测通过）。
-3. #442 既有语义不变；`node tests/frontend/test_chat_recall_442.js` 通过。
+3. #442 既有语义不变；`node tests/js/test_chat_recall_442.js` 通过。

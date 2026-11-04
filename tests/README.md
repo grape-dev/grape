@@ -14,8 +14,18 @@ tests/
 ├── runtime/              # src/domains/runtime：agent/task/pipeline/event/chat/engine/webhook
 ├── arch/                 # 架构约束（R1–R6）
 ├── atomic/               # 原子切片 / 迁移类
-├── curl/ frontend/ js/ playwright/   # 既有专项（保持原位）
+├── js/                   # 前端 node:test 用例（原 tests/frontend 已并入）
+├── playwright/           # 手工 E2E 脚本（非 pytest 用例，python 直跑）
+├── curl/                 # 手工后端守卫脚本（bash，需 JWT）
 └── README.md
+```
+
+前端与手工套件不参与 `pytest tests` 收集：
+
+```bash
+node tests/js/test_chat_recall_464.js          # 单条前端用例
+bash tests/curl/test_r14_backend_guard.sh <jwt>  # 手工后端守卫
+python tests/playwright/test_r12_fullscreen_zindex.py  # 手工 E2E
 ```
 
 ## 归属规则
