@@ -31,7 +31,7 @@ let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
 let _taskFilterStatuses = []; // 按状态多选筛选（空=全部）
-let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部）
+let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部；Issue #805: 值域改为 creator，请求携 creators=）
 let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
 let _taskFilterPopoverOpen = false;  // 筛选 popover 展开状态（跨 _render 保持）
 let _filterStatusExpanded = false;   // 状态筛选区展开状态
@@ -259,12 +259,12 @@ function loadTasks() {
     apiUrl = '/issues/' + repo.owner + '/' + repo.name +
              '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
     if (_taskFilterAssignees.length) {
-      apiUrl += '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(','));
+      apiUrl += '&creators=' + encodeURIComponent(_taskFilterAssignees.join(','));  // Issue #805: 按创建人过滤
     }
   } else {
     apiUrl = '/issues/mine?status=&repo_key=' + encodeURIComponent(repoKey) +
              '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
-             (_taskFilterAssignees.length ? '&assignees=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');
+             (_taskFilterAssignees.length ? '&creators=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');  // Issue #805: 按创建人过滤
   }
   API.get(apiUrl).then(d => {
     if (window._currentView !== 'tasks') return;  // stale guard
@@ -355,9 +355,9 @@ function _filteredTasks() {
       return _taskFilterStatuses.includes(ms);
     });
   }
-  // 创建人多选过滤（后端已按 assignees 过滤，前端二次过滤保持一致）
+  // 创建人多选过滤（Issue #805: 后端已按 creators 过滤，前端二次过滤按 creator 保持一致）
   if (_taskFilterAssignees.length > 0) {
-    list = list.filter(t => _taskFilterAssignees.includes(t.assignee));
+    list = list.filter(t => _taskFilterAssignees.includes(t.creator));
   }
   if (_taskQuery) {
     const q = _taskQuery.toLowerCase().trim();
@@ -370,6 +370,7 @@ function _filteredTasks() {
           String(t.issue_number || ''),
           (t.repo_key || ''),
           (t.assignee || ''),
+          (t.creator || ''),
           (t.scene_name || ''),
           (t.status || ''),
           (t.repo_display || ''),
@@ -853,7 +854,7 @@ function _renderBoard(filtered) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -889,7 +890,7 @@ function _render() {
     {k:'done', lbl: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成'},
     {k:'cancelled', lbl: I18N.t('tasks.status.tag_cancelled')||'已取消'},
   ];
-  const _assignees = [...new Set(_tasksAll.map(t => t.assignee).filter(Boolean))].sort();
+  const _assignees = [...new Set(_tasksAll.map(t => t.creator).filter(Boolean))].sort();  // Issue #805: 创建人值域 = creator
   const _filterPanel = `
     <div style="position:relative;display:inline-flex;align-items:center;flex-shrink:0">
       <button class="tsk-tab" onclick="_toggleFilterPopover()" style="border:1px solid var(--b);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;background:var(--bg);display:inline-flex;align-items:center;gap:4px">
@@ -923,7 +924,7 @@ function _render() {
             ${I18N.t('tasks.tab.all')||'全部'} <span style="font-size:11px">${cntAll}</span>
           </label>
           ${_assignees.map(a => {
-            const cnt = _tasksAll.filter(t => t.assignee === a).length;
+            const cnt = _tasksAll.filter(t => t.creator === a).length;
             const chk = _taskFilterAssignees.includes(a);
             const safeA = a.replace(/'/g, "\\'");
             return `<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;${chk?'background:rgba(59,130,246,.06)':''}" onclick="_toggleFilterAssignee('${safeA}')">
@@ -959,7 +960,8 @@ function _render() {
     const ms = _mapStatusL(t);
     const si = _lStatusInfo[ms] || _lStatusInfo.pending;
     const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
-    const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';
+    const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';  // PR 伪卡片「触发者」保持 assignee 语义（Issue #805 不改）
+    const _creatorHtml = t.creator ? ` · 👤 ${t.creator}` : '';    // Issue #805: Issue 卡片展示创建人（creator）
     // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
     if (t.is_pr_event) {
       return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
@@ -975,7 +977,7 @@ function _render() {
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
       </div>
       <span class="tsk-tag ${si.cls}">${si.text}</span>
     </div>`;
@@ -1169,7 +1171,7 @@ function _detailHtml(t) {
       <div style="${_cardTitle}">${I18N.t('issues.detail_title')||'需求详情'}</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.issue_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.creator || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${t.is_pr ? 'PR' : 'Issue'}</span><b style="${_valueStyle}"><a href="${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>

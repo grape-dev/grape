@@ -97,7 +97,18 @@
     "max_concurrent": "最大并发数",
     "max_concurrent_desc": "该引擎同时执行的任务上限（1-100）",
     "worker_version_stale": "Worker 版本落后",
-    "worker_version_stale_hint": "Worker 上报版本落后于服务端最新版本，重新执行一键安装命令即可升级；此提示与引擎健康异常无关。"
+    "worker_version_stale_hint": "Worker 上报版本落后于服务端最新版本，重新执行一键安装命令即可升级；此提示与引擎健康异常无关。",
+    "model": "模型",
+    "model_recent_short": "最近",
+    "model_configured": "配置模型",
+    "model_last_used": "最后使用",
+    "model_source_report": "worker 上报",
+    "model_source_local": "本机配置",
+    "model_fallback_hint": "未上报配置模型，回退显示最近使用模型",
+    "recent_models": "最近使用模型",
+    "recent_models_desc": "按用量统计 Top 3",
+    "recent_models_empty": "暂无使用记录",
+    "model_used_count": "{{count}} 次"
   },
   "empty": {
     "no_engines": "暂无引擎",

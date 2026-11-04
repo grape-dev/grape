@@ -25,6 +25,8 @@ router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 
 # 完整 sha（40-hex，git object id）：tree 接口直连免存在性预校验（Issue #734）
 import re as _re
+
+import json
 _FULL_SHA_RE = _re.compile(r"^[0-9a-fA-F]{40}$")
 
 # provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
@@ -273,16 +275,14 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} API 调用失败: {str(e)[:120]}"})
 
 
-# ===================== 仓库信息 / 传输支撑 =====================
-
+# ===================== 仓库信息 / 传输支撑 ==============
 @router.get("/{owner}/{repo}", operation_id="gitrepo_repo", summary="Repository info (clone_url/default_branch)", description="Repository metadata from the Git provider: id/name/full_name/default_branch/html_url/clone_url/visibility.")
 def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                   p: str = Depends(_provider)):
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
 
 
-# ===================== 分支 / 提交 / 内容 / 标签 / 里程碑 =====================
-
+# ===================== 分支 / 提交 / 内容 / 标签 / 里程碑 ==============
 @router.get("/{owner}/{repo}/branches", operation_id="gitrepo_branches", summary="List branches", description="Lists repository branches from the Git provider (paged).")
 def list_branches(owner: str, repo: str, per_page: int = Query(50, ge=1, le=100),
                   user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
@@ -453,8 +453,7 @@ def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depe
                     {"name": body.name, "color": body.color.lstrip("#")})
 
 
-# ===================== Milestones =====================
-
+# ===================== Milestones ==============
 # Issue #684：上游返回 state=active/opened，过滤合法值为 open/closed/all →
 # 返回字段归一化为 open/closed（口径与过滤值对齐；active→open 映射见端点描述/文档）
 _MILESTONE_STATE_MAP = {"active": "open", "opened": "open", "closed": "closed"}
@@ -505,8 +504,7 @@ def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBo
     return _normalize_milestone_states(data)
 
 
-# ===================== Issues =====================
-
+# ===================== Issues ==============
 @router.get("/{owner}/{repo}/issues", operation_id="gitrepo_issues_list", summary="List issues", description="Lists repository issues (state open/closed/all filter, paged).")
 def list_issues(owner: str, repo: str, state: str = Query("open"),
                 page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
@@ -685,8 +683,7 @@ def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
     return resp
 
 
-# ===================== Pull Requests =====================
-
+# ===================== Pull Requests ==============
 @router.get("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_list", summary="List pull requests", description="Lists repository pull requests (state filter, paged).")
 def list_pulls(owner: str, repo: str, state: str = Query("open"),
                page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
@@ -826,8 +823,64 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
                      {"merge_method": (body.merge_method or "").strip(),
                       "title": (body.title or "").strip()}.items() if v}
         _payload = _filtered or None
+    _token = _repo_token(owner, repo, user, p)
+    # Issue #752（M1）：合入前冲突标记扫描门禁——PR 变更文件硬命中 `<<<<<<< `/`    # → 阻断 409（防残留进入基线分支，AC1）；仅孤立 `=======` 软命中 → 告警放行（防误杀
+    # markdown 下划线）；扫描自身异常 fail-open。每次决策写合入日志（AC3）。
+    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, get_pull_base, record_gate_log
+    _repo_key = f"{owner}/{repo}"
+    # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
+    _base_info = get_pull_base(owner, repo, number, p, _token)
+    _gate = run_merge_gate(owner, repo, number, p, _token)
+    if _gate.get("decision") == "blocked":
+        record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
+        # 命中文件清单入 message（承接基线分支 Issue #754 语义：报告 path(markers)）
+        _files = ", ".join(f"{_p}({_n})" for _p, _n in (_gate.get("hard_hits") or {}).items())
+        _msg = (f"merge blocked by conflict-marker gate (Issue #752): "
+                f"unresolved merge conflict markers found in PR changed files: {_files}")
+        # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
+        try:
+            from src.outbound_ledger import record_outbound
+            from src.repo_key import to_repo_key
+            record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
+                            issue_number=str(number), origin_channel="api")
+        except Exception as _le:
+            log.warning(f"outbound_ledger record (pr_merge_blocked) failed: {_le}")
+        # 阻断留痕②（承接 Issue #754）：PR 评论 best-effort（GitCode /pulls、GitHub /issues 通道）
+        try:
+            _trace_body = (f"[Grape] merge blocked: unresolved conflict markers in PR files: {_files}. "
+                           f"Manual fix required before merge. (Issue #752)")
+            _trace_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
+            _vcs_req(p, "POST", _vcs_url(owner, repo, _trace_path, None, p), _token,
+                     {"body": _trace_body})
+        except Exception as _ce:
+            log.warning(f"merge gate block-trace PR comment failed: {_ce}")
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": _msg,
+            "gate": {"phase": "pre_merge", "hard_hits": _gate.get("hard_hits", {}),
+                     "soft_hits": _gate.get("soft_hits", {})}})
+    if _gate.get("decision") == "warned":
+        record_gate_log(_repo_key, number, "pre_merge", "warned", _gate)
+        log.warning(f"merge gate soft warning {owner}/{repo}#{number}: "
+                    f"{_gate.get('soft_hits')}")
+    else:
+        record_gate_log(_repo_key, number, "pre_merge", _gate.get("decision", "passed"), _gate)
     resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
-                    _repo_token(owner, repo, user, p), _payload)
+                    _token, _payload)
+    # Issue #752（M1，PR #874 审查修正）：合入后扫描 base 分支合入结果（pre-merge base sha
+    # → 合入后 tip 的 compare diff）——覆盖自动复测等旁路写入 base 分支的残留（PR files
+    # 复扫永远与 pre_merge 同结果，检不出旁路）；命中告警+日志（合入已完成无法回滚，
+    # 人工裁决），未命中记录 passed。fail-open 不影响返回。
+    _merge_sha = resp.get("sha") or "" if isinstance(resp, dict) else ""
+    _post = run_post_merge_gate(owner, repo, number, p, _token,
+                                _base_info.get("ref", ""), _base_info.get("sha", ""),
+                                _merge_sha)
+    _post_decision = "alarmed" if _post.get("decision") in ("blocked", "warned") \
+        else _post.get("decision", "passed")
+    record_gate_log(_repo_key, number, "post_merge", _post_decision, _post)
+    if _post_decision == "alarmed":
+        log.warning(f"merge gate post-merge alarm {owner}/{repo}#{number}: "
+                    f"hard={_post.get('hard_hits')} soft={_post.get('soft_hits')}")
     # Issue #453 台账（S25）：合并 PR → pull_request_merged 回声对账（VcsApiClient.merge_pr
     # 已入账，网关直调路径此处分账）
     try:
@@ -851,7 +904,9 @@ def list_pull_comments(owner: str, repo: str, number: int, user: dict = Depends(
              description="Creates a PR comment (body required). Issue #585: the GitHub provider routes this through "
                          "POST /issues/{number}/comments (a PR is an issue; that endpoint only needs body), because "
                          "GitHub's /pulls/{n}/comments is the inline review comment endpoint which requires "
-                         "commit_id/path/line and returns 422 for body-only payloads. GitCode keeps /pulls/{n}/comments.")
+                         "commit_id/path/line and returns 422 for body-only payloads. GitCode keeps /pulls/{n}/comments. "
+                         "Issue #754: GitCode 405 (PR already merged, not reviewable) automatically falls back to "
+                         "POST /issues/{number}/comments (equivalent trace channel, PR-is-issue semantics).")
 def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 R4.1: PR 评论同样追加标记
@@ -862,8 +917,22 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     # （必填 commit_id/path/line），仅传 body 必然 422；PR 本身是 issue，改用
     # /issues/{n}/comments 发普通 PR 评论（仅需 body），与 GitCode 行为对齐。
     _comments_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
-    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _comments_path, None, p),
-                    _repo_token(owner, repo, user, p), {"body": _body})
+    # Issue #754：GitCode 已 merged PR 上 POST /pulls/{n}/comments 返回 405
+    # （not allowed to be reviewed after being merged）→ 等价留痕通道回写兜底：
+    # PR=issue 语义（同 #585 方案），改走 /issues/{n}/comments，闭环说明不再散落 Issue。
+    _fallback_path = None if p == "github" else f"/issues/{number}/comments"
+    _token = _repo_token(owner, repo, user, p)
+    try:
+        resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _comments_path, None, p),
+                        _token, {"body": _body})
+    except HTTPException as _e:
+        if _fallback_path and getattr(_e, "status_code", None) == 405:
+            log.warning(f"Issue #754 PR comment 405 on {_comments_path} (merged PR?) "
+                        f"→ fallback to {_fallback_path}")
+            resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _fallback_path, None, p),
+                            _token, {"body": _body})
+        else:
+            raise
     # Issue #453 台账（S29-G1，网关 PR 端点族补全）：PR 评论入账——系统内部发 PR 评论
     # 走 event_pipeline 裸 urllib 路径（已入账），此网关端点原先漏账，仅剩外部 API 调用者
     # 的理论路径无台账防线。回流按 note_hook_pr 评论 ID 对账；系统内部 QA 回帖 PR 的
@@ -973,6 +1042,12 @@ def _normalize_pull_files_diff(resp):
     string-valued ``.patch`` into the object form. Consistency assertion afterwards:
     every file object with diff content must expose it at ``.patch.diff``; abnormal
     structures are logged via log.warning instead of being silently passed through.
+
+    Issue #750: string-valued ``.patch`` may be a doubly JSON-encoded payload
+    (``"{\\"diff\\": ...}"``). Try an inner ``json.loads`` first: if it decodes into a
+    dict with a ``diff`` key, that value is the bare diff text; otherwise treat the
+    string itself as a raw diff. ``.patch.diff`` is therefore always a bare diff text
+    string, so a single ``json.loads`` of the CLI output suffices downstream.
     """
     if not isinstance(resp, list):
         return resp
@@ -988,7 +1063,15 @@ def _normalize_pull_files_diff(resp):
                 item["patch"] = merged
             item.pop("diff", None)
         elif isinstance(patch, str) and patch:
-            item["patch"] = {"diff": patch}
+            diff_text = patch
+            try:
+                decoded = json.loads(patch)
+            except (ValueError, TypeError):
+                decoded = None
+            if isinstance(decoded, dict) and isinstance(decoded.get("diff"), str) \
+                    and decoded["diff"]:
+                diff_text = decoded["diff"]
+            item["patch"] = {"diff": diff_text}
         final = item.get("patch")
         if not isinstance(final, dict) or not final.get("diff"):
             log.warning(f"Pull files diff consistency check failed for {item.get('filename')!r}: "
@@ -996,12 +1079,15 @@ def _normalize_pull_files_diff(resp):
     return resp
 
 
+
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files",
             description="Lists files changed in a pull request. Issue #585: page/per_page pass through to the provider "
                         "(GitHub default per_page=30 silently truncated large PRs; default here is per_page=100). "
                         "For changed_files>100 PRs, page through manually; tree --depth recursive is a fallback for huge PRs. "
                         "Issue #731: file diff content is always normalized to the unified field path .patch.diff; "
-                        "top-level .diff (if returned by the provider) is merged into .patch.diff.")
+                        "top-level .diff (if returned by the provider) is merged into .patch.diff. "
+                        "Issue #750: doubly JSON-encoded patch strings are inner-decoded, so .patch.diff "
+                        "is always a bare diff text string (single json.loads downstream).")
 def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=1),
                     per_page: int = Query(100, ge=1, le=100),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):

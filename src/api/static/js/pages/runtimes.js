@@ -587,6 +587,39 @@ function renderRuntimes(data) {
   }
 }
 
+// ====== Issue #865：引擎模型展示（配置模型 → 最近模型 → —）======
+function _engineModelDisplay(rt) {
+  const configured = rt.model_name || '';
+  if (configured) return configured;
+  const recent = (rt.recent_models || [])[0];
+  if (recent && recent.model) return recent.model + ' (' + I18N.t('runtimes.label.model_recent_short') + ')';
+  return '—';
+}
+
+function _engineModelTooltip(rt) {
+  const configured = rt.model_name || '';
+  if (configured) {
+    const src = rt.model_source === 'local_config'
+      ? I18N.t('runtimes.label.model_source_local')
+      : I18N.t('runtimes.label.model_source_report');
+    return configured + ' · ' + src;
+  }
+  return I18N.t('runtimes.label.model_fallback_hint');
+}
+
+function _recentModelsBlock(rt) {
+  const items = rt.recent_models || [];
+  if (!items.length) {
+    return `<div class="ts t3" style="font-size:12px;padding:4px 0">${I18N.t('runtimes.label.recent_models_empty')}</div>`;
+  }
+  return `<div style="display:flex;flex-direction:column;gap:6px">` + items.map(m => `
+    <div style="display:flex;align-items:center;gap:10px;font-size:12px;color:var(--t2);min-width:0">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${m.model}</span>
+      <span class="ts t3" style="flex-shrink:0">${I18N.t('runtimes.label.model_used_count', {count: m.count})}</span>
+      <span class="ts t3" style="flex-shrink:0">${I18N.t('runtimes.label.model_last_used')} ${m.last_used_at ? relTime(m.last_used_at) : '—'}</span>
+    </div>`).join('') + `</div>`;
+}
+
 function renderEngines(data, devices) {
   const runtimes = data.runtimes || [];
   // Issue #472: q/type/scene/tag 筛选已迁移到后端（agent-runtimes 端点全局过滤），
@@ -632,6 +665,7 @@ function renderEngines(data, devices) {
         <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.installed')}</span> ${_engineInstalled}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:46px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
+        <div style="grid-column:1 / -1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_engineModelTooltip(rt)}"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.model')}</span> ${_engineModelDisplay(rt)}</div>
       </div>
     </div>`;
   });
@@ -1389,6 +1423,15 @@ function _renderEngineDetail(rt) {
         <div style="display:flex;align-items:center;gap:8px"><span style="color:var(--t3);display:inline-block;min-width:70px">健康分</span> ${_healthScoreBadge(rt) || '—'}${_healthCanReset(rt) ? `<button class="bt bt-o" title="${I18N.t('runtimes.action.reset_health')}" style="font-size:11px;padding:3px 10px;border-radius:4px;margin-left:4px" onclick="event.stopPropagation();resetEngineHealth(${rt.id})">${I18N.t('runtimes.action.reset_health')}</button>` : ''}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">异常原因</span> ${(() => { const _k = _healthHelpHint(rt); return _k ? `<span style="color:var(--r);font-weight:500">${I18N.t(_k)}</span>` : '<span class="ts t3">—</span>'; })()}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">最近失败</span> ${rt.health_last_failure_at ? `<span class="ts t2">${relTime(rt.health_last_failure_at)}</span>` : '<span class="ts t3">—</span>'}</div>
+        <div style="display:flex;align-items:center;gap:4px;min-width:0"><span style="color:var(--t3);display:inline-block;min-width:70px;flex-shrink:0">${I18N.t('runtimes.label.model_configured')}</span> <span title="${_engineModelTooltip(rt)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.model_name || '—'}</span></div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.model_last_used')}</span> ${(() => { const _m = (rt.recent_models || [])[0]; return _m && _m.last_used_at ? `<span class="ts t2">${relTime(_m.last_used_at)}</span>` : '<span class="ts t3">—</span>'; })()}</div>
+      </div>
+      <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.recent_models')}</span>
+          <span class="ts t3" style="font-size:11px">${I18N.t('runtimes.label.recent_models_desc')}</span>
+        </div>
+        ${_recentModelsBlock(rt)}
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">

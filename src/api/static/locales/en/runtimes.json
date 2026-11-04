@@ -97,7 +97,18 @@
     "max_concurrent": "Max Concurrent",
     "max_concurrent_desc": "Maximum concurrent tasks for this engine (1-100)",
     "worker_version_stale": "Worker version outdated",
-    "worker_version_stale_hint": "The reported worker version is outdated. Re-run the one-line install command to upgrade. This hint is independent of engine health."
+    "worker_version_stale_hint": "The reported worker version is outdated. Re-run the one-line install command to upgrade. This hint is independent of engine health.",
+    "model": "Model",
+    "model_recent_short": "recent",
+    "model_configured": "Configured model",
+    "model_last_used": "Last used",
+    "model_source_report": "worker reported",
+    "model_source_local": "local config",
+    "model_fallback_hint": "No configured model reported; falling back to recently used models",
+    "recent_models": "Recently used models",
+    "recent_models_desc": "Top 3 by usage",
+    "recent_models_empty": "No usage records",
+    "model_used_count": "{{count}} calls"
   },
   "empty": {
     "no_engines": "No engines",

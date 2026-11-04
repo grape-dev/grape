@@ -160,6 +160,21 @@ CREATE TABLE IF NOT EXISTS grape_t_patrol_findings (
 )
 """
 
+# Issue #752: 合入流程冲突标记扫描门禁日志（docs/issue-752/plan.md §3）。
+# 只增新表不改既有表；主键 UUID（新表硬性要求）；每次门禁决策一行
+# （phase: pre_merge/post_merge；decision: blocked/warned/alarmed/passed/error）。
+_MERGE_GATE_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_merge_gate_log (
+    id         TEXT PRIMARY KEY,
+    repo_key   TEXT NOT NULL DEFAULT '',
+    pr_number  INTEGER NOT NULL DEFAULT 0,
+    phase      TEXT NOT NULL DEFAULT '',
+    decision   TEXT NOT NULL DEFAULT '',
+    hits_json  TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+)
+"""
+
 # ===== Issue #536: 迁移版本表（迁移只跑一遍的地基）=====
 # 设计：docs/weekly-09/migration-versioning-and-ddl-safety-design.md §D1
 # - version 主键（'202611010001' 日期+序号）；kind: safe/backfill/cleanup/legacy-stamp；
@@ -223,6 +238,9 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
     detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
     role_tags TEXT DEFAULT '',           -- Issue #658：引擎角色标签（JSON 数组，如 ["coding","issue"]；空=按引擎类型默认映射兜底）
+    model_name TEXT DEFAULT '',          -- Issue #865：配置模型（worker 注册上报的本机配置模型名）
+    model_source TEXT DEFAULT '',        -- Issue #865：配置模型来源（worker_report=worker 上报 / local_config=服务端本机解析）
+    model_reported_at TEXT DEFAULT '',   -- Issue #865：配置模型上报时间（UTC ISO）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
@@ -891,6 +909,7 @@ _NEW_TABLES = [
     ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
     ("grape_t_patrol_findings", _PATROL_FINDINGS_DDL),
+    ("grape_t_merge_gate_log", _MERGE_GATE_LOG_DDL),
     ("grape_t_schema_migrations", _SCHEMA_MIGRATIONS_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
@@ -2740,6 +2759,22 @@ register_migration(
 )
 
 
+def _fn_create_grape_t_merge_gate_log() -> None:
+    """Issue #752：存量库补建合入门禁日志表（CREATE TABLE IF NOT EXISTS 幂等，
+    与 patrol-findings 同路径：_NEW_TABLES 只服务 legacy 全量首跑，已盖章库走本迁移）。"""
+    with db_lock:
+        db.execute(_MERGE_GATE_LOG_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611030001",
+    name="create-merge-gate-log-table",
+    kind="safe",
+    fn=_fn_create_grape_t_merge_gate_log,
+)
+
+
 def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
     """部署验证实测发现（2026-11-02）：issue 级 finding（stalled_issue）task_id 恒为空串，
     原三列唯一键 UNIQUE(kind, task_id, event_seq) 使全部 issue 级发现共享同一键——
@@ -2809,6 +2844,97 @@ register_migration(
     name="issue658_agent_runtimes_role_tags",
     kind="safe",
     fn=_fn_add_agent_runtimes_role_tags,
+)
+
+
+def _fn_add_agent_runtimes_model() -> None:
+    """Issue #865 补注册：agent_runtimes 增 model_name/model_source/model_reported_at
+    三列（配置模型展示）。与 #658 role_tags 同模式：legacy 盖帽库不自动执行时
+    附手工 ALTER（见 _migrate_tables 冻结清单）；幂等：查列缺才 ALTER。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_runtimes'"
+                " AND COLUMN_NAME IN ('model_name','model_source','model_reported_at')")
+            have = c.fetchone()[0]
+            if have < 3:
+                if have < 1:
+                    c.execute("ALTER TABLE agent_runtimes ADD COLUMN model_name TEXT DEFAULT ''")
+                if have < 2:
+                    c.execute("ALTER TABLE agent_runtimes ADD COLUMN model_source TEXT DEFAULT ''")
+                c.execute("ALTER TABLE agent_runtimes ADD COLUMN model_reported_at TEXT DEFAULT ''")
+                db.commit()
+        else:
+            c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'")
+            row = c.fetchone()
+            ddl = (row[0] or "") if row else ""
+            if not row:
+                return
+            for col in ("model_name", "model_source", "model_reported_at"):
+                if col not in ddl:
+                    db.execute(f"ALTER TABLE agent_runtimes ADD COLUMN {col} TEXT DEFAULT ''")
+            db.commit()
+
+
+register_migration(
+    version="202611030002",
+    name="issue865_agent_runtimes_model",
+    kind="safe",
+    fn=_fn_add_agent_runtimes_model,
+)
+
+
+def _fn_add_obs_llm_usage_engine_index() -> None:
+    """性能补丁（2026-11-03）：obs_llm_usage 原先没有 engine_id 索引，
+    引擎页的"最近使用模型"聚合（Issue #865 `_recent_models_by_runtime`）
+    每页触发一次全表扫描（EXPLAIN: type=ALL + Using temporary）——千万行量级
+    下单页 0.3~0.6s，且全程持 db_lock，会串行堵住其它 DB 请求。
+    补 (engine_id, model_key, model_raw, created_at) 索引后按引擎收窄 + 覆盖分组，
+    实测（sqlite，100 万行）38ms → 1.5ms。幂等：索引已存在即跳过。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    _idx = "idx_obs_llm_engine_model"
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            # MySQL 下 model_key/model_raw/created_at 是 TEXT，必须带前缀长度
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='obs_llm_usage' "
+                "AND INDEX_NAME=%s", (_idx,))
+            if c.fetchone()[0]:
+                return
+            c.execute(
+                f"CREATE INDEX {_idx} ON obs_llm_usage "
+                "(engine_id, model_key(64), model_raw(64), created_at(32))")
+            db.commit()
+        else:
+            c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+            if c.fetchone():
+                return
+            c.execute(
+                f"CREATE INDEX {_idx} ON obs_llm_usage "
+                "(engine_id, model_key, model_raw, created_at)")
+            db.commit()
+
+
+register_migration(
+    version="202611030003",
+    name="perf_obs_llm_usage_engine_index",
+    kind="safe",
+    fn=_fn_add_obs_llm_usage_engine_index,
 )
 
 
@@ -3231,6 +3357,27 @@ def _run_all_migrations():
         _migrate_a2a_idempotency_key()
     except Exception as _e:
         log.warning(f"A2A idempotency key migration failed: {_e}")
+    # ===== Issue #805: issue.created_by 列兜底（SQLite 新库建表已含，存量库/MySQL 幂等补列）=====
+    try:
+        _migrate_issue_created_by()
+    except Exception as _e:
+        log.warning(f"Issue #805 issue created_by migration failed: {_e}")
+
+
+def _migrate_issue_created_by():
+    """Issue #805：issue 表幂等补 `created_by TEXT DEFAULT ''` 列（创建人一等数据化）。
+
+    - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
+    - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（MySQL 经 mysql_compat 翻译）。
+    """
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue", "created_by", "TEXT DEFAULT ''")
+            db.commit()
+    except Exception as e:
+        log.warning(f"issue created_by column migration failed: {e}")
 
 
 def _migrate_a2a_idempotency_key():
@@ -4479,6 +4626,10 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN health_reset_at VARCHAR(64) DEFAULT ''",
         # ===== Issue #658: 引擎角色标签（显式声明；空=按引擎类型默认角色映射兜底）=====
         "ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''",
+        # ===== Issue #865: 配置模型（worker 注册上报；legacy 盖帽库需手工执行同款 ALTER）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN model_name TEXT DEFAULT ''",
+        "ALTER TABLE agent_runtimes ADD COLUMN model_source TEXT DEFAULT ''",
+        "ALTER TABLE agent_runtimes ADD COLUMN model_reported_at TEXT DEFAULT ''",
         # ===== Issue #498: 健康统计自愈留痕（失败衰减窗口有效失败数 + 最近失败时间）=====
         "ALTER TABLE runtime_health_scores ADD COLUMN failed_tasks_effective INTEGER DEFAULT 0",
         "ALTER TABLE runtime_health_scores ADD COLUMN last_failure_at TEXT DEFAULT ''",

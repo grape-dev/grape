@@ -217,7 +217,10 @@ def test_pulls_mapping(gitcode_calls, _client):
 
     r = client.put(f"{base}/pulls/9/merge")
     assert r.status_code == 200
-    assert gitcode_calls[-1]["method"] == "PUT" and gitcode_calls[-1]["url"].endswith("/pulls/9/merge")
+    # Issue #752：merge 前后各有一次门禁 GET /pulls/9/files 扫描，merge PUT 不再是
+    # 「最后一次」上游调用——改为存在性断言（PUT /pulls/9/merge 已发出且返回 200）。
+    assert any(c["method"] == "PUT" and c["url"].endswith("/pulls/9/merge")
+               for c in gitcode_calls)
 
     assert _get(client, f"{base}/pulls/9/files").status_code == 200
     assert gitcode_calls[-1]["url"].split("?")[0].endswith("/pulls/9/files")
@@ -860,6 +863,38 @@ def test_json_out_control_chars_parseable(monkeypatch, _client):
     assert parsed[0]["body"] == raw_body
 
 
+def test_commits_control_chars_big_page_parseable(monkeypatch, _client):
+    """Issue #818 验收（增量用例）：commits 透传端点 per_page=60 大分页，
+    上游 commit message 含原始控制字符（C0 全集 + DEL + 引号/反斜杠/孤立代理项），
+    响应体可 json.loads(strict=True) 无预处理直接解析且值保真。
+
+    报障原场景：`grape git-repo commits --per_page 60 --json-out` 因
+    `Invalid control character at char 19970` 解析失败；#684 既有用例仅覆盖
+    pulls 端点小响应，本用例补齐 commits 端点 + 大分页（per_page 60）维度。
+    """
+    ctrl = "".join(chr(c) for c in range(0x01, 0x1F)) + "\x00\x7f"
+    raw_msg = f"fix: page scan\nline2{ctrl} end \"quoted\" \\ back \ud800"
+    upstream = [{"sha": f"c{i:04d}",
+                 "commit": {"message": raw_msg, "author": {"name": "a\x02b"}}}
+                for i in range(60)]
+    calls = []
+    def _fake_req(method, url, token="", body=None):
+        calls.append(url)
+        return [dict(c) for c in upstream]
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/commits?per_page=60")
+    assert r.status_code == 200
+    assert "per_page=60" in calls[-1]  # 大分页参数如实透传上游
+    # 原始控制字符不落字节流（以转义序列出现）
+    assert b"\x01" not in r.content and b"\x7f" not in r.content
+    parsed = json.loads(r.content, strict=True)  # 无预处理直接解析
+    assert len(parsed) == 60
+    # round-trip 值保真：转义无损，值与上游一致
+    assert parsed[0]["commit"]["message"] == raw_msg
+    assert parsed[59]["commit"]["message"] == raw_msg
+    assert parsed[0]["commit"]["author"]["name"] == "a\x02b"
+
+
 def test_milestones_state_normalized(monkeypatch, _client):
     """Issue #684：milestones 返回 state 归一化 active/opened→open（与过滤合法值口径对齐）。"""
     calls = []
@@ -955,3 +990,62 @@ def test_pulls_files_diff_non_list_passthrough(monkeypatch, _client):
                         lambda m, u, token="", body=None: {"ok": True})
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+def test_pulls_files_diff_double_encoded_patch_decoded(monkeypatch, _client):
+    """Issue #750：patch 为双重 JSON 编码字符串时内层解码，.patch.diff 为裸 diff 文本。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    raw_diff = "@@ -1 +1 @@\n+a"
+    upstream = [{"filename": "src/a.py", "status": "modified",
+                 "patch": json.dumps({"diff": raw_diff})}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert isinstance(f["patch"], dict)
+    assert f["patch"]["diff"] == raw_diff  # 裸 diff 文本，非 JSON 字符串
+
+
+def test_pulls_files_diff_raw_patch_string_wrapped(monkeypatch, _client):
+    """Issue #750：patch 为裸 diff 字符串（非合法 JSON）时按原样包裹（兼容 #731）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    raw_diff = "@@ -1,2 +1,3 @@\n context\n-old\n+new\n+line"
+    upstream = [{"filename": "src/b.py", "status": "modified", "patch": raw_diff}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert isinstance(f["patch"], dict) and f["patch"]["diff"] == raw_diff
+
+
+def test_pulls_files_diff_json_string_without_diff_key_wrapped(monkeypatch, _client):
+    """Issue #750：patch 可 json.loads 但非含 diff 键的 dict → 视为裸 diff 字符串。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    upstream = [{"filename": "src/c.py", "status": "modified",
+                 "patch": json.dumps({"text": "@@ -1 +1 @@\n+x"})}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    # json.dumps({"text":...}) 不是合法 JSON 语义下的裸 diff？不——它可解码但无 diff 键，按裸字符串原样包裹
+    assert f["patch"]["diff"] == json.dumps({"text": "@@ -1 +1 @@\n+x"})
+
+
+def test_pulls_files_diff_json_string_with_empty_diff_wrapped(monkeypatch, _client):
+    """Issue #750：patch 解码为含 diff 键但值为空字符串 → 不取空值，按裸字符串包裹。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    payload = json.dumps({"diff": ""})
+    upstream = [{"filename": "src/d.py", "status": "modified", "patch": payload}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert f["patch"]["diff"] == payload
