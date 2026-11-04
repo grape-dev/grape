@@ -255,7 +255,7 @@ test('U8-2: send-code 成功文案不暴露存在性', () => {
 });
 
 test('U8-3: verify 不先检查邮箱已注册（防枚举）', () => {
-  var py = fs.readFileSync(path.join(ROOT, 'src/api/routes/grape_auth.py'), 'utf8');
+  var py = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/grape_auth.py'), 'utf8');
   var fnIdx = py.indexOf('def register_verify');
   var fnEnd = py.indexOf('\n@router', fnIdx + 10);
   var fnBody = py.slice(fnIdx, fnEnd > 0 ? fnEnd : fnIdx + 3000);
@@ -269,7 +269,7 @@ test('U8-3: verify 不先检查邮箱已注册（防枚举）', () => {
 });
 
 test('U8-4: send-code 已注册邮箱统一返回成功', () => {
-  var py = fs.readFileSync(path.join(ROOT, 'src/api/routes/grape_auth.py'), 'utf8');
+  var py = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/grape_auth.py'), 'utf8');
   var fnIdx = py.indexOf('def register_send_code');
   var fnEnd = py.indexOf('\n@router', fnIdx + 10);
   var fnBody = py.slice(fnIdx, fnEnd > 0 ? fnEnd : fnIdx + 3000);

@@ -44,7 +44,7 @@ const issuesScriptMatch = indexHtml.match(/<script src="\/static\/js\/pages\/iss
 assert.ok(issuesScriptMatch, 'issues.js script 标签应带 defer 属性');
 assert.ok(parseInt(issuesScriptMatch[1]) >= 120, 'issues.js 版本号应 >= 120');
 
-const reposPy = readFile('src/api/routes/repos.py');
+const reposPy = readFile('src/domains/mgmt/routes/repos.py');
 assert.ok(reposPy.includes('def _validate_deploy_url(url: str)'), 'repos.py 应包含 _validate_deploy_url');
 assert.ok(reposPy.includes('url.startswith("http://")') && reposPy.includes('url.startswith("https://")'), '应校验 http(s) 前缀');
 assert.ok(reposPy.includes('len(url) > 512'), '应校验 URL 长度 <= 512');

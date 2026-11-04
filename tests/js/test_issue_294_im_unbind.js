@@ -23,8 +23,8 @@ const fs = require('fs');
 const ROOT = path.resolve(__dirname, '../..');
 const imSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/im_channel.js'), 'utf8');
 const agentsSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/agents.js'), 'utf8');
-const chatPy = fs.readFileSync(path.join(ROOT, 'src/api/routes/chat.py'), 'utf8');
-const agentsPy = fs.readFileSync(path.join(ROOT, 'src/api/routes/agents.py'), 'utf8');
+const chatPy = fs.readFileSync(path.join(ROOT, 'src/domains/runtime/routes/chat.py'), 'utf8');
+const agentsPy = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/agents.py'), 'utf8');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -114,8 +114,11 @@ test('chat.py：解绑补齐注册表/会话/映射清理，且仅无其他引�
     '无其他引用时才删除 chat_bot 注册行');
   assert.ok(body.indexOf("DELETE FROM chat_conversations WHERE im_channel_id=?") >= 0, '应清理该渠道会话');
   assert.ok(body.indexOf("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id=''") >= 0, '应对账 unified_user_mapping');
-  assert.ok(/"im" in body and not feishu\.get\("app_id"\) and old_app_id:\s*\n\s*_purge_chat_im_binding\(/.test(chatPy),
-    '解绑请求（显式携带 im 且 app_id 置空）应触发清理');
+  // 实现已把条件收敛到 explicit_unbind 变量，断言语义而非字面顺序
+  assert.ok(/explicit_unbind\s*=.*"im" in body/.test(chatPy), '显式携带 im 应作为解绑判定条件');
+  assert.ok(/not feishu\.get\("app_id"\)/.test(chatPy), 'app_id 置空应作为解绑判定条件');
+  assert.ok(/explicit_unbind and old_app_id:\s*\n\s*_purge_chat_im_binding\(/.test(chatPy),
+    '解绑请求应触发 _purge_chat_im_binding');
   assert.ok(/kwargs\["im_provider"\] = ""/.test(chatPy), '解绑应同时清空 im_provider');
 });
 

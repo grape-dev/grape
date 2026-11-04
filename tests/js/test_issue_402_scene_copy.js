@@ -54,7 +54,7 @@ test('dashboard.js 语法完整', () => {
 });
 
 test('后端零改动：scenes.py / pipeline_config.py 无 copy 相关新增', () => {
-  const scenesPy = fs.readFileSync(path.join(ROOT, 'src/api/routes/scenes.py'), 'utf8');
+  const scenesPy = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/scenes.py'), 'utf8');
   assert(!scenesPy.includes('scenes_copy'), 'scenes.py 不应包含新增 copy 端点（scenes_copy）');
   assert(!scenesPy.includes('_clean_scene_engine_ids_for_copy'), 'scenes.py 不应包含 copy 清洗助手');
   const pcPy = fs.readFileSync(path.join(ROOT, 'src/api/pipeline_config.py'), 'utf8');
