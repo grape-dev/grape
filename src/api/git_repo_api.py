@@ -477,15 +477,40 @@ def _normalize_milestone_states(data):
     return data
 
 
+# Issue #900：per_page 上限（超出钳制到该值而非 422，与 Spec「大 per_page 不被 422」对齐）
+_MILESTONES_MAX_PER_PAGE = 100
+
+
 @router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones",
             summary="List milestones",
             description="Lists repository milestones (state filter: open/closed/all). "
+                        "Issue #900: optional page/per_page pass through to the provider "
+                        "(upstream default small page silently truncated long lists; use per_page=100 for the full set). "
+                        "per_page larger than 100 is clamped to 100, not rejected. "
+                        "Optional title filter narrows by milestone title. "
+                        "When page/per_page are omitted they are not sent upstream (provider defaults apply, "
+                        "preserving pre-#900 request URLs). "
                         "Returned items' `state` field is normalized to open/closed "
                         "(upstream `active`/`opened` is mapped to `open`).")
 def list_milestones(owner: str, repo: str, state: str = Query("all",
                     description="Filter: open/closed/all (upstream rejects other values)"),
+                    page: int = Query(None, ge=1,
+                                      description="Page number (1-based); omitted = provider default"),
+                    per_page: int = Query(None, ge=1,
+                                          description="Page size, clamped to 100 when larger; "
+                                                      "omitted = provider default"),
+                    title: str = Query("", description="Optional filter by milestone title"),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", {"state": state}, p),
+    # Issue #900：分页/过滤参数仅在调用方显式提供时透传上游（_vcs_url 过滤空值），
+    # 无参请求 URL 与 #900 之前完全一致（向后兼容）；per_page 超上限钳制而非 422。
+    params = {"state": state}
+    if page is not None:
+        params["page"] = page
+    if per_page is not None:
+        params["per_page"] = min(per_page, _MILESTONES_MAX_PER_PAGE)
+    if title:
+        params["title"] = title
+    data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", params, p),
                     _repo_token(owner, repo, user, p))
     return _normalize_milestone_states(data)
 

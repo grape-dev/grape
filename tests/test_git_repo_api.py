@@ -929,6 +929,57 @@ def test_milestones_state_passthrough_filter(gitcode_calls, _client):
     assert "state=closed" in gitcode_calls[-1]["url"]
 
 
+def test_milestones_paging_passthrough(gitcode_calls, _client):
+    """Issue #900：page/per_page 显式提供时透传上游，消除默认小分页截断（对齐 #744/#585 模式）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    # 全量取法：per_page=100 透传且不被 422
+    assert _client.get(f"{base}/milestones?state=all&per_page=100").status_code == 200
+    url = gitcode_calls[-1]["url"]
+    assert "/milestones" in url and "per_page=100" in url and "state=all" in url
+    # page=2 组合分页
+    assert _client.get(f"{base}/milestones?page=2&per_page=50").status_code == 200
+    url = gitcode_calls[-1]["url"]
+    assert "page=2" in url and "per_page=50" in url
+    # QA 复审 (c)：默认无参时不发送 page/per_page（URL 与 #900 之前一致，向后兼容）
+    assert _client.get(f"{base}/milestones").status_code == 200
+    url = gitcode_calls[-1]["url"]
+    assert "/milestones" in url and "state=all" in url
+    assert "page=" not in url and "per_page=" not in url
+
+
+def test_milestones_title_filter_passthrough(gitcode_calls, _client):
+    """Issue #900：title 过滤（可选）非空时透传上游。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    assert _client.get(f"{base}/milestones", params={"title": "weekly-07"}).status_code == 200
+    assert "title=weekly-07" in gitcode_calls[-1]["url"]
+    # 空 title = 不过滤（不出现 title 参数）
+    assert _client.get(f"{base}/milestones?title=").status_code == 200
+    assert "title" not in gitcode_calls[-1]["url"]
+
+
+def test_milestones_paging_validation(gitcode_calls, _client):
+    """Issue #900：非法分页值 422；per_page 超上限钳制到 100（QA 复审 (a)：钳制而非 422）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    # per_page>100：钳制透传（Spec「大 per_page 不被 422」）
+    assert _client.get(f"{base}/milestones?per_page=500").status_code == 200
+    assert "per_page=100" in gitcode_calls[-1]["url"]
+    # 非法值仍 422（最小值约束）
+    assert _client.get(f"{base}/milestones?per_page=0").status_code == 422
+    assert _client.get(f"{base}/milestones?page=0").status_code == 422
+    assert _client.get(f"{base}/milestones?page=-1").status_code == 422
+
+
+def test_milestones_openapi_contract_params(_client):
+    """Issue #900 QA 复审 (b)：契约登记——OpenAPI schema 中 gitrepo_milestones
+    必须含 page/per_page/title Query 参数（CLI 契约驱动呈现 --page/--per_page 的前提）。"""
+    schema = app.openapi()
+    op = schema["paths"]["/api/git-repo/{owner}/{repo}/milestones"]["get"]
+    assert op["operationId"] == "gitrepo_milestones"
+    params = {p["name"]: p for p in op["parameters"]}
+    assert set(params) >= {"state", "page", "per_page", "title"}
+    assert all(params[n]["in"] == "query" for n in ("page", "per_page", "title"))
+
+
 def test_pulls_files_diff_normalization(monkeypatch, _client):
     """Issue #731：pulls files 出参 diff 字段归一化统一至 .patch.diff。"""
     base = f"/api/git-repo/{OWNER}/{REPO}"
