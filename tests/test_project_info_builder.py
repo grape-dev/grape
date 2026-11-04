@@ -470,10 +470,18 @@ class TestDefaultBranchDrivesWorktree:
 class TestDegradedModuleCandidates:
     """Issue #666 (M2)：codegraph 不可用时降级路径模块级候选（非全 N/A）。"""
 
+    @pytest.fixture(autouse=True)
+    def _reset_warned(self):
+        """QA 修复 #666：恢复模块级全局告警态，避免跨测试泄漏。"""
+        import src.project_info.builder as b
+        old = b._codegraph_warned
+        b._codegraph_warned = False
+        yield
+        b._codegraph_warned = old
+
     def _degraded_build(self, monkeypatch, caplog=None):
         import logging
         import src.project_info.builder as b
-        b._codegraph_warned = False
         monkeypatch.setattr(b, "_codegraph_available", lambda: False)
         if caplog is not None:
             with caplog.at_level(logging.WARNING, logger="devops-bot"):
@@ -486,8 +494,8 @@ class TestDegradedModuleCandidates:
         """git tree 可用 → 降级 graph 含模块级候选（Architecture/Modules/Key Files 非 N/A）。"""
         import src.project_info.builder as b
         monkeypatch.setattr(b, "_git_tree_paths",
-                            lambda repo_key, token="": ["src", "scripts", "README.md",
-                                                        "src/config.py", "src/api", "src/worker_package.py"])
+                            lambda repo_key: ["src", "scripts", "README.md",
+                                              "src/config.py", "src/api", "src/worker_package.py"])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
         from src.repo_key import workspace_repo_dir
@@ -505,7 +513,7 @@ class TestDegradedModuleCandidates:
     def test_degraded_api_fallback(self, _tmp_workspace, monkeypatch):
         """git tree 不可用 → GitCode API 兜底，来源标注 GitCode API。"""
         import src.project_info.builder as b
-        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key, token="": [])
+        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
         monkeypatch.setattr(b, "_api_tree_paths",
                             lambda repo_key, owner, rname, token="": ["src", "src/main.py", "README.md"])
         r = self._degraded_build(monkeypatch)
@@ -518,11 +526,28 @@ class TestDegradedModuleCandidates:
         meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
         assert "GitCode API" in meta["note"]
 
+    def test_degraded_api_fallback_logs_warning(self, _tmp_workspace, monkeypatch, caplog):
+        """QA 修复 #666：API 兜底失败不再静默吞错，记 log.warning（不含 token）。"""
+        import logging
+        import src.project_info.builder as b
+        caplog.set_level(logging.WARNING, logger="devops-bot")
+        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
+
+        class _BoomRepo:
+            def __init__(self, repo_key):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr("src.repo.Repo", _BoomRepo)
+        r = self._degraded_build(monkeypatch)
+        assert r["degraded"] is True
+        assert any("api tree paths failed" in r.getMessage() for r in caplog.records)
+
     def test_degraded_no_source_falls_back(self, _tmp_workspace, monkeypatch):
         """git tree 与 API 均不可用 → 回落现状（N/A + 降级说明），不崩溃。"""
         import src.project_info.builder as b
-        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key, token="": [])
-        monkeypatch.setattr(b, "_api_tree_paths", lambda repo_key, owner, rname, token="": [])
+        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
+        monkeypatch.setattr(b, "_api_tree_paths",
+                            lambda repo_key, owner, rname, token="": [])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
         from src.repo_key import workspace_repo_dir
@@ -532,6 +557,49 @@ class TestDegradedModuleCandidates:
         meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
         assert "codegraph" in meta["note"]
         assert "module candidates from" not in meta["note"]
+
+    def test_degraded_then_codegraph_available_full_restore(self, _tmp_workspace, monkeypatch):
+        """QA 修复 #666（Spec 恢复路径证据）：degraded 基线 + codegraph 就位
+        → should_refresh 触发 → 重建 degraded=false 全量恢复（非降级候选）。"""
+        import src.project_info.builder as b
+        from src.repo_key import workspace_repo_dir
+        # ① 先降级生成（无候选来源）
+        monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
+        monkeypatch.setattr(b, "_api_tree_paths", lambda repo_key, owner, rname, token="": [])
+        r1 = self._degraded_build(monkeypatch)
+        assert r1["degraded"] is True
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
+        meta1 = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
+        assert meta1["degraded"] is True
+        # ② codegraph 就位 → should_refresh 应触发全量重建
+        monkeypatch.setattr(b, "_codegraph_available", lambda: True)
+        monkeypatch.setattr(b, "_ensure_analysis_worktree",
+                            lambda repo_key, token="", default_branch="": "/fake/work")
+        monkeypatch.setattr(b, "_codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
+        monkeypatch.setattr(b, "_codegraph_files", lambda work: "file-tree")
+        assert b.should_refresh("gitcode:org/test") is True
+        r2 = b.build_project_info("gitcode:org/test")
+        assert r2["degraded"] is False
+        assert r2["reason"] == "codegraph"
+        meta2 = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
+        assert meta2["degraded"] is False
+        assert meta2["note"] == ""
+        graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
+        assert "explore:main entry point application startup" in graph  # 全量分析内容
+        assert "module candidate" not in graph                          # 不再是降级候选
+        assert "file-tree" in graph
+
+    def test_degraded_tree_max_entries_invalid_env_fallback(self, _tmp_workspace, monkeypatch, caplog):
+        """QA 修复 #666（Standards #1）：env 非数字不再致 import/调用崩溃，惰性兜底默认 200。"""
+        import logging
+        import src.project_info.builder as b
+        caplog.set_level(logging.WARNING, logger="devops-bot")
+        monkeypatch.setenv("PROJECT_INFO_DEGRADED_TREE_ENTRIES", "not-a-number")
+        assert b._degraded_tree_max_entries() == 200
+        assert any("invalid PROJECT_INFO_DEGRADED_TREE_ENTRIES" in r.getMessage()
+                   for r in caplog.records)
+        monkeypatch.setenv("PROJECT_INFO_DEGRADED_TREE_ENTRIES", "5")
+        assert b._degraded_tree_max_entries() == 5
 
     def test_warn_codegraph_missing_once(self, _tmp_workspace, monkeypatch, caplog):
         """Issue #666 (M1)：告警一次性——首次 generate 完整告警，第二次仅简讯。"""

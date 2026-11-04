@@ -16,16 +16,25 @@ RUN pip install --no-cache-dir -r requirements.txt
 # bin/codegraph 可直接执行，见 scripts/install-codegraph.sh 注释）——非 pip 包。
 # 构建期用 nodejs/npm 在线安装，装完卸载 nodejs/npm 保持镜像精简（二进制自包含不依赖系统 node）。
 # best-effort：安装失败不阻断镜像构建，运行时走降级路径并显式告警（src/project_info/builder.py）。
+# 安装位置：独立 prefix /opt/codegraph（QA 修复 #666：规避 apt purge nodejs/npm 时
+# npm 全局目录 /usr/lib/node_modules 被连带清理的风险）；bin 软链到 /usr/local/bin。
+# purge 后最终复核 codegraph --version（不可用则清理失效软链并告警，镜像仍可构建）。
 RUN set -x; \
     apt-get update && apt-get install -y --no-install-recommends nodejs npm; \
-    if npm install -g @colbymchenry/codegraph; then \
-        codegraph --version; \
+    if npm install -g --prefix /opt/codegraph @colbymchenry/codegraph; then \
+        ln -sf /opt/codegraph/bin/codegraph /usr/local/bin/codegraph; \
     else \
         echo "warning: codegraph install failed, project-info will run degraded with warning"; \
     fi; \
     apt-get purge -y nodejs npm; \
     apt-get autoremove -y; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    if codegraph --version >/dev/null 2>&1; then \
+        codegraph --version; \
+    else \
+        echo "warning: codegraph missing after node purge, project-info will run degraded with warning"; \
+        rm -f /usr/local/bin/codegraph; \
+    fi
 
 # 代码
 COPY . .

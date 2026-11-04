@@ -128,11 +128,24 @@ def _warn_codegraph_missing(repo_key: str):
 
 
 # Issue #666（M2）：降级路径模块级候选——git tree 拉取参数（env 可调）
-_DEGRADED_TREE_MAX_ENTRIES = int(os.environ.get("PROJECT_INFO_DEGRADED_TREE_ENTRIES", "200"))
+# QA 修复 #666：惰性读取 + 兜底默认（模块导入期 int(env) 非数字会致 import 崩溃）
+_DEGRADED_TREE_MAX_ENTRIES_DEFAULT = 200
 _DEGRADED_TREE_KEY_DIRS = ("src", "app", "lib", "packages", "server", "worker", "scripts", "tests")
 
 
-def _git_tree_paths(repo_key: str, token: str = "") -> list[str]:
+def _degraded_tree_max_entries() -> int:
+    try:
+        return int(os.environ.get("PROJECT_INFO_DEGRADED_TREE_ENTRIES",
+                                  _DEGRADED_TREE_MAX_ENTRIES_DEFAULT))
+    except (TypeError, ValueError):
+        log.warning(
+            f"project-info: invalid PROJECT_INFO_DEGRADED_TREE_ENTRIES "
+            f"{os.environ.get('PROJECT_INFO_DEGRADED_TREE_ENTRIES')!r}, "
+            f"falling back to default {_DEGRADED_TREE_MAX_ENTRIES_DEFAULT}")
+        return _DEGRADED_TREE_MAX_ENTRIES_DEFAULT
+
+
+def _git_tree_paths(repo_key: str) -> list[str]:
     """Issue #666（M2）：bare mirror git ls-tree 拉目录结构（best-effort，失败返回空）。
 
     - ref 候选：origin/HEAD → origin/main → origin/master；
@@ -151,13 +164,14 @@ def _git_tree_paths(repo_key: str, token: str = "") -> list[str]:
     else:
         return []
     entries = list(top)
+    max_entries = _degraded_tree_max_entries()
     for d in top:
-        if d in _DEGRADED_TREE_KEY_DIRS and len(entries) < _DEGRADED_TREE_MAX_ENTRIES:
+        if d in _DEGRADED_TREE_KEY_DIRS and len(entries) < max_entries:
             c, out, _e = _run(["git", "--git-dir", base, "ls-tree", "--name-only", ref, d], timeout=60)
             if c == 0:
                 for l in (out or "").splitlines():
                     p = l.strip()
-                    if p and len(entries) < _DEGRADED_TREE_MAX_ENTRIES:
+                    if p and len(entries) < max_entries:
                         entries.append(p)
     return entries
 
@@ -171,12 +185,14 @@ def _api_tree_paths(repo_key: str, owner: str, rname: str, token: str = "") -> l
         tok = token or _repo.bot_token
         if not tok:
             return []
-        import urllib.request, json as _json
+        import urllib.parse, urllib.request, json as _json
         _api = _repo.api_base
         _headers = {"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"}
+        max_entries = _degraded_tree_max_entries()
         for _p in ("", "src"):
             req = urllib.request.Request(
-                f"{_api}/repos/{owner}/{rname}/contents/{_p}", headers=_headers)
+                f"{_api}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(rname, safe='')}/contents/{_p}",
+                headers=_headers)
             data = _json.load(urllib.request.urlopen(req, timeout=20))
             if isinstance(data, dict):
                 data = data.get("tree") or data.get("entries") or []
@@ -185,11 +201,13 @@ def _api_tree_paths(repo_key: str, owner: str, rname: str, token: str = "") -> l
                     paths.append(it["path"])
                 elif isinstance(it, str) and it:
                     paths.append(it)
-            if len(paths) >= _DEGRADED_TREE_MAX_ENTRIES:
+            if len(paths) >= max_entries:
                 break
-    except Exception:
+    except Exception as e:
+        # QA 修复 #666：不再静默吞错，记 warning 便于排障（不含 token）
+        log.warning(f"project-info: api tree paths failed for {repo_key}: {e}")
         return []
-    return paths[:_DEGRADED_TREE_MAX_ENTRIES]
+    return paths[:_degraded_tree_max_entries()]
 
 
 def _degraded_candidates_md(repo_key: str, token: str = "") -> tuple[str, str, str, str]:
@@ -199,13 +217,14 @@ def _degraded_candidates_md(repo_key: str, token: str = "") -> tuple[str, str, s
     source 为空（meta.note 不标候选来源）。候选仅作推断线索，标注为 inferred，不替代全量分析。
     """
     owner, rname = split_owner_repo(repo_key)
-    paths = _git_tree_paths(repo_key, token)
+    paths = _git_tree_paths(repo_key)
     source = "git tree" if paths else ""
     if not paths:
         paths = _api_tree_paths(repo_key, owner, rname, token)
         source = "GitCode API" if paths else ""
     if not paths:
         return "", "", "", ""
+    max_entries = _degraded_tree_max_entries()
     top_dirs = sorted({p.split("/")[0] for p in paths if "/" in p})
     top_files = sorted(p for p in paths if "/" not in p)
     modules_md = "\n".join(
@@ -215,8 +234,8 @@ def _degraded_candidates_md(repo_key: str, token: str = "") -> tuple[str, str, s
         "codegraph 不可用，降级生成——基于 {src} 的目录结构推断模块划分（inferred，非全量分析）：\n"
         + "\n".join(f"- 顶层目录（模块候选）：{d}/" for d in top_dirs)
     ).format(src=source)
-    kf_lines = [f"- {p}" for p in top_files[:_DEGRADED_TREE_MAX_ENTRIES]]
-    kf_lines += [f"- {p}" for p in paths if "/" in p][:_DEGRADED_TREE_MAX_ENTRIES - len(kf_lines)]
+    kf_lines = [f"- {p}" for p in top_files[:max_entries]]
+    kf_lines += [f"- {p}" for p in paths if "/" in p][:max(0, max_entries - len(kf_lines))]
     key_files_md = f"（降级：来自 {source} 的路径候选，inferred）\n" + "\n".join(kf_lines)
     return arch_md, modules_md, key_files_md, source
 
