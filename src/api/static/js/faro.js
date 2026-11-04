@@ -8,13 +8,16 @@
   if (!SDK) { console.warn('[faro] SDK not loaded, telemetry disabled'); return; }
 
   var ver = (window.GRAPE_VERSION || (document.documentElement.getAttribute('data-version')) || 'dev');
+  var env = 'prod';
+  if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') env = 'local';
+  else if (location.hostname.indexOf('.topxtopx.com') === -1) env = 'dev';
 
   SDK.initializeFaro({
     url: '/faro/collect',
     app: {
       name: 'grape-web',
       version: ver,
-      environment: window.location.port === '8081' ? 'dev' : 'prod'
+      environment: env
     },
     sessionTracking: { persistent: false }
   });
@@ -22,13 +25,20 @@
   // 环境信息补齐（按登录后 localStorage 可用字段，未登录时跳过）
   var _applyUser = function () {
     try {
-      var u = JSON.parse(localStorage.getItem('userInfo') || 'null');
-      if (u && (u.username || u.id)) {
-        SDK.faro.api.setUser({ id: String(u.id || ''), username: u.username || u.nickname || '' });
+      var u = JSON.parse(localStorage.getItem('user') || 'null');
+      if (u && (u.username || u.nickname || u.id)) {
+        SDK.faro.api.setUser({ id: String(u.id || u.username || ''), username: (u.username || u.nickname || '') });
       }
     } catch (e) { /* ignore */ }
   };
   _applyUser();
+  // 同 tab 登录不会触发 storage 事件 → 轮询兜底（登录后 app.js 写 localStorage 'user'）
+  var _lastU = null;
+  setInterval(function () {
+    var raw = null;
+    try { raw = localStorage.getItem('user'); } catch (e) { return; }
+    if (raw && raw !== _lastU) { _lastU = raw; _applyUser(); }
+  }, 5000);
   window.addEventListener('storage', _applyUser);
 
   // 页面视图: SPA 内部切换 (hash/router 页面切换) 手动上报
