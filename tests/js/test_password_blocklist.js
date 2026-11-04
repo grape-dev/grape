@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 
 const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'static');
-const _BACKEND = path.join(__dirname, '..', '..', 'src', 'auth', 'password.py');
+const _BACKEND = path.join(__dirname, '..', '..', 'src', 'domains', 'mgmt', 'auth', 'password.py');
 
 // ── 与 register.html reqs 同规格的四条件判定 ──
 function pwdReqs(p, username, email) {

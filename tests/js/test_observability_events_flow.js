@@ -125,7 +125,10 @@ const ev = (o) => Object.assign({
     env2.els.obsEventQ.value = 'task_stuck';
     env2.obs.obsEventSearch();
     await tick(); await tick();
-    const last = env2.calls[env2.calls.length - 1];
+    // Issue #476 之后页面会并行发出 /obs/events/failed-result-gap 摘要卡请求，
+    // 取“最后一次请求”会抓到摘要卡；这里只看事件列表端点。
+    const evCalls = env2.calls.filter((u) => /^\/obs\/events(\?|$)/.test(u));
+    const last = evCalls[evCalls.length - 1] || '';
     assert.ok(last.indexOf('q=task_stuck') >= 0, '关键字应作为服务端参数发出: ' + last);
     assert.ok(calls.length >= 1, '首个环境也应发出请求');
   });

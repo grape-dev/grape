@@ -24,10 +24,10 @@ function readFile(rel) {
 }
 
 function testNginxBodySize() {
-  const conf = readFile('nginx-grape.conf');
+  const conf = readFile('deploy/nginx-grape.conf');
   assert.ok(
     /client_max_body_size\s+50m\s*;/.test(conf),
-    'nginx-grape.conf 应含 client_max_body_size 50m;（多图 base64 ≈45MB+ 放行）'
+    'deploy/nginx-grape.conf 应含 client_max_body_size 50m;（多图 base64 ≈45MB+ 放行）'
   );
   console.log('  ✓ nginx-grape.conf client_max_body_size 50m');
 }
