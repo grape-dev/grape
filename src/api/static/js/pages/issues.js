@@ -274,7 +274,10 @@ window._saveDeployUrl = function() {
 function loadTasks(opts) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  if (_tasksLoading) return;   // 防重复并发请求
+  // Issue #926（2026-11-04 修复）：不再用 _tasksLoading 拦截「重置」请求——它会让
+  // 重复点击/重进本页的第二发请求被静默吞掉，而第一发已被 nav() 的 _navAbortController
+  // 取消（AbortError 静默），页面就永久停在「加载中」。重置类请求一律放行，靠
+  // _taskReqSeq 让最新一发胜出；只有滚动追加（append）需要去重。
   const repo = app.currentRepo();
   const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
   _loadTasksSortPref(repoKey);
@@ -311,7 +314,7 @@ function loadTasks(opts) {
   }
   _tasksLoading = true;
   API.get(apiUrl).then(d => {
-    if (_seq !== _taskReqSeq) { _tasksLoading = false; return; }  // 已被更新的重置请求取代，丢弃
+    if (_seq !== _taskReqSeq) return;  // 已被更新的请求取代：旗标归最新请求所有，不由本发清除
     if (window._currentView !== 'tasks') { _tasksLoading = false; return; }  // stale guard
     _tasksLoading = false;
     const _items = d.issues || d.tasks || [];
@@ -379,11 +382,14 @@ function loadTasks(opts) {
         _openDeeplinkDetailViaApi(repo, _pinNum);
         _openedDetail = true;
       } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
-        var _seq = window._taskDetailFromScene.latestSeq;
+        // 注意：变量名必须与外层请求序号 _seq 区分——本箭头函数内 var 会提升到
+        // 整个响应回调作用域，用 _seq 会遮蔽 loadTasks 里的 const _seq，
+        // 使上面的「请求序号比对」永远判定为过期而丢弃响应（需求中心永久卡加载中）。
+        var _sceneSeq = window._taskDetailFromScene.latestSeq;
         window._taskDetailFromScene = null;
         window._deeplinkIssueNumber = null;
         _render();  // 无匹配任务，渲染列表
-        app.nav('event', _seq);
+        app.nav('event', _sceneSeq);
       } else {
         window._taskDetailFromScene = null;
         _render();  // 无匹配任务，渲染列表
@@ -412,8 +418,8 @@ function loadTasks(opts) {
       window._currentDetailTask = null;
     }
   }).catch(e => {
+    if (_seq !== _taskReqSeq) return;  // 已被更新的请求取代，静默丢弃（旗标归最新请求所有）
     _tasksLoading = false;
-    if (_seq !== _taskReqSeq) return;  // 已被更新的重置请求取代，静默丢弃
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
     window._pendingTaskDetailId = null;  // Issue #175: 清理待打开详情（loadTasks 失败时不残留）
