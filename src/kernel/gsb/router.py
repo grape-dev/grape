@@ -57,6 +57,16 @@ HEARTBEAT_INTERVAL = 30
 # 每 N 拍心跳顺带收敛一次注册表（N × 30s ≈ 10min）
 PURGE_EVERY_N_BEATS = 20
 
+# 多机部署命名空间：注册键 = "<service>@<namespace>"，避免两台机器写同一行互相覆盖
+# （默认空 = 旧行为，单机部署不受影响）
+NAMESPACE_ENV = "GRAPE_GSB_NAMESPACE"
+
+
+def registry_key(service_name: str, namespace: str | None = None) -> str:
+    """注册键：有 namespace 时拼成 ``service@namespace``，否则沿用服务名。"""
+    ns = (namespace if namespace is not None else os.environ.get(NAMESPACE_ENV, "")).strip()
+    return f"{service_name}@{ns}" if ns else service_name
+
 # 进程角色 → GSB 服务名。worker 进程对外就是 runtime 域（与 GRAPE_RUNTIME_URL 对齐）
 _ROLE_TO_SERVICE = {
     "mgmt": "mgmt",
@@ -139,7 +149,9 @@ class GsbService:
         health_url: str = "/api/ping",
         version: str | None = None,
     ):
-        self.name = name
+        self.name = name              # 基础服务名（mgmt/event/runtime/insight）
+        self.namespace = os.environ.get(NAMESPACE_ENV, "").strip()
+        self.key = registry_key(name, self.namespace)  # 注册表主键（多机隔离）
         self.port = port
         self.app = app
         self.base_url = resolve_base_url(name, port, base_url)
@@ -193,11 +205,12 @@ class GsbService:
             self.app.add_middleware(InternalAuthMiddleware)
 
         self.app.include_router(self.internal_router)
-        log.info(f"GSB routes mounted: /internal/gsb/services (service={self.name})")
+        log.info(f"GSB routes mounted: /internal/gsb/services (service={self.key})")
 
     def _metadata(self) -> dict[str, Any]:
         return {
             "role": self.name,
+            "namespace": self.namespace or socket.gethostname(),
             "port": self.port,
             "pid": os.getpid(),
             "host": socket.gethostname(),
@@ -209,7 +222,7 @@ class GsbService:
         """写注册表（幂等）。失败只告警，不阻断进程启动。"""
         try:
             register_service(
-                name=self.name,
+                name=self.key,
                 base_url=self.base_url,
                 health_url=self.health_url,
                 metadata=self._metadata(),
@@ -217,14 +230,14 @@ class GsbService:
             )
             self._registered = True
             log.info(
-                f"GSB registered: service={self.name} base_url={self.base_url} "
+                f"GSB registered: service={self.key} base_url={self.base_url} "
                 f"health={self.health_url} version={self.version}"
             )
             return True
         except Exception as e:  # noqa: BLE001 - 注册失败不能拖垮业务进程
             self._registered = False
             self._last_register_error = time.time()
-            log.warning(f"GSB register failed: service={self.name} err={type(e).__name__}: {e}")
+            log.warning(f"GSB register failed: service={self.key} err={type(e).__name__}: {e}")
             return False
 
     async def startup(self) -> None:
@@ -247,10 +260,10 @@ class GsbService:
                 pass
             self._heartbeat_task = None
         try:
-            deregister_service(self.name)
-            log.info(f"GSB deregistered: service={self.name}")
+            deregister_service(self.key)
+            log.info(f"GSB deregistered: service={self.key}")
         except Exception as e:  # noqa: BLE001
-            log.warning(f"GSB deregister failed: service={self.name} err={type(e).__name__}: {e}")
+            log.warning(f"GSB deregister failed: service={self.key} err={type(e).__name__}: {e}")
 
     async def _heartbeat_loop(self) -> None:
         """心跳循环：立即打一次，之后每 30s；未注册成功则顺带重试注册（自愈）。
@@ -265,14 +278,14 @@ class GsbService:
                 if not self._registered:
                     self.register()
                 else:
-                    heartbeat_service(self.name)
+                    heartbeat_service(self.key)
                     self._registered = True
             except Exception as e:  # noqa: BLE001
                 self._registered = False
                 now = time.time()
                 if now - self._last_register_error > _REGISTER_RETRY_BACKOFF:
                     self._last_register_error = now
-                    log.warning(f"GSB heartbeat failed: service={self.name} err={type(e).__name__}: {e}")
+                    log.warning(f"GSB heartbeat failed: service={self.key} err={type(e).__name__}: {e}")
 
             beats += 1
             if beats % PURGE_EVERY_N_BEATS == 0:
@@ -310,6 +323,8 @@ def get_gsb(app: FastAPI) -> GsbService | None:
 
 __all__ = [
     "HEARTBEAT_INTERVAL",
+    "NAMESPACE_ENV",
+    "registry_key",
     "GsbService",
     "get_gsb",
     "init_gsb",

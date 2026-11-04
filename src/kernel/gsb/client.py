@@ -97,13 +97,25 @@ class GsbClient:
         url = os.environ.get(env_key)
         return url.rstrip("/") if url else None
 
+    def _registry_keys(self) -> list[str]:
+        """注册键候选：本机命名空间优先，其次裸服务名（跨机/旧注册兜底）。"""
+        keys: list[str] = []
+        ns = os.environ.get("GRAPE_GSB_NAMESPACE", "").strip()
+        if ns:
+            keys.append(f"{self.service_name}@{ns}")
+        keys.append(self.service_name)
+        return keys
+
     def _registry_url(self) -> str | None:
-        try:
-            svc = discover_service(self.service_name)
+        for key in self._registry_keys():
+            try:
+                svc = discover_service(key)
+            except Exception:  # noqa: BLE001 - 注册表不可用不应阻断调用
+                continue
             base = (svc or {}).get("base_url")
-            return base.rstrip("/") if base else None
-        except Exception:  # noqa: BLE001 - 注册表不可用不应阻断调用
-            return None
+            if base:
+                return base.rstrip("/")
+        return None
 
     def _fallback_url(self) -> str:
         port = _FALLBACK_PORT.get(self.service_name, 38080)

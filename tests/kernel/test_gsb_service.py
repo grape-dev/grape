@@ -387,3 +387,27 @@ def test_internal_routes_use_local_provider_only():
         for banned in ("get_mgmt_service()", "get_runtime_service()", "get_insight_service()"):
             assert banned not in src, f"{domain} internal routes must not call {banned}"
         assert "get_local_service" in src
+
+
+def test_registry_key_namespace(monkeypatch):
+    """多机隔离：有 GRAPE_GSB_NAMESPACE 时注册键为 service@namespace。"""
+    from src.kernel.gsb.router import registry_key
+
+    monkeypatch.setenv("GRAPE_GSB_NAMESPACE", "node-b")
+    assert registry_key("mgmt") == "mgmt@node-b"
+    assert registry_key("mgmt", "node-a") == "mgmt@node-a"
+    monkeypatch.delenv("GRAPE_GSB_NAMESPACE", raising=False)
+    assert registry_key("mgmt") == "mgmt"
+
+
+def test_client_prefers_namespaced_registry_entry(monkeypatch):
+    """客户端优先用本机命名空间的行，取不到再退回裸服务名（跨机/旧注册）。"""
+    registry.register_service("runtime@node-b", "http://10.0.0.9:38083")
+    monkeypatch.setenv("GRAPE_GSB_NAMESPACE", "node-b")
+    client = GsbClient("runtime", caller_name="mgmt")
+    assert client._registry_url() == "http://10.0.0.9:38083"
+
+    monkeypatch.setenv("GRAPE_GSB_NAMESPACE", "node-a")
+    client2 = GsbClient("runtime", caller_name="mgmt")
+    # 本机命名空间没有行 → 退回裸服务名（此处也没有）→ None
+    assert client2._registry_url() is None

@@ -2668,6 +2668,7 @@ grape-admin（Spring Boot + Vue3）是最先需要接入的非 Python 服务：
 | 旧库升级 | `_ensure_table()` 对早期无 `version` 列的注册表补一次 `ADD COLUMN`（列已存在时忽略），避免旧库上注册被吞成无限重试 |
 | 重放安全 | 非幂等请求（POST/PUT/PATCH/DELETE）只在连接期错误（ConnectError/ConnectTimeout）时切换候选；读超时/协议错误直接抛出，防止 `update_issue_state`、`log_obs` 等写操作被重复执行 |
 | 状态收敛 | 心跳循环每 20 拍（≈10min）调用一次 `purge_stale()`，兜住 `kill -9` 后残留的 online 行 |
+| 多机隔离 | 可选 `GRAPE_GSB_NAMESPACE`：设置后注册键为 `<service>@<namespace>`（如 `mgmt@node-a`），避免两台机器写同一行互相覆盖；客户端优先查本机命名空间行，再回退裸服务名。未设置时保持旧行为 |
 
 实测（本机四进程重启后）：
 
