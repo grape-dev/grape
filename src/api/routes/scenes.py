@@ -1664,7 +1664,7 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
 
 
 
-@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
+@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging). Response contract: each skill item exposes (skill_id, scope, skill_name) which together form the unique selection key for frontend consumers — official/repo/user scoped skills may share the same skill_name, so skill_name alone MUST NOT be used as a selection/cache key.")
 def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
                           q: str = "", scope: str = "", repo: str = "",
                           page: int = Query(1, ge=1, description="页码，从 1 开始"),
@@ -1712,6 +1712,10 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
             params + [page_size, offset],
         )
         for r in c.fetchall():
+            # Issue #978 契约固化：skill 表 UNIQUE(skill_name, scope, owner_id) 允许
+            # official/repo/user 三档同名技能共存；本响应中 (skill_id, scope, skill_name)
+            # 共同构成前端选择的唯一键（skill_id 优先，缺失时回退 (scope, skill_name)）。
+            # 前端（dashboard.js 技能下拉）不得再用裸 skill_name 作选中/缓存 key。
             skills.append({"skill_id": r[0], "skill_name": r[1], "display_name": r[2] or r[1], "scope": r[3], "owner_id": r[4] or "", "description": r[5] or "", "agent_type": r[6] or ""})
     return {"skills": skills, "total": total}
 

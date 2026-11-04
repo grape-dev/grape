@@ -255,6 +255,7 @@
 
 | Path | `{agent_type}` |
 | 出参 | 技能数组 |
+| 说明 | Issue #978：每条技能含 `skill_id / skill_name / display_name / scope / owner_id`；**`(skill_id, scope, skill_name)` 共同构成前端选择的唯一键**——official/repo/user 三档允许同名技能共存（skill 表 `UNIQUE(skill_name, scope, owner_id)`），消费方不得用裸 `skill_name` 作选中/缓存 key（skill_id 优先，缺失时回退 `(scope, skill_name)`） |
 | 返回 | 200 |
 
 ---

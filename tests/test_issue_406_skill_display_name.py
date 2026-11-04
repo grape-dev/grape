@@ -37,10 +37,14 @@ class TestSelectAgentSkillWritesDisplayName:
     """selectAgentSkill 选中时同步写 node.skill_display_name。"""
 
     def test_select_writes_skill_display_name_from_cache(self, js_content):
-        """selectAgentSkill 实现应从 _skillPickCache 取 display_name 写入 node.skill_display_name。"""
-        # 两处实现（编辑 + 创建）均使用 cache[skillName] 模式
+        """selectAgentSkill 实现应从 _skillPickCache 取 display_name 写入 node.skill_display_name。
+
+        Issue #978：缓存结构改为 唯一键 -> {name, display}，选中优先按唯一键命中
+        entry，再按 name 兜底；断言两处实现均为 entry.display 模式。
+        """
+        # 两处实现（编辑 + 创建）均使用 (entry && entry.display) 模式
         matches = js_content.count(
-            "node.skill_display_name = skillName ? (cache[skillName] || skillName) : ''"
+            "node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : ''"
         )
         assert matches == 2, (
             f"selectAgentSkill 应有两处实现均写 node.skill_display_name，实际 {matches}"
@@ -62,7 +66,7 @@ class TestSelectAgentSkillWritesDisplayName:
         """selectAgentSkill 找不到 node 时应安全返回（if (!node) return;）。"""
         # 两处实现都有 `if (!node) return;` 守卫
         select_sections = []
-        for marker in ["window.selectAgentSkill = function(agentType, skillName)"]:
+        for marker in ["window.selectAgentSkill = function(agentType, skillName, skillKey)"]:
             start = js_content.find(marker)
             assert start >= 0, "selectAgentSkill 函数未找到"
             # 截取函数体（约 200 字符足够覆盖守卫）

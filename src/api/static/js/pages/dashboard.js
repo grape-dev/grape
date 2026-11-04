@@ -1294,6 +1294,17 @@ function _skillEsc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Issue #978：技能唯一键 —— 优先 skill_id，缺失时回退 (scope, skill_name) 复合键。
+// official/repo/user 三档允许同名技能共存（UNIQUE(skill_name, scope, owner_id)），
+// 裸 skill_name 不再作为选中/缓存 key，否则同名三行同时勾选、缓存互相覆盖。
+// 契约：GET /scenes/skills/{agent_type} 响应中 (skill_id, scope, skill_name) 共同构成前端选择的唯一键。
+function _skillKeyOf(s) {
+  if (!s) return '';
+  var id = (s.skill_id !== undefined && s.skill_id !== null && s.skill_id !== '') ? s.skill_id : s.id;
+  if (id !== undefined && id !== null && id !== '') return 'id:' + id;
+  return (s.scope || 'official') + ':' + (s.skill_name || '');
+}
+
 // 分组定义（顺序即展示顺序；user 组仅在有个人技能时渲染，原平铺列表含 user 技能，避免回归丢选项）
 window._SKILL_SCOPE_GROUPS = [
   { key: 'official', label: '官方技能' },
@@ -1324,7 +1335,7 @@ window._skillGroupByScope = function(skills) {
 };
 
 // 触发按钮 → 下拉面板（顶部搜索框 + 分组列表 + 空结果态）
-window._skillPickCache = {};  // agentType -> {skill_name: display_name}（保存后刷新显示名）
+window._skillPickCache = {};  // agentType -> {唯一键(skill_id 优先，回退 scope:skill_name): {name, display}}（保存后刷新显示名；Issue #978 不再用裸 skill_name 作 key）
 window._skillDropdownOutsideHandler = null;
 window._skillDropdownScrollHandler = null;
 
@@ -1348,8 +1359,10 @@ window._openSkillDropdown = function(agentType, btn) {
   var repoParam = '?page_size=100' + (repo ? '&repo=' + encodeURIComponent(repo) : '');
   API.get('/scenes/skills/' + agentType + repoParam).then(function(r) {
     var skills = r.skills || [];
+    // Issue #978：缓存以唯一键（skill_id 优先，回退 (scope, skill_name)）索引，
+    // 三档同名技能互不覆盖；value 同时携带 name/display 供回显与旧调用兜底。
     var cache = window._skillPickCache[agentType] = {};
-    skills.forEach(function(s) { cache[s.skill_name] = s.display_name || s.skill_name; });
+    skills.forEach(function(s) { cache[_skillKeyOf(s)] = { name: s.skill_name, display: s.display_name || s.skill_name }; });
 
     var rect = btn.getBoundingClientRect();
     var panel = document.createElement('div');
@@ -1360,6 +1373,10 @@ window._openSkillDropdown = function(agentType, btn) {
     panel.style.cssText = 'position:fixed;z-index:1001;width:' + Math.max(rect.width, 240) + 'px;left:' + rect.left + 'px;top:' + top + 'px;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.12);padding:8px;box-sizing:border-box';
 
     var current = btn.getAttribute('data-current') || '';
+    // Issue #978：current 为唯一键（用户本次会话选中）或旧值（初始渲染写入的裸 skill_name）。
+    // 同名计数：旧值仅在该名字全局唯一时才允许命中，避免同名三行同时勾选。
+    var _nameCount = {};
+    skills.forEach(function(s) { _nameCount[s.skill_name] = (_nameCount[s.skill_name] || 0) + 1; });
 
     function renderList(q) {
       var groups = window._skillGroupByScope(window._skillFilterByQuery(skills, q));
@@ -1371,8 +1388,10 @@ window._openSkillDropdown = function(agentType, btn) {
       return clearRow + groups.map(function(g) {
         return '<div style="margin:6px 4px 4px;font-size:10px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">' + _skillEsc(g.label) + ' (' + g.items.length + ')</div>' +
           g.items.map(function(s) {
-            var sel = s.skill_name === current;
-            return '<div class="ap-skill-opt" data-name="' + _skillEsc(s.skill_name) + '" data-display="' + _skillEsc(s.display_name || s.skill_name) + '" title="' + _skillEsc(s.description || '') + '" style="padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:#1d1d1f;display:flex;align-items:center;gap:6px;background:' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '" onmouseover="this.style.background=\'rgba(0,113,227,.06)\'" onmouseout="this.style.background=\'' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '\'">' +
+            // Issue #978：优先唯一键精确命中；旧裸 skill_name 值仅在名字唯一时回退命中，
+            // 同名多行（official/repo/user 三档）时不再同时勾选。
+            var sel = (_skillKeyOf(s) === current) || (!!current && current === s.skill_name && _nameCount[s.skill_name] === 1);
+            return '<div class="ap-skill-opt" data-name="' + _skillEsc(s.skill_name) + '" data-key="' + _skillEsc(_skillKeyOf(s)) + '" data-display="' + _skillEsc(s.display_name || s.skill_name) + '" title="' + _skillEsc(s.description || '') + '" style="padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:#1d1d1f;display:flex;align-items:center;gap:6px;background:' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '" onmouseover="this.style.background=\'rgba(0,113,227,.06)\'" onmouseout="this.style.background=\'' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '\'">' +
               (sel ? '<span style="color:#0071e3;font-weight:700;flex-shrink:0">✓</span>' : '') +
               '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _skillEsc(s.display_name || s.skill_name) + '</span>' +
               '</div>';
@@ -1397,10 +1416,12 @@ window._openSkillDropdown = function(agentType, btn) {
       var opt = e.target && e.target.closest ? e.target.closest('.ap-skill-opt') : null;
       if (!opt) return;
       e.stopPropagation();
-      if (typeof window.selectAgentSkill === 'function') window.selectAgentSkill(agentType, opt.getAttribute('data-name'));
+      // Issue #978：选中回写唯一键到 data-current（重开下拉按 skill_id 精确回显，同名其他档不再勾选）
+      if (typeof window.selectAgentSkill === 'function') window.selectAgentSkill(agentType, opt.getAttribute('data-name'), opt.getAttribute('data-key'));
       var disp = opt.getAttribute('data-display') || '';
       var nm = opt.getAttribute('data-name') || '';
-      btn.setAttribute('data-current', nm);
+      var key = opt.getAttribute('data-key') || '';
+      btn.setAttribute('data-current', key || nm);
       btn.textContent = disp || nm || I18N.t('dashboard.select_skill');
       btn.style.color = (disp || nm) ? '#1d1d1f' : '#86868b';
       window._closeSkillDropdown();
@@ -1558,15 +1579,24 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     _saveEditDraft();
   };
 
-  window.selectAgentSkill = function(agentType, skillName) {
+  window.selectAgentSkill = function(agentType, skillName, skillKey) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     // Issue #406：选中时同步写 skill_display_name（取自 _openSkillDropdown 缓存的 display_name），
     // 避免禁用其他角色触发 _renderEditFlowCards 重渲染时显示退化为内部 id（如 vod-cli）。
     // skillName 为空（清除选择）时同步清空 skill_display_name，保持字段一致。
+    // Issue #978：优先按唯一键（skill_id 优先，回退 (scope, skill_name)）命中缓存条目，
+    // 同名三档技能 display_name 互不覆盖；无 key 时按 name 兜底（单同名场景行为不变）。
     node.skill = skillName || '';
     var cache = (window._skillPickCache || {})[agentType] || {};
-    node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+    var entry = skillKey ? cache[skillKey] : null;
+    if (!entry && skillName) {
+      Object.keys(cache).some(function(k) {
+        if (cache[k] && cache[k].name === skillName) { entry = cache[k]; return true; }
+        return false;
+      });
+    }
+    node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
     _saveEditDraft();
   };
 
@@ -1605,10 +1635,13 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
         const newNodes = (sc && sc.pipeline && sc.pipeline.nodes) || [];
         // 从编辑模式的技能下拉数据构建 skill_name → display_name 映射
         // Issue #292：下拉改为分组面板后 option 不再存在，优先用 _skillPickCache 展平，残留 option 兜底
+        // Issue #978：缓存已改为唯一键 → {name, display} 结构；按 name 展平映射
+        //（pipeline 仅持久化 skill_name，三档同名时取最后一次写入的 display，无法进一步区分）
         const skillDisplayMap = {};
         Object.keys(window._skillPickCache || {}).forEach(function(at) {
-          Object.keys(window._skillPickCache[at] || {}).forEach(function(sn) {
-            skillDisplayMap[sn] = window._skillPickCache[at][sn];
+          var _c = window._skillPickCache[at] || {};
+          Object.keys(_c).forEach(function(k) {
+            if (_c[k] && _c[k].name) skillDisplayMap[_c[k].name] = _c[k].display;
           });
         });
         document.querySelectorAll('.ap-skill-select option, select[onchange*="selectAgentSkill"] option').forEach(opt => {
@@ -2194,15 +2227,24 @@ function _enterCreateStandardMode(data, owner, name) {
     _saveCreateDraft();
   };
 
-  window.selectAgentSkill = function(agentType, skillName) {
+  window.selectAgentSkill = function(agentType, skillName, skillKey) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     // Issue #406：选中时同步写 skill_display_name（取自 _openSkillDropdown 缓存的 display_name），
     // 避免禁用其他角色触发 _renderEditFlowCards 重渲染时显示退化为内部 id（如 vod-cli）。
     // skillName 为空（清除选择）时同步清空 skill_display_name，保持字段一致。
+    // Issue #978：优先按唯一键（skill_id 优先，回退 (scope, skill_name)）命中缓存条目，
+    // 同名三档技能 display_name 互不覆盖；无 key 时按 name 兜底（单同名场景行为不变）。
     node.skill = skillName || '';
     var cache = (window._skillPickCache || {})[agentType] || {};
-    node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+    var entry = skillKey ? cache[skillKey] : null;
+    if (!entry && skillName) {
+      Object.keys(cache).some(function(k) {
+        if (cache[k] && cache[k].name === skillName) { entry = cache[k]; return true; }
+        return false;
+      });
+    }
+    node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
     _saveCreateDraft();
   };
 
