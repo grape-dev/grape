@@ -144,6 +144,37 @@ class TestBuildSkillDisplayMap:
         m = build_skill_display_map(repo_key=REPO_KEY, user_id=UID)
         assert m[SN] == "官方-显示名"
 
+    def test_map_drops_prio0_rows_zero_regression(self, clean_skills):
+        """无 official 档、仅他人 user/他仓 repo 行 → 映射不含该键，
+        名称回退 skill_name 本身（与旧 official-only 行为逐字一致，零回归）。"""
+        from src.api.skill_display import build_skill_display_map, resolve_node_skill_display
+        only_others = "i980-others-only"
+        _seed_skill(only_others, "别人的个人技能", "user", "other-user")
+        _seed_skill(only_others, "别的仓库技能", "repo", "gitcode:other/repo")
+        m = build_skill_display_map(repo_key=REPO_KEY, user_id=UID)
+        assert only_others not in m
+        # 节点分支（无 skill_id）→ map.get 缺省回退 skill_name 本身
+        assert resolve_node_skill_display(
+            only_others, 0, m, repo_key=REPO_KEY, user_id=UID) == only_others
+
+    def test_resolve_node_skill_display_shared_branch(self, three_scope_same_name):
+        """共用节点分支：skill_id 精确解析 / 无 skill_id 走批量映射。"""
+        from src.api.skill_display import build_skill_display_map, resolve_node_skill_display
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user'", (SN,))
+            uid_row_id = c.fetchone()[0]
+        m = build_skill_display_map(repo_key=REPO_KEY, user_id=UID)
+        # skill_id 精确命中（即使映射里也是 user 档，验证走的是 resolve 路径）
+        assert resolve_node_skill_display(
+            SN, uid_row_id, m, repo_key=REPO_KEY, user_id=UID) == "个人-显示名"
+        # 无 skill_id → 映射
+        assert resolve_node_skill_display(
+            SN, 0, m, repo_key=REPO_KEY, user_id=UID) == "个人-显示名"
+        # 空名 → 空串
+        assert resolve_node_skill_display("", 0, m) == ""
+
 
 class TestScenesRouteUsesSharedResolver:
     """/scenes/with-pipeline 节点 skill_display_name 按实际档位显示。"""

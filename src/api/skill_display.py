@@ -16,7 +16,11 @@
   批量版：一次查询全部 active 技能，按上述优先级为每个 skill_name 选定
   display_name，供列表类接口按名批量 enrich（避免 N+1）。
 """
+import logging
+
 from src.session_manager import db, db_lock
+
+logger = logging.getLogger(__name__)
 
 
 def _norm_user_id(user_id) -> str:
@@ -41,8 +45,6 @@ def resolve_skill_display_name(skill_name: str, skill_id: int = 0,
     if not skill_name:
         return ""
     uid = _norm_user_id(user_id)
-    if scope and not owner_id:
-        owner_id = ""
     try:
         with db_lock:
             c = db.cursor()
@@ -89,8 +91,8 @@ def resolve_skill_display_name(skill_name: str, skill_id: int = 0,
             row = c.fetchone()
             if row:
                 return _pick_display(row[0], skill_name)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("resolve_skill_display_name failed for %r, fallback to skill_name: %s", skill_name, exc)
     return skill_name
 
 
@@ -99,7 +101,9 @@ def build_skill_display_map(repo_key: str = "", user_id=None) -> dict:
 
     单次查询全部 active 技能，Python 侧按 user(匹配 user_id) > repo(匹配 repo_key)
     > official 的优先级为每个 skill_name 选定显示名；display_name 为空回退
-    skill_name。DB 异常时返回空 dict（调用方按旧语义回退 skill_name）。
+    skill_name。他人 user 档/他仓 repo 档（prio=0）不写入映射，无 official 档的
+    skill_name 缺省回退 skill_name 本身（与旧 official-only 行为一致，零回归）。
+    DB 异常时返回空 dict（调用方按旧语义回退 skill_name）。
     """
     uid = _norm_user_id(user_id)
     skill_map: dict = {}
@@ -113,6 +117,9 @@ def build_skill_display_map(repo_key: str = "", user_id=None) -> dict:
     except Exception:
         return {}
     # 优先级打分：3=user(本上下文) 2=repo(本上下文) 1=official 0=不相关档
+    # prio=0（他人 user 档/他仓 repo 档）不写入映射：否则无 official 档的
+    # skill_name 会被显示成他人档位的 display_name，破坏零回归（旧
+    # official-only 映射下该名称回退显示 skill_name 本身）。
     best: dict = {}
     for skill_name, display_name, scope, owner_id in rows:
         if scope == "user" and uid and owner_id == uid:
@@ -122,7 +129,22 @@ def build_skill_display_map(repo_key: str = "", user_id=None) -> dict:
         elif scope == "official":
             prio = 1
         else:
-            prio = 0
+            continue
         if skill_name not in best or prio > best[skill_name][0]:
             best[skill_name] = (prio, _pick_display(display_name, skill_name))
     return {name: val[1] for name, val in best.items()}
+
+
+def resolve_node_skill_display(skill_name: str, skill_id, display_map: dict,
+                               repo_key: str = "", user_id=None) -> str:
+    """节点级共用分支：有 skill_id 走精确解析，否则查批量映射兜底（Issue #980）。
+
+    scenes / dashboard 两路由的 `_sid → resolve : map.get` 分支统一收敛到这里，
+    避免两处重复同一优先级逻辑。
+    """
+    if not skill_name:
+        return ""
+    if skill_id:
+        return resolve_skill_display_name(
+            skill_name, skill_id=int(skill_id), repo_key=repo_key, user_id=user_id)
+    return display_map.get(skill_name, skill_name)
