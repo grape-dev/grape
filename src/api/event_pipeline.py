@@ -3672,7 +3672,8 @@ def get_prompt_context(repo_key: str) -> str:
 
 
 def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_name: str,
-                                evt: dict, issue_id: str, prompt: str) -> str:
+                                evt: dict, issue_id: str, prompt: str,
+                                engine_name: str = "") -> str:
     """组件4：direct 端统一物化 project-info / skill / knowledge 到工位 ws 下。
 
     替代旧的「占位符替换为服务端绝对路径（仓库级 project-info 原件 / 全局 SKILLS_DIR）」，
@@ -3809,11 +3810,24 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
         # 拒绝派发引擎）+ 来源标注（agent_logs）。绑定未物化且本地缓存存在其它技能 →
         # ok=False（缓存不得覆盖绑定，拒绝执行）。键为 SKILL_CONSISTENCY_KEY 契约常量
         # （scheduler direct 端同键消费，物化后判定，口径一致）。
+        # Issue #887（QA 复审修复）：direct 端同样扫描引擎原生技能目录
+        # （engine_skill_dirs，按 engine_name 推导后端），与 worker 门
+        # （agent._skill_consistency_gate）扫描口径对齐——绑定未物化、工位 .skills
+        # 为空、残留落在引擎原生缓存（seq=46108 变体）时不再静默放行。
+        # scheduler direct 端消费同一 evt 判定，一并覆盖。
+        _extra_dirs: list[str] = []
+        try:
+            from src.runtime.agent import _backend_for_engine
+            from src.runtime.os_adapter import engine_skill_dirs as _esd
+            _extra_dirs = _esd(_backend_for_engine(engine_name))
+        except Exception as _ede:
+            log.warning(f"direct skill consistency: engine skill dirs resolve "
+                        f"failed for engine '{engine_name}': {_ede}")
         try:
             from src.runtime.skill_materialize import (verify_skill_execution_consistency,
                                                         SKILL_CONSISTENCY_KEY)
             evt[SKILL_CONSISTENCY_KEY] = verify_skill_execution_consistency(
-                skill_name or "", skill_dir)
+                skill_name or "", skill_dir, extra_scan_dirs=_extra_dirs)
         except Exception as _sc_e:
             log.warning(f"direct skill consistency verify failed: {_sc_e}")
     except Exception as e:

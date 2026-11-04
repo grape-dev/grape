@@ -424,6 +424,55 @@ def test_direct_materialize_local_cache_leftover_refused(tmp_path, monkeypatch):
     assert sv.get("source") == "local_cache"
 
 
+def test_direct_materialize_engine_native_leftover_refused(tmp_path, monkeypatch):
+    # QA 复审修复：seq=46108 原生缓存变体——绑定未物化 + 工位 .skills 空 +
+    # casegen-prep 残留引擎原生缓存 → direct 端判定必须 ok=False（不再静默放行），
+    # 与 worker 门（_skill_consistency_gate）扫描口径一致。
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    skill_dir = str(tmp_path / ".skills")
+    native = str(tmp_path / "native")
+    os.makedirs(skill_dir, exist_ok=True)
+    _mk_skill(native, "casegen-prep")
+    import src.runtime.os_adapter as osa
+    monkeypatch.setattr(osa, "engine_skill_dirs", lambda name: [native])
+    # 物化降级会写 FALLBACK.md（#607 权威取回优先于原生缓存判定放行）——
+    # 本用例聚焦「无 FALLBACK 指引时的原生缓存残留拒绝」，屏蔽降级文件写入。
+    monkeypatch.setattr(sm, "write_skill_fallback", lambda *a, **k: None)
+    from src.api.event_pipeline import _materialize_direct_workdir
+    evt = {"_skill_id": 0, "_skill_path": ""}
+    _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
+                                "caserun-prep", evt, "", "prompt",
+                                engine_name="opencode-server-1")
+    sv = evt.get(sm.SKILL_CONSISTENCY_KEY) or {}
+    assert sv.get("ok") is False
+    assert sv.get("actual") == "casegen-prep"
+    assert sv.get("source") == "engine_native"
+
+
+def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypatch):
+    # 绑定技能存在于引擎原生缓存（内容一致的本地副本）→ 放行并显式标注
+    # source=engine_native、actual=bound（不因原生目录存在而误拒）。
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    skill_dir = str(tmp_path / ".skills")
+    native = str(tmp_path / "native")
+    os.makedirs(skill_dir, exist_ok=True)
+    _mk_skill(native, "caserun-prep")
+    import src.runtime.os_adapter as osa
+    monkeypatch.setattr(osa, "engine_skill_dirs", lambda name: [native])
+    monkeypatch.setattr(sm, "write_skill_fallback", lambda *a, **k: None)
+    from src.api.event_pipeline import _materialize_direct_workdir
+    evt = {"_skill_id": 0, "_skill_path": ""}
+    _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
+                                "caserun-prep", evt, "", "prompt",
+                                engine_name="hermes-node-2")
+    sv = evt.get(sm.SKILL_CONSISTENCY_KEY) or {}
+    assert sv.get("ok") is True
+    assert sv.get("source") == "engine_native"
+    assert sv.get("actual") == "caserun-prep"
+
+
 # ── 6. 派发 payload 携带绑定 skill（env GRAPE_BOUND_SKILL） ─────────
 
 def test_enqueue_task_carries_bound_skill_env():

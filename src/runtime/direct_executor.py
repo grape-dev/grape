@@ -218,7 +218,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # （替代旧的「占位符替换为服务端绝对路径：仓库级 project-info 原件 / 全局 SKILLS_DIR」），
         # 使 direct 端与 worker 端 cwd 布局一致，后续 bwrap 锁只需挂 ws。
         prompt = _materialize_direct_workdir(
-            ws, repo_key, agent_type, skill_name, evt, issue_id, prompt
+            ws, repo_key, agent_type, skill_name, evt, issue_id, prompt,
+            engine_name=inst_name or backend or ""
         )
         # Issue #887：direct 端执行前一致性硬校验——绑定 skill 未物化而工位本地缓存
         # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。

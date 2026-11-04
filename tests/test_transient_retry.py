@@ -287,7 +287,7 @@ def _run_direct(repo_key: str, tid: str, seq: int, events, agent_type: str = "is
     with patch("src.runtime.executor.stream_devops_agent", _fake_stream(events)), \
          patch("src.observability.master_usage.for_task", _FakeUsage), \
          patch.object(event_pipeline, "_materialize_direct_workdir",
-                      side_effect=lambda ws, rk, at, sk, e, iid, p: p), \
+                      side_effect=lambda ws, rk, at, sk, e, iid, p, engine_name="": p), \
          patch.object(event_pipeline, "_cleanup_direct_workdir", lambda *a, **k: None):
         event_pipeline._execute_agent_inner(
             repo_key, seq, agent_type, "opencode", "issue", evt, runtime_id=0, task_id=tid)

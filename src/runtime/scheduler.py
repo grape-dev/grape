@@ -293,7 +293,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     #    glob 搜到 /home/{user} 副本自救，不可依赖。
     evt = {"repo_key": repo_key, "issue_id": "", "payload": {}}
     if _is_direct:
-        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "", prompt)
+        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "",
+                                             prompt, engine_name=inst_name or backend or "")
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
