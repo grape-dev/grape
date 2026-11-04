@@ -145,8 +145,8 @@ test -n "$REPO_FULL_NAME" && test -n "$REPO_OWNER" && test -n "$REPO_NAME" || ec
 `BOT_USERNAME`（#584，`_resolve_bot_username`）、`PR_NUMBER`（#595，`_inject_issue_pr_env`）、
 `REPO_FULL_NAME`（#721，`from_repo_key` 归一）均已纳入注入侧统一口径与保留名清单
 （`src/scene_custom_env.py` `_RESERVED_ENV_NAMES`，场景自定义变量不可覆盖）；
-测试见 `tests/test_issue_573_bot_agent_env_injection.py`、`tests/test_issue_528_pr_sub_env_injection.py`、
-`tests/test_issue_721_repo_full_name_env.py`。
+测试见 `tests/runtime/test_issue_573_bot_agent_env_injection.py`、`tests/runtime/test_issue_528_pr_sub_env_injection.py`、
+`tests/runtime/test_issue_721_repo_full_name_env.py`。
 
 ### 五.3 技能如何使用自定义场景变量
 

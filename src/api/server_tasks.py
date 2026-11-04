@@ -494,7 +494,7 @@ async def stop_worker_tasks(app, h: dict) -> None:
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
     # 避免 uvicorn 优雅停机等待超时被 systemd SIGKILL（grape-main timeout 重启根因，2026-08-18）
     try:
-        from src.domains.runtime.agents.executor import terminate_active_agents
+        from src.domains.runtime.engine.executor import terminate_active_agents
         terminate_active_agents(grace_seconds=5)
     except Exception as e:
         log.warning(f"terminate_active_agents failed: {e}")

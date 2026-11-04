@@ -190,7 +190,7 @@ def _probe_loop():
         with _probe_lock:
             _probing = True
         try:
-            from src.domains.runtime.agents.executor import discover_backends
+            from src.domains.runtime.engine.executor import discover_backends
             engines = discover_backends()
             for eng in engines:
                 if not eng.get("installed"):
@@ -235,7 +235,7 @@ def get_probe_results() -> dict:
 
 def probe_now(engine_name: str = "") -> dict:
     """手动触发一次探测（可选：只探测指定引擎）。"""
-    from src.domains.runtime.agents.executor import discover_backends
+    from src.domains.runtime.engine.executor import discover_backends
     engines = discover_backends()
     for eng in engines:
         if engine_name and eng["name"] != engine_name:
@@ -258,7 +258,7 @@ def probe_all_now():
     with _probe_lock:
         _probing = True
     try:
-        from src.domains.runtime.agents.executor import discover_backends
+        from src.domains.runtime.engine.executor import discover_backends
         engines = discover_backends()
         for eng in engines:
             if not eng.get("installed"):

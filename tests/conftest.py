@@ -8,6 +8,9 @@ import sys
 # Ensure src/ is in path（唯一权威路径引导；pytest.ini pythonpath=src 兜底）
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
+# 测试目录自身入 path：tests/ 被按 domain 分目录后，共享 helper（mock_db 等）
+# 仍以裸模块名 import；pytest prepend 模式只加用例所在子目录。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 测试库隔离：所有本地测试使用独立测试库，绝不触碰生产库 data/sessions.db
 os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_sessions.db")
@@ -72,3 +75,30 @@ def _reset_db_path():
     _test_db = os.path.join(ROOT, "data", "test_sessions.db")
     os.environ["DEVOPS_DB_PATH"] = _test_db
     yield
+
+@pytest.fixture(autouse=True)
+def _isolate_src_modules_and_env():
+    """逐用例隔离 sys.modules 中的 src.* 与数据库环境变量。
+
+    背景：部分用例直接改写 sys.modules["src"] / 注入 stub 模块（如 autopilot 通知、
+    ACP 探测），或把 DEVOPS_DB_PATH 指向临时库；旧布局（tests 平铺）靠执行顺序侥幸通过。
+    tests/ 按 domain 分目录后收集顺序变化，污染会外溢成后续用例的
+    "No module named 'src.domains...'" / sqlite unable to open 采集错误。
+    这里在每个用例前后快照并恢复，保证用例间互不影响。
+    """
+    import sys as _sys
+
+    keys = ("DEVOPS_DB_PATH", "DEVOPS_DB_BACKEND")
+    saved_mods = {k: v for k, v in list(_sys.modules.items())
+                  if k == "src" or k.startswith("src.")}
+    saved_env = {k: os.environ.get(k) for k in keys}
+    yield
+    for k in [k for k in list(_sys.modules) if k == "src" or k.startswith("src.")]:
+        if k not in saved_mods:
+            _sys.modules.pop(k, None)
+    _sys.modules.update(saved_mods)
+    for k, v in saved_env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v

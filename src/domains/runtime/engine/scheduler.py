@@ -362,7 +362,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     _mu.start()
 
     try:
-        from src.domains.runtime.agents.executor import stream_devops_agent
+        from src.domains.runtime.engine.executor import stream_devops_agent
         for evt_type, data in stream_devops_agent(
             prompt, ws, session_id="",
             event_type="autopilot_event",

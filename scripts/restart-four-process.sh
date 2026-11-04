@@ -11,7 +11,16 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit 1
+
+# 已切换为 systemd 托管（grape@.service）时禁止用本脚本：本脚本会杀掉 systemd 的子进程，
+# 而单元重启策略 Restart=always 会把它们再拉起来 → 端口冲突/双实例。改用：
+#   su -c "systemctl restart grape@mgmt grape@event grape@worker grape@insight" root
+if [ "$(systemctl is-enabled grape@mgmt.service 2>/dev/null)" = "enabled" ]; then
+    echo "[restart] 检测到 systemd 单元 grape@*.service（已 enable），本脚本不再适用。" >&2
+    echo "[restart] 请改用: su -c \"systemctl restart grape@mgmt grape@event grape@worker grape@insight\" root" >&2
+    exit 3
+fi
 
 PY="$REPO_ROOT/venv/bin/python"
 LOG_PREFIX="/tmp/grape"
@@ -70,7 +79,7 @@ _health_path_for() {
     esac
 }
 ok=0
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     up=0
     for port in 38081 38082 38083 38084; do
         curl -s -m 2 "http://127.0.0.1:$port$(_health_path_for "$port")" >/dev/null 2>&1 && up=$((up+1))

@@ -1329,7 +1329,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
     """
     from src.domains.mgmt.user.db import get_server_base_url
-    from src.domains.runtime.agents.executor import discover_backends
+    from src.domains.runtime.engine.executor import discover_backends
     from src.kernel.repo_key import from_repo_key
 
     base = (get_server_base_url() or "").rstrip("/")

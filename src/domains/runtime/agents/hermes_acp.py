@@ -250,14 +250,14 @@ class HermesACPBackend:
 
         # 注册到全局进程表（供 shutdown 时终止）—— 延迟导入避免循环引用
         try:
-            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.engine.executor import _track_proc, _untrack_proc, _terminate_proc
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
             _terminate_proc = lambda p, l: None
 
         # issue #416：stderr 尾采环形缓冲（崩溃栈在末尾，仅保留末尾 ≥2000 字节）
         try:
-            from src.domains.runtime.agents.executor import _StderrTailBuffer, _stderr_tail_bytes_for
+            from src.domains.runtime.engine.executor import _StderrTailBuffer, _stderr_tail_bytes_for
         except ImportError:
             _StderrTailBuffer = None  # type: ignore[assignment]
             _stderr_tail_bytes_for = None  # type: ignore[assignment]

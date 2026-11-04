@@ -36,6 +36,12 @@ install-worker: ## Install worker-only dependencies
 test: ## Run pytest test suite
 	$(PYTHON) -m pytest tests/ -v
 
+test-domains: ## Run tests per domain in isolated processes (stable order; see tests/README.md)
+	@set -e; for d in arch atomic contracts kernel insight api mgmt runtime; do \
+		echo "== tests/$$d =="; \
+		$(PYTHON) -m pytest tests/$$d -q || exit 1; \
+	done
+
 test-fast: ## Run pytest (fast: skip slow/e2e markers)
 	$(PYTHON) -m pytest tests/ -v -m "not e2e_ui and not atomic"
 

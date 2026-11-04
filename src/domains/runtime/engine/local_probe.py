@@ -44,7 +44,7 @@ def probe_local_engines(engines: list | None = None) -> list[dict]:
     线程池并发 + 单引擎 5s 超时 + 总时长 ≤ LOCAL_PROBE_MAX_TOTAL（超时未完成引擎置 healthy=False）。
     """
     if engines is None:
-        from src.domains.runtime.agents.executor import discover_backends
+        from src.domains.runtime.engine.executor import discover_backends
         engines = discover_backends()
     engines = [
         {**e, "probe_args": ["acp", "--check"]}

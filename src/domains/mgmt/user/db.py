@@ -3820,13 +3820,13 @@ def is_known_engine_name(name: str) -> bool:
     if name in _KNOWN:
         return True
     try:
-        from src.domains.runtime.agents.executor import discover_backends
+        from src.domains.runtime.engine.executor import discover_backends
         if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):
             return True
     except Exception:
         pass
     try:
-        from src.domains.runtime.agents.executor import _BACKENDS
+        from src.domains.runtime.engine.executor import _BACKENDS
         if name in _BACKENDS:
             return True
     except Exception:
@@ -3837,7 +3837,7 @@ def is_known_engine_name(name: str) -> bool:
 def _local_engine_info(name: str) -> tuple[bool, str]:
     """按引擎类型名返回本机是否已安装 + cli_path（discover_backends 真实探测，见 engine-selection §7.3）。"""
     try:
-        from src.domains.runtime.agents.executor import discover_backends
+        from src.domains.runtime.engine.executor import discover_backends
         for b in discover_backends():
             if (b.get("name") or "").strip().lower() == (name or "").strip().lower():
                 return bool(b.get("installed")), (b.get("cli_path") or "")

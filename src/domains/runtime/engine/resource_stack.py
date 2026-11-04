@@ -46,7 +46,7 @@ class TaskResourceStack:
         """Register a subprocess for tracking + termination on dispose."""
         self._procs.append(proc)
         try:
-            from src.domains.runtime.agents.executor import _track_proc
+            from src.domains.runtime.engine.executor import _track_proc
             _track_proc(proc)
         except Exception:
             pass
@@ -56,7 +56,7 @@ class TaskResourceStack:
         if proc in self._procs:
             self._procs.remove(proc)
         try:
-            from src.domains.runtime.agents.executor import _untrack_proc
+            from src.domains.runtime.engine.executor import _untrack_proc
             _untrack_proc(proc)
         except Exception:
             pass
@@ -84,7 +84,7 @@ class TaskResourceStack:
             for proc in self._procs:
                 self._kill_proc(proc)
                 try:
-                    from src.domains.runtime.agents.executor import _untrack_proc
+                    from src.domains.runtime.engine.executor import _untrack_proc
                     _untrack_proc(proc)
                 except Exception:
                     pass

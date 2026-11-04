@@ -271,7 +271,7 @@ class HwcloudACPBackend:
 
         # 注册到全局进程表（供 shutdown 时终止）—— 延迟导入避免循环引用
         try:
-            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.engine.executor import _track_proc, _untrack_proc, _terminate_proc
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
             _terminate_proc = lambda p, l: None
