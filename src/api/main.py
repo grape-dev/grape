@@ -15,6 +15,7 @@ from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, s
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 from src.domains.insight.routes import dashboard, search, health, latency, observability
 from src.api.routes import knowledge
+from src.api.routes import patrol
 
 
 bot_manager = None

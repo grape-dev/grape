@@ -95,6 +95,15 @@ def build_app(
 
     _attach_request_log(app)
 
+    # 可选 tracing：GRAPE_OTLP_ENDPOINT 启用后，FastAPI/requests 自动埋点，
+    # span 经 Alloy:4317 转发到 Tempo（未启用时零开销）
+    try:
+        from src.domains.insight.observability.tracing import setup_tracing, instrument_fastapi_app
+        setup_tracing(service_default=f"grape-{title.lower().split(' ')[0]}")
+        instrument_fastapi_app(app)
+    except Exception as e:
+        log.warning(f"tracing setup skipped: {e}")
+
     @app.get("/api/ping", include_in_schema=False)
     async def api_ping():
         """前端会话保活 / Failed to fetch 恢复预检的轻量探针（无鉴权、不查 DB、浏览器可达）。"""

@@ -69,9 +69,17 @@ def _mk_task(tid, repo_key, status, created, started=None, completed=None):
 
 
 def _mk_usage(tid, repo_key, created, tokens=100, local_fmt=True):
-    """插一条用量行；local_fmt=True 用本地时间串（与 DDL 默认一致）。"""
+    """插一条用量行；local_fmt=True 用本地时间串（与 DDL 默认一致）。
+
+    DDL 默认值在 sqlite 是 `datetime('now')`（UTC 串）、在 MySQL 是 `NOW()`（DB 本地 CST 串）。
+    为与 normalize_event_time 的 backend 语义对称：sqlite 下"本地串"即 UTC 串。
+    """
     from src.kernel.session_manager import db, db_lock
-    ts = _local(created) if local_fmt else _iso(created)
+    from src.api.time_utils import _db_backend
+    if _db_backend() != "mysql":
+        ts = _iso(created)
+    else:
+        ts = _local(created) if local_fmt else _iso(created)
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO obs_llm_usage (dedup_key, task_id, seq, turn, source, repo_key,"

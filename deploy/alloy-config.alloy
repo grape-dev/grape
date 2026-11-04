@@ -1,0 +1,87 @@
+// Grape Alloy 配置 — 日志 + 指标 + 调用链统一采集
+// LGTM 容器在 192.168.0.2 上
+// Loki:3100, Prometheus:9090, Tempo:3200, OTLP:4317/4318
+// 本机 IP 由环境变量 HOST_IP 注入
+//
+// 端口规划（见 scripts/restart-four-process.sh）：
+//   Mgmt    38081 / metrics 39081
+//   Event   38082 / metrics 39082
+//   Worker  38083 / metrics 39083
+//   Insight 38084 / metrics 39084
+//   metrics 端口绑定 127.0.0.1，仅本机 Alloy 可达
+
+// ============ 日志采集 → Loki ============
+// local.file_match 负责通配符展开（loki.source.file 的 targets 不支持 glob）
+local.file_match "grape_logs" {
+  path_targets = [
+    {__path__ = "/tmp/grape-mgmt.log",    job = "grape-mgmt",    host = sys.env("HOST_IP")},
+    {__path__ = "/tmp/grape-event.log",   job = "grape-event",   host = sys.env("HOST_IP")},
+    {__path__ = "/tmp/grape-worker.log",  job = "grape-worker",  host = sys.env("HOST_IP")},
+    {__path__ = "/tmp/grape-insight.log", job = "grape-insight", host = sys.env("HOST_IP")},
+    {__path__ = "/var/log/nginx/access.log", job = "nginx-access", host = sys.env("HOST_IP")},
+    {__path__ = "/var/log/nginx/error.log",  job = "nginx-error",  host = sys.env("HOST_IP")},
+  ]
+}
+
+loki.source.file "grape_logs" {
+  targets    = local.file_match.grape_logs.targets
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://192.168.0.2:3100/loki/api/v1/push"
+  }
+}
+
+// ============ 指标采集 → Prometheus ============
+prometheus.scrape "node" {
+  targets = [
+    {"__address__" = "127.0.0.1:9100", "instance" = sys.env("HOST_IP")},
+    // 兄弟节点：192.168.0.2（node exporter 已在该机运行）
+    {"__address__" = "192.168.0.2:9100", "instance" = "192.168.0.2"},
+  ]
+  forward_to = [prometheus.remote_write.default.receiver]
+  scrape_interval = "15s"
+}
+
+// Grape 四进程独立 metrics 端口（METRICS_ADDR，绑 127.0.0.1）
+prometheus.scrape "grape" {
+  targets = [
+    {"__address__" = "127.0.0.1:39081", "instance" = sys.env("HOST_IP"), "process" = "mgmt"},
+    {"__address__" = "127.0.0.1:39082", "instance" = sys.env("HOST_IP"), "process" = "event"},
+    {"__address__" = "127.0.0.1:39083", "instance" = sys.env("HOST_IP"), "process" = "worker"},
+    {"__address__" = "127.0.0.1:39084", "instance" = sys.env("HOST_IP"), "process" = "insight"},
+  ]
+  forward_to = [prometheus.remote_write.default.receiver]
+  scrape_interval = "15s"
+  metrics_path = "/metrics"
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "http://192.168.0.2:9090/api/v1/write"
+  }
+}
+
+// ============ 调用链转发 → Tempo ============
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "192.168.0.2:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
