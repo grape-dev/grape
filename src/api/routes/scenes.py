@@ -1745,11 +1745,31 @@ class ApplySceneRequest(BaseModel):
     strict: bool = False  # Issue #524: true=任一节点 skipped（声明引擎不健康）时整单拒绝；默认部分应用
 
 
+def _validate_scene_node_roles(nodes: list):
+    """Issue #955：场景节点 id（角色名）枚举校验。
+
+    节点 id 必须属于已知 Agent 角色全集（engine_select._KNOWN_AGENT_ROLES ∪ {"chat"}），
+    非法值 → 400（报错含非法值与合法全集），防止非标准角色名落库导致派发
+    引擎绑定静默失效（读侧按 id 优先匹配）。tag 保留为展示用阶段名（可为
+    中文等任意展示值），不参与角色匹配，存量场景不受影响。
+    """
+    from src.runtime.engine_select import _KNOWN_AGENT_ROLES
+    _roles = set(_KNOWN_AGENT_ROLES) | {"chat"}
+    for node in nodes:
+        _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
+        if _id and _id not in _roles:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"节点角色非法：'{_id}'（节点 id 必须为角色名），"
+                           f"合法角色：{', '.join(sorted(_roles))}"})
+
+
 def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """校验场景 nodes 的 engine_runtime_ids：
     1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
-    3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
+    3. 引擎必须有对应节点角色（Issue #955：按节点 id/角色名匹配，不再支持
+       tag='all' 通配与展示 tag 匹配）的能力标签（engine_capabilities.tag）
     4. SRE 节点：引擎必须为个人级或仓库级（scope=user 且 owner_id==当前用户，或
        scope=repo 且归属当前仓库——repo 归属由下方通用校验覆盖）
        （sre-repo-worker-relax §1.2，取代 sre-personal-machine §3.7 Q2/Q3）
@@ -1761,7 +1781,8 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     from src.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
-        tag = node.get("tag") or node.get("id") or ""
+        # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
+        tag = node.get("id") or node.get("tag") or ""
         eids = node.get("engine_runtime_ids") or []
         if not tag:
             continue
@@ -1808,12 +1829,12 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                     raise HTTPException(status_code=400, detail={
                         "code": 400,
                         "message": f"节点 {tag} 的引擎 {_eid} 属于仓库 {_owner_norm}，不是当前仓库 {_repo_norm}"})
-            # 校验 tag 能力
+            # 校验角色能力（Issue #955：按节点角色匹配，堵住 tag='all' 通配）
             with db_lock:
                 c = db.cursor()
                 c.execute(
                     "SELECT 1 FROM engine_capabilities "
-                    "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
+                    "WHERE runtime_id=? AND enabled=1 AND tag=? LIMIT 1",
                     (_eid, tag))
                 if not c.fetchone():
                     raise HTTPException(status_code=400, detail={
@@ -1848,7 +1869,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
 
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
-    _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key, user.get("username") or "")
+    _validate_scene_node_roles(nodes_json := [n.model_dump() for n in body.nodes])
+    _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
 
     # Issue #657: 保存即拦截——节点技能仅他人 user scope 可用 → 400（scope 不匹配）
     _validate_scene_skill_scope(nodes_json, repo_key, user.get("username") or "", user.get("id") or "")
@@ -1901,6 +1923,8 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
     nodes_json = [n.model_dump() for n in body.nodes]
+    # Issue #955：节点 id 角色枚举校验（非法角色 400）
+    _validate_scene_node_roles(nodes_json)
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
 
