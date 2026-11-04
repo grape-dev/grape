@@ -21,7 +21,31 @@ _inited_service = None
 
 
 def otel_enabled() -> bool:
-    return bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip())
+    """OTel 启用条件：显式 gRPC 端点（主控/CLI）或 worker 中继模式（MR-2b）。"""
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip():
+        return True
+    return _worker_relay_exporter_kwargs() is not None
+
+
+def _worker_relay_exporter_kwargs():
+    """MR-2b：worker 进程特征 = RUNTIME_TOKEN 非空。
+
+    返回 OTLP/HTTP exporter 配置（指向主控中继 /api/runtime/traces + Bearer token）；
+    非 worker 进程（主控/CLI，无 RUNTIME_TOKEN）→ None（走 gRPC 直连分支）。
+    worker 无需配置 OTEL_EXPORTER_OTLP_ENDPOINT（中继地址由 RUNTIME_SERVER_URL 推导）。
+    """
+    try:
+        token = os.environ.get("RUNTIME_TOKEN", "").strip()
+        server = os.environ.get("RUNTIME_SERVER_URL", "").strip()
+        if not (token and server):
+            return None
+        return {
+            "endpoint": server.rstrip("/") + "/api/runtime/traces",
+            "headers": {"Authorization": "Bearer " + token},
+            "timeout": 5,
+        }
+    except Exception:
+        return None
 
 
 def init_otel(service_name: str):
@@ -42,7 +66,6 @@ def init_otel(service_name: str):
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.sdk.trace.sampling import TraceIdRatioBased, ParentBased
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
         resource = Resource.create({
             "service.name": service_name,
@@ -56,10 +79,20 @@ def init_otel(service_name: str):
         sampler = ParentBased(TraceIdRatioBased(ratio))
 
         provider = TracerProvider(resource=resource, sampler=sampler)
-        exporter = OTLPSpanExporter(
-            endpoint=os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].strip(),
-            timeout=3,
-        )
+        # MR-2b（2026-11-05）：worker 进程 → trace 走主控中继（OTLP/HTTP + worker token），
+        # 不直连 LGTM（生产 LGTM 机器不对 worker 开放）。主控/CLI 维持 gRPC 直连。
+        relay = _worker_relay_exporter_kwargs()
+        if relay is not None:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as _HTTPExporter
+            exporter = _HTTPExporter(**relay)
+        else:
+            # gRPC exporter 仅主控/CLI 路径 import（worker venv 只装 HTTP exporter——
+            # 此前顶层 import 在 worker 上直接 ModuleNotFoundError → init 静默失败）
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+            exporter = OTLPSpanExporter(
+                endpoint=os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].strip(),
+                timeout=3,
+            )
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
 
