@@ -1445,7 +1445,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         from src.api.event_pipeline import _execute_agent
         from src.session_manager import db, db_lock
         backend = ""
-        runtime_id = 0
+        # payload.runtime_id 优先（接管场景：指定路由到本机 worker）
+        runtime_id = int(payload.get("runtime_id", 0) or 0)
         skill_name = ""
         skill_id = 0
         skill_path = ""
@@ -1453,13 +1454,27 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_name))
-                row = c.fetchone()
+                # payload 未指定 runtime_id 时，从 session 表查绑定的引擎
+                if not runtime_id:
+                    c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_name))
+                    row = c.fetchone()
+                else:
+                    # payload 指定了 runtime_id：只查 skill/skill_id
+                    c.execute("SELECT 0, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_name))
+                    row = c.fetchone()
                 if row:
-                    runtime_id = row[0] or 0
+                    # payload 指定了 runtime_id 时不覆盖；否则用 session 表的值
+                    if not runtime_id:
+                        runtime_id = row[0] or 0
                     backend = ""
                     if row[0]:
                         c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
+                        brow = c.fetchone()
+                        if brow and brow[0]:
+                            backend = brow[0]
+                    # payload 指定 runtime_id 时查该 runtime 的 backend 名
+                    if runtime_id and not backend:
+                        c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
                         brow = c.fetchone()
                         if brow and brow[0]:
                             backend = brow[0]
