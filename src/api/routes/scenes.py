@@ -1726,6 +1726,7 @@ class SceneNodeInput(BaseModel):
     id: str
     tag: str = ""
     skill: str = ""
+    skill_id: int = 0  # Issue #979：权威技能标识（三档同名派发锁定）；0=仅名字（老场景，派发按名降级）
     mode: str = "emit"
     next: str = "done"
     handoff: str = "a2a"

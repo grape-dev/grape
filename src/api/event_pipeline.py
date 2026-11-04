@@ -350,6 +350,35 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
     return ""
 
 
+def resolve_scene_node_skill_id(repo_key: str, agent_type: str,
+                                scene_id: str = "", user_id: int = 0) -> int:
+    """读场景节点的 skill_id（Issue #979 权威派发标识）。
+
+    节点仅存 skill_name（老场景）或节点缺失 → 返回 0（调用方按名字降级）。
+    """
+    try:
+        from src.api.pipeline_config import get_node_by_tag
+        if not scene_id:
+            return 0
+        node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+        if node:
+            return int(node.get("skill_id") or 0)
+    except Exception as e:
+        log.warning(f"resolve_scene_node_skill_id failed: {e}")
+    return 0
+
+
+def start_direct_agent(fn, args, name=""):
+    """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
+    future = _DIRECT_POOL.submit(fn, *args)
+    # 从 args 中提取 seq（约定第一个参数是 repo_key，第二个是 seq）
+    seq = args[1] if len(args) > 1 else 0
+    if seq:
+        with _DIRECT_FUTURES_LOCK:
+            _DIRECT_FUTURES[seq] = future
+    return future
+
+
 def _task_insert_row(_cols, **kw):
     """按 agent_tasks 列清单顺序组装 INSERT 值。
 
@@ -2401,24 +2430,34 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         skill_id = 0
         skill_path = skill_name
         _issue_scene = evt["_pr_sub_scene_id"]
+        # Issue #979: 节点 skill_id 权威优先；同时补传 user_id（此前 PR 订阅
+        # 只传 repo_key，个人同名技能被静默跳过落到 official）
+        _sub_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=_issue_scene,
+                                               user_id=_issue_scene_uid)
+        _sub_degraded = False
         try:
-            from src.user.db import resolve_skill_id, get_skill_by_id
-            _sid = resolve_skill_id(skill_name, repo_key=repo_key)
-            if _sid:
-                skill_id = _sid
-                _sk = get_skill_by_id(_sid)
-                if _sk:
-                    skill_path = _sk.get("skill_path") or skill_name
-        except Exception:
-            pass
+            from src.user.db import resolve_skill_dispatch
+            _res = resolve_skill_dispatch(skill_name, _sub_sid, repo_key=repo_key,
+                                          user_id=_issue_scene_uid,
+                                          scene_id=_issue_scene, node_tag="qa")
+            skill_id = _res["skill_id"]
+            _sub_degraded = bool(_res.get("degraded"))
+            if _res.get("skill_name"):
+                skill_name = _res["skill_name"]
+            if _res.get("skill_path"):
+                skill_path = _res["skill_path"]
+        except Exception as _se979:
+            log.warning(f"Pipeline (PR-sub): skill dispatch resolve failed: {_se979}")
         # Issue #657: 派发前技能 scope 校验——skill 解析为空（仅 user scope 可用）
         # → 立即 fail-fast 落错误事件，不再派发（替代 1800s 超时）
-        _mm, _mm_info = _skill_scope_mismatch(skill_name, repo_key)
-        if _mm:
-            return _fail_skill_resolve_event(
-                repo_key, skill_name, _issue_scene, agent_type,
-                _skill_scope_mismatch_reason(skill_name, _mm_info, _issue_scene, agent_type),
-                issue_id=_pre_issue_id or "")
+        # Issue #979: skill_id 显式命中（非降级）= 用户授权绑定，跳过名字级 scope 门禁
+        if _sub_degraded or not skill_id:
+            _mm, _mm_info = _skill_scope_mismatch(skill_name, repo_key)
+            if _mm:
+                return _fail_skill_resolve_event(
+                    repo_key, skill_name, _issue_scene, agent_type,
+                    _skill_scope_mismatch_reason(skill_name, _mm_info, _issue_scene, agent_type),
+                    issue_id=_pre_issue_id or "")
         backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
         log.info(f"Pipeline (PR-sub): skill from scene nodes: {skill_name} sid={skill_id} (scene={_issue_scene})")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
@@ -2435,12 +2474,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         if _pipe_skill:
             skill_name = _pipe_skill
             # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
-            from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
-            _new_sid = resolve_skill_id(_pipe_skill, repo_key=repo_key, user_id=_issue_scene_uid)
-            if _new_sid:
-                skill_id = _new_sid
-                _sk = get_skill_by_id(_new_sid)
-                skill_path = (_sk.get("skill_path") or _pipe_skill) if _sk else _pipe_skill
+            # Issue #979: 节点 skill_id 权威优先（三档同名锁定用户选择的档位），
+            # 无 id/失效 → 名字降级（user→repo→official）+ warning
+            from src.user.db import resolve_skill_dispatch
+            _node_sid = resolve_scene_node_skill_id(repo_key, agent_type, scene_id=_issue_scene,
+                                                    user_id=_issue_scene_uid)
+            _res = resolve_skill_dispatch(_pipe_skill, _node_sid, repo_key=repo_key,
+                                          user_id=_issue_scene_uid,
+                                          scene_id=_issue_scene, node_tag=agent_type)
+            if _res["skill_id"]:
+                skill_id = _res["skill_id"]
+                skill_path = _res.get("skill_path") or _pipe_skill
             else:
                 skill_path = _pipe_skill
                 skill_id = 0

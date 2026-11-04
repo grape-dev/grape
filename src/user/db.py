@@ -1305,6 +1305,55 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
     return 0
 
 
+def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
+                           repo_key: str = "", user_id: str | int = "",
+                           scene_id: str = "", node_tag: str = "") -> dict:
+    """派发技能解析（Issue #979）：skill_id 权威直查 → 名字降级 + warning。
+
+    - skill_id 非零且 skill 表命中（is_active=1）→ 直接返回该档（显式绑定，
+      三档同名下锁定用户选择的档位）；
+    - skill_id 缺失（老场景仅名字）或失效（技能被删/停用）→ 按
+      resolve_skill_id 现有规则（user→repo→official）降级解析，并打
+      warning（含场景/节点/降级原因），行为与既有名字派发一致；
+    - 两者都解析不到 → skill_id=0（调用方按 #657 scope 门禁/内置包兜底）。
+
+    返回 {skill_id, skill_name, skill_path, degraded, skill}。
+    """
+    out = {"skill_id": 0, "skill_name": skill_name or "",
+           "skill_path": skill_name or "", "degraded": False, "skill": None}
+    if not skill_name and not skill_id:
+        return out
+    if skill_id:
+        row = get_skill_by_id(skill_id)
+        if row:
+            _name = row.get("skill_name") or skill_name or ""
+            out.update(skill_id=int(skill_id), skill_name=_name,
+                       skill_path=row.get("skill_path") or _name, skill=row)
+            return out
+        log.warning(
+            f"resolve_skill_dispatch: skill_id={skill_id} invalid/inactive "
+            f"(scene={scene_id or '-'} node={node_tag or '-'} "
+            f"skill_name='{skill_name or ''}'), degrade to name resolution")
+    elif skill_name:
+        log.warning(
+            f"resolve_skill_dispatch: node without skill_id "
+            f"(scene={scene_id or '-'} node={node_tag or '-'} "
+            f"skill_name='{skill_name}'), degrade to name resolution "
+            f"(user→repo→official)")
+    sid = resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id)
+    if sid:
+        out["skill_id"] = int(sid)
+        out["degraded"] = True
+        row = get_skill_by_id(sid)
+        out["skill"] = row
+        if row:
+            out["skill_name"] = row.get("skill_name") or skill_name
+            out["skill_path"] = row.get("skill_path") or out["skill_name"]
+    else:
+        out["degraded"] = True
+    return out
+
+
 def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
     """技能 scope 与场景（repo 级）scope 匹配判定（Issue #657）。
 
