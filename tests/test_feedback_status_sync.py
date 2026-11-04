@@ -135,7 +135,7 @@ class TestSyncExternalFeedbackStatuses:
         try:
             with mock.patch.object(fstat, "_fetch_external_issue_state",
                                    return_value="closed"), \
-                 mock.patch("src.api.feedback_issue_converter._repo_bot_token",
+                 mock.patch.object(fstat, "_repo_bot_token",
                             return_value="B"):
                 updated = sync_external_feedback_statuses()
             assert updated >= 1
@@ -151,7 +151,7 @@ class TestSyncExternalFeedbackStatuses:
         try:
             with mock.patch.object(fstat, "_fetch_external_issue_state",
                                    return_value="open"), \
-                 mock.patch("src.api.feedback_issue_converter._repo_bot_token",
+                 mock.patch.object(fstat, "_repo_bot_token",
                             return_value="B"):
                 sync_external_feedback_statuses()
             with db_lock:
@@ -168,7 +168,7 @@ class TestSyncExternalFeedbackStatuses:
         try:
             with mock.patch.object(fstat, "_fetch_external_issue_state",
                                    return_value="closed") as m, \
-                 mock.patch("src.api.feedback_issue_converter._repo_bot_token",
+                 mock.patch.object(fstat, "_repo_bot_token",
                             return_value="B"):
                 sync_external_feedback_statuses()
             ids_fetched = [c[0][1] for c in m.call_args_list]
@@ -187,3 +187,89 @@ class TestSyncExternalFeedbackStatuses:
             assert not m.called
         finally:
             _cleanup_feedback(fid)
+
+
+class TestSyncExternalRotationAndFallback:
+    """Issue #673 QA 复审：游标轮转（S3）与 issue_url 兜底（S4）、limit 对齐。"""
+
+    def setup_method(self):
+        fstat._external_sync_cursor = 0
+
+    def teardown_method(self):
+        fstat._external_sync_cursor = 0
+
+    def test_default_limit_matches_internal_sync(self):
+        import inspect
+        sig = inspect.signature(sync_external_feedback_statuses)
+        assert sig.parameters["limit"].default == 200
+        assert inspect.signature(fstat.sync_feedback_statuses).parameters["limit"].default == 200
+
+    def test_empty_repo_key_falls_back_to_issue_url(self):
+        """S4：repo_key 为空但 issue_url 可解析的历史行也能同步。"""
+        fid = None
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "INSERT INTO user_feedback "
+                    "(user_id, username, category, title, description, repo_key, status, source, "
+                    "issue_id, issue_url, issue_number, is_deleted) "
+                    "VALUES (0,'u','bug','t','d','','open','user',NULL,"
+                    "'https://gitcode.com/o/r/issues/42','','0')")
+                fid = c.lastrowid
+                db.commit()
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   return_value="closed") as m, \
+                 mock.patch.object(fstat, "_repo_bot_token", return_value="B"):
+                assert sync_external_feedback_statuses() >= 1
+            repo_key = m.call_args[0][0]
+            number = m.call_args[0][1]
+            assert repo_key == "gitcode:o/r"
+            assert number == "42"
+            with db_lock:
+                st = db.execute("SELECT status FROM user_feedback WHERE id=?",
+                                (fid,)).fetchone()[0]
+            assert st == FEEDBACK_STATUS_CLOSED
+        finally:
+            _cleanup_feedback(fid)
+
+    def test_cursor_rotation_covers_all_rows(self):
+        """S3：窗口不足 limit 时回绕；limit=1 时多轮能覆盖多行（不饿死）。"""
+        fids = [_insert_feedback(status="open", issue_url=f"https://gitcode.com/o/r/issues/{n}")
+                for n in (61, 62, 63)]
+        try:
+            states = {fid: "open" for fid in fids}
+
+            def fake_state(repo_key, number, token):
+                return "closed"
+
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   side_effect=fake_state), \
+                 mock.patch.object(fstat, "_repo_bot_token", return_value="B"):
+                total = 0
+                for _ in range(len(fids) + 2):
+                    total += sync_external_feedback_statuses(limit=1)
+                assert total == len(fids)
+            with db_lock:
+                st = {r[0]: r[1] for r in db.execute(
+                    "SELECT id, status FROM user_feedback WHERE id IN (?,?,?)",
+                    fids).fetchall()}
+            assert all(v == FEEDBACK_STATUS_CLOSED for v in st.values())
+        finally:
+            _cleanup_feedback(*fids)
+
+    def test_cursor_advances_across_pages(self):
+        """取满一页后游标推进到本页最大 id（下轮取后续分段）。"""
+        fid_a = _insert_feedback(status="open", issue_url="https://gitcode.com/o/r/issues/71")
+        fid_b = _insert_feedback(status="open", issue_url="https://gitcode.com/o/r/issues/72")
+        try:
+            with mock.patch.object(fstat, "_fetch_external_issue_state",
+                                   return_value="open"), \
+                 mock.patch.object(fstat, "_repo_bot_token", return_value="B"):
+                sync_external_feedback_statuses(limit=1)
+                first_page_cursor = fstat._external_sync_cursor
+                sync_external_feedback_statuses(limit=1)
+            assert first_page_cursor == fid_a
+            assert fstat._external_sync_cursor == fid_b
+        finally:
+            _cleanup_feedback(fid_a, fid_b)

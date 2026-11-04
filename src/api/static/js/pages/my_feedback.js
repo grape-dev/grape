@@ -14,6 +14,11 @@ function renderMyFeedback() {
     return val;
   }
 
+  function _escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function statusLabel(st) {
     var map = { open: t('status_open'), in_progress: t('status_in_progress'), resolved: t('status_resolved'), closed: t('status_closed') };
     return map[st] || st;
@@ -65,10 +70,10 @@ function renderMyFeedback() {
         'onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'">' +
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
         '<span style="color:' + stColor + ';font-weight:600;font-size:13px;flex-shrink:0">' + statusLabel(st) + '</span>' +
-        (item.issue_url ? '<a href="' + item.issue_url + '" target="_blank" rel="noopener" ' +
+        (item.issue_url ? '<a href="' + _escapeHtml(item.issue_url) + '" target="_blank" rel="noopener" ' +
           'onclick="event.stopPropagation()" ' +
           'style="font-size:12px;color:var(--a);font-weight:500;text-decoration:none;flex-shrink:0" ' +
-          'title="' + t('field_issue') + '">#' + (item.issue_number || '') + '</a>' : '') +
+          'title="' + _escapeHtml(t('field_issue')) + '">#' + _escapeHtml(item.issue_number || '') + '</a>' : '') +
         '<span style="font-size:14px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (item.title || '—') + '</span>' +
         '<span class="ts t3" style="font-size:11px;flex-shrink:0">' + timeStr + '</span>' +
         '<button class="bt bt-o bt-s" onclick="event.stopPropagation();_myFbDelete(' + item.id + ', event)" ' +

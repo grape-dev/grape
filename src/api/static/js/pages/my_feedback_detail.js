@@ -10,6 +10,11 @@ function renderMyFeedbackDetail(feedbackId) {
     return I18N.t('app.feedback.' + key, params);
   }
 
+  function _escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function statusLabel(st) {
     var map = { open: t('status_open'), in_progress: t('status_in_progress'), resolved: t('status_resolved'), closed: t('status_closed') };
     return map[st] || st;
@@ -50,8 +55,8 @@ function renderMyFeedbackDetail(feedbackId) {
     // 关联 Issue（Issue #673：转换回写后展示链接 + 处理进度文案）
     var issueHtml = t('issue_none');
     if (item.issue_url) {
-      issueHtml = '<a href="' + item.issue_url + '" target="_blank" rel="noopener" ' +
-        'style="color:var(--a);font-weight:600;text-decoration:none">#' + (item.issue_number || '') + '</a>' +
+      issueHtml = '<a href="' + _escapeHtml(item.issue_url) + '" target="_blank" rel="noopener" ' +
+        'style="color:var(--a);font-weight:600;text-decoration:none">#' + _escapeHtml(item.issue_number || '') + '</a>' +
         '<span class="ts t3" style="margin-left:6px">' + t('issue_progress', { status: statusLabel(st) }) + '</span>';
     }
 

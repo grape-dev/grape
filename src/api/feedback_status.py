@@ -6,6 +6,8 @@
 - 联动同步只升不降（open < in_progress < resolved < closed）：
   admin 手工标记的 resolved/closed 不被自动同步回退覆盖。
 """
+import re
+
 from src.config import log
 from src.session_manager import db, db_lock
 
@@ -55,12 +57,60 @@ def derive_feedback_status(stage: str, task_status: str = "") -> str:
                                               FEEDBACK_STATUS_OPEN)
 
 
+# 外部 Issue URL 解析（Issue #673 QA S4：repo_key 为空的历史行按 issue_url 兜底推导）
+_EXTERNAL_ISSUE_URL_RE = re.compile(
+    r"^https?://(?:www\.)?(github\.com|gitcode\.com|gitlab\.com)"
+    r"/([^/\s]+)/([^/\s]+)/(?:-/)?issues/(\d+)/?$")
+
+
+def _repo_key_from_issue_url(issue_url: str) -> str:
+    """issue_url → repo_key（"<provider>:<owner>/<repo>"）；无法解析返回 ''。"""
+    m = _EXTERNAL_ISSUE_URL_RE.match((issue_url or "").strip())
+    if not m:
+        return ""
+    host, owner, repo, _num = m.groups()
+    provider = ("github" if host.startswith("github")
+                else "gitlab" if host.startswith("gitlab") else "gitcode")
+    return f"{provider}:{owner}/{repo}"
+
+
+def _issue_number_from_issue_url(issue_url: str) -> str:
+    """issue_url → issue number 字符串；无法解析返回 ''。"""
+    m = _EXTERNAL_ISSUE_URL_RE.match((issue_url or "").strip())
+    return m.group(4) if m else ""
+
+
+def _provider_module(provider: str):
+    """provider 模块解析（与 feedback_issue_converter 同源取 src.vcs.providers，
+    但不反向 import converter 私有实现，避免双向耦合，Issue #673 QA 判断项）。"""
+    from src.vcs.providers import _MODULES
+    mod = _MODULES.get(provider)
+    if mod is None:
+        raise ValueError(f"Git provider 未支持: {provider}")
+    return mod
+
+
+def _repo_target(repo_key: str):
+    """repo_key → (provider, owner, repo)。"""
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    return (provider or "gitcode", owner or "", repo or "")
+
+
+def _repo_bot_token(repo_key: str):
+    """repo_key → 仓库 bot token（provider 模块解析）。"""
+    provider, _, _ = _repo_target(repo_key)
+    try:
+        return _provider_module(provider).bot_token(repo_key) or ""
+    except Exception:
+        return ""
+
+
 def _fetch_external_issue_state(repo_key: str, issue_number, token: str) -> str:
     """拉取外部 VCS Issue 的 state（open/closed）；失败/不支持返回 ''（调用方跳过）。"""
     if not repo_key or not issue_number or not token:
         return ""
     import urllib.parse
-    from src.api.feedback_issue_converter import _repo_target, _provider_module
     provider, owner, repo = _repo_target(repo_key)
     if not owner or not repo:
         return ""
@@ -70,38 +120,51 @@ def _fetch_external_issue_state(repo_key: str, issue_number, token: str) -> str:
                f"{urllib.parse.quote(repo, safe='')}/issues/{issue_number}")
         resp = mod.request("GET", url, token, None) or {}
         return (resp.get("state") or "").strip().lower()
-    except Exception as e:
-        log.warning(f"feedback status sync: fetch external issue failed "
-                    f"({repo_key}#{issue_number}): {e}")
+    except Exception:
+        log.exception(f"feedback status sync: fetch external issue failed "
+                      f"({repo_key}#{issue_number})")
         return ""
 
 
-def sync_external_feedback_statuses(limit: int = 20) -> int:
+# 外部同步游标（进程内轮转，Issue #673 QA S3：避免固定窗口下先到的外部 open 行
+# 永久占位、后续反馈永不轮询）。取满一页则推进到本页最大 id，不足一页回绕到 0。
+_external_sync_cursor = 0
+
+
+def sync_external_feedback_statuses(limit: int = 200) -> int:
     """user 反馈状态联动（Issue #673 QA S1 修复）。
 
     user 反馈转换后指向外部 GitCode Issue，内部 issue 表无映射（issue_id 为空），
     `sync_feedback_statuses` 的内部 JOIN 无法覆盖 → 这里按 issue_url/issue_number
     拉取外部 Issue 状态联动：closed → closed（只升不降，open 不回退状态）。
+    limit 与 `sync_feedback_statuses` 对齐（默认 200）；按 id 游标轮转取窗，
+    每轮覆盖全部待同步行的不同分段，避免外部 open 行永久占窗饿死新反馈。
+    repo_key 为空的历史行按 issue_url 兜底推导（S4）。
     由 feedback reconcile 周期与内部同步一起调用。
     """
+    global _external_sync_cursor
     updated = 0
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT f.id, f.status, f.repo_key, f.issue_number FROM user_feedback f "
+                "SELECT f.id, f.status, f.repo_key, f.issue_number, f.issue_url "
+                "FROM user_feedback f "
                 "WHERE f.source='user' AND f.issue_url!='' "
                 "AND (f.issue_id IS NULL OR f.issue_id=0) AND f.is_deleted=0 "
                 "AND f.status NOT IN ('closed') "
-                "ORDER BY f.id LIMIT ?",
-                (limit,))
+                "AND f.id > ? ORDER BY f.id LIMIT ?",
+                (_external_sync_cursor, limit))
             rows = c.fetchall()
         if not rows:
+            _external_sync_cursor = 0
             return 0
-        from src.api.feedback_issue_converter import _repo_bot_token
         tokens = {}
-        for fid, _cur, repo_key, number in rows:
-            repo_key = repo_key or ""
+        for fid, _cur, repo_key, number, issue_url in rows:
+            repo_key = (repo_key or "").strip() or _repo_key_from_issue_url(issue_url)
+            number = number or _issue_number_from_issue_url(issue_url)
+            if not repo_key or not number:
+                continue
             if repo_key not in tokens:
                 tokens[repo_key] = _repo_bot_token(repo_key)
             state = _fetch_external_issue_state(repo_key, number, tokens[repo_key])
@@ -112,10 +175,14 @@ def sync_external_feedback_statuses(limit: int = 20) -> int:
                            (FEEDBACK_STATUS_CLOSED, fid))
                 db.commit()
             updated += 1
+        if len(rows) < limit:
+            _external_sync_cursor = 0
+        else:
+            _external_sync_cursor = rows[-1][0]
         if updated:
             log.info(f"feedback status sync (external): {updated} rows updated")
-    except Exception as e:
-        log.warning(f"feedback status sync (external) failed: {e}")
+    except Exception:
+        log.exception("feedback status sync (external) failed")
     return updated
 
 
@@ -152,6 +219,6 @@ def sync_feedback_statuses(limit: int = 200) -> int:
             db.commit()
         if updated:
             log.info(f"feedback status sync: {updated} rows updated")
-    except Exception as e:
-        log.warning(f"feedback status sync failed: {e}")
+    except Exception:
+        log.exception("feedback status sync failed")
     return updated
