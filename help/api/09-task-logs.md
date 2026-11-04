@@ -7,7 +7,7 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{task_id}` |
-| 出参 | `{id, status, exit_code, duration, started_at, completed_at, engine, ...}` |
+| 出参 | `{agent_name, agent_version, device_name, owner_name, prompt, prompt_full_length, status, ..., wrote_files}`；`wrote_files`：任务写过的文件清单 `[{path, bytes, tool, seq, first_seen_at}]`（派生自 write/patch tool_use 消息入参，不扫工作区，无写入返回 `[]`） |
 | 返回 | 200；404 |
 
 ---

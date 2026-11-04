@@ -2456,6 +2456,65 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
     return out
 
 
+# wrote_files 派生查询认定的「写入类」工具名（含 hermes 等引擎的工具名变体，
+# 兜底按 input 含 path + content/new_string 精筛，见 list_wrote_files）
+_WRITE_TOOL_EXACT = frozenset({"write", "write_file", "patch"})
+
+
+def _is_write_tool(tool: str) -> bool:
+    t = (tool or "").strip().lower()
+    return t in _WRITE_TOOL_EXACT or "write" in t or "patch" in t
+
+
+def list_wrote_files(task_id) -> list[dict]:
+    """派生查询：该任务写过的文件清单（Issue #977，/info 的 wrote_files 数据源）。
+
+    - 数据源：task_messages 中 tool_use 消息的 input_json（write/patch 的 path +
+      content/new_string 的 utf-8 字节数），不扫描工作区、不依赖 agent 自述。
+    - 过滤：宽松 SQL（type='tool_use'）+ Python 侧精筛（工具名 ∈ write/patch 变体
+      且 input 含 path 与 content/new_string）。
+    - 同 path 多次写入各记一条（保留全部 seq）；first_seen_at 取该条消息 created_at。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, tool, input_json, created_at FROM task_messages "
+                "WHERE task_id=? AND type='tool_use' ORDER BY seq",
+                (task_id,))
+            rows = c.fetchall()
+    except Exception as e:
+        log.warning(f"list_wrote_files failed: {e}")
+        return []
+    out = []
+    for seq, tool, input_json, created_at in rows:
+        if not _is_write_tool(tool):
+            continue
+        try:
+            inp = _json.loads(input_json or "{}")
+        except Exception:
+            continue
+        if not isinstance(inp, dict):
+            continue
+        path = inp.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        payload = inp.get("content")
+        if not isinstance(payload, str):
+            payload = inp.get("new_string")
+        if not isinstance(payload, str):
+            continue
+        out.append({
+            "path": path,
+            "bytes": len(payload.encode("utf-8")),
+            "tool": (tool or "").strip().lower(),
+            "seq": seq,
+            "first_seen_at": normalize_event_time(created_at or ""),
+        })
+    return out
+
+
 def report_progress(task_id, progress):
     # 阶段进度：写 result_text 前缀（保持轻量，完整进度落 agent_tasks.result_text）
     task = get_task(task_id)
