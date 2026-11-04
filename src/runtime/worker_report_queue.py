@@ -114,12 +114,16 @@ class WorkerReportQueue:
 
 
 async def replay_pending_reports(client, queue: WorkerReportQueue):
-    """重放补报队列：对每条 pending 调 master complete/fail（带 run_token），ack 后出队。"""
+    """重放补报队列：task 条目调 master complete/fail（带 run_token）；messages 条目
+    （Issue #975 批次级失败降级入队）重发消息，ack 后出队。"""
     pruned = queue.prune_expired()
     if pruned:
         log.info(f"worker_report_queue: pruned {pruned} expired report(s)")
     for entry in queue.pending():
         task_id = entry.get("task_id") or ""
+        if entry.get("kind") == "messages":
+            await _replay_messages(client, queue, entry)
+            continue
         run_token = entry.get("run_token") or ""
         try:
             if entry.get("status") == "failed":
@@ -136,3 +140,36 @@ async def replay_pending_reports(client, queue: WorkerReportQueue):
                 log.info(f"worker_report_queue: replayed {task_id} ({entry.get('status')})")
         except Exception as e:
             log.warning(f"worker_report_queue: replay {task_id} failed: {e}")
+
+
+async def _replay_messages(client, queue: WorkerReportQueue, entry: dict):
+    """重放单条 messages 补报条目（Issue #975 降级入队的消息）。"""
+    from src.runtime.client import ReportBatchError
+    from src.runtime.message_report import degrade_failed_batch
+    task_id = entry.get("task_id") or ""
+    real_tid = entry.get("task") or task_id.split("#msg-")[0]
+    message = entry.get("message") or []
+    try:
+        resp = await client.report_messages(real_tid, [message] if isinstance(message, dict) else [message])
+        if isinstance(resp, dict) and resp.get("status") == "ok":
+            queue.remove(task_id)
+            log.info(f"worker_report_queue: replayed messages {task_id}")
+            return
+        if resp is None:
+            # 任务已终态：消息无处可落，出队避免无限重放（终态任务的日志窗口已关闭）
+            queue.remove(task_id)
+            log.info(f"worker_report_queue: messages {task_id} dropped (task terminal)")
+            return
+        # 网络错误：保留下轮重放
+        return
+    except ReportBatchError as e:
+        # 单条仍 4xx（超限/坏请求）：再走一次拆批（单条）→仍失败发占位后出队
+        try:
+            await degrade_failed_batch(
+                lambda msgs: client.report_messages(real_tid, msgs),
+                real_tid, [message], e, enqueue=None)
+        except Exception as _e:
+            log.warning(f"worker_report_queue: messages degrade {task_id} failed: {_e}")
+        queue.remove(task_id)
+    except Exception as e:
+        log.warning(f"worker_report_queue: replay messages {task_id} failed: {e}")

@@ -2256,8 +2256,20 @@ def requeue_task(task_id):
         return ret
 
 
-def report_messages(task_id, messages):
-    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout"""
+def peek_next_seq(task_id) -> int:
+    """预读 task 下一个可用 seq（MAX+1）。Issue #975：路由层预留下列 seq 范围作回执。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+        return (c.fetchone()[0] or 0) + 1
+
+
+def report_messages(task_id, messages, seq_start: int | None = None):
+    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout
+
+    seq_start（Issue #975）：路由层同步预定的批次 seq 起点（peek_next_seq 预留）。
+    不传则沿用 MAX+1。批次回执（日志 + 返回值）带 seq 范围，供 worker/master 对账。
+    """
     task = get_task(task_id)
     if not task:
         return
@@ -2326,8 +2338,12 @@ def report_messages(task_id, messages):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
-            seq = (c.fetchone()[0] or 0) + 1
+            if seq_start is not None:
+                seq = int(seq_start)
+            else:
+                c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                seq = (c.fetchone()[0] or 0) + 1
+            _seq_first = seq
             for m in (messages or []):
                 if not isinstance(m, dict):
                     continue
@@ -2344,6 +2360,10 @@ def report_messages(task_id, messages):
                 _seq_messages.append({**m, "seq": seq})
                 seq += 1
             db.commit()
+            # Issue #975：批次回执日志（seq 起止 + 条数）——master 侧对账凭证
+            if _seq_messages:
+                log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
+                         f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
     except Exception as e:
         log.warning(f"report_messages task_messages insert failed: {e}")
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
@@ -3594,10 +3614,10 @@ async def _ingestion_loop():
                 except asyncio.TimeoutError:
                     break
             with db_lock:
-                for kind, tid, payload in batch:
+                for kind, tid, payload, seq_start in batch:
                     try:
                         if kind == "messages":
-                            report_messages(tid, payload)
+                            report_messages(tid, payload, seq_start=seq_start)
                         elif kind == "progress":
                             report_progress(tid, payload)
                     except Exception as e:
@@ -3616,22 +3636,22 @@ async def _ingestion_loop():
 _ASYNC_REPORT_QUEUE = None
 
 
-def enqueue_async_report(kind: str, task_id: str, payload):
-    """异步回报入队（队列满降级同步，不丢数据）。"""
+def enqueue_async_report(kind: str, task_id: str, payload, seq_start: int | None = None):
+    """异步回报入队（队列满降级同步，不丢数据）。seq_start：Issue #975 批次 seq 预留起点。"""
     q = _ASYNC_REPORT_QUEUE
     if q is None:
         # 队列未启动 → 同步兜底
         if kind == "messages":
-            report_messages(task_id, payload)
+            report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
         return
     try:
-        q.put_nowait((kind, task_id, payload))
+        q.put_nowait((kind, task_id, payload, seq_start))
     except Exception:
         # 队列满：同步降级
         if kind == "messages":
-            report_messages(task_id, payload)
+            report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
 

@@ -967,8 +967,13 @@ def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int =
             log.info(f"auto-fix: task {task_id} status {task.get('status')} -> running (messages reported)")
         except Exception as e:
             log.warning(f"auto-fix: failed to update task {task_id} to running: {e}")
-    service.enqueue_async_report("messages", task_id, body.messages)
-    return {"status": "ok"}
+    # Issue #975：批次回执带 seq 范围（peek 预留 + 异步落库沿用），worker 侧记录累计
+    # 已确认 seq 供对账（worker 对同一 task 串行上报，预约与落库顺序一致）
+    _count = len(body.messages or [])
+    _seq_start = service.peek_next_seq(task_id)
+    service.enqueue_async_report("messages", task_id, body.messages, seq_start=_seq_start)
+    return {"status": "ok", "count": _count, "seq_start": _seq_start,
+            "seq_end": _seq_start + _count - 1 if _count > 0 else _seq_start - 1}
 
 
 @router.post("/tasks/{task_id}/usage")

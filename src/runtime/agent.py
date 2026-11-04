@@ -2243,6 +2243,42 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
     return None
 
 
+async def _flush_report_batch(client, tid: str, batch: list) -> str:
+    """批量上报一批消息（Issue #975 三态处理）。
+
+    返回：
+    - "ok"      批次已送达（或已走降级：拆批重发/占位/补报队列），可清空 batch
+    - "retry"   网络错误（可重试）——保留 batch，下个 flush 窗口重试，不清空不丢
+    - "terminal" 任务已被服务端标终态（410），调用方应中断执行
+    """
+    from src.runtime.client import ReportBatchError
+    from src.runtime.message_report import degrade_failed_batch
+    try:
+        _resp = await client.report_messages(tid, batch)
+    except ReportBatchError as e:
+        # 4xx 批次级失败（413/400）：拆批重发 → 单条仍失败发占位 + 落补报队列
+        try:
+            await degrade_failed_batch(
+                lambda msgs: client.report_messages(tid, msgs), tid, batch, e,
+                enqueue=_report_queue().add)
+        except Exception as _de:
+            log.warning(f"task {tid} report degrade failed: {_de}")
+        return "ok"
+    except CredentialRevokedError:
+        raise
+    if _resp is None:
+        return "terminal"
+    if isinstance(_resp, dict) and _resp.get("status") == "ok":
+        # 服务端回执带 seq 范围（seq_start/seq_end）——记录累计已确认 seq 供对账
+        _seq_end = _resp.get("seq_end")
+        if _seq_end is not None:
+            log.info(f"task {tid} messages acknowledged: count={len(batch)} "
+                     f"seq_range={_resp.get('seq_start')}..{_seq_end}")
+        return "ok"
+    # 网络错误（{}）：保留 batch，下个窗口重试（不清空，防止静默丢失）
+    return "retry"
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -2552,19 +2588,20 @@ async def _execute_task(client, task, engine_name: str = ""):
             # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
             _now = time.monotonic()
             if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
-                _resp = await client.report_messages(tid, batch)
-                if _resp is None:
-                    # task 已被服务端标终态（410 Gone / 网络错误）→ 中断执行，杀引擎进程
+                _outcome = await _flush_report_batch(client, tid, batch)
+                if _outcome == "terminal":
+                    # task 已被服务端标终态（410 Gone）→ 中断执行，杀引擎进程
                     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
                     _kill_stale_engine(task, _backend_for_engine(engine_name))
                     _res.dispose()
                     _cleanup_task_workdir(task, env)
                     return {"_error": "task terminated by server (aborted during execution)", "_started": started}
-                batch = []
+                if _outcome == "ok":
+                    batch = []
                 _last_flush = _now
         if batch:
-            _resp = await client.report_messages(tid, batch)
-            if _resp is None:
+            _outcome = await _flush_report_batch(client, tid, batch)
+            if _outcome == "terminal":
                 log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
                 _kill_stale_engine(task, _backend_for_engine(engine_name))
                 _res.dispose()
