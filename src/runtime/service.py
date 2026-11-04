@@ -2460,6 +2460,12 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
 # 兜底按 input 含 path + content/new_string 精筛，见 list_wrote_files）
 _WRITE_TOOL_EXACT = frozenset({"write", "write_file", "patch"})
 
+# 记忆化缓存（Issue #977 性能补丁）：key=task_id → (max_seq, wrote_files)。
+# 只按「消息 seq 是否前进」判失效（新增即失效），不用纯 TTL，避免"配置/进度改了却显示旧值"。
+# 上限 512 个任务，超出按插入序淘汰最旧（单进程内小字典，替换成本可忽略）。
+_WROTE_FILES_CACHE: dict = {}
+_WROTE_FILES_CACHE_MAX = 512
+
 
 def _is_write_tool(tool: str) -> bool:
     t = (tool or "").strip().lower()
@@ -2471,17 +2477,29 @@ def list_wrote_files(task_id) -> list[dict]:
 
     - 数据源：task_messages 中 tool_use 消息的 input_json（write/patch 的 path +
       content/new_string 的 utf-8 字节数），不扫描工作区、不依赖 agent 自述。
-    - 过滤：宽松 SQL（type='tool_use'）+ Python 侧精筛（工具名 ∈ write/patch 变体
-      且 input 含 path 与 content/new_string）。
+    - 过滤：SQL 侧先按工具名收窄（write/patch 变体，与 _is_write_tool 同口径）
+      + Python 侧精筛（input 含 path 与 content/new_string）。
     - 同 path 多次写入各记一条（保留全部 seq）；first_seen_at 取该条消息 created_at。
+    - 性能（2026-11-04 压测）：原实现扫该任务全部 tool_use 行（10k 消息 36ms、
+      大写入 221ms、40k 消息 146ms），且 /info 会被前端反复拉。改为
+      「SQL 工具名预过滤」+「按 (task_id, max_seq) 记忆化」：任务消息无新增时命中缓存
+      返回 ~µs；有新增消息（seq 前进）自动失效重算，不做纯 TTL 假缓存。
     """
     import json as _json
     try:
         with db_lock:
             c = db.cursor()
+            c.execute("SELECT COALESCE(MAX(seq), 0) FROM task_messages WHERE task_id=?",
+                      (task_id,))
+            _max_seq = int(c.fetchone()[0] or 0)
+            _hit = _WROTE_FILES_CACHE.get(str(task_id))
+            if _hit and _hit[0] == _max_seq:
+                return [dict(x) for x in _hit[1]]
             c.execute(
                 "SELECT seq, tool, input_json, created_at FROM task_messages "
-                "WHERE task_id=? AND type='tool_use' ORDER BY seq",
+                "WHERE task_id=? AND type='tool_use' "
+                "AND (LOWER(tool) LIKE '%write%' OR LOWER(tool) LIKE '%patch%') "
+                "ORDER BY seq",
                 (task_id,))
             rows = c.fetchall()
     except Exception as e:
@@ -2512,6 +2530,9 @@ def list_wrote_files(task_id) -> list[dict]:
             "seq": seq,
             "first_seen_at": normalize_event_time(created_at or ""),
         })
+    if len(_WROTE_FILES_CACHE) >= _WROTE_FILES_CACHE_MAX:
+        _WROTE_FILES_CACHE.pop(next(iter(_WROTE_FILES_CACHE)), None)
+    _WROTE_FILES_CACHE[str(task_id)] = (_max_seq, [dict(x) for x in out])
     return out
 
 

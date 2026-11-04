@@ -2277,6 +2277,14 @@ def list_repo_issues(owner: str, repo: str,
             _total = 0
         _total += len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
         _offset = (page - 1) * per_page
+        # 性能守卫（2026-11-04 压测）：default 模式第一排序键是状态优先级 CASE
+        # （_status_order_sql），无法免排序；偏移越深单页越贵（issue 表 20 万行时
+        # page=6666 达 350ms），且分页查询持 db_lock，会串行阻塞其它 DB 访问。
+        # 超过 2 万条偏移直接拒绝并提示收窄，避免个别客户端把单核吃满。
+        if _offset > 20000:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"深分页超过上限（偏移 {_offset} 条 > 20000），请用 q / statuses 收窄后再翻页"})
         # Issue #926：窗口化取数（替代深页 0..offset+per_page+pr 全前缀拉取，O(page) 而非 O(offset)）。
         # 合并序中 issue 行的全局位次 p 满足 seq-pr ≤ p ≤ seq（pr=PR 卡总数），故页窗口
         # [_offset, _offset+per_page) 内的 issue 行其 seq 必落在 [max(0,_offset-pr), _offset+per_page)；

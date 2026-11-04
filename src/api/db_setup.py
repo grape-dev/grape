@@ -3038,6 +3038,50 @@ register_migration(
 )
 
 
+def _fn_add_issue_repo_created_index() -> None:
+    """性能补丁（2026-11-04 压测）：需求中心服务端分页（Issue #926）按
+    `WHERE repo_key=? ... ORDER BY created_at DESC LIMIT/OFFSET` 取数，issue 表只有
+    (repo_key, issue_number) 唯一索引 → 每页 COUNT(*) 全扫 + ORDER BY 建临时 B-TREE
+    （200k 行实测首页 78ms / 深页 350ms），且全程持 db_lock 串行阻塞其它查询。
+    补 (repo_key, created_at) 后 COUNT 与 time 模式排序可走索引；default 模式
+    的第一排序键是状态优先级 CASE，无法完全免排序，深页由路由侧偏移上限兜底。
+    幂等：索引已存在即跳过。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    _idx = "idx_issue_repo_created"
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            # MySQL 下 repo_key/created_at 是 TEXT，必须带前缀长度
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                "AND INDEX_NAME=%s", (_idx,))
+            if c.fetchone()[0]:
+                return
+            c.execute(
+                f"CREATE INDEX {_idx} ON issue (repo_key(64), created_at(32))")
+            db.commit()
+        else:
+            c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+            if c.fetchone():
+                return
+            c.execute(f"CREATE INDEX {_idx} ON issue (repo_key, created_at)")
+            db.commit()
+
+
+register_migration(
+    version="202611040002",
+    name="perf_issue_repo_created_index",
+    kind="safe",
+    fn=_fn_add_issue_repo_created_index,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 
