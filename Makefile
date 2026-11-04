@@ -14,6 +14,10 @@
 PYTHON ?= python3
 PORT ?= 3000
 VENV ?= .venv
+# 测试解释器：优先仓库自带的 venv/ 或 .venv/（本仓库部署用 venv/），否则退回 PYTHON
+TEST_PYTHON ?= $(firstword $(wildcard venv/bin/python .venv/bin/python) $(PYTHON))
+# 逐域测试的领域顺序（可覆盖：make test-domains DOMAINS="kernel api"）
+DOMAINS ?= arch atomic contracts kernel insight api mgmt runtime
 
 .PHONY: help install install-dev install-all test test-fast run sync-skills lint clean docker
 
@@ -37,9 +41,9 @@ test: ## Run pytest test suite
 	$(PYTHON) -m pytest tests/ -v
 
 test-domains: ## Run tests per domain in isolated processes (stable order; see tests/README.md)
-	@set -e; for d in arch atomic contracts kernel insight api mgmt runtime; do \
+	@set -e; for d in $(DOMAINS); do \
 		echo "== tests/$$d =="; \
-		$(PYTHON) -m pytest tests/$$d -q || exit 1; \
+		$(TEST_PYTHON) -m pytest tests/$$d -q || exit 1; \
 	done
 
 test-fast: ## Run pytest (fast: skip slow/e2e markers)
