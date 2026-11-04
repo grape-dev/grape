@@ -37,9 +37,19 @@ def _reset_registry() -> None:
 
 @pytest.fixture(autouse=True)
 def clean_registry(monkeypatch):
-    # 避免 .env 里的 cluster 模式把 /internal/* 变成必须带服务令牌
-    monkeypatch.delenv("GRAPE_MODE", raising=False)
-    monkeypatch.delenv("GRAPE_GSB_BASE_URL", raising=False)
+    # 避免 .env 里的部署开关泄漏进用例：cluster 模式会让 /internal/* 需要令牌，
+    # remote/namespace 会改变注册键与 provider 选择（用例自带显式设置）
+    for _k in (
+        "GRAPE_MODE",
+        "GRAPE_GSB_BASE_URL",
+        "GRAPE_PROVIDER_MODE",
+        "GRAPE_GSB_NAMESPACE",
+        "GRAPE_MGMT_URL",
+        "GRAPE_RUNTIME_URL",
+        "GRAPE_INSIGHT_URL",
+        "GRAPE_EVENT_URL",
+    ):
+        monkeypatch.delenv(_k, raising=False)
     _reset_registry()
     yield
     _reset_registry()
