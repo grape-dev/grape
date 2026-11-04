@@ -11,6 +11,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Issue #666 (M3): 引擎基线镜像预装 codegraph（project-info 全量生成引擎）。
+# 分发形式：npm 平台二进制包 @colbymchenry/codegraph（自包含：内置 node 运行时 + Rust 内核，
+# bin/codegraph 可直接执行，见 scripts/install-codegraph.sh 注释）——非 pip 包。
+# 构建期用 nodejs/npm 在线安装，装完卸载 nodejs/npm 保持镜像精简（二进制自包含不依赖系统 node）。
+# best-effort：安装失败不阻断镜像构建，运行时走降级路径并显式告警（src/project_info/builder.py）。
+RUN set -x; \
+    apt-get update && apt-get install -y --no-install-recommends nodejs npm; \
+    if npm install -g @colbymchenry/codegraph; then \
+        codegraph --version; \
+    else \
+        echo "warning: codegraph install failed, project-info will run degraded with warning"; \
+    fi; \
+    apt-get purge -y nodejs npm; \
+    apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*
+
 # 代码
 COPY . .
 
