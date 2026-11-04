@@ -239,17 +239,15 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     else:
         scene_list = get_scenes(repo_key=repo_key, q=q, sort=sort)
 
-    # 构建 skill_name → display_name 映射，给每个 node 补 skill_display_name
-    # 这样前端查看模式直接用 node 上的 display_name，不依赖 dashboard API 绑定的 agent skill
-    skill_display_map = {}
+    # Issue #980：显示名解析统一走共用 skill_display 层（skill_id 优先 →
+    # (scope, skill_name) → user/repo 上下文 → official 兜底），三档同名技能
+    # 不再被 official 映射一律覆盖成官方名。
+    from src.api.skill_display import build_skill_display_map, resolve_skill_display_name
+    _uid_ctx = user.get("id", "")
     try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
-            skill_display_map = {r[0]: r[1] or r[0] for r in c.fetchall()}
+        skill_display_map = build_skill_display_map(repo_key=repo_key, user_id=_uid_ctx)
     except Exception:
-        pass
+        skill_display_map = {}
 
     result = []
     for s in scene_list:
@@ -259,10 +257,19 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
             cfg = {"name": s["name"], "nodes": nodes, "onboarding": s.get("onboarding") or "repo-onboarding"}
         else:
             cfg = get_pipeline_config(s["id"], repo_key=repo_key) or {}
-        # 给每个 node 补 skill_display_name
+        # 给每个 node 补 skill_display_name（Issue #980：node 带 skill_id 时
+        # 精确解析；否则按共用映射（含 user/repo/official 档位优先级））
         for n in (cfg.get("nodes") or []):
             _sk = n.get("skill", "")
-            n["skill_display_name"] = skill_display_map.get(_sk, _sk) if _sk else ""
+            if not _sk:
+                n["skill_display_name"] = ""
+                continue
+            _sid = n.get("skill_id") or 0
+            if _sid:
+                n["skill_display_name"] = resolve_skill_display_name(
+                    _sk, skill_id=int(_sid), repo_key=repo_key, user_id=_uid_ctx)
+            else:
+                n["skill_display_name"] = skill_display_map.get(_sk, _sk)
         # Issue #501: 引擎在线探测已从本接口移出——N 场景 × M 节点的探测改为
         # 按需接口 GET /scenes/{scene_id}/engine-status（需求中心弹窗选中场景时才探测）。
         # 本接口不再返回 offline_nodes/sre_unbound/all_offline。
