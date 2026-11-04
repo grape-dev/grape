@@ -115,7 +115,15 @@ def instrument_fastapi(app, service_name: str):
         init_otel(service_name)
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         # 剔除探针/指标路径，避免无意义 span 噪声（与 metrics 中间件同款口径）
-        FastAPIInstrumentor.instrument_app(app, excluded_urls="health,healthz,readyz,metrics")
+        # 噪声端点剔除（2026-11-05）：worker 每 15s 的 claim/heartbeat/tags 刷屏 Tempo
+        # 列表，把真正要看的任务 trace 挤出搜索窗口。任务生命周期另有专门 span
+        # （task.*），协议面已在 metrics（/metrics）观测，trace 层保留完整请求以外的价值。
+        FastAPIInstrumentor.instrument_app(app, excluded_urls=(
+            "health,healthz,readyz,metrics,"
+            "runtimes/[^/]+/tasks/claim,runtimes/[^/]+/tags,"
+            "/runtime/heartbeat,/runtime/register,"
+            "grape-worker[.]tar[.]gz,/runtime/install"
+        ))
         return True
     except Exception as e:
         try:
