@@ -407,6 +407,84 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     }
 
 
+def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
+    """Issue #648 性能修复：按仓库前缀一次 ListObjects 拉全量附件清单，内存按 issue 编号分组。
+
+    原实现（_issue_attachments）逐卡调一次 OBS list（~16-110ms），几百卡串行 = 十几秒，
+    是需求中心列表接口慢的根因（#648 引入）。OBS/本地两种后端均走 storage 一次前缀枚举。
+    返回 {issue_number_str: [ {filename,url,size,is_image}, ... ]}，无附件的编号不在 map 中。
+    分页 cursor 循环拉全量（OBS 单次 max_keys=1000）。
+    """
+    result: dict[str, list[dict]] = {}
+    for rk in repo_keys or []:
+        try:
+            from src.repo_key import split_owner_repo
+            owner, rname = split_owner_repo(rk)
+        except Exception as e:
+            log.warning(f"issues: attachments batch skip bad repo_key={rk}: {e}")
+            continue
+        try:
+            from src.storage import get_storage
+            from src.api.issues_center import _ATTACH_IMAGE_EXTS
+            import os as _os
+            storage = get_storage()
+            if storage:
+                from src.api.issues_center import _attach_obs_key
+                # 仓库级前缀：{PREFIX}/issue_attachments/{owner}/{repo}/
+                # list_objects_with_meta 返回的 key 已剥 OBS_PREFIX，形如
+                # issue_attachments/{owner}/{repo}/{issue_number}/{filename}
+                prefix_key = _attach_obs_key(owner, rname, "", "").rstrip("/")
+                _prefix = prefix_key.rsplit("issue_attachments/", 1)[-1]
+                _prefix = f"issue_attachments/{_prefix}".rstrip("/") + "/"
+                _items: list[dict] = []
+                _cursor: str | None = ""
+                while _cursor is not None:
+                    page, _cursor = storage.list_objects_with_meta(_prefix, cursor=_cursor, limit=1000)
+                    _items.extend(page or [])
+                for item in _items:
+                    # key 形如 issue_attachments/{owner}/{repo}/{issue_number}/{filename}
+                    rel = (item.get("key") or "")
+                    if rel.startswith(_prefix):
+                        rel = rel[len(_prefix):]
+                    parts = rel.split("/", 1)
+                    if len(parts) != 2 or not parts[0] or not parts[1]:
+                        continue
+                    num, fname = parts
+                    ext = _os.path.splitext(fname)[1].lower()
+                    result.setdefault(num, []).append({
+                        "filename": fname,
+                        "url": storage.temporary_url(item["key"], expires=7 * 24 * 3600),
+                        "size": item.get("size", 0),
+                        "is_image": ext in _ATTACH_IMAGE_EXTS,
+                    })
+            else:
+                # 本地磁盘后端：一次 listdir 顶层目录 = 全部 issue 编号
+                from src.api.issues_center import _attach_base_dir
+                from src.user.db import get_browser_callback_url as _bcb
+                _base_url = (_bcb() or "").rstrip("/")
+                base = _attach_base_dir(owner, rname, "")
+                if _os.path.isdir(base):
+                    for num in _os.listdir(base):
+                        d = _os.path.join(base, num)
+                        if not _os.path.isdir(d):
+                            continue
+                        for fname in sorted(_os.listdir(d)):
+                            fpath = _os.path.join(d, fname)
+                            if not _os.path.isfile(fpath):
+                                continue
+                            ext = _os.path.splitext(fname)[1].lower()
+                            result.setdefault(str(num), []).append({
+                                "filename": fname,
+                                "url": f"{_base_url}/static/issue_attachments/{owner}/{rname}/{num}/{fname}",
+                                "size": _os.path.getsize(fpath),
+                                "is_image": ext in _ATTACH_IMAGE_EXTS,
+                            })
+        except Exception as e:
+            log.warning(f"issues: attachments batch failed repo={rk}: {e}")
+            continue
+    return result
+
+
 def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
     """Issue #648：聚合 issue 附件（复用 issues_center._attach_list，不新建存储）。
 
@@ -2052,6 +2130,9 @@ def list_repo_issues(owner: str, repo: str,
     _numbers = [str(it.get("issue_number")) for it in issues if it.get("issue_number")]
     group_map = _group_events_by_issue(repo_keys, numbers=_numbers or None)
     stage_map = _issue_stage_map(repo_keys, numbers=_numbers or None)
+    # Issue #648 性能修复：附件改为按仓库前缀一次拉全量再内存分组（原逐卡一次 OBS list，
+    # 几百卡串行 = 十几秒），返回结构不变；PR 伪卡片编号错配仍在下方置 []。
+    _attach_map = _issue_attachments_batch(repo_keys)
     for it in issues:
         _num = it.get("issue_number")
         it["number"] = _num or it.get("number")
@@ -2082,7 +2163,7 @@ def list_repo_issues(owner: str, repo: str,
         # Issue #648：统一列表卡片带附件清单（无附件为 []，前端附件区直接消费）
         # PR 订阅伪卡片（is_pr_event）编号与 GitCode PR 对应，不是 issue 附件目录编号；
         # PR 号与同仓 issue 号重合时会命中错误附件目录，显式置 [] 防错配
-        it["attachments"] = [] if it.get("is_pr_event") else _issue_attachments([it.get("repo_key") or ""], _num)
+        it["attachments"] = [] if it.get("is_pr_event") else _attach_map.get(str(_num or ""), [])
 
     # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
     # Issue #542：分页模式下 PR 卡片只混入第 1 页（避免逐页重复）；has_more 按 issue 行数计算
