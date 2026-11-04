@@ -220,6 +220,35 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         prompt = _materialize_direct_workdir(
             ws, repo_key, agent_type, skill_name, evt, issue_id, prompt
         )
+        # Issue #887：direct 端执行前一致性硬校验——绑定 skill 未物化而工位本地缓存
+        # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。
+        _sv_887 = evt.get("_skill_consistency") or {}
+        if _sv_887.get("ok") is False:
+            _sv_reason = (_sv_887.get("reason")
+                          or "bound skill not materialized while local cache holds other skills")
+            log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] "
+                      f"skill consistency refused: {_sv_reason}")
+            if task_id:
+                try:
+                    from src.session_manager import db as _sdb, db_lock as _sdl
+                    with _sdl:
+                        _sc = _sdb.cursor()
+                        _sc.execute(
+                            "UPDATE agent_tasks SET status='failed', exit_code=1, "
+                            "result_text=?, errors=?, completed_at=? WHERE id=? "
+                            "AND status IN ('running','queued','dispatched')",
+                            (f"[skill_mismatch] {_sv_reason}", _sv_reason,
+                             datetime.utcnow().isoformat(), task_id))
+                        _sdb.commit()
+                except Exception as _se:
+                    log.warning(f"Exec agent: mark task failed failed: {_se}")
+            _fail_event(seq, _sv_reason, diag={
+                "code": "skill_mismatch",
+                "skill": _sv_887.get("bound") or skill_name or "",
+                "actual": _sv_887.get("actual") or "",
+                "agent_type": agent_type, "repo_key": repo_key,
+                "reason": _sv_reason[:300]})
+            return
         log.info(f"Exec agent: prompt built, {len(prompt)} chars, skill={skill_name or agent_type}: {prompt[:2000]}")
         # 回写 prompt 到 agent_tasks（direct 模式创建时 prompt 为空，此处补写）
         log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
@@ -266,6 +295,22 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 "time": datetime.utcnow().isoformat(),
                 "type": "skill_materialize",
                 "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
+            })
+    except Exception:
+        pass
+    # Issue #887：技能来源标注（绑定值 vs 实际值）落入事件 agent_logs
+    try:
+        _sk_src = evt.get("_skill_consistency") or {}
+        if _sk_src:
+            agent_logs.append({
+                "time": datetime.utcnow().isoformat(),
+                "type": "skill_source",
+                "msg": (f"skill source: bound={_sk_src.get('bound') or '-'} "
+                        f"actual={_sk_src.get('actual') or '-'} "
+                        f"source={_sk_src.get('source') or '-'} "
+                        f"ok={int(bool(_sk_src.get('ok')))}"
+                        + (f" reason={(_sk_src.get('reason') or '')[:200]}"
+                           if _sk_src.get("reason") else "")),
             })
     except Exception:
         pass

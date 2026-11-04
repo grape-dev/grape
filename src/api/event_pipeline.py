@@ -3805,6 +3805,15 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             else:
                 log.info(f"direct skill materialize {skill_name}: ok")
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
+        # Issue #887：direct 端执行前一致性校验（fail-fast 判定落 evt，_execute_agent
+        # 拒绝派发引擎）+ 来源标注（agent_logs）。绑定未物化且本地缓存存在其它技能 →
+        # ok=False（缓存不得覆盖绑定，拒绝执行）。
+        try:
+            from src.runtime.skill_materialize import verify_skill_execution_consistency
+            evt["_skill_consistency"] = verify_skill_execution_consistency(
+                skill_name or "", skill_dir)
+        except Exception as _sc_e:
+            log.warning(f"direct skill consistency verify failed: {_sc_e}")
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
         evt["_skill_materialize"] = {"status": "degraded", "detail": str(e), "skill_dir": ""}

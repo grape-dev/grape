@@ -1023,6 +1023,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # worker 端看门狗 + ACP 全局超时均任务级 env 优先，管理台/配置文件改后对新任务生效。
     for k, v in _runtime_timeout_env_kv().items():
         env.setdefault(k, v)
+    # Issue #887：任务 payload 携带按 agent 绑定（仓库级/场景级）解析的 skill——
+    # 执行侧一致性校验与任务日志「技能来源」标注的绑定基准值（worker 端 agent.py
+    # _skill_consistency_gate 消费；与任务行 skill 字段同源，此处注入保证可观测可见）。
+    env.setdefault("GRAPE_BOUND_SKILL", (skill or "").strip())
     # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
     # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
     # devops 事件任务无用户概念（user_id=0，仓库身份）。

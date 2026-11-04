@@ -2160,6 +2160,40 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
     return prompt
 
 
+async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, _res) -> dict | None:
+    """Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注。
+
+    校验「即将执行的 skill」与 agent 绑定（任务 skill 字段，仓库级/场景级绑定解析值）
+    一致；不一致（引擎本地缓存决定执行技能）→ 拒绝执行并显式报错（返回错误 dict，
+    调用方据此置任务 failed，不静默跑错流程）。绑定为空 → 放行（本地缓存仅此时兜底）。
+
+    无论放行与否，先向服务端上报技能来源标注日志（绑定值 vs 实际值，落任务日志）。
+    校验自身异常不阻断执行（降级放行 + 告警，与物化链路容错口径一致）。
+    """
+    try:
+        from src.runtime.skill_materialize import verify_skill_execution_consistency
+        from src.runtime.task_log_stream import build_skill_source_message
+        _sv = verify_skill_execution_consistency(
+            task.get("skill") or "", skill_dir, task.get("skill_fallback") or None)
+        try:
+            await client.report_messages(tid, [build_skill_source_message(
+                _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))])
+        except Exception as _rme:
+            log.warning(f"task {tid}: skill source log report failed: {_rme}")
+        if not _sv.get("ok"):
+            _reason = _sv.get("reason") or "skill consistency check failed"
+            log.error(f"[skill] task {tid} refused to execute: {_reason}")
+            try:
+                _res.dispose()
+            except Exception:
+                pass
+            return {"_error": f"[skill_mismatch] {_reason}", "_started": False}
+    except Exception as _sve:
+        log.warning(f"task {tid}: skill consistency verify failed (degraded pass): {_sve}")
+    return None
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -2332,6 +2366,12 @@ async def _execute_task(client, task, engine_name: str = ""):
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
     # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)
+    # Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注——绑定 skill 未物化
+    # 而本地缓存存在其它技能时拒绝执行（events seq=46108：绑定 caserun-prep 实际执行
+    # casegen-prep，静默跑错流程并跳过环境硬校验）。
+    _sv_err = await _skill_consistency_gate(client, tid, task, skill_dir, _res)
+    if _sv_err:
+        return _sv_err
     # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
     proj_dir = _os.path.join(cwd, ".project-info")
     try:

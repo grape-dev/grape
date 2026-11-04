@@ -63,3 +63,39 @@ def derive_local_runtime_health(installed: bool, healthy: bool) -> str:
     Issue #592：引擎选择弹窗全显失联的根因；与 settings._engine_health 口径统一。
     """
     return "online" if (installed and healthy) else "offline"
+
+
+def check_skill_consistency(bound_skill: str, actual_skill: str,
+                            declared: bool = False) -> dict:
+    """Issue #887：skill 一致性校验项（健康检查口径，服务端/worker 共用，零依赖）。
+
+    规则（对齐 Issue #887 Spec：fail-fast，仅绑定非空且不一致时拒绝）：
+    - bound 为空 → ok（引擎本地缓存仅绑定为空时兜底，source=unbound）；
+    - bound 非空且 actual == bound → ok；
+    - bound 非空且 actual != bound：
+      - declared=False（未声明的偏离，如引擎本地缓存决定执行技能）→ NOT ok（拒绝执行）；
+      - declared=True（服务端明示的回退，如 #617 官方检查器 skill_fallback）→ ok，
+        但 mismatch=True 显式标注（可观测，不静默）。
+
+    返回 {"name": "skill_consistency", "ok": bool, "mismatch": bool, "bound": str,
+          "actual": str, "detail": str}。
+    """
+    bound = (bound_skill or "").strip()
+    actual = (actual_skill or "").strip()
+    if not bound:
+        return {"name": "skill_consistency", "ok": True, "mismatch": False,
+                "bound": "", "actual": actual,
+                "detail": "no bound skill; engine local cache may apply as fallback only"}
+    if actual == bound:
+        return {"name": "skill_consistency", "ok": True, "mismatch": False,
+                "bound": bound, "actual": actual,
+                "detail": "actual skill matches agent binding"}
+    if declared:
+        return {"name": "skill_consistency", "ok": True, "mismatch": True,
+                "bound": bound, "actual": actual,
+                "detail": (f"declared fallback: bound '{bound}' resolved to declared "
+                           f"skill '{actual}' (server-sanctioned, Issue #617)")}
+    return {"name": "skill_consistency", "ok": False, "mismatch": True,
+            "bound": bound, "actual": actual,
+            "detail": (f"skill mismatch: bound '{bound}' but about to execute "
+                       f"'{actual}'; refusing execution (Issue #887)")}

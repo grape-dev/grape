@@ -351,6 +351,24 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
 
     log.info(f"Autopilot exec {exec_id}: starting direct agent={agent_type} engine={inst_name}")
 
+    # Issue #887：direct 端执行前技能一致性硬校验（fail-fast）——绑定 skill 未物化而
+    # 工位本地缓存存在其它技能时拒绝执行（显式报错，不静默跑错流程）。
+    try:
+        from src.runtime.skill_materialize import verify_skill_execution_consistency
+        _sv = verify_skill_execution_consistency(
+            skill_name or "", os.path.join(ws, ".skills"))
+        log.info(f"Autopilot exec {exec_id}: skill source bound={_sv.get('bound') or '-'} "
+                 f"actual={_sv.get('actual') or '-'} source={_sv.get('source')} "
+                 f"ok={int(bool(_sv.get('ok')))}")
+        if _sv.get("ok") is False:
+            _sv_reason = _sv.get("reason") or "skill consistency check failed"
+            log.error(f"Autopilot exec {exec_id}: skill consistency refused: {_sv_reason}")
+            _finalize_autopilot_task(task_id, exec_id, 1, f"[skill_mismatch] {_sv_reason}")
+            _update_execution_result(exec_id, "failed", error=f"[skill_mismatch] {_sv_reason}")
+            return
+    except Exception as _sc_e:
+        log.warning(f"Autopilot exec {exec_id}: skill consistency verify failed: {_sc_e}")
+
     exit_code = -1
     final_text = ""
 

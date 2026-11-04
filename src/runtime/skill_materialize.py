@@ -343,3 +343,77 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
     result["status"] = "degraded"
     result["detail"] = _fb_reason
     return result
+
+
+def _scan_materialized_skills(skill_dir: str) -> list:
+    """扫描 skill_dir 下已物化（含 SKILL.md）的技能名列表（Issue #887）。"""
+    skills = []
+    try:
+        for entry in sorted(os.listdir(skill_dir)):
+            if entry.startswith(TMP_PREFIX):
+                continue
+            if os.path.isfile(os.path.join(skill_dir, entry, "SKILL.md")):
+                skills.append(entry)
+    except Exception:
+        pass
+    return skills
+
+
+def verify_skill_execution_consistency(skill_name: str, skill_dir: str,
+                                       skill_fallback: dict | None = None) -> dict:
+    """Issue #887：执行前「即将执行的 skill」与 agent 绑定一致性校验（fail-fast 判定）。
+
+    服务端（event_pipeline._materialize_direct_workdir / scheduler direct）与
+    worker（agent.py _execute_task 执行前硬校验）两侧共用，零 DB 依赖。
+
+    语义（对齐 Issue #887 Spec）：
+    - 绑定 skill 已物化（skill_dir/<bound>/SKILL.md 存在）→ actual=bound，ok（source=bound）；
+    - 绑定为空 → ok（source=unbound，引擎本地缓存仅绑定为空时兜底）；
+    - 服务端明示回退（#617 claim 下发的 skill_fallback）已物化 → ok（source=declared_fallback，
+      mismatch=True 显式标注，不静默）；
+    - 绑定未物化且 skill_dir 本地缓存存在**其它**技能 → NOT ok（source=local_cache，
+      引擎将随本地缓存跑错技能——events seq=46108：绑定 caserun-prep 实际执行
+      casegen-prep，静默跳过环境硬校验；缓存不得覆盖仓库级/场景级绑定 → 拒绝执行）；
+    - 绑定未物化且无其它本地技能（仅 FALLBACK.md 降级指引/空目录）→ ok
+      （source=degraded_recovery，#607 权威取回路径，actual 仍为绑定值）。
+
+    返回 dict {"ok": bool, "bound": str, "actual": str, "source": str,
+               "reason": str, "local_cache": list}。
+    """
+    bound = (skill_name or "").strip()
+    result = {"ok": True, "bound": bound, "actual": bound,
+              "source": "bound", "reason": "", "local_cache": []}
+    if not bound:
+        result.update({"actual": "", "source": "unbound",
+                       "reason": "no bound skill; engine local cache may apply as fallback"})
+        return result
+    from src.runtime.health import check_skill_consistency
+    if os.path.isfile(os.path.join(skill_dir, bound, "SKILL.md")):
+        result["reason"] = "bound skill materialized"
+        return result
+    _fb_name = str(((skill_fallback or {}).get("skill_name")) or "").strip()
+    if _fb_name and os.path.isfile(os.path.join(skill_dir, _fb_name, "SKILL.md")):
+        _chk = check_skill_consistency(bound, _fb_name, declared=True)
+        result.update({"actual": _fb_name, "source": "declared_fallback",
+                       "ok": _chk["ok"], "reason": _chk["detail"]})
+        return result
+    # 绑定未物化：本地缓存若存在其它技能，执行将由缓存决定 → 拒绝（fail-fast）
+    _others = [s for s in _scan_materialized_skills(skill_dir) if s != bound]
+    if _others:
+        result.update({"ok": False, "actual": _others[0], "source": "local_cache",
+                       "reason": (f"bound skill '{bound}' not materialized while local skill "
+                                  f"cache holds other skill(s) [{', '.join(_others[:5])}]; "
+                                  f"refusing execution to prevent silent wrong-skill run "
+                                  f"(Issue #887)"),
+                       "local_cache": _others})
+        return result
+    if os.path.isfile(os.path.join(skill_dir, bound, FALLBACK_FILENAME)):
+        result.update({"source": "degraded_recovery",
+                       "reason": ("bound skill not materialized; FALLBACK.md instructs "
+                                  "authoritative fetch via `grape skills detail` "
+                                  "(Issue #607 recovery, actual stays bound)")})
+        return result
+    result.update({"source": "missing",
+                   "reason": "bound skill not materialized and no local cache content; "
+                             "prompt instructs authoritative fetch"})
+    return result
