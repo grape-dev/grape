@@ -4557,10 +4557,17 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     R20.29.4: redispatch 时 token 短路返回空 → 新 task 行 repo_gitcode_token=空 → agent 运行时实时获取。
     Issue #565: bot 建单只做场景判定（scene_id 已写库），不进执行棒——evt 带 _bot_opened
     标记时短路，不重派 VOD 执行流（不派 issue/coding 棒）。
+    2026-11-04 反转：默认放开（GRAPE_BOT_OPENED_FULL_PIPELINE=1），bot 建单推荐完成后
+    照常重派 VOD 跑完整流水线；仅当开关显式置 0 时回退旧的 scene-only 短路。
     """
-    if evt.get("_bot_opened"):
-        log.info(f"智能推荐完成: bot-opened issue {issue_id}, scene-only, skip redispatch (Issue #565)")
+    from src.config import GRAPE_BOT_OPENED_FULL_PIPELINE as _bot_full_pipeline
+    if evt.get("_bot_opened") and not _bot_full_pipeline:
+        log.info(f"智能推荐完成: bot-opened issue {issue_id}, scene-only, skip redispatch (Issue #565, "
+                 f"GRAPE_BOT_OPENED_FULL_PIPELINE=0)")
         return
+    if evt.get("_bot_opened"):
+        log.info(f"智能推荐完成: bot-opened issue {issue_id}, full pipeline enabled "
+                 f"(GRAPE_BOT_OPENED_FULL_PIPELINE=1), redispatch VOD")
     from src.api.event_store import append_event
     from src.runtime.engine_select import pick_engine, engine_name
     from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT

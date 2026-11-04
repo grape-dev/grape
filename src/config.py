@@ -835,6 +835,13 @@ BWRAP_RW_ENGINE = {
 GRAPE_TRANSIENT_RETRY_MAX = max(0, int(os.environ.get("GRAPE_TRANSIENT_RETRY_MAX", "3") or 3))
 GRAPE_TRANSIENT_RETRY_BASE = max(1, int(os.environ.get("GRAPE_TRANSIENT_RETRY_BASE", "10") or 10))
 
+# ===== bot 建单：智能推荐完成后是否进入完整流水线（Issue #565 反转开关，2026-11-04）=====
+# 旧行为（Issue #565）：bot 建单只做场景判定，scene_id 写库后短路，不重派 VOD 执行棒。
+# 现默认放开：推荐完成即按场景重派 VOD，继续跑完整流水线（issue/coding/qa/sre）。
+# 置 0/false/off 可回退到旧的 scene-only 行为；评论族自循环拦截不受本开关影响。
+GRAPE_BOT_OPENED_FULL_PIPELINE = os.environ.get(
+    "GRAPE_BOT_OPENED_FULL_PIPELINE", "1").strip().lower() in ("1", "true", "on", "yes")
+
 # ===== Admin Console =====
 ADMIN_CONSOLE_URL = os.environ.get("ADMIN_CONSOLE_URL", "").rstrip("/")
 ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")
