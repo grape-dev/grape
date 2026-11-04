@@ -1,7 +1,7 @@
 {
   "title": "Automation",
   "tpl_issue_patrol_t": "Issue Board Patrol",
-  "tpl_issue_patrol_d": "Check stale issues daily, remind to update or close",
+  "tpl_issue_patrol_d": "Daily stale issue check; dual-dimension dedup (title + root cause), suspected duplicates need owner confirmation",
   "tpl_pr_review_t": "PR Review Reminder",
   "tpl_pr_review_d": "Flag overdue PRs needing review",
   "tpl_bug_triage_t": "Bug Triage",
@@ -229,6 +229,7 @@
     "load_failed": "Failed to load issues",
     "no_records": "No issue records",
     "dispatched_badge": "Dispatched",
+    "suspected_dup_badge": "Suspected duplicate (pending owner confirmation)",
     "list_title": "Issues (Run #{{id}})",
     "load_detail_failed": "Failed to load issue details: {{msg}}"
   },

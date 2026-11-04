@@ -25,6 +25,12 @@ router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 # agent_type 不再由用户选择，内部固定为 'issue'
 _FIXED_AGENT_TYPE = "issue"
 
+# Issue #697：巡检重复判定双维度规则（根因三要素比对），与巡检执行 prompt 共用同一事实源
+try:
+    from src.runtime.scheduler import AUTOPILOT_DEDUP_RULE
+except Exception:  # scheduler 不可达时兜底为空，润色 prompt 退化为旧行为
+    AUTOPILOT_DEDUP_RULE = ""
+
 
 def _validate_cron(cron_expr: str) -> bool:
     """校验 cron 表达式格式（5 段制）。"""
@@ -607,11 +613,53 @@ class DispatchBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     scene_id: Optional[str] = None
+    # Issue #697：疑似重复（suspected_duplicate）需跟踪单 owner agent 确认后方可并入挂靠
+    dedup_confirmed: bool = False
+    dedup_confirmed_by: str = ""
+
+
+# Issue #697：判定级别常量（与 scheduler.AUTOPILOT_DEDUP_RULE 的输出契约一致）
+_DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+
+
+def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
+    """疑似重复派发门禁（Issue #697）。
+
+    dedup_level=suspected_duplicate 且未经 owner 确认（dedup_confirmed != true）时，
+    拒绝派发挂靠（409），防止仅标题相似即误并乃至级联关闭独立跟踪线。
+    确认后由调用方将 dedup_confirmed 落回 findings_json。
+    """
+    if str(finding.get("dedup_level") or "") != _DEDUP_LEVEL_SUSPECTED:
+        return
+    if not (dedup_confirmed or finding.get("dedup_confirmed")):
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": "疑似重复（suspected_duplicate）：根因比对不一致，"
+                       "需跟踪单 owner agent 确认后方可派发并入；确认后携带 dedup_confirmed=true 重试",
+            "dedup_level": _DEDUP_LEVEL_SUSPECTED,
+            "dedup_note": finding.get("dedup_note", ""),
+        })
+
+
+def _append_dedup_note(description: str, finding: dict) -> str:
+    """Issue #697：派发描述追加判定级别与差异说明，保留根因对比证据链。"""
+    level = str(finding.get("dedup_level") or "").strip()
+    if not level:
+        return description
+    note = str(finding.get("dedup_note") or "").strip()
+    lines = [description.rstrip(), "", f"[dedup] level={level}"]
+    if note:
+        lines.append(f"[dedup] 差异说明: {note}")
+    if level == _DEDUP_LEVEL_SUSPECTED:
+        lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入；级联关闭不自动触发")
+    return "\n".join(lines)
 
 
 async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                  title: str = "", description: str = "",
-                                 scene_id: str = "", user: dict = None):
+                                 scene_id: str = "", user: dict = None,
+                                 dedup_confirmed: bool = False,
+                                 dedup_confirmed_by: str = ""):
     """派发核心逻辑（autopilot-feishu-subscription-design.md §4.7）。
 
     从路由 dispatch_finding 抽出，供 Web 路由与飞书 /finding-dispatch handler 共用，
@@ -649,6 +697,15 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                                      "message": f"已派发过 (Issue #{finding['dispatched_issue_number']})",
                                                      "issue_number": finding["dispatched_issue_number"]})
 
+    # Issue #697：疑似重复（根因不一致）未经 owner 确认 → 拒绝派发挂靠
+    _dedup_dispatch_guard(finding, dedup_confirmed)
+
+    # Issue #697：owner 确认后落库标记，防止后续重复确认/误判链重启
+    if dedup_confirmed and not finding.get("dedup_confirmed"):
+        finding["dedup_confirmed"] = True
+        if dedup_confirmed_by:
+            finding["dedup_confirmed_by"] = dedup_confirmed_by
+
     # 创建真实 Issue（调用方传的 title/desc/scene_id 优先，否则用 finding 原值）
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
@@ -671,7 +728,7 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     issue_body = TaskCreateBody(
         repo_key=repo_key,
         title=title or finding["title"],
-        description=description or finding.get("description", ""),
+        description=_append_dedup_note(description or finding.get("description", ""), finding),
         scene_id=scene_id or "",
     )
     internal_user = {"id": (user or {}).get("id", 0),
@@ -703,7 +760,9 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
     # 权限/仓库校验后走共用核心（权限模型与路由原本一致）
     return await _dispatch_finding_core(exec_id, body.finding_id,
                                         body.title or "", body.description or "",
-                                        body.scene_id or "", user=user)
+                                        body.scene_id or "", user=user,
+                                        dedup_confirmed=bool(body.dedup_confirmed),
+                                        dedup_confirmed_by=body.dedup_confirmed_by or "")
 
 
 # ====== 飞书订阅（autopilot-feishu-subscription-design.md §4.3）======
@@ -832,6 +891,9 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 2. 明确期望的输出或完成标准
 3. 不要扩展用户意图之外的内容
 4. 输出纯文本，不要 markdown 标题语法（不要用 #）
+5. 若指令涉及重复/相似问题判定与并入，必须保留并强化以下双维度门禁（原文照抄进优化结果）：
+
+{AUTOPILOT_DEDUP_RULE}
 
 任务名称：{body.name}
 初步指令：

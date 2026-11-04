@@ -108,6 +108,20 @@ def _heal_findings_marker(text: str) -> str:
     return text
 
 
+# Issue #697：巡检重复判定双维度规则（根因三要素比对 + 三级判定 + owner 确认 + 级联关闭守护）。
+# 同时注入巡检执行 prompt 与润色 prompt（routes/autopilot.py 复用），保持单一事实源。
+AUTOPILOT_DEDUP_RULE = """## 重复判定双维度门禁（Issue #697）
+判定两个 Issue/问题是否重复时，禁止仅凭标题相似度下结论，必须逐一比对根因三要素：
+1. 报错信息（error message 原文）
+2. 根因描述（root cause 结论）
+3. 涉及命令与参数（command + args）
+输出分级结论之一：
+- exact_duplicate：标题相似且根因三要素一致，才可判定完全重复（允许自动并入挂靠）
+- suspected_duplicate：仅标题相似而任一要素不一致 → 疑似重复，列出差异点，通知跟踪单 owner agent 确认后方可并入，禁止自动挂靠
+- not_duplicate：不重复
+级联关闭守护：resolve 级联关闭仅对「exact_duplicate（已确认）」生效；suspected_duplicate 在 owner 确认前不得触发级联关闭。"""
+
+
 def parse_findings(agent_output: str) -> dict:
     """从 agent 产出中解析问题列表。
 
@@ -160,6 +174,9 @@ def parse_findings(agent_output: str) -> dict:
             f.setdefault("severity", "medium")
             f.setdefault("suggested_assignee", "coding")
             f.setdefault("suggested_skill", "implementation")
+            # Issue #697：判定级别与差异说明透传（exact_duplicate/suspected_duplicate/not_duplicate）
+            f.setdefault("dedup_level", "")
+            f.setdefault("dedup_note", "")
             valid.append(f)
         return {
             "result": data.get("result", ""),
@@ -214,6 +231,7 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
         parts.append("")
 
     parts.append("\n请执行以上任务指令，分析仓库代码/依赖/文档/配置等。")
+    parts.append("\n\n" + AUTOPILOT_DEDUP_RULE + "\n")
     parts.append("\n## 输出格式要求\n")
     parts.append(_FINDINGS_FORMAT_TEMPLATE)
     parts.append("\n## 项目知识\n")

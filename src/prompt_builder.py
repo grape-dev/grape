@@ -82,6 +82,23 @@ _KNOWLEDGE_INJECT_MAX_CHARS = 8000
 
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
+# Issue #697：判重双维度门禁（注入 issue summary 之后，随反馈分诊判重路径生效）。
+# 历史误并案例：#446 vs #126（根因分别为 --repo 参数报错/降级指引缺失、注入 ID 404）、#179、#277。
+ISSUE_DEDUP_ROOT_CAUSE_RULE = (
+    "\n## 重复判定双维度门禁（Issue #697）\n"
+    "判定本 Issue 与上述已有 Issue 是否重复时，禁止仅凭标题相似度下结论，必须逐一比对根因三要素：\n"
+    "1. 报错信息（error message 原文）\n"
+    "2. 根因描述（root cause 结论）\n"
+    "3. 涉及命令与参数（command + args）\n"
+    "分级结论：\n"
+    "- 完全重复：标题相似且根因三要素一致，才可并入挂靠（mark-duplicate）\n"
+    "- 疑似重复：仅标题相似而任一要素不一致 → 降级为疑似重复，列出差异点，"
+    "通知跟踪单 owner agent 确认后方可并入，禁止自动挂靠\n"
+    "- 不重复：独立跟踪，正常流转\n"
+    "级联关闭守护：resolve 级联关闭仅对「完全重复（已确认）」生效；"
+    "疑似重复在 owner 确认前不得触发级联关闭，避免误关独立跟踪线。\n"
+)
+
 
 def _build_project_info_section(repo_key: str, agent_type: str = "",
                                 issue_num: int = 0, scene_id: str = "") -> str:
@@ -777,6 +794,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                 )
             else:
                 parts.append(issue_summary)
+                # Issue #697：反馈分诊判重路径注入双维度门禁（根因三要素比对 + 疑似重复降级）
+                parts.append(ISSUE_DEDUP_ROOT_CAUSE_RULE)
     except Exception:
         pass
 

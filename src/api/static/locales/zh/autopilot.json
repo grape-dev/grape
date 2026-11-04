@@ -1,7 +1,7 @@
 {
   "title": "自动化",
   "tpl_issue_patrol_t": "Issue看板巡检",
-  "tpl_issue_patrol_d": "每日检查stale issue，提醒更新或关闭",
+  "tpl_issue_patrol_d": "每日检查stale issue，双维度判重（标题+根因三要素），疑似重复需owner确认",
   "tpl_pr_review_t": "PR审查提醒",
   "tpl_pr_review_d": "标记需要 Review 的过期 PR",
   "tpl_bug_triage_t": "Bug 分拣",
@@ -229,6 +229,7 @@
     "load_failed": "加载问题失败",
     "no_records": "暂无问题记录",
     "dispatched_badge": "已派发",
+    "suspected_dup_badge": "疑似重复（待owner确认）",
     "list_title": "问题列表 (执行 #{{id}})",
     "load_detail_failed": "加载问题详情失败: {{msg}}"
   },
