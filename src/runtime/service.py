@@ -1025,8 +1025,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         env.setdefault(k, v)
     # Issue #887：任务 payload 携带按 agent 绑定（仓库级/场景级）解析的 skill——
     # 执行侧一致性校验与任务日志「技能来源」标注的绑定基准值（worker 端 agent.py
-    # _skill_consistency_gate 消费；与任务行 skill 字段同源，此处注入保证可观测可见）。
-    env.setdefault("GRAPE_BOUND_SKILL", (skill or "").strip())
+    # _skill_consistency_gate 与 env 双源互校消费；与任务行 skill 字段同源）。
+    # QA 修复：直接赋值（非 setdefault）——env_extra 不得预置覆盖绑定基准，
+    # 否则可观测标注失真且双源互校永远一致（假阴性）。
+    env["GRAPE_BOUND_SKILL"] = (skill or "").strip()
     # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
     # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
     # devops 事件任务无用户概念（user_id=0，仓库身份）。

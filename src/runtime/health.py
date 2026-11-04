@@ -99,3 +99,45 @@ def check_skill_consistency(bound_skill: str, actual_skill: str,
             "bound": bound, "actual": actual,
             "detail": (f"skill mismatch: bound '{bound}' but about to execute "
                        f"'{actual}'; refusing execution (Issue #887)")}
+
+
+def aggregate_skill_consistency(days: int = 7) -> dict:
+    """Issue #887（QA AC4）：skill 一致性健康检查汇总项。
+
+    统计近 N 天因 [skill_mismatch] 被拒绝执行的任务数（agent_tasks.result_text
+    前缀），供 /readyz 与 /api/health 端点消费——校验逻辑本身已在执行链路
+    fail-fast（verify_skill_execution_consistency），此处是聚合可观测口径：
+    出现拒绝记录说明门禁真实拦截过绑定漂移（不静默），持续新增则提示环境
+    存在残留缓存/绑定配置问题需排查。
+
+    返回 {"name": "skill_consistency", "status": "ok"|"warn",
+          "refused_recent": int, "window_days": int, "detail": str}。
+    查询失败降级 status=unknown，绝不阻断健康端点。
+    """
+    out = {"name": "skill_consistency", "status": "unknown", "refused_recent": 0,
+           "window_days": int(days), "detail": ""}
+    try:
+        from datetime import timedelta
+        from src.session_manager import db, db_lock
+        _since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT COUNT(*) FROM agent_tasks "
+                "WHERE status='failed' AND result_text LIKE '[skill_mismatch]%' "
+                "AND completed_at >= ?", (_since,))
+            n = int(c.fetchone()[0] or 0)
+        out["refused_recent"] = n
+        if n:
+            out["status"] = "warn"
+            out["detail"] = (f"{n} task(s) refused by skill consistency gate in last "
+                             f"{int(days)}d (bound-skill drift intercepted; check "
+                             f"workspace/engine skill cache residue)")
+        else:
+            out["status"] = "ok"
+            out["detail"] = (f"no skill-mismatch refusals in last {int(days)}d "
+                             f"(Issue #887 gate active)")
+        return out
+    except Exception as e:
+        out["detail"] = f"skill consistency aggregate failed: {e}"
+        return out

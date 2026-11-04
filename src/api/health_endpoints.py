@@ -94,6 +94,18 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
                 checks["tables"] = "error: agent_tasks missing"
                 status = "not_ready"
                 http_status = 503
+        # Issue #887：skill 一致性门禁聚合项（近 N 天 [skill_mismatch] 拒绝数，AC4）。
+        # 非阻断（warn 不改 readiness 终态，仅标记 degraded 告警）。
+        try:
+            from src.runtime.health import aggregate_skill_consistency as _agg_sk
+            _sk_agg = _agg_sk()
+            checks["skill_consistency"] = _sk_agg.get("status", "unknown")
+            if _sk_agg.get("status") == "warn":
+                checks["skill_consistency"] = f"warn: {_sk_agg.get('detail', '')}"
+                if status == "ok":
+                    status = "degraded"
+        except Exception as _ske:
+            checks["skill_consistency"] = f"error: {_ske}"
         resp = JSONResponse(
             status_code=http_status,
             content={"status": status, "checks": checks, "service": service_name},

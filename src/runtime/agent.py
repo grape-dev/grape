@@ -2009,6 +2009,14 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                 if _ok:
                     _env["DEVOPS_SKILLS_DIR"] = _skill_dir
                     if _dst_name != _skill_name:
+                        # Issue #887（QA 修复）：物化名≠绑定名时回写 task.skill_fallback，
+                        # 使 _skill_consistency_gate 将其识别为 declared_fallback
+                        # （ok + mismatch 显式标注），而非 local_cache 残留自相矛盾拒绝。
+                        try:
+                            _task["skill_fallback"] = {
+                                "skill_name": _dst_name, "skill_id": _fb_id}
+                        except Exception:
+                            pass
                         return {"status": "fallback", "detail": (
                             f"skill '{_skill_name}' not found; materialized official checker "
                             f"'{_dst_name}' (fetch via `grape skills detail --skill_id {_fb_id}`) "
@@ -2160,21 +2168,62 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
     return prompt
 
 
-async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, _res) -> dict | None:
+async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, _res,
+                                  env: dict | None = None,
+                                  engine_name: str = "") -> dict | None:
     """Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注。
 
     校验「即将执行的 skill」与 agent 绑定（任务 skill 字段，仓库级/场景级绑定解析值）
     一致；不一致（引擎本地缓存决定执行技能）→ 拒绝执行并显式报错（返回错误 dict，
     调用方据此置任务 failed，不静默跑错流程）。绑定为空 → 放行（本地缓存仅此时兜底）。
 
+    扫描范围（QA 修复）：任务技能目录（cwd/.skills）+ 引擎原生技能目录
+    （engine_skill_dirs，按 engine_name 推导后端）——seq=46108 的残留若落在
+    引擎原生缓存而非 ws/.skills，仅扫 .skills 会漏检。
+
+    双源互校（QA 修复）：env GRAPE_BOUND_SKILL（service.enqueue_task 注入的绑定
+    基准）与 task["skill"] 不一致 → 拒绝（绑定基准被覆盖/漂移，可观测标注失真）；
+    task["skill"] 为空时以 env 值兜底。
+
     无论放行与否，先向服务端上报技能来源标注日志（绑定值 vs 实际值，落任务日志）。
     校验自身异常不阻断执行（降级放行 + 告警，与物化链路容错口径一致）。
     """
     try:
-        from src.runtime.skill_materialize import verify_skill_execution_consistency
+        from src.runtime.skill_materialize import (verify_skill_execution_consistency,
+                                                   skill_mismatch_error)
         from src.runtime.task_log_stream import build_skill_source_message
+        # 双源互校：task["skill"]（绑定基准权威源）vs env GRAPE_BOUND_SKILL（下发镜像）
+        _bound_task = (task.get("skill") or "").strip()
+        _bound_env = ((env or {}).get("GRAPE_BOUND_SKILL") or "").strip()
+        if _bound_task and _bound_env and _bound_task != _bound_env:
+            _x_reason = (f"bound skill sources disagree: task.skill='{_bound_task}' "
+                         f"but env GRAPE_BOUND_SKILL='{_bound_env}'; refusing execution "
+                         f"to prevent wrong-skill run (Issue #887)")
+            log.error(f"[skill] task {tid} refused to execute: {_x_reason}")
+            try:
+                await client.report_messages(tid, [build_skill_source_message(
+                    _bound_task, _bound_env, "env_conflict",
+                    ok=False, reason=_x_reason)])
+            except Exception as _rme:
+                log.warning(f"task {tid}: skill source log report failed: {_rme}")
+            try:
+                _res.dispose()
+            except Exception:
+                pass
+            return {"_error": f"[skill_mismatch] {_x_reason}", "_started": False}
+        if not _bound_task and _bound_env:
+            task = dict(task)
+            task["skill"] = _bound_env
+        # 引擎原生技能目录（跨平台，见 os_adapter.engine_skill_dirs）
+        _extra_dirs: list[str] = []
+        try:
+            from src.runtime.os_adapter import engine_skill_dirs as _esd
+            _extra_dirs = _esd(_backend_for_engine(engine_name))
+        except Exception as _ede:
+            log.warning(f"task {tid}: engine skill dirs resolve failed: {_ede}")
         _sv = verify_skill_execution_consistency(
-            task.get("skill") or "", skill_dir, task.get("skill_fallback") or None)
+            task.get("skill") or "", skill_dir, task.get("skill_fallback") or None,
+            extra_scan_dirs=_extra_dirs)
         try:
             await client.report_messages(tid, [build_skill_source_message(
                 _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
@@ -2182,13 +2231,13 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
         except Exception as _rme:
             log.warning(f"task {tid}: skill source log report failed: {_rme}")
         if not _sv.get("ok"):
-            _reason = _sv.get("reason") or "skill consistency check failed"
-            log.error(f"[skill] task {tid} refused to execute: {_reason}")
+            _err = skill_mismatch_error(_sv)
+            log.error(f"[skill] task {tid} refused to execute: {_err}")
             try:
                 _res.dispose()
             except Exception:
                 pass
-            return {"_error": f"[skill_mismatch] {_reason}", "_started": False}
+            return {"_error": _err, "_started": False}
     except Exception as _sve:
         log.warning(f"task {tid}: skill consistency verify failed (degraded pass): {_sve}")
     return None
@@ -2368,8 +2417,10 @@ async def _execute_task(client, task, engine_name: str = ""):
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)
     # Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注——绑定 skill 未物化
     # 而本地缓存存在其它技能时拒绝执行（events seq=46108：绑定 caserun-prep 实际执行
-    # casegen-prep，静默跑错流程并跳过环境硬校验）。
-    _sv_err = await _skill_consistency_gate(client, tid, task, skill_dir, _res)
+    # casegen-prep，静默跑错流程并跳过环境硬校验）。扫描范围含引擎原生技能目录，
+    # 并与 env GRAPE_BOUND_SKILL 双源互校。
+    _sv_err = await _skill_consistency_gate(client, tid, task, skill_dir, _res,
+                                            env=env, engine_name=engine_name)
     if _sv_err:
         return _sv_err
     # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
