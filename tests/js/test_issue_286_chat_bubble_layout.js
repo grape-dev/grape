@@ -32,19 +32,17 @@ function testChatJsUserRight() {
   );
   console.log('  ✓ 历史会话加载：用户 → msg r，agent → msg l');
 
-  // 实时发送：用户消息
-  assert.ok(
-    js.includes("'<div class=\"msg r\">' + displayMsg"),
-    '实时发送：用户消息应为 msg r'
-  );
-  console.log('  ✓ 实时发送：用户消息 → msg r');
+  // 实时发送：用户消息（#442 后统一走 _userMsgHtml 助手，带 data-msg-id + 撤回入口）
+  assert.ok(/_userMsgHtml\(/.test(js), '实时发送应通过 _userMsgHtml 渲染用户气泡');
+  assert.ok(/class=\\?"msg r/.test(js), '实时发送：用户气泡 class 应为 msg r');
+  console.log('  ✓ 实时发送：用户消息 → _userMsgHtml → msg r');
 
-  // renderChatMessages：用户消息
-  assert.ok(
-    js.includes("'<div class=\"msg r\">' + escaped"),
-    'renderChatMessages：用户消息应为 msg r'
-  );
-  console.log('  ✓ renderChatMessages：用户消息 → msg r');
+  // renderChatMessages：用户消息（同样走 _userMsgHtml 助手）
+  const renderIdx = js.indexOf('function renderChatMessages');
+  assert.ok(renderIdx > -1, '应存在 renderChatMessages');
+  const renderBody = js.substring(renderIdx, renderIdx + 4000);
+  assert.ok(/_userMsgHtml\(/.test(renderBody), 'renderChatMessages 应通过 _userMsgHtml 渲染用户气泡');
+  console.log('  ✓ renderChatMessages：用户消息 → _userMsgHtml → msg r');
 }
 
 function testChatJsAgentLeft() {
@@ -57,13 +55,17 @@ function testChatJsAgentLeft() {
   );
   console.log('  ✓ renderChatMessages：agent 消息 → msg l');
 
-  // agent 占位气泡（发送后/任务恢复）不应再使用 msg r
-  const placeholders = js.match(/class=\\"msg [lr]\\" id=/g) || js.match(/class="msg [lr]" id=/g) || [];
-  assert.ok(placeholders.length >= 3, '应存在多处 agent 占位气泡渲染点');
-  placeholders.forEach(p => {
-    assert.ok(p.includes('msg l'), `agent 占位气泡应为 msg l，实际: ${p}`);
+  // agent 占位气泡（发送后/任务恢复）不应再使用 msg r。
+  // 精确判定：带 id 的 msg r 只允许出现在「用户气泡」构造点（变量名含 user/userBubble），
+  // agent 占位用的是 elId / tid 这类运行时 id。
+  const rIds = [...js.matchAll(/class="msg r" id="' \+ ([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+  assert.ok(rIds.length >= 1, '应存在用户气泡 msg r 构造点');
+  rIds.forEach((v) => {
+    assert.ok(/user/i.test(v), 'msg r 构造点应用于用户气泡，实际变量 ' + v);
   });
-  console.log(`  ✓ agent 占位气泡（${placeholders.length} 处）全部为 msg l`);
+  const lIds = [...js.matchAll(/class="msg l" id="' \+ ([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+  assert.ok(lIds.length >= 2, '应存在多处 agent 占位气泡（msg l）构造点');
+  console.log('  ✓ agent 占位气泡（' + lIds.length + ' 处）全部为 msg l；用户气泡仅 msg r');
 }
 
 function testAppCss() {

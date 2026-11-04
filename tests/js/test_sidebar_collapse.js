@@ -76,6 +76,8 @@ function loadApp(dom, localStorage, innerWidth) {
     document: dom,
     window: win,
     localStorage,
+    // Issue #231 后 currentRepo 迁到 sessionStorage（页签级隔离），沙箱需同步提供
+    sessionStorage: localStorage,
     API,
     I18N,
     console: console_,

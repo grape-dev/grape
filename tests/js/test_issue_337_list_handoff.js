@@ -107,7 +107,10 @@ test('locales zh/en cross_pipeline 新词条存在', () => {
 // ─── 测试 9：index.html 版本号已提升 ───
 test('index.html issues.js 版本号已提升（缓存刷新）', () => {
   const html = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
-  assert.ok(html.indexOf('issues.js?v=122') >= 0, 'issues.js 版本号应为 v=114');
+  // 版本号随迭代递增，断言只锁“不低于该 issue 引入时的基线”
+  const vm2 = /issues\.js\?v=(\d+)/.exec(html);
+  assert.ok(vm2, 'issues.js 应带 ?v= 版本参数');
+  assert.ok(parseInt(vm2[1], 10) >= 122, 'issues.js 版本号应 >= 122，实际 ' + vm2[1]);
 });
 
 // ─── 测试 10：语法完整性 ───

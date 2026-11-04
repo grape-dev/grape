@@ -54,7 +54,7 @@ function buildSandbox(opts) {
       if (id === 'convList') return {innerHTML: '', _html: ''};
       if (id === 'pageContent') return {innerHTML: ''};
       if (id === 'chatBody') return {innerHTML: '', scrollTop: 0, scrollHeight: 0};
-      if (id === 'chatInput') return {disabled: false};
+      if (id === 'chatInput') return {disabled: false, style: {}, scrollHeight: 0, value: ''};
       if (id === 'chatImgPreview') return {style: {display: 'none'}};
       return null;
     },
@@ -85,7 +85,7 @@ function buildSandbox(opts) {
       if (!_chatBodyEl) _chatBodyEl = {innerHTML: '', scrollTop: 0, scrollHeight: 0};
       return _chatBodyEl;
     }
-    if (id === 'chatInput') return {disabled: false, addEventListener(){}};
+    if (id === 'chatInput') return {disabled: false, addEventListener(){}, style: {}, scrollHeight: 0, value: ''};
     if (id === 'chatImgPreview') return {style: {display: 'none'}};
     if (id === 'chatModelBtn') return {classList: {add(){}, remove(){}}, getBoundingClientRect: function(){return {top:0,left:0};}};
     if (id === 'chatSkillBtn') return {classList: {add(){}, remove(){}}, getBoundingClientRect: function(){return {top:0,left:0};}};

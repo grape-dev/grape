@@ -43,7 +43,7 @@ function buildSandbox(opts) {
   var docStub = {
     getElementById: function(id) {
       if (id === 'chatBody') return bodyEl;
-      if (id === 'chatInput') return {disabled: false, addEventListener: function(){}};
+      if (id === 'chatInput') return {disabled: false, addEventListener: function(){}, style: {}, scrollHeight: 0, value: ''};
       if (id === 'convList') return {innerHTML: '', _html: ''};
       if (id === 'pageContent') return {innerHTML: ''};
       if (id === 'chatImgPreview') return {style: {display: 'none'}};
@@ -77,8 +77,13 @@ function buildSandbox(opts) {
         if (url.indexOf('/chat/conversations') !== -1) {
           return Promise.resolve({conversations: opts.conversations || []});
         }
+        // 任务状态探测由 fetch 改为 API.get('/chat/task/<id>/status')（Issue #407 后）
+        if (url.indexOf('/chat/task/') !== -1 && url.indexOf('/status') !== -1) {
+          return Promise.resolve({status: opts.status || 'done'});
+        }
         return Promise.resolve({});
       },
+      ensureTokenValid: function() { return Promise.resolve(''); },
       post: function() { return Promise.resolve({}); },
       put: function() { return Promise.resolve({}); },
       del: function() { return Promise.resolve({}); },

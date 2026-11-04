@@ -36,6 +36,9 @@ function makeDom() {
       addEventListener: () => {},
       nextElementSibling: null,
       closest: () => null,
+      options: [],
+      selectedIndex: -1,
+      dataset: {},
     };
   }
   const dom = {
@@ -137,10 +140,8 @@ function seedRepo(ls) {
 }
 
 let passed = 0, failed = 0;
-function test(name, fn) {
-  try { fn(); passed++; console.log('  ✓ ' + name); }
-  catch(e) { failed++; console.log('  ✗ ' + name + '\n    ' + e.message); }
-}
+const _queue = [];
+function test(name, fn) { _queue.push([name, fn]); }
 
 console.log('Issue #273: /en/ 前缀下 F5 刷新保持当前视图 — 回归测试\n');
 
@@ -155,13 +156,15 @@ test('loadRepos: pathname=/en/app/ + hash=#settings/credentials → 恢复 setti
 });
 
 // ─── 测试 2：/en/app/ + #settings/credentials → init() 恢复（含 param）───
-test('init: pathname=/en/app/ + hash=#settings/credentials → 恢复 settings + param=credentials', () => {
+test('init: pathname=/en/app/ + hash=#settings/credentials → 恢复 settings + param=credentials', async () => {
   var { dom, localStorage: ls } = makeDom();
   seedRepo(ls);
   ls.setItem('token', 'test-token');
   ls.setItem('app_cache_ver', '36');
   var { app, window: win } = loadApp(dom, ls, { hash: '#settings/credentials', pathname: '/en/app/', lang: 'en' });
   app.init();
+  // 等 loadProfile → _restoreNavAfterLogin 的微任务链跑完
+  for (var i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   assert.strictEqual(win._currentView, 'settings',
     'init() 在 /en/ 前缀下应恢复 settings 视图，实际为 ' + win._currentView);
   assert.strictEqual(String(win._currentParam), 'credentials',
@@ -198,5 +201,13 @@ test('loadRepos: pathname=/en/ + 无 hash → 回退默认 dash', () => {
     '/en/ 前缀无 hash 应回退 dash，实际为 ' + win._currentView);
 });
 
-console.log('\n' + passed + ' passed, ' + failed + ' failed');
-process.exit(failed > 0 ? 1 : 0);
+(async () => {
+  // init()/loadRepos() 内部是异步链路（loadProfile → 路由恢复），必须逐条 await
+  for (const [name, fn] of _queue) {
+    try { await fn(); passed++; console.log('  ✓ ' + name); }
+    catch (e) { failed++; console.log('  ✗ ' + name + '\n    ' + e.message); }
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  console.log('\n' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed > 0 ? 1 : 0);
+})();

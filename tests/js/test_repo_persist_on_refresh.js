@@ -31,6 +31,9 @@ function makeDom() {
       addEventListener: () => {},
       nextElementSibling: null,
       closest: () => null,
+      options: [],
+      selectedIndex: -1,
+      dataset: {},
     };
   }
   const dom = {
@@ -70,6 +73,7 @@ function loadApp(dom, localStorage) {
     document: dom,
     window,
     localStorage,
+    sessionStorage: localStorage,  // Issue #231：currentRepo 迁到 sessionStorage（页签级隔离）
     API,
     I18N,
     console: console_,

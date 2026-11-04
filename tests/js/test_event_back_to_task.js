@@ -61,6 +61,14 @@ function buildSandbox() {
       removeItem(k) { delete this._store[k]; },
       clear() { this._store = {}; },
     },
+    // Issue #231：currentRepo 走 sessionStorage（页签级隔离），沙箱同步提供
+    sessionStorage: {
+      _store: {},
+      getItem(k) { return this._store[k] || null; },
+      setItem(k, v) { this._store[k] = String(v); },
+      removeItem(k) { delete this._store[k]; },
+      clear() { this._store = {}; },
+    },
     _AGENT_TYPES: {},
     _vcsUrl: (rk, p) => (rk || '') + (p || ''),
     renderMarkdown: (s) => s,

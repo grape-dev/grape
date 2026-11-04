@@ -12,6 +12,30 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { describe, it, test } = require('node:test');
+// 最小 jest 风格 expect 垫片：本文件原本依赖外部 jest/chai 运行器，
+// 仓库内其它前端用例统一走 node 直跑，这里补一个等价实现（零依赖）。
+function expect(actual) {
+  const mk = (neg) => {
+    const assertCond = (cond, msg) => {
+      if (neg ? cond : !cond) throw new Error((neg ? 'NOT ' : '') + msg + ' | actual=' + String(actual));
+    };
+    return {
+      toContain: (v) => assertCond(String(actual).indexOf(v) >= 0, 'toContain(' + v + ')'),
+      toMatch: (re) => assertCond(re.test(String(actual)), 'toMatch(' + re + ')'),
+      toBeGreaterThan: (n) => assertCond(actual > n, 'toBeGreaterThan(' + n + ')'),
+      toBeGreaterThanOrEqual: (n) => assertCond(actual >= n, 'toBeGreaterThanOrEqual(' + n + ')'),
+      toBeDefined: () => assertCond(actual !== undefined, 'toBeDefined'),
+      toBeNull: () => assertCond(actual === null, 'toBeNull'),
+      toBe: (v) => assertCond(actual === v, 'toBe(' + v + ')'),
+      toBeTruthy: () => assertCond(!!actual, 'toBeTruthy'),
+    };
+  };
+  const m = mk(false);
+  m.not = mk(true);
+  return m;
+}
+
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
@@ -114,7 +138,9 @@ describe('Issue #329: Cross-pipeline handoff frontend', () => {
     const m = html.match(/issues\.js\?v=(\d+)/);
     expect(m).not.toBeNull();
     expect(parseInt(m[1], 10)).toBeGreaterThanOrEqual(109);
-    expect(html).toContain('pipeline.js?v=44');
+    const pm = html.match(/pipeline\.js\?v=(\d+)/);
+    expect(pm).not.toBeNull();
+    expect(parseInt(pm[1], 10)).toBeGreaterThanOrEqual(44);
   });
 
   test('issues.js handoff button uses Apple design (0.5px border, rounded-lg)', () => {
