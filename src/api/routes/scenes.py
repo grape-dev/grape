@@ -1841,8 +1841,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
     _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key, user.get("username") or "")
 
-    # Issue #657: 保存即拦截——节点技能仅 user scope 可用 → 400（scope 不匹配）
-    _validate_scene_skill_scope(nodes_json, repo_key)
+    # Issue #657: 保存即拦截——节点技能仅他人 user scope 可用 → 400（scope 不匹配）
+    _validate_scene_skill_scope(nodes_json, repo_key, user.get("username") or "", user.get("id") or "")
 
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     if body.pr_subscription_enabled:
@@ -1915,9 +1915,9 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
     # body.nodes 为空时不覆盖已有 nodes（只更新 pr_subscription_enabled 等字段）
     _update_nodes = nodes_json if body.nodes else existing.get("nodes", [])
-    # Issue #657: 保存即拦截——节点技能仅 user scope 可用 → 400（scope 不匹配）
+    # Issue #657: 保存即拦截——节点技能仅他人 user scope 可用 → 400（scope 不匹配）
     if repo_key and body.nodes:
-        _validate_scene_skill_scope(_update_nodes, repo_key)
+        _validate_scene_skill_scope(_update_nodes, repo_key, user.get("username") or "", user.get("id") or "")
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
         name=body.name, description=body.description, icon=body.icon,
@@ -1955,15 +1955,19 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
     return {"message": "场景已删除"}
 
 
-def _validate_scene_skill_scope(nodes: list, repo_key: str):
-    """场景节点技能 scope 校验（Issue #657）：repo 级场景不可引用 user 级技能。
+def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id=""):
+    """场景节点技能 scope 校验（Issue #657）：repo 级场景不可引用他人 user 级技能。
 
-    仅当技能在 skill 表确以 user scope 存在（且无 repo/official 同名可用）时拒绝；
+    仅当技能在 skill 表确以 user scope 存在（且无 repo/official 同名可用）时
+    拒绝；user scope 技能 owner==当前登录用户时放行（与 SRE 引擎校验同口径：
+    自己的个人资源可绑自己管理的场景，派发身份即本人可正常解析）。
+    skill.owner_id 历史上既存过数字 user_id 也存过 username，两种口径都比对。
     技能不在 skill 表（官方内置包形态）维持原行为（存量场景兼容，
     由派发侧 fail-fast 兜底）。校验失败抛 HTTPException(400)，
     文案含「scope 不匹配」+ 技能名 + 双方 scope 值。
     """
     from src.user.db import get_skill_scope_info
+    _self_marks = {m for m in (username or "", str(user_id or "")) if m}
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -1974,15 +1978,18 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str):
             continue
         info = get_skill_scope_info(skill, repo_key)
         if info.get("found") and not info.get("matched"):
+            if info.get("scope") == "user" and (info.get("owner_id") or "") in _self_marks:
+                # #657 follow-up: 自己的个人技能放行（对齐 SRE 引擎 user scope 校验口径）
+                continue
             tag = node.get("tag") or node.get("id") or ""
             raise HTTPException(status_code=400, detail={
                 "code": 400,
                 "message": (
                     f"节点 {tag} 引用技能 '{skill}' scope 不匹配："
                     f"技能 scope={info.get('scope')}，场景 scope=repo，"
-                    f"repo 级场景不可引用 user 级技能"
+                    f"repo 级场景不可引用他人的 user 级技能"
                     + (f"（技能 owner={info.get('owner_id')}）" if info.get("owner_id") else "")
-                    + "，请改用 repo/official 级技能"),
+                    + "，请改用本人个人技能或 repo/official 级技能"),
             })
 
 
@@ -2006,7 +2013,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
 
     # Issue #657: 节点技能 scope 校验（repo 级场景不可引用 user 级技能），
     # Pass 1 只读阶段拦截，落库前直接拒绝
-    _validate_scene_skill_scope(nodes, repo_key)
+    _validate_scene_skill_scope(nodes, repo_key, user.get("username") or "", user.get("id") or "")
 
     # R25.9 回声治理：应用场景不触碰 token（原 get_repo_token_with_refresh 把 bot/用户级
     # token 回填 session，第 1 级命中 bot token → 自循环检测放行 bot 评论 → 回声）。

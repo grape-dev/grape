@@ -220,6 +220,42 @@ class TestCreateUpdateSceneScopeMismatch:
         finally:
             _delete_skills(sname)
 
+    def test_create_scene_own_user_scope_skill_passes(self):
+        """#657 follow-up：自己的个人技能（owner==当前用户）→ 放行。"""
+        from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
+        owner, repo = "o657", _unique_repo()
+        repo_key = f"gitcode:{owner}/{repo}"
+        sname = f"usk657_{uuid.uuid4().hex[:6]}"
+        scene_id = f"sc-{uuid.uuid4().hex[:8]}"
+        try:
+            _mk_skill_row(scope="user", owner="1", sname=sname)
+            body = CreateSceneRequest(
+                name="t", scene_id=scene_id,
+                nodes=[SceneNodeInput(id="issue", tag="issue", skill=sname)])
+            resp = create_scene(body, user={"username": "me657", "id": 1},
+                                repo=f"{owner}/{repo}")
+            assert resp.get("scene_id") == scene_id
+        finally:
+            _delete_skills(sname)
+            _cleanup(repo_key, scene_id)
+
+    def test_create_scene_other_user_scope_skill_rejected(self):
+        """#657 follow-up：他人个人技能（owner!=当前用户）→ 仍 400。"""
+        from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
+        owner, repo = "o657", _unique_repo()
+        sname = f"usk657_{uuid.uuid4().hex[:6]}"
+        try:
+            _mk_skill_row(scope="user", owner="someoneelse", sname=sname)
+            body = CreateSceneRequest(
+                name="t", nodes=[SceneNodeInput(id="issue", tag="issue", skill=sname)])
+            with pytest.raises(HTTPException) as ei:
+                create_scene(body, user={"username": "me657", "id": 1},
+                             repo=f"{owner}/{repo}")
+            assert ei.value.status_code == 400
+            assert "他人的 user 级技能" in ei.value.detail["message"]
+        finally:
+            _delete_skills(sname)
+
     def test_update_scene_user_scope_skill_rejected(self):
         from src.api.routes.scenes import (update_scene, UpdateSceneRequest,
                                            SceneNodeInput)
