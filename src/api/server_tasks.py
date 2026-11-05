@@ -253,11 +253,28 @@ async def start_mgmt_tasks(app) -> dict:
     except Exception as e:
         log.warning(f"Active user tracker start failed: {e}")
 
+    # GSB 自检（仅 remote 模式）：周期性跨域读一次，验证总线可用，
+    # 同时给 Grafana「模块间流动」面板提供稳定信号（否则业务侧尚未迁移时该面板恒空）。
+    try:
+        from src.kernel.gsb.selftest import gsb_selftest_loop, selftest_enabled
+
+        if selftest_enabled():
+            h["gsb_selftest_task"] = asyncio.create_task(gsb_selftest_loop())
+    except Exception as e:
+        log.warning(f"GSB selftest start failed: {e}")
+
     return h
 
 
 async def stop_mgmt_tasks(app, h: dict) -> None:
     """Mgmt 进程关闭：lease → IM WS → 知识写入 → 活跃追踪 → 迁移等待 → 定时线程。"""
+    _gsb_selftest = h.get("gsb_selftest_task")
+    if _gsb_selftest:
+        _gsb_selftest.cancel()
+        try:
+            await _gsb_selftest
+        except (asyncio.CancelledError, Exception):
+            pass
     # 问题 H：先 cancel lease_sweep_task（不再抢新锁）→ 再 stop bot_manager（停 bot + 释放 lease）
     _lease_sweep_task = h.get("lease_sweep_task")
     if _lease_sweep_task:

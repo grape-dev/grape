@@ -474,3 +474,42 @@ def test_client_records_metric_on_success(monkeypatch):
 
     assert client.get("/internal/runtimes") == {"ok": True}
     assert seen == [("runtime", "mgmt", "GET", "200")]
+
+
+def test_selftest_runs_probes_and_reports(monkeypatch):
+    """GSB 自检：remote 模式执行一轮，两个只读探针都被调用且返回 ok。"""
+    from src.kernel.gsb import selftest
+
+    calls: list[str] = []
+
+    class _Svc:
+        def __init__(self, name):
+            self.name = name
+
+        def get_runtimes(self):
+            calls.append("runtime.get_runtimes")
+            return []
+
+        def aggregate_runtime_stats(self):
+            calls.append("insight.aggregate_runtime_stats")
+            return {}
+
+    monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
+    monkeypatch.delenv("GRAPE_GSB_SELFTEST", raising=False)
+    monkeypatch.setattr(selftest, "get_service", lambda name: _Svc(name), raising=True)
+
+    assert selftest.selftest_enabled() is True
+    result = selftest.run_selftest_once()
+    assert result == {"runtime": "ok", "insight": "ok"}
+    assert calls == ["runtime.get_runtimes", "insight.aggregate_runtime_stats"]
+
+
+def test_selftest_disabled_when_local_or_off(monkeypatch):
+    from src.kernel.gsb import selftest
+
+    monkeypatch.delenv("GRAPE_PROVIDER_MODE", raising=False)
+    assert selftest.selftest_enabled() is False
+
+    monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
+    monkeypatch.setenv("GRAPE_GSB_SELFTEST", "off")
+    assert selftest.selftest_enabled() is False
