@@ -1124,7 +1124,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         db.commit()
     from src.runtime.instances import runtime_instance_name
     _inst = runtime_instance_name(runtime_id)
-    log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
+    log.info(f"Task enqueued: {task_id} agent={agent_type} repo={repo_key} skill={skill} runtime={runtime_id}({_inst}) session={agent_session_id}")
     # MR-2：enqueue span 收口（行已写入，trace_context 已存）
     if _task_span is not None:
         try:
@@ -2813,7 +2813,10 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                      session_engine=_done_engine)
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
-    log.info(f"Task completed: {task_id} exit={exit_code}")
+    _t_agent = (task or {}).get("agent_type", "")
+    _t_repo = (task or {}).get("repo_key", "")
+    _t_skill = (task or {}).get("skill", "")
+    log.info(f"Task completed: {task_id} agent={_t_agent} repo={_t_repo} skill={_t_skill} exit={exit_code} outcome={'failed' if exit_code else 'completed'}")
     # Issue #627: SRE 生产发布任务终态回填（成功/失败都要回填——deploy_failed 分支
     # 恰在 exit!=0；钩子自带 production_release 锚点判断，普通任务零影响、幂等）
     if task and (task.get("agent_type") or "") == "sre" and task.get("issue_id"):
@@ -3676,7 +3679,8 @@ def fail_task(task_id, error, exit_code=-1):
                     log.info(f"fail_task: dead session detected (consecutive failures), cleared runtime_session_id for {_isid}")
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
-    log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
+    _ft = get_task(task_id) or {}
+    log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
     # 可观察性埋点：任务失败
     try:
         from src.observability import record_task_terminal, record_task_failed
