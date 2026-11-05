@@ -16,6 +16,7 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 生命周期接入，task_id/pipeline_trace_id 作为 span 属性与业务 id 同源对齐。
 """
 import os
+from contextlib import contextmanager
 
 _inited_service = None
 
@@ -25,6 +26,57 @@ def otel_enabled() -> bool:
     if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip():
         return True
     return _worker_relay_exporter_kwargs() is not None
+
+
+def start_external_span(kind: str, target: str, attrs: dict | None = None):
+    """手动生命周期的外部 span（生成器内不能用 with）——调用方负责 .end()。"""
+    if not otel_enabled():
+        return None
+    from opentelemetry import trace
+    span = trace.get_tracer(__name__).start_span(
+        "%s %s" % (kind, target), kind=trace.SpanKind.CLIENT)
+    # 注意：start_span 不自动入上下文——子 span（后续的外部调用）不会自动挂到它下面；
+    # 对引擎执行 span 可接受（其子级价值低），换取生成器内手动生命周期的简单性。
+    span.set_attribute("dep.kind", kind)
+    span.set_attribute("dep.target", str(target)[:200])
+    for k, v in (attrs or {}).items():
+        try:
+            span.set_attribute(str(k)[:60], str(v)[:200])
+        except Exception:
+            pass
+    return span
+
+
+@contextmanager
+def external_call_span(kind: str, target: str, attrs: dict | None = None):
+    """外部依赖调用 span（MR-3，2026-11-05）：GitCode/GitHub/OBS/引擎进程等黑盒展开。
+
+    - kind: 依赖类别（vcs / obs / engine / http ...）
+    - target: 具体目标（API path、对象 key、backend 名）——不含 token/密钥
+    - attrs: 额外业务属性（provider、repo_key、size 等）
+    - OTel 未启用时是零开销空上下文；异常自动记录（error.type/error.message）。
+    """
+    if not otel_enabled():
+        yield None
+        return
+    from opentelemetry import trace
+    tracer = trace.get_tracer(__name__)
+    name = "%s %s" % (kind, target)
+    with tracer.start_as_current_span(name, kind=trace.SpanKind.CLIENT) as span:
+        try:
+            span.set_attribute("dep.kind", kind)
+            span.set_attribute("dep.target", str(target)[:200])
+            for k, v in (attrs or {}).items():
+                try:
+                    span.set_attribute(str(k)[:60], str(v)[:200])
+                except Exception:
+                    pass
+            yield span
+        except Exception as e:
+            span.set_attribute("error.type", type(e).__name__)
+            span.set_attribute("error.message", str(e)[:200])
+            span.record_exception(e)
+            raise
 
 
 def _worker_relay_exporter_kwargs():
@@ -86,13 +138,14 @@ def init_otel(service_name: str):
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as _HTTPExporter
             exporter = _HTTPExporter(**relay)
         else:
-            # gRPC exporter 仅主控/CLI 路径 import（worker venv 只装 HTTP exporter——
-            # 此前顶层 import 在 worker 上直接 ModuleNotFoundError → init 静默失败）
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-            exporter = OTLPSpanExporter(
-                endpoint=os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].strip(),
-                timeout=3,
-            )
+            # MR-3（2026-11-05）：gRPC→HTTP exporter 切换。实测 Tempo 3.1.1 的 4317 gRPC
+            # 接收静默丢弃 span（force_flush 成功但 Tempo 无数据），4318 HTTP 正常落库。
+            # endpoint 约定不变（用户配置 :4317 也自动改写为 :4318）。
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            _ep = os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].strip().rstrip("/")
+            if _ep.endswith(":4317"):
+                _ep = _ep[:-5] + ":4318"
+            exporter = OTLPSpanExporter(endpoint=_ep + "/v1/traces", timeout=5)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
 
