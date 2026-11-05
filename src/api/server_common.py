@@ -70,6 +70,13 @@ def build_app(
     Middleware registration order is preserved from the legacy main.py (CORS first,
     then metrics, then request-id/log as the outermost), so behavior is identical.
     """
+    # systemd 的 PATH 只有 venv/bin 与系统目录，用户级安装的 agent CLI
+    # （~/.local/bin/hermes、~/.local/npm-global/bin/opencode）会被漏掉，
+    # 导致 web chat 报 "hermes ACP CLI not found in PATH" 而无回复。
+    from src.kernel.cli_paths import ensure_user_bin_dirs
+
+    ensure_user_bin_dirs()
+
     app = FastAPI(
         title=title,
         version=version,
