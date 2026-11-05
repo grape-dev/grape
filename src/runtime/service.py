@@ -1026,6 +1026,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # worker 端看门狗 + ACP 全局超时均任务级 env 优先，管理台/配置文件改后对新任务生效。
     for k, v in _runtime_timeout_env_kv().items():
         env.setdefault(k, v)
+    # Issue #887：任务 payload 携带按 agent 绑定（仓库级/场景级）解析的 skill——
+    # 执行侧一致性校验与任务日志「技能来源」标注的绑定基准值（worker 端 agent.py
+    # _skill_consistency_gate 与 env 双源互校消费；与任务行 skill 字段同源）。
+    # QA 修复：直接赋值（非 setdefault）——env_extra 不得预置覆盖绑定基准，
+    # 否则可观测标注失真且双源互校永远一致（假阴性）。
+    env["GRAPE_BOUND_SKILL"] = (skill or "").strip()
     # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
     # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
     # devops 事件任务无用户概念（user_id=0，仓库身份）。
@@ -2291,8 +2297,25 @@ def requeue_task(task_id):
         return ret
 
 
-def report_messages(task_id, messages):
-    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout"""
+def peek_next_seq(task_id) -> int:
+    """预读 task 下一个可用 seq（MAX+1）。Issue #975：路由层预留下列 seq 范围作回执。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+        return (c.fetchone()[0] or 0) + 1
+
+
+def report_messages(task_id, messages, seq_start: int | None = None) -> dict | None:
+    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout
+
+    seq_start（Issue #975）：路由层同步预定的批次 seq 起点（peek_next_seq 预留）。
+    不传则沿用 MAX+1。批次回执（日志 + 返回值）带 seq 范围，供 worker/master 对账。
+
+    返回（QA 复审修复，Spec #1）：**实际落库**的回执 dict
+    {"count": 落库条数, "seq_start": 首条 seq, "seq_end": 末条 seq}；
+    无可落库消息返回 None。落库异常时返回 {}（调用方不得当作成功范围）。
+    非 dict 消息不计入 seq 消耗与回执（与 insert 跳过行为一致，杜绝假回执）。
+    """
     task = get_task(task_id)
     if not task:
         return
@@ -2357,30 +2380,58 @@ def report_messages(task_id, messages):
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
     # 收集落库后的 (原始消息, seq) 对，供 fanout 透传 seq（前端按 seq 去重，跨主 DB 尾随双通道不重复渲染）
+    # QA 复审（Spec #1/#4）：只对 dict 消息消耗 seq；INSERT 命中 UNIQUE（预留 seq 与
+    # 并发落库/重放撞号）时改用 MAX+1 重试一次——防 INSERT OR IGNORE 静默丢消息
+    _persistable = [m for m in (messages or []) if isinstance(m, dict)]
     _seq_messages: list[dict] = []
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
-            seq = (c.fetchone()[0] or 0) + 1
-            for m in (messages or []):
-                if not isinstance(m, dict):
-                    continue
-                _t = m.get("type", "log")
-                _d = m.get("data")
-                tool, content, input_json, output = _normalize_message(_t, _d)
-                # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
-                # 双后端存储语义统一，读时 normalize_event_time 幂等）
-                c.execute(
-                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (task_id, seq, _t, tool, content, input_json, output,
-                     datetime.now(timezone.utc).isoformat()))
-                # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
-                _seq_messages.append({**m, "seq": seq})
-                seq += 1
-            db.commit()
-    except Exception as e:
-        log.warning(f"report_messages task_messages insert failed: {e}")
+    _receipt: dict | None = None
+    if _persistable:
+        try:
+            with db_lock:
+                c = db.cursor()
+                if seq_start is not None:
+                    seq = int(seq_start)
+                else:
+                    c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                    seq = (c.fetchone()[0] or 0) + 1
+                _seq_first = None
+                for m in _persistable:
+                    _t = m.get("type", "log")
+                    _d = m.get("data")
+                    tool, content, input_json, output = _normalize_message(_t, _d)
+                    # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
+                    # 双后端存储语义统一，读时 normalize_event_time 幂等）
+                    _row = (task_id, seq, _t, tool, content, input_json, output,
+                            datetime.now(timezone.utc).isoformat())
+                    try:
+                        c.execute(
+                            "INSERT INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            _row)
+                    except Exception as _ie:
+                        # seq 撞号（预留范围与异步落库/补报重放并发）：改用 MAX+1 重试一次，
+                        # 不允许 INSERT OR IGNORE 式静默丢消息（QA Spec #4 seq 重复风险）
+                        c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                        seq = (c.fetchone()[0] or 0) + 1
+                        c.execute(
+                            "INSERT INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (task_id, seq, _t, tool, content, input_json, output,
+                             datetime.now(timezone.utc).isoformat()))
+                        log.warning(f"report_messages: task={task_id} seq conflict, reallocated to {seq}")
+                    if _seq_first is None:
+                        _seq_first = seq
+                    # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
+                    _seq_messages.append({**m, "seq": seq})
+                    seq += 1
+                db.commit()
+                _receipt = {"count": len(_seq_messages), "seq_start": _seq_first,
+                            "seq_end": _seq_messages[-1].get("seq")}
+                # Issue #975：批次回执日志（seq 起止 + 条数）——master 侧对账凭证
+                if _seq_messages:
+                    log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
+                             f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
+        except Exception as e:
+            log.warning(f"report_messages task_messages insert failed: {e}")
+            _receipt = {}
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
     # 传带 seq 的消息：前端按 seq 去重，queue 快路径与 SSE DB 尾随双通道不重复渲染
     try:
@@ -2388,6 +2439,7 @@ def report_messages(task_id, messages):
         fanout(task_id, _seq_messages if _seq_messages else (messages or []))
     except Exception as e:
         log.warning(f"report_messages fanout failed: {e}")
+    return _receipt
 
 
 def _normalize_message(_t: str, _d) -> tuple[str, str, str, str]:
@@ -2442,6 +2494,86 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
         out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
                     "content": r[3] or "", "input": inp, "output": r[5] or "",
                     "created_at": normalize_event_time(r[6] or "")})
+    return out
+
+
+# wrote_files 派生查询认定的「写入类」工具名（含 hermes 等引擎的工具名变体，
+# 兜底按 input 含 path + content/new_string 精筛，见 list_wrote_files）
+_WRITE_TOOL_EXACT = frozenset({"write", "write_file", "patch"})
+
+# 记忆化缓存（Issue #977 性能补丁）：key=task_id → (max_seq, wrote_files)。
+# 只按「消息 seq 是否前进」判失效（新增即失效），不用纯 TTL，避免"配置/进度改了却显示旧值"。
+# 上限 512 个任务，超出按插入序淘汰最旧（单进程内小字典，替换成本可忽略）。
+_WROTE_FILES_CACHE: dict = {}
+_WROTE_FILES_CACHE_MAX = 512
+
+
+def _is_write_tool(tool: str) -> bool:
+    t = (tool or "").strip().lower()
+    return t in _WRITE_TOOL_EXACT or "write" in t or "patch" in t
+
+
+def list_wrote_files(task_id) -> list[dict]:
+    """派生查询：该任务写过的文件清单（Issue #977，/info 的 wrote_files 数据源）。
+
+    - 数据源：task_messages 中 tool_use 消息的 input_json（write/patch 的 path +
+      content/new_string 的 utf-8 字节数），不扫描工作区、不依赖 agent 自述。
+    - 过滤：SQL 侧先按工具名收窄（write/patch 变体，与 _is_write_tool 同口径）
+      + Python 侧精筛（input 含 path 与 content/new_string）。
+    - 同 path 多次写入各记一条（保留全部 seq）；first_seen_at 取该条消息 created_at。
+    - 性能（2026-11-04 压测）：原实现扫该任务全部 tool_use 行（10k 消息 36ms、
+      大写入 221ms、40k 消息 146ms），且 /info 会被前端反复拉。改为
+      「SQL 工具名预过滤」+「按 (task_id, max_seq) 记忆化」：任务消息无新增时命中缓存
+      返回 ~µs；有新增消息（seq 前进）自动失效重算，不做纯 TTL 假缓存。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COALESCE(MAX(seq), 0) FROM task_messages WHERE task_id=?",
+                      (task_id,))
+            _max_seq = int(c.fetchone()[0] or 0)
+            _hit = _WROTE_FILES_CACHE.get(str(task_id))
+            if _hit and _hit[0] == _max_seq:
+                return [dict(x) for x in _hit[1]]
+            c.execute(
+                "SELECT seq, tool, input_json, created_at FROM task_messages "
+                "WHERE task_id=? AND type='tool_use' "
+                "AND (LOWER(tool) LIKE '%write%' OR LOWER(tool) LIKE '%patch%') "
+                "ORDER BY seq",
+                (task_id,))
+            rows = c.fetchall()
+    except Exception as e:
+        log.warning(f"list_wrote_files failed: {e}")
+        return []
+    out = []
+    for seq, tool, input_json, created_at in rows:
+        if not _is_write_tool(tool):
+            continue
+        try:
+            inp = _json.loads(input_json or "{}")
+        except Exception:
+            continue
+        if not isinstance(inp, dict):
+            continue
+        path = inp.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        payload = inp.get("content")
+        if not isinstance(payload, str):
+            payload = inp.get("new_string")
+        if not isinstance(payload, str):
+            continue
+        out.append({
+            "path": path,
+            "bytes": len(payload.encode("utf-8")),
+            "tool": (tool or "").strip().lower(),
+            "seq": seq,
+            "first_seen_at": normalize_event_time(created_at or ""),
+        })
+    if len(_WROTE_FILES_CACHE) >= _WROTE_FILES_CACHE_MAX:
+        _WROTE_FILES_CACHE.pop(next(iter(_WROTE_FILES_CACHE)), None)
+    _WROTE_FILES_CACHE[str(task_id)] = (_max_seq, [dict(x) for x in out])
     return out
 
 
@@ -3653,10 +3785,10 @@ async def _ingestion_loop():
                 except asyncio.TimeoutError:
                     break
             with db_lock:
-                for kind, tid, payload in batch:
+                for kind, tid, payload, seq_start in batch:
                     try:
                         if kind == "messages":
-                            report_messages(tid, payload)
+                            report_messages(tid, payload, seq_start=seq_start)
                         elif kind == "progress":
                             report_progress(tid, payload)
                     except Exception as e:
@@ -3675,24 +3807,31 @@ async def _ingestion_loop():
 _ASYNC_REPORT_QUEUE = None
 
 
-def enqueue_async_report(kind: str, task_id: str, payload):
-    """异步回报入队（队列满降级同步，不丢数据）。"""
+def enqueue_async_report(kind: str, task_id: str, payload, seq_start: int | None = None) -> dict | None:
+    """异步回报入队（队列满降级同步，不丢数据）。seq_start：Issue #975 批次 seq 预留起点。
+
+    返回（QA 复审，Spec #1）：同步兜底路径返回 report_messages 的实际落库回执
+    （dict）；走异步队列时返回 None（实际回执以服务端 report_messages 日志为准）。
+    """
     q = _ASYNC_REPORT_QUEUE
     if q is None:
         # 队列未启动 → 同步兜底
         if kind == "messages":
-            report_messages(task_id, payload)
+            return report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
-        return
+            return None
+        return None
     try:
-        q.put_nowait((kind, task_id, payload))
+        q.put_nowait((kind, task_id, payload, seq_start))
+        return None
     except Exception:
         # 队列满：同步降级
         if kind == "messages":
-            report_messages(task_id, payload)
+            return report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
+        return None
 
 
 async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 1.0) -> dict:

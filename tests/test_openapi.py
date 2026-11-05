@@ -243,6 +243,7 @@ EXPECTED_PUBLIC = {
     "runtime_task_status": ("get", "/api/runtime/tasks/{task_id}/status"),
     "runtime_tasks_list": ("get", "/api/runtime/runtimes/{runtime_id}/tasks"),
     "scenes_advanced_options_get": ("get", "/api/scenes/{scene_id}/advanced-options"),
+    "scenes_advanced_options_reveal": ("post", "/api/scenes/{scene_id}/advanced-options/reveal"),
     "scenes_advanced_options_set": ("put", "/api/scenes/{scene_id}/advanced-options"),
     "scenes_apply": ("post", "/api/scenes/apply/{owner}/{repo}"),
     "scenes_branch_create": ("post", "/api/scenes/branches/{owner}/{repo}"),

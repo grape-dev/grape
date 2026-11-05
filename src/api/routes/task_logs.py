@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from src.api.deps import require_no_session_token
 from src.config import log
-from src.runtime.service import list_task_messages
+from src.runtime.service import list_task_messages, list_wrote_files
 
 router = APIRouter(prefix="/api/task-logs", tags=["task-logs"])
 
@@ -31,16 +31,61 @@ def _require_task_exists(task_id: str):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
 
 
-@router.get("/{task_id}/info", operation_id="task_logs_info", summary="Task runtime info", description="Task runtime info: agent/device/machine + received context (prompt).")
+_WROTE_FILES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "agent_name": {"type": "string"},
+        "agent_version": {"type": "string"},
+        "device_name": {"type": "string"},
+        "last_ip": {"type": "string"},
+        "owner_name": {"type": "string"},
+        "prompt": {"type": "string"},
+        "prompt_full_length": {"type": "integer"},
+        "created_at": {"type": "string"},
+        "started_at": {"type": "string"},
+        "completed_at": {"type": "string"},
+        "status": {"type": "string"},
+        "issue_id": {"type": "string"},
+        "event_seq": {"type": "integer"},
+        "repo_key": {"type": "string"},
+        "spec": {"type": "string"},
+        "cpu_percent": {"type": "number"},
+        "memory_percent": {"type": "number"},
+        "disk_percent": {"type": "number"},
+        "load_avg": {"type": "string"},
+        "wrote_files": {
+            "type": "array",
+            "description": "任务写过的文件清单（派生自 task_messages 的 write/patch tool_use 入参，不扫工作区；无数据为 []）",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "bytes": {"type": "integer", "description": "写入内容的 utf-8 字节数（patch 取 new_string）"},
+                    "tool": {"type": "string"},
+                    "seq": {"type": "integer"},
+                    "first_seen_at": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+@router.get("/{task_id}/info", operation_id="task_logs_info", summary="Task runtime info",
+            description="Task runtime info: agent/device/machine + received context (prompt).",
+            responses={200: {"description": "任务运行信息 + wrote_files 产物清单", "content": {"application/json": {"schema": _WROTE_FILES_SCHEMA}}}})
 def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务关联的执行引擎/机器信息 + 接收上下文（prompt）。
 
     返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length,
-           created_at, started_at, completed_at, status, issue_id, event_seq, repo_key}
+           created_at, started_at, completed_at, status, issue_id, event_seq, repo_key,
+           wrote_files}
     agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.name/last_ip/owner_name。
     Issue #701：device_name 字段下发凭据自定义名 rc.name（空则空值，前端统一占位），
     不再下发边端自报 device_name。
     prompt 为 agent 接收到的完整上下文（截断至 8000 字符），prompt_full_length 为原始长度。
+    wrote_files（Issue #977）：任务写过的文件清单 [{path, bytes, tool, seq, first_seen_at}]，
+    派生自 task_messages 的 write/patch tool_use 入参，不扫工作区；无写入返回 []（兼容老前端）。
     """
     from src.session_manager import db, db_lock
     from src.api.time_utils import normalize_event_time
@@ -87,6 +132,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         "memory_percent": mem_pct or 0,
         "disk_percent": disk_pct or 0,
         "load_avg": load_avg or "",
+        "wrote_files": list_wrote_files(task_id),
     }
 
 

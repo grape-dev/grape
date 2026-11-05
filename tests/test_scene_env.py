@@ -102,7 +102,7 @@ def test_custom_field_lowercase_skipped_at_runtime():
 
 
 def test_secret_masked_from_get_but_injected():
-    """secret 项：get_advanced_options 返回明文 value + is_secret 标记；注入用明文。"""
+    """secret 项：get_advanced_options 占位返回（value:"" + has_value）；注入用明文。"""
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{"custom_fields": [{"name": "DEPLOY_SECRET", "value": "ultra-secret", "is_secret": true}]}')
     env = _inject()
@@ -150,7 +150,9 @@ def test_save_advanced_options_validates_uppercase_and_reserved():
     d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
     assert d["custom_fields"][0]["name"] == "GOOD_KEY"
     assert d["custom_fields"][0]["is_secret"] is True
-    assert d["custom_fields"][0]["value"] == "1"
+    # Issue #885: secret 字段占位返回——不下发明文，has_value 标记已配置
+    assert d["custom_fields"][0]["value"] == ""
+    assert d["custom_fields"][0]["has_value"] is True
 
 
 def test_secret_blank_value_preserves_old_value():
@@ -173,7 +175,9 @@ def test_secret_blank_value_preserves_old_value():
                           user={"user_id": 0}, repo="org/sceneenv")
     d = get_advanced_options("devops-scene", user={"user_id": 0}, repo="org/sceneenv")
     assert d["custom_fields"][0]["name"] == "DEPLOY_SECRET"
-    assert d["custom_fields"][0]["value"] == "orig"
+    # Issue #885: 占位返回（值仍在库内，注入/reveal 用明文）
+    assert d["custom_fields"][0]["value"] == ""
+    assert d["custom_fields"][0]["has_value"] is True
 
 
 def test_unchecking_secret_keeps_value_and_returns_plaintext():

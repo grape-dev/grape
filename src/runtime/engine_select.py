@@ -36,13 +36,35 @@ _PRIO_LOCAL = 90
 _DEFAULT_ENGINE_ROLE_TAGS: dict = {}
 
 # 已知节点角色全集（认领侧守卫仅对角色类 pool_tag 生效；自定义路由 tag 如 "b520tag"
-# 不是角色，不受角色硬过滤约束）
-_KNOWN_AGENT_ROLES = {"coding", "issue", "qa", "vod", "chat", "sre"}
+# 不是角色，不受角色硬过滤约束）。Issue #955：节点 id 即角色名（agent_type），
+# 场景写侧/读侧统一引用该公开常量做枚举校验与 id 优先匹配（避免各模块重复定义漂移）。
+KNOWN_AGENT_ROLES = {"coding", "issue", "qa", "vod", "chat", "sre"}
+
+# 兼容别名（既有内部引用保留；外部模块请使用 KNOWN_AGENT_ROLES）
+_KNOWN_AGENT_ROLES = KNOWN_AGENT_ROLES
+
+
+def node_agent_role(node) -> str:
+    """Issue #955：解析节点角色名（agent_type）——id 优先、tag 兜底。
+
+    节点 id 为角色名（标准写侧口径），tag 为展示用阶段名（可为中文等任意值，
+    仅存量 tag-only 节点兜底）；非 dict 节点返回空串。
+    """
+    if not isinstance(node, dict):
+        return ""
+    return (node.get("id") or node.get("tag") or "").strip()
+
+
+def node_matches_agent_role(node, role) -> bool:
+    """Issue #955：节点是否匹配指定角色——id 优先、tag 兜底（存量兼容）。"""
+    if not isinstance(node, dict) or not role:
+        return False
+    return node.get("id") == role or node.get("tag") == role
 
 
 def is_agent_role(tag: str) -> bool:
     """pool_tag 是否为已知节点角色（Issue #658 认领侧守卫的适用判定）。"""
-    return (tag or "").strip().lower() in _KNOWN_AGENT_ROLES
+    return (tag or "").strip().lower() in KNOWN_AGENT_ROLES
 
 
 def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:

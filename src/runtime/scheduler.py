@@ -293,7 +293,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     #    glob 搜到 /home/{user} 副本自救，不可依赖。
     evt = {"repo_key": repo_key, "issue_id": "", "payload": {}}
     if _is_direct:
-        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "", prompt)
+        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "",
+                                             prompt, engine_name=inst_name or backend or "")
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
@@ -324,7 +325,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         # DIRECT 模式：本机执行
         _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                                   engine_id, backend, inst_name, ws, prompt,
-                                  repo_token, agent_display_name, env_extra, repository)
+                                  repo_token, agent_display_name, env_extra, repository,
+                                  evt)
     else:
         # REMOTE / 广播模式：入队让远端 worker 认领
         _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
@@ -334,7 +336,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
 def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                               engine_id, backend, inst_name, ws, prompt,
-                              repo_token, agent_display_name, env_extra, repository):
+                              repo_token, agent_display_name, env_extra, repository,
+                              evt=None):
     """DIRECT 模式：本机 stream_devops_agent 执行。"""
     from src.api.event_pipeline import _create_direct_task
 
@@ -350,6 +353,33 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         return
 
     log.info(f"Autopilot exec {exec_id}: starting direct agent={agent_type} engine={inst_name}")
+
+    # Issue #887（QA 修复）：direct 端执行前技能一致性硬校验——复用 _materialize_direct_workdir
+    # 物化后写入 evt 的判定结果（SKILL_CONSISTENCY_KEY），与 event_pipeline._execute_agent_inner
+    # 口径一致（物化后校验，残留缓存+绑定未物化才拒绝），不再在物化前另起一套 verify
+    # （旧实现与物化时序/口径不一致，存在误拒）；拒绝消息经 skill_mismatch_error 单一实现。
+    try:
+        from src.runtime.skill_materialize import (SKILL_CONSISTENCY_KEY,
+                                                   skill_mismatch_error)
+        from src.runtime.task_log_stream import build_skill_source_message
+        _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}
+        if not _sv:
+            # 判定缺失（物化异常等）→ 显式降级放行 + 告警，不静默当作通过
+            log.warning(f"Autopilot exec {exec_id}: skill consistency verdict missing "
+                        f"(materialize degraded); degraded pass")
+        else:
+            _src_line = build_skill_source_message(
+                _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))["data"]["text"]
+            log.info(f"Autopilot exec {exec_id}: skill source {_src_line}")
+            if _sv.get("ok") is False:
+                _sv_err = skill_mismatch_error(_sv)
+                log.error(f"Autopilot exec {exec_id}: skill consistency refused: {_sv_err}")
+                _finalize_autopilot_task(task_id, exec_id, 1, _sv_err)
+                _update_execution_result(exec_id, "failed", error=_sv_err)
+                return
+    except Exception as _sc_e:
+        log.warning(f"Autopilot exec {exec_id}: skill consistency verify failed: {_sc_e}")
 
     exit_code = -1
     final_text = ""

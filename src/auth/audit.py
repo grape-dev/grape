@@ -45,6 +45,7 @@ EVENT_TYPES = frozenset({
     "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
     "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
     "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）
+    "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
 })
 
 

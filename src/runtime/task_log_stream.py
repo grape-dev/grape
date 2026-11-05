@@ -67,6 +67,24 @@ def fanout(task_id: str, messages: list):
                     pass
 
 
+def build_skill_source_message(bound: str, actual: str, source: str,
+                               ok: bool = True, reason: str = "") -> dict:
+    """Issue #887：技能来源标注消息（worker/服务端执行前上报）。
+
+    统一格式「skill 来源：绑定=X / 实际=Y」——worker 通过 report_messages 上报后
+    落 task_messages / events.agent_logs（详情页「处理记录」）并 fanout 到 SSE。
+    data.skill_source 结构化字段由 _to_payload 透传给前端（issue #887 可观测）。
+    """
+    skill_source = {"bound": bound or "", "actual": actual or "",
+                    "source": source or "", "ok": bool(ok)}
+    if reason:
+        skill_source["reason"] = str(reason)[:300]
+    line = (f"[skill] source: bound={bound or '-'} actual={actual or '-'} "
+            f"source={source or '-'} ok={int(bool(ok))}"
+            + (f" reason={str(reason)[:300]}" if reason else ""))
+    return {"type": "log", "data": {"text": line, "skill_source": skill_source}}
+
+
 def _to_payload(m: dict) -> dict | None:
     """worker 消息 {type, data, seq?} → 前端 SSE payload。
 
@@ -98,6 +116,10 @@ def _to_payload(m: dict) -> dict | None:
             return payload
         content = str(d.get("text") or d.get("content") or "")
         payload.update({"tool": tool, "content": content, "input": {}, "output": "", "created_at": _now})
+        # Issue #887：技能来源标注字段透传（绑定值 vs 实际值）
+        _ss = d.get("skill_source")
+        if isinstance(_ss, dict):
+            payload["skill_source"] = _ss
         return payload
     payload.update({"tool": "", "content": str(d or ""), "input": {}, "output": "", "created_at": _now})
     return payload

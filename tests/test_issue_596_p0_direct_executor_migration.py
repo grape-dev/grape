@@ -161,7 +161,7 @@ class TestFailureFinalizationRuntimePath:
             _inject_bot_agent_env=lambda *a, **k: None,
             _inject_issue_pr_env=lambda *a, **k: None,
             _inject_linked_repo_tokens=lambda *a, **k: None,
-            _materialize_direct_workdir=lambda ws, rk, at, sn, e, iid, p: p,
+            _materialize_direct_workdir=lambda ws, rk, at, sn, e, iid, p, engine_name="": p,
             _fail_event=lambda *a, **k: None,
             _issue_num_from=lambda s: "",
             _post_result_to_issue=lambda *a, **k: None,

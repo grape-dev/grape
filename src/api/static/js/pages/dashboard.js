@@ -1054,7 +1054,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
+window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description, hasValue) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -1063,6 +1063,10 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _val = (value || '');
+    // Issue #885: secret 字段接口已占位化（value:"" + has_value）——已配置未改动时
+    // 输入框留空、占位提示 ********；保存空 secret 值由服务端保留旧值（不回传明文）
+    var _ph = 'value';
+    if (_isSec && !_val && hasValue) { _ph = '********'; }
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
     var _desc = (description || '').trim();
@@ -1074,12 +1078,21 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
         '</span>'
       : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
     row.innerHTML = _nameEl +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
-      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" value="' + _val + '">' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(!i)return;if(i.getAttribute(\'data-keep-value\')===\'1\'){window._cfRevealSecretField(i,b);return;}i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="adv-del" onclick="this.parentElement.remove()">×</button>') +
       (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
+    // Issue #885：密钥占位行（已配置未改动）→ 标记 keep_value（保存不回传明文）；
+    // 眼睛按钮走 reveal 按需取回；用户一旦输入即清除标记
+    if (_isSec && !_val && hasValue) {
+      var _vEl = document.getElementById(valId);
+      if (_vEl) {
+        _vEl.setAttribute('data-keep-value', '1');
+        _vEl.addEventListener('input', function() { _vEl.removeAttribute('data-keep-value'); });
+      }
+    }
   };
 
 window._createNewBranchInline = function(owner, name) {
@@ -1281,6 +1294,17 @@ function _skillEsc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Issue #978：技能唯一键 —— 优先 skill_id，缺失时回退 (scope, skill_name) 复合键。
+// official/repo/user 三档允许同名技能共存（UNIQUE(skill_name, scope, owner_id)），
+// 裸 skill_name 不再作为选中/缓存 key，否则同名三行同时勾选、缓存互相覆盖。
+// 契约：GET /scenes/skills/{agent_type} 响应中 (skill_id, scope, skill_name) 共同构成前端选择的唯一键。
+function _skillKeyOf(s) {
+  if (!s) return '';
+  var id = (s.skill_id !== undefined && s.skill_id !== null && s.skill_id !== '') ? s.skill_id : s.id;
+  if (id !== undefined && id !== null && id !== '') return 'id:' + id;
+  return (s.scope || 'official') + ':' + (s.skill_name || '');
+}
+
 // 分组定义（顺序即展示顺序；user 组仅在有个人技能时渲染，原平铺列表含 user 技能，避免回归丢选项）
 window._SKILL_SCOPE_GROUPS = [
   { key: 'official', label: '官方技能' },
@@ -1311,7 +1335,7 @@ window._skillGroupByScope = function(skills) {
 };
 
 // 触发按钮 → 下拉面板（顶部搜索框 + 分组列表 + 空结果态）
-window._skillPickCache = {};  // agentType -> {skill_name: display_name}（保存后刷新显示名）
+window._skillPickCache = {};  // agentType -> {唯一键(skill_id 优先，回退 scope:skill_name): {name, display}}（保存后刷新显示名；Issue #978 不再用裸 skill_name 作 key）
 window._skillDropdownOutsideHandler = null;
 window._skillDropdownScrollHandler = null;
 
@@ -1335,8 +1359,10 @@ window._openSkillDropdown = function(agentType, btn) {
   var repoParam = '?page_size=100' + (repo ? '&repo=' + encodeURIComponent(repo) : '');
   API.get('/scenes/skills/' + agentType + repoParam).then(function(r) {
     var skills = r.skills || [];
+    // Issue #978：缓存以唯一键（skill_id 优先，回退 (scope, skill_name)）索引，
+    // 三档同名技能互不覆盖；value 同时携带 name/display 供回显与旧调用兜底。
     var cache = window._skillPickCache[agentType] = {};
-    skills.forEach(function(s) { cache[s.skill_name] = s.display_name || s.skill_name; });
+    skills.forEach(function(s) { cache[_skillKeyOf(s)] = { name: s.skill_name, display: s.display_name || s.skill_name }; });
 
     var rect = btn.getBoundingClientRect();
     var panel = document.createElement('div');
@@ -1347,6 +1373,10 @@ window._openSkillDropdown = function(agentType, btn) {
     panel.style.cssText = 'position:fixed;z-index:1001;width:' + Math.max(rect.width, 240) + 'px;left:' + rect.left + 'px;top:' + top + 'px;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.12);padding:8px;box-sizing:border-box';
 
     var current = btn.getAttribute('data-current') || '';
+    // Issue #978：current 为唯一键（用户本次会话选中）或旧值（初始渲染写入的裸 skill_name）。
+    // 同名计数：旧值仅在该名字全局唯一时才允许命中，避免同名三行同时勾选。
+    var _nameCount = {};
+    skills.forEach(function(s) { _nameCount[s.skill_name] = (_nameCount[s.skill_name] || 0) + 1; });
 
     function renderList(q) {
       var groups = window._skillGroupByScope(window._skillFilterByQuery(skills, q));
@@ -1358,8 +1388,10 @@ window._openSkillDropdown = function(agentType, btn) {
       return clearRow + groups.map(function(g) {
         return '<div style="margin:6px 4px 4px;font-size:10px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">' + _skillEsc(g.label) + ' (' + g.items.length + ')</div>' +
           g.items.map(function(s) {
-            var sel = s.skill_name === current;
-            return '<div class="ap-skill-opt" data-name="' + _skillEsc(s.skill_name) + '" data-display="' + _skillEsc(s.display_name || s.skill_name) + '" title="' + _skillEsc(s.description || '') + '" style="padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:#1d1d1f;display:flex;align-items:center;gap:6px;background:' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '" onmouseover="this.style.background=\'rgba(0,113,227,.06)\'" onmouseout="this.style.background=\'' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '\'">' +
+            // Issue #978：优先唯一键精确命中；旧裸 skill_name 值仅在名字唯一时回退命中，
+            // 同名多行（official/repo/user 三档）时不再同时勾选。
+            var sel = (_skillKeyOf(s) === current) || (!!current && current === s.skill_name && _nameCount[s.skill_name] === 1);
+            return '<div class="ap-skill-opt" data-name="' + _skillEsc(s.skill_name) + '" data-key="' + _skillEsc(_skillKeyOf(s)) + '" data-display="' + _skillEsc(s.display_name || s.skill_name) + '" title="' + _skillEsc(s.description || '') + '" style="padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:#1d1d1f;display:flex;align-items:center;gap:6px;background:' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '" onmouseover="this.style.background=\'rgba(0,113,227,.06)\'" onmouseout="this.style.background=\'' + (sel ? 'rgba(0,113,227,.08)' : 'transparent') + '\'">' +
               (sel ? '<span style="color:#0071e3;font-weight:700;flex-shrink:0">✓</span>' : '') +
               '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _skillEsc(s.display_name || s.skill_name) + '</span>' +
               '</div>';
@@ -1384,10 +1416,12 @@ window._openSkillDropdown = function(agentType, btn) {
       var opt = e.target && e.target.closest ? e.target.closest('.ap-skill-opt') : null;
       if (!opt) return;
       e.stopPropagation();
-      if (typeof window.selectAgentSkill === 'function') window.selectAgentSkill(agentType, opt.getAttribute('data-name'));
+      // Issue #978：选中回写唯一键到 data-current（重开下拉按 skill_id 精确回显，同名其他档不再勾选）
+      if (typeof window.selectAgentSkill === 'function') window.selectAgentSkill(agentType, opt.getAttribute('data-name'), opt.getAttribute('data-key'));
       var disp = opt.getAttribute('data-display') || '';
       var nm = opt.getAttribute('data-name') || '';
-      btn.setAttribute('data-current', nm);
+      var key = opt.getAttribute('data-key') || '';
+      btn.setAttribute('data-current', key || nm);
       btn.textContent = disp || nm || I18N.t('dashboard.select_skill');
       btn.style.color = (disp || nm) ? '#1d1d1f' : '#86868b';
       window._closeSkillDropdown();
@@ -1545,15 +1579,24 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     _saveEditDraft();
   };
 
-  window.selectAgentSkill = function(agentType, skillName) {
+  window.selectAgentSkill = function(agentType, skillName, skillKey) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     // Issue #406：选中时同步写 skill_display_name（取自 _openSkillDropdown 缓存的 display_name），
     // 避免禁用其他角色触发 _renderEditFlowCards 重渲染时显示退化为内部 id（如 vod-cli）。
     // skillName 为空（清除选择）时同步清空 skill_display_name，保持字段一致。
+    // Issue #978：优先按唯一键（skill_id 优先，回退 (scope, skill_name)）命中缓存条目，
+    // 同名三档技能 display_name 互不覆盖；无 key 时按 name 兜底（单同名场景行为不变）。
     node.skill = skillName || '';
     var cache = (window._skillPickCache || {})[agentType] || {};
-    node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+    var entry = skillKey ? cache[skillKey] : null;
+    if (!entry && skillName) {
+      Object.keys(cache).some(function(k) {
+        if (cache[k] && cache[k].name === skillName) { entry = cache[k]; return true; }
+        return false;
+      });
+    }
+    node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
     _saveEditDraft();
   };
 
@@ -1592,10 +1635,13 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
         const newNodes = (sc && sc.pipeline && sc.pipeline.nodes) || [];
         // 从编辑模式的技能下拉数据构建 skill_name → display_name 映射
         // Issue #292：下拉改为分组面板后 option 不再存在，优先用 _skillPickCache 展平，残留 option 兜底
+        // Issue #978：缓存已改为唯一键 → {name, display} 结构；按 name 展平映射
+        //（pipeline 仅持久化 skill_name，三档同名时取最后一次写入的 display，无法进一步区分）
         const skillDisplayMap = {};
         Object.keys(window._skillPickCache || {}).forEach(function(at) {
-          Object.keys(window._skillPickCache[at] || {}).forEach(function(sn) {
-            skillDisplayMap[sn] = window._skillPickCache[at][sn];
+          var _c = window._skillPickCache[at] || {};
+          Object.keys(_c).forEach(function(k) {
+            if (_c[k] && _c[k].name) skillDisplayMap[_c[k].name] = _c[k].display;
           });
         });
         document.querySelectorAll('.ap-skill-select option, select[onchange*="selectAgentSkill"] option').forEach(opt => {
@@ -2181,15 +2227,24 @@ function _enterCreateStandardMode(data, owner, name) {
     _saveCreateDraft();
   };
 
-  window.selectAgentSkill = function(agentType, skillName) {
+  window.selectAgentSkill = function(agentType, skillName, skillKey) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     // Issue #406：选中时同步写 skill_display_name（取自 _openSkillDropdown 缓存的 display_name），
     // 避免禁用其他角色触发 _renderEditFlowCards 重渲染时显示退化为内部 id（如 vod-cli）。
     // skillName 为空（清除选择）时同步清空 skill_display_name，保持字段一致。
+    // Issue #978：优先按唯一键（skill_id 优先，回退 (scope, skill_name)）命中缓存条目，
+    // 同名三档技能 display_name 互不覆盖；无 key 时按 name 兜底（单同名场景行为不变）。
     node.skill = skillName || '';
     var cache = (window._skillPickCache || {})[agentType] || {};
-    node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+    var entry = skillKey ? cache[skillKey] : null;
+    if (!entry && skillName) {
+      Object.keys(cache).some(function(k) {
+        if (cache[k] && cache[k].name === skillName) { entry = cache[k]; return true; }
+        return false;
+      });
+    }
+    node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
     _saveCreateDraft();
   };
 
@@ -2200,7 +2255,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
+  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description, hasValue) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -2209,6 +2264,10 @@ function _enterCreateStandardMode(data, owner, name) {
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _val = (value || '');
+    // Issue #885: secret 字段接口已占位化（value:"" + has_value）——已配置未改动时
+    // 输入框留空、占位提示 ********；保存空 secret 值由服务端保留旧值（不回传明文）
+    var _ph = 'value';
+    if (_isSec && !_val && hasValue) { _ph = '********'; }
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
     var _desc = (description || '').trim();
@@ -2219,12 +2278,20 @@ function _enterCreateStandardMode(data, owner, name) {
         '</span>'
       : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
     row.innerHTML = _nameEl +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
-      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(!i)return;if(i.getAttribute(\'data-keep-value\')===\'1\'){window._cfRevealSecretField(i,b);return;}i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>') +
       (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
+    // Issue #885：密钥占位行（已配置未改动）→ 标记 keep_value（保存不回传明文）
+    if (_isSec && !_val && hasValue) {
+      var _vEl = document.getElementById(valId);
+      if (_vEl) {
+        _vEl.setAttribute('data-keep-value', '1');
+        _vEl.addEventListener('input', function() { _vEl.removeAttribute('data-keep-value'); });
+      }
+    }
   };
 
   window._createNewBranchInline = function(owner, name) {
@@ -2453,6 +2520,8 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
   }).catch(function() { window._linkedRepoOptions = []; });
 
   API.get('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name)).then(function(d) {
+    // Issue #885：密钥占位 reveal 上下文（眼睛按钮按需取回明文用）
+    window._cfAdvCtx = { sceneId: sceneId, repoParam: owner + '/' + name };
     var sel = document.getElementById('advWorkBranchInline');
     if (sel) {
       sel.innerHTML = '<option value="' + (d.work_branch || 'main') + '">' + (d.work_branch || 'main') + '</option>';
@@ -2473,7 +2542,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var container = document.getElementById('advCustomFieldsInline');
     if (container) {
       container.innerHTML = '';
-      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
+      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description, f.has_value); });
     }
     // Issue #242: 加载关联仓库（等托管仓库列表加载完成后再渲染，确保下拉框有选项）
     var linkedRepos = d.linked_repos || [];
