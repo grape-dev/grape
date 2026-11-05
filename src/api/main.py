@@ -863,6 +863,12 @@ app.add_middleware(
 # 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
 from src.observability import metrics_middleware, start_metrics_server, metrics_enabled
 metrics_middleware(app)
+# OTel HTTP spans（2026-11-05 MR-1）：legacy 单进程入口
+try:
+    from src.observability.otel import instrument_fastapi
+    instrument_fastapi(app, "grape-main")
+except Exception:
+    pass
 if metrics_enabled():
     start_metrics_server()
 
