@@ -1358,10 +1358,23 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         evt["account"] = _o_acc
     event_type = evt.get("type", "unknown")
 
+    # 绑定仓库到日志上下文（事件落库前的前置日志也能带 repo_key）
+    try:
+        from src.kernel.config import repo_var
+        if repo_key:
+            repo_var.set(repo_key)
+    except Exception:
+        pass
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
 
     # Issue #89: 提前解析 issue_id 供 skipped 事件审计（所有提前 return 路径共用）
     _pre_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+    try:
+        from src.kernel.config import issue_var
+        if _pre_issue_id:
+            issue_var.set(_pre_issue_id)
+    except Exception:
+        pass
     if not _pre_issue_id and event_type in PR_EVENT_TYPES:
         try:
             _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""

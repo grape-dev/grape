@@ -109,6 +109,19 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                 )
             db.commit()
             _seq = c.lastrowid
+            # 日志上下文：事件落库后，本次处理链路的所有日志自动带 repo/issue/seq，
+            # Grafana(Loki) 可直接按 repo_key / issue_id / seq 过滤（§Grafana 日志维度）。
+            # 运行在 asyncio.to_thread 的独立 context 中，不会泄漏到其它请求。
+            try:
+                from src.kernel.config import repo_var, issue_var, seq_var
+                if repo_key:
+                    repo_var.set(repo_key)
+                if issue_id:
+                    issue_var.set(issue_id)
+                if _seq and _seq > 0:
+                    seq_var.set(_seq)
+            except Exception:
+                pass
             # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
             c.execute("SELECT seq FROM events WHERE seq=?", (_seq,))
             if not c.fetchone():

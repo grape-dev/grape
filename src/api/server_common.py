@@ -15,6 +15,7 @@ single-process and four-process mode share one implementation.
 import os
 import time as _time
 import uuid as _uuid
+import re as _re
 from datetime import datetime as _dt, timezone as _tz
 
 from fastapi import FastAPI, Request
@@ -25,7 +26,7 @@ from fastapi.routing import APIRoute
 
 from src.api.version_check import ensure_python_version
 from src.kernel.config import log
-from src.kernel.config import request_id_var, repo_var, user_var
+from src.kernel.config import issue_var, request_id_var, repo_var, seq_var, user_var
 
 __all__ = [
     "ensure_python_version",
@@ -147,6 +148,43 @@ _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
 _LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/", "/api/ping")
 
 
+_ISSUE_PATH_RE = _re.compile(r"^/api/issues/([^/]+)")
+_EVENT_PATH_RE = _re.compile(r"^/api/events/(\d+)")
+
+
+def _normalize_issue(value: str) -> str:
+    """把 25 / #25 统一成 #25；非数字（如内部 id）原样保留。"""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.startswith("#"):
+        return v
+    if v.isdigit():
+        return f"#{v}"
+    return v
+
+
+def _issue_seq_from_request(path: str, params) -> tuple:
+    """从请求路径/查询串推断 Issue 号与事件 seq，用于日志字段 issue_id / seq。"""
+    issue = ""
+    seq = ""
+    m = _ISSUE_PATH_RE.match(path or "")
+    if m:
+        issue = _normalize_issue(m.group(1))
+    if not issue and params is not None:
+        for key in ("issue", "issue_number", "issue_id"):
+            value = params.get(key) if hasattr(params, "get") else ""
+            if value:
+                issue = _normalize_issue(value)
+                break
+    m = _EVENT_PATH_RE.match(path or "")
+    if m:
+        seq = m.group(1)
+    if not seq and params is not None:
+        seq = (params.get("seq") if hasattr(params, "get") else "") or ""
+    return issue, str(seq)
+
+
 def _attach_request_log(app: FastAPI) -> None:
     """request_id 注入 + HTTP 请求日志（合并为一个中间件，确保 ContextVar 贯穿日志）。
 
@@ -200,6 +238,11 @@ def _attach_request_log(app: FastAPI) -> None:
             except Exception:
                 pass
         token_uid = user_var.set(_uid)
+
+        # Issue/seq 维度：/api/issues/<n>、/api/events/<seq> 及 ?issue=/?seq= 直接带进日志
+        _issue, _seq = _issue_seq_from_request(path, request.query_params)
+        token_issue = issue_var.set(_issue)
+        token_seq = seq_var.set(_seq)
 
         # Issue #372 §14.2.2: 已认证请求到达时从 Host 头推导 webhook_url / server_base_url
         if _uid:
@@ -283,6 +326,8 @@ def _attach_request_log(app: FastAPI) -> None:
             request_id_var.reset(token_rid)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)
+            issue_var.reset(token_issue)
+            seq_var.reset(token_seq)
 
 
 def init_process_db() -> None:
