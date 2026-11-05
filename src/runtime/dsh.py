@@ -207,32 +207,39 @@ class DshRuntime(AgentRuntime):
         注意：**模型凭据不在此处注入** —— 按设计 D2，由 worker 机器自己的 dsh 配置/环境提供
         （平台不持有模型 key）。本函数不读取、不转发任何模型凭据。
 
-        GRAPE_SESSION_TOKEN 的穿透（dsh 专属问题）：
-        dsh 的 subprocess 服务在 spawn bash 工具时会 scrub 掉父进程 env 里所有匹配
-        /KEY|PASSWORD|SECRET|TOKEN/i 的变量名。GRAPE_SESSION_TOKEN 命中 TOKEN → 被洗掉
-        → bash 里拿不到 → grape CLI 调不了 git-repo 接口。
-        解法：把 token 值写到一个 0600 临时文件，路径通过 GRAPE_AUTH_FILE 传递
-        （该变量名不命中 scrub）。grape CLI 的 config.py 先读该文件，再 fallback 到
-        环境变量。其他引擎不做此 scrub，GRAPE_AUTH_FILE 不存在 → fallback 正常。
+        GRAPE_SESSION_TOKEN 的穿透见 prepare_env()：必须等 env_extra 合并之后再处理，
+        因为 token 是任务级的（在 env_extra 里），而本函数执行时 env_extra 尚未注入。
         """
         env = os.environ.copy()
         from src.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
-
-        # dsh token 穿透：写临时文件
-        sess_tok = env.get("GRAPE_SESSION_TOKEN", "")
-        if sess_tok:
-            try:
-                import tempfile
-                fd, auth_path = tempfile.mkstemp(
-                    prefix="grape-sess-", suffix=".tok"
-                )
-                os.write(fd, sess_tok.encode("utf-8"))
-                os.close(fd)
-                os.chmod(auth_path, 0o600)
-                env["GRAPE_AUTH_FILE"] = auth_path
-            except Exception:
-                pass  # 写文件失败不阻断执行（fallback 到 env 变量）
-
         return env
+
+    def prepare_env(self, env: dict) -> None:
+        """任务级 env 合并之后的收尾钩子（dsh 专属 token 穿透）。
+
+        dsh 的 subprocess 服务在 spawn bash 工具时会 scrub 掉父进程 env 里所有匹配
+        /KEY|PASSWORD|SECRET|TOKEN/i 的变量名。GRAPE_SESSION_TOKEN 命中 TOKEN → 被洗掉
+        → bash 里拿不到 → grape CLI 调不了 git-repo 接口。
+
+        解法：把 token 值写到一个 0600 临时文件，路径通过 GRAPE_AUTH_FILE 传递
+        （该变量名不命中 scrub）。grape CLI 的 config.py 先读该文件，再 fallback 到
+        环境变量。其他引擎不做此 scrub，GRAPE_AUTH_FILE 不存在 → fallback 正常。
+
+        ⚠️ 必须在 env_extra 合并之后调用：GRAPE_SESSION_TOKEN 由平台按任务下发、
+        存在 agent_tasks.env_extra 里，get_env() 阶段它还没进 env（历史 bug：#948
+        把本逻辑写在 get_env 里，读到的永远是空串，临时文件从未生成）。
+        """
+        sess_tok = env.get("GRAPE_SESSION_TOKEN", "")
+        if not sess_tok:
+            return
+        try:
+            import tempfile
+            fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
+            os.write(fd, sess_tok.encode("utf-8"))
+            os.close(fd)
+            os.chmod(auth_path, 0o600)
+            env["GRAPE_AUTH_FILE"] = auth_path
+        except Exception:
+            pass  # 写文件失败不阻断执行（fallback 到 env 变量）
