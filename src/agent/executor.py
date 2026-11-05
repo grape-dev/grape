@@ -666,6 +666,18 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     if env_extra:
         env.update(env_extra)
 
+    # 任务级 env 合并完成后的收尾钩子（可选，backend 自行实现）。
+    # dsh 在这里把 GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE，
+    # 绕过它 subprocess 服务的 /TOKEN/i scrub。必须放在 env_extra 之后：
+    # token 是任务级的，get_env() 执行时它还不在 env 里（#948 曾写在 get_env 里，
+    # 读到的永远是空串，临时文件从未生成）。
+    try:
+        _prepare_env = getattr(backend, "prepare_env", None)
+        if callable(_prepare_env):
+            _prepare_env(env)
+    except Exception as _pe:
+        log.warning(f"{label}prepare_env failed: {_pe}")
+
     # 技能路径占位符：worker 侧已在物化时把 {{SKILL_DIR}} 替换为随任务下发的目录；
     # direct（服务端本地）执行在此按 skills/<agent_type>/<skill>/ 结构解析，使 read tool 能找到技能文件。
     try:

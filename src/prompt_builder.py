@@ -82,6 +82,9 @@ _KNOWLEDGE_INJECT_MAX_CHARS = 8000
 
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
+# 注：判重规则的 prompt 文本已按运维决定移除（不改自动化任务/分诊的 prompt）；
+# 代码侧门禁见 scheduler.dedup_auto_merge_allowed 与 routes/autopilot._dedup_dispatch_guard。
+
 
 def _build_project_info_section(repo_key: str, agent_type: str = "",
                                 issue_num: int = 0, scene_id: str = "") -> str:

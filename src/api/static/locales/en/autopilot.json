@@ -229,6 +229,7 @@
     "load_failed": "Failed to load issues",
     "no_records": "No issue records",
     "dispatched_badge": "Dispatched",
+    "suspected_dup_badge": "Suspected duplicate (pending owner confirmation)",
     "list_title": "Issues (Run #{{id}})",
     "load_detail_failed": "Failed to load issue details: {{msg}}"
   },

@@ -229,6 +229,7 @@
     "load_failed": "加载问题失败",
     "no_records": "暂无问题记录",
     "dispatched_badge": "已派发",
+    "suspected_dup_badge": "疑似重复（待owner确认）",
     "list_title": "问题列表 (执行 #{{id}})",
     "load_detail_failed": "加载问题详情失败: {{msg}}"
   },

@@ -199,6 +199,7 @@ EXPECTED_PUBLIC = {
     "orgs_members_update": ("patch", "/api/orgs/{org_id}/members/{user_id}"),
     "orgs_search_users": ("get", "/api/orgs/search/users"),
     "orgs_update": ("put", "/api/orgs/{org_id}"),
+    "pipeline_handoff": ("post", "/api/pipeline/handoff"),
     "pipeline_get": ("get", "/api/pipeline/{owner}/{repo}"),
     "project_template_create": ("post", "/api/project-templates/create"),
     "project_template_preview": ("get", "/api/project-templates/{template_id}/preview"),

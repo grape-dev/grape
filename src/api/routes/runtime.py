@@ -1254,8 +1254,9 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"没有找到 Issue #{issue_number} 正在运行的任务"})
     task_id, status, agent_type, skill, prompt, env_extra, cwd, runtime_id, task_repo_key, task_issue_id = row
-    # ② 查最近 200 条消息
-    messages = service.list_task_messages(task_id, since=0, limit=200)
+    # ② 查最近 200 条消息（必须取"最新"而非"最早"，否则长任务接管时看到的
+    #    是几小时前的任务开头，而不是当前进展。先按 seq DESC 取，再反转为正序阅读）
+    messages = service.list_task_messages_recent(task_id, limit=200)
     return {
         "task_id": task_id,
         "status": status,

@@ -552,6 +552,42 @@ PYEOF
 }
 provision_codearts_trust
 
+# ===== 5.9 codegraph 预装（Issue #666 M4：project-info 分析引擎，best-effort 不阻断注册）=====
+# 分发形式：npm 平台二进制包 @colbymchenry/codegraph（自包含 node 运行时 + Rust 内核，非 pip 包）。
+# 优先级：已装跳过 → npm 在线安装 → 随包 install-codegraph.sh 离线安装（需 tgz）→ 告警跳过。
+# 缺失只影响知识基线全量生成（服务端/本地分析降级 + 显式告警），worker 正常注册运行。
+install_codegraph() {
+  if command -v codegraph >/dev/null 2>&1; then
+    log "codegraph already present ($(codegraph --version 2>/dev/null || echo unknown)), skipping"
+    return 0
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    log "Installing codegraph (npm install -g @colbymchenry/codegraph)..."
+    if timeout 300 npm install -g @colbymchenry/codegraph >/dev/null 2>&1 && command -v codegraph >/dev/null 2>&1; then
+      log "codegraph installed ($(codegraph --version 2>/dev/null || echo unknown))"
+      return 0
+    fi
+    log "Warning: codegraph npm install failed"
+  fi
+  if [ -f "$INSTALL_DIR/scripts/install-codegraph.sh" ]; then
+    log "Trying bundled offline installer scripts/install-codegraph.sh..."
+    bash "$INSTALL_DIR/scripts/install-codegraph.sh" --src "$INSTALL_DIR/scripts" && command -v codegraph >/dev/null 2>&1 && \
+      log "codegraph installed offline" && return 0
+    log "Warning: offline codegraph install unavailable (no matching platform tgz bundled)"
+  fi
+  log "Warning: codegraph NOT installed -- project-info full generation degraded with explicit warning."
+  log "  Hint: install Node.js then npm install -g @colbymchenry/codegraph, or place platform tgz in scripts/ and re-run"
+  return 0
+}
+install_codegraph
+
+# codegraph 可用性校验（Issue #666 验收：缺失显式告警，不 fail）
+if command -v codegraph >/dev/null 2>&1; then
+  log "codegraph check OK: $(codegraph --version 2>/dev/null || echo 'present')"
+else
+  log "Warning: codegraph check FAILED ('codegraph --version' not available); worker runs fine, knowledge baseline will be degraded"
+fi
+
 # ===== 6. 生成启动脚本并启动 =====
 # systemd 可用性检测：容器环境（如 DevSpace）通常无 systemd（PID 1 非 systemd），
 # 此时 root 模式也必须回退到 nohup/setsid，否则 systemctl restart 会 fail 退出。

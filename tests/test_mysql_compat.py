@@ -122,6 +122,23 @@ class TestTranslateSql:
         assert mc.translate_sql("SELECT 'gitcode:' || repo_key FROM t") == \
             "SELECT CONCAT('gitcode:', repo_key) FROM t"
 
+    def test_arbitrary_literal_concat_translated(self):
+        """架构审查 BLOCKED-1：任意字面量拼接也要翻译，否则 MySQL 下 `||` 退化为逻辑 OR。
+
+        `e.issue_id='#'||i.issue_number` 不翻译时在 MySQL 求值为 (0 OR n) → 1，
+        NOT EXISTS 恒真，静默返回错误数据（SQLite 测试发现不了）。
+        """
+        sql = ("SELECT 1 FROM issues i WHERE NOT EXISTS (SELECT 1 FROM events e "
+               "WHERE e.repo_key=i.repo_key AND e.issue_id='#'||i.issue_number)")
+        out = mc.translate_sql(sql)
+        assert "CONCAT('#', i.issue_number)" in out
+        assert "'#'||" not in out
+
+    def test_logical_or_untouched(self):
+        """真正的逻辑 OR 写法（非字面量左操作数）不得被改写。"""
+        out = mc.translate_sql("SELECT * FROM t WHERE a=1 || b=2")
+        assert "CONCAT" not in out
+
     def test_cast_as_text_to_char(self):
         """CAST(seq AS TEXT) → CAST(seq AS CHAR)（MySQL 不支持 TEXT 作 CAST 目标）"""
         out = mc.translate_sql("SELECT * FROM events WHERE CAST(seq AS TEXT) LIKE %s")

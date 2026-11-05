@@ -56,6 +56,9 @@ MANIFEST = [
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     "requirements-worker.txt",
+    # Issue #666 (M4): 随包下发 codegraph 离线安装脚本（降级/离线环境的预装入口；
+    # 在线首选 npm install -g @colbymchenry/codegraph，见 install-worker.sh 5.9 步）
+    "scripts/install-codegraph.sh",
 ]
 
 _build_lock = threading.Lock()

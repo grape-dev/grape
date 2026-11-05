@@ -14,3 +14,7 @@ aiohttp>=3.9
 bcrypt>=4.0
 click>=8.0
 httpx>=0.24
+# Issue #666 (M4): codegraph（project-info 分析引擎）为 npm 平台二进制包
+# @colbymchenry/codegraph（自包含 node 运行时 + Rust 内核），NOT a pip package —— 故不在此声明
+# pip 依赖。worker 侧预装走 scripts/install-codegraph.sh（随包下发）或 npm 在线安装，
+# 安装后由 install-worker.sh 校验 `codegraph --version`（缺失仅告警，不阻断注册）。

@@ -1,11 +1,16 @@
 """反馈 → Issue 转换器 + reconcile worker（feedback-openapi-expose-design.md §1.3/§四.5/§四.6）。
 
-职责：把 `source='agent'` 且未转换（issue_url=''）的反馈，按 skill.scope 路由到目标仓库并创建 Issue，
+职责：把待转换（issue_url='')的反馈按 skill.scope 路由到目标仓库并创建 Issue，
 成功后回写 issue_url / issue_number / converted_at。
+
+覆盖范围（Issue #673）：
+- source='agent'（自动反馈）；
+- source='user' 且带仓库上下文（repo_key 非空）的用户反馈——按 repo_key 路由建 Issue 回写，
+  使「我的反馈」用户视图同样能拿到关联 Issue 链接；纯意见类（无 repo_key）跳过不转换。
 
 路由规则：
 - skill.scope='official' → 官方技能仓库（GRAPE_SKILLS_REPO 配置，以全局 bot token 身份）
-- skill.scope='repo'/'user' → 反馈所属 repo_key 的 <owner>/<repo>（以仓库 bot token 身份）
+- skill.scope='repo'/'user'/source='user' → 反馈所属 repo_key 的 <owner>/<repo>（以仓库 bot token 身份）
 
 幂等：以 (task_id, skill_name, title) 为组，同组只建一个 Issue；组内全部回写同一 issue_url。
 失败处理：异常仅记日志、不回写，下轮重试；连续失败可标记 skipped 供 admin 感知。
@@ -118,13 +123,16 @@ def _issue_url(provider: str, owner: str, repo: str, number) -> str:
 
 
 def _fetch_pending(limit: int):
-    """取待转换行：source='agent' AND issue_url='' AND is_deleted=0。"""
+    """取待转换行：issue_url='' AND is_deleted=0，且
+    source='agent'，或 source='user' 且带仓库上下文（repo_key 非空，Issue #673）。"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT id, repo_key, task_id, agent_type, skill_name, skill_scope, "
-            "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind "
-            "FROM user_feedback WHERE source='agent' AND issue_url='' AND is_deleted=0 "
+            "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind, "
+            "source, username "
+            "FROM user_feedback WHERE issue_url='' AND is_deleted=0 "
+            "AND (source='agent' OR (source='user' AND COALESCE(repo_key,'')!='')) "
             "ORDER BY id LIMIT ?",
             (limit,))
         rows = c.fetchall()
@@ -134,11 +142,12 @@ def _fetch_pending(limit: int):
         "title": r[6] or '', "description": r[7] or '', "fail_summary": r[8] or '',
         "event_seq": r[9], "issue_id": r[10], "issue_number": r[11] or '',
         "feedback_kind": r[12] or '',
+        "source": r[13] or 'agent', "username": r[14] or '',
     } for r in rows]
 
 
 def convert_pending_feedback(limit: int = 20) -> dict:
-    """扫描并转换待处理的 agent 反馈，返回统计 {converted, skipped, failed}。"""
+    """扫描并转换待处理的反馈（agent + 带上下文的 user），返回统计 {converted, skipped, failed}。"""
     result = {"converted": 0, "skipped": 0, "failed": 0}
     rows = _fetch_pending(limit)
     if not rows:
@@ -146,10 +155,14 @@ def convert_pending_feedback(limit: int = 20) -> dict:
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()
 
-    # 幂等组：同 (task_id, skill_name, title)，只建一个 Issue，组内全部回写
+    # 幂等组：agent 反馈同 (task_id, skill_name, title) 共用一个 Issue，组内全部回写；
+    # user 反馈按行独立（task_id/skill_name 常为空，跨用户同标题不得并组，Issue #673 QA S2）
     groups = {}
     for row in rows:
-        key = (row["task_id"], row["skill_name"], row["title"])
+        if (row.get("source") or "agent") == "user":
+            key = ("user", row["id"])
+        else:
+            key = (row["task_id"], row["skill_name"], row["title"])
         groups.setdefault(key, []).append(row)
 
     for key, group in groups.items():
@@ -200,7 +213,10 @@ def _resolve_target(row):
     """
     scope = (row.get("skill_scope") or "").lower()
     kind = (row.get("feedback_kind") or "").lower()
-    if scope != "official" and kind not in _OFFICIAL_COMPONENT_KINDS:
+    # 用户反馈（Issue #673）：一律按反馈所属仓库路由（带 repo_key 才会进入待转换队列），
+    # 与 repo/user 技能类同路（语义一致，合并分支避免路由规则膨胀）
+    is_user = (row.get("source") or "agent") == "user"
+    if is_user or (scope != "official" and kind not in _OFFICIAL_COMPONENT_KINDS):
         provider, owner, repo = _repo_target(row.get("repo_key") or "")
         token = _repo_bot_token(row.get("repo_key") or "")
         return (provider, owner, repo, token)
@@ -222,6 +238,21 @@ def _build_issue_body(row: dict) -> str:
     （docs/weekly-08/feedback-issue-body-redact-m1-design.md）。
     """
     from src.observability.redact_issue_body import redact_issue_text
+    if (row.get("source") or "agent") == "user":
+        # 用户反馈（Issue #673）：来源/提交人/仓库/事件 + 反馈内容
+        lines = [
+            "> 来源：用户反馈（source=user）",
+            f"- 反馈ID：{row['id']}",
+            f"- 提交人：{row.get('username') or '-'}",
+            f"- 仓库：{row['repo_key'] or '-'}",
+            f"- 事件：{row['event_seq'] or '-'} (issue {row['issue_number'] or '-'})",
+            "",
+            "## 反馈内容",
+        ]
+        desc = (row.get("description") or "").strip()
+        if desc:
+            lines.append(redact_issue_text(desc, 2000))
+        return "\n".join(lines)
     lines = [
         f"> 来源：Agent 自动反馈（source=agent）",
         f"- 反馈ID：{row['id']}",
@@ -244,6 +275,24 @@ def _build_issue_body(row: dict) -> str:
 
 # ===================== reconcile worker =====================
 
+def _sync_statuses():
+    """reconcile 周期内的反馈状态联动同步（导入放函数内避免循环依赖风险）。
+
+    内部 issue 映射同步 + user 反馈外部 Issue 状态拉取（Issue #673 QA S1）。
+    """
+    try:
+        from src.api.feedback_status import (
+            sync_feedback_statuses,
+            sync_external_feedback_statuses,
+        )
+        sync_feedback_statuses()
+        # 外部拉取单独限批：单请求 30s 超时，20×30s=600s 仍小于 feedback_status_sync 的
+        # 900s 锁 TTL（架构审查 M-4：原 200 条最坏 6000s，锁先过期导致并发重入）。
+        sync_external_feedback_statuses(limit=20)
+    except Exception:
+        log.exception("feedback status sync in reconcile failed")
+
+
 async def feedback_reconcile_loop(interval: float = 300.0):
     """周期性扫描转换（与 skill-sync serial worker 同套路：分布式锁 + 崩溃安全）。"""
     from src.runtime.task_lock import run_with_distributed_lock
@@ -262,6 +311,16 @@ async def feedback_reconcile_loop(interval: float = 300.0):
                 log.exception("feedback reconcile run failed")
             else:
                 log.exception("feedback reconcile run failed")
+        # 状态联动同步走独立的锁与独立预算：外部 Issue 状态拉取是慢路径
+        # （单请求 timeout=30s），放在 reconcile 的 300s 锁内会把锁撑过期，
+        # 导致其它进程重入并重复发起外部请求（架构审查 M-4）。
+        try:
+            async with run_with_distributed_lock("feedback_status_sync", ttl=900):
+                await asyncio.to_thread(_sync_statuses)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("feedback status sync run failed")
         await asyncio.sleep(interval)
 
 

@@ -108,6 +108,52 @@ def _heal_findings_marker(text: str) -> str:
     return text
 
 
+# ====== Issue #697：dedup 判定级别枚举 + 门禁判定（代码级强制，单一事实源） ======
+# prompt_builder / routes/autopilot.py 均从这里取常量与判定函数，禁止各自复制规则文本。
+
+DEDUP_LEVEL_EXACT = "exact_duplicate"
+DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+DEDUP_LEVEL_NOT = "not_duplicate"
+DEDUP_LEVELS = (DEDUP_LEVEL_EXACT, DEDUP_LEVEL_SUSPECTED, DEDUP_LEVEL_NOT)
+
+# 写入公开 Issue 描述 / 确认人字段的限长（防 LLM 长文注入公开面）
+DEDUP_NOTE_MAX_CHARS = 200
+DEDUP_CONFIRMED_BY_MAX_CHARS = 64
+
+# 注：判重规则的 prompt 文本已按运维决定移除（不再改自动化任务的 prompt）；
+# 这里只保留代码侧门禁所需的级别枚举与判定函数。
+
+
+def normalize_dedup_level(raw) -> str:
+    """判定级别归一（fail-closed）。
+
+    合法枚举原样返回；空串=LLM 未分类（保持既有放行行为）；
+    非法/拼错的非空级别一律降级为 suspected_duplicate，杜绝漏发/拼错绕过 409 门禁。
+    """
+    level = str(raw or "").strip().lower()
+    if not level:
+        return ""
+    return level if level in DEDUP_LEVELS else DEDUP_LEVEL_SUSPECTED
+
+
+def sanitize_dedup_note(raw) -> str:
+    """dedup_note 压平换行 + 限长（写入公开 Issue 描述前调用）。"""
+    return " ".join(str(raw or "").split())[:DEDUP_NOTE_MAX_CHARS]
+
+
+def sanitize_dedup_confirmed_by(raw) -> str:
+    """dedup_confirmed_by 压平 + 限长（确认人身份字段，非自由文本）。"""
+    return " ".join(str(raw or "").split())[:DEDUP_CONFIRMED_BY_MAX_CHARS]
+
+
+def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
+    """并入挂靠门禁：exact 允许；未分类（空）保持既有行为允许；疑似/未知需 owner 确认。"""
+    level = normalize_dedup_level(dedup_level)
+    if level in ("", DEDUP_LEVEL_NOT, DEDUP_LEVEL_EXACT):
+        return True
+    return bool(dedup_confirmed)
+
+
 def parse_findings(agent_output: str) -> dict:
     """从 agent 产出中解析问题列表。
 
@@ -160,6 +206,10 @@ def parse_findings(agent_output: str) -> dict:
             f.setdefault("severity", "medium")
             f.setdefault("suggested_assignee", "coding")
             f.setdefault("suggested_skill", "implementation")
+            # Issue #697：判定级别与差异说明透传（exact_duplicate/suspected_duplicate/not_duplicate）；
+            # 级别在解析层即归一 fail-closed（漏发/拼错的非空级别按疑似重复处理，杜绝绕过 409 门禁）
+            f["dedup_level"] = normalize_dedup_level(f.get("dedup_level"))
+            f["dedup_note"] = sanitize_dedup_note(f.get("dedup_note"))
             valid.append(f)
         return {
             "result": data.get("result", ""),
