@@ -154,14 +154,6 @@ def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool
     return bool(dedup_confirmed)
 
 
-def dedup_cascade_close_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
-    """级联关闭守护（代码级）：仅 exact_duplicate 或 owner 已确认的疑似重复允许级联关闭。"""
-    level = normalize_dedup_level(dedup_level)
-    if level in ("", DEDUP_LEVEL_NOT, DEDUP_LEVEL_EXACT):
-        return True
-    return bool(dedup_confirmed)
-
-
 def parse_findings(agent_output: str) -> dict:
     """从 agent 产出中解析问题列表。
 

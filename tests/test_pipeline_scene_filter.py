@@ -36,7 +36,9 @@ class TestPushdownSource:
 
     def test_build_only_window(self):
         s = _src()
-        assert "for iid in _win_ids]" in s, "流水线构建应只跑窗口内的 issue"
+        # 下推成功只用窗口；失败必须回落到完整 issue 列表（架构审查 M-1）
+        assert "for iid in (_win_ids if _pushdown_ok else issue_ids)]" in s, \
+            "流水线构建应只跑窗口内 issue，且下推失败时回落 issue_ids"
 
     def test_stats_from_aggregate(self):
         s = _src()

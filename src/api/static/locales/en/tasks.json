@@ -145,6 +145,7 @@
     "failed": "Failed",
     "cancelled": "Cancelled"
   },
+  "load_more": "Load more",
   "filter_options": {
     "created_by_me": "My Requirements"
   }

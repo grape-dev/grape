@@ -617,7 +617,6 @@ try:
     from src.runtime.scheduler import (
         DEDUP_LEVEL_SUSPECTED,
         dedup_auto_merge_allowed,
-        dedup_cascade_close_allowed,
         normalize_dedup_level,
         sanitize_dedup_note,
         sanitize_dedup_confirmed_by,
@@ -633,10 +632,6 @@ except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同
             else "suspected_duplicate"
 
     def dedup_auto_merge_allowed(dedup_level, dedup_confirmed=False):
-        level = normalize_dedup_level(dedup_level)
-        return level in ("", "not_duplicate", "exact_duplicate") or bool(dedup_confirmed)
-
-    def dedup_cascade_close_allowed(dedup_level, dedup_confirmed=False):
         level = normalize_dedup_level(dedup_level)
         return level in ("", "not_duplicate", "exact_duplicate") or bool(dedup_confirmed)
 
@@ -679,7 +674,7 @@ def _append_dedup_note(description: str, finding: dict) -> str:
     if note:
         lines.append(f"[dedup] 差异说明: {note}")
     if level == DEDUP_LEVEL_SUSPECTED:
-        lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入；级联关闭不自动触发")
+        lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入")
     return "\n".join(lines)
 
 

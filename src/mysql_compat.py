@@ -119,6 +119,12 @@ _PRAGMA_INDEX_LIST_RE = re.compile(r"^\s*PRAGMA\s+index_list\(\s*([`\"'\w]+)\s*\
 _PRAGMA_INDEX_INFO_RE = re.compile(r"^\s*PRAGMA\s+index_info\(\s*([`\"'\w]+)\s*\)\s*$", re.I)
 # 仅处理 'gitcode:' || col 拼接模式（代码中唯一用法）
 _CONCAT_RE = re.compile(r"'gitcode:'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
+# 通用字面量拼接：'<lit>' || <col> → CONCAT('<lit>', <col>)
+# MySQL 默认 sql_mode 下 `||` 是逻辑 OR：'#'||n 求值为 (0 OR n) → 1，比较恒不相等，
+# 不翻译会静默返回错误数据（pipeline.py 的 e.issue_id='#'||i.issue_number 即此类）。
+# 只有左操作数是字符串字面量时才翻译，真正的逻辑 OR 写法不受影响。
+_LIT_CONCAT_RE = re.compile(
+    r"'((?:[^'\\]|\\.)*)'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
 
 # CREATE TABLE 语句中的列行级翻译
 _COL_TEXT_PK_RE = re.compile(r"^(\s*)([`\"\w]+)\s+TEXT\s+PRIMARY\s+KEY\b", re.I)
@@ -310,6 +316,8 @@ def translate_sql(sql: str) -> str:
     sql = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", sql)
     # 'gitcode:' || col → CONCAT('gitcode:', col)
     sql = _CONCAT_RE.sub(r"CONCAT('gitcode:', \1)", sql)
+    # 其余字面量拼接：'<lit>' || col → CONCAT('<lit>', col)（见 _LIT_CONCAT_RE 注释）
+    sql = _LIT_CONCAT_RE.sub(r"CONCAT('\1', \2)", sql)
     # CAST(x AS TEXT) → CAST(x AS CHAR)（MySQL 不支持 TEXT 作为 CAST 目标类型，1064 语法错误；
     #   CHAR 在 SQLite 中按 TEXT 亲和性处理，双方言兼容）
     sql = re.sub(r"\bCAST\((.+?)\s+AS\s+TEXT\)", r"CAST(\1 AS CHAR)", sql, flags=re.I)

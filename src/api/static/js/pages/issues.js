@@ -196,7 +196,7 @@ function _boardColFootHtml(colKey, loadedN) {
   }
   if (cur.hasMore) {
     return '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">↓ ' +
-           (I18N.t('tasks.load_more') || '滚动加载更多') + '</div>';
+           (I18N.t('tasks.load_more', {}, '滚动加载更多')) + '</div>';
   }
   return loadedN > 0
     ? '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">— ' +
@@ -1087,7 +1087,7 @@ function _renderPipelineSection(data) {
       (events.length > _shown ? ` <span style="font-weight:400;font-size:10px;color:var(--t3,#86868b)">(${_shown}/${events.length})</span>` : '') + `</div>`;
     html += '<div style="display:flex;flex-direction:column;gap:0">';
     if (events.length > _shown) {
-      html += `<div style="text-align:center;padding:4px 0 10px"><button class="tsk-btn tsk-btn-ghost" style="padding:3px 12px;border-radius:8px;font-size:11px" onclick="window._pipeEventsShown=(window._pipeEventsShown||20)+20;_loadMorePipeEvents()">▲ ${I18N.t('tasks.load_more')||'加载更多'}</button></div>`;
+      html += `<div style="text-align:center;padding:4px 0 10px"><button class="tsk-btn tsk-btn-ghost" style="padding:3px 12px;border-radius:8px;font-size:11px" onclick="window._pipeEventsShown=(window._pipeEventsShown||20)+20;_loadMorePipeEvents()">▲ ${I18N.t('tasks.load_more', {}, '加载更多')}</button></div>`;
     }
     shownEvents.forEach(function(e, i) {
       var isLast = i === shownEvents.length - 1;

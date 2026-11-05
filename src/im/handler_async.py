@@ -650,7 +650,7 @@ def _autopilot_dedup_confirm_card(exec_id: int, finding_id: str, scene_id: str, 
         {"tag": "div", "text": {"tag": "lark_md",
                                 "content": "**⚠️ 疑似重复（根因比对不一致）**\n"
                                            "该问题与已有跟踪单仅标题相似、根因不一致，"
-                                           "需确认后方可派发并入；级联关闭在确认前不会自动触发。"}},
+                                           "需确认后方可派发并入。"}},
     ]
     if _note:
         body.append({"tag": "div", "text": {"tag": "lark_md",

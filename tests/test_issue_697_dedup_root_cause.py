@@ -98,12 +98,6 @@ class TestSchedulerDedupRule:
         assert sched.normalize_dedup_level(None) == ""
         assert sched.normalize_dedup_level("Exact_Duplicate") == "exact_duplicate"
         assert sched.normalize_dedup_level("suspected") == "suspected_duplicate"  # 未知 fail-closed
-        # 级联关闭守护（代码级）：疑似重复未确认不允许；确认后允许；未知级别未确认不允许
-        assert sched.dedup_cascade_close_allowed("suspected_duplicate", False) is False
-        assert sched.dedup_cascade_close_allowed("suspected_duplicate", True) is True
-        assert sched.dedup_cascade_close_allowed("unknown_level", False) is False
-        assert sched.dedup_cascade_close_allowed("exact_duplicate", False) is True
-        assert sched.dedup_cascade_close_allowed("not_duplicate", False) is True
         # 并入门禁：疑似未确认拒绝，确认放行
         assert sched.dedup_auto_merge_allowed("suspected_duplicate", False) is False
         assert sched.dedup_auto_merge_allowed("suspected_duplicate", True) is True
@@ -148,7 +142,7 @@ class TestDispatchGuard:
     def test_append_dedup_note_unknown_level_fail_closed(self, ap):
         out = ap._append_dedup_note("原始描述", {"dedup_level": "duplicate?"})
         assert "level=suspected_duplicate" in out
-        assert "级联关闭不自动触发" in out
+        assert "待跟踪单 owner agent 确认后方可并入" in out
 
     def test_append_dedup_note_truncates_and_flattens(self, ap):
         finding = {"dedup_level": "suspected_duplicate", "dedup_note": "行1\n行2 " + "长" * 400}
@@ -156,11 +150,6 @@ class TestDispatchGuard:
         seg = out.split("[dedup] 差异说明: ", 1)[1].split("\n", 1)[0]
         assert "\n" not in seg
         assert len(seg) == 200
-
-    def test_cascade_close_helper_reexported(self, ap):
-        """routes/autopilot 复用 scheduler 级联关闭守护（代码级单一事实源）。"""
-        assert ap.dedup_cascade_close_allowed("suspected_duplicate", False) is False
-        assert ap.dedup_cascade_close_allowed("suspected_duplicate", True) is True
 
     def test_confirmation_persisted_even_if_issue_create_fails(self, ap, monkeypatch):
         """Issue #697：owner 确认标记先于建 Issue 落库，建 Issue 失败（issue_number=0）不丢确认。"""
@@ -200,7 +189,7 @@ class TestDispatchGuard:
         out = ap._append_dedup_note("原始描述", finding)
         assert "level=suspected_duplicate" in out
         assert "404 scene not found" in out
-        assert "级联关闭不自动触发" in out
+        assert "待跟踪单 owner agent 确认后方可并入" in out
 
     def test_append_dedup_note_no_level_untouched(self, ap):
         assert ap._append_dedup_note("原始描述", {}) == "原始描述"

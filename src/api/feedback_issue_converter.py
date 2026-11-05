@@ -286,7 +286,9 @@ def _sync_statuses():
             sync_external_feedback_statuses,
         )
         sync_feedback_statuses()
-        sync_external_feedback_statuses()
+        # 外部拉取单独限批：单请求 30s 超时，20×30s=600s 仍小于 feedback_status_sync 的
+        # 900s 锁 TTL（架构审查 M-4：原 200 条最坏 6000s，锁先过期导致并发重入）。
+        sync_external_feedback_statuses(limit=20)
     except Exception:
         log.exception("feedback status sync in reconcile failed")
 
@@ -299,8 +301,6 @@ async def feedback_reconcile_loop(interval: float = 300.0):
         try:
             async with run_with_distributed_lock("feedback_reconcile", ttl=300):
                 await asyncio.to_thread(convert_pending_feedback, 50)
-                # 状态联动同步（Issue #673：反馈状态随关联 issue 推进更新，与 #22 共用口径）
-                await asyncio.to_thread(_sync_statuses)
             _fail = 0
         except asyncio.CancelledError:
             raise
@@ -311,6 +311,16 @@ async def feedback_reconcile_loop(interval: float = 300.0):
                 log.exception("feedback reconcile run failed")
             else:
                 log.exception("feedback reconcile run failed")
+        # 状态联动同步走独立的锁与独立预算：外部 Issue 状态拉取是慢路径
+        # （单请求 timeout=30s），放在 reconcile 的 300s 锁内会把锁撑过期，
+        # 导致其它进程重入并重复发起外部请求（架构审查 M-4）。
+        try:
+            async with run_with_distributed_lock("feedback_status_sync", ttl=900):
+                await asyncio.to_thread(_sync_statuses)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("feedback status sync run failed")
         await asyncio.sleep(interval)
 
 

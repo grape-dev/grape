@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
+from src.config import log
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -566,7 +567,7 @@ def get_pipeline(owner: str, repo: str,
         repo_key, iid, events,
         _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
         _bot_usernames, _feishu_name_cache, _events_by_issue
-    ) for iid in _win_ids]
+    ) for iid in (_win_ids if _pushdown_ok else issue_ids)]
     pipelines = [p for p in pipelines if p is not None]
 
     # Issue #89: 检测 tasks 有记录但 events 无记录的 Issue（数据一致性差异）
