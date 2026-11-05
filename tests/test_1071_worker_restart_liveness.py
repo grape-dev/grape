@@ -112,7 +112,7 @@ def test_sweep_kills_task_without_activity():
     """真死兜底：pending_since 过 30 分钟且完全没有产出 → 照旧判死（真死任务仍回收）。"""
     from src.runtime.scheduler import _sweep_pending_self_report_timeouts
     tid = "t_1071_dead"
-    _seed_task(tid, "pending_self_report", pending_since=_iso(-2400), started_at=_iso(-3000))
+    _seed_task(tid, "pending_self_report", pending_since=_iso(-6000), started_at=_iso(-7000))
     _sweep_pending_self_report_timeouts()
     row = _status(tid)
     assert row[0] == "timeout_failed", f"真死任务没被判死: {row}"
