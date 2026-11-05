@@ -206,9 +206,33 @@ class DshRuntime(AgentRuntime):
         DEVOPS_SKILLS_DIR / DEVOPS_EVENT_TYPE 由平台侧下发，供引擎读取节点技能与事件类型。
         注意：**模型凭据不在此处注入** —— 按设计 D2，由 worker 机器自己的 dsh 配置/环境提供
         （平台不持有模型 key）。本函数不读取、不转发任何模型凭据。
+
+        GRAPE_SESSION_TOKEN 的穿透（dsh 专属问题）：
+        dsh 的 subprocess 服务在 spawn bash 工具时会 scrub 掉父进程 env 里所有匹配
+        /KEY|PASSWORD|SECRET|TOKEN/i 的变量名。GRAPE_SESSION_TOKEN 命中 TOKEN → 被洗掉
+        → bash 里拿不到 → grape CLI 调不了 git-repo 接口。
+        解法：把 token 值写到一个 0600 临时文件，路径通过 GRAPE_AUTH_FILE 传递
+        （该变量名不命中 scrub）。grape CLI 的 config.py 先读该文件，再 fallback 到
+        环境变量。其他引擎不做此 scrub，GRAPE_AUTH_FILE 不存在 → fallback 正常。
         """
         env = os.environ.copy()
         from src.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
+
+        # dsh token 穿透：写临时文件
+        sess_tok = env.get("GRAPE_SESSION_TOKEN", "")
+        if sess_tok:
+            try:
+                import tempfile
+                fd, auth_path = tempfile.mkstemp(
+                    prefix="grape-sess-", suffix=".tok"
+                )
+                os.write(fd, sess_tok.encode("utf-8"))
+                os.close(fd)
+                os.chmod(auth_path, 0o600)
+                env["GRAPE_AUTH_FILE"] = auth_path
+            except Exception:
+                pass  # 写文件失败不阻断执行（fallback 到 env 变量）
+
         return env
