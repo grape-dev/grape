@@ -29,7 +29,10 @@ _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id �
 
 # Issue #537：pending_self_report 超时（worker 未自报）→ timeout_failed 兜底阈值；
 # zombie 判死离线宽限（停双主/重启 master 的短暂离线不误判 failed）。
-PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "1800"))
+# Issue #1071：默认 1800→5400——部署类任务（打包+生产部署全流程约 40-50 分钟）按设计
+# 在执行中重启主控，重启瞬间 pending_since 重置，1800s 窗口实际退化为「重启后 30 分钟」，
+# 剩余工序经常超 30 分钟被误判 timeout_failed；配合判死前活跃流豁免（见 sweep）双保险。
+PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "5400"))
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 
 # agent_type 固定为 'issue'，不再由用户选择
@@ -1172,23 +1175,36 @@ def _offline_duration_seconds(last_seen_at: str):
         return None
 
 
-def _epoch_seconds_of(value):
-    """库里时间串 → epoch 秒；不可解析 → None（与 service._epoch_of 同口径，本地副本避免循环导入）。"""
-    if not value:
-        return None
+# Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 600s 视为
+# 「执行中」（worker 还在产出执行流），跳过本轮判死。600s 与调度扫描周期（60s）量级
+# 匹配，避免无限豁免；真沉默任务最多延迟一轮（60s 扫描 + 600s 静默窗）被回收。
+_PENDING_STREAM_ACTIVE_WINDOW_SECONDS = 600
+
+
+def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
+    """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 600s → True。
+
+    返回 False（回退原判死逻辑，Spec：数据缺失不豁免，宁可误回收不留死任务）：
+    - 该任务在 task_messages 无任何记录（执行流从未产出，无法证明在跑）；
+    - created_at 缺失/无法解析（parse_dt 失败）；
+    - 查询异常（表缺失等）。
+    """
     try:
+        row = cursor.execute(
+            "SELECT created_at FROM task_messages WHERE task_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,)).fetchone()
+        if not row or not (row[0] or "").strip():
+            return False
         from src.runtime.health import parse_dt
-        _ts = parse_dt(value)
-        if isinstance(_ts, (int, float)):
-            return float(_ts)
+        _ts = parse_dt(row[0])
         if _ts is None:
-            return None
-        _dt = _ts
-        if _dt.tzinfo is None:
-            _dt = _dt.replace(tzinfo=timezone.utc)
-        return _dt.timestamp()
-    except Exception:
-        return None
+            return False
+        _age = datetime.now(timezone.utc).timestamp() - float(_ts)
+        return _age < _PENDING_STREAM_ACTIVE_WINDOW_SECONDS
+    except Exception as _e:
+        log.warning(f"pending stream activity check failed for task {task_id}: {_e}")
+        return False
 
 
 def _sweep_pending_self_report_timeouts() -> int:
@@ -1196,20 +1212,22 @@ def _sweep_pending_self_report_timeouts() -> int:
 
     主控停机时 REMOTE 任务被置 pending_self_report；正常路径是 worker 继续执行并
     complete_task/fail_task 自报。若 worker 失联/永远不自报，超过
-    PENDING_SELF_REPORT_TIMEOUT_SECONDS（默认 30min）→ 判 timeout_failed
-    （带说明的终态，区别于 plain failed），并同步 events=failed + autopilot_executions=failed。
+    PENDING_SELF_REPORT_TIMEOUT_SECONDS（默认 90min，Issue #1071 放宽）→ 判
+    timeout_failed（带说明的终态，区别于 plain failed），并同步 events=failed +
+    autopilot_executions=failed。
+
+    Issue #1071 活跃流豁免：部署类长任务（打包+生产部署约 40-50 分钟）按设计在执行中
+    重启主控，重启瞬间 pending_since 重置；判死前先查 task_messages 最新一条写入时间，
+    距 now < 600s 说明 worker 仍在执行（执行流持续产出），跳过本轮判死、下轮再评估；
+    无消息/解析失败回退原判死逻辑（数据缺失不豁免）。
     """
     from src.runtime.service import update_task_status
-    from src.runtime.service import task_last_activity, TIMEOUT_SOURCE_MARKER
     from src.api.event_store import update_event_complete
     _cutoff_ts = datetime.now(timezone.utc).timestamp() - PENDING_SELF_REPORT_TIMEOUT_SECONDS
     _now = datetime.now(timezone.utc).isoformat()
-    _reason = (f"[{TIMEOUT_SOURCE_MARKER}] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s "
-               f"内未自报完成/失败（pending_self_report 超时），判 timeout_failed")
-    # 来源标记（Issue #1071）：标记内嵌在判死文案里，errors 仍是「纯字符串数组」——
-    # 不改结构，UI / _resolve_error_messages / event_pipeline 合并逻辑零兼容风险，
-    # 后端复活路径靠 marker 子串识别「兜底超时」而非业务失败。
-    _errors_json = json.dumps([_reason], ensure_ascii=False)
+    _reason = (f"[PENDING_SELF_REPORT_TIMEOUT] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
+               f"且执行流静默超 {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s"
+               f"（pending_self_report 超时），判 timeout_failed")
     marked = 0
     try:
         _pending_rows = []
@@ -1232,30 +1250,16 @@ def _sweep_pending_self_report_timeouts() -> int:
                 except Exception:
                     _ts = None
                 if _ts and float(_ts) <= _cutoff_ts:
+                    # 活跃流豁免（Issue #1071）：执行流 <600s 内仍在写入 → 任务在跑，
+                    # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
+                    if _pending_self_report_stream_active(c, _r[0]):
+                        continue
                     _pending_rows.append(_r)
             rows = _pending_rows
         for tid, evt_seq, _rt_id, _ps in rows:
-            # Issue #1071（P1）：活性判定——重启后 worker 还活着就不判死。
-            # 判死只看 pending_since（=停机时刻）是一刀切：worker 继续执行并在 task_messages
-            # 持续产出，却仍在停机 30 分钟后被标死（今天 26/34 属于这一类）。
-            # 有效基准 = max(停机时刻, 最近产出)，仍超阈值才判死；真死任务照样 30 分钟回收。
-            try:
-                _ps_epoch = _epoch_seconds_of(_ps)
-                _last_act = task_last_activity(tid)
-                _base = max([_x for _x in (_ps_epoch, _last_act) if _x is not None],
-                            default=None)
-                if _base is not None and _base > _cutoff_ts:
-                    _la_txt = (datetime.fromtimestamp(_last_act, tz=timezone.utc).isoformat()
-                               if _last_act else "none")
-                    log.info(f"pending_self_report renew: task {tid} "
-                             f"last_activity={_la_txt} pending_since={_ps} "
-                             f"(threshold={PENDING_SELF_REPORT_TIMEOUT_SECONDS}s)")
-                    continue
-            except Exception as _ae:
-                log.warning(f"pending_self_report activity check failed for task {tid}: {_ae}")
             try:
                 update_task_status(tid, "timeout_failed", exit_code=-1,
-                                   errors=_errors_json,
+                                   errors=json.dumps([_reason], ensure_ascii=False),
                                    completed_at=_now)
                 if evt_seq:
                     try:

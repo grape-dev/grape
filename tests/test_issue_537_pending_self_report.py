@@ -33,8 +33,8 @@ RT_REMOTE = 9302
 CRED_REMOTE = 9402
 RK = "gitcode:shutdown/test537"
 
-# Issue #537 默认参数（与实现常量对齐）
-PENDING_TIMEOUT_DEFAULT = 1800
+# Issue #537 默认参数（与实现常量对齐；#1071 起实现默认放宽为 5400）
+PENDING_TIMEOUT_DEFAULT = 5400
 ZOMBIE_OFFLINE_GRACE_DEFAULT = 300
 
 
@@ -421,11 +421,11 @@ class TestS4PendingTimeoutSweep:
         assert _task_row("t_i537_sp1")[0] == "pending_self_report", "窗口内空格格式不得超时"
 
     def test_sweep_prod_space_format_expired_marked(self):
-        """生产空格格式且确实超时（3600s 前）→ 照常判 timeout_failed。"""
+        """生产空格格式且确实超时（5500s 前，超过 #1071 放宽后的 5400s 窗口）→ 照常判 timeout_failed。"""
         import time as _t
         from src.runtime.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
-        _space_old = _t.strftime("%Y-%m-%d %H:%M:%S", _t.gmtime(_t.time() - 3600))
+        _space_old = _t.strftime("%Y-%m-%d %H:%M:%S", _t.gmtime(_t.time() - 5500))
         _seed_task("t_i537_sp2", RT_REMOTE, 9539, status="pending_self_report",
                    pending_since=_space_old)
         _sweep_pending_self_report_timeouts()
