@@ -384,6 +384,61 @@ def _running_issue_ids(repo_keys) -> set[str]:
         return set()
 
 
+def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
+    """Issue #1077-P：把「要构建哪几条流水线」下推到 SQL。
+
+    原实现先为整仓所有有事件的 issue 构建流水线（每条约 2ms），再切片/过滤：
+    6k issue 就要 12.9s，且与 history_limit/scene_id 传什么无关。
+
+    返回 (ordered_ids, total, failed_ids)：
+      ordered_ids : 按最新事件倒序的 issue（已按场景过滤），只取前 need 条
+      total       : 该范围（全仓/单场景）的 issue 总数（用于 history_total）
+      failed_ids  : 其中有失败节点的 issue 集合（某 agent 最新事件 status='failed'，
+                    与 compute_node_statuses 的状态码 3 同口径）
+
+    场景判定用 SQL LEFT JOIN：issue.scene_id 权威、events.scene_id 兜底，
+    走 idx_tasks_repo_issue(repo_key, issue_number) 等值查找，不扫全表。
+    """
+    from src.session_manager import db, db_lock
+    _ph = ",".join("?" * len(repo_keys))
+    need = max(1, int(need))
+    # 无场景过滤时不 join（省一次 i 表查找；全仓口径只依赖 events）
+    if scene_filter:
+        _join = ("LEFT JOIN issue i ON i.repo_key = e.repo_key "
+                 "AND i.issue_number = CAST(SUBSTR(e.issue_id, 2) AS INTEGER)")
+        _scene_clause = " AND COALESCE(NULLIF(i.scene_id,''), e.scene_id) = ?"
+        _scene_params = [scene_filter]
+    else:
+        _join, _scene_clause, _scene_params = "", "", []
+    with db_lock:
+        c = db.cursor()
+        # ① 窗口：最新事件倒序，只要前 need 条
+        c.execute(
+            f"SELECT e.issue_id, MAX(e.seq) AS m FROM events e {_join} "
+            f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != ''{_scene_clause} "
+            f"GROUP BY e.issue_id ORDER BY m DESC LIMIT ?",
+            (*repo_keys, *_scene_params, need))
+        ordered = [r[0] for r in c.fetchall()]
+        # ② 总数（精确，供 history_total/统计）
+        c.execute(
+            f"SELECT COUNT(*) FROM (SELECT e.issue_id FROM events e {_join} "
+            f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != ''{_scene_clause} "
+            f"GROUP BY e.issue_id)",
+            (*repo_keys, *_scene_params))
+        total = c.fetchone()[0]
+        # ③ 失败集合：每个 (issue, agent) 取最新事件后判 failed
+        c.execute(
+            f"SELECT DISTINCT x.issue_id FROM ("
+            f"  SELECT e.issue_id, e.agent_type, e.status,"
+            f"         ROW_NUMBER() OVER (PARTITION BY e.issue_id, e.agent_type ORDER BY e.seq DESC) rn"
+            f"  FROM events e {_join}"
+            f"  WHERE e.repo_key IN ({_ph}) AND e.issue_id != '' AND e.agent_type != ''{_scene_clause}"
+            f") x WHERE x.rn = 1 AND x.status = 'failed'",
+            (*repo_keys, *_scene_params))
+        failed = {r[0] for r in c.fetchall()}
+    return ordered, total, failed
+
+
 @router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user. Issue #542: `history_limit` (default 50) caps the returned history items (most recent first); `history_total` carries the untruncated count. Issue #1077-S: optional `scene_id` scopes the whole response (active/history/stats/history_total) to one scene, so the scene detail page is no longer limited by the repo-wide recent window.")
 def get_pipeline(owner: str, repo: str,
                  history_limit: int = Query(50, ge=1, le=500, description="history 截断条数（最近优先），默认 50"),
@@ -406,17 +461,31 @@ def get_pipeline(owner: str, repo: str,
         _repo_keys.append(f"gitcode:{_owner_repo}")
 
     from src.session_manager import db, db_lock
+
+    # Issue #1077-P：先算「要构建的 issue 窗口」（SQL 聚合 + 场景过滤），
+    # 再只加载/归一化这些 issue 的事件——原先 60k 事件逐条 normalize_event_time
+    # （每次还做一次后端探测）单独就占 0.8s。
+    _scene_filter = str(scene_id or "").strip()
+    _need = 1 + max(int(history_offset or 0), 0) + int(history_limit)
+    try:
+        _win_ids, _issues_total, _failed_ids = _pipeline_window(_repo_keys, _scene_filter, _need)
+        _pushdown_ok = True
+    except Exception as _e:
+        log.warning(f"pipeline window pushdown failed, fallback to full load: {_e}")
+        _win_ids, _issues_total, _failed_ids, _pushdown_ok = [], None, None, False
+
     with db_lock:
         c = db.cursor()
         try:
+            _where = "repo_key IN ({}) AND issue_id != ''".format(",".join("?" * len(_repo_keys)))
+            _params = list(_repo_keys)
+            if _pushdown_ok and _win_ids:
+                _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
+                _params += list(_win_ids)
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
                 "created_at, actor, duration, repo_key, scene_id "
-                "FROM events WHERE repo_key IN ({}) AND issue_id != '' ORDER BY seq ASC".format(
-                    ",".join("?" * len(_repo_keys))
-                ),
-                _repo_keys
-            )
+                f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
             rows = c.fetchall()
         except Exception:
             rows = []
@@ -429,7 +498,7 @@ def get_pipeline(owner: str, repo: str,
         for r in rows
     ]
 
-    issue_ids = list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"]))
+    issue_ids = (_win_ids if _pushdown_ok else list(dict.fromkeys(e["issue_id"] for e in events if e["issue_id"])))
 
     # 批量查标题（消除 N+1：182 次 DB 查询 → 1 次）
     _title_map = {}
@@ -493,29 +562,33 @@ def get_pipeline(owner: str, repo: str,
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
-    # Issue #542：把索引真正传进 _get_issue_pipeline（O(issues×events) → O(events)）
     pipelines = [_get_issue_pipeline(
         repo_key, iid, events,
         _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
         _bot_usernames, _feishu_name_cache, _events_by_issue
-    ) for iid in issue_ids]
+    ) for iid in _win_ids]
     pipelines = [p for p in pipelines if p is not None]
 
     # Issue #89: 检测 tasks 有记录但 events 无记录的 Issue（数据一致性差异）
     # 这些 Issue 在任务中心有任务，但流水线未生成事件 → 前端展示提示
     tasks_without_events = []
+    # Issue #1077-P：成员判定改 set——原实现是 `_iid not in issue_ids`（list 线性查找），
+    # 20 万 issue / 6 千事件编号时退化成平方级，这是 13s 耗时的主因。
+    _issue_ids_set = set(issue_ids)
     try:
         with db_lock:
             c = db.cursor()
+            # 索引友好写法：events(repo_key, issue_id) 等值查找，避免 20 万 issue × 全表扫描
             c.execute(
-                "SELECT DISTINCT issue_number, title FROM issue "
-                "WHERE repo_key=? AND status IN ('active','processing') AND issue_number > 0",
+                "SELECT i.issue_number, i.title FROM issue i "
+                "WHERE i.repo_key=? AND i.status IN ('active','processing') AND i.issue_number > 0 "
+                "AND NOT EXISTS (SELECT 1 FROM events e "
+                "                WHERE e.repo_key=i.repo_key AND e.issue_id='#'||i.issue_number) "
+                "LIMIT 200",
                 (repo_key,)
             )
             for r in c.fetchall():
-                _iid = f"#{r[0]}"
-                if _iid not in issue_ids:
-                    tasks_without_events.append({"issue_id": _iid, "title": r[1] or ""})
+                tasks_without_events.append({"issue_id": f"#{r[0]}", "title": r[1] or ""})
     except Exception:
         pass
 
@@ -523,11 +596,6 @@ def get_pipeline(owner: str, repo: str,
     _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
     pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
 
-    # Issue #1077-S：场景详情页独立查询——按 scene_id 收窄整个响应（active/history/统计），
-    # 避免「从整仓最近 history_limit 条里前端过滤」导致本场景流水线显示不全。
-    _scene_filter = str(scene_id or "").strip()
-    if _scene_filter:
-        pipelines = [p for p in pipelines if str(p.get("scene_id") or "") == _scene_filter]
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
@@ -540,7 +608,10 @@ def get_pipeline(owner: str, repo: str,
     # history_total 保留全量条数；统计口径（today/failed/active_count）仍按全量计算。
     # history_offset：前端增量翻页拉取（0=最新一段；偏移后 active 不随 offset 重复返回，
     # has_more 标识是否还有更早的历史可拉）。
-    history_total = len(pipelines) - 1 if len(pipelines) > 1 else 0
+    if _pushdown_ok and _issues_total is not None:
+        history_total = _issues_total - 1 if _issues_total > 1 else 0
+    else:
+        history_total = len(pipelines) - 1 if len(pipelines) > 1 else 0
     _offset = min(max(int(history_offset or 0), 0), history_total)
     _h_start = 1 + _offset
     _h_end = _h_start + history_limit
@@ -570,8 +641,9 @@ def get_pipeline(owner: str, repo: str,
         "history_offset": _offset,
         "history_has_more": _has_more,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,
-        "today_count": len(pipelines),
-        "failed_count": len([p for p in pipelines if p["result"] == "Failed"]),
+        "today_count": (_issues_total if _pushdown_ok and _issues_total is not None else len(pipelines)),
+        "failed_count": (len(_failed_ids) if _pushdown_ok and _failed_ids is not None
+                         else len([p for p in pipelines if p["result"] == "Failed"])),
         "scene_id": _scene_filter,
         "pipeline_config": pipeline_config,
         "tasks_without_events": tasks_without_events,
