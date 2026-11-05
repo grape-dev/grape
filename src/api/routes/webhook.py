@@ -1925,3 +1925,35 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         seq = 0
 
     return {"status": "ok", "seq": seq, "agent": agent_name}
+
+
+# ── 跨流水线移交开放接口（开放契约 / CLI `grape pipeline handoff`）──
+# 语义化别名：把 /api/a2a 的 target_scene_id 移交路径暴露成独立 operation，
+# 让 CLI 按 operation_id 前缀渲染成 `grape pipeline handoff`（契约→CLI 约定
+# <tag>_<动词>，见 docs/weekly-03/operation-id-explicit-naming-design.md）。
+# 注：路由级 tags=["webhook"] 会和端点 tags 合并（与 /api/a2a 的
+# ['webhook','a2a'] 同形），CLI 分组取 operation_id 前缀而非 tags[0]，故无影响。
+# 与 /api/a2a 的差异只有一处：必须携带 payload.target_scene_id，缺则同步 400，
+# 避免命令名承诺「跨流水线」却静默退化成普通场内派发。
+@router.post(
+    "/api/pipeline/handoff", operation_id="pipeline_handoff", tags=["pipeline"],
+    summary="Hand off an issue to another pipeline scene",
+    description=(
+        "Cross-pipeline handoff: same contract as POST /api/a2a, but "
+        "payload.target_scene_id is required. Redirects the event to the target "
+        "scene's target_node (default vod) without creating a duplicate issue. "
+        "Accepts JWT/session token/API key (public) plus internal bot-token."
+    ),
+)
+async def pipeline_handoff_endpoint(request: Request, body: A2AHandoffBody,
+                                    user: dict | None = Depends(get_user_or_none)):
+    """跨流水线移交：强制携带 payload.target_scene_id，其余语义全部委托 a2a_endpoint。"""
+    payload = body.payload or {}
+    target_scene_id = str(payload.get("target_scene_id") or "").strip()
+    if not target_scene_id:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "missing payload.target_scene_id: pipeline handoff must name the target scene"
+                       " (use POST /api/a2a for in-scene dispatch)",
+        })
+    return await a2a_endpoint(request, body, user)
