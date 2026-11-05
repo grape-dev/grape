@@ -1986,7 +1986,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
     content = await file.read()
     if len(content) > _ATTACH_MAX_SIZE:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"文件大小超过 {_ATTACH_MAX_SIZE // (1024 * 1024)}MB 限制"})
     import uuid
     safe_name = f"{uuid.uuid4().hex}{ext}"
     dir_name = str(issue_number) if issue_number else "pending"
@@ -2067,7 +2067,7 @@ async def pre_upload_attachment(file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
     content = await file.read()
     if len(content) > _ATTACH_MAX_SIZE:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"文件大小超过 {_ATTACH_MAX_SIZE // (1024 * 1024)}MB 限制"})
     import uuid
     safe_name = f"{uuid.uuid4().hex}{ext}"
     url = _attach_save(owner, rname, "pending", safe_name, content)
