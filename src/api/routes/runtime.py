@@ -1228,6 +1228,71 @@ def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)
     }
 
 
+@router.get("/issues/takeover-context", operation_id="runtime_takeover_context", summary="Takeover context for an issue", description="Returns the running task's full context (prompt, env_extra, messages) for interactive takeover in dsh-web.")
+def takeover_context(repo_key: str = Query(..., description="Repository key (e.g. gitcode:owner/repo)"),
+                     issue_number: str = Query(..., description="Issue number (without #)"),
+                     user: dict = Depends(require_no_session_token)):
+    """接管上下文：按 Issue 号查正在运行的任务，返回完整字段 + 最近 200 条消息。
+
+    一次调用拿到全部续接所需数据：
+    - prompt / env_extra / skill / cwd → 重建执行环境
+    - messages（最近 200 条）→ agent 的思考和操作历史
+    - task_id → 用于后续 cancel
+    """
+    from src.session_manager import db, db_lock
+    _issue_id = f"#{issue_number.lstrip('#')}"
+    # ① 查 running/dispatched 的 task（跨所有 worker，不限 runtime_id）
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, status, agent_type, skill, prompt, env_extra, cwd, runtime_id, repo_key, issue_id "
+            "FROM agent_tasks "
+            "WHERE repo_key=? AND issue_id=? AND status IN ('running','dispatched') "
+            "ORDER BY created_at DESC LIMIT 1",
+            (repo_key, _issue_id))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"没有找到 Issue #{issue_number} 正在运行的任务"})
+    task_id, status, agent_type, skill, prompt, env_extra, cwd, runtime_id, task_repo_key, task_issue_id = row
+    # ② 查最近 200 条消息
+    messages = service.list_task_messages(task_id, since=0, limit=200)
+    return {
+        "task_id": task_id,
+        "status": status,
+        "agent_type": agent_type or "",
+        "skill": skill or "",
+        "prompt": prompt or "",
+        "env_extra": env_extra or "{}",
+        "cwd": cwd or "",
+        "runtime_id": runtime_id or 0,
+        "repo_key": task_repo_key or "",
+        "issue_id": task_issue_id or "",
+        "messages": messages,
+    }
+
+
+@router.get("/tasks/{task_id}/detail", operation_id="runtime_task_detail", summary="Task detail (takeover)", description="Returns full task fields for interactive takeover: prompt, env_extra, skill, cwd, etc.")
+def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)):
+    """任务详情（接管用）：返回完整字段供 dsh-web 创建交互式 session。"""
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    return {
+        "id": task["id"],
+        "status": task["status"],
+        "agent_type": task.get("agent_type") or "",
+        "skill": task.get("skill") or "",
+        "prompt": task.get("prompt") or "",
+        "env_extra": task.get("env_extra") or "{}",
+        "cwd": task.get("cwd") or "",
+        "repo_key": task.get("repo_key") or "",
+        "issue_id": task.get("issue_id") or "",
+        "runtime_id": task.get("runtime_id") or 0,
+        "event_seq": task.get("event_seq") or 0,
+        "server_url": task.get("server_url") or "",
+    }
+
+
 @router.get("/tasks/{task_id}/state")
 def runtime_task_state(task_id: str, credential_id: int = Depends(_require_credential)):
     """worker 端轻量状态查询：只返回 status，用于 sid 看门狗检测幽灵任务。
