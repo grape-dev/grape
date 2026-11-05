@@ -2768,7 +2768,9 @@ def _fn_create_grape_t_merge_gate_log() -> None:
 
 
 register_migration(
-    version="202611030001",
+    # 20261105 修复：远端曾误改为 0001（与 issue658_role_tags 撞号），且生产版本表
+    # 已按 0002 落库——回到 0002 对齐生产；issue865 挪至 0004 避让。
+    version="202611030002",
     name="create-merge-gate-log-table",
     kind="safe",
     fn=_fn_create_grape_t_merge_gate_log,
@@ -2885,7 +2887,9 @@ def _fn_add_agent_runtimes_model() -> None:
 
 
 register_migration(
-    version="202611030002",
+    # 20261105 修复：原 0002 与 merge-gate-log 撞号（merge-gate-log 已按 0002 落库），
+    # 挪至 0004；列添加幂等（已存在则跳过），生产/新库均安全。
+    version="202611030004",
     name="issue865_agent_runtimes_model",
     kind="safe",
     fn=_fn_add_agent_runtimes_model,
