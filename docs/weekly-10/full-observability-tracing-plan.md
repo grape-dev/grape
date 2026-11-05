@@ -105,3 +105,45 @@ Step 4（worker metrics + mysqld_exporter）为运维项不进 MR。
 - [ ] Grafana 日志行出现 TraceID 蓝链，点击跳 Tempo 瀑布成功
 - [ ] issue 流水线视图：按 pipeline_trace_id 聚合能看到 vod→coding→qa 串联
 - [ ] 断网演练：停 Tempo → 业务无感（exporter 异步队列丢弃，零阻塞）；恢复后新 trace 续传
+
+## 7. 调用链监控使用手册（2026-11-05，MR-3 后）
+
+### 7.1 入口
+- Grafana → 「Grape Dev — 任务追踪与排障」看板 → 「任务瀑布入口」→ 点 Tempo 链接（Explore）
+- 或直接: http://192.168.0.39:3000/explore → 左上数据源选 Tempo
+
+### 7.2 查某个任务的调用链（最常用）
+1. 平台任务详情页拿到 task_id（如 t_2020735a54c3）
+2. Explore 搜索框输入: `{span.task_id = "t_2020735a54c3"}`
+3. 结果点任意一条 → 瀑布图
+
+### 7.3 瀑布里看什么（三层结构）
+```
+task t_xxx issue enqueue   [grape-server-a]  5ms      ← 入队时刻
+ └ task t_xxx execute ...  [grape-task]      78841ms  ← 引擎干活（黑盒已展开，见 7.4）
+ └ task t_xxx finish       [grape-server-c]  0ms      ← 终态（exit_code/outcome 属性）
+```
+- enqueue→execute 起点空隙大 = 排队久（引擎忙/没认领）
+- execute 占大头 = 正常（引擎在跑）
+- finish 的 outcome=failed → 看属性里的 error_head
+
+### 7.4 MR-3 后的新层次（execute 展开）
+execute 期间发生：
+- `vcs gitcode.com /repos/...` —— 每次 GitCode/GitHub/GitLab API 调用（建 issue/评论/PR），
+  带 vcs.method / http.status_code / vcs.result
+- `obs put <key>` —— 附件/文件上传 OBS（带 obs.size）
+- `engine <backend>` —— 引擎子进程全程（backend/session/exit_code/text_len/parsed_count）
+
+### 7.5 常用 TraceQL
+- `{span.name = "task.finish" && span.outcome = "failed"}` —— 所有失败任务
+- `{span.task_id = "t_xxx"}` —— 指定任务
+- `{span.dep.kind = "vcs" && span.vcs.result = "http_error"}` —— 所有失败的 VCS 调用
+
+### 7.6 日志 ↔ 瀑布互跳
+- Loki 日志行点 TraceID → 瀑布
+- 瀑布 span 详情页 "Logs for this span" → 该时间窗日志
+
+### 7.7 注意
+- 采样 100%（2026-11-05 起），所有请求都有 trace
+- Tempo 查询侧索引有 ~1 分钟延迟：刚发生的调用立刻按 trace_id 直查可能查不到，稍等再查
+- worker 侧 execute span 走主控中继（MR-2b），只在任务派到远程 worker 时出现
