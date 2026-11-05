@@ -586,96 +586,142 @@ window._jumpFromScenePipeline = function(issueNum, sceneId, latestSeq) {
   app.nav('tasks');
 };
 
-// 构建相关流水线 HTML（从 pipeData 提取当前场景的流水线统计+表格，支持分页）
-var _scenePipePage = 0;
-var _scenePipeSize = 10;
-var _scenePipeCache = { pipes: [], sceneId: '', dashData: null };
+// ===== Issue #1077-S：场景详情 · 相关流水线（按场景独立查询，服务端分页）=====
+// 旧实现：从 /pipeline 的整仓最近 history_limit(50) 条里前端过滤 scene_id，
+// 仓越忙本场景越容易"看不全"。现在直接按 scene_id 向服务端要该场景的分页数据。
+var _scenePipe = {
+  sceneId: '', dashData: null, page: 0, size: 10,
+  total: 0, hasMore: false, loading: false, rows: [],
+  failed: 0, activeCount: 0, err: '', seq: 0
+};
 
+// 骨架 + 触发首屏拉取（DOM 插入后再发请求，避免 outerHTML 尚未生效）
 function _buildRelatedPipelineHTML(pipeData, sceneId, dashData) {
-  const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(pipeData.history || []);
-  const scenePipes = allPipesRaw.filter(p => p.scene_id === sceneId);
-
-  // 缓存供分页使用
-  _scenePipeCache = { pipes: scenePipes, sceneId: sceneId, dashData: dashData };
-  _scenePipePage = 0;
-
+  _scenePipe = {
+    sceneId: sceneId, dashData: dashData, page: 0, size: 10,
+    total: 0, hasMore: false, loading: true, rows: [],
+    failed: 0, activeCount: 0, err: '', seq: 0
+  };
+  setTimeout(function () { _loadScenePipePage(sceneId, 0); }, 0);
   return _renderScenePipelinePage();
 }
 
-function _renderScenePipelinePage() {
-  const scenePipes = _scenePipeCache.pipes;
-  const sceneId = _scenePipeCache.sceneId;
-  const dashData = _scenePipeCache.dashData;
-  const totalPages = Math.max(1, Math.ceil(scenePipes.length / _scenePipeSize));
-  if (_scenePipePage >= totalPages) _scenePipePage = totalPages - 1;
-  if (_scenePipePage < 0) _scenePipePage = 0;
-  const pagePipes = scenePipes.slice(_scenePipePage * _scenePipeSize, (_scenePipePage + 1) * _scenePipeSize);
+// 按场景拉一页：/pipeline/{owner}/{repo}?scene_id=...&history_limit=10&history_offset=N*10
+function _loadScenePipePage(sceneId, page) {
+  var st = _scenePipe;
+  if (!st.sceneId || st.sceneId !== sceneId) return;   // 场景已切换
+  var repo = String((st.dashData && st.dashData.repo) || '').replace(/^(gitcode|github):/, '');
+  if (!repo || repo.indexOf('/') < 0) { st.loading = false; _scenePipeReplace(); return; }
+  st.page = Math.max(0, parseInt(page, 10) || 0);
+  st.loading = true;
+  _scenePipeReplace();
+  var seq = ++st.seq;
+  API.get('/pipeline/' + repo + '?scene_id=' + encodeURIComponent(st.sceneId) +
+          '&history_limit=' + st.size + '&history_offset=' + (st.page * st.size)).then(function (d) {
+    if (!d || seq !== _scenePipe.seq || _scenePipe.sceneId !== sceneId) return;
+    st.loading = false;
+    st.err = '';
+    var rows = (d.history || []).slice();
+    if (d.active && st.page === 0) rows = [d.active].concat(rows);   // 服务端 active 独立返回，仅首屏前置
+    st.rows = rows;
+    st.total = (d.history_total || 0) + (d.active ? 1 : 0);
+    st.hasMore = !!d.history_has_more;
+    st.failed = d.failed_count || 0;
+    st.activeCount = d.active_count || 0;
+    _scenePipeReplace();
+  }).catch(function (e) {
+    if (seq !== _scenePipe.seq) return;
+    st.loading = false;
+    if (e && e.name === 'AbortError' && e.silent) return;   // 切页静默
+    st.err = (e && e.message) || '';
+    _scenePipeReplace();
+  });
+}
+window._scenePipeGo = function (page) {
+  _loadScenePipePage(_scenePipe.sceneId, page);
+};
 
-  const _stageLabel = function(stage) { var map = {vod:'VOD',issue:'Issue',coding:'Coding',qa:'QA',sre:'SRE',done:I18N.t('pipeline.stage_done')||'完成'}; return map[stage] ? map[stage] : stage; };
-  const sceneActiveCount = scenePipes.filter(p => p.executing).length;
-  const sceneFailedCount = scenePipes.filter(p => p.statuses && p.statuses.some(s => s === 3)).length;
+function _scenePipeReplace() {
+  var sec = document.getElementById('relatedPipelineSection');
+  if (sec) sec.outerHTML = _renderScenePipelinePage();
+}
 
-  let html = `<div class="det-card-wrap" id="relatedPipelineSection">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.related_pipeline')||'相关流水线'}</h2>
-      <div style="display:flex;gap:8px">
-        <div class="pl-stat"><div class="v" style="color:#34c759">${sceneActiveCount}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
-        <div class="pl-stat"><div class="v" style="color:#ff3b30">${sceneFailedCount}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
-        <div class="pl-stat"><div class="v" style="color:#0071e3">${scenePipes.length}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
-      </div>
-    </div>`;
-
-  if (scenePipes.length === 0) {
-    html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues')||'暂无 Issue'}</div>`;
-  } else {
-    const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
-    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue')||'Issue'}</th><th>${I18N.t('pipeline.th_title')||'标题'}</th><th>${I18N.t('pipeline.th_duration')||'耗时'}</th><th>${I18N.t('pipeline.th_agents')||'Agent'}</th><th>${I18N.t('pipeline.th_stage')||'阶段'}</th><th>${I18N.t('pipeline.th_owner')||'负责人'}</th></tr>`;
-    pagePipes.forEach(p => {
-      const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-      const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
-      const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
-      const agentTags = ['vod','issue','coding','qa','sre'].map((at, j) => {
-        const hasAgent = p.statuses && p.statuses[j] > 0;
-        const cls = ['tg-v','tg-i','tg-c','tg-q','tg-s'][j];
-        const evSeq = (p.stages && p.stages[j] && p.stages[j].latest_event && p.stages[j].latest_event.seq) || '';
-        if (hasAgent && evSeq) {
-          return `<span class="tg ${cls}" style="cursor:pointer;transition:transform .15s" onclick="event.stopPropagation();app.nav('event','${evSeq}')" onmouseover="this.style.transform='scale(1.25)'" onmouseout="this.style.transform='scale(1)'">${at.charAt(0).toUpperCase()}</span>`;
-        }
-        return `<span class="tg ${cls}" style="opacity:0.3;cursor:default">${at.charAt(0).toUpperCase()}</span>`;
-      }).join('');
-      const stageName = p.stage ? _stageLabel(p.stage) : '—';
-      const _dur = p.duration;
-      const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
-      const execBadge = p.executing ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡</span>' : '';
-      let latestSeq = '';
-      if (p.stages) {
-        for (let si = p.stages.length - 1; si >= 0; si--) {
-          if (p.statuses && p.statuses[si] > 0) {
-            const ev = p.stages[si] && p.stages[si].latest_event;
-            if (ev && ev.seq) { latestSeq = ev.seq; break; }
-          }
-        }
+// 单行渲染
+function _scenePipeRowHtml(p, sceneId, dashData) {
+  var _stageLabel = function (stage) {
+    var map = { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', done: I18N.t('pipeline.stage_done') || '完成' };
+    return map[stage] ? map[stage] : stage;
+  };
+  const _issueNum = String(p.issue_id || '').replace(/^#/, '');
+  const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
+  const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
+  const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
+  const agentTags = ['vod', 'issue', 'coding', 'qa', 'sre'].map((at, j) => {
+    const hasAgent = p.statuses && p.statuses[j] > 0;
+    const cls = ['tg-v', 'tg-i', 'tg-c', 'tg-q', 'tg-s'][j];
+    const evSeq = (p.stages && p.stages[j] && p.stages[j].latest_event && p.stages[j].latest_event.seq) || '';
+    if (hasAgent && evSeq) {
+      return `<span class="tg ${cls}" style="cursor:pointer;transition:transform .15s" onclick="event.stopPropagation();app.nav('event','${evSeq}')" onmouseover="this.style.transform='scale(1.25)'" onmouseout="this.style.transform='scale(1)'">${at.charAt(0).toUpperCase()}</span>`;
+    }
+    return `<span class="tg ${cls}" style="opacity:0.3;cursor:default">${at.charAt(0).toUpperCase()}</span>`;
+  }).join('');
+  const stageName = p.stage ? _stageLabel(p.stage) : '—';
+  const _dur = p.duration;
+  const dur = _dur ? (_dur >= 60 ? Math.floor(_dur / 60) + 'm ' + Math.round(_dur % 60) + 's' : _dur + 's') : '—';
+  const execBadge = p.executing ? '<span class="tg tg-c" style="color:#fff;background:var(--g)">⚡</span>' : '';
+  let latestSeq = '';
+  if (p.stages) {
+    for (let si = p.stages.length - 1; si >= 0; si--) {
+      if (p.statuses && p.statuses[si] > 0) {
+        const ev = p.stages[si] && p.stages[si].latest_event;
+        if (ev && ev.seq) { latestSeq = ev.seq; break; }
       }
-      html += `<tr onclick="_jumpFromScenePipeline('${_issueNum}','${sceneId}','${latestSeq}')">
+    }
+  }
+  return `<tr onclick="_jumpFromScenePipeline('${_issueNum}','${sceneId}','${latestSeq}')">
         <td><b>${p.issue_id || '?'}</b> ${execBadge}</td>
-        <td><a href="${_issueUrl||'#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${(p.title || '—').substring(0, 40)}</a></td>
+        <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${(p.title || '—').substring(0, 40)}</a></td>
         <td>${dur}</td>
         <td>${agentTags}</td>
         <td><span style="font-size:11px;color:${p.stage === 'done' ? '#34c759' : '#86868b'}">${stageName}</span></td>
         <td>${p.current_owner || '—'}</td>
       </tr>`;
-    });
+}
+
+function _renderScenePipelinePage() {
+  const st = _scenePipe;
+  const dashData = st.dashData || {};
+  const sceneId = st.sceneId;
+  const totalPages = Math.max(1, Math.ceil(st.total / st.size));
+
+  let html = `<div class="det-card-wrap" id="relatedPipelineSection">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h2 style="font-size:15px;font-weight:600">${I18N.t('dashboard.related_pipeline') || '相关流水线'}</h2>
+      <div style="display:flex;gap:8px">
+        <div class="pl-stat"><div class="v" style="color:#34c759">${st.activeCount}</div><div class="l">${I18N.t('pipeline.stat_active') || '活跃'}</div></div>
+        <div class="pl-stat"><div class="v" style="color:#ff3b30">${st.failed}</div><div class="l">${I18N.t('pipeline.stat_failed') || '失败'}</div></div>
+        <div class="pl-stat"><div class="v" style="color:#0071e3">${st.total}</div><div class="l">${I18N.t('dashboard.stat_total') || '总数'}</div></div>
+      </div>
+    </div>`;
+
+  if (st.err) {
+    html += `<div class="error" style="padding:16px;font-size:12px">${I18N.t('common.load_failed') || '加载失败'}: ${st.err}</div>`;
+  } else if (st.loading && st.rows.length === 0) {
+    html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('common.loading') || '加载中'}…</div>`;
+  } else if (st.rows.length === 0) {
+    html += `<div style="text-align:center;padding:24px;color:#86868b;font-size:13px">${I18N.t('pipeline.no_issues') || '暂无 Issue'}</div>`;
+  } else {
+    html += `<div class="pl-table-card" style="border:none;box-shadow:none"><div class="pl-table-wrap"><table class="pl-table"><tr><th>${I18N.t('pipeline.th_issue') || 'Issue'}</th><th>${I18N.t('pipeline.th_title') || '标题'}</th><th>${I18N.t('pipeline.th_duration') || '耗时'}</th><th>${I18N.t('pipeline.th_agents') || 'Agent'}</th><th>${I18N.t('pipeline.th_stage') || '阶段'}</th><th>${I18N.t('pipeline.th_owner') || '负责人'}</th></tr>`;
+    html += st.rows.map(function (p) { return _scenePipeRowHtml(p, sceneId, dashData); }).join('');
     html += `</table></div></div>`;
 
-    // 分页
-    if (totalPages > 1) {
-      var pageInfo = I18N.t('pipeline.page_info', {cur: _scenePipePage + 1, total: totalPages});
-      var prevLabel = I18N.t('pipeline.prev_page');
-      var nextLabel = I18N.t('pipeline.next_page');
+    if (totalPages > 1 || st.hasMore) {
+      const cur = st.page + 1;
       html += '<div style="display:flex;align-items:center;gap:12px;padding:10px 0;font-size:12px;color:#86868b">' +
-        '<span>' + pageInfo + '</span>' +
-        '<button class="bt bt-o bt-s" ' + (_scenePipePage <= 0 ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipePage--;document.getElementById(\'relatedPipelineSection\').outerHTML=_renderScenePipelinePage();">' + prevLabel + '</button>' +
-        '<button class="bt bt-o bt-s" ' + (_scenePipePage >= totalPages - 1 ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipePage++;document.getElementById(\'relatedPipelineSection\').outerHTML=_renderScenePipelinePage();">' + nextLabel + '</button>' +
+        '<span>' + I18N.t('pipeline.page_info', { cur: cur, total: totalPages }) + '</span>' +
+        (st.loading ? '<span>' + (I18N.t('common.loading') || '加载中') + '…</span>' : '') +
+        '<button class="bt bt-o bt-s" ' + (st.page <= 0 || st.loading ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipeGo(' + (st.page - 1) + ')">' + (I18N.t('pipeline.prev_page') || '上一页') + '</button>' +
+        '<button class="bt bt-o bt-s" ' + ((st.page >= totalPages - 1 && !st.hasMore) || st.loading ? 'disabled style="opacity:.4"' : '') + ' onclick="_scenePipeGo(' + (st.page + 1) + ')">' + (I18N.t('pipeline.next_page') || '下一页') + '</button>' +
         '</div>';
     }
   }
@@ -683,7 +729,7 @@ function _renderScenePipelinePage() {
   return html;
 }
 
-// 延迟填充相关流水线区域
+// 延迟填充相关流水线区域（兼容旧调用：数据改由 _loadScenePipePage 按场景拉取）
 function _fillRelatedPipeline(pipeData, sceneId, dashData) {
   const section = document.getElementById('relatedPipelineSection');
   if (section) {
@@ -739,10 +785,9 @@ function renderSceneDetailLocal(sceneId) {
 
     _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isApplied, isCustomScene, null, owner, name, m, dashData);
 
-    // 延迟加载相关流水线数据，到了再填充底部表格
-    API.get('/pipeline/' + owner + '/' + name).then(pipeData => {
-      _fillRelatedPipeline(pipeData, scene.id, dashData);
-    }).catch(() => {});
+    // Issue #1077-S：相关流水线不再预拉整仓最近 50 条（那样本场景会被截断），
+    // 改为占位骨架 + 按 scene_id 向服务端分页拉取（见 _loadScenePipePage）
+    _fillRelatedPipeline(null, scene.id, dashData);
   }).catch(e => {
     el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + (e.message||'') + '</div>';
   });

@@ -384,10 +384,11 @@ def _running_issue_ids(repo_keys) -> set[str]:
         return set()
 
 
-@router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user. Issue #542: `history_limit` (default 50) caps the returned history items (most recent first); `history_total` carries the untruncated count.")
+@router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user. Issue #542: `history_limit` (default 50) caps the returned history items (most recent first); `history_total` carries the untruncated count. Issue #1077-S: optional `scene_id` scopes the whole response (active/history/stats/history_total) to one scene, so the scene detail page is no longer limited by the repo-wide recent window.")
 def get_pipeline(owner: str, repo: str,
                  history_limit: int = Query(50, ge=1, le=500, description="history 截断条数（最近优先），默认 50"),
                  history_offset: int = Query(0, ge=0, description="history 偏移量（最近优先起点，0=最新；与 history_limit 组合支持前端增量翻页拉取全量历史）"),
+                 scene_id: str = Query("", max_length=128, description="Issue #1077-S：只返回该场景的流水线（含 active/history/统计口径）；空=全仓（旧行为）"),
                  user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
@@ -522,6 +523,12 @@ def get_pipeline(owner: str, repo: str,
     _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
     pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
 
+    # Issue #1077-S：场景详情页独立查询——按 scene_id 收窄整个响应（active/history/统计），
+    # 避免「从整仓最近 history_limit 条里前端过滤」导致本场景流水线显示不全。
+    _scene_filter = str(scene_id or "").strip()
+    if _scene_filter:
+        pipelines = [p for p in pipelines if str(p.get("scene_id") or "") == _scene_filter]
+
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
     # 不维护 issue_agent_session.status 双份记账，避免状态漂移
     running_issues = _running_issue_ids(_repo_keys)
@@ -542,8 +549,9 @@ def get_pipeline(owner: str, repo: str,
 
     # Pipeline config (event-dispatch-redesign-v2.md Phase 2)
     from src.api.pipeline_config import get_pipeline_config
-    scene_id = ""
-    pipeline_config = get_pipeline_config(scene_id) if scene_id else None
+    # 注：此前的占位局部变量与入参 scene_id 同名会互相覆盖，改为独立变量名（语义仍是「按场景取配置」）
+    _scene_cfg_id = ""
+    pipeline_config = get_pipeline_config(_scene_cfg_id) if _scene_cfg_id else None
 
     # 返回实际有事件的 repo_key（带 provider 前缀），供前端生成 VCS 链接
     _actual_repo_key = repo_key
@@ -564,7 +572,7 @@ def get_pipeline(owner: str, repo: str,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,
         "today_count": len(pipelines),
         "failed_count": len([p for p in pipelines if p["result"] == "Failed"]),
-        "scene_id": scene_id,
+        "scene_id": _scene_filter,
         "pipeline_config": pipeline_config,
         "tasks_without_events": tasks_without_events,
         "has_tasks_without_events": len(tasks_without_events) > 0,
