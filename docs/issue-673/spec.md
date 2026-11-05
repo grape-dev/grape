@@ -1,7 +1,7 @@
 # Spec: Issue #673 — 反馈闭环状态可见性（「我的反馈」分析状态 + 关联 Issue 链接）
 
 > 来源：issue Agent 已发布 Spec（见 Issue #673 评论），本文件为 coding 阶段落档副本。
-> 目标分支：weekly-mys（马岩松的专属开发流水线注入基线）。与 #22 互相引用不合并、共用状态枚举口径。
+> 目标分支：weekly-mys（该需求专属开发流水线注入基线）。与 #22 互相引用不合并、共用状态枚举口径。
 
 ## Objective
 在用户工作台「我的反馈」页面，为每条反馈展示分析状态（open / in_progress / resolved / closed）与关联 GitCode Issue 链接，形成反馈闭环的「状态可见性」。
