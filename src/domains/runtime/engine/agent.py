@@ -1912,6 +1912,22 @@ def _prepare_codearts_data_dir(tid: str, cwd: str) -> str:
 
 
 async def _execute_task(client, task, engine_name: str = ""):
+    """执行单个任务的外层包装：把 repo / issue / seq 绑进日志上下文。
+
+    绑定后，任务执行期间的所有日志行都会带上 repo_key / issue_id / seq 三个字段，
+    Grafana(Loki) 可以直接按仓库名、Issue 号或事件 seq 过滤排障。
+    """
+    _seq = task.get("event_seq")
+    with log_context(
+        repo_key=task.get("repo_key") or "",
+        issue_id=task.get("issue_id") or "",
+        seq="" if _seq is None else _seq,
+        user_id=task.get("user_id") if task.get("user_id") is not None else None,
+    ):
+        return await _execute_task_impl(client, task, engine_name)
+
+
+async def _execute_task_impl(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
     engine_name 为该任务所属引擎实例名（如 opencode-worker-123249），用于日志区分。

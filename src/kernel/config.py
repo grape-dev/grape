@@ -26,11 +26,16 @@ except Exception:
 # - request_id 通过 ContextVar 注入（request_id_middleware 设置）
 # - 保留 TimedRotatingFileHandler（按天轮转，保留30天）+ stderr 双输出
 
+import contextlib
 import contextvars
 
 request_id_var: contextvars.ContextVar = contextvars.ContextVar("request_id", default="-")
 repo_var: contextvars.ContextVar = contextvars.ContextVar("repo_key", default="")
 user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
+# 本次处理对应的 Issue（issue 号或 issue_id）与事件序号（events.seq）。
+# agent 任务执行期间由 _execute_task 绑定，便于在 Loki 里按 repo/issue/seq 过滤。
+issue_var: contextvars.ContextVar = contextvars.ContextVar("issue_id", default="")
+seq_var: contextvars.ContextVar = contextvars.ContextVar("seq", default="")
 
 
 class _RequestIdFilter(logging.Filter):
@@ -40,6 +45,8 @@ class _RequestIdFilter(logging.Filter):
         record.request_id = request_id_var.get()
         record.repo_key = repo_var.get()
         record.user_id = user_var.get()
+        record.issue_id = issue_var.get()
+        record.seq = seq_var.get()
         return True
 
 
@@ -55,7 +62,10 @@ class _JsonFormatter(logging.Formatter):
     """
 
     # extra 字段白名单：只有这些 LogRecord 属性会被提升为顶层 JSON 字段
-    _EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "user_id", "repo_key")
+    _EXTRA_FIELDS = (
+        "method", "path", "status", "duration_ms",
+        "user_id", "repo_key", "issue_id", "seq",
+    )
 
     def format(self, record):
         import time as _t
@@ -838,3 +848,27 @@ GRAPE_TRANSIENT_RETRY_BASE = max(1, int(os.environ.get("GRAPE_TRANSIENT_RETRY_BA
 # ===== Admin Console =====
 ADMIN_CONSOLE_URL = os.environ.get("ADMIN_CONSOLE_URL", "").rstrip("/")
 ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")
+
+
+@contextlib.contextmanager
+def log_context(repo_key=None, issue_id=None, seq=None, user_id=None):
+    """Bind repo / issue / seq to every log record emitted inside the block.
+
+    Used by agent task execution so Grafana(Loki) log lines carry the git repo
+    name, the issue being handled and the event seq. Values are reset on exit,
+    so pooled threads do not leak context into the next task.
+    """
+    tokens = []
+    if repo_key is not None:
+        tokens.append((repo_var, repo_var.set(str(repo_key))))
+    if issue_id is not None:
+        tokens.append((issue_var, issue_var.set(str(issue_id))))
+    if seq is not None:
+        tokens.append((seq_var, seq_var.set(str(seq))))
+    if user_id is not None:
+        tokens.append((user_var, user_var.set(str(user_id))))
+    try:
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)

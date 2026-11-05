@@ -988,7 +988,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
             nonlocal captured_session
             _worker_final_text = ""
             _stream_error_detail = ""  # R20.8.6: 保存 error 信息用于 401 标记
-            log.info(f"[Agent:chat|user:{user['username']}] agent_worker starting (backend={backend_name})")
+            log.info(f"[Agent:chat|user:{user['username']}|repo:{repo_key}] agent_worker starting (backend={backend_name})")
             if not _CHAT_AGENT_SEMAPHORE.acquire(blocking=True):
                 log.warning(f"[Agent:chat|user:{user['username']}] semaphore NOT acquired (exhausted)")
                 return
