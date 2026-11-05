@@ -25,12 +25,6 @@ router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 # agent_type 不再由用户选择，内部固定为 'issue'
 _FIXED_AGENT_TYPE = "issue"
 
-# Issue #697：巡检重复判定双维度规则（根因三要素比对），与巡检执行 prompt 共用同一事实源
-try:
-    from src.runtime.scheduler import AUTOPILOT_DEDUP_RULE
-except Exception:  # scheduler 不可达时兜底为空，润色 prompt 退化为旧行为
-    AUTOPILOT_DEDUP_RULE = ""
-
 
 def _validate_cron(cron_expr: str) -> bool:
     """校验 cron 表达式格式（5 段制）。"""
@@ -935,9 +929,6 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 2. 明确期望的输出或完成标准
 3. 不要扩展用户意图之外的内容
 4. 输出纯文本，不要 markdown 标题语法（不要用 #）
-5. 若指令涉及重复/相似问题判定与并入，必须保留并强化以下双维度门禁（原文照抄进优化结果）：
-
-{AUTOPILOT_DEDUP_RULE}
 
 任务名称：{body.name}
 初步指令：

@@ -1,7 +1,7 @@
 {
   "title": "Automation",
   "tpl_issue_patrol_t": "Issue Board Patrol",
-  "tpl_issue_patrol_d": "Daily stale issue check; dual-dimension dedup (title + root cause), suspected duplicates need owner confirmation",
+  "tpl_issue_patrol_d": "Check stale issues daily, remind to update or close",
   "tpl_pr_review_t": "PR Review Reminder",
   "tpl_pr_review_d": "Flag overdue PRs needing review",
   "tpl_bug_triage_t": "Bug Triage",

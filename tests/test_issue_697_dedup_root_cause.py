@@ -1,13 +1,10 @@
 """Issue #697：巡检重复判定双维度（根因对比 + 疑似重复降级 + owner 确认门禁）回归测试。
 
-覆盖：
-1. 历史误并案例回归（#446 vs #126、#179、#277）：issue summary 注入 prompt 时，
-   双维度门禁规则随注入，判重必须比对根因三要素（报错信息/根因描述/涉及命令与参数）。
-2. 巡检执行 prompt（scheduler._build_autopilot_prompt）注入 AUTOPILOT_DEDUP_RULE。
-3. parse_findings 透传 dedup_level/dedup_note（疑似重复差异说明）。
-4. dispatch 门禁：suspected_duplicate 未确认 → 409；owner 确认后放行并落标记。
-5. 派发描述追加判定级别与差异说明（证据链）。
-6. 润色 prompt 源含双维度规则（routes/autopilot.py 复用同一事实源）。
+覆盖（prompt 侧规则已按运维决定回退，本文件只锁代码侧行为）：
+1. parse_findings 透传 dedup_level/dedup_note（疑似重复差异说明），未知级别 fail-closed。
+2. dispatch 门禁：suspected_duplicate 未确认 → 409；owner 确认后放行并落标记。
+3. 派发描述追加判定级别与差异说明（证据链）。
+4. 级别归一/门禁判定辅助函数（scheduler 单一事实源）。
 """
 import importlib.util
 import logging
@@ -22,114 +19,6 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, SRC_DIR)
 
 _log = logging.getLogger("test_issue_697")
-
-# ===== 历史误并案例 fixture（Issue #697 用户反馈，后台 id 358）=====
-# #446 vs #126：标题相似方向相近（scenes detail 异常），根因不同 → 新逻辑应判 suspected/not duplicate
-CASE_446 = {
-    "number": "446",
-    "title": "runbook 与 CLI 不符：scenes detail 无 --repo 选项",
-    "body": "scenes detail 报错 --repo 参数报错；runbook 降级指引缺失",
-    "root_cause": "--repo 参数报错 + runbook 降级指引缺失",
-    "error_message": "unknown request field(s): --repo",
-    "command": "grape scenes detail --repo x",
-}
-CASE_126 = {
-    "number": "126",
-    "title": "注入 GRAPE_SCENE_ID 在 scenes detail 返回 404",
-    "body": "服务端注入 GRAPE_SCENE_ID 在 scenes detail 返回 404",
-    "root_cause": "服务端注入 ID 404",
-    "error_message": "404 scene not found",
-    "command": "grape scenes detail --scene_id <injected>",
-}
-CASE_179 = {
-    "number": "179",
-    "title": "巡检完全重复判定不成立（同类误判 A）",
-    "body": "标题相似但根因不同，被误判完全重复并入",
-    "root_cause": "案例A根因：CLI 参数契约变更",
-    "error_message": "unknown request field(s)",
-    "command": "grape a --flag",
-}
-CASE_277 = {
-    "number": "277",
-    "title": "巡检完全重复判定不成立（同类误判 B）",
-    "body": "标题相似但根因不同，被误判完全重复并入",
-    "root_cause": "案例B根因：服务端可见性口径",
-    "error_message": "403 forbidden",
-    "command": "grape b --scope",
-}
-HISTORICAL_CASES = [CASE_446, CASE_126, CASE_179, CASE_277]
-
-RULE_KEYWORDS = ("报错信息", "根因描述", "涉及命令与参数", "疑似重复", "owner")
-
-
-def _summary_of(cases):
-    lines = ["Issue Pipeline:"]
-    for c in cases:
-        lines.append(f"  {c['number']} {c['title']} — vod:issue_opened✓")
-        lines.append(f"    最新结论: {c['root_cause']}")
-    return "\n".join(lines)
-
-
-# ===== 1. prompt_builder：分诊判重路径注入双维度门禁 =====
-
-@pytest.fixture(scope="module")
-def pb():
-    from src import prompt_builder
-    return prompt_builder
-
-
-def _evt_for(case):
-    return {
-        "type": "issue_opened",
-        "repository": "grape-dev/grape",
-        "source": "gitcode",
-        "repo_key": "gitcode:grape-dev/grape",
-        "issue_id": case["number"],
-        "payload": {
-            "project": {"path_with_namespace": "grape-dev/grape"},
-            "issue": {"number": int(case["number"]), "title": case["title"], "body": case["body"]}
-        },
-    }
-
-
-class TestPromptBuilderDedupGuard:
-    @pytest.mark.parametrize("case", HISTORICAL_CASES, ids=[c["number"] for c in HISTORICAL_CASES])
-    def test_guard_injected_with_issue_summary(self, pb, monkeypatch, case):
-        """回归：三历史案例的 prompt 在看到相似 Issue 摘要时必须携带双维度门禁。"""
-        import src.api.event_store as es
-        others = [c for c in HISTORICAL_CASES if c["number"] != case["number"]]
-        monkeypatch.setattr(es, "get_issue_summary", lambda *a, **k: _summary_of(others))
-        prompt = pb.build_devops_agent_prompt(_evt_for(case), [], "", ["issue"])
-        for kw in RULE_KEYWORDS:
-            assert kw in prompt, f"门禁规则缺少关键词 {kw}"
-        assert "Issue Pipeline:" in prompt
-        # 门禁必须晚于摘要注入（先看到相似单，再给出比对规则）
-        assert prompt.index("Issue Pipeline:") < prompt.index("重复判定双维度门禁")
-
-    def test_no_summary_no_guard(self, pb, monkeypatch):
-        """无相似 Issue 摘要时不注入门禁（不污染空仓库场景）。"""
-        import src.api.event_store as es
-        monkeypatch.setattr(es, "get_issue_summary", lambda *a, **k: "")
-        prompt = pb.build_devops_agent_prompt(_evt_for(CASE_446), [], "", ["issue"])
-        assert "重复判定双维度门禁" not in prompt
-
-    def test_user_selected_scene_branch_untouched(self, pb, monkeypatch):
-        """用户已选场景跳过查重的既有行为保持：该分支只注入原提示，不叠加门禁。"""
-        import src.api.event_store as es
-        monkeypatch.setattr(es, "get_issue_summary", lambda *a, **k: _summary_of(HISTORICAL_CASES))
-        evt = _evt_for(CASE_446)
-        evt["_user_selected_scene"] = None  # 该分支由 get_issue_scene 决定，此处仅验证非该分支路径稳定
-        prompt = pb.build_devops_agent_prompt(evt, [], "", ["issue"], agent_type="vod")
-        assert "Issue Pipeline:" in prompt
-        assert "重复判定双维度门禁" in prompt
-
-    def test_rule_single_source_from_scheduler(self, pb):
-        """判重规则片段单一事实源：prompt_builder 复用 scheduler 共享片段，禁止双源漂移。"""
-        from src.runtime.scheduler import (DEDUP_ROOT_CAUSE_ELEMENTS_RULE,
-                                           DEDUP_CASCADE_CLOSE_GUARD_RULE)
-        assert DEDUP_ROOT_CAUSE_ELEMENTS_RULE in pb.ISSUE_DEDUP_ROOT_CAUSE_RULE
-        assert DEDUP_CASCADE_CLOSE_GUARD_RULE in pb.ISSUE_DEDUP_ROOT_CAUSE_RULE
-
 
 # ===== 2/3. scheduler：执行 prompt 注入 + findings 透传 =====
 
@@ -169,19 +58,6 @@ def sched():
 
 
 class TestSchedulerDedupRule:
-    def test_rule_constant_keywords(self, sched):
-        for kw in RULE_KEYWORDS + ("级联关闭", "exact_duplicate"):
-            assert kw in sched.AUTOPILOT_DEDUP_RULE
-
-    def test_build_autopilot_prompt_injects_rule(self, sched):
-        prompt = sched._build_autopilot_prompt(
-            {"name": "issue_patrol", "instruction": "1. 巡检 Issue", "skill_name": "", "work_branch": ""},
-            "gitcode:grape-dev/grape", "grape-dev/grape")
-        assert "重复判定双维度门禁" in prompt
-        assert "suspected_duplicate" in prompt
-        # 指令本身仍在（模板指令不被规则覆盖）
-        assert "巡检 Issue" in prompt
-
     def test_parse_findings_passthrough_dedup_fields(self, sched):
         out = ('<!-- autopilot-findings\n'
                '{"result":"warning","summary":"s1","findings":[{"id":"f1","title":"t","description":"d",'
@@ -233,13 +109,7 @@ class TestSchedulerDedupRule:
         assert sched.dedup_auto_merge_allowed("suspected_duplicate", True) is True
         assert sched.dedup_auto_merge_allowed("", False) is True
 
-    def test_rule_single_source_fragments(self, sched):
-        """规则文本片段单一事实源：AUTOPILOT_DEDUP_RULE 由共享片段组成。"""
-        assert sched.DEDUP_ROOT_CAUSE_ELEMENTS_RULE in sched.AUTOPILOT_DEDUP_RULE
-        assert sched.DEDUP_CASCADE_CLOSE_GUARD_RULE in sched.AUTOPILOT_DEDUP_RULE
-
-
-# ===== 4/5/6. routes/autopilot.py：dispatch 门禁 + 描述证据链 + 润色 prompt =====
+# ===== 4/5. routes/autopilot.py：dispatch 门禁 + 描述证据链 =====
 
 @pytest.fixture(scope="module")
 def ap():
@@ -334,11 +204,3 @@ class TestDispatchGuard:
 
     def test_append_dedup_note_no_level_untouched(self, ap):
         assert ap._append_dedup_note("原始描述", {}) == "原始描述"
-
-
-class TestPolishPrompt:
-    def test_polish_prompt_contains_rule(self, ap):
-        """润色 prompt 复用 scheduler.AUTOPILOT_DEDUP_RULE 同一事实源。"""
-        assert ap.AUTOPILOT_DEDUP_RULE  # scheduler 可达（非空兜底）
-        for kw in RULE_KEYWORDS:
-            assert kw in ap.AUTOPILOT_DEDUP_RULE

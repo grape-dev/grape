@@ -82,26 +82,8 @@ _KNOWLEDGE_INJECT_MAX_CHARS = 8000
 
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
-# Issue #697：判重双维度门禁（注入 issue summary 之后，随反馈分诊判重路径生效）。
-# 历史误并案例：#446 vs #126（根因分别为 --repo 参数报错/降级指引缺失、注入 ID 404）、#179、#277。
-# 根因三要素与级联关闭守护片段取自 scheduler（单一事实源，禁止双源漂移）；
-# 级别枚举与门禁判定同源（scheduler.dedup_auto_merge_allowed / dedup_cascade_close_allowed）。
-from src.runtime.scheduler import (
-    DEDUP_ROOT_CAUSE_ELEMENTS_RULE,
-    DEDUP_CASCADE_CLOSE_GUARD_RULE,
-)
-
-ISSUE_DEDUP_ROOT_CAUSE_RULE = (
-    "\n## 重复判定双维度门禁（Issue #697）\n"
-    "判定本 Issue 与上述已有 Issue 是否重复时，"
-    + DEDUP_ROOT_CAUSE_ELEMENTS_RULE + "\n"
-    "分级结论：\n"
-    "- 完全重复：标题相似且根因三要素一致，才可并入挂靠（mark-duplicate）\n"
-    "- 疑似重复：仅标题相似而任一要素不一致 → 降级为疑似重复，列出差异点，"
-    "通知跟踪单 owner agent 确认后方可并入，禁止自动挂靠\n"
-    "- 不重复：独立跟踪，正常流转\n"
-    + DEDUP_CASCADE_CLOSE_GUARD_RULE + "\n"
-)
+# 注：判重规则的 prompt 文本已按运维决定移除（不改自动化任务/分诊的 prompt）；
+# 代码侧门禁见 scheduler.dedup_auto_merge_allowed 与 routes/autopilot._dedup_dispatch_guard。
 
 
 def _build_project_info_section(repo_key: str, agent_type: str = "",
@@ -798,8 +780,6 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                 )
             else:
                 parts.append(issue_summary)
-                # Issue #697：反馈分诊判重路径注入双维度门禁（根因三要素比对 + 疑似重复降级）
-                parts.append(ISSUE_DEDUP_ROOT_CAUSE_RULE)
     except Exception:
         pass
 

@@ -21,7 +21,7 @@ var _apDetailRepoKey = '';      // 详情页任务仓库 key（dispatch 弹窗�
 
 // ===== 模板（title/desc 走 i18n；instruction 是发给 agent 的指令内容，保持原文不翻译）=====
 var _AP_TEMPLATES = [
-  {id:'issue_patrol', icon:'📋', title_key:'tpl_issue_patrol_t', desc_key:'tpl_issue_patrol_d', cron:'0 9 * * *', instruction:'1. 列出所有打开的 Issue\n2. 找出超过 7 天无更新的 stale issue\n3. 检查是否有阻塞的 Issue 及其阻塞原因\n4. 对疑似重复的 Issue 做双维度判定：除标题相似外，逐一比对根因三要素（报错信息、根因描述、涉及命令与参数），输出分级结论（完全重复/疑似重复/不重复）及差异点说明\n5. 仅标题相似而根因不一致时标记为「疑似重复」，通知跟踪单 owner agent 确认后方可并入，禁止自动挂靠；resolve 级联关闭仅对已确认的完全重复生效\n6. 汇总巡检报告，包含：stale 数量、阻塞数量、重复判定分级清单（含根因差异说明）、建议关闭列表'},
+  {id:'issue_patrol', icon:'📋', title_key:'tpl_issue_patrol_t', desc_key:'tpl_issue_patrol_d', cron:'0 9 * * *', instruction:'1. 列出所有打开的 Issue\n2. 找出超过 7 天无更新的 stale issue\n3. 检查是否有阻塞的 Issue 及其阻塞原因\n4. 汇总巡检报告，包含：stale 数量、阻塞数量、建议关闭列表'},
   {id:'pr_review', icon:'🔀', title_key:'tpl_pr_review_t', desc_key:'tpl_pr_review_d', cron:'0 10 * * 1-5', instruction:'1. 列出所有打开的 PR\n2. 找出超过 24 小时未审查的 PR\n3. 为每个标记作者和摘要\n4. 提醒团队审查'},
   {id:'bug_triage', icon:'🐛', title_key:'tpl_bug_triage_t', desc_key:'tpl_bug_triage_d', cron:'0 9 * * 1-5', instruction:'1. 列出所有未优先排序的 backlog Issue\n2. 评估每个的严重程度\n3. 设置优先级标签\n4. 添加评估说明'},
   {id:'weekly_report', icon:'📊', title_key:'tpl_weekly_report_t', desc_key:'tpl_weekly_report_d', cron:'0 17 * * 1', instruction:'1. 收集过去 7 天完成的 Issue\n2. 收集进行中的 Issue\n3. 识别阻塞的 Issue\n4. 编写结构化周报'},
