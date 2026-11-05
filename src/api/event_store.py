@@ -649,7 +649,8 @@ def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
 def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
                           completed_at: str = "", result: str = "",
-                          structured_output: dict = None):
+                          structured_output: dict = None,
+                          revive_from_timeout_failed: bool = False):
     """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result, structured_output）
 
     幂等保护：终态事件不允许被其他终态覆盖。
@@ -658,6 +659,10 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
       调 complete 把 failed 覆盖成 completed，2026-08-24 seq#2488 实例）。
     - structured_output：完整结构化产出（actions/conclusion/artifacts/next_step/issue_summary），
       weekly-05 起落库替代 event.json seg.output；None 不覆盖旧值。
+    - revive_from_timeout_failed（Issue #1071）：**唯一的窄口子**——只允许「兜底超时判死的
+      failed 事件」被迟到结果改判 completed。调用方必须是 service.revive_timeout_task，
+      它已校验：任务态 timeout_failed、未复活过、在复活窗口内、errors 带兜底超时来源标记、
+      结果含完整结构化产出。不传此参数时终态保护与 seq#2488 之后的行为完全一致。
     """
     with db_lock:
         try:
@@ -666,8 +671,13 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
             c.execute("SELECT status FROM events WHERE seq=?", (seq,))
             row = c.fetchone()
             if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
-                log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
-                return
+                _revive_ok = (revive_from_timeout_failed
+                              and row[0] == "failed" and status == "completed")
+                if not _revive_ok:
+                    log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
+                    return
+                log.info(f"Event {seq}: failed -> completed via timeout revive "
+                         f"(Issue #1071 narrow gate)")
             _structured = json.dumps(structured_output, ensure_ascii=False) if structured_output is not None else None
             cols = [r[1] for r in c.execute(f"PRAGMA table_info(events)").fetchall()]
             if "structured_output" in cols and _structured is not None:

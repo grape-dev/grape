@@ -2043,6 +2043,78 @@ def release_busy_slot(runtime_id, cursor=None):
         _db.commit()
 
 
+# ===== Issue #1071：重启后「活着却被判死」——活性判定 · 回炉守卫 · 迟到复活 =====
+#
+# 三个根因（同一份故障链）：
+#   1) 优雅停机把 REMOTE 任务置 pending_self_report，pending_since=停机时刻；判死扫描只看
+#      pending_since，worker 仍在产出也 30 分钟后一刀切 → 活着的任务被杀。
+#   2) 自动回炉（reap/rerequeue）不看活性，回炉认领会改写 started_at，而 started_at 就是
+#      worker 的 run_token → 老 worker 的上报被 409 stale 永久拒收。
+#   3) 判死走 update_task_status，对 timeout_failed 也 revoke 会话 token → 之后连重试都 401。
+# 修复口径统一为「任务最近一次产出消息」：worker 还活着就必然在写 task_messages，
+# 这比引擎心跳更贴近任务本身（心跳断 ≠ 任务死）。
+
+# 兜底超时来源标记：sweep 写入 agent_tasks.errors 首元素，供迟到结果复活时精确识别
+# （避免把真业务失败也复活，重新打开 2026-08-24 seq#2488「失败被成功覆盖」的洞）。
+TIMEOUT_SOURCE_MARKER = "PENDING_SELF_REPORT_TIMEOUT"
+
+# 自动回炉前的活性窗口：最近 N 秒内有产出消息 → 视为仍在跑，不自动回炉
+TASK_ACTIVITY_GUARD_SECONDS = int(os.environ.get("TASK_ACTIVITY_GUARD_SECONDS", "600"))
+
+# 迟到结果复活窗口：从判死时刻（completed_at）起 N 秒内允许复活一次
+TIMEOUT_REVIVE_WINDOW_SECONDS = int(os.environ.get("TIMEOUT_REVIVE_WINDOW_SECONDS", "1800"))
+
+
+def _epoch_of(value) -> float | None:
+    """库里时间串 → epoch 秒；不可解析返回 None（复用 health.parse_dt 的双后端口径）。"""
+    if not value:
+        return None
+    try:
+        from src.runtime.health import parse_dt
+        _v = parse_dt(value)
+        return float(_v) if _v is not None else None
+    except Exception:
+        return None
+
+
+def task_last_activity(task_id) -> float | None:
+    """任务最近一次产出消息的 epoch 秒；无消息 → None。
+
+    取最近 20 条在 Python 侧取数值最大，而不是 SQL MAX(created_at)：历史行是无时区
+    '%Y-%m-%d %H:%M:%S'，新行是带时区 ISO-8601（Issue #588），字符串比较会把 ' '(0x20)
+    < 'T'(0x54) 误判（与 scheduler 判死扫描同一个坑）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT created_at FROM task_messages WHERE task_id=? ORDER BY id DESC LIMIT 20",
+                (task_id,)
+            ).fetchall()
+        _best = None
+        for (_ts,) in rows or []:
+            _e = _epoch_of(_ts)
+            if _e is not None and (_best is None or _e > _best):
+                _best = _e
+        return _best
+    except Exception as e:
+        log.warning(f"task_last_activity failed for task {task_id}: {e}")
+        return None
+
+
+def task_recently_active(task_id, window_seconds: int | None = None) -> bool:
+    """最近 window_seconds 内是否有产出消息（默认 TASK_ACTIVITY_GUARD_SECONDS）。
+
+    回炉守卫的统一口径。窗口化是有意的：守卫不能永久拦住回炉，否则又回到
+    seq#622「任务悬空卡死」；超过窗口仍无产出，照旧按原逻辑回收。
+    """
+    _win = TASK_ACTIVITY_GUARD_SECONDS if window_seconds is None else int(window_seconds)
+    _ts = task_last_activity(task_id)
+    if _ts is None:
+        return False
+    return _ts >= datetime.now(timezone.utc).timestamp() - _win
+
+
 def validate_run_token(task: dict | None, run_token: str = "") -> str:
     """校验补报实例（run_token = 认领时刻 started_at，Step 4）。
 
@@ -2207,8 +2279,12 @@ def update_task_status(task_id, status, **kw):
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         db.commit()
-    # Issue-45 M2：任务终态（含 timeout_failed）→ 会话级临时 token 即时失效（存在即有效，删除即失效）
-    if status in TASK_TERMINAL_STATUSES:
+    # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
+    # Issue #1071（P4）：timeout_failed 是「疑似误判终态」，**不**收钥匙——
+    #   判死是兜底猜测，不是任务真的结束；worker 之后 push/调平台接口全 401
+    #   （生产 16:33–16:49 有 22 次 401）会让它连交付都做不到，活就白跑了。
+    #   这类 token 靠 6 小时 TTL 自然过期，purge 会清；多活 6 小时只属于一个已判死的任务。
+    if status in TASK_TERMINAL_STATUSES and status != TASK_TIMEOUT_FAILED:
         try:
             from src.api.auth_token import revoke_session_token
             revoke_session_token(task_id)
@@ -2235,8 +2311,16 @@ def requeue_task(task_id):
     with db_lock:
         c = db.cursor()
         # 释放槽位（根因2修复）：requeue 前先查 runtime_id，requeue 后 busy_slots-1
-        c.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT runtime_id, status FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
+        # Issue #1071（P3）：活着的任务不回炉。回炉会改写 started_at，而 started_at 就是
+        # worker 的 run_token → 老 worker 紧接着的 complete/fail 立刻被 409 stale 拒收。
+        # 只拦 running（dispatched 从未开始执行，谈不上「活着」）；窗口化见
+        # TASK_ACTIVITY_GUARD_SECONDS，超窗口仍无产出照旧回炉，不留悬空卡死。
+        if row and (row[1] or "") == "running" and task_recently_active(task_id):
+            log.info(f"requeue_task skipped: task {task_id} has recent task_messages activity "
+                     f"(guard={TASK_ACTIVITY_GUARD_SECONDS}s)")
+            return False
         c.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')",
                   (task_id,))
         ret = c.rowcount > 0
@@ -2673,8 +2757,13 @@ def _backfill_release_subissue_on_complete(task: dict | None, exit_code: int,
         log.warning(f"_backfill_release_subissue_on_complete failed: {_e}")
 
 
-def complete_task(task_id, result_text, exit_code=0, usage=None):
-    """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
+def complete_task(task_id, result_text, exit_code=0, usage=None,
+                  revive_from_timeout_failed: bool = False):
+    """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。
+
+    revive_from_timeout_failed（Issue #1071）：由 service.revive_timeout_task 传入，
+    表示这是一次已校验过的「兜底超时判死后迟到结果」复活，允许把事件侧 failed 改判 completed。
+    """
     task = get_task(task_id)
     # 可见性（P1）：引擎「疑似提前结束」（模型输出后静默、无收尾记录）时任务仍算
     # completed（exit 0），但把标记显式落到 agent_tasks.errors + 事件 result 前缀，
@@ -2753,7 +2842,9 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_result_show,
-                                  structured_output=output or None)
+                                  structured_output=output or None,
+                                  revive_from_timeout_failed=(
+                                      revive_from_timeout_failed and status == "completed"))
             # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
             # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
             # failed 阻断回退 pending_review 保留人工 confirm done 路径）
@@ -2979,7 +3070,11 @@ def finalize_by_stream_end(task_id: str, fallback_text: str = "", exit_code: int
     task = get_task(task_id)
     if not task:
         return False
-    if task.get("status") in TASK_TERMINAL_STATUSES:
+    _st = task.get("status")
+    if _st == TASK_TIMEOUT_FAILED:
+        # Issue #1071（P2）：判死之后才回来的结果——走窄口子复活，其余终态照旧幂等返回。
+        return revive_timeout_task(task_id, fallback_text or "", exit_code, usage=usage or {})
+    if _st in TASK_TERMINAL_STATUSES:
         return False
     result_text = fallback_text or ""
     if task.get("self_reported") == 1 and task.get("result_text"):
@@ -2992,6 +3087,79 @@ def finalize_by_stream_end(task_id: str, fallback_text: str = "", exit_code: int
         except Exception:
             pass
     complete_task(task_id, result_text, exit_code, usage=usage or {})
+    return True
+
+
+def _is_pending_self_report_timeout(task: dict) -> bool:
+    """判死来源是否为「兜底超时」（sweep），而不是业务失败。
+
+    Issue #1071：复活是窄口子，来源必须钉死——
+    - 新行：sweep 写 errors 首元素 {"error_code": "PENDING_SELF_REPORT_TIMEOUT"}；
+    - 存量行（改动前判死）：没有 error_code 标记，按 sweep 写死的判死文案兜底识别。
+    业务失败（failed）永远走不到这里，2026-08-24 seq#2488 的「失败被成功覆盖」竞态不重开。
+    """
+    _errs = str(task.get("errors") or "")
+    if not _errs:
+        return False
+    if TIMEOUT_SOURCE_MARKER in _errs:
+        return True
+    return ("内未自报完成/失败" in _errs) or ("pending_self_report 超时" in _errs)
+
+
+def revive_timeout_task(task_id, result_text: str = "", exit_code: int = 0,
+                        usage: dict | None = None) -> bool:
+    """Issue #1071（P2）：迟到结果回收——判死后才回来的结构化结论不再永久丢弃。
+
+    准入（全部满足才复活，任一不满足返回 False 并记原因）：
+    1. 任务态 = timeout_failed（其它终态一律不动）；
+    2. 从未复活过（revived_at 为空）——只复活一次，防反复重放刷状态；
+    3. 判死时刻在 TIMEOUT_REVIVE_WINDOW_SECONDS 内（默认 30 分钟）；
+    4. 判死来源是兜底超时（见 _is_pending_self_report_timeout），不是业务失败；
+    5. 迟到结果含完整结构化产出（actions + conclusion），与 complete_task 既有判据一致。
+
+    通过后：状态回 running（清 completed_at/exit_code，落 revived_at）→ 交给 complete_task
+    走完整收尾（事件归档/事件改判/回帖/stage），事件侧 failed→completed 由
+    update_event_complete(revive_from_timeout_failed=True) 这一个窄口子放行。
+    """
+    task = get_task(task_id)
+    if not task or task.get("status") != TASK_TIMEOUT_FAILED:
+        return False
+    if task.get("revived_at"):
+        log.info(f"revive skipped: task {task_id} already revived at {task['revived_at']}")
+        return False
+    from src.api.event_store import parse_agent_output_json
+    _out = parse_agent_output_json(result_text or "")
+    if not (_out and _out.get("actions") and _out.get("conclusion")):
+        log.info(f"revive skipped: task {task_id} late result has no complete structured output")
+        return False
+    if not _is_pending_self_report_timeout(task):
+        log.info(f"revive skipped: task {task_id} was not failed by the timeout sweep "
+                 f"(business failure stays failed)")
+        return False
+    _dead_at = _epoch_of(task.get("completed_at"))
+    if _dead_at is not None:
+        _age = datetime.now(timezone.utc).timestamp() - _dead_at
+        if _age > TIMEOUT_REVIVE_WINDOW_SECONDS:
+            log.info(f"revive skipped: task {task_id} judged {_age:.0f}s ago "
+                     f"(window={TIMEOUT_REVIVE_WINDOW_SECONDS}s)")
+            return False
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE agent_tasks SET status='running', completed_at=NULL, exit_code=NULL, "
+            "revived_at=? WHERE id=? AND status='timeout_failed' "
+            "AND (revived_at IS NULL OR revived_at='')",
+            (datetime.now(timezone.utc).isoformat(), task_id)
+        )
+        _ok = c.rowcount > 0
+        db.commit()
+    if not _ok:
+        log.info(f"revive skipped: task {task_id} changed state concurrently")
+        return False
+    log.info(f"timeout revive: task {task_id} timeout_failed -> running "
+             f"(late structured result, re-finalizing)")
+    complete_task(task_id, result_text or "", 0 if exit_code is None else exit_code,
+                  usage=usage or {}, revive_from_timeout_failed=True)
     return True
 
 
@@ -3976,6 +4144,17 @@ def reap_stale_runtimes() -> dict:
                     _cut = _recover_cutoff_for_agent(_agent_t or "")
                     if _started_at and _cut and _started_at >= _cut:
                         continue  # 该 agent 超时更宽（如 coding 7200s），未到其回收点
+                    # Issue #1071（P3）：回炉前查活性。引擎心跳断 ≠ 任务死——worker 还在
+                    # 写 task_messages 就说明它活着。不回炉的理由同上：回炉会把 started_at
+                    # 改写成新的认领时刻，老 worker 的 run_token 立刻失效 → 409 stale 永败。
+                    try:
+                        if task_recently_active(_task_id):
+                            log.info(f"reap_stale_runtimes: skip requeue task {_task_id} "
+                                     f"(recent task_messages activity, runtime offline)")
+                            continue
+                    except Exception as _ae:
+                        log.warning(f"reap_stale_runtimes: activity guard failed for "
+                                    f"task {_task_id}: {_ae}")
                     c.execute(
                         "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0,"
                         " attempts=attempts+1 WHERE id=? AND status='running'",

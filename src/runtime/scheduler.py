@@ -1172,6 +1172,25 @@ def _offline_duration_seconds(last_seen_at: str):
         return None
 
 
+def _epoch_seconds_of(value):
+    """库里时间串 → epoch 秒；不可解析 → None（与 service._epoch_of 同口径，本地副本避免循环导入）。"""
+    if not value:
+        return None
+    try:
+        from src.runtime.health import parse_dt
+        _ts = parse_dt(value)
+        if isinstance(_ts, (int, float)):
+            return float(_ts)
+        if _ts is None:
+            return None
+        _dt = _ts
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=timezone.utc)
+        return _dt.timestamp()
+    except Exception:
+        return None
+
+
 def _sweep_pending_self_report_timeouts() -> int:
     """pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed。
 
@@ -1181,11 +1200,16 @@ def _sweep_pending_self_report_timeouts() -> int:
     （带说明的终态，区别于 plain failed），并同步 events=failed + autopilot_executions=failed。
     """
     from src.runtime.service import update_task_status
+    from src.runtime.service import task_last_activity, TIMEOUT_SOURCE_MARKER
     from src.api.event_store import update_event_complete
     _cutoff_ts = datetime.now(timezone.utc).timestamp() - PENDING_SELF_REPORT_TIMEOUT_SECONDS
     _now = datetime.now(timezone.utc).isoformat()
-    _reason = (f"worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
-               f"（pending_self_report 超时），判 timeout_failed")
+    _reason = (f"[{TIMEOUT_SOURCE_MARKER}] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s "
+               f"内未自报完成/失败（pending_self_report 超时），判 timeout_failed")
+    # 来源标记（Issue #1071）：标记内嵌在判死文案里，errors 仍是「纯字符串数组」——
+    # 不改结构，UI / _resolve_error_messages / event_pipeline 合并逻辑零兼容风险，
+    # 后端复活路径靠 marker 子串识别「兜底超时」而非业务失败。
+    _errors_json = json.dumps([_reason], ensure_ascii=False)
     marked = 0
     try:
         _pending_rows = []
@@ -1211,9 +1235,27 @@ def _sweep_pending_self_report_timeouts() -> int:
                     _pending_rows.append(_r)
             rows = _pending_rows
         for tid, evt_seq, _rt_id, _ps in rows:
+            # Issue #1071（P1）：活性判定——重启后 worker 还活着就不判死。
+            # 判死只看 pending_since（=停机时刻）是一刀切：worker 继续执行并在 task_messages
+            # 持续产出，却仍在停机 30 分钟后被标死（今天 26/34 属于这一类）。
+            # 有效基准 = max(停机时刻, 最近产出)，仍超阈值才判死；真死任务照样 30 分钟回收。
+            try:
+                _ps_epoch = _epoch_seconds_of(_ps)
+                _last_act = task_last_activity(tid)
+                _base = max([_x for _x in (_ps_epoch, _last_act) if _x is not None],
+                            default=None)
+                if _base is not None and _base > _cutoff_ts:
+                    _la_txt = (datetime.fromtimestamp(_last_act, tz=timezone.utc).isoformat()
+                               if _last_act else "none")
+                    log.info(f"pending_self_report renew: task {tid} "
+                             f"last_activity={_la_txt} pending_since={_ps} "
+                             f"(threshold={PENDING_SELF_REPORT_TIMEOUT_SECONDS}s)")
+                    continue
+            except Exception as _ae:
+                log.warning(f"pending_self_report activity check failed for task {tid}: {_ae}")
             try:
                 update_task_status(tid, "timeout_failed", exit_code=-1,
-                                   errors=json.dumps([_reason], ensure_ascii=False),
+                                   errors=_errors_json,
                                    completed_at=_now)
                 if evt_seq:
                     try:
