@@ -40,6 +40,169 @@ let _taskFilterStatuses = []; // 按状态多选筛选（空=全部；Issue #926
 let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部；Issue #805: 值域改为 creator，请求携 creators=）
 let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
 let _taskFilterPopoverOpen = false;  // 筛选 popover 展开状态（跨 _render 保持）
+
+// ===== Issue #1077-F：仓库全部 · 看板按列独立分页 =====
+// 每列一个游标，首屏 30 条；列内触底只加载该列下一页（不再靠整页 sentinel）。
+// 约束：服务端只能按 issue.status 过滤，而看板列是 status+stage 的派生映射，
+// 因此「待处理」与「进行中」共享同一游标（statuses=active,processing），
+// 行最终落到哪一列仍由 _mapStatusL 决定（同一行不会重复渲染）。
+const _BOARD_COLS = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
+const _BOARD_CURSOR_OF_COL = {
+  pending: 'active_flow', in_progress: 'active_flow',
+  awaiting_input: 'awaiting_input', pending_review: 'pending_review',
+  done: 'done', cancelled: 'cancelled'
+};
+const _BOARD_CURSOR_STATUSES = {
+  active_flow: 'active,processing',
+  awaiting_input: 'awaiting_input',
+  pending_review: 'pending_review',
+  done: 'completed',
+  cancelled: 'cancelled'
+};
+let _colCursor = {};        // cursor -> {page, hasMore, loading, total, seq}
+
+function _boardPagingActive() {
+  return _tasksViewMode === 'repo_all' && _taskView === 'board' && !!app.currentRepo();
+}
+
+function _resetBoardCursors() {
+  _colCursor = {};
+  Object.keys(_BOARD_CURSOR_STATUSES).forEach(function (k) {
+    _colCursor[k] = { page: 1, hasMore: true, loading: false, total: null, seq: 0 };
+  });
+  _tasksAll = [];
+  _taskSel = null;
+  _tasksHasMore = false;
+  _tasksTotal = 0;
+  _taskPage = 1;
+  window._tasksById = {};
+}
+
+function _boardColsOfCursor(key) {
+  return _BOARD_COLS.filter(function (c) { return _BOARD_CURSOR_OF_COL[c] === key; });
+}
+
+function _mergeBoardItems(items) {
+  var byId = {};
+  _tasksAll.forEach(function (t) { byId[t.id] = t; });
+  items.forEach(function (t) {
+    if (byId[t.id]) Object.assign(byId[t.id], t);
+    else { _tasksAll.push(t); byId[t.id] = t; }
+  });
+  if (_taskSel) {
+    var upd = _tasksAll.find(function (t) { return t.id === _taskSel.id; });
+    _taskSel = upd || null;
+  }
+  window._tasksById = {};
+  _tasksAll.forEach(function (t) { window._tasksById[t.id] = t; });
+}
+
+// 取某游标的一页（merge=true 只刷新第 1 屏用于轮询对账）
+function _boardFetch(key, opts) {
+  var repo = app.currentRepo();
+  var cur = _colCursor[key];
+  if (!repo || !cur) return Promise.resolve();
+  var _merge = !!(opts && opts.merge);
+  if (cur.loading) return Promise.resolve();
+  if (!_merge && !cur.hasMore) return Promise.resolve();
+  cur.loading = true;
+  var seq = ++cur.seq;
+  var page = _merge ? 1 : cur.page;
+  var url = '/issues/' + repo.owner + '/' + repo.name +
+            '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+            '&per_page=' + _TASKS_PER_PAGE + '&page=' + page +
+            '&statuses=' + encodeURIComponent(_BOARD_CURSOR_STATUSES[key]);
+  if (_taskQuery) url += '&q=' + encodeURIComponent(_taskQuery);
+  if (_taskFilterAssignees.length) url += '&creators=' + encodeURIComponent(_taskFilterAssignees.join(','));
+  return API.get(url).then(function (d) {
+    if (seq !== cur.seq) return;          // 被更新的同列请求取代
+    cur.loading = false;
+    var items = d.issues || d.tasks || [];
+    if (!_merge) cur.page = page + 1;
+    cur.hasMore = !!d.has_more;
+    cur.total = (d.total === null || d.total === undefined) ? null : d.total;
+    _mergeBoardItems(items);
+    _renderBoardCols();
+  }).catch(function (e) {
+    if (seq !== cur.seq) return;
+    cur.loading = false;
+    if (e && e.silent) return;            // 外部取消（切页）静默
+    _boardColsOfCursor(key).forEach(function (c) {
+      var foot = document.getElementById('colFoot-' + c);
+      if (foot) foot.innerHTML = I18N.t('tasks.load_failed', { msg: (e && e.message) || '' });
+    });
+  });
+}
+
+function _boardLoadAll(opts) {
+  return Promise.all(Object.keys(_BOARD_CURSOR_STATUSES).map(function (k) { return _boardFetch(k, opts); }));
+}
+
+// 只重绘「卡片容器」与列头计数/列底提示，保留每列 scrollTop（避免触底加载后列内回顶）
+function _renderBoardCols() {
+  if (!_boardPagingActive()) { _render(); return; }
+  var filtered = _filteredTasks();
+  var missing = false;
+  _BOARD_COLS.forEach(function (c) {
+    var el = document.getElementById('colList-' + c);
+    if (!el) { missing = true; return; }
+    var list = filtered.filter(function (t) { return _mapStatusL(t) === c; });
+    var top = el.scrollTop;
+    el.innerHTML = _boardColListHtml(c, list);
+    el.scrollTop = top;
+    var cnt = document.getElementById('colCount-' + c);
+    if (cnt) cnt.textContent = _boardColCountText(c, list.length);
+    var foot = document.getElementById('colFoot-' + c);
+    if (foot) foot.innerHTML = _boardColFootHtml(c, list.length);
+  });
+  if (missing) { _render(); return; }      // 容器缺失（首次渲染前）→ 回退整页渲染
+  _bindBoardScroll();
+}
+
+// 列内滚动靠近底部 → 只加载该列所属游标的下一页
+function _bindBoardScroll() {
+  if (!_boardPagingActive()) return;
+  _BOARD_COLS.forEach(function (c) {
+    var el = document.getElementById('colList-' + c);
+    if (!el) return;
+    if (el.dataset && el.dataset.colBound === '1') return;   // 只绑一次
+    if (el.dataset) el.dataset.colBound = '1';
+    el.addEventListener('scroll', function () {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
+        _boardFetch(_BOARD_CURSOR_OF_COL[c]);
+      }
+    });
+  });
+}
+
+// 列头计数：单列游标给出「已加载/服务端总数」；共享游标（待处理+进行中）只给已加载数，
+// 因为一份 total 覆盖两列，直接展示会误导。
+function _boardColCountText(colKey, loadedN) {
+  if (!_boardPagingActive()) return String(loadedN);
+  var key = _BOARD_CURSOR_OF_COL[colKey];
+  var cur = _colCursor[key];
+  var shared = _boardColsOfCursor(key).length > 1;
+  if (shared || !cur || cur.total === null || cur.total === undefined) return String(loadedN);
+  return loadedN + '/' + cur.total;
+}
+
+function _boardColFootHtml(colKey, loadedN) {
+  if (!_boardPagingActive()) return '';
+  var cur = _colCursor[_BOARD_CURSOR_OF_COL[colKey]];
+  if (!cur) return '';
+  if (cur.loading) {
+    return '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">' +
+           (I18N.t('tasks.loading') || '加载中') + '…</div>';
+  }
+  if (cur.hasMore) {
+    return '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">↓ ' +
+           (I18N.t('tasks.load_more') || '滚动加载更多') + '</div>';
+  }
+  return loadedN > 0
+    ? '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">— ' +
+      (I18N.t('tasks.tab.all') || '全部') + ' ' + loadedN + ' —</div>'
+    : '';
+}
 let _filterStatusExpanded = false;   // 状态筛选区展开状态
 let _filterCreatorExpanded = false;  // 创建人筛选区展开状态
 
@@ -89,6 +252,7 @@ function _resetTaskListAndLoad() {
   _tasksAll = [];
   _tasksTotal = 0;   // Issue #926：切换瞬间清 total，避免显示旧口径计数
   _tasksHasMore = false;
+  if (_boardPagingActive()) { _taskSel = null; _tasksReload(); return; }  // Issue #1077-F：按列分页时清空各列重拉
   loadTasks();
 }
 function _toggleFilterStatus(s) {
@@ -155,8 +319,25 @@ function renderTasks(param) {
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   _taskPage = 1;      // Issue #926：进入页面重置到第 1 屏
   _tasksHasMore = false;
-  loadTasks();
+  _tasksReload();
   _startScenePoll();
+}
+
+// Issue #1077-F：统一重载入口——「仓库全部 + 看板」按列分页，其余保持原逻辑
+function _tasksReload(resetAll) {
+  if (_boardPagingActive()) {
+    _resetBoardCursors();
+    _render();          // 先画空列（容器就位），再由各列请求填充
+    _boardLoadAll();
+    return;
+  }
+  if (resetAll) {        // 板↔列表切换：全局分页链路必须从头拉
+    _taskPage = 1;
+    _tasksAll = [];
+    _tasksHasMore = false;
+    _tasksTotal = 0;
+  }
+  loadTasks();
 }
 
 window._switchTasksViewMode = function(mode) {
@@ -166,7 +347,26 @@ window._switchTasksViewMode = function(mode) {
   _taskPage = 1;
   _taskFilterStatuses = [];
   _taskFilterAssignees = [];
-  loadTasks();
+  if (mode === 'mine') {           // 我的需求：全量一次拉（不分页）
+    _resetBoardCursors();
+    loadTasks();
+    return;
+  }
+  _tasksReload();                  // 仓库全部：看板按列分页 / 列表全局分页
+};
+
+// Issue #1077-F：板/列表视图切换——仓库全部下两条分页链路不同，必须各自重置
+window._switchTaskView = function(k) {
+  if (_taskView === k) {
+    var _p0 = document.getElementById('taskViewPopover');
+    if (_p0) _p0.style.display = 'none';
+    return;
+  }
+  _taskView = k;
+  var p = document.getElementById('taskViewPopover');
+  if (p) p.style.display = 'none';
+  if (_tasksViewMode === 'repo_all') { _tasksReload(true); }
+  else { _render(); }
 };
 
 // 场景识别轮询：有待处理任务且场景未识别时，定期刷新
@@ -181,7 +381,9 @@ function _startScenePoll() {
              (t.status === 'processing');
     });
     if (needRefresh) {
-      loadTasks({merge: true});  // Issue #926：轮询按 id 合并更新（不整表替换，不丢已滚动加载的分页）
+      // Issue #1077-F：仓库全部·看板按列分页时，按列刷新第 1 屏对账
+      if (_boardPagingActive()) _boardLoadAll({ merge: true });
+      else loadTasks({merge: true});  // Issue #926：轮询按 id 合并更新（不整表替换，不丢已滚动加载的分页）
     } else {
       // 所有任务场景已识别（或无待处理任务）→ 停止轮询
       clearInterval(_taskPollTimer);
@@ -926,98 +1128,98 @@ window._loadMorePipeEvents = function() {
   if (window._lastPipeData) _renderPipelineSection(window._lastPipeData);
 };
 
-function _renderBoard(filtered) {
-  // 看板列按 task.status 严格分组
-  const statusCols = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
-  const statusLabels = {
-    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理',
-    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中',
-    awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
-    pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消'
+function _boardStageMeta() {
+  return {
+    labels: {
+      vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
+      sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review') || '待审核',
+      done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g, '') : '已完成',
+      '': '—'
+    },
+    colors: {
+      vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
+      sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
+    }
   };
-  const statusColors = {
-    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
-    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
-  };
-  const stageLabels = {
-    vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
-    sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    '': '—'
-  };
-  const stageColors = {
-    vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
-    sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
-  };
-  // task.status → 看板列映射（Issue #85: 增加 task.status=pending_review 支持）
-  function _mapStatus(t) {
-    if (t.status === 'cancelled') return 'cancelled';
-    if (t.status === 'completed' || t.stage === 'done') return 'done';
-    if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
-    if (t.status === 'awaiting_input') return 'awaiting_input';
-    const _activeStages = ['vod','issue','coding','qa','sre'];
-    if (_activeStages.includes(t.stage)) return 'in_progress';
-    if (t.status === 'processing') return 'in_progress';
-    return 'pending';
-  }
-  const grouped = {};
-  statusCols.forEach(s => grouped[s] = []);
-  filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
+}
 
-  // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
-  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px;flex-shrink:0">';
-  statusCols.forEach(s => {
-    const list = grouped[s];
-    const col = statusColors[s];
-    const dim = (s === 'cancelled') ? ';opacity:.65' : '';
-    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;flex-shrink:0;display:flex;flex-direction:column;background:transparent;border-radius:14px;border:0.5px solid var(--b,#e8e8ed);height:100%;overflow:hidden${dim}">`;
-    // 列头：颜色圆点 + 名称 + 计数
-    html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
-      <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
-      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[s]}</span>
-      <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
-    </div>`;
-    // 卡片容器：独立垂直滚动
-    html += `<div style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
-    if (list.length === 0) {
-      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无需求'}</div>`;
-    } else {
-      list.forEach(t => {
-        const _ms = _mapStatus(t);
-        const _stage = t.stage || '';
-        const _stageLabel = stageLabels[_stage] || _stage || '—';
-        const _stageColor = stageColors[_stage] || '#86868b';
-        const _isRunning = s === 'in_progress' && t.is_running && ['vod','issue','coding','qa','sre'].includes(_stage);
-        // PR 事件：右上角显示紫色 PR 药丸代替 stage 标签
-        const _isPR = !!t.is_pr_event;
-        const _tagHtml = _isPR
-          ? `<span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>`
-          : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}${_stageLabel}</span>`;
-        const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
-        const _cardCls = _isRunning ? ' tsk-card-radar' : '';
-        const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
-        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
-        if (_isRunning) {
-          html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
-        }
-        html += `<div style="position:relative;z-index:1">
+// 单张看板卡片（Issue #1077-F：从 _renderBoard 抽出，供整页渲染与按列局部渲染共用）
+function _boardCardHtml(t, colKey, meta) {
+  const _stage = t.stage || '';
+  const _stageLabel = meta.labels[_stage] || _stage || '—';
+  const _stageColor = meta.colors[_stage] || '#86868b';
+  const _isRunning = colKey === 'in_progress' && t.is_running && ['vod', 'issue', 'coding', 'qa', 'sre'].includes(_stage);
+  const _isPR = !!t.is_pr_event;
+  const _tagHtml = _isPR
+    ? `<span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>`
+    : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? ';animation:radarPulse 1.2s ease-in-out infinite' : ''}">${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}${_stageLabel}</span>`;
+  const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
+  const _cardCls = _isRunning ? ' tsk-card-radar' : '';
+  const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
+  let html = `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
+  if (_isRunning) {
+    html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
+  }
+  html += `<div style="position:relative;z-index:1">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
-            <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
+            <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#' + t.issue_number : ''}</span>
             ${_tagHtml}
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
-            <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
+            <span style="margin-left:auto;white-space:nowrap">${(t.created_at || '').substring(5, 10)}</span>
           </div>
         </div>`;
-        html += `</div>`;
-      });
-    }
-    html += `</div></div>`;
-  });
+  html += `</div>`;
+  return html;
+}
+
+// 某列的卡片容器内容（含空态）
+function _boardColListHtml(colKey, list) {
+  if (list.length === 0) {
+    return `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc') || '无需求'}</div>`;
+  }
+  const meta = _boardStageMeta();
+  return list.map(function (t) { return _boardCardHtml(t, colKey, meta); }).join('');
+}
+
+// 单列整体（列头 + 卡片容器 id=colList-<col> + 列底提示 id=colFoot-<col>）
+function _boardColHtml(colKey, list) {
+  const statusColors = {
+    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
+    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
+  };
+  const statusLabels = {
+    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g, '') : '待处理',
+    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g, '') : '进行中',
+    awaiting_input: I18N.t('tasks.status.tag_awaiting_input') || '待澄清',
+    pending_review: I18N.t('tasks.status.tag_pending_review') || '待审核',
+    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g, '') : '已完成',
+    cancelled: I18N.t('tasks.status.tag_cancelled') || '已取消'
+  };
+  const col = statusColors[colKey];
+  const dim = (colKey === 'cancelled') ? ';opacity:.65' : '';
+  let html = `<div style="min-width:240px;max-width:300px;flex:1 1 240px;flex-shrink:0;display:flex;flex-direction:column;background:transparent;border-radius:14px;border:0.5px solid var(--b,#e8e8ed);height:100%;overflow:hidden${dim}">`;
+  html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
+      <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
+      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[colKey]}</span>
+      <span id="colCount-${colKey}" style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${_boardColCountText(colKey, list.length)}</span>
+    </div>`;
+  html += `<div id="colList-${colKey}" style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
+  html += _boardColListHtml(colKey, list);
+  html += `</div>`;
+  html += `<div id="colFoot-${colKey}" style="flex-shrink:0">${_boardColFootHtml(colKey, list.length)}</div>`;
+  html += `</div>`;
+  return html;
+}
+
+function _renderBoard(filtered) {
+  const grouped = {};
+  _BOARD_COLS.forEach(function (s) { grouped[s] = []; });
+  filtered.forEach(function (t) { grouped[_mapStatusL(t)].push(t); });
+  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px;flex-shrink:0">';
+  _BOARD_COLS.forEach(function (s) { html += _boardColHtml(s, grouped[s]); });
   html += '</div>';
   return html;
 }
@@ -1283,7 +1485,7 @@ function _render() {
               const lbl = k==='list'?(I18N.t('tasks.view_list')||'列表'):(I18N.t('tasks.view_board')||'看板');
               const ic = k==='list'?'☰':'▦';
               const act = _taskView===k;
-              return `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--t1,#1d1d1f);${act?'background:rgba(59,130,246,.06)':''}" onclick="_taskView='${k}';document.getElementById('taskViewPopover').style.display='none';_render()">
+              return `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--t1,#1d1d1f);${act?'background:rgba(59,130,246,.06)':''}" onclick="_switchTaskView('${k}')">
                 <span style="font-size:13px">${ic}</span> ${lbl}
                 ${act?'<span style="margin-left:auto;color:#3b82f6;font-size:12px">✓</span>':''}
               </label>`;
@@ -1300,7 +1502,7 @@ function _render() {
       </div>
     </div>
     <div style="flex:1;display:flex;flex-direction:column;min-height:0">
-      <div id="taskBoardScroll" style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}${(_tasksViewMode === 'repo_all' && _tasksHasMore) ? _taskSentinelHtml() : ''}</div>
+      <div id="taskBoardScroll" style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}${(!_boardPagingActive() && _tasksViewMode === 'repo_all' && _tasksHasMore) ? _taskSentinelHtml() : ''}</div>
     </div>` : `
     <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
       <div style="position:relative;width:100%;max-width:400px">
@@ -1325,6 +1527,8 @@ function _render() {
 
   // Issue #926：挂载滚动加载观察器（sentinel 触底 → 追加下一屏）
   _observeTaskSentinel();
+  // Issue #1077-F：看板按列分页时，绑定各列滚动触底
+  _bindBoardScroll();
 }
 
 // Issue #926：IntersectionObserver 无限滚动——sentinel 进入视口且 has_more 时按屏递增
