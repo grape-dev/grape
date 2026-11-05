@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
 
 from src.kernel.config import log
+from src.kernel.gsb import metrics as _gsb_metrics
 from src.kernel.gsb.registry import discover_service
 from src.kernel.auth_sdk.service_token import generate_service_token
 
@@ -158,14 +159,29 @@ class GsbClient:
         candidates = self._candidates()
         last_exc: Exception | None = None
         for idx, base in enumerate(candidates):
+            started = time.time()
             try:
                 resp = self._http.request(method, f"{base}{path}", headers=self._headers(), **kwargs)
                 if idx > 0:
                     log.info(f"GSB failover: service={self.service_name} used {base} (candidate #{idx + 1})")
                 self._cached_url, self._cached_at = base, time.time()
+                _gsb_metrics.observe(
+                    target=self.service_name,
+                    caller=self.caller_name,
+                    method=method,
+                    status=getattr(resp, "status_code", "unknown"),
+                    seconds=time.time() - started,
+                )
                 resp.raise_for_status()
                 return resp
             except Exception as exc:  # noqa: BLE001
+                _gsb_metrics.observe(
+                    target=self.service_name,
+                    caller=self.caller_name,
+                    method=method,
+                    status=getattr(exc, "response", None) and getattr(exc.response, "status_code", "error") or type(exc).__name__,
+                    seconds=time.time() - started,
+                )
                 if _TRANSPORT_ERRORS and isinstance(exc, _TRANSPORT_ERRORS):
                     # 非幂等请求只在“连接期失败”时切换候选：
                     # 读超时/协议错误意味着请求可能已被服务端执行（update_issue_state、

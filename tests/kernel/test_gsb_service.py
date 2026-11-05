@@ -421,3 +421,56 @@ def test_client_prefers_namespaced_registry_entry(monkeypatch):
     client2 = GsbClient("runtime", caller_name="mgmt")
     # 本机命名空间没有行 → 退回裸服务名（此处也没有）→ None
     assert client2._registry_url() is None
+
+
+def test_gsb_client_metrics_installed_and_recorded():
+    """GSB 客户端指标：安装到 insight registry 后 observe 能出现在 /metrics 文本里。"""
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from src.kernel.gsb import metrics as gsb_metrics
+
+    reg = CollectorRegistry()
+    # 重置模块级单例，模拟首次安装
+    gsb_metrics._CLIENT_REQUESTS = None
+    gsb_metrics._CLIENT_DURATION = None
+    gsb_metrics.install(reg)
+    gsb_metrics.observe("runtime", "mgmt", "GET", "200", 0.02)
+
+    text = generate_latest(reg).decode()
+    assert 'grape_gsb_client_requests_total{caller="mgmt",method="GET",status="200",target="runtime"} 1.0' in text
+    assert "grape_gsb_client_duration_seconds_bucket" in text
+
+
+def test_client_records_metric_on_success(monkeypatch):
+    """RemoteProvider 走 GsbClient 时，每次调用都要落到流向指标（target/caller/status）。"""
+    from src.kernel.gsb import metrics as gsb_metrics
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        gsb_metrics,
+        "observe",
+        lambda **kw: seen.append((kw["target"], kw["caller"], kw["method"], str(kw["status"]))),
+        raising=True,
+    )
+
+    registry.register_service("runtime", "http://alive-host:38083")
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeHTTP:
+        def request(self, method, url, headers=None, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setenv("GRAPE_RUNTIME_URL", "http://alive-host:38083")
+    client = GsbClient("runtime", caller_name="mgmt")
+    client._http = FakeHTTP()
+
+    assert client.get("/internal/runtimes") == {"ok": True}
+    assert seen == [("runtime", "mgmt", "GET", "200")]

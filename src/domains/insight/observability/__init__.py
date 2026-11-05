@@ -52,6 +52,12 @@ HTTP_REQUEST_DURATION = Histogram(
     registry=registry,
 )
 
+# GSB 跨域调用指标：收集器定义在 kernel（kernel 不能依赖 domains），
+# 这里把它们的收集器注册进本模块的 registry，/metrics 才能带出来。
+from src.kernel.gsb.metrics import install as _install_gsb_metrics
+
+_install_gsb_metrics(registry)
+
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
     "Current number of in-flight HTTP requests served by the API server.",
