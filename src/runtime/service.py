@@ -2456,6 +2456,40 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
     return out
 
 
+def list_task_messages_recent(task_id, limit: int = 200) -> list[dict]:
+    """拉取任务**最新**的 limit 条 task_messages，按时间正序返回。
+
+    与 list_task_messages 的区别：后者从 seq=0 往后取，适合前端从头回放；
+    本函数先按 seq DESC 取尾部再反转，用于「接管」这类只关心当前进展的场景 ——
+    否则长任务的接管上下文会停在几小时前的任务开头。
+
+    返回 [{seq, type, tool, content, input, output, created_at}]，input 为解析后的 dict。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, type, tool, content, input_json, output, created_at FROM task_messages "
+                "WHERE task_id=? ORDER BY seq DESC LIMIT ?",
+                (task_id, limit))
+            rows = list(reversed(c.fetchall()))
+    except Exception as e:
+        log.warning(f"list_task_messages_recent failed: {e}")
+        return []
+    out = []
+    for r in rows:
+        inp = {}
+        try:
+            inp = _json.loads(r[4] or "{}")
+        except Exception:
+            pass
+        out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
+                    "content": r[3] or "", "input": inp, "output": r[5] or "",
+                    "created_at": normalize_event_time(r[6] or "")})
+    return out
+
+
 # wrote_files 派生查询认定的「写入类」工具名（含 hermes 等引擎的工具名变体，
 # 兜底按 input 含 path + content/new_string 精筛，见 list_wrote_files）
 _WRITE_TOOL_EXACT = frozenset({"write", "write_file", "patch"})
