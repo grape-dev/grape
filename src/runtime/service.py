@@ -1124,7 +1124,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         db.commit()
     from src.runtime.instances import runtime_instance_name
     _inst = runtime_instance_name(runtime_id)
-    log.info(f"Task enqueued: {task_id} agent={agent_type} repo={repo_key} skill={skill} runtime={runtime_id}({_inst}) session={agent_session_id}")
+    log.info(f"Task enqueued: {task_id} agent={agent_type} repo={repo_key} issue={issue_id or '-'} skill={skill} runtime={runtime_id}({_inst}) session={agent_session_id}")
     # MR-2：enqueue span 收口（行已写入，trace_context 已存）
     if _task_span is not None:
         try:
@@ -2816,7 +2816,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     _t_agent = (task or {}).get("agent_type", "")
     _t_repo = (task or {}).get("repo_key", "")
     _t_skill = (task or {}).get("skill", "")
-    log.info(f"Task completed: {task_id} agent={_t_agent} repo={_t_repo} skill={_t_skill} exit={exit_code} outcome={'failed' if exit_code else 'completed'}")
+    _t_issue = (task or {}).get("issue_id", "")
+    log.info(f"Task completed: {task_id} agent={_t_agent} repo={_t_repo} issue={_t_issue or '-'} skill={_t_skill} exit={exit_code} outcome={'failed' if exit_code else 'completed'}")
     # Issue #627: SRE 生产发布任务终态回填（成功/失败都要回填——deploy_failed 分支
     # 恰在 exit!=0；钩子自带 production_release 锚点判断，普通任务零影响、幂等）
     if task and (task.get("agent_type") or "") == "sre" and task.get("issue_id"):
@@ -3680,7 +3681,7 @@ def fail_task(task_id, error, exit_code=-1):
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
     _ft = get_task(task_id) or {}
-    log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
+    log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} issue={_ft.get('issue_id', '') or '-'} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
     # 可观察性埋点：任务失败
     try:
         from src.observability import record_task_terminal, record_task_failed
