@@ -419,8 +419,8 @@ def test_client_prefers_namespaced_registry_entry(monkeypatch):
 
     monkeypatch.setenv("GRAPE_GSB_NAMESPACE", "node-a")
     client2 = GsbClient("runtime", caller_name="mgmt")
-    # 本机命名空间没有行 → 退回裸服务名（此处也没有）→ None
-    assert client2._registry_url() is None
+    # 本机命名空间没有行 → 多实例负载均衡下跨节点兜底（同一服务只有 node-b 一个实例）
+    assert client2._registry_url() == "http://10.0.0.9:38083"
 
 
 def test_gsb_client_metrics_installed_and_recorded():
@@ -437,7 +437,7 @@ def test_gsb_client_metrics_installed_and_recorded():
     gsb_metrics.observe("runtime", "mgmt", "GET", "200", 0.02)
 
     text = generate_latest(reg).decode()
-    assert 'grape_gsb_client_requests_total{caller="mgmt",method="GET",status="200",target="runtime"} 1.0' in text
+    assert 'grape_gsb_client_requests_total{caller="mgmt",instance="",method="GET",status="200",target="runtime"} 1.0' in text
     assert "grape_gsb_client_duration_seconds_bucket" in text
 
 

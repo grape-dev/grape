@@ -147,6 +147,63 @@ def list_services() -> list:
         return _rows_to_dicts(c, c.fetchall())
 
 
+def split_key(key: str) -> tuple[str, str]:
+    """把注册键拆成 (服务名, 命名空间)。
+
+    ``mgmt@hd002`` → ``("mgmt", "hd002")``；裸 ``mgmt`` → ``("mgmt", "")``。
+    命名空间为空表示未启用多机隔离（旧注册/单机模式）。
+    """
+    raw = (key or "").strip()
+    if "@" not in raw:
+        return raw, ""
+    service, instance = raw.split("@", 1)
+    return service, instance
+
+
+def list_instances(service: str, include_offline: bool = False) -> list[dict]:
+    """列出某个基础服务的全部实例（``service`` 与 ``service@namespace`` 两类键）。
+
+    这是 GSB 负载均衡的数据基础：discover_service() 只返回单条（fetchone），
+    多实例场景需要一次拿到全部候选。
+
+    返回的每行在原字段之外补充：
+    - ``service``：基础服务名（mgmt / runtime / ...）
+    - ``instance``：命名空间（hd002 / vod / ...），裸键为空串
+    - ``age_seconds``：距最近一次心跳的秒数
+    - ``alive``：是否 online 且心跳未超时
+
+    Args:
+        service: 基础服务名，如 ``mgmt``
+        include_offline: 为 True 时一并返回 status 非 online / 心跳过期的行
+    """
+    _ensure_table()
+    cutoff = time.time() - HEARTBEAT_TIMEOUT
+    sql = (
+        "SELECT * FROM gsb_service_registry "
+        "WHERE (service_name = ? OR service_name LIKE ?)"
+    )
+    params: list = [service, f"{service}@%"]
+    if not include_offline:
+        sql += " AND status='online' AND last_heartbeat > ?"
+        params.append(cutoff)
+    sql += " ORDER BY service_name"
+
+    with session_manager.db_lock:
+        c = session_manager.db.cursor()
+        c.execute(sql, tuple(params))
+        rows = _rows_to_dicts(c, c.fetchall())
+
+    now = time.time()
+    for r in rows:
+        base, instance = split_key(r.get("service_name", ""))
+        age = max(0.0, now - float(r.get("last_heartbeat") or 0))
+        r["service"] = base
+        r["instance"] = instance
+        r["age_seconds"] = round(age, 1)
+        r["alive"] = bool(r.get("status") == "online" and age <= HEARTBEAT_TIMEOUT)
+    return rows
+
+
 def list_all_services(include_offline: bool = True) -> list:
     """列出注册表全部行（运维视角，含离线与心跳过期行）。
 

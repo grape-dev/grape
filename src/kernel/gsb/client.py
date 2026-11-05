@@ -1,9 +1,10 @@
 """Grape Service Bus — 统一服务客户端（GsbClient）.
 
-设计依据：docs/weekly-09/grape-unified-implementation-design.md §7.8.4.
+设计依据：docs/weekly-09/grape-unified-implementation-design.md §7.8.4。
 
 GsbClient 是域间通信的统一入口：
-- 服务发现：环境变量优先 > DB 注册表 > localhost 回退
+- 服务发现：环境变量优先 > DB 注册表（全部实例）> localhost 回退
+- 负载均衡：注册表里同一服务有多个实例时，按 GRAPE_GSB_LB 策略挑一个
 - 认证：HMAC-SHA256 服务令牌（X-Service-Token 头）
 - 重试：httpx HTTPTransport(retries=2)
 - 超时：10s 总超时，5s 连接超时
@@ -12,28 +13,43 @@ GsbClient 是域间通信的统一入口：
     client = GsbClient("mgmt", caller_name="runtime")
     cfg = client.get("/internal/repos/owner/repo/webhook-config")
 
-2026-11 补齐（让注册表真正参与路由）：
+2026-11 补充：
 - 新增 event 服务映射与四进程实际端口回退；
-- 连接级故障（ConnectError / ConnectTimeout / ReadTimeout / RemoteProtocolError）
-  时自动按 "env → 注册表 → fallback" 的顺序换下一个候选地址重试，把死掉/改端口的
-  静态配置兜住；HTTP 状态码错误不重试（保留原有语义，避免掩盖 4xx/5xx）。
+- 传输层故障时按候选顺序切换地址；非幂等写请求只在"连接期失败"才切换，
+  避免读超时后重放造成重复写。
+- 多实例负载均衡：discover_service() 只能拿一条，这里改用 list_instances()
+  拿全部 ``service`` / ``service@namespace`` 行，按策略排序后依次尝试。
+
+负载均衡策略（GRAPE_GSB_LB，默认 local_first）：
+    local_first     本机命名空间实例优先，同命名空间内轮询，失败再跨节点（默认，兼容旧行为）
+    round_robin     忽略本机偏好，跨全部实例轮询
+    random          随机挑，适合实例数多且同质的场景
+    least_inflight  选并发在途请求最少的实例
+
+配套开关：
+    GRAPE_GSB_NAMESPACE       本机命名空间（默认读不到 → 空，等价"无本机偏好"）
+    GRAPE_GSB_LB_COOLDOWN    实例传输失败后的冷却秒数（默认 30）
+    GRAPE_GSB_LB_CACHE_TTL   实例列表缓存秒数（默认 5，避免每次调用查库）
 """
 from __future__ import annotations
 
 import json
 import os
+import random
+import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     import httpx
 except ImportError:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
 
+from src.kernel.auth_sdk.service_token import generate_service_token
 from src.kernel.config import log
 from src.kernel.gsb import metrics as _gsb_metrics
-from src.kernel.gsb.registry import discover_service
-from src.kernel.auth_sdk.service_token import generate_service_token
+from src.kernel.gsb.registry import list_instances
 
 # 环境变量优先级高于 DB 注册表（支持静态配置）
 _ENV_URL_MAP = {
@@ -51,8 +67,18 @@ _FALLBACK_PORT = {
     "insight": 38084,
 }
 
-# URL 缓存 TTL
+# URL 缓存 TTL（仅用于展示 / SSE 首地址）
 _URL_CACHE_TTL = 30
+
+# ---------------- 负载均衡配置 ----------------
+_LB_ENV = "GRAPE_GSB_LB"
+_LB_DEFAULT = "local_first"
+_LB_STRATEGIES = ("local_first", "round_robin", "random", "least_inflight")
+_LB_ALIASES = {"local": "local_first", "rr": "round_robin", "least": "least_inflight"}
+
+_NAMESPACE_ENV = "GRAPE_GSB_NAMESPACE"
+_COOLDOWN_SECONDS = float(os.environ.get("GRAPE_GSB_LB_COOLDOWN", "30"))
+_INSTANCE_CACHE_TTL = float(os.environ.get("GRAPE_GSB_LB_CACHE_TTL", "5"))
 
 # 只有传输层错误才换候选地址重试；HTTPStatusError 属于业务响应，直接抛出
 _TRANSPORT_ERRORS: tuple = ()
@@ -72,8 +98,28 @@ if httpx:
 _IDEMPOTENT_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
+def resolve_lb_strategy() -> str:
+    """读取并归一化 GRAPE_GSB_LB（非法值回退默认策略并告警一次）。"""
+    raw = os.environ.get(_LB_ENV, "").strip().lower()
+    if not raw:
+        return _LB_DEFAULT
+    value = _LB_ALIASES.get(raw, raw)
+    if value not in _LB_STRATEGIES:
+        log.warning(f"invalid {_LB_ENV}={raw!r}, fallback to {_LB_DEFAULT}")
+        return _LB_DEFAULT
+    return value
+
+
+def _instance_of(url: str) -> str:
+    """URL → 实例标识（netloc），用于指标与冷却表。"""
+    try:
+        return urlsplit(url).netloc or url
+    except Exception:  # noqa: BLE001
+        return url
+
+
 class GsbClient:
-    """统一域间通信客户端——自动服务发现 + 令牌认证 + 重试 + 故障切换。"""
+    """统一域间通信客户端——自动服务发现 + 负载均衡 + 令牌认证 + 故障切换。"""
 
     def __init__(self, service_name: str, caller_name: str = ""):
         self.service_name = service_name
@@ -89,6 +135,14 @@ class GsbClient:
                 transport=httpx.HTTPTransport(retries=2),
             )
 
+        # 负载均衡状态
+        self._lock = threading.Lock()
+        self._rr_cursor = 0
+        self._inflight: dict[str, int] = {}
+        self._cooldown_until: dict[str, float] = {}
+        self._instances: list[dict] = []
+        self._instances_at = 0.0
+
     # ---------- 地址解析 ----------
 
     def _env_url(self) -> str | None:
@@ -98,34 +152,98 @@ class GsbClient:
         url = os.environ.get(env_key)
         return url.rstrip("/") if url else None
 
-    def _registry_keys(self) -> list[str]:
-        """注册键候选：本机命名空间优先，其次裸服务名（跨机/旧注册兜底）。"""
-        keys: list[str] = []
-        ns = os.environ.get("GRAPE_GSB_NAMESPACE", "").strip()
-        if ns:
-            keys.append(f"{self.service_name}@{ns}")
-        keys.append(self.service_name)
-        return keys
+    def _fetch_instances(self) -> list[dict]:
+        """从注册表取该服务的全部存活实例（带 TTL 缓存）。"""
+        now = time.time()
+        with self._lock:
+            if now - self._instances_at < _INSTANCE_CACHE_TTL:
+                return list(self._instances)
+        try:
+            rows = list_instances(self.service_name)
+        except Exception:  # noqa: BLE001 - 注册表不可用不应阻断调用
+            rows = []
+        alive = [
+            r
+            for r in rows
+            if (r.get("base_url") or "") and r.get("alive", True)
+        ]
+        with self._lock:
+            self._instances = alive
+            self._instances_at = now
+        return list(alive)
+
+    def _available(self, instances: list[dict]) -> list[dict]:
+        """过滤掉处于冷却期的实例；全部冷却时退回全集（宁可重试也不空转）。"""
+        now = time.time()
+        with self._lock:
+            hot = [r for r in instances if self._cooldown_until.get(_instance_of(r["base_url"]), 0) <= now]
+        return hot or instances
+
+    def _ordered_instances(self) -> list[dict]:
+        """按 GRAPE_GSB_LB 策略给实例排序（返回的列表就是要尝试的顺序）。"""
+        instances = self._available(self._fetch_instances())
+        if not instances:
+            return []
+
+        strategy = resolve_lb_strategy()
+        ns = os.environ.get(_NAMESPACE_ENV, "").strip()
+
+        if strategy == "random":
+            shuffled = list(instances)
+            random.shuffle(shuffled)
+            return shuffled
+
+        if strategy == "least_inflight":
+            with self._lock:
+                return sorted(
+                    instances,
+                    key=lambda r: (
+                        self._inflight.get(_instance_of(r["base_url"]), 0),
+                        r.get("age_seconds", 0),
+                    ),
+                )
+
+        # round_robin / local_first：都需要游标推进
+        with self._lock:
+            cursor = self._rr_cursor
+            self._rr_cursor = (self._rr_cursor + 1) % max(1, len(instances))
+
+        if strategy == "round_robin":
+            return instances[cursor:] + instances[:cursor]
+
+        # local_first：本机命名空间实例优先，同命名空间内轮询；再拼其它节点
+        local = [r for r in instances if r.get("instance", "") == ns] if ns else []
+        remote = [r for r in instances if r not in local]
+        if local:
+            local = local[cursor % len(local):] + local[: cursor % len(local)]
+        return local + remote
+
+    def _registry_urls(self) -> list[str]:
+        """注册表里的候选地址（按策略排序，去重）。"""
+        urls: list[str] = []
+        for row in self._ordered_instances():
+            base = (row.get("base_url") or "").rstrip("/")
+            if base and base not in urls:
+                urls.append(base)
+        return urls
 
     def _registry_url(self) -> str | None:
-        for key in self._registry_keys():
-            try:
-                svc = discover_service(key)
-            except Exception:  # noqa: BLE001 - 注册表不可用不应阻断调用
-                continue
-            base = (svc or {}).get("base_url")
-            if base:
-                return base.rstrip("/")
-        return None
+        """兼容旧接口：返回按 LB 策略排序后的第一个注册表实例地址。
+
+        旧实现只查「本机命名空间 → 裸服务名」两个 key，取不到就 None；
+        多实例负载均衡后改为返回候选列表首项——本机没有时自动跨节点兜底。
+        """
+        urls = self._registry_urls()
+        return urls[0] if urls else None
 
     def _fallback_url(self) -> str:
         port = _FALLBACK_PORT.get(self.service_name, 38080)
         return f"http://127.0.0.1:{port}"
 
     def _candidates(self) -> list[str]:
-        """候选地址，去重且保序：环境变量 → 注册表 → 本机回退。"""
+        """候选地址，去重且保序：环境变量 → 注册表（按 LB 策略） → 本机回退。"""
         candidates: list[str] = []
-        for url in (self._env_url(), self._registry_url()):
+        for url in (self._env_url(), *self._registry_urls()):
             if url and url not in candidates:
                 candidates.append(url)
         fallback = self._fallback_url()
@@ -140,6 +258,31 @@ class GsbClient:
         url = self._candidates()[0]
         self._cached_url, self._cached_at = url, time.time()
         return url
+
+    # ---------- 冷却与在途统计 ----------
+
+    def _mark_failure(self, url: str) -> None:
+        """传输失败后给实例打冷却，避免连续打同一个坏实例。"""
+        if _COOLDOWN_SECONDS <= 0:
+            return
+        inst = _instance_of(url)
+        with self._lock:
+            self._cooldown_until[inst] = time.time() + _COOLDOWN_SECONDS
+
+    def _mark_success(self, url: str) -> None:
+        inst = _instance_of(url)
+        with self._lock:
+            self._cooldown_until.pop(inst, None)
+
+    def _enter_inflight(self, url: str) -> None:
+        inst = _instance_of(url)
+        with self._lock:
+            self._inflight[inst] = self._inflight.get(inst, 0) + 1
+
+    def _leave_inflight(self, url: str) -> None:
+        inst = _instance_of(url)
+        with self._lock:
+            self._inflight[inst] = max(0, self._inflight.get(inst, 0) - 1)
 
     def _headers(self) -> dict:
         """认证头——每次请求重新生成令牌（TTL 60s）。"""
@@ -160,17 +303,20 @@ class GsbClient:
         last_exc: Exception | None = None
         for idx, base in enumerate(candidates):
             started = time.time()
+            self._enter_inflight(base)
             try:
                 resp = self._http.request(method, f"{base}{path}", headers=self._headers(), **kwargs)
                 if idx > 0:
                     log.info(f"GSB failover: service={self.service_name} used {base} (candidate #{idx + 1})")
                 self._cached_url, self._cached_at = base, time.time()
+                self._mark_success(base)
                 _gsb_metrics.observe(
                     target=self.service_name,
                     caller=self.caller_name,
                     method=method,
                     status=getattr(resp, "status_code", "unknown"),
                     seconds=time.time() - started,
+                    instance=_instance_of(base),
                 )
                 resp.raise_for_status()
                 return resp
@@ -181,6 +327,7 @@ class GsbClient:
                     method=method,
                     status=getattr(exc, "response", None) and getattr(exc.response, "status_code", "error") or type(exc).__name__,
                     seconds=time.time() - started,
+                    instance=_instance_of(base),
                 )
                 if _TRANSPORT_ERRORS and isinstance(exc, _TRANSPORT_ERRORS):
                     # 非幂等请求只在“连接期失败”时切换候选：
@@ -194,6 +341,7 @@ class GsbClient:
                             f"url={base} err={type(exc).__name__} (request may have been applied)"
                         )
                         raise
+                    self._mark_failure(base)
                     last_exc = exc
                     log.warning(
                         f"GSB transport failed: service={self.service_name} url={base} "
@@ -201,6 +349,8 @@ class GsbClient:
                     )
                     continue
                 raise
+            finally:
+                self._leave_inflight(base)
         raise last_exc if last_exc else RuntimeError(f"GSB request failed: {self.service_name}{path}")
 
     def get(self, path: str, params: dict | None = None) -> Any:
@@ -212,7 +362,7 @@ class GsbClient:
         return self._request("POST", path, json=json_data).json()
 
     def stream_sse(self, path: str):
-        """SSE 流式读取——yield dict per event（使用首个可用候选地址）。"""
+        """SSE 流式读取——使用首个可用候选地址。"""
         if not self._http:
             raise RuntimeError("httpx not available")
         base = self._resolve_url()

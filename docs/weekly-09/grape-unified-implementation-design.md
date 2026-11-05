@@ -4011,3 +4011,47 @@ wait
 | **table_maintenance (task_messages)** | **6h** | **Insight** | **insight** | **cleanup_old_task_messages** |
 
 > **加粗项**为本方案的关键变更：从 Mgmt 进程迁移到 Insight 独立进程。
+
+#### 7.8.13 多实例负载均衡（2026-11 增补）
+
+##### 背景
+
+命名空间（§7.8.12）解决了多机注册行互相覆盖的问题，但 `discover_service()` 仍是
+`SELECT ... WHERE service_name=?` + `fetchone()`，一次只能拿一条；同机多副本
+（未来多 worker）或跨机同名服务都不会被调度。本次在客户端补上实例级调度。
+
+##### 数据侧
+
+`registry.list_instances(service)` 一次取出 `service` 与 `service@namespace` 两类键的全部行，
+补充 `service` / `instance` / `age_seconds` / `alive` 字段；跳过 `status!='online'`
+或心跳超过 90s 的行（`include_offline=True` 可供运维排查）。
+
+##### 客户端策略
+
+`GRAPE_GSB_LB`（默认 `local_first`）：
+
+| 策略 | 行为 |
+|------|------|
+| `local_first` | 本机命名空间实例优先，同命名空间内轮询；失败后跨节点兜底（保持旧行为语义） |
+| `round_robin` | 忽略本机偏好，跨全部实例轮询 |
+| `random` | 随机顺序 |
+| `least_inflight` | 选在途请求最少的实例（客户端本地计数） |
+
+配套：
+
+- `GRAPE_GSB_NAMESPACE`：本机命名空间，用于 local_first 判定；
+- `GRAPE_GSB_LB_COOLDOWN`（默认 30s）：实例传输失败后短期剔除，避免连续打坏实例；
+- `GRAPE_GSB_LB_CACHE_TTL`（默认 5s）：实例列表缓存，避免每次调用查库；
+- 环境变量 `GRAPE_{MGMT,RUNTIME,INSIGHT,EVENT}_URL` 仍为最高优先级（静态钉住单个目标，
+  便于排障与灰度），此时负载均衡只作用于后续兜底候选。
+
+##### 安全语义不变
+
+- 只有传输层错误（连接失败/超时/协议错误）才切换候选；
+- 非幂等请求（POST/PUT/DELETE）只在"连接期失败"时切换——读超时后不重放，
+  避免 `update_issue_state`、`log_obs` 等写操作重复执行。
+
+##### 可观测
+
+`grape_gsb_client_requests_total` / `grape_gsb_client_duration_seconds` 增加 `instance`
+维度，可直接看各实例的 QPS、错误率与延迟分布。

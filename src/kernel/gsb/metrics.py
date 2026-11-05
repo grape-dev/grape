@@ -30,13 +30,13 @@ def install(registry: Any) -> None:
         _CLIENT_REQUESTS = Counter(
             "grape_gsb_client_requests_total",
             "Cross-domain calls issued through the GSB client.",
-            ["target", "caller", "method", "status"],
+            ["target", "caller", "method", "status", "instance"],
             registry=registry,
         )
         _CLIENT_DURATION = Histogram(
             "grape_gsb_client_duration_seconds",
             "GSB client call duration.",
-            ["target", "method", "status"],
+            ["target", "method", "status", "instance"],
             registry=registry,
             buckets=_BUCKETS,
         )
@@ -44,9 +44,24 @@ def install(registry: Any) -> None:
         pass
 
 
-def observe(target: str, caller: str, method: str, status: str, seconds: float) -> None:
-    """记录一次跨域调用（未安装指标时为 no-op）。"""
+def observe(
+    target: str,
+    caller: str,
+    method: str,
+    status: str,
+    seconds: float,
+    instance: str = "",
+) -> None:
+    """记录一次跨域调用（未安装指标时为 no-op）。
+
+    ``instance`` 是本次命中的实例（host:port）。多实例负载均衡后，
+    没有这个维度就看不出发往哪个实例、各实例的错误率与延迟差异。
+    """
     if _CLIENT_REQUESTS is None or _CLIENT_DURATION is None:
         return
-    _CLIENT_REQUESTS.labels(target=target, caller=caller, method=method, status=str(status)).inc()
-    _CLIENT_DURATION.labels(target=target, method=method, status=str(status)).observe(seconds)
+    _CLIENT_REQUESTS.labels(
+        target=target, caller=caller, method=method, status=str(status), instance=instance
+    ).inc()
+    _CLIENT_DURATION.labels(
+        target=target, method=method, status=str(status), instance=instance
+    ).observe(seconds)
