@@ -2779,7 +2779,9 @@ def _fn_task_liveness_index_and_revived_at() -> None:
 
 
 register_migration(
-    version="202611050001",
+    # 20261105 撞号修复：生产库已将 202611050001 盖给 issue865_agent_runtimes_model
+    # （202611050011 包发布时本迁移尚未合入）。让位改用未占用号 202611050002。
+    version="202611050002",
     name="task-liveness-revived-at",
     kind="safe",
     fn=_fn_task_liveness_index_and_revived_at,
@@ -2916,7 +2918,7 @@ def _fn_add_agent_runtimes_model() -> None:
 register_migration(
     # 20261105 修复：原 0002 与 merge-gate-log 撞号（merge-gate-log 已按 0002 落库），
     # 挪至 0004；列添加幂等（已存在则跳过），生产/新库均安全。
-    version="202611030004",
+    version="202611050001",
     name="issue865_agent_runtimes_model",
     kind="safe",
     fn=_fn_add_agent_runtimes_model,
