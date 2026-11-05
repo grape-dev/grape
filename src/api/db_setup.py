@@ -2759,6 +2759,33 @@ register_migration(
 )
 
 
+def _fn_task_liveness_index_and_revived_at() -> None:
+    """Issue #1071：迟到结果复活所需的结构（存量库幂等补齐）。
+
+    - agent_tasks.revived_at：复活只允许发生一次，靠此列落痕（NULL = 未复活）。
+    不加 task_messages(task_id, created_at) 复合索引：实测该表已有
+    idx_task_messages_task(task_id)（db_setup:1986，存量库均在），而活性查询是
+    「按 task_id 过滤 + ORDER BY id DESC LIMIT 20」，单列索引即命中；task_messages 是
+    追加最频繁的表，再挂一个索引只有写入放大、没有读收益。
+    走 register_migration（legacy 清单已冻结，不再往 _NEW_TABLES/legacy 里加）。
+    """
+    with db_lock:
+        c = db.cursor()
+        try:
+            _ensure_column(c, "agent_tasks", "revived_at", "TEXT DEFAULT NULL")
+            db.commit()
+        except Exception as e:
+            log.warning(f"agent_tasks.revived_at migration failed: {e}")
+
+
+register_migration(
+    version="202611050001",
+    name="task-liveness-revived-at",
+    kind="safe",
+    fn=_fn_task_liveness_index_and_revived_at,
+)
+
+
 def _fn_create_grape_t_merge_gate_log() -> None:
     """Issue #752：存量库补建合入门禁日志表（CREATE TABLE IF NOT EXISTS 幂等，
     与 patrol-findings 同路径：_NEW_TABLES 只服务 legacy 全量首跑，已盖章库走本迁移）。"""

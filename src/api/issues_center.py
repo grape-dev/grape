@@ -2497,7 +2497,8 @@ _ATTACH_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", "
 _ATTACH_CODE_EXTS = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".sh", ".sql", ".tf", ".dockerfile"}
 _ATTACH_ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z"}
 _ATTACH_ALL_EXTS = _ATTACH_IMAGE_EXTS | _ATTACH_DOC_EXTS | _ATTACH_CODE_EXTS | _ATTACH_ARCHIVE_EXTS
-_ATTACH_MAX_SIZE = 50 * 1024 * 1024  # 50MB
+_ATTACH_MAX_SIZE = (int(os.environ.get("ATTACH_MAX_SIZE_MB", "200")) * 1024 * 1024
+                    )  # 单个附件上限：默认 200MB，可用 ATTACH_MAX_SIZE_MB 覆盖（需同步 nginx client_max_body_size）
 
 
 def _attach_obs_key(owner: str, repo: str, issue_number, filename: str) -> str:
