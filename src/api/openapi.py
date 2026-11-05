@@ -111,6 +111,48 @@ def token_scope(route) -> str | None:
     return None
 
 
+def _event_only_openapi_paths(prefixes=("/api/a2a",)) -> dict:
+    """把只注册在 Event 进程的路由并入契约（仅 schema，不注册真实路由）。
+
+    Issue #9427（flask-blog 流水线停在 issue 节点）根因：/api/a2a 在 #699 Phase 4
+    四进程拆分后只挂在 Event 进程（:38082，nginx 也把 /api/a2a 路由到 Event），
+    而 CLI 是按 Mgmt 的 /openapi.json 生成命令的 —— 契约里没有 /api/a2a，
+    `grape a2a handoff` 命令就不存在，agent 无法交办下一个节点，流水线直接停住
+    （agent 结构化产出里写着「契约 2.2.0 无 a2a/tasks 命令」）。
+
+    这里用同一个 router 在一个临时 app 上生成 schema，按前缀挑出 a2a 条目补进契约。
+    只影响 /openapi.json 内容，Mgmt 进程不会因此新增真实端点。
+    """
+    try:
+        from fastapi import FastAPI
+
+        from src.domains.runtime.routes import webhook
+    except Exception:  # pragma: no cover - 契约合并失败不应影响 /openapi.json
+        return {}
+
+    sub = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    sub.include_router(webhook.router)
+    sub_schema = get_openapi(title=sub.title, version=sub.version, routes=sub.routes)
+
+    merged: dict = {}
+    for path, methods in (sub_schema.get("paths") or {}).items():
+        if not any(path.startswith(p) for p in prefixes):
+            continue
+        ops = {m: op for m, op in methods.items() if m in _METHODS and isinstance(op, dict)}
+        if not ops:
+            continue
+        for op in ops.values():
+            op["security"] = [
+                {"apiKey": []},
+                {"privateKey": []},
+                {"accessToken": []},
+            ]
+            # a2a 走 get_user_or_none 软认证 → dual（JWT/session/api key 任一）
+            op.setdefault("x-token-scope", "dual")
+        merged[path] = ops
+    return merged
+
+
 def custom_openapi(app):
     """定制 /openapi.json 渲染：注入 securitySchemes + 只保留对外安全路由 + 逐操作 security。"""
     if app.openapi_schema:
@@ -145,6 +187,12 @@ def custom_openapi(app):
             if scope:
                 op["x-token-scope"] = scope
         paths[path] = ops
+
+    # 契约完整性：/api/a2a 只注册在 Event 进程（nginx 同样路由到 Event），
+    # 但 CLI 按本进程 /openapi.json 生成命令 —— 不补进来 agent 就没有 a2a 命令可用。
+    for _p, _ops in _event_only_openapi_paths().items():
+        paths.setdefault(_p, _ops)
+
     schema["paths"] = paths
     app.openapi_schema = schema
     return schema

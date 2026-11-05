@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
 
 app = server_common.build_app(
     title="Grape Mgmt Server",
-    version="2.2.0",
+    version="2.2.1",
     lifespan=lifespan,
 )
 
