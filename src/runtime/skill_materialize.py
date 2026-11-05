@@ -32,6 +32,24 @@ TMP_PREFIX = ".tmp"
 
 FALLBACK_FILENAME = "FALLBACK.md"
 
+# Issue #1070：跨技能前缀引用一次性 INFO 日志去重（同进程同技能只记一次）。
+_CROSS_SKILL_LOGGED: set = set()
+
+
+def _extract_cross_skill_prefix(ref: str, skill_name: str) -> str:
+    """Issue #1070：判定 references 引用是否带跨技能前缀。
+
+    返回非空串 = 跨技能前缀（如 ``other-skill/``），应从本技能校验清单排除；
+    返回空串 = 本技能自有引用（无前缀，或前缀即本技能自身目录名）。
+    """
+    head = ref.split("references/", 1)[0]
+    if not head:
+        return ""
+    owner = head.rstrip("/").rsplit("/", 1)[-1]
+    if owner and owner != skill_name:
+        return owner
+    return ""
+
 
 def _rmtree_safe(path: str):
     try:
@@ -41,18 +59,40 @@ def _rmtree_safe(path: str):
         pass
 
 
-def parse_skill_md_references(skill_md_path: str) -> list:
-    """解析 SKILL.md 正文中引用的 references/ 相对路径（去重保序）。"""
+def parse_skill_md_references(skill_md_path: str, skill_name: str = "") -> list:
+    """解析 SKILL.md 正文中引用的 references/ 相对路径（去重保序）。
+
+    Issue #1070：带跨技能前缀的引用（如 ``other-skill/references/x.md``，前缀
+    技能目录 ≠ 本技能自身目录）不在本技能 zip 包内（设计如此，运行时经
+    ``grape skills detail`` / 平台 API 按需获取），直接排除出本技能校验清单，
+    并记一次性 INFO 日志；仅对本技能自有 references 文件保留校验。
+    """
     refs = []
+    skill_name = (skill_name
+                  or os.path.basename(os.path.dirname(os.path.abspath(skill_md_path)))
+                  or "").strip()
+    skipped = 0
     try:
         with open(skill_md_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
     except Exception:
         return refs
-    for m in re.finditer(r"(?:[\w./-]*?/)?(references/[\w./-]+\.[\w]+)", text):
-        r = m.group(1).strip()
-        if r and r not in refs:
+    for m in re.finditer(r"(?:([\w.-]+)/)?(references/[\w./-]+\.[\w]+)", text):
+        prefix = m.group(1) or ""
+        r = m.group(2).strip()
+        if not r:
+            continue
+        if prefix and prefix != skill_name:
+            # 跨技能前缀引用（含 ``docs/references/...`` 等路径段前缀）：跳过校验
+            skipped += 1
+            continue
+        if r not in refs:
             refs.append(r)
+    if skipped and skill_name:
+        key = f"{skill_name}:{skill_md_path}"
+        if key not in _CROSS_SKILL_LOGGED:
+            _CROSS_SKILL_LOGGED.add(key)
+            _log.info(f"[skill] skipped {skipped} cross-skill refs for skill {skill_name}")
     return refs
 
 
