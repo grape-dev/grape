@@ -221,18 +221,17 @@ class TestSyntheticDispatchNoBroadcast:
 
 
 class TestValidateSceneEngineIdsCapability:
-    """Issue #955：能力标签按节点 id（角色）校验，堵住 tag='all' 通配。"""
+    """Issue #955：能力标签按节点 id（角色）校验。
+    #955 follow-up：恢复 tag='all' 通配（存量引擎能力表仅 'all' 行，严格匹配
+    误杀其场景引擎配置），角色枚举校验保留。"""
 
-    def test_all_capability_wildcard_blocked(self):
-        """引擎仅有 tag='all' 能力 → 不再放行（原通配漏洞）。"""
+    def test_all_capability_wildcard_allowed(self):
+        """引擎仅有 tag='all' 能力 → 放行（follow-up 恢复通配，存量引擎兼容）。"""
         eng = _mk_engine("opencode-955w", credential_id=_mk_cred("c-955w"), cap_tags=("all",))
         from src.api.routes.scenes import _validate_scene_engine_ids
-        with pytest.raises(HTTPException) as ei:
-            _validate_scene_engine_ids(
-                [{"id": "coding", "tag": "开发阶段", "skill": "implementation",
-                  "engine_runtime_ids": [eng]}], "gitcode:955/repo")
-        assert ei.value.status_code == 400
-        assert "coding" in ei.value.detail["message"]
+        _validate_scene_engine_ids(
+            [{"id": "coding", "tag": "开发阶段", "skill": "implementation",
+              "engine_runtime_ids": [eng]}], "gitcode:955/repo")
 
     def test_role_capability_passes_with_chinese_tag(self):
         """引擎有角色能力标签 + 节点 tag 为中文阶段名 → 校验按 id 角色通过。"""
