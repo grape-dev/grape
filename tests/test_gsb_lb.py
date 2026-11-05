@@ -13,7 +13,7 @@ import pytest
 
 from src.kernel import session_manager
 from src.kernel.gsb import registry
-from src.kernel.gsb.client import GsbClient, resolve_lb_strategy
+from src.kernel.gsb.client import GsbClient, reset_instance_cache, resolve_lb_strategy
 
 
 def _reset() -> None:
@@ -30,8 +30,14 @@ def clean(monkeypatch):
     monkeypatch.delenv("GRAPE_RUNTIME_URL", raising=False)
     monkeypatch.delenv("GRAPE_GSB_NAMESPACE", raising=False)
     monkeypatch.delenv("GRAPE_GSB_LB", raising=False)
+    from src.kernel.gsb import client as _client_mod
+
+    _client_mod._RR_CURSOR.clear()
+    reset_instance_cache()
     _reset()
     yield
+    _client_mod._RR_CURSOR.clear()
+    reset_instance_cache()
     _reset()
 
 
@@ -40,9 +46,8 @@ def _client(service="mgmt", namespace=None, strategy=None, monkeypatch=None):
         monkeypatch.setenv("GRAPE_GSB_NAMESPACE", namespace)
     if strategy is not None:
         monkeypatch.setenv("GRAPE_GSB_LB", strategy)
-    client = GsbClient(service, caller_name="test")
-    client._instances_at = 0  # 不吃上一用例的缓存
-    return client
+    reset_instance_cache()
+    return GsbClient(service, caller_name="test")
 
 
 # ---------------- registry.list_instances ----------------
@@ -117,7 +122,7 @@ def test_round_robin_rotates_across_instances(monkeypatch):
     client = _client(namespace="hd002", strategy="round_robin", monkeypatch=monkeypatch)
     firsts = []
     for _ in range(4):
-        client._instances_at = 0
+        reset_instance_cache()
         firsts.append(client._candidates()[0])
 
     assert firsts == [
@@ -153,6 +158,25 @@ def test_least_inflight_prefers_idle_instance(monkeypatch):
     assert client._candidates()[0] == "http://10.0.0.1:38081"
 
 
+def test_round_robin_cursor_shared_across_client_instances(monkeypatch):
+    """RemoteProvider 每次调用都 new GsbClient，轮询游标必须进程级共享，否则永远选第一个。"""
+    registry.register_service("mgmt@hd002", "http://10.0.0.1:38081")
+    registry.register_service("mgmt@vod", "http://10.0.0.2:38081")
+    monkeypatch.setenv("GRAPE_GSB_LB", "round_robin")
+
+    firsts = []
+    for _ in range(4):
+        reset_instance_cache()
+        fresh = GsbClient("mgmt", caller_name="test")  # 模拟 RemoteProvider 每次新建
+        firsts.append(fresh._candidates()[0])
+    assert firsts == [
+        "http://10.0.0.1:38081",
+        "http://10.0.0.2:38081",
+        "http://10.0.0.1:38081",
+        "http://10.0.0.2:38081",
+    ]
+
+
 # ---------------- 冷却与静态钉住 ----------------
 
 
@@ -162,17 +186,16 @@ def test_cooldown_skips_failed_instance(monkeypatch):
 
     client = _client(namespace="hd002", strategy="round_robin", monkeypatch=monkeypatch)
     client._mark_failure("http://10.0.0.1:38081")
-    client._instances_at = 0
+    reset_instance_cache()
 
     firsts = {client._candidates()[0] for _ in range(3)}
     assert firsts == {"http://10.0.0.2:38081"}
 
     # 冷却过期后重新参与
     client._cooldown_until["10.0.0.1:38081"] = time.time() - 1
-    client._instances_at = 0
     seen = set()
     for _ in range(4):
-        client._instances_at = 0
+        reset_instance_cache()
         seen.add(client._candidates()[0])
     assert "http://10.0.0.1:38081" in seen
 

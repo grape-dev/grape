@@ -80,6 +80,21 @@ _NAMESPACE_ENV = "GRAPE_GSB_NAMESPACE"
 _COOLDOWN_SECONDS = float(os.environ.get("GRAPE_GSB_LB_COOLDOWN", "30"))
 _INSTANCE_CACHE_TTL = float(os.environ.get("GRAPE_GSB_LB_CACHE_TTL", "5"))
 
+# 进程级共享状态：RemoteProvider 每次 get_service() 都会新建 GsbClient，
+# 若轮询游标/实例缓存放在实例上，round_robin 会退化成"永远选第一个"。
+_STATE_LOCK = threading.Lock()
+_INSTANCE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_RR_CURSOR: dict[str, int] = {}
+
+
+def reset_instance_cache(service: str | None = None) -> None:
+    """清空实例列表缓存（测试/配置热更新用）。"""
+    with _STATE_LOCK:
+        if service is None:
+            _INSTANCE_CACHE.clear()
+        else:
+            _INSTANCE_CACHE.pop(service, None)
+
 # 只有传输层错误才换候选地址重试；HTTPStatusError 属于业务响应，直接抛出
 _TRANSPORT_ERRORS: tuple = ()
 # 连接阶段错误 = 请求肯定没送到服务端，任何方法都可安全切换候选
@@ -153,11 +168,16 @@ class GsbClient:
         return url.rstrip("/") if url else None
 
     def _fetch_instances(self) -> list[dict]:
-        """从注册表取该服务的全部存活实例（带 TTL 缓存）。"""
+        """从注册表取该服务的全部存活实例（进程级 TTL 缓存）。
+
+        缓存挂在模块级而不是实例上：RemoteProvider 每次调用都会新建 GsbClient，
+        实例级缓存等于每次都要查一次库。
+        """
         now = time.time()
-        with self._lock:
-            if now - self._instances_at < _INSTANCE_CACHE_TTL:
-                return list(self._instances)
+        with _STATE_LOCK:
+            hit = _INSTANCE_CACHE.get(self.service_name)
+        if hit and now - hit[0] < _INSTANCE_CACHE_TTL:
+            return list(hit[1])
         try:
             rows = list_instances(self.service_name)
         except Exception:  # noqa: BLE001 - 注册表不可用不应阻断调用
@@ -167,9 +187,8 @@ class GsbClient:
             for r in rows
             if (r.get("base_url") or "") and r.get("alive", True)
         ]
-        with self._lock:
-            self._instances = alive
-            self._instances_at = now
+        with _STATE_LOCK:
+            _INSTANCE_CACHE[self.service_name] = (now, alive)
         return list(alive)
 
     def _available(self, instances: list[dict]) -> list[dict]:
@@ -203,13 +222,14 @@ class GsbClient:
                     ),
                 )
 
-        # round_robin / local_first：都需要游标推进
-        with self._lock:
-            cursor = self._rr_cursor
-            self._rr_cursor = (self._rr_cursor + 1) % max(1, len(instances))
+        # round_robin / local_first：游标必须进程级共享，否则 new GsbClient 每次归零
+        with _STATE_LOCK:
+            cursor = _RR_CURSOR.get(self.service_name, 0)
+            _RR_CURSOR[self.service_name] = cursor + 1
 
         if strategy == "round_robin":
-            return instances[cursor:] + instances[:cursor]
+            offset = cursor % len(instances)
+            return instances[offset:] + instances[:offset]
 
         # local_first：本机命名空间实例优先，同命名空间内轮询；再拼其它节点
         local = [r for r in instances if r.get("instance", "") == ns] if ns else []

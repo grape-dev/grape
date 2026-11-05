@@ -102,3 +102,17 @@ def _isolate_src_modules_and_env():
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+
+
+@pytest.fixture(autouse=True)
+def _reset_gsb_lb_state():
+    """GSB 负载均衡的进程级缓存/轮询游标在用例之间必须重置（否则用例互相污染）。"""
+    try:
+        from src.kernel.gsb import client as _gsb_client
+        from src.kernel.gsb.client import reset_instance_cache
+
+        _gsb_client._RR_CURSOR.clear()
+        reset_instance_cache()
+    except Exception:  # noqa: BLE001 - 指标/注册表未初始化时不影响用例
+        pass
+    yield
