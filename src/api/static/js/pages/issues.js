@@ -32,6 +32,7 @@ let _tasksLoading = false;    // Issue #926：分页请求进行中（防重复�
 let _taskReqSeq = 0;         // Issue #926：请求序号——重置类请求使旧在途响应失效（防闸门吞请求/错序渲染）
 let _tasksTotal = 0;          // Issue #926：服务端 total（含 PR 伪卡片）
 let _taskObs = null;          // Issue #926：IntersectionObserver 实例
+let _taskObsReentryUntil = 0; // Issue #1077：observer 重入窗口（ms 时间戳），防止 append 后 sentinel 在视口内立即误触发
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
@@ -345,9 +346,10 @@ function loadTasks(opts) {
       }
       const _byId = {};
       _tasksAll.forEach(t => { _byId[t.id] = t; });
+      var _newItems = [];  // Issue #1077：记录本屏新增项，供 append 局部追加渲染
       _items.forEach(t => {
         if (_byId[t.id]) { Object.assign(_byId[t.id], t); }
-        else { _tasksAll.push(t); _byId[t.id] = t; }
+        else { _tasksAll.push(t); _byId[t.id] = t; _newItems.push(t); }
       });
     } else {
       _tasksAll = _items;
@@ -361,7 +363,13 @@ function loadTasks(opts) {
     // Issue #175: 有待打开详情时不先渲染列表，避免列表闪现后立刻被详情覆盖
     var _openedDetail = false;  // 跟踪本次 loadTasks 是否打开了详情页
     if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
-      _render();
+      // Issue #1077：append（滚动追加）/merge（轮询刷新）只做列表局部更新，
+      // 不整页 _render()（消除顶部/搜索/筛选/详情闪动与滚动位置重置）
+      if ((_append || (opts && opts.merge)) && _tasksAll.length > 0) {
+        _partialRenderTasks(_append ? _newItems : null);
+      } else {
+        _render();
+      }
     } else {
       // 跳过 _render() 时仍需更新 _tasksById 供 _openBoardDetail 使用
       window._tasksById = {};
@@ -1014,6 +1022,152 @@ function _renderBoard(filtered) {
   return html;
 }
 
+// ---- Issue #1077：列表渲染助手（_render 与局部更新共用，保证两路径产出一致） ----
+
+// 列表模式状态信息
+function _lStatusInfoMap() {
+  return {
+    pending: {ic:'#', cls:'tsk-tag-p', rIc:'tsk-ic-p', text:I18N.t('tasks.status.tag_pending')||'<b></b>待处理'},
+    in_progress: {ic:'⏳', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_processing')||'<b></b>处理中'},
+    awaiting_input: {ic:'?', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
+    pending_review: {ic:'◉', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_pending_review')||'待审核'},
+    done: {ic:'✓', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_completed')||'<b></b>已完成'},
+    cancelled: {ic:'✕', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_cancelled')||'已取消'},
+  };
+}
+
+// 单行渲染（列表模式）
+function _taskRowHtml(t) {
+  const _lStatusInfo = _lStatusInfoMap();
+  const ms = _mapStatusL(t);
+  const si = _lStatusInfo[ms] || _lStatusInfo.pending;
+  const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
+  const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';  // PR 伪卡片「触发者」保持 assignee 语义（Issue #805 不改）
+  const _creatorHtml = t.creator ? ` · 👤 ${t.creator}` : '';    // Issue #805: Issue 卡片展示创建人（creator）
+  // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
+  if (t.is_pr_event) {
+    return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
+      <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
+      <div class="tsk-r-main">
+        <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+      </div>
+      <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
+    </div>`;
+  }
+  return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
+    <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
+    <div class="tsk-r-main">
+      <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
+      <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
+    </div>
+    <span class="tsk-tag ${si.cls}">${si.text}</span>
+  </div>`;
+}
+
+// 列表主体（行/状态分区/空态），不含 pager
+function _taskListBodyHtml(rows) {
+  let html = '';
+  if (_tasksMode === 'time') {
+    html = rows.map(_taskRowHtml).join('');
+  } else {
+    // 按新状态分区
+    const pageByStatus = {};
+    rows.forEach(t => { const ms = _mapStatusL(t); (pageByStatus[ms] = pageByStatus[ms] || []).push(t); });
+    const _secLabels = {
+      pending: I18N.t('tasks.section.pending')||'待处理',
+      in_progress: I18N.t('tasks.section.processing')||'进行中',
+      awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
+      pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+      done: I18N.t('tasks.section.completed')||'已完成',
+      cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消',
+    };
+    ['pending','in_progress','awaiting_input','pending_review','done','cancelled'].forEach(ms => {
+      if (pageByStatus[ms] && pageByStatus[ms].length > 0) {
+        html += `<div class="tsk-list-sec">${_secLabels[ms]} <span class="tsk-sec-n">${pageByStatus[ms].length}</span></div>` +
+          pageByStatus[ms].map(_taskRowHtml).join('');
+      }
+    });
+  }
+  return html;
+}
+
+// Issue #1077：确保 _grapeSpin keyframes 已注入（与 _withTaskLoading 的 spinner 同源）
+function _ensureGrapeSpinCss() {
+  if (!document.getElementById('_grapeSpinCSS')) {
+    var style = document.createElement('style');
+    style.id = '_grapeSpinCSS';
+    style.textContent = '@keyframes _grapeSpin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(style);
+  }
+}
+
+// 滚动加载 sentinel（列表/看板统一）：spinner 加载态
+function _taskSentinelHtml() {
+  _ensureGrapeSpinCss();
+  return '<div id="taskListSentinel" style="padding:14px 16px;display:flex;align-items:center;justify-content:center">' +
+    '<div style="width:18px;height:18px;border:2.5px solid var(--b,rgba(0,0,0,.1));border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite"></div>' +
+  '</div>';
+}
+
+// 列表模式 pager：has_more 时为 sentinel spinner，否则为「全部 N」结尾条
+function _taskListPagerHtml(rows) {
+  if (_tasksViewMode !== 'repo_all' || !app.currentRepo()) return '';
+  if (_tasksHasMore) return _taskSentinelHtml();
+  if (rows.length > 0) {
+    return `<div style="padding:12px 16px;text-align:center;color:var(--t3,#86868b);font-size:11px">— ${I18N.t('tasks.tab.all')||'全部'} ${_tasksTotal || rows.length} —</div>`;
+  }
+  return '';
+}
+
+// Issue #1077：append/merge 局部更新——只重绘列表容器/看板滚动区，
+// 不动顶部、搜索框、筛选面板与详情区（消除整页闪动与滚动位置重置），且跳过 _loadDeployLink()。
+// newItems 非空（append）且为 time 模式时，仅 insertAdjacentHTML 追加新行。
+function _partialRenderTasks(newItems) {
+  const filtered = _filteredTasks();
+  // 选中项失效时回退到当前过滤列表第一条（与 _render 保持一致）
+  if (_taskSel && !filtered.some(t => t.id === _taskSel.id)) {
+    _taskSel = filtered.length > 0 ? filtered[0] : null;
+  } else if (!_taskSel && filtered.length > 0) {
+    _taskSel = filtered[0];
+  }
+  window._tasksById = {};
+  _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
+
+  if (_taskView === 'board') {
+    const sc = document.getElementById('taskBoardScroll');
+    if (sc) {
+      sc.innerHTML = _renderBoard(filtered) + ((_tasksViewMode === 'repo_all' && _tasksHasMore) ? _taskSentinelHtml() : '');
+    } else {
+      _render();  // 容器缺失（如首次进入），回退整页渲染
+      return;
+    }
+    _observeTaskSentinel();
+    return;
+  }
+
+  const body = document.getElementById('taskListBody');
+  const pager = document.getElementById('taskListPager');
+  if (!body || !pager) { _render(); return; }  // 容器缺失，回退整页渲染
+
+  const _canAppendRows = newItems && newItems.length > 0 && _tasksMode === 'time';
+  if (_canAppendRows) {
+    // append：仅追加通过当前过滤的新行（不重绘已有行）
+    const rowsHtml = newItems
+      .filter(t => filtered.some(f => f.id === t.id))
+      .map(_taskRowHtml).join('');
+    if (rowsHtml) body.insertAdjacentHTML('beforeend', rowsHtml);
+  } else {
+    // merge / 分区模式：重绘列表容器内部（顶部与详情区不受影响）
+    body.innerHTML = _taskListBodyHtml(filtered);
+    if (!body.innerHTML) {
+      body.innerHTML = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+    }
+  }
+  pager.innerHTML = _taskListPagerHtml(filtered);
+  _observeTaskSentinel();
+}
+
 function _render() {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -1090,77 +1244,18 @@ function _render() {
   const pageRows = allRows;
 
   // 列表模式状态信息（_mapStatusL 已提为全局函数）
-  const _lStatusInfo = {
-    pending: {ic:'#', cls:'tsk-tag-p', rIc:'tsk-ic-p', text:I18N.t('tasks.status.tag_pending')||'<b></b>待处理'},
-    in_progress: {ic:'⏳', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_processing')||'<b></b>处理中'},
-    awaiting_input: {ic:'?', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
-    pending_review: {ic:'◉', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_pending_review')||'待审核'},
-    done: {ic:'✓', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_completed')||'<b></b>已完成'},
-    cancelled: {ic:'✕', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_cancelled')||'已取消'},
-  };
+  const _lStatusInfo = _lStatusInfoMap();
 
-  const rowHtml = (t) => {
-    const ms = _mapStatusL(t);
-    const si = _lStatusInfo[ms] || _lStatusInfo.pending;
-    const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
-    const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';  // PR 伪卡片「触发者」保持 assignee 语义（Issue #805 不改）
-    const _creatorHtml = t.creator ? ` · 👤 ${t.creator}` : '';    // Issue #805: Issue 卡片展示创建人（creator）
-    // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
-    if (t.is_pr_event) {
-      return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
-        <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
-        <div class="tsk-r-main">
-          <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
-          <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
-        </div>
-        <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
-      </div>`;
-    }
-    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
-      <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
-      <div class="tsk-r-main">
-        <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
-      </div>
-      <span class="tsk-tag ${si.cls}">${si.text}</span>
-    </div>`;
-  };
+  const rowHtml = _taskRowHtml;
 
-  let listHtml = '';
-  if (_tasksMode === 'time') {
-    listHtml = pageRows.map(rowHtml).join('');
-  } else {
-    // 按新状态分区
-    const pageByStatus = {};
-    pageRows.forEach(t => { const ms = _mapStatusL(t); (pageByStatus[ms] = pageByStatus[ms] || []).push(t); });
-    const _secLabels = {
-      pending: I18N.t('tasks.section.pending')||'待处理',
-      in_progress: I18N.t('tasks.section.processing')||'进行中',
-      awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
-      pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-      done: I18N.t('tasks.section.completed')||'已完成',
-      cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消',
-    };
-    ['pending','in_progress','awaiting_input','pending_review','done','cancelled'].forEach(ms => {
-      if (pageByStatus[ms] && pageByStatus[ms].length > 0) {
-        listHtml += `<div class="tsk-list-sec">${_secLabels[ms]} <span class="tsk-sec-n">${pageByStatus[ms].length}</span></div>` +
-          pageByStatus[ms].map(rowHtml).join('');
-      }
-    });
-  }
+  let listHtml = _taskListBodyHtml(pageRows);
   if (!listHtml) {
     listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
   }
 
   // Issue #926：滚动加载 sentinel（替代分页控件）——触底自动追加下一屏
-  let pagerHtml = '';
-  if (_tasksViewMode === 'repo_all' && app.currentRepo()) {
-    if (_tasksHasMore) {
-      pagerHtml = `<div id="taskListSentinel" style="padding:14px 16px;text-align:center;color:var(--t3,#86868b);font-size:11px">${I18N.t('tasks.loading')||'加载中'}…</div>`;
-    } else if (pageRows.length > 0) {
-      pagerHtml = `<div style="padding:12px 16px;text-align:center;color:var(--t3,#86868b);font-size:11px">— ${I18N.t('tasks.tab.all')||'全部'} ${_tasksTotal || allRows.length} —</div>`;
-    }
-  }
+  // Issue #1077：加载态由纯文字改为 _grapeSpin spinner
+  const pagerHtml = _taskListPagerHtml(pageRows);
 
   // 详情面板
   const detailHtml = _taskSel ? _detailHtml(_taskSel) : `<div class="tsk-empty" style="border:none"><div>🗒</div><h3>${I18N.t('tasks.empty.select_task_title')}</h3><p>${I18N.t('tasks.empty.select_task_desc')}</p></div>`;
@@ -1205,7 +1300,7 @@ function _render() {
       </div>
     </div>
     <div style="flex:1;display:flex;flex-direction:column;min-height:0">
-      <div style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}${(_tasksViewMode === 'repo_all' && _tasksHasMore) ? '<div id="taskListSentinel" style="padding:14px;text-align:center;color:var(--t3,#86868b);font-size:11px">' + (I18N.t('tasks.loading')||'加载中') + '…</div>' : ''}</div>
+      <div id="taskBoardScroll" style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}${(_tasksViewMode === 'repo_all' && _tasksHasMore) ? _taskSentinelHtml() : ''}</div>
     </div>` : `
     <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
       <div style="position:relative;width:100%;max-width:400px">
@@ -1214,7 +1309,7 @@ function _render() {
       </div>
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
-      <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
+      <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column"><div id="taskListBody">${listHtml}</div><div style="flex:1"></div><div id="taskListPager">${pagerHtml}</div></div>
       <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}${_renderCrossPipelineButton(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
@@ -1233,8 +1328,9 @@ function _render() {
 }
 
 // Issue #926：IntersectionObserver 无限滚动——sentinel 进入视口且 has_more 时按屏递增
+// Issue #1077：observer 实例建立后复用（不每次 disconnect 重建）；重连/追加后
+// 设 200ms 重入窗口，防止 sentinel 仍在视口内时立即误触发下一屏
 function _observeTaskSentinel() {
-  if (_taskObs) { _taskObs.disconnect(); _taskObs = null; }
   const sentinel = document.getElementById('taskListSentinel');
   if (!sentinel || !_tasksHasMore) return;
   const _loadNext = function() {
@@ -1249,11 +1345,18 @@ function _observeTaskSentinel() {
     sentinel.onclick = _loadNext;
     return;
   }
-  _taskObs = new IntersectionObserver(function(entries) {
-    entries.forEach(function(en) {
-      if (en.isIntersecting) _loadNext();
-    });
-  }, {rootMargin: '300px'});
+  if (!_taskObs) {
+    _taskObs = new IntersectionObserver(function(entries) {
+      entries.forEach(function(en) {
+        if (!en.isIntersecting) return;
+        if (Date.now() < _taskObsReentryUntil) return;  // Issue #1077：重入窗口内忽略
+        _loadNext();
+      });
+    }, {rootMargin: '300px'});
+  } else {
+    // 复用已有 observer：sentinel 元素可能已被局部更新重建，重设重入窗口
+    _taskObsReentryUntil = Date.now() + 200;
+  }
   _taskObs.observe(sentinel);
 }
 
