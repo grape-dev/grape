@@ -2885,7 +2885,7 @@ def _fn_add_agent_runtimes_model() -> None:
 
 
 register_migration(
-    version="202611030002",
+    version="202611050001",
     name="issue865_agent_runtimes_model",
     kind="safe",
     fn=_fn_add_agent_runtimes_model,

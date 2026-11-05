@@ -148,16 +148,15 @@ def start_metrics_server():
     """在独立端口启动 metrics HTTP server（参考 multica metrics/server.go）。
 
     仅在 METRICS_ADDR 启用时启动。绑定到指定地址，与主 API 分离。
-    幂等（2026-11-04）：三进程入口（grape_server.py）的 lifespan 会
-    `_startup_security_check() → import src.api.main`——main.py 的**模块级**
-    start_metrics_server() 副作用随之再触发一次，同端口二次 bind 直接
-    Errno 98 崩进程。已有实例直接复用，不再重复绑定。
+    幂等（three-process double-import fix 2026-11-04）：grape_server 与
+    main.py 双重调用/模块重复加载时只启动一次；端口被占（TIME_WAIT/
+    重复绑定）时降级跳过而非抛异常阻断应用启动。
     """
     global _metrics_httpd
+    if _metrics_httpd is not None:
+        return
     if not metrics_enabled():
         return
-    if _metrics_httpd is not None:
-        return  # 幂等：已启动（跨入口 import 副作用）
 
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -181,7 +180,14 @@ def start_metrics_server():
         def log_message(self, format, *args):
             pass  # 静默访问日志
 
-    _metrics_httpd = HTTPServer((host or "127.0.0.1", int(port or 9090)), _MetricsHandler)
+    try:
+        _metrics_httpd = HTTPServer((host or "127.0.0.1", int(port or 9090)), _MetricsHandler)
+    except OSError as _bind_err:
+        # 端口被占（快速重启 TIME_WAIT / 重复入口）：降级跳过，不阻断应用启动
+        from src.config import log as _log
+        _log.warning(f"metrics server skipped: bind failed on {addr} ({_bind_err})")
+        _metrics_httpd = None
+        return
 
     import threading
     t = threading.Thread(target=_metrics_httpd.serve_forever, daemon=True)
