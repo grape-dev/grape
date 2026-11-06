@@ -60,3 +60,10 @@ def test_partial_writes_are_buffered_until_newline():
     assert len(handler.records) == 1
     assert "[ORPHAN]" in handler.records[0].getMessage()
     assert handler.records[0].levelno == logging.WARNING
+
+def test_repeated_tag_lines_are_capped_with_summary():
+    recs = _run(["  [COLLISION] audit_logs.user_id=%d count=1" % i for i in range(25)])
+    warnings = [r for r in recs if r.levelno == logging.WARNING]
+    # 前 20 条明细 + 1 条折叠汇总
+    assert len(warnings) == 21
+    assert "其余 5 条同类明细已折叠" in warnings[-1].getMessage()

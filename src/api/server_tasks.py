@@ -34,9 +34,19 @@ class _StructuredScriptOutput(io.TextIOBase):
     """
 
     _WARN_HINTS = ("COLLISION", "ORPHAN", "SCAN", "WARN", "失败", "异常", "撞号")
+    # 同一类明细行每次迁移最多打 20 条，其余折叠成一条汇总，避免刷屏
+    _MAX_PER_TAG = 20
 
     def __init__(self) -> None:
         self._buf = ""
+        self._tag_counts: dict[str, int] = {}
+
+    @staticmethod
+    def _tag_of(message: str) -> str:
+        bracket = message.lstrip()
+        if bracket.startswith("[") and "]" in bracket:
+            return bracket[: bracket.index("]") + 1]
+        return message.lstrip()[:16]
 
     def write(self, chunk: str) -> int:  # type: ignore[override]
         self._buf += chunk
@@ -49,12 +59,20 @@ class _StructuredScriptOutput(io.TextIOBase):
         if self._buf:
             self._emit(self._buf)
             self._buf = ""
+        for tag, total in self._tag_counts.items():
+            suppressed = total - self._MAX_PER_TAG
+            if suppressed > 0:
+                log.warning(f"{tag} 其余 {suppressed} 条同类明细已折叠（本次迁移共 {total} 条）")
 
     def _emit(self, line: str) -> None:
         line = line.rstrip()
         if not line.strip():
             return
         message = line.strip()
+        tag = self._tag_of(message)
+        self._tag_counts[tag] = self._tag_counts.get(tag, 0) + 1
+        if self._tag_counts[tag] > self._MAX_PER_TAG:
+            return
         if any(h in message for h in self._WARN_HINTS):
             log.warning(message)
         else:
