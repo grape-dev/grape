@@ -36,6 +36,11 @@ user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
 # agent 任务执行期间由 _execute_task 绑定，便于在 Loki 里按 repo/issue/seq 过滤。
 issue_var: contextvars.ContextVar = contextvars.ContextVar("issue_id", default="")
 seq_var: contextvars.ContextVar = contextvars.ContextVar("seq", default="")
+# 请求级 trace 兜底：BaseHTTPMiddleware 在 call_next 之后已离开 OTel span 上下文
+# （Starlette 为下游 app 单独起 task），此时 get_current_span() 为空 → 日志 trace_id 空白。
+# 中间件在入口解析 traceparent 写入这两个 ContextVar，过滤器优先用当前 span，缺失时回退。
+trace_id_var: contextvars.ContextVar = contextvars.ContextVar("trace_id", default="")
+span_id_var: contextvars.ContextVar = contextvars.ContextVar("span_id", default="")
 
 
 def _current_span_ids() -> tuple[str, str]:
@@ -64,7 +69,9 @@ class _RequestIdFilter(logging.Filter):
         record.user_id = user_var.get()
         record.issue_id = issue_var.get()
         record.seq = seq_var.get()
-        record.trace_id, record.span_id = _current_span_ids()
+        _tid, _sid = _current_span_ids()
+        record.trace_id = _tid or trace_id_var.get()
+        record.span_id = _sid or span_id_var.get()
         return True
 
 

@@ -26,7 +26,8 @@ from fastapi.routing import APIRoute
 
 from src.api.version_check import ensure_python_version
 from src.kernel.config import log
-from src.kernel.config import issue_var, request_id_var, repo_var, seq_var, user_var
+from src.kernel.config import (issue_var, request_id_var, repo_var, seq_var, span_id_var,
+                               trace_id_var, user_var)
 
 __all__ = [
     "ensure_python_version",
@@ -185,6 +186,26 @@ def _issue_seq_from_request(path: str, params) -> tuple:
     return issue, str(seq)
 
 
+def _trace_ids_from_traceparent(value: str) -> tuple[str, str]:
+    """解析 W3C traceparent（00-<32hex trace_id>-<16hex span_id>-<flags>）。
+
+    非法/缺失返回 ("", "")。用于请求日志兜底：Starlette 的 BaseHTTPMiddleware 在
+    call_next 之后已离开 OTel span 上下文，get_current_span() 取不到，改用入口 header。
+    """
+    parts = (value or "").strip().split("-")
+    if len(parts) != 4 or parts[0] != "00":
+        return "", ""
+    tid, sid = parts[1].strip(), parts[2].strip()
+    if len(tid) != 32 or len(sid) != 16:
+        return "", ""
+    try:
+        int(tid, 16)
+        int(sid, 16)
+    except ValueError:
+        return "", ""
+    return tid.lower(), sid.lower()
+
+
 def _attach_request_log(app: FastAPI) -> None:
     """request_id 注入 + HTTP 请求日志（合并为一个中间件，确保 ContextVar 贯穿日志）。
 
@@ -199,6 +220,12 @@ def _attach_request_log(app: FastAPI) -> None:
         rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
         request.scope["request_id"] = rid
         token_rid = request_id_var.set(rid)
+
+        # W3C traceparent 兜底：BaseHTTPMiddleware 的 call_next 之后已不在 span 上下文，
+        # 从入口 header 取 trace/span 写入 ContextVar，保证请求日志带 trace_id（Grafana↔Tempo）
+        _tid, _sid = _trace_ids_from_traceparent(request.headers.get("traceparent", ""))
+        token_tid = trace_id_var.set(_tid)
+        token_sid = span_id_var.set(_sid)
 
         # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
         path = request.url.path
@@ -328,6 +355,8 @@ def _attach_request_log(app: FastAPI) -> None:
             user_var.reset(token_uid)
             issue_var.reset(token_issue)
             seq_var.reset(token_seq)
+            trace_id_var.reset(token_tid)
+            span_id_var.reset(token_sid)
 
 
 def init_process_db() -> None:
