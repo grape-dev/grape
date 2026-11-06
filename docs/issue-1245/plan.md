@@ -7,7 +7,7 @@
 
 ## 复用实现
 - 场景配置：`src/api/pipeline_config.get_pipeline_config`。
-- 引擎健康：`src/runtime/engine_select._health_ok` + `health_scorer.get_health_scores`。
+- 引擎健康：`src/runtime/engine_select._health_ok` + `runtime_health_scores` 只读查询。
 - 技能解析：`src/user/db.get_skill_by_id` / `resolve_skill_id`。
 - webhook 失败：`event_pipeline._fail_event` / `_create_failed_task`，与
   `_fail_scene_all_offline` 同款终态路径。
@@ -31,7 +31,8 @@
   }
 }
 ```
-文件缺失/解析失败使用默认全开；任何内部异常放行并记录 warning。
+文件缺失/解析失败回落默认全开（`enforce=true` + 全部 reason 开启），即缺配置仍执行
+校验，不因配置文件缺失静默跳过；查询/探测等内部异常逐一 fail-open 并记录 warning。
 
 ## 测试
 使用仓库 sqlite 测试库构造 `agent_runtimes` / `runtime_credentials` /

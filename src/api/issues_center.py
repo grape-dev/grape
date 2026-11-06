@@ -2211,15 +2211,22 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 })
         # Issue #1245: 建单前场景可用性预校验（查重 + assignee 预校验之后、GitCode 建单之前）。
         # 静态只读校验，不通过返回 400 + problems[] + trace_id；此时尚未产生任何 VCS/DB 副作用。
-        # 仅校验用户显式选择的场景；智能推荐 / 仓库默认场景不在此拦截（由 issue_opened 路径兜底）。
+        # 显式场景直接校验；智能推荐（vod-auto）/留空时回落到仓库默认场景一并校验，
+        # 与后续写入 issue 的 scene_id 口径一致，避免默认/推荐路径产生死单。
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
+        if not _scene_for_precheck:
+            try:
+                from src.user.db import get_repo_scene
+                _scene_for_precheck = get_repo_scene(repo_key) or ""
+            except Exception as _rs_err:
+                log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")
+                _scene_for_precheck = ""
         if _scene_for_precheck:
-            from src.api.scene_precheck import precheck_scene
+            from src.api.scene_precheck import precheck_scene, summarize_problems
             _precheck = precheck_scene(_scene_for_precheck, repo_key, user)
             if not _precheck.get("ok"):
                 _pc_problems = _precheck.get("problems") or []
-                _pc_summary = "；".join(
-                    str(p.get("message") or p.get("reason_code") or "") for p in _pc_problems[:3])
+                _pc_summary = summarize_problems(_pc_problems)
                 raise HTTPException(status_code=400, detail={
                     "code": 400,
                     "message": f"所选场景当前不可执行，已阻止建单：{_pc_summary}",

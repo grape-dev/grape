@@ -7,7 +7,8 @@
 4) 节点技能对创建者可解析（skill_id 有效或 resolve_skill_id 命中）。
 
 另有结构校验（next 悬空 / 节点 id 重复）与三类豁免（非 SRE 空绑定、
-enabled=false、skill 为空）。查询/配置异常一律 fail-open，避免误拦正常建单。
+enabled=false、skill 为空）。配置缺失/解析失败回落默认全开（不因缺配置跳过
+校验），查询/探测异常逐一 fail-open，避免误拦正常建单。
 """
 import json
 import os
@@ -35,7 +36,11 @@ def _default_config() -> dict:
 
 
 def load_precheck_config() -> dict:
-    """读取预校验开关；文件缺失/解析失败/字段异常一律回落默认全开。"""
+    """读取预校验开关。
+
+    文件缺失/解析失败/字段异常一律回落默认全开（enforce=true + 全部 reason 开启），
+    即「缺配置仍校验」，不因配置文件缺失静默跳过预校验。
+    """
     cfg = _default_config()
     try:
         with open(_PREHECK_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -48,18 +53,12 @@ def load_precheck_config() -> dict:
         if not isinstance(reasons, dict):
             reasons = {}
         for code in REASON_CODES:
-            # 支持嵌套 reasons 与顶层 reason_code 两种写法
             if code in reasons:
                 cfg["reasons"][code] = bool(reasons.get(code))
-            elif code in raw:
-                cfg["reasons"][code] = bool(raw.get(code))
     except FileNotFoundError:
-        # 配置文件缺失 → fail-open（不因配置缺失误拦建单）
-        log.warning("scene_precheck: config missing, fail-open")
-        cfg["fail_open"] = True
+        log.warning("scene_precheck: config missing, use default (all reasons enabled)")
     except Exception as e:
-        log.warning(f"scene_precheck: config load failed, fail-open: {e}")
-        cfg["fail_open"] = True
+        log.warning(f"scene_precheck: config load failed, use default (all reasons enabled): {e}")
     return cfg
 
 
@@ -79,29 +78,58 @@ def _node_key(node: dict) -> str:
     return str(node.get("id") or node.get("tag") or "").strip()
 
 
-def _user_identities(user) -> tuple[set[str], str]:
-    """返回可用于 user 档归属比对的用户名集合与 user_id。"""
+def _node_skill_id(node: dict) -> int:
+    try:
+        return int(node.get("skill_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _user_identities(user) -> tuple[set[str], set[str]]:
+    """返回可用于 user 档归属比对的用户名集合与数字 uid 集合。
+
+    生产数据形态：user 凭据的 runtime_credentials.owner_id 恒为 ''（用户名写在
+    owner_name），用户引擎 agent_runtimes.owner_id 存 grape_accounts.id 数字串。
+    因此这里同时产出「用户名」与「数字 uid」两套标识，双向按需解析。
+    """
     user = user or {}
     names: set[str] = set()
+    uids: set[str] = set()
     for key in ("username", "external_login", "login", "name"):
         val = str(user.get(key) or "").strip()
         if val:
             names.add(val)
     uid = str(user.get("id") or "").strip()
-    if uid:
-        try:
-            from src.auth.grape_account_db import get_grape_account_by_id
-            acc = get_grape_account_by_id(int(uid))
-            if acc and acc.get("username"):
-                names.add(str(acc["username"]).strip())
-        except Exception:
-            pass
+    if uid.isdigit() and int(uid) > 0:
+        uids.add(uid)
+    try:
+        from src.auth.grape_account_db import (
+            get_grape_account_by_id,
+            get_grape_account_by_username,
+        )
+        for _uid in list(uids):
+            try:
+                acc = get_grape_account_by_id(int(_uid))
+                if acc and acc.get("username"):
+                    names.add(str(acc["username"]).strip())
+            except Exception as e:
+                log.warning(f"scene_precheck: resolve uid->username failed ({_uid}): {e}")
+        for _name in list(names):
+            try:
+                acc = get_grape_account_by_username(_name)
+                if acc and acc.get("id"):
+                    uids.add(str(acc["id"]).strip())
+            except Exception as e:
+                log.warning(f"scene_precheck: resolve username->uid failed ({_name}): {e}")
+    except Exception as e:
+        log.warning(f"scene_precheck: identity resolution unavailable: {e}")
     names.discard("")
-    return names, uid
+    uids.discard("")
+    return names, uids
 
 
 def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
-    """单次批量查询引擎存在性与归属（1 次 DB 查询/节点）。"""
+    """单次批量查询引擎存在性、归属与在线信息（1 次 DB 查询/节点）。"""
     if not engine_ids:
         return {}
     from src.session_manager import db, db_lock
@@ -110,7 +138,9 @@ def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
         c = db.cursor()
         c.execute(
             "SELECT r.id, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-            "COALESCE(rc.scope, r.scope, ''), COALESCE(rc.owner_id, r.owner_id, '') "
+            "COALESCE(rc.scope, r.scope, ''), "
+            "COALESCE(NULLIF(rc.owner_id, ''), r.owner_id, ''), "
+            "COALESCE(rc.owner_name, '') "
             "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
             f"WHERE r.id IN ({placeholders})",
             tuple(engine_ids))
@@ -126,6 +156,7 @@ def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
             "last_seen_at": r[5] or "",
             "scope": (r[6] or "").strip().lower(),
             "owner_id": str(r[7] or "").strip(),
+            "owner_name": str(r[8] or "").strip(),
         }
     return out
 
@@ -169,11 +200,7 @@ def _available_engines(rows: list[dict]) -> list[dict]:
 
 def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     skill_name = str(node.get("skill") or "").strip()
-    skill_id = 0
-    try:
-        skill_id = int(node.get("skill_id") or 0)
-    except (TypeError, ValueError):
-        skill_id = 0
+    skill_id = _node_skill_id(node)
     if skill_id:
         try:
             from src.user.db import get_skill_by_id
@@ -192,17 +219,26 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
         return True
 
 
-def _ownership_problem(rows: list[dict], repo_key: str, usernames: set[str]) -> dict | None:
-    """返回首个归属非法引擎信息；合法返回 None。"""
+def _ownership_problem(rows: list[dict], repo_key: str,
+                       names: set[str], uids: set[str]) -> dict | None:
+    """返回首个归属非法引擎信息；合法/无法判定返回 None。"""
     from src.repo_key import from_repo_key
     current_repo = (from_repo_key(repo_key or "") or "").strip()
-    names_lower = {n.lower() for n in usernames}
+    names_lower = {n.lower() for n in names if n}
+    uid_set = {u for u in uids if u}
     for row in rows:
         scope = row.get("scope") or ""
         owner = row.get("owner_id") or ""
+        owner_name = row.get("owner_name") or ""
         if scope == "user":
-            if owner and owner.lower() not in names_lower:
-                return {"engine_id": row["runtime_id"], "reason": "user", "owner": owner}
+            candidates = [c for c in (owner, owner_name) if c]
+            if not candidates:
+                # 归属字段全空 → 无法判定，fail-open
+                continue
+            if any(c.lower() in names_lower or c in uid_set for c in candidates):
+                continue
+            return {"engine_id": row["runtime_id"], "reason": "user",
+                    "owner": owner or owner_name}
         elif scope == "repo":
             owner_norm = (from_repo_key(owner) or "").strip()
             if owner_norm and current_repo and owner_norm != current_repo:
@@ -221,6 +257,23 @@ def _append_problem(problems: list, cfg: dict, reason_code: str, node_tag: str,
         "message": message,
         "suggestion": suggestion,
     })
+
+
+def summarize_problems(problems: list, limit: int = 3) -> str:
+    """把 problems 压成一行摘要（API / webhook 共用，避免重复实现）。"""
+    return "；".join(
+        str(p.get("message") or p.get("reason_code") or "")
+        for p in (problems or [])[:limit])
+
+
+def problem_reason_codes(problems: list) -> list[str]:
+    """按出现顺序去重 reason_code（API / webhook 共用）。"""
+    codes = []
+    for p in problems or []:
+        code = p.get("reason_code") or ""
+        if code and code not in codes:
+            codes.append(code)
+    return codes
 
 
 def _check_structure(nodes: list, cfg: dict, problems: list) -> None:
@@ -261,9 +314,64 @@ def _check_structure(nodes: list, cfg: dict, problems: list) -> None:
                 suggestion="修正节点流向或删除悬空引用后再建单")
 
 
-def _check_nodes(nodes: list, scene_id: str, repo_key: str, user, cfg: dict,
-                 problems: list) -> None:
-    _names, user_id = _user_identities(user)
+def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str,
+                          repo_key: str, names: set[str], uids: set[str],
+                          cfg: dict, problems: list) -> None:
+    if not eids:
+        if is_sre:
+            _append_problem(
+                problems, cfg, "engine_missing", tag, [],
+                message=f"SRE 节点 {tag} 未绑定机器（SRE 不支持广播）",
+                suggestion="为 SRE 节点选择个人或仓库级机器后重试")
+        return
+
+    rows_map = _lookup_engine_rows(eids)
+    existing = [rows_map[eid] for eid in eids if eid in rows_map]
+    missing = [eid for eid in eids if eid not in rows_map]
+    if missing:
+        # 逐台校验：部分缺失也不能静默放行
+        _append_problem(
+            problems, cfg, "engine_missing", tag, missing,
+            message=f"节点 {tag} 绑定的引擎不存在（已删除/注销）：{missing}",
+            suggestion="在场景配置中重新选择可用引擎后重试")
+        log.warning(f"scene_precheck: scene={scene_id} node={tag} bound engines missing: {missing}")
+
+    if not existing:
+        return
+
+    ownership = _ownership_problem(existing, repo_key, names, uids)
+    if ownership:
+        _append_problem(
+            problems, cfg, "foreign_personal_engine", tag,
+            [ownership["engine_id"]],
+            message=f"节点 {tag} 的引擎 {ownership['engine_id']} 归属非法"
+                    f"（{ownership['reason']} 档，owner={ownership['owner']}）",
+            suggestion="仅可选择本人个人机器或当前仓库机器")
+
+    available = _available_engines(existing)
+    if not available:
+        _append_problem(
+            problems, cfg, "engine_all_offline", tag, [r["runtime_id"] for r in existing],
+            message=f"节点 {tag} 绑定的引擎全部离线或健康分不足："
+                    f"{[r['runtime_id'] for r in existing]}",
+            suggestion="启动引擎或重新选择在线机器后重试")
+
+
+def _check_skill(node: dict, tag: str, repo_key: str, user_id: str,
+                 cfg: dict, problems: list) -> None:
+    skill_name = str(node.get("skill") or "").strip()
+    skill_id = _node_skill_id(node)
+    if (skill_name or skill_id) and not _skill_resolvable(node, repo_key, user_id):
+        _append_problem(
+            problems, cfg, "skill_unresolvable", tag, [],
+            message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}",
+            suggestion="重新选择技能或确认技能对当前用户/仓库可见")
+
+
+def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
+                 cfg: dict, problems: list) -> None:
+    names, uids = _user_identities(user)
+    user_id = next(iter(sorted(uids)), "")
     for n in nodes:
         if not isinstance(n, dict):
             continue
@@ -272,60 +380,40 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user, cfg: dict,
         tag = _node_key(n)
         is_sre = str(n.get("id") or n.get("tag") or "").strip().lower() == "sre"
         eids = _normalize_engine_ids(n.get("engine_runtime_ids"))
-        if not eids:
-            if is_sre:
-                _append_problem(
-                    problems, cfg, "engine_missing", tag, [],
-                    message=f"SRE 节点 {tag} 未绑定机器（SRE 不支持广播）",
-                    suggestion="为 SRE 节点选择个人或仓库级机器后重试")
-            continue
+        _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
+                              cfg, problems)
+        _check_skill(n, tag, repo_key, user_id, cfg, problems)
 
-        rows_map = _lookup_engine_rows(eids)
-        existing = [rows_map[eid] for eid in eids if eid in rows_map]
-        missing = [eid for eid in eids if eid not in rows_map]
-        if not existing:
-            _append_problem(
-                problems, cfg, "engine_missing", tag, eids,
-                message=f"节点 {tag} 绑定的引擎不存在（已删除/注销）：{eids}",
-                suggestion="在场景配置中重新选择可用引擎后重试")
-        elif missing:
-            log.warning(f"scene_precheck: scene={scene_id} node={tag} bound engines missing: {missing}")
 
-        if existing:
-            ownership = _ownership_problem(existing, repo_key, _names)
-            if ownership:
-                _append_problem(
-                    problems, cfg, "foreign_personal_engine", tag,
-                    [ownership["engine_id"]],
-                    message=f"节点 {tag} 的引擎 {ownership['engine_id']} 归属非法"
-                            f"（{ownership['reason']} 档，owner={ownership['owner']}）",
-                    suggestion="仅可选择本人个人机器或当前仓库机器")
+def _scene_unresolved(scene: dict | None, scene_id: str) -> bool:
+    return (not scene or scene.get("fallback")
+            or bool(scene.get("scene_id") and scene.get("scene_id") != scene_id))
 
-            available = _available_engines(existing)
-            if not available:
-                _append_problem(
-                    problems, cfg, "engine_all_offline", tag, [r["runtime_id"] for r in existing],
-                    message=f"节点 {tag} 绑定的引擎全部离线或健康分不足："
-                            f"{[r['runtime_id'] for r in existing]}",
-                    suggestion="启动引擎或重新选择在线机器后重试")
 
-        skill_name = str(n.get("skill") or "").strip()
+def _load_user_scene_nodes(scene_id: str, uids: set[str]):
+    """标准解析未命中时补查用户个人场景（Issue #979 / #1245）。"""
+    from src.api.pipeline_config import _query_user_market_scene_nodes
+    for uid in sorted(uids):
         try:
-            skill_id = int(n.get("skill_id") or 0)
+            numeric_uid = int(uid)
         except (TypeError, ValueError):
-            skill_id = 0
-        if (skill_name or skill_id) and not _skill_resolvable(n, repo_key, user_id):
-            _append_problem(
-                problems, cfg, "skill_unresolvable", tag, [],
-                message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}",
-                suggestion="重新选择技能或确认技能对当前用户/仓库可见")
+            continue
+        try:
+            nodes = _query_user_market_scene_nodes(scene_id, numeric_uid)
+        except Exception as e:
+            log.warning(f"scene_precheck: user scene lookup failed (scene={scene_id}, uid={uid}): {e}")
+            continue
+        if nodes is not None:
+            return nodes
+    return None
 
 
 def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
     """建单前场景可用性预校验。
 
     返回 {"ok", "problems", "warnings", "trace_id"}；problems 非空即 ok=False。
-    配置 enforce=false、场景不存在、配置/查询异常一律放行（fail-open）。
+    配置 enforce=false、场景不存在、查询异常一律放行（fail-open）。
+    标准解析未命中时会补查 user 个人场景（scene_market scope='user'）。
     """
     trace_id = "pc_" + uuid.uuid4().hex[:16]
     out = {"ok": True, "problems": [], "warnings": [], "trace_id": trace_id}
@@ -342,8 +430,12 @@ def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
     try:
         from src.api.pipeline_config import get_pipeline_config
         scene = get_pipeline_config(scene_id, repo_key=repo_key)
-        if not scene or scene.get("fallback") or (
-                scene.get("scene_id") and scene.get("scene_id") != scene_id):
+        if _scene_unresolved(scene, scene_id):
+            _names, uids = _user_identities(user)
+            personal_nodes = _load_user_scene_nodes(scene_id, uids) if uids else None
+            if personal_nodes is not None:
+                scene = {"scene_id": scene_id, "nodes": personal_nodes}
+        if _scene_unresolved(scene, scene_id):
             out["warnings"].append(f"scene not found: {scene_id}")
             return out
         nodes = scene.get("nodes") or []

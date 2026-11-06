@@ -30,7 +30,8 @@ def _patch_scene(monkeypatch, nodes):
     monkeypatch.setattr(pc, "get_pipeline_config", lambda scene_id, repo_key="": cfg)
 
 
-def _insert_engine(name, *, credential_id=0, status="online", healthy=1, installed=1):
+def _insert_engine(name, *, credential_id=0, status="online", healthy=1, installed=1,
+                   scope="global", owner_id=""):
     with db_lock:
         c = db.cursor()
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -38,20 +39,21 @@ def _insert_engine(name, *, credential_id=0, status="online", healthy=1, install
             "INSERT INTO agent_runtimes "
             "(credential_id, name, status, healthy, installed, last_seen_at, scope, owner_id) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            (credential_id, name, status, healthy, installed, now, "global", ""))
+            (credential_id, name, status, healthy, installed, now, scope, owner_id))
         rid = c.lastrowid
         db.commit()
     return rid
 
 
 def _insert_user_credential(name, owner):
+    """按生产数据形态写 user 凭据：owner_id 恒为 ''，用户名在 owner_name。"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name) "
             "VALUES (?,?,?,?,?)",
             (f"hash_{name}_{int(time.time() * 1000)}", f"cred_{name}_{int(time.time() * 1000)}",
-             "user", owner, owner))
+             "user", "", owner))
         cid = c.lastrowid
         db.commit()
     return cid
@@ -66,6 +68,25 @@ def _cleanup(engine_ids=(), cred_ids=()):
             c.execute("DELETE FROM runtime_health_scores WHERE runtime_id=?", (rid,))
         for cid in cred_ids:
             c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
+        db.commit()
+
+
+def _insert_user_scene(user_id, nodes):
+    import json
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO scene_market (name, scope, source, source_user_id, nodes_json, is_active) "
+            "VALUES (?,?,?,?,?,?)",
+            (_SCENE_ID, "user", "user", int(user_id), json.dumps(nodes), 1))
+        db.commit()
+
+
+def _cleanup_user_scene(user_id):
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM scene_market WHERE name=? AND scope='user' AND source_user_id=?",
+                  (_SCENE_ID, int(user_id)))
         db.commit()
 
 
@@ -88,6 +109,17 @@ def test_engine_missing(monkeypatch):
     assert {p["reason_code"] for p in out["problems"]} == {"engine_missing"}
 
 
+def test_partial_engine_missing_not_silently_passed(monkeypatch):
+    rid = _insert_engine("partial-engine")
+    try:
+        out = _run(monkeypatch, [_node("coding", eids=[rid, 999998])])
+        assert out["ok"] is False
+        missing = [p for p in out["problems"] if p["reason_code"] == "engine_missing"]
+        assert missing and missing[0]["engine_ids"] == [999998]
+    finally:
+        _cleanup([rid])
+
+
 def test_engine_all_offline(monkeypatch):
     rid = _insert_engine("offline-engine", installed=1, healthy=0, status="offline")
     try:
@@ -99,12 +131,29 @@ def test_engine_all_offline(monkeypatch):
 
 
 def test_foreign_personal_engine(monkeypatch):
+    # 生产形态：user 凭据 owner_id=''，引擎 owner_id 存数字 grape_accounts.id
     cid = _insert_user_credential("foreign", "other_user")
-    rid = _insert_engine("foreign-engine", credential_id=cid)
+    rid = _insert_engine("foreign-engine", credential_id=cid, scope="user",
+                         owner_id="424242")
     try:
-        out = _run(monkeypatch, [_node("coding", eids=[rid])])
+        out = _run(monkeypatch, [_node("coding", eids=[rid])],
+                   user={"username": "me", "id": "10001"})
         assert out["ok"] is False
         assert any(p["reason_code"] == "foreign_personal_engine" for p in out["problems"])
+    finally:
+        _cleanup([rid], [cid])
+
+
+def test_own_personal_engine_allowed(monkeypatch):
+    cid = _insert_user_credential("mine", "me")
+    rid = _insert_engine("my-engine", credential_id=cid, scope="user",
+                         owner_id="10001")
+    try:
+        out = _run(monkeypatch, [_node("coding", eids=[rid])],
+                   user={"username": "me", "id": "10001"})
+        assert out["ok"] is True
+        assert not any(p["reason_code"] == "foreign_personal_engine"
+                       for p in out["problems"])
     finally:
         _cleanup([rid], [cid])
 
@@ -130,6 +179,23 @@ def test_scene_node_duplicate(monkeypatch):
     out = _run(monkeypatch, [_node("coding"), _node("coding")])
     assert out["ok"] is False
     assert any(p["reason_code"] == "scene_node_duplicate" for p in out["problems"])
+
+
+def test_user_personal_scene_resolved(monkeypatch):
+    _insert_user_scene("10001", [_node("coding", eids=[999999], skill="")])
+    import src.api.pipeline_config as pc
+    # 标准解析未命中，回落 pipelines.json default（fallback）
+    monkeypatch.setattr(pc, "get_pipeline_config", lambda *a, **kw: {
+        "scene_id": "default", "fallback": True, "nodes": []})
+    import src.user.db as udb
+    monkeypatch.setattr(udb, "resolve_skill_id", lambda *a, **kw: 999)
+    try:
+        out = scene_precheck.precheck_scene(_SCENE_ID, _REPO,
+                                            {"username": "me", "id": "10001"})
+        assert out["ok"] is False
+        assert any(p["reason_code"] == "engine_missing" for p in out["problems"])
+    finally:
+        _cleanup_user_scene("10001")
 
 
 def test_exempt_non_sre_empty_binding(monkeypatch):
@@ -171,15 +237,16 @@ def test_fail_open_on_query_exception(monkeypatch):
     assert any("fail-open" in w for w in out["warnings"])
 
 
-def test_config_missing_fails_open(monkeypatch):
+def test_config_missing_uses_default_all_enabled(monkeypatch):
+    # 契约：文件缺失 → 默认全开（仍校验），不是静默跳过
     monkeypatch.setattr(scene_precheck, "_PREHECK_CONFIG_PATH",
                         "/nonexistent/scene-precheck.json")
     import src.api.pipeline_config as pc
     monkeypatch.setattr(pc, "get_pipeline_config", lambda *a, **kw: {
         "scene_id": _SCENE_ID, "nodes": [_node("coding", eids=[999999])]})
     out = scene_precheck.precheck_scene(_SCENE_ID, _REPO, {"username": "me"})
-    assert out["ok"] is True
-    assert any("fail-open" in w for w in out["warnings"])
+    assert out["ok"] is False
+    assert any(p["reason_code"] == "engine_missing" for p in out["problems"])
 
 
 def test_reason_switch_off_does_not_block(monkeypatch):

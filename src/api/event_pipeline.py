@@ -2774,36 +2774,42 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # Issue #1245: webhook issue_opened 场景可用性预校验（不拒单，只不启动流水线）。
     # 事件已落库 → 失败时置 failed（含 reason_code）+ 评论原因，与 _fail_scene_all_offline 同款终态路径。
-    if event_type == "issue_opened" and _issue_scene and _issue_scene != "default":
+    # 身份口径：webhook 的建单人 = actor（issue 创建者），不是场景 owner（_issue_scene_uid）。
+    # 用 actor 解析其 grape uid 作为 user 档归属基准，避免建单人≠场景 owner 时误判。
+    if event_type == "issue_opened" and _issue_scene:
+        _pc_user = {"username": actor}
+        try:
+            from src.runtime.engine_select import _repo_user_id
+            _pc_uid = _repo_user_id(repo_key, issue_creator=actor)
+            if _pc_uid:
+                _pc_user["id"] = _pc_uid
+        except Exception as _uid_err:
+            log.warning(f"Pipeline: resolve precheck actor uid failed (Issue #1245): {_uid_err}")
         try:
             from src.api.scene_precheck import precheck_scene
-            _pc_user = {"username": actor, "id": _issue_scene_uid}
             _precheck = precheck_scene(_issue_scene, repo_key, _pc_user)
-            if not _precheck.get("ok"):
-                _pc_problems = _precheck.get("problems") or []
-                _pc_codes = []
-                for _p in _pc_problems:
-                    _c = _p.get("reason_code") or ""
-                    if _c and _c not in _pc_codes:
-                        _pc_codes.append(_c)
-                _pc_summary = "；".join(
-                    str(p.get("message") or p.get("reason_code") or "") for p in _pc_problems[:3])
-                _reason = (f"场景可用性预校验未通过（{','.join(_pc_codes) or 'unknown'}）："
-                           f"{_pc_summary}（scene={_issue_scene}, agent={agent_type}）")
-                log.warning(f"Pipeline: scene precheck blocked dispatch seq={seq}: {_reason}")
-                _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
-                _fail_event(seq, _reason, diag={
-                    "code": _pc_codes[0] if _pc_codes else "scene_precheck_failed",
-                    "phase": "scene_precheck",
-                    "scene_id": _issue_scene,
-                })
-                _notify_scene_precheck_failure(
-                    repo_key, issue_id or "", _pc_problems, _precheck.get("trace_id") or "")
-                return result
         except Exception as _pc_err:
-            # fail-open：预校验自身异常不得误拦正常流水线
+            # fail-open：仅预校验本身异常放行；后续失败终态副作用不得被此 try 吞掉
             log.warning(f"Pipeline: scene precheck failed, allow dispatch (Issue #1245): {_pc_err}")
+            _precheck = None
+        if _precheck and not _precheck.get("ok"):
+            from src.api.scene_precheck import problem_reason_codes, summarize_problems
+            _pc_problems = _precheck.get("problems") or []
+            _pc_codes = problem_reason_codes(_pc_problems)
+            _pc_summary = summarize_problems(_pc_problems)
+            _reason = (f"场景可用性预校验未通过（{','.join(_pc_codes) or 'unknown'}）："
+                       f"{_pc_summary}（scene={_issue_scene}, agent={agent_type}）")
+            log.warning(f"Pipeline: scene precheck blocked dispatch seq={seq}: {_reason}")
+            _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                                skill_path, skill_id, evt, issue_id, runtime_id or 0)
+            _fail_event(seq, _reason, diag={
+                "code": _pc_codes[0] if _pc_codes else "scene_precheck_failed",
+                "phase": "scene_precheck",
+                "scene_id": _issue_scene,
+            })
+            _notify_scene_precheck_failure(
+                repo_key, issue_id or "", _pc_problems, _precheck.get("trace_id") or "")
+            return result
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
