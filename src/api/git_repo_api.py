@@ -35,6 +35,10 @@ _SUPPORTED_PROVIDERS = set(_PROVIDER_MODULES)
 # Issue #707：issues update `state` 合法中性集合（入口层前置校验；strip/lower 归一后匹配）
 _UPDATE_STATE_NEUTRAL = {"open", "opened", "reopen", "closed", "close"}
 
+# Issue #1076：milestone_id 非整数时的统一提示（多处校验复用，避免文案漂移）
+_MILESTONE_ID_INT_HINT = ("'milestone_id' must be an integer milestone number "
+                          "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+
 
 class PRCreateBody(BaseModel):
     title: str = ""
@@ -111,8 +115,7 @@ class IssueUpdateBody(BaseModel):
         if v is None or v == "":
             return 0
         if isinstance(v, bool):
-            raise ValueError("'milestone_id' must be an integer milestone number "
-                             "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+            raise ValueError(_MILESTONE_ID_INT_HINT)
         if isinstance(v, str):
             s = v.strip()
             if not s:
@@ -120,11 +123,9 @@ class IssueUpdateBody(BaseModel):
             try:
                 v = int(s)
             except ValueError:
-                raise ValueError("'milestone_id' must be an integer milestone number "
-                                 "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+                raise ValueError(_MILESTONE_ID_INT_HINT)
         if not isinstance(v, int):
-            raise ValueError("'milestone_id' must be an integer milestone number "
-                             "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+            raise ValueError(_MILESTONE_ID_INT_HINT)
         if v < 0:
             raise ValueError("'milestone_id' must be a non-negative milestone number")
         return v
@@ -547,7 +548,7 @@ def list_milestones(owner: str, repo: str, state: str = Query("all",
     return _normalize_milestone_states(data)
 
 
-@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).")
+@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone including `number` (the value accepted by `issues update --milestone_id`); returned `state` is normalized to open/closed (active→open).")
 def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #632（对齐 #577）：GitHub/GitCode milestones 字段语义一致 → 直调透传（同 labels 模式）
@@ -579,12 +580,17 @@ def _gitcode_milestone_number_exists(owner: str, repo: str, number: int,
     token = _repo_token(owner, repo, user, p)
     found = False
     numbers: list[int] = []
+    prev_page = None
     for page in range(1, _MILESTONE_SCAN_MAX_PAGES + 1):
         data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
                                            {"state": "all", "page": page,
                                             "per_page": _MILESTONES_MAX_PER_PAGE}, p), token)
         if not isinstance(data, list) or not data:
             break
+        if data == prev_page:
+            # 上游忽略 page 参数时返回同一页，继续翻页无意义。
+            break
+        prev_page = data
         for item in data:
             if not isinstance(item, dict):
                 continue
@@ -596,8 +602,8 @@ def _gitcode_milestone_number_exists(owner: str, repo: str, number: int,
                 numbers.append(n)
             if n == number:
                 found = True
-        if len(data) < _MILESTONES_MAX_PER_PAGE:
-            break
+        # Issue #1076 审查：上游可能静默钳制 per_page，不能用「本页不足 per_page」判断末页
+        # （否则后续页的有效 number 会被误判不存在 → 422）；只以空页/non-list 为终止条件。
     return found, numbers
 
 
@@ -766,15 +772,38 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             _rollback_note = ""
             # 失败原子性：仅当 PATCH 后值与原值不同（被清空/改成其它）时回滚到原里程碑。
             if _before_ms_num is not None and _ms_num != _before_ms_num:
+                _rollback_ok = False
                 try:
                     _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                              _repo_token(owner, repo, user, p),
                              {"repo": f"{owner}/{repo}", "title": payload.get("title", ""),
                               "milestone": _before_ms_num})
-                    _rollback_note = f"；已回滚为原 milestone={_before_ms_num}"
+                    _rollback_ok = True
                 except Exception as _re:
                     log.warning(f"milestone rollback (update_issue #{number}) failed: {_re}")
                     _rollback_note = f"；回滚原 milestone={_before_ms_num} 失败"
+                if _rollback_ok:
+                    # Issue #1076 审查：回滚 PATCH 可能被上游静默忽略，必须回读确认才能宣称已回滚。
+                    try:
+                        _rolled = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                                           _repo_token(owner, repo, user, p))
+                        _rolled_ms = _rolled.get("milestone") if isinstance(_rolled, dict) else None
+                        _rolled_raw = _rolled_ms.get("number") if isinstance(_rolled_ms, dict) else _rolled_ms
+                        try:
+                            _rolled_num = int(_rolled_raw) if _rolled_raw is not None else None
+                        except (TypeError, ValueError):
+                            _rolled_num = None
+                    except Exception as _re:
+                        log.warning(f"milestone rollback readback (update_issue #{number}) failed: {_re}")
+                        _rollback_note = (f"；已请求回滚为原 milestone={_before_ms_num}，"
+                                          f"但回读确认失败，未确认恢复")
+                    else:
+                        if _rolled_num == _before_ms_num:
+                            _rollback_note = f"；已回滚为原 milestone={_before_ms_num}"
+                        else:
+                            _rolled_txt = _rolled_num if _rolled_num is not None else "空"
+                            _rollback_note = (f"；回滚原 milestone={_before_ms_num} 后回读仍为 "
+                                              f"{_rolled_txt}，原值未恢复")
             raise HTTPException(status_code=422, detail={
                 "code": 422,
                 "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "

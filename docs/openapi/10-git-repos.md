@@ -308,7 +308,8 @@ grapecli git diff --repo Jason7602/hello
 
 **Query**：`state`（open/closed/all，技能用 all；其他值上游 400）
 
-**返回（200）**：里程碑数组 `[{"id":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+**返回（200）**：里程碑数组 `[{"id":1,"number":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+（`number` 即 `issues update --milestone_id` 的合法取值；`id` 为 REST 内部 id，不可用于设置 milestone）
 （Issue #684：`state` 字段归一化为 `open`/`closed`，上游 `active`/`opened` 映射为 `open`——与过滤合法值口径一致）
 
 **错误**：401 / 403 / 404。
@@ -393,7 +394,8 @@ provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 
 > **里程碑（#1076）**：`milestone_id` 必须取 `milestones` 列表的 `number`；非数字、内部 id、
 > 不存在的 number → 422 并给出合法取值来源，不返回 502；写入前预校验、回读不一致时回滚，
-> 失败请求保持原 milestone；只有上游真实故障（网关/连接/不可用）才返回 5xx。
+> 且回滚后再次回读确认（回滚被上游静默忽略时文案标注「原值未恢复」）；只有上游真实故障
+> （网关/连接/不可用）才返回 5xx。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
 

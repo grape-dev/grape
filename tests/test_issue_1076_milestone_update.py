@@ -84,10 +84,11 @@ def test_non_numeric_milestone_id_rejected_by_contract():
 
 
 def test_readback_mismatch_rolls_back_existing_milestone(monkeypatch):
-    """AC3：先挂 850012，请求 850013 后上游回读为空 → 422，并回滚原 milestone=850012。"""
+    """AC3：先挂 850012，请求 850013 后上游回读为空 → 422，回滚并回读确认为原 milestone=850012。"""
     calls = _transport(monkeypatch, [
         {"title": "issue title", "milestone": {"number": 850012, "title": "weekly-03"}},
         {"title": "issue title", "milestone": None},
+        {"title": "issue title", "milestone": {"number": 850012, "title": "weekly-03"}},
     ])
     with pytest.raises(HTTPException) as ei:
         gra.update_issue(
@@ -99,6 +100,49 @@ def test_readback_mismatch_rolls_back_existing_milestone(monkeypatch):
     assert "回滚为原 milestone=850012" in ei.value.detail["message"]
     patches = [c for c in calls if c[0] == "PATCH"]
     assert [p[2]["milestone"] for p in patches] == [850013, 850012]
+
+
+def test_rollback_silently_ignored_reports_not_restored(monkeypatch):
+    """AC3：回滚 PATCH 被上游静默忽略时，回读确认失败必须标注「原值未恢复」，不得谎称已回滚。"""
+    calls = _transport(monkeypatch, [
+        {"title": "issue title", "milestone": {"number": 850012, "title": "weekly-03"}},
+        {"title": "issue title", "milestone": None},
+        {"title": "issue title", "milestone": None},
+    ])
+    with pytest.raises(HTTPException) as ei:
+        gra.update_issue(
+            "grape-dev", "grape", 640,
+            gra.IssueUpdateBody(milestone_id=850013),
+            user={"auth_type": "session_token"}, p="gitcode",
+        )
+    assert ei.value.status_code == 422
+    assert "原值未恢复" in ei.value.detail["message"]
+    assert "已回滚为原 milestone=850012" not in ei.value.detail["message"]
+    patches = [c for c in calls if c[0] == "PATCH"]
+    assert [p[2]["milestone"] for p in patches] == [850013, 850012]
+
+
+def test_milestone_scan_does_not_stop_at_short_page(monkeypatch):
+    """Spec：上游静默钳制页大小时，不能以「本页不足 per_page」提前结束，必须扫到空页。"""
+    pages = {
+        1: [{"number": 1, "title": "a"}, {"number": 2, "title": "b"}],
+        2: [{"number": 850012, "title": "weekly-03"}],
+        3: [],
+    }
+    seen = []
+
+    def fake_req(provider, method, url, token, payload=None):
+        page = int(url.split("page=")[1].split("&")[0])
+        seen.append(page)
+        return pages.get(page, [])
+
+    monkeypatch.setattr(gra, "_vcs_req", fake_req)
+    monkeypatch.setattr(gra, "_repo_token", lambda *a, **k: "tok")
+    found, numbers = gra._gitcode_milestone_number_exists(
+        "grape-dev", "grape", 850012, user={"auth_type": "session_token"}, p="gitcode")
+    assert found is True
+    assert 850012 in numbers
+    assert seen == [1, 2, 3]
 
 
 def test_upstream_unavailable_during_readback_still_5xx(monkeypatch):

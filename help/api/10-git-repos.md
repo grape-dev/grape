@@ -199,7 +199,8 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 **Query**：`state`（open/closed/all，技能用 all）
 
-**返回（200）**：里程碑数组 `[{"id":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+**返回（200）**：里程碑数组 `[{"id":1,"number":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+（`number` 即 `issues update --milestone_id` 的合法取值；`id` 为 REST 内部 id，不可用于设置 milestone）
 
 **错误**：401 / 403 / 404。
 
@@ -267,7 +268,8 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 > - **非法取值 4xx**：非数字、内部 id、不存在的 number（如 `3`/`999999`）→ **422**，错误信息给出
 >   合法取值来源与当前仓库可用 number；不再返回 502。
 > - **失败保持原值**：写入前先校验 number 存在，非法值不会发出 PATCH；若上游 200 但回读不一致，
->   返回 422 并尽量回滚为请求前的 milestone，既有里程碑不被清空。
+>   返回 422 并回滚为请求前的 milestone，**回滚后再次回读确认**；若回滚被上游静默忽略，
+>   错误文案会标注「原值未恢复」，不会谎称已回滚。
 > - **5xx 仅保留上游真实故障**：预校验/回读时上游不可用、网关或连接失败仍返回 5xx。
 > - 成功时响应回显 `milestone`（`issues get` 同样回显上游 milestone 字段）。
 > - GitHub：`milestone_id` 语义不变（透传上游同名参数）。
