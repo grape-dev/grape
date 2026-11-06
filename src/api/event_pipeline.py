@@ -1660,6 +1660,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         evt["account"] = _o_acc
     event_type = evt.get("type", "unknown")
 
+    # Issue #996：变更类事件补齐文件清单（payload 优先，provider API 兜底）
+    if event_type in ("push", "pull_request_merged", "pull_request_updated"):
+        try:
+            from src.vcs.files_enrich import enrich_event_files
+            enrich_event_files(evt, repo_key)
+        except Exception as _fe:
+            log.warning(f"Pipeline: files enrich failed type={event_type} repo={repo_key}: {_fe}")
+
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
 
     # Issue #89: 提前解析 issue_id 供 skipped 事件审计（所有提前 return 路径共用）

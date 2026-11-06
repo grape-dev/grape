@@ -721,8 +721,13 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
 
 
 def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
-               status: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
-    """查询事件列表，支持按 agent/issue/status 过滤"""
+               status: str = "", limit: int = 50, offset: int = 0,
+               include_payload: bool = False) -> list[dict]:
+    """查询事件列表，支持按 agent/issue/status 过滤。
+
+    include_payload=True 时附带解析后的 payload（仅取 files/guard_impact 视图，
+    避免大 payload 全量返回；Issue #996 展示需求）。
+    """
     clauses = ["repo_key=?"]
     params = [repo_key]
 
@@ -740,19 +745,34 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
     with db_lock:
         c = db.cursor()
         try:
+            _payload_col = ", payload" if include_payload else ""
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at{_payload_col} FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
-            return [
-                {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
-                 "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
-                 "status": r[7], "created_at": normalize_event_time(r[8]),
-                 "runtime": r[9] or "", "skill": r[10] or "",
-                 "exit_code": r[11], "duration": r[12],
-                 "started_at": normalize_event_time(r[13] or ""), "completed_at": normalize_event_time(r[14] or "")}
-                for r in c.fetchall()
-            ]
+            out = []
+            for r in c.fetchall():
+                item = {
+                    "seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
+                    "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
+                    "status": r[7], "created_at": normalize_event_time(r[8]),
+                    "runtime": r[9] or "", "skill": r[10] or "",
+                    "exit_code": r[11], "duration": r[12],
+                    "started_at": normalize_event_time(r[13] or ""),
+                    "completed_at": normalize_event_time(r[14] or ""),
+                }
+                if include_payload:
+                    try:
+                        _p = json.loads(r[15]) if r[15] else {}
+                    except Exception:
+                        _p = {}
+                    if isinstance(_p, dict):
+                        if _p.get("files"):
+                            item["files"] = _p["files"]
+                        if _p.get("guard_impact"):
+                            item["guard_impact"] = _p["guard_impact"]
+                out.append(item)
+            return out
         except Exception:
             return []
 

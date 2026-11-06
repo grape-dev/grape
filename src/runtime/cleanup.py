@@ -22,6 +22,48 @@ _QUEUED_STALE_MINUTES = int(os.environ.get("SWEEPER_QUEUED_STALE_MINUTES", "180"
 _DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
 
 
+def clean_issue_artifacts(repo_key: str, ref: str, issue_number, *,
+                          targets: list | None = None, token: str = "",
+                          provider: str = "", scripts: dict | None = None,
+                          remover=None, apply: bool = True,
+                          payload: dict | None = None) -> dict:
+    """产物清理入口（Issue #996）：删除 docs/issue-N/* 前做守卫影响预检。
+
+    - 守卫脚本（scripts/check-*、tests/check-*）引用待删路径 → 跳过删除，
+      返回 guard_impact{scripts, breaking:true} 供事件 payload 标注；
+    - 无引用 → 照常调用 remover(targets) 删除，返回值不含 guard_impact 字段；
+    - apply=False 仅预检（dry-run）。
+
+    清理动作（remover）由调用方注入（本地 worktree 删除 / VCS 删除 API 均可），
+    本函数只负责守卫影响决策，保证保守侧：宁可保留产物，不让守卫由绿转红。
+    """
+    from src.vcs.guard_impact import assess_guard_impact, list_issue_artifacts
+
+    resolved = list(targets) if targets is not None else list_issue_artifacts(
+        repo_key, ref, issue_number, token=token, provider=provider)
+    if not resolved:
+        return {"deleted": [], "skipped": [], "dry_run": not apply}
+
+    paths = [t.get("path") if isinstance(t, dict) else str(t) for t in resolved]
+    impact = assess_guard_impact(repo_key, ref, paths, token=token,
+                                 provider=provider, scripts=scripts)
+    if impact.get("breaking"):
+        log.warning(f"artifact cleanup skipped: guard scripts reference target paths "
+                    f"repo={repo_key} ref={ref} issue={issue_number} "
+                    f"scripts={impact.get('scripts')}")
+        if isinstance(payload, dict):
+            payload["guard_impact"] = impact
+        return {"deleted": [], "skipped": paths, "guard_impact": impact,
+                "dry_run": not apply}
+    if apply and remover is not None:
+        try:
+            remover(resolved)
+        except Exception as e:
+            log.warning(f"artifact cleanup remover failed repo={repo_key}: {e}")
+            return {"deleted": [], "skipped": paths, "error": str(e)[:200]}
+    return {"deleted": paths, "skipped": [], "dry_run": not apply}
+
+
 def _long_running_minutes() -> int:
     """running·dispatched 孤儿回收阈值（分钟）。
 

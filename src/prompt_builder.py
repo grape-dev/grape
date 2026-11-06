@@ -742,6 +742,29 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         if body != '""':
             parts.append(f"Body: {body}")
 
+    # Issue #996：变更类事件输出被删文件清单，供 QA 增量复核（避免全量重审）
+    _files = payload.get("files") if isinstance(payload, dict) else None
+    if isinstance(_files, dict) and (
+            _files.get("added") or _files.get("modified") or _files.get("deleted")):
+        def _paths(_items):
+            return ", ".join(
+                (it.get("path") if isinstance(it, dict) else str(it))
+                for it in (_items or [])[:50])
+        parts.append("\n## Changed Files")
+        if _files.get("deleted"):
+            parts.append(f"- Deleted ({len(_files['deleted'])}): {_paths(_files['deleted'])}")
+        if _files.get("added"):
+            parts.append(f"- Added ({len(_files['added'])}): {_paths(_files['added'])}")
+        if _files.get("modified"):
+            parts.append(f"- Modified ({len(_files['modified'])}): {_paths(_files['modified'])}")
+        if _files.get("truncated"):
+            parts.append("- Note: added/modified lists are truncated; deleted paths are complete.")
+        _gi = payload.get("guard_impact") if isinstance(payload, dict) else None
+        if isinstance(_gi, dict) and _gi.get("breaking"):
+            parts.append(f"- Guard impact: {', '.join(_gi.get('scripts') or [])} "
+                         f"reference deleted paths; cleanup was skipped (breaking=true).")
+        parts.append("Review focus: only re-check guard scripts related to the changed files above.")
+
     # PR 订阅场景提示
     if evt.get("_pr_sub_scene_id"):
         parts.append(f"\n## PR 审查任务\n本任务来自 PR 订阅场景，PR 无关联 Issue。请审查 PR #{number} 的变更内容，结果回帖到 PR 评论。")

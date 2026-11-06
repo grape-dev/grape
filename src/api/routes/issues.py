@@ -338,15 +338,27 @@ def _attach_event_payloads(group_map: dict) -> None:
             # SUBSTR 在 sqlite/MySQL 语义一致；多取 1 字符用于判断是否被截断
             c.execute(
                 f"SELECT seq, SUBSTR(structured_output, 1, {cap + 1}), "
-                f"SUBSTR(agent_logs, 1, {cap + 1}) FROM events WHERE seq IN ({placeholders})",
+                f"SUBSTR(agent_logs, 1, {cap + 1}), SUBSTR(payload, 1, {cap + 1}) "
+                f"FROM events WHERE seq IN ({placeholders})",
                 seqs)
-            rows = {int(r[0]): (r[1], r[2]) for r in c.fetchall()}
+            rows = {int(r[0]): (r[1], r[2], r[3] if len(r) > 3 else None)
+                    for r in c.fetchall()}
     except Exception:
         return
     picked = set()
     for p in picks:
         picked.add(id(p))
-        raw_so, raw_logs = rows.get(int(p["seq"]), (None, None))
+        raw_so, raw_logs, raw_payload = rows.get(int(p["seq"]), (None, None, None))
+        if raw_payload:
+            try:
+                _p = _json.loads(raw_payload)
+                if isinstance(_p, dict):
+                    if _p.get("files"):
+                        p["files"] = _p["files"]
+                    if _p.get("guard_impact"):
+                        p["guard_impact"] = _p["guard_impact"]
+            except Exception:
+                pass
         if raw_so:
             if len(raw_so) > cap:
                 p["output_truncated"] = True
@@ -1297,7 +1309,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     nodes = (pipe_cfg or {}).get("nodes", [])
     events = []
     if issue_key:
-        events = get_events(repo_key, issue_id=issue_key, limit=30)
+        events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
     nodes, _ = compute_node_statuses(nodes, events, _current_stage)
