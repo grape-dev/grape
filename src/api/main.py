@@ -93,7 +93,7 @@ def _startup_security_check():
 def _start_server_metrics_task():
     """主控机指标上报循环（15s）——启动并返回 task。"""
     from datetime import datetime, timezone
-    from src.config import log
+    from src.kernel.config import log
 
     async def _server_metrics_loop():
         import socket as _sock, hashlib as _hl
@@ -107,7 +107,7 @@ def _start_server_metrics_task():
         except Exception:
             pass
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
             with db_lock:
                 c = db.cursor()
@@ -181,7 +181,7 @@ def _start_server_metrics_task():
                 except Exception:
                     pass
                 _now = datetime.now(timezone.utc).isoformat()
-                from src.session_manager import db, db_lock
+                from src.kernel.session_manager import db, db_lock
                 with db_lock:
                     c = db.cursor()
                     c.execute(
@@ -202,7 +202,7 @@ def _start_server_metrics_task():
 
 def _start_obs_alert_task():
     """可观测性告警中心循环（30s + SLO 独立周期）——启动并返回 task。"""
-    from src.config import log
+    from src.kernel.config import log
     from src.domains.insight.observability import alerts as _obs_alerts
     from src.domains.insight.observability import slo as _obs_slo
     from src.domains.insight.observability import loops as _obs_loops
@@ -258,7 +258,7 @@ def _start_obs_alert_task():
 
 def _start_obs_rollup_task():
     """业务指标聚合循环（60s）——启动并返回 task。"""
-    from src.config import log
+    from src.kernel.config import log
     from src.domains.insight.observability import metric_rollup as _obs_mrollup
     from src.domains.insight.observability import llm_usage as _obs_llm_usage
     from src.domains.insight.observability import loops as _obs_loops
@@ -291,7 +291,7 @@ def _start_obs_rollup_task():
 
 def _start_obs_sample_task():
     """设备资源采样循环（60s）——启动并返回 task。"""
-    from src.config import log
+    from src.kernel.config import log
     from src.domains.insight.observability import rollup as _obs_rollup
     from src.domains.insight.observability import logs as _obs_logs
     from src.domains.insight.observability import loops as _obs_loops
@@ -319,7 +319,7 @@ def _start_obs_sample_task():
 
 def _start_active_user_tracker_task():
     """用户活跃状态追踪循环（30s flush + 5min token/guard 清理）——启动并返回 task。"""
-    from src.config import log
+    from src.kernel.config import log
     async def _active_user_tracker():
         from src.api.deps import get_pending_active
         from src.domains.mgmt.user import db as user_db

@@ -180,7 +180,7 @@ def _api_tree_paths(repo_key: str, owner: str, rname: str, token: str = "") -> l
     """Issue #666（M2）：git tree 不可用时 GitCode API contents 拉根路径（best-effort）。"""
     paths = []
     try:
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         _repo = Repo(repo_key)
         tok = token or _repo.bot_token
         if not tok:

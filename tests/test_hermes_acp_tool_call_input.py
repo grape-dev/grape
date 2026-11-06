@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import src.runtime.registry  # noqa: E402,F401 先触发（绕开 src.agent.__init__ 循环导入）
+import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.agent.__init__ 循环导入）
 from src.agent.hermes_acp import (  # noqa: E402
     _ACPSimpleClient,
     _clip_tool_input,

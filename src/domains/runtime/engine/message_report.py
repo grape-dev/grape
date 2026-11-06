@@ -11,8 +11,8 @@
 import json
 import time
 
-from src.config import log
-from src.runtime.client import ReportBatchError
+from src.kernel.config import log
+from src.domains.runtime.engine.client import ReportBatchError
 
 # 拆批深度上限：50 → 25 → 12 → … → 1 约 6 层；超限直接逐条，防止病态递归
 MAX_SPLIT_DEPTH = 6

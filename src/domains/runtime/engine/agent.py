@@ -1937,7 +1937,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             _fb_name = str(_fb_info.get("skill_name") or "")
             _fb_id = int(_fb_info.get("skill_id") or 0)
             try:
-                from src.config import resolve_official_skill_path
+                from src.kernel.config import resolve_official_skill_path
                 _official = resolve_official_skill_path(_skill_name)
             except Exception as _e:
                 log.warning(f"[skill] official resolve failed: {_e}")
@@ -1945,7 +1945,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             if not _official and _fb_name:
                 # 按名未命中 → agent_type 官方检查器（skill_fallback）回退
                 try:
-                    from src.config import resolve_official_skill_path as _resolve
+                    from src.kernel.config import resolve_official_skill_path as _resolve
                     _official = _resolve(_fb_name)
                 except Exception as _e:
                     log.warning(f"[skill] checker resolve failed: {_e}")
@@ -2141,7 +2141,7 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
     try:
         from src.domains.runtime.engine.skill_materialize import (verify_skill_execution_consistency,
                                                    skill_mismatch_error)
-        from src.runtime.task_log_stream import build_skill_source_message
+        from src.domains.runtime.engine.task_log_stream import build_skill_source_message
         # 双源互校：task["skill"]（绑定基准权威源）vs env GRAPE_BOUND_SKILL（下发镜像）
         _bound_task = (task.get("skill") or "").strip()
         _bound_env = ((env or {}).get("GRAPE_BOUND_SKILL") or "").strip()
@@ -2167,7 +2167,7 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
         # 引擎原生技能目录（跨平台，见 os_adapter.engine_skill_dirs）
         _extra_dirs: list[str] = []
         try:
-            from src.runtime.os_adapter import engine_skill_dirs as _esd
+            from src.domains.runtime.engine.os_adapter import engine_skill_dirs as _esd
             _extra_dirs = _esd(_backend_for_engine(engine_name))
         except Exception as _ede:
             log.warning(f"task {tid}: engine skill dirs resolve failed: {_ede}")
@@ -2201,8 +2201,8 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
     - "retry"   网络错误（可重试）——保留 batch，下个 flush 窗口重试，不清空不丢
     - "terminal" 任务已被服务端标终态（410），调用方应中断执行
     """
-    from src.runtime.client import ReportBatchError
-    from src.runtime.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
+    from src.domains.runtime.engine.client import ReportBatchError
+    from src.domains.runtime.engine.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
     try:
         _resp = await client.report_messages(tid, batch)
     except ReportBatchError as e:

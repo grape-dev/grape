@@ -190,7 +190,7 @@ def start_metrics_server():
         _metrics_httpd = HTTPServer((host or "127.0.0.1", int(port or 9090)), _MetricsHandler)
     except OSError as _bind_err:
         # 端口被占（快速重启 TIME_WAIT / 重复入口）：降级跳过，不阻断应用启动
-        from src.config import log as _log
+        from src.kernel.config import log as _log
         _log.warning(f"metrics server skipped: bind failed on {addr} ({_bind_err})")
         _metrics_httpd = None
         return

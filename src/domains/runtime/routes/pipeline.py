@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
-from src.config import log
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -400,7 +400,7 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
     场景判定用 SQL LEFT JOIN：issue.scene_id 权威、events.scene_id 兜底，
     走 idx_tasks_repo_issue(repo_key, issue_number) 等值查找，不扫全表。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _ph = ",".join("?" * len(repo_keys))
     need = max(1, int(need))
     # 无场景过滤时不 join（省一次 i 表查找；全仓口径只依赖 events）

@@ -1647,7 +1647,7 @@ def _validate_scene_node_roles(nodes: list):
     Spec 注明（Issue #955）：空 id / 非 dict 节点静默放行——为兼容存量
     tag-only 节点与历史数据（此类节点无角色名可校验，读侧走 tag 兜底）。
     """
-    from src.runtime.engine_select import KNOWN_AGENT_ROLES
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
     _roles = set(KNOWN_AGENT_ROLES)
     for node in nodes:
         _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
@@ -1888,7 +1888,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.kernel.repo_key import to_repo_key
     from src.kernel.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
-    from src.runtime.engine_select import node_agent_role
+    from src.domains.runtime.engine.engine_select import node_agent_role
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
@@ -2193,8 +2193,8 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
     - 明文仅当次返回：Cache-Control: no-store
     - 高频告警：窗口内取回次数达到阈值 → 429（复用 #474 reveal 日志表计数）
     """
-    from src.session_manager import db, db_lock
-    from src.scene_custom_env import normalize_custom_field
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.scene_custom_env import normalize_custom_field
     from src.api.routes.settings import (
         _count_reveals_in_window, _record_reveal, _REVEAL_MAX_PER_WINDOW)
     import json as _json

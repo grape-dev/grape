@@ -937,7 +937,7 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
     - messages（最近 200 条）→ agent 的思考和操作历史
     - task_id → 用于后续 cancel
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _issue_id = f"#{issue_number.lstrip('#')}"
     # ① 查 running/dispatched 的 task（跨所有 worker，不限 runtime_id）
     with db_lock:

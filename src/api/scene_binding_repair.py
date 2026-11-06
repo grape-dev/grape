@@ -14,7 +14,7 @@ scene_id，静默回退全局模板行（无引擎）→ SRE 派发失败。
 """
 import time
 
-from src.config import log
+from src.kernel.config import log
 
 
 def _resolve_repo_copy(scene_value: str, repo_key: str) -> str:
@@ -26,7 +26,7 @@ def _resolve_repo_copy(scene_value: str, repo_key: str) -> str:
     from src.api.pipeline_config import scene_exists_in_repo
     if scene_exists_in_repo(scene_value, repo_key):
         return ""  # 正常绑定，无需修复
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -62,7 +62,7 @@ def repair_scene_bindings() -> dict:
     返回 {"repos_fixed", "issues_fixed", "repos_scanned", "issues_scanned"}。
     幂等：已正确的绑定二轮扫描直接跳过（fixed=0）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     repos_fixed = 0
     issues_fixed = 0
     repos_scanned = 0

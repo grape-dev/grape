@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 # 评审八轮修正①：claiming 孤儿租约（分钟）。派发是秒级；10 分钟仍未回写=进程崩溃
 # 或异常路径漏写，回收为 open 下轮重试（幂等键保证回收重试不会双发）。

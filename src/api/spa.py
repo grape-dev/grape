@@ -21,7 +21,7 @@ def install_spa_routes(app: FastAPI) -> None:
 
     main.py 拆分时同样调用本函数（其原内联块删除）。
     """
-    from src.config import WORKSPACE_DIR as _WS_DIR
+    from src.kernel.config import WORKSPACE_DIR as _WS_DIR
 
     # Issue 附件静态服务（必须在 /static 之前 mount）
     _ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")

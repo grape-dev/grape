@@ -17,7 +17,7 @@ import uuid as _uuid
 
 from fastapi import FastAPI, Request
 
-from src.config import request_id_var, repo_var, user_var, log as _log
+from src.kernel.config import request_id_var, repo_var, user_var, log as _log
 
 # webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
 _WEBHOOK_PREFIX = "/webhook/"
@@ -157,10 +157,10 @@ def install_request_middleware(app: FastAPI) -> None:
                     _log.info(msg, extra=extra)
                 # 慢请求入库（方案C）
                 try:
-                    from src.config import SLOW_REQUEST_THRESHOLD_MS
+                    from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
                     if duration >= SLOW_REQUEST_THRESHOLD_MS:
                         try:
-                            from src.session_manager import db as _sdb, db_lock as _sdbl
+                            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
                             with _sdbl:
                                 _sdb.execute(
                                     "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "

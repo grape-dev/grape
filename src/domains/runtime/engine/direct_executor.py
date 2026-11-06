@@ -247,7 +247,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                       f"skill consistency refused: {_sv_err}")
             if task_id:
                 try:
-                    from src.session_manager import db as _sdb, db_lock as _sdl
+                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
                     with _sdl:
                         _sc = _sdb.cursor()
                         _sc.execute(
@@ -320,7 +320,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         from src.domains.runtime.engine.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
         _sk_src = evt.get(_SCK2) or {}
         if _sk_src:
-            from src.runtime.task_log_stream import build_skill_source_message as _bssm
+            from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
             _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
                              _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
                              reason=_sk_src.get("reason") or "")

@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from src.runtime.client import ReportBatchError
+from src.domains.runtime.engine.client import ReportBatchError
 from tests.test_runtime_client import _Ctx, _FakeResp, _client, _run
 
 
@@ -87,7 +87,7 @@ class TestFlushReportBatch:
 
     def test_413_split_resend_delivers_all(self):
         """验收 2：413 后拆批重发成功 → 全部消息送达，无缺号。"""
-        from src.runtime.agent import _flush_report_batch
+        from src.domains.runtime.engine.agent import _flush_report_batch
         cli = _ScriptedClient(_size_limited_policy(limit_msgs=20))
         batch = self._batch(50)
         outcome = asyncio.run(_flush_report_batch(cli, "t1", batch))
@@ -98,11 +98,11 @@ class TestFlushReportBatch:
 
     def test_413_single_failure_degrades_with_placeholder(self):
         """验收 1：批次含超大消息 → 整批 413 → 拆批；单条仍失败 → 占位可见 + 落补报队列。"""
-        from src.runtime.agent import _flush_report_batch
+        from src.domains.runtime.engine.agent import _flush_report_batch
         cli = _ScriptedClient(_size_limited_policy(limit_msgs=5, huge=2000))
         queued = []
         batch = self._batch(50, huge_at=10)
-        import src.runtime.agent as agent_mod
+        import src.domains.runtime.engine.agent as agent_mod
         orig = agent_mod._report_queue
         try:
             agent_mod._report_queue = lambda: type("Q", (), {"add": staticmethod(queued.append)})()
@@ -125,7 +125,7 @@ class TestFlushReportBatch:
 
     def test_network_error_keeps_batch(self):
         """网络错误（{}）→ retry：batch 不清空，等待下个窗口重试。"""
-        from src.runtime.agent import _flush_report_batch
+        from src.domains.runtime.engine.agent import _flush_report_batch
 
         async def policy(cli, messages):
             return {}
@@ -137,7 +137,7 @@ class TestFlushReportBatch:
         assert cli.delivered == []
 
     def test_410_terminal(self):
-        from src.runtime.agent import _flush_report_batch
+        from src.domains.runtime.engine.agent import _flush_report_batch
 
         async def policy(cli, messages):
             return None
@@ -147,8 +147,8 @@ class TestFlushReportBatch:
 
     def test_credential_revoked_propagates(self):
         """401 凭据吊销不得被降级路径吞掉。"""
-        from src.runtime.agent import _flush_report_batch
-        from src.runtime.client import CredentialRevokedError
+        from src.domains.runtime.engine.agent import _flush_report_batch
+        from src.domains.runtime.engine.client import CredentialRevokedError
 
         async def policy(cli, messages):
             raise CredentialRevokedError("revoked")
@@ -160,7 +160,7 @@ class TestFlushReportBatch:
     def test_degrade_failure_falls_back_to_queue_not_ok_silently(self):
         """QA 复审（Spec #3）：degrade_failed_batch 自身抛错时不得仍返回 "ok" 静默清空
         batch——兜底逐条落补报队列（可重放，不丢）；队列不可用才返回 "retry" 保留 batch。"""
-        from src.runtime.agent import _flush_report_batch
+        from src.domains.runtime.engine.agent import _flush_report_batch
 
         async def policy(cli, messages):
             raise ReportBatchError(413, "too large")
@@ -168,7 +168,7 @@ class TestFlushReportBatch:
         cli = _ScriptedClient(policy)
         batch = self._batch(5)
         queued = []
-        import src.runtime.agent as agent_mod
+        import src.domains.runtime.engine.agent as agent_mod
         orig_degrade = agent_mod.degrade_failed_batch if hasattr(agent_mod, "degrade_failed_batch") else None
         from src.runtime import message_report as mr
         orig_split = mr.split_resend
@@ -189,9 +189,9 @@ class TestFlushReportBatch:
 
     def test_degrade_failure_and_queue_failure_keeps_batch(self):
         """QA 复审（Spec #3）续：兜底入队也失败 → 返回 "retry" 保留 batch，绝不静默丢失。"""
-        from src.runtime.agent import _flush_report_batch
+        from src.domains.runtime.engine.agent import _flush_report_batch
         from src.runtime import message_report as mr
-        import src.runtime.agent as agent_mod
+        import src.domains.runtime.engine.agent as agent_mod
 
         async def policy(cli, messages):
             raise ReportBatchError(413, "too large")
@@ -222,7 +222,7 @@ class TestFlushReportBatch:
 
 class TestSplitResend:
     def test_binary_split_depth_limited(self):
-        from src.runtime.message_report import split_resend
+        from src.domains.runtime.engine.message_report import split_resend
         calls = []
 
         async def report(msgs):
@@ -236,7 +236,7 @@ class TestSplitResend:
         assert 1 in calls, "最终必须拆到单条送达"
 
     def test_terminal_stops_resend(self):
-        from src.runtime.message_report import split_resend
+        from src.domains.runtime.engine.message_report import split_resend
 
         async def report(msgs):
             if len(msgs) > 2:
@@ -409,7 +409,7 @@ class TestQaReviewFixes:
         assert ei.value.status == 413
 
     def test_msg_entry_id_helpers_roundtrip(self):
-        from src.runtime.message_report import MSG_ENTRY_ID_SEP, build_msg_entry_id, real_task_id
+        from src.domains.runtime.engine.message_report import MSG_ENTRY_ID_SEP, build_msg_entry_id, real_task_id
         eid = build_msg_entry_id("t9", 1700000000.5, 3)
         assert eid.startswith(f"t9{MSG_ENTRY_ID_SEP}")
         assert real_task_id(eid) == "t9"

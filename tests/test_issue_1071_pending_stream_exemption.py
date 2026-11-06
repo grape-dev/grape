@@ -150,7 +150,7 @@ def _fixture():
 class TestActiveStreamExemption:
     def test_recent_task_message_blocks_timeout(self):
         """部署类长任务：重启后 pending 超 1800s，但执行流 60s 前仍在写 → 不判 timeout_failed。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_a1", 10801,
                    pending_since=_iso(_utcnow() - timedelta(seconds=1900)))
@@ -162,7 +162,7 @@ class TestActiveStreamExemption:
 
     def test_message_at_window_edge_599s_exempts(self):
         """豁免窗口边界：最新写入 599s 前（<600s）→ 豁免。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_a2", 10802,
                    pending_since=_iso(_utcnow() - timedelta(seconds=5500)))
@@ -178,7 +178,7 @@ class TestActiveStreamExemption:
 class TestSilentTimeoutStillSwept:
     def test_stale_stream_over_timeout_swept_full_chain(self):
         """沉默（消息停在 700s 前）且 pending_since 已过 5400s → timeout_failed 全链路。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_s1", 10803,
                    pending_since=_iso(_utcnow() - timedelta(seconds=5500)))
@@ -197,7 +197,7 @@ class TestSilentTimeoutStillSwept:
 
     def test_silent_stream_sweep_delayed_until_quiet_600s(self):
         """执行流刚沉默（100s 前最后写入）且 pending 已超阈值 → 本轮仍豁免（600s 静默窗），下轮才回收。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_s2", 10804,
                    pending_since=_iso(_utcnow() - timedelta(seconds=5500)))
@@ -213,7 +213,7 @@ class TestSilentTimeoutStillSwept:
 
 class TestNoMessagesFallback:
     def test_no_messages_expired_pending_still_swept(self):
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_n1", 10805,
                    pending_since=_iso(_utcnow() - timedelta(seconds=5500)))
@@ -229,12 +229,12 @@ class TestTimeoutThresholdDefault:
     def test_default_is_5400(self):
         """Spec：默认 1800 → 5400（覆盖部署类任务重启后剩余工序时长）。"""
         import importlib
-        import src.runtime.scheduler as sched
+        import src.domains.runtime.engine.scheduler as sched
         importlib.reload(sched)
         assert sched.PENDING_SELF_REPORT_TIMEOUT_SECONDS == 5400
 
     def test_pending_within_5400s_not_swept(self):
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_w1", 10806,
                    pending_since=_iso(_utcnow() - timedelta(seconds=5300)))
@@ -250,7 +250,7 @@ class TestTimeoutThresholdDefault:
 class TestLateSuccessWarning:
     def test_complete_after_timeout_failed_with_evidence_logs_warning(self, caplog):
         """worker 真实完成上报被终态拒收 → warning 含 task_id/时间线，终态不翻转。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0)
         _seed_task("t_i1071_w1a", 10807, status="timeout_failed",
                    pending_since=_iso(_utcnow() - timedelta(seconds=5600)))
@@ -264,7 +264,7 @@ class TestLateSuccessWarning:
 
     def test_complete_after_timeout_failed_without_evidence_no_warning(self, caplog):
         """无执行流证据（task_messages 空）→ 不告警（维持原 skip 日志），终态不变。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0)
         _seed_task("t_i1071_w2", 10808, status="timeout_failed",
                    pending_since=_iso(_utcnow() - timedelta(seconds=5600)))
@@ -283,7 +283,7 @@ class TestLateSuccessWarning:
 class TestRegressionNormalPaths:
     def test_pending_self_report_completes_normally(self):
         """普通路径：pending 期间 worker 自报完成 → completed（活跃豁免不影响自报放行）。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task("t_i1071_r1", 10809,
                    pending_since=_iso(_utcnow() - timedelta(seconds=1900)), issue_id="")
@@ -293,7 +293,7 @@ class TestRegressionNormalPaths:
 
     def test_timeout_failed_still_rejects_late_update(self):
         """终态幂等回归：timeout_failed 不被 update_task_status 覆盖为 completed。"""
-        from src.runtime.service import update_task_status
+        from src.domains.runtime.engine.service import update_task_status
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0)
         _seed_task("t_i1071_r2", 10810, status="timeout_failed")
         update_task_status("t_i1071_r2", "completed", result_text="迟到完成")

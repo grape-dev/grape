@@ -26,8 +26,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from src.config import CONFIG_DIR, log
-from src.session_manager import db, db_lock
+from src.kernel.config import CONFIG_DIR, log
+from src.kernel.session_manager import db, db_lock
 
 # ====== 配置面（决策变更 2026-11-02 负责人拍板）：全部走 configs/patrol-config.json
 # （example 入库、正式文件 gitignored，缺省即全默认=能力全开），不再读任何 env。

@@ -597,7 +597,7 @@ class DispatchBody(BaseModel):
 
 # Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
 try:
-    from src.runtime.scheduler import (
+    from src.domains.runtime.engine.scheduler import (
         DEDUP_LEVEL_SUSPECTED,
         dedup_auto_merge_allowed,
         normalize_dedup_level,

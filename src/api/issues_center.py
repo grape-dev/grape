@@ -636,8 +636,8 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
     通过 full_name 匹配。找不到返回空串。
     """
     try:
-        from src.repo_key import split_owner_repo
-        from src.session_manager import db, db_lock
+        from src.kernel.repo_key import split_owner_repo
+        from src.kernel.session_manager import db, db_lock
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return ""
@@ -655,7 +655,7 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
 def _close_vcs_one_auto(repo_key: str, issue_number: int) -> str:
     """对单个 repo_key 幂等关闭 VCS Issue（bot token，降级不阻断）。"""
     try:
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         provider, owner, repo = parse_repo_key(repo_key)
         if not owner or not repo:
             return "skipped"
@@ -1448,7 +1448,7 @@ def _release_subissue_body(repo_key: str, issue_number: int, candidate_sha: str,
                            target_env: str, evidence_ref: str,
                            approved_by: int, approved_at: str) -> str:
     """发布子单 body：`## 父任务`（现有子任务识别机制）+ `## 发布绑定`（绑定要素落平台）。"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
     _lines = [
         f"## 父任务",
@@ -1503,7 +1503,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
     绑定字段 → stage=sre（直通 sre，不经 vod/issue/coding/qa）→ dispatch=True 时服务内
     直调 a2a_endpoint 派发 sre 执行部署。子单终态 release_result 即发布结果三分支。
     """
-    from src.repo_key import to_repo_key, split_owner_repo, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, split_owner_repo, parse_repo_key
     repo_key = to_repo_key(repo_key)
     # PR #799 R1 语义保留：落库前统一小写——唯一绑定与验收记录对照口径一致，
     # 大小写变体不得绕过唯一性重复创建发布子单
@@ -1694,7 +1694,7 @@ def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: in
     回填按 task.issue_id 反查 issue 行即可）。
     """
     import json as _json
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
     _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
     _account = _repository.split("/", 1)[0] if "/" in _repository else ""
@@ -2635,7 +2635,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
     仅支持 gitcode（GitHub 附件同步不在本次范围）。
     """
     try:
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         _prov, owner, rname = parse_repo_key(repo_key)
         if _prov != "gitcode":
             return False

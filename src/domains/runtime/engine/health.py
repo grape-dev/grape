@@ -118,7 +118,7 @@ def aggregate_skill_consistency(days: int = 7) -> dict:
            "window_days": int(days), "detail": ""}
     try:
         from datetime import timedelta
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
         with db_lock:
             c = db.cursor()

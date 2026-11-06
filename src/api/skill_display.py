@@ -18,7 +18,7 @@
 """
 import logging
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 logger = logging.getLogger(__name__)
 

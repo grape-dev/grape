@@ -70,7 +70,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         if cached and now < _readiness_cache["expires_at"]:
             return cached
 
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         checks = {"db": "ok", "tables": "ok"}
         status = "ok"
         http_status = 200
@@ -97,7 +97,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         # Issue #887：skill 一致性门禁聚合项（近 N 天 [skill_mismatch] 拒绝数，AC4）。
         # 非阻断（warn 不改 readiness 终态，仅标记 degraded 告警）。
         try:
-            from src.runtime.health import aggregate_skill_consistency as _agg_sk
+            from src.domains.runtime.engine.health import aggregate_skill_consistency as _agg_sk
             _sk_agg = _agg_sk()
             checks["skill_consistency"] = _sk_agg.get("status", "unknown")
             if _sk_agg.get("status") == "warn":
@@ -119,7 +119,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         """运维诊断：IM bot 状态、任务队列深度、runtime 在线数。"""
         if not _is_loopback(request):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.domains.runtime.engine.health import derive_runtime_health
 
         now_ts = time.time()

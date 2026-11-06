@@ -418,7 +418,7 @@ def verify_skill_execution_consistency(skill_name: str, skill_dir: str,
         result.update({"actual": "", "source": "unbound",
                        "reason": "no bound skill; engine local cache may apply as fallback"})
         return result
-    from src.runtime.health import check_skill_consistency
+    from src.domains.runtime.engine.health import check_skill_consistency
     if os.path.isfile(os.path.join(skill_dir, bound, "SKILL.md")):
         result["reason"] = "bound skill materialized"
         return result

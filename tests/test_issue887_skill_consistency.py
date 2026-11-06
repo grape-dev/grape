@@ -25,7 +25,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import pytest
 
 from src.runtime import skill_materialize as sm
-from src.runtime.task_log_stream import build_skill_source_message, _to_payload
+from src.domains.runtime.engine.task_log_stream import build_skill_source_message, _to_payload
 
 
 def _mk_skill(skill_dir: str, name: str, with_md=True, fallback=False):
@@ -176,7 +176,7 @@ def test_worker_official_fallback_writes_back_declared(tmp_path, monkeypatch):
     (official / "SKILL.md").write_text("# checker-x\n", encoding="utf-8")
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(official / "SKILL.md"))
-    from src.runtime.agent import _materialize_worker_skill
+    from src.domains.runtime.engine.agent import _materialize_worker_skill
     task = {"id": "t-887-fb", "skill": "caserun-prep", "skill_files": "{}",
             "skill_fallback": {"skill_name": "checker-x", "skill_id": 42}}
     _materialize_worker_skill(task, {}, "p", skill_dir)
@@ -197,7 +197,7 @@ def test_worker_official_fallback_diff_name_writes_back(tmp_path, monkeypatch):
     (official / "SKILL.md").write_text("# caserun-alt\n", encoding="utf-8")
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(official / "SKILL.md"))
-    from src.runtime.agent import _materialize_worker_skill
+    from src.domains.runtime.engine.agent import _materialize_worker_skill
     task = {"id": "t-887-fb2", "skill": "caserun-prep", "skill_files": "{}",
             "skill_fallback": {}}
     _materialize_worker_skill(task, {}, "p", skill_dir)
@@ -211,28 +211,28 @@ def test_worker_official_fallback_diff_name_writes_back(tmp_path, monkeypatch):
 # ── 2. health.check_skill_consistency（健康检查项） ────────────────
 
 def test_health_consistency_match():
-    from src.runtime.health import check_skill_consistency
+    from src.domains.runtime.engine.health import check_skill_consistency
     r = check_skill_consistency("caserun-prep", "caserun-prep")
     assert r["ok"] is True and r["mismatch"] is False
     assert r["name"] == "skill_consistency"
 
 
 def test_health_consistency_mismatch_rejected():
-    from src.runtime.health import check_skill_consistency
+    from src.domains.runtime.engine.health import check_skill_consistency
     r = check_skill_consistency("caserun-prep", "casegen-prep")
     assert r["ok"] is False and r["mismatch"] is True
     assert "refusing execution" in r["detail"]
 
 
 def test_health_consistency_declared_fallback_ok():
-    from src.runtime.health import check_skill_consistency
+    from src.domains.runtime.engine.health import check_skill_consistency
     r = check_skill_consistency("caserun-prep", "checker-x", declared=True)
     assert r["ok"] is True and r["mismatch"] is True
     assert "declared fallback" in r["detail"]
 
 
 def test_health_consistency_unbound_ok():
-    from src.runtime.health import check_skill_consistency
+    from src.domains.runtime.engine.health import check_skill_consistency
     r = check_skill_consistency("", "casegen-prep")
     assert r["ok"] is True
     assert "local cache" in r["detail"]
@@ -282,7 +282,7 @@ class _FakeRes:
 
 
 def _run_gate(task, skill_dir):
-    from src.runtime.agent import _skill_consistency_gate
+    from src.domains.runtime.engine.agent import _skill_consistency_gate
     client = _FakeClient()
     res = _FakeRes()
     err = asyncio.run(
@@ -334,7 +334,7 @@ def test_gate_passes_unbound_with_cache_fallback(tmp_path):
 
 def test_gate_env_bound_conflict_refused(tmp_path):
     # task.skill 与 env GRAPE_BOUND_SKILL 不一致（绑定基准被覆盖/漂移）→ 拒绝
-    from src.runtime.agent import _skill_consistency_gate
+    from src.domains.runtime.engine.agent import _skill_consistency_gate
     skill_dir = str(tmp_path / ".skills")
     _mk_skill(skill_dir, "caserun-prep")
     task = {"id": "t-887-env", "skill": "caserun-prep"}
@@ -354,7 +354,7 @@ def test_gate_env_bound_conflict_refused(tmp_path):
 
 def test_gate_env_bound_used_when_task_skill_empty(tmp_path):
     # task.skill 为空但 env 有绑定值（绑定基准兜底）→ 以 env 值校验
-    from src.runtime.agent import _skill_consistency_gate
+    from src.domains.runtime.engine.agent import _skill_consistency_gate
     skill_dir = str(tmp_path / ".skills")
     _mk_skill(skill_dir, "caserun-prep")
     task = {"id": "t-887-env2", "skill": ""}
@@ -370,12 +370,12 @@ def test_gate_env_bound_used_when_task_skill_empty(tmp_path):
 def test_gate_scans_engine_native_dirs(tmp_path, monkeypatch):
     # seq=46108 原生缓存版回归：绑定未物化 + .skills 空 + 引擎原生缓存残留
     # casegen-prep → 门必须拒绝（不再漏检）
-    from src.runtime.agent import _skill_consistency_gate
+    from src.domains.runtime.engine.agent import _skill_consistency_gate
     skill_dir = str(tmp_path / ".skills")
     native = str(tmp_path / "native")
     os.makedirs(skill_dir, exist_ok=True)
     _mk_skill(native, "casegen-prep")
-    import src.runtime.os_adapter as osa
+    import src.domains.runtime.engine.os_adapter as osa
     monkeypatch.setattr(osa, "engine_skill_dirs", lambda name: [native])
     task = {"id": "t-887-native", "skill": "caserun-prep"}
     client = _FakeClient()
@@ -434,7 +434,7 @@ def test_direct_materialize_engine_native_leftover_refused(tmp_path, monkeypatch
     native = str(tmp_path / "native")
     os.makedirs(skill_dir, exist_ok=True)
     _mk_skill(native, "casegen-prep")
-    import src.runtime.os_adapter as osa
+    import src.domains.runtime.engine.os_adapter as osa
     monkeypatch.setattr(osa, "engine_skill_dirs", lambda name: [native])
     # 物化降级会写 FALLBACK.md（#607 权威取回优先于原生缓存判定放行）——
     # 本用例聚焦「无 FALLBACK 指引时的原生缓存残留拒绝」，屏蔽降级文件写入。
@@ -459,7 +459,7 @@ def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypat
     native = str(tmp_path / "native")
     os.makedirs(skill_dir, exist_ok=True)
     _mk_skill(native, "caserun-prep")
-    import src.runtime.os_adapter as osa
+    import src.domains.runtime.engine.os_adapter as osa
     monkeypatch.setattr(osa, "engine_skill_dirs", lambda name: [native])
     monkeypatch.setattr(sm, "write_skill_fallback", lambda *a, **k: None)
     from src.api.event_pipeline import _materialize_direct_workdir
@@ -545,7 +545,7 @@ def test_enqueue_task_overrides_spoofed_bound_skill_env():
 
 def test_aggregate_skill_consistency_counts_refusals():
     from src.session_manager import db, db_lock
-    from src.runtime.health import aggregate_skill_consistency
+    from src.domains.runtime.engine.health import aggregate_skill_consistency
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()
     with db_lock:

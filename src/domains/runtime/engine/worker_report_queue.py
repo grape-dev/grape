@@ -144,8 +144,8 @@ async def replay_pending_reports(client, queue: WorkerReportQueue):
 
 async def _replay_messages(client, queue: WorkerReportQueue, entry: dict):
     """重放单条 messages 补报条目（Issue #975 降级入队的消息）。"""
-    from src.runtime.client import ReportBatchError
-    from src.runtime.message_report import degrade_failed_batch, real_task_id
+    from src.domains.runtime.engine.client import ReportBatchError
+    from src.domains.runtime.engine.message_report import degrade_failed_batch, real_task_id
     task_id = entry.get("task_id") or ""
     # QA 复审：#msg- 键格式与入队侧共享常量/解析函数（message_report.real_task_id），
     # 消除跨模块字符串隐式耦合；优先取 task 字段，缺失时从 task_id 剥离后缀

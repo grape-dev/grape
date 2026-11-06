@@ -139,7 +139,7 @@ class TestSceneNodeRoleValidation:
     def test_role_source_single_definition(self):
         """角色全集统一引用 engine_select.KNOWN_AGENT_ROLES，避免重复定义漂移。"""
         from src.api.routes.scenes import _validate_scene_node_roles
-        from src.runtime.engine_select import KNOWN_AGENT_ROLES
+        from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
         with pytest.raises(HTTPException) as ei:
             _validate_scene_node_roles([{"id": "drift_probe_role", "tag": "x"}])
         msg = ei.value.detail["message"]
@@ -296,20 +296,20 @@ class TestNodeAgentRoleHelper:
     """Issue #955 QA 复审：id 优先、tag 兜底 helper 统一三处重复匹配逻辑。"""
 
     def test_id_first_tag_fallback(self):
-        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        from src.domains.runtime.engine.engine_select import node_agent_role, node_matches_agent_role
         node = {"id": "vod", "tag": "准备工作"}
         assert node_agent_role(node) == "vod"
         assert node_matches_agent_role(node, "vod") is True
         assert node_matches_agent_role(node, "准备工作") is True
 
     def test_tag_only_legacy_node(self):
-        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        from src.domains.runtime.engine.engine_select import node_agent_role, node_matches_agent_role
         node = {"tag": "sre"}
         assert node_agent_role(node) == "sre"
         assert node_matches_agent_role(node, "sre") is True
 
     def test_non_dict_and_empty_role(self):
-        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        from src.domains.runtime.engine.engine_select import node_agent_role, node_matches_agent_role
         assert node_agent_role("not-a-node") == ""
         assert node_matches_agent_role({"id": "vod"}, "") is False
         assert node_matches_agent_role(None, "vod") is False

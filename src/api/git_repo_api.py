@@ -831,7 +831,7 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
     # Issue #453 台账（对齐 update_pull：PR 变更入账，best-effort 不阻断）
     try:
         from src.outbound_ledger import record_outbound
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", str(number),
                         issue_number=str(issue_number))
     except Exception as _e:
@@ -869,7 +869,7 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
         # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
         try:
             from src.outbound_ledger import record_outbound
-            from src.repo_key import to_repo_key
+            from src.kernel.repo_key import to_repo_key
             record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
                             issue_number=str(number), origin_channel="api")
         except Exception as _le:

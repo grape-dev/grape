@@ -11,7 +11,7 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
-        from src.config import log
+        from src.kernel.config import log
         # Issue #380/#395: 异常原文（含 DB/SQL 错误细节）不回显给客户端
         log.warning(f"API error ({request.url.path}): {exc}")
         rid = request.scope.get("request_id", "-")

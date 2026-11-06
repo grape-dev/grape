@@ -16,7 +16,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from src.config import log
+from src.kernel.config import log
 
 # 行首锚定：仅识别冲突标记形态，避免正文提及 ">>>>>>>" 字样误报
 _CONFLICT_START_RE = re.compile(r"^<{7}( .*)?$")   # <<<<<<< HEAD / <<<<<<< feat/issue-N
@@ -180,7 +180,7 @@ def record_gate_log(repo_key: str, pr_number: int, phase: str, decision: str,
     try:
         import json
 
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute(
                 "INSERT INTO grape_t_merge_gate_log "

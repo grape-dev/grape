@@ -2844,7 +2844,7 @@ def _fn_add_agent_runtimes_role_tags() -> None:
     天然含列，同样空转。幂等：information_schema 查列，缺才 ALTER。"""
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -2882,7 +2882,7 @@ def _fn_add_agent_runtimes_model() -> None:
     附手工 ALTER（见 _migrate_tables 冻结清单）；幂等：查列缺才 ALTER。"""
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -2932,7 +2932,7 @@ def _fn_add_obs_llm_usage_engine_index() -> None:
     实测（sqlite，100 万行）38ms → 1.5ms。幂等：索引已存在即跳过。"""
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -3079,7 +3079,7 @@ def _fn_add_issue_repo_created_index() -> None:
     幂等：索引已存在即跳过。"""
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -3125,7 +3125,7 @@ def _fn_add_issue_status_priority_index() -> None:
     深页由路由偏移护栏兜底）。幂等：索引已存在即跳过。"""
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -3597,7 +3597,7 @@ def _migrate_issue_created_by():
     - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
     - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（MySQL 经 mysql_compat 翻译）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -3659,10 +3659,10 @@ def _migrate_release_subissue_unique_index():
     建索引幂等（IF NOT EXISTS / information_schema 检查）；存量脏数据冲突时记
     WARNING 不阻塞启动（前置查询仍兜一层）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -3721,7 +3721,7 @@ def _migrate_release_subissue_unique_index():
 
 def _mig_issue627_drop_legacy_production_release():
     """Issue #627 方案 C 审查修复（Optional-4）：DROP 旧库遗留旁路表（代码已无引用）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.execute("DROP TABLE IF EXISTS production_release")
         db.commit()

@@ -414,7 +414,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     try:
         from src.domains.runtime.engine.skill_materialize import (SKILL_CONSISTENCY_KEY,
                                                    skill_mismatch_error)
-        from src.runtime.task_log_stream import build_skill_source_message
+        from src.domains.runtime.engine.task_log_stream import build_skill_source_message
         _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}
         if not _sv:
             # 判定缺失（物化异常等）→ 显式降级放行 + 告警，不静默当作通过
@@ -1196,7 +1196,7 @@ def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
             (task_id,)).fetchone()
         if not row or not (row[0] or "").strip():
             return False
-        from src.runtime.health import parse_dt
+        from src.domains.runtime.engine.health import parse_dt
         _ts = parse_dt(row[0])
         if _ts is None:
             return False

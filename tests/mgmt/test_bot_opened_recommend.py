@@ -211,7 +211,7 @@ class TestT1BotIssueOpenedRecommends:
         assert _events_before == 1, "应产生 1 条 issue_opened 事件"
         # 3) 2026-11-04 反转：默认放开 → bot 建单推荐完成后重派 VOD，继续跑完整流水线
         with patch("src.api.event_store.append_event", return_value=1) as _ae, \
-             patch("src.runtime.engine_select.pick_engine", return_value=None), \
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None), \
              patch.object(ep, "_fail_event"):
             ep._redispatch_vod_after_recommend(RK, "#201", "vod",
                                                {"_bot_opened": True, "payload": {}}, 0)

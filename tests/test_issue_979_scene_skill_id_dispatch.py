@@ -337,13 +337,13 @@ def _run_hook(raw, headers, account="owner979/repo"):
         return "t_979_" + uuid.uuid4().hex[:8]
 
     _patches = [
-        patch("src.runtime.engine_select.pick_engine", return_value=0),
-        patch("src.runtime.engine_select.engine_name", return_value="opencode"),
-        patch("src.runtime.engine_select.get_scene_pool_engine_ids", return_value=""),
+        patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0),
+        patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
+        patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),
         patch("src.api.event_pipeline.is_plugin_mode", return_value=True),
-        patch("src.runtime.service.get_execution_mode", return_value="remote"),
-        patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue),
-        patch("src.runtime.service.verify_skill_materializable",
+        patch("src.domains.runtime.engine.service.get_execution_mode", return_value="remote"),
+        patch("src.domains.runtime.engine.service.enqueue_task", side_effect=_fake_enqueue),
+        patch("src.domains.runtime.engine.service.verify_skill_materializable",
               return_value=(True, "test-stub", 0)),
         patch("src.user.db.get_agent_bot_token", return_value=""),
         patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
@@ -378,7 +378,7 @@ class TestPRSubPipelineIntegration:
             _seed_pr_sub_scene(scene_id, {"id": "qa", "tag": "qa", "skill": sname,
                                           "skill_id": sid_u, "enabled": True})
             # 无关联 Issue → uid 兜底反查 _repo_user_id → 补传 user_id（Issue #979）
-            with patch("src.runtime.engine_select._repo_user_id", return_value=ua["id"]):
+            with patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=ua["id"]):
                 captured = _run_hook(_make_pr_opened_raw(pr_num=331),
                                      {"X-GitCode-Event": "Merge Request Hook"})
             assert captured, "PR 订阅应派发 qa 任务"
@@ -406,7 +406,7 @@ class TestPRSubPipelineIntegration:
             _insert_scope_skill(sname, "user", "999999")
             _seed_pr_sub_scene(scene_id, {"id": "qa", "tag": "qa", "skill": sname,
                                           "enabled": True})
-            with patch("src.runtime.engine_select._repo_user_id", return_value=0):
+            with patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=0):
                 captured = _run_hook(_make_pr_opened_raw(pr_num=332),
                                      {"X-GitCode-Event": "Merge Request Hook"})
             assert not captured, "降级解析为空 + scope 不匹配不应入队"

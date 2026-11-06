@@ -365,7 +365,7 @@ def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for rk in repo_keys or []:
         try:
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             owner, rname = split_owner_repo(rk)
         except Exception as e:
             log.warning(f"issues: attachments batch skip bad repo_key={rk}: {e}")
@@ -442,7 +442,7 @@ def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
     if issue_number is None or str(issue_number).strip() == "":
         return []
     from src.api.issues_center import _attach_list
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     for rk in repo_keys or []:
         try:
             owner, rname = split_owner_repo(rk)
@@ -464,7 +464,7 @@ def _issue_attachments_count(repo_keys: list[str], issue_number) -> int:
     if issue_number is None or str(issue_number).strip() == "":
         return 0
     from src.api.issues_center import _attach_count
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     for rk in repo_keys or []:
         try:
             owner, rname = split_owner_repo(rk)
