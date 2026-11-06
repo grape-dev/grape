@@ -17,9 +17,48 @@ its combined sweep_loop / table-maintenance, so behavior is unchanged. The four-
 servers call only their own group. Code moved verbatim from the legacy lifespan.
 """
 import asyncio
+import contextlib
+import io
 import os
 
 from src.kernel.config import log
+
+
+class _StructuredScriptOutput(io.TextIOBase):
+    """把脚本 ``print()`` 的 stdout 按行转成结构化日志。
+
+    迁移脚本（scripts.migrate_user_accounts_to_grape）在 mgmt 启动时会往 stdout 打大量
+    纯文本（[阶段 3] / [COLLISION] / [ORPHAN] ...）。Alloy 原样采集后 Loki 无法判定级别，
+    Grafana 的 grape-mgmt 面板里就出现大片 level=unknown。这里按内容分流到 INFO/WARNING，
+    保证每行都是 JSON 且带 level 字段。
+    """
+
+    _WARN_HINTS = ("COLLISION", "ORPHAN", "SCAN", "WARN", "失败", "异常", "撞号")
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def write(self, chunk: str) -> int:  # type: ignore[override]
+        self._buf += chunk
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit(line)
+        return len(chunk)
+
+    def flush(self) -> None:  # type: ignore[override]
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
+
+    def _emit(self, line: str) -> None:
+        line = line.rstrip()
+        if not line.strip():
+            return
+        message = line.strip()
+        if any(h in message for h in self._WARN_HINTS):
+            log.warning(message)
+        else:
+            log.info(message)
 
 __all__ = [
     "start_mgmt_tasks",
@@ -213,10 +252,17 @@ async def start_mgmt_tasks(app) -> dict:
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
 
-    # D32: user_accounts → grape_accounts 数据迁移（Issue #343: yield 前同步等待完成）
+    
+# D32: user_accounts → grape_accounts 数据迁移（Issue #343: yield 前同步等待完成）
     try:
         from scripts.migrate_user_accounts_to_grape import run_migration
-        await asyncio.to_thread(run_migration, False)
+
+        def _run_d32_migration() -> None:
+            # 迁移脚本的 print() 一律走结构化日志，避免 Loki 里出现 level=unknown 的裸文本
+            with contextlib.redirect_stdout(_StructuredScriptOutput()):
+                run_migration(False)
+
+        await asyncio.to_thread(_run_d32_migration)
         log.info("D32 migration completed (sync, pre-yield)")
     except Exception as e:
         log.error(f"D32 migration failed: {e}", exc_info=e)
