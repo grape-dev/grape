@@ -414,6 +414,13 @@ function _addDeviceBtnHtml() {
   document.head.appendChild(s);
 })();
 
+// Issue #1167: 是否存在用户激活的筛选条件（与 _rtClearFilters 的重置范围保持一致）
+// 空数据快速路径据此区分「筛选无结果」与「组织无引擎」两种空态。
+function _rtHasActiveFilters() {
+  return !!(_rtFilterScope || _rtFilterType || _rtFilterScene.length || _rtFilterTag.length ||
+    _runtimeSearch || (_rtRange && _rtRange !== 'all'));
+}
+
 function _renderRuntimesSkeleton(data) {
   var el = document.getElementById('pageContent');
   if (!el) return;
@@ -431,18 +438,31 @@ function _renderRuntimesSkeleton(data) {
   _addDeviceBtnHtml() +
   '</div>';
   if (isEmpty) {
-    el.innerHTML = toolbar +
-      '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
-      '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' +
-      '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_engines_title') + '</div>' +
-      '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_engines_sub') + '</div>' +
-      '</div>';
-    // 一键部署闭环（时序引导第三步）：引擎页空态引导用户打开"添加设备"——
-    // 侧边栏里有完整的凭据生成与安装命令流程；不在空态里堆命令文本。
-    // 门条件用 needs_worker（后端语义"该用户是否有可用引擎"），不用列表为空：
-    // 启动迁移会预置默认 opencode 占位行（credential_id=0）、server-metrics 会
-    // 自注册主控设备行，真实部署上两表永非空——按"列表为空"门控会让引导不可达。
-    window._rtMaybePulseAddBtn();
+    var emptyIcon = '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+    // Issue #1167: 有激活筛选时不能复用「组织无引擎」文案，也不应只留一个没有清除入口的
+    // 空面板——否则用户只能刷新页面（F5）恢复。这里渲染「筛选无结果」+ 清除入口。
+    if (_rtHasActiveFilters()) {
+      el.innerHTML = toolbar +
+        '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
+        emptyIcon +
+        '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_result_title') + '</div>' +
+        '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_result_sub') + '</div>' +
+        '<button class="bt bt-o" onclick="_rtClearFilters()" style="margin-top:4px;padding:7px 18px;font-size:13px;border-radius:8px;cursor:pointer">' + I18N.t('runtimes.empty.clear_filters') + '</button>' +
+        '</div>';
+    } else {
+      el.innerHTML = toolbar +
+        '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
+        emptyIcon +
+        '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_engines_title') + '</div>' +
+        '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_engines_sub') + '</div>' +
+        '</div>';
+      // 一键部署闭环（时序引导第三步）：引擎页空态引导用户打开"添加设备"——
+      // 侧边栏里有完整的凭据生成与安装命令流程；不在空态里堆命令文本。
+      // 门条件用 needs_worker（后端语义"该用户是否有可用引擎"），不用列表为空：
+      // 启动迁移会预置默认 opencode 占位行（credential_id=0）、server-metrics 会
+      // 自注册主控设备行，真实部署上两表永非空——按"列表为空"门控会让引导不可达。
+      window._rtMaybePulseAddBtn();
+    }
   } else {
     el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
   }
@@ -570,7 +590,7 @@ function renderRuntimes(data) {
         ${_availTags.map(t => { var c = _RT_TAG_COLORS[t]||'#999'; var sel = _rtFilterTag.indexOf(t) >= 0; return '<label style="padding:5px 10px;font-size:11px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'"><input type="checkbox" onchange="_rtToggleMulti(\'tag\',\'' + t + '\')" ' + (sel?'checked':'') + ' style="width:13px;height:13px;accent-color:' + c + '"><span style="font-size:9px;padding:1px 7px;border-radius:999px;color:#fff;background:' + c + '">' + _rtTagLabel(t) + '</span></label>'; }).join('')}
       </div>
     </div>` : ''}
-    ${(_rtFilterType || _rtFilterScope || _rtFilterScene.length || _rtFilterTag.length || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
+    ${_rtHasActiveFilters() ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
   </div>`;
   html += _summaryStatsBar(data, devices);
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);

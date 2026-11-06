@@ -72,20 +72,12 @@ function runHarness(harnessBody) {
   };
   sandbox.window = sandbox;
   sandbox.__capture = () => pageContent.innerHTML;
+  const resetFn = 'function resetFilters(){_rtFilterScope="";_rtFilterType="";_rtFilterScene=[];_rtFilterTag=[];_runtimeSearch="";_rtRange="all";}\n';
   vm.createContext(sandbox);
-  vm.runInContext(RUNTIMES_JS + '\n;(' + harnessBody + ')();', sandbox, {
+  vm.runInContext(RUNTIMES_JS + '\n;(function(){' + resetFn + '(' + harnessBody + ')();})();', sandbox, {
     filename: 'runtimes.js + harness',
   });
   return { sandbox, html: pageContent.innerHTML };
-}
-
-function resetFilters() {
-  _rtFilterScope = '';
-  _rtFilterType = '';
-  _rtFilterScene = [];
-  _rtFilterTag = [];
-  _runtimeSearch = '';
-  _rtRange = 'all';
 }
 
 // 1. 筛选态识别
@@ -115,7 +107,6 @@ function test_emptyWithFilterShowsClearEntry() {
     _runtimeTab = 'engines';
     _rtFilterType = 'opencode';
     _renderRuntimesSkeleton({ runtimes: [], devices: [], total: 0 });
-    window.__capture = __capture;
   });
   assert.ok(html.includes(ZH.empty.no_result_title), '应渲染「筛选无结果」标题');
   assert.ok(html.includes(ZH.empty.no_result_sub), '应渲染「筛选无结果」说明');
@@ -132,7 +123,6 @@ function test_emptyWithoutFilterKeepsOrgGuide() {
     resetFilters();
     _runtimeTab = 'engines';
     _renderRuntimesSkeleton({ runtimes: [], devices: [], total: 0 });
-    window.__capture = __capture;
   });
   assert.ok(html.includes(ZH.empty.no_engines_title), '应保留「暂无引擎」标题');
   assert.ok(html.includes(ZH.empty.no_engines_sub), '应保留「组织无引擎」说明');
