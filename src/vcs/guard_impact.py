@@ -91,9 +91,29 @@ def scripts_referencing(target_paths, scripts: dict) -> list[str]:
 
 
 def scan_guard_impact(target_paths, scripts: dict) -> dict:
-    """纯函数：按守卫脚本文本评估影响，返回 {scripts, breaking}。"""
-    hits = scripts_referencing(target_paths, scripts)
-    return {"scripts": hits, "breaking": bool(hits)}
+    """纯函数：按守卫脚本文本评估影响，返回 {scripts, breaking}。
+
+    性能（Issue #996 复审）：旧实现是「每个待删路径一条正则 × 每个脚本全文」，
+    10 个路径 × 300 个 100KB 脚本要做 300MB 正则匹配（实测 15.5s）。这里两点优化：
+    - 字面量预筛：needle 已被 re.escape 转义，能被正则命中的脚本必然包含该字面量，
+      不含任何 needle 文本的脚本直接跳过正则（绝大多数脚本走这条快路径）；
+    - 单条交替正则：所有 needle 合成一条，全文只扫一遍，而不是 N 条各扫一遍。
+    命中集合与旧实现完全一致（同一批 needle、同一组边界断言）。
+    """
+    needles = _reference_needles(target_paths)
+    if not needles:
+        return {"scripts": [], "breaking": False}
+    combined = re.compile("|".join(_path_pattern(n).pattern for n in needles))
+    hits = []
+    for path, text in (scripts or {}).items():
+        if not is_guard_script(path):
+            continue
+        body = (text or "").replace("\\", "/")
+        if not any(n in body for n in needles):
+            continue
+        if combined.search(body):
+            hits.append(path)
+    return {"scripts": sorted(set(hits)), "breaking": bool(hits)}
 
 
 def _decode_content(item: dict, path: str = "") -> str:

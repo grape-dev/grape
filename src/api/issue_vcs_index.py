@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from src.config import log
@@ -28,6 +29,8 @@ _MAX_PAGES = 200
 _PER_PAGE = 100
 # 索引未命中时允许逐条复核的最大候选数；超过即整体 unknown（fail-open），绝不批量确认删除。
 _CONFIRM_LIMIT = 100
+# 单条复核的并发度：串行 100 条 × 100ms 上游 ≈ 10s，并发 8 路降到 ~1.3s（Issue #995 复审）。
+_CONFIRM_WORKERS = 8
 # 存量回填每仓之间的限速（秒），避免启动期触发 VCS 限流。
 _BACKFILL_SLEEP_SECONDS = 0.2
 
@@ -61,19 +64,6 @@ def _store(repo_key: str, value: Optional[frozenset]) -> None:
     ttl = VCS_INDEX_TTL_SECONDS if value is not None else VCS_INDEX_FAILURE_TTL_SECONDS
     with _cache_lock:
         _cache[repo_key] = (time.monotonic() + ttl, value)
-
-
-def _cached_refresh(repo_key: str) -> tuple[bool, dict]:
-    with _cache_lock:
-        entry = _refresh_cache.get(repo_key)
-    if not entry:
-        return False, {}
-    expires_at, info = entry
-    if time.monotonic() >= expires_at:
-        with _cache_lock:
-            _refresh_cache.pop(repo_key, None)
-        return False, {}
-    return True, info
 
 
 def _store_refresh(repo_key: str, info: dict) -> None:
@@ -199,15 +189,23 @@ def _confirm_missing(repo_key: str, numbers: list[int]) -> tuple[set[int], set[i
     except Exception as exc:
         log.warning(f"issue_vcs_index: import fetch_issue_via_vcs failed: {exc}")
         return set(), set(numbers)
-    for num in numbers:
+
+    def _one(num: int):
         try:
             state, _ = fetch_issue_via_vcs(repo_key, num)
         except Exception:
             state = "unknown"
-        if state == "missing":
-            confirmed.add(num)
-        elif state != "exists":
-            unresolved.add(num)
+        return num, state
+
+    # Issue #995 复审：串行复核 100 条 × 上游 100ms ≈ 10s，会直接顶满首个列表请求；
+    # 并发 8 路压到 ~1.3s。ex.map 保序，返回口径与串行完全一致。
+    workers = min(_CONFIRM_WORKERS, len(numbers)) or 1
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vcs-confirm") as pool:
+        for num, state in pool.map(_one, numbers):
+            if state == "missing":
+                confirmed.add(num)
+            elif state != "exists":
+                unresolved.add(num)
     return confirmed, unresolved
 
 
@@ -289,32 +287,84 @@ def _apply_existence(repo_key: str, numbers: frozenset[int]) -> Optional[frozens
     return frozenset(unresolved)
 
 
+def _refresh_entry(repo_key: str) -> tuple[bool, dict | None]:
+    """读取刷新结果缓存，不删除过期项：返回 (是否仍在 TTL 内, 缓存值)。
+
+    过期但存在的值要留给 ``refresh_vcs_existence`` 做 stale-while-revalidate：
+    先把旧结果立刻返回，再在后台刷新（Issue #995 复审的冷刷新尖峰修复）。
+    """
+    with _cache_lock:
+        entry = _refresh_cache.get(repo_key)
+    if not entry:
+        return False, None
+    expires_at, info = entry
+    return (time.monotonic() < expires_at), info
+
+
+# 后台刷新去重：同一个 repo 同时只允许一个刷新线程，避免列表高峰把上游打爆。
+_refresh_inflight: set[str] = set()
+_inflight_lock = threading.Lock()
+
+
+def _refresh_repo(repo_key: str) -> dict:
+    """同步执行一次「拉编号 → 对齐台账 → 存缓存」，返回状态字典。"""
+    numbers = vcs_issue_numbers(repo_key)
+    if numbers is None:
+        info = {"status": "unavailable", "unresolved": frozenset()}
+    else:
+        unresolved = _apply_existence(repo_key, numbers)
+        if unresolved is None:
+            info = {"status": "unavailable", "unresolved": frozenset()}
+        else:
+            info = {"status": "ok", "unresolved": frozenset(unresolved)}
+    _store_refresh(repo_key, info)
+    return info
+
+
+def _schedule_refresh(repo_key: str) -> bool:
+    """把一次刷新丢到后台线程（去重）。返回是否真的启动了新线程。"""
+    with _inflight_lock:
+        if repo_key in _refresh_inflight:
+            return False
+        _refresh_inflight.add(repo_key)
+
+    def _run() -> None:
+        try:
+            _refresh_repo(repo_key)
+        except Exception as exc:
+            log.warning(f"issue_vcs_index: background refresh failed {repo_key}: {exc}")
+        finally:
+            with _inflight_lock:
+                _refresh_inflight.discard(repo_key)
+
+    threading.Thread(target=_run, name=f"vcs-refresh-{repo_key}"[:64], daemon=True).start()
+    return True
+
+
 def refresh_vcs_existence(repo_keys: list[str]) -> dict[str, dict]:
     """按 repo_key 刷新存在性并回写台账（仅刷新缓存 miss 时回写，避免每请求全表扫描）。
 
     返回 ``{repo_key: {"status": "ok" | "unavailable", "unresolved": frozenset[int]}}``：
     - ``ok``：已拿到编号集合并完成回写；``unresolved`` 为无法确认存在性的卡片编号；
     - ``unavailable``：无法核实或回写失败（调用方按 fail-open 不过滤该 provider 的卡片）。
+
+    缓存过期时走 stale-while-revalidate：旧结果立即返回（列表请求不等上游），
+    后台线程按 repo 去重刷新；只有从来没有缓存过的 repo 才同步刷新。
     """
     status: dict[str, dict] = {}
     for repo_key in repo_keys:
         if not repo_key:
             continue
-        hit, info = _cached_refresh(repo_key)
-        if hit:
+        fresh, info = _refresh_entry(repo_key)
+        if fresh and info is not None:
             status[repo_key] = info
             continue
-        numbers = vcs_issue_numbers(repo_key)
-        if numbers is None:
-            info = {"status": "unavailable", "unresolved": frozenset()}
-        else:
-            unresolved = _apply_existence(repo_key, numbers)
-            if unresolved is None:
-                info = {"status": "unavailable", "unresolved": frozenset()}
-            else:
-                info = {"status": "ok", "unresolved": frozenset(unresolved)}
-        _store_refresh(repo_key, info)
-        status[repo_key] = info
+        if info is not None:
+            # 过期但可用：先给旧值，后台补新值（旧值最多多存活一个刷新周期）。
+            _schedule_refresh(repo_key)
+            status[repo_key] = info
+            continue
+        status[repo_key] = _refresh_repo(repo_key)
     return status
 
 

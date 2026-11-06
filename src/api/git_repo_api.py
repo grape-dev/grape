@@ -531,8 +531,13 @@ def _normalize_milestone_states(data):
 _MILESTONE_FETCH_MAX_PAGES = 21
 
 
-def _fetch_gitcode_milestones(owner: str, repo: str, user: dict, p: str):
-    """Issue #1005：分页取全量里程碑（用于 milestone_id 的 id/number 解析）。"""
+def _fetch_gitcode_milestones(owner: str, repo: str, user: dict, p: str, want=None):
+    """Issue #1005：分页取全量里程碑（用于 milestone_id 的 id/number 解析）。
+
+    ``want`` 给定时（issues update 的解析路径）：一旦本页出现匹配的 id/number 就停止翻页，
+    把常见情形的上游往返从「整表 6~10 次」降到 1~2 次（Issue #1076 复审的延迟尖峰）。
+    未命中时仍按空页/重复页扫到底，保证「不存在」判定不被短页欺骗。
+    """
     items = []
     prev_page = None
     for page in range(1, _MILESTONE_FETCH_MAX_PAGES + 1):
@@ -548,6 +553,8 @@ def _fetch_gitcode_milestones(owner: str, repo: str, user: dict, p: str):
             break
         prev_page = data
         items.extend(_normalize_milestone_states(data))
+        if want is not None and _resolve_gitcode_milestone(items, want) is not None:
+            break
     return items
 
 
@@ -770,7 +777,7 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     # Issue #1005：milestone_id 取值口径 id 优先、number 兼容。先解析到具体里程碑，
     # 再以解析出的上游 number 写 PATCH（id 与 number 混用不再静默落空）。
     if p == "gitcode" and _want_milestone:
-        _milestones = _fetch_gitcode_milestones(owner, repo, user, p)
+        _milestones = _fetch_gitcode_milestones(owner, repo, user, p, want=body.milestone_id)
         _resolved_milestone = _resolve_gitcode_milestone(_milestones, body.milestone_id)
         if _resolved_milestone is None:
             _available = []
