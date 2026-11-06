@@ -24,7 +24,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 import pytest
 
-from src.runtime import skill_materialize as sm
+from src.domains.runtime.engine import skill_materialize as sm
 from src.domains.runtime.engine.task_log_stream import build_skill_source_message, _to_payload
 
 
@@ -477,7 +477,7 @@ def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypat
 
 def test_enqueue_task_carries_bound_skill_env():
     from src.session_manager import db, db_lock
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     tid = svc.enqueue_task(agent_session_id="sess-887", runtime_id=1,
                            prompt="p", skill="caserun-prep",
                            repo_key="gitcode:o/test887", agent_type="qa")
@@ -497,7 +497,7 @@ def test_enqueue_task_carries_bound_skill_env():
 
 
 def test_enqueue_task_bound_skill_env_empty_when_unbound():
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     from src.session_manager import db, db_lock
     tid = svc.enqueue_task(agent_session_id="sess-887", runtime_id=1,
                            prompt="p", skill="",
@@ -521,7 +521,7 @@ def test_enqueue_task_bound_skill_env_empty_when_unbound():
 
 def test_enqueue_task_overrides_spoofed_bound_skill_env():
     from src.session_manager import db, db_lock
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     tid = svc.enqueue_task(agent_session_id="sess-887", runtime_id=1,
                             prompt="p", skill="caserun-prep",
                             repo_key="gitcode:o/test887", agent_type="qa",

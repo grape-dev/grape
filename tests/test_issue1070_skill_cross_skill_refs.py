@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from src.runtime import skill_materialize as sm
+from src.domains.runtime.engine import skill_materialize as sm
 
 
 SKILL_MD_CROSS = """---

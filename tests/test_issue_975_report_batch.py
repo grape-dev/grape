@@ -13,7 +13,7 @@ import json
 import pytest
 
 from src.domains.runtime.engine.client import ReportBatchError
-from tests.test_runtime_client import _Ctx, _FakeResp, _client, _run
+from tests.runtime.test_runtime_client import _Ctx, _FakeResp, _client, _run
 
 
 # ---------- client.report_messages 三态 ----------
@@ -170,7 +170,7 @@ class TestFlushReportBatch:
         queued = []
         import src.domains.runtime.engine.agent as agent_mod
         orig_degrade = agent_mod.degrade_failed_batch if hasattr(agent_mod, "degrade_failed_batch") else None
-        from src.runtime import message_report as mr
+        from src.domains.runtime.engine import message_report as mr
         orig_split = mr.split_resend
         orig_q = agent_mod._report_queue
 
@@ -190,7 +190,7 @@ class TestFlushReportBatch:
     def test_degrade_failure_and_queue_failure_keeps_batch(self):
         """QA 复审（Spec #3）续：兜底入队也失败 → 返回 "retry" 保留 batch，绝不静默丢失。"""
         from src.domains.runtime.engine.agent import _flush_report_batch
-        from src.runtime import message_report as mr
+        from src.domains.runtime.engine import message_report as mr
         import src.domains.runtime.engine.agent as agent_mod
 
         async def policy(cli, messages):
@@ -251,7 +251,7 @@ class TestSplitResend:
 
 class TestMessagesReplay:
     def test_replay_messages_ack_dequeues(self, tmp_path):
-        from src.runtime import worker_report_queue as wrq
+        from src.domains.runtime.engine import worker_report_queue as wrq
         delivered = []
 
         class _FakeClient:
@@ -267,7 +267,7 @@ class TestMessagesReplay:
         assert delivered and delivered[0][0] == "t9"
 
     def test_replay_messages_network_error_keeps(self, tmp_path):
-        from src.runtime import worker_report_queue as wrq
+        from src.domains.runtime.engine import worker_report_queue as wrq
 
         class _FakeClient:
             async def report_messages(self, tid, messages):
@@ -280,7 +280,7 @@ class TestMessagesReplay:
         assert q.size() == 1
 
     def test_replay_messages_4xx_degrades_and_dequeues(self, tmp_path):
-        from src.runtime import worker_report_queue as wrq
+        from src.domains.runtime.engine import worker_report_queue as wrq
         delivered = []
 
         class _FakeClient:
@@ -317,7 +317,7 @@ class TestServiceSeqRange:
             db.commit()
 
     def test_seq_start_reserved_and_receipt_logged(self, caplog):
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task_id = "t_seq975"
         self._clean(task_id)
         self._make_task(task_id)
@@ -336,7 +336,7 @@ class TestServiceSeqRange:
             self._clean(task_id)
 
     def test_enqueue_async_report_sync_fallback_with_seq_start(self):
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task_id = "t_seq975"
         self._clean(task_id)
         self._make_task(task_id)
@@ -352,7 +352,7 @@ class TestServiceSeqRange:
 
     def test_report_messages_returns_actual_receipt_and_skips_non_dict(self):
         """QA 复审（Spec #1）：返回实际落库回执；非 dict 消息不占 seq、不计入回执。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task_id = "t_seq975"
         self._clean(task_id)
         self._make_task(task_id)
@@ -367,7 +367,7 @@ class TestServiceSeqRange:
 
     def test_report_messages_seq_conflict_reallocates(self):
         """QA 复审（Spec #4）：预留 seq 与已存在行撞号 → 改用 MAX+1 重试，不静默丢消息。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task_id = "t_seq975"
         self._clean(task_id)
         self._make_task(task_id)
@@ -383,7 +383,7 @@ class TestServiceSeqRange:
 
     def test_enqueue_async_report_returns_sync_receipt(self):
         """QA 复审（Spec #1）：同步兜底路径把实际落库回执透传给路由层。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task_id = "t_seq975"
         self._clean(task_id)
         self._make_task(task_id)
@@ -418,7 +418,7 @@ class TestQaReviewFixes:
 
     def test_replay_uses_real_task_id_without_task_field(self, tmp_path):
         """补报条目缺 task 字段时仍能从 task_id 剥离 #msg- 后缀得到真实 task。"""
-        from src.runtime import worker_report_queue as wrq
+        from src.domains.runtime.engine import worker_report_queue as wrq
         delivered = []
 
         class _FakeClient:
