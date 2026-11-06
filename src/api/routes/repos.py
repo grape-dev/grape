@@ -1,6 +1,8 @@
 """仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
+import json
 import os
 import re
+import time
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
@@ -2603,26 +2605,80 @@ def _strip_provider_prefix(owner: str) -> str:
     return s
 
 
+GIT_CREDENTIAL_ERROR_CODE = "GIT_CREDENTIAL_UNAVAILABLE"
+GIT_CREDENTIAL_RETRY_AFTER_S = 15
+
+# 凭据解析失败阶段：三个分支各自独立，供 CLI/运维区分故障来源（Issue #1063）
+_GIT_CREDENTIAL_STAGE_BOT = "bot_token_lookup"
+_GIT_CREDENTIAL_STAGE_USER = "user_token_refresh"
+_GIT_CREDENTIAL_STAGE_BOTH = "both_unavailable"
+_GIT_CREDENTIAL_STAGE_UNEXPECTED = "credential_resolve"
+
+
+def _credential_502_detail(stage: str, message: str = "", provider: str = "gitcode") -> dict:
+    """构造 git 凭据解析失败的 502 detail（Issue #1063：失败需可解释、可重试）。
+
+    与 Issue #455 的 _host_502_detail 同构：只回失败阶段与错误码，异常原文仅落日志，
+    不含任何 token/上游 URL 等内部信息。
+    """
+    _vcs = "GitHub" if provider == "github" else "GitCode"
+    return {
+        "code": 502,
+        "error_code": GIT_CREDENTIAL_ERROR_CODE,
+        "message": message or f"{_vcs} 仓库 token 解析失败",
+        "stage": stage,
+        "provider": provider,
+        "retryable": True,
+        "retry_after_s": GIT_CREDENTIAL_RETRY_AFTER_S,
+    }
+
+
+def _log_git_credential_failure(stage: str, provider: str, repo_key: str, user: dict,
+                                exc: Exception = None) -> None:
+    """记录 git 凭据解析失败的结构化日志（不含 token 明文）。
+
+    message 为单行 JSON，便于日志系统按 stage/error_code 检索；request_id/repo_key/
+    user_id 由 logging filter 从 ContextVar 自动补齐。
+    """
+    payload = {
+        "event": "git_credential_failed",
+        "stage": stage,
+        "error_code": GIT_CREDENTIAL_ERROR_CODE,
+        "provider": provider,
+        "repo_key": repo_key,
+        "auth_type": user.get("auth_type", ""),
+        "agent_type": user.get("agent_type", ""),
+        "error_class": type(exc).__name__ if exc else "",
+        "error": (str(exc)[:200] if exc else ""),
+    }
+    log.warning("git_credential_failed " + json.dumps(payload, ensure_ascii=False))
+
+
 def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
     """平台 token 解析（仅会话级临时 token tk_；用户 API Key / Web JWT 不适用）。
 
     chat agent → 用户 token；devops 事件 agent → 仓库 bot token；一种缺失交叉回退；均缺失 502。
+    Issue #1063：分别记录 bot 读取异常 / user 刷新异常 / 两者均空，失败响应带 stage 与错误码。
     """
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
     from src.repo_key import to_repo_key
 
+    # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
+    # 禁止再手工拼前缀，否则会得到双前缀导致 managed_repos 精确匹配不到 → 502。
+    rk = to_repo_key(f"{owner}/{repo}", provider=provider)
+    _start = time.monotonic()
+
+    def _fail(stage: str, exc: Exception):
+        return "", stage, exc
+
     if provider == "github":
-        # Issue #466: owner 段可带 github: 前缀（跨平台关联仓换券）；用 to_repo_key(f"{owner}/{repo}")
-        # 带前缀时幂等（单前缀），裸 owner 时补 github: 前缀——禁止再拼 f"github:{owner}/..." 否则
-        # owner 已带前缀时得到 github:github:owner/repo 双前缀，精确匹配 managed_repos 查不到 → 502。
-        rk = to_repo_key(f"{owner}/{repo}", provider="github")
         def _bot():
             try:
                 from src.user.db import get_github_token
-                return get_github_token(repo_key=rk) or ""
-            except Exception:
-                return ""
+                return get_github_token(repo_key=rk) or "", "", None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
         def _user():
             try:
                 from src.api.deps import get_user_github_token_with_refresh
@@ -2630,17 +2686,16 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 if not username and user.get("id", 0) > 0:
                     from src.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(user["id"]) or {}).get("username", "")
-                return get_user_github_token_with_refresh(username, user_id=user.get("id", 0)) or ""
-            except Exception:
-                return ""
+                return get_user_github_token_with_refresh(username, user_id=user.get("id", 0)) or "", "", None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
     else:
-        rk = to_repo_key(f"{owner}/{repo}")
         def _bot():
             try:
                 from src.user.db import get_gitcode_token
-                return get_gitcode_token(repo_key=rk) or ""
-            except Exception:
-                return ""
+                return get_gitcode_token(repo_key=rk) or "", "", None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
         def _user():
             try:
                 from src.api.deps import get_user_token_with_refresh
@@ -2649,22 +2704,34 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 if not username and uid > 0:
                     from src.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(uid) or {}).get("username", "")
-                return get_user_token_with_refresh(username, user_id=uid)
-            except Exception:
-                return ""
+                return get_user_token_with_refresh(username, user_id=uid) or "", "", None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
 
     if user.get("agent_type") == "chat":
-        tok = _user()
+        tok, stage, exc = _user()
         if not tok:
-            tok = _bot()
+            alt, alt_stage, alt_exc = _bot()
+            tok = alt
+            if not tok and not stage:
+                stage, exc = alt_stage, alt_exc
     else:
-        tok = _bot()
+        tok, stage, exc = _bot()
         if not tok:
-            tok = _user()
+            alt, alt_stage, alt_exc = _user()
+            tok = alt
+            if not tok and not stage:
+                stage, exc = alt_stage, alt_exc
     if tok:
+        log.debug("git_credential_ok " + json.dumps({
+            "provider": provider, "repo_key": rk,
+            "auth_type": user.get("auth_type", ""), "agent_type": user.get("agent_type", ""),
+            "duration_ms": round((time.monotonic() - _start) * 1000),
+        }, ensure_ascii=False))
         return tok
-    _vcs = "GitHub" if provider == "github" else "GitCode"
-    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_vcs} 仓库 token 解析失败"})
+    stage = stage or _GIT_CREDENTIAL_STAGE_BOTH
+    _log_git_credential_failure(stage, provider, rk, user, exc)
+    raise HTTPException(status_code=502, detail=_credential_502_detail(stage, provider=provider))
 
 
 @router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
@@ -2677,17 +2744,26 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
 
     gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
     Issue #466：owner 段可带 provider 前缀（跨平台关联仓换券）；clone_url 用裸 owner/repo。
+    Issue #1063：未预期异常记录 stage 后交给全局 handler（500 + request_id）。
     """
-    token = _repo_platform_token(owner, repo, user, p)
-    _gh = "github.com" if p == "github" else "gitcode.com"
-    _o = _strip_provider_prefix(owner)
-    return {
-        "provider": p,
-        "username": "x-access-token",
-        "password": token,
-        "clone_url": f"https://{_gh}/{_o}/{repo}.git",
-        "expires_in": _CREDENTIAL_TTL,
-    }
+    try:
+        token = _repo_platform_token(owner, repo, user, p)
+        _gh = "github.com" if p == "github" else "gitcode.com"
+        _o = _strip_provider_prefix(owner)
+        return {
+            "provider": p,
+            "username": "x-access-token",
+            "password": token,
+            "clone_url": f"https://{_gh}/{_o}/{repo}.git",
+            "expires_in": _CREDENTIAL_TTL,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        from src.repo_key import to_repo_key
+        _log_git_credential_failure(_GIT_CREDENTIAL_STAGE_UNEXPECTED, p,
+                                    to_repo_key(f"{owner}/{repo}", provider=p), user, e)
+        raise
 
 
 @router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)", description="Returns the grape-managed local workspace path for the repository (CLI local git on the server). Session-only.")
