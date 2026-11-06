@@ -33,10 +33,8 @@ MANIFEST = [
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
     "src/kernel/",
-    # 历史导入路径兼容包：worker 侧仍有 from src.domains.runtime.engine.<module> 的懒导入
-    # （message_report / client / health / engine_select / task_log_stream / os_adapter），
-    # 包内缺这个目录会在任务执行期 ModuleNotFoundError（远程 worker 零产出被判死）。
-    "src/runtime/",
+    # 历史导入路径 src.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
+    # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
     "src/config.py",
     "src/repo_key.py",
