@@ -106,7 +106,8 @@ def enrich_event_files(evt: dict, repo_key: str, token: str = "",
                 try:
                     from src.user.db import get_repo_token_with_refresh
                     token = get_repo_token_with_refresh(repo_key) or ""
-                except Exception:
+                except Exception as e:
+                    log.warning(f"files enrich: get repo token failed repo={repo_key}: {e}")
                     token = ""
             if not token:
                 return normalize_files({})

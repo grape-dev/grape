@@ -4,6 +4,7 @@ from datetime import datetime
 from src.session_manager import db, db_lock
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.api.event_payload_view import payload_view_from_json
 
 # ====== Per-repo 锁（从旧 event_processor 迁移）======
 # 2026-08-16 事故修复：由 threading.Lock 改为 asyncio.Lock。
@@ -762,13 +763,7 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
                     "completed_at": normalize_event_time(r[14] or ""),
                 }
                 if include_payload:
-                    from src.api.event_payload_view import payload_view
-                    try:
-                        _p = json.loads(r[15]) if r[15] else {}
-                    except Exception as e:
-                        log.warning(f"get_events: payload parse failed seq={r[0]}: {e}")
-                        _p = {}
-                    item.update(payload_view(_p))
+                    item.update(payload_view_from_json(r[15], seq=r[0]))
                 out.append(item)
             return out
         except Exception:

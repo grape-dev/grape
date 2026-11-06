@@ -81,12 +81,15 @@ def clean_issue_artifacts(scope: ArtifactScope, *,
                     f"repo={scope.repo_key} ref={scope.ref} issue={scope.issue_number} "
                     f"scripts={impact.get('scripts')}")
         return {"deleted": [], "skipped": paths, "guard_impact": impact}
-    if remover is not None:
-        try:
-            remover(pre["targets"])
-        except Exception as e:
-            log.warning(f"artifact cleanup remover failed repo={scope.repo_key}: {e}")
-            return {"deleted": [], "skipped": paths, "error": str(e)[:200]}
+    if remover is None:
+        log.warning(f"artifact cleanup skipped: no remover injected "
+                    f"repo={scope.repo_key} ref={scope.ref} issue={scope.issue_number}")
+        return {"deleted": [], "skipped": paths, "noop": True}
+    try:
+        remover(pre["targets"])
+    except Exception as e:
+        log.warning(f"artifact cleanup remover failed repo={scope.repo_key}: {e}")
+        return {"deleted": [], "skipped": paths, "error": str(e)[:200]}
     return {"deleted": paths, "skipped": []}
 
 

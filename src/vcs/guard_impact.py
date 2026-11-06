@@ -25,18 +25,21 @@ GUARD_PATTERNS = ("check-*.sh", "check-*.py")
 # 一次读取守卫文件的大小上限（防止超大脚本拖垮内存）
 _MAX_SCRIPT_BYTES = 1024 * 1024
 _MAX_PAGES = 10
+_MAX_DIR_DEPTH = 5
 
 
 def is_guard_script(path: str) -> bool:
-    """相对路径是否属于守卫脚本（scripts/check-* 或 tests/check-*）。"""
+    """相对路径是否属于守卫脚本（scripts/**/check-* 或 tests/**/check-*）。
+
+    顶层目录必须是守卫目录，文件名可在任意嵌套层级（如 scripts/ci/check-*.sh）。
+    """
     p = (path or "").replace("\\", "/").removeprefix("./")
-    parts = p.split("/")
+    parts = [part for part in p.split("/") if part]
     if len(parts) < 2:
         return False
-    directory = parts[-2]
-    name = parts[-1]
-    if directory not in GUARD_DIRS:
+    if parts[0] not in GUARD_DIRS:
         return False
+    name = parts[-1]
     return any(fnmatch.fnmatch(name, pat) for pat in GUARD_PATTERNS)
 
 
@@ -58,9 +61,17 @@ def _reference_needles(target_paths) -> list[str]:
 
 
 def _path_pattern(needle: str):
-    """路径引用匹配：两侧加边界，避免 docs/issue-996 误命中 docs/issue-9960。"""
-    return re.compile(
-        r"(?<![A-Za-z0-9_./-])" + re.escape(needle) + r"(?![A-Za-z0-9_-])")
+    """路径引用匹配（保守优先）。
+
+    - 前置边界允许 `/`：覆盖 `./docs/...`、`$ROOT/docs/...`、绝对路径等写法；
+    - 非目录 needle 的后置边界排除 `.`：避免 `docs/issue-996` 误命中
+      `docs/issue-996.md` / `docs/issue-996.tar.gz` 这类无关文件；
+    - 目录 needle（以 `/` 结尾）不加后置边界，允许其下任意文件引用。
+    """
+    escaped = re.escape(needle)
+    prefix = r"(?<![A-Za-z0-9_.-])"
+    suffix = "" if needle.endswith(("/", "*")) else r"(?![A-Za-z0-9_.-])"
+    return re.compile(prefix + escaped + suffix)
 
 
 def scripts_referencing(target_paths, scripts: dict) -> list[str]:
@@ -73,7 +84,7 @@ def scripts_referencing(target_paths, scripts: dict) -> list[str]:
     for path, text in (scripts or {}).items():
         if not is_guard_script(path):
             continue
-        body = text or ""
+        body = (text or "").replace("\\", "/")
         if any(pat.search(body) for pat in patterns):
             hits.append(path)
     return sorted(set(hits))
@@ -115,7 +126,24 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
         return {}
 
     scripts: dict = {}
-    for directory in GUARD_DIRS:
+
+    def _fetch_content(path: str) -> str:
+        try:
+            detail = _vcs_req(
+                p, "GET",
+                _vcs_url(owner, repo, f"/contents/{path}", {"ref": ref}, p),
+                token)
+        except Exception as e:
+            log.warning(f"guard impact: fetch content failed path={path} "
+                        f"repo={repo_key} ref={ref}: {e}")
+            return ""
+        if not isinstance(detail, dict):
+            return ""
+        return _decode_content(detail, path)
+
+    def _walk(directory: str, depth: int) -> None:
+        if depth > _MAX_DIR_DEPTH:
+            return
         for page in range(1, _MAX_PAGES + 1):
             try:
                 items = _vcs_req(p, "GET",
@@ -131,25 +159,20 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
                 if not isinstance(item, dict):
                     continue
                 path = item.get("path") or ""
+                if item.get("type") == "dir":
+                    if path:
+                        _walk(path, depth + 1)
+                    continue
                 if not is_guard_script(path):
                     continue
-                text = _decode_content(item, path)
-                if not text:
-                    try:
-                        detail = _vcs_req(
-                            p, "GET",
-                            _vcs_url(owner, repo, f"/contents/{path}", {"ref": ref}, p),
-                            token)
-                        if isinstance(detail, dict):
-                            text = _decode_content(detail, path)
-                    except Exception as e:
-                        log.warning(f"guard impact: fetch content failed path={path} "
-                                    f"repo={repo_key} ref={ref}: {e}")
-                        text = ""
+                text = _decode_content(item, path) or _fetch_content(path)
                 if text:
                     scripts[path] = text
             if len(items) < 100:
                 break
+
+    for directory in GUARD_DIRS:
+        _walk(directory, 0)
     return scripts
 
 

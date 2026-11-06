@@ -252,3 +252,48 @@ def test_guard_impact_helpers():
         {"tests/check-docs.sh": "cat docs/issue-996/*", "scripts/check-all.sh": "echo ok"},
     )
     assert impact == {"scripts": ["tests/check-docs.sh"], "breaking": True}
+
+def test_guard_matching_accepts_prefixed_references():
+    target = ["docs/issue-996/spec.md"]
+    for ref in (
+        "test -f ./docs/issue-996/spec.md",
+        "test -f $ROOT/docs/issue-996/spec.md",
+        "test -f /home/u/r/docs/issue-996/spec.md",
+        "rm -rf ./docs/issue-996/",
+        "cat ../repo/docs/issue-996/spec.md",
+    ):
+        impact = scan_guard_impact(target, {"scripts/check-docs.sh": ref})
+        assert impact == {"scripts": ["scripts/check-docs.sh"], "breaking": True}, ref
+
+
+def test_guard_matching_rejects_unrelated_sibling_paths():
+    target = ["docs/issue-996/spec.md"]
+    for ref in (
+        "test -f docs/issue-996.md",
+        "test -f docs/issue-996.tar.gz",
+        "test -f docs/issue-9960/spec.md",
+        "test -f notdocs/issue-996/spec.md",
+    ):
+        impact = scan_guard_impact(target, {"scripts/check-docs.sh": ref})
+        assert impact == {"scripts": [], "breaking": False}, ref
+
+
+def test_nested_guard_scripts_are_scanned():
+    assert is_guard_script("scripts/ci/check-docs.sh")
+    assert is_guard_script("tests/integration/check-api.py")
+    assert not is_guard_script("scripts/ci/deploy.sh")
+    assert not is_guard_script("src/scripts/check-docs.sh")
+    impact = scan_guard_impact(
+        ["docs/issue-996/spec.md"],
+        {"scripts/ci/check-docs.sh": "cat ./docs/issue-996/spec.md"},
+    )
+    assert impact == {"scripts": ["scripts/ci/check-docs.sh"], "breaking": True}
+
+
+def test_cleanup_without_remover_reports_noop():
+    result = clean_issue_artifacts(
+        _scope(), targets=["docs/issue-996/spec.md"], scripts={},
+    )
+    assert result["deleted"] == []
+    assert result["skipped"] == ["docs/issue-996/spec.md"]
+    assert result["noop"] is True
