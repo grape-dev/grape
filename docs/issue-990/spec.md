@@ -29,11 +29,16 @@
 
 ### 实现路径
 1. `src/api/auth_token.py`
-   - 新增 `rotate_session_token()`：先过期同一 `session_key` 的旧 token，再签发新 token。
+   - 新增 `rotate_session_token()`：在同一事务内先过期同一 `session_key` 的旧 token、再
+     签发新 token；失败回滚并抛出，避免旧 token 已作废但新 token 未落库的半状态。
    - 新增 `SESSION_TOKEN_RECOVERY_HINT`：401 恢复指引文案。
 2. `src/runtime/service.py`
-   - 新增 `sync_task_session_token(task_id)`：读取任务快照，校验 token（session_key /
-     repo_key / agent_type 匹配且未过期）；有效则原样返回，否则轮换并回写 `env_extra`。
+   - 新增 `sync_task_session_token(task_id)`：以数据库写事务串行化（SQLite `BEGIN IMMEDIATE` /
+     MySQL `SELECT ... FOR UPDATE`）后读取任务快照，校验 token（session_key / repo_key /
+     agent_type 匹配且未过期）；有效则原样返回，否则在同一事务内轮换并回写 `env_extra`，
+     任一步失败回滚，不返回未落库 token。
+   - 新增 `session_token_for_execution()`：direct 路径优先复用/同步快照 token；有任务行但
+     同步失败时不另签未回写快照的 token，避免运行时注入与快照漂移。
 3. `src/api/routes/runtime.py`
    - `runtime_task_env` 在原有 AK/SK 实时刷新之外，返回 `sync_task_session_token` 的结果，
      使 worker 执行时的运行时 env 与快照一致。

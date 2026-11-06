@@ -738,6 +738,11 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
 
     Workers call this before executing to get fresh credentials,
     instead of relying on the env_extra snapshot from task creation time.
+
+    Issue #990: this endpoint is idempotent for a valid snapshot token, but may
+    rotate the session token and persist it back to ``agent_tasks.env_extra``
+    when the snapshot token is expired or out of scope. The returned env and
+    the persisted snapshot are committed atomically by ``sync_task_session_token``.
     """
     from src.session_manager import db, db_lock
     from src.runtime.service import _collect_server_env, sync_task_session_token

@@ -1602,7 +1602,7 @@ def get_task(task_id) -> dict | None:
     return dict(zip(_cols, row)) if row else None
 
 
-def sync_task_session_token(task_id: str, *, force_rotate: bool = False) -> str:
+def sync_task_session_token(task_id: str) -> str:
     """同步任务的会话 token：保证 shell 环境快照与运行时注入值一致（Issue #990）。
 
     `agent_tasks.env_extra` 是任务创建时的 shell 环境快照；运行时进程执行前会经
@@ -1611,69 +1611,114 @@ def sync_task_session_token(task_id: str, *, force_rotate: bool = False) -> str:
 
     规则：
     - 快照 token 有效（session_key / repo_key / agent_type 匹配且未过期）→ 原样返回，不轮换；
-    - 失效、作用域不匹配或 force_rotate → 先作废旧 token 再签发新 token，并回写
+    - 失效或作用域不匹配 → 在同一事务内作废旧 token、签发新 token 并回写
       `agent_tasks.env_extra`，使快照与运行时注入值保持一致。
 
-    返回同步后的 token；任务不存在或无仓库/agent 上下文时返回空串。
+    跨进程原子性：SQLite 用 ``BEGIN IMMEDIATE`` 先取写锁，MySQL 用 ``SELECT ... FOR UPDATE``
+    锁任务行（服务端以多 worker 运行，线程级 ``db_lock`` 不足以覆盖跨进程竞争）。过期、
+    签发、快照回写共享同一事务；任一步失败即回滚并返回空串，绝不返回未落库的新 token。
+
+    返回同步后的 token；任务不存在、无仓库/agent 上下文或持久化失败时返回空串。
     """
     if not task_id:
         return ""
     from src.api.auth_token import verify_session_token, rotate_session_token
+    from src.session_manager import _is_mysql_backend
+    is_mysql = _is_mysql_backend()
     with db_lock:
         c = db.cursor()
         try:
-            row = c.execute(
-                "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
-                (task_id,),
-            ).fetchone()
-        except Exception as e:
-            log.warning(f"sync_task_session_token: read task {task_id} failed: {e}")
-            return ""
-        if not row:
-            return ""
-        repo_key, agent_type = (row[0] or ""), (row[1] or "")
-        try:
-            user_id = int(row[2] or 0)
-        except (TypeError, ValueError):
-            user_id = 0
-        try:
-            env = json.loads(row[3] or "{}")
-        except Exception:
-            env = {}
-        if not isinstance(env, dict):
-            env = {}
-        if not repo_key or not agent_type:
-            return ""
+            # 先串行化同任务的并发同步：SQLite 取库级写锁，MySQL 锁任务行。
+            if is_mysql:
+                row = c.execute(
+                    "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=? FOR UPDATE",
+                    (task_id,),
+                ).fetchone()
+            else:
+                try:
+                    c.execute("BEGIN IMMEDIATE")
+                except Exception as e:
+                    # 已有事务时沿用当前事务；否则无法建立写锁 → 放弃本轮同步，避免无锁写。
+                    if "within a transaction" not in str(e).lower():
+                        raise
+                row = c.execute(
+                    "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
+                    (task_id,),
+                ).fetchone()
+            if not row:
+                db.commit()
+                return ""
+            repo_key, agent_type = (row[0] or ""), (row[1] or "")
+            try:
+                user_id = int(row[2] or 0)
+            except (TypeError, ValueError):
+                user_id = 0
+            try:
+                env = json.loads(row[3] or "{}")
+            except Exception:
+                env = {}
+            if not isinstance(env, dict):
+                env = {}
+            if not repo_key or not agent_type:
+                db.commit()
+                return ""
 
-        snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
-        info = verify_session_token(snapshot_token) if snapshot_token else None
-        token_ok = bool(
-            info
-            and info.get("session_key") == task_id
-            and info.get("repo_key") == repo_key
-            and info.get("agent_type") == agent_type
-        )
-        if token_ok and not force_rotate:
-            return snapshot_token
+            snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
+            info = verify_session_token(snapshot_token) if snapshot_token else None
+            token_ok = bool(
+                info
+                and info.get("session_key") == task_id
+                and info.get("repo_key") == repo_key
+                and info.get("agent_type") == agent_type
+            )
+            if token_ok:
+                db.commit()
+                return snapshot_token
 
-        try:
             new_token = rotate_session_token(
                 session_key=task_id, repo_key=repo_key,
-                agent_type=agent_type, user_id=user_id)
-        except Exception as e:
-            log.warning(f"sync_task_session_token: rotate token failed for {task_id}: {e}")
-            return ""
-        env["GRAPE_SESSION_TOKEN"] = new_token
-        env.setdefault("GRAPE_CLI_MODE", "WORKER")
-        try:
+                agent_type=agent_type, user_id=user_id, commit=False)
+            env["GRAPE_SESSION_TOKEN"] = new_token
+            env.setdefault("GRAPE_CLI_MODE", "WORKER")
             c.execute(
                 "UPDATE agent_tasks SET env_extra=? WHERE id=?",
                 (json.dumps(env, ensure_ascii=False), task_id),
             )
             db.commit()
+            return new_token
         except Exception as e:
-            log.warning(f"sync_task_session_token: persist snapshot failed for {task_id}: {e}")
-        return new_token
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"sync_task_session_token: sync failed for {task_id}: {e}")
+            return ""
+
+
+def session_token_for_execution(task_id: str, *, session_key_fallback: str,
+                                repo_key: str, agent_type: str,
+                                user_id: int = 0) -> str:
+    """direct 执行前的 token 解析：优先复用/同步任务快照，绝不制造未落库 token。
+
+    - 有任务行：走 ``sync_task_session_token``，失败时返回空串（不另签未回写快照的 token，
+      否则运行时注入值与 shell 环境快照再次漂移，正是 #990 的症状）；
+    - 无任务行（如纯 direct 会话）：按 ``session_key_fallback`` 新签。
+    """
+    if task_id:
+        token = sync_task_session_token(task_id)
+        if token:
+            return token
+        if get_task(task_id) is not None:
+            log.warning(f"session_token_for_execution: task {task_id} snapshot sync failed; "
+                        "skip issuing an unpersisted token")
+            return ""
+        session_key = task_id
+    else:
+        session_key = session_key_fallback
+    from src.api.auth_token import issue_session_token
+    return issue_session_token(
+        session_key=session_key, repo_key=repo_key,
+        agent_type=agent_type, user_id=user_id)
 
 
 def lookup_task_by_event_seq(runtime_id: int, event_seq: int) -> dict | None:

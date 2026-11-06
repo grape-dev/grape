@@ -66,29 +66,43 @@ def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
 
 
 def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
-                         user_id: int = 0, ttl: int = SESSION_TOKEN_TTL) -> str:
-    """轮换会话 token：先作废同一 session_key 的旧 token，再签发新 token。
+                         user_id: int = 0, ttl: int = SESSION_TOKEN_TTL,
+                         commit: bool = True) -> str:
+    """轮换会话 token：同一事务内先作废旧 token、再签发新 token。
 
     Issue #990：会话 token 轮换时若只签发新 token、不刷新 shell 环境快照
     （agent_tasks.env_extra），Agent 会继续用旧快照 token 调 grape → 全量 401。
-    调用方（service.sync_task_session_token）负责在同一处把新 token 回写快照。
+    调用方（service.sync_task_session_token）用 ``commit=False`` 把「轮换 + 快照回写」
+    放进同一事务，避免过期/签发/回写分步提交导致跨进程交错误伤新 token。
+
+    任一步失败即回滚并抛出，保证不会出现「旧 token 已作废、新 token 未落库」的半状态。
     """
+    token = SESSION_TOKEN_PREFIX + secrets.token_urlsafe(32)
     now = _now()
-    try:
-        with db_lock:
-            c = db.cursor()
+    with db_lock:
+        c = db.cursor()
+        try:
             # 只提前作废仍有效的旧 token；已过期行保持原样（purge 清理）
             c.execute(
                 "UPDATE session_api_tokens SET expires_at=? "
                 "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
                 (now, session_key, now),
             )
-            db.commit()
-    except Exception as e:
-        log.warning(f"Rotate session token (expire old) failed for {session_key}: {e}")
-    return issue_session_token(
-        session_key=session_key, repo_key=repo_key,
-        agent_type=agent_type, user_id=user_id, ttl=ttl)
+            c.execute(
+                "INSERT INTO session_api_tokens (session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, _sha256(token), now + ttl),
+            )
+            if commit:
+                db.commit()
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"Rotate session token failed for {session_key}: {e}")
+            raise
+    return token
 
 
 def verify_session_token(token: str) -> dict | None:
