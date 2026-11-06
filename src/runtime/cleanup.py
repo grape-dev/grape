@@ -632,6 +632,8 @@ def sweep_once() -> int:
             cleaned += purge_stale_instances(older_than_hours=24)
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
+        # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
+        cleaned += _sweep_branch_guard_state()
 
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
@@ -693,6 +695,21 @@ def sweep_once() -> int:
         return cleaned
     except Exception as e:
         log.warning(f"sweep_once failed: {e}")
+        return 0
+
+
+
+def _sweep_branch_guard_state() -> int:
+    """Issue #993 R9：按 updated_at TTL 清理 branch_guard_state（每分支一行、只增不减）。
+
+    MySQL 后端下不能放在 `_has_db_tables` 判定块里（sqlite_master 检测恒 False）。
+    有 pending 候选的行由 prune_guard_state 保留，避免漏一次漂移比对。
+    """
+    try:
+        from src.runtime.branch_guard import prune_guard_state
+        return prune_guard_state()
+    except Exception as e:
+        log.debug(f"sweeper branch-guard prune skipped: {e}")
         return 0
 
 
@@ -943,6 +960,8 @@ def sweep_events_once() -> int:
             cleaned += purge_stale_instances(older_than_hours=24)
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
+        # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
+        cleaned += _sweep_branch_guard_state()
 
         from src.runtime import repogit
         if _has_db_tables:

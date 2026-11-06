@@ -23,9 +23,23 @@ import shlex
 import subprocess
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from src.config import log
+class _LazyLog:
+    """惰性日志代理（Issue #993 R8）。
+
+    ``src.config`` 的 import 链约 74~113ms（urllib3/urllib.request 等）。pre-push 钩子是
+    每次 push 起一个新进程，若在模块顶层 import config，即使本次没有任何 refs/heads/
+    （tag 推送、删分支、空 stdin）也要付这笔钱。改成按需取 logger 后，钩子的快路径
+    不再触发 config 链；真正要判分支时 ``src.lock`` 仍会导入 config，那是必要成本。
+    """
+
+    def __getattr__(self, name):
+        from src.config import log as _log
+        return getattr(_log, name)
+
+
+log = _LazyLog()
 
 LEASE_PREFIX = "branch_guard:"
 DEFAULT_TTL = 1800  # 30 分钟；租约仅覆盖一次写窗口，过期自动释放
@@ -113,6 +127,36 @@ def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
     except Exception as e:
         log.warning(f"branch guard state write failed {repo_key}:{head_branch}: {e}")
     return state
+
+
+def prune_guard_state(older_than_days: int = 90) -> int:
+    """清理长期未更新的分支守卫状态行（Issue #993 R9）。
+
+    ``branch_guard_state`` 每个 (repo_key, head_branch) 一行、只增不减：实测 171 字节/行，
+    1 万用户按每月 10 个分支估算 ≈10 万行/月（约 17MB/月）。按 ``updated_at`` 做 TTL 清理，
+    有 pending 候选的行不删（那是 pre-push 钩子等待 reconcile 的状态，删了会漏一次漂移比对）。
+
+    返回删除行数；任何异常只告警，不影响 sweeper。
+    """
+    if older_than_days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "DELETE FROM branch_guard_state WHERE updated_at != '' AND updated_at < ? "
+                "AND COALESCE(pending_expected_sha, '') = ''",
+                (cutoff,))
+            n = c.rowcount if isinstance(c.rowcount, int) and c.rowcount > 0 else 0
+            db.commit()
+        if n:
+            log.info(f"branch guard state pruned: {n} row(s) older than {older_than_days}d")
+        return n
+    except Exception as e:
+        log.warning(f"branch guard state prune failed: {e}")
+        return 0
 
 
 def record_remote_sha(repo_key: str, head_branch: str, remote_sha: str) -> dict:
@@ -284,9 +328,26 @@ def check_push_allowed(repo_key: str, head_branch: str, *, remote_sha: str = "",
 
 
 def preflight_push(repo_key: str, head_branch: str, token: str = "") -> dict:
-    """服务端 push 前置检查：查远端 head + PR 状态后调用 ``check_push_allowed``。"""
-    remote_sha = resolve_remote_head(repo_key, head_branch, token=token)
-    pr = fetch_pr_state(repo_key, head_branch, token=token)
+    """服务端 push 前置检查：查远端 head + PR 状态后调用 ``check_push_allowed``。
+
+    两次上游查询互不依赖（ls-remote / PR 列表），并发执行把 push 前置延迟从
+    「a+b」降到「max(a,b)」——实测打桩 100ms+200ms 时 300ms → ~201ms。
+    两者异常各自 fail-open（``resolve_remote_head`` 返回空、``fetch_pr_state`` 返回空状态）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="bg-preflight") as pool:
+        f_remote = pool.submit(resolve_remote_head, repo_key, head_branch, token)
+        f_pr = pool.submit(fetch_pr_state, repo_key, head_branch, token)
+        try:
+            remote_sha = f_remote.result()
+        except Exception as e:
+            log.warning(f"branch guard ls-remote task failed {repo_key}:{head_branch}: {e}")
+            remote_sha = ""
+        try:
+            pr = f_pr.result()
+        except Exception as e:
+            log.warning(f"branch guard PR task failed {repo_key}:{head_branch}: {e}")
+            pr = {"state": ""}
     expected = reconcile_pending(repo_key, head_branch, remote_sha)
     verdict = check_push_allowed(
         repo_key, head_branch,
@@ -482,8 +543,19 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             except Exception:
                 pass
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        code = (f"import sys; sys.path.insert(0, {json.dumps(root)}); "
-                f"from src.runtime.branch_guard import hook_main; sys.exit(hook_main())")
+        # Issue #993 R8：钩子按文件路径直接加载本模块，绕过 src/runtime/__init__.py 的
+        # 重型依赖链（base/opencode/service/engine_select …，实测 115ms）。钩子的快路径
+        # （tag 推送、删分支、空 stdin）因此从 ~290ms 降到 ~40ms；真正要判分支时
+        # src.lock/session_manager 仍会导入 config，那是必要成本。
+        module_path = os.path.join(root, "src", "runtime", "branch_guard.py")
+        code = (
+            "import sys, importlib.util; "
+            f"sys.path.insert(0, {json.dumps(root)}); "
+            f"_spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
+            "_m = importlib.util.module_from_spec(_spec); "
+            "\ntry: _spec.loader.exec_module(_m)\nexcept Exception: sys.exit(0) "
+            "\nsys.exit(_m.hook_main())"
+        )
         interpreter = sys.executable or "python3"
         lines = [
             "#!/bin/sh",
