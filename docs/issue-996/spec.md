@@ -24,7 +24,9 @@
 - [x] push / PR merged / PR updated payload 含 `files{added,modified,deleted}`；
 - [x] 超阈值 `truncated=true` 且 deleted 全量保留；
 - [x] QA 上下文输出被删文件清单，可增量复核；
-- [x] 守卫引用待删路径时跳过删除并标注 `guard_impact{breaking=true}`；
-- [x] 无守卫引用时照常清理、不产生 guard_impact；
+- [ ] 守卫引用待删路径时跳过删除并标注 `guard_impact{breaking=true}`
+      —— 预检函数已实现并有单测，但平台内无 `docs/issue-*` 删除链路，
+      待 devdzr-merge-bot 按 `contract-devdzr-merge-bot.md` 接线后达成；
+- [ ] 无守卫引用时照常清理、不产生 guard_impact（同上，待跨仓接线）；
 - [x] pipeline 事件可查看 files / guard_impact；
 - [x] 现有测试通过 + 新增单测覆盖五类场景。

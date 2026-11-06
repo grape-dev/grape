@@ -16,6 +16,7 @@ import fnmatch
 import re
 
 from src.config import log
+from src.repo_key import parse_repo_key
 
 # 守卫脚本目录与文件名模式（只扫脚本目录，避免整仓遍历）
 GUARD_DIRS = ("scripts", "tests")
@@ -84,13 +85,14 @@ def scan_guard_impact(target_paths, scripts: dict) -> dict:
     return {"scripts": hits, "breaking": bool(hits)}
 
 
-def _decode_content(item: dict) -> str:
+def _decode_content(item: dict, path: str = "") -> str:
     content = item.get("content")
     if not isinstance(content, str) or not content:
         return ""
     try:
         raw = base64.b64decode(content)
-    except Exception:
+    except Exception as e:
+        log.warning(f"guard impact: decode content failed path={path}: {e}")
         return ""
     if len(raw) > _MAX_SCRIPT_BYTES:
         raw = raw[:_MAX_SCRIPT_BYTES]
@@ -105,15 +107,12 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
     """
     from src.api.git_repo_api import _vcs_req, _vcs_url
 
-    raw = repo_key or ""
-    p = provider or "gitcode"
-    if ":" in raw:
-        p, raw = raw.split(":", 1)
+    p, owner, repo = parse_repo_key(repo_key)
+    p = provider or p
     if p not in ("gitcode", "github"):
         return {}
-    if "/" not in raw:
+    if not owner or not repo:
         return {}
-    owner, repo = raw.split("/", 1)
 
     scripts: dict = {}
     for directory in GUARD_DIRS:
@@ -134,7 +133,7 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
                 path = item.get("path") or ""
                 if not is_guard_script(path):
                     continue
-                text = _decode_content(item)
+                text = _decode_content(item, path)
                 if not text:
                     try:
                         detail = _vcs_req(
@@ -142,8 +141,10 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
                             _vcs_url(owner, repo, f"/contents/{path}", {"ref": ref}, p),
                             token)
                         if isinstance(detail, dict):
-                            text = _decode_content(detail)
-                    except Exception:
+                            text = _decode_content(detail, path)
+                    except Exception as e:
+                        log.warning(f"guard impact: fetch content failed path={path} "
+                                    f"repo={repo_key} ref={ref}: {e}")
                         text = ""
                 if text:
                     scripts[path] = text
@@ -170,13 +171,10 @@ def list_issue_artifacts(repo_key: str, ref: str, issue_number, token: str = "",
     """列出 docs/issue-N 下的产物文件（[{path, sha}]）；目录不存在返回 []。"""
     from src.api.git_repo_api import _vcs_req, _vcs_url
 
-    raw = repo_key or ""
-    p = provider or "gitcode"
-    if ":" in raw:
-        p, raw = raw.split(":", 1)
-    if p not in ("gitcode", "github") or "/" not in raw:
+    p, owner, repo = parse_repo_key(repo_key)
+    p = provider or p
+    if p not in ("gitcode", "github") or not owner or not repo:
         return []
-    owner, repo = raw.split("/", 1)
     directory = f"docs/issue-{str(issue_number).lstrip('#')}"
     try:
         items = _vcs_req(p, "GET",

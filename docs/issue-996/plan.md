@@ -22,9 +22,13 @@
    - `scan_guard_impact(target_paths, scripts)`：按完整路径 / 父目录引用匹配；
    - `fetch_guard_scripts`：contents API 按目录预筛拉取脚本文本；
    - `list_issue_artifacts`：列 `docs/issue-N` 产物。
-2. `src/runtime/cleanup.py::clean_issue_artifacts`
-   - 删除前预检；`breaking=true` → 跳过删除、返回 `guard_impact`；
-   - 无命中 → 照常 remover，返回值不含 guard_impact。
+2. `src/runtime/cleanup.py`
+   - `ArtifactScope` 封装 repo_key/ref/issue_number/token/provider，避免长参数表；
+   - `precheck_issue_artifacts` 只读预检（命令/查询分离），返回 targets/paths/guard_impact；
+   - `clean_issue_artifacts` 复用预检：`breaking=true` → 跳过删除、返回 guard_impact；
+     无命中 → 照常 remover，返回值不含 guard_impact；不再隐式改写 payload；
+   - 平台内无 `docs/issue-*` 删除链路（清理由 devdzr-merge-bot 执行），
+     跨仓接线契约见 `contract-devdzr-merge-bot.md`。
 
 ## 消费与展示
 1. `src/prompt_builder.py`：变更类事件注入 `## Changed Files`，列出

@@ -11,26 +11,13 @@ diff/files 接口兜底补齐，写入 payload.files，供 QA 增量复核与产
 """
 from __future__ import annotations
 
-import base64
-
 from src.config import log
+from src.repo_key import parse_repo_key
 from src.vcs.event_types import (
     FILE_EVENT_TYPES, normalize_files, has_file_changes,
 )
 
 _MAX_PAGES = 20
-
-
-def _split_repo_key(repo_key: str) -> tuple[str, str, str]:
-    """repo_key（gitcode:owner/repo / owner/repo）→ (provider, owner, repo)。"""
-    raw = repo_key or ""
-    provider = "gitcode"
-    if ":" in raw:
-        provider, raw = raw.split(":", 1)
-    if "/" in raw:
-        owner, repo = raw.split("/", 1)
-        return provider, owner, repo
-    return provider, "", raw
 
 
 def _pr_number(payload: dict) -> str:
@@ -56,10 +43,10 @@ def fetch_files_via_api(source: str, payload: dict, repo_key: str, token: str,
     """
     from src.api.git_repo_api import _vcs_req, _vcs_url
 
-    p = provider or _split_repo_key(repo_key)[0]
+    p, owner, repo = parse_repo_key(repo_key)
+    p = provider or p
     if p not in ("gitcode", "github"):
         return []
-    _, owner, repo = _split_repo_key(repo_key)
     if not owner or not repo:
         return []
 

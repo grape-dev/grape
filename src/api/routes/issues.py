@@ -336,9 +336,12 @@ def _attach_event_payloads(group_map: dict) -> None:
         with db_lock:
             c = db.cursor()
             # SUBSTR 在 sqlite/MySQL 语义一致；多取 1 字符用于判断是否被截断
+            # payload 不截断：Issue #996 复审指出先 SUBSTR 再 json.loads 会在
+            # >32KB 时解析失败，导致 files/guard_impact 静默丢失；投影后仅保留
+            # files/guard_impact 两个视图，内存占用随行释放。
             c.execute(
                 f"SELECT seq, SUBSTR(structured_output, 1, {cap + 1}), "
-                f"SUBSTR(agent_logs, 1, {cap + 1}), SUBSTR(payload, 1, {cap + 1}) "
+                f"SUBSTR(agent_logs, 1, {cap + 1}), payload "
                 f"FROM events WHERE seq IN ({placeholders})",
                 seqs)
             rows = {int(r[0]): (r[1], r[2], r[3] if len(r) > 3 else None)
@@ -350,15 +353,8 @@ def _attach_event_payloads(group_map: dict) -> None:
         picked.add(id(p))
         raw_so, raw_logs, raw_payload = rows.get(int(p["seq"]), (None, None, None))
         if raw_payload:
-            try:
-                _p = _json.loads(raw_payload)
-                if isinstance(_p, dict):
-                    if _p.get("files"):
-                        p["files"] = _p["files"]
-                    if _p.get("guard_impact"):
-                        p["guard_impact"] = _p["guard_impact"]
-            except Exception:
-                pass
+            from src.api.event_payload_view import payload_view_from_json
+            p.update(payload_view_from_json(raw_payload, seq=p["seq"]))
         if raw_so:
             if len(raw_so) > cap:
                 p["output_truncated"] = True

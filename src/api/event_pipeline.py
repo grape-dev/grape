@@ -1661,7 +1661,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     event_type = evt.get("type", "unknown")
 
     # Issue #996：变更类事件补齐文件清单（payload 优先，provider API 兜底）
-    if event_type in ("push", "pull_request_merged", "pull_request_updated"):
+    from src.vcs.event_types import FILE_EVENT_TYPES
+    if event_type in FILE_EVENT_TYPES:
         try:
             from src.vcs.files_enrich import enrich_event_files
             enrich_event_files(evt, repo_key)

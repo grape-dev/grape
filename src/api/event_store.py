@@ -762,15 +762,13 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
                     "completed_at": normalize_event_time(r[14] or ""),
                 }
                 if include_payload:
+                    from src.api.event_payload_view import payload_view
                     try:
                         _p = json.loads(r[15]) if r[15] else {}
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"get_events: payload parse failed seq={r[0]}: {e}")
                         _p = {}
-                    if isinstance(_p, dict):
-                        if _p.get("files"):
-                            item["files"] = _p["files"]
-                        if _p.get("guard_impact"):
-                            item["guard_impact"] = _p["guard_impact"]
+                    item.update(payload_view(_p))
                 out.append(item)
             return out
         except Exception:

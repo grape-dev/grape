@@ -15,7 +15,7 @@ from src.vcs.gitlab import GitLabBackend
 from src.vcs.event_types import normalize_files
 from src.vcs.files_enrich import enrich_event_files
 from src.vcs.guard_impact import scan_guard_impact, is_guard_script
-from src.runtime.cleanup import clean_issue_artifacts
+from src.runtime.cleanup import ArtifactScope, clean_issue_artifacts, precheck_issue_artifacts
 
 
 def _raw(payload):
@@ -131,19 +131,28 @@ def test_truncation_keeps_all_deleted():
     assert files["deleted"][-1]["path"] == "docs/issue-996/old9.md"
 
 
+def _scope():
+    return ArtifactScope("gitcode:owner/repo", "weekly-mys", 996)
+
+
 def test_guard_hit_skips_cleanup_and_marks_impact():
     removed = []
     scripts = {
         "scripts/check-docs.sh": "test -f docs/issue-996/spec.md\n",
         "tests/check_other.sh": "echo ok\n",
     }
-    payload = {}
-    result = clean_issue_artifacts(
-        "gitcode:owner/repo", "weekly-mys", 996,
+    scope = _scope()
+    pre = precheck_issue_artifacts(
+        scope,
         targets=["docs/issue-996/spec.md", "docs/issue-996/plan.md"],
-        scripts=scripts, remover=lambda items: removed.extend(items), payload=payload,
+        scripts=scripts,
     )
-    assert payload["guard_impact"]["breaking"] is True
+    assert pre["guard_impact"]["breaking"] is True
+    result = clean_issue_artifacts(
+        scope,
+        targets=["docs/issue-996/spec.md", "docs/issue-996/plan.md"],
+        scripts=scripts, remover=lambda items: removed.extend(items),
+    )
     assert removed == []
     assert result["deleted"] == []
     assert result["guard_impact"]["breaking"] is True
@@ -155,13 +164,83 @@ def test_no_guard_hit_cleans_normally_without_impact_field():
     removed = []
     scripts = {"scripts/check-other.sh": "grep docs/issue-1/spec.md\n"}
     result = clean_issue_artifacts(
-        "gitcode:owner/repo", "weekly-mys", 996,
-        targets=["docs/issue-996/spec.md"],
+        _scope(), targets=["docs/issue-996/spec.md"],
         scripts=scripts, remover=lambda items: removed.extend(items),
     )
     assert [p for p in removed] == ["docs/issue-996/spec.md"]
     assert result["deleted"] == ["docs/issue-996/spec.md"]
     assert "guard_impact" not in result
+
+
+def test_deleted_kept_across_multiple_commits_in_one_push():
+    files = normalize_files([
+        {"modified": ["docs/issue-996/y.md"]},
+        {"removed": ["docs/issue-996/y.md"]},
+    ])
+    assert [f["path"] for f in files["modified"]] == ["docs/issue-996/y.md"]
+    assert [f["path"] for f in files["deleted"]] == ["docs/issue-996/y.md"]
+
+    files = normalize_files([
+        {"added": ["docs/issue-996/z.md"]},
+        {"removed": ["docs/issue-996/z.md"]},
+    ])
+    assert [f["path"] for f in files["added"]] == ["docs/issue-996/z.md"]
+    assert [f["path"] for f in files["deleted"]] == ["docs/issue-996/z.md"]
+
+
+def test_normalize_files_recognizes_top_level_aliases():
+    files = normalize_files({
+        "deleted_files": ["docs/issue-996/spec.md"],
+        "changed_files": ["src/app.py"],
+        "added_files": ["src/new.py"],
+    })
+    assert [f["path"] for f in files["deleted"]] == ["docs/issue-996/spec.md"]
+    assert [f["path"] for f in files["modified"]] == ["src/app.py"]
+    assert [f["path"] for f in files["added"]] == ["src/new.py"]
+
+
+def test_change_map_does_not_fold_file_keys():
+    from src.vcs.event_types import normalize_changes
+    result = normalize_changes({
+        "deleted_files": ["docs/issue-996/spec.md"],
+        "changed_files": ["src/app.py"],
+    })
+    assert result["deleted_files"] == ["docs/issue-996/spec.md"]
+    assert result["changed_files"] == ["src/app.py"]
+
+
+def test_prompt_shows_all_deleted_paths():
+    from src.prompt_builder import build_devops_agent_prompt
+    deleted = [{"path": f"docs/issue-996/old{i}.md"} for i in range(80)]
+    evt = {
+        "type": "pull_request_updated",
+        "repository": "owner/repo",
+        "source": "gitcode",
+        "repo_key": "gitcode:owner/repo",
+        "issue_id": "#996",
+        "payload": {
+            "pull_request": {"number": 996, "title": "PR", "body": ""},
+            "files": {"added": [], "modified": [], "deleted": deleted,
+                      "truncated": False},
+        },
+    }
+    prompt = build_devops_agent_prompt(evt, [], "", ["qa"], agent_type="qa")
+    assert "docs/issue-996/old79.md" in prompt
+    assert "Deleted (80)" in prompt
+
+
+def test_payload_view_survives_large_payload():
+    from src.api.event_payload_view import payload_view_from_json
+    payload = {
+        "padding": "x" * 40000,
+        "files": {"added": [], "modified": [],
+                  "deleted": [{"path": "docs/issue-996/spec.md"}],
+                  "truncated": False},
+        "guard_impact": {"scripts": ["scripts/check-docs.sh"], "breaking": True},
+    }
+    view = payload_view_from_json(json.dumps(payload), seq=1)
+    assert view["files"]["deleted"][0]["path"] == "docs/issue-996/spec.md"
+    assert view["guard_impact"]["breaking"] is True
 
 
 def test_guard_impact_helpers():

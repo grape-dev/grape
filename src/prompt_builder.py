@@ -746,17 +746,19 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     _files = payload.get("files") if isinstance(payload, dict) else None
     if isinstance(_files, dict) and (
             _files.get("added") or _files.get("modified") or _files.get("deleted")):
-        def _paths(_items):
+        def _paths(_items, limit=None):
+            picked = (_items or [])[:limit] if limit else (_items or [])
             return ", ".join(
                 (it.get("path") if isinstance(it, dict) else str(it))
-                for it in (_items or [])[:50])
+                for it in picked)
         parts.append("\n## Changed Files")
+        # deleted 全量展示（审计/守卫预检需要完整删除路径，不受 [:50] 截断）
         if _files.get("deleted"):
             parts.append(f"- Deleted ({len(_files['deleted'])}): {_paths(_files['deleted'])}")
         if _files.get("added"):
-            parts.append(f"- Added ({len(_files['added'])}): {_paths(_files['added'])}")
+            parts.append(f"- Added ({len(_files['added'])}): {_paths(_files['added'], 50)}")
         if _files.get("modified"):
-            parts.append(f"- Modified ({len(_files['modified'])}): {_paths(_files['modified'])}")
+            parts.append(f"- Modified ({len(_files['modified'])}): {_paths(_files['modified'], 50)}")
         if _files.get("truncated"):
             parts.append("- Note: added/modified lists are truncated; deleted paths are complete.")
         _gi = payload.get("guard_impact") if isinstance(payload, dict) else None
