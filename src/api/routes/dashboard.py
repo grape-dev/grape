@@ -105,6 +105,160 @@ def _local_bandwidth() -> tuple:
 
 
 # ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
+# ===== 能效看板（Issue #1229）：同属前缀路由，也必须在 /{owner}/{repo} 之前注册 =====
+
+
+def _efficiency_bot_usernames() -> set:
+    """bot 用户名集合（bot 是执行方不是需求方，不计入协作者）。失败按空集合降级。"""
+    try:
+        from src.user.db import get_all_bot_usernames
+        return {u for u in (get_all_bot_usernames() or []) if u}
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: bot usernames load failed: {e}")
+        return set()
+
+
+@router.get("/efficiency", operation_id="dashboard_efficiency", summary="Efficiency board",
+            description="Issue #1229: per-contributor aggregation for the current repo — "
+            "issues opened / completed (issue table, creator with assignee fallback) "
+            "plus LLM token usage attributed via task->issue creator chain "
+            "(obs_llm_usage run_kind='task'; total = input+output+cache_read+cache_write). "
+            "Bots and subtask rows are excluded; empty contributors = empty state.")
+def get_efficiency_board(repo: str = "", limit: int = 50,
+                         user: dict = Depends(require_org_member)):
+    """能效看板聚合端点：按当前仓库、按协作者输出提需求/完成/token 统计。
+
+    - 提需求/完成：`issue` 单表（Phase C3 权威，get_issue_stage 同源）；
+      归属人 = COALESCE(NULLIF(created_by,''), assignee)；完成 = status='completed'；
+      排除 bot 创建人与子任务行（is_subtask_mode=1，归属父需求）。
+    - token：`obs_llm_usage`（run_kind='task'）按 task_id SUM（五项 token 与
+      src/observability/tokens.py 同口径：total 不含 reasoning），经
+      `agent_tasks.issue_id` 回链 issue 创建人；孤儿任务（无 issue 行/归属 bot）丢弃。
+    - 仓库隔离：repo 支持 owner/repo 与 platform:owner/repo 两种入参，
+      双平台前缀（gitcode:/github:）同查；空 repo 返回空态（仓库维度视图）。
+    - 任何查询异常降级为该路径空结果（统计不拖垮页面），绝不向上抛。
+    """
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+
+    # repo 归一化：入参可带或不带平台前缀；统一双前缀候选（与 get_dashboard 口径一致）
+    repo_keys = []
+    repo_key_out = ""
+    if repo and repo.strip():
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_key_out = to_repo_key(_base)
+
+    out = {
+        "repo": repo_key_out,
+        "total_issues": 0,
+        "completed_issues": 0,
+        "total_tokens": 0,
+        "contributors": [],
+    }
+    if not repo_keys:
+        return out  # 未指定仓库：空态（不做全库聚合）
+
+    try:
+        from src.api.deps import check_repo_access
+        check_repo_access(user, repo_key_out)
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: repo access check failed: {e}")
+        raise
+
+    _rk_ph = ",".join("?" * len(repo_keys))
+    _bots = _efficiency_bot_usernames()
+
+    def _is_contributor(name: str) -> bool:
+        return bool(name) and name != "unknown" and name not in _bots
+
+    # --- ① 提需求/完成数（issue 单表） ---
+    contrib: dict = {}   # user -> {issues, completed, input, output}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT COALESCE(NULLIF(created_by,''), assignee) AS owner_name,"
+                " COUNT(*), SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)"
+                f" FROM issue WHERE repo_key IN ({_rk_ph}) AND is_subtask_mode=0"
+                " GROUP BY owner_name",
+                tuple(repo_keys))
+            for owner_name, cnt, done in c.fetchall():
+                name = owner_name or ""
+                if not _is_contributor(name):
+                    continue
+                contrib[name] = {"issues": int(cnt or 0),
+                                 "completed": int(done or 0),
+                                 "input": 0, "output": 0, "cache": 0}
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: issue aggregate failed: {e}")
+
+    # --- ② token 归属链：obs_llm_usage → agent_tasks.issue_id → issue 创建人 ---
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 先按任务聚合（行数=任务数，可控），task 行上带仓库与 issue_id
+            c.execute(
+                "SELECT u.task_id, SUM(u.input_tokens), SUM(u.output_tokens),"
+                " SUM(u.cache_read_tokens), SUM(u.cache_write_tokens)"
+                " FROM obs_llm_usage u WHERE u.run_kind='task'"
+                f" AND u.repo_key IN ({_rk_ph}) GROUP BY u.task_id",
+                tuple(repo_keys))
+            task_tokens = {
+                r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0), int(r[4] or 0))
+                for r in c.fetchall()
+            }
+            # 回链分块查询：SQLite 变量上限 999/32766 视版本，大仓库任务数可能超限
+            _task_items = list(task_tokens.items())
+            _chunk = 500
+            for _i in range(0, len(_task_items), _chunk):
+                _part = _task_items[_i:_i + _chunk]
+                _t_ph = ",".join("?" * len(_part))
+                c.execute(
+                    "SELECT t.id, t.issue_id, i.created_by, i.assignee,"
+                    " i.is_subtask_mode"
+                    " FROM agent_tasks t LEFT JOIN issue i"
+                    " ON i.repo_key = t.repo_key AND i.issue_number ="
+                    " CAST(SUBSTR(t.issue_id, 2) AS INTEGER)"
+                    f" WHERE t.id IN ({_t_ph})",
+                    tuple(tid for tid, _ in _part))
+                for task_id, _issue_id, created_by, assignee, is_sub in c.fetchall():
+                    name = created_by or assignee or ""
+                    if not _is_contributor(name) or is_sub:
+                        continue  # 孤儿任务（无 issue 行/bot 的 issue）→ 用量丢弃
+                    slot = contrib.setdefault(
+                        name, {"issues": 0, "completed": 0, "input": 0, "output": 0, "cache": 0})
+                    it, ot, cr, cw = task_tokens.get(task_id, (0, 0, 0, 0))
+                    slot["input"] += it
+                    # cache 读写计入 total（同 tokens.py 口径），保留独立缓存桶：
+                    # 并入 output 桶会导致 output 列失真，故 total=input+output+cache。
+                    slot["output"] += ot
+                    slot["cache"] += cr + cw
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: token aggregate failed: {e}")
+
+    # --- ③ 汇总排序（issues DESC, tokens DESC, user ASC）+ 截断 ---
+    rows = []
+    for name, d in contrib.items():
+        total = int(d["input"]) + int(d["output"]) + int(d.get("cache", 0))
+        rows.append({
+            "user": name,
+            "issues": int(d["issues"]),
+            "completed": int(d["completed"]),
+            "input_tokens": int(d["input"]),
+            "output_tokens": int(d["output"]),
+            "total_tokens": total,
+        })
+    rows.sort(key=lambda r: (-r["issues"], -r["total_tokens"], r["user"]))
+    try:
+        _limit = max(1, min(int(limit or 50), 200))
+    except (TypeError, ValueError):
+        _limit = 50
+    out["contributors"] = rows[:_limit]
+    out["total_issues"] = sum(r["issues"] for r in rows)
+    out["completed_issues"] = sum(r["completed"] for r in rows)
+    out["total_tokens"] = sum(r["total_tokens"] for r in rows)
+    return out
 
 
 @router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")
