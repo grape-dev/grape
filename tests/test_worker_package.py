@@ -271,8 +271,8 @@ class TestGrapeCliWheel:
         """陈旧 wheel（内容与远端不一致，如 0.3.3-48a08d1 缺 GRAPE_AUTH_FILE）必须被重建替换。
 
         #896：缓存的 grape wheel 一旦过期就永远过期——`pip wheel` 只在同一
-        文件名已存在时报错，`pip install` 对同版本号也不重新解压。导致服务端
-        git-0161d8289904（含令牌穿透运行时）的升级包里带的仍是缺
+        文件名已存在时报错，`pip install` 对同版本号也不重新解压。导致某次
+        服务端升级包（已含令牌穿透运行时）里带的仍是缺
         GRAPE_AUTH_FILE 读文件逻辑的旧 CLI：dsh 任务拿到 auth 文件路径，
         CLI 却不读 → 穿透失效，且永不自愈。
         修法：构建前先清掉旧 grape-*.whl，保证 wheels 里永远是当前 HEAD 的
