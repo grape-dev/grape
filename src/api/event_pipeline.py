@@ -149,7 +149,7 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
 
 
 # Issue #565: bot 建单智能推荐仓级滑动窗口限流（进程内实现，不进 DB）
-_BOT_OPEN_RECOMMEND_LIMIT = 5
+_BOT_OPEN_RECOMMEND_LIMIT = 30
 _BOT_OPEN_RECOMMEND_WINDOW_SECONDS = 60.0
 _BOT_OPEN_RECOMMEND_WINDOWS: dict = {}
 
@@ -1908,7 +1908,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception as e:
             log.warning(f"Pipeline: outbound ledger issue_opened check failed (allow-through): {e}")
     # 2.0c Issue #565: bot 建单推荐仓级滑动窗口限流——放行后、路由判定前。
-    # 同 repo_key 60s 内最多 5 条 bot 建单进推荐（防 bot 批量建单打爆模型调用），
+    # 同 repo_key 60s 内最多 _BOT_OPEN_RECOMMEND_LIMIT 条 bot 建单进推荐（防 bot 批量建单打爆模型调用），
     # 超限记 event_skipped(bot_open_recommend_rate_limited) 并终止（进程内 dict，不进 DB）。
     # 「## 父任务」子任务开单是多任务流水线内部通道，不占推荐配额。
     if event_type == "issue_opened" and _is_bot_actor:

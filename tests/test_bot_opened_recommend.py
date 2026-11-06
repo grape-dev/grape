@@ -6,8 +6,9 @@
 修复：
 1. 自循环检测两处路径（主路径 handler / fallback）对 bot actor 的 issue_opened 一律放行，
    放行时打 evt["_bot_opened"]=True；评论族（issue_comment/note_hook_pr）拦截不动。
-2. 放行后、路由判定前加仓级滑动窗口限流：同 repo_key 60s 内最多 5 条 bot 建单推荐，
-   超限记 event_skipped(bot_open_recommend_rate_limited)（进程内 dict，不进 DB）。
+2. 放行后、路由判定前加仓级滑动窗口限流：同 repo_key 60s 内最多
+   _BOT_OPEN_RECOMMEND_LIMIT 条 bot 建单推荐（当前 30），超限记
+   event_skipped(bot_open_recommend_rate_limited)（进程内 dict，不进 DB）。
 3. 推荐完成回调确认会派发执行棒（_redispatch_vod_after_recommend 重派 VOD 执行流，
    direct 路径 event_pipeline + worker 路径 service._handle_vod_recommend_complete 双入口），
    bot 建单以 evt["_bot_opened"] 短路——只做场景判定，不进执行棒。
@@ -270,19 +271,20 @@ class TestT2ExistingSceneSkipsRecommend:
 
 
 class TestT3RateLimit:
-    def test_t3_6th_bot_open_within_60s_rate_limited(self):
-        """T3: 同 repo 60s 内第 6 条 bot 建单 → event_skipped 记 bot_open_recommend_rate_limited。"""
+    def test_t3_over_limit_bot_open_within_60s_rate_limited(self):
+        """T3: 同 repo 60s 内第 (limit+1) 条 bot 建单 → event_skipped 记 bot_open_recommend_rate_limited。"""
         _clean()
+        _lim = ep._BOT_OPEN_RECOMMEND_LIMIT
         captured, patches = _dispatch_patches(handler_self_loop=True)
         from contextlib import ExitStack
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            for num in range(301, 307):  # 6 条 bot 建单
+            for num in range(301, 301 + _lim + 1):  # limit 条放行 + 第 limit+1 条超限
                 _run(_issue_opened_payload("grape_bot", num))
         assert _skipped_count("bot_open_recommend_rate_limited") == 1, \
-            "第 6 条 bot 建单必须被限流并留痕"
-        assert _events_count() == 5, "前 5 条正常入流水线（各 1 条事件）"
+            f"第 {_lim + 1} 条 bot 建单必须被限流并留痕"
+        assert _events_count() == _lim, f"前 {_lim} 条正常入流水线（各 1 条事件）"
         assert _skipped_count("self_loop") == 0, "限流≠自循环，不得误记 self_loop"
 
 
@@ -305,9 +307,10 @@ class TestT5HumanIssueOpenedUnchanged:
         """T5: 人建 issue_opened → 行为与现状一致（放行 + vod 推荐，不受限流影响）。"""
         _clean()
         # 预先打满 bot 限流窗口（人建单不应受影响）
-        for _ in range(5):
+        for _ in range(ep._BOT_OPEN_RECOMMEND_LIMIT):
             ep._bot_open_recommend_rate_limited(RK)
-        assert ep._bot_open_recommend_rate_limited(RK) is True, "窗口应已打满（bot 第 6 条会被限）"
+        assert ep._bot_open_recommend_rate_limited(RK) is True, \
+            f"窗口应已打满（bot 第 {ep._BOT_OPEN_RECOMMEND_LIMIT + 1} 条会被限）"
         captured, patches = _dispatch_patches(handler_self_loop=False)
         from contextlib import ExitStack
         with ExitStack() as stack:
