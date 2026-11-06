@@ -94,7 +94,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         c.execute(
             """SELECT ar.name, ar.version, rc.name, rc.last_ip, rc.owner_name, t.prompt,
                       t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key,
-                      rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec
+                      rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec, t.runtime_id
                FROM agent_tasks t
                LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id
                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
@@ -107,6 +107,13 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     agent_name, agent_version, device_name, last_ip, owner_name, prompt = row[:6]
     created_at, started_at, completed_at, status, issue_id, event_seq, repo_key = row[6:13]
     cpu_pct, mem_pct, disk_pct, load_avg, spec = row[13:18] if len(row) > 17 else (0, 0, 0, "", "")
+    runtime_id = row[18] if len(row) > 18 else 0
+    # Issue #1255：执行模型（用量优先、配置模型回落，与事件详情同一取值函数，口径一致）
+    try:
+        from src.observability.llm_usage import task_model_summary
+        model_summary = task_model_summary(task_id, int(runtime_id or 0))
+    except Exception:
+        model_summary = {"model": "", "source": "unknown", "models": []}
     import re as _re
     _m = _re.search(r"(\d+\.\d+\.\d+)", str(agent_version or ""))
     ver = _m.group(1) if _m else str(agent_version or "")
@@ -133,6 +140,9 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         "disk_percent": disk_pct or 0,
         "load_avg": load_avg or "",
         "wrote_files": list_wrote_files(task_id),
+        "model": model_summary.get("model", ""),
+        "model_source": model_summary.get("source", "unknown"),
+        "models": model_summary.get("models", []),
     }
 
 

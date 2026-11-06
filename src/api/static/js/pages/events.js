@@ -136,8 +136,15 @@ function _evInfoSummaryText(data) {
   return `${data.event_type || '—'} · ${data.actor || '—'} · ${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
 }
 
+// Issue #1255：引擎行模型段（用量优先；空值统一占位；未派发不展示）
+function _evModelText(data) {
+  if (!data.engine_instance) return '';
+  if (data.engine_model) return ` · <span style="color:var(--t3)">${I18N.t('events.model')}</span> <b>${_evEsc494(data.engine_model)}</b>`;
+  return ` · <span class="ts t3">${I18N.t('events.model_unknown')}</span>`;
+}
+
 function _evEngineText(data) {
-  return `<span style="color:var(--t3)">Engine:</span> ${(() => { if (!data.engine_instance) return '<span class="ts t3">' + I18N.t('events.engine_undispatched') + '</span>'; const h = data.engine_health; let health = ''; if (h && h.score !== null && h.score !== undefined) { const sc = h.score === 0 ? 'var(--r)' : h.score < 50 ? 'var(--y)' : 'var(--g)'; const hb = h.heartbeat_alive === false ? ' · 失联' : ''; health = ` · <span style="color:${sc};font-weight:600">健康分 ${h.score}</span>${h.consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败 ${h.consecutive_failures}</span>` : ''}${hb}`; } return `<b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}${health}`; })()}`;
+  return `<span style="color:var(--t3)">Engine:</span> ${(() => { if (!data.engine_instance) return '<span class="ts t3">' + I18N.t('events.engine_undispatched') + '</span>'; const h = data.engine_health; let health = ''; if (h && h.score !== null && h.score !== undefined) { const sc = h.score === 0 ? 'var(--r)' : h.score < 50 ? 'var(--y)' : 'var(--g)'; const hb = h.heartbeat_alive === false ? ' · 失联' : ''; health = ` · <span style="color:${sc};font-weight:600">健康分 ${h.score}</span>${h.consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败 ${h.consecutive_failures}</span>` : ''}${hb}`; } return `<b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}${health}`; })()}${_evModelText(data)}`;
 }
 
 function _evDurationText(data) {
@@ -244,7 +251,7 @@ function _evProcessingText(data) {
 // 轮询指纹：动态字段集合不变 → 跳过一切 DOM 写入（零闪动）
 function _evFingerprint(d) {
   return JSON.stringify([d.status, d.duration, d.result, d.summary, d.engine_instance, d.runtime, d.backend,
-    d.engine_device, d.engine_ip, (d.engine_health && d.engine_health.score) || null,
+    d.engine_device, d.engine_ip, d.engine_model || '', (d.engine_health && d.engine_health.score) || null,
     d.archive && d.archive.output ? JSON.stringify(d.archive.output) : null,
     (d.task && d.task.task_status) || '', (d.task && d.task.task_id) || '',
     JSON.stringify((d.task && d.task.task_errors) || []),
@@ -1341,6 +1348,22 @@ function _tlLoadInfo(taskId) {
       if (info.last_ip) bits.push('🌐 ' + _tlEsc(info.last_ip));
       if (info.owner_name) bits.push('👤 ' + _tlEsc(info.owner_name));
       if (info.spec) bits.push('⚙️ ' + _tlEsc(info.spec));
+      // Issue #1255：执行模型（与事件详情同口径）+ 该任务真实 token 明细（input/output 内联，不再用悬浮省略号）
+      if (info.model) {
+        const _fmtTok = v => { v = Number(v) || 0; return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1000 ? (v / 1000).toFixed(1) + 'K' : String(v); };
+        const _ms = info.models || [];
+        const _top = _ms.find(m => m.model === info.model) || _ms[0] || null;
+        let _tokTxt = '';
+        if (_top && (_top.input || _top.output)) {
+          _tokTxt = ' <span class="ts" style="color:var(--t3)">· ↑' + _fmtTok(_top.input) + ' ↓' + _fmtTok(_top.output) + '</span>';
+        }
+        // 多模型任务：主模型之外的模型与用量作为悬浮说明，避免内联撑长
+        const _others = _ms.filter(m => m.model !== info.model);
+        const _tip = _others.map(m => m.model + ' (↑' + _fmtTok(m.input) + ' ↓' + _fmtTok(m.output) + ')').join('、');
+        bits.push('🧠 ' + _tlEsc(info.model) + _tokTxt + (_tip ? ' <span class="ts t3" title="' + _tlEsc(_tip) + '">+' + _others.length + '</span>' : ''));
+      } else {
+        bits.push('🧠 <span style="color:var(--t3)">' + I18N.t('events.model_unknown') + '</span>');
+      }
       if (info.cpu_percent) bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%');
       if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%');
       el.innerHTML = bits.map(b => '<span>' + b + '</span>').join('');
