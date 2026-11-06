@@ -1521,6 +1521,15 @@ def get_task(task_id) -> dict | None:
     return dict(zip(_cols, row)) if row else None
 
 
+def _has_verified_executor(probe_status: str, worker_version: str) -> bool:
+    """引擎是否有可信的执行器（可安全参与任务认领）。
+
+    本机 CLI 探测注册的引擎 worker_version 为空；在探活通过（probe_status=ok）
+    之前它们只是"展示用"条目，认领后任务会零输出挂死（event seq=9491 事故）。
+    """
+    return bool(worker_version) or probe_status not in ("pending", "failed")
+
+
 def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
     """按标签认领任务 + scope 隔离（event-dispatch-redesign-v2.md §2.4）
 
@@ -1547,6 +1556,31 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             scope = row[1] or "global"
             owner_id = row[2] or ""
             owner_name = row[3] or ""
+
+            # 幽灵引擎闸门（2026-11-06，event seq=9491 事故）：
+            # 本机 CLI 探测注册出来的引擎（worker_version 为空）在探活通过之前没有执行器，
+            # 一旦参与认领，任务会零输出地挂在 running 上，被 recover-orphans 反复回炉，
+            # attempts 封顶后整条事件被判死（"possible self-restart loop"）。
+            # 只允许「探活 ok」或「带 worker_version 的真实执行器」认领。
+            # 列探测分两步做：老库/SQLite 测试 schema 可能还没有 worker_version 列，
+            # 缺列时按"未知执行器"处理（只挡 pending/failed），不让整条 claim 失败。
+            try:
+                c.execute("SELECT probe_status FROM agent_runtimes WHERE id=?", (runtime_id,))
+                _pv = c.fetchone()
+                _probe_status = (_pv[0] or "") if _pv else ""
+            except Exception:
+                _probe_status = ""
+            _worker_version = ""
+            try:
+                c.execute("SELECT worker_version FROM agent_runtimes WHERE id=?", (runtime_id,))
+                _wv = c.fetchone()
+                _worker_version = (_wv[0] or "") if _wv else ""
+            except Exception:
+                pass
+            if not _has_verified_executor(_probe_status, _worker_version):
+                log.warning(f"claim_by_tag: runtime={runtime_id} has no verified executor "
+                            f"(probe={_probe_status or '-'}, worker_version=-), skip claiming")
+                return None
 
             # 2. 引擎级并发槽检查（方案一：标签只做路由，并发纯引擎级）
             # 废弃 engine_capabilities.max_concurrent，统一走 agent_runtimes.max_concurrent
