@@ -5,20 +5,20 @@ PR 已合并后继续向 head 分支 push 无任何提示，修复静默丢失�
 
 设计（docs/issue-993/spec.md）：
 - 写租约：lock key = ``branch_guard:<repo_key>:<head_branch>``，复用
-  ``src.lock`` 的 ``distributed_locks`` 表，跨实例互斥；租约记录本机首次看到的
-  远端 head sha（expected_remote_sha），供后续 push 做漂移检测。
+  ``src.lock`` 的 ``distributed_locks`` 表，跨实例互斥；租约期望的远端 head sha
+  （expected_remote_sha）与租约同源存 DB ``branch_guard_state`` 表，跨 worker 可见。
 - push 前置守卫：PR 已 merged/closed → fail-closed 阻断并提示新建分支/PR；
   远端 head 与租约记录不一致 → fail-closed 阻断并提示重新 fetch/rebase。
   守卫自身查询异常 → fail-open + 告警，避免阻断正常交付。
-- pre-push 钩子：由 ``repogit.ensure_issue_worktree`` 安装到每个 worktree，
-  覆盖 Agent 手工 push；钩子只做本地租约/漂移判定 + 通过 grape CLI 查 PR 状态。
+- pre-push 钩子：由 ``repogit.ensure_issue_worktree`` 安装；git 的 hooks 目录是
+  仓库共享目录，因此钩子**不固化分支**，运行时从 stdin 的远程 ref 动态判定每个被推
+  分支，覆盖同一仓库所有 worktree 的 Agent 手工 push。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -29,8 +29,6 @@ from src.config import log
 LEASE_PREFIX = "branch_guard:"
 DEFAULT_TTL = 1800  # 30 分钟；租约仅覆盖一次写窗口，过期自动释放
 HOOK_MARKER = "# grape-branch-guard (Issue #993)"
-STATE_DIR_SUFFIX = ".branch_guard"
-STATE_SUFFIX = ".json"
 
 
 def lease_key(repo_key: str, head_branch: str) -> str:
@@ -46,28 +44,32 @@ def lease_key(repo_key: str, head_branch: str) -> str:
 
 
 # ===================== 租约状态（expected_remote_sha） =====================
-
-def _state_dir(repo_key: str) -> str:
-    try:
-        from src.repo_key import workspace_repo_dir
-        base = workspace_repo_dir(repo_key)
-    except Exception:
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", repo_key or "unknown")
-        base = os.path.join(os.environ.get("TMPDIR", "/tmp"), "grape-branch-guard", safe)
-    return os.path.join(base, STATE_DIR_SUFFIX)
-
-
-def _state_path(repo_key: str, head_branch: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "__", head_branch or "default")
-    return os.path.join(_state_dir(repo_key), f"{safe}{STATE_SUFFIX}")
-
+#
+# 期望 sha 必须与租约同源存储（同一 DB，跨 worker 可见）。早前落在本机 workspace
+# 文件里，同一分支调度到另一 worker 时读不到期望值，漂移检测直接 fail-open。
+# 使用独立表 branch_guard_state：租约释放会删除 distributed_locks 行，状态需比
+# 单次租约生命周期更长（供下一次任务比对远端漂移）。
 
 def load_lease_state(repo_key: str, head_branch: str) -> dict:
     try:
-        with open(_state_path(repo_key, head_branch), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT expected_remote_sha, pr_number, base_branch, updated_at "
+                "FROM branch_guard_state WHERE repo_key=? AND head_branch=?",
+                (repo_key, head_branch)).fetchone()
+        if not row:
+            return {}
+        return {
+            "repo_key": repo_key,
+            "head_branch": head_branch,
+            "expected_remote_sha": str(row[0] or ""),
+            "pr_number": int(row[1] or 0),
+            "base_branch": str(row[2] or ""),
+            "updated_at": str(row[3] or ""),
+        }
+    except Exception as e:
+        log.warning(f"branch guard state read failed {repo_key}:{head_branch}: {e}")
         return {}
 
 
@@ -75,13 +77,31 @@ def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
     """合并写租约状态（expected_remote_sha / pr_number / base_branch）。"""
     state = load_lease_state(repo_key, head_branch)
     state.update({k: v for k, v in fields.items() if v is not None})
-    state.setdefault("repo_key", repo_key)
-    state.setdefault("head_branch", head_branch)
+    state["repo_key"] = repo_key
+    state["head_branch"] = head_branch
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        os.makedirs(_state_dir(repo_key), exist_ok=True)
-        with open(_state_path(repo_key, head_branch), "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False)
+        from src.session_manager import db, db_lock
+        with db_lock:
+            exists = db.cursor().execute(
+                "SELECT 1 FROM branch_guard_state WHERE repo_key=? AND head_branch=?",
+                (repo_key, head_branch)).fetchone()
+            vals = (str(state.get("expected_remote_sha") or ""),
+                    int(state.get("pr_number") or 0),
+                    str(state.get("base_branch") or ""),
+                    state["updated_at"])
+            if exists:
+                db.execute(
+                    "UPDATE branch_guard_state SET expected_remote_sha=?, pr_number=?, "
+                    "base_branch=?, updated_at=? WHERE repo_key=? AND head_branch=?",
+                    (*vals, repo_key, head_branch))
+            else:
+                db.execute(
+                    "INSERT INTO branch_guard_state "
+                    "(repo_key, head_branch, expected_remote_sha, pr_number, base_branch, "
+                    "updated_at) VALUES (?,?,?,?,?,?)",
+                    (repo_key, head_branch, *vals))
+            db.commit()
     except Exception as e:
         log.warning(f"branch guard state write failed {repo_key}:{head_branch}: {e}")
     return state
@@ -197,6 +217,39 @@ def preflight_push(repo_key: str, head_branch: str, token: str = "") -> dict:
     return verdict
 
 
+def guarded_push(repo_key: str, head_branch: str, wt_dir: str, token: str = "",
+                 run_git=None) -> dict:
+    """自动推送路径统一入口：preflight → push --no-verify → 记录已推 local sha。
+
+    调用方须已持有分支租约（写入窗口从 ``ensure_feature_branch`` 前开始，不能只包
+    push）。``--no-verify`` 是因为本进程已持租约且完成等价 preflight；钩子是独立
+    进程、holder 不同，再走钩子会被自身租约判 branch_locked。
+    返回 ``{"ok", "stage", "reason", "message", "sha"}``；阻断同时写任务日志与
+    stderr（与手工 push 钩子统一双通道）。
+    """
+    pre = preflight_push(repo_key, head_branch, token=token)
+    if not pre.get("allowed"):
+        _block(f"branch guard blocked push {repo_key}:{head_branch}: {pre.get('reason')}",
+               pre.get("message") or "push blocked")
+        return {"ok": False, "stage": "preflight",
+                "reason": pre.get("reason", "guard_blocked"),
+                "message": pre.get("message", "")}
+    if run_git is None:
+        from src.runtime.repogit import _run_git as run_git
+    r = run_git(["-C", wt_dir, "push", "--no-verify", "origin",
+                 f"HEAD:refs/heads/{head_branch}"], token=token, timeout=120)
+    if r is None or r.returncode != 0:
+        err = (r.stderr[:300] if r is not None and r.stderr else "git exec failed")
+        return {"ok": False, "stage": "push", "reason": "push_failed",
+                "message": f"git push failed: {err}"}
+    r_head = run_git(["-C", wt_dir, "rev-parse", "HEAD"], token=token, timeout=15)
+    sha = ((r_head.stdout or "").strip()
+           if r_head is not None and r_head.returncode == 0 else "")
+    if sha:
+        record_remote_sha(repo_key, head_branch, sha)
+    return {"ok": True, "stage": "pushed", "reason": "ok", "message": "", "sha": sha}
+
+
 def resolve_remote_head(repo_key: str, head_branch: str, token: str = "") -> str:
     """``git ls-remote`` 取远端 head sha；失败/不存在返回空串让守卫 fail-open。"""
     try:
@@ -302,15 +355,6 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
 
 # ===================== pre-push 钩子 =====================
 
-def _current_branch(wt_dir: str) -> str:
-    try:
-        from src.runtime.repogit import _run_git
-        r = _run_git(["-C", wt_dir, "rev-parse", "--abbrev-ref", "HEAD"], timeout=15)
-        return (r.stdout or "").strip() if r is not None and r.returncode == 0 else ""
-    except Exception:
-        return ""
-
-
 def _hooks_dir(wt_dir: str) -> str:
     from src.runtime.repogit import _run_git
     r = _run_git(["-C", wt_dir, "rev-parse", "--git-path", "hooks"], timeout=15)
@@ -322,8 +366,13 @@ def _hooks_dir(wt_dir: str) -> str:
     return path if os.path.isabs(path) else os.path.join(wt_dir, path)
 
 
-def install_pre_push_hook(wt_dir: str, repo_key: str, head_branch: str = "") -> bool:
-    """在每个 worktree 的 git hooks 目录安装 pre-push 守卫（幂等）。
+def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
+    """安装 pre-push 守卫（幂等）。
+
+    注意：``git rev-parse --git-path hooks`` 在 linked worktree 里返回的是**仓库共享
+    hooks 目录**（common dir），不是 worktree 私有目录。因此钩子不得固化任何分支，
+    运行时从 stdin 读取本次被推的 ref 动态判定——同一仓库所有 worktree 共用一份钩子
+    也能正确守卫各自的手工 push。
 
     已存在非本守卫的钩子时保留为 ``pre-push.grape-local`` 并在守卫前执行，
     不覆盖用户既有逻辑。
@@ -335,7 +384,6 @@ def install_pre_push_hook(wt_dir: str, repo_key: str, head_branch: str = "") -> 
         if not hooks_dir:
             return False
         os.makedirs(hooks_dir, exist_ok=True)
-        branch = head_branch or _current_branch(wt_dir)
         hook_path = os.path.join(hooks_dir, "pre-push")
         preserved = os.path.join(hooks_dir, "pre-push.grape-local")
         if os.path.isfile(hook_path):
@@ -356,7 +404,7 @@ def install_pre_push_hook(wt_dir: str, repo_key: str, head_branch: str = "") -> 
             HOOK_MARKER,
             'LOCAL="$(dirname "$0")/pre-push.grape-local"',
             'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" || exit $?; fi',
-            f"python3 -c {shlex.quote(code)} {shlex.quote(repo_key)} {shlex.quote(branch)}",
+            f"python3 -c {shlex.quote(code)} {shlex.quote(repo_key)}",
             "",
         ]
         with open(hook_path, "w", encoding="utf-8") as f:
@@ -371,75 +419,72 @@ def install_pre_push_hook(wt_dir: str, repo_key: str, head_branch: str = "") -> 
         return False
 
 
-def remove_pre_push_hook(wt_dir: str) -> bool:
-    """移除本守卫安装的 pre-push 钩子（仅当内容含本守卫标记）。"""
-    try:
-        hooks_dir = _hooks_dir(wt_dir)
-        hook_path = os.path.join(hooks_dir, "pre-push") if hooks_dir else ""
-        if not hook_path or not os.path.isfile(hook_path):
-            return False
-        with open(hook_path, "r", encoding="utf-8", errors="replace") as f:
-            if HOOK_MARKER not in f.read():
-                return False
-        os.remove(hook_path)
-        preserved = os.path.join(hooks_dir, "pre-push.grape-local")
-        if os.path.isfile(preserved):
-            os.replace(preserved, hook_path)
-        return True
-    except Exception:
-        return False
-
-
 def hook_main(argv: list | None = None) -> int:
     """pre-push 钩子入口：stdin 为 ``<local_ref> <local_sha> <remote_ref> <remote_sha>``。
 
-    返回 0=放行；1=阻断（stderr 输出可执行提示 + 任务日志告警双通道）。查询异常 fail-open。
+    不固化分支：逐条解析 stdin 的 remote ref，对本次实际被推的每个 head 分支独立
+    获取租约、查 PR/漂移并在全部通过后记录 local sha。返回 0=放行；1=阻断
+    （stderr 提示 + 任务日志告警双通道）。查询异常 fail-open。
     """
     args = argv if argv is not None else sys.argv[1:]
     repo_key = args[0] if len(args) > 0 else ""
-    branch = args[1] if len(args) > 1 else ""
-    if not repo_key or not branch:
+    if not repo_key:
         return 0
     try:
         data = sys.stdin.read()
     except Exception:
         data = ""
-    lease = acquire_branch_lease(repo_key, branch)
-    if not lease.get("ok"):
-        _block(f"branch lease rejected {repo_key}:{branch}: {lease.get('message', 'branch locked')}",
-               lease.get("message", "branch locked"))
-        return 1
+    refs = []
+    for raw in (data or "").splitlines():
+        parts = raw.split()
+        if len(parts) < 4:
+            continue
+        local_sha, remote_ref, remote_sha = parts[1], parts[2], parts[3]
+        if not remote_ref.startswith("refs/heads/"):
+            continue
+        pushed = remote_ref[len("refs/heads/"):]
+        if not pushed:
+            continue
+        if set(local_sha) <= {"0"}:
+            continue  # 删除分支不写内容，无需租约
+        if set(remote_sha) <= {"0"}:
+            remote_sha = ""
+        refs.append((pushed, local_sha, remote_sha))
+    if not refs:
+        return 0
+
+    held: list[str] = []
     try:
-        for raw in (data or "").splitlines():
-            parts = raw.split()
-            if len(parts) < 4:
-                continue
-            local_sha, remote_ref, remote_sha = parts[1], parts[2], parts[3]
-            pushed = remote_ref[len("refs/heads/"):] if remote_ref.startswith("refs/heads/") else remote_ref
-            if pushed != branch:
-                continue
-            if set(remote_sha) <= {"0"}:
-                remote_sha = ""
-            if set(local_sha) <= {"0"}:
-                local_sha = ""
-            state = load_lease_state(repo_key, branch)
-            pr = _fetch_pr_state_via_grape(repo_key, branch)
+        for pushed, _local_sha, _remote_sha in refs:
+            lease = acquire_branch_lease(repo_key, pushed)
+            if not lease.get("ok"):
+                _block(f"branch lease rejected {repo_key}:{pushed}: "
+                       f"{lease.get('message', 'branch locked')}",
+                       lease.get("message", "branch locked"))
+                return 1
+            held.append(pushed)
+        for pushed, _local_sha, remote_sha in refs:
+            state = load_lease_state(repo_key, pushed)
+            pr = _fetch_pr_state_via_grape(repo_key, pushed)
             verdict = check_push_allowed(
-                repo_key, branch, remote_sha=remote_sha,
+                repo_key, pushed, remote_sha=remote_sha,
                 expected_remote_sha=state.get("expected_remote_sha", ""),
                 pr_state=pr.get("state", ""), pr_number=pr.get("number", 0),
                 base_branch=pr.get("base", ""))
             if not verdict.get("allowed"):
-                _block(f"branch guard blocked push {repo_key}:{branch}: {verdict.get('reason')}",
+                _block(f"branch guard blocked push {repo_key}:{pushed}: "
+                       f"{verdict.get('reason')}",
                        verdict.get("message") or "push blocked")
                 return 1
-            # 记录本次推上去的 local sha（push 成功后远端即前进到它），而非 push 前的旧
-            # remote sha；否则同任务第二次合法 push 会把自己上一次推送误判为远端漂移。
+        # 全部 ref 通过后才记录，避免多 ref push 中途阻断时留下未真正推送的期望值。
+        # 记录的必须是本次推上去的 local sha（push 后远端即前进到它），而非旧 remote sha。
+        for pushed, local_sha, _remote_sha in refs:
             if local_sha:
-                record_remote_sha(repo_key, branch, local_sha)
+                record_remote_sha(repo_key, pushed, local_sha)
         return 0
     finally:
-        release_branch_lease(repo_key, branch)
+        for pushed in held:
+            release_branch_lease(repo_key, pushed)
 
 
 def _block(log_message: str, user_message: str) -> None:

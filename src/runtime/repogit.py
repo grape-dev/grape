@@ -429,7 +429,7 @@ def _install_branch_guard_hook(issue_dir: str, repo_key: str, branch: str) -> No
     """Issue #993：安装 worktree 级 pre-push 钩子（失败仅告警，不阻断建树）。"""
     try:
         from src.runtime.branch_guard import install_pre_push_hook
-        if not install_pre_push_hook(issue_dir, repo_key, branch):
+        if not install_pre_push_hook(issue_dir, repo_key):
             log.warning(f"repogit branch guard hook install failed {repo_key}:{branch}")
     except Exception as e:
         log.warning(f"repogit branch guard hook install error {repo_key}:{branch}: {e}")

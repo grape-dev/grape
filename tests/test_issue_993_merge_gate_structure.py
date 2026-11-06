@@ -119,3 +119,61 @@ def test_gate_decision_recorded_to_log():
         "WHERE repo_key=? AND pr_number=?", ("gitcode:o/r", 9)).fetchall()
     assert rows and rows[-1][0] == "blocked"
     assert "structure_hard_hits" in rows[-1][1]
+
+
+def test_fenced_examples_are_ignored():
+    """代码围栏内的 YAML/JSON 示例不得判为元数据矛盾/硬缺陷。"""
+    text = (
+        "```yaml\n"
+        "status: open\n"
+        "status: closed\n"
+        "pr_number: 0\n"
+        "```\n"
+    )
+    r = mg.scan_structure_text(text)
+    assert r["pr_number_zero"] == 0
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False
+
+
+def test_fenced_example_not_hard_in_patch():
+    patch = ("@@ -1,1 +1,7 @@\n"
+             "+```yaml\n"
+             "+status: open\n"
+             "+status: closed\n"
+             "+pr_number: 0\n"
+             "+```\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["pr_number_zero"] == 0
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False
+
+
+def test_metadata_conflict_with_existing_context_value():
+    """PR 新增值必须与文件既有（context）值比对，不能只看新增行。"""
+    patch = ("@@ -1,3 +1,4 @@\n"
+             " meta:\n"
+             " status: merged\n"
+             "+status: open\n"
+             " issue_number: 42\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["metadata_conflicts"] == {"status": ["merged", "open"]}
+
+
+def test_metadata_conflict_not_reported_without_added_key():
+    """仅路过已有矛盾文档（新增行不含该 key）不应阻断。"""
+    patch = ("@@ -1,3 +1,4 @@\n"
+             " status: merged\n"
+             " status: open\n"
+             "+notes: unrelated\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["metadata_conflicts"] == {}
+
+
+def test_removed_conflicting_value_is_not_conflict():
+    """删除旧值后新增单一值不构成矛盾。"""
+    patch = ("@@ -1,2 +1,2 @@\n"
+             "-status: merged\n"
+             "+status: open\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["metadata_conflicts"] == {}

@@ -1884,34 +1884,17 @@ def _submit_linked_repo_prs(task: dict, env: dict):
                     continue
 
             # 5. push（token 经 http.extraheader 注入，不落盘）
-            # Issue #993（M2）：push 前置守卫——PR 已 merged/closed 或远端 head 漂移
-            # → 阻断并给出可执行提示，避免修复静默丢失/盲目二次解冲突。
-            _pre = _branch_guard.preflight_push(_rk, _wt_branch, token=_token)
-            if not _pre.get("allowed"):
-                log.warning(f"linked PR: push blocked by branch guard {_rk}:{_wt_branch}: "
-                            f"{_pre.get('message')}")
-                _results.append({"repo_key": _rk, "status": "blocked",
-                                 "reason": _pre.get("reason", "guard_blocked"),
-                                 "message": _pre.get("message", "")})
+            # Issue #993（M2）：统一走 branch_guard.guarded_push——preflight 阻断
+            # PR 已 merged/closed 或远端漂移，push 后记录已推 local sha。
+            _push = _branch_guard.guarded_push(_rk, _wt_branch, _wt_dir, token=_token)
+            if not _push.get("ok"):
+                log.warning(f"linked PR: push blocked/failed {_rk}:{_wt_branch}: "
+                            f"{_push.get('message')}")
+                _status = "blocked" if _push.get("stage") == "preflight" else "failed"
+                _results.append({"repo_key": _rk, "status": _status,
+                                 "reason": _push.get("reason", "guard_blocked"),
+                                 "message": _push.get("message", "")})
                 continue
-            from src.runtime.repogit import _run_git
-            # --no-verify：本进程已持有租约并完成等价的 preflight；pre-push 钩子是
-            # 独立进程、holder 不同，若再走钩子会被自身租约判 branch_locked 自锁。
-            _r_push = _run_git(
-                ["-C", _wt_dir, "push", "--no-verify", "origin",
-                 f"HEAD:refs/heads/{_wt_branch}"],
-                token=_token, timeout=120)
-            if _r_push is None or _r_push.returncode != 0:
-                _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
-                log.warning(f"linked PR: push failed {_rk}: {_err}")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
-                continue
-            # push 成功后记录推上去的 local sha（新远端 head），而非 push 前的旧 remote sha。
-            _r_head = _run_git(["-C", _wt_dir, "rev-parse", "HEAD"], token=_token, timeout=15)
-            _pushed_sha = ((_r_head.stdout or "").strip()
-                           if _r_head is not None and _r_head.returncode == 0 else "")
-            if _pushed_sha:
-                _branch_guard.record_remote_sha(_rk, _wt_branch, _pushed_sha)
 
             # 6. create PR
             from src.vcs.api_client import create_pr_for_repo

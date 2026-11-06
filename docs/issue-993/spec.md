@@ -13,7 +13,7 @@
 **In Scope**
 - M1 分支级写互斥：新增分支写租约（lock key = `repo_key + head_branch`），覆盖平台侧所有 worktree 自动提交/推送路径。
 - M2 推送前置守卫：push 前校验「PR 状态」与「远端 head 是否已被他人推进」；已合并/已关闭 → 阻断并提示；远端 head 变化 → 阻断并提示重新 fetch/rebase，禁止盲目二次解冲突。
-- M3 结构校验：合入门禁新增重建文档结构扫描（代码围栏配平、`pr_number: 0` 残留、元数据口径矛盾），命中按硬/软分级阻断或告警并写入合入日志。
+- M3 结构校验：合入门禁新增重建文档结构扫描（代码围栏配平、`pr_number: 0` 残留、元数据口径矛盾），命中按硬/软分级阻断或告警并写入合入日志；代码围栏内的示例不参与元数据判定，新增值需与文件既有值比对。
 - 守卫提示需同时出现在 git push 输出与任务日志，保证 Agent 可感知。
 
 **Out of Scope**
@@ -25,7 +25,7 @@
 2. `src/runtime/repogit.py`：worktree 创建/复用时安装 `pre-push` 钩子（调用 branch_guard 判定），覆盖 Agent 手工 push。
 3. `src/runtime/agent.py::_submit_linked_repo_prs`：push 前接入同一守卫与租约，失败写出结构化 reason。
 4. `src/api/merge_gate.py`：扩展结构扫描（fence 配平、`pr_number:0`、口径矛盾），决策复用 `grape_t_merge_gate_log`。
-5. 远端变化判定：租约记录 `expected_remote_sha`，push 前 `ls-remote` 对比；PR 状态查询按 head 分支匹配 merged/closed。
+5. 远端变化判定：租约期望的 `expected_remote_sha` 与租约同源存 DB `branch_guard_state` 表（跨 worker 可见），push 前 `ls-remote` 对比；PR 状态查询按 head 分支匹配 merged/closed。
 
 ### 关键设计决策
 | 决策 | 选项 | 选择 | 理由 |
@@ -33,8 +33,8 @@
 | 互斥粒度 | 仓库/PR/分支 | 分支（`repo_key+head_branch`） | 冲突只发生在同一 head 分支，粒度最小、误伤最少 |
 | 外部 merge-bot 并发 | 强互斥/检测提示 | 检测+提示（租约开放对接） | 平台无权改造外部 bot；满足"至少可感知、可协调" |
 | 守卫失败语义 | fail-open/fail-closed | 已合并/远端变化 fail-closed；查询异常 fail-open+告警 | 防止修复丢失优先；守卫自身故障不阻断正常交付 |
-| 结构校验分级 | 全阻断/分级 | `pr_number:0`、元数据矛盾硬阻断；fence 配平软告警 | 避免合法 Markdown 标题/示例误杀 |
-| 钩子安装位置 | 全局/每 worktree | 每 worktree（`repogit` 创建时） | 与 Issue 隔离目录一致，随 worktree 清理，不污染宿主机 |
+| 结构校验分级 | 全阻断/分级 | `pr_number:0`、元数据矛盾硬阻断；fence 配平软告警 | 避免合法 Markdown 标题/示例误杀；代码围栏内示例跳过元数据判定 |
+| 钩子安装位置 | 全局固化/共享动态 | 共享 hooks 目录安装，运行时按 stdin ref 动态判定 | git worktree hooks 本就是仓库共享目录；固化分支会让并发 worktree 按错分支抢租约，动态 ref 才能正确覆盖各 worktree 手工 push |
 
 ### Affected Modules
 | 模块 | 改动类型 | 说明 |

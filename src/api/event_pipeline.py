@@ -4097,32 +4097,18 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 _log.warning(f"direct linked PR: no token for {_rk}, skip push")
                 _results.append({"repo_key": _rk, "status": "failed", "reason": "no token (expired or not configured)"})
                 continue
-            # Issue #993（M2）：direct 自动推送路径同样接入 push 前置守卫。
-            _pre = _branch_guard.preflight_push(_rk, _wt_branch, token=_linked_token)
-            if not _pre.get("allowed"):
-                _log.warning(f"direct linked PR: push blocked by branch guard {_rk}:{_wt_branch}: "
-                             f"{_pre.get('message')}")
-                _results.append({"repo_key": _rk, "status": "blocked",
-                                 "reason": _pre.get("reason", "guard_blocked"),
-                                 "message": _pre.get("message", "")})
+            # Issue #993（M2）：direct 自动推送路径统一走 branch_guard.guarded_push。
+            _push = _branch_guard.guarded_push(
+                _rk, _wt_branch, _wt_dir, token=_linked_token,
+                run_git=repogit._run_git)
+            if not _push.get("ok"):
+                _log.warning(f"direct linked PR: push blocked/failed {_rk}:{_wt_branch}: "
+                             f"{_push.get('message')}")
+                _status = "blocked" if _push.get("stage") == "preflight" else "failed"
+                _results.append({"repo_key": _rk, "status": _status,
+                                 "reason": _push.get("reason", "guard_blocked"),
+                                 "message": _push.get("message", "")})
                 continue
-            # --no-verify：本进程已持租约并完成等价 preflight，避免 pre-push 钩子
-            # 以另一 holder 判 branch_locked 自锁。
-            _r_push = repogit._run_git(
-                ["-C", _wt_dir, "push", "--no-verify", "origin",
-                 f"HEAD:refs/heads/{_wt_branch}"],
-                token=_linked_token, timeout=120)
-            if _r_push is None or _r_push.returncode != 0:
-                _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
-                _log.warning(f"direct linked PR: push failed {_rk}: {_err}")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
-                continue
-            _r_head = repogit._run_git(["-C", _wt_dir, "rev-parse", "HEAD"],
-                                       token=_linked_token, timeout=15)
-            _pushed_sha = ((_r_head.stdout or "").strip()
-                           if _r_head is not None and _r_head.returncode == 0 else "")
-            if _pushed_sha:
-                _branch_guard.record_remote_sha(_rk, _wt_branch, _pushed_sha)
 
             # 6. create PR
             from src.vcs.api_client import create_pr_for_repo

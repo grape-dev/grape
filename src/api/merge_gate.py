@@ -55,14 +55,26 @@ def _normalize_patch(patch) -> str:
     return patch if isinstance(patch, str) else ""
 
 
-def scan_structure_text(text: str) -> dict:
-    """扫描重建文档结构：围栏配平 / pr_number:0 / 元数据口径矛盾。"""
-    fence_count = 0
+def _scan_structure_lines(lines) -> tuple[dict, dict]:
+    """扫描行序列，返回 (结构结果, 元数据 key→values)。
+
+    代码围栏内只统计配平、不做元数据判定：文档里的 YAML/JSON 示例（如
+    ``status: open``、``pr_number: 0``）不是真实元数据，不能误阻断合法文档 PR。
+    """
+    fence_open = ""
     pr_zero = 0
     meta_values: dict = {}
-    for line in (text or "").splitlines():
-        if _FENCE_RE.match(line):
-            fence_count += 1
+    for line in lines:
+        fence = _FENCE_RE.match(line)
+        if fence:
+            marker = fence.group(1)
+            if not fence_open:
+                fence_open = marker
+            elif marker == fence_open:
+                fence_open = ""
+            continue
+        if fence_open:
+            continue
         if _PR_NUMBER_ZERO_RE.search(line):
             pr_zero += 1
         m = _META_LINE_RE.match(line)
@@ -71,22 +83,55 @@ def scan_structure_text(text: str) -> dict:
             value = m.group(2).strip().strip('"').strip("'")
             meta_values.setdefault(key, set()).add(value)
     conflicts = {k: sorted(v) for k, v in meta_values.items() if len(v) > 1}
-    return {
-        "fence_unbalanced": fence_count % 2 == 1,
+    result = {
+        "fence_unbalanced": bool(fence_open),
         "pr_number_zero": pr_zero,
         "metadata_conflicts": conflicts,
     }
+    return result, meta_values
+
+
+def scan_structure_text(text: str) -> dict:
+    """扫描重建文档结构：围栏配平 / pr_number:0 / 元数据口径矛盾。"""
+    return _scan_structure_lines((text or "").splitlines())[0]
 
 
 def scan_structure_patch(patch: str) -> dict:
-    """基于 unified diff 的新增行做结构扫描（删除行不计）。"""
-    added = []
+    """基于 unified diff 扫描：新增行判硬缺陷，变更后的完整 hunk 判元数据矛盾。
+
+    - ``pr_number: 0`` 只看新增行（PR 自己引入的残留才阻断）；
+    - 元数据矛盾看「新增值 + 既有值」：未修改的 context 行也计入结果态，避免
+      新增值与文件既有值矛盾时漏检；仅当该 key 在新增行出现时才报告，避免误伤
+      只是路过已有矛盾文档的 PR；
+    - 围栏配平按变更后的结果态判断（context + 新增，删除行不计）。
+    """
+    added: list = []
+    resulting: list = []
     for line in (patch or "").splitlines():
-        if line.startswith("+++") or line.startswith("---"):
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
             continue
-        if line.startswith("+"):
-            added.append(line[1:])
-    return scan_structure_text("\n".join(added))
+        if line.startswith("+") or line.startswith(" "):
+            body = line[1:]
+            resulting.append(body)
+            if line.startswith("+"):
+                added.append(body)
+        elif line.startswith("-"):
+            continue
+        elif line.startswith("\\"):
+            continue
+        else:
+            resulting.append(line)
+    added_res, added_meta = _scan_structure_lines(added)
+    result_res, result_meta = _scan_structure_lines(resulting)
+    conflicts = {
+        k: sorted(v) for k, v in result_meta.items()
+        if len(v) > 1 and k in added_meta
+    }
+    return {
+        "fence_unbalanced": result_res["fence_unbalanced"],
+        "pr_number_zero": added_res["pr_number_zero"],
+        "metadata_conflicts": conflicts,
+    }
 
 
 def scan_structure_files(files) -> dict:

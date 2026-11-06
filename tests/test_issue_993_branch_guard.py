@@ -20,18 +20,17 @@ BRANCH = "feat/issue-993"
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    import src.lock as lock
     from src.session_manager import db
-    # 租约状态文件落到临时目录，避免污染工作区
-    monkeypatch.setattr(bg, "_state_dir", lambda repo_key: str(tmp_path / "state"))
     try:
         db.execute("DELETE FROM distributed_locks WHERE lock_key LIKE 'branch_guard:%'")
+        db.execute("DELETE FROM branch_guard_state")
         db.commit()
     except Exception:
         pass
     yield
     try:
         db.execute("DELETE FROM distributed_locks WHERE lock_key LIKE 'branch_guard:%'")
+        db.execute("DELETE FROM branch_guard_state")
         db.commit()
     except Exception:
         pass
@@ -211,3 +210,225 @@ def test_hook_cross_process_holder_rejects_self_lock(monkeypatch, capsys):
     finally:
         monkeypatch.setattr(lock, "_holder", "host-task-A")
         bg.release_branch_lease(REPO_KEY, BRANCH)
+
+
+# ===================== 钩子安装 / 共享目录（AC1/M1 回归） =====================
+
+class _R:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _git(*args, cwd=None):
+    env = os.environ.copy()
+    env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                          text=True, check=True, env=env)
+
+
+def test_install_pre_push_hook_shared_dir_has_no_fixed_branch(tmp_path):
+    """linked worktree 的 hooks 目录是仓库共享目录；钩子不得固化分支。"""
+    base = tmp_path / "base"
+    base.mkdir()
+    _git("init", cwd=base)
+    _git("checkout", "-b", "main", cwd=base)
+    (base / "a.txt").write_text("a")
+    _git("add", "-A", cwd=base)
+    _git("commit", "-m", "init", cwd=base)
+    wt1 = tmp_path / "wt1"
+    wt2 = tmp_path / "wt2"
+    _git("worktree", "add", "-b", "feat/one", str(wt1), cwd=base)
+    _git("worktree", "add", "-b", "feat/two", str(wt2), cwd=base)
+
+    assert bg.install_pre_push_hook(str(wt1), REPO_KEY) is True
+    assert bg.install_pre_push_hook(str(wt2), REPO_KEY) is True
+    hooks1 = bg._hooks_dir(str(wt1))
+    hooks2 = bg._hooks_dir(str(wt2))
+    assert hooks1 and hooks1 == hooks2, "worktree 共享同一 hooks 目录"
+    content = (tmp_path / "base" / ".git" / "hooks" / "pre-push").read_text()
+    assert bg.HOOK_MARKER in content
+    assert "feat/one" not in content and "feat/two" not in content, \
+        "钩子必须运行时从 stdin 取 ref，不能固化安装时分支"
+
+
+def test_hook_dynamically_uses_pushed_ref(monkeypatch):
+    """钩子按 stdin 的 ref 记录状态，不受安装时分支影响。"""
+    monkeypatch.setattr(bg, "acquire_branch_lease", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(bg, "release_branch_lease", lambda *a, **k: None)
+    monkeypatch.setattr(bg, "_fetch_pr_state_via_grape",
+                        lambda *a, **k: {"state": "open"})
+    monkeypatch.setattr(bg.sys, "stdin", io.StringIO(
+        f"refs/heads/feat/other local-other refs/heads/feat/other old\n"))
+    assert bg.hook_main([REPO_KEY, "feat/installed"]) == 0
+    assert bg.load_lease_state(REPO_KEY, "feat/other")["expected_remote_sha"] == "local-other"
+    assert bg.load_lease_state(REPO_KEY, "feat/installed") == {}
+
+
+def test_hook_multi_ref_blocks_before_recording(monkeypatch):
+    """多 ref 推送任一被阻断时不得记录任何期望 sha（hook 失败则整次 push 未发生）。"""
+    monkeypatch.setattr(bg, "acquire_branch_lease", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(bg, "release_branch_lease", lambda *a, **k: None)
+
+    def _pr(_rk, branch):
+        return {"state": "merged", "number": 9} if branch == "feat/b" else {"state": "open"}
+
+    monkeypatch.setattr(bg, "_fetch_pr_state_via_grape", _pr)
+    monkeypatch.setattr(bg.sys, "stdin", io.StringIO(
+        "refs/heads/feat/a local-a refs/heads/feat/a old\n"
+        "refs/heads/feat/b local-b refs/heads/feat/b old\n"))
+    assert bg.hook_main([REPO_KEY]) == 1
+    assert bg.load_lease_state(REPO_KEY, "feat/a") == {}
+    assert bg.load_lease_state(REPO_KEY, "feat/b") == {}
+
+
+# ===================== preflight_push / resolve_remote_head =====================
+
+def test_resolve_remote_head_parses_ls_remote(monkeypatch):
+    from src.runtime import repogit
+    monkeypatch.setattr(repogit, "_run_git",
+                        lambda *a, **k: _R(0, "abc123\trefs/heads/feat/issue-993\n"))
+    assert bg.resolve_remote_head(REPO_KEY, BRANCH) == "abc123"
+
+
+def test_resolve_remote_head_fail_open(monkeypatch):
+    from src.runtime import repogit
+    monkeypatch.setattr(repogit, "_run_git", lambda *a, **k: _R(1, "", "boom"))
+    assert bg.resolve_remote_head(REPO_KEY, BRANCH) == ""
+
+
+def test_preflight_push_combines_remote_and_pr_state(monkeypatch):
+    monkeypatch.setattr(bg, "resolve_remote_head", lambda *a, **k: "sha-old")
+    monkeypatch.setattr(bg, "fetch_pr_state",
+                        lambda *a, **k: {"state": "open", "number": 3, "base": "main"})
+    got = bg.preflight_push(REPO_KEY, BRANCH, token="tok")
+    assert got["allowed"] is True and got["remote_sha"] == "sha-old"
+    assert got["pr"]["number"] == 3
+
+    monkeypatch.setattr(bg, "fetch_pr_state",
+                        lambda *a, **k: {"state": "merged", "number": 3, "base": "main"})
+    got2 = bg.preflight_push(REPO_KEY, BRANCH, token="tok")
+    assert got2["allowed"] is False and got2["reason"] == "pr_merged"
+
+
+# ===================== guarded_push 自动路径 =====================
+
+def test_guarded_push_blocks_before_git(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bg, "preflight_push", lambda *a, **k: {
+        "allowed": False, "reason": "pr_merged", "message": "merged"})
+    got = bg.guarded_push(REPO_KEY, BRANCH, "/tmp", token="t",
+                          run_git=lambda *a, **k: calls.append(a))
+    assert got["ok"] is False and got["stage"] == "preflight"
+    assert calls == []
+
+
+def test_guarded_push_records_pushed_local_sha(monkeypatch):
+    monkeypatch.setattr(bg, "preflight_push", lambda *a, **k: {"allowed": True})
+
+    def _run(args, **kw):
+        if "rev-parse" in args:
+            return _R(0, "local-sha\n")
+        return _R(0, "")
+
+    got = bg.guarded_push(REPO_KEY, BRANCH, "/tmp", token="t", run_git=_run)
+    assert got["ok"] is True and got["sha"] == "local-sha"
+    assert bg.load_lease_state(REPO_KEY, BRANCH)["expected_remote_sha"] == "local-sha"
+
+
+# ===================== 两条自动推送路径集成 =====================
+
+def _make_worktree_repo(tmp_path, branch="feat/issue-42"):
+    remote = tmp_path / "remote.git"
+    _git("init", "--bare", str(remote))
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _git("init", cwd=wt)
+    _git("checkout", "-b", "main", cwd=wt)
+    (wt / "a.txt").write_text("a")
+    _git("add", "-A", cwd=wt)
+    _git("commit", "-m", "init", cwd=wt)
+    base_sha = _git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    _git("remote", "add", "origin", str(remote), cwd=wt)
+    _git("update-ref", "refs/remotes/origin/main", base_sha, cwd=wt)
+    _git("checkout", "-b", branch, cwd=wt)
+    (wt / "b.txt").write_text("b")
+    _git("add", "-A", cwd=wt)
+    _git("commit", "-m", "feature", cwd=wt)
+    return wt, remote
+
+
+def _patch_guard(monkeypatch):
+    from src.runtime import branch_guard
+    seen = {"acquire": [], "release": [], "pre": [], "record": []}
+    monkeypatch.setattr(branch_guard, "acquire_branch_lease",
+                        lambda rk, br, *a, **k: (seen["acquire"].append((rk, br))
+                                                 or {"ok": True}))
+    monkeypatch.setattr(branch_guard, "release_branch_lease",
+                        lambda rk, br: seen["release"].append((rk, br)))
+    monkeypatch.setattr(branch_guard, "preflight_push",
+                        lambda rk, br, token="": (seen["pre"].append((rk, br))
+                                                  or {"allowed": True}))
+    monkeypatch.setattr(branch_guard, "record_remote_sha",
+                        lambda rk, br, sha: seen["record"].append((rk, br, sha)))
+    return seen
+
+
+def test_agent_linked_push_path_uses_guard(tmp_path, monkeypatch):
+    import json as _json
+
+    from src.runtime import agent, repogit
+    from src.vcs import api_client
+
+    wt, remote = _make_worktree_repo(tmp_path)
+    seen = _patch_guard(monkeypatch)
+    monkeypatch.setattr(agent, "_get_task_token", lambda task: "tok")
+    monkeypatch.setattr(repogit, "ensure_feature_branch", lambda *a, **k: True)
+    monkeypatch.setattr(api_client, "create_pr_for_repo",
+                        lambda **k: {"number": 7, "html_url": "u"})
+
+    task = {"agent_type": "coding", "issue_id": "#42"}
+    env = {"BOT_USERNAME": "bot", "GRAPE_LINKED_WORKTREES": _json.dumps(
+        [{"repo_key": REPO_KEY, "branch": "main", "dir": str(wt)}])}
+    agent._submit_linked_repo_prs(task, env)
+
+    assert task["_linked_pr_results"][0]["status"] == "created"
+    assert (REPO_KEY, "feat/issue-42") in seen["acquire"]
+    assert (REPO_KEY, "feat/issue-42") in seen["pre"]
+    assert any(r[0] == REPO_KEY and r[1] == "feat/issue-42" for r in seen["record"])
+    assert (REPO_KEY, "feat/issue-42") in seen["release"]
+    heads = _git("ls-remote", "--heads", str(remote), cwd=wt).stdout
+    assert "refs/heads/feat/issue-42" in heads
+
+
+def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
+    import json as _json
+    from types import SimpleNamespace
+
+    import src.repo as repo_mod
+    from src.api import event_pipeline
+    from src.runtime import repogit
+    from src.vcs import api_client
+
+    wt, remote = _make_worktree_repo(tmp_path)
+    seen = _patch_guard(monkeypatch)
+    monkeypatch.setattr(repogit, "ensure_feature_branch", lambda *a, **k: True)
+    monkeypatch.setattr(repo_mod, "Repo", lambda rk: SimpleNamespace(bot_token="tok"))
+    created = []
+    monkeypatch.setattr(api_client, "create_pr_for_repo",
+                        lambda **k: (created.append(k) or {"number": 8, "html_url": "u"}))
+
+    event_pipeline._submit_direct_linked_prs(
+        {"BOT_USERNAME": "bot", "GRAPE_LINKED_WORKTREES": _json.dumps(
+            [{"repo_key": REPO_KEY, "branch": "main", "dir": str(wt)}])},
+        "gitcode:org/main", "#42", "tok")
+
+    assert (REPO_KEY, "feat/issue-42") in seen["acquire"]
+    assert (REPO_KEY, "feat/issue-42") in seen["pre"]
+    assert any(r[0] == REPO_KEY and r[1] == "feat/issue-42" for r in seen["record"])
+    assert (REPO_KEY, "feat/issue-42") in seen["release"]
+    assert created and created[0]["head"] == "feat/issue-42"
+    heads = _git("ls-remote", "--heads", str(remote), cwd=wt).stdout
+    assert "refs/heads/feat/issue-42" in heads

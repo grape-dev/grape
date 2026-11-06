@@ -841,8 +841,21 @@ CREATE TABLE IF NOT EXISTS distributed_locks (
     locked_at   BIGINT       NOT NULL DEFAULT 0, -- 获取锁时间戳（秒）
     expires_at  BIGINT       NOT NULL DEFAULT 0, -- 锁过期时间戳（秒），过期可被抢占
     update_at   BIGINT       NOT NULL DEFAULT 0, -- 最后更新时间戳（排查用）
-    created_at  BIGINT       NOT NULL DEFAULT 0, -- 锁记录首次创建时间（排查用）
+    created_at  BIGINT       NOT NULL DEFAULT 0, -- 锁记录首次创建时间戳（排查用）
     PRIMARY KEY (lock_key)
+)
+"""
+
+# Issue #993：分支守卫的期望远端 sha 状态（与 distributed_locks 同源 DB，跨 worker 可见）。
+_BRANCH_GUARD_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS branch_guard_state (
+    repo_key            VARCHAR(255) NOT NULL DEFAULT '',
+    head_branch         VARCHAR(255) NOT NULL DEFAULT '',
+    expected_remote_sha VARCHAR(64)  NOT NULL DEFAULT '',
+    pr_number           INTEGER      NOT NULL DEFAULT 0,
+    base_branch         VARCHAR(255) NOT NULL DEFAULT '',
+    updated_at          TEXT         NOT NULL DEFAULT '',
+    PRIMARY KEY (repo_key, head_branch)
 )
 """
 
@@ -2803,6 +2816,25 @@ register_migration(
     name="create-merge-gate-log-table",
     kind="safe",
     fn=_fn_create_grape_t_merge_gate_log,
+)
+
+
+def _fn_create_branch_guard_state() -> None:
+    """Issue #993：存量库补建分支守卫状态表（CREATE TABLE IF NOT EXISTS 幂等）。
+
+    与 distributed_locks 同源 DB，跨 worker 共享 expected_remote_sha；早期把它落在
+    本机 workspace 文件，跨 worker 调度时漂移检测会 fail-open。
+    """
+    with db_lock:
+        db.execute(_BRANCH_GUARD_STATE_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611060001",
+    name="create-branch-guard-state-table",
+    kind="safe",
+    fn=_fn_create_branch_guard_state,
 )
 
 
