@@ -72,7 +72,7 @@ Issue 对象字段：
 | `issue_number` | int | **VCS 侧 Issue 编号**（GitCode/GitHub），与 `grape git-repo issues get --number` 同口径；与 `id` 不可互用 |
 | `vcs_exists` | bool | VCS 侧是否仍存在该编号（`false`=已删除） |
 | `is_vcs_deleted` | bool | `= !vcs_exists`，便于前端/Agent 直接判定 |
-| `vcs_check` | string | `ok`=已完成 VCS 校验；`unavailable`=校验失败（fail-open，卡片未隐藏） |
+| `vcs_check` | string | 卡片级校验结果：`ok`=已确认存在/已确认删除；`unavailable`=该校验失败或单卡复核 unknown（fail-open，卡片未隐藏） |
 | `title` | string | 标题 |
 | `status` | string | 需求中心状态（active/processing/awaiting_input/pending_review/completed/cancelled） |
 | `stage` | string | pipeline 阶段（vod/issue/coding/qa/sre/pending_review/done） |

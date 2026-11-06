@@ -2242,26 +2242,28 @@ def list_repo_issues(owner: str, repo: str,
     # Issue #995：先按 provider 批量刷新 VCS 存在性并回写台账，SQL 过滤/COUNT 才能与
     # 返回集合一致。VCS 无法核实（无 token/超时）的 repo_key 记 unavailable → fail-open，
     # 不参与 vcs_exists 过滤（避免 VCS 抖动导致需求“消失”）。
-    _vcs_status: dict[str, str] = {}
+    _vcs_status: dict[str, dict] = {}
     try:
         from src.api.issue_vcs_index import refresh_vcs_existence
         _vcs_status = refresh_vcs_existence(repo_keys) or {}
     except Exception as _vcs_err:
         log.warning(f"issues: refresh vcs existence failed: {_vcs_err}")
-        _vcs_status = {_k: "unavailable" for _k in repo_keys}
+        _vcs_status = {_k: {"status": "unavailable", "unresolved": frozenset()} for _k in repo_keys}
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
     params: list = list(repo_keys)
     if not include_deleted:
-        _vcs_ok = [k for k in repo_keys if _vcs_status.get(k) == "ok"]
-        _vcs_unknown = [k for k in repo_keys if _vcs_status.get(k) != "ok"]
+        _vcs_ok = [k for k in repo_keys
+                   if (_vcs_status.get(k) or {}).get("status") == "ok"]
+        _vcs_unknown = [k for k in repo_keys
+                        if (_vcs_status.get(k) or {}).get("status") != "ok"]
         if _vcs_ok:
             if _vcs_unknown:
                 _ph = ",".join("?" * len(_vcs_unknown))
-                clauses.append(f"(repo_key NOT IN ({_ph}) OR vcs_exists != 0)")
+                clauses.append(f"(repo_key NOT IN ({_ph}) OR COALESCE(vcs_exists, 1) != 0)")
                 params.extend(_vcs_unknown)
             else:
-                clauses.append("vcs_exists != 0")
+                clauses.append("COALESCE(vcs_exists, 1) != 0")
     if status:
         clauses.append("status=?")
         params.append(status)
@@ -2432,7 +2434,16 @@ def list_repo_issues(owner: str, repo: str,
         _rk = _it.get("repo_key") or ""
         _it["vcs_exists"] = bool(_it.get("vcs_exists", True))
         _it["is_vcs_deleted"] = not _it["vcs_exists"]
-        _it["vcs_check"] = "ok" if _vcs_status.get(_rk) == "ok" else "unavailable"
+        _info = _vcs_status.get(_rk) or {}
+        _it["vcs_check"] = "unavailable"
+        if _info.get("status") == "ok":
+            _unresolved = _info.get("unresolved") or frozenset()
+            try:
+                _unknown = int(_it.get("issue_number")) in _unresolved
+            except (TypeError, ValueError):
+                _unknown = True
+            # 单卡复核 unknown（无法确认存在性）时同样标 unavailable，不冒充已完成校验。
+            _it["vcs_check"] = "unavailable" if _unknown else "ok"
 
     # Issue #542：分页模式返回服务端分页元数据；非分页模式 total 维持 len(issues)（兼容旧语义）
     if _total is not None:
