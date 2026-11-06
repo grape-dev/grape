@@ -36,6 +36,17 @@ def _extract_issue_id_from_text(text: str) -> str:
     return ""
 
 
+def _extract_issue_id_from_link(text: str) -> str:
+    """仅从 Issue/PR 链接中提取编号（Issue #1312：裸 #N 不作为归属来源）。"""
+    if not text:
+        return ""
+    import re
+    m = re.search(r'/(?:issues|pulls|merge_requests)/(\d+)', text)
+    if m and m.group(1) != "0":
+        return f"#{m.group(1)}"
+    return ""
+
+
 def _extract_entity_type_from_text(text: str) -> str:
     """从文本中提取实体类型（issue vs pull_request）。
 
@@ -68,8 +79,8 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     跨流水线交接、订阅、admin 审计、技能解析失败等直写终态入口的统一收口点；
     调用方显式传入 completed_at 时优先使用。非终态 status 不写。
 
-    issue_id 保证非空：传入为空时按 payload → result → title/summary 顺序兜底解析，
-    仍无法解析则用 #0 表示"无关联"。
+    issue_id：传入为空时仅信任结构化来源（payload 的 issue_number / issue 对象 /
+    链接），裸 #N 不再解析；无法解析时写空串表示"无关联"（Issue #1312）。
     scene_id: PR 订阅等场景级事件持久化场景ID，空字符串表示无关联场景。
     entity_type: 实体类型（"issue" / "pull_request"），区分编号相同的 issue 与 PR。
     idempotency_key: A2A 幂等键（Issue #544 L2）。非空时写入列并受
@@ -89,12 +100,12 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                         if num:
                             break
             if num:
-                issue_id = f"#{num}"
+                _num = str(num).lstrip("#")
+                if _num.isdigit() and _num != "0":
+                    issue_id = f"#{_num}"
         if not issue_id:
-            issue_id = _extract_issue_id_from_text(result) or _extract_issue_id_from_text(summary) \
-                or _extract_issue_id_from_text(title)
-        if not issue_id:
-            issue_id = "#0"
+            issue_id = _extract_issue_id_from_link(result) or _extract_issue_id_from_link(summary) \
+                or _extract_issue_id_from_link(title)
     _seq = 0
     # Issue #1497：终态 INSERT 同事务写 completed_at（已有非空值由调用方显式传入保留）
     if status in ("completed", "failed", "cancelled", "timeout") and not completed_at:
