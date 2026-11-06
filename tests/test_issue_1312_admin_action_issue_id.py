@@ -222,3 +222,18 @@ class TestBackfillScript:
         assert bf._rollback(c, conn, path) == 1
         c.execute("SELECT issue_id FROM events WHERE seq=3")
         assert c.fetchone()[0] == "#0"
+
+
+def test_pipeline_window_scene_filter_excludes_audit(monkeypatch):
+    from src.api.routes import pipeline as pipeline_route
+
+    conn = _seed_pipeline_db()
+    conn.execute("UPDATE issue SET scene_id='scene-x'")
+    conn.execute("UPDATE events SET scene_id='scene-x' WHERE issue_id='#30'")
+    conn.commit()
+    _patch_pipeline(monkeypatch, conn)
+
+    ordered, total, failed = pipeline_route._pipeline_window([REPO], "scene-x", 50)
+    assert ordered == ["#30"]
+    assert total == 1
+    assert failed == set()
