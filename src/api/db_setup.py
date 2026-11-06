@@ -3278,7 +3278,7 @@ def _fn_backfill_events_terminal_completed_at(conn=None) -> None:
 
 
 register_migration(
-    version="202611060001",
+    version="202611060003",
     name="backfill_events_terminal_completed_at",
     kind="safe",
     fn=_fn_backfill_events_terminal_completed_at,
