@@ -424,7 +424,7 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
         c.execute(
             f"SELECT COUNT(*) FROM (SELECT e.issue_id FROM events e {_join} "
             f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != ''{_scene_clause} "
-            f"GROUP BY e.issue_id)",
+            f"GROUP BY e.issue_id) AS _cnt",
             (*repo_keys, *_scene_params))
         total = c.fetchone()[0]
         # ③ 失败集合：每个 (issue, agent) 取最新事件后判 failed
