@@ -967,10 +967,13 @@ def run_migration(dry_run: bool = False, force: bool = False,
         orphans = _scan_orphan_ids()
         if orphans:
             print(f"\n[阶段 3] 孤儿 ID 扫描: 发现 {len(orphans)} 组孤儿")
-            for o in orphans:
-                msg = f"  [ORPHAN] {o['table']}.{o['column']}: id={o['orphan_id']} count={o['count']}"
-                print(msg)
-                log.warning(msg)
+            # 逐行明细最多 20 条，其余折叠——避免每次启动刷出上千条 WARNING
+            for idx, o in enumerate(orphans):
+                if idx >= 20:
+                    break
+                log.warning(f"  [ORPHAN] {o['table']}.{o['column']}: id={o['orphan_id']} count={o['count']}")
+            if len(orphans) > 20:
+                log.warning(f"  [ORPHAN] 其余 {len(orphans) - 20} 条同类明细已折叠（本次共 {len(orphans)} 条）")
             print("[阶段 3] 有孤儿 ID，迁移不完整，需人工处理")
         else:
             print(f"\n[阶段 3] 孤儿 ID 扫描: 0 孤儿，迁移完整")
@@ -979,10 +982,14 @@ def run_migration(dry_run: bool = False, force: bool = False,
         collisions = _scan_id_collisions()
         if collisions:
             print(f"\n[阶段 3] 撞 ID 错位检测: 发现 {len(collisions)} 组疑似错位")
-            for c in collisions:
-                msg = f"  [COLLISION] user_id={c['user_id']} username={c['username']} provider={c['provider']}: {c['issue']}"
-                print(msg)
-                log.warning(msg)
+            for idx, c in enumerate(collisions):
+                if idx >= 20:
+                    break
+                log.warning(f"  [COLLISION] user_id={c['user_id']} username={c['username']} "
+                            f"provider={c['provider']}: {c['issue']}")
+            if len(collisions) > 20:
+                log.warning(f"  [COLLISION] 其余 {len(collisions) - 20} 条同类明细已折叠"
+                            f"（本次共 {len(collisions)} 条）")
             print("[阶段 3] 有撞 ID 错位，需人工核对凭据归属")
         else:
             print(f"[阶段 3] 撞 ID 错位检测: 0 错位")
