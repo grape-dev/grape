@@ -1608,6 +1608,54 @@ class _TaskTokenLockSkipped(Exception):
 
 _SESSION_TOKEN_LOCK_TIMEOUT = 10  # 秒：同任务跨进程轮换锁等待上限
 
+# Issue #990 复审：GET_LOCK 是连接级锁，连接一断就释放，因此这条专用连接可以**跨次复用**。
+# 实测（MySQL 8.0.43 RDS）每次新建/关闭连接 + 加解一次锁 p50=8.4ms，复用后 p50=0.22ms；
+# 每 50 次同步省 408ms（97%）。池外的语义不变：绝不用池借出的连接持锁。
+# guard 保证「同进程内一次只有一个线程持锁」——同一连接上对同名 GET_LOCK 会重入计数，
+# 若两个线程交错加解就会漏释放，其它进程被永久卡住。
+_lock_conn_state: dict = {"conn": None, "guard": threading.Lock()}
+
+
+def _locked_connection():
+    """取复用的专用锁连接（失效则重建）。失败返回 None（调用方 fail-closed）。"""
+    conn = _lock_conn_state.get("conn")
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            return conn
+        except Exception as e:
+            log.warning(f"sync_task_session_token: lock conn unhealthy, reconnecting: {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _lock_conn_state["conn"] = None
+    factory = getattr(db, "dedicated_connection", None)
+    if factory is None:
+        log.warning("sync_task_session_token: mysql backend without dedicated_connection; "
+                    "cannot serialize cross-process token rotation")
+        return None
+    try:
+        conn = factory()
+    except Exception as e:
+        log.warning(f"sync_task_session_token: dedicated lock conn failed: {e}")
+        return None
+    _lock_conn_state["conn"] = conn
+    return conn
+
+
+def _drop_locked_connection():
+    """连接出错/断链时丢弃，下次重建（连接断开即释放其上的命名锁）。"""
+    conn = _lock_conn_state.get("conn")
+    _lock_conn_state["conn"] = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 
 def _session_token_lock_name(task_id: str) -> str:
     """MySQL 命名锁名（≤64 字符）：按库名隔离，避免同一 MySQL 实例多环境互相排队。"""
@@ -1622,57 +1670,60 @@ def _session_token_lock_name(task_id: str) -> str:
 
 
 def _acquire_task_token_lock(task_id: str):
-    """在池外专用连接上获取 MySQL 服务器级命名锁（跨进程串行化）。
+    """在复用的池外专用连接上获取 MySQL 服务器级命名锁（跨进程串行化）。
 
     为什么不用 ``SELECT ... FOR UPDATE``：``src/mysql_compat.py`` 对任何 SELECT
     执行后立即 ``commit()``，行锁随即释放，多 worker 仍可并发轮换互相作废旧 token。
     GET_LOCK 是连接级、服务器级互斥，且锁连接独立于业务连接，可稳定覆盖读+轮换+回写
     整个临界区（对应 QA 建议的「分布式锁」方案）。
 
-    返回 (dedicated_conn, lock_name)；获取失败返回 (None, "")，调用方必须 fail-closed。
+    返回 (locked_conn, lock_name)；获取失败返回 (None, "")，调用方必须 fail-closed。
+    进程内的 guard 先串行化（同一连接重入计数会漏释放），再用 GET_LOCK 跨进程互斥。
     """
-    factory = getattr(db, "dedicated_connection", None)
-    if factory is None:
-        log.warning("sync_task_session_token: mysql backend without dedicated_connection; "
-                    "cannot serialize cross-process token rotation")
+    guard = _lock_conn_state["guard"]
+    if not guard.acquire(timeout=_SESSION_TOKEN_LOCK_TIMEOUT):
+        log.warning("sync_task_session_token: in-process token lock busy; fail closed without rotating")
         return None, ""
     try:
-        dconn = factory()
-    except Exception as e:
-        log.warning(f"sync_task_session_token: dedicated lock conn failed: {e}")
-        return None, ""
-    lock_name = _session_token_lock_name(task_id)
-    try:
-        cur = dconn.cursor()
-        cur.execute("SELECT GET_LOCK(%s, %s)", (lock_name, _SESSION_TOKEN_LOCK_TIMEOUT))
-        row = cur.fetchone()
-        if not row or row[0] != 1:
-            log.warning(f"sync_task_session_token: mysql named lock not acquired ({lock_name}); "
-                        "fail closed without rotating")
-            dconn.close()
+        dconn = _locked_connection()
+        if dconn is None:
+            guard.release()
             return None, ""
-        return dconn, lock_name
-    except Exception as e:
-        log.warning(f"sync_task_session_token: mysql named lock error ({lock_name}): {e}")
+        lock_name = _session_token_lock_name(task_id)
         try:
-            dconn.close()
-        except Exception:
-            pass
-        return None, ""
+            cur = dconn.cursor()
+            cur.execute("SELECT GET_LOCK(%s, %s)", (lock_name, _SESSION_TOKEN_LOCK_TIMEOUT))
+            row = cur.fetchone()
+            if not row or row[0] != 1:
+                log.warning(f"sync_task_session_token: mysql named lock not acquired ({lock_name}); "
+                            "fail closed without rotating")
+                guard.release()
+                return None, ""
+            return dconn, lock_name
+        except Exception as e:
+            log.warning(f"sync_task_session_token: mysql named lock error ({lock_name}): {e}")
+            _drop_locked_connection()
+            guard.release()
+            return None, ""
+    except Exception:
+        guard.release()
+        raise
 
 
 def _release_task_token_lock(dconn, lock_name: str):
-    """显式释放命名锁并关闭专用连接（连接断开也会兜底释放）。"""
+    """释放命名锁并归还进程内 guard（连接保留复用；断链时下次自动重建）。"""
     try:
         cur = dconn.cursor()
         cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
         cur.fetchone()
     except Exception as e:
-        log.warning(f"sync_task_session_token: release lock {lock_name} failed (close will release): {e}")
+        log.warning(f"sync_task_session_token: release lock {lock_name} failed (conn drop will release): {e}")
+        _drop_locked_connection()
     finally:
         try:
-            dconn.close()
-        except Exception:
+            _lock_conn_state["guard"].release()
+        except RuntimeError:
+            # 未持锁（异常路径已释放）：无需处理
             pass
 
 

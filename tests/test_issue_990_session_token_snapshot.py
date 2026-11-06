@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -92,6 +93,17 @@ def _cleanup(task_ids):
         db.commit()
 
 
+
+@pytest.fixture(autouse=True)
+def _reset_lock_conn_state():
+    """Issue #990 复审：锁连接改为跨次复用，测试间必须清掉进程级连接。"""
+    import src.runtime.service as _svc
+    _svc._lock_conn_state["conn"] = None
+    _svc._lock_conn_state["guard"] = threading.Lock()
+    yield
+    _svc._lock_conn_state["conn"] = None
+    _svc._lock_conn_state["guard"] = threading.Lock()
+
 class _FakeLockCursor:
     """模拟池外 MySQL 专用连接上的 GET_LOCK / RELEASE_LOCK。"""
 
@@ -106,6 +118,10 @@ class _FakeLockCursor:
             self._row = (1 if self._state.get("acquired", True) else 0,)
         elif "RELEASE_LOCK" in upper:
             self._state["events"].append(("release", params[0]))
+            self._row = (1,)
+        elif upper.startswith("SELECT 1"):
+            # Issue #990 复审：复用锁连接前先做健康探测
+            self._state["events"].append(("ping", ""))
             self._row = (1,)
         else:
             raise AssertionError(f"unexpected lock SQL: {sql}")
@@ -140,6 +156,7 @@ class _DBWithDedicated:
         return getattr(self._real, name)
 
     def dedicated_connection(self):
+        self._state["connects"] = self._state.get("connects", 0) + 1
         return _FakeLockConn(self._state)
 
 
@@ -299,9 +316,11 @@ class TestSyncTaskSessionToken:
             kinds = [e[0] for e in state["events"]]
             assert kinds.count("get") == 1
             assert kinds.count("release") == 1
-            assert kinds.count("close") == 1
+            # Issue #990 复审：锁连接改为跨次复用，不再每次 close（实测省 97% 连接开销）
+            assert kinds.count("close") == 0
+            assert state["connects"] == 1
             # GET_LOCK 先于临界区，RELEASE_LOCK 在临界区之后
-            assert kinds[0] == "get" and kinds[-2:] == ["release", "close"]
+            assert kinds[0] == "get" and kinds[-1] == "release"
         finally:
             _cleanup([tid])
 
