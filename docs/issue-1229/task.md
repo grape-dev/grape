@@ -8,7 +8,7 @@
 | 4 | 绿实现：前端「能效看板」子 Tab + 渲染 + 空态 + i18n（zh/en） | observability.js + locales zh/en | node 转绿 |
 | 5 | 回归：既有 dashboard/observability 相关测试全量通过 | — | pytest 0 fail |
 | 6 | 自审查（5 轴）+ 前置增量检查（黑名单拦截 + 敏感扫描） | — | 两条通过 |
-| 7 | push + 建 PR（base=local-liufei）+ Issue 评论 + A2A QA | PR | 链路完整 |
+| 7 | push + 建 PR（base=weekly-10）+ Issue 评论 + A2A QA | PR | 链路完整 |
 
 ## 测试切片（一竖切片一测试一提交，红/绿分提交）
 - 切片 A（端点契约）：T1 404→路由存在；T2 空库返回空 contributors（空态数据形态）。
