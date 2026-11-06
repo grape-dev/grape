@@ -41,6 +41,14 @@
 | 出参 | 仓库维度看板数据 |
 | 返回 | 200；403 无仓库权限 |
 
+### GET /api/dashboard/efficiency — 能效看板
+
+> scope：user_only。权限：`require_org_member` + `check_repo_access`（传 `repo` 时校验当前用户可访问该仓库）。
+
+| Query | `repo`（可选，`gitcode:owner/name` 或 `owner/name`）、`limit`（可选，默认 50，上限 200） |
+| 出参 | 按任务聚合的 token/cost 效率：`kpi` 汇总、`contributors` 协作者明细（bot 账号已排除）、`models` 模型分布 |
+| 返回 | 200；401 未登录；403 无仓库权限 |
+
 ---
 
 ## Pipeline 流水线

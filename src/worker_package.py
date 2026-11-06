@@ -127,8 +127,8 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
                 log.info(f"worker_package: removed stale grape wheel {_old} (rebuild from current main)")
             except Exception as e:
                 log.warning(f"worker_package: failed to remove stale grape wheel {_old}: {e}")
-    if any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir)):
-        return whl_dir
+    # 清空后不再做「已有 wheel 即跳过」的短路：wheels/ 里若仍残留 grape-*.whl（如清理失败），
+    # 也不能当缓存命中——否则又退回到陈旧 wheel 永不自愈的老问题。
     src = os.path.join(CACHE_DIR, "grape-cli-src")
     try:
         if not os.path.isdir(os.path.join(src, ".git")):
