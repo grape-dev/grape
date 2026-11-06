@@ -33,6 +33,10 @@ MANIFEST = [
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
     "src/kernel/",
+    # 历史导入路径兼容包：worker 侧仍有 from src.runtime.<module> 的懒导入
+    # （message_report / client / health / engine_select / task_log_stream / os_adapter），
+    # 包内缺这个目录会在任务执行期 ModuleNotFoundError（远程 worker 零产出被判死）。
+    "src/runtime/",
     "src/domains/",
     "src/config.py",
     "src/repo_key.py",
