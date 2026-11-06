@@ -528,19 +528,26 @@ def _normalize_milestone_states(data):
     return data
 
 
+_MILESTONE_FETCH_MAX_PAGES = 21
+
+
 def _fetch_gitcode_milestones(owner: str, repo: str, user: dict, p: str):
     """Issue #1005：分页取全量里程碑（用于 milestone_id 的 id/number 解析）。"""
     items = []
-    for page in range(1, 21):
+    prev_page = None
+    for page in range(1, _MILESTONE_FETCH_MAX_PAGES + 1):
         data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
                                             {"state": "all", "per_page": _MILESTONES_MAX_PER_PAGE,
                                              "page": page}, p),
                         _repo_token(owner, repo, user, p))
-        if not isinstance(data, list):
+        # 上游可能静默钳制 per_page，不能用「本页不足 per_page」判断末页（Issue #1076 审查）。
+        if not isinstance(data, list) or not data:
             break
+        if data == prev_page:
+            # 上游忽略 page 参数时返回同一页，继续翻页无意义。
+            break
+        prev_page = data
         items.extend(_normalize_milestone_states(data))
-        if len(data) < _MILESTONES_MAX_PER_PAGE:
-            break
     return items
 
 
