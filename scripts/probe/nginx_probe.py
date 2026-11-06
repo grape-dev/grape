@@ -13,6 +13,8 @@ Grape 统一探针 —— 每分钟探测 nginx（两节点）、node_exporter �
     nginx_probe_up / http_status / latency_ms        入口可用性（/api/health）
     nginx_conn_active / reading / writing / waiting   nginx stub_status 连接数
     host_probe_up / net_rx_bps / net_tx_bps / tcp_established / load1 / mem_available_ratio
+  label upstream=127.0.0.1:38090|192.168.0.116:38080
+    lb_requests_5m / lb_share_percent               LB 近 5 分钟分发量与占比（从 Loki 反查）
   label component=grafana|prometheus|loki|tempo|alloy
     lgtm_probe_up / http_status / latency_ms          LGTM 各组件健康
 
@@ -83,6 +85,39 @@ def _parse_stub_status(text):
         out["writing"] = float(m.group(2))
         out["waiting"] = float(m.group(3))
     return out
+
+
+
+LOKI_QUERY = "http://127.0.0.1:3100/loki/api/v1/query"
+LB_QUERY = ('sum by (upstream) (count_over_time({job="nginx-lb"} | upstream=~".+" | upstream!~".*," [5m]))')
+
+
+def _lb_share():
+    """从 Loki 反查 LB 近 5 分钟按上游分发的条数，换算成绝对量与百分比。"""
+    import urllib.parse
+    url = LOKI_QUERY + "?" + urllib.parse.urlencode({"query": LB_QUERY, "time": int(time.time())})
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        rows = data.get("data", {}).get("result", []) or []
+        counts = {}
+        for r in rows:
+            up = (r.get("metric") or {}).get("upstream") or ""
+            if not up:
+                continue
+            try:
+                counts[up] = float(r["value"][1])
+            except Exception:
+                continue
+        total = sum(counts.values())
+        out = []
+        for up, cnt in counts.items():
+            out.append(("lb_requests_5m", cnt, {"upstream": up}))
+            if total > 0:
+                out.append(("lb_share_percent", round(cnt * 100.0 / total, 1), {"upstream": up}))
+        return out
+    except Exception:
+        return []
 
 
 def collect():
@@ -167,6 +202,8 @@ def collect():
         metrics += [("lgtm_probe_up", up, labels),
                     ("lgtm_probe_http_status", code, labels),
                     ("lgtm_probe_latency_ms", round(latency, 1), labels)]
+
+    metrics += _lb_share()
 
     return metrics, state
 
