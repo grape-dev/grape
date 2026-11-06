@@ -1805,9 +1805,13 @@ def _submit_linked_repo_prs(task: dict, env: dict):
 
         # Issue #993（M1）：分支级写租约必须先于 ensure_feature_branch（其中可能
         # `git checkout -b` 写分支）获取，否则被保护的写动作可能先发生。
+        # 与 direct 端共用 branch_lease 上下文，租约获取/释放生命周期不再各写一遍。
         from src.runtime import branch_guard as _branch_guard
-        _lease = _branch_guard.acquire_branch_lease(_rk, _wt_branch)
+        _lease_ctx = _branch_guard.branch_lease(
+            _rk, _wt_branch, task_id=str(task.get("id") or ""))
+        _lease = _lease_ctx.__enter__()
         if not _lease.get("ok"):
+            _lease_ctx.__exit__(None, None, None)
             log.warning(f"linked PR: branch lease blocked {_rk}:{_wt_branch}: "
                         f"{_lease.get('message')}")
             _results.append({"repo_key": _rk, "status": "blocked",
@@ -1920,7 +1924,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             log.warning(f"linked PR: error for {_rk}: {e}")
             _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
         finally:
-            _branch_guard.release_branch_lease(_rk, _wt_branch)
+            _lease_ctx.__exit__(None, None, None)
 
     task["_linked_pr_results"] = _results
     _created = [r for r in _results if r.get("status") == "created"]

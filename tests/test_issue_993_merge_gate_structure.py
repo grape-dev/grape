@@ -313,3 +313,64 @@ def test_merge_pull_both_sources_trace_both(monkeypatch):
     body = _trace_comments(captured)[0]["body"]
     assert "conflict markers" in body and "runbook.md" in body
     assert "structural defects" in body and "docs/spec.md" in body
+
+
+# ===================== 复审修复：全文行号映射（围栏跨 hunk） =====================
+
+def test_fence_open_outside_hunk_uses_full_text_context():
+    """围栏开标记在 hunk 之外时，hunk 内的新增 pr_number:0 仍应视为示例不阻断。"""
+    file_text = ("```yaml\n"
+                 "status: open\n"
+                 "pr_number: 0\n"
+                 "```\n")
+    patch = ("@@ -2,1 +2,2 @@\n"
+             " status: open\n"
+             "+pr_number: 0\n")
+    r = mg.scan_structure_patch(patch, file_text=file_text)
+    assert r["pr_number_zero"] == 0
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False
+
+
+def test_fence_close_between_hunks_real_added_line_still_hard():
+    """围栏闭合标记在 hunk 间被省略时，后续 hunk 的真实 pr_number:0 不得漏检。"""
+    file_text = ("```yaml\n"
+                 "example: 1\n"
+                 "foo: bar\n"
+                 "```\n"
+                 "stuff\n"
+                 "pr_number: 0\n")
+    patch = ("@@ -1,2 +1,3 @@\n"
+             " ```yaml\n"
+             " example: 1\n"
+             "+foo: bar\n"
+             "@@ -5,1 +5,2 @@\n"
+             " stuff\n"
+             "+pr_number: 0\n")
+    r = mg.scan_structure_patch(patch, file_text=file_text)
+    assert r["pr_number_zero"] == 1
+    assert r["fence_unbalanced"] is False
+
+
+def test_multi_hunk_added_inside_fence_after_context_open():
+    """多 hunk：围栏开/闭标记都在 hunk 之外，第二 hunk 的围栏内示例不阻断。"""
+    file_text = ("```json\n"
+                 "{\"a\": 1}\n"
+                 "```\n"
+                 "intro\n"
+                 "pr_number: 0\n"
+                 "```yaml\n"
+                 "example\n"
+                 "status: open\n"
+                 "```\n")
+    patch = ("@@ -4,1 +4,2 @@\n"
+             " intro\n"
+             "+pr_number: 0\n"
+             "@@ -6,2 +7,3 @@\n"
+             " example\n"
+             "+status: open\n"
+             " ```\n")
+    r = mg.scan_structure_patch(patch, file_text=file_text)
+    assert r["pr_number_zero"] == 1  # 第 5 行围栏外真实残留仍命中
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False

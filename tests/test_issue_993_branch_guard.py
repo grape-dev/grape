@@ -384,6 +384,14 @@ def test_installed_hook_feeds_stdin_to_local_and_guard(tmp_path, monkeypatch):
     base = tmp_path / "base"
     base.mkdir()
     _git("init", cwd=base)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_py = fake_bin / "python3"
+    fake_py.write_text('#!/bin/sh\ncat > "$GUARD_SEEN"\n')
+    fake_py.chmod(0o755)
+    # 钩子使用 sys.executable（不依赖 PATH 里的 python3），安装时注入假解释器。
+    monkeypatch.setattr(bg.sys, "executable", str(fake_py))
     assert bg.install_pre_push_hook(str(base), REPO_KEY) is True
     hooks = Path(bg._hooks_dir(str(base)))
 
@@ -391,12 +399,6 @@ def test_installed_hook_feeds_stdin_to_local_and_guard(tmp_path, monkeypatch):
     local = hooks / "pre-push.grape-local"
     local.write_text('#!/bin/sh\ncat > "$LOCAL_SEEN"\n')
     local.chmod(0o755)
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_py = fake_bin / "python3"
-    fake_py.write_text('#!/bin/sh\ncat > "$GUARD_SEEN"\n')
-    fake_py.chmod(0o755)
 
     guard_seen = tmp_path / "guard-stdin.txt"
     env = os.environ.copy()
@@ -589,3 +591,22 @@ def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
     assert created and created[0]["head"] == "feat/issue-42"
     heads = _git("ls-remote", "--heads", str(remote), cwd=wt).stdout
     assert "refs/heads/feat/issue-42" in heads
+
+
+def test_lease_contention_message_contains_task_id(monkeypatch):
+    """AC1：租约 holder 使用任务 ID 时，争用提示可定位到具体任务。"""
+    import src.lock as lock
+    monkeypatch.setattr(lock, "_holder", "host-task-A")
+    first = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskA")
+    assert first["ok"] is True
+    assert first["holder"] == "t_taskA"
+
+    monkeypatch.setattr(lock, "_holder", "host-task-B")
+    second = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskB")
+    assert second["ok"] is False
+    assert second["reason"] == "branch_locked"
+    assert second["holder"] == "t_taskA"
+    assert "t_taskA" in second["message"]
+
+    bg.release_branch_lease(REPO_KEY, BRANCH, task_id="t_taskA")
+    assert bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskB")["ok"] is True

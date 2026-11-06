@@ -22,6 +22,7 @@ import os
 import shlex
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from src.config import log
@@ -140,8 +141,10 @@ def reconcile_pending(repo_key: str, head_branch: str, remote_sha: str) -> str:
     """用远端实际 head 收敛 pre-push 钩子留下的候选 sha，返回应比对的期望 sha。
 
     - remote == 候选 → 上次手工 push 已落地，expected 前进到候选并清空 pending；
-    - remote == 推送前旧值（或远端未知）→ 上次 push 未落地，丢弃候选，保持旧 expected
+    - remote == 推送前旧值 → 上次 push 未落地，丢弃候选，保持旧 expected
       （避免下一次合法 push 被误判 remote_drift）；
+    - 远端未知（查询失败/分支不存在）→ 保留候选不清空（fail-open，交由后续守卫
+      在能查到远端时再收敛，避免凭未知信息误丢候选）；
     - 其它值 → 传输窗口内有他人写入，保留候选让 ``check_push_allowed`` 判漂移阻断。
     """
     state = load_lease_state(repo_key, head_branch)
@@ -178,9 +181,11 @@ def _peek_holder(lock_key: str) -> tuple[str, int]:
 
 def acquire_branch_lease(repo_key: str, head_branch: str,
                          expected_remote_sha: str | None = None,
-                         ttl: int = DEFAULT_TTL) -> dict:
+                         ttl: int = DEFAULT_TTL, task_id: str = "") -> dict:
     """获取分支写租约；同 holder 重入视为成功（一次任务内多次 push）。
 
+    ``task_id`` 非空时作为租约 holder 写入 DB，争用提示可直接定位到任务；缺省用
+    进程级 holder（``src.lock._holder``），兼容手工 push 钩子等无任务上下文场景。
     返回 ``{"ok": bool, "lock_key", "holder", "reason", "message", ...}``。
     """
     if not repo_key or not head_branch:
@@ -188,27 +193,50 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
                 "message": "分支租约参数缺失（repo_key/head_branch）"}
     from src import lock as _lock
     key = lease_key(repo_key, head_branch)
+    holder = task_id or None
     # 新获取或同 holder 重入（renew）均视为成功；仅在两者都失败时判定他人持有。
-    if not (_lock.acquire_lock(key, ttl=ttl) or _lock.renew_lock(key, ttl=ttl)):
-        holder, _expires = _peek_holder(key)
+    if not (_lock.acquire_lock(key, ttl=ttl, holder=holder)
+            or _lock.renew_lock(key, ttl=ttl, holder=holder)):
+        current, _expires = _peek_holder(key)
         return {
             "ok": False,
             "lock_key": key,
-            "holder": holder,
+            "holder": current,
             "reason": "branch_locked",
-            "message": (f"分支 {head_branch} 正被任务 {holder or 'unknown'} 占用，"
+            "message": (f"分支 {head_branch} 正被任务 {current or 'unknown'} 占用，"
                         f"请等待其完成后再推送（禁止并发重建同分支）"),
         }
     state = load_lease_state(repo_key, head_branch)
     if expected_remote_sha is not None:
         state = record_remote_sha(repo_key, head_branch, expected_remote_sha)
-    return {"ok": True, "lock_key": key, "holder": _lock._holder,
+    return {"ok": True, "lock_key": key, "holder": holder or _lock._holder,
             "expected_remote_sha": state.get("expected_remote_sha", "")}
 
 
-def release_branch_lease(repo_key: str, head_branch: str) -> None:
+def release_branch_lease(repo_key: str, head_branch: str, task_id: str = "") -> None:
     from src import lock as _lock
-    _lock.release_lock(lease_key(repo_key, head_branch))
+    _lock.release_lock(lease_key(repo_key, head_branch), holder=task_id or None)
+
+
+@contextmanager
+def branch_lease(repo_key: str, head_branch: str, expected_remote_sha: str | None = None,
+                 ttl: int = DEFAULT_TTL, task_id: str = ""):
+    """持有分支租约的上下文管理器：进入获取、退出释放（未获取不释放）。
+
+    worker 端 ``_submit_linked_repo_prs`` 与 direct 端 ``_submit_direct_linked_prs``
+    共用，避免两侧租约生命周期逻辑重复漂移。
+    """
+    lease = acquire_branch_lease(repo_key, head_branch,
+                                 expected_remote_sha=expected_remote_sha,
+                                 ttl=ttl, task_id=task_id)
+    try:
+        yield lease
+    finally:
+        if lease.get("ok"):
+            if task_id:
+                release_branch_lease(repo_key, head_branch, task_id=task_id)
+            else:
+                release_branch_lease(repo_key, head_branch)
 
 
 # ===================== push 前置判定 =====================
@@ -445,16 +473,17 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         code = (f"import sys; sys.path.insert(0, {json.dumps(root)}); "
                 f"from src.runtime.branch_guard import hook_main; sys.exit(hook_main())")
+        interpreter = sys.executable or "python3"
         lines = [
             "#!/bin/sh",
             HOOK_MARKER,
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
             "trap 'rm -f \"$STDIN_TMP\"' EXIT INT TERM HUP",
-            'cat > "$STDIN_TMP"',
+            'cat > "$STDIN_TMP" || exit 1',
             'LOCAL="$(dirname "$0")/pre-push.grape-local"',
             'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" < "$STDIN_TMP" || exit $?; fi',
-            f'python3 -c {shlex.quote(code)} {shlex.quote(repo_key)} < "$STDIN_TMP"',
+            f'{shlex.quote(interpreter)} -c {shlex.quote(code)} {shlex.quote(repo_key)} < "$STDIN_TMP"',
             "",
         ]
         with open(hook_path, "w", encoding="utf-8") as f:

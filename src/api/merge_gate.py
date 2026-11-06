@@ -106,6 +106,9 @@ def scan_structure_text(text: str) -> dict:
     return _scan_structure_lines((text or "").splitlines())[0]
 
 
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
 def _resulting_with_added_flags(patch: str) -> tuple[list, list]:
     """把 unified diff 还原为变更后的行序列，并标记其中哪些行是新增行。"""
     resulting: list = []
@@ -124,6 +127,46 @@ def _resulting_with_added_flags(patch: str) -> tuple[list, list]:
     return resulting, added_flags
 
 
+def _added_line_map(patch: str) -> dict:
+    """按 ``@@ -a,b +c,d @@`` 把新增行映射到新文件行号（1-based）→ 行内容。
+
+    返回空字典表示 patch 不含可定位的 hunk 头（调用方回退到 patch 结果态）。
+    """
+    added: dict = {}
+    new_lineno = None
+    for line in (patch or "").splitlines():
+        m = _HUNK_RE.match(line)
+        if m:
+            new_lineno = int(m.group(3))
+            continue
+        if new_lineno is None:
+            continue
+        if line.startswith("+"):
+            added[new_lineno] = line[1:]
+            new_lineno += 1
+        elif line.startswith(" "):
+            new_lineno += 1
+        elif line.startswith("\\"):
+            continue
+        # '-' 行不占新文件行号
+    return added
+
+
+def _added_flags_from_full_text(patch: str, file_lines: list) -> list | None:
+    """用全文行号标记新增行；行号/内容与全文不匹配时返回 None 回退 patch 口径。
+
+    只有确认 patch 新增行确实落在全文对应位置，才用全文的围栏上下文判定；避免
+    全文与 patch 版本不一致时把无关行误标为新增。
+    """
+    added = _added_line_map(patch)
+    if not added or max(added) > len(file_lines):
+        return None
+    for lineno, content in added.items():
+        if file_lines[lineno - 1] != content:
+            return None
+    return [(i + 1) in added for i in range(len(file_lines))]
+
+
 def scan_structure_patch(patch: str, file_text: str | None = None) -> dict:
     """基于 unified diff 扫描：新增行判硬缺陷，结果态判元数据矛盾。
 
@@ -138,7 +181,15 @@ def scan_structure_patch(patch: str, file_text: str | None = None) -> dict:
     resulting, added_flags = _resulting_with_added_flags(patch)
     added_res, _added_values, added_meta = _scan_structure_lines(resulting, added_flags)
     if file_text is not None:
-        result_res, result_meta, _result_added = _scan_structure_lines(file_text.splitlines())
+        file_lines = file_text.splitlines()
+        full_flags = _added_flags_from_full_text(patch, file_lines)
+        if full_flags is not None:
+            # 全文行号映射成功：围栏状态与新增行判定都在全文上完成，覆盖围栏开/闭
+            # 标记在 hunk 之外、跨多个 hunk 的场景。
+            added_res, result_meta, added_meta = _scan_structure_lines(file_lines, full_flags)
+            result_res = added_res
+        else:
+            result_res, result_meta, _result_added = _scan_structure_lines(file_lines)
     else:
         result_res, result_meta, _result_added = _scan_structure_lines(resulting)
     conflicts = {

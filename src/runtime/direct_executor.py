@@ -804,7 +804,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # 遍历 GRAPE_LINKED_WORKTREES，对每个有改动的关联仓库 worktree 执行 push + create_pr_for_repo
     if new_status == "completed" and agent_type == "coding" and env_extra.get("GRAPE_LINKED_WORKTREES"):
         try:
-            _submit_direct_linked_prs(env_extra, repo_key, issue_id, repo_gitcode_token)
+            _submit_direct_linked_prs(env_extra, repo_key, issue_id, repo_gitcode_token,
+                                      task_id=task_id)
         except Exception as _le:
             log.warning(f"Exec agent: direct linked PR submit failed: {_le}")
 

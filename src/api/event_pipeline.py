@@ -3969,7 +3969,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
 
 def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
-                              repo_gitcode_token: str = ""):
+                              repo_gitcode_token: str = "", task_id: str = ""):
     """Issue #242: direct 模式 coding agent 完成后，向关联仓库提交 PR。
 
     与 worker 端 _submit_linked_repo_prs 等价：遍历 GRAPE_LINKED_WORKTREES，
@@ -4012,9 +4012,13 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
             continue
 
         # Issue #993（M1）：分支级写租约须先于 ensure_feature_branch 获取（其可能写分支）。
+        # 与 worker 端共用 branch_lease 上下文，租约获取/释放生命周期不再各写一遍。
         from src.runtime import branch_guard as _branch_guard
-        _lease = _branch_guard.acquire_branch_lease(_rk, _wt_branch)
+        _lease_ctx = _branch_guard.branch_lease(
+            _rk, _wt_branch, task_id=str(task_id or ""))
+        _lease = _lease_ctx.__enter__()
         if not _lease.get("ok"):
+            _lease_ctx.__exit__(None, None, None)
             _log.warning(f"direct linked PR: branch lease blocked {_rk}:{_wt_branch}: "
                          f"{_lease.get('message')}")
             _results.append({"repo_key": _rk, "status": "blocked",
@@ -4134,7 +4138,7 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
             _log.warning(f"direct linked PR: error for {_rk}: {e}")
             _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
         finally:
-            _branch_guard.release_branch_lease(_rk, _wt_branch)
+            _lease_ctx.__exit__(None, None, None)
 
     _created = [r for r in _results if r.get("status") == "created"]
     _skipped = [r for r in _results if r.get("status") == "skipped"]
