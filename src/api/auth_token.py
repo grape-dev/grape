@@ -20,6 +20,14 @@ SESSION_TOKEN_PREFIX = "tk_"
 API_KEY_PREFIX = "grape_"
 SESSION_TOKEN_TTL = 6 * 3600  # 会话级临时 token 默认 TTL（秒）——执行超时兜底
 
+# Issue #990：401 恢复指引——随 session token 失效的 401 message 下发，
+# grape CLI 直接透传 detail.message，Agent 据此从运行时进程环境重读 token，
+# 而不是把「快照 token 过期」误判为凭据失效。
+SESSION_TOKEN_RECOVERY_HINT = (
+    "Invalid or expired session token; if the shell environment snapshot is stale, "
+    "re-read GRAPE_SESSION_TOKEN from the agent runtime process environment and retry"
+)
+
 # 预留 scopes（方式 B，未来 RBAC 扩展）
 _API_KEY_SCOPES = '["public"]'
 
@@ -55,6 +63,32 @@ def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
     except Exception as e:
         log.warning(f"Issue session token failed: {e}")
         raise
+
+
+def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
+                         user_id: int = 0, ttl: int = SESSION_TOKEN_TTL) -> str:
+    """轮换会话 token：先作废同一 session_key 的旧 token，再签发新 token。
+
+    Issue #990：会话 token 轮换时若只签发新 token、不刷新 shell 环境快照
+    （agent_tasks.env_extra），Agent 会继续用旧快照 token 调 grape → 全量 401。
+    调用方（service.sync_task_session_token）负责在同一处把新 token 回写快照。
+    """
+    now = _now()
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 只提前作废仍有效的旧 token；已过期行保持原样（purge 清理）
+            c.execute(
+                "UPDATE session_api_tokens SET expires_at=? "
+                "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+                (now, session_key, now),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"Rotate session token (expire old) failed for {session_key}: {e}")
+    return issue_session_token(
+        session_key=session_key, repo_key=repo_key,
+        agent_type=agent_type, user_id=user_id, ttl=ttl)
 
 
 def verify_session_token(token: str) -> dict | None:

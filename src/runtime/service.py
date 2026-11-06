@@ -1602,6 +1602,80 @@ def get_task(task_id) -> dict | None:
     return dict(zip(_cols, row)) if row else None
 
 
+def sync_task_session_token(task_id: str, *, force_rotate: bool = False) -> str:
+    """同步任务的会话 token：保证 shell 环境快照与运行时注入值一致（Issue #990）。
+
+    `agent_tasks.env_extra` 是任务创建时的 shell 环境快照；运行时进程执行前会经
+    `GET /tasks/{id}/env` 刷新 env。若两端各自签发 token，快照会保留旧值 → Agent 用
+    旧 token 调 grape 全量 401。
+
+    规则：
+    - 快照 token 有效（session_key / repo_key / agent_type 匹配且未过期）→ 原样返回，不轮换；
+    - 失效、作用域不匹配或 force_rotate → 先作废旧 token 再签发新 token，并回写
+      `agent_tasks.env_extra`，使快照与运行时注入值保持一致。
+
+    返回同步后的 token；任务不存在或无仓库/agent 上下文时返回空串。
+    """
+    if not task_id:
+        return ""
+    from src.api.auth_token import verify_session_token, rotate_session_token
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = c.execute(
+                "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+        except Exception as e:
+            log.warning(f"sync_task_session_token: read task {task_id} failed: {e}")
+            return ""
+        if not row:
+            return ""
+        repo_key, agent_type = (row[0] or ""), (row[1] or "")
+        try:
+            user_id = int(row[2] or 0)
+        except (TypeError, ValueError):
+            user_id = 0
+        try:
+            env = json.loads(row[3] or "{}")
+        except Exception:
+            env = {}
+        if not isinstance(env, dict):
+            env = {}
+        if not repo_key or not agent_type:
+            return ""
+
+        snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
+        info = verify_session_token(snapshot_token) if snapshot_token else None
+        token_ok = bool(
+            info
+            and info.get("session_key") == task_id
+            and info.get("repo_key") == repo_key
+            and info.get("agent_type") == agent_type
+        )
+        if token_ok and not force_rotate:
+            return snapshot_token
+
+        try:
+            new_token = rotate_session_token(
+                session_key=task_id, repo_key=repo_key,
+                agent_type=agent_type, user_id=user_id)
+        except Exception as e:
+            log.warning(f"sync_task_session_token: rotate token failed for {task_id}: {e}")
+            return ""
+        env["GRAPE_SESSION_TOKEN"] = new_token
+        env.setdefault("GRAPE_CLI_MODE", "WORKER")
+        try:
+            c.execute(
+                "UPDATE agent_tasks SET env_extra=? WHERE id=?",
+                (json.dumps(env, ensure_ascii=False), task_id),
+            )
+            db.commit()
+        except Exception as e:
+            log.warning(f"sync_task_session_token: persist snapshot failed for {task_id}: {e}")
+        return new_token
+
+
 def lookup_task_by_event_seq(runtime_id: int, event_seq: int) -> dict | None:
     """许可对号 lookup（Issue #520 Spec v2 §4，XOcto 补充设计）。
 

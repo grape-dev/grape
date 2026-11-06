@@ -740,7 +740,7 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     instead of relying on the env_extra snapshot from task creation time.
     """
     from src.session_manager import db, db_lock
-    from src.runtime.service import _collect_server_env
+    from src.runtime.service import _collect_server_env, sync_task_session_token
     with db_lock:
         c = db.cursor()
         c.execute("SELECT user_id, account FROM agent_tasks WHERE id=?", (task_id,))
@@ -749,6 +749,12 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
         return {"env": {}}
     user_id, account = row[0] or 0, row[1] or ""
     env = _collect_server_env(user_id, account)
+    # Issue #990：会话 token 与 shell 环境快照同步——valid 时复用快照 token，
+    # 失效/轮换时签发新 token 并回写 agent_tasks.env_extra，随后返回给 worker。
+    session_token = sync_task_session_token(task_id)
+    if session_token:
+        env["GRAPE_SESSION_TOKEN"] = session_token
+        env["GRAPE_CLI_MODE"] = "WORKER"
     return {"env": env}
 
 

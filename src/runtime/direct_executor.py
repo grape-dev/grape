@@ -406,12 +406,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         log.warning(f"Exec agent: linked repos worktree init failed: {e}")
 
     # Issue-45 M2：direct 会话签发会话级临时 token（session_key=task_id 或 d_{seq}）
+    # Issue #990：已入队任务优先复用/同步快照 token，避免 direct 再签一个 token 造成
+    # shell env 快照（agent_tasks.env_extra）与运行时注入值不一致（旧快照 token → 401）。
     try:
         from src.api.auth_token import issue_session_token
+        from src.runtime.service import sync_task_session_token
         if repo_key and agent_type:
-            env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
-                session_key=task_id or f"d_{seq}",
-                repo_key=repo_key, agent_type=agent_type, user_id=0)
+            token = sync_task_session_token(task_id) if task_id else ""
+            if not token:
+                token = issue_session_token(
+                    session_key=task_id or f"d_{seq}",
+                    repo_key=repo_key, agent_type=agent_type, user_id=0)
+            env_extra["GRAPE_SESSION_TOKEN"] = token
             # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
             # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
             env_extra["GRAPE_CLI_MODE"] = "WORKER"
