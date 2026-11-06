@@ -302,7 +302,7 @@ def _start_obs_sample_task():
                 r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
                 if r.get("inserted"):
                     log.debug(f"Observability runtime samples: {r}")
-                _nc = await asyncio.to_thread(_obs_log.maybe_cleanup)
+                _nc = await asyncio.to_thread(_obs_logs.maybe_cleanup)
                 if _nc:
                     log.info(f"Observability logs cleaned: {_nc} rows")
                     _obs_loops.beat("obs_log_cleanup")
