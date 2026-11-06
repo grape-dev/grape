@@ -34,6 +34,12 @@ def _auth_credential(request: Request) -> int:
         c.execute("SELECT id FROM runtime_credentials WHERE token_hash=? AND status='active'", (h,))
         row = c.fetchone()
     if not row:
+        # 凭据校验失败要留痕：worker 侧只看到 401，服务端此前完全无记录，
+        # 设备一直"离线"时无法判断是 token 抄错、还是根本没连上来。
+        try:
+            log.warning(f"runtime credential rejected: prefix={token[:10]}... ip={_client_ip(request)}")
+        except Exception:
+            pass
         raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
     return row[0]
 
@@ -1222,6 +1228,11 @@ def runtime_install_script():
             content = f.read()
     except Exception:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "read install script failed"})
+    # 默认 --server 注入本机回连地址：用户漏写 --server 时脚本原来会退回占位域名
+    # grape.example.com，worker 永远连不上、状态一直离线（flaskb_11061758 事故）。
+    _base = _server_url()
+    if _base:
+        content = content.replace('SERVER="https://grape.example.com"', f'SERVER="{_base}"')
     return PlainTextResponse(content, media_type="text/plain")
 
 
@@ -1251,6 +1262,9 @@ def runtime_install_script_ps1():
             content = f.read()
     except Exception:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "read install script failed"})
+    _base = _server_url()
+    if _base:
+        content = content.replace('$Server = "https://grape.example.com"', f'$Server = "{_base}"')
     return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
 
 
