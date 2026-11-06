@@ -563,6 +563,22 @@ def check_and_sync_templates() -> bool:
     return json_ok and examples_ok
 
 
+def attach_internal_guard(app: FastAPI) -> None:
+    """兜底：未匹配的 /internal/* 一律返回 JSON 404，而不是落到 SPA catch-all。
+
+    mgmt 不挂载业务型 /internal/* 契约后，未知的 /internal/* 会被前端 catch-all
+    当成页面路由返回 200 + index.html，调用方无法区分"不存在"和"页面"。
+    必须在业务/GSB 路由注册之后、attach_frontend 之前调用（按注册顺序匹配）。
+    """
+    from fastapi import HTTPException
+
+    @app.api_route("/internal/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                   include_in_schema=False)
+    async def _internal_not_found(rest: str):  # noqa: ARG001
+        raise HTTPException(status_code=404,
+                            detail={"code": 404, "message": "internal endpoint not found"})
+
+
 def attach_frontend(app: FastAPI) -> None:
     """前端静态托管（Mgmt 进程独占）：附件/社区静态目录 + SPA（i18n/兑票注入）+ admin/account/兜底路由。
 
@@ -856,9 +872,11 @@ def include_selected(
 def attach_internal_routes(app: FastAPI, domain: str) -> None:
     """Mount /internal/* routes for cross-domain RemoteProvider calls (Phase 5).
 
-    Adds InternalAuthMiddleware and includes the domain's internal router.
-    Called by each four-process server entry point to enable /internal/*
-    endpoints for cluster-mode RemoteProvider access.
+    Always installs InternalAuthMiddleware (guards /internal/gsb/* registry too),
+    then mounts the domain's business internal router. mgmt intentionally gets no
+    business router: it is the management-plane service and must not be called
+    over HTTP by event/worker/insight (those read the shared DB or use in-process
+    contracts instead).
 
     Args:
         app: FastAPI application instance
@@ -867,9 +885,15 @@ def attach_internal_routes(app: FastAPI, domain: str) -> None:
     from src.kernel.auth_sdk.internal_middleware import InternalAuthMiddleware
     app.add_middleware(InternalAuthMiddleware)
 
+    # mgmt 是管理态服务（开发者工作台的后端），按架构约定不向其它域服务开放业务型
+    # /internal/* 契约：event/worker/insight 需要 mgmt 的数据时直接读共享库或走进程内契约，
+    # 不允许再通过 HTTP 反向调用 mgmt（避免管理面被业务面耦合、也避免越权面扩大）。
+    # 中间件仍然挂载：/internal/gsb/* 服务注册端点需要它做 service-secret 校验。
     if domain == "mgmt":
-        from src.domains.mgmt.routes.internal import router as internal_router
-    elif domain == "runtime":
+        log.info("attach_internal_routes: mgmt 为管理态服务，业务型 /internal/* 不挂载（仅保留 GSB 端点）")
+        return
+
+    if domain == "runtime":
         from src.domains.runtime.routes.internal import router as internal_router
     elif domain == "insight":
         from src.domains.insight.routes.internal import router as internal_router

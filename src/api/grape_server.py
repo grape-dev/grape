@@ -177,12 +177,16 @@ app.openapi = lambda: custom_openapi(app)
 
 server_common.init_process_db()
 
-# /internal/* 端点——供集群模式 RemoteProvider 调用（Phase 5）
+# mgmt 是管理态服务：只挂 InternalAuthMiddleware（保护 /internal/gsb/*），
+# 不挂载业务型 /internal/* 契约——其它域服务不得通过 HTTP 反向调用 mgmt。
 server_common.attach_internal_routes(app, "mgmt")
 
 # GSB 服务注册表端点（/internal/gsb/*）
 from src.kernel.gsb.router import init_gsb
 init_gsb(app, "mgmt")
+
+# 未匹配的 /internal/* 返回 JSON 404（否则会落到下面的 SPA catch-all 变成 200+HTML）
+server_common.attach_internal_guard(app)
 
 server_common.attach_health(app, service_name="server", readiness=True)
 server_common.attach_frontend(app)

@@ -1,12 +1,9 @@
-"""Mgmt 进程内部端点——仅供其他域 RemoteProvider 调用（Issue #699 Phase 5）.
+"""Mgmt 进程内部端点——**已停止挂载**（2026-11 架构收敛）。
 
-设计依据：docs/weekly-09/grape-unified-implementation-design.md §7.7.
-
-集群模式下挂载到 Mgmt 进程，提供 /internal/* 端点供
-RuntimeServiceRemote / InsightServiceRemote 调用。
-单机模式不挂载（走 LocalProvider 直接查 DB）。
-
-服务端一律用 Local 实现（get_local_service），否则 remote 模式下会 HTTP 回环自调用。
+mgmt 是管理态服务（开发者工作台后端），按约定不被 event/worker/insight
+通过 HTTP 反向调用：其它域需要 mgmt 数据时直接读共享库或走进程内契约。
+本文件保留仅为历史参考与契约定义，attach_internal_routes 不会再 include 它；
+若将来要恢复，必须同时打开 InternalAuthMiddleware 的服务密钥校验并补审计日志。
 """
 from __future__ import annotations
 
