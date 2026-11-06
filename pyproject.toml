@@ -49,6 +49,13 @@ mysql = [
     "pymysql>=1.1",
     "DBUtils>=3.0",
 ]
+# OpenTelemetry tracing (Loki trace_id <-> Tempo)
+otel = [
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+    "opentelemetry-instrumentation-fastapi>=0.41b0",
+    "opentelemetry-instrumentation-requests>=0.41b0",
+]
 # Huawei OBS object storage
 obs = [
     "esdk-obs-python>=3.26",

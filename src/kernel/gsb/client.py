@@ -305,12 +305,19 @@ class GsbClient:
             self._inflight[inst] = max(0, self._inflight.get(inst, 0) - 1)
 
     def _headers(self) -> dict:
-        """认证头——每次请求重新生成令牌（TTL 60s）。"""
-        return {
+        """认证头——每次请求重新生成令牌（TTL 60s），并透传 W3C traceparent。"""
+        headers = {
             "X-Internal-Call": "true",
             "X-Service": self.caller_name,
             "X-Service-Token": generate_service_token(self.caller_name),
         }
+        # 跨进程链路：把当前 span 的 traceparent 注入下游请求，Tempo 可串起调用链
+        try:
+            from opentelemetry.propagate import inject as _otel_inject
+            _otel_inject(headers)
+        except Exception:
+            pass
+        return headers
 
     # ---------- 请求 ----------
 

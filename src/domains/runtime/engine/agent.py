@@ -2256,6 +2256,30 @@ def _abort_task_terminal(task, engine_name, env, res, started: bool, reason: str
     return {"_error": f"task terminated by server (aborted {reason})", "_started": started}
 
 
+def _task_span(task: dict, engine_name: str = ""):
+    """为一次 agent 任务开一个 root span；OTel 未安装时退化为 nullcontext。
+
+    这样任务执行期间的所有日志（含 worker 线程）都会带 trace_id，
+    Grafana 里可从 Loki 直接跳 Tempo 看该任务的调用链。
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+        _tracer = _otel_trace.get_tracer("grape.agent")
+        return _tracer.start_as_current_span(
+            f"agent.task.{task.get('agent_type') or 'unknown'}",
+            attributes={
+                "grape.repo_key": str(task.get("repo_key") or ""),
+                "grape.issue_id": str(task.get("issue_id") or ""),
+                "grape.event_seq": str(task.get("event_seq") or ""),
+                "grape.task_id": str(task.get("id") or ""),
+                "grape.engine": engine_name or "",
+            },
+        )
+    except Exception:
+        import contextlib
+        return contextlib.nullcontext()
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务的外层包装：把 repo / issue / seq 绑进日志上下文。
 
@@ -2269,7 +2293,8 @@ async def _execute_task(client, task, engine_name: str = ""):
         seq="" if _seq is None else _seq,
         user_id=task.get("user_id") if task.get("user_id") is not None else None,
     ):
-        return await _execute_task_impl(client, task, engine_name)
+        with _task_span(task, engine_name):
+            return await _execute_task_impl(client, task, engine_name)
 
 
 async def _execute_task_impl(client, task, engine_name: str = ""):

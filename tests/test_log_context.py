@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 from src.kernel.config import _JsonFormatter, _RequestIdFilter, log_context
 
 
@@ -39,3 +41,32 @@ def test_log_context_nested_restores_outer_values():
         entry = _format("outer")
     assert entry["repo_key"] == "outer"
     assert str(entry["seq"]) == "1"
+
+def _fake_span(monkeypatch, *, valid: bool, trace_id: int = 0x0123456789ABCDEF0123456789ABCDEF,
+               span_id: int = 0x0123456789ABCDEF):
+    otel_trace = pytest.importorskip("opentelemetry.trace")
+
+    ctx = type("_Ctx", (), {})()
+    ctx.is_valid = valid
+    ctx.trace_id = trace_id
+    ctx.span_id = span_id
+
+    class _Span:
+        def get_span_context(self):
+            return ctx
+
+    monkeypatch.setattr(otel_trace, "get_current_span", lambda: _Span())
+
+
+def test_json_log_carries_trace_and_span_id(monkeypatch):
+    _fake_span(monkeypatch, valid=True)
+    data = _format("with trace")
+    assert data["trace_id"] == "0123456789abcdef0123456789abcdef"
+    assert data["span_id"] == "0123456789abcdef"
+
+
+def test_json_log_trace_id_empty_without_valid_span(monkeypatch):
+    _fake_span(monkeypatch, valid=False)
+    data = _format("no trace")
+    assert data["trace_id"] == ""
+    assert data["span_id"] == ""

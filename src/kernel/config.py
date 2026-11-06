@@ -38,6 +38,23 @@ issue_var: contextvars.ContextVar = contextvars.ContextVar("issue_id", default="
 seq_var: contextvars.ContextVar = contextvars.ContextVar("seq", default="")
 
 
+def _current_span_ids() -> tuple[str, str]:
+    """当前 OTel span 的 trace_id / span_id（32/16 位十六进制）。
+
+    Grafana 的 Loki derived field 依赖 trace_id 与 Tempo 对齐；未启用 tracing
+    或不在 span 上下文里时返回空字符串（前端显示 "-"）。
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+        span = _otel_trace.get_current_span()
+        ctx = span.get_span_context() if span is not None else None
+        if ctx is not None and ctx.is_valid:
+            return format(ctx.trace_id, "032x"), format(ctx.span_id, "016x")
+    except Exception:
+        pass
+    return "", ""
+
+
 class _RequestIdFilter(logging.Filter):
     """把 ContextVar 中的 request_id / repo_key / user_id 注入到每条 LogRecord 中。"""
 
@@ -47,6 +64,7 @@ class _RequestIdFilter(logging.Filter):
         record.user_id = user_var.get()
         record.issue_id = issue_var.get()
         record.seq = seq_var.get()
+        record.trace_id, record.span_id = _current_span_ids()
         return True
 
 
@@ -65,6 +83,7 @@ class _JsonFormatter(logging.Formatter):
     _EXTRA_FIELDS = (
         "method", "path", "status", "duration_ms",
         "user_id", "repo_key", "issue_id", "seq",
+        "trace_id", "span_id",
     )
 
     def format(self, record):
