@@ -1868,7 +1868,8 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
-def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False):
+def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
+                   strict: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
@@ -1883,6 +1884,11 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False):
     allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
     补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
     不加此开关时会被安全策略挡下导致列永远建不出来。
+
+    strict=True（注册式迁移专用）：所有降级分支都失败时 **raise** 而不是只记人工
+    清单后正常返回。理由：迁移执行器约定「fn 正常返回=盖章」，若这里静默返回，
+    列没建成也会盖死版本号，下次启动不再重试，线上表现为查询该列 1054 且接口
+    静默返回空 —— 与 2026-11-06 issue.vcs_exists 事故同态（QA 审查 M1）。
     """
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col in cols:
@@ -1921,11 +1927,15 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False):
                          f"({_copy_err})——需人工处理")
                 _DDL_MANUAL_REVIEW.append(entry)
                 log.error(f"_ensure_column MANUAL REVIEW: {entry}")
+                if strict:
+                    raise RuntimeError(f"_ensure_column 补列失败（strict）: {entry}")
                 return
         entry = (f"{tbl}.{col}: INSTANT 与 INPLACE,LOCK=NONE 均失败 "
                  f"(INPLACE err={_inplace_err})——需人工处理，未静默 COPY")
         _DDL_MANUAL_REVIEW.append(entry)
         log.error(f"_ensure_column MANUAL REVIEW: {entry}")
+        if strict:
+            raise RuntimeError(f"_ensure_column 补列失败（strict）: {entry}")
 
 
 def _rename_column_if_exists(c, tbl: str, old: str, new: str):
@@ -2748,11 +2758,52 @@ class Migration:
 
 _MIGRATIONS: List[Migration] = []
 
+# 🧊 老轨 _run_all_migrations() 的冻结快照（调用名清单）。
+# 存量库不会跑老轨，任何新增补列/补表一律 register_migration（见该函数 docstring）。
+# tests/atomic/test_migration_track_guard.py 用 AST 比对：本常量与函数体里的实际调用
+# 集合必须一致 —— 有人往老轨塞新迁移，测试立刻红；确实要改动老轨（极少见）时，
+# 先评估是否该改成注册式迁移，只有确认必须留老轨才同步改这里，并在 PR 里说明原因。
+LEGACY_TRACK_FROZEN = (
+    "_ensure_case_insensitive_indexes",
+    "_ensure_whitelist_columns",
+    "_migrate_a2a_idempotency_key",
+    "_migrate_allow_signup_default",
+    "_migrate_event_status_pending",
+    "_migrate_issue_created_by",
+    "_migrate_knowledge_dedup_and_ref",
+    "_migrate_tables",
+    "_migrate_whitelist_from_file",
+)
+
 
 def register_migration(version: str, name: str, kind: str,
                        fn: Optional[Callable[[], None]] = None) -> Migration:
-    """登记一条迁移（新增迁移一律走这里 + kind 规则）。"""
+    """登记一条迁移（新增迁移一律走这里 + kind 规则）。
+
+    ⚠️ 新增补列/补表/回填必须走这里，不要写进老轨 _run_all_migrations()
+    ────────────────────────────────────────────────────────────────
+    存量库的 grape_t_schema_migrations 早已被 legacy-stamp 盖帽
+    （202610300001），启动时执行器只跑本函数登记的增量迁移 —— 写进老轨的
+    ALTER TABLE 永远不会执行，运行代码查该列立刻 Unknown column(1054)，
+    异常被各处 except 吞掉后接口静默返回空数组（2026-11-06 Issue #995
+    的 issue.vcs_exists 就是这么挂的：升级后四台 794 次 1054，
+    /api/issues/mine 从有数据变成 0 条）。
+
+    提交前自查四条（tests/atomic/test_migration_track_guard.py 会卡前三/四条）：
+    1. version 未被占用：库里已盖章的号 + 源码里其它 register_migration 的号都不能重
+       （同号会被判「已执行」永久跳过；历史事故 202611050001 / 202611060001）；
+    2. fn 失败要抛出，不要 try/except 吞掉 —— 执行器约定「抛错=不盖章，下次启动重试」，
+       吞了就会「列没建成、版本号却盖死」；
+    3. 加 TEXT 列且带非 NULL DEFAULT 时，_ensure_column 要传 allow_copy=True
+       （TEXT 带 DEFAULT 走不了 INSTANT/INPLACE，不传会被 DDL 安全带挡下）；
+    4. fn 必须幂等（IF NOT EXISTS / _ensure_column），存量库会重跑。
+    """
     mig = Migration(version=version, name=name, kind=kind, fn=fn)
+    if any(m.version == version for m in _MIGRATIONS):
+        _prev = next(m.name for m in _MIGRATIONS if m.version == version)
+        log.error(
+            f"迁移版本号撞号: {version} 已被 {_prev} 占用，本迁移 {name} 将被版本表"
+            f"判为「已执行」而永久跳过。改用未占用号（日期+序号顺延）后再提交。")
     _MIGRATIONS.append(mig)
     _MIGRATIONS.sort(key=lambda m: m.version)
     return mig
@@ -3276,7 +3327,11 @@ def _fn_backfill_events_terminal_completed_at(conn=None) -> None:
 
 
 register_migration(
-    version="202611060001",
+    # 撞号修复（2026-11-06 发版实测）：本迁移原用 202611060001，与
+    # create-branch-guard-state-table 同号 —— 执行器按 version 判定，后登记的
+    # 那条会被判「已执行」而永久跳过（生产库当时是拿包内改号 202611060003 绕过的，
+    # 分支上必须同步成同一个号，否则下次从分支打包又会撞）。
+    version="202611060003",
     name="backfill_events_terminal_completed_at",
     kind="safe",
     fn=_fn_backfill_events_terminal_completed_at,
@@ -3653,7 +3708,24 @@ def run_pending_migrations() -> None:
 
 
 def _run_all_migrations():
-    """init_database 的迁移段（顺序与历史一致；MySQL/SQLite 共用，避免两处清单漂移）。"""
+    """init_database 的迁移段（顺序与历史一致；MySQL/SQLite 共用，避免两处清单漂移）。
+
+    🧊 老轨已冻结（FROZEN LEGACY TRACK）——只跑两种场景：
+    ① 全新库（grape_t_schema_migrations 为空）首跑全量；
+    ② run_pending_migrations 执行器自身异常时的兜底重放。
+    存量库（已盖 legacy-stamp 202610300001）启动时**完全不执行本函数**。
+
+    ⛔ 所以：任何新增的补列 / 补表 / 回填 / 补索引，一律写成
+       register_migration(version, name, kind, fn) 注册式迁移，
+       **不要加到本函数里**（加了不报错、也不执行，直到线上查询报 1054 才暴露）。
+    事故样本：Issue #995 issue.vcs_exists（2026-11-06 升级后列表静默变空）、
+             Issue #785 grape_t_patrol_findings（表永远不建）。
+
+    🧪 守卫：tests/atomic/test_migration_track_guard.py 用 AST 比对本函数里的
+       迁移调用清单与 LEGACY_TRACK_FROZEN —— 少一条（删了要同步改常量）或多一条
+       （有人又往老轨塞东西）都会让测试变红。要往这里加东西，正确做法是
+       register_migration，不是改这个常量。
+    """
     _tasks_to_issue_rename_pre_create()
     _create_tables()
     _seed_admin_accounts()
@@ -3707,11 +3779,6 @@ def _run_all_migrations():
         _migrate_issue_created_by()
     except Exception as _e:
         log.warning(f"Issue #805 issue created_by migration failed: {_e}")
-    # ===== Issue #995: issue.vcs_exists/vcs_checked_at 列（VCS 存在性校验，幂等补列）=====
-    try:
-        _migrate_issue_vcs_exists()
-    except Exception as _e:
-        log.warning(f"Issue #995 issue vcs_exists migration failed: {_e}")
 
 
 def _migrate_issue_vcs_exists():
@@ -3720,16 +3787,38 @@ def _migrate_issue_vcs_exists():
     - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
     - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（幂等可重跑）；
     - vcs_exists 默认 1（未知/存在），vcs_checked_at 空表示尚未校验。
+
+    失败必须抛出（不吞）——迁移执行器约定「fn 抛错=不盖章，下次启动幂等重试」，
+    吞掉异常会导致列没建成却把版本号盖死，存量库永远等不到补列。
+
+    两道保险（QA 审查 M1：_ensure_column 的人工清单分支默认只 log 不抛）：
+    ① 两个补列都传 strict=True，降级算法全失败时直接 raise；
+    ② 补完再显式回验列存在，缺一个就 raise —— 印章只在 schema 真落地后才写。
     """
     from src.session_manager import db, db_lock
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "issue", "vcs_exists", "INTEGER NOT NULL DEFAULT 1")
-            _ensure_column(c, "issue", "vcs_checked_at", "TEXT DEFAULT NULL")
-            db.commit()
-    except Exception as e:
-        log.warning(f"issue vcs_exists columns migration failed: {e}")
+    wanted = {"vcs_exists", "vcs_checked_at"}
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "issue", "vcs_exists", "INTEGER NOT NULL DEFAULT 1", strict=True)
+        # TEXT 列带 DEFAULT 无法 INSTANT/INPLACE，须 allow_copy 兜底（issue 表行数级别可接受）
+        _ensure_column(c, "issue", "vcs_checked_at", "TEXT DEFAULT NULL",
+                       allow_copy=True, strict=True)
+        db.commit()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(issue)").fetchall()}
+        missing = wanted - cols
+        if missing:
+            raise RuntimeError(
+                f"issue.vcs_exists migration finished but columns still missing: {sorted(missing)}")
+
+
+# 注册式迁移：老轨（_run_all_migrations）在版本表盖帽后即冻结，补列写在那里永远不会执行。
+# 本迁移与 _fn_create_grape_t_patrol_findings 同因——存量库靠新轨增量补列。
+# 已知时序（QA 审查 I3）：若某次启动同时满足「版本表为空」+「破坏性 DDL 被
+# min_code_version 门槛或 MDL 超时拦截」，执行器会先 return 不盖帽、本轮不跑 pending，
+# 补列推迟到下一次启动（幂等，不丢）。真正的新库建表已含两列，不受影响。
+register_migration(
+    "202611060004", "issue995_issue_vcs_exists_columns", "safe",
+    _migrate_issue_vcs_exists)
 
 
 def _migrate_issue_created_by():
