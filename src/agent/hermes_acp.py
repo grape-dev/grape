@@ -77,7 +77,7 @@ PREMATURE_END_MARKER = "[PREMATURE_END_TURN]"
 
 
 def _text_incomplete_timeout_for() -> float:
-    """text 静默且无收尾记录时的等待上限（默认 300s，与 tool 静默窗口对齐）。
+    """text 静默且无收尾记录时的等待上限（默认 300s，独立于 tool 静默窗口）。
 
     语义：模型输出 text 后 60s 无事件只说明「暂时没输出」，不代表干完了——可能正在
     生成一个大 tool call（补丁/大文件），这期间 hermes 不会发任何 ACP 事件。
@@ -95,18 +95,18 @@ def _text_incomplete_timeout_for() -> float:
 
 
 def _silent_timeout_for(env: dict | None = None) -> float:
-    """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）。
+    """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 600s）。
 
     与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
     （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
-    env 优先（任务级），os.environ 次之（手动调参/测试），默认 300s。
+    env 优先（任务级），os.environ 次之（手动调参/测试），默认 600s。
     """
     _silent_src = (env or {}).get("HERMES_SILENT_TIMEOUT") or \
-        os.environ.get("HERMES_SILENT_TIMEOUT", "300")
+        os.environ.get("HERMES_SILENT_TIMEOUT", "600")
     try:
         return max(float(_silent_src), 0.0)
     except Exception:
-        return 300.0
+        return 600.0
 
 
 def _init_timeout_for(env: dict | None = None) -> float:
@@ -561,7 +561,7 @@ class HermesACPBackend:
             # ── 4. 内循环：从队列消费事件 + 等 prompt 完成 ──
             _last_activity = time.time()
             _global_start = time.time()
-            # 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）：
+            # 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 600s）：
             # 与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
             # （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
             _SILENT_TIMEOUT = _silent_timeout_for(env)
@@ -607,7 +607,7 @@ class HermesACPBackend:
                 # text 后静默：不再直接判完成——静默只决定「还要不要等」，
                 #   「算不算完成」必须由证据决定（见 _has_completion_record / PromptResponse）。
                 #   ① 累计输出里已有收尾记录（actions + conclusion）→ 判完成（response 丢失）；
-                #   ② 无证据 → 继续等到 _TEXT_INCOMPLETE_TIMEOUT（默认 300s，与 tool 静默对齐），
+                #   ② 无证据 → 继续等到 _TEXT_INCOMPLETE_TIMEOUT（默认 300s，独立于 tool 静默窗口），
                 #      到点按「疑似提前结束」收尾（exit 0 + 标记，不冒充干净完成）。
                 #   非 text 事件（tool/reasoning）后的静默维持原语义：超时终止（exit -1）。
                 elapsed_silent = time.time() - _last_activity

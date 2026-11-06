@@ -182,14 +182,14 @@ def _win_acp_drain_stderr(proc):
 
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
-# Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
+# Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 600s）。
 # 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
 #   - executor.py       _silent_window  读 AGENT_SILENT_WINDOW
 #   - hermes_acp.py     _SILENT_TIMEOUT 读 HERMES_SILENT_TIMEOUT
 #   - hwcloud_acp.py    _SILENT_TIMEOUT 读 RUNTIME_TOOL_SILENT_TIMEOUT（已支持）
-# coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，300s 会在正常进行中误杀。
+# coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，600s 对 coding/QA 长任务仍偏短，会在正常进行中误杀。
 _AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200}
-_DEFAULT_SILENT_WINDOW = 300
+_DEFAULT_SILENT_WINDOW = 600
 
 _worker_url_probe_cache: dict = {}  # {(rts, task_server_url): (ts, reachable)}
 _worker_url_probe_lock = _threading.Lock()
@@ -2380,7 +2380,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             env.update(_fresh_env)
     except Exception:
         pass
-    # Issue #378: 按 agent_type 注入差异化静默超时 env（coding/qa=1200s，其余默认 300s）。
+    # Issue #378: 按 agent_type 注入差异化静默超时 env（coding/qa=1200s，其余默认 600s）。
     # setdefault 语义：上层 env_extra / fresh_env 已显式设置（手动调参）时不覆盖。
     # 注入到局部 env dict（并发安全，不写 os.environ 避免 async 交错竞态，见 L1774 注释），
     # 经 env_extra → stream_agent env.update(env_extra) → 各 backend 读 env 生效。

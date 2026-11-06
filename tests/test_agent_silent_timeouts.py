@@ -35,10 +35,10 @@ class TestAgentSilentTimeoutsMapping:
     def test_other_agents_not_in_mapping(self):
         for _t in ("vod", "issue", "sre", "chat", ""):
             assert _t not in ra._AGENT_SILENT_TIMEOUTS, \
-                f"{_t} 不应在差异化映射中（保持默认 300s）"
+                f"{_t} 不应在差异化映射中（保持默认 600s）"
 
-    def test_default_silent_window_is_300(self):
-        assert ra._DEFAULT_SILENT_WINDOW == 300
+    def test_default_silent_window_is_600(self):
+        assert ra._DEFAULT_SILENT_WINDOW == 600
 
 
 class TestAgentSilentTimeoutInjection:
@@ -104,10 +104,10 @@ class TestAgentSilentTimeoutInjection:
 class TestHermesSilentTimeoutEnv:
     """hermes _silent_timeout_for 读 HERMES_SILENT_TIMEOUT env。"""
 
-    def test_default_is_300(self, monkeypatch):
+    def test_default_is_600(self, monkeypatch):
         monkeypatch.delenv("HERMES_SILENT_TIMEOUT", raising=False)
-        assert ha._silent_timeout_for(None) == 300.0
-        assert ha._silent_timeout_for({}) == 300.0
+        assert ha._silent_timeout_for(None) == 600.0
+        assert ha._silent_timeout_for({}) == 600.0
 
     def test_env_dict_overrides_to_1200(self, monkeypatch):
         """任务级 env dict 优先（_execute_task 注入路径）。"""
@@ -125,13 +125,13 @@ class TestHermesSilentTimeoutEnv:
         monkeypatch.setenv("HERMES_SILENT_TIMEOUT", "600")
         assert ha._silent_timeout_for({"HERMES_SILENT_TIMEOUT": "1200"}) == 1200.0
 
-    def test_invalid_value_falls_back_to_300(self, monkeypatch):
+    def test_invalid_value_falls_back_to_600(self, monkeypatch):
         monkeypatch.delenv("HERMES_SILENT_TIMEOUT", raising=False)
-        assert ha._silent_timeout_for({"HERMES_SILENT_TIMEOUT": "abc"}) == 300.0
+        assert ha._silent_timeout_for({"HERMES_SILENT_TIMEOUT": "abc"}) == 600.0
 
-    def test_invalid_os_environ_falls_back_to_300(self, monkeypatch):
+    def test_invalid_os_environ_falls_back_to_600(self, monkeypatch):
         monkeypatch.setenv("HERMES_SILENT_TIMEOUT", "not-a-number")
-        assert ha._silent_timeout_for(None) == 300.0
+        assert ha._silent_timeout_for(None) == 600.0
 
     def test_zero_value_accepted(self, monkeypatch):
         monkeypatch.delenv("HERMES_SILENT_TIMEOUT", raising=False)
@@ -183,7 +183,7 @@ class TestExecutorSilentWindowEnvDict:
 
     Issue #378 关键修复点：原代码读 os.environ，改为 env.get(..., os.environ.get(...))。
     行为判定（AGENT_SILENT_EXTEND_CAP=0.1）：
-    - 默认 _silent_window=min(300,0.1)=0.1 → 静默超时在 0.2s（0.1+extend 0.1）触发 → exit -9；
+    - 默认 _silent_window=min(600,0.1)=0.1 → 静默超时在 0.2s（0.1+extend 0.1）触发 → exit -9；
     - AGENT_SILENT_WINDOW=1200 → 静默超时不触发（1200s >> 1s stdout EOF）→ 由 stdout EOF 路径收尾 exit -1。
     """
 
@@ -213,7 +213,7 @@ class TestExecutorSilentWindowEnvDict:
             "AGENT_SILENT_WINDOW=1200 时不应被静默超时强杀（-9）；应由 stdout EOF 路径收尾"
 
     def test_default_silent_window_kills_fast(self, monkeypatch):
-        """对比：默认 _silent_window=min(300,0.1)=0.1 → 0.2s 静默超时强杀 exit -9。"""
+        """对比：默认 _silent_window=min(600,0.1)=0.1 → 0.2s 静默超时强杀 exit -9。"""
         from src.runtime.executor import stream_agent
         import src.agent.executor as _ex
         import subprocess
