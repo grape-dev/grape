@@ -15,17 +15,21 @@ worker（runtime/agent.py 任务执行技能物化）两侧共用。零 DB 依�
 """
 
 import os
+import logging
 import re
 import shutil
 import uuid
 import zipfile
 
+# 模块级 logger：下面的降级/兜底日志必须独立于 src.kernel.config，
+# 否则 kernel.config 导入失败（worker 裁剪场景）时 _logging 未定义 → NameError
+# 会把整个任务执行协程炸掉（任务停在 running，被 orphan 回收直到 attempts cap）。
+_log_fallback = logging.getLogger(__name__)
+
 try:  # 服务端有 src.kernel.config；worker 同仓部署同样可导入。保持导入失败也不致命。
     from src.kernel.config import log as _log
 except Exception:  # pragma: no cover
-    import logging as _logging
-
-    _log = _logging.getLogger(__name__)
+    _log = _log_fallback
 
 
 TMP_PREFIX = ".tmp"
@@ -276,12 +280,12 @@ def write_skill_fallback(skills_root: str, skill_name: str,
         )
         with open(os.path.join(dst, FALLBACK_FILENAME), "w", encoding="utf-8") as f:
             f.write(content)
-        _logging.getLogger(__name__).warning(
+        _log_fallback.warning(
             f"[skill] fallback file written: skill={skill_name} "
             f"stage={stage or 'unknown'} dir={dst} reason={reason or 'unknown'}")
         return True
     except Exception as e:
-        _logging.getLogger(__name__).error(
+        _log_fallback.error(
             f"[skill] fallback file write failed: skill={skill_name} "
             f"stage={stage}: {e}")
         return False

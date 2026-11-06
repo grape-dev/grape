@@ -1459,9 +1459,13 @@ def _fetch_skill_zip_by_key(obs_key: str, task_id: str = "") -> bytes | None:
     token = os.environ.get("RUNTIME_TOKEN", "")
     if task_id and token:
         try:
+            # 服务端路由是 POST（@router.post "/tasks/{task_id}/skill-zip"）；
+            # urllib 默认 GET → 405 Method Not Allowed，代拉通道 100% 失败。
             req = _urllib.Request(
                 f"{server}/api/runtime/tasks/{task_id}/skill-zip",
-                headers={"Authorization": f"Bearer {token}"})
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="POST")
             with _urllib.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read())
             b64 = (payload or {}).get("zip_base64") or ""
@@ -1497,9 +1501,13 @@ def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
     token = os.environ.get("RUNTIME_TOKEN", "")
     if task_id and token:
         try:
+            # 服务端路由是 POST（@router.post "/tasks/{task_id}/skill-zip"）；
+            # urllib 默认 GET → 405 Method Not Allowed，代拉通道 100% 失败。
             req = _urllib.Request(
                 f"{server}/api/runtime/tasks/{task_id}/skill-zip",
-                headers={"Authorization": f"Bearer {token}"})
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="POST")
             with _urllib.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read())
             b64 = (payload or {}).get("zip_base64") or ""
@@ -3040,6 +3048,16 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     # 下一轮退出进程（_wrap 是 create_task，异常不穿透主循环）。
                     log.error(f"task {_tid}: credential revoked, signaling main loop to exit")
                     _credential_revoked.set()
+                    return
+                except Exception as _exec_err:
+                    # 兜底：任何未预期异常（如 skill 物化降级路径的 NameError）都必须
+                    # 自报失败，否则任务停在 running → orphan 回收 → attempts cap 判死，
+                    # 对外表现为 "possible self-restart loop"，真实原因被掩埋。
+                    log.error(f"task {_tid}: execution crashed: {type(_exec_err).__name__}: {_exec_err}")
+                    try:
+                        await client.fail(_tid, f"execution crashed: {type(_exec_err).__name__}: {_exec_err}")
+                    except Exception as _fe:
+                        log.warning(f"task {_tid}: fail report after crash failed: {_fe}")
                     return
                 # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
                 # Step 4：完成/失败先入补报队列（ms master 停机窗口不丢），ack 后出队
