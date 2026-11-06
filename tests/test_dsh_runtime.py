@@ -5,6 +5,7 @@
 见 /root/dsh_grape_docs/WORKER-ONBOARDING-AND-DSH-ENGINE-DESIGN.md §4.2.4。
 """
 import json
+import os
 
 import pytest
 
@@ -233,8 +234,14 @@ def test_parse_full_real_stream(rt):
 # 修法：抽出 prepare_env(env) 钩子，由 executor 在 env_extra 合并之后调用。
 
 
-def test_get_env_does_not_create_auth_file(rt):
-    """get_env 阶段没有任务级 token，不该产出 GRAPE_AUTH_FILE。"""
+def test_get_env_does_not_create_auth_file(rt, monkeypatch):
+    """get_env 阶段没有任务级 token，不该产出 GRAPE_AUTH_FILE。
+
+    monkeypatch 隔离：get_env 会拷贝 os.environ，若测试进程自身带
+    GRAPE_SESSION_TOKEN（平台注入的任务环境），裸跑会误得 GRAPE_AUTH_FILE——
+    该断言验证的是「get_env 阶段不产文件」，必须把环境变量钉空再跑。
+    """
+    monkeypatch.delenv("GRAPE_SESSION_TOKEN", raising=False)
     env = rt.get_env()
     assert "GRAPE_AUTH_FILE" not in env
 
@@ -256,8 +263,9 @@ def test_prepare_env_writes_token_file_after_merge(rt, tmp_path):
     os.unlink(auth_file)
 
 
-def test_prepare_env_noop_without_token(rt):
+def test_prepare_env_noop_without_token(rt, monkeypatch):
     """没有 token 时不生成文件（其他引擎同样适用，走 env fallback）。"""
+    monkeypatch.delenv("GRAPE_SESSION_TOKEN", raising=False)
     env = rt.get_env()
     rt.prepare_env(env)
     assert "GRAPE_AUTH_FILE" not in env
@@ -273,3 +281,121 @@ def test_prepare_env_survives_unwritable_temp(rt, monkeypatch):
     env.update({"GRAPE_SESSION_TOKEN": "tk_x"})
     rt.prepare_env(env)  # 不应抛
     assert "GRAPE_AUTH_FILE" not in env
+
+# ===== executor 接线：prepare_env 钩子必须在 env_extra 合并后、Popen 前被调用 =====
+#
+# dsh 的令牌穿透依赖两个前提同时成立：
+#   ① executor 在 env.update(env_extra) 之后调用 backend.prepare_env(env)
+#     （token 是任务级的，get_env 阶段还不在 env 里）；
+#   ② prepare_env 写入的 GRAPE_AUTH_FILE 真正进入 Popen 的最终 env
+#     （非 ACP 后端 pre_exec 默认透传 env，prepare_env 的就地修改随之生效）。
+# 只测 DshRuntime.prepare_env 本身（上面 4 个用例）钉不住接线——
+# 钩子改名/挪位/被 ACP 分支旁路时单测仍绿、线上却断，故补 executor 级回归。
+
+
+class _PrepareEnvRecorderBackend:
+    """记录 prepare_env 调用时序并打标的假后端。"""
+
+    name = "fake"
+    binary = "true"
+    prompt_via_stdin = False
+
+    def __init__(self):
+        self.prepare_saw_token = None
+
+    def get_env(self, account="", user_id=0):
+        return {}
+
+    def build_args(self, prompt, session_id):
+        return []
+
+    def parse_output(self, line):
+        return None
+
+    def prepare_env(self, env):
+        # prepare_env 执行时必须已能看到任务级 token（env_extra 合并之后）
+        self.prepare_saw_token = env.get("GRAPE_SESSION_TOKEN", "")
+        env["PREPARE_ENV_MARK"] = "1"
+
+
+def _run_stream_capture_env(monkeypatch, backend, env_extra):
+    """跑 stream_agent 到 Popen，捕获传给子进程的最终 env（复用 token_env 测试的假件）。"""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from unittest import mock
+    import tests.test_executor_token_env as _tenv
+
+    fake_popen = _tenv._FakePopen()
+    with mock.patch("src.agent.executor.get_backend", return_value=backend), \
+         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.user.db.get_credentials", return_value=[]):
+        from src.runtime.executor import stream_agent
+        list(stream_agent(
+            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            backend_name="fake", account="u", user_id=0, env_extra=env_extra,
+            max_exec_seconds=60, repo_key="gitcode:owner/repo"))
+    return fake_popen.captured
+
+
+def test_executor_calls_prepare_env_after_env_extra_merge():
+    """prepare_env 在 env_extra 合并后执行：能看到任务级 token，标记进 Popen env。"""
+    backend = _PrepareEnvRecorderBackend()
+    final_env = _run_stream_capture_env(None, backend, {"GRAPE_SESSION_TOKEN": "tk_task_scoped"})
+    assert backend.prepare_saw_token == "tk_task_scoped", \
+        "prepare_env 必须在 env_extra（含任务级 GRAPE_SESSION_TOKEN）合并之后调用"
+    assert final_env.get("PREPARE_ENV_MARK") == "1", \
+        "prepare_env 的就地修改必须落入 Popen 最终 env（非 ACP 后端 pre_exec 默认透传）"
+
+
+def test_executor_tolerates_backend_without_prepare_env():
+    """无 prepare_env 的后端（opencode/hermes/codex 等现状）不报错、env 不受影响。"""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from unittest import mock
+    import tests.test_executor_token_env as _tenv
+
+    class _PlainBackend(_tenv._FakeBackend):
+        pass  # 无 prepare_env
+
+    fake_popen = _tenv._FakePopen()
+    with mock.patch("src.agent.executor.get_backend", return_value=_PlainBackend()), \
+         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.user.db.get_credentials", return_value=[]):
+        from src.runtime.executor import stream_agent
+        list(stream_agent(
+            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            backend_name="fake", account="u", user_id=0, env_extra={},
+            max_exec_seconds=60, repo_key="gitcode:owner/repo"))
+    assert "PREPARE_ENV_MARK" not in fake_popen.captured
+
+
+def test_executor_swallows_prepare_env_failure():
+    """prepare_env 抛异常只告警不阻断执行（降级走 env 变量 fallback）。"""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from unittest import mock
+    import tests.test_executor_token_env as _tenv
+
+    class _BoomBackend(_tenv._FakeBackend):
+        def prepare_env(self, env):
+            raise RuntimeError("boom")
+
+    fake_popen = _tenv._FakePopen()
+    with mock.patch("src.agent.executor.get_backend", return_value=_BoomBackend()), \
+         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.user.db.get_credentials", return_value=[]):
+        from src.runtime.executor import stream_agent
+        events = list(stream_agent(
+            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            backend_name="fake", account="u", user_id=0, env_extra={},
+            max_exec_seconds=60, repo_key="gitcode:owner/repo"))
+    assert any(et == "done" for et, _ in events), "prepare_env 失败不应阻断执行流"

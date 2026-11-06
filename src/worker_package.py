@@ -111,10 +111,22 @@ def _git_retry(args: list[str], retries: int = 3, base_delay: float = 1.0) -> No
 def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     """把 grape-cli 构建成 wheel 放入 wheels/（离线随包安装）。
 
-    - wheels/ 已含 `grape-*.whl` → 跳过；
-    - 否则懒拉 grape-cli 源码（浅克隆到 CACHE_DIR），`pip wheel` 产出到 wheels/；
+    - 每次构建前先清除 wheels/ 中的旧 `grape-*.whl`（#896）：wheel 文件名含版本号，
+      缓存过旧 wheel 后 `pip wheel` 重建同名报错、`pip install` 对同版本不重新
+      解压——陈旧 wheel 永不自愈（曾致升级包内 CLI 缺 GRAPE_AUTH_FILE 读文件
+      逻辑，dsh 令牌穿透静默失效）。先清后建，保证 wheels 里永远是当前
+      grape-cli main 快照；
+    - 随后懒拉 grape-cli 源码（浅克隆到 CACHE_DIR，已有则 ff-only 更新），
+      `pip wheel` 强制产出到 wheels/；
     - 失败仅告警：安装侧回退在线（现状兜底，不影响包构建）。
     """
+    for _old in os.listdir(whl_dir):
+        if _old.startswith("grape-") and _old.endswith(".whl"):
+            try:
+                os.remove(os.path.join(whl_dir, _old))
+                log.info(f"worker_package: removed stale grape wheel {_old} (rebuild from current main)")
+            except Exception as e:
+                log.warning(f"worker_package: failed to remove stale grape wheel {_old}: {e}")
     if any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir)):
         return whl_dir
     src = os.path.join(CACHE_DIR, "grape-cli-src")
