@@ -30,7 +30,7 @@ _CODEARTS_ALLOW_PERMS = [
     {"permission": "dotfile", "pattern": "*", "action": "ask"},
 ]
 
-from src.kernel.config import log, CHAT_CWD_BASE
+from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
