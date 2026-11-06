@@ -30,11 +30,22 @@ _MAX_FILES_PAGES = 20             # PR files 翻页上限（20 页 × 100 = 2000
 # Issue #993（M3）：重建文档结构校验。
 # - pr_number: 0 / 元数据口径矛盾 → 硬阻断（修复丢失在基线之外的文档痕迹）；
 # - 代码围栏（``` / ~~~）不配平 → 软告警（合法 Markdown 示例/片段可能误报）。
-_PR_NUMBER_ZERO_RE = re.compile(r"\bpr_number\s*[:=]\s*0\b", re.IGNORECASE)
+# 仅扫描 docs/ 下的 Markdown 重建文档（Spec 范围），且只认行首 YAML 式元数据
+# （``key: value``），避免把正文引用/Python 注解/赋值误判为元数据矛盾。
+_REBUILT_DOC_PREFIX = "docs/"
+_PR_NUMBER_ZERO_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?[\"']?pr_number[\"']?\s*:\s*0[\"']?\s*$", re.IGNORECASE)
 _META_LINE_RE = re.compile(
-    r"^\s*\"?(pr_number|issue_number|status|state|merged)\"?\s*[:=]\s*(.+?)\s*$",
+    r"^\s*(?:[-*]\s*)?[\"']?(pr_number|issue_number|status|state|merged)[\"']?"
+    r"\s*:\s*(.+?)\s*$",
     re.IGNORECASE)
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def is_rebuilt_doc(filename: str) -> bool:
+    """重建文档判定：``docs/`` 下的 Markdown 文件（Spec M3 扫描范围）。"""
+    return bool(filename) and filename.startswith(_REBUILT_DOC_PREFIX) \
+        and filename.lower().endswith(".md")
 
 
 def _normalize_patch(patch) -> str:
@@ -95,7 +106,7 @@ def scan_structure_files(files) -> dict:
             continue
         filename = item.get("filename") or item.get("path") or ""
         patch = _normalize_patch(item.get("patch"))
-        if not filename or not patch:
+        if not filename or not patch or not is_rebuilt_doc(filename):
             continue
         got = scan_structure_patch(patch)
         hard_n = int(got.get("pr_number_zero") or 0) + len(got.get("metadata_conflicts") or {})
@@ -199,6 +210,7 @@ def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> di
     任何异常 fail-open 返回 passed（记 warning），门禁故障不阻断合入。
     """
     empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {},
+             "conflict_hard_hits": {}, "conflict_soft_hits": {},
              "structure_hard_hits": {}, "structure_soft_hits": {}}
     try:
         files = _pull_files_all_pages(owner, repo, number, p, token)
@@ -207,6 +219,8 @@ def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> di
         hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
         soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
         result = {"hard_hits": hard_hits, "soft_hits": soft_hits,
+                  "conflict_hard_hits": hits["hard_hits"],
+                  "conflict_soft_hits": hits["soft_hits"],
                   "structure_hard_hits": structure["hard_hits"],
                   "structure_soft_hits": structure["soft_hits"],
                   "structure_details": structure["details"]}
@@ -231,6 +245,7 @@ def run_post_merge_gate(owner: str, repo: str, number: int, p: str, token: str,
     任何异常 fail-open 返回 passed（记 warning），不影响合入返回。
     """
     empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {},
+             "conflict_hard_hits": {}, "conflict_soft_hits": {},
              "structure_hard_hits": {}, "structure_soft_hits": {}}
     try:
         from src.api.git_repo_api import _vcs_req, _vcs_url
@@ -258,6 +273,8 @@ def run_post_merge_gate(owner: str, repo: str, number: int, p: str, token: str,
         hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
         soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
         result = {"hard_hits": hard_hits, "soft_hits": soft_hits,
+                  "conflict_hard_hits": hits["hard_hits"],
+                  "conflict_soft_hits": hits["soft_hits"],
                   "structure_hard_hits": structure["hard_hits"],
                   "structure_soft_hits": structure["soft_hits"],
                   "structure_details": structure["details"]}

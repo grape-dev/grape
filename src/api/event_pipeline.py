@@ -4011,11 +4011,22 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
             _log.warning(f"direct linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
             continue
 
-        # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
-        from src.runtime.repogit import ensure_feature_branch
-        ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=_log)
+        # Issue #993（M1）：分支级写租约须先于 ensure_feature_branch 获取（其可能写分支）。
+        from src.runtime import branch_guard as _branch_guard
+        _lease = _branch_guard.acquire_branch_lease(_rk, _wt_branch)
+        if not _lease.get("ok"):
+            _log.warning(f"direct linked PR: branch lease blocked {_rk}:{_wt_branch}: "
+                         f"{_lease.get('message')}")
+            _results.append({"repo_key": _rk, "status": "blocked",
+                             "reason": _lease.get("reason", "branch_locked"),
+                             "message": _lease.get("message", "")})
+            continue
 
         try:
+            # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
+            from src.runtime.repogit import ensure_feature_branch
+            ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=_log)
+
             # 1. git identity（防 commit 被拒）
             _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
                     capture_output=True, text=True, timeout=10)
@@ -4086,14 +4097,32 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 _log.warning(f"direct linked PR: no token for {_rk}, skip push")
                 _results.append({"repo_key": _rk, "status": "failed", "reason": "no token (expired or not configured)"})
                 continue
+            # Issue #993（M2）：direct 自动推送路径同样接入 push 前置守卫。
+            _pre = _branch_guard.preflight_push(_rk, _wt_branch, token=_linked_token)
+            if not _pre.get("allowed"):
+                _log.warning(f"direct linked PR: push blocked by branch guard {_rk}:{_wt_branch}: "
+                             f"{_pre.get('message')}")
+                _results.append({"repo_key": _rk, "status": "blocked",
+                                 "reason": _pre.get("reason", "guard_blocked"),
+                                 "message": _pre.get("message", "")})
+                continue
+            # --no-verify：本进程已持租约并完成等价 preflight，避免 pre-push 钩子
+            # 以另一 holder 判 branch_locked 自锁。
             _r_push = repogit._run_git(
-                ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
+                ["-C", _wt_dir, "push", "--no-verify", "origin",
+                 f"HEAD:refs/heads/{_wt_branch}"],
                 token=_linked_token, timeout=120)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 _log.warning(f"direct linked PR: push failed {_rk}: {_err}")
                 _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
                 continue
+            _r_head = repogit._run_git(["-C", _wt_dir, "rev-parse", "HEAD"],
+                                       token=_linked_token, timeout=15)
+            _pushed_sha = ((_r_head.stdout or "").strip()
+                           if _r_head is not None and _r_head.returncode == 0 else "")
+            if _pushed_sha:
+                _branch_guard.record_remote_sha(_rk, _wt_branch, _pushed_sha)
 
             # 6. create PR
             from src.vcs.api_client import create_pr_for_repo
@@ -4118,6 +4147,8 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
         except Exception as e:
             _log.warning(f"direct linked PR: error for {_rk}: {e}")
             _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
+        finally:
+            _branch_guard.release_branch_lease(_rk, _wt_branch)
 
     _created = [r for r in _results if r.get("status") == "created"]
     _skipped = [r for r in _results if r.get("status") == "skipped"]

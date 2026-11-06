@@ -1803,12 +1803,8 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             log.warning(f"linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
             continue
 
-        # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
-        from src.runtime.repogit import ensure_feature_branch
-        ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=log)
-
-        # Issue #993（M1）：分支级写租约——同一 repo+branch 仅一方获准写，
-        # 防止 merge-bot 与任务 Agent 并发重建同分支导致重复解冲突。
+        # Issue #993（M1）：分支级写租约必须先于 ensure_feature_branch（其中可能
+        # `git checkout -b` 写分支）获取，否则被保护的写动作可能先发生。
         from src.runtime import branch_guard as _branch_guard
         _lease = _branch_guard.acquire_branch_lease(_rk, _wt_branch)
         if not _lease.get("ok"):
@@ -1820,6 +1816,9 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             continue
 
         try:
+            # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
+            from src.runtime.repogit import ensure_feature_branch
+            ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=log)
             # 1. git identity（防 commit 被拒）
             _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
                     capture_output=True, text=True, timeout=10)
@@ -1895,16 +1894,24 @@ def _submit_linked_repo_prs(task: dict, env: dict):
                                  "reason": _pre.get("reason", "guard_blocked"),
                                  "message": _pre.get("message", "")})
                 continue
-            _branch_guard.record_remote_sha(_rk, _wt_branch, _pre.get("remote_sha") or "")
             from src.runtime.repogit import _run_git
+            # --no-verify：本进程已持有租约并完成等价的 preflight；pre-push 钩子是
+            # 独立进程、holder 不同，若再走钩子会被自身租约判 branch_locked 自锁。
             _r_push = _run_git(
-                ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
+                ["-C", _wt_dir, "push", "--no-verify", "origin",
+                 f"HEAD:refs/heads/{_wt_branch}"],
                 token=_token, timeout=120)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 log.warning(f"linked PR: push failed {_rk}: {_err}")
                 _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
                 continue
+            # push 成功后记录推上去的 local sha（新远端 head），而非 push 前的旧 remote sha。
+            _r_head = _run_git(["-C", _wt_dir, "rev-parse", "HEAD"], token=_token, timeout=15)
+            _pushed_sha = ((_r_head.stdout or "").strip()
+                           if _r_head is not None and _r_head.returncode == 0 else "")
+            if _pushed_sha:
+                _branch_guard.record_remote_sha(_rk, _wt_branch, _pushed_sha)
 
             # 6. create PR
             from src.vcs.api_client import create_pr_for_repo

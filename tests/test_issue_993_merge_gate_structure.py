@@ -60,6 +60,34 @@ def test_run_merge_gate_blocks_structural_defect(monkeypatch):
     r = mg.run_merge_gate("o", "r", 1, "gitcode", "tok")
     assert r["decision"] == "blocked"
     assert r["structure_hard_hits"] == {"docs/spec.md": 1}
+    # 仅结构缺陷时不得混报为冲突标记命中
+    assert r["conflict_hard_hits"] == {}
+
+
+def test_python_annotations_and_assignments_not_metadata():
+    """Python 注解/赋值不应被判为元数据矛盾（回归 QA 自阻断）。"""
+    files = [{"filename": "src/x.py", "patch": (
+        "@@\n"
+        "+def f(pr_number: int = 0):\n"
+        "+    state = \"merged\"\n"
+        "+    state = \"open\"\n")}]
+    r = mg.scan_structure_files(files)
+    assert r["hard_hits"] == {} and r["soft_hits"] == {}
+
+
+def test_doc_prose_reference_not_hard_defect():
+    """文档正文里的 `pr_number: 0` 引用（非行首元数据）不应自阻断。"""
+    files = [{"filename": "docs/issue-993/spec.md", "patch": (
+        "@@\n"
+        "+- M3 结构校验：扫描 `pr_number: 0` 残留与元数据矛盾。\n")}]
+    r = mg.scan_structure_files(files)
+    assert r["hard_hits"] == {}
+
+
+def test_non_doc_file_out_of_scope():
+    files = [{"filename": "src/api/merge_gate.py", "patch": "@@\n+status: merged\n+status: open\n"}]
+    r = mg.scan_structure_files(files)
+    assert r["hard_hits"] == {}
 
 
 def test_run_merge_gate_warns_fence_imbalance(monkeypatch):

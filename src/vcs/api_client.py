@@ -265,6 +265,40 @@ class VcsApiClient:
                 "GET", f"/projects/{project_id}/merge_requests/{pr_number}")
         return {"error": f"unsupported provider: {self.provider}"}
 
+    def list_prs(self, state: str = "all", head: str = "",
+                 max_pages: int = 20) -> list | dict:
+        """分页查询 PR 列表（Issue #993：按 head 分支查 merged/closed 状态）。
+
+        ``per_page=100`` 且全量翻页，避免 PR 超过单页时漏掉 merged PR。返回列表；
+        查询失败返回 ``{"error": ...}``。
+        """
+        items: list = []
+        for page in range(1, max_pages + 1):
+            if self.provider == "gitcode":
+                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
+                        f"&per_page=100&page={page}")
+                part = self._gitcode_request("GET", path)
+            elif self.provider == "github":
+                head_q = f"&head={self.owner}:{head}" if head else ""
+                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
+                        f"{head_q}&per_page=100&page={page}")
+                part = self._github_request("GET", path)
+            elif self.provider == "gitlab":
+                project_id = f"{self.owner}%2F{self.repo}"
+                path = (f"/projects/{project_id}/merge_requests?state={state}"
+                        f"&per_page=100&page={page}")
+                part = self._gitlab_request("GET", path)
+            else:
+                return {"error": f"unsupported provider: {self.provider}"}
+            if isinstance(part, dict) and part.get("error"):
+                return part
+            if not isinstance(part, list) or not part:
+                break
+            items.extend(part)
+            if len(part) < 100:
+                break
+        return items
+
     # === 仓库信息 ===
 
     def get_repo_info(self) -> dict:

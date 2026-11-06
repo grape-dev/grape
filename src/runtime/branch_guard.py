@@ -34,12 +34,15 @@ STATE_SUFFIX = ".json"
 
 
 def lease_key(repo_key: str, head_branch: str) -> str:
-    """分支级租约 key（distributed_locks.lock_key 上限 128）。"""
+    """分支级租约 key（distributed_locks.lock_key 上限 128）。
+
+    超长时对完整 ``repo_key+head_branch`` 取 sha1，避免截断造成不同分支碰撞。
+    """
     raw = f"{LEASE_PREFIX}{repo_key}:{head_branch or 'default'}"
     if len(raw) <= 128:
         return raw
-    digest = hashlib.sha1((head_branch or "default").encode("utf-8")).hexdigest()
-    return f"{LEASE_PREFIX}{repo_key}:sha1:{digest}"[:128]
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return f"{LEASE_PREFIX}sha1:{digest}"
 
 
 # ===================== 租约状态（expected_remote_sha） =====================
@@ -85,7 +88,11 @@ def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
 
 
 def record_remote_sha(repo_key: str, head_branch: str, remote_sha: str) -> dict:
-    """记录本次 push 时看到的远端 head（供下一次 push 做漂移比对）。"""
+    """记录本次 push 成功后远端将前进到的 head sha（供下一次 push 做漂移比对）。
+
+    注意：必须是**本次推上去的 local sha**，不是 push 前的旧 remote sha；否则同一
+    任务第二次合法 push 会把自己上一次推送误判为他人漂移。
+    """
     return save_lease_state(repo_key, head_branch, expected_remote_sha=remote_sha or "")
 
 
@@ -134,11 +141,6 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
         state = record_remote_sha(repo_key, head_branch, expected_remote_sha)
     return {"ok": True, "lock_key": key, "holder": _lock._holder,
             "expected_remote_sha": state.get("expected_remote_sha", "")}
-
-
-def renew_branch_lease(repo_key: str, head_branch: str, ttl: int = DEFAULT_TTL) -> bool:
-    from src import lock as _lock
-    return _lock.renew_lock(lease_key(repo_key, head_branch), ttl=ttl)
 
 
 def release_branch_lease(repo_key: str, head_branch: str) -> None:
@@ -211,9 +213,14 @@ def resolve_remote_head(repo_key: str, head_branch: str, token: str = "") -> str
 
 
 def _match_pr(items, head_branch: str) -> dict:
-    """从 PR 列表里按 head 分支匹配，归一为 {state, number, base}。"""
+    """从 PR 列表里按 head 分支匹配，取编号最大的一个（最近一次 PR）。
+
+    不能只看首个命中：分页后同一 head 可能有多条历史 PR，若最近一条已 merged，
+    取首个（更旧）会漏掉 merged 而 fail-open。
+    """
     if not isinstance(items, list):
         return {}
+    matched = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -228,23 +235,27 @@ def _match_pr(items, head_branch: str) -> dict:
             state = "merged"
         elif raw_state in ("closed", "close"):
             state = "closed"
-        elif raw_state in ("merged",):
-            state = "merged"
         elif raw_state in ("open", "opened"):
             state = "open"
         else:
             state = raw_state
         base = item.get("base") if isinstance(item.get("base"), dict) else {}
-        return {"state": state,
-                "number": item.get("number") or item.get("iid") or 0,
-                "base": base.get("ref") or item.get("target_branch") or ""}
-    return {}
+        try:
+            number = int(item.get("number") or item.get("iid") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        matched.append({"state": state, "number": number,
+                        "base": base.get("ref") or item.get("target_branch") or ""})
+    if not matched:
+        return {}
+    return max(matched, key=lambda m: m["number"])
 
 
 def fetch_pr_state(repo_key: str, head_branch: str, token: str = "") -> dict:
     """按 head 分支查询 PR 状态（merged/closed/open）；异常 fail-open 返回空。
 
-    复用 ``VcsApiClient`` 的平台端点；runner 侧 token 为空时尝试 grape CLI。
+    全量翻页查询后再匹配，避免 PR 超过单页上限时漏掉 merged/closed 而 fail-open。
+    runner 侧 token 为空时尝试 grape CLI。
     """
     if not token:
         return _fetch_pr_state_via_grape(repo_key, head_branch)
@@ -253,17 +264,7 @@ def fetch_pr_state(repo_key: str, head_branch: str, token: str = "") -> dict:
         from src.vcs.api_client import VcsApiClient
         provider, owner, repo = parse_repo_key(repo_key)
         client = VcsApiClient(provider=provider, token=token, owner=owner, repo=repo)
-        if provider == "github":
-            items = client._github_request(
-                "GET", f"/repos/{owner}/{repo}/pulls?state=all&head={owner}:{head_branch}"
-                       f"&per_page=100")
-        elif provider == "gitlab":
-            project_id = f"{owner}%2F{repo}"
-            items = client._gitlab_request(
-                "GET", f"/projects/{project_id}/merge_requests?state=all&per_page=100")
-        else:
-            items = client._gitcode_request(
-                "GET", f"/repos/{owner}/{repo}/pulls?state=all&per_page=100")
+        items = client.list_prs(state="all", head=head_branch)
         if isinstance(items, dict) and items.get("error"):
             log.warning(f"branch guard PR query failed (fail-open) {repo_key}: {items.get('error')}")
             return {"state": "", "error": items.get("error")}
@@ -278,14 +279,22 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
     try:
         from src.repo_key import parse_repo_key
         provider, owner, repo = parse_repo_key(repo_key)
-        cmd = ["grape", "git-repo", "pulls", "list", "--owner", owner, "--repo", repo,
-               "--state", "all", "--per_page", "100", "--json-out"]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: "
-                        f"{(r.stderr or '')[:200]}")
-            return {"state": ""}
-        return _match_pr(json.loads(r.stdout or "[]"), head_branch)
+        items: list = []
+        for page in range(1, 21):
+            cmd = ["grape", "git-repo", "pulls", "list", "--owner", owner, "--repo", repo,
+                   "--state", "all", "--per_page", "100", "--page", str(page), "--json-out"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: "
+                            f"{(r.stderr or '')[:200]}")
+                return {"state": ""}
+            part = json.loads(r.stdout or "[]")
+            if not isinstance(part, list) or not part:
+                break
+            items.extend(part)
+            if len(part) < 100:
+                break
+        return _match_pr(items, head_branch)
     except Exception as e:
         log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: {e}")
         return {"state": ""}
@@ -384,7 +393,7 @@ def remove_pre_push_hook(wt_dir: str) -> bool:
 def hook_main(argv: list | None = None) -> int:
     """pre-push 钩子入口：stdin 为 ``<local_ref> <local_sha> <remote_ref> <remote_sha>``。
 
-    返回 0=放行；1=阻断（stderr 输出可执行提示）。查询异常 fail-open。
+    返回 0=放行；1=阻断（stderr 输出可执行提示 + 任务日志告警双通道）。查询异常 fail-open。
     """
     args = argv if argv is not None else sys.argv[1:]
     repo_key = args[0] if len(args) > 0 else ""
@@ -397,19 +406,22 @@ def hook_main(argv: list | None = None) -> int:
         data = ""
     lease = acquire_branch_lease(repo_key, branch)
     if not lease.get("ok"):
-        sys.stderr.write(f"\n[branch-guard] {lease.get('message', 'branch locked')}\n")
+        _block(f"branch lease rejected {repo_key}:{branch}: {lease.get('message', 'branch locked')}",
+               lease.get("message", "branch locked"))
         return 1
     try:
         for raw in (data or "").splitlines():
             parts = raw.split()
             if len(parts) < 4:
                 continue
-            remote_ref, remote_sha = parts[2], parts[3]
+            local_sha, remote_ref, remote_sha = parts[1], parts[2], parts[3]
             pushed = remote_ref[len("refs/heads/"):] if remote_ref.startswith("refs/heads/") else remote_ref
             if pushed != branch:
                 continue
             if set(remote_sha) <= {"0"}:
                 remote_sha = ""
+            if set(local_sha) <= {"0"}:
+                local_sha = ""
             state = load_lease_state(repo_key, branch)
             pr = _fetch_pr_state_via_grape(repo_key, branch)
             verdict = check_push_allowed(
@@ -418,13 +430,25 @@ def hook_main(argv: list | None = None) -> int:
                 pr_state=pr.get("state", ""), pr_number=pr.get("number", 0),
                 base_branch=pr.get("base", ""))
             if not verdict.get("allowed"):
-                sys.stderr.write(f"\n[branch-guard] {verdict.get('message')}\n")
+                _block(f"branch guard blocked push {repo_key}:{branch}: {verdict.get('reason')}",
+                       verdict.get("message") or "push blocked")
                 return 1
-            if remote_sha:
-                record_remote_sha(repo_key, branch, remote_sha)
+            # 记录本次推上去的 local sha（push 成功后远端即前进到它），而非 push 前的旧
+            # remote sha；否则同任务第二次合法 push 会把自己上一次推送误判为远端漂移。
+            if local_sha:
+                record_remote_sha(repo_key, branch, local_sha)
         return 0
     finally:
         release_branch_lease(repo_key, branch)
+
+
+def _block(log_message: str, user_message: str) -> None:
+    """阻断提示双通道：git push stderr（用户可见）+ 任务日志（结构化可追溯）。"""
+    try:
+        log.warning(log_message)
+    except Exception:
+        pass
+    sys.stderr.write(f"\n[branch-guard] {user_message}\n")
 
 
 if __name__ == "__main__":

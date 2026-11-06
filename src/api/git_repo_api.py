@@ -1110,15 +1110,20 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
-        # 命中文件清单入 message（承接基线分支 Issue #754 语义：报告 path(markers)）
-        _files = ", ".join(f"{_p}({_n})" for _p, _n in (_gate.get("hard_hits") or {}).items())
-        _msg = (f"merge blocked by conflict-marker gate (Issue #752): "
-                f"unresolved merge conflict markers found in PR changed files: {_files}")
-        # Issue #993（M3）：结构缺陷（pr_number:0 / 元数据口径矛盾）同样阻断，补明原因。
+        # 命中文件清单入 message（承接基线分支 Issue #754 语义：报告 path(markers)）；
+        # Issue #993（M3）：仅结构缺陷命中时不得谎称冲突标记门禁，按来源分别措辞。
+        _conflict = _gate.get("conflict_hard_hits") or {}
         _structure = _gate.get("structure_hard_hits") or {}
+        _parts = []
+        if _conflict:
+            _files = ", ".join(f"{_p}({_n})" for _p, _n in _conflict.items())
+            _parts.append("merge blocked by conflict-marker gate (Issue #752): "
+                          f"unresolved merge conflict markers found in PR changed files: {_files}")
         if _structure:
             _sfiles = ", ".join(f"{_p}({_n})" for _p, _n in _structure.items())
-            _msg += f"; structural defects in rebuilt docs: {_sfiles}"
+            _parts.append("merge blocked by structural gate (Issue #993): "
+                          f"structural defects in rebuilt docs: {_sfiles}")
+        _msg = "; ".join(_parts) or "merge blocked by merge gate"
         # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
         try:
             from src.outbound_ledger import record_outbound
