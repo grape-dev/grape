@@ -1114,6 +1114,11 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
         _files = ", ".join(f"{_p}({_n})" for _p, _n in (_gate.get("hard_hits") or {}).items())
         _msg = (f"merge blocked by conflict-marker gate (Issue #752): "
                 f"unresolved merge conflict markers found in PR changed files: {_files}")
+        # Issue #993（M3）：结构缺陷（pr_number:0 / 元数据口径矛盾）同样阻断，补明原因。
+        _structure = _gate.get("structure_hard_hits") or {}
+        if _structure:
+            _sfiles = ", ".join(f"{_p}({_n})" for _p, _n in _structure.items())
+            _msg += f"; structural defects in rebuilt docs: {_sfiles}"
         # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
         try:
             from src.outbound_ledger import record_outbound

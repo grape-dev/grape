@@ -27,6 +27,86 @@ _CONFLICT_SEP_RE = re.compile(r"^={7}$")           # =======(孤立分隔行，m
 _MAX_SCAN_BYTES = 5 * 1024 * 1024  # 单文件扫描上限（超大文件截断扫描，防内存放大）
 _MAX_FILES_PAGES = 20             # PR files 翻页上限（20 页 × 100 = 2000 文件，防无限循环）
 
+# Issue #993（M3）：重建文档结构校验。
+# - pr_number: 0 / 元数据口径矛盾 → 硬阻断（修复丢失在基线之外的文档痕迹）；
+# - 代码围栏（``` / ~~~）不配平 → 软告警（合法 Markdown 示例/片段可能误报）。
+_PR_NUMBER_ZERO_RE = re.compile(r"\bpr_number\s*[:=]\s*0\b", re.IGNORECASE)
+_META_LINE_RE = re.compile(
+    r"^\s*\"?(pr_number|issue_number|status|state|merged)\"?\s*[:=]\s*(.+?)\s*$",
+    re.IGNORECASE)
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _normalize_patch(patch) -> str:
+    # Issue #754 归一：patch 可能是 str（GitHub）或 {"diff": str}（GitCode）。
+    if isinstance(patch, dict):
+        patch = patch.get("diff")
+    return patch if isinstance(patch, str) else ""
+
+
+def scan_structure_text(text: str) -> dict:
+    """扫描重建文档结构：围栏配平 / pr_number:0 / 元数据口径矛盾。"""
+    fence_count = 0
+    pr_zero = 0
+    meta_values: dict = {}
+    for line in (text or "").splitlines():
+        if _FENCE_RE.match(line):
+            fence_count += 1
+        if _PR_NUMBER_ZERO_RE.search(line):
+            pr_zero += 1
+        m = _META_LINE_RE.match(line)
+        if m:
+            key = m.group(1).lower()
+            value = m.group(2).strip().strip('"').strip("'")
+            meta_values.setdefault(key, set()).add(value)
+    conflicts = {k: sorted(v) for k, v in meta_values.items() if len(v) > 1}
+    return {
+        "fence_unbalanced": fence_count % 2 == 1,
+        "pr_number_zero": pr_zero,
+        "metadata_conflicts": conflicts,
+    }
+
+
+def scan_structure_patch(patch: str) -> dict:
+    """基于 unified diff 的新增行做结构扫描（删除行不计）。"""
+    added = []
+    for line in (patch or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+    return scan_structure_text("\n".join(added))
+
+
+def scan_structure_files(files) -> dict:
+    """扫描 PR files 响应，返回结构缺陷的硬/软命中明细。
+
+    hard_hits: {filename: n}（pr_number:0 / 元数据矛盾）
+    soft_hits: {filename: n}（围栏不配平）
+    details: 原始缺陷描述，供合入日志排查。
+    """
+    hard_hits: dict = {}
+    soft_hits: dict = {}
+    details: dict = {}
+    if not isinstance(files, list):
+        return {"hard_hits": hard_hits, "soft_hits": soft_hits, "details": details}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename") or item.get("path") or ""
+        patch = _normalize_patch(item.get("patch"))
+        if not filename or not patch:
+            continue
+        got = scan_structure_patch(patch)
+        hard_n = int(got.get("pr_number_zero") or 0) + len(got.get("metadata_conflicts") or {})
+        if hard_n:
+            hard_hits[filename] = hard_n
+        if got.get("fence_unbalanced"):
+            soft_hits[filename] = 1
+        if hard_n or got.get("fence_unbalanced"):
+            details[filename] = got
+    return {"hard_hits": hard_hits, "soft_hits": soft_hits, "details": details}
+
 
 def scan_text(text: str) -> dict:
     """扫描文本行，返回 {"hard": n, "soft": n}（hard=开始/结束标记，soft=孤立分隔行）。"""
@@ -118,15 +198,23 @@ def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> di
     decision: blocked（硬命中，合入前阻断）/ warned（仅软命中，告警放行）/ passed。
     任何异常 fail-open 返回 passed（记 warning），门禁故障不阻断合入。
     """
-    empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {}}
+    empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {},
+             "structure_hard_hits": {}, "structure_soft_hits": {}}
     try:
         files = _pull_files_all_pages(owner, repo, number, p, token)
         hits = scan_pull_files(files)
-        if hits["hard_hits"]:
-            return {"decision": "blocked", **hits}
-        if hits["soft_hits"]:
-            return {"decision": "warned", **hits}
-        return {"decision": "passed", **hits}
+        structure = scan_structure_files(files)
+        hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
+        soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
+        result = {"hard_hits": hard_hits, "soft_hits": soft_hits,
+                  "structure_hard_hits": structure["hard_hits"],
+                  "structure_soft_hits": structure["soft_hits"],
+                  "structure_details": structure["details"]}
+        if hard_hits:
+            return {"decision": "blocked", **result}
+        if soft_hits:
+            return {"decision": "warned", **result}
+        return {"decision": "passed", **result}
     except Exception as e:
         log.warning(f"merge gate scan failed (fail-open) {owner}/{repo}#{number}: {e}")
         return {**empty, "decision": "error"}
@@ -142,7 +230,8 @@ def run_post_merge_gate(owner: str, repo: str, number: int, p: str, token: str,
     2. 降级：merge commit 详情（/commits/{merge_sha}）的变更文件。
     任何异常 fail-open 返回 passed（记 warning），不影响合入返回。
     """
-    empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {}}
+    empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {},
+             "structure_hard_hits": {}, "structure_soft_hits": {}}
     try:
         from src.api.git_repo_api import _vcs_req, _vcs_url
         files = None
@@ -165,11 +254,18 @@ def run_post_merge_gate(owner: str, repo: str, number: int, p: str, token: str,
         if not files:
             return empty
         hits = scan_pull_files(files)
-        if hits["hard_hits"]:
-            return {"decision": "blocked", **hits}
-        if hits["soft_hits"]:
-            return {"decision": "warned", **hits}
-        return {"decision": "passed", **hits}
+        structure = scan_structure_files(files)
+        hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
+        soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
+        result = {"hard_hits": hard_hits, "soft_hits": soft_hits,
+                  "structure_hard_hits": structure["hard_hits"],
+                  "structure_soft_hits": structure["soft_hits"],
+                  "structure_details": structure["details"]}
+        if hard_hits:
+            return {"decision": "blocked", **result}
+        if soft_hits:
+            return {"decision": "warned", **result}
+        return {"decision": "passed", **result}
     except Exception as e:
         log.warning(f"merge gate post-merge scan failed (fail-open) {owner}/{repo}#{number}: {e}")
         return {**empty, "decision": "error"}

@@ -1807,6 +1807,18 @@ def _submit_linked_repo_prs(task: dict, env: dict):
         from src.runtime.repogit import ensure_feature_branch
         ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=log)
 
+        # Issue #993（M1）：分支级写租约——同一 repo+branch 仅一方获准写，
+        # 防止 merge-bot 与任务 Agent 并发重建同分支导致重复解冲突。
+        from src.runtime import branch_guard as _branch_guard
+        _lease = _branch_guard.acquire_branch_lease(_rk, _wt_branch)
+        if not _lease.get("ok"):
+            log.warning(f"linked PR: branch lease blocked {_rk}:{_wt_branch}: "
+                        f"{_lease.get('message')}")
+            _results.append({"repo_key": _rk, "status": "blocked",
+                             "reason": _lease.get("reason", "branch_locked"),
+                             "message": _lease.get("message", "")})
+            continue
+
         try:
             # 1. git identity（防 commit 被拒）
             _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
@@ -1873,6 +1885,17 @@ def _submit_linked_repo_prs(task: dict, env: dict):
                     continue
 
             # 5. push（token 经 http.extraheader 注入，不落盘）
+            # Issue #993（M2）：push 前置守卫——PR 已 merged/closed 或远端 head 漂移
+            # → 阻断并给出可执行提示，避免修复静默丢失/盲目二次解冲突。
+            _pre = _branch_guard.preflight_push(_rk, _wt_branch, token=_token)
+            if not _pre.get("allowed"):
+                log.warning(f"linked PR: push blocked by branch guard {_rk}:{_wt_branch}: "
+                            f"{_pre.get('message')}")
+                _results.append({"repo_key": _rk, "status": "blocked",
+                                 "reason": _pre.get("reason", "guard_blocked"),
+                                 "message": _pre.get("message", "")})
+                continue
+            _branch_guard.record_remote_sha(_rk, _wt_branch, _pre.get("remote_sha") or "")
             from src.runtime.repogit import _run_git
             _r_push = _run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
@@ -1906,6 +1929,8 @@ def _submit_linked_repo_prs(task: dict, env: dict):
         except Exception as e:
             log.warning(f"linked PR: error for {_rk}: {e}")
             _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
+        finally:
+            _branch_guard.release_branch_lease(_rk, _wt_branch)
 
     task["_linked_pr_results"] = _results
     _created = [r for r in _results if r.get("status") == "created"]
