@@ -10,7 +10,7 @@
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.api.deps import get_current_user_or_api_key
 from src.config import log
@@ -96,7 +96,39 @@ class IssueUpdateBody(BaseModel):
         examples=["bug,P1", ["bug", "P1"]],
     )
     assignee: str = ""
-    milestone_id: int = 0
+    milestone_id: int = Field(
+        0,
+        title="Milestone number",
+        description="Milestone number from `grape git-repo milestones` (the `number` field), "
+                    "not the REST path/internal id. GitCode maps it to the upstream `milestone` parameter; "
+                    "invalid or nonexistent numbers are rejected with 422.",
+        examples=[850012],
+    )
+
+    @field_validator("milestone_id", mode="before")
+    @classmethod
+    def _validate_milestone_id(cls, v):
+        if v is None or v == "":
+            return 0
+        if isinstance(v, bool):
+            raise ValueError("'milestone_id' must be an integer milestone number "
+                             "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return 0
+            try:
+                v = int(s)
+            except ValueError:
+                raise ValueError("'milestone_id' must be an integer milestone number "
+                                 "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+        if not isinstance(v, int):
+            raise ValueError("'milestone_id' must be an integer milestone number "
+                             "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
+        if v < 0:
+            raise ValueError("'milestone_id' must be a non-negative milestone number")
+        return v
+
     state: str = Field(
         "",
         title="Issue state event",
@@ -536,6 +568,49 @@ def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBo
     return _normalize_milestone_states(data)
 
 
+# Issue #1076：issues update 前校验 milestone number 存在（milestones list 的 number 口径）。
+# 先校验后写，避免非法值触发上游 PATCH 清空既有 milestone（上游 PATCH 非原子）。
+_MILESTONE_SCAN_MAX_PAGES = 10
+
+
+def _gitcode_milestone_number_exists(owner: str, repo: str, number: int,
+                                     user: dict, p: str) -> tuple[bool, list[int]]:
+    """返回 (number 是否存在, 已扫描到的 number 列表)。上游故障由 _vcs_req 抛 5xx。"""
+    token = _repo_token(owner, repo, user, p)
+    found = False
+    numbers: list[int] = []
+    for page in range(1, _MILESTONE_SCAN_MAX_PAGES + 1):
+        data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
+                                           {"state": "all", "page": page,
+                                            "per_page": _MILESTONES_MAX_PER_PAGE}, p), token)
+        if not isinstance(data, list) or not data:
+            break
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                n = int(item.get("number"))
+            except (TypeError, ValueError):
+                continue
+            if n not in numbers:
+                numbers.append(n)
+            if n == number:
+                found = True
+        if len(data) < _MILESTONES_MAX_PER_PAGE:
+            break
+    return found, numbers
+
+
+def _milestone_invalid_422(number: int, numbers: list[int], reason: str) -> HTTPException:
+    """非法 milestone number 的可读 4xx（不掩盖真实上游故障，5xx 仅保留网关/连接层）。"""
+    available = ", ".join(str(n) for n in numbers[:20]) or "无"
+    return HTTPException(status_code=422, detail={
+        "code": 422,
+        "message": f"milestone_id={number} {reason}；合法取值来源为 `grape git-repo milestones` "
+                   f"返回的 `number` 字段（非 REST 内部 id）。当前仓库可用 number: {available}",
+    })
+
+
 # ===================== Issues =====================
 
 @router.get("/{owner}/{repo}/issues", operation_id="gitrepo_issues_list", summary="List issues", description="Lists repository issues (state open/closed/all filter, paged).")
@@ -577,7 +652,7 @@ def get_issue(owner: str, repo: str, number: int, user: dict = Depends(get_curre
     return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
 
 
-@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id maps to upstream `milestone` (number); PATCH auto-fills required repo/title; milestone changes are read-back verified and echoed, or 502 if the milestone was not applied.")
+@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id must be the milestone `number` from `milestones` (not the REST internal id), mapped to upstream `milestone`; PATCH auto-fills required repo/title. Invalid/nonexistent numbers return 422 with the valid value source, and the existing milestone is preserved (pre-validated before write, rolled back on read-back mismatch); success is read-back verified and echoed. Upstream real failures still return 5xx.")
 def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
@@ -609,25 +684,47 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     # Issue #640：GitCode PATCH /repos/{owner}/issues/{number} body 必填 repo+title（路径不含 repo 维度
     # 的必填语义），仅传元数据字段（如 milestone_id）会被上游 400 拒绝 —— 复用 close_issue 已验证模式：
     # 服务端自动补 repo，title 缺失时先 GET 回取当前值回填，调用方无感
-    if p == "gitcode":
+    _pre_issue = None
+    if p == "gitcode" and (_want_milestone or "title" not in payload):
         payload.setdefault("repo", f"{owner}/{repo}")
+        try:
+            _pre_issue = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                                  _repo_token(owner, repo, user, p))
+        except HTTPException:
+            raise
+        except Exception as _e:
+            raise HTTPException(status_code=502, detail={
+                "code": 502,
+                "message": f"GitCode PATCH 必填 title 回取失败（update_issue #{number}）：{_e}"})
         if "title" not in payload:
-            try:
-                _info = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
-                                 _repo_token(owner, repo, user, p))
-                _title = str(_info.get("title") or "").strip() if isinstance(_info, dict) else ""
-            except HTTPException:
-                raise
-            except Exception as _e:
-                raise HTTPException(status_code=502, detail={
-                    "code": 502,
-                    "message": f"GitCode PATCH 必填 title 回取失败（update_issue #{number}）：{_e}"})
+            _title = str(_pre_issue.get("title") or "").strip() if isinstance(_pre_issue, dict) else ""
             if not _title:
                 # Issue #640 审查意见：title 必填非空，回取为空仍发空串会被上游 400 拒绝 → 明确报错
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
                     "message": f"GitCode PATCH 必填 title 回取为空（update_issue #{number}），无法补齐必填字段"})
             payload["title"] = _title
+    # Issue #1076：写入前先校验 milestone number 存在（合法口径 = milestones.number）。
+    # 非法/不存在的值直接 422，绝不发 PATCH，既有 milestone 因而不被清空；上游不可用仍抛 5xx。
+    _before_ms_num = None
+    if p == "gitcode" and _want_milestone:
+        _before_ms = _pre_issue.get("milestone") if isinstance(_pre_issue, dict) else None
+        _before_raw = _before_ms.get("number") if isinstance(_before_ms, dict) else _before_ms
+        try:
+            _before_ms_num = int(_before_raw) if _before_raw is not None else None
+        except (TypeError, ValueError):
+            _before_ms_num = None
+        try:
+            _ms_exists, _ms_numbers = _gitcode_milestone_number_exists(owner, repo, body.milestone_id, user, p)
+        except HTTPException:
+            raise
+        except Exception as _e:
+            raise HTTPException(status_code=502, detail={
+                "code": 502,
+                "message": f"milestone 预校验失败（update_issue #{number}）：{_e}"})
+        if not _ms_exists:
+            raise _milestone_invalid_422(body.milestone_id, _ms_numbers,
+                                         "不存在于仓库里程碑列表（milestone number 无效）")
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
@@ -643,30 +740,49 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             record_outbound(p, _rk, "issue_meta", str(number), issue_number=str(number))
     except Exception as _e:
         log.warning(f"outbound_ledger record (update_issue) failed: {_e}")
-    # Issue #640：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
+    # Issue #640/#1076：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
     # 仅当请求含 milestone_id 且 provider=gitcode 时执行一次 GET 回读：
-    #   - 未落库或落库值 number ≠ 请求的 milestone_id（如原挂旧里程碑、新值被上游静默忽略）
-    #     → 返回明确 502 结构化错误（不再是 200 假成功、不回显错误值）
+    #   - 回读 number ≠ 请求值 → 422 可读错误（不再 502），并尽量回滚到请求前的 milestone，
+    #     保证失败路径不破坏既有值；502 仅保留给回读时上游真实不可用。
     #   - 一致 → 响应回显 milestone（上游 PATCH 响应可能不回显，以回读值为准）
     if p == "gitcode" and _want_milestone and isinstance(resp, dict) and "error" not in resp:
         try:
             _after = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                               _repo_token(owner, repo, user, p))
-            _ms = _after.get("milestone") if isinstance(_after, dict) else None
-            _ms_num = _ms.get("number") if isinstance(_ms, dict) else _ms
-            if _ms_num is None or int(_ms_num) != int(body.milestone_id):
-                _cur = _ms_num if _ms_num is not None else "空"
-                raise HTTPException(status_code=502, detail={
-                    "code": 502,
-                    "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "
-                               f"milestone={_cur}（原值/空，与请求不一致——新值可能被上游静默忽略或 "
-                               f"里程碑 number 无效），请用 milestones list 核对里程碑 number 后重试"})
-            resp = dict(resp)
-            resp["milestone"] = _ms
         except HTTPException:
             raise
         except Exception as _e:
-            log.warning(f"milestone readback verify (update_issue #{number}) failed: {_e}")
+            raise HTTPException(status_code=502, detail={
+                "code": 502,
+                "message": f"milestone 回读校验失败（update_issue #{number}，上游不可用）：{_e}"})
+        _ms = _after.get("milestone") if isinstance(_after, dict) else None
+        _ms_raw = _ms.get("number") if isinstance(_ms, dict) else _ms
+        try:
+            _ms_num = int(_ms_raw) if _ms_raw is not None else None
+        except (TypeError, ValueError):
+            _ms_num = None
+        if _ms_num != int(body.milestone_id):
+            _cur = _ms_num if _ms_num is not None else "空"
+            _rollback_note = ""
+            # 失败原子性：仅当 PATCH 后值与原值不同（被清空/改成其它）时回滚到原里程碑。
+            if _before_ms_num is not None and _ms_num != _before_ms_num:
+                try:
+                    _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                             _repo_token(owner, repo, user, p),
+                             {"repo": f"{owner}/{repo}", "title": payload.get("title", ""),
+                              "milestone": _before_ms_num})
+                    _rollback_note = f"；已回滚为原 milestone={_before_ms_num}"
+                except Exception as _re:
+                    log.warning(f"milestone rollback (update_issue #{number}) failed: {_re}")
+                    _rollback_note = f"；回滚原 milestone={_before_ms_num} 失败"
+            raise HTTPException(status_code=422, detail={
+                "code": 422,
+                "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "
+                           f"milestone={_cur}（与请求不一致——新值可能被上游静默忽略）。"
+                           f"合法取值来源为 `grape git-repo milestones` 返回的 `number` 字段"
+                           f"{_rollback_note}"})
+        resp = dict(resp)
+        resp["milestone"] = _ms
     return resp
 
 

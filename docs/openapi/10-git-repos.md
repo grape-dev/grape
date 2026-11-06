@@ -323,7 +323,7 @@ grapecli git diff --repo Jason7602/hello
 | `description` | string | 否 | 描述（空值不透传） |
 | `due_on` | string | 否 | 截止时间 ISO 时间戳（空值不透传） |
 
-**返回（200/201）**：创建后的里程碑对象（含 `id`，可挂接 `issues update --milestone_id`）。
+**返回（200/201）**：创建后的里程碑对象（含 `number`，可挂接 `issues update --milestone_id`）。
 **错误**：400（缺 title 等上游校验）/ 422（title 缺失的契约校验）/ 401 / 403 / 409（标题重复）。
 provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 
@@ -385,11 +385,15 @@ provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 | `labels` | string | 标签（逗号分隔字符串）或数组 |
 | `assignee` | string | 责任人（单） |
 | `assignee_ids` | array | 责任人 id 数组（implementation 风格） |
-| `milestone_id` | int | 里程碑 id |
+| `milestone_id` | int | 里程碑 **number**（取 `grape git-repo milestones` 返回的 `number` 字段，如 850012；**不是** REST 路径内部 id） |
 | `state` | string | `"close"`（**注意**：GitCode 关闭用 "close" 非 "closed"） |
 | `body` | string | Issue 正文（同 POST create / PR update 的 body；空值忽略，不影响其他字段） |
 
-**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
+**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/422/502。
+
+> **里程碑（#1076）**：`milestone_id` 必须取 `milestones` 列表的 `number`；非数字、内部 id、
+> 不存在的 number → 422 并给出合法取值来源，不返回 502；写入前预校验、回读不一致时回滚，
+> 失败请求保持原 milestone；只有上游真实故障（网关/连接/不可用）才返回 5xx。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
 

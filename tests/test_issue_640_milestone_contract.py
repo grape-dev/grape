@@ -2,7 +2,7 @@
 
 - 契约层：gitcode provider `_RULES[("issues","update")]` 将 milestone_id 映射为上游 `milestone`。
 - 运行时层：GitCode PATCH 必填 repo+title 自动补齐（仅传 milestone_id 不再 400）；
-  写后回读校验（未落库 → 502 明确错误）；响应回显 milestone。
+  写后回读校验（Issue #1076 起未落库/不一致 → 422 可读错误，5xx 仅保留上游真实故障）；响应回显 milestone。
 """
 import importlib
 
@@ -27,12 +27,19 @@ def test_gitcode_translate_skips_empty_milestone():
     assert native == {}
 
 
-def _patch_transport(monkeypatch, get_resp, patch_resp):
+def _patch_transport(monkeypatch, get_resp, patch_resp, milestones=None):
     calls = []
+    state = {"n": 0}
 
     def fake_req(provider, method, url, token, payload=None):
         calls.append((method, url, payload))
         if method == "GET":
+            if url.split("?")[0].endswith("/milestones"):
+                return milestones if milestones is not None else [{"number": 850012, "title": "weekly-03"}]
+            if isinstance(get_resp, list):
+                i = min(state["n"], len(get_resp) - 1)
+                state["n"] += 1
+                return get_resp[i]
             return get_resp
         return patch_resp
 
@@ -64,12 +71,13 @@ def test_update_issue_gitcode_backfills_repo_title_and_echoes_milestone(monkeypa
     assert resp["milestone"] == {"number": 850012, "title": "weekly-03"}
 
 
-def test_update_issue_gitcode_milestone_not_applied_raises_502(monkeypatch):
-    """上游 200 假成功（回读 milestone 仍为空）→ 明确 502 错误，不再静默成功。"""
-    _patch_transport(
+def test_update_issue_gitcode_nonexistent_milestone_raises_422_without_patch(monkeypatch):
+    """不存在的 number → 422（非 502），且预校验失败即中止，绝不发出 PATCH（原值不被清空）。"""
+    calls = _patch_transport(
         monkeypatch,
-        get_resp={"title": "issue title", "milestone": None},
+        get_resp={"title": "issue title", "milestone": {"number": 850012, "title": "weekly-03"}},
         patch_resp={"number": 640, "state": "open"},
+        milestones=[{"number": 850012, "title": "weekly-03"}],
     )
     with pytest.raises(HTTPException) as ei:
         gra.update_issue(
@@ -77,17 +85,20 @@ def test_update_issue_gitcode_milestone_not_applied_raises_502(monkeypatch):
             gra.IssueUpdateBody(milestone_id=999999),
             user={"auth_type": "session_token"}, p="gitcode",
         )
-    assert ei.value.status_code == 502
+    assert ei.value.status_code == 422
     assert "milestone_id=999999" in ei.value.detail["message"]
+    assert "number" in ei.value.detail["message"]
+    assert [c for c in calls if c[0] == "PATCH"] == []
 
 
-def test_update_issue_gitcode_stale_milestone_ignored_raises_502(monkeypatch):
-    """审查 Required 用例：Issue 原挂旧里程碑（number=111），新值 850012 被上游静默忽略——
-    回读非空但 number ≠ 请求的 milestone_id → 502（不得 200 假成功并回显错误值）。"""
+def test_update_issue_gitcode_stale_milestone_ignored_raises_422(monkeypatch):
+    """Issue 原挂旧里程碑（number=111），新值 850012 被上游静默忽略——
+    回读非空但 number ≠ 请求的 milestone_id → 422（不得 200 假成功并回显错误值）。"""
     _patch_transport(
         monkeypatch,
         get_resp={"title": "issue title", "milestone": {"number": 111, "title": "old-weekly"}},
         patch_resp={"number": 640, "state": "open"},
+        milestones=[{"number": 111, "title": "old-weekly"}, {"number": 850012, "title": "weekly-03"}],
     )
     with pytest.raises(HTTPException) as ei:
         gra.update_issue(
@@ -95,7 +106,7 @@ def test_update_issue_gitcode_stale_milestone_ignored_raises_502(monkeypatch):
             gra.IssueUpdateBody(milestone_id=850012),
             user={"auth_type": "session_token"}, p="gitcode",
         )
-    assert ei.value.status_code == 502
+    assert ei.value.status_code == 422
     assert "milestone_id=850012" in ei.value.detail["message"]
     assert "111" in ei.value.detail["message"]
 
