@@ -526,7 +526,7 @@ def _patch_guard(monkeypatch):
                         lambda rk, br, *a, **k: (seen["acquire"].append((rk, br))
                                                  or {"ok": True}))
     monkeypatch.setattr(branch_guard, "release_branch_lease",
-                        lambda rk, br: seen["release"].append((rk, br)))
+                        lambda rk, br, *a, **k: seen["release"].append((rk, br)))
     monkeypatch.setattr(branch_guard, "preflight_push",
                         lambda rk, br, token="": (seen["pre"].append((rk, br))
                                                   or {"allowed": True}))
@@ -594,19 +594,40 @@ def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
 
 
 def test_lease_contention_message_contains_task_id(monkeypatch):
-    """AC1：租约 holder 使用任务 ID 时，争用提示可定位到具体任务。"""
+    """AC1：租约 holder 含任务 ID 时，争用提示可定位到具体任务。"""
     import src.lock as lock
     monkeypatch.setattr(lock, "_holder", "host-task-A")
     first = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskA")
     assert first["ok"] is True
-    assert first["holder"] == "t_taskA"
+    assert first["holder"] == "t_taskA:host-task-A"
 
     monkeypatch.setattr(lock, "_holder", "host-task-B")
     second = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskB")
     assert second["ok"] is False
     assert second["reason"] == "branch_locked"
-    assert second["holder"] == "t_taskA"
+    assert second["holder"] == "t_taskA:host-task-A"
     assert "t_taskA" in second["message"]
 
+    monkeypatch.setattr(lock, "_holder", "host-task-A")
     bg.release_branch_lease(REPO_KEY, BRANCH, task_id="t_taskA")
+    monkeypatch.setattr(lock, "_holder", "host-task-B")
     assert bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskB")["ok"] is True
+
+
+def test_same_task_id_across_workers_still_mutually_exclusive(monkeypatch):
+    """同一 task_id 调度的两个 worker 不得互相续期成功（holder 须含进程标识）。"""
+    import src.lock as lock
+    monkeypatch.setattr(lock, "_holder", "worker-A")
+    first = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_shared")
+    assert first["ok"] is True
+    assert first["holder"] == "t_shared:worker-A"
+
+    monkeypatch.setattr(lock, "_holder", "worker-B")
+    second = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_shared")
+    assert second["ok"] is False
+    assert second["reason"] == "branch_locked"
+    assert second["holder"] == "t_shared:worker-A"
+
+    # 跨实例释放不应误删他人租约
+    bg.release_branch_lease(REPO_KEY, BRANCH, task_id="t_shared")
+    assert bg._peek_holder(bg.lease_key(REPO_KEY, BRANCH))[0] == "t_shared:worker-A"

@@ -152,6 +152,59 @@ def test_fenced_example_not_hard_in_patch():
     assert r["fence_unbalanced"] is False
 
 
+def test_nested_longer_backtick_fence_example_ignored():
+    """4 反引号围栏内的 3 反引号嵌套示例不得误判为围栏闭合、pr_number:0 硬阻断。"""
+    text = (
+        "````markdown\n"
+        "```yaml\n"
+        "pr_number: 0\n"
+        "status: open\n"
+        "```\n"
+        "````\n"
+    )
+    r = mg.scan_structure_text(text)
+    assert r["pr_number_zero"] == 0
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False
+
+
+def test_nested_longer_tilde_fence_example_ignored():
+    """4 波浪线围栏内的 3 波浪线嵌套示例同样按开围栏长度配对。"""
+    text = (
+        "~~~~markdown\n"
+        "~~~yaml\n"
+        "pr_number: 0\n"
+        "~~~\n"
+        "~~~~\n"
+    )
+    r = mg.scan_structure_text(text)
+    assert r["pr_number_zero"] == 0
+    assert r["fence_unbalanced"] is False
+
+
+def test_nested_fence_example_not_hard_in_patch():
+    """patch 新增 4 反引号嵌套围栏示例时不得硬阻断。"""
+    patch = ("@@ -1,1 +1,7 @@\n"
+             "+````markdown\n"
+             "+```yaml\n"
+             "+pr_number: 0\n"
+             "+status: open\n"
+             "+```\n"
+             "+````\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["pr_number_zero"] == 0
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False
+
+
+def test_short_closing_fence_does_not_close_longer_open():
+    """闭合围栏短于开围栏时不算闭合（CommonMark），真实残留仍应触发软告警。"""
+    text = "````markdown\npr_number: 0\n```\n"
+    r = mg.scan_structure_text(text)
+    assert r["pr_number_zero"] == 0
+    assert r["fence_unbalanced"] is True
+
+
 def test_added_lines_inside_existing_fence_are_ignored():
     """围栏开标记在 context、新增行位于围栏内时不得判元数据硬缺陷。"""
     patch = ("@@ -1,4 +1,6 @@\n"

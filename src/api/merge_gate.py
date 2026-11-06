@@ -39,7 +39,7 @@ _META_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?[\"']?(pr_number|issue_number|status|state|merged)[\"']?"
     r"\s*:\s*(.+?)\s*$",
     re.IGNORECASE)
-_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
 def is_rebuilt_doc(filename: str) -> bool:
@@ -78,7 +78,9 @@ def _scan_structure_lines(lines, added=None) -> tuple[dict, dict, dict]:
             marker = fence.group(1)
             if not fence_open:
                 fence_open = marker
-            elif marker == fence_open:
+            elif marker[0] == fence_open[0] and len(marker) >= len(fence_open):
+                # CommonMark：闭合围栏须同字符且不短于开围栏；4 反引号围栏内的
+                # 3 反引号示例因此保持围栏内状态，不被误判为闭合。
                 fence_open = ""
             continue
         if fence_open:
@@ -179,19 +181,20 @@ def scan_structure_patch(patch: str, file_text: str | None = None) -> dict:
     - 围栏配平按变更后的结果态判断（有全文用全文，否则 context + 新增，删除行不计）。
     """
     resulting, added_flags = _resulting_with_added_flags(patch)
-    added_res, _added_values, added_meta = _scan_structure_lines(resulting, added_flags)
-    if file_text is not None:
-        file_lines = file_text.splitlines()
-        full_flags = _added_flags_from_full_text(patch, file_lines)
-        if full_flags is not None:
-            # 全文行号映射成功：围栏状态与新增行判定都在全文上完成，覆盖围栏开/闭
-            # 标记在 hunk 之外、跨多个 hunk 的场景。
-            added_res, result_meta, added_meta = _scan_structure_lines(file_lines, full_flags)
-            result_res = added_res
-        else:
-            result_res, result_meta, _result_added = _scan_structure_lines(file_lines)
+    file_lines = file_text.splitlines() if file_text is not None else None
+    full_flags = (_added_flags_from_full_text(patch, file_lines)
+                  if file_lines is not None else None)
+    if full_flags is not None:
+        # 全文行号映射成功：围栏状态与新增行判定都在全文上完成，覆盖围栏开/闭
+        # 标记在 hunk 之外、跨多个 hunk 的场景。
+        added_res, result_meta, added_meta = _scan_structure_lines(file_lines, full_flags)
+        result_res = added_res
     else:
-        result_res, result_meta, _result_added = _scan_structure_lines(resulting)
+        added_res, _added_values, added_meta = _scan_structure_lines(resulting, added_flags)
+        if file_lines is not None:
+            result_res, result_meta, _result_added = _scan_structure_lines(file_lines)
+        else:
+            result_res, result_meta = added_res, _added_values
     conflicts = {
         k: sorted(v) for k, v in result_meta.items()
         if len(v) > 1 and k in added_meta
@@ -360,6 +363,23 @@ def get_pull_base(owner: str, repo: str, number: int, p: str, token: str) -> dic
         return {"ref": "", "sha": ""}
 
 
+def _merge_result(hits: dict, structure: dict) -> dict:
+    """合并冲突标记与结构扫描结果，按硬/软命中给出决策（blocked/warned/passed）。"""
+    hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
+    soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
+    decision = "blocked" if hard_hits else ("warned" if soft_hits else "passed")
+    return {
+        "decision": decision,
+        "hard_hits": hard_hits,
+        "soft_hits": soft_hits,
+        "conflict_hard_hits": hits["hard_hits"],
+        "conflict_soft_hits": hits["soft_hits"],
+        "structure_hard_hits": structure["hard_hits"],
+        "structure_soft_hits": structure["soft_hits"],
+        "structure_details": structure["details"],
+    }
+
+
 def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> dict:
     """取 PR 变更文件（全量翻页）并扫描，返回 {"decision", "hard_hits", "soft_hits"}。
 
@@ -368,7 +388,8 @@ def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> di
     """
     empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {},
              "conflict_hard_hits": {}, "conflict_soft_hits": {},
-             "structure_hard_hits": {}, "structure_soft_hits": {}}
+             "structure_hard_hits": {}, "structure_soft_hits": {},
+             "structure_details": {}}
     try:
         files = _pull_files_all_pages(owner, repo, number, p, token)
         hits = scan_pull_files(files)
@@ -383,19 +404,7 @@ def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> di
                 _loader = lambda fn: _fetch_rebuilt_doc_text(  # noqa: E731
                     owner, repo, fn, _head_ref, p, token)
         structure = scan_structure_files(files, file_text_loader=_loader)
-        hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
-        soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
-        result = {"hard_hits": hard_hits, "soft_hits": soft_hits,
-                  "conflict_hard_hits": hits["hard_hits"],
-                  "conflict_soft_hits": hits["soft_hits"],
-                  "structure_hard_hits": structure["hard_hits"],
-                  "structure_soft_hits": structure["soft_hits"],
-                  "structure_details": structure["details"]}
-        if hard_hits:
-            return {"decision": "blocked", **result}
-        if soft_hits:
-            return {"decision": "warned", **result}
-        return {"decision": "passed", **result}
+        return _merge_result(hits, structure)
     except Exception as e:
         log.warning(f"merge gate scan failed (fail-open) {owner}/{repo}#{number}: {e}")
         return {**empty, "decision": "error"}
@@ -413,7 +422,8 @@ def run_post_merge_gate(owner: str, repo: str, number: int, p: str, token: str,
     """
     empty = {"decision": "passed", "hard_hits": {}, "soft_hits": {},
              "conflict_hard_hits": {}, "conflict_soft_hits": {},
-             "structure_hard_hits": {}, "structure_soft_hits": {}}
+             "structure_hard_hits": {}, "structure_soft_hits": {},
+             "structure_details": {}}
     try:
         from src.api.git_repo_api import _vcs_req, _vcs_url
         files = None
@@ -437,19 +447,7 @@ def run_post_merge_gate(owner: str, repo: str, number: int, p: str, token: str,
             return empty
         hits = scan_pull_files(files)
         structure = scan_structure_files(files)
-        hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
-        soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
-        result = {"hard_hits": hard_hits, "soft_hits": soft_hits,
-                  "conflict_hard_hits": hits["hard_hits"],
-                  "conflict_soft_hits": hits["soft_hits"],
-                  "structure_hard_hits": structure["hard_hits"],
-                  "structure_soft_hits": structure["soft_hits"],
-                  "structure_details": structure["details"]}
-        if hard_hits:
-            return {"decision": "blocked", **result}
-        if soft_hits:
-            return {"decision": "warned", **result}
-        return {"decision": "passed", **result}
+        return _merge_result(hits, structure)
     except Exception as e:
         log.warning(f"merge gate post-merge scan failed (fail-open) {owner}/{repo}#{number}: {e}")
         return {**empty, "decision": "error"}

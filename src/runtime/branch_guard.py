@@ -179,13 +179,27 @@ def _peek_holder(lock_key: str) -> tuple[str, int]:
     return "", 0
 
 
+def _lease_holder(task_id: str) -> str | None:
+    """租约 holder：``task_id:进程 holder``。
+
+    只把 ``task_id`` 当 holder 会让同一任务在不同 worker 上并发写时互相通过
+    ``renew_lock``（holder 相等即续期成功），跨实例互斥失效；拼接进程级 holder
+    后才能同时满足「同任务同进程可重入」与「同任务跨实例互斥」。
+    """
+    if not task_id:
+        return None
+    from src import lock as _lock
+    return f"{task_id}:{_lock._holder}"
+
+
 def acquire_branch_lease(repo_key: str, head_branch: str,
                          expected_remote_sha: str | None = None,
                          ttl: int = DEFAULT_TTL, task_id: str = "") -> dict:
     """获取分支写租约；同 holder 重入视为成功（一次任务内多次 push）。
 
-    ``task_id`` 非空时作为租约 holder 写入 DB，争用提示可直接定位到任务；缺省用
-    进程级 holder（``src.lock._holder``），兼容手工 push 钩子等无任务上下文场景。
+    ``task_id`` 非空时与进程级 holder 组合作为租约 holder 写入 DB，争用提示可直接
+    定位到任务；缺省用进程级 holder（``src.lock._holder``），兼容手工 push 钩子等
+    无任务上下文场景。
     返回 ``{"ok": bool, "lock_key", "holder", "reason", "message", ...}``。
     """
     if not repo_key or not head_branch:
@@ -193,7 +207,7 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
                 "message": "分支租约参数缺失（repo_key/head_branch）"}
     from src import lock as _lock
     key = lease_key(repo_key, head_branch)
-    holder = task_id or None
+    holder = _lease_holder(task_id)
     # 新获取或同 holder 重入（renew）均视为成功；仅在两者都失败时判定他人持有。
     if not (_lock.acquire_lock(key, ttl=ttl, holder=holder)
             or _lock.renew_lock(key, ttl=ttl, holder=holder)):
@@ -215,7 +229,7 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
 
 def release_branch_lease(repo_key: str, head_branch: str, task_id: str = "") -> None:
     from src import lock as _lock
-    _lock.release_lock(lease_key(repo_key, head_branch), holder=task_id or None)
+    _lock.release_lock(lease_key(repo_key, head_branch), holder=_lease_holder(task_id))
 
 
 @contextmanager
@@ -233,10 +247,7 @@ def branch_lease(repo_key: str, head_branch: str, expected_remote_sha: str | Non
         yield lease
     finally:
         if lease.get("ok"):
-            if task_id:
-                release_branch_lease(repo_key, head_branch, task_id=task_id)
-            else:
-                release_branch_lease(repo_key, head_branch)
+            release_branch_lease(repo_key, head_branch, task_id=task_id)
 
 
 # ===================== push 前置判定 =====================
