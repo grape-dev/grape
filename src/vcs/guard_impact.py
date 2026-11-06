@@ -196,6 +196,45 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
     return scripts
 
 
+def delete_issue_artifacts(repo_key: str, ref: str, entries, token: str = "",
+                           provider: str = "", message: str = "") -> dict:
+    """删除 docs/issue-N 下的产物文件（contents DELETE），Issue #996 删除链路。
+
+    与 ``list_issue_artifacts`` 配对：调用方先列出 ``[{path, sha}]``，再做守卫预检，
+    未命中才把条目交给本函数（remover 实现）。逐条删除、失败续跑，返回
+    ``{"deleted": [path...], "failed": [{"path", "error"}...]}``——不因单条失败丢整批，
+    但会把失败如实上报（禁止静默成功）。
+    """
+    from src.api.git_repo_api import _vcs_req, _vcs_url
+
+    p, owner, repo = parse_repo_key(repo_key)
+    p = provider or p
+    out: dict = {"deleted": [], "failed": []}
+    if p not in ("gitcode", "github") or not owner or not repo:
+        out["failed"].append({"path": "", "error": f"unsupported provider: {p}"})
+        return out
+
+    for raw in entries or []:
+        raw_path = raw.get("path") if isinstance(raw, dict) else raw
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        sha = raw.get("sha") if isinstance(raw, dict) else ""
+        body = {"message": message or f"chore: remove issue artifact {path}"}
+        if sha:
+            # GitHub contents DELETE 必须带 sha；GitCode 兼容传入。
+            body["sha"] = sha
+        try:
+            _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/contents/{path}", None, p),
+                     token, body)
+        except Exception as e:
+            log.warning(f"guard impact: delete artifact failed path={path} repo={repo_key}: {e}")
+            out["failed"].append({"path": path, "error": str(e)[:200]})
+            continue
+        out["deleted"].append(path)
+    return out
+
+
 def assess_guard_impact(repo_key: str, ref: str, target_paths,
                         token: str = "", provider: str = "",
                         scripts: dict | None = None) -> dict:

@@ -9,9 +9,18 @@ coding，多耗一轮。
 
 本仓（grape）负责**事件侧**：变更事件携带 `payload.files`，并在 prompt /
 pipeline events 展示被删文件清单，供 QA 增量复核。
-清理动作由 **devdzr-merge-bot** 执行，因此「删除前守卫预检」必须由该仓接线，
-本仓提供参考实现与数据契约；平台内不存在 `docs/issue-*` 删除链路，故不在本仓
-直接调用。
+清理动作原先约定由 **devdzr-merge-bot** 执行，因此「删除前守卫预检」需要该仓接线。
+复审后本仓补齐了删除链路（Issue #996 R5）：平台现在提供端点，下游可直接调用而无需重写预检：
+
+```
+POST /api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean
+  {"dry_run": true, "ref": "", "message": ""}
+```
+
+- `dry_run` 默认 true：只返回 `paths` / `guard_impact`，不发 DELETE；
+- `guard_impact.breaking=true` → `skipped=paths`、`deleted=[]`（永不绕过）；
+- `dry_run=false` 且无命中 → 逐条 `contents DELETE`（带 sha），返回
+  `deleted[]` 与 `failed[{path,error}]`，单条失败不中断整批，也不静默吞掉。
 
 ## 平台已交付的可复用能力
 
