@@ -45,8 +45,18 @@ def _detail(resp):
     return resp.json()["detail"]
 
 
-def _log_messages(caplog):
-    return "\n".join(r.getMessage() for r in caplog.records)
+def _event_records(caplog, event):
+    return [r for r in caplog.records if getattr(r, "event", "") == event]
+
+
+def _log_dump(caplog):
+    parts = []
+    for record in caplog.records:
+        parts.append(record.getMessage())
+        for value in vars(record).values():
+            if isinstance(value, str):
+                parts.append(value)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -73,10 +83,17 @@ def test_bot_lookup_exception_stage(client, monkeypatch, caplog):
     assert d["retry_after_s"] > 0
     assert d["provider"] == "gitcode"
 
-    msgs = _log_messages(caplog)
-    assert "git_credential_failed" in msgs
-    assert '"stage": "bot_token_lookup"' in msgs
-    assert "RuntimeError" in msgs
+    records = _event_records(caplog, "git_credential_failed")
+    assert len(records) == 1
+    record = records[0]
+    assert record.stage == "bot_token_lookup"
+    assert record.error_code == "GIT_CREDENTIAL_UNAVAILABLE"
+    assert record.provider == "gitcode"
+    assert record.repo_key == f"gitcode:{OWNER}/{REPO}"
+    assert record.error_class == "RuntimeError"
+    assert record.auth_type == "session_token"
+    assert record.agent_type == "vod"
+    assert record.duration_ms >= 0
 
 
 def test_user_refresh_exception_stage(client, monkeypatch, caplog):
@@ -96,9 +113,10 @@ def test_user_refresh_exception_stage(client, monkeypatch, caplog):
     assert d["retryable"] is True
     assert d["retry_after_s"] == 15
 
-    msgs = _log_messages(caplog)
-    assert '"stage": "user_token_refresh"' in msgs
-    assert "RuntimeError" in msgs
+    records = _event_records(caplog, "git_credential_failed")
+    assert len(records) == 1
+    assert records[0].stage == "user_token_refresh"
+    assert records[0].error_class == "RuntimeError"
 
 
 def test_both_empty_stage(client, monkeypatch, caplog):
@@ -113,8 +131,10 @@ def test_both_empty_stage(client, monkeypatch, caplog):
     assert d["stage"] == "both_unavailable"
     assert d["error_code"] == "GIT_CREDENTIAL_UNAVAILABLE"
 
-    msgs = _log_messages(caplog)
-    assert '"stage": "both_unavailable"' in msgs
+    records = _event_records(caplog, "git_credential_failed")
+    assert len(records) == 1
+    assert records[0].stage == "both_unavailable"
+    assert records[0].error_class == ""
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +155,8 @@ def test_failure_response_does_not_leak_token(client, monkeypatch):
     assert "database is locked" not in body
 
 
-def test_bot_exception_message_not_in_response(client, monkeypatch):
+def test_bot_exception_message_not_in_response(client, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
     _set_user(agent_type="vod")
 
     def _raise(*a, **k):
@@ -146,7 +167,10 @@ def test_bot_exception_message_not_in_response(client, monkeypatch):
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
     assert r.status_code == 502
+    # 响应与日志两条链路都不得泄漏异常原文中的 token
     assert BOT_TOKEN not in r.text
+    assert BOT_TOKEN not in _log_dump(caplog)
+    assert "db error token=" not in _log_dump(caplog)
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +216,10 @@ def test_unexpected_exception_500_with_request_id(caplog):
     assert body["code"] == 500
     assert body["request_id"] and body["request_id"] != "-"
 
-    msgs = _log_messages(caplog)
-    assert "git_credential_failed" in msgs
-    assert '"stage": "credential_resolve"' in msgs
-    assert "RuntimeError" in msgs
+    records = _event_records(caplog, "git_credential_failed")
+    assert len(records) == 1
+    assert records[0].stage == "credential_resolve"
+    assert records[0].error_class == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +252,10 @@ def test_success_path_still_returns_credential(client, monkeypatch, caplog):
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
     assert r.status_code == 200
     assert r.json()["password"] == BOT_TOKEN
-    assert "git_credential_ok" in _log_messages(caplog)
+    records = _event_records(caplog, "git_credential_ok")
+    assert len(records) == 1
+    assert records[0].provider == "gitcode"
+    assert records[0].repo_key == f"gitcode:{OWNER}/{REPO}"
+    assert records[0].duration_ms >= 0
     # 成功日志也不得出现 token 明文
-    assert BOT_TOKEN not in _log_messages(caplog)
+    assert BOT_TOKEN not in _log_dump(caplog)

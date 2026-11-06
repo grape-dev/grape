@@ -1,5 +1,4 @@
 """仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
-import json
 import os
 import re
 import time
@@ -2634,13 +2633,18 @@ def _credential_502_detail(stage: str, message: str = "", provider: str = "gitco
 
 
 def _log_git_credential_failure(stage: str, provider: str, repo_key: str, user: dict,
-                                exc: Exception = None) -> None:
+                                exc: Exception = None, duration_ms: int = None) -> None:
     """记录 git 凭据解析失败的结构化日志（不含 token 明文）。
 
-    message 为单行 JSON，便于日志系统按 stage/error_code 检索；request_id/repo_key/
-    user_id 由 logging filter 从 ContextVar 自动补齐。
+    按仓库日志契约通过 extra={...} 注入顶层字段（event/stage/error_code/provider/
+    repo_key/auth_type/agent_type/error_class/duration_ms），便于 Loki/ELK 按字段
+    检索与聚合；message 仅保留事件名。request_id/user_id 缺失时由 logging filter
+    从 ContextVar 补齐，repo_key 因本接口路径不在中间件提取范围内而显式传入。
+
+    安全取舍：不记录异常原文与 traceback，仅保留异常类名——异常消息可能携带
+    token 或含凭据 URL（Spec 禁止输出 token 值）。需要堆栈时按 request_id 关联。
     """
-    payload = {
+    extra = {
         "event": "git_credential_failed",
         "stage": stage,
         "error_code": GIT_CREDENTIAL_ERROR_CODE,
@@ -2649,9 +2653,10 @@ def _log_git_credential_failure(stage: str, provider: str, repo_key: str, user: 
         "auth_type": user.get("auth_type", ""),
         "agent_type": user.get("agent_type", ""),
         "error_class": type(exc).__name__ if exc else "",
-        "error": (str(exc)[:200] if exc else ""),
     }
-    log.warning("git_credential_failed " + json.dumps(payload, ensure_ascii=False))
+    if duration_ms is not None:
+        extra["duration_ms"] = duration_ms
+    log.warning("git_credential_failed", extra=extra)
 
 
 def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
@@ -2723,14 +2728,20 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             if not tok and not stage:
                 stage, exc = alt_stage, alt_exc
     if tok:
-        log.debug("git_credential_ok " + json.dumps({
-            "provider": provider, "repo_key": rk,
-            "auth_type": user.get("auth_type", ""), "agent_type": user.get("agent_type", ""),
+        log.debug("git_credential_ok", extra={
+            "event": "git_credential_ok",
+            "provider": provider,
+            "repo_key": rk,
+            "auth_type": user.get("auth_type", ""),
+            "agent_type": user.get("agent_type", ""),
             "duration_ms": round((time.monotonic() - _start) * 1000),
-        }, ensure_ascii=False))
+        })
         return tok
     stage = stage or _GIT_CREDENTIAL_STAGE_BOTH
-    _log_git_credential_failure(stage, provider, rk, user, exc)
+    _log_git_credential_failure(
+        stage, provider, rk, user, exc,
+        duration_ms=round((time.monotonic() - _start) * 1000),
+    )
     raise HTTPException(status_code=502, detail=_credential_502_detail(stage, provider=provider))
 
 
@@ -2745,7 +2756,11 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
     Issue #466：owner 段可带 provider 前缀（跨平台关联仓换券）；clone_url 用裸 owner/repo。
     Issue #1063：未预期异常记录 stage 后交给全局 handler（500 + request_id）。
+
+    安全取舍：未预期异常同样只记录异常类名（不打 traceback），避免异常原文中的
+    token/凭据 URL 落日志；现场由 request_id 关联全局 handler 的 500 记录。
     """
+    _start = time.monotonic()
     try:
         token = _repo_platform_token(owner, repo, user, p)
         _gh = "github.com" if p == "github" else "gitcode.com"
@@ -2761,8 +2776,11 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
         raise
     except Exception as e:
         from src.repo_key import to_repo_key
-        _log_git_credential_failure(_GIT_CREDENTIAL_STAGE_UNEXPECTED, p,
-                                    to_repo_key(f"{owner}/{repo}", provider=p), user, e)
+        _log_git_credential_failure(
+            _GIT_CREDENTIAL_STAGE_UNEXPECTED, p,
+            to_repo_key(f"{owner}/{repo}", provider=p), user, e,
+            duration_ms=round((time.monotonic() - _start) * 1000),
+        )
         raise
 
 

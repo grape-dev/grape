@@ -88,7 +88,9 @@ done
 
 - 失败统一为 `502`（非 500），`detail` 含 `stage`（`bot_token_lookup` / `user_token_refresh` /
   `both_unavailable`）、`error_code=GIT_CREDENTIAL_UNAVAILABLE`、`retryable=true`、`retry_after_s=15`、`provider`。
-- 服务端日志事件 `git_credential_failed` 为单行 JSON，含上述阶段与异常类名，不含 token 明文。
+- 服务端日志事件 `git_credential_failed` 按仓库日志契约以 `extra=` 输出顶层字段 `event` / `stage` /
+  `error_code` / `provider` / `repo_key` / `auth_type` / `agent_type` / `error_class` / `duration_ms`，
+  可直接按字段检索/聚合；仅记录异常类名，不记录异常原文与 traceback，不含 token 明文。
 - 未预期异常仍由全局 handler 返回 `500 + request_id`，并在抛出点记录 `stage=credential_resolve` 与异常类名。
 - 服务端**不重试**（避免放大上游压力），有限次带间隔重试与告警由 grape-cli#69 负责。
 

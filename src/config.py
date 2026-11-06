@@ -34,12 +34,19 @@ user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
 
 
 class _RequestIdFilter(logging.Filter):
-    """把 ContextVar 中的 request_id / repo_key / user_id 注入到每条 LogRecord 中。"""
+    """把 ContextVar 中的 request_id / repo_key / user_id 注入到每条 LogRecord 中。
+
+    调用方已通过 extra={...} 显式传入同名字段时保留显式值（如凭据接口日志显式
+    传 repo_key），仅补齐缺失字段，避免 ContextVar 覆盖业务上下文。
+    """
 
     def filter(self, record):
-        record.request_id = request_id_var.get()
-        record.repo_key = repo_var.get()
-        record.user_id = user_var.get()
+        if not getattr(record, "request_id", None):
+            record.request_id = request_id_var.get()
+        if not getattr(record, "repo_key", None):
+            record.repo_key = repo_var.get()
+        if not getattr(record, "user_id", None):
+            record.user_id = user_var.get()
         return True
 
 
@@ -55,7 +62,11 @@ class _JsonFormatter(logging.Formatter):
     """
 
     # extra 字段白名单：只有这些 LogRecord 属性会被提升为顶层 JSON 字段
-    _EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "user_id", "repo_key")
+    _EXTRA_FIELDS = (
+        "method", "path", "status", "duration_ms", "user_id", "repo_key",
+        "event", "stage", "error_code", "provider", "auth_type",
+        "agent_type", "error_class",
+    )
 
     def format(self, record):
         import time as _t
