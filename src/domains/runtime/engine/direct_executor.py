@@ -230,7 +230,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。
         # 契约键缺失（物化异常降级）→ 显式告警后放行，不静默当作通过。
         try:
-            from src.runtime.skill_materialize import (SKILL_CONSISTENCY_KEY as _SCK,
+            from src.domains.runtime.engine.skill_materialize import (SKILL_CONSISTENCY_KEY as _SCK,
                                                         skill_mismatch_error as _sme)
         except Exception:  # noqa: BLE001 - 门禁依赖缺失不得中断执行链
             _SCK = "_skill_consistency"
@@ -317,7 +317,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         pass
     # Issue #887：技能来源标注（绑定值 vs 实际值）落入事件 agent_logs
     try:
-        from src.runtime.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
+        from src.domains.runtime.engine.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
         _sk_src = evt.get(_SCK2) or {}
         if _sk_src:
             from src.runtime.task_log_stream import build_skill_source_message as _bssm

@@ -412,7 +412,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     # 口径一致（物化后校验，残留缓存+绑定未物化才拒绝），不再在物化前另起一套 verify
     # （旧实现与物化时序/口径不一致，存在误拒）；拒绝消息经 skill_mismatch_error 单一实现。
     try:
-        from src.runtime.skill_materialize import (SKILL_CONSISTENCY_KEY,
+        from src.domains.runtime.engine.skill_materialize import (SKILL_CONSISTENCY_KEY,
                                                    skill_mismatch_error)
         from src.runtime.task_log_stream import build_skill_source_message
         _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}

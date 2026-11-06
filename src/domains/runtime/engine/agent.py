@@ -1920,7 +1920,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
     即可读到 `grape skills detail` 权威取回命令）+ log.warning 结构化留痕；
     物化成功路径不受影响。
     """
-    from src.runtime.skill_materialize import write_skill_fallback
+    from src.domains.runtime.engine.skill_materialize import write_skill_fallback
     try:
         # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
         _skill_notes = []
@@ -1951,7 +1951,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                     log.warning(f"[skill] checker resolve failed: {_e}")
                     _official = ""
             if _official and os.path.isfile(_official):
-                from src.runtime.skill_materialize import materialize_skill_dir_atomic
+                from src.domains.runtime.engine.skill_materialize import materialize_skill_dir_atomic
                 # 官方目录名即落盘技能名（checker 回退时为 _fb_name，同名回退为 _skill_name）
                 _dst_name = os.path.basename(os.path.dirname(_official)) or _skill_name
                 _ok, _r = materialize_skill_dir_atomic(
@@ -2011,7 +2011,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             # SKILL.md/references、失败回退官方技能包、仍失败降级标注（不静默空注入）。
             # 权限恢复见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
             # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
-            from src.runtime.skill_materialize import materialize_skill_zip_atomic
+            from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
             raw = _b64.b64decode(skill_zip_b64)
             _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
             # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
@@ -2059,7 +2059,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
             # Issue #564：原子写盘 + 完整性校验 + 官方包回退；仅物化成功才注入
             # DEVOPS_SKILLS_DIR（杜绝"有路径无内容"的空注入）。
-            from src.runtime.skill_materialize import materialize_skill_files_atomic
+            from src.domains.runtime.engine.skill_materialize import materialize_skill_files_atomic
             skill_files = json.loads(task.get("skill_files") or "{}")
             # Issue #463 P2 扩展（2026-10-27）：引用单写格式 {"<skill>": {"__obs_key__": ...}}
             # —— 内容不内联 DB，按对象键现拉原始 zip（含二进制，优于文本物化）。
@@ -2139,7 +2139,7 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
     校验自身异常不阻断执行（降级放行 + 告警，与物化链路容错口径一致）。
     """
     try:
-        from src.runtime.skill_materialize import (verify_skill_execution_consistency,
+        from src.domains.runtime.engine.skill_materialize import (verify_skill_execution_consistency,
                                                    skill_mismatch_error)
         from src.runtime.task_log_stream import build_skill_source_message
         # 双源互校：task["skill"]（绑定基准权威源）vs env GRAPE_BOUND_SKILL（下发镜像）
