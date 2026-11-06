@@ -1207,6 +1207,33 @@ def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
         return False
 
 
+def _parse_pending_since(value: str) -> float | None:
+    """pending_since → epoch 秒。
+
+    历史坑（#588 / #9495）：executor 曾用 gmtime() 写**无时区**的 "YYYY-MM-DDTHH:MM:SS"，
+    而 health.parse_dt 在 MySQL 后端把无时区值按 CST(+08:00) 解释，凭空多 8 小时 →
+    刚置 pending 就被判超时。这里单独解析：
+    - 带偏移/Z：直接按偏移；
+    - 含 "T" 但无偏移：本仓库写入语义是 UTC（executor gmtime）→ 按 UTC；
+    - 空格分隔的旧格式：沿用 parse_dt（MySQL=CST 历史口径 / SQLite=UTC）。
+    """
+    s = (value or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        from src.domains.runtime.engine.health import parse_dt
+        return parse_dt(s)
+    if dt.tzinfo is None:
+        if "T" in s:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            from src.domains.runtime.engine.health import parse_dt
+            return parse_dt(s)
+    return dt.timestamp()
+
+
 def _sweep_pending_self_report_timeouts() -> int:
     """pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed。
 
@@ -1244,7 +1271,7 @@ def _sweep_pending_self_report_timeouts() -> int:
             from src.domains.runtime.engine.health import parse_dt
             for _r in c.fetchall():
                 try:
-                    _ts = parse_dt(_r[3])
+                    _ts = _parse_pending_since(_r[3])
                 except Exception:
                     _ts = None
                 if _ts and float(_ts) <= _cutoff_ts:
