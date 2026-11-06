@@ -336,17 +336,25 @@ def _attach_event_payloads(group_map: dict) -> None:
         with db_lock:
             c = db.cursor()
             # SUBSTR 在 sqlite/MySQL 语义一致；多取 1 字符用于判断是否被截断
+            # payload 不截断：Issue #996 复审指出先 SUBSTR 再 json.loads 会在
+            # >32KB 时解析失败，导致 files/guard_impact 静默丢失；投影后仅保留
+            # files/guard_impact 两个视图，内存占用随行释放。
             c.execute(
                 f"SELECT seq, SUBSTR(structured_output, 1, {cap + 1}), "
-                f"SUBSTR(agent_logs, 1, {cap + 1}) FROM events WHERE seq IN ({placeholders})",
+                f"SUBSTR(agent_logs, 1, {cap + 1}), payload "
+                f"FROM events WHERE seq IN ({placeholders})",
                 seqs)
-            rows = {int(r[0]): (r[1], r[2]) for r in c.fetchall()}
+            rows = {int(r[0]): (r[1], r[2], r[3] if len(r) > 3 else None)
+                    for r in c.fetchall()}
     except Exception:
         return
     picked = set()
     for p in picks:
         picked.add(id(p))
-        raw_so, raw_logs = rows.get(int(p["seq"]), (None, None))
+        raw_so, raw_logs, raw_payload = rows.get(int(p["seq"]), (None, None, None))
+        if raw_payload:
+            from src.api.event_payload_view import payload_view_from_json
+            p.update(payload_view_from_json(raw_payload, seq=p["seq"]))
         if raw_so:
             if len(raw_so) > cap:
                 p["output_truncated"] = True
@@ -960,7 +968,8 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
             log.warning(f"admin-confirm: sync agent_tasks failed: {_e}")
         try:
             c.execute(
-                "UPDATE events SET status='completed' "
+                "UPDATE events SET status='completed', "
+                "completed_at=COALESCE(NULLIF(completed_at,''), datetime('now')) "
                 "WHERE repo_key=? AND issue_id=? AND status='running'",
                 (repo_key, _issue_id))
         except Exception as _e:
@@ -1296,7 +1305,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     nodes = (pipe_cfg or {}).get("nodes", [])
     events = []
     if issue_key:
-        events = get_events(repo_key, issue_id=issue_key, limit=30)
+        events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
     nodes, _ = compute_node_statuses(nodes, events, _current_stage)
@@ -2186,7 +2195,7 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
     return out
 
 
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`. Issue #995: cards whose `issue_number` no longer exists on VCS are hidden by default (provider-aware batch VCS index + TTL cache + ledger `vcs_exists` flag); pass `include_deleted=1` to audit them. Each non-PR card carries `vcs_exists` (bool), `is_vcs_deleted` (bool, = !vcs_exists) and `vcs_check` (ok/unavailable; unavailable means VCS verification failed and cards are fail-open/not hidden). `id` is the ledger card id, `issue_number` is the VCS issue number — they are NOT interchangeable.")
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
@@ -2198,6 +2207,7 @@ def list_repo_issues(owner: str, repo: str,
                      page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
                      per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
                      recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
+                     include_deleted: bool = Query(False, description="Issue #995：默认隐藏 VCS 侧已删除的台账卡片；设为 true（或 =1）可审计返回，并带 is_vcs_deleted=true / vcs_exists=false"),
                      user: dict = Depends(require_org_member)):
     """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
 
@@ -2237,9 +2247,31 @@ def list_repo_issues(owner: str, repo: str,
             repo_keys = _live
     except Exception:
         pass
+    # Issue #995：先按 provider 批量刷新 VCS 存在性并回写台账，SQL 过滤/COUNT 才能与
+    # 返回集合一致。VCS 无法核实（无 token/超时）的 repo_key 记 unavailable → fail-open，
+    # 不参与 vcs_exists 过滤（避免 VCS 抖动导致需求“消失”）。
+    _vcs_status: dict[str, dict] = {}
+    try:
+        from src.api.issue_vcs_index import refresh_vcs_existence
+        _vcs_status = refresh_vcs_existence(repo_keys) or {}
+    except Exception as _vcs_err:
+        log.warning(f"issues: refresh vcs existence failed: {_vcs_err}")
+        _vcs_status = {_k: {"status": "unavailable", "unresolved": frozenset()} for _k in repo_keys}
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
     params: list = list(repo_keys)
+    if not include_deleted:
+        _vcs_ok = [k for k in repo_keys
+                   if (_vcs_status.get(k) or {}).get("status") == "ok"]
+        _vcs_unknown = [k for k in repo_keys
+                        if (_vcs_status.get(k) or {}).get("status") != "ok"]
+        if _vcs_ok:
+            if _vcs_unknown:
+                _ph = ",".join("?" * len(_vcs_unknown))
+                clauses.append(f"(repo_key NOT IN ({_ph}) OR COALESCE(vcs_exists, 1) != 0)")
+                params.extend(_vcs_unknown)
+            else:
+                clauses.append("COALESCE(vcs_exists, 1) != 0")
     if status:
         clauses.append("status=?")
         params.append(status)
@@ -2398,6 +2430,28 @@ def list_repo_issues(owner: str, repo: str,
         issues.extend(_page_pr)
     else:
         issues.extend(pr_items)
+
+    # Issue #995：存在性标注——PR 伪卡片来自 PR 事件而非 issue 台账，不参与已删除过滤；
+    # 普通卡片按 repo_key 的校验结果给出 vcs_check，vcs_exists=false 即 VCS 侧已删除。
+    for _it in issues:
+        if _it.get("is_pr_event"):
+            _it["vcs_exists"] = True
+            _it["is_vcs_deleted"] = False
+            _it["vcs_check"] = "ok"
+            continue
+        _rk = _it.get("repo_key") or ""
+        _it["vcs_exists"] = bool(_it.get("vcs_exists", True))
+        _it["is_vcs_deleted"] = not _it["vcs_exists"]
+        _info = _vcs_status.get(_rk) or {}
+        _it["vcs_check"] = "unavailable"
+        if _info.get("status") == "ok":
+            _unresolved = _info.get("unresolved") or frozenset()
+            try:
+                _unknown = int(_it.get("issue_number")) in _unresolved
+            except (TypeError, ValueError):
+                _unknown = True
+            # 单卡复核 unknown（无法确认存在性）时同样标 unavailable，不冒充已完成校验。
+            _it["vcs_check"] = "unavailable" if _unknown else "ok"
 
     # Issue #542：分页模式返回服务端分页元数据；非分页模式 total 维持 len(issues)（兼容旧语义）
     if _total is not None:

@@ -2,7 +2,7 @@
   "view_hint": {
     "overview": "Health verdict, SLO, alerts, trends",
     "devices": "Engines & devices, resources, online state",
-    "inspect": "Tasks, events, error logs"
+    "inspect": "Tasks · Efficiency · Events · Error logs"
   },
   "title": "📊 Observability",
   "refresh": "🔄 Refresh",
@@ -243,7 +243,19 @@
     "tasks": "Tasks",
     "anomaly": "Anomalies",
     "errorlogs": "Error Logs",
-    "events": "Events"
+    "events": "Events",
+    "efficiency": "Efficiency"
+  },
+  "eff": {
+    "total_issues": "Issues opened",
+    "completed": "Completed",
+    "total_tokens": "Token usage",
+    "th_user": "Contributor",
+    "th_issues": "Opened",
+    "th_completed": "Completed",
+    "th_tokens": "Tokens",
+    "empty": "No collaboration records for this repo yet",
+    "load_failed": "Failed to load efficiency board: {{msg}}"
   },
   "loading": "Loading...",
   "loading_tasks": "Loading task list...",

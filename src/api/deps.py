@@ -141,7 +141,10 @@ def get_current_user_or_api_key(request: Request) -> dict:
     返回 dict 与 get_current_user 兼容（含 id/username/token），并附加认证类型与作用域字段，
     供内部接口按需读取（如 repo_key/agent_type 做仓库级鉴权）。
     """
-    from src.api.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX, verify_session_token, verify_api_token
+    from src.api.auth_token import (
+        SESSION_TOKEN_PREFIX, API_KEY_PREFIX, SESSION_TOKEN_RECOVERY_HINT,
+        verify_session_token, verify_api_token,
+    )
     token = _extract_api_token(request)
     if not token:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "NOT_LOGGED_IN", "message": "Not logged in"})
@@ -149,7 +152,9 @@ def get_current_user_or_api_key(request: Request) -> dict:
     if token.startswith(SESSION_TOKEN_PREFIX):
         info = verify_session_token(token)
         if not info:
-            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_TOKEN_INVALID", "message": "Invalid or expired session token"})
+            # Issue #990：message 透传给 grape CLI。Agent 持 snapshot 旧 token 时据此
+            # 从运行时进程环境重读 GRAPE_SESSION_TOKEN 后重试，不误判凭据失效。
+            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_TOKEN_INVALID", "message": SESSION_TOKEN_RECOVERY_HINT})
         return {
             "id": info["user_id"],
             "username": "",

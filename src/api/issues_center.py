@@ -2209,6 +2209,30 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "upstream_detail": f"member precheck: collaborator permission lookup returned 404 "
                                        f"for assignee '{assignee}' on {owner}/{rname}",
                 })
+        # Issue #1245: 建单前场景可用性预校验（查重 + assignee 预校验之后、GitCode 建单之前）。
+        # 静态只读校验，不通过返回 400 + problems[] + trace_id；此时尚未产生任何 VCS/DB 副作用。
+        # 显式场景直接校验；智能推荐（vod-auto）/留空时回落到仓库默认场景一并校验，
+        # 与后续写入 issue 的 scene_id 口径一致，避免默认/推荐路径产生死单。
+        _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
+        if not _scene_for_precheck:
+            try:
+                from src.user.db import get_repo_scene
+                _scene_for_precheck = get_repo_scene(repo_key) or ""
+            except Exception as _rs_err:
+                log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")
+                _scene_for_precheck = ""
+        if _scene_for_precheck:
+            from src.api.scene_precheck import precheck_scene, summarize_problems
+            _precheck = precheck_scene(_scene_for_precheck, repo_key, user)
+            if not _precheck.get("ok"):
+                _pc_problems = _precheck.get("problems") or []
+                _pc_summary = summarize_problems(_pc_problems)
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"所选场景当前不可执行，已阻止建单：{_pc_summary}",
+                    "problems": _pc_problems,
+                    "trace_id": _precheck.get("trace_id") or _trace_id,
+                })
         # 拼接 Task Center 上传的附件到 issue body（Issue #648：拼装逻辑抽为可复用函数）
         _desc_with_attach = (body.description or "").strip()
         _pending_attachments = _attach_list(owner, rname, "pending")
@@ -3050,7 +3074,9 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
         "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id, created_by"
         + (", user_id" if include_user_id else "")
+        + ", vcs_exists, vcs_checked_at"
     )
+    _vcs_idx = 15 + (1 if include_user_id else 0)
     _limit_sql = ""
     if limit is not None and int(limit) > 0:
         _limit_sql = f" LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -3139,6 +3165,9 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "is_running": _has_running_agent,
             "agent_statuses": _agent_status_map.get((_rk, _issue_id), []),
             "is_pr": (_rk, _issue_id) in _pr_issue_keys,
+            # Issue #995：VCS 存在性（默认 1=未知/存在；0=VCS 侧已删除）；未知列值按存在处理。
+            "vcs_exists": bool(r[_vcs_idx]) if r[_vcs_idx] is not None else True,
+            "vcs_checked_at": r[_vcs_idx + 1] or "",
         }
         if include_user_id:
             item["user_id"] = r[15] or 0

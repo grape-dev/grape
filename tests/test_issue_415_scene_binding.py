@@ -101,10 +101,14 @@ class TestCreateTaskSceneFallback:
         _calls = []
         real_set = None
         from src.api import session_store as _ss
+        # Issue #1245 起 create_task 会对场景做可用性预校验；本用例只验证场景绑定，
+        # 预校验在测试库无技能数据下会误报，这里打桩放行以免干扰绑定语义。
+        _pc_ok = {"ok": True, "problems": [], "warnings": [], "trace_id": "pc_test"}
         with patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 911}), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="fake_token"), \
              patch("src.api.issues_center._get_user_id_by_gitcode", return_value=1), \
+             patch("src.api.scene_precheck.precheck_scene", return_value=_pc_ok), \
              patch("src.api.event_pipeline.run_pipeline", return_value={"seq": 0, "ok": True}):
             def _fake_set_issue_scene(rk, iid, sid, scene_user_id=0):
                 _calls.append((rk, iid, sid, scene_user_id))

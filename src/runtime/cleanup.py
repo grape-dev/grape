@@ -7,6 +7,7 @@
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 import asyncio, os, shutil, time
+from dataclasses import dataclass
 from src import config
 from src.config import log, CHAT_CWD_BASE
 from src.session_manager import db, db_lock
@@ -20,6 +21,76 @@ _SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
 # running·dispatched 超长未收敛（worker 侧任务超时 RUNTIME_TASK_TIMEOUT=1h，6h 仍运行必为孤儿）
 _QUEUED_STALE_MINUTES = int(os.environ.get("SWEEPER_QUEUED_STALE_MINUTES", "180"))
 _DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
+
+
+@dataclass(frozen=True)
+class ArtifactScope:
+    """产物清理定位参数（Issue #996）：仓库/分支/Issue 与访问凭据。"""
+    repo_key: str
+    ref: str
+    issue_number: object
+    token: str = ""
+    provider: str = ""
+
+
+def precheck_issue_artifacts(scope: ArtifactScope, *,
+                             targets: list | None = None,
+                             scripts: dict | None = None) -> dict:
+    """只读预检：返回待删路径与守卫影响，不执行任何删除（命令/查询分离）。
+
+    返回 {"targets": 原始条目, "paths": 路径列表, "guard_impact": {...}|None}。
+    调用方据 guard_impact.breaking 决定是否删除；命中时由调用方自行写入
+    事件 payload，避免本函数隐式修改外部对象。
+    """
+    from src.vcs.guard_impact import assess_guard_impact, list_issue_artifacts
+
+    resolved = list(targets) if targets is not None else list_issue_artifacts(
+        scope.repo_key, scope.ref, scope.issue_number,
+        token=scope.token, provider=scope.provider)
+    if not resolved:
+        return {"targets": [], "paths": [], "guard_impact": None}
+
+    paths = [t.get("path") if isinstance(t, dict) else str(t) for t in resolved]
+    impact = assess_guard_impact(scope.repo_key, scope.ref, paths,
+                                 token=scope.token, provider=scope.provider,
+                                 scripts=scripts)
+    return {"targets": resolved, "paths": paths, "guard_impact": impact}
+
+
+def clean_issue_artifacts(scope: ArtifactScope, *,
+                          targets: list | None = None,
+                          scripts: dict | None = None,
+                          remover=None) -> dict:
+    """产物清理入口（Issue #996）：删除 docs/issue-N/* 前做守卫影响预检。
+
+    - 守卫脚本（scripts/check-*、tests/check-*）引用待删路径 → 跳过删除，
+      返回 guard_impact{scripts, breaking:true}；
+    - 无引用 → 调用 remover(targets) 删除，返回值不含 guard_impact 字段。
+
+    清理动作（remover）由调用方注入（本地 worktree 删除 / VCS 删除 API 均可），
+    本函数只负责守卫影响决策，保证保守侧：宁可保留产物，不让守卫由绿转红。
+    """
+    pre = precheck_issue_artifacts(scope, targets=targets, scripts=scripts)
+    paths = pre["paths"]
+    if not paths:
+        return {"deleted": [], "skipped": []}
+
+    impact = pre.get("guard_impact") or {}
+    if impact.get("breaking"):
+        log.warning(f"artifact cleanup skipped: guard scripts reference target paths "
+                    f"repo={scope.repo_key} ref={scope.ref} issue={scope.issue_number} "
+                    f"scripts={impact.get('scripts')}")
+        return {"deleted": [], "skipped": paths, "guard_impact": impact}
+    if remover is None:
+        log.warning(f"artifact cleanup skipped: no remover injected "
+                    f"repo={scope.repo_key} ref={scope.ref} issue={scope.issue_number}")
+        return {"deleted": [], "skipped": paths, "noop": True}
+    try:
+        remover(pre["targets"])
+    except Exception as e:
+        log.warning(f"artifact cleanup remover failed repo={scope.repo_key}: {e}")
+        return {"deleted": [], "skipped": paths, "error": str(e)[:200]}
+    return {"deleted": paths, "skipped": []}
 
 
 def _long_running_minutes() -> int:
@@ -561,6 +632,8 @@ def sweep_once() -> int:
             cleaned += purge_stale_instances(older_than_hours=24)
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
+        # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
+        cleaned += _sweep_branch_guard_state()
 
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
@@ -622,6 +695,21 @@ def sweep_once() -> int:
         return cleaned
     except Exception as e:
         log.warning(f"sweep_once failed: {e}")
+        return 0
+
+
+
+def _sweep_branch_guard_state() -> int:
+    """Issue #993 R9：按 updated_at TTL 清理 branch_guard_state（每分支一行、只增不减）。
+
+    MySQL 后端下不能放在 `_has_db_tables` 判定块里（sqlite_master 检测恒 False）。
+    有 pending 候选的行由 prune_guard_state 保留，避免漏一次漂移比对。
+    """
+    try:
+        from src.runtime.branch_guard import prune_guard_state
+        return prune_guard_state()
+    except Exception as e:
+        log.debug(f"sweeper branch-guard prune skipped: {e}")
         return 0
 
 
@@ -872,6 +960,8 @@ def sweep_events_once() -> int:
             cleaned += purge_stale_instances(older_than_hours=24)
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
+        # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
+        cleaned += _sweep_branch_guard_state()
 
         from src.runtime import repogit
         if _has_db_tables:

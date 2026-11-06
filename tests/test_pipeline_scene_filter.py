@@ -31,8 +31,23 @@ class TestPushdownSource:
         s = _src()
         assert "COALESCE(NULLIF(i.scene_id,''), e.scene_id) = ?" in s, \
             "场景过滤应下推到 SQL（issue.scene_id 权威 + 事件 scene_id 兜底）"
-        assert 'pipelines = [p for p in pipelines if str(p.get("scene_id") or "") == _scene_filter]' not in s, \
-            "不应保留「先建全量再过滤」的旧实现"
+        # 主路径不得「先建全量再过滤」；仅 fallback 分支允许按场景收口（见下一断言）
+        s_main = s.split("if not _pushdown_ok and _scene_filter:")[0]
+        assert 'pipelines = [p for p in pipelines if str(p.get("scene_id") or "") == _scene_filter]' not in s_main, \
+            "主路径不应保留「先建全量再过滤」的旧实现"
+
+    def test_fallback_rescopes_by_scene(self):
+        s = _src()
+        assert "if not _pushdown_ok and _scene_filter:" in s, \
+            "下推失败回落全仓时必须按场景收口，否则场景页显示所有流水线"
+        tail = s.split("if not _pushdown_ok and _scene_filter:")[1]
+        assert 'pipelines = [p for p in pipelines if str(p.get("scene_id") or "") == _scene_filter]' in tail.split("\n\n")[0], \
+            "fallback 分支应按 pipeline.scene_id 过滤"
+
+    def test_no_window_function(self):
+        s = _src()
+        assert "ROW_NUMBER()" not in s, \
+            "窗口函数是 MySQL 8.0 才有的，5.7 会 1064 → 整块下推失败退化成全仓"
 
     def test_build_only_window(self):
         s = _src()

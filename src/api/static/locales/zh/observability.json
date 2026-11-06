@@ -2,7 +2,7 @@
   "view_hint": {
     "overview": "健康结论 · SLO · 告警 · 趋势",
     "devices": "引擎与设备资源 · 在线状态",
-    "inspect": "任务 · 事件 · 错误日志"
+    "inspect": "任务 · 能效看板 · 事件 · 错误日志"
   },
   "title": "📊 可观测性",
   "refresh": "🔄 刷新",
@@ -243,7 +243,19 @@
     "tasks": "任务",
     "anomaly": "异常任务",
     "errorlogs": "错误日志",
-    "events": "事件"
+    "events": "事件",
+    "efficiency": "能效看板"
+  },
+  "eff": {
+    "total_issues": "提需求",
+    "completed": "已完成",
+    "total_tokens": "Token 消耗",
+    "th_user": "协作者",
+    "th_issues": "提需求",
+    "th_completed": "完成",
+    "th_tokens": "Token",
+    "empty": "当前仓库暂无协作记录",
+    "load_failed": "能效看板加载失败: {{msg}}"
   },
   "loading": "加载中...",
   "loading_tasks": "加载任务列表...",

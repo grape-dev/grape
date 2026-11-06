@@ -16,11 +16,13 @@ from src.session_manager import db, db_lock
 _holder = f"{socket.gethostname()}-{secrets.token_hex(4)}"
 
 
-def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
+def acquire_lock(lock_key: str, ttl: int = 60, holder: str | None = None) -> bool:
     """抢分布式锁，成功返回 True。
 
     ttl: 锁过期时间（秒），过期后可被其他实例抢占。
+    holder: 可选 holder 标识（如任务 ID）；缺省用进程级 ``_holder``。
     """
+    h = holder or _holder
     now = int(time.time())
     with db_lock:
         c = db.cursor()
@@ -29,7 +31,7 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
             c.execute(
                 "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, update_at, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (lock_key, _holder, now, now + ttl, now, now))
+                (lock_key, h, now, now + ttl, now, now))
             db.commit()
             return True  # INSERT 成功 = 拿到锁
         except Exception:
@@ -45,7 +47,7 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
                 c.execute(
                     "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, update_at, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (lock_key, _holder, now, now + ttl, now, now))
+                    (lock_key, h, now, now + ttl, now, now))
                 db.commit()
                 return True
             except Exception:
@@ -57,45 +59,46 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
                 "UPDATE distributed_locks SET holder=?, locked_at=?, "
                 "expires_at=?, update_at=? "
                 "WHERE lock_key=? AND expires_at < ?",
-                (_holder, now, now + ttl, now, lock_key, now))
+                (h, now, now + ttl, now, lock_key, now))
             db.commit()
             row2 = c.execute(
                 "SELECT holder FROM distributed_locks WHERE lock_key=?",
                 (lock_key,)).fetchone()
-            return row2 and row2[0] == _holder
+            return row2 and row2[0] == h
 
         # 4. 未过期 → 抢锁失败
         return False
 
 
-def release_lock(lock_key: str):
+def release_lock(lock_key: str, holder: str | None = None):
     """释放锁。只删自己的锁，不会误删别人的。"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "DELETE FROM distributed_locks WHERE lock_key=? AND holder=?",
-            (lock_key, _holder))
+            (lock_key, holder or _holder))
         db.commit()
 
 
-def renew_lock(lock_key: str, ttl: int = 60) -> bool:
+def renew_lock(lock_key: str, ttl: int = 60, holder: str | None = None) -> bool:
     """续期锁（只续自己的）。返回 True=续期成功，False=锁已被别人抢走。
 
     不依赖 cursor.rowcount（MySQL/pymysql 对 UPDATE 返回 rowcount=0 不可靠），
     改为 UPDATE + SELECT 验证 holder 是否还是自己。
     """
+    h = holder or _holder
     now = int(time.time())
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE distributed_locks SET expires_at=?, update_at=? "
             "WHERE lock_key=? AND holder=?",
-            (now + ttl, now, lock_key, _holder))
+            (now + ttl, now, lock_key, h))
         db.commit()
         row = c.execute(
             "SELECT holder FROM distributed_locks WHERE lock_key=?",
             (lock_key,)).fetchone()
-        return row and row[0] == _holder
+        return row and row[0] == h
 
 
 def cleanup_expired_locks():

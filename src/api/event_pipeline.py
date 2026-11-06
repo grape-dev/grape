@@ -149,7 +149,7 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
 
 
 # Issue #565: bot 建单智能推荐仓级滑动窗口限流（进程内实现，不进 DB）
-_BOT_OPEN_RECOMMEND_LIMIT = 5
+_BOT_OPEN_RECOMMEND_LIMIT = 30
 _BOT_OPEN_RECOMMEND_WINDOW_SECONDS = 60.0
 _BOT_OPEN_RECOMMEND_WINDOWS: dict = {}
 
@@ -214,6 +214,46 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
         except Exception as _e541:
             log.warning(f"_fail_scene_all_offline: failure reason lookup failed: {_e541}")
     _fail_event(seq, _reason)
+
+
+def _notify_scene_precheck_failure(repo_key: str, issue_id: str, problems: list,
+                                   trace_id: str = "") -> None:
+    """Issue #1245: webhook 侧场景预校验失败 → 在 Issue 评论原因（best-effort）。"""
+    num = _issue_num_from(issue_id)
+    if not num:
+        return
+    lines = ["场景可用性预校验未通过，已跳过流水线启动（Issue 已正常创建，无需重复建单）。", ""]
+    for p in (problems or [])[:8]:
+        node = p.get("node_tag") or "-"
+        code = p.get("reason_code") or ""
+        msg = p.get("message") or ""
+        suggestion = p.get("suggestion") or ""
+        lines.append(f"- 节点 `{node}`：{msg}（reason_code: {code}）")
+        if suggestion:
+            lines.append(f"  - 建议：{suggestion}")
+    if trace_id:
+        lines.append("")
+        lines.append(f"trace_id: {trace_id}")
+    lines.append("")
+    lines.append("修复场景配置或启动引擎后重新触发即可。")
+    body = "\n".join(lines)
+    try:
+        from src.repo_key import split_owner_repo
+        from src.token_service import get_repo_bot_token
+        owner, rname = split_owner_repo(repo_key)
+        token = get_repo_bot_token(repo_key) or ""
+        if not token:
+            log.warning(f"scene_precheck notify: no bot token for {repo_key}, skip comment")
+            return
+        if _is_github_repo(repo_key):
+            _github_post_issue_comment(owner, rname, str(num), body, token)
+        else:
+            _gitcode_post_issue_comment_ledgered(f"{owner}/{rname}", num, body, token,
+                                                 repo_key=repo_key)
+        log.info(f"scene_precheck notify: posted reason comment to {repo_key}#{num}")
+    except Exception as e:
+        log.warning(f"scene_precheck notify: comment failed for {repo_key}#{num}: {e}")
+
 
 def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
     """取指定场景 QA 节点的 skill：优先从订阅匹配列表取，查不到再读场景节点表。"""
@@ -1620,6 +1660,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         evt["account"] = _o_acc
     event_type = evt.get("type", "unknown")
 
+    # Issue #996：变更类事件补齐文件清单（payload 优先，provider API 兜底）
+    from src.vcs.event_types import FILE_EVENT_TYPES
+    if event_type in FILE_EVENT_TYPES:
+        try:
+            from src.vcs.files_enrich import enrich_event_files
+            enrich_event_files(evt, repo_key)
+        except Exception as _fe:
+            log.warning(f"Pipeline: files enrich failed type={event_type} repo={repo_key}: {_fe}")
+
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
 
     # Issue #89: 提前解析 issue_id 供 skipped 事件审计（所有提前 return 路径共用）
@@ -1868,7 +1917,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         except Exception as e:
             log.warning(f"Pipeline: outbound ledger issue_opened check failed (allow-through): {e}")
     # 2.0c Issue #565: bot 建单推荐仓级滑动窗口限流——放行后、路由判定前。
-    # 同 repo_key 60s 内最多 5 条 bot 建单进推荐（防 bot 批量建单打爆模型调用），
+    # 同 repo_key 60s 内最多 _BOT_OPEN_RECOMMEND_LIMIT 条 bot 建单进推荐（防 bot 批量建单打爆模型调用），
     # 超限记 event_skipped(bot_open_recommend_rate_limited) 并终止（进程内 dict，不进 DB）。
     # 「## 父任务」子任务开单是多任务流水线内部通道，不占推荐配额。
     if event_type == "issue_opened" and _is_bot_actor:
@@ -2731,6 +2780,45 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "backend": backend, "skill_name": skill_name,
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
+
+    # Issue #1245: webhook issue_opened 场景可用性预校验（不拒单，只不启动流水线）。
+    # 事件已落库 → 失败时置 failed（含 reason_code）+ 评论原因，与 _fail_scene_all_offline 同款终态路径。
+    # 身份口径：webhook 的建单人 = actor（issue 创建者），不是场景 owner（_issue_scene_uid）。
+    # 用 actor 解析其 grape uid 作为 user 档归属基准，避免建单人≠场景 owner 时误判。
+    if event_type == "issue_opened" and _issue_scene:
+        _pc_user = {"username": actor}
+        try:
+            from src.runtime.engine_select import _repo_user_id
+            _pc_uid = _repo_user_id(repo_key, issue_creator=actor)
+            if _pc_uid:
+                _pc_user["id"] = _pc_uid
+        except Exception as _uid_err:
+            log.warning(f"Pipeline: resolve precheck actor uid failed (Issue #1245): {_uid_err}")
+        try:
+            from src.api.scene_precheck import precheck_scene
+            _precheck = precheck_scene(_issue_scene, repo_key, _pc_user)
+        except Exception as _pc_err:
+            # fail-open：仅预校验本身异常放行；后续失败终态副作用不得被此 try 吞掉
+            log.warning(f"Pipeline: scene precheck failed, allow dispatch (Issue #1245): {_pc_err}")
+            _precheck = None
+        if _precheck and not _precheck.get("ok"):
+            from src.api.scene_precheck import problem_reason_codes, summarize_problems
+            _pc_problems = _precheck.get("problems") or []
+            _pc_codes = problem_reason_codes(_pc_problems)
+            _pc_summary = summarize_problems(_pc_problems)
+            _reason = (f"场景可用性预校验未通过（{','.join(_pc_codes) or 'unknown'}）："
+                       f"{_pc_summary}（scene={_issue_scene}, agent={agent_type}）")
+            log.warning(f"Pipeline: scene precheck blocked dispatch seq={seq}: {_reason}")
+            _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                                skill_path, skill_id, evt, issue_id, runtime_id or 0)
+            _fail_event(seq, _reason, diag={
+                "code": _pc_codes[0] if _pc_codes else "scene_precheck_failed",
+                "phase": "scene_precheck",
+                "scene_id": _issue_scene,
+            })
+            _notify_scene_precheck_failure(
+                repo_key, issue_id or "", _pc_problems, _precheck.get("trace_id") or "")
+            return result
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
@@ -3881,7 +3969,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
 
 def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
-                              repo_gitcode_token: str = ""):
+                              repo_gitcode_token: str = "", task_id: str = ""):
     """Issue #242: direct 模式 coding agent 完成后，向关联仓库提交 PR。
 
     与 worker 端 _submit_linked_repo_prs 等价：遍历 GRAPE_LINKED_WORKTREES，
@@ -3923,113 +4011,130 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
             _log.warning(f"direct linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
             continue
 
-        # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
-        from src.runtime.repogit import ensure_feature_branch
-        ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=_log)
-
-        try:
-            # 1. git identity（防 commit 被拒）
-            _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
-                    capture_output=True, text=True, timeout=10)
-            _sp.run(["git", "-C", _wt_dir, "config", "user.email",
-                     f"{_bot_name}@noreply.git.com"],
-                    capture_output=True, text=True, timeout=10)
-
-            # 2. stage 未提交改动
-            _sp.run(["git", "-C", _wt_dir, "add", "-A"],
-                    capture_output=True, text=True, timeout=60)
-            _r_diff = _sp.run(["git", "-C", _wt_dir, "diff", "--cached", "--quiet"],
-                              capture_output=True, text=True, timeout=30)
-            _has_staged = _r_diff.returncode != 0
-
-            # 3. 检查是否有领先于 base 分支的提交
-            _r_ahead = _sp.run(
-                ["git", "-C", _wt_dir, "rev-list", "--count",
-                 f"origin/{_base_branch}..HEAD"],
-                capture_output=True, text=True, timeout=15)
-            _ahead = 0
-            if _r_ahead.returncode == 0:
-                try:
-                    _ahead = int((_r_ahead.stdout or "0").strip() or "0")
-                except ValueError:
-                    _ahead = 0
-            else:
-                _ahead = 1  # origin/{base} 不存在 → 保守认为有改动
-
-            if not _has_staged and _ahead == 0:
-                _log.info(f"direct linked PR: no changes in {_rk}, skip")
-                _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
+        # Issue #993（M1）：分支级写租约须先于 ensure_feature_branch 获取（其可能写分支）。
+        # 与 worker 端共用 branch_lease 上下文，租约获取/释放生命周期不再各写一遍。
+        from src.runtime import branch_guard as _branch_guard
+        with _branch_guard.branch_lease(
+                _rk, _wt_branch, task_id=str(task_id or "")) as _lease:
+            if not _lease.get("ok"):
+                _log.warning(f"direct linked PR: branch lease blocked {_rk}:{_wt_branch}: "
+                             f"{_lease.get('message')}")
+                _results.append({"repo_key": _rk, "status": "blocked",
+                                 "reason": _lease.get("reason", "branch_locked"),
+                                 "message": _lease.get("message", "")})
                 continue
 
-            # Issue #752（M2）：commit 前冲突标记推送守卫（与 worker 端 _submit_linked_repo_prs
-            # 同口径）：暂存硬命中阻断提交/推送；软命中告警不阻断。
-            # 保真告警不在推送口（PR #874 审查修正）：agent 正常编码必然修改功能文件，
-            # 推送口告警全是噪声；保真校验保留在清理口（同函数尾部 cleanup 段）。
             try:
-                from src.runtime.worktree_guard import scan_staged_files
-                _g = scan_staged_files(_wt_dir)
-                if _g.get("hard"):
-                    _log.warning(f"direct linked PR: conflict markers in staged files, "
-                                 f"BLOCKED push {_rk}: {_g['hard']}")
-                    _results.append({"repo_key": _rk, "status": "blocked",
-                                     "reason": f"conflict markers in staged files: "
-                                               f"{list(_g['hard'].keys())[:5]}"})
+                # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
+                from src.runtime.repogit import ensure_feature_branch
+                ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=_log)
+
+                # 1. git identity（防 commit 被拒）
+                _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
+                        capture_output=True, text=True, timeout=10)
+                _sp.run(["git", "-C", _wt_dir, "config", "user.email",
+                         f"{_bot_name}@noreply.git.com"],
+                        capture_output=True, text=True, timeout=10)
+
+                # 2. stage 未提交改动
+                _sp.run(["git", "-C", _wt_dir, "add", "-A"],
+                        capture_output=True, text=True, timeout=60)
+                _r_diff = _sp.run(["git", "-C", _wt_dir, "diff", "--cached", "--quiet"],
+                                  capture_output=True, text=True, timeout=30)
+                _has_staged = _r_diff.returncode != 0
+
+                # 3. 检查是否有领先于 base 分支的提交
+                _r_ahead = _sp.run(
+                    ["git", "-C", _wt_dir, "rev-list", "--count",
+                     f"origin/{_base_branch}..HEAD"],
+                    capture_output=True, text=True, timeout=15)
+                _ahead = 0
+                if _r_ahead.returncode == 0:
+                    try:
+                        _ahead = int((_r_ahead.stdout or "0").strip() or "0")
+                    except ValueError:
+                        _ahead = 0
+                else:
+                    _ahead = 1  # origin/{base} 不存在 → 保守认为有改动
+
+                if not _has_staged and _ahead == 0:
+                    _log.info(f"direct linked PR: no changes in {_rk}, skip")
+                    _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
                     continue
-                if _g.get("soft"):
-                    _log.warning(f"direct linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
-            except Exception as _ge:
-                _log.warning(f"direct linked PR: worktree guard failed {_rk}: {_ge}")
 
-            # 4. commit staged changes
-            if _has_staged:
-                _msg = f"feat: #{_issue_num} linked repo changes"
-                _r_commit = _sp.run(["git", "-C", _wt_dir, "commit", "-m", _msg],
-                                    capture_output=True, text=True, timeout=60)
-                if _r_commit.returncode != 0:
-                    _log.warning(f"direct linked PR: commit failed {_rk}: {(_r_commit.stderr or '')[:200]}")
-                    _results.append({"repo_key": _rk, "status": "failed", "reason": "commit failed"})
+                # Issue #752（M2）：commit 前冲突标记推送守卫（与 worker 端 _submit_linked_repo_prs
+                # 同口径）：暂存硬命中阻断提交/推送；软命中告警不阻断。
+                # 保真告警不在推送口（PR #874 审查修正）：agent 正常编码必然修改功能文件，
+                # 推送口告警全是噪声；保真校验保留在清理口（同函数尾部 cleanup 段）。
+                try:
+                    from src.runtime.worktree_guard import scan_staged_files
+                    _g = scan_staged_files(_wt_dir)
+                    if _g.get("hard"):
+                        _log.warning(f"direct linked PR: conflict markers in staged files, "
+                                     f"BLOCKED push {_rk}: {_g['hard']}")
+                        _results.append({"repo_key": _rk, "status": "blocked",
+                                         "reason": f"conflict markers in staged files: "
+                                                   f"{list(_g['hard'].keys())[:5]}"})
+                        continue
+                    if _g.get("soft"):
+                        _log.warning(f"direct linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
+                except Exception as _ge:
+                    _log.warning(f"direct linked PR: worktree guard failed {_rk}: {_ge}")
+
+                # 4. commit staged changes
+                if _has_staged:
+                    _msg = f"feat: #{_issue_num} linked repo changes"
+                    _r_commit = _sp.run(["git", "-C", _wt_dir, "commit", "-m", _msg],
+                                        capture_output=True, text=True, timeout=60)
+                    if _r_commit.returncode != 0:
+                        _log.warning(f"direct linked PR: commit failed {_rk}: {(_r_commit.stderr or '')[:200]}")
+                        _results.append({"repo_key": _rk, "status": "failed", "reason": "commit failed"})
+                        continue
+
+                # 5. push（token 经 http.extraheader 注入）
+                # R20.26.3: 关联仓库独立获取 token
+                from src.repo import Repo
+                _linked_token = Repo(_rk).bot_token
+                if not _linked_token:
+                    _log.warning(f"direct linked PR: no token for {_rk}, skip push")
+                    _results.append({"repo_key": _rk, "status": "failed", "reason": "no token (expired or not configured)"})
+                    continue
+                # Issue #993（M2）：direct 自动推送路径统一走 branch_guard.guarded_push。
+                _push = _branch_guard.guarded_push(
+                    _rk, _wt_branch, _wt_dir, token=_linked_token,
+                    run_git=repogit._run_git)
+                if not _push.get("ok"):
+                    _log.warning(f"direct linked PR: push blocked/failed {_rk}:{_wt_branch}: "
+                                 f"{_push.get('message')}")
+                    _status = "blocked" if _push.get("stage") == "preflight" else "failed"
+                    _results.append({"repo_key": _rk, "status": _status,
+                                     "reason": _push.get("reason", "guard_blocked"),
+                                     "message": _push.get("message", "")})
                     continue
 
-            # 5. push（token 经 http.extraheader 注入）
-            # R20.26.3: 关联仓库独立获取 token
-            from src.repo import Repo
-            _linked_token = Repo(_rk).bot_token
-            if not _linked_token:
-                _log.warning(f"direct linked PR: no token for {_rk}, skip push")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": "no token (expired or not configured)"})
-                continue
-            _r_push = repogit._run_git(
-                ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_linked_token, timeout=120)
-            if _r_push is None or _r_push.returncode != 0:
-                _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
-                _log.warning(f"direct linked PR: push failed {_rk}: {_err}")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
-                continue
-
-            # 6. create PR
-            from src.vcs.api_client import create_pr_for_repo
-            _pr_title = f"feat: #{_issue_num} linked repo ({_rk})"
-            _pr_body = (f"跨仓库需求开发 PR（Issue #{_issue_num}）\n\n"
-                        f"由 coding agent 自动提交，关联主仓库 {repo_key}。\n\n"
-                        f"Closes #{_issue_num}")
-            _pr_result = create_pr_for_repo(
-                repo_key=_rk, token=_linked_token,
-                title=_pr_title, head=_wt_branch, base=_base_branch,
-                body=_pr_body)
-            if isinstance(_pr_result, dict) and "error" not in _pr_result:
-                _pr_num = _pr_result.get("number") or ""
-                _pr_url = _pr_result.get("html_url") or ""
-                _log.info(f"direct linked PR: created #{_pr_num} for {_rk}: {_pr_url}")
-                _results.append({"repo_key": _rk, "status": "created",
-                                 "pr_number": _pr_num, "pr_url": _pr_url})
-            else:
-                _err = _pr_result.get("error", "unknown") if isinstance(_pr_result, dict) else "unknown"
-                _log.warning(f"direct linked PR: create_pr failed {_rk}: {_err}")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": f"PR create: {_err}"})
-        except Exception as e:
-            _log.warning(f"direct linked PR: error for {_rk}: {e}")
-            _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
+                # 6. create PR
+                from src.vcs.api_client import create_pr_for_repo
+                _pr_title = f"feat: #{_issue_num} linked repo ({_rk})"
+                _pr_body = (f"跨仓库需求开发 PR（Issue #{_issue_num}）\n\n"
+                            f"由 coding agent 自动提交，关联主仓库 {repo_key}。\n\n"
+                            f"Closes #{_issue_num}")
+                _pr_result = create_pr_for_repo(
+                    repo_key=_rk, token=_linked_token,
+                    title=_pr_title, head=_wt_branch, base=_base_branch,
+                    body=_pr_body)
+                if isinstance(_pr_result, dict) and "error" not in _pr_result:
+                    _pr_num = _pr_result.get("number") or ""
+                    _pr_url = _pr_result.get("html_url") or ""
+                    _log.info(f"direct linked PR: created #{_pr_num} for {_rk}: {_pr_url}")
+                    _results.append({"repo_key": _rk, "status": "created",
+                                     "pr_number": _pr_num, "pr_url": _pr_url})
+                else:
+                    _err = _pr_result.get("error", "unknown") if isinstance(_pr_result, dict) else "unknown"
+                    _log.warning(f"direct linked PR: create_pr failed {_rk}: {_err}")
+                    _results.append({"repo_key": _rk, "status": "failed", "reason": f"PR create: {_err}"})
+            except Exception as e:
+                _log.warning(f"direct linked PR: error for {_rk}: {e}")
+                _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
 
     _created = [r for r in _results if r.get("status") == "created"]
     _skipped = [r for r in _results if r.get("status") == "skipped"]

@@ -4,6 +4,7 @@ from datetime import datetime
 from src.session_manager import db, db_lock
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.api.event_payload_view import payload_view_from_json
 
 # ====== Per-repo 锁（从旧 event_processor 迁移）======
 # 2026-08-16 事故修复：由 threading.Lock 改为 asyncio.Lock。
@@ -571,7 +572,17 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
                 if _need_fallback:
                     log.warning(f"Event {seq}: bare failed update, backfilled diagnostic result (#476)")
             else:
-                c.execute("UPDATE events SET status=? WHERE seq=?", (status, seq))
+                if status in _TERMINAL:
+                    # Issue #1105：completed/cancelled 终态同样强制落 completed_at
+                    #（终态⇔completed_at 非空不变量）；已有非空值不覆盖。
+                    _now = datetime.now(_tz.utc).isoformat()
+                    c.execute(
+                        "UPDATE events SET status=?, "
+                        "completed_at=CASE WHEN completed_at IS NULL OR completed_at='' "
+                        "THEN ? ELSE completed_at END WHERE seq=?",
+                        (status, _now, seq))
+                else:
+                    c.execute("UPDATE events SET status=? WHERE seq=?", (status, seq))
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event {seq}: {e}")
@@ -663,7 +674,12 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
       failed 事件」被迟到结果改判 completed。调用方必须是 service.revive_timeout_task，
       它已校验：任务态 timeout_failed、未复活过、在复活窗口内、errors 带兜底超时来源标记、
       结果含完整结构化产出。不传此参数时终态保护与 seq#2488 之后的行为完全一致。
+    Issue #1105：completed_at 为空时兜底赋当前时间（终态⇔completed_at 非空不变量）；
+    调用方显式传入非空值仍优先使用。
     """
+    if not completed_at:
+        from datetime import datetime, timezone as _tz
+        completed_at = datetime.now(_tz.utc).isoformat()
     with db_lock:
         try:
             c = db.cursor()
@@ -706,8 +722,13 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
 
 
 def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
-               status: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
-    """查询事件列表，支持按 agent/issue/status 过滤"""
+               status: str = "", limit: int = 50, offset: int = 0,
+               include_payload: bool = False) -> list[dict]:
+    """查询事件列表，支持按 agent/issue/status 过滤。
+
+    include_payload=True 时附带解析后的 payload（仅取 files/guard_impact 视图，
+    避免大 payload 全量返回；Issue #996 展示需求）。
+    """
     clauses = ["repo_key=?"]
     params = [repo_key]
 
@@ -725,19 +746,26 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
     with db_lock:
         c = db.cursor()
         try:
+            _payload_col = ", payload" if include_payload else ""
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at{_payload_col} FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
-            return [
-                {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
-                 "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
-                 "status": r[7], "created_at": normalize_event_time(r[8]),
-                 "runtime": r[9] or "", "skill": r[10] or "",
-                 "exit_code": r[11], "duration": r[12],
-                 "started_at": normalize_event_time(r[13] or ""), "completed_at": normalize_event_time(r[14] or "")}
-                for r in c.fetchall()
-            ]
+            out = []
+            for r in c.fetchall():
+                item = {
+                    "seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "",
+                    "title": r[4] or r[2], "actor": r[5] or "", "summary": r[6] or r[4] or r[2],
+                    "status": r[7], "created_at": normalize_event_time(r[8]),
+                    "runtime": r[9] or "", "skill": r[10] or "",
+                    "exit_code": r[11], "duration": r[12],
+                    "started_at": normalize_event_time(r[13] or ""),
+                    "completed_at": normalize_event_time(r[14] or ""),
+                }
+                if include_payload:
+                    item.update(payload_view_from_json(r[15], seq=r[0]))
+                out.append(item)
+            return out
         except Exception:
             return []
 

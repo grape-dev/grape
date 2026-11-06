@@ -100,6 +100,8 @@
   "scope_agent_solo": "Agent Only",
   "nav_forbidden": "No permission to access event #{{seq}}, it may belong to another repo",
   "engine_undispatched": "Undispatched / No execution engine",
+  "model": "Model",
+  "model_unknown": "Model unknown",
   "fail_reason": "Failure reason",
   "btn_a2a_redo": "🤝 A2A Redispatch",
   "status_pending": "⏳ Queued",

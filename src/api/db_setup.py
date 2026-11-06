@@ -354,6 +354,8 @@ CREATE TABLE IF NOT EXISTS issue (
     status           TEXT DEFAULT 'active',
     completed_reason TEXT DEFAULT '',
     created_by       TEXT DEFAULT '',
+    vcs_exists       INTEGER NOT NULL DEFAULT 1,
+    vcs_checked_at   TEXT DEFAULT NULL,
     created_at       TEXT DEFAULT (datetime('now')),
     completed_at     TEXT DEFAULT NULL
 )
@@ -839,8 +841,23 @@ CREATE TABLE IF NOT EXISTS distributed_locks (
     locked_at   BIGINT       NOT NULL DEFAULT 0, -- 获取锁时间戳（秒）
     expires_at  BIGINT       NOT NULL DEFAULT 0, -- 锁过期时间戳（秒），过期可被抢占
     update_at   BIGINT       NOT NULL DEFAULT 0, -- 最后更新时间戳（排查用）
-    created_at  BIGINT       NOT NULL DEFAULT 0, -- 锁记录首次创建时间（排查用）
+    created_at  BIGINT       NOT NULL DEFAULT 0, -- 锁记录首次创建时间戳（排查用）
     PRIMARY KEY (lock_key)
+)
+"""
+
+# Issue #993：分支守卫的期望远端 sha 状态（与 distributed_locks 同源 DB，跨 worker 可见）。
+_BRANCH_GUARD_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS branch_guard_state (
+    repo_key            VARCHAR(255) NOT NULL DEFAULT '',
+    head_branch         VARCHAR(255) NOT NULL DEFAULT '',
+    expected_remote_sha VARCHAR(64)  NOT NULL DEFAULT '',
+    pr_number           INTEGER      NOT NULL DEFAULT 0,
+    base_branch         VARCHAR(255) NOT NULL DEFAULT '',
+    updated_at          TEXT         NOT NULL DEFAULT '',
+    pending_expected_sha VARCHAR(64) NOT NULL DEFAULT '',
+    pending_prev_sha    VARCHAR(64)  NOT NULL DEFAULT '',
+    PRIMARY KEY (repo_key, head_branch)
 )
 """
 
@@ -2806,6 +2823,49 @@ register_migration(
 )
 
 
+def _fn_create_branch_guard_state() -> None:
+    """Issue #993：存量库补建分支守卫状态表（CREATE TABLE IF NOT EXISTS 幂等）。
+
+    与 distributed_locks 同源 DB，跨 worker 共享 expected_remote_sha；早期把它落在
+    本机 workspace 文件，跨 worker 调度时漂移检测会 fail-open。
+    """
+    with db_lock:
+        db.execute(_BRANCH_GUARD_STATE_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611060001",
+    name="create-branch-guard-state-table",
+    kind="safe",
+    fn=_fn_create_branch_guard_state,
+)
+
+
+def _fn_add_branch_guard_pending_columns() -> None:
+    """Issue #993 复审：pre-push 钩子候选 sha 字段（存量库幂等补列）。
+
+    钩子退出后才真正传输，无法在钩子内确认 push 成功；用 pending_expected_sha +
+    pending_prev_sha 记录候选与推送前远端，下一次守卫按远端实际值收敛，避免 push
+    失败后误报 remote_drift。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "branch_guard_state", "pending_expected_sha",
+                       "VARCHAR(64) NOT NULL DEFAULT ''")
+        _ensure_column(c, "branch_guard_state", "pending_prev_sha",
+                       "VARCHAR(64) NOT NULL DEFAULT ''")
+        db.commit()
+
+
+register_migration(
+    version="202611060002",
+    name="add-branch-guard-pending-columns",
+    kind="safe",
+    fn=_fn_add_branch_guard_pending_columns,
+)
+
+
 def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
     """部署验证实测发现（2026-11-02）：issue 级 finding（stalled_issue）task_id 恒为空串，
     原三列唯一键 UNIQUE(kind, task_id, event_seq) 使全部 issue 级发现共享同一键——
@@ -3164,6 +3224,64 @@ register_migration(
     name="perf_issue_status_priority_index",
     kind="safe",
     fn=_fn_add_issue_status_priority_index,
+)
+
+
+def _fn_backfill_events_terminal_completed_at(conn=None) -> None:
+    """Issue #1105：存量回填——终态（completed/failed/cancelled）且 completed_at
+    为空的 events 行，取 created_at 回填（created_at 为空则兜底当前时间），
+    恢复「终态 ⇔ completed_at 非空」不变量。
+
+    幂等：只更新 completed_at 为空的行，重跑无副作用。
+    分批回填（每批 500 条，按 seq 升序推进），避免大表单条 UPDATE 长事务/锁。
+    conn 可选：测试注入独立连接；缺省用全局 db（受 db_lock 保护）。
+    """
+    _TERMINALS = ("completed", "failed", "cancelled")
+    _BATCH = 500
+    _own = conn is None
+    if _own:
+        conn = db
+    try:
+        from src.session_manager import _is_mysql_backend
+    except Exception:
+        _is_mysql_backend = lambda: False  # noqa: E731
+    _mysql = _is_mysql_backend()
+    _ph = "%s" if _mysql else "?"
+    _now_fn = "NOW()" if _mysql else "datetime('now')"
+    with db_lock:
+        c = conn.cursor()
+        _placeholders = ",".join(_ph for _ in _TERMINALS)
+        while True:
+            try:
+                c.execute(
+                    f"SELECT seq FROM events WHERE status IN ({_placeholders}) "
+                    "AND (completed_at IS NULL OR completed_at='') "
+                    f"ORDER BY seq LIMIT {_BATCH}", _TERMINALS)
+                rows = c.fetchall()
+                if not rows:
+                    break
+                seqs = [r[0] for r in rows]
+                _in = ",".join(_ph for _ in seqs)
+                c.execute(
+                    f"UPDATE events SET completed_at="
+                    f"COALESCE(NULLIF(created_at,''), {_now_fn}) "
+                    f"WHERE seq IN ({_in}) "
+                    f"AND status IN ({_placeholders}) "
+                    "AND (completed_at IS NULL OR completed_at='')",
+                    (*seqs, *_TERMINALS))
+                conn.commit()
+                if len(seqs) < _BATCH:
+                    break
+            except Exception as e:
+                log.warning(f"backfill_events_terminal_completed_at failed: {e}")
+                break
+
+
+register_migration(
+    version="202611060001",
+    name="backfill_events_terminal_completed_at",
+    kind="safe",
+    fn=_fn_backfill_events_terminal_completed_at,
 )
 
 
@@ -3591,6 +3709,29 @@ def _run_all_migrations():
         _migrate_issue_created_by()
     except Exception as _e:
         log.warning(f"Issue #805 issue created_by migration failed: {_e}")
+    # ===== Issue #995: issue.vcs_exists/vcs_checked_at 列（VCS 存在性校验，幂等补列）=====
+    try:
+        _migrate_issue_vcs_exists()
+    except Exception as _e:
+        log.warning(f"Issue #995 issue vcs_exists migration failed: {_e}")
+
+
+def _migrate_issue_vcs_exists():
+    """Issue #995：issue 表幂等补 VCS 存在性列（存量回填由 issue_vcs_index 异步执行）。
+
+    - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
+    - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（幂等可重跑）；
+    - vcs_exists 默认 1（未知/存在），vcs_checked_at 空表示尚未校验。
+    """
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue", "vcs_exists", "INTEGER NOT NULL DEFAULT 1")
+            _ensure_column(c, "issue", "vcs_checked_at", "TEXT DEFAULT NULL")
+            db.commit()
+    except Exception as e:
+        log.warning(f"issue vcs_exists columns migration failed: {e}")
 
 
 def _migrate_issue_created_by():
