@@ -19,7 +19,12 @@ fastapi>=0.100
 uvicorn>=0.23
 python-multipart>=0.0.9
 aiohttp>=3.9
+requests>=2.31
 websockets>=12.0
+pymysql>=1.1
+DBUtils>=3.0
+lark-oapi>=1.0
+httpx>=0.27
 python-jose[cryptography]>=3.3
 bcrypt>=4.0
 prometheus_client>=0.20
@@ -28,5 +33,3 @@ croniter>=3.0
 
 # 以下为可选依赖（按需安装）：
 # OBS 对象存储：pip install esdk-obs-python crcmod
-# MySQL 数据库：pip install pymysql DBUtils
-# 飞书 Bot：pip install lark-oapi
