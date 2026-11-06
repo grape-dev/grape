@@ -756,10 +756,11 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     env = _collect_server_env(user_id, account)
     # Issue #990：会话 token 与 shell 环境快照同步——valid 时复用快照 token，
     # 失效/轮换时签发新 token 并回写 agent_tasks.env_extra，随后返回给 worker。
+    # Issue #990：只同步 GRAPE_SESSION_TOKEN，不覆盖任务快照中的其它显式 env
+    # （如 GRAPE_CLI_MODE），避免超出 Spec 范围改变 CLI 作用域语义。
     session_token = sync_task_session_token(task_id)
     if session_token:
         env["GRAPE_SESSION_TOKEN"] = session_token
-        env["GRAPE_CLI_MODE"] = "WORKER"
     return {"env": env}
 
 

@@ -1602,6 +1602,80 @@ def get_task(task_id) -> dict | None:
     return dict(zip(_cols, row)) if row else None
 
 
+class _TaskTokenLockSkipped(Exception):
+    """已存在未结束事务，无法取得 SQLite 写锁：本轮同步 fail-closed（不触碰调用方事务）。"""
+
+
+_SESSION_TOKEN_LOCK_TIMEOUT = 10  # 秒：同任务跨进程轮换锁等待上限
+
+
+def _session_token_lock_name(task_id: str) -> str:
+    """MySQL 命名锁名（≤64 字符）：按库名隔离，避免同一 MySQL 实例多环境互相排队。"""
+    dbname = "default"
+    try:
+        from src.mysql_compat import mysql_config
+        dbname = (mysql_config().get("database") or "default")
+    except Exception:
+        pass
+    # MySQL 锁名长度上限 64；task_id 通常 < 32，库名截断兜底。
+    return ("grape_sess_tk_%s_%s" % (task_id, dbname))[:64]
+
+
+def _acquire_task_token_lock(task_id: str):
+    """在池外专用连接上获取 MySQL 服务器级命名锁（跨进程串行化）。
+
+    为什么不用 ``SELECT ... FOR UPDATE``：``src/mysql_compat.py`` 对任何 SELECT
+    执行后立即 ``commit()``，行锁随即释放，多 worker 仍可并发轮换互相作废旧 token。
+    GET_LOCK 是连接级、服务器级互斥，且锁连接独立于业务连接，可稳定覆盖读+轮换+回写
+    整个临界区（对应 QA 建议的「分布式锁」方案）。
+
+    返回 (dedicated_conn, lock_name)；获取失败返回 (None, "")，调用方必须 fail-closed。
+    """
+    factory = getattr(db, "dedicated_connection", None)
+    if factory is None:
+        log.warning("sync_task_session_token: mysql backend without dedicated_connection; "
+                    "cannot serialize cross-process token rotation")
+        return None, ""
+    try:
+        dconn = factory()
+    except Exception as e:
+        log.warning(f"sync_task_session_token: dedicated lock conn failed: {e}")
+        return None, ""
+    lock_name = _session_token_lock_name(task_id)
+    try:
+        cur = dconn.cursor()
+        cur.execute("SELECT GET_LOCK(%s, %s)", (lock_name, _SESSION_TOKEN_LOCK_TIMEOUT))
+        row = cur.fetchone()
+        if not row or row[0] != 1:
+            log.warning(f"sync_task_session_token: mysql named lock not acquired ({lock_name}); "
+                        "fail closed without rotating")
+            dconn.close()
+            return None, ""
+        return dconn, lock_name
+    except Exception as e:
+        log.warning(f"sync_task_session_token: mysql named lock error ({lock_name}): {e}")
+        try:
+            dconn.close()
+        except Exception:
+            pass
+        return None, ""
+
+
+def _release_task_token_lock(dconn, lock_name: str):
+    """显式释放命名锁并关闭专用连接（连接断开也会兜底释放）。"""
+    try:
+        cur = dconn.cursor()
+        cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+        cur.fetchone()
+    except Exception as e:
+        log.warning(f"sync_task_session_token: release lock {lock_name} failed (close will release): {e}")
+    finally:
+        try:
+            dconn.close()
+        except Exception:
+            pass
+
+
 def sync_task_session_token(task_id: str) -> str:
     """同步任务的会话 token：保证 shell 环境快照与运行时注入值一致（Issue #990）。
 
@@ -1614,85 +1688,99 @@ def sync_task_session_token(task_id: str) -> str:
     - 失效或作用域不匹配 → 在同一事务内作废旧 token、签发新 token 并回写
       `agent_tasks.env_extra`，使快照与运行时注入值保持一致。
 
-    跨进程原子性：SQLite 用 ``BEGIN IMMEDIATE`` 先取写锁，MySQL 用 ``SELECT ... FOR UPDATE``
-    锁任务行（服务端以多 worker 运行，线程级 ``db_lock`` 不足以覆盖跨进程竞争）。过期、
-    签发、快照回写共享同一事务；任一步失败即回滚并返回空串，绝不返回未落库的新 token。
+    跨进程原子性：SQLite 用 ``BEGIN IMMEDIATE`` 取库级写锁；MySQL 用池外专用连接上的
+    ``GET_LOCK`` 命名锁串行化（服务端多 worker 运行，线程级 ``db_lock`` 不足以覆盖跨进程
+    竞争；兼容层的 ``FOR UPDATE`` 会被 SELECT 后自动 commit 提前放锁，故不可用）。锁不可
+    获取时 fail-closed 返回空串。过期、签发、快照回写共享同一事务；任一步失败即回滚并
+    返回空串，绝不返回未落库的新 token。
 
-    返回同步后的 token；任务不存在、无仓库/agent 上下文或持久化失败时返回空串。
+    返回同步后的 token；任务不存在、无仓库/agent 上下文、取锁失败或持久化失败时返回空串。
     """
     if not task_id:
         return ""
     from src.api.auth_token import verify_session_token, rotate_session_token
     from src.session_manager import _is_mysql_backend
     is_mysql = _is_mysql_backend()
-    with db_lock:
-        c = db.cursor()
-        try:
-            # 先串行化同任务的并发同步：SQLite 取库级写锁，MySQL 锁任务行。
-            if is_mysql:
-                row = c.execute(
-                    "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=? FOR UPDATE",
-                    (task_id,),
-                ).fetchone()
-            else:
-                try:
-                    c.execute("BEGIN IMMEDIATE")
-                except Exception as e:
-                    # 已有事务时沿用当前事务；否则无法建立写锁 → 放弃本轮同步，避免无锁写。
-                    if "within a transaction" not in str(e).lower():
-                        raise
-                row = c.execute(
-                    "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
-                    (task_id,),
-                ).fetchone()
-            if not row:
-                db.commit()
-                return ""
-            repo_key, agent_type = (row[0] or ""), (row[1] or "")
-            try:
-                user_id = int(row[2] or 0)
-            except (TypeError, ValueError):
-                user_id = 0
-            try:
-                env = json.loads(row[3] or "{}")
-            except Exception:
-                env = {}
-            if not isinstance(env, dict):
-                env = {}
-            if not repo_key or not agent_type:
-                db.commit()
-                return ""
-
-            snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
-            info = verify_session_token(snapshot_token) if snapshot_token else None
-            token_ok = bool(
-                info
-                and info.get("session_key") == task_id
-                and info.get("repo_key") == repo_key
-                and info.get("agent_type") == agent_type
-            )
-            if token_ok:
-                db.commit()
-                return snapshot_token
-
-            new_token = rotate_session_token(
-                session_key=task_id, repo_key=repo_key,
-                agent_type=agent_type, user_id=user_id, commit=False)
-            env["GRAPE_SESSION_TOKEN"] = new_token
-            env.setdefault("GRAPE_CLI_MODE", "WORKER")
-            c.execute(
-                "UPDATE agent_tasks SET env_extra=? WHERE id=?",
-                (json.dumps(env, ensure_ascii=False), task_id),
-            )
-            db.commit()
-            return new_token
-        except Exception as e:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            log.warning(f"sync_task_session_token: sync failed for {task_id}: {e}")
+    lock_conn, lock_name = (None, "")
+    if is_mysql:
+        lock_conn, lock_name = _acquire_task_token_lock(task_id)
+        if lock_conn is None:
             return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            try:
+                if is_mysql:
+                    # 已持有服务器级命名锁 → 临界区内普通 SELECT 即可（无需 FOR UPDATE）。
+                    row = c.execute(
+                        "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
+                        (task_id,),
+                    ).fetchone()
+                else:
+                    try:
+                        c.execute("BEGIN IMMEDIATE")
+                    except Exception as e:
+                        if "within a transaction" in str(e).lower():
+                            # 已有未结束事务：无法取得写锁，fail-closed；不回滚调用方事务。
+                            raise _TaskTokenLockSkipped(str(e))
+                        raise
+                    row = c.execute(
+                        "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
+                        (task_id,),
+                    ).fetchone()
+                if not row:
+                    db.commit()
+                    return ""
+                repo_key, agent_type = (row[0] or ""), (row[1] or "")
+                try:
+                    user_id = int(row[2] or 0)
+                except (TypeError, ValueError):
+                    user_id = 0
+                try:
+                    env = json.loads(row[3] or "{}")
+                except Exception:
+                    env = {}
+                if not isinstance(env, dict):
+                    env = {}
+                if not repo_key or not agent_type:
+                    db.commit()
+                    return ""
+
+                snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
+                info = verify_session_token(snapshot_token) if snapshot_token else None
+                token_ok = bool(
+                    info
+                    and info.get("session_key") == task_id
+                    and info.get("repo_key") == repo_key
+                    and info.get("agent_type") == agent_type
+                )
+                if token_ok:
+                    db.commit()
+                    return snapshot_token
+
+                new_token = rotate_session_token(
+                    session_key=task_id, repo_key=repo_key,
+                    agent_type=agent_type, user_id=user_id, commit=False)
+                env["GRAPE_SESSION_TOKEN"] = new_token
+                c.execute(
+                    "UPDATE agent_tasks SET env_extra=? WHERE id=?",
+                    (json.dumps(env, ensure_ascii=False), task_id),
+                )
+                db.commit()
+                return new_token
+            except _TaskTokenLockSkipped as e:
+                log.warning(f"sync_task_session_token: sqlite write lock unavailable for {task_id}: {e}")
+                return ""
+            except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                log.warning(f"sync_task_session_token: sync failed for {task_id}: {e}")
+                return ""
+    finally:
+        if lock_conn is not None:
+            _release_task_token_lock(lock_conn, lock_name)
 
 
 def session_token_for_execution(task_id: str, *, session_key_fallback: str,
