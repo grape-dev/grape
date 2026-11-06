@@ -21,21 +21,201 @@ function _fmtEventTime(utcStr) {
   return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
-let _tasksAll = [];           // 全部任务缓存
+let _tasksAll = [];           // 已加载任务缓存（Issue #926：分屏增量追加，非全量）
 let _taskSel = null;          // 选中的任务
-let _taskQuery = '';          // 搜索关键字
-let _taskPage = 1;            // 当前页码
+let _taskQuery = '';          // 搜索关键字（Issue #926：随请求发服务端 q=）
+let _taskPage = 1;            // 当前页码（Issue #926：服务端分页页码，滚动递增）
 let _taskView = 'board';       // 'list' | 'board'
-const _TASKS_PER_PAGE = 15;   // 每页任务数
+const _TASKS_PER_PAGE = 30;   // Issue #926：每屏条数（服务端 per_page，原前端切片 15 改服务端分页）
+let _tasksHasMore = false;    // Issue #926：服务端 has_more（false 时停止无限滚动）
+let _tasksLoading = false;    // Issue #926：分页请求进行中（防重复触发）
+let _taskReqSeq = 0;         // Issue #926：请求序号——重置类请求使旧在途响应失效（防闸门吞请求/错序渲染）
+let _tasksTotal = 0;          // Issue #926：服务端 total（含 PR 伪卡片）
+let _taskObs = null;          // Issue #926：IntersectionObserver 实例
+let _taskObsReentryUntil = 0; // Issue #1077：observer 重入窗口（ms 时间戳），防止 append 后 sentinel 在视口内立即误触发
 let _taskPollTimer = null;    // 场景识别轮询定时器
 let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #42）
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
-let _taskFilterStatuses = []; // 按状态多选筛选（空=全部）
+let _taskFilterStatuses = []; // 按状态多选筛选（空=全部；Issue #926：映射 statuses= 发服务端）
 let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部；Issue #805: 值域改为 creator，请求携 creators=）
 let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
 let _taskFilterPopoverOpen = false;  // 筛选 popover 展开状态（跨 _render 保持）
+
+// ===== Issue #1077-F：仓库全部 · 看板按列独立分页 =====
+// 每列一个游标，首屏 30 条；列内触底只加载该列下一页（不再靠整页 sentinel）。
+// 约束：服务端只能按 issue.status 过滤，而看板列是 status+stage 的派生映射，
+// 因此「待处理」与「进行中」共享同一游标（statuses=active,processing），
+// 行最终落到哪一列仍由 _mapStatusL 决定（同一行不会重复渲染）。
+const _BOARD_COLS = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
+const _BOARD_CURSOR_OF_COL = {
+  pending: 'active_flow', in_progress: 'active_flow',
+  awaiting_input: 'awaiting_input', pending_review: 'pending_review',
+  done: 'done', cancelled: 'cancelled'
+};
+const _BOARD_CURSOR_STATUSES = {
+  active_flow: 'active,processing',
+  awaiting_input: 'awaiting_input',
+  pending_review: 'pending_review',
+  done: 'completed',
+  cancelled: 'cancelled'
+};
+let _colCursor = {};        // cursor -> {page, hasMore, loading, total, seq}
+
+function _boardPagingActive() {
+  return _tasksViewMode === 'repo_all' && _taskView === 'board' && !!app.currentRepo();
+}
+
+function _resetBoardCursors() {
+  _colCursor = {};
+  Object.keys(_BOARD_CURSOR_STATUSES).forEach(function (k) {
+    _colCursor[k] = { page: 1, hasMore: true, loading: false, total: null, seq: 0 };
+  });
+  _tasksAll = [];
+  _taskSel = null;
+  _tasksHasMore = false;
+  _tasksTotal = 0;
+  _taskPage = 1;
+  window._tasksById = {};
+}
+
+function _boardColsOfCursor(key) {
+  return _BOARD_COLS.filter(function (c) { return _BOARD_CURSOR_OF_COL[c] === key; });
+}
+
+function _mergeBoardItems(items) {
+  var byId = {};
+  _tasksAll.forEach(function (t) { byId[t.id] = t; });
+  items.forEach(function (t) {
+    if (byId[t.id]) Object.assign(byId[t.id], t);
+    else { _tasksAll.push(t); byId[t.id] = t; }
+  });
+  if (_taskSel) {
+    var upd = _tasksAll.find(function (t) { return t.id === _taskSel.id; });
+    _taskSel = upd || null;
+  }
+  window._tasksById = {};
+  _tasksAll.forEach(function (t) { window._tasksById[t.id] = t; });
+}
+
+// 取某游标的一页（merge=true 只刷新第 1 屏用于轮询对账）
+function _boardFetch(key, opts) {
+  var repo = app.currentRepo();
+  var cur = _colCursor[key];
+  if (!repo || !cur) return Promise.resolve();
+  var _merge = !!(opts && opts.merge);
+  if (cur.loading) return Promise.resolve();
+  if (!_merge && !cur.hasMore) return Promise.resolve();
+  cur.loading = true;
+  var seq = ++cur.seq;
+  var page = _merge ? 1 : cur.page;
+  var url = '/issues/' + repo.owner + '/' + repo.name +
+            '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+            '&per_page=' + _TASKS_PER_PAGE + '&page=' + page +
+            '&statuses=' + encodeURIComponent(_BOARD_CURSOR_STATUSES[key]);
+  if (_taskQuery) url += '&q=' + encodeURIComponent(_taskQuery);
+  if (_taskFilterAssignees.length) url += '&creators=' + encodeURIComponent(_taskFilterAssignees.join(','));
+  return API.get(url).then(function (d) {
+    if (seq !== cur.seq) return;          // 被更新的同列请求取代
+    cur.loading = false;
+    var items = d.issues || d.tasks || [];
+    if (!_merge) cur.page = page + 1;
+    cur.hasMore = !!d.has_more;
+    cur.total = (d.total === null || d.total === undefined) ? null : d.total;
+    _mergeBoardItems(items);
+    _renderBoardCols();
+  }).catch(function (e) {
+    if (seq !== cur.seq) return;
+    cur.loading = false;
+    if (e && e.silent) return;            // 外部取消（切页）静默
+    _boardColsOfCursor(key).forEach(function (c) {
+      var foot = document.getElementById('colFoot-' + c);
+      if (foot) foot.innerHTML = I18N.t('tasks.load_failed', { msg: (e && e.message) || '' });
+    });
+  });
+}
+
+function _boardLoadAll(opts) {
+  return Promise.all(Object.keys(_BOARD_CURSOR_STATUSES).map(function (k) { return _boardFetch(k, opts); }));
+}
+
+// 只重绘「卡片容器」与列头计数/列底提示，保留每列 scrollTop（避免触底加载后列内回顶）
+function _renderBoardCols() {
+  if (!_boardPagingActive()) { _render(); return; }
+  var filtered = _filteredTasks();
+  var missing = false;
+  _BOARD_COLS.forEach(function (c) {
+    var el = document.getElementById('colList-' + c);
+    if (!el) { missing = true; return; }
+    var list = filtered.filter(function (t) { return _mapStatusL(t) === c; });
+    var top = el.scrollTop;
+    el.innerHTML = _boardColListHtml(c, list);
+    el.scrollTop = top;
+    var cnt = document.getElementById('colCount-' + c);
+    if (cnt) cnt.textContent = _boardColCountText(c, list.length);
+    var foot = document.getElementById('colFoot-' + c);
+    if (foot) foot.innerHTML = _boardColFootHtml(c, list.length);
+  });
+  if (missing) { _render(); return; }      // 容器缺失（首次渲染前）→ 回退整页渲染
+  _bindBoardScroll();
+}
+
+// 列内滚动靠近底部 → 只加载该列所属游标的下一页
+function _bindBoardScroll() {
+  if (!_boardPagingActive()) return;
+  _BOARD_COLS.forEach(function (c) {
+    var el = document.getElementById('colList-' + c);
+    if (!el) return;
+    if (el.dataset && el.dataset.colBound === '1') return;   // 只绑一次
+    if (el.dataset) el.dataset.colBound = '1';
+    el.addEventListener('scroll', function () {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
+        _boardFetch(_BOARD_CURSOR_OF_COL[c]);
+      }
+    });
+  });
+}
+
+// 列头计数：单列游标给出「已加载/服务端总数」；共享游标（待处理+进行中）只给已加载数，
+// 因为一份 total 覆盖两列，直接展示会误导。
+function _boardColCountText(colKey, loadedN) {
+  if (!_boardPagingActive()) return String(loadedN);
+  var key = _BOARD_CURSOR_OF_COL[colKey];
+  var cur = _colCursor[key];
+  var shared = _boardColsOfCursor(key).length > 1;
+  if (shared || !cur || cur.total === null || cur.total === undefined) return String(loadedN);
+  return loadedN + '/' + cur.total;
+}
+
+function _boardColFootHtml(colKey, loadedN) {
+  if (!_boardPagingActive()) return '';
+  var cur = _colCursor[_BOARD_CURSOR_OF_COL[colKey]];
+  if (!cur) return '';
+  if (cur.loading) {
+    return '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">' +
+           (I18N.t('tasks.loading') || '加载中') + '…</div>';
+  }
+  if (cur.hasMore) {
+    return '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">↓ ' +
+           (I18N.t('tasks.load_more', {}, '滚动加载更多')) + '</div>';
+  }
+  return loadedN > 0
+    ? '<div style="padding:10px;text-align:center;font-size:11px;color:var(--t3,#86868b)">— ' +
+      (I18N.t('tasks.tab.all') || '全部') + ' ' + loadedN + ' —</div>'
+    : '';
+}
 let _filterStatusExpanded = false;   // 状态筛选区展开状态
 let _filterCreatorExpanded = false;  // 创建人筛选区展开状态
+
+// Issue #926：前端状态键 → 后端 issue.status 多值映射（statuses= 参数）。
+// in_progress 同时下发 active+processing：服务端粗筛后由 _filteredTasks 按 stage 精筛（保持旧口径）
+const _TASK_STATUS_TO_API = {
+  pending: ['active'],
+  in_progress: ['active', 'processing'],
+  awaiting_input: ['awaiting_input'],
+  pending_review: ['pending_review'],
+  done: ['completed'],
+  cancelled: ['cancelled']
+};
 
 function _tasksSortPrefKey(repoKey) {
   return 'task_sort_' + (repoKey || 'all');
@@ -57,30 +237,36 @@ function toggleTasksSort() {
   _tasksSortOrder = (_tasksSortOrder === 'desc') ? 'asc' : 'desc';
   const repo = app.currentRepo();
   _saveTasksSortPref(repo ? repo.fullName : '');
-  _taskPage = 1;
-  loadTasks();
+  _resetTaskListAndLoad();
 }
 function toggleTasksMode() {
   // 已统一为 time 模式，保留函数兼容旧调用
   _tasksMode = 'time';
   const repo = app.currentRepo();
   _saveTasksSortPref(repo ? repo.fullName : '');
+  _resetTaskListAndLoad();
+}
+// Issue #926：状态/搜索/排序/换仓变化 → 重置回第 1 屏重新拉取（选中项 _taskSel 保留）
+function _resetTaskListAndLoad() {
   _taskPage = 1;
+  _tasksAll = [];
+  _tasksTotal = 0;   // Issue #926：切换瞬间清 total，避免显示旧口径计数
+  _tasksHasMore = false;
+  if (_boardPagingActive()) { _taskSel = null; _tasksReload(); return; }  // Issue #1077-F：按列分页时清空各列重拉
   loadTasks();
 }
 function _toggleFilterStatus(s) {
   const i = _taskFilterStatuses.indexOf(s);
   if (i >= 0) _taskFilterStatuses.splice(i, 1);
   else _taskFilterStatuses.push(s);
-  _taskPage = 1;
-  _render();
+  // Issue #926：状态筛选映射 statuses= 走服务端过滤 → 重置回第 1 屏重拉
+  _resetTaskListAndLoad();
 }
 function _toggleFilterAssignee(a) {
   const i = _taskFilterAssignees.indexOf(a);
   if (i >= 0) _taskFilterAssignees.splice(i, 1);
   else _taskFilterAssignees.push(a);
-  _taskPage = 1;
-  loadTasks();
+  _resetTaskListAndLoad();
 }
 function toggleCreatedByMe() {
   const me = (window.app && app._user && app._user.username) || '';
@@ -131,8 +317,27 @@ function renderTasks(param) {
     window._deeplinkIssueNumber = null;
   }
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
-  loadTasks();
+  _taskPage = 1;      // Issue #926：进入页面重置到第 1 屏
+  _tasksHasMore = false;
+  _tasksReload();
   _startScenePoll();
+}
+
+// Issue #1077-F：统一重载入口——「仓库全部 + 看板」按列分页，其余保持原逻辑
+function _tasksReload(resetAll) {
+  if (_boardPagingActive()) {
+    _resetBoardCursors();
+    _render();          // 先画空列（容器就位），再由各列请求填充
+    _boardLoadAll();
+    return;
+  }
+  if (resetAll) {        // 板↔列表切换：全局分页链路必须从头拉
+    _taskPage = 1;
+    _tasksAll = [];
+    _tasksHasMore = false;
+    _tasksTotal = 0;
+  }
+  loadTasks();
 }
 
 window._switchTasksViewMode = function(mode) {
@@ -142,7 +347,26 @@ window._switchTasksViewMode = function(mode) {
   _taskPage = 1;
   _taskFilterStatuses = [];
   _taskFilterAssignees = [];
-  loadTasks();
+  if (mode === 'mine') {           // 我的需求：全量一次拉（不分页）
+    _resetBoardCursors();
+    loadTasks();
+    return;
+  }
+  _tasksReload();                  // 仓库全部：看板按列分页 / 列表全局分页
+};
+
+// Issue #1077-F：板/列表视图切换——仓库全部下两条分页链路不同，必须各自重置
+window._switchTaskView = function(k) {
+  if (_taskView === k) {
+    var _p0 = document.getElementById('taskViewPopover');
+    if (_p0) _p0.style.display = 'none';
+    return;
+  }
+  _taskView = k;
+  var p = document.getElementById('taskViewPopover');
+  if (p) p.style.display = 'none';
+  if (_tasksViewMode === 'repo_all') { _tasksReload(true); }
+  else { _render(); }
 };
 
 // 场景识别轮询：有待处理任务且场景未识别时，定期刷新
@@ -157,7 +381,9 @@ function _startScenePoll() {
              (t.status === 'processing');
     });
     if (needRefresh) {
-      loadTasks();
+      // Issue #1077-F：仓库全部·看板按列分页时，按列刷新第 1 屏对账
+      if (_boardPagingActive()) _boardLoadAll({ merge: true });
+      else loadTasks({merge: true});  // Issue #926：轮询按 id 合并更新（不整表替换，不丢已滚动加载的分页）
     } else {
       // 所有任务场景已识别（或无待处理任务）→ 停止轮询
       clearInterval(_taskPollTimer);
@@ -246,18 +472,41 @@ window._saveDeployUrl = function() {
   }).catch(e => { app.showToast(I18N.t('issues.save_failed', {msg: (e.detail?.message || e.message)})); });
 };
 
-function loadTasks() {
+// Issue #926：分屏逐步加载——首屏 per_page=30，滚动触底按屏递增（append 模式按 id 去重合并）
+// opts.append=true：追加下一屏（滚动触发）；缺省：重置为第 1 屏或轮询合并刷新
+function loadTasks(opts) {
   const el = document.getElementById('pageContent');
   if (!el) return;
+  // Issue #926（2026-11-04 修复）：不再用 _tasksLoading 拦截「重置」请求——它会让
+  // 重复点击/重进本页的第二发请求被静默吞掉，而第一发已被 nav() 的 _navAbortController
+  // 取消（AbortError 静默），页面就永久停在「加载中」。重置类请求一律放行，靠
+  // _taskReqSeq 让最新一发胜出；只有滚动追加（append）需要去重。
   const repo = app.currentRepo();
   const repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
   _loadTasksSortPref(repoKey);
-  // 方案 B：拉取全部任务，前端按 tab/搜索过滤（双栏联动需要全量数据）
-  // 「仓库全部」视图统一走 /issues/{owner}/{repo}（归一，见 issues-list-merge-design.md）
+  const _append = !!(opts && opts.append);
+  const _merge = !!(opts && opts.merge);
+  // Issue #926：滚动追加并发去重；重置/轮询类请求不再被 _tasksLoading 闸门静默吞掉——
+  // 通过 _taskReqSeq 使旧在途响应作废，先发者被后发重置请求取代（切筛选必然重拉第 1 屏）
+  if (_append && _tasksLoading) return;
+  const _seq = ++_taskReqSeq;
+  // Issue #926：merge（轮询刷新）固定取第 1 屏做增量对账；append（滚动）取当前页码
+  const _reqPage = _merge ? 1 : _taskPage;
+  // 「仓库全部」视图：服务端分页 + q/statuses 过滤（Issue #926）
+  // 「我的需求」视图：个人维度条数有限，保持全量拉取（无 per_page）
   let apiUrl;
-  if (_tasksViewMode === 'repo_all' && repo) {
+  const _usePaging = (_tasksViewMode === 'repo_all' && repo);
+  if (_usePaging) {
+    const _apiStatuses = [...new Set(
+      _taskFilterStatuses.reduce(function(acc, k) {
+        return acc.concat(_TASK_STATUS_TO_API[k] || []);
+      }, [])
+    )].join(',');
     apiUrl = '/issues/' + repo.owner + '/' + repo.name +
-             '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode;
+             '?sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
+             '&per_page=' + _TASKS_PER_PAGE + '&page=' + _reqPage;
+    if (_taskQuery) apiUrl += '&q=' + encodeURIComponent(_taskQuery);
+    if (_apiStatuses) apiUrl += '&statuses=' + encodeURIComponent(_apiStatuses);
     if (_taskFilterAssignees.length) {
       apiUrl += '&creators=' + encodeURIComponent(_taskFilterAssignees.join(','));  // Issue #805: 按创建人过滤
     }
@@ -266,10 +515,48 @@ function loadTasks() {
              '&sort_order=' + _tasksSortOrder + '&mode=' + _tasksMode +
              (_taskFilterAssignees.length ? '&creators=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');  // Issue #805: 按创建人过滤
   }
+  _tasksLoading = true;
   API.get(apiUrl).then(d => {
-    if (window._currentView !== 'tasks') return;  // stale guard
-    _tasksAll = d.issues || d.tasks || [];
-    // Issue #175: 刷新 _taskSel 指向新对象（旧引用的 status 等字段已过时）
+    if (_seq !== _taskReqSeq) return;  // 已被更新的请求取代：旗标归最新请求所有，不由本发清除
+    if (window._currentView !== 'tasks') { _tasksLoading = false; return; }  // stale guard
+    _tasksLoading = false;
+    const _items = d.issues || d.tasks || [];
+    if (_usePaging && (d.page !== undefined)) {
+      // Issue #926：轮询 merge 只取第 1 屏——已滚动超过第 1 屏（_taskPage>2）时
+      // total 仍以服务端为准，但 has_more/已删除项清除只能按本地已加载量对账，
+      // 避免第 1 屏口径覆盖深滚动状态（误停滚动/误删未加载行）
+      // Issue #926 性能补丁：q 模式服务端不返精确 total（null，避免 LIKE 全表 COUNT），
+      // 深滚动时以服务端 has_more 为准；无 q 时仍是精确 total。
+      _tasksTotal = (d.total === null || d.total === undefined) ? null : d.total;
+      var _beyondFirst = (_taskPage > 2);
+      _tasksHasMore = _beyondFirst
+        ? (_tasksTotal === null ? !!d.has_more : (_tasksAll.length < _tasksTotal))
+        : !!d.has_more;
+    } else {
+      _tasksTotal = _items.length;
+      _tasksHasMore = false;
+    }
+    // Issue #926：成功后才推进页码（_taskPage = 下一屏页码）；失败不推进 → 重试不跳屏
+    if (_usePaging && !_merge) _taskPage = _reqPage + 1;
+    if (_append || (opts && opts.merge)) {
+      // Issue #926：按 id 去重合并——已有项原地更新字段（轮询刷新不整表重排），新项尾部追加；
+      // 仍在第 1 屏（未滚动）时同步清除已删除项（第 1 屏对账口径）
+      if (opts && opts.merge && _taskPage <= 2) {
+        var _liveIds = {};
+        _items.forEach(t => { _liveIds[t.id] = true; });
+        _tasksAll = _tasksAll.filter(t => _liveIds[t.id]);
+      }
+      const _byId = {};
+      _tasksAll.forEach(t => { _byId[t.id] = t; });
+      var _newItems = [];  // Issue #1077：记录本屏新增项，供 append 局部追加渲染
+      _items.forEach(t => {
+        if (_byId[t.id]) { Object.assign(_byId[t.id], t); }
+        else { _tasksAll.push(t); _byId[t.id] = t; _newItems.push(t); }
+      });
+    } else {
+      _tasksAll = _items;
+    }
+    // Issue #175: 刷新 _taskSel 指向新对象（旧引用的 status 等字段已过时）；重置加载时保留选中
     if (_taskSel) {
       var updated = _tasksAll.find(t => t.id === _taskSel.id);
       _taskSel = updated || null;
@@ -278,7 +565,13 @@ function loadTasks() {
     // Issue #175: 有待打开详情时不先渲染列表，避免列表闪现后立刻被详情覆盖
     var _openedDetail = false;  // 跟踪本次 loadTasks 是否打开了详情页
     if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
-      _render();
+      // Issue #1077：append（滚动追加）/merge（轮询刷新）只做列表局部更新，
+      // 不整页 _render()（消除顶部/搜索/筛选/详情闪动与滚动位置重置）
+      if ((_append || (opts && opts.merge)) && _tasksAll.length > 0) {
+        _partialRenderTasks(_append ? _newItems : null);
+      } else {
+        _render();
+      }
     } else {
       // 跳过 _render() 时仍需更新 _tasksById 供 _openBoardDetail 使用
       window._tasksById = {};
@@ -294,12 +587,19 @@ function loadTasks() {
         window._deeplinkIssueNumber = null;  // 深链命中，详情已打开，无需容错提示
         _openBoardDetail(_match.id);
         _openedDetail = true;
+      } else if (repo) {
+        // Issue #926：列表分页后深链不再依赖全量——未命中已加载页时走详情接口直达
+        _openDeeplinkDetailViaApi(repo, _pinNum);
+        _openedDetail = true;
       } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
-        var _seq = window._taskDetailFromScene.latestSeq;
+        // 注意：变量名必须与外层请求序号 _seq 区分——本箭头函数内 var 会提升到
+        // 整个响应回调作用域，用 _seq 会遮蔽 loadTasks 里的 const _seq，
+        // 使上面的「请求序号比对」永远判定为过期而丢弃响应（需求中心永久卡加载中）。
+        var _sceneSeq = window._taskDetailFromScene.latestSeq;
         window._taskDetailFromScene = null;
         window._deeplinkIssueNumber = null;
         _render();  // 无匹配任务，渲染列表
-        app.nav('event', _seq);
+        app.nav('event', _sceneSeq);
       } else {
         window._taskDetailFromScene = null;
         _render();  // 无匹配任务，渲染列表
@@ -328,11 +628,53 @@ function loadTasks() {
       window._currentDetailTask = null;
     }
   }).catch(e => {
+    if (_seq !== _taskReqSeq) return;  // 已被更新的请求取代，静默丢弃（旗标归最新请求所有）
+    _tasksLoading = false;
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
     window._pendingTaskDetailId = null;  // Issue #175: 清理待打开详情（loadTasks 失败时不残留）
     window._deeplinkIssueNumber = null;  // Issue #341: 深链标志同步清理
     el.innerHTML = '<div class="error">' + I18N.t('tasks.load_failed', {msg: e.message}) + '</div>';
+  });
+}
+
+// Issue #926：深链/待打开编号不在已加载分页内 → 按详情接口构造任务对象直达详情页
+function _openDeeplinkDetailViaApi(repo, issueNum) {
+  var _dn = window._deeplinkIssueNumber;
+  window._deeplinkIssueNumber = null;
+  API.get('/issues/' + repo.owner + '/' + repo.name + '/' + issueNum).then(function(d) {
+    var t = {
+      id: d.issue_id,
+      issue_number: d.number,
+      number: d.number,
+      title: d.title || '',
+      status: d.task_status || 'active',
+      task_status: d.task_status || '',
+      stage: d.stage || '',
+      owner_agent: d.owner_agent || 'vod',
+      scene_id: d.scene_id || '',
+      assignee: d.assignee || '',
+      creator: d.creator || '',
+      is_subtask_mode: d.is_subtask_mode || 0,
+      parent_issue_id: d.parent_issue_id || '',
+      repo_key: (repo.repoKey || repo.fullName || ''),
+      created_at: '',
+      events_count: d.events_count || 0,
+      is_running: false
+    };
+    if (t.id == null) {
+      // 详情无内部卡片行（纯 VCS 兜底）→ 无法进详情交互，回退列表 + 提示
+      _render();
+      if (_dn && app && app.showToast) app.showToast(I18N.t('tasks.deeplink_not_found', {n: _dn}));
+      return;
+    }
+    if (!window._tasksById) window._tasksById = {};
+    window._tasksById[t.id] = t;
+    window._pendingTaskDetailId = null;
+    _openBoardDetail(t.id);
+  }).catch(function() {
+    _render();
+    if (_dn && app && app.showToast) app.showToast(I18N.t('tasks.deeplink_not_found', {n: _dn}));
   });
 }
 
@@ -396,6 +738,8 @@ window._openBoardDetail = function(taskId) {
     return;
   }
   // 先渲染基本详情，然后异步加载流水线
+  // Issue #926：进入新详情重置时间线展开量（默认最近 20 条）
+  window._pipeEventsShown = 20;
   // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
   var _backAction = 'loadTasks()';
@@ -636,6 +980,7 @@ window._jumpToPipePage = function() {
 function _renderPipelineSection(data) {
   const el = document.getElementById('_boardPipelineSection');
   if (!el) return;
+  window._lastPipeData = data;  // Issue #926：供「加载更多」本地重渲染（不重复请求）
   // HTML 转义（与文件内其他渲染函数的局部 esc 定义保持一致；Issue #539 审查修复：
   // 此前 SRE 结论块引用了本作用域不存在的 esc，pending_review + SRE 结论场景抛
   // ReferenceError 导致流水线卡片整体不渲染）
@@ -733,12 +1078,19 @@ function _renderPipelineSection(data) {
     });
     html += '</div>';
   }
-  // 事件历史（同一卡片内）
+  // 事件历史（同一卡片内）——Issue #926：默认最近 20 条，「加载更多」按批展开
   if (events.length > 0) {
-    html += `<div style="${_cardTitle};margin-top:4px">${I18N.t('tasks.event_history')||'事件历史'}</div>`;
+    if (!window._pipeEventsShown || window._pipeEventsShown > events.length) window._pipeEventsShown = 20;
+    const _shown = Math.min(window._pipeEventsShown, events.length);
+    const shownEvents = events.slice(events.length - _shown);
+    html += `<div style="${_cardTitle};margin-top:4px">${I18N.t('tasks.event_history')||'事件历史'}` +
+      (events.length > _shown ? ` <span style="font-weight:400;font-size:10px;color:var(--t3,#86868b)">(${_shown}/${events.length})</span>` : '') + `</div>`;
     html += '<div style="display:flex;flex-direction:column;gap:0">';
-    events.forEach(function(e, i) {
-      var isLast = i === events.length - 1;
+    if (events.length > _shown) {
+      html += `<div style="text-align:center;padding:4px 0 10px"><button class="tsk-btn tsk-btn-ghost" style="padding:3px 12px;border-radius:8px;font-size:11px" onclick="window._pipeEventsShown=(window._pipeEventsShown||20)+20;_loadMorePipeEvents()">▲ ${I18N.t('tasks.load_more', {}, '加载更多')}</button></div>`;
+    }
+    shownEvents.forEach(function(e, i) {
+      var isLast = i === shownEvents.length - 1;
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
       // Issue #329: cross-scene handoff events get special annotation
@@ -771,100 +1123,251 @@ function _renderPipelineSection(data) {
   el.innerHTML = html;
 }
 
-function _renderBoard(filtered) {
-  // 看板列按 task.status 严格分组
-  const statusCols = ['pending', 'in_progress', 'awaiting_input', 'pending_review', 'done', 'cancelled'];
-  const statusLabels = {
-    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g,'') : '待处理',
-    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g,'') : '进行中',
-    awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
-    pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消'
-  };
-  const statusColors = {
-    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
-    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
-  };
-  const stageLabels = {
-    vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
-    sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g,'') : '已完成',
-    '': '—'
-  };
-  const stageColors = {
-    vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
-    sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
-  };
-  // task.status → 看板列映射（Issue #85: 增加 task.status=pending_review 支持）
-  function _mapStatus(t) {
-    if (t.status === 'cancelled') return 'cancelled';
-    if (t.status === 'completed' || t.stage === 'done') return 'done';
-    if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
-    if (t.status === 'awaiting_input') return 'awaiting_input';
-    const _activeStages = ['vod','issue','coding','qa','sre'];
-    if (_activeStages.includes(t.stage)) return 'in_progress';
-    if (t.status === 'processing') return 'in_progress';
-    return 'pending';
-  }
-  const grouped = {};
-  statusCols.forEach(s => grouped[s] = []);
-  filtered.forEach(t => { grouped[_mapStatus(t)].push(t); });
+// Issue #926：「加载更多」事件时间线——用缓存数据本地展开（0 请求）
+window._loadMorePipeEvents = function() {
+  if (window._lastPipeData) _renderPipelineSection(window._lastPipeData);
+};
 
-  // 苹果风格看板：响应式列宽，水平滚动，列独立垂直滚动
-  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px;flex-shrink:0">';
-  statusCols.forEach(s => {
-    const list = grouped[s];
-    const col = statusColors[s];
-    const dim = (s === 'cancelled') ? ';opacity:.65' : '';
-    html += `<div style="min-width:240px;max-width:300px;flex:1 1 240px;flex-shrink:0;display:flex;flex-direction:column;background:transparent;border-radius:14px;border:0.5px solid var(--b,#e8e8ed);height:100%;overflow:hidden${dim}">`;
-    // 列头：颜色圆点 + 名称 + 计数
-    html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
-      <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
-      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[s]}</span>
-      <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${list.length}</span>
-    </div>`;
-    // 卡片容器：独立垂直滚动
-    html += `<div style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
-    if (list.length === 0) {
-      html += `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc')||'无需求'}</div>`;
-    } else {
-      list.forEach(t => {
-        const _ms = _mapStatus(t);
-        const _stage = t.stage || '';
-        const _stageLabel = stageLabels[_stage] || _stage || '—';
-        const _stageColor = stageColors[_stage] || '#86868b';
-        const _isRunning = s === 'in_progress' && t.is_running && ['vod','issue','coding','qa','sre'].includes(_stage);
-        // PR 事件：右上角显示紫色 PR 药丸代替 stage 标签
-        const _isPR = !!t.is_pr_event;
-        const _tagHtml = _isPR
-          ? `<span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>`
-          : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? `;animation:radarPulse 1.2s ease-in-out infinite` : ''}">${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}${_stageLabel}</span>`;
-        const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
-        const _cardCls = _isRunning ? ' tsk-card-radar' : '';
-        const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
-        html += `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
-        if (_isRunning) {
-          html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
-        }
-        html += `<div style="position:relative;z-index:1">
+function _boardStageMeta() {
+  return {
+    labels: {
+      vod: 'VOD', issue: 'ISSUE', coding: 'Coding', qa: 'QA',
+      sre: 'SRE', pending_review: I18N.t('tasks.status.tag_pending_review') || '待审核',
+      done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g, '') : '已完成',
+      '': '—'
+    },
+    colors: {
+      vod: '#ec4899', issue: '#ef4444', coding: '#3b82f6', qa: '#a855f7',
+      sre: '#f59e0b', pending_review: '#10b981', done: '#34c759', '': '#86868b'
+    }
+  };
+}
+
+// 单张看板卡片（Issue #1077-F：从 _renderBoard 抽出，供整页渲染与按列局部渲染共用）
+function _boardCardHtml(t, colKey, meta) {
+  const _stage = t.stage || '';
+  const _stageLabel = meta.labels[_stage] || _stage || '—';
+  const _stageColor = meta.colors[_stage] || '#86868b';
+  const _isRunning = colKey === 'in_progress' && t.is_running && ['vod', 'issue', 'coding', 'qa', 'sre'].includes(_stage);
+  const _isPR = !!t.is_pr_event;
+  const _tagHtml = _isPR
+    ? `<span style="font-size:10px;font-weight:500;padding:2px 8px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>`
+    : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${_stageColor};font-weight:600;background:${_stageColor}15;border-radius:4px;padding:2px 6px${_isRunning ? ';animation:radarPulse 1.2s ease-in-out infinite' : ''}">${_isRunning ? `<span style="width:5px;height:5px;border-radius:50%;background:${_stageColor};animation:radarPulse 1.2s ease-in-out infinite"></span>` : ''}${_stageLabel}</span>`;
+  const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
+  const _cardCls = _isRunning ? ' tsk-card-radar' : '';
+  const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
+  let html = `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
+  if (_isRunning) {
+    html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
+  }
+  html += `<div style="position:relative;z-index:1">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
-            <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#'+t.issue_number : ''}</span>
+            <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#' + t.issue_number : ''}</span>
             ${_tagHtml}
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
-            <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
+            <span style="margin-left:auto;white-space:nowrap">${(t.created_at || '').substring(5, 10)}</span>
           </div>
         </div>`;
-        html += `</div>`;
-      });
-    }
-    html += `</div></div>`;
-  });
+  html += `</div>`;
+  return html;
+}
+
+// 某列的卡片容器内容（含空态）
+function _boardColListHtml(colKey, list) {
+  if (list.length === 0) {
+    return `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc') || '无需求'}</div>`;
+  }
+  const meta = _boardStageMeta();
+  return list.map(function (t) { return _boardCardHtml(t, colKey, meta); }).join('');
+}
+
+// 单列整体（列头 + 卡片容器 id=colList-<col> + 列底提示 id=colFoot-<col>）
+function _boardColHtml(colKey, list) {
+  const statusColors = {
+    pending: '#86868b', in_progress: '#3b82f6', awaiting_input: '#f59e0b',
+    pending_review: '#10b981', done: '#34c759', cancelled: '#86868b'
+  };
+  const statusLabels = {
+    pending: I18N.t('tasks.status.tag_pending') ? I18N.t('tasks.status.tag_pending').replace(/<[^>]*>/g, '') : '待处理',
+    in_progress: I18N.t('tasks.status.tag_processing') ? I18N.t('tasks.status.tag_processing').replace(/<[^>]*>/g, '') : '进行中',
+    awaiting_input: I18N.t('tasks.status.tag_awaiting_input') || '待澄清',
+    pending_review: I18N.t('tasks.status.tag_pending_review') || '待审核',
+    done: I18N.t('tasks.status.tag_completed') ? I18N.t('tasks.status.tag_completed').replace(/<[^>]*>/g, '') : '已完成',
+    cancelled: I18N.t('tasks.status.tag_cancelled') || '已取消'
+  };
+  const col = statusColors[colKey];
+  const dim = (colKey === 'cancelled') ? ';opacity:.65' : '';
+  let html = `<div style="min-width:240px;max-width:300px;flex:1 1 240px;flex-shrink:0;display:flex;flex-direction:column;background:transparent;border-radius:14px;border:0.5px solid var(--b,#e8e8ed);height:100%;overflow:hidden${dim}">`;
+  html += `<div style="display:flex;align-items:center;gap:8px;padding:12px 14px 10px;flex-shrink:0">
+      <span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col}40"></span>
+      <span style="font-weight:600;font-size:13px;color:var(--t1,#1d1d1f);letter-spacing:-.2px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif">${statusLabels[colKey]}</span>
+      <span id="colCount-${colKey}" style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${_boardColCountText(colKey, list.length)}</span>
+    </div>`;
+  html += `<div id="colList-${colKey}" style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
+  html += _boardColListHtml(colKey, list);
+  html += `</div>`;
+  html += `<div id="colFoot-${colKey}" style="flex-shrink:0">${_boardColFootHtml(colKey, list.length)}</div>`;
+  html += `</div>`;
+  return html;
+}
+
+function _renderBoard(filtered) {
+  const grouped = {};
+  _BOARD_COLS.forEach(function (s) { grouped[s] = []; });
+  filtered.forEach(function (t) { grouped[_mapStatusL(t)].push(t); });
+  let html = '<div style="display:flex;gap:10px;height:100%;overflow-x:auto;padding-bottom:4px;flex-shrink:0">';
+  _BOARD_COLS.forEach(function (s) { html += _boardColHtml(s, grouped[s]); });
   html += '</div>';
   return html;
+}
+
+// ---- Issue #1077：列表渲染助手（_render 与局部更新共用，保证两路径产出一致） ----
+
+// 列表模式状态信息
+function _lStatusInfoMap() {
+  return {
+    pending: {ic:'#', cls:'tsk-tag-p', rIc:'tsk-ic-p', text:I18N.t('tasks.status.tag_pending')||'<b></b>待处理'},
+    in_progress: {ic:'⏳', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_processing')||'<b></b>处理中'},
+    awaiting_input: {ic:'?', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
+    pending_review: {ic:'◉', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_pending_review')||'待审核'},
+    done: {ic:'✓', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_completed')||'<b></b>已完成'},
+    cancelled: {ic:'✕', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_cancelled')||'已取消'},
+  };
+}
+
+// 单行渲染（列表模式）
+function _taskRowHtml(t) {
+  const _lStatusInfo = _lStatusInfoMap();
+  const ms = _mapStatusL(t);
+  const si = _lStatusInfo[ms] || _lStatusInfo.pending;
+  const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
+  const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';  // PR 伪卡片「触发者」保持 assignee 语义（Issue #805 不改）
+  const _creatorHtml = t.creator ? ` · 👤 ${t.creator}` : '';    // Issue #805: Issue 卡片展示创建人（creator）
+  // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
+  if (t.is_pr_event) {
+    return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
+      <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
+      <div class="tsk-r-main">
+        <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+      </div>
+      <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
+    </div>`;
+  }
+  return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
+    <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
+    <div class="tsk-r-main">
+      <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
+      <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
+    </div>
+    <span class="tsk-tag ${si.cls}">${si.text}</span>
+  </div>`;
+}
+
+// 列表主体（行/状态分区/空态），不含 pager
+function _taskListBodyHtml(rows) {
+  let html = '';
+  if (_tasksMode === 'time') {
+    html = rows.map(_taskRowHtml).join('');
+  } else {
+    // 按新状态分区
+    const pageByStatus = {};
+    rows.forEach(t => { const ms = _mapStatusL(t); (pageByStatus[ms] = pageByStatus[ms] || []).push(t); });
+    const _secLabels = {
+      pending: I18N.t('tasks.section.pending')||'待处理',
+      in_progress: I18N.t('tasks.section.processing')||'进行中',
+      awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
+      pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
+      done: I18N.t('tasks.section.completed')||'已完成',
+      cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消',
+    };
+    ['pending','in_progress','awaiting_input','pending_review','done','cancelled'].forEach(ms => {
+      if (pageByStatus[ms] && pageByStatus[ms].length > 0) {
+        html += `<div class="tsk-list-sec">${_secLabels[ms]} <span class="tsk-sec-n">${pageByStatus[ms].length}</span></div>` +
+          pageByStatus[ms].map(_taskRowHtml).join('');
+      }
+    });
+  }
+  return html;
+}
+
+// Issue #1077：确保 _grapeSpin keyframes 已注入（与 _withTaskLoading 的 spinner 同源）
+function _ensureGrapeSpinCss() {
+  if (!document.getElementById('_grapeSpinCSS')) {
+    var style = document.createElement('style');
+    style.id = '_grapeSpinCSS';
+    style.textContent = '@keyframes _grapeSpin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(style);
+  }
+}
+
+// 滚动加载 sentinel（列表/看板统一）：spinner 加载态
+function _taskSentinelHtml() {
+  _ensureGrapeSpinCss();
+  return '<div id="taskListSentinel" style="padding:14px 16px;display:flex;align-items:center;justify-content:center">' +
+    '<div style="width:18px;height:18px;border:2.5px solid var(--b,rgba(0,0,0,.1));border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite"></div>' +
+  '</div>';
+}
+
+// 列表模式 pager：has_more 时为 sentinel spinner，否则为「全部 N」结尾条
+function _taskListPagerHtml(rows) {
+  if (_tasksViewMode !== 'repo_all' || !app.currentRepo()) return '';
+  if (_tasksHasMore) return _taskSentinelHtml();
+  if (rows.length > 0) {
+    return `<div style="padding:12px 16px;text-align:center;color:var(--t3,#86868b);font-size:11px">— ${I18N.t('tasks.tab.all')||'全部'} ${_tasksTotal || rows.length} —</div>`;
+  }
+  return '';
+}
+
+// Issue #1077：append/merge 局部更新——只重绘列表容器/看板滚动区，
+// 不动顶部、搜索框、筛选面板与详情区（消除整页闪动与滚动位置重置），且跳过 _loadDeployLink()。
+// newItems 非空（append）且为 time 模式时，仅 insertAdjacentHTML 追加新行。
+function _partialRenderTasks(newItems) {
+  const filtered = _filteredTasks();
+  // 选中项失效时回退到当前过滤列表第一条（与 _render 保持一致）
+  if (_taskSel && !filtered.some(t => t.id === _taskSel.id)) {
+    _taskSel = filtered.length > 0 ? filtered[0] : null;
+  } else if (!_taskSel && filtered.length > 0) {
+    _taskSel = filtered[0];
+  }
+  window._tasksById = {};
+  _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
+
+  if (_taskView === 'board') {
+    const sc = document.getElementById('taskBoardScroll');
+    if (sc) {
+      sc.innerHTML = _renderBoard(filtered) + ((_tasksViewMode === 'repo_all' && _tasksHasMore) ? _taskSentinelHtml() : '');
+    } else {
+      _render();  // 容器缺失（如首次进入），回退整页渲染
+      return;
+    }
+    _observeTaskSentinel();
+    return;
+  }
+
+  const body = document.getElementById('taskListBody');
+  const pager = document.getElementById('taskListPager');
+  if (!body || !pager) { _render(); return; }  // 容器缺失，回退整页渲染
+
+  const _canAppendRows = newItems && newItems.length > 0 && _tasksMode === 'time';
+  if (_canAppendRows) {
+    // append：仅追加通过当前过滤的新行（不重绘已有行）
+    const rowsHtml = newItems
+      .filter(t => filtered.some(f => f.id === t.id))
+      .map(_taskRowHtml).join('');
+    if (rowsHtml) body.insertAdjacentHTML('beforeend', rowsHtml);
+  } else {
+    // merge / 分区模式：重绘列表容器内部（顶部与详情区不受影响）
+    body.innerHTML = _taskListBodyHtml(filtered);
+    if (!body.innerHTML) {
+      body.innerHTML = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+    }
+  }
+  pager.innerHTML = _taskListPagerHtml(filtered);
+  _observeTaskSentinel();
 }
 
 function _render() {
@@ -904,7 +1407,7 @@ function _render() {
         </div>
         <div onclick="_toggleFilterSection('status')" style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">${I18N.t('tasks.filter_status')||'状态'}<span id="_filterStatusArrow" style="font-size:10px">▸</span></div>
         <div id="_filterStatusBody" style="display:none;flex-direction:column;gap:3px;margin-bottom:12px">
-          <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--t3,#86868b)" onclick="_taskFilterStatuses=[];_taskPage=1;_render()">
+          <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--t3,#86868b)" onclick="_taskFilterStatuses=[];_resetTaskListAndLoad()">
             <span style="width:14px;height:14px;border-radius:4px;border:1.5px solid var(--b,#d0d7de);display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff"></span>
             ${I18N.t('tasks.tab.all')||'全部'} <span style="font-size:11px">${cntAll}</span>
           </label>
@@ -919,7 +1422,7 @@ function _render() {
         </div>
         <div onclick="_toggleFilterSection('creator')" style="font-size:10px;font-weight:600;color:var(--t3,#86868b);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">${I18N.t('tasks.filter_creator')||'创建人'}<span id="_filterCreatorArrow" style="font-size:10px">▸</span></div>
         <div id="_filterCreatorBody" style="display:none;flex-direction:column;gap:3px;max-height:160px;overflow-y:auto;margin-bottom:12px">
-          <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--t3,#86868b)" onclick="_taskFilterAssignees=[];_taskPage=1;loadTasks()">
+          <label style="display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--t3,#86868b)" onclick="_taskFilterAssignees=[];_resetTaskListAndLoad()">
             <span style="width:14px;height:14px;border-radius:4px;border:1.5px solid var(--b,#d0d7de);display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff"></span>
             ${I18N.t('tasks.tab.all')||'全部'} <span style="font-size:11px">${cntAll}</span>
           </label>
@@ -937,98 +1440,24 @@ function _render() {
       </div>
     </div>`;
 
-  // 分页：后端已按 sort_order/mode 排序返回；mode=time 时纯时间序，default 时后端已状态优先
-  // （不再前端状态分组拼接，避免打乱时间序——Issue #42 根因）
+  // Issue #926：分屏逐步加载——不再前端切片分页，已加载行全部渲染；
+  // 尾部 sentinel + IntersectionObserver 触底追加下一屏（has_more=false 终止）
   const allRows = filtered;
-  const totalPages = Math.ceil(allRows.length / _TASKS_PER_PAGE);
-  if (_taskPage > totalPages) _taskPage = 1;
-  if (_taskPage < 1) _taskPage = 1;
-  const pageStart = (_taskPage - 1) * _TASKS_PER_PAGE;
-  const pageRows = allRows.slice(pageStart, pageStart + _TASKS_PER_PAGE);
+  const pageRows = allRows;
 
   // 列表模式状态信息（_mapStatusL 已提为全局函数）
-  const _lStatusInfo = {
-    pending: {ic:'#', cls:'tsk-tag-p', rIc:'tsk-ic-p', text:I18N.t('tasks.status.tag_pending')||'<b></b>待处理'},
-    in_progress: {ic:'⏳', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_processing')||'<b></b>处理中'},
-    awaiting_input: {ic:'?', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_awaiting_input')||'待澄清'},
-    pending_review: {ic:'◉', cls:'tsk-tag-pr', rIc:'tsk-ic-pr', text:I18N.t('tasks.status.tag_pending_review')||'待审核'},
-    done: {ic:'✓', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_completed')||'<b></b>已完成'},
-    cancelled: {ic:'✕', cls:'tsk-tag-d', rIc:'tsk-ic-d', text:I18N.t('tasks.status.tag_cancelled')||'已取消'},
-  };
+  const _lStatusInfo = _lStatusInfoMap();
 
-  const rowHtml = (t) => {
-    const ms = _mapStatusL(t);
-    const si = _lStatusInfo[ms] || _lStatusInfo.pending;
-    const sel = _taskSel && _taskSel.id === t.id ? ' tsk-row-sel' : '';
-    const _assigneeHtml = t.assignee ? ` · 👤 ${t.assignee}` : '';  // PR 伪卡片「触发者」保持 assignee 语义（Issue #805 不改）
-    const _creatorHtml = t.creator ? ` · 👤 ${t.creator}` : '';    // Issue #805: Issue 卡片展示创建人（creator）
-    // PR 事件卡片：右上角紫色 PR 药丸 + 点击跳事件详情
-    if (t.is_pr_event) {
-      return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
-        <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
-        <div class="tsk-r-main">
-          <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
-          <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
-        </div>
-        <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
-      </div>`;
-    }
-    return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
-      <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
-      <div class="tsk-r-main">
-        <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
-      </div>
-      <span class="tsk-tag ${si.cls}">${si.text}</span>
-    </div>`;
-  };
+  const rowHtml = _taskRowHtml;
 
-  let listHtml = '';
-  if (_tasksMode === 'time') {
-    listHtml = pageRows.map(rowHtml).join('');
-  } else {
-    // 按新状态分区
-    const pageByStatus = {};
-    pageRows.forEach(t => { const ms = _mapStatusL(t); (pageByStatus[ms] = pageByStatus[ms] || []).push(t); });
-    const _secLabels = {
-      pending: I18N.t('tasks.section.pending')||'待处理',
-      in_progress: I18N.t('tasks.section.processing')||'进行中',
-      awaiting_input: I18N.t('tasks.status.tag_awaiting_input')||'待澄清',
-      pending_review: I18N.t('tasks.status.tag_pending_review')||'待审核',
-      done: I18N.t('tasks.section.completed')||'已完成',
-      cancelled: I18N.t('tasks.status.tag_cancelled')||'已取消',
-    };
-    ['pending','in_progress','awaiting_input','pending_review','done','cancelled'].forEach(ms => {
-      if (pageByStatus[ms] && pageByStatus[ms].length > 0) {
-        listHtml += `<div class="tsk-list-sec">${_secLabels[ms]} <span class="tsk-sec-n">${pageByStatus[ms].length}</span></div>` +
-          pageByStatus[ms].map(rowHtml).join('');
-      }
-    });
-  }
+  let listHtml = _taskListBodyHtml(pageRows);
   if (!listHtml) {
     listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
   }
 
-  // 分页控件
-  let pagerHtml = '';
-  if (totalPages > 1) {
-    const pBtn = (label, page, disabled, active) =>
-      `<button class="tsk-btn tsk-btn-ghost" style="padding:3px 10px;font-size:11px;${disabled ? 'opacity:.4;cursor:not-allowed' : ''}${active ? ';border-color:var(--a);color:var(--a);font-weight:600' : ''}" ${disabled ? 'disabled' : `onclick="_taskPage=${page};_render()"`}>${label}</button>`;
-    let btns = '';
-    // 最多显示 7 个页码按钮
-    let s = Math.max(1, _taskPage - 3);
-    let e = Math.min(totalPages, s + 6);
-    if (e - s < 6) s = Math.max(1, e - 6);
-    if (s > 1) btns += pBtn('1', 1, false, _taskPage === 1) + (s > 2 ? '<span style="color:var(--t3);padding:0 2px">…</span>' : '');
-    for (let i = s; i <= e; i++) btns += pBtn(String(i), i, false, _taskPage === i);
-    if (e < totalPages) btns += (e < totalPages - 1 ? '<span style="color:var(--t3);padding:0 2px">…</span>' : '') + pBtn(String(totalPages), totalPages, false, _taskPage === totalPages);
-    pagerHtml = `<div style="display:flex;align-items:center;gap:4px;padding:10px 16px;border-top:1px solid var(--b);background:var(--bg);flex-shrink:0">
-      ${pBtn('‹', _taskPage - 1, _taskPage <= 1, false)}
-      ${btns}
-      ${pBtn('›', _taskPage + 1, _taskPage >= totalPages, false)}
-      <span class="ts t3" style="margin-left:8px;font-size:10px">${I18N.t('tasks.pager.summary', {total: allRows.length, page: _taskPage, pages: totalPages})}</span>
-    </div>`;
-  }
+  // Issue #926：滚动加载 sentinel（替代分页控件）——触底自动追加下一屏
+  // Issue #1077：加载态由纯文字改为 _grapeSpin spinner
+  const pagerHtml = _taskListPagerHtml(pageRows);
 
   // 详情面板
   const detailHtml = _taskSel ? _detailHtml(_taskSel) : `<div class="tsk-empty" style="border:none"><div>🗒</div><h3>${I18N.t('tasks.empty.select_task_title')}</h3><p>${I18N.t('tasks.empty.select_task_desc')}</p></div>`;
@@ -1056,7 +1485,7 @@ function _render() {
               const lbl = k==='list'?(I18N.t('tasks.view_list')||'列表'):(I18N.t('tasks.view_board')||'看板');
               const ic = k==='list'?'☰':'▦';
               const act = _taskView===k;
-              return `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--t1,#1d1d1f);${act?'background:rgba(59,130,246,.06)':''}" onclick="_taskView='${k}';document.getElementById('taskViewPopover').style.display='none';_render()">
+              return `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--t1,#1d1d1f);${act?'background:rgba(59,130,246,.06)':''}" onclick="_switchTaskView('${k}')">
                 <span style="font-size:13px">${ic}</span> ${lbl}
                 ${act?'<span style="margin-left:auto;color:#3b82f6;font-size:12px">✓</span>':''}
               </label>`;
@@ -1069,20 +1498,20 @@ function _render() {
     <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
       <div style="position:relative;width:100%;max-width:400px">
         <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--t3,#86868b);pointer-events:none">🔍</span>
-        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_resetTaskListAndLoad()}" onchange="_taskQuery=this.value;_resetTaskListAndLoad()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
       </div>
     </div>
     <div style="flex:1;display:flex;flex-direction:column;min-height:0">
-      <div style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}</div>
+      <div id="taskBoardScroll" style="flex:1;overflow:auto;min-height:0">${_renderBoard(filtered)}${(!_boardPagingActive() && _tasksViewMode === 'repo_all' && _tasksHasMore) ? _taskSentinelHtml() : ''}</div>
     </div>` : `
     <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
       <div style="position:relative;width:100%;max-width:400px">
         <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--t3,#86868b);pointer-events:none">🔍</span>
-        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_taskPage=1;_render()}" onchange="_taskQuery=this.value;_taskPage=1;_render()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_resetTaskListAndLoad()}" onchange="_taskQuery=this.value;_resetTaskListAndLoad()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
       </div>
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
-      <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
+      <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column"><div id="taskListBody">${listHtml}</div><div style="flex:1"></div><div id="taskListPager">${pagerHtml}</div></div>
       <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}${_renderCrossPipelineButton(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
@@ -1095,6 +1524,44 @@ function _render() {
   // 建立 id → task 映射供行点击
   window._tasksById = {};
   _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
+
+  // Issue #926：挂载滚动加载观察器（sentinel 触底 → 追加下一屏）
+  _observeTaskSentinel();
+  // Issue #1077-F：看板按列分页时，绑定各列滚动触底
+  _bindBoardScroll();
+}
+
+// Issue #926：IntersectionObserver 无限滚动——sentinel 进入视口且 has_more 时按屏递增
+// Issue #1077：observer 实例建立后复用（不每次 disconnect 重建）；重连/追加后
+// 设 200ms 重入窗口，防止 sentinel 仍在视口内时立即误触发下一屏
+function _observeTaskSentinel() {
+  const sentinel = document.getElementById('taskListSentinel');
+  if (!sentinel || !_tasksHasMore) return;
+  const _loadNext = function() {
+    if (!_tasksHasMore || _tasksLoading) return;
+    if (window._currentView !== 'tasks') return;  // stale guard
+    // Issue #926：页码推进移入 loadTasks 成功回调（失败不推进，重试不跳屏）
+    loadTasks({append: true});
+  };
+  if (!('IntersectionObserver' in window)) {
+    // 降级：点击 sentinel 手动加载下一屏
+    sentinel.style.cursor = 'pointer';
+    sentinel.onclick = _loadNext;
+    return;
+  }
+  if (!_taskObs) {
+    _taskObs = new IntersectionObserver(function(entries) {
+      entries.forEach(function(en) {
+        if (!en.isIntersecting) return;
+        if (Date.now() < _taskObsReentryUntil) return;  // Issue #1077：重入窗口内忽略
+        _loadNext();
+      });
+    }, {rootMargin: '300px'});
+  } else {
+    // 复用已有 observer：sentinel 元素可能已被局部更新重建，重设重入窗口
+    _taskObsReentryUntil = Date.now() + 200;
+  }
+  _taskObs.observe(sentinel);
 }
 
 function _renderAgentStatusCard(t) {
@@ -1221,9 +1688,17 @@ function _renderTaskAttachments(taskId, atts) {
 function _loadTaskAttachments(taskId, forceRefresh) {
   // Issue #648：详情卡片自带 attachments 字段（详情/统一列表 API 新增）时直接渲染，
   // 免二次请求；上传/删除后 forceRefresh=true 强制走端点刷新拿最新清单。
+  // Issue #926：分页列表瘦身不回 attachments 清单（仅 attachments_count）——
+  // count=0 免请求直渲空清单，count>0 走 /issues/{id}/attachments 异步填充（到货各自渲染）
   var t = window._currentDetailTask;
-  if (!forceRefresh && t && Array.isArray(t.attachments)) {
+  if (!forceRefresh && t && Array.isArray(t.attachments) && t.attachments.length) {
     _renderTaskAttachments(taskId, t.attachments);
+    return;
+  }
+  if (!forceRefresh && t && typeof t.attachments_count === 'number' && t.attachments_count === 0 &&
+      !(Array.isArray(t.attachments) && t.attachments.length)) {
+    // count=0（分页瘦身行 / PR 伪卡片）免请求直渲空清单
+    _renderTaskAttachments(taskId, []);
     return;
   }
   API.get('/issues/' + taskId + '/attachments').then(function(data) {

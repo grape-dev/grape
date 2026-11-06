@@ -64,6 +64,18 @@ def health():
     except Exception:
         pass
 
+    # Issue #887：skill 一致性门禁聚合项（近 7 天 [skill_mismatch] 拒绝数，AC4）。
+    # 免鉴权端点只暴露计数与状态，不含仓库/技能明细；查询失败显式 unknown。
+    skill_consistency = {"status": "unknown", "refused_recent": 0, "detail": ""}
+    try:
+        from src.runtime.health import aggregate_skill_consistency
+        _sk = aggregate_skill_consistency()
+        skill_consistency = {"status": _sk.get("status", "unknown"),
+                             "refused_recent": int(_sk.get("refused_recent") or 0),
+                             "detail": _sk.get("detail", "")}
+    except Exception:
+        skill_consistency["detail"] = "skill consistency aggregate check failed"
+
     # Issue #455：base_configured/base_warning 供 OSS 用户自检——未配置对外基址时明确告警
     # （OAuth 回调指向 localhost 第三方平台无法回访）。字段新增向后兼容。
     return {
@@ -76,4 +88,5 @@ def health():
         "worker_connect_url": worker_url,
         "url_split_warning": split_warning,
         "agent_runtime": agent_runtime_status,
+        "skill_consistency": skill_consistency,
     }

@@ -2759,6 +2759,33 @@ register_migration(
 )
 
 
+def _fn_task_liveness_index_and_revived_at() -> None:
+    """Issue #1071：迟到结果复活所需的结构（存量库幂等补齐）。
+
+    - agent_tasks.revived_at：复活只允许发生一次，靠此列落痕（NULL = 未复活）。
+    不加 task_messages(task_id, created_at) 复合索引：实测该表已有
+    idx_task_messages_task(task_id)（db_setup:1986，存量库均在），而活性查询是
+    「按 task_id 过滤 + ORDER BY id DESC LIMIT 20」，单列索引即命中；task_messages 是
+    追加最频繁的表，再挂一个索引只有写入放大、没有读收益。
+    走 register_migration（legacy 清单已冻结，不再往 _NEW_TABLES/legacy 里加）。
+    """
+    with db_lock:
+        c = db.cursor()
+        try:
+            _ensure_column(c, "agent_tasks", "revived_at", "TEXT DEFAULT NULL")
+            db.commit()
+        except Exception as e:
+            log.warning(f"agent_tasks.revived_at migration failed: {e}")
+
+
+register_migration(
+    version="202611050001",
+    name="task-liveness-revived-at",
+    kind="safe",
+    fn=_fn_task_liveness_index_and_revived_at,
+)
+
+
 def _fn_create_grape_t_merge_gate_log() -> None:
     """Issue #752：存量库补建合入门禁日志表（CREATE TABLE IF NOT EXISTS 幂等，
     与 patrol-findings 同路径：_NEW_TABLES 只服务 legacy 全量首跑，已盖章库走本迁移）。"""
@@ -2768,7 +2795,9 @@ def _fn_create_grape_t_merge_gate_log() -> None:
 
 
 register_migration(
-    version="202611030001",
+    # 20261105 修复：远端曾误改为 0001（与 issue658_role_tags 撞号），且生产版本表
+    # 已按 0002 落库——回到 0002 对齐生产；issue865 挪至 0004 避让。
+    version="202611030002",
     name="create-merge-gate-log-table",
     kind="safe",
     fn=_fn_create_grape_t_merge_gate_log,
@@ -2885,7 +2914,9 @@ def _fn_add_agent_runtimes_model() -> None:
 
 
 register_migration(
-    version="202611030002",
+    # 20261105 修复：原 0002 与 merge-gate-log 撞号（merge-gate-log 已按 0002 落库），
+    # 挪至 0004；列添加幂等（已存在则跳过），生产/新库均安全。
+    version="202611030004",
     name="issue865_agent_runtimes_model",
     kind="safe",
     fn=_fn_add_agent_runtimes_model,
@@ -2935,6 +2966,202 @@ register_migration(
     name="perf_obs_llm_usage_engine_index",
     kind="safe",
     fn=_fn_add_obs_llm_usage_engine_index,
+)
+
+
+def _backfill_scene_rows_skill_id(rows: list, update_sql: str) -> int:
+    """Issue #979 backfill 公共循环（devops_pipeline_scene / scene_market 共用）。
+
+    rows 元素为 (row_id, repo_key, uid, nodes_json)：对仅含 skill_name 的节点按
+    现有规则（user→repo→official，resolve_skill_id）解析一次并写回 skill_id
+    （update_sql 形如 "UPDATE <table> SET nodes_json=? WHERE id=?"）。
+    幂等：节点已有 skill_id 跳过；解析不到保持原样（派发时按名字降级 + warning）。
+    返回发生写回的行数。
+    """
+    from src.user.db import resolve_skill_id
+    updated = 0
+    for row_id, repo_key, uid, nodes_json in rows:
+        try:
+            nodes = json.loads(nodes_json or "[]")
+        except Exception as e:
+            log.warning(f"issue979 backfill: bad nodes_json (row={row_id}): {e}")
+            continue
+        if not isinstance(nodes, list) or not nodes:
+            continue
+        changed = False
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            _name = n.get("skill") or ""
+            if not _name or n.get("skill_id"):
+                continue
+            sid = resolve_skill_id(_name, repo_key=repo_key or "", user_id=uid or 0)
+            if sid:
+                n["skill_id"] = int(sid)
+                changed = True
+        if changed:
+            try:
+                with db_lock:
+                    db.cursor().execute(update_sql,
+                                        (json.dumps(nodes, ensure_ascii=False), row_id))
+                    db.commit()
+                updated += 1
+            except Exception as e:
+                log.warning(f"issue979 backfill: write back failed (row={row_id}): {e}")
+    return updated
+
+
+def _fn_scene_nodes_skill_id_backfill() -> None:
+    """Issue #979：存量场景节点写回 skill_id（backfill，幂等续跑）。
+
+    三档（official/repo/user）同名技能并存时，节点仅存 skill_name 无法锁定
+    档位。本迁移对仅含 skill_name 的节点按现有规则（user→repo→official，
+    resolve_skill_id）解析一次并写回 skill_id：
+    - devops_pipeline_scene：user 上下文取 created_by（gitcode 用户名 →
+      unified_user_mapping.user_id），repo 上下文取行内 repo_key；
+    - scene_market：user 上下文取 source_user_id，repo 上下文取行内 repo_key
+      （scope='repo' 行；此前空 repo_key 解析会漏 repo 档）。
+    解析不到（官方内置包形态等）保持原样，派发时按名字降级 + warning。
+    仅写回 skill_id，不删 skill_name（显示与降级兜底）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, repo_key, nodes_json, created_by "
+            "FROM devops_pipeline_scene WHERE is_active=1")
+        scene_rows = c.fetchall() or []
+        try:
+            c.execute("SELECT id, repo_key, source_user_id, nodes_json FROM scene_market")
+            market_rows = c.fetchall() or []
+        except Exception as e:
+            log.warning(f"issue979 backfill: scene_market read failed: {e}")
+            market_rows = []
+    # devops_pipeline_scene：created_by（gitcode 用户名）→ user_id
+    normalized = []
+    for row_id, repo_key, nodes_json, created_by in scene_rows:
+        uid = 0
+        if created_by:
+            try:
+                with db_lock:
+                    r2 = db.cursor().execute(
+                        "SELECT user_id FROM unified_user_mapping "
+                        "WHERE gitcode_user=? AND user_id>0 LIMIT 1",
+                        (created_by,)).fetchone()
+                if r2:
+                    uid = int(r2[0] or 0)
+            except Exception as e:
+                log.warning(f"issue979 backfill: created_by lookup failed "
+                            f"(row={row_id}, user={created_by}): {e}")
+        normalized.append((row_id, repo_key or "", uid, nodes_json))
+    _backfill_scene_rows_skill_id(
+        normalized, "UPDATE devops_pipeline_scene SET nodes_json=? WHERE id=?")
+    # scene_market：source_user_id 即 user 上下文，repo_key 行内（repo 档）
+    _backfill_scene_rows_skill_id(
+        [(row_id, repo_key or "", int(source_user_id or 0), nodes_json)
+         for row_id, repo_key, source_user_id, nodes_json in market_rows],
+        "UPDATE scene_market SET nodes_json=? WHERE id=?")
+
+
+register_migration(
+    version="202611040001",
+    name="issue979_scene_nodes_skill_id_backfill",
+    kind="backfill",
+    fn=_fn_scene_nodes_skill_id_backfill,
+)
+
+
+def _fn_add_issue_repo_created_index() -> None:
+    """性能补丁（2026-11-04 压测）：需求中心服务端分页（Issue #926）按
+    `WHERE repo_key=? ... ORDER BY created_at DESC LIMIT/OFFSET` 取数，issue 表只有
+    (repo_key, issue_number) 唯一索引 → 每页 COUNT(*) 全扫 + ORDER BY 建临时 B-TREE
+    （200k 行实测首页 78ms / 深页 350ms），且全程持 db_lock 串行阻塞其它查询。
+    补 (repo_key, created_at) 后 COUNT 与 time 模式排序可走索引；default 模式
+    的第一排序键是状态优先级 CASE，无法完全免排序，深页由路由侧偏移上限兜底。
+    幂等：索引已存在即跳过。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    _idx = "idx_issue_repo_created"
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            # MySQL 下 repo_key/created_at 是 TEXT，必须带前缀长度
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                "AND INDEX_NAME=%s", (_idx,))
+            if c.fetchone()[0]:
+                return
+            c.execute(
+                f"CREATE INDEX {_idx} ON issue (repo_key(64), created_at(32))")
+            db.commit()
+        else:
+            c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+            if c.fetchone():
+                return
+            c.execute(f"CREATE INDEX {_idx} ON issue (repo_key, created_at)")
+            db.commit()
+
+
+register_migration(
+    version="202611040002",
+    name="perf_issue_repo_created_index",
+    kind="safe",
+    fn=_fn_add_issue_repo_created_index,
+)
+
+
+def _fn_add_issue_status_priority_index() -> None:
+    """性能补丁（2026-11-04 压测，方案 B）：需求中心默认排序是
+    `CASE 状态优先级, created_at DESC`（路由 _status_order_sql，单一事实源）。
+    普通列索引对"算出来的第一排序键"无效 → 20 万行 offset 19950 实测 168ms，
+    且全程持 db_lock。改为表达式索引：sqlite 支持 `CREATE INDEX ... ON issue
+    (repo_key, <CASE 表达式>, created_at DESC)`，EXPLAIN 变为
+    `SEARCH ... USING INDEX`，同数据同深页 168ms → 1.0ms（首页 0.1ms）。
+    表达式的 CASE 文本必须与 _status_order_sql() 完全一致（同一函数懒导入生成，
+    避免两处手写漂移）；MySQL 侧函数索引需 >= 8.0.13，失败只告警跳过（不阻断启动，
+    深页由路由偏移护栏兜底）。幂等：索引已存在即跳过。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    from src.api.routes.issues import _status_order_sql  # 懒导入：避免模块级环形依赖
+    _expr = _status_order_sql()
+    _idx = "idx_issue_repo_statuspri_time"
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            try:
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                    "AND INDEX_NAME=%s", (_idx,))
+                if c.fetchone()[0]:
+                    return
+                c.execute(
+                    f"CREATE INDEX {_idx} ON issue (repo_key(64), ({_expr}), created_at(32))")
+                db.commit()
+            except Exception as e:
+                log.warning(
+                    f"{_idx} 建索引失败（MySQL 函数索引需 >= 8.0.13，跳过；"
+                    f"默认排序深页由偏移护栏兜底）: {e}")
+            return
+        c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+        if c.fetchone():
+            return
+        c.execute(f"CREATE INDEX {_idx} ON issue (repo_key, {_expr}, created_at DESC)")
+        db.commit()
+
+
+register_migration(
+    version="202611040003",
+    name="perf_issue_status_priority_index",
+    kind="safe",
+    fn=_fn_add_issue_status_priority_index,
 )
 
 

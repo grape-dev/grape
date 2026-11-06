@@ -984,6 +984,12 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # worker 端看门狗 + ACP 全局超时均任务级 env 优先，管理台/配置文件改后对新任务生效。
     for k, v in _runtime_timeout_env_kv().items():
         env.setdefault(k, v)
+    # Issue #887：任务 payload 携带按 agent 绑定（仓库级/场景级）解析的 skill——
+    # 执行侧一致性校验与任务日志「技能来源」标注的绑定基准值（worker 端 agent.py
+    # _skill_consistency_gate 与 env 双源互校消费；与任务行 skill 字段同源）。
+    # QA 修复：直接赋值（非 setdefault）——env_extra 不得预置覆盖绑定基准，
+    # 否则可观测标注失真且双源互校永远一致（假阴性）。
+    env["GRAPE_BOUND_SKILL"] = (skill or "").strip()
     # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
     # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
     # devops 事件任务无用户概念（user_id=0，仓库身份）。
@@ -1851,6 +1857,78 @@ def release_busy_slot(runtime_id, cursor=None):
         _db.commit()
 
 
+# ===== Issue #1071：重启后「活着却被判死」——活性判定 · 回炉守卫 · 迟到复活 =====
+#
+# 三个根因（同一份故障链）：
+#   1) 优雅停机把 REMOTE 任务置 pending_self_report，pending_since=停机时刻；判死扫描只看
+#      pending_since，worker 仍在产出也 30 分钟后一刀切 → 活着的任务被杀。
+#   2) 自动回炉（reap/rerequeue）不看活性，回炉认领会改写 started_at，而 started_at 就是
+#      worker 的 run_token → 老 worker 的上报被 409 stale 永久拒收。
+#   3) 判死走 update_task_status，对 timeout_failed 也 revoke 会话 token → 之后连重试都 401。
+# 修复口径统一为「任务最近一次产出消息」：worker 还活着就必然在写 task_messages，
+# 这比引擎心跳更贴近任务本身（心跳断 ≠ 任务死）。
+
+# 兜底超时来源标记：sweep 写入 agent_tasks.errors 首元素，供迟到结果复活时精确识别
+# （避免把真业务失败也复活，重新打开 2026-08-24 seq#2488「失败被成功覆盖」的洞）。
+TIMEOUT_SOURCE_MARKER = "PENDING_SELF_REPORT_TIMEOUT"
+
+# 自动回炉前的活性窗口：最近 N 秒内有产出消息 → 视为仍在跑，不自动回炉
+TASK_ACTIVITY_GUARD_SECONDS = int(os.environ.get("TASK_ACTIVITY_GUARD_SECONDS", "600"))
+
+# 迟到结果复活窗口：从判死时刻（completed_at）起 N 秒内允许复活一次
+TIMEOUT_REVIVE_WINDOW_SECONDS = int(os.environ.get("TIMEOUT_REVIVE_WINDOW_SECONDS", "1800"))
+
+
+def _epoch_of(value) -> float | None:
+    """库里时间串 → epoch 秒；不可解析返回 None（复用 health.parse_dt 的双后端口径）。"""
+    if not value:
+        return None
+    try:
+        from src.runtime.health import parse_dt
+        _v = parse_dt(value)
+        return float(_v) if _v is not None else None
+    except Exception:
+        return None
+
+
+def task_last_activity(task_id) -> float | None:
+    """任务最近一次产出消息的 epoch 秒；无消息 → None。
+
+    取最近 20 条在 Python 侧取数值最大，而不是 SQL MAX(created_at)：历史行是无时区
+    '%Y-%m-%d %H:%M:%S'，新行是带时区 ISO-8601（Issue #588），字符串比较会把 ' '(0x20)
+    < 'T'(0x54) 误判（与 scheduler 判死扫描同一个坑）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT created_at FROM task_messages WHERE task_id=? ORDER BY id DESC LIMIT 20",
+                (task_id,)
+            ).fetchall()
+        _best = None
+        for (_ts,) in rows or []:
+            _e = _epoch_of(_ts)
+            if _e is not None and (_best is None or _e > _best):
+                _best = _e
+        return _best
+    except Exception as e:
+        log.warning(f"task_last_activity failed for task {task_id}: {e}")
+        return None
+
+
+def task_recently_active(task_id, window_seconds: int | None = None) -> bool:
+    """最近 window_seconds 内是否有产出消息（默认 TASK_ACTIVITY_GUARD_SECONDS）。
+
+    回炉守卫的统一口径。窗口化是有意的：守卫不能永久拦住回炉，否则又回到
+    seq#622「任务悬空卡死」；超过窗口仍无产出，照旧按原逻辑回收。
+    """
+    _win = TASK_ACTIVITY_GUARD_SECONDS if window_seconds is None else int(window_seconds)
+    _ts = task_last_activity(task_id)
+    if _ts is None:
+        return False
+    return _ts >= datetime.now(timezone.utc).timestamp() - _win
+
+
 def validate_run_token(task: dict | None, run_token: str = "") -> str:
     """校验补报实例（run_token = 认领时刻 started_at，Step 4）。
 
@@ -2015,8 +2093,12 @@ def update_task_status(task_id, status, **kw):
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         db.commit()
-    # Issue-45 M2：任务终态（含 timeout_failed）→ 会话级临时 token 即时失效（存在即有效，删除即失效）
-    if status in TASK_TERMINAL_STATUSES:
+    # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
+    # Issue #1071（P4）：timeout_failed 是「疑似误判终态」，**不**收钥匙——
+    #   判死是兜底猜测，不是任务真的结束；worker 之后 push/调平台接口全 401
+    #   （生产 16:33–16:49 有 22 次 401）会让它连交付都做不到，活就白跑了。
+    #   这类 token 靠 6 小时 TTL 自然过期，purge 会清；多活 6 小时只属于一个已判死的任务。
+    if status in TASK_TERMINAL_STATUSES and status != TASK_TIMEOUT_FAILED:
         try:
             from src.kernel.auth_sdk.auth_token import revoke_session_token
             revoke_session_token(task_id)
@@ -2043,8 +2125,16 @@ def requeue_task(task_id):
     with db_lock:
         c = db.cursor()
         # 释放槽位（根因2修复）：requeue 前先查 runtime_id，requeue 后 busy_slots-1
-        c.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT runtime_id, status FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
+        # Issue #1071（P3）：活着的任务不回炉。回炉会改写 started_at，而 started_at 就是
+        # worker 的 run_token → 老 worker 紧接着的 complete/fail 立刻被 409 stale 拒收。
+        # 只拦 running（dispatched 从未开始执行，谈不上「活着」）；窗口化见
+        # TASK_ACTIVITY_GUARD_SECONDS，超窗口仍无产出照旧回炉，不留悬空卡死。
+        if row and (row[1] or "") == "running" and task_recently_active(task_id):
+            log.info(f"requeue_task skipped: task {task_id} has recent task_messages activity "
+                     f"(guard={TASK_ACTIVITY_GUARD_SECONDS}s)")
+            return False
         c.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')",
                   (task_id,))
         ret = c.rowcount > 0
@@ -2064,8 +2154,25 @@ def requeue_task(task_id):
         return ret
 
 
-def report_messages(task_id, messages):
-    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout"""
+def peek_next_seq(task_id) -> int:
+    """预读 task 下一个可用 seq（MAX+1）。Issue #975：路由层预留下列 seq 范围作回执。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+        return (c.fetchone()[0] or 0) + 1
+
+
+def report_messages(task_id, messages, seq_start: int | None = None) -> dict | None:
+    """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout
+
+    seq_start（Issue #975）：路由层同步预定的批次 seq 起点（peek_next_seq 预留）。
+    不传则沿用 MAX+1。批次回执（日志 + 返回值）带 seq 范围，供 worker/master 对账。
+
+    返回（QA 复审修复，Spec #1）：**实际落库**的回执 dict
+    {"count": 落库条数, "seq_start": 首条 seq, "seq_end": 末条 seq}；
+    无可落库消息返回 None。落库异常时返回 {}（调用方不得当作成功范围）。
+    非 dict 消息不计入 seq 消耗与回执（与 insert 跳过行为一致，杜绝假回执）。
+    """
     task = get_task(task_id)
     if not task:
         return
@@ -2130,30 +2237,58 @@ def report_messages(task_id, messages):
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
     # 收集落库后的 (原始消息, seq) 对，供 fanout 透传 seq（前端按 seq 去重，跨主 DB 尾随双通道不重复渲染）
+    # QA 复审（Spec #1/#4）：只对 dict 消息消耗 seq；INSERT 命中 UNIQUE（预留 seq 与
+    # 并发落库/重放撞号）时改用 MAX+1 重试一次——防 INSERT OR IGNORE 静默丢消息
+    _persistable = [m for m in (messages or []) if isinstance(m, dict)]
     _seq_messages: list[dict] = []
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
-            seq = (c.fetchone()[0] or 0) + 1
-            for m in (messages or []):
-                if not isinstance(m, dict):
-                    continue
-                _t = m.get("type", "log")
-                _d = m.get("data")
-                tool, content, input_json, output = _normalize_message(_t, _d)
-                # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
-                # 双后端存储语义统一，读时 normalize_event_time 幂等）
-                c.execute(
-                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (task_id, seq, _t, tool, content, input_json, output,
-                     datetime.now(timezone.utc).isoformat()))
-                # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
-                _seq_messages.append({**m, "seq": seq})
-                seq += 1
-            db.commit()
-    except Exception as e:
-        log.warning(f"report_messages task_messages insert failed: {e}")
+    _receipt: dict | None = None
+    if _persistable:
+        try:
+            with db_lock:
+                c = db.cursor()
+                if seq_start is not None:
+                    seq = int(seq_start)
+                else:
+                    c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                    seq = (c.fetchone()[0] or 0) + 1
+                _seq_first = None
+                for m in _persistable:
+                    _t = m.get("type", "log")
+                    _d = m.get("data")
+                    tool, content, input_json, output = _normalize_message(_t, _d)
+                    # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
+                    # 双后端存储语义统一，读时 normalize_event_time 幂等）
+                    _row = (task_id, seq, _t, tool, content, input_json, output,
+                            datetime.now(timezone.utc).isoformat())
+                    try:
+                        c.execute(
+                            "INSERT INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            _row)
+                    except Exception as _ie:
+                        # seq 撞号（预留范围与异步落库/补报重放并发）：改用 MAX+1 重试一次，
+                        # 不允许 INSERT OR IGNORE 式静默丢消息（QA Spec #4 seq 重复风险）
+                        c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                        seq = (c.fetchone()[0] or 0) + 1
+                        c.execute(
+                            "INSERT INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (task_id, seq, _t, tool, content, input_json, output,
+                             datetime.now(timezone.utc).isoformat()))
+                        log.warning(f"report_messages: task={task_id} seq conflict, reallocated to {seq}")
+                    if _seq_first is None:
+                        _seq_first = seq
+                    # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
+                    _seq_messages.append({**m, "seq": seq})
+                    seq += 1
+                db.commit()
+                _receipt = {"count": len(_seq_messages), "seq_start": _seq_first,
+                            "seq_end": _seq_messages[-1].get("seq")}
+                # Issue #975：批次回执日志（seq 起止 + 条数）——master 侧对账凭证
+                if _seq_messages:
+                    log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
+                             f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
+        except Exception as e:
+            log.warning(f"report_messages task_messages insert failed: {e}")
+            _receipt = {}
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
     # 传带 seq 的消息：前端按 seq 去重，queue 快路径与 SSE DB 尾随双通道不重复渲染
     try:
@@ -2161,6 +2296,7 @@ def report_messages(task_id, messages):
         fanout(task_id, _seq_messages if _seq_messages else (messages or []))
     except Exception as e:
         log.warning(f"report_messages fanout failed: {e}")
+    return _receipt
 
 
 def _normalize_message(_t: str, _d) -> tuple[str, str, str, str]:
@@ -2215,6 +2351,120 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
         out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
                     "content": r[3] or "", "input": inp, "output": r[5] or "",
                     "created_at": normalize_event_time(r[6] or "")})
+    return out
+
+
+def list_task_messages_recent(task_id, limit: int = 200) -> list[dict]:
+    """拉取任务**最新**的 limit 条 task_messages，按时间正序返回。
+
+    与 list_task_messages 的区别：后者从 seq=0 往后取，适合前端从头回放；
+    本函数先按 seq DESC 取尾部再反转，用于「接管」这类只关心当前进展的场景 ——
+    否则长任务的接管上下文会停在几小时前的任务开头。
+
+    返回 [{seq, type, tool, content, input, output, created_at}]，input 为解析后的 dict。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, type, tool, content, input_json, output, created_at FROM task_messages "
+                "WHERE task_id=? ORDER BY seq DESC LIMIT ?",
+                (task_id, limit))
+            rows = list(reversed(c.fetchall()))
+    except Exception as e:
+        log.warning(f"list_task_messages_recent failed: {e}")
+        return []
+    out = []
+    for r in rows:
+        inp = {}
+        try:
+            inp = _json.loads(r[4] or "{}")
+        except Exception:
+            pass
+        out.append({"seq": r[0], "type": r[1], "tool": r[2] or "",
+                    "content": r[3] or "", "input": inp, "output": r[5] or "",
+                    "created_at": normalize_event_time(r[6] or "")})
+    return out
+
+
+# wrote_files 派生查询认定的「写入类」工具名（含 hermes 等引擎的工具名变体，
+# 兜底按 input 含 path + content/new_string 精筛，见 list_wrote_files）
+_WRITE_TOOL_EXACT = frozenset({"write", "write_file", "patch"})
+
+# 记忆化缓存（Issue #977 性能补丁）：key=task_id → (max_seq, wrote_files)。
+# 只按「消息 seq 是否前进」判失效（新增即失效），不用纯 TTL，避免"配置/进度改了却显示旧值"。
+# 上限 512 个任务，超出按插入序淘汰最旧（单进程内小字典，替换成本可忽略）。
+_WROTE_FILES_CACHE: dict = {}
+_WROTE_FILES_CACHE_MAX = 512
+
+
+def _is_write_tool(tool: str) -> bool:
+    t = (tool or "").strip().lower()
+    return t in _WRITE_TOOL_EXACT or "write" in t or "patch" in t
+
+
+def list_wrote_files(task_id) -> list[dict]:
+    """派生查询：该任务写过的文件清单（Issue #977，/info 的 wrote_files 数据源）。
+
+    - 数据源：task_messages 中 tool_use 消息的 input_json（write/patch 的 path +
+      content/new_string 的 utf-8 字节数），不扫描工作区、不依赖 agent 自述。
+    - 过滤：SQL 侧先按工具名收窄（write/patch 变体，与 _is_write_tool 同口径）
+      + Python 侧精筛（input 含 path 与 content/new_string）。
+    - 同 path 多次写入各记一条（保留全部 seq）；first_seen_at 取该条消息 created_at。
+    - 性能（2026-11-04 压测）：原实现扫该任务全部 tool_use 行（10k 消息 36ms、
+      大写入 221ms、40k 消息 146ms），且 /info 会被前端反复拉。改为
+      「SQL 工具名预过滤」+「按 (task_id, max_seq) 记忆化」：任务消息无新增时命中缓存
+      返回 ~µs；有新增消息（seq 前进）自动失效重算，不做纯 TTL 假缓存。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COALESCE(MAX(seq), 0) FROM task_messages WHERE task_id=?",
+                      (task_id,))
+            _max_seq = int(c.fetchone()[0] or 0)
+            _hit = _WROTE_FILES_CACHE.get(str(task_id))
+            if _hit and _hit[0] == _max_seq:
+                return [dict(x) for x in _hit[1]]
+            c.execute(
+                "SELECT seq, tool, input_json, created_at FROM task_messages "
+                "WHERE task_id=? AND type='tool_use' "
+                "AND (LOWER(tool) LIKE '%write%' OR LOWER(tool) LIKE '%patch%') "
+                "ORDER BY seq",
+                (task_id,))
+            rows = c.fetchall()
+    except Exception as e:
+        log.warning(f"list_wrote_files failed: {e}")
+        return []
+    out = []
+    for seq, tool, input_json, created_at in rows:
+        if not _is_write_tool(tool):
+            continue
+        try:
+            inp = _json.loads(input_json or "{}")
+        except Exception:
+            continue
+        if not isinstance(inp, dict):
+            continue
+        path = inp.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        payload = inp.get("content")
+        if not isinstance(payload, str):
+            payload = inp.get("new_string")
+        if not isinstance(payload, str):
+            continue
+        out.append({
+            "path": path,
+            "bytes": len(payload.encode("utf-8")),
+            "tool": (tool or "").strip().lower(),
+            "seq": seq,
+            "first_seen_at": normalize_event_time(created_at or ""),
+        })
+    if len(_WROTE_FILES_CACHE) >= _WROTE_FILES_CACHE_MAX:
+        _WROTE_FILES_CACHE.pop(next(iter(_WROTE_FILES_CACHE)), None)
+    _WROTE_FILES_CACHE[str(task_id)] = (_max_seq, [dict(x) for x in out])
     return out
 
 
@@ -2289,8 +2539,45 @@ def premature_end_marker() -> str:
         return "[PREMATURE_END_TURN]"
 
 
-def complete_task(task_id, result_text, exit_code=0, usage=None):
-    """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
+# ===== Issue #627: SRE 生产发布任务终态回填 =====
+
+def _backfill_release_subissue_on_complete(task: dict | None, exit_code: int,
+                                            result_text: str) -> None:
+    """按 task.issue_id 反查发布子单回填结果三分支（方案 C，无需 payload 锚点）。
+
+    - 任务须为 sre 且关联发布子单（issue 行 release_target_env 非空）；
+      普通 sre 任务直接返回，零影响。
+    - exit_code == 0：有 deploy_url 证据 → deployed_success；否则 not_executed
+      （阶段 completed 不视为发布成功）。
+    - exit_code != 0：deploy_failed（failure_reason 取 result_text 摘要）。
+    - 幂等：release_result 已回填不再覆盖（_backfill_release_subissue_result 内部保护）。
+    """
+    if not task:
+        return
+    if (task.get("agent_type") or "") != "sre":
+        return
+    _issue_id = task.get("issue_id") or ""
+    _issue_num = str(_issue_id).lstrip("#")
+    if not _issue_num.isdigit():
+        return
+    try:
+        from src.api.issues_center import _backfill_release_subissue_result
+        _backfill_release_subissue_result(
+            repo_key=task.get("repo_key") or "",
+            issue_number=int(_issue_num),
+            exit_code=int(exit_code or 0),
+            result_text=result_text or "")
+    except Exception as _e:
+        log.warning(f"_backfill_release_subissue_on_complete failed: {_e}")
+
+
+def complete_task(task_id, result_text, exit_code=0, usage=None,
+                  revive_from_timeout_failed: bool = False):
+    """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。
+
+    revive_from_timeout_failed（Issue #1071）：由 service.revive_timeout_task 传入，
+    表示这是一次已校验过的「兜底超时判死后迟到结果」复活，允许把事件侧 failed 改判 completed。
+    """
     task = get_task(task_id)
     # 可见性（P1）：引擎「疑似提前结束」（模型输出后静默、无收尾记录）时任务仍算
     # completed（exit 0），但把标记显式落到 agent_tasks.errors + 事件 result 前缀，
@@ -2369,9 +2656,12 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_result_show,
-                                  structured_output=output or None)
-            # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
-            # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
+                                  structured_output=output or None,
+                                  revive_from_timeout_failed=(
+                                      revive_from_timeout_failed and status == "completed"))
+            # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
+            # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
+            # failed 阻断回退 pending_review 保留人工 confirm done 路径）
             if status == "completed" and task.get("issue_id"):
                 try:
                     _ag = task.get("agent_type") or ""
@@ -2594,7 +2884,11 @@ def finalize_by_stream_end(task_id: str, fallback_text: str = "", exit_code: int
     task = get_task(task_id)
     if not task:
         return False
-    if task.get("status") in TASK_TERMINAL_STATUSES:
+    _st = task.get("status")
+    if _st == TASK_TIMEOUT_FAILED:
+        # Issue #1071（P2）：判死之后才回来的结果——走窄口子复活，其余终态照旧幂等返回。
+        return revive_timeout_task(task_id, fallback_text or "", exit_code, usage=usage or {})
+    if _st in TASK_TERMINAL_STATUSES:
         return False
     result_text = fallback_text or ""
     if task.get("self_reported") == 1 and task.get("result_text"):
@@ -2607,6 +2901,79 @@ def finalize_by_stream_end(task_id: str, fallback_text: str = "", exit_code: int
         except Exception:
             pass
     complete_task(task_id, result_text, exit_code, usage=usage or {})
+    return True
+
+
+def _is_pending_self_report_timeout(task: dict) -> bool:
+    """判死来源是否为「兜底超时」（sweep），而不是业务失败。
+
+    Issue #1071：复活是窄口子，来源必须钉死——
+    - 新行：sweep 写 errors 首元素 {"error_code": "PENDING_SELF_REPORT_TIMEOUT"}；
+    - 存量行（改动前判死）：没有 error_code 标记，按 sweep 写死的判死文案兜底识别。
+    业务失败（failed）永远走不到这里，2026-08-24 seq#2488 的「失败被成功覆盖」竞态不重开。
+    """
+    _errs = str(task.get("errors") or "")
+    if not _errs:
+        return False
+    if TIMEOUT_SOURCE_MARKER in _errs:
+        return True
+    return ("内未自报完成/失败" in _errs) or ("pending_self_report 超时" in _errs)
+
+
+def revive_timeout_task(task_id, result_text: str = "", exit_code: int = 0,
+                        usage: dict | None = None) -> bool:
+    """Issue #1071（P2）：迟到结果回收——判死后才回来的结构化结论不再永久丢弃。
+
+    准入（全部满足才复活，任一不满足返回 False 并记原因）：
+    1. 任务态 = timeout_failed（其它终态一律不动）；
+    2. 从未复活过（revived_at 为空）——只复活一次，防反复重放刷状态；
+    3. 判死时刻在 TIMEOUT_REVIVE_WINDOW_SECONDS 内（默认 30 分钟）；
+    4. 判死来源是兜底超时（见 _is_pending_self_report_timeout），不是业务失败；
+    5. 迟到结果含完整结构化产出（actions + conclusion），与 complete_task 既有判据一致。
+
+    通过后：状态回 running（清 completed_at/exit_code，落 revived_at）→ 交给 complete_task
+    走完整收尾（事件归档/事件改判/回帖/stage），事件侧 failed→completed 由
+    update_event_complete(revive_from_timeout_failed=True) 这一个窄口子放行。
+    """
+    task = get_task(task_id)
+    if not task or task.get("status") != TASK_TIMEOUT_FAILED:
+        return False
+    if task.get("revived_at"):
+        log.info(f"revive skipped: task {task_id} already revived at {task['revived_at']}")
+        return False
+    from src.api.event_store import parse_agent_output_json
+    _out = parse_agent_output_json(result_text or "")
+    if not (_out and _out.get("actions") and _out.get("conclusion")):
+        log.info(f"revive skipped: task {task_id} late result has no complete structured output")
+        return False
+    if not _is_pending_self_report_timeout(task):
+        log.info(f"revive skipped: task {task_id} was not failed by the timeout sweep "
+                 f"(business failure stays failed)")
+        return False
+    _dead_at = _epoch_of(task.get("completed_at"))
+    if _dead_at is not None:
+        _age = datetime.now(timezone.utc).timestamp() - _dead_at
+        if _age > TIMEOUT_REVIVE_WINDOW_SECONDS:
+            log.info(f"revive skipped: task {task_id} judged {_age:.0f}s ago "
+                     f"(window={TIMEOUT_REVIVE_WINDOW_SECONDS}s)")
+            return False
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE agent_tasks SET status='running', completed_at=NULL, exit_code=NULL, "
+            "revived_at=? WHERE id=? AND status='timeout_failed' "
+            "AND (revived_at IS NULL OR revived_at='')",
+            (datetime.now(timezone.utc).isoformat(), task_id)
+        )
+        _ok = c.rowcount > 0
+        db.commit()
+    if not _ok:
+        log.info(f"revive skipped: task {task_id} changed state concurrently")
+        return False
+    log.info(f"timeout revive: task {task_id} timeout_failed -> running "
+             f"(late structured result, re-finalizing)")
+    complete_task(task_id, result_text or "", 0 if exit_code is None else exit_code,
+                  usage=usage or {}, revive_from_timeout_failed=True)
     return True
 
 
@@ -3364,10 +3731,10 @@ async def _ingestion_loop():
                 except asyncio.TimeoutError:
                     break
             with db_lock:
-                for kind, tid, payload in batch:
+                for kind, tid, payload, seq_start in batch:
                     try:
                         if kind == "messages":
-                            report_messages(tid, payload)
+                            report_messages(tid, payload, seq_start=seq_start)
                         elif kind == "progress":
                             report_progress(tid, payload)
                     except Exception as e:
@@ -3386,24 +3753,31 @@ async def _ingestion_loop():
 _ASYNC_REPORT_QUEUE = None
 
 
-def enqueue_async_report(kind: str, task_id: str, payload):
-    """异步回报入队（队列满降级同步，不丢数据）。"""
+def enqueue_async_report(kind: str, task_id: str, payload, seq_start: int | None = None) -> dict | None:
+    """异步回报入队（队列满降级同步，不丢数据）。seq_start：Issue #975 批次 seq 预留起点。
+
+    返回（QA 复审，Spec #1）：同步兜底路径返回 report_messages 的实际落库回执
+    （dict）；走异步队列时返回 None（实际回执以服务端 report_messages 日志为准）。
+    """
     q = _ASYNC_REPORT_QUEUE
     if q is None:
         # 队列未启动 → 同步兜底
         if kind == "messages":
-            report_messages(task_id, payload)
+            return report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
-        return
+            return None
+        return None
     try:
-        q.put_nowait((kind, task_id, payload))
+        q.put_nowait((kind, task_id, payload, seq_start))
+        return None
     except Exception:
         # 队列满：同步降级
         if kind == "messages":
-            report_messages(task_id, payload)
+            return report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
+        return None
 
 
 async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 1.0) -> dict:
@@ -3579,6 +3953,17 @@ def reap_stale_runtimes() -> dict:
                     _cut = _recover_cutoff_for_agent(_agent_t or "")
                     if _started_at and _cut and _started_at >= _cut:
                         continue  # 该 agent 超时更宽（如 coding 7200s），未到其回收点
+                    # Issue #1071（P3）：回炉前查活性。引擎心跳断 ≠ 任务死——worker 还在
+                    # 写 task_messages 就说明它活着。不回炉的理由同上：回炉会把 started_at
+                    # 改写成新的认领时刻，老 worker 的 run_token 立刻失效 → 409 stale 永败。
+                    try:
+                        if task_recently_active(_task_id):
+                            log.info(f"reap_stale_runtimes: skip requeue task {_task_id} "
+                                     f"(recent task_messages activity, runtime offline)")
+                            continue
+                    except Exception as _ae:
+                        log.warning(f"reap_stale_runtimes: activity guard failed for "
+                                    f"task {_task_id}: {_ae}")
                     c.execute(
                         "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0,"
                         " attempts=attempts+1 WHERE id=? AND status='running'",

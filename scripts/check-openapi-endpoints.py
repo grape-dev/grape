@@ -7,11 +7,17 @@
    Issue #897 实测 v2.2.0 曾被 A 进程子集落盘覆盖丢失）；
 2. 版本间端点缩水——发布构建时校验 v2.x 契约不得删除 v2.(x-1) 基线中
    核心工作流前缀下的任何端点（子集覆盖/漂移再次发生时 CI 直接失败）。
+   基线 = 仓库内 checked-in 快照 help/api/openapi-baseline.json（上次发布的
+   正式契约；注意 help/api/openapi.json 是启动期生成物且被 .gitignore 忽略，
+   不能作 CI 基线——否则版本间比对在 CI 永远静默跳过、形同虚设）。
 
 用法（本地 / CI 通用，不启动服务、不落盘正式契约）：
     python3 scripts/check-openapi-endpoints.py [--baseline PATH]
+                                               [--require-baseline]
+                                               [--update-baseline]
 
-默认基线 help/api/openapi.json（存在才启用版本间比对）。
+--require-baseline：基线缺失/不可读时直接 FAIL（CI 必用，杜绝静默跳过版本间比对）。
+--update-baseline：全部校验通过后，把当前渲染契约写回基线文件（发布构建时刷新基线用）。
 退出码：0 通过；1 校验失败。
 """
 import argparse
@@ -87,7 +93,11 @@ def check_baseline_subset(current_paths: dict, baseline_paths: dict,
 
 
 def load_baseline(path: str):
-    """读取基线契约文件，返回 (paths, version) 或 (None, None)。"""
+    """读取基线契约文件，返回 (paths, version) 或 (None, None)。
+
+    基线缺失返回 (None, None) 交由调用方决定是否报错（--require-baseline）；
+    文件存在但不可读/非 JSON 属异常，直接 FAIL 退出。
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -119,8 +129,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="CI OpenAPI contract endpoint completeness check (Issue #897)")
     parser.add_argument(
-        "--baseline", default=os.path.join("help", "api", "openapi.json"),
-        help="baseline contract file (version-diff check skipped if absent)")
+        "--baseline", default=os.path.join("help", "api", "openapi-baseline.json"),
+        help="baseline contract file (checked-in snapshot of last released contract)")
+    parser.add_argument(
+        "--require-baseline", action="store_true",
+        help="fail when baseline file is missing (CI must set this so the "
+             "version-diff check can never be silently skipped)")
+    parser.add_argument(
+        "--update-baseline", action="store_true",
+        help="write the current rendered contract back to the baseline file "
+             "after all checks pass (refresh at release build time)")
     args = parser.parse_args()
 
     schema = build_current_contract()
@@ -133,11 +151,18 @@ def main() -> int:
     if baseline_paths:
         errors.extend(check_baseline_subset(
             current_paths, baseline_paths, current_version, baseline_version))
+    elif args.require_baseline:
+        errors.append(
+            f"baseline contract missing: {args.baseline} "
+            "(version-diff check cannot run; commit the released contract "
+            "snapshot or pass the correct --baseline path)")
 
     print(f"OpenAPI contract check: {len(current_paths)} paths, version={current_version}")
     if baseline_paths:
         print(f"  baseline: {args.baseline} ({len(baseline_paths)} paths, "
               f"version={baseline_version})")
+    else:
+        print("  baseline: none (version-diff check skipped)")
     for ep in CORE_WORKFLOW_ENDPOINTS:
         mark = "OK" if ep in current_paths else "MISSING"
         print(f"  [{mark}] {ep}")
@@ -148,6 +173,12 @@ def main() -> int:
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         return 1
+    if args.update_baseline:
+        with open(args.baseline, "w", encoding="utf-8") as f:
+            json.dump(schema, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        print(f"  baseline updated: {args.baseline} "
+              f"({len(current_paths)} paths, version={current_version})")
     print("OK: OpenAPI contract endpoint completeness check passed")
     return 0
 

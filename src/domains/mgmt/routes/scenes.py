@@ -1,6 +1,6 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
 import json, os, re, threading, time
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request, Response
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.kernel.config import log
@@ -186,17 +186,12 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     repo_key = _resolve_scene_repo_key(repo, user)
     scene_list = get_scenes(repo_key=repo_key)
 
-    # 构建 skill_name → display_name 映射，给每个 node 补 skill_display_name
-    # 这样前端查看模式直接用 node 上的 display_name，不依赖 dashboard API 绑定的 agent skill
-    skill_display_map = {}
-    try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
-            skill_display_map = {r[0]: r[1] or r[0] for r in c.fetchall()}
-    except Exception:
-        pass
+    # Issue #980：显示名解析统一走共用 skill_display 层（skill_id 优先 →
+    # (scope, skill_name) → user/repo 上下文 → official 兜底），三档同名技能
+    # 不再被 official 映射一律覆盖成官方名。
+    from src.api.skill_display import build_skill_display_map, resolve_node_skill_display
+    _uid_ctx = user.get("id", "")
+    skill_display_map = build_skill_display_map(repo_key=repo_key, user_id=_uid_ctx)
 
     result = []
     for s in scene_list:
@@ -206,39 +201,19 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
             cfg = {"name": s["name"], "nodes": nodes, "onboarding": s.get("onboarding") or "repo-onboarding"}
         else:
             cfg = get_pipeline_config(s["id"], repo_key=repo_key) or {}
-        # 给每个 node 补 skill_display_name
+        # 给每个 node 补 skill_display_name（Issue #980：node 带 skill_id 时
+        # 精确解析；否则按共用映射（含 user/repo/official 档位优先级））
         for n in (cfg.get("nodes") or []):
             _sk = n.get("skill", "")
-            n["skill_display_name"] = skill_display_map.get(_sk, _sk) if _sk else ""
-        # 需求中心事前拦截（用户思路）：创建需求前就知道场景引擎全灭。
-        # 对每个有 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids：
-        # 返回 None = 该节点绑定引擎全部离线。批量算好随场景返回，弹窗直接用。
-        # 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）。
-        # SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
-        # 与「配了引擎但全灭」区分开——前端提示换成「未选择机器」话术。
-        offline_nodes: list[str] = []
-        sre_unbound: bool = False
-        try:
-            from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _gspei
-            for n in (cfg.get("nodes") or []):
-                if not isinstance(n, dict):
-                    continue
-                _tag = n.get("tag") or n.get("id") or ""
-                _eids = n.get("engine_runtime_ids") or []
-                if not _tag or not _eids:
-                    # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
-                    if _tag and str(_tag).lower() == "sre":
-                        sre_unbound = True
-                    continue
-                if n.get("enabled") is False:
-                    continue
-                try:
-                    if _gspei(s["id"], _tag, repo_key=repo_key) is None:
-                        offline_nodes.append(str(_tag))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            if not _sk:
+                n["skill_display_name"] = ""
+                continue
+            _sid = n.get("skill_id") or 0
+            n["skill_display_name"] = resolve_node_skill_display(
+                _sk, _sid, skill_display_map, repo_key=repo_key, user_id=_uid_ctx)
+        # Issue #501: 引擎在线探测已从本接口移出——N 场景 × M 节点的探测改为
+        # 按需接口 GET /scenes/{scene_id}/engine-status（需求中心弹窗选中场景时才探测）。
+        # 本接口不再返回 offline_nodes/sre_unbound/all_offline。
         result.append({"id": s["id"], "name": s["name"],
                        "display_name": s.get("display_name") or s["name"],
                        "description": s.get("description") or "",
@@ -247,10 +222,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "scene_type": s.get("scene_type") or "standard",
                        "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
                        "linked_repos": s.get("linked_repos") or [],
-                       "offline_nodes": offline_nodes,
-                       "sre_unbound": sre_unbound,
-                       "all_offline": bool(offline_nodes) or sre_unbound,
-                       "pipeline": cfg})
+                                                                    "pipeline": cfg})
     return {"scenes": result}
 
 
@@ -1220,6 +1192,10 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     if check_scene_name_exists(name=body.name, scope=body.scope, repo_key=repo_key):
         raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
 
+    # Issue #955：市场场景写侧同样校验节点 id 角色枚举（market apply 会拷贝
+    # 节点进 repo 场景，不能留脏数据入库通道）
+    _validate_scene_node_roles(body.nodes)
+
     nodes_json = json.dumps(body.nodes, ensure_ascii=False)
 
     try:
@@ -1287,6 +1263,10 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
     if scene.get("scope") == "official":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可编辑"})
+
+    # Issue #955：市场场景更新同样校验节点 id 角色枚举（与 create 口径一致）
+    if body.nodes:
+        _validate_scene_node_roles(body.nodes)
 
     nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
 
@@ -1562,7 +1542,7 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
 
 
 
-@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
+@router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging). Response contract: each skill item exposes (skill_id, scope, skill_name) which together form the unique selection key for frontend consumers — official/repo/user scoped skills may share the same skill_name, so skill_name alone MUST NOT be used as a selection/cache key.")
 def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
                           q: str = "", scope: str = "", repo: str = "",
                           page: int = Query(1, ge=1, description="页码，从 1 开始"),
@@ -1610,6 +1590,10 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
             params + [page_size, offset],
         )
         for r in c.fetchall():
+            # Issue #978 契约固化：skill 表 UNIQUE(skill_name, scope, owner_id) 允许
+            # official/repo/user 三档同名技能共存；本响应中 (skill_id, scope, skill_name)
+            # 共同构成前端选择的唯一键（skill_id 优先，缺失时回退 (scope, skill_name)）。
+            # 前端（dashboard.js 技能下拉）不得再用裸 skill_name 作选中/缓存 key。
             skills.append({"skill_id": r[0], "skill_name": r[1], "display_name": r[2] or r[1], "scope": r[3], "owner_id": r[4] or "", "description": r[5] or "", "agent_type": r[6] or ""})
     return {"skills": skills, "total": total}
 
@@ -1620,6 +1604,7 @@ class SceneNodeInput(BaseModel):
     id: str
     tag: str = ""
     skill: str = ""
+    skill_id: int = 0  # Issue #979：权威技能标识（三档同名派发锁定）；0=仅名字（老场景，派发按名降级）
     mode: str = "emit"
     next: str = "done"
     handoff: str = "a2a"
@@ -1651,11 +1636,36 @@ class ApplySceneRequest(BaseModel):
     strict: bool = False  # Issue #524: true=任一节点 skipped（声明引擎不健康）时整单拒绝；默认部分应用
 
 
+def _validate_scene_node_roles(nodes: list):
+    """Issue #955：场景节点 id（角色名）枚举校验。
+
+    节点 id 必须属于已知 Agent 角色全集（engine_select.KNOWN_AGENT_ROLES，
+    含 chat），非法值 → 400（报错含非法值与合法全集），防止非标准角色名落库
+    导致派发引擎绑定静默失效（读侧按 id 优先匹配）。tag 保留为展示用阶段名
+    （可为中文等任意展示值），不参与角色匹配，存量场景不受影响。
+
+    Spec 注明（Issue #955）：空 id / 非 dict 节点静默放行——为兼容存量
+    tag-only 节点与历史数据（此类节点无角色名可校验，读侧走 tag 兜底）。
+    """
+    from src.runtime.engine_select import KNOWN_AGENT_ROLES
+    _roles = set(KNOWN_AGENT_ROLES)
+    for node in nodes:
+        _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
+        if _id and _id not in _roles:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"节点角色非法：'{_id}'（节点 id 必须为角色名），"
+                           f"合法角色：{', '.join(sorted(_roles))}"})
+
+
 def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """校验场景 nodes 的 engine_runtime_ids：
     1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
-    3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
+    3. 引擎必须有对应节点角色的能力标签（engine_capabilities.tag 或 'all' 通配，
+       Issue #955 follow-up：恢复 'all' 通配——存量引擎仅登记 'all' 一行，严格匹配
+       会误杀其场景引擎配置（实证：用户场景保存 sre 节点全量被拒）；#955 的节点
+       id 角色枚举校验保留，仅推翻"堵通配"这一点）
     4. SRE 节点：引擎必须为个人级或仓库级（scope=user 且 owner_id==当前用户，或
        scope=repo 且归属当前仓库——repo 归属由下方通用校验覆盖）
        （sre-repo-worker-relax §1.2，取代 sre-personal-machine §3.7 Q2/Q3）
@@ -1665,9 +1675,11 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import from_repo_key
+    from src.domains.runtime.engine.engine_select import node_agent_role
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
-        tag = node.get("tag") or node.get("id") or ""
+        # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
+        tag = node_agent_role(node)
         eids = node.get("engine_runtime_ids") or []
         if not tag:
             continue
@@ -1714,7 +1726,8 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                     raise HTTPException(status_code=400, detail={
                         "code": 400,
                         "message": f"节点 {tag} 的引擎 {_eid} 属于仓库 {_owner_norm}，不是当前仓库 {_repo_norm}"})
-            # 校验 tag 能力
+            # 校验角色能力（Issue #955 follow-up：按节点角色匹配，'all' 通配放行——
+            # 存量引擎能力表仅 'all' 行，严格匹配误杀，恢复宽匹配待角色数据面补齐后再收紧）
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -1754,7 +1767,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
 
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
-    _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key, user.get("username") or "")
+    _validate_scene_node_roles(nodes_json := [n.model_dump() for n in body.nodes])
+    _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
 
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     if body.pr_subscription_enabled:
@@ -1804,6 +1818,8 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
     nodes_json = [n.model_dump() for n in body.nodes]
+    # Issue #955：节点 id 角色枚举校验（非法角色 400）
+    _validate_scene_node_roles(nodes_json)
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
 
@@ -1872,6 +1888,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.kernel.repo_key import to_repo_key
     from src.kernel.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
+    from src.runtime.engine_select import node_agent_role
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
@@ -1893,7 +1910,9 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         # Issue #524: Pass 1——先逐节点解析引擎选择（只读，不落库），产出结构化回执
         _pending = []  # (node_receipt, agent_type, skill, runtime_id)
         for node in nodes:
-            agent_type = node.get("tag") or node.get("id", "")
+            # Issue #955：节点 id 即角色名（id 优先、tag 兜底）——tag 为中文阶段名
+            # 的节点在 apply 路径也按 id 角色解析引擎绑定，不再取展示 tag
+            agent_type = node_agent_role(node)
             skill = node.get("skill", "")
             if not agent_type or not skill:
                 continue
@@ -2123,11 +2142,15 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             _nf = normalize_custom_field(f)
             if not _nf.get("name"):
                 continue
-            # preset 项：scope/is_secret/preset 锁定展示；value 正常返回（前端按 is_secret 掩码）
+            # Issue #885: is_secret 字段不再明文返回——占位（value:"" + has_value 标记），
+            # 按需取回明文走 POST /{scene_id}/advanced-options/reveal（对齐 #474 模式）；
+            # 非 secret 字段保持明文返回（原行为）。
+            _is_sec = bool(_nf.get("is_secret"))
             _fields.append({
                 "name": _nf["name"],
-                "value": _nf.get("value", ""),
-                "is_secret": _nf.get("is_secret", False),
+                "value": "" if _is_sec else _nf.get("value", ""),
+                "is_secret": _is_sec,
+                "has_value": bool(_nf.get("value")),
                 "scope": _nf.get("scope", ["all"]),
                 "preset": _nf.get("preset", False),
                 "description": _nf.get("description", ""),
@@ -2147,6 +2170,110 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
     except Exception:
         pass
     return {"work_branch": "main", "custom_fields": [], "linked_repos": _linked_repos}
+
+
+# ===== Issue #885: 场景自定义变量密钥字段按需取回明文（对齐 #474 reveal 模式）=====
+# GET advanced-options 已收敛为占位（is_secret → value:"" + has_value）；
+# 需要查看明文时走本接口：密码二次确认 + 审计日志（不落明文）+ 当次返回
+# （Cache-Control: no-store）+ 高频取回限流（复用 #474 的 reveal 日志表，429）。
+class SceneAdvancedOptionsRevealBody(BaseModel):
+    name: str = ""       # custom_field 变量名（大写）
+    password: str = ""   # 二次确认：当前 Grape 密码
+
+
+@router.post("/{scene_id}/advanced-options/reveal", operation_id="scenes_advanced_options_reveal", summary="Reveal a scene custom-field secret once", description="Returns the plaintext value of one is_secret custom field once, after the user re-enters their Grape password. The response carries Cache-Control: no-store and a successful reveal is written to the audit log (scene/repo/field only, never the secret). Repeated reveals within a short window are rate-limited (429).")
+def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsRevealBody,
+                                   user: dict = Depends(require_no_session_token),
+                                   repo: str = "", request: Request = None, response: Response = None):
+    """按需取回场景自定义变量密钥明文（一次性，Issue #885）。
+
+    - 前置：repo 归属校验（check_repo_access）+ 场景存在 + 字段存在且 is_secret
+    - 二次确认：重新输入当前 Grape 密码（未设密码 → 400 + need_set_password）
+    - 审计：scene_secret_reveal，detail 仅含 scene_id/repo_key/name，不落明文值
+    - 明文仅当次返回：Cache-Control: no-store
+    - 高频告警：窗口内取回次数达到阈值 → 429（复用 #474 reveal 日志表计数）
+    """
+    from src.session_manager import db, db_lock
+    from src.scene_custom_env import normalize_custom_field
+    from src.api.routes.settings import (
+        _count_reveals_in_window, _record_reveal, _REVEAL_MAX_PER_WINDOW)
+    import json as _json
+
+    repo_key = ""
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "变量名不能为空"})
+
+    # 二次确认：重新输入当前密码（与 #474 reveal 一致，密码校验前置于字段枚举之前，
+    # 防止无正确密码探测密钥字段存在性/配置状态）
+    from src.auth.password import verify_password
+    from src.auth.grape_account_db import get_grape_account_by_id
+    account = get_grape_account_by_id(user["id"]) or {}
+    password_hash = account.get("password_hash") or ""
+    if not password_hash:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "请先设置 Grape 密码后再取回明文", "need_set_password": True})
+    if not verify_password(body.password or "", password_hash):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "当前密码错误"})
+
+    # 读取场景存储的 custom_fields（明文在库内，接口层不下发）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+    except Exception:
+        row = None
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+    try:
+        opts = _json.loads(row[0]) or {}
+    except Exception:
+        opts = {}
+
+    target = None
+    for f in (opts.get("custom_fields", []) or []):
+        _nf = normalize_custom_field(f) if isinstance(f, dict) else {}
+        if _nf.get("name") == name:
+            target = _nf
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"配置项 '{name}' 不存在"})
+    if not target.get("is_secret"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非密钥字段无需按需取回"})
+    value = target.get("value") or ""
+    if not value:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "该配置项未配置值"})
+
+    # 高频取回告警：窗口内已达阈值 → 拒绝并提示（复用 #474 计数表）
+    if _count_reveals_in_window(user["id"]) >= _REVEAL_MAX_PER_WINDOW:
+        ip = request.client.host if request and request.client else ""
+        log.warning(f"scene secret reveal high-frequency: user={user['id']} scene={scene_id} "
+                    f"repo={repo_key} field={name} ip={ip}")
+        raise HTTPException(status_code=429, detail={
+            "code": 429, "message": "明文取回过于频繁，请稍后再试"})
+
+    # 审计：谁/何时/取了哪个场景的哪个字段（detail 不含明文）
+    ip = request.client.host if request and request.client else ""
+    from src.auth import audit as auth_audit
+    auth_audit.log_audit("scene_secret_reveal", user_id=user["id"], ip=ip,
+                         detail={"scene_id": scene_id, "repo_key": repo_key, "name": name})
+    _record_reveal(user["id"], "scene_advanced_options", name, ip)
+
+    if response:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return {"name": name, "value": value}
 
 
 @router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
@@ -2260,9 +2387,10 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                 for f in (body.custom_fields or []) if isinstance(f, dict) and f.get("keep_value")
             }
             for _f in _custom_fields:
-                # keep_value（掩码未改）或 secret 空值（清空无效）→ 保留旧值
+                # keep_value（掩码未改）/ secret 空值或 "********" 掩码回显（清空无效；
+                # Issue #885 前端占位掩码回传）→ 保留旧值
                 if ((_f["name"] in _keep_map)
-                        or (_f.get("is_secret") and not _f.get("value"))) \
+                        or (_f.get("is_secret") and (not _f.get("value") or _f.get("value") == "********"))) \
                         and _f["name"] in _old_map:
                     _f["value"] = _old_map[_f["name"]]
         except Exception:

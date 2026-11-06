@@ -341,6 +341,24 @@ def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = 
 
 
 
+def resolve_scene_node_skill_id(repo_key: str, agent_type: str,
+                                scene_id: str = "", user_id: int = 0) -> int:
+    """读场景节点的 skill_id（Issue #979 权威派发标识）。
+
+    节点仅存 skill_name（老场景）或节点缺失 → 返回 0（调用方按名字降级）。
+    """
+    try:
+        from src.api.pipeline_config import get_node_by_tag
+        if not scene_id:
+            return 0
+        node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+        if node:
+            return int(node.get("skill_id") or 0)
+    except Exception as e:
+        log.warning(f"resolve_scene_node_skill_id failed: {e}")
+    return 0
+
+
 def _task_insert_row(_cols, **kw):
     """按 agent_tasks 列清单顺序组装 INSERT 值。
 
@@ -2135,16 +2153,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         skill_id = 0
         skill_path = skill_name
         _issue_scene = evt["_pr_sub_scene_id"]
+        # Issue #979: 节点 skill_id 权威优先；同时补传 user_id（此前 PR 订阅
+        # 只传 repo_key，个人同名技能被静默跳过落到 official）
+        _sub_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=_issue_scene,
+                                               user_id=_issue_scene_uid)
         try:
-            from src.domains.mgmt.user.db import resolve_skill_id, get_skill_by_id
-            _sid = resolve_skill_id(skill_name, repo_key=repo_key)
-            if _sid:
-                skill_id = _sid
-                _sk = get_skill_by_id(_sid)
-                if _sk:
-                    skill_path = _sk.get("skill_path") or skill_name
-        except Exception:
-            pass
+            from src.domains.mgmt.user.db import resolve_skill_dispatch
+            _res = resolve_skill_dispatch(skill_name, _sub_sid, repo_key=repo_key,
+                                          user_id=_issue_scene_uid,
+                                          scene_id=_issue_scene, node_tag="qa")
+            skill_id = _res["skill_id"]
+            if _res.get("skill_name"):
+                skill_name = _res["skill_name"]
+            if _res.get("skill_path"):
+                skill_path = _res["skill_path"]
+        except Exception as _se979:
+            log.warning(f"Pipeline (PR-sub): skill dispatch resolve failed: {_se979}")
         backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
         log.info(f"Pipeline (PR-sub): skill from scene nodes: {skill_name} sid={skill_id} (scene={_issue_scene})")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
@@ -2161,12 +2185,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         if _pipe_skill:
             skill_name = _pipe_skill
             # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
-            from src.domains.mgmt.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
-            _new_sid = resolve_skill_id(_pipe_skill, repo_key=repo_key, user_id=_issue_scene_uid)
-            if _new_sid:
-                skill_id = _new_sid
-                _sk = get_skill_by_id(_new_sid)
-                skill_path = (_sk.get("skill_path") or _pipe_skill) if _sk else _pipe_skill
+            # Issue #979: 节点 skill_id 权威优先（三档同名锁定用户选择的档位），
+            # 无 id/失效 → 名字降级（user→repo→official）+ warning
+            from src.domains.mgmt.user.db import resolve_skill_dispatch
+            _node_sid = resolve_scene_node_skill_id(repo_key, agent_type, scene_id=_issue_scene,
+                                                    user_id=_issue_scene_uid)
+            _res = resolve_skill_dispatch(_pipe_skill, _node_sid, repo_key=repo_key,
+                                          user_id=_issue_scene_uid,
+                                          scene_id=_issue_scene, node_tag=agent_type)
+            if _res["skill_id"]:
+                skill_id = _res["skill_id"]
+                skill_path = _res.get("skill_path") or _pipe_skill
             else:
                 skill_path = _pipe_skill
                 skill_id = 0
@@ -3336,7 +3365,8 @@ def get_prompt_context(repo_key: str) -> str:
 
 
 def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_name: str,
-                                evt: dict, issue_id: str, prompt: str) -> str:
+                                evt: dict, issue_id: str, prompt: str,
+                                engine_name: str = "") -> str:
     """组件4：direct 端统一物化 project-info / skill / knowledge 到工位 ws 下。
 
     替代旧的「占位符替换为服务端绝对路径（仓库级 project-info 原件 / 全局 SKILLS_DIR）」，
@@ -3439,6 +3469,25 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             else:
                 log.info(f"direct skill materialize {skill_name}: ok")
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
+        # Issue #887：direct 端执行前一致性校验（fail-fast 判定落 evt，_execute_agent
+        # 拒绝派发引擎）+ 来源标注（agent_logs）。绑定未物化且本地缓存存在其它技能 →
+        # ok=False（缓存不得覆盖绑定，拒绝执行）。键为 SKILL_CONSISTENCY_KEY 契约常量
+        # （scheduler direct 端同键消费，物化后判定，口径一致）。
+        _extra_dirs: list[str] = []
+        try:
+            from src.domains.runtime.engine.agent import _backend_for_engine
+            from src.domains.runtime.engine.os_adapter import engine_skill_dirs as _esd
+            _extra_dirs = _esd(_backend_for_engine(engine_name))
+        except Exception as _ede:
+            log.warning(f"direct skill consistency: engine skill dirs resolve "
+                        f"failed for engine '{engine_name}': {_ede}")
+        try:
+            from src.domains.runtime.engine.skill_materialize import (
+                verify_skill_execution_consistency, SKILL_CONSISTENCY_KEY)
+            evt[SKILL_CONSISTENCY_KEY] = verify_skill_execution_consistency(
+                skill_name or "", skill_dir, extra_scan_dirs=_extra_dirs)
+        except Exception as _sc_e:
+            log.warning(f"direct skill consistency verify failed: {_sc_e}")
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
         evt["_skill_materialize"] = {"status": "degraded", "detail": str(e), "skill_dir": ""}
@@ -4057,10 +4106,17 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     R20.29.4: redispatch 时 token 短路返回空 → 新 task 行 repo_gitcode_token=空 → agent 运行时实时获取。
     Issue #565: bot 建单只做场景判定（scene_id 已写库），不进执行棒——evt 带 _bot_opened
     标记时短路，不重派 VOD 执行流（不派 issue/coding 棒）。
+    2026-11-04 反转：默认放开（GRAPE_BOT_OPENED_FULL_PIPELINE=1），bot 建单推荐完成后
+    照常重派 VOD 跑完整流水线；仅当开关显式置 0 时回退旧的 scene-only 短路。
     """
-    if evt.get("_bot_opened"):
-        log.info(f"智能推荐完成: bot-opened issue {issue_id}, scene-only, skip redispatch (Issue #565)")
+    from src.kernel.config import GRAPE_BOT_OPENED_FULL_PIPELINE as _bot_full_pipeline
+    if evt.get("_bot_opened") and not _bot_full_pipeline:
+        log.info(f"智能推荐完成: bot-opened issue {issue_id}, scene-only, skip redispatch (Issue #565, "
+                 f"GRAPE_BOT_OPENED_FULL_PIPELINE=0)")
         return
+    if evt.get("_bot_opened"):
+        log.info(f"智能推荐完成: bot-opened issue {issue_id}, full pipeline enabled "
+                 f"(GRAPE_BOT_OPENED_FULL_PIPELINE=1), redispatch VOD")
     from src.api.event_store import append_event
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name
     from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode

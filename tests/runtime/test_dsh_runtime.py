@@ -223,4 +223,53 @@ def test_parse_full_real_stream(rt):
     assert kinds.count("step_finish") == 2              # 两个 step 各一次
     assert tokens == 5947 + 6015                        # token 可累加
     assert "9.9.9" in "".join(texts)                    # 答案文本在 text 流里
-    assert kinds[-1] != "text"                          # final 未被当作 text 重复
+    assert kinds[-1] != "text"                          # final 未被当作 text 重复# ===== env 收尾钩子：token 穿透必须在 env_extra 合并之后 =====
+#
+# 背景（回归测试）：#948 把「写 GRAPE_AUTH_FILE 临时文件」的逻辑放进了 get_env()，
+# 但 GRAPE_SESSION_TOKEN 是任务级的、存在 agent_tasks.env_extra 里，
+# executor.py 的顺序是 get_env() → env.update(env_extra) → Popen()。
+# 于是在 get_env() 里读 token 永远是空串，临时文件从未生成，
+# dsh 的 bash 工具被 /TOKEN/i scrub 后拿不到凭据 → agent 报「前置检查未通过」。
+# 修法：抽出 prepare_env(env) 钩子，由 executor 在 env_extra 合并之后调用。
+
+
+def test_get_env_does_not_create_auth_file(rt):
+    """get_env 阶段没有任务级 token，不该产出 GRAPE_AUTH_FILE。"""
+    env = rt.get_env()
+    assert "GRAPE_AUTH_FILE" not in env
+
+
+def test_prepare_env_writes_token_file_after_merge(rt, tmp_path):
+    """env_extra 合并后调用 prepare_env，应生成 0600 文件且内容为 token。"""
+    import os
+
+    env = rt.get_env()
+    env.update({"GRAPE_SESSION_TOKEN": "tk_regression_token"})
+    rt.prepare_env(env)
+
+    auth_file = env.get("GRAPE_AUTH_FILE")
+    assert auth_file, "prepare_env 应设置 GRAPE_AUTH_FILE"
+    assert os.path.exists(auth_file)
+    assert oct(os.stat(auth_file).st_mode & 0o777) == "0o600"
+    with open(auth_file) as f:
+        assert f.read() == "tk_regression_token"
+    os.unlink(auth_file)
+
+
+def test_prepare_env_noop_without_token(rt):
+    """没有 token 时不生成文件（其他引擎同样适用，走 env fallback）。"""
+    env = rt.get_env()
+    rt.prepare_env(env)
+    assert "GRAPE_AUTH_FILE" not in env
+
+
+def test_prepare_env_survives_unwritable_temp(rt, monkeypatch):
+    """写文件失败不阻断执行（保持 fallback 到 env 变量）。"""
+    def boom(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("tempfile.mkstemp", boom)
+    env = rt.get_env()
+    env.update({"GRAPE_SESSION_TOKEN": "tk_x"})
+    rt.prepare_env(env)  # 不应抛
+    assert "GRAPE_AUTH_FILE" not in env

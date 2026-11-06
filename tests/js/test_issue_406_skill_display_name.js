@@ -24,14 +24,23 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const DASHBOARD_JS = path.join(ROOT, 'src/api/static/js/pages/dashboard.js');
 
 // ── 与 dashboard.js selectAgentSkill 保持一致的纯函数提取 ──
-// 输入：editNodes 数组、_skillPickCache（agentType -> {skill_name: display_name}）、agentType、skillName
+// Issue #978：缓存结构改为 唯一键 -> {name, display}，选中优先按唯一键（skillKey）命中，
+// 无 key 时按 name 兜底（保持单同名场景旧行为）。
+// 输入：editNodes 数组、_skillPickCache（agentType -> {唯一键: {name, display}}）、agentType、skillName、skillKey
 // 副作用：原地修改 editNodes 中匹配 node 的 skill / skill_display_name
-function selectAgentSkill(editNodes, _skillPickCache, agentType, skillName) {
+function selectAgentSkill(editNodes, _skillPickCache, agentType, skillName, skillKey) {
   const node = editNodes.find(n => n.id === agentType);
   if (!node) return;
   node.skill = skillName || '';
   var cache = (_skillPickCache || {})[agentType] || {};
-  node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+  var entry = skillKey ? cache[skillKey] : null;
+  if (!entry && skillName) {
+    Object.keys(cache).some(function(k) {
+      if (cache[k] && cache[k].name === skillName) { entry = cache[k]; return true; }
+      return false;
+    });
+  }
+  node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
 }
 
 // 与 toggleAgentInScene 保持一致（禁用分支）
@@ -51,9 +60,9 @@ function mkNode(id, skill, displayName, enabled) {
 // ── 测试 ──
 
 function testSelectWritesDisplayName() {
-  const cache = { vod: { 'vod-cli': '开发者声音分析（CLI版）' } };
+  const cache = { vod: { 'id:1': { name: 'vod-cli', display: '开发者声音分析（CLI版）' } } };
   const editNodes = ['vod', 'issue', 'coding', 'qa', 'sre'].map(at => mkNode(at));
-  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli');
+  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli', 'id:1');
   const vod = editNodes.find(n => n.id === 'vod');
   assert.strictEqual(vod.skill, 'vod-cli', 'node.skill 应为内部 id vod-cli');
   assert.strictEqual(vod.skill_display_name, '开发者声音分析（CLI版）', 'node.skill_display_name 应为缓存中的显示名');
@@ -61,10 +70,10 @@ function testSelectWritesDisplayName() {
 }
 
 function testSelectClearAlsoClearsDisplayName() {
-  const cache = { vod: { 'vod-cli': '开发者声音分析（CLI版）' } };
+  const cache = { vod: { 'id:1': { name: 'vod-cli', display: '开发者声音分析（CLI版）' } } };
   const editNodes = ['vod', 'issue', 'coding', 'qa', 'sre'].map(at => mkNode(at));
   // 先选中
-  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli');
+  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli', 'id:1');
   // 再清除（data-name='' 对应「清除选择」行）
   selectAgentSkill(editNodes, cache, 'vod', '');
   const vod = editNodes.find(n => n.id === 'vod');
@@ -101,10 +110,10 @@ function testNodeNotFoundSafe() {
 // ── 核心回归场景：Issue #406 复现链路模拟 ──
 function testReproIssue406_DisplayNameSurvivesToggle() {
   // 模拟创建模式：VOD 选 vod-cli → 禁用 SRE → VOD skill_display_name 不丢失
-  const cache = { vod: { 'vod-cli': '开发者声音分析（CLI版）' } };
+  const cache = { vod: { 'id:1': { name: 'vod-cli', display: '开发者声音分析（CLI版）' } } };
   const editNodes = ['vod', 'issue', 'coding', 'qa', 'sre'].map(at => mkNode(at));
   // 1. 用户为 VOD 选「开发者声音分析（CLI版）」
-  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli');
+  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli', 'id:1');
   const vodAfterSelect = editNodes.find(n => n.id === 'vod');
   assert.strictEqual(vodAfterSelect.skill_display_name, '开发者声音分析（CLI版）');
   // 2. 用户禁用 SRE
@@ -132,14 +141,14 @@ function testToggleClearsDisplayNameOnDisable() {
 // ── 任意 skill 在启用/禁用其他角色后显示名不退化（验收第 2 条） ──
 function testOtherAgentsToggleDontDegradeVOD() {
   const cache = {
-    vod: { 'vod-cli': '开发者声音分析（CLI版）' },
-    coding: { 'coding-default': '代码实现' },
-    qa: { 'qa-review': '代码审查' }
+    vod: { 'id:1': { name: 'vod-cli', display: '开发者声音分析（CLI版）' } },
+    coding: { 'id:2': { name: 'coding-default', display: '代码实现' } },
+    qa: { 'id:3': { name: 'qa-review', display: '代码审查' } }
   };
   const editNodes = ['vod', 'issue', 'coding', 'qa', 'sre'].map(at => mkNode(at));
-  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli');
-  selectAgentSkill(editNodes, cache, 'coding', 'coding-default');
-  selectAgentSkill(editNodes, cache, 'qa', 'qa-review');
+  selectAgentSkill(editNodes, cache, 'vod', 'vod-cli', 'id:1');
+  selectAgentSkill(editNodes, cache, 'coding', 'coding-default', 'id:2');
+  selectAgentSkill(editNodes, cache, 'qa', 'qa-review', 'id:3');
   // 轮流禁用/启用其他角色
   ['coding', 'qa', 'sre'].forEach(at => {
     toggleAgentDisable(editNodes, at);
@@ -166,7 +175,7 @@ function testRenderEditFlowCardsPrioritizesDisplayName() {
 function testBothSelectAgentSkillImplsWriteDisplayName() {
   const src = readSrc();
   // 两处 selectAgentSkill 实现都应写 node.skill_display_name
-  const matches = src.match(/node\.skill_display_name = skillName \? \(cache\[skillName\] \|\| skillName\) : ''/g) || [];
+  const matches = src.match(/node\.skill_display_name = skillName \? \(\(entry && entry\.display\) \|\| skillName\) : ''/g) || [];
   assert.strictEqual(matches.length, 2, 'selectAgentSkill 应有两处实现均写 node.skill_display_name（编辑模式 + 创建模式）');
   console.log('  PASS: 两处 selectAgentSkill 实现均写 skill_display_name（编辑 + 创建模式）');
 }

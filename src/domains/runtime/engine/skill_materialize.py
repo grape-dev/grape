@@ -30,6 +30,26 @@ except Exception:  # pragma: no cover
 
 TMP_PREFIX = ".tmp"
 
+FALLBACK_FILENAME = "FALLBACK.md"
+
+# Issue #1070：跨技能前缀引用一次性 INFO 日志去重（同进程同技能只记一次）。
+_CROSS_SKILL_LOGGED: set = set()
+
+
+def _extract_cross_skill_prefix(ref: str, skill_name: str) -> str:
+    """Issue #1070：判定 references 引用是否带跨技能前缀。
+
+    返回非空串 = 跨技能前缀（如 ``other-skill/``），应从本技能校验清单排除；
+    返回空串 = 本技能自有引用（无前缀，或前缀即本技能自身目录名）。
+    """
+    head = ref.split("references/", 1)[0]
+    if not head:
+        return ""
+    owner = head.rstrip("/").rsplit("/", 1)[-1]
+    if owner and owner != skill_name:
+        return owner
+    return ""
+
 
 def _rmtree_safe(path: str):
     try:
@@ -39,18 +59,40 @@ def _rmtree_safe(path: str):
         pass
 
 
-def parse_skill_md_references(skill_md_path: str) -> list:
-    """解析 SKILL.md 正文中引用的 references/ 相对路径（去重保序）。"""
+def parse_skill_md_references(skill_md_path: str, skill_name: str = "") -> list:
+    """解析 SKILL.md 正文中引用的 references/ 相对路径（去重保序）。
+
+    Issue #1070：带跨技能前缀的引用（如 ``other-skill/references/x.md``，前缀
+    技能目录 ≠ 本技能自身目录）不在本技能 zip 包内（设计如此，运行时经
+    ``grape skills detail`` / 平台 API 按需获取），直接排除出本技能校验清单，
+    并记一次性 INFO 日志；仅对本技能自有 references 文件保留校验。
+    """
     refs = []
+    skill_name = (skill_name
+                  or os.path.basename(os.path.dirname(os.path.abspath(skill_md_path)))
+                  or "").strip()
+    skipped = 0
     try:
         with open(skill_md_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
     except Exception:
         return refs
-    for m in re.finditer(r"(?:[\w./-]*?/)?(references/[\w./-]+\.[\w]+)", text):
-        r = m.group(1).strip()
-        if r and r not in refs:
+    for m in re.finditer(r"(?:([\w.-]+)/)?(references/[\w./-]+\.[\w]+)", text):
+        prefix = m.group(1) or ""
+        r = m.group(2).strip()
+        if not r:
+            continue
+        if prefix and prefix != skill_name:
+            # 跨技能前缀引用（含 ``docs/references/...`` 等路径段前缀）：跳过校验
+            skipped += 1
+            continue
+        if r not in refs:
             refs.append(r)
+    if skipped and skill_name:
+        key = f"{skill_name}:{skill_md_path}"
+        if key not in _CROSS_SKILL_LOGGED:
+            _CROSS_SKILL_LOGGED.add(key)
+            _log.info(f"[skill] skipped {skipped} cross-skill refs for skill {skill_name}")
     return refs
 
 
@@ -262,4 +304,129 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary) 
 
     result["status"] = "degraded"
     result["detail"] = _fb_reason
+    return result
+
+
+def _scan_materialized_skills(skill_dir: str) -> list:
+    """扫描 skill_dir 下已物化（含 SKILL.md）的技能名列表（Issue #887）。"""
+    skills = []
+    try:
+        for entry in sorted(os.listdir(skill_dir)):
+            if entry.startswith(TMP_PREFIX):
+                continue
+            if os.path.isfile(os.path.join(skill_dir, entry, "SKILL.md")):
+                skills.append(entry)
+    except Exception:
+        pass
+    return skills
+
+
+# Issue #887：evt 携带一致性判定结果的契约键（event_pipeline / scheduler 共用，
+# 消除跨 ~500 行的魔法字符串隐式耦合；缺失时调用方显式降级放行 + 告警）。
+SKILL_CONSISTENCY_KEY = "_skill_consistency"
+
+
+def skill_mismatch_error(sv: dict) -> str:
+    """Issue #887：一致性拒绝错误消息（worker/direct/autopilot 三处共用单一实现）。
+
+    sv 为 verify_skill_execution_consistency 返回值；统一 `[skill_mismatch] <reason>`
+    格式，避免各调用点手写拼接漂移。
+    """
+    _reason = (sv or {}).get("reason") or "skill consistency check failed"
+    return f"[skill_mismatch] {_reason}"
+
+
+def verify_skill_execution_consistency(skill_name: str, skill_dir: str,
+                                       skill_fallback: dict | None = None,
+                                       extra_scan_dirs: list | None = None) -> dict:
+    """Issue #887：执行前「即将执行的 skill」与 agent 绑定一致性校验（fail-fast 判定）。
+
+    服务端（event_pipeline._materialize_direct_workdir / scheduler direct）与
+    worker（agent.py _execute_task 执行前硬校验）两侧共用，零 DB 依赖。
+
+    extra_scan_dirs（QA 修复）：引擎原生技能目录（os_adapter.engine_skill_dirs /
+    opencode SKILLS_DIR 等）——worker 门必须连同引擎原生缓存一起判定，否则
+    seq=46108 的残留（casegen-prep）落在引擎原生缓存而非 ws/.skills 时漏检。
+
+    语义（对齐 Issue #887 Spec）：
+    - 绑定 skill 已物化（skill_dir/<bound>/SKILL.md 存在）→ actual=bound，ok（source=bound）；
+    - 绑定为空 → ok（source=unbound，引擎本地缓存仅绑定为空时兜底）；
+    - 服务端明示回退（#617 claim 下发的 skill_fallback）已物化 → ok（source=declared_fallback，
+      mismatch=True 显式标注，不静默）；
+    - 绑定未物化但引擎原生缓存持有同名技能 → ok（source=engine_native，引擎将按
+      绑定名从原生缓存加载，内容与绑定一致，显式标注可观测）；
+    - 绑定未物化且 skill_dir 本地缓存存在**其它**技能 → NOT ok（source=local_cache，
+      引擎将随本地缓存跑错技能——events seq=46108：绑定 caserun-prep 实际执行
+      casegen-prep，静默跳过环境硬校验；缓存不得覆盖仓库级/场景级绑定 → 拒绝执行）；
+    - 绑定未物化、skill_dir 无其它技能但引擎原生缓存存在其它技能且无 FALLBACK.md
+      降级指引 → NOT ok（source=engine_native，actual=原生缓存首个其它技能——
+      绑定技能无处可加载而引擎原生缓存将驱动执行，即 seq=46108 的原生缓存残留
+      场景，静默跑错技能风险 → 拒绝执行）；
+    - 绑定未物化且无其它本地技能（仅 FALLBACK.md 降级指引/空目录）→ ok
+      （source=degraded_recovery，#607 权威取回路径，actual 仍为绑定值）；
+    - 绑定未物化且任何缓存均无技能内容 → ok（source=missing，无可跑偏内容）。
+
+    返回 dict {"ok": bool, "bound": str, "actual": str, "source": str,
+               "reason": str, "local_cache": list}。
+    """
+    bound = (skill_name or "").strip()
+    result = {"ok": True, "bound": bound, "actual": bound,
+              "source": "bound", "reason": "", "local_cache": []}
+    if not bound:
+        result.update({"actual": "", "source": "unbound",
+                       "reason": "no bound skill; engine local cache may apply as fallback"})
+        return result
+    from src.runtime.health import check_skill_consistency
+    if os.path.isfile(os.path.join(skill_dir, bound, "SKILL.md")):
+        result["reason"] = "bound skill materialized"
+        return result
+    _fb_name = str(((skill_fallback or {}).get("skill_name")) or "").strip()
+    if _fb_name and os.path.isfile(os.path.join(skill_dir, _fb_name, "SKILL.md")):
+        _chk = check_skill_consistency(bound, _fb_name, declared=True)
+        result.update({"actual": _fb_name, "source": "declared_fallback",
+                       "ok": _chk["ok"], "reason": _chk["detail"]})
+        return result
+    # 引擎原生缓存（extra_scan_dirs）：绑定同名技能存在 → 引擎按绑定名加载，内容一致
+    _extra = [d for d in (extra_scan_dirs or []) if d and os.path.isdir(d)]
+    _extra_others: list[str] = []
+    for _d in _extra:
+        _extra_others.extend(s for s in _scan_materialized_skills(_d) if s != bound)
+    # 绑定未物化：任务技能目录本地缓存若存在其它技能，执行将由缓存决定 → 拒绝（fail-fast）
+    # （seq=46108 原始场景：残留优先于 FALLBACK.md，杜绝静默跑错流程）
+    _others = [s for s in _scan_materialized_skills(skill_dir) if s != bound]
+    if _others:
+        result.update({"ok": False, "actual": _others[0], "source": "local_cache",
+                       "reason": (f"bound skill '{bound}' not materialized while local skill "
+                                  f"cache holds other skill(s) [{', '.join(_others[:5])}]; "
+                                  f"refusing execution to prevent silent wrong-skill run "
+                                  f"(Issue #887)"),
+                       "local_cache": _others})
+        return result
+    if os.path.isfile(os.path.join(skill_dir, bound, FALLBACK_FILENAME)):
+        result.update({"source": "degraded_recovery",
+                       "reason": ("bound skill not materialized; FALLBACK.md instructs "
+                                  "authoritative fetch via `grape skills detail` "
+                                  "(Issue #607 recovery, actual stays bound)"),
+                       "local_cache": _extra_others[:10]})
+        return result
+    if any(os.path.isfile(os.path.join(_d, bound, "SKILL.md")) for _d in _extra):
+        result.update({"source": "engine_native",
+                       "reason": ("bound skill not materialized in task skill dir but "
+                                  "present in engine native skill cache; engine loads "
+                                  "the bound skill by name (Issue #887)"),
+                       "local_cache": _extra_others[:10]})
+        return result
+    # 引擎原生缓存残留（seq=46108 原生缓存版）：绑定无处可加载 + 原生缓存持有其它
+    # 技能 + 无 FALLBACK.md 权威取回指引 → 引擎将随原生缓存跑错技能 → 拒绝。
+    if _extra_others:
+        result.update({"ok": False, "actual": _extra_others[0], "source": "engine_native",
+                       "reason": (f"bound skill '{bound}' not materialized anywhere while "
+                                  f"engine native skill cache holds other skill(s) "
+                                  f"[{', '.join(_extra_others[:5])}]; refusing execution "
+                                  f"to prevent silent wrong-skill run (Issue #887)"),
+                       "local_cache": _extra_others[:10]})
+        return result
+    result.update({"source": "missing",
+                   "reason": "bound skill not materialized and no local cache content; "
+                             "prompt instructs authoritative fetch"})
     return result

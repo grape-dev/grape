@@ -354,6 +354,129 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     }
 
 
+def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
+    """Issue #648 性能修复：按仓库前缀一次 ListObjects 拉全量附件清单，内存按 issue 编号分组。
+
+    原实现（_issue_attachments）逐卡调一次 OBS list（~16-110ms），几百卡串行 = 十几秒，
+    是需求中心列表接口慢的根因（#648 引入）。OBS/本地两种后端均走 storage 一次前缀枚举。
+    返回 {issue_number_str: [ {filename,url,size,is_image}, ... ]}，无附件的编号不在 map 中。
+    分页 cursor 循环拉全量（OBS 单次 max_keys=1000）。
+    """
+    result: dict[str, list[dict]] = {}
+    for rk in repo_keys or []:
+        try:
+            from src.repo_key import split_owner_repo
+            owner, rname = split_owner_repo(rk)
+        except Exception as e:
+            log.warning(f"issues: attachments batch skip bad repo_key={rk}: {e}")
+            continue
+        try:
+            from src.storage import get_storage
+            from src.api.issues_center import _ATTACH_IMAGE_EXTS
+            import os as _os
+            storage = get_storage()
+            if storage:
+                from src.api.issues_center import _attach_obs_key
+                # 仓库级前缀：{PREFIX}/issue_attachments/{owner}/{repo}/
+                # list_objects_with_meta 返回的 key 已剥 OBS_PREFIX，形如
+                # issue_attachments/{owner}/{repo}/{issue_number}/{filename}
+                prefix_key = _attach_obs_key(owner, rname, "", "").rstrip("/")
+                _prefix = prefix_key.rsplit("issue_attachments/", 1)[-1]
+                _prefix = f"issue_attachments/{_prefix}".rstrip("/") + "/"
+                _items: list[dict] = []
+                _cursor: str | None = ""
+                while _cursor is not None:
+                    page, _cursor = storage.list_objects_with_meta(_prefix, cursor=_cursor, limit=1000)
+                    _items.extend(page or [])
+                for item in _items:
+                    # key 形如 issue_attachments/{owner}/{repo}/{issue_number}/{filename}
+                    rel = (item.get("key") or "")
+                    if rel.startswith(_prefix):
+                        rel = rel[len(_prefix):]
+                    parts = rel.split("/", 1)
+                    if len(parts) != 2 or not parts[0] or not parts[1]:
+                        continue
+                    num, fname = parts
+                    ext = _os.path.splitext(fname)[1].lower()
+                    result.setdefault(num, []).append({
+                        "filename": fname,
+                        "url": storage.temporary_url(item["key"], expires=7 * 24 * 3600),
+                        "size": item.get("size", 0),
+                        "is_image": ext in _ATTACH_IMAGE_EXTS,
+                    })
+            else:
+                # 本地磁盘后端：一次 listdir 顶层目录 = 全部 issue 编号
+                from src.api.issues_center import _attach_base_dir
+                from src.user.db import get_browser_callback_url as _bcb
+                _base_url = (_bcb() or "").rstrip("/")
+                base = _attach_base_dir(owner, rname, "")
+                if _os.path.isdir(base):
+                    for num in _os.listdir(base):
+                        d = _os.path.join(base, num)
+                        if not _os.path.isdir(d):
+                            continue
+                        for fname in sorted(_os.listdir(d)):
+                            fpath = _os.path.join(d, fname)
+                            if not _os.path.isfile(fpath):
+                                continue
+                            ext = _os.path.splitext(fname)[1].lower()
+                            result.setdefault(str(num), []).append({
+                                "filename": fname,
+                                "url": f"{_base_url}/static/issue_attachments/{owner}/{rname}/{num}/{fname}",
+                                "size": _os.path.getsize(fpath),
+                                "is_image": ext in _ATTACH_IMAGE_EXTS,
+                            })
+        except Exception as e:
+            log.warning(f"issues: attachments batch failed repo={rk}: {e}")
+            continue
+    return result
+
+
+def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
+    """Issue #648：聚合 issue 附件（复用 issues_center._attach_list，不新建存储）。
+
+    只取已建单附件目录（str(issue_number)），pending 为建单前临时目录不入 issue 维度，
+    避免跨 issue 污染。按 repo_key 顺序探测，首个命中即返回；异常/无附件降级为空列表，
+    不阻塞详情/列表主流程。
+    """
+    if issue_number is None or str(issue_number).strip() == "":
+        return []
+    from src.api.issues_center import _attach_list
+    from src.repo_key import split_owner_repo
+    for rk in repo_keys or []:
+        try:
+            owner, rname = split_owner_repo(rk)
+            atts = _attach_list(owner, rname, str(issue_number))
+        except Exception as e:
+            log.warning(f"issues: list attachments failed repo={rk} #{issue_number}: {e}")
+            continue
+        if atts:
+            return atts
+    return []
+
+
+def _issue_attachments_count(repo_keys: list[str], issue_number) -> int:
+    """Issue #926：仅取附件数量（分页瘦身专用）。
+
+    与 _issue_attachments 同探测口径（按 repo_key 顺序，首个命中即返回），
+    但跳过 _attach_list 的 URL 预签名/元数据构造，深列表页 I/O 显著低于全量取清单。
+    """
+    if issue_number is None or str(issue_number).strip() == "":
+        return 0
+    from src.api.issues_center import _attach_count
+    from src.repo_key import split_owner_repo
+    for rk in repo_keys or []:
+        try:
+            owner, rname = split_owner_repo(rk)
+            n = _attach_count(owner, rname, str(issue_number))
+        except Exception as e:
+            log.warning(f"issues: count attachments failed repo={rk} #{issue_number}: {e}")
+            continue
+        if n:
+            return n
+    return 0
+
+
 def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
     """读 event.json 组装 pipeline 路线图（跨 provider 双查）。"""
     from src.api.event_archive import load_event_json
@@ -1514,7 +1637,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
     content = await file.read()
     if len(content) > _ATTACH_MAX_SIZE:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"文件大小超过 {_ATTACH_MAX_SIZE // (1024 * 1024)}MB 限制"})
     import uuid
     safe_name = f"{uuid.uuid4().hex}{ext}"
     dir_name = str(issue_number) if issue_number else "pending"
@@ -1585,7 +1708,7 @@ async def pre_upload_attachment(file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的文件类型: {ext}"})
     content = await file.read()
     if len(content) > _ATTACH_MAX_SIZE:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "文件大小超过 50MB 限制"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"文件大小超过 {_ATTACH_MAX_SIZE // (1024 * 1024)}MB 限制"})
     import uuid
     safe_name = f"{uuid.uuid4().hex}{ext}"
     url = _attach_save(owner, rname, "pending", safe_name, content)
@@ -1654,17 +1777,63 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
     _order_by = f"created_at {_order_dir}"
     if mode == "default":
-        _order_by = f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 ELSE 2 END, created_at {_order_dir}"
+        # Issue #926：与 issues_list / _merge_sort_items 同源（_status_order_sql），
+        # 修复旧版仅 3 桶（active/processing/else）与 Python 4 级优先序口径不一致
+        _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
     issues_out = _query_tasks(where, params, _order_by, include_user_id=False)
     return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
 
 
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set).")
+_STATUS_PRIORITY = {"active": 0, "processing": 1, "awaiting_input": 2, "pending_review": 3}
+
+
+def _status_order_sql() -> str:
+    """Issue #926：default 模式状态优先序的 SQL CASE 片段（单一事实源）。
+
+    与 Python 侧 _STATUS_PRIORITY 同源派生（终态兜底 4），消除 SQL CASE /
+    _STATUS_PRIORITY / 前端映射三处口径复制导致的霰弹式同改风险。
+    """
+    _cases = " ".join(
+        f"WHEN status='{_st}' THEN {_pr}"
+        for _st, _pr in sorted(_STATUS_PRIORITY.items(), key=lambda kv: kv[1])
+    )
+    return f"CASE {_cases} ELSE 4 END"
+
+
+def _merge_sort_items(items: list[dict], mode: str, sort_order: str) -> None:
+    """Issue #926：与 SQL _order_by 对齐的就地稳定排序（issue 行 + PR 伪卡片统一合并口径）。
+
+    两次稳定排序复刻 SQL「CASE 优先级 ASC, created_at DESC/ASC」：
+    先按 created_at（方向取 sort_order），再按状态优先级（恒 ASC）稳定覆盖分组。
+    mode=time 时仅按 created_at 排序。
+    """
+    items.sort(key=lambda it: str(it.get("created_at") or ""), reverse=(sort_order == "desc"))
+    if mode != "time":
+        items.sort(key=lambda it: _STATUS_PRIORITY.get(it.get("status") or "", 4))
+
+
+def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[dict]:
+    """Issue #926：PR 伪卡片与 issue 行同口径的服务端过滤（q / statuses）。"""
+    out = pr_items
+    if statuses_set:
+        out = [it for it in out if (it.get("status") or "pending") in statuses_set]
+    if q:
+        _needle = q.lower()
+        out = [it for it in out
+               if _needle in str(it.get("title") or "").lower()
+               or _needle in str(it.get("issue_number") or "")]
+    return out
+
+
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                      mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
-                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                     assignees: str = Query("", description="按责任人筛选(逗号分隔)"),
+                     creators: str = Query("", description="按创建人筛选(逗号分隔, Issue #805)"),
+                     q: str = Query("", max_length=200, description="Issue #926：标题/编号模糊搜索（服务端过滤）"),
+                     statuses: str = Query("", max_length=200, description="Issue #926：多状态筛选（逗号分隔 issue.status）"),
                      page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
                      per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
                      recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
@@ -1676,9 +1845,13 @@ def list_repo_issues(owner: str, repo: str,
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
     - Issue #542 三种模式：
       * per_page>0：真分页（COUNT + LIMIT/OFFSET，响应含 total/page/per_page/has_more）
+        Issue #926：PR 伪卡片并入同一分页窗口（issue 行窗口取 offset+per_page+PR 数，
+        与全量 PR 卡按同排序键合并后切页；total 计入 PR 卡，滚动累计与 total 一致）
       * 默认（per_page=0，无 status 过滤，recent_terminal>0）：非终态全量 + 终态最近 N 条
         （分析文档第一步"数据截断"：前端不改也能先受益，翻页再拉走 per_page）
       * recent_terminal=0 或显式 status 过滤：legacy 全量返回
+    - Issue #926：q（标题/编号 LIKE）与 statuses（逗号分隔多状态）为服务端过滤，
+      PR 伪卡片同口径过滤（statuses 匹配映射后的 task_status）。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
     from src.domains.mgmt.user.org_db import is_org_personal
@@ -1686,12 +1859,46 @@ def list_repo_issues(owner: str, repo: str,
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
     repo_keys = _repo_keys_of(owner, repo)
+    # Issue #926 性能补丁（2026-11-04 压测）：repo 可能同时映射 gitcode/github 两个 key
+    # （镜像仓），而 `repo_key IN (a,b)` 会让排序退化成"两个分支各自有序再归并"——
+    # 表达式索引只能逐个分支用上，最终仍建临时 B-TREE（20 万行深页 131ms，单 key 为 1ms）。
+    # 空 key 对结果零贡献，先剔掉只留有数据的 key；IN 退化为单值/少值时可走有序索引。
+    try:
+        from src.kernel.session_manager import db as _db, db_lock as _lock
+        _live = []
+        for _k in repo_keys:
+            with _lock:
+                _c = _db.cursor()
+                _c.execute("SELECT 1 FROM issue WHERE repo_key=? LIMIT 1", (_k,))
+                if _c.fetchone():
+                    _live.append(_k)
+        if _live:
+            repo_keys = _live
+    except Exception:
+        pass
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
     params: list = list(repo_keys)
     if status:
         clauses.append("status=?")
         params.append(status)
+    # Issue #926：多状态服务端过滤（白名单校验，防注入）
+    statuses_set = set()
+    if statuses:
+        _allowed = {"active", "processing", "awaiting_input", "pending_review", "completed", "cancelled"}
+        statuses_set = {s.strip() for s in statuses.split(",") if s.strip()} & _allowed
+        if not statuses_set:
+            # Issue #926：全部为白名单外值时与 status 参数 pattern 校验（400）口径一致，
+            # 显式拒绝而非静默退化为无过滤
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "statuses 参数不含任何合法状态值（active/processing/awaiting_input/pending_review/completed/cancelled）"})
+        clauses.append(f"status IN ({','.join('?' * len(statuses_set))})")
+        params.extend(sorted(statuses_set))
+    # Issue #926：q 搜索（标题/编号子串，大小写不敏感）
+    if q:
+        clauses.append("(LOWER(title) LIKE ? OR CAST(issue_number AS TEXT) LIKE ?)")
+        _like = f"%{q.lower()}%"
+        params.extend([_like, _like])
     # 组织隔离
     if _filter_org_id:
         clauses.append("org_id=?")
@@ -1701,27 +1908,60 @@ def list_repo_issues(owner: str, repo: str,
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
     _order_by = f"created_at {_order_dir}"
     if mode == "default":
-        _order_by = (f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 "
-                     f"WHEN status='awaiting_input' THEN 2 WHEN status='pending_review' THEN 3 "
-                     f"ELSE 4 END, created_at {_order_dir}")
+        _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
 
     _total = None
     _page_row_count = None
+    # Issue #926：PR 伪卡片先取（全量聚合，含 q/statuses 同口径过滤），
+    # 分页模式下并入统一 LIMIT/OFFSET 窗口
+    pr_items = _filter_pr_items(_query_pr_subscription_events(repo_keys), q, statuses_set)
+    for _pit in pr_items:
+        _pit.setdefault("attachments", [])
+        # Issue #805: PR 伪卡片无创建人概念（触发者语义保留 assignee），creator 置空防前端 undefined
+        _pit.setdefault("creator", "")
     if per_page > 0:
-        # ---- 真分页：COUNT + LIMIT/OFFSET ----
+        # ---- 真分页（Issue #926：PR 伪卡片并入统一窗口）----
         from src.kernel.session_manager import db, db_lock
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
-                _total = c.fetchone()[0]
-        except Exception as e:
-            log.warning(f"issues: count failed: {e}")
-            _total = 0
+        # Issue #926 性能补丁（2026-11-04 压测）：q 走 `LOWER(title) LIKE '%kw%'`，前后
+        # 通配符下任何普通索引都用不上——5 万行 COUNT 74ms、20 万行约 300ms，占一次搜索
+        # 请求的大头。q 模式不返精确 total（total=null），has_more 按"本页是否满页"推断
+        # （最多多探一次空页，前端已按 has_more 终止）；无 q 时 COUNT 走索引，保持精确值。
+        if q:
+            _total = None
+        else:
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
+                    _total = c.fetchone()[0]
+            except Exception as e:
+                log.warning(f"issues: count failed: {e}")
+                _total = 0
+            _total += len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
+        _offset = (page - 1) * per_page
+        # 性能守卫（2026-11-04 压测）：default 模式第一排序键是状态优先级 CASE
+        # （_status_order_sql），无法免排序；偏移越深单页越贵（issue 表 20 万行时
+        # page=6666 达 350ms），且分页查询持 db_lock，会串行阻塞其它 DB 访问。
+        # 超过 2 万条偏移直接拒绝并提示收窄，避免个别客户端把单核吃满。
+        if _offset > 20000:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"深分页超过上限（偏移 {_offset} 条 > 20000），请用 q / statuses 收窄后再翻页"})
+        # Issue #926：窗口化取数（替代深页 0..offset+per_page+pr 全前缀拉取，O(page) 而非 O(offset)）。
+        # 合并序中 issue 行的全局位次 p 满足 seq-pr ≤ p ≤ seq（pr=PR 卡总数），故页窗口
+        # [_offset, _offset+per_page) 内的 issue 行其 seq 必落在 [max(0,_offset-pr), _offset+per_page)；
+        # 本地合并列表（窗口 issue 行 + 全部 PR 卡）排序后，前缀恰有 min(_offset, pr) 条
+        # 全局位次 < _offset 的多余项，从该位置切片即得全局页窗口。
+        _pr_count = len(pr_items)
         issues = _query_tasks(where, params, _order_by, include_user_id=True,
-                              limit=per_page, offset=(page - 1) * per_page)
-        _page_row_count = len(issues)
-    elif status or recent_terminal <= 0:
+                              limit=per_page + _pr_count, offset=max(0, _offset - _pr_count))
+        _merged = list(issues) + list(pr_items)
+        _merge_sort_items(_merged, mode, sort_order)
+        _page = _merged[min(_offset, _pr_count):][:per_page]
+        issues = [it for it in _page if not it.get("is_pr_event")]
+        _page_pr = [it for it in _page if it.get("is_pr_event")]
+        _page_row_count = len(_page)
+    elif status or statuses_set or recent_terminal <= 0:
         # ---- legacy 全量（显式 status 过滤 = 调用方明确要该状态全量）----
         issues = _query_tasks(where, params, _order_by, include_user_id=True)
     else:
@@ -1742,6 +1982,8 @@ def list_repo_issues(owner: str, repo: str,
     _numbers = [str(it.get("issue_number")) for it in issues if it.get("issue_number")]
     group_map = _group_events_by_issue(repo_keys, numbers=_numbers or None)
     stage_map = _issue_stage_map(repo_keys, numbers=_numbers or None)
+    # Issue #926 + #648：仓库级批量附件映射（避免逐卡 OBS list）
+    _attach_map = _issue_attachments_batch(repo_keys)
     for it in issues:
         _num = it.get("issue_number")
         it["number"] = _num or it.get("number")
@@ -1767,17 +2009,39 @@ def list_repo_issues(owner: str, repo: str,
         # P1-E: Remove heavy fields not needed in list view (detail page has /issues/{id}/pipeline)
         it.pop("agent_statuses", None)
         it.pop("task_description", None)
+        # Issue #648：统一列表卡片带附件清单（无附件为 []，前端附件区直接消费）
+        # PR 订阅伪卡片（is_pr_event）编号与 GitCode PR 对应，不是 issue 附件目录编号；
+        # PR 号与同仓 issue 号重合时会命中错误附件目录，显式置 [] 防错配
+        # Issue #926 + #648 合并口径：附件清单走仓库级批量映射（_attach_map，避免逐卡 OBS list）；
+        # 分页模式瘦身——不回 attachments 清单（仅 attachments_count），计数直接取批量映射长度
+        # （无需再走 _issue_attachments_count 的 URL 预签名/元数据构造成本），前端按 count
+        # 判定 count=0 免请求直渲 / count>0 走 /issues/{id}/attachments 异步填充。
+        if it.get("is_pr_event"):
+            it["attachments"] = []
+            it["attachments_count"] = 0
+        else:
+            _att = _attach_map.get(str(_num or ""), [])
+            if per_page > 0:
+                it.pop("attachments", None)
+            else:
+                it["attachments"] = _att
+            it["attachments_count"] = len(_att)
 
-    # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
-    # Issue #542：分页模式下 PR 卡片只混入第 1 页（避免逐页重复）；has_more 按 issue 行数计算
-    pr_items = _query_pr_subscription_events(repo_keys)
-    if _total is None or page == 1:
+    # PR 订阅事件伪卡片混入（Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
+    # 非分页 legacy 模式保持「全部 PR 卡追加在末尾」旧口径，per_page=0 兼容）
+    if per_page > 0:
+        issues.extend(_page_pr)
+    else:
         issues.extend(pr_items)
 
     # Issue #542：分页模式返回服务端分页元数据；非分页模式 total 维持 len(issues)（兼容旧语义）
     if _total is not None:
         return {"issues": issues, "total": _total, "page": page, "per_page": per_page,
                 "has_more": (page - 1) * per_page + (_page_row_count or 0) < _total}
+    if per_page > 0:
+        # q 模式（不精确 total）：满页即认为还有下一页，最多多探一次空页
+        return {"issues": issues, "total": None, "page": page, "per_page": per_page,
+                "has_more": (_page_row_count or 0) >= per_page}
     return {"issues": issues, "total": len(issues)}
 
 

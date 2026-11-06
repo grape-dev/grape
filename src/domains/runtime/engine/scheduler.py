@@ -29,7 +29,10 @@ _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id �
 
 # Issue #537：pending_self_report 超时（worker 未自报）→ timeout_failed 兜底阈值；
 # zombie 判死离线宽限（停双主/重启 master 的短暂离线不误判 failed）。
-PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "1800"))
+# Issue #1071：默认 1800→5400——部署类任务（打包+生产部署全流程约 40-50 分钟）按设计
+# 在执行中重启主控，重启瞬间 pending_since 重置，1800s 窗口实际退化为「重启后 30 分钟」，
+# 剩余工序经常超 30 分钟被误判 timeout_failed；配合判死前活跃流豁免（见 sweep）双保险。
+PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "5400"))
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 
 # agent_type 固定为 'issue'，不再由用户选择
@@ -108,6 +111,52 @@ def _heal_findings_marker(text: str) -> str:
     return text
 
 
+# ====== Issue #697：dedup 判定级别枚举 + 门禁判定（代码级强制，单一事实源） ======
+# prompt_builder / routes/autopilot.py 均从这里取常量与判定函数，禁止各自复制规则文本。
+
+DEDUP_LEVEL_EXACT = "exact_duplicate"
+DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+DEDUP_LEVEL_NOT = "not_duplicate"
+DEDUP_LEVELS = (DEDUP_LEVEL_EXACT, DEDUP_LEVEL_SUSPECTED, DEDUP_LEVEL_NOT)
+
+# 写入公开 Issue 描述 / 确认人字段的限长（防 LLM 长文注入公开面）
+DEDUP_NOTE_MAX_CHARS = 200
+DEDUP_CONFIRMED_BY_MAX_CHARS = 64
+
+# 注：判重规则的 prompt 文本已按运维决定移除（不再改自动化任务的 prompt）；
+# 这里只保留代码侧门禁所需的级别枚举与判定函数。
+
+
+def normalize_dedup_level(raw) -> str:
+    """判定级别归一（fail-closed）。
+
+    合法枚举原样返回；空串=LLM 未分类（保持既有放行行为）；
+    非法/拼错的非空级别一律降级为 suspected_duplicate，杜绝漏发/拼错绕过 409 门禁。
+    """
+    level = str(raw or "").strip().lower()
+    if not level:
+        return ""
+    return level if level in DEDUP_LEVELS else DEDUP_LEVEL_SUSPECTED
+
+
+def sanitize_dedup_note(raw) -> str:
+    """dedup_note 压平换行 + 限长（写入公开 Issue 描述前调用）。"""
+    return " ".join(str(raw or "").split())[:DEDUP_NOTE_MAX_CHARS]
+
+
+def sanitize_dedup_confirmed_by(raw) -> str:
+    """dedup_confirmed_by 压平 + 限长（确认人身份字段，非自由文本）。"""
+    return " ".join(str(raw or "").split())[:DEDUP_CONFIRMED_BY_MAX_CHARS]
+
+
+def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
+    """并入挂靠门禁：exact 允许；未分类（空）保持既有行为允许；疑似/未知需 owner 确认。"""
+    level = normalize_dedup_level(dedup_level)
+    if level in ("", DEDUP_LEVEL_NOT, DEDUP_LEVEL_EXACT):
+        return True
+    return bool(dedup_confirmed)
+
+
 def parse_findings(agent_output: str) -> dict:
     """从 agent 产出中解析问题列表。
 
@@ -160,6 +209,10 @@ def parse_findings(agent_output: str) -> dict:
             f.setdefault("severity", "medium")
             f.setdefault("suggested_assignee", "coding")
             f.setdefault("suggested_skill", "implementation")
+            # Issue #697：判定级别与差异说明透传（exact_duplicate/suspected_duplicate/not_duplicate）；
+            # 级别在解析层即归一 fail-closed（漏发/拼错的非空级别按疑似重复处理，杜绝绕过 409 门禁）
+            f["dedup_level"] = normalize_dedup_level(f.get("dedup_level"))
+            f["dedup_note"] = sanitize_dedup_note(f.get("dedup_note"))
             valid.append(f)
         return {
             "result": data.get("result", ""),
@@ -293,7 +346,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     #    glob 搜到 /home/{user} 副本自救，不可依赖。
     evt = {"repo_key": repo_key, "issue_id": "", "payload": {}}
     if _is_direct:
-        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "", prompt)
+        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "",
+                                             prompt, engine_name=inst_name or backend or "")
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
@@ -324,7 +378,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         # DIRECT 模式：本机执行
         _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                                   engine_id, backend, inst_name, ws, prompt,
-                                  repo_token, agent_display_name, env_extra, repository)
+                                  repo_token, agent_display_name, env_extra, repository,
+                                  evt)
     else:
         # REMOTE / 广播模式：入队让远端 worker 认领
         _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
@@ -334,7 +389,8 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
 def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                               engine_id, backend, inst_name, ws, prompt,
-                              repo_token, agent_display_name, env_extra, repository):
+                              repo_token, agent_display_name, env_extra, repository,
+                              evt=None):
     """DIRECT 模式：本机 stream_devops_agent 执行。"""
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
 
@@ -350,6 +406,33 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         return
 
     log.info(f"Autopilot exec {exec_id}: starting direct agent={agent_type} engine={inst_name}")
+
+    # Issue #887（QA 修复）：direct 端执行前技能一致性硬校验——复用 _materialize_direct_workdir
+    # 物化后写入 evt 的判定结果（SKILL_CONSISTENCY_KEY），与 event_pipeline._execute_agent_inner
+    # 口径一致（物化后校验，残留缓存+绑定未物化才拒绝），不再在物化前另起一套 verify
+    # （旧实现与物化时序/口径不一致，存在误拒）；拒绝消息经 skill_mismatch_error 单一实现。
+    try:
+        from src.runtime.skill_materialize import (SKILL_CONSISTENCY_KEY,
+                                                   skill_mismatch_error)
+        from src.runtime.task_log_stream import build_skill_source_message
+        _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}
+        if not _sv:
+            # 判定缺失（物化异常等）→ 显式降级放行 + 告警，不静默当作通过
+            log.warning(f"Autopilot exec {exec_id}: skill consistency verdict missing "
+                        f"(materialize degraded); degraded pass")
+        else:
+            _src_line = build_skill_source_message(
+                _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))["data"]["text"]
+            log.info(f"Autopilot exec {exec_id}: skill source {_src_line}")
+            if _sv.get("ok") is False:
+                _sv_err = skill_mismatch_error(_sv)
+                log.error(f"Autopilot exec {exec_id}: skill consistency refused: {_sv_err}")
+                _finalize_autopilot_task(task_id, exec_id, 1, _sv_err)
+                _update_execution_result(exec_id, "failed", error=_sv_err)
+                return
+    except Exception as _sc_e:
+        log.warning(f"Autopilot exec {exec_id}: skill consistency verify failed: {_sc_e}")
 
     exit_code = -1
     final_text = ""
@@ -1092,19 +1175,58 @@ def _offline_duration_seconds(last_seen_at: str):
         return None
 
 
+# Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 600s 视为
+# 「执行中」（worker 还在产出执行流），跳过本轮判死。600s 与调度扫描周期（60s）量级
+# 匹配，避免无限豁免；真沉默任务最多延迟一轮（60s 扫描 + 600s 静默窗）被回收。
+_PENDING_STREAM_ACTIVE_WINDOW_SECONDS = 600
+
+
+def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
+    """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 600s → True。
+
+    返回 False（回退原判死逻辑，Spec：数据缺失不豁免，宁可误回收不留死任务）：
+    - 该任务在 task_messages 无任何记录（执行流从未产出，无法证明在跑）；
+    - created_at 缺失/无法解析（parse_dt 失败）；
+    - 查询异常（表缺失等）。
+    """
+    try:
+        row = cursor.execute(
+            "SELECT created_at FROM task_messages WHERE task_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,)).fetchone()
+        if not row or not (row[0] or "").strip():
+            return False
+        from src.runtime.health import parse_dt
+        _ts = parse_dt(row[0])
+        if _ts is None:
+            return False
+        _age = datetime.now(timezone.utc).timestamp() - float(_ts)
+        return _age < _PENDING_STREAM_ACTIVE_WINDOW_SECONDS
+    except Exception as _e:
+        log.warning(f"pending stream activity check failed for task {task_id}: {_e}")
+        return False
+
+
 def _sweep_pending_self_report_timeouts() -> int:
     """pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed。
 
     主控停机时 REMOTE 任务被置 pending_self_report；正常路径是 worker 继续执行并
     complete_task/fail_task 自报。若 worker 失联/永远不自报，超过
-    PENDING_SELF_REPORT_TIMEOUT_SECONDS（默认 30min）→ 判 timeout_failed
-    （带说明的终态，区别于 plain failed），并同步 events=failed + autopilot_executions=failed。
+    PENDING_SELF_REPORT_TIMEOUT_SECONDS（默认 90min，Issue #1071 放宽）→ 判
+    timeout_failed（带说明的终态，区别于 plain failed），并同步 events=failed +
+    autopilot_executions=failed。
+
+    Issue #1071 活跃流豁免：部署类长任务（打包+生产部署约 40-50 分钟）按设计在执行中
+    重启主控，重启瞬间 pending_since 重置；判死前先查 task_messages 最新一条写入时间，
+    距 now < 600s 说明 worker 仍在执行（执行流持续产出），跳过本轮判死、下轮再评估；
+    无消息/解析失败回退原判死逻辑（数据缺失不豁免）。
     """
     from src.domains.runtime.engine.service import update_task_status
     from src.api.event_store import update_event_complete
     _cutoff_ts = datetime.now(timezone.utc).timestamp() - PENDING_SELF_REPORT_TIMEOUT_SECONDS
     _now = datetime.now(timezone.utc).isoformat()
-    _reason = (f"worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
+    _reason = (f"[PENDING_SELF_REPORT_TIMEOUT] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
+               f"且执行流静默超 {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s"
                f"（pending_self_report 超时），判 timeout_failed")
     marked = 0
     try:
@@ -1126,6 +1248,10 @@ def _sweep_pending_self_report_timeouts() -> int:
                 except Exception:
                     _ts = None
                 if _ts and float(_ts) <= _cutoff_ts:
+                    # 活跃流豁免（Issue #1071）：执行流 <600s 内仍在写入 → 任务在跑，
+                    # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
+                    if _pending_self_report_stream_active(c, _r[0]):
+                        continue
                     _pending_rows.append(_r)
             rows = _pending_rows
         for tid, evt_seq, _rt_id, _ps in rows:

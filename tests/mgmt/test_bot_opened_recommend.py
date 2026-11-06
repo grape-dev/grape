@@ -209,10 +209,20 @@ class TestT1BotIssueOpenedRecommends:
         assert captured[0]["is_scene_recommend"] is True, "bot 建单走智能推荐（场景判定）"
         _events_before = _events_count()
         assert _events_before == 1, "应产生 1 条 issue_opened 事件"
-        # 3) direct 路径执行棒短路：evt 带 _bot_opened → 不重派（不新增事件）
-        ep._redispatch_vod_after_recommend(RK, "#201", "vod",
-                                           {"_bot_opened": True, "payload": {}}, 0)
-        assert _events_count() == _events_before, "bot 建单不得重派 VOD 执行棒（Issue #565）"
+        # 3) 2026-11-04 反转：默认放开 → bot 建单推荐完成后重派 VOD，继续跑完整流水线
+        with patch("src.api.event_store.append_event", return_value=1) as _ae, \
+             patch("src.runtime.engine_select.pick_engine", return_value=None), \
+             patch.object(ep, "_fail_event"):
+            ep._redispatch_vod_after_recommend(RK, "#201", "vod",
+                                               {"_bot_opened": True, "payload": {}}, 0)
+        assert _ae.called, ("bot 建单必须重派 VOD 执行棒"
+                            "（GRAPE_BOT_OPENED_FULL_PIPELINE 默认 1）")
+        # 3b) 开关显式置 0 → 回退旧行为：scene-only，不新增事件
+        with patch("src.config.GRAPE_BOT_OPENED_FULL_PIPELINE", False), \
+             patch("src.api.event_store.append_event", return_value=1) as _ae2:
+            ep._redispatch_vod_after_recommend(RK, "#201", "vod",
+                                               {"_bot_opened": True, "payload": {}}, 0)
+        assert not _ae2.called, "开关置 0 时必须回退 scene-only（Issue #565 旧行为）"
         # 4) worker 路径：推荐完成回调解析 scene_id 写库 + 按 issue 首事件 actor 还原
         #    _bot_opened 短路标记（核实结论：回调确会派执行棒，已按标记短路）
         with db_lock:

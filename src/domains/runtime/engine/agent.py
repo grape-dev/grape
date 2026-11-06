@@ -1911,6 +1911,351 @@ def _prepare_codearts_data_dir(tid: str, cwd: str) -> str:
     return _cli_data
 
 
+def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str) -> str:
+    """Issue #607：_execute_task 技能物化块提取（可单测）。返回追加降级说明后的 prompt。
+
+    语义与提取前逐字对齐（v3.0 OBS 直连/代拉 + #564 原子物化/官方包回退），
+    仅在失败分支追加 Issue #607 兜底：物化失败（zip/skill_files 均失败、结果为空、
+    或物化异常）时向 skill_dir/<skill>/ 写入 FALLBACK.md 降级指引（Agent 首轮
+    即可读到 `grape skills detail` 权威取回命令）+ log.warning 结构化留痕；
+    物化成功路径不受影响。
+    """
+    from src.runtime.skill_materialize import write_skill_fallback
+    try:
+        # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
+        _skill_notes = []
+
+        def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
+            """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。
+
+            Issue #617：按名未命中时优先用服务端 claim 下发的 skill_fallback
+            （agent_type 对应官方检查器，worker 无库不自行解析），提示带
+            `grape skills detail --skill_id <id>`。
+            """
+            _skill_name = _task.get("skill") or ""
+            _fb_info = _task.get("skill_fallback") or {}
+            _fb_name = str(_fb_info.get("skill_name") or "")
+            _fb_id = int(_fb_info.get("skill_id") or 0)
+            try:
+                from src.config import resolve_official_skill_path
+                _official = resolve_official_skill_path(_skill_name)
+            except Exception as _e:
+                log.warning(f"[skill] official resolve failed: {_e}")
+                _official = ""
+            if not _official and _fb_name:
+                # 按名未命中 → agent_type 官方检查器（skill_fallback）回退
+                try:
+                    from src.config import resolve_official_skill_path as _resolve
+                    _official = _resolve(_fb_name)
+                except Exception as _e:
+                    log.warning(f"[skill] checker resolve failed: {_e}")
+                    _official = ""
+            if _official and os.path.isfile(_official):
+                from src.runtime.skill_materialize import materialize_skill_dir_atomic
+                # 官方目录名即落盘技能名（checker 回退时为 _fb_name，同名回退为 _skill_name）
+                _dst_name = os.path.basename(os.path.dirname(_official)) or _skill_name
+                _ok, _r = materialize_skill_dir_atomic(
+                    _skill_dir, _dst_name, os.path.dirname(_official))
+                if _ok:
+                    _env["DEVOPS_SKILLS_DIR"] = _skill_dir
+                    if _dst_name != _skill_name:
+                        # Issue #887（QA 修复）：物化名≠绑定名时回写 task.skill_fallback，
+                        # 使 _skill_consistency_gate 将其识别为 declared_fallback
+                        # （ok + mismatch 显式标注），而非 local_cache 残留自相矛盾拒绝。
+                        try:
+                            _task["skill_fallback"] = {
+                                "skill_name": _dst_name, "skill_id": _fb_id}
+                        except Exception:
+                            pass
+                        return {"status": "fallback", "detail": (
+                            f"skill '{_skill_name}' not found; materialized official checker "
+                            f"'{_dst_name}' (fetch via `grape skills detail --skill_id {_fb_id}`) "
+                            f"at DEVOPS_SKILLS_DIR/{_dst_name}")}
+                    return {"status": "fallback", "detail": "official skill package materialized"}
+                return {"status": "degraded", "detail": f"official fallback failed: {_r}"}
+            return {"status": "degraded", "detail": (
+                f"official skill package not found"
+                + (f"; checker '{_fb_name}' unavailable (fetch via "
+                   f"`grape skills detail --skill_id {_fb_id}`)" if _fb_name else ""))}
+
+        # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
+        # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
+        # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
+        # ③ 无 URL（老任务/无 OBS 技能）→ skill_files 文本物化（既有）
+        skill_obs_url = task.get("skill_obs_url") or ""
+        skill_zip_b64 = None
+        if skill_obs_url:
+            raw = _fetch_skill_zip(skill_obs_url, task_id=task.get("id", ""))
+            if raw:
+                skill_zip_b64 = _b64.b64encode(raw).decode()
+                # v3.0 能力反馈：直连/代拉成功 → 计数恢复
+                global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
+                _OBS_FAIL_STREAK = 0
+                _OBS_OK_STREAK += 1
+                if _OBS_OK_STREAK >= _OBS_FALLBACK_THRESHOLD and _OBS_FALLBACK:
+                    _OBS_FALLBACK = False
+                    _OBS_OK_STREAK = 0
+                    log.info("[skill] OBS 直连恢复（连续 3 次成功）")
+            else:
+                log.warning(f"[skill] OBS 直连+代拉均失败, task={task.get('id')} url={skill_obs_url[:60]}...")
+                # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
+                _OBS_FAIL_STREAK += 1
+                _OBS_OK_STREAK = 0
+                if _OBS_FAIL_STREAK >= _OBS_FALLBACK_THRESHOLD and not _OBS_FALLBACK:
+                    _OBS_FALLBACK = True
+                    _OBS_FAIL_STREAK = 0
+                    log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
+        if skill_zip_b64:
+            # ===== zip 物化（直连/代拉获取的 zip → 原子解压 + 完整性校验 → 恢复权限）=====
+            # Issue #564：tmp + 原子 rename（不留半写 .skills）、按 zip 名单校验
+            # SKILL.md/references、失败回退官方技能包、仍失败降级标注（不静默空注入）。
+            # 权限恢复见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
+            # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
+            from src.runtime.skill_materialize import materialize_skill_zip_atomic
+            raw = _b64.b64decode(skill_zip_b64)
+            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
+            # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
+            # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
+            #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
+            _target_skill = task.get("skill") or ""
+            if _ok_zip and _target_skill and _target_skill not in _skills_ok:
+                # Issue #617：目标技能名未命中但官方检查器已物化（skill_fallback）→
+                # 视为回退成功，提示读检查器 SKILL.md（含 skills detail --skill_id 路径）
+                _fb_info = task.get("skill_fallback") or {}
+                _fb_hit = str(_fb_info.get("skill_name") or "")
+                if _fb_hit and _fb_hit in _skills_ok:
+                    log.info(f"[skill] target '{_target_skill}' miss, checker '{_fb_hit}' materialized")
+                    _skill_notes.append(
+                        f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                        f"(fallback): skill '{_target_skill}' not found; materialized official "
+                        f"checker '{_fb_hit}' for agent_type '{task.get('agent_type', '')}' "
+                        f"instead (fetch via `grape skills detail --skill_id "
+                        f"{_fb_info.get('skill_id', 0)}`). Read "
+                        f"DEVOPS_SKILLS_DIR/{_fb_hit}/SKILL.md instead.")
+                else:
+                    _ok_zip = False
+                    _reason = (f"target skill '{_target_skill}' not in materialized list "
+                               f"[{', '.join(_skills_ok)}]")
+                    log.warning(f"[skill] zip partial success misses target: {_reason}")
+            if _ok_zip:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
+                if _reason:
+                    log.warning(f"[skill] partial zip materialize: {_reason}")
+            else:
+                log.warning(f"[skill] zip materialize failed: {_reason}")
+                _fb_status = _fallback_official_skill(skill_dir, task, env)
+                _skill_notes.append(
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                    f"({_fb_status.get('status')}): zip materialize failed ({_reason}); "
+                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
+                    f"missing, fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
+                # Issue #607：官方包回退也失败 → 写 FALLBACK.md 降级指引（不静默空注入）
+                if _fb_status.get("status") == "degraded":
+                    write_skill_fallback(skill_dir, _target_skill,
+                                         f"zip materialize failed: {_reason}",
+                                         stage="zip_b64")
+        else:
+            # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
+            # Issue #564：原子写盘 + 完整性校验 + 官方包回退；仅物化成功才注入
+            # DEVOPS_SKILLS_DIR（杜绝"有路径无内容"的空注入）。
+            from src.runtime.skill_materialize import materialize_skill_files_atomic
+            skill_files = json.loads(task.get("skill_files") or "{}")
+            # Issue #463 P2 扩展（2026-10-27）：引用单写格式 {"<skill>": {"__obs_key__": ...}}
+            # —— 内容不内联 DB，按对象键现拉原始 zip（含二进制，优于文本物化）。
+            # 老 worker 不识别此标记时（物化出一个 __obs_key__ 文件，无害），实际任务
+            # 仍走 skill_obs_url 直连 / 服务端代拉，本分支只在 ①② 都失败时到达。
+            _ref_key = ""
+            for _sn, files in skill_files.items():
+                if isinstance(files, dict) and "__obs_key__" in files:
+                    _ref_key = str(files["__obs_key__"])
+                    break
+            if _ref_key:
+                raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
+                if raw:
+                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
+                    skill_files = {}
+                else:
+                    log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
+            # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
+            # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
+            _per_skill = []  # [(skill_name, ok, reason)]
+            for _sn, files in skill_files.items():
+                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
+                _per_skill.append((_sn, _ok_s, _r_s))
+                if not _ok_s:
+                    log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
+            _failed = [(_sn, _r) for _sn, _ok_f, _r in _per_skill if not _ok_f]
+            _reason = "; ".join(f"{_sn}: {_r}" for _sn, _r in _failed)
+            _ok_files = not _failed
+            # Issue #607：skill_obs_url 直连/代拉均失败且 skill_files 为空（无任何物化
+            # 结果）却计为成功——构成静默空注入；改为按降级处理：官方包回退 +
+            # FALLBACK.md 兜底 + 留痕，不再注入空 DEVOPS_SKILLS_DIR。
+            if _ok_files and not skill_files and not skill_zip_b64 and (task.get("skill") or ""):
+                _ok_files = False
+                _reason = "skill obs url fetch failed and skill_files empty"
+            if _ok_files:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
+            else:
+                _fb_status = _fallback_official_skill(skill_dir, task, env)
+                _skill_notes.append(
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                    f"({_fb_status.get('status')}): skill_files materialize failed ({_reason}); "
+                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
+                    f"missing, fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
+                # Issue #607：官方包回退也失败 → 写 FALLBACK.md 降级指引（不静默空注入）
+                if _fb_status.get("status") == "degraded":
+                    write_skill_fallback(skill_dir, task.get("skill") or "",
+                                         _reason, stage="skill_files")
+        if _skill_notes:
+            prompt += "".join(_skill_notes)
+    except Exception as e:
+        log.warning(f"skill materialize failed: {e}")
+        # Issue #607：物化异常分支同样写 FALLBACK.md 降级指引 + 留痕
+        write_skill_fallback(skill_dir, task.get("skill") or "",
+                             f"materialize exception: {e}", stage="exception")
+    return prompt
+
+
+async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, _res,
+                                  env: dict | None = None,
+                                  engine_name: str = "") -> dict | None:
+    """Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注。
+
+    校验「即将执行的 skill」与 agent 绑定（任务 skill 字段，仓库级/场景级绑定解析值）
+    一致；不一致（引擎本地缓存决定执行技能）→ 拒绝执行并显式报错（返回错误 dict，
+    调用方据此置任务 failed，不静默跑错流程）。绑定为空 → 放行（本地缓存仅此时兜底）。
+
+    扫描范围（QA 修复）：任务技能目录（cwd/.skills）+ 引擎原生技能目录
+    （engine_skill_dirs，按 engine_name 推导后端）——seq=46108 的残留若落在
+    引擎原生缓存而非 ws/.skills，仅扫 .skills 会漏检。
+
+    双源互校（QA 修复）：env GRAPE_BOUND_SKILL（service.enqueue_task 注入的绑定
+    基准）与 task["skill"] 不一致 → 拒绝（绑定基准被覆盖/漂移，可观测标注失真）；
+    task["skill"] 为空时以 env 值兜底。
+
+    无论放行与否，先向服务端上报技能来源标注日志（绑定值 vs 实际值，落任务日志）。
+    校验自身异常不阻断执行（降级放行 + 告警，与物化链路容错口径一致）。
+    """
+    try:
+        from src.runtime.skill_materialize import (verify_skill_execution_consistency,
+                                                   skill_mismatch_error)
+        from src.runtime.task_log_stream import build_skill_source_message
+        # 双源互校：task["skill"]（绑定基准权威源）vs env GRAPE_BOUND_SKILL（下发镜像）
+        _bound_task = (task.get("skill") or "").strip()
+        _bound_env = ((env or {}).get("GRAPE_BOUND_SKILL") or "").strip()
+        if _bound_task and _bound_env and _bound_task != _bound_env:
+            _x_reason = (f"bound skill sources disagree: task.skill='{_bound_task}' "
+                         f"but env GRAPE_BOUND_SKILL='{_bound_env}'; refusing execution "
+                         f"to prevent wrong-skill run (Issue #887)")
+            log.error(f"[skill] task {tid} refused to execute: {_x_reason}")
+            try:
+                await client.report_messages(tid, [build_skill_source_message(
+                    _bound_task, _bound_env, "env_conflict",
+                    ok=False, reason=_x_reason)])
+            except Exception as _rme:
+                log.warning(f"task {tid}: skill source log report failed: {_rme}")
+            try:
+                _res.dispose()
+            except Exception:
+                pass
+            return {"_error": f"[skill_mismatch] {_x_reason}", "_started": False}
+        if not _bound_task and _bound_env:
+            task = dict(task)
+            task["skill"] = _bound_env
+        # 引擎原生技能目录（跨平台，见 os_adapter.engine_skill_dirs）
+        _extra_dirs: list[str] = []
+        try:
+            from src.runtime.os_adapter import engine_skill_dirs as _esd
+            _extra_dirs = _esd(_backend_for_engine(engine_name))
+        except Exception as _ede:
+            log.warning(f"task {tid}: engine skill dirs resolve failed: {_ede}")
+        _sv = verify_skill_execution_consistency(
+            task.get("skill") or "", skill_dir, task.get("skill_fallback") or None,
+            extra_scan_dirs=_extra_dirs)
+        try:
+            await client.report_messages(tid, [build_skill_source_message(
+                _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))])
+        except Exception as _rme:
+            log.warning(f"task {tid}: skill source log report failed: {_rme}")
+        if not _sv.get("ok"):
+            _err = skill_mismatch_error(_sv)
+            log.error(f"[skill] task {tid} refused to execute: {_err}")
+            try:
+                _res.dispose()
+            except Exception:
+                pass
+            return {"_error": _err, "_started": False}
+    except Exception as _sve:
+        log.warning(f"task {tid}: skill consistency verify failed (degraded pass): {_sve}")
+    return None
+
+
+async def _flush_report_batch(client, tid: str, batch: list) -> str:
+    """批量上报一批消息（Issue #975 三态处理）。
+
+    返回：
+    - "ok"      批次已送达（或已走降级：拆批重发/占位/补报队列），可清空 batch
+    - "retry"   网络错误（可重试）——保留 batch，下个 flush 窗口重试，不清空不丢
+    - "terminal" 任务已被服务端标终态（410），调用方应中断执行
+    """
+    from src.runtime.client import ReportBatchError
+    from src.runtime.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
+    try:
+        _resp = await client.report_messages(tid, batch)
+    except ReportBatchError as e:
+        # 4xx 批次级失败（413/400）：拆批重发 → 单条仍失败发占位 + 落补报队列
+        try:
+            await degrade_failed_batch(
+                lambda msgs: client.report_messages(tid, msgs), tid, batch, e,
+                enqueue=_report_queue().add)
+        except Exception as _de:
+            # QA 复审修复（Spec #3）：降级链路自身抛错时绝不能仍返回 "ok"
+            # 静默清空 batch（原缺陷换入口复现）。兜底：逐条落本地持久化补报队列
+            # （截断防 413），由 _report_replay_loop 后续重放；队列也不可用才返回
+            # "retry" 保留 batch 下个窗口重试——两条路径都不丢消息。
+            log.warning(f"task {tid} report degrade failed: {_de}")
+            try:
+                import time as _time
+                _q = _report_queue()
+                _ts = _time.time()
+                for i, m in enumerate(batch):
+                    _q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
+                            "task": tid, "message": truncate_message(m)})
+                log.info(f"task {tid} report degrade fallback: {len(batch)} message(s) queued for replay")
+                return "ok"
+            except Exception as _qe:
+                log.warning(f"task {tid} report degrade fallback enqueue failed: {_qe}")
+                return "retry"
+        return "ok"
+    except CredentialRevokedError:
+        raise
+    if _resp is None:
+        return "terminal"
+    if isinstance(_resp, dict) and _resp.get("status") == "ok":
+        # 服务端回执带 seq 范围（seq_start/seq_end）——记录累计已确认 seq 供对账
+        _seq_end = _resp.get("seq_end")
+        if _seq_end is not None:
+            log.info(f"task {tid} messages acknowledged: count={len(batch)} "
+                     f"seq_range={_resp.get('seq_start')}..{_seq_end}")
+        return "ok"
+    # 网络错误（{}）：保留 batch，下个窗口重试（不清空，防止静默丢失）
+    return "retry"
+
+
+def _abort_task_terminal(task, engine_name, env, res, started: bool, reason: str) -> dict:
+    """任务被服务端标终态（410）→ 统一中断处理（QA 复审：执行中/收尾两处
+    flush 的 terminal 处理块逐行重复，提取为单一实现）。"""
+    tid = task.get("id", "")
+    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting: {reason}")
+    _kill_stale_engine(task, _backend_for_engine(engine_name))
+    res.dispose()
+    _cleanup_task_workdir(task, env)
+    return {"_error": f"task terminated by server (aborted {reason})", "_started": started}
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务的外层包装：把 repo / issue / seq 绑进日志上下文。
 
@@ -2096,134 +2441,17 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         log.info(f"task {tid}: retry resumed from checkpoint {os.path.basename(_ckpt.path)}")
     elif int(task.get("_grape_resume_attempt") or 0) >= 2:
         log.info(f"task {tid}: retry without usable checkpoint, running from scratch")
-    try:
-        # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
-        _skill_notes = []
-
-        def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
-            """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。"""
-            _skill_name = _task.get("skill") or ""
-            try:
-                from src.kernel.config import resolve_official_skill_path
-                _official = resolve_official_skill_path(_skill_name)
-            except Exception as _e:
-                log.warning(f"[skill] official resolve failed: {_e}")
-                _official = ""
-            if _official and os.path.isfile(_official):
-                from src.domains.runtime.engine.skill_materialize import materialize_skill_dir_atomic
-                _ok, _r = materialize_skill_dir_atomic(
-                    _skill_dir, _skill_name, os.path.dirname(_official))
-                if _ok:
-                    _env["DEVOPS_SKILLS_DIR"] = _skill_dir
-                    return {"status": "fallback", "detail": "official skill package materialized"}
-                return {"status": "degraded", "detail": f"official fallback failed: {_r}"}
-            return {"status": "degraded", "detail": "official skill package not found"}
-
-        # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
-        # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
-        # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
-        # ③ 无 URL（老任务/无 OBS 技能）→ skill_files 文本物化（既有）
-        skill_obs_url = task.get("skill_obs_url") or ""
-        skill_zip_b64 = None
-        if skill_obs_url:
-            raw = _fetch_skill_zip(skill_obs_url, task_id=task.get("id", ""))
-            if raw:
-                skill_zip_b64 = _b64.b64encode(raw).decode()
-                # v3.0 能力反馈：直连/代拉成功 → 计数恢复
-                global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
-                _OBS_FAIL_STREAK = 0
-                _OBS_OK_STREAK += 1
-                if _OBS_OK_STREAK >= _OBS_FALLBACK_THRESHOLD and _OBS_FALLBACK:
-                    _OBS_FALLBACK = False
-                    _OBS_OK_STREAK = 0
-                    log.info("[skill] OBS 直连恢复（连续 3 次成功）")
-            else:
-                log.warning(f"[skill] OBS 直连+代拉均失败, task={task.get('id')} url={skill_obs_url[:60]}...")
-                # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
-                _OBS_FAIL_STREAK += 1
-                _OBS_OK_STREAK = 0
-                if _OBS_FAIL_STREAK >= _OBS_FALLBACK_THRESHOLD and not _OBS_FALLBACK:
-                    _OBS_FALLBACK = True
-                    _OBS_FAIL_STREAK = 0
-                    log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
-        if skill_zip_b64:
-            # ===== zip 物化（直连/代拉获取的 zip → 原子解压 + 完整性校验 → 恢复权限）=====
-            # Issue #564：tmp + 原子 rename（不留半写 .skills）、按 zip 名单校验
-            # SKILL.md/references、失败回退官方技能包、仍失败降级标注（不静默空注入）。
-            # 权限恢复见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
-            # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
-            from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
-            raw = _b64.b64decode(skill_zip_b64)
-            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
-            # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
-            # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
-            #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
-            _target_skill = task.get("skill") or ""
-            if _ok_zip and _target_skill and _target_skill not in _skills_ok:
-                _ok_zip = False
-                _reason = (f"target skill '{_target_skill}' not in materialized list "
-                           f"[{', '.join(_skills_ok)}]")
-                log.warning(f"[skill] zip partial success misses target: {_reason}")
-            if _ok_zip:
-                env["DEVOPS_SKILLS_DIR"] = skill_dir
-                if _reason:
-                    log.warning(f"[skill] partial zip materialize: {_reason}")
-            else:
-                log.warning(f"[skill] zip materialize failed: {_reason}")
-                _fb_status = _fallback_official_skill(skill_dir, task, env)
-                _skill_notes.append(
-                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
-                    f"({_fb_status.get('status')}): zip materialize failed ({_reason}); "
-                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
-                    f"missing, fetch the skill via `grape skills detail` or the platform "
-                    f"skills API before proceeding.")
-        else:
-            # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
-            # Issue #564：原子写盘 + 完整性校验 + 官方包回退；仅物化成功才注入
-            # DEVOPS_SKILLS_DIR（杜绝"有路径无内容"的空注入）。
-            from src.domains.runtime.engine.skill_materialize import materialize_skill_files_atomic
-            skill_files = json.loads(task.get("skill_files") or "{}")
-            # Issue #463 P2 扩展（2026-10-27）：引用单写格式 {"<skill>": {"__obs_key__": ...}}
-            # —— 内容不内联 DB，按对象键现拉原始 zip（含二进制，优于文本物化）。
-            # 老 worker 不识别此标记时（物化出一个 __obs_key__ 文件，无害），实际任务
-            # 仍走 skill_obs_url 直连 / 服务端代拉，本分支只在 ①② 都失败时到达。
-            _ref_key = ""
-            for _sn, files in skill_files.items():
-                if isinstance(files, dict) and "__obs_key__" in files:
-                    _ref_key = str(files["__obs_key__"])
-                    break
-            if _ref_key:
-                raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
-                if raw:
-                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
-                    skill_files = {}
-                else:
-                    log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
-            # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
-            # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
-            _per_skill = []  # [(skill_name, ok, reason)]
-            for _sn, files in skill_files.items():
-                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
-                _per_skill.append((_sn, _ok_s, _r_s))
-                if not _ok_s:
-                    log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
-            _failed = [(_sn, _r) for _sn, _ok_f, _r in _per_skill if not _ok_f]
-            _reason = "; ".join(f"{_sn}: {_r}" for _sn, _r in _failed)
-            _ok_files = not _failed
-            if _ok_files:
-                env["DEVOPS_SKILLS_DIR"] = skill_dir
-            elif skill_files:
-                _fb_status = _fallback_official_skill(skill_dir, task, env)
-                _skill_notes.append(
-                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
-                    f"({_fb_status.get('status')}): skill_files materialize failed ({_reason}); "
-                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
-                    f"missing, fetch the skill via `grape skills detail` or the platform "
-                    f"skills API before proceeding.")
-        if _skill_notes:
-            prompt += "".join(_skill_notes)
-    except Exception as e:
-        log.warning(f"skill materialize failed: {e}")
+    # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
+    # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
+    prompt = _materialize_worker_skill(task, env, prompt, skill_dir)
+    # Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注——绑定 skill 未物化
+    # 而本地缓存存在其它技能时拒绝执行（events seq=46108：绑定 caserun-prep 实际执行
+    # casegen-prep，静默跑错流程并跳过环境硬校验）。扫描范围含引擎原生技能目录，
+    # 并与 env GRAPE_BOUND_SKILL 双源互校。
+    _sv_err = await _skill_consistency_gate(client, tid, task, skill_dir, _res,
+                                            env=env, engine_name=engine_name)
+    if _sv_err:
+        return _sv_err
     # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
     proj_dir = _os.path.join(cwd, ".project-info")
     try:
@@ -2348,24 +2576,19 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
             _now = time.monotonic()
             if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
-                _resp = await client.report_messages(tid, batch)
-                if _resp is None:
-                    # task 已被服务端标终态（410 Gone / 网络错误）→ 中断执行，杀引擎进程
-                    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
-                    _kill_stale_engine(task, _backend_for_engine(engine_name))
-                    _res.dispose()
-                    _cleanup_task_workdir(task, env)
-                    return {"_error": "task terminated by server (aborted during execution)", "_started": started}
-                batch = []
+                _outcome = await _flush_report_batch(client, tid, batch)
+                if _outcome == "terminal":
+                    # task 已被服务端标终态（410 Gone）→ 中断执行，杀引擎进程
+                    return _abort_task_terminal(task, engine_name, env, _res, started,
+                                                "during execution")
+                if _outcome == "ok":
+                    batch = []
                 _last_flush = _now
         if batch:
-            _resp = await client.report_messages(tid, batch)
-            if _resp is None:
-                log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
-                _kill_stale_engine(task, _backend_for_engine(engine_name))
-                _res.dispose()
-                _cleanup_task_workdir(task, env)
-                return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
+            _outcome = await _flush_report_batch(client, tid, batch)
+            if _outcome == "terminal":
+                return _abort_task_terminal(task, engine_name, env, _res, started,
+                                            "at final flush")
         # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
         if done is not None and not (isinstance(done, dict) and done.get("_error")):
             try:

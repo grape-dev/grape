@@ -517,8 +517,9 @@ class TestListIssuesPaging:
             assert it["events_count"] == 1
             assert it["latest_event"]["title"] == f"Real {it['issue_number']}"
 
-    def test_pagination_pr_cards_only_on_first_page(self):
-        """分页模式：PR 订阅伪卡片只混入第 1 页（不逐页重复），has_more 不受 PR 卡片影响。"""
+    def test_pagination_pr_cards_merged_into_window(self):
+        """Issue #926：PR 伪卡片并入统一 LIMIT/OFFSET 分页窗口——
+        PR 卡计入 total，按合并序分布到各页，逐页累计无重复无丢失。"""
         self._mk_many(5600, 4, "completed")
         with db_lock:
             c = db.cursor()
@@ -530,14 +531,19 @@ class TestListIssuesPaging:
                     (self.P_REPO_KEY, f"#pr_{pr}_scene-x", "note_hook_pr", "qa",
                      f"PR #{pr} review", f"Sum pr{pr}", "completed"))
             db.commit()
-        d1 = self._get("?mode=time&per_page=2&page=1").json()
-        assert d1["total"] == 4  # PR 伪卡片不计入 issue 行 total
-        pr_cards = [it for it in d1["issues"] if it.get("is_pr_event")]
-        assert len(pr_cards) == 2, "第 1 页应混入 PR 伪卡片"
-        # issue 行 2 条 + PR 卡片 2 条
-        assert len([it for it in d1["issues"] if not it.get("is_pr_event")]) == 2
-        assert d1["has_more"] is True  # 2/4 行 < 4（不被 PR 卡片虚增）
-        d2 = self._get("?mode=time&per_page=2&page=2").json()
-        assert not [it for it in d2["issues"] if it.get("is_pr_event")], "第 2 页不应重复 PR 伪卡片"
-        assert len(d2["issues"]) == 2
-        assert d2["has_more"] is False
+        # 逐页拉取（per_page=2），累计编号无重复无丢失，total 计入 PR 卡
+        seen, pg = [], 1
+        total = None
+        while True:
+            d = self._get(f"?mode=time&per_page=2&page={pg}").json()
+            total = d["total"]
+            seen.extend([it.get("issue_number") for it in d["issues"]])
+            if not d["has_more"]:
+                break
+            pg += 1
+            assert pg < 20, "分页终止保护"
+        assert total == 4 + 2  # issue 4 行 + PR 卡 2 张（Issue #926 计入 total）
+        assert len(seen) == total
+        assert len(set(seen)) == total, "PR 卡与 issue 行逐页无重复"
+        pr_cards = [n for n in seen if n in (11, 12)]
+        assert len(pr_cards) == 2, "两张 PR 卡都应出现在某一页"

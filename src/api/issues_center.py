@@ -2494,7 +2494,8 @@ _ATTACH_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", "
 _ATTACH_CODE_EXTS = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".sh", ".sql", ".tf", ".dockerfile"}
 _ATTACH_ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z"}
 _ATTACH_ALL_EXTS = _ATTACH_IMAGE_EXTS | _ATTACH_DOC_EXTS | _ATTACH_CODE_EXTS | _ATTACH_ARCHIVE_EXTS
-_ATTACH_MAX_SIZE = 50 * 1024 * 1024  # 50MB
+_ATTACH_MAX_SIZE = (int(os.environ.get("ATTACH_MAX_SIZE_MB", "200")) * 1024 * 1024
+                    )  # 单个附件上限：默认 200MB，可用 ATTACH_MAX_SIZE_MB 覆盖（需同步 nginx client_max_body_size）
 
 
 def _attach_obs_key(owner: str, repo: str, issue_number, filename: str) -> str:
@@ -2542,6 +2543,24 @@ def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
         os.unlink(fpath)
         return True
     return False
+
+
+def _attach_count(owner: str, repo: str, issue_number) -> int:
+    """Issue #926：仅统计附件数量（分页列表瘦身）。
+
+    与 _attach_list 同存储口径，但跳过 URL 预签名与元数据 dict 构造。
+    """
+    from src.storage import get_storage
+    storage = get_storage()
+    if storage:
+        prefix_key = _attach_obs_key(owner, repo, issue_number, "")
+        items, _ = storage.list_objects_with_meta(prefix_key)
+        return sum(1 for item in items if item["key"].rsplit("/", 1)[-1])
+    attach_dir = _attach_base_dir(owner, repo, issue_number)
+    if os.path.isdir(attach_dir):
+        return sum(1 for f in os.listdir(attach_dir)
+                   if os.path.isfile(os.path.join(attach_dir, f)))
+    return 0
 
 
 def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:

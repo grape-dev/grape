@@ -51,3 +51,93 @@ def derive_runtime_health(status: str, last_seen_at: str | None, now: float | No
     if offline_for > 6 * 24 * 3600:
         return "about_to_gc"
     return "offline"
+
+
+def derive_local_runtime_health(installed: bool, healthy: bool) -> str:
+    """本机直连引擎（credential_id=0）健康态：按探活结果（installed/healthy）派生。
+
+    本机直连引擎不参与远端 worker 心跳（15s），仅由主控机周期重探
+    （main.py _local_probe_loop，默认 10min，local-direct-health-probe-design）刷新
+    last_seen_at/healthy——若误用 derive_runtime_health 的心跳新鲜度阈值
+    （_STALE_SECONDS=100s）判定，探活间隔内会被误判为 recently_lost（失联）。
+    Issue #592：引擎选择弹窗全显失联的根因；与 settings._engine_health 口径统一。
+    """
+    return "online" if (installed and healthy) else "offline"
+
+
+def check_skill_consistency(bound_skill: str, actual_skill: str,
+                            declared: bool = False) -> dict:
+    """Issue #887：skill 一致性校验项（健康检查口径，服务端/worker 共用，零依赖）。
+
+    规则（对齐 Issue #887 Spec：fail-fast，仅绑定非空且不一致时拒绝）：
+    - bound 为空 → ok（引擎本地缓存仅绑定为空时兜底，source=unbound）；
+    - bound 非空且 actual == bound → ok；
+    - bound 非空且 actual != bound：
+      - declared=False（未声明的偏离，如引擎本地缓存决定执行技能）→ NOT ok（拒绝执行）；
+      - declared=True（服务端明示的回退，如 #617 官方检查器 skill_fallback）→ ok，
+        但 mismatch=True 显式标注（可观测，不静默）。
+
+    返回 {"name": "skill_consistency", "ok": bool, "mismatch": bool, "bound": str,
+          "actual": str, "detail": str}。
+    """
+    bound = (bound_skill or "").strip()
+    actual = (actual_skill or "").strip()
+    if not bound:
+        return {"name": "skill_consistency", "ok": True, "mismatch": False,
+                "bound": "", "actual": actual,
+                "detail": "no bound skill; engine local cache may apply as fallback only"}
+    if actual == bound:
+        return {"name": "skill_consistency", "ok": True, "mismatch": False,
+                "bound": bound, "actual": actual,
+                "detail": "actual skill matches agent binding"}
+    if declared:
+        return {"name": "skill_consistency", "ok": True, "mismatch": True,
+                "bound": bound, "actual": actual,
+                "detail": (f"declared fallback: bound '{bound}' resolved to declared "
+                           f"skill '{actual}' (server-sanctioned, Issue #617)")}
+    return {"name": "skill_consistency", "ok": False, "mismatch": True,
+            "bound": bound, "actual": actual,
+            "detail": (f"skill mismatch: bound '{bound}' but about to execute "
+                       f"'{actual}'; refusing execution (Issue #887)")}
+
+
+def aggregate_skill_consistency(days: int = 7) -> dict:
+    """Issue #887（QA AC4）：skill 一致性健康检查汇总项。
+
+    统计近 N 天因 [skill_mismatch] 被拒绝执行的任务数（agent_tasks.result_text
+    前缀），供 /readyz 与 /api/health 端点消费——校验逻辑本身已在执行链路
+    fail-fast（verify_skill_execution_consistency），此处是聚合可观测口径：
+    出现拒绝记录说明门禁真实拦截过绑定漂移（不静默），持续新增则提示环境
+    存在残留缓存/绑定配置问题需排查。
+
+    返回 {"name": "skill_consistency", "status": "ok"|"warn",
+          "refused_recent": int, "window_days": int, "detail": str}。
+    查询失败降级 status=unknown，绝不阻断健康端点。
+    """
+    out = {"name": "skill_consistency", "status": "unknown", "refused_recent": 0,
+           "window_days": int(days), "detail": ""}
+    try:
+        from datetime import timedelta
+        from src.session_manager import db, db_lock
+        _since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT COUNT(*) FROM agent_tasks "
+                "WHERE status='failed' AND result_text LIKE '[skill_mismatch]%' "
+                "AND completed_at >= ?", (_since,))
+            n = int(c.fetchone()[0] or 0)
+        out["refused_recent"] = n
+        if n:
+            out["status"] = "warn"
+            out["detail"] = (f"{n} task(s) refused by skill consistency gate in last "
+                             f"{int(days)}d (bound-skill drift intercepted; check "
+                             f"workspace/engine skill cache residue)")
+        else:
+            out["status"] = "ok"
+            out["detail"] = (f"no skill-mismatch refusals in last {int(days)}d "
+                             f"(Issue #887 gate active)")
+        return out
+    except Exception as e:
+        out["detail"] = f"skill consistency aggregate failed: {e}"
+        return out

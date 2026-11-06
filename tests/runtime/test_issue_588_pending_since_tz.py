@@ -32,7 +32,8 @@ from src.session_manager import db, db_lock
 RT_REMOTE = 9318
 CRED_REMOTE = 9418
 RK = "gitcode:tz/test588"
-PENDING_TIMEOUT_DEFAULT = 1800
+# 与实现常量对齐（#1071 起实现默认放宽为 5400）
+PENDING_TIMEOUT_DEFAULT = 5400
 
 import pytest
 

@@ -28,6 +28,107 @@ _PRIO_REPO = 10
 _PRIO_GLOBAL = 50
 _PRIO_LOCAL = 90
 
+# ===== Issue #658 修订（2026-11-03 用户裁定）：引擎角色不按类型默认映射 =====
+# 撤销 opencode/codearts/hermes 的类型刻板映射——引擎能力与引擎类型无关，
+# 所有引擎默认不限角色；仅显式声明 role_tags 时才按声明硬过滤。
+# （类型默认映射曾把 hermes 锁在 vod/chat/sre、opencode 锁在 coding/issue/qa，
+# 误伤跨类型绑定的合法场景；保留显式声明轨，默认口径 = 不限。）
+_DEFAULT_ENGINE_ROLE_TAGS: dict = {}
+
+# 已知节点角色全集（认领侧守卫仅对角色类 pool_tag 生效；自定义路由 tag 如 "b520tag"
+# 不是角色，不受角色硬过滤约束）。Issue #955：节点 id 即角色名（agent_type），
+# 场景写侧/读侧统一引用该公开常量做枚举校验与 id 优先匹配（避免各模块重复定义漂移）。
+KNOWN_AGENT_ROLES = {"coding", "issue", "qa", "vod", "chat", "sre"}
+
+# 兼容别名（既有内部引用保留；外部模块请使用 KNOWN_AGENT_ROLES）
+_KNOWN_AGENT_ROLES = KNOWN_AGENT_ROLES
+
+
+def node_agent_role(node) -> str:
+    """Issue #955：解析节点角色名（agent_type）——id 优先、tag 兜底。
+
+    节点 id 为角色名（标准写侧口径），tag 为展示用阶段名（可为中文等任意值，
+    仅存量 tag-only 节点兜底）；非 dict 节点返回空串。
+    """
+    if not isinstance(node, dict):
+        return ""
+    return (node.get("id") or node.get("tag") or "").strip()
+
+
+def node_matches_agent_role(node, role) -> bool:
+    """Issue #955：节点是否匹配指定角色——id 优先、tag 兜底（存量兼容）。"""
+    if not isinstance(node, dict) or not role:
+        return False
+    return node.get("id") == role or node.get("tag") == role
+
+
+def is_agent_role(tag: str) -> bool:
+    """pool_tag 是否为已知节点角色（Issue #658 认领侧守卫的适用判定）。"""
+    return (tag or "").strip().lower() in KNOWN_AGENT_ROLES
+
+
+def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:
+    """解析引擎有效角色集（双轨：显式 role_tags 声明 > 引擎类型默认映射兜底）。
+
+    返回：
+    - 非空 list：引擎可服务的 agent_type 集合（硬过滤口径）
+    - None：不限角色（引擎类型不在默认映射且未显式声明——存量引擎零配置兼容，
+      不因缺声明被全量排除）
+    """
+    raw = (role_tags_json or "").strip()
+    if raw:
+        try:
+            tags = json.loads(raw)
+            if isinstance(tags, list):
+                tags = [str(t).strip().lower() for t in tags if str(t).strip()]
+                if tags:
+                    return tags
+        except Exception:
+            pass
+    name = (engine_name or "").strip().lower()
+    return _DEFAULT_ENGINE_ROLE_TAGS.get(name)
+
+
+def _member_role_tags(m: dict) -> list | None:
+    """从候选引擎成员 dict 取有效角色集（成员未带 role_tags 字段时按 name 解析）。"""
+    return engine_role_tags(m.get("name") or "", m.get("role_tags") or "")
+
+
+def _filter_by_role(members: list[dict], agent_type: str) -> list[dict]:
+    """Issue #658 角色硬过滤（派发候选筛选最前置）：agent_type ∈ engine 有效角色集。
+
+    有效角色集为 None 的引擎（未知类型且未显式声明）不参与过滤（兼容口径）。
+    """
+    at = (agent_type or "").strip().lower()
+    if not at or not members:
+        return members
+    out = []
+    for m in members:
+        roles = _member_role_tags(m)
+        if roles is None or at in roles:
+            out.append(m)
+    return out
+
+
+def _role_no_candidates_detail(members: list[dict], agent_type: str) -> str:
+    """角色硬过滤后无候选的显式错误信息（含 agent_type 与各候选引擎 role_tags）。"""
+    at = (agent_type or "").strip().lower()
+    parts = []
+    for m in members:
+        roles = _member_role_tags(m)
+        parts.append(f"{m.get('name') or '?'}(id={m.get('runtime_id')}):{','.join(roles) if roles else 'any'}")
+    return (f"no engine matches agent_type '{at}' by role_tags "
+            f"(available engines: {'; '.join(parts) or 'none'})")
+
+
+def _log_role_no_candidates(stage: str, repo_key: str, agent_type: str, scene_id: str,
+                            members: list[dict]) -> None:
+    """角色无候选统一留痕：结构化决策日志 + 明确错误日志（不静默降级）。"""
+    detail = _role_no_candidates_detail(members, agent_type)
+    _decision_log(stage, repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                  result="role_no_candidates", detail=detail)
+    log.error(f"engine_select[{stage}]: {detail}")
+
 _DEFAULT_CFG = {
     "enabled": True,
     "scopes": ["repo", "global", "local"],

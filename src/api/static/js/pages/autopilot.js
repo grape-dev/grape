@@ -1891,7 +1891,7 @@ function _apLoadFindingsInline(execId, container) {
       html += '<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--b)">' +
         '<span style="font-size:12px;flex-shrink:0">' + icon + '</span>' +
         '<div style="flex:1;min-width:0">' +
-          '<div style="font-size:12px;font-weight:500;color:var(--t)">' + _esc(f.title) + '</div>' +
+          '<div style="font-size:12px;font-weight:500;color:var(--t)">' + _esc(f.title) + (f.dedup_level === 'suspected_duplicate' ? ' <span style="font-size:10px;padding:1px 6px;border-radius:4px;background:#e8a00020;color:#e8a000" title="' + _esc(f.dedup_note || '') + '">' + _apt('findings.suspected_dup_badge') + '</span>' : '') + '</div>' +
           '<div style="font-size:11px;color:var(--t2);margin-top:2px;white-space:pre-wrap">' + _esc(f.description || '') + '</div>' +
           '<div style="font-size:10px;color:' + color + ';margin-top:2px">' + _esc(f.severity || 'medium') + (f.category ? ' · ' + _esc(f.category) : '') + '</div>' +
         '</div>' +
@@ -1915,12 +1915,17 @@ function _apShowFindings(execId) {
     var sevIcons = {high:'🔴', medium:'🟡', low:'🔵'};
     var rows = findings.map(function(f) {
       var icon = sevIcons[f.severity] || '•';
+      // Issue #697：疑似重复（根因不一致）徽标，派发需 owner 确认
+      var dupBadge = f.dedup_level === 'suspected_duplicate'
+        ? '<span style="flex-shrink:0;font-size:10px;padding:1px 6px;border-radius:4px;background:#e8a00020;color:#e8a000" title="' + _esc(f.dedup_note || '') + '">' + _apt('findings.suspected_dup_badge') + '</span>'
+        : '';
       var dispatchBtn = f.dispatched
         ? '<span style="font-size:11px;color:var(--t3)">' + _apt('findings.dispatched_badge') + '</span>'
         : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ', ' + f.id + ', this)" style="font-size:11px">' + _apt('findings.dispatch_btn') + '</button>';
       return '<div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--b)">' +
         '<span style="font-size:14px;flex-shrink:0">' + icon + '</span>' +
         '<span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(f.title) + '</span>' +
+        dupBadge +
         '<span style="flex-shrink:0">' + dispatchBtn + '</span>' +
       '</div>';
     }).join('');

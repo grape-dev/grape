@@ -145,6 +145,7 @@
     "failed": "失败",
     "cancelled": "已取消"
   },
+  "load_more": "加载更多",
   "filter_options": {
     "created_by_me": "我创建的需求"
   }
