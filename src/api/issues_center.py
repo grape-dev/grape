@@ -2209,6 +2209,23 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "upstream_detail": f"member precheck: collaborator permission lookup returned 404 "
                                        f"for assignee '{assignee}' on {owner}/{rname}",
                 })
+        # Issue #1245: 建单前场景可用性预校验（查重 + assignee 预校验之后、GitCode 建单之前）。
+        # 静态只读校验，不通过返回 400 + problems[] + trace_id；此时尚未产生任何 VCS/DB 副作用。
+        # 仅校验用户显式选择的场景；智能推荐 / 仓库默认场景不在此拦截（由 issue_opened 路径兜底）。
+        _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
+        if _scene_for_precheck:
+            from src.api.scene_precheck import precheck_scene
+            _precheck = precheck_scene(_scene_for_precheck, repo_key, user)
+            if not _precheck.get("ok"):
+                _pc_problems = _precheck.get("problems") or []
+                _pc_summary = "；".join(
+                    str(p.get("message") or p.get("reason_code") or "") for p in _pc_problems[:3])
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"所选场景当前不可执行，已阻止建单：{_pc_summary}",
+                    "problems": _pc_problems,
+                    "trace_id": _precheck.get("trace_id") or _trace_id,
+                })
         # 拼接 Task Center 上传的附件到 issue body（Issue #648：拼装逻辑抽为可复用函数）
         _desc_with_attach = (body.description or "").strip()
         _pending_attachments = _attach_list(owner, rname, "pending")
