@@ -59,6 +59,7 @@
 | 钩子在无 grape CLI 环境失效 | Med | 钩子失败 fail-open+任务日志告警；关键自动推送路径另做服务端校验 |
 | fence 配平误报 | Low | 仅软告警，不阻断 |
 | 查询 PR 状态延迟 | Low | 以 push 时实时查询为准，查询异常放行但告警 |
+| 手工 push 租约未覆盖传输窗口 | Med（已接受） | pre-push 钩子在 git 实际传输完成后才会退出，但钩子内租约于 `finally` 释放，git 传输阶段租约已释放；自动推送路径由 `guarded_push` 持租约到 push 返回。两条路径语义不同，手工 push 的传输窗口仅由 `reconcile_pending` 事后漂移检测兜底（可感知、不可阻止并发写入）。本次明确接受该窗口，不在钩子内包装 `git push`（钩子无法持租约到传输结束）；后续如需强互斥，由 merge-bot 对接同一租约或改用包装 `git push` 的受控推送入口 |
 
 ### Assumptions / Open Questions
 - 假设 devdzr-merge-bot 为独立机器人、不受本仓库控制；本 Spec 交付"检测+提示+平台侧互斥"，强互斥需 bot 侧对接同一租约。

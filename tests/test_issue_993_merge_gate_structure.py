@@ -152,6 +152,31 @@ def test_fenced_example_not_hard_in_patch():
     assert r["fence_unbalanced"] is False
 
 
+def test_added_lines_inside_existing_fence_are_ignored():
+    """围栏开标记在 context、新增行位于围栏内时不得判元数据硬缺陷。"""
+    patch = ("@@ -1,4 +1,6 @@\n"
+             " ```yaml\n"
+             " status: open\n"
+             "+status: closed\n"
+             "+pr_number: 0\n"
+             " ```\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["pr_number_zero"] == 0
+    assert r["metadata_conflicts"] == {}
+    assert r["fence_unbalanced"] is False
+
+
+def test_added_line_after_existing_fence_is_still_hard():
+    """既有围栏闭合后的新增元数据仍应判定（围栏上下文不能放过真实残留）。"""
+    patch = ("@@ -1,3 +1,4 @@\n"
+             " ```\n"
+             " example\n"
+             " ```\n"
+             "+pr_number: 0\n")
+    r = mg.scan_structure_patch(patch)
+    assert r["pr_number_zero"] == 1
+
+
 def test_metadata_conflict_with_existing_context_value():
     """PR 新增值必须与文件既有（context）值比对，不能只看新增行。"""
     patch = ("@@ -1,3 +1,4 @@\n"

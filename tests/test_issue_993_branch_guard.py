@@ -377,6 +377,40 @@ def test_install_pre_push_hook_shared_dir_has_no_fixed_branch(tmp_path):
         "钩子必须运行时从 stdin 取 ref，不能固化安装时分支"
 
 
+def test_installed_hook_feeds_stdin_to_local_and_guard(tmp_path, monkeypatch):
+    """既有 pre-push.grape-local 消费 stdin 后，守卫仍能读到同一份 ref 列表。"""
+    from pathlib import Path
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _git("init", cwd=base)
+    assert bg.install_pre_push_hook(str(base), REPO_KEY) is True
+    hooks = Path(bg._hooks_dir(str(base)))
+
+    local_seen = tmp_path / "local-stdin.txt"
+    local = hooks / "pre-push.grape-local"
+    local.write_text('#!/bin/sh\ncat > "$LOCAL_SEEN"\n')
+    local.chmod(0o755)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_py = fake_bin / "python3"
+    fake_py.write_text('#!/bin/sh\ncat > "$GUARD_SEEN"\n')
+    fake_py.chmod(0o755)
+
+    guard_seen = tmp_path / "guard-stdin.txt"
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+    env["LOCAL_SEEN"] = str(local_seen)
+    env["GUARD_SEEN"] = str(guard_seen)
+    payload = "refs/heads/feat/x abc123 refs/heads/feat/x 000\n"
+    r = subprocess.run(["sh", str(hooks / "pre-push"), "origin", "url"],
+                       input=payload, text=True, capture_output=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert local_seen.read_text() == payload
+    assert guard_seen.read_text() == payload
+
+
 def test_hook_dynamically_uses_pushed_ref(monkeypatch):
     """钩子按 stdin 的 ref 记录状态，不受安装时分支影响。"""
     monkeypatch.setattr(bg, "acquire_branch_lease", lambda *a, **k: {"ok": True})

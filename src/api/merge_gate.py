@@ -55,16 +55,24 @@ def _normalize_patch(patch) -> str:
     return patch if isinstance(patch, str) else ""
 
 
-def _scan_structure_lines(lines) -> tuple[dict, dict]:
-    """扫描行序列，返回 (结构结果, 元数据 key→values)。
+def _scan_structure_lines(lines, added=None) -> tuple[dict, dict, dict]:
+    """扫描行序列，返回 (结构结果, 全部元数据, 新增行元数据)。
+
+    ``added`` 为与 ``lines`` 等长的布尔列表，标记哪些行是本次新增行；缺省视为
+    全部新增（纯文本扫描）。围栏状态按 ``lines`` 的自然顺序跟踪，因此围栏开标记
+    在 context、新增行位于围栏内时也能正确识别。
 
     代码围栏内只统计配平、不做元数据判定：文档里的 YAML/JSON 示例（如
     ``status: open``、``pr_number: 0``）不是真实元数据，不能误阻断合法文档 PR。
+    ``pr_number: 0`` 仅统计围栏外的**新增行**；元数据矛盾的全量值收集围栏外所有
+    行，但新增值只收集围栏外新增行。
     """
     fence_open = ""
     pr_zero = 0
     meta_values: dict = {}
-    for line in lines:
+    added_meta: dict = {}
+    for idx, line in enumerate(lines):
+        is_added = True if added is None else bool(added[idx])
         fence = _FENCE_RE.match(line)
         if fence:
             marker = fence.group(1)
@@ -75,20 +83,22 @@ def _scan_structure_lines(lines) -> tuple[dict, dict]:
             continue
         if fence_open:
             continue
-        if _PR_NUMBER_ZERO_RE.search(line):
+        if is_added and _PR_NUMBER_ZERO_RE.search(line):
             pr_zero += 1
         m = _META_LINE_RE.match(line)
         if m:
             key = m.group(1).lower()
             value = m.group(2).strip().strip('"').strip("'")
             meta_values.setdefault(key, set()).add(value)
+            if is_added:
+                added_meta.setdefault(key, set()).add(value)
     conflicts = {k: sorted(v) for k, v in meta_values.items() if len(v) > 1}
     result = {
         "fence_unbalanced": bool(fence_open),
         "pr_number_zero": pr_zero,
         "metadata_conflicts": conflicts,
     }
-    return result, meta_values
+    return result, meta_values, added_meta
 
 
 def scan_structure_text(text: str) -> dict:
@@ -96,37 +106,41 @@ def scan_structure_text(text: str) -> dict:
     return _scan_structure_lines((text or "").splitlines())[0]
 
 
-def scan_structure_patch(patch: str, file_text: str | None = None) -> dict:
-    """基于 unified diff 扫描：新增行判硬缺陷，结果态判元数据矛盾。
-
-    - ``pr_number: 0`` 只看新增行（PR 自己引入的残留才阻断）；
-    - 元数据矛盾看「新增值 + 文件既有值」：传入 ``file_text``（PR head 完整文件内容）
-      时与全文既有值比对，覆盖 patch hunk 之外的既有值；未传时退化为「新增值 +
-      context 既有值」（仅有 diff 可用时的保守口径）。仅当该 key 在新增行出现时才
-      报告，避免误伤只是路过已有矛盾文档的 PR；
-    - 围栏配平按变更后的结果态判断（有全文用全文，否则 context + 新增，删除行不计）。
-    """
-    added: list = []
+def _resulting_with_added_flags(patch: str) -> tuple[list, list]:
+    """把 unified diff 还原为变更后的行序列，并标记其中哪些行是新增行。"""
     resulting: list = []
+    added_flags: list = []
     for line in (patch or "").splitlines():
         if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
             continue
         if line.startswith("+") or line.startswith(" "):
-            body = line[1:]
-            resulting.append(body)
-            if line.startswith("+"):
-                added.append(body)
-        elif line.startswith("-"):
-            continue
-        elif line.startswith("\\"):
+            resulting.append(line[1:])
+            added_flags.append(line.startswith("+"))
+        elif line.startswith("-") or line.startswith("\\"):
             continue
         else:
             resulting.append(line)
-    added_res, added_meta = _scan_structure_lines(added)
+            added_flags.append(False)
+    return resulting, added_flags
+
+
+def scan_structure_patch(patch: str, file_text: str | None = None) -> dict:
+    """基于 unified diff 扫描：新增行判硬缺陷，结果态判元数据矛盾。
+
+    - ``pr_number: 0`` 只看新增行（PR 自己引入的残留才阻断）；围栏状态按
+      ``resulting`` 的自然顺序跟踪，围栏开标记在 context、新增行位于围栏内时不判定；
+    - 元数据矛盾看「新增值 + 文件既有值」：传入 ``file_text``（PR head 完整文件内容）
+      时与全文既有值比对，覆盖 patch hunk 之外的既有值；未传时退化为「新增值 +
+      context 既有值」（仅有 diff 可用时的保守口径）。仅当该 key 在围栏外新增行
+      出现时才报告，避免误伤只是路过已有矛盾文档的 PR；
+    - 围栏配平按变更后的结果态判断（有全文用全文，否则 context + 新增，删除行不计）。
+    """
+    resulting, added_flags = _resulting_with_added_flags(patch)
+    added_res, _added_values, added_meta = _scan_structure_lines(resulting, added_flags)
     if file_text is not None:
-        result_res, result_meta = _scan_structure_lines(file_text.splitlines())
+        result_res, result_meta, _result_added = _scan_structure_lines(file_text.splitlines())
     else:
-        result_res, result_meta = _scan_structure_lines(resulting)
+        result_res, result_meta, _result_added = _scan_structure_lines(resulting)
     conflicts = {
         k: sorted(v) for k, v in result_meta.items()
         if len(v) > 1 and k in added_meta

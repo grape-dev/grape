@@ -420,7 +420,8 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
     也能正确守卫各自的手工 push。
 
     已存在非本守卫的钩子时保留为 ``pre-push.grape-local`` 并在守卫前执行，
-    不覆盖用户既有逻辑。
+    不覆盖用户既有逻辑；stdin（本次被推 ref 列表）先暂存到临时文件，分别喂给
+    本地钩子与本守卫，避免本地钩子消费 stdin 后守卫读到空串而静默放行。
     """
     if not wt_dir or not repo_key:
         return False
@@ -447,9 +448,13 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
         lines = [
             "#!/bin/sh",
             HOOK_MARKER,
+            'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
+            'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
+            "trap 'rm -f \"$STDIN_TMP\"' EXIT INT TERM HUP",
+            'cat > "$STDIN_TMP"',
             'LOCAL="$(dirname "$0")/pre-push.grape-local"',
-            'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" || exit $?; fi',
-            f"python3 -c {shlex.quote(code)} {shlex.quote(repo_key)}",
+            'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" < "$STDIN_TMP" || exit $?; fi',
+            f'python3 -c {shlex.quote(code)} {shlex.quote(repo_key)} < "$STDIN_TMP"',
             "",
         ]
         with open(hook_path, "w", encoding="utf-8") as f:
