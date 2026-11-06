@@ -411,46 +411,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Engine probe start failed: {e}")
 
-        # 模板自愈：启动时检查 project-templates.json + examples/ 是否存在，
-        # 缺失则自动从 grape-template 仓库拉取（防 git merge 删除后模板页变空）
-        try:
-            _templates_ok = _check_and_sync_templates()
-            if _templates_ok:
-                log.info("Templates: project-templates.json + examples/ verified OK")
-            else:
-                log.warning("Templates: auto-sync attempted but issues remain, check logs")
-        except Exception as e:
-            log.warning(f"Templates: startup check failed: {e}")
-
-        # Issue #541：存量场景错误绑定幂等修复——dev_scene / issue.scene_id 曾误写
-        # 模板场景名，扫描后按 market_scene_id 改绑仓内副本真实 scene_id（可安全重跑）
-        try:
-            from src.api.scene_binding_repair import repair_scene_bindings
-            _rep_541 = repair_scene_bindings()
-            if _rep_541["repos_fixed"] or _rep_541["issues_fixed"]:
-                log.info(f"Scene binding repair: fixed {_rep_541['repos_fixed']} repos, "
-                         f"{_rep_541['issues_fixed']} issues (Issue #541)")
-        except Exception as e:
-            log.warning(f"Scene binding repair failed: {e}")
-
-        # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
-        try:
-            from src.help_page_gen import generate as _generate_help_page
-            _n_help = _generate_help_page()
-            log.info(f"Help: help.html regenerated ({_n_help} sources)")
-        except Exception as e:
-            log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
-
-        # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
-        try:
-            from src.api.openapi import custom_openapi
-            from src.help_page_gen import write_openapi_contract
-            _schema = custom_openapi(app)
-            _n_paths = write_openapi_contract(_schema)
-            log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
-        except Exception as e:
-            log.warning(f"OpenAPI: contract dump failed: {e}")
-
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
         lease_store = None
@@ -479,6 +439,46 @@ async def lifespan(app: FastAPI):
         set_bot_manager(bot_manager)
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
+
+    # 模板自愈：启动时检查 project-templates.json + examples/ 是否存在，
+    # 缺失则自动从 grape-template 仓库拉取（防 git merge 删除后模板页变空）
+    try:
+        _templates_ok = _check_and_sync_templates()
+        if _templates_ok:
+            log.info("Templates: project-templates.json + examples/ verified OK")
+        else:
+            log.warning("Templates: auto-sync attempted but issues remain, check logs")
+    except Exception as e:
+        log.warning(f"Templates: startup check failed: {e}")
+
+    # Issue #541：存量场景错误绑定幂等修复——dev_scene / issue.scene_id 曾误写
+    # 模板场景名，扫描后按 market_scene_id 改绑仓内副本真实 scene_id（可安全重跑）
+    try:
+        from src.api.scene_binding_repair import repair_scene_bindings
+        _rep_541 = repair_scene_bindings()
+        if _rep_541["repos_fixed"] or _rep_541["issues_fixed"]:
+            log.info(f"Scene binding repair: fixed {_rep_541['repos_fixed']} repos, "
+                     f"{_rep_541['issues_fixed']} issues (Issue #541)")
+    except Exception as e:
+        log.warning(f"Scene binding repair failed: {e}")
+
+    # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
+    try:
+        from src.help_page_gen import generate as _generate_help_page
+        _n_help = _generate_help_page()
+        log.info(f"Help: help.html regenerated ({_n_help} sources)")
+    except Exception as e:
+        log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+
+    # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
+    try:
+        from src.api.openapi import custom_openapi
+        from src.help_page_gen import write_openapi_contract
+        _schema = custom_openapi(app)
+        _n_paths = write_openapi_contract(_schema)
+        log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
+    except Exception as e:
+        log.warning(f"OpenAPI: contract dump failed: {e}")
 
     # lease sweep 循环（问题 J：变量名 _lease_sweep_task 区分）
     _lease_sweep_task = None
