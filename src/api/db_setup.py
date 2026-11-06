@@ -2978,7 +2978,7 @@ def _backfill_scene_rows_skill_id(rows: list, update_sql: str) -> int:
     幂等：节点已有 skill_id 跳过；解析不到保持原样（派发时按名字降级 + warning）。
     返回发生写回的行数。
     """
-    from src.user.db import resolve_skill_id
+    from src.domains.mgmt.user.db import resolve_skill_id
     updated = 0
     for row_id, repo_key, uid, nodes_json in rows:
         try:
@@ -3129,7 +3129,7 @@ def _fn_add_issue_status_priority_index() -> None:
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
-    from src.api.routes.issues import _status_order_sql  # 懒导入：避免模块级环形依赖
+    from src.domains.runtime.routes.issues import _status_order_sql  # 懒导入：避免模块级环形依赖
     _expr = _status_order_sql()
     _idx = "idx_issue_repo_statuspri_time"
     with db_lock:
