@@ -55,7 +55,8 @@ def load_lease_state(repo_key: str, head_branch: str) -> dict:
         from src.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute(
-                "SELECT expected_remote_sha, pr_number, base_branch, updated_at "
+                "SELECT expected_remote_sha, pr_number, base_branch, updated_at, "
+                "pending_expected_sha, pending_prev_sha "
                 "FROM branch_guard_state WHERE repo_key=? AND head_branch=?",
                 (repo_key, head_branch)).fetchone()
         if not row:
@@ -67,6 +68,8 @@ def load_lease_state(repo_key: str, head_branch: str) -> dict:
             "pr_number": int(row[1] or 0),
             "base_branch": str(row[2] or ""),
             "updated_at": str(row[3] or ""),
+            "pending_expected_sha": str(row[4] or ""),
+            "pending_prev_sha": str(row[5] or ""),
         }
     except Exception as e:
         log.warning(f"branch guard state read failed {repo_key}:{head_branch}: {e}")
@@ -74,7 +77,7 @@ def load_lease_state(repo_key: str, head_branch: str) -> dict:
 
 
 def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
-    """合并写租约状态（expected_remote_sha / pr_number / base_branch）。"""
+    """合并写租约状态（expected_remote_sha / pr_number / base_branch / pending 两字段）。"""
     state = load_lease_state(repo_key, head_branch)
     state.update({k: v for k, v in fields.items() if v is not None})
     state["repo_key"] = repo_key
@@ -89,17 +92,21 @@ def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
             vals = (str(state.get("expected_remote_sha") or ""),
                     int(state.get("pr_number") or 0),
                     str(state.get("base_branch") or ""),
-                    state["updated_at"])
+                    state["updated_at"],
+                    str(state.get("pending_expected_sha") or ""),
+                    str(state.get("pending_prev_sha") or ""))
             if exists:
                 db.execute(
                     "UPDATE branch_guard_state SET expected_remote_sha=?, pr_number=?, "
-                    "base_branch=?, updated_at=? WHERE repo_key=? AND head_branch=?",
+                    "base_branch=?, updated_at=?, pending_expected_sha=?, pending_prev_sha=? "
+                    "WHERE repo_key=? AND head_branch=?",
                     (*vals, repo_key, head_branch))
             else:
                 db.execute(
                     "INSERT INTO branch_guard_state "
                     "(repo_key, head_branch, expected_remote_sha, pr_number, base_branch, "
-                    "updated_at) VALUES (?,?,?,?,?,?)",
+                    "updated_at, pending_expected_sha, pending_prev_sha) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (repo_key, head_branch, *vals))
             db.commit()
     except Exception as e:
@@ -111,9 +118,48 @@ def record_remote_sha(repo_key: str, head_branch: str, remote_sha: str) -> dict:
     """记录本次 push 成功后远端将前进到的 head sha（供下一次 push 做漂移比对）。
 
     注意：必须是**本次推上去的 local sha**，不是 push 前的旧 remote sha；否则同一
-    任务第二次合法 push 会把自己上一次推送误判为他人漂移。
+    任务第二次合法 push 会把自己上一次推送误判为他人漂移。成功后落定即清空 pending。
     """
-    return save_lease_state(repo_key, head_branch, expected_remote_sha=remote_sha or "")
+    return save_lease_state(repo_key, head_branch, expected_remote_sha=remote_sha or "",
+                            pending_expected_sha="", pending_prev_sha="")
+
+
+def record_pending_push(repo_key: str, head_branch: str, local_sha: str,
+                        prev_remote_sha: str = "") -> dict:
+    """pre-push 钩子记录「候选」期望 sha（钩子退出后才真正传输，可能失败）。
+
+    钩子无法感知传输结果，因此不直接落定 expected：记录候选 local sha + 推送前远端
+    sha，下一次守卫查询时由 ``reconcile_pending`` 按远端实际值判定是否落地。
+    """
+    return save_lease_state(repo_key, head_branch,
+                            pending_expected_sha=local_sha or "",
+                            pending_prev_sha=prev_remote_sha or "")
+
+
+def reconcile_pending(repo_key: str, head_branch: str, remote_sha: str) -> str:
+    """用远端实际 head 收敛 pre-push 钩子留下的候选 sha，返回应比对的期望 sha。
+
+    - remote == 候选 → 上次手工 push 已落地，expected 前进到候选并清空 pending；
+    - remote == 推送前旧值（或远端未知）→ 上次 push 未落地，丢弃候选，保持旧 expected
+      （避免下一次合法 push 被误判 remote_drift）；
+    - 其它值 → 传输窗口内有他人写入，保留候选让 ``check_push_allowed`` 判漂移阻断。
+    """
+    state = load_lease_state(repo_key, head_branch)
+    expected = state.get("expected_remote_sha", "")
+    pending = state.get("pending_expected_sha", "")
+    prev = state.get("pending_prev_sha", "")
+    if not pending:
+        return expected
+    if remote_sha and remote_sha == pending:
+        save_lease_state(repo_key, head_branch, expected_remote_sha=pending,
+                         pending_expected_sha="", pending_prev_sha="")
+        return pending
+    if not remote_sha:
+        return pending
+    if remote_sha == prev:
+        save_lease_state(repo_key, head_branch, pending_expected_sha="", pending_prev_sha="")
+        return expected
+    return pending
 
 
 def _peek_holder(lock_key: str) -> tuple[str, int]:
@@ -142,11 +188,8 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
                 "message": "分支租约参数缺失（repo_key/head_branch）"}
     from src import lock as _lock
     key = lease_key(repo_key, head_branch)
-    if _lock.acquire_lock(key, ttl=ttl):
-        pass
-    elif _lock.renew_lock(key, ttl=ttl):
-        pass  # 同 holder 重入
-    else:
+    # 新获取或同 holder 重入（renew）均视为成功；仅在两者都失败时判定他人持有。
+    if not (_lock.acquire_lock(key, ttl=ttl) or _lock.renew_lock(key, ttl=ttl)):
         holder, _expires = _peek_holder(key)
         return {
             "ok": False,
@@ -205,9 +248,11 @@ def preflight_push(repo_key: str, head_branch: str, token: str = "") -> dict:
     """服务端 push 前置检查：查远端 head + PR 状态后调用 ``check_push_allowed``。"""
     remote_sha = resolve_remote_head(repo_key, head_branch, token=token)
     pr = fetch_pr_state(repo_key, head_branch, token=token)
+    expected = reconcile_pending(repo_key, head_branch, remote_sha)
     verdict = check_push_allowed(
         repo_key, head_branch,
         remote_sha=remote_sha,
+        expected_remote_sha=expected,
         pr_state=pr.get("state", ""),
         pr_number=pr.get("number", 0),
         base_branch=pr.get("base", ""),
@@ -331,22 +376,22 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
     """pre-push 钩子无 VCS token 时，通过 grape CLI（会话 token）查 PR 状态。"""
     try:
         from src.repo_key import parse_repo_key
+        from src.vcs.api_client import paginate_pages
         provider, owner, repo = parse_repo_key(repo_key)
-        items: list = []
-        for page in range(1, 21):
+
+        def _fetch(page):
             cmd = ["grape", "git-repo", "pulls", "list", "--owner", owner, "--repo", repo,
                    "--state", "all", "--per_page", "100", "--page", str(page), "--json-out"]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
                 log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: "
                             f"{(r.stderr or '')[:200]}")
-                return {"state": ""}
-            part = json.loads(r.stdout or "[]")
-            if not isinstance(part, list) or not part:
-                break
-            items.extend(part)
-            if len(part) < 100:
-                break
+                return {"error": (r.stderr or "")[:200]}
+            return json.loads(r.stdout or "[]")
+
+        items = paginate_pages(_fetch, page_size=100, max_pages=20)
+        if isinstance(items, dict) and items.get("error"):
+            return {"state": ""}
         return _match_pr(items, head_branch)
     except Exception as e:
         log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: {e}")
@@ -464,11 +509,11 @@ def hook_main(argv: list | None = None) -> int:
                 return 1
             held.append(pushed)
         for pushed, _local_sha, remote_sha in refs:
-            state = load_lease_state(repo_key, pushed)
+            expected = reconcile_pending(repo_key, pushed, remote_sha)
             pr = _fetch_pr_state_via_grape(repo_key, pushed)
             verdict = check_push_allowed(
                 repo_key, pushed, remote_sha=remote_sha,
-                expected_remote_sha=state.get("expected_remote_sha", ""),
+                expected_remote_sha=expected,
                 pr_state=pr.get("state", ""), pr_number=pr.get("number", 0),
                 base_branch=pr.get("base", ""))
             if not verdict.get("allowed"):
@@ -476,11 +521,12 @@ def hook_main(argv: list | None = None) -> int:
                        f"{verdict.get('reason')}",
                        verdict.get("message") or "push blocked")
                 return 1
-        # 全部 ref 通过后才记录，避免多 ref push 中途阻断时留下未真正推送的期望值。
-        # 记录的必须是本次推上去的 local sha（push 后远端即前进到它），而非旧 remote sha。
-        for pushed, local_sha, _remote_sha in refs:
+        # pre-push 钩子退出后 git 才真正传输，无法在钩子内确认成功：这里只记录候选
+        # sha + 推送前远端，下一次守卫用 reconcile_pending 按远端实际值收敛，避免
+        # push 失败（网络/non-fast-forward）后留下未落地的 expected 导致误报漂移。
+        for pushed, local_sha, remote_sha in refs:
             if local_sha:
-                record_remote_sha(repo_key, pushed, local_sha)
+                record_pending_push(repo_key, pushed, local_sha, prev_remote_sha=remote_sha)
         return 0
     finally:
         for pushed in held:

@@ -149,6 +149,93 @@ def test_fetch_pr_state_uses_paginated_client(monkeypatch):
     assert captured == {"state": "all", "head": BRANCH}
 
 
+def test_list_prs_gitcode_paginates_until_short_page():
+    """VcsApiClient.list_prs：>1 页时按 page 翻页，短页即停。"""
+    from src.vcs.api_client import VcsApiClient
+
+    calls = []
+
+    def _req(method, path):
+        import re as _re
+        calls.append(path)
+        page = int(_re.search(r"[?&]page=(\d+)", path).group(1))
+        if page == 1:
+            return [{"number": i} for i in range(100)]
+        if page == 2:
+            return [{"number": 100}, {"number": 101}]
+        return []
+
+    c = VcsApiClient("gitcode", "tok", "owner", "repo")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(c, "_gitcode_request", _req)
+        items = c.list_prs(state="all", head=BRANCH)
+    finally:
+        monkeypatch.undo()
+    assert len(items) == 102
+    assert len(calls) == 2
+    assert "state=all" in calls[0] and "per_page=100" in calls[0]
+
+
+def test_list_prs_github_uses_head_owner_branch():
+    from src.vcs.api_client import VcsApiClient
+
+    calls = []
+
+    def _req(method, path):
+        calls.append(path)
+        return []
+
+    c = VcsApiClient("github", "tok", "owner", "repo")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(c, "_github_request", _req)
+        c.list_prs(state="all", head=BRANCH)
+    finally:
+        monkeypatch.undo()
+    assert calls and f"head=owner:{BRANCH}" in calls[0]
+
+
+def test_list_prs_gitlab_encodes_project_path():
+    from src.vcs.api_client import VcsApiClient
+
+    calls = []
+
+    def _req(method, path):
+        calls.append(path)
+        return []
+
+    c = VcsApiClient("gitlab", "tok", "owner", "repo")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(c, "_gitlab_request", _req)
+        c.list_prs(state="all", head=BRANCH)
+    finally:
+        monkeypatch.undo()
+    assert calls and "/projects/owner%2Frepo/merge_requests" in calls[0]
+
+
+def test_list_prs_error_passthrough():
+    from src.vcs.api_client import VcsApiClient
+
+    c = VcsApiClient("gitcode", "tok", "owner", "repo")
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(c, "_gitcode_request",
+                            lambda method, path: {"error": "HTTP 403"})
+        assert c.list_prs() == {"error": "HTTP 403"}
+    finally:
+        monkeypatch.undo()
+
+
+def test_paginate_pages_shared_helper():
+    from src.vcs.api_client import paginate_pages
+
+    pages = {1: [1, 2], 2: [3]}
+    got = paginate_pages(lambda p: pages.get(p, []), page_size=2, max_pages=5)
+    assert got == [1, 2, 3]
+
+
 def test_consecutive_push_records_pushed_local_sha():
     """AC3：push 成功后记录 local sha，第二次合法推送不误报漂移。"""
     bg.record_remote_sha(REPO_KEY, BRANCH, "local-1")
@@ -157,8 +244,8 @@ def test_consecutive_push_records_pushed_local_sha():
     assert bg.check_push_allowed(REPO_KEY, BRANCH, remote_sha="local-2")["allowed"] is True
 
 
-def test_hook_records_local_sha_not_stale_remote(monkeypatch):
-    """钩子必须记录 stdin 的 local_sha（parts[1]），而非 push 前的旧 remote_sha。"""
+def test_hook_records_pending_local_sha_not_stale_remote(monkeypatch):
+    """钩子记录 stdin 的 local_sha（parts[1]）为候选，而非 push 前的旧 remote_sha。"""
     monkeypatch.setattr(bg, "acquire_branch_lease",
                         lambda *a, **k: {"ok": True})
     monkeypatch.setattr(bg, "release_branch_lease", lambda *a, **k: None)
@@ -167,7 +254,43 @@ def test_hook_records_local_sha_not_stale_remote(monkeypatch):
     monkeypatch.setattr(bg.sys, "stdin",
                         io.StringIO(f"refs/heads/{BRANCH} local-new refs/heads/{BRANCH} old-remote\n"))
     assert bg.hook_main([REPO_KEY, BRANCH]) == 0
-    assert bg.load_lease_state(REPO_KEY, BRANCH)["expected_remote_sha"] == "local-new"
+    state = bg.load_lease_state(REPO_KEY, BRANCH)
+    assert state["pending_expected_sha"] == "local-new"
+    assert state["pending_prev_sha"] == "old-remote"
+
+
+def test_manual_push_success_reconciles_expected():
+    """钩子推送落地后，下一次守卫把候选 sha 收敛为 expected。"""
+    bg.record_remote_sha(REPO_KEY, BRANCH, "local-1")
+    bg.record_pending_push(REPO_KEY, BRANCH, "local-2", prev_remote_sha="local-1")
+    expected = bg.reconcile_pending(REPO_KEY, BRANCH, "local-2")
+    assert expected == "local-2"
+    state = bg.load_lease_state(REPO_KEY, BRANCH)
+    assert state["expected_remote_sha"] == "local-2"
+    assert state["pending_expected_sha"] == "" and state["pending_prev_sha"] == ""
+
+
+def test_manual_push_failure_does_not_false_drift():
+    """钩子记录的候选若未真正传输（远端仍是旧值），不得误判 remote_drift。"""
+    bg.record_remote_sha(REPO_KEY, BRANCH, "local-1")
+    bg.record_pending_push(REPO_KEY, BRANCH, "local-2", prev_remote_sha="local-1")
+    expected = bg.reconcile_pending(REPO_KEY, BRANCH, "local-1")
+    assert expected == "local-1"
+    verdict = bg.check_push_allowed(REPO_KEY, BRANCH, remote_sha="local-1",
+                                    expected_remote_sha=expected)
+    assert verdict["allowed"] is True
+    assert bg.load_lease_state(REPO_KEY, BRANCH)["pending_expected_sha"] == ""
+
+
+def test_manual_push_transfer_window_concurrent_move_blocks_drift():
+    """传输窗口内他人写入远端 → 候选与旧值均不匹配，下一次守卫判漂移阻断。"""
+    bg.record_remote_sha(REPO_KEY, BRANCH, "local-1")
+    bg.record_pending_push(REPO_KEY, BRANCH, "local-2", prev_remote_sha="local-1")
+    expected = bg.reconcile_pending(REPO_KEY, BRANCH, "other-sha")
+    verdict = bg.check_push_allowed(REPO_KEY, BRANCH, remote_sha="other-sha",
+                                    expected_remote_sha=expected)
+    assert expected == "local-2"
+    assert verdict["allowed"] is False and verdict["reason"] == "remote_drift"
 
 
 def test_hook_block_is_dual_channel(monkeypatch, capsys):
@@ -263,7 +386,7 @@ def test_hook_dynamically_uses_pushed_ref(monkeypatch):
     monkeypatch.setattr(bg.sys, "stdin", io.StringIO(
         f"refs/heads/feat/other local-other refs/heads/feat/other old\n"))
     assert bg.hook_main([REPO_KEY, "feat/installed"]) == 0
-    assert bg.load_lease_state(REPO_KEY, "feat/other")["expected_remote_sha"] == "local-other"
+    assert bg.load_lease_state(REPO_KEY, "feat/other")["pending_expected_sha"] == "local-other"
     assert bg.load_lease_state(REPO_KEY, "feat/installed") == {}
 
 

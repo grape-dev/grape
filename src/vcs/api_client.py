@@ -21,6 +21,26 @@ USER_IMAGE_TIMEOUT = 15                  # 单图下载 15s 超时
 USER_IMAGE_MAX_COUNT = 8                 # 单 Issue 最多采集 8 张（超出降级说明）
 
 
+def paginate_pages(fetch_page, page_size: int = 100, max_pages: int = 20) -> list | dict:
+    """通用分页收集：``fetch_page(page)`` 返回列表或 ``{"error": ...}``。
+
+    结果不足 ``page_size`` 或为空即停止；任一页返回 error 时原样返回 error。
+    Issue #993：VcsApiClient.list_prs 与 branch_guard 的 grape CLI 查询共用，
+    避免两处分页逻辑漂移。
+    """
+    items: list = []
+    for page in range(1, max_pages + 1):
+        part = fetch_page(page)
+        if isinstance(part, dict) and part.get("error"):
+            return part
+        if not isinstance(part, list) or not part:
+            break
+        items.extend(part)
+        if len(part) < page_size:
+            break
+    return items
+
+
 def extract_gitcode_user_image_urls(text: "str | None") -> list[str]:
     """从 Markdown / HTML / 裸链文本中提取 raw.gitcode.com/user-images 图片 URL。
 
@@ -272,32 +292,26 @@ class VcsApiClient:
         ``per_page=100`` 且全量翻页，避免 PR 超过单页时漏掉 merged PR。返回列表；
         查询失败返回 ``{"error": ...}``。
         """
-        items: list = []
-        for page in range(1, max_pages + 1):
-            if self.provider == "gitcode":
+        if self.provider == "gitcode":
+            def _fetch(page):
                 path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
                         f"&per_page=100&page={page}")
-                part = self._gitcode_request("GET", path)
-            elif self.provider == "github":
+                return self._gitcode_request("GET", path)
+        elif self.provider == "github":
+            def _fetch(page):
                 head_q = f"&head={self.owner}:{head}" if head else ""
                 path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
                         f"{head_q}&per_page=100&page={page}")
-                part = self._github_request("GET", path)
-            elif self.provider == "gitlab":
+                return self._github_request("GET", path)
+        elif self.provider == "gitlab":
+            def _fetch(page):
                 project_id = f"{self.owner}%2F{self.repo}"
                 path = (f"/projects/{project_id}/merge_requests?state={state}"
                         f"&per_page=100&page={page}")
-                part = self._gitlab_request("GET", path)
-            else:
-                return {"error": f"unsupported provider: {self.provider}"}
-            if isinstance(part, dict) and part.get("error"):
-                return part
-            if not isinstance(part, list) or not part:
-                break
-            items.extend(part)
-            if len(part) < 100:
-                break
-        return items
+                return self._gitlab_request("GET", path)
+        else:
+            return {"error": f"unsupported provider: {self.provider}"}
+        return paginate_pages(_fetch, page_size=100, max_pages=max_pages)
 
     # === 仓库信息 ===
 

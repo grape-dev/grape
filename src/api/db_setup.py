@@ -855,6 +855,8 @@ CREATE TABLE IF NOT EXISTS branch_guard_state (
     pr_number           INTEGER      NOT NULL DEFAULT 0,
     base_branch         VARCHAR(255) NOT NULL DEFAULT '',
     updated_at          TEXT         NOT NULL DEFAULT '',
+    pending_expected_sha VARCHAR(64) NOT NULL DEFAULT '',
+    pending_prev_sha    VARCHAR(64)  NOT NULL DEFAULT '',
     PRIMARY KEY (repo_key, head_branch)
 )
 """
@@ -2835,6 +2837,30 @@ register_migration(
     name="create-branch-guard-state-table",
     kind="safe",
     fn=_fn_create_branch_guard_state,
+)
+
+
+def _fn_add_branch_guard_pending_columns() -> None:
+    """Issue #993 复审：pre-push 钩子候选 sha 字段（存量库幂等补列）。
+
+    钩子退出后才真正传输，无法在钩子内确认 push 成功；用 pending_expected_sha +
+    pending_prev_sha 记录候选与推送前远端，下一次守卫按远端实际值收敛，避免 push
+    失败后误报 remote_drift。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "branch_guard_state", "pending_expected_sha",
+                       "VARCHAR(64) NOT NULL DEFAULT ''")
+        _ensure_column(c, "branch_guard_state", "pending_prev_sha",
+                       "VARCHAR(64) NOT NULL DEFAULT ''")
+        db.commit()
+
+
+register_migration(
+    version="202611060002",
+    name="add-branch-guard-pending-columns",
+    kind="safe",
+    fn=_fn_add_branch_guard_pending_columns,
 )
 
 

@@ -96,14 +96,15 @@ def scan_structure_text(text: str) -> dict:
     return _scan_structure_lines((text or "").splitlines())[0]
 
 
-def scan_structure_patch(patch: str) -> dict:
-    """基于 unified diff 扫描：新增行判硬缺陷，变更后的完整 hunk 判元数据矛盾。
+def scan_structure_patch(patch: str, file_text: str | None = None) -> dict:
+    """基于 unified diff 扫描：新增行判硬缺陷，结果态判元数据矛盾。
 
     - ``pr_number: 0`` 只看新增行（PR 自己引入的残留才阻断）；
-    - 元数据矛盾看「新增值 + 既有值」：未修改的 context 行也计入结果态，避免
-      新增值与文件既有值矛盾时漏检；仅当该 key 在新增行出现时才报告，避免误伤
-      只是路过已有矛盾文档的 PR；
-    - 围栏配平按变更后的结果态判断（context + 新增，删除行不计）。
+    - 元数据矛盾看「新增值 + 文件既有值」：传入 ``file_text``（PR head 完整文件内容）
+      时与全文既有值比对，覆盖 patch hunk 之外的既有值；未传时退化为「新增值 +
+      context 既有值」（仅有 diff 可用时的保守口径）。仅当该 key 在新增行出现时才
+      报告，避免误伤只是路过已有矛盾文档的 PR；
+    - 围栏配平按变更后的结果态判断（有全文用全文，否则 context + 新增，删除行不计）。
     """
     added: list = []
     resulting: list = []
@@ -122,7 +123,10 @@ def scan_structure_patch(patch: str) -> dict:
         else:
             resulting.append(line)
     added_res, added_meta = _scan_structure_lines(added)
-    result_res, result_meta = _scan_structure_lines(resulting)
+    if file_text is not None:
+        result_res, result_meta = _scan_structure_lines(file_text.splitlines())
+    else:
+        result_res, result_meta = _scan_structure_lines(resulting)
     conflicts = {
         k: sorted(v) for k, v in result_meta.items()
         if len(v) > 1 and k in added_meta
@@ -134,12 +138,49 @@ def scan_structure_patch(patch: str) -> dict:
     }
 
 
-def scan_structure_files(files) -> dict:
+def _fetch_rebuilt_doc_text(owner: str, repo: str, path: str, ref: str, p: str,
+                            token: str) -> str:
+    """取重建文档在 PR head 的全文（base64），供元数据与文件既有值比对。
+
+    失败/非文件响应返回空串，调用方回退到 patch hunk 口径（fail-open）。
+    """
+    try:
+        import base64
+
+        from src.api.git_repo_api import _vcs_req, _vcs_url
+        info = _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/" + path,
+                                            {"ref": ref}, p), token)
+        if not isinstance(info, dict):
+            return ""
+        content = info.get("content")
+        if not isinstance(content, str) or not content:
+            return ""
+        return base64.b64decode(content).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning(f"merge gate read doc content failed (fail-open) {path}: {e}")
+        return ""
+
+
+def _pull_head_ref(owner: str, repo: str, number: int, p: str, token: str) -> str:
+    """取 PR head sha/ref（读取重建文档全文的定位点）；失败返回空串。"""
+    try:
+        from src.api.git_repo_api import _vcs_req, _vcs_url
+        pr = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), token)
+        head = (pr or {}).get("head") or {} if isinstance(pr, dict) else {}
+        return head.get("sha") or head.get("ref") or ""
+    except Exception as e:
+        log.warning(f"merge gate get pull head failed (fail-open) {owner}/{repo}#{number}: {e}")
+        return ""
+
+
+def scan_structure_files(files, file_text_loader=None) -> dict:
     """扫描 PR files 响应，返回结构缺陷的硬/软命中明细。
 
     hard_hits: {filename: n}（pr_number:0 / 元数据矛盾）
     soft_hits: {filename: n}（围栏不配平）
     details: 原始缺陷描述，供合入日志排查。
+    ``file_text_loader(filename)`` 可选：返回该文件 PR head 全文，用于与 hunk 之外的
+    既有值比对；返回空串/异常时回退 patch 口径。
     """
     hard_hits: dict = {}
     soft_hits: dict = {}
@@ -153,7 +194,13 @@ def scan_structure_files(files) -> dict:
         patch = _normalize_patch(item.get("patch"))
         if not filename or not patch or not is_rebuilt_doc(filename):
             continue
-        got = scan_structure_patch(patch)
+        file_text = None
+        if file_text_loader is not None:
+            try:
+                file_text = file_text_loader(filename) or None
+            except Exception:
+                file_text = None
+        got = scan_structure_patch(patch, file_text=file_text)
         hard_n = int(got.get("pr_number_zero") or 0) + len(got.get("metadata_conflicts") or {})
         if hard_n:
             hard_hits[filename] = hard_n
@@ -260,7 +307,17 @@ def run_merge_gate(owner: str, repo: str, number: int, p: str, token: str) -> di
     try:
         files = _pull_files_all_pages(owner, repo, number, p, token)
         hits = scan_pull_files(files)
-        structure = scan_structure_files(files)
+        # 仅当 PR 含重建文档时取 head 全文，用于与 hunk 之外的既有值比对。
+        _has_doc = any(isinstance(it, dict)
+                       and is_rebuilt_doc(it.get("filename") or it.get("path") or "")
+                       for it in (files or []))
+        _loader = None
+        if _has_doc:
+            _head_ref = _pull_head_ref(owner, repo, number, p, token)
+            if _head_ref:
+                _loader = lambda fn: _fetch_rebuilt_doc_text(  # noqa: E731
+                    owner, repo, fn, _head_ref, p, token)
+        structure = scan_structure_files(files, file_text_loader=_loader)
         hard_hits = {**hits["hard_hits"], **structure["hard_hits"]}
         soft_hits = {**hits["soft_hits"], **structure["soft_hits"]}
         result = {"hard_hits": hard_hits, "soft_hits": soft_hits,

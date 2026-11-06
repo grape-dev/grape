@@ -1115,14 +1115,19 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
         _conflict = _gate.get("conflict_hard_hits") or {}
         _structure = _gate.get("structure_hard_hits") or {}
         _parts = []
+        _trace_parts = []
         if _conflict:
             _files = ", ".join(f"{_p}({_n})" for _p, _n in _conflict.items())
             _parts.append("merge blocked by conflict-marker gate (Issue #752): "
                           f"unresolved merge conflict markers found in PR changed files: {_files}")
+            _trace_parts.append(f"unresolved merge conflict markers in PR files: {_files} "
+                                f"(Issue #752)")
         if _structure:
             _sfiles = ", ".join(f"{_p}({_n})" for _p, _n in _structure.items())
             _parts.append("merge blocked by structural gate (Issue #993): "
                           f"structural defects in rebuilt docs: {_sfiles}")
+            _trace_parts.append(f"structural defects in rebuilt docs: {_sfiles} "
+                                f"(Issue #993)")
         _msg = "; ".join(_parts) or "merge blocked by merge gate"
         # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
         try:
@@ -1134,8 +1139,9 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
             log.warning(f"outbound_ledger record (pr_merge_blocked) failed: {_le}")
         # 阻断留痕②（承接 Issue #754）：PR 评论 best-effort（GitCode /pulls、GitHub /issues 通道）
         try:
-            _trace_body = (f"[Grape] merge blocked: unresolved conflict markers in PR files: {_files}. "
-                           f"Manual fix required before merge. (Issue #752)")
+            _trace_body = ("[Grape] merge blocked: "
+                           + "; ".join(_trace_parts or ["merge gate blocked"])
+                           + ". Manual fix required before merge.")
             _trace_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
             _vcs_req(p, "POST", _vcs_url(owner, repo, _trace_path, None, p), _token,
                      {"body": _trace_body})
