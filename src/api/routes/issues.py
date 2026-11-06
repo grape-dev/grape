@@ -2187,7 +2187,7 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
     return out
 
 
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`. Issue #995: cards whose `issue_number` no longer exists on VCS are hidden by default (provider-aware batch VCS index + TTL cache + ledger `vcs_exists` flag); pass `include_deleted=1` to audit them. Each non-PR card carries `vcs_exists` (bool), `is_vcs_deleted` (bool, = !vcs_exists) and `vcs_check` (ok/unavailable; unavailable means VCS verification failed and cards are fail-open/not hidden). `id` is the ledger card id, `issue_number` is the VCS issue number — they are NOT interchangeable.")
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
@@ -2199,6 +2199,7 @@ def list_repo_issues(owner: str, repo: str,
                      page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
                      per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
                      recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
+                     include_deleted: bool = Query(False, description="Issue #995：默认隐藏 VCS 侧已删除的台账卡片；设为 true（或 =1）可审计返回，并带 is_vcs_deleted=true / vcs_exists=false"),
                      user: dict = Depends(require_org_member)):
     """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
 
@@ -2238,9 +2239,29 @@ def list_repo_issues(owner: str, repo: str,
             repo_keys = _live
     except Exception:
         pass
+    # Issue #995：先按 provider 批量刷新 VCS 存在性并回写台账，SQL 过滤/COUNT 才能与
+    # 返回集合一致。VCS 无法核实（无 token/超时）的 repo_key 记 unavailable → fail-open，
+    # 不参与 vcs_exists 过滤（避免 VCS 抖动导致需求“消失”）。
+    _vcs_status: dict[str, str] = {}
+    try:
+        from src.api.issue_vcs_index import refresh_vcs_existence
+        _vcs_status = refresh_vcs_existence(repo_keys) or {}
+    except Exception as _vcs_err:
+        log.warning(f"issues: refresh vcs existence failed: {_vcs_err}")
+        _vcs_status = {_k: "unavailable" for _k in repo_keys}
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
     params: list = list(repo_keys)
+    if not include_deleted:
+        _vcs_ok = [k for k in repo_keys if _vcs_status.get(k) == "ok"]
+        _vcs_unknown = [k for k in repo_keys if _vcs_status.get(k) != "ok"]
+        if _vcs_ok:
+            if _vcs_unknown:
+                _ph = ",".join("?" * len(_vcs_unknown))
+                clauses.append(f"(repo_key NOT IN ({_ph}) OR vcs_exists != 0)")
+                params.extend(_vcs_unknown)
+            else:
+                clauses.append("vcs_exists != 0")
     if status:
         clauses.append("status=?")
         params.append(status)
@@ -2399,6 +2420,19 @@ def list_repo_issues(owner: str, repo: str,
         issues.extend(_page_pr)
     else:
         issues.extend(pr_items)
+
+    # Issue #995：存在性标注——PR 伪卡片来自 PR 事件而非 issue 台账，不参与已删除过滤；
+    # 普通卡片按 repo_key 的校验结果给出 vcs_check，vcs_exists=false 即 VCS 侧已删除。
+    for _it in issues:
+        if _it.get("is_pr_event"):
+            _it["vcs_exists"] = True
+            _it["is_vcs_deleted"] = False
+            _it["vcs_check"] = "ok"
+            continue
+        _rk = _it.get("repo_key") or ""
+        _it["vcs_exists"] = bool(_it.get("vcs_exists", True))
+        _it["is_vcs_deleted"] = not _it["vcs_exists"]
+        _it["vcs_check"] = "ok" if _vcs_status.get(_rk) == "ok" else "unavailable"
 
     # Issue #542：分页模式返回服务端分页元数据；非分页模式 total 维持 len(issues)（兼容旧语义）
     if _total is not None:

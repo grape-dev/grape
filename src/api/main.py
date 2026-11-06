@@ -347,6 +347,27 @@ def _start_active_user_tracker_task():
     return _t
 
 
+def _start_vcs_exists_backfill_task():
+    """Issue #995：存量 issue.vcs_exists 异步回填（幂等，启动后延迟执行一次）。
+
+    不阻塞启动；失败仅告警，列表请求仍按 fail-open 语义工作。
+    """
+    from src.config import log
+
+    async def _worker():
+        await asyncio.sleep(60)
+        try:
+            from src.api.issue_vcs_index import backfill_vcs_exists
+            summary = await asyncio.to_thread(backfill_vcs_exists)
+            log.info(f"VCS existence backfill: {summary}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"VCS existence backfill failed: {e}")
+
+    return asyncio.create_task(_worker(), name="vcs-exists-backfill")
+
+
 # ===== main.py lifespan（单进程兼容模式，Issue #596 后保留）=====
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -615,6 +636,13 @@ async def lifespan(app: FastAPI):
         log.info("knowledge_migrate started (async)")
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
+
+    # Issue #995：存量 VCS 存在性回填（启动后异步执行，不阻塞，幂等可重跑）
+    try:
+        app.state.vcs_exists_backfill_task = _start_vcs_exists_backfill_task()
+        log.info("VCS existence backfill started (async)")
+    except Exception as e:
+        log.warning(f"VCS existence backfill start failed: {e}")
 
     # D32: user_accounts → grape_accounts 数据迁移（Issue #343: yield 前同步等待完成）
     # P1-1 修复: 原异步执行不等待就 yield，迁移期间用户请求读到旧 user_id 导致数据错位。

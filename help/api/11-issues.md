@@ -58,18 +58,27 @@
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` 仓库 |
-| Query | `status`（active/processing/awaiting_input/pending_review/completed/cancelled）、`sort_order`（desc/asc）、`mode`（default=状态优先/time=纯时间序）、`assignees`（逗号分隔创建人） |
-| 出参 | `{issues: Issue[], total: int}`（不限 user_id） |
+| Query | `status`（active/processing/awaiting_input/pending_review/completed/cancelled）、`sort_order`（desc/asc）、`mode`（default=状态优先/time=纯时间序）、`assignees`（逗号分隔创建人）、`include_deleted`（可选，默认 false；`1`/`true` 时返回 VCS 侧已删除的台账卡片供审计，见 Issue #995） |
+| 出参 | `{issues: Issue[], total: int}`（不限 user_id；默认不含 VCS 侧已删除卡片） |
 | 返回 | 200；401 未认证 |
 
 > 仓库列表为公开只读聚合（对齐原 `issues_list` 行为，无仓库权限门禁）。
+>
+> **Issue #995：VCS 存在性过滤**——服务端按 provider（`gitcode:`/`github:` 分别对齐）批量拉取 VCS issue 编号
+> （进程内 TTL 缓存 300s）并回写 `issue.vcs_exists`，默认隐藏 `vcs_exists=0`（VCS 侧 404）的卡片；
+> 分页模式 `total`/`has_more` 与过滤后集合一致。VCS 校验失败时 fail-open：卡片照常返回并标
+> `vcs_check=unavailable`。传 `include_deleted=1` 可返回被隐藏卡片并标 `is_vcs_deleted=true`。
 
 Issue 对象字段：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `number` | int | Issue 编号 |
-| `id` / `issue_number` | int | Issue 内部 id / GitCode 编号（`id` 即 `/api/issues/{issue_id}/...` 操作入参） |
+| `number` | int | VCS Issue 编号（等同 `issue_number`） |
+| `id` | int | **台账卡片 id**（`issue.id`，即 `/api/issues/{issue_id}/...` 操作入参），**不是** VCS 编号 |
+| `issue_number` | int | **VCS 侧 Issue 编号**（GitCode/GitHub），与 `grape git-repo issues get --number` 同口径；与 `id` 不可互用 |
+| `vcs_exists` | bool | VCS 侧是否仍存在该编号（`false`=已删除） |
+| `is_vcs_deleted` | bool | `= !vcs_exists`，便于前端/Agent 直接判定 |
+| `vcs_check` | string | `ok`=已完成 VCS 校验；`unavailable`=校验失败（fail-open，卡片未隐藏） |
 | `title` | string | 标题 |
 | `status` | string | 需求中心状态（active/processing/awaiting_input/pending_review/completed/cancelled） |
 | `stage` | string | pipeline 阶段（vod/issue/coding/qa/sre/pending_review/done） |

@@ -354,6 +354,8 @@ CREATE TABLE IF NOT EXISTS issue (
     status           TEXT DEFAULT 'active',
     completed_reason TEXT DEFAULT '',
     created_by       TEXT DEFAULT '',
+    vcs_exists       INTEGER NOT NULL DEFAULT 1,
+    vcs_checked_at   TEXT DEFAULT NULL,
     created_at       TEXT DEFAULT (datetime('now')),
     completed_at     TEXT DEFAULT NULL
 )
@@ -3647,6 +3649,29 @@ def _run_all_migrations():
         _migrate_issue_created_by()
     except Exception as _e:
         log.warning(f"Issue #805 issue created_by migration failed: {_e}")
+    # ===== Issue #995: issue.vcs_exists/vcs_checked_at 列（VCS 存在性校验，幂等补列）=====
+    try:
+        _migrate_issue_vcs_exists()
+    except Exception as _e:
+        log.warning(f"Issue #995 issue vcs_exists migration failed: {_e}")
+
+
+def _migrate_issue_vcs_exists():
+    """Issue #995：issue 表幂等补 VCS 存在性列（存量回填由 issue_vcs_index 异步执行）。
+
+    - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
+    - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（幂等可重跑）；
+    - vcs_exists 默认 1（未知/存在），vcs_checked_at 空表示尚未校验。
+    """
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue", "vcs_exists", "INTEGER NOT NULL DEFAULT 1")
+            _ensure_column(c, "issue", "vcs_checked_at", "TEXT DEFAULT NULL")
+            db.commit()
+    except Exception as e:
+        log.warning(f"issue vcs_exists columns migration failed: {e}")
 
 
 def _migrate_issue_created_by():

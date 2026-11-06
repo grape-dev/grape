@@ -3050,7 +3050,9 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
         "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id, created_by"
         + (", user_id" if include_user_id else "")
+        + ", vcs_exists, vcs_checked_at"
     )
+    _vcs_idx = 15 + (1 if include_user_id else 0)
     _limit_sql = ""
     if limit is not None and int(limit) > 0:
         _limit_sql = f" LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -3139,6 +3141,9 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "is_running": _has_running_agent,
             "agent_statuses": _agent_status_map.get((_rk, _issue_id), []),
             "is_pr": (_rk, _issue_id) in _pr_issue_keys,
+            # Issue #995：VCS 存在性（默认 1=未知/存在；0=VCS 侧已删除）；未知列值按存在处理。
+            "vcs_exists": bool(r[_vcs_idx]) if r[_vcs_idx] is not None else True,
+            "vcs_checked_at": r[_vcs_idx + 1] or "",
         }
         if include_user_id:
             item["user_id"] = r[15] or 0

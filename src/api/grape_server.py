@@ -217,6 +217,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
 
+    # Issue #995：存量 VCS 存在性回填（启动后异步执行，不阻塞，幂等可重跑）
+    try:
+        from src.api.main import _start_vcs_exists_backfill_task
+        app.state.vcs_exists_backfill_task = _start_vcs_exists_backfill_task()
+        log.info("VCS existence backfill started (async)")
+    except Exception as e:
+        log.warning(f"VCS existence backfill start failed: {e}")
+
     # D32: user_accounts → grape_accounts 数据迁移（yield 前同步等待，幂等）
     try:
         from scripts.migrate_user_accounts_to_grape import run_migration
