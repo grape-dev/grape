@@ -92,3 +92,41 @@ def test_pushdown_success_still_uses_window(monkeypatch):
 
     assert seen.get("called"), "正常情况下应走下推路径"
     assert _ids(out) == ["#101"]
+
+
+def _seed_two_scenes():
+    """两个场景各一条 issue/事件，用于验证 fallback 的场景收口。"""
+    conn = sqlite3.connect(":memory:")
+    for ddl in _SCHEMA:
+        conn.execute(ddl)
+    for num, scene in ((101, "scene-A"), (102, "scene-B")):
+        conn.execute(
+            "INSERT INTO issue VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (REPO, num, f"issue {num}", "active", "vod", "vod", "u1", scene, None, 0, "u1"))
+        conn.execute(
+            "INSERT INTO events (issue_id, event_type, agent_type, title, summary, status, "
+            "created_at, actor, duration, repo_key, scene_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (f"#{num}", "issue_opened", "vod", f"issue {num}", "", "done",
+             "2026-11-05 10:00:00", "tester", 1, REPO, scene))
+    conn.commit()
+    return conn
+
+
+def test_pushdown_failure_still_scopes_to_scene(monkeypatch):
+    """下推失败（如 MySQL 5.7 语法错）回落全仓时，场景页不得串出别的场景。"""
+    _patch_common(monkeypatch, _seed_two_scenes())
+    # 场景配置查询会摸真实 db_lock（本测试用 nullcontext 替换），这里直接打桩
+    monkeypatch.setattr("src.api.pipeline_config.get_pipeline_config", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise RuntimeError("(1064, 'You have an error in your SQL syntax')")
+
+    monkeypatch.setattr(pipeline_route, "_pipeline_window", _boom)
+
+    out = pipeline_route.get_pipeline("fallback", "repo", history_limit=10,
+                                      history_offset=0, scene_id="scene-A", user={"id": "u1"})
+
+    assert _ids(out) == ["#101"], f"fallback 应按场景收口，实际返回: {out!r}"
+    assert out.get("history_total") == 0
+    for row in ([out["active"]] if out.get("active") else []) + (out.get("history") or []):
+        assert row.get("scene_id") == "scene-A"

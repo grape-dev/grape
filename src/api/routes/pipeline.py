@@ -428,13 +428,17 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
             (*repo_keys, *_scene_params))
         total = c.fetchone()[0]
         # ③ 失败集合：每个 (issue, agent) 取最新事件后判 failed
+        # 不用窗口函数：ROW_NUMBER 是 MySQL 8.0 才有的，5.7 直接 1064，
+        # 而这整块一旦抛错就退化成「全仓构建」的 fallback（见调用方 except），
+        # 场景页会静默显示所有场景的流水线。NOT EXISTS 语义等价（不存在更新 seq
+        # 的同 (issue, agent) 事件 → 本条即最新），且 SQLite/MySQL 5.7 都能跑。
         c.execute(
-            f"SELECT DISTINCT x.issue_id FROM ("
-            f"  SELECT e.issue_id, e.agent_type, e.status,"
-            f"         ROW_NUMBER() OVER (PARTITION BY e.issue_id, e.agent_type ORDER BY e.seq DESC) rn"
-            f"  FROM events e {_join}"
-            f"  WHERE e.repo_key IN ({_ph}) AND e.issue_id != '' AND e.agent_type != ''{_scene_clause}"
-            f") x WHERE x.rn = 1 AND x.status = 'failed'",
+            f"SELECT DISTINCT e.issue_id FROM events e {_join} "
+            f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != '' AND e.agent_type != ''"
+            f"{_scene_clause} AND e.status = 'failed'"
+            f" AND NOT EXISTS (SELECT 1 FROM events e2"
+            f"                 WHERE e2.repo_key = e.repo_key AND e2.issue_id = e.issue_id"
+            f"                   AND e2.agent_type = e.agent_type AND e2.seq > e.seq)",
             (*repo_keys, *_scene_params))
         failed = {r[0] for r in c.fetchall()}
     return ordered, total, failed
@@ -569,6 +573,13 @@ def get_pipeline(owner: str, repo: str,
         _bot_usernames, _feishu_name_cache, _events_by_issue
     ) for iid in (_win_ids if _pushdown_ok else issue_ids)]
     pipelines = [p for p in pipelines if p is not None]
+
+    # 下推失败时 events 是按「全仓」加载的，pipelines 也就成了全仓列表——这里按场景
+    # 收口，否则场景详情页会静默显示所有场景的流水线（MySQL 5.7 窗口函数 1064 时的
+    # 真实表现）。收口后 history_total/today_count/failed_count 由下面的 pipelines
+    # 派生，口径自动一致。
+    if not _pushdown_ok and _scene_filter:
+        pipelines = [p for p in pipelines if str(p.get("scene_id") or "") == _scene_filter]
 
     # Issue #89: 检测 tasks 有记录但 events 无记录的 Issue（数据一致性差异）
     # 这些 Issue 在任务中心有任务，但流水线未生成事件 → 前端展示提示
