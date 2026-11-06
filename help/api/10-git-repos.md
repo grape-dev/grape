@@ -199,8 +199,11 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 **Query**：`state`（open/closed/all，技能用 all）
 
-**返回（200）**：里程碑数组 `[{"id":1,"number":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
-（`number` 即 `issues update --milestone_id` 的合法取值；`id` 为 REST 内部 id，不可用于设置 milestone）
+**返回（200）**：里程碑数组 `[{"id":3,"number":850012,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+
+> Issue #1005：上游里程碑对象通常只有 `number`（如 `850012`），真实 `id` 体现在 `url` 尾部
+> （`…/milestones/3` → `id=3`）。本端点（以及 milestones create/update）统一补出非空 `id`；
+> `issues update --milestone_id` **优先取 `id`，同时兼容 `number`**。
 
 **错误**：401 / 403 / 404。
 
@@ -254,24 +257,24 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 |------|------|------|
 | `labels` | string/array | 标签 |
 | `assignee` | string | 责任人 |
-| `milestone_id` | int | 里程碑 **number**（取 `grape git-repo milestones` 返回的 `number` 字段，如 850012；**不是** REST 路径内部 id）。GitCode 下游映射为上游 `milestone` 参数，#640/#1076 |
+| `milestone_id` | int | 里程碑 `id`（优先，取 `milestones list` 的 `id`）；兼容历史 `number` 传参。GitCode 下游解析后映射为上游 `milestone` 参数（#640/#1005） |
 | `state` | string | Issue 状态迁移（对齐 GitHub `state_event`）：仅接受 `"reopen"` / `"close"`，其他取值后端返回 400 |
 | `body` | string | Issue 正文（空值忽略，不影响其他字段） |
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/422/502。
 
-> **里程碑（#640 / #1076）**：
-> - **取值来源**：`milestone_id` 必须取 `grape git-repo milestones` 返回的 `number` 字段（例如
->   `850012` = weekly-03），**不是** REST 路径中的内部 id（例如 `3`）。GitCode 侧映射为上游
->   `milestone`（int）；PATCH 必填 `repo`+`title` 由服务端自动补齐（title 缺失时 GET 回取，
->   回取失败/为空返回 502），仅传 `milestone_id` 也不会被上游 400 拒绝。
-> - **非法取值 4xx**：非数字、内部 id、不存在的 number（如 `3`/`999999`）→ **422**，错误信息给出
->   合法取值来源与当前仓库可用 number；不再返回 502。
-> - **失败保持原值**：写入前先校验 number 存在，非法值不会发出 PATCH；若上游 200 但回读不一致，
->   返回 422 并回滚为请求前的 milestone，**回滚后再次回读确认**；若回滚被上游静默忽略，
->   错误文案会标注「原值未恢复」，不会谎称已回滚。
+> **里程碑（#640 / #1005 / #1076）**：
+> - GitCode：`milestone_id` 服务端映射为上游 `milestone`（int）；PATCH 必填 `repo`+`title` 由服务端自动补齐
+>   （title 缺失时 GET 回取，回取失败/为空返回 502），**仅传 `milestone_id` 也不会被上游 400 拒绝**。
+> - 取值口径（#1005）：`milestone_id` **优先按 `id` 匹配**（`milestones list` 的 `id`，如 `3`），
+>   未命中再按 `number` 匹配（如 `850012`）；解析后以目标里程碑的上游 `number` 写入 PATCH。
+> - 失败语义（不再笼统 502）：
+>   - **400**：可访问里程碑列表中找不到该 `id`/`number`（不存在或无权限查看），解析失败不会发出 PATCH；
+>   - **403**：当前身份无权限（读取里程碑或写 Issue 时上游返回 403）；
+>   - **422**：上游 PATCH 返回 200 但回读 `milestone` 为空 / number 与解析目标不一致（上游忽略），
+>     并回滚为请求前的 milestone、回读确认；若回滚被上游静默忽略，错误文案标注「原值未恢复」。
 > - **5xx 仅保留上游真实故障**：预校验/回读时上游不可用、网关或连接失败仍返回 5xx。
-> - 成功时响应回显 `milestone`（`issues get` 同样回显上游 milestone 字段）。
+> - 成功时响应回显 `milestone`（`issues get` 同样回显上游 milestone 字段，并补 `id` 供 QA 断言）。
 > - GitHub：`milestone_id` 语义不变（透传上游同名参数）。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close

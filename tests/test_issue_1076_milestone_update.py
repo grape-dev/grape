@@ -58,8 +58,8 @@ def test_valid_number_sets_and_reads_back(monkeypatch):
 
 
 @pytest.mark.parametrize("bad", [3, 999999])
-def test_invalid_number_returns_422_without_patch(monkeypatch, bad):
-    """AC2：内部 id / 不存在的 number → 422 可读错误，无 502，且不发出 PATCH。"""
+def test_invalid_number_returns_400_without_patch(monkeypatch, bad):
+    """AC2（Issue #1005 起）：不存在的 id/number → 400 可读错误，无 502，且不发出 PATCH。"""
     calls = _transport(monkeypatch, [
         {"title": "issue title", "milestone": {"number": 850012, "title": "weekly-03"}},
     ])
@@ -69,7 +69,7 @@ def test_invalid_number_returns_422_without_patch(monkeypatch, bad):
             gra.IssueUpdateBody(milestone_id=bad),
             user={"auth_type": "session_token"}, p="gitcode",
         )
-    assert ei.value.status_code == 422
+    assert ei.value.status_code == 400
     assert f"milestone_id={bad}" in ei.value.detail["message"]
     assert "number" in ei.value.detail["message"]
     assert "850012" in ei.value.detail["message"]  # 给出合法取值来源/可用值

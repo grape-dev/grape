@@ -308,9 +308,10 @@ grapecli git diff --repo Jason7602/hello
 
 **Query**：`state`（open/closed/all，技能用 all；其他值上游 400）
 
-**返回（200）**：里程碑数组 `[{"id":1,"number":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
-（`number` 即 `issues update --milestone_id` 的合法取值；`id` 为 REST 内部 id，不可用于设置 milestone）
+**返回（200）**：里程碑数组 `[{"id":3,"number":850012,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
 （Issue #684：`state` 字段归一化为 `open`/`closed`，上游 `active`/`opened` 映射为 `open`——与过滤合法值口径一致）
+（Issue #1005：上游不返回 `id` 时，从 `url` 尾部补出真实 `id`（`…/milestones/3` → `id=3`）；
+`number` 保留用于兼容。`issues update --milestone_id` 优先取 `id`、兼容 `number`。）
 
 **错误**：401 / 403 / 404。
 
@@ -386,15 +387,16 @@ provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 | `labels` | string | 标签（逗号分隔字符串）或数组 |
 | `assignee` | string | 责任人（单） |
 | `assignee_ids` | array | 责任人 id 数组（implementation 风格） |
-| `milestone_id` | int | 里程碑 **number**（取 `grape git-repo milestones` 返回的 `number` 字段，如 850012；**不是** REST 路径内部 id） |
+| `milestone_id` | int | 里程碑 `id`（优先，取 `milestones list` 的 `id`）；兼容历史 `number` 传参。GitCode 解析后映射为上游 `milestone`（#640/#1005） |
 | `state` | string | `"close"`（**注意**：GitCode 关闭用 "close" 非 "closed"） |
 | `body` | string | Issue 正文（同 POST create / PR update 的 body；空值忽略，不影响其他字段） |
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/422/502。
 
-> **里程碑（#1076）**：`milestone_id` 必须取 `milestones` 列表的 `number`；非数字、内部 id、
-> 不存在的 number → 422 并给出合法取值来源，不返回 502；写入前预校验、回读不一致时回滚，
-> 且回滚后再次回读确认（回滚被上游静默忽略时文案标注「原值未恢复」）；只有上游真实故障
+> **里程碑（#640 / #1005 / #1076）**：`milestone_id` 先按 `id` 匹配、未命中再按 `number` 匹配，解析后以目标
+> 里程碑的上游 `number` 写入 PATCH；解析失败（不存在/不可见）→ 400，无权限 → 403，不发出 PATCH。
+> 写入前预校验，回读不一致 → 422 并回滚为请求前 milestone、回读确认（回滚被上游静默忽略时文案标注
+> 「原值未恢复」）；成功时响应与 `issues get` 均回显 `milestone`（补 `id`）；只有上游真实故障
 > （网关/连接/不可用）才返回 5xx。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close

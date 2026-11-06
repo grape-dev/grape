@@ -102,11 +102,12 @@ class IssueUpdateBody(BaseModel):
     assignee: str = ""
     milestone_id: int = Field(
         0,
-        title="Milestone number",
-        description="Milestone number from `grape git-repo milestones` (the `number` field), "
-                    "not the REST path/internal id. GitCode maps it to the upstream `milestone` parameter; "
-                    "invalid or nonexistent numbers are rejected with 422.",
-        examples=[850012],
+        title="Milestone id",
+        description="Milestone identifier: prefers `id` from `grape git-repo milestones` "
+                    "(Issue #1005), and also accepts the legacy `number` for compatibility. "
+                    "GitCode resolves it to the upstream `milestone` parameter; "
+                    "an unknown/invisible milestone is rejected with 400.",
+        examples=[3, 850012],
     )
 
     @field_validator("milestone_id", mode="before")
@@ -127,7 +128,7 @@ class IssueUpdateBody(BaseModel):
         if not isinstance(v, int):
             raise ValueError(_MILESTONE_ID_INT_HINT)
         if v < 0:
-            raise ValueError("'milestone_id' must be a non-negative milestone number")
+            raise ValueError("'milestone_id' must be a non-negative milestone id or number")
         return v
 
     state: str = Field(
@@ -499,15 +500,82 @@ def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depe
 _MILESTONE_STATE_MAP = {"active": "open", "opened": "open", "closed": "closed"}
 
 
+def _milestone_id_from_url(url):
+    """Issue #1005：GitCode 里程碑列表不返回 id，仅 url 尾部含真实 id（…/milestones/3）。"""
+    if not isinstance(url, str):
+        return None
+    m = _re.search(r"/milestones/(\d+)(?:[/?#]|$)", url)
+    return int(m.group(1)) if m else None
+
+
 def _normalize_milestone_states(data):
-    """milestone(s) 返回条目 state 字段归一化（active/opened→open），其余字段原样透传。"""
+    """milestone(s) 返回条目归一化：state active/opened→open，并从 url 尾部补 id。
+
+    Issue #1005：上游里程碑对象只有 number（如 850012），真实 id 仅在 url 尾部
+    （…/milestones/3）。补 id 后 `milestone_id` 可优先传 id，同时保留 number 兼容。
+    """
     if isinstance(data, list):
         return [_normalize_milestone_states(item) for item in data]
-    if isinstance(data, dict) and "state" in data:
+    if isinstance(data, dict):
         out = dict(data)
-        out["state"] = _MILESTONE_STATE_MAP.get(str(data["state"]).lower(), data["state"])
+        if "state" in out:
+            out["state"] = _MILESTONE_STATE_MAP.get(str(out["state"]).lower(), out["state"])
+        if out.get("id") is None:
+            _mid = _milestone_id_from_url(out.get("url"))
+            if _mid is not None:
+                out["id"] = _mid
         return out
     return data
+
+
+def _fetch_gitcode_milestones(owner: str, repo: str, user: dict, p: str):
+    """Issue #1005：分页取全量里程碑（用于 milestone_id 的 id/number 解析）。"""
+    items = []
+    for page in range(1, 21):
+        data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
+                                            {"state": "all", "per_page": _MILESTONES_MAX_PER_PAGE,
+                                             "page": page}, p),
+                        _repo_token(owner, repo, user, p))
+        if not isinstance(data, list):
+            break
+        items.extend(_normalize_milestone_states(data))
+        if len(data) < _MILESTONES_MAX_PER_PAGE:
+            break
+    return items
+
+
+def _resolve_gitcode_milestone(milestones, milestone_id):
+    """Issue #1005：milestone_id 取值口径 id 优先、number 兼容。"""
+    try:
+        want = int(milestone_id)
+    except (TypeError, ValueError):
+        return None
+    for m in milestones:
+        if not isinstance(m, dict) or m.get("id") is None:
+            continue
+        try:
+            if int(m.get("id")) == want:
+                return m
+        except (TypeError, ValueError):
+            continue
+    for m in milestones:
+        if not isinstance(m, dict) or m.get("number") is None:
+            continue
+        try:
+            if int(m.get("number")) == want:
+                return m
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _normalize_issue_milestone(resp):
+    """Issue #1005：issues get/update 回显的 milestone 同样补 id（供 QA 断言）。"""
+    if isinstance(resp, dict) and isinstance(resp.get("milestone"), dict):
+        out = dict(resp)
+        out["milestone"] = _normalize_milestone_states(resp["milestone"])
+        return out
+    return resp
 
 
 # Issue #900：per_page 上限（超出钳制到该值而非 422，与 Spec「大 per_page 不被 422」对齐）
@@ -524,7 +592,10 @@ _MILESTONES_MAX_PER_PAGE = 100
                         "When page/per_page are omitted they are not sent upstream (provider defaults apply, "
                         "preserving pre-#900 request URLs). "
                         "Returned items' `state` field is normalized to open/closed "
-                        "(upstream `active`/`opened` is mapped to `open`).")
+                        "(upstream `active`/`opened` is mapped to `open`). "
+                        "Issue #1005: returned items also expose a non-null `id` "
+                        "(derived from the provider milestone URL tail when upstream omits it); "
+                        "`milestone_id` on issues update prefers this `id`, with `number` also accepted.")
 def list_milestones(owner: str, repo: str, state: str = Query("all",
                     description="Filter: open/closed/all (upstream rejects other values)"),
                     page: int = Query(None, ge=1,
@@ -548,7 +619,7 @@ def list_milestones(owner: str, repo: str, state: str = Query("all",
     return _normalize_milestone_states(data)
 
 
-@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone including `number` (the value accepted by `issues update --milestone_id`); returned `state` is normalized to open/closed (active→open).")
+@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with `number` and a non-null `id` (derived from the milestone URL tail when upstream omits it, Issue #1005); `issues update --milestone_id` accepts either. Returned `state` is normalized to open/closed (active→open).")
 def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #632（对齐 #577）：GitHub/GitCode milestones 字段语义一致 → 直调透传（同 labels 模式）
@@ -559,7 +630,7 @@ def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
     return _normalize_milestone_states(data)
 
 
-@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open).")
+@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open); returned `id` is derived from the milestone URL tail when upstream omits it (Issue #1005).")
 def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     payload = {k: v for k, v in {"title": body.title, "description": body.description,
@@ -652,13 +723,14 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
     return resp
 
 
-@router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue.")
+@router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue. The `milestone` object is echoed with a non-null `id` (derived from the milestone URL tail when upstream omits it, Issue #1005), enabling QA to assert the assignment.")
 def get_issue(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
               p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    return _normalize_issue_milestone(resp)
 
 
-@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id must be the milestone `number` from `milestones` (not the REST internal id), mapped to upstream `milestone`; PATCH auto-fills required repo/title. Invalid/nonexistent numbers return 422 with the valid value source, and the existing milestone is preserved (pre-validated before write, rolled back on read-back mismatch); success is read-back verified and echoed. Upstream real failures still return 5xx.")
+@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.")
 def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
@@ -687,6 +759,34 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     }
     payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
     _want_milestone = bool(body.milestone_id)
+    _resolved_milestone = None
+    # Issue #1005：milestone_id 取值口径 id 优先、number 兼容。先解析到具体里程碑，
+    # 再以解析出的上游 number 写 PATCH（id 与 number 混用不再静默落空）。
+    if p == "gitcode" and _want_milestone:
+        _milestones = _fetch_gitcode_milestones(owner, repo, user, p)
+        _resolved_milestone = _resolve_gitcode_milestone(_milestones, body.milestone_id)
+        if _resolved_milestone is None:
+            _available = []
+            for _m in _milestones:
+                if not isinstance(_m, dict) or _m.get("number") is None:
+                    continue
+                _n = str(_m.get("number"))
+                if _n not in _available:
+                    _available.append(_n)
+            _avail_txt = ", ".join(_available[:20]) or "无"
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"milestone_id={body.milestone_id} 不存在：可访问的里程碑列表中未找到 "
+                           f"id/number 匹配项（里程碑已删除或当前身份无权限查看）。"
+                           f"合法取值来源为 `grape git-repo milestones` 返回的 `id`（优先）或 `number` 字段。"
+                           f"当前仓库可用 number: {_avail_txt}"})
+        try:
+            _resolved_number = int(_resolved_milestone.get("number"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail={
+                "code": 422,
+                "message": f"milestone_id={body.milestone_id} 匹配到里程碑但缺少可用 number，无法写上游 PATCH"})
+        payload["milestone"] = _resolved_number
     # Issue #640：GitCode PATCH /repos/{owner}/issues/{number} body 必填 repo+title（路径不含 repo 维度
     # 的必填语义），仅传元数据字段（如 milestone_id）会被上游 400 拒绝 —— 复用 close_issue 已验证模式：
     # 服务端自动补 repo，title 缺失时先 GET 回取当前值回填，调用方无感
@@ -710,8 +810,9 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                     "code": 502,
                     "message": f"GitCode PATCH 必填 title 回取为空（update_issue #{number}），无法补齐必填字段"})
             payload["title"] = _title
-    # Issue #1076：写入前先校验 milestone number 存在（合法口径 = milestones.number）。
-    # 非法/不存在的值直接 422，绝不发 PATCH，既有 milestone 因而不被清空；上游不可用仍抛 5xx。
+    # Issue #1076/#1005：写入前已把 milestone_id 解析为具体里程碑（id 优先、number 兼容），
+    # 不存在的值在解析阶段已 400 拦截，绝不发 PATCH，既有 milestone 因而不被清空。
+    # 这里仅记录请求前的 milestone number，供写后回读失败时回滚。
     _before_ms_num = None
     if p == "gitcode" and _want_milestone:
         _before_ms = _pre_issue.get("milestone") if isinstance(_pre_issue, dict) else None
@@ -720,17 +821,6 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             _before_ms_num = int(_before_raw) if _before_raw is not None else None
         except (TypeError, ValueError):
             _before_ms_num = None
-        try:
-            _ms_exists, _ms_numbers = _gitcode_milestone_number_exists(owner, repo, body.milestone_id, user, p)
-        except HTTPException:
-            raise
-        except Exception as _e:
-            raise HTTPException(status_code=502, detail={
-                "code": 502,
-                "message": f"milestone 预校验失败（update_issue #{number}）：{_e}"})
-        if not _ms_exists:
-            raise _milestone_invalid_422(body.milestone_id, _ms_numbers,
-                                         "不存在于仓库里程碑列表（milestone number 无效）")
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
@@ -746,11 +836,11 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             record_outbound(p, _rk, "issue_meta", str(number), issue_number=str(number))
     except Exception as _e:
         log.warning(f"outbound_ledger record (update_issue) failed: {_e}")
-    # Issue #640/#1076：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
+    # Issue #640/#1005/#1076：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
     # 仅当请求含 milestone_id 且 provider=gitcode 时执行一次 GET 回读：
-    #   - 回读 number ≠ 请求值 → 422 可读错误（不再 502），并尽量回滚到请求前的 milestone，
-    #     保证失败路径不破坏既有值；502 仅保留给回读时上游真实不可用。
-    #   - 一致 → 响应回显 milestone（上游 PATCH 响应可能不回显，以回读值为准）
+    #   - 未落库或落库 number ≠ 解析出的目标 number → 422 可读错误（不再 502），
+    #     并尽量回滚到请求前的 milestone，保证失败路径不破坏既有值；502 仅保留给回读时上游真实不可用。
+    #   - 一致 → 响应回显 milestone（补 id，上游 PATCH 响应可能不回显，以回读值为准）
     if p == "gitcode" and _want_milestone and isinstance(resp, dict) and "error" not in resp:
         try:
             _after = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
@@ -767,7 +857,7 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             _ms_num = int(_ms_raw) if _ms_raw is not None else None
         except (TypeError, ValueError):
             _ms_num = None
-        if _ms_num != int(body.milestone_id):
+        if _ms_num != _resolved_number:
             _cur = _ms_num if _ms_num is not None else "空"
             _rollback_note = ""
             # 失败原子性：仅当 PATCH 后值与原值不同（被清空/改成其它）时回滚到原里程碑。
@@ -806,12 +896,12 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                                               f"{_rolled_txt}，原值未恢复")
             raise HTTPException(status_code=422, detail={
                 "code": 422,
-                "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "
+                "message": f"milestone_id={body.milestone_id} 未生效（上游忽略）：上游 PATCH 返回 200 但回读校验 "
                            f"milestone={_cur}（与请求不一致——新值可能被上游静默忽略）。"
-                           f"合法取值来源为 `grape git-repo milestones` 返回的 `number` 字段"
+                           f"合法取值来源为 `grape git-repo milestones` 返回的 `id`（优先）或 `number` 字段"
                            f"{_rollback_note}"})
         resp = dict(resp)
-        resp["milestone"] = _ms
+        resp["milestone"] = _normalize_milestone_states(_ms)
     return resp
 
 
