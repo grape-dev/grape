@@ -187,3 +187,93 @@ class TestIssue995VcsExists:
             assert all(r[2] for r in rows)
         finally:
             self._restore(original)
+
+    def test_fetch_gitcode_short_page_not_treated_as_end(self):
+        """非空短页不代表末页：分页应继续到空页，避免索引截断导致批量误删。"""
+        import src.user.repo_manager as repo_manager
+        pages = {
+            1: [{"number": "1"}, {"number": "2"}],
+            2: [{"number": "3"}],
+            3: [],
+        }
+        calls = []
+        original = repo_manager._req
+
+        def fake_req(method, url, token="", body=None):
+            calls.append(url)
+            page = int(url.split("page=")[1].split("&")[0])
+            return pages.get(page, [])
+
+        repo_manager._req = fake_req
+        try:
+            got = vcs_index._fetch_gitcode_numbers("o", "r", "t")
+        finally:
+            repo_manager._req = original
+        assert got == {1, 2, 3}
+        assert len(calls) == 3
+
+    def test_fetch_github_short_page_not_treated_as_end(self):
+        import src.user.repo_manager as repo_manager
+        pages = {
+            1: [{"number": 1}, {"number": 2}],
+            2: [{"number": 3}, {"number": 9, "pull_request": {"url": "x"}}],
+            3: [],
+        }
+        calls = []
+        original = repo_manager._github_req
+
+        def fake_req(method, url, token="", body=None):
+            calls.append(url)
+            page = int(url.split("page=")[1].split("&")[0])
+            return pages.get(page, [])
+
+        repo_manager._github_req = fake_req
+        try:
+            got = vcs_index._fetch_github_numbers("o", "r", "t")
+        finally:
+            repo_manager._github_req = original
+        assert got == {1, 2, 3}
+        assert len(calls) == 3
+
+    def test_many_unresolved_candidates_fail_open_without_bulk_delete(self):
+        """候选 > _CONFIRM_LIMIT 时整体 unknown，绝不自动确认删除。"""
+        for n in range(1, 102):
+            self._mk(n)
+        unresolved = vcs_index._apply_existence(self.P_REPO_KEY, frozenset({9999}))
+        assert unresolved == frozenset(range(1, 102))
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM issue WHERE repo_key=? AND vcs_exists=0",
+                      (self.P_REPO_KEY,))
+            assert c.fetchone()[0] == 0
+
+    def test_apply_write_failure_maps_unavailable_and_fail_open(self):
+        """回写失败必须 fail-open（status=unavailable），卡片不隐藏。"""
+        self._mk(50)
+        self._mk(51)
+        original = self._patch_numbers({self.P_REPO_KEY: frozenset({50})})
+        original_apply = vcs_index._apply_existence
+        vcs_index._apply_existence = lambda rk, nums: None
+        try:
+            d = self._get("?mode=time&per_page=50").json()
+            assert {it["issue_number"] for it in d["issues"]} == {50, 51}
+            assert all(it["vcs_check"] == "unavailable" for it in d["issues"])
+        finally:
+            vcs_index._apply_existence = original_apply
+            self._restore(original)
+
+    def test_single_card_unknown_reports_unavailable_not_ok(self):
+        """provider ok 但单卡复核 unknown 时，该卡片 vcs_check=unavailable 且不隐藏。"""
+        self._mk(60)
+        self._mk(61)
+        original = self._patch_numbers(
+            {self.P_REPO_KEY: frozenset({60})}, confirm_state="unknown")
+        try:
+            d = self._get("?mode=time&per_page=50").json()
+            by_num = {it["issue_number"]: it for it in d["issues"]}
+            assert by_num[60]["vcs_check"] == "ok"
+            assert by_num[61]["vcs_check"] == "unavailable"
+            assert by_num[61]["vcs_exists"] is True
+            assert by_num[61]["is_vcs_deleted"] is False
+        finally:
+            self._restore(original)
