@@ -873,7 +873,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     model_cfg = hermes_cfg.get("model", {})
     base_url = model_cfg.get("base_url", "").rstrip("/")
     # 润色用轻量模型，不走默认的 glm-5.2（响应慢）
-    model_name = "deepseek-v4-flash-0731"
+    model_name = "deepseek-v4.1-flash-1017"
     api_key = ""
 
     # api_key 可能是 ${ENV_VAR} 格式

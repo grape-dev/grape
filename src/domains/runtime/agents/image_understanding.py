@@ -265,7 +265,7 @@ def _call_vlm(ocr_text: str, features: str) -> str:
     # Load API config from opencode.jsonc
     api_key = ""
     base_url = ""
-    model = "glm-5.2"
+    model = "deepseek-v4.1-flash-1017"
     try:
         config_path = os.path.expanduser("~/.config/opencode/opencode.jsonc")
         with open(config_path, encoding="utf-8") as f:
@@ -292,12 +292,19 @@ def _call_vlm(ocr_text: str, features: str) -> str:
         import re as _re
         raw = _re.sub(r',\s*([}\]])', r'\1', raw)  # strip trailing commas
         cfg = json.loads(raw)
-        opts = cfg.get("provider", {}).get("modelarts", {}).get("options", {})
+        # provider 名历史上是 modelarts，现网已改为 clouddeveloper（opengw 网关），两代都认
+        providers = cfg.get("provider", {}) or {}
+        opts, models = {}, {}
+        for _pname in ("modelarts", "clouddeveloper"):
+            _p = providers.get(_pname) or {}
+            if _p.get("options"):
+                opts = _p.get("options") or opts
+            if _p.get("models"):
+                models = _p.get("models") or models
         api_key = opts.get("apiKey", "")
         base_url = opts.get("baseURL", "").rstrip("/")
-        models = cfg.get("provider", {}).get("modelarts", {}).get("models", {})
-        if "glm-5.2" in models:
-            model = "glm-5.2"
+        if model not in models and models:
+            model = next(iter(models))
     except Exception as e:
         log.warning(f"ImageUnderstanding: failed to load opengw config: {e}")
         return ""
