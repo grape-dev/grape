@@ -336,7 +336,7 @@ def _get_gitcode_credential_by_gitcode_id(username: str) -> dict:
         with db_lock:
             rows = db.cursor().execute(
                 "SELECT config_json, updated_at FROM user_credentials "
-                "WHERE provider='gitcode_oauth' ORDER BY updated_at DESC, rowid DESC").fetchall()
+                "WHERE provider='gitcode_oauth' ORDER BY updated_at DESC, user_id DESC").fetchall()
         for raw, _uat in rows:
             try:
                 cfg = _json.loads(raw or "{}")
