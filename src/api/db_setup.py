@@ -3165,6 +3165,64 @@ register_migration(
 )
 
 
+def _fn_backfill_events_terminal_completed_at(conn=None) -> None:
+    """Issue #1105：存量回填——终态（completed/failed/cancelled）且 completed_at
+    为空的 events 行，取 created_at 回填（created_at 为空则兜底当前时间），
+    恢复「终态 ⇔ completed_at 非空」不变量。
+
+    幂等：只更新 completed_at 为空的行，重跑无副作用。
+    分批回填（每批 500 条，按 seq 升序推进），避免大表单条 UPDATE 长事务/锁。
+    conn 可选：测试注入独立连接；缺省用全局 db（受 db_lock 保护）。
+    """
+    _TERMINALS = ("completed", "failed", "cancelled")
+    _BATCH = 500
+    _own = conn is None
+    if _own:
+        conn = db
+    try:
+        from src.session_manager import _is_mysql_backend
+    except Exception:
+        _is_mysql_backend = lambda: False  # noqa: E731
+    _mysql = _is_mysql_backend()
+    _ph = "%s" if _mysql else "?"
+    _now_fn = "NOW()" if _mysql else "datetime('now')"
+    with db_lock:
+        c = conn.cursor()
+        _placeholders = ",".join(_ph for _ in _TERMINALS)
+        while True:
+            try:
+                c.execute(
+                    f"SELECT seq FROM events WHERE status IN ({_placeholders}) "
+                    "AND (completed_at IS NULL OR completed_at='') "
+                    f"ORDER BY seq LIMIT {_BATCH}", _TERMINALS)
+                rows = c.fetchall()
+                if not rows:
+                    break
+                seqs = [r[0] for r in rows]
+                _in = ",".join(_ph for _ in seqs)
+                c.execute(
+                    f"UPDATE events SET completed_at="
+                    f"COALESCE(NULLIF(created_at,''), {_now_fn}) "
+                    f"WHERE seq IN ({_in}) "
+                    f"AND status IN ({_placeholders}) "
+                    "AND (completed_at IS NULL OR completed_at='')",
+                    (*seqs, *_TERMINALS))
+                conn.commit()
+                if len(seqs) < _BATCH:
+                    break
+            except Exception as e:
+                log.warning(f"backfill_events_terminal_completed_at failed: {e}")
+                break
+
+
+register_migration(
+    version="202611060001",
+    name="backfill_events_terminal_completed_at",
+    kind="safe",
+    fn=_fn_backfill_events_terminal_completed_at,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 

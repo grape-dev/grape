@@ -960,7 +960,8 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
             log.warning(f"admin-confirm: sync agent_tasks failed: {_e}")
         try:
             c.execute(
-                "UPDATE events SET status='completed' "
+                "UPDATE events SET status='completed', "
+                "completed_at=COALESCE(NULLIF(completed_at,''), datetime('now')) "
                 "WHERE repo_key=? AND issue_id=? AND status='running'",
                 (repo_key, _issue_id))
         except Exception as _e:
