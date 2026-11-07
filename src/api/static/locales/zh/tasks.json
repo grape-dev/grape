@@ -146,6 +146,7 @@
     "cancelled": "已取消"
   },
   "load_more": "加载更多",
+  "load_earlier_events": "加载更早的事件",
   "filter_options": {
     "created_by_me": "我创建的需求"
   }
