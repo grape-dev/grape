@@ -162,6 +162,56 @@ class TestRunPendingIdempotence:
         finally:
             conn.close()
 
+    def test_same_version_diff_name_reports_error_and_skips(self, tmp_path, caplog):
+        """Issue #1412：库内同号已由其它分支（不同 name）盖章 → ERROR 且 fn 不执行。
+
+        存量库可能已被其它分支的同号迁移盖章，执行器按 version 判「已执行」会
+        永久跳过本迁移；必须把「同号不同名」升级为 ERROR 报出，便于 renumber。
+        """
+        from src.api import db_setup
+        conn = self._fresh_sqlite(tmp_path)
+        conn.execute(
+            "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
+            "VALUES (?, ?, 'safe', '2026-11-03 00:00:00')",
+            ("202611030004", "issue-646-mysql-fks"))
+        conn.commit()
+        calls = []
+
+        try:
+            with caplog.at_level("ERROR"):
+                db_setup._run_migrations_with_conn(conn, registry=[
+                    db_setup.Migration("202611030004", "issue865_agent_runtimes_model",
+                                       "safe", lambda: calls.append(1)),
+                ])
+            errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+            assert errors, "同号不同名未报 ERROR"
+            msg = "\n".join(errors)
+            assert "202611030004" in msg, "ERROR 未包含撞号 version"
+            assert "issue-646-mysql-fks" in msg, "ERROR 未包含库内盖章名"
+            assert "issue865_agent_runtimes_model" in msg, "ERROR 未包含本次注册名"
+            assert "撞号" in msg and "非普通" in msg, "ERROR 未区分撞号与普通漂移"
+            assert "renumber" in msg or "修复指引" in msg, "ERROR 未包含修复指引"
+            assert calls == [], "同号不同名仍执行了迁移 fn（应跳过不执行）"
+        finally:
+            conn.close()
+
+    def test_no_collision_no_error(self, tmp_path, caplog):
+        """Issue #1412：号与名都不冲突时不产生 ERROR（不误报）。"""
+        from src.api import db_setup
+        conn = self._fresh_sqlite(tmp_path)
+
+        try:
+            with caplog.at_level("ERROR"):
+                db_setup._run_migrations_with_conn(conn, registry=[
+                    db_setup.Migration("202611070001", "issue865_agent_runtimes_model",
+                                       "safe", lambda: None),
+                ])
+            errors = [r.getMessage() for r in caplog.records
+                      if r.levelname == "ERROR" and "撞号" in r.getMessage()]
+            assert not errors, f"无撞号场景误报 ERROR: {errors}"
+        finally:
+            conn.close()
+
     def test_backfill_failure_skips_not_blocks(self, tmp_path, caplog):
         """backfill 单项失败 → 跳过不阻断后续迁移、不盖章（下次续跑）。"""
         from src.api import db_setup

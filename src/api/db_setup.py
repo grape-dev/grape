@@ -2789,14 +2789,17 @@ def register_migration(version: str, name: str, kind: str,
     的 issue.vcs_exists 就是这么挂的：升级后四台 794 次 1054，
     /api/issues/mine 从有数据变成 0 条）。
 
-    提交前自查四条（tests/atomic/test_migration_track_guard.py 会卡前三/四条）：
+    提交前自查五条（tests/atomic/test_migration_track_guard.py 会卡前 1/2/3/4 条）：
     1. version 未被占用：库里已盖章的号 + 源码里其它 register_migration 的号都不能重
        （同号会被判「已执行」永久跳过；历史事故 202611050001 / 202611060001）；
     2. fn 失败要抛出，不要 try/except 吞掉 —— 执行器约定「抛错=不盖章，下次启动重试」，
        吞了就会「列没建成、版本号却盖死」；
     3. 加 TEXT 列且带非 NULL DEFAULT 时，_ensure_column 要传 allow_copy=True
        （TEXT 带 DEFAULT 走不了 INSTANT/INPLACE，不传会被 DDL 安全带挡下）；
-    4. fn 必须幂等（IF NOT EXISTS / _ensure_column），存量库会重跑。
+    4. fn 必须幂等（IF NOT EXISTS / _ensure_column），存量库会重跑；
+    5. renumber 前必须人工核对目标环境 grape_t_schema_migrations 现值
+       （SELECT version, name FROM grape_t_schema_migrations）——测试连不了真实库，
+       跨分支撞号只能靠这一步发现；执行器对「同号不同名」会报 ERROR 但不阻断启动。
     """
     mig = Migration(version=version, name=name, kind=kind, fn=fn)
     if any(m.version == version for m in _MIGRATIONS):
@@ -3026,8 +3029,10 @@ def _fn_add_agent_runtimes_model() -> None:
 
 register_migration(
     # 20261105 修复：原 0002 与 merge-gate-log 撞号（merge-gate-log 已按 0002 落库），
-    # 挪至 0004；列添加幂等（已存在则跳过），生产/新库均安全。
-    version="202611030004",
+    # 挪至 0004；后 0004 又被其它分支落库的 issue-646-mysql-fks 占用（Issue #1412），
+    # 再 renumber 至全新日期段 202611070001（name 不变，兼容已按旧号盖章的环境）。
+    # 列添加幂等（已存在则跳过），生产/新库均安全。
+    version="202611070001",
     name="issue865_agent_runtimes_model",
     kind="safe",
     fn=_fn_add_agent_runtimes_model,
@@ -3657,8 +3662,8 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     def _applied_versions() -> dict:
         try:
             c = conn.cursor()
-            c.execute("SELECT version, checksum FROM grape_t_schema_migrations")
-            return {r[0]: (r[1] or "") for r in c.fetchall()}
+            c.execute("SELECT version, name, checksum FROM grape_t_schema_migrations")
+            return {r[0]: ((r[1] or ""), (r[2] or "")) for r in c.fetchall()}
         except Exception:
             return {}
 
@@ -3700,10 +3705,26 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         # 盖帽后重读（上面全量迁移可能已含注册表内的早期迁移语义，直接进入增量判定）
         applied = _applied_versions()
 
+    # 同号不同名守卫（Issue #1412）：撞号 ≠ 普通 checksum 漂移。
+    # 存量库可能已被其它分支的同号迁移盖章（name 不同），此时 pending 判定按
+    # version 会把它永久判「已执行」，本分支的迁移 fn 永不执行 —— 必须 ERROR 报出，
+    # 让 operator 能据此 renumber。行为仍是跳过不执行（fail-safe，不阻断启动）。
+    for m in registry:
+        if m.version not in applied:
+            continue
+        recorded_name = applied[m.version][0]
+        if recorded_name and recorded_name != m.name:
+            log.error(
+                f"迁移版本号撞号（同号不同名，非普通 checksum 漂移）: version={m.version} "
+                f"库内盖章名={recorded_name} 本次注册名={m.name}。该号在目标库已被其它分支的"
+                f"迁移占用，本次迁移会被判「已执行」而永久跳过、其 DDL 不会执行。"
+                f"修复指引：把本次迁移 renumber 到未占用号（日期+序号顺延），并先核对目标库 "
+                f"`SELECT version, name FROM grape_t_schema_migrations` 的现值。")
+
     # checksum 漂移告警（fail-safe：不阻断不重跑；先于 pending 判定，0 pending 时也要查）
     for m in registry:
         if m.version in applied and m.fn is not None:
-            recorded = applied.get(m.version, "")
+            recorded = applied[m.version][1]
             current = _fn_checksum(m.fn)
             if recorded and current and recorded != current:
                 log.warning(
