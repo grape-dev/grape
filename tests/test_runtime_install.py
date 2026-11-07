@@ -157,3 +157,36 @@ class TestInstallPs1Bom:
             non_ascii = [c for c in msg if ord(c) > 127]
             assert not non_ascii, f"Log/Fail message contains non-ASCII: {msg}"
 
+    def test_worker_requirements_are_ascii(self):
+        """requirements-worker.txt 随 worker 包分发，必须纯 ASCII——pip auto_decode
+        在非 UTF-8 locale（如中文 Windows GBK）下按系统首选编码解码该文件，
+        非 ASCII 字节会直接 UnicodeDecodeError（Issue #1409 实测）。"""
+        p = os.path.join(os.path.dirname(__file__), "..", "requirements-worker.txt")
+        raw = open(p, "rb").read()
+        bad = sorted({b for b in raw if b > 0x7F})
+        assert not bad, (
+            "requirements-worker.txt contains non-ASCII bytes; it is shipped in "
+            "the worker package and must stay ASCII-only (Issue #1409): "
+            + ", ".join(f"0x{b:02x}" for b in bad)
+        )
+
+    def test_install_ps1_pythonutf8_scoped_to_pip_calls(self):
+        """install-worker.ps1 的 PYTHONUTF8=1 应收敛在 Invoke-PipQuiet 内（设完即恢复），
+        不得在脚本顶层设置——顶层设置会被 Start-Process 拉起的常驻 worker daemon
+        继承，静默改变其运行时默认编码（Issue #1409 PR #1010 M1 整改）。"""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.ps1")
+        content = open(p, encoding="utf-8").read()
+        assert '$env:PYTHONUTF8 = "1"' in content, "PYTHONUTF8=1 sentinel missing"
+        # 顶层设置 = 出现在 Invoke-PipQuiet 函数体之外
+        fn_start = content.index("function Invoke-PipQuiet")
+        fn_end = content.index("}", content.index("return $exitCode", fn_start))
+        outside = content[:fn_start] + content[fn_end:]
+        assert '$env:PYTHONUTF8 = "1"' not in outside, (
+            "PYTHONUTF8=1 must only be set inside Invoke-PipQuiet (restore after "
+            "each call), not at script top level where the resident worker daemon "
+            "inherits it"
+        )
+        # 函数体内应有恢复逻辑
+        body = content[fn_start:fn_end]
+        assert "prevUTF8" in body and "Remove-Item Env:PYTHONUTF8" in body
+

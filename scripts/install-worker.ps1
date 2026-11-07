@@ -30,6 +30,13 @@ $ErrorActionPreference = "Stop"
 # 各 pip 调用点另有 EAP 防御层（Invoke-PipQuiet），双保险。
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
+# 2026-11-07 Windows GBK incident: pip's auto_decode parses requirements files
+# with the locale preferred encoding; on Chinese Windows (GBK locale) it dies on
+# UTF-8 non-ASCII bytes with UnicodeDecodeError. requirements-worker.txt is kept
+# ASCII-only for this reason; PYTHONUTF8=1 (Python 3.7+) is set per pip call in
+# Invoke-PipQuiet (and restored afterwards) as a second line of defense for
+# third-party requirements outside the package.
+
 function Log([string]$msg) { Write-Host "[install-worker] $msg" }
 function Fail([string]$msg) { Write-Error "[install-worker] ERROR: $msg"; exit 1 }
 
@@ -44,12 +51,20 @@ function Invoke-PipQuiet {
     )
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    # Issue #1409: force UTF-8 for Python child processes (pip requirements
+    # parsing) on non-UTF-8 locales; scope strictly to this pip call and
+    # restore afterwards so the resident worker daemon does not inherit it.
+    $prevUTF8 = $env:PYTHONUTF8
+    $env:PYTHONUTF8 = "1"
     $exitCode = 1
     try {
         & $CommandPath @Arguments 2>&1 | Out-Null
         $exitCode = $LASTEXITCODE
     } catch {
         $exitCode = 1
+    } finally {
+        if ($null -eq $prevUTF8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue }
+        else { $env:PYTHONUTF8 = $prevUTF8 }
     }
     $ErrorActionPreference = $prevEAP
     return $exitCode
