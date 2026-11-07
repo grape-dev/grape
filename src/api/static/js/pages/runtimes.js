@@ -118,12 +118,19 @@ function _loadRuntimesData() {
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
-    // 空数据快速路径：直接渲染空态，不经过 renderRuntimes（避免等待 sceneTagsCache）
+    // 空数据快速路径：不等待 sceneTagsCache，先给即时反馈。
+    // Issue #1167: 有激活筛选时与 Worker 页空态对齐——走完整渲染路径（保留搜索框与
+    // 筛选栏，筛选栏自带 ✕ 清除，列表区内联「暂无引擎」）；无筛选的真空态保持
+    // 原「接入第一台引擎设备」引导不变。
     var _rts = (d && d.runtimes) || [];
     var _devs = (d && d.devices) || [];
     if (_rts.length === 0 && _devs.length === 0) {
-      _renderRuntimesSkeleton(d);
-      if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
+      if (_rtHasActiveFilters()) {
+        renderRuntimes(d);   // 场景标签缓存未就绪时内部已自行预热并回调重渲
+      } else {
+        _renderRuntimesSkeleton(d);
+        if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
+      }
       return;
     }
     renderRuntimes(d);
@@ -414,6 +421,13 @@ function _addDeviceBtnHtml() {
   document.head.appendChild(s);
 })();
 
+// Issue #1167: 是否存在用户激活的筛选条件（与 _rtClearFilters 的重置范围保持一致）
+// 空数据快速路径据此区分「筛选无结果」与「组织无引擎」两种空态。
+function _rtHasActiveFilters() {
+  return !!(_rtFilterScope || _rtFilterType || _rtFilterScene.length || _rtFilterTag.length ||
+    _runtimeSearch || (_rtRange && _rtRange !== 'all'));
+}
+
 function _renderRuntimesSkeleton(data) {
   var el = document.getElementById('pageContent');
   if (!el) return;
@@ -431,9 +445,16 @@ function _renderRuntimesSkeleton(data) {
   _addDeviceBtnHtml() +
   '</div>';
   if (isEmpty) {
+    var emptyIcon = '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+    // Issue #1167: 有激活筛选时不渲染「组织无引擎」引导——骨架只出工具栏+加载占位，
+    // 待场景标签缓存就绪后由完整渲染与 Worker 页对齐（搜索框/筛选栏保留，列表区内联「暂无引擎」）。
+    if (_rtHasActiveFilters()) {
+      el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
+      return;
+    }
     el.innerHTML = toolbar +
       '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
-      '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' +
+      emptyIcon +
       '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_engines_title') + '</div>' +
       '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_engines_sub') + '</div>' +
       '</div>';
@@ -570,7 +591,7 @@ function renderRuntimes(data) {
         ${_availTags.map(t => { var c = _RT_TAG_COLORS[t]||'#999'; var sel = _rtFilterTag.indexOf(t) >= 0; return '<label style="padding:5px 10px;font-size:11px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:6px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'\'"><input type="checkbox" onchange="_rtToggleMulti(\'tag\',\'' + t + '\')" ' + (sel?'checked':'') + ' style="width:13px;height:13px;accent-color:' + c + '"><span style="font-size:9px;padding:1px 7px;border-radius:999px;color:#fff;background:' + c + '">' + _rtTagLabel(t) + '</span></label>'; }).join('')}
       </div>
     </div>` : ''}
-    ${(_rtFilterType || _rtFilterScope || _rtFilterScene.length || _rtFilterTag.length || _runtimeSearch) ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
+    ${_rtHasActiveFilters() ? `<span onclick="_rtClearFilters()" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;color:#86868b;font-weight:400" onmouseover="this.style.color='#d32f2f'" onmouseout="this.style.color='#86868b'">✕ 清除</span>` : ''}
   </div>`;
   html += _summaryStatsBar(data, devices);
   html += _runtimeTab === 'engines' ? renderEngines(data, devices) : renderWorkers(data, devices);
