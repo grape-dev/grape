@@ -118,12 +118,19 @@ function _loadRuntimesData() {
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
-    // 空数据快速路径：直接渲染空态，不经过 renderRuntimes（避免等待 sceneTagsCache）
+    // 空数据快速路径：不等待 sceneTagsCache，先给即时反馈。
+    // Issue #1167: 有激活筛选时与 Worker 页空态对齐——走完整渲染路径（保留搜索框与
+    // 筛选栏，筛选栏自带 ✕ 清除，列表区内联「暂无引擎」）；无筛选的真空态保持
+    // 原「接入第一台引擎设备」引导不变。
     var _rts = (d && d.runtimes) || [];
     var _devs = (d && d.devices) || [];
     if (_rts.length === 0 && _devs.length === 0) {
-      _renderRuntimesSkeleton(d);
-      if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
+      if (_rtHasActiveFilters()) {
+        renderRuntimes(d);   // 场景标签缓存未就绪时内部已自行预热并回调重渲
+      } else {
+        _renderRuntimesSkeleton(d);
+        if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
+      }
       return;
     }
     renderRuntimes(d);
@@ -439,30 +446,24 @@ function _renderRuntimesSkeleton(data) {
   '</div>';
   if (isEmpty) {
     var emptyIcon = '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
-    // Issue #1167: 有激活筛选时不能复用「组织无引擎」文案，也不应只留一个没有清除入口的
-    // 空面板——否则用户只能刷新页面（F5）恢复。这里渲染「筛选无结果」+ 清除入口。
+    // Issue #1167: 有激活筛选时不渲染「组织无引擎」引导——骨架只出工具栏+加载占位，
+    // 待场景标签缓存就绪后由完整渲染与 Worker 页对齐（搜索框/筛选栏保留，列表区内联「暂无引擎」）。
     if (_rtHasActiveFilters()) {
-      el.innerHTML = toolbar +
-        '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
-        emptyIcon +
-        '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_result_title') + '</div>' +
-        '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_result_sub') + '</div>' +
-        '<button class="bt bt-o" onclick="_rtClearFilters()" style="margin-top:4px;padding:7px 18px;font-size:13px;border-radius:8px;cursor:pointer">' + I18N.t('runtimes.empty.clear_filters') + '</button>' +
-        '</div>';
-    } else {
-      el.innerHTML = toolbar +
-        '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
-        emptyIcon +
-        '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_engines_title') + '</div>' +
-        '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_engines_sub') + '</div>' +
-        '</div>';
-      // 一键部署闭环（时序引导第三步）：引擎页空态引导用户打开"添加设备"——
-      // 侧边栏里有完整的凭据生成与安装命令流程；不在空态里堆命令文本。
-      // 门条件用 needs_worker（后端语义"该用户是否有可用引擎"），不用列表为空：
-      // 启动迁移会预置默认 opencode 占位行（credential_id=0）、server-metrics 会
-      // 自注册主控设备行，真实部署上两表永非空——按"列表为空"门控会让引导不可达。
-      window._rtMaybePulseAddBtn();
+      el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
+      return;
     }
+    el.innerHTML = toolbar +
+      '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
+      emptyIcon +
+      '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_engines_title') + '</div>' +
+      '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_engines_sub') + '</div>' +
+      '</div>';
+    // 一键部署闭环（时序引导第三步）：引擎页空态引导用户打开"添加设备"——
+    // 侧边栏里有完整的凭据生成与安装命令流程；不在空态里堆命令文本。
+    // 门条件用 needs_worker（后端语义"该用户是否有可用引擎"），不用列表为空：
+    // 启动迁移会预置默认 opencode 占位行（credential_id=0）、server-metrics 会
+    // 自注册主控设备行，真实部署上两表永非空——按"列表为空"门控会让引导不可达。
+    window._rtMaybePulseAddBtn();
   } else {
     el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
   }
