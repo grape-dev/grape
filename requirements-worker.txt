@@ -14,7 +14,15 @@ aiohttp>=3.9
 bcrypt>=4.0
 click>=8.0
 httpx>=0.24
-# Issue #666 (M4): codegraph（project-info 分析引擎）为 npm 平台二进制包
-# @colbymchenry/codegraph（自包含 node 运行时 + Rust 内核），NOT a pip package —— 故不在此声明
-# pip 依赖。worker 侧预装走 scripts/install-codegraph.sh（随包下发）或 npm 在线安装，
-# 安装后由 install-worker.sh 校验 `codegraph --version`（缺失仅告警，不阻断注册）。
+# Issue #666 (M4): codegraph (project-info analysis engine) is an npm platform
+# binary package @colbymchenry/codegraph (self-contained node runtime + Rust core),
+# NOT a pip package -- hence not declared here. Worker-side preinstall goes through
+# scripts/install-codegraph.sh (shipped in package) or online npm install;
+# install-worker.sh then verifies `codegraph --version` (missing = warn only,
+# does not block registration).
+#
+# ASCII-only on purpose: this file ships inside the cross-platform worker package
+# and is parsed by pip on machines whose preferred locale may be non-UTF8 (e.g.
+# Chinese Windows GBK): pip's auto_decode falls back to the locale encoding and
+# dies on non-ASCII UTF-8 bytes (UnicodeDecodeError, 2026-11-07 real install
+# failure). Keep every line ASCII.
