@@ -1078,17 +1078,17 @@ function _renderPipelineSection(data) {
     });
     html += '</div>';
   }
-  // 事件历史（同一卡片内）——Issue #926：默认最近 20 条，「加载更多」按批展开
+  // 事件历史（同一卡片内）——Issue #1102：默认展示最新 20 条，「加载更早的事件」向更早方向本地展开（0 请求）。
+  // 用户反馈 7879：①文案走 i18n 键 tasks.load_earlier_events（3 参 fallback，语义与实际行为一致）；
+  // ②按钮 onclick 首句 stopPropagation——卡片 onclick=_jumpToPipePage() 会整页跳转 #pipe/{issue}，不得触发；
+  // ③接口 events 为 seq DESC（最新在前），取头部 slice(0, _shown) 即最新一段，展开向更早方向。
   if (events.length > 0) {
-    if (!window._pipeEventsShown || window._pipeEventsShown > events.length) window._pipeEventsShown = 20;
+    if (!window._pipeEventsShown) window._pipeEventsShown = 20;
     const _shown = Math.min(window._pipeEventsShown, events.length);
-    const shownEvents = events.slice(events.length - _shown);
+    const shownEvents = events.slice(0, _shown);
     html += `<div style="${_cardTitle};margin-top:4px">${I18N.t('tasks.event_history')||'事件历史'}` +
       (events.length > _shown ? ` <span style="font-weight:400;font-size:10px;color:var(--t3,#86868b)">(${_shown}/${events.length})</span>` : '') + `</div>`;
     html += '<div style="display:flex;flex-direction:column;gap:0">';
-    if (events.length > _shown) {
-      html += `<div style="text-align:center;padding:4px 0 10px"><button class="tsk-btn tsk-btn-ghost" style="padding:3px 12px;border-radius:8px;font-size:11px" onclick="window._pipeEventsShown=(window._pipeEventsShown||20)+20;_loadMorePipeEvents()">▲ ${I18N.t('tasks.load_more', {}, '加载更多')}</button></div>`;
-    }
     shownEvents.forEach(function(e, i) {
       var isLast = i === shownEvents.length - 1;
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
@@ -1117,13 +1117,18 @@ function _renderPipelineSection(data) {
       if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${e.summary}</div>`;
       html += `</div></div>`;
     });
+    // 「加载更早的事件」按钮：置列表底部（事件行最新在顶，更早的在下方追加）；
+    // stopPropagation 必须为首句——否则冒泡到卡片 onclick=_jumpToPipePage()，点击即整页跳转 #pipe/{issue}。
+    if (events.length > _shown) {
+      html += `<div style="text-align:center;padding:8px 0 4px"><button class="tsk-btn tsk-btn-ghost" style="padding:3px 12px;border-radius:8px;font-size:11px" onclick="event.stopPropagation();window._pipeEventsShown=(window._pipeEventsShown||20)+20;_loadMorePipeEvents()">▼ ${I18N.t('tasks.load_earlier_events', {}, '加载更早的事件')}</button></div>`;
+    }
     html += '</div>';
   }
   html += '</div>';
   el.innerHTML = html;
 }
 
-// Issue #926：「加载更多」事件时间线——用缓存数据本地展开（0 请求）
+// Issue #1102：「加载更早的事件」——用缓存数据本地展开（0 请求），只影响事件历史分批，不触发跳转
 window._loadMorePipeEvents = function() {
   if (window._lastPipeData) _renderPipelineSection(window._lastPipeData);
 };
