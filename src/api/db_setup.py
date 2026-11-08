@@ -2847,7 +2847,7 @@ def _fn_task_liveness_index_and_revived_at() -> None:
 
 
 register_migration(
-    version="202611080002",
+    version="202611080004",
     name="task-liveness-revived-at",
     kind="safe",
     fn=_fn_task_liveness_index_and_revived_at,
