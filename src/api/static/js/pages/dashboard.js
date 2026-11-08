@@ -1851,7 +1851,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
     currentIds = (window._engCurIds || []).slice();
     const q = (filter || '').toLowerCase().trim();
     const filtered = _visibleEngines.filter(e => {
-      if (q) { const hay = [e.name, e.alias, e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (!hay.includes(q)) return false; }
+      if (q) { const hay = [engineDisplayName(e), e.name, e.alias, e.worker_name || '', e.engine_name || '', e.scope_label, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (!hay.includes(q)) return false; }
       if (_engFilterType) { const ename = (e.name || '').toLowerCase(); if (!ename.includes(_engFilterType)) return false; }
       if (_engFilterScope && (e.scope || 'global') !== _engFilterScope) return false;
       if (_engFilterScene.length > 0) {
@@ -1879,7 +1879,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
         const checked = currentIds.includes(e.id);
         return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.06)' : '#f5f5f7'};transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">
           <input type="checkbox" data-eid="${e.id}" ${checked ? 'checked' : ''} onchange="if(this.checked){window._engCurIds.push(${e.id})}else{window._engCurIds=window._engCurIds.filter(x=>x!==${e.id})}" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">
-          <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.alias || e.name}${e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : ''}${_tagBadge(e.tags)}${_sceneBadge(e.scene_tags)}${_scopeBadge(e.scope)}</div><div style="font-size:10px;color:#86868b;margin-top:3px">${e.device || ''}${e.cred_name ? ' · ' + e.cred_name : ''}</div></div>
+          <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">${e.alias || engineDisplayName(e)}${e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + engineDisplayName(e) + ')</span>' : ''}${_tagBadge(e.tags)}${_sceneBadge(e.scene_tags)}${_scopeBadge(e.scope)}</div><div style="font-size:10px;color:#86868b;margin-top:3px">${e.cred_name ? e.cred_name : ''}</div></div>
           <span style="font-size:11px;font-weight:500;color:${(() => { const _sc = {online:'#34c759', recently_lost:'#f59e0b', offline:'#86868b', about_to_gc:'#ff3b30'}; return _sc[e.status] || '#86868b'; })()}">${(() => { const _sl = {online: I18N.t('dashboard.online')||'在线', recently_lost:'失联', offline:'离线', about_to_gc:'待回收'}; return _sl[e.status] || '离线'; })()}</span>
         </label>`;
       }).join('');

@@ -323,6 +323,24 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         from src.runtime.instances import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.session_manager import db, db_lock
+        # Issue #1310：凭据名（runtime_credentials.name）查询；本机直连（cid=0）回退 host_name
+        def _lookup_worker_name(_p):
+            _cid = _p.get("credential_id") or 0
+            _wname = ""
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    if _cid:
+                        c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                        _wr = c.fetchone()
+                        _wname = (_wr[0] or "") if _wr else ""
+                    else:
+                        c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
+                        _wr = c.fetchone()
+                        _wname = (_wr[0] or "") if _wr else ""
+            except Exception:
+                _wname = ""
+            return _wname
         # 查当前场景（Issue #524: 从 managed_repos.dev_scene 解析，声明配置来源）
         _scene_id = ""
         try:
@@ -343,6 +361,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             pool = _engines_by_ids(_eids, _repo, _cfg)
             for _p in pool:
                 _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
+                # Issue #1310：补凭据名 worker_name（=runtime_credentials.name；本机直连回退 host_name）
+                _p["worker_name"] = _lookup_worker_name(_p)
     except Exception:
         pass
 

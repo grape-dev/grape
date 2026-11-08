@@ -20,13 +20,15 @@ class PersonalPoolIdentityTests(unittest.TestCase):
         self.addCleanup(self.db.close)
         self.db.executescript('''
             CREATE TABLE agent_runtimes (id INTEGER, status TEXT, healthy INTEGER,
-                probe_status TEXT, last_seen_at TEXT, credential_id INTEGER);
+                probe_status TEXT, last_seen_at TEXT, credential_id INTEGER,
+                installed INTEGER DEFAULT 1);
             CREATE TABLE engine_capabilities (runtime_id INTEGER, enabled INTEGER, tag TEXT);
             CREATE TABLE runtime_credentials (id INTEGER, scope TEXT, owner_id TEXT, owner_name TEXT);
             CREATE TABLE grape_accounts (id INTEGER, username TEXT);
             CREATE TABLE unified_user_mapping (user_id INTEGER, gitcode_user TEXT);
         ''')
-        self.db.execute('INSERT INTO agent_runtimes VALUES (1,?,?,?,?,1)',
+        self.db.execute('INSERT INTO agent_runtimes (id, status, healthy, probe_status, '
+                        'last_seen_at, credential_id) VALUES (1,?,?,?,?,1)',
                         ('online', 1, 'ok', datetime.now(timezone.utc).isoformat()))
         self.db.execute("INSERT INTO engine_capabilities VALUES (1,1,'sre')")
         self.db.execute("INSERT INTO runtime_credentials VALUES (1,'user','123','fixture-owner')")
@@ -35,6 +37,11 @@ class PersonalPoolIdentityTests(unittest.TestCase):
         repo.from_repo_key = lambda value: value.removeprefix('gitcode:')
         health = ModuleType('src.runtime.health')
         health.parse_dt = lambda value: datetime.fromisoformat(value).timestamp()
+        # Issue #1487 返工：可达性判定统一走 src.runtime.health.engine_health_ok（单一真源），
+        # 本用例把 service 的函数源码抽出来 exec，所以替身模块也必须提供该函数——
+        # 直接用真实实现（含 cred0 豁免心跳/远端 status+healthy+心跳三关），避免替身失真。
+        from src.runtime.health import engine_health_ok as _real_engine_health_ok
+        health.engine_health_ok = _real_engine_health_ok
         modules = patch.dict(sys.modules, {'src.repo_key': repo, 'src.runtime.health': health})
         modules.start()
         self.addCleanup(modules.stop)

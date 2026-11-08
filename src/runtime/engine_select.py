@@ -202,25 +202,25 @@ def _member_scope(m: dict, repo: str) -> str:
 
 
 def _health_ok(m: dict) -> bool:
-    """健康判定：远端按 status='online' + last_seen_at 新鲜；本机按 installed+healthy。
+    """健康判定：唯一真源 src.runtime.health.engine_health_ok（Issue #592 / #259 / #1487 /
+    #1496 收敛）——派发与认领共用同一把尺子，禁止在此复制判定逻辑。
 
-    远端引擎（credential_id>0）必须 last_seen_at 在 _RUNTIME_STALE_SECONDS 内才算健康，
-    防止 AI DevSpace 环境被删后 runtime 行残留 status=online 但实际不可达（模式 QQ）。
+    status 是 agent_runtimes 在线态唯一真源；遗留 health 列是派生展示值，
+    不参与派发判定（列表侧展示统一走 derive_runtime_health）。
+    心跳缺失（last_seen_at 空/解析失败）与超时同判不可用——status=online 但从未
+    心跳的幽灵行不得被派发放行（对齐 derive_runtime_health → recently_lost）。
+
+    远端引擎（credential_id>0）必须 status 在线且 last_seen_at 在 _RUNTIME_STALE_SECONDS 内，
+    防止 AI DevSpace 环境被删后 runtime 行残留 status=online 但实际不可达（模式 QQ）；
+    本机直连（credential_id=0）按 installed+healthy，不判心跳（本机不参与 15s 心跳）。
+
+    认领侧（service._check_pool_engines_reachable）调用同一函数——两侧口径必须一致，
+    否则会出现「派发认为健康、认领认为失联」的任务入队即失败（Issue #1487）。
     """
-    cid = m.get("credential_id") or 0
-    if cid == 0:
-        return bool(m.get("installed")) and bool(m.get("healthy"))
-    if (m.get("status") or "") != "online":
-        return False
-    # 远端引擎检查心跳新鲜度
-    last_seen = m.get("last_seen_at") or ""
-    if last_seen:
-        from src.runtime.health import parse_dt
-        import time as _time
-        ts = parse_dt(last_seen)
-        if ts is not None and _time.time() - ts > _RUNTIME_STALE_SECONDS:
-            return False
-    return True
+    from src.runtime.health import engine_health_ok
+    return engine_health_ok(m.get("credential_id"), m.get("status"), m.get("healthy"),
+                            m.get("installed"), m.get("last_seen_at"),
+                            stale_seconds=_RUNTIME_STALE_SECONDS)
 
 
 # ===== 派发决策可观测性（Issue #605）=====
