@@ -1507,8 +1507,10 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             # Events/Week: 最近 7 天事件数
             # N1c 修复：原 datetime('now', '-7 days') 是 SQLite 私有函数变体（MySQL
             # 1064），改应用层预计算 cutoff + 标准参数化 SQL，双方言一致。
-            import time as _time
-            _week_cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 7 * 86400))
+            # Issue #1487 衍生修复：cutoff 必须走 db_now_str（存储层口径：MySQL=CST 墙钟 /
+            # SQLite=UTC），原先用 gmtime 的 UTC 字面量在 MySQL 下会多算 8 小时窗口。
+            from src.api.time_utils import db_now_str as _db_now_str
+            _week_cutoff = _db_now_str(-7 * 86400)
             c.execute(
                 "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= ?",
                 (_repo_keys[0], _repo_keys[1], _week_cutoff)

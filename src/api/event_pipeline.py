@@ -2686,7 +2686,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         #   "同 (repo,issue,agent) 无 running 事件" SELECT）；
         # - C：近 60s 同类事件（含已终态）也视为重复，处理 webhook 重发/终态后二次投递。
         # 解决 GitCode/GitHub 双 webhook 或 create_task 同步补发 + 真实 webhook 并发双投。
-        from src.api.event_store import append_skipped_event, _utc_now_str
+        from src.api.event_store import append_skipped_event, _utc_now_str, find_recent_same_event
         try:
             with db_lock:
                 _dc = db.cursor()
@@ -2704,11 +2704,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     result["skipped"] = "duplicate_active_task"
                     return result
                 # ② 近窗去重：同 (repo,issue,agent) 且同 event_type 60s 内已存在（含已终态）→ 跳过
-                _dc.execute(
-                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
-                    "AND event_type=? AND created_at >= ? ORDER BY seq DESC LIMIT 1",
-                    (repo_key, issue_id or "#0", agent_type, event_type, _utc_now_str(-60)))
-                if _dc.fetchone():
+                # 时间口径必须与 events.created_at 的写入口径一致（MySQL=CST 墙钟 /
+                # SQLite=UTC），见 time_utils.db_now_str。用 _utc_now_str(-60) 会在 MySQL
+                # 下把窗口放大成 8h+，PR 评论等 webhook 事件被静默判重吞掉（Issue #1487 衍生）
+                if find_recent_same_event(repo_key, issue_id or "#0", agent_type, event_type, 60):
                     log.info(f"Pipeline: dedup skip — recent {event_type} event within 60s "
                              f"for (issue,agent)=({issue_id},{agent_type})")
                     append_skipped_event(repo_key, event_type,
