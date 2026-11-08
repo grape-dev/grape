@@ -467,6 +467,7 @@
     "api_key_desc": "API Keys are used for grape-cli authentication and CI/automation. Prefix <code>grape_</code>, long-lived, revocable. Plaintext is shown only once at creation.",
     "created": "Created",
     "last_used": "Last used",
+    "last_used_never": "Never used",
     "revoke": "Revoke",
     "revoke_confirm": "Revoke \"{name}\"? This is immediate and irreversible.",
     "revoke_failed": "Revoke failed: {msg}",

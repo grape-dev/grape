@@ -133,10 +133,10 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
                     _usr_expr = "0"
                     _usr_pre = ()
                 c.execute(
-                    "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
-                    "SELECT " + _usr_expr + ", ?, ?, ?, 'active' WHERE NOT EXISTS "
+                    "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) "
+                    "SELECT " + _usr_expr + ", ?, ?, ?, 'active', ? WHERE NOT EXISTS "
                     "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (*_usr_pre, _assignee, repo_key, _num, repo_key, _num))
+                    (*_usr_pre, _assignee, repo_key, _num, _assignee, repo_key, _num))
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             else:
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)

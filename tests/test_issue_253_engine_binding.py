@@ -111,15 +111,13 @@ def test_ut1_pool_all_unreachable_fails_task(setup_db):
     c.execute("INSERT INTO events (seq, repo_key, status) VALUES (9301, 'gitcode:x/r', 'running')")
     setup_db.commit()
 
-    # hermes 尝试认领 → 绑定全不可达 → 任务 failed + 事件 failed + 保留 pool
+    # hermes 尝试认领 → 绑定全不可达 → 保持 queued 交 _check_stale_queued_tasks 裁决
+    # （Issue #1487 改动C：单次瞬时快照不判死，120s 窗口由 stale-queued 收敛）
     result = svc.claim_by_tag("all", 1129)
     assert result is None, "hermes 不应认领 codex 专属任务"
     row = c.execute("SELECT status, pool_engine_ids, errors FROM agent_tasks WHERE id='t_253a'").fetchone()
-    assert row[0] == "failed", f"任务应 failed，实际 {row[0]}"
+    assert row[0] == "queued", f"claim 阶段不应判死（#1487 改动C），实际 {row[0]}"
     assert row[1] == "[10907]", "pool_engine_ids 必须保留（不清空）"
-    assert "codex" in (row[2] or ""), f"人话原因应含引擎名，实际: {row[2]}"
-    ev = c.execute("SELECT status FROM events WHERE seq=9301").fetchone()
-    assert ev[0] == "failed", "事件终态应同步 failed"
 
 
 # ===== UT-2：绑定引擎在线时，池外引擎无法认领 =====

@@ -40,6 +40,12 @@ def _now() -> int:
     return int(time.time())
 
 
+def _utc_iso() -> str:
+    """当前 UTC 时刻的 ISO 字符串（秒级列 created_at 的口径，Issue #1477）。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ===================== 方式 A：会话级临时 token =====================
 
 def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
@@ -198,8 +204,11 @@ def generate_api_token(user_id: int, name: str = "") -> dict | None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO api_tokens (user_id, token_sha256, name) VALUES (?,?,?)",
-                (user_id, _sha256(token), name),
+                "INSERT INTO api_tokens (user_id, token_sha256, name, created_at) VALUES (?,?,?,?)",
+                # created_at 用 UTC ISO（与其它表时间列一致，settings.py 经
+                # normalize_event_time 归一后给前端 +00:00 口径）；
+                # last_used_at 仍走 _now() 的秒级时间戳（前端两条链路都兼容）
+                (user_id, _sha256(token), name, _utc_iso()),
             )
             db.commit()
             return {"token": token, "id": c.lastrowid}

@@ -198,10 +198,15 @@ function _sortByHealth(list) {
 }
 
 // 按名称排序（字母数字从小到大）
+// Issue #1310：引擎按「引擎名（凭据名）」、设备按设备显示名（workerDisplayName）排序
+function _rtListSortName(x) {
+  if (x && Array.isArray(x.runtimes)) return workerDisplayName(x) || '';
+  return engineDisplayName(x) || x.instance_name || x.name || '';
+}
 function _sortByName(list) {
   return list.sort((a, b) => {
-    const na = (a.instance_name || a.name || a.device_name || '').toLowerCase();
-    const nb = (b.instance_name || b.name || b.device_name || '').toLowerCase();
+    const na = _rtListSortName(a).toLowerCase();
+    const nb = _rtListSortName(b).toLowerCase();
     return na.localeCompare(nb);
   });
 }
@@ -541,7 +546,7 @@ function renderRuntimes(data) {
   //             旧缓存缺字段时回退当前页派生
   const _availTypes = _runtimeTab === 'engines'
     ? (data.avail_types || [...new Set((data.runtimes||[]).map(e => {
-        const n = ((e.instance_name || e.name || '')).toLowerCase();
+        const n = ((e.display_name || e.name || e.instance_name || '')).toLowerCase();
         if (n.includes('aishell') || n.includes('hwcloud')) return 'aishell';
         if (n.includes('hermes')) return 'hermes';
         if (n.includes('opencode')) return 'opencode';
@@ -660,7 +665,7 @@ function renderEngines(data, devices) {
     const _abnormal = _isAbnormalEngine(rt);
     const _borderColor = _abnormal ? (_abnormalBorderColor(rt) || _cardLeftBorder) : _cardLeftBorder;
     const _cardShadow = _abnormal ? 'var(--sh),0 0 0 1px var(--r)' : 'var(--sh)';
-    const _engineName = rt.alias || rt.instance_name || rt.name || '—';
+    const _engineName = rt.alias || engineDisplayName(rt) || '—';
     const _engineType = rt.name || '—';
     const _engineVersion = rt.version || '—';
     const _engineInstalled = rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no');
@@ -673,8 +678,8 @@ function renderEngines(data, devices) {
         ${_workerVersionStaleBadge(rt)}
         <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
           <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_engineName}</span>
-          ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name || '—'})</span>` : ''}
-          <svg onclick="event.stopPropagation();copyText('${(rt.instance_name || rt.name || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${engineDisplayName(rt)})</span>` : ''}
+          <svg onclick="event.stopPropagation();copyText('${(engineDisplayName(rt) || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </span>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px;color:var(--t2);flex:1">
@@ -711,7 +716,7 @@ function renderWorkers(data, devices) {
     const _canManage = d.credential_id && _isOwner;
     const _curScope = d.scope || 'global';
     const _isLocal = d.credential_id === 0;
-    const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || rt.name} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
+    const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || engineDisplayName(rt)} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
     const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
     const _wStatus = d.health || 'offline';
     const _wCardLeftBorder = _wStatus === 'online' ? 'none' : (RUNTIME_COLOR[_wStatus] || 'var(--t3)');
@@ -1425,8 +1430,8 @@ function _renderEngineDetail(rt) {
         ${_healthBadge(rt.health)}
         ${_helpBtn(_healthHelpHint(rt))}
         ${_workerVersionStaleBadge(rt)}
-        <span style="font-weight:700;font-size:18px">${rt.alias || rt.instance_name || rt.name}</span>
-        ${rt.alias ? `<span style="font-size:12px;color:var(--t3)">(${rt.instance_name || rt.name})</span>` : ''}
+        <span style="font-weight:700;font-size:18px">${rt.alias || engineDisplayName(rt)}</span>
+        ${rt.alias ? `<span style="font-size:12px;color:var(--t3)">(${engineDisplayName(rt)})</span>` : ''}
         <button class="bt bt-o" style="font-size:11px;padding:3px 8px;border-radius:4px" onclick="editRuntimeAlias(${runtimeId})">${I18N.t('runtimes.action.edit_alias')}</button>
         ${rt.is_local ? `<span style="font-size:11px;font-weight:600;color:#0e7490;background:#cffafe;border-radius:999px;padding:1px 8px">${I18N.t('runtimes.label.local_direct')}</span>` : ''}
         <button class="bt bt-o" style="margin-left:auto" onclick="closeEngineDetail()">${I18N.t('runtimes.action.close')}</button>
@@ -1758,17 +1763,17 @@ function editRuntimeAlias(runtimeId) {
           var parent = titleEl.parentElement;
           var nextSibling = titleEl.nextSibling;
           // 重建标题区域
-          titleEl.textContent = d.alias || (rt ? (rt.instance_name || rt.name) : '');
+          titleEl.textContent = d.alias || (rt ? engineDisplayName(rt) : '');
           // 更新括号显示
           var parenSpan = parent.querySelector('span[style*="color:var(--t3)"][style*="font-size:12px"]');
           if (d.alias && rt) {
             if (!parenSpan) {
               var ns = document.createElement('span');
               ns.style.cssText = 'font-size:12px;color:var(--t3)';
-              ns.textContent = '(' + (rt.instance_name || rt.name) + ')';
+              ns.textContent = '(' + engineDisplayName(rt) + ')';
               titleEl.insertAdjacentElement('afterend', ns);
             } else {
-              parenSpan.textContent = '(' + (rt.instance_name || rt.name) + ')';
+              parenSpan.textContent = '(' + engineDisplayName(rt) + ')';
             }
           } else if (parenSpan) {
             parenSpan.remove();
