@@ -28,6 +28,25 @@ def _db_backend() -> str:
         return "sqlite"
 
 
+def db_now_str(offset_seconds: int = 0) -> str:
+    """按**存储层时间口径**返回当前时间字符串（'YYYY-MM-DD HH:MM:SS'），offset 秒偏移。
+
+    与 parse_dt / normalize_event_time 是同一口径的正反向：表默认值在 MySQL 下由
+    NOW() 写成 CST 本地墙钟、在 SQLite 下由 datetime('now') 写成 UTC，两者都是
+    无时区字符串。任何「created_at >= 某个 cutoff」的 SQL 比较必须用本函数生成
+    cutoff，否则两侧时区错位（MySQL 下 UTC cutoff 会把 60s 窗口放大到 8h+）。
+
+    反面案例（Issue #1487 衍生）：event_pipeline 的去重②曾用 _utc_now_str(-60)
+    （Python UTC 字符串）与 events.created_at（MySQL 本地墙钟）比较，导致 PR 评论
+    等 webhook 类事件在同 (repo,issue,agent,event_type) 8 小时内被静默判重丢弃。
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    ts = _dt.now(_tz.utc).timestamp() + offset_seconds
+    if _db_backend() == "mysql":
+        return _dt.fromtimestamp(ts, _CST).strftime("%Y-%m-%d %H:%M:%S")
+    return _dt.fromtimestamp(ts, _tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def normalize_event_time(raw) -> str:
     """把存储层时间字符串统一为 UTC ISO（带 +00:00 偏移）。
 

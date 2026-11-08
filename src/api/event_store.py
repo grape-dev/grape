@@ -160,6 +160,27 @@ def find_event_by_idempotency_key(repo_key: str, idempotency_key: str) -> dict |
         return None
 
 
+def find_recent_same_event(repo_key: str, issue_id: str, agent_type: str,
+                           event_type: str, window_seconds: int = 60) -> int:
+    """同 (repo,issue,agent,event_type) 在近窗内是否已有事件，返回其 seq（无则 0）。
+
+    时间口径：cutoff 由 db_now_str 按存储层口径生成（MySQL=CST 墙钟 / SQLite=UTC），
+    与 events.created_at 的写入口径一致。**不可**改用 _utc_now_str()——那是 Python
+    UTC 字符串，与 MySQL 下的 created_at 差 8 小时，会把窗口放大成 8 小时（Issue #1487
+    衍生：PR 评论 note_hook_pr 被静默判重吞掉）。
+    """
+    from src.api.time_utils import db_now_str
+    cutoff = db_now_str(-window_seconds)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+            "AND event_type=? AND created_at >= ? ORDER BY seq DESC LIMIT 1",
+            (repo_key, issue_id or "#0", agent_type, event_type, cutoff))
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
 def claim_event_guard(repo_key: str, issue_id: str, agent_type: str) -> bool:
     """原子抢占事件活跃守卫（duplicate-issue-opened-event-fix-design.md 方案 A）。
 
