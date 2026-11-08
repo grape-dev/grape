@@ -1388,6 +1388,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
+                 # Issue #1310：承载引擎 chip 显示「引擎名（凭据名）」——补凭据名 worker_name
+                 "worker_name": cred.get("name", ""),
                  "health": derive_runtime_health(x[5], x[6], now),
                  "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
                  "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
@@ -1448,6 +1450,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                 "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
                 "instance_name": rt.get("instance_name", rt.get("name", "")),
+                # Issue #1310：本机直连按 host_name 兜底凭据名
+                "worker_name": _hn,
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
@@ -1472,6 +1476,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                 "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
                 "instance_name": rt.get("instance_name", rt.get("name", "")),
+                # Issue #1310：本机直连按 host_name 兜底凭据名
+                "worker_name": _hn,
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),

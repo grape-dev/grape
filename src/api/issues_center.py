@@ -137,6 +137,26 @@ def _get_feishu_open_id_by_user_id(user_id: int) -> str:
             return ""
 
 
+def _get_gitcode_user_by_user_id(user_id: int) -> str:
+    """按 user_id 反查平台用户名（gitcode_user 优先，github_login 兜底）。
+
+    Issue #1337: 建 issue 卡片时回填 created_by 用；查不到返回空串（归入「未归属」）。
+    """
+    if not user_id:
+        return ""
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = c.execute(
+                "SELECT COALESCE(NULLIF(gitcode_user,''), NULLIF(github_login,''))"
+                " FROM unified_user_mapping WHERE user_id=? AND user_id>0 LIMIT 1",
+                (user_id,)).fetchone()
+            return (row[0] or "") if row else ""
+        except Exception as e:
+            log.warning(f"_get_gitcode_user_by_user_id({user_id}) failed: {e}")
+            return ""
+
+
 def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
                                title: str, task_description: str) -> int | None:
     """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。
@@ -158,11 +178,11 @@ def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue
                 db.commit()
             return card_id
         c.execute(
-            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
-            "VALUES (?,?,?,?,?,?,'active',?,?,?)",
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, created_by) "
+            "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
             (user_id, assignee, repo_key, issue_number, title, task_description,
              _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number),
-             _get_issue_parent_id(repo_key, issue_number))
+             _get_issue_parent_id(repo_key, issue_number), _get_gitcode_user_by_user_id(user_id))
         )
         db.commit()
         return c.lastrowid

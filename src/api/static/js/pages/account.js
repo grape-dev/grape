@@ -1313,8 +1313,8 @@ function _accountLoadApiKeys() {
         '<div style="flex:1;min-width:0">' +
         '<div style="font-size:12px;font-weight:600;color:var(--t)">' + _accountEsc(k.name) + '</div>' +
         '<div style="font-size:11px;color:var(--t3);font-family:monospace;margin-top:2px">' + _accountEsc(k.prefix) + '</div>' +
-        '<div style="font-size:10px;color:var(--t3);margin-top:2px">' + (I18N.t('app.account.created')) + ': ' + _accountEsc(k.created_at || '—') +
-        (k.last_used_at ? ' · ' + (I18N.t('app.account.last_used')) + ': ' + _accountEsc(k.last_used_at) : '') + '</div>' +
+        '<div style="font-size:10px;color:var(--t3);margin-top:2px">' + (I18N.t('app.account.created')) + ': ' + _accountEsc(fmtTimestamp8(k.created_at) || '—') +
+        ' · ' + (I18N.t('app.account.last_used')) + ': ' + (k.last_used_at ? _accountEsc(fmtTimestamp8(k.last_used_at)) : I18N.t('app.account.last_used_never')) + '</div>' +
         '</div>' +
         '<button class="bt bt-s" style="color:var(--r)" onclick="_accountRevokeApiKey(' + k.id + ',\'' + _accountJsStr(k.name) + '\')">' + (I18N.t('app.account.revoke')) + '</button>' +
         '</div>';

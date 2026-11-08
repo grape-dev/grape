@@ -16,6 +16,18 @@ import json, hashlib, re, time, os, warnings, threading
 from src.session_manager import db, db_lock
 from src.config import log
 
+
+def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: str) -> None:
+    """延迟绑定 apply_runtime_state（Issue #1496）。
+
+    src/runtime/service.py 反向 import 本模块（get_task_token），模块级
+    `from src.runtime.health import apply_runtime_state` 会形成
+    user.db → runtime.health → runtime/__init__ → service → user.db 环；
+    运行期（调用点）再解析则无环。
+    """
+    from src.runtime.health import apply_runtime_state
+    apply_runtime_state(c, runtime_id, status, last_seen_at)
+
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
 # OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
 
@@ -3807,15 +3819,19 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     (name, scope, owner_id, host_name, host_name))
                 row = c.fetchone()
                 if row:
+                    # Issue #1496：status+last_seen_at 走统一写入口（同事务含遗留
+                    # health 列派生同步），其余展示/配置字段仍随本 upsert 原地更新。
+                    _rid0 = row[0]
+                    _apply_runtime_state_compat(c, _rid0, "online", _now_iso)
                     c.execute(
                         "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, "
-                        "pip_package=?, status='online', last_seen_at=?, updated_at=?, "
+                        "pip_package=?, updated_at=?, "
                         "local_skills=?, skill_scan_result=?, host_name=? WHERE id=?",
                         (a.get("display_name", name),
                          1 if a.get("installed") else 0, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), _now_iso, _now_iso,
-                         _ls_json, _detail_json, host_name, row[0])
+                         a.get("pip_package", ""), _now_iso,
+                         _ls_json, _detail_json, host_name, _rid0)
                     )
                 else:
                     # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。

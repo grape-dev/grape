@@ -96,13 +96,15 @@ def test_concurrent_polls_do_not_exceed_bound_capacity(engines):
 
 
 @pytest.mark.parametrize('failure',['offline','stale','unhealthy','probe','tag','scope'])
-def test_physically_unreachable_bound_engine_still_fails_closed(engines,failure):
+def test_physically_unreachable_bound_engine_kept_queued_for_stale_verdict(engines,failure):
+    # Issue #1487 改动C：claim 阶段池全不可达只是单次瞬时快照，不判死——
+    # 保持 queued 交 _check_stale_queued_tasks 的 120s 窗口统一裁决。
     bound, outside = engines
     with db_lock:
         if failure == 'offline': db.execute("UPDATE agent_runtimes SET status='offline' WHERE id=?",(bound,))
         if failure == 'stale': db.execute('UPDATE agent_runtimes SET last_seen_at=? WHERE id=?',
             ((datetime.now(timezone.utc)-timedelta(hours=1)).isoformat(),bound))
-        if failure == 'unhealthy': db.execute('UPDATE agent_runtimes SET healthy=0 WHERE id=?',(bound,))
+        if failure == 'unhealthy': db.execute("UPDATE agent_runtimes SET healthy=0 WHERE id=?",(bound,))
         if failure == 'probe': db.execute("UPDATE agent_runtimes SET probe_status='failed' WHERE id=?",(bound,))
         if failure == 'tag': db.execute('DELETE FROM engine_capabilities WHERE runtime_id=?',(bound,))
         if failure == 'scope': db.execute("UPDATE runtime_credentials SET owner_id='other/repo' WHERE id IN "
@@ -110,6 +112,6 @@ def test_physically_unreachable_bound_engine_still_fails_closed(engines,failure)
         db.commit()
     child = enqueue(bound=bound)
     assert service.claim_by_tag('qa',outside) is None
-    assert service.get_task(child)['status'] == 'failed'
+    assert service.get_task(child)['status'] == 'queued'
     assert json.loads(service.get_task(child)['pool_engine_ids']) == [bound]
     assert busy(outside) == 0

@@ -292,8 +292,8 @@ function loadApiKeys() {
             <div style="font-size:12px;font-weight:600;color:var(--t)">${_escApi(k.name)}</div>
             <div style="font-size:11px;color:var(--t3);font-family:monospace;margin-top:2px">${_escApi(k.prefix)}</div>
             <div style="font-size:10px;color:var(--t3);margin-top:2px">
-              ${I18N.t('app.account.created')}: ${_escApi(k.created_at || '—')}
-              ${k.last_used_at ? ' · ' + I18N.t('app.account.last_used') + ': ' + _escApi(k.last_used_at) : ''}
+              ${I18N.t('app.account.created')}: ${_escApi(fmtTimestamp8(k.created_at) || '—')}
+              · ${I18N.t('app.account.last_used')}: ${k.last_used_at ? _escApi(fmtTimestamp8(k.last_used_at)) : I18N.t('app.account.last_used_never')}
             </div>
           </div>
           <button class="bt" style="font-size:11px;padding:5px 12px;background:var(--r);color:#fff;border:none;border-radius:6px;cursor:pointer"

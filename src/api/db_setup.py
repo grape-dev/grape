@@ -3338,6 +3338,74 @@ register_migration(
 )
 
 
+def _fn_backfill_events_terminal_completed_at_1497(conn=None) -> None:
+    """Issue #1497：存量回填（第二轮）——终态（completed/failed/cancelled/timeout）
+    且 completed_at 为空的 events 行补写 completed_at。
+
+    口径：completed_at = COALESCE(已有非空值, updated_at, created_at, 当前时间)。
+    events 表当前无 updated_at 列（列存在时优先取，语义为「最后更新时间」兜底口径），
+    缺列时按 created_at 回填——与 #1105 第一轮迁移口径一致并记录于此。
+    幂等：只更新 completed_at 为空的行，重跑无副作用；分批（每批 500 条，按 seq 升序）。
+    conn 可选：测试注入独立连接；缺省用全局 db（受 db_lock 保护）。
+    """
+    _TERMINALS = ("completed", "failed", "cancelled", "timeout")
+    _BATCH = 500
+    _own = conn is None
+    if _own:
+        conn = db
+    try:
+        from src.session_manager import _is_mysql_backend
+    except Exception:
+        _is_mysql_backend = lambda: False  # noqa: E731
+    _mysql = _is_mysql_backend()
+    _ph = "%s" if _mysql else "?"
+    _now_fn = "NOW()" if _mysql else "datetime('now')"
+    with db_lock:
+        c = conn.cursor()
+        # updated_at 列存在性探测（events 老库无该列）
+        _has_updated_at = False
+        try:
+            _cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
+            _has_updated_at = "updated_at" in _cols
+        except Exception:
+            _has_updated_at = False
+        _val_expr = (
+            "COALESCE(NULLIF(updated_at,''), NULLIF(created_at,''), " + _now_fn + ")"
+            if _has_updated_at else
+            "COALESCE(NULLIF(created_at,''), " + _now_fn + ")")
+        while True:
+            try:
+                c.execute(
+                    f"SELECT seq FROM events WHERE status IN ({','.join(_ph for _ in _TERMINALS)}) "
+                    "AND (completed_at IS NULL OR completed_at='') "
+                    f"ORDER BY seq LIMIT {_BATCH}", _TERMINALS)
+                rows = c.fetchall()
+                if not rows:
+                    break
+                seqs = [r[0] for r in rows]
+                _in = ",".join(_ph for _ in seqs)
+                c.execute(
+                    f"UPDATE events SET completed_at={_val_expr} "
+                    f"WHERE seq IN ({_in}) "
+                    f"AND status IN ({','.join(_ph for _ in _TERMINALS)}) "
+                    "AND (completed_at IS NULL OR completed_at='')",
+                    (*seqs, *_TERMINALS))
+                conn.commit()
+                if len(seqs) < _BATCH:
+                    break
+            except Exception as e:
+                log.warning(f"backfill_events_terminal_completed_at_1497 failed: {e}")
+                break
+
+
+register_migration(
+    version="202611080001",
+    name="backfill_events_terminal_completed_at_1497",
+    kind="safe",
+    fn=_fn_backfill_events_terminal_completed_at_1497,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 
@@ -3819,6 +3887,152 @@ def _migrate_issue_vcs_exists():
 register_migration(
     "202611060004", "issue995_issue_vcs_exists_columns", "safe",
     _migrate_issue_vcs_exists)
+
+
+def _fn_normalize_legacy_health_column(conn=None) -> int:
+    """Issue #1496：遗留 health 列按 status+last_seen_at 口径幂等回填。
+
+    背景：现 DDL _AGENT_RUNTIMES_DDL 只有 healthy INTEGER，没有 health 列；
+    库中出现的 health 是历史版本遗留列（读路径已不消费，展示侧统一走
+    derive_runtime_health(status, last_seen_at) 派生）。旧写入方单独写
+    health 不同步 status → 「health='online' AND status<>'online'」自相矛盾行
+    （存量 4 条 id 23259–23262），测试直读库即红、列表/派发口径分叉（#758 表现）。
+
+    裁定（Spec 拍板）：status 为唯一真源；health 仅允许作为派生展示值。
+    本迁移【只规范化不删列】（存在无法立即下线的外部写入方），登记待删除；
+    回填值必须由 status+last_seen_at 派生——绝不信旧 health 值，防止真失联
+    引擎被旧 health='online' 反向"复活"。
+
+    幂等：值级幂等（health 已等于派生目标值的行不再 UPDATE），重复执行零变更；
+    无遗留列时 no-op 且不引入新列。
+    conn 可选：测试注入独立连接；缺省用全局 db（受 db_lock 保护）。
+    返回本次实际改写的行数（幂等断言用）。
+    """
+    _own = conn is None
+    if _own:
+        conn = db
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        is_mysql = False
+    from src.runtime.health import derive_runtime_health
+    import time as _time
+
+    def _has_col() -> bool:
+        if is_mysql:
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_runtimes' "
+                "AND COLUMN_NAME='health'")
+            return bool(c.fetchone()[0])
+        # SQLite：PRAGMA table_info（mysql_compat Cursor 对 PRAGMA 特判翻译，
+        # 但本函数测试注入的是裸 sqlite3 连接，直接原生查询双方言通用）
+        try:
+            return any(r[1] == "health" for r in c.execute(
+                "PRAGMA table_info(agent_runtimes)").fetchall())
+        except Exception:
+            return False
+
+    changed = 0
+    with db_lock:
+        c = conn.cursor()
+        if not _has_col():
+            return 0
+        _ph = "%s" if is_mysql else "?"
+        c.execute(
+            f"SELECT id, status, last_seen_at, health, credential_id, installed, healthy "
+            f"FROM agent_runtimes "
+            f"WHERE health IS NOT NULL AND health != ''")
+        rows = c.fetchall()
+        now_ts = _time.time()
+        from src.runtime.health import derive_local_runtime_health
+        for rid, status, last_seen, health, cred, installed, healthy in rows:
+            # Issue #1496 返工：本机直连（cred0）按 #592 口径派生（installed+healthy），
+            # 不能用远端心跳口径——本机 last_seen 10min 才刷新，套 100s 新鲜度会把健康
+            # 的本机引擎回填成 recently_lost（制造新的矛盾行）。
+            if not (cred or 0):
+                target = derive_local_runtime_health(
+                    bool(installed if installed is not None else 1), bool(healthy))
+            else:
+                target = derive_runtime_health(status or "offline", last_seen, now_ts)
+            if (health or "") == target:
+                continue  # 值级幂等：已等不再 UPDATE
+            c.execute(
+                f"UPDATE agent_runtimes SET health={_ph} WHERE id={_ph} AND health={_ph}",
+                (target, rid, health))
+            changed += c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        conn.commit()
+    if changed:
+        log.info(f"Issue #1496: 遗留 health 列回填 {changed} 行（按 status+last_seen 派生口径）")
+    return changed
+
+
+register_migration(
+    # 版本号取当前日期段顺延（全库 register_migration 现存最大 202611060004；202611080001 已被 #1497 占用 → 顺延 202611080002；
+    # 避开 #1412 撞号教训的 202611030004/20261105 0001/20261106 0001 已占号段）。
+    # 列不删、只按派生口径规范化 + 登记待删除（外部写入方下线后再清理）。
+    "202611080002", "issue1496_normalize_legacy_health_column", "safe",
+    _fn_normalize_legacy_health_column)
+
+
+def _fn_normalize_task_messages_created_at_default(conn=None) -> int:
+    """Issue #1495（B 项）：MySQL 侧 task_messages.created_at 默认值统一为 ISO+00:00（UTC）。
+
+    病根：MySQL 默认 `cast(now() as char)` 是**本地墙钟、空格分隔、无时区**的形态；
+    parse_dt 的 mysql 分支虽按 CST 正确解析这种值，但只要有写入方按 UTC 空格格式
+    （SQLite 口径）落库，就会产生 8h 偏差 → 活跃任务被判不活跃（实测复现）。
+
+    处理：
+    - SQLite：默认 `datetime('now')` 本身是 UTC，parse_dt 的 sqlite 分支按 UTC 解析，
+      无歧义 → **no-op**（SQLite 不支持 ALTER COLUMN 改默认值，新库沿用原 DDL）。
+    - MySQL：ALTER COLUMN ... SET DEFAULT 为元数据变更（8.0 起 INSTANT），
+      值形如 `2026-11-08T12:34:09.824507+00:00`，与写入侧 isoformat() 一致。
+
+    幂等：默认值已含 '+00:00' 直接跳过；重复执行零变更。
+    注意：表达式刻意不用 DATE_FORMAT('%%Y-...')——mysql_compat 参数化会把 `%` 转义成
+    `%%`，默认值退化为常量串（实测）；改用 CONCAT/REPLACE 拼装，表达式中无 `%`。
+    """
+    try:
+        from src.session_manager import _is_mysql_backend
+        if not _is_mysql_backend():
+            return 0
+    except Exception:
+        return 0
+    _own = conn is None
+    if _own:
+        conn = db
+    try:
+        with db_lock:
+            c = conn.cursor()
+            c.execute(
+                "SELECT COLUMN_DEFAULT FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='task_messages' "
+                "AND COLUMN_NAME='created_at'")
+            row = c.fetchone()
+            if not row:
+                return 0            # 表不存在（初始化顺序）→ 跳过
+            _cur_default = str(row[0] or "")
+            if "+00:00" in _cur_default:
+                return 0            # 已是 ISO+00:00，幂等
+            c.execute(
+                "ALTER TABLE task_messages ALTER COLUMN created_at SET DEFAULT "
+                "(CONCAT(REPLACE(CAST(UTC_TIMESTAMP(6) AS CHAR), ' ', 'T'), '+00:00'))")
+            conn.commit()
+            log.info("Issue #1495: task_messages.created_at 默认值改为 ISO+00:00（UTC）")
+            return 1
+    except Exception as e:
+        log.warning(f"Issue #1495 default migration skipped: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
+
+
+register_migration(
+    "202611080003", "issue1495_task_messages_created_at_default", "safe",
+    _fn_normalize_task_messages_created_at_default)
 
 
 def _migrate_issue_created_by():

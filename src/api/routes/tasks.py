@@ -58,6 +58,7 @@ from src.api.issues_center import (  # noqa: F401
     _get_issue_title,
     _get_task_issue_info,
     _get_user_id_by_gitcode,
+    _get_gitcode_user_by_user_id,
     _patch_github_issue_body,
     _patch_issue_body,
     _post_gitcode_issue,
@@ -189,10 +190,11 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id, created_by) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id)
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id,
+                 sender.strip() or _get_gitcode_user_by_user_id(user_id or 0))
             )
             db.commit()
             task_id = c.lastrowid

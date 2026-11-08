@@ -20,6 +20,56 @@ function fmtLocalTime(utcStr) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+// 全局工具：任意时间输入（秒/毫秒时间戳、UTC ISO、带 ±HH:MM 偏移字符串）→ 固定东八区（UTC+8）
+// 的 'YYYY-MM-DD HH:mm:ss'。Issue #1477：API Key「最近使用时间」展示口径——固定时区，跨环境一致。
+// - 0/负值/空 → ''（占位由调用方兜底为 '—'，避免 0 被格式化成 1970-01-01）
+// - 数字/纯数字字符串按量级自动判别秒（< 1e11）或毫秒
+// - 字符串先按带偏移/UTC 语义换算为绝对时刻，再用 Intl 固定 Asia/Shanghai 取分量
+// - 解析失败 → 原样返回（不破坏数据、不抛异常）
+function fmtTimestamp8(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'number' || (/^-?\d+$/.test(String(v).trim()) && String(v).trim() !== '')) {
+    const n = Number(v);
+    if (!isFinite(n) || n <= 0) return '';
+    const ms = n < 1e11 ? n * 1000 : n;
+    return _format8FromMs(ms);
+  }
+  const s = String(v).replace('T', ' ').replace('Z', '').trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?([+-]\d{2}:\d{2})?/);
+  if (!m) return String(v);
+  let ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  if (m[7]) {
+    // 带偏移：把「本地假想时刻」还原成绝对 UTC 时间点（+08:00 减 8h，-05:00 加 5h）
+    const sign = m[7][0] === '-' ? 1 : -1;
+    const oh = parseInt(m[7].slice(1, 3), 10);
+    const om = parseInt(m[7].slice(4, 6), 10);
+    ms += sign * (oh * 3600 + om * 60) * 1000;
+  }
+  return _format8FromMs(ms);
+}
+
+// 绝对毫秒时间戳 → Asia/Shanghai 固定时区的 YYYY-MM-DD HH:mm:ss（Intl 不可用时按 UTC+8 偏移兜底）
+function _format8FromMs(ms) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date(ms));
+    const get = t => (parts.find(p => p.type === t) || {}).value || '';
+    const day = `${get('year')}-${get('month')}-${get('day')}`;
+    const hm = `${get('hour')}:${get('minute')}:${get('second')}`;
+    if (day.includes('undefined') || hm.includes('undefined')) throw new Error('intl parts missing');
+    // en-CA 24h 下 hour 可能为 "24"，归一为 "00"
+    return `${day} ${hm === '24:00:00' ? '00:00:00' : hm}`;
+  } catch (e) {
+    // 兜底：无 Intl/时区数据环境直接按 UTC+8 偏移取分量
+    const d = new Date(ms + 8 * 3600 * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+  }
+}
+
 // 全局工具：Markdown 渲染（先转义 HTML 防 XSS，再由 marked 解析）
 let _markedReady = false;
 try {

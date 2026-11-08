@@ -35,15 +35,15 @@ def _clean():
     with db_lock:
         db.cursor().execute("DELETE FROM task_messages WHERE task_id LIKE 'test_%' OR task_id LIKE 't_test%' OR task_id IN (SELECT id FROM agent_tasks WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%')")
         db.cursor().execute("DELETE FROM agent_tasks WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
-        db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR id IN (900001)")
-        db.cursor().execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%') OR id IN (900001, 900002, 999)")
+        db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR name LIKE 'CI-Recover%' OR id IN (900001)")
+        db.cursor().execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR name LIKE 'CI-Recover%') OR id IN (900001, 900002, 999)")
         db.commit()
     yield
     with db_lock:
         db.cursor().execute("DELETE FROM task_messages WHERE task_id LIKE 'test_%' OR task_id LIKE 't_test%' OR task_id IN (SELECT id FROM agent_tasks WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%')")
         db.cursor().execute("DELETE FROM agent_tasks WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
-        db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR id IN (900001)")
-        db.cursor().execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%') OR id IN (900001, 900002, 999)")
+        db.cursor().execute("DELETE FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR name LIKE 'CI-Recover%' OR id IN (900001)")
+        db.cursor().execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR name LIKE 'CI-Recover%') OR id IN (900001, 900002, 999)")
         db.commit()
 
 
@@ -63,10 +63,21 @@ def _enqueue(runtime_id, session_id="sess-o", seq=1, prompt="p"):
         agent_type="issue", skill="issue")
 
 
-def _mark_running(tid):
-    """直接置 running（绕开 claim 的 600s stale 回收分支，保证路径确定性）。"""
+def _mark_running(tid, *, started_seconds_ago=None):
+    """直接置 running（绕开 claim 的 600s stale 回收分支，保证路径确定性）。
+
+    started_seconds_ago：可把 started_at 回拨（默认不回拨=now）。
+    Issue #370 年龄闸门按 started_at（NULL 兜底 created_at）判 skipped_young 且先于
+    活跃度检查——要测活跃度检查的用例必须把 started_at 回拨到宽限期（300s）之外。
+    """
+    from datetime import datetime, timezone, timedelta
     with db_lock:
-        db.cursor().execute("UPDATE agent_tasks SET status='running' WHERE id=?", (tid,))
+        if started_seconds_ago is not None:
+            db.cursor().execute(
+                "UPDATE agent_tasks SET status='running', started_at=? WHERE id=?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=started_seconds_ago)).isoformat(), tid))
+        else:
+            db.cursor().execute("UPDATE agent_tasks SET status='running' WHERE id=?", (tid,))
         db.commit()
 
 
@@ -86,7 +97,7 @@ class TestRecoverOrphans:
         rid = _register_runtime(client, token)
 
         tid = _enqueue(rid)
-        _mark_running(tid)
+        _mark_running(tid, started_seconds_ago=400)  # 超过 #370 宽限 300s，闸门放行到活跃度检查
         # 活跃信号：最近一条 task_messages（created_at 用与生产一致的 ISO 格式，
         # SQLite datetime('now') 的 'YYYY-MM-DD HH:MM:SS' 与 ISO 'T'+offset 字符串
         # 比较会失真，导致活跃度检查误判为孤儿）
@@ -120,7 +131,7 @@ class TestRecoverOrphans:
         rid = _register_runtime(client, token)
 
         tid = _enqueue(rid)
-        _mark_running(tid)
+        _mark_running(tid, started_seconds_ago=400)  # 超过 #370 宽限 300s，闸门放行到活跃度检查
         _set_attempts(tid, 1)
 
         r = client.post(f"/api/runtime/runtimes/{rid}/recover-orphans",
@@ -141,7 +152,7 @@ class TestRecoverOrphans:
         rid = _register_runtime(client, token)
 
         tid = _enqueue(rid)
-        _mark_running(tid)
+        _mark_running(tid, started_seconds_ago=400)  # 超过 #370 宽限 300s，闸门放行到活跃度检查
         _set_attempts(tid, 2)
 
         r = client.post(f"/api/runtime/runtimes/{rid}/recover-orphans",
@@ -166,6 +177,13 @@ class TestRecoverOrphans:
         tid = _enqueue(rid)
         got = service.claim(rid)
         assert got and got["id"] == tid
+        # #370 年龄闸门：claim 刚写的 started_at 是新鲜值，回炉断言前回拨到宽限期外
+        with db_lock:
+            from datetime import datetime, timezone, timedelta
+            db.cursor().execute(
+                "UPDATE agent_tasks SET started_at=? WHERE id=?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat(), tid))
+            db.commit()
 
         r = client.post(f"/api/runtime/runtimes/{rid}/recover-orphans",
                         headers={"Authorization": f"Bearer {token}"})

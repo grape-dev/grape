@@ -467,6 +467,7 @@
     "api_key_desc": "API Key 用于 grape-cli 认证和 CI/自动化场景。前缀 <code>grape_</code>，长效有效，可吊销。明文仅在生成时显示一次，请妥善保存。",
     "created": "创建",
     "last_used": "最近使用",
+    "last_used_never": "从未使用",
     "revoke": "吊销",
     "revoke_confirm": "确定吊销 \"{name}\" 吗？吊销后立即失效，不可恢复。",
     "revoke_failed": "吊销失败: {msg}",

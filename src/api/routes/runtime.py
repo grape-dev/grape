@@ -13,6 +13,8 @@ from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import db, db_lock
 from src.runtime import service
+from src.runtime.health import apply_runtime_state, parse_dt  # Issue #1496 统一写入口 + 心跳解析
+from src.runtime import health as _health_mod  # noqa: F401  (_STALE_SECONDS 经 _RUNTIME_STALE 下发)
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
@@ -302,12 +304,15 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
                 # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=?"
+                # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
+                # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
+                apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
+                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
                           + (", role_tags=?" if _role_tags_json else "")
                           + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
                           + " WHERE id=?",
                           (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid)
+                           rt.get("cli_path", ""), _ls_json, body.cli_version, rid)
                           + ((_role_tags_json,) if _role_tags_json else ())
                           + ((_model_name, datetime.now(timezone.utc).isoformat()) if _model_name else ()))
                 # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
@@ -401,8 +406,26 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                       (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
-            c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
-                      [now] + body.runtime_ids + [credential_id])
+            # Issue #1496：在线态统一写入口（status+last_seen_at 同事务，含遗留
+            # health 列派生同步）。本机直连引擎（credential_id=0）不受远端心跳
+            # 管辖（不做在线判定，active/online 视图另有口径），只同步其
+            # last_seen_at 观测时间，不翻转 status（保住 #1487 的认领侧豁免语义）。
+            # 远端引擎：仅 status='online' 的行刷新心跳；status≠online（已被
+            # reap/revoke 置 offline）不得被旧 worker 兜底路径"复活"——对齐
+            # derive_runtime_health / engine_select._health_ok 的唯一真源口径。
+            c.execute(f"SELECT id, status, credential_id FROM agent_runtimes WHERE id IN ({ph})",
+                      body.runtime_ids)
+            _stale_cut = datetime.now(timezone.utc).timestamp() - _health_mod._STALE_SECONDS
+            for _rid, _st, _cid in c.fetchall():
+                if _cid != credential_id:
+                    continue  # 归属校验：只允许刷新当前凭据名下 runtime
+                _fresh = False
+                _cur = c.execute("SELECT last_seen_at FROM agent_runtimes WHERE id=?", (_rid,)).fetchone()
+                if _cur and _cur[0]:
+                    _ts = parse_dt(_cur[0])
+                    _fresh = _ts is not None and _ts >= _stale_cut
+                if (_st or "") == "online" or _fresh:
+                    apply_runtime_state(c, _rid, "online", now)
             # worker 上报的引擎探测结果写入 DB（probe_* 列已由 db_setup.py 自动迁移添加）
             # Issue #490：按 last_probe 幂等去重——同一观测（相同 last_probe）重放只刷新状态，
             # 不递增/重置 probe_fail_count、不动 healthy，避免心跳重放导致计数虚增与 Runtime 误摘除。
@@ -564,7 +587,17 @@ def machine_health_overview(user: dict = Depends(require_no_session_token)):
 
 @router.get("/admin/machine-health/{runtime_id}", operation_id="runtime_machine_health_detail", summary="Single runtime health detail", description="Health detail for a single engine. Issue #498: includes health_abnormal/health_reason (unified verdict), failed_tasks_effective (decayed-window failures) and last_failure_at for self-heal observability.")
 def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_session_token)):
-    """获取单个引擎的健康度详情。"""
+    """获取单个引擎的健康度详情。
+
+    Issue #1104（契约 AT-RNT-52）：详情语义——不存在的 runtime_id 返回 404
+    （统一错误结构），不再回退 get_health_score 现算通路返回 200 全量结构。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=404, detail={
+                "code": 404, "message": "runtime not found"})
     from src.runtime.health_scorer import get_health_score
     from src.runtime.instances import runtime_instance_name
     data = get_health_score(runtime_id, force_refresh=True)
@@ -1101,11 +1134,16 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
     （NULL 兜底 created_at）距 now 不足 RECOVER_GRACE_SECONDS（默认 300s，
     覆盖队列出队+引擎冷启动上界）直接 skipped，attempts 不变、不回炉。
     """
-    RECOVER_ACTIVITY_WINDOW = int(os.environ.get("RECOVER_ACTIVITY_WINDOW", "1200"))
     RECOVER_MAX_ATTEMPTS = int(os.environ.get("RECOVER_MAX_ATTEMPTS", "3"))
     RECOVER_GRACE_SECONDS = int(os.environ.get("RECOVER_GRACE_SECONDS", "300"))
+    # Issue #1495：活跃窗口单点收敛到 task_activity 具名常量（数值沿用 1200s 不变，
+    # 原 RECOVER_ACTIVITY_WINDOW 环境变量口除名——「一处定义」硬约束）；
+    # 判定改走 has_recent_activity（Python 侧解析 epoch 比较），消除 TEXT 列逐字节
+    # 比较对 created_at 写入格式的隐含依赖（表默认值空格格式行 / 无微秒 ISO 行）。
+    from src.runtime.task_activity import (RECOVER_ORPHANS_ACTIVITY_WINDOW_SECONDS,
+                                           has_recent_activity)
+    RECOVER_ACTIVITY_WINDOW = RECOVER_ORPHANS_ACTIVITY_WINDOW_SECONDS
     _now = datetime.now(timezone.utc)
-    _active_cutoff = (_now - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
     _grace_cutoff_dt = _now - timedelta(seconds=RECOVER_GRACE_SECONDS)
     recovered, skipped_active, force_failed, skipped_young = [], [], [], []
     with db_lock:
@@ -1134,11 +1172,11 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                 except Exception:
                     pass
             # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
+            # Issue #1495：改走 task_activity.has_recent_activity（按 task_id 索引
+            # 取行 + Python 解析 epoch 比较），替代 `created_at > ?` 逐字节比较；
+            # 解析失败行不计活跃（保守：宁可误回收也不留死任务）。
             try:
-                c.execute(
-                    "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
-                    (tid, _active_cutoff))
-                if c.fetchone():
+                if has_recent_activity(c, tid, RECOVER_ACTIVITY_WINDOW):
                     skipped_active.append(tid)
                     continue
             except Exception:
