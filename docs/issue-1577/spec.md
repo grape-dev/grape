@@ -12,8 +12,9 @@ worker 任务内 `GRAPE_SERVER_URL` 被注入为 worker runtime 基址（仅 54 
 - 单地址部署向前兼容，env 与改造前等价。
 
 ## 范围
-- In：`src/prompt_builder.py`、`src/api/event_pipeline.py`、`src/runtime/agent.py`、
-  `src/user/db.py`、`src/config.py`、新增单测、`help/usage/agent-environment-variables.md`。
+- In：`src/prompt_builder.py`、`src/api/event_pipeline.py`、`src/api/routes/chat.py`
+  （对话入队同源注入）、`src/runtime/agent.py`、`src/user/db.py`、`src/api/routes/health.py`、
+  `src/config.py`、新增单测、`help/usage/agent-environment-variables.md`。
 - Out：grape-cli refresh 告警、grape-skills 文档（另仓承接）。
 
 ## 验收标准

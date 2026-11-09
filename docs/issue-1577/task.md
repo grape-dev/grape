@@ -4,7 +4,9 @@
 - [x] T2 `src/config.py`：`task_business_api_url` 可选配置双写 meta。
 - [x] T3 `src/prompt_builder.py`：`_runtime_is_local` + `_resolve_business_server_url`。
 - [x] T4 `src/api/event_pipeline.py`：两处 env 组装注入双基址。
-- [x] T5 `src/runtime/agent.py`：本机/内网 worker 仅覆盖 runtime 基址 + 回退。
-- [x] T6 `help/usage/agent-environment-variables.md`：补充 `RUNTIME_SERVER_URL` 与语义。
-- [x] T7 `tests/test_issue_1577_server_url_split.py`：双地址/单地址/回退单测。
-- [x] T8 运行新增与相关回归测试。
+- [x] T5 `src/runtime/agent.py`：本机/内网 worker 覆盖 runtime 基址；单地址部署保留业务基址覆盖，双地址保留显式业务基址。
+- [x] T6 `src/api/routes/chat.py`：全部对话入队路径注入双基址。
+- [x] T7 `src/user/db.py` / `src/api/routes/health.py`：`task_business_api_url` 并入告警与 health。
+- [x] T8 `help/usage/agent-environment-variables.md`：补充 `RUNTIME_SERVER_URL` 与注入来源。
+- [x] T9 `tests/test_issue_1577_server_url_split.py`：双地址/单地址/显式优先级/异常回退/告警健康单测。
+- [x] T10 运行新增与相关回归测试。

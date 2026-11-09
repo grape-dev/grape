@@ -43,18 +43,48 @@ class TestBusinessApiUrlGetter:
 class TestResolveBusinessServerUrl:
     def test_remote_runtime_uses_business_base(self):
         from src import prompt_builder
-        with patch("src.user.db.get_business_api_url",
+        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False):
             assert prompt_builder._resolve_business_server_url(7) == "https://api.grape.example.com"
 
     def test_local_runtime_uses_localhost(self):
         from src import prompt_builder
-        with patch("src.user.db.get_business_api_url",
+        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_local_port", return_value="3456"):
             assert prompt_builder._resolve_business_server_url(3) == "http://127.0.0.1:3456"
+
+    def test_local_runtime_respects_explicit_business_base(self):
+        """Spec 优先级：显式 task_business_api_url > server_base_url > 本机 127.0.0.1。"""
+        from src import prompt_builder
+        with patch("src.user.db.get_business_api_url_explicit",
+                   return_value="https://api.grape.example.com"), \
+             patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
+             patch.object(prompt_builder, "_local_port", return_value="3456"):
+            assert prompt_builder._resolve_business_server_url(3) == "https://api.grape.example.com"
+
+    def test_runtime_lookup_error_keeps_localhost_fallback(self):
+        """DB 查询异常（未知）保留改造前 localhost 回退，不等同于「非本地」。"""
+        from src import prompt_builder
+        with patch.object(prompt_builder, "_runtime_is_local", return_value=None), \
+             patch.object(prompt_builder, "_local_port", return_value="3456"), \
+             patch("src.user.db.get_worker_connect_url",
+                   return_value="https://worker.grape.example.com"):
+            assert prompt_builder._resolve_server_url(5) == "http://localhost:3456"
+
+    def test_resolve_task_server_env_returns_both_bases(self):
+        from src import prompt_builder
+        with patch.object(prompt_builder, "_resolve_business_server_url",
+                          return_value="https://api.grape.example.com"), \
+             patch.object(prompt_builder, "_resolve_server_url",
+                          return_value="https://worker.grape.example.com"):
+            env = prompt_builder.resolve_task_server_env(7)
+        assert env == {"GRAPE_SERVER_URL": "https://api.grape.example.com",
+                       "RUNTIME_SERVER_URL": "https://worker.grape.example.com"}
 
     def test_runtime_resolver_keeps_worker_connect_semantics(self):
         from src import prompt_builder
@@ -93,13 +123,6 @@ class TestBuildTaskEnv:
         assert env["GRAPE_SERVER_URL"] == "https://api.grape.example.com"
         assert env["RUNTIME_SERVER_URL"] == "https://worker.grape.example.com"
 
-    def test_build_task_env_source_injects_both(self):
-        import inspect
-        from src.api.event_pipeline import build_task_env
-        src = inspect.getsource(build_task_env)
-        assert "_resolve_business_server_url" in src
-        assert 'env["RUNTIME_SERVER_URL"]' in src
-
 
 class TestLocalWorkerOverride:
     def test_keeps_business_base_and_overrides_runtime(self):
@@ -120,11 +143,44 @@ class TestLocalWorkerOverride:
         assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:3000"
         assert task["server_url"] == "http://127.0.0.1:3000"
 
-    def test_no_unconditional_business_override_in_source(self):
-        import inspect
-        from src.runtime import agent as agent_mod
-        src = inspect.getsource(agent_mod)
-        assert 'env["GRAPE_SERVER_URL"] = _local_base' not in src
+    def test_single_address_overrides_business_base(self):
+        """单地址部署（业务基址与回连基址同主机）：业务基址仍覆盖为本机直连。"""
+        from src.runtime.agent import _apply_local_worker_base_override
+        env = {"GRAPE_SERVER_URL": "https://grape.example.com", "RUNTIME_SERVER_URL": "https://grape.example.com"}
+        task = {"server_url": "https://grape.example.com"}
+        _apply_local_worker_base_override(env, task, "http://127.0.0.1:3000")
+        assert env["GRAPE_SERVER_URL"] == "http://127.0.0.1:3000"
+        assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:3000"
+
+    def test_dual_address_keeps_business_base_when_hosts_differ(self):
+        from src.runtime.agent import _apply_local_worker_base_override
+        env = {"GRAPE_SERVER_URL": "https://grape.example.com", "RUNTIME_SERVER_URL": "https://worker.grape.example.com"}
+        task = {"server_url": "https://worker.grape.example.com"}
+        _apply_local_worker_base_override(env, task, "http://127.0.0.1:3000")
+        assert env["GRAPE_SERVER_URL"] == "https://grape.example.com"
+        assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:3000"
+
+class TestBusinessApiWarningAndHealth:
+    def test_loopback_business_api_warns(self):
+        from src.user.db import get_url_split_warning
+        with patch("src.config.read_server_config",
+                   return_value={"task_business_api_url": "http://127.0.0.1:8000"}):
+            w = get_url_split_warning()
+        assert "task_business_api_url" in w
+
+    def test_health_exposes_business_api_url(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.api.routes.health import router
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        with patch("src.config.read_server_config",
+                   return_value={"task_business_api_url": "https://api.grape.example.com"}), \
+             patch("src.user.db.get_meta_value", return_value=""):
+            data = client.get("/api/health").json()
+        assert data["task_business_api_url"] == "https://api.grape.example.com"
+
 
 class TestReservedRuntimeEnv:
     def test_runtime_server_url_reserved_in_scene_custom_env(self):
