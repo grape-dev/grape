@@ -54,6 +54,11 @@ class AishellDshACPBackend:
     binary = "aishell"
     prompt_via_stdin = False  # ACP 模式不用 stdin 传 prompt，用 JSON-RPC
 
+    def build_args(self, prompt: str, session_id: str = "") -> list[str]:
+        # ACP 模式不用 CLI 参数传 prompt；保留接口以兼容 AgentRuntime 契约
+        # （chat 生产路径会取 backend.build_args 组命令，同 src/runtime/hwcloud.py 先例）。
+        return ["acp"]
+
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         """基础 env（D3/D4：模型凭据设备预配置，grape 不注 key/不透传）。"""
         env = os.environ.copy()

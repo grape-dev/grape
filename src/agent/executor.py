@@ -722,6 +722,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         )
         return
 
+    # ── aishell-dsh ACP 专用路径（docs/issues/aishell-dsh-runtime-acp-implement-plan.md）──
+    if backend_name == "aishell-dsh":
+        yield from _stream_aishell_dsh_acp(
+            prompt, cwd, session_id, event_type, backend,
+            account, user_id, env_extra, bot_token, user_token,
+            agent_name, agent_label, max_exec_seconds,
+            repo_key=repo_key,
+        )
+        return
+
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
     # P2：平台 VCS token（BOT_*/USER_*/BOT_TOKEN）不再注入 agent env——
