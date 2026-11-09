@@ -595,7 +595,11 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
     import queue as _queue
     import tempfile as _tempfile
 
-    agent_cmd = cli_path or _shutil.which("aishell") or _shutil.which("aishell.cmd")
+    # CLI 定位统一走 find_cli（PATH → 默认安装目录 → Uninstall 注册表 InstallLocation
+    # 三层兜底）；裸 shutil.which 只是历史上 PATH 时期的后备，装在非默认目录的
+    # AI Shell 会漏——与 aishell_acp.py 任务链同一寻路源。
+    from src.runtime.os_adapter import find_cli as _find_cli
+    agent_cmd = cli_path or _find_cli("aishell")
     if not agent_cmd:
         return {"status": "fail", "latency": 0, "error": "aishell CLI not found"}
 
