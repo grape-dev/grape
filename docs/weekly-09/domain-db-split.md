@@ -51,3 +51,13 @@ systemd 的 `EnvironmentFile=.env` 在 `Environment=` 之后加载，**会覆盖
 3. **备份**：三库需分别备份；跨库视图本身不落数据。
 4. **可用性耦合**：mgmt 库不可用时，runtime/insight 中指向 mgmt 的视图会报错
    （例如账户状态校验），这是拆库后新增的依赖方向。
+## Grafana 数据源（拆库后必须同步改）
+
+`grape-mysql` 数据源原来指向 `grape_ljt_db`。拆库后心跳写入 `grape-mgmt-db`，
+继续读旧库会让「GSB 服务注册表（MySQL 实时）」等面板全部显示离线（数据停在切换前）。
+
+已改为：`database=grape-mgmt-db`、`user=grape-mgmt`（`/api/datasources/uid/grape-mysql/health` → OK）。
+`grape-mgmt-db` 里对 runtime/insight 的表是跨库视图，所以 5 条看板 SQL 全部照常执行。
+
+注意：Grafana 容器（`lgtm`）没有挂载卷，数据源/看板都存在容器可写层，
+容器重建会丢失 —— 建议后续给 `/var/lib/grafana` 挂持久卷。
