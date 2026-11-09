@@ -41,14 +41,12 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
     """Issue #1668: 统一解析 ACCOUNT/actor（a2a_event 兜底链）。
 
     优先级：a2a_event 为 payload.account → evt.actor → Issue creator；
-    其余事件为 evt.actor → payload.account → evt.account。
+    其余事件为 evt.actor → payload.account。
     解析为空时输出结构化告警（event_type/issue_number），**禁止回退仓库属主**。
-    结果缓存在 evt，避免多处装配重复告警/重复查库。
+    结果不写入 evt 缓存：Issue 建档前解析为空不应被永久缓存（下次调用会重新查库）。
     """
     if not isinstance(evt, dict):
         evt = {}
-    if evt.get("_actor_account_resolved"):
-        return evt.get("_actor_account") or ""
     payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
     event_type = str(evt.get("type") or evt.get("event_type") or "")
     issue_number = str(
@@ -63,10 +61,10 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
         account = str(payload.get("account") or evt.get("actor") or "").strip()
         if not account:
             account = _get_issue_creator(repo_key, issue_number)
+        fallback = "payload.account->actor->issue_creator"
     else:
-        account = str(
-            evt.get("actor") or payload.get("account") or evt.get("account") or ""
-        ).strip()
+        account = str(evt.get("actor") or payload.get("account") or "").strip()
+        fallback = "actor->payload.account"
     if not account:
         log.warning(
             "ACCOUNT_MISSING "
@@ -75,13 +73,32 @@ def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
                 "issue_number": issue_number,
                 "repository": evt.get("repository", ""),
                 "repo_key": repo_key,
-                "fallback": "payload.account->issue_creator",
+                "fallback": fallback,
                 "owner_fallback": False,
             }, ensure_ascii=False)
         )
-    evt["_actor_account_resolved"] = True
-    evt["_actor_account"] = account
     return account
+
+
+def _a2a_actor_for(evt: dict, issue_id: str, repo_key: str) -> str:
+    """Issue #1668: 解析派生 a2a_event 的触发人账号。
+
+    订阅 / PR 订阅 / VOD 重派统一走此入口：以派生 issue_id 构造临时 a2a_event，
+    按 payload.account → actor → Issue creator 解析，避免三处内联构造重复与优先级漂移。
+    """
+    payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
+    return resolve_actor_account(
+        {"type": "a2a_event", "actor": evt.get("actor", ""),
+         "issue_id": issue_id, "payload": payload},
+        repo_key,
+    )
+
+
+def _payload_with_account(payload, account: str) -> dict:
+    """Issue #1668: 复制 payload 并回填解析后的 account（落库与事件 actor 保持一致）。"""
+    out = dict(payload) if isinstance(payload, dict) else {}
+    out["account"] = account
+    return out
 
 
 def _get_task_repo_token(repo_key: str) -> str:
@@ -1448,15 +1465,13 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         # 创建事件
         from src.api.event_store import append_event
         _title = f"PR 订阅 QA: {scene_id}"
-        _a2a_actor = resolve_actor_account(
-            {"type": "a2a_event", "actor": evt.get("actor", ""),
-             "issue_id": _pseudo_id, "payload": evt.get("payload", {})}, repo_key)
+        _a2a_actor = _a2a_actor_for(evt, _pseudo_id, repo_key)
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
             title=_title, issue_id=_pseudo_id, source="a2a",
             agent_type="qa", actor=_a2a_actor,
             summary=f"PR 订阅并行: scene={scene_id} → qa",
-            payload=evt.get("payload", {}), status="pending",
+            payload=_payload_with_account(evt.get("payload"), _a2a_actor), status="pending",
             scene_id=scene_id,
             entity_type="pull_request",
         )
@@ -1685,15 +1700,13 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             _sub_title = f"A2A (订阅): {agent_type}"
         # Issue #252: 订阅事件继承原事件实体类型
         _sub_entity_type = "pull_request" if event_type in PR_EVENT_TYPES else ("issue" if event_type in ISSUE_EVENT_TYPES else "")
-        _a2a_actor = resolve_actor_account(
-            {"type": "a2a_event", "actor": evt.get("actor", ""),
-             "issue_id": issue_id, "payload": evt.get("payload", {})}, repo_key)
+        _a2a_actor = _a2a_actor_for(evt, issue_id, repo_key)
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
             title=_sub_title, issue_id=issue_id, source="a2a",
             agent_type=agent_type, actor=_a2a_actor,
             summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
-            payload=evt.get("payload", {}), status="pending",
+            payload=_payload_with_account(evt.get("payload"), _a2a_actor), status="pending",
             entity_type=_sub_entity_type,
         )
         log.info(f"Pipeline subscription: event created seq={seq} agent={agent_type}")
@@ -5288,10 +5301,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         _title = f"VOD redispatch: {vod_skill}"
 
     # 创建新 event
-    _a2a_actor = resolve_actor_account(
-        {"type": "a2a_event", "issue_id": issue_id,
-         "payload": {"account": evt.get("account", ""),
-                     "issue_number": _issue_num}}, repo_key)
+    _a2a_actor = _a2a_actor_for(evt, issue_id, repo_key)
     seq = append_event(
         repo_key=repo_key,
         event_type="a2a_event",
@@ -5302,6 +5312,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         actor=_a2a_actor,
         summary=f"智能推荐完成 → VOD ({vod_skill})",
         payload={"repository": evt.get("repository", ""), "issue_number": _issue_num,
+                 "account": _a2a_actor,
                  "context": "智能推荐完成，重派 VOD 执行完整工作流"},
         status="pending",
         entity_type="issue",
