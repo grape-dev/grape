@@ -87,7 +87,7 @@ def _seed_runtime(rid, cid, busy=1, status="online", last_seen=None, worker_vers
 
 
 def _seed_task(tid, rid, seq, status="running", pending_since=None, skill="", prompt="do work",
-               env_extra=None, issue_id="#537", started_at=None):
+               env_extra=None, issue_id="#537", started_at=None, event_type="autopilot_event"):
     _env = json.dumps(env_extra or {}, ensure_ascii=False) if env_extra else "{}"
     _started = started_at or _iso(_utcnow())
     with db_lock:
@@ -96,8 +96,8 @@ def _seed_task(tid, rid, seq, status="running", pending_since=None, skill="", pr
         c.execute(
             "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, repo_key, issue_id, "
             "agent_type, event_type, status, prompt, cwd, skill_files, env_extra, event_seq, "
-            "skill, started_at, pending_since) VALUES (?,?,?,?,?, 'vod', 'a2a_event', ?, ?, '', '{}', ?, ?, ?, ?, ?)",
-            (tid, "sess-" + tid, rid, RK, issue_id, status, prompt, _env, seq, skill,
+            "skill, started_at, pending_since) VALUES (?,?,?,?,?, 'vod', ?, ?, ?, '', '{}', ?, ?, ?, ?, ?)",
+            (tid, "sess-" + tid, rid, RK, issue_id, event_type, status, prompt, _env, seq, skill,
              _started, pending_since))
         c.execute("DELETE FROM events WHERE seq=?", (seq,))
         c.execute(
@@ -107,13 +107,17 @@ def _seed_task(tid, rid, seq, status="running", pending_since=None, skill="", pr
         db.commit()
 
 
-def _seed_exec(exec_id, status="dispatched", task_id=77):
+def _seed_exec(exec_id, status="dispatched", task_id=77, started_at=None):
+    # Issue #1546: fallback reverse lookup requires exec.started_at <= task.created_at
+    # and the young-grace guard needs an aged execution, so seed a past start time.
+    _started = started_at or _iso(_utcnow() - timedelta(hours=1))
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM autopilot_executions WHERE id=?", (exec_id,))
         c.execute(
-            "INSERT INTO autopilot_executions (id, task_id, status, a2a_seq) VALUES (?,?,?,?)",
-            (exec_id, task_id, status, exec_id))
+            "INSERT INTO autopilot_executions (id, task_id, status, a2a_seq, started_at, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (exec_id, task_id, status, exec_id, _started, _started))
         db.commit()
 
 
