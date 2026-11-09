@@ -555,13 +555,12 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
 
     # env_extra
     repository = evt.get("repository", "")
-    from src.repo_key import split_owner_repo as _sor
-    from src.repo_key import from_repo_key as _frk
-    _owner, _repo_name = _sor(repository)
+    # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME 派生（缺失回退 repo_key），
+    # 禁止以触发人账号充当 REPO_OWNER；REPO_FULL_NAME 归一（剥 provider 前缀）供 runbook 拼 URL。
+    from src.repo_key import derive_repo_identity as _derive
+    _full_name, _owner, _repo_name = _derive(repository, repo_key)
     env_extra = {
-        # Issue #721: REPO_FULL_NAME 归一（剥 provider 前缀），保证下游 runbook
-        # clone URL（https://gitcode.com/$REPO_FULL_NAME.git）拼接正确；无前缀幂等。
-        "REPO_FULL_NAME": _frk(repository) or repository,
+        "REPO_FULL_NAME": _full_name,
         "REPO_OWNER": _owner,
         "REPO_NAME": _repo_name,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
@@ -3819,12 +3818,12 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         return
 
     from src.prompt_builder import resolve_task_server_env
-    from src.repo_key import split_owner_repo as _sor2
-    from src.repo_key import from_repo_key as _frk2
-    _owner2, _repo_name2 = _sor2(repository)
+    # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key 并告警），
+    # REPO_FULL_NAME 归一（剥 provider 前缀）与 owner/name 同源口径。
+    from src.repo_key import derive_repo_identity as _derive2
+    _full_name2, _owner2, _repo_name2 = _derive2(repository, repo_key)
     env_extra = {
-        # Issue #721: REPO_FULL_NAME 归一（剥 provider 前缀），与 REPO_OWNER/REPO_NAME 口径一致。
-        "REPO_FULL_NAME": _frk2(repository) or repository,
+        "REPO_FULL_NAME": _full_name2,
         "REPO_OWNER": _owner2,
         "REPO_NAME": _repo_name2,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
@@ -4087,9 +4086,12 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     import json as _json
     env = {}
     # ── 仓库/服务地址基础四项 ──
-    from src.repo_key import split_owner_repo as _sor
-    _owner, _repo_name = _sor(repo_key)
-    env["REPO_FULL_NAME"] = _repo_name and f"{_owner}/{_repo_name}" or repo_key
+    # Issue #1660：REPO_FULL_NAME/OWNER/NAME 统一由派生入口产出；重派只有 repo_key，
+    # 以其无前缀全名作为 REPO_FULL_NAME 事实源（不再出现 REPO_NAME 为空却回退带前缀全名）。
+    from src.repo_key import derive_repo_identity as _derive_env
+    from src.repo_key import from_repo_key as _from_rk_env
+    _full_name, _owner, _repo_name = _derive_env(_from_rk_env(repo_key), repo_key)
+    env["REPO_FULL_NAME"] = _full_name or repo_key
     env["REPO_OWNER"] = _owner
     env["REPO_NAME"] = _repo_name
     env["ACCOUNT"] = account
