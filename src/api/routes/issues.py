@@ -23,7 +23,7 @@ from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
-                                   _find_github_mirror_repo_key)
+                                   _read_issue_status, _find_github_mirror_repo_key)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -1841,28 +1841,44 @@ class _ReviewRejectBody(BaseModel):
     reason: str = ""
 
 
+def _review_outcome(_out: str) -> tuple:
+    """拆分内部审核结果码为 (result, reason)。
+
+    Issue #1599：`result` 保留旧字符串语义（`noop` / `rejected_*` / `passed_*`）兼容现有消费方；
+    `noop:<reason>` 拆出机器可读原因码（already_target/terminal/not_pending_review/error）。
+    """
+    if _out.startswith("noop"):
+        _reason = _out.split(":", 1)[1] if ":" in _out else "not_pending_review"
+        return "noop", _reason
+    return _out, ""
+
+
 @router.post("/{issue_id}/review-pass", operation_id="issues_review-pass",
              summary="Agent decides review passed",
-             description="Agent 判定用户已通过审核：pending_review → processing（继续）；target=done → completed+stage=done（合入/收尾）。Session-only (tk_)，repo 匹配，devops agent。")
+             description="Agent 判定用户已通过审核：pending_review → processing（继续）；target=done → completed+stage=done（合入/收尾）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review），不再回显名义 status 冒充成功。Session-only (tk_)，repo 匹配，devops agent。")
 async def issue_review_pass(issue_id: int, body: _ReviewPassBody,
                             user: dict = Depends(get_current_user_or_api_key)):
     it = _session_devops_issue(issue_id, user)
     _out = _review_pass(it["repo_key"], it["issue_number"],
                         target=body.target or "processing", evidence=body.evidence or "")
-    return {"ok": True, "issue_id": it["id"], "status": "completed" if _out == "passed_done" else ("processing" if _out == "passed_processing" else "pending_review"),
-            "result": _out}
+    _result, _reason = _review_outcome(_out)
+    _st = _read_issue_status(it["repo_key"], it["issue_number"]) or it["status"]
+    return {"ok": True, "issue_id": it["id"], "status": _st,
+            "changed": _result != "noop", "result": _result, "reason": _reason}
 
 
 @router.post("/{issue_id}/review-reject", operation_id="issues_review-reject",
              summary="Agent decides review rejected",
-             description="Agent 判定用户未通过审核：pending_review → processing（打回）或 awaiting_input（转澄清）。Session-only (tk_)，repo 匹配，devops agent。")
+             description="Agent 判定用户未通过审核：仅 pending_review → processing（打回）或 awaiting_input（转澄清）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review）。noop 排查：`grape issues detail --json-out` 查看 issue_task_status。Session-only (tk_)，repo 匹配，devops agent。")
 async def issue_review_reject(issue_id: int, body: _ReviewRejectBody,
                               user: dict = Depends(get_current_user_or_api_key)):
     it = _session_devops_issue(issue_id, user)
     _out = _review_reject(it["repo_key"], it["issue_number"],
                           target=body.target or "processing", reason=body.reason or "")
-    _st = "awaiting_input" if _out == "rejected_awaiting_input" else ("processing" if _out == "rejected_processing" else "pending_review")
-    return {"ok": True, "issue_id": it["id"], "status": _st, "result": _out}
+    _result, _reason = _review_outcome(_out)
+    _st = _read_issue_status(it["repo_key"], it["issue_number"]) or it["status"]
+    return {"ok": True, "issue_id": it["id"], "status": _st,
+            "changed": _result != "noop", "result": _result, "reason": _reason}
 
 
 class _IssueClarifyBody(BaseModel):

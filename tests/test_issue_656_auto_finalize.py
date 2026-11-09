@@ -126,7 +126,13 @@ def test_running_event_noop():
 
 def test_pending_review_status_not_auto_finalized():
     from src.api.issues_center import auto_finalize_issue_on_last_node
-    _seed(status="pending_review", stage="sre")
+    # Issue #1599：set_issue_stage 推进阶段时会清理 pending_review 漂移，
+    # 此用例直接构造「stage=sre + status=pending_review」的显式待审核行，验证自动结单守卫。
+    _seed(status="processing", stage="sre")
+    with db_lock:
+        db.cursor().execute("UPDATE issue SET status='pending_review' "
+                            "WHERE repo_key=? AND issue_number=?", (_REPO, _NUM))
+        db.commit()
     _seed_events(_ALL_COMPLETED)
     with patch("src.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")

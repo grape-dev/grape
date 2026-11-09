@@ -522,6 +522,17 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         return c.rowcount
 
 
+# 进入 pending_review 时可能写入的哨兵 owner_agent（非真实流水线节点）；
+# resume 回落 stage 时不能直接采用，避免阶段取值非法。
+_RESUME_STAGE_SENTINELS = ("", "bot_takeover", "issue_closed", "pending_review")
+
+
+def _resume_stage(owner_agent: str) -> str:
+    """pending_review 恢复到哪个阶段：真实节点用 owner_agent，哨兵回落到默认首节点 issue。"""
+    _owner = (owner_agent or "").strip()
+    return "issue" if _owner in _RESUME_STAGE_SENTINELS else _owner
+
+
 def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
 
@@ -529,16 +540,30 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     - webhook `issue_comment` 自动恢复（非 bot 用户评论）；
     - `issues clarify` / Agent 显式续接。
     仅当 issue 正处于 `awaiting_input` 或 `pending_review` 时翻回，返回是否真正翻转（幂等、可观测）。
+
+    Issue #1599（审核态漂移收敛）：翻转 status 时同步把 `stage=pending_review` 回落到
+    `owner_agent`，避免库内 `status=processing` 但 `stage` 仍停在 pending_review，
+    导致展示态继续显示「待审核」而 review-reject 必然 noop。
     """
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
+                "SELECT stage, owner_agent FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            _row = c.fetchone()
+            _stage = ((_row[0] if _row else "") or "").strip()
+            _owner = ((_row[1] if _row else "") or "").strip()
+            c.execute(
                 "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('awaiting_input','pending_review')",
                 (repo_key, issue_number))
-            db.commit()
             _changed = c.rowcount > 0
+            if _changed and _stage == "pending_review":
+                c.execute(
+                    "UPDATE issue SET stage=? WHERE repo_key=? AND issue_number=?",
+                    (_resume_stage(_owner), repo_key, issue_number))
+            db.commit()
         if _changed:
             log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing")
         return _changed
@@ -611,6 +636,43 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
             log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
         log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
     return _changed
+
+
+# Issue #1599：审核动作未命中原因分类所依赖的终态集合
+_ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
+
+
+def _read_issue_status(repo_key: str, issue_number: int) -> str:
+    """回读 issue 表真实 status（空串 = 无行或回读失败，由调用方兜底）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            _r = c.fetchone()
+        return ((_r[0] if _r else "") or "").strip()
+    except Exception as _e:
+        log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
+        return ""
+
+
+def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) -> str:
+    """审核动作未命中时回读真实 status 并给出机器可读原因码。
+
+    - `noop:already_target`：已处于目标态（幂等，无需变更）；
+    - `noop:terminal`：已完成/已取消，不可再变更；
+    - `noop:not_pending_review`：前置态不符（如 awaiting_input/active）；
+    - `noop:error`：回读失败（无行/DB 异常）。
+    """
+    _cur = _read_issue_status(repo_key, issue_number)
+    if not _cur:
+        return "noop:error"
+    if _cur == target_status:
+        return "noop:already_target"
+    if _cur in _ISSUE_TERMINAL_STATUSES:
+        return "noop:terminal"
+    return "noop:not_pending_review"
 
 
 # Issue #656: 自动结单完成原因（区别于 review_passed/user_confirmed 人工确认路径）
@@ -884,7 +946,8 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
       如 PR 已合入但需求卡 active → 原路径 noop）。防中间节点误终态：非末节点仍仅 pending_review 可退出。
     - target=processing：仅 pending_review → processing（继续流水线）；末节点触达则归一 done
       （review-pass-last-node-force-done-design.md，无下游可续）。
-    - 非命中 → noop。
+    - 未命中 → `noop:already_target|terminal|not_pending_review|error`（Issue #1599：
+      回读真实 status 后分类，调用方据此给出 changed=false + 真实 status + 原因码）。
     """
     try:
         if target == "done":
@@ -893,16 +956,19 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                 if _complete_issue_done(repo_key, issue_number, evidence,
                                         ("pending_review", "active", "processing", "awaiting_input")):
                     return "passed_done"
-                return "noop"
+                return _review_noop_reason(repo_key, issue_number, "completed")
             # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
-            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
-                                                          ("pending_review",)) else "noop"
+            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",)):
+                return "passed_done"
+            return _review_noop_reason(repo_key, issue_number, "completed")
         if _is_last_stage_node(repo_key, issue_number):
             # 末节点 + processing → 归一 done（无下游可续）
             log.info(f"Issue review-pass normalized last-node target=processing→done: "
                      f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
-            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
-                                                          ("pending_review", "active", "processing", "awaiting_input")) else "noop"
+            if _complete_issue_done(repo_key, issue_number, evidence,
+                                    ("pending_review", "active", "processing", "awaiting_input")):
+                return "passed_done"
+            return _review_noop_reason(repo_key, issue_number, "completed")
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -914,15 +980,20 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
         if _changed:
             log.info(f"Issue review-pass(processing): {repo_key}/#{issue_number} evidence={evidence[:60]}")
             return "passed_processing"
-        return "noop"
+        return _review_noop_reason(repo_key, issue_number, "processing")
     except Exception as _e:
         log.warning(f"review_pass failed {repo_key}/#{issue_number}: {_e}")
-        return "noop"
+        return "noop:error"
 
 
 def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
                    reason: str = "") -> str:
-    """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。"""
+    """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。
+
+    返回 `rejected_processing|rejected_awaiting_input`（命中）；未命中返回
+    `noop:already_target|terminal|not_pending_review|error`（Issue #1599：回读真实 status 分类，
+    不再以 `noop` 冒充 `status=pending_review`）。
+    """
     try:
         _t = target if target in ("processing", "awaiting_input") else "processing"
         with db_lock:
@@ -936,10 +1007,10 @@ def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
         if _changed:
             log.info(f"Issue review-reject({_t}): {repo_key}/#{issue_number} reason={reason[:60]}")
             return f"rejected_{_t}"
-        return "noop"
+        return _review_noop_reason(repo_key, issue_number, _t)
     except Exception as _e:
         log.warning(f"review_reject failed {repo_key}/#{issue_number}: {_e}")
-        return "noop"
+        return "noop:error"
 
 
 def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:

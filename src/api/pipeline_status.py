@@ -117,7 +117,11 @@ def derive_review_status(stage, task_status):
     """由需求级 stage（issue/issue_state.stage）与 task_status（issue.status）
     推导需求级业务状态。规则（优先级从高到低）：
 
-    1. pending_review（stage 或 task_status 任一命中）→ 待人工确认；
+    Issue #1599（审核态漂移收敛，方案 A）：**以 task_status 为唯一事实源**判定
+    pending_review，`stage=pending_review` 不再单独判待审核——避免 resume 后
+    status=processing 而 stage 残留 pending_review 时页面仍显示「待审核」。
+
+    1. task_status=pending_review → 待人工确认；
     2. task_status=cancelled → 已取消；
     3. task_status=completed 或 stage=done → 需求已完成（含生产发布完成）；
     4. task_status=awaiting_input → 等待用户澄清；
@@ -126,7 +130,7 @@ def derive_review_status(stage, task_status):
     """
     stage = (stage or "").strip()
     task_status = (task_status or "").strip()
-    if "pending_review" in (stage, task_status):
+    if task_status == "pending_review":
         return REVIEW_STATUS_PENDING_REVIEW
     if task_status == "cancelled":
         return REVIEW_STATUS_CANCELLED

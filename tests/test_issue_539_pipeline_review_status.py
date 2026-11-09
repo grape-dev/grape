@@ -153,7 +153,11 @@ class TestDeriveReviewStatus:
         from src.api.pipeline_status import derive_review_status
         assert derive_review_status("pending_review", "pending_review") == "pending_review"
         assert derive_review_status("sre", "pending_review") == "pending_review"
-        assert derive_review_status("pending_review", "") == "pending_review"
+        # Issue #1599：status 为唯一事实源，stage=pending_review 不再单独判待审核
+        assert derive_review_status("pending_review", "") == "in_progress"
+        assert derive_review_status("pending_review", "processing") == "in_progress"
+        assert derive_review_status("pending_review", "awaiting_input") == "awaiting_input"
+        assert derive_review_status("pending_review", "completed") == "completed"
 
     def test_completed(self):
         from src.api.pipeline_status import derive_review_status

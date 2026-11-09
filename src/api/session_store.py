@@ -162,7 +162,10 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     from src.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
-    # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled/pending_review）
+    # Issue #85: stage 推进时同步 task.status（仅终态不覆盖）
+    # Issue #1599（审核态漂移收敛）：不再把 pending_review/awaiting_input 排除在同步之外——
+    # 阶段已推进却将 status 留在 pending_review 会形成幽灵审核点（展示态与 issue.status 矛盾）。
+    # 终态 completed/cancelled 仍保留，避免被阶段写入翻活。
     _STAGE_TO_TASK_STATUS = {
         "vod": "processing", "issue": "processing", "coding": "processing",
         "qa": "processing", "sre": "processing",
@@ -177,7 +180,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 _c.execute(
                     "UPDATE issue SET status=? "
                     "WHERE repo_key=? AND issue_number=? "
-                    "AND status NOT IN ('completed','cancelled','awaiting_input','pending_review')",
+                    "AND status NOT IN ('completed','cancelled')",
                     (_task_status, repo_key, _issue_num))
                 db.commit()
         except Exception as _e:
