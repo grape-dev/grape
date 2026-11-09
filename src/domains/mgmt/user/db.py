@@ -21,11 +21,11 @@ def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: s
     """延迟绑定 apply_runtime_state（Issue #1496）。
 
     src/runtime/service.py 反向 import 本模块（get_task_token），模块级
-    `from src.runtime.health import apply_runtime_state` 会形成
+    `from src.domains.runtime.engine.health import apply_runtime_state` 会形成
     user.db → runtime.health → runtime/__init__ → service → user.db 环；
     运行期（调用点）再解析则无环。
     """
-    from src.runtime.health import apply_runtime_state
+    from src.domains.runtime.engine.health import apply_runtime_state
     apply_runtime_state(c, runtime_id, status, last_seen_at)
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）

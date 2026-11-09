@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-import src.runtime.branch_guard as bg
+import src.domains.runtime.engine.branch_guard as bg
 from src.session_manager import db, db_lock
 
 RK = "gitcode:prune993/repo"
@@ -74,7 +74,7 @@ def test_prune_disabled_by_non_positive_days():
 
 
 def test_sweeper_helper_calls_prune(monkeypatch):
-    import src.runtime.cleanup as cleanup
+    import src.domains.runtime.engine.cleanup as cleanup
     monkeypatch.setattr(bg, "prune_guard_state", lambda days=90: 7)
     assert cleanup._sweep_branch_guard_state() == 7
 

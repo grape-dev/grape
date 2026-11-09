@@ -16,7 +16,7 @@ Python `datetime.now(timezone.utc).isoformat()` 生成（T 分隔、带微秒、
 修法（Spec 拍板）：SQL 仅按 task_id（idx_task_messages_task 索引列）过滤取
 created_at，**禁止在 SQL 里对 created_at 施任何函数运算**（4.8M 行表、索引不可
 退化）；取回后 Python 侧宽容解析为 epoch，与 `now - window` 做数值比较。解析口径
-复用 `src.runtime.health.parse_dt`（与 service._epoch_of / scheduler 判死扫描同源）：
+复用 `src.domains.runtime.engine.health.parse_dt`（与 service._epoch_of / scheduler 判死扫描同源）：
 - ISO 带微秒/无微秒、带 +00:00/Z 后缀均可解析；
 - 空格分隔 naive 串按双后端语义解析（mysql=CST(+08:00) 墙钟、sqlite=UTC），
   与存储层归一口径（Issue #512）一致；
@@ -51,7 +51,7 @@ def _epoch_of(value) -> float | None:
     if not value:
         return None
     try:
-        from src.runtime.health import parse_dt
+        from src.domains.runtime.engine.health import parse_dt
         _v = parse_dt(value)
         return float(_v) if _v is not None else None
     except Exception:

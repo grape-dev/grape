@@ -29,7 +29,7 @@ ROOT = None  # pytest.ini pythonpath=src；conftest 已引导 ROOT
 @pytest.fixture()
 def setup_db(monkeypatch):
     """内存 SQLite 双表最小环境：替换 svc/rt/session_manager 的 db/db_lock。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     import src.api.routes.runtime as rt
     # event_store 必须同批替换：claim 回收的 force-fail 分支与 recover-orphans 判死
     # 回写都会函数内 from src.api.event_store import update_event_complete——该模块
@@ -168,7 +168,7 @@ class TestClaimBackstopFormat:
 
         旧字节比较下该任务会被回炉 attempts+1（本用例红）。
         """
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (701, 'codex', 'online', 1, 0, 4)")
@@ -184,7 +184,7 @@ class TestClaimBackstopFormat:
 
     def test_no_microsecond_iso_message_blocks_claim_backstop(self, setup_db):
         """dispatched 超时但无微秒 ISO 消息在 600s 窗口内 → 不回收（同秒窗口塌陷修复）。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (702, 'codex', 'online', 1, 0, 4)")
@@ -201,7 +201,7 @@ class TestClaimBackstopFormat:
 
     def test_dead_task_with_only_stale_messages_recovered_on_claim(self, setup_db):
         """真死任务：消息存在但全部在 600s 窗外 → claim 照常回收（不因 helper 漏回收）。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (703, 'codex', 'online', 1, 0, 4)")
@@ -226,14 +226,14 @@ class TestClaimBackstopFormat:
 class TestWindowConstants:
     def test_constants_single_source(self):
         """600/1200 收敛为 task_activity 具名常量，两调用点引用同一来源。"""
-        from src.runtime import task_activity
+        from src.domains.runtime.engine import task_activity
         assert task_activity.CLAIM_ACTIVITY_WINDOW_SECONDS == 600
         assert task_activity.RECOVER_ORPHANS_ACTIVITY_WINDOW_SECONDS == 1200
 
     def test_recover_orphans_uses_task_activity_window(self, setup_db, monkeypatch):
         """recover_orphans 活跃窗口随 task_activity 常量联动（不再各自拼字面量）。"""
         from src.api.routes.runtime import runtime_recover_orphans
-        from src.runtime import task_activity
+        from src.domains.runtime.engine import task_activity
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (604, 'codex', 'online', 1, 1, 4)")
@@ -263,7 +263,7 @@ def test_sqlite_default_created_at_parses_as_utc_now():
     conn.execute("INSERT INTO m (id) VALUES (1)")
     ts = conn.execute("SELECT created_at FROM m WHERE id=1").fetchone()[0]
     conn.close()
-    from src.runtime.health import parse_dt
+    from src.domains.runtime.engine.health import parse_dt
     epoch = parse_dt(ts)
     assert epoch is not None, f"SQLite 默认值不可解析: {ts!r}"
     assert abs(_time.time() - epoch) < 60, f"SQLite 默认值与当前时间偏差过大: {ts!r}"

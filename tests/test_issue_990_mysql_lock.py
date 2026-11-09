@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-import src.runtime.service as svc
+import src.domains.runtime.engine.service as svc
 
 
 class _Cursor:

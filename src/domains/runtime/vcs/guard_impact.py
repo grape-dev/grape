@@ -15,8 +15,8 @@ import base64
 import fnmatch
 import re
 
-from src.config import log
-from src.repo_key import parse_repo_key
+from src.kernel.config import log
+from src.kernel.repo_key import parse_repo_key
 
 # 守卫脚本目录与文件名模式（只扫脚本目录，避免整仓遍历）
 GUARD_DIRS = ("scripts", "tests")

@@ -56,7 +56,7 @@ class TestMachineHealthUnknownRuntime404:
 
     def test_unknown_runtime_404(self, client):
         """不存在 runtime_id → 404 + 统一错误结构，不再回退全量列表。"""
-        with patch("src.runtime.health_scorer.get_health_score") as m:
+        with patch("src.domains.runtime.engine.health_scorer.get_health_score") as m:
             r = client.get("/api/runtime/admin/machine-health/999999")
         assert r.status_code == 404, r.text
         assert m.await_count if hasattr(m, "await_count") else m.called is False

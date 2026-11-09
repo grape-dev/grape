@@ -18,7 +18,7 @@ import pytest
 def setup_db(monkeypatch):
     """独立测试库（同 test_issue_253 布局）。"""
     import sqlite3
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
 
     test_db = sqlite3.connect(":memory:", check_same_thread=False)
     test_db.execute("PRAGMA foreign_keys=OFF")
@@ -103,7 +103,7 @@ def _mk_engine(c, rid, name, *, status="online", healthy=1, installed=1, cred=0,
 
 def test_a_cred0_stale_heartbeat_still_reachable(setup_db):
     """cred0 引擎 last_seen_at 超 100s 阈值 → 仍可达（Issue #1487 验收 1）。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 1, "local-opencode", cred=0, seen=_ts(400))
     setup_db.commit()
@@ -113,7 +113,7 @@ def test_a_cred0_stale_heartbeat_still_reachable(setup_db):
 
 def test_a_cred0_empty_heartbeat_still_reachable(setup_db):
     """cred0 引擎 last_seen_at 为空（启动 600s 窗口）→ 仍可达。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 1, "local-opencode", cred=0, seen=None)
     setup_db.commit()
@@ -123,7 +123,7 @@ def test_a_cred0_empty_heartbeat_still_reachable(setup_db):
 
 def test_a_cred0_not_installed_unreachable(setup_db):
     """cred0 installed=0 → 不可达（_health_ok 口径：installed+healthy）。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 1, "local-opencode", cred=0, installed=0)
     setup_db.commit()
@@ -133,7 +133,7 @@ def test_a_cred0_not_installed_unreachable(setup_db):
 
 def test_a_cred0_unhealthy_unreachable(setup_db):
     """cred0 healthy=0 → 不可达。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 1, "local-opencode", cred=0, healthy=0)
     setup_db.commit()
@@ -146,10 +146,10 @@ def test_a_cred0_status_is_not_part_of_yardstick(setup_db):
 
     Issue #1487 返工：原实现 cred0 仍要求 status=='online'，而派发侧 _health_ok 只看
     installed+healthy → 两把尺子在 status 维度继续打架（实测 claim=False / dispatch=True）。
-    统一到 src.runtime.health.engine_health_ok 后两侧一致：本机引擎行 status 只是探测副产物。
+    统一到 src.domains.runtime.engine.health.engine_health_ok 后两侧一致：本机引擎行 status 只是探测副产物。
     """
-    from src.runtime import service as svc
-    from src.runtime.engine_select import _health_ok
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.engine.engine_select import _health_ok
     c = setup_db
     _mk_engine(c, 1, "local-opencode", cred=0, status="offline", healthy=1, installed=1)
     setup_db.commit()
@@ -165,7 +165,7 @@ def test_a_cred0_status_is_not_part_of_yardstick(setup_db):
 
 def test_a_remote_stale_heartbeat_still_unreachable(setup_db):
     """cred>0 远端引擎心跳过期 → 仍不可达（Issue #253 行为不变，验收 3）。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 2, "remote-worker", cred=63, seen=_ts(400))
     setup_db.commit()
@@ -177,7 +177,7 @@ def test_a_remote_stale_heartbeat_still_unreachable(setup_db):
 
 def test_c_claim_pool_all_unreachable_keeps_queued(setup_db):
     """池外引擎认领时池内全不可达 → 任务保持 queued（不再直接 failed）。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     # 池内：远端 codex 心跳过期（cred>0，不可达）
     _mk_engine(c, 10907, "codex", cred=63, seen=_ts(400), tag="coding", cap_tag="coding")
@@ -203,7 +203,7 @@ def test_c_claim_pool_all_unreachable_keeps_queued(setup_db):
 
 def test_d_fail_message_classifies_four_reasons(setup_db):
     """离线/心跳过期/无对应标签能力/scope 不匹配 → 文案分别含对应关键字。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 11, "eng-offline", cred=64, status="offline")
     _mk_engine(c, 12, "eng-stale", cred=65, seen=_ts(400))
@@ -227,7 +227,7 @@ def test_d_fail_message_classifies_four_reasons(setup_db):
 
 def test_d_cred0_uninstalled_classified_offline(setup_db):
     """cred0 installed=0 归入离线类（心跳豁免口径下唯一可能的本机不可达形态）。"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 21, "local-broken", cred=0, installed=0)
     c.execute("INSERT INTO agent_tasks (id, status, pool_tag, created_at) "
@@ -259,9 +259,9 @@ PARITY_CASES = [
 
 def test_a_claim_and_dispatch_share_one_yardstick(setup_db):
     """认领侧 _check_pool_engines_reachable 与派发侧 _health_ok 必须逐例一致（Issue #1487 返工）。"""
-    from src.runtime import service as svc
-    from src.runtime.engine_select import _health_ok
-    from src.runtime.health import parse_dt
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.engine.engine_select import _health_ok
+    from src.domains.runtime.engine.health import parse_dt
     c = setup_db
     rid = 100
     for desc, cred, status, healthy, installed, ago, want in PARITY_CASES:
@@ -289,8 +289,8 @@ def test_a_claim_and_dispatch_share_one_yardstick(setup_db):
 
 def test_a_remote_probe_gate_is_claim_only(setup_db):
     """文档化差异：probe 异常只在认领侧生效（既有口径，Issue #1487 未改），不是回归。"""
-    from src.runtime import service as svc
-    from src.runtime.engine_select import _health_ok
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.engine.engine_select import _health_ok
     c = setup_db
     _mk_engine(c, 201, "remote-probe-err", cred=63, seen=_ts(5), probe="error", tag="all")
     setup_db.commit()
@@ -318,8 +318,8 @@ def test_c_stale_queued_healthy_by_score_but_unreachable_fails(setup_db, monkeyp
     实测缺陷复现（2026-11-08 真机）：claim 侧不再判死后，本分支被
     _check_pool_has_healthy 提前 continue，任务永远停在 queued。
     """
-    from src.runtime import service as svc
-    import src.runtime.health_scorer as hs
+    from src.domains.runtime.engine import service as svc
+    import src.domains.runtime.engine.health_scorer as hs
     monkeypatch.setattr(hs, "is_healthy", lambda eid: True, raising=False)
     c = setup_db
     _mk_engine(c, 301, "eng-notag", cred=0, tag=None, cap_tag="other")
@@ -336,8 +336,8 @@ def test_c_stale_queued_healthy_by_score_but_unreachable_fails(setup_db, monkeyp
 
 def test_c_stale_queued_hard_window_fails_unclaimed_task(setup_db, monkeypatch):
     """健康且可达，但超过硬窗口仍无人认领 → 诚实失败（防永久挂单）。"""
-    from src.runtime import service as svc
-    import src.runtime.health_scorer as hs
+    from src.domains.runtime.engine import service as svc
+    import src.domains.runtime.engine.health_scorer as hs
     monkeypatch.setattr(hs, "is_healthy", lambda eid: True, raising=False)
     c = setup_db
     _mk_engine(c, 401, "eng-ok", cred=0, tag="all")
@@ -359,8 +359,8 @@ def test_c_stale_queued_hard_window_fails_unclaimed_task(setup_db, monkeypatch):
 
 def test_c_stale_queued_reachable_within_hard_window_waits(setup_db, monkeypatch):
     """健康且可达、仍在硬窗口内 → 保持 queued（正常等待引擎认领，不误杀）。"""
-    from src.runtime import service as svc
-    import src.runtime.health_scorer as hs
+    from src.domains.runtime.engine import service as svc
+    import src.domains.runtime.engine.health_scorer as hs
     monkeypatch.setattr(hs, "is_healthy", lambda eid: True, raising=False)
     c = setup_db
     _mk_engine(c, 501, "eng-ok2", cred=0, tag="all")

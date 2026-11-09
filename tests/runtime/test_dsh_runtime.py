@@ -328,11 +328,11 @@ def _run_stream_capture_env(monkeypatch, backend, env_extra):
     fake_popen = _tenv._FakePopen()
     with mock.patch("src.agent.executor.get_backend", return_value=backend), \
          mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
          mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
          mock.patch("src.user.db.get_credentials", return_value=[]):
-        from src.runtime.executor import stream_agent
+        from src.domains.runtime.engine.executor import stream_agent
         list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
             backend_name="fake", account="u", user_id=0, env_extra=env_extra,
@@ -363,11 +363,11 @@ def test_executor_tolerates_backend_without_prepare_env():
     fake_popen = _tenv._FakePopen()
     with mock.patch("src.agent.executor.get_backend", return_value=_PlainBackend()), \
          mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
          mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
          mock.patch("src.user.db.get_credentials", return_value=[]):
-        from src.runtime.executor import stream_agent
+        from src.domains.runtime.engine.executor import stream_agent
         list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
             backend_name="fake", account="u", user_id=0, env_extra={},
@@ -389,11 +389,11 @@ def test_executor_swallows_prepare_env_failure():
     fake_popen = _tenv._FakePopen()
     with mock.patch("src.agent.executor.get_backend", return_value=_BoomBackend()), \
          mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
          mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
          mock.patch("src.user.db.get_credentials", return_value=[]):
-        from src.runtime.executor import stream_agent
+        from src.domains.runtime.engine.executor import stream_agent
         events = list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
             backend_name="fake", account="u", user_id=0, env_extra={},

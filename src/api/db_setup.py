@@ -3295,7 +3295,7 @@ def _fn_backfill_events_terminal_completed_at(conn=None) -> None:
     if _own:
         conn = db
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
     except Exception:
         _is_mysql_backend = lambda: False  # noqa: E731
     _mysql = _is_mysql_backend()
@@ -3358,7 +3358,7 @@ def _fn_backfill_events_terminal_completed_at_1497(conn=None) -> None:
     if _own:
         conn = db
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
     except Exception:
         _is_mysql_backend = lambda: False  # noqa: E731
     _mysql = _is_mysql_backend()
@@ -3887,7 +3887,7 @@ def _migrate_issue_vcs_exists():
     ① 两个补列都传 strict=True，降级算法全失败时直接 raise；
     ② 补完再显式回验列存在，缺一个就 raise —— 印章只在 schema 真落地后才写。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     wanted = {"vcs_exists", "vcs_checked_at"}
     with db_lock:
         c = db.cursor()
@@ -3936,11 +3936,11 @@ def _fn_normalize_legacy_health_column(conn=None) -> int:
     if _own:
         conn = db
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         is_mysql = False
-    from src.runtime.health import derive_runtime_health
+    from src.domains.runtime.engine.health import derive_runtime_health
     import time as _time
 
     def _has_col() -> bool:
@@ -3970,7 +3970,7 @@ def _fn_normalize_legacy_health_column(conn=None) -> int:
             f"WHERE health IS NOT NULL AND health != ''")
         rows = c.fetchall()
         now_ts = _time.time()
-        from src.runtime.health import derive_local_runtime_health
+        from src.domains.runtime.engine.health import derive_local_runtime_health
         for rid, status, last_seen, health, cred, installed, healthy in rows:
             # Issue #1496 返工：本机直连（cred0）按 #592 口径派生（installed+healthy），
             # 不能用远端心跳口径——本机 last_seen 10min 才刷新，套 100s 新鲜度会把健康
@@ -4018,7 +4018,7 @@ def _fn_normalize_task_messages_created_at_default(conn=None) -> int:
     `%%`，默认值退化为常量串（实测）；改用 CONCAT/REPLACE 拼装，表达式中无 `%`。
     """
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         if not _is_mysql_backend():
             return 0
     except Exception:

@@ -15,7 +15,7 @@ from src.vcs.gitlab import GitLabBackend
 from src.vcs.event_types import normalize_files
 from src.vcs.files_enrich import enrich_event_files
 from src.vcs.guard_impact import scan_guard_impact, is_guard_script
-from src.runtime.cleanup import ArtifactScope, clean_issue_artifacts, precheck_issue_artifacts
+from src.domains.runtime.engine.cleanup import ArtifactScope, clean_issue_artifacts, precheck_issue_artifacts
 
 
 def _raw(payload):

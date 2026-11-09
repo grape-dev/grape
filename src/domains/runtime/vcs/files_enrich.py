@@ -11,8 +11,8 @@ diff/files 接口兜底补齐，写入 payload.files，供 QA 增量复核与产
 """
 from __future__ import annotations
 
-from src.config import log
-from src.repo_key import parse_repo_key
+from src.kernel.config import log
+from src.kernel.repo_key import parse_repo_key
 from src.vcs.event_types import (
     FILE_EVENT_TYPES, normalize_files, has_file_changes,
 )

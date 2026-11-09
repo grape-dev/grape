@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 
 import pytest  # noqa: E402
 
-from src.runtime.health import derive_runtime_health  # noqa: E402
+from src.domains.runtime.engine.health import derive_runtime_health  # noqa: E402
 
 _NOW = datetime.now(timezone.utc)
 
@@ -195,7 +195,7 @@ class TestDerivedHealthMatrix:
 class TestApplyRuntimeState:
     def test_apply_writes_status_last_seen_same_txn(self):
         """apply_runtime_state 一次写入 status+last_seen_at（+保留列 health）。"""
-        from src.runtime.health import apply_runtime_state
+        from src.domains.runtime.engine.health import apply_runtime_state
         conn = _legacy_conn()
         rid = conn.execute(
             "SELECT id FROM agent_runtimes WHERE name='engine-23259'").fetchone()[0]
@@ -215,7 +215,7 @@ class TestApplyRuntimeState:
     def test_apply_offline_marks_health_offline(self):
         """offline + 刚刷新的 last_seen_at → 派生口径 recently_lost（对齐唯一真源，
         不再断言旧口径的 'offline'）；关键是 health 与派生值一致，无矛盾行。"""
-        from src.runtime.health import apply_runtime_state
+        from src.domains.runtime.engine.health import apply_runtime_state
         conn = _legacy_conn()
         rid = conn.execute(
             "SELECT id FROM agent_runtimes WHERE name='engine-online-fresh'").fetchone()[0]
@@ -253,7 +253,7 @@ class TestListVsDispatchConvergence:
 
     def test_same_conclusion_for_same_runtime(self):
         """同一 runtime 状态：列表 health 派生 == online ⇔ 派发 _health_ok 为真。"""
-        from src.runtime.engine_select import _health_ok
+        from src.domains.runtime.engine.engine_select import _health_ok
         cases = [
             ("online", _iso(_NOW - timedelta(seconds=10))),   # 真在线
             ("online", _iso(_NOW - timedelta(minutes=20))),   # 心跳超时（recently_lost）
@@ -271,7 +271,7 @@ class TestListVsDispatchConvergence:
 
     def test_contradiction_rows_never_pass_dispatch(self):
         """存量矛盾形态（status=offline + 库内 health=online）不得被派发放行。"""
-        from src.runtime.engine_select import _health_ok
+        from src.domains.runtime.engine.engine_select import _health_ok
         m = self._member("offline", _iso(_NOW - timedelta(seconds=5)))
         assert not _health_ok(m)
 
@@ -299,7 +299,7 @@ class TestCred0DerivedHealth:
 
     def test_apply_runtime_state_cred0_uses_installed_healthy(self):
         """cred0 + installed/healthy 正常 + 心跳 10min 旧 → health 仍为 online（不判失联）。"""
-        from src.runtime.health import apply_runtime_state
+        from src.domains.runtime.engine.health import apply_runtime_state
         conn = _legacy_conn()
         rid = self._add_cred0(conn, status="offline", seen_minutes_ago=10)
         stale_seen = _iso(_NOW - timedelta(minutes=10))
@@ -316,7 +316,7 @@ class TestCred0DerivedHealth:
 
     def test_apply_runtime_state_cred0_not_installed_marks_offline(self):
         """cred0 installed=0 → 派生 offline（本机口径的另一半）。"""
-        from src.runtime.health import apply_runtime_state
+        from src.domains.runtime.engine.health import apply_runtime_state
         conn = _legacy_conn()
         rid = self._add_cred0(conn, status="online", installed=0, healthy=1)
         with conn:

@@ -206,7 +206,7 @@ def test_api_key_created_at_persisted_and_listed():
             "SELECT created_at FROM api_tokens WHERE id=?", (got["id"],)
         ).fetchone()
     assert row[0] not in (None, ""), "created_at 必须落库，否则前端只能显示 —"
-    from src.runtime.health import parse_dt as _pdt
+    from src.domains.runtime.engine.health import parse_dt as _pdt
     _epoch = _pdt(row[0])
     assert _epoch is not None, f"created_at 不可解析：{row[0]!r}"
     assert abs(_epoch - before) <= 5, f"created_at 与当前时间偏差过大：{row[0]!r}"

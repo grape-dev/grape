@@ -153,6 +153,66 @@ def _event_only_openapi_paths(prefixes=("/api/a2a",)) -> dict:
     return merged
 
 
+def _side_process_openapi_paths(router, prefixes) -> dict:
+    """把只注册在其它进程（Event / Worker / Insight）的路由并入契约（仅 schema）。
+
+    四进程拆分后，a2a 只在 Event、runtime 全量路由只在 Worker、/api/obs 只在 Insight，
+    而 CLI 是按 Mgmt 的 /openapi.json 生成命令的 —— 不合并就会出现「端点在跑但命令
+    不存在」（Issue #9427：agent 拿不到 a2a 命令，流水线停在 issue 节点）。
+
+    这里只在临时 app 上生成 schema，按前缀挑出条目补进契约；Mgmt 进程不会因此
+    新增真实端点，管理面「不被业务面 HTTP 调用」的约定不受影响。
+
+    Args:
+        router: 目标进程的 APIRouter
+        prefixes: 需要并入的路径前缀
+    """
+    try:
+        from fastapi import FastAPI
+    except Exception:  # pragma: no cover
+        return {}
+
+    scopes: dict = {}
+    for r in getattr(router, "routes", []) or []:
+        if not isinstance(r, APIRoute):
+            continue
+        sc = token_scope(r)
+        for m in (getattr(r, "methods", None) or set()):
+            if m.lower() in _METHODS:
+                scopes[(_openapi_path(getattr(r, "path", "")), m.lower())] = sc
+
+    sub = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    try:
+        sub.include_router(router)
+        sub_schema = get_openapi(title=sub.title, version=sub.version, routes=sub.routes)
+    except Exception:  # pragma: no cover - 契约合并失败不应影响 /openapi.json
+        return {}, {}
+
+    merged: dict = {}
+    for path, methods in (sub_schema.get("paths") or {}).items():
+        if not any(path.startswith(p) for p in prefixes):
+            continue
+        ops = {}
+        for m, op in methods.items():
+            if m not in _METHODS or not isinstance(op, dict):
+                continue
+            scope = scopes.get((path, m))
+            if not scope:
+                continue  # 非对外认证路由（内部/工具端点）不并入
+            op["security"] = [
+                {"apiKey": []},
+                {"privateKey": []},
+                {"accessToken": []},
+            ]
+            op.setdefault("x-token-scope", scope)
+            ops[m] = op
+        if ops:
+            merged[path] = ops
+    # 子 app 的 components.schemas 必须一起并入，否则 $ref 悬空（CLI/agent 解析不到 body 结构）
+    sub_schemas = dict((sub_schema.get("components", {}) or {}).get("schemas") or {})
+    return merged, sub_schemas
+
+
 def custom_openapi(app):
     """定制 /openapi.json 渲染：注入 securitySchemes + 只保留对外安全路由 + 逐操作 security。"""
     if app.openapi_schema:
@@ -188,10 +248,38 @@ def custom_openapi(app):
                 op["x-token-scope"] = scope
         paths[path] = ops
 
-    # 契约完整性：/api/a2a 只注册在 Event 进程（nginx 同样路由到 Event），
-    # 但 CLI 按本进程 /openapi.json 生成命令 —— 不补进来 agent 就没有 a2a 命令可用。
-    for _p, _ops in _event_only_openapi_paths().items():
-        paths.setdefault(_p, _ops)
+    # 契约完整性（四进程模式）：下列路由只注册在各自进程，但 CLI/agent 按 Mgmt 的
+    # /openapi.json 生成命令 —— 不并入就会出现「端点在跑但命令不存在」。
+    #   · /api/a2a      → Event 进程（Issue #9427：交办命令缺失，流水线停在 issue 节点）
+    #   · /api/runtime  → Worker 进程（runtime 全量：标签/别名/接管等用户态操作）
+    #   · /api/obs      → Insight 进程（可观测性 L1 视图）
+    # 仅合并 schema，Mgmt 进程不新增真实端点。
+    def _merge_router(router, prefixes):
+        _paths, _schemas = _side_process_openapi_paths(router, prefixes)
+        for _name, _sch in _schemas.items():
+            schema.setdefault("components", {}).setdefault("schemas", {}).setdefault(_name, _sch)
+        for _p, _ops in _paths.items():
+            existing = paths.get(_p) or {}
+            for _m, _op in _ops.items():
+                existing.setdefault(_m, _op)
+            if existing:
+                paths[_p] = existing
+
+    try:
+        from src.domains.runtime.routes import webhook as _a2a_mod
+        _merge_router(_a2a_mod.router, ("/api/a2a",))
+    except Exception:
+        pass
+    try:
+        from src.domains.runtime.routes import runtime as _runtime_mod
+        _merge_router(_runtime_mod.router, ("/api/runtime",))
+    except Exception:
+        pass
+    try:
+        from src.domains.insight.routes import observability as _obs_mod
+        _merge_router(_obs_mod.router, ("/api/obs",))
+    except Exception:
+        pass
 
     schema["paths"] = paths
     app.openapi_schema = schema

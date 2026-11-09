@@ -5,7 +5,7 @@
 
 参见 docs/weekly-02/issue-49-multi-vcs-extension-design.md §3.1
 """
-from src.config import log
+from src.kernel.config import log
 
 # === Issue 事件 ===
 ISSUE_OPENED    = "issue_opened"

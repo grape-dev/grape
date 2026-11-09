@@ -35,7 +35,7 @@ class _LazyLog:
     """
 
     def __getattr__(self, name):
-        from src.config import log as _log
+        from src.kernel.config import log as _log
         return getattr(_log, name)
 
 
@@ -67,7 +67,7 @@ def lease_key(repo_key: str, head_branch: str) -> str:
 
 def load_lease_state(repo_key: str, head_branch: str) -> dict:
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute(
                 "SELECT expected_remote_sha, pr_number, base_branch, updated_at, "
@@ -99,7 +99,7 @@ def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
     state["head_branch"] = head_branch
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             exists = db.cursor().execute(
                 "SELECT 1 FROM branch_guard_state WHERE repo_key=? AND head_branch=?",
@@ -142,7 +142,7 @@ def prune_guard_state(older_than_days: int = 90) -> int:
         return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -211,7 +211,7 @@ def reconcile_pending(repo_key: str, head_branch: str, remote_sha: str) -> str:
 
 def _peek_holder(lock_key: str) -> tuple[str, int]:
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute(
                 "SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?",
@@ -242,7 +242,7 @@ def acquire_branch_lease(repo_key: str, head_branch: str,
     """获取分支写租约；同 holder 重入视为成功（一次任务内多次 push）。
 
     ``task_id`` 非空时与进程级 holder 组合作为租约 holder 写入 DB，争用提示可直接
-    定位到任务；缺省用进程级 holder（``src.lock._holder``），兼容手工 push 钩子等
+    定位到任务；缺省用进程级 holder（``src.kernel.lock._holder``），兼容手工 push 钩子等
     无任务上下文场景。
     返回 ``{"ok": bool, "lock_key", "holder", "reason", "message", ...}``。
     """
@@ -380,7 +380,7 @@ def guarded_push(repo_key: str, head_branch: str, wt_dir: str, token: str = "",
                 "reason": pre.get("reason", "guard_blocked"),
                 "message": pre.get("message", "")}
     if run_git is None:
-        from src.runtime.repogit import _run_git as run_git
+        from src.domains.runtime.engine.repogit import _run_git as run_git
     r = run_git(["-C", wt_dir, "push", "--no-verify", "origin",
                  f"HEAD:refs/heads/{head_branch}"], token=token, timeout=120)
     if r is None or r.returncode != 0:
@@ -398,7 +398,7 @@ def guarded_push(repo_key: str, head_branch: str, wt_dir: str, token: str = "",
 def resolve_remote_head(repo_key: str, head_branch: str, token: str = "") -> str:
     """``git ls-remote`` 取远端 head sha；失败/不存在返回空串让守卫 fail-open。"""
     try:
-        from src.runtime.repogit import _run_git, clone_url_for
+        from src.domains.runtime.engine.repogit import _run_git, clone_url_for
         r = _run_git(["ls-remote", clone_url_for(repo_key),
                       f"refs/heads/{head_branch}"], token=token, timeout=30)
         if r is None or r.returncode != 0:
@@ -458,7 +458,7 @@ def fetch_pr_state(repo_key: str, head_branch: str, token: str = "") -> dict:
     if not token:
         return _fetch_pr_state_via_grape(repo_key, head_branch)
     try:
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         from src.vcs.api_client import VcsApiClient
         provider, owner, repo = parse_repo_key(repo_key)
         client = VcsApiClient(provider=provider, token=token, owner=owner, repo=repo)
@@ -475,7 +475,7 @@ def fetch_pr_state(repo_key: str, head_branch: str, token: str = "") -> dict:
 def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
     """pre-push 钩子无 VCS token 时，通过 grape CLI（会话 token）查 PR 状态。"""
     try:
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         from src.vcs.api_client import paginate_pages
         provider, owner, repo = parse_repo_key(repo_key)
 
@@ -501,7 +501,7 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
 # ===================== pre-push 钩子 =====================
 
 def _hooks_dir(wt_dir: str) -> str:
-    from src.runtime.repogit import _run_git
+    from src.domains.runtime.engine.repogit import _run_git
     r = _run_git(["-C", wt_dir, "rev-parse", "--git-path", "hooks"], timeout=15)
     if r is None or r.returncode != 0:
         return ""

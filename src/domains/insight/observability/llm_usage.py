@@ -405,7 +405,7 @@ def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
                            for m, t in ranked[:3]]}
     try:
         if runtime_id:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 if _agent_runtimes_has_model_name(c):
