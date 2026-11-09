@@ -339,3 +339,63 @@ class TestSkillScopeAudit:
         with pytest.raises(HTTPException) as ei:
             audit_scene_skill_scope(repo="", limit=200, user={})
         assert ei.value.status_code == 400
+
+
+class TestAuditRouteAndFallback:
+    """R5 路由顺序守卫 + audit 兜底仅针对缺列（QA 判断项）。"""
+
+    def test_audit_route_registered_before_scene_id_route(self):
+        """只读体检为固定路径，必须注册在 /{scene_id} 之前，否则被路径吞掉。"""
+        import inspect
+        from src.api.routes import scenes
+        src = inspect.getsource(scenes)
+        i_audit = src.index('@router.get("/skill-scope-audit"')
+        i_detail = src.index('@router.get("/{scene_id}"')
+        assert i_audit < i_detail, "skill-scope-audit 路由应在 /{scene_id} 之前注册"
+
+    def test_audit_falls_back_only_on_missing_display_name_column(self, monkeypatch):
+        """缺 display_name 列时定向兜底，正常返回体检结果。"""
+        import sqlite3
+        import src.session_manager as sm
+
+        class _FakeCursor:
+            def __init__(self):
+                self._rows = []
+
+            def execute(self, sql, params=None):
+                if "display_name" in sql:
+                    raise sqlite3.OperationalError("no such column: display_name")
+                self._rows = [("sc-old", "old-name", "[]")]
+
+            def fetchall(self):
+                return self._rows
+
+        class _FakeDB:
+            def cursor(self):
+                return _FakeCursor()
+
+        monkeypatch.setattr(sm, "db", _FakeDB())
+        from src.api.routes.scenes import audit_scene_skill_scope
+        result = audit_scene_skill_scope(repo="gitcode:o/r", limit=200, user={})
+        assert result["checked_scenes"] == 1
+        assert result["total_conflicts"] == 0
+
+    def test_audit_propagates_unrelated_db_error(self, monkeypatch):
+        """非缺列 DB 异常不得被吞成空/部分结果，应照常上抛。"""
+        import src.session_manager as sm
+
+        class _FakeCursor:
+            def execute(self, sql, params=None):
+                raise RuntimeError("disk I/O error")
+
+            def fetchall(self):
+                return []
+
+        class _FakeDB:
+            def cursor(self):
+                return _FakeCursor()
+
+        monkeypatch.setattr(sm, "db", _FakeDB())
+        from src.api.routes.scenes import audit_scene_skill_scope
+        with pytest.raises(RuntimeError):
+            audit_scene_skill_scope(repo="gitcode:o/r", limit=200, user={})

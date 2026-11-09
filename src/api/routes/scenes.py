@@ -1663,7 +1663,10 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
                 "WHERE repo_key=? AND is_active=1 ORDER BY id LIMIT ?",
                 (repo_key, limit))
             rows = c.fetchall()
-        except Exception:
+        except Exception as e:
+            # 仅对旧库缺 display_name 列做定向兜底；其余 DB 异常照常上抛，避免被吞成空结果
+            if "no such column" not in str(e).lower():
+                raise
             c.execute(
                 "SELECT scene_id, name, nodes_json FROM devops_pipeline_scene "
                 "WHERE repo_key=? AND is_active=1 ORDER BY id LIMIT ?",
@@ -1679,15 +1682,10 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
         scene_name = display_name or name or scene_id
         for v in _collect_scene_skill_scope_violations(
                 nodes, repo_key, allow_own_user=False):
-            violations.append({
-                "scene_id": scene_id,
-                "scene_name": scene_name,
-                "node_id": v["node_id"],
-                "node_tag": v["node_tag"],
-                "skill": v["skill"],
-                "actual_scope": v["actual_scope"],
-                "expected_scope": v["expected_scope"],
-            })
+            item = _project_scene_scope_violation(v)
+            item["scene_id"] = scene_id
+            item["scene_name"] = scene_name
+            violations.append(item)
             conflict_scenes.add(scene_id)
     return {
         "repo": repo_key,
@@ -2133,6 +2131,15 @@ def _collect_scene_skill_scope_violations(nodes: list, repo_key: str, username: 
     return violations
 
 
+_SCENE_SCOPE_VIOLATION_FIELDS = ("node_id", "node_tag", "skill",
+                                "actual_scope", "expected_scope")
+
+
+def _project_scene_scope_violation(v: dict) -> dict:
+    """对外 violations[] 的唯一裁剪点（Issue #1564）：去掉内部 owner_id 等字段。"""
+    return {k: v[k] for k in _SCENE_SCOPE_VIOLATION_FIELDS}
+
+
 def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id="",
                                 allow_own_user: bool = True, expected_scope: str = "repo"):
     """场景节点技能 scope 校验（Issue #657 / #1564）：冲突时抛 HTTPException(400)。
@@ -2167,10 +2174,7 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
         "skill": _first["skill"],
         "actual_scope": _first["actual_scope"],
         "expected_scope": _first["expected_scope"],
-        "violations": [
-            {k: v[k] for k in ("node_id", "node_tag", "skill", "actual_scope", "expected_scope")}
-            for v in violations
-        ],
+        "violations": [_project_scene_scope_violation(v) for v in violations],
     })
 
 
