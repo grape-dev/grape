@@ -70,7 +70,7 @@ jobs:
           DDL_BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           python3 scripts/check-destructive-ddl.py "$DDL_BASE"
-          python -m pytest tests/atomic/test_issue_536_migrations.py tests/test_check_destructive_ddl.py -v
+          python -m pytest tests/atomic/test_issue_536_migrations.py tests/atomic/test_migration_track_guard.py tests/test_check_destructive_ddl.py -v
       - name: OpenAPI contract endpoint completeness guard (issue #897)
         # Issue #897 P0：契约 v2.2.0 曾被 A 进程子集落盘覆盖，丢失 /api/a2a、
         # /api/tasks/* 等核心工作流端点导致 CLI 命令组不渲染。CI 卡点：

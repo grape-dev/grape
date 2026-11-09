@@ -446,6 +446,48 @@ class TestEnsureColumnAlgorithm:
 
 
 # ---------------------------------------------------------------------------
+# Issue #1412 QA Required · _fn_add_agent_runtimes_model MySQL 分支逐列幂等
+# ---------------------------------------------------------------------------
+
+class TestAgentRuntimesModelMigration:
+    def _run_fn(self, monkeypatch, existing):
+        from src.api import db_setup
+        from src import session_manager
+
+        mdb = MockDB()
+        rows = [(i, col, "text", 0, "", 0) for i, col in enumerate(sorted(existing))]
+        mdb.register("PRAGMA table_info", lambda sql, params: list(rows))
+        monkeypatch.setattr(db_setup, "db", mdb, raising=True)
+        monkeypatch.setattr(db_setup, "db_lock", mdb.lock, raising=True)
+        monkeypatch.setattr(db_setup, "_mysql_backend", lambda: True, raising=False)
+        monkeypatch.setattr(session_manager, "_is_mysql_backend", lambda: True,
+                            raising=False)
+        db_setup._fn_add_agent_runtimes_model()
+        return mdb, [q for q, _ in mdb.cursor().queries if "ALTER TABLE" in q.upper()]
+
+    def test_have2_missing_source_adds_only_missing_column(self, monkeypatch):
+        """have==2（reported_at+name 已存在）→ 只补 model_source，不重复 ALTER。"""
+        mdb, alters = self._run_fn(monkeypatch, {"model_reported_at", "model_name"})
+        assert len(alters) == 1, f"应只补 1 列，实际 {alters}"
+        assert "model_source" in alters[0]
+        assert mdb.committed == 1
+
+    def test_have3_no_alter(self, monkeypatch):
+        """三列齐全 → 不下发任何 ALTER（幂等）。"""
+        _, alters = self._run_fn(monkeypatch,
+                                 {"model_reported_at", "model_name", "model_source"})
+        assert alters == [], f"列已齐全仍 ALTER: {alters}"
+
+    def test_have0_adds_all_columns(self, monkeypatch):
+        """空列 → 三列各补一次。"""
+        _, alters = self._run_fn(monkeypatch, set())
+        assert len(alters) == 3, f"应补 3 列，实际 {alters}"
+        joined = " ".join(alters)
+        for col in ("model_name", "model_source", "model_reported_at"):
+            assert col in joined
+
+
+# ---------------------------------------------------------------------------
 # S3 · lock_wait_timeout + MDL 超时跳过
 # ---------------------------------------------------------------------------
 
