@@ -201,6 +201,19 @@ class TestPolicyModes:
         assert "<!-- grape-auto-comment -->" in captured["body"]
         assert not _suppressed_records(tid)
 
+    def test_clean_truncates_long_plain_text_to_3000(self, monkeypatch):
+        tid = "t_1545_clean_long"
+        _seed_task(tid=tid)
+        long_text = "A" * 3500
+        captured = {}
+        self._post(monkeypatch, captured, long_text, True, "clean", tid)
+        assert "body" in captured, "clean 下正常长文本应照发"
+        assert long_text[:3000] in captured["body"], "clean 纯文本应沿用既有 3000 字截断"
+        assert long_text[:3001] not in captured["body"]
+        assert long_text not in captured["body"]
+        assert "<!-- grape-auto-comment -->" in captured["body"]
+        assert not _suppressed_records(tid)
+
     def test_off_suppresses_structured(self, monkeypatch):
         tid = "t_1545_off_struct"
         _seed_task(tid=tid)

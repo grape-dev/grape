@@ -4521,7 +4521,8 @@ def _apply_agent_result_policy(result_text: str, structured_conclusion: str, pla
         log.info(f"Exec agent: suppress result comment by policy=clean (error text) "
                  f"({repo_key}#{issue_number})")
         return ""
-    return structured_conclusion or plain_text
+    # Issue #1545 B3：无结构化 conclusion 时沿用既有 3000 字截断，避免长正文整段外发。
+    return structured_conclusion or (plain_text or "")[:3000]
 
 
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str,
