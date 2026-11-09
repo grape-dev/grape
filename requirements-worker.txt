@@ -1,16 +1,3 @@
-# Grape worker-side dependencies - only what src.runtime.agent needs
-#
-# worker execution chain (src/runtime/agent.py -> client.py -> executor.py -> opencode.py -> config.py)
-# uses only the Python standard library + aiohttp; no server-side deps (fastapi/uvicorn/paramiko/lark-oapi etc).
-# grape CLI is installed offline with the package (wheels/grape-*.whl); its deps click/httpx are declared
-# here so the offline wheels cover them fully (Issue: _ensure_grape_cli_wheel --no-deps missed deps).
-# Note: binary wheels for the aiohttp chain are bundled for a platform matrix (linux x86_64 /
-# linux aarch64 / win_amd64, see src/worker_package.py WHEEL_PLATFORMS); pip matches the exact
-# platform via wheel tags on offline install, and the install script falls back to the online
-# mirror automatically on platform/python mismatch (see install-worker.sh/ps1).
-# Requires Python >= 3.10 (code uses X | None union syntax); recommended: build venv with python3.12:
-#   python3.12 -m venv .venv && .venv/bin/pip install -r requirements-worker.txt
-aiohttp>=3.9
 bcrypt>=4.0
 click>=8.0
 httpx>=0.24
@@ -26,3 +13,5 @@ httpx>=0.24
 # Chinese Windows GBK): pip's auto_decode falls back to the locale encoding and
 # dies on non-ASCII UTF-8 bytes (UnicodeDecodeError, 2026-11-07 real install
 # failure). Keep every line ASCII.
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http

@@ -376,17 +376,17 @@ class VcsApiClient:
         })
 
     @staticmethod
-    def _do_request(url: str, method: str, data: dict | None = None, headers: dict | None = None) -> dict:
+    def _do_request(url: str, method: str, data: dict | None = None, headers: dict | None = None,
+                    _span_target: str = "") -> dict:
         """执行 HTTP 请求，返回 JSON dict。
 
-        MR-3 移植（2026-11-05，feat/lgtm-fullstack-obs）：外部依赖 span——
-        每次 VCS API 调用展开为 'vcs <host> <path>' client span；
-        span 目标只含 host+path（URL query 里的 access_token 永不进遥测）。
-        OTel 未启用时零开销。
+        _span_target：调用方传入的脱敏目标（provider + path，不含 token/url），
+        用于调用链 span（MR-3）；未传时从 url 提取 path（去 query，防 token 泄漏）。
         """
-        from urllib.parse import urlparse as _up
-        _p = _up(url)
-        _span_target = "%s%s" % (_p.netloc.split(".")[0], _p.path)
+        if not _span_target:
+            from urllib.parse import urlparse as _up
+            _p = _up(url)
+            _span_target = "%s%s" % (_p.netloc.split(".")[0], _p.path)
         from src.observability.otel import external_call_span
         with external_call_span("vcs", _span_target,
                                 {"vcs.method": method, "vcs.path": _span_target}) as _span:
