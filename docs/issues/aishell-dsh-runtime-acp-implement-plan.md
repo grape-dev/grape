@@ -100,6 +100,16 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ⑬ **实体 configs 复制自 example 后必须查占位值**：email.example.json 的示例 SMTP 段（smtp.qq.com/your@qq.com）残留 → is_email_configured() 判 True → R7 注册降级被挡死（页面要求验证码但永远收不到）。部署后必查：`grep -E 'your@|your_smtp|example' configs/*.json | grep -v example`；send-code 应返回 EMAIL_NOT_CONFIGURED；注册页应注入 __EMAIL_CONFIGURED__=false。
 
+### 3.2 Windows 适配踩坑增补（2026-11-07 Windows 真机实证，aishell 0.0.2 + grape win 适配）
+
+⑭ **aishell CLI 在 Windows 无 PATH 无 exe**：唯一入口是桌面安装内 `resources\runtime\cli\bin\aishell.cmd`（ELECTRON_RUN_AS_NODE=1 启动器，DSH_HOME 钉 `%USERPROFILE%\.aishell`，对齐 Linux 启动器）。发现链必须落 `_ENGINE_WINDOWS_PATHS["aishell"]` 兜底（§2.1 #9 的 Windows 对称）——未启动过桌面的机器用户 PATH 无该目录。`.cmd` 形态**不命中 issue #351 多行截断雷**：ACP 模式 argv 只有 `["acp"]`，prompt 走 stdin 不经 cmd 壳（find_cli 实测命中 + `--version` 0.0.2 通过）。
+
+⑮ **探活/会话 cwd 不得写死 `/tmp`**：Windows 无此目录，且报错错位——session/new 正常返回，到 prompt 才报 `working-directory: directory does not exist: "/tmp"`，易误判成模型/凭据问题。解法 `tempfile.gettempdir()`（跨平台）。同修：探活延迟单位统一为秒（曾以 ms 混进 `{latency}s` 日志打出 `29994s`）。
+
+⑯ **subprocess 捕获必须固定 `encoding="utf-8", errors="replace"`**：Windows 控制台/子进程可能输出 GBK（0xC0 起），strict utf-8 reader 线程抛 UnicodeDecodeError，且调用方 `stderr` 读成 None——报错只剩 `exit=127\nNone`，极难排查（templates 自动同步实证；与 f4dc10289 的 pip GBK 崩溃同族）。
+
+⑰ **模型凭据可全自包含，无需平台注入 env**：apiKeyEnv 的解析链为 credentials store → 进程 env → `<cwd>/.env` → **`$DSH_HOME/.env`**；Windows DSH_HOME 钉 `%USERPROFILE%\.aishell`，key 写 `~/.aishell/.env`（`<REF_NAME>=<key>`）即自包含——grape 服务不加载 .env 也能跑通探活与任务（无注入实测 probe ok）。自建 provider 配置行 id 为 `llm-pi-ai`（`providers: {<name>: {apiKeyEnv, api, baseURL, models}}`，api 取 openai-completions/openai-responses/anthropic-messages）；默认路由须同时改 `acp` 与 `agent-default-model` 两行，漏一行则 session/options 与实际路由不一致。
+
 ## 4. 一期验收（三阶段，页面端到端）
 
 前置：测试项目仓库，worker 上旧 AI Shell(hwcloud) 与新 aishell 并存——全程「新旧对照」，旧行为逐字不变才算过。
