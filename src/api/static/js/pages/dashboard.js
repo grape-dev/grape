@@ -1728,7 +1728,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
       if (_viols.length) {
         window._sceneNodeViolations = _indexScopeViolations(_viols);
         if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
-        app.showToast((e.detail && e.detail.message) || I18N.t('dashboard.skill_scope_mismatch') || '技能 scope 不匹配，请修正标红节点');
+        app.showToast((e.detail && e.detail.message) || I18N.t('dashboard.skill_scope_mismatch', null, '技能 scope 不匹配，请修正标红节点'));
         return;
       }
       app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)}));
@@ -1775,7 +1775,7 @@ function _scopeViolationHint(v) {
   var skill = _skillEsc(v.skill || '');
   var actual = _skillEsc(v.actual_scope || '');
   var expected = _skillEsc(v.expected_scope || 'repo');
-  return (I18N.t('dashboard.skill_scope_mismatch') || '技能 scope 不匹配') +
+  return I18N.t('dashboard.skill_scope_mismatch', null, '技能 scope 不匹配') +
     '：' + skill + '（' + actual + ' → ' + expected + '）';
 }
 
@@ -2494,7 +2494,7 @@ function _enterCreateStandardMode(data, owner, name) {
         window._sceneNodeViolations = _indexScopeViolations(_viols);
         var _fc2 = document.getElementById('flowCardsContainer');
         if (_fc2) _fc2.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
-        app.showToast((e.detail && e.detail.message) || I18N.t('dashboard.skill_scope_mismatch') || '技能 scope 不匹配，请修正标红节点');
+        app.showToast((e.detail && e.detail.message) || I18N.t('dashboard.skill_scope_mismatch', null, '技能 scope 不匹配，请修正标红节点'));
         return;
       }
       app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)}));
