@@ -602,6 +602,16 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     # 把 worker venv bin 注册进 PATH，agent shell 里 `grape` 找不到——2026-11-07 真任务
     # 实证 event 1）。目录存在才前缀注入；机器级 PATH 修复后此注入自然冗余无害。
     # agent 调用继续用裸 `grape`，无需绝对路径/prompt 模板改动。
+    #
+    # 为什么不用「Linux 同等方法」（把 venv bin 注册进用户/机器 PATH）——四个实测/结构性风险：
+    #   1. 影子命令：worker venv Scripts 里有 python.exe/pip.exe 等，注册进用户 PATH 会
+    #      shadow 全机 python/pip（真机 ls 实证 12 个 exe）；
+    #   2. setx 1024 字符截断：用户 PATH 超长被静默截断，直接损坏；
+    #   3. 非幂等：重复安装/升级重复追加，卸载通常不清理 → PATH 残骸累积；
+    #   4. 作用域错位：Linux unit Environment 仅服务进程可见，Windows 用户 PATH 全局生效
+    #      且已运行进程不重启不生效。
+    # 正规部署修复应注册「只含 grape 启动器 shim 的专用目录」（不含 python/pip），见
+    # plan 文档 §5 TODO；本注入与该修复可并存。
     try:
         from src.runtime.os_adapter import default_install_dir
         _gbin = os.path.join(default_install_dir(), ".venv",
