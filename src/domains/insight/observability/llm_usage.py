@@ -343,6 +343,83 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
 
 # ---------------------------------------------------------------- 汇总查询
 
+# ---------------------------------------------------------------- 执行模型统一取值（Issue #1255）
+
+def _agent_runtimes_has_model_name(cursor) -> bool:
+    """agent_runtimes 是否已有 model_name 列（#865 老库可能缺列，缺列时配置回落跳过不报错）。
+
+    SQLite 走 PRAGMA table_info；MySQL/其它后端兜底 SELECT 探测（缺列抛异常 → False）。
+    """
+    try:
+        cols = [r[1] for r in cursor.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
+        if cols:
+            return "model_name" in cols
+    except Exception:
+        pass
+    try:
+        cursor.execute("SELECT model_name FROM agent_runtimes LIMIT 0")
+        return True
+    except Exception:
+        return False
+
+
+def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
+    """任务执行模型的统一取值口径（事件详情页/实时日志弹窗共用，防止口径漂移）。
+
+    取值优先级：
+    1. 实际使用模型：obs_llm_usage WHERE task_id=? AND run_kind='task'，按 model_key 聚合
+       SUM(input_tokens+output_tokens) 降序取主模型；并列时按 model_key 字典序升序兜底，
+       同一任务重复请求结果稳定不抖动。model_key 为空或 unknown 时用 model_raw，两者皆空的行跳过。
+       source='usage'。
+    2. 配置模型回落：runtime_id 关联 agent_runtimes.model_name（缺列/空值跳过），source='config'。
+    3. 皆空：model=''、source='unknown'，前端统一占位。
+
+    返回 {"model": str, "source": 'usage'|'config'|'unknown', "models": [{model, tokens, input, output}](top3)}。
+    安全：只返回模型名字符串与 token 数，SELECT 不触及 base_url/api_key/provider 凭据。
+    token 占比口径固定为 input+output（不含 cache/reasoning），与 #1229 看板一致。
+    """
+    agg: Dict[str, int] = {}
+    agg_in: Dict[str, int] = {}
+    agg_out: Dict[str, int] = {}
+    try:
+        for r in task_usage(task_id):
+            mk = (r.get("model_key") or "").strip()
+            if not mk or mk.lower() == "unknown":
+                mk = (r.get("model_raw") or "").strip()
+            if not mk:
+                continue
+            in_toks = int(r.get("input_tokens") or 0)
+            out_toks = int(r.get("output_tokens") or 0)
+            toks = in_toks + out_toks
+            agg[mk] = agg.get(mk, 0) + toks
+            agg_in[mk] = agg_in.get(mk, 0) + in_toks
+            agg_out[mk] = agg_out.get(mk, 0) + out_toks
+    except Exception as e:
+        log.warning(f"llm_usage: task_model_summary usage agg failed task={task_id}: {e}")
+    if agg:
+        ranked = sorted(agg.items(), key=lambda kv: (-kv[1], kv[0]))
+        return {"model": ranked[0][0], "source": "usage",
+                "models": [{"model": m, "tokens": _plain(t),
+                            "input": _plain(agg_in.get(m, 0)),
+                            "output": _plain(agg_out.get(m, 0))}
+                           for m, t in ranked[:3]]}
+    try:
+        if runtime_id:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                if _agent_runtimes_has_model_name(c):
+                    c.execute("SELECT model_name FROM agent_runtimes WHERE id=?", (int(runtime_id),))
+                    row = c.fetchone()
+                    name = (row[0] if row else "") or ""
+                    name = name.strip()
+                    if name:
+                        return {"model": name, "source": "config", "models": []}
+    except Exception as e:
+        log.warning(f"llm_usage: task_model_summary config fallback failed task={task_id}: {e}")
+    return {"model": "", "source": "unknown", "models": []}
+
+
 def _plain(v: Any) -> Any:
     """pymysql 会把 SUM/REAL 列返回成 Decimal——转成 JSON 可序列化的原始类型。"""
     if isinstance(v, Decimal):

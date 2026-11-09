@@ -190,6 +190,32 @@ def test_api_key_secret_hash_not_plain(client):
     assert row[0] != got["token"]
 
 
+def test_api_key_created_at_persisted_and_listed():
+    """Issue #1477 补充：创建 API Key 时必须写入 created_at（此前漏写，页面「创建」恒为 —）。
+
+    断言两点：库内 created_at 非空且接近当前时间；list_api_tokens 原样带出供前端格式化。
+    """
+    uid = _make_user("t6c")["id"]
+    before = int(time.time())
+    got = auth_token.generate_api_token(uid, name="ci-created")
+    assert got and got["token"].startswith("grape_")
+
+    from src.session_manager import db, db_lock
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT created_at FROM api_tokens WHERE id=?", (got["id"],)
+        ).fetchone()
+    assert row[0] not in (None, ""), "created_at 必须落库，否则前端只能显示 —"
+    from src.runtime.health import parse_dt as _pdt
+    _epoch = _pdt(row[0])
+    assert _epoch is not None, f"created_at 不可解析：{row[0]!r}"
+    assert abs(_epoch - before) <= 5, f"created_at 与当前时间偏差过大：{row[0]!r}"
+
+    listed = [k for k in auth_token.list_api_tokens(uid) if k["id"] == got["id"]]
+    assert listed, "新建的 key 应出现在列表里"
+    assert listed[0]["created_at"] not in (None, "")
+
+
 def test_revoke_api_key(client):
     uid = _make_user("t6r")["id"]
     got = auth_token.generate_api_token(uid, name="ci")

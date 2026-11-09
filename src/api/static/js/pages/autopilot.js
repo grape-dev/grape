@@ -630,7 +630,7 @@ function _apOpenEnginePickerInner() {
   function _renderEngineList(filter) {
     var q = (filter || '').toLowerCase().trim();
     var filtered = sorted.filter(function(e) {
-      if (q) { var hay = [e.name, e.alias, e.host_name, e.worker_name, e.instance_name, e.scope, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (hay.indexOf(q) < 0) return false; }
+      if (q) { var hay = [engineDisplayName(e), e.name, e.alias, e.host_name, e.worker_name, e.instance_name, e.scope, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (hay.indexOf(q) < 0) return false; }
       if (_engFilterType) { var ename = (e.name || '').toLowerCase(); if (ename.indexOf(_engFilterType) < 0) return false; }
       if (_engFilterScope && (e.scope || 'global') !== _engFilterScope) return false;
       return true;
@@ -644,15 +644,14 @@ function _apOpenEnginePickerInner() {
       html += '<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">' + (_SCOPE_LABELS[s]||s) + ' (' + groups[s].length + ')</div>';
       html += groups[s].map(function(e) {
         var checked = _apSelectedEngines.has(e.id);
-        var inst = e.instance_name || '';
-        var host = e.host_name || e.worker_name || '';
+        var display = engineDisplayName(e);  // Issue #1310：显示「引擎名（凭据名）」
         var tags = e.tags || [];
         // agent_tags 兼容
         if (e.agent_tags && !tags.length) tags = e.agent_tags;
         return '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (checked ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
           '<input type="checkbox" data-eid="' + e.id + '" ' + (checked ? 'checked' : '') + ' onchange="window._apEngToggle(' + e.id + ')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
-          '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + (e.alias || e.name) + (e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : '') + _tagBadge(tags) + _scopeBadge(e.scope) + '</div>' +
-          '<div style="font-size:10px;color:#86868b;margin-top:3px">' + (inst || e.name) + (host ? ' · ' + host : '') + '</div></div>' +
+          '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + (e.alias || display) + (e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + display + ')</span>' : '') + _tagBadge(tags) + _scopeBadge(e.scope) + '</div>' +
+          '<div style="font-size:10px;color:#86868b;margin-top:3px">' + (display.length ? '' : e.name) + '</div></div>' +
           '<span style="font-size:11px;font-weight:500;color:#34c759;flex-shrink:0">' + _apt('engine_picker.online') + '</span></label>';
       }).join('');
     });

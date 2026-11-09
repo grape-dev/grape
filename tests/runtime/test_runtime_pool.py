@@ -63,7 +63,9 @@ class TestStaleRecovery:
     """M1 兜底回收：dispatched 超时自动重排 + attempts 上限（防 worker 丢弃死循环）。"""
 
     @staticmethod
-    def _stale_dispatched(attempts=0, age_minutes=5):
+    def _stale_dispatched(attempts=0, age_minutes=11):
+        # 11min > claim 兜底窗口 600s（2026-08-28 起 300→600）：原 5min 参数在 600s
+        # 窗口下不满足 started_at < now-600s，回收永不触发（用例与现状语义对齐）。
         from datetime import datetime, timezone, timedelta
         eng = _mk_runtime()
         with db_lock:
@@ -93,8 +95,10 @@ class TestStaleRecovery:
         assert bs in (0, 1), f"busy_slots={bs}"
 
     def test_stale_dispatched_attempts_limit_fails(self):
-        """attempts=2 的超时 dispatched → 回收时直接 failed（回收超限）。"""
-        eng = self._stale_dispatched(attempts=2)
+        """attempts=49 的超时 dispatched → 回收时直接 failed（回收超限封顶 50）。
+
+        封顶自 #253 起为 50（原 3）：attempts=2 回收后 3 < 50 → queued（对齐现状）。"""
+        eng = self._stale_dispatched(attempts=49)
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE agent_runtimes SET busy_slots=1, status='online' WHERE id=?", (eng,))
@@ -102,7 +106,7 @@ class TestStaleRecovery:
         service.claim(eng)
         t = service.get_task("t_stale1")
         assert t["status"] == "failed", t["status"]
-        assert t["attempts"] == 3, t["attempts"]
+        assert t["attempts"] == 50, t["attempts"]
 
     def test_fresh_dispatched_not_recovered(self):
         """新鲜 dispatched（10s 前）→ 不被回收。"""

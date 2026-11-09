@@ -132,7 +132,7 @@
   "search_placeholder": "Search tasks...",
   "change_status_failed": "Status update failed: {{msg}}",
   "scene_default_badge": "(default)",
-"multi_task_badge": "Multi-Requirement",
+  "multi_task_badge": "Multi-Requirement",
   "single_task_badge": "Single Requirement",
   "parent_task": "Parent Requirement",
   "pipeline_scene": "Pipeline Scenario",
@@ -146,6 +146,7 @@
     "cancelled": "Cancelled"
   },
   "load_more": "Load more",
+  "load_earlier_events": "Load earlier events",
   "filter_options": {
     "created_by_me": "My Requirements"
   }

@@ -288,7 +288,9 @@ class TestDirectDispatchStaleCheck:
                "repository": "owner/repo", "source": "gitcode"}
         import os
         os.environ["GRAPE_PIPELINE_MODE"] = "legacy"
-        result = _enqueue_via_pipeline("owner/repo", 2, "vod", "test-skill", evt,
+        # skill 用可解析的官方 skill 名（vod）：pipeline skill gate 上线后，
+        # 'test-skill' 会被判 unresolvable 直接 BLOCK，任务根本不会入队（原断言因此取不到行）
+        result = _enqueue_via_pipeline("owner/repo", 2, "vod", "vod", evt,
                                         fresh_eng, "#2", "vod")
         # 正常入队：无 error；且任务 runtime_id 保持定向
         assert not result.get("error"), result

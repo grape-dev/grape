@@ -121,6 +121,69 @@ def test_list_api_keys_user_isolation():
     assert len(resp.json()["keys"]) == 0
 
 
+def test_list_api_keys_time_field_shapes():
+    """GET /api/settings/api-keys 时间字段数据形态护栏（Issue #1477 前端格式化的输入契约）。
+
+    存储层 last_used_at 为秒级 Unix 时间戳字符串（verify_api_token 写入 str(_now())），
+    normalize_event_time 对纯数字字符串原样透传（仅归一 ISO 格式）——即接口返回：
+      - 已使用：last_used_at = 裸秒级时间戳字符串（前端 fmtTimestamp8 需自动判别秒/毫秒）
+      - 未使用：last_used_at = None（前端渲染「从未使用」占位）
+      - created_at：'datetime('now')' 产物 → 归一为 UTC ISO（带 +00:00）
+    本用例固化三种形态，防止后端序列化口径漂移导致前端格式化失配。
+    """
+    user = _make_user()
+    created = client.post(
+        "/api/settings/api-keys",
+        json={"name": "norm"},
+        headers={"Authorization": f"Bearer {_jwt_token(user)}"},
+    )
+    assert created.status_code == 200, created.text
+
+    # 直接把存储层 last_used_at 写成 verify_api_token 同款秒级时间戳字符串
+    # （api_tokens 表挂在 session_manager 的 db 上，与文件头 fixture 同一连接）
+    raw_ts = "1794094387"  # 2026-11-07T23:33:07Z
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE api_tokens SET last_used_at=? WHERE user_id=?", (raw_ts, user["id"])
+        )
+        db.commit()
+
+    resp = client.get(
+        "/api/settings/api-keys",
+        headers={"Authorization": f"Bearer {_jwt_token(user)}"},
+    )
+    assert resp.status_code == 200
+    keys = resp.json()["keys"]
+    target = [k for k in keys if k["name"] == "norm"]
+    assert target, f"norm key not found: {keys}"
+    k = target[0]
+
+    # 已使用：裸秒级时间戳字符串原样透传（前端 fmtTimestamp8 数字字符串路径负责格式化）
+    assert k["last_used_at"] == raw_ts, k["last_used_at"]
+    # created_at：归一为 UTC ISO 口径（前端同一 fmtTimestamp8 链路兼容）
+    assert isinstance(k["created_at"], str) and k["created_at"].endswith("+00:00"), k["created_at"]
+
+
+def test_list_api_keys_unused_last_used_none():
+    """GET /api/settings/api-keys：未使用的 key last_used_at 为 None（前端渲染占位）。"""
+    user = _make_user()
+    created = client.post(
+        "/api/settings/api-keys",
+        json={"name": "unused"},
+        headers={"Authorization": f"Bearer {_jwt_token(user)}"},
+    )
+    assert created.status_code == 200, created.text
+
+    resp = client.get(
+        "/api/settings/api-keys",
+        headers={"Authorization": f"Bearer {_jwt_token(user)}"},
+    )
+    assert resp.status_code == 200
+    target = [k for k in resp.json()["keys"] if k["name"] == "unused"]
+    assert target, "unused key not found"
+    assert target[0]["last_used_at"] is None
+
+
 # ==================== DELETE: 吊销 ====================
 
 def test_revoke_api_key_immediate_invalidation():

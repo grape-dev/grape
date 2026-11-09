@@ -1,0 +1,34 @@
+# Grape 服务端依赖 —— 运行 src.api.run（WebUI + webhook + IM bot + 服务端执行）需要
+#
+# 端侧（worker）不装此清单，只用最小集 requirements-worker.txt（仅 aiohttp）。
+# 本地开发可用 requirements-local.txt（不含 OBS/MySQL/飞书，最小集）。
+#
+# 安装：
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 国内镜像加速：
+#   .venv/bin/pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+#
+# Python 版本要求：>= 3.10（主服务与 devbox sandbox 一致；低于 3.10 启动将显式提示并退出）
+paramiko>=3.0
+markdown>=3.4
+lark-oapi>=1.0
+pyyaml>=6.0
+fastapi>=0.100
+uvicorn>=0.23
+python-multipart>=0.0.9
+aiohttp>=3.9
+requests>=2.31
+websockets>=12.0
+pymysql>=1.1
+DBUtils>=3.0
+esdk-obs-python>=3.26
+python-jose[cryptography]>=3.3
+bcrypt>=4.0
+prometheus_client>=0.20
+psutil>=5.9
+croniter>=3.0
+httpx>=0.27
+# DevBox cloud sandbox SDK (optional — install to enable devbox sandbox provider)
+# Install from source: pip install /path/to/devspace-devbox/python-sdk
+# Or: pip install devbox-sdk (when published to PyPI)
+# devbox-sdk>=0.1.0  # requires Python >=3.10 (worker venv, not grape main 3.9)

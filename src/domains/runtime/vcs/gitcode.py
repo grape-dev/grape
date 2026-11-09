@@ -6,7 +6,7 @@ from .event_types import (
     ISSUE_ASSIGNED, ISSUE_LABELED, ISSUE_COMMENT,
     PR_OPENED, PR_UPDATED, PR_CLOSED, PR_MERGED, PR_REVIEW, PR_COMMENT,
     PUSH, TAG_CREATED, RELEASE_CREATED, BUILD_START,
-    normalize_changes,
+    normalize_changes, normalize_files, has_file_changes, FILE_EVENT_TYPES,
 )
 
 
@@ -80,6 +80,12 @@ class GitCodeBackend(VcsBackend):
         # 保留原始 action 和 normalized changes 供 event_rule 使用
         payload["_raw_action"] = action
         payload["_changes"] = changes
+
+        # Issue #996：变更类事件携带文件清单（payload 自带 commits/files 时直接归一）
+        if evt_type in FILE_EVENT_TYPES:
+            _files = normalize_files(payload)
+            if has_file_changes(_files):
+                payload["files"] = _files
 
         return {
             "source": "gitcode", "type": evt_type,

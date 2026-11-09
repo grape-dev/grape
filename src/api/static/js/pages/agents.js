@@ -127,9 +127,10 @@ function loadCfgOptions() {
         return tags.includes('all') || tags.includes(agentType);
       });
       const tagLabels = {all: I18N.t('agents.tag.all'), vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE'};
-      const val = r => r.instance_name || r.name;
+      const val = r => r.instance_name || r.name;  // option value：底层标识（绑定/路由不变，Issue #1310）
       const cb = (r, i) => {
         const v = val(r);
+        const display = engineDisplayName(r);  // Issue #1310：显示「引擎名（凭据名）」
         const online = r.health === 'online' || r.healthy;
         const color = _beColor(i);
         const checked = current.includes(v) || current.includes(r.name) ? 'checked' : '';
@@ -138,7 +139,7 @@ function loadCfgOptions() {
         return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;width:100%;flex-shrink:1;background:${checked ? `rgba(${rgb},.12)` : 'transparent'};${checked ? `box-shadow:inset 2px 0 0 ${color}` : ''};transition:background .12s">
           <input type="checkbox" class="cfg-backend-cb" value="${v}" data-color="${color}" ${checked} style="accent-color:${color};flex:0 0 auto;width:14px;height:14px;margin:0">
           <span style="width:9px;height:9px;border-radius:50%;background:${color};flex-shrink:0"></span>
-          <span style="font-weight:600;color:${checked ? color : 'var(--t2)'};min-width:110px">${v}</span>
+          <span style="font-weight:600;color:${checked ? color : 'var(--t2)'};min-width:110px">${display}</span>
           <span class="ts t3" style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name} v${r.version || ''} · ${r.worker_name || ''} · ${localLabel(r)}${online ? ' ✓' : ' ✗'} · ${tagStr}</span>
         </label>`;
       };

@@ -58,6 +58,7 @@ EXPECTED_PUBLIC = {
     "dashboard_ops_overview": ("get", "/api/dashboard/ops/overview"),
     "dashboard_ops_probe_now": ("get", "/api/dashboard/ops/probe-now"),
     "dashboard_ops_timeline": ("get", "/api/dashboard/ops/timeline"),
+    "dashboard_efficiency": ("get", "/api/dashboard/efficiency"),
     "dashboard_repo": ("get", "/api/dashboard/{owner}/{repo}"),
     "delete_account_api_auth_delete_account_post": ("post", "/api/auth/delete-account"),
     "delete_account_send_code_api_auth_delete_account_send_code_post": ("post", "/api/auth/delete-account/send-code"),

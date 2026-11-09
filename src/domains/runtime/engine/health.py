@@ -14,6 +14,52 @@ from datetime import datetime, timedelta, timezone
 _STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 
 
+def apply_runtime_state(c, runtime_id: int, status: str, last_seen_at: str) -> None:
+    """Issue #1496：agent_runtimes 在线态统一写入口（status 唯一真源）。
+
+    register/heartbeat/probe/本机直连刷新/僵尸回收等所有写 status 的路径一律走本函数：
+    同一条 UPDATE 内写 status + last_seen_at（+遗留保留列 health 的派生同步值），
+    消除「先写 A 后写 B」的二次写窗口期——库内任意时刻不再出现
+    health='online' AND status<>'online' 的自相矛盾行。
+
+    裁定：status 是唯一真源（online/idle/offline）；health 仅作派生展示值。
+    派生口径按引擎类型分流（Issue #592 / #1496 返工）：
+      · 远端（credential_id>0）→ derive_runtime_health(status, last_seen_at)
+      · 本机直连（credential_id=0）→ derive_local_runtime_health(installed, healthy)
+        （本机不参与 15s 心跳，只有 10min 探活，套心跳阈值会把健康引擎刷成 recently_lost）
+    best-effort：未启用遗留列的库该列写入被 except 吞掉，不影响 status/last_seen_at 主语义。
+    调用方必须在持有 db_lock 的事务内传入 cursor c，由调用方统一 commit。
+    """
+    _now = datetime.now(timezone.utc).timestamp()
+    # Issue #1496 返工（2026-11-08）：本机直连（credential_id=0）的派生 health 必须走
+    # Issue #592 口径 derive_local_runtime_health(installed, healthy)，不能用远端心跳
+    # 口径 derive_runtime_health(status, last_seen)——本机引擎只由 10min 探活刷新
+    # last_seen_at，套远端 100s 新鲜度会把健康的本机引擎刷成 recently_lost。
+    _derived = None
+    try:
+        c.execute("SELECT credential_id, installed, healthy FROM agent_runtimes WHERE id=?",
+                  (runtime_id,))
+        _row = c.fetchone()
+    except Exception:
+        _row = None
+    if _row and not (_row[0] or 0):
+        _derived = derive_local_runtime_health(
+            bool(_row[1] if _row[1] is not None else 1), bool(_row[2]))
+    else:
+        _derived = derive_runtime_health(status, last_seen_at, _now)
+    try:
+        c.execute(
+            "UPDATE agent_runtimes SET status=?, last_seen_at=?, health=? WHERE id=?",
+            (status, last_seen_at, _derived, runtime_id))
+    except Exception:
+        # 库无遗留 health 列（当前 DDL 口径）→ 只写 status+last_seen_at 主语义。
+        # 注意：异常可能发生在列缺失之外的场景（表锁等），此时第二条 UPDATE 同样
+        # 会失败并由调用方的事务回滚兜底，不会出现半写状态。
+        c.execute(
+            "UPDATE agent_runtimes SET status=?, last_seen_at=? WHERE id=?",
+            (status, last_seen_at, runtime_id))
+
+
 def parse_dt(s: str) -> float | None:
     if not s:
         return None
@@ -34,6 +80,11 @@ def parse_dt(s: str) -> float | None:
 
 
 def derive_runtime_health(status: str, last_seen_at: str | None, now: float | None = None) -> str:
+    """唯一派生入口（Issue #1496 裁定）：status 是 agent_runtimes 在线态的唯一真源，
+    本函数是把 (status, last_seen_at) 派生为展示值的唯一口径 —— dashboard 列表、
+    scene engine-status、settings 设备视图等读路径一律复用本函数，禁止直读库内
+    遗留 health 列（该列不参与任何派发/展示判定，仅由 apply_runtime_state 同事务
+    回写派生值、迁移按本口径回填，登记待删除）。"""
     _now = now if now is not None else datetime.now(timezone.utc).timestamp()
     ts = parse_dt(last_seen_at)
     # "active" 是 runtime_credentials 表的状态（等价于 online）
@@ -63,6 +114,38 @@ def derive_local_runtime_health(installed: bool, healthy: bool) -> str:
     Issue #592：引擎选择弹窗全显失联的根因；与 settings._engine_health 口径统一。
     """
     return "online" if (installed and healthy) else "offline"
+
+
+def engine_health_ok(credential_id, status, healthy, installed, last_seen_at,
+                     stale_seconds: int | None = None) -> bool:
+    """引擎是否「健康可达」的唯一判定真源（Issue #592 / #259 / #1487）。
+
+    派发侧（engine_select._health_ok）与认领侧（service._check_pool_engines_reachable）
+    必须调用本函数，禁止各自复制一份判定——#1487 的根因就是两侧各拿一把尺子：
+    派发说健康、认领说失联，任务入队即被判死。
+
+    - 本机直连（credential_id=0）：installed + healthy，**不判**心跳新鲜度，
+      **也不判** status（status 在本机行上只是 probe 循环的副产物，真值已由
+      installed/healthy 表达；#592 约定本机不参与远端心跳）。
+    - 远端（credential_id>0）：status ∈ {online, active} + healthy==1 + last_seen_at 在
+      stale_seconds（默认 RUNTIME_STALE_SECONDS=100s）内；无心跳记录视为失联。
+
+    说明：probe_status 不在本函数口径内——认领侧对远端仍额外校验 probe
+    （'ok'/'pending'/'' 之外判不可达），比派发侧更严，属既有差异（#1487 未改）。
+    """
+    _stale = stale_seconds if stale_seconds is not None else _STALE_SECONDS
+    if not (credential_id or 0):
+        _installed = installed if installed is not None else 1
+        return derive_local_runtime_health(bool(_installed), bool(healthy)) == "online"
+    if (status or "") not in ("online", "active"):
+        return False
+    if (healthy if healthy is not None else 0) != 1:
+        return False          # 探活失败（healthy=0）的远端引擎不可派发/不可认领
+    _now = datetime.now(timezone.utc).timestamp()
+    _ts = parse_dt(last_seen_at or "")
+    if _ts is None:
+        return False          # 标 online 但无心跳记录 → 失联（与 derive_runtime_health 一致）
+    return _now - _ts <= _stale
 
 
 def check_skill_consistency(bound_skill: str, actual_skill: str,

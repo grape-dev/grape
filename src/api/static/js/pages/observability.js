@@ -14,7 +14,7 @@ const _OBS_VIEWS = ['overview', 'devices', 'inspect'];
 const _OBS_SECTIONS = {
   overview: { subs: [] },
   devices:  { subs: ['overview'] },
-  inspect:  { subs: ['tasks', 'events', 'errorlogs'] },   // 异常任务并入任务 Tab 的过滤 chip（2026-10-18 拍板）
+  inspect:  { subs: ['tasks', 'efficiency', 'events', 'errorlogs'] },   // 异常任务并入任务 Tab 的过滤 chip（2026-10-18 拍板）；能效看板见 Issue #1229
 };
 
 let _obsSection = 'overview';
@@ -1295,6 +1295,11 @@ function renderObsContent(isAutoRefresh) {
     if (!isAutoRefresh) loadErrorLogs(c);
     return;
   }
+  // 能效看板 Tab（Issue #1229）: 独立异步加载；自动刷新走同一路径静默重取
+  if (_obsTab === 'efficiency') {
+    loadObsEfficiency(c, isAutoRefresh);
+    return;
+  }
   // 统一事件视图 Tab: 独立异步加载；自动刷新只检查"有没有新事件"（30s，顶部提示不强制前插）
   if (_obsTab === 'events') {
     if (isAutoRefresh) _obsEventSoftRefresh();
@@ -2214,6 +2219,63 @@ function renderTasksTab(ops, rt) {
     });
   }
   return html;
+}
+
+// ===== Tab: 能效看板（Issue #1229）=====
+// 按当前仓库、按协作者聚合：提需求数 / 完成数 / 消耗 token。
+// 数据源：/api/dashboard/efficiency（issue 单表计数 + obs_llm_usage 按创建人归属）。
+function _effTokFmt(n) {
+  const v = Number(n || 0);
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return String(v);
+}
+
+function renderObsEfficiency(c, d) {
+  const t = d || {};
+  const list = t.contributors || [];
+  const maxTok = list.reduce((m, x) => Math.max(m, Number(x.total_tokens || 0)), 0);
+  let html = '<div id="obsEffBody">';
+  html += _kpiRowHTML([
+    { label: I18N.t('observability.eff.total_issues'), value: Number(t.total_issues || 0).toLocaleString(), color: 'var(--a)' },
+    { label: I18N.t('observability.eff.completed'), value: Number(t.completed_issues || 0).toLocaleString(), color: 'var(--g)' },
+    { label: I18N.t('observability.eff.total_tokens'), value: _effTokFmt(t.total_tokens), color: 'var(--pu)', hint: Number(t.total_tokens || 0).toLocaleString() },
+  ]);
+  if (!list.length) {
+    html += `<div class="ts t3" style="text-align:center;padding:40px 0">📭 ${I18N.t('observability.eff.empty')}</div>`;
+  } else {
+    html += table(
+      [I18N.t('observability.eff.th_user'), I18N.t('observability.eff.th_issues'),
+       I18N.t('observability.eff.th_completed'), I18N.t('observability.eff.th_tokens')],
+      list.map(x => {
+        const tok = Number(x.total_tokens || 0);
+        const pct = maxTok > 0 ? Math.round(tok / maxTok * 100) : 0;
+        return [_escHtml(x.user), String(x.issues || 0), String(x.completed || 0),
+          `<div style="display:flex;align-items:center;gap:8px">` +
+          `<div style="flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;min-width:60px">` +
+          `<div style="height:100%;width:${pct}%;background:var(--pu);border-radius:4px"></div></div>` +
+          `<span style="min-width:56px;text-align:right;font-variant-numeric:tabular-nums">${_effTokFmt(tok)}</span></div>`];
+      })
+    );
+  }
+  html += '</div>';
+  c.innerHTML = html;
+}
+
+function loadObsEfficiency(c, isAutoRefresh) {
+  if (!c) c = (typeof document !== 'undefined') ? document.getElementById('obsContent') : null;
+  if (!c) return;
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+  if (!isAutoRefresh && !c.innerHTML) {
+    c.innerHTML = '<div class="loading">' + I18N.t('observability.loading') + '</div>';
+  }
+  API.get('/dashboard/efficiency' + repoParam).then(d => {
+    renderObsEfficiency(c, d || {});
+  }).catch(e => {
+    c.innerHTML = '<div class="error">' + I18N.t('observability.eff.load_failed', { msg: e.message }) + '</div>';
+  });
 }
 
 // ===== Issue 任务列表 + Mermaid 时序图 =====

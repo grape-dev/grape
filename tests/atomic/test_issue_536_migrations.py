@@ -162,6 +162,56 @@ class TestRunPendingIdempotence:
         finally:
             conn.close()
 
+    def test_same_version_diff_name_reports_error_and_skips(self, tmp_path, caplog):
+        """Issue #1412：库内同号已由其它分支（不同 name）盖章 → ERROR 且 fn 不执行。
+
+        存量库可能已被其它分支的同号迁移盖章，执行器按 version 判「已执行」会
+        永久跳过本迁移；必须把「同号不同名」升级为 ERROR 报出，便于 renumber。
+        """
+        from src.api import db_setup
+        conn = self._fresh_sqlite(tmp_path)
+        conn.execute(
+            "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
+            "VALUES (?, ?, 'safe', '2026-11-03 00:00:00')",
+            ("202611030004", "issue-646-mysql-fks"))
+        conn.commit()
+        calls = []
+
+        try:
+            with caplog.at_level("ERROR"):
+                db_setup._run_migrations_with_conn(conn, registry=[
+                    db_setup.Migration("202611030004", "issue865_agent_runtimes_model",
+                                       "safe", lambda: calls.append(1)),
+                ])
+            errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+            assert errors, "同号不同名未报 ERROR"
+            msg = "\n".join(errors)
+            assert "202611030004" in msg, "ERROR 未包含撞号 version"
+            assert "issue-646-mysql-fks" in msg, "ERROR 未包含库内盖章名"
+            assert "issue865_agent_runtimes_model" in msg, "ERROR 未包含本次注册名"
+            assert "撞号" in msg and "非普通" in msg, "ERROR 未区分撞号与普通漂移"
+            assert "renumber" in msg or "修复指引" in msg, "ERROR 未包含修复指引"
+            assert calls == [], "同号不同名仍执行了迁移 fn（应跳过不执行）"
+        finally:
+            conn.close()
+
+    def test_no_collision_no_error(self, tmp_path, caplog):
+        """Issue #1412：号与名都不冲突时不产生 ERROR（不误报）。"""
+        from src.api import db_setup
+        conn = self._fresh_sqlite(tmp_path)
+
+        try:
+            with caplog.at_level("ERROR"):
+                db_setup._run_migrations_with_conn(conn, registry=[
+                    db_setup.Migration("202611070001", "issue865_agent_runtimes_model",
+                                       "safe", lambda: None),
+                ])
+            errors = [r.getMessage() for r in caplog.records
+                      if r.levelname == "ERROR" and "撞号" in r.getMessage()]
+            assert not errors, f"无撞号场景误报 ERROR: {errors}"
+        finally:
+            conn.close()
+
     def test_backfill_failure_skips_not_blocks(self, tmp_path, caplog):
         """backfill 单项失败 → 跳过不阻断后续迁移、不盖章（下次续跑）。"""
         from src.api import db_setup
@@ -393,6 +443,48 @@ class TestEnsureColumnAlgorithm:
         assert alters and "ALGORITHM" not in alters[0].upper(), (
             "SQLite 路径不应下发 ALGORITHM"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1412 QA Required · _fn_add_agent_runtimes_model MySQL 分支逐列幂等
+# ---------------------------------------------------------------------------
+
+class TestAgentRuntimesModelMigration:
+    def _run_fn(self, monkeypatch, existing):
+        from src.api import db_setup
+        from src import session_manager
+
+        mdb = MockDB()
+        rows = [(i, col, "text", 0, "", 0) for i, col in enumerate(sorted(existing))]
+        mdb.register("PRAGMA table_info", lambda sql, params: list(rows))
+        monkeypatch.setattr(db_setup, "db", mdb, raising=True)
+        monkeypatch.setattr(db_setup, "db_lock", mdb.lock, raising=True)
+        monkeypatch.setattr(db_setup, "_mysql_backend", lambda: True, raising=False)
+        monkeypatch.setattr(session_manager, "_is_mysql_backend", lambda: True,
+                            raising=False)
+        db_setup._fn_add_agent_runtimes_model()
+        return mdb, [q for q, _ in mdb.cursor().queries if "ALTER TABLE" in q.upper()]
+
+    def test_have2_missing_source_adds_only_missing_column(self, monkeypatch):
+        """have==2（reported_at+name 已存在）→ 只补 model_source，不重复 ALTER。"""
+        mdb, alters = self._run_fn(monkeypatch, {"model_reported_at", "model_name"})
+        assert len(alters) == 1, f"应只补 1 列，实际 {alters}"
+        assert "model_source" in alters[0]
+        assert mdb.committed == 1
+
+    def test_have3_no_alter(self, monkeypatch):
+        """三列齐全 → 不下发任何 ALTER（幂等）。"""
+        _, alters = self._run_fn(monkeypatch,
+                                 {"model_reported_at", "model_name", "model_source"})
+        assert alters == [], f"列已齐全仍 ALTER: {alters}"
+
+    def test_have0_adds_all_columns(self, monkeypatch):
+        """空列 → 三列各补一次。"""
+        _, alters = self._run_fn(monkeypatch, set())
+        assert len(alters) == 3, f"应补 3 列，实际 {alters}"
+        joined = " ".join(alters)
+        for col in ("model_name", "model_source", "model_reported_at"):
+            assert col in joined
 
 
 # ---------------------------------------------------------------------------
