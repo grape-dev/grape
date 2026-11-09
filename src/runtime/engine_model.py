@@ -99,8 +99,14 @@ def _aishell_dsh_model() -> str:
     for path in paths:
         if not os.path.isfile(path):
             continue
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
+        # GBK 兼容：Windows 手工保存的 profile 可能是 ANSI/GBK（中文注释），
+        # utf-8 硬读会 UnicodeDecodeError（真机实证 2026-11-09）——先 utf-8 后 gbk
+        with open(path, "rb") as f:
+            raw_bytes = f.read()
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = raw_bytes.decode("gbk", errors="replace")
         try:
             import yaml  # type: ignore
             for item in (yaml.safe_load(raw) or []):
