@@ -1126,3 +1126,63 @@ def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=
                                        {"page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
     return _normalize_pull_files_diff(resp)
+
+
+# ── Issue #996：产物预检/清理（由 weekly-10 迁入） ──
+class ArtifactCleanBody(BaseModel):
+    dry_run: bool = Field(
+        True,
+        title="Dry run",
+        description="When true (default) only reports what would be deleted plus the guard "
+                    "impact; no upstream DELETE is issued.",
+    )
+    ref: str = Field("", title="Branch/tag/sha", description="Defaults to the repo default branch.")
+    message: str = Field("", title="Commit message", description="Optional cleanup commit message.")
+
+
+@router.post("/{owner}/{repo}/issues/{number}/artifacts/clean",
+             operation_id="gitrepo_issue_artifacts_clean",
+             summary="Precheck and clean docs/issue-N artifacts (Issue #996)",
+             description="Lists `docs/issue-N/*`, runs the committed-guard impact precheck, and only "
+                         "when no guard script references the paths deletes them via the contents "
+                         "API. `dry_run` defaults to true, so a plain call reports impact and "
+                         "deletions without touching the repo. Guard hits always skip deletion "
+                         "(never bypassed). Failures are returned per path, not swallowed.")
+def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int, body: ArtifactCleanBody | None = None,
+                                   user: dict = Depends(get_current_user_or_api_key),
+                                   p: str = Depends(_provider)):
+    body = body or ArtifactCleanBody(dry_run=True, ref='', message='')
+    from src.kernel.repo_key import to_repo_key
+    from src.domains.runtime.engine.cleanup import ArtifactScope, precheck_issue_artifacts
+    from src.domains.runtime.vcs.guard_impact import delete_issue_artifacts
+
+    token = _repo_token(owner, repo, user, p)
+    ref = (body.ref or "").strip() or _default_ref(p, owner, repo, user)
+    scope = ArtifactScope(repo_key=to_repo_key(f"{owner}/{repo}", p), ref=ref,
+                          issue_number=number, token=token, provider=p)
+    pre = precheck_issue_artifacts(scope)
+    paths = pre.get("paths") or []
+    out = {"issue": number, "ref": ref, "paths": paths, "guard_impact": pre.get("guard_impact"),
+           "deleted": [], "skipped": [], "failed": [], "dry_run": bool(body.dry_run)}
+    if not paths:
+        return out
+    impact = pre.get("guard_impact") or {}
+    if impact.get("breaking"):
+        # 守卫引用命中：绝不删除，如实回传命中脚本供 QA/pipeline 展示。
+        out["skipped"] = paths
+        log.warning(f"artifact clean skipped (guard hit) repo={owner}/{repo} issue={number} "
+                    f"scripts={impact.get('scripts')}")
+        return out
+    if body.dry_run:
+        return out
+    result = delete_issue_artifacts(scope.repo_key, ref, pre.get("targets") or [], token=token,
+                                    provider=p, message=body.message)
+    out["deleted"] = result.get("deleted") or []
+    out["failed"] = result.get("failed") or []
+    if out["failed"]:
+        out["guard_impact"] = None
+    return out
+
+
+# ===================== Pull Requests =====================
+

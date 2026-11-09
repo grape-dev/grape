@@ -2519,3 +2519,72 @@ def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
         db.commit()
     log.info(f"Scene deploy url saved: scene={scene_id} repo={repo_key}")
     return {"message": "场景访问地址已更新", "deploy_url": deploy_url}
+
+
+# ── Issue #501：单场景引擎在线状态（按需探测，从 with-pipeline 抽出） ──────────
+# 由 weekly-10 迁入（原实现 src/api/routes/scenes.py）。
+def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
+    """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
+
+    语义与原 with-pipeline 内联版完全一致：
+    - 对每个绑定 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids，
+      返回 None = 该节点绑定引擎全部离线 → 记入 offline_nodes
+    - SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
+      与「配了引擎但全灭」区分开——sre_unbound 单独标记，前端提示「未选择机器」
+    - 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）
+    """
+    offline_nodes: list[str] = []
+    sre_unbound: bool = False
+    try:
+        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _gspei
+        for n in (cfg_nodes or []):
+            if not isinstance(n, dict):
+                continue
+            _tag = n.get("tag") or n.get("id") or ""
+            _eids = n.get("engine_runtime_ids") or []
+            if not _tag or not _eids:
+                # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
+                if _tag and str(_tag).lower() == "sre":
+                    sre_unbound = True
+                continue
+            if n.get("enabled") is False:
+                continue
+            try:
+                if _gspei(scene_id, _tag, repo_key=repo_key) is None:
+                    offline_nodes.append(str(_tag))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"offline_nodes": offline_nodes,
+            "sre_unbound": sre_unbound,
+            "all_offline": bool(offline_nodes) or sre_unbound}
+
+@router.get("/{scene_id}/engine-status", operation_id="scenes_engine_status",
+            summary="Scene engine online status",
+            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.")
+def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
+    """返回单个场景的引擎在线状态（需求中心弹窗选中场景时按需调用，1 场景 × M 节点）。
+
+    节点来源与 with-pipeline 一致：DB 场景（get_scenes）优先，查不到回退
+    get_pipeline_config（official 模板 / pipelines.json）。
+    场景不存在时返回 all_offline=False（不拦创建入口）。
+    """
+    from src.api.pipeline_config import get_pipeline_config
+    from src.kernel.repo_key import to_repo_key
+
+    # P3（Issue #501 深审）：与 /scenes 列表同一会话级 repo 解析（#534），
+    # 不再只认显式 repo 参数——避免无 repo 上下文时退化到全局作用域探测错库。
+    repo_key = _resolve_scene_repo_key(repo, user)
+    # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
+    # P1（Issue #501 深审）：get_pipeline_config 第 4 级兜底会静默回退
+    # pipelines.json 的 default 场景——不存在的场景 id 会拿别人的节点探测，
+    # 返回误导性 sre_unbound 警告。回退（fallback=True 或解析出的 scene_id
+    # 与请求不一致）时按「场景不存在」处理：不标记、不拦创建入口。
+    if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
+        return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
+    cfg_nodes = cfg.get("nodes") or []
+    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key)
+    status["scene_id"] = scene_id
+    return status

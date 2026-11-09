@@ -1071,3 +1071,115 @@ def _detach_dead_engine_bindings() -> dict:
         log.info(f"_detach_dead_engine_bindings: {stats} (threshold={_ENGINE_DETACH_AFTER_SECONDS}s)")
     return stats
 
+
+# ── Issue #605：候选过滤原因（由 weekly-10 迁入，只读解释，不改选择行为） ──
+def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
+    """计算单个候选引擎会被过滤掉的原因列表（与实际过滤链同一口径，只读不改行为）。
+
+    覆盖 _apply_filters（enabled/installed/healthy/_health_ok/本机已知引擎名）、
+    _filter_by_tags（engine_capabilities 标签）、_filter_by_health（健康分）三层。
+    返回空列表 = 该候选可通过全部过滤。
+    """
+    reasons = []
+    f = cfg.get("filters") or {}
+    if not m.get("enabled", True):
+        reasons.append("disabled")
+    if f.get("only_installed") and not m.get("installed"):
+        reasons.append("not_installed")
+    if f.get("only_healthy") and not m.get("healthy"):
+        reasons.append("healthy=0")
+    if f.get("only_online") and not _health_ok(m):
+        if (m.get("status") or "") != "online":
+            reasons.append(f"status={m.get('status') or 'offline'}")
+        else:
+            reasons.append(f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s")
+    if (m.get("credential_id") or 0) == 0:
+        try:
+            from src.domains.mgmt.user.db import is_known_engine_name
+            if not is_known_engine_name(m.get("name") or ""):
+                reasons.append("unknown_local_engine")
+        except Exception:
+            pass
+    rid = m.get("runtime_id") or 0
+    if rid and agent_type:
+        try:
+            db, lock = _db()
+            with lock:
+                c = db.cursor()
+                c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
+                tags = [r[0] for r in c.fetchall()]
+        except Exception:
+            tags = []
+        if agent_type not in tags and "all" not in tags:
+            reasons.append(f"tag_mismatch({','.join(tags) or 'none'})")
+        # Issue #658：角色硬过滤口径（role_tags/引擎类型默认映射）
+        _at = (agent_type or "").strip().lower()
+        _roles = _member_role_tags(m)
+        if _at and _roles is not None and _at not in _roles:
+            reasons.append(f"role_mismatch({','.join(_roles)})")
+    if rid:
+        try:
+            from src.runtime.health_scorer import is_healthy as _score_ok
+            if not _score_ok(rid):
+                reasons.append("health_score_below_threshold")
+        except Exception:
+            pass
+    return reasons
+
+
+# ── Issue #605：引擎派发解释（由 weekly-10 迁入） ──
+def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
+                             user_id: int = 0, issue_creator: str = "") -> dict:
+    """主控侧取证入口（Issue #605）：解释某 (repo, agent_type, scene) 的引擎候选与过滤全景。
+
+    返回：
+    - mode：plugin（广播）/ legacy
+    - bound_engine_ids：场景 node 绑定的 engine_runtime_ids
+    - candidates：候选全集（含 scope/priority/healthy/last_seen_at/tags），每个候选带
+      reasons（会被过滤的具体原因，空 = 可通过全部过滤）
+    - pool_engine_ids：广播名单（get_scene_pool_engine_ids 实际结果，None = 全灭）
+    - selected：legacy 模式实际会选中的 runtime_id（None = engine_unavailable）
+    """
+    out = {"repo": _norm_repo(repo_key), "agent_type": agent_type, "scene_id": scene_id,
+           "mode": "legacy", "bound_engine_ids": [], "candidates": [],
+           "pool_engine_ids": "", "selected": None}
+    try:
+        from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+        if is_plugin_mode():
+            out["mode"] = "plugin"
+    except Exception:
+        pass
+    cfg = load_engine_selection()
+    repo = _norm_repo(repo_key)
+    if not user_id:
+        user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import get_scene_engine_ids
+            engine_ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo, user_id=user_id)
+        except Exception:
+            engine_ids = []
+    else:
+        engine_ids = []
+    out["bound_engine_ids"] = list(engine_ids or [])
+    if engine_ids:
+        members = dedupe_engines(_engines_by_ids(list(engine_ids), repo, cfg))
+        for m in members:
+            out["candidates"].append({
+                "runtime_id": m.get("runtime_id"), "name": m.get("name") or "",
+                "instance": engine_unique_key(m), "scope": m.get("scope") or "",
+                "priority": m.get("priority"), "status": m.get("status") or "",
+                "healthy": bool(m.get("healthy")), "installed": bool(m.get("installed")),
+                "last_seen_at": m.get("last_seen_at") or "",
+                "credential_id": m.get("credential_id") or 0,
+                "reasons": _candidate_reject_reasons(m, cfg, agent_type),
+            })
+    if scene_id:
+        out["pool_engine_ids"] = get_scene_pool_engine_ids(
+            scene_id, agent_type, repo_key=repo_key, user_id=user_id, issue_creator=issue_creator)
+    if out["mode"] == "legacy":
+        out["selected"] = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
+                                      scene_id=scene_id, user_id=user_id, issue_creator=issue_creator)
+    return out
+
+
