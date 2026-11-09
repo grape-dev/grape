@@ -4379,14 +4379,162 @@ def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) ->
     return ""
 
 
+# ===== Issue #1545: agent 产出回帖策略（阻止引擎报错文本外泄到 Issue/PR） =====
+_ERROR_TEXT_PATTERNS = (
+    "model not found", "model_not_found", "traceback (most recent call last)",
+    "econnrefused", "etimedout", "rate limit", "quota exceeded",
+    "sockettimeout", "upstream", "bad gateway", "service unavailable",
+)
+_RESULT_POST_POLICY_WARNED = False
+
+
+def _looks_like_error_text(text: str) -> bool:
+    """Issue #1545 B1：判断文本是否为引擎/上游报错文本（固定规则集，不得增删）。"""
+    t = text or ""
+    lower = t.lower()
+    if re.search(r"http\s*[45]\d\d", t, re.IGNORECASE):
+        return True
+    if any(p in lower for p in _ERROR_TEXT_PATTERNS):
+        return True
+    if t.lstrip().startswith("\u274c"):
+        return True
+    if "exit_code=" in lower:
+        return True
+    if "http 401" in lower or "http 403" in lower:
+        return True
+    return False
+
+
+def _result_post_policy() -> str:
+    """Issue #1545 B2：读取 GRAPE_RESULT_POST_POLICY（strict 默认 / clean / off）。
+
+    非法值回落 strict，进程内只告警一次；有效值不缓存，便于运行时与测试切换。
+    """
+    global _RESULT_POST_POLICY_WARNED
+    raw = (os.environ.get("GRAPE_RESULT_POST_POLICY") or "").strip().lower()
+    if raw in ("strict", "clean", "off"):
+        return raw
+    if raw and not _RESULT_POST_POLICY_WARNED:
+        log.warning(f"invalid GRAPE_RESULT_POST_POLICY={raw!r}, fallback to strict")
+        _RESULT_POST_POLICY_WARNED = True
+    return "strict"
+
+
+def _parse_task_errors(raw):
+    """把 agent_tasks.errors 原始值解析为列表（兼容历史纯字符串）。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return [str(raw)]
+    if isinstance(parsed, list):
+        return parsed
+    return [parsed]
+
+
+def _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type, reason, raw_text):
+    """Issue #1545 C1/C2：把一次结果回帖抑制留痕写入 agent_tasks.errors。
+
+    复用既有 errors JSON 去重追加通路，不新增列。幂等键 = 同 issue + raw_text 前 200 字；
+    DB 异常只告警，绝不影响任务终态与主流程。
+    """
+    try:
+        _rec = {
+            "error_code": "RESULT_POST_SUPPRESSED",
+            "policy": _result_post_policy(),
+            "reason": reason,
+            "agent_type": agent_type or "",
+            "issue_number": str(issue_number or ""),
+            "raw_text": (raw_text or "")[:500],
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        _idem_key = (raw_text or "")[:200]
+        _where_col = ""
+        _where_val = None
+        _existing = None
+        with db_lock:
+            c = db.cursor()
+            if task_id:
+                c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                row = c.fetchone()
+                if row:
+                    _where_col, _where_val, _existing = "id", task_id, _parse_task_errors(row[0])
+            elif seq is not None:
+                c.execute(
+                    "SELECT errors FROM agent_tasks WHERE event_seq=? "
+                    "ORDER BY created_at DESC LIMIT 1", (seq,))
+                row = c.fetchone()
+                if row:
+                    _where_col, _where_val, _existing = "event_seq", seq, _parse_task_errors(row[0])
+            else:
+                # 无任务上下文（系统通知等）→ 按 repo_key + issue 兜底定位最近任务
+                _issue_num = str(issue_number or "").lstrip("#")
+                c.execute(
+                    "SELECT id, errors FROM agent_tasks WHERE repo_key=? AND "
+                    "(issue_id=? OR issue_id=? OR issue_id LIKE ?) "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (repo_key or "", str(issue_number or ""), _issue_num, f"%{_issue_num}%"))
+                row = c.fetchone()
+                if row:
+                    _where_col, _where_val, _existing = "id", row[0], _parse_task_errors(row[1])
+            if _where_col and _existing is not None:
+                for e in _existing:
+                    if (isinstance(e, dict) and e.get("error_code") == "RESULT_POST_SUPPRESSED"
+                            and (e.get("raw_text") or "")[:200] == _idem_key
+                            and str(e.get("issue_number") or "") == _rec["issue_number"]):
+                        return
+                _existing = [e for e in _existing if str(e).strip()]
+                _existing.append(_rec)
+                if len(_existing) > 5:
+                    _existing = _existing[:1] + _existing[1:][-4:]
+                c.execute(f"UPDATE agent_tasks SET errors=? WHERE {_where_col}=?",
+                          (json.dumps(_existing, ensure_ascii=False), _where_val))
+                db.commit()
+                return
+        log.warning(f"record_post_suppressed: no task row for {repo_key}#{issue_number}")
+    except Exception as e:
+        log.warning(f"record_post_suppressed failed: {e}")
+
+
+def _apply_agent_result_policy(result_text: str, structured_conclusion: str, plain_text: str,
+                               task_id, seq, repo_key, issue_number, agent_type):
+    """Issue #1545 A3/B3：对 agent 产出套用回帖策略。
+
+    返回应当发布的文本；返回空串表示抑制（已留痕）。仅 agent_result=True 时调用。
+    """
+    _policy = _result_post_policy()
+    if _policy == "off":
+        _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                "policy_off", result_text)
+        log.info(f"Exec agent: suppress result comment by policy=off ({repo_key}#{issue_number})")
+        return ""
+    if _policy == "strict" and not structured_conclusion:
+        _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                "strict_no_conclusion", result_text)
+        log.info(f"Exec agent: suppress result comment by policy=strict (no structured conclusion) "
+                 f"({repo_key}#{issue_number})")
+        return ""
+    if _policy == "clean" and not structured_conclusion and _looks_like_error_text(plain_text):
+        _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                "clean_error_text", result_text)
+        log.info(f"Exec agent: suppress result comment by policy=clean (error text) "
+                 f"({repo_key}#{issue_number})")
+        return ""
+    return structured_conclusion or plain_text
+
+
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str,
-                          repo_key: str = ""):
+                          repo_key: str = "", *, agent_result: bool, task_id: str = "", seq=None):
     """Agent 执行完成后，将结果作为评论发回 VCS Issue。
 
     根据 repo_key provider 分流 GitHub/GitCode。
     方案 B：先 GET Issue 评论列表，若已有 agent 发的评论则跳过系统回帖，
     避免与 agent 自己发的评论重复（"一鱼两吃"问题）。
     agent 忘了发评论时系统补发，保证 Issue 不会静悄悄。
+
+    Issue #1545：`agent_result` 必填以区分「agent 产出」（True，套用回帖策略，
+    阻止引擎/上游报错文本外泄）与「系统通知」（False，行为完全不变）。
     """
     if not repository or not issue_number or not bot_token:
         return
@@ -4408,14 +4556,26 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
+    _structured_conclusion = _conclusion
+    _plain_text = ""
     # conclusion 提取失败时：保留有效 result_text（纯文本），避免思考过程/JSON 块泄漏到 Issue 评论；
     # result_text 为空或纯 JSON 时无内容可发，直接跳过回帖（Issue #679：不发占位文案）
     if not _conclusion:
         _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
         if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _plain_text = _stripped
             _conclusion = _stripped[:3000]
         else:
+            if agent_result and (result_text or "").strip():
+                _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                        "no_conclusion", result_text)
             log.info(f"Exec agent: skip system comment, no conclusion or valid text to post to {repository}/issues/{issue_number}")
+            return
+    if agent_result:
+        _conclusion = _apply_agent_result_policy(
+            result_text, _structured_conclusion, _plain_text,
+            task_id, seq, repo_key, issue_number, agent_type)
+        if not _conclusion:
             return
 
     # 根据 repo_key provider 分流
@@ -4522,11 +4682,14 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
 
 
 def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_token: str,
-                        agent_type: str, repo_key: str = ""):
+                        agent_type: str, repo_key: str = "", *, agent_result: bool,
+                        task_id: str = "", seq=None):
     """PR 订阅场景：Agent 执行完成后，将结果作为评论发回 PR。
 
     GitCode: POST /repos/{owner}/{repo}/pulls/{pr_number}/comments
     GitHub:  POST /repos/{owner}/{repo}/issues/{pr_number}/comments（PR 共用 Issue 评论 API）
+
+    Issue #1545：`agent_result` 必填以区分「agent 产出」与「系统通知」，语义同 Issue 回帖。
     """
     if not repository or not pr_number or not bot_token:
         return
@@ -4539,13 +4702,25 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
+    _structured_conclusion = _conclusion
+    _plain_text = ""
     if not _conclusion:
         # Issue #679：无 conclusion 时保留有效纯文本正文；为空或纯 JSON 时跳过发帖（不发占位文案）
         _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
         if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _plain_text = _stripped
             _conclusion = _stripped[:3000]
         else:
+            if agent_result and (result_text or "").strip():
+                _record_post_suppressed(task_id, seq, repo_key, pr_number, agent_type,
+                                        "no_conclusion", result_text)
             log.info(f"Exec agent: skip PR comment, no conclusion to post to {repository}/pulls/{pr_number}")
+            return
+    if agent_result:
+        _conclusion = _apply_agent_result_policy(
+            result_text, _structured_conclusion, _plain_text,
+            task_id, seq, repo_key, pr_number, agent_type)
+        if not _conclusion:
             return
     _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
     _comment += "\n<!-- grape-auto-comment -->"

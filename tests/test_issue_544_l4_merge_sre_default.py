@@ -130,7 +130,7 @@ class TestMergeSREDefault:
         monkeypatch.setattr(udb, "get_repo_token_with_refresh", lambda rk: "tok-544")
         posted = []
         monkeypatch.setattr(ep, "_post_result_to_issue",
-                            lambda repo, num, body, token, agent, rk="": posted.append((repo, num, body, agent)))
+                            lambda repo, num, body, token, agent, rk="", **kw: posted.append((repo, num, body, agent)))
         p = mod._normalize_params(
             repo_key=_REPO, seq=seq, agent_type="sre", backend="opencode",
             skill_name="sre-cli", skill_id=1, skill_path="/skills/sre",
@@ -160,7 +160,7 @@ class TestMergeSREDefault:
         monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
         posted = []
         monkeypatch.setattr(ep, "_post_result_to_issue",
-                            lambda repo, num, body, token, agent, rk="": posted.append((repo, num, body, agent)))
+                            lambda repo, num, body, token, agent, rk="", **kw: posted.append((repo, num, body, agent)))
         p = mod._normalize_params(
             repo_key=_REPO, seq=seq, agent_type="sre", backend="opencode",
             skill_name="sre-cli", skill_id=1, skill_path="/skills/sre",

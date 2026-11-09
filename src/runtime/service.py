@@ -3336,13 +3336,17 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                     elif _token:
                         # 无 handler（无 token 配置）→ fallback 直接调 _post_result_to_issue
                         from src.api.event_pipeline import _post_result_to_issue
-                        _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type)
+                        _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type,
+                                              agent_result=True, task_id=task_id,
+                                              seq=task.get("event_seq"))
                 except Exception as _pe:
                     log.warning(f"complete_task: handler.post_issue_comment failed: {_pe}")
                     # fallback 到直接调用
                     if _token:
                         from src.api.event_pipeline import _post_result_to_issue
-                        _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type)
+                        _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type,
+                                              agent_result=True, task_id=task_id,
+                                              seq=task.get("event_seq"))
             # 2. 子任务 SRE 完成 → 登记到父 Issue
             if _agent_type == "sre" and _issue_num and _token:
                 try:
@@ -4124,6 +4128,8 @@ def fail_task(task_id, error, exit_code=-1):
                                         _post_result_to_issue(
                                             _repo, _issue_num, _msg, _comment_token,
                                             task.get("agent_type") or "", _rk,
+                                            agent_result=False, task_id=task_id,
+                                            seq=task.get("event_seq"),
                                         )
                                 except Exception as _pe:
                                     log.warning(f"fail_task: R10 issue comment post failed: {_pe}")

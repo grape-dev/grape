@@ -101,7 +101,7 @@ def test_post_result_to_pr_405_fallback(monkeypatch):
                         lambda *a, **k: True)
 
     _post_result_to_pr("o/hello", "33", '{"conclusion": "trace after merge"}',
-                       BOT, "qa", repo_key="gitcode:o/hello")
+                       BOT, "qa", repo_key="gitcode:o/hello", agent_result=False)
 
     assert calls[0].endswith("/pulls/33/comments")
     assert calls[1].endswith("/issues/33/comments")

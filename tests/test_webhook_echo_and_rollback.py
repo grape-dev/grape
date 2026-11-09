@@ -289,7 +289,7 @@ class TestPlanBMarkerAdded:
         orig = urllib.request.urlopen
         urllib.request.urlopen = _mock_urlopen
         try:
-            ep._post_result_to_issue("owner/repo", "5", "test result", "fake_token", "coding")
+            ep._post_result_to_issue("owner/repo", "5", "test result", "fake_token", "coding", agent_result=False)
         finally:
             urllib.request.urlopen = orig
 

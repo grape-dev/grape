@@ -1085,7 +1085,8 @@ def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
         if not _repo:
             return False
         # 复用现有 _post_result_to_issue 发评论（含去重、conclusion 提取等逻辑）
-        _post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key)
+        _post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key,
+                              agent_result=False)
         return True
     except Exception as e:
         from src.config import log
