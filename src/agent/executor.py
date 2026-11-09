@@ -523,6 +523,17 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
     if env_extra:
         env.update(env_extra)
 
+    # 任务级 env 合并完成后的收尾钩子（同 executor 通用 CLI 路径语义）：
+    # aishell（dsh 框架）会 scrub env 里 /TOKEN/i 变量，prepare_env 把
+    # GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE 穿透。
+    # 必须在 env_extra 之后：token 是任务级的，此刻才进 env。
+    try:
+        _prepare_env = getattr(acp, "prepare_env", None)
+        if callable(_prepare_env):
+            _prepare_env(env)
+    except Exception as _pe:
+        log.warning(f"{label}prepare_env failed: {_pe}")
+
     # 技能路径占位符替换（direct 模式）
     try:
         from src.config import replace_skill_dir_placeholders

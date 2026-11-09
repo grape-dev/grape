@@ -59,6 +59,30 @@ class AishellDshACPBackend:
         # （chat 生产路径会取 backend.build_args 组命令，同 src/runtime/hwcloud.py 先例）。
         return ["acp"]
 
+    def prepare_env(self, env: dict) -> None:
+        """任务级 env 合并之后的收尾钩子（dsh 框架专属 token 穿透，同 src/runtime/dsh.py）。
+
+        aishell 与 dsh 同框架：其 bash 工具 spawn 时会 scrub 父进程 env 里所有
+        匹配 /KEY|PASSWORD|SECRET|TOKEN/i 的变量名 → GRAPE_SESSION_TOKEN 被洗掉 →
+        grape CLI 无法认证（2026-11-06 remote worker vod 场景实证）。
+
+        解法：token 写 0600 临时文件，路径经 GRAPE_AUTH_FILE 传递（变量名不命中
+        scrub）；grape CLI config 先读该文件再 fallback 环境变量。
+        ⚠️ 必须在 env_extra 合并之后调用（token 是任务级的，get_env 阶段尚未进 env）。
+        """
+        sess_tok = env.get("GRAPE_SESSION_TOKEN", "")
+        if not sess_tok:
+            return
+        try:
+            import tempfile
+            fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
+            os.write(fd, sess_tok.encode("utf-8"))
+            os.close(fd)
+            os.chmod(auth_path, 0o600)
+            env["GRAPE_AUTH_FILE"] = auth_path
+        except Exception:
+            pass  # 写文件失败不阻断执行（fallback 到 env 变量）
+
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         """基础 env（D3/D4：模型凭据设备预配置，grape 不注 key/不透传）。"""
         env = os.environ.copy()
