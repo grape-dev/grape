@@ -53,15 +53,20 @@ def _seed_repo():
 
 
 def _seed_issue(status, stage):
+    """直接落库构造「真实形态」的 (status, stage)。
+
+    修复（2026-11-09）：旧实现先插 status 再调 set_issue_stage 写入 stage，而 #1599 之后
+    set_issue_stage 在阶段变化时会同步 status（pending_review→processing），导致种子态与
+    断言前提不符（6 条用例全红）。真实系统里审核/等答态由 _set_issue_pending_review /
+    awaiting_input 直接写 status，stage 早已就位，故此处按真实形态一次写入。
+    """
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO issue (user_id, assignee, repo_key, issue_number, status, completed_at, completed_reason) "
-            "VALUES (0, '', ?, ?, ?, NULL, NULL)",
-            (_REPO, _NUM, status))
+            "INSERT OR REPLACE INTO issue (user_id, assignee, repo_key, issue_number, status, stage, owner_agent) "
+            "VALUES (0, '', ?, ?, ?, ?, ?)",
+            (_REPO, _NUM, status, stage, stage))
         db.commit()
-    from src.api.session_store import set_issue_stage
-    set_issue_stage(_REPO, f"#{_NUM}", stage, stage)
 
 
 def _issue_row():
@@ -177,7 +182,9 @@ class TestPRMergedReviewResume:
         _run_pipeline(monkeypatch)
         status, stage = _issue_row()
         assert stage == "sre", (status, stage)
-        assert status == "pending_review", (status, stage)
+        # 修复（2026-11-09）：resume 抛异常时阶段仍推进，stage 变化的 status 同步照常生效，
+        # 否则会留下 status=pending_review / stage=sre 的幽灵审核点（#1599 收敛目标）。
+        assert status == "processing", (status, stage)
 
 
 class TestAutoFinalizeRegression:

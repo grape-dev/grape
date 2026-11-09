@@ -180,25 +180,43 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     建档由 `_sync_issue_fields` 的 ensure_row 保证（无卡片行建最小行）。
     scene_id 初始为空，由 Task Center set_issue_scene 或智能推荐写入。
     """
+    from src.config import log
+    # Issue #1599 修复（2026-11-09）：同 stage 重写不得抹掉人工审核点。
+    # 旧实现无条件写 status，重派/重试等幂等重写（set_issue_stage('sre','sre')）会把
+    # pending_review 清成 processing，随后 auto_finalize 绕过「待审核不自动结单」直接 auto_done。
+    # 故**写前**先取旧 stage（必须在 _sync_issue_fields 之前，否则读到的是已更新的新值）。
+    _prev_stage, _prev_known = "", False
+    try:
+        _num_prev = int(str(issue_id).lstrip("#"))
+        with db_lock:
+            _row_prev = db.cursor().execute(
+                "SELECT stage FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num_prev)).fetchone()
+        _prev_stage = ((_row_prev[0] if _row_prev else "") or "").strip()
+        _prev_known = True
+    except Exception as _e_prev:
+        log.warning(f"set_issue_stage: read previous stage failed ({repo_key} #{issue_id}): {_e_prev}")
+
     # Phase C3：写 issue 单表（无卡片行则建档最小行）
     _sync_issue_fields(repo_key, issue_id, {
         "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
         "a2a_seq": a2a_seq,
     }, ensure_row=True, assignee=assignee)
-    from src.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
     # Issue #85: stage 推进时同步 task.status（仅终态不覆盖）
-    # Issue #1599（审核态漂移收敛）：不再把 pending_review/awaiting_input 排除在同步之外——
-    # 阶段已推进却将 status 留在 pending_review 会形成幽灵审核点（展示态与 issue.status 矛盾）。
-    # 终态 completed/cancelled 仍保留，避免被阶段写入翻活。
+    # Issue #1599（审核态漂移收敛）：不再把 pending_review 排除在同步之外——阶段已推进却将
+    # status 留在 pending_review 会形成幽灵审核点（展示态与 issue.status 矛盾）。
+    # 终态 completed/cancelled 保留，避免被阶段写入翻活；awaiting_input（等用户澄清）
+    # 是明确的「等人」态而非阶段漂移，仍不覆盖（修复：此前后台推进会把等答提示吞掉）。
     _STAGE_TO_TASK_STATUS = {
         "vod": "processing", "issue": "processing", "coding": "processing",
         "qa": "processing", "sre": "processing",
         "pending_review": "pending_review", "done": "completed",
     }
     _task_status = _STAGE_TO_TASK_STATUS.get(stage)
-    if _task_status:
+    _stage_changed = _prev_known and (stage or "").strip() != _prev_stage
+    if _task_status and _stage_changed:
         try:
             _issue_num = int(issue_id.lstrip("#"))
             with db_lock:
@@ -206,7 +224,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 _c.execute(
                     "UPDATE issue SET status=? "
                     "WHERE repo_key=? AND issue_number=? "
-                    "AND status NOT IN ('completed','cancelled')",
+                    "AND status NOT IN ('completed','cancelled','awaiting_input')",
                     (_task_status, repo_key, _issue_num))
                 db.commit()
         except Exception as _e:
