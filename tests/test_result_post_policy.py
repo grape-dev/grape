@@ -164,7 +164,7 @@ class TestPolicyModes:
         _post_result_to_issue("test/repo", "5", text, "fake_token", "vod",
                               agent_result=agent_result, task_id=tid)
 
-    @pytest.mark.parametrize("policy", ["strict", "clean", "off"])
+    @pytest.mark.parametrize("policy", ["strict", "clean"])
     def test_error_text_suppressed(self, monkeypatch, policy):
         tid = f"t_1545_err_{policy}"
         _seed_task(tid=tid)
@@ -214,13 +214,27 @@ class TestPolicyModes:
         assert "<!-- grape-auto-comment -->" in captured["body"]
         assert not _suppressed_records(tid)
 
-    def test_off_suppresses_structured(self, monkeypatch):
+    def test_off_restores_posting(self, monkeypatch):
+        """修复（2026-11-09）：off = 关闭抑制、恢复照贴。
+
+        原实现记录 policy_off 留痕后返回空串，等于把 off 做成「全量抑制」，与本开关语义相反；
+        现断言 agent 产出照常发评论、不留 RESULT_POST_SUPPRESSED 记录。
+        """
         tid = "t_1545_off_struct"
         _seed_task(tid=tid)
         captured = {}
         self._post(monkeypatch, captured, self.STRUCTURED, True, "off", tid)
-        assert "body" not in captured, "off 下 agent 产出零评论"
-        assert _suppressed_records(tid)
+        assert "body" in captured, "off 下 agent 产出应照贴"
+        assert not _suppressed_records(tid), "off 下不应留抑制记录"
+
+    def test_off_posts_error_text_too(self, monkeypatch):
+        """off 连报错文本也照贴（操作者显式关闭抑制时的预期）。"""
+        tid = "t_1545_off_err"
+        _seed_task(tid=tid)
+        captured = {}
+        self._post(monkeypatch, captured, self.ERROR_TEXT, True, "off", tid)
+        assert "body" in captured
+        assert not _suppressed_records(tid)
 
     @pytest.mark.parametrize("policy", ["strict", "clean", "off"])
     def test_system_notification_always_posted(self, monkeypatch, policy):

@@ -4519,10 +4519,9 @@ def _apply_agent_result_policy(result_text: str, structured_conclusion: str, pla
     """
     _policy = _result_post_policy()
     if _policy == "off":
-        _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
-                                "policy_off", result_text)
-        log.info(f"Exec agent: suppress result comment by policy=off ({repo_key}#{issue_number})")
-        return ""
+        # 修复（2026-11-09）：off 的语义是「关闭抑制、恢复照贴」，原实现记录 policy_off 后
+        # 返回空串＝照样全量抑制，与开关含义相反（QA 复核发现）。
+        return structured_conclusion or (plain_text or "")[:3000]
     if _policy == "strict" and not structured_conclusion:
         _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
                                 "strict_no_conclusion", result_text)
