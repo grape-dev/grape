@@ -272,8 +272,9 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 | resume chat | session/close → 跨进程 session/resume → 续聊上下文保留（已验证），configOptions 保留 | 另立 issue（阶段 4） |
 | Windows 路径 | os_adapter _ENGINE_WINDOWS_PATHS 条目（Linux 一期仅 PATH） | — |
 | usage_update 消费 | {used,size} 上下文占用的展示消费 | — |
-| 引擎设置页补探活状态列 | 设置→引擎页只有在线/健康分，探活失败（如无凭据 MISSING_CREDENTIAL）在页面无线索，需去可观测页看——补四态探活列（✅延迟/❌/⏭/⏳）+ 悬停完整 probe_error，复用 observability.js:1214 既有渲染 | 2026-11-06 页面验收发现 |
+| 引擎设置页补探活状态列 | 设置→引擎页只有在线/健康分，探活失败（如无凭据 MISSING_CREDENTIAL）在页面无线索，需去可观测页看——补四态探活列（✅延迟/❌/⏳）+ 悬停完整 probe_error，复用 observability.js:1214 既有渲染 | 2026-11-06 页面验收发现 |
 | 失败事件 Engine 行显示真实绑定引擎 | 事件页 Engine 行取 `data.runtime \|\| data.backend \|\| 'OpenCode'` 兜底，派发失败事件显示成 opencode 误导排障（实例：vod 绑 aishell-dsh 失败事件显示 Engine: opencode）——失败事件改显示绑定引擎名（失败文案里已有），events.js:140 | 2026-11-06 页面验收发现 |
+| **TODO（Windows）：hwcloud/hermes 任务链 select 轮询改 readline** | `hwcloud_acp.py:410`、`hermes_acp.py:407` 的 select 读线程在 Windows 首循环即抛 WinError 10038（select 仅支持 socket）→ ACP 任务事件流全丢，复现 aishell ⑱ 的「探活 ok（agent.py:271/469 已有 _win_acp_* 兼容层）、任务黑屏」割裂。修法照抄 aishell_acp 9ce71b005：win32 分支专用阻塞 readline 线程 + 切行抽 `_feed()` 共用，POSIX 路径不动，各 ~20 行 | 2026-11-07 aishell ⑱ 同族排查 |
 
 ## 6. 实施顺序（一期）
 
