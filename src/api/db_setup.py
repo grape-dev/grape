@@ -3003,18 +3003,17 @@ def _fn_add_agent_runtimes_model() -> None:
     with db_lock:
         c = db.cursor()
         if is_mysql:
-            c.execute(
-                "SELECT COUNT(*) FROM information_schema.columns "
-                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_runtimes'"
-                " AND COLUMN_NAME IN ('model_name','model_source','model_reported_at')")
-            have = c.fetchone()[0]
-            if have < 3:
-                if have < 1:
-                    c.execute("ALTER TABLE agent_runtimes ADD COLUMN model_name TEXT DEFAULT ''")
-                if have < 2:
-                    c.execute("ALTER TABLE agent_runtimes ADD COLUMN model_source TEXT DEFAULT ''")
-                c.execute("ALTER TABLE agent_runtimes ADD COLUMN model_reported_at TEXT DEFAULT ''")
-                db.commit()
+            # Issue #1412 QA Required：逐列 _ensure_column 幂等补列。原实现在 have<3
+            # 分支内无条件执行第三个 ALTER，当 model_reported_at 已存在而
+            # model_name/model_source 缺一个（have==2）时每次启动都抛
+            # Duplicate column name (1060)，迁移永不盖章、三列永远补不齐。
+            # _ensure_column 内部 PRAGMA table_info 由 mysql_compat 转
+            # information_schema，按列判断存在性；strict=True 保证补列失败
+            # 不盖章（下次启动重试）。
+            for col in ("model_name", "model_source", "model_reported_at"):
+                _ensure_column(c, "agent_runtimes", col, "TEXT DEFAULT ''",
+                               allow_copy=True, strict=True)
+            db.commit()
         else:
             c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'")
             row = c.fetchone()
@@ -3664,7 +3663,11 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
             c = conn.cursor()
             c.execute("SELECT version, name, checksum FROM grape_t_schema_migrations")
             return {r[0]: ((r[1] or ""), (r[2] or "")) for r in c.fetchall()}
-        except Exception:
+        except Exception as _read_err:
+            # Issue #1412 QA Optional：区分「读失败」与「版本表为空」，避免线上
+            # 只能看到 legacy 全量重放却无从定位异常。全新库尚无该表时 SELECT
+            # 也会失败，属预期，故仅 warning 不做 fail-closed。
+            log.warning(f"读取 grape_t_schema_migrations 失败，按空表处理: {_read_err}")
             return {}
 
     applied = _applied_versions()
