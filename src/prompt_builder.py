@@ -126,6 +126,18 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     return f"http://localhost:{_local_port()}"
 
 
+def _apply_server_url_placeholders(text: str, runtime_id: int = 0) -> str:
+    """把 prompt 里的服务基址占位符替换成对应语义的地址（Issue #1577 / 架构审查 M3）。
+
+    - `{{SERVER_URL}}`：业务 API 基址（与 help/api 全局约定一致，同 GRAPE_SERVER_URL）
+    - `{{RUNTIME_SERVER_URL}}`：worker runtime / A2A 回连基址
+
+    先替换长占位符：`{{SERVER_URL}}` 是 `{{RUNTIME_SERVER_URL}}` 的子串。
+    """
+    return (text.replace("{{RUNTIME_SERVER_URL}}", _resolve_server_url(runtime_id))
+                .replace("{{SERVER_URL}}", _resolve_business_server_url(runtime_id)))
+
+
 def resolve_task_server_env(runtime_id: int = 0) -> dict:
     """返回任务 env 的两项服务基址（事件/重派/对话入队共用，防漏注入）。
 
@@ -942,8 +954,9 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             pass
 
     parts.append(_build_output_contract(_rk))
-    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
-    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
+    # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
+    # （Issue #1577 / 架构审查 M3；worker 端会再替换一次，幂等）
+    return _apply_server_url_placeholders("\n".join(parts), runtime_id)
 
 
 _AGENT_TAG_RE = None

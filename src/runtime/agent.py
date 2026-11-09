@@ -2520,8 +2520,14 @@ async def _execute_task(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"linked repos worktree init failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
-    prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
-                                       .replace("{{SERVER_URL}}", task.get("server_url") or "")
+    prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir)
+    # Issue #1577 / 架构审查 M3：worker 端残留占位符按同一语义兜底——
+    # {{SERVER_URL}}=业务 API（env GRAPE_SERVER_URL）、{{RUNTIME_SERVER_URL}}=回连基址，
+    # 不再把业务占位符填成 A2A 地址（先替换长占位符，避免子串误命中）。
+    _prompt_biz_url = env.get("GRAPE_SERVER_URL") or task.get("server_url") or ""
+    _prompt_runtime_url = env.get("RUNTIME_SERVER_URL") or task.get("server_url") or ""
+    prompt = (prompt.replace("{{RUNTIME_SERVER_URL}}", _prompt_runtime_url)
+                    .replace("{{SERVER_URL}}", _prompt_biz_url))
     # 本机 worker：prompt 里 build_prompt 已把 {{SERVER_URL}} 替换成公网 server_base_url
     # （worker 端此处 .replace("{{SERVER_URL}}") 是空操作），需把 prompt 里已硬编码的公网
     # 地址回改为 localhost，否则本机 worker 的 A2A 走公网 NAT 回环不通（超时）。

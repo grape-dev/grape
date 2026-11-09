@@ -71,6 +71,20 @@ def test_executions_reads_agent_task_id_when_column_present():
         _cleanup()
 
 
+def test_server_url_placeholders_use_matching_bases(monkeypatch):
+    """M3：{{SERVER_URL}} = 业务 API 基址，{{RUNTIME_SERVER_URL}} = 回连基址（先替换长占位符）。"""
+    from src import prompt_builder as pb
+
+    monkeypatch.setattr(pb, "_resolve_server_url", lambda runtime_id=0: "http://rt.example:8080")
+    monkeypatch.setattr(pb, "_resolve_business_server_url", lambda runtime_id=0: "http://biz.example")
+    out = pb._apply_server_url_placeholders(
+        "A {{SERVER_URL}}/api/issues B {{RUNTIME_SERVER_URL}}/api/a2a C")
+    assert out == ("A http://biz.example/api/issues "
+                   "B http://rt.example:8080/api/a2a C")
+    # 无残留占位符
+    assert "{{" not in out
+
+
 def test_zombie_young_grace_env_override():
     """M1：常量可由 env 覆盖，默认 120。"""
     code = ("from src.runtime.scheduler import ZOMBIE_YOUNG_GRACE_SECONDS as v;"

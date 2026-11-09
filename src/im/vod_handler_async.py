@@ -230,10 +230,11 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
 
-    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
+    # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
+    # （Issue #1577 / 架构审查 M3；worker 端会再替换一次，幂等）
     try:
-        from src.prompt_builder import _resolve_server_url
-        return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
+        from src.prompt_builder import _apply_server_url_placeholders
+        return _apply_server_url_placeholders("\n".join(parts))
     except Exception:
         return "\n".join(parts)
 
