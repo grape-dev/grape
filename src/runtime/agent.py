@@ -1353,6 +1353,51 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
     return ok
 
 
+def _same_url_host(a: str, b: str) -> bool:
+    """比较两个 URL 是否指向同一端点（scheme + host + port + path，忽略尾部斜杠）。
+
+    用于判定单地址部署：业务基址与 worker 回连基址同源时，内网 worker 必须
+    继续把业务基址覆盖为本机直连，否则公网/NAT 回环不通（改造前语义）。
+
+    仅比较 netloc 会把「同 host:port、不同 path 前缀」的双地址部署（如业务 API 与
+    runtime 分路径承载）误判为单地址，进而把业务基址覆盖为 localhost；因此纳入
+    scheme 与 path 比较，任一不同即视为双地址、保留显式业务基址。
+    """
+    if not a or not b:
+        return False
+    try:
+        from urllib.parse import urlsplit
+        ua = urlsplit(a.strip())
+        ub = urlsplit(b.strip())
+        if (ua.scheme.lower(), ua.netloc.lower()) != (ub.scheme.lower(), ub.netloc.lower()):
+            return False
+        pa = (ua.path or "").rstrip("/")
+        pb = (ub.path or "").rstrip("/")
+        return pa == pb
+    except Exception:
+        return a.strip().lower().rstrip("/") == b.strip().lower().rstrip("/")
+
+
+def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
+    """本机/内网 worker 修正回连基址（Issue #1577 语义拆分）。
+
+    - `RUNTIME_SERVER_URL` / `task["server_url"]` 覆盖为本 worker 直连地址
+      （A2A / tasks 等回连调用，走公网会 NAT 回环不通）。
+    - 业务 API 基址 `GRAPE_SERVER_URL`：双地址部署（显式业务基址与 worker 回连
+      基址不同主机）时保留不动，任务内 grape 业务命令需要全量端点；单地址部署
+      （未提供业务基址，或业务基址与回连基址同主机）时仍覆盖为本机直连地址，
+      与改造前等价，避免内网 worker 走公网 NAT 回环不通。
+    """
+    _business_base = env.get("GRAPE_SERVER_URL") or ""
+    _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
+    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
+    env["RUNTIME_SERVER_URL"] = local_base
+    task["server_url"] = local_base
+    if _single_address:
+        env["GRAPE_SERVER_URL"] = local_base
+        log.info("local worker: single-address deploy, override GRAPE_SERVER_URL -> %s", local_base)
+
+
 def _current_username() -> "str | None":
     """Resolve the current username without touching a controlling terminal.
 
@@ -2449,9 +2494,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if ":" not in _local_base.split("://", 1)[1]:
                 _local_base = _local_base + ":3000"
         # 其他（http:// 内网域名/IP 无端口）：保持原样，不猜端口
-        env["GRAPE_SERVER_URL"] = _local_base
-        task["server_url"] = _local_base
-        log.info(f"local worker: override GRAPE_SERVER_URL/server_url -> {_local_base}")
+        # Issue #1577：本机/内网 worker 覆盖 worker runtime 基址（RUNTIME_SERVER_URL /
+        # task.server_url，A2A/tasks 直连用）；双地址部署保留显式业务 API 基址
+        # GRAPE_SERVER_URL，单地址部署仍覆盖为本机直连（改造前等价，避免 NAT 回环不通）。
+        _apply_local_worker_base_override(env, task, _local_base)
+        log.info(f"local worker: override RUNTIME_SERVER_URL/server_url -> {_local_base}")
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
@@ -2489,8 +2536,14 @@ async def _execute_task(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"linked repos worktree init failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
-    prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
-                                       .replace("{{SERVER_URL}}", task.get("server_url") or "")
+    prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir)
+    # Issue #1577 / 架构审查 M3：worker 端残留占位符按同一语义兜底——
+    # {{SERVER_URL}}=业务 API（env GRAPE_SERVER_URL）、{{RUNTIME_SERVER_URL}}=回连基址，
+    # 不再把业务占位符填成 A2A 地址（先替换长占位符，避免子串误命中）。
+    _prompt_biz_url = env.get("GRAPE_SERVER_URL") or task.get("server_url") or ""
+    _prompt_runtime_url = env.get("RUNTIME_SERVER_URL") or task.get("server_url") or ""
+    prompt = (prompt.replace("{{RUNTIME_SERVER_URL}}", _prompt_runtime_url)
+                    .replace("{{SERVER_URL}}", _prompt_biz_url))
     # 本机 worker：prompt 里 build_prompt 已把 {{SERVER_URL}} 替换成公网 server_base_url
     # （worker 端此处 .replace("{{SERVER_URL}}") 是空操作），需把 prompt 里已硬编码的公网
     # 地址回改为 localhost，否则本机 worker 的 A2A 走公网 NAT 回环不通（超时）。

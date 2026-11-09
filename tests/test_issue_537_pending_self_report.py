@@ -87,7 +87,10 @@ def _seed_runtime(rid, cid, busy=1, status="online", last_seen=None, worker_vers
 
 
 def _seed_task(tid, rid, seq, status="running", pending_since=None, skill="", prompt="do work",
-               env_extra=None, issue_id="#537", started_at=None):
+               env_extra=None, issue_id="#537", started_at=None, event_type="a2a_event"):
+    # Issue #1546: event_type 默认保持源事件 a2a_event；仅当用例经由
+    # _poll_dispatched_completion/_reap_zombie_executions 的执行记录反查时，
+    # 由调用方显式传 event_type="autopilot_event"（派生任务的可判别特征）。
     _env = json.dumps(env_extra or {}, ensure_ascii=False) if env_extra else "{}"
     _started = started_at or _iso(_utcnow())
     with db_lock:
@@ -96,8 +99,8 @@ def _seed_task(tid, rid, seq, status="running", pending_since=None, skill="", pr
         c.execute(
             "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, repo_key, issue_id, "
             "agent_type, event_type, status, prompt, cwd, skill_files, env_extra, event_seq, "
-            "skill, started_at, pending_since) VALUES (?,?,?,?,?, 'vod', 'a2a_event', ?, ?, '', '{}', ?, ?, ?, ?, ?)",
-            (tid, "sess-" + tid, rid, RK, issue_id, status, prompt, _env, seq, skill,
+            "skill, started_at, pending_since) VALUES (?,?,?,?,?, 'vod', ?, ?, ?, '', '{}', ?, ?, ?, ?, ?)",
+            (tid, "sess-" + tid, rid, RK, issue_id, event_type, status, prompt, _env, seq, skill,
              _started, pending_since))
         c.execute("DELETE FROM events WHERE seq=?", (seq,))
         c.execute(
@@ -107,13 +110,17 @@ def _seed_task(tid, rid, seq, status="running", pending_since=None, skill="", pr
         db.commit()
 
 
-def _seed_exec(exec_id, status="dispatched", task_id=77):
+def _seed_exec(exec_id, status="dispatched", task_id=77, started_at=None):
+    # Issue #1546: fallback reverse lookup requires exec.started_at <= task.created_at
+    # and the young-grace guard needs an aged execution, so seed a past start time.
+    _started = started_at or _iso(_utcnow() - timedelta(hours=1))
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM autopilot_executions WHERE id=?", (exec_id,))
         c.execute(
-            "INSERT INTO autopilot_executions (id, task_id, status, a2a_seq) VALUES (?,?,?,?)",
-            (exec_id, task_id, status, exec_id))
+            "INSERT INTO autopilot_executions (id, task_id, status, a2a_seq, started_at, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (exec_id, task_id, status, exec_id, _started, _started))
         db.commit()
 
 
@@ -447,7 +454,7 @@ class TestS4ZombieOfflineGrace:
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1, status="offline",
                       last_seen=_iso(_utcnow() - timedelta(seconds=60)))
-        _seed_task("t_i537_z1", RT_REMOTE, 9526, status="running")
+        _seed_task("t_i537_z1", RT_REMOTE, 9526, status="running", event_type="autopilot_event")
         _seed_exec(9526, status="running")
         _reap_zombie_executions()
         assert _exec_row(9526)[0] == "running", "短离线不得判 failed"
@@ -458,7 +465,7 @@ class TestS4ZombieOfflineGrace:
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1, status="offline",
                       last_seen=_iso(_utcnow() - timedelta(seconds=3600)))
-        _seed_task("t_i537_z2", RT_REMOTE, 9527, status="running")
+        _seed_task("t_i537_z2", RT_REMOTE, 9527, status="running", event_type="autopilot_event")
         _seed_exec(9527, status="running")
         _reap_zombie_executions()
         ex = _exec_row(9527)
@@ -469,7 +476,7 @@ class TestS4ZombieOfflineGrace:
         """last_seen_at 缺失（信息不足）→ 不判死（宁可多等，不误杀重启窗口）。"""
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1, status="offline", last_seen="")
-        _seed_task("t_i537_z3", RT_REMOTE, 9528, status="running")
+        _seed_task("t_i537_z3", RT_REMOTE, 9528, status="running", event_type="autopilot_event")
         _seed_exec(9528, status="running")
         _reap_zombie_executions()
         assert _exec_row(9528)[0] == "running"
@@ -479,7 +486,7 @@ class TestS4ZombieOfflineGrace:
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1, status="offline",
                       last_seen=_iso(_utcnow() - timedelta(seconds=3600)))
-        _seed_task("t_i537_z4", RT_REMOTE, 9529, status="pending_self_report",
+        _seed_task("t_i537_z4", RT_REMOTE, 9529, status="pending_self_report", event_type="autopilot_event",
                    pending_since=_iso(_utcnow() - timedelta(seconds=120)))
         _seed_exec(9529, status="running")
         _reap_zombie_executions()
@@ -490,7 +497,7 @@ class TestS4ZombieOfflineGrace:
         """回归：agent_task 已完成 → 僵尸 exec 同步 success（无 evidence 时保持原行为）。"""
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0)
-        _seed_task("t_i537_z5", RT_REMOTE, 9530, status="completed", skill="",
+        _seed_task("t_i537_z5", RT_REMOTE, 9530, status="completed", event_type="autopilot_event", skill="",
                    prompt="do routine")
         _seed_exec(9530, status="running")
         _reap_zombie_executions()
@@ -503,7 +510,7 @@ class TestS4PollPending:
         import asyncio
         from src.runtime.scheduler import _poll_dispatched_completion
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
-        _seed_task("t_i537_p1", RT_REMOTE, 9531, status="pending_self_report",
+        _seed_task("t_i537_p1", RT_REMOTE, 9531, status="pending_self_report", event_type="autopilot_event",
                    pending_since=_iso(_utcnow()))
         _seed_exec(9531, status="dispatched")
 
@@ -525,7 +532,7 @@ class TestS4PollPending:
         import asyncio
         from src.runtime.scheduler import _poll_dispatched_completion, _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
-        _seed_task("t_i537_p2", RT_REMOTE, 9532, status="pending_self_report",
+        _seed_task("t_i537_p2", RT_REMOTE, 9532, status="pending_self_report", event_type="autopilot_event",
                    pending_since=_iso(_utcnow() - timedelta(seconds=PENDING_TIMEOUT_DEFAULT + 60)))
         _seed_exec(9532, status="dispatched")
 
@@ -678,7 +685,7 @@ class TestS5DeployEvidence:
         import asyncio
         from src.runtime.scheduler import _poll_dispatched_completion
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0, worker_version="202610101200")
-        _seed_task("t_i537_ev12", RT_REMOTE, 9544, status="completed", skill="upgrade-master",
+        _seed_task("t_i537_ev12", RT_REMOTE, 9544, status="completed", event_type="autopilot_event", skill="upgrade-master",
                    env_extra={"EXPECTED_VERSION": "202610301316"},
                    prompt="升级到目标版本 202610301316")
         _seed_exec(9544, status="dispatched")
@@ -705,7 +712,7 @@ class TestS5DeployEvidence:
         import asyncio
         from src.runtime.scheduler import _poll_dispatched_completion
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0, worker_version="202610301316")
-        _seed_task("t_i537_ev13", RT_REMOTE, 9545, status="completed", skill="upgrade-master",
+        _seed_task("t_i537_ev13", RT_REMOTE, 9545, status="completed", event_type="autopilot_event", skill="upgrade-master",
                    env_extra={"EXPECTED_VERSION": "202610301316"},
                    prompt="升级到目标版本 202610301316")
         _seed_exec(9545, status="dispatched")
@@ -729,7 +736,7 @@ class TestS5DeployEvidence:
         """QA Recommended：zombie recovery 接入 evidence 校验——版本不匹配 → exec failed。"""
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0, worker_version="202610101200")
-        _seed_task("t_i537_ev14", RT_REMOTE, 9546, status="completed", skill="upgrade-master",
+        _seed_task("t_i537_ev14", RT_REMOTE, 9546, status="completed", event_type="autopilot_event", skill="upgrade-master",
                    env_extra={"EXPECTED_VERSION": "202610301316"},
                    prompt="升级到目标版本 202610301316")
         _seed_exec(9546, status="running")
@@ -742,7 +749,7 @@ class TestS5DeployEvidence:
         """QA Recommended：zombie recovery 接入 evidence 校验——版本匹配 → exec success。"""
         from src.runtime.scheduler import _reap_zombie_executions
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=0, worker_version="202610301316")
-        _seed_task("t_i537_ev16", RT_REMOTE, 9548, status="completed", skill="upgrade-master",
+        _seed_task("t_i537_ev16", RT_REMOTE, 9548, status="completed", event_type="autopilot_event", skill="upgrade-master",
                    env_extra={"EXPECTED_VERSION": "202610301316"},
                    prompt="升级到目标版本 202610301316")
         _seed_exec(9548, status="running")

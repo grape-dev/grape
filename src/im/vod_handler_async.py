@@ -230,10 +230,11 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
 
-    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
+    # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
+    # （Issue #1577 / 架构审查 M3；worker 端会再替换一次，幂等）
     try:
-        from src.prompt_builder import _resolve_server_url
-        return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
+        from src.prompt_builder import _apply_server_url_placeholders
+        return _apply_server_url_placeholders("\n".join(parts))
     except Exception:
         return "\n".join(parts)
 
@@ -291,6 +292,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             _queue_repo_token = repo_token or ""
             if _token_result.level == "user":
                 _queue_repo_token = ""  # 路径 B: repo_gitcode_token 留空，与 pipeline 一致
+            from src.prompt_builder import resolve_task_server_env
             tid = enqueue_task(
                 agent_session_id=f"vod:{repo_key}",
                 runtime_id=runtime_id,
@@ -303,6 +305,9 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 repo_gitcode_token=_queue_repo_token,
                 skill_path=skill_path or "",
                 skill_id=agent_session.get("skill_id", 0) or 0,
+                # Issue #1577：与事件/Web chat 同源注入两项服务基址，远端 VOD worker
+                # 的业务命令（issues/git-repo）免 --base-url 可用。
+                env_extra=resolve_task_server_env(runtime_id),
             )
             log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={kind}")
             task = await wait_task_terminal(tid)

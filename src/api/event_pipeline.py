@@ -828,6 +828,75 @@ def _inject_bot_agent_env(env_extra: dict, repo_key: str, agent_type: str) -> No
         pass
 
 
+_PR_URL_NUMBER_RE = re.compile(r"/(?:merge_requests|pulls|pull)/(\d+)(?:[#/?]|$)")
+
+
+def _numeric_value(value) -> str:
+    """返回去 # 前缀后的纯数字字符串；非数字/空返回空串。"""
+    text = str(value or "").strip().lstrip("#")
+    return text if text.isdigit() else ""
+
+
+def _pr_number_from_url(*values) -> str:
+    """从 PR/MR 结构化 URL（.../merge_requests/<N>、.../pulls/<N>）提取编号。"""
+    for value in values:
+        match = _PR_URL_NUMBER_RE.search(str(value or ""))
+        if match and match.group(1) != "0":
+            return match.group(1)
+    return ""
+
+
+def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, str]:
+    """Issue #1579：统一 PR 号解析链，note_hook_pr 与普通事件共用同一来源。
+
+    返回 (PR 号, 来源)。来源：payload（结构化字段，含 URL 兜底）；失败返回 ("", "")。
+    note_hook_pr 不使用 object_attributes.iid：Note Hook 中该字段是评论自身 id，
+    误用会把评论号当成 PR 号；改为从 object_attributes.url（.../merge_requests/<N>）
+    等结构化 URL 兜底。仅消费结构化字段，不从事件标题猜号——真实事件标题是 MR/Issue
+    标题（如 `fix: #1412 ...`），不含 `note_hook_pr #<N>` 标记。
+    """
+    merge_req = payload.get("merge_request")
+    pull_req = payload.get("pull_request")
+    obj_attrs = payload.get("object_attributes")
+    merge_req = merge_req if isinstance(merge_req, dict) else {}
+    pull_req = pull_req if isinstance(pull_req, dict) else {}
+    obj_attrs = obj_attrs if isinstance(obj_attrs, dict) else {}
+
+    candidates = [
+        payload.get("pr_number"),
+        evt.get("_pr_sub_pr_number"),
+    ]
+    if event_type == "note_hook_pr":
+        candidates.extend([
+            merge_req.get("iid"),
+            merge_req.get("number"),
+            pull_req.get("iid"),
+            pull_req.get("number"),
+            obj_attrs.get("noteable_iid"),
+        ])
+    else:
+        candidates.extend([
+            pull_req.get("number"),
+            merge_req.get("number"),
+            obj_attrs.get("iid"),
+        ])
+    for value in candidates:
+        num = _numeric_value(value)
+        if num:
+            return num, "payload"
+
+    url_num = _pr_number_from_url(
+        obj_attrs.get("url"),
+        merge_req.get("web_url"),
+        merge_req.get("url"),
+        pull_req.get("web_url"),
+        pull_req.get("url"),
+    )
+    if url_num:
+        return url_num, "url"
+    return "", ""
+
+
 def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     """Issue #528：ISSUE_NUMBER/PR_NUMBER 仅注入纯数字值。
 
@@ -842,6 +911,12 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     前两来源均空时依次尝试 payload.pull_request.number（GitHub/GitCode）→
     payload.merge_request.number（GitLab MR）→ payload.object_attributes.iid
     （GitLab hook），沿用 lstrip("#").isdigit() 校验。
+
+    Issue #1579：note_hook_pr 与普通事件统一走 `_extract_pr_number` 解析链——
+    payload 结构化字段优先（含 Note Hook noteable_iid），缺失时从
+    object_attributes.url / merge_request、pull_request 的 URL（.../merge_requests/<N>）
+    兜底；不从事件标题猜号。解析失败注入 PR_NUMBER_PARSE_FAILED=1 并告警，
+    禁止用 ISSUE_NUMBER 顶替。
     """
     _issue_num = str(evt.get("issue_id", "") or (evt.get("payload", {}) or {}).get("issue_number", "") or "").lstrip("#")
     if _issue_num.isdigit():
@@ -865,17 +940,16 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     elif _issue_num:
         log.info(f"Pipeline env: non-numeric issue_id '{_issue_num}', skip ISSUE_NUMBER/GRAPE_ISSUE_ID injection (Issue #528)")
     _payload = evt.get("payload", {}) or {}
-    _pr_raw = (_payload.get("pr_number", "")
-               or evt.get("_pr_sub_pr_number", "")
-               or (( _payload.get("pull_request", {}) or {}).get("number", "") if isinstance(_payload.get("pull_request"), dict) else "")
-               or ((_payload.get("merge_request", {}) or {}).get("number", "") if isinstance(_payload.get("merge_request"), dict) else "")
-               or ((_payload.get("object_attributes", {}) or {}).get("iid", "") if isinstance(_payload.get("object_attributes"), dict) else "")
-               or "")
-    _pr_num = str(_pr_raw).lstrip("#")
-    if _pr_num.isdigit():
+    _event_type = str(evt.get("type", "") or evt.get("event_type", "") or "")
+    _pr_num, _pr_source = _extract_pr_number(evt, _payload, _event_type)
+    if _pr_num:
         env_extra["PR_NUMBER"] = _pr_num
-    elif _pr_num:
-        log.info(f"Pipeline env: non-numeric pr_number '{_pr_num}', skip PR_NUMBER injection (Issue #528)")
+        if _pr_source == "url":
+            log.info(f"Pipeline env: PR #{_pr_num} resolved from event URL (Issue #1579)")
+    elif _event_type == "note_hook_pr":
+        log.warning(f"Pipeline env: note_hook_pr PR number parse failed "
+                    f"(issue=#{_issue_num or '-'}, title={evt.get('title', '') or '-'})")
+        env_extra["PR_NUMBER_PARSE_FAILED"] = "1"
 
 
 def _norm_issue_id(s) -> str:
@@ -2310,6 +2384,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             from src.api.session_store import get_issue_stage as _gis
             _st_sre = _gis(repo_key, _rid_sre)
             if _st_sre and _st_sre.get("stage") == "qa":
+                # Issue #1573: PR 合并视同审核通过——qa 阶段 pending_review 时用户直接合并
+                # PR 会将卡片永久留在待审核列；此处先恢复 processing，失败降级不阻断后续推进。
+                try:
+                    from src.api.session_store import get_issue_status as _gist
+                    if _gist(repo_key, _rid_sre) == "pending_review":
+                        _num_sre = str(_rid_sre).lstrip("#")
+                        if _num_sre.isdigit():
+                            from src.api.issues_center import _resume_issue_waiting
+                            if _resume_issue_waiting(repo_key, int(_num_sre)):
+                                log.info(f"Pipeline: PR merged treated as review pass, "
+                                         f"pending_review→processing for {_rid_sre}")
+                except Exception as _resume_e:
+                    log.warning(f"Pipeline: PR merged resume pending_review failed "
+                                f"for {_rid_sre}: {_resume_e}")
                 set_issue_stage(repo_key, _rid_sre, "sre", "sre")
                 log.info(f"Pipeline: PR merged skip QA, advance stage qa→sre for {_rid_sre}")
 
@@ -3482,7 +3570,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    from src.prompt_builder import _resolve_server_url
+    from src.prompt_builder import resolve_task_server_env
     from src.repo_key import split_owner_repo as _sor2
     from src.repo_key import from_repo_key as _frk2
     _owner2, _repo_name2 = _sor2(repository)
@@ -3492,7 +3580,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "REPO_OWNER": _owner2,
         "REPO_NAME": _repo_name2,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
-        "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
+        # Issue #1577：GRAPE_SERVER_URL 承载业务 API 基址（issues/git-repo 全量端点），
+        # worker runtime / A2A 回连基址由 RUNTIME_SERVER_URL 独立承载（语义拆分）。
+        # 统一复用 resolve_task_server_env，与 build_task_env / chat 入队同源，防双实现漂移。
+        **resolve_task_server_env(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     # Issue #427：PR 订阅任务（evt 带 _pr_sub_scene_id）场景按订阅场景注入——
@@ -3754,8 +3845,9 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     env["REPO_OWNER"] = _owner
     env["REPO_NAME"] = _repo_name
     env["ACCOUNT"] = account
-    from src.prompt_builder import _resolve_server_url
-    env["GRAPE_SERVER_URL"] = _resolve_server_url(runtime_id)
+    from src.prompt_builder import resolve_task_server_env
+    # Issue #1577：GRAPE_SERVER_URL=业务 API 基址，RUNTIME_SERVER_URL=worker runtime 基址。
+    env.update(resolve_task_server_env(runtime_id))
     # ── 场景环境（work_branch / scene_id / custom_fields / linked_repos）──
     try:
         from src.runtime.repogit import _read_scene_work_branch
@@ -4301,14 +4393,162 @@ def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) ->
     return ""
 
 
+# ===== Issue #1545: agent 产出回帖策略（阻止引擎报错文本外泄到 Issue/PR） =====
+_ERROR_TEXT_PATTERNS = (
+    "model not found", "model_not_found", "traceback (most recent call last)",
+    "econnrefused", "etimedout", "rate limit", "quota exceeded",
+    "sockettimeout", "upstream", "bad gateway", "service unavailable",
+)
+_RESULT_POST_POLICY_WARNED = False
+
+
+def _looks_like_error_text(text: str) -> bool:
+    """Issue #1545 B1：判断文本是否为引擎/上游报错文本（固定规则集，不得增删）。"""
+    t = text or ""
+    lower = t.lower()
+    if re.search(r"http\s*[45]\d\d", t, re.IGNORECASE):
+        return True
+    if any(p in lower for p in _ERROR_TEXT_PATTERNS):
+        return True
+    if t.lstrip().startswith("\u274c"):
+        return True
+    if "exit_code=" in lower:
+        return True
+    if "http 401" in lower or "http 403" in lower:
+        return True
+    return False
+
+
+def _result_post_policy() -> str:
+    """Issue #1545 B2：读取 GRAPE_RESULT_POST_POLICY（strict 默认 / clean / off）。
+
+    非法值回落 strict，进程内只告警一次；有效值不缓存，便于运行时与测试切换。
+    """
+    global _RESULT_POST_POLICY_WARNED
+    raw = (os.environ.get("GRAPE_RESULT_POST_POLICY") or "").strip().lower()
+    if raw in ("strict", "clean", "off"):
+        return raw
+    if raw and not _RESULT_POST_POLICY_WARNED:
+        log.warning(f"invalid GRAPE_RESULT_POST_POLICY={raw!r}, fallback to strict")
+        _RESULT_POST_POLICY_WARNED = True
+    return "strict"
+
+
+def _parse_task_errors(raw):
+    """把 agent_tasks.errors 原始值解析为列表（兼容历史纯字符串）。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return [str(raw)]
+    if isinstance(parsed, list):
+        return parsed
+    return [parsed]
+
+
+def _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type, reason, raw_text):
+    """Issue #1545 C1/C2：把一次结果回帖抑制留痕写入 agent_tasks.errors。
+
+    复用既有 errors JSON 去重追加通路，不新增列。幂等键 = 同 issue + raw_text 前 200 字；
+    DB 异常只告警，绝不影响任务终态与主流程。
+    """
+    try:
+        _rec = {
+            "error_code": "RESULT_POST_SUPPRESSED",
+            "policy": _result_post_policy(),
+            "reason": reason,
+            "agent_type": agent_type or "",
+            "issue_number": str(issue_number or ""),
+            "raw_text": (raw_text or "")[:500],
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        _idem_key = (raw_text or "")[:200]
+        _where_col = ""
+        _where_val = None
+        _existing = None
+        with db_lock:
+            c = db.cursor()
+            if task_id:
+                c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                row = c.fetchone()
+                if row:
+                    _where_col, _where_val, _existing = "id", task_id, _parse_task_errors(row[0])
+            elif seq is not None:
+                c.execute(
+                    "SELECT errors FROM agent_tasks WHERE event_seq=? "
+                    "ORDER BY created_at DESC LIMIT 1", (seq,))
+                row = c.fetchone()
+                if row:
+                    _where_col, _where_val, _existing = "event_seq", seq, _parse_task_errors(row[0])
+            else:
+                # 无任务上下文（系统通知等）→ 按 repo_key + issue 兜底定位最近任务
+                _issue_num = str(issue_number or "").lstrip("#")
+                c.execute(
+                    "SELECT id, errors FROM agent_tasks WHERE repo_key=? AND "
+                    "(issue_id=? OR issue_id=? OR issue_id LIKE ?) "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (repo_key or "", str(issue_number or ""), _issue_num, f"%{_issue_num}%"))
+                row = c.fetchone()
+                if row:
+                    _where_col, _where_val, _existing = "id", row[0], _parse_task_errors(row[1])
+            if _where_col and _existing is not None:
+                for e in _existing:
+                    if (isinstance(e, dict) and e.get("error_code") == "RESULT_POST_SUPPRESSED"
+                            and (e.get("raw_text") or "")[:200] == _idem_key
+                            and str(e.get("issue_number") or "") == _rec["issue_number"]):
+                        return
+                _existing = [e for e in _existing if str(e).strip()]
+                _existing.append(_rec)
+                if len(_existing) > 5:
+                    _existing = _existing[:1] + _existing[1:][-4:]
+                c.execute(f"UPDATE agent_tasks SET errors=? WHERE {_where_col}=?",
+                          (json.dumps(_existing, ensure_ascii=False), _where_val))
+                db.commit()
+                return
+        log.warning(f"record_post_suppressed: no task row for {repo_key}#{issue_number}")
+    except Exception as e:
+        log.warning(f"record_post_suppressed failed: {e}")
+
+
+def _apply_agent_result_policy(result_text: str, structured_conclusion: str, plain_text: str,
+                               task_id, seq, repo_key, issue_number, agent_type):
+    """Issue #1545 A3/B3：对 agent 产出套用回帖策略。
+
+    返回应当发布的文本；返回空串表示抑制（已留痕）。仅 agent_result=True 时调用。
+    """
+    _policy = _result_post_policy()
+    if _policy == "off":
+        # 修复（2026-11-09）：off 的语义是「关闭抑制、恢复照贴」，原实现记录 policy_off 后
+        # 返回空串＝照样全量抑制，与开关含义相反（QA 复核发现）。
+        return structured_conclusion or (plain_text or "")[:3000]
+    if _policy == "strict" and not structured_conclusion:
+        _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                "strict_no_conclusion", result_text)
+        log.info(f"Exec agent: suppress result comment by policy=strict (no structured conclusion) "
+                 f"({repo_key}#{issue_number})")
+        return ""
+    if _policy == "clean" and not structured_conclusion and _looks_like_error_text(plain_text):
+        _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                "clean_error_text", result_text)
+        log.info(f"Exec agent: suppress result comment by policy=clean (error text) "
+                 f"({repo_key}#{issue_number})")
+        return ""
+    # Issue #1545 B3：无结构化 conclusion 时沿用既有 3000 字截断，避免长正文整段外发。
+    return structured_conclusion or (plain_text or "")[:3000]
+
+
 def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_token: str, agent_type: str,
-                          repo_key: str = ""):
+                          repo_key: str = "", *, agent_result: bool, task_id: str = "", seq=None):
     """Agent 执行完成后，将结果作为评论发回 VCS Issue。
 
     根据 repo_key provider 分流 GitHub/GitCode。
     方案 B：先 GET Issue 评论列表，若已有 agent 发的评论则跳过系统回帖，
     避免与 agent 自己发的评论重复（"一鱼两吃"问题）。
     agent 忘了发评论时系统补发，保证 Issue 不会静悄悄。
+
+    Issue #1545：`agent_result` 必填以区分「agent 产出」（True，套用回帖策略，
+    阻止引擎/上游报错文本外泄）与「系统通知」（False，行为完全不变）。
     """
     if not repository or not issue_number or not bot_token:
         return
@@ -4330,14 +4570,26 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
+    _structured_conclusion = _conclusion
+    _plain_text = ""
     # conclusion 提取失败时：保留有效 result_text（纯文本），避免思考过程/JSON 块泄漏到 Issue 评论；
     # result_text 为空或纯 JSON 时无内容可发，直接跳过回帖（Issue #679：不发占位文案）
     if not _conclusion:
         _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
         if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _plain_text = _stripped
             _conclusion = _stripped[:3000]
         else:
+            if agent_result and (result_text or "").strip():
+                _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type,
+                                        "no_conclusion", result_text)
             log.info(f"Exec agent: skip system comment, no conclusion or valid text to post to {repository}/issues/{issue_number}")
+            return
+    if agent_result:
+        _conclusion = _apply_agent_result_policy(
+            result_text, _structured_conclusion, _plain_text,
+            task_id, seq, repo_key, issue_number, agent_type)
+        if not _conclusion:
             return
 
     # 根据 repo_key provider 分流
@@ -4444,11 +4696,14 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
 
 
 def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_token: str,
-                        agent_type: str, repo_key: str = ""):
+                        agent_type: str, repo_key: str = "", *, agent_result: bool,
+                        task_id: str = "", seq=None):
     """PR 订阅场景：Agent 执行完成后，将结果作为评论发回 PR。
 
     GitCode: POST /repos/{owner}/{repo}/pulls/{pr_number}/comments
     GitHub:  POST /repos/{owner}/{repo}/issues/{pr_number}/comments（PR 共用 Issue 评论 API）
+
+    Issue #1545：`agent_result` 必填以区分「agent 产出」与「系统通知」，语义同 Issue 回帖。
     """
     if not repository or not pr_number or not bot_token:
         return
@@ -4461,13 +4716,25 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
+    _structured_conclusion = _conclusion
+    _plain_text = ""
     if not _conclusion:
         # Issue #679：无 conclusion 时保留有效纯文本正文；为空或纯 JSON 时跳过发帖（不发占位文案）
         _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
         if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _plain_text = _stripped
             _conclusion = _stripped[:3000]
         else:
+            if agent_result and (result_text or "").strip():
+                _record_post_suppressed(task_id, seq, repo_key, pr_number, agent_type,
+                                        "no_conclusion", result_text)
             log.info(f"Exec agent: skip PR comment, no conclusion to post to {repository}/pulls/{pr_number}")
+            return
+    if agent_result:
+        _conclusion = _apply_agent_result_policy(
+            result_text, _structured_conclusion, _plain_text,
+            task_id, seq, repo_key, pr_number, agent_type)
+        if not _conclusion:
             return
     _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
     _comment += "\n<!-- grape-auto-comment -->"

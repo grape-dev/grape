@@ -375,7 +375,7 @@ def _running_issue_ids(repo_keys) -> set[str]:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key IN ({}) AND status IN ('queued','dispatched','running') AND issue_id!=''".format(
+                "SELECT DISTINCT issue_id FROM agent_tasks WHERE repo_key IN ({}) AND status IN ('queued','dispatched','running') AND issue_id NOT IN ('', '#0')".format(
                     ",".join("?" * len(repo_keys))
                 ),
                 repo_keys
@@ -403,6 +403,8 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
     from src.session_manager import db, db_lock
     _ph = ",".join("?" * len(repo_keys))
     need = max(1, int(need))
+    # Issue #1312：审计事件与无归属事件不参与流水线聚合
+    _exclude_clause = " AND e.event_type <> 'admin_action' AND e.issue_id NOT IN ('', '#0')"
     # 无场景过滤时不 join（省一次 i 表查找；全仓口径只依赖 events）
     if scene_filter:
         _join = ("LEFT JOIN issue i ON i.repo_key = e.repo_key "
@@ -416,14 +418,14 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
         # ① 窗口：最新事件倒序，只要前 need 条
         c.execute(
             f"SELECT e.issue_id, MAX(e.seq) AS m FROM events e {_join} "
-            f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != ''{_scene_clause} "
+            f"WHERE e.repo_key IN ({_ph}){_exclude_clause}{_scene_clause} "
             f"GROUP BY e.issue_id ORDER BY m DESC LIMIT ?",
             (*repo_keys, *_scene_params, need))
         ordered = [r[0] for r in c.fetchall()]
         # ② 总数（精确，供 history_total/统计）
         c.execute(
             f"SELECT COUNT(*) FROM (SELECT e.issue_id FROM events e {_join} "
-            f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != ''{_scene_clause} "
+            f"WHERE e.repo_key IN ({_ph}){_exclude_clause}{_scene_clause} "
             f"GROUP BY e.issue_id)",
             (*repo_keys, *_scene_params))
         total = c.fetchone()[0]
@@ -434,7 +436,7 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
         # 的同 (issue, agent) 事件 → 本条即最新），且 SQLite/MySQL 5.7 都能跑。
         c.execute(
             f"SELECT DISTINCT e.issue_id FROM events e {_join} "
-            f"WHERE e.repo_key IN ({_ph}) AND e.issue_id != '' AND e.agent_type != ''"
+            f"WHERE e.repo_key IN ({_ph}){_exclude_clause} AND e.agent_type != ''"
             f"{_scene_clause} AND e.status = 'failed'"
             f" AND NOT EXISTS (SELECT 1 FROM events e2"
             f"                 WHERE e2.repo_key = e.repo_key AND e2.issue_id = e.issue_id"
@@ -482,7 +484,8 @@ def get_pipeline(owner: str, repo: str,
     with db_lock:
         c = db.cursor()
         try:
-            _where = "repo_key IN ({}) AND issue_id != ''".format(",".join("?" * len(_repo_keys)))
+            _where = ("repo_key IN ({}) AND issue_id NOT IN ('', '#0') "
+                      "AND event_type <> 'admin_action'").format(",".join("?" * len(_repo_keys)))
             _params = list(_repo_keys)
             if _pushdown_ok and _win_ids:
                 _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))

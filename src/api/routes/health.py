@@ -22,18 +22,21 @@ def health():
     base_warning = ""
     browser_url = ""
     worker_url = ""
+    business_url = ""
     split_warning = ""
     try:
         from src.user.db import (get_server_base_url, is_server_base_url_configured,
                                  get_server_base_url_warning,
                                  get_browser_callback_url, get_worker_connect_url,
-                                 get_url_split_warning)
+                                 get_business_api_url, get_url_split_warning)
         base = get_server_base_url() or ""
         base_configured = is_server_base_url_configured()
         base_warning = get_server_base_url_warning() if not base_configured else ""
         # Issue #471 E1：拆分后双地址各取所需（未配新项回退 server_base_url）
         browser_url = get_browser_callback_url() or ""
         worker_url = get_worker_connect_url() or ""
+        # Issue #1577：任务内业务 API 基址（未配回退 server_base_url）
+        business_url = get_business_api_url() or ""
         split_warning = get_url_split_warning()
     except Exception:
         base = ""
@@ -41,6 +44,7 @@ def health():
         base_warning = "server_base_url 检查失败，请查看服务端日志"
         browser_url = ""
         worker_url = ""
+        business_url = ""
         split_warning = ""
 
     # Issue #452: 暴露 agent_runtime 状态，缺失时显式标记 missing 而非静默通过
@@ -86,6 +90,7 @@ def health():
         # Issue #471 E1：浏览器回调 / worker 回连拆分地址（回退 server_base_url）
         "browser_callback_url": browser_url,
         "worker_connect_url": worker_url,
+        "task_business_api_url": business_url,
         "url_split_warning": split_warning,
         "agent_runtime": agent_runtime_status,
         "skill_consistency": skill_consistency,

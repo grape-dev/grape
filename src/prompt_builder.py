@@ -40,8 +40,36 @@ def _vcs_name(repo_key: str) -> str:
     return "GitHub" if _is_github_repo(repo_key) else "GitCode"
 
 
+def _runtime_is_local(runtime_id: int = 0) -> bool | None:
+    """判断 runtime 是否本机直连/本机 worker。
+
+    判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1
+    （本机 worker）。查询异常返回 None（未知），由调用方保留改造前的 localhost
+    异常回退语义；未知不等于「非本地」。
+    """
+    if not runtime_id or runtime_id <= 0:
+        return False
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+            row = c.fetchone()
+            if not row:
+                return False
+            cid = row[0] or 0
+            if cid == 0:
+                return True
+            # 检查是否本机 worker（last_ip == 127.0.0.1）
+            c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
+            cred_row = c.fetchone()
+            return bool(cred_row and (cred_row[0] or "").startswith("127."))
+    except Exception:
+        return None
+
+
 def _resolve_server_url(runtime_id: int = 0) -> str:
-    """返回服务端可达地址（A2A/tasks 等对外调用用）。
+    """返回 worker runtime / A2A 回连基址（RUNTIME_SERVER_URL、task.server_url 用）。
 
     本地引擎走 localhost 直连，避免 NAT 回环不通
     （服务端无法通过自己的公网 IP 访问自己）；
@@ -53,26 +81,73 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     try:
         from src.user.db import get_worker_connect_url
         public_url = get_worker_connect_url()
-        if runtime_id and runtime_id > 0:
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
-                row = c.fetchone()
-                if row:
-                    cid = row[0] or 0
-                    if cid == 0:
-                        return f"http://127.0.0.1:{_local_port()}"
-                    # 检查是否本机 worker（last_ip == 127.0.0.1）
-                    c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
-                    cred_row = c.fetchone()
-                    if cred_row and (cred_row[0] or "").startswith("127."):
-                        return f"http://127.0.0.1:{_local_port()}"
+        local = _runtime_is_local(runtime_id)
+        if local is None:
+            # DB 查询异常：保留改造前「异常回退 localhost」语义（Issue #372 §15.5）。
+            raise RuntimeError("runtime locality lookup failed")
+        if local:
+            return f"http://127.0.0.1:{_local_port()}"
         return public_url
     except Exception:
         pass
     # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
     return f"http://localhost:{_local_port()}"
+
+
+def _resolve_business_server_url(runtime_id: int = 0) -> str:
+    """返回主控业务 API 基址（任务内 grape 业务命令用，GRAPE_SERVER_URL）。
+
+    Issue #1577：任务派发 env 语义拆分——`GRAPE_SERVER_URL` 承载业务 API 基址
+    （issues / git-repo 等全量 261 端点），worker runtime / A2A 回连基址改由
+    `RUNTIME_SERVER_URL`（见 `_resolve_server_url`）独立承载。
+
+    来源优先级（与实际分支一致）：`task_business_api_url` 显式配置
+    > 本机 runtime 直连 `127.0.0.1:{port}` > `server_base_url`。
+    即：显式配置永远优先；未显式配置时，本机 runtime 走本机回环（`server_base_url`
+    不参与），远程 runtime 用 `server_base_url`。单地址部署时 `worker_connect_url`
+    回退 `server_base_url`，故与改造前 `_resolve_server_url` 返回值等价（向前兼容）。
+    """
+    try:
+        from src.user.db import get_business_api_url, get_business_api_url_explicit
+        # Spec 优先级：显式 task_business_api_url 优先于本机回环回退。
+        explicit = get_business_api_url_explicit()
+        if explicit:
+            return explicit
+        public_url = get_business_api_url()
+        local = _runtime_is_local(runtime_id)
+        if local is None:
+            raise RuntimeError("runtime locality lookup failed")
+        if local:
+            return f"http://127.0.0.1:{_local_port()}"
+        return public_url
+    except Exception:
+        pass
+    # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
+    return f"http://localhost:{_local_port()}"
+
+
+def _apply_server_url_placeholders(text: str, runtime_id: int = 0) -> str:
+    """把 prompt 里的服务基址占位符替换成对应语义的地址（Issue #1577 / 架构审查 M3）。
+
+    - `{{SERVER_URL}}`：业务 API 基址（与 help/api 全局约定一致，同 GRAPE_SERVER_URL）
+    - `{{RUNTIME_SERVER_URL}}`：worker runtime / A2A 回连基址
+
+    先替换长占位符：`{{SERVER_URL}}` 是 `{{RUNTIME_SERVER_URL}}` 的子串。
+    """
+    return (text.replace("{{RUNTIME_SERVER_URL}}", _resolve_server_url(runtime_id))
+                .replace("{{SERVER_URL}}", _resolve_business_server_url(runtime_id)))
+
+
+def resolve_task_server_env(runtime_id: int = 0) -> dict:
+    """返回任务 env 的两项服务基址（事件/重派/对话入队共用，防漏注入）。
+
+    - `GRAPE_SERVER_URL`：主控业务 API 基址
+    - `RUNTIME_SERVER_URL`：worker runtime / A2A 回连基址
+    """
+    return {
+        "GRAPE_SERVER_URL": _resolve_business_server_url(runtime_id),
+        "RUNTIME_SERVER_URL": _resolve_server_url(runtime_id),
+    }
 
 
 _PROJECT_INFO_SUMMARY_CHARS = 400
@@ -879,8 +954,9 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             pass
 
     parts.append(_build_output_contract(_rk))
-    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
-    return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url(runtime_id))
+    # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
+    # （Issue #1577 / 架构审查 M3；worker 端会再替换一次，幂等）
+    return _apply_server_url_placeholders("\n".join(parts), runtime_id)
 
 
 _AGENT_TAG_RE = None

@@ -55,7 +55,7 @@ def test_post_result_does_not_write_conversation():
     result_text = "需要确认：目标云服务是 ECS 还是 CCE？"
     before = len(get_messages(_conv_id, limit=50))
     with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-        _post_result_to_issue("tc_sync/demo", 99, result_text, "fake_bot_token", "vod")
+        _post_result_to_issue("tc_sync/demo", 99, result_text, "fake_bot_token", "vod", agent_result=False)
     after = get_messages(_conv_id, limit=50)
     assert len(after) == before, "不应新增任务会话消息（result_text 单写，同步由 _execute_agent 收尾承担）"
 
@@ -78,4 +78,4 @@ def test_post_result_no_conversation_no_error():
             def __exit__(self, *a): pass
         return _R()
     with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-        _post_result_to_issue("tc_sync/no_conv_repo", 888, "test", "fake_token", "issue")
+        _post_result_to_issue("tc_sync/no_conv_repo", 888, "test", "fake_token", "issue", agent_result=False)

@@ -54,6 +54,7 @@
   "save_engine": "保存引擎",
   "engine_config_saved": "引擎配置已保存",
   "save_failed": "保存失败: {{msg}}",
+  "skill_scope_mismatch": "技能 scope 不匹配，请修正标红节点",
   "refresh_failed": "刷新失败: {{msg}}",
   "please_input_scene_name": "请输入场景名称",
   "scene_saved": "场景已保存",

@@ -103,7 +103,7 @@ class TestPostResultToIssueConclusion:
             "artifacts": ["PR #1"],
         })
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod")
+            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod", agent_result=False)
         assert "已修复占位评论问题" in captured["body"]
         assert "[VOD Agent]" in captured["body"]
 
@@ -113,7 +113,7 @@ class TestPostResultToIssueConclusion:
         captured = {}
         result_text = "已修复 bug，测试通过。"
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "coding")
+            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "coding", agent_result=False)
         assert "已修复 bug，测试通过。" in captured["body"]
         assert "任务已完成。" not in captured["body"], \
             "有效 result_text 不应被占位文案覆盖"
@@ -123,7 +123,7 @@ class TestPostResultToIssueConclusion:
         from src.api.event_pipeline import _post_result_to_issue
         captured = {}
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_issue("test/repo", "5", "", "fake_token", "vod")
+            _post_result_to_issue("test/repo", "5", "", "fake_token", "vod", agent_result=False)
         assert "body" not in captured, \
             "result_text 为空时应跳过回帖，不应发出占位文案"
 
@@ -133,7 +133,7 @@ class TestPostResultToIssueConclusion:
         captured = {}
         result_text = '{"foo": "bar"}'
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "sre")
+            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "sre", agent_result=False)
         assert "body" not in captured, \
             "无 conclusion 的 JSON 产出应跳过回帖，不应发出占位文案"
 
@@ -143,7 +143,7 @@ class TestPostResultToIssueConclusion:
         captured = {}
         result_text = "修复完成\n<!-- grape-auto-comment -->"
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod")
+            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod", agent_result=False)
         # conclusion 应保留「修复完成」，body 末尾应有且仅有一个 marker
         assert "修复完成" in captured["body"]
         assert captured["body"].count("<!-- grape-auto-comment -->") == 1, \
@@ -165,7 +165,7 @@ class TestPostResultToIssueDedup:
             {"body": "[VOD Agent] 已完成需求分析，详见 spec。"},
         ]
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured, existing)):
-            _post_result_to_issue("test/repo", "5", "some result", "fake_token", "vod")
+            _post_result_to_issue("test/repo", "5", "some result", "fake_token", "vod", agent_result=False)
         assert "body" not in captured, \
             "Agent 已发评论时系统不应补发（不应触发 POST）"
 
@@ -177,7 +177,7 @@ class TestPostResultToIssueDedup:
             {"body": "[issue agent] 已完成可开发性分析，详见 spec。"},
         ]
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured, existing)):
-            _post_result_to_issue("test/repo", "5", "done", "fake_token", "vod")
+            _post_result_to_issue("test/repo", "5", "done", "fake_token", "vod", agent_result=False)
         assert "body" in captured, "Agent 未发评论时系统应补发"
         assert "[VOD Agent]" in captured["body"]
 
@@ -186,7 +186,7 @@ class TestPostResultToIssueDedup:
         from src.api.event_pipeline import _post_result_to_issue
         captured = {}
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured, [])):
-            _post_result_to_issue("test/repo", "5", "done", "fake_token", "coding")
+            _post_result_to_issue("test/repo", "5", "done", "fake_token", "coding", agent_result=False)
         assert "body" in captured
         assert "[CODING Agent]" in captured["body"]
 
@@ -235,7 +235,7 @@ class TestIssue679SkipEmptyPosting:
         captured = {}
         with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_pr("test/repo", "33", "", "fake_token", "qa")
+            _post_result_to_pr("test/repo", "33", "", "fake_token", "qa", agent_result=False)
         assert "body" not in captured, \
             "PR 回帖：result_text 为空时应跳过，不应发出占位文案"
 
@@ -245,7 +245,7 @@ class TestIssue679SkipEmptyPosting:
         captured = {}
         with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_pr("test/repo", "33", '{"foo": "bar"}', "fake_token", "qa")
+            _post_result_to_pr("test/repo", "33", '{"foo": "bar"}', "fake_token", "qa", agent_result=False)
         assert "body" not in captured, \
             "PR 回帖：无 conclusion 的 JSON 产出应跳过"
 
@@ -255,7 +255,7 @@ class TestIssue679SkipEmptyPosting:
         captured = {}
         with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_pr("test/repo", "33", "conclusion: 审查通过", "fake_token", "qa")
+            _post_result_to_pr("test/repo", "33", "conclusion: 审查通过", "fake_token", "qa", agent_result=False)
         assert "body" in captured, "PR 回帖：纯文本正文应正常发布"
         assert "审查通过" in captured["body"]
         assert "任务已完成" not in captured["body"]
@@ -266,7 +266,7 @@ class TestIssue679SkipEmptyPosting:
         captured = {}
         result_text = json.dumps({"conclusion": "分析完成，评级 ready"})
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
-            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod")
+            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod", agent_result=False)
         assert "分析完成，评级 ready" in captured["body"]
         assert "任务已完成" not in captured["body"]
 

@@ -74,15 +74,16 @@ def teardown_module():
         db.commit()
 
 
-def _seed(status="processing", issue_number=21, assignee="review_eric", stage="vod"):
+def _seed(status="processing", issue_number=21, assignee="review_eric", stage="vod",
+          owner_agent="vod"):
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=?", (issue_number,))
         c.execute("DELETE FROM chat_conversations WHERE repo_key='gitcode:org/test' AND title=?", (f"Issue #{issue_number}",))
         c.execute(
-            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, stage) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (_uid["id"], assignee, "gitcode:org/test", issue_number, "待审核需求", "d", status, stage))
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, stage, owner_agent) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (_uid["id"], assignee, "gitcode:org/test", issue_number, "待审核需求", "d", status, stage, owner_agent))
         card_id = c.lastrowid
         db.commit()
         return card_id
@@ -356,3 +357,193 @@ class TestReviewPassLastNodeNormalize:
         assert _is_last_stage_node("gitcode:org/test", 43) is False  # 终态 → 保守 False
         _seed(status="processing", issue_number=44, stage="")
         assert _is_last_stage_node("gitcode:org/test", 44) is False  # 未知 → 保守 False
+
+class TestReviewActionContract:
+    """Issue #1599：review-reject/review-pass 三态返回体（命中/幂等/前置态不符）+ 真实 status 回读。"""
+
+    def test_reject_hit_returns_real_status_and_changed(self):
+        cid = _seed(status="pending_review", issue_number=51)
+        r = client.post(f"/api/issues/{cid}/review-reject",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing", "reason": "驳回"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is True
+        assert d["status"] == "processing"
+        assert d["result"] == "rejected_processing"
+        assert d["reason"] == ""
+        assert _status(issue_number=51)[0] == "processing"
+
+    def test_reject_hit_awaiting_input(self):
+        cid = _seed(status="pending_review", issue_number=52)
+        r = client.post(f"/api/issues/{cid}/review-reject",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "awaiting_input", "reason": "需求不明确"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is True
+        assert d["status"] == "awaiting_input"
+        assert d["result"] == "rejected_awaiting_input"
+        assert _status(issue_number=52)[0] == "awaiting_input"
+
+    def test_pass_hit_processing(self):
+        cid = _seed(status="pending_review", issue_number=53, stage="qa")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is True
+        assert d["status"] == "processing"
+        assert d["result"] == "passed_processing"
+        assert _status(issue_number=53)[0] == "processing"
+
+    def test_pass_hit_done(self):
+        cid = _seed(status="pending_review", issue_number=54)
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "done"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is True
+        assert d["status"] == "completed"
+        assert d["result"] == "passed_done"
+        st = _status(issue_number=54)
+        assert st[0] == "completed" and st[1] == "done"
+
+    def test_reject_idempotent_already_target(self):
+        cid = _seed(status="processing", issue_number=55)
+        r = client.post(f"/api/issues/{cid}/review-reject",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "processing"
+        assert d["result"] == "noop" and d["reason"] == "already_target"
+        assert _status(issue_number=55)[0] == "processing"
+
+    def test_pass_idempotent_already_target(self):
+        cid = _seed(status="processing", issue_number=56, stage="qa")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "processing"
+        assert d["result"] == "noop" and d["reason"] == "already_target"
+
+    def test_pass_already_completed_target_done_idempotent(self):
+        cid = _seed(status="completed", issue_number=57)
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "done"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "completed"
+        assert d["reason"] == "already_target"
+
+    def test_reject_precondition_mismatch_awaiting_input(self):
+        cid = _seed(status="awaiting_input", issue_number=58)
+        r = client.post(f"/api/issues/{cid}/review-reject",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "awaiting_input"
+        assert d["result"] == "noop" and d["reason"] == "not_pending_review"
+        assert d["status"] != "pending_review"  # 回归 #11218：禁止伪成功回显
+        assert _status(issue_number=58)[0] == "awaiting_input"
+
+    def test_reject_precondition_mismatch_active(self):
+        cid = _seed(status="active", issue_number=59)
+        r = client.post(f"/api/issues/{cid}/review-reject",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "active"
+        assert d["reason"] == "not_pending_review"
+
+    def test_reject_terminal_completed(self):
+        cid = _seed(status="completed", issue_number=60)
+        r = client.post(f"/api/issues/{cid}/review-reject",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "completed"
+        assert d["result"] == "noop" and d["reason"] == "terminal"
+
+    def test_pass_terminal_completed_target_processing(self):
+        cid = _seed(status="completed", issue_number=61)
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["changed"] is False
+        assert d["status"] == "completed"
+        assert d["reason"] == "terminal"
+
+
+class TestReviewStateDriftConvergence:
+    """Issue #1599：审核态单一事实源（issue.status 为准）+ 两条漂移链路收敛。"""
+
+    def test_derive_review_status_uses_task_status_only(self):
+        from src.api.pipeline_status import derive_review_status
+        assert derive_review_status("pending_review", "processing") == "in_progress"
+        assert derive_review_status("pending_review", "") == "in_progress"
+        assert derive_review_status("pending_review", "awaiting_input") == "awaiting_input"
+        assert derive_review_status("qa", "pending_review") == "pending_review"
+
+    def test_resume_rolls_back_stage_to_owner(self):
+        from src.api.issues_center import _resume_issue_waiting
+        _seed(status="pending_review", issue_number=71, stage="pending_review", owner_agent="qa")
+        assert _resume_issue_waiting("gitcode:org/test", 71) is True
+        st = _status(issue_number=71)
+        assert st[0] == "processing"
+        assert st[1] == "qa"
+
+    def test_resume_sentinel_owner_falls_back_to_issue(self):
+        from src.api.issues_center import _resume_issue_waiting
+        _seed(status="pending_review", issue_number=72, stage="pending_review", owner_agent="bot_takeover")
+        assert _resume_issue_waiting("gitcode:org/test", 72) is True
+        st = _status(issue_number=72)
+        assert st[0] == "processing"
+        assert st[1] == "issue"
+
+    def test_resume_awaiting_input_keeps_real_stage(self):
+        from src.api.issues_center import _resume_issue_waiting
+        _seed(status="awaiting_input", issue_number=73, stage="issue", owner_agent="issue")
+        assert _resume_issue_waiting("gitcode:org/test", 73) is True
+        st = _status(issue_number=73)
+        assert st[0] == "processing"
+        assert st[1] == "issue"
+
+    def test_set_issue_stage_clears_stale_pending_review(self):
+        from src.api.session_store import set_issue_stage
+        _seed(status="pending_review", issue_number=74, stage="pending_review", owner_agent="qa")
+        set_issue_stage("gitcode:org/test", "#74", "qa", "qa")
+        st = _status(issue_number=74)
+        assert st[0] == "processing"
+        assert st[1] == "qa"
+
+    def test_set_issue_stage_keeps_terminal_status(self):
+        from src.api.session_store import set_issue_stage
+        _seed(status="completed", issue_number=75, stage="qa", owner_agent="qa")
+        set_issue_stage("gitcode:org/test", "#75", "sre", "sre")
+        assert _status(issue_number=75)[0] == "completed"
+
+    def test_no_ghost_review_after_resume(self):
+        from src.api.issues_center import _resume_issue_waiting
+        from src.api.pipeline_status import derive_review_status
+        _seed(status="pending_review", issue_number=76, stage="pending_review", owner_agent="qa")
+        assert _resume_issue_waiting("gitcode:org/test", 76) is True
+        st = _status(issue_number=76)
+        assert derive_review_status(st[1], st[0]) == "in_progress"

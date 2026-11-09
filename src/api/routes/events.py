@@ -16,6 +16,8 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
 
     追加 admin_action 审计事件（status=completed，不参与业务流转，仅留痕）。
+    Issue #1312：继承目标事件的真实 repo_key / issue_id，避免审计事件被兜底成
+    目标 seq 形成流水线幽灵行；查询失败降级为无归属，不影响管理操作主流程。
     失败不影响主操作（吞异常 + 日志）。
     """
     try:
@@ -23,11 +25,33 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
         from src.api.event_store import append_event
         _actor = (user or {}).get("username", "") or "unknown"
         _ts = datetime.now(timezone.utc).isoformat()
+        _target_repo = repo_key
+        _target_issue = ""
+        _related = False
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT repo_key, issue_id FROM events WHERE repo_key=? AND seq=?",
+                          (repo_key, target_seq))
+                _row = c.fetchone()
+            if _row:
+                if _row[0]:
+                    _target_repo = _row[0]
+                _target_issue = _row[1] or ""
+                _related = bool(_target_issue and _target_issue not in ("", "#0"))
+                if not _related:
+                    _target_issue = ""
+        except Exception as e:
+            log.warning(f"_audit_admin_action target lookup failed ({action} event #{target_seq}): {e}")
+            _target_repo = repo_key
+            _target_issue = ""
+            _related = False
         append_event(
-            repo_key=repo_key,
+            repo_key=_target_repo,
             event_type="admin_action",
             title=f"Admin {action}: event #{target_seq}",
-            issue_id="",
+            issue_id=_target_issue,
             agent_type="",
             source="admin",
             actor=_actor,
@@ -39,6 +63,7 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                 "time": _ts,
                 "target_event_seq": target_seq,
                 "target_task_id": task_id,
+                "related": _related,
             },
             status="completed",
         )

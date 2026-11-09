@@ -1093,7 +1093,7 @@ def test_pr_result_comment_real_chain_ledgered():
     fake_resp.read.return_value = json.dumps({"id": 666003}).encode()
     with patch.object(_ur_req, "urlopen", return_value=fake_resp):
         ep._post_result_to_pr("test/i453led", "33", "conclusion: 审查通过", "tok", "qa",
-                              repo_key=RK)
+                              repo_key=RK, agent_result=False)
     assert ol.is_our_outbound("gitcode", RK, "issue_comment", "666003") is True
 
 

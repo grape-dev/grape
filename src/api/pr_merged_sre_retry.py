@@ -283,7 +283,7 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
             return False
         body = (f"[sre agent] ⚠️ PR 合并收尾（merge→sre）交接链路断链提示：{note}\n"
                 f"事件已留痕（含失败原因），可人工重派或在引擎恢复后重试。")
-        _post_result_to_issue(repo, num, body, token, "sre", repo_key)
+        _post_result_to_issue(repo, num, body, token, "sre", repo_key, agent_result=False)
         log.info(f"[544-broken-chain] issue comment posted for {repo_key}#{num}")
         return True
     except Exception as e:

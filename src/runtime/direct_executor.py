@@ -825,7 +825,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             try:
-                _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key)
+                _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key,
+                                      agent_result=True, task_id=task_id, seq=seq)
             except Exception as _pe:
                 # R20.3.2: _post_result_to_issue 失败时 append RESULT_POST_FAILED
                 log.warning(f"Exec agent: post result to issue failed: {_pe}")
@@ -859,7 +860,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     if new_status == "completed" and result_text and evt.get("_pr_sub_pr_number"):
         _pr_num = str(evt["_pr_sub_pr_number"])
         if _pr_num and repo_gitcode_token:
-            _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key)
+            _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key,
+                               agent_result=True, task_id=task_id, seq=seq)
 
     # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
     # Issue #468: 登记逻辑抽为共享函数 register_sre_deploy_url，与远程 worker
