@@ -2,7 +2,7 @@
 import json, asyncio, tempfile, os, threading, time
 
 from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
-from src.prompt_builder import build_general_chat_prompt
+from src.prompt_builder import build_general_chat_prompt, resolve_task_server_env
 from src.auth.grape_account_db import get_grape_account_by_username as _get_acc
 from src.token_service import is_auth_401_error
 
@@ -946,7 +946,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
                     user_gitcode_token="",  # Issue #344: no plaintext token in task payload
-                    env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
+                    env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
+                               **resolve_task_server_env(runtime_id)},
                 )
                 log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")
                 task = await wait_task_terminal(tid)
@@ -1238,7 +1239,8 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
         runtime_session_id=session.get("runtime_session_id") or "",
         event_type="chat", account=user.get("username") or "", user_id=user["id"],
         repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-        env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
+        env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
+                   **resolve_task_server_env(runtime_id)},
     )
     _log.info(f"Chat enqueued: task={tid} user={user['id']} conv={conv_id} mode={get_execution_mode()}")
     return {"task_id": tid, "reply": "", "conversation_id": conv_id, "queued": True}
@@ -1961,7 +1963,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
             repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-            env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
+            env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
+                       **resolve_task_server_env(rid)},
         )
         log.info(f"Chat submit enqueued: enqueue_tid={enqueue_tid} chat_task_id={chat_task_id}")
         # Issue #442: 记录映射，撤回时经 #136 cancel_task 终止远端任务
@@ -2244,7 +2247,8 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
             repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-            env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
+            env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
+                       **resolve_task_server_env(rid)},
         )
         with _chat_tasks_lock:
             _chat_tasks[task_id] = {
@@ -2371,7 +2375,8 @@ def _execute_chat_task(task_id: str):
                 event_type="chat",
                 account=user.get("username") or "", user_id=user.get("id", 0),
                 repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-                env_extra={"USER_ID": str(user.get("id", 0)), "CONVERSATION_ID": conv_id},
+                env_extra={"USER_ID": str(user.get("id", 0)), "CONVERSATION_ID": conv_id,
+                           **resolve_task_server_env(rid)},
             )
             # 同步等待任务完成
             import time as _t

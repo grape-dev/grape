@@ -40,11 +40,12 @@ def _vcs_name(repo_key: str) -> str:
     return "GitHub" if _is_github_repo(repo_key) else "GitCode"
 
 
-def _runtime_is_local(runtime_id: int = 0) -> bool:
+def _runtime_is_local(runtime_id: int = 0) -> bool | None:
     """判断 runtime 是否本机直连/本机 worker。
 
     判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1
-    （本机 worker）。查询异常一律按非本地处理（保守走对外地址）。
+    （本机 worker）。查询异常返回 None（未知），由调用方保留改造前的 localhost
+    异常回退语义；未知不等于「非本地」。
     """
     if not runtime_id or runtime_id <= 0:
         return False
@@ -64,7 +65,7 @@ def _runtime_is_local(runtime_id: int = 0) -> bool:
             cred_row = c.fetchone()
             return bool(cred_row and (cred_row[0] or "").startswith("127."))
     except Exception:
-        return False
+        return None
 
 
 def _resolve_server_url(runtime_id: int = 0) -> str:
@@ -80,7 +81,11 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     try:
         from src.user.db import get_worker_connect_url
         public_url = get_worker_connect_url()
-        if _runtime_is_local(runtime_id):
+        local = _runtime_is_local(runtime_id)
+        if local is None:
+            # DB 查询异常：保留改造前「异常回退 localhost」语义（Issue #372 §15.5）。
+            raise RuntimeError("runtime locality lookup failed")
+        if local:
             return f"http://127.0.0.1:{_local_port()}"
         return public_url
     except Exception:
@@ -96,21 +101,40 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     （issues / git-repo 等全量 261 端点），worker runtime / A2A 回连基址改由
     `RUNTIME_SERVER_URL`（见 `_resolve_server_url`）独立承载。
 
-    来源优先级：`task_business_api_url` 显式配置 > `server_base_url`；
-    本机直连（credential_id == 0 或本机 worker）回退 `127.0.0.1:{port}`。
-    单地址部署时 `worker_connect_url` 回退 `server_base_url`，故与改造前
-    `_resolve_server_url` 返回值等价（向前兼容）。
+    来源优先级：`task_business_api_url` 显式配置 > `server_base_url` > 本机直连
+    `127.0.0.1:{port}`（仅本机 runtime 且未显式配置时）。单地址部署时
+    `worker_connect_url` 回退 `server_base_url`，故与改造前 `_resolve_server_url`
+    返回值等价（向前兼容）。
     """
     try:
-        from src.user.db import get_business_api_url
+        from src.user.db import get_business_api_url, get_business_api_url_explicit
+        # Spec 优先级：显式 task_business_api_url 优先于本机回环回退。
+        explicit = get_business_api_url_explicit()
+        if explicit:
+            return explicit
         public_url = get_business_api_url()
-        if _runtime_is_local(runtime_id):
+        local = _runtime_is_local(runtime_id)
+        if local is None:
+            raise RuntimeError("runtime locality lookup failed")
+        if local:
             return f"http://127.0.0.1:{_local_port()}"
         return public_url
     except Exception:
         pass
     # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
     return f"http://localhost:{_local_port()}"
+
+
+def resolve_task_server_env(runtime_id: int = 0) -> dict:
+    """返回任务 env 的两项服务基址（事件/重派/对话入队共用，防漏注入）。
+
+    - `GRAPE_SERVER_URL`：主控业务 API 基址
+    - `RUNTIME_SERVER_URL`：worker runtime / A2A 回连基址
+    """
+    return {
+        "GRAPE_SERVER_URL": _resolve_business_server_url(runtime_id),
+        "RUNTIME_SERVER_URL": _resolve_server_url(runtime_id),
+    }
 
 
 _PROJECT_INFO_SUMMARY_CHARS = 400

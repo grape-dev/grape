@@ -3831,10 +3831,9 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     env["REPO_OWNER"] = _owner
     env["REPO_NAME"] = _repo_name
     env["ACCOUNT"] = account
-    from src.prompt_builder import _resolve_server_url, _resolve_business_server_url
+    from src.prompt_builder import resolve_task_server_env
     # Issue #1577：GRAPE_SERVER_URL=业务 API 基址，RUNTIME_SERVER_URL=worker runtime 基址。
-    env["GRAPE_SERVER_URL"] = _resolve_business_server_url(runtime_id)
-    env["RUNTIME_SERVER_URL"] = _resolve_server_url(runtime_id)
+    env.update(resolve_task_server_env(runtime_id))
     # ── 场景环境（work_branch / scene_id / custom_fields / linked_repos）──
     try:
         from src.runtime.repogit import _read_scene_work_branch
