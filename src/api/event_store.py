@@ -656,7 +656,19 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
     if status in _TERMINAL:
         # 释放活跃守卫（独立 db_lock；避免在临界区内嵌套获取非可重入锁）
         _release_guard_by_seq(seq)
+        # Issue #1667：终态 → 自动派发排队在其后的 A2A handoff
+        _drain_a2a_queue_after_terminal(seq)
 
+
+
+
+def _drain_a2a_queue_after_terminal(seq: int) -> None:
+    """Issue #1667：事件终态后触发 A2A 排队派发（失败不影响终态写入）。"""
+    try:
+        from src.api.event_pipeline import drain_queued_a2a
+        drain_queued_a2a(seq)
+    except Exception as e:
+        log.warning(f"A2A queue drain hook failed seq={seq}: {e}")
 
 def _release_guard_by_seq(seq: int) -> None:
     """事件终态 → 按事件的 (repo,issue,agent) 释放对应守卫（仅当前 seq）。"""
@@ -792,6 +804,8 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
     # 事件进入终态 → 释放活跃守卫（允许同 (issue,agent) 开启新事件）
     if status in ("completed", "failed", "cancelled"):
         _release_guard_by_seq(seq)
+        # Issue #1667：前序 A2A 事件终态 → 自动派发排队在其后的 handoff（仅一次）
+        _drain_a2a_queue_after_terminal(seq)
     # WAL checkpoint 在 db_lock 释放后执行
     try:
         db.execute("PRAGMA wal_checkpoint(PASSIVE)")
