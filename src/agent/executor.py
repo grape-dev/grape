@@ -598,6 +598,19 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
       chat/任务需要的模型凭据，与 VCS 平台 token 无关。
     - 参数 bot_token/user_token 仅用于日志脱敏（_tokens 列表），不再写入 env。
     """
+    # grape CLI PATH 注入（Windows 部署缺口：install-worker.ps1 未像 install-worker.sh:615
+    # 把 worker venv bin 注册进 PATH，agent shell 里 `grape` 找不到——2026-11-07 真任务
+    # 实证 event 1）。目录存在才前缀注入；机器级 PATH 修复后此注入自然冗余无害。
+    # agent 调用继续用裸 `grape`，无需绝对路径/prompt 模板改动。
+    try:
+        from src.runtime.os_adapter import default_install_dir
+        _gbin = os.path.join(default_install_dir(), ".venv",
+                             "Scripts" if os.name == "nt" else "bin")
+        _gexe = "grape.exe" if os.name == "nt" else "grape"
+        if os.path.isfile(os.path.join(_gbin, _gexe)):
+            env["PATH"] = _gbin + os.pathsep + env.get("PATH", "")
+    except Exception:
+        pass
     # 平台 VCS token 不再注入（P2）。bot_token/user_token 保留仅作日志脱敏用途，
     # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
     # Issue #344: 改用带预刷新的 token 获取函数，避免拿到过期 token。
