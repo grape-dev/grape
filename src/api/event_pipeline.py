@@ -2384,6 +2384,20 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             from src.api.session_store import get_issue_stage as _gis
             _st_sre = _gis(repo_key, _rid_sre)
             if _st_sre and _st_sre.get("stage") == "qa":
+                # Issue #1573: PR 合并视同审核通过——qa 阶段 pending_review 时用户直接合并
+                # PR 会将卡片永久留在待审核列；此处先恢复 processing，失败降级不阻断后续推进。
+                try:
+                    from src.api.session_store import get_issue_status as _gist
+                    if _gist(repo_key, _rid_sre) == "pending_review":
+                        _num_sre = str(_rid_sre).lstrip("#")
+                        if _num_sre.isdigit():
+                            from src.api.issues_center import _resume_issue_waiting
+                            if _resume_issue_waiting(repo_key, int(_num_sre)):
+                                log.info(f"Pipeline: PR merged treated as review pass, "
+                                         f"pending_review→processing for {_rid_sre}")
+                except Exception as _resume_e:
+                    log.warning(f"Pipeline: PR merged resume pending_review failed "
+                                f"for {_rid_sre}: {_resume_e}")
                 set_issue_stage(repo_key, _rid_sre, "sre", "sre")
                 log.info(f"Pipeline: PR merged skip QA, advance stage qa→sre for {_rid_sre}")
 

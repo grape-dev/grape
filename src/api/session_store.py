@@ -91,6 +91,32 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     return None
 
 
+def get_issue_status(repo_key: str, issue_id: str) -> str:
+    """读 Issue 当前 status（只读 helper）。无记录或异常返回 ""。
+
+    与 `get_issue_stage` 分离：其返回结构不含 status，需要判 status 的路径
+    （如 PR merged 视同审核通过）单独读取，避免改动既有返回契约。
+    """
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+    except Exception:
+        return ""
+    if not _num:
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num))
+            row = c.fetchone()
+        return (row[0] if row and row[0] else "") or ""
+    except Exception as _e:
+        from src.config import log as _log3
+        _log3.warning(f"get_issue_status failed for {repo_key} #{_num}: {_e}")
+        return ""
+
+
 def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated_at: bool = True,
                        ensure_row: bool = False, assignee: str = ""):
     """Phase B2.5/C3：将收编字段写回 `issue` 卡片行（按 issue_number）。
