@@ -1870,6 +1870,13 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
+def _strip_null_default(ddl: str) -> str:
+    """Issue #1546 修复：仅剥离尾部 `DEFAULT NULL`（与可空列的隐式默认完全等价）；
+    其它显式默认值（0/'' 等）原样保留——剥掉会改变历史行语义。"""
+    import re as _re
+    return _re.sub(r"\s+DEFAULT\s+NULL\s*$", "", (ddl or "").strip(), flags=_re.IGNORECASE)
+
+
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    strict: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
@@ -1880,8 +1887,11 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
     1. 首选 ``ALGORITHM=INSTANT``（8.0 加可空列默认 INSTANT，不锁表）；
     2. INSTANT 不支持 → 降级重试 ``ALGORITHM=INPLACE, LOCK=NONE``（显式声明，
        做不到就报错而非默默锁全表）；
+    2.5 带 ``DEFAULT NULL`` 的 TEXT/MEDIUMTEXT 列上述两者都不支持（Issue #1546 实测）→
+       剥离该默认值后重试两者（与可空列隐式默认等价，不改历史行语义）；
     3. 再失败 → 记 ERROR 进人工处理清单，**绝不静默降级到 COPY**；
-       列未建成，下次启动幂等重试。
+       注意：此处不抛异常，调用方迁移仍会盖章 → 该列不会自动重试，只能另行补一条
+       幂等修复迁移（参考 202611090002）。
 
     allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
     补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
@@ -1919,6 +1929,23 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
         if _is_mdl_timeout(_inplace_err):
             _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
             raise _MdlWaitTimeout(str(_inplace_err))
+        # Issue #1546 修复（2026-11-09）：带 DEFAULT NULL 的 TEXT/MEDIUMTEXT 列在 MySQL 上
+        # INSTANT 与 INPLACE,LOCK=NONE 均不支持；此前直接落人工清单后正常返回 → 迁移照样盖章、
+        # 列永不创建也不重试（SQLite 全绿，生产运行时才 1054）。DEFAULT NULL 与可空列隐式默认
+        # 等价，剥离后重试，既能把列补上、又不必退到 COPY 锁全表。
+        _ddl_nd = _strip_null_default(ddl)
+        if _ddl_nd != ddl:
+            _base_nd = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_nd}"
+            for _algo_nd in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
+                try:
+                    c.execute(f"{_base_nd}, {_algo_nd}")
+                    log.info(f"_ensure_column({tbl}.{col}) 剥离 DEFAULT NULL 后补列成功（{_algo_nd}）")
+                    return
+                except Exception as _nd_err:
+                    if _is_mdl_timeout(_nd_err):
+                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
+                        raise _MdlWaitTimeout(str(_nd_err))
+                    _inplace_err = _nd_err
         if allow_copy:
             try:
                 c.execute(base_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
@@ -2937,10 +2964,36 @@ def _fn_add_ap_exec_agent_task_id() -> None:
 
 
 register_migration(
-    version="202611060003",
+    # 撞号避让（2026-11-09 变基）：weekly-10 已用 202611060003 给
+    # backfill_events_terminal_completed_at，同号后登记项会被判「已执行」永久跳过。
+    version="202611090001",
     name="add-autopilot-exec-agent-task-id",
     kind="safe",
     fn=_fn_add_ap_exec_agent_task_id,
+)
+
+
+def _fn_repair_ap_exec_agent_task_id() -> None:
+    """Issue #1546 修复（2026-11-09）：原迁移在 MySQL 上可能「已盖章但列未创建」。
+
+    _ensure_column 两级降级失败时不抛异常、只记人工清单，迁移仍会被盖章 → 该列再也
+    不会补。本迁移幂等重查一次：列存在则只补索引（无副作用），缺失则按修正后的
+    剥离 DEFAULT NULL 路径补列；即使仍失败，下次启动也会重试（未被提前盖章掩盖）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "autopilot_executions", "agent_task_id", "TEXT DEFAULT NULL")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ap_exec_agent_task "
+            "ON autopilot_executions(agent_task_id)")
+        db.commit()
+
+
+register_migration(
+    version="202611090002",
+    name="repair-autopilot-exec-agent-task-id",
+    kind="safe",
+    fn=_fn_repair_ap_exec_agent_task_id,
 )
 
 

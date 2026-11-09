@@ -200,7 +200,7 @@ def _counting_migration(db_setup, calls):
     def _fn():
         calls.append(1)
         db_setup._fn_add_ap_exec_agent_task_id()
-    return db_setup.Migration("202611060003", "add-autopilot-exec-agent-task-id",
+    return db_setup.Migration("202611090001", "add-autopilot-exec-agent-task-id",
                               "safe", _fn)
 
 
@@ -214,7 +214,7 @@ def _assert_column_and_index(conn, check_stamp=True):
     if check_stamp:
         stamped = conn.execute(
             "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE version=?",
-            ("202611060003",)).fetchone()[0]
+            ("202611090001",)).fetchone()[0]
         assert stamped == 1, "迁移未盖章"
 
 
@@ -222,8 +222,8 @@ class TestMigration:
     def test_registered_safe_migration(self):
         from src.api import db_setup
         by_version = {m.version: m for m in db_setup._MIGRATIONS}
-        assert "202611060003" in by_version
-        mig = by_version["202611060003"]
+        assert "202611090001" in by_version
+        mig = by_version["202611090001"]
         assert mig.name == "add-autopilot-exec-agent-task-id"
         assert mig.kind == "safe"
 
