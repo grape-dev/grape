@@ -270,7 +270,9 @@ function _summaryStatsBar(data, devices) {
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
   if (n.startsWith('aishell-dsh') || n.includes('aishell-dsh')) {
-    return ''; // aishell-dsh 新引擎：独立卡片，不画旧 AIShell 水印（查表区分，勿用 includes('aishell') 误命中）
+    // aishell-dsh 独立图标资产（AIShellDsh.svg，内容复用 AIShell.svg——同名不同物但视觉同源，
+    // 2026-11-09 用户裁定：两文件分开存，后续可独立替换 aishell-dsh 专属图）
+    return `<img src="/static/img/engines/AIShellDsh.svg" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
   if (n.includes('aishell') || n.includes('hwcloud')) {
     return `<img src="/static/img/engines/AIShell.svg" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
