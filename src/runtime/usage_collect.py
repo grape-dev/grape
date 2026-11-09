@@ -142,6 +142,13 @@ class UsageCollector:
         """任务开始前调用:记累计型账本的基线。失败静默降级。"""
         self._started = True
         try:
+            if self.engine == "aishell-dsh":
+                # aishell-dsh 一期无 token 账本（协议面 usage_update 仅上下文占用；
+                # token 在 session.v4.jsonl.zstd，二期解析轨接入）。显式缺口：
+                # 不落基线、不误入 hwcloud/aishell 别名分支。
+                log.info("usage_collect: aishell-dsh token billing lands in phase 2 "
+                         "(session.v4.jsonl.zstd parse); gap is explicit, not silent")
+                return
             if self.engine == "hermes":
                 self._baseline = {"hermes": self._hermes_snapshot()}
             elif self.engine in ("hwcloud", "aishell"):
@@ -193,6 +200,11 @@ class UsageCollector:
         if session_id:
             self.session_id = session_id
         try:
+            if self.engine == "aishell-dsh":
+                # 一期显式缺口：不误入 hwcloud/aishell 别名分支（防归因混账），
+                # token 解析轨二期接入（session.v4.jsonl.zstd，方案已定见设计 spec §5）
+                log.info("usage_collect: aishell-dsh usage gap (phase 2 will parse session file)")
+                return []
             if self.engine == "codex":
                 return self._fed
             if self.engine == "opencode":
