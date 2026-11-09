@@ -23,6 +23,7 @@ _SECTION_CAP = int(os.environ.get("PROJECT_INFO_SECTION_CAP", "3000"))
 _KEY_FILES_CAP = int(os.environ.get("PROJECT_INFO_KEY_FILES_CAP", "8000"))
 _KEY_FILES_MAX_DEPTH = int(os.environ.get("PROJECT_INFO_FILES_MAX_DEPTH", "5"))
 _GRAPH_VERSION = 2
+_CODEGRAPH_UNINDEXED_MARKERS = ("no files indexed", "run codegraph index", "no relevant code found")
 _GRAPH_TEMPLATE = """# Project Graph: {owner}/{repo}
 
 > Last updated: {updated} | Branches: {branches_list} | Commit: {sha}
@@ -462,6 +463,24 @@ def _codegraph_files(work: str) -> str:
     return out or err or ""
 
 
+def _codegraph_unindexed(texts: list) -> bool:
+    """判定 codegraph 输出是否表明仓库尚未建索引（Issue #1547）。
+
+    列表首项为 `codegraph files` 的目录树：其为空表示索引缺失。
+    其余小节为空属单段缺失，不单独触发；任一段命中占位文案 marker 亦视为未索引。
+    """
+    if not texts:
+        return False
+    for idx, text in enumerate(texts):
+        stripped = (text or "").strip()
+        lowered = stripped.lower()
+        if any(marker in lowered for marker in _CODEGRAPH_UNINDEXED_MARKERS):
+            return True
+        if idx == 0 and not stripped:
+            return True
+    return False
+
+
 def _codegraph_files_section(work: str, directory: str, max_depth: int = 3) -> str:
     """目录过滤子树：探测 skills/ agents/ workflows/ 等目录用（命中才填，无命中返回空）。"""
     if not os.path.isdir(work):
@@ -680,8 +699,14 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     if default_branch:
         meta["default_branch"] = default_branch
 
-    meta["degraded"] = False
-    meta["note"] = ""
+    unindexed = _codegraph_unindexed([files, arch, modules, chains])
+    if unindexed:
+        log.warning(f"project-info: codegraph index missing for {repo_key} (no files listed)")
+        meta["degraded"] = True
+        meta["note"] = "codegraph index missing (no files listed)"
+    else:
+        meta["degraded"] = False
+        meta["note"] = ""
     meta["build_ms"] = int((time.perf_counter() - _build_start) * 1000)
     meta["sections_char_counts"] = {
         "graph_arch": len(arch), "graph_modules": len(modules), "graph_chains": len(chains),
@@ -695,6 +720,8 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     caps_extra = {"integrations": integ, "skills_agents": skagents, "data_model": dmodel, "config": cfg}
     _write_file(repo_key, _GRAPH_FILE, _build_graph_md(repo_key, meta, arch, modules, chains, files, graph_extra))
     _write_file(repo_key, _CAP_FILE, _build_capabilities_md(repo_key, meta, tech, features, api, caps_extra))
+    if unindexed:
+        return {"ok": True, "degraded": True, "reason": "codegraph index missing"}
     log.info(f"project-info regenerated for {repo_key} (codegraph)")
     return {"ok": True, "degraded": False, "reason": "codegraph"}
 
