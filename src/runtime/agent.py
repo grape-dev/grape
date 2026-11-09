@@ -1,3 +1,4 @@
+
 """RuntimeAgent 边端入口（python -m runtime.agent，仅外连）。
 
 见 agent-runtime-design.md §7.4 / tech-impl.md §1.4 / skill-delivery-remote.md §3.5。
@@ -1097,19 +1098,21 @@ def _remap_cwd(path: str) -> str:
 
 
 def _backend_for_engine(engine_name: str | None = "") -> str:
-    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；其余默认 opencode）。"""
-    name = (engine_name or "").lower()
-    if name.startswith("hermes"):
-        return "hermes"
-    if name.startswith("codearts"):
-        return "codearts"
-    if name.startswith("codex"):
-        return "codex"
-    if name.startswith("hwcloud") or name.startswith("aishell"):
-        return "hwcloud"
-    if name.startswith("dsh"):
-        return "dsh"
-    return "opencode"
+    """由引擎实例名推导执行后端——统一走 canonical_engine 查表（前缀最长匹配）。
+
+    hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；
+    aishell-dsh-xxx → aishell-dsh（新引擎，先于 aishell 前缀命中）；
+    hwcloud-xxx / aishell-xxx → hwcloud（旧轨不变）；其余默认 opencode。
+    """
+    from src.runtime.instances import canonical_engine
+
+    return canonical_engine(engine_name)
+
+
+def _usage_retry_engine(engine_name: str | None) -> bool:
+    from src.runtime.instances import usage_retry_engine
+
+    return usage_retry_engine(engine_name)
 
 
 def _scan_local_skills() -> list[dict]:
@@ -2788,7 +2791,7 @@ async def _report_llm_usage(client, tid: str, collector, done) -> None:
     try:
         sid = done.get("oc_session_id") if isinstance(done, dict) else ""
         usages = collector.finish(session_id=sid or "")
-        if not usages and collector.engine in ("hermes", "hwcloud", "aishell"):
+        if not usages and _usage_retry_engine(collector.engine):
             await asyncio.sleep(1.5)
             usages = collector.finish(session_id=sid or "")
         if not usages:
