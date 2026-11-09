@@ -526,6 +526,25 @@ SAMPLER_IN_PROGRESS = _Gauge(
 )
 
 
+_known_sources: set[str] = set()
+
+
+def _apply_source_gauges(queued: dict, running: dict, stuck: dict) -> set[str]:
+    """把三类任务 gauge 刷到 Prometheus；本轮消失的 source 必须显式归零。
+
+    旧写法只遍历"本轮查到的 source"：某类任务全部结束后集合为空，
+    gauge 会永远保留上一次的值（实测「队列/执行/卡住」面板长期显示 running=1，
+    而库里已经没有 running 任务）。这里按历史出现过的 source 全量刷新。
+    source 取值是 agent_type（vod/issue/coding/qa/sre…），基数有限。
+    """
+    _known_sources.update(set(queued) | set(running) | set(stuck))
+    for src in _known_sources:
+        SAMPLER_TASK_QUEUED.labels(source=src).set(queued.get(src, 0))
+        SAMPLER_TASK_RUNNING.labels(source=src).set(running.get(src, 0))
+        SAMPLER_TASK_STUCK.labels(source=src).set(stuck.get(src, 0))
+    return set(_known_sources)
+
+
 def collect_business_sampler():
     """BusinessSampler：scrape 时执行 SQL 采样，带 TTL 缓存。
 
@@ -604,12 +623,8 @@ def collect_business_sampler():
             except Exception:
                 pass
 
-        # 更新 Prometheus gauges
-        all_sources = set(queued_by_source) | set(running_by_source) | set(stuck_by_source)
-        for src in all_sources:
-            SAMPLER_TASK_QUEUED.labels(source=src).set(queued_by_source.get(src, 0))
-            SAMPLER_TASK_RUNNING.labels(source=src).set(running_by_source.get(src, 0))
-            SAMPLER_TASK_STUCK.labels(source=src).set(stuck_by_source.get(src, 0))
+        # 更新 Prometheus gauges（消失的 source 会显式归零，见 _apply_source_gauges）
+        _apply_source_gauges(queued_by_source, running_by_source, stuck_by_source)
 
         SAMPLER_RUNTIME_ONLINE.labels(mode="local").set(online_local)
         SAMPLER_RUNTIME_ONLINE.labels(mode="remote").set(online_remote)
