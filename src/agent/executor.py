@@ -527,10 +527,12 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
     # aishell（dsh 框架）会 scrub env 里 /TOKEN/i 变量，prepare_env 把
     # GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE 穿透。
     # 必须在 env_extra 之后：token 是任务级的，此刻才进 env。
+    _auth_file = None
     try:
         _prepare_env = getattr(acp, "prepare_env", None)
         if callable(_prepare_env):
-            _prepare_env(env)
+            # 传 cwd：bwrap 沙箱 /tmp 为私有 tmpfs，token 文件须落工位目录才沙箱内可见
+            _auth_file = _prepare_env(env, cwd=cwd)
     except Exception as _pe:
         log.warning(f"{label}prepare_env failed: {_pe}")
 
@@ -553,25 +555,34 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
                 s = s.replace(t, "[REDACTED]")
         return s
 
-    for evt_type, data in acp.stream_execute(
-        prompt, cwd, session_id=session_id, env=env,
-        max_exec_seconds=max_exec_seconds, agent_label=label,
-    ):
-        if evt_type == "text":
-            yield ("text", _redact_text(data))
-        elif evt_type == "tool_use":
-            if isinstance(data, dict):
-                data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
-            yield ("tool_use", data)
-        elif evt_type == "tool_result":
-            yield ("tool_result", _redact_text(data))
-        elif evt_type == "done":
-            if isinstance(data, dict):
-                data["text"] = _redact_text(data.get("text", ""))
-                data["stderr"] = _redact_text(data.get("stderr", ""))
-            yield ("done", data)
-        else:
-            yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
+    try:
+        for evt_type, data in acp.stream_execute(
+            prompt, cwd, session_id=session_id, env=env,
+            max_exec_seconds=max_exec_seconds, agent_label=label,
+        ):
+            if evt_type == "text":
+                yield ("text", _redact_text(data))
+            elif evt_type == "tool_use":
+                if isinstance(data, dict):
+                    data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
+                yield ("tool_use", data)
+            elif evt_type == "tool_result":
+                yield ("tool_result", _redact_text(data))
+            elif evt_type == "done":
+                if isinstance(data, dict):
+                    data["text"] = _redact_text(data.get("text", ""))
+                    data["stderr"] = _redact_text(data.get("stderr", ""))
+                yield ("done", data)
+            else:
+                yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
+    finally:
+        # prepare_env 在 cwd 下创建的 token 文件：任务结束即清（仅清 cwd 下的，
+        # /tmp fallback 的不主动删，避免误删并发任务文件）
+        if _auth_file and cwd and _auth_file.startswith(cwd + os.sep):
+            try:
+                os.unlink(_auth_file)
+            except OSError:
+                pass
 
 
 def _assemble_env(env: dict, *, kind: str, label: str = "",

@@ -59,7 +59,7 @@ class AishellDshACPBackend:
         # （chat 生产路径会取 backend.build_args 组命令，同 src/runtime/hwcloud.py 先例）。
         return ["acp"]
 
-    def prepare_env(self, env: dict) -> None:
+    def prepare_env(self, env: dict, cwd: str = "") -> "str | None":
         """任务级 env 合并之后的收尾钩子（dsh 框架专属 token 穿透，同 src/runtime/dsh.py）。
 
         aishell 与 dsh 同框架：其 bash 工具 spawn 时会 scrub 父进程 env 里所有
@@ -68,20 +68,50 @@ class AishellDshACPBackend:
 
         解法：token 写 0600 临时文件，路径经 GRAPE_AUTH_FILE 传递（变量名不命中
         scrub）；grape CLI config 先读该文件再 fallback 环境变量。
+
+        落盘位置优先 cwd（工位目录）：bwrap 沙箱把 /tmp 挂成私有 tmpfs
+        （src/agent/sandbox/__init__.py --tmpfs /tmp），沙箱外写入 /tmp 的文件
+        沙箱内不可见——coding/worktree 场景曾因此 GRAPE_AUTH_FILE 悬空
+        （2026-11-06 event #6 coding 前置检查实证）。cwd 被沙箱 rw-bind 必可见。
+        为防污染 git status，同步写入 .git/info/exclude（仓库级忽略，不动跟踪文件）。
         ⚠️ 必须在 env_extra 合并之后调用（token 是任务级的，get_env 阶段尚未进 env）。
+        返回实际文件路径（executor 在任务结束后负责清理）。
         """
         sess_tok = env.get("GRAPE_SESSION_TOKEN", "")
         if not sess_tok:
-            return
+            return None
         try:
+            import secrets as _secrets
             import tempfile
-            fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
-            os.write(fd, sess_tok.encode("utf-8"))
-            os.close(fd)
-            os.chmod(auth_path, 0o600)
+            if cwd and os.path.isdir(cwd):
+                auth_path = os.path.join(cwd, f".grape-sess-{_secrets.token_hex(4)}.tok")
+                fd = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as _f:
+                    _f.write(sess_tok)
+                # 仓库级忽略（.git/info/exclude），不动工作区跟踪文件
+                try:
+                    import subprocess as _sp
+                    _gitdir = _sp.run(["git", "-C", cwd, "rev-parse", "--git-dir"],
+                                      capture_output=True, text=True, timeout=5).stdout.strip()
+                    if _gitdir and os.path.isdir(_gitdir):
+                        excl = os.path.join(_gitdir, "info", "exclude")
+                        os.makedirs(os.path.dirname(excl), exist_ok=True)
+                        pat = os.path.basename(auth_path)
+                        with open(excl, "a+", encoding="utf-8") as _ef:
+                            _ef.seek(0)
+                            if pat not in _ef.read().splitlines():
+                                _ef.write(f"\n{pat}\n")
+                except Exception:
+                    pass  # 忽略失败只影响 git status 展示，不阻断认证
+            else:
+                fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
+                os.write(fd, sess_tok.encode("utf-8"))
+                os.close(fd)
+                os.chmod(auth_path, 0o600)
             env["GRAPE_AUTH_FILE"] = auth_path
+            return auth_path
         except Exception:
-            pass  # 写文件失败不阻断执行（fallback 到 env 变量）
+            return None  # 写文件失败不阻断执行（fallback 到 env 变量）
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         """基础 env（D3/D4：模型凭据设备预配置，grape 不注 key/不透传）。"""
