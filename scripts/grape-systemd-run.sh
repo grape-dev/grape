@@ -15,6 +15,19 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# 领域库拆分（2026-11）：每个进程连自己的库。
+# 注意：systemd 的 EnvironmentFile=.env 在 Environment= 之后加载，会覆盖 drop-in 里写的
+# DEVOPS_DB_*，所以领域库的用户/库名必须在这里按角色 export（脚本 export 晚于 .env 注入）。
+case "$role" in
+    mgmt)         _db_name="grape-mgmt-db";    _db_user="grape-mgmt" ;;
+    event|worker) _db_name="grape-runtime-db"; _db_user="grape-runtime" ;;
+    insight)      _db_name="grape-insight-db"; _db_user="grape-insight" ;;
+esac
+export DEVOPS_DB_NAME="$_db_name"
+export DEVOPS_DB_USER="$_db_user"
+export DEVOPS_DB_PASSWORD="${GRAPE_DOMAIN_DB_PASSWORD:-Grape@123}"
+
 PY="$REPO_ROOT/venv/bin/python"
 [ -x "$PY" ] || { echo "missing venv python: $PY" >&2; exit 3; }
 
