@@ -88,7 +88,11 @@ class AishellDshACPBackend:
         一期每任务 session/new（resume 属二期，另立 issue）。
         """
         label = f"{agent_label} " if agent_label else ""
-        agent_cmd = shutil.which(self.binary) or shutil.which(self.binary + ".cmd")
+        # CLI 定位统一走 find_cli（PATH 优先 + ~/.local/bin 兜底）——pip --user
+        # 安装的 aishell 在 systemd 服务的精简 PATH 里不可见，纯 which 会漏（remote Worker E2E 实证）
+        from src.runtime.os_adapter import find_cli as _find_cli
+
+        agent_cmd = _find_cli(self.binary) or shutil.which(self.binary + ".cmd")
         if not agent_cmd:
             log.error(f"{label}aishell-dsh ACP CLI not found in PATH")
             # 失败信息指名引擎（反向冒烟断言：绝不静默回退到旧 hwcloud）
