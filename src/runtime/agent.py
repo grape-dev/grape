@@ -1354,20 +1354,28 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
 
 
 def _same_url_host(a: str, b: str) -> bool:
-    """比较两个 URL 是否同主机（host[:port]，忽略 scheme/path）。
+    """比较两个 URL 是否指向同一端点（scheme + host + port + path，忽略尾部斜杠）。
 
     用于判定单地址部署：业务基址与 worker 回连基址同源时，内网 worker 必须
     继续把业务基址覆盖为本机直连，否则公网/NAT 回环不通（改造前语义）。
+
+    仅比较 netloc 会把「同 host:port、不同 path 前缀」的双地址部署（如业务 API 与
+    runtime 分路径承载）误判为单地址，进而把业务基址覆盖为 localhost；因此纳入
+    scheme 与 path 比较，任一不同即视为双地址、保留显式业务基址。
     """
     if not a or not b:
         return False
     try:
         from urllib.parse import urlsplit
-        ha = urlsplit(a.strip()).netloc.lower()
-        hb = urlsplit(b.strip()).netloc.lower()
-        return bool(ha) and ha == hb
+        ua = urlsplit(a.strip())
+        ub = urlsplit(b.strip())
+        if (ua.scheme.lower(), ua.netloc.lower()) != (ub.scheme.lower(), ub.netloc.lower()):
+            return False
+        pa = (ua.path or "").rstrip("/")
+        pb = (ub.path or "").rstrip("/")
+        return pa == pb
     except Exception:
-        return a.strip().lower() == b.strip().lower()
+        return a.strip().lower().rstrip("/") == b.strip().lower().rstrip("/")
 
 
 def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):

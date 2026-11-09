@@ -160,6 +160,36 @@ class TestLocalWorkerOverride:
         assert env["GRAPE_SERVER_URL"] == "https://grape.example.com"
         assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:3000"
 
+    def test_same_host_different_path_keeps_business_base(self):
+        """同 host:port、不同 path 前缀的双地址部署不得误判为单地址。"""
+        from src.runtime.agent import _apply_local_worker_base_override
+        env = {"GRAPE_SERVER_URL": "https://grape.example.com/api",
+               "RUNTIME_SERVER_URL": "https://grape.example.com/runtime"}
+        task = {"server_url": "https://grape.example.com/runtime"}
+        _apply_local_worker_base_override(env, task, "http://127.0.0.1:3000")
+        assert env["GRAPE_SERVER_URL"] == "https://grape.example.com/api"
+        assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:3000"
+
+
+class TestSameUrlHost:
+    def test_same_scheme_host_port_path_ignores_trailing_slash(self):
+        from src.runtime.agent import _same_url_host
+        assert _same_url_host("https://grape.example.com/api", "https://grape.example.com/api/")
+
+    def test_different_path_is_not_same_endpoint(self):
+        from src.runtime.agent import _same_url_host
+        assert not _same_url_host("https://grape.example.com/api",
+                                   "https://grape.example.com/runtime")
+
+    def test_different_scheme_is_not_same_endpoint(self):
+        from src.runtime.agent import _same_url_host
+        assert not _same_url_host("https://grape.example.com", "http://grape.example.com")
+
+    def test_different_port_is_not_same_endpoint(self):
+        from src.runtime.agent import _same_url_host
+        assert not _same_url_host("https://grape.example.com:8443",
+                                   "https://grape.example.com:443")
+
 class TestBusinessApiWarningAndHealth:
     def test_loopback_business_api_warns(self):
         from src.user.db import get_url_split_warning
