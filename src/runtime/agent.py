@@ -2044,6 +2044,10 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
         except Exception as _sse:
             log.warning(f"[skill] scope resolve failed: {_sse}")
         _skill_meta: dict = {}
+        # Issue #1635 review：官方回退成功后的有效来源（物化名/scope/skill_id）。
+        # 官方内容 digest/version 必须与 official 来源口径一致，不能沿用任务原始
+        # skill_id/_skill_scope（否则构成「主来源 id + 官方 digest」错配）。
+        _fb_source: dict = {}
 
         def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
             """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。
@@ -2078,6 +2082,11 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                     _skill_dir, _dst_name, os.path.dirname(_official))
                 if _ok:
                     _env["DEVOPS_SKILLS_DIR"] = _skill_dir
+                    # 同名官方包回退 → official/0；agent_type 检查器回退（异名）→
+                    # official + 检查器 skill_id（与共享物化实现口径一致）。
+                    _fb_source["skill_name"] = _dst_name
+                    _fb_source["scope"] = "official"
+                    _fb_source["skill_id"] = 0 if _dst_name == _skill_name else _fb_id
                     if _dst_name != _skill_name:
                         # Issue #887（QA 修复）：物化名≠绑定名时回写 task.skill_fallback，
                         # 使 _skill_consistency_gate 将其识别为 declared_fallback
@@ -2146,6 +2155,11 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                 _fb_hit = str(_fb_info.get("skill_name") or "")
                 if _fb_hit and _fb_hit in _skills_ok:
                     log.info(f"[skill] target '{_target_skill}' miss, checker '{_fb_hit}' materialized")
+                    # Issue #1635 review：zip 内命中官方检查器（异名）→ 来源按
+                    # official + 检查器 skill_id 构造，供执行前来源行读取。
+                    _fb_source["skill_name"] = _fb_hit
+                    _fb_source["scope"] = "official"
+                    _fb_source["skill_id"] = int(_fb_info.get("skill_id") or 0)
                     _skill_notes.append(
                         f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
                         f"(fallback): skill '{_target_skill}' not found; materialized official "
@@ -2234,13 +2248,20 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
         if _skill_notes:
             prompt += "".join(_skill_notes)
         # Issue #1635：物化成功（含回退）→ 计算最终来源与漂移，供执行前来源行上报
-        _final_skill = task.get("skill") or ""
+        # Issue #1635 review：官方回退（同名/agent_type 检查器异名）时，来源必须取
+        # 实际落盘的技能名 + official/0（或检查器 id），不得沿用任务原始 skill_id/
+        # _skill_scope；否则 digest/version 来自官方内容而 id 指向主来源造成错配，
+        # 且异名回退时原技能名无 SKILL.md 会漏掉 source/drift（来源行缺字段）。
+        _final_skill = (_fb_source.get("skill_name") or task.get("skill") or "")
+        _final_id = _fb_source.get("skill_id", _skill_id) if _fb_source else _skill_id
+        _final_scope = (_fb_source.get("scope", _skill_scope)
+                        if _fb_source else _skill_scope)
         if _final_skill and os.path.isfile(os.path.join(
                 skill_dir, _final_skill, "SKILL.md")):
             try:
                 from src.runtime.skill_materialize import build_skill_drift_and_source
                 _skill_meta.update(build_skill_drift_and_source(
-                    skill_dir, _final_skill, _skill_id, _skill_scope,
+                    skill_dir, _final_skill, _final_id, _final_scope,
                     task.get("agent_type") or ""))
             except Exception as _sme:
                 log.warning(f"[skill] drift/source build failed: {_sme}")
