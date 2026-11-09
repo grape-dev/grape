@@ -199,6 +199,39 @@ def instrument_fastapi(app, service_name: str):
         return False
 
 
+def start_db_span(sql: str):
+    """SQL 执行 span（DB 阶段拆解 2026-11-05）：在 execute 调用点创建，自动挂当前
+    请求 trace（contextvars 传播）。OTel 未启用/无有效 span → None（零开销）。"""
+    if not otel_enabled():
+        return None
+    try:
+        from opentelemetry import trace as _trace
+        _span = _trace.get_tracer(__name__).start_span("db.query")
+        if not _span.get_span_context().is_valid:
+            return None
+        _span.set_attribute("db.statement", sql[:512])
+        _sys = (sql.lstrip()[:6]).upper()
+        _span.set_attribute("db.operation", _sys)
+        return _span
+    except Exception:
+        return None
+
+
+def end_db_span(span, rowcount=None):
+    """结束 start_db_span 的 span；失败标记 error。"""
+    try:
+        if span is None:
+            return
+        if rowcount is not None:
+            try:
+                span.set_attribute("db.rowcount", int(rowcount))
+            except Exception:
+                pass
+        span.end()
+    except Exception:
+        pass
+
+
 def current_trace_context_headers() -> dict:
     """把当前 W3C tracecontext 注出到 HTTP header dict（跨进程传递用，MR-2 用）。"""
     try:
