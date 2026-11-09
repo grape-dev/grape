@@ -275,6 +275,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 | 引擎设置页补探活状态列 | 设置→引擎页只有在线/健康分，探活失败（如无凭据 MISSING_CREDENTIAL）在页面无线索，需去可观测页看——补四态探活列（✅延迟/❌/⏳）+ 悬停完整 probe_error，复用 observability.js:1214 既有渲染 | 2026-11-06 页面验收发现 |
 | 失败事件 Engine 行显示真实绑定引擎 | 事件页 Engine 行取 `data.runtime \|\| data.backend \|\| 'OpenCode'` 兜底，派发失败事件显示成 opencode 误导排障（实例：vod 绑 aishell-dsh 失败事件显示 Engine: opencode）——失败事件改显示绑定引擎名（失败文案里已有），events.js:140 | 2026-11-06 页面验收发现 |
 | **TODO（Windows）：hwcloud/hermes 任务链 select 轮询改 readline** | `hwcloud_acp.py:410`、`hermes_acp.py:407` 的 select 读线程在 Windows 首循环即抛 WinError 10038（select 仅支持 socket）→ ACP 任务事件流全丢，复现 aishell ⑱ 的「探活 ok（agent.py:271/469 已有 _win_acp_* 兼容层）、任务黑屏」割裂。修法照抄 aishell_acp 9ce71b005：win32 分支专用阻塞 readline 线程 + 切行抽 `_feed()` 共用，POSIX 路径不动，各 ~20 行 | 2026-11-07 aishell ⑱ 同族排查 |
+| **TODO（Windows）：agent shell 中文乱码——PS 5.1 按 GBK 解码子进程 UTF-8 输出** | 真任务实证（event 7）：PowerShell 工具跑 `grape issues get \| ConvertFrom-Json` 构建更新载荷时，未带 `[Console]::OutputEncoding=UTF8` 前缀的调用按控制台 CP936 解码 grape 的 UTF-8 输出 → body 变 `鍦╮eadme娣诲姞椤圭洰鍦板潃`（原文「在readme添加项目地址」），乱码载荷险些经 `issues update` 写穿（服务重启中断未执行）。候选修法：① 服务控制台启动即 `chcp 65001`（子 PS 继承，系统级根治，需验证）；② grape-skills 各 runbook 强制每条 grape 命令带 UTF-8 前缀（已有部分命令带，不一致）；③ grape CLI 增加输出编码自描述。防写穿对账：issues update 前检查载荷含 CJK 乱码特征（如 `鍦`/`娣诲姞`） | 2026-11-07 real-task evidence；同族根因见 executor.py PATH 注入注释块 |
 
 ## 6. 实施顺序（一期）
 
