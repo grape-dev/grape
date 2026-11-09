@@ -85,6 +85,20 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（如 self-hosted provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ set_config_option 字段名是 **id** 非 configId；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）；⑦ **systemd 服务 PATH 不含 ~/.local/bin**（E2E 实证）：pip --user 安装的 CLI（aishell 即如此）人登录可见、服务进程不可见，且 install-worker.sh 重装会重置 unit PATH——由 §2.1 #9 的 Linux 发现兜底根治，不依赖运维改 PATH。
 
+### 3.1 已踩坑增补（2026-11-07 A2A 全链实测，独立于分期计划，接入任何引擎前必读）
+
+⑧ **任务级 GRAPE_SESSION_TOKEN 被 dsh 框架洗掉**：aishell 与 dsh 同框架，bash 工具 spawn 时 scrub 父进程 env 中变量名匹配 /KEY|PASSWORD|SECRET|TOKEN/i 的变量（先例 src/runtime/dsh.py:222）→ grape CLI 全命令 Missing token。解法：token 落 0600 文件 + GRAPE_AUTH_FILE 传递（变量名不命中 scrub；grape CLI 先读该文件再 fallback env）。实现 src/agent/aishell_acp.py prepare_env；⚠️ 调用必须在 env_extra 合并之后（executor.py:535，token 任务级）。
+
+⑨ **GRAPE_AUTH_FILE 不能写 /tmp**——两层隔离依次实证：(a) bwrap 沙箱把 /tmp 挂私有 tmpfs（src/agent/sandbox/__init__.py:88 --tmpfs /tmp），coding/worktree 场景沙箱外写的文件沙箱内不可见（issue/vod/chat 不走沙箱所以通过——**同代码不同场景执行环境不同**）；(b) prepare_env 先于 acp 服务建工位目录执行，isdir(cwd) 为假静默 fallback 回 /tmp。解法：文件落任务 cwd（rw-bind 必可见）+ makedirs(cwd, exist_ok=True) + .git/info/exclude 防污染 + executor finally 清理（仅 cwd 下）。
+
+⑩ **凭据 scope=user 与系统派单身份不匹配**：_check_pool_engines_reachable（service.py:37）对 user scope 引擎要求 task.user_id==owner_id；A2A 交办为系统身份 → 判「范围不匹配」不可达，同凭据手动重派（用户身份）却可达。E2E 测试凭据应为 global。**新引擎接入必须逐格验证 scope×派单方式矩阵**（global/user/repo × 手动/A2A/定时）。
+
+⑪ **探活三副本必须同步登记**：agent.py:55（worker 心跳）/ engine_probe.py:20（主控每 10min，dashboard 本机行读内存不读 DB）/ local_probe.py:48（注册链）。漏任一份 → 页面「跳过 unknown engine」且可达性判死（skip 不在 ok/pending 白名单）。临时解法：主控单源 import agent._probe_aishell_dsh_acp；二期单源化+键集合护栏单测（todo: engine-probe-triple-duplication）。
+
+⑫ **凡涉及 worker 包内文件的修复，验收必须含远端版本确认**（四步）：①判定文件属 worker 包（worker 加载路径，remote worker /opt/grape/）；②找本次修复的新符号；③worker 上 `grep -c "<新符号>" <文件>` 必须命中，0=旧代码先同步再测；④`systemctl restart runtime-agent` 触发 auto-upgrade，日志见 `Auto-upgrade to h-xxxx` 再复测。**没这步会把「代码没同步」误判成「修复无效」**（2026-11-06 实证白跑一轮）。
+
+⑬ **实体 configs 复制自 example 后必须查占位值**：email.example.json 的示例 SMTP 段（smtp.qq.com/your@qq.com）残留 → is_email_configured() 判 True → R7 注册降级被挡死（页面要求验证码但永远收不到）。部署后必查：`grep -E 'your@|your_smtp|example' configs/*.json | grep -v example`；send-code 应返回 EMAIL_NOT_CONFIGURED；注册页应注入 __EMAIL_CONFIGURED__=false。
+
 ## 4. 一期验收（三阶段，页面端到端）
 
 前置：测试项目仓库，worker 上旧 AI Shell(hwcloud) 与新 aishell 并存——全程「新旧对照」，旧行为逐字不变才算过。
