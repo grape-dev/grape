@@ -97,7 +97,7 @@ def _seed_global_scene(scene_id, name="全局场景"):
 
 class TestSceneDetailRepoContext:
     def test_detail_with_repo_matches_list(self):
-        """?repo= 指定仓库：detail 的 name/nodes 与 list --repo 该 id 条目完全一致。"""
+        """?repo= 指定仓库：detail 的 name/既有 nodes 字段与 list --repo 该 id 条目一致。"""
         sid = f"uuid-{uuid.uuid4().hex[:8]}"
         _seed_repo_scene(sid, name="仓库自定义场景")
 
@@ -111,7 +111,16 @@ class TestSceneDetailRepoContext:
         body = resp.json()
         assert body["id"] == sid
         assert body["name"] == entries[0]["name"] == "仓库自定义场景"
-        assert body["nodes"] == entries[0]["nodes"]
+        # Issue #1721：detail 节点新增 resolvable/scope_check 增量字段，
+        # 既有字段保持与 list 一致。
+        list_nodes = entries[0]["nodes"]
+        detail_nodes = body["nodes"]
+        assert len(detail_nodes) == len(list_nodes)
+        for detail_node, list_node in zip(detail_nodes, list_nodes):
+            for key, value in list_node.items():
+                assert detail_node[key] == value
+            assert "resolvable" in detail_node
+            assert "scope_check" in detail_node
 
     def test_detail_with_repo_scene_name(self):
         """?repo= 指定仓库：按场景名（非 uuid）也能解析到仓库内场景。"""

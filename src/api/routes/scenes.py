@@ -1638,17 +1638,34 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (local): {e}")
 
 
-@router.get("/skill-scope-audit", operation_id="scenes_skill_scope_audit", summary="Audit scene skill scope", description="Read-only audit (Issue #1564): scans active repo scenes and reports nodes whose skill scope conflicts (user-scope skills referenced by repo-shared scenes). Returns violations[{scene_id,scene_name,node_id,node_tag,skill,actual_scope,expected_scope}] plus summary counts; never writes.")
+@router.get("/skill-scope-audit", operation_id="scenes_skill_scope_audit", summary="Audit scene skill scope", description="Read-only audit (Issue #1564/#1721): scans active repo scenes and reports nodes whose skill scope conflicts (user-scope skills referenced by repo-shared scenes). Accepts session token (tk_) restricted to its bound repo, read-only. Returns violations[{scene_id,scene_name,node_id,node_tag,skill,actual_scope,expected_scope,suggested_skills}] plus summary counts; never writes.")
 def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1, le=1000),
-                            user: dict = Depends(require_no_session_token)):
-    """存量场景技能 scope 只读体检（Issue #1564 R5）。
+                            user: dict = Depends(get_current_user_or_api_key)):
+    """存量场景技能 scope 只读体检（Issue #1564 R5 / #1721）。
 
     遍历该仓库 is_active=1 的 devops_pipeline_scene，逐节点校验技能 scope，
     输出冲突清单与汇总计数。只读，不改写任何数据；维护者可按清单逐个修正。
     审计口径取严格模式（user scope 一律计冲突），因为场景为全仓共享配置，
     他人应用/派发时必然无法解析。
+
+    Issue #1721：允许会话级 token（tk_）只读体检——限定其绑定 repo_key，
+    显式指向其它仓库一律 403；API Key / JWT 维持既有语义。
     """
-    repo_key = _resolve_scene_repo_key(repo, user)
+    if (user or {}).get("auth_type") == "session_token":
+        _bound_repo_key = (user or {}).get("repo_key") or ""
+        if not _bound_repo_key:
+            raise HTTPException(status_code=403, detail={"code": 403,
+                                                         "message": "会话 token 仅可体检绑定仓库的技能 scope"})
+        if repo:
+            _explicit_repo_key = _resolve_repo_key(repo)
+            if _explicit_repo_key != _bound_repo_key:
+                raise HTTPException(status_code=403, detail={"code": 403,
+                                                             "message": "会话 token 仅可体检本仓技能 scope，越权仓库已拒绝"})
+            repo_key = _explicit_repo_key
+        else:
+            repo_key = _bound_repo_key
+    else:
+        repo_key = _resolve_scene_repo_key(repo, user)
     if not repo_key:
         raise HTTPException(status_code=400,
                             detail={"code": 400, "message": "请先选择仓库"})
@@ -1674,6 +1691,7 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
             rows = [(r[0], r[1], "", r[2]) for r in c.fetchall()]
     violations = []
     conflict_scenes = set()
+    _suggestion_cache = {}
     for scene_id, name, display_name, nodes_json in rows:
         try:
             nodes = json.loads(nodes_json) if nodes_json else []
@@ -1685,6 +1703,12 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
             item = _project_scene_scope_violation(v)
             item["scene_id"] = scene_id
             item["scene_name"] = scene_name
+            _skill = v.get("skill") or ""
+            if _skill not in _suggestion_cache:
+                _suggestion_cache[_skill] = _suggest_repo_official_skills(
+                    _skill, repo_key,
+                    agent_type=_skill_agent_type_by_name(_skill))
+            item["suggested_skills"] = list(_suggestion_cache[_skill])
             violations.append(item)
             conflict_scenes.add(scene_id)
     return {
@@ -1697,6 +1721,7 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
         "note": (
             "只读体检：下列场景节点引用了 user 级技能，应用/派发时可能无法解析。"
             "请改用 repo/official 级技能后重新保存场景；本接口不会改写任何数据。"
+            "suggested_skills 仅为改绑指引，需仓库管理员显式改绑。"
         ) if violations else "只读体检：未发现技能 scope 冲突。",
     }
 
@@ -1736,7 +1761,11 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
         # 命中 pipelines.json default 兜底（与请求 scene_id 不一致）→ 视为未解析到，禁止静默回退
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
     resolved_id = cfg.get("scene_id") or scene_id
-    return {"id": resolved_id, "name": cfg["name"], "nodes": cfg["nodes"],
+    # Issue #1721：节点级技能可解析性前置暴露（与派发侧同一判定口径，按技能名解析），
+    # 纯增量字段；复制节点后附加，避免污染 get_pipeline_config 的进程级缓存。
+    nodes = _attach_scene_node_scope_checks(
+        cfg.get("nodes") or [], repo_key, resolved_id)
+    return {"id": resolved_id, "name": cfg["name"], "nodes": nodes,
             "display_name": cfg.get("display_name") or cfg["name"],
             "onboarding": cfg.get("onboarding", ""),
             "scene_type": cfg.get("scene_type", "standard")}
@@ -2138,6 +2167,99 @@ _SCENE_SCOPE_VIOLATION_FIELDS = ("node_id", "node_tag", "skill",
 def _project_scene_scope_violation(v: dict) -> dict:
     """对外 violations[] 的唯一裁剪点（Issue #1564）：去掉内部 owner_id 等字段。"""
     return {k: v[k] for k in _SCENE_SCOPE_VIOLATION_FIELDS}
+
+
+def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "") -> dict:
+    """单节点技能可解析性前置判定（Issue #1721）。
+
+    复用派发侧 `_skill_scope_mismatch` / `_skill_scope_mismatch_reason`
+    （与 a2a handoff 同一口径，不另写一套规则），按技能名解析，不依赖 skill_id。
+    返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
+    """
+    from src.api.event_pipeline import (_skill_scope_mismatch,
+                                        _skill_scope_mismatch_reason)
+    skill = (node.get("skill") or "").strip()
+    node_tag = node.get("tag") or node.get("id") or ""
+    if not skill:
+        return {"resolvable": True,
+                "scope_check": {"ok": True, "skill": "", "actual_scope": "",
+                                "expected_scope": "repo", "reason": ""}}
+    if node.get("enabled") is False:
+        return {"resolvable": True,
+                "scope_check": {"ok": True, "skill": skill, "actual_scope": "",
+                                "expected_scope": "repo",
+                                "reason": "节点未启用，跳过技能 scope 校验"}}
+    mismatch, info = _skill_scope_mismatch(skill, repo_key)
+    check = {"ok": not mismatch, "skill": skill,
+             "actual_scope": (info or {}).get("scope") or "",
+             "expected_scope": "repo", "reason": ""}
+    if mismatch:
+        check["reason"] = _skill_scope_mismatch_reason(
+            skill, info, scene_id, node_tag)
+    return {"resolvable": not mismatch, "scope_check": check}
+
+
+def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
+                                    scene_id: str = "") -> list:
+    """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
+
+    复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
+    """
+    result = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            result.append(node)
+            continue
+        item = dict(node)
+        item.update(_scene_node_scope_check(node, repo_key, scene_id))
+        result.append(item)
+    return result
+
+
+def _skill_agent_type_by_name(skill_name: str) -> str:
+    """按技能名取 agent_type（Issue #1721 改绑建议用），查不到返回空串。"""
+    if not skill_name:
+        return ""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1 "
+                "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END "
+                "LIMIT 1", (skill_name,)).fetchone()
+        return (row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"_skill_agent_type_by_name failed: {e}")
+        return ""
+
+
+def _suggest_repo_official_skills(skill_name: str, repo_key: str,
+                                  agent_type: str = "", limit: int = 5) -> list:
+    """为冲突的 user 级技能列出可改绑的 repo/official 级同类技能（Issue #1721）。
+
+    仅输出指引，不做任何改绑/写库；优先本仓 repo 级，其次 official 级。
+    """
+    if not skill_name:
+        return []
+    try:
+        from src.session_manager import db, db_lock
+        sql = ("SELECT id, skill_name, scope, agent_type FROM skill "
+               "WHERE is_active=1 AND skill_name<>? AND "
+               "((scope='repo' AND owner_id=?) OR scope='official')")
+        params = [skill_name, repo_key]
+        if agent_type:
+            sql += " AND agent_type=?"
+            params.append(agent_type)
+        sql += (" ORDER BY CASE scope WHEN 'repo' THEN 0 ELSE 1 END, "
+                "skill_name LIMIT ?")
+        params.append(limit)
+        with db_lock:
+            rows = db.cursor().execute(sql, params).fetchall()
+        return [{"skill_id": r[0], "skill_name": r[1], "scope": r[2],
+                 "agent_type": r[3] or ""} for r in rows]
+    except Exception as e:
+        log.warning(f"_suggest_repo_official_skills failed: {e}")
+        return []
 
 
 def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id="",

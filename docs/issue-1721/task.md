@@ -1,0 +1,22 @@
+# Tasks: Issue #1721
+
+- [x] T1 detail 节点级 scope 判定辅助
+  - Acceptance: 单节点返回 `resolvable` + `scope_check{ok,skill,actual_scope,expected_scope,reason}`，按技能名解析
+  - Verify: `tests/test_issue_1721_scene_scope_precheck.py` detail 用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T2 detail 路由接入增量字段
+  - Acceptance: 冲突节点 `resolvable=false`，无冲突节点 `resolvable=true`；缓存节点不被改写
+  - Verify: detail 冲突/无冲突用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T3 audit 支持 tk_ 只读本仓 + 越权拒绝
+  - Acceptance: 会话 token 未传 repo 取绑定仓；显式其它仓 403；不写库
+  - Verify: audit 鉴权/只读用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T4 audit 输出改绑建议
+  - Acceptance: 冲突项含 `suggested_skills`（repo/official 同级技能）
+  - Verify: audit 建议字段用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T5 回归与测试
+  - Acceptance: 新增用例通过，既有 #657/#1564 测试通过
+  - Verify: `pytest tests/test_issue_1721_scene_scope_precheck.py tests/test_issue_1564_skill_scope_market_paths.py`
+  - Files: `tests/test_issue_1721_scene_scope_precheck.py`
