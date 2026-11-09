@@ -1,6 +1,7 @@
 # aishell-dsh 引擎接入实施计划（一期上线 / 二期完善）
 
 > 📅 2026-11-06 ｜ 🌿 基于 weekly-10 @ 40be0820a (personal working branch with aishell-dsh commits) ｜ 📄 分期实施计划（设计结论详见 2026-11-05 设计 spec，本文自包含）
+> ⚠️ 行号体系：§2/§4 行号锚定 40be0820a（实施前）；§3.1 增补（2026-11-07）引用的是**实施后**当前分支（含 aishell_acp.py 等）的行号——两套不可互相对照。
 
 ## 0. 背景约束与已裁定决策（承接设计 spec，实施必须遵守）
 
@@ -12,7 +13,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 |---|---|---|
 | D1 | 命名 | 旧 hwcloud 内部名/路由键/binary/展示名 AI Shell **全保持不动**；新引擎内部名=展示名=`aishell-dsh`。旧名占用点（instances.py:31/51、settings.py:985-986 出口转换、AIShell.svg）全部不动；存量瑕疵 agent.py:1063 capitalize 与 instances.py upper 大小写不一致——不修 |
 | D2 | 接入模式 | 本地部署：自备机器/已有 worker 装 aishell，**不走 cloud-image preinstall、不建云环境** |
-| D3/D4 | 模型凭据与分工 | 设备预配置（acp profile cordis.patch.yml 用户自写，**grape 不提供模板**；key 预置 .credentials.yaml/env，**grape 不持 key、不下发、不透传**）。VCS 收口 grape CLI + GRAPE_SESSION_TOKEN，不在 aishell 侧装 MCP/插件 |
+| D3/D4 | 模型凭据与分工 | 设备预配置（acp profile cordis.patch.yml 用户自写，**grape 不提供模板**；key 预置 .credentials.yaml/env，**grape 不持模型 key、不下发、不透传**。注意：不透传指模型 key；平台自身的 VCS 收口凭据 GRAPE_SESSION_TOKEN 按任务注入并经 GRAPE_AUTH_FILE 穿透进 agent bash，见 §3.1 ⑧）。VCS 收口 grape CLI + GRAPE_SESSION_TOKEN，不在 aishell 侧装 MCP/插件 |
 | D5-D7 | usage/技能/遗留 | usage 解析轨、技能投送（物化 dest=`<cwd>/.dsh/skills` 已实证）、resume 等二期方案已定，详见 §5；#14 守卫不独立立项随查表顺带改 |
 
 **边界与不做的事**（沿用设计 spec §9 否决结论）：REST/SSE 接入模式（常驻服务+端口管理与 per-task 子进程模型冲突）；改动旧 hwcloud 任何命名/展示/路由；平台下发模型 key；aishell web/acp 之外的 profile 形态（tui 等）；plan_update 等增强事件结构化消费（映射 text 透传）。集群语义：不引入新状态存储/新标识符，实例仍走 agent_runtimes 行 + credential_id 锚，多实例语义不变。
@@ -34,7 +35,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 |---|---|---|
 | 1 | src/agent/aishell_acp.py（新建） | AishellDshACPBackend：initialize → session/new → set_config_option(id=model，**字段名是 id 非 configId**，value 从 options 原样取) → session/prompt |
 | 2 | executor.py:30 _BACKENDS / :192 known 表 | 注册转发壳；`aishell-dsh: {cli: aishell}` CLI 发现 |
-| 3 | executor.py:637 附近 dispatch | stream_agent 分支 + _stream_aishell_dsh_acp（env/脱敏/占位符复用，参照 _stream_hermes_acp:363） |
+| 3 | executor.py:613 附近 dispatch（复核定版行号） | stream_agent 分支 + _stream_aishell_dsh_acp（env/脱敏/占位符复用，参照 _stream_hermes_acp:363） |
 | 3b | 发现链（grape_worker_server.py:86-94，现有代码） | **零改动**——worker 启动 discover_runtimes()→probe→register 扫本机 PATH，本机与远程 ECS 两种部署形态天然同构；一期验收要求两形态各识别验证一次（V1），不新增分叉代码 |
 | 4 | runtime/agent.py:1099 _backend_for_engine | **aishell-dsh 分支必须先于 :1108 的 startswith("hwcloud")/("aishell")**——本期实现为 canonical_engine() 查表（见 2.2） |
 | 5 | runtime/agent.py:581 | _probe_aishell_dsh_acp 四步探活（参照 _probe_hwcloud_acp:414；**不做 --version 假探活**） |
