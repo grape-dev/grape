@@ -621,19 +621,6 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             env["PATH"] = _gbin + os.pathsep + env.get("PATH", "")
     except Exception:
         pass
-    # 本机代理隔离（2026-11-07 Windows 真任务实证）：机器常配系统代理（真机
-    # 127.0.0.1:7897），任务内 `grape` CLI → 本机 master 的请求被代理劫持后
-    # 一律 502/挂起。localhost/127.0.0.1 追加进 NO_PROXY/no_proxy（幂等），
-    # 保证 CLI 直连本机服务；对外部地址的代理行为不变。
-    try:
-        for _k in ("NO_PROXY", "no_proxy"):
-            _cur = (env.get(_k) or "").strip()
-            _have = [h.strip().lower() for h in _cur.split(",") if h.strip()] if _cur else []
-            _add = [h for h in ("localhost", "127.0.0.1") if h not in _have]
-            if _add:
-                env[_k] = (_cur + "," if _cur else "") + ",".join(_add)
-    except Exception:
-        pass
     # 平台 VCS token 不再注入（P2）。bot_token/user_token 保留仅作日志脱敏用途，
     # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
     # Issue #344: 改用带预刷新的 token 获取函数，避免拿到过期 token。
