@@ -615,7 +615,7 @@ ExecStart=$VENV/bin/python -m src.runtime.agent
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=$INSTALL_DIR/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=$INSTALL_DIR/.venv/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]

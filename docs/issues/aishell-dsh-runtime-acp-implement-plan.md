@@ -42,6 +42,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 | 7 | settings.py:1152 _engine_type_of、runtimes.js:260/524/537 | includes('aishell') 误命中修复：aishell-dsh 分支前置；_ENGINE_DOT 加色点 |
 | 8 | usage_collect.py:147/204 | aishell-dsh 分支：**一期返回空 + 显式缺口标注**（不加会静默落空） |
 | 9 | os_adapter.py find_cli / engine_search_paths | Linux 通用发现兜底：PATH 找不到时追加候选 `~/.local/bin/\<cli\>`（pip/pipx --user 安装目录；systemd 服务 PATH 常缺该目录，E2E 实证 aishell 装在这里导致升级重装后识别丢失）。对称 Windows 侧已有的 _ENGINE_WINDOWS_PATHS 机制（hermes 条目即 %USERPROFILE%\.local\bin 先例），非 aishell 特例 |
+| 10 | scripts/install-worker.sh systemd unit 模板 | unit 模板 `Environment=PATH` 追加 `$HOME/.local/bin`（安装时展开为安装用户 home，与服务用户一致）——与 #9 双保险：即使未来发现兜底有遗漏，unit PATH 也不丢该目录。E2E 实证 upgrade 重装会重置 unit PATH 导致识别丢失 |
 
 ### 2.2 标准②：调度正确（首期红线）
 
@@ -244,6 +245,8 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 | resume chat | session/close → 跨进程 session/resume → 续聊上下文保留（已验证），configOptions 保留 | 另立 issue（阶段 4） |
 | Windows 路径 | os_adapter _ENGINE_WINDOWS_PATHS 条目（Linux 一期仅 PATH） | — |
 | usage_update 消费 | {used,size} 上下文占用的展示消费 | — |
+| 引擎设置页补探活状态列 | 设置→引擎页只有在线/健康分，探活失败（如无凭据 MISSING_CREDENTIAL）在页面无线索，需去可观测页看——补四态探活列（✅延迟/❌/⏭/⏳）+ 悬停完整 probe_error，复用 observability.js:1214 既有渲染 | 2026-11-06 页面验收发现 |
+| 失败事件 Engine 行显示真实绑定引擎 | 事件页 Engine 行取 `data.runtime \|\| data.backend \|\| 'OpenCode'` 兜底，派发失败事件显示成 opencode 误导排障（实例：vod 绑 aishell-dsh 失败事件显示 Engine: opencode）——失败事件改显示绑定引擎名（失败文案里已有），events.js:140 | 2026-11-06 页面验收发现 |
 
 ## 6. 实施顺序（一期）
 
