@@ -8,7 +8,7 @@
 ## Scope
 ### In Scope
 - `src/api/routes/scenes.py`：
-  - `scenes detail` 节点级附加 `resolvable` 与 `scope_check{ok, skill, actual_scope, expected_scope, reason}`，复用派发侧 `_skill_scope_mismatch` / `_skill_scope_mismatch_reason`，按技能名解析，不依赖 `skill_id`。
+  - `scenes detail` 节点级附加 `resolvable` 与 `scope_check{ok, skill, actual_scope, expected_scope, reason}`；与派发侧同一口径：节点显式 `skill_id` active 即视为授权（跳过名字级 scope 门禁），否则按技能名复用派发侧 `_skill_scope_mismatch` 判定；detail 阶段 reason 使用“保存/派发时将拦截”措辞（不复用“派发已阻断”）。
   - `skill-scope-audit` 鉴权从 `require_no_session_token` 放宽为 `get_current_user_or_api_key`，`tk_` 限定本仓（`repo_key=会话仓`）、只读、越权仓拒绝。
   - audit 响应每个冲突项附带建议改绑的 repo/official 级同类技能（仅指引）。
 ### Out of Scope
@@ -25,8 +25,9 @@
 - [ ] 报障场景 `agent-best-practices/fix-system-agent` 的 `default` 在 detail 即可看到 issue 节点 `resolvable=false` 与 `scope_check`（技能名、user/repo 双方 scope、原因）。
 - [ ] `skill-scope-audit` 以 `tk_` 可读本仓冲突清单与改绑建议，且不写库；显式其它仓 403。
 - [ ] 无冲突场景 detail 仅新增字段，既有字段与行为不变。
-- [ ] 冲突场景保存/apply 仍 400（回归）；改绑后派发 2xx（由 #657/#1564 既有链路保障）。
-- [ ] 现有测试通过，新增测试覆盖 detail 增量字段、audit `tk_` 鉴权与越权拒绝。
+- [ ] 冲突场景保存/apply 仍 400（回归）；改绑后派发门禁放行（#657/#1564 既有链路保障，另由 `test_detail_after_rebind_to_repo_skill_is_resolvable` 覆盖改绑后 `resolvable=true` 且 `_skill_scope_mismatch=false`）。
+- [ ] 显式有效 `skill_id` 的节点 detail 判定 `resolvable=true`（与派发侧一致）；`skill_id` 失效时回退名字判定。
+- [ ] 现有测试通过，新增测试覆盖 detail 增量字段、`skill_id` 口径、改绑回归、audit `tk_` 鉴权与越权拒绝。
 
 ## Open Questions
 - 无。

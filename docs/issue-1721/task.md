@@ -20,3 +20,7 @@
   - Acceptance: 新增用例通过，既有 #657/#1564 测试通过
   - Verify: `pytest tests/test_issue_1721_scene_scope_precheck.py tests/test_issue_1564_skill_scope_market_paths.py`
   - Files: `tests/test_issue_1721_scene_scope_precheck.py`
+- [x] T6 审查意见修复（#1721 复审）
+  - Acceptance: 显式 `skill_id` 有效判可解析（与派发侧一致）、失效回退名字判定；detail reason 不再复用“派发已阻断”；detail OpenAPI description 同步新字段；AC4 改绑回归用例
+  - Verify: `pytest tests/test_issue_1721_scene_scope_precheck.py`
+  - Files: `src/api/routes/scenes.py`, `tests/test_issue_1721_scene_scope_precheck.py`, `docs/issue-1721/*.md`

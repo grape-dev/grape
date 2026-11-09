@@ -1726,7 +1726,7 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
     }
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill cannot be resolved by the dispatch path (name resolution only sees a user-scope skill, or an explicit skill_id is invalid/inactive), so the scene node must be re-bound to a repo/official skill before dispatch. An explicit active skill_id is treated as authorized (same rule as dispatch).")
 def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）。
 
@@ -1761,8 +1761,9 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
         # 命中 pipelines.json default 兜底（与请求 scene_id 不一致）→ 视为未解析到，禁止静默回退
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
     resolved_id = cfg.get("scene_id") or scene_id
-    # Issue #1721：节点级技能可解析性前置暴露（与派发侧同一判定口径，按技能名解析），
-    # 纯增量字段；复制节点后附加，避免污染 get_pipeline_config 的进程级缓存。
+    # Issue #1721：节点级技能可解析性前置暴露（与派发侧同一判定口径：显式 skill_id
+    # 有效即授权，否则按技能名判定），纯增量字段；复制节点后附加，避免污染
+    # get_pipeline_config 的进程级缓存。
     nodes = _attach_scene_node_scope_checks(
         cfg.get("nodes") or [], repo_key, resolved_id)
     return {"id": resolved_id, "name": cfg["name"], "nodes": nodes,
@@ -2169,15 +2170,22 @@ def _project_scene_scope_violation(v: dict) -> dict:
     return {k: v[k] for k in _SCENE_SCOPE_VIOLATION_FIELDS}
 
 
-def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "") -> dict:
+def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
+                            cache: dict | None = None) -> dict:
     """单节点技能可解析性前置判定（Issue #1721）。
 
-    复用派发侧 `_skill_scope_mismatch` / `_skill_scope_mismatch_reason`
-    （与 a2a handoff 同一口径，不另写一套规则），按技能名解析，不依赖 skill_id。
+    与派发侧同一判定口径：
+    - 节点带非零 `skill_id` 且该技能仍 active → 派发侧
+      `resolve_skill_dispatch` 直接按 id 授权直用并跳过名字级 scope 门禁，
+      故此处同样判为可解析（即使技能为 user scope）；
+    - 否则按技能名复用派发侧 `_skill_scope_mismatch`（上游私有符号契约：
+      `(skill_name, repo_key) -> (mismatch, info)`，上游签名变更需同步此处）。
+    detail 阶段尚未派发，reason 使用“保存/派发时将拦截”措辞，不复用派发侧
+    “派发已阻断”文案以免误导。
     返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
+    `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
     """
-    from src.api.event_pipeline import (_skill_scope_mismatch,
-                                        _skill_scope_mismatch_reason)
+    from src.api.event_pipeline import _skill_scope_mismatch
     skill = (node.get("skill") or "").strip()
     node_tag = node.get("tag") or node.get("id") or ""
     if not skill:
@@ -2189,13 +2197,51 @@ def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "") -> di
                 "scope_check": {"ok": True, "skill": skill, "actual_scope": "",
                                 "expected_scope": "repo",
                                 "reason": "节点未启用，跳过技能 scope 校验"}}
-    mismatch, info = _skill_scope_mismatch(skill, repo_key)
+    try:
+        skill_id = int(node.get("skill_id") or 0)
+    except (TypeError, ValueError):
+        skill_id = 0
+    bound = None
+    if skill_id:
+        _id_key = ("id", skill_id)
+        if cache is not None and _id_key in cache:
+            bound = cache[_id_key]
+        else:
+            try:
+                from src.user.db import get_skill_by_id
+                bound = get_skill_by_id(skill_id)
+            except Exception as e:
+                log.warning(f"_scene_node_scope_check get_skill_by_id failed: {e}")
+                bound = None
+            if cache is not None:
+                cache[_id_key] = bound
+    if bound:
+        _bound_scope = bound.get("scope") or ""
+        return {"resolvable": True,
+                "scope_check": {
+                    "ok": True,
+                    "skill": bound.get("skill_name") or skill,
+                    "actual_scope": _bound_scope,
+                    "expected_scope": "repo",
+                    "reason": (f"节点已显式绑定 skill_id={skill_id}"
+                               f"（scope={_bound_scope or '-'}），"
+                               f"派发侧按显式绑定授权直用，跳过名字级 scope 门禁")}}
+    _name_key = ("name", skill)
+    if cache is not None and _name_key in cache:
+        mismatch, info = cache[_name_key]
+    else:
+        mismatch, info = _skill_scope_mismatch(skill, repo_key)
+        if cache is not None:
+            cache[_name_key] = (mismatch, info)
     check = {"ok": not mismatch, "skill": skill,
              "actual_scope": (info or {}).get("scope") or "",
              "expected_scope": "repo", "reason": ""}
     if mismatch:
-        check["reason"] = _skill_scope_mismatch_reason(
-            skill, info, scene_id, node_tag)
+        _scope = (info or {}).get("scope") or "user"
+        check["reason"] = (
+            f"技能 '{skill}' scope 不匹配（技能 scope={_scope}，场景 scope=repo）；"
+            f"repo 级场景不可引用 user 级技能，保存/派发时将拦截"
+            f"（scene={scene_id or '-'}，node={node_tag or '-'}）")
     return {"resolvable": not mismatch, "scope_check": check}
 
 
@@ -2204,14 +2250,16 @@ def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
     """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
 
     复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
+    同一响应内按 skill_id/技能名缓存判定结果，避免重复节点触发多次查询。
     """
     result = []
+    _cache = {}
     for node in nodes or []:
         if not isinstance(node, dict):
             result.append(node)
             continue
         item = dict(node)
-        item.update(_scene_node_scope_check(node, repo_key, scene_id))
+        item.update(_scene_node_scope_check(node, repo_key, scene_id, cache=_cache))
         result.append(item)
     return result
 

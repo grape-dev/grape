@@ -150,6 +150,91 @@ class TestSceneDetailScopeCheck:
             _cleanup_repo(repo_key, scene_id)
             _delete_skill(s_repo)
 
+    def test_detail_explicit_skill_id_is_authorized(self):
+        """显式 skill_id 命中即授权：与派发侧 resolve_skill_dispatch 口径一致。"""
+        from src.api.routes.scenes import get_scene_detail
+        owner, repo = f"o1721-{_unique()}", _unique()
+        repo_key = _repo_key(owner, repo)
+        scene_id = f"sc-{_unique()}"
+        s_user = f"usk1721_{_unique()}"
+        try:
+            user_skill_id = _mk_skill_row(scope="user", owner="42", sname=s_user)
+            _create_scene(scene_id, repo_key, [
+                {"id": "issue", "tag": "issue", "skill": s_user,
+                 "skill_id": user_skill_id, "enabled": True},
+            ])
+            detail = get_scene_detail(
+                scene_id, repo=f"{owner}/{repo}", user={"username": "me", "id": 1})
+            node = detail["nodes"][0]
+            assert node["resolvable"] is True
+            check = node["scope_check"]
+            assert check["ok"] is True
+            assert check["skill"] == s_user
+            assert check["actual_scope"] == "user"
+            assert "skill_id" in check["reason"]
+        finally:
+            _cleanup_repo(repo_key, scene_id)
+            _delete_skill(s_user)
+
+    def test_detail_invalid_skill_id_falls_back_to_name_gate(self):
+        """skill_id 失效（技能被删/停用）→ 回退名字判定，仍报冲突。"""
+        from src.api.routes.scenes import get_scene_detail
+        owner, repo = f"o1721-{_unique()}", _unique()
+        repo_key = _repo_key(owner, repo)
+        scene_id = f"sc-{_unique()}"
+        s_user = f"usk1721_{_unique()}"
+        try:
+            _mk_skill_row(scope="user", owner="42", sname=s_user)
+            _create_scene(scene_id, repo_key, [
+                {"id": "issue", "tag": "issue", "skill": s_user,
+                 "skill_id": 999999999, "enabled": True},
+            ])
+            detail = get_scene_detail(
+                scene_id, repo=f"{owner}/{repo}", user={"username": "me", "id": 1})
+            node = detail["nodes"][0]
+            assert node["resolvable"] is False
+            assert node["scope_check"]["actual_scope"] == "user"
+        finally:
+            _cleanup_repo(repo_key, scene_id)
+            _delete_skill(s_user)
+
+    def test_detail_after_rebind_to_repo_skill_is_resolvable(self):
+        """AC4 回归：user 技能节点改绑 repo 级技能后详情可解析、派发门禁放行。"""
+        from src.api.routes.scenes import get_scene_detail
+        from src.api.event_pipeline import _skill_scope_mismatch
+        owner, repo = f"o1721-{_unique()}", _unique()
+        repo_key = _repo_key(owner, repo)
+        scene_id = f"sc-{_unique()}"
+        s_user = f"usk1721_{_unique()}"
+        s_repo = f"rsk1721_{_unique()}"
+        try:
+            _mk_skill_row(scope="user", owner="42", sname=s_user)
+            repo_skill_id = _mk_skill_row(scope="repo", owner=repo_key, sname=s_repo)
+            _create_scene(scene_id, repo_key, [
+                {"id": "issue", "tag": "issue", "skill": s_user,
+                 "skill_id": 0, "enabled": True},
+            ])
+            before = get_scene_detail(
+                scene_id, repo=f"{owner}/{repo}", user={"username": "me", "id": 1})
+            assert before["nodes"][0]["resolvable"] is False
+
+            _create_scene(scene_id, repo_key, [
+                {"id": "issue", "tag": "issue", "skill": s_repo,
+                 "skill_id": repo_skill_id, "enabled": True},
+            ])
+            after = get_scene_detail(
+                scene_id, repo=f"{owner}/{repo}", user={"username": "me", "id": 1})
+            node = after["nodes"][0]
+            assert node["resolvable"] is True
+            assert node["scope_check"]["ok"] is True
+            assert node["scope_check"]["actual_scope"] == "repo"
+            mismatch, _info = _skill_scope_mismatch(s_repo, repo_key)
+            assert mismatch is False
+        finally:
+            _cleanup_repo(repo_key, scene_id)
+            _delete_skill(s_user)
+            _delete_skill(s_repo)
+
     def test_detail_disabled_and_empty_skill_nodes_are_resolvable(self):
         """禁用节点与无技能节点不产生误报。"""
         from src.api.routes.scenes import get_scene_detail
