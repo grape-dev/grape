@@ -9,6 +9,27 @@ from src.config import log
 API_BASE = "https://gitcode.com/api/v5"
 
 
+class UpstreamAPIError(RuntimeError):
+    """上游 Git 平台 API 返回 >=400（Issue #549）：携带真实 status_code / message。
+
+    继承 RuntimeError：既有 `except RuntimeError` 调用点（add_collaborator /
+    get_member_permission 等）零改动兼容；`str()` 保持
+    "GitCode API {method} {url} failed ({code}): {message}" 格式，
+    `_extract_http_code` 的 `\\((\\d{3})\\)` 正则与字符串判定不受影响。
+    """
+
+    def __init__(self, method: str, url: str, status_code: int, message: str,
+                 provider: str = "GitCode"):
+        self.method = method
+        self.url = url
+        self.status_code = int(status_code)
+        self.message = message or ""
+        self.provider = provider
+        super().__init__(
+            f"{provider} API {method} {url} failed ({self.status_code}): {self.message}"
+        )
+
+
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
@@ -27,7 +48,8 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         else:
             raise ValueError(f"Unsupported method: {method}")
         if resp.status_code >= 400:
-            raise RuntimeError(f"GitCode API {method} {url} failed ({resp.status_code}): {resp.text[:500]}")
+            # Issue #549: 上游真实状态码透传（不截断 message），供 _vcs_req 分流
+            raise UpstreamAPIError(method, url, resp.status_code, resp.text)
         if resp.text.strip():
             return resp.json()
         return {}
@@ -157,8 +179,8 @@ def _req_query(method: str, path: str, token: str, params: dict | None = None,
             raw = resp.read().decode()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
-        raw = e.read().decode(errors="replace")[:500]
-        raise RuntimeError(f"GitCode API {method} {path} failed ({e.code}): {raw}")
+        raw = e.read().decode(errors="replace")
+        raise UpstreamAPIError(method, path, e.code, raw)
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
@@ -225,7 +247,10 @@ def accept_invite_for_repo(token: str, owner: str, repo: str) -> bool:
 
 
 def _extract_http_code(err: Exception) -> int:
-    """从 RuntimeError('...failed (429):...') 提取 HTTP 状态码。"""
+    """从异常提取上游 HTTP 状态码：优先 UpstreamAPIError.status_code，正则兜底。"""
+    code = getattr(err, "status_code", 0)
+    if code:
+        return int(code)
     import re
     m = re.search(r"\((\d{3})\)", str(err))
     return int(m.group(1)) if m else 0
@@ -337,6 +362,57 @@ def get_user_gitcode_login(api_token: str) -> str:
     except RuntimeError as e:
         log.warning(f"get_user_gitcode_login failed: {e}")
         return ""
+
+
+def fetch_user_orgs(api_token: str) -> list[dict]:
+    """获取当前 token 用户拥有的 GitCode 组织列表。
+
+    Issue #543：迁移目标组织下拉框数据源。
+    返回 [{"login", "name", "avatar_url"}, ...]（login 为组织账号名，用作 target_owner）。
+    失败抛 RuntimeError（由 with_oauth_token 统一处理 401/403 token 失效）。
+
+    GitCode 无 /user/orgs 端点（404），需先获取用户 login，
+    再走 /users/{login}/orgs 查组织列表。
+    """
+    if not api_token:
+        raise RuntimeError("GitCode API Token 未配置")
+
+    # 1. 获取当前用户 login
+    user_url = f"{API_BASE}/user"
+    user_data = _req("GET", user_url, api_token)
+    login = user_data.get("login") or user_data.get("username") or ""
+    if not login:
+        raise RuntimeError("无法获取当前用户 login")
+
+    # 2. 查用户组织列表
+    orgs: list[dict] = []
+    page = 1
+    while True:
+        url = f"{API_BASE}/users/{urllib.parse.quote(login, safe='')}/orgs?per_page=50&page={page}"
+        data = _req("GET", url, api_token)
+        items = data if isinstance(data, list) else []
+        if not items and isinstance(data, dict):
+            for key in ("data", "list", "items", "content"):
+                if key in data and isinstance(data[key], list):
+                    items = data[key]
+                    break
+        for o in items:
+            if not isinstance(o, dict):
+                continue
+            org_login = o.get("login") or o.get("path") or o.get("username") or ""
+            if not org_login:
+                continue
+            orgs.append({
+                "login": org_login,
+                "name": o.get("name") or o.get("nickname") or org_login,
+                "avatar_url": o.get("avatar_url") or "",
+            })
+        if len(items) < 50:
+            break
+        page += 1
+        if page > 20:  # 安全上限（1000 组织）
+            break
+    return orgs
 
 
 def create_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
@@ -737,8 +813,8 @@ def _github_req(method: str, url: str, token: str = "", body: dict | None = None
                 return json.loads(raw)
             return {}
     except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:500]
-        raise RuntimeError(f"GitHub API {method} {url} failed ({e.code}): {body}")
+        body = e.read().decode(errors="replace")
+        raise UpstreamAPIError(method, url, e.code, body, provider="GitHub")
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitHub API: {e.reason}")
 

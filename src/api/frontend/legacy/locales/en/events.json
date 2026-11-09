@@ -100,9 +100,12 @@
   "scope_agent_solo": "Agent Only",
   "nav_forbidden": "No permission to access event #{{seq}}, it may belong to another repo",
   "engine_undispatched": "Undispatched / No execution engine",
+  "model": "Model",
+  "model_unknown": "Model unknown",
   "fail_reason": "Failure reason",
   "btn_a2a_redo": "🤝 A2A Redispatch",
   "status_pending": "⏳ Queued",
+  "status_cancelled": "⊘ Cancelled",
   "btn_feedback": "Feedback",
   "btn_feedback_title": "Report an issue for this failed event (auto-attaches repo/task/engine context)",
   "no_fail_reason": "No failure reason",
@@ -111,5 +114,10 @@
   "a2a_redo_skipped": "A2A redo skipped: {reason}",
   "a2a_redo_success": "A2A redo succeeded, new event #{seq}",
   "a2a_redo_failed": "A2A redo failed: {msg}",
-  "a2a_redo_unknown": "Unknown error"
+  "a2a_redo_unknown": "Unknown error",
+  "fail_expand": "Expand",
+  "fail_collapse": "Collapse",
+  "diag_target": "Target stage",
+  "diag_phase": "Failure phase",
+  "diag_ref_seq": "Ref seq"
 }

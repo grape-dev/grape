@@ -209,7 +209,7 @@ class TestUpsertSkillObs:
             agent_type="coding", description="test", object_key="test-key",
             created_by="test", category_id=3
         )
-        assert ok is True
+        assert ok  # Issue #444: upsert 返回主键 id（truthy）
         with db_lock:
             c = db.cursor()
             c.execute("SELECT category_id FROM skill WHERE skill_name='test-skill-179' AND scope='user'")

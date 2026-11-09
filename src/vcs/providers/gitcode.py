@@ -28,7 +28,12 @@ def _gc_related(v, neutral, native, ctx):
 
 
 _QUERY_STATE = {"open": "opened", "closed": "closed", "all": "all"}
-_UPDATE_STATE = {"open": "open", "closed": "close", "close": "close"}
+# Issue #707: 上游 PATCH state 合法值为事件语义 reopen/close —— open/opened 为中性
+# 别名（映射为 reopen），原 open→open 直传会触发上游 400 'state_event' 误导文案
+_UPDATE_STATE = {
+    "open": "reopen", "opened": "reopen", "reopen": "reopen",
+    "closed": "close", "close": "close",
+}
 
 _RULES = {
     ("issues", "query"): {"state": {"native": "state", "values": _QUERY_STATE}},
@@ -40,7 +45,9 @@ _RULES = {
     ("issues", "update"): {
         "labels": "labels",
         "assignee": "assignee",
-        "milestone_id": "milestone_id",
+        # Issue #640: 上游 PATCH /repos/{owner}/issues/{number} 里程碑参数名为 milestone（int），
+        # 不存在 milestone_id —— 同名直传会被静默忽略（200 假成功）
+        "milestone_id": "milestone",
         "state": {"native": "state", "values": _UPDATE_STATE},
         "body": "body",
     },

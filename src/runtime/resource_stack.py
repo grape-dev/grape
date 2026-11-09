@@ -33,6 +33,9 @@ class TaskResourceStack:
         self._overlays: list[str] = []
         self._procs: list = []
         self._tmp_patterns: list[str] = []
+        # Issue #516 M2：进度快照（checkpoint）——终态 dispose 时清理快照文件；
+        # 超时取消路径不走 dispose（CancelledError 非法路径），快照保留供自动重试续跑。
+        self._checkpoints: list = []
         self._disposed = False
 
     def track_overlay(self, path: str):
@@ -61,6 +64,10 @@ class TaskResourceStack:
     def track_tmp_pattern(self, pattern: str):
         """Register a glob pattern for /tmp cleanup."""
         self._tmp_patterns.append(pattern)
+
+    def track_checkpoint(self, ckpt):
+        """Issue #516 M2：注册进度快照对象（dispose 时清理其落盘文件）。"""
+        self._checkpoints.append(ckpt)
 
     def dispose(self, kill_procs: bool = True, keep_overlays: bool = False):
         """Release all tracked resources. Idempotent.
@@ -101,7 +108,15 @@ class TaskResourceStack:
                 except Exception:
                     pass
 
-        # 4. Close ExitStack
+        # 4. Remove checkpoint snapshot files (Issue #516 M2: terminal states
+        #    no longer need resume; timeout-cancel path never reaches dispose)
+        for ckpt in self._checkpoints:
+            try:
+                ckpt.clear()
+            except Exception:
+                pass
+
+        # 5. Close ExitStack
         try:
             self._stack.close()
         except Exception:
@@ -110,7 +125,7 @@ class TaskResourceStack:
         log.info(
             f"TaskResourceStack disposed: task={self.task_id} "
             f"procs={len(self._procs)} overlays={len(self._overlays)} "
-            f"tmp_patterns={len(self._tmp_patterns)}"
+            f"tmp_patterns={len(self._tmp_patterns)} checkpoints={len(self._checkpoints)}"
         )
 
     def _kill_proc(self, proc):

@@ -284,6 +284,33 @@ class TestRegression338PersonalOrgVisibility:
         assert "t371-opencode" in {rt["name"] for rt in r["runtimes"]}, r
 
 
+class TestIssue430RepoScopeVisibleInPersonalOrg:
+    """Issue #430：仓库级（repo scope）设备在个人组织视图对仓库成员可见。
+
+    场景：仓库切为「仓库级」后 org_id 对齐到仓库所属组织（可能是仓库 owner 的个人组织），
+    与查看者当前个人组织不一致 → 个人组织视图的 org_id 过滤把仓库级设备滤掉。
+    修正口径与 #371 非个人组织分支一致：repo scope 豁免 org_id 过滤，可见性仍由
+    _visible_credential（repo_key ∈ user_repos）收敛，不越权。
+    """
+
+    def test_repo_scope_device_visible_in_personal_org(self):
+        """个人组织视图：runtime-devices 列出 repo scope 设备。"""
+        from src.api.routes.settings import get_runtime_devices
+        _create_repo_scope_cred()
+        d = get_runtime_devices(user=_user_in_personal(), page=1, page_size=100)
+        names = {dev["name"] for dev in d["devices"]}
+        assert "t371-worker-repo" in names, f"repo scope 设备在个人组织视图应可见: {names}"
+
+    def test_non_member_cannot_see_repo_scope_in_personal_org(self):
+        """不越权对照：非仓库成员的另一个账号在个人组织视图看不到 repo scope 设备。"""
+        from src.api.routes.settings import get_runtime_devices
+        _create_repo_scope_cred()
+        user_other = {"id": 88, "username": "bob", "auth_type": "jwt", "org_id": _ORG_PERSONAL}
+        d = get_runtime_devices(user=user_other, page=1, page_size=100)
+        assert "t371-worker-repo" not in {dev["name"] for dev in d["devices"]}, \
+            "非仓库成员不应通过 repo scope 豁免看到设备"
+
+
 class TestRegression277RepoIsolation:
     """回归 #277：仓库隔离不越权（非仓库成员看不到 repo scope 设备）。"""
 

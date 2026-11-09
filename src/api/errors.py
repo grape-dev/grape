@@ -8,6 +8,9 @@
 """
 
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
+
+UNPROCESSABLE_ENTITY = 422
 
 # ===== 状态码常量 =====
 OK = 200
@@ -44,3 +47,52 @@ def business_ok_false(code: int, message: str) -> dict:
     用于 tasks/notify 等命令语义端点：调用方凭 `ok=False` 判失败。
     """
     return {"ok": False, "code": code, "message": message}
+
+
+def extract_allowed_values(pattern: str) -> list:
+    """从 pattern regex 解析合法值枚举（pattern 为合法值真相源，禁止硬编码漂移）。
+
+    支持 `^(a|b|c)$` / `^(a|b|)$` 形式；解析失败返回空列表（调用方降级）。
+    """
+    if not pattern:
+        return []
+    body = pattern.strip()
+    if body.startswith("^"):
+        body = body[1:]
+    if body.endswith("$"):
+        body = body[:-1]
+    body = body.strip()
+    if body.startswith("(") and body.endswith(")"):
+        body = body[1:-1]
+    values = [v for v in body.split("|")]
+    # 去掉空串占位（`|)` 尾部空分支表示"可选空值"），保留用户可感知的非空合法值
+    cleaned = [v for v in values if v]
+    return cleaned[:64]
+
+
+def validation_error_response(exc) -> JSONResponse:
+    """将 FastAPI RequestValidationError 转为统一 {code, message} 信封（Issue #683）。
+
+    message 携带非法字段名与合法值枚举（从 ctx.pattern 解析），Agent 可据此自纠命令；
+    多个错误用 "; " 拼接。
+    """
+    parts = []
+    for err in exc.errors():
+        loc = [str(p) for p in err.get("loc", [])]
+        field = ".".join(p for p in loc if p not in ("query", "body", "path"))
+        if not field and loc:
+            field = loc[-1]
+        msg = str(err.get("msg", "invalid value"))
+        ctx = err.get("ctx") or {}
+        pattern = ctx.get("pattern") or ""
+        allowed = extract_allowed_values(pattern)
+        source = loc[0] if loc else "query"
+        if allowed:
+            parts.append(
+                f"{source} param '{field}' invalid: allowed values are "
+                f"[{', '.join(allowed)}]")
+        else:
+            parts.append(f"{source} param '{field}' invalid: {msg}")
+    message = "; ".join(parts) if parts else "request validation failed"
+    return JSONResponse(status_code=UNPROCESSABLE_ENTITY,
+                        content={"code": UNPROCESSABLE_ENTITY, "message": message})

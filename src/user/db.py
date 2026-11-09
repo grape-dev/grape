@@ -12,9 +12,21 @@ D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
   link_gitcode_user/link_github_user → create_external_identity
   get_user_by_gitcode_id/get_user_by_github_id → get_external_identity
 """
-import json, hashlib, time, os, warnings
+import json, hashlib, re, time, os, warnings, threading
 from src.session_manager import db, db_lock
 from src.config import log
+
+
+def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: str) -> None:
+    """延迟绑定 apply_runtime_state（Issue #1496）。
+
+    src/runtime/service.py 反向 import 本模块（get_task_token），模块级
+    `from src.runtime.health import apply_runtime_state` 会形成
+    user.db → runtime.health → runtime/__init__ → service → user.db 环；
+    运行期（调用点）再解析则无环。
+    """
+    from src.runtime.health import apply_runtime_state
+    apply_runtime_state(c, runtime_id, status, last_seen_at)
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
 # OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
@@ -293,9 +305,15 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
 # P0-3: exchange_code 一次性交换码——替代 URL 传递 access_token
 def save_exchange_code(code: str, user_id: int, username: str,
                        provider: str, token_version: int, is_new: bool) -> bool:
-    """保存一次性 exchange code（10 秒过期）。
+    """保存一次性 exchange code（60 秒过期）。
 
     P2-1: 懒清理——每次保存时顺带删除过期 exchange_codes。
+    #535 UC14：10s→60s。原 10s 窗口对 SPA 首载（公网无缓存拉全量静态资源
+    经常 >10s）是必然冲突——回调成功→前端加载完才兑票→票已过期→401→
+    被踢回登录页。60s 是缓解（治本为 UC15 内联脚本落地即兑，见 main.py）。
+    安全论证：code 为 sha256(urandom(32)) 高熵值，威胁模型是截获而非枚举；
+    一次性原子消费（validate_exchange_code SELECT+DELETE rowcount）不变；
+    兑换是 POST（链接预取/邮件扫描器只发 GET，不会预消费）。
     """
     import time as _t
     try:
@@ -309,7 +327,7 @@ def save_exchange_code(code: str, user_id: int, username: str,
                     "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (code, user_id, username, provider, token_version,
-                     1 if is_new else 0, _t.time(), _t.time() + 10),
+                     1 if is_new else 0, _t.time(), _t.time() + 60),
                 )
             except Exception as _exc:
                 # FR-CQ-5: 约束冲突时删旧票重试
@@ -326,7 +344,7 @@ def save_exchange_code(code: str, user_id: int, username: str,
                     "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (code, user_id, username, provider, token_version,
-                     1 if is_new else 0, _t.time(), _t.time() + 10),
+                     1 if is_new else 0, _t.time(), _t.time() + 60),
                 )
             db.commit()
         return True
@@ -1123,6 +1141,44 @@ def get_skill_by_id(skill_id) -> dict | None:
         return None
 
 
+def resolve_official_checker_skill(agent_type: str) -> dict | None:
+    """Issue #617：按 agent_type 回退官方检查器技能（skill 按名未命中时的兜底）。
+
+    场景节点引用了官方库不存在的技能名（如 skill-batch-validator）时，materialize
+    按名必然失败。此处按节点 agent_type 在 skill 表取 is_active=1 且 scope='official'
+    的官方技能兜底：
+    - 优先取技能名含 validator/check/review/lint/inspect 的“检查器”技能（id 最小）；
+    - 否则取该 agent_type 下 id 最小的官方技能。
+    返回技能 dict（含 id/skill_name/skill_path/file_path）或 None。
+    """
+    if not agent_type:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
+                "file_path, scope, owner_id, content_hash FROM skill "
+                "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
+                (agent_type,))
+            rows = c.fetchall()
+        if not rows:
+            return None
+        pick = next((r for r in rows
+                     if re.search(r"valid|check|review|lint|inspect", r[1] or "", re.IGNORECASE)),
+                    rows[0])
+        return {
+            "id": pick[0], "skill_name": pick[1], "display_name": pick[2] or pick[1],
+            "description": pick[3] or "", "agent_type": pick[4] or "",
+            "skill_path": pick[5] or pick[1], "file_path": pick[6] or "",
+            "scope": pick[7] or "official", "owner_id": pick[8] or "",
+            "content_hash": pick[9] or "",
+        }
+    except Exception as e:
+        log.warning(f"resolve_official_checker_skill failed for {agent_type}: {e}")
+        return None
+
+
 def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
     """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
     返回 (id, content_hash, file_path)，id=0 表示不存在。
@@ -1138,6 +1194,71 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
     except Exception as e:
         log.warning(f"get_skill_content_hash failed: {e}")
         return (0, "", "")
+
+
+def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = "") -> tuple[int, str, str, int]:
+    """按 (skill_name, scope, owner_id) 精确读取技能 hash（Issue #444 读时校验用）。
+
+    (skill_name, scope, owner_id) 受 skill 表 UNIQUE 约束，唯一确定一行——
+    避免 user scope 多 owner 同名时 LIMIT 1 命中不确定行（需求 backlog F3）。
+    official 技能 owner_id 为空串。返回 (id, content_hash, file_path, is_active)，
+    id=0 表示不存在；is_active=0 表示行已被软删除。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, content_hash, file_path, is_active FROM skill "
+                "WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1",
+                (skill_name, scope or "official", owner_id or ""))
+            row = c.fetchone()
+            if not row:
+                return (0, "", "", 0)
+            return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
+    except Exception as e:
+        log.warning(f"get_skill_hash_by_key failed: {e}")
+        return (0, "", "", 0)
+
+
+def get_skill_hash_by_id(skill_id: int) -> tuple[int, str, str, int]:
+    """按主键 id 读取技能 hash（Issue #444 id 锚点校验：校验层跟 id 走）。
+
+    返回 (id, content_hash, file_path, is_active)；id=0 表示不存在（行被删/
+    删除重传换 id），调用方应强制失效缓存而非降级通过。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=?",
+                (skill_id,))
+            row = c.fetchone()
+            if not row:
+                return (0, "", "", 0)
+            return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
+    except Exception as e:
+        log.warning(f"get_skill_hash_by_id failed: {e}")
+        return (0, "", "", 0)
+
+
+def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> list[tuple[str, str]]:
+    """按 (skill_name, scope) 取全部匹配行的 (owner_id, content_hash)（Issue #444 P1-1）。
+
+    repo scope 的 DB owner_id 带 provider 前缀（gitcode:/github:/gitlab:），而对象键
+    owner 段无前缀——调用侧（storage 读时校验）需拿全部行后在 Python 侧去前缀比对，
+    覆盖全部 provider 口径。返回空列表表示无行。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT owner_id, content_hash FROM skill "
+                "WHERE skill_name=? AND scope=? AND is_active=1",
+                (skill_name, scope or "official"))
+            return [(r[0] or "", r[1] or "") for r in c.fetchall()]
+    except Exception as e:
+        log.warning(f"get_skill_hashes_by_name_scope failed: {e}")
+        return []
 
 
 def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:
@@ -1196,6 +1317,101 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
     return 0
 
 
+def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
+                           repo_key: str = "", user_id: str | int = "",
+                           scene_id: str = "", node_tag: str = "") -> dict:
+    """派发技能解析（Issue #979）：skill_id 权威直查 → 名字降级 + warning。
+
+    - skill_id 非零且 skill 表命中（is_active=1）→ 直接返回该档（显式绑定，
+      三档同名下锁定用户选择的档位）；
+    - skill_id 缺失（老场景仅名字）或失效（技能被删/停用）→ 按
+      resolve_skill_id 现有规则（user→repo→official）降级解析，并打
+      warning（含场景/节点/降级原因），行为与既有名字派发一致；
+    - 两者都解析不到 → skill_id=0（调用方按 #657 scope 门禁/内置包兜底）。
+
+    返回 {skill_id, skill_name, skill_path, degraded, skill}。
+    """
+    out = {"skill_id": 0, "skill_name": skill_name or "",
+           "skill_path": skill_name or "", "degraded": False, "skill": None}
+    if not skill_name and not skill_id:
+        return out
+    if skill_id:
+        row = get_skill_by_id(skill_id)
+        if row:
+            _name = row.get("skill_name") or skill_name or ""
+            out.update(skill_id=int(skill_id), skill_name=_name,
+                       skill_path=row.get("skill_path") or _name, skill=row)
+            return out
+        log.warning(
+            f"resolve_skill_dispatch: skill_id={skill_id} invalid/inactive "
+            f"(scene={scene_id or '-'} node={node_tag or '-'} "
+            f"skill_name='{skill_name or ''}'), degrade to name resolution")
+    elif skill_name:
+        log.warning(
+            f"resolve_skill_dispatch: node without skill_id "
+            f"(scene={scene_id or '-'} node={node_tag or '-'} "
+            f"skill_name='{skill_name}'), degrade to name resolution "
+            f"(user→repo→official)")
+    sid = resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id)
+    if sid:
+        out["skill_id"] = int(sid)
+        out["degraded"] = True
+        row = get_skill_by_id(sid)
+        out["skill"] = row
+        if row:
+            out["skill_name"] = row.get("skill_name") or skill_name
+            out["skill_path"] = row.get("skill_path") or out["skill_name"]
+    else:
+        out["degraded"] = True
+    return out
+
+
+def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
+    """技能 scope 与场景（repo 级）scope 匹配判定（Issue #657）。
+
+    按 repo → official → user（任意 owner）顺序查 skill 表：
+    - 命中 repo（owner_id=repo_key）或 official → matched=True（repo 级场景可引用）；
+    - 仅 user scope 存在 → found=True, matched=False
+      （scope 不匹配：repo 级场景不可引用 user 级技能，无论 owner 是谁）；
+    - 全部未命中 → found=False（技能不在 skill 表，如官方内置包形态，
+      由调用方走内置包兜底/派发侧门禁，维持存量场景兼容）。
+
+    返回 {found, matched, scope, skill_id, owner_id}。
+    """
+    info = {"found": False, "matched": False, "scope": "", "skill_id": 0, "owner_id": ""}
+    if not skill_name:
+        return info
+    try:
+        with db_lock:
+            c = db.cursor()
+            if repo_key:
+                row = c.execute(
+                    "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' "
+                    "AND owner_id=? AND is_active=1 LIMIT 1",
+                    (skill_name, repo_key)).fetchone()
+                if row:
+                    info.update(found=True, matched=True, scope="repo",
+                                skill_id=row[0], owner_id=row[1] or "")
+                    return info
+            row = c.execute(
+                "SELECT id FROM skill WHERE skill_name=? AND scope='official' "
+                "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            if row:
+                info.update(found=True, matched=True, scope="official",
+                            skill_id=row[0], owner_id="")
+                return info
+            row = c.execute(
+                "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='user' "
+                "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            if row:
+                info.update(found=True, matched=False, scope="user",
+                            skill_id=row[0], owner_id=row[1] or "")
+                return info
+    except Exception as e:
+        log.warning(f"get_skill_scope_info failed: {e}")
+    return info
+
+
 def get_skill_path(skill_id) -> str:
     """按 skill_id 返回 skill 的实际 SKILL.md 绝对路径（official/user/repo scope 处理）"""
     skill = get_skill_by_id(skill_id)
@@ -1242,11 +1458,14 @@ def get_skill_current_version(skill_id) -> int:
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                      description: str, object_key: str, created_by: str = "",
-                     category_id: int = 0) -> bool:
+                     category_id: int = 0, content_hash: str = "") -> int | None:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
-    scope: user/repo；owner: user_id 或 repo_key。返回是否成功。
+    scope: user/repo；owner: user_id 或 repo_key。
     Issue #179: 新增 category_id 参数。
+    Issue #444: 新增 content_hash 参数（UPDATE/INSERT 补写 content_hash 列，
+    读时校验据此感知跨进程覆盖更新）；返回值改为 int | None（技能主键 id，
+    失败返回 None——0/None 均为 falsy，既有 `if not ok` 判断语义不变）。
     """
     try:
         with db_lock:
@@ -1263,21 +1482,24 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
             if row:
                 c.execute(
                     "UPDATE skill SET file_path=?, display_name=?, "
-                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
+                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, "
+                    "content_hash=?, updated_at=datetime('now') WHERE id=?",
                     (object_key, skill_name, agent_type or "", description or "",
-                     category_id, created_by or "", row[0]))
-            else:
-                c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, "
-                    "file_path, scope, owner_id, created_by, updated_by, is_active, category_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,1,?)",
-                    (skill_name, skill_name, description or "", agent_type or "",
-                     object_key, scope, owner, created_by or "", created_by or "", category_id))
+                     category_id, created_by or "", content_hash or "", row[0]))
+                db.commit()
+                return int(row[0])
+            cur = c.execute(
+                "INSERT INTO skill (skill_name, display_name, description, agent_type, "
+                "file_path, scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+                (skill_name, skill_name, description or "", agent_type or "",
+                 object_key, scope, owner, created_by or "", created_by or "", category_id,
+                 content_hash or ""))
             db.commit()
-            return True
+            return int(cur.lastrowid or 0)
     except Exception as e:
         log.warning(f"upsert_skill_obs failed: {e}")
-        return False
+        return None
 
 
 
@@ -1296,9 +1518,23 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
                           (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
             db.commit()
             if scope == "repo":
-                ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
+                _dir = ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
             else:
-                ensure_skill_dir(user_id, skill_name)
+                _dir = ensure_skill_dir(user_id, skill_name)
+            # Issue #630：发布链路落盘断点修复——legacy 注册路径只写 DB 行 + 空目录，
+            # 若注册后无内容源（file_path 空 + 本地无 SKILL.md），该行为「空壳技能」，
+            # 派发侧 verify_skill_materializable 门禁会显式阻断（如 sid=3276）。此处
+            # 显式告警留审计痕迹，提示发布者补齐内容（/api/skills/upload 或 save_skill_md）。
+            if not os.path.isfile(os.path.join(_dir, "SKILL.md")):
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT file_path FROM skill WHERE skill_name=? AND scope=? AND owner_id=?",
+                              (skill_name, scope, owner_id or str(user_id)))
+                    _row = c.fetchone()
+                if not (_row and (_row[0] or "").strip()):
+                    log.warning(f"create_skill: '{skill_name}' (scope={scope}, owner={owner_id or user_id}) "
+                                f"registered WITHOUT materialization source (no SKILL.md, no obs file_path); "
+                                f"save content before dispatching tasks with this skill (Issue #630)")
             return True
     except Exception as e:
         log.warning(f"Create skill failed: {e}")
@@ -1449,9 +1685,19 @@ def set_repo_scene(repo_key: str, scene_id: str):
     """写入仓库开发场景（managed_repos.dev_scene），幂等。
 
     issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
+    Issue #541：写前做仓内存在性校验——scene_id 仓内查不到（如误写模板场景名）
+    时告警不阻断（兼容显式直写场景名等历史路径，派发侧另有防线兜底）。
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import scene_exists_in_repo
+            if not scene_exists_in_repo(scene_id, repo_key):
+                log.warning(f"Set repo scene: scene '{scene_id}' not found in repo {repo_key} "
+                            f"(possible template-name misbinding, Issue #541)")
+        except Exception as _e:
+            log.warning(f"Set repo scene: existence check failed: {_e}")
     try:
         with db_lock:
             c = db.cursor()
@@ -1504,40 +1750,56 @@ def get_scene_recommend_config(repo_key: str) -> dict:
     return {"fallback_scene": "", "rules": []}
 
 
-def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list):
+def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list) -> bool:
     """写入仓库智能推荐配置（managed_repos.scene_recommend_config），幂等。
 
     写入时自检：过滤 scene_id 不在当前场景列表中的规则。
-    fallback_scene 必填，空则报错。
+    #487 失败显式化：
+    - 场景列表为空 → raise ValueError（调用方映射 4xx，不再静默丢保存）；
+    - UPDATE 0 行 → INSERT OR IGNORE 兜底补行后再 UPDATE；
+    - 返回 True=已落库，False=兜底后仍未写入（调用方显式报错）。
     """
-    from src.repo_key import to_repo_key
+    from src.repo_key import to_repo_key, parse_repo_key
     repo_key = to_repo_key(repo_key)
     import json
 
     # 自检：过滤无效 scene_id
-    try:
-        from src.api.pipeline_config import get_scenes
-        scenes = get_scenes(repo_key=repo_key)
-        valid_ids = {s["id"] for s in scenes}
-        if not valid_ids:
-            log.warning(f"Set scene recommend config: no scenes for {repo_key}")
-            return
-        rules = [r for r in (rules or []) if isinstance(r, dict) and r.get("scene_id") in valid_ids]
-        if fallback_scene and fallback_scene not in valid_ids:
-            fallback_scene = scenes[0]["id"] if scenes else ""
-            log.info(f"Set scene recommend config: fallback invalid, reset to {fallback_scene}")
-    except Exception as e:
-        log.warning(f"Set scene recommend config: sanitize failed: {e}")
+    from src.api.pipeline_config import get_scenes
+    scenes = get_scenes(repo_key=repo_key)
+    if not scenes:
+        raise ValueError(f"仓库 {repo_key} 场景列表为空，无法保存智能推荐配置")
+    valid_ids = {s["id"] for s in scenes}
+    rules = [r for r in (rules or []) if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+    if fallback_scene and fallback_scene not in valid_ids:
+        fallback_scene = scenes[0]["id"]
+        log.info(f"Set scene recommend config: fallback invalid, reset to {fallback_scene}")
 
     cfg = json.dumps({"fallback_scene": fallback_scene or "", "rules": rules or []}, ensure_ascii=False)
     try:
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE managed_repos SET scene_recommend_config=? WHERE repo_key=?", (cfg, repo_key))
+            if not c.rowcount:
+                # #487 upsert 兜底：仓库行缺失时补行（repo_key 主键幂等）再写入
+                _provider, _owner, _name = parse_repo_key(repo_key)
+                c.execute("INSERT OR IGNORE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
+                          "VALUES (?,?,?,?)",
+                          (repo_key, _owner, _name, f"{_owner}/{_name}"))
+                c.execute("UPDATE managed_repos SET scene_recommend_config=? WHERE repo_key=?", (cfg, repo_key))
+                if not c.rowcount:
+                    db.rollback()
+                    log.warning(f"Set scene recommend config failed: no managed_repos row for {repo_key}")
+                    return False
             db.commit()
         log.info(f"Scene recommend config saved: repo={repo_key} fallback={fallback_scene} rules={len(rules)}")
+        return True
     except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         log.warning(f"Set scene recommend config failed: {e}")
+        return False
 
 
 def set_host_status(repo_key: str, status: str = ""):
@@ -1554,6 +1816,22 @@ def set_host_status(repo_key: str, status: str = ""):
             db.commit()
     except Exception as e:
         log.warning(f"Set host status failed: {e}")
+
+
+def managed_repo_exists(repo_key: str) -> bool:
+    """判定 repo_key 是否已存在于 managed_repos（Issue #671：A2A 回退/自愈链路共用）。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            return bool(c.fetchone())
+    except Exception as e:
+        log.warning(f"Managed repo exists check failed: {e}")
+        return False
 
 
 def get_host_status(repo_key: str) -> str:
@@ -2794,6 +3072,99 @@ def get_server_base_url() -> str:
     return f"http://localhost:{_port}"
 
 
+def _server_base_url_configured_value() -> str:
+    """读取显式配置的对外基址（server-config.json > meta），空串表示未配置。
+
+    Issue #455：与 get_server_base_url 不同，本函数不做 localhost 兜底，
+    用于判断「用户是否显式配置了对外可访问基址」。
+    """
+    try:
+        from src.config import read_server_config
+        _sb = (read_server_config().get("server_base_url") or "").strip().rstrip("/")
+        if _sb:
+            return _sb
+    except Exception:
+        pass
+    try:
+        return (get_meta_value("server_base_url") or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1")
+
+
+def is_server_base_url_configured() -> bool:
+    """对外基址是否已显式配置（非空且非本机回环地址）。
+
+    Issue #455：未配置时 OAuth 回调/安装命令会指向 localhost，第三方平台无法回访，
+    应在启动日志与健康检查中给出告警。
+    Issue #471 E1（QA Required）：配置检查纳入拆分项——浏览器面认
+    browser_callback_url、worker 面认 worker_connect_url，任一拆分项
+    已配置（非回环）即视为已配置（双地址部署只配拆分项不再误报）。
+    """
+    if _split_face_public("browser_callback_url") or _split_face_public("worker_connect_url"):
+        return True
+    base = _server_base_url_configured_value()
+    if not base:
+        return False
+    _host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return _host not in _LOOPBACK_HOSTS
+
+
+def _split_face_public(key: str) -> bool:
+    """拆分配置项（browser_callback_url/worker_connect_url）是否已配置且非回环。"""
+    _v = _split_url_configured_value(key)
+    if not _v:
+        return False
+    _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return _host not in _LOOPBACK_HOSTS
+
+
+def _split_face_warning(key: str) -> str:
+    """单个拆分项指向回环时的告警文案（面向对应语义：浏览器回调/worker 回连）。"""
+    _v = _split_url_configured_value(key)
+    _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    _usage = "浏览器回调" if key == "browser_callback_url" else "worker 回连"
+    return (
+        f"{key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
+        f"请在 configs/server-config.json 配置对外可访问地址后重启。"
+    )
+
+
+def get_server_base_url_warning() -> str:
+    """未显式配置对外基址时的告警文案；已配置返回空串。
+
+    Issue #471 E1（QA Required）：告警按面拆分——
+    - 任一拆分项（browser_callback_url / worker_connect_url）或 server_base_url
+      已配置且非回环 → 无告警；
+    - 拆分项/旧值指向回环 → 按对应面输出回环告警（引导改对应配置项）；
+    - 全未配置 → 保留「未配置」告警（提示配 server_base_url 或两个拆分项均可）。
+    """
+    # 逐面检查拆分项：指向回环的面对出回环告警
+    for _key in ("browser_callback_url", "worker_connect_url"):
+        if _split_url_configured_value(_key) and not _split_face_public(_key):
+            return _split_face_warning(_key)
+    # 任一面已公网配置 → 无告警（含拆分项，双地址部署不误报）
+    if is_server_base_url_configured():
+        return ""
+    base = _server_base_url_configured_value()
+    if base:
+        return (
+            "server_base_url 当前指向本机回环地址 " + base +
+            "，OAuth 回调与安装命令对第三方平台不可达；"
+            "请在 configs/server-config.json 配置对外可访问基址（如 https://grape.example.com）后重启。"
+        )
+    return (
+        "未配置对外可访问基址（server_base_url 或拆分项 browser_callback_url/worker_connect_url）："
+        "OAuth 回调与安装命令将默认指向 http://localhost:3000，"
+        "第三方平台无法回访导致登录/托管不可用；"
+        "请在 configs/server-config.json 配置 server_base_url（如 https://grape.example.com）"
+        "或分别配置 browser_callback_url / worker_connect_url 后重启。"
+        "配置示例见 configs/server-config.example.json。"
+    )
+
+
 def get_webhook_url() -> str:
     """返回服务端 webhook 地址（GitCode 事件回调注册用，含 /webhook/gitcode 后缀）。
 
@@ -3322,13 +3693,105 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
     return save_agent_runtimes(agents, scope, owner_id, host_name)
 
 
+_NAIVE_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$")
+
+# Issue #512 维护方评审意见②：迁移扫描进程内节流——同一进程两次全表扫描间隔 ≥ 该阈值（秒），
+# 避免每轮本机直连重探（10min）都全表 SELECT。monotonic 时钟不受墙钟跳变影响；
+# 判断与标记在专用锁内原子完成（与 db_lock 同语义的互斥保障），并发刷新不会重复扫描。
+_AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL = 3600
+_agent_runtimes_migrate_throttle_lock = threading.Lock()
+_agent_runtimes_migrate_last_mono = 0.0
+
+
+def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_seconds: int | None = None) -> int:
+    """幂等修正 agent_runtimes 中"超前当前 UTC"的行（Issue #512）。
+
+    根因：本机直连刷新链路历史写 SQL 字面量 datetime('now')，MySQL backend 经
+    mysql_compat 翻译为 NOW()（CST 本地墙钟、无时区），与心跳链路 UTC ISO
+    （datetime.now(timezone.utc).isoformat()）同表混存，last_seen_at/updated_at
+    超前 UTC 约 8h，健康窗口误判为"未来时间"。
+
+    规则（仅 MySQL backend 生效；SQLite 下 naive 已是 UTC，无超前问题）：
+    - 对 last_seen_at/updated_at 中满足 naive 格式（无 Z/无 offset）且按 UTC 解释后
+      超前当前 UTC（容差 tolerance_seconds）的值，按 normalize_event_time 语义
+      （mysql=CST(+08:00) → UTC）改写为带 +00:00 的 UTC ISO；
+    - 幂等：改写后值带时区偏移，不再命中 naive 正则，重复执行不重复改写；
+    - 不超前 / 非 naive / 带 offset 的行一概不动（避免误伤正常离线行）；
+    - 进程内节流（throttle_seconds，默认 _AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL=3600s）：
+      同一进程两次全表扫描间隔低于阈值时直接返回 0 不扫描；传 0 可禁用（测试/手动强制迁移）。
+
+    挂载点：save_agent_runtimes 开头（本机直连周期重探与手动刷新均经此入口）。
+    """
+    from src.api.time_utils import _db_backend, normalize_event_time
+    from datetime import datetime as _dt, timezone as _tz
+
+    if _db_backend() != "mysql":
+        return 0
+    global _agent_runtimes_migrate_last_mono
+    _interval = _AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL if throttle_seconds is None else throttle_seconds
+    with _agent_runtimes_migrate_throttle_lock:
+        _now_mono = time.monotonic()
+        if _now_mono - _agent_runtimes_migrate_last_mono < _interval:
+            return 0
+        _agent_runtimes_migrate_last_mono = _now_mono
+    now_ts = _dt.now(_tz.utc).timestamp()
+    changed = 0
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, last_seen_at, updated_at FROM agent_runtimes")
+            for rid, last_seen, updated in c.fetchall():
+                new_last, new_updated = last_seen, updated
+                for col, val in (("last_seen_at", last_seen), ("updated_at", updated)):
+                    if not val or not isinstance(val, str):
+                        continue
+                    raw = val.strip()
+                    if not _NAIVE_DT_RE.match(raw):
+                        continue
+                    try:
+                        ts_utc = _dt.fromisoformat(raw.replace(" ", "T")).replace(tzinfo=_tz.utc).timestamp()
+                    except Exception:
+                        continue
+                    if ts_utc > now_ts + tolerance_seconds:
+                        norm = normalize_event_time(raw) or raw
+                        if col == "last_seen_at":
+                            new_last = norm
+                        else:
+                            new_updated = norm
+                if new_last != last_seen or new_updated != updated:
+                    c.execute(
+                        "UPDATE agent_runtimes SET last_seen_at=?, updated_at=? WHERE id=?",
+                        (new_last, new_updated, rid))
+                    changed += 1
+            db.commit()
+        except Exception as e:
+            log.warning(f"migrate_agent_runtimes_utc_caliber failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    return changed
+
+
 def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
     幂等 upsert：按 name+scope+owner_id+host_name 匹配，存在则更新（保留 id），不存在才插入。
     保证跨刷新 id 稳定，供各表 runtime_id 引用。
     host_name：本机直连引擎（credential_id=0）归属的主控机 hostname，区分多台主控机。
+
+    Issue #512：本机直连刷新链路的时间口径统一为 UTC（带 +00:00），与心跳链路一致——
+    不再写 SQL 字面量 datetime('now')（MySQL 下经 mysql_compat 翻译为 NOW()=CST 墙钟，
+    导致 last_seen_at 超前 UTC 约 8h），改为 Python 参数化 UTC 时间戳写入
+    last_seen_at/updated_at；写前先幂等迁移存量超前行。
     """
+    from datetime import datetime as _dt, timezone as _tz
+
+    _now_iso = _dt.now(_tz.utc).isoformat()
+    try:
+        migrate_agent_runtimes_utc_caliber()
+    except Exception as _me:
+        log.warning(f"migrate_agent_runtimes_utc_caliber skipped: {_me}")
     with db_lock:
         c = db.cursor()
         # P0 修复：MySQL 下缩短 innodb_lock_wait_timeout（50s→5s），
@@ -3356,14 +3819,19 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     (name, scope, owner_id, host_name, host_name))
                 row = c.fetchone()
                 if row:
+                    # Issue #1496：status+last_seen_at 走统一写入口（同事务含遗留
+                    # health 列派生同步），其余展示/配置字段仍随本 upsert 原地更新。
+                    _rid0 = row[0]
+                    _apply_runtime_state_compat(c, _rid0, "online", _now_iso)
                     c.execute(
                         "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, "
-                        "pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), "
+                        "pip_package=?, updated_at=?, "
                         "local_skills=?, skill_scan_result=?, host_name=? WHERE id=?",
                         (a.get("display_name", name),
                          1 if a.get("installed") else 0, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), _ls_json, _detail_json, host_name, row[0])
+                         a.get("pip_package", ""), _now_iso,
+                         _ls_json, _detail_json, host_name, _rid0)
                     )
                 else:
                     # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
@@ -3373,11 +3841,12 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     if not a.get("installed"):
                         continue
                     c.execute(
-                        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, last_seen_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (name, a.get("display_name", name),
                          1, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
+                         a.get("pip_package", ""), scope, owner_id,
+                         _ls_json, _detail_json, host_name, _now_iso, _now_iso)
                     )
                     rid = c.lastrowid or 0
                     # 新本机直连引擎默认写入 "all" 标签（与远端 worker 注册行为对齐）：
@@ -3386,8 +3855,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     c.execute(
                         "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
                     if not c.fetchone():
-                        from datetime import datetime as _dt, timezone as _tz
-                        _now_ec = _dt.now(_tz.utc).isoformat()
+                        _now_ec = _now_iso
                         c.execute(
                             "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
                             "VALUES (?, 'all', 1, 50, 1, ?, ?)",
@@ -3401,12 +3869,15 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             if current_names:
                 placeholders = ",".join("?" for _ in current_names)
                 c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
-            # 去重：同 name+scope+owner_id+org_id+cred=0 的重复行只保留 id 最小的一条
-            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行）
+            # 去重：同 name+scope+owner_id+org_id+host_name+cred=0 的重复行只保留 id 最小的一条
+            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行。
+            #  host_name 必须进 GROUP BY：本机直连引擎按主控机隔离（engine-selection-design.md §4.3），
+            #  002 的行与 001 同名不同机，缺 host_name 分组会把 002 的行当重复删掉——
+            #  见 chat-engine-visibility-20261027 排障）
             c.execute(
                 "DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
                 "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
-                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0))"
+                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, ''))"
             )
             db.commit()
         except Exception as e:
@@ -3431,9 +3902,9 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id, model_name, model_source, model_reported_at FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id, model_name, model_source, model_reported_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return _rows_to_runtimes(c.fetchall())
 
 
@@ -3455,7 +3926,10 @@ def _rows_to_runtimes(rows) -> list[dict]:
          "scene_tags": json.loads(r[19]) if r[19] else ["default"],
          "alias": r[20] or "",
          "worker_version": r[21] or "",
-         "org_id": r[22] or 0}
+         "org_id": r[22] or 0,
+         "model_name": r[23] or "",
+         "model_source": r[24] or "",
+         "model_reported_at": r[25] or ""}
         for r in rows
     ]
 
@@ -4343,3 +4817,63 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
                      "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
                     for r in c.fetchall()]
 
+
+def get_browser_callback_url() -> str:
+    """浏览器回调基址（OAuth 回调 / 附件 URL / 前端展示用）。
+
+    Issue #471 E1：优先 browser_callback_url（server-config.json > meta），
+    未配置回退 server_base_url（向前兼容）。
+    """
+    _v = _split_url_configured_value("browser_callback_url")
+    if _v:
+        return _v
+    return get_server_base_url()
+
+
+def get_worker_connect_url() -> str:
+    """worker 回连基址（devstage RUNTIME_SERVER_URL / 任务 server_url / 远程 worker 地址）。
+
+    Issue #471 E1：优先 worker_connect_url（server-config.json > meta），
+    未配置回退 server_base_url（向前兼容）。双地址部署（浏览器公网 ≠ worker 可达）
+    时必须单独配置本项，否则设备永远接不进来。
+    """
+    _v = _split_url_configured_value("worker_connect_url")
+    if _v:
+        return _v
+    return get_server_base_url()
+
+
+def _split_url_configured_value(key: str) -> str:
+    """读取拆分配置项（server-config.json > meta），空串表示未配置。
+
+    Issue #471 E1：browser_callback_url / worker_connect_url 双写两级来源，
+    未配置返回空串（调用方回退 server_base_url）。
+    """
+    try:
+        from src.config import read_server_config
+        _v = (read_server_config().get(key) or "").strip().rstrip("/")
+        if _v:
+            return _v
+    except Exception:
+        pass
+    try:
+        return (get_meta_value(key) or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+def get_url_split_warning() -> str:
+    """Issue #471 E1：拆分配置项错误的明确报错引导；配置正确返回空串。"""
+    warnings = []
+    for _key in ("browser_callback_url", "worker_connect_url"):
+        _v = _split_url_configured_value(_key)
+        if not _v:
+            continue
+        _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+        if _host in _LOOPBACK_HOSTS:
+            _usage = "浏览器回调" if _key == "browser_callback_url" else "worker 回连"
+            warnings.append(
+                f"{_key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
+                f"请在 configs/server-config.json 配置对外可访问地址后重启。"
+            )
+    return " ".join(warnings)

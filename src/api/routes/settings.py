@@ -1,6 +1,8 @@
 """Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
 import json
-from fastapi import APIRouter, HTTPException, Depends
+from datetime import datetime, timedelta
+from typing import Literal
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import require_no_session_token, require_org_member
@@ -52,7 +54,7 @@ def _resolve_repo_key(owner_repo: str) -> str:
 
 # ====== Credentials ======
 
-@router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user.")
+@router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
     from src.api.deps import get_user_token, get_user_github_token_with_refresh
@@ -99,14 +101,120 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         "huawei_cloud": {
             "ak_exists": bool(hw_cred.get("ak")),
             "sk_exists": bool(hw_cred.get("sk")),
-            "ak": hw_cred.get("ak", ""),
-            "sk": hw_cred.get("sk", ""),
         },
         "codearts": {
             "ak_exists": bool(codearts_cred.get("ak")),
             "sk_exists": bool(codearts_cred.get("sk")),
         },
     }
+
+
+# ====== Credential Reveal（Issue #474 方案A：按需取回明文）======
+# GET /credentials 已收敛为「凭据只回存在性」；需要查看/复制明文时走本接口：
+#   二次确认（重新输入 Grape 密码）+ 审计日志 + 明文仅当次返回（Cache-Control: no-store）
+#   + 高频取回告警（窗口内计数超阈值 → 429）。
+_REVEAL_WINDOW_SECONDS = 600      # 高频窗口：10 分钟
+_REVEAL_MAX_PER_WINDOW = 10       # 窗口内最大取回次数（第 11 次起告警并拒绝）
+
+
+def _count_reveals_in_window(user_id: int) -> int:
+    """统计窗口内该用户的凭据取回次数（幂等；表不存在时返回 0）。
+
+    created_at 由 DDL 默认 datetime('now')（UTC）写入；取回日志与审计都走 UTC，
+    这里用 UTC 基准计算窗口起点，避免本地时区与库内 UTC 不一致导致误判。
+    """
+    try:
+        from src.session_manager import db as _sdb, db_lock as _sdl
+        since = (datetime.utcnow() - timedelta(seconds=_REVEAL_WINDOW_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+        with _sdl:
+            c = _sdb.cursor()
+            c.execute(
+                "SELECT COUNT(*) FROM grape_t_credential_reveal_log WHERE user_id=? AND created_at>=?",
+                (user_id, since))
+            return c.fetchone()[0] or 0
+    except Exception:
+        return 0
+
+
+def _record_reveal(user_id: int, provider: str, field: str, ip: str):
+    """记录一次凭据取回（供高频告警计数；不存明文）。"""
+    try:
+        from src.session_manager import db as _sdb, db_lock as _sdl
+        with _sdl:
+            c = _sdb.cursor()
+            c.execute(
+                "INSERT INTO grape_t_credential_reveal_log (user_id, provider, field, ip) VALUES (?,?,?,?)",
+                (user_id, provider, field, ip))
+            _sdb.commit()
+    except Exception as e:
+        log.warning(f"record reveal failed: {e}")
+
+
+class CredentialRevealBody(BaseModel):
+    provider: str = "huawei_cloud"   # huawei_cloud / codearts
+    field: str = "ak"                # ak / sk
+    password: str = ""
+
+
+@router.post("/credentials/reveal", operation_id="settings_credentials_reveal", summary="Reveal a third-party credential plaintext once", description="Returns the plaintext value of one credential field once, after the user re-enters their Grape password. The response carries Cache-Control: no-store and a successful reveal is written to the audit log (provider/field only, never the secret). Repeated reveals within a short window are rate-limited (429).")
+def reveal_credential(body: CredentialRevealBody, user: dict = Depends(require_no_session_token),
+                      request: Request = None, response: Response = None):
+    """按需取回凭据明文（一次性）。
+
+    - 二次确认：必须重新输入当前 Grape 密码（未设密码 → 400 + need_set_password）
+    - 审计：credential_reveal，detail 仅含 provider/field，不落明文值
+    - 明文仅当次返回：Cache-Control: no-store
+    - 高频告警：窗口内取回次数达到阈值 → 429（服务端告警日志 + 用户提示）
+    """
+    from src.auth.password import verify_password
+    from src.auth.grape_account_db import get_grape_account_by_id
+    from src.auth import audit as auth_audit
+
+    provider = body.provider.strip().lower()
+    field = body.field.strip().lower()
+    if provider not in ("huawei_cloud", "codearts"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "不支持的凭据类型"})
+    if field not in ("ak", "sk"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "不支持的凭据字段"})
+
+    # 二次确认：重新输入当前密码
+    account = get_grape_account_by_id(user["id"]) or {}
+    password_hash = account.get("password_hash") or ""
+    if not password_hash:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "请先设置 Grape 密码后再取回明文凭据",
+            "need_set_password": True,
+        })
+    if not verify_password(body.password or "", password_hash):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "当前密码错误"})
+
+    # 高频取回告警：窗口内已达阈值 → 拒绝并提示
+    if _count_reveals_in_window(user["id"]) >= _REVEAL_MAX_PER_WINDOW:
+        log.warning(f"credential reveal high-frequency: user={user['id']} provider={provider} field={field} "
+                    f"ip={request.client.host if request and request.client else ''}")
+        raise HTTPException(status_code=429, detail={
+            "code": 429,
+            "message": "明文取回过于频繁，请稍后再试",
+        })
+
+    # 取原值（仅当次返回）
+    cred = user_db.get_credential(user["id"], provider) or {}
+    value = cred.get(field) or ""
+    if not value:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "该凭据未配置"})
+
+    # 审计：谁/何时/取了哪个凭据（detail 不含明文）
+    ip = request.client.host if request and request.client else ""
+    auth_audit.log_audit("credential_reveal", user_id=user["id"], ip=ip,
+                         detail={"provider": provider, "field": field})
+
+    _record_reveal(user["id"], provider, field, ip)
+
+    if response:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return {"provider": provider, "field": field, "value": value}
 
 
 class UpdateCredentials(BaseModel):
@@ -746,9 +854,16 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 
 # ====== Agent Runtimes ======
 
-@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo.")
+# Issue #473 范围参数合法值（PR #668 审查修复）：Literal 校验——非法值 422，
+# 不再静默回落全量（QA Nice-to-have）。空串=默认全量口径（与前端不传参一致）。
+# 参数名 range 遮蔽 Python 内置（QA Nice-to-have）：与既有 type 参数同风格保留，
+# 本文件无内置 range() 调用（AST 扫描确认），仅函数内作用域无实际冲突。
+RTRange = Literal["", "all", "repo", "user"]
+
+@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo. Issue #472: q/type/scene/tag params apply search/filters server-side over the full visible set (not just the current page) and the response carries health_stats (total + health distribution over the whole filtered result) so the stats bar reflects the overall search result, decoupled from pagination. Issue #473: range param narrows the viewing scope - empty/all (default, full visibility), repo (repo scope only), user (current user's user-scope + own local engines); invalid range values are rejected with 422.")
 def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 0,
-                       scope: str = "", repo: str = ""):
+                       scope: str = "", repo: str = "", range: RTRange = "",
+                       q: str = "", type: str = "", scene: str = "", tag: str = ""):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -760,11 +875,19 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     可见性过滤在应用层完成（依赖 credential scope + 用户仓库列表），无法纯 SQL 分页，
     因此先全量过滤再切片——total 为过滤后总数。
 
+    筛选（Issue #472 全局口径）：q/type/scene/tag 在分页切片前对全量可见集过滤
+    （谓词与原前端 _filterEngines 一致），health_stats 为筛选后整体搜索结果的
+    健康分布（total + online/recently_lost/offline/about_to_gc）——统计栏与分页解耦。
+
     Issue #277 数据隔离：repo 参数非空时，repo scope 引擎仅返回该仓库的引擎，
     避免跨仓库看到其他仓库的 worker 设备和引擎。
 
     Issue #338：个人组织视图下，个人归属 worker 设备（scope=user 且 owner=当前用户）
     不受凭据创建时绑定的 org_id 隔离（与 dashboard 个人组织视图语义一致）。
+
+    Issue #473 范围筛选：range 参数收窄查看范围——空/all=全量口径（默认），
+    repo=仅 repo scope（配合 repo 参数复用 #277 收窄到当前仓库），
+    user=仅当前登录用户名下 user scope（含 owner=当前用户的本机引擎）。
     """
     from src.user import db as user_db
     from src.runtime.instances import instance_name
@@ -790,6 +913,15 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     _visible_credential = _make_visible_credential_fn(uname, user_repos, repo_filter=repo)
 
     cached = user_db.get_agent_runtimes(scope=None)
+    # Issue #512：出口统一归一——last_seen_at/updated_at 与心跳链路同为 UTC ISO（带 +00:00）。
+    # normalize_event_time 幂等：带 offset 值原样通过；MySQL 存量 naive CST 值按 CST 语义
+    # 归一为 UTC（兜底未迁移/残留脏行，避免前端与健康判定 8h 偏差）
+    for _rt in cached:
+        # 空值保持原样（None/""），非空值归一为 UTC ISO（normalize_event_time 幂等）
+        _rt_last = _rt.get("last_seen_at")
+        _rt["last_seen_at"] = normalize_event_time(_rt_last) if _rt_last else _rt_last
+        _rt_upd = _rt.get("updated_at")
+        _rt["updated_at"] = normalize_event_time(_rt_upd) if _rt_upd else _rt_upd
     _org_id = user.get("org_id", 0)
     # 判断当前组织是否是个人组织（个人组织显示 global 引擎，非个人组织严格隔离）
     _is_personal_org = False
@@ -867,6 +999,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
+        rt["spec"] = cred.get("spec") or ""
         # B5 (Issue #257): worker 版本是否落后（服务端最新版本 vs worker 上报版本）
         try:
             from src.worker_package import worker_code_version, normalize_worker_version
@@ -879,14 +1012,20 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         except Exception:
             rt["worker_version_stale"] = False
         # 引擎健康分（Issue #134 展示增强）
+        # Issue #498: 透出统一异常口径（health_abnormal/health_reason）与自愈留痕
+        # （最近失败时间/衰减窗口有效失败数），前端两口径一致呈现、异常原因可见
         try:
             from src.runtime.health_scorer import get_health_score
             _hd = get_health_score(rt["id"])
             rt["health_score"] = _hd.get("health_score")
             rt["health_total_tasks"] = _hd.get("total_tasks", 0)
             rt["health_failed_tasks"] = _hd.get("failed_tasks", 0)
+            rt["health_failed_tasks_effective"] = _hd.get("failed_tasks_effective", 0)
             rt["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
             rt["health_heartbeat_alive"] = _hd.get("heartbeat_alive")
+            rt["health_last_failure_at"] = _hd.get("last_failure_at", "")
+            rt["health_abnormal"] = _hd.get("health_abnormal", False)
+            rt["health_reason"] = _hd.get("health_reason", "")
         except Exception:
             rt["health_score"] = None
         # 引擎标签（event-dispatch-redesign-v2.md §2.5）
@@ -915,13 +1054,31 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（可见性由 _visible_credential 的 owner 判定收敛）
-        # repo scope 设备只在创建它的组织下可见，不在个人组织下跨组织展示
+        # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
+        # 切换为仓库级后 org_id 对齐到仓库所属组织（可能是其他用户的个人组织），
+        # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
+        # user_repos 判定收敛，不越权。
         _devices_cred_map = {k: v for k, v in cred_map.items()
                              if (v.get("org_id") or 0) in (0, _org_id)
+                             or v.get("scope") == "repo"
                              or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)]
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
                                      valid_users, _devices_cached, now)
+
+    # Issue #473 范围筛选：全部（默认，现有全量口径）/ 仓库（仅 repo scope，配合 repo 参数
+    # 复用 #277 口径收窄到当前仓库）/ 个人（仅当前用户 user scope + 本人本机引擎）。
+    # 先范围再 scope 标签再分页；吊销设备在可见性阶段已排除（#417）。
+    if range:
+        visible_runtimes = [rt for rt in visible_runtimes
+                            if _rt_in_range(rt.get("scope") or "global", rt.get("owner") or "",
+                                            bool(rt.get("is_local")), range, uname,
+                                            local_owner=rt.get("owner_id") or "")]
+        devices = [d for d in devices
+                   if _rt_in_range(d.get("scope") or "global", d.get("owner") or "",
+                                   (d.get("credential_id") or 0) == 0, range, uname,
+                                   local_owner=d.get("local_owner_id") or "")]
 
     # scope 筛选（服务端过滤）
     if scope:
@@ -937,17 +1094,152 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         for rt in visible_runtimes
     ))
 
+    # Issue #472 全局口径：筛选标签（类型/场景/标签）从全量可见集派生（分页/筛选后不消失）
+    _avail_types = list(set(_engine_type_of(rt) for rt in visible_runtimes if _engine_type_of(rt)))
+    _avail_scenes = sorted({s for rt in visible_runtimes for s in (rt.get("scene_tags") or []) if s})
+    _avail_tags = sorted({t for rt in visible_runtimes for t in (rt.get("agent_tags") or []) if t})
+
+    # Issue #472 全局口径：q/type/scene/tag 在分页切片前对全量可见集过滤
+    # （谓词与原前端 _filterEngines 一致，搜索作用于整体结果而非当前页）
+    _q = (q or "").strip().lower()
+    if _q:
+        visible_runtimes = [rt for rt in visible_runtimes if _q in " ".join([
+            str(rt.get("alias") or ""), str(rt.get("instance_name") or ""),
+            str(rt.get("name") or ""), str(rt.get("worker_name") or ""),
+            str(rt.get("owner") or ""), str(rt.get("host_name") or ""),
+            " ".join(rt.get("agent_tags") or []),
+            " ".join(rt.get("local_skills") or []),
+        ]).lower()]
+    if type:
+        _tlow = type.lower()
+        visible_runtimes = [rt for rt in visible_runtimes if _tlow in (
+            rt.get("instance_name") or rt.get("name") or "").lower()]
+    if scene:
+        _scenes = [s.strip().lower() for s in scene.split(",") if s.strip()]
+        visible_runtimes = [rt for rt in visible_runtimes
+                            if any((s in [str(x).lower() for x in (rt.get("scene_tags") or [])])
+                                   for s in _scenes)]
+    if tag:
+        _tags = [t.strip().lower() for t in tag.split(",") if t.strip()]
+        visible_runtimes = [rt for rt in visible_runtimes
+                            if any((t in [str(x).lower() for x in (rt.get("agent_tags") or [])]
+                                    or "all" in [str(x).lower() for x in (rt.get("agent_tags") or [])])
+                                   for t in _tags)]
+
+    # Issue #472 全局口径：统计栏数据源 = 筛选后整体搜索结果的健康分布（与分页解耦）
+    health_stats = _health_stats(visible_runtimes)
+
     # Issue #185: 分页（page_size>0 时对 visible_runtimes 切片，total 为过滤后总数）
+    # Issue #865：仅对当前页批量附加模型字段（单条 GROUP BY，无 N+1）
     total_runtimes = len(visible_runtimes)
     if page_size and page_size > 0:
         _page = max(page, 1)
         _offset = (_page - 1) * page_size
         paged_runtimes = visible_runtimes[_offset:_offset + page_size]
+        _attach_engine_models(paged_runtimes)
         return {"runtimes": paged_runtimes, "devices": devices,
                 "total": total_runtimes, "page": _page, "page_size": page_size,
-                "avail_scopes": _avail_scopes}
+                "avail_scopes": _avail_scopes, "avail_types": _avail_types,
+                "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
+                "health_stats": health_stats}
+    _attach_engine_models(visible_runtimes)
     return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes,
-            "avail_scopes": _avail_scopes}
+            "avail_scopes": _avail_scopes, "avail_types": _avail_types,
+            "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
+            "health_stats": health_stats}
+
+
+def _engine_type_of(rt: dict) -> str:
+    """从引擎名派生类型标签（与前端 _availTypes 的 includes 判定一致）。"""
+    n = (rt.get("instance_name") or rt.get("name") or "").lower()
+    if "aishell" in n or "hwcloud" in n:
+        return "aishell"
+    if "hermes" in n:
+        return "hermes"
+    if "opencode" in n:
+        return "opencode"
+    if "codearts" in n:
+        return "codearts"
+    if "codex" in n:
+        return "codex"
+    return ""
+
+
+_HEALTH_STAT_KEYS = ("online", "recently_lost", "offline", "about_to_gc")
+
+
+def _health_stats(items: list) -> dict:
+    """Issue #472: 整体搜索结果的健康分布（total + 四态计数），统计栏全局口径数据源。"""
+    counts = {k: 0 for k in _HEALTH_STAT_KEYS}
+    for it in items:
+        h = it.get("health") or it.get("status") or "offline"
+        if h in counts:
+            counts[h] += 1
+    counts["total"] = len(items)
+    return counts
+
+
+# ====== Issue #865：引擎模型展示（配置模型 + 最近实际使用模型）======
+
+_RECENT_MODELS_TOP_N = 3
+
+
+def _recent_models_by_runtime(runtime_ids: list[int]) -> dict[int, list[dict]]:
+    """按 runtime_ids 批量聚合 obs_llm_usage 的最近实际使用模型（top N）。
+
+    单条 GROUP BY（engine_id × model 维度一次查询，避免 N+1），
+    top N 在应用层排序（count desc → last_used desc）。
+    返回 {runtime_id: [{model, count, last_used_at}, ...]}；无用量/异常返回空 dict。
+    安全约束（Issue #865 Spec）：仅聚合模型名字段，不取 base_url/api_key。
+    """
+    ids = [int(rid) for rid in (runtime_ids or []) if rid]
+    if not ids:
+        return {}
+    from src.session_manager import db, db_lock
+    out: dict[int, list[dict]] = {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            ph = ",".join("?" * len(ids))
+            c.execute(
+                f"SELECT engine_id, model_key, model_raw, COUNT(*) AS cnt, MAX(created_at) AS last_used "
+                f"FROM obs_llm_usage WHERE engine_id IN ({ph}) GROUP BY engine_id, model_key, model_raw",
+                ids)
+            for eng_id, m_key, m_raw, cnt, last_used in c.fetchall():
+                model = str(m_key or m_raw or "").strip()
+                if not model:
+                    continue
+                out.setdefault(int(eng_id or 0), []).append(
+                    {"model": model[:120], "count": int(cnt or 0), "last_used_at": last_used or ""})
+    except Exception as e:
+        log.warning(f"recent_models aggregation failed: {e}")
+        return {}
+    for rows in out.values():
+        rows.sort(key=lambda r: (-r["count"], r["last_used_at"]))
+        del rows[_RECENT_MODELS_TOP_N:]
+    return out
+
+
+def _attach_engine_models(runtimes: list[dict]) -> None:
+    """为列表/详情的引擎行附加模型字段（Issue #865）。
+
+    - recent_models：obs_llm_usage 聚合（批量单查，无 N+1）
+    - 配置模型：DB model_name（worker 上报）；本机直连（credential_id=0）且未上报时
+      服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
+    仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
+    """
+    from src.runtime.engine_model import detect_engine_model
+    recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
+    for rt in runtimes:
+        rt["recent_models"] = recent.get(rt.get("id"), [])
+        if not (rt.get("model_name") or "") and (rt.get("credential_id") or 0) == 0:
+            try:
+                _m = detect_engine_model(rt.get("name") or "")
+            except Exception:
+                _m = ""
+            if _m:
+                rt["model_name"] = _m
+                rt["model_source"] = "local_config"
 
 
 def _runtime_health(rt: dict, now: float) -> str:
@@ -955,12 +1247,11 @@ def _runtime_health(rt: dict, now: float) -> str:
     - credential_id>0（远端边端）：status+last_seen 四态
     - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
     """
-    from src.runtime.health import derive_runtime_health
+    from src.runtime.health import derive_runtime_health, derive_local_runtime_health
     if rt.get("credential_id"):
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
-    if rt.get("installed") and rt.get("healthy"):
-        return "online"
-    return "offline"
+    # Issue #592：本机直连口径收敛到 health.py（与 dashboard 弹窗共用，防两处漂移）
+    return derive_local_runtime_health(bool(rt.get("installed")), bool(rt.get("healthy")))
 
 
 _DEVICE_ONLINE_WINDOW = 60  # 心跳间隔 15s，容差 60s 内视为在线
@@ -993,13 +1284,14 @@ def _build_cred_map(db, db_lock) -> dict:
     cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id FROM runtime_credentials")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
                              "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or "", "org_id": corg_id or 0}
+                             "repo_key": crepo_key or "", "org_id": corg_id or 0,
+                             "spec": cspec or ""}
     return cred_map
 
 
@@ -1031,6 +1323,32 @@ def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = 
             return _rk in user_repos
         return False
     return _visible_credential
+
+
+def _rt_in_range(scope: str, owner: str, is_local: bool, rt_range: str, uname: str,
+                 local_owner: str = "") -> bool:
+    """Issue #473 范围筛选判定（列表查看范围，与 scope 标签筛选互补）。
+
+    - 空 / all / global → True（现有全量口径兜底：全局 + 个人 + 我所在仓库的仓库级）
+    - repo  → 仅 repo scope（配合 #277 repo 参数时进一步收窄到当前仓库）
+    - user  → 仅当前登录用户名下 user scope（含 owner=当前用户的本机引擎）
+
+    PR #668 审查修复（Required）：本机引擎（credential_id=0）的输出 owner 恒为空
+    （cred_map 无 id=0 行，落默认 owner_name=""），is_local 条目以输出 owner 判定
+    归属不可达；改用引擎自身 DB 行 owner_id（agent_runtimes.owner_id，
+    local_owner 参数）判定「owner=当前用户的本机引擎」。远端条目（cid>0）不受影响。
+    local_owner 缺省为 ""（无主/未传）→ 不属于任何用户，不误入个人范围。
+    """
+    _r = (rt_range or "").strip().lower()
+    if not _r or _r in ("all", "global"):
+        return True
+    if _r == "repo":
+        return (scope or "global") == "repo"
+    if _r == "user":
+        if is_local:
+            return (local_owner or "").strip() == uname
+        return (owner or "") == uname and (scope or "global") == "user"
+    return True
 
 
 def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_users: set,
@@ -1070,6 +1388,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
+                 # Issue #1310：承载引擎 chip 显示「引擎名（凭据名）」——补凭据名 worker_name
+                 "worker_name": cred.get("name", ""),
                  "health": derive_runtime_health(x[5], x[6], now),
                  "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
                  "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
@@ -1123,10 +1443,15 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         rt["name"] = _td(rt["name"])
         target_device = _device_by_name.get(_hn)
         if target_device:
+            # Issue #473 范围筛选：本机引擎挂到已有主控机凭据设备时补充归属
+            if not target_device.get("local_owner_id"):
+                target_device["local_owner_id"] = rt_owner
             target_device["runtimes"].append({
                 "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                 "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
                 "instance_name": rt.get("instance_name", rt.get("name", "")),
+                # Issue #1310：本机直连按 host_name 兜底凭据名
+                "worker_name": _hn,
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
@@ -1140,13 +1465,19 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                     "device_name": _hn or "本机直连",
                     "credential_status": "active", "last_seen_at": None,
                     "worker_ip": "127.0.0.1", "scope": "local",
-                    "owner": "", "health": "online", "runtimes": []}
+                    "owner": "", "health": "online", "runtimes": [],
+                    "local_owner_id": rt_owner}
                 devices.append(_local_dev)
                 _device_by_name[_local_dev_key] = _local_dev
+            elif not _device_by_name[_local_dev_key].get("local_owner_id"):
+                # 首个有主本机引擎补充归属（Issue #473 范围筛选判定用）
+                _device_by_name[_local_dev_key]["local_owner_id"] = rt_owner
             _device_by_name[_local_dev_key]["runtimes"].append({
                 "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                 "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
                 "instance_name": rt.get("instance_name", rt.get("name", "")),
+                # Issue #1310：本机直连按 host_name 兜底凭据名
+                "worker_name": _hn,
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
@@ -1167,9 +1498,10 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
-@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245). Issue #277: repo param filters repo-scoped devices to only the current repo.")
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245). Issue #277: repo param filters repo-scoped devices to only the current repo. Issue #473: range param narrows the viewing scope - empty/all (default), repo (repo scope only), user (current user's user-scope + own local engines); invalid range values are rejected with 422.")
 def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 20,
-                        scope: str = "", type: str = "", q: str = "", repo: str = ""):
+                        scope: str = "", type: str = "", q: str = "", repo: str = "",
+                        range: RTRange = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
@@ -1227,11 +1559,15 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（与 dashboard 个人组织视图语义一致）
-        # repo scope 设备只在创建它的组织下可见，不在个人组织下跨组织展示
+        # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
+        # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
+        # user_repos 判定收敛，不越权。
         _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == 0
-                           or (rt.get("org_id") or 0) == _org_id]
+                           or (rt.get("org_id") or 0) == _org_id
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
                     if (v.get("org_id") or 0) in (0, _org_id)
+                    or v.get("scope") == "repo"
                     or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
 
     # 构建设备列表（共享 helper）
@@ -1248,6 +1584,14 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     _avail_types = list(set(
         _t for d in devices for _t in _device_engine_types(d)
     ))
+
+    # Issue #473 范围筛选：全部（默认）/ 仓库 / 个人，先于 type/q/scope 与分页（total 为组合筛选后总数）
+    # PR #668 审查修复：本机设备（credential_id=0）归属按 local_owner_id（引擎 DB 行 owner_id）
+    if range:
+        devices = [d for d in devices
+                   if _rt_in_range(d.get("scope") or "global", d.get("owner") or "",
+                                   (d.get("credential_id") or 0) == 0, range, uname,
+                                   local_owner=d.get("local_owner_id") or "")]
 
     # type 筛选：设备任一引擎名 includes(type)（小写，与前端 _availTypes 逻辑一致）
     if type:
@@ -1273,14 +1617,18 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
 
     # 分页切片（total 为筛选后总数）
     total = len(devices)
+    # Issue #472 全局口径：统计栏数据源 = 筛选后整体搜索结果的健康分布（与分页解耦）
+    health_stats = _health_stats(devices)
     if page_size and page_size > 0:
         _page = max(page, 1)
         _offset = (_page - 1) * page_size
         paged_devices = devices[_offset:_offset + page_size]
         return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
-                "avail_scopes": _avail_scopes, "avail_types": _avail_types}
+                "avail_scopes": _avail_scopes, "avail_types": _avail_types,
+                "health_stats": health_stats}
     return {"devices": devices, "total": total,
-            "avail_scopes": _avail_scopes, "avail_types": _avail_types}
+            "avail_scopes": _avail_scopes, "avail_types": _avail_types,
+            "health_stats": health_stats}
 
 
 def _device_engine_types(d: dict) -> list:
@@ -1392,7 +1740,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
 # 兼容别名：旧路径 /backend-agents/refresh
 @router.post("/backend-agents/refresh", operation_id="settings_backend_agents_refresh", summary="Refresh backend agents (legacy alias)", description="Legacy alias for refreshing agent runtimes.")
 async def refresh_backend_agents(user: dict = Depends(require_org_member)):
-    return await refresh_agent_runtimes(user)
+    return refresh_agent_runtimes(user)
 
 
 # ====== Runtime Credentials（rta_ token，见 agent-runtime-event-full-design.md §4.1 / §10）======
@@ -1540,26 +1888,45 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         #   判断走 from_repo_key(owner_id) in user_repos，owner_id 为空 → 同仓库其他成员永远看不到）；
         # - user scope：owner_id 清空（user scope 注册时按 owner_name 从 grape_accounts 重算，不依赖此字段）。
         _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
+        # Issue #654：user scope 引擎行 owner_id 与 register 同源（按 owner_name 解析
+        # grape_accounts.id），消除「切换置空、注册重算」两条路径的语义漂移；
+        # 解析不到回退空串（兼容老数据，register 侧同样回退）。
+        _engine_owner_id = _new_owner_id
+        if scope == "user" and _owner:
+            try:
+                c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (_owner,))
+                _urow = c.fetchone()
+                if _urow:
+                    _engine_owner_id = str(_urow[0])
+            except Exception as _e:
+                log.warning(f"change_credential_scope: resolve owner_id for user scope failed: {_e}")
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
                   (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
-        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）
-        # 先删除 offline 重复行（只保留每个引擎名最新的一行），再 UPDATE 剩余行
-        c.execute(
-            "DELETE FROM engine_capabilities WHERE runtime_id IN ("
-            "SELECT id FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
-            "SELECT MAX(id) FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)))",
-            (cid, cid)
-        )
-        c.execute(
-            "DELETE FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
-            "SELECT max_id FROM (SELECT MAX(id) as max_id FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)) t)",
-            (cid, cid)
-        )
+        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）。
+        # Issue #654：先按 (credential_id, lower(name)) 去重合并（保留 MAX(id)）：
+        # 被替换行的 engine_capabilities / tags_user_set 迁移到存活行（priority/标签不回默认），
+        # 引用旧引擎 id 的配置（场景 engine_runtime_ids / agent backend）由 remap 改指向存活行。
+        from src.runtime.engine_select import merge_duplicate_engine_rows, remap_engine_references
+        _rid_map = merge_duplicate_engine_rows(cid, c)
         c.execute(
             "UPDATE agent_runtimes SET scope=?, owner_id=?, org_id=?, repo_key=? WHERE credential_id=?",
-            (scope, _new_owner_id, _new_org_id, repo_key or None, cid)
+            (scope, _engine_owner_id, _new_org_id, repo_key or None, cid)
         )
         db.commit()
+    # Issue #654：引擎行替换时统一 remap 引用（自身事务，锁外执行避免交叉提交），
+    # 并输出结构化变更事件（cid、影响引擎数、旧→新 id 映射）。
+    if _rid_map:
+        try:
+            remap_engine_references(_rid_map, cid, reason="credential_scope_change")
+        except Exception as _e:
+            log.warning(f"change_credential_scope: remap references failed: {_e}")
+    import json as _json654
+    log.info("engine_change_event: " + _json654.dumps({
+        "event": "credential_scope_changed", "credential_id": cid, "scope": scope,
+        "repo_key": repo_key, "org_id": _new_org_id,
+        "engines_affected": len(_rid_map),
+        "id_mapping": {str(k): v for k, v in _rid_map.items()},
+    }, ensure_ascii=False))
     log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key} org_id={_new_org_id}")
     return {"scope": scope, "repo_key": repo_key}
 

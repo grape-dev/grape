@@ -264,6 +264,12 @@ class TestPlanBMarkerAdded:
         posted = {}
 
         class _MockResp:
+            def __init__(self, data=b'[]'):
+                self._data = data
+
+            def read(self):
+                return self._data
+
             def __enter__(self):
                 return self
 
@@ -272,9 +278,12 @@ class TestPlanBMarkerAdded:
 
         def _mock_urlopen(req, timeout=15):
             import json as _j
-            posted["body"] = _j.loads(req.data.decode())["body"]
-            posted["url"] = req.full_url
-            return _MockResp()
+            # GET (list comments) → empty list; POST (create comment) → capture body
+            if req.data:
+                posted["body"] = _j.loads(req.data.decode())["body"]
+                posted["url"] = req.full_url
+                return _MockResp(b'{"id":1}')
+            return _MockResp(b'[]')
 
         import urllib.request
         orig = urllib.request.urlopen

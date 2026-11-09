@@ -24,7 +24,10 @@
 >   `status`（用户可读，active/processing/awaiting_input/pending_review/completed/cancelled）由 `stage` 映射同步，
 >   但 `awaiting_input / completed / cancelled` 可由用户操作直接设置（更高优先级）。两者同存 `issue` 表。
 > - **task complete ≠ Issue 完结**：`POST /api/tasks/complete` 完成的是某次引擎执行（对应 Event 的 `event_seq`），
->   不代表需求完结；需求完结以「最后节点 complete → pending_review → 审核 → done」判断（`confirm-done` / `status` 操作）。
+>   不代表需求完结。**Issue #656 起需求完结默认自动化**：流水线**末节点完成且无阻断**（全部节点最新事件
+>   completed、无 failed）时服务端自动结单——`stage=done`、`status=completed`、`completed_at` 落库，并联动
+>   关闭 VCS Issue（bot token，降级不阻断）；存在 failed 阻断时回退 `pending_review`。人工确认
+>   （`confirm-done` / `status` 操作）仅用于显式待确认场景（见下方 confirm-done 说明）。
 > - 接口中的 `task_status` 字段即 `issue.status`（需求中心状态）。
 
 ---
@@ -55,18 +58,27 @@
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` 仓库 |
-| Query | `status`（active/processing/awaiting_input/pending_review/completed/cancelled）、`sort_order`（desc/asc）、`mode`（default=状态优先/time=纯时间序）、`assignees`（逗号分隔创建人） |
-| 出参 | `{issues: Issue[], total: int}`（不限 user_id） |
+| Query | `status`（active/processing/awaiting_input/pending_review/completed/cancelled）、`sort_order`（desc/asc）、`mode`（default=状态优先/time=纯时间序）、`assignees`（逗号分隔创建人）、`include_deleted`（可选，默认 false；`1`/`true` 时返回 VCS 侧已删除的台账卡片供审计，见 Issue #995） |
+| 出参 | `{issues: Issue[], total: int}`（不限 user_id；默认不含 VCS 侧已删除卡片） |
 | 返回 | 200；401 未认证 |
 
 > 仓库列表为公开只读聚合（对齐原 `issues_list` 行为，无仓库权限门禁）。
+>
+> **Issue #995：VCS 存在性过滤**——服务端按 provider（`gitcode:`/`github:` 分别对齐）批量拉取 VCS issue 编号
+> （进程内 TTL 缓存 300s）并回写 `issue.vcs_exists`，默认隐藏 `vcs_exists=0`（VCS 侧 404）的卡片；
+> 分页模式 `total`/`has_more` 与过滤后集合一致。VCS 校验失败时 fail-open：卡片照常返回并标
+> `vcs_check=unavailable`。传 `include_deleted=1` 可返回被隐藏卡片并标 `is_vcs_deleted=true`。
 
 Issue 对象字段：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `number` | int | Issue 编号 |
-| `id` / `issue_number` | int | Issue 内部 id / GitCode 编号（`id` 即 `/api/issues/{issue_id}/...` 操作入参） |
+| `number` | int | VCS Issue 编号（等同 `issue_number`） |
+| `id` | int | **台账卡片 id**（`issue.id`，即 `/api/issues/{issue_id}/...` 操作入参），**不是** VCS 编号 |
+| `issue_number` | int | **VCS 侧 Issue 编号**（GitCode/GitHub），与 `grape git-repo issues get --number` 同口径；与 `id` 不可互用 |
+| `vcs_exists` | bool | VCS 侧是否仍存在该编号（`false`=已删除） |
+| `is_vcs_deleted` | bool | `= !vcs_exists`，便于前端/Agent 直接判定 |
+| `vcs_check` | string | 卡片级校验结果：`ok`=已确认存在/已确认删除；`unavailable`=该校验失败或单卡复核 unknown（fail-open，卡片未隐藏） |
 | `title` | string | 标题 |
 | `status` | string | 需求中心状态（active/processing/awaiting_input/pending_review/completed/cancelled） |
 | `stage` | string | pipeline 阶段（vod/issue/coding/qa/sre/pending_review/done） |
@@ -129,8 +141,23 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` / `{number}` 仓库 + Issue 编号 |
-| 出参 | `{...Issue 字段, events: Event[], pipeline: Pipeline}` |
-| 返回 | 200 成功；404 Issue 不存在；401 未认证 |
+| 出参 | `{...Issue 字段, events: Event[], pipeline: Pipeline, synced_by_fallback?}` |
+| 返回 | 200 成功；404 Issue 不存在（含语义区分，见下）；401 未认证 |
+
+> **404 语义区分与兜底解析（Issue #667）**：内部三表（issue/issue_state/events）未命中时，服务端按
+> `owner/repo + number` 调 VCS API 核实 Issue 存在性：存在 → 自动补建内部需求卡行并正常返回
+> （出参带 `synced_by_fallback: true`）；404 detail 含 `reason` 字段——
+> `reason=issue_not_found`（VCS 侧亦无此 Issue，可能已删除，属预期 404）与
+> `reason=internal_sync_missing`（VCS 无法核实且内部缺行，`suggestion` 提示稍后重试/检查 webhook 同步链路）。
+> Agent 侧降级指引：命中 `issue_not_found` 不再重试；命中 `internal_sync_missing` 可短暂重试一次，
+> 持续失败再走人工排查。
+
+> **`issue_id` 字段与两套 id 体系（Issue #569）**：出参含 `issue_id`（issue 表主键，**平台内部需求卡片 id**），
+> 可直接作 `awaiting-input` / `pending-review` / `review-pass` 等的 `--issue_id`（首选服务端注入的
+> `$GRAPE_ISSUE_ID`，与本字段同源）；`number` 是 **GitCode 侧 Issue 编号**，与内部卡片 id 不同；
+> `grape git-repo issues get` 返回的 `id` 是 **GitCode 侧 id**，与平台内部 id **不可混用**——
+> 严禁把 `number` 或 GitCode 侧 `id` 传入 `--issue_id`（否则 404/403）。无 issue 卡片行（过渡期兜底）时
+> `issue_id` 为 null，此时用 `$GRAPE_ISSUE_ID`。
 
 `events` 结构（seq 升序）：
 
@@ -184,7 +211,7 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` / `{number}` |
-| 出参 | `{issue: object, summary: string, status: string, segments: Segment[]}` |
+| 出参 | `{issue: object, summary: string, status: string, segments: Segment[]}` + Issue #539 可选业务状态字段（见下） |
 | 返回 | 200 成功；404 Issue 不存在；401 未认证 |
 
 `segments[].output`：
@@ -196,6 +223,18 @@ Issue 对象字段：
 | `actions` | string[] | 动作清单 |
 | `artifacts` | string[] | 产出/标识 |
 | `issue_summary` | string | 一句话摘要 |
+| `task_ref` | object | Issue #539 可选：阶段关联 runtime 任务引用 `{task_id, task_status, query_path}`；无关联任务 → `{task_id: null, task_status: "unavailable", query_path: ""}` |
+| `result_ref` | object | Issue #539 可选：阶段结果引用 `{status}`，`status` 枚举：`available`（附脱敏 `summary`）/ `pending`（任务在途）/ `unavailable`（无结果或不可读）。`query_path` 指向 `GET /api/runtime/tasks/{task_id}/status`（授权后可查全量） |
+
+**Issue #539 语义澄清与新增顶层字段**：顶层 `status` 仅表示**事件执行结束**（如 `completed` = 最后一个事件执行完毕），不代表需求已确认或生产发布完成。需求级业务状态由以下可选字段独立暴露：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `issue_stage` | string | 需求当前阶段（issue.stage，issue_state 兜底） |
+| `issue_task_status` | string | 需求中心状态（issue.status） |
+| `review_status` | string | 需求级业务状态枚举：`pending_review`（待人工确认）/ `completed`（含生产发布完成）/ `cancelled` / `awaiting_input` / `in_progress`（流水线执行中，生产尚未开始）/ `unknown`（无法判定，显式标注） |
+
+> 典型场景：SRE（末节点）执行完成后需求进入 `pending_review` 待人工确认，此时顶层 `status=completed` 仅表示事件执行结束，`review_status=pending_review` 才表示需求仍等待人审/发布（真实样本 #428）。旧字段语义与结构不变，新增字段均为可选，旧客户端无破坏；摘要仅含脱敏 conclusion，不透出受限日志与凭据。
 
 > 优先读 event.json 档案；无档案时降级由 `events` 重构。
 
@@ -268,6 +307,12 @@ Issue 对象字段：
 
 > 任意阶段可确认完成（stage→done）；开发者确认需求完结。
 
+> **Issue #656 人工确认触发条件**：末节点完成且无阻断的 Issue 已由流水线**自动结单**（无需本接口）。
+> `confirm done` 仅用于以下显式需人工确认场景：
+> 1. issue 处于 `pending_review`（Agent 显式审核点 / 末节点 failed 阻断回退 / Issue 关闭待审核）；
+> 2. 用户侧提前收口仍处 active/processing/awaiting_input 的 Issue（如 PR 已合入、卡流转）。
+> 幂等：已 completed 再次调用返回 `already_done`，不重复关闭 VCS Issue。
+
 ### POST /api/issues/{issue_id}/cancel — 取消
 
 > CLI：grape issues cancel --issue_id {issue_id} --json-out（operation_id=issues_cancel）。
@@ -300,10 +345,11 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
 | Path | `{issue_id}` int |
-| 出参 | `{"scene_id", "scene_name", "current_stage", "nodes", "events"}`（nodes 含 `node_status` 数值码 0-5 + `latest_event`） |
+| 出参 | `{"scene_id", "scene_name", "current_stage", "nodes", "events"}` + Issue #539 可选：`{"issue_stage", "issue_task_status", "review_status", "sre_result"}`（nodes 含 `node_status` 数值码 0-5 + `latest_event`） |
 | 返回 | 200；403；404 |
 
 > 节点状态由 `compute_node_statuses` 统一计算（与流水线菜单页一致）；`node_status`：0=pending 1=running 2=completed 3=failed 4=cancelled 5=skipped。
+> Issue #539：`review_status` 为需求级业务状态（`pending_review`=待人工确认，节点全 ✓ 仅表示事件执行结束）；`sre_result` = `{task_ref, result_ref}`（SRE 最新任务的引用与脱敏结论摘要，`result_ref.status` 枚举 available/pending/unavailable），供详情页区分「阶段执行完成」与「待人工确认」。
 
 ### GET /api/issues/{issue_id}/clarifications — 澄清历史
 
@@ -340,9 +386,16 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT/`BOT_GITCODE_TOKEN` → 403） |
 | Path | `{issue_id}` int（需求卡片 id） |
-| Body | `{"questions": "...", "reason": "..."}` |
+| Body | `{"questions": "...", "reason": "...", "issue_number": 0?}` |
 | 出参 | `{"ok": true, "issue_id": 210, "status": "awaiting_input", "changed": true}` |
-| 返回 | 200；400 questions 缺失；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 需求不存在 |
+| 返回 | 200；400 questions 缺失；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 需求不存在（含语义区分，见下） |
+
+> **卡片缺行兜底（Issue #667）**：`{issue_id}` 无对应卡片行时，可在 Body 附 `issue_number`
+> （GitCode 侧编号，须落在会话 token 的仓库作用域内）——服务端按该编号复用既有卡行；
+> 无卡行则经 VCS 核实存在后自动补建（`ensure_issue_task`）再执行状态迁移。404 detail 的 `reason`：
+> `issue_not_found`（VCS 侧无此 Issue）/ `internal_card_missing`（卡片 id 与 issue_number 兜底均未命中，
+> `hint` 给出 `grape issues detail` 解析指引）。`GRAPE_ISSUE_ID` 注入侧同步修复：事件链路注入时发现
+> 卡片行缺失会先补建再注入，消除「同步时序未到 → 空 id」缺口。
 
 > 鉴权：会话 token 的 `(repo_key, agent_type)` 作用域——须与需求的 repo_key 一致且 `agent_type∈{vod,issue}`
 > （与 `tasks notify` 同源信任模型）。效果：`active/processing → awaiting_input` 原子迁移（`changed` 可观测）、
@@ -360,13 +413,19 @@ Issue 对象字段：
 | scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT → 403） |
 | Path | `{issue_id}` int |
 | Body | `{"review_points": "...", "references": "...(可选，如 PR#/设计文档)"}` |
-| 出参 | `{"ok": true, "issue_id": 217, "status": "pending_review", "changed": true}` |
-| 返回 | 200；400 review_points 缺失；403 非会话 / 仓库作用域不匹配 / 非 devops agent；404 |
+| 出参 | `{"ok": true, "issue_id": 217, "status": "pending_review", "changed": true, "idempotent": false}` |
+| 返回 | 200（重复调用幂等，见下）；400 review_points 缺失；403 非会话 / 仓库作用域不匹配 / 非 devops agent；404 |
 
 > 鉴权：`agent_type∈{vod,issue,coding,qa,sre}` 且 `issue.repo_key == token.repo_key`。效果：
 > `active/processing/awaiting_input → pending_review` 原子迁移（`changed` 可观测）、审核点写入任务会话、
 > 向本人飞书 bot 发静态卡片「需要你审核确认」（缺配置则跳过）、不改 stage、不终态化（与任务生命周期正交）。
 > 用户评论（非 bot）会自动恢复为 processing。
+>
+> **重复调用幂等（Issue #725）**：Issue 已处于 `pending_review` 时再次调用 → **200 幂等短路**，
+> 出参 `{"ok": true, "status": "pending_review", "changed": false, "idempotent": true}`；
+> 不重复写会话审核点、不重复发通知。`completed/cancelled` 终态重复调用同样 200 + `idempotent: true`。
+> CLI/Agent 重复调用处理指引：收到 `idempotent: true` 视为提交已被接受（此前审核点已生效），
+> 无需重试、无需换 `issue_id` 兜底；切勿将其当作失败走 405/重试路径。
 
 ### POST /api/issues/{issue_id}/review-pass — Agent 判定审核通过
 

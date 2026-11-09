@@ -1,0 +1,11 @@
+{
+  "enforce": true,
+  "reasons": {
+    "engine_missing": true,
+    "engine_all_offline": true,
+    "foreign_personal_engine": true,
+    "skill_unresolvable": true,
+    "scene_node_dangling": true,
+    "scene_node_duplicate": true
+  }
+}

@@ -92,7 +92,7 @@ def _run_stream(user_token="", bot_token="", user_id=0, db_user_token="", event_
     fake_popen = _FakePopen()
     with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
          mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.agent.executor.shutil.which", return_value="/usr/bin/fake"), \
+         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
          mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
          mock.patch("src.user.db.get_credentials", return_value=[]), \
@@ -156,7 +156,7 @@ def _run_chat_fn(user_token="", bot_token="", user_id=0):
     fake_popen = _FakePopen()
     with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
          mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.agent.executor.shutil.which", return_value="/usr/bin/fake"), \
+         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
          mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
          mock.patch("src.user.db.get_credentials", return_value=[]), \
@@ -176,7 +176,7 @@ def _run_devops_fn(bot_token="", user_token="", repo_user_id=0):
     fake_popen = _FakePopen()
     with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
          mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.agent.executor.shutil.which", return_value="/usr/bin/fake"), \
+         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
          mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
          mock.patch("src.user.db.get_credentials", return_value=[]), \

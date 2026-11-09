@@ -21,6 +21,26 @@ USER_IMAGE_TIMEOUT = 15                  # 单图下载 15s 超时
 USER_IMAGE_MAX_COUNT = 8                 # 单 Issue 最多采集 8 张（超出降级说明）
 
 
+def paginate_pages(fetch_page, page_size: int = 100, max_pages: int = 20) -> list | dict:
+    """通用分页收集：``fetch_page(page)`` 返回列表或 ``{"error": ...}``。
+
+    结果不足 ``page_size`` 或为空即停止；任一页返回 error 时原样返回 error。
+    Issue #993：VcsApiClient.list_prs 与 branch_guard 的 grape CLI 查询共用，
+    避免两处分页逻辑漂移。
+    """
+    items: list = []
+    for page in range(1, max_pages + 1):
+        part = fetch_page(page)
+        if isinstance(part, dict) and part.get("error"):
+            return part
+        if not isinstance(part, list) or not part:
+            break
+        items.extend(part)
+        if len(part) < page_size:
+            break
+    return items
+
+
 def extract_gitcode_user_image_urls(text: "str | None") -> list[str]:
     """从 Markdown / HTML / 裸链文本中提取 raw.gitcode.com/user-images 图片 URL。
 
@@ -224,18 +244,26 @@ class VcsApiClient:
             self._ledger("pr", extract_content_id(_resp, "issue"), "", body)
         return _resp
 
-    def merge_pr(self, pr_number: int) -> dict:
-        """合并 Pull Request。"""
+    def merge_pr(self, pr_number: int, merge_method: str = "", title: str = "") -> dict:
+        """合并 Pull Request。
+
+        Issue #558：merge_method（merge/squash/rebase）与 title（自定义合并提交标题）
+        可选透传；缺省空值不进 body（存量行为不变）。GitLab 无 merge_method 字段，
+        squash 映射为 {"squash": True}。
+        """
+        _body = {k: v for k, v in {"merge_method": (merge_method or "").strip(),
+                                   "title": (title or "").strip()}.items() if v}
         if self.provider == "gitcode":
             _resp = self._gitcode_request(
-                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", {})
+                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", _body or {})
         elif self.provider == "github":
             _resp = self._github_request(
-                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", {})
+                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", _body or {})
         elif self.provider == "gitlab":
             project_id = f"{self.owner}%2F{self.repo}"
+            _gl_body = {"squash": True} if _body.get("merge_method") == "squash" else {}
             _resp = self._gitlab_request(
-                "PUT", f"/projects/{project_id}/merge_requests/{pr_number}/merge", {})
+                "PUT", f"/projects/{project_id}/merge_requests/{pr_number}/merge", _gl_body)
         else:
             return {"error": f"unsupported provider: {self.provider}"}
         # Issue #453 台账（写点11）：合并 PR 入账——pr_merge 事件回流对账
@@ -256,6 +284,34 @@ class VcsApiClient:
             return self._gitlab_request(
                 "GET", f"/projects/{project_id}/merge_requests/{pr_number}")
         return {"error": f"unsupported provider: {self.provider}"}
+
+    def list_prs(self, state: str = "all", head: str = "",
+                 max_pages: int = 20) -> list | dict:
+        """分页查询 PR 列表（Issue #993：按 head 分支查 merged/closed 状态）。
+
+        ``per_page=100`` 且全量翻页，避免 PR 超过单页时漏掉 merged PR。返回列表；
+        查询失败返回 ``{"error": ...}``。
+        """
+        if self.provider == "gitcode":
+            def _fetch(page):
+                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
+                        f"&per_page=100&page={page}")
+                return self._gitcode_request("GET", path)
+        elif self.provider == "github":
+            def _fetch(page):
+                head_q = f"&head={self.owner}:{head}" if head else ""
+                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
+                        f"{head_q}&per_page=100&page={page}")
+                return self._github_request("GET", path)
+        elif self.provider == "gitlab":
+            def _fetch(page):
+                project_id = f"{self.owner}%2F{self.repo}"
+                path = (f"/projects/{project_id}/merge_requests?state={state}"
+                        f"&per_page=100&page={page}")
+                return self._gitlab_request("GET", path)
+        else:
+            return {"error": f"unsupported provider: {self.provider}"}
+        return paginate_pages(_fetch, page_size=100, max_pages=max_pages)
 
     # === 仓库信息 ===
 
@@ -328,13 +384,15 @@ class VcsApiClient:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            # Issue #558：错误 dict 补 status_code、detail 保留上游全文（不截断），
+            # 供调用方保留上游状态语义；error 键不变保兼容
             err_body = ""
             try:
-                err_body = e.read().decode("utf-8")[:500]
+                err_body = e.read().decode()
             except Exception:
                 pass
             log.warning(f"VcsApiClient: {method} {url} → HTTP {e.code}: {err_body}")
-            return {"error": f"HTTP {e.code}", "detail": err_body}
+            return {"error": f"HTTP {e.code}", "status_code": e.code, "detail": err_body}
         except Exception as e:
             log.warning(f"VcsApiClient: {method} {url} → {e}")
             return {"error": str(e)}

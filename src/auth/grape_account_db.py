@@ -24,6 +24,27 @@ def _safe_decrypt(encrypted: str) -> str:
         return ""
 
 
+def _sync_um_platform_col(grape_user_id: int, provider: str, external_login: str):
+    """FR-18.6: OAuth/PAT 绑定成功后补写 um 平台列（消除空窗）。
+
+    Issue #497: 登录名变更同步复用本函数更新 unified_user_mapping 平台列。
+    """
+    if not grape_user_id or not external_login:
+        return
+    try:
+        with db_lock:
+            _c = db.cursor()
+            _c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (grape_user_id,))
+            # FR-CQ-1: 提取为 um_column_for_provider 工具函数
+            from src.repo_key import um_column_for_provider
+            _col = um_column_for_provider(provider)
+            _c.execute(f"UPDATE unified_user_mapping SET {_col}=?, updated_at=datetime('now') WHERE user_id=?",
+                       (external_login, grape_user_id))
+            db.commit()
+    except Exception as _e:
+        log.warning(f"_sync_um_platform_col: failed for user {grape_user_id} provider {provider}: {_e}")
+
+
 # ---------------------------------------------------------------------------
 # grape_accounts CRUD
 # ---------------------------------------------------------------------------
@@ -1213,6 +1234,88 @@ def update_external_identity_tokens(
     except Exception as e:
         log.warning(f"Update external identity tokens failed: {e}")
         return False
+
+
+def sync_external_login_on_rename(
+    grape_user_id: int,
+    provider: str,
+    new_external_login: str,
+    old_external_login: str = "",
+) -> bool:
+    """登录名变更同步（Issue #497）：external_id 不变、login 变（CSDN 联动改名最常见）。
+
+    在 OAuth 登录回调「已绑定」/rebind 分支检测到 user_info.external_login 与库内
+    external_login 不一致时调用，四表一致并写 audit_logs：
+    1. external_identities.external_login → 新登录名；
+    2. grape_accounts.username → 新登录名（UNIQUE 冲突时保留旧 username，不阻断登录）；
+    3. unified_user_mapping 平台列 → 复用 _sync_um_platform_col；
+    4. login_whitelist 平台列 → 旧名行改新名（UNIQUE 冲突时保留旧行，不阻断）。
+
+    先对比：new 为空或与 old 相同 → 直接返回 False（不产生写放大）。
+    返回 True 表示发生同步；False 表示无需同步或同步失败（失败不阻断登录）。
+    """
+    new_login = (new_external_login or "").strip()
+    old_login = (old_external_login or "").strip()
+    if not new_login or new_login == old_login:
+        return False
+
+    # 1) external_identities.external_login（活跃/过期绑定，与 token 刷新口径一致 status IN (1,4)）
+    #    核心目标失败 → 不再继续（避免四表半同步），返回 False 不阻断登录
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE external_identities SET external_login=?, updated_at=datetime('now') "
+                "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
+                (new_login, grape_user_id, provider),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"Sync external_login failed for user {grape_user_id} provider {provider}: {e}")
+        return False
+
+    # 2) grape_accounts.username（UNIQUE 冲突 → 保留旧 username，不会因此登录失败）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE grape_accounts SET username=?, updated_at=datetime('now') WHERE id=?",
+                (new_login, grape_user_id),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"Sync username failed for user {grape_user_id} (UNIQUE conflict? keep old username): {e}")
+
+    # 3) unified_user_mapping 平台列
+    _sync_um_platform_col(grape_user_id, provider, new_login)
+
+    # 4) login_whitelist 联动（与 2026-10-29 现网修数口径一致；冲突保留旧行）
+    try:
+        wl_col = "gitcode_username" if provider == "gitcode" else (
+            "github_username" if provider == "github" else "")
+        if wl_col:
+            with db_lock:
+                c = db.cursor()
+                # login_whitelist 表无 updated_at 列（DDL 仅 created_at），只改用户名不碰时间戳
+                c.execute(
+                    f"UPDATE login_whitelist SET {wl_col}=? "
+                    f"WHERE {wl_col}=? AND {wl_col}!=''",
+                    (new_login, old_login),
+                )
+                db.commit()
+    except Exception as e:
+        log.warning(f"Sync login_whitelist failed for user {grape_user_id} provider {provider}: {e}")
+
+    # 5) audit_logs 留痕（event_type=login_rename，detail 记 old/new）
+    try:
+        from src.auth.audit import log_audit
+        log_audit("login_rename", user_id=grape_user_id,
+                  detail={"provider": provider, "old_login": old_login, "new_login": new_login})
+    except Exception as e:
+        log.warning(f"Sync audit login_rename failed for user {grape_user_id}: {e}")
+
+    log.info(f"OAuth login name synced: user {grape_user_id} {provider} {old_login} -> {new_login}")
+    return True
 
 
 def mark_identity_expired(grape_user_id: int, provider: str) -> bool:

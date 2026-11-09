@@ -82,12 +82,74 @@ def _check_exec_access(user: dict, exec_id: int) -> dict:
     return {"id": row[0], "task_id": row[1], "repo_key": repo_key}
 
 
+def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) -> None:
+    """Issue #486: 服务端校验 engine_runtime_ids 归属（复用 #277 可见性口径）。
+
+    引擎对应凭据不在当前用户于该仓库的可见范围（全局 / 本人个人 / 当前仓库仓库级）
+    时拒绝，防止 API 层越权绑定其他仓库或他人个人的引擎。空列表 = 广播模式，
+    不在校验范围，行为保持不变。凭据已吊销（revoked）同样拒绝。
+    """
+    if not engine_ids:
+        return
+    from src.repo_key import from_repo_key
+    from src.user import db as user_db
+    from src.api.routes.settings import _build_cred_map, _make_visible_credential_fn
+    uid = user.get("id") or 0
+    uname = user.get("username") or ""
+    user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
+    repo_base = from_repo_key(repo_key or "")
+    cred_map = _build_cred_map(db, db_lock)
+    _visible = _make_visible_credential_fn(uname, user_repos, repo_filter=repo_base)
+    try:
+        ids = [int(x) for x in engine_ids]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid engine_runtime_ids"})
+    with db_lock:
+        c = db.cursor()
+        ph = ",".join("?" * len(ids))
+        rows = c.execute(f"SELECT id, credential_id FROM agent_runtimes WHERE id IN ({ph})", ids).fetchall()
+    rt_cred = {r[0]: (r[1] or 0) for r in rows}
+    invalid = []
+    for eid in ids:
+        if eid not in rt_cred:
+            invalid.append(str(eid))
+            continue
+        cid = rt_cred[eid]
+        cred = cred_map.get(cid) or {"scope": "global", "owner_name": "", "owner_id": "", "repo_key": ""}
+        if cred.get("status") == "revoked":
+            invalid.append(str(eid))
+            continue
+        if not _visible(cid, cred.get("scope", "global"), cred.get("owner_name", ""),
+                        cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+            invalid.append(str(eid))
+    if invalid:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"engine runtime ids not available for this repo/user: {', '.join(invalid)}"})
+
+
 def _autopilot_exec_cols() -> list:
     """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
     with db_lock:
         c = db.cursor()
         c.execute("PRAGMA table_info(autopilot_executions)")
         return [r[1] for r in c.fetchall()]
+
+
+def _skill_display_name(skill_name: str) -> str:
+    """skill 表 display_name（与场景选择处同款查询条件）；无/空返回空串由前端回退 Skill ID。"""
+    if not skill_name:
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                (skill_name,))
+            row = c.fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
 
 
 def _row_to_task(row) -> dict:
@@ -113,6 +175,7 @@ def _row_to_task(row) -> dict:
         "agent_type": row[3],
         "instruction": row[4],
         "skill_name": row[5],
+        "display_name": _skill_display_name(row[5] if len(row) > 5 else ""),
         "cron": row[6],
         "max_retry": row[7],
         "enabled": bool(row[8]),
@@ -318,6 +381,8 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
             # 用用户实际关联的 repo_key（正确的前缀），而非前端硬编码的
             body.repo_key = _matched_repo_key
         check_repo_access(user, body.repo_key)
+    # Issue #486: 服务端校验 engine_runtime_ids 归属（与 #277 引擎可见性口径一致）
+    _validate_engine_runtime_ids(user, body.repo_key or "", body.engine_runtime_ids or [])
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
     engine_ids_json = json.dumps(body.engine_runtime_ids) if body.engine_runtime_ids else ""
@@ -341,10 +406,13 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
 @router.put("/tasks/{task_id}")
 def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_current_user)):
     """更新自动化任务（部分更新）。"""
-    _check_task_access(user, task_id)
+    task = _check_task_access(user, task_id)
     # 如果要改 repo_key，校验新仓库归属
     if body.repo_key:
         check_repo_access(user, body.repo_key)
+    # Issue #486: engine_runtime_ids 服务端归属校验（生效仓库 = 提交的 repo_key 或任务原 repo_key）
+    if body.engine_runtime_ids is not None:
+        _validate_engine_runtime_ids(user, body.repo_key or task.get("repo_key") or "", body.engine_runtime_ids)
     fields = []
     params = []
     updates = body.model_dump(exclude_none=True)
@@ -539,11 +607,93 @@ class DispatchBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     scene_id: Optional[str] = None
+    # Issue #697：疑似重复（suspected_duplicate）需跟踪单 owner agent 确认后方可并入挂靠
+    dedup_confirmed: bool = False
+    dedup_confirmed_by: str = ""
+
+
+# Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
+try:
+    from src.runtime.scheduler import (
+        DEDUP_LEVEL_SUSPECTED,
+        dedup_auto_merge_allowed,
+        normalize_dedup_level,
+        sanitize_dedup_note,
+        sanitize_dedup_confirmed_by,
+    )
+except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同策略）
+    DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+
+    def normalize_dedup_level(raw):
+        level = str(raw or "").strip().lower()
+        if not level:
+            return ""
+        return level if level in ("exact_duplicate", "suspected_duplicate", "not_duplicate") \
+            else "suspected_duplicate"
+
+    def dedup_auto_merge_allowed(dedup_level, dedup_confirmed=False):
+        level = normalize_dedup_level(dedup_level)
+        return level in ("", "not_duplicate", "exact_duplicate") or bool(dedup_confirmed)
+
+    def sanitize_dedup_note(raw):
+        return " ".join(str(raw or "").split())[:200]
+
+    def sanitize_dedup_confirmed_by(raw):
+        return " ".join(str(raw or "").split())[:64]
+
+
+def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
+    """疑似重复派发门禁（Issue #697，代码级强制）。
+
+    dedup_level 经 normalize_dedup_level 归一（fail-closed：LLM 漏发为空串保持既有放行，
+    拼错/未知非空级别一律降级为 suspected_duplicate），疑似重复且未经 owner 确认
+    （dedup_confirmed != true）时拒绝派发挂靠（409），防止仅标题相似即误并乃至级联关闭独立跟踪线。
+    确认后由调用方将 dedup_confirmed 落回 findings_json（创建 Issue 失败也不丢确认标记）。
+    """
+    if not dedup_auto_merge_allowed(finding.get("dedup_level"), dedup_confirmed
+                                    or bool(finding.get("dedup_confirmed"))):
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": "疑似重复（suspected_duplicate）：根因比对不一致，"
+                       "需跟踪单 owner agent 确认后方可派发并入；确认后携带 dedup_confirmed=true 重试",
+            "dedup_level": DEDUP_LEVEL_SUSPECTED,
+            "dedup_note": sanitize_dedup_note(finding.get("dedup_note")),
+        })
+
+
+def _append_dedup_note(description: str, finding: dict) -> str:
+    """Issue #697：派发描述追加判定级别与差异说明，保留根因对比证据链。
+
+    级别经 normalize 归一（未知 fail-closed）、dedup_note 压平限长后再写入公开 Issue 描述。
+    """
+    level = normalize_dedup_level(finding.get("dedup_level"))
+    if not level:
+        return description
+    note = sanitize_dedup_note(finding.get("dedup_note"))
+    lines = [description.rstrip(), "", f"[dedup] level={level}"]
+    if note:
+        lines.append(f"[dedup] 差异说明: {note}")
+    if level == DEDUP_LEVEL_SUSPECTED:
+        lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入")
+    return "\n".join(lines)
+
+
+def _save_findings_json(exec_id: int, findings_data: dict) -> None:
+    """Issue #697：findings_json 回写（确认标记/派发号共用，统一加锁提交）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
+            (json.dumps(findings_data, ensure_ascii=False), exec_id)
+        )
+        db.commit()
 
 
 async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                  title: str = "", description: str = "",
-                                 scene_id: str = "", user: dict = None):
+                                 scene_id: str = "", user: dict = None,
+                                 dedup_confirmed: bool = False,
+                                 dedup_confirmed_by: str = ""):
     """派发核心逻辑（autopilot-feishu-subscription-design.md §4.7）。
 
     从路由 dispatch_finding 抽出，供 Web 路由与飞书 /finding-dispatch handler 共用，
@@ -581,6 +731,18 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                                      "message": f"已派发过 (Issue #{finding['dispatched_issue_number']})",
                                                      "issue_number": finding["dispatched_issue_number"]})
 
+    # Issue #697：疑似重复（根因不一致）未经 owner 确认 → 拒绝派发挂靠
+    _dedup_dispatch_guard(finding, dedup_confirmed)
+
+    # Issue #697：owner 确认后立即落库标记（先于建 Issue，建 Issue 失败也不丢确认），
+    # 防止后续重复确认/误判链重启；确认人取服务端身份，客户端自证字段仅作兜底展示
+    if dedup_confirmed and not finding.get("dedup_confirmed"):
+        finding["dedup_confirmed"] = True
+        _confirmed_by = sanitize_dedup_confirmed_by(dedup_confirmed_by)
+        if _confirmed_by:
+            finding["dedup_confirmed_by"] = _confirmed_by
+        _save_findings_json(exec_id, findings_data)
+
     # 创建真实 Issue（调用方传的 title/desc/scene_id 优先，否则用 finding 原值）
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
@@ -603,7 +765,7 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     issue_body = TaskCreateBody(
         repo_key=repo_key,
         title=title or finding["title"],
-        description=description or finding.get("description", ""),
+        description=_append_dedup_note(description or finding.get("description", ""), finding),
         scene_id=scene_id or "",
     )
     internal_user = {"id": (user or {}).get("id", 0),
@@ -614,13 +776,7 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     if issue_number and issue_number != "0":
         # 更新 findings_json
         finding["dispatched_issue_number"] = issue_number
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
-                (json.dumps(findings_data, ensure_ascii=False), exec_id)
-            )
-            db.commit()
+        _save_findings_json(exec_id, findings_data)
         log.info(f"Autopilot: finding {finding_id} dispatched as Issue #{issue_number} (exec={exec_id})")
         return {"ok": True, "issue_number": issue_number, "message": f"已创建 Issue #{issue_number}"}
     return {"ok": False, "message": f"创建 Issue 失败: {result}"}
@@ -632,10 +788,14 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
     exec_info = _check_exec_access(user, exec_id)
     log.info(f"[dispatch-debug] body.scene_id={body.scene_id!r} body.title={body.title!r}")
 
-    # 权限/仓库校验后走共用核心（权限模型与路由原本一致）
+    # 权限/仓库校验后走共用核心（权限模型与路由原本一致）；
+    # dedup_confirmed_by 以服务端认证身份为准（客户端自证字段仅兜底，防止伪造确认人）
     return await _dispatch_finding_core(exec_id, body.finding_id,
                                         body.title or "", body.description or "",
-                                        body.scene_id or "", user=user)
+                                        body.scene_id or "", user=user,
+                                        dedup_confirmed=bool(body.dedup_confirmed),
+                                        dedup_confirmed_by=str((user or {}).get("username")
+                                                               or body.dedup_confirmed_by or ""))
 
 
 # ====== 飞书订阅（autopilot-feishu-subscription-design.md §4.3）======

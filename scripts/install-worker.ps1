@@ -30,6 +30,13 @@ $ErrorActionPreference = "Stop"
 # 各 pip 调用点另有 EAP 防御层（Invoke-PipQuiet），双保险。
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
+# 2026-11-07 Windows GBK incident: pip's auto_decode parses requirements files
+# with the locale preferred encoding; on Chinese Windows (GBK locale) it dies on
+# UTF-8 non-ASCII bytes with UnicodeDecodeError. requirements-worker.txt is kept
+# ASCII-only for this reason; PYTHONUTF8=1 (Python 3.7+) is set per pip call in
+# Invoke-PipQuiet (and restored afterwards) as a second line of defense for
+# third-party requirements outside the package.
+
 function Log([string]$msg) { Write-Host "[install-worker] $msg" }
 function Fail([string]$msg) { Write-Error "[install-worker] ERROR: $msg"; exit 1 }
 
@@ -44,12 +51,20 @@ function Invoke-PipQuiet {
     )
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    # Issue #1409: force UTF-8 for Python child processes (pip requirements
+    # parsing) on non-UTF-8 locales; scope strictly to this pip call and
+    # restore afterwards so the resident worker daemon does not inherit it.
+    $prevUTF8 = $env:PYTHONUTF8
+    $env:PYTHONUTF8 = "1"
     $exitCode = 1
     try {
         & $CommandPath @Arguments 2>&1 | Out-Null
         $exitCode = $LASTEXITCODE
     } catch {
         $exitCode = 1
+    } finally {
+        if ($null -eq $prevUTF8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue }
+        else { $env:PYTHONUTF8 = $prevUTF8 }
     }
     $ErrorActionPreference = $prevEAP
     return $exitCode
@@ -69,6 +84,21 @@ if (-not $Server) {
     Log "No -Server specified, using default $Server (add -Server https://<your-controller> if incorrect)"
 }
 $Server = $Server.TrimEnd('/')
+
+if (-not $Device) {
+    # 已有安装记录过设备名就沿用。auto-upgrade 重跑本脚本时不带 -Device，
+    # 若在此回落到「worker-<主机名>」，设备名与引擎实例名会漂移，
+    # 服务端按实例名派发随之失效（任务卡在 runtime_id=None）。
+    $existingEnvFile = Join-Path (Join-Path $HOME ".grape") "runtime.env"
+    if (Test-Path $existingEnvFile) {
+        $existingDevice = (Select-String -Path $existingEnvFile -Pattern '^RUNTIME_DEVICE_NAME=(.+)$' -ErrorAction SilentlyContinue |
+                           Select-Object -First 1)
+        if ($existingDevice) {
+            $Device = $existingDevice.Matches[0].Groups[1].Value.Trim()
+            if ($Device) { Log "Reusing existing device name from runtime.env: $Device" }
+        }
+    }
+}
 
 if (-not $Device) {
     $rawHost = $env:COMPUTERNAME
@@ -154,7 +184,7 @@ function restore_upgrade_backup {
     if (Test-Path $backupVer) {
         Copy-Item -Path $backupVer -Destination $versionFilePath -Force -ErrorAction SilentlyContinue
     }
-    $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "未知版本" }
+    $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "unknown" }
     Log "Restored old code ($restoredVer)"
     # 重启旧 agent
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
@@ -170,11 +200,44 @@ function restore_upgrade_backup {
     return $false
 }
 
+# 解压前记录当前版本 + 从主控取目标版本，供解压后做「版本内容」校验
+# （旧实现只 Test-Path 判 VERSION/src 是否存在，升级场景下这两者恒存在，
+#   会把「一个文件都没解压出来」的失败误判为成功）
+$preVersion = ""
+if (Test-Path $versionFilePath) {
+    $preVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+}
+$expectedVersion = ""
+try {
+    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+    $expectedVersion = ("" + $lvi.version).Trim()
+    if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
+} catch {
+    Log "Warning: cannot fetch target version from $Server/api/runtime/install/latest - will fall back to changed-or-not check"
+}
+
 Log "Extracting runtime package to $Dir"
 try {
     # Windows 没有 tar 命令时用 .NET System.IO.Compression
-    $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
-    if ($tarCmd) {
+    # 优先使用 Windows 自带 bsdtar（%SystemRoot%\System32\tar.exe）。
+    # 装了 MSYS/git 的节点（如 Hermes 自带的 git）PATH 里会有一个 GNU tar，
+    # 它把 `C:\...` 当作「远端主机:路径」解析，报
+    #   tar: Cannot connect to C: resolve failed
+    # 并以 exit 2 结束、解压出 0 个文件；而旧校验只看 VERSION/src 是否存在，
+    # 于是这种静默失败被当成成功 → 拿旧代码走完安装 → 版本不变 → 升级死循环。
+    $tarCmd = $null
+    $sysTar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (Test-Path $sysTar) {
+        $tarCmd = Get-Command $sysTar -ErrorAction SilentlyContinue
+    }
+    if (-not $tarCmd) {
+        $tarCmd = Get-Command tar -All -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Source -notmatch '\\git\\usr\\bin\\|\\usr\\bin\\|\\msys|\\mingw' } |
+                  Select-Object -First 1
+    }
+    # 注意：必须按解析出的路径调用，不能写 `& tar` —— 那样仍会命中 PATH 里的 MSYS tar
+    $tarExe = if ($tarCmd) { $tarCmd.Source } else { $null }
+    if ($tarExe) {
         # tar -xzf --strip-components=1（Windows 10+ 自带 bsdtar）
         # Windows tar 遇到符号链接会报错——$ErrorActionPreference="Stop" 会将 stderr 当作异常
         # 临时切换为 Continue，让 tar 正常返回退出码
@@ -182,29 +245,39 @@ try {
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            & tar -xzf $TmpPkg -C $Dir --strip-components=1 2>&1 | Out-Null
+            & $tarExe -xzf $TmpPkg -C $Dir --strip-components=1 2>&1 | Out-Null
         } catch {
             $tarErr = $_
         }
         $ErrorActionPreference = $prevEAP
-        if ($LASTEXITCODE -ne 0 -or $tarErr) {
-            # 检查是否只是符号链接错误（关键文件已解压即可继续）
-            $hasVersion = Test-Path (Join-Path $Dir "VERSION")
-            $hasSrc = Test-Path (Join-Path $Dir "src")
-            if (-not ($hasVersion -and $hasSrc)) {
-                # 关键文件缺失——回退不带 strip 重试
-                $tmpExtract = Join-Path $env:TEMP "grape-extract-$(Get-Random)"
-                $ErrorActionPreference = "Continue"
-                try {
-                    & tar -xzf $TmpPkg -C $tmpExtract 2>&1 | Out-Null
-                } catch {}
-                $ErrorActionPreference = $prevEAP
-                if (Test-Path (Join-Path $tmpExtract "grape-worker")) {
-                    Copy-Item -Path (Join-Path $tmpExtract "grape-worker\*") -Destination $Dir -Recurse -Force
-                    Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            } else {
+        $postVersion = ""
+        if (Test-Path $versionFilePath) {
+            $postVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+        }
+        # 成功判据是「VERSION 内容换成了新版本」，不是「文件还在」：升级场景下
+        # VERSION/src 本来就在，只看存在性会把「没解压出任何文件」误判为成功。
+        $versionChanged = ($postVersion -and $postVersion -ne $preVersion)
+        if ($LASTEXITCODE -ne 0 -or $tarErr -or -not $versionChanged) {
+            # 关键文件缺失 / 版本未变——回退不带 strip 重试
+            $tmpExtract = Join-Path $env:TEMP "grape-extract-$(Get-Random)"
+            $ErrorActionPreference = "Continue"
+            try {
+                & $tarExe -xzf $TmpPkg -C $tmpExtract 2>&1 | Out-Null
+            } catch {}
+            $ErrorActionPreference = $prevEAP
+            if (Test-Path (Join-Path $tmpExtract "grape-worker")) {
+                Copy-Item -Path (Join-Path $tmpExtract "grape-worker\*") -Destination $Dir -Recurse -Force
+                Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            $postVersion = ""
+            if (Test-Path $versionFilePath) {
+                $postVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+            }
+            $versionChanged = ($postVersion -and $postVersion -ne $preVersion)
+            if ($versionChanged) {
                 Log "tar exit code non-zero (possible symlink error), key files extracted, continuing"
+            } else {
+                Log "Warning: fallback extraction also produced no new VERSION (still '$postVersion')"
             }
         }
     } else {
@@ -232,6 +305,22 @@ with tarfile.open(tmp) as t:
     Fail "Extract failed: $_"
 }
 Remove-Item $TmpPkg -ErrorAction SilentlyContinue
+
+# ===== 解压后最终校验：目标版本没落地就明确失败 =====
+# 宁可让本次安装报错并留下日志，也不要用旧代码继续走完安装流程 ——
+# 那会让 worker 以旧版本重启，下一轮又发现版本不一致，形成无限升级循环。
+$finalVersion = ""
+if (Test-Path $versionFilePath) {
+    $finalVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+}
+if ($expectedVersion) {
+    if ($finalVersion -ne $expectedVersion) {
+        Fail "Extract verification failed: expected VERSION=$expectedVersion but got '$finalVersion'. Extraction did not land - check that PATH does not shadow tar with MSYS/git (tar -xzf on C:\ paths exits 2)."
+    }
+    Log "Extract verified: VERSION=$finalVersion"
+} elseif ($finalVersion -and $finalVersion -eq $preVersion) {
+    Fail "Extract verification failed: VERSION unchanged ('$finalVersion') after extraction."
+}
 
 if (-not (Test-Path $CfgDir)) {
     New-Item -ItemType Directory -Path $CfgDir -Force | Out-Null
@@ -326,25 +415,18 @@ if (Test-Path $reqFile) {
     $pipIndex = $env:PIP_INDEX_URL
     if (-not $pipIndex) { $pipIndex = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 
-    # 离线 wheels 优先 —— 仅 Linux aarch64（wheels 按打包机平台 aarch64 manylinux 下载，
-    # 其他平台（Windows/x86_64）离线装必失败，直接走在线，避免无谓报错刷屏）
+    # 离线 wheels 优先 —— Issue #499: 包内 wheels 为多平台矩阵（linux x86_64/aarch64 + win_amd64），
+    # pip 按 wheel 平台标签自动精确匹配本机平台；不匹配平台（或 Python 版本不匹配）离线失败回退在线。
     $wheelsDir = Join-Path $Dir "wheels"
     $useWheels = $false
     if ((Test-Path $wheelsDir) -and (Get-ChildItem "$wheelsDir\*.whl" -ErrorAction SilentlyContinue)) {
-        # Linux aarch64 only: bundled wheels are built for aarch64 manylinux;
-        # other platforms (Windows/x86_64) always fail offline, go online directly.
-        $isArm = $env:PROCESSOR_ARCHITECTURE -match "ARM64"
-        if ($isArm) {
-            $useWheels = $true
-        } else {
-            Log "Non-Linux/arm64 host detected, skipping bundled wheels, installing online"
-        }
+        $useWheels = $true
     }
     if ($useWheels) {
         Log "Installing deps from bundled wheels (offline)"
         $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir, "-r", $reqFile)
         if ($rc -ne 0) {
-            Log "Offline install failed (common on Windows - binary wheel platform mismatch), falling back to online..."
+            Log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
             $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
             if ($rc -ne 0) {
                 Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
@@ -359,7 +441,7 @@ if (Test-Path $reqFile) {
     }
 }
 
-# ===== 4.5 安装 grape CLI（离线 wheel 优先，回退在线；非 Linux/arm64 平台直接在线）=====
+# ===== 4.5 安装 grape CLI（离线 wheel 优先——grape wheel 为纯 Python 平台无关，回退在线）=====
 $grapeWheel = $null
 if ($useWheels) {
     $grapeWheel = Get-ChildItem "$wheelsDir\grape-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -517,34 +599,8 @@ if ($regOk) {
 # ===== 6.5 hermes 沙箱降级标注 =====
 Log "Note: hermes sandbox (namespace/cgroup isolation) is not supported on Windows, disabled. Other engines are unaffected."
 
-# ===== 7. 执行引擎提示 =====
-$engineHints = @()
-$engines = @("opencode", "hermes", "codearts", "codex")
-foreach ($eng in $engines) {
-    $found = $false
-    try { $cmd = Get-Command $eng -ErrorAction Stop; $found = $true } catch {}
-    if (-not $found) {
-        $exts = @(".cmd", ".exe", ".bat")
-        foreach ($ext in $exts) {
-            if (Get-Command "$eng$ext" -ErrorAction SilentlyContinue) { $found = $true; break }
-        }
-    }
-    if (-not $found) {
-        switch ($eng) {
-            "opencode" { $engineHints += "  npm install -g opencode-ai（opencode 引擎）" }
-            "hermes" { $engineHints += "  pip install 'hermes[acp]'（hermes 引擎，含 ACP 协议包——普通 pip install hermes 不带，会导致引擎在线但调不通）" }
-            "codearts" { $engineHints += "  安装 CodeArts CLI（codearts 引擎）" }
-            "codex" { $engineHints += "  npm install -g @openai/codex（codex 引擎）" }
-        }
-    }
-}
-
-if ($engineHints.Count -gt 0) {
-    Log "Some execution engines not detected. Install them and restart worker:"
-    foreach ($hint in $engineHints) { Log $hint }
-    Log "  $startScript"
-    Log "(Engine type is not restricted; worker auto-discovers and registers installed engines on startup)"
-}
+# Issue #499: 执行引擎安装引导段已删除——worker 启动自动发现并注册本机已装引擎，
+# 无需在安装期引导用户安装 opencode/hermes/codearts/codex。
 
 Log "Install complete! Verify registration:"
 Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"

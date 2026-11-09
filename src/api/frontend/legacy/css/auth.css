@@ -657,6 +657,57 @@
   border-color: rgba(255,255,255,0.15);
 }
 
+/* B+（Issue #535）：OAuth 未配置置灰态——不用真 disabled（保留点击可解释），
+   aria-disabled + 视觉弱化；说明常显在按钮组下方（.oauth-unconfigured-hint） */
+.oauth-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.oauth-btn[aria-disabled="true"]:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: var(--auth-border);
+}
+/* FOUC 修复（#535，注册页同模式）：服务端在 <html> 注入按平台粒度的
+   oauth-<provider>-not-configured 类，CSS 在首帧（defer JS 运行前）即弱化
+   对应按钮——消除「先常亮后置灰」闪动，且单平台配置时已配置按钮不误灰。
+   app.js 同步块随后补 aria-disabled（视觉不变，仅语义补充）。 */
+html[class*="oauth-gitcode-not-configured"] #oauthBtns .oauth-btn[onclick*="oauthLogin('gitcode')"],
+html[class*="oauth-github-not-configured"] #oauthBtns .oauth-btn[onclick*="oauthLogin('github')"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+html[class*="oauth-gitcode-not-configured"] #oauthBtns .oauth-btn[onclick*="oauthLogin('gitcode')"]:hover,
+html[class*="oauth-github-not-configured"] #oauthBtns .oauth-btn[onclick*="oauthLogin('github')"]:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: var(--auth-border);
+}
+/* 说明行同样 CSS 驱动：预置 DOM + 注入类首帧显示（内联 style display:none 被
+   类规则覆盖）；全部已配置（无任何 oauth-*-not-configured 类）时保持隐藏 */
+html[class*="oauth-gitcode-not-configured"] #oauthUnconfiguredHint,
+html[class*="oauth-github-not-configured"] #oauthUnconfiguredHint {
+  display: block !important;
+}
+html.oauth-configured #oauthUnconfiguredHint {
+  display: none !important;
+}
+.oauth-unconfigured-hint {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  /* 用主题次级文字色（登录卡片为浅色背景），不用 rgba(255,255,255,*)——浅底白字不可见 */
+  color: var(--auth-text-tertiary, #6e6e73);
+  text-align: center;
+}
+.oauth-unconfigured-hint a {
+  color: var(--a, #7ab8ff);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.oauth-unconfigured-hint a:hover {
+  color: var(--a, #7ab8ff);
+  filter: brightness(1.15);
+}
+
 .oauth-btn svg {
   /* 品牌色做图标 tint，但深色品牌色在深色背景上不可见，用 color-mix 提亮 */
   color: color-mix(in srgb, var(--brand, rgba(255,255,255,0.7)) 60%, rgba(255,255,255,0.7));

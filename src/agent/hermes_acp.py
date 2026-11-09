@@ -20,6 +20,7 @@ ACP 协议流程：
 通信格式：每行一个 JSON-RPC 消息（NDJSON over stdin/stdout）
 """
 import os
+import stat as _stat
 import json
 import re
 import time
@@ -30,19 +31,39 @@ import signal
 from typing import Generator
 from src.config import log
 
+_bwrap_fail_notified = False
 
-def _global_timeout_for(max_exec_seconds: float) -> float:
+
+def _note_bwrap_fail_once(message: str) -> None:
+    """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
+
+    放在调用方模块（而非 src.agent.sandbox）是因为本函数需覆盖 sandbox
+    自身导入失败的场景，此时不能依赖 sandbox 内的助手。
+    """
+    global _bwrap_fail_notified
+    if _bwrap_fail_notified:
+        log.debug(message)
+        return
+    _bwrap_fail_notified = True
+    log.warning(message)
+
+
+def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hermes ACP 内循环全局墙钟上限（#282 对齐修复）。
 
-    取 RUNTIME_TASK_TIMEOUT 环境变量（与 src/runtime/agent.py 任务级看门狗
-    `_env_float("RUNTIME_TASK_TIMEOUT", 3600)` 同一配置源、同默认值），
-    解析失败回退 3600；下限保护 max_exec_seconds——全局上限始终 ≥ 静默超时窗口，
+    取 RUNTIME_TASK_TIMEOUT（与 src/runtime/agent.py 任务级看门狗同一配置源、
+    同默认值），下限保护 max_exec_seconds——全局上限始终 ≥ 静默超时窗口，
     防止配置异常把全局上限压到静默超时之下。
     旧逻辑 `max_exec_seconds * 2`（=1200s 写死倍率）会在长任务 20 分钟处
     硬切仍在正常输出的任务，已废弃。
+
+    Issue #470：任务级 env 优先（服务端经 env_extra 注入的统一配置值），
+    os.environ 次之（worker runtime.env 手动调参/测试），默认 3600——
+    与同文件 _silent_timeout_for(env) 模式一致（#378/#416 先例）。
     """
+    _src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
     try:
-        _v = float(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+        _v = float(_src) if _src not in (None, "") else 3600.0
     except Exception:
         _v = 3600.0
     return max(_v, float(max_exec_seconds))
@@ -56,7 +77,7 @@ PREMATURE_END_MARKER = "[PREMATURE_END_TURN]"
 
 
 def _text_incomplete_timeout_for() -> float:
-    """text 静默且无收尾记录时的等待上限（默认 300s，与 tool 静默窗口对齐）。
+    """text 静默且无收尾记录时的等待上限（默认 300s，独立于 tool 静默窗口）。
 
     语义：模型输出 text 后 60s 无事件只说明「暂时没输出」，不代表干完了——可能正在
     生成一个大 tool call（补丁/大文件），这期间 hermes 不会发任何 ACP 事件。
@@ -74,18 +95,18 @@ def _text_incomplete_timeout_for() -> float:
 
 
 def _silent_timeout_for(env: dict | None = None) -> float:
-    """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）。
+    """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 600s）。
 
     与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
     （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
-    env 优先（任务级），os.environ 次之（手动调参/测试），默认 300s。
+    env 优先（任务级），os.environ 次之（手动调参/测试），默认 600s。
     """
     _silent_src = (env or {}).get("HERMES_SILENT_TIMEOUT") or \
-        os.environ.get("HERMES_SILENT_TIMEOUT", "300")
+        os.environ.get("HERMES_SILENT_TIMEOUT", "600")
     try:
         return max(float(_silent_src), 0.0)
     except Exception:
-        return 300.0
+        return 600.0
 
 
 def _init_timeout_for(env: dict | None = None) -> float:
@@ -131,6 +152,12 @@ class HermesACPBackend:
         env["TERM"] = "dumb"
         # ACP 模式自动批准工具执行（等效旧 --yolo）
         env["HERMES_YOLO_MODE"] = "1"
+        # 2026-10-28 止血（initialize 100s 超时）：ACP 子进程禁止 pm 懒安装——
+        # 隔离 home 里依赖/运行时由 overlay symlink 共享源 home（见
+        # _OVERLAY_READONLY_SYMLINK_ENTRIES），本就无需懒装；历史上白名单漏列
+        # installs/tools 时 bootstrap 会判"未装完"并在握手前联网重下全套运行时，
+        # 远超 HERMES_INIT_TIMEOUT 导致任务超时判死。双保险关闭懒安装。
+        env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
         return env
 
     def stream_execute(
@@ -152,6 +179,7 @@ class HermesACPBackend:
         - ("tool_finish", str)
         - ("tool_result", str)
         - ("step_finish", str)
+        - ("usage", dict)   # issue #727：PromptResponse result.usage 直报（LLM 用量采集）
         - ("done", {"exit_code": int, "text": str, "oc_session_id": str, "errors": list, "stderr": str})
         """
         label = f"{agent_label} " if agent_label else ""
@@ -180,6 +208,9 @@ class HermesACPBackend:
         # symlink 镜像共享 home 的内容（学习 multica mirrorSharedHermesHome）
         # 只覆写 state.db（task-local）和 config.yaml（tool_progress=new）
         _build_overlay_home(iso_home, src_home)
+        # issue #439 worker 写前兜底：可写目录必须是真实目录（reparse point 会触发
+        # Windows 提权引擎 hermes_dir_acl 拒绝授权）。覆盖存量 home 与构建后竞态。
+        ensure_overlay_writable_dirs(iso_home)
 
         proc_env = dict(env) if env else os.environ.copy()
         proc_env["HERMES_HOME"] = iso_home
@@ -192,16 +223,25 @@ class HermesACPBackend:
         if hasattr(os, "getpgid"):
             _popen_kwargs["start_new_session"] = True
 
-        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        # 组件2：文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
+        # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音。
+        # 直接读 src.config（与 sandbox_enabled() 同语义），规避 sandbox 模块
+        # 自身导入损坏时短路失效）
         _acp_cmd = [agent_cmd, "acp"]
         try:
-            from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name="hermes")
-            if _wrap:
-                _acp_cmd = _wrap + _acp_cmd
-                log.info(f"{label}hermes ACP sandboxed via bwrap (cwd={cwd})")
-        except Exception as _bw_e:
-            log.warning(f"{label}hermes ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
+            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+        except Exception:
+            _sbx_on = False
+        if _sbx_on:
+            try:
+                from src.agent.sandbox import build_bwrap_cmd
+                _wrap = build_bwrap_cmd(cwd, backend_name="hermes")
+                if _wrap:
+                    _acp_cmd = _wrap + _acp_cmd
+                    log.info(f"{label}hermes ACP sandboxed via bwrap (cwd={cwd})")
+            except Exception as _bw_e:
+                _note_bwrap_fail_once(
+                    f"{label}hermes ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
 
         proc = subprocess.Popen(
             _acp_cmd,
@@ -521,14 +561,15 @@ class HermesACPBackend:
             # ── 4. 内循环：从队列消费事件 + 等 prompt 完成 ──
             _last_activity = time.time()
             _global_start = time.time()
-            # 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）：
+            # 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 600s）：
             # 与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
             # （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
             _SILENT_TIMEOUT = _silent_timeout_for(env)
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后静默 60s → 先做一次「完成证据」检查
             _TEXT_INCOMPLETE_TIMEOUT = _text_incomplete_timeout_for()  # 无证据时最多再等到这里 → 按疑似提前结束收尾
-            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
+            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds, env)
             _last_event_type = ""   # 记录最后一次事件类型
+            _timeout_secs = None    # Issue #494：触发超时的实际上限秒数（归因文案用）
             _rec_check_n = -1       # 已完成收尾记录检查的 collected_text 长度（避免静默期每 50ms 重复解析）
             _rec_ok = False         # 是否已检测到收尾记录（actions + conclusion）
             _silent_wait_logged = False
@@ -566,7 +607,7 @@ class HermesACPBackend:
                 # text 后静默：不再直接判完成——静默只决定「还要不要等」，
                 #   「算不算完成」必须由证据决定（见 _has_completion_record / PromptResponse）。
                 #   ① 累计输出里已有收尾记录（actions + conclusion）→ 判完成（response 丢失）；
-                #   ② 无证据 → 继续等到 _TEXT_INCOMPLETE_TIMEOUT（默认 300s，与 tool 静默对齐），
+                #   ② 无证据 → 继续等到 _TEXT_INCOMPLETE_TIMEOUT（默认 300s，独立于 tool 静默窗口），
                 #      到点按「疑似提前结束」收尾（exit 0 + 标记，不冒充干净完成）。
                 #   非 text 事件（tool/reasoning）后的静默维持原语义：超时终止（exit -1）。
                 elapsed_silent = time.time() - _last_activity
@@ -593,14 +634,16 @@ class HermesACPBackend:
                 elif elapsed_silent > _SILENT_TIMEOUT:
                     log.warning(f"{label}hermes ACP silent {elapsed_silent:.0f}s, timeout")
                     prompt_result["stopReason"] = "timeout"
+                    _timeout_secs = _SILENT_TIMEOUT
                     break
 
                 # 全局超时（#282：对齐外层 RUNTIME_TASK_TIMEOUT，默认 3600s）
                 if time.time() - _global_start > _GLOBAL_TIMEOUT:
-                    _gt_src = os.environ.get("RUNTIME_TASK_TIMEOUT")
+                    _gt_src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
                     _gt_src_txt = f"env RUNTIME_TASK_TIMEOUT={_gt_src}" if _gt_src else "default 3600s"
                     log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT:.0f}s, {_gt_src_txt}) exceeded")
                     prompt_result["stopReason"] = "timeout"
+                    _timeout_secs = _GLOBAL_TIMEOUT
                     break
 
                 time.sleep(0.05)
@@ -611,6 +654,22 @@ class HermesACPBackend:
 
             stop_reason = prompt_result.get("stopReason", "")
             log.info(f"{label}hermes ACP done: stopReason={stop_reason}")
+
+            # issue #727：PromptResponse result.usage 直报——治本路径，喂事件流
+            # （("usage", {...})），由调用方（worker/主控）转给 UsageCollector.feed；
+            # state.db 读取只做兜底（缺表降级见 usage_collect._hermes_rows）。
+            _usage_rec = _extract_prompt_usage(prompt_result.get("result"))
+            if _usage_rec is not None:
+                log.info(f"{label}hermes ACP prompt usage: {json.dumps(_usage_rec, ensure_ascii=False)}")
+                yield ("usage", _usage_rec)
+
+            # Issue #494：超时失败显式归因（与 hwcloud_acp 同口径）——stopReason=timeout
+            # 时 stderr/errors 常为空，补「执行超时（Ns）」文案进 errors。
+            if stop_reason == "timeout" and not error_events:
+                from src.agent.failure_attribution import timeout_error_text
+                error_events.append(timeout_error_text(
+                    _timeout_secs if _timeout_secs is not None else _GLOBAL_TIMEOUT,
+                    "hermes ACP stopReason=timeout"))
 
             yield ("step_finish", f"Step 1 done (stopReason={stop_reason})")
 
@@ -920,10 +979,20 @@ class _ACPSimpleClient:
             tool_call_id = update.get("toolCallId", "")
             name = update.get("name", "")
             title = update.get("title", "")
-            raw_input = update.get("rawInput") or update.get("input") or update.get("parameters") or {}
+            # issue #976：按 ACP 语义读取工具入参（rawInput → input → parameters →
+            # content 文本/diff 块），hermes 0.9-0.20 的 acp_adapter 对 write_file/patch
+            # 等 polished tools 只发 content diff 块不发 rawInput，落库恒为空即此因。
+            raw_input = _extract_tool_call_input(update)
             tool_name = _tool_name_from_title(title) or name
             if tool_name:
-                self.on_message("tool_use", {"tool": tool_name, "input": raw_input})
+                self.on_message("tool_use", {"tool": tool_name, "input": raw_input,
+                                             "tool_call_id": tool_call_id})
+            else:
+                # issue #976：name/title 皆解析不到时不静默丢弃，产出占位 tool_use 事件，
+                # 消费方（任务日志 /api/task-logs/{id}/messages）可感知缺口。
+                self.on_message("tool_use", {"tool": "unknown", "input": raw_input,
+                                             "title": title or "",
+                                             "tool_call_id": tool_call_id})
         elif update_type_norm == "tool_call_update":
             status = update.get("status", "")
             title = update.get("title", update.get("name", ""))
@@ -959,6 +1028,86 @@ def _normalize_update_type(t: str) -> str:
     key = t.lower().replace("_", "").replace("-", "")
     return _UPDATE_TYPE_MAP.get(key, "")
 
+_TOOL_INPUT_MAX_BYTES = int(os.environ.get("HERMES_TOOL_INPUT_MAX_BYTES") or 262144)
+
+
+def _extract_tool_call_input(update: dict) -> dict:
+    """issue #976：按 ACP 语义提取 tool_call 入参。
+
+    优先级：rawInput → input → parameters → content 文本/diff 块。
+    hermes acp_adapter 对 write_file/patch 等工具（_POLISHED_TOOLS）不携带
+    rawInput，但会把完整 diff（path/oldText/newText）放进 content 块，这里
+    统一还原为 {path, content}（write）/ {path, old, new}（patch）。
+    超限裁剪走 _clip_tool_input（带 truncated/original_bytes/sha256 前缀）。
+    """
+    for key in ("rawInput", "input", "parameters"):
+        val = update.get(key)
+        if isinstance(val, dict) and val:
+            return _clip_tool_input(val)
+        if isinstance(val, str) and val.strip():
+            try:
+                parsed = json.loads(val)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed:
+                return _clip_tool_input(parsed)
+    return _clip_tool_input(_input_from_content_blocks(update.get("content")))
+
+
+def _input_from_content_blocks(content) -> dict:
+    """从 ACP tool_call 的 content 块（diff / text）还原入参。"""
+    if not isinstance(content, list):
+        return {}
+    edits: list[dict] = []
+    texts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "diff":
+            edit = {"path": str(block.get("path") or "")}
+            if block.get("oldText") is not None:
+                edit["old"] = block.get("oldText")
+            edit["new"] = block.get("newText") or ""
+            edits.append(edit)
+        elif btype == "text" and block.get("text"):
+            texts.append(str(block["text"]))
+    if len(edits) == 1:
+        edit = edits[0]
+        if "old" in edit:
+            return {"path": edit["path"], "old": edit["old"], "new": edit["new"]}
+        return {"path": edit["path"], "content": edit["new"]}
+    if len(edits) > 1:
+        return {"edits": edits}
+    if texts:
+        return {"text": "\n".join(texts)}
+    return {}
+
+
+def _clip_tool_input(inp: dict) -> dict:
+    """issue #976 裁剪契约：超限入参不静默截断，带可校验元数据。
+
+    输出 {truncated: true, original_bytes: <原始字节数>, sha256_prefix: <sha256 前
+    16 hex>, preview: <前 2KB>}。上限 HERMES_TOOL_INPUT_MAX_BYTES（默认 256KB，
+    Issue 验收的 57KB content 在保真区间内全量透传）。
+    """
+    import hashlib as _hashlib
+    try:
+        payload = json.dumps(inp, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        payload = str(inp)
+    raw = payload.encode("utf-8", errors="replace")
+    if len(raw) <= _TOOL_INPUT_MAX_BYTES:
+        return inp
+    digest = _hashlib.sha256(raw).hexdigest()[:16]
+    return {
+        "truncated": True,
+        "original_bytes": len(raw),
+        "sha256_prefix": digest,
+        "preview": payload[:2048],
+    }
+
+
 def _tool_name_from_title(title: str) -> str:
     if not title:
         return ""
@@ -990,6 +1139,56 @@ def _extract_session_id(result) -> str:
             if sid:
                 return sid
     return ""
+
+
+def _extract_prompt_usage(result) -> dict | None:
+    """issue #727：从 `session/prompt` 的 PromptResponse result 里提取 `usage`。
+
+    hermes 0.9.0 起 PromptResponse result 携带 usage（token 计数字段命名跨版本
+    有波动：input_tokens/input、completion_tokens/output……），这里是治本路径——
+    用量经事件流 `("usage", {...})` 直报给 UsageCollector，不依赖 state.db 表结构。
+
+    返回形态与 UsageCollector.feed 的 usage dict 对齐：
+    {model, provider, input, output, cache_read, cache_write, reasoning}；全 0/缺失返回 None。
+    """
+    if not isinstance(result, dict):
+        return None
+    usage = result.get("usage")
+    if not isinstance(usage, dict) or not usage:
+        return None
+    tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
+    try:
+        from src.observability.llm_usage import normalize_tokens
+        _n = normalize_tokens(usage)
+        tok = {
+            "input": _n.get("input_tokens", 0),
+            "output": _n.get("output_tokens", 0),
+            "cache_read": _n.get("cache_read_tokens", 0),
+            "cache_write": _n.get("cache_write_tokens", 0),
+            "reasoning": _n.get("reasoning_tokens", 0),
+        }
+    except Exception:
+        # 归一化器不可用时退化为常见 snake/camel 键的手工解析
+        for canon, aliases in (
+            ("input", ("input_tokens", "input", "prompt_tokens")),
+            ("output", ("output_tokens", "output", "completion_tokens")),
+            ("cache_read", ("cache_read_tokens", "cache_read")),
+            ("cache_write", ("cache_write_tokens", "cache_write")),
+            ("reasoning", ("reasoning_tokens", "reasoning")),
+        ):
+            for a in aliases:
+                v = usage.get(a)
+                if isinstance(v, (int, float)) and v > 0:
+                    tok[canon] = int(v)
+                    break
+    if not any(tok.values()):
+        return None
+    model = str(usage.get("model") or result.get("model") or "")
+    provider = str(usage.get("provider") or result.get("provider") or "")
+    rec = dict(tok)
+    rec["model"] = model
+    rec["provider"] = provider
+    return rec
 
 
 def _has_completion_record(chunks: list) -> bool:
@@ -1185,10 +1384,128 @@ def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
         "oc_session_id": session_id, "errors": errors, "stderr": stderr,
     }
 
+# ── issue #439：overlay home 条目分类（替代全量 symlink）──
+# 可写状态目录白名单：per-task 真实目录。Windows 提权引擎下 symlink 是 reparse
+# point，hermes_dir_acl 拒绝授权 → 引擎写 cron/memories 即 exit_code=-1。
+_OVERLAY_WRITABLE_DIRS = frozenset({
+    "cron", "sessions", "logs", "log", "cache", "tmp", "temp",
+    "memories", "history", "backups", "output", "outputs", "data",
+})
+# lock/pid 类：真实空文件（引擎自行接管内容）
+_OVERLAY_LOCK_FILES = frozenset({
+    "processes.json", ".port-locks", "gateway.pid", "hermes.pid",
+})
+# 只读共享资产：保留 symlink（Linux 不回归；symlink 失败降级复制）
+_OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
+    "skills", "plugins", "venv", "assets", "themes", "prompts",
+    # hermes 自管运行时（只读共享，引擎不写）：
+    # installs/ 依赖环境代际、tools/ 托管 Python/node/chromium、bin/ uv/tirith、
+    # lsp/ 语言服务器、huaweicloud-plugins/ 插件源码。
+    # 2026-10-28 修复（initialize 100s 超时根因）：#439 白名单漏列这几个目录时，
+    # 它们落"未知目录→真实空目录"兜底，隔离 home 里 installs/tools 为空 →
+    # hermes bootstrap 判"安装未完成"→ 每次冷启动联网重下全套运行时
+    # （几百 MB，国内网络下载远超 HERMES_INIT_TIMEOUT=100s）→ 任务超时判死；
+    # 且每个 home 各下各的，磁盘按 2G/home 炸。归入 symlink 后共享源 home 一份，
+    # 启动恢复秒级。
+    "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
+})
+# 新归入 symlink 的 hermes 自管运行时目录（构建期遇到历史真实空目录/下载残骸时
+# 删除重建 symlink；见 overlay 构建分支 2026-10-28 修复）
+_OVERLAY_RUNTIME_SYMLINK_DIRS = frozenset({
+    "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
+})
+
+
+def _overlay_entry_kind(entry: str, src_path: str | None = None) -> str:
+    """分类 overlay 条目的构建类型："dir"（真实目录）/ "file"（真实空文件）/
+    "symlink"（只读共享资产）。
+
+    分类依据显式白名单（确定性高、易测试）；未知目录保守按真实目录处理
+    （issue #439：宁可多建目录，也不再对可能被写的目录产生 reparse point）；
+    未知文件按只读资产 symlink 处理（失败降级复制，issue #416）。
+    """
+    if entry.endswith(".lock") or entry in _OVERLAY_LOCK_FILES:
+        return "file"
+    if entry in _OVERLAY_WRITABLE_DIRS:
+        return "dir"
+    if entry in _OVERLAY_READONLY_SYMLINK_ENTRIES:
+        return "symlink"
+    if src_path is not None and os.path.isdir(src_path):
+        return "dir"
+    return "symlink"
+
+
+def _is_reparse_point_or_link(path: str) -> bool:
+    """判断 path 是否为 symlink / Windows reparse point（junction 等）。
+
+    os.path.islink 覆盖 symlink；Windows 上目录 junction 也是 reparse point
+    （st_file_attributes 含 FILE_ATTRIBUTE_REPARSE_POINT），hermes_dir_acl
+    同样拒绝授权，需一并识别。
+    """
+    if os.path.islink(path):
+        return True
+    if os.name == "nt":
+        try:
+            st = os.lstat(path)
+            return bool(getattr(st, "st_file_attributes", 0)
+                        & _stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except OSError:
+            return False
+    return False
+
+
+def _remove_path(path: str):
+    """删除文件/链接/目录（构建期遗留清理用）。
+
+    安全要点：Windows 目录 junction 是 reparse point（os.path.islink=False、
+    isdir=True），若走 shutil.rmtree 会穿透 junction 递归删除共享 HERMES_HOME
+    目标目录内容（共享资产/状态数据丢失风险）。reparse point 目录必须用
+    os.rmdir 仅删链接本身；symlink 用 os.remove；真实目录才走 rmtree。
+    """
+    if os.path.islink(path):
+        os.remove(path)  # 链接本身（含 dangling link）
+    elif _is_reparse_point_or_link(path):
+        os.rmdir(path)  # Windows junction/reparse point 目录：仅删链接本身
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+    elif os.path.exists(path):
+        os.remove(path)
+
+
+def ensure_overlay_writable_dirs(iso_home: str):
+    """issue #439 worker 写前兜底：确保可写状态目录为真实目录。
+
+    覆盖两类场景：
+    - 存量 overlay home：旧版本构建的全量 symlink（升级窗口期内遗留）；
+    - 构建与写入之间的竞态/外部工具误建。
+    对每个可写目录名：是链接/reparse point → 删除后建真实目录；已是真实
+    目录 → 幂等保留（不清理内容）。只读资产不受影响。
+    """
+    for name in _OVERLAY_WRITABLE_DIRS:
+        p = os.path.join(iso_home, name)
+        try:
+            if _is_reparse_point_or_link(p):
+                _remove_path(p)
+                log.info(f"hermes ACP overlay: replaced legacy link '{name}' "
+                         f"with real dir (issue #439)")
+            os.makedirs(p, exist_ok=True)
+        except Exception as _e:
+            log.warning(f"hermes ACP overlay: ensure real dir '{name}' failed: {_e}")
+
+
 def _build_overlay_home(iso_home: str, src_home: str):
     """构建 per-task HERMES_HOME overlay（学习 multica mirrorSharedHermesHome）。
 
-    - symlink 镜像共享 home 的所有内容（skills/plugins/auth 等）
+    issue #439：不再对 src_home 全量 symlink。Windows 提权引擎下 symlink 是
+    NTFS reparse point，hermes_dir_acl 拒绝给 reparse point 授权 → 引擎写
+    cron/memories 即 exit_code=-1。改为按条目类型分类构建：
+    - 可写状态目录 → per-task 真实目录（per-task 隔离 + ACL 可授权）
+    - lock/pid 文件 → 真实空文件
+    - 只读共享资产 → 保留 symlink（Linux 不回归；失败降级 _mirror_without_symlink）
+    - 未知目录 → 保守按真实目录处理（宁可多建目录也不再产生 reparse point）
+    并在构建期清理历史遗留的同类旧链接（旧版本 `if os.path.exists(dst):
+    continue` 会放过全量 symlink 时代的产物）。
+
     - 覆写 config.yaml（tool_progress=new）
     - 覆写 .env（pin HERMES_HOME + 保留凭据）
     - state.db 保持 task-local（不 symlink，每个 task 独立）
@@ -1202,19 +1519,81 @@ def _build_overlay_home(iso_home: str, src_home: str):
                 if entry in ("state.db", "state.db-wal", "state.db-shm",
                              "config.yaml", ".env", "active_profile", "profiles"):
                     continue
-                if os.path.exists(dst):
+                # gateway-ctl-not-mirrored（2026-10-24 修复）：
+                # 网关控制文件一律不镜像进任务 home——missing_owner_state(home) 的语义是
+                # "本 home 自己有没有在跑的网关"，把共享 home 的 gateway.lock 等符号链接
+                # 镜像进来，hermes 网关归属判定（lstat 不跟随符号链接）会判
+                # unsafe_control_path → inaccessible → ACP session/new 被拒（-32603）。
+                # 生产实测（内部 worker 事故，2026-10-23）：新建工作区任务
+                # 100% 失败；老工作区（lock 出现前建成的 home）不受影响。
+                if entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
+                             "gateway.pid", "gateway_state.json", "gateway-starts.log"):
                     continue
                 src = os.path.join(src_home, entry)
+                kind = _overlay_entry_kind(entry, src)
                 try:
-                    os.symlink(src, dst)
-                except Exception as _sl_e:
-                    # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
-                    # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
-                    # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
-                    # → hermes ACP 启动后加载资产失败即死（exit rc!=0、无诊断）。
-                    # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
-                    # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
-                    _mirror_without_symlink(src, dst, entry, str(_sl_e))
+                    if kind == "dir":
+                        # 遗留清理：旧版本可能建了 symlink/reparse point 或类型不符
+                        if _is_reparse_point_or_link(dst) or \
+                                (os.path.exists(dst) and not os.path.isdir(dst)):
+                            _remove_path(dst)
+                        os.makedirs(dst, exist_ok=True)
+                    elif kind == "file":
+                        if _is_reparse_point_or_link(dst) or \
+                                (os.path.exists(dst) and not os.path.isfile(dst)):
+                            _remove_path(dst)
+                        if not os.path.exists(dst):
+                            # 真实空文件：lock/pid 类，引擎自行接管内容
+                            with open(dst, "a", encoding="utf-8"):
+                                pass
+                    else:  # symlink：只读共享资产
+                        if os.path.isdir(dst) and not os.path.islink(dst):
+                            # 2026-10-28 修复（initialize 100s 超时善后）：installs/tools 等新归入
+                            # symlink 的自管运行时，历史上被 #439 兜底规则建成"真实空目录"
+                            # （或 hermes 懒安装留下的半成品 tools/python-*.staging-*）。
+                            # 空目录/下载残骸对引擎不可用（bootstrap 判"未装完"→联网重下），
+                            # 必须删除换成指向源 home 的 symlink；只有 issue #416 降级复制的
+                            # 完整资产（非运行时目录）才 continue 保留。
+                            if entry in _OVERLAY_RUNTIME_SYMLINK_DIRS:
+                                _remove_path(dst)
+                            else:
+                                continue  # issue #416 降级复制的真实目录，可用
+                        if os.path.isfile(dst) and not os.path.islink(dst):
+                            if entry in _OVERLAY_RUNTIME_SYMLINK_DIRS:
+                                _remove_path(dst)
+                            else:
+                                continue  # issue #416 降级复制的真实文件，可用
+                        if _is_reparse_point_or_link(dst):
+                            # 遗留/失效链接 → 删除重建
+                            _remove_path(dst)
+                        try:
+                            os.symlink(src, dst)
+                        except Exception as _sl_e:
+                            # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
+                            # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
+                            # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
+                            # → hermes ACP 启动后加载资产失败即死（exit rc!=0、无诊断）。
+                            # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
+                            # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
+                            _mirror_without_symlink(src, dst, entry, str(_sl_e))
+                except Exception as _e_e:
+                    log.warning(f"hermes ACP overlay: build entry '{entry}' failed: {_e_e}")
+
+        # issue #439：共享 home 中不存在的可写目录也补建为真实目录
+        # （cron/memories/sessions 等是引擎运行时必然要写的状态目录）
+        ensure_overlay_writable_dirs(iso_home)
+
+        # gateway-ctl-cleanup（2026-10-24 修复）：清掉历史遗留的网关控制文件链接——
+        # 修复部署前建成的隔离 home 里已经镜像了 gateway.lock 等符号链接，不清理的话
+        # 这些老 home 上的任务在 hermes 升级（带 lstat 加固）后仍会失败。
+        for _gw_entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
+                          "gateway.pid", "gateway_state.json", "gateway-starts.log"):
+            _gw_dst = os.path.join(iso_home, _gw_entry)
+            try:
+                if os.path.islink(_gw_dst):
+                    os.unlink(_gw_dst)
+            except Exception:
+                pass
 
         # 覆写 config.yaml：从源复制 + 改 tool_progress=new
         src_cfg = os.path.join(src_home, "config.yaml")

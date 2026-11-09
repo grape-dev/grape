@@ -825,18 +825,69 @@ def add_message(conversation_id: str, role: str, content: str, task_id: str = ""
         return c.lastrowid
 
 
+_MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
+
+
+def _row_to_msg(r) -> dict:
+    return {"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3],
+            "created_at": normalize_event_time(r[4]), "task_id": r[5] or "",
+            "generate_status": r[6], "deleted": int(r[7] or 0)}
+
+
+def get_message(msg_id: int) -> dict | None:
+    """按主键取单条消息（Issue #442 撤回用）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE id=?", (msg_id,))
+        row = c.fetchone()
+        return _row_to_msg(row) if row else None
+
+
+def recall_message(msg_id: int) -> bool:
+    """软删除一条消息（Issue #442：撤回 = deleted=1，保留原文供重新编辑）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0", (msg_id,))
+        db.commit()
+        return c.rowcount > 0
+
+
+def recall_agent_replies_by_task(task_id: str) -> int:
+    """软删除同一轮（task_id 相同）的 agent 回复消息（Issue #442）。"""
+    if not task_id:
+        return 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE chat_messages SET deleted=1 WHERE task_id=? AND role IN ('agent','assistant') AND deleted=0",
+                  (task_id,))
+        db.commit()
+        return c.rowcount
+
+
+def is_task_recalled(task_id: str) -> bool:
+    """该轮次用户消息是否已撤回（agent_fn 落库前校验，Issue #442）。"""
+    if not task_id:
+        return False
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT deleted FROM chat_messages WHERE task_id=? AND role='user' ORDER BY id DESC LIMIT 1",
+                  (task_id,))
+        row = c.fetchone()
+        return bool(row and row[0])
+
+
 def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> list[dict]:
     with db_lock:
         c = db.cursor()
         if before_id > 0:
-            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
+            c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
                       (conversation_id, before_id, limit))
         else:
-            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+            c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
                       (conversation_id, limit))
         rows = c.fetchall()
         rows.reverse()
-        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4]), "task_id": r[5] or "", "generate_status": r[6]} for r in rows]
+        return [_row_to_msg(r) for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):
@@ -962,7 +1013,7 @@ def get_chat_config(user_id: int) -> dict:
         picked_id, row, backend_name = _pick_chat_config_row(c, user_id)
         if row is None:
             # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
-            cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
+            cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "", user_id=user_id)
             if cfg.get("runtime_id"):
                 try:
                     _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
@@ -974,15 +1025,18 @@ def get_chat_config(user_id: int) -> dict:
             log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
                      f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
-                                               row[3] or "", row[4] or "", row[5] or "", "")
+                                               row[3] or "", row[4] or "", row[5] or "", "", user_id=user_id)
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
-                                    im_app_id, im_app_secret, im_provider, updated_at) -> dict:
+                                    im_app_id, im_app_secret, im_provider, updated_at, user_id: int = 0) -> dict:
     """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
 
     有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
     无 → backend=''、runtime_id=0（前端"无 engine，不可用"）。
+
+    user_id>0 时按 per-user-random-default-engine 选：限定当前主控机直连引擎，
+    按 user_id 稳定取模散开，避免全员滑向同一个默认引擎。
 
     注意：如果 runtime_id 已显式配置（>0），即使 backend 未知也不覆盖，
     由上游 get_chat_config 自行决定是否用 runtime_id 直接执行。
@@ -990,7 +1044,7 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     if not backend and not runtime_id:
         try:
             from src.runtime.engine_select import resolve_local_engine, engine_name
-            _rid = resolve_local_engine() or 0
+            _rid = resolve_local_engine(user_id) or 0
             if _rid:
                 backend = engine_name(_rid) or ""
                 runtime_id = _rid

@@ -21,7 +21,13 @@
     "download_template": "📄 Download Skill Template ZIP",
     "back_to_library": "Back to Skills Library",
     "back_to_huawei": "Back to Huawei Cloud Skills",
-    "download_skill_title": "Download skill package zip"
+    "download_skill_title": "Download skill package zip",
+    "update_skill": "Upload Update",
+    "confirm_update": "Confirm Overwrite Update"
+  },
+  "update": {
+    "title": "Upload Skill Update",
+    "tip": "Upload a new ZIP to overwrite the current skill content; skill ID, scene references and likes are preserved. The folder name inside the ZIP must match the skill name"
   },
   "toast": {
     "sync_found": "New official skills found, synced",
@@ -43,7 +49,9 @@
     "already_experienced": "You have already experienced this scene",
     "experience_failed": "Experience failed",
     "like_failed": "Like failed",
-    "like_success": "Done"
+    "like_success": "Done",
+    "update_success": "Updated successfully",
+    "update_failed": "Update failed"
   },
   "empty": {
     "no_repo_selected": "No repo selected. Please select a current repo on the Repos page.",
@@ -179,6 +187,9 @@
   "toast.upload_failed": "Upload failed: {msg}",
   "toast.upload_success": "Uploaded successfully",
   "apply_confirm_title": "Confirm Overwrite",
+  "apply_scene_name_label": "Scene Name",
+  "apply_scene_name_empty": "Scene name cannot be empty",
+  "apply_scene_name_conflict_inline": "A scene with this name already exists in this repo. Try another name.",
   "apply_confirm_desc": "This scene has already been applied to this repository",
   "apply_confirm_warning": "Applying again will overwrite the existing scene configuration.",
   "apply_confirm_btn": "Confirm Overwrite",
@@ -232,5 +243,14 @@
   "converting": "Converting...",
   "scene_detail": "Details",
   "scene_params": "Scene Parameters",
-  "scene_params_hint": "Required when applying; Agent reads via env vars"
+  "scene_params_hint": "Required when applying; Agent reads via env vars",
+  "hw_creds_hint": "☁ Huawei Cloud scenes require AK/SK credentials, fill them below. Stored credentials are never echoed on the page; manage them in personal settings.",
+  "hw_creds_go_settings": "Go to settings",
+  "hw_creds_configured": "✓ AK/SK configured (plaintext not echoed; fill here to use)",
+  "action.update_skill": "Upload Update",
+  "action.confirm_update": "Overwrite & Update",
+  "update.title": "Update Skill",
+  "update.tip": "Upload a new ZIP to overwrite this skill. Skill ID, scene refs and likes are kept; the top folder in the ZIP must match the skill name",
+  "toast.update_success": "Skill updated",
+  "toast.update_failed": "Update failed: {{msg}}"
 }

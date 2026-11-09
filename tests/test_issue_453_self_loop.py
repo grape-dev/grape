@@ -63,6 +63,7 @@ def _mock_db(monkeypatch):
     import src.api.db_setup as _dbs
     _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _lock = threading.RLock()
+    _real_db, _real_lock = _sm.db, _sm.db_lock
     for _name in _PATCH_DB_MODULES:
         _mod = sys.modules.get(_name)
         if _mod is None:
@@ -71,6 +72,18 @@ def _mock_db(monkeypatch):
         monkeypatch.setattr(_mod, "db_lock", _lock, raising=False)
     _dbs.init_database()
     yield
+    # 隔离修复：本 patch 生效期间若有模块是**首次** import，它的
+    # `from src.session_manager import db` 会把临时内存库句柄永久捕获到模块全局；
+    # monkeypatch 只还原被 patch 的属性，那个模块仍指向临时连接（且随后被 close）
+    # → 泄漏到后续测试文件。此处兜住：扫描已加载模块，把仍指向临时句柄的重绑回真句柄。
+    for _m in list(sys.modules.values()):
+        try:
+            if getattr(_m, "db", None) is _conn:
+                _m.db = _real_db
+            if getattr(_m, "db_lock", None) is _lock:
+                _m.db_lock = _real_lock
+        except Exception:
+            pass
     _conn.close()
 
 from src.api import event_pipeline as ep

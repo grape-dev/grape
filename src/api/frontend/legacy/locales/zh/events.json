@@ -11,6 +11,7 @@
   "status_failed": "❌ 失败",
   "status_running_prefix": "⏳ ",
   "status_pending": "⏳ 排队中",
+  "status_cancelled": "⊘ 已取消",
   "fail_reason": "失败原因",
   "btn_redispatch": "🔄 重新派发",
   "btn_a2a_redo": "🤝 A2A 重新派发",
@@ -101,6 +102,8 @@
   "scope_agent_solo": "Agent 独享",
   "nav_forbidden": "无权限访问事件 #{{seq}}，可能属于其他仓库",
   "engine_undispatched": "未派发/无执行引擎",
+  "model": "模型",
+  "model_unknown": "模型未知",
   "terminate_confirm_ok": "确认终止",
   "terminate_confirm_msg": "终止当前运行中的 Agent 任务？<br>此操作不可撤销。进行中的工作将丢失，任务需重新派发。",
   "btn_feedback": "反馈",
@@ -111,5 +114,10 @@
   "a2a_redo_skipped": "A2A 补发未执行：{reason}",
   "a2a_redo_success": "A2A 补发成功，新事件 #{seq}",
   "a2a_redo_failed": "A2A 补发失败：{msg}",
-  "a2a_redo_unknown": "未知原因"
+  "a2a_redo_unknown": "未知原因",
+  "fail_expand": "展开全文",
+  "fail_collapse": "收起",
+  "diag_target": "目标阶段",
+  "diag_phase": "失败环节",
+  "diag_ref_seq": "引用 Seq"
 }

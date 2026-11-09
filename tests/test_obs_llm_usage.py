@@ -11,6 +11,7 @@
    搞反会让用量翻好几倍或少算。
 """
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -497,6 +498,115 @@ def test_collector_never_raises_on_broken_ledger(tmp_path, monkeypatch):
     monkeypatch.setattr(uc, "_hermes_iso_home", lambda cwd: str(tmp_path / "nonexistent"))
     col = uc.UsageCollector("hermes", cwd="/x")
     col.start()
+    assert col.finish() == []
+
+
+# ------------------------------------------- issue #727：hermes 0.9.0 兼容
+
+def test_hermes_usage_event_direct_report_wins(tmp_path, monkeypatch):
+    """issue #727 治本：ACP PromptResponse result.usage 经事件流直报——
+    事件流喂到过 usage 就以直报为准，不再读 state.db（两路互斥，不双计入）。"""
+    db_path = str(tmp_path / "state.db")
+    _tmp_sqlite([
+        "CREATE TABLE session_model_usage (session_id TEXT, model TEXT, task TEXT,"
+        " input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,"
+        " cache_write_tokens INTEGER, reasoning_tokens INTEGER)",
+        ("INSERT INTO session_model_usage VALUES ('s1','glm-5.3','', 500, 50, 0, 0, 0)"),
+    ], db_path)
+    monkeypatch.setattr(uc, "_hermes_iso_home", lambda cwd: str(tmp_path))
+
+    col = uc.UsageCollector("hermes", cwd="/whatever")
+    col.feed("text", "hi")
+    col.feed("usage", {"model": "glm-5.3", "provider": "", "input": 120,
+                       "output": 30, "cache_read": 0, "cache_write": 0, "reasoning": 5})
+    got = col.finish()
+    assert len(got) == 1, "直报优先，state.db 的 500/50 不得混入"
+    assert got[0]["input"] == 120 and got[0]["output"] == 30 and got[0]["reasoning"] == 5
+    assert got[0]["turn"] == 1
+
+
+def test_hermes_missing_usage_table_falls_back_to_sessions(tmp_path, monkeypatch, caplog):
+    """issue #727 兜底：hermes 0.9.0 没有 session_model_usage 表 → 回退 sessions 表
+    取差值 + 告警降级（一次），不中断采集。"""
+    db_path = str(tmp_path / "state.db")
+    _tmp_sqlite([
+        # hermes 0.9.0 形态：只有 sessions 表（每 session 一行累计 token）
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT,"
+        " input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,"
+        " cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,"
+        " reasoning_tokens INTEGER DEFAULT 0)",
+        ("INSERT INTO sessions VALUES ('s1','glm-5.3', 1000, 200, 5000, 0, 30)"),
+    ], db_path)
+    monkeypatch.setattr(uc, "_hermes_iso_home", lambda cwd: str(tmp_path))
+    monkeypatch.setattr(uc, "_hermes_missing_table_notified", False)
+
+    col = uc.UsageCollector("hermes", cwd="/whatever")
+    # 基线 = 历史累计（s1 已有 900/150），本次新增 100/50
+    col._baseline = {"hermes": {"s1|glm-5.3|": {"input": 900, "output": 150,
+                                                 "cache_read": 5000, "cache_write": 0,
+                                                 "reasoning": 30}}}
+    with caplog.at_level(logging.WARNING, logger="src.runtime.usage_collect"):
+        got = col.finish()
+    assert len(got) == 1
+    assert got[0]["input"] == 100 and got[0]["output"] == 50
+    assert got[0]["model"] == "glm-5.3"
+    assert any("session_model_usage" in r.message for r in caplog.records), "缺表必须降级告警"
+    # 告警只发一次
+    caplog.clear()
+    col2 = uc.UsageCollector("hermes", cwd="/whatever")
+    col2._baseline = {"hermes": {}}
+    with caplog.at_level(logging.WARNING, logger="src.runtime.usage_collect"):
+        col2.finish()
+    assert not any("session_model_usage" in r.message for r in caplog.records)
+
+
+def test_hermes_finish_is_idempotent_no_errno2(tmp_path, monkeypatch):
+    """issue #727：_report_llm_usage 对 hermes 会短重试二次 finish——
+    _cleanup 复位 _tmpdir 后二次调用重建临时目录，不再 Errno 2。"""
+    db_path = str(tmp_path / "state.db")
+    _tmp_sqlite([
+        "CREATE TABLE session_model_usage (session_id TEXT, model TEXT, task TEXT,"
+        " input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,"
+        " cache_write_tokens INTEGER, reasoning_tokens INTEGER)",
+        ("INSERT INTO session_model_usage VALUES ('s1','glm-5.3','', 100, 20, 0, 0, 0)"),
+    ], db_path)
+    monkeypatch.setattr(uc, "_hermes_iso_home", lambda cwd: str(tmp_path))
+
+    col = uc.UsageCollector("hermes", cwd="/whatever")
+    col._baseline = {"hermes": {"s1|glm-5.3|": {"input": 100, "output": 20,
+                                                 "cache_read": 0, "cache_write": 0,
+                                                 "reasoning": 0}}}
+    assert col.finish() == []
+    # 二次 finish（worker 侧 1.5s 重试路径）：不得抛 FileNotFoundError/Errno 2
+    assert col.finish() == []
+
+
+def test_hermes_prompt_usage_extraction():
+    """issue #727：hermes_acp._extract_prompt_usage 解析 PromptResponse result.usage，
+    兼容多种 token 字段命名。"""
+    from src.agent.hermes_acp import _extract_prompt_usage
+    # snake_case 形态（usage 内含 model）
+    rec = _extract_prompt_usage({"stopReason": "end_turn",
+                                 "usage": {"model": "glm-5.3", "input_tokens": 100,
+                                           "output_tokens": 20, "cache_read_tokens": 7,
+                                           "cache_write_tokens": 1, "reasoning_tokens": 3}})
+    assert rec == {"model": "glm-5.3", "provider": "", "input": 100, "output": 20,
+                   "cache_read": 7, "cache_write": 1, "reasoning": 3}
+    # 别名形态（prompt/completion tokens）+ model 在 result 顶层
+    rec2 = _extract_prompt_usage({"model": "deepseek-v4",
+                                  "usage": {"prompt_tokens": 50, "completion_tokens": 5}})
+    assert rec2["input"] == 50 and rec2["output"] == 5 and rec2["model"] == "deepseek-v4"
+    # 缺 usage / 全 0 → None（不产生噪声记录）
+    assert _extract_prompt_usage({"stopReason": "end_turn"}) is None
+    assert _extract_prompt_usage({"usage": {"input_tokens": 0, "output_tokens": 0}}) is None
+    assert _extract_prompt_usage(None) is None
+    assert _extract_prompt_usage({"usage": "garbage"}) is None
+
+
+def test_hermes_fed_usage_zero_record_not_fed():
+    """全 0 的直报记录不入账（与台账 0 值纪律一致）。"""
+    col = uc.UsageCollector("hermes", cwd="/x")
+    col.feed("usage", {"model": "m", "input": 0, "output": 0})
     assert col.finish() == []
 
 

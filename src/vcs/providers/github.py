@@ -34,7 +34,11 @@ def _gh_close_body(nums, neutral, native, ctx):
 
 
 _QUERY_STATE = {"open": "open", "closed": "closed", "all": "all"}
-_UPDATE_STATE = {"open": "open", "closed": "closed", "close": "closed"}
+# Issue #707: 与 gitcode 通道对齐中性别名集合（reopen=设为 open；opened/close 为词形别名）
+_UPDATE_STATE = {
+    "open": "open", "opened": "open", "reopen": "open",
+    "closed": "closed", "close": "closed",
+}
 
 _RULES = {
     ("issues", "query"): {"state": {"native": "state", "values": _QUERY_STATE}},

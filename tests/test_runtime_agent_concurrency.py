@@ -8,6 +8,8 @@
 import asyncio
 import pytest
 
+from unittest.mock import patch
+
 from src.session_manager import db, db_lock
 from src.runtime import service
 from src.runtime import agent as agent_mod
@@ -78,7 +80,7 @@ class FakeClient:
     async def claim_by_tag(self, rid, tag, **kwargs):
         return None
 
-    async def heartbeat(self, runtime_ids):
+    async def heartbeat(self, runtime_ids, log_lines=None, metrics=None, probe_results=None):
         pass
 
     async def reset_session(self):
@@ -219,7 +221,7 @@ class FakeRegClient:
     async def reset_session(self):
         self.resets += 1
 
-    async def register(self, runtimes, device_name="", local_skills=None):
+    async def register(self, runtimes, device_name="", cli_version="", local_skills=None):
         return self.ids, "probe-url"
 
     async def recover_orphans(self, runtime_id):
@@ -235,14 +237,15 @@ def test_reregister_unpacks_register_tuple():
     （worker 全离线事故，2026-08-17 实测）。
     """
     client = FakeRegClient([54, 55])
-    result = asyncio.run(agent_mod._reregister(client, installed=[], device_name="test"))
-    assert result == [54, 55], "应返回真正的 ids 列表，而非 (ids, probe_url) 元组"
+    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test"))
+    assert result[0] == [54, 55], "应返回真正的 ids 列表，而非 (ids, probe_url) 元组"
     assert client.recovered == [54, 55], "recover_orphans 应逐个收到单值 id，不能收到 [54, 55] 列表"
 
 
 def test_reregister_handles_empty_ids():
-    """register 返回 ([], '') 时 _reregister 应返回 None（无 id 可恢复）。"""
+    """register 返回 ([], '') 且快照无引擎 → C1 正常状态 ([], {}, [])（无 id 可恢复）。"""
     client = FakeRegClient([])
-    result = asyncio.run(agent_mod._reregister(client, installed=[], device_name="test"))
-    assert result is None
+    with patch.object(agent_mod, "_discover_local_runtimes", return_value=[]):
+        result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test"))
+    assert result == ([], {}, [])
     assert client.recovered == []

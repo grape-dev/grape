@@ -1,6 +1,6 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
 import io as _io
-import os, tempfile, zipfile, json, shutil, stat as _stat
+import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -14,8 +14,14 @@ router = APIRouter(prefix="/api/skills", tags=["skills"])
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
 
 
-def _resolve_repo_key(repo: str) -> str:
-    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+def _resolve_repo_key(repo: str, strict: bool = False) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。
+
+    strict=True（#444 根治，仅写路径 upload/convert 使用）：裸 repo 同时命中
+    gitcode: 与 github: 两行时显式报错（歧义从"静默 LIMIT 1 不确定归属"变为
+    "可处置的明确指引"），防止覆盖上传写错 provider 行。读路径（list/search/
+    download）保持原 LIMIT 1 行为不变——读错列表无数据损害，收窄修复范围。
+    """
     from src.repo_key import to_repo_key
     rk = to_repo_key(repo)
     if ":" in repo:
@@ -24,13 +30,55 @@ def _resolve_repo_key(repo: str) -> str:
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
-            if row:
-                return row[0]
+            rows = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
+                             (f"gitcode:{repo}", f"github:{repo}")).fetchall()
+            if len(rows) == 2 and strict:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"仓库 {repo} 同时存在于 gitcode 与 github，请指定完整仓库标识（如 gitcode:{repo}）后重试"})
+            if rows:
+                return rows[0][0]
+    except HTTPException:
+        raise
     except Exception:
         pass
     return rk
+
+
+def _safe_zip_name(filename: str | None) -> str:
+    """净化 multipart filename 为安全 .zip 文件名（CWE-22 路径穿越防护，Issue #856）。
+
+    - None/空白 → 默认 "skill.zip"（保持原有缺省行为）
+    - 含 / 或 \\ 路径分隔符（绝对路径、目录穿越片段）→ 非法（返回空串，调用方返回 400）
+    - 必须以 .zip 结尾，否则非法
+    """
+    if not filename or not filename.strip():
+        return "skill.zip"
+    name = filename.strip()
+    if "/" in name or "\\" in name or name in (".", ".."):
+        return ""
+    if not name.lower().endswith(".zip"):
+        return ""
+    return name
+
+
+def _restore_zip_permissions(zf: zipfile.ZipFile, extract_dir: str) -> None:
+    """恢复解压成员的 Unix 权限位（Python 3.12+ extractall 不再恢复）。
+
+    chmod 前对每个成员做 realpath 前缀校验（Issue #856 纵深防御）：
+    不在 extract_dir 下的成员跳过并记日志，杜绝 info.filename 伪造穿越。
+    """
+    from src.config import log
+    real_root = os.path.realpath(extract_dir)
+    for info in zf.infolist():
+        mode = info.external_attr >> 16
+        if mode and not info.is_dir():
+            p = os.path.join(extract_dir, info.filename)
+            if os.path.realpath(p).startswith(real_root + os.sep):
+                if os.path.isfile(p):
+                    os.chmod(p, mode & 0o777)
+            else:
+                log.warning("skill zip member escapes extract dir, skip chmod: %r", info.filename)
 
 
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
@@ -516,13 +564,27 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且技能对象缺失，下载失败。请检查服务端存储配置后重试。"})
 
 
-@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
+@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller. Since #630 the {skill_id} path param also accepts a skill name (user scope first, then repo, then official).")
+def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
     权限校验：official 可见；user 需本人；repo 需当前用户托管该仓库。
+    Issue #630：路径参数支持技能名（非数字时按 resolve_skill_id 解析 user→repo→official，
+    user scope 优先本人，与派发侧口径一致），使 `grape skills detail --skill_id <名称>` 可用。
     """
+    # Issue #630：name→sid 解析（复用 resolve_skill_id 的 user scope 逻辑）
+    _raw = str(skill_id or "").strip()
+    if not _raw.isdigit():
+        from src.user.db import resolve_skill_id
+        _repo_key = _resolve_repo_key(repo) if repo else ""
+        _sid = resolve_skill_id(_raw, repo_key=_repo_key, user_id=str(user.get("id", "")))
+        if not _sid:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+        skill_id = _sid
+    else:
+        skill_id = int(_raw)
+
     from src.session_manager import db, db_lock
     from src.config import SKILLS_DIR
 
@@ -614,7 +676,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
             skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
     content = ""
     if os.path.exists(skill_path):
-        with open(skill_path, encoding="utf-8") as f:
+        with open(skill_path, encoding="utf-8-sig") as f:
             content = f.read()
     return {
         "id": current_id,
@@ -669,7 +731,11 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        zip_path = os.path.join(tmp_dir, file.filename or "skill.zip")
+        # Issue #856：basename 净化 + .zip 后缀校验，防 multipart filename 路径穿越
+        safe_name = _safe_zip_name(file.filename)
+        if not safe_name:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "文件名非法：仅接受 .zip 文件名，不允许路径分隔符或目录穿越片段"})
+        zip_path = os.path.join(tmp_dir, safe_name)
         with open(zip_path, "wb") as f:
             f.write(content)
 
@@ -683,12 +749,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                 zf.extractall(extract_dir)
                 # Python 3.12+ extractall 不再恢复 Unix 权限位 → 手动恢复
                 # （否则后续规范化重打包读 st_mode 拿不到上传时的权限，见 obs-skill-storage-design.md §7）
-                for info in zf.infolist():
-                    mode = info.external_attr >> 16
-                    if mode and not info.is_dir():
-                        p = os.path.join(extract_dir, info.filename)
-                        if os.path.isfile(p):
-                            os.chmod(p, mode & 0o777)
+                _restore_zip_permissions(zf, extract_dir)
         except HTTPException:
             raise
         except zipfile.BadZipFile:
@@ -726,7 +787,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
             from src.repo_key import to_repo_key
-            owner = _resolve_repo_key(repo) if scope == "repo" else str(user["id"])
+            owner = _resolve_repo_key(repo, strict=True) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
             try:
                 # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
@@ -734,14 +795,23 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                 object_key = skill_key("custom" if db_scope == "user" else db_scope,
                                        owner, skill_name)
                 zip_bytes = _normalize_skill_zip(skill_dir, skill_name)
+                # Issue #444 收尾（P-B）：save 前留存旧对象字节——upsert 失败（并发
+                # 同名 409）时恢复，防止"存储已是新字节、DB hash 停留旧值"的指纹
+                # 失真窗口（写序 save_bytes → upsert，最后写者胜；409 输者恢复旧字节
+                # 使存储与 DB 记录回到一致）。对齐 convert 409 分支的回滚语义。
+                _prev_bytes = storage.read_bytes(object_key)
                 storage.save_bytes(object_key, zip_bytes)
-                ok = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
-                                      description, object_key, str(user["id"]),
-                                      category_id)
-                if not ok:
+                # Issue #444 (P47)：写入 content_hash，使另一进程读时校验可感知覆盖更新
+                content_hash = hashlib.sha256(zip_bytes).hexdigest()
+                skill_id = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
+                                            description, object_key, str(user["id"]),
+                                            category_id, content_hash)
+                if not skill_id:
+                    if _prev_bytes is not None:
+                        storage.save_bytes(object_key, _prev_bytes)   # 恢复旧对象（DB 行未动）
                     raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
-                zip_cache_put(object_key, zip_bytes)  # put 覆盖同名 key 即天然失效旧缓存
-                mem_cache_invalidate(skill_name)      # 覆盖后显式失效内存提取缓存
+                zip_cache_put(object_key, zip_bytes, content_hash, skill_id or 0)  # put 覆盖同名 key + hash + id 锚点供读时校验
+                mem_cache_invalidate(object_key)      # 覆盖后显式失效内存提取缓存（object_key 口径，P49）
                 log.info(f"skill uploaded (storage={storage.backend_name()}, key={object_key})")
             except HTTPException:
                 raise
@@ -829,6 +899,155 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
     return {"message": f"技能 {skill_name} 已删除"}
 
 
+VALID_SKILL_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
+
+
+@router.post("/by-id/{skill_id}/update", operation_id="skills_update",
+             summary="Update skill by uploading a new ZIP (Issue #561)",
+             description="Overwrites an existing skill's content by uploading a new ZIP. Keeps skill id/scope/owner/scene refs/likes, refreshes content_hash and invalidates both cache levels. official skills cannot be updated; user scope requires ownership; repo scope requires the caller to manage the repo.")
+async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
+                             user: dict = Depends(require_no_session_token),
+                             agent_type: str = Form(""), category_id: str = Form("")):
+    """按 skill_id 上传 ZIP 覆盖更新既有技能（Issue #561：卡片直接更新，免删了重传）。
+
+    权限对齐 delete：official 不允许更新；user 需本人；repo 需当前用户托管该仓库。
+    写序对齐 #444：save 前留存旧对象字节，upsert 失败回滚；成功后两级缓存失效。
+    ZIP 内技能目录名必须与既有 skill_name 一致（upsert 按 (name, scope, owner) 命中
+    原行，保留 id/场景引用/点赞）；不一致返回 400 明确指引。
+    agent_type / category_id 可选，缺省沿用原记录值。
+    """
+    from src.session_manager import db, db_lock
+
+    # 1. 查既有记录（按主键 id 精确）
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill WHERE id=? AND is_active=1",
+            (skill_id,)
+        )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    skill_name, skill_scope, owner_id, cur_agent_type, cur_category_id = row[0], row[1] or "user", row[2] or "", row[3] or "", row[4] or 0
+
+    # 2. 权限校验（对齐 delete）
+    if skill_scope == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能不允许更新"})
+    if skill_scope == "user" and owner_id != str(user["id"]):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权更新该技能"})
+    if skill_scope == "repo":
+        from src.user.db import get_user_repos
+        user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
+        if owner_id not in user_repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权更新该技能"})
+
+    # 3. 可选字段：缺省沿用原值；提供则校验
+    new_agent_type = (agent_type or "").strip() or cur_agent_type
+    if new_agent_type not in VALID_SKILL_AGENT_TYPES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_SKILL_AGENT_TYPES))}"})
+    cat_str = (category_id or "").strip()
+    if cat_str:
+        try:
+            new_category_id = int(cat_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分类 ID 必须为整数"})
+        if new_category_id > 0:
+            from src.user.db import get_skill_category
+            if not get_skill_category(new_category_id):
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {new_category_id} 不存在"})
+    else:
+        new_category_id = int(cur_category_id or 0)
+
+    # 4. ZIP 校验（复用 upload 链：大小/炸弹/结构/SKILL.md）
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 文件不能超过 10MB"})
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        # Issue #856：basename 净化 + .zip 后缀校验，防 multipart filename 路径穿越
+        safe_name = _safe_zip_name(file.filename)
+        if not safe_name:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "文件名非法：仅接受 .zip 文件名，不允许路径分隔符或目录穿越片段"})
+        zip_path = os.path.join(tmp_dir, safe_name)
+        with open(zip_path, "wb") as f:
+            f.write(content)
+
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                total = sum((i.file_size or 0) for i in zf.infolist())
+                if total > MAX_EXTRACT_BYTES:
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"ZIP 解压后总大小超过 {MAX_EXTRACT_BYTES // (1024 * 1024)}MB 上限"})
+                zf.extractall(extract_dir)
+                _restore_zip_permissions(zf, extract_dir)
+        except HTTPException:
+            raise
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "不是有效的 ZIP 文件，请上传 .zip 格式"})
+
+        entries = os.listdir(extract_dir)
+        if not entries:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 文件为空"})
+        real_entries = [e for e in entries if e not in ("__MACOSX", ".DS_Store", ".git") and not e.startswith(".")]
+        if not real_entries:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 中未找到技能目录"})
+
+        skill_dir = os.path.join(extract_dir, real_entries[0])
+        if not os.path.isdir(skill_dir):
+            skill_dir = extract_dir
+        zip_skill_name = os.path.basename(skill_dir) if os.path.isdir(skill_dir) else real_entries[0]
+
+        # 名称一致性（核心：upsert 按 (name, scope, owner) 命中原行；名称漂移会新建行而非更新）
+        if zip_skill_name != skill_name:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"ZIP 内技能目录名「{zip_skill_name}」与既有技能「{skill_name}」不一致，请保持同名目录后重新上传（如需新增技能请使用上传）"})
+
+        errors = validate_custom_skill(skill_dir, skill_name)
+        if errors:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 校验失败", "errors": errors})
+
+        fm = parse_skill_frontmatter(skill_dir)
+        description = fm.get("description", "") or ""
+
+        # 5. 存储写序（对齐 #444：留存旧字节 → 覆盖 → upsert → 失败回滚 → 缓存失效）
+        from src.config import log
+        from src.storage import get_skill_storage
+        storage = get_skill_storage()
+        if storage is None:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且本地存储被禁用，技能更新失败。请检查服务端存储配置后重试。"})
+        from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
+        from src.user.db import upsert_skill_obs, get_skill_object_key
+        object_key = get_skill_object_key(skill_id) or skill_key(
+            "custom" if skill_scope == "user" else skill_scope, owner_id, skill_name)
+        try:
+            zip_bytes = _normalize_skill_zip(skill_dir, skill_name)
+            _prev_bytes = storage.read_bytes(object_key)
+            storage.save_bytes(object_key, zip_bytes)
+            content_hash = hashlib.sha256(zip_bytes).hexdigest()
+            new_id = upsert_skill_obs(skill_scope, owner_id, skill_name, new_agent_type,
+                                      description, object_key, str(user["id"]),
+                                      new_category_id, content_hash)
+            if not new_id or int(new_id) != int(skill_id):
+                if _prev_bytes is not None:
+                    storage.save_bytes(object_key, _prev_bytes)  # 回滚旧对象（DB 行未动）
+                raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录更新失败（并发冲突或同名记录漂移），已回滚，请重试"})
+            zip_cache_put(object_key, zip_bytes, content_hash, int(new_id))
+            mem_cache_invalidate(object_key)
+            log.info(f"skill updated (storage={storage.backend_name()}, key={object_key}, skill_id={skill_id})")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能更新存储失败: {e}"})
+        return {"message": f"技能 {skill_name} 更新成功", "skill_id": int(skill_id), "skill_name": skill_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"更新失败: {e}"})
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 class ConvertSkillRequest(BaseModel):
     skill_name: str
     repo: str  # 目标仓库 repo_key（如 Jason7602/skill-evaluator）
@@ -853,7 +1072,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的 source_scope: {source_scope}"})
 
     from src.repo_key import from_repo_key
-    repo_key = _resolve_repo_key(repo)
+    repo_key = _resolve_repo_key(repo, strict=True)  # 写路径（convert）：歧义显式报错（#444 根治）
     user_id = str(user["id"])
 
     from src.session_manager import db, db_lock
@@ -904,7 +1123,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     from src.storage import get_skill_storage
     storage = get_skill_storage()
     if storage is not None:
-        from src.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate
+        from src.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate, zip_cache_get_with_hash, get_skill_zip_bytes
         from src.user.db import get_skill_object_key, upsert_skill_obs
         src_key = get_skill_object_key(skill_rec["id"])
         if not src_key:
@@ -913,22 +1132,46 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         dst_key = skill_key(dst_skill_key_scope, dst_owner, skill_name)
         if not storage.copy_object(src_key, dst_key):
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"OBS 复制技能失败: {src_key} -> {dst_key}"})
-        ok = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
-                              skill_rec.get("description", ""), dst_key, user_id,
-                              skill_rec.get("category_id", 0))
-        if not ok:
+        # Issue #444 (P47)：convert 同款写 content_hash——copy 的 zip 字节与源一致，
+        # hash 复用源缓存条目的 hash；源无 hash（存量）则对 src_zip 现算
+        _src_zip = zip_cache_get_with_hash(src_key)
+        src_zip, _src_hash = (_src_zip[:2] if _src_zip else (None, ""))
+        if src_zip is None:
+            src_zip = get_skill_zip_bytes(src_key) or b""
+        content_hash = _src_hash or (hashlib.sha256(src_zip).hexdigest() if src_zip else "")
+        skill_id = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
+                                    skill_rec.get("description", ""), dst_key, user_id,
+                                    skill_rec.get("category_id", 0), content_hash)
+        if not skill_id:
             storage.delete_object(dst_key)
             raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
-        # 源 zip 若在磁盘缓存，复制到目标 key（懒加载兜底亦可）
-        src_zip = zip_cache_get(src_key)
+        # 源 zip 若在磁盘缓存，复制到目标 key（懒加载兜底亦可）；写侧拿到新行 id，
+        # 直接锚定（目标行是新 upsert 的行，id 即 dst 锚点）
         if src_zip:
-            zip_cache_put(dst_key, src_zip)
-        mem_cache_invalidate(skill_name)
+            zip_cache_put(dst_key, src_zip, content_hash, skill_id or 0)
+        mem_cache_invalidate(dst_key)  # Issue #444 (P49)：object_key 口径（原 skill_name 会失效错键）
         dst_label = f"仓库 {repo}" if dst_scope == "repo" else "个人技能"
         return {"message": f"技能 {skill_name} 已复制到{dst_label}", "skill_name": skill_name, "scope": dst_scope, "repo": repo if dst_scope == "repo" else ""}
 
     # local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能转换失败。请检查服务端 OBS 配置后重试。"})
+
+
+def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
+    """子技能端点 OBS 分支共用（Issue #448）：取技能 zip 字节。
+
+    本地 references/ 目录未命中时调用。对象键缺失（历史数据未迁移）返回 None
+    （沿用既有 404/空列表口径）；有对象键但存储未启用 → 503（对齐 detail 端点）。
+    """
+    from src.user.db import get_skill_object_key
+    from src.storage import get_skill_storage, get_skill_zip_bytes
+    object_key = get_skill_object_key(skill_id)
+    if not object_key:
+        return None
+    if get_skill_storage() is None:
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "message": "OBS 存储未启用，子技能读取不可用。请检查服务端 OBS 配置后重试。"})
+    return get_skill_zip_bytes(object_key)
 
 
 @router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package", description="Lists a skill package's sub-skills from the references/ directory.")
@@ -959,6 +1202,11 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
     ref_dir = os.path.join(base_dir, "references")
 
     if not os.path.isdir(ref_dir):
+        # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取 references/ =====
+        from src.storage import list_zip_sub_skills
+        zip_bytes = _get_sub_skill_zip(skill_id, skill_name)
+        if zip_bytes is not None:
+            return {"skill_name": skill_name, "sub_skills": list_zip_sub_skills(zip_bytes, skill_name)}
         return {"skill_name": skill_name, "sub_skills": []}
 
     subs = []
@@ -967,12 +1215,15 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
         if not os.path.isdir(sub_dir):
             continue
         sub_md = os.path.join(sub_dir, "SKILL.md")
+        # Issue #509（维护方回退口径「列出 + 标注」）：列表恢复枚举 references/ 全部目录（不静默过滤），
+        # 新增 readable 标注（= 该目录下是否存在 SKILL.md）；无 SKILL.md 详情仍 404（read_sub_skill 不变）。
+        readable = os.path.isfile(sub_md)
         display_name = entry
         description = ""
         file_count = 0
-        if os.path.isfile(sub_md):
+        if readable:
             try:
-                with open(sub_md, encoding="utf-8") as f:
+                with open(sub_md, encoding="utf-8-sig") as f:
                     front = f.read(500)
                 m = _re.search(r'description:\s*["\']?(.*?)["\']?$', front, _re.MULTILINE)
                 if m:
@@ -989,6 +1240,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
             "display_name": display_name,
             "description": description,
             "file_count": file_count,
+            "readable": readable,
         })
 
     return {"skill_name": skill_name, "sub_skills": subs}
@@ -1020,10 +1272,16 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
 
     if not os.path.isfile(sub_md):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
+        # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
+        from src.storage import read_zip_sub_skill
+        zip_bytes = _get_sub_skill_zip(skill_id, row[0])
+        sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
+        if sub_data is None:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
+        return {"name": sub_name, "content": sub_data["content"], "references": sub_data["references"]}
 
     try:
-        with open(sub_md, encoding="utf-8") as f:
+        with open(sub_md, encoding="utf-8-sig") as f:
             content = f.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
@@ -1036,7 +1294,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
             rp = os.path.join(ref_dir, r)
             if os.path.isfile(rp):
                 try:
-                    with open(rp, encoding="utf-8") as f:
+                    with open(rp, encoding="utf-8-sig") as f:
                         refs.append({"name": r, "content": f.read()[:2000]})
                 except Exception:
                     refs.append({"name": r, "content": ""})
@@ -1069,14 +1327,22 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
         else:
             base_dir = os.path.join(SKILLS_DIR, _sp) if _sp else ""
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
-    if not os.path.isfile(sub_md):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
 
-    try:
-        with open(sub_md, encoding="utf-8") as f:
-            content = f.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+    content = None
+    if os.path.isfile(sub_md):
+        try:
+            with open(sub_md, encoding="utf-8-sig") as f:
+                content = f.read()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+    else:
+        # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
+        from src.storage import read_zip_sub_skill
+        zip_bytes = _get_sub_skill_zip(pkg_id, row[0])
+        sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
+        content = sub_data["content"] if sub_data else None
+    if content is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
 
     # 从 frontmatter 解析 name 和 description
     display_name = sub_name

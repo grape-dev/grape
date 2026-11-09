@@ -1,0 +1,24 @@
+# Grape Worker Server (C process — Task execution, port 38082)
+# Issue #596 P1: three-process split, design doc §9.1
+# Install: cp deploy/systemd/grape-worker-server.service /etc/systemd/system/ && systemctl daemon-reload
+[Unit]
+Description=Grape Worker Server (Task Execution)
+After=network.target grape-server.service
+
+[Service]
+User=grape
+WorkingDirectory=/opt/grape
+Environment=PYTHONUNBUFFERED=1
+Environment=GRAPE_PROCESS_ROLE=worker
+Environment=GRAPE_PORT=38082
+Environment=GRAPE_LOCAL_CLAIMER=1
+Environment=RUNTIME_MAX_CONCURRENT_TASKS=20
+Environment=OBS_LOG_DB=0
+EnvironmentFile=-/etc/grape/grape.env
+ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_worker_server:app \
+    --host 0.0.0.0 --port 38082 --proxy-headers --forwarded-allow-ips=* --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

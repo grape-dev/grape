@@ -151,12 +151,14 @@ test('T07: currentRepo 为 null 时不报错', () => {
   assert.ok(!c.goToReposCalled);
 });
 
-// ── T08: 清除后调 goToRepos（两个平台都测） ──
-test('T08: 清除 currentRepo 后调 goToRepos', () => {
+// ── T08: 清除 currentRepo 后不跳转（需求变更 2026-10-28：解绑留在 account 页）──
+test('T08: 清除 currentRepo 后不调 goToRepos（解绑不跳转）', () => {
   const c1 = runCleanup('github', {repoKey: 'github:octocat/my-repo', fullName: 'octocat/my-repo'});
-  assert.ok(c1.goToReposCalled, 'GitHub 清除后应调 goToRepos');
+  assert.ok(c1.removedCurrentRepo, 'GitHub 匹配时仍应清除');
+  assert.ok(!c1.goToReposCalled, '清除后不跳转（留在 account 页）');
   const c2 = runCleanup('gitcode', {repoKey: 'gitcode:dev/project', fullName: 'dev/project'});
-  assert.ok(c2.goToReposCalled, 'GitCode 清除后应调 goToRepos');
+  assert.ok(c2.removedCurrentRepo, 'GitCode 匹配时仍应清除');
+  assert.ok(!c2.goToReposCalled, '清除后不跳转（留在 account 页）');
 });
 
 // ── T09: 未清除时不调 goToRepos（两个方向都测） ──
@@ -390,7 +392,7 @@ const BASELINE_V = {
   'pages/repos.js': 61,
   'pages/settings.js': 33,
   // 未修改的文件（用于 T38/T39 验证不变）
-  'pages/dashboard.js': 98,
+  'pages/dashboard.js': 101,
   'pages/pipeline.js': 46,
 };
 
@@ -464,6 +466,30 @@ test('T39: 未修改的 pipeline.js ?v= 值不变（基线 46，R10 精确性）
   const v = extractVersion(INDEX_HTML, 'pages/pipeline.js');
   assert.ok(v !== null, 'pipeline.js 应在 index.html 中有 ?v= 版本号');
   assert.ok(v === BASELINE_V['pages/pipeline.js'], 'pipeline.js ?v=' + v + ' 应等于基线 ' + BASELINE_V['pages/pipeline.js'] + '（未修改不应递增）');
+});
+
+// ── T40: 解绑成功回调留在 account 页（2026-10-28 需求变更：R2 不跳转）──
+test('T40: 解绑成功后不跳转，renderAccount 重渲染安全页', () => {
+  const fn = extractFn(ACCOUNT_JS, '_accountOnUnbindSuccess');
+  assert.ok(fn, '_accountOnUnbindSuccess 函数应存在');
+  // 修复后形态：_currentView !== 'repos' 时 renderAccount('security')，无 goToRepos 调用
+  assert.ok(fn.includes("renderAccount('security')"), '解绑后应重渲染 account 安全页（留在原地）');
+  assert.ok(!/\bgoToRepos\s*\(/.test(fn.replace(/^ *\/\/.*$/gm, '')), '解绑成功回调不应调用 goToRepos（需求变更：不跳转）');
+});
+
+// ── T41: _accountCleanupAfterUnbind 清 currentRepo 但不跳转（R1 保留 / R2 跳转移除）──
+test('T41: 清理函数清 currentRepo 但全程无 goToRepos 调用', () => {
+  const fn = extractFn(ACCOUNT_JS, '_accountCleanupAfterUnbind');
+  assert.ok(fn, '_accountCleanupAfterUnbind 函数应存在');
+  assert.ok(fn.includes("sessionStorage.removeItem('currentRepo')"), 'R1 清理保留');
+  assert.ok(!fn.includes('goToRepos'), 'R2 跳转已移除（需求变更 2026-10-28）');
+  assert.ok(!fn.includes('_needRedirect'), '跳转标志变量已删（无死代码残留）');
+});
+
+// ── T42: account.js 版本号反映本轮改动（R10 与需求变更联动）──
+test('T42: account.js ?v ≥ 45（2026-10-28 不跳转改动入缓存失效）', () => {
+  const v = extractVersion(INDEX_HTML, 'pages/account.js');
+  assert.ok(v !== null && v >= 45, 'account.js ?v=' + v + ' 应 ≥ 45（本轮改动需缓存失效）');
 });
 
 // ── 汇总 ──

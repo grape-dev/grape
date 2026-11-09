@@ -261,7 +261,8 @@ class TestBindingGuideAndRenderAllProviders:
         source = _read_file("js/app.js")
         assert "function renderOAuthButtons" in source
         idx = source.find("function renderOAuthButtons")
-        func_source = source[idx:idx + 1200]
+        # B+（#535）后函数变长（新增置灰+常显说明），窗口从 1200 放宽到 2000
+        func_source = source[idx:idx + 2000]
         # 不应过滤 configured
         assert "filter(function(p){return p.configured})" not in func_source, \
             "renderOAuthButtons should NOT filter providers by configured"

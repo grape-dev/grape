@@ -1,0 +1,14 @@
+{
+  "_comment": "Issue #516 任务超时配置示例。复制为 configs/task-timeout.json 后按需修改；文件缺省时全部走内置默认（coding=7200，其余 agent=3600，全局 env RUNTIME_TASK_TIMEOUT 仍生效）。agent_defaults/per_repo/per_skill 的键做大小写不敏感匹配；timeout_retries 为超时自动重试次数（0=禁用，默认 1）；retry_backoff_sec 为重试前退避间隔（默认 30）。",
+  "agent_defaults": {
+    "coding": 7200
+  },
+  "per_repo": {
+    "gitcode:owner/repo": 7200
+  },
+  "per_skill": {
+    "coding-cli-1": 10800
+  },
+  "timeout_retries": 1,
+  "retry_backoff_sec": 30
+}

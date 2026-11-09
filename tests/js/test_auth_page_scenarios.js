@@ -306,8 +306,13 @@ test('U9-2: for/id 无障碍关联', () => {
 });
 
 test('U9-3: 版本号对齐', () => {
-  assert.ok(REGISTER_HTML.includes('api.js?v=31') && REGISTER_HTML.includes('app.css?v=85'), 'register 版本号对齐');
-  assert.ok(FORGOT_HTML.includes('api.js?v=31') && FORGOT_HTML.includes('app.css?v=85'), 'forgot 版本号对齐');
+  // 版本随迭代 bump（2026-10-28 i18n v17 / api v31）——只锁两页版本号一致，不锁具体值
+  const regApi = (REGISTER_HTML.match(/api\.js\?v=(\d+)/) || [])[1];
+  const forgotApi = (FORGOT_HTML.match(/api\.js\?v=(\d+)/) || [])[1];
+  const regCss = (REGISTER_HTML.match(/app\.css\?v=(\d+)/) || [])[1];
+  const forgotCss = (FORGOT_HTML.match(/app\.css\?v=(\d+)/) || [])[1];
+  assert.ok(regApi && regApi === forgotApi, 'register/forgot api.js 版本号一致（v=' + regApi + '）');
+  assert.ok(regCss && regCss === forgotCss, 'register/forgot app.css 版本号一致（v=' + regCss + '）');
 });
 
 // ============ U10: FOUC 验证 — CSS class 驱动显隐 ============
@@ -389,9 +394,9 @@ test('U11-3: 英文 forgot.html defer + boost 自动 init', () => {
 
 test('U11-4: 英文 index.html defer + boost 自动 init', () => {
   assert.ok(INDEX_HTML.indexOf('defer') >= 0, 'index.html i18n.js 应有 defer');
-  // head 中有 i18n.js defer 引用
+  // head 中有 i18n.js defer 引用（版本号随迭代 bump，2026-10-28 v=20261028-1——只锁位置不锁版本）
   var headEnd = INDEX_HTML.indexOf('</head>');
-  var deferIdx = INDEX_HTML.indexOf('i18n.js?v=20261023-3" defer');
+  var deferIdx = INDEX_HTML.search(/i18n\.js\?v=\d[\w-]*"\s+defer/);
   assert.ok(deferIdx >= 0 && deferIdx < headEnd, 'i18n.js defer 应在 head 中');
   // body 中不再有 <script src="i18n.js 引用
   var bodyStart = INDEX_HTML.indexOf('<body>');

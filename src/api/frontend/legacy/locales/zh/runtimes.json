@@ -12,7 +12,15 @@
     "reset_confirm": "确认重置该引擎的健康分？重置后健康分将基于重置点之后的任务数据重新统计。",
     "reset_success": "健康分已重置",
     "reset_failed": "重置健康分失败",
-    "reset_global_denied": "全局引擎不支持重置健康分"
+    "reset_global_denied": "全局引擎不支持重置健康分",
+    "hint": {
+      "consecutive_failures": "引擎状态异常：探活连续失败，建议登录机器进行定位",
+      "heartbeat_lost": "心跳失联，建议检查机器网络/进程状态",
+      "offline": "引擎离线，建议检查设备是否开机联网、引擎进程是否运行",
+      "recently_lost": "引擎刚失联（<5 分钟），通常为网络抖动；若持续失联请检查机器网络",
+      "about_to_gc": "引擎即将被回收（>6 天未上线），如需保留请尽快让设备续联",
+      "low_score": "健康分过低，建议排查近期失败任务，或重置健康分重新统计"
+    }
   },
   "stats": {
     "total": "共 {count} 台"
@@ -60,6 +68,7 @@
     "unhealthy": "✗ 异常",
     "worker": "设备",
     "ip": "IP",
+    "spec": "规格",
     "scope_label": "范围",
     "scope_short": "级别",
     "owner": "归属",
@@ -86,7 +95,20 @@
     "result": "结果",
     "skills_label": "技能",
     "max_concurrent": "最大并发数",
-    "max_concurrent_desc": "该引擎同时执行的任务上限（1-100）"
+    "max_concurrent_desc": "该引擎同时执行的任务上限（1-100）",
+    "worker_version_stale": "Worker 版本落后",
+    "worker_version_stale_hint": "Worker 上报版本落后于服务端最新版本，重新执行一键安装命令即可升级；此提示与引擎健康异常无关。",
+    "model": "模型",
+    "model_recent_short": "最近",
+    "model_configured": "配置模型",
+    "model_last_used": "最后使用",
+    "model_source_report": "worker 上报",
+    "model_source_local": "本机配置",
+    "model_fallback_hint": "未上报配置模型，回退显示最近使用模型",
+    "recent_models": "最近使用模型",
+    "recent_models_desc": "按用量统计 Top 3",
+    "recent_models_empty": "暂无使用记录",
+    "model_used_count": "{{count}} 次"
   },
   "empty": {
     "no_engines": "暂无引擎",
@@ -95,7 +117,11 @@
     "no_local_skill": "无本地 skill",
     "unassigned": "未分配",
     "loading": "加载中...",
-    "no_scenes": "暂无场景"
+    "no_scenes": "暂无场景",
+    "no_engines_title": "暂无引擎",
+    "no_engines_sub": "当前组织下暂无接入的引擎或设备",
+    "worker_guide_title": "接入你的第一台引擎设备",
+    "worker_guide_sub": "在任意装了 Agent 引擎的机器上添加设备接入为执行节点——侧边栏会引导你生成凭据并给出安装命令"
   },
   "time": {
     "not_online": "未上线",
@@ -111,6 +137,7 @@
     "install_hint": "📦 在 Worker 机器（普通用户）一键安装接入：",
     "install_desc": "该命令从主控下载运行包（grape-worker.tar.gz）解压到用户家目录，自动写入凭据与主控地址并后台启动注册；免 root。重复执行可升级。",
     "manual_start": "或手动启动 RuntimeAgent：",
+    "manual_start_desc": "需在安装根目录（运行包解压目录）下执行上述命令，请勿进入 src 目录执行。",
     "win_install_hint": "🖥️ Windows 设备接入（PowerShell）：",
     "win_install_desc": "在 Windows 设备上打开 PowerShell 执行以下命令，自动下载安装运行包、写入凭据并后台启动注册。需预装 Python 3.10+。",
     "toast_generated": "凭据已生成",
@@ -228,5 +255,8 @@
       "cde_1004": "异常",
       "unknown": "未知"
     }
-  }
+  },
+  "rt_range_all": "全部",
+  "rt_range_repo": "仓库",
+  "rt_range_user": "个人"
 }

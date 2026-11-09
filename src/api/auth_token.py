@@ -20,6 +20,14 @@ SESSION_TOKEN_PREFIX = "tk_"
 API_KEY_PREFIX = "grape_"
 SESSION_TOKEN_TTL = 6 * 3600  # 会话级临时 token 默认 TTL（秒）——执行超时兜底
 
+# Issue #990：401 恢复指引——随 session token 失效的 401 message 下发，
+# grape CLI 直接透传 detail.message，Agent 据此从运行时进程环境重读 token，
+# 而不是把「快照 token 过期」误判为凭据失效。
+SESSION_TOKEN_RECOVERY_HINT = (
+    "Invalid or expired session token; if the shell environment snapshot is stale, "
+    "re-read GRAPE_SESSION_TOKEN from the agent runtime process environment and retry"
+)
+
 # 预留 scopes（方式 B，未来 RBAC 扩展）
 _API_KEY_SCOPES = '["public"]'
 
@@ -30,6 +38,12 @@ def _sha256(token: str) -> str:
 
 def _now() -> int:
     return int(time.time())
+
+
+def _utc_iso() -> str:
+    """当前 UTC 时刻的 ISO 字符串（秒级列 created_at 的口径，Issue #1477）。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ===================== 方式 A：会话级临时 token =====================
@@ -55,6 +69,46 @@ def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
     except Exception as e:
         log.warning(f"Issue session token failed: {e}")
         raise
+
+
+def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
+                         user_id: int = 0, ttl: int = SESSION_TOKEN_TTL,
+                         commit: bool = True) -> str:
+    """轮换会话 token：同一事务内先作废旧 token、再签发新 token。
+
+    Issue #990：会话 token 轮换时若只签发新 token、不刷新 shell 环境快照
+    （agent_tasks.env_extra），Agent 会继续用旧快照 token 调 grape → 全量 401。
+    调用方（service.sync_task_session_token）用 ``commit=False`` 把「轮换 + 快照回写」
+    放进同一事务，避免过期/签发/回写分步提交导致跨进程交错误伤新 token。
+
+    任一步失败即回滚并抛出，保证不会出现「旧 token 已作废、新 token 未落库」的半状态。
+    """
+    token = SESSION_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = _now()
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 只提前作废仍有效的旧 token；已过期行保持原样（purge 清理）
+            c.execute(
+                "UPDATE session_api_tokens SET expires_at=? "
+                "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+                (now, session_key, now),
+            )
+            c.execute(
+                "INSERT INTO session_api_tokens (session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, _sha256(token), now + ttl),
+            )
+            if commit:
+                db.commit()
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"Rotate session token failed for {session_key}: {e}")
+            raise
+    return token
 
 
 def verify_session_token(token: str) -> dict | None:
@@ -150,8 +204,11 @@ def generate_api_token(user_id: int, name: str = "") -> dict | None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO api_tokens (user_id, token_sha256, name) VALUES (?,?,?)",
-                (user_id, _sha256(token), name),
+                "INSERT INTO api_tokens (user_id, token_sha256, name, created_at) VALUES (?,?,?,?)",
+                # created_at 用 UTC ISO（与其它表时间列一致，settings.py 经
+                # normalize_event_time 归一后给前端 +00:00 口径）；
+                # last_used_at 仍走 _now() 的秒级时间戳（前端两条链路都兼容）
+                (user_id, _sha256(token), name, _utc_iso()),
             )
             db.commit()
             return {"token": token, "id": c.lastrowid}

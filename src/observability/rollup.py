@@ -51,7 +51,12 @@ ONLINE_WINDOW_SEC = 900
 
 
 def snapshot_runtimes() -> Dict[str, int]:
-    """采样一轮：把每个未吊销引擎的当前资源值写一行历史 + 清理过期数据。"""
+    """采样一轮：把每个未吊销引擎的当前资源值写一行历史。
+
+    Issue #702 起**不再顺带清理过期数据**：清理职责收敛到持锁分支单独执行
+    （`cleanup_expired_samples`），消除多主各自清理的 4 倍放大。清理由
+    `sample_once_under_lease()`（采样租约持有者路径）编排调用。
+    """
     from src.session_manager import db, db_lock
     now = _now()
     now_iso = now.isoformat()
@@ -90,16 +95,75 @@ def snapshot_runtimes() -> Dict[str, int]:
                     inserted += 1
                 except Exception:
                     pass
-            # 清理过期采样（顺手做，避免表无限增长）
-            try:
-                cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
-                c.execute("DELETE FROM obs_runtime_samples WHERE sampled_at < ?", (cutoff,))
-            except Exception:
-                pass
             db.commit()
     except Exception as e:
         log.warning(f"obs snapshot_runtimes failed: {e}")
     return {"inserted": inserted}
+
+
+def cleanup_expired_samples() -> Dict[str, int]:
+    """清理过期采样（留存窗口 RETENTION_DAYS）。
+
+    Issue #702：从 `snapshot_runtimes()` 拆出——只在**采样租约持有分支**被调用
+    （`sample_once_under_lease`），多主下仅一台执行，消除清理放大。幂等。
+    """
+    from src.session_manager import db, db_lock
+    now = _now()
+    deleted = 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            cutoff = (now - timedelta(days=RETENTION_DAYS)).isoformat()
+            c.execute("DELETE FROM obs_runtime_samples WHERE sampled_at < ?", (cutoff,))
+            try:
+                deleted = int(c.rowcount or 0)
+            except Exception:
+                deleted = 0
+            db.commit()
+    except Exception as e:
+        log.warning(f"obs cleanup_expired_samples failed: {e}")
+    return {"deleted": deleted}
+
+
+def sample_once_under_lease() -> Dict[str, Any]:
+    """单写者采样编排（Issue #702 多主收敛的核心入口）。
+
+    每轮采样前抢全局租约（`sample_lease`，TTL=60s）：
+    - **非持有者**（他主持有未过期）→ 什么都不写：0 INSERT、0 DELETE，返回
+      `skipped=True`；他主失联（lease 过期）后下一轮在 `acquire_lease` 处原子抢占，
+      接管无需额外协调；
+    - **持有者**（首次抢到，或本轮开始时仍是自己持有）→ `snapshot_runtimes()` 采样 +
+      `cleanup_expired_samples()` 清理，采样完成后续期租约（renew）；
+    - 锁表异常 → 降级跳过（`sample_lease.acquire_lease` 返回 False），采样暂停但
+      读侧（runtime_history / SLO）不受影响。
+
+    不在末尾 release：租约跨轮长持有（TTL 兜底），持有者靠每轮 renew 维持；
+    进程失联后 lease 自然过期被接管——这是"失联自动接管"的实现基础。
+
+    返回：{leased, skipped, inserted, deleted, renewed}
+    """
+    from src.observability import sample_lease
+    out: Dict[str, Any] = {"leased": False, "skipped": False, "inserted": 0, "deleted": 0, "renewed": False}
+    if not sample_lease.acquire_lease():
+        # 已是本主持有（上轮抢到后未释放）→ 续期继续本轮采样/清理；
+        # 他主持有未过期 / 锁表异常 → 降级跳过本轮（skipped）。
+        if not sample_lease.renew_lease():
+            out["skipped"] = True
+            return out
+        out["leased"] = True
+        out["renewed"] = True
+    else:
+        out["leased"] = True
+    try:
+        snap = snapshot_runtimes()
+        out["inserted"] = int(snap.get("inserted", 0))
+        out.update(cleanup_expired_samples())
+        if not out["renewed"]:
+            # 采样+清理完成后续期（持锁期间工作完成即刷新 TTL；下一轮走 renew 路径）
+            out["renewed"] = bool(sample_lease.renew_lease())
+    except Exception as e:
+        log.warning(f"obs sample_once_under_lease failed: {e}")
+    return out
 
 
 def runtime_history(runtime_ids: List[int], range_str: str = DEFAULT_RANGE) -> Dict[str, Any]:

@@ -238,7 +238,13 @@ class BotLeaseStore:
 
             from src.session_manager import db, db_lock
             _ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-            with db_lock:
+            # deadlock fix (2026-11-03): heartbeat runs on the asyncio event loop; an
+            # unbounded db_lock acquire froze the whole A-process. Acquire with timeout
+            # and skip this beat if the lock is busy — the next sweep retries.
+            if not db_lock.acquire(timeout=10):
+                log.warning("[lease] heartbeat skipped: db_lock busy >10s")
+                return False
+            try:
                 c = db.cursor()
                 from src.session_manager import _is_mysql_backend
                 if _is_mysql_backend():
@@ -260,8 +266,12 @@ class BotLeaseStore:
                         (self.instance_id, hostname, ip, _ts),
                     )
                 db.commit()
+                return True
+            finally:
+                db_lock.release()
         except Exception as e:
             log.warning(f"[lease] heartbeat error: {e}")
+            return False
 
     def _heartbeat_window(self, timeout: float, now_dt=None):
         """心跳有效窗口 (下界, 上界)，都是 UTC 口径的本地时间串（各后端可字符串比较）。

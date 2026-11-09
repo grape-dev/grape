@@ -64,6 +64,8 @@ Event 字段：`seq / repo_key / issue_id / event_type / source / agent_type / t
 ---
 
 ## POST /api/events/{seq}/redispatch — 重派事件
+
+> 适用终态：failed / cancelled（Issue #566：用户取消与失败同权支持重新派发）；卡死 running>10min 同样适用。
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{seq}` int |

@@ -111,15 +111,13 @@ def test_ut1_pool_all_unreachable_fails_task(setup_db):
     c.execute("INSERT INTO events (seq, repo_key, status) VALUES (9301, 'gitcode:x/r', 'running')")
     setup_db.commit()
 
-    # hermes 尝试认领 → 绑定全不可达 → 任务 failed + 事件 failed + 保留 pool
+    # hermes 尝试认领 → 绑定全不可达 → 保持 queued 交 _check_stale_queued_tasks 裁决
+    # （Issue #1487 改动C：单次瞬时快照不判死，120s 窗口由 stale-queued 收敛）
     result = svc.claim_by_tag("all", 1129)
     assert result is None, "hermes 不应认领 codex 专属任务"
     row = c.execute("SELECT status, pool_engine_ids, errors FROM agent_tasks WHERE id='t_253a'").fetchone()
-    assert row[0] == "failed", f"任务应 failed，实际 {row[0]}"
+    assert row[0] == "queued", f"claim 阶段不应判死（#1487 改动C），实际 {row[0]}"
     assert row[1] == "[10907]", "pool_engine_ids 必须保留（不清空）"
-    assert "codex" in (row[2] or ""), f"人话原因应含引擎名，实际: {row[2]}"
-    ev = c.execute("SELECT status FROM events WHERE seq=9301").fetchone()
-    assert ev[0] == "failed", "事件终态应同步 failed"
 
 
 # ===== UT-2：绑定引擎在线时，池外引擎无法认领 =====
@@ -161,14 +159,14 @@ def test_ut3_stale_queued_three_tiers(setup_db):
               "agent_session_id, issue_session_id, created_at, agent_type) "
               "VALUES ('t_253c', 'queued', 0, 'coding', '[201]', 's', 'is', ?, 'coding')", (_old,))
     # 档2：在线、物理健康（healthy=1）但健康分低 → 限时等待到点 → failed。
-    #   健康分由任务史计算：塞 2 条 failed 任务史 → 失败率 100% → 低分 →
+    #   健康分由任务史计算：塞 6 条 failed 任务史（≥ HEALTH_MIN_SAMPLES，issue #439
+    #   小样本豁免阈值——低样本单次失败不再打入低分区）→ 失败率 100% → 低分 →
     #   has_healthy=False；物理可达检查（healthy 列=1 + 心跳新鲜 + tag + 槽位）通过 →
     #   走 _fail_task_pool_unhealthy（120s 到点）。这正是 #253 事故第一次派发的死区形态。
     _mk_engine(c, 202, "codex-low", healthy=1, seen=_now, tag="coding")
-    c.execute("INSERT INTO agent_tasks (id, status, runtime_id, created_at, completed_at) VALUES "
-              "('t_hist1', 'failed', 202, ?, ?)", (_old, _old))
-    c.execute("INSERT INTO agent_tasks (id, status, runtime_id, created_at, completed_at) VALUES "
-              "('t_hist2', 'failed', 202, ?, ?)", (_old, _old))
+    for _i in range(1, 7):
+        c.execute("INSERT INTO agent_tasks (id, status, runtime_id, created_at, completed_at) VALUES "
+                  "(?, 'failed', 202, ?, ?)", (f"t_hist{_i}", _old, _old))
     c.execute("INSERT INTO agent_tasks (id, status, runtime_id, pool_tag, pool_engine_ids, "
               "agent_session_id, issue_session_id, created_at, agent_type) "
               "VALUES ('t_253d', 'queued', 0, 'coding', '[202]', 's', 'is', ?, 'coding')", (_old,))

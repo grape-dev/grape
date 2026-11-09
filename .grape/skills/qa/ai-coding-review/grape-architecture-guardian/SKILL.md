@@ -1,11 +1,11 @@
 ---
 name: grape-architecture-guardian
-version: 1.0.1
+version: 2.0.0
 description: |
   Grape 项目群架构守护技能（qa 型 PR 门禁审查）：PR 提交时按 grape-dev 组织 8 个项目统一架构规则
   执行 review 模式门禁审查。①拉取 PR 材料（diff/变更文件/commits）+ 跑 3 只读脚本取证 →
-  ②按 7 Gate 逐项三态判定（核心架构约束/组织隔离与安全/前端规范/Git 提交规范/测试规范/数值证据/架构适配性）→
-  ③输出带证据定位的 APPROVED/APPROVED WITH CONDITIONS/BLOCKED 审查报告（PR 评论）。
+  ②按 7 Gate + 规则 2.0（4 级判定 BLOCKED/Critical/Medium/Informational + 16 条规则 A1-A9/B1-B2/C1-C3/D1-D2）
+  双轨三态判定 → ③输出按 4 级别归类统计与合入建议的审查报告（PR 评论）；Medium 级不遵从置 pending-review 人工判断。
 tools:
   - bash
   - grape
@@ -34,15 +34,8 @@ tools:
 
 ## Prerequisites（执行前必检，通过后才进入处理流程）
 
-1. **grape CLI 版本 ≥ 0.3.2**：
-   ```bash
-   grape --version
-   ```
-   未装/版本过低 → 自行安装（见 `references/grape-cli-reference.md` §1）后复验。
-2. **刷新契约**：
-   ```bash
-   grape refresh
-   ```
+1. **grape CLI 版本 ≥ 0.3.2**：`grape --version`；未装/版本过低 → 自行安装（见 `references/grape-cli-reference.md` §1）后复验。
+2. **刷新契约**：`grape refresh`。
 3. **环境变量就绪**（`${VAR:+ok}` 校验，不打印 token）：
    ```bash
    echo "token=${GRAPE_SESSION_TOKEN:+ok} owner=$REPO_OWNER repo=$REPO_NAME issue=$ISSUE_NUMBER pr=${PR_NUMBER:-unset}"
@@ -53,15 +46,10 @@ tools:
 
 | 变量 | 语义 | 用途 |
 |------|------|------|
-| `GRAPE_SERVER_URL` | 服务端地址 | `grape` 自动读取 |
-| `GRAPE_SESSION_TOKEN` | 会话级 token（`tk_`） | `grape` 自动认证 |
-| `REPO_OWNER` | 仓库属主 | `--owner "$REPO_OWNER"` |
-| `REPO_NAME` | 仓库名 | `--repo "$REPO_NAME"` |
-| `REPO_FULL_NAME` | owner/repo | 报告引用 |
-| `ACCOUNT` | 触发人 actor | A2A payload `account` |
-| `ISSUE_NUMBER` | Issue 编号 | 任务上下文 |
-| `PR_NUMBER` | 待审 PR 编号 | 审查对象（未注入时从 A2A payload 取） |
-| `GRAPE_ISSUE_ID` / `GRAPE_SCENE_ID` / `BOT_USERNAME` | 内部 id / 场景 ID / Bot 用户名 | 状态接口 / A2A 核验 / 报告署名 |
+| `GRAPE_SERVER_URL` / `GRAPE_SESSION_TOKEN` | 服务端地址 / 会话级 token（`tk_`） | `grape` 自动读取认证 |
+| `REPO_OWNER` / `REPO_NAME` / `REPO_FULL_NAME` | 仓库属主 / 仓库名 / owner/repo | `--owner`/`--repo`/报告引用 |
+| `ACCOUNT` / `ISSUE_NUMBER` / `PR_NUMBER` | 触发人 actor / Issue 编号 / 待审 PR 编号 | A2A payload / 任务上下文 / 审查对象（未注入从 A2A payload 取） |
+| `GRAPE_ISSUE_ID` / `GRAPE_SCENE_ID` / `BOT_USERNAME` | 内部 id / 场景 ID / Bot 用户名 | pending-review `--issue_id` / A2A 核验 / 报告署名 |
 
 > ⚠️ token 类变量为敏感信息：不 printenv 打印、不写入日志/评论/文件。
 
@@ -80,9 +68,14 @@ grape-skills / grape-template / grape-test / grape-website）的 PR 执行门禁
 
 ## 处理流程
 
-> ⚠️ 先读 `references/architecture-review-runbook.md`，按走查表逐步执行（Step 0 前置+上下文 → 1 拉取 PR 材料 → 2 运行脚本取证 → 3 逐 Gate 三态判定 → 4 汇总报告 → 5 发布 PR 评论 → 6 收尾/交办），**照抄执行，不要 `grape --help` / `grape commands` 逐条探索**。
-> ⚠️ 7 个 Gate 的检查项清单在 `references/grape-architecture-rules.md`（含历史事故背景与适用仓库矩阵），逐条对照、不凭记忆转述。
+> ⚠️ 先读 `references/architecture-review-runbook.md`，按走查表逐步执行（Step 0 前置+上下文 → 1 拉取 PR 材料 → 2 运行脚本取证 → 3 逐 Gate + 2.0 规则双轨判定 → 4 按 4 级别汇总报告 → 4b Medium 置 pending-review → 5 发布 PR 评论 → 6 收尾/交办），**照抄执行，不要 `grape --help` / `grape commands` 逐条探索**。
+> ⚠️ 7 个 Gate 与规则 2.0 的 16 条规则（A1-A9/B1-B2/C1-C3/D1-D2）清单在 `references/grape-architecture-rules.md`（含历史事故背景与适用仓库矩阵），逐条对照、不凭记忆转述。
 > ⚠️ 本技能收尾一律用 `grape tasks complete`（情形一）；评论发完 ≠ 任务完成。
+
+## 流程节点（flow_nodes: pending-review）
+
+- **Medium 级不遵从 → 人工判断是否合入 PR**（必做）：审查存在 Medium 级不符合项时，按 runbook Step 4b 调用 `grape issues pending-review --issue_id ${GRAPE_ISSUE_ID} --json '{"review_points":"...","references":"PR #{N} + 报告评论 id"}'` 置审核点，报告标注「人工判断是否合入」；用户回复后 `grape issues review-pass / review-reject` 续接（幂等，`changed:false` 忽略）。
+- 无 Medium 级不符合 → 不置审核点，按正常结论流转。
 
 ## 操作边界
 
@@ -90,41 +83,43 @@ grape-skills / grape-template / grape-test / grape-website）的 PR 执行门禁
 |------|------|
 | 拉取 PR diff/文件/commits/新增文件内容（只读） | ✅ **必须做** |
 | 运行 3 只读脚本取证（repo_inventory / magic_number_audit / grape_constraint_check） | ✅ **必须做** |
-| 按 7 Gate 逐项三态审查（符合/不符合/不适用 + 证据定位） | ✅ **必须做** |
-| PR 评论发布审查报告 + BLOCKED 时 A2A 交办 coding 整改 | ✅ **必须做** |
+| 按 7 Gate + 2.0 规则（16 条）逐项三态审查（符合/不符合/不适用 + 证据定位） | ✅ **必须做** |
+| PR 评论发布审查报告 + Medium 级置 pending-review 人工判断 | ✅ **必须做** |
+| BLOCKED/Critical 时 A2A 交办 coding 整改 | ✅ **必须做** |
 | 大 PR（>100 文件或 >1000 行）委派 `agents/grape-architecture-auditor.md` 深度审计 | ✅ **可以做** |
 | 修改任何文件 / git 写操作 / 合并 PR | ❌ **禁止** |
 | 报告复述完整密钥/口令原文 | ❌ **禁止** |
-| 无证据判 BLOCKED / 数值无来源仍判通过 | ❌ **禁止** |
+| 无证据判 BLOCKED / 数值无来源仍判通过 / Medium 不遵从不置审核点直接放行 | ❌ **禁止** |
 
 ## 硬约束
 
-- 结论三态唯一：`APPROVED`（0 BLOCKED / 0 Critical）/ `APPROVED WITH CONDITIONS`（有 Critical 可修复，列条件）/ `BLOCKED`（列出具体技术原因，不是风格偏好）。
-- 检查项必须逐条对照 `references/grape-architecture-rules.md`，不凭记忆转述。
+- 结论按 4 级别归类统计后三态唯一：`APPROVED`（0 BLOCKED / 0 Critical，Medium 全部经人工判断通过或不适用）/ `APPROVED WITH CONDITIONS`（有 Critical 可修复，列条件）/ `BLOCKED`（有 BLOCKED 或未整改 Critical，给具体技术原因，不是风格偏好）。
+- 合入建议映射：**BLOCKED/Critical → 不建议合入**（打回 coding 整改）；**Medium → 人工判断是否合入**（置 pending-review，报告标注）；**Informational → 不影响合入**（记录备查）。
+- 检查项必须逐条对照 `references/grape-architecture-rules.md`（7 Gate §1-§7 + 2.0 规则 §10），不凭记忆转述。
 - 每项「不符合」必须给出证据定位（文件路径+行号 或 commit sha）；无证据不判死。
 - 查询命令一律加 `--json-out`；写命令（`pulls comments create`）也加 `--json-out` 确认 comment id。
 - A2A 交办用 agent 名（`coding` 整改 / `sre` 放行），非技能名。
 
 ## 任务完成流程（必做）
 
-1. **输出人类可读的分析摘要**：审查 PR 编号、适用 Gate、各严重度计数（BLOCKED/Critical/Medium）、报告评论 id。
+1. **输出人类可读的分析摘要**：审查 PR 编号、适用 Gate 与 2.0 规则类别、4 级别计数（BLOCKED/Critical/Medium/Informational）、报告评论 id、是否置 pending-review。
 2. **调用 `grape tasks complete` 自报完成（必做）**：
 
 ```bash
 grape tasks complete --json '{
-  "result_text": "结论：PR #{PR_NUMBER} grape架构守护审查完成：{APPROVED / APPROVED WITH CONDITIONS / BLOCKED}（N BLOCKED / N Critical / N Medium）。\n动作：拉取 PR 材料 + 3 只读脚本取证 + 7 Gate 逐项审查 + PR 评论发布报告（comment id=XXXX）。\n摘要：一句话概括审查结论。",
+  "result_text": "结论：PR #{PR_NUMBER} grape架构守护审查完成（规则 2.0）：{APPROVED / APPROVED WITH CONDITIONS / BLOCKED}（N BLOCKED / N Critical / N Medium / N Informational）。\n动作：拉取 PR 材料 + 3 只读脚本取证 + 7 Gate + 2.0 规则（16 条）双轨审查 + PR 评论发布报告（comment id=XXXX）{+ Medium 置 pending-review}。\n摘要：一句话概括审查结论与合入建议。",
   "next_step": "a2a_coding",
-  "actions": ["拉取 PR 材料", "脚本取证", "逐 Gate 审查", "发布审查报告"],
-  "conclusion": "PR #{PR_NUMBER} 审查完成：{结论}，{整改/后续}",
+  "actions": ["拉取 PR 材料", "脚本取证", "逐 Gate + 2.0 规则审查", "发布审查报告", "Medium 置 pending-review（如有）"],
+  "conclusion": "PR #{PR_NUMBER} 审查完成：{结论 + 合入建议}，{整改/后续}",
   "artifacts": ["PR #{PR_NUMBER} 评论 comment id=XXXX"],
-  "issue_summary": "PR 审查完成 | PR #{PR_NUMBER} {结论} | 后续 {下一步}"
+  "issue_summary": "PR 审查完成（规则 2.0） | PR #{PR_NUMBER} {结论} | 后续 {下一步}"
 }'
 ```
 
 ## 参考
 
 - **执行走查表（先读）**：`references/architecture-review-runbook.md`
-- **架构规则清单（7 Gate 检查项 + 适用矩阵 + 历史事故背景）**：`references/grape-architecture-rules.md`
+- **架构规则清单（7 Gate §1-§7 + 2.0 规则 §10 + 适用矩阵 + 历史事故背景）**：`references/grape-architecture-rules.md`
 - **已验证配置数值注册表**：`references/known-config-values.md`
 - CLI 命令基线：`references/grape-cli-reference.md`
 - 模板/子审计：`templates/pr-review-report.md`、`templates/finding.md`、`agents/grape-architecture-auditor.md`

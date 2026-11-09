@@ -126,8 +126,9 @@ def test_save_preset_protected_fields():
     assert preset_names == {"AI_MODEL", "AI_API_KEY"}
     assert by_name["AI_MODEL"]["value"] == "gpt4"       # 值更新生效
     assert by_name["AI_MODEL"]["scope"] == ["all"]      # scope 被锁回声明
-    # AI_API_KEY 未被提交仍保留旧值
-    assert by_name["AI_API_KEY"]["value"] == "secret-1"
+    # AI_API_KEY 未被提交仍保留旧值（Issue #885：GET 占位返回，库内保留明文）
+    assert by_name["AI_API_KEY"]["value"] == ""
+    assert by_name["AI_API_KEY"]["has_value"] is True
 
 
 def test_save_preset_cannot_be_deleted():

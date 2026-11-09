@@ -1268,9 +1268,9 @@ class TestSettings:
             c.execute("DELETE FROM agent_runtimes WHERE name=?", ("test-detail-eng",))
             c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-detail",))
             c.execute(
-                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
-                "VALUES (?,?,?,?,?,?, 'active')",
-                ("hcred-detail", "cred-detail", "dev-detail", "global", "", "tester"))
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status, spec) "
+                "VALUES (?,?,?,?,?,?, 'active', ?)",
+                ("hcred-detail", "cred-detail", "dev-detail", "global", "", "tester", "4C8G"))
             cid = c.lastrowid
             c.execute(
                 "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id, alias) "
@@ -1289,6 +1289,8 @@ class TestSettings:
             for k in ("health", "instance_name", "worker_name", "worker_ip",
                       "scope", "owner", "health_score", "tags", "local_skills"):
                 assert k in d, f"详情端点缺少字段 {k}"
+            # Issue #459: 设备规格 spec 透出
+            assert d["spec"] == "4C8G"
             # 不存在的 id → 404
             r404 = client.get("/api/settings/agent-runtimes/999999999", headers=_headers)
             assert r404.status_code == 404
@@ -1338,6 +1340,47 @@ class TestSettings:
                 c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
                 c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
                 c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-invis",))
+                db.commit()
+
+    def test_agent_runtime_detail_spec_missing(self):
+        """Issue #459: 无 spec 数据（未上报规格的旧版 worker）/ 本机直连引擎，详情与列表 spec 为空字符串不报错"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM agent_runtimes WHERE name=?", ("test-nospec-eng",))
+            for row in c.fetchall():
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+            c.execute("DELETE FROM agent_runtimes WHERE name=?", ("test-nospec-eng",))
+            c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-nospec",))
+            # 无 spec 列的 worker（旧版注册，spec 默认空）
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                "VALUES (?,?,?,?,?,?, 'active')",
+                ("hcred-nospec", "cred-nospec", "dev-nospec", "global", "", "tester"))
+            cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-nospec-eng", "test-nospec-eng", cid, "online", 1, 1, _fresh, "global", ""))
+            rid = c.lastrowid
+            db.commit()
+        try:
+            r_detail = client.get(f"/api/settings/agent-runtimes/{rid}", headers=_headers)
+            assert r_detail.status_code == 200
+            assert r_detail.json()["spec"] == ""
+            r_list = client.get("/api/settings/agent-runtimes?page=1&page_size=0", headers=_headers)
+            hit = next((rt for rt in r_list.json()["runtimes"] if rt["id"] == rid), None)
+            assert hit is not None
+            assert hit["spec"] == ""
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-nospec",))
                 db.commit()
 
     def test_runtime_devices_endpoint(self):
@@ -1578,6 +1621,44 @@ class TestSkills:
             c = db.cursor()
             row = c.execute("SELECT agent_type FROM skill WHERE skill_name='skill-nosections' AND scope='user'").fetchone()
         assert row and row[0] == "issue", f"agent_type should be issue, got {row}"
+
+    def test_skills_upload_bom_encoded(self):
+        """Issue #608: 上传 UTF-8 with BOM 编码的 SKILL.md 技能包，详情接口应返回无 BOM 的内容。"""
+        import tempfile, zipfile, os
+        from src.session_manager import db, db_lock
+        # 自隔离：清除历史残留
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name='skill-bomtest' AND scope='user'")
+            db.commit()
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        skill_md = "---\nname: skill-bomtest\nversion: 1.0.0\ndescription: BOM encoded skill\n---\n\n## 场景\n## 知识\n## 步骤\n- step"
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-bomtest/SKILL.md", b"\xef\xbb\xbf" + skill_md.encode("utf-8"))
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-bomtest.zip", f.read())},
+                            data={"agent_type": "chat"}, headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 200, f"Upload failed: {r.status_code}: {r.text[:200]}"
+        # 验证 description 从 BOM frontmatter 正确解析
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT id, description FROM skill WHERE skill_name='skill-bomtest' AND scope='user'").fetchone()
+        assert row, "skill should be inserted"
+        sid, desc = row
+        assert desc == "BOM encoded skill", f"description should be parsed from BOM frontmatter, got {desc!r}"
+        # 验证 by-id 接口返回的 content 无 BOM
+        detail = client.get(f"/api/skills/by-id/{sid}", headers=_headers)
+        assert detail.status_code == 200, f"Detail failed: {detail.status_code}"
+        content = detail.json().get("content", "")
+        assert not content.startswith("\ufeff"), "content should not start with BOM"
+        assert content.startswith("---"), "content should start with --- (frontmatter matchable)"
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name='skill-bomtest' AND scope='user'")
+            db.commit()
 
     def test_skills_template_download(self):
         """GET /api/skills/template — OBS 模式返回 {url, expires_in} JSON"""

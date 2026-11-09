@@ -156,7 +156,10 @@ class TestOsAdapter:
         from src.runtime.os_adapter import bun_cache_dir
         with patch("src.runtime.os_adapter._IS_WINDOWS", False):
             result = bun_cache_dir()
-            assert result == "/var/cache/bun-compile"
+            # issue #857: Unix 三级解析，默认用户级 ~/.cache/grape/bun-compile
+            assert result == os.path.join(
+                os.path.expanduser("~"), ".cache", "grape", "bun-compile"
+            )
 
     def test_bun_cache_dir_windows(self):
         from src.runtime.os_adapter import bun_cache_dir

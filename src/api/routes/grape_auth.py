@@ -30,6 +30,7 @@ from src.auth.grape_account_db import (
     delete_external_identity, count_user_identities, has_password,
     get_external_identity, get_external_identity_any_status,
     update_external_identity_tokens,
+    _sync_um_platform_col,
     update_last_login_at,
     # D22: 软删除/恢复绑定支持
     get_unbound_identity, restore_external_identity,
@@ -50,24 +51,6 @@ from src.auth.cookie_utils import (
 # 无通配符需要转义；原 ESCAPE '\' 子句在 MySQL 上是语法炸弹（1064）。
 # 如未来确需用户输入进 LIKE 模式，用 ESCAPE '|' + 转义函数（双方言安全）。
 
-
-def _sync_um_platform_col(grape_user_id: int, provider: str, external_login: str):
-    """FR-18.6: OAuth/PAT 绑定成功后补写 um 平台列（消除空窗）。"""
-    if not grape_user_id or not external_login:
-        return
-    try:
-        from src.session_manager import db as _sm_db, db_lock as _sm_dl
-        with _sm_dl:
-            _c = _sm_db.cursor()
-            _c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (grape_user_id,))
-            # FR-CQ-1: 提取为 um_column_for_provider 工具函数
-            from src.repo_key import um_column_for_provider
-            _col = um_column_for_provider(provider)
-            _c.execute(f"UPDATE unified_user_mapping SET {_col}=?, updated_at=datetime('now') WHERE user_id=?",
-                       (external_login, grape_user_id))
-            _sm_db.commit()
-    except Exception as _e:
-        log.warning(f"_sync_um_platform_col: failed for user {grape_user_id} provider {provider}: {_e}")
 
 router = APIRouter(prefix="/api/auth", tags=["grape-auth"])
 
@@ -1251,11 +1234,17 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
     """
     from src.auth.providers import _get_trusted_host
     from src.auth.email_service import is_production_env
-    if is_production_env():
-        scheme = "https"
-    else:
-        scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
-    host = _get_trusted_host(request)
+
+    # 优先用 browser_callback_url 配置（nginx 反代场景 Host header 不可靠）
+    base = ""
+    try:
+        from src.user.db import get_browser_callback_url
+        base = get_browser_callback_url()
+        if base and ("localhost" in base or "127.0.0.1" in base):
+            base = ""
+    except Exception:
+        base = ""
+
     lang = request.cookies.get("grapeLang", "zh")
     prefix = f"/{lang}" if lang != "zh" else ""
     import urllib.parse as _up
@@ -1265,7 +1254,16 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
         real_path = path
     qs = f"?{_up.urlencode(params)}" if params else ""
     frag = f"#{hash_frag}" if hash_frag else ""
-    return f"{scheme}://{host}{_app_base()}{prefix}{real_path}{qs}{frag}"
+
+    if base:
+        return f"{base.rstrip('/')}{_app_base()}{prefix}{real_path}{qs}{frag}"
+    else:
+        if is_production_env():
+            scheme = "https"
+        else:
+            scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
+        host = _get_trusted_host(request)
+        return f"{scheme}://{host}{_app_base()}{prefix}{real_path}{qs}{frag}"
 
 
 def _oauth_error_redirect(request: Request, message: str, popup: bool = False):
@@ -1326,7 +1324,8 @@ def _oauth_login_redirect(request: Request, access_token: str, first_login: bool
                           token_version: int = 0, popup: bool = False):
     """P0-3: OAuth 登录成功 → 生成一次性 exchange code → 重定向到前端。
 
-    不再通过 URL 传递 access_token，改为生成 10 秒过期的 exchange code，
+    不再通过 URL 传递 access_token，改为生成 60 秒过期的 exchange code（#535 UC14，
+    原 10s 与 SPA 首载耗时冲突），
     前端用 POST /auth/exchange 换取 JWT。
     refresh_token 仍通过 HttpOnly cookie 传递（调用方设置）。
     popup=True 时重定向到中间页，由中间页 postMessage 通知父窗口。
@@ -1671,6 +1670,20 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         if not _token_updated:
             log.warning(f"OAuth login: token refresh failed for user={grape_user_id}, provider={provider}")
 
+        # Issue #497: 登录名变更同步（external_id 不变、login 变）——检测到不一致时四表一致化
+        _oauth_new_login = (user_info.get("external_login") or "").strip()
+        _oauth_old_login = (binding.get("external_login") or "").strip()
+        if _oauth_new_login and _oauth_new_login != _oauth_old_login:
+            from src.auth.grape_account_db import sync_external_login_on_rename
+            _renamed = sync_external_login_on_rename(grape_user_id, provider,
+                                                     _oauth_new_login, _oauth_old_login)
+            if _renamed:
+                log.info(f"OAuth login: external_login synced {_oauth_old_login} -> {_oauth_new_login} for user={grape_user_id}")
+                # username 可能已同步更新，刷新 account 供 JWT/重定向使用
+                _fresh_account = get_grape_account_by_id(grape_user_id)
+                if _fresh_account:
+                    account = _fresh_account
+
         token_version = account.get("token_version", 0)
         jwt_access, jwt_refresh = _issue_jwt(account["id"], account["username"],
                                               token_version, login_provider=provider)
@@ -1720,6 +1733,19 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         )
         if not restored:
             return _oauth_error_redirect(request, "rebind_failed", popup=popup)
+
+        # Issue #497: rebind 路径同样同步登录名变更（external_id 不变、login 变）
+        _oauth_new_login = (user_info.get("external_login") or "").strip()
+        _oauth_old_login = (unbound.get("external_login") or "").strip()
+        if _oauth_new_login and _oauth_new_login != _oauth_old_login:
+            from src.auth.grape_account_db import sync_external_login_on_rename
+            _renamed = sync_external_login_on_rename(original_user_id, provider,
+                                                     _oauth_new_login, _oauth_old_login)
+            if _renamed:
+                log.info(f"OAuth rebind: external_login synced {_oauth_old_login} -> {_oauth_new_login} for user={original_user_id}")
+                _fresh_account = get_grape_account_by_id(original_user_id)
+                if _fresh_account:
+                    original_account = _fresh_account
 
         _clear_user_repos_cache(original_user_id)
         _rebind_lang = (state_data or {}).get("lang", "") if isinstance(state_data, dict) else ""
@@ -1785,6 +1811,15 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         log.warning(f"OAuth auto-create failed: username={username}, provider={provider}")
         return _oauth_error_redirect(request, "create_failed", popup=popup)
 
+    # Issue #455: GitHub OAuth 落库读回校验——实测曾出现「日志称创建成功但库中查不到账号/绑定」（落库无痕）。
+    # 创建后立即读回，读不到则按数据一致性优先返回失败（不再静默 302）；GitCode 语义保持不变。
+    if provider == "github":
+        _readback_account = get_grape_account_by_id(account["id"])
+        if not _readback_account:
+            log.error(f"OAuth auto-create READBACK FAILED: account {account['id']} ({username}) not persisted for provider={provider}; returning failure")
+            soft_delete_account(account["id"])
+            return _oauth_error_redirect(request, "create_failed", popup=popup)
+
     bind_ok = create_external_identity(
         grape_user_id=account["id"],
         provider=provider,
@@ -1800,6 +1835,14 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         log.warning(f"OAuth auto-create: bind failed for user {account['id']}, provider={provider}, rolling back")
         soft_delete_account(account["id"])
         return _oauth_error_redirect(request, "bind_failed", popup=popup)
+
+    if provider == "github":
+        # 绑定读回校验：external_identities 必须能查到刚写入的绑定，否则视为落库失败（回滚账号 + 失败响应）
+        _readback_binding = get_external_identity(provider, external_id)
+        if not _readback_binding:
+            log.error(f"OAuth auto-create READBACK FAILED: binding for user {account['id']} ({username}) not persisted for provider={provider}; rolling back and returning failure")
+            soft_delete_account(account["id"])
+            return _oauth_error_redirect(request, "bind_failed", popup=popup)
     # FR-18.6: 补写 um 平台列
     _sync_um_platform_col(account["id"], provider, external_login)
     _clear_user_repos_cache(account["id"])
@@ -1952,7 +1995,7 @@ class ExchangeCodeBody(BaseModel):
 def exchange_token(body: ExchangeCodeBody, request: Request, response: Response):
     """P0-3: 用一次性 exchange_code 换取 JWT access_token。
 
-    exchange_code 由 OAuth 回调生成，10 秒过期，一次性消费（查+删）。
+    exchange_code 由 OAuth 回调生成，60 秒过期（#535 UC14），一次性消费（查+删）。
     防止 access_token 泄露到 URL/日志/Referer。
     """
     # supp-2: IP 限流

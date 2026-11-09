@@ -21,6 +21,8 @@ configs/db-backend.json
 configs/db-backend.json.*
 configs/db-backend.json.bak-*
 configs/server-config.json
+configs/runtime-config.json
+configs/patrol-config.json
 configs/vlm-config.json
 configs/SETUP-GUIDE.md
 skills/custom/
@@ -101,6 +103,8 @@ scripts/check-*-*.py
 !scripts/check-i18n-keys.py
 !scripts/check-css-vars.py
 !scripts/check-health-contract.py
+!scripts/check-destructive-ddl.py
+!scripts/check-openapi-endpoints.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh
@@ -145,7 +149,7 @@ _e2e_test.py
 configs/oauth-providers.json
 .upgrade-backup/
 .project-info/
-
 # Vue refactor
 src/api/frontend/app/node_modules/
 src/api/frontend/static-dist/
+_uid_backup*.json

@@ -12,9 +12,12 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 > agent 无需清单——当前场景经 env `GRAPE_SCENE_ID` 注入，取详情走 `GET /api/scenes/{scene_id}`。
 > CLI：`grape scenes list`（operation_id=`scenes_list`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
+> Issue #534 口径结论（与 #529 联动）：**维持 user_only 不放开**——`tk_` 是 agent 任务执行凭据，
+> scenes list 是可指定任意 `--repo` 的跨仓库枚举入口，放开超出会话凭据 scope 模型；
+> 会话内取当前场景请用 `GET /api/scenes/{scene_id}`（dual，缺省按会话仓库解析）。
 
-| Query | `repo`（可选；带 repo 时返回仓库级场景，否则 official） |
-| 出参 | 可用场景数组 |
+| Query | `repo`（可选；带 repo 时返回仓库级场景；缺省按会话/请求上下文解析，Issue #534）；`page`/`page_size`（可选，Issue #501 分页——不带 `page` 全量返回，带时 SQL LIMIT/OFFSET，total 恒返回）；`q`（可选，Issue #501 检索——name/display_name/description 三字段 LIKE，total 为命中数）；`sort`（可选：`id` 稳定序默认 / `latest` 按创建时间倒序）；`fields=minimal`（可选，Issue #501 C——跳过 nodes_json 反序列化，供只要名字/图标的下拉类调用方） |
+| 出参 | `{"scenes": [...], "total"}`（minimal 时 items 的 nodes 为空数组） |
 | 返回 | 200 |
 
 ---
@@ -72,8 +75,17 @@
 ## GET /api/scenes/with-pipeline — 场景列表（含流水线）
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| Query | `repo`（可选） |
-| 出参 | `[{scene_id, name, description, display_name, nodes, onboarding, is_active}]` |
+| Query | `repo`（可选；缺省按会话/请求上下文解析，Issue #534）；`page`/`page_size`（可选，Issue #501 分页）；`q`（可选，Issue #501 检索——与 /scenes 同参同语义）；`sort`（可选：`id`/`latest`） |
+| 出参 | `{"scenes": [{scene_id, name, display_name, description, work_branch, created_by, is_active, pipeline}], "total"}`（引擎在线字段 `offline_nodes`/`sre_unbound`/`all_offline` 已移出——改走 `GET /api/scenes/{scene_id}/engine-status` 按需探测） |
+| 返回 | 200 |
+
+---
+
+## GET /api/scenes/{scene_id}/engine-status — 场景引擎在线状态（按需探测）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Query | `repo`（可选，仓库级场景定位；缺省按会话/请求上下文解析，Issue #534） |
+| 出参 | `{"scene_id", "offline_nodes": [tag...], "sre_unbound": bool, "all_offline": bool}`——单场景 × 各启用节点一次引擎池探测；探测异常降级为不标记（不拦需求创建）；场景不存在/静默回退 default 时返回全 False |
 | 返回 | 200 |
 
 ---
@@ -206,8 +218,13 @@
 > 会话 token 调用供 agent 按 `GRAPE_SCENE_ID`（env 注入）取当前场景详情（nodes/onboarding 等）。
 
 | Path | `{scene_id}` |
+| Query | `repo`（可选；Issue #534 缺省按会话上下文解析：显式 `repo` 优先 → `tk_` 绑定仓库 → 请求中间件 repo 上下文，权限校验不放松） |
 | 出参 | `{id, name, nodes[], onboarding, scene_type}`（`id`=传入的 scene_id；`nodes`=技能链；`onboarding` 默认 `repo-onboarding`；`scene_type` 默认 `standard`） |
-| 返回 | 200；404 |
+| 返回 | 200；404（报错附「跨仓库场景请附 --repo <owner/repo> 后重试」提示） |
+
+> Issue #568 两级解析：`tk_` 会话 token 未显式传 `repo` 且仓库作用域未命中该 scene_id 的场景行时，
+> 回落**会话绑定**二级解析（session token → `agent_tasks` → issue 绑定场景，与 a2a handoff
+> 场景可见性口径一致，两路返回一致节点集合）；显式 `repo` 行为不变（不放松权限）。
 
 **示例（`default` 场景）**：
 
@@ -238,6 +255,7 @@
 
 | Path | `{agent_type}` |
 | 出参 | 技能数组 |
+| 说明 | Issue #978：每条技能含 `skill_id / skill_name / display_name / scope / owner_id`；**`(skill_id, scope, skill_name)` 共同构成前端选择的唯一键**——official/repo/user 三档允许同名技能共存（skill 表 `UNIQUE(skill_name, scope, owner_id)`），消费方不得用裸 `skill_name` 作选中/缓存 key（skill_id 优先，缺失时回退 `(scope, skill_name)`） |
 | 返回 | 200 |
 
 ---
@@ -266,8 +284,27 @@
 
 | Path | `{scene_id}` |
 | Query | `repo`（可选） |
-| 出参 | `{work_branch: "main", custom_fields: [{key, value}]}` |
+| 出参 | `{work_branch, custom_fields: [{name, value, is_secret, has_value?, scope, preset, description}], linked_repos}` |
+| 说明 | Issue #885：`is_secret=true` 字段不再明文返回——`value` 恒为空串，`has_value` 标记是否已配置；明文按需取回走 `POST /advanced-options/reveal` |
 | 返回 | 200；404 |
+
+## POST /api/scenes/{scene_id}/advanced-options/reveal — 按需取回密钥字段明文（一次性）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> Issue #885（对齐 #474 reveal 模式）：密码二次确认 + 审计日志（不落明文）+ 当次返回（`Cache-Control: no-store`）+ 窗口高频限流（429）。
+
+请求头：`Content-Type: application/json`
+
+请求体（SceneAdvancedOptionsRevealBody）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `name` | string | 是 | 密钥字段变量名（`is_secret=true`） |
+| `password` | string | 是 | 二次确认：当前 Grape 密码 |
+
+| Path | `{scene_id}` |
+| Query | `repo`（必填，owner/repo） |
+| 出参 | `{name: "...", value: "..."}`（明文仅当次返回） |
+| 返回 | 200；400（缺 repo / 缺密码 / 密码错误 / 非密钥字段 / 未设密码）；403（非归属人）；404（场景或字段不存在）；429（高频取回） |
 
 ## PUT /api/scenes/{scene_id}/advanced-options — 保存高级选项
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
@@ -280,10 +317,34 @@
 |------|------|:---:|------|
 | `work_branch` | string | 否 | 工作分支（默认 main） |
 | `custom_fields` | list | 否 | 自定义 key:value 数组 `[{key, value}]` |
+| `custom_fields[].keep_value` | bool | 否 | Issue #885：密钥字段值未变更时置 `true`，服务端保留库内旧值（不回传明文；`is_secret` 空值或 `"********"` 掩码回显同样保留旧值） |
 
 | Path | `{scene_id}` |
 | 出参 | `{"ok": true}` |
 | 返回 | 200；400；404 |
+
+---
+
+## GET /api/scenes/{scene_id}/deploy-url — 获取场景访问地址
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Path | `{scene_id}` |
+| Query | `repo`（必填，owner/repo） |
+| 出参 | `{deploy_url: "..."}`（场景级，未登记为空串） |
+| 返回 | 200；400（缺 repo）；403（非归属人）；404 |
+
+## PUT /api/scenes/{scene_id}/deploy-url — 登记/编辑场景访问地址
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> 校验与需求中心部署 URL 一致：非空必须以 `http://` 或 `https://` 开头、长度 ≤512；空串=清除。
+
+请求头：`Content-Type: application/json`
+
+请求体（SceneDeployUrlBody）：`{"deploy_url": "http://1.2.3.4:5000"}`
+
+| Path | `{scene_id}` |
+| Query | `repo`（必填，owner/repo） |
+| 出参 | `{"deploy_url": "..."}` |
+| 返回 | 200；400（缺 repo / URL 非法）；403（非归属人）；404（场景不存在或未激活） |
 
 ---
 

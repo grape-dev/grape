@@ -14,12 +14,37 @@ _CST = timezone(timedelta(hours=8), "CST")
 
 
 def _db_backend() -> str:
-    """当前数据库后端：mysql / sqlite（测试环境由 DEVOPS_DB_BACKEND 或 conftest 覆盖）。"""
+    """当前数据库后端：mysql / sqlite（测试环境由 DEVOPS_DB_BACKEND 或 conftest 覆盖）。
+
+    与 src.mysql_compat.get_db_backend() 同口径：环境变量 DEVOPS_DB_BACKEND 优先，
+    其次配置文件。否则 conftest 强制 sqlite 时本函数仍返回 mysql，
+    parse_dt/migrate 会把 SQLite 的 UTC naive 值按 CST 解析（Issue #512 回归，
+    test_event_conversation TestLocalRetry 409 根因）。
+    """
     try:
-        from src.mysql_compat import load_db_backend_config
-        return str(load_db_backend_config().get("backend", "sqlite")).lower()
+        from src.mysql_compat import get_db_backend
+        return get_db_backend()
     except Exception:
         return "sqlite"
+
+
+def db_now_str(offset_seconds: int = 0) -> str:
+    """按**存储层时间口径**返回当前时间字符串（'YYYY-MM-DD HH:MM:SS'），offset 秒偏移。
+
+    与 parse_dt / normalize_event_time 是同一口径的正反向：表默认值在 MySQL 下由
+    NOW() 写成 CST 本地墙钟、在 SQLite 下由 datetime('now') 写成 UTC，两者都是
+    无时区字符串。任何「created_at >= 某个 cutoff」的 SQL 比较必须用本函数生成
+    cutoff，否则两侧时区错位（MySQL 下 UTC cutoff 会把 60s 窗口放大到 8h+）。
+
+    反面案例（Issue #1487 衍生）：event_pipeline 的去重②曾用 _utc_now_str(-60)
+    （Python UTC 字符串）与 events.created_at（MySQL 本地墙钟）比较，导致 PR 评论
+    等 webhook 类事件在同 (repo,issue,agent,event_type) 8 小时内被静默判重丢弃。
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    ts = _dt.now(_tz.utc).timestamp() + offset_seconds
+    if _db_backend() == "mysql":
+        return _dt.fromtimestamp(ts, _CST).strftime("%Y-%m-%d %H:%M:%S")
+    return _dt.fromtimestamp(ts, _tz.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def normalize_event_time(raw) -> str:

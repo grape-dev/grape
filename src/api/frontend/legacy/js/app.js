@@ -90,18 +90,79 @@ function _cfCollectFields(prefix) {
       if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
     }
     const isSec = vEl.type === 'password';
+    // Issue #885：密钥占位行（data-keep-value）值未变更 → 提交 keep_value，服务端保留旧值
+    const keepValue = vEl.getAttribute('data-keep-value') === '1';
     // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
     const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
       .map(cb => cb.value);
     const scope = checked.length ? checked : ['all'];
-    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset });
+    const item = { name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset };
+    if (keepValue) item.keep_value = true;
+    fields.push(item);
   }
   return { fields: fields };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Issue #885：场景密钥类自定义变量明文按需取回（对齐 #474 credentials reveal）
+// GET advanced-options 对 is_secret 字段已占位返回（value:"" + has_value），
+// 前端对已配置未改动的密钥行标记 data-keep-value；点击眼睛按钮时走本流程：
+// 二次确认（重输 Grape 密码）→ POST reveal → 明文当次回填并清除 keep 标记。
+// 上下文 window._cfAdvCtx = { sceneId, repoParam } 由加载高级选项时设置。
+// ═══════════════════════════════════════════════════════════════
+window._cfRevealSecretField = function(input, btn) {
+  if (!input) return;
+  var row = input.closest ? input.closest('.adv-kv') : null;
+  var nEl = row ? row.querySelector('.adv-kv-key') : null;
+  var staticEl = row ? row.querySelector('.adv-kv-key-static') : null;
+  var name = nEl ? (nEl.value || '').trim() : (staticEl ? (staticEl.textContent || '').trim() : '');
+  var ctx = window._cfAdvCtx || {};
+  if (!name || !ctx.sceneId || !ctx.repoParam) {
+    if (window.app && app.showToast) app.showToast('当前上下文不支持取回明文');
+    return;
+  }
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = '<div style="background:#fff;border-radius:16px;padding:24px;min-width:300px;max-width:380px;box-shadow:0 12px 48px rgba(0,0,0,.15)">' +
+    '<div style="font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:8px">查看明文：' + name + '</div>' +
+    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">查看密钥明文需重新输入 Grape 密码确认，读取动作将记入审计日志。</div>' +
+    '<input id="cfRevealPwd" type="password" placeholder="Grape 密码" style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;margin-bottom:16px">' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+      '<button class="ap-btn" onclick="this.closest(\'[style*=fixed]\').remove()">取消</button>' +
+      '<button class="ap-btn" id="cfRevealConfirmBtn">确认</button>' +
+    '</div></div>';
+  document.body.appendChild(overlay);
+  var pwdInput = document.getElementById('cfRevealPwd');
+  if (pwdInput) pwdInput.focus();
+  document.getElementById('cfRevealConfirmBtn').onclick = function() {
+    var pwd = (document.getElementById('cfRevealPwd') || {}).value || '';
+    API.post('/scenes/' + encodeURIComponent(ctx.sceneId) + '/advanced-options/reveal?repo=' + encodeURIComponent(ctx.repoParam),
+      { name: name, password: pwd })
+      .then(function(d) {
+        overlay.remove();
+        input.value = (d && d.value) || '';
+        input.type = 'text';
+        input.removeAttribute('data-keep-value');
+        if (btn) btn.textContent = '🙈';
+      })
+      .catch(function(e) {
+        overlay.remove();
+        if (window.app && app.showToast) app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '取回明文失败');
+      });
+  };
+};
+
 const app = (() => {
   const $ = id => document.getElementById(id);
   const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account'];
+
+  // ── 非仓库视图清单（单一事实源）──
+  // 历史上 app.js 内有 4 份内容不一致的拷贝（restore 198 / check 1125 / nav 1458 /
+  // popstate 1785），漏改任意一份就是"视图守卫漂移"类 bug（如用户设置页弹引擎横幅）。
+  // 收敛为一份并集常量：合法 VIEWS 之外的历史遗留视图（scene-detail-local /
+  // autopilot / autopilot-detail / organizations）一并纳入，多排无害（它们都不
+  // 依赖仓库上下文，横幅/守卫跳过它们语义正确）。
+  const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'account'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -154,11 +215,59 @@ const app = (() => {
     } catch { return null; }
   }
 
+  // ── Issue #614：会话失效时统一清理明文凭据弹窗 ──
+  // showLogin 是所有登出路径（app.logout 手动登出 / doRefresh 失败 /
+  // handle401 无 retryFn 踢回登录）的最终汇聚点。在此集中关闭/清空
+  // 所有含明文秘钥的弹窗与面板，避免秘钥在无人值守屏幕上残留暴露。
+  function _clearSensitiveModals() {
+    // 1) 统一弹层：showModal/showPrompt（grapeModalOverlay）与 showConfirm（grapeConfirmOverlay）
+    closeModal();
+    closeConfirm();
+    // 2) 已知明文凭据面板：runtime 添加设备的凭据生成区 / AI Devspace 区
+    //    （runtimes.js 一次性渲染明文 token，清空 DOM 即清除秘钥）
+    var panelIds = ['addDeviceCredArea', 'addDeviceDevArea', 'aiDevspacePanel'];
+    for (var i = 0; i < panelIds.length; i++) {
+      var panel = document.getElementById(panelIds[i]);
+      if (panel) { panel.innerHTML = ''; panel.style.display = 'none'; }
+    }
+    // 3) 已知敏感弹窗：SRE 添加设备弹窗、侧边栏添加设备面板、
+    //    devspace 环境凭据弹窗（credModal_*，直含明文 token 安装命令）
+    var modalIds = ['sreAddDeviceOverlay', 'addDeviceOverlay'];
+    for (var j = 0; j < modalIds.length; j++) {
+      var modal = document.getElementById(modalIds[j]);
+      if (modal) modal.remove();
+    }
+    var credModals = document.querySelectorAll('[id^="credModal_"]');
+    for (var k = 0; k < credModals.length; k++) { credModals[k].remove(); }
+    // 4) 兜底：移除 body 直系子节点中 position:fixed 且 z-index∈[1000,9000)
+    //    的未知遮罩层（toast 9999/10000、warn 9999、帮助抽屉 9990/9991 不在
+    //    区间内，不受影响）
+    var overlays = document.querySelectorAll('body > div');
+    for (var m = 0; m < overlays.length; m++) {
+      var node = overlays[m];
+      var pos = (node.style && node.style.position) || '';
+      var z = parseInt((node.style && node.style.zIndex) || '', 10);
+      if (pos === 'fixed' && !isNaN(z) && z >= 1000 && z < 9000) { node.remove(); }
+    }
+  }
+
   function showLogin() {
+    // Issue #614：会话失效统一清理明文凭据弹窗（所有登出路径的汇聚点，
+    // 与下方 UC16e 停轮询同一收口语义）
+    _clearSensitiveModals();
     document.documentElement.removeAttribute('data-logged-in');
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
+    // UC16e（#535 S9）：被踢回登录页时停掉后台轮询定时器——
+    // 此前 doRefresh 失败清 token + showLogin 后，dashboard 30s 轮询
+    // 仍在裸发 401（token 已清走「无 token」静默分支），用户只看到
+    // 数据不动、得不到「请重新登录」的明确引导。showLogin 是所有
+    // 踢人路径（refresh 失败/手动登出/token 失效）的统一收口，在此
+    // 停轮询 = 一次修复覆盖全部入口。
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // Issue #600：离开/被踢时停掉流水线卡片轮询
+    if (typeof stopPipePolling === 'function') stopPipePolling();
     // 清除当前视图状态——退出/过期后重新登录时 _restoreNavAfterLogin 需要重新路由
     window._currentView = '';
     renderOAuthButtons();
@@ -195,14 +304,20 @@ function loadAgentTypes() {
     const hash = window.location.hash;
     const user = JSON.parse(localStorage.getItem('user') || '{}');
     const bindings = user.bindings || [];
-    const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail', 'account'];
+    const noRepoViews = NO_REPO_VIEWS;
 
     if (hash && hash.length > 1) {
-      // 有 hash 路由 → 恢复到该页面
+      // 有 hash 路由 → 恢复到该页面。
+      // 一键部署闭环（复现修复）：未绑定平台的新用户带 hash 进入时（注册页跳转/
+      // OAuth 回调携带 hash），原逻辑直接 nav() 落在空 dashboard，绕过绑定引导页
+      // ——用户首次进入看不到 GitCode/GitHub 绑定提示，只剩密码补全条。
+      // 修正：未绑定且无当前仓库 → 一律引导页（hash 丢弃）；绑定引导完成后正常走路由。
       const parts = hash.substring(1).split('/');
       const view = parts[0];
       const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-      if (noRepoViews.includes(view) || currentRepo()) {
+      if (bindings.length === 0 && !currentRepo()) {
+        goToRepos();
+      } else if (noRepoViews.includes(view) || currentRepo()) {
         nav(view, param);
       } else {
         nav('dash');
@@ -512,6 +627,36 @@ function loadAgentTypes() {
         if (_u.bindings.indexOf(bindSuccess) < 0) _u.bindings.push(bindSuccess);
         localStorage.setItem('user', JSON.stringify(_u));
       } catch(e) {}
+      // 引导页成功反馈（苹果式完成感）：绑定的卡片原地变"已绑定 ✓"品牌态，
+      // 光圈/箭头静默，1.6s 后再进仓库列表——替代"toast 一闪就跳走"的断崖
+      var _card = document.querySelector('.ob-bind-card.' + bindSuccess + '-card, .ob-bind-card[data-provider="' + bindSuccess + '"]');
+      if (!_card) {
+        // 兜底：按卡片 onclick 里的 provider 匹配
+        document.querySelectorAll('.ob-bind-card').forEach(function(c) {
+          if ((c.getAttribute('onclick') || '').indexOf(bindSuccess) >= 0) _card = c;
+        });
+      }
+      if (!_card || !document.querySelector('.ob-hero')) {
+        // 时序兜底：OAuth 回跳时回调处理先于引导页渲染（init 顺序）——
+        // 存 pending，_renderOnboardingShell 渲染完成后再应用成功态
+        try { sessionStorage.setItem('ob_pending_bind_success', bindSuccess); } catch (e) {}
+      }
+      if (_card && document.querySelector('.ob-hero')) {
+        try {
+          document.querySelectorAll('.ob-bind-card').forEach(function(c) { c.classList.add('bound'); });
+          var _h = document.querySelector('.ob-hero'); if (_h) _h.classList.add('ob-bound-done');
+          _card.classList.add('just-bound');
+          _card.insertAdjacentHTML('beforeend',
+            '<div class="ob-bound-check" style="position:absolute;top:12px;right:12px;width:26px;height:26px;border-radius:50%;'
+            + 'background:linear-gradient(135deg,#34c759,#30d158);display:flex;align-items:center;justify-content:center;'
+            + 'box-shadow:0 2px 8px rgba(52,199,89,.4)">'
+            + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>');
+          setTimeout(function() { loadRepos(); }, 1600);
+          var cleanUrl0 = window.location.pathname + window.location.hash;
+          window.history.replaceState({}, '', cleanUrl0);
+          return;
+        } catch (e) {}
+      }
       // 清除 URL 参数
       var cleanUrl = window.location.pathname + window.location.hash;
       window.history.replaceState({}, '', cleanUrl);
@@ -558,6 +703,8 @@ function loadAgentTypes() {
 
   // 用户设置返回工作台
   function _accountGoBack() {
+    // 优先级补位：从安全设置返回时安全横幅可能已被处理，补检被抑制的引擎引导
+    setTimeout(function() { _checkEngineBanner(); }, 100);
     var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
     // 先检查绑定状态——未绑定直接回引导页，不走 nav('dash') 避免 403
     var _u = JSON.parse(localStorage.getItem('user') || '{}');
@@ -772,6 +919,13 @@ function loadAgentTypes() {
     console.log("[loadRepos] repos", JSON.stringify({total: repos.length, managed: managedRepos.length}));
     initSidebarRepos();
     const current = currentRepo();
+    // 引擎兜底引导仅服务"已进入仓库上下文（有选中仓库）"的场景（dash 渲染时
+    // dashboard.js 会调 app._checkEngineBanner 补位）。此处调用只覆盖"有仓库
+    // 工作台"分支的进入路径；零托管仓库分支（managedRepos.length===0，落 repos
+    // 项目大厅）不弹——该场景用户的第一要务是托管仓库，引擎引导属于超前打扰
+    //（历史注释曾写"两个分支都需要兜底引导"，与 _checkEngineBanner 的
+    // NO_REPO_VIEWS 视图守卫矛盾，已修正——守卫本来就会拦掉 repos 视图）。
+    if (managedRepos.length > 0) _checkEngineBanner();
 
     if (managedRepos.length === 0) {
       _pushHistory('repos', null);
@@ -927,6 +1081,11 @@ function loadAgentTypes() {
       '<button class="bt bt-p" style="font-size:12px;padding:4px 12px" onclick="app.nav(\'account\',\'security\')">' + I18N.t('app.login.go_to_settings') + '</button>' +
       '<button class="bt bt-o" style="font-size:12px;padding:4px 12px" onclick="app._dismissOAuthCompletion()">' + I18N.t('app.login.skip') + '</button>';
     document.body.appendChild(banner);
+    // 优先级显式化（替代隐式 z-index 遮挡）：安全横幅显示前主动摘掉引擎横幅。
+    // 此前两横幅靠 9999 盖 9998 维持互斥，引擎横幅会作为"幽灵 DOM"留在场上，
+    // 补位链任一环漏调即成不可见残留；显式摘除后互斥由代码保证，不靠运气。
+    var _eb = document.getElementById('engineBanner');
+    if (_eb) _eb.remove();
     document.body.style.paddingTop = '44px';
   }
 
@@ -936,7 +1095,14 @@ function loadAgentTypes() {
     localStorage.setItem(skipKey, '1');
     const banner = document.getElementById('oauthCompletionBanner');
     if (banner) banner.remove();
-    document.body.style.paddingTop = '';
+    // 对称复位：engineBanner 可能在场（本次安全横幅是补位/并存路径弹出的），
+    // 无条件清 paddingTop 会把内容顶进残留横幅的遮挡区（见 _hideEngineBannerOnly）
+    if (!document.getElementById('engineBanner')) {
+      document.body.style.paddingTop = '';
+    }
+    // 优先级补位：安全横幅退出后，被抑制的引擎引导立即补检（幂等——
+    // _checkEngineBanner 内部有 DOM/needs_worker/skip-key 多重守卫，不会重复弹）
+    setTimeout(function() { _checkEngineBanner(); }, 100);
   }
 
   function _renderBindingGuide() {
@@ -948,6 +1114,10 @@ function loadAgentTypes() {
     // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
     API.get('/auth/providers').then(function(d) {
       var providers = d.providers || [];
+      // #535 修复：写入共享缓存 _accountProvidersData——引导页 → bindProvider →
+      // _accountBindProvider 读同一缓存判断 OAuth tab；此前只有账号安全 tab 填充它，
+      // 引导路径缓存为 null 被保守猜成「未配置」（配合 account.js 的 fetch 兜底双保险）
+      if (typeof _accountProvidersData !== 'undefined') _accountProvidersData = d;
       _renderOnboardingShell(providers, isZh, name, avatar);
     }).catch(function() {
       // Fallback: show both platforms
@@ -1017,8 +1187,131 @@ function loadAgentTypes() {
 
     d.innerHTML = html;
     d.classList.add('ob-mode');
+    // 入场终态兜底：0.7s 后锁定 opacity:1（.ob-shown）——
+    // 修复：点击绑定加 .bound 停动画时 obBindIn 的 forwards 终态被抹掉 → 卡片隐形
+    setTimeout(function() {
+      document.querySelectorAll('.ob-bind-card').forEach(function(c) { c.classList.add('ob-shown'); });
+    }, 1500);  // 级联最迟 ~1.2s，兜底留余量
+    // OAuth 回跳的迟到成功态：卡片此刻才存在，应用"已绑定 ✓"再进仓库列表
+    try {
+      var _pending = sessionStorage.getItem('ob_pending_bind_success');
+      if (_pending) {
+        sessionStorage.removeItem('ob_pending_bind_success');
+        var _pc = null;
+        document.querySelectorAll('.ob-bind-card').forEach(function(c) {
+          if ((c.getAttribute('onclick') || '').indexOf(_pending) >= 0) _pc = c;
+        });
+        if (_pc) {
+          document.querySelectorAll('.ob-bind-card').forEach(function(c) { c.classList.add('bound'); });
+          var _ph = document.querySelector('.ob-hero'); if (_ph) _ph.classList.add('ob-bound-done');
+          _pc.classList.add('just-bound');
+          _pc.insertAdjacentHTML('beforeend',
+            '<div class="ob-bound-check" style="position:absolute;top:12px;right:12px;width:26px;height:26px;border-radius:50%;'
+            + 'background:linear-gradient(135deg,#34c759,#30d158);display:flex;align-items:center;justify-content:center;'
+            + 'box-shadow:0 2px 8px rgba(52,199,89,.4)">'
+            + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>');
+          setTimeout(function() { loadRepos(); }, 1600);
+        }
+      }
+    } catch (e) {}
     _updateTbOrgName();
     _updateLobbyOrgName();
+    // 时序 gating：未绑定平台时不做引擎引导（先 token 后引擎，见需求文档 O*/B* 场景修订）
+  }
+
+  function _copyEngineCmd(btn) {
+    var code = btn.parentElement && btn.parentElement.querySelector('code');
+    var text = code ? code.textContent : '';
+    if (navigator.clipboard && text) {
+      navigator.clipboard.writeText(text).then(function() {
+        var old = btn.textContent; btn.textContent = I18N.t('app.login.ob_engine_copied');
+        setTimeout(function() { btn.textContent = old; }, 1500);
+      });
+    }
+  }
+
+  // ── 引擎不可用横幅（已绑定用户兜底引导，B 场景）──
+  // 引导页卡片只覆盖"无绑定新用户"；已绑定用户直接进工作台，引擎不可用时
+  // 由本横幅兜底（可关闭并记忆，复用 OAuth 补全横幅的 localStorage 模式）。
+  // worker 上线后 needs_worker=false → 横幅自动不再出现（每次进工作台重查）。
+  function _checkEngineBanner() {
+    // 时序链（最终版）：token → 仓库 → 引擎。引擎引导只在用户已进入仓库
+    // 上下文（选中了具体仓库）后触发——此时 token 与仓库均就绪，缺的只是
+    // 引擎。仓库列表/绑定后不弹（避免在没托管仓库前提引擎）。
+    var _bu = JSON.parse(localStorage.getItem('user') || '{}');
+    if (!(_bu.bindings || []).length) return;      // 未绑定：引导页专心配 token
+    if (!currentRepo()) return;                     // 未进入仓库：不提引擎
+    if (localStorage.getItem('engine_banner_skipped_' + (_bu.username || ''))) return;
+    API.get('/runtime/engine-onboarding').then(function(d) {
+      if (!d || !d.needs_worker) return;
+      // 视图守卫：引擎引导是仓库维度的提示，非仓库视图（用户设置/任务/事件等）
+      // 不弹——与 runtimes 页（页内已有空态引导）同一类排除，复用 NO_REPO_VIEWS
+      // 单一事实源。currentRepo() 读的是 localStorage 持久化的
+      // "最近选中仓库"，不代表用户当前正在看仓库视图，故必须另行按 _currentView 判断。
+      if (NO_REPO_VIEWS.indexOf(window._currentView) >= 0) return;
+      if (document.getElementById('engineBanner')) return;  // 已显示
+      // 全局横幅优先级（Adobe Spectrum 替换式，评审采纳）：安全补全 > 引擎引导。
+      // 安全横幅在场时引擎引导不显示（单向抑制，不互推不偏移）；
+      // 其退出路径会主动调 _checkEngineBanner() 补位（见 _dismissOAuthCompletion/
+      // account 安全设置完成后的 nav 返回）。
+      var _ob = document.getElementById('oauthCompletionBanner');
+      if (_ob) {
+        // 排队可见：安全横幅在场 → 引擎引导被抑制，但在密码条上给出轻量指示
+        // （纯文本 chip，无按钮无交互）——用户处理完安全条，补位检查会自动接上。
+        // 不加指示时用户对"后面还有一条提示在等"零预期，补位横幅出现像惊吓。
+        if (!document.getElementById('engineBannerQueued')) {
+          var _chip = document.createElement('span');
+          _chip.id = 'engineBannerQueued';
+          _chip.style.cssText = 'font-size:11px;color:var(--t3);opacity:.8;margin-left:8px;padding:2px 10px;border:1px solid var(--b);border-radius:999px;white-space:nowrap';
+          _chip.textContent = I18N.t('app.login.engine_banner_queued_hint') || '+1';
+          _ob.appendChild(_chip);
+        }
+        return;
+      }
+      var banner = document.createElement('div');
+      banner.id = 'engineBanner';
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9998;background:rgba(255,204,0,0.12);border-bottom:1px solid rgba(255,204,0,0.3);padding:10px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--t)';
+      banner.innerHTML =
+        '<span>' + I18N.t('app.login.ob_engine_banner_hint') + '</span>'
+        + '<button class="bt bt-p" style="font-size:12px;padding:4px 12px" onclick="app._gotoEnginePage()">' + I18N.t('app.login.ob_engine_banner_btn') + '</button>'
+        + '<button class="bt bt-o" style="font-size:12px;padding:4px 12px" onclick="app._dismissEngineBanner()">' + I18N.t('app.login.skip') + '</button>';
+      document.body.appendChild(banner);
+      document.body.style.paddingTop = '44px';
+    }).catch(function() { /* 静默 */ });
+  }
+
+  function _dismissEngineBanner() {
+    var user = JSON.parse(localStorage.getItem('user') || '{}');
+    localStorage.setItem('engine_banner_skipped_' + (user.username || ''), '1');
+    var b = document.getElementById('engineBanner');
+    if (b) b.remove();
+    // 跳过路径同样不能无条件清 paddingTop（安全横幅可能在场，见 _hideEngineBannerOnly）
+    if (!document.getElementById('oauthCompletionBanner')) {
+      document.body.style.paddingTop = '';
+    }
+  }
+
+  // 仅隐藏引擎横幅（不写 skip-key）：供 nav 切到非仓库视图时退场用。
+  // paddingTop 复位必须带 oauthCompletionBanner 在场检查——两条横幅共用同一个
+  // body padding（44px），无条件清零会把安全横幅下面的页面内容顶进遮挡区。
+  // 反向同理：_dismissOAuthCompletion / _checkOAuthCompletion 各自复位前先看
+  // 对方是否在场，双向闭合，杜绝"内容被横幅盖住 44px"的竞态。
+  function _hideEngineBannerOnly() {
+    var b = document.getElementById('engineBanner');
+    if (!b) return;
+    b.remove();
+    if (!document.getElementById('oauthCompletionBanner')) {
+      document.body.style.paddingTop = '';
+    }
+  }
+
+  function _gotoEnginePage() {
+    // 时序引导（需求修订）：绑定完成后直接进入引擎页面——那里有完整的
+    // 接入 UI（安装命令/复制/凭据管理），不在横幅弹窗里堆命令文本。
+    // 跳转后自动展开"添加设备"面板（runtimes.js 渲染完成后消费此标记）
+    _dismissEngineBanner();
+    window._rtOpenPanelOnEnter = true;
+    nav('runtimes');
   }
 
   // ── 离开引导页时清理标记 class ──
@@ -1033,7 +1326,7 @@ function loadAgentTypes() {
       + '<div class="ob-hero-logo"><img src="/static/img/grape-logo.jpg?v=1" alt="Grape"></div>'
       + '<h1 class="ob-hero-title" data-i18n="app.login.ob_cta_title">' + I18N.t('app.login.ob_cta_title') + '</h1>'
       + '<p class="ob-hero-sub" data-i18n="app.login.ob_cta_sub">' + I18N.t('app.login.ob_cta_sub') + '</p>'
-      + '<div class="ob-hero-bind">' + platformCards + '</div>'
+      + '<div class="ob-hero-bind" data-guide="' + _esc(I18N.t('app.login.ob_bind_guide')) + '">' + platformCards + '</div>'
       + '<p class="ob-hero-hint" data-i18n="app.login.ob_hero_hint">' + I18N.t('app.login.ob_hero_hint') + '</p>'
       + '</section>';
   }
@@ -1119,6 +1412,7 @@ function loadAgentTypes() {
     });
   }
 
+  // UC16e：dashboard 轮询定时器（showLogin 统一收口清理，声明前置避免 TDZ 风险）
   let _refreshTimer = null;
   let _currentParam = null;
   let _hiddenSince = 0;
@@ -1292,6 +1586,11 @@ function loadAgentTypes() {
   function nav(view, param) {
     // 离开引导页模式：清理 .ct.ob-mode 标记
     _obExitMode();
+    // 引擎横幅退场（语义对齐 _gotoEnginePage）：无论从哪条路径进入引擎页
+    // （侧栏菜单/直链），横幅使命已完成——移除并恢复 padding，与横幅按钮
+    // 跳转后的行为一致；_checkEngineBanner 的 runtimes 守卫只防"新弹"，
+    // 不退"已在场"的横幅（实测复现：侧栏进入后横幅残留）。
+    if (view === 'runtimes') _dismissEngineBanner();
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
     if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
       return;
@@ -1299,7 +1598,7 @@ function loadAgentTypes() {
     const repo = currentRepo();
     // 需求17: 未绑定平台守卫——依赖仓库的视图需检查 bindings
     var _repoDependentViews = ['dash', 'pipe', 'vod', 'issue', 'coding', 'qa', 'sre', 'chat', 'im-channel', 'skills', 'skill', 'knowledge', 'scene-market', 'scene-detail', 'scene-detail-local'];
-    var _nonRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'observability', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'organizations', 'account'];
+    var _nonRepoViews = NO_REPO_VIEWS;
     if (!repo && _repoDependentViews.indexOf(view) >= 0) {
       // 检查是否未绑定
       var _u = JSON.parse(localStorage.getItem('user') || '{}');
@@ -1391,6 +1690,17 @@ function loadAgentTypes() {
     window._currentView = view;
     // 需求24: 进入非引导页时显示未绑定提示条（在 _currentView 设置后检查）
     _showBindBannerIfNeeded();
+    // 引擎引导横幅是仓库维度的提示：进入非仓库视图时隐藏（仅摘 DOM+复位
+    // paddingTop，不写 skip-key——"这里不显示"不等于"永久跳过"），返回仓库
+    // 视图时既有补位调用（_accountGoBack/loadRepos）会按守卫自动重弹。
+    // runtimes 页沿用既有 _dismissEngineBanner 语义（页内已有空态引导）。
+    if (view !== 'runtimes' && _nonRepoViews.indexOf(view) >= 0) {
+      _hideEngineBannerOnly();
+      // 顺带清理过期意图：_rtOpenPanelOnEnter 是"跳转引擎页自动开面板"的一次性
+      // 标记，若用户中途改道去了别的视图，标记会残留在 window 上——下次任意
+      // 时刻进引擎页都会无故自动弹面板。nav 离开引导链即作废。
+      window._rtOpenPanelOnEnter = false;
+    }
     // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
     // account/organizations 分支自行隐藏 sidebar，此处统一恢复 tb/mainView
     if (view !== 'repos') {
@@ -1406,6 +1716,11 @@ function loadAgentTypes() {
     if (view !== 'chat' && typeof _stopOnboardPoll === 'function') _stopOnboardPoll();
     // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
     window._dashboardEditing = false;
+    // 同家族泄漏（D 审计，2026-10-28）：_isCreateMode 原先只在"返回按钮/创建成功/创建
+    // 失败"三条路径重置，用户直接点侧栏离开场景创建流程时残留 true——下次渲染 dash
+    // 智能体卡片仍按创建模式跳过 skill 名显示（幽灵行为，与 _rtOpenPanelOnEnter 同款）。
+    // nav 离开即统一复位（dashboard.js 有 _resetCreateMode，但闭包外用 window 直清等效）
+    window._isCreateMode = false;
 
     if (repo) {
       // F5 refresh: ensure sidebar repo dropdown is populated even when
@@ -1436,16 +1751,39 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       window._dashboardEditing = false;
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
-      const loadDash = () => Promise.all([
+      // Issue #501: 场景列表分页——不带 page 的老调用方不受影响，前端带 page 时后端按页切片
+      // 切换仓库时页码/搜索词归位，避免带着旧仓库的页码拉新仓库（越界返回空列表）
+      if (window._sceneListRepo !== (repo.fullName || '')) {
+        window._sceneListRepo = repo.fullName || '';
+        window._sceneListPage = 1;
+        window._sceneListQ = '';
+      }
+      // 检索参数（Issue #501 增量）：q 为空串时不携带，保持 URL 简洁。
+      // 必须在 loadDash 内部取值——闭包外取值会被 30s 自动刷新/_sceneReload 复用旧 q，静默丢搜索词
+      const loadDash = () => {
+        const _q = (window._sceneListQ || '').trim();
+        const _qParam = _q ? '&q=' + encodeURIComponent(_q) : '';
+        const _sort = window._sceneListSort || 'id';
+        const _sortParam = _sort !== 'id' ? '&sort=' + encodeURIComponent(_sort) : '';
+        return Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
-        API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
+        // Issue #501 A 方案：卡片+技能链合并为 with-pipeline 单一来源（原 /scenes+with-pipeline
+        // 双请求查同表同页数据双倍付费，30s 自动刷新每轮省 1 请求 1 次 DB 读）
+        API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(repo.owner + '/' + repo.name) + '&page=' + (window._sceneListPage || 1) + '&page_size=' + (window._sceneListPageSize || 20) + _qParam + _sortParam),
       ]).then(([dashData, scenesData]) => {
         if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
+        // Issue #501 深审优化：挂到 window 供场景分页条局部重载（替代整页 app.nav('dash')）
+        window._sceneReload = loadDash;
         // R14.17: dashboard 成功加载时清除 403 去重列表，权限恢复后可切回之前 403 的仓库
         window._tried403Repos = null;
         dashData._scenes = scenesData.scenes || [];
+        // 分页角标/分页条用跨页总数 total（老后端无 total 时回退当前页条数）
+        dashData._scenesTotal = (typeof scenesData.total === 'number') ? scenesData.total : (scenesData.scenes || []).length;
+        // A 方案：同一响应直接产出技能链映射，dashboard.js 不再二次拉 with-pipeline
+        dashData._pipelines = {};
+        (scenesData.scenes || []).forEach(s => { dashData._pipelines[s.id] = s.pipeline || {}; });
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
@@ -1484,12 +1822,15 @@ function loadAgentTypes() {
         }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
       });
+      };
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      // Issue #600：流水线卡片轮询——重派成功/新终态到达后自动刷新，无手动刷新依赖
+      if (typeof startPipePolling === 'function') startPipePolling();
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
@@ -1600,7 +1941,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'account'];
+          const noRepoViews = NO_REPO_VIEWS;
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -1622,12 +1963,90 @@ function loadAgentTypes() {
   function oauthLogin(provider) {
     // 登录场景：全页重定向（业界标准，兼容性最强）
     // 弹窗模式仅用于已登录态的绑定场景（见 account.js _accountDoOauthBind）
+    // B+（Issue #535）：配置状态已知且未配置 → 不发请求直接给出原因+文档入口；
+    // 状态未知（providers 未返回/检测失败）→ 走下方 API 的 A 兜底路径
+    if (_oauthConfiguredMap && _oauthConfiguredMap[provider] === false) {
+      var _nm0 = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _lt0 = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
+      showToast(
+        I18N.t('app.login.oauth_not_configured', {name: _nm0}, _nm0 + ' OAuth 未配置，' + _nm0 + ' 登录暂不可用'),
+        I18N.t('app.login.oauth_not_configured_hint', {name: _nm0}, '请使用用户名+密码注册登录'),
+        6000,
+        {text: _lt0, url: _oauthDocUrl(provider)}
+      );
+      return;
+    }
     API.get('/auth/login/' + provider + '?lang=' + I18N.getLang()).then(function(d) {
       if (d.redirect_url) window.location.href = d.redirect_url;
-    }).catch(function() {
-      // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册后绑定 token
-      showToast(I18N.t('app.login.oauth_not_configured_hint') || I18N.t('app.login.oauth_not_configured') || 'OAuth未配置');
+    }).catch(function(e) {
+      // R7.5 + P0：区分「未配置」与其他失败（网络/限流/5xx），避免误导用户去查配置
+      // - 400 且 detail 含「未配置」→ 未配置文案 + 配置帮助深链
+      // - 其余（网络瞬断 / 429 限流 / 5xx）→ 通用失败提示，不走配置文案
+      var _isNotConfigured = e && e.status === 400 &&
+        /未配置|not configured/i.test(String(e.message || (e.detail && e.detail.message) || ''));
+      if (!_isNotConfigured) {
+        showToast(I18N.t('app.login.oauth_request_failed', null, errMsg(e) || '请求失败，请稍后重试'), '', 4000);
+        return;
+      }
+      // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册；附帮助文档链接（OAuth App 配置指南）
+      var _nm = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _doc = {
+        gitcode: '/static/help.html#/developer/01-gitcode-integration',
+        github: '/static/help.html#/developer/02-github-integration'
+      }[provider] || '/static/help.html';
+      var _linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
+      showToast(
+        I18N.t('app.login.oauth_not_configured', {name: _nm}, _nm + ' OAuth 未配置，' + _nm + ' 登录暂不可用'),
+        I18N.t('app.login.oauth_not_configured_hint', {name: _nm}, '请使用用户名+密码注册登录'),
+        6000,
+        {text: _linkText, url: _doc}
+      );
     });
+  }
+
+  // B+（Issue #535）：provider 配置状态表——renderOAuthButtons 从 /auth/providers 填充；
+  // 未加载（状态未知）时不置灰、不拦截，点击走 API 的 A 兜底路径
+  var _oauthConfiguredMap = null;
+
+  // FOUC 修复（#535）：服务端在 HTML head 注入 window.__OAUTH_CONFIGURED__（与注册页
+  // __EMAIL_CONFIGURED__ 同模式）。app.js 为 defer——DOM 已就绪，此同步块在首帧渲染
+  // 前执行：预渲染按钮直接带上正确的 aria-disabled + 常显说明行，不出现
+  // 「先常亮 123ms、providers 返回后再置灰」的闪动。已配置场景注入值即为 true，
+  // 按钮保持常亮，无中间态，行为与之前完全一致。
+  // 注意：_oauthConfiguredMap 仍初始为 null——服务端未注入（如本地 file:// 打开、
+  // 或未来新增入口页）时维持 A 兜底，不会误判。
+  (function _applyInjectedOAuthState() {
+    try {
+      var inj = window.__OAUTH_CONFIGURED__;
+      if (!inj || typeof inj !== 'object') return;
+      var container = document.getElementById('oauthBtns');
+      if (!container) return;
+      var anyUnconfigured = false;
+      Object.keys(inj).forEach(function(provider) {
+        var key = "app.oauthLogin('" + provider + "')";
+        var btns = container.querySelectorAll('.oauth-btn');
+        for (var i = 0; i < btns.length; i++) {
+          if ((btns[i].getAttribute('onclick') || '').indexOf(key) >= 0) {
+            if (inj[provider]) btns[i].removeAttribute('aria-disabled');
+            else { btns[i].setAttribute('aria-disabled', 'true'); anyUnconfigured = true; }
+            break;
+          }
+        }
+      });
+      if (anyUnconfigured) {
+        var providers = Object.keys(inj).map(function(k) {
+          return { provider: k, name: {gitcode: 'GitCode', github: 'GitHub'}[k] || k, configured: !!inj[k] };
+        });
+        _renderOAuthUnconfiguredHint(container, providers);
+      }
+    } catch (e) { /* 注入缺失/格式异常 → 维持预渲染常亮 + A 兜底 */ }
+  })();
+
+  function _oauthDocUrl(provider) {
+    return {
+      gitcode: '/static/help.html#/developer/01-gitcode-integration',
+      github: '/static/help.html#/developer/02-github-integration'
+    }[provider] || '/static/help.html';
   }
 
   // OAuth provider 图标 SVG（UX-2 修复：内置已知平台图标，未知平台用首字母降级）
@@ -1649,11 +2068,29 @@ function loadAgentTypes() {
     if (!container) return;
     API.get('/auth/providers').then(function(d) {
       var providers = d.providers || [];
-      // R7.5: 所有平台始终显示（不过滤 configured），未配 OAuth App 时点击弹提示
+      // R7.5: 所有平台始终显示（不过滤 configured）
       if (providers.length === 0) {
         if (section) section.style.display = '';  // 确保可见
         return;
       }
+      // B+（Issue #535）：记录配置状态表——oauthLogin 前置判断用（状态未知=null 不拦截）
+      _oauthConfiguredMap = {};
+      providers.forEach(function(p) {
+        _oauthConfiguredMap[p.provider] = !!p.configured;
+      });
+      // FOUC 修复闭环：head 注入的 oauth-<provider>-not-configured 类是首帧快照，
+      // providers 返回的运行时状态才是权威——不一致时按平台粒度纠正类名（例：注入时
+      // gitcode 未配置、加载间隙管理员已配好 → 移除该类，按钮恢复常亮；反之亦然），
+      // 避免「视觉置灰但实际可登录」/「视觉常亮但点击被拦」的错位。按平台而非
+      // all-or-nothing：单平台配置时另一平台的状态变化互不干扰。
+      var _de = document.documentElement;
+      providers.forEach(function(p) {
+        var _cls = 'oauth-' + p.provider + '-not-configured';
+        if (p.configured) _de.classList.remove(_cls);
+        else _de.classList.add(_cls);
+      });
+      // oauth-configured 类仍由整体状态决定（hint 显隐的语义锚点：全配置=隐藏）
+      _de.classList.toggle('oauth-configured', providers.every(function(p) { return !!p.configured; }));
       // 预渲染按钮已在 HTML 中，只在平台列表不一致时才重新渲染
       var existingBtns = container.querySelectorAll('.oauth-btn');
       var existingNames = Array.prototype.map.call(existingBtns, function(b) {
@@ -1674,12 +2111,63 @@ function loadAgentTypes() {
           var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
           var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
           var brandVar = _brandColor ? ' style="--brand:' + _brandColor + '"' : '';
-          return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + brandVar + '>'
+          var ariaVar = p.configured ? '' : ' aria-disabled="true"';
+          return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + ariaVar + brandVar + '>'
             + icon + '<span data-i18n="' + i18nKey + '">' + p.name + '</span></button>';
         }).join('');
         if (typeof I18N !== 'undefined' && I18N.apply) I18N.apply();
+      } else {
+        // 预渲染按钮：按 configured 同步 aria-disabled（不用真 disabled，保留点击可解释）
+        providers.forEach(function(p) {
+          var key = "app.oauthLogin('" + p.provider + "')";
+          for (var j = 0; j < existingBtns.length; j++) {
+            if ((existingBtns[j].getAttribute('onclick') || '').indexOf(key) >= 0) {
+              if (p.configured) existingBtns[j].removeAttribute('aria-disabled');
+              else existingBtns[j].setAttribute('aria-disabled', 'true');
+              break;
+            }
+          }
+        });
       }
-    }).catch(function() { /* 预渲染按钮保留，不隐藏 */ });
+      _renderOAuthUnconfiguredHint(container, providers);
+    }).catch(function() { /* 预渲染按钮保留，不隐藏（状态未知=A 兜底） */ });
+  }
+
+  // B+（Issue #535）：未配置平台的常显说明。FOUC 修复后说明行 DOM 预置在
+  // index.html（display:none），CSS 按注入 html 类首帧显示——此函数只负责按
+  // 运行时权威状态更新内容（平台名单/深链）与显隐（全部已配置时隐藏）。
+  // 文本走 data-i18n + data-i18n-vars：I18N 包加载完成 / setLang 时
+  // applyI18nToDOM 自动刷新（语言切换/慢网络包晚到均不残留）。
+  function _renderOAuthUnconfiguredHint(container, providers) {
+    var el = document.getElementById('oauthUnconfiguredHint');
+    if (!el) return;
+    var unconfigured = providers.filter(function(p) { return !p.configured; });
+    if (unconfigured.length === 0) {
+      el.style.display = 'none';
+      return;
+    }
+    var names = unconfigured.map(function(p) {
+      return {gitcode: 'GitCode', github: 'GitHub'}[p.provider] || (p.name || p.provider);
+    }).join(' / ');
+    var linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
+    var hint = I18N.t('app.login.oauth_needs_config', {name: names},
+      names + ' 登录需要管理员先配置 OAuth 后才能使用');
+    // 更新预置 DOM：文案 span（保 data-i18n 结构）+ 深链 href（按第一个未配置平台）
+    var span = el.querySelector('span[data-i18n="app.login.oauth_needs_config"], span[data-i18n="app.login.oauth_needs_config_generic"]');
+    if (span) {
+      // 预置是 generic key（不点名）；拿到真实名单后切到带 {name} 的 key 并设 vars，
+      // 后续语言切换时 applyI18nToDOM 会用新 key + vars 渲染精确文案
+      span.setAttribute('data-i18n', 'app.login.oauth_needs_config');
+      span.setAttribute('data-i18n-vars', JSON.stringify({name: names}));
+      span.textContent = hint;
+    }
+    var a = el.querySelector('a');
+    if (a) {
+      a.setAttribute('href', _oauthDocUrl(unconfigured[0].provider));
+      var ls = a.querySelector('span[data-i18n="app.login.oauth_view_config_help"]');
+      if (ls) ls.textContent = linkText;
+    }
+    el.style.display = '';
   }
 
   // 内测申请表单
@@ -2188,6 +2676,11 @@ function openBetaApply() {
     var cp = $('cpConfirm').value.trim();
     if (!curr || !np || !cp) return showToast(I18N.t('app.login.fill_all_fields'));
     if (np !== cp) return showToast(I18N.t('app.login.password_mismatch'));
+    // 弱密码黑名单前端预检（复核 #3，2026-10-28）：改密与注册同源消费——
+    // 消除"前端全绿、后端拒绝"的不一致（后端 /auth/change-password 有同名单校验）
+    if (window.isWeakPassword(np)) {
+      return showToast(I18N.t('app.login.err_password_blocklist'));
+    }
     API.post('/auth/change-password', {current_password: curr, new_password: np}).then(function(d) {
       if (d.token) { localStorage.setItem('token', d.token); API.setToken(d.token); }
       closeConfirm();
@@ -2223,6 +2716,10 @@ function openBetaApply() {
     var code = $('spCode').value.trim();
     var pwd = $('spPwd').value.trim();
     if (!code || !pwd) return showToast(I18N.t('app.login.fill_all_fields'));
+    // 弱密码黑名单前端预检（复核 #3）：设密与注册同源消费（谓词见 pwd-blocklist.js）
+    if (window.isWeakPassword(pwd)) {
+      return showToast(I18N.t('app.login.err_password_blocklist'));
+    }
     API.post('/auth/set-password', {code: code, new_password: pwd}).then(function() {
       closeConfirm();
       showToast(I18N.t('app.login.password_set'));
@@ -2270,6 +2767,12 @@ function openBetaApply() {
   }
 
   function bindProvider(provider) {
+    // 引导高亮：用户点击绑定卡片后停止光圈/箭头/气泡（交互已达成）
+    try {
+      document.querySelectorAll('.ob-bind-card').forEach(function(c) { c.classList.add('bound'); });
+      var _h = document.querySelector('.ob-hero');
+      if (_h) _h.classList.add('ob-bound-done');
+    } catch (e) {}
     // 复用设置页的绑定模态框——OAuth + 手动令牌 + spinner + 转移确认 + 成功反馈
     if (typeof _accountBindProvider === 'function') {
       _accountBindProvider(provider);
@@ -2428,7 +2931,7 @@ function openBetaApply() {
     return I18N.t('common.request_failed', {status: (e && e.status) || 0}) || 'Request failed';
   }
 
-  function showToast(msg, desc, duration) {
+  function showToast(msg, desc, duration, link) {
     // Issue #199: 先移除已有 Toast，避免连续提示叠加
     var existing = document.querySelector('[role="status"].app-toast');
     if (existing) existing.remove();
@@ -2441,8 +2944,15 @@ function openBetaApply() {
     t.classList.add('app-toast');
     // 有描述时显示主文案(粗体) + 描述(小字)
     if (desc) {
+      var _linkHtml = '';
+      if (link && link.url) {
+        // 可选操作链接（如「查看配置帮助」）——挂在 desc 区，点击不关闭 Toast
+        _linkHtml = ' <a href="' + _esc(link.url) + '" target="_blank" rel="noopener" '
+          + 'style="color:#7ab8ff;text-decoration:underline;cursor:pointer" onclick="event.stopPropagation()">'
+          + _esc(link.text || link.url) + '</a>';
+      }
       t.innerHTML = '<div style="font-weight:600">' + _esc(msg) + '</div>'
-        + '<div style="font-size:11px;opacity:.8;margin-top:2px">' + _esc(desc) + '</div>';
+        + '<div style="font-size:11px;opacity:.8;margin-top:2px">' + _esc(desc) + _linkHtml + '</div>';
     } else {
       t.textContent = msg;
     }
@@ -2623,8 +3133,108 @@ function openBetaApply() {
     // 绑定/解绑回调检测（全局，不依赖 nav('account')）
     _checkBindSuccess();
 
+    // UC15d（#535）：popup 登录消息消费方——此前 /login/{provider}?popup=true 的
+    // 回调经 oauth-popup-callback.html postMessage {type:'oauth_result',
+    // action:'login'} 但 app.js 无监听（休眠路径）。此处补齐：成功→用
+    // exchange_code 兑票、存 token、整页重载走回访用户路径；失败→toast。
+    // 默认登录仍是全页重定向（oauthLogin 不带 popup），本监听只激活休眠路径，
+    // 不改变默认 UX。幂等守卫防止 init 重复注册。
+    if (!window.__oauthPopupLoginListener) {
+      window.__oauthPopupLoginListener = true;
+      window.addEventListener('message', function(event) {
+        if (event.origin !== window.location.origin) return;
+        var d = event.data;
+        if (!d || d.type !== 'oauth_result' || d.action !== 'login') return;
+        if (d.success && d.exchange_code) {
+          fetch('/api/auth/exchange', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code: d.exchange_code}),
+          }).then(function(r) {
+            if (!r.ok) {
+              return r.json().catch(function() { return null; }).then(function(b) {
+                var det = (b && b.detail) || {};
+                throw new Error(det.message || det.error_code || 'exchange_failed');
+              });
+            }
+            return r.json();
+          }).then(function(t) {
+            localStorage.setItem('token', t.token);
+            localStorage.setItem('app_cache_ver', '46');
+            localStorage.removeItem('repo_member_cache');
+            localStorage.removeItem('currentRepo');
+            localStorage.removeItem('current_org_id');
+            sessionStorage.removeItem('currentRepo');
+            // UC15g（外审发现）：保留 /en 语言前缀——硬编码 '/' 会把英文用户
+            // 打回中文首页。与原 exchangeCode 分支 lang0/prefix0 同款逻辑。
+            var _lg = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
+            location.replace((_lg === 'en' ? '/en' : '') + '/');
+          }).catch(function(e) {
+            showToast((e && e.message) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+          });
+        } else if (d.error) {
+          showToast(decodeURIComponent((d.error + '').replace(/\+/g, ' ')) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+        }
+      });
+    }
+
     // P0-3: Check for exchange_code in URL (new secure flow)
     const exchangeCode = p.get('exchange_code');
+    // UC15f（#535 竞态修复）：内联兑票 fetch 进行中而 app.js init 先到——
+    // URL 已被 strip、接力 flag 未落，直接走默认路径会把已入库的 token 孤立
+    // 在登录页。见 pending 标记则轮询等待终态 flag（上限 5s，终态必到：
+    // 内联脚本成败都会摘 pending + 置对应 flag）。
+    if (!exchangeCode && sessionStorage.getItem('__oauth_inline_pending__')) {
+      var _pf = null;
+      var _pfDone = false;  // 双重重入守卫：interval 与 5s 超时都可能触发，只放行一次
+      var _pfReenter = function () {
+        if (_pfDone) return;
+        _pfDone = true;
+        if (_pf) clearInterval(_pf);
+        init();
+      };
+      try { _pf = setInterval(function () {
+        if (sessionStorage.getItem('__oauth_inline_login__') ||
+            sessionStorage.getItem('__oauth_exchange_failed__') ||
+            !sessionStorage.getItem('__oauth_inline_pending__')) {
+          _pfReenter();
+        }
+      }, 100); } catch (e) {}
+      setTimeout(_pfReenter, 5000);
+      return;
+    }
+    // UC15（#535）：内联兑票脚本（main.py 注入，HTML 解析期执行）已抢先兑票并
+    // strip 了 URL——这里到不了 exchangeCode 分支，改由 sessionStorage flag 接力：
+    // token/缓存清理内联脚本已做完，本块补上它做不了的（DOM/I18N/API 模块依赖）。
+    if (!exchangeCode && sessionStorage.getItem('__oauth_inline_login__')) {
+      sessionStorage.removeItem('__oauth_inline_login__');
+      const inlineFirstLogin = sessionStorage.getItem('__oauth_inline_first_login__');
+      if (inlineFirstLogin) {
+        sessionStorage.removeItem('__oauth_inline_first_login__');
+        sessionStorage.removeItem('currentRepo');
+        $('sidebar').style.display = 'none';
+        $('tb').style.display = 'none';
+        $('mainView').style.display = 'flex';
+        $('mainView').style.position = 'fixed';
+        $('mainView').style.inset = '0';
+        $('mainView').style.zIndex = '100';
+        $('pageTitle').textContent = I18N.t('app.current_project');
+      }
+      showApp();
+      API.scheduleProactiveRefresh();
+      return;
+    }
+    // UC15 失败兜底：内联兑票 401（过期/无效）→ 与原 app.js 兑票失败同款 UX；
+    // UC15c：后端 detail（message/error_code）已由内联脚本解析存入
+    // __oauth_exchange_failed_msg__，有则优先展示具体原因，无则回退通用文案
+    if (!exchangeCode && sessionStorage.getItem('__oauth_exchange_failed__')) {
+      sessionStorage.removeItem('__oauth_exchange_failed__');
+      var _exMsg = sessionStorage.getItem('__oauth_exchange_failed_msg__') || '';
+      if (_exMsg) sessionStorage.removeItem('__oauth_exchange_failed_msg__');
+      showToast(_exMsg || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      return;
+    }
     if (exchangeCode) {
       // 立即清除 URL 参数（不等待响应）
       if (window.history.replaceState) {
@@ -2766,7 +3376,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
+return {nav, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

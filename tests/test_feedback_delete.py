@@ -27,6 +27,20 @@ def _jwt(user_id, username):
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
+def _admin_jwt():
+    """插入 admin_accounts + 签发 role=admin JWT（admin-only 端点测试用）。"""
+    import uuid
+    from src.admin.db import get_admin_token_version
+    name = f"adm_del_{uuid.uuid4().hex[:6]}"
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO admin_accounts (username, password_hash, is_super, token_version) "
+                  "VALUES (?, '', 1, 0)", (name,))
+        db.commit()
+        aid = c.lastrowid
+    return create_access_token(aid, name, get_admin_token_version(aid), "", "admin"), aid
+
+
 def _ensure_user(username, password="test123"):
     uid = grape_account_db.create_grape_account(username, email=None, password=password)
     if not uid:
@@ -129,26 +143,41 @@ class TestFeedbackDelete:
         # 删除
         r = client.delete(f"/api/feedback/{fid}", headers=self.hdr_a)
         assert r.status_code == 200
-        # 查 admin 列表
-        r = client.get("/api/feedback/list")
-        assert r.status_code == 200
-        ids = [it["id"] for it in r.json()["items"]]
-        assert fid not in ids
+        # 查 admin 列表（admin-only）
+        admin_token, admin_id = _admin_jwt()
+        try:
+            r = client.get("/api/feedback/list",
+                           headers={"Authorization": f"Bearer {admin_token}"})
+            assert r.status_code == 200
+            ids = [it["id"] for it in r.json()["items"]]
+            assert fid not in ids
+        finally:
+            with db_lock:
+                db.execute("DELETE FROM admin_accounts WHERE id=?", (admin_id,))
+                db.commit()
 
     def test_stats_filters_deleted(self):
         """GET /stats 过滤已删除记录"""
         fid = _insert_feedback(self.user_a["id"], self.user_a["username"], "统计测试")
         client = TestClient(app)
-        # 删除前统计
-        r1 = client.get("/api/feedback/stats")
-        before = r1.json()["byStatus"]["open"]
-        # 删除
-        r = client.delete(f"/api/feedback/{fid}", headers=self.hdr_a)
-        assert r.status_code == 200
-        # 删除后统计
-        r2 = client.get("/api/feedback/stats")
-        after = r2.json()["byStatus"]["open"]
-        assert after == before - 1
+        admin_token, admin_id = _admin_jwt()
+        hdr_admin = {"Authorization": f"Bearer {admin_token}"}
+        try:
+            # 删除前统计
+            r1 = client.get("/api/feedback/stats", headers=hdr_admin)
+            assert r1.status_code == 200
+            before = r1.json()["byStatus"]["open"]
+            # 删除
+            r = client.delete(f"/api/feedback/{fid}", headers=self.hdr_a)
+            assert r.status_code == 200
+            # 删除后统计
+            r2 = client.get("/api/feedback/stats", headers=hdr_admin)
+            after = r2.json()["byStatus"]["open"]
+            assert after == before - 1
+        finally:
+            with db_lock:
+                db.execute("DELETE FROM admin_accounts WHERE id=?", (admin_id,))
+                db.commit()
 
     def test_delete_no_auth_401(self):
         """无认证删除 → 401"""

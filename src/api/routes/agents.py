@@ -55,7 +55,8 @@ async def _remove_vod_bot(app_id: str) -> None:
     if not app_id:
         return
     try:
-        from src.api.main import bot_manager
+        from src.api.bot_manager_registry import get_bot_manager
+        bot_manager = get_bot_manager()
         if bot_manager and bot_manager.api:
             await bot_manager.remove_bot(app_id)
             log.info(f"VOD IM: removed bot {app_id[:30]} from BotManager (unbind)")
@@ -229,6 +230,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_token_exists": bool(row[4]), "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or "",
                                "instance_name": instance_name_val,
+                               "runtime_id": row[1] or 0,  # Issue #524: 实际生效引擎 ID（声明/生效区分）
                                "enable": bool(row[9]) if row[9] is not None else True,
                                "subscribe_events": _sub_evts}
         except Exception:
@@ -316,12 +318,40 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
     # 当前引擎集合（从场景 node 的 engine_runtime_ids 读取，前端回显多选）
     pool = []
+    _eids = []  # Issue #524: 场景声明引擎集合（声明配置），供 declared/effective 区分
     try:
         from src.runtime.instances import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.session_manager import db, db_lock
-        # 查当前场景
+        # Issue #1310：凭据名（runtime_credentials.name）查询；本机直连（cid=0）回退 host_name
+        def _lookup_worker_name(_p):
+            _cid = _p.get("credential_id") or 0
+            _wname = ""
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    if _cid:
+                        c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                        _wr = c.fetchone()
+                        _wname = (_wr[0] or "") if _wr else ""
+                    else:
+                        c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
+                        _wr = c.fetchone()
+                        _wname = (_wr[0] or "") if _wr else ""
+            except Exception:
+                _wname = ""
+            return _wname
+        # 查当前场景（Issue #524: 从 managed_repos.dev_scene 解析，声明配置来源）
         _scene_id = ""
+        try:
+            with db_lock:
+                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key IN ({}) LIMIT 1".format(_rk_placeholders),
+                          tuple(_repo_keys))
+                _sr = c.fetchone()
+            if _sr and _sr[0]:
+                _scene_id = _sr[0]
+        except Exception:
+            pass
         _uid = user.get("id", 0) if isinstance(user, dict) else 0
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
@@ -331,6 +361,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             pool = _engines_by_ids(_eids, _repo, _cfg)
             for _p in pool:
                 _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
+                # Issue #1310：补凭据名 worker_name（=runtime_credentials.name；本机直连回退 host_name）
+                _p["worker_name"] = _lookup_worker_name(_p)
     except Exception:
         pass
 
@@ -366,6 +398,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "backend": session_data.get("instance_name") or session_data.get("backend", ""),
         "backends": [p.get("instance_name") or p.get("name") for p in pool],  # 引擎集合（多选回显）
         "pool": pool,  # 完整集合信息（含 priority/status 等）
+        "declared_runtime_ids": _eids or [],  # Issue #524: 场景声明的引擎集合（声明配置）
+        "effective_runtime_id": session_data.get("runtime_id", 0),  # Issue #524: 实际生效引擎（生效配置）
         "detached_engines": detached_engines,  # 被系统解绑的引擎提示（引擎绑定真实性同步 §4.3）
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
@@ -663,7 +697,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # VOD IM：通过 BotManager 动态增删 Bot
     if name == "vod" and body.im_app_id and app_secret:
         try:
-            from src.api.main import bot_manager
+            from src.api.bot_manager_registry import get_bot_manager
+            bot_manager = get_bot_manager()
             if bot_manager and bot_manager.api:
                 if old_app_id and old_app_id != body.im_app_id:
                     await bot_manager.remove_bot(old_app_id)

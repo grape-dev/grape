@@ -7,7 +7,24 @@ from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
 from .codex import CodexBackend
+from .dsh import DshBackend
 from .hwcloud import HwcloudBackend
+
+_bwrap_fail_notified = False
+
+
+def _note_bwrap_fail_once(message: str) -> None:
+    """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
+
+    放在调用方模块（而非 src.agent.sandbox）是因为本函数需覆盖 sandbox
+    自身导入失败的场景，此时不能依赖 sandbox 内的助手。
+    """
+    global _bwrap_fail_notified
+    if _bwrap_fail_notified:
+        log.debug(message)
+        return
+    _bwrap_fail_notified = True
+    log.warning(message)
 
 
 _BACKENDS = {
@@ -15,6 +32,7 @@ _BACKENDS = {
     "codearts": CodeArtsBackend(),
     "hermes": HermesBackend(),
     "codex": CodexBackend(),
+    "dsh": DshBackend(),
     "hwcloud": HwcloudBackend(),
 }
 
@@ -68,9 +86,15 @@ def terminate_active_agents(grace_seconds: int = 5):
     # 进程活在远端 worker 上，与主控进程生死无关——主控停机不等于任务死了。停机时把它们
     # 标 failed 会在部署类任务停主控时自杀（agent 通过 SSH systemctl stop grape-main →
     # 本函数把任务标 failed → worker 侧进程仍在跑但上报被幂等保护拒绝 → 任务永败）。
-    # REMOTE 任务改为跳过：worker 继续执行并正常上报（complete_task 不受影响）；
-    # 悬空兜底 = worker 侧 recover-orphans（worker 重连时 force_fail）+ scheduler
-    # zombie recovery（引擎离线的 running 任务同步 failed，见 scheduler_loop）。
+    # Issue #537 升级（2026-10-30）：#404 的"跳过"留下 running/dispatched 悬空——下游
+    # （zombie recovery / 心跳判死 / 活跃计数）无法区分"正常跑"与"等自报"，重启窗口内
+    # worker 心跳断 → 引擎被标 offline → zombie recovery 误判 failed → 终态定格（生产
+    # exec incident case 误报实例）。改为显式中间态 pending_self_report + pending_since 落时刻：
+    #   - worker 继续执行并自报（complete_task/fail_task 从 pending 正常转换，终态幂等
+    #     只拦真终态 completed/failed/cancelled/timeout_failed）；
+    #   - 超时兜底 = scheduler 每轮扫描的 pending 超时回收（默认 30min → timeout_failed）；
+    #   - 悬空兜底 = worker 侧 recover-orphans + scheduler zombie recovery（引擎离线
+    #     持续 > 阈值才判死，见 scheduler_loop）。
     # 只有本机 DIRECT 任务（runtime_id=0 或本机引擎 credential_id=0）的子进程确实被
     # 上面的 SIGTERM 杀掉了，照旧标 failed。
     try:
@@ -89,14 +113,29 @@ def terminate_active_agents(grace_seconds: int = 5):
                 "WHERE t.status IN ('running','dispatched')"
             )
             stale_tasks = c.fetchall()
-            _remote_skipped = 0
+            _remote_pending = 0
             for task_id, event_seq, runtime_id, cred_id in stale_tasks:
-                # REMOTE 任务：进程在 worker 上活着，跳过（worker 会继续跑完并上报；
-                # 兜底 = worker recover-orphans + scheduler zombie recovery 引擎离线同步）
+                # REMOTE 任务：进程在 worker 上活着 → 置 pending_self_report 等自报
+                # （不释放 busy 槽——任务仍占 worker 引擎槽；事件保持 running 等自报收口）
                 if runtime_id and cred_id and cred_id > 0:
-                    _remote_skipped += 1
-                    log.info(f"terminate_active_agents: skip REMOTE task {task_id} "
-                             f"(runtime={runtime_id}, worker-owned, will self-report)")
+                    _remote_pending += 1
+                    try:
+                        # pending_since 写带时区的 ISO-8601 UTC（Issue #588）：
+                        # 无时区值在 MySQL 后端经 health.parse_dt 按 UTC+08:00 解释
+                        # （Issue #512 存储层口径），刚写入即被误判 1800s 超时；
+                        # 带时区后写入与解析同源，双后端均按真实 UTC 计算 elapsed。
+                        _now_iso = _time.strftime("%Y-%m-%dT%H:%M:%S+00:00", _time.gmtime())
+                        c.execute(
+                            "UPDATE agent_tasks SET status='pending_self_report', "
+                            "pending_since=? WHERE id=? AND status IN ('running','dispatched')",
+                            (_now_iso, task_id)
+                        )
+                        log.info(f"terminate_active_agents: REMOTE task {task_id} "
+                                 f"(runtime={runtime_id}) -> pending_self_report "
+                                 f"(worker-owned, awaiting self-report)")
+                    except Exception as e:
+                        log.warning(f"terminate_active_agents: mark pending_self_report "
+                                    f"failed for task {task_id}: {e}")
                     continue
                 try:
                     c.execute(
@@ -123,8 +162,9 @@ def terminate_active_agents(grace_seconds: int = 5):
                 except Exception as e:
                     log.warning(f"terminate_active_agents: failed to mark task {task_id} as failed: {e}")
             db.commit()
-            if _remote_skipped:
-                log.info(f"terminate_active_agents: skipped {_remote_skipped} REMOTE task(s) (worker-owned, left running)")
+            if _remote_pending:
+                log.info(f"terminate_active_agents: {_remote_pending} REMOTE task(s) "
+                         f"-> pending_self_report (worker-owned, awaiting self-report)")
         if stale_tasks:
             log.info(f"terminate_active_agents: marked {len(stale_tasks)} stale task(s) as failed")
     except Exception as e:
@@ -154,6 +194,7 @@ def discover_backends() -> list[dict]:
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
         "hermes": {"cli": "hermes", "pip": "hermes"},
         "codex": {"cli": "codex", "pip": "@openai/codex"},
+        "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
         "hwcloud": {"cli": "hwcloud", "pip": ""},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
@@ -625,6 +666,18 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     if env_extra:
         env.update(env_extra)
 
+    # 任务级 env 合并完成后的收尾钩子（可选，backend 自行实现）。
+    # dsh 在这里把 GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE，
+    # 绕过它 subprocess 服务的 /TOKEN/i scrub。必须放在 env_extra 之后：
+    # token 是任务级的，get_env() 执行时它还不在 env 里（#948 曾写在 get_env 里，
+    # 读到的永远是空串，临时文件从未生成）。
+    try:
+        _prepare_env = getattr(backend, "prepare_env", None)
+        if callable(_prepare_env):
+            _prepare_env(env)
+    except Exception as _pe:
+        log.warning(f"{label}prepare_env failed: {_pe}")
+
     # 技能路径占位符：worker 侧已在物化时把 {{SKILL_DIR}} 替换为随任务下发的目录；
     # direct（服务端本地）执行在此按 skills/<agent_type>/<skill>/ 结构解析，使 read tool 能找到技能文件。
     try:
@@ -751,16 +804,23 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _proc_env["PYTHONPATH"] = _inject_dir + (_sep + _old_pp if _old_pp else "")
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
-        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        # 组件2：文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
+        # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音）
         _cmd = [agent_cmd] + args
         try:
-            from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
-            if _wrap:
-                _cmd = _wrap + _cmd
-                log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
-        except Exception as _bw_e:
-            log.warning(f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
+            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+        except Exception:
+            _sbx_on = False
+        if _sbx_on:
+            try:
+                from src.agent.sandbox import build_bwrap_cmd
+                _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
+                if _wrap:
+                    _cmd = _wrap + _cmd
+                    log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
+            except Exception as _bw_e:
+                _note_bwrap_fail_once(
+                    f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
 
         # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
         proc = subprocess.Popen(
@@ -785,12 +845,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _reader_total = 0
         _text_count = 0      # 本次执行 text 事件数（假完成判定用，issue-P5）
         _tool_count = 0      # 本次执行 tool_use 事件数（假完成判定用，issue-P5）
-        # 静默超时窗口：首个无输出窗口。与 hermes ACP _SILENT_TIMEOUT=300s 对齐，
-        # 可用 AGENT_SILENT_WINDOW 环境变量覆盖（模型流挂死 5 分钟即感知，不再干等 20min）。
+        # 静默超时窗口：首个无输出窗口。与 hermes ACP _SILENT_TIMEOUT=600s 对齐，
+        # 可用 AGENT_SILENT_WINDOW 环境变量覆盖（模型流挂死 10 分钟即感知，不再干等 20min）。
         # Issue #378: 优先读任务级 env dict（含 env_extra，由 _execute_task 按 agent_type 注入
-        # coding/qa=1200s），os.environ 次之（手动调参/测试），默认 min(300, max_exec_seconds)。
+        # coding/qa=1200s），os.environ 次之（手动调参/测试），默认 min(600, max_exec_seconds)。
         _silent_window = float(env.get("AGENT_SILENT_WINDOW",
-            os.environ.get("AGENT_SILENT_WINDOW", str(min(300, max_exec_seconds)))))
+            os.environ.get("AGENT_SILENT_WINDOW", str(min(600, max_exec_seconds)))))
         # 进程存活但无输出的累计延长上限（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
         # 可用 AGENT_SILENT_EXTEND_CAP 调整（旧变量 AGENT_SILENT_LIMIT 亦兼容，语义=续期额度上限）。
         _silent_extend_total = 0.0
@@ -798,7 +858,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                                                    os.environ.get("AGENT_SILENT_LIMIT", str(max_exec_seconds))))
         # 超时总账（issue-P1）：单次执行最坏 ≈ _silent_window + _silent_extend_cap + grace 10s；
         # RUNTIME_TASK_TIMEOUT=3600s 需 ≥ 2×(单次最坏) 才能容纳一次无效完成自动重跑。
-        # 300 + 600 + 10 = 910s → 2 次 ≈ 1820s < 3600s，安全。
+        # 600 + 600 + 10 = 1210s → 2 次 ≈ 2420s < 3600s，安全。
 
         import threading
         _line_queue = []
@@ -944,11 +1004,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
                     _killed = "-9" if _grace_tail.strip() == "" else "grace"
                     log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
+                    # Issue #494：静默超时强杀必须带明确归因（不再只写英文 killed 短语）
+                    from src.agent.failure_attribution import timeout_error_text
                     yield ("done", {
                         "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
                         "text": _redact("\n".join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
-                        "errors": error_events + ([f"no output for {_silent_window:.0f}s, killed"] if _grace_tail.strip() == "" else []),
+                        "errors": error_events + ([timeout_error_text(
+                            _silent_window, f"{backend.name} 无输出静默超时被终止")] if _grace_tail.strip() == "" else []),
                         "stderr": _redact(_stderr_tail.text(), _tokens),
                         "backend": backend.name, "parsed_count": _parsed_count,
                         "text_count": _text_count, "tool_count": _tool_count,
@@ -1045,6 +1108,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # 结合系统日志启发式判定 OOM。
         _exit_code = proc.returncode
         _final_errors = list(error_events)
+        # Issue #494：超时类死亡显式归因——returncode=124（timeout 命令）/ -15（SIGTERM）
+        # 时 stderr 常为空，尾采拿不到原因，直接构造「执行超时」文案进 errors。
+        from src.agent.failure_attribution import process_exit_attribution
+        _exit_attr = process_exit_attribution(_exit_code)
+        if _exit_attr:
+            _final_errors.append(_exit_attr)
         # issue #416（E7）：进程退出码非 0 且无文本 → errors 写明 `<引擎> exited rc=N`，
         # 不再让失败任务 errors 为空（旧形态：exit_code=-1、errors 空、stderr 截断）
         if _exit_code != 0 and not full_text.strip():

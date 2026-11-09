@@ -83,3 +83,52 @@ def test_direct_branch_env_parts():
     assert env["REPO_NAME"] == "hello-x"
     assert env["ACCOUNT"] == "dev_act"
     assert env["REPO_NAME"] == "hello-x"
+
+
+def _direct_env(exec_account, repository, actor="dev_act"):
+    """同步实现 _execute_agent_inner env_extra 构建（repo-owner-prefix-injection-fix-design.md §3.1）。
+
+    修复前为 naive split（带前缀输入会得到 gitcode:<owner>，即 Issue #94 根因）；
+    修复后统一走 split_owner_repo，REPO_OWNER/REPO_NAME 均无前缀。
+    """
+    from src.repo_key import split_owner_repo
+    _repo_owner, _repo_name = split_owner_repo(exec_account)
+    return {
+        "REPO_FULL_NAME": repository,
+        "REPO_OWNER": _repo_owner,
+        "REPO_NAME": _repo_name,
+        "ACCOUNT": actor or exec_account or "",
+    }
+
+
+def test_direct_branch_env_parts_prefixed_account_red():
+    """RED：带前缀 exec_account 用 naive split 复现 Issue #94 根因（得 gitcode:<owner>）。"""
+    exec_account = "gitcode:Jason7602/hello-x"
+    naive_owner = (exec_account).split("/", 1)[0]
+    assert naive_owner != "Jason7602"          # naive 分割带前缀 → 正是 bug
+    assert naive_owner == "gitcode:Jason7602"
+
+
+def test_direct_branch_env_parts_prefixed_account():
+    """T1：exec_account 带平台前缀全名（gitcode:<owner>/<repo>）→ REPO_OWNER/REPO_NAME 均无前缀。"""
+    env = _direct_env(exec_account="gitcode:Jason7602/hello-x",
+                      repository="Jason7602/hello-x")
+    assert env["REPO_OWNER"] == "Jason7602"    # 纯 owner，不带 gitcode:
+    assert env["REPO_NAME"] == "hello-x"
+    assert env["ACCOUNT"] == "dev_act"
+
+
+def test_direct_branch_env_parts_unprefixed_account():
+    """T2：exec_account 无前缀（回归基线）→ 行为不变。"""
+    env = _direct_env(exec_account="Jason7602/hello-x",
+                      repository="Jason7602/hello-x")
+    assert env["REPO_OWNER"] == "Jason7602"
+    assert env["REPO_NAME"] == "hello-x"
+
+
+def test_direct_branch_env_parts_owner_repo_no_prefix():
+    """T3：split_owner_repo 幂等——对已剥前缀输入再跑结果不变（无双重剥离）。"""
+    from src.repo_key import split_owner_repo
+    assert split_owner_repo("Jason7602/hello-x") == ("Jason7602", "hello-x")
+    again = split_owner_repo("Jason7602/hello-x")
+    assert again == ("Jason7602", "hello-x")

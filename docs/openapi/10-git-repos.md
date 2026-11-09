@@ -296,7 +296,7 @@ grapecli git diff --repo Jason7602/hello
 
 ### POST /api/git-repo/{owner}/{repo}/labels
 
-**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
+**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `d73a4a`，不带 `#` 的 6 位 hex；带 `#` 前缀会被自动去除）
 
 **返回（201）**：创建后的标签对象。**错误**：400（缺 name）/ 409（已存在）/ 403。
 
@@ -306,11 +306,41 @@ grapecli git diff --repo Jason7602/hello
 
 ### GET /api/git-repo/{owner}/{repo}/milestones?state=all
 
-**Query**：`state`（open/closed/all，技能用 all）
+**Query**：`state`（open/closed/all，技能用 all；其他值上游 400）
 
-**返回（200）**：里程碑数组 `[{"id":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+**返回（200）**：里程碑数组 `[{"id":3,"number":850012,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+（Issue #684：`state` 字段归一化为 `open`/`closed`，上游 `active`/`opened` 映射为 `open`——与过滤合法值口径一致）
+（Issue #1005：上游不返回 `id` 时，从 `url` 尾部补出真实 `id`（`…/milestones/3` → `id=3`）；
+`number` 保留用于兼容。`issues update --milestone_id` 优先取 `id`、兼容 `number`。）
 
 **错误**：401 / 403 / 404。
+
+### POST /api/git-repo/{owner}/{repo}/milestones
+
+**入参 Body（JSON）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `title` | string | ✅ | 里程碑标题 |
+| `description` | string | 否 | 描述（空值不透传） |
+| `due_on` | string | 否 | 截止时间 ISO 时间戳（空值不透传） |
+
+**返回（200/201）**：创建后的里程碑对象（含 `number`，可挂接 `issues update --milestone_id`）。
+**错误**：400（缺 title 等上游校验）/ 422（title 缺失的契约校验）/ 401 / 403 / 409（标题重复）。
+provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
+
+### PATCH /api/git-repo/{owner}/{repo}/milestones/{number}
+
+**入参 Body（JSON）**：全字段可选（空值不透传，不影响其他字段）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `title` | string | 里程碑标题 |
+| `description` | string | 描述 |
+| `due_on` | string | 截止时间 ISO 时间戳 |
+| `state` | string | `open`/`closed` |
+
+**返回（200）**：更新后的里程碑对象（`state` 归一化为 `open`/`closed`，上游 `active` 映射为 `open`）。**错误**：400 / 401 / 403 / 404。
 
 ---
 
@@ -357,11 +387,17 @@ grapecli git diff --repo Jason7602/hello
 | `labels` | string | 标签（逗号分隔字符串）或数组 |
 | `assignee` | string | 责任人（单） |
 | `assignee_ids` | array | 责任人 id 数组（implementation 风格） |
-| `milestone_id` | int | 里程碑 id |
+| `milestone_id` | int | 里程碑 `id`（优先，取 `milestones list` 的 `id`）；兼容历史 `number` 传参。GitCode 解析后映射为上游 `milestone`（#640/#1005） |
 | `state` | string | `"close"`（**注意**：GitCode 关闭用 "close" 非 "closed"） |
 | `body` | string | Issue 正文（同 POST create / PR update 的 body；空值忽略，不影响其他字段） |
 
-**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
+**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/422/502。
+
+> **里程碑（#640 / #1005 / #1076）**：`milestone_id` 先按 `id` 匹配、未命中再按 `number` 匹配，解析后以目标
+> 里程碑的上游 `number` 写入 PATCH；解析失败（不存在/不可见）→ 400，无权限 → 403，不发出 PATCH。
+> 写入前预校验，回读不一致 → 422 并回滚为请求前 milestone、回读确认（回滚被上游静默忽略时文案标注
+> 「原值未恢复」）；成功时响应与 `issues get` 均回显 `milestone`（补 `id`）；只有上游真实故障
+> （网关/连接/不可用）才返回 5xx。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
 
@@ -424,7 +460,16 @@ grapecli git diff --repo Jason7602/hello
 
 ### PUT /api/git-repo/{owner}/{repo}/pulls/{number}/merge
 
-**返回（200）**：`{"merged": true, "sha": "..."}`。**错误**：409（不可合并）。
+**入参 Body（JSON，均可选）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `merge_method` | string | 否 | 合并方式：`merge` / `squash` / `rebase`；缺省不传（上游默认 merge） |
+| `title` | string | 否 | 自定义合并提交标题，空值不透传 |
+
+**返回（200）**：`{"merged": true, "sha": "..."}`。
+
+**错误（Issue #558 透传语义）**：上游平台拒绝合并（如 PR 不可自动合并返回 405）时，本接口**透传上游真实状态码与完整错误 message**（如 405/409，`detail.message` 为上游原文，不截断）；仅代理自身异常（超时/连接失败）返回 502。
 
 ### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
 
@@ -437,8 +482,12 @@ grapecli git diff --repo Jason7602/hello
 **返回（200）**：变更文件数组
 ```json
 [{"filename": "src/a.py", "status": "modified", "additions": 10, "deletions": 2,
-  "patch": "@@ ...", "raw_url": "..."}]
+  "patch": {"diff": "@@ ...", "added_lines": 10, "removed_lines": 2}, "raw_url": "..."}]
 ```
+
+> **Issue #731（diff 字段路径契约）**：所有文件对象的 diff 内容**统一且仅在** `.patch.diff`（对象内字符串，含 `@@ ... @@` diff 头）。代理层已对平台差异返回做归一化（顶层 `.diff` 会并入 `.patch.diff` 并移除），下游脚本无需 `.patch.diff // .diff` 兜底；`patch` 元信息（added_lines/removed_lines/too_large 等）语义不变。
+>
+> **Issue #750（单次解析保证）**：`.patch.diff` **恒为裸 diff 文本字符串**（非 JSON 字符串）。平台侧的双重 JSON 编码（patch 字段本身为 `"{\"diff\":\"...\"}"` 字符串）已在代理层 `list_pull_files` 出参归一化中内层解码；裸 diff 字符串按 `{"diff": <raw>}` 包裹。下游**单次** `json.loads(输出)[i]["patch"]["diff"]` 即可直接取到 diff 文本，无需二次解析。
 
 ---
 

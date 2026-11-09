@@ -184,12 +184,12 @@ var Auth = (function () {
     if (reqsEl) reqsEl.classList.add('visible');
 
     var score = 0;
-    if (pwd.length >= 8) score++;
+    if (pwd.length >= (window.PWD_MIN_LEN || 8)) score++;  // C 收敛：下限与后端同源
     if (pwd.length >= 12) score++;
     if (/[a-zA-Z]/.test(pwd) && /\d/.test(pwd)) score++;
     if (/[!@#$%^&*(),.?":{}|<>_\-+=\[\]\\\/;'`~]/.test(pwd)) score++;
 
-    if (pwd.length < 8) score = 0;
+    if (window.isPwdTooShort ? window.isPwdTooShort(pwd) : pwd.length < 8) score = 0;
 
     if (fillEl) fillEl.className = 'pwd-strength-fill';
     if (labelEl) labelEl.className = 'pwd-strength-label';

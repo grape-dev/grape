@@ -108,7 +108,7 @@ Choose a template / existing Git project
 
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
-| **Python** | >= 3.9 (main service) | 3.10+ recommended for devbox sandbox |
+| **Python** | >= 3.10 (required) | Main service and devbox sandbox both require Python 3.10+ (new-style type annotations/syntax); startup exits with an explicit message below 3.10 |
 | **Node.js** | >= 18 (for Agent CLI) | `npm install -g opencode` |
 | **Git** | any recent version | |
 
@@ -150,7 +150,7 @@ mkdir -p data
 python -m src.api.run --dev                # Dev mode, open http://localhost:3000
 ```
 
-### China Mirror (国内镜像加速)
+### China Mirror / Network Tips (国内镜像加速 / 网络建议)
 
 ```bash
 # PyPI mirror
@@ -159,6 +159,11 @@ pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
 # Or configure permanently:
 pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 ```
+
+> Occasional HTTP/2 frame errors / connection timeouts during git fetch are network jitter; the fetch path retries
+> automatically up to 3 times with backoff. If it still fails, downgrade to HTTP/1.1:
+> `git config --global http.version HTTP/1.1`, or configure a mirror/proxy for your network
+> (e.g. `git config --global url."https://<your-proxy>/https://github.com/".insteadOf "https://github.com/"`).
 
 ### Install Agent CLI (at least one)
 
@@ -174,12 +179,61 @@ pip install codearts-cli         # Python based
 python scripts/doctor.py         # Run preflight checks
 ```
 
-### Copy Bot Token Config
+> Full "0→1 Installation Checklist" (staged operations + expected results + troubleshooting):
+> see [docs/0-to-1-checklist.md](docs/0-to-1-checklist.md).
+
+### Configure OAuth App Credentials (required)
 
 ```bash
-cp configs/global-bot-token.example.json configs/global-bot-token.json
-# Edit with your GitCode Bot Token / OAuth credentials
+cp configs/oauth-providers.example.json configs/oauth-providers.json
+# Edit configs/oauth-providers.json and fill in client_id / client_secret for both GitCode and GitHub providers
 ```
+
+`configs/oauth-providers.json` is the authoritative OAuth credential file (synced into DB on startup; credentials are written once, idempotently).
+Putting credentials in the wrong file or leaving fields empty makes `/api/auth/login/{provider}` return 400 (`not_configured`).
+
+```jsonc
+{
+  "gitcode": {
+    "client_id": "<your GitCode OAuth App Client ID>",
+    "client_secret": "<your GitCode OAuth App Client Secret>",
+    "redirect_uri": "https://<your-domain>/api/auth/callback/gitcode",
+    "auth_url": "https://gitcode.com/oauth/authorize",
+    "token_url": "https://gitcode.com/oauth/token",
+    "user_url": "https://gitcode.com/api/v5/user",
+    "scope": "all"
+  },
+  "github": {
+    "client_id": "<your GitHub OAuth App Client ID>",
+    "client_secret": "<your GitHub OAuth App Client Secret>",
+    "redirect_uri": "https://<your-domain>/api/auth/callback/github",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "user_url": "https://api.github.com/user",
+    "scope": "repo user admin:repo_hook offline_access"
+  }
+}
+```
+
+> See `configs/oauth-providers.example.json` for the full field set. The Callback URL registered in the OAuth App must exactly match the `redirect_uri` above.
+> Legacy OAuth fields in `configs/global-bot-token.json` remain supported (backward compat); use `oauth-providers.json` for new setups.
+
+### Configure Public Base URL (required)
+
+```bash
+cp configs/server-config.example.json configs/server-config.json
+# Edit configs/server-config.json: set server_base_url / webhook_url to a public address
+```
+
+```jsonc
+{
+  "server_base_url": "https://<your-domain>",
+  "webhook_url": "https://<your-domain>/webhook/gitcode"
+}
+```
+
+> Without `server_base_url`, the service falls back to `http://localhost:3000`: OAuth callbacks point to the local machine and GitCode/GitHub cannot reach back, so login/hosting will fail.
+> Startup logs and `/api/health` surface an explicit warning (`server_base_url_configured=false`). Local pure development can ignore it, but you must configure it before OAuth login.
 
 ## Deployment
 
@@ -194,7 +248,9 @@ Production deployment examples (nginx reverse proxy / systemd / Docker) in `docs
 
 | File | Description |
 |------|-------------|
-| `configs/global-bot-token.json` | Global Bot token + GitCode OAuth credentials (gitignored) |
+| `configs/global-bot-token.json` | Global Bot token (gitignored) |
+| `configs/oauth-providers.json` | OAuth App credentials (GitCode/GitHub client_id/secret etc., copied from `oauth-providers.example.json`, gitignored) |
+| `configs/server-config.json` | Public base URL server_base_url / webhook_url (copied from `server-config.example.json`; without it OAuth callbacks point to localhost and are unreachable) |
 | `configs/agent-description.json` | Agent type seeds (event subscriptions, default backend) |
 | `configs/skill-description.json` | Official skill seeds (synced from the standalone [grape-skills](https://github.com/grape-dev/grape-skills) repo via `scripts/sync_skills.sh`) |
 | `configs/agent-skill-mapping.json` | Dev scenario → Agent × Skill mapping |

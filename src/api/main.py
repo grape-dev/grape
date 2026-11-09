@@ -1,14 +1,20 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
 import sys, os, asyncio
+
+# Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.main:app` 的启动方式，
+# 在业务模块导入链触发前显式提示并退出。
+from src.api.version_check import ensure_python_version
+ensure_python_version()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability
+from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口
+
+from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability, patrol
 
 
 bot_manager = None
@@ -79,6 +85,290 @@ def _startup_security_check():
         raise SystemExit(f"生产环境安全门禁失败：{'; '.join(errors)}")
 
 
+# ===== 定时任务启动器（Issue #596 P1 抽出，A 进程 grape_server.py 复用）=====
+# 这些函数把 main.py lifespan 内的巨型闭包循环抽为可复用启动器，
+# 单进程模式（main.py）与 A 进程（grape_server.py）共用同一实现源。
+
+def _start_server_metrics_task():
+    """主控机指标上报循环（15s）——启动并返回 task。"""
+    from datetime import datetime, timezone
+    from src.config import log
+
+    async def _server_metrics_loop():
+        import socket as _sock, hashlib as _hl
+        _hostname = _sock.gethostname() or "unknown-server"
+        _local_ip = "127.0.0.1"
+        try:
+            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _local_ip = _s.getsockname()[0]
+            _s.close()
+        except Exception:
+            pass
+        try:
+            from src.session_manager import db, db_lock
+            _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
+                if not c.fetchone():
+                    c.execute(
+                        "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
+                        "VALUES (?, ?, ?, 'global', 'active', ?)",
+                        (_token_hash, _hostname, _hostname, _local_ip))
+                    db.commit()
+                    log.info(f"Server metrics: registered {_hostname}")
+        except Exception as e:
+            log.warning(f"Server metrics: register failed: {e}")
+        while True:
+            try:
+                _cpu = _mem = _disk = _tmp = 0.0
+                _load = ""
+                try:
+                    import psutil as _ps
+                    _cpu = _ps.cpu_percent(interval=None)
+                    try:
+                        with open("/proc/meminfo") as _mf:
+                            _mi = {}
+                            for _line in _mf:
+                                _p = _line.split(":")
+                                if len(_p) == 2:
+                                    _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
+                            _total = _mi["MemTotal"]
+                            _used = _total - _mi.get("MemFree", 0) - _mi.get("Buffers", 0) - _mi.get("Cached", 0)
+                            _mem = round(_used / _total * 100, 1) if _total > 0 else _ps.virtual_memory().percent
+                    except Exception:
+                        _mem = _ps.virtual_memory().percent
+                    _disk = _ps.disk_usage("/").percent
+                    try:
+                        _tmp = _ps.disk_usage("/tmp").percent
+                    except Exception:
+                        _tmp = 0.0
+                    _load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
+                    # BANDWIDTH: 读 /proc/net/dev，两次采样差分算速率
+                    _bw_mbps = 0.0
+                    _bw_pct = 0.0
+                    try:
+                        import time as _bt
+                        _rx = _tx = 0
+                        with open("/proc/net/dev") as _bf:
+                            for _bl in _bf:
+                                if ":" not in _bl:
+                                    continue
+                                _bn, _br = _bl.split(":", 1)
+                                _bn = _bn.strip()
+                                if _bn == "lo":
+                                    continue
+                                _bf2 = _br.split()
+                                if len(_bf2) >= 9:
+                                    _rx += int(_bf2[0])
+                                    _tx += int(_bf2[8])
+                        _bw_now = _bt.time()
+                        _bw_prev = getattr(_server_metrics_loop, "_bw_prev", None)
+                        if _bw_prev:
+                            _bpts, _bpbytes = _bw_prev
+                            _bdt = _bw_now - _bpts
+                            _bdb = (_rx + _tx) - _bpbytes
+                            if _bdt > 0 and _bdb >= 0:
+                                _bw_mbps = round(_bdb * 8 / _bdt / 1e6, 1)
+                                _bw_thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "10"))
+                                if _bw_thr > 0:
+                                    _bw_pct = round(min(_bw_mbps / _bw_thr * 100, 100.0), 1)
+                        _server_metrics_loop._bw_prev = (_bw_now, _rx + _tx)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                _now = datetime.now(timezone.utc).isoformat()
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
+                        "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, "
+                        "bandwidth_percent=?, bandwidth_mbps=?, load_avg=? "
+                        "WHERE device_name=? AND scope='global'",
+                        (_now, _local_ip, _cpu, _mem, _disk, _tmp, _bw_pct, _bw_mbps, _load, _hostname))
+                    db.commit()
+            except Exception as e:
+                log.warning(f"Server metrics: upload failed: {e}")
+            await asyncio.sleep(15)
+
+    _t = asyncio.create_task(_server_metrics_loop())
+    log.info("Server metrics loop started (15s)")
+    return _t
+
+
+def _start_obs_alert_task():
+    """可观测性告警中心循环（30s + SLO 独立周期）——启动并返回 task。"""
+    from src.config import log
+    from src.observability import alerts as _obs_alerts
+    from src.observability import slo as _obs_slo
+    from src.observability import loops as _obs_loops
+
+    _obs_seeded = _obs_alerts.seed_rules()
+    _obs_slo_seeded = _obs_slo.seed_defaults()      # P2-1：三条默认 SLO（幂等）
+
+    async def _obs_alert_loop():
+        _tick = 0
+        _slo_next = 0.0
+        _loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(30)
+            _tick += 1
+            try:
+                _r = await asyncio.to_thread(_obs_alerts.evaluate_rules)
+                if _r.get("fired") or _r.get("resolved"):
+                    log.info(f"Observability alerts: "
+                             f"{ {k: v for k, v in _r.items() if k != 'new_events'} }")
+                _new = _r.get("new_events") or []
+                if _new:
+                    _n = await _obs_alerts.notify_fired_events(_new)
+                    log.info(f"Observability alert notifications: {_n}")
+                _a = await _obs_alerts.flush_aggregates()
+                if _a.get("summaries"):
+                    log.info(f"Observability alert aggregates: {_a}")
+                if _tick % 120 == 0:
+                    _n2 = await asyncio.to_thread(_obs_alerts.cleanup_events)
+                    if _n2:
+                        log.info(f"Observability alert events cleaned: {_n2} rows")
+                    _obs_loops.beat("obs_alert_retention")
+                if _loop.time() >= _slo_next:
+                    _slo_next = _loop.time() + _obs_slo.eval_interval_sec()
+                    try:
+                        _s = await asyncio.to_thread(_obs_slo.evaluate_all)
+                        if _s.get("firing") or _s.get("resolved"):
+                            log.info(f"Observability SLO: {_s}")
+                        if _s.get("cleaned"):
+                            log.info(f"Observability SLO snapshots cleaned: {_s['cleaned']} rows")
+                        _obs_loops.beat("obs_slo")
+                    except Exception as e:
+                        log.warning(f"Observability SLO loop failed: {e}")
+                _obs_loops.beat("obs_alert")
+            except Exception as e:
+                _obs_loops.fail("obs_alert", e)
+                log.warning(f"Observability alert evaluation failed: {e}")
+
+    _t = asyncio.create_task(_obs_alert_loop())
+    log.info(f"Observability alert evaluator started (30s, seeded={_obs_seeded});"
+             f" SLO eval interval {_obs_slo.eval_interval_sec()}s (decoupled, Issue #437)")
+    return _t
+
+
+def _start_obs_rollup_task():
+    """业务指标聚合循环（60s）——启动并返回 task。"""
+    from src.config import log
+    from src.observability import metric_rollup as _obs_mrollup
+    from src.observability import llm_usage as _obs_llm_usage
+    from src.observability import loops as _obs_loops
+
+    async def _obs_rollup_loop():
+        _tick = 0
+        while True:
+            await asyncio.sleep(60)
+            _tick += 1
+            try:
+                _s = await asyncio.to_thread(_obs_mrollup.catch_up)
+                if _s.get("minute_done") or _s.get("hour_done"):
+                    log.info(f"Observability metric rollup: {_s}")
+                if _tick % 60 == 0:
+                    await asyncio.to_thread(_obs_mrollup.cleanup)
+                if _tick % 1440 == 0:
+                    _ar = await asyncio.to_thread(_obs_llm_usage.archive_old_usage)
+                    if _ar.get("archived"):
+                        log.info(f"Observability usage archive: {_ar}")
+                    _obs_loops.beat("obs_usage_archive")
+                _obs_loops.beat("obs_rollup")
+            except Exception as e:
+                _obs_loops.fail("obs_rollup", e)
+                log.warning(f"Observability metric rollup failed: {e}")
+
+    _t = asyncio.create_task(_obs_rollup_loop())
+    log.info("Observability metric rollup started (60s, minute 7d / hour 30d)")
+    return _t
+
+
+def _start_obs_sample_task():
+    """设备资源采样循环（60s）——启动并返回 task。"""
+    from src.config import log
+    from src.observability import rollup as _obs_rollup
+    from src.observability import logs as _obs_logs
+    from src.observability import loops as _obs_loops
+
+    async def _obs_sample_loop():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
+                if r.get("inserted"):
+                    log.debug(f"Observability runtime samples: {r}")
+                _nc = await asyncio.to_thread(_obs_log.maybe_cleanup)
+                if _nc:
+                    log.info(f"Observability logs cleaned: {_nc} rows")
+                    _obs_loops.beat("obs_log_cleanup")
+                _obs_loops.beat("obs_sample")
+            except Exception as e:
+                _obs_loops.fail("obs_sample", e)
+                log.warning(f"Observability runtime sampling failed: {e}")
+
+    _t = asyncio.create_task(_obs_sample_loop())
+    log.info("Observability runtime sampler started (60s)")
+    return _t
+
+
+def _start_active_user_tracker_task():
+    """用户活跃状态追踪循环（30s flush + 5min token/guard 清理）——启动并返回 task。"""
+    from src.config import log
+    async def _active_user_tracker():
+        from src.api.deps import get_pending_active
+        from src.user import db as user_db
+        _purge_i = 0
+        while True:
+            await asyncio.sleep(30)
+            try:
+                uids = get_pending_active()
+                if uids:
+                    await asyncio.to_thread(user_db.batch_update_last_active, list(uids))
+            except Exception as e:
+                log.warning(f"Active user tracker flush failed: {e}")
+            try:
+                _purge_i += 1
+                if _purge_i >= 10:
+                    _purge_i = 0
+                    from src.api.auth_token import purge_expired_session_tokens
+                    await asyncio.to_thread(purge_expired_session_tokens)
+                    from src.api.event_store import purge_stale_event_guards
+                    await asyncio.to_thread(purge_stale_event_guards)
+            except Exception as e:
+                log.warning(f"Session token purge failed: {e}")
+
+    _t = asyncio.create_task(_active_user_tracker())
+    log.info("Active user tracker started (30s flush)")
+    return _t
+
+
+def _start_vcs_exists_backfill_task():
+    """Issue #995：存量 issue.vcs_exists 异步回填（幂等，启动后延迟执行一次）。
+
+    不阻塞启动；失败仅告警，列表请求仍按 fail-open 语义工作。
+    """
+    from src.config import log
+
+    async def _worker():
+        await asyncio.sleep(60)
+        try:
+            from src.api.issue_vcs_index import backfill_vcs_exists
+            summary = await asyncio.to_thread(backfill_vcs_exists)
+            log.info(f"VCS existence backfill: {summary}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"VCS existence backfill failed: {e}")
+
+    return asyncio.create_task(_worker(), name="vcs-exists-backfill")
+
+
+# ===== main.py lifespan（单进程兼容模式，Issue #596 后保留）=====
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bot_manager
@@ -89,6 +379,18 @@ async def lifespan(app: FastAPI):
         _startup_security_check()
     except SystemExit as e:
         raise
+
+    # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
+    # 未显式配置时默认 localhost，第三方平台无法回访（登录/托管不可用）。
+    try:
+        from src.user.db import get_server_base_url_warning
+        _base_warn = get_server_base_url_warning()
+        if _base_warn:
+            log.warning(f"[CONFIG] {_base_warn}")
+        else:
+            log.info("[CONFIG] server_base_url configured OK")
+    except Exception as _bw:
+        log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
     try:
         from src.im.feishu_async import BotManager
@@ -108,35 +410,6 @@ async def lifespan(app: FastAPI):
             start_probe()
         except Exception as e:
             log.warning(f"Engine probe start failed: {e}")
-
-        # 模板自愈：启动时检查 project-templates.json + examples/ 是否存在，
-        # 缺失则自动从 grape-template 仓库拉取（防 git merge 删除后模板页变空）
-        try:
-            _templates_ok = _check_and_sync_templates()
-            if _templates_ok:
-                log.info("Templates: project-templates.json + examples/ verified OK")
-            else:
-                log.warning("Templates: auto-sync attempted but issues remain, check logs")
-        except Exception as e:
-            log.warning(f"Templates: startup check failed: {e}")
-
-        # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
-        try:
-            from src.help_page_gen import generate as _generate_help_page
-            _n_help = _generate_help_page()
-            log.info(f"Help: help.html regenerated ({_n_help} sources)")
-        except Exception as e:
-            log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
-
-        # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
-        try:
-            from src.api.openapi import custom_openapi
-            from src.help_page_gen import write_openapi_contract
-            _schema = custom_openapi(app)
-            _n_paths = write_openapi_contract(_schema)
-            log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
-        except Exception as e:
-            log.warning(f"OpenAPI: contract dump failed: {e}")
 
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
@@ -161,8 +434,51 @@ async def lifespan(app: FastAPI):
 
         hc = bot_manager.health_check()
         log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
+        # Issue #596 P1：注册进进程级 registry（跨模块 IM 访问统一走 get_bot_manager）
+        from src.api.bot_manager_registry import set_bot_manager
+        set_bot_manager(bot_manager)
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
+
+    # 模板自愈：启动时检查 project-templates.json + examples/ 是否存在，
+    # 缺失则自动从 grape-template 仓库拉取（防 git merge 删除后模板页变空）
+    try:
+        _templates_ok = _check_and_sync_templates()
+        if _templates_ok:
+            log.info("Templates: project-templates.json + examples/ verified OK")
+        else:
+            log.warning("Templates: auto-sync attempted but issues remain, check logs")
+    except Exception as e:
+        log.warning(f"Templates: startup check failed: {e}")
+
+    # Issue #541：存量场景错误绑定幂等修复——dev_scene / issue.scene_id 曾误写
+    # 模板场景名，扫描后按 market_scene_id 改绑仓内副本真实 scene_id（可安全重跑）
+    try:
+        from src.api.scene_binding_repair import repair_scene_bindings
+        _rep_541 = repair_scene_bindings()
+        if _rep_541["repos_fixed"] or _rep_541["issues_fixed"]:
+            log.info(f"Scene binding repair: fixed {_rep_541['repos_fixed']} repos, "
+                     f"{_rep_541['issues_fixed']} issues (Issue #541)")
+    except Exception as e:
+        log.warning(f"Scene binding repair failed: {e}")
+
+    # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
+    try:
+        from src.help_page_gen import generate as _generate_help_page
+        _n_help = _generate_help_page()
+        log.info(f"Help: help.html regenerated ({_n_help} sources)")
+    except Exception as e:
+        log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+
+    # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
+    try:
+        from src.api.openapi import custom_openapi
+        from src.help_page_gen import write_openapi_contract
+        _schema = custom_openapi(app)
+        _n_paths = write_openapi_contract(_schema)
+        log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
+    except Exception as e:
+        log.warning(f"OpenAPI: contract dump failed: {e}")
 
     # lease sweep 循环（问题 J：变量名 _lease_sweep_task 区分）
     _lease_sweep_task = None
@@ -178,6 +494,16 @@ async def lifespan(app: FastAPI):
         log.info("Sweeper loop started")
     except Exception as e:
         log.warning(f"Sweeper loop start failed: {e}")
+
+    # A2A 链路巡检器（Phase 1 只读，docs/weekly-09/a2a-chain-patrol-design.md）：
+    # 拉模型兜底，谓词 UPDATE 选主，仅写 grape_t_patrol_findings，零既有表写路径
+    _patrol_task = None
+    try:
+        from src.api.patrol import patrol_loop
+        _patrol_task = asyncio.create_task(patrol_loop())
+        log.info("Patrol loop started")
+    except Exception as e:
+        log.warning(f"Patrol loop start failed: {e}")
 
     # 知识库 OBS 同步：后台定时迁移老数据到 OBS（每小时一次）
     _knowledge_sync_task = None
@@ -209,6 +535,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
 
+    # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
+    try:
+        from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
+        start_feedback_reconcile_scheduler()
+    except Exception as e:
+        log.warning(f"Feedback reconcile scheduler start failed: {e}")
+
     # 官方技能+场景合并定时同步：每 30 分钟串行同步（R31：skill 完成后自动触发场景同步，
     # 场景同步已合并进 sync_official_skills，不再有独立的 scene_sync scheduler）
 
@@ -221,6 +554,11 @@ async def lifespan(app: FastAPI):
 
     # P2-C (Issue #357): Large table maintenance — nullify old agent_tasks fields
     # and delete old task_messages. Runs every 6 hours with distributed lock.
+    # Issue #463 P1: also delete terminal agent_tasks older than 90 days.
+    # Issue #596 P3 (§6.2 拆分)：单进程模式同样按两个独立锁 key 执行
+    # （table_maintenance_tasks → agent_tasks 清理；table_maintenance_messages →
+    # task_messages 清理），与多进程模式 A/C 各持一锁的语义一致——
+    # 多进程部署时 A/C 各自抢自己的锁，单进程两个锁都在本进程内顺序拿。
     try:
         from src.runtime.task_lock import run_with_distributed_lock
 
@@ -229,12 +567,15 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(600)  # 10 min after startup (avoid migration race)
             while True:
                 try:
-                    async with run_with_distributed_lock("table_maintenance", ttl=3600):
+                    async with run_with_distributed_lock("table_maintenance_tasks", ttl=3600):
                         from src.runtime.table_maintenance import (
                             cleanup_old_agent_tasks_fields,
-                            cleanup_old_task_messages,
+                            delete_old_agent_tasks,
                         )
                         cleanup_old_agent_tasks_fields()
+                        delete_old_agent_tasks()
+                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
+                        from src.runtime.table_maintenance import cleanup_old_task_messages
                         cleanup_old_task_messages()
                 except asyncio.CancelledError:
                     raise
@@ -295,6 +636,13 @@ async def lifespan(app: FastAPI):
         log.info("knowledge_migrate started (async)")
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
+
+    # Issue #995：存量 VCS 存在性回填（启动后异步执行，不阻塞，幂等可重跑）
+    try:
+        app.state.vcs_exists_backfill_task = _start_vcs_exists_backfill_task()
+        log.info("VCS existence backfill started (async)")
+    except Exception as e:
+        log.warning(f"VCS existence backfill start failed: {e}")
 
     # D32: user_accounts → grape_accounts 数据迁移（Issue #343: yield 前同步等待完成）
     # P1-1 修复: 原异步执行不等待就 yield，迁移期间用户请求读到旧 user_id 导致数据错位。
@@ -366,111 +714,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Reap stale runtimes loop start failed: {e}")
 
-    # 主控机指标上报：每 15 秒采集本机 CPU/内存/磁盘/负载写入 DB
+    # 主控机指标上报（Issue #596 P1：复用 _start_server_metrics_task 启动器）
     _server_metrics_task = None
     try:
-        async def _server_metrics_loop():
-            import socket as _sock, hashlib as _hl
-            from datetime import datetime, timezone
-            _hostname = _sock.gethostname() or "unknown-server"
-            _local_ip = "127.0.0.1"
-            try:
-                _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                _s.connect(("8.8.8.8", 80))
-                _local_ip = _s.getsockname()[0]
-                _s.close()
-            except Exception:
-                pass
-            try:
-                from src.session_manager import db, db_lock
-                _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
-                    if not c.fetchone():
-                        c.execute(
-                            "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
-                            "VALUES (?, ?, ?, 'global', 'active', ?)",
-                            (_token_hash, _hostname, _hostname, _local_ip))
-                        db.commit()
-                        log.info(f"Server metrics: registered {_hostname}")
-            except Exception as e:
-                log.warning(f"Server metrics: register failed: {e}")
-            while True:
-                try:
-                    _cpu = _mem = _disk = _tmp = 0.0
-                    _load = ""
-                    try:
-                        import psutil as _ps
-                        _cpu = _ps.cpu_percent(interval=None)
-                        try:
-                            with open("/proc/meminfo") as _mf:
-                                _mi = {}
-                                for _line in _mf:
-                                    _p = _line.split(":")
-                                    if len(_p) == 2:
-                                        _mi[_p[0]] = int(_p[1].strip().split()[0]) * 1024
-                            _total = _mi["MemTotal"]
-                            _used = _total - _mi.get("MemFree", 0) - _mi.get("Buffers", 0) - _mi.get("Cached", 0)
-                            _mem = round(_used / _total * 100, 1) if _total > 0 else _ps.virtual_memory().percent
-                        except Exception:
-                            _mem = _ps.virtual_memory().percent
-                        _disk = _ps.disk_usage("/").percent
-                        try:
-                            _tmp = _ps.disk_usage("/tmp").percent
-                        except Exception:
-                            _tmp = 0.0
-                        _load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
-                        # BANDWIDTH: 读 /proc/net/dev，两次采样差分算速率
-                        _bw_mbps = 0.0
-                        _bw_pct = 0.0
-                        try:
-                            import time as _bt
-                            _rx = _tx = 0
-                            with open("/proc/net/dev") as _bf:
-                                for _bl in _bf:
-                                    if ":" not in _bl:
-                                        continue
-                                    _bn, _br = _bl.split(":", 1)
-                                    _bn = _bn.strip()
-                                    if _bn == "lo":
-                                        continue
-                                    _bf2 = _br.split()
-                                    if len(_bf2) >= 9:
-                                        _rx += int(_bf2[0])
-                                        _tx += int(_bf2[8])
-                            _bw_now = _bt.time()
-                            _bw_prev = getattr(_server_metrics_loop, "_bw_prev", None)
-                            if _bw_prev:
-                                _bpts, _bpbytes = _bw_prev
-                                _bdt = _bw_now - _bpts
-                                _bdb = (_rx + _tx) - _bpbytes
-                                if _bdt > 0 and _bdb >= 0:
-                                    _bw_mbps = round(_bdb * 8 / _bdt / 1e6, 1)
-                                    _bw_thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "10"))
-                                    if _bw_thr > 0:
-                                        _bw_pct = round(min(_bw_mbps / _bw_thr * 100, 100.0), 1)
-                            _server_metrics_loop._bw_prev = (_bw_now, _rx + _tx)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-                    _now = datetime.now(timezone.utc).isoformat()
-                    from src.session_manager import db, db_lock
-                    with db_lock:
-                        c = db.cursor()
-                        c.execute(
-                            "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
-                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, "
-                            "bandwidth_percent=?, bandwidth_mbps=?, load_avg=? "
-                            "WHERE device_name=? AND scope='global'",
-                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _bw_pct, _bw_mbps, _load, _hostname))
-                        db.commit()
-                except Exception as e:
-                    log.warning(f"Server metrics: upload failed: {e}")
-                await asyncio.sleep(15)
-        _server_metrics_task = asyncio.create_task(_server_metrics_loop())
-        log.info("Server metrics loop started (15s)")
+        _server_metrics_task = _start_server_metrics_task()
     except Exception as e:
         log.warning(f"Server metrics loop start failed: {e}")
 
@@ -482,130 +729,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Health refresh scheduler start failed: {e}")
 
-    # 可观测性告警中心：种子规则 + 每 30s 求值（设计文档 §9.2）
-    # 平台级规则（DB/主机/全局引擎）与用户面规则一起求值，但用户面 API 只出 level='user'
+    # 可观测性告警中心（Issue #596 P1：复用 _start_obs_alert_task 启动器）
     _obs_alert_loop_task = None
     try:
-        from src.observability import alerts as _obs_alerts
-        from src.observability import slo as _obs_slo
-        from src.observability import loops as _obs_loops
-
-        _obs_seeded = _obs_alerts.seed_rules()
-        _obs_slo_seeded = _obs_slo.seed_defaults()      # P2-1：三条默认 SLO（幂等）
-
-        async def _obs_alert_loop():
-            _tick = 0
-            # Issue #437：SLO 评估与 30s 告警循环解耦——独立周期（默认 300s，meta/环境变量可配，
-            # eval_interval_sec() 每轮重读支持热更新）；指标 60s 才采样一次，30s 全窗跑一轮太密
-            _slo_next = 0.0
-            _loop = asyncio.get_running_loop()
-            while True:
-                await asyncio.sleep(30)
-                _tick += 1
-                try:
-                    _r = await asyncio.to_thread(_obs_alerts.evaluate_rules)
-                    if _r.get("fired") or _r.get("resolved"):
-                        log.info(f"Observability alerts: "
-                                 f"{ {k: v for k, v in _r.items() if k != 'new_events'} }")
-                    # 通知在主事件循环里发（求值跑在线程中，IM 客户端是 async 的）
-                    _new = _r.get("new_events") or []
-                    if _new:
-                        _n = await _obs_alerts.notify_fired_events(_new)
-                        log.info(f"Observability alert notifications: {_n}")
-                    # 聚合汇总：窗口结束的合并通知（P1-1）
-                    _a = await _obs_alerts.flush_aggregates()
-                    if _a.get("summaries"):
-                        log.info(f"Observability alert aggregates: {_a}")
-                    # 事件留存（90 天，只清已恢复的）：约每小时一次
-                    if _tick % 120 == 0:
-                        _n2 = await asyncio.to_thread(_obs_alerts.cleanup_events)
-                        if _n2:
-                            log.info(f"Observability alert events cleaned: {_n2} rows")
-                        _obs_loops.beat("obs_alert_retention")
-                    # SLO / 错误预算（P2-1）：算三类 SLI → 落小时快照 → 同步违约事件
-                    # （违约写 source='slo' 进统一事件视图，复用告警的静默/通知渠道）
-                    # Issue #437：桶数据走小时桶 rollup 预聚合 + 独立评估周期（≥ 默认 300s）
-                    if _loop.time() >= _slo_next:
-                        _slo_next = _loop.time() + _obs_slo.eval_interval_sec()
-                        try:
-                            _s = await asyncio.to_thread(_obs_slo.evaluate_all)
-                            if _s.get("firing") or _s.get("resolved"):
-                                log.info(f"Observability SLO: {_s}")
-                            if _s.get("cleaned"):
-                                log.info(f"Observability SLO snapshots cleaned: {_s['cleaned']} rows")
-                            _obs_loops.beat("obs_slo")
-                        except Exception as e:
-                            log.warning(f"Observability SLO loop failed: {e}")
-                    _obs_loops.beat("obs_alert")     # gap 探测在 evaluate_rules 内部
-                except Exception as e:
-                    _obs_loops.fail("obs_alert", e)
-                    log.warning(f"Observability alert evaluation failed: {e}")
-
-        _obs_alert_loop_task = asyncio.create_task(_obs_alert_loop())
-        log.info(f"Observability alert evaluator started (30s, seeded={_obs_seeded});"
-                 f" SLO eval interval {_obs_slo.eval_interval_sec()}s (decoupled, Issue #437)")
+        _obs_alert_loop_task = _start_obs_alert_task()
     except Exception as e:
         log.warning(f"Observability alert evaluator start failed: {e}")
 
-    # 业务指标聚合（P1-2）：60s 追赶式补齐分钟/小时桶；每小时顺带清一次留存
+    # 业务指标聚合（Issue #596 P1：复用 _start_obs_rollup_task 启动器）
     _obs_rollup_task = None
     try:
-        from src.observability import metric_rollup as _obs_mrollup
-        from src.observability import llm_usage as _obs_llm_usage
-        from src.observability import loops as _obs_loops
-
-        async def _obs_rollup_loop():
-            _tick = 0
-            while True:
-                await asyncio.sleep(60)
-                _tick += 1
-                try:
-                    _s = await asyncio.to_thread(_obs_mrollup.catch_up)
-                    if _s.get("minute_done") or _s.get("hour_done"):
-                        log.info(f"Observability metric rollup: {_s}")
-                    if _tick % 60 == 0:      # 约每小时清一次留存
-                        await asyncio.to_thread(_obs_mrollup.cleanup)
-                    if _tick % 1440 == 0:    # 约每天一次：台账年度归档（>365 天搬到归档表）
-                        _ar = await asyncio.to_thread(_obs_llm_usage.archive_old_usage)
-                        if _ar.get("archived"):
-                            log.info(f"Observability usage archive: {_ar}")
-                        _obs_loops.beat("obs_usage_archive")
-                    _obs_loops.beat("obs_rollup")
-                except Exception as e:
-                    _obs_loops.fail("obs_rollup", e)
-                    log.warning(f"Observability metric rollup failed: {e}")
-
-        _obs_rollup_task = asyncio.create_task(_obs_rollup_loop())
-        log.info("Observability metric rollup started (60s, minute 7d / hour 30d)")
+        _obs_rollup_task = _start_obs_rollup_task()
     except Exception as e:
         log.warning(f"Observability metric rollup start failed: {e}")
 
-    # 设备资源采样：每 60s 留一份历史（资源曲线用），顺带清理过期采样
+    # 设备资源采样（Issue #596 P1：复用 _start_obs_sample_task 启动器）
     _obs_sample_task = None
     try:
-        from src.observability import rollup as _obs_rollup
-        from src.observability import logs as _obs_logs_mod
-        from src.observability import loops as _obs_loops
-
-        async def _obs_sample_loop():
-            while True:
-                await asyncio.sleep(60)
-                try:
-                    r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
-                    if r.get("inserted"):
-                        log.debug(f"Observability runtime samples: {r}")
-                    # 日志留存：顺带按小时限流清理（14 天）
-                    _nc = await asyncio.to_thread(_obs_logs_mod.maybe_cleanup)
-                    if _nc:
-                        log.info(f"Observability logs cleaned: {_nc} rows")
-                        _obs_loops.beat("obs_log_cleanup")
-                    _obs_loops.beat("obs_sample")
-                except Exception as e:
-                    _obs_loops.fail("obs_sample", e)
-                    log.warning(f"Observability runtime sampling failed: {e}")
-
-        _obs_sample_task = asyncio.create_task(_obs_sample_loop())
-        log.info("Observability runtime sampler started (60s)")
+        _obs_sample_task = _start_obs_sample_task()
     except Exception as e:
         log.warning(f"Observability runtime sampler start failed: {e}")
 
@@ -625,36 +766,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Observability trace stamp failed: {e}")
 
-    # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
+    # 用户活跃状态追踪（Issue #596 P1：复用 _start_active_user_tracker_task 启动器）
     _active_tracker_task = None
     try:
-        async def _active_user_tracker():
-            from src.api.deps import get_pending_active
-            from src.user import db as user_db
-            _purge_i = 0
-            while True:
-                await asyncio.sleep(30)
-                try:
-                    uids = get_pending_active()
-                    if uids:
-                        await asyncio.to_thread(user_db.batch_update_last_active, list(uids))
-                except Exception as e:
-                    log.warning(f"Active user tracker flush failed: {e}")
-                # Issue-45 M2：会话级临时 token TTL 兜底清理（每 5 分钟）
-                try:
-                    _purge_i += 1
-                    if _purge_i >= 10:
-                        _purge_i = 0
-                        from src.api.auth_token import purge_expired_session_tokens
-                        await asyncio.to_thread(purge_expired_session_tokens)
-                        # 事件活跃守卫 TTL 兜底清理（进程崩溃未终态释放时自愈）
-                        from src.api.event_store import purge_stale_event_guards
-                        await asyncio.to_thread(purge_stale_event_guards)
-                except Exception as e:
-                    log.warning(f"Session token purge failed: {e}")
-
-        _active_tracker_task = asyncio.create_task(_active_user_tracker())
-        log.info("Active user tracker started (30s flush)")
+        _active_tracker_task = _start_active_user_tracker_task()
     except Exception as e:
         log.warning(f"Active user tracker start failed: {e}")
 
@@ -689,6 +804,16 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # 巡检后台循环（S53/R24，外部复审发现 1）：与 obs 三循环同款收口——
+    # 此前漏 cancel，patrol_loop 是无限循环写库任务，任何在本进程启动过 app
+    # 的场景（含 pytest TestClient）都会把它留在后台继续写库 → 用例成片假失败
+    # （main.py 本处注释记录过的同类真实事故，复发封口）。
+    if _patrol_task:
+        _patrol_task.cancel()
+        try:
+            await asyncio.wait_for(_patrol_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     # 可观测性后台循环（告警求值 / 指标聚合 / 设备采样）：**必须一起收掉**。
     # 之前漏了这三个 cancel —— 任何在本进程里启动过 app 的场景（含 pytest 里的 TestClient）
     # 都会把这些循环留在后台，继续对同一个库读写 → 后续用例成片假失败（真实踩到）。
@@ -712,6 +837,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
         await stop_skill_sync_scheduler()
+    except Exception:
+        pass
+    # 反馈→Issue reconcile：优雅关闭定时任务（weekly-08）
+    try:
+        from src.api.feedback_issue_converter import stop_feedback_reconcile_scheduler
+        await stop_feedback_reconcile_scheduler()
     except Exception:
         pass
     # R31：场景同步随 skill worker 一同优雅关闭（合并进 stop_skill_sync_scheduler），
@@ -740,11 +871,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Agentic DevOps API",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    default_response_class=SafeJSONResponse,  # Issue #684：统一 JSON 序列化出口（控制字符转义）
 )
 
 app.add_middleware(
@@ -756,200 +888,19 @@ app.add_middleware(
 )
 
 
-def _is_loopback(request: Request) -> bool:
-    """判断请求是否来自内网（127.0.0.1 / ::1）。"""
-    client = request.client
-    if client and client.host in ("127.0.0.1", "::1", "localhost"):
-        return True
-    # 信任反代 X-Forwarded-For（nginx 加 X-Real-IP）
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first in ("127.0.0.1", "::1"):
-            return True
-    xri = request.headers.get("x-real-ip", "")
-    if xri in ("127.0.0.1", "::1"):
-        return True
-    return False
-
 # 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
-from src.observability import metrics_middleware, start_metrics_server, metrics_endpoint, metrics_enabled
+from src.observability import metrics_middleware, start_metrics_server, metrics_enabled
 metrics_middleware(app)
 if metrics_enabled():
     start_metrics_server()
 
-# 可观察性：request_id + HTTP 请求日志合并中间件（参考 multica middleware/request_logger.go）
-# request_id：注入 X-Request-ID + ContextVar，贯穿日志 + 响应头
-# 请求日志：结构化记录 method/path/status/duration/request_id，按状态码分级
-import uuid as _uuid
-import time as _time
-from src.config import request_id_var, repo_var, user_var, log as _log
+# Issue #596 P1：request_id + HTTP 请求日志中间件抽至 src/api/middleware.py（A/B/C 三入口复用）
+from src.api.middleware import install_request_middleware
+install_request_middleware(app)
 
-
-# webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
-_WEBHOOK_PREFIX = "/webhook/"
-
-
-def _redact_path(path: str) -> str:
-    """webhook 路径中的 token 段替换为 [redacted]。"""
-    if not path.startswith(_WEBHOOK_PREFIX):
-        return path
-    rest = path[len(_WEBHOOK_PREFIX):]
-    if "/" in rest:
-        return _WEBHOOK_PREFIX + "[redacted]" + rest[rest.index("/"):]
-    return _WEBHOOK_PREFIX + "[redacted]"
-
-
-# 健康探针路径不记请求日志（参考 multica isHealthProbePath）
-_LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
-# Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 = ~24 行/秒, 膨胀日志）
-_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/", "/api/ping")
-
-
-@app.middleware("http")
-async def request_id_and_log_middleware(request: Request, call_next):
-    """request_id 注入 + HTTP 请求日志（合并为一个中间件，确保 ContextVar 贯穿日志）。
-
-    按状态码分级：5xx → ERROR, 4xx → WARN, 2xx/3xx → INFO。
-    健康探针路径跳过请求日志（但 request_id 仍注入）。
-    """
-    rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
-    request.scope["request_id"] = rid
-    token_rid = request_id_var.set(rid)
-
-    # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
-    path = request.url.path
-    _repo = ""
-    # 从请求路径提取 repo_key，不同模块路径结构不同：
-    # /api/dashboard/{owner}/{repo}          → owner=parts[2], repo=parts[3]
-    # /api/pipeline/{owner}/{repo}           → 同上
-    # /api/agents/{agent_type}/{owner}/{repo} → owner=parts[3], repo=parts[4]
-    _path_parts = path.strip("/").split("/")
-    if len(_path_parts) >= 4 and _path_parts[0] == "api":
-        _module = _path_parts[1]
-        # agents 路由多一层 agent_type
-        if _module == "agents" and len(_path_parts) >= 5:
-            _owner = _path_parts[3]
-            _repo_name = _path_parts[4]
-            if "/" not in _owner and "." not in _owner:
-                _repo = f"gitcode:{_owner}/{_repo_name}"
-        elif _module in {"dashboard", "pipeline"} and len(_path_parts) >= 4:
-            _owner = _path_parts[2]
-            _repo_name = _path_parts[3]
-            if "/" not in _owner and "." not in _owner:
-                _repo = f"gitcode:{_owner}/{_repo_name}"
-    # query param 中的 repo（如 ?repo=requiredsa/hello-flask）
-    if not _repo:
-        _qp = request.query_params.get("repo", "")
-        if _qp:
-            _repo = f"gitcode:{_qp}" if not _qp.startswith("gitcode:") else _qp
-    token_repo = repo_var.set(_repo)
-
-    # 从 Authorization header 提取 user_id
-    _uid = ""
-    _auth = request.headers.get("Authorization", "")
-    if _auth.startswith("Bearer "):
-        try:
-            # Issue #372 §14.2.2a: 优先用 JWT 解析 user_id（与依赖层 get_current_user 一致）
-            # 注册/登录返回 JWT token，不走 create_session_token → validate_token 内存缓存查不到
-            from src.api.jwt_utils import verify_access_token
-            _payload = verify_access_token(_auth[7:])
-            if _payload and _payload.get("sub"):
-                _uid = str(_payload["sub"])
-            else:
-                # fallback: 旧 session token（create_session_token 写入 _user_tokens）
-                from src.user.db import validate_token
-                _uid_val = validate_token(_auth[7:])
-                if _uid_val:
-                    _uid = str(_uid_val)
-        except Exception:
-            pass
-    token_uid = user_var.set(_uid)
-
-    # Issue #372 §14.2.2: 已认证请求到达时从 Host 头推导 webhook_url
-    # 零管理员部署场景：外网 IP 探测失败时，用户通过浏览器访问 Web UI 的 Host 头是最可靠的发现信号
-    # nginx 代理场景：优先 X-Forwarded-Host（含端口），X-Forwarded-Proto（https）
-    if _uid:
-        try:
-            from src.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
-            if not get_meta_value("webhook_url"):
-                _host = request.headers.get("host", "")
-                _fwd_host = request.headers.get("x-forwarded-host", "")
-                _fwd_proto = request.headers.get("x-forwarded-proto", "")
-                _candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
-                if _candidate:
-                    set_meta_value("webhook_url", _candidate)
-                    # 清除启动时探测失败标记
-                    if get_meta_value("webhook_url_detect_failed"):
-                        set_meta_value("webhook_url_detect_failed", "")
-                    _log.info(f"webhook_url auto-detected from Host header: {_candidate}")
-        except Exception:
-            pass
-
-    skip_log = path in _LOG_SKIP_PATHS or path.startswith(_LOG_SKIP_PREFIXES)
-    start = _time.time()
-    status = 500
-    try:
-        response = await call_next(request)
-        status = response.status_code
-        response.headers["X-Request-ID"] = rid
-        return response
-    except Exception:
-        raise
-    finally:
-        if not skip_log:
-            duration = (_time.time() - start) * 1000
-            redacted_path = _redact_path(path)
-            # 结构化字段通过 extra 注入，作为独立 JSON 字段输出（非 message 文本）
-            extra = {
-                "method": request.method,
-                "path": redacted_path,
-                "status": status,
-                "duration_ms": round(duration),
-            }
-            msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
-            if status >= 500:
-                _log.error(msg, extra=extra)
-            elif status == 401:
-                # 401 降级：前端 token 过期刷新是正常行为不记 WARNING；
-                # 但 runtime/worker 凭据失败保留 WARNING（运维需感知 worker 掉线）
-                if path.startswith("/api/runtime/"):
-                    _log.warning(msg, extra=extra)
-                else:
-                    _log.debug(msg, extra=extra)
-            elif status in (403, 404):
-                # 403/404 降级：health 外网限制、favicon、SPA 路由回退等正常行为，非错误
-                _log.debug(msg, extra=extra)
-            elif status >= 400:
-                _log.warning(msg, extra=extra)
-            else:
-                _log.info(msg, extra=extra)
-            # 慢请求入库（方案C）
-            from src.config import SLOW_REQUEST_THRESHOLD_MS
-            if duration >= SLOW_REQUEST_THRESHOLD_MS:
-                try:
-                    from src.session_manager import db as _sdb, db_lock as _sdbl
-                    with _sdbl:
-                        _sdb.execute(
-                            "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
-                            (rid, request.method, redacted_path, status, round(duration), _repo, _uid)
-                        )
-                        _sdb.commit()
-                except Exception:
-                    pass  # 入库失败不影响请求
-        request_id_var.reset(token_rid)
-        repo_var.reset(token_repo)
-        user_var.reset(token_uid)
-
-@app.get("/api/ping", include_in_schema=False)
-async def api_ping():
-    """前端会话保活 / Failed to fetch 恢复预检的轻量探针（无鉴权、不查 DB、浏览器可达）。
-
-    - `/health` 仅 loopback（nginx 外网 403），浏览器用不了；
-    - 本端点对任何来源返回 200，零 IO，供 heartbeat 60s 与 unhandledrejection 恢复预检。
-    """
-    return {"ok": True, "ts": _dt.now(_tz.utc).isoformat()}
+# /api/ping（Issue #596 P1：随 health_endpoints 安装，含 /health /healthz /readyz）
+from src.api.health_endpoints import install_health_endpoints
+install_health_endpoints(app, service_name="server")
 
 app.include_router(grape_auth.router)
 app.include_router(auth.router)
@@ -986,210 +937,14 @@ app.include_router(autopilot.router)
 app.include_router(orgs.router)
 app.include_router(community.router)
 app.include_router(observability.router)
+app.include_router(patrol.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 app.openapi = lambda: custom_openapi(app)
-# Issue 附件静态服务（Task Center 上传的文件）
-# 注意：必须在 /static 之前 mount，否则 /static 会拦截 /static/issue_attachments 请求
-# 路径与 tasks.py _attach_base_dir 对齐（基于 WORKSPACE_DIR）
-from src.config import WORKSPACE_DIR as _WS_DIR
-_ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
-os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
-app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
-
-# Community uploads (images for markdown posts)
-_COMMUNITY_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "community_uploads")
-os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
-app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
-
-# Vue refactor: static root moved to frontend/legacy (phase 1); keep serving under /static
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "legacy") if os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "legacy")) else os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-# Vue refactor (phase 1): serve new Vue app build output under /static-vue/
-# (approved Gate 0 option A). Temporary mount — removed when migration completes.
-_VUE_DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "static-dist")
-if os.path.isdir(_VUE_DIST_DIR):
-    class _VueSPAStaticFiles(StaticFiles):
-        """StaticFiles with history-mode fallback: unknown paths -> index.html."""
-        async def get_response(self, path, scope):
-            from starlette.responses import FileResponse as _FR
-            try:
-                resp = await super().get_response(path, scope)
-            except Exception:
-                resp = None
-            if resp is None or resp.status_code == 404:
-                resp = _FR(os.path.join(_VUE_DIST_DIR, "index.html"))
-                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-            return resp
-    app.mount("/static-vue", _VueSPAStaticFiles(directory=_VUE_DIST_DIR, html=True), name="static_vue")
-
-if os.path.isdir(STATIC_DIR):
-    # Static assets (JS/CSS): allow browser caching with ETag revalidation.
-    # ?v= bump is the primary cache-buster; must-revalidate ensures stale files are always checked.
-    # index.html itself stays no-store (see _spa_response below) so the browser always fetches the
-    # latest HTML, which references the correct ?v= for each asset.
-    from starlette.middleware.base import BaseHTTPMiddleware
-    class NoCacheStaticMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            resp = await call_next(request)
-            if request.url.path.startswith("/static/"):
-                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-            return resp
-    app.add_middleware(NoCacheStaticMiddleware)
-
-    from fastapi.responses import FileResponse, HTMLResponse
-    from src.auth.email_service import is_email_configured as _is_email_configured
-    import json as _json_mod
-
-    # ── i18n boost: 服务端注入翻译数据，消除首屏 i18n 闪动 ──
-    _I18N_BOOST_CACHE = None
-
-    def _get_i18n_boost():
-        """启动时读取 locale JSON，提取 auth 页面 [data-i18n] 需要的 key，缓存为双语 boost pack。
-        读取失败时返回空 JSON '{}'——early-translate 检测到无 boost 数据会直接 return，
-        降级为 i18n.js defer 翻译（有短暂闪动但页面不崩溃）。"""
-        global _I18N_BOOST_CACHE
-        if _I18N_BOOST_CACHE is not None:
-            return _I18N_BOOST_CACHE
-
-        try:
-            import re as _re
-            boost = {'en': {'app': {}}, 'zh': {'app': {}}}
-
-            # Collect all data-i18n keys from auth pages
-            auth_keys = set()
-            for fname in ('register.html', 'forgot.html', 'index.html'):
-                fpath = os.path.join(STATIC_DIR, fname)
-                if os.path.isfile(fpath):
-                    with open(fpath, 'r', encoding='utf-8') as f:
-                        html = f.read()
-                    for m in _re.finditer(r'data-i18n(?:-placeholder)?="([^"]+)"', html):
-                        auth_keys.add(m.group(1))
-
-            # Extract keys from locale JSON files
-            for lang in ('en', 'zh'):
-                app_path = os.path.join(STATIC_DIR, 'locales', lang, 'app.json')
-                if os.path.isfile(app_path):
-                    with open(app_path, 'r', encoding='utf-8') as f:
-                        app_data = _json_mod.load(f)
-                    # Pre-load organizations.json for organizations.* keys
-                    org_path = os.path.join(STATIC_DIR, 'locales', lang, 'organizations.json')
-                    org_data = {}
-                    if os.path.isfile(org_path):
-                        with open(org_path, 'r', encoding='utf-8') as of:
-                            org_data = _json_mod.load(of)
-                    for k in auth_keys:
-                        parts = k.split('.')
-                        if parts[0] == 'app' and len(parts) >= 2:
-                            section, leaf = parts[1], parts[-1]
-                            if section not in app_data:
-                                continue
-                            if isinstance(app_data[section], dict):
-                                if leaf in app_data[section]:
-                                    boost[lang]['app'].setdefault(section, {})[leaf] = app_data[section][leaf]
-                            elif parts[1] == leaf:
-                                boost[lang]['app'][leaf] = app_data[section]
-                        elif parts[0] == 'organizations' and len(parts) >= 2:
-                            leaf = parts[-1]
-                            if leaf in org_data:
-                                boost[lang].setdefault('organizations', {})[leaf] = org_data[leaf]
-
-                common_path = os.path.join(STATIC_DIR, 'locales', lang, 'common.json')
-                if os.path.isfile(common_path):
-                    with open(common_path, 'r', encoding='utf-8') as f:
-                        common_data = _json_mod.load(f)
-                    for ck in ('server_error', 'request_failed', 'session_expired', 'network_upload_error'):
-                        if ck in common_data:
-                            boost[lang].setdefault('common', {})[ck] = common_data[ck]
-
-            _I18N_BOOST_CACHE = _json_mod.dumps(boost, ensure_ascii=False, separators=(',', ':'))
-        except Exception as _e:
-            import sys
-            print(f"[WARNING] Failed to build i18n boost pack: {_e}", file=sys.stderr)
-            _I18N_BOOST_CACHE = '{}'
-        return _I18N_BOOST_CACHE
-
-    # ── i18n early-translate: 内联翻译 script，在 </body> 前同步执行 ──
-    # 不依赖 i18n.js 外部文件——用 __I18N_BOOST__ 数据直接翻译 DOM 并移除 i18n-loading
-    # HTML 解析到 </body> 时 body 元素已全部就绪，querySelectorAll 能找到所有 [data-i18n]
-    _EARLY_TRANSLATE_SCRIPT = '''<script>
-(function(){if(!window.__I18N_BOOST__)return;var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang==='zh'){document.documentElement.classList.remove('i18n-loading');return;}
-var P=window.__I18N_BOOST__[lang];if(!P)return;
-function L(k){var p=k.split('.'),c=P;for(var i=0;i<p.length;i++){if(c==null||typeof c!=='object')return;c=c[p[i]];}return c;}
-var els=document.querySelectorAll('[data-i18n]');for(var i=0;i<els.length;i++){var k=els[i].getAttribute('data-i18n');if(k){var v=L(k);if(v&&v!==k)els[i].textContent=v;}}
-var phs=document.querySelectorAll('[data-i18n-placeholder]');for(var i=0;i<phs.length;i++){var k=phs[i].getAttribute('data-i18n-placeholder');if(k){var v=L(k);if(v&&v!==k)phs[i].setAttribute('placeholder',v);}}
-document.documentElement.classList.remove('i18n-loading');})();
-</script>'''
-
-    def _inject_email_configured(html: str) -> str:
-        """在 </head> 前注入邮箱配置状态 + i18n boost 翻译数据。
-        在 </body> 前注入早期翻译 script（零网络延迟，HTML 解析阶段完成翻译）。
-        邮箱配置：window.__EMAIL_CONFIGURED__ + html class（CSS 驱动显隐，修复 FOUC）。
-        i18n boost：window.__I18N_BOOST__ + 早期翻译 script（消除首屏闪动）。"""
-        configured = _is_email_configured()
-        val = 'true' if configured else 'false'
-        cls = 'email-configured' if configured else 'email-not-configured'
-        boost_json = _get_i18n_boost()
-        head_inject = (
-            f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls}";'
-            f'window.__I18N_BOOST__={boost_json};</script>'
-        )
-        html = html.replace('</head>', head_inject + '</head>', 1)
-        # 在 </body> 前注入早期翻译 script（内联，零网络延迟）
-        html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
-        return html
-
-    def _serve_auth_page(filename: str) -> HTMLResponse:
-        """读取认证页面 HTML，注入邮箱配置状态，返回 HTMLResponse。"""
-        with open(os.path.join(STATIC_DIR, filename), 'r', encoding='utf-8') as f:
-            html = f.read()
-        html = _inject_email_configured(html)
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-
-    def _spa_response():
-        with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:
-            html = f.read()
-        html = _inject_email_configured(html)
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
-
-    @app.get("/")
-    async def serve_spa():
-        return _spa_response()
-
-    @app.get("/register")
-    async def serve_register():
-        """注册页面 — 独立 HTML，不加载主应用 JS。"""
-        return _serve_auth_page("register.html")
-
-    @app.get("/forgot")
-    async def serve_forgot():
-        """忘记密码页面 — 独立 HTML，不加载主应用 JS。"""
-        return _serve_auth_page("forgot.html")
-
-    @app.get("/en")
-    @app.get("/en/{path:path}")
-    async def serve_spa_en(path: str = ""):
-        """英文国际化路由——返回同一个 index.html，前端 i18n.js 从 URL /en 检测语言。"""
-        if path.startswith("api/") or path.startswith("static/"):
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404)
-        # 认证页面独立 HTML（不是 SPA view）
-        if path == "register":
-            return _serve_auth_page("register.html")
-        if path == "forgot":
-            return _serve_auth_page("forgot.html")
-        # Admin 独立页面——/en/admin 兜底返回 admin.html
-        if path == "admin" or path.startswith("admin/"):
-            _admin_html = os.path.join(STATIC_DIR, "admin.html")
-            if os.path.isfile(_admin_html):
-                return FileResponse(_admin_html,
-                                    headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-        return _spa_response()
-
-    # 注意：SPA catch-all (/{path:path}) 延迟到文件末尾注册，避免拦截 /health /healthz 等系统端点
+# ===== Issue #596 P1：静态资源 + SPA 路由抽至 src/api/spa.py（A 进程复用）=====
+from src.api.spa import install_spa_routes
+install_spa_routes(app)
 
 from src.api.db_setup import init_database
 init_database()
@@ -1197,174 +952,13 @@ init_database()
 from src.config import _load_accounts
 _load_accounts()
 
+# 全局异常处理器（Issue #596 P1：抽至 src/api/exception_handlers.py）
+from src.api.exception_handlers import install_exception_handlers
+install_exception_handlers(app)
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    from src.config import log
-    # Issue #380/#395: 异常原文（含 DB/SQL 错误细节）不回显给客户端——原文仅落服务端日志，
-    # 响应体返回通用文案 + request_id（便于关联排障）
-    log.warning(f"API error ({request.url.path}): {exc}")
-    rid = request.scope.get("request_id", "-")
-    return JSONResponse(status_code=500, content={"code": 500, "message": "服务器内部错误，请稍后重试", "request_id": rid})
-
-
-# ===== 三层健康检查（参考 multica health.go）=====
-
-import os as _os_mod
-from datetime import datetime as _dt, timezone as _tz
-
-_PROCESS_STARTED_AT = _dt.now(_tz.utc).isoformat()
-
-
-@app.get("/health")
-async def health(request: Request):
-    """Liveness：进程存活，不检查 DB。
-
-    K8s livenessProbe 用此端点。DB 挂了不应导致 pod 重启，只标记 NotReady。
-    仅允许内网访问（外网通过 nginx 限制或返回 403）。
-    """
-    if not _is_loopback(request):
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
-    return {
-        "status": "ok",
-        "version": "2.0.0",
-        "pid": _os_mod.getpid(),
-        "started_at": _PROCESS_STARTED_AT,
-    }
-
-
-# /healthz 3s TTL 缓存（参考 multica readinessCacheTTL）
-_readiness_cache = {"result": None, "expires_at": 0}
-_READINESS_CACHE_TTL = 3  # 秒
-
-
-@app.get("/healthz")
-@app.get("/readyz")
-async def readiness(request: Request):
-    """Readiness：检查 DB 连通 + 表结构完整性，3s 缓存。
-
-    K8s readinessProbe / startupProbe 用此端点。
-    仅允许内网访问。
-    """
-    if not _is_loopback(request):
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
-    import time as _t
-    now = _t.time()
-    cached = _readiness_cache["result"]
-    if cached and now < _readiness_cache["expires_at"]:
-        return cached
-
-    from src.session_manager import db, db_lock
-    checks = {"db": "ok", "tables": "ok"}
-    status = "ok"
-    http_status = 200
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT 1")
-            c.fetchone()
-    except Exception as e:
-        checks["db"] = f"error: {e}"
-        checks["tables"] = "unknown"
-        status = "not_ready"
-        http_status = 503
-    else:
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT COUNT(*) FROM agent_tasks")
-                c.fetchone()
-        except Exception:
-            checks["tables"] = "error: agent_tasks missing"
-            status = "not_ready"
-            http_status = 503
-    # 模板检查：project-templates.json 存在且非空
-    import os as _os_mod2
-    _json_path = _os_mod2.path.join(
-        _os_mod2.path.dirname(_os_mod2.path.dirname(_os_mod2.path.dirname(_os_mod2.path.abspath(__file__)))),
-        "configs", "project-templates.json")
-    if _os_mod2.path.isfile(_json_path) and _os_mod2.path.getsize(_json_path) > 100:
-        checks["templates"] = "ok"
-    else:
-        checks["templates"] = "missing: project-templates.json"
-        # 不阻断 readiness（模板缺失不影响核心功能，但标记告警）
-        if status == "ok":
-            status = "degraded"
-    # P1-1 修复: /readyz 检查 D32 迁移状态
-    # 迁移在 lifespan yield 前同步完成，但如果迁移异常退出，服务仍会启动
-    _d32_failed = getattr(app, "state", None)
-    if _d32_failed and getattr(_d32_failed, "d32_migration_failed", False):
-        checks["migration"] = "error: D32 migration failed"
-        status = "not_ready"
-        http_status = 503
-    else:
-        checks["migration"] = "ok"
-    resp = JSONResponse(
-        status_code=http_status,
-        content={"status": status, "checks": checks},
-    )
-    _readiness_cache["result"] = resp
-    _readiness_cache["expires_at"] = now + _READINESS_CACHE_TTL
-    return resp
-
-
-@app.get("/health/realtime")
-async def health_realtime(request: Request):
-    """运维诊断：暴露 IM bot 状态、任务队列深度、runtime 在线数。
-
-    参考 multica /health/realtime（health_realtime.go）。
-    仅允许内网访问——外网不暴露运维细节。
-    """
-    if not _is_loopback(request):
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
-    from src.session_manager import db, db_lock
-    from src.runtime.health import derive_runtime_health
-    import time as _time, os as _os
-
-    now_ts = _time.time()
-    result = {
-        "status": "ok",
-        "version": "2.0.0",
-        "pid": _os.getpid(),
-    }
-
-    # IM bot 状态
-    if bot_manager:
-        result["im"] = bot_manager.health_check()
-
-    # 任务队列实时快照
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
-            result["tasks"] = {r[0]: r[1] for r in c.fetchall()}
-
-            c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')")
-            result["in_progress"] = c.fetchone()[0]
-
-            c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
-            online = 0
-            total = 0
-            for r in c.fetchall():
-                total += 1
-                h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
-                if h == "online":
-                    online += 1
-            result["runtimes"] = {"total": total, "online": online}
-    except Exception as e:
-        result["db_error"] = str(e)
-
-    return result
-
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
-    如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
-    """
-    from fastapi.responses import JSONResponse
-    return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
-
+# ===== 三层健康检查（Issue #596 P1：抽至 src/api/health_endpoints.py）=====
+# /health /healthz /readyz /health/realtime /api/ping 已在上方
+# install_health_endpoints(app, service_name="server") 处注册。
 
 # ===== 模板自愈：启动时检查 + 自动同步 =====
 
@@ -1423,43 +1017,3 @@ def _check_and_sync_templates() -> bool:
     examples_ok = _os.path.isdir(_examples_dir) and \
         any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
     return json_ok and examples_ok
-# SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
-# 必须放在所有 API 路由之后，否则会拦截 /health /healthz 等端点
-
-@app.get("/admin", include_in_schema=False)
-@app.get("/admin/{path:path}", include_in_schema=False)
-async def serve_admin(path: str = ""):
-    """Admin 独立页面：返回 src/api/frontend/legacy/admin.html（frontend 单页）。"""
-    from fastapi.responses import FileResponse
-    if path.startswith("api/") or path.startswith("static/"):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404)
-    _admin_html = os.path.join(STATIC_DIR, "admin.html")
-    if os.path.isfile(_admin_html):
-        resp = FileResponse(_admin_html)
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        return resp
-    raise HTTPException(status_code=404, detail="admin.html not found")
-
-@app.get("/account", include_in_schema=False)
-@app.get("/account/{path:path}", include_in_schema=False)
-async def serve_account_redirect():
-    """旧用户中心 URL 302 重定向到内嵌 SPA view。"""
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/#account", status_code=302)
-
-@app.get("/oauth-popup-callback.html", include_in_schema=False)
-async def serve_oauth_popup_callback():
-    """OAuth 弹窗回调中间页——极简 HTML，通过 postMessage 通知父窗口后关闭。"""
-    from fastapi.responses import FileResponse
-    resp = FileResponse(os.path.join(STATIC_DIR, "oauth-popup-callback.html"))
-    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    resp.headers["Referrer-Policy"] = "no-referrer"
-    return resp
-
-@app.get("/{path:path}")
-async def spa_catch_all(path: str):
-    if path.startswith("api/") or path.startswith("static/"):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404)
-    return _spa_response()

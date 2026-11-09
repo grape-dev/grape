@@ -54,6 +54,17 @@
 
 ---
 
+## POST /api/chat/messages/{msg_id}/recall — 撤回消息
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Path | `{msg_id}`（消息 id，`chat_submit` 响应 `message_id` 或 `GET /messages` 列表 `id`） |
+| 出参 | `{recalled: true, message_id, task_id, terminated}`（软删除 + 终止该轮 agent 执行） |
+| 返回 | 200；400（非 user 消息）；404（消息不存在 / 非本人会话） |
+
+说明（Issue #442）：仅限本人发送的消息；软删除保留原文供「重新编辑」；同轮 agent 回复一并软删除；direct 模式经 ChatTaskManager 终止，远端模式复用任务取消（#136）。
+
+---
+
 ## POST /api/chat/send — 发送消息（普通）
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 

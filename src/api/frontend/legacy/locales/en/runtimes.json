@@ -12,7 +12,15 @@
     "reset_confirm": "Reset this engine's health score? After reset, the score is recalculated from the reset point onwards.",
     "reset_success": "Health score reset",
     "reset_failed": "Failed to reset health score",
-    "reset_global_denied": "Global engines cannot reset health score"
+    "reset_global_denied": "Global engines cannot reset health score",
+    "hint": {
+      "consecutive_failures": "Engine is abnormal: consecutive health probe failures. Log in to the machine to troubleshoot.",
+      "heartbeat_lost": "Heartbeat lost. Check the machine's network and process status.",
+      "offline": "Engine is offline. Check whether the device is powered on and connected, and whether the engine process is running.",
+      "recently_lost": "Engine was recently lost (<5 min), usually due to network jitter. If it stays lost, check the machine's network.",
+      "about_to_gc": "Engine is about to be garbage-collected (>6 days offline). Reconnect the device soon to keep it.",
+      "low_score": "Health score is low. Investigate recent failed tasks, or reset the health score to recalculate."
+    }
   },
   "stats": {
     "total": "Total {count}"
@@ -60,6 +68,7 @@
     "unhealthy": "✗ Unhealthy",
     "worker": "Worker",
     "ip": "IP",
+    "spec": "Spec",
     "scope_label": "Scope",
     "scope_short": "Level",
     "owner": "Owner",
@@ -86,7 +95,20 @@
     "result": "Result",
     "skills_label": "Skills",
     "max_concurrent": "Max Concurrent",
-    "max_concurrent_desc": "Maximum concurrent tasks for this engine (1-100)"
+    "max_concurrent_desc": "Maximum concurrent tasks for this engine (1-100)",
+    "worker_version_stale": "Worker version outdated",
+    "worker_version_stale_hint": "The reported worker version is outdated. Re-run the one-line install command to upgrade. This hint is independent of engine health.",
+    "model": "Model",
+    "model_recent_short": "recent",
+    "model_configured": "Configured model",
+    "model_last_used": "Last used",
+    "model_source_report": "worker reported",
+    "model_source_local": "local config",
+    "model_fallback_hint": "No configured model reported; falling back to recently used models",
+    "recent_models": "Recently used models",
+    "recent_models_desc": "Top 3 by usage",
+    "recent_models_empty": "No usage records",
+    "model_used_count": "{{count}} calls"
   },
   "empty": {
     "no_engines": "No engines",
@@ -95,7 +117,11 @@
     "no_local_skill": "No local skill",
     "unassigned": "Unassigned",
     "loading": "Loading...",
-    "no_scenes": "No scenes"
+    "no_scenes": "No scenes",
+    "no_engines_title": "No engines",
+    "no_engines_sub": "No engines or devices attached in this organization yet",
+    "worker_guide_title": "Attach your first engine device",
+    "worker_guide_sub": "Add a device from any machine with an agent engine installed — the panel guides you through credential creation and the install command"
   },
   "time": {
     "not_online": "Not online",
@@ -111,6 +137,7 @@
     "install_hint": "📦 Install on the Worker machine (regular user) with one command:",
     "install_desc": "This command downloads the runtime package (grape-worker.tar.gz) from the controller, extracts it to the home directory, writes the credential and controller address, and starts registration in the background; no root needed. Re-run to upgrade.",
     "manual_start": "Or start RuntimeAgent manually:",
+    "manual_start_desc": "Run the command above from the installation root directory (where the runtime package is extracted), not from inside the src directory.",
     "win_install_hint": "🖥️ Windows setup (PowerShell):",
     "win_install_desc": "Run this command in PowerShell on your Windows device. It downloads the runtime package, writes the credential, and starts registration in the background. Requires Python 3.10+.",
     "toast_generated": "Credential generated",
@@ -228,5 +255,8 @@
       "cde_1004": "Error",
       "unknown": "Unknown"
     }
-  }
+  },
+  "rt_range_all": "All",
+  "rt_range_repo": "Repo",
+  "rt_range_user": "Personal"
 }

@@ -228,6 +228,7 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
       hermes: ~/.hermes/skills
       opencode: ~/.config/opencode/skills
       codearts: ~/.codeartsdoer/cli-data/system/skills
+      dsh(DeepSeek Harness): ~/.dsh/skills
       hwcloud(AIShell): ~/.hwcloud/skills + ~/.agents/skills（后者为 openagent
       原生全局 skill 根——acp/server.go buildSessionSkillProvider 约定，
       任务执行时 agent 实际读取的目录；前者为 grape 侧自定义路径，两者都扫）
@@ -249,6 +250,13 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
         # env（冒号分隔）追加任意目录，扫描时合并进所有引擎。
         "hwcloud": [os.path.join(home, ".agents", "skills"),
                     os.path.join(home, ".hwcloud", "skills")],
+        # dsh(DeepSeek Harness)：用户级 skill 根为 <dshHome>/skills（默认 ~/.dsh/skills）。
+        # 依据 dsh-skill-filesystem/lib/index.js:roots() —— 它扫三处：
+        #   project-dsh  <projectRoot>/.dsh/skills      （项目级，随任务工作区走）
+        #   project-agents <projectRoot>/.agents/skills
+        #   user-dsh     <dshHome>/skills               （← 平台投送落点，本行即此）
+        # 另有 customSkillDirs 可配置，但平台按现有约定只投 user 级。
+        "dsh": [os.path.join(home, ".dsh", "skills")],
     }
     return mapping.get(key, [])
 
@@ -279,12 +287,24 @@ def path_separator() -> str:
 def bun_cache_dir() -> str:
     """bun JIT 编译缓存目录（跨平台）。
 
-    Unix: /var/cache/bun-compile
-    Windows: %LOCALAPPDATA%\\grape\\bun-compile
+    Unix 按三级优先级解析（issue #857）：
+      1. GRAPE_BUN_CACHE_DIR 环境变量
+      2. ~/.cache/grape/bun-compile（用户级默认）
+      3. 系统临时目录下 grape/bun-compile（兜底）
+    Windows: %LOCALAPPDATA%\\grape\\bun-compile（不变）
     """
     if _IS_WINDOWS:
         return os.path.join(os.environ.get("LOCALAPPDATA", home_dir()), "grape", "bun-compile")
-    return "/var/cache/bun-compile"
+    env_dir = os.environ.get("GRAPE_BUN_CACHE_DIR", "")
+    if env_dir:
+        return os.path.expanduser(os.path.expandvars(env_dir))
+    return os.path.join(home_dir(), ".cache", "grape", "bun-compile")
+
+
+def bun_cache_fallback_dir() -> str:
+    """bun 编译缓存兜底目录（临时目录下，issue #857 降级用）。"""
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "grape", "bun-compile")
 
 
 def remap_cwd(path: str) -> str:

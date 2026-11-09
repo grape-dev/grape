@@ -174,3 +174,127 @@ class TestEnsureFeatureBranch:
         """无效目录 → 不崩溃，返回 False。"""
         ok = repogit.ensure_feature_branch("/nonexistent/path", "feat/issue-1", "main")
         assert ok is False
+
+
+class TestLinkedRepoTokenFromEnv:
+    """Issue #466 断点二：关联仓 token 解析——服务端 env 分发（GRAPE_LINKED_REPO_TOKENS）
+    优先，本地 Repo.bot_token 回退，两者皆无维持 skip。
+
+    场景：GitHub 主仓 + GitCode 关联仓。worker 本地 sqlite 无 managed_repos 数据，
+    Repo(rk).bot_token 必为空 → worktree 全部 skip。服务端派发时把各关联仓 token
+    随 env 下发后，worker 应优先用 env token 完成初始化。
+    """
+
+    LINKED = [{"repo_key": "gitcode:OPCTeam/HDBlogService", "branch": "main"}]
+
+    def test_env_token_preferred_over_local(self, monkeypatch):
+        """env 有该仓 token → 优先使用，不再走本地 Repo.bot_token。"""
+        monkeypatch.setattr(repogit, "ensure_issue_worktree",
+                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+        local_called = {"n": 0}
+
+        class _FakeRepo:
+            def __init__(self, rk):
+                pass
+
+            @property
+            def bot_token(self):
+                local_called["n"] += 1
+                return "tok_local"
+
+        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        env = {"GRAPE_LINKED_REPO_TOKENS": '{"gitcode:OPCTeam/HDBlogService": "tok_env"}'}
+        wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466", env=env)
+        assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_env")
+        assert local_called["n"] == 0, "env 有 token 时不应回退本地解析"
+
+    def test_env_missing_key_falls_back_to_local(self, monkeypatch):
+        """env 无该仓键 → 回退本地 Repo.bot_token（本地模式可用性保持）。"""
+        monkeypatch.setattr(repogit, "ensure_issue_worktree",
+                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+
+        class _FakeRepo:
+            def __init__(self, rk):
+                pass
+
+            @property
+            def bot_token(self):
+                return "tok_local"
+
+        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        env = {"GRAPE_LINKED_REPO_TOKENS": '{"gitcode:other/repo": "tok_env"}'}
+        wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466", env=env)
+        assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_local")
+
+    def test_both_missing_skips(self, monkeypatch):
+        """env 与本地均无 token → 该仓 skip（维持降级语义，不抛异常）。"""
+        monkeypatch.setattr(repogit, "ensure_issue_worktree",
+                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+
+        class _FakeRepo:
+            def __init__(self, rk):
+                pass
+
+            @property
+            def bot_token(self):
+                return ""
+
+        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466", env={})
+        assert wts == [], "双无 token 应 skip 该关联仓"
+
+    def test_env_json_invalid_falls_back(self, monkeypatch):
+        """env JSON 损坏 → 视为无 env token，回退本地解析。"""
+        monkeypatch.setattr(repogit, "ensure_issue_worktree",
+                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+
+        class _FakeRepo:
+            def __init__(self, rk):
+                pass
+
+            @property
+            def bot_token(self):
+                return "tok_local"
+
+        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466",
+                                                   env={"GRAPE_LINKED_REPO_TOKENS": "{broken"})
+        assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_local")
+
+    def test_ensure_repo_base_multi_env_preferred(self, monkeypatch):
+        """ensure_repo_base_multi 同口径：env token 优先传给 ensure_repo_base。"""
+        monkeypatch.setattr(repogit, "ensure_repo_base",
+                            lambda rk, token="": {"rk": rk, "token": token})
+
+        class _FakeRepo:
+            def __init__(self, rk):
+                pass
+
+            @property
+            def bot_token(self):
+                return "tok_local"
+
+        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        env = {"GRAPE_LINKED_REPO_TOKENS": '{"gitcode:OPCTeam/HDBlogService": "tok_env"}'}
+        result = repogit.ensure_repo_base_multi(self.LINKED, env=env)
+        assert result["gitcode:OPCTeam/HDBlogService"] == {
+            "rk": "gitcode:OPCTeam/HDBlogService", "token": "tok_env"}
+
+    def test_default_env_reads_os_environ(self, monkeypatch):
+        """env 参数缺省（None）→ 读 os.environ（本地直调/进程内兼容）。"""
+        monkeypatch.setattr(repogit, "ensure_issue_worktree",
+                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+        monkeypatch.setenv("GRAPE_LINKED_REPO_TOKENS",
+                           '{"gitcode:OPCTeam/HDBlogService": "tok_osenv"}')
+
+        class _FakeRepo:
+            def __init__(self, rk):
+                pass
+
+            @property
+            def bot_token(self):
+                return "tok_local"
+
+        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466")
+        assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_osenv")

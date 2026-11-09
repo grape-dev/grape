@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.api.time_utils import normalize_event_time
+from src.config import log
 
 # range → (窗口秒数, 分桶秒数)。桶数上限约 60，避免柱条细如发丝（见总览设计 §5「点数上限」）
 RANGE_SPECS: Dict[str, Tuple[int, int]] = {

@@ -37,6 +37,42 @@ class ChatTask:
         self.final_text = ""
         self.error = ""
         self._lock = threading.Lock()
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self, reason: str = ""):
+        """撤回消息触发的任务终止（Issue #442）。
+
+        置 cancelled 标志 → 后续 push_event/publish 全部丢弃（不再输出状态更新）；
+        推送一条 cancelled 终态事件供 SSE 订阅方感知，并通知完成。
+        """
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            was_running = self.status == "running"
+            if was_running:
+                self.status = "cancelled"
+                if reason:
+                    self.error = reason
+        if not was_running:
+            return  # 已终态（done/error）→ 仅屏蔽后续事件，不改终态不发 cancelled
+        sse_line = json.dumps({"type": "cancelled", "text": reason or "cancelled"}, ensure_ascii=False)
+        self.events.append(sse_line)
+        # push_event 已被 cancelled 屏蔽 → 手动 flush cancelled 事件给在线订阅者
+        with self._lock:
+            subs = list(self.subscribers)
+        for q, loop in subs:
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, sse_line)
+            except Exception:
+                pass
+        self.notify_done()
+        log.info(f"[ChatTaskManager] task cancelled task={self.task_id} reason={reason[:100]}")
 
     def add_subscriber(self, q: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         with self._lock:
@@ -48,6 +84,9 @@ class ChatTask:
 
     def push_event(self, evt_type: str, data: Any):
         """事件 → 缓冲 + flush 到所有 subscribers（线程安全）"""
+        # Issue #442: 任务被撤回取消后丢弃一切后续事件（不再输出状态更新）
+        if self.cancelled:
+            return
         # 序列化为 SSE data 行
         if isinstance(data, str):
             text = data
@@ -147,6 +186,21 @@ class ChatTaskManager:
         task.push_event(evt_type, data)
 
     @classmethod
+    def cancel(cls, task_id: str, reason: str = "") -> bool:
+        """终止一个运行中/已登记的任务（Issue #442 消息撤回）。
+
+        direct 模式：置 cancelled 标志，_run 迭代侧感知后 break + close generator；
+        external 驱动（register_idle/publish）：publish 后续事件被丢弃。
+        返回是否存在该任务。
+        """
+        with cls._lock:
+            task = cls._tasks.get(task_id)
+        if not task:
+            return False
+        task.cancel(reason)
+        return True
+
+    @classmethod
     def finish_external(cls, task_id: str, final_text: str = "", error: str = ""):
         """外部驱动结束时写终态 + 通知 subscribers（对齐 _run 的收尾逻辑）。"""
         with cls._lock:
@@ -192,7 +246,11 @@ class ChatTaskManager:
             return
         log.info(f"[ChatTaskManager] agent_worker starting task={task.task_id} conv={task.conv_id}")
         try:
-            for evt_type, data in agent_fn():
+            gen = agent_fn()
+            for evt_type, data in gen:
+                # Issue #442: 消息撤回 → 停止消费事件，close 触发 agent_fn 的 finally（撤回感知收尾）
+                if task.cancelled:
+                    break
                 task.push_event(evt_type, data)
                 if evt_type == "done":
                     if isinstance(data, dict):
@@ -213,6 +271,13 @@ class ChatTaskManager:
                     task.error = str(data)
                     if task.status != "done":
                         task.status = "error"
+            if task.cancelled:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+                if task.status != "done":
+                    task.status = "cancelled"
             # agent_fn 正常结束但未发 done → 收集到的文本作为结果
             if task.status == "running":
                 task.status = "done" if task.final_text else "error"

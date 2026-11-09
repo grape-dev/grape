@@ -86,7 +86,10 @@
   "host": {
     "confirm_title": "添加托管",
     "confirm": "确认将该仓库添加到托管列表？",
-    "confirm_btn": "确认"
+    "confirm_btn": "确认",
+    "permission_denied": "无权限托管该仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试",
+    "repo_not_found": "仓库 {{repo}} 不存在于对应代码托管平台或无权访问，请确认仓库归属与授权",
+    "upstream_error": "托管服务暂时不可用（{{msg}}），请稍后重试；若 webhook 已创建但托管未完成，可使用「修复托管」自愈"
   },
   "unhost": {
     "confirm": "确定要解除托管 {{name}} 吗？\n\n解除托管后，将删除该仓库在 Grape 上的所有资产数据（事件记录、会话、Agent 配置、仓库技能、工作区文件），且不可恢复。",

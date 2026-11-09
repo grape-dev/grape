@@ -26,7 +26,7 @@ def parse_skill_frontmatter(skill_dir: str) -> dict:
     if not os.path.exists(skill_path):
         return result
     try:
-        with open(skill_path, encoding="utf-8") as f:
+        with open(skill_path, encoding="utf-8-sig") as f:
             content = f.read()
         parts = content.split("---", 2)
         if len(parts) < 3:
@@ -54,7 +54,7 @@ def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
     if not os.path.exists(skill_path):
         return ["缺少 SKILL.md 文件"]
 
-    with open(skill_path, encoding="utf-8") as f:
+    with open(skill_path, encoding="utf-8-sig") as f:
         content = f.read()
 
     # 2. 解析 Front Matter

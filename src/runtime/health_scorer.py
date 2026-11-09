@@ -47,6 +47,14 @@ _MAX_CONSECUTIVE_FAILURES = int(os.environ.get("HEALTH_MAX_CONSECUTIVE_FAILURES"
 # 心跳超时阈值（秒）：last_seen_at 超过此值或为 NULL → 引擎失联，健康分强制 0。
 # 与 engine_select._RUNTIME_STALE_SECONDS / health.py 5min 判定保持一致。
 _HEARTBEAT_STALE_SECONDS = int(os.environ.get("HEALTH_HEARTBEAT_STALE_SECONDS", "100"))
+# 小样本保护阈值（issue #439）：窗口内任务总数 < N 时豁免连败惩罚、失败率按
+# failed/N 稀释——低样本引擎单次失败不再打入拒派区（旧逻辑 total=1/failed=1
+# → 0 分 → claim_by_tag 拒派死锁）。
+_MIN_SAMPLES = int(os.environ.get("HEALTH_MIN_SAMPLES", "5"))
+# 失败衰减窗口（小时，Issue #498）：窗口内无新失败时 consecutive_failures 清零、
+# 失败不再计入健康分有效口径（failed_effective）——探活/心跳正常 + 无新失败 →
+# 异常标记自动消除、健康分回升（自愈）。默认 72h，env HEALTH_FAILURE_DECAY_HOURS 可调。
+_FAILURE_DECAY_HOURS = float(os.environ.get("HEALTH_FAILURE_DECAY_HOURS", "72"))
 
 # ===== 内存缓存 =====
 
@@ -71,6 +79,15 @@ def _utcnow() -> datetime:
 def _window_start() -> str:
     """滑动窗口起始时间（ISO 格式，近 N 天）。"""
     return (_utcnow() - timedelta(days=_WINDOW_DAYS)).isoformat()
+
+
+def _decay_start() -> str:
+    """Issue #498: 失败衰减窗口起点（T 格式纯 UTC 字面量，近 N 小时）。
+
+    与 agent_tasks.completed_at（TEXT，Python isoformat 写入的 T 格式存量）
+    同格式字符串比较，复用 _to_sql_utc 的口径（见其注释中的两次实测踩坑）。
+    """
+    return _to_sql_utc((_utcnow() - timedelta(hours=_FAILURE_DECAY_HOURS)).isoformat())
 
 
 def _effective_window_start(runtime_id: int) -> str:
@@ -193,6 +210,12 @@ def _compute_health_score(total: "int | Decimal | None", failed: "int | Decimal 
        5 次归 0；总分小于 0 时 clamp 为 0）
     - clamp [0, 100]
 
+    issue #439 小样本保护：0 < total < _MIN_SAMPLES 时——
+    - 失败率稀释为 failed / _MIN_SAMPLES 再按 0.5 权重计分
+      （单次失败 total=1 → 90 分，不再直接打入低分区）
+    - 连败惩罚豁免（样本不足时连败不构成统计显著性）
+    样本数达到 N 后恢复原公式（原行为不回归）。
+
     入口归一化（2026-10-23 Decimal 崩溃修复）：本函数被多处调用（健康分重置、
     管理台展示等），调用方可能直接传 MySQL SUM()/COUNT() 返回的 Decimal 或
     None——本函数自身容错（而非只靠 _fetch_task_stats 一处归一化）才是结构性
@@ -203,9 +226,13 @@ def _compute_health_score(total: "int | Decimal | None", failed: "int | Decimal 
     total = int(total or 0)
     failed = int(failed or 0)
     consecutive_failures = int(consecutive_failures or 0)
-    failure_rate = failed / total if total > 0 else 0.0
+    if total < _MIN_SAMPLES:
+        failure_rate = failed / _MIN_SAMPLES
+        penalty = 0
+    else:
+        failure_rate = failed / total if total > 0 else 0.0
+        penalty = _consecutive_failure_penalty(consecutive_failures)
     base_score = round(100 * (1 - failure_rate * 0.5))
-    penalty = _consecutive_failure_penalty(consecutive_failures)
     score = base_score - penalty
     return max(0, min(100, score))
 
@@ -221,22 +248,30 @@ def _fetch_task_stats(runtime_id: int) -> dict:
     与 agent_tasks 时间列（TEXT，Python isoformat 写入的 T 格式 ISO 存量）同格式——
     `created_at >= ?` 字符串比较与 `ORDER BY completed_at DESC` 排序两侧口径一致
     （空格格式会在同日第 11 位 T(0x54) vs 空格(0x20) 上误判，赦免失效）。
+
+    Issue #498 失败衰减（自愈）：
+    - failed_effective：completed_at ≥ 衰减窗口起点的失败数（老失败不计入健康分）
+    - last_failure_at：最近一次失败时间（排障透出）
+    - 最近失败已滚出衰减窗口 → consecutive_failures 清零（无新失败不长期判异常）
     """
     window = _to_sql_utc(_effective_window_start(runtime_id))
+    decay = _decay_start()
     result = {"total": 0, "failed": 0, "completed": 0,
-              "consecutive_failures": 0, "last_status": ""}
+              "consecutive_failures": 0, "last_status": "",
+              "failed_effective": 0, "last_failure_at": ""}
     try:
         with _lock():
             c = _db().cursor()
-            # 近 N 天总任务数 + 失败数 + 完成数
+            # 近 N 天总任务数 + 失败数 + 完成数 + 衰减窗口内失败数（Issue #498）
             c.execute(
                 "SELECT COUNT(*), "
                 "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) "
+                "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN status='failed' AND completed_at >= ? THEN 1 ELSE 0 END) "
                 "FROM agent_tasks "
                 "WHERE runtime_id=? AND created_at >= ? "
                 "AND status IN ('completed','failed','cancelled')",
-                (runtime_id, window))
+                (decay, runtime_id, window))
             row = c.fetchone()
             if row:
                 # 2026-10-23 Decimal 崩溃修复：MySQL 后端 SUM()/COUNT(*) 返回
@@ -245,21 +280,33 @@ def _fetch_task_stats(runtime_id: int) -> dict:
                 result["total"] = int(row[0] or 0)
                 result["failed"] = int(row[1] or 0)
                 result["completed"] = int(row[2] or 0)
+                result["failed_effective"] = int(row[3] or 0)
 
             # 连续失败次数：从最近一条终态任务倒序遍历，统计连续 failed
+            # （Issue #498：同时取 completed_at 记录最近失败时间，用于衰减判定）
             c.execute(
-                "SELECT status FROM agent_tasks "
+                "SELECT status, completed_at FROM agent_tasks "
                 "WHERE runtime_id=? AND created_at >= ? "
                 "AND status IN ('completed','failed','cancelled') "
                 "ORDER BY completed_at DESC LIMIT 50",
                 (runtime_id, window))
             consec = 0
-            for (st,) in c.fetchall():
+            last_failure_at = ""
+            for (st, comp_at) in c.fetchall():
                 if st == "failed":
+                    if not last_failure_at and comp_at:
+                        last_failure_at = comp_at
                     consec += 1
                 else:
                     break  # 遇到非失败即停止
+            # Issue #498 衰减：最近失败滚出衰减窗口（无新失败）→ 连败清零
+            if last_failure_at:
+                from src.runtime.health import parse_dt
+                ts = parse_dt(last_failure_at)
+                if ts is not None and (time.time() - ts) > _FAILURE_DECAY_HOURS * 3600:
+                    consec = 0
             result["consecutive_failures"] = consec
+            result["last_failure_at"] = last_failure_at
 
             # 最近一条任务状态
             c.execute(
@@ -314,6 +361,27 @@ def _fetch_heartbeat(runtime_id: int) -> bool:
         return False
 
 
+def _derive_health_flag(data: dict) -> dict:
+    """Issue #498: 统一「健康异常」判定口径（后端单一事实源，前端/接口透出复用）。
+
+    判定顺序（与 is_healthy 拒派口径一致）：
+    1. 心跳失联（heartbeat_alive=False）→ heartbeat_lost
+    2. 连续失败超限且非小样本（total ≥ _MIN_SAMPLES 时 cf ≥ _MAX_CONSECUTIVE_FAILURES）
+       → consecutive_failures（小样本豁免：单次偶发失败不判异常，#439/#498）
+    3. 健康分 < _HEALTH_THRESHOLD → low_score
+    4. 否则健康（abnormal=False, reason=''）
+    """
+    if data.get("heartbeat_alive") is False:
+        return {"health_abnormal": True, "health_reason": "heartbeat_lost"}
+    total = data.get("total_tasks")
+    cf = int(data.get("consecutive_failures") or 0)
+    if (total is None or int(total) >= _MIN_SAMPLES) and cf >= _MAX_CONSECUTIVE_FAILURES:
+        return {"health_abnormal": True, "health_reason": "consecutive_failures"}
+    if int(data.get("health_score") or 0) < _HEALTH_THRESHOLD:
+        return {"health_abnormal": True, "health_reason": "low_score"}
+    return {"health_abnormal": False, "health_reason": ""}
+
+
 def _compute_and_persist(runtime_id: int) -> dict:
     """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。
 
@@ -321,12 +389,20 @@ def _compute_and_persist(runtime_id: int) -> dict:
     - 引擎失联（last_seen_at 超时 / NULL / 不存在）→ score=0
     - 心跳正常 → 原失败率公式（total=0 → 100）
     total/failed 仍保留便于排障。
+
+    Issue #498 自愈：健康分按 failed_effective（衰减窗口内的失败数）计算——
+    探活/心跳正常 + 衰减窗口内无新失败 → 分数回升至满分口径、连败清零；
+    failed_tasks 保留 7 天窗口信息口径便于排障对比。
     """
     stats = _fetch_task_stats(runtime_id)
     heartbeat_alive = _fetch_heartbeat(runtime_id)
+    # 旧 mock/旧档无 failed_effective 字段 → 回退 failed（兼容）
+    failed_effective = stats.get("failed_effective")
+    if failed_effective is None:
+        failed_effective = stats["failed"]
     if heartbeat_alive:
         score = _compute_health_score(
-            stats["total"], stats["failed"], stats["consecutive_failures"])
+            stats["total"], failed_effective, stats["consecutive_failures"])
     else:
         score = 0  # 失联强制 0，优先于失败率
     data = {
@@ -334,14 +410,18 @@ def _compute_and_persist(runtime_id: int) -> dict:
         "health_score": score,
         "total_tasks": stats["total"],
         "failed_tasks": stats["failed"],
+        "failed_tasks_effective": int(failed_effective),
         "completed_tasks": stats["completed"],
         "consecutive_failures": stats["consecutive_failures"],
         "failure_rate": round(stats["failed"] / stats["total"], 4) if stats["total"] > 0 else 0.0,
         "last_status": stats["last_status"],
+        "last_failure_at": stats.get("last_failure_at", ""),
         "heartbeat_alive": heartbeat_alive,
         "window_days": _WINDOW_DAYS,
+        "failure_decay_hours": _FAILURE_DECAY_HOURS,
         "updated_at": _utcnow().isoformat(),
     }
+    data.update(_derive_health_flag(data))
     # 内存缓存
     with _cache_lock:
         _cache[runtime_id] = {
@@ -355,19 +435,38 @@ def _compute_and_persist(runtime_id: int) -> dict:
 
 
 def _persist_score(data: dict):
-    """将健康分写入 runtime_health_scores 表（upsert）。"""
+    """将健康分写入 runtime_health_scores 表（upsert）。
+
+    Issue #498 新列：failed_tasks_effective / last_failure_at
+    （db_setup 幂等迁移补列；列缺失时降级为旧列集写入，不抛错）。
+    """
     try:
         with _lock():
             c = _db().cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO runtime_health_scores "
-                "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
-                "consecutive_failures, failure_rate, last_status, window_days, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (data["runtime_id"], data["health_score"], data["total_tasks"],
-                 data["failed_tasks"], data["completed_tasks"],
-                 data["consecutive_failures"], data["failure_rate"],
-                 data["last_status"], data["window_days"], data["updated_at"]))
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO runtime_health_scores "
+                    "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
+                    "consecutive_failures, failure_rate, last_status, window_days, updated_at, "
+                    "failed_tasks_effective, last_failure_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (data["runtime_id"], data["health_score"], data["total_tasks"],
+                     data["failed_tasks"], data["completed_tasks"],
+                     data["consecutive_failures"], data["failure_rate"],
+                     data["last_status"], data["window_days"], data["updated_at"],
+                     data.get("failed_tasks_effective", 0),
+                     data.get("last_failure_at", "")))
+            except Exception:
+                # 旧库未迁移（新列缺失）→ 降级旧列集
+                c.execute(
+                    "INSERT OR REPLACE INTO runtime_health_scores "
+                    "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
+                    "consecutive_failures, failure_rate, last_status, window_days, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (data["runtime_id"], data["health_score"], data["total_tasks"],
+                     data["failed_tasks"], data["completed_tasks"],
+                     data["consecutive_failures"], data["failure_rate"],
+                     data["last_status"], data["window_days"], data["updated_at"]))
             _db().commit()
     except Exception as e:
         log.warning(f"health_scorer: persist_score failed for runtime={data['runtime_id']}: {e}")
@@ -396,12 +495,13 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
                 c = _db().cursor()
                 c.execute(
                     "SELECT health_score, total_tasks, failed_tasks, completed_tasks, "
-                    "consecutive_failures, failure_rate, last_status, window_days, updated_at "
+                    "consecutive_failures, failure_rate, last_status, window_days, updated_at, "
+                    "failed_tasks_effective, last_failure_at "
                     "FROM runtime_health_scores WHERE runtime_id=?",
                     (runtime_id,))
                 row = c.fetchone()
             if row:
-                return {
+                data = {
                     "runtime_id": runtime_id,
                     "health_score": row[0],
                     "total_tasks": row[1],
@@ -413,9 +513,14 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
                     "heartbeat_alive": None,   # 读档不含实时心跳；失联判定由定时扫描落表
                     "window_days": row[7],
                     "updated_at": row[8] or "",
+                    "failed_tasks_effective": int(row[9] or 0),
+                    "last_failure_at": row[10] or "",
                 }
+                data.update(_derive_health_flag(data))
+                return data
         except Exception as e:
             log.warning(f"health_scorer: read_score failed for runtime={runtime_id}: {e}")
+        # 无记录/旧档列缺失 → 落到现算路径
     return _compute_and_persist(runtime_id)
 
 
@@ -434,13 +539,19 @@ def is_healthy(runtime_id: int, threshold: int | None = None,
 
     threshold 默认 _HEALTH_THRESHOLD（可环境变量调优）。
     连续失败超过 _MAX_CONSECUTIVE_FAILURES 也视为不健康。
+
+    issue #439 小样本保护：窗口任务总数 < _MIN_SAMPLES 时连败拒派豁免
+    （单次/少量失败不把低样本引擎打入拒派区，避免 claim_by_tag 拒派死锁）；
+    total_tasks 未知（旧档/兼容 mock）时维持原判定。
     """
     if not runtime_id:
         return True  # runtime_id=0（广播/未绑定）不参与健康过滤
     _thr = threshold if threshold is not None else _HEALTH_THRESHOLD
     data = get_health_score(runtime_id, force_refresh=force_refresh)
-    if data["consecutive_failures"] >= _MAX_CONSECUTIVE_FAILURES:
-        return False
+    _total = data.get("total_tasks")
+    if _total is None or _total >= _MIN_SAMPLES:
+        if data["consecutive_failures"] >= _MAX_CONSECUTIVE_FAILURES:
+            return False
     return data["health_score"] >= _thr
 
 
@@ -531,19 +642,24 @@ def reset_health(runtime_id: int) -> dict | None:
 
 def _empty_score(runtime_id: int) -> dict:
     """空健康度数据（runtime_id=0 或无效时）。"""
-    return {
+    data = {
         "runtime_id": runtime_id,
         "health_score": 100,
         "total_tasks": 0,
         "failed_tasks": 0,
+        "failed_tasks_effective": 0,
         "completed_tasks": 0,
         "consecutive_failures": 0,
         "failure_rate": 0.0,
         "last_status": "",
+        "last_failure_at": "",
         "heartbeat_alive": True,  # runtime_id=0（广播）不参与心跳判定
         "window_days": _WINDOW_DAYS,
+        "failure_decay_hours": _FAILURE_DECAY_HOURS,
         "updated_at": _utcnow().isoformat(),
     }
+    data.update(_derive_health_flag(data))
+    return data
 
 
 def record_task_completion(runtime_id: int, status: str):

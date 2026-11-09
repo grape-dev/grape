@@ -53,6 +53,9 @@ def _tar_filter(ti):
         return None
     if ".venv" in ti.name:
         return None
+    # Vue 前端依赖目录：npm ci 产物，体积大且与平台无关——打包跳过（static-dist 构建产物保留，运行时要 /static-vue）
+    if "/node_modules/" in ti.name or ti.name.endswith("/node_modules"):
+        return None
     # help/api/openapi.json 是生成物（服务启动时落盘，gitignore）——打包跳过
     if ti.name.endswith("help/api/openapi.json"):
         return None
@@ -73,7 +76,7 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 def pack_backend(ts):
-    """后端: src/ (含 api/static) + scripts/ + 仓库根文件 + configs example + requirements"""
+    """后端: src/ (含 api/frontend legacy 前端) + scripts/ + 仓库根文件 + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []

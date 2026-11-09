@@ -15,7 +15,6 @@ if sys.version_info < (3, 10):
 
 import asyncio, json, os, random, re, time
 import base64 as _b64
-import zipfile as _zf
 import urllib.request as _urllib
 import shutil as _shutil
 
@@ -57,6 +56,7 @@ _PROBE_COMMANDS = {
     "codearts": ["codearts", "run", "hello"],
     "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
     "cursor": ["cursor", "run", "hello"],
+    "dsh": ["dsh", "headless", "hello"],
 }
 _PROBE_TIMEOUT = 30
 _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
@@ -64,16 +64,132 @@ _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长�
 # Issue #423: _read_response 防御性行数上限（保险丝，防失控流）。真正终止条件是 deadline；
 # 会话通知量是动态值（三步探活实测 prompt 响应前 36 行），行数上限不得与其耦合。
 _ACP_READ_MAX_LINES = 500
+
+# ===== Windows ACP 探测兼容层（os.set_blocking 为 POSIX-only；Windows 管道不支持 select）=====
+# 探测原有实现：fd 置非阻塞 + select + os.read。这两个能力在 Windows 上都不存在
+# （os.set_blocking 属性缺失 / select.select 仅支持 socket），导致 hermes/hwcloud
+# ACP 探活必然 AttributeError 立即失败 → 引擎被判 unhealthy，服务端不派任务。
+# 兼容层：后台读线程把字节推进队列，_read_response 侧带 deadline 消费，语义与原实现一致。
+_win_acp_pumps: dict = {}
+
+
+def _win_acp_queue(proc):
+    """按进程惰性启动读线程，返回字节队列（EOF 时投递 b"" 哨兵）。"""
+    import queue as _queue
+    import threading as _threading
+
+    key = id(proc)
+    q = _win_acp_pumps.get(key)
+    if q is not None:
+        return q
+    q = _queue.Queue()
+    _win_acp_pumps[key] = q
+
+    def _pump():
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                q.put(chunk)
+        except Exception:
+            pass
+        finally:
+            q.put(b"")
+
+    _threading.Thread(target=_pump, daemon=True, name="acp-probe-pump").start()
+    return q
+
+
+def _win_acp_read_response(proc, send, buf, req_id: int, timeout: float):
+    """JSON-RPC 行读取（Windows 版）：deadline 驱动 + 队列消费，语义对齐 POSIX 实现。"""
+    import json as _json
+    import queue as _queue
+
+    q = _win_acp_queue(proc)
+    deadline = _time_mod.time() + timeout
+    _lines = 0
+    while _time_mod.time() < deadline and _lines < _ACP_READ_MAX_LINES:
+        _remaining = max(deadline - _time_mod.time(), 0.0)
+        try:
+            _chunk = q.get(timeout=_remaining) if _remaining > 0 else q.get_nowait()
+        except _queue.Empty:
+            if proc.poll() is not None:
+                return None
+            continue
+        if not _chunk:
+            return None  # EOF
+        buf.extend(_chunk)
+        while buf:
+            _nl = buf.find(b"\n")
+            if _nl < 0:
+                if _time_mod.time() >= deadline:
+                    return None
+                break
+            _raw = bytes(buf[:_nl])
+            del buf[:_nl + 1]
+            _lines += 1
+            _line = _raw.strip().decode("utf-8", errors="replace")
+            if not _line.startswith("{"):
+                continue
+            try:
+                _msg = _json.loads(_line)
+            except _json.JSONDecodeError:
+                continue
+            if "id" not in _msg or "method" in _msg:
+                if "method" in _msg and "id" in _msg:
+                    try:
+                        send({"jsonrpc": "2.0", "id": _msg["id"], "result": {"optionId": ""}})
+                    except Exception:
+                        pass
+                continue
+            if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
+                return _msg
+    return None
+
+
+_win_acp_stderr: dict = {}
+
+
+def _win_acp_drain_stderr(proc):
+    """Windows：hermes/hwcloud ACP 启动时向 stderr 大量刷日志，管道缓冲（≈4KB）写满后
+    子进程阻塞在 write，探针再也等不到响应（实测 session/new 15s 超时、initialize 正常）。
+    Linux 下 PIPE 缓冲大且不影响本次探活，Windows 必须后台抽干。仅保留尾部 16KB 供诊断。"""
+    import threading as _threading
+
+    key = id(proc)
+    buf = _win_acp_stderr.get(key)
+    if buf is not None:
+        return buf
+    buf = bytearray()
+    _win_acp_stderr[key] = buf
+
+    def _drain():
+        try:
+            while True:
+                chunk = proc.stderr.read(65536)
+                if not chunk:
+                    return
+                buf.extend(chunk)
+                if len(buf) > 16384:
+                    del buf[:-16384]
+        except Exception:
+            return
+
+    _threading.Thread(target=_drain, daemon=True, name="acp-probe-stderr").start()
+    return buf
+
+
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
-# Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
+# Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 600s）。
 # 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
 #   - executor.py       _silent_window  读 AGENT_SILENT_WINDOW
 #   - hermes_acp.py     _SILENT_TIMEOUT 读 HERMES_SILENT_TIMEOUT
 #   - hwcloud_acp.py    _SILENT_TIMEOUT 读 RUNTIME_TOOL_SILENT_TIMEOUT（已支持）
-# coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，300s 会在正常进行中误杀。
+# coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，600s 对 coding/QA 长任务仍偏短，会在正常进行中误杀。
 _AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200}
-_DEFAULT_SILENT_WINDOW = 300
+_DEFAULT_SILENT_WINDOW = 600
 
 _worker_url_probe_cache: dict = {}  # {(rts, task_server_url): (ts, reachable)}
 _worker_url_probe_lock = _threading.Lock()
@@ -81,6 +197,9 @@ _worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, 
 _worker_probe_lock = _threading.Lock()
 _worker_probe_thread = None
 _worker_probe_started = False
+# Issue #490：已成功发送的探针观测指纹 {engine_name: last_probe}。
+# 心跳成功后写回；未变化的观测（last_probe 相同）不再重复发送，避免服务端重放计数。
+_last_sent_probe_fingerprint: dict = {}
 
 
 def _probe_hermes_acp(cli_path: str) -> dict:
@@ -116,6 +235,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
             bufsize=0,
             start_new_session=True,
         )
+        if os.name == "nt":
+            _win_acp_drain_stderr(proc)
 
         import select as _sel
 
@@ -130,7 +251,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         # 每轮 select/read 后都重检 deadline。（用 os.set_blocking 而非 os.fcntl：
         # 部分 Python 构建无 os.fcntl 顶层别名，set_blocking 为标准可移植接口。）
         _fd = proc.stdout.fileno()
-        os.set_blocking(_fd, False)
+        if os.name != "nt":
+            os.set_blocking(_fd, False)
         _buf = bytearray()
 
         def _read_response(req_id: int, timeout: float) -> dict | None:
@@ -143,6 +265,9 @@ def _probe_hermes_acp(cli_path: str) -> dict:
             非阻塞 fd + os.read 小块读 + 行缓冲：半行数据不会卡住 read 系统调用，
             deadline 在每一轮 select 与 read 之后都被重新检查。
             """
+            # Windows：无 os.set_blocking，且 select 不支持管道 → 读线程 + 队列
+            if os.name == "nt":
+                return _win_acp_read_response(proc, _send, _buf, req_id, timeout)
             deadline = _time_mod.time() + timeout
             _lines = 0
             while _time_mod.time() < deadline and _lines < _ACP_READ_MAX_LINES:
@@ -319,6 +444,8 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
             bufsize=0,
             start_new_session=True,
         )
+        if os.name == "nt":
+            _win_acp_drain_stderr(proc)
 
         import select as _sel
 
@@ -332,10 +459,14 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
         # 标准可移植接口）+ os.read 小块读 + 行缓冲拼行，每轮 select/read 后重检
         # deadline，半行悬置到 deadline 即返回。
         _fd = proc.stdout.fileno()
-        os.set_blocking(_fd, False)
+        if os.name != "nt":
+            os.set_blocking(_fd, False)
         _probe_buf = bytearray()
 
         def _read_response(req_id: int, timeout: float) -> dict | None:
+            # Windows：无 os.set_blocking，且 select 不支持管道 → 读线程 + 队列
+            if os.name == "nt":
+                return _win_acp_read_response(proc, _send, _probe_buf, req_id, timeout)
             # Issue #423 同步审查：本实现已是 deadline 驱动（while deadline，无固定行数上限），
             # 无 hermes 同款 10 行 bug；仅补 _ACP_READ_MAX_LINES 防御上限保持同构。
             deadline = _time_mod.time() + timeout
@@ -466,11 +597,34 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
     if cli_path:
         cmd = [cli_path] + cmd[1:]
+    # Issue #471 C2：codearts 探测走专用数据目录（预写目录信任）——
+    # 探测进程无 TTY，folder-trust 闸门未信任 cwd 时会 exit 1 误报引擎不健康。
+    # Issue 探活session堆积：opencode/cursor/dsh 探测走独立 XDG_DATA_HOME 临时目录，
+    # 探活会话只写临时库，finally 整目录删除——不进生产 opencode.db（此前每次
+    # 探活新建一条 Greeting session 且无任何清理路径，DB 堆积至数百 MB）。
+    # 认证/配置不受影响：opencode 凭据存 ~/.config（XDG_CONFIG_HOME），不在数据目录。
+    _probe_env = None
+    _probe_data_tmp = None
+    if engine_name == "codearts":
+        try:
+            from src.runtime.codearts import probe_env as _codearts_probe_env
+            _probe_env = {**os.environ, **_codearts_probe_env(os.getcwd())}
+        except Exception as _pe:
+            log.warning(f"codearts probe env setup failed: {_pe}")
+    elif engine_name in ("opencode", "cursor", "dsh"):
+        try:
+            import tempfile as _tempfile
+            _probe_data_tmp = _tempfile.mkdtemp(prefix="grape-probe-data-")
+            _probe_env = {**os.environ, "XDG_DATA_HOME": _probe_data_tmp}
+        except Exception as _pe:
+            log.warning(f"probe data dir setup failed for {engine_name}: {_pe}")
+            _probe_data_tmp = None
     start = _time_mod.time()
     try:
         result = _subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=_PROBE_TIMEOUT, stdin=_subprocess.DEVNULL,
+            env=_probe_env,
         )
         latency = round(_time_mod.time() - start, 1)
         if result.returncode == 0:
@@ -486,6 +640,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+    finally:
+        if _probe_data_tmp:
+            _shutil.rmtree(_probe_data_tmp, ignore_errors=True)
 
 
 def _worker_probe_once():
@@ -516,9 +673,15 @@ def _worker_probe_once():
 
 
 def _worker_probe_loop():
-    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
+    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。
+
+    Issue #490：首轮先 sleep _PROBE_INTERVAL 再探测，与注册时 _worker_probe_once()
+    的即时结果间隔 ≥ 一个周期，避免启动阶段连续两轮探测。
+    """
     global _worker_probe_started
     while True:
+        # 首轮先等待一个周期，复用注册时 _worker_probe_once() 的即时结果
+        _time_mod.sleep(_PROBE_INTERVAL)
         try:
             engines = _discover_local_runtimes()
             for eng in engines:
@@ -538,7 +701,6 @@ def _worker_probe_loop():
                 log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
         except Exception as e:
             log.warning(f"worker engine probe loop error: {e}")
-        _time_mod.sleep(_PROBE_INTERVAL)
 
 
 def _start_worker_probe():
@@ -553,9 +715,30 @@ def _start_worker_probe():
 
 
 def _collect_worker_probe_results() -> dict:
-    """返回当前探测结果快照（供心跳上报）。"""
+    """返回当前探测结果快照（供心跳上报）。
+
+    Issue #490：按观测指纹去重——已成功发送且 last_probe 未变化的引擎不再重复携带，
+    避免心跳重放同一观测导致服务端计数虚增。新观测（last_probe 变化）正常发送。
+    """
     with _worker_probe_lock:
-        return dict(_worker_probe_results)
+        snapshot = dict(_worker_probe_results)
+        # 过滤掉已成功发送且未变化的观测
+        return {
+            eng: data for eng, data in snapshot.items()
+            if data.get("last_probe") != _last_sent_probe_fingerprint.get(eng)
+        }
+
+
+def _mark_probe_fingerprint_sent(sent: dict) -> None:
+    """心跳成功后写回已发送观测的指纹（engine_name → last_probe）。
+
+    Issue #490：仅心跳成功才更新指纹；失败不更新，下次重试仍可发送。
+    """
+    with _worker_probe_lock:
+        for eng, data in (sent or {}).items():
+            lp = (data or {}).get("last_probe") if isinstance(data, dict) else None
+            if lp:
+                _last_sent_probe_fingerprint[eng] = lp
 
 
 def _collect_worker_metrics() -> dict:
@@ -817,6 +1000,22 @@ def _env_float(name, default):
         return float(default)
 
 
+def _watchdog_timeout_for(env: dict | None = None) -> float:
+    """worker 任务级看门狗超时（秒，Issue #470 收敛点）。
+
+    取 RUNTIME_TASK_TIMEOUT：任务级 env 优先（服务端 enqueue 时经 env_extra 注入的
+    统一配置值——env > 管理台 meta > 配置文件）→ os.environ → 默认 3600；
+    新任务经 setdefault 注入后任务级值生效，worker 本地 os.environ 仅在任务 env
+    无该键时兜底（本地直跑/旧任务）。
+    与 hermes/hwcloud `_global_timeout_for(env)` 同优先级语义。
+    """
+    _src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
+    try:
+        return float(_src) if _src not in (None, "") else 3600.0
+    except Exception:
+        return 3600.0
+
+
 def _env_int(name, default):
     try:
         return int(os.environ.get(name, default))
@@ -828,10 +1027,11 @@ def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
 
     hermes 额外做 ACP 依赖自举（hermes-acp-auto-bootstrap-design.md）：
-    --version 探测不出 ACP 依赖缺失（可选 extra），必须 `hermes acp --check`
-    才能暴露；缺失时自动补装 agent-client-protocol==0.9.0，补装失败则
-    healthy=False（引擎照常注册，但服务端 engine_select 只挑 healthy，
-    不会再把任务派到一台调不通的机器上）。
+    --version 探测不出 ACP 依赖缺失（可选 extra），须对 `hermes acp` 做真实
+    ACP 握手探测才能暴露（`acp --check` 子命令在 hermes v0.9.0 起不存在，
+    Issue #613）；缺失时自动补装 agent-client-protocol（版本经兼容性判断，
+    不硬钉），补装失败则 healthy=False（引擎照常注册，但服务端 engine_select
+    只挑 healthy，不会再把任务派到一台调不通的机器上）。
     """
     from src.runtime.registry import discover_runtimes
     from src.runtime.acp_bootstrap import _ensure_hermes_acp
@@ -843,7 +1043,9 @@ def _discover_local_runtimes() -> list[dict]:
         if cli:
             try:
                 import subprocess
-                res = subprocess.run([cli, "--version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+                # Windows 冷启动慢（hermes.exe 实测 8s+，注册表/WMI/插件扫描），5s 会误判
+                # healthy=False → 服务端 engine_select 不派任务。放宽到 20s（仍远小于探活超时）。
+                res = subprocess.run([cli, "--version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=20)
                 healthy = res.returncode == 0
                 if healthy:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
@@ -856,8 +1058,11 @@ def _discover_local_runtimes() -> list[dict]:
         from src.runtime.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
         _dn = ENGINE_DISPLAY_NAMES.get(_et, "")
+        # Issue #865：配置模型（本机配置解析；失败留空不影响注册/心跳）
+        from src.runtime.engine_model import detect_engine_model
         out.append({"name": r["name"], "display_name": (_dn.capitalize() if _dn else r["name"]),
-                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False),
+                    "model": detect_engine_model(_et)})
     return out
 
 
@@ -902,6 +1107,8 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
         return "codex"
     if name.startswith("hwcloud") or name.startswith("aishell"):
         return "hwcloud"
+    if name.startswith("dsh"):
+        return "dsh"
     return "opencode"
 
 
@@ -1025,7 +1232,7 @@ def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
                     break
         if detail["path"]:
             try:
-                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8") as f:
+                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8-sig") as f:
                     content = f.read()
                 if content.startswith("---"):
                     end = content.find("---", 3)
@@ -1146,6 +1353,28 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
     return ok
 
 
+def _current_username() -> "str | None":
+    """Resolve the current username without touching a controlling terminal.
+
+    Fallback chain: USER env var -> pwd.getpwuid(os.getuid()).pw_name -> str(os.getuid()).
+    os.getlogin() is deliberately avoided: it raises OSError(ENXIO) on TTY-less
+    workers, and as a default-argument expression it is evaluated eagerly even
+    when USER is set (Issue #522). Returns None only on platforms without
+    os.getuid (Windows callers never reach this code path).
+    """
+    user = os.environ.get("USER", "")
+    if user:
+        return user
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        pass
+    if hasattr(os, "getuid"):
+        return str(os.getuid())
+    return None
+
+
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
     """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
     按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。
@@ -1160,6 +1389,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         "hwcloud": ["hwcloud serve --acp"],
         "codearts": ["codearts run"],
         "codex": ["codex exec"],
+        "dsh": ["dsh headless"],
     }.get(backend, ["opencode run"])
 
     if is_windows():
@@ -1194,10 +1424,12 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         return
 
     killed_any = False
+    user = _current_username()
     for pattern in patterns:
         try:
+            pgrep_args = ["pgrep", "-u", user, "-f", pattern] if user else ["pgrep", "-f", pattern]
             out = subprocess.run(
-                ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
+                pgrep_args,
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
             )
             for pid_str in out.stdout.strip().split():
@@ -1235,24 +1467,14 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         log.info(f"_kill_stale_engine({backend}): no matching process found for cwd={cwd}")
 
 
-def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
-    """v3.0 技能 zip 获取降级链：① URL 直连 OBS（重试）→ ② 服务端代拉（复用 zip_cache）。
+def _fetch_skill_zip_by_key(obs_key: str, task_id: str = "") -> bytes | None:
+    """Issue #463 P2 扩展（2026-10-27）：按对象键拉技能 zip（skill_files 引用单写格式的
+    消费端）。复用 _fetch_skill_zip 的 ② 服务端代拉通道——服务端按 task 重解析对象键，
+    本函数仅在无预签名 URL 的兜底分支调用（①② 主链路不受影响）。
 
-    返回 zip 字节；两条路都失败返回 None（调用方降级 skill_files 或回池）。
+    走 POST /api/runtime/tasks/{task_id}/skill-zip（服务端现查 file_path → zip_cache）。
     """
     timeout = float(os.environ.get("RUNTIME_OBS_FETCH_TIMEOUT", "10"))
-    retries = int(os.environ.get("RUNTIME_OBS_FETCH_RETRIES", "3"))
-    # ① URL 直连 OBS（预签名 URL，重试）
-    for i in range(retries):
-        try:
-            with _urllib.urlopen(skill_obs_url, timeout=timeout) as resp:
-                data = resp.read()
-            if data:
-                return data
-            log.warning(f"[skill] OBS URL 直连返回空({i + 1}/{retries})")
-        except Exception as e:
-            log.warning(f"[skill] OBS URL 直连失败({i + 1}/{retries}): {type(e).__name__}")
-    # ② 服务端代拉（服务端现查 file_path → zip_cache → base64）
     server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
     token = os.environ.get("RUNTIME_TOKEN", "")
     if task_id and token:
@@ -1264,11 +1486,12 @@ def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
                 payload = json.loads(resp.read())
             b64 = (payload or {}).get("zip_base64") or ""
             if b64:
-                log.info(f"[skill] 服务端代拉成功 task={task_id}")
+                log.info(f"[skill] __obs_key__ 服务端代拉成功 task={task_id}")
                 return _b64.b64decode(b64)
-            log.warning(f"[skill] 代拉返回空 task={task_id}")
         except Exception as e:
-            log.warning(f"[skill] 服务端代拉失败: {type(e).__name__}")
+            log.warning(f"[skill] __obs_key__ 代拉失败: {type(e).__name__}")
+    # task_id/token 不可用（极老 worker 无凭据）→ 只能告警，由调用方降级
+    log.warning(f"[skill] __obs_key__ 拉取通道不可用（无 task_id/token）key={obs_key[:60]}")
     return None
 
 
@@ -1491,6 +1714,16 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         from src.runtime import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if _num and task.get("issue_session_id"):
+            # Issue #752（M2）：清理（卸载 worktree）前保真校验——功能文件指纹 vs
+            # 任务开始基线，不一致（复测清理损坏功能文件证据）告警供人工裁决，不阻断清理。
+            try:
+                from src.runtime.worktree_guard import verify_fidelity
+                _fid = verify_fidelity(cwd)
+                if not _fid.get("baseline_missing") and (_fid.get("modified") or _fid.get("removed")):
+                    log.warning(f"workdir cleanup fidelity alarm task={task.get('id')}: "
+                                f"modified={_fid.get('modified')} removed={_fid.get('removed')}")
+            except Exception as _fe:
+                log.warning(f"workdir cleanup fidelity check failed: {_fe}")
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
                 _num, token=_get_task_token(task))
@@ -1570,95 +1803,522 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             log.warning(f"linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
             continue
 
-        # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
-        from src.runtime.repogit import ensure_feature_branch
-        ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=log)
-
-        try:
-            # 1. git identity（防 commit 被拒）
-            _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
-                    capture_output=True, text=True, timeout=10)
-            _sp.run(["git", "-C", _wt_dir, "config", "user.email",
-                     f"{_bot_name}@noreply.git.com"],
-                    capture_output=True, text=True, timeout=10)
-
-            # 2. stage 未提交改动
-            _sp.run(["git", "-C", _wt_dir, "add", "-A"],
-                    capture_output=True, text=True, timeout=60)
-            _r_diff = _sp.run(["git", "-C", _wt_dir, "diff", "--cached", "--quiet"],
-                              capture_output=True, text=True, timeout=30)
-            _has_staged = _r_diff.returncode != 0
-
-            # 3. 检查是否有领先于 base 分支的提交（origin/{base}..HEAD）
-            _r_ahead = _sp.run(
-                ["git", "-C", _wt_dir, "rev-list", "--count",
-                 f"origin/{_base_branch}..HEAD"],
-                capture_output=True, text=True, timeout=15)
-            _ahead = 0
-            if _r_ahead.returncode == 0:
-                try:
-                    _ahead = int((_r_ahead.stdout or "0").strip() or "0")
-                except ValueError:
-                    _ahead = 0
-            else:
-                # origin/{base} 不存在 → 无法比较，保守认为有改动（push 会建远程分支）
-                _ahead = 1
-
-            if not _has_staged and _ahead == 0:
-                log.info(f"linked PR: no changes in {_rk}, skip")
-                _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
+        # Issue #993（M1）：分支级写租约必须先于 ensure_feature_branch（其中可能
+        # `git checkout -b` 写分支）获取，否则被保护的写动作可能先发生。
+        # 与 direct 端共用 branch_lease 上下文，租约获取/释放生命周期不再各写一遍。
+        from src.runtime import branch_guard as _branch_guard
+        with _branch_guard.branch_lease(
+                _rk, _wt_branch, task_id=str(task.get("id") or "")) as _lease:
+            if not _lease.get("ok"):
+                log.warning(f"linked PR: branch lease blocked {_rk}:{_wt_branch}: "
+                            f"{_lease.get('message')}")
+                _results.append({"repo_key": _rk, "status": "blocked",
+                                 "reason": _lease.get("reason", "branch_locked"),
+                                 "message": _lease.get("message", "")})
                 continue
 
-            # 4. commit staged changes
-            if _has_staged:
-                _msg = f"feat: #{_issue_num} linked repo changes"
-                _r_commit = _sp.run(["git", "-C", _wt_dir, "commit", "-m", _msg],
-                                    capture_output=True, text=True, timeout=60)
-                if _r_commit.returncode != 0:
-                    log.warning(f"linked PR: commit failed {_rk}: {(_r_commit.stderr or '')[:200]}")
-                    _results.append({"repo_key": _rk, "status": "failed", "reason": "commit failed"})
+            try:
+                # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
+                from src.runtime.repogit import ensure_feature_branch
+                ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=log)
+                # 1. git identity（防 commit 被拒）
+                _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
+                        capture_output=True, text=True, timeout=10)
+                _sp.run(["git", "-C", _wt_dir, "config", "user.email",
+                         f"{_bot_name}@noreply.git.com"],
+                        capture_output=True, text=True, timeout=10)
+
+                # 2. stage 未提交改动
+                _sp.run(["git", "-C", _wt_dir, "add", "-A"],
+                        capture_output=True, text=True, timeout=60)
+                _r_diff = _sp.run(["git", "-C", _wt_dir, "diff", "--cached", "--quiet"],
+                                  capture_output=True, text=True, timeout=30)
+                _has_staged = _r_diff.returncode != 0
+
+                # 3. 检查是否有领先于 base 分支的提交（origin/{base}..HEAD）
+                _r_ahead = _sp.run(
+                    ["git", "-C", _wt_dir, "rev-list", "--count",
+                     f"origin/{_base_branch}..HEAD"],
+                    capture_output=True, text=True, timeout=15)
+                _ahead = 0
+                if _r_ahead.returncode == 0:
+                    try:
+                        _ahead = int((_r_ahead.stdout or "0").strip() or "0")
+                    except ValueError:
+                        _ahead = 0
+                else:
+                    # origin/{base} 不存在 → 无法比较，保守认为有改动（push 会建远程分支）
+                    _ahead = 1
+
+                if not _has_staged and _ahead == 0:
+                    log.info(f"linked PR: no changes in {_rk}, skip")
+                    _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
                     continue
 
-            # 5. push（token 经 http.extraheader 注入，不落盘）
-            from src.runtime.repogit import _run_git
-            _r_push = _run_git(
-                ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_token, timeout=120)
-            if _r_push is None or _r_push.returncode != 0:
-                _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
-                log.warning(f"linked PR: push failed {_rk}: {_err}")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": f"push: {_err[:100]}"})
-                continue
+                # Issue #752（M2）：commit 前冲突标记推送守卫——暂存文件硬命中
+                # `<<<<<<< `/`>>>>>>> ` → 阻断提交/推送（防冲突残留被 add -A 整树写入分支，
+                # PR #352 实证的损坏通道）；软命中（孤立 =======）仅告警。
+                # 保真告警不在推送口（PR #874 审查修正）：agent 正常编码必然修改功能文件，
+                # 推送口告警全是噪声；保真校验保留在清理口（remove_issue_worktree 前），
+                # 由 cleanup 阶段对照任务开始基线告警。
+                try:
+                    from src.runtime.worktree_guard import scan_staged_files
+                    _g = scan_staged_files(_wt_dir)
+                    if _g.get("hard"):
+                        log.warning(f"linked PR: conflict markers in staged files, BLOCKED push {_rk}: {_g['hard']}")
+                        _results.append({"repo_key": _rk, "status": "blocked",
+                                         "reason": f"conflict markers in staged files: "
+                                                   f"{list(_g['hard'].keys())[:5]}"})
+                        continue
+                    if _g.get("soft"):
+                        log.warning(f"linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
+                except Exception as _ge:
+                    log.warning(f"linked PR: worktree guard failed {_rk}: {_ge}")
 
-            # 6. create PR
-            from src.vcs.api_client import create_pr_for_repo
-            _pr_title = f"feat: #{_issue_num} linked repo ({_rk})"
-            _pr_body = (f"跨仓库需求开发 PR（Issue #{_issue_num}）\n\n"
-                        f"由 coding agent 自动提交，关联主仓库 {_rk}。\n\n"
-                        f"Closes #{_issue_num}")
-            _pr_result = create_pr_for_repo(
-                repo_key=_rk, token=_token,
-                title=_pr_title, head=_wt_branch, base=_base_branch,
-                body=_pr_body)
-            if isinstance(_pr_result, dict) and "error" not in _pr_result:
-                _pr_num = _pr_result.get("number") or ""
-                _pr_url = _pr_result.get("html_url") or ""
-                log.info(f"linked PR: created #{_pr_num} for {_rk}: {_pr_url}")
-                _results.append({"repo_key": _rk, "status": "created",
-                                 "pr_number": _pr_num, "pr_url": _pr_url})
-            else:
-                _err = _pr_result.get("error", "unknown") if isinstance(_pr_result, dict) else "unknown"
-                log.warning(f"linked PR: create_pr failed {_rk}: {_err}")
-                _results.append({"repo_key": _rk, "status": "failed", "reason": f"PR create: {_err}"})
-        except Exception as e:
-            log.warning(f"linked PR: error for {_rk}: {e}")
-            _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
+                # 4. commit staged changes
+                if _has_staged:
+                    _msg = f"feat: #{_issue_num} linked repo changes"
+                    _r_commit = _sp.run(["git", "-C", _wt_dir, "commit", "-m", _msg],
+                                        capture_output=True, text=True, timeout=60)
+                    if _r_commit.returncode != 0:
+                        log.warning(f"linked PR: commit failed {_rk}: {(_r_commit.stderr or '')[:200]}")
+                        _results.append({"repo_key": _rk, "status": "failed", "reason": "commit failed"})
+                        continue
+
+                # 5. push（token 经 http.extraheader 注入，不落盘）
+                # Issue #993（M2）：统一走 branch_guard.guarded_push——preflight 阻断
+                # PR 已 merged/closed 或远端漂移，push 后记录已推 local sha。
+                _push = _branch_guard.guarded_push(_rk, _wt_branch, _wt_dir, token=_token)
+                if not _push.get("ok"):
+                    log.warning(f"linked PR: push blocked/failed {_rk}:{_wt_branch}: "
+                                f"{_push.get('message')}")
+                    _status = "blocked" if _push.get("stage") == "preflight" else "failed"
+                    _results.append({"repo_key": _rk, "status": _status,
+                                     "reason": _push.get("reason", "guard_blocked"),
+                                     "message": _push.get("message", "")})
+                    continue
+
+                # 6. create PR
+                from src.vcs.api_client import create_pr_for_repo
+                _pr_title = f"feat: #{_issue_num} linked repo ({_rk})"
+                _pr_body = (f"跨仓库需求开发 PR（Issue #{_issue_num}）\n\n"
+                            f"由 coding agent 自动提交，关联主仓库 {_rk}。\n\n"
+                            f"Closes #{_issue_num}")
+                _pr_result = create_pr_for_repo(
+                    repo_key=_rk, token=_token,
+                    title=_pr_title, head=_wt_branch, base=_base_branch,
+                    body=_pr_body)
+                if isinstance(_pr_result, dict) and "error" not in _pr_result:
+                    _pr_num = _pr_result.get("number") or ""
+                    _pr_url = _pr_result.get("html_url") or ""
+                    log.info(f"linked PR: created #{_pr_num} for {_rk}: {_pr_url}")
+                    _results.append({"repo_key": _rk, "status": "created",
+                                     "pr_number": _pr_num, "pr_url": _pr_url})
+                else:
+                    _err = _pr_result.get("error", "unknown") if isinstance(_pr_result, dict) else "unknown"
+                    log.warning(f"linked PR: create_pr failed {_rk}: {_err}")
+                    _results.append({"repo_key": _rk, "status": "failed", "reason": f"PR create: {_err}"})
+            except Exception as e:
+                log.warning(f"linked PR: error for {_rk}: {e}")
+                _results.append({"repo_key": _rk, "status": "error", "reason": str(e)[:200]})
 
     task["_linked_pr_results"] = _results
     _created = [r for r in _results if r.get("status") == "created"]
     _skipped = [r for r in _results if r.get("status") == "skipped"]
     _failed = [r for r in _results if r.get("status") in ("failed", "error")]
     log.info(f"linked PR summary: {len(_created)} created, {len(_skipped)} skipped, {len(_failed)} failed")
+
+
+def _prepare_codearts_data_dir(tid: str, cwd: str) -> str:
+    """方案 G + Issue #471 C2：创建 codearts per-task 独立数据目录并预写配置。
+
+    预写内容（均幂等）：
+    1. storage/permission/global.json + config.json（write/edit 等权限 allow）
+    2. storage/sandbox/config.json（network_policy=allow_all）
+    3. settings.json——目录信任（C2）：把任务 cwd 加入 trustedFolders，
+       根治无 TTY 环境 folder-trust 闸门 exit 1。
+    4. symlink sandbox_runner / system/skills 指向宿主机（避免每次解压 66MB）
+
+    返回 per-task cli-data 目录（调用方设为 KERNEL_DATA_DIR）。
+    """
+    import os as _os
+    _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+    _data_dir = _os.path.join(_tasks_base, tid)
+    _cli_data = _os.path.join(_data_dir, "cli-data")
+    # 1. 预写 global.json + config.json (write/edit/external_directory_write=allow)
+    _perm_dir = _os.path.join(_cli_data, "storage", "permission")
+    _os.makedirs(_perm_dir, exist_ok=True)
+    for _fname in ("global.json", "config.json"):
+        _f = _os.path.join(_perm_dir, _fname)
+        if not _os.path.exists(_f):
+            with open(_f, "w") as f:
+                json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
+    # 2. 预写 sandbox/config.json (network_policy=allow_all)
+    _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
+    _os.makedirs(_sandbox_dir, exist_ok=True)
+    _sandbox_cfg = _os.path.join(_sandbox_dir, "config.json")
+    if not _os.path.exists(_sandbox_cfg):
+        with open(_sandbox_cfg, "w") as f:
+            f.write('{"network_policy": "allow_all"}')
+    # 3. 预写 settings.json：目录信任（Issue #471 C2，无 TTY 不再致命退出）
+    from src.runtime.codearts import write_trust_settings
+    write_trust_settings(_cli_data, [cwd])
+    # 4. symlink sandbox_runner + system/skills 指向宿主机
+    _home = _os.path.expanduser("~")
+    _host_cli = _os.path.join(_home, ".codeartsdoer", "cli-data")
+    _sandbox_runner = _os.path.join(_cli_data, "sandbox_runner")
+    if not _os.path.exists(_sandbox_runner) and _os.path.isdir(_os.path.join(_host_cli, "sandbox_runner")):
+        _os.symlink(_os.path.join(_host_cli, "sandbox_runner"), _sandbox_runner)
+    _sys_skills = _os.path.join(_cli_data, "system", "skills")
+    if not _os.path.exists(_sys_skills) and _os.path.isdir(_os.path.join(_host_cli, "system", "skills")):
+        _os.makedirs(_os.path.join(_cli_data, "system"), exist_ok=True)
+        _os.symlink(_os.path.join(_host_cli, "system", "skills"), _sys_skills)
+    return _cli_data
+
+
+def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str) -> str:
+    """Issue #607：_execute_task 技能物化块提取（可单测）。返回追加降级说明后的 prompt。
+
+    语义与提取前逐字对齐（v3.0 OBS 直连/代拉 + #564 原子物化/官方包回退），
+    仅在失败分支追加 Issue #607 兜底：物化失败（zip/skill_files 均失败、结果为空、
+    或物化异常）时向 skill_dir/<skill>/ 写入 FALLBACK.md 降级指引（Agent 首轮
+    即可读到 `grape skills detail` 权威取回命令）+ log.warning 结构化留痕；
+    物化成功路径不受影响。
+    """
+    from src.runtime.skill_materialize import write_skill_fallback
+    try:
+        # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
+        _skill_notes = []
+
+        def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
+            """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。
+
+            Issue #617：按名未命中时优先用服务端 claim 下发的 skill_fallback
+            （agent_type 对应官方检查器，worker 无库不自行解析），提示带
+            `grape skills detail --skill_id <id>`。
+            """
+            _skill_name = _task.get("skill") or ""
+            _fb_info = _task.get("skill_fallback") or {}
+            _fb_name = str(_fb_info.get("skill_name") or "")
+            _fb_id = int(_fb_info.get("skill_id") or 0)
+            try:
+                from src.config import resolve_official_skill_path
+                _official = resolve_official_skill_path(_skill_name)
+            except Exception as _e:
+                log.warning(f"[skill] official resolve failed: {_e}")
+                _official = ""
+            if not _official and _fb_name:
+                # 按名未命中 → agent_type 官方检查器（skill_fallback）回退
+                try:
+                    from src.config import resolve_official_skill_path as _resolve
+                    _official = _resolve(_fb_name)
+                except Exception as _e:
+                    log.warning(f"[skill] checker resolve failed: {_e}")
+                    _official = ""
+            if _official and os.path.isfile(_official):
+                from src.runtime.skill_materialize import materialize_skill_dir_atomic
+                # 官方目录名即落盘技能名（checker 回退时为 _fb_name，同名回退为 _skill_name）
+                _dst_name = os.path.basename(os.path.dirname(_official)) or _skill_name
+                _ok, _r = materialize_skill_dir_atomic(
+                    _skill_dir, _dst_name, os.path.dirname(_official))
+                if _ok:
+                    _env["DEVOPS_SKILLS_DIR"] = _skill_dir
+                    if _dst_name != _skill_name:
+                        # Issue #887（QA 修复）：物化名≠绑定名时回写 task.skill_fallback，
+                        # 使 _skill_consistency_gate 将其识别为 declared_fallback
+                        # （ok + mismatch 显式标注），而非 local_cache 残留自相矛盾拒绝。
+                        try:
+                            _task["skill_fallback"] = {
+                                "skill_name": _dst_name, "skill_id": _fb_id}
+                        except Exception:
+                            pass
+                        return {"status": "fallback", "detail": (
+                            f"skill '{_skill_name}' not found; materialized official checker "
+                            f"'{_dst_name}' (fetch via `grape skills detail --skill_id {_fb_id}`) "
+                            f"at DEVOPS_SKILLS_DIR/{_dst_name}")}
+                    return {"status": "fallback", "detail": "official skill package materialized"}
+                return {"status": "degraded", "detail": f"official fallback failed: {_r}"}
+            return {"status": "degraded", "detail": (
+                f"official skill package not found"
+                + (f"; checker '{_fb_name}' unavailable (fetch via "
+                   f"`grape skills detail --skill_id {_fb_id}`)" if _fb_name else ""))}
+
+        # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
+        # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
+        # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
+        # ③ 无 URL（老任务/无 OBS 技能）→ skill_files 文本物化（既有）
+        skill_obs_url = task.get("skill_obs_url") or ""
+        skill_zip_b64 = None
+        if skill_obs_url:
+            raw = _fetch_skill_zip(skill_obs_url, task_id=task.get("id", ""))
+            if raw:
+                skill_zip_b64 = _b64.b64encode(raw).decode()
+                # v3.0 能力反馈：直连/代拉成功 → 计数恢复
+                global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
+                _OBS_FAIL_STREAK = 0
+                _OBS_OK_STREAK += 1
+                if _OBS_OK_STREAK >= _OBS_FALLBACK_THRESHOLD and _OBS_FALLBACK:
+                    _OBS_FALLBACK = False
+                    _OBS_OK_STREAK = 0
+                    log.info("[skill] OBS 直连恢复（连续 3 次成功）")
+            else:
+                log.warning(f"[skill] OBS 直连+代拉均失败, task={task.get('id')} url={skill_obs_url[:60]}...")
+                # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
+                _OBS_FAIL_STREAK += 1
+                _OBS_OK_STREAK = 0
+                if _OBS_FAIL_STREAK >= _OBS_FALLBACK_THRESHOLD and not _OBS_FALLBACK:
+                    _OBS_FALLBACK = True
+                    _OBS_FAIL_STREAK = 0
+                    log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
+        if skill_zip_b64:
+            # ===== zip 物化（直连/代拉获取的 zip → 原子解压 + 完整性校验 → 恢复权限）=====
+            # Issue #564：tmp + 原子 rename（不留半写 .skills）、按 zip 名单校验
+            # SKILL.md/references、失败回退官方技能包、仍失败降级标注（不静默空注入）。
+            # 权限恢复见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
+            # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
+            from src.runtime.skill_materialize import materialize_skill_zip_atomic
+            raw = _b64.b64decode(skill_zip_b64)
+            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
+            # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
+            # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
+            #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
+            _target_skill = task.get("skill") or ""
+            if _ok_zip and _target_skill and _target_skill not in _skills_ok:
+                # Issue #617：目标技能名未命中但官方检查器已物化（skill_fallback）→
+                # 视为回退成功，提示读检查器 SKILL.md（含 skills detail --skill_id 路径）
+                _fb_info = task.get("skill_fallback") or {}
+                _fb_hit = str(_fb_info.get("skill_name") or "")
+                if _fb_hit and _fb_hit in _skills_ok:
+                    log.info(f"[skill] target '{_target_skill}' miss, checker '{_fb_hit}' materialized")
+                    _skill_notes.append(
+                        f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                        f"(fallback): skill '{_target_skill}' not found; materialized official "
+                        f"checker '{_fb_hit}' for agent_type '{task.get('agent_type', '')}' "
+                        f"instead (fetch via `grape skills detail --skill_id "
+                        f"{_fb_info.get('skill_id', 0)}`). Read "
+                        f"DEVOPS_SKILLS_DIR/{_fb_hit}/SKILL.md instead.")
+                else:
+                    _ok_zip = False
+                    _reason = (f"target skill '{_target_skill}' not in materialized list "
+                               f"[{', '.join(_skills_ok)}]")
+                    log.warning(f"[skill] zip partial success misses target: {_reason}")
+            if _ok_zip:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
+                if _reason:
+                    log.warning(f"[skill] partial zip materialize: {_reason}")
+            else:
+                log.warning(f"[skill] zip materialize failed: {_reason}")
+                _fb_status = _fallback_official_skill(skill_dir, task, env)
+                _skill_notes.append(
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                    f"({_fb_status.get('status')}): zip materialize failed ({_reason}); "
+                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
+                    f"missing, fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
+                # Issue #607：官方包回退也失败 → 写 FALLBACK.md 降级指引（不静默空注入）
+                if _fb_status.get("status") == "degraded":
+                    write_skill_fallback(skill_dir, _target_skill,
+                                         f"zip materialize failed: {_reason}",
+                                         stage="zip_b64")
+        else:
+            # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
+            # Issue #564：原子写盘 + 完整性校验 + 官方包回退；仅物化成功才注入
+            # DEVOPS_SKILLS_DIR（杜绝"有路径无内容"的空注入）。
+            from src.runtime.skill_materialize import materialize_skill_files_atomic
+            skill_files = json.loads(task.get("skill_files") or "{}")
+            # Issue #463 P2 扩展（2026-10-27）：引用单写格式 {"<skill>": {"__obs_key__": ...}}
+            # —— 内容不内联 DB，按对象键现拉原始 zip（含二进制，优于文本物化）。
+            # 老 worker 不识别此标记时（物化出一个 __obs_key__ 文件，无害），实际任务
+            # 仍走 skill_obs_url 直连 / 服务端代拉，本分支只在 ①② 都失败时到达。
+            _ref_key = ""
+            for _sn, files in skill_files.items():
+                if isinstance(files, dict) and "__obs_key__" in files:
+                    _ref_key = str(files["__obs_key__"])
+                    break
+            if _ref_key:
+                raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
+                if raw:
+                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
+                    skill_files = {}
+                else:
+                    log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
+            # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
+            # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
+            _per_skill = []  # [(skill_name, ok, reason)]
+            for _sn, files in skill_files.items():
+                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
+                _per_skill.append((_sn, _ok_s, _r_s))
+                if not _ok_s:
+                    log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
+            _failed = [(_sn, _r) for _sn, _ok_f, _r in _per_skill if not _ok_f]
+            _reason = "; ".join(f"{_sn}: {_r}" for _sn, _r in _failed)
+            _ok_files = not _failed
+            # Issue #607：skill_obs_url 直连/代拉均失败且 skill_files 为空（无任何物化
+            # 结果）却计为成功——构成静默空注入；改为按降级处理：官方包回退 +
+            # FALLBACK.md 兜底 + 留痕，不再注入空 DEVOPS_SKILLS_DIR。
+            if _ok_files and not skill_files and not skill_zip_b64 and (task.get("skill") or ""):
+                _ok_files = False
+                _reason = "skill obs url fetch failed and skill_files empty"
+            if _ok_files:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
+            else:
+                _fb_status = _fallback_official_skill(skill_dir, task, env)
+                _skill_notes.append(
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                    f"({_fb_status.get('status')}): skill_files materialize failed ({_reason}); "
+                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
+                    f"missing, fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
+                # Issue #607：官方包回退也失败 → 写 FALLBACK.md 降级指引（不静默空注入）
+                if _fb_status.get("status") == "degraded":
+                    write_skill_fallback(skill_dir, task.get("skill") or "",
+                                         _reason, stage="skill_files")
+        if _skill_notes:
+            prompt += "".join(_skill_notes)
+    except Exception as e:
+        log.warning(f"skill materialize failed: {e}")
+        # Issue #607：物化异常分支同样写 FALLBACK.md 降级指引 + 留痕
+        write_skill_fallback(skill_dir, task.get("skill") or "",
+                             f"materialize exception: {e}", stage="exception")
+    return prompt
+
+
+async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, _res,
+                                  env: dict | None = None,
+                                  engine_name: str = "") -> dict | None:
+    """Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注。
+
+    校验「即将执行的 skill」与 agent 绑定（任务 skill 字段，仓库级/场景级绑定解析值）
+    一致；不一致（引擎本地缓存决定执行技能）→ 拒绝执行并显式报错（返回错误 dict，
+    调用方据此置任务 failed，不静默跑错流程）。绑定为空 → 放行（本地缓存仅此时兜底）。
+
+    扫描范围（QA 修复）：任务技能目录（cwd/.skills）+ 引擎原生技能目录
+    （engine_skill_dirs，按 engine_name 推导后端）——seq=46108 的残留若落在
+    引擎原生缓存而非 ws/.skills，仅扫 .skills 会漏检。
+
+    双源互校（QA 修复）：env GRAPE_BOUND_SKILL（service.enqueue_task 注入的绑定
+    基准）与 task["skill"] 不一致 → 拒绝（绑定基准被覆盖/漂移，可观测标注失真）；
+    task["skill"] 为空时以 env 值兜底。
+
+    无论放行与否，先向服务端上报技能来源标注日志（绑定值 vs 实际值，落任务日志）。
+    校验自身异常不阻断执行（降级放行 + 告警，与物化链路容错口径一致）。
+    """
+    try:
+        from src.runtime.skill_materialize import (verify_skill_execution_consistency,
+                                                   skill_mismatch_error)
+        from src.runtime.task_log_stream import build_skill_source_message
+        # 双源互校：task["skill"]（绑定基准权威源）vs env GRAPE_BOUND_SKILL（下发镜像）
+        _bound_task = (task.get("skill") or "").strip()
+        _bound_env = ((env or {}).get("GRAPE_BOUND_SKILL") or "").strip()
+        if _bound_task and _bound_env and _bound_task != _bound_env:
+            _x_reason = (f"bound skill sources disagree: task.skill='{_bound_task}' "
+                         f"but env GRAPE_BOUND_SKILL='{_bound_env}'; refusing execution "
+                         f"to prevent wrong-skill run (Issue #887)")
+            log.error(f"[skill] task {tid} refused to execute: {_x_reason}")
+            try:
+                await client.report_messages(tid, [build_skill_source_message(
+                    _bound_task, _bound_env, "env_conflict",
+                    ok=False, reason=_x_reason)])
+            except Exception as _rme:
+                log.warning(f"task {tid}: skill source log report failed: {_rme}")
+            try:
+                _res.dispose()
+            except Exception:
+                pass
+            return {"_error": f"[skill_mismatch] {_x_reason}", "_started": False}
+        if not _bound_task and _bound_env:
+            task = dict(task)
+            task["skill"] = _bound_env
+        # 引擎原生技能目录（跨平台，见 os_adapter.engine_skill_dirs）
+        _extra_dirs: list[str] = []
+        try:
+            from src.runtime.os_adapter import engine_skill_dirs as _esd
+            _extra_dirs = _esd(_backend_for_engine(engine_name))
+        except Exception as _ede:
+            log.warning(f"task {tid}: engine skill dirs resolve failed: {_ede}")
+        _sv = verify_skill_execution_consistency(
+            task.get("skill") or "", skill_dir, task.get("skill_fallback") or None,
+            extra_scan_dirs=_extra_dirs)
+        try:
+            await client.report_messages(tid, [build_skill_source_message(
+                _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))])
+        except Exception as _rme:
+            log.warning(f"task {tid}: skill source log report failed: {_rme}")
+        if not _sv.get("ok"):
+            _err = skill_mismatch_error(_sv)
+            log.error(f"[skill] task {tid} refused to execute: {_err}")
+            try:
+                _res.dispose()
+            except Exception:
+                pass
+            return {"_error": _err, "_started": False}
+    except Exception as _sve:
+        log.warning(f"task {tid}: skill consistency verify failed (degraded pass): {_sve}")
+    return None
+
+
+async def _flush_report_batch(client, tid: str, batch: list) -> str:
+    """批量上报一批消息（Issue #975 三态处理）。
+
+    返回：
+    - "ok"      批次已送达（或已走降级：拆批重发/占位/补报队列），可清空 batch
+    - "retry"   网络错误（可重试）——保留 batch，下个 flush 窗口重试，不清空不丢
+    - "terminal" 任务已被服务端标终态（410），调用方应中断执行
+    """
+    from src.runtime.client import ReportBatchError
+    from src.runtime.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
+    try:
+        _resp = await client.report_messages(tid, batch)
+    except ReportBatchError as e:
+        # 4xx 批次级失败（413/400）：拆批重发 → 单条仍失败发占位 + 落补报队列
+        try:
+            await degrade_failed_batch(
+                lambda msgs: client.report_messages(tid, msgs), tid, batch, e,
+                enqueue=_report_queue().add)
+        except Exception as _de:
+            # QA 复审修复（Spec #3）：降级链路自身抛错时绝不能仍返回 "ok"
+            # 静默清空 batch（原缺陷换入口复现）。兜底：逐条落本地持久化补报队列
+            # （截断防 413），由 _report_replay_loop 后续重放；队列也不可用才返回
+            # "retry" 保留 batch 下个窗口重试——两条路径都不丢消息。
+            log.warning(f"task {tid} report degrade failed: {_de}")
+            try:
+                import time as _time
+                _q = _report_queue()
+                _ts = _time.time()
+                for i, m in enumerate(batch):
+                    _q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
+                            "task": tid, "message": truncate_message(m)})
+                log.info(f"task {tid} report degrade fallback: {len(batch)} message(s) queued for replay")
+                return "ok"
+            except Exception as _qe:
+                log.warning(f"task {tid} report degrade fallback enqueue failed: {_qe}")
+                return "retry"
+        return "ok"
+    except CredentialRevokedError:
+        raise
+    if _resp is None:
+        return "terminal"
+    if isinstance(_resp, dict) and _resp.get("status") == "ok":
+        # 服务端回执带 seq 范围（seq_start/seq_end）——记录累计已确认 seq 供对账
+        _seq_end = _resp.get("seq_end")
+        if _seq_end is not None:
+            log.info(f"task {tid} messages acknowledged: count={len(batch)} "
+                     f"seq_range={_resp.get('seq_start')}..{_seq_end}")
+        return "ok"
+    # 网络错误（{}）：保留 batch，下个窗口重试（不清空，防止静默丢失）
+    return "retry"
+
+
+def _abort_task_terminal(task, engine_name, env, res, started: bool, reason: str) -> dict:
+    """任务被服务端标终态（410）→ 统一中断处理（QA 复审：执行中/收尾两处
+    flush 的 terminal 处理块逐行重复，提取为单一实现）。"""
+    tid = task.get("id", "")
+    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting: {reason}")
+    _kill_stale_engine(task, _backend_for_engine(engine_name))
+    res.dispose()
+    _cleanup_task_workdir(task, env)
+    return {"_error": f"task terminated by server (aborted {reason})", "_started": started}
 
 
 async def _execute_task(client, task, engine_name: str = ""):
@@ -1687,6 +2347,11 @@ async def _execute_task(client, task, engine_name: str = ""):
     # TaskResourceStack: unified resource lifecycle for this task
     from src.runtime.resource_stack import TaskResourceStack
     _res = TaskResourceStack(task_id=tid, cwd=cwd)
+    # Issue #516 M2：进度快照——流式事件周期性原子落盘；超时被杀前留有可用快照，
+    # 自动重试时加载注入续跑上下文（见下方 resume 段）。成功/异常路径随 dispose 清理。
+    from src.runtime.checkpoint import TaskCheckpoint
+    _ckpt = TaskCheckpoint(tid)
+    _res.track_checkpoint(_ckpt)
     # Register known tmp patterns for cleanup on any exit path
     for pat in [
         "/tmp/tf-deploy-*", "/tmp/tf-sys-xhy*", "/tmp/blog-build-*",
@@ -1730,7 +2395,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             env.update(_fresh_env)
     except Exception:
         pass
-    # Issue #378: 按 agent_type 注入差异化静默超时 env（coding/qa=1200s，其余默认 300s）。
+    # Issue #378: 按 agent_type 注入差异化静默超时 env（coding/qa=1200s，其余默认 600s）。
     # setdefault 语义：上层 env_extra / fresh_env 已显式设置（手动调参）时不覆盖。
     # 注入到局部 env dict（并发安全，不写 os.environ 避免 async 交错竞态，见 L1774 注释），
     # 经 env_extra → stream_agent env.update(env_extra) → 各 backend 读 env 生效。
@@ -1787,6 +2452,8 @@ async def _execute_task(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
+    # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
+    # token 解析 env 优先 → 本地 Repo.bot_token 回退
     try:
         from src.runtime import repogit
         _linked_repos_env = env.get("GRAPE_LINKED_REPOS", "")
@@ -1797,7 +2464,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=_get_task_token(task))
+                    token=_get_task_token(task), env=env)
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -1814,69 +2481,26 @@ async def _execute_task(client, task, engine_name: str = ""):
     if _is_local_worker and _old_server_url and _local_base and _old_server_url != _local_base:
         prompt = prompt.replace(_old_server_url, _local_base)
         log.info(f"local worker: rewrote prompt server_url {_old_server_url} -> {_local_base}")
-    try:
-        # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
-        # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
-        # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
-        # ③ 无 URL（老任务/无 OBS 技能）→ skill_files 文本物化（既有）
-        skill_obs_url = task.get("skill_obs_url") or ""
-        skill_zip_b64 = None
-        if skill_obs_url:
-            raw = _fetch_skill_zip(skill_obs_url, task_id=task.get("id", ""))
-            if raw:
-                skill_zip_b64 = _b64.b64encode(raw).decode()
-                # v3.0 能力反馈：直连/代拉成功 → 计数恢复
-                global _OBS_FAIL_STREAK, _OBS_OK_STREAK, _OBS_FALLBACK
-                _OBS_FAIL_STREAK = 0
-                _OBS_OK_STREAK += 1
-                if _OBS_OK_STREAK >= _OBS_FALLBACK_THRESHOLD and _OBS_FALLBACK:
-                    _OBS_FALLBACK = False
-                    _OBS_OK_STREAK = 0
-                    log.info("[skill] OBS 直连恢复（连续 3 次成功）")
-            else:
-                log.warning(f"[skill] OBS 直连+代拉均失败, task={task.get('id')} url={skill_obs_url[:60]}...")
-                # v3.0 能力反馈：连续失败 → 声明 prefer_fallback（服务端直接代拉模式）
-                _OBS_FAIL_STREAK += 1
-                _OBS_OK_STREAK = 0
-                if _OBS_FAIL_STREAK >= _OBS_FALLBACK_THRESHOLD and not _OBS_FALLBACK:
-                    _OBS_FALLBACK = True
-                    _OBS_FAIL_STREAK = 0
-                    log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
-        if skill_zip_b64:
-            # ===== zip 物化（直连/代拉获取的 zip → 解压 → 恢复权限）=====
-            # 见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
-            # Unix 权限位，手动按 external_attr 恢复；剥离 setuid/setgid/sticky 防提权）
-            raw = _b64.b64decode(skill_zip_b64)
-            tmp_zip = _os.path.join(skill_dir, "_skill_delivery.zip")
-            _os.makedirs(skill_dir, exist_ok=True)
-            with open(tmp_zip, "wb") as f:
-                f.write(raw)
-            with _zf.ZipFile(tmp_zip, "r") as zf:
-                zf.extractall(skill_dir)  # zip 根 = {skill_name}/，落地 .skills/{skill_name}/
-                for info in zf.infolist():
-                    mode = info.external_attr >> 16
-                    if mode and not info.is_dir():
-                        p = _os.path.join(skill_dir, info.filename)
-                        if _os.path.isfile(p):
-                            _os.chmod(p, mode & 0o777)
-            try:
-                _os.remove(tmp_zip)
-            except Exception:
-                pass
-            env["DEVOPS_SKILLS_DIR"] = skill_dir
-        else:
-            # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
-            skill_files = json.loads(task.get("skill_files") or "{}")
-            for _sn, files in skill_files.items():
-                for rel, content in (files or {}).items():
-                    dest = _os.path.join(skill_dir, _sn, rel)
-                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                    with open(dest, "w", encoding="utf-8") as f:
-                        f.write(content)
-            if skill_files:
-                env["DEVOPS_SKILLS_DIR"] = skill_dir
-    except Exception as e:
-        log.warning(f"skill materialize failed: {e}")
+    # Issue #516 M2：超时自动重试续跑——_wrap 重试轮次给 task 打了 _grape_resume_attempt，
+    # 此处加载上一轮进度快照，把最近事件摘要追加为续跑上下文（避免从零重做已完成步骤）。
+    # 快照损坏/缺失 → 降级从零跑（仅记日志）。注入逻辑见 checkpoint.inject_resume（可单测）。
+    from src.runtime.checkpoint import inject_resume
+    prompt, _resumed = inject_resume(task, env, prompt, _ckpt)
+    if _resumed:
+        log.info(f"task {tid}: retry resumed from checkpoint {os.path.basename(_ckpt.path)}")
+    elif int(task.get("_grape_resume_attempt") or 0) >= 2:
+        log.info(f"task {tid}: retry without usable checkpoint, running from scratch")
+    # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
+    # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
+    prompt = _materialize_worker_skill(task, env, prompt, skill_dir)
+    # Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注——绑定 skill 未物化
+    # 而本地缓存存在其它技能时拒绝执行（events seq=46108：绑定 caserun-prep 实际执行
+    # casegen-prep，静默跑错流程并跳过环境硬校验）。扫描范围含引擎原生技能目录，
+    # 并与 env GRAPE_BOUND_SKILL 双源互校。
+    _sv_err = await _skill_consistency_gate(client, tid, task, skill_dir, _res,
+                                            env=env, engine_name=engine_name)
+    if _sv_err:
+        return _sv_err
     # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
     proj_dir = _os.path.join(cwd, ".project-info")
     try:
@@ -1900,49 +2524,18 @@ async def _execute_task(client, task, engine_name: str = ""):
 
     # ── 方案 G: codearts per-task 独立数据目录 ──
     # 通过 KERNEL_DATA_DIR 指向 per-task 临时目录，预写 global.json + sandbox/config.json
-    # 实现 per-process 权限隔离，不影响宿主机全局配置。
+    # + settings.json（Issue #471 C2 目录信任）实现 per-process 权限隔离，
+    # 不影响宿主机全局配置。
     # env 是局部变量，并发安全（不用 os.environ 避免 async 交错竞态）。
     # 通过 env_extra 传给 stream_agent → env.update(env_extra) 覆盖 get_env 的默认值。
     _engine = engine_name or ""
     if "codearts" in _engine.lower():
         try:
+            env["KERNEL_DATA_DIR"] = _prepare_codearts_data_dir(tid, cwd)
+            # 注册清理：task 结束时删除临时目录
             _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
-            _data_dir = _os.path.join(_tasks_base, tid)
-            _cli_data = _os.path.join(_data_dir, "cli-data")
-            # 1. 预写 global.json (write/edit/external_directory_write=allow)
-            _perm_dir = _os.path.join(_cli_data, "storage", "permission")
-            _os.makedirs(_perm_dir, exist_ok=True)
-            _global_json = _os.path.join(_perm_dir, "global.json")
-            if not _os.path.exists(_global_json):  # 幂等
-                with open(_global_json, "w") as f:
-                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
-            # 1b. 预写 config.json (codearts 26.8.8 getEffectivePermissions 实际读取路径)
-            _config_json = _os.path.join(_perm_dir, "config.json")
-            if not _os.path.exists(_config_json):  # 幂等
-                with open(_config_json, "w") as f:
-                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
-            # 2. 预写 sandbox/config.json (network_policy=allow_all)
-            _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
-            _os.makedirs(_sandbox_dir, exist_ok=True)
-            _sandbox_cfg = _os.path.join(_sandbox_dir, "config.json")
-            if not _os.path.exists(_sandbox_cfg):  # 幂等
-                with open(_sandbox_cfg, "w") as f:
-                    f.write('{"network_policy": "allow_all"}')
-            # 3. symlink sandbox_runner + system/skills 指向宿主机（避免每次解压 66MB）
-            _home = _os.path.expanduser("~")
-            _host_cli = _os.path.join(_home, ".codeartsdoer", "cli-data")
-            _sandbox_runner = _os.path.join(_cli_data, "sandbox_runner")
-            if not _os.path.exists(_sandbox_runner) and _os.path.isdir(_os.path.join(_host_cli, "sandbox_runner")):
-                _os.symlink(_os.path.join(_host_cli, "sandbox_runner"), _sandbox_runner)
-            _sys_skills = _os.path.join(_cli_data, "system", "skills")
-            if not _os.path.exists(_sys_skills) and _os.path.isdir(_os.path.join(_host_cli, "system", "skills")):
-                _os.makedirs(_os.path.join(_cli_data, "system"), exist_ok=True)
-                _os.symlink(_os.path.join(_host_cli, "system", "skills"), _sys_skills)
-            # 4. 设置 KERNEL_DATA_DIR 到 env dict（局部变量，并发安全）
-            env["KERNEL_DATA_DIR"] = _cli_data
-            # 5. 注册清理：task 结束时删除临时目录
             _res.track_tmp_pattern(f"{_tasks_base}/{tid}")
-            log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {_cli_data}")
+            log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {env['KERNEL_DATA_DIR']}")
         except Exception as e:
             log.warning(f"codearts data dir setup failed: {e}")
 
@@ -1999,6 +2592,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
+            # issue #727：hermes ACP 直报用量（("usage", {...}) 事件）——只喂采集器，
+            # 不进消息流/日志（内部观测数据，非任务执行事件）。
+            if evt_type == "usage":
+                _usage_col.feed(evt_type, data)
+                continue
             # 流式引擎的用量(目前只有 codex)随事件带出，喂给采集器
             _usage_col.feed(evt_type, data)
             # 引擎确已开始执行（opencode 已 Popen 并产出首个执行事件）→ 才置 running。
@@ -2017,31 +2615,34 @@ async def _execute_task(client, task, engine_name: str = ""):
                 log.info(f"  [{_esq}] 🔧 {str(data)[:150]}")
             elif evt_type == "step_finish":
                 log.info(f"  [{_esq}] ✅ {data}")
+            elif evt_type == "task:retry":
+                # issue #403：模型流瞬时异常自动重试（用户侧可感知，事件流已透出）
+                log.warning(f"  [{_esq}] ↻ auto-retry: {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
+            # Issue #516 M2：进度快照——喂流式事件（内存 tail + 周期原子落盘）
+            try:
+                _ckpt.feed(evt_type, data)
+            except Exception:
+                pass  # 快照是尽力而为的优化，绝不影响主执行链路
             # Context compaction: compact batch if it grows too large (prevents context overflow)
             if should_compact(batch):
                 batch = compact_messages(batch)
             # 双触发批量上报（实时日志实时性关键）：50 条或 500ms 时间窗任一满足即 flush
             _now = time.monotonic()
             if len(batch) >= 50 or (_last_flush and _now - _last_flush >= 0.5):
-                _resp = await client.report_messages(tid, batch)
-                if _resp is None:
-                    # task 已被服务端标终态（410 Gone / 网络错误）→ 中断执行，杀引擎进程
-                    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
-                    _kill_stale_engine(task, _backend_for_engine(engine_name))
-                    _res.dispose()
-                    _cleanup_task_workdir(task, env)
-                    return {"_error": "task terminated by server (aborted during execution)", "_started": started}
-                batch = []
+                _outcome = await _flush_report_batch(client, tid, batch)
+                if _outcome == "terminal":
+                    # task 已被服务端标终态（410 Gone）→ 中断执行，杀引擎进程
+                    return _abort_task_terminal(task, engine_name, env, _res, started,
+                                                "during execution")
+                if _outcome == "ok":
+                    batch = []
                 _last_flush = _now
         if batch:
-            _resp = await client.report_messages(tid, batch)
-            if _resp is None:
-                log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
-                _kill_stale_engine(task, _backend_for_engine(engine_name))
-                _res.dispose()
-                _cleanup_task_workdir(task, env)
-                return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
+            _outcome = await _flush_report_batch(client, tid, batch)
+            if _outcome == "terminal":
+                return _abort_task_terminal(task, engine_name, env, _res, started,
+                                            "at final flush")
         # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
         if done is not None and not (isinstance(done, dict) and done.get("_error")):
             try:
@@ -2133,8 +2734,32 @@ async def _report_llm_usage(client, tid: str, collector, done) -> None:
         log.warning(f"llm usage collect/report failed task={tid}: {e}")
 
 
-async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
+def _register_failed(ids: list[int], installed: list[dict]) -> bool:
+    """Issue #471 C1：注册请求成功（HTTP 200）即注册成功。
+
+    无引擎 worker 的空 ids 是正常状态（服务端按实例键 upsert，无引擎则无行），
+    不判失败、不退出——否则 daemon/systemd Restart=always 无限重启、安装脚本
+    30s 注册验证失败触发回滚循环（鸡生蛋：引擎未装 → 注册"失败" → 重启 → 永远装不上）。
+    仅当本机有引擎而服务端未返回任何 runtime id 时才视为真失败（服务端异常）。
+    """
+    return (not ids) and bool(installed)
+
+
+async def _reregister(client, prev_installed, device_name, cli_version: str = "") -> tuple[list[int], dict, list] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
+
+    Issue #471 C1：
+    - 每次重注册前重新发现本机引擎（不用启动时快照）——启动时无引擎的 worker，
+      用户后续安装引擎后无需重启即可自动注册上线（≤ RE_REGISTER_INTERVAL 秒）。
+    - 返回 (runtime_ids, engine_by_rid, installed)；无引擎时返回 ([], {}, []) 同样算成功。
+    - 有引擎但服务端返回空 ids → 返回 None（真失败）。
+
+    Issue #471 QA 建议（S2/S3）：
+    - S2：engine_by_rid 按 name 配对（服务端 register 返回 runtimes 明细含
+      name；个别引擎被跳过时 zip 位置对齐会错位，按 name 配对根治）。
+    - S3：重扫瞬时为空（此前快照有引擎）视为异常扫描——沿用上次快照、
+      返回 None（调用方保留原 runtime_ids），不把空列表注册上去清空在线态；
+      真实无引擎（快照也为空）仍正常注册空列表（C1 语义不变）。
 
     凭据被吊销（401 → CredentialRevokedError）时直接上抛——调用方退出进程，
     不再当普通失败无限退避重试。
@@ -2143,19 +2768,58 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
+        # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
+        installed = [r for r in _discover_local_runtimes() if r.get("installed")]
+        # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
+        if not installed and prev_installed:
+            log.warning("re-scan found no engines while snapshot had "
+                        f"{len(prev_installed)}; keeping snapshot (transient scan?)")
+            return None
         _ls = _scan_local_skills()
         ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
+            from src.runtime.instances import instance_name
+            # S2：按 name 配对（服务端返回顺序/跳过与本地发现列表可能不一致，
+            # zip 位置对齐在个别引擎被跳过时会错位）
+            _name_by_rid = {}
+            for _rt in (_probe_runtimes_detail(client) or []):
+                if isinstance(_rt, dict) and _rt.get("id") is not None:
+                    _name_by_rid[_rt["id"]] = str(_rt.get("name") or "").strip().lower()
+            _local_by_name = {str(r.get("name") or "").strip().lower(): r for r in installed}
+            engine_by_rid = {}
+            for rid in ids:
+                _nm = _name_by_rid.get(rid, "")
+                _r = _local_by_name.get(_nm) if _nm else None
+                if _r is None:
+                    # 兜底：按位置对齐（服务端未返回明细/name 未知时保持旧行为）
+                    _idx = ids.index(rid)
+                    _r = installed[_idx] if _idx < len(installed) else {}
+                engine_by_rid[rid] = instance_name(_r.get("name", ""), device_name, 0)
             log.info(f"re-registered successfully, new runtime ids: {ids}")
-            return ids
-        log.warning("re-register returned empty ids")
+            return ids, engine_by_rid, installed
+        if not installed:
+            # C1：无引擎为正常状态——注册成功，ids 为空
+            log.info("re-registered with no engines installed (normal state); "
+                     "engines will auto-register once installed")
+            return [], {}, []
+        log.warning("re-register returned empty ids despite installed engines")
     except CredentialRevokedError:
         raise  # 凭据已吊销——重试无意义，上抛退出
     except Exception as e:
         log.warning(f"re-register failed: {e}")
     return None
+
+
+def _probe_runtimes_detail(client):
+    """S2 辅助：读取最近一次 register 响应中的 runtimes 明细（{id, name}）。
+
+    真实 RuntimeClient.register 只返回 (ids, probe_url)；服务端响应明细
+    挂在 client.last_register_detail（无则为 None，兜底按位置对齐）。
+    测试 Fake 可自行提供该属性。
+    """
+    return getattr(client, "last_register_detail", None)
 
 
 _report_queue_obj = None
@@ -2236,9 +2900,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-            if new_ids:
-                runtime_ids = new_ids
+            _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+            if _rr is not None:
+                runtime_ids, _new_ebr, installed = _rr
+                if _new_ebr:
+                    engine_by_rid = _new_ebr
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
@@ -2335,7 +3001,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 3600)
+                # Issue #516 M1：超时上限配置化——读取链 per-skill > per-repo > agent 默认
+                # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/runtime/task_timeout.py。
+                # （#470 任务级 env_extra 优先语义已包含：链条第 1 优先级即任务级显式 env。）
+                from src.runtime.task_timeout import (resolve_task_timeout, timeout_retry_count,
+                                                      retry_backoff_sec)
+                task_timeout, _timeout_src = resolve_task_timeout(t)
+                # Issue #516 M2：超时失败有限次自动重试（默认 1 次，可配置禁用）
+                _retry_max = timeout_retry_count(t)
+                _retry_backoff = retry_backoff_sec()
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
@@ -2360,16 +3034,36 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         pass
                     return
+                _result = None
+                _timeout_attempts = 0  # Issue #516 M2：超时触发的尝试次数（观测/fail 消息用）
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
                     else:
-                        # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理
-                        _result = await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
-                except asyncio.TimeoutError:
-                    log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
-                    _kill_stale_engine(t, _backend_for_engine(e))
-                    _result = None  # timeout → 走 fail 路径
+                        # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理。
+                        # Issue #516 M2：超时失败有限次自动重试——每次超时 kill 引擎 →
+                        # 退避 → 从 checkpoint 快照续跑（_execute_task 内注入续跑上下文）；
+                        # 重试耗尽仍超时才走 fail 路径。
+                        for _attempt in range(1, _retry_max + 2):
+                            if _attempt > 1:
+                                log.info(f"task {_tid} timeout auto-retry {_attempt - 1}/{_retry_max}"
+                                         f" (backoff {_retry_backoff}s, resume from checkpoint)")
+                                await asyncio.sleep(_retry_backoff)
+                                t["_grape_resume_attempt"] = _attempt
+                            try:
+                                _result = await asyncio.wait_for(
+                                    _execute_task(client, t, e), timeout=task_timeout)
+                                break  # 拿到结果（含 _error dict），交给下方 complete/fail 判定
+                            except asyncio.TimeoutError:
+                                _timeout_attempts = _attempt
+                                _will_retry = _attempt <= _retry_max
+                                log.warning(
+                                    f"task {_tid} timed out after {task_timeout}s (attempt "
+                                    f"{_attempt}/{_retry_max + 1}, source={_timeout_src}), killing "
+                                    f"child processes and failing" +
+                                    (", will retry" if _will_retry else ""))
+                                _kill_stale_engine(t, _backend_for_engine(e))
+                                _result = None  # timeout → 重试或最终走 fail 路径
                 except CredentialRevokedError:
                     # 凭据吊销——_execute_task 已杀引擎清理。置全局 Event 让主循环
                     # 下一轮退出进程（_wrap 是 create_task，异常不穿透主循环）。
@@ -2402,8 +3096,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         if isinstance(_result, dict) and _result.get("_error"):
                             await _do_report("failed", _result["_error"], -1)
                         elif _result is None:
-                            # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发
-                            await _do_report("failed", f"task timed out after {task_timeout}s", -1)
+                            # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发。
+                            # Issue #516 M2：保留 "timed out after" 签名（M3 观测聚合依赖），
+                            # 追加尝试数（含自动重试）便于排障。
+                            _to_msg = f"task timed out after {task_timeout}s"
+                            if _timeout_attempts > 1:
+                                _to_msg += f" (attempts: {_timeout_attempts}, retries: {_retry_max})"
+                            await _do_report("failed", _to_msg, -1)
                         elif isinstance(_result, dict) and "exit_code" in _result:
                             _exit = _result.get("exit_code", 0)
                             _text = _result.get("text", "")
@@ -2456,6 +3155,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
             _recent_logs = _collect_recent_logs()
             _metrics = _collect_worker_metrics()
+            # Issue #490：_collect_worker_probe_results 已按指纹去重未变化观测
             _probe_results = _collect_worker_probe_results()
             ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics, probe_results=_probe_results)
             # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
@@ -2463,6 +3163,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             if ok is not None and ok.get("status") == "ok":
                 heartbeat_fail_streak = 0
                 log.debug(f"heartbeat ok, ids={runtime_ids}")
+                # Issue #490：心跳成功后写回已发送观测指纹，未变化的观测下次不再重发
+                if _probe_results:
+                    _mark_probe_fingerprint_sent(_probe_results)
                 # 检查取消信号——发现 cancelled 立即杀引擎进程
                 cancelled_tasks = ok.get("cancelled_tasks", [])
                 if cancelled_tasks:
@@ -2488,9 +3191,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-                if new_ids:
-                    runtime_ids = new_ids
+                _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+                if _rr is not None:
+                    runtime_ids, _new_ebr, installed = _rr
+                    if _new_ebr:
+                        engine_by_rid = _new_ebr
                     heartbeat_fail_streak = 0
                     last_reregister = asyncio.get_running_loop().time()
                 else:
@@ -2620,7 +3325,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                              f"(attempt {upgrade_fail_count + 1})")
                 _upgrade_ok = await _perform_upgrade(
                     os.environ.get("RUNTIME_SERVER_URL", ""),
-                    os.environ.get("RUNTIME_TOKEN", "")
+                    os.environ.get("RUNTIME_TOKEN", ""),
+                    # 透传设备名：不透传时安装脚本会回落到「worker-<主机名>」，
+                    # 设备名/引擎实例名漂移会让服务端按实例名的派发失效。
+                    os.environ.get("RUNTIME_DEVICE_NAME", "")
                 )
                 if not _upgrade_ok:
                     upgrade_fail_count += 1
@@ -2729,7 +3437,7 @@ def _normalize_worker_version(ver: str) -> str:
     return ver
 
 
-async def _perform_upgrade(server: str, token: str) -> bool:
+async def _perform_upgrade(server: str, token: str, device_name: str = "") -> bool:
     """下载并执行安装脚本升级 worker（跨平台）。
 
     成功时 worker 被安装脚本重启（本进程被杀，不会返回）。
@@ -2796,7 +3504,8 @@ async def _perform_upgrade(server: str, token: str) -> bool:
             result = await asyncio.to_thread(
                 subprocess.run,
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp_script,
-                 "-Token", token, "-Server", server, "-Dir", _install_dir],
+                 "-Token", token, "-Server", server, "-Dir", _install_dir]
+                + (["-Device", device_name] if device_name else []),
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
             )
         else:
@@ -2975,7 +3684,10 @@ def main():
         runtimes = _discover_local_runtimes()
         installed = [r for r in runtimes if r.get("installed")]
         if not installed:
-            log.warning("No runtimes installed locally, registering empty")
+            # Issue #471 C1：无引擎是正常初始状态（注册成功即成功），不再用 warning 误导
+            log.info("No engines installed locally yet, registering with empty engine list "
+                     "(install engines later, e.g. `npm install -g opencode-ai`; "
+                     "they will auto-register without worker restart)")
         device = os.environ.get("RUNTIME_DEVICE_NAME", "")
         if not device:
             from src.runtime.os_adapter import hostname as _hostname
@@ -2990,9 +3702,12 @@ def main():
                   "Reinstall with a new credential to rejoin.", file=sys.stderr)
             log.error("register 401: credential revoked/invalid, exiting (code 42)")
             raise SystemExit(42)
-        if not ids:
+        if _register_failed(ids, installed):
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
+        # Issue #471 C1：无引擎 worker（ids=[]）注册成功即成功——正常状态进入主循环：
+        # 心跳维持凭据在线，周期性 re-register 自动拾起后续安装的引擎。
+        # 此前判失败退出 → daemon/systemd 无限重启 + 安装脚本 30s 验证失败回滚循环。
         # v3.0 启动探测（B）：GET probe_url 验证完整链路（网络+签名+读取）
         global _OBS_SUPPORT
         if probe_url:

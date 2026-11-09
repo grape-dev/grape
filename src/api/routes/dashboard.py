@@ -1,4 +1,6 @@
 """Dashboard 路由：仓库概览、指标、Agent 状态、运维可观察性"""
+import re
+
 from fastapi import APIRouter, Depends
 from src.user import db as user_db
 from src.api.deps import require_no_session_token, require_org_member
@@ -7,6 +9,12 @@ from src.observability.engine_probe import get_probe_results
 from src.config import log
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+def _stuck_minutes() -> int:
+    """stuck 预警阈值（分钟，Issue #470：随统一超时配置派生，默认超时 3600s → 22min）。"""
+    from src.config import get_stuck_threshold_minutes
+    return get_stuck_threshold_minutes()
 
 
 # ===== Issue #180: 本机带宽占用率差分采样缓存 =====
@@ -25,7 +33,10 @@ def _load_error_code_i18n() -> dict:
         return _ERROR_CODE_I18N_CACHE
     import json as _json, os
     _result = {}
-    _locales_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "locales")
+    _api_root = os.path.dirname(os.path.dirname(__file__))
+    _locales_dir = os.path.join(_api_root, "frontend", "legacy", "locales")
+    if not os.path.isdir(_locales_dir):
+        _locales_dir = os.path.join(_api_root, "static", "locales")
     for _lang in ("zh", "en"):
         _path = os.path.join(_locales_dir, _lang, "app.json")
         try:
@@ -99,6 +110,230 @@ def _local_bandwidth() -> tuple:
 
 
 # ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
+# ===== 能效看板（Issue #1229）：同属前缀路由，也必须在 /{owner}/{repo} 之前注册 =====
+
+
+def _efficiency_bot_usernames() -> set:
+    """bot 用户名集合（bot 是执行方不是需求方，不计入协作者）。失败按空集合降级。"""
+    try:
+        from src.user.db import get_all_bot_usernames
+        return {u for u in (get_all_bot_usernames() or []) if u}
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: bot usernames load failed: {e}")
+        return set()
+
+
+_UNASSIGNED_LABEL = "(未归属)"
+
+
+# bot 名形态（Issue #1337）：必须带分隔符或整名就是 bot，避免把真人 login 误杀。
+# 反例（实测）：abbot / robot / talbot 都以 "bot" 结尾但都是真人账号。
+_BOT_NAME_RE = re.compile(r"(?:^|[-_])bot$", re.IGNORECASE)
+
+
+def _is_bot_name(name: str) -> bool:
+    """bot 规则识别（Issue #1337）：`bot` / `*_bot` / `*-bot`，大小写不敏感。
+
+    不能用裸 `endswith('bot')`：abbot / robot / talbot 这类真人账号会被当成 bot
+    从看板里静默丢掉（与 issue 抱怨的「数据不全」同一性质）。已知 bot 名单
+    （managed_repos.bot_username / 全局 bot 配置）仍由调用方 `_bots` 兜底，
+    svc-bot-account 这类非 `*bot` 形态的机器人靠名单命中。
+    """
+    n = (name or "").strip()
+    return bool(n) and bool(_BOT_NAME_RE.search(n))
+
+
+def _efficiency_uid_name_loader(c):
+    """批量加载 user_id → 平台用户名映射（gitcode_user 优先，github_login 兜底）。
+
+    分块查询规避 SQLite 变量上限；返回 {user_id: name}（仅含有名字的行）。
+    """
+    cache: dict = {}
+
+    def _load(uids) -> dict:
+        todo = sorted({u for u in uids if u and u not in cache})
+        for i in range(0, len(todo), 500):
+            part = todo[i:i + 500]
+            _ph = ",".join("?" * len(part))
+            c.execute(
+                "SELECT user_id, COALESCE(NULLIF(gitcode_user,''),"
+                " NULLIF(github_login,'')) FROM unified_user_mapping"
+                f" WHERE user_id IN ({_ph}) AND user_id>0",
+                tuple(part))
+            for uid, name in c.fetchall():
+                if name:
+                    cache[uid] = name
+        return cache
+
+    return _load
+
+
+@router.get("/efficiency", operation_id="dashboard_efficiency", summary="Efficiency board",
+            description="Issue #1229: per-contributor aggregation for the current repo — "
+            "issues opened / completed (issue table, creator with assignee fallback) "
+            "plus LLM token usage attributed via task->issue creator chain "
+            "(obs_llm_usage run_kind='task'; total = input+output+cache_read+cache_write). "
+            "Bots and subtask rows are excluded; empty contributors = empty state.")
+def get_efficiency_board(repo: str = "", limit: int = 50,
+                         user: dict = Depends(require_org_member)):
+    """能效看板聚合端点：按当前仓库、按协作者输出提需求/完成/token 统计。
+
+    - 提需求/完成：`issue` 单表（Phase C3 权威，get_issue_stage 同源）；
+      归属人 = COALESCE(NULLIF(created_by,''), assignee)；完成 = status='completed'；
+      排除 bot 创建人与子任务行（is_subtask_mode=1，归属父需求）。
+    - token：`obs_llm_usage`（run_kind='task'）按 task_id SUM（五项 token 与
+      src/observability/tokens.py 同口径：total 不含 reasoning），经
+      `agent_tasks.issue_id` 回链 issue 创建人；孤儿任务（无 issue 行/归属 bot）丢弃。
+    - 仓库隔离：repo 支持 owner/repo 与 platform:owner/repo 两种入参，
+      双平台前缀（gitcode:/github:）同查；空 repo 返回空态（仓库维度视图）。
+    - 任何查询异常降级为该路径空结果（统计不拖垮页面），绝不向上抛。
+    """
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+
+    # repo 归一化：入参可带或不带平台前缀；统一双前缀候选（与 get_dashboard 口径一致）
+    repo_keys = []
+    repo_key_out = ""
+    if repo and repo.strip():
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_key_out = to_repo_key(_base)
+
+    out = {
+        "repo": repo_key_out,
+        "total_issues": 0,
+        "completed_issues": 0,
+        "total_tokens": 0,
+        "contributors": [],
+    }
+    if not repo_keys:
+        return out  # 未指定仓库：空态（不做全库聚合）
+
+    try:
+        from src.api.deps import check_repo_access
+        check_repo_access(user, repo_key_out)
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: repo access check failed: {e}")
+        raise
+
+    _rk_ph = ",".join("?" * len(repo_keys))
+    _bots = _efficiency_bot_usernames()
+
+    def _is_contributor(name: str) -> bool:
+        return (bool(name) and name != "unknown" and not _is_bot_name(name)
+                and name not in _bots)
+
+    # --- ① 提需求/完成数（issue 单表） ---
+    contrib: dict = {}   # user -> {issues, completed, input, output}
+    load_uid_names = None
+    try:
+        with db_lock:
+            c = db.cursor()
+            load_uid_names = _efficiency_uid_name_loader(c)
+            c.execute(
+                "SELECT COALESCE(NULLIF(created_by,''), '') AS creator,"
+                " COALESCE(assignee,'') AS assignee, COALESCE(user_id,0),"
+                " COUNT(*), SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)"
+                f" FROM issue WHERE repo_key IN ({_rk_ph}) AND is_subtask_mode=0"
+                " GROUP BY creator, assignee, COALESCE(user_id,0)",
+                tuple(repo_keys))
+            _rows = c.fetchall()
+            _uid_names = load_uid_names(r[2] for r in _rows)
+            for creator, assignee, uid, cnt, done in _rows:
+                name = creator.strip() or assignee.strip() or _uid_names.get(uid, "")
+                if not name:
+                    # 双空且 user_id 无映射 → 「未归属」档，计数可对账不丢数（Issue #1337 B）
+                    name = _UNASSIGNED_LABEL
+                elif not _is_contributor(name):
+                    continue
+                slot = contrib.setdefault(
+                    name, {"issues": 0, "completed": 0, "input": 0, "output": 0, "cache": 0})
+                slot["issues"] += int(cnt or 0)
+                slot["completed"] += int(done or 0)
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: issue aggregate failed: {e}")
+
+    # --- ② token 归属链：obs_llm_usage → agent_tasks.issue_id → issue 创建人 ---
+    try:
+        with db_lock:
+            c = db.cursor()
+            if load_uid_names is None:
+                load_uid_names = _efficiency_uid_name_loader(c)
+            # 先按任务聚合（行数=任务数，可控），task 行上带仓库与 issue_id
+            c.execute(
+                "SELECT u.task_id, SUM(u.input_tokens), SUM(u.output_tokens),"
+                " SUM(u.cache_read_tokens), SUM(u.cache_write_tokens)"
+                " FROM obs_llm_usage u WHERE u.run_kind='task'"
+                f" AND u.repo_key IN ({_rk_ph}) GROUP BY u.task_id",
+                tuple(repo_keys))
+            task_tokens = {
+                r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0), int(r[4] or 0))
+                for r in c.fetchall()
+            }
+            # 回链分块查询：SQLite 变量上限 999/32766 视版本，大仓库任务数可能超限
+            _task_items = list(task_tokens.items())
+            _chunk = 500
+            _task_rows = []   # (task_id, created_by, assignee, user_id, is_subtask_mode, issue_id)
+            for _i in range(0, len(_task_items), _chunk):
+                _part = _task_items[_i:_i + _chunk]
+                _t_ph = ",".join("?" * len(_part))
+                c.execute(
+                    "SELECT t.id, i.created_by, i.assignee,"
+                    " COALESCE(i.user_id, 0), i.is_subtask_mode, i.id"
+                    " FROM agent_tasks t LEFT JOIN issue i"
+                    " ON i.repo_key = t.repo_key AND i.issue_number ="
+                    " CAST(SUBSTR(t.issue_id, 2) AS INTEGER)"
+                    f" WHERE t.id IN ({_t_ph})",
+                    tuple(tid for tid, _ in _part))
+                _task_rows.extend(c.fetchall())
+            _uid_names = load_uid_names(r[3] for r in _task_rows)
+            for task_id, created_by, assignee, uid, is_sub, issue_id in _task_rows:
+                name = ((created_by or "").strip() or (assignee or "").strip()
+                        or _uid_names.get(uid or 0, ""))
+                if is_sub:
+                    continue  # 子任务行归属父需求
+                if not name:
+                    # 孤儿任务（LEFT JOIN 未命中、无 issue 行）→ 用量丢弃；
+                    # 命中行但归属全空（user_id NULL/0 无映射）→ 「未归属」档，
+                    # 口径同 issue 链 COALESCE(user_id,0)（Issue #1337 B）。
+                    if issue_id is None:
+                        continue
+                    name = _UNASSIGNED_LABEL
+                elif not _is_contributor(name):
+                    continue  # bot 的 issue：命中 issue 行但被 bot 规则排除 → 用量丢弃
+                slot = contrib.setdefault(
+                    name, {"issues": 0, "completed": 0, "input": 0, "output": 0, "cache": 0})
+                it, ot, cr, cw = task_tokens.get(task_id, (0, 0, 0, 0))
+                slot["input"] += it
+                # cache 读写计入 total（同 tokens.py 口径），保留独立缓存桶：
+                # 并入 output 桶会导致 output 列失真，故 total=input+output+cache。
+                slot["output"] += ot
+                slot["cache"] += cr + cw
+    except Exception as e:
+        log.warning(f"Dashboard efficiency: token aggregate failed: {e}")
+
+    # --- ③ 汇总排序（issues DESC, tokens DESC, user ASC）+ 截断 ---
+    rows = []
+    for name, d in contrib.items():
+        total = int(d["input"]) + int(d["output"]) + int(d.get("cache", 0))
+        rows.append({
+            "user": name,
+            "issues": int(d["issues"]),
+            "completed": int(d["completed"]),
+            "input_tokens": int(d["input"]),
+            "output_tokens": int(d["output"]),
+            "total_tokens": total,
+        })
+    rows.sort(key=lambda r: (-r["issues"], -r["total_tokens"], r["user"]))
+    try:
+        _limit = max(1, min(int(limit or 50), 200))
+    except (TypeError, ValueError):
+        _limit = 50
+    out["contributors"] = rows[:_limit]
+    out["total_issues"] = sum(r["issues"] for r in rows)
+    out["completed_issues"] = sum(r["completed"] for r in rows)
+    out["total_tokens"] = sum(r["total_tokens"] for r in rows)
+    return out
 
 
 @router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")
@@ -130,8 +365,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         repo_key = _repo_keys[0]
         _repo_filter = f" AND repo_key IN ({','.join('?' * len(_repo_keys))})"
         _repo_params = _repo_keys
-    # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=3600s=1h，22min 能在超时前预警）
-    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=22)).isoformat()
+    # stuck 阈值：running 超过统一超时配置的派生预警窗口（默认超时 3600s → 22min，
+    # 超时前预警；Issue #470 起随 RUNTIME_TASK_TIMEOUT 配置派生，不再写死 22min）
+    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_stuck_minutes())).isoformat()
 
     # 组织隔离：非个人组织只显示该组织的引擎/凭据
     from src.user.org_db import is_org_personal
@@ -456,7 +692,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
+                "rc.name AS rc_name, rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
                 "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error, "
                 "ar.org_id "
                 "FROM agent_runtimes ar "
@@ -466,7 +702,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 ([_filter_org_id] if _filter_org_id else [])
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rc_name, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）。
                 # Issue #417：吊销=物理删除凭据行，LEFT JOIN 得 NULL（cred_pk 为 None）
                 # 的孤儿 agent_runtimes 行同样跳过——否则已吊销设备在 runtime 表残留显示
@@ -545,9 +781,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                         "error": rprobe_error or "",
                     }
                 # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
-                _dev_name = rdev or ""
+                # 远端引擎 device_name = 凭据自定义名 rc.name 唯一来源（Issue #701 收口）：
+                # 为空下发空值，前端统一占位「未命名设备」，不回退边端自报 device_name
                 if (cid or 0) == 0:
                     _dev_name = rhost or "本机直连"
+                else:
+                    _dev_name = (rc_name or "").strip()
                 from src.runtime.instances import to_display as _td
                 runtime_list.append({
                     "id": rid, "name": _td(rname or ""), "status": rstatus or "offline",
@@ -614,6 +853,29 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             "list": worker_list,
         },
     }
+
+
+@router.get("/ops/engine-select-explain", operation_id="dashboard_ops_engine_select_explain",
+            summary="Engine selection explain", description="Issue #605: explain engine dispatch candidates "
+            "for a (repo, agent_type, scene) — bound engines, per-candidate filter reasons, "
+            "broadcast pool and legacy selection result. Read-only.")
+def get_engine_select_explain(repo: str = "", agent_type: str = "vod", scene_id: str = "",
+                              user: dict = Depends(require_org_member)):
+    """主控侧取证接口（Issue #605）：解释引擎派发候选与过滤原因（只读）。
+
+    - repo：仓库 repo_key（如 gitcode:owner/repo 或 owner/repo）
+    - agent_type：agent 角色（vod/coding/qa/sre/issue）
+    - scene_id：场景 ID（空则无场景绑定口径）
+    返回 explain_engine_selection 结果：bound_engine_ids / candidates（含 reasons）/
+    pool_engine_ids / selected。库内字段（healthy/online/last_seen）与 console 展示
+    不一致的核对可由 candidates 字段直接完成。
+    """
+    from src.runtime.engine_select import explain_engine_selection
+    try:
+        return {"ok": True, **explain_engine_selection(repo, agent_type, scene_id=scene_id)}
+    except Exception as e:
+        log.warning(f"Dashboard: engine-select-explain failed: {e}")
+        return {"ok": False, "error": str(e)[:200]}
 
 
 @router.get("/ops/probe-now", operation_id="dashboard_ops_probe_now")
@@ -1208,21 +1470,24 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 为每个 agent 附带场景信息（skill / enabled_in_scene / engine_runtime_ids）
     # engine_runtime_ids 只从场景 node 读取（为空 = 全广播/兜底）
     scene_by_agent = {n.get("tag") or n.get("id", ""): n for n in scene_nodes}
-    # 构建 skill_name → display_name 映射（官方 skill 优先）
-    skill_display_map = {}
-    try:
-        with db_lock:
-            c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
-            skill_display_map = {r[0]: r[1] or r[0] for r in c.fetchall()}
-    except Exception:
-        pass
+    # Issue #980：显示名解析统一走共用 skill_display 层（skill_id 优先 →
+    # (scope, skill_name) → user/repo 上下文 → official 兜底），三档同名技能
+    # 不再被 official 映射一律覆盖成官方名。
+    from src.api.skill_display import build_skill_display_map, resolve_node_skill_display
+    _uid_ctx = user.get("id", "")
+    skill_display_map = build_skill_display_map(repo_key=repo_key, user_id=_uid_ctx)
     for ag in agent_sessions:
         at = ag.get("agent_type", "")
         node = scene_by_agent.get(at)
         if node:
             _sk = node.get("skill", "")
             ag["skill"] = _sk
-            ag["skill_display_name"] = skill_display_map.get(_sk, _sk)
+            if _sk:
+                _sid = node.get("skill_id") or 0
+                ag["skill_display_name"] = resolve_node_skill_display(
+                    _sk, _sid, skill_display_map, repo_key=repo_key, user_id=_uid_ctx)
+            else:
+                ag["skill_display_name"] = ""
             ag["enabled_in_scene"] = node.get("enabled", True)
             ag["engine_runtime_ids"] = node.get("engine_runtime_ids", []) or []
         else:
@@ -1242,8 +1507,27 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     agent_engines = {}
     try:
         from src.runtime.engine_select import query_engines
-        from src.runtime.instances import instance_name
+        from src.runtime.instances import instance_name, to_display
         _uname = user.get("username") or ""
+
+        # Issue #1310：凭据名缓存（runtime_credentials.name），供 agent_engines 下拉展示
+        _cred_name_cache = {}
+        def _cred_name(_cid):
+            if not _cid:
+                return ""
+            if _cid in _cred_name_cache:
+                return _cred_name_cache[_cid]
+            _n = ""
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                    _r = c.fetchone()
+                    _n = (_r[0] or "") if _r else ""
+            except Exception:
+                _n = ""
+            _cred_name_cache[_cid] = _n
+            return _n
         for atype in all_types:
             # SRE 专属（sre-repo-worker-relax §1.3）：user + repo 两档
             # （global 池不放行：SRE 执行部署/运维命令，广播责任边界不清）
@@ -1256,7 +1540,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                            + query_engines(repo_key, "repo", agent_type=atype)
                            + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
-            from src.runtime.health import derive_runtime_health
+            from src.runtime.health import derive_runtime_health, derive_local_runtime_health
             import time as _time
             _now = _time.time()
             _seen_ids = set()
@@ -1272,8 +1556,20 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                 _deduped = [e for e in _deduped if (e.get("org_id") or 0) == _filter_org_id]
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
+                                     # Issue #1310：引擎显示名统一「引擎名（凭据名）」——
+                                     # engine_name 为引擎类型名（name 仍是 instance_name 标识）；
+                                     # worker_name 为凭据名（runtime_credentials.name），本机直连回退 host_name
+                                     "engine_name": to_display(e.get("name", "")),
+                                     "worker_name": ((e.get("host_name") or "") if (e.get("credential_id") or 0) == 0
+                                                     else _cred_name(e.get("credential_id") or 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
+                                     # Issue #592：本机直连（credential_id=0）不参与 worker 心跳，
+                                     # last_seen_at 仅由 10min 周期重探刷新——统一走远端心跳口径
+                                     # 会把探活间隔内的本机引擎误判 recently_lost（全显失联）。
+                                     # 本机直连按探活结果派生（与引擎页 _engine_health 口径一致）。
+                                     "status": (derive_local_runtime_health(bool(e.get("installed")), bool(e.get("healthy")))
+                                                if (e.get("credential_id") or 0) == 0
+                                                else derive_runtime_health(e["status"], e.get("last_seen_at"), _now)),
                                      "tags": e.get("tags", []),
                                      "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
@@ -1311,8 +1607,10 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             # Events/Week: 最近 7 天事件数
             # N1c 修复：原 datetime('now', '-7 days') 是 SQLite 私有函数变体（MySQL
             # 1064），改应用层预计算 cutoff + 标准参数化 SQL，双方言一致。
-            import time as _time
-            _week_cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 7 * 86400))
+            # Issue #1487 衍生修复：cutoff 必须走 db_now_str（存储层口径：MySQL=CST 墙钟 /
+            # SQLite=UTC），原先用 gmtime 的 UTC 字面量在 MySQL 下会多算 8 小时窗口。
+            from src.api.time_utils import db_now_str as _db_now_str
+            _week_cutoff = _db_now_str(-7 * 86400)
             c.execute(
                 "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= ?",
                 (_repo_keys[0], _repo_keys[1], _week_cutoff)

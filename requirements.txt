@@ -8,7 +8,7 @@
 # 国内镜像加速：
 #   .venv/bin/pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 #
-# Python 版本要求：主服务 >= 3.9，devbox sandbox 需 >= 3.10
+# Python 版本要求：>= 3.10（主服务与 devbox sandbox 一致；低于 3.10 启动将显式提示并退出）
 paramiko>=3.0
 markdown>=3.4
 lark-oapi>=1.0
@@ -17,6 +17,7 @@ fastapi>=0.100
 uvicorn>=0.23
 python-multipart>=0.0.9
 aiohttp>=3.9
+requests>=2.31
 websockets>=12.0
 pymysql>=1.1
 DBUtils>=3.0
@@ -26,6 +27,7 @@ bcrypt>=4.0
 prometheus_client>=0.20
 psutil>=5.9
 croniter>=3.0
+httpx>=0.27
 # DevBox cloud sandbox SDK (optional — install to enable devbox sandbox provider)
 # Install from source: pip install /path/to/devspace-devbox/python-sdk
 # Or: pip install devbox-sdk (when published to PyPI)

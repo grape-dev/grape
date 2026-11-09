@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import log
 from src.observability import alert_policy as _policy
+from src.runtime.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
 # ===== 种子规则 =====
 # 7 条与 deploy/alerts.yml 一一对应（seed_source 记原名）；后 3 条是 P1-3 新增的
@@ -42,6 +43,13 @@ SEED_RULES: List[Dict[str, Any]] = [
         "comparator": "gt", "threshold": 0.5, "window_sec": 300, "for_sec": 300,
         "severity": "warning", "seed_source": "GrapeTaskFailureRateHigh",
         "description": "近 5 分钟终态任务失败率超过 50%",
+    },
+    # Issue #516 M3：超时失败聚合告警——识别易超时仓库/场景（长任务需拆分或上调超时配置）
+    {
+        "name": "task_timeout", "kind": "metric", "level": "user", "metric": "task_timeout",
+        "comparator": "gt", "threshold": 0, "window_sec": 600, "for_sec": 300,
+        "severity": "warning", "seed_source": "GrapeTaskTimeout",
+        "description": "近 10 分钟有任务因超时被强制失败（timed out after），建议预拆分长任务或上调该 skill/仓库超时配置",
     },
     {
         "name": "task_queue_backlog", "kind": "metric", "level": "user", "metric": "task_queued",
@@ -98,6 +106,23 @@ SEED_RULES: List[Dict[str, Any]] = [
         "severity": "warning", "seed_source": "GrapeTaskSuccessRateDrop",
         "description": "任务成功率环比上一窗口下跌超过 20 个百分点"
                        "（两个 30 分钟窗口各需 ≥3 个终态任务，样本不足不出指标）",
+    },
+    # ----- Issue #463 P3：agent_tasks 表体积治理指标 -----
+    {
+        "name": "agent_tasks_rows_high", "kind": "metric", "level": "platform",
+        "metric": "agent_tasks_rows",
+        "comparator": "gt", "threshold": 500000, "window_sec": 3600, "for_sec": 0,
+        "severity": "warning", "seed_source": "GrapeAgentTasksRowsHigh",
+        "description": "agent_tasks 表行数超过 50 万"
+                       "（Issue #463：90 天终态删行后应回落，持续超限说明删行未生效）",
+    },
+    {
+        "name": "agent_tasks_size_high", "kind": "metric", "level": "platform",
+        "metric": "agent_tasks_mb",
+        "comparator": "gt", "threshold": 2048, "window_sec": 3600, "for_sec": 0,
+        "severity": "warning", "seed_source": "GrapeAgentTasksSizeHigh",
+        "description": "agent_tasks 表体积超过 2GB"
+                       "（Issue #463：7 天置空大字段 + 90 天删行后应回落）",
     },
 ]
 
@@ -351,6 +376,23 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                 m["_done"] += cnt
                 if (status or "").lower() != "completed":
                     m["_bad"] += cnt
+            # ②b Issue #516 M3：超时失败计数（worker 超时 kill 上报的
+            # "timed out after" 签名，PR #722 起常量集中在 task_timeout.py），
+            # 按仓库聚合供 task_timeout 告警规则消费
+            _to_sig = f"%{_TIMEOUT_FAIL_SIGNATURE}%"
+            c.execute(
+                "SELECT repo_key, COUNT(*) FROM agent_tasks"
+                " WHERE repo_key IS NOT NULL AND repo_key != ''"
+                "   AND status='failed'"
+                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+                "   AND (result_text LIKE ? OR errors LIKE ?)"
+                " GROUP BY repo_key", (fail_cutoff, _to_sig, _to_sig,))
+            for repo_key, n in c.fetchall():
+                m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
+                                              "_done": 0.0, "_bad": 0.0,
+                                              "_mut0_tot": 0.0, "_mut0_bad": 0.0,
+                                              "_mut1_tot": 0.0, "_mut1_bad": 0.0})
+                m["task_timeout"] = m.get("task_timeout", 0.0) + float(n or 0)
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数
             c.execute(
                 "SELECT repo_key, status,"
@@ -481,6 +523,36 @@ def _platform_metrics() -> Dict[str, float]:
             _baseline["http"] = (now_ts, tot, c5x)
     except Exception as e:
         log.debug(f"obs platform http metrics skipped: {e}")
+
+    # Issue #463 P3：agent_tasks 表体积指标（行数 + MB，供 agent_tasks_rows_high /
+    # agent_tasks_size_high 告警求值）。体积口径：MySQL 用 information_schema 精确值；
+    # SQLite 无单表统计，用 page_count×page_size 整库体积作上界参考（测试/单机部署）。
+    try:
+        from src.session_manager import _is_mysql_backend, db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM agent_tasks")
+            vals["agent_tasks_rows"] = float(c.fetchone()[0] or 0)
+        if _is_mysql_backend():
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT (DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024"
+                    " FROM information_schema.TABLES"
+                    " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agent_tasks'")
+                r = c.fetchone()
+            if r and r[0] is not None:
+                vals["agent_tasks_mb"] = round(float(r[0]), 2)
+        else:
+            with db_lock:
+                c = db.cursor()
+                c.execute("PRAGMA page_count")
+                pc = c.fetchone()[0]
+                c.execute("PRAGMA page_size")
+                ps = c.fetchone()[0]
+            vals["agent_tasks_mb"] = round((pc or 0) * (ps or 0) / 1024 / 1024, 2)
+    except Exception as e:
+        log.warning(f"obs platform agent_tasks metrics failed: {e}")
 
     return vals
 

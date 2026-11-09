@@ -267,6 +267,32 @@ def test_overview_trends_from_rollup_and_fallback():
     assert ov2["charts"]["source"] == "live", "无 rollup 数据应回退直查"
 
 
+def test_overview_rollup_exception_falls_back_to_live(monkeypatch):
+    """rollup 聚合查询抛异常时，降级分支应记录 warning 并回退 live，而非 NameError/500。"""
+    from src.observability import overview
+    from src.session_manager import db, db_lock
+
+    _grant(REPO)
+    user = {"id": UID, "username": "roll-tester", "org_id": 0, "org_role": "owner"}
+    _clean()
+    base = _now().replace(second=0, microsecond=0) - timedelta(minutes=10)
+    mr.write_bucket(mr.RES_MINUTE, base, {mr._repo_dim(REPO): {
+        "task_done": (2.0, 2), "task_failed": (1.0, 1), "token_input": (500.0, 2)}})
+
+    import src.observability.metric_rollup as mr_mod
+    orig = mr_mod.overview_trends
+
+    def boom(*a, **k):
+        raise RuntimeError("rollup table locked")
+
+    monkeypatch.setattr(mr_mod, "overview_trends", boom)
+    ov = overview.build_overview(user, range_str="1h")
+    assert ov["charts"]["source"] == "live", "rollup 异常应回退 live 直查"
+    assert "charts" in ov
+
+    monkeypatch.setattr(mr_mod, "overview_trends", orig)
+
+
 def _grant(repo_key):
     from src.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")

@@ -5,6 +5,7 @@
 
 参见 docs/weekly-02/issue-49-multi-vcs-extension-design.md §3.1
 """
+from src.config import log
 
 # === Issue 事件 ===
 ISSUE_OPENED    = "issue_opened"
@@ -31,6 +32,11 @@ BUILD_START     = "build_start"
 BUILD_FAILURE   = "build_failure"
 DEPLOY_START    = "deploy_start"
 DEPLOY_FINISH   = "deploy_finish"
+
+# === 派发前错误事件（Issue #657）===
+# 派发前技能解析失败（如 repo 级场景引用 user 级技能，scope 不匹配）→
+# 立即产生该错误事件（status=failed）并阻断派发，替代 pending_self_report 1800s 超时
+SKILL_RESOLVE_FAILED = "skill_resolve_failed"
 
 # 所有需要阶段矩阵路由的事件
 ROUTABLE_EVENTS = {
@@ -75,6 +81,9 @@ CHANGES_KEY_MAP = {
     "assignee_id": "assignees",
     "assignee_ids": "assignees",
 }
+# 注意：files / deleted_files / changed_files 不在此折叠为同一 canonical 键。
+# 多个文件维度键同时出现时后写会覆盖前值（Issue #996 复审），统一交给
+# normalize_files() 逐桶归一并保留 added/modified/deleted 三个维度。
 
 
 def normalize_changes(raw_changes: dict) -> dict:
@@ -86,3 +95,201 @@ def normalize_changes(raw_changes: dict) -> dict:
         canonical_key = CHANGES_KEY_MAP.get(k, k)
         result[canonical_key] = v
     return result
+
+
+# === 文件级变更清单（Issue #996）===
+# 需要携带 files{added,modified,deleted} 的事件类型：产物清理/自动合入前清理
+# 事件都落在这三类上（push、PR merged、PR updated）。
+FILE_EVENT_TYPES = {PUSH, PR_MERGED, PR_UPDATED}
+
+# added/modified 单桶上限；deleted 永不截断（审计需要完整删除路径，
+# 见 Issue #996 AC：truncated=true 但 deleted 全量保留）。
+FILES_BUCKET_LIMIT = 200
+
+_STATUS_ADDED = {"added", "created", "new", "add", "create", "A"}
+_STATUS_MODIFIED = {"modified", "changed", "updated", "edit", "modify", "M", "R", "renamed"}
+_STATUS_DELETED = {"removed", "deleted", "delete", "D"}
+
+
+def _file_path(item) -> str:
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("path") or item.get("filename") or item.get("name")
+               or item.get("new_path") or "")
+
+
+def _file_entry(item) -> dict:
+    """文件条目统一为 {"path": str, "sha": optional}。"""
+    path = _file_path(item)
+    if not path:
+        return {}
+    entry = {"path": path}
+    if isinstance(item, dict):
+        sha = item.get("sha") or item.get("id") or item.get("blob_id")
+        if sha:
+            entry["sha"] = sha
+    return entry
+
+
+def _append_unique(bucket: list, entry: dict, seen: set) -> None:
+    path = entry.get("path")
+    if not path or path in seen:
+        return
+    seen.add(path)
+    bucket.append(entry)
+
+
+def _collect_from_commit(commit: dict, added, modified, deleted,
+                         seen_added, seen_modified, seen_deleted) -> None:
+    for key in ("added", "new", "added_files"):
+        for item in commit.get(key) or []:
+            _append_unique(added, _file_entry(item), seen_added)
+    for key in ("modified", "changed", "modified_files"):
+        for item in commit.get(key) or []:
+            _append_unique(modified, _file_entry(item), seen_modified)
+    for key in ("removed", "deleted", "deleted_files"):
+        for item in commit.get(key) or []:
+            _append_unique(deleted, _file_entry(item), seen_deleted)
+
+
+def _collect_from_file_item(item: dict, added, modified, deleted,
+                            seen_added, seen_modified, seen_deleted) -> None:
+    status = str(item.get("status") or item.get("change_type") or "").lower()
+    entry = _file_entry(item)
+    if not entry:
+        return
+    old_guess = item.get("old_path") or item.get("previous_filename") or ""
+    if old_guess and old_guess != entry.get("path"):
+        _append_unique(deleted, {"path": old_guess}, seen_deleted)
+        _append_unique(added, entry, seen_added)
+        return
+    if status in _STATUS_DELETED or item.get("deleted_file") is True:
+        _append_unique(deleted, entry, seen_deleted)
+    elif status in _STATUS_ADDED or item.get("new_file") is True:
+        _append_unique(added, entry, seen_added)
+    elif status in _STATUS_MODIFIED or item.get("renamed_file") is True:
+        # rename：旧路径进 deleted，新路径进 added，保证删除清单可用于守卫预检
+        old = item.get("old_path") or item.get("previous_filename") or ""
+        if old:
+            _append_unique(deleted, {"path": old}, seen_deleted)
+            _append_unique(added, entry, seen_added)
+        else:
+            _append_unique(modified, entry, seen_modified)
+    else:
+        _append_unique(modified, entry, seen_modified)
+
+
+def _collect_normalized(source, added, modified, deleted,
+                        seen_added, seen_modified, seen_deleted) -> None:
+    # 三个桶各用独立 seen：同一路径在 add/modify→delete 的多次 commit 中
+    # 必须分别保留，deleted 不得因前序 added/modified 去重被吞掉（Issue #996 AC）。
+    for key, bucket, seen in (("added", added, seen_added),
+                              ("modified", modified, seen_modified),
+                              ("deleted", deleted, seen_deleted)):
+        values = source.get(key)
+        if isinstance(values, list):
+            for item in values:
+                _append_unique(bucket, _file_entry(item), seen)
+
+
+def normalize_files(source, limit: int = FILES_BUCKET_LIMIT) -> dict:
+    """把各平台 payload / commits / files 归一为 files{added,modified,deleted}。
+
+    支持输入：
+    - dict 已含 added/modified/deleted（幂等复用）；
+    - webhook payload（含 commits / files / changes）；
+    - list（commit 列表或 file 列表）。
+
+    返回 {"added": [{"path",...}], "modified": [...], "deleted": [...],
+          "truncated": bool}。deleted 全量保留；仅 added/modified 受 limit 截断。
+    """
+    added: list = []
+    modified: list = []
+    deleted: list = []
+    seen_added: set = set()
+    seen_modified: set = set()
+    seen_deleted: set = set()
+    try:
+        if isinstance(source, list):
+            for item in source:
+                if not isinstance(item, dict):
+                    continue
+                if any(k in item for k in ("added", "modified", "removed", "deleted")):
+                    _collect_from_commit(item, added, modified, deleted,
+                                         seen_added, seen_modified, seen_deleted)
+                else:
+                    _collect_from_file_item(item, added, modified, deleted,
+                                            seen_added, seen_modified, seen_deleted)
+        elif isinstance(source, dict):
+            _collect_normalized(source, added, modified, deleted,
+                                seen_added, seen_modified, seen_deleted)
+            # 顶层 *files 别名（Issue #996 复审）：deleted_files / changed_files
+            # 不依赖 normalize_changes 折叠，normalize_files 直接识别。
+            _collect_normalized(
+                {"added": source.get("added_files"),
+                 "modified": source.get("changed_files") or source.get("modified_files"),
+                 "deleted": source.get("deleted_files")},
+                added, modified, deleted,
+                seen_added, seen_modified, seen_deleted)
+            for item in source.get("commits") or source.get("commits_list") or []:
+                if isinstance(item, dict):
+                    _collect_from_commit(item, added, modified, deleted,
+                                         seen_added, seen_modified, seen_deleted)
+            for _obj_key in ("pull_request", "merge_request"):
+                _pr_obj = source.get(_obj_key)
+                if isinstance(_pr_obj, dict) and isinstance(_pr_obj.get("files"), list):
+                    for item in _pr_obj["files"]:
+                        if isinstance(item, dict):
+                            _collect_from_file_item(item, added, modified, deleted,
+                                                    seen_added, seen_modified, seen_deleted)
+            files = source.get("files")
+            if isinstance(files, dict):
+                # 幂等复用已归一化形态 payload.files
+                _collect_normalized(files, added, modified, deleted,
+                                    seen_added, seen_modified, seen_deleted)
+            elif isinstance(files, list):
+                for item in files:
+                    if isinstance(item, dict):
+                        _collect_from_file_item(item, added, modified, deleted,
+                                                seen_added, seen_modified, seen_deleted)
+                    elif isinstance(item, str):
+                        _append_unique(modified, {"path": item}, seen_modified)
+            changes = source.get("changes")
+            if isinstance(changes, list):
+                for item in changes:
+                    if isinstance(item, dict):
+                        _collect_from_file_item(item, added, modified, deleted,
+                                                seen_added, seen_modified, seen_deleted)
+            elif isinstance(changes, dict):
+                # 文件维度键可能位于 changes 内部（不折叠为同一键）
+                _collect_normalized(
+                    {"added": changes.get("added_files") or changes.get("added"),
+                     "modified": changes.get("changed_files") or changes.get("modified"),
+                     "deleted": changes.get("deleted_files") or changes.get("deleted")},
+                    added, modified, deleted,
+                    seen_added, seen_modified, seen_deleted)
+            # GitLab MR / GitCode diff：object_attributes.changes（dict 形态）
+            oa = source.get("object_attributes")
+            if isinstance(oa, dict) and isinstance(oa.get("changes"), list):
+                for item in oa["changes"]:
+                    if isinstance(item, dict):
+                        _collect_from_file_item(item, added, modified, deleted,
+                                                seen_added, seen_modified, seen_deleted)
+    except Exception as e:
+        log.warning(f"normalize_files failed: {e}")
+
+    truncated = len(added) > limit or len(modified) > limit
+    return {
+        "added": added[:limit],
+        "modified": modified[:limit],
+        "deleted": deleted,
+        "truncated": truncated,
+    }
+
+
+def has_file_changes(files: dict) -> bool:
+    if not isinstance(files, dict):
+        return False
+    return bool(files.get("added") or files.get("modified") or files.get("deleted"))

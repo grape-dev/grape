@@ -344,22 +344,17 @@ def _availability_raw_buckets(start: datetime, end: datetime
 
 def _availability_buckets(start: datetime, end: datetime,
                           not_before: Optional[datetime] = None
-                          ) -> List[Tuple[str, float, float]]:
-    """引擎可用率：(桶, 在线采样数, 总采样数)。**读小时桶 rollup，不再全窗扫原始表**（Issue #437）。
+                          ) -> Tuple[List[Tuple[str, float, float]], int]:
+    """引擎可用率：(桶, 在线采样数, 总采样数) + 回填 pending 小时数。
 
-    数据源分段（Issue #437）：
-    - 完整闭合小时桶 → `obs_metric_rollup` 的 `engine_avail_online/total` 预聚合
-      （由 60s 聚合循环追赶式回填 30 天）；
-    - **部分回填期**：窗口内已有部分 `engine_avail_*` 桶时，缺失的闭合小时**不静默丢弃**
-      （窗口截断 → budget_total 骤减 → 可能瞬时误报 breached），逐段回退有界原始扫描；
-    - 窗口起点落在小时中段 → 头部不完整小时（bucket_start < start，rollup 序列不含）
-      有界现算该小段，口径与旧原始扫描一致；
-    - 头部小段 / 缺失回填段与 rollup 行**合并后统一按桶时间排序**返回（`burn_series`
-      按序累计，坏桶消耗必须出现在曲线的正确位置）；
-    - 当前未闭合桶 → 原始表现算，**有界仅本小时**；
-    - rollup 一行 availability 都没有（升级初期）→ 回退旧的全窗原始扫描 + 日志，
-      口径与改动前完全一致，回填完成后自动走预聚合路径（两级回退：部分回填逐段回退 +
-      完全无数据全窗回退）。
+    **读小时桶 rollup，不在请求进程做缺失段 raw-scan 回填（Issue #544 L1）**：
+    - 完整闭合小时桶 → `obs_metric_rollup` 的 `engine_avail_online/total` 预聚合；
+    - 缺失闭合小时（停机窗口/零样本小时）→ **转后台限流队列离线补齐**
+      （`src.observability.slo_backfill`），本次评估不计入预算、不计为坏桶
+      （避免窗口截断误报 breached），缺失数经 `compute()` 以
+      `avail_backfill_pending_hours` 透出；补齐后自动回到预聚合路径；
+    - 窗口起点落在小时中段 → 头部不完整小时有界现算（分钟级数据量）；
+    - 当前未闭合桶 → 有界现算（仅本小时）。
 
     `not_before`：`online` 列上线前的历史行是"未知"（建列默认 0），把它们当"离线"会把可用率
     长期按 0 算（真机实测：加列当天 L2 可用率 = 0% → 误报违约）。因此可用率**只从该 SLO 的
@@ -368,10 +363,11 @@ def _availability_buckets(start: datetime, end: datetime,
     if not_before and not_before > start:
         start = not_before
     if start >= end:
-        return []
+        return [], 0
     cur_hour = end.replace(minute=0, second=0, microsecond=0)
     closed_end = min(end, cur_hour)
     out: List[Tuple[str, float, float]] = []
+    pending_hours = 0
     if closed_end > start:
         # rollup 小时桶只对应"完整闭合小时"（bucket_start >= h1）；窗口头部不完整小时单独现算
         h1 = start.replace(minute=0, second=0, microsecond=0)
@@ -393,38 +389,68 @@ def _availability_buckets(start: datetime, end: datetime,
                         rollup_rows.append((b, on.get(b, 0.0), t))
             except Exception as e:
                 log.warning(f"slo availability rollup read failed: {e}")
-        if rollup_rows:
+        # 覆盖判定按"engine_avail 行存在"（total=0 的覆盖标记行也算），不是 t>0 的行——
+        # 零样本小时无 t>0 行，按后者判会永远"缺失"、每次评估重复 raw-scan（#544 断链根因）
+        covered = _engine_avail_covered_hours(h1, closed_end)
+        if covered:
             out.extend(rollup_rows)
             # 窗口头部不完整小时（bucket_start < start，rollup 序列不含）：有界现算这一小段
             if h1 > start:
                 out.extend(_availability_raw_buckets(start, h1))
-            # 部分回填期（审查修复）：缺失的闭合小时回退有界原始扫描，连续缺失段合并为一次查询
-            covered = {b for b, _, _ in rollup_rows}
-            missing: List[datetime] = []
-            h = h1
-            while h < closed_end:
-                if _iso(h) not in covered:
-                    missing.append(h)
-                h += timedelta(hours=1)
+            # 缺失闭合小时：转后台限流回填，本次不扫库不计预算（Issue #544 L1）
+            missing = [h for h in _iter_closed_hours(h1, closed_end)
+                       if _iso(h) not in covered]
             if missing:
-                seg_start = missing[0]
-                for prev, cur in zip(missing, missing[1:] + [None]):
-                    if cur is None or cur != prev + timedelta(hours=1):
-                        out.extend(_availability_raw_buckets(seg_start,
-                                                             prev + timedelta(hours=1)))
-                        seg_start = cur
-                log.warning(f"slo availability: {len(missing)} closed hour(s) missing from"
-                            f" rollup (partial backfill), raw-scan backfill applied")
-            # 头部小段/回填段追加在 rollup 行之后会破坏时间有序（burn_series 按序累计）
-            # → 合并后统一按桶时间排序（审查修复）
+                pending_hours = len(missing)
+                try:
+                    from src.observability import slo_backfill
+                    slo_backfill.schedule(missing[0], missing[-1] + timedelta(hours=1))
+                    log.info(f"slo availability: {len(missing)} closed hour(s) missing from"
+                             f" rollup, background backfill scheduled (Issue #544 L1)")
+                except Exception as e:
+                    log.warning(f"slo availability: schedule backfill failed: {e}")
+            # 头部小段与 rollup 行合并后统一按桶时间排序（burn_series 按序累计）
             out.sort(key=lambda r: r[0])
         else:
-            log.warning("slo availability: no engine_avail_* rollup rows yet, "
-                        "fallback to raw full-window scan (upgrade/backfill window)")
-            out.extend(_availability_raw_buckets(start, closed_end))
+            # 升级/停机窗口（一行 engine_avail 都没有）：同样转后台，不做全窗同步扫描
+            pending_hours = max(0, int((closed_end - h1).total_seconds() // 3600))
+            try:
+                from src.observability import slo_backfill
+                slo_backfill.schedule(h1, closed_end)
+                log.warning("slo availability: no engine_avail_* rollup rows yet,"
+                            " background backfill scheduled (Issue #544 L1)")
+            except Exception as e:
+                log.warning(f"slo availability: schedule backfill failed: {e}")
     # 当前未闭合桶：有界现算（仅本小时，分钟级数据量）
     if end > cur_hour:
         out.extend(_availability_raw_buckets(max(start, cur_hour), end))
+    return out, pending_hours
+
+
+def _iter_closed_hours(h1: datetime, closed_end: datetime) -> List[datetime]:
+    h = h1
+    out: List[datetime] = []
+    while h < closed_end:
+        out.append(h)
+        h += timedelta(hours=1)
+    return out
+
+
+def _engine_avail_covered_hours(h1: datetime, closed_end: datetime) -> set:
+    """窗口内已有 `engine_avail_total`（global, hour）行的桶集合（行存在=已覆盖）。"""
+    from src.session_manager import db, db_lock
+    out: set = set()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT DISTINCT bucket_start FROM obs_metric_rollup"
+                " WHERE resolution='hour' AND metric='engine_avail_total' AND dim_key='global'"
+                " AND bucket_start >= ? AND bucket_start < ?",
+                (_iso(h1), _iso(closed_end)))
+            out = {r[0] for r in c.fetchall()}
+    except Exception as e:
+        log.warning(f"slo availability covered query failed: {e}")
     return out
 
 
@@ -461,7 +487,10 @@ def compute(slo: Dict[str, Any], dim_keys: List[str], now: Optional[datetime] = 
             reason = "l2_only"
         else:
             nb = _dt(slo.get("created_at"))
-            buckets = _availability_buckets(start, end, not_before=nb)
+            buckets, _avail_pending = _availability_buckets(start, end, not_before=nb)
+            if _avail_pending:
+                # Issue #544 L1：缺失闭合小时转后台回填，缺失数透出（不截断预算误报）
+                extra["avail_backfill_pending_hours"] = _avail_pending
     else:
         reason = "unknown_sli"
 

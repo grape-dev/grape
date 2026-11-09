@@ -45,13 +45,14 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
 
     本地引擎走 localhost 直连，避免 NAT 回环不通
     （服务端无法通过自己的公网 IP 访问自己）；
-    远程 worker 走 meta.server_base_url（公网地址）。
+    远程 worker 走 worker 回连地址（Issue #471 E1：worker_connect_url，
+    未配置回退 server_base_url）。
 
     判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
     """
     try:
-        from src.user.db import get_server_base_url
-        public_url = get_server_base_url()
+        from src.user.db import get_worker_connect_url
+        public_url = get_worker_connect_url()
         if runtime_id and runtime_id > 0:
             from src.session_manager import db, db_lock
             with db_lock:
@@ -80,6 +81,9 @@ _PROJECT_INFO_SUMMARY_CHARS = 400
 _KNOWLEDGE_INJECT_MAX_CHARS = 8000
 
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
+
+# 注：判重规则的 prompt 文本已按运维决定移除（不改自动化任务/分诊的 prompt）；
+# 代码侧门禁见 scheduler.dedup_auto_merge_allowed 与 routes/autopilot._dedup_dispatch_guard。
 
 
 def _build_project_info_section(repo_key: str, agent_type: str = "",
@@ -738,6 +742,31 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         if body != '""':
             parts.append(f"Body: {body}")
 
+    # Issue #996：变更类事件输出被删文件清单，供 QA 增量复核（避免全量重审）
+    _files = payload.get("files") if isinstance(payload, dict) else None
+    if isinstance(_files, dict) and (
+            _files.get("added") or _files.get("modified") or _files.get("deleted")):
+        def _paths(_items, limit=None):
+            picked = (_items or [])[:limit] if limit else (_items or [])
+            return ", ".join(
+                (it.get("path") if isinstance(it, dict) else str(it))
+                for it in picked)
+        parts.append("\n## Changed Files")
+        # deleted 全量展示（审计/守卫预检需要完整删除路径，不受 [:50] 截断）
+        if _files.get("deleted"):
+            parts.append(f"- Deleted ({len(_files['deleted'])}): {_paths(_files['deleted'])}")
+        if _files.get("added"):
+            parts.append(f"- Added ({len(_files['added'])}): {_paths(_files['added'], 50)}")
+        if _files.get("modified"):
+            parts.append(f"- Modified ({len(_files['modified'])}): {_paths(_files['modified'], 50)}")
+        if _files.get("truncated"):
+            parts.append("- Note: added/modified lists are truncated; deleted paths are complete.")
+        _gi = payload.get("guard_impact") if isinstance(payload, dict) else None
+        if isinstance(_gi, dict) and _gi.get("breaking"):
+            parts.append(f"- Guard impact: {', '.join(_gi.get('scripts') or [])} "
+                         f"reference deleted paths; cleanup was skipped (breaking=true).")
+        parts.append("Review focus: only re-check guard scripts related to the changed files above.")
+
     # PR 订阅场景提示
     if evt.get("_pr_sub_scene_id"):
         parts.append(f"\n## PR 审查任务\n本任务来自 PR 订阅场景，PR 无关联 Issue。请审查 PR #{number} 的变更内容，结果回帖到 PR 评论。")
@@ -818,8 +847,13 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         parts.append(
             f"## Skill: {skills[0]}\n"
             f"Skill file: {_sp}\n"
+            f"Skill content location: DEVOPS_SKILLS_DIR environment variable points to the "
+            f"same directory as {{{{SKILL_DIR}}}}; layout: {skills[0]}/SKILL.md (main) plus "
+            f"{skills[0]}/references/ files under the same directory.\n"
             f"**MANDATORY**: Read this SKILL.md with the read tool and strictly follow its instructions (do not skip reading or guess from the name).\n"
             f"If the SKILL.md instructs reading reference files under references/, read them as needed before you proceed.\n"
+            f"If the skill directory is empty or files are missing (degraded delivery, see [Skill Materialization Notice] if present), "
+            f"fetch the skill content via `grape skills detail` or the platform skills API instead of proceeding without the skill.\n"
             f"Execute the instructions directly - do not analyze or propose; just execute."
         )
 

@@ -21,7 +21,13 @@
     "download_template": "📄 下载技能模板 ZIP",
     "back_to_library": "返回 Skills Library",
     "back_to_huawei": "返回华为云技能包",
-    "download_skill_title": "下载技能包 zip"
+    "download_skill_title": "下载技能包 zip",
+    "update_skill": "上传更新",
+    "confirm_update": "确认覆盖更新"
+  },
+  "update": {
+    "title": "上传更新技能",
+    "tip": "上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致"
   },
   "toast": {
     "sync_found": "发现新增官方技能，已同步",
@@ -43,7 +49,9 @@
     "already_experienced": "您已体验过该场景",
     "experience_failed": "体验失败",
     "like_failed": "点赞失败",
-    "like_success": "操作成功"
+    "like_success": "操作成功",
+    "update_success": "更新成功",
+    "update_failed": "更新失败"
   },
   "empty": {
     "no_repo_selected": "未选择仓库，请先在仓库页面选择当前仓库。",
@@ -179,6 +187,9 @@
   "toast.upload_failed": "上传失败：{msg}",
   "toast.upload_success": "上传成功",
   "apply_confirm_title": "确认覆盖应用",
+  "apply_scene_name_label": "场景名称",
+  "apply_scene_name_empty": "场景名称不能为空",
+  "apply_scene_name_conflict_inline": "仓库中已有同名场景，请换个名称",
   "apply_confirm_desc": "当前仓库已应用过此场景",
   "apply_confirm_warning": "再次应用将覆盖更新已有的场景配置。",
   "apply_confirm_btn": "确认覆盖",
@@ -232,5 +243,14 @@
   "converting": "转换中...",
   "scene_detail": "查看详情",
   "scene_params": "场景参数",
-  "scene_params_hint": "应用场景时需配置，Agent 将通过环境变量读取"
+  "scene_params_hint": "应用场景时需配置，Agent 将通过环境变量读取",
+  "hw_creds_hint": "☁ 华为云场景需要 AK/SK 凭证，可在下方直接填写。已配置的凭据不会在页面回显，可在个人设置中管理。",
+  "hw_creds_go_settings": "前往设置",
+  "hw_creds_configured": "✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）",
+  "action.update_skill": "上传更新",
+  "action.confirm_update": "确认覆盖更新",
+  "update.title": "上传更新技能",
+  "update.tip": "上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致",
+  "toast.update_success": "技能更新成功",
+  "toast.update_failed": "更新失败: {{msg}}"
 }

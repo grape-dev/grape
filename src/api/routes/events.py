@@ -11,6 +11,41 @@ from src.token_service import is_auth_401_error
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
+def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
+                         task_id: str = ""):
+    """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
+
+    追加 admin_action 审计事件（status=completed，不参与业务流转，仅留痕）。
+    失败不影响主操作（吞异常 + 日志）。
+    """
+    try:
+        from datetime import datetime, timezone
+        from src.api.event_store import append_event
+        _actor = (user or {}).get("username", "") or "unknown"
+        _ts = datetime.now(timezone.utc).isoformat()
+        append_event(
+            repo_key=repo_key,
+            event_type="admin_action",
+            title=f"Admin {action}: event #{target_seq}",
+            issue_id="",
+            agent_type="",
+            source="admin",
+            actor=_actor,
+            summary=f"管理员 {_actor} 对事件 #{target_seq} 执行 {action}"
+                    + (f"（关联任务 {task_id}）" if task_id else ""),
+            payload={
+                "action": action,
+                "actor": _actor,
+                "time": _ts,
+                "target_event_seq": target_seq,
+                "target_task_id": task_id,
+            },
+            status="completed",
+        )
+    except Exception as e:
+        log.warning(f"_audit_admin_action failed ({action} event #{target_seq}): {e}")
+
+
 @router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.session_manager import db, db_lock
@@ -67,6 +102,21 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #574：Skill 展示改 display_name（与场景选择处同款查询条件；display_name 为空时前端回退 Skill ID）
+    _skill_display_name = ""
+    try:
+        if row[13]:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                    (row[13],))
+                _sr = _c.fetchone()
+            if _sr and _sr[0]:
+                _skill_display_name = _sr[0]
+    except Exception:
+        pass
+    result["skill_display_name"] = _skill_display_name
     # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
     _structured_raw = row[20] if len(row) > 20 else None
     _structured = None
@@ -166,14 +216,16 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                         runtime_id = sr[0]
             if runtime_id:
                 c2.execute(
-                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                     "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
                     (runtime_id,))
                 ar = c2.fetchone()
                 if ar:
+                    # Issue #701：engine_device 下发凭据自定义名 rc.name；
+                    # engine_instance 派生仍用 device_name（实例唯一名标识符，供 resolve 匹配）
                     engine_instance = instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0)
-                    engine_device = ar[2] or ""
-                    engine_ip = ar[3] or ""
+                    engine_device = ar[3] or ""
+                    engine_ip = ar[4] or ""
             if not engine_instance and row[12]:
                 # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
                 # Issue #285 + C 方案：runtime_id=0 说明无任何真实绑定（未派发/未认领），
@@ -208,22 +260,23 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     if _resolved_rid:
                         runtime_id = _resolved_rid
                         c2.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
                             (_resolved_rid,))
                         ar2 = c2.fetchone()
                     else:
                         # 回退：旧格式类型名（本机 credential_id=0 优先、其次在线实例）
                         c2.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
                             "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
                             (row[12],))
                         ar2 = c2.fetchone()
                     if ar2:
+                        # Issue #701：engine_device = rc.name（凭据自定义名）；instance 派生仍用 device_name
                         engine_instance = instance_name(ar2[0] or "engine", ar2[2] or "", ar2[1] or 0)
-                        engine_device = ar2[2] or ""
-                        engine_ip = ar2[3] or ""
+                        engine_device = ar2[3] or ""
+                        engine_ip = ar2[4] or ""
     except Exception:
         pass
     result["engine_instance"] = engine_instance
@@ -249,25 +302,50 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     result["engine_health"] = engine_health
 
     # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
+    # Issue #494：带出 task_errors（失败归因摘要，前端失败态展示用）
     task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
-                 "runtime_session_id": "", "task_created_at": "", "task_started_at": ""}
+                 "runtime_session_id": "", "task_created_at": "", "task_started_at": "",
+                 "task_errors": []}
     try:
         with db_lock:
             c4 = db.cursor()
             c4.execute(
-                "SELECT id, status, runtime_id, runtime_session_id, created_at, started_at "
+                "SELECT id, status, runtime_id, runtime_session_id, created_at, started_at, errors "
                 "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
                 (seq,))
             tr3 = c4.fetchone()
             if tr3:
+                _task_errors = []
+                if tr3[6]:
+                    try:
+                        _parsed = json.loads(tr3[6])
+                        if isinstance(_parsed, list):
+                            _task_errors = [str(e)[:500] for e in _parsed
+                                            if str(e).strip()][:5]
+                        else:
+                            _task_errors = [str(tr3[6])[:500]]
+                    except (json.JSONDecodeError, TypeError):
+                        _task_errors = [str(tr3[6])[:500]]
                 task_info = {
                     "task_id": tr3[0], "task_status": tr3[1], "runtime_id": tr3[2] or 0,
                     "runtime_session_id": tr3[3] or "", "task_created_at": tr3[4] or "",
                     "task_started_at": tr3[5] or "",
+                    "task_errors": _task_errors,
                 }
     except Exception:
         pass
     result["task"] = task_info
+
+    # Issue #1255：执行模型展示（用量优先、配置模型回落，与 task-logs info 同一取值函数）
+    try:
+        from src.observability.llm_usage import task_model_summary
+        _ms = task_model_summary(str(task_info.get("task_id") or ""),
+                                 int(task_info.get("runtime_id") or 0))
+    except Exception:
+        _ms = {"model": "", "source": "unknown", "models": []}
+    result["engine_model"] = _ms.get("model", "")
+    result["engine_model_source"] = _ms.get("source", "unknown")
+    result["engine_models"] = _ms.get("models", [])
 
     return result
 
@@ -326,8 +404,10 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                 and runtime_execution_kind(_task.get("runtime_id") or 0) == EXEC_MODE_REMOTE
             )
             if _is_worker:
-                cancel_task(task_id)
-                # 事件档案/状态收尾（cancel_task 只更新 task 状态，事件侧需手动补）
+                # Issue #587 审查修复：先详写事件终态（result=用户手动终止）再 cancel_task。
+                # 反序时 cancel_task 内 _cascade_event_terminal 会先把事件置为 cancelled
+                # 并写入通用级联文案，随后 update_event_complete 被终态保护跳过，
+                # 用户可见诊断信息（用户手动终止）丢失。
                 if _task.get("event_seq"):
                     try:
                         from datetime import datetime, timezone
@@ -347,6 +427,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                         )
                     except Exception as e:
                         log.warning(f"Event terminate: worker cancel event finalize failed: {e}")
+                cancel_task(task_id)
                 cancelled = True
                 log.info(f"Event terminate: seq={seq} task={task_id} cancelled via cancel_task (worker mode)")
             else:
@@ -356,8 +437,12 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
         except Exception as e:
             log.warning(f"Event terminate: task cancel/fail failed: {e}")
 
-    # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
-    #    同时取消 worker 模式的 future（direct 模式杀本地子进程）
+    # 2) direct 模式 → cancel_direct_task（仅单进程模式有效，兜底）
+    #    多进程（Issue #596 三进程拆分）下 direct 执行在 C 进程、terminate 落在 B，
+    #    本进程 _DIRECT_FUTURES 恒为空——真正的杀子进程由状态驱动取消完成：
+    #    上面 fail_task/update_event_status 落库后，C 侧执行流周期探测
+    #    task/event 终态（failed/cancelled）→ _kill_stale_engine 杀引擎并中断。
+    #    （单进程模式 terminate 与 direct 执行同进程，cancel_direct_task 仍生效）
     try:
         from src.api.event_pipeline import cancel_direct_task
         dc = cancel_direct_task(seq)
@@ -368,12 +453,31 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
         log.warning(f"Event terminate: cancel_direct_task failed: {e}")
 
     # 3) 事件状态回写 failed（兜底，fail_task/cancel_task 已处理但再确认一次）
+    # Issue #476：显式 reason，避免 terminate 产生空 result 无头失败
     try:
-        update_event_status(seq, "failed")
+        update_event_status(seq, "failed", result="用户手动终止事件（terminate）")
     except Exception as e:
         log.warning(f"Event terminate: update_event_status failed: {e}")
 
+    # Issue #587：终止操作强制审计留痕（actor/time/target_event/动作）
+    _audit_admin_action(row[1] or "", seq, "terminate", user, task_id=task_id)
+
     return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
+
+
+def _mark_event_redispatched(seq: int, new_seq, channel: str):
+    """Issue #600：重派接管后原事件标记为 cancelled（被新事件取代），而非 failed。
+
+    failed 属于失败终态，会永久残留为流水线卡片的红色失败段（重派成功后旧失败
+    仍未被覆盖）。cancelled 语义为「已被新 seq 接管」，不参与 any_failed 聚合，
+    流水线节点状态随新事件（同 agent 最新 seq）刷新。经 reset_event_terminal
+    重置后写入，绕开终态保护，与既有 redispatch 语义一致。
+    """
+    from src.api.event_store import reset_event_terminal, update_event_complete
+    reset_event_terminal(seq)
+    update_event_complete(
+        seq, "cancelled", exit_code=None,
+        result=f"事件已重新派发（{channel} 新 seq={new_seq} 接管，原事件已取消）")
 
 
 @router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
@@ -391,7 +495,6 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     import json as _json
     from src.session_manager import db, db_lock
     from src.runtime.service import requeue_task, get_task, enqueue_task, update_task_status
-    from src.api.event_store import update_event_status
 
     # 1) 幂等：30s 内已重派过则拒绝
     try:
@@ -414,6 +517,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     # 1.0）归属校验：仅仓库归属人（managed_repos）可重派
     from src.api.deps import check_repo_access
     check_repo_access(user, evt.get("repo_key", "") or "")
+
+    # Issue #587：重派操作强制审计留痕（actor/time/target_event/动作）
+    _audit_admin_action(evt.get("repo_key", "") or "", seq, "redispatch", user)
 
     # 1.0a）Issue #453 修复点 3：自循环被拦事件禁止重派（S7）——重派不得复活被拦事件。
     # 双源判定：① event_skipped 留痕（self_loop / self_loop_path_b / outbound_ledger_hit，
@@ -471,9 +577,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
         log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
         _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
-        # 原 seq 标记 failed（保持历史记录），新 seq 接管
+        # Issue #600：原事件标记 cancelled（被新任务接管，非失败态），避免流水线卡片残留失败
         try:
-            update_event_status(seq, "failed")
+            _mark_event_redispatched(seq, "(new)", "onboarding 重建任务")
         except Exception:
             pass
         try:
@@ -496,6 +602,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         tr = c.fetchone()
         if tr:
             task_id, task_status, _orig_rid = tr[0], tr[1] or "", tr[2] or 0
+    # Issue #521：回执 task_id 一律返回收敛后实际有效任务（queued 复用=原 ID，终态重建=新 ID）
+    _effective_task_id = task_id
 
     # 2.5) local_only：本机重试分支 — 强制使用原 runtime_id，跳过 pick_engine，不换机器
     if local_only:
@@ -527,6 +635,56 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if _cid > 0 and not _remote_runtime_ready(_orig_rid):
             raise HTTPException(status_code=409, detail={"code": 409,
                 "message": "原执行机器不可用（远端引擎失联），无法本机重试"})
+
+        # Issue #521：旧任务仍为 queued → 同事务原子复用原任务行（同机重派不新建副本，
+        # 避免"旧 queued 行 + 新 queued 行"双可领取副本）。UPDATE 带 status='queued' 守卫，
+        # 窗口期被领取（rowcount=0）则落到下方快照重建分支按新状态处理，不留半状态。
+        if (old.get("status") or "") == "queued":
+            with db_lock:
+                clq = db.cursor()
+                clq.execute(
+                    "UPDATE agent_tasks SET runtime_id=?, started_at=NULL, completed_at=NULL, exit_code=NULL "
+                    "WHERE id=? AND status='queued'",
+                    (_orig_rid, task_id))
+                _lq_reused = clq.rowcount > 0
+                db.commit()
+            if _lq_reused:
+                # 本机 direct 引擎 → 直接触发执行（复用原行，task_id 不变）
+                if _cid == 0:
+                    try:
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.runtime.engine_select import engine_name as _en
+                        from src.repo_key import from_repo_key as _frk
+                        _be = _en(_orig_rid) or ""
+                        _rk = old.get("repo_key") or ""
+                        _evt_lq = {
+                            "repo_key": _rk,
+                            "repository": _frk(_rk),
+                            "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
+                            "issue_id": old.get("issue_id") or "",
+                            "agent_type": old.get("agent_type") or "",
+                            "event_type": old.get("event_type") or "",
+                            "type": old.get("event_type") or "",
+                            "payload": {},
+                        }
+                        start_direct_agent(_execute_agent, (
+                            _rk, seq, old.get("agent_type") or "", _be, old.get("skill") or "",
+                            _evt_lq, _orig_rid, task_id,
+                        ), name=f"redispatch-{seq}")
+                        log.info(f"[redispatch] seq={seq} local_only: queued reuse direct started on rid={_orig_rid}")
+                    except Exception as e:
+                        log.warning(f"[redispatch] seq={seq} local_only: queued reuse direct failed: {e}")
+                from src.api.event_store import reset_event_terminal
+                reset_event_terminal(seq)
+                try:
+                    from src.user.db import set_meta_value
+                    import time as _time
+                    set_meta_value(f"redispatch:{seq}", str(_time.time()))
+                except Exception:
+                    pass
+                log.info(f"[redispatch] seq={seq} local_only: queued task {task_id} reused on rid={_orig_rid} by={user.get('username','')}")
+                return {"status": "redispatched", "task_id": task_id, "event_seq": seq, "local_only": True}
+
 
         # 校验通过 → 复用原 task 快照参数 + 原 runtime_id 新建任务（不调 pick_engine）
         from src.api.event_pipeline import is_plugin_mode as _is_plugin_mode
@@ -762,6 +920,142 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 log.info(f"[redispatch] seq={seq} plugin: pipeline/node/requeued emitted, task={task_id}, tag={evt['agent_type']}")
         except Exception as e:
             log.warning(f"[redispatch] plugin event emit failed: {e}")
+    elif task_id and task_status == "queued":
+        # Issue #521：queued 任务重派 → 同一事务内原子复用原任务行（更新 runtime_id 等派发目标字段）。
+        # 旧实现把 queued 落入"终态/缺失"分支：enqueue 新任务 + 保留旧 queued 行 → 同一事件两个
+        # 可领取副本，且回执仍返回旧 task_id。复用原行天然无双副本、无 ID 漂移；env/prompt/skill/
+        # pool 快照保持首次派发原值不动（queued 行尚未执行，无漂移风险）。
+        old = get_task(task_id)
+        if not old:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
+        try:
+            from src.api.event_pipeline import is_plugin_mode
+            _q_is_plugin = is_plugin_mode()
+        except Exception:
+            _q_is_plugin = False
+        _q_rid = old.get("runtime_id") or 0
+        if _q_is_plugin and (old.get("pool_tag") or ""):
+            # 池任务：按 tag+scope 重新选定在线引擎（与 dispatched/running 重派分支口径一致）；
+            # 选不到 → runtime_id=0 贴证广播，等池内引擎 claim_by_tag 认领（#253 语义，绑定字段不动）
+            _q_pool_eids = []
+            try:
+                import json as _json_q
+                _q_raw = old.get("pool_engine_ids") or ""
+                if _q_raw:
+                    _q_pool_eids = [int(x) for x in _json_q.loads(_q_raw) if x]
+            except Exception:
+                pass
+            _q_repo = old.get("repo_key") or ""
+            _q_uid = old.get("user_id") or 0
+            if _q_pool_eids:
+                _q_ph = ",".join("?" * len(_q_pool_eids))
+                _q_scope_extra = f" AND ar.id IN ({_q_ph})"
+                _q_scope_params = list(_q_pool_eids)
+            else:
+                _q_bare = _q_repo.split(":", 1)[1] if ":" in _q_repo else _q_repo
+                _q_scope_extra = (
+                    " AND (ar.credential_id = 0"
+                    " OR rc.scope = 'global'"
+                    " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
+                    " OR (rc.scope = 'user' AND rc.owner_name ="
+                    " (SELECT username FROM grape_accounts WHERE id=?)))"
+                )
+                _q_scope_params = [_q_bare, f"gitcode:{_q_bare}", f"github:{_q_bare}", _q_uid]
+            try:
+                with db_lock:
+                    cq = db.cursor()
+                    cq.execute(
+                        "SELECT ar.id FROM agent_runtimes ar "
+                        "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                        "AND (ec.tag=? OR ec.tag='all') "
+                        "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                        "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0"
+                        + _q_scope_extra +
+                        " ORDER BY ar.busy_slots ASC LIMIT 1",
+                        (old.get("pool_tag"), *_q_scope_params)
+                    )
+                    _q_row = cq.fetchone()
+                    if not _q_row:
+                        cq.execute(
+                            "SELECT ar.id FROM agent_runtimes ar "
+                            "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                            "AND (ec.tag=? OR ec.tag='all') "
+                            "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                            "WHERE ar.status='online' AND ar.healthy=1"
+                            + _q_scope_extra +
+                            " ORDER BY ar.busy_slots ASC LIMIT 1",
+                            (old.get("pool_tag"), *_q_scope_params)
+                        )
+                        _q_row = cq.fetchone()
+                if _q_row:
+                    _q_rid = _q_row[0]
+                else:
+                    _q_rid = 0
+            except Exception:
+                pass
+        else:
+            # 确定路由：fallback 链 task.runtime_id → session 主引擎 → pick_engine（与终态重建分支一致）
+            if not _q_rid:
+                try:
+                    with db_lock:
+                        cqs = db.cursor()
+                        cqs.execute("SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                                    (old.get("repo_key") or "", old.get("agent_type") or ""))
+                        _q_sr = cqs.fetchone()
+                        if _q_sr and _q_sr[0]:
+                            _q_rid = _q_sr[0]
+                except Exception:
+                    pass
+            try:
+                from src.runtime.engine_select import pick_engine
+                _q_rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "",
+                                     fallback_runtime_id=_q_rid) or 0
+            except Exception:
+                _q_rid = old.get("runtime_id") or 0
+            if not _q_rid and not _q_is_plugin:
+                raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
+        # 原子收敛：单事务校验仍为 queued 并复用原任务行（防领取竞态；被领取 → 409，无半状态）
+        with db_lock:
+            cq = db.cursor()
+            cq.execute(
+                "UPDATE agent_tasks SET runtime_id=?, started_at=NULL, completed_at=NULL, exit_code=NULL "
+                "WHERE id=? AND status='queued'",
+                (_q_rid, task_id))
+            _q_reused = cq.rowcount > 0
+            db.commit()
+        if not _q_reused:
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": "任务刚被引擎领取（状态已流转），请稍后重试重派"})
+        log.info(f"[redispatch] seq={seq} queued reuse: task {task_id} reassigned rid={_q_rid}")
+        # 本机 direct 引擎（cid=0 且 rid>0）→ 直接触发执行，复用行无需 worker 认领
+        if _q_rid > 0:
+            try:
+                from src.runtime.service import runtime_credential_id
+                if (runtime_credential_id(_q_rid) or 0) == 0:
+                    from src.api.event_pipeline import _execute_agent, start_direct_agent
+                    from src.runtime.engine_select import engine_name as _en
+                    from src.repo_key import from_repo_key as _frk
+                    _q_be = _en(_q_rid) or ""
+                    _q_rk = old.get("repo_key") or ""
+                    _q_evt = {
+                        "repo_key": _q_rk,
+                        "repository": _frk(_q_rk),
+                        "source": (_q_rk.split(":", 1)[0] if ":" in _q_rk else "gitcode"),
+                        "issue_id": old.get("issue_id") or "",
+                        "agent_type": old.get("agent_type") or "",
+                        "event_type": old.get("event_type") or "",
+                        "type": old.get("event_type") or "",
+                        "payload": {},
+                    }
+                    start_direct_agent(_execute_agent, (
+                        _q_rk, seq, old.get("agent_type") or "", _q_be, old.get("skill") or "",
+                        _q_evt, _q_rid, task_id,
+                    ), name=f"redispatch-{seq}")
+                    log.info(f"[redispatch] seq={seq} queued reuse: direct execution started on rid={_q_rid}")
+            except Exception as e:
+                log.warning(f"[redispatch] seq={seq} queued reuse direct trigger failed: {e}")
+        # 回执返回实际有效任务（复用原行 → 原 task_id）
+        _effective_task_id = task_id
     else:
         # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
         from src.api.event_pipeline import is_plugin_mode
@@ -805,9 +1099,19 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             from src.api.event_pipeline import _fail_scene_all_offline
                             _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
                                                     context="Redispatch", repo_key=old.get("repo_key") or "")
+                            # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
+                            _msg_541 = "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"
+                            try:
+                                from src.runtime.engine_select import scene_dispatch_failure_reason
+                                _msg_541 = scene_dispatch_failure_reason(
+                                    _scene_253, old.get("agent_type") or "",
+                                    repo_key=old.get("repo_key") or "",
+                                    user_id=_scene_uid_253) or _msg_541
+                            except Exception:
+                                pass
                             raise HTTPException(status_code=409, detail={
                                 "code": 409,
-                                "message": "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"})
+                                "message": _msg_541})
                         _pool_253 = _rp_253 or ""
                         _pool_253_authoritative = True
                 except HTTPException:
@@ -942,6 +1246,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_engine_ids=_pool_253,
                 )
+                # Issue #521：终态重建的实际有效任务 = 新任务，回执不得再返回旧（终态）task_id
+                _effective_task_id = _new_task_id or "(new)"
                 # If local direct engine, trigger direct execution (no worker will claim)
                 # Issue #253 改动1 守卫：_rid=0 时禁止触发直跑。runtime_credential_id(0) 返回 None，
                 # None or 0 → _cid=0 → _is_local_direct 误判 True → 空 engine_id=0 直跑。
@@ -1036,7 +1342,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _a2a_result.get("status") == "ok":
                         _new_seq = _a2a_result.get("seq", 0)
                         log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
-                        update_event_status(seq, "failed")
+                        # Issue #600：原事件标记 cancelled（被新事件接管，非失败态），
+                        # 避免流水线卡片/segments 长期残留失败红卡片
+                        _mark_event_redispatched(seq, _new_seq, "A2A")
                         try:
                             from src.user.db import set_meta_value as _smv
                             import time as _tm
@@ -1076,8 +1384,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                  account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""))
                 if _rp_result.get("ok"):
                     log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
-                    # 原 seq 事件标记 failed（保持历史记录），新 seq 接管执行
-                    update_event_status(seq, "failed")
+                    # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）
+                    _mark_event_redispatched(seq, _rp_result.get("seq", 0), "run_pipeline")
                     try:
                         from src.user.db import set_meta_value as _smv
                         import time as _tm
@@ -1107,8 +1415,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     except Exception:
         pass
 
-    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={task_id or '(new)'} by={user.get('username','')}")
-    return {"status": "redispatched", "task_id": task_id or "(new)", "event_seq": seq}
+    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={_effective_task_id or '(new)'} by={user.get('username','')}")
+    return {"status": "redispatched", "task_id": _effective_task_id or "(new)", "event_seq": seq}
 
 
 # ====== Event 对话（event-conversation-design.md）======
@@ -1223,7 +1531,9 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
         "account": actor,
         "issue_number": issue_id,
         "pr_number": "",
-        "context": f"用户手动补发 A2A：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
+        # D5 评审修正③：手工路径必传 compensated_by=manual+操作用户（不给默认值，防审计底线被稀释）；
+        # marker 进 context 使其随 a2a_endpoint 组装落入事件 payload
+        "context": f"用户手动补发 A2A[compensated_by=manual:{user.get('username', '')}]：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
     })
     _res = await a2a_endpoint(None, _a2a_body, _redo_user)  # type: ignore[arg-type]  # jwt 分支不读 request
     # JSONResponse（拦截类 skipped）原样透传
@@ -2124,10 +2434,10 @@ def list_events(owner: str, repo: str,
     _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
-    where_clauses = [f"repo_key IN ({_rk_placeholders})"]
+    where_clauses = [f"e.repo_key IN ({_rk_placeholders})"]
     params = _repo_keys
     if status:
-        where_clauses.append("status=?")
+        where_clauses.append("e.status=?")
         params.append(status)
 
     where_sql = " AND ".join(where_clauses)
@@ -2135,20 +2445,84 @@ def list_events(owner: str, repo: str,
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(f"SELECT COUNT(*) FROM events WHERE {where_sql}", params)
+            c.execute(f"SELECT COUNT(*) FROM events e WHERE {where_sql}", params)
             total = c.fetchone()[0]
 
             offset = (page - 1) * page_size
+            # Issue #476：列表补 result / issue_id / task_id（LEFT JOIN 取最新 task）
+            # result 摘要由前端截断展示；task_id 为空表示未关联任务（仍可跳 Issue）
             c.execute(
-                f"SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT e.seq, e.event_type, e.agent_type, e.title, e.summary, e.status, e.created_at, "
+                f"e.result, e.issue_id, "
+                f"(SELECT t.id FROM agent_tasks t WHERE t.event_seq=e.seq ORDER BY t.created_at DESC LIMIT 1) AS task_id "
+                f"FROM events e WHERE {where_sql} ORDER BY e.seq DESC LIMIT ? OFFSET ?",
                 params + [page_size, offset]
             )
             events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6]),
+                 "result": r[7] or "", "issue_id": r[8] or "", "task_id": r[9] or ""}
                 for r in c.fetchall()
             ]
         except Exception:
             return {"events": [], "total": 0, "page": page, "page_size": page_size}
 
     return {"events": events, "total": total, "page": page, "page_size": page_size}
+
+
+# ===== Issue #596 P1：B 进程操作端点子路由（ops_router） =====
+# 三进程拆分（grape-three-process-split-design.md §4.1.2 / §2.2）：
+# - GET 查看端点（detail/thread/task status/stream/list、a2a-redo/scene）归 A 进程
+#   （grape_server.py 加载本文件完整 `router`）；
+# - 操作端点（terminate/redispatch/a2a-redo/chat 发送/knowledge 写入/flow reset 等
+#   直接触发事件处理层的 POST/DELETE）归 B 进程（grape_event_server.py 加载
+#   `ops_router`）——重派类操作调用 run_pipeline / enqueue，属 B 的入队职责。
+# 单进程兼容模式（main.py）加载完整 `router`（A+B 全量），行为不变。
+#
+# 实现方式：与 runtime_view.py 同款「原函数对象复用注册」——单一实现源，
+# 改一处两端生效；路径/operation_id 与原定义一致。
+
+ops_router = APIRouter(prefix="/api/events", tags=["events"])
+
+_EVENTS_OPS_ENDPOINTS = [
+    # (method, path, function_name, kwargs)
+    ("post", "/{seq}/terminate", "terminate_event", dict(
+        operation_id="events_terminate", summary="Terminate event",
+        description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")),
+    ("post", "/{seq}/redispatch", "redispatch_event", dict(
+        operation_id="events_redispatch", summary="Redispatch event",
+        description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")),
+    ("post", "/{seq}/a2a-redo", "a2a_redo_event", dict(
+        operation_id="events_a2a_redo", summary="A2A redo (manual handoff)",
+        description="Manually re-sends a downstream A2A handoff for a completed event whose agent did not actually hand off. Does NOT touch the original event/task (unlike redispatch); simply creates a new a2a_event via the standard A2A path.")),
+    ("delete", "/{seq}/chat", "delete_event_thread", dict(
+        operation_id="events_chat_delete", summary="Delete event conversation thread",
+        description="Clears the event conversation thread records.")),
+    ("delete", "/{seq}/knowledge/{scope}", "delete_event_knowledge", dict(
+        operation_id="events_knowledge_delete", summary="Delete issue knowledge",
+        description="Deletes agent knowledge produced for the event (file + DB + refs).")),
+    ("post", "/{seq}/chat", "send_conversation", dict(
+        operation_id="events_chat_send", summary="Send event conversation",
+        description="Sends a message into the event conversation (non-streaming).")),
+    ("post", "/{seq}/chat/stream", "stream_conversation", dict(
+        operation_id="events_chat_stream", summary="Event conversation SSE",
+        description="SSE streaming conversation. Direct mode streams live; queue mode returns a single done.")),
+    ("post", "/{seq}/chat/submit", "submit_conversation", dict(
+        operation_id="events_chat_submit", summary="Submit event conversation (async)",
+        description="Submits a conversation query and immediately returns a task_id; the agent executes in the background.")),
+    ("post", "/{seq}/knowledge", "add_knowledge", {}),
+    ("post", "/{seq}/flow/reset", "flow_reset", {}),
+]
+
+
+def _register_ops_routes() -> None:
+    import src.api.routes.events as _self
+    for method, path, func_name, kwargs in _EVENTS_OPS_ENDPOINTS:
+        fn = getattr(_self, func_name, None)
+        if fn is None:
+            continue  # 原函数被重命名/删除时跳过（防御）
+        decorator = getattr(ops_router, method)
+        decorator(path, **kwargs)(fn)
+
+
+_register_ops_routes()

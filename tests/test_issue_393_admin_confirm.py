@@ -427,3 +427,87 @@ class TestAdminConfirmDone:
                 c = db.cursor()
                 c.execute("DELETE FROM grape_accounts WHERE username='test393_outsider'")
                 db.commit()
+
+
+class TestIssue491CrossUserAdminConfirm:
+    """Issue #491: 管理员（自定义 admin 角色）确认完成**他人创建**需求的回归测试。
+
+    根因：GitCode collaborator-permission 端点对自定义管理员角色返回
+    role_name="Admin" + access_level=20 + permission="custom"，
+    _check_gitcode_admin 判定链（access_level>=50 / permission=="admin" /
+    permissions.admin）全部落空 → 403 误报。与前端 /user/repos 列表口径
+    （permission.admin=true → Admin）不一致。
+    以下用例 mock repo_manager._req 返回**真实形态** payload（不 mock
+    _check_gitcode_admin 本身），走完整端点链路。
+    """
+
+    def test_custom_role_admin_confirms_others_issue(self):
+        """#491 主场景：自定义 admin 角色（role_name=Admin/access_level=20）确认他人需求 → 200。"""
+        _clean()
+        tid = _insert_task(issue_number=521)
+        from src.user import repo_manager
+        _payload = {"access_level": 20, "permission": "custom", "role_name": "Admin",
+                    "permissions": {"admin": False, "push": True, "pull": True}}
+        with _oauth_pass_through(), \
+             patch.object(repo_manager, "_req", return_value=_payload), \
+             patch("src.api.routes.issues._close_vcs_issues",
+                   return_value={"gitcode": "skipped", "github": "skipped"}):
+            r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["status"] == "completed"
+        assert data["stage"] == "done"
+        assert data["confirmed_by"] == "admin"
+        assert _audit_count() == 1
+
+    def test_non_admin_non_creator_403(self):
+        """安全边界：Developer（role_name=Developer/access_level=30）非创建者 → 403。"""
+        _clean()
+        tid = _insert_task(issue_number=522)
+        from src.user import repo_manager
+        _payload = {"access_level": 30, "permission": "write", "role_name": "Developer",
+                    "permissions": {"admin": False, "push": True, "pull": True}}
+        with _oauth_pass_through(), \
+             patch.object(repo_manager, "_req", return_value=_payload):
+            r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
+        assert r.status_code == 403
+        assert "管理员" in r.json()["detail"]["message"]
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT status FROM issue WHERE id=?", (tid,)).fetchone()
+        assert row[0] == "processing"
+        assert _audit_count() == 0
+
+    def test_owner_confirms_others_issue(self):
+        """Owner 本人（external_login==owner）确认他人需求 → 200（快速路径回归）。"""
+        _clean()
+        tid = _insert_task(issue_number=523)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_accounts WHERE username='test491_owner'")
+            db.commit()
+        _owner_uid = grape_account_db.create_grape_account("test491_owner", email="", password="test123")
+        assert _owner_uid, "create owner account failed"
+        _bind_identity(_owner_uid["id"], "gitcode", "org")
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) "
+                "VALUES (?,?,?,?,?,?)",
+                (_owner_uid["id"], REPO_KEY, "org", "issue393", 0, 1))
+            db.commit()
+        try:
+            _tok = _jwt_access_token(_owner_uid["id"], _owner_uid["username"])
+            with patch("src.api.routes.issues._close_vcs_issues",
+                       return_value={"gitcode": "skipped", "github": "skipped"}):
+                r = client.post(f"/api/issues/{tid}/admin-confirm-done",
+                                headers={"Authorization": f"Bearer {_tok}"})
+            assert r.status_code == 200, r.text
+            assert r.json()["confirmed_by"] == "admin"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_owner_uid["id"],))
+                c.execute("DELETE FROM user_repos WHERE user_id=?", (_owner_uid["id"],))
+                c.execute("DELETE FROM grape_accounts WHERE id=?", (_owner_uid["id"],))
+                db.commit()

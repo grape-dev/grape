@@ -112,7 +112,7 @@ Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
 
 | 组件 | 版本要求 | 说明 |
 |------|---------|------|
-| **Python** | >= 3.9（主服务） | 推荐 3.10+（devbox sandbox 需要） |
+| **Python** | >= 3.10（必须） | 主服务与 devbox sandbox 均要求 Python 3.10+（新式类型注解/语法依赖；低于 3.10 启动会显式提示并退出） |
 | **Node.js** | >= 18（Agent CLI） | `npm install -g opencode` |
 | **Git** | 任意较新版本 | |
 
@@ -154,7 +154,7 @@ mkdir -p data
 python -m src.api.run --dev                # 开发模式，打开 http://localhost:3000
 ```
 
-### 国内镜像加速
+### 国内镜像加速 / 网络建议
 
 ```bash
 # PyPI 阿里云镜像
@@ -163,6 +163,10 @@ pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
 # 永久配置：
 pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 ```
+
+> git 拉取偶发 HTTP/2 / 连接超时属网络抖动，拉取路径已内置有限次自动重试（3 次退避）。
+> 仍失败可降级 HTTP/1.1：`git config --global http.version HTTP/1.1`；或按你的网络环境配置
+> 镜像/代理（如 `git config --global url."https://你的代理/https://github.com/".insteadOf "https://github.com/"`）。
 
 ### 安装 Agent CLI（至少一个）
 
@@ -178,12 +182,61 @@ pip install codearts-cli         # 基于 Python
 python scripts/doctor.py         # 运行安装前自检
 ```
 
-### 复制 Bot Token 配置
+> 完整「0→1 安装自检清单」（阶段化操作 + 期望结果 + 失败排查）见 [docs/0-to-1-checklist.md](docs/0-to-1-checklist.md)。
+
+### 配置 OAuth 应用凭据（必做）
 
 ```bash
-cp configs/global-bot-token.example.json configs/global-bot-token.json
-# 编辑填入 GitCode Bot Token / OAuth 凭据
+cp configs/oauth-providers.example.json configs/oauth-providers.json
+# 编辑 configs/oauth-providers.json，填入 GitCode / GitHub 两个 provider 的 client_id / client_secret
 ```
+
+`configs/oauth-providers.json` 是 OAuth 凭据的权威配置文件（重启时同步入库，凭据采用「首次写入」幂等模式）：
+写错文件、留空字段会导致登录入口 `/api/auth/login/{provider}` 返回 400（not_configured）。
+
+```jsonc
+{
+  "gitcode": {
+    "client_id": "你的 GitCode OAuth App Client ID",
+    "client_secret": "你的 GitCode OAuth App Client Secret",
+    "redirect_uri": "https://你的域名/api/auth/callback/gitcode",
+    "auth_url": "https://gitcode.com/oauth/authorize",
+    "token_url": "https://gitcode.com/oauth/token",
+    "user_url": "https://gitcode.com/api/v5/user",
+    "scope": "all"
+  },
+  "github": {
+    "client_id": "你的 GitHub OAuth App Client ID",
+    "client_secret": "你的 GitHub OAuth App Client Secret",
+    "redirect_uri": "https://你的域名/api/auth/callback/github",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "user_url": "https://api.github.com/user",
+    "scope": "repo user admin:repo_hook offline_access"
+  }
+}
+```
+
+> 完整协议字段与示例见 `configs/oauth-providers.example.json`；OAuth App 的 Callback URL 必须与上表 `redirect_uri` 完全一致。
+> 旧版 `configs/global-bot-token.json` 中的 OAuth 凭据字段仍兼容（向前兼容回退），新配置请统一使用 `oauth-providers.json`。
+
+### 配置对外可访问基址（必做）
+
+```bash
+cp configs/server-config.example.json configs/server-config.json
+# 编辑 configs/server-config.json，把 server_base_url / webhook_url 改为对外可访问地址
+```
+
+```jsonc
+{
+  "server_base_url": "https://你的域名",
+  "webhook_url": "https://你的域名/webhook/gitcode"
+}
+```
+
+> 未配置 `server_base_url` 时服务会回退到 `http://localhost:3000`：OAuth 回调地址指向本机，
+> 第三方平台（GitCode/GitHub）无法回访，登录/托管不可用。启动日志与 `/api/health` 会输出明确告警
+> （`server_base_url_configured=false`）。本地纯开发可忽略，但 OAuth 登录前必须配置。
 
 首次登录用 GitCode OAuth 一键授权，即可开始托管仓库、把项目接入 AI 工作流。
 
@@ -200,7 +253,9 @@ python -m src.api.run --dev    # 开发：单端口 3000，热重载
 
 | 文件 | 说明 |
 |------|------|
-| `configs/global-bot-token.json` | 全局 Bot token + GitCode OAuth 凭据（gitignored） |
+| `configs/global-bot-token.json` | 全局 Bot token（gitignored） |
+| `configs/oauth-providers.json` | OAuth 应用凭据（GitCode/GitHub 的 client_id/secret 等，从 `oauth-providers.example.json` 复制，gitignored） |
+| `configs/server-config.json` | 对外基址 server_base_url / webhook_url（从 `server-config.example.json` 复制；未配置时 OAuth 回调指向 localhost 不可用） |
 | `configs/agent-description.json` | Agent 类型种子（订阅事件、默认后端） |
 | `configs/skill-description.json` | 官方技能种子（由独立技能仓库 [grape-skills](https://github.com/grape-dev/grape-skills) 经 `scripts/sync_skills.sh` 同步） |
 | `configs/agent-skill-mapping.json` | 开发场景 → Agent × Skill 映射 |
