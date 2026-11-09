@@ -24,3 +24,11 @@
 ## 提交拆分
 - feat(#1667): a2a context dedup + queue/force + queued drain
 - test(#1667): cover dedup queue force drain
+
+## 审查后修正（PR #1069 QA）
+| 问题 | 修正 |
+|------|------|
+| 排队滞留无兜底（高） | 新增 `reconcile_queued_a2a` 终态对账；挂接 runtime 任务级联 / issues admin 确认旁路；排队落库后立即对账；patrol 每轮兜底扫描 |
+| queue 幂等非原子（中） | 新增 `event_store.append_queued_a2a_event`，单 db_lock/事务内查重+插入 |
+| 全仓扫描 / 同步阻塞 / 递归（判断项） | drain WHERE 收窄到 (repo, issue, agent)；重入锁短路递归；异步上下文的终态钩子经线程池执行 |
+| 缺 EOF 换行 | `a2a_dispatch.py` 与 docs 补齐 |

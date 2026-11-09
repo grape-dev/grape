@@ -84,36 +84,8 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     return {"status": "repo_deleted", "message": "repository deleted, cascade cleanup done"}
 
 
-def _a2a_context_key(idempotency_key: str = "", context: str = "") -> str:
-    """Issue #1667：A2A 去重上下文键（幂等键优先，其次 context 摘要）。
-
-    - 显式 idempotency_key：`idem:<key>`（跨请求稳定，由调用方派生）；
-    - 无幂等键但携带 context：`ctx:<sha256(context)[:16]>`，区分不同任务的
-      交办上下文（如 T3 补测 vs PR 交付），避免被同 issue+agent 去重吞掉；
-    - 两者皆空：返回 ""（保持 #587 的 issue+agent 旧去重语义）。
-    """
-    _k = (idempotency_key or "").strip()
-    if _k:
-        return f"idem:{_k}"
-    _c = (context or "").strip()[:500]
-    if _c:
-        import hashlib
-        return "ctx:" + hashlib.sha256(_c.encode("utf-8")).hexdigest()[:16]
-    return ""
-
-
-def _a2a_event_context_key(idempotency_key: str = "", payload_raw: str = "") -> str:
-    """从已落库事件的行内 payload 还原上下文键（历史行兼容）。"""
-    _ctx = ""
-    try:
-        _p = json.loads(payload_raw or "{}")
-        if isinstance(_p, dict):
-            _ctx = str(_p.get("context") or "")
-            if not idempotency_key:
-                idempotency_key = str(_p.get("idempotency_key") or "")
-    except Exception:
-        pass
-    return _a2a_context_key(idempotency_key, _ctx)
+from src.api.a2a_context import a2a_context_key as _a2a_context_key
+from src.api.a2a_context import a2a_event_context_key as _a2a_event_context_key
 
 
 def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
@@ -1702,25 +1674,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 _cancel_superseded_queued_a2a(
                     repo_key, f"#{issue_number}", agent_name, _a2a_ctx_key, "force=true")
             elif _existing_seq and _queue:
-                # queue 幂等：同上下文已排队 → 复用原排队记录，不重复排队
-                for _q_item in _queued_a2a_events(repo_key, f"#{issue_number}", agent_name):
-                    _qp = _q_item["payload"]
-                    _q_key = _a2a_context_key(
-                        str(_qp.get("idempotency_key") or ""), str(_qp.get("context") or ""))
-                    if _q_key == _a2a_ctx_key and _q_key:
-                        _qi = _q_item["queue"] if isinstance(_q_item["queue"], dict) else {}
-                        log.info(f"A2A: queue idempotent hit — reuse queued seq={_q_item['seq']}")
-                        return JSONResponse(status_code=200, content={
-                            "status": "ok", "seq": 0, "agent": agent_name,
-                            "skipped": "queued", "queued": True, "idempotent": True,
-                            "reason": "active_a2a_event",
-                            "existing_seq": int(_qi.get("existing_seq") or _existing_seq),
-                            "queue_seq": _q_item["seq"],
-                            "message": "same context already queued; existing queued event returned",
-                            "event": {"seq": _q_item["seq"], "status": "queued",
-                                      "agent": agent_name, "issue_id": f"#{issue_number}"},
-                        })
-                from src.api.event_store import append_event as _append_queue_event
+                # 审查修复②：排队落库改为「查重 + 插入」同一 db_lock/事务内原子完成，
+                # 无 idempotency_key 的并发同上下文请求不会再产生多条排队行。
+                from src.api.event_store import append_queued_a2a_event
                 from datetime import datetime, timezone
                 _a2a_ref_seq_q = _a2a_source_event_seq(_a2a_session_info)
                 _a2a_title_q = ""
@@ -1754,26 +1710,33 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         },
                     },
                 }
-                _qseq = _append_queue_event(
-                    repo_key=repo_key, event_type="a2a_event", title=_a2a_title_q,
-                    issue_id=f"#{issue_number}", source="a2a", agent_type=agent_name,
-                    actor="", summary=f"A2A: → {agent_name} (queued)",
-                    payload=_q_payload, status="queued", idempotency_key=_idem_key)
+                _qseq = append_queued_a2a_event(
+                    repo_key, issue_id=f"#{issue_number}", agent_type=agent_name,
+                    title=_a2a_title_q, summary=f"A2A: → {agent_name} (queued)",
+                    payload=_q_payload, context_key=_a2a_ctx_key,
+                    idempotency_key=_idem_key)
                 if _qseq < 0:
-                    _dupq = find_event_by_idempotency_key(repo_key, _idem_key)
+                    _reused_seq = -_qseq
+                    log.info(f"A2A: queue idempotent hit — reuse queued seq={_reused_seq}")
                     return JSONResponse(status_code=200, content={
-                        "status": "ok", "seq": 0, "agent": (_dupq or {}).get("agent_type") or agent_name,
-                        "idempotent": True, "queued": True,
-                        "queue_seq": -_qseq, "existing_seq": _existing_seq,
-                        "message": "duplicate idempotency_key, existing event returned",
-                        "event": {"seq": -_qseq, "status": (_dupq or {}).get("status", ""),
-                                  "agent": (_dupq or {}).get("agent_type", ""),
-                                  "issue_id": (_dupq or {}).get("issue_id", ""),
-                                  "created_at": (_dupq or {}).get("created_at", "")},
+                        "status": "ok", "seq": 0, "agent": agent_name,
+                        "skipped": "queued", "queued": True, "idempotent": True,
+                        "reason": "active_a2a_event",
+                        "existing_seq": _existing_seq, "queue_seq": _reused_seq,
+                        "message": "same context already queued; existing queued event returned",
+                        "event": {"seq": _reused_seq, "status": "queued",
+                                  "agent": agent_name, "issue_id": f"#{issue_number}"},
                     })
                 if not _qseq:
                     log.error(f"A2A: queue event store failed for agent={agent_name}, issue=#{issue_number}")
                     return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A"})
+                # 审查修复①：覆盖「活跃判定 → 排队落库」竞态窗口——若前序在间隙内已终态，
+                # 终态钩子已在本次写入前执行完，排队行将无人派发；此处立即对账兜底。
+                try:
+                    from src.api.event_pipeline import reconcile_queued_a2a
+                    reconcile_queued_a2a(repo_key)
+                except Exception as _re:
+                    log.warning(f"A2A: queue reconcile after enqueue failed: {_re}")
                 log.info(f"A2A: queued (issue=#{issue_number} agent={agent_name} "
                          f"queue_seq={_qseq} existing_seq={_existing_seq})")
                 return JSONResponse(status_code=200, content={

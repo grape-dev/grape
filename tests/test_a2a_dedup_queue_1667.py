@@ -235,3 +235,67 @@ class TestA2ADedupQueue1667:
         from src.api.event_store import update_event_complete
         update_event_complete(first_seq, "completed", result="前序完成")
         assert self._tasks_for(queue_seq) == [], "被 force 取代的排队事件不应再派发"
+
+    def test_reconcile_dispatches_stranded_queued_after_terminal_bypass(self):
+        client = self._setup()
+        first = client.post("/api/a2a", json=self._body(context="旁路终态上下文"))
+        first_seq = first.json()["seq"]
+        assert first_seq > 0
+        q = client.post("/api/a2a", json=self._body(context="旁路终态上下文", queue=True)).json()
+        queue_seq = q["queue_seq"]
+        assert queue_seq > 0
+
+        # 模拟直接 SQL 写终态的旁路（如 runtime 任务级联 / issues admin 确认）：
+        # 不经过 update_event_* 终态钩子，排队行不会收到 drain 通知。
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE events SET status='completed', completed_at=datetime('now'), "
+                "result='bypass' WHERE seq=?", (first_seq,))
+            db.commit()
+
+        from src.api.event_pipeline import reconcile_queued_a2a
+        drained = reconcile_queued_a2a()
+        assert queue_seq in drained
+        assert self._event(queue_seq)["status"] == "running"
+        assert len(self._tasks_for(queue_seq)) == 1
+
+        # 幂等：再次对账不应重复派发
+        reconcile_queued_a2a()
+        assert len(self._tasks_for(queue_seq)) == 1
+
+    def test_queue_insert_atomic_under_concurrency(self):
+        client = self._setup()
+        first = client.post("/api/a2a", json=self._body(context="并发排队上下文"))
+        first_seq = first.json()["seq"]
+        assert first_seq > 0
+        with db_lock:
+            c = db.cursor()
+            _rk = c.execute("SELECT repo_key FROM events WHERE seq=?", (first_seq,)).fetchone()[0]
+
+        from concurrent.futures import ThreadPoolExecutor
+        from src.api.a2a_context import a2a_context_key
+        from src.api.event_store import append_queued_a2a_event
+
+        ctx_key = a2a_context_key("", "并发排队上下文")
+
+        def _enqueue(_i):
+            return append_queued_a2a_event(
+                _rk, issue_id="#5", agent_type="coding", title="t",
+                summary="s",
+                payload={"issue_number": "5", "context": "并发排队上下文",
+                         "_a2a_queue": {"existing_seq": first_seq,
+                                        "dispatch": {"evt": {}}}},
+                context_key=ctx_key)
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(_enqueue, range(8)))
+        positives = [r for r in results if r > 0]
+        assert len(positives) == 1, f"并发同上下文应只插入一行排队事件, got {results}"
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT seq FROM events WHERE repo_key=? AND issue_id='#5' "
+                "AND agent_type='coding' AND event_type='a2a_event' AND status='queued'",
+                (_rk,)).fetchall()
+        assert len(rows) == 1
