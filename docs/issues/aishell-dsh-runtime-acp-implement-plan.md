@@ -84,7 +84,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ## 3. 已踩坑（实施必读，全部真机实证）
 
-① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（如 self-hosted provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ set_config_option 字段名是 **id** 非 configId；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）；⑦ **systemd 服务 PATH 不含 ~/.local/bin**（E2E 实证）：pip --user 安装的 CLI（aishell 即如此）人登录可见、服务进程不可见，且 install-worker.sh 重装会重置 unit PATH——由 §2.1 #9 的 Linux 发现兜底根治，不依赖运维改 PATH。
+① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（如 self-hosted provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ session/set_config_option 的 RPC 参数键是 **configId** 非 id（2026-11-07 Windows aishell 0.0.2 真机复测：传 `id` 报 -32602 `Invalid input: expected string, received undefined`，传 `configId` 通过）；**「id」指的是 configOptions 列表里模型选项自身的标识字段**（据此过滤 `id=="model"`），不是 RPC 参数键——勿按旧表述改反代码；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）；⑦ **systemd 服务 PATH 不含 ~/.local/bin**（E2E 实证）：pip --user 安装的 CLI（aishell 即如此）人登录可见、服务进程不可见，且 install-worker.sh 重装会重置 unit PATH——由 §2.1 #9 的 Linux 发现兜底根治，不依赖运维改 PATH。
 
 ### 3.1 已踩坑增补（2026-11-07 A2A 全链实测，独立于分期计划，接入任何引擎前必读）
 
@@ -255,7 +255,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 | 项 | 方案（已定） | 依据 |
 |---|---|---|
-| usage token 解析 | 解析 `~/.aishell/sessions/\<cwd\>/\<sid\>/session.v4.jsonl.zstd`（含 inputTokens/outputTokens/cacheReadTokens）；每任务独立文件无需 watermark/baseline；fail-open：v4 漂移/zstd 缺失返回 []+告警。zstd 依赖三级：zstandard 包 → zstd CLI → 缺口 | 账本位置已实测；opencode（SQLite）/hwcloud（日志）同为先例 |
+| usage token 解析 | 解析 `~/.aishell/sessions/\<cwd\>/\<sid\>/session.v4.jsonl.zstd`（含 inputTokens/outputTokens/cacheReadTokens）；每任务独立文件无需 watermark/baseline；fail-open：v4 漂移/zstd 缺失返回 []+告警。zstd 依赖三级：zstandard 包 → zstd CLI → 缺口。**Windows 目录名映射（2026-11-07 实测）**：`\<cwd\>` 段是压扁路径——`C:\Users\<user>\AppData\Local\Temp` → `--C-Users-ZJ-AppData-Local-Temp--`（`:`→`-`、`\`→`-`、首尾各补 `-`），解析器必须按同规则映射 cwd，映射不到时回退目录扫描（并入 fail-open） | 账本位置已实测；opencode（SQLite）/hwcloud（日志）同为先例 |
 | 技能投送 | 物化 dest 按引擎切换：aishell-dsh → `<cwd>/.dsh/skills`（**已实证引擎自动读取**：真实 SKILL.md 投放后会话识别技能名与内容）；无需软链/双写/env（skillsRoot 硬编码不可配已核实）。engine_skill_dirs 挂 ~/.dsh/skills 供卡片扫描 | asar 逆向 + 真机投放验证 |
 | resume chat | session/close → 跨进程 session/resume → 续聊上下文保留（已验证），configOptions 保留 | 另立 issue（阶段 4） |
 | Windows 路径 | os_adapter _ENGINE_WINDOWS_PATHS 条目（Linux 一期仅 PATH） | — |
