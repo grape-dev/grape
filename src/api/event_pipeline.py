@@ -4192,6 +4192,8 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
     #    + 官方技能包回退 + 降级标注（evt._skill_materialize / prompt 降级说明），不静默空注入。
     skill_dir = os.path.join(ws, ".skills")
     try:
+        _primary_meta = {}  # Issue #1635：记录主渠道技能来源（skill_id/scope）
+
         def _skill_primary():
             _skill_local = ""  # 本地技能根目录（非空则 copytree）
             from src.user.db import get_skill_by_id, get_skill_path
@@ -4199,6 +4201,8 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             if _skill_id:
                 _sk = get_skill_by_id(_skill_id)
                 if _sk:
+                    _primary_meta["skill_id"] = int(_skill_id)
+                    _primary_meta["scope"] = _sk.get("scope") or ""
                     _okey = _sk.get("file_path") or ""
                     if _okey:
                         # OBS 技能：zip 根 = {skill_name}/，原子解压到 ws/.skills/
@@ -4247,7 +4251,9 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
             _mat = materialize_skill_with_fallback(
                 skill_dir, skill_name, _skill_primary,
-                agent_type=agent_type, agent_type_fallback=_agent_type_checker_resolver)
+                agent_type=agent_type, agent_type_fallback=_agent_type_checker_resolver,
+                scope=_primary_meta.get("scope") or "",
+                skill_type=agent_type, skill_id=_primary_meta.get("skill_id") or 0)
             # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
             evt["_skill_materialize"] = _mat
             if _mat.get("status") in ("fallback", "degraded"):

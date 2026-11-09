@@ -965,7 +965,7 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
             _full = ""
         if _full:
             from src.runtime.skill_materialize import validate_skill_dir
-            ok, missing = validate_skill_dir(os.path.dirname(_full))
+            ok, missing, _extra, _vd = validate_skill_dir(os.path.dirname(_full))
             if ok:
                 return True, "local skill dir ok", sid
             _src = (f"obs storage unavailable (key={_okey})" if _storage_unavailable else

@@ -318,7 +318,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             from src.runtime.task_log_stream import build_skill_source_message as _bssm
             _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
                              _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
-                             reason=_sk_src.get("reason") or "")
+                             reason=_sk_src.get("reason") or "",
+                             source_info=_sk_mat.get("source") or None,
+                             drift=_sk_mat.get("drift") or None)
             agent_logs.append({
                 "time": datetime.utcnow().isoformat(),
                 "type": "skill_source",

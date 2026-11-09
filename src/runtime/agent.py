@@ -2034,6 +2034,16 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
     try:
         # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
         _skill_notes = []
+        # Issue #1635：来源溯源 + 双向漂移校验（scope 由 skill_id 解析，失败则跳过）
+        _skill_id = int(task.get("skill_id") or 0)
+        _skill_scope = ""
+        try:
+            if _skill_id:
+                from src.user.db import get_skill_by_id
+                _skill_scope = (get_skill_by_id(_skill_id) or {}).get("scope") or ""
+        except Exception as _sse:
+            log.warning(f"[skill] scope resolve failed: {_sse}")
+        _skill_meta: dict = {}
 
         def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
             """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。
@@ -2123,7 +2133,8 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
             from src.runtime.skill_materialize import materialize_skill_zip_atomic
             raw = _b64.b64decode(skill_zip_b64)
-            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
+            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(
+                skill_dir, raw, baseline_dir="", scope=_skill_scope, meta=_skill_meta)
             # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
             # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
             #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
@@ -2191,7 +2202,9 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
             _per_skill = []  # [(skill_name, ok, reason)]
             for _sn, files in skill_files.items():
-                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
+                _ok_s, _r_s = materialize_skill_files_atomic(
+                    skill_dir, _sn, files or {},
+                    baseline_dir="", scope=_skill_scope, meta=_skill_meta)
                 _per_skill.append((_sn, _ok_s, _r_s))
                 if not _ok_s:
                     log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
@@ -2220,6 +2233,18 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                                          _reason, stage="skill_files")
         if _skill_notes:
             prompt += "".join(_skill_notes)
+        # Issue #1635：物化成功（含回退）→ 计算最终来源与漂移，供执行前来源行上报
+        _final_skill = task.get("skill") or ""
+        if _final_skill and os.path.isfile(os.path.join(
+                skill_dir, _final_skill, "SKILL.md")):
+            try:
+                from src.runtime.skill_materialize import build_skill_drift_and_source
+                _skill_meta.update(build_skill_drift_and_source(
+                    skill_dir, _final_skill, _skill_id, _skill_scope,
+                    task.get("agent_type") or ""))
+            except Exception as _sme:
+                log.warning(f"[skill] drift/source build failed: {_sme}")
+        task["_skill_materialize_meta"] = _skill_meta
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
         # Issue #607：物化异常分支同样写 FALLBACK.md 降级指引 + 留痕
@@ -2284,10 +2309,13 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
         _sv = verify_skill_execution_consistency(
             task.get("skill") or "", skill_dir, task.get("skill_fallback") or None,
             extra_scan_dirs=_extra_dirs)
+        _mm = task.get("_skill_materialize_meta") or {}
         try:
             await client.report_messages(tid, [build_skill_source_message(
                 _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
-                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))])
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""),
+                source_info=_mm.get("source") or None,
+                drift=_mm.get("drift") or None)])
         except Exception as _rme:
             log.warning(f"task {tid}: skill source log report failed: {_rme}")
         if not _sv.get("ok"):

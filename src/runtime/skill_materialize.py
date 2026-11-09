@@ -14,6 +14,7 @@ worker（runtime/agent.py 任务执行技能物化）两侧共用。零 DB 依�
   copytree 原子落盘；仍失败 → 降级（status=degraded），调用方在事件/prompt 中标注。
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -96,18 +97,170 @@ def parse_skill_md_references(skill_md_path: str, skill_name: str = "") -> list:
     return refs
 
 
-def validate_skill_dir(skill_dir: str, expected_files=None) -> tuple:
-    """校验技能目录完整性。
+# Issue #1635：物化包与仓库基线的双向漂移校验。
+MANIFEST_EXCLUDE_NAMES = {FALLBACK_FILENAME}
+_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+
+
+def collect_manifest(skill_dir: str) -> list:
+    """扫描技能目录内全部文件（相对路径、posix 分隔、排序）。
+
+    Issue #1635：用于物化包与仓库基线的逐文件比对。排除 ``.tmp`` 临时目录与
+    ``FALLBACK.md`` 降级指引（二者均非技能资产，不参与漂移判定）。
+    """
+    manifest = []
+    if not skill_dir or not os.path.isdir(skill_dir):
+        return manifest
+    for root, dirs, fnames in os.walk(skill_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(TMP_PREFIX)]
+        for fn in fnames:
+            if fn in MANIFEST_EXCLUDE_NAMES:
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, skill_dir).replace(os.sep, "/")
+            manifest.append(rel)
+    return sorted(manifest)
+
+
+def package_digest(skill_dir: str) -> str:
+    """技能包内容指纹：排序后的 ``rel+size`` 做 sha256，取前 16 位。
+
+    Issue #1635：仅依赖文件相对路径与字节大小，避免逐文件读内容带来的开销；
+    同一文件集/同一大小 → 同一 digest，可直接用于来源行与漂移判定。
+    """
+    h = hashlib.sha256()
+    for rel in collect_manifest(skill_dir):
+        try:
+            size = os.path.getsize(os.path.join(skill_dir, rel))
+        except OSError:
+            size = 0
+        h.update(f"{rel}\x00{size}\n".encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def read_skill_version(skill_dir: str) -> str:
+    """读取 SKILL.md frontmatter 的 ``version``（缺失/异常返回空串）。"""
+    skill_md = os.path.join(skill_dir or "", "SKILL.md")
+    try:
+        with open(skill_md, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except Exception:
+        return ""
+    # 仅解析 frontmatter 区块（首个 --- 与第二个 --- 之间）
+    m = re.match(r"^\s*---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
+    body = m.group(1) if m else text
+    vm = re.search(r"(?m)^\s*version\s*:\s*['\"]?([^'\"\s]+)", body)
+    return vm.group(1).strip() if vm else ""
+
+
+def _semver_tuple(version: str) -> tuple:
+    m = _SEMVER_RE.match((version or "").strip())
+    if not m:
+        return ()
+    return tuple(int(x) for x in m.groups())
+
+
+def resolve_baseline_dir(skill_name: str) -> str:
+    """官方基线目录（复用 resolve_official_skill_path 取 dirname）。缺失返回空串。"""
+    try:
+        from src.config import resolve_official_skill_path
+        p = resolve_official_skill_path(skill_name or "")
+        return os.path.dirname(p) if p else ""
+    except Exception:
+        return ""
+
+
+def _version_kind(pkg_version: str, base_version: str, has_file_diff: bool) -> str:
+    pkg_t, base_t = _semver_tuple(pkg_version), _semver_tuple(base_version)
+    if pkg_t and base_t:
+        if pkg_t > base_t:
+            return "baseline_lag"
+        if pkg_t < base_t:
+            return "stale_package"
+    return "content_mismatch" if has_file_diff else ""
+
+
+def compute_skill_drift(skill_dir: str, baseline_dir: str) -> dict:
+    """双向漂移报告：extra=包有基线无、missing=基线有包无、version=版本语义。
+
+    基线缺失 → ``baseline_available=False`` + ``kind=baseline_unavailable``，
+    仅做版本占位，不参与阻断（Issue #1635 风险表）。
+    """
+    pkg_manifest = collect_manifest(skill_dir)
+    pkg_version = read_skill_version(skill_dir)
+    if not baseline_dir or not os.path.isdir(baseline_dir):
+        return {"baseline_available": False, "extra": [], "missing": [],
+                "version": {"package": pkg_version or "unknown",
+                            "baseline": "unavailable",
+                            "kind": "baseline_unavailable"}}
+    base_manifest = collect_manifest(baseline_dir)
+    extra = sorted(set(pkg_manifest) - set(base_manifest))
+    missing = sorted(set(base_manifest) - set(pkg_manifest))
+    base_version = read_skill_version(baseline_dir)
+    kind = _version_kind(pkg_version, base_version, bool(extra or missing))
+    return {"baseline_available": True, "extra": extra, "missing": missing,
+            "version": {"package": pkg_version or "unknown",
+                        "baseline": base_version or "unknown",
+                        "kind": kind}}
+
+
+def drift_blocks(drift: dict, scope: str) -> bool:
+    """official 漂移处置：stale_package / content_mismatch → 阻断回退基线。
+
+    baseline_lag（包比基线新）只提示补基线，不阻断；baseline_unavailable 不阻断；
+    user/repo scope 定制合法，只告警不阻断。
+    """
+    if (scope or "") != "official" or not isinstance(drift, dict):
+        return False
+    if not drift.get("baseline_available"):
+        return False
+    kind = (drift.get("version") or {}).get("kind") or ""
+    return kind in ("stale_package", "content_mismatch")
+
+
+def drift_summary(drift: dict) -> str:
+    """漂移一句话摘要（日志/来源行共用）。"""
+    if not isinstance(drift, dict) or not drift.get("baseline_available"):
+        return "baseline_unavailable"
+    ver = drift.get("version") or {}
+    return (f"extra={drift.get('extra') or []} missing={drift.get('missing') or []} "
+            f"package={ver.get('package')} baseline={ver.get('baseline')} "
+            f"kind={ver.get('kind') or 'none'}")
+
+
+def build_skill_drift_and_source(skill_dir: str, skill_name: str, skill_id: int = 0,
+                                 scope: str = "", skill_type: str = "",
+                                 baseline_dir: str = "") -> dict:
+    """构造 ``{drift, source}``（物化结果增补字段，Issue #1635）。
+
+    source 含 skill_id/scope/type/version/digest，供 ``[skill] source`` 来源行透传。
+    """
+    d = os.path.join(skill_dir, skill_name) if skill_name else skill_dir
+    base = baseline_dir if baseline_dir else resolve_baseline_dir(skill_name)
+    return {
+        "drift": compute_skill_drift(d, base),
+        "source": {"skill_id": int(skill_id or 0), "scope": scope or "unknown",
+                   "type": skill_type or "", "version": read_skill_version(d) or "unknown",
+                   "digest": package_digest(d)},
+    }
+
+
+def validate_skill_dir(skill_dir: str, expected_files=None, baseline_dir=None,
+                       scope: str = "") -> tuple:
+    """校验技能目录完整性（+ 可选基线漂移）。
 
     - SKILL.md 必须存在；
     - expected_files（技能定义清单，相对 skill_dir 的相对路径）逐一存在；
-    - SKILL.md 引用的 references/ 文件必须存在。
+    - SKILL.md 引用的 references/ 文件必须存在；
+    - ``baseline_dir`` 不为 None 时做双向漂移校验（空串=按技能名自动解析官方基线）。
 
-    返回 (ok, missing_list)。
+    返回 ``(ok, missing_list, extra_list, version_drift)``。``ok`` 仅反映完整性
+    （缺 SKILL.md/声明文件/引用）；漂移阻断由调用方按 scope 判定（见 drift_blocks）。
     """
     missing = []
     if not os.path.isdir(skill_dir):
-        return False, [skill_dir]
+        return False, [skill_dir], [], {"baseline_available": False, "extra": [],
+                                        "missing": [], "version": {}}
     skill_md = os.path.join(skill_dir, "SKILL.md")
     if not os.path.isfile(skill_md):
         missing.append("SKILL.md")
@@ -119,13 +272,46 @@ def validate_skill_dir(skill_dir: str, expected_files=None) -> tuple:
         for ref in parse_skill_md_references(skill_md):
             if not os.path.isfile(os.path.join(skill_dir, ref)):
                 missing.append(ref)
-    return (not missing), missing
+    extra = []
+    version_drift = None
+    if baseline_dir is not None:
+        base = baseline_dir or resolve_baseline_dir(
+            os.path.basename(os.path.normpath(skill_dir)))
+        drift = compute_skill_drift(skill_dir, base)
+        extra = drift.get("extra") or []
+        version_drift = drift
+    return (not missing), missing, extra, version_drift
+
+
+def _apply_baseline_check(skill_dir: str, skill_name: str, baseline_dir, scope: str,
+                          meta: dict | None) -> tuple:
+    """Issue #1635：物化包与官方基线双向漂移校验（三渠道共用）。
+
+    - 未传 baseline_dir 且 scope 为空 → 不做漂移校验（向后兼容旧调用）；
+    - official 命中 stale_package/content_mismatch → 返回 False（走既有回退）；
+    - user/repo 漂移 → 仅告警（定制合法但必须可见），不阻断。
+    返回 (ok, reason)。
+    """
+    if baseline_dir is None and not scope:
+        return True, ""
+    base = baseline_dir if baseline_dir else resolve_baseline_dir(skill_name)
+    drift = compute_skill_drift(skill_dir, base)
+    if isinstance(meta, dict):
+        meta.setdefault("drift", drift)
+    if drift_blocks(drift, scope):
+        return False, f"baseline drift blocked (scope={scope}): {drift_summary(drift)}"
+    if scope in ("user", "repo") and drift.get("baseline_available"):
+        kind = (drift.get("version") or {}).get("kind") or ""
+        if drift.get("extra") or drift.get("missing") or kind == "content_mismatch":
+            _log.warning(f"[skill] baseline drift (non-blocking, scope={scope}) "
+                         f"skill={skill_name}: {drift_summary(drift)}")
+    return True, ""
 
 
 def _atomic_install(tmp_dir: str, dst_dir: str) -> None:
     """tmp_dir 原子 rename 到 dst_dir；dst 已存在且合法则幂等跳过；空/坏 dst 先删。"""
     if os.path.isdir(dst_dir):
-        ok, _ = validate_skill_dir(dst_dir)
+        ok = validate_skill_dir(dst_dir)[0]
         if ok:
             _rmtree_safe(tmp_dir)
             return
@@ -136,9 +322,12 @@ def _atomic_install(tmp_dir: str, dst_dir: str) -> None:
     os.rename(tmp_dir, dst_dir)
 
 
-def materialize_skill_files_atomic(skills_root: str, skill_name: str, files: dict) -> tuple:
+def materialize_skill_files_atomic(skills_root: str, skill_name: str, files: dict,
+                                   baseline_dir=None, scope: str = "",
+                                   meta: dict | None = None) -> tuple:
     """skill_files 文本物化（老任务格式）：tmp 写盘 → 校验 → 原子 rename。
 
+    baseline_dir(空串=自动解析官方基线)/scope 非空时追加 Issue #1635 双向漂移校验。
     返回 (ok, reason)。
     """
     if not skill_name:
@@ -156,10 +345,15 @@ def materialize_skill_files_atomic(skills_root: str, skill_name: str, files: dic
             with open(dest, "w", encoding="utf-8") as f:
                 f.write(content if isinstance(content, str) else str(content))
             expected.append(rel)
-        ok, missing = validate_skill_dir(tmp_dir, expected)
+        ok, missing, _extra, _vd = validate_skill_dir(tmp_dir, expected)
         if not ok:
             _rmtree_safe(tmp_dir)
             return False, f"skill_files incomplete, missing: {', '.join(missing[:10])}"
+        _ok_drift, _drift_reason = _apply_baseline_check(
+            tmp_dir, skill_name, baseline_dir, scope, meta)
+        if not _ok_drift:
+            _rmtree_safe(tmp_dir)
+            return False, _drift_reason
         dst = os.path.join(skills_root, skill_name)
         _atomic_install(tmp_dir, dst)
         return True, ""
@@ -168,10 +362,13 @@ def materialize_skill_files_atomic(skills_root: str, skill_name: str, files: dic
         return False, f"skill_files materialize failed: {e}"
 
 
-def materialize_skill_zip_atomic(skills_root: str, zip_bytes: bytes) -> tuple:
+def materialize_skill_zip_atomic(skills_root: str, zip_bytes: bytes,
+                                 baseline_dir=None, scope: str = "",
+                                 meta: dict | None = None) -> tuple:
     """OBS 技能 zip 物化：tmp 解压（恢复 Unix 权限）→ 校验 → 逐技能原子 rename。
 
     zip 根 = {skill_name}/（可含多个顶层技能目录）。
+    baseline_dir(空串=按技能名自动解析)/scope 非空时逐技能做 Issue #1635 漂移校验。
     返回 (ok, skills_list, reason)。
     """
     if not zip_bytes:
@@ -204,10 +401,18 @@ def materialize_skill_zip_atomic(skills_root: str, zip_bytes: bytes) -> tuple:
                 for fn in fnames:
                     full = os.path.join(root, fn)
                     expected.append(os.path.relpath(full, src))
-            ok, missing = validate_skill_dir(src, expected)
+            ok, missing, _extra, _vd = validate_skill_dir(src, expected)
             if not ok:
                 reasons.append(f"{d}: missing {', '.join(missing[:10])}")
                 continue
+            _skill_meta = {}
+            _ok_drift, _drift_reason = _apply_baseline_check(
+                src, d, baseline_dir, scope, _skill_meta)
+            if not _ok_drift:
+                reasons.append(f"{d}: {_drift_reason}")
+                continue
+            if isinstance(meta, dict):
+                meta.setdefault("skills", {})[d] = _skill_meta
             _atomic_install(src, os.path.join(skills_root, d))
             installed.append(d)
         _rmtree_safe(tmp_root)  # 清掉未通过校验的残留
@@ -222,8 +427,13 @@ def materialize_skill_zip_atomic(skills_root: str, zip_bytes: bytes) -> tuple:
         return False, [], f"zip materialize failed: {e}"
 
 
-def materialize_skill_dir_atomic(skills_root: str, skill_name: str, src_dir: str) -> tuple:
-    """本地技能目录物化：copytree 到 tmp → 校验 → 原子 rename。返回 (ok, reason)。"""
+def materialize_skill_dir_atomic(skills_root: str, skill_name: str, src_dir: str,
+                                 baseline_dir=None, scope: str = "",
+                                 meta: dict | None = None) -> tuple:
+    """本地技能目录物化：copytree 到 tmp → 校验 → 原子 rename。返回 (ok, reason)。
+
+    baseline_dir(空串=自动解析)/scope 非空时追加 Issue #1635 双向漂移校验。
+    """
     if not skill_name or not os.path.isdir(src_dir):
         return False, f"local skill dir invalid: {src_dir}"
     os.makedirs(skills_root, exist_ok=True)
@@ -234,10 +444,15 @@ def materialize_skill_dir_atomic(skills_root: str, skill_name: str, src_dir: str
         for root, _dirs, fnames in os.walk(tmp_dir):
             for fn in fnames:
                 expected.append(os.path.relpath(os.path.join(root, fn), tmp_dir))
-        ok, missing = validate_skill_dir(tmp_dir, expected)
+        ok, missing, _extra, _vd = validate_skill_dir(tmp_dir, expected)
         if not ok:
             _rmtree_safe(tmp_dir)
             return False, f"local skill incomplete, missing: {', '.join(missing[:10])}"
+        _ok_drift, _drift_reason = _apply_baseline_check(
+            tmp_dir, skill_name, baseline_dir, scope, meta)
+        if not _ok_drift:
+            _rmtree_safe(tmp_dir)
+            return False, _drift_reason
         _atomic_install(tmp_dir, os.path.join(skills_root, skill_name))
         return True, ""
     except Exception as e:
@@ -295,7 +510,9 @@ def write_skill_fallback(skills_root: str, skill_name: str,
 
 def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
                                      agent_type: str = "",
-                                     agent_type_fallback=None) -> tuple:
+                                     agent_type_fallback=None,
+                                     scope: str = "", skill_type: str = "",
+                                     skill_id: int = 0, baseline_dir=None) -> tuple:
     """主渠道物化 + 官方技能包回退 + 降级状态。
 
     primary: 闭包，返回 (kind, payload)：
@@ -304,8 +521,10 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
         {"skill_name": str, "skill_id": int, "skill_dir": str} 或 None。
         按名未命中（官方库无该技能名）时按 agent_type 回退官方检查器；
         本模块零 DB 依赖，resolver 由服务端调用方注入。
+    scope/skill_type/skill_id/baseline_dir（Issue #1635，可选）：传入后启用双向
+        漂移校验（baseline_dir 空串=按技能名自动解析），结果增 ``drift`` 与 ``source``。
     返回 dict {"status": ok|fallback|degraded, "detail": str, "skill_dir": str,
-               "skill_id": int}（skill_id 为回退检查器技能 id，0=未知）。
+               "skill_id": int, "drift": dict, "source": dict}。
     """
     result = {"status": "degraded", "detail": "", "skill_dir": "", "skill_id": 0}
     try:
@@ -313,9 +532,14 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
     except Exception as e:
         kind, payload = "none", f"primary source error: {e}"
 
+    # baseline_dir=None 且未指定 scope → 不做漂移校验（向后兼容旧调用）
+    _baseline = baseline_dir if baseline_dir is not None else ("" if scope else None)
+    _meta: dict = {}
+
     ok, reason = False, ""
     if kind == "zip":
-        _zip_ok, _skills, reason = materialize_skill_zip_atomic(skills_root, payload or b"")
+        _zip_ok, _skills, reason = materialize_skill_zip_atomic(
+            skills_root, payload or b"", baseline_dir=_baseline, scope=scope, meta=_meta)
         ok = _zip_ok
         # Issue #564 review：zip 部分成功（或全成功）都必须确认目标 skill_name
         # 属于实际 installed 列表，否则视为未物化 → 进入官方包回退链。
@@ -326,13 +550,18 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
         if not ok and not reason:
             reason = "zip materialize failed"
     elif kind == "files":
-        ok, reason = materialize_skill_files_atomic(skills_root, skill_name, payload or {})
+        ok, reason = materialize_skill_files_atomic(
+            skills_root, skill_name, payload or {},
+            baseline_dir=_baseline, scope=scope, meta=_meta)
     elif kind == "dir":
-        ok, reason = materialize_skill_dir_atomic(skills_root, skill_name, payload)
+        ok, reason = materialize_skill_dir_atomic(
+            skills_root, skill_name, payload, baseline_dir=_baseline, scope=scope, meta=_meta)
 
     if ok:
         result["status"] = "ok"
         result["skill_dir"] = os.path.join(skills_root, skill_name) if skill_name else skills_root
+        result.update(build_skill_drift_and_source(
+            skills_root, skill_name, skill_id, scope, skill_type, baseline_dir or ""))
         return result
 
     # 主渠道失败/缺失 → 回退官方技能包（resolve_official_skill_path → 本地目录 copytree）
@@ -352,6 +581,8 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
             result["detail"] = f"primary skill source failed ({_fb_reason}); " \
                                f"materialized official skill package instead"
             result["skill_dir"] = os.path.join(skills_root, skill_name)
+            result.update(build_skill_drift_and_source(
+                skills_root, skill_name, skill_id, scope, skill_type, baseline_dir or ""))
             return result
         _fb_reason = f"{_fb_reason}; official fallback failed ({reason2})"
     else:
