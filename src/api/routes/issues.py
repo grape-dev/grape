@@ -975,6 +975,13 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
         except Exception as _e:
             log.warning(f"admin-confirm: sync events failed: {_e}")
         db.commit()
+    # Issue #1667：admin 终审直接 SQL 把 events 置 completed，绕过了终态钩子；
+    # 对账扫描兜底派发因此滞留的排队 A2A 事件（Spec 风险表要求）。
+    try:
+        from src.api.event_pipeline import reconcile_queued_a2a
+        reconcile_queued_a2a(repo_key)
+    except Exception as _qe:
+        log.warning(f"admin-confirm: a2a queue reconcile failed: {_qe}")
     return _synced
 
 

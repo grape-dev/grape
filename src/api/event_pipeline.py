@@ -16,6 +16,8 @@ from src.runtime.direct_executor import (
     start_direct_agent, _execute_agent, _execute_agent_inner,
 )
 
+_COMMENT_EVENT_TYPES = ("issue_comment", "note_hook_pr")
+
 
 def _get_task_repo_token(repo_key: str) -> str:
     """Issue #372 R2.4: 获取 task 行 repo_gitcode_token，区分 token 来源。
@@ -2768,7 +2770,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 评论是人操作、频率低，被「同 (issue,agent) 有 running 事件」的 dedup 挡掉会导致评论丢失；
     # 改为始终新建事件 + 入队（agent_tasks），由 issue_agent_session 的串行执行自然排队，
     # 待当前事件终态后再跑，不丢弃。bot 自评回声/系统回帖已在上游过滤，不会因豁免循环触发。
-    if issue_id and agent_type and event_type not in ("a2a_event", "issue_comment"):
+    if issue_id and agent_type and event_type not in (("a2a_event",) + _COMMENT_EVENT_TYPES):
         # 方案 A/C（duplicate-issue-opened-event-fix-design.md）：
         # - A：event_active_guard 唯一约束原子抢占（跨进程互斥，替代依赖进程内 db_lock 的
         #   "同 (repo,issue,agent) 无 running 事件" SELECT）；
@@ -2839,6 +2841,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     else:
         # a2a_event 或无 issue_id/agent_type：直接写入（无需 dedup）
         from src.api.event_store import append_event
+        _comment_cid = ""
+        _idem_key = ""
+        if event_type in ("issue_comment", "note_hook_pr"):
+            try:
+                from src.repo_key import parse_repo_key
+                from src.outbound_ledger import extract_event_content_id
+                _provider = parse_repo_key(repo_key)[0] if repo_key else ""
+                _comment_cid = extract_event_content_id(_provider, payload)
+                if _comment_cid:
+                    _idem_key = f"comment:{_comment_cid}"
+            except Exception as _ike:
+                log.warning(f"Pipeline: comment idempotency key build failed: {_ike}")
         _seq = append_event(
             repo_key=repo_key,
             event_type=event_type,
@@ -2852,7 +2866,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             status="pending",
             scene_id=_scene_id_for_event,
             entity_type=_entity_type,
+            idempotency_key=_idem_key,
         )
+        if _seq < 0:
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, "duplicate_comment_delivery",
+                                 detail=_comment_cid, issue_id=issue_id or "#0")
+            result["skipped"] = "duplicate_comment_delivery"
+            return result
     seq = _seq
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
     if seq and issue_id and agent_type and event_type != "a2a_event":
@@ -3449,6 +3470,233 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
         log.info(f"Pipeline: event {seq} -> failed ({_result[:80]})")
     except Exception as e:
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
+
+
+# 排队派发重入锁（Issue #1667 审查修复④）：
+# 终态钩子 → drain → 派发失败 _fail_event → 再次终态 → 钩子 的递归链在此短路；
+# 同一进程内并发终态回调也只会有一路执行 drain（其余跳过，排队行仍由原子抢占保证仅派发一次）。
+_A2A_DRAIN_LOCK = threading.Lock()
+# 仍视为「前序未结束」的状态：排队事件只在这些前序终态后才应派发。
+_A2A_PRIOR_ACTIVE = ("running", "dispatched", "queued")
+
+
+def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_id: str,
+                               payload: dict, qinfo: dict, prior_seq: int) -> bool:
+    """原子抢占一条排队事件（queued→running）并派发；返回是否成功派发。"""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE events SET status='running', started_at=? "
+                "WHERE seq=? AND status='queued'", (now_iso, qseq))
+            claimed = c.rowcount == 1
+            if claimed:
+                qinfo["dispatched_at"] = now_iso
+                payload["_a2a_queue"] = qinfo
+                c.execute("UPDATE events SET payload=? WHERE seq=?",
+                          (json.dumps(payload, ensure_ascii=False), qseq))
+            db.commit()
+    except Exception as _ce:
+        log.warning(f"a2a queue drain: claim failed queue_seq={qseq}: {_ce}")
+        return False
+    if not claimed:
+        return False
+    dispatch_info = qinfo.get("dispatch") or {}
+    if not isinstance(dispatch_info, dict):
+        dispatch_info = {}
+    skill_id = dispatch_info.get("skill_id") or 0
+    try:
+        skill_id = int(skill_id)
+    except Exception:
+        skill_id = 0
+    runtime_id = dispatch_info.get("runtime_id") or 0
+    try:
+        runtime_id = int(runtime_id)
+    except Exception:
+        runtime_id = 0
+    _issue_number = str(payload.get("issue_number") or (issue_id or "")).lstrip("#")
+    evt = dispatch_info.get("evt") or {}
+    if not isinstance(evt, dict):
+        evt = {}
+    try:
+        from src.api.a2a_dispatch import run_a2a_dispatch
+        result = run_a2a_dispatch(
+            repo_key, qseq, agent_type or "", evt,
+            skill_name=dispatch_info.get("skill_name") or (agent_type or ""),
+            skill_id=skill_id,
+            skill_path=dispatch_info.get("skill_path") or "",
+            runtime_id=runtime_id,
+            backend=dispatch_info.get("backend") or "",
+            issue_number=_issue_number,
+            repository=payload.get("repository") or "",
+            ref_seq=int(payload.get("ref_seq") or 0),
+        )
+        if not isinstance(result, dict) or result.get("status") == "failed" or not result.get("seq"):
+            _reason = (result or {}).get("error") if isinstance(result, dict) else ""
+            _fail_event(qseq, f"A2A 排队派发失败（queue_seq={qseq}，前序 seq={prior_seq}）: "
+                              f"{str(_reason or 'dispatch returned no task')[:200]}",
+                        diag={"code": "a2a_queue_dispatch_failed",
+                              "phase": "queue_drain", "ref_seq": prior_seq})
+            return False
+        log.info(f"a2a queue drain: dispatched queue_seq={qseq} "
+                 f"agent={agent_type} prior_seq={prior_seq}")
+        return True
+    except Exception as _de:
+        log.warning(f"a2a queue drain: dispatch exception queue_seq={qseq}: {_de}")
+        try:
+            _fail_event(qseq, f"A2A 排队派发异常（queue_seq={qseq}，前序 seq={prior_seq}）: "
+                              f"{str(_de)[:150]}",
+                        diag={"code": "a2a_queue_dispatch_exception",
+                              "phase": "queue_drain", "ref_seq": prior_seq})
+        except Exception:
+            pass
+        return False
+
+
+def _parse_queued_row(row):
+    """把 events 行解析为 (qseq, repo_key, agent_type, issue_id, payload, qinfo, linked_seq)。"""
+    qseq, repo_key, agent_type, issue_id, payload_raw = row
+    if not qseq or not repo_key:
+        return None
+    try:
+        payload = json.loads(payload_raw or "{}")
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    qinfo = payload.get("_a2a_queue") or {}
+    if not isinstance(qinfo, dict):
+        qinfo = {}
+    try:
+        _linked_seq = int(qinfo.get("existing_seq") or 0)
+    except Exception:
+        _linked_seq = 0
+    return qseq, repo_key, agent_type, issue_id or "", payload, qinfo, _linked_seq
+
+
+def drain_queued_a2a(prior_seq: int) -> list:
+    """Issue #1667：前序 A2A 事件终态后，派发等待在其后的排队 A2A 事件。
+
+    queue=true 的请求在命中活跃事件时先落一条 status='queued' 的 a2a_event
+    （payload._a2a_queue.existing_seq 关联前序事件），本函数在前序事件进入终态时
+    取出这些排队事件，原子置 running 并复用 run_a2a_dispatch 派发。
+
+    - 原子 UPDATE（status='queued' → 'running'）保证并发终态回调下「仅派发一次」；
+    - 派发失败 → _fail_event 置 failed（不无限重试，避免排障黑洞）；
+    - 查询按前序事件的 (repo, issue, agent) 收窄（不再全仓扫描，审查修复④）；
+    - 重入锁保证 drain 期间由 _fail_event 触发的二次终态钩子不递归；
+    - 无排队记录或查询失败 → 返回空列表，不影响终态写入主流程。
+    """
+    if not prior_seq:
+        return []
+    if not _A2A_DRAIN_LOCK.acquire(blocking=False):
+        log.info(f"a2a queue drain: another drain in progress, skip prior_seq={prior_seq}")
+        return []
+    dispatched = []
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key, issue_id, agent_type FROM events WHERE seq=? LIMIT 1",
+                      (prior_seq,))
+            _prior = c.fetchone()
+        if not _prior:
+            return []
+        _prior_repo, _prior_issue, _prior_agent = _prior[0] or "", _prior[1] or "", _prior[2] or ""
+        if not _prior_repo:
+            return []
+        _clauses = ["repo_key=?", "event_type='a2a_event'", "status='queued'"]
+        _params = [_prior_repo]
+        if _prior_issue:
+            _clauses.append("issue_id=?")
+            _params.append(_prior_issue)
+        if _prior_agent:
+            _clauses.append("agent_type=?")
+            _params.append(_prior_agent)
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, repo_key, agent_type, issue_id, payload FROM events WHERE "
+                + " AND ".join(_clauses) + " ORDER BY seq ASC", tuple(_params))
+            rows = c.fetchall() or []
+        for row in rows:
+            parsed = _parse_queued_row(row)
+            if not parsed:
+                continue
+            qseq, repo_key, agent_type, issue_id, payload, qinfo, _linked_seq = parsed
+            if _linked_seq != int(prior_seq):
+                continue
+            if _claim_and_dispatch_queued(qseq, repo_key, agent_type, issue_id,
+                                          payload, qinfo, prior_seq):
+                dispatched.append(qseq)
+        return dispatched
+    except Exception as _e:
+        log.warning(f"a2a queue drain: query/dispatch failed prior_seq={prior_seq}: {_e}")
+        return dispatched
+    finally:
+        _A2A_DRAIN_LOCK.release()
+
+
+def reconcile_queued_a2a(repo_key: str = "") -> list:
+    """Issue #1667：排队滞留兜底对账扫描（Spec 风险表要求）。
+
+    覆盖两类 drain 钩子触达不到的场景（审查修复①）：
+    - 前序事件经直接 SQL 写终态的旁路（runtime/service 任务级联、issues admin 确认）；
+    - 「活跃判定 → 排队落库」之间的竞态窗口：前序在间隙内完成，排队行落库时
+      已无「终态回调」可触发。
+
+    谓词：queued 事件的 `_a2a_queue.existing_seq` 指向的事件**不再活跃**
+    （不在 running/dispatched/queued，或已不存在）→ 立即按 drain 同样的原子抢占派发。
+    """
+    if not _A2A_DRAIN_LOCK.acquire(blocking=False):
+        log.info("a2a queue reconcile: another drain/reconcile in progress, skip")
+        return []
+    try:
+        with db_lock:
+            c = db.cursor()
+            if repo_key:
+                c.execute(
+                    "SELECT seq, repo_key, agent_type, issue_id, payload FROM events "
+                    "WHERE repo_key=? AND event_type='a2a_event' AND status='queued' "
+                    "ORDER BY seq ASC", (repo_key,))
+            else:
+                c.execute(
+                    "SELECT seq, repo_key, agent_type, issue_id, payload FROM events "
+                    "WHERE event_type='a2a_event' AND status='queued' ORDER BY seq ASC")
+            rows = c.fetchall() or []
+        parsed_rows = [p for p in (_parse_queued_row(r) for r in rows) if p]
+        if not parsed_rows:
+            return []
+        _prior_seqs = sorted({p[6] for p in parsed_rows if p[6]})
+        _prior_status = {}
+        if _prior_seqs:
+            _ph = ",".join("?" * len(_prior_seqs))
+            with db_lock:
+                c = db.cursor()
+                c.execute(f"SELECT seq, status FROM events WHERE seq IN ({_ph})",
+                          tuple(_prior_seqs))
+                for _s, _st in (c.fetchall() or []):
+                    _prior_status[int(_s)] = _st or ""
+        dispatched = []
+        for qseq, _repo, agent_type, issue_id, payload, qinfo, _linked_seq in parsed_rows:
+            if not _linked_seq:
+                # 无关联前序（历史/异常行）：无法判定，交由人工排障，不盲目派发
+                continue
+            _pst = _prior_status.get(_linked_seq)
+            if _pst in _A2A_PRIOR_ACTIVE:
+                continue
+            if _claim_and_dispatch_queued(qseq, _repo, agent_type, issue_id,
+                                          payload, qinfo, _linked_seq):
+                dispatched.append(qseq)
+        if dispatched:
+            log.info(f"a2a queue reconcile: dispatched {len(dispatched)} stranded queued "
+                     f"event(s) repo={repo_key or '*'}")
+        return dispatched
+    except Exception as _e:
+        log.warning(f"a2a queue reconcile failed repo={repo_key or '*'}: {_e}")
+        return []
+    finally:
+        _A2A_DRAIN_LOCK.release()
 
 
 # _pool_only_local_direct（方案B/方案A self-run 兜底）已随 self-run 块一并移除
