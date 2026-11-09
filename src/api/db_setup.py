@@ -896,6 +896,8 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     -- v3.0 新增字段
     agent_type      TEXT DEFAULT '',                     -- 执行快照
     findings_json   MEDIUMTEXT DEFAULT '',               -- findings list JSON
+    -- Issue #1546：执行记录直接持有的 agent_tasks.id（非 events.seq），反查唯一权威来源
+    agent_task_id   TEXT DEFAULT NULL,                   -- agent_tasks.id（字符串，空=历史行）
     -- Feishu subscription notification: terminal-state notify idempotency guard
     notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
 )
@@ -2915,6 +2917,30 @@ register_migration(
     name="add-branch-guard-pending-columns",
     kind="safe",
     fn=_fn_add_branch_guard_pending_columns,
+)
+
+
+def _fn_add_ap_exec_agent_task_id() -> None:
+    """Issue #1546：autopilot_executions 直接持有 agent_tasks.id（存量库幂等补列 + 索引）。
+
+    反查任务不再依赖 `event_seq`（= exec_id）与 events.seq 的跨序列撞号；索引
+    支撑按 agent_task_id 直连查询。列/索引已存在时正常返回并盖章，失败抛出由
+    迁移执行器跳过不盖章（幂等重试）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "autopilot_executions", "agent_task_id", "TEXT DEFAULT NULL")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ap_exec_agent_task "
+            "ON autopilot_executions(agent_task_id)")
+        db.commit()
+
+
+register_migration(
+    version="202611060003",
+    name="add-autopilot-exec-agent-task-id",
+    kind="safe",
+    fn=_fn_add_ap_exec_agent_task_id,
 )
 
 

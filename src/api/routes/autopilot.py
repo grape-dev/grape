@@ -535,13 +535,13 @@ def list_executions(
         exec_id = r[0]
         tid = r[1]
         issue_number = r[11] or ""
-        # 反查 agent_task_id（event_seq = exec_id，旧路径）
+        # 反查 agent_task_id（Issue #1546：agent_task_id 直连优先，历史空值受约束兜底）
         agent_task_id = ""
         try:
+            from src.runtime.scheduler import _get_exec_agent_task
             with db_lock:
                 c2 = db.cursor()
-                c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (exec_id,))
-                at_row = c2.fetchone()
+                at_row = _get_exec_agent_task(c2, exec_id)
                 if at_row:
                     agent_task_id = at_row[0]
         except Exception:

@@ -34,6 +34,9 @@ _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id �
 # 剩余工序经常超 30 分钟被误判 timeout_failed；配合判死前活跃流豁免（见 sweep）双保险。
 PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "5400"))
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
+# Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
+# 避免「回收器抢在真任务落库前判定终态」的竞态；时区解析规则同 _get_exec_agent_task。
+ZOMBIE_YOUNG_GRACE_SECONDS = 120
 
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
@@ -593,6 +596,18 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             _update_execution_result(exec_id, "failed", error="入队失败")
             return
 
+        # Issue #1546：执行记录直接持有 agent_tasks.id，反查不再依赖 event_seq 撞号。
+        # 回写失败只告警，不影响派发主流程（历史空值行走受约束兜底）。
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "UPDATE autopilot_executions SET agent_task_id=? WHERE id=?",
+                    (str(task_id), exec_id))
+                db.commit()
+        except Exception as _at_e:
+            log.warning(f"Autopilot exec {exec_id}: persist agent_task_id failed: {_at_e}")
+
         log.info(f"Autopilot exec {exec_id}: enqueued task_id={task_id}, waiting for worker...")
 
         # 远端执行是异步的，worker 认领后执行完会通过 report_messages/task_complete 回调更新 agent_tasks
@@ -990,6 +1005,80 @@ def _update_task_run_info(task_id: int, next_run: str):
         db.commit()
 
 
+def _parse_iso_aware(value):
+    """解析 ISO 时间串为 aware datetime（无时区按 UTC 补齐），失败返回 None。"""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace(" ", "T"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+_AGENT_TASK_SELECT = "id, status, result_text, exit_code, skill, env_extra, runtime_id"
+
+
+def _get_exec_agent_task(c, exec_row_or_id):
+    """按执行记录解析对应 agent_tasks 行（Issue #1546）。
+
+    - `agent_task_id` 非空：按任务主键 `id` 直查（唯一权威关联）；
+    - 为空（历史行）：受约束兜底 `event_seq=? AND event_type='autopilot_event'
+      AND created_at >= exec.started_at`（started_at 缺省用 created_at，aware
+      比较，解析失败视为不匹配）；
+    - 两路皆无 → 返回 None（调用方跳过，禁止退回裸 event_seq）。
+
+    返回列序：id, status, result_text, exit_code, skill, env_extra, runtime_id。
+    """
+    try:
+        if isinstance(exec_row_or_id, int):
+            _erow = c.execute(
+                "SELECT id, agent_task_id, started_at, created_at "
+                "FROM autopilot_executions WHERE id=?",
+                (exec_row_or_id,)).fetchone()
+            if not _erow:
+                return None
+        else:
+            _erow = exec_row_or_id
+        _exec_id = _erow[0]
+        _atid = (_erow[1] or "") if len(_erow) > 1 else ""
+        _started = (_erow[2] or "") if len(_erow) > 2 else ""
+        _created = (_erow[3] or "") if len(_erow) > 3 else ""
+    except Exception as e:
+        log.warning(f"Autopilot: resolve exec agent_task failed for {exec_row_or_id}: {e}")
+        return None
+
+    _atid = str(_atid).strip()
+    if _atid:
+        try:
+            return c.execute(
+                f"SELECT {_AGENT_TASK_SELECT} FROM agent_tasks WHERE id=? LIMIT 1",
+                (_atid,)).fetchone()
+        except Exception as e:
+            log.warning(f"Autopilot: lookup agent_task {_atid} failed: {e}")
+            return None
+
+    _since = _parse_iso_aware(_started) or _parse_iso_aware(_created)
+    if _since is None:
+        return None
+    try:
+        _rows = c.execute(
+            f"SELECT {_AGENT_TASK_SELECT}, created_at FROM agent_tasks "
+            "WHERE event_seq=? AND event_type='autopilot_event' "
+            "ORDER BY created_at DESC LIMIT 5",
+            (_exec_id,)).fetchall()
+    except Exception as e:
+        log.warning(f"Autopilot: legacy agent_task fallback failed for exec {_exec_id}: {e}")
+        return None
+    for _r in _rows:
+        _seen = _parse_iso_aware(_r[7])
+        if _seen is not None and _seen >= _since:
+            return _r[:7]
+    return None
+
+
 async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
                                      poll_interval: float = 10.0) -> str:
     """轮询 dispatched 状态的 exec 等待 worker 完成执行。
@@ -1009,23 +1098,19 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
         try:
             with db_lock:
                 c = db.cursor()
-                # 查 agent_tasks 按 event_seq=exec_id（含 skill/env_extra/runtime_id 供 evidence 校验）
-                row = c.execute(
-                    "SELECT status, result_text, exit_code, skill, env_extra, runtime_id "
-                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
-                    (exec_id,)
-                ).fetchone()
+                # Issue #1546：优先按 agent_task_id 直连，历史行受约束兜底；无命中跳过
+                row = _get_exec_agent_task(c, exec_id)
             if not row:
                 continue
-            _at_status = row[0] or ""
-            _result_text = row[1] or ""
-            _exit_code = row[2]
+            _at_status = row[1] or ""
+            _result_text = row[2] or ""
+            _exit_code = row[3]
             _at_task = {
                 "status": _at_status,
                 "result_text": _result_text,
-                "skill": row[3] or "",
-                "env_extra": row[4] or "",
-                "runtime_id": row[5] or 0,
+                "skill": row[4] or "",
+                "env_extra": row[5] or "",
+                "runtime_id": row[6] or 0,
             }
 
             if _at_status in ("completed", "success"):
@@ -1300,21 +1385,26 @@ def _reap_zombie_executions() -> None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id FROM autopilot_executions "
+                "SELECT id, agent_task_id, started_at, created_at "
+                "FROM autopilot_executions "
                 "WHERE status IN ('running', 'dispatched') "
                 "ORDER BY id DESC LIMIT 20"
             )
             stuck = c.fetchall()
         for row in stuck:
             _exec_id = row[0]
+            # Issue #1546 D1：年轻度保护——派发协程尚未 enqueue 落库时回收器已开跑，
+            # started_at/created_at 距今 < 120s 的执行本轮跳过，避免误判历史同号行。
+            _ref_ts = _parse_iso_aware(row[2]) or _parse_iso_aware(row[3])
+            if _ref_ts is None:
+                continue
+            _age = datetime.now(timezone.utc).timestamp() - _ref_ts.timestamp()
+            if _age < ZOMBIE_YOUNG_GRACE_SECONDS:
+                continue
             with db_lock:
                 c2 = db.cursor()
-                c2.execute(
-                    "SELECT id, status, result_text, exit_code, skill, env_extra, runtime_id "
-                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
-                    (_exec_id,)
-                )
-                at_row = c2.fetchone()
+                # Issue #1546：agent_task_id 直连优先，历史空值受约束兜底；无命中跳过
+                at_row = _get_exec_agent_task(c2, row)
             if not at_row:
                 continue
             _at_id = at_row[0]
@@ -1377,8 +1467,8 @@ def _reap_zombie_executions() -> None:
                         c3.execute(
                             "SELECT t.runtime_id, ar.status, ar.last_seen_at FROM agent_tasks t "
                             "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                            "WHERE t.event_seq=? ORDER BY t.created_at DESC LIMIT 1",
-                            (_exec_id,)
+                            "WHERE t.id=? LIMIT 1",
+                            (_at_id,)
                         )
                         _rt_row = c3.fetchone()
                     _rt_id = (_rt_row[0] or 0) if _rt_row else 0
