@@ -102,7 +102,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ### 3.2 Windows 适配踩坑增补（2026-11-07 Windows 真机实证，aishell 0.0.2 + grape win 适配）
 
-⑭ **aishell CLI 在 Windows 无 PATH 无 exe**：唯一入口是桌面安装内 `resources\runtime\cli\bin\aishell.cmd`（ELECTRON_RUN_AS_NODE=1 启动器，DSH_HOME 钉 `%USERPROFILE%\.aishell`，对齐 Linux 启动器）。发现链必须落 `_ENGINE_WINDOWS_PATHS["aishell"]` 兜底（§2.1 #9 的 Windows 对称）——未启动过桌面的机器用户 PATH 无该目录。`.cmd` 形态**不命中 issue #351 多行截断雷**：ACP 模式 argv 只有 `["acp"]`，prompt 走 stdin 不经 cmd 壳（find_cli 实测命中 + `--version` 0.0.2 通过）。
+⑭ **aishell CLI 在 Windows 无 PATH 无 exe**：唯一入口是桌面安装内 `resources\runtime\cli\bin\aishell.cmd`（ELECTRON_RUN_AS_NODE=1 启动器，DSH_HOME 钉 `%USERPROFILE%\.aishell`，对齐 Linux 启动器）。发现链兜底两层：`_ENGINE_WINDOWS_PATHS["aishell"]` 默认目录 + **Uninstall 注册表 `InstallLocation` 动态候选**（HKCU/HKLM 按 DisplayName 前缀 "AI Shell" 定位，装在非默认盘/目录仍可发现）——未启动过桌面的机器用户 PATH 无该目录，不可依赖。`.cmd` 形态**不命中 issue #351 多行截断雷**：ACP 模式 argv 只有 `["acp"]`，prompt 走 stdin 不经 cmd 壳（find_cli 实测命中 + `--version` 0.0.2 通过）。
 
 ⑮ **探活/会话 cwd 不得写死 `/tmp`**：Windows 无此目录，且报错错位——session/new 正常返回，到 prompt 才报 `working-directory: directory does not exist: "/tmp"`，易误判成模型/凭据问题。解法 `tempfile.gettempdir()`（跨平台）。同修：探活延迟单位统一为秒（曾以 ms 混进 `{latency}s` 日志打出 `29994s`）。
 
