@@ -110,6 +110,8 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ⑰ **模型凭据可全自包含，无需平台注入 env**：apiKeyEnv 的解析链为 credentials store → 进程 env → `<cwd>/.env` → **`$DSH_HOME/.env`**；Windows DSH_HOME 钉 `%USERPROFILE%\.aishell`，key 写 `~/.aishell/.env`（`<REF_NAME>=<key>`）即自包含——grape 服务不加载 .env 也能跑通探活与任务（无注入实测 probe ok）。自建 provider 配置行 id 为 `llm-pi-ai`（`providers: {<name>: {apiKeyEnv, api, baseURL, models}}`，api 取 openai-completions/openai-responses/anthropic-messages）；默认路由须同时改 `acp` 与 `agent-default-model` 两行，漏一行则 session/options 与实际路由不一致。
 
+⑱ **Windows `select()` 不能轮询管道（仅 socket）**：aishell_acp 的 select 读线程在 Windows 上首个循环即抛 `[WinError 10038] 在一个非套接字上尝试了一个操作`，reader 一起跑即死——**真任务 stdout 事件流全丢**（探活无感：agent.py 探活是独立 readline 读线程，导致「探活 ok、任务黑屏」的割裂假象）。解法：Windows 分支改专用阻塞 readline 线程（行即时投递、EOF 返回 b""），切行逻辑抽 `_feed()` 共用，POSIX select 路径不动（2026-11-07 真任务实证 + 修复后 E2E done exit=0 text=ok）。⚠️ `hwcloud_acp.py:410` 与 `hermes_acp.py:407` 存在同样的 select 轮询模式——这两个引擎在 Windows 上跑 ACP 任务会踩同一雷（未改，hwcloud/hermes 非 Windows 适配范围）。
+
 ## 4. 一期验收（三阶段，页面端到端）
 
 前置：测试项目仓库，worker 上旧 AI Shell(hwcloud) 与新 aishell 并存——全程「新旧对照」，旧行为逐字不变才算过。
