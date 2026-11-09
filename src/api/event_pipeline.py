@@ -828,7 +828,7 @@ def _inject_bot_agent_env(env_extra: dict, repo_key: str, agent_type: str) -> No
         pass
 
 
-_NOTE_HOOK_TITLE_PR_RE = re.compile(r"note_hook_pr\s*#\s*(\d+)", re.IGNORECASE)
+_PR_URL_NUMBER_RE = re.compile(r"/(?:merge_requests|pulls|pull)/(\d+)(?:[#/?]|$)")
 
 
 def _numeric_value(value) -> str:
@@ -837,13 +837,23 @@ def _numeric_value(value) -> str:
     return text if text.isdigit() else ""
 
 
-def _note_hook_pr_number(evt: dict, payload: dict) -> tuple[str, str]:
-    """Issue #1579：note_hook_pr 事件解析真实 PR 号。
+def _pr_number_from_url(*values) -> str:
+    """从 PR/MR 结构化 URL（.../merge_requests/<N>、.../pulls/<N>）提取编号。"""
+    for value in values:
+        match = _PR_URL_NUMBER_RE.search(str(value or ""))
+        if match and match.group(1) != "0":
+            return match.group(1)
+    return ""
 
-    返回 (PR 号, 来源)。来源：payload / subscription / title；解析失败返回 ("", "")。
-    payload 优先（顶层 pr_number → 订阅号 → merge_request/pull_request → Note Hook
-    noteable_iid），标题 `note_hook_pr #<N>` 作为兜底。不使用 object_attributes.iid：
-    Note Hook 的 iid 是评论自身 id，误用会把评论号当成 PR 号。
+
+def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, str]:
+    """Issue #1579：统一 PR 号解析链，note_hook_pr 与普通事件共用同一来源。
+
+    返回 (PR 号, 来源)。来源：payload（结构化字段，含 URL 兜底）；失败返回 ("", "")。
+    note_hook_pr 不使用 object_attributes.iid：Note Hook 中该字段是评论自身 id，
+    误用会把评论号当成 PR 号；改为从 object_attributes.url（.../merge_requests/<N>）
+    等结构化 URL 兜底。仅消费结构化字段，不从事件标题猜号——真实事件标题是 MR/Issue
+    标题（如 `fix: #1412 ...`），不含 `note_hook_pr #<N>` 标记。
     """
     merge_req = payload.get("merge_request")
     pull_req = payload.get("pull_request")
@@ -852,75 +862,39 @@ def _note_hook_pr_number(evt: dict, payload: dict) -> tuple[str, str]:
     pull_req = pull_req if isinstance(pull_req, dict) else {}
     obj_attrs = obj_attrs if isinstance(obj_attrs, dict) else {}
 
-    for value in (
+    candidates = [
         payload.get("pr_number"),
         evt.get("_pr_sub_pr_number"),
-        merge_req.get("iid"),
-        merge_req.get("number"),
-        pull_req.get("iid"),
-        pull_req.get("number"),
-        obj_attrs.get("noteable_iid"),
-    ):
+    ]
+    if event_type == "note_hook_pr":
+        candidates.extend([
+            merge_req.get("iid"),
+            merge_req.get("number"),
+            pull_req.get("iid"),
+            pull_req.get("number"),
+            obj_attrs.get("noteable_iid"),
+        ])
+    else:
+        candidates.extend([
+            pull_req.get("number"),
+            merge_req.get("number"),
+            obj_attrs.get("iid"),
+        ])
+    for value in candidates:
         num = _numeric_value(value)
         if num:
             return num, "payload"
 
-    for value in (evt.get("title"), obj_attrs.get("title"),
-                  merge_req.get("title"), pull_req.get("title")):
-        match = _NOTE_HOOK_TITLE_PR_RE.search(str(value or ""))
-        if match and match.group(1) != "0":
-            return match.group(1), "title"
+    url_num = _pr_number_from_url(
+        obj_attrs.get("url"),
+        merge_req.get("web_url"),
+        merge_req.get("url"),
+        pull_req.get("web_url"),
+        pull_req.get("url"),
+    )
+    if url_num:
+        return url_num, "url"
     return "", ""
-
-
-def _pr_detail_issue_number(info: dict, pr_number: str) -> str:
-    """从 PR 详情提取其关联 Issue 编号（分支 issue-N / 标题 / issues 列表）。"""
-    head = info.get("head")
-    branch = head.get("ref", "") if isinstance(head, dict) else ""
-    match = re.search(r"issue[-_](\d+)", str(branch or ""))
-    if match and match.group(1) != "0":
-        return match.group(1)
-    pseudo = {
-        "object_attributes": {
-            "iid": pr_number,
-            "title": info.get("title", ""),
-            "source_branch": branch,
-        },
-        "issues": info.get("issues"),
-    }
-    linked = resolve_pr_issue_id(pseudo, api_token="")
-    return _numeric_value(linked)
-
-
-def _validate_pr_issue_binding(repo_key: str, pr_number: str, issue_number: str) -> bool | None:
-    """校验 PR 是否关联到指定 Issue。
-
-    True=关联；False=明确不匹配；None=无法校验（无 token/网络/详情缺关联信息）。
-    仅标题兜底解析出的 PR 号需要该校验，payload 来源视为可信。
-    """
-    pr_num = _numeric_value(pr_number)
-    issue_num = _numeric_value(issue_number)
-    if not pr_num or not issue_num:
-        return None
-    try:
-        from src.user.db import get_repo_token_with_refresh
-        from src.repo_key import parse_repo_key
-        from src.vcs.api_client import VcsApiClient
-
-        token = get_repo_token_with_refresh(repo_key) or ""
-        if not token:
-            return None
-        provider, owner, repo = parse_repo_key(repo_key)
-        info = VcsApiClient(provider, token, owner, repo).get_pr(int(pr_num))
-        if not isinstance(info, dict) or info.get("error"):
-            return None
-        linked = _pr_detail_issue_number(info, pr_num)
-        if not linked:
-            return None
-        return linked == issue_num
-    except Exception as e:
-        log.warning(f"Pipeline env: validate PR #{pr_num} against issue #{issue_num} failed: {e}")
-        return None
 
 
 def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
@@ -938,9 +912,11 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     payload.merge_request.number（GitLab MR）→ payload.object_attributes.iid
     （GitLab hook），沿用 lstrip("#").isdigit() 校验。
 
-    Issue #1579：note_hook_pr 走独立解析——payload 优先（含 Note Hook
-    noteable_iid），标题 `note_hook_pr #<N>` 兜底；标题来源须与关联 Issue
-    校验，失败注入 PR_NUMBER_PARSE_FAILED=1 并告警，禁止用 ISSUE_NUMBER 顶替。
+    Issue #1579：note_hook_pr 与普通事件统一走 `_extract_pr_number` 解析链——
+    payload 结构化字段优先（含 Note Hook noteable_iid），缺失时从
+    object_attributes.url / merge_request、pull_request 的 URL（.../merge_requests/<N>）
+    兜底；不从事件标题猜号。解析失败注入 PR_NUMBER_PARSE_FAILED=1 并告警，
+    禁止用 ISSUE_NUMBER 顶替。
     """
     _issue_num = str(evt.get("issue_id", "") or (evt.get("payload", {}) or {}).get("issue_number", "") or "").lstrip("#")
     if _issue_num.isdigit():
@@ -965,30 +941,15 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
         log.info(f"Pipeline env: non-numeric issue_id '{_issue_num}', skip ISSUE_NUMBER/GRAPE_ISSUE_ID injection (Issue #528)")
     _payload = evt.get("payload", {}) or {}
     _event_type = str(evt.get("type", "") or evt.get("event_type", "") or "")
-    if _event_type == "note_hook_pr":
-        _pr_num, _pr_source = _note_hook_pr_number(evt, _payload)
-        if not _pr_num:
-            log.warning(f"Pipeline env: note_hook_pr PR number parse failed "
-                        f"(issue=#{_issue_num or '-'}, title={evt.get('title', '') or '-'})")
-            env_extra["PR_NUMBER_PARSE_FAILED"] = "1"
-        elif _pr_source == "title" and _validate_pr_issue_binding(repo_key, _pr_num, _issue_num) is False:
-            log.warning(f"Pipeline env: note_hook_pr title PR #{_pr_num} does not belong to "
-                        f"issue #{_issue_num}, skip PR_NUMBER injection")
-            env_extra["PR_NUMBER_PARSE_FAILED"] = "1"
-        else:
-            env_extra["PR_NUMBER"] = _pr_num
-        return
-    _pr_raw = (_payload.get("pr_number", "")
-               or evt.get("_pr_sub_pr_number", "")
-               or (( _payload.get("pull_request", {}) or {}).get("number", "") if isinstance(_payload.get("pull_request"), dict) else "")
-               or ((_payload.get("merge_request", {}) or {}).get("number", "") if isinstance(_payload.get("merge_request"), dict) else "")
-               or ((_payload.get("object_attributes", {}) or {}).get("iid", "") if isinstance(_payload.get("object_attributes"), dict) else "")
-               or "")
-    _pr_num = str(_pr_raw).lstrip("#")
-    if _pr_num.isdigit():
+    _pr_num, _pr_source = _extract_pr_number(evt, _payload, _event_type)
+    if _pr_num:
         env_extra["PR_NUMBER"] = _pr_num
-    elif _pr_num:
-        log.info(f"Pipeline env: non-numeric pr_number '{_pr_num}', skip PR_NUMBER injection (Issue #528)")
+        if _pr_source == "url":
+            log.info(f"Pipeline env: PR #{_pr_num} resolved from event URL (Issue #1579)")
+    elif _event_type == "note_hook_pr":
+        log.warning(f"Pipeline env: note_hook_pr PR number parse failed "
+                    f"(issue=#{_issue_num or '-'}, title={evt.get('title', '') or '-'})")
+        env_extra["PR_NUMBER_PARSE_FAILED"] = "1"
 
 
 def _norm_issue_id(s) -> str:

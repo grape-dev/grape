@@ -5,12 +5,11 @@ env_extra 仅注入 ISSUE_NUMBER，PR_NUMBER 缺失，Agent 只能从标题猜�
 
 验收：
 1. Note Hook payload 的 noteable_iid / merge_request.iid → PR_NUMBER 注入。
-2. payload 无 PR 字段时标题 `note_hook_pr #<N>` 兜底。
-3. 标题来源须与关联 Issue 校验；跨 Issue 不匹配 → 不注入并标记失败。
+2. payload 无 PR 字段时从结构化 URL（.../merge_requests/<N>、.../pulls/<N>）兜底。
+3. 事件标题是 MR/Issue 标题（如 `fix: #1412 ...`），不含 note_hook_pr 标记 → 不从标题猜号。
 4. 解析失败 → PR_NUMBER_PARSE_FAILED=1 + 告警，禁止用 ISSUE_NUMBER 顶替。
 5. 非 note_hook_pr 事件（含 a2a_event）注入逻辑不回归。
 """
-import src.api.event_pipeline as ep
 from src.api.event_pipeline import _inject_issue_pr_env
 
 _TEST_REPO = "gitcode:owner/repo"
@@ -57,27 +56,44 @@ class TestNoteHookPayloadSources:
         assert env.get("PR_NUMBER_PARSE_FAILED") == "1"
 
 
-class TestNoteHookTitleFallback:
-    def test_title_fallback_validated(self, monkeypatch):
-        monkeypatch.setattr(ep, "_validate_pr_issue_binding",
-                            lambda repo, pr, issue: True)
+class TestNoteHookUrlFallback:
+    def test_object_attributes_url_fallback(self):
+        """payload 无 PR 字段时，从 object_attributes.url 的 merge_requests/<N> 兜底。"""
         env = {}
-        _inject_issue_pr_env(env, _note_event(title="note_hook_pr #1011"), _TEST_REPO)
+        _inject_issue_pr_env(env, _note_event(payload={
+            "object_attributes": {
+                "noteable_type": "MergeRequest",
+                "url": "https://gitcode.com/owner/repo/merge_requests/1011",
+            },
+        }), _TEST_REPO)
         assert env.get("PR_NUMBER") == "1011"
         assert "PR_NUMBER_PARSE_FAILED" not in env
 
-    def test_title_fallback_fail_open_when_unverifiable(self, monkeypatch):
-        monkeypatch.setattr(ep, "_validate_pr_issue_binding",
-                            lambda repo, pr, issue: None)
+    def test_merge_request_web_url_with_note_anchor(self):
+        """merge_request.web_url 带 #note_ 锚点仍能提取 PR 号。"""
         env = {}
-        _inject_issue_pr_env(env, _note_event(title="note_hook_pr #1011"), _TEST_REPO)
+        _inject_issue_pr_env(env, _note_event(payload={
+            "merge_request": {
+                "web_url": "https://gitcode.com/owner/repo/merge_requests/1011#note_88",
+            },
+        }), _TEST_REPO)
         assert env.get("PR_NUMBER") == "1011"
 
-    def test_title_cross_issue_mismatch_marks_failed(self, monkeypatch):
-        monkeypatch.setattr(ep, "_validate_pr_issue_binding",
-                            lambda repo, pr, issue: False)
+    def test_pull_request_web_url_pulls_form(self):
+        """pulls/<N> 形态的 URL 同样可提取。"""
         env = {}
-        _inject_issue_pr_env(env, _note_event(title="note_hook_pr #1011"), _TEST_REPO)
+        _inject_issue_pr_env(env, _note_event(payload={
+            "pull_request": {"web_url": "https://gitcode.com/owner/repo/pulls/1011"},
+        }), _TEST_REPO)
+        assert env.get("PR_NUMBER") == "1011"
+
+    def test_title_marker_not_used_for_guessing(self):
+        """事件标题是 MR 标题，不含 note_hook_pr 标记，不得从标题猜 PR 号。"""
+        env = {}
+        _inject_issue_pr_env(env, _note_event(
+            title="fix: #1412 renumber issue865 migration and detect version collision",
+            payload={"object_attributes": {"noteable_type": "MergeRequest",
+                                           "iid": 88001}}), _TEST_REPO)
         assert "PR_NUMBER" not in env
         assert env.get("PR_NUMBER_PARSE_FAILED") == "1"
 
@@ -118,4 +134,17 @@ class TestNonNoteHookNoRegression:
         }, _TEST_REPO)
         assert env.get("ISSUE_NUMBER") == "1412"
         assert "PR_NUMBER" not in env
+        assert "PR_NUMBER_PARSE_FAILED" not in env
+
+    def test_pull_request_event_url_fallback(self):
+        """普通 PR 事件也走统一解析链：嵌套键缺失时 URL 兜底。"""
+        env = {}
+        _inject_issue_pr_env(env, {
+            "type": "pull_request_opened",
+            "issue_id": "#1412",
+            "payload": {"pull_request": {
+                "web_url": "https://gitcode.com/owner/repo/merge_requests/1011",
+            }},
+        }, _TEST_REPO)
+        assert env.get("PR_NUMBER") == "1011"
         assert "PR_NUMBER_PARSE_FAILED" not in env
