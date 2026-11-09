@@ -247,6 +247,23 @@ def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: i
     })
 
 
+def _augment_a2a_dispatch_response(result, seq: int, agent_name: str,
+                                   issue_number) -> dict:
+    """Issue #1691：成功派发响应补 `event`（seq/status/agent/issue_id）。
+
+    与幂等/排队响应口径一致，CLI 可直接读取下游派发状态，无需再猜 seq=0/ok 的语义。
+    失败或未建事件（seq<=0）不补，保持原响应。
+    """
+    if isinstance(result, dict) and result.get("status") == "ok" and seq > 0:
+        result.setdefault("event", {
+            "seq": seq,
+            "status": "running",
+            "agent": agent_name,
+            "issue_id": f"#{issue_number}" if issue_number else "",
+        })
+    return result
+
+
 def _a2a_source_event_seq(session_info) -> int:
     """取 A2A 调用方（源事件）seq：会话 token 的 session_key=调用方任务 id → agent_tasks.event_seq。
 
@@ -1820,13 +1837,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A"})
         log.info(f"A2A: event created, seq={seq}")
 
-        return run_a2a_dispatch(
+        _dispatch_result = run_a2a_dispatch(
             repo_key, seq, agent_name, evt,
             skill_name=skill_name, skill_id=skill_id, skill_path=skill_path,
             runtime_id=runtime_id or 0, backend=backend,
             issue_number=issue_number, repository=repository,
             ref_seq=_a2a_ref_seq,
         )
+        return _augment_a2a_dispatch_response(
+            _dispatch_result, seq, agent_name, issue_number)
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸
