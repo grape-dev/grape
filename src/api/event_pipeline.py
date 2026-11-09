@@ -16,6 +16,8 @@ from src.runtime.direct_executor import (
     start_direct_agent, _execute_agent, _execute_agent_inner,
 )
 
+_COMMENT_EVENT_TYPES = ("issue_comment", "note_hook_pr")
+
 
 def _get_task_repo_token(repo_key: str) -> str:
     """Issue #372 R2.4: 获取 task 行 repo_gitcode_token，区分 token 来源。
@@ -2768,7 +2770,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 评论是人操作、频率低，被「同 (issue,agent) 有 running 事件」的 dedup 挡掉会导致评论丢失；
     # 改为始终新建事件 + 入队（agent_tasks），由 issue_agent_session 的串行执行自然排队，
     # 待当前事件终态后再跑，不丢弃。bot 自评回声/系统回帖已在上游过滤，不会因豁免循环触发。
-    if issue_id and agent_type and event_type not in ("a2a_event", "issue_comment"):
+    if issue_id and agent_type and event_type not in (("a2a_event",) + _COMMENT_EVENT_TYPES):
         # 方案 A/C（duplicate-issue-opened-event-fix-design.md）：
         # - A：event_active_guard 唯一约束原子抢占（跨进程互斥，替代依赖进程内 db_lock 的
         #   "同 (repo,issue,agent) 无 running 事件" SELECT）；
@@ -2839,6 +2841,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     else:
         # a2a_event 或无 issue_id/agent_type：直接写入（无需 dedup）
         from src.api.event_store import append_event
+        _comment_cid = ""
+        _idem_key = ""
+        if event_type in ("issue_comment", "note_hook_pr"):
+            try:
+                from src.repo_key import parse_repo_key
+                from src.outbound_ledger import extract_event_content_id
+                _provider = parse_repo_key(repo_key)[0] if repo_key else ""
+                _comment_cid = extract_event_content_id(_provider, payload)
+                if _comment_cid:
+                    _idem_key = f"comment:{_comment_cid}"
+            except Exception as _ike:
+                log.warning(f"Pipeline: comment idempotency key build failed: {_ike}")
         _seq = append_event(
             repo_key=repo_key,
             event_type=event_type,
@@ -2852,7 +2866,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             status="pending",
             scene_id=_scene_id_for_event,
             entity_type=_entity_type,
+            idempotency_key=_idem_key,
         )
+        if _seq < 0:
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, "duplicate_comment_delivery",
+                                 detail=_comment_cid, issue_id=issue_id or "#0")
+            result["skipped"] = "duplicate_comment_delivery"
+            return result
     seq = _seq
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
     if seq and issue_id and agent_type and event_type != "a2a_event":
