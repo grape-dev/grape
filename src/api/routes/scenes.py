@@ -645,6 +645,11 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     except Exception:
         nodes = []
 
+    # Issue #1564 R2：应用市场模板前以「应用者身份」复核技能 scope——
+    # 本人 user 技能放行（派发身份即本人），他人 user 技能 400。
+    _validate_scene_skill_scope(
+        nodes, repo_key, user.get("username") or "", user.get("id") or "")
+
     # 检查场景引用的 skill 是否都存在（基于 scene_skill_ref 的 skill_id 查 skill 表）
     from src.session_manager import db, db_lock
     with db_lock:
@@ -1319,6 +1324,11 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # 节点进 repo 场景，不能留脏数据入库通道）
     _validate_scene_node_roles(body.nodes)
 
+    # Issue #1564 R1：市场模板为全仓共享配置，保存即强制拒绝 user scope（含创建者本人）
+    _validate_scene_skill_scope(
+        body.nodes, repo_key, user.get("username") or "", user.get("id") or "",
+        allow_own_user=False)
+
     nodes_json = json.dumps(body.nodes, ensure_ascii=False)
 
     try:
@@ -1390,6 +1400,13 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     # Issue #955：市场场景更新同样校验节点 id 角色枚举（与 create 口径一致）
     if body.nodes:
         _validate_scene_node_roles(body.nodes)
+
+    # Issue #1564 R1：市场模板保存强制拒绝 user scope（含创建者本人）；
+    # update 无 repo 入参，repo_key 取市场行自身归属。
+    if body.nodes:
+        _validate_scene_skill_scope(
+            body.nodes, scene.get("repo_key", ""), user.get("username") or "",
+            user.get("id") or "", allow_own_user=False)
 
     nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
 
@@ -1619,6 +1636,71 @@ def _delete_scene_icon_file(file_key: str):
                 os.remove(local_path)
         except Exception as e:
             log.warning(f"Scene icon delete (local): {e}")
+
+
+@router.get("/skill-scope-audit", operation_id="scenes_skill_scope_audit", summary="Audit scene skill scope", description="Read-only audit (Issue #1564): scans active repo scenes and reports nodes whose skill scope conflicts (user-scope skills referenced by repo-shared scenes). Returns violations[{scene_id,scene_name,node_id,node_tag,skill,actual_scope,expected_scope}] plus summary counts; never writes.")
+def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1, le=1000),
+                            user: dict = Depends(require_no_session_token)):
+    """存量场景技能 scope 只读体检（Issue #1564 R5）。
+
+    遍历该仓库 is_active=1 的 devops_pipeline_scene，逐节点校验技能 scope，
+    输出冲突清单与汇总计数。只读，不改写任何数据；维护者可按清单逐个修正。
+    审计口径取严格模式（user scope 一律计冲突），因为场景为全仓共享配置，
+    他人应用/派发时必然无法解析。
+    """
+    repo_key = _resolve_scene_repo_key(repo, user)
+    if not repo_key:
+        raise HTTPException(status_code=400,
+                            detail={"code": 400, "message": "请先选择仓库"})
+    if not isinstance(limit, int) or limit < 1:
+        limit = 200
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT scene_id, name, display_name, nodes_json FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND is_active=1 ORDER BY id LIMIT ?",
+                (repo_key, limit))
+            rows = c.fetchall()
+        except Exception:
+            c.execute(
+                "SELECT scene_id, name, nodes_json FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND is_active=1 ORDER BY id LIMIT ?",
+                (repo_key, limit))
+            rows = [(r[0], r[1], "", r[2]) for r in c.fetchall()]
+    violations = []
+    conflict_scenes = set()
+    for scene_id, name, display_name, nodes_json in rows:
+        try:
+            nodes = json.loads(nodes_json) if nodes_json else []
+        except Exception:
+            nodes = []
+        scene_name = display_name or name or scene_id
+        for v in _collect_scene_skill_scope_violations(
+                nodes, repo_key, allow_own_user=False):
+            violations.append({
+                "scene_id": scene_id,
+                "scene_name": scene_name,
+                "node_id": v["node_id"],
+                "node_tag": v["node_tag"],
+                "skill": v["skill"],
+                "actual_scope": v["actual_scope"],
+                "expected_scope": v["expected_scope"],
+            })
+            conflict_scenes.add(scene_id)
+    return {
+        "repo": repo_key,
+        "read_only": True,
+        "checked_scenes": len(rows),
+        "conflict_scenes": len(conflict_scenes),
+        "total_conflicts": len(violations),
+        "violations": violations,
+        "note": (
+            "只读体检：下列场景节点引用了 user 级技能，应用/派发时可能无法解析。"
+            "请改用 repo/official 级技能后重新保存场景；本接口不会改写任何数据。"
+        ) if violations else "只读体检：未发现技能 scope 冲突。",
+    }
 
 
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
@@ -2009,19 +2091,21 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
     return {"message": "场景已删除"}
 
 
-def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id=""):
-    """场景节点技能 scope 校验（Issue #657）：repo 级场景不可引用他人 user 级技能。
+def _collect_scene_skill_scope_violations(nodes: list, repo_key: str, username: str = "",
+                                          user_id="", allow_own_user: bool = True,
+                                          expected_scope: str = "repo") -> list:
+    """收集场景节点技能 scope 冲突（Issue #657 / #1564），不抛异常、一次返回全部冲突。
 
     仅当技能在 skill 表确以 user scope 存在（且无 repo/official 同名可用）时
-    拒绝；user scope 技能 owner==当前登录用户时放行（与 SRE 引擎校验同口径：
-    自己的个人资源可绑自己管理的场景，派发身份即本人可正常解析）。
+    判定冲突；allow_own_user=True 时 owner==当前登录用户的 user 技能放行
+    （repo 场景口径，派发身份即本人可正常解析）。市场模板保存路径传
+    allow_own_user=False，强制拒绝 user scope（含创建者本人）。
     skill.owner_id 历史上既存过数字 user_id 也存过 username，两种口径都比对。
-    技能不在 skill 表（官方内置包形态）维持原行为（存量场景兼容，
-    由派发侧 fail-fast 兜底）。校验失败抛 HTTPException(400)，
-    文案含「scope 不匹配」+ 技能名 + 双方 scope 值。
+    技能不在 skill 表（官方内置包形态）不计冲突（存量兼容，由派发侧 fail-fast 兜底）。
     """
     from src.user.db import get_skill_scope_info
     _self_marks = {m for m in (username or "", str(user_id or "")) if m}
+    violations = []
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -2032,19 +2116,62 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
             continue
         info = get_skill_scope_info(skill, repo_key)
         if info.get("found") and not info.get("matched"):
-            if info.get("scope") == "user" and (info.get("owner_id") or "") in _self_marks:
+            if (allow_own_user and info.get("scope") == "user"
+                    and (info.get("owner_id") or "") in _self_marks):
                 # #657 follow-up: 自己的个人技能放行（对齐 SRE 引擎 user scope 校验口径）
                 continue
-            tag = node.get("tag") or node.get("id") or ""
-            raise HTTPException(status_code=400, detail={
-                "code": 400,
-                "message": (
-                    f"节点 {tag} 引用技能 '{skill}' scope 不匹配："
-                    f"技能 scope={info.get('scope')}，场景 scope=repo，"
-                    f"repo 级场景不可引用他人的 user 级技能"
-                    + (f"（技能 owner={info.get('owner_id')}）" if info.get("owner_id") else "")
-                    + "，请改用本人个人技能或 repo/official 级技能"),
+            node_id = node.get("id") or node.get("tag") or ""
+            node_tag = node.get("tag") or node_id
+            violations.append({
+                "node_id": node_id or node_tag,
+                "node_tag": node_tag,
+                "skill": skill,
+                "actual_scope": info.get("scope") or "",
+                "expected_scope": expected_scope,
+                "owner_id": info.get("owner_id") or "",
             })
+    return violations
+
+
+def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id="",
+                                allow_own_user: bool = True, expected_scope: str = "repo"):
+    """场景节点技能 scope 校验（Issue #657 / #1564）：冲突时抛 HTTPException(400)。
+
+    Issue #1564：改为收集式校验，400 detail 一次性返回全部冲突节点
+    violations[{node_id,node_tag,skill,actual_scope,expected_scope}]（供前端整表单标红），
+    同时保留顶层 skill/actual_scope/expected_scope（兼容既有调用方）。
+    文案含「scope 不匹配」+ 技能名 + 双方 scope 值。
+    市场模板保存路径以 allow_own_user=False 强制拒绝 user scope（含创建者本人）。
+    """
+    violations = _collect_scene_skill_scope_violations(
+        nodes, repo_key, username=username, user_id=user_id,
+        allow_own_user=allow_own_user, expected_scope=expected_scope)
+    if not violations:
+        return
+    _msgs = []
+    for v in violations:
+        _m = (f"节点 {v['node_tag']} 引用技能 '{v['skill']}' scope 不匹配："
+              f"技能 scope={v['actual_scope']}，场景 scope=repo，")
+        if allow_own_user:
+            _m += "repo 级场景不可引用他人的 user 级技能"
+            if v.get("owner_id"):
+                _m += f"（技能 owner={v['owner_id']}）"
+            _m += "，请改用本人个人技能或 repo/official 级技能"
+        else:
+            _m += "市场模板为全仓共享配置，不可引用 user 级技能（含创建者本人），请改用 repo/official 级技能"
+        _msgs.append(_m)
+    _first = violations[0]
+    raise HTTPException(status_code=400, detail={
+        "code": 400,
+        "message": "；".join(_msgs),
+        "skill": _first["skill"],
+        "actual_scope": _first["actual_scope"],
+        "expected_scope": _first["expected_scope"],
+        "violations": [
+            {k: v[k] for k in ("node_id", "node_tag", "skill", "actual_scope", "expected_scope")}
+            for v in violations
+        ],
+    })
 
 
 @router.post("/apply/{owner}/{repo}", operation_id="scenes_apply", summary="Apply scene to repository", description="Applies a scene to a repository.")

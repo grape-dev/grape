@@ -1542,6 +1542,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
 function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   window._dashboardEditing = true;
   window._currentSceneId = sceneId;
+  window._sceneNodeViolations = {};
   // Issue #407: 持久化编辑模式状态（F5/idle 恢复用）
   _saveDashEditMode('edit', sceneId);
   const agents = dashData.agents || [];
@@ -1642,6 +1643,8 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
       });
     }
     node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
+    // Issue #1564：修正技能后即时清除该节点标红
+    _clearNodeScopeViolation(agentType);
     _saveEditDraft();
   };
 
@@ -1670,6 +1673,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     });
     API.put('/scenes/' + encodeURIComponent(sceneId) + '?repo=' + encodeURIComponent(owner + '/' + name), { nodes: nodesPayload }).then(() => {
       window._dashboardEditing = false;
+      window._sceneNodeViolations = {};
       // Issue #407: 保存成功后清除草稿与编辑模式状态
       _clearDashEditMode();
       _clearDashDraft(owner, name, 'edit', sceneId);
@@ -1717,7 +1721,18 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
           cardsContainer.innerHTML = _renderFlowCards(newNodes, refreshAgents, agentEngines, _agentOrder, _agentLabels, _colors, _descs, false, []);
         }
       }).catch(() => {});
-    }).catch(e => { window._dashboardEditing = false; app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
+    }).catch(e => {
+      window._dashboardEditing = false;
+      // Issue #1564：技能 scope 冲突 → 按 violations[] 对节点卡片标红，便于就地修正
+      var _viols = (e && e.detail && e.detail.violations) || [];
+      if (_viols.length) {
+        window._sceneNodeViolations = _indexScopeViolations(_viols);
+        if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
+        app.showToast((e.detail && e.detail.message) || I18N.t('dashboard.skill_scope_mismatch') || '技能 scope 不匹配，请修正标红节点');
+        return;
+      }
+      app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)}));
+    });
   };
 
   // 取消编辑 — 只恢复执行流程区域
@@ -1745,10 +1760,40 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
 }
 
 // 渲染编辑模式的流程卡片（带箭头，引擎按钮在下方）
+// Issue #1564：保存失败时按后端 400 violations[] 对节点卡片标红（node_id 优先，回退 node_tag）
+function _indexScopeViolations(violations) {
+  var map = {};
+  (violations || []).forEach(function(v) {
+    var k = (v && (v.node_id || v.node_tag)) || '';
+    if (k) map[k] = v;
+  });
+  return map;
+}
+
+function _scopeViolationHint(v) {
+  if (!v) return '';
+  var skill = _skillEsc(v.skill || '');
+  var actual = _skillEsc(v.actual_scope || '');
+  var expected = _skillEsc(v.expected_scope || 'repo');
+  return (I18N.t('dashboard.skill_scope_mismatch') || '技能 scope 不匹配') +
+    '：' + skill + '（' + actual + ' → ' + expected + '）';
+}
+
+function _clearNodeScopeViolation(agentType) {
+  if (window._sceneNodeViolations) delete window._sceneNodeViolations[agentType];
+  var card = document.querySelector('.ap-nd[data-node-id="' + agentType + '"]');
+  if (!card) return;
+  card.style.border = '';
+  card.style.boxShadow = '';
+  var hint = card.querySelector('.ap-nd-violation');
+  if (hint) hint.remove();
+}
+
 function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSub) {
   const colors = {vod:'#B07A8B',issue:'#B8857A',coding:'#7A92B0',qa:'#9A85A8',sre:'#B89B6A'};
   const descs = {vod:I18N.t('dashboard.desc_vod'),issue:I18N.t('dashboard.desc_issue'),coding:I18N.t('dashboard.desc_coding'),qa:I18N.t('dashboard.desc_qa'),sre:I18N.t('dashboard.desc_sre')};
   const canToggle = (tag) => tag !== 'vod' && tag !== 'issue';
+  const _violations = window._sceneNodeViolations || {};
   let html = '';
   editNodes.forEach((node, i) => {
     const tag = node.id || node.tag;
@@ -1792,7 +1837,9 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
       engineHtml = `<span style="font-size:11px;color:#86868b">none</span>`;
     }
 
-    html += `<div class="ap-nd" style="${enabled ? '' : 'opacity:.35;filter:grayscale(1)'}">
+    const _violation = _violations[tag];
+    const _violationStyle = _violation ? ';border:1.5px solid #ff3b30;box-shadow:0 0 0 3px rgba(255,59,48,.12)' : '';
+    html += `<div class="ap-nd" data-node-id="${tag}" style="${enabled ? '' : 'opacity:.35;filter:grayscale(1)'}${_violationStyle}">
       <div class="ap-nd-top" style="background:${bgColor}"></div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <span style="width:22px;height:22px;border-radius:6px;background:${bgColor}22;color:${bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
@@ -1809,6 +1856,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
         <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px">${I18N.t('dashboard.label_engine')||'引擎'}</div>
         ${engineHtml}
       </div>
+      ${_violation ? `<div class="ap-nd-violation" style="font-size:10px;color:#ff3b30;line-height:1.4;margin-top:6px;text-align:left;width:100%">${_scopeViolationHint(_violation)}</div>` : ''}
     </div>`;
     // 保留箭头
     if (i < editNodes.length - 1) {
@@ -2080,6 +2128,7 @@ function _enterCreateStandardMode(data, owner, name) {
   // 无可用个人机器时卡片保持亮态，徽章显示「没有可用的个人机器」并提供「重新检测个人机器」按钮
   let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', skill_display_name: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
   window._isCreateMode = true;
+  window._sceneNodeViolations = {};
   window._dashboardEditing = true;
 
   const el = document.getElementById('pageContent');
@@ -2290,6 +2339,8 @@ function _enterCreateStandardMode(data, owner, name) {
       });
     }
     node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
+    // Issue #1564：修正技能后即时清除该节点标红
+    _clearNodeScopeViolation(agentType);
     _saveCreateDraft();
   };
 
@@ -2436,7 +2487,18 @@ function _enterCreateStandardMode(data, owner, name) {
         _resetCreateMode();
         app.nav('dash');
       });
-    }).catch(e => { app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)})); });
+    }).catch(e => {
+      // Issue #1564：创建场景技能 scope 冲突 → 按 violations[] 对节点卡片标红
+      var _viols = (e && e.detail && e.detail.violations) || [];
+      if (_viols.length) {
+        window._sceneNodeViolations = _indexScopeViolations(_viols);
+        var _fc2 = document.getElementById('flowCardsContainer');
+        if (_fc2) _fc2.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
+        app.showToast((e.detail && e.detail.message) || I18N.t('dashboard.skill_scope_mismatch') || '技能 scope 不匹配，请修正标红节点');
+        return;
+      }
+      app.showToast(I18N.t('dashboard.save_failed', {msg: (e.detail?.message || e.message)}));
+    });
   };
 };
 
