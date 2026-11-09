@@ -351,9 +351,13 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
+    from src.prompt_builder import resolve_task_server_env
     env_extra = {
         "REPO_FULL_NAME": repository,
         "ACCOUNT": repository,
+        # Issue #1577：与事件/chat 同源注入两项服务基址，远端 autopilot worker
+        # 的业务命令免 --base-url 可用（direct 模式注入本机回环同样正确）。
+        **resolve_task_server_env(engine_id),
     }
     # 注入 custom_fields（自定义环境变量）和 work_branch
     _task_custom_fields = task.get("custom_fields") or ""
