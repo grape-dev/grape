@@ -2879,7 +2879,7 @@ def _fn_task_liveness_index_and_revived_at() -> None:
 
 
 register_migration(
-    version="202611050001",
+    version="202611080004",
     name="task-liveness-revived-at",
     kind="safe",
     fn=_fn_task_liveness_index_and_revived_at,
@@ -6126,6 +6126,10 @@ def _migrate_tables():
             # §6.4 追踪：trace_id（任务级轨迹）+ pipeline_trace_id（同一 issue 流程共享）
             _ensure_column(c, "agent_tasks", "trace_id", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "pipeline_trace_id", "TEXT DEFAULT ''")
+            # 架构守护 BLOCKED-2（2026-11-09）：MR-2 跨进程 trace 串联依赖该列。
+            # 之前只在 dev 库手工加列，新库/未 ALTER 的存量库会被 _avail 列过滤静默剔除，
+            # 导致 worker 取不到 traceparent、execute/finish 各自成为新根 trace。
+            _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
             # 告警策略层（P1-1）：规则侧节流/聚合/时段/升级 + 事件侧通知状态
             # P2-1 SLO：采样表补"在线"列（老库迁移；历史行只能为 0 = 数据不足）
             _ensure_column(c, "obs_runtime_samples", "online", "INTEGER NOT NULL DEFAULT 0")
