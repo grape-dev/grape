@@ -165,8 +165,11 @@ def _efficiency_uid_name_loader(c):
     return _load
 
 
-@router.get("/efficiency", operation_id="dashboard_efficiency", summary="Efficiency board",
-            description="Issue #1229: per-contributor aggregation for the current repo — "
+@router.get("/efficiency", operation_id="dashboard_efficiency", summary="Efficiency board (deprecated)",
+            deprecated=True,
+            description="**Deprecated（2026-11-09）**：由 `GET /efficiency/board`（flow efficiency 10 卡）"
+                        "取代，前端已切换；本端点保留 6 个月兼容期，仅返回旧的按协作者表。\n\n"
+                        "Issue #1229: per-contributor aggregation for the current repo — "
             "issues opened / completed (issue table, creator with assignee fallback) "
             "plus LLM token usage attributed via task->issue creator chain "
             "(obs_llm_usage run_kind='task'; total = input+output+cache_read+cache_write). "
@@ -331,6 +334,155 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
     out["completed_issues"] = sum(r["completed"] for r in rows)
     out["total_tokens"] = sum(r["total_tokens"] for r in rows)
     return out
+
+
+@router.get("/efficiency/board", operation_id="dashboard_efficiency_board",
+            summary="Efficiency flow board",
+            description="能效看板 2.0（flow efficiency）：净流入 / 总工作量 / 在制工作项 / "
+                        "本周完成 / 超龄未关 / 周吞吐与累计积压 / 周期时间，单请求一次返回。"
+                        "口径见 docs/weekly-10/efficiency-board-redesign-2026-11-09.md。")
+def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
+                              age_threshold_days: int = 7,
+                              group_by: str = "all",
+                              user: dict = Depends(require_org_member)):
+    """能效看板 2.0 聚合端点（P1 六段）。
+
+    - 净流入 / 吞吐：按 ISO 周（周一起算，CST）分桶，累计积压用 created/completed 回算，
+      不需要历史快照表。
+    - 在制 / 超龄：未关闭 = status 不在 (completed, cancelled)；「超龄」按龄期阈值，
+      **不是期限**——grape 没有 due date（payload 有字段但实测全空且未落库）。
+    - 周期时间：仅 completed 且有 completed_at 的样本，响应用 sample 暴露样本量。
+    - 任务交付：agent_tasks started_at→completed_at；group_by 切 all/completed/failed/
+      cancelled，非法值回退 all；by_status / by_agent_type 始终给全量拆分。
+    - 仓库隔离：repo 空 → 空态（不做全库聚合）；越权 → 沿用 check_repo_access 的 403/404。
+    - 任何查询异常不外抛，按段降级为空结果（与 /efficiency 同策略），不拖垮页面。
+    """
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    from src.observability.efficiency import build_board
+
+    repo_keys = []
+    repo_key_out = ""
+    if repo and repo.strip():
+        _base = repo.split(":", 1)[1] if ":" in repo else repo
+        repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_key_out = to_repo_key(_base)
+
+    if not repo_keys:
+        return build_board(None, [], repo_label="", weeks=weeks,
+                           age_threshold_days=age_threshold_days,
+                           delivery_group="all")
+
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key_out)
+
+    try:
+        _weeks = max(4, min(int(weeks or 12), 26))
+    except (TypeError, ValueError):
+        _weeks = 12
+    try:
+        _threshold = max(1, min(int(age_threshold_days or 7), 90))
+    except (TypeError, ValueError):
+        _threshold = 7
+    _group = (group_by or "all").strip().lower()
+    if _group not in ("all", "completed", "failed", "cancelled"):
+        _group = "all"
+
+    try:
+        with db_lock:
+            return build_board(db.cursor(), repo_keys, repo_label=repo_key_out,
+                               weeks=_weeks, age_threshold_days=_threshold,
+                               bot_names=_efficiency_bot_usernames(),
+                               delivery_group=_group)
+    except Exception as e:
+        log.warning(f"Dashboard efficiency board failed: {e}")
+        return {
+            "repo": repo_key_out, "empty": True, "error": "aggregation_failed",
+            "summary": {}, "net_flow": {}, "throughput": {},
+            "aging": {}, "cycle_time": {},
+        }
+
+
+def _eff_repo_keys(repo: str):
+    """repo 入参归一化 → (repo_keys, repo_key_out)。空入参返回空（仓库维度视图）。"""
+    from src.repo_key import to_repo_key
+    if not (repo and repo.strip()):
+        return [], ""
+    base = repo.split(":", 1)[1] if ":" in repo else repo
+    return [f"gitcode:{base}", f"github:{base}"], to_repo_key(base)
+
+
+@router.get("/efficiency/daily", operation_id="dashboard_efficiency_daily",
+            summary="Efficiency board daily drill-down",
+            description="某周按天拆解（新建/关闭/当日累计积压）：④本周完成、⑥周吞吐的点击下钻。"
+                        "week 为空取当前周；与看板同源回算，周值 = 该周 7 天之和。")
+def get_efficiency_daily(repo: str = "", week: str = "",
+                         user: dict = Depends(require_org_member)):
+    from datetime import datetime as _dt
+    from src.session_manager import db, db_lock
+    from src.observability.efficiency import (build_daily, parse_week_label,
+                                              _fetch_issue_rows, iso_week_label)
+
+    repo_keys, repo_key_out = _eff_repo_keys(repo)
+    if not repo_keys:
+        return {"repo": "", "empty": True, "message": "no_repo_selected", "days": []}
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key_out)
+
+    monday = parse_week_label(week) or parse_week_label(iso_week_label(_dt.now()))
+    if monday is None:
+        return {"repo": repo_key_out, "empty": True, "error": "invalid_week", "days": []}
+    try:
+        with db_lock:
+            out = build_daily(_fetch_issue_rows(db.cursor(), repo_keys), monday)
+        out["repo"] = repo_key_out
+        out["empty"] = False
+        return out
+    except Exception as e:
+        log.warning(f"Dashboard efficiency daily failed: {e}")
+        return {"repo": repo_key_out, "empty": True, "error": "aggregation_failed", "days": []}
+
+
+@router.get("/efficiency/issues", operation_id="dashboard_efficiency_issues",
+            summary="Efficiency board issue drill-down",
+            description="某卡片某一行对应的 issue 列表（含场景）：超龄未关/周期时间/积压龄期的点击下钻。"
+                        "kind=aging(按龄期桶) | overdue(超阈值) | cycle(按周期桶)；"
+                        "limit/offset 分页，total 为全量条数。")
+def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
+                          threshold_days: int = 7, limit: int = 20, offset: int = 0,
+                          user: dict = Depends(require_org_member)):
+    from src.session_manager import db, db_lock
+    from src.observability.efficiency import build_issue_list
+
+    repo_keys, repo_key_out = _eff_repo_keys(repo)
+    if not repo_keys:
+        return {"repo": "", "empty": True, "message": "no_repo_selected", "items": []}
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key_out)
+
+    try:
+        _threshold = max(1, min(int(threshold_days or 7), 90))
+    except (TypeError, ValueError):
+        _threshold = 7
+    try:
+        _limit = max(1, min(int(limit or 20), 200))
+    except (TypeError, ValueError):
+        _limit = 20
+    try:
+        _offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        _offset = 0
+    try:
+        with db_lock:
+            out = build_issue_list(db.cursor(), repo_keys, kind=(kind or "aging"),
+                                   bucket=bucket or "", threshold_days=_threshold,
+                                   limit=_limit, offset=_offset)
+        out["repo"] = repo_key_out
+        return out
+    except Exception as e:
+        log.warning(f"Dashboard efficiency issues failed: {e}")
+        return {"repo": repo_key_out, "items": [], "total": 0, "empty": True,
+                "error": "aggregation_failed"}
 
 
 @router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")

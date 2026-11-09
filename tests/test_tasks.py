@@ -45,7 +45,7 @@ def setup_module():
     global _uid, _token, _headers
     from src.api.db_setup import init_database
     init_database()
-    # 用户卫生：先清掉历史残留（user_accounts + 映射），保证本模块用到的测试用户 id 确定、不被跨运行回收复用
+    # 用户卫生：先清掉历史残留（grape_accounts + 映射），保证本模块用到的测试用户 id 确定、不被跨运行回收复用
     # （unified_user_mapping.user_id 为主键，id 被回收重用会导致 INSERT OR REPLACE 互相覆盖 → 顺序依赖失败）
     with db_lock:
         c = db.cursor()
@@ -80,7 +80,7 @@ def teardown_module():
         c = db.cursor()
         c.execute("DELETE FROM grape_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user')")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
-        c.execute("DELETE FROM user_repos WHERE user_id IN (SELECT id FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user'))")
+        c.execute("DELETE FROM user_repos WHERE user_id IN (SELECT id FROM grape_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user'))")
         db.commit()
 
 
@@ -440,41 +440,53 @@ class TestUserMappingBackfill:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('backfill_user_1','oauth_user_1')")
-            c.execute("DELETE FROM user_accounts WHERE username IN ('backfill_user_1','oauth_user_1')")
+            c.execute("DELETE FROM grape_accounts WHERE username IN ('backfill_user_1','oauth_user_1')")
             c.execute("DELETE FROM issue WHERE repo_key='gitcode:org/test' AND issue_number IN (91, 92)")
             db.commit()
 
     def _run_backfill(self):
-        """与 session_manager 启动回填同 SQL（幂等）"""
+        """与 session_manager 启动回填同 SQL（幂等；D32 后源为 grape_accounts + external_identities）"""
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
-                "SELECT id, username, nickname FROM user_accounts WHERE id>0"
+                "INSERT OR IGNORE INTO unified_user_mapping (user_id) "
+                "SELECT id FROM grape_accounts WHERE id>0"
+            )
+            c.execute(
+                "UPDATE unified_user_mapping SET gitcode_user="
+                "(SELECT ei.external_login FROM external_identities ei "
+                "WHERE ei.grape_user_id=unified_user_mapping.user_id "
+                "AND ei.provider='gitcode' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
+                "WHERE (gitcode_user IS NULL OR gitcode_user='')"
             )
             db.commit()
 
     def test_backfill_populates_mapping_for_existing_account(self):
-        """存量用户（仅 user_accounts、无映射）经回填后 notify 可解析 user_id"""
+        """存量用户（仅 grape_accounts、无映射）经回填后 notify 可解析 user_id"""
         self._clean()
-        created = user_db.create_user("backfill_user_1", "pwd")
+        created = grape_account_db.create_grape_account("backfill_user_1", email=None, password="pwd")
         uid = created["id"]
         try:
             with db_lock:
                 c = db.cursor()
                 c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='backfill_user_1'")
                 db.commit()
+            assert grape_account_db.create_external_identity(
+                uid, "gitcode", "ext_backfill_b1", external_login="backfill_user_1") is True
             self._run_backfill()
             assert tasks_mod._get_user_id_by_gitcode("backfill_user_1") == uid
         finally:
-            user_db.delete_user(uid)
+            grape_account_db.delete_external_identity(uid, "gitcode")
+            grape_account_db.soft_delete_account(uid)
             self._clean()
 
     def test_notify_creates_task_after_backfill(self):
         """回填后 /api/tasks/notify 能成功建任务（此前因无映射返回 ok:false）"""
         self._clean()
-        created = user_db.create_user("backfill_user_1", "pwd")
+        created = grape_account_db.create_grape_account("backfill_user_1", email=None, password="pwd")
         try:
+            assert grape_account_db.create_external_identity(
+                created["id"], "gitcode", "ext_backfill_b2", external_login="backfill_user_1") is True
             self._run_backfill()
 
             def _swallow(coro, *a, **k):
@@ -496,7 +508,8 @@ class TestUserMappingBackfill:
                 ).fetchone()
             assert row[0] == 1, "回填后 notify 应成功创建任务"
         finally:
-            user_db.delete_user(created["id"])
+            grape_account_db.delete_external_identity(created["id"], "gitcode")
+            grape_account_db.soft_delete_account(created["id"])
             self._clean()
 
 
