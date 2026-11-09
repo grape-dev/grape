@@ -1,6 +1,6 @@
 # aishell-dsh 引擎接入实施计划（一期上线 / 二期完善）
 
-> 📅 2026-11-06 ｜ 🌿 基于 weekly-10 @ 40be0820a (personal working branch with aishell-dsh commits) ｜ 📄 分期实施计划（自包含；设计结论与实测证据见 docs 仓 todo/2026-11-05-aishell-dsh-runtime-acp-design.html）
+> 📅 2026-11-06 ｜ 🌿 基于 weekly-10 @ 40be0820a (personal working branch with aishell-dsh commits) ｜ 📄 分期实施计划（设计结论详见 2026-11-05 设计 spec，本文自包含）
 
 ## 0. 背景约束与已裁定决策（承接设计 spec，实施必须遵守）
 
@@ -41,6 +41,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 | 6 | engine_select.py:36 | **不加** _DEFAULT_ENGINE_ROLE_TAGS 条目（#658 11-03 裁定：默认不限角色，仅显式声明轨） |
 | 7 | settings.py:1152 _engine_type_of、runtimes.js:260/524/537 | includes('aishell') 误命中修复：aishell-dsh 分支前置；_ENGINE_DOT 加色点 |
 | 8 | usage_collect.py:147/204 | aishell-dsh 分支：**一期返回空 + 显式缺口标注**（不加会静默落空） |
+| 9 | os_adapter.py find_cli / engine_search_paths | Linux 通用发现兜底：PATH 找不到时追加候选 `~/.local/bin/\<cli\>`（pip/pipx --user 安装目录；systemd 服务 PATH 常缺该目录，E2E 实证 aishell 装在这里导致升级重装后识别丢失）。对称 Windows 侧已有的 _ENGINE_WINDOWS_PATHS 机制（hermes 条目即 %USERPROFILE%\.local\bin 先例），非 aishell 特例 |
 
 ### 2.2 标准②：调度正确（首期红线）
 
@@ -81,7 +82,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ## 3. 已踩坑（实施必读，全部真机实证）
 
-① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（如 self-hosted provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ set_config_option 字段名是 **id** 非 configId；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）。
+① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（如 self-hosted provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ set_config_option 字段名是 **id** 非 configId；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）；⑦ **systemd 服务 PATH 不含 ~/.local/bin**（E2E 实证）：pip --user 安装的 CLI（aishell 即如此）人登录可见、服务进程不可见，且 install-worker.sh 重装会重置 unit PATH——由 §2.1 #9 的 Linux 发现兜底根治，不依赖运维改 PATH。
 
 ## 4. 一期验收（三阶段，页面端到端）
 
@@ -164,7 +165,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 |---|---|---|
 | Q-单测 | 四向映射（aishell-dsh-xxx→aishell-dsh；aishell-worker-xxx/hwcloud-xxx→hwcloud 旧轨不动；dsh-xxx→dsh；未知→opencode）+ 表序无关 + _backend_for_engine/_engine_type_of/runtimes.js 三判定点与表同源（#14 两处守卫同函数域抽查） | |
 
-二期用例（G 多 profile 干扰 / H 冷启动自愈细化 / I prompt 中途 kill / J stdin EOF / K 大输出截断 / M 畸形消息 / N role_tags 显式声明过滤 / O 技能投送端到端 / P 探活不污染计费）留在设计 spec（docs 仓）§8，随二期 issue 搬移。一期用例结果总表见 §4 V1/V2/V3 阶段表。
+二期用例（G 多 profile 干扰 / H 冷启动自愈细化 / I prompt 中途 kill / J stdin EOF / K 大输出截断 / M 畸形消息 / N role_tags 显式声明过滤 / O 技能投送端到端 / P 探活不污染计费）留在设计 spec §8，随二期 issue 搬移。一期用例结果总表见 §4 V1/V2/V3 阶段表。
 
 ### 4.2 Q 端到端三阶段验收详情（配置→触发→观察，含判定点↔页面症状对照）
 
@@ -255,4 +256,4 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ---
 
-aishell-dsh 实施计划 · 一期/二期 · 2026-11-06 · 设计结论与实测证据见 docs 仓 2026-11-05 设计 spec
+aishell-dsh 实施计划 · 一期/二期 · 2026-11-06 · 设计结论与实测证据详见 2026-11-05 设计 spec（同目录）
