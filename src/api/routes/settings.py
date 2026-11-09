@@ -1112,9 +1112,12 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             " ".join(rt.get("local_skills") or []),
         ]).lower()]
     if type:
+        # 类型过滤用 _engine_type_of 规范化后精确匹配（原 `_tlow in name` 子串
+        # 匹配会让 "aishell" 筛选带出 aishell-dsh——与派发侧 includes 误命中
+        # 同族问题，2026-11-06 页面验收发现）。type 值本身即 _engine_type_of 派生。
         _tlow = type.lower()
-        visible_runtimes = [rt for rt in visible_runtimes if _tlow in (
-            rt.get("instance_name") or rt.get("name") or "").lower()]
+        visible_runtimes = [rt for rt in visible_runtimes
+                            if _engine_type_of(rt).lower() == _tlow]
     if scene:
         _scenes = [s.strip().lower() for s in scene.split(",") if s.strip()]
         visible_runtimes = [rt for rt in visible_runtimes
