@@ -130,31 +130,6 @@ class _BoomDb:
         return getattr(self._inner, name)
 
 
-def _force_engines_offline():
-    """把 agent_runtimes 全量压成 offline，返回原状态供恢复。
-
-    早退用例的隐含前提是「本机无可用引擎」；但同进程里其它用例（如
-    test_a2a_dedup_queue_1667）会种下 online 引擎行，而 a2a_dispatch 的
-    auto-select 是**直查 agent_runtimes**（不走 pick_engine），会挑到残留引擎，
-    导致早退分支不再触发、事件留 running。故按用例粒度隔离，跑完恢复。
-    """
-    with db_lock:
-        c = db.cursor()
-        rows = c.execute("SELECT id, status, healthy FROM agent_runtimes").fetchall()
-        c.execute("UPDATE agent_runtimes SET status='offline' WHERE status<>'offline'")
-        db.commit()
-    return rows
-
-
-def _restore_engines(rows):
-    with db_lock:
-        c = db.cursor()
-        for rid, status, healthy in rows or []:
-            c.execute("UPDATE agent_runtimes SET status=?, healthy=? WHERE id=?",
-                      (status, healthy, rid))
-        db.commit()
-
-
 class TestA2AEarlyExitFailEvent:
     """webhook.py 4 处 A2A 早退分支 → _fail_event 完整诊断回写。"""
 
@@ -165,9 +140,7 @@ class TestA2AEarlyExitFailEvent:
         # legacy 模式：绕开 plugin event-driven 路径，直达 4 处早退分支
         monkeypatch.setenv("GRAPE_PIPELINE_MODE", "legacy")
         monkeypatch.delenv("DEVOPS_EXECUTION_MODE", raising=False)
-        _prev_engines = _force_engines_offline()
         yield
-        _restore_engines(_prev_engines)
         _clean()
 
     def test_pick_engine_none_writes_reason(self):

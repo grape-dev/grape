@@ -209,11 +209,7 @@ if (Test-Path $versionFilePath) {
 }
 $expectedVersion = ""
 try {
-    # latest 端点要求 rta_ 鉴权（runtime.py _require_credential）；裸请求必 401 →
-    # 恒走 changed-or-not fallback（真机实证 2026-11-10）。带 Token 请求可拿到
-    # 精确目标版本，解压校验走 expected-version 精确分支，消除「已最新 vs 未落地」歧义。
-    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop `
-        -Headers @{ "Authorization" = "Bearer $Token" }
+    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
     $expectedVersion = ("" + $lvi.version).Trim()
     if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
 } catch {
@@ -323,18 +319,7 @@ if ($expectedVersion) {
     }
     Log "Extract verified: VERSION=$finalVersion"
 } elseif ($finalVersion -and $finalVersion -eq $preVersion) {
-    # 幂等重装：已装版本 == 本次包版本 → 本来就最新，跳过重装直接启动 worker。
-    # 真机实证（2026-11-10）：changed-or-not fallback 下「无变化」被误报为解压失败，
-    # 用户反复重装最新版必然撞上；旧逻辑无法区分「已最新」与「解压未落地」。
-    Log "Already up-to-date (VERSION=$finalVersion), skipping reinstall and starting worker"
-    $startScript = Join-Path $Dir "start-worker.ps1"
-    if (Test-Path $startScript) {
-        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
-        Log "Worker started (no reinstall needed)"
-        exit 0
-    }
-    Log "start-worker.ps1 not found - install is current; start the worker manually"
-    exit 0
+    Fail "Extract verification failed: VERSION unchanged ('$finalVersion') after extraction."
 }
 
 if (-not (Test-Path $CfgDir)) {

@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
-from src.api.chat_session_env import chat_repo_env
 from src.session_manager import db, db_lock
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
@@ -308,8 +307,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 skill_id=agent_session.get("skill_id", 0) or 0,
                 # Issue #1577：与事件/Web chat 同源注入两项服务基址，远端 VOD worker
                 # 的业务命令（issues/git-repo）免 --base-url 可用。
-                env_extra={**resolve_task_server_env(runtime_id),
-                           **chat_repo_env(repo_key)},
+                env_extra=resolve_task_server_env(runtime_id),
             )
             log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={kind}")
             task = await wait_task_terminal(tid)
@@ -348,11 +346,10 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                               "engine_id": int(engine_id or 0)})
         _mu.start()
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
-                                                           backend_name=_be, account=repo_key,
+                                                            backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, user_token=_user_token,
                                                            agent_name="VOD Agent",
-                                                           agent_label=f"[Agent:vod|repo:{repo_key}]",
-                                                           env_extra=chat_repo_env(repo_key)):
+                                                           agent_label=f"[Agent:vod|repo:{repo_key}]"):
             _mu.feed(event_type, data)
             if event_type == "done":
                 final_text = data.get("text", "")

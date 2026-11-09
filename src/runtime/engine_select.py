@@ -432,15 +432,14 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
     """从 user_repos 表反查 repo_key 对应的 user_id。
 
     优先按 issue_creator（GitCode 用户名）查 unified_user_mapping 获取 user_id；
-    issue_creator 为空或查不到时，改查 grape_accounts/external_identities
-    （平台 login 匹配 external_login，或平台数字 ID 匹配 external_id）作为二级回退；
-    仍查不到时，user_repos 回退按创建者过滤（JOIN grape_accounts），而非取第一个 join 用户。
+    issue_creator 为空或查不到时，增加 user_accounts.username/gitcode_id 直接查询作为二级回退；
+    仍查不到时，user_repos 回退按创建者过滤（JOIN user_accounts），而非取第一个 join 用户。
 
     Issue #76 修复：原逻辑按 user_id ASC 取第一条 is_join=1 的记录，
     对于多用户仓库会返回"最早加入的用户"而非 Issue 创建者，
     导致 scope=user 引擎无法通过 claim_by_tag 认领任务。
 
-    Issue #211 增强：二级回退 + user_repos 按创建者过滤，
+    Issue #211 增强：增加 user_accounts 二级回退 + user_repos 按创建者过滤，
     确保已注册 grape 的项目组成员能正确映射而非落为 user_id=0。
     """
     if not repo_key:
@@ -1150,10 +1149,10 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
 
 # ====== 引擎绑定真实性同步（docs/weekly-06/engine-binding-truth-sync-design.md）======
 
-# 引擎离线判定为真死、触发场景绑定清理的阈值（秒）。默认 0 = 禁用自动解绑（只提示不清理）；
-# 需要自动清理时显式设置 ENGINE_DETACH_AFTER_SECONDS（如 28800 = 8h：心跳 15s，8h 无恢复
-# = 连续 ~1920 个心跳周期全丢，机器不会自己回来）。
-_ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "0"))
+# 引擎离线判定为真死、触发场景绑定清理的阈值（秒）。默认 8h：
+# 心跳周期 15s，8h 无恢复 = 连续 ~1920 个心跳周期全丢，机器不会自己回来。
+# 置 0 禁用自动解绑（只提示不清理）。
+_ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "28800"))
 
 
 def cleanup_scene_engine_bindings(rid_list: list) -> int:

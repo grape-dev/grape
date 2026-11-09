@@ -59,10 +59,7 @@ def _user(auth="jwt"):
 
 
 def _run(seq, agent, user=None):
-    # Python 3.12：asyncio.get_event_loop() 已废弃，前面的用例起停事件循环后
-    # 主线程 current loop 为 None，会抛 RuntimeError（同进程混跑必炸）。
-    # 每次调用自建循环，结果与执行顺序无关。
-    return asyncio.run(
+    return asyncio.get_event_loop().run_until_complete(
         a2a_redo_event(seq, A2ARedoBody(agent=agent), user or _user()))
 
 

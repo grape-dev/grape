@@ -112,13 +112,6 @@ app.include_router(events_ops_router)
 from src.api.middleware import install_request_middleware
 install_request_middleware(app)
 
-# OTel HTTP spans（2026-11-05 MR-1）：B 进程入口
-try:
-    from src.observability.otel import instrument_fastapi
-    instrument_fastapi(app, "grape-server-b")
-except Exception:
-    pass
-
 from src.api.exception_handlers import install_exception_handlers
 install_exception_handlers(app)
 

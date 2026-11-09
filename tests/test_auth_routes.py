@@ -44,6 +44,10 @@ def _cleanup(username: str, gitcode_id: str):
     if acc:
         delete_external_identity(acc["id"], "gitcode")
         soft_delete_account(acc["id"])
+    # 兼容：清理旧表残留
+    u = user_db.get_user_by_username(username)
+    if u:
+        user_db.delete_user(u["id"])
 
 
 def _save_state():
@@ -231,11 +235,10 @@ class TestOAuthCallback:
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
              patch("src.config.is_user_allowed", return_value=True), \
-             patch("src.api.routes.grape_auth.create_grape_account_oauth", return_value=None):
+             patch("src.user.db.create_user", return_value=None):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
-        # grape_auth callback 建号失败（create_grape_account_oauth=None，Issue #1588 后无 create_user）
-        # 仍走 302 重定向（oauth_error），不 500
+        # grape_auth callback 未绑定用户走 _oauth_associate_redirect（302），不走 create_user
         assert r.status_code == 302
 
     def test_mapping_write_failure_still_logs_in(self):

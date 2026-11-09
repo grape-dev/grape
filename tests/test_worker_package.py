@@ -135,7 +135,6 @@ class TestWorkerPackage:
             "sys.path.insert(0, sys.argv[1])\n"
             "import src.config\n"           # 启动链第一环（事故死因）
             "import src.runtime.agent\n"    # worker 主模块全量闭包
-            "import src.observability.otel\n"  # PR #1077：worker 侧 span/中继依赖（漏打=静默失效）
             "print('IMPORT_CLOSURE_OK')\n"
         )
         r = subprocess.run(

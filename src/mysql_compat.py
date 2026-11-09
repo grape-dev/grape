@@ -615,24 +615,7 @@ class MySQLCompatCursor:
 
         t = translate_sql(sql)
         cur = self._conn._raw_cursor()
-        # OTel DB span（2026-11-05）：在 execute 调用点取当前 context——连接可能来自
-        # 启动期创建的池（早于 pymysql 插桩，连接未被 patch），在 execute 处手动包 span
-        # 保证挂到请求 trace 下。OTel 未启用/无 span 时零开销（noop span）。
-        _otel_span = None
-        try:
-            from src.observability.otel import start_db_span
-            _otel_span = start_db_span(t)
-        except Exception:
-            _otel_span = None
-        try:
-            cur.execute(t, params)
-        finally:
-            if _otel_span is not None:
-                try:
-                    from src.observability.otel import end_db_span
-                    end_db_span(_otel_span, rowcount=getattr(cur, "rowcount", None))
-                except Exception:
-                    _otel_span = None
+        cur.execute(t, params)
         # autocommit=False：SELECT 也会隐式开启事务，同线程连接复用时
         # 后续 SELECT 看到旧 MVCC 快照（/repo 返回老列表根因）。
         # 只读语句执行后自动 commit 释放事务，保持读一致性。

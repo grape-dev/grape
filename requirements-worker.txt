@@ -26,7 +26,3 @@ httpx>=0.24
 # Chinese Windows GBK): pip's auto_decode falls back to the locale encoding and
 # dies on non-ASCII UTF-8 bytes (UnicodeDecodeError, 2026-11-07 real install
 # failure). Keep every line ASCII.
-# OpenTelemetry tracing (worker-side task spans / trace relay client). Pinned to a
-# compatible minor band: the otel python ecosystem ships breaking changes monthly.
-opentelemetry-sdk>=1.27,<2
-opentelemetry-exporter-otlp-proto-http>=1.27,<2

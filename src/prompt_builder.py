@@ -1,5 +1,5 @@
 """Prompt 构建：角色定义、事件 prompt、飞书 prompt"""
-import json, os, re, sys
+import json, os, re
 from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
@@ -7,29 +7,12 @@ _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
 
 
 def _local_port() -> str:
-    """本机服务端口。
+    """本机服务端口，优先读环境变量，默认 3000（兼容老 devops-bot）。
 
-    优先级（2026-11-07 Windows 实证：uvicorn --port 8080 而 env 未设 GRAPE_PORT
-    时，GRAPE_SERVER_URL 落 3000 → 任务内 `grape` CLI 全部 502）：
-      1. GRAPE_PORT env（与 config.py / db.py 统一，Issue #372 §24）
-      2. GRAPE_MAIN_PORT env（向后兼容已设此变量的部署）
-      3. 本进程 argv 的 --port（uvicorn 直跑时自动发现——服务自己知道自己端口，
-         不应要求部署方重复声明）
-      4. 3000（兼容老 devops-bot）
+    Issue #372 §24: 优先读 GRAPE_PORT（与 config.py / db.py 统一），
+    fallback GRAPE_MAIN_PORT（向后兼容已设此变量的部署），默认 3000。
     """
-    port = os.environ.get("GRAPE_PORT") or os.environ.get("GRAPE_MAIN_PORT")
-    if port:
-        return port
-    try:
-        argv = sys.argv
-        for i, a in enumerate(argv):
-            if a == "--port" and i + 1 < len(argv):
-                return argv[i + 1]
-            if a.startswith("--port="):
-                return a.split("=", 1)[1]
-    except Exception:
-        pass
-    return "3000"
+    return os.environ.get("GRAPE_PORT") or os.environ.get("GRAPE_MAIN_PORT") or "3000"
 
 
 def _is_github_repo(repo_key: str) -> bool:

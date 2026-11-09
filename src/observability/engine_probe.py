@@ -42,13 +42,6 @@ def _probe_engine(engine_name: str, cli_path: str) -> dict:
     if engine_name == "hermes":
         return _probe_hermes_acp(cli_path)
 
-    # aishell-dsh 同走 ACP 探活。实现单源自 src.runtime.agent._probe_aishell_dsh_acp
-    # （worker 侧同函数，已实测）——engine_probe 曾因缺此分支每 10 分钟对本机行写出
-    # skip "unknown engine: aishell-dsh"，可观测页恒显「跳过」（2026-11-06 实测）。
-    if engine_name == "aishell-dsh":
-        from src.runtime.agent import _probe_aishell_dsh_acp
-        return _probe_aishell_dsh_acp(cli_path)
-
     cmd = _PROBE_COMMANDS.get(engine_name)
     if not cmd:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}

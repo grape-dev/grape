@@ -537,10 +537,7 @@ _TASK_COLUMNS = (
     "pool_engine_source, "
     "status, stream_ended, self_reported, pending_since, "
     "exit_code, result_text, errors, stderr, "
-    "usage_json, started_at, completed_at, created_at, "
-    # MR-2（2026-11-05）：W3C trace 上下文随任务行下发（worker 恢复同一 trace）；列缺失时
-    # _avail 过滤自动跳过，老库兼容。
-    "trace_context"
+    "usage_json, started_at, completed_at, created_at"
 )
 
 # Issue #537：任务状态机口径（集中定义，防字面量漂移）。
@@ -1178,32 +1175,6 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             _server_url = get_worker_connect_url()
         except Exception:
             pass
-    # MR-2（2026-11-05）：任务生命周期根 span "task.enqueue" + W3C trace_context 存行。
-    # OTel 未启用/失败 → _task_trace_context="" 且无 span，业务零影响。
-    _task_span = None
-    _task_trace_context = ""
-    try:
-        from src.observability.otel import start_task_span, snapshot_trace_context
-        _pipeline_tid = ""
-        if repo_key and issue_id:
-            try:
-                from src.observability.trace import pipeline_trace_id
-                _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
-            except Exception:
-                pass
-        # span 名带业务标识（task_id + agent_type）：trace 列表的 rootTraceName 从抽象的
-        # "task.enqueue" 变成可读的 "task t_xxx vod enqueue"——排查时按 SeqID/task_id 一眼定位
-        _task_span, _ = start_task_span(f"task {task_id} {agent_type or 'task'} enqueue", {
-            "task_id": task_id, "agent_type": agent_type, "skill": skill,
-            "repo_key": repo_key, "issue_id": issue_id, "runtime_id": runtime_id,
-            "pool_tag": pool_tag, "pipeline_trace_id": _pipeline_tid,
-            "event_seq": event_seq, "event_type": event_type,
-        })
-        if _task_span is not None:
-            _task_trace_context = snapshot_trace_context(_task_span)
-    except Exception:
-        _task_span = None
-        _task_trace_context = ""
     with db_lock:
         c = db.cursor()
         _avail = _table_columns("agent_tasks")
@@ -1231,12 +1202,6 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             "pending_since": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        # MR-2：trace_context 已入 _TASK_COLUMNS_LIST（_avail 过滤保老库兼容），此处仅补值。
-        try:
-            if "trace_context" in _insert_cols and "trace_context" not in _insert_vals:
-                _insert_vals["trace_context"] = _task_trace_context
-        except Exception:
-            pass
         c.execute(
             f"INSERT INTO agent_tasks ({', '.join(_insert_cols)}) VALUES ({','.join(['?'] * len(_insert_cols))})",
             [_insert_vals[x] for x in _insert_cols],
@@ -1244,13 +1209,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         db.commit()
     from src.runtime.instances import runtime_instance_name
     _inst = runtime_instance_name(runtime_id)
-    log.info(f"Task enqueued: {task_id} agent={agent_type} repo={repo_key} issue={issue_id or '-'} skill={skill} runtime={runtime_id}({_inst}) session={agent_session_id}")
-    # MR-2：enqueue span 收口（行已写入，trace_context 已存）
-    if _task_span is not None:
-        try:
-            _task_span.end()
-        except Exception:
-            pass
+    log.info(f"Task enqueued: {task_id} session={agent_session_id} runtime={runtime_id}({_inst}) skill={skill}")
     # 可观察性埋点：任务入队
     try:
         from src.observability import record_task_enqueued
@@ -2660,13 +2619,6 @@ def converge_event_to_task(task_id: str) -> dict:
         converged = _cascade_event_terminal(c, _seq, _task_status,
                                             exit_code=task.get("exit_code"))
         db.commit()
-    # Issue #1667：直接 SQL 收敛终态后补挂排队 drain（旁路兜底）
-    if converged:
-        try:
-            from src.api.event_store import _drain_a2a_queue_after_terminal
-            _drain_a2a_queue_after_terminal(_seq)
-        except Exception as _qe:
-            log.warning(f"converge_event_to_task: a2a queue drain failed: {_qe}")
     return {"status": "converged" if converged else "noop",
             "task_id": task_id, "task_status": _task_status, "event_seq": _seq,
             "event_status_before": before,
@@ -2714,27 +2666,17 @@ def update_task_status(task_id, status, **kw):
         # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
         # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的
         # 详写终态路径（update_event_complete 先行）在此为 no-op（事件已终态）。
-        _cascaded_seq = 0
         if status in _TERMINAL_STATUSES:
             try:
                 _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
                                      (task_id,)).fetchone()
                 if _evt_row and _evt_row[0]:
                     if _cascade_event_terminal(c, _evt_row[0], status):
-                        _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
                                  f"{status} for task {task_id} (Issue #587 convergence)")
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         db.commit()
-    # Issue #1667：任务级联写终态是「绕过 update_event_status/complete」的直接 SQL 旁路，
-    # 排队 A2A 事件不会收到终态钩子 → 在此补挂 drain，避免 queued 永久滞留。
-    if _cascaded_seq:
-        try:
-            from src.api.event_store import _drain_a2a_queue_after_terminal
-            _drain_a2a_queue_after_terminal(_cascaded_seq)
-        except Exception as _qe:
-            log.warning(f"update_task_status: a2a queue drain after cascade failed: {_qe}")
     # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
     # Issue #1071（P4）：timeout_failed 是「疑似误判终态」，**不**收钥匙——
     #   判死是兜底猜测，不是任务真的结束；worker 之后 push/调平台接口全 401
@@ -3219,21 +3161,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
 
     revive_from_timeout_failed（Issue #1071）：由 service.revive_timeout_task 传入，
     表示这是一次已校验过的「兜底超时判死后迟到结果」复活，允许把事件侧 failed 改判 completed。
-
-    MR-2（2026-11-05）：task.finish span——从任务行 trace_context 恢复同一 trace；
-    覆盖 complete 与 fail 两个终态（fail_task 单独埋同款）。未启用/坏数据 → 零影响。
     """
-    try:
-        from src.observability.otel import start_task_span
-        _fin_span, _ = start_task_span(f"task {task_id} finish", {
-            "task_id": task_id, "exit_code": exit_code,
-            "result_len": len(result_text or ""),
-            "outcome": "completed",
-        }, trace_context=(get_task(task_id) or {}).get("trace_context") or "")
-        if _fin_span is not None:
-            _fin_span.end()  # 终态判定在函数体内，span 本身即时收口
-    except Exception:
-        pass
     task = get_task(task_id)
     # 可见性（P1）：引擎「疑似提前结束」（模型输出后静默、无收尾记录）时任务仍算
     # completed（exit 0），但把标记显式落到 agent_tasks.errors + 事件 result 前缀，
@@ -3357,11 +3285,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                                      session_engine=_done_engine)
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
-    _t_agent = (task or {}).get("agent_type", "")
-    _t_repo = (task or {}).get("repo_key", "")
-    _t_skill = (task or {}).get("skill", "")
-    _t_issue = (task or {}).get("issue_id", "")
-    log.info(f"Task completed: {task_id} agent={_t_agent} repo={_t_repo} issue={_t_issue or '-'} skill={_t_skill} exit={exit_code} outcome={'failed' if exit_code else 'completed'}")
+    log.info(f"Task completed: {task_id} exit={exit_code}")
     # Issue #627: SRE 生产发布任务终态回填（成功/失败都要回填——deploy_failed 分支
     # 恰在 exit!=0；钩子自带 production_release 锚点判断，普通任务零影响、幂等）
     if task and (task.get("agent_type") or "") == "sre" and task.get("issue_id"):
@@ -3969,19 +3893,6 @@ def fail_task(task_id, error, exit_code=-1):
             return
     except Exception as _e:
         log.warning(f"fail_task: transient retry check failed for {task_id}: {_e}")
-    # MR-2（2026-11-05）：task.finish span（fail 终态，与 complete_task 同款串联）。
-    # 架构审查 P2-6：放在全部幂等判定（completed / failed / timeout_failed / 过期上报 /
-    # 瞬时重试）之后——被跳过的重放调用不再产生误导性的 finish FAIL span。
-    try:
-        from src.observability.otel import start_task_span
-        _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
-            "task_id": task_id, "exit_code": exit_code,
-            "outcome": "failed", "error_head": str(error or "")[:200],
-        }, trace_context=(task or {}).get("trace_context") or "")
-        if _fin_span is not None:
-            _fin_span.end()
-    except Exception:
-        pass
     _result_show = None  # Issue #403：耗尽判死 → 分类失败摘要（无 event_seq 时保持 None）
     if task and task.get("event_seq"):
         try:
@@ -4314,8 +4225,7 @@ def fail_task(task_id, error, exit_code=-1):
                     log.info(f"fail_task: dead session detected (consecutive failures), cleared runtime_session_id for {_isid}")
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
-    _ft = get_task(task_id) or {}
-    log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} issue={_ft.get('issue_id', '') or '-'} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
+    log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
     # 可观察性埋点：任务失败
     try:
         from src.observability import record_task_terminal, record_task_failed

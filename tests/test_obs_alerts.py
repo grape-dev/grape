@@ -439,7 +439,7 @@ def test_notify_skips_when_no_channel_configured():
     from src.observability import alerts as al2
     import asyncio
     _set_rule("task_stuck", notify_channels="")
-    stats = asyncio.run(
+    stats = asyncio.get_event_loop().run_until_complete(
         al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                   "threshold": 0, "metric": "task_stuck", "severity": "warning"}]))
     assert stats["sent"] == 0 and stats["skipped"] == 1, stats
@@ -463,7 +463,7 @@ def test_notify_feishu_uses_recipients_own_bot(monkeypatch=None):
     ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
     ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id" if int(uid) == UID else ""
     try:
-        stats = asyncio.run(
+        stats = asyncio.get_event_loop().run_until_complete(
             al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 3,
                                       "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                       "silenced_until": ""}]))
@@ -498,7 +498,7 @@ def test_notify_send_failure_counted_not_raised():
     ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
     ic._get_feishu_open_id_by_user_id = lambda uid: "ou_x"
     try:
-        stats = asyncio.run(
+        stats = asyncio.get_event_loop().run_until_complete(
             al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                       "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                       "silenced_until": ""}]))
@@ -521,7 +521,7 @@ def test_notify_skips_silenced_event():
     from src.observability import alerts as al2
     _set_rule("task_stuck", notify_channels="feishu")
     future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
-    stats = asyncio.run(
+    stats = asyncio.get_event_loop().run_until_complete(
         al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                   "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                   "silenced_until": future}]))
@@ -537,7 +537,7 @@ def test_test_notification_reports_reason():
 
     # 1) 未绑定飞书身份
     _unbind_open_id(UID)
-    r = asyncio.run(
+    r = asyncio.get_event_loop().run_until_complete(
         al2.send_test_notification({"id": UID, "username": "u"}))
     assert r["ok"] is False and r["reason"] == "no_open_id", r
 
@@ -550,12 +550,12 @@ def test_test_notification_reports_reason():
     orig_bm = getattr(api_main, "bot_manager", None)
     api_main.bot_manager = _FakeBM(_FakeApi())
     try:
-        r = asyncio.run(
+        r = asyncio.get_event_loop().run_until_complete(
             al2.send_test_notification({"id": UID, "username": "u"}))
         assert r["ok"] is False and r["reason"] == "no_bot", r
         # 3) 正常路径
         ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-        r = asyncio.run(
+        r = asyncio.get_event_loop().run_until_complete(
             al2.send_test_notification({"id": UID, "username": "u"}))
         assert r["ok"] is True and r["message_id"], r
     finally:

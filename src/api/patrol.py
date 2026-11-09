@@ -1069,16 +1069,6 @@ async def patrol_loop():
                 # D23（实现后审计）：run_patrol_once 是持 db_lock 的同步全表扫描，
                 # 裸调会卡住整个事件循环——经 asyncio.to_thread 卸载（DB 车道竞争
                 # 仍在，但 API 事件循环不再被整轮冻结）。
-                # Issue #1667：排队 A2A 滞留兜底对账（终态旁路/竞态窗口的最终防线）。
-                # 无 repo 谓词 = 全仓 queued 扫描，但只派发「前序已不活跃」的行，
-                # 正常在途排队不受影响；持 db_lock 的同步段经 to_thread 卸载。
-                try:
-                    from src.api.event_pipeline import reconcile_queued_a2a
-                    _drained = await asyncio.to_thread(reconcile_queued_a2a)
-                    if _drained:
-                        log.info(f"[patrol] a2a queue reconcile: dispatched {len(_drained)}")
-                except Exception as e:
-                    log.warning(f"[patrol] a2a queue reconcile failed: {e}")
                 try:
                     await asyncio.to_thread(run_patrol_once)
                 except PatrolScanInProgress:

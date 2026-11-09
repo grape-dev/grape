@@ -44,47 +44,6 @@ def split_owner_repo(owner_repo: str) -> tuple[str, str]:
     return owner, repo
 
 
-def derive_repo_identity(repository: str = "", repo_key: str = "") -> tuple[str, str, str]:
-    """由 REPO_FULL_NAME（repository）统一派生 (full_name, owner, name)。
-
-    Issue #1660：Agent 任务 env 注入的唯一事实源是 REPO_FULL_NAME，**禁止**用触发人
-    账号（ACCOUNT/exec_account）充当 REPO_OWNER。规则：
-    - 优先拆 `repository`（允许带 provider 前缀，先剥前缀）；
-    - `repository` 为空/无法拆出 owner+name 时，回退拆分 `repo_key` 并告警；
-    - 二者均为空或伪仓库（`chat:`）→ 返回 ("", "", "")，由调用方决定不注入。
-    """
-    _log = None
-
-    def _warn(msg: str) -> None:
-        nonlocal _log
-        try:
-            if _log is None:
-                from src.config import log as _log
-            _log.warning(msg)
-        except Exception:
-            pass
-
-    candidate = from_repo_key((repository or "").strip())
-    if candidate and "/" in candidate:
-        owner, _, name = candidate.partition("/")
-        if owner and name:
-            return f"{owner}/{name}", owner, name
-
-    rk = (repo_key or "").strip()
-    if rk and not rk.startswith("chat:"):
-        fallback = from_repo_key(rk)
-        owner, _, name = fallback.partition("/")
-        if owner and name:
-            _warn(f"derive_repo_identity: REPO_FULL_NAME missing/invalid "
-                  f"(repository={repository!r}), fallback to repo_key={rk!r}")
-            return f"{owner}/{name}", owner, name
-
-    if (repository or "").strip() or (rk and not rk.startswith("chat:")):
-        _warn(f"derive_repo_identity: cannot derive owner/name "
-              f"(repository={repository!r}, repo_key={repo_key!r})")
-    return "", "", ""
-
-
 def workspace_repo_dir(repo_key: str) -> str:
     """返回仓库在工作空间中的根目录（含 provider 隔离）。
 

@@ -90,9 +90,7 @@ class MasterRun:
         sid = session_id or self.session_id or ""
         try:
             usages = self._collector.finish(session_id=sid)
-            from src.runtime.instances import usage_retry_engine
-
-            if not usages and usage_retry_engine(self.engine):
+            if not usages and self.engine in ("hermes", "hwcloud", "aishell"):
                 time.sleep(1.0)
                 usages = self._collector.finish(session_id=sid)
             if not usages:

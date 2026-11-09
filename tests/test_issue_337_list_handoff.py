@@ -119,7 +119,7 @@ def _seed_scenes():
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 # ===== 领域函数：get_handoff_targets =====

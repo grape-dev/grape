@@ -1,4 +1,3 @@
-
 """Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
 import json
 from datetime import datetime, timedelta
@@ -1112,12 +1111,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             " ".join(rt.get("local_skills") or []),
         ]).lower()]
     if type:
-        # 类型过滤用 _engine_type_of 规范化后精确匹配（原 `_tlow in name` 子串
-        # 匹配会让 "aishell" 筛选带出 aishell-dsh——与派发侧 includes 误命中
-        # 同族问题，2026-11-06 页面验收发现）。type 值本身即 _engine_type_of 派生。
         _tlow = type.lower()
-        visible_runtimes = [rt for rt in visible_runtimes
-                            if _engine_type_of(rt).lower() == _tlow]
+        visible_runtimes = [rt for rt in visible_runtimes if _tlow in (
+            rt.get("instance_name") or rt.get("name") or "").lower()]
     if scene:
         _scenes = [s.strip().lower() for s in scene.split(",") if s.strip()]
         visible_runtimes = [rt for rt in visible_runtimes
@@ -1154,25 +1150,8 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
 
 
 def _engine_type_of(rt: dict) -> str:
-    """从引擎名派生类型标签——走 canonical_engine 查表后转展示类型名
-    （canonical 是后端键：aishell/hwcloud → hwcloud；本函数是页面类型：
-    旧 AI Shell 显示 aishell、新引擎 aishell-dsh，与前端 _availTypes 一致）。
-    非前缀形态的历史名保留 includes 兜底（旧轨判定不变）。"""
+    """从引擎名派生类型标签（与前端 _availTypes 的 includes 判定一致）。"""
     n = (rt.get("instance_name") or rt.get("name") or "").lower()
-    if not n:
-        return ""
-    from src.runtime.instances import canonical_engine
-
-    c = canonical_engine(n)
-    if c == "aishell-dsh":
-        return "aishell-dsh"
-    if c == "hwcloud":
-        return "aishell"
-    if c != "opencode":
-        return c
-    # 旧轨兜底：名字中段包含引擎词的历史形态（与改造前 includes 判定一致）
-    if "aishell-dsh" in n:
-        return "aishell-dsh"
     if "aishell" in n or "hwcloud" in n:
         return "aishell"
     if "hermes" in n:

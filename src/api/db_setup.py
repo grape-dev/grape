@@ -2879,7 +2879,7 @@ def _fn_task_liveness_index_and_revived_at() -> None:
 
 
 register_migration(
-    version="202611080004",
+    version="202611050001",
     name="task-liveness-revived-at",
     kind="safe",
     fn=_fn_task_liveness_index_and_revived_at,
@@ -2897,34 +2897,10 @@ def _fn_create_grape_t_merge_gate_log() -> None:
 register_migration(
     # 20261105 修复：远端曾误改为 0001（与 issue658_role_tags 撞号），且生产版本表
     # 已按 0002 落库——回到 0002 对齐生产；issue865 挪至 0004 避让。
-    # 2026-11-10：目标库 202611030002 已被 issue865_agent_runtimes_model 占用（同号不同名，
-    # 本次迁移被判已执行永久跳过）→ renumber 到 202611100002。该迁移只做
-    # CREATE TABLE IF NOT EXISTS，重跑幂等无损。
-    version="202611100002",
+    version="202611030002",
     name="create-merge-gate-log-table",
     kind="safe",
     fn=_fn_create_grape_t_merge_gate_log,
-)
-
-
-def _fn_add_agent_tasks_trace_context() -> None:
-    """MR-2（weekly-10）：存量库补 agent_tasks.trace_context（幂等补列）。
-
-    _migrate_tables 里的同名 _ensure_column 只在 legacy 全量迁移路径执行，已盖章的
-    存量库不会再跑那一段，缺列时代码侧 _TASK_COLUMNS_LIST 含该列会让
-    _create_direct_task 的严格 INSERT 直接抛错、任务行永不落库。故补一条独立迁移。
-    """
-    with db_lock:
-        c = db.cursor()
-        _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
-        db.commit()
-
-
-register_migration(
-    version="202611100001",
-    name="add-agent-tasks-trace-context",
-    kind="safe",
-    fn=_fn_add_agent_tasks_trace_context,
 )
 
 
@@ -6150,10 +6126,6 @@ def _migrate_tables():
             # §6.4 追踪：trace_id（任务级轨迹）+ pipeline_trace_id（同一 issue 流程共享）
             _ensure_column(c, "agent_tasks", "trace_id", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "pipeline_trace_id", "TEXT DEFAULT ''")
-            # 架构守护 BLOCKED-2（2026-11-09）：MR-2 跨进程 trace 串联依赖该列。
-            # 之前只在 dev 库手工加列，新库/未 ALTER 的存量库会被 _avail 列过滤静默剔除，
-            # 导致 worker 取不到 traceparent、execute/finish 各自成为新根 trace。
-            _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
             # 告警策略层（P1-1）：规则侧节流/聚合/时段/升级 + 事件侧通知状态
             # P2-1 SLO：采样表补"在线"列（老库迁移；历史行只能为 0 = 数据不足）
             _ensure_column(c, "obs_runtime_samples", "online", "INTEGER NOT NULL DEFAULT 0")

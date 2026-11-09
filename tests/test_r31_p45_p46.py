@@ -23,8 +23,7 @@ import pytest
 
 
 def _run_async(coro):
-    # Python 3.12：统一 asyncio.run（原 get_event_loop().run_until_complete 分支为死代码）
-    return asyncio.run(coro)
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
 
 
 # ===== P46.1 scene stale 检测（只读，铁律 1.0）=====

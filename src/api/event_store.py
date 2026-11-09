@@ -5,7 +5,6 @@ from src.session_manager import db, db_lock
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.event_payload_view import payload_view_from_json
-from src.api.a2a_context import a2a_event_context_key
 
 # ====== Per-repo 锁（从旧 event_processor 迁移）======
 # 2026-08-16 事故修复：由 threading.Lock 改为 asyncio.Lock。
@@ -66,51 +65,6 @@ def _extract_entity_type_from_text(text: str) -> str:
     return ""
 
 
-def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: str,
-                      agent_type: str, source: str, actor: str, summary: str,
-                      payload: dict, status: str, result: str, scene_id: str,
-                      entity_type: str, idempotency_key: str,
-                      completed_at: str) -> int:
-    """在调用方已持 db_lock/事务内 INSERT 一条事件，返回 seq（失败返回 0）。
-
-    不 commit：由调用方统一提交，便于排队幂等「查重 + 插入」在同一事务内原子完成
-    （Issue #1667 审查修复②）。
-    """
-    from src.user.org_db import get_org_id_by_repo_key
-    _org_id = get_org_id_by_repo_key(repo_key)
-    _payload_json = json.dumps(payload or {})
-    if idempotency_key:
-        c.execute(
-            "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, idempotency_key, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-             _payload_json, status, result, scene_id, entity_type, _org_id,
-             idempotency_key, completed_at))
-    else:
-        c.execute(
-            "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-             _payload_json, status, result, scene_id, entity_type, _org_id,
-             completed_at))
-    _seq = c.lastrowid
-    # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
-    c.execute("SELECT seq FROM events WHERE seq=?", (_seq,))
-    if not c.fetchone():
-        log.warning(f"Event store FAILED: INSERT returned lastrowid={_seq} but row not found "
-                    f"(WAL conflict?), repo={repo_key}, type={event_type}")
-        return 0
-    return _seq
-
-
-def _existing_seq_for_idempotency(repo_key: str, idempotency_key: str) -> int:
-    """幂等键撞唯一索引 → 返回已存在事件 seq 的负值；否则 0。"""
-    if not idempotency_key:
-        return 0
-    _existing = find_event_by_idempotency_key(repo_key, idempotency_key)
-    if _existing:
-        return -int(_existing["seq"])
-    return 0
-
-
 def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
                  actor: str = "", summary: str = "",
@@ -160,15 +114,30 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     with db_lock:
         c = db.cursor()
         try:
-            _seq = _insert_event_row(
-                c, repo_key, event_type, title, issue_id, agent_type, source, actor,
-                summary, payload, status, result, scene_id, entity_type,
-                idempotency_key, completed_at)
-            if not _seq:
-                db.rollback()
-                _seq = _existing_seq_for_idempotency(repo_key, idempotency_key)
-                return _seq
+            # 解析 org_id（从 managed_repos.org_id 获取）
+            from src.user.org_db import get_org_id_by_repo_key
+            _org_id = get_org_id_by_repo_key(repo_key)
+            if idempotency_key:
+                c.execute(
+                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, idempotency_key, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
+                     json.dumps(payload or {}), status, result, scene_id, entity_type, _org_id,
+                     idempotency_key, completed_at))
+            else:
+                c.execute(
+                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
+                     json.dumps(payload or {}), status, result, scene_id, entity_type, _org_id,
+                     completed_at)
+                )
             db.commit()
+            _seq = c.lastrowid
+            # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
+            c.execute("SELECT seq FROM events WHERE seq=?", (_seq,))
+            if not c.fetchone():
+                db.rollback()
+                log.warning(f"Event store FAILED: INSERT returned lastrowid={_seq} but row not found (WAL conflict?), repo={repo_key}, type={event_type}")
+                return 0
             payload_keys = list((payload or {}).keys())
             log.info(f"Event stored: seq={_seq}, repo={repo_key}, type={event_type}, "
                      f"agent={agent_type}, issue={issue_id}, actor={actor}, source={source}, "
@@ -176,9 +145,10 @@ def append_event(repo_key: str, event_type: str, title: str = "",
         except Exception as e:
             log.warning(f"Failed to store event: {e}")
             # Issue #544 L2：幂等键撞唯一索引 → 返回已存在事件 seq 的负值（调用方转"返回已有事件"）
-            _existing = _existing_seq_for_idempotency(repo_key, idempotency_key)
-            if _existing:
-                return _existing
+            if idempotency_key:
+                _existing = find_event_by_idempotency_key(repo_key, idempotency_key)
+                if _existing:
+                    return -int(_existing["seq"])
             return 0
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
     try:
@@ -186,68 +156,6 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     except Exception:
         pass
     return _seq
-
-
-def append_queued_a2a_event(repo_key: str, *, issue_id: str, agent_type: str,
-                            title: str, summary: str, payload: dict,
-                            context_key: str, idempotency_key: str = "") -> int:
-    """原子写入排队 A2A 事件（Issue #1667 审查修复②：queue 幂等原子化）。
-
-    在**同一 db_lock/事务**内完成「同上下文已排队 → 复用」与「插入新排队行」：
-    - 返回 >0：新插入的排队事件 seq；
-    - 返回 <0：同上下文已有排队事件，值为 `-existing_seq`（调用方复用，不重复派发）；
-    - 返回 0：写入失败。
-
-    并发同一 context_key 的 queue 请求只会插入一行（先前查后写在锁内串行化）；
-    显式 idempotency_key 撞唯一索引时同样回落为已存在 seq 的负值。
-    """
-    _payload = dict(payload or {})
-    _qmeta = _payload.get("_a2a_queue")
-    if not isinstance(_qmeta, dict):
-        _qmeta = {}
-    _qmeta["context_key"] = context_key
-    _payload["_a2a_queue"] = _qmeta
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT seq, idempotency_key, payload FROM events "
-                "WHERE repo_key=? AND issue_id=? AND agent_type=? "
-                "AND event_type='a2a_event' AND status='queued' ORDER BY seq ASC",
-                (repo_key, issue_id, agent_type))
-            for _seq, _ik, _raw in (c.fetchall() or []):
-                _row_key = ""
-                try:
-                    _p = json.loads(_raw or "{}")
-                    if isinstance(_p, dict):
-                        _qm = _p.get("_a2a_queue") or {}
-                        if isinstance(_qm, dict):
-                            _row_key = str(_qm.get("context_key") or "")
-                except Exception:
-                    _row_key = ""
-                if not _row_key:
-                    _row_key = a2a_event_context_key(_ik or "", _raw or "")
-                if not context_key or _row_key == context_key:
-                    return -int(_seq)
-            _seq = _insert_event_row(
-                c, repo_key, "a2a_event", title, issue_id, agent_type, "a2a", "",
-                summary, _payload, "queued", "", "", "", idempotency_key, "")
-            if not _seq:
-                db.rollback()
-                return 0
-            db.commit()
-            return _seq
-        except Exception as e:
-            log.warning(f"append_queued_a2a_event failed repo={repo_key} issue={issue_id} "
-                        f"agent={agent_type}: {e}")
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            _existing = _existing_seq_for_idempotency(repo_key, idempotency_key)
-            if _existing:
-                return _existing
-            return 0
 
 
 def find_event_by_idempotency_key(repo_key: str, idempotency_key: str) -> dict | None:
@@ -748,34 +656,7 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
     if status in _TERMINAL:
         # 释放活跃守卫（独立 db_lock；避免在临界区内嵌套获取非可重入锁）
         _release_guard_by_seq(seq)
-        # Issue #1667：终态 → 自动派发排队在其后的 A2A handoff
-        _drain_a2a_queue_after_terminal(seq)
 
-
-
-
-def _drain_a2a_queue_after_terminal(seq: int) -> None:
-    """Issue #1667：事件终态后触发 A2A 排队派发（失败不影响终态写入）。
-
-    审查修复④（阻塞/递归）：
-    - 有运行中的事件循环（FastAPI 异步路径）→ 卸载到线程池执行，终态写入不再
-      被网络派发阻塞，也不在异步上下文里新建事件循环；
-    - 无事件循环（脚本/同步 worker/测试）→ 同步执行，保持确定性；
-    - 派发本身带重入锁（event_pipeline._A2A_DRAIN_LOCK），由 _fail_event 触发的
-      二次终态钩子在 drain 期间直接短路，不形成递归链。
-    """
-    try:
-        from src.api.event_pipeline import drain_queued_a2a
-        try:
-            _loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _loop = None
-        if _loop is not None:
-            _loop.create_task(asyncio.to_thread(drain_queued_a2a, seq))
-        else:
-            drain_queued_a2a(seq)
-    except Exception as e:
-        log.warning(f"A2A queue drain hook failed seq={seq}: {e}")
 
 def _release_guard_by_seq(seq: int) -> None:
     """事件终态 → 按事件的 (repo,issue,agent) 释放对应守卫（仅当前 seq）。"""
@@ -911,8 +792,6 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
     # 事件进入终态 → 释放活跃守卫（允许同 (issue,agent) 开启新事件）
     if status in ("completed", "failed", "cancelled"):
         _release_guard_by_seq(seq)
-        # Issue #1667：前序 A2A 事件终态 → 自动派发排队在其后的 handoff（仅一次）
-        _drain_a2a_queue_after_terminal(seq)
     # WAL checkpoint 在 db_lock 释放后执行
     try:
         db.execute("PRAGMA wal_checkpoint(PASSIVE)")

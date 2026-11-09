@@ -15,23 +15,22 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
 from src.user import db as udb
-from src.auth import grape_account_db as gad
 from src.prompt_builder import build_general_chat_prompt
 from src.session_manager import db, db_lock
 
 
 def _mk_user(prefix="sk367"):
     uname = f"{prefix}_{uuid.uuid4().hex[:8]}"
-    u = gad.create_grape_account(uname, email="", password="pw123")
+    u = udb.create_user(uname, "pw123")
     if not u:
-        u = gad.get_grape_account_by_username(uname)
+        u = udb.get_user_by_username(uname)
     return u, uname
 
 
 def _cleanup_user(uname):
-    u = gad.get_grape_account_by_username(uname)
+    u = udb.get_user_by_username(uname)
     if u:
-        gad.soft_delete_account(u["id"])
+        udb.delete_user(u["id"])
     with db_lock:
         db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (uname,))
         db.commit()

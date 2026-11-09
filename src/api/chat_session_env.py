@@ -10,32 +10,14 @@ Web（src/api/routes/chat.py）与飞书 IM（src/im/handler_async.py）共用�
 from src.config import log
 
 
-def chat_repo_env(repo_key: str) -> dict:
-    """真实仓库 chat → REPO_FULL_NAME/REPO_OWNER/REPO_NAME（由 REPO_FULL_NAME 统一派生）。
-
-    Issue #1660：chat 注入路径此前缺失仓库身份变量；此处与事件/重派路径同源派生，
-    保证 `$REPO_OWNER/$REPO_NAME` 始终等于 REPO_FULL_NAME 拆分结果。伪仓库（`chat:`）/空 → {}。
-    """
-    rk = (repo_key or "").strip()
-    if not rk or rk.startswith("chat:"):
-        return {}
-    from src.repo_key import derive_repo_identity, from_repo_key
-    full_name, owner, name = derive_repo_identity(from_repo_key(rk), rk)
-    if not full_name:
-        return {}
-    return {"REPO_FULL_NAME": full_name, "REPO_OWNER": owner, "REPO_NAME": name}
-
-
 def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
     """任务会话（真实仓库）chat 会话凭据注入。
 
     返回 env dict：恒含 USER_ID / CONVERSATION_ID；repo_key 为真实仓库时附加
-    REPO_FULL_NAME/REPO_OWNER/REPO_NAME、GRAPE_SESSION_TOKEN（tk_，session_key=`conv:{conv_id}`）
-    与 GRAPE_CLI_MODE=WORKER。
+    GRAPE_SESSION_TOKEN（tk_，session_key=`conv:{conv_id}`）与 GRAPE_CLI_MODE=WORKER。
     issue_session_token 抛异常（DB 不可用等）时仅缺 token 字段、不抛，chat 仍可正常回复。
     """
     env = {"USER_ID": str(user_id), "CONVERSATION_ID": conv_id or ""}
-    env.update(chat_repo_env(repo_key))
     if repo_key and not repo_key.startswith("chat:"):
         try:
             from src.api.auth_token import issue_session_token

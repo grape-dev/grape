@@ -266,14 +266,9 @@ function _summaryStatsBar(data, devices) {
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
 
-// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex/aishell/aishell-dsh）
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex/aishell）
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
-  if (n.startsWith('aishell-dsh') || n.includes('aishell-dsh')) {
-    // aishell-dsh 独立图标资产（AIShellDsh.svg，内容复用 AIShell.svg——同名不同物但视觉同源，
-    // 2026-11-09 用户裁定：两文件分开存，后续可独立替换 aishell-dsh 专属图）
-    return `<img src="/static/img/engines/AIShellDsh.svg" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
-  }
   if (n.includes('aishell') || n.includes('hwcloud')) {
     return `<img src="/static/img/engines/AIShell.svg" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
@@ -552,7 +547,6 @@ function renderRuntimes(data) {
   const _availTypes = _runtimeTab === 'engines'
     ? (data.avail_types || [...new Set((data.runtimes||[]).map(e => {
         const n = ((e.display_name || e.name || e.instance_name || '')).toLowerCase();
-        if (n.startsWith('aishell-dsh') || n.includes('aishell-dsh')) return 'aishell-dsh';
         if (n.includes('aishell') || n.includes('hwcloud')) return 'aishell';
         if (n.includes('hermes')) return 'hermes';
         if (n.includes('opencode')) return 'opencode';
@@ -566,7 +560,7 @@ function renderRuntimes(data) {
   // 筛选标签从后端返回的 avail_scopes 生成（不依赖当前页数据）
   const _availScopes = _runtimeTab === 'engines' ? (data.avail_scopes || []) : (_rtDevAvailScopes || []);
   const _hasScope = (sc) => _availScopes.includes(sc);
-  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', aishell: '#0a8cd8', 'aishell-dsh': '#22c55e' };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', aishell: '#0a8cd8' };
   // 收集可用场景和标签（Issue #472: 优先用后端返回的全量可见集派生值）
   const _allRuntimes = (data.runtimes || []);
   const _availScenes = (data.avail_scenes || [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))]).filter(Boolean);
