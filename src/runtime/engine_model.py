@@ -84,10 +84,49 @@ def _codearts_model() -> str:
     return _sanitize(cfg.get("model"))
 
 
+def _aishell_dsh_model() -> str:
+    """acp profile 的 agent-default-model 段 → "provider/model"。
+
+    路径：~/.aishell/profiles/acp/*.patch.yml（HERMES_HOME 无关，AISHELL_HOME
+    可覆盖）。dsh profile 是 patch 列表，取 id=agent-default-model 段的
+    config.provider + config.model；只取模型名，apiKeyEnv/base_url 不进返回值
+    （Issue #865 安全约束）。worker 可能无 pyyaml——正则兜底（对齐 hermes 分支）。
+    """
+    import glob
+    home = os.environ.get("AISHELL_HOME", os.path.expanduser("~/.aishell"))
+    paths = sorted(glob.glob(os.path.join(home, "profiles", "acp", "*.patch.yml")),
+                   reverse=True)
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+        try:
+            import yaml  # type: ignore
+            for item in (yaml.safe_load(raw) or []):
+                if isinstance(item, dict) and item.get("id") == "agent-default-model":
+                    cfg = item.get("config") or {}
+                    # 只返回模型名，不带 provider 前缀（provider 名属内部网关标识，
+                    # 开源合规不外泄；opencode 的 provider/modelid 先例不适用此场景）
+                    return _sanitize(cfg.get("model"))
+        except Exception:
+            pass
+        # 正则兜底（无 pyyaml）：agent-default-model 段内的 provider/model
+        m = re.search(r"- id:\s*agent-default-model\s*(?:\n(?!\s*-\s+id:).)*",
+                      raw, re.S)
+        if m:
+            block = m.group(0)
+            mm = re.search(r"^\s+model:\s*([^\s#]+)", block, re.M)
+            if mm:
+                return _sanitize(mm.group(1))
+    return ""
+
+
 _PARSERS = {
     "hermes": _hermes_model,
     "opencode": _opencode_model,
     "codearts": _codearts_model,
+    "aishell-dsh": _aishell_dsh_model,
 }
 
 
