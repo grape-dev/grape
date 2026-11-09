@@ -118,9 +118,11 @@ class TestInfra:
         assert "Grape" in r.text
 
     def test_spa_static_files(self):
+        # Vue structure: legacy shell assets + migrated Vue view chunks live under frontend/legacy
         for f in ["/static/js/app.js", "/static/css/app.css", "/static/js/api.js",
-                   "/static/js/pages/dashboard.js", "/static/js/pages/agents.js",
-                   "/static/js/pages/runtimes.js", "/static/js/pages/chat.js"]:
+                   "/static/js/worker-name.js", "/static/js/pwd-blocklist.js",
+                   "/static/js/vue/dashboard-view.js", "/static/js/vue/issues-view.js",
+                   "/static-vue/"]:
             r = client.get(f)
             assert r.status_code == 200, f"{f} -> {r.status_code}"
             assert len(r.content) > 100, f"{f} too short"
