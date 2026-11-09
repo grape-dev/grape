@@ -1260,10 +1260,16 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     except Exception as _755_e:
         log.warning(f"A2A #755: entry issue_number backfill failed, keep original: {_755_e}")
 
-    # Issue #1668：a2a_event 触发人账号解析（payload.account → Issue creator，空则告警）。
+    # Issue #1668：a2a_event 触发人账号解析（payload.account → 已认证调用方登录名 → Issue creator，空则告警）。
     # 禁止回退仓库属主：解析结果同步写入 payload.account / 事件 actor / 任务 ACCOUNT。
+    _caller_login = ""
+    if isinstance(user, dict):
+        _caller_login = str(
+            user.get("username") or user.get("login") or user.get("name") or ""
+        ).strip()
     account = resolve_actor_account(
-        {"type": "a2a_event", "payload": payload, "issue_id": f"#{issue_number}" if issue_number else "",
+        {"type": "a2a_event", "actor": _caller_login, "payload": payload,
+         "issue_id": f"#{issue_number}" if issue_number else "",
          "repository": repository},
         repo_key,
     )

@@ -54,11 +54,14 @@ GitCode 事件（Issue/PR/评论）
 
 > **`ACCOUNT` 取值优先级（Issue #1668）**：
 > 1. `a2a_event`：`payload.account`（A2A 交办方显式携带的触发人）→ 事件 `actor`；
+>    - `/api/a2a` 入口的事件 `actor` 取**已认证调用方登录名**（JWT / API Key 可提供；会话 token 无登录名时为空）；
+>    - 内部派生的 a2a_event（订阅 / PR 订阅 / VOD 重派）继承来源事件的 `actor`；
 > 2. 其余事件：事件 `actor`（webhook 触发人）→ `payload.account`；
 > 3. 仅 `a2a_event`：上述为空时按 `issue_number` 查 `issue.created_by`（Issue 创建人）；
-> 4. 仍为空 → 注入空串，并在服务端事件日志输出结构化告警 `ACCOUNT_MISSING`（含 `event_type` / `issue_number` / `repository`）。
+> 4. 仍为空 → 注入空串，并在服务端事件日志输出结构化告警 `ACCOUNT_MISSING`（含 `event_type` / `issue_number` / `repository` / 实际回退链 `fallback`）。
 >
 > **禁止回退为仓库属主（`REPO_OWNER`）**——个人账号与仓库属主解耦；A2A payload 的 `account` 与事件记录 `actor` 同步使用该解析结果。
+> 订阅 / PR 订阅 / VOD 重派等派生的 a2a_event 会把解析结果同时写入事件 `actor` 与落库 `payload.account`，保证下游任务与事件查询一致。
 > `issue_opened` / PR 等非 A2A 事件的 `ACCOUNT` 仍取 webhook 触发人 `actor`，行为不变。
 
 > **`AGENT_NAME` 与 `DEVOPS_EVENT_TYPE` 的区别**：两者是正交的两个维度——
