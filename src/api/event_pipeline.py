@@ -3556,7 +3556,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    from src.prompt_builder import _resolve_server_url, _resolve_business_server_url
+    from src.prompt_builder import resolve_task_server_env
     from src.repo_key import split_owner_repo as _sor2
     from src.repo_key import from_repo_key as _frk2
     _owner2, _repo_name2 = _sor2(repository)
@@ -3568,8 +3568,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
         # Issue #1577：GRAPE_SERVER_URL 承载业务 API 基址（issues/git-repo 全量端点），
         # worker runtime / A2A 回连基址由 RUNTIME_SERVER_URL 独立承载（语义拆分）。
-        "GRAPE_SERVER_URL": _resolve_business_server_url(runtime_id),
-        "RUNTIME_SERVER_URL": _resolve_server_url(runtime_id),
+        # 统一复用 resolve_task_server_env，与 build_task_env / chat 入队同源，防双实现漂移。
+        **resolve_task_server_env(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     # Issue #427：PR 订阅任务（evt 带 _pr_sub_scene_id）场景按订阅场景注入——
