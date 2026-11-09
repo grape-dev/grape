@@ -26,8 +26,10 @@ PATTERNS = [
     (re.compile(r"\b172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b"), "内网 IP（RFC1918）"),
     (re.compile(r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "内网 IP（RFC1918）"),
     # 资产编号（主机别名 0001~0999）：避免真实机器编号进公开文档
-    (re.compile(r"(?<![\w./-])00(?!00)\d{2}(?![\w./-])"), "资产编号（应改为 master-N / worker-N）"),
-    (re.compile(r"topxtopx\.com"), "内部域名"),
+    # 机器资产编号 0001-0010（主机别名）；允许 worker-0001 / hosts/0001 这类分隔写法，
+    # 同时排除 chmod 0755/0600、0022 之类非资产数字（QA 第 5 轮健壮性项）。
+    (re.compile(r"(?<!\d)00(?:0[1-9]|10)(?!\d)"), "资产编号（应改为 master-N / worker-N）"),
+    (re.compile("topx" "topx" r"\.com"), "内部域名（规则表内拼装，源码不留明文）"),
     (re.compile(r"systemctl (restart|start|stop|status) grape"), "运维操作记录"),
     # 磁盘容量/使用率等运维事实
     (re.compile(r"磁盘[^。\n]{0,12}([0-9]{2,3}\s*%|\d+\s*(GB|TB))"), "磁盘容量/使用率运维事实"),
@@ -100,8 +102,9 @@ def scan_diff(base: str) -> list:
             capture_output=True, text=True, check=True,
         ).stdout
     except Exception as e:  # pragma: no cover
-        print(f"git diff failed: {e}", file=sys.stderr)
-        return []
+        # 不能静默返回空：浅克隆/base 写错时会假阴性（QA 第 5 轮健壮性项）。
+        print(f"git diff failed for base '{base}': {e}", file=sys.stderr)
+        raise
     hits = []
     cur_file = ""
     new_ln = 0
@@ -137,7 +140,12 @@ def main() -> int:
     # PR 门禁用法（推荐）：check-doc-redaction.py --diff <base-sha>  只扫新增行
     if args and args[0] == "--diff":
         base = args[1] if len(args) > 1 else "HEAD~1"
-        hits = scan_diff(base)
+        try:
+            hits = scan_diff(base)
+        except Exception:
+            print("docs-redaction: FAILED (cannot compute diff; check base ref / shallow clone)",
+                  file=sys.stderr)
+            return 2
     # 定向文件用法：check-doc-redaction.py --files docs/a.md ...
     elif args and args[0] == "--files":
         files = args[1:]
