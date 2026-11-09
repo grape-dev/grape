@@ -2619,6 +2619,13 @@ def converge_event_to_task(task_id: str) -> dict:
         converged = _cascade_event_terminal(c, _seq, _task_status,
                                             exit_code=task.get("exit_code"))
         db.commit()
+    # Issue #1667：直接 SQL 收敛终态后补挂排队 drain（旁路兜底）
+    if converged:
+        try:
+            from src.api.event_store import _drain_a2a_queue_after_terminal
+            _drain_a2a_queue_after_terminal(_seq)
+        except Exception as _qe:
+            log.warning(f"converge_event_to_task: a2a queue drain failed: {_qe}")
     return {"status": "converged" if converged else "noop",
             "task_id": task_id, "task_status": _task_status, "event_seq": _seq,
             "event_status_before": before,
@@ -2666,17 +2673,27 @@ def update_task_status(task_id, status, **kw):
         # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
         # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的
         # 详写终态路径（update_event_complete 先行）在此为 no-op（事件已终态）。
+        _cascaded_seq = 0
         if status in _TERMINAL_STATUSES:
             try:
                 _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
                                      (task_id,)).fetchone()
                 if _evt_row and _evt_row[0]:
                     if _cascade_event_terminal(c, _evt_row[0], status):
+                        _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
                                  f"{status} for task {task_id} (Issue #587 convergence)")
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         db.commit()
+    # Issue #1667：任务级联写终态是「绕过 update_event_status/complete」的直接 SQL 旁路，
+    # 排队 A2A 事件不会收到终态钩子 → 在此补挂 drain，避免 queued 永久滞留。
+    if _cascaded_seq:
+        try:
+            from src.api.event_store import _drain_a2a_queue_after_terminal
+            _drain_a2a_queue_after_terminal(_cascaded_seq)
+        except Exception as _qe:
+            log.warning(f"update_task_status: a2a queue drain after cascade failed: {_qe}")
     # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
     # Issue #1071（P4）：timeout_failed 是「疑似误判终态」，**不**收钥匙——
     #   判死是兜底猜测，不是任务真的结束；worker 之后 push/调平台接口全 401
