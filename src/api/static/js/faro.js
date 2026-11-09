@@ -1,16 +1,30 @@
 /* Grape 前端可观测性接入 — Grafana Faro (vendored IIFE @2.13.0)
  * 上报链路: 浏览器 SDK → 本站 /faro/collect (spa.py 反代) → Alloy :12347 → Loki/Tempo
  * 采集: console 日志、未捕获异常、Web Vitals、RUM trace、页面视图
+ * Tracing: fetch 注入 W3C traceparent（propagateTraceHeaderCorsUrls 同源覆盖），
+ *          后端 OTel span 同 trace 关联 → Grafana 里前端点击可跳完整调用链
  */
 (function () {
   'use strict';
   var SDK = window.GrafanaFaroWebSdk;
   if (!SDK) { console.warn('[faro] SDK not loaded, telemetry disabled'); return; }
+  var TRACING = window.GrafanaFaroWebTracing;
 
   var ver = (window.GRAPE_VERSION || (document.documentElement.getAttribute('data-version')) || 'dev');
   var env = 'prod';
   if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') env = 'local';
   else if (location.hostname.indexOf('.topxtopx.com') === -1) env = 'dev';
+
+  var instrumentations = undefined;
+  if (TRACING && TRACING.TracingInstrumentation) {
+    // SDK 自带默认三件套（Console/WebVitals/Session）+ Tracing（fetch 注入 traceparent）
+    // propagateTraceHeaderCorsUrls 同源也要覆盖（默认只对跨域 API 注入）
+    instrumentations = SDK.getWebInstrumentations().concat([new TRACING.TracingInstrumentation({
+      instrumentationOptions: {
+        propagateTraceHeaderCorsUrls: [/./],
+      },
+    })]);
+  }
 
   SDK.initializeFaro({
     url: '/faro/collect',
@@ -19,7 +33,8 @@
       version: ver,
       environment: env
     },
-    sessionTracking: { persistent: false }
+    instrumentations: instrumentations,
+    sessionTracking: { persistent: false, samplingRate: 1 }
   });
 
   // 环境信息补齐（按登录后 localStorage 可用字段，未登录时跳过）
