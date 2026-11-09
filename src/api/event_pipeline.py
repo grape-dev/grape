@@ -4252,11 +4252,13 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                 except Exception:
                     return None
 
+            # Issue #1635 review：_primary_meta 由 _skill_primary() 执行时才写入，
+            # 参数在调用前求值会恒得空值；改为传取值 callable，primary 执行后再解析。
             _mat = materialize_skill_with_fallback(
                 skill_dir, skill_name, _skill_primary,
                 agent_type=agent_type, agent_type_fallback=_agent_type_checker_resolver,
-                scope=_primary_meta.get("scope") or "",
-                skill_type=agent_type, skill_id=_primary_meta.get("skill_id") or 0)
+                scope=lambda: _primary_meta.get("scope") or "",
+                skill_type=agent_type, skill_id=lambda: _primary_meta.get("skill_id") or 0)
             # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
             evt["_skill_materialize"] = _mat
             if _mat.get("status") in ("fallback", "degraded"):

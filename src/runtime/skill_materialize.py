@@ -568,6 +568,8 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
         本模块零 DB 依赖，resolver 由服务端调用方注入。
     scope/skill_type/skill_id/baseline_dir（Issue #1635，可选）：传入后启用双向
         漂移校验（baseline_dir 空串=按技能名自动解析），结果增 ``drift`` 与 ``source``。
+        ``scope``/``skill_id`` 也可传无参 callable，在 ``primary()`` 执行后再取值，
+        供来源 meta 由 primary 惰性写入的调用点使用（避免参数先于函数体求值恒为空）。
     返回 dict {"status": ok|fallback|degraded, "detail": str, "skill_dir": str,
                "skill_id": int, "drift": dict, "source": dict}。
     """
@@ -576,6 +578,20 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
         kind, payload = primary() if callable(primary) else ("none", "no primary source")
     except Exception as e:
         kind, payload = "none", f"primary source error: {e}"
+
+    # Issue #1635 review：scope/skill_id 支持惰性取值（callable）。服务端主渠道的来源
+    # meta 由 primary() 执行时才写入，若调用点在参数求值阶段直接读取 dict 会恒为空
+    # （scope="" skill_id=0），导致 direct/服务端主链路漂移校验被完全跳过。
+    if callable(scope):
+        try:
+            scope = scope() or ""
+        except Exception:
+            scope = ""
+    if callable(skill_id):
+        try:
+            skill_id = int(skill_id() or 0)
+        except Exception:
+            skill_id = 0
 
     # baseline_dir=None 且未指定 scope → 不做漂移校验（向后兼容旧调用）
     _baseline = baseline_dir if baseline_dir is not None else ("" if scope else None)
