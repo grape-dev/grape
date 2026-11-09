@@ -593,6 +593,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
     import subprocess as _subprocess
     import threading as _threading
     import queue as _queue
+    import tempfile as _tempfile
 
     agent_cmd = cli_path or _shutil.which("aishell") or _shutil.which("aishell.cmd")
     if not agent_cmd:
@@ -670,13 +671,13 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
             "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}},
         }, 30)
         if err:
-            return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+            return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                     "error": f"initialize: {err}"}
         version = ((result or {}).get("agentInfo") or {}).get("version", "")
 
-        result, err = _rpc("session/new", {"cwd": "/tmp", "mcpServers": []}, 30)
+        result, err = _rpc("session/new", {"cwd": _tempfile.gettempdir(), "mcpServers": []}, 30)
         if err:
-            return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+            return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                     "error": f"session/new: {err}"}
         sid = (result or {}).get("sessionId", "")
 
@@ -700,7 +701,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
                 _, err = _rpc("session/set_config_option", {
                     "sessionId": sid, "configId": "model", "value": picked}, 20)
                 if err:
-                    return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                    return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                             "error": f"set_config_option: {err}"}
             break
 
@@ -726,12 +727,12 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
                 continue
             if raw.get("id") == _prompt_id:
                 if "error" in raw:
-                    return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                    return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                             "error": f"prompt: {raw['error'].get('message', '')[:200]}"}
                 stop_reason = (raw.get("result") or {}).get("stopReason", "")
                 break
 
-        latency = int((_time_mod.time() - start) * 1000)
+        latency = round(_time_mod.time() - start, 1)
         if stop_reason == "end_turn":
             out = {"status": "ok", "latency": latency}
             if version:
@@ -740,7 +741,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
         return {"status": "fail", "latency": latency,
                 "error": f"prompt stopReason={stop_reason or 'none'}"}
     except Exception as e:
-        return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+        return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                 "error": str(e)[:200]}
     finally:
         if proc is not None:

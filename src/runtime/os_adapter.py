@@ -193,6 +193,17 @@ _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.cmd"),
     ],
+    # aishell-dsh（2026-11-06 二期 Windows 对接）：AI Shell 桌面安装的 CLI 启动器。
+    # exe 形态不存在——AI Shell.exe 是 Electron 外壳，aishell CLI 唯一入口是
+    # resources/runtime/cli/bin/aishell.cmd（ELECTRON_RUN_AS_NODE=1 + DSH_HOME=
+    # %USERPROFILE%\.aishell 钉死，对齐 Linux 启动器）。.cmd 不命中 issue #351 的
+    # 多行截断雷：ACP 模式 argv 只有 ["acp"]，prompt 走 stdin 不经 cmd 壳。
+    # 桌面端 command-path.ps1 有把该目录发布进用户 PATH 的机制，但 grape 发现链
+    # 不依赖它（未启动过桌面的机器 PATH 无此项），故落兜底路径。
+    "aishell": [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "AI Shell",
+                     "resources", "runtime", "cli", "bin", "aishell.cmd"),
+    ],
 }
 
 

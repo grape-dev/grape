@@ -118,6 +118,26 @@ class TestEngineSearchPaths:
             # 应包含路径（即使 LOCALAPPDATA 为空也会有元素）
             assert len(paths) >= 0
 
+    def test_windows_aishell_desktop_cmd_entry(self):
+        """aishell-dsh 二期 Windows 对接：AI Shell 桌面安装的 CLI 启动器兜底。
+
+        aishell CLI 唯一形态是桌面安装内 resources/runtime/cli/bin/aishell.cmd
+        （ELECTRON_RUN_AS_NODE 启动器，无 aishell.exe）。find_cli("aishell")
+        （discover_backends 与 aishell_acp.stream_execute 的调用形态）在 PATH
+        查不到时必须经此条目命中——未启动过桌面的机器用户 PATH 无该目录。
+        """
+        with patch.object(os_adapter, "_IS_WINDOWS", True):
+            paths = os_adapter.engine_search_paths("aishell")
+        assert len(paths) == 1
+        assert paths[0].lower().endswith("aishell.cmd")
+        assert "AI Shell" in paths[0]
+        assert os.path.join("resources", "runtime", "cli", "bin") in paths[0]
+        # find_cli 全链：PATH 落空 → 兜底路径存在即返回该 .cmd
+        with patch.object(os_adapter, "_IS_WINDOWS", True):
+            with patch("src.runtime.os_adapter.which", return_value=""):
+                with patch("os.path.isfile", return_value=True):
+                    assert os_adapter.find_cli("aishell") == paths[0]
+
 
 class TestEngineSkillDirs:
     def test_hermes_skill_dir(self):
