@@ -829,6 +829,21 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
         _track_proc(proc)
+        # MR-3 移植（2026-11-05，feat/lgtm-fullstack-obs）：引擎执行 span——展开
+        # task.execute 的"黑盒"：spawn→流式输出→退出全程一段。手动生命周期
+        # （生成器内不能用 with）；OTel 关闭时零开销。
+        _eng_span = None
+        try:
+            from src.observability.otel import otel_enabled, start_external_span
+            if otel_enabled():
+                _eng_span = start_external_span("engine", backend.name, {
+                    "engine.backend": backend.name,
+                    "engine.session_id": session_id or "",
+                    "engine.repo_key": repo_key or "",
+                    "engine.event_type": event_type or "",
+                })
+        except Exception:
+            _eng_span = None
         # issue #351: prompt 经 stdin 传输（不进 argv，规避 cmd 壳多行截断）
         _stdin = getattr(proc, "stdin", None)
         if backend.prompt_via_stdin and _stdin is not None:
@@ -1078,6 +1093,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         stderr_output = _stderr_tail.text()
 
         log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
+        if _eng_span is not None:
+            try:
+                _eng_span.set_attribute("engine.exit_code", proc.returncode if proc.returncode is not None else -1)
+                _eng_span.set_attribute("engine.text_len", len(full_text))
+                _eng_span.end()
+            except Exception:
+                pass
+            _eng_span = None
         _untrack_proc(proc)
 
         # codearts 方案E2: 杀掉 per-task codearts serve 子进程，释放内存

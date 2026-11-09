@@ -70,12 +70,23 @@ class _JsonFormatter(logging.Formatter):
 
     def format(self, record):
         import time as _t
+        # OTel trace 关联（MR-1 移植 2026-11-05，feat/lgtm-fullstack-obs）：日志行注入
+        # trace_id/span_id——Loki 日志行的 TraceID 可直跳调用链瀑布。
+        _otel_trace_id = ""
+        _otel_span_id = ""
+        try:
+            from src.observability.otel import inject_trace_ids
+            _otel_trace_id, _otel_span_id = inject_trace_ids()
+        except Exception:
+            pass
         log_entry = {
             "ts": _t.strftime("%Y-%m-%dT%H:%M:%S.", _t.gmtime(record.created))
                   + f"{record.msecs:03.0f}Z",
             "level": record.levelname,
             "component": record.name,
             "request_id": getattr(record, "request_id", "-"),
+            "trace_id": _otel_trace_id,
+            "span_id": _otel_span_id,
             "message": record.getMessage(),
         }
         # 提取 extra 字段（HTTP 请求日志中间件注入的结构化维度）
