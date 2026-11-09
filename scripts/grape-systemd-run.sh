@@ -20,9 +20,9 @@ cd "$REPO_ROOT"
 # 注意：systemd 的 EnvironmentFile=.env 在 Environment= 之后加载，会覆盖 drop-in 里写的
 # DEVOPS_DB_*，所以领域库的用户/库名必须在这里按角色 export（脚本 export 晚于 .env 注入）。
 case "$role" in
-    mgmt)         _db_name="grape-mgmt-db";    _db_user="grape-mgmt" ;;
-    event|worker) _db_name="grape-runtime-db"; _db_user="grape-runtime" ;;
-    insight)      _db_name="grape-insight-db"; _db_user="grape-insight" ;;
+    mgmt)         _db_name="grape_mgmt_db";    _db_user="grape_mgmt" ;;
+    event|worker) _db_name="grape_runtime_db"; _db_user="grape_runtime" ;;
+    insight)      _db_name="grape_insight_db"; _db_user="grape_insight" ;;
 esac
 export DEVOPS_DB_NAME="$_db_name"
 export DEVOPS_DB_USER="$_db_user"
