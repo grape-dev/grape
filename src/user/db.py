@@ -3113,7 +3113,7 @@ def is_server_base_url_configured() -> bool:
 
 
 def _split_face_public(key: str) -> bool:
-    """拆分配置项（browser_callback_url/worker_connect_url）是否已配置且非回环。"""
+    """拆分配置项（browser_callback_url/worker_connect_url/task_business_api_url）是否已配置且非回环。"""
     _v = _split_url_configured_value(key)
     if not _v:
         return False
@@ -3121,11 +3121,18 @@ def _split_face_public(key: str) -> bool:
     return _host not in _LOOPBACK_HOSTS
 
 
+_SPLIT_KEY_USAGE = {
+    "browser_callback_url": "浏览器回调",
+    "worker_connect_url": "worker 回连",
+    "task_business_api_url": "任务业务 API",
+}
+
+
 def _split_face_warning(key: str) -> str:
-    """单个拆分项指向回环时的告警文案（面向对应语义：浏览器回调/worker 回连）。"""
+    """单个拆分项指向回环时的告警文案（面向对应语义：浏览器回调/worker 回连/任务业务 API）。"""
     _v = _split_url_configured_value(key)
     _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
-    _usage = "浏览器回调" if key == "browser_callback_url" else "worker 回连"
+    _usage = _SPLIT_KEY_USAGE.get(key, key)
     return (
         f"{key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
         f"请在 configs/server-config.json 配置对外可访问地址后重启。"
@@ -3142,7 +3149,7 @@ def get_server_base_url_warning() -> str:
     - 全未配置 → 保留「未配置」告警（提示配 server_base_url 或两个拆分项均可）。
     """
     # 逐面检查拆分项：指向回环的面对出回环告警
-    for _key in ("browser_callback_url", "worker_connect_url"):
+    for _key in ("browser_callback_url", "worker_connect_url", "task_business_api_url"):
         if _split_url_configured_value(_key) and not _split_face_public(_key):
             return _split_face_warning(_key)
     # 任一面已公网配置 → 无告警（含拆分项，双地址部署不误报）
@@ -4843,6 +4850,15 @@ def get_worker_connect_url() -> str:
     return get_server_base_url()
 
 
+def get_business_api_url_explicit() -> str:
+    """显式配置的 task_business_api_url（未配置返回空串，不回落 server_base_url）。
+
+    Issue #1577：用于解析优先级「显式配置 > server_base_url > 本机回环」，
+    本机 runtime 也要尊重显式业务基址配置（QA 复审 Spec 偏离项）。
+    """
+    return _split_url_configured_value("task_business_api_url")
+
+
 def get_business_api_url() -> str:
     """主控业务 API 基址（任务内 grape 业务命令 issues / git-repo 等全量端点用）。
 
@@ -4851,7 +4867,7 @@ def get_business_api_url() -> str:
     `RUNTIME_SERVER_URL` 独立承载。优先 task_business_api_url（server-config.json
     > meta），未配置回退 server_base_url（单地址部署与改造前等价）。
     """
-    _v = _split_url_configured_value("task_business_api_url")
+    _v = get_business_api_url_explicit()
     if _v:
         return _v
     return get_server_base_url()
@@ -4879,13 +4895,13 @@ def _split_url_configured_value(key: str) -> str:
 def get_url_split_warning() -> str:
     """Issue #471 E1：拆分配置项错误的明确报错引导；配置正确返回空串。"""
     warnings = []
-    for _key in ("browser_callback_url", "worker_connect_url"):
+    for _key in ("browser_callback_url", "worker_connect_url", "task_business_api_url"):
         _v = _split_url_configured_value(_key)
         if not _v:
             continue
         _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
         if _host in _LOOPBACK_HOSTS:
-            _usage = "浏览器回调" if _key == "browser_callback_url" else "worker 回连"
+            _usage = _SPLIT_KEY_USAGE.get(_key, _key)
             warnings.append(
                 f"{_key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
                 f"请在 configs/server-config.json 配置对外可访问地址后重启。"

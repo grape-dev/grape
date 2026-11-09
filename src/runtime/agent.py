@@ -1353,21 +1353,41 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
     return ok
 
 
+def _same_url_host(a: str, b: str) -> bool:
+    """比较两个 URL 是否同主机（host[:port]，忽略 scheme/path）。
+
+    用于判定单地址部署：业务基址与 worker 回连基址同源时，内网 worker 必须
+    继续把业务基址覆盖为本机直连，否则公网/NAT 回环不通（改造前语义）。
+    """
+    if not a or not b:
+        return False
+    try:
+        from urllib.parse import urlsplit
+        ha = urlsplit(a.strip()).netloc.lower()
+        hb = urlsplit(b.strip()).netloc.lower()
+        return bool(ha) and ha == hb
+    except Exception:
+        return a.strip().lower() == b.strip().lower()
+
+
 def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     """本机/内网 worker 修正回连基址（Issue #1577 语义拆分）。
 
     - `RUNTIME_SERVER_URL` / `task["server_url"]` 覆盖为本 worker 直连地址
       （A2A / tasks 等回连调用，走公网会 NAT 回环不通）。
-    - 业务 API 基址 `GRAPE_SERVER_URL` **不再被 runtime 地址覆盖**：任务内
-      grape 业务命令需要全量端点，runtime 面只有 runtime 端点会报
-      `No such command`。上游未提供业务基址时才保守回退到本机地址
-      （单地址部署与改造前等价）并打日志。
+    - 业务 API 基址 `GRAPE_SERVER_URL`：双地址部署（显式业务基址与 worker 回连
+      基址不同主机）时保留不动，任务内 grape 业务命令需要全量端点；单地址部署
+      （未提供业务基址，或业务基址与回连基址同主机）时仍覆盖为本机直连地址，
+      与改造前等价，避免内网 worker 走公网 NAT 回环不通。
     """
+    _business_base = env.get("GRAPE_SERVER_URL") or ""
+    _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
+    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
     env["RUNTIME_SERVER_URL"] = local_base
     task["server_url"] = local_base
-    if not env.get("GRAPE_SERVER_URL"):
+    if _single_address:
         env["GRAPE_SERVER_URL"] = local_base
-        log.info("local worker: no business base in env, fallback GRAPE_SERVER_URL -> %s", local_base)
+        log.info("local worker: single-address deploy, override GRAPE_SERVER_URL -> %s", local_base)
 
 
 def _current_username() -> "str | None":
@@ -2450,9 +2470,9 @@ async def _execute_task(client, task, engine_name: str = ""):
             if ":" not in _local_base.split("://", 1)[1]:
                 _local_base = _local_base + ":3000"
         # 其他（http:// 内网域名/IP 无端口）：保持原样，不猜端口
-        # Issue #1577：本机/内网 worker 仅覆盖 worker runtime 基址（RUNTIME_SERVER_URL /
-        # task.server_url，A2A/tasks 直连用），不得再用 runtime 地址覆盖业务 API 基址
-        # GRAPE_SERVER_URL——否则任务内 grape 业务命令会落到只有 runtime 端点的地址。
+        # Issue #1577：本机/内网 worker 覆盖 worker runtime 基址（RUNTIME_SERVER_URL /
+        # task.server_url，A2A/tasks 直连用）；双地址部署保留显式业务 API 基址
+        # GRAPE_SERVER_URL，单地址部署仍覆盖为本机直连（改造前等价，避免 NAT 回环不通）。
         _apply_local_worker_base_override(env, task, _local_base)
         log.info(f"local worker: override RUNTIME_SERVER_URL/server_url -> {_local_base}")
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
