@@ -2221,58 +2221,616 @@ function renderTasksTab(ops, rt) {
   return html;
 }
 
-// ===== Tab: 能效看板（Issue #1229）=====
-// 按当前仓库、按协作者聚合：提需求数 / 完成数 / 消耗 token。
-// 数据源：/api/dashboard/efficiency（issue 单表计数 + obs_llm_usage 按创建人归属）。
-function _effTokFmt(n) {
-  const v = Number(n || 0);
-  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
-  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-  return String(v);
+// ===== Tab: 能效看板 2.0（flow efficiency，Issue #1229 升级）=====
+// 数据源：/api/dashboard/efficiency/board（单请求返回 10 段）
+// 设计见 docs/weekly-10/efficiency-board-redesign-2026-11-09.md
+// 定位：看工作流入 / 积压 / 周期 / 瓶颈——找瓶颈，不是绩效。
+const _effState = { weeks: 12, group: 'all', data: null };
+const _effCharts = {};
+
+function _effT(k, vars) { return I18N.t('observability.eff2.' + k, vars); }
+
+// ===== 下钻弹窗（周→日 / 桶→issue 列表）=====
+let _effModalChart = null;
+
+function _effCloseModal() {
+  const m = document.getElementById('effMask');
+  if (m) m.remove();
+  if (_effModalChart) { try { _effModalChart.dispose(); } catch (e) {} _effModalChart = null; }
+  document.removeEventListener('keydown', _effEsc);
 }
 
-function renderObsEfficiency(c, d) {
-  const t = d || {};
-  const list = t.contributors || [];
-  const maxTok = list.reduce((m, x) => Math.max(m, Number(x.total_tokens || 0)), 0);
-  let html = '<div id="obsEffBody">';
-  html += _kpiRowHTML([
-    { label: I18N.t('observability.eff.total_issues'), value: Number(t.total_issues || 0).toLocaleString(), color: 'var(--a)' },
-    { label: I18N.t('observability.eff.completed'), value: Number(t.completed_issues || 0).toLocaleString(), color: 'var(--g)' },
-    { label: I18N.t('observability.eff.total_tokens'), value: _effTokFmt(t.total_tokens), color: 'var(--pu)', hint: Number(t.total_tokens || 0).toLocaleString() },
-  ]);
-  if (!list.length) {
-    html += `<div class="ts t3" style="text-align:center;padding:40px 0">📭 ${I18N.t('observability.eff.empty')}</div>`;
-  } else {
-    html += table(
-      [I18N.t('observability.eff.th_user'), I18N.t('observability.eff.th_issues'),
-       I18N.t('observability.eff.th_completed'), I18N.t('observability.eff.th_tokens')],
-      list.map(x => {
-        const tok = Number(x.total_tokens || 0);
-        const pct = maxTok > 0 ? Math.round(tok / maxTok * 100) : 0;
-        return [_escHtml(x.user), String(x.issues || 0), String(x.completed || 0),
-          `<div style="display:flex;align-items:center;gap:8px">` +
-          `<div style="flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;min-width:60px">` +
-          `<div style="height:100%;width:${pct}%;background:var(--pu);border-radius:4px"></div></div>` +
-          `<span style="min-width:56px;text-align:right;font-variant-numeric:tabular-nums">${_effTokFmt(tok)}</span></div>`];
-      })
-    );
+function _effEsc(e) { if (e.key === 'Escape') _effCloseModal(); }
+
+function _effOpenModal(title, sub, bodyHtml) {
+  _effCloseModal();
+  const mask = document.createElement('div');
+  mask.className = 'efmask';
+  mask.id = 'effMask';
+  mask.innerHTML = `<div class="efmodal">
+    <button class="fx" title="${_effT('close')}">×</button>
+    <h3>${_escHtml(title)}${sub ? `<span class="fin">${_escHtml(sub)}</span>` : ''}</h3>
+    <div class="fsec" id="effModalBody">${bodyHtml}</div>
+  </div>`;
+  document.body.appendChild(mask);
+  mask.addEventListener('click', e => { if (e.target === mask) _effCloseModal(); });
+  mask.querySelector('.fx').addEventListener('click', _effCloseModal);
+  document.addEventListener('keydown', _effEsc);
+  return mask.querySelector('#effModalBody');
+}
+
+function _effRepoParam() {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  return repo && repo.fullName ? 'repo=' + encodeURIComponent(repo.fullName) : '';
+}
+
+// ④/⑥ 点击某周 → 该周每日拆解
+function _effOpenDaily(weekLabel) {
+  const base = _effRepoParam();
+  if (!base) return;
+  const body = _effOpenModal(_effT('daily_title', { week: weekLabel }), _effT('daily_sub'), '<div class="efempty">' + I18N.t('observability.loading') + '</div>');
+  API.get('/dashboard/efficiency/daily?' + base + '&week=' + encodeURIComponent(weekLabel)).then(d => {
+    const days = (d && d.days) || [];
+    if (!days.length) { body.innerHTML = '<div class="efempty">' + _effT('no_data') + '</div>'; return; }
+    body.innerHTML = `<div id="effDailyChart" class="echart"></div>
+      <div class="ftbl-wrap"><table class="ftbl"><thead><tr>
+        <th>${_effT('d_date')}</th><th>${_effT('d_weekday')}</th><th>${_effT('leg_created')}</th>
+        <th>${_effT('leg_completed')}</th><th>${_effT('leg_backlog')}</th></tr></thead><tbody>
+        ${days.map(x => `<tr><td class="num">${x.label}</td><td>${x.weekday}</td>
+          <td class="num">${x.created}</td><td class="num">${x.completed}</td><td class="num">${x.backlog}</td></tr>`).join('')}
+      </tbody></table></div>`;
+    const el = document.getElementById('effDailyChart');
+    if (el && typeof echarts !== 'undefined') {
+      try {
+        _effModalChart = echarts.init(el);
+        _effModalChart.setOption({
+          grid: { left: 34, right: 34, top: 26, bottom: 22 },
+          tooltip: { trigger: 'axis' },
+          legend: { top: 0, right: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 10 } },
+          xAxis: { type: 'category', data: days.map(x => x.label), axisLabel: { fontSize: 10 }, axisTick: { show: false } },
+          yAxis: [{ type: 'value', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { color: '#eef0f4' } } },
+                  { type: 'value', axisLabel: { fontSize: 10 }, splitLine: { show: false } }],
+          series: [
+            { name: _effT('leg_created'), type: 'bar', data: days.map(x => x.created), itemStyle: { color: '#4a7fd1' }, barMaxWidth: 16 },
+            { name: _effT('leg_completed'), type: 'bar', data: days.map(x => x.completed), itemStyle: { color: '#22a06b' }, barMaxWidth: 16 },
+            { name: _effT('leg_backlog'), type: 'line', yAxisIndex: 1, data: days.map(x => x.backlog), itemStyle: { color: '#e0a02a' }, lineStyle: { color: '#e0a02a', width: 2 }, symbolSize: 5 }
+          ]
+        });
+      } catch (e) {}
+    }
+  }).catch(e => { body.innerHTML = '<div class="efempty">' + _effT('load_failed', { msg: e.message }) + '</div>'; });
+}
+
+// ⑤⑦⑧ 点击某一行 → 该桶的 issue 列表（含场景）
+// 数据量大时分页 + 懒加载：只取当前页，翻页即取，取过的页留在 _effIssueCache 里不重取
+const _effIssueState = { kind: '', bucket: '', title: '', page: 0, pageSize: 20, total: 0, reqId: 0 };
+const _effIssueCache = new Map();
+
+function _effIssueKey(page, size) { return `${_effIssueState.kind}|${_effIssueState.bucket}|${page}|${size}`; }
+
+function _effIssueUrl(page) {
+  const base = _effRepoParam();
+  return '/dashboard/efficiency/issues?' + base
+    + '&kind=' + encodeURIComponent(_effIssueState.kind)
+    + '&bucket=' + encodeURIComponent(_effIssueState.bucket || '')
+    + '&threshold_days=' + encodeURIComponent(_effState.thresholdDays || 7)
+    + '&limit=' + encodeURIComponent(_effIssueState.pageSize)
+    + '&offset=' + encodeURIComponent(page * _effIssueState.pageSize);
+}
+
+function _effIssueTableHtml(items) {
+  if (!items.length) return '<div class="efempty">' + _effT('no_data') + '</div>';
+  return `<table class="ftbl">
+    <colgroup><col class="c-num"><col class="c-title"><col class="c-status"><col class="c-stage">
+      <col class="c-scene"><col class="c-metric"><col class="c-owner"><col class="c-time"></colgroup>
+    <thead><tr>
+      <th>#</th><th>${_effT('i_title')}</th><th>${_effT('i_status')}</th><th>${_effT('i_stage')}</th>
+      <th>${_effT('i_scene')}</th><th>${_effT('i_metric')}</th><th>${_effT('i_owner')}</th><th>${_effT('i_created')}</th>
+    </tr></thead><tbody>
+    ${items.map(x => `<tr>
+      <td class="num">#${x.number}</td>
+      <td class="fttl" title="${_escHtml(x.title)}">${_escHtml(x.title)}</td>
+      <td>${_escHtml(x.status)}</td>
+      <td>${_escHtml(x.stage || '—')}</td>
+      <td class="fttl" title="${_escHtml(x.scene || '')}">${_escHtml(x.scene || '—')}</td>
+      <td class="num">${x.metric == null ? '—' : (x.metric_unit === 'days' ? x.metric + ' ' + _effT('unit_d') : x.metric + ' ' + _effT('unit_h'))}</td>
+      <td>${_escHtml(x.created_by || '—')}</td>
+      <td class="num">${_escHtml(x.created_at || '')}</td>
+    </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function _effIssuePagerHtml() {
+  const st = _effIssueState;
+  const pages = Math.max(1, Math.ceil(st.total / st.pageSize));
+  const from = st.total === 0 ? 0 : st.page * st.pageSize + 1;
+  const to = Math.min(st.total, (st.page + 1) * st.pageSize);
+  return `<div class="efpager">
+    <span class="fin">${_effT('page_range', { from: from, to: to, n: st.total })}</span>
+    <span class="efspacer"></span>
+    <select class="efpsize">
+      ${[20, 50, 100].map(n => `<option value="${n}" ${n === st.pageSize ? 'selected' : ''}>${_effT('per_page', { n: n })}</option>`).join('')}
+    </select>
+    <button class="bt bt-o bt-s" data-efpage="prev" ${st.page <= 0 ? 'disabled' : ''}>${_effT('prev_page')}</button>
+    <span class="fin">${_effT('page_of', { p: st.page + 1, t: pages })}</span>
+    <button class="bt bt-o bt-s" data-efpage="next" ${st.page >= pages - 1 ? 'disabled' : ''}>${_effT('next_page')}</button>
+  </div>`;
+}
+
+function _effIssueRender(body) {
+  const st = _effIssueState;
+  body.innerHTML = `<div id="effIssueCount" class="fin" style="margin-bottom:6px">${_effT('issues_count', { n: st.total })}</div>
+    <div id="effIssueTable">${_effIssueTableHtml(_effIssueCache.get(_effIssueKey(st.page, st.pageSize)) || [])}</div>
+    <div id="effIssuePager">${_effIssuePagerHtml()}</div>`;
+  _effIssueBind(body);
+}
+
+function _effIssueBind(body) {
+  const st = _effIssueState;
+  body.querySelectorAll('[data-efpage]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dir = btn.getAttribute('data-efpage');
+      const pages = Math.max(1, Math.ceil(st.total / st.pageSize));
+      const next = dir === 'prev' ? Math.max(0, st.page - 1) : Math.min(pages - 1, st.page + 1);
+      if (next !== st.page) { st.page = next; _effIssueLoadPage(body); }
+    });
+  });
+  const sel = body.querySelector('.efpsize');
+  if (sel) {
+    sel.addEventListener('change', () => {
+      st.pageSize = Number(sel.value) || 20;
+      st.page = 0;
+      _effIssueCache.clear();
+      _effIssueLoadPage(body);
+    });
   }
+}
+
+function _effIssueLoadPage(body) {
+  const st = _effIssueState;
+  const key = _effIssueKey(st.page, st.pageSize);
+  const cached = _effIssueCache.get(key);
+  if (cached) { _effIssueRender(body); return; }   // 已取过的页直接渲染，不重复请求
+  const tableEl = body.querySelector('#effIssueTable');
+  if (tableEl) tableEl.innerHTML = '<div class="efempty">' + I18N.t('observability.loading') + '</div>';
+  const reqId = ++st.reqId;
+  API.get(_effIssueUrl(st.page)).then(d => {
+    if (reqId !== st.reqId) return;                  // 快速翻页：丢掉过期响应
+    st.total = (d && d.total) || 0;
+    _effIssueCache.set(key, (d && d.items) || []);
+    _effIssueRender(body);
+  }).catch(e => {
+    if (reqId !== st.reqId) return;
+    if (tableEl) tableEl.innerHTML = '<div class="efempty">' + _effT('load_failed', { msg: e.message }) + '</div>';
+  });
+}
+
+function _effOpenIssues(kind, bucket, title) {
+  const base = _effRepoParam();
+  if (!base) return;
+  const st = _effIssueState;
+  st.kind = kind; st.bucket = bucket || ''; st.title = title || '';
+  st.page = 0; st.pageSize = st.pageSize || 20; st.total = 0; st.reqId = 0;
+  _effIssueCache.clear();
+  const body = _effOpenModal(title, _effT('issues_sub'), '<div class="efempty">' + I18N.t('observability.loading') + '</div>');
+  _effIssueLoadPage(body);
+}
+
+function _effSpark(bars, color, title) {
+  const max = Math.max(1, ...bars.map(b => Number(b.v) || 0));
+  return `<div class="espark" title="${_escHtml(title || '')}">${bars.map(b => {
+    const h = Math.round((Number(b.v) || 0) / max * 100);
+    const w = b.week ? ` data-week="${_escHtml(b.week)}"` : '';
+    return `<div class="efsp${b.week ? ' efsp-clk' : ''}"${w} title="${_escHtml(b.l)}: ${b.v}">
+      <div class="efsb" style="height:${h}%;background:${color || 'var(--a)'}"></div>
+      <div class="efsl">${_escHtml(b.l)}</div></div>`;
+  }).join('')}</div>`;
+}
+
+// 分钟 → 可读（本平台任务量级从 2 秒到 3 小时，后端统一给分钟原值）
+function _effFmtMin(m) {
+  if (m === null || m === undefined) return '—';
+  const v = Number(m);
+  if (!isFinite(v)) return '—';
+  if (v < 1) return Math.round(v * 60) + ' ' + _effT('unit_s');
+  if (v < 60) return (v < 10 ? v.toFixed(1) : String(Math.round(v))) + ' ' + _effT('unit_m');
+  const h = v / 60;
+  return (h < 10 ? h.toFixed(1) : String(Math.round(h))) + ' ' + _effT('unit_h');
+}
+
+// 三个分位用同一单位（按 P90 量级决定），避免 "P50 11 秒 / P90 2.3 分钟" 这种混排
+function _effFmtTriple(p50, p90, p99) {
+  const vals = [p50, p90, p99].map(Number).filter(v => isFinite(v));
+  if (!vals.length) return ['—', '—', '—'];
+  const ref = Number(p90);
+  let unit = 'unit_m', scale = 1;
+  if (isFinite(ref) && ref < 1) { unit = 'unit_s'; scale = 60; }
+  else if (isFinite(ref) && ref >= 60) { unit = 'unit_h'; scale = 1 / 60; }
+  return [p50, p90, p99].map(v => {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v) * scale;
+    if (!isFinite(n)) return '—';
+    return (n < 10 ? n.toFixed(1) : String(Math.round(n))) + ' ' + _effT(unit);
+  });
+}
+
+function _effFmtDays(d) {
+  if (d === null || d === undefined) return '—';
+  const v = Number(d);
+  if (!isFinite(v)) return '—';
+  if (v < 1) return Math.round(v * 24) + ' ' + _effT('unit_h');
+  return (v < 10 ? v.toFixed(1) : String(Math.round(v))) + ' ' + _effT('unit_d');
+}
+
+function _effWipBars(items) {
+  const t = _effT.bind(null);
+  // 整条长度 = 该人总条数（未关闭+已完成）；段内蓝=未关闭、绿=已完成
+  const tmax = Math.max(1, ...items.map(i => (Number(i.open || i.count) || 0) + (Number(i.completed) || 0)));
+  const head = `<div class="ebhead"><div class="eflb"></div><div class="efbarwrap"></div>
+    <div class="efnum">${t('wip_open')}</div><div class="efnum2">${t('wip_done')}</div></div>`;
+  const rows = items.map(i => {
+    const n = Number(i.open || i.count) || 0;
+    const c = Number(i.completed || 0);
+    const total = n + c;
+    const tw = total > 0 ? Math.max(3, Math.round(total / tmax * 100)) : 0;
+    const openPct = total > 0 ? (n / total * 100) : 0;
+    const cls = (i.kind === 'bot' ? 'bot ' : '') + (n === 0 ? 'zero' : '');
+    return `<div class="ebrow ${cls}" title="${_escHtml(i.label || i.name)}: ${t('wip_total')} ${total} · ${t('wip_open')} ${n} · ${t('wip_done')} ${c}">
+      <div class="eflb">${_escHtml(i.label || i.name)}</div>
+      <div class="efbarwrap">
+        <div class="eftrack" style="width:${tw}%">
+          <div class="efl" style="width:${openPct}%"></div>
+          <div class="eflg" style="width:${100 - openPct}%"></div>
+        </div>
+      </div>
+      <div class="efnum">${n}</div>
+      <div class="efnum2 ${c > 0 ? 'has' : ''}">${c}</div></div>`;
+  }).join('');
+  return head + '<div class="ebars">' + rows + '</div>';
+}
+
+function _effEnsureStyles() {
+  if (document.getElementById('effBoardStyle')) return;
+  const st = document.createElement('style');
+  st.id = 'effBoardStyle';
+  st.textContent = `
+.efh{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.efh .scope{font-size:11px;color:var(--t2)}
+.efh .scope b{color:var(--t);font-weight:600}
+.efh .efspacer{flex:1}
+.efh select{padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--c);color:var(--t);outline:none}
+.ewarn{margin-bottom:12px;padding:8px 12px;border-radius:8px;background:var(--warn-bg);border:1px solid var(--warn-border);font-size:11px;color:var(--t2)}
+.egrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.ecard{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:14px 16px;box-shadow:var(--sh);min-width:0;display:flex;flex-direction:column}
+.ecard.wide{grid-column:1 / -1}
+.ecard h3{font-size:11px;font-weight:600;color:var(--t2);letter-spacing:.3px;margin-bottom:6px;display:flex;align-items:baseline;gap:6px}
+.ecard h3 .efcnt{font-weight:400;color:var(--t3);font-size:10px}
+.ebig{font-size:26px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums}
+.ebig .efunit{font-size:13px;font-weight:600;margin-left:2px;color:var(--t2)}
+.epair{display:flex;gap:18px;flex-wrap:wrap;margin:2px 0 8px}
+.epair .efcell{min-width:64px}
+.epair .efcell .efv{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.3}
+.epair .efcell .efl{font-size:10px;color:var(--t3)}
+.esub{font-size:11px;color:var(--t2);line-height:1.5;margin-top:4px}
+.efoot{font-size:10px;color:var(--t3);line-height:1.5;margin-top:auto;padding-top:6px;border-top:1px dashed var(--b)}
+.ebars{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+.ebrow{display:flex;align-items:center;gap:8px;font-size:11px;line-height:1.35}
+.ebrow .eflb{width:64px;flex-shrink:0;color:var(--t2);text-align:right}
+.ebrow .eftrack{flex:1;height:7px;background:var(--bg);border-radius:4px;overflow:hidden;min-width:40px}
+.ebrow .efl{height:100%;border-radius:5px;background:var(--a)}
+.ebrow .efnum{width:40px;text-align:right;color:var(--t3);font-variant-numeric:tabular-nums;flex-shrink:0}
+.ebrow.bot .eflb{color:var(--t3)}
+.ebrow.bot .efl{background:#a9b1bd}
+.ebrow.zero .efnum{color:var(--t3)}
+.ebhead{display:flex;align-items:center;gap:8px;font-size:9px;color:var(--t3);margin-bottom:1px}
+.ebhead .eflb{width:64px;flex-shrink:0}
+.ebhead .eftrack{flex:1}
+.ebhead .efnum{width:40px;text-align:right;flex-shrink:0}
+.ebhead .efnum2{width:46px;text-align:right;flex-shrink:0}
+.ebrow .efnum2{width:46px;text-align:right;color:var(--t3);font-variant-numeric:tabular-nums;flex-shrink:0}
+.ebrow .efnum2.has{color:var(--g)}
+.eseg{display:inline-flex;border:1px solid var(--b);border-radius:6px;overflow:hidden;margin-left:auto}
+.eseg button{background:var(--c);border:none;padding:3px 9px;font-size:10px;color:var(--t2);cursor:pointer;white-space:nowrap}
+.eseg button+button{border-left:1px solid var(--b)}
+.eseg button.efon{background:var(--a);color:#fff}
+.espark{display:flex;align-items:flex-end;gap:6px;height:64px;margin:6px 0 2px}
+.espark .efsp{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
+.espark .efsb{width:100%;max-width:22px;border-radius:3px 3px 0 0;min-height:2px;opacity:.85}
+.espark .efsl{font-size:9px;color:var(--t3);margin-top:3px;white-space:nowrap}
+.espark .efsp-clk{cursor:pointer;border-radius:3px}
+.espark .efsp-clk:hover{background:#eef2ff}
+.echart{height:220px}
+.efmask{position:fixed;inset:0;background:rgba(12,18,34,.45);z-index:900;display:flex;align-items:center;justify-content:center;padding:24px 16px;overflow:auto}
+.efmodal{background:var(--c);border-radius:var(--r2);box-shadow:0 12px 40px rgba(0,0,0,.18);width:min(920px,100%);max-height:min(62vh,560px);display:flex;flex-direction:column;overflow:hidden;padding:16px 20px 14px;position:relative;margin:auto}
+.efmodal h3{font-size:14px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:8px}
+.efmodal .fin{font-size:10px;color:var(--t3);font-weight:400}
+.efmodal .fx{position:absolute;right:14px;top:12px;border:none;background:var(--bg);color:var(--t2);width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:14px;line-height:1}
+.efmodal .fx:hover{background:var(--b)}
+.efmodal h3{flex:0 0 auto}
+.efmodal .fsec{margin-top:10px;min-height:0;display:flex;flex-direction:column}
+.efmodal #effIssueTable{overflow:auto;min-height:0;flex:1 1 auto}
+.efmodal #effIssuePager{flex:0 0 auto}
+.efmodal #effIssueCount{flex:0 0 auto}
+.efmodal .ftbl{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11px}
+.efmodal .ftbl col.c-num{width:56px}.efmodal .ftbl col.c-title{width:auto}
+.efmodal .ftbl col.c-status{width:76px}.efmodal .ftbl col.c-stage{width:62px}
+.efmodal .ftbl col.c-scene{width:126px}.efmodal .ftbl col.c-metric{width:76px}
+.efmodal .ftbl col.c-owner{width:88px}.efmodal .ftbl col.c-time{width:104px}
+.efmodal .ftbl th{font-size:9px;color:var(--t3);font-weight:500;text-align:left;padding:5px 8px;border-bottom:1px solid var(--b);white-space:nowrap;position:sticky;top:0;background:var(--c);z-index:2}
+.efmodal .ftbl td{padding:5px 8px;border-bottom:1px solid #f0f2f6;color:var(--t2);vertical-align:top;word-break:break-word;overflow-wrap:anywhere}
+.efmodal .ftbl td.num{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--t)}
+.efmodal .ftbl tr:hover td{background:#f8f9fb}
+.efmodal .fttl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t)}
+.efbarwrap{flex:1;min-width:40px;display:flex;align-items:center}
+/* 必须 flex:0 1 auto 并尊重内联 width：继承来的 .ebrow .eftrack{flex:1} 会把每行拉满 */
+.ebrow .efbarwrap .eftrack{flex:0 1 auto;display:flex;height:7px;border-radius:4px;overflow:hidden;background:var(--bg)}
+.efbarwrap .efl{height:100%;background:var(--a)}
+.efbarwrap .eflg{height:100%;background:var(--g)}
+.efleg{display:flex;gap:10px;font-size:9px;color:var(--t3);margin-top:4px}
+.efleg i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:3px;vertical-align:-1px}
+.efmodal .echart{height:200px}
+.efempty{text-align:center;color:var(--t3);font-size:12px;padding:28px 0}
+.efrow{cursor:pointer}
+.efpager{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid var(--b)}
+.efpager .efpsize{padding:3px 6px;border:1px solid var(--b);border-radius:6px;font-size:10px;background:var(--c);color:var(--t2);outline:none}
+.efpager .bt-s{white-space:nowrap;padding:4px 10px}
+.efpager .bt-s[disabled]{opacity:.45;cursor:default}
+.efpager .efspacer{flex:1}
+.efrow:hover{background:#f8f9fb}
+@media(max-width:1100px){.egrid{grid-template-columns:1fr}.ecard.wide{grid-column:auto}}`;
+  document.head.appendChild(st);
+}
+
+function _effBars(items, opts) {
+  const o = opts || {};
+  const max = Math.max(1, ...items.map(i => Number(i.count) || 0));
+  return '<div class="ebars">' + items.map(i => {
+    const n = Number(i.count) || 0;
+    const w = n > 0 ? Math.max(2, Math.round(n / max * 100)) : 0;
+    const cls = (o.kindOf ? o.kindOf(i) : '') + (n === 0 ? ' zero' : '') + (o.kind ? ' efrow' : '');
+    const attrs = o.kind ? ` data-kind="${o.kind}" data-bucket="${_escHtml(i.label)}" data-title="${_escHtml(i.label)}"` : '';
+    return `<div class="ebrow ${cls}"${attrs} title="${_escHtml(i.label)}: ${n}">
+      <div class="eflb">${_escHtml(i.label)}</div>
+      <div class="eftrack"><div class="efl" style="width:${w}%;${i.color ? 'background:' + i.color : ''}"></div></div>
+      <div class="efnum">${n}</div></div>`;
+  }).join('') + '</div>';
+}
+
+function _effKpiCard(title, value, unit, subs, foot, color) {
+  return `<div class="ecard">
+    <h3>${title}</h3>
+    <div class="ebig" style="color:${color || 'var(--t)'}">${value}${unit ? `<span class="efunit">${unit}</span>` : ''}</div>
+    ${(subs || []).map(x => `<div class="esub">${x}</div>`).join('')}
+    ${foot ? `<div class="efoot">${foot}</div>` : ''}
+  </div>`;
+}
+
+// ⑥ 周吞吐与累计积压：柱（新建/关闭）+ 折线（累计积压）
+function _effThroughputOption(tp) {
+  const weeks = (tp.weeks || []).map(w => w.replace(/^W0*/, 'W'));
+  return {
+    grid: { left: 34, right: 34, top: 26, bottom: 22 },
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, right: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 10 } },
+    xAxis: { type: 'category', data: weeks, axisLabel: { fontSize: 10 }, axisTick: { show: false } },
+    yAxis: [
+      { type: 'value', name: _effT('leg_items'), nameTextStyle: { fontSize: 9 }, axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { color: '#eef0f4' } } },
+      { type: 'value', name: _effT('leg_backlog'), nameTextStyle: { fontSize: 9 }, axisLabel: { fontSize: 10 }, splitLine: { show: false } }
+    ],
+    series: [
+      { name: _effT('leg_created'), type: 'bar', data: tp.created || [], itemStyle: { color: '#4a7fd1' }, barMaxWidth: 14 },
+      { name: _effT('leg_completed'), type: 'bar', data: tp.completed || [], itemStyle: { color: '#22a06b' }, barMaxWidth: 14 },
+      { name: _effT('leg_backlog'), type: 'line', yAxisIndex: 1, data: tp.backlog || [], symbolSize: 5, itemStyle: { color: '#e0a02a' }, lineStyle: { color: '#e0a02a', width: 2 } }
+    ]
+  };
+}
+
+function renderEffBoard(c, d) {
+  _effEnsureStyles();
+  const t = d || {};
+  const sm = t.summary || {};
+  const nf = t.net_flow || {};
+  const rg = t.range || {};
+  const ag = t.aging || {};
+  const ct = t.cycle_time || {};
+  const wip = t.wip_by_assignee || {};
+  const td = t.task_delivery || {};
+  const dq = t.data_quality || {};
+  const range = app && app.currentRepo ? app.currentRepo() : null;
+  const repoName = (range && range.fullName) ? range.fullName : (t.repo || '');
+
+  if (!repoName) {
+    c.innerHTML = `<div class="ts t3" style="text-align:center;padding:40px 0">${_effT('no_repo')}</div>`;
+    return;
+  }
+
+  const net = Number(nf.week_net || 0);
+  const netColor = net > 0 ? 'var(--r)' : (net < 0 ? 'var(--g)' : 'var(--t)');
+  const trendTxt = nf.backlog_trend === 'up' ? _effT('trend_up')
+    : nf.backlog_trend === 'down' ? _effT('trend_down') : _effT('trend_flat');
+
+  const cycleUnitTxt = (ct.unit === 'days') ? _effT('unit_d') : (ct.unit === 'hours' ? _effT('unit_h') : _effT('unit_m'));
+
+  // ⑩ 分组切换：用 by_status 客户端切换，不重新请求
+  const g = _effState.group;
+  const gData = (g === 'all') ? td : ((td.by_status || {})[g] || {});
+  const segBtn = (k, label) => `<button class="${g === k ? 'efon' : ''}" data-effgroup="${k}">${label}</button>`;
+
+  let html = '';
+
+  if (dq.stale) {
+    html += `<div class="ewarn">⚠ ${_effT('stale_warn', { days: dq.stale_days, last: dq.issue_last_sync || '-' })}</div>`;
+  }
+
+  html += `<div class="efh">
+    <div class="scope">${_effT('scope', { total: Number(sm.created_total || 0).toLocaleString(), closed: Number(sm.completed_total || 0).toLocaleString(), open: Number(sm.open_total || 0).toLocaleString() })}</div>
+    <div class="scope">${_effT('week_label', { week: rg.week || '-' })}</div>
+    <div class="efspacer"></div>
+    <select id="effWeeks">
+      ${[4, 8, 12, 24].map(w => `<option value="${w}" ${w === _effState.weeks ? 'selected' : ''}>${_effT('last_n_weeks', { n: w })}</option>`).join('')}
+    </select>
+  </div>`;
+
+  html += '<div class="egrid">';
+
+  // ①②③
+  html += _effKpiCard(_effT('kpi_net'), (net > 0 ? '+' : '') + net, _effT('unit_card'),
+    [`${nf.week_created || 0} ${_effT('created')} − ${nf.week_completed || 0} ${_effT('closed_word')}`,
+     `${_effT('last4_net')}: ${(Number(nf.last4_weeks_net || 0) > 0 ? '+' : '') + (nf.last4_weeks_net || 0)}`],
+    `${_effT('backlog_now', { n: nf.backlog || 0 })} · ${trendTxt}`, netColor);
+  html += _effKpiCard(_effT('kpi_total'), Number(sm.created_total || 0).toLocaleString(), _effT('unit_card'),
+    [`${_effT('closed_word')} ${Number(sm.completed_total || 0).toLocaleString()} + ${_effT('open_word')} ${Number(sm.open_total || 0).toLocaleString()}`],
+    _effT('total_foot'));
+  html += _effKpiCard(_effT('kpi_wip'), Number(sm.open_total || 0).toLocaleString(), _effT('unit_card'),
+    [`${_effT('unassigned')}: ${sm.unassigned || 0}`],
+    _effT('wip_foot'));
+
+  // ④⑤⑥
+  const tpWeeks = (t.throughput || {}).weeks || [];
+  const tpDone = (t.throughput || {}).completed || [];
+  const tpFull = (t.throughput || {}).week_labels_full || [];
+  const last6 = tpWeeks.map((w, i) => ({
+    l: w.replace(/^W0*/, 'W'), v: tpDone[i] || 0, week: tpFull[i] || w
+  })).slice(-6);
+  html += `<div class="ecard">
+    <h3>${_effT('kpi_done_week')}<span class="efcnt">${rg.week || ''}</span></h3>
+    <div class="ebig" style="color:${Number(nf.week_completed || 0) > 0 ? 'var(--g)' : 'var(--t3)'}">${Number(nf.week_completed || 0).toLocaleString()}<span class="efunit">${_effT('unit_card')}</span></div>
+    <div class="esub">${_effT('attribution_closed')}</div>
+    ${_effSpark(last6, 'var(--g)', _effT('done_foot', { week: rg.week || '-' }))}
+    <div class="efoot">${_effT('done_foot', { week: rg.week || '-' })}</div>
+  </div>`;
+  html += `<div class="ecard">
+    <h3>${_effT('kpi_overdue')}<span class="efcnt">${_effT('open_n', { n: ag.open || 0 })}</span></h3>
+    <div class="ebig" style="color:${Number(ag.over_threshold || 0) > 0 ? 'var(--y)' : 'var(--t3)'}">${Number(ag.over_threshold || 0).toLocaleString()}<span class="efunit">${_effT('unit_card')}</span></div>
+    <div class="esub">${_effT('overdue_rule', { d: ag.threshold_days || 7 })}</div>
+    ${_effBars((ag.buckets || []).map(b => ({ label: b.label, count: b.count })), { kind: 'aging' })}
+    <div class="efoot">${_effT('overdue_foot')}</div>
+  </div>`;
+  html += `<div class="ecard">
+    <h3>${_effT('kpi_throughput')}</h3>
+    <div id="effChart-tp" class="echart"></div>
+  </div>`;
+
+  // ⑦⑧⑨
+  html += `<div class="ecard">
+    <h3>${_effT('kpi_cycle')}<span class="efcnt">${_effT('sample_n', { n: ct.sample || 0 })}</span></h3>
+    <div class="epair">
+      <div class="efcell"><div class="efv">${ct.p50 === null || ct.p50 === undefined ? '—' : ct.p50}</div><div class="efl">P50 · ${cycleUnitTxt}</div></div>
+      <div class="efcell"><div class="efv">${ct.p75 === null || ct.p75 === undefined ? '—' : ct.p75}</div><div class="efl">P75 · ${cycleUnitTxt}</div></div>
+      <div class="efcell"><div class="efv">${ct.p90 === null || ct.p90 === undefined ? '—' : ct.p90}</div><div class="efl">P90 · ${cycleUnitTxt}</div></div>
+    </div>
+    ${_effBars((ct.buckets || []).map(b => ({ label: b.label, count: b.count })), { kind: 'cycle' })}
+    <div class="efoot">${_effT('cycle_foot')}</div>
+  </div>`;
+
+  html += `<div class="ecard">
+    <h3>${_effT('kpi_aging')}<span class="efcnt">${_effT('open_n', { n: ag.open || 0 })}</span></h3>
+    <div class="epair">
+      <div class="efcell"><div class="efv">${_effFmtDays(ag.p50_days)}</div><div class="efl">P50</div></div>
+      <div class="efcell"><div class="efv">${_effFmtDays(ag.p90_days)}</div><div class="efl">P90</div></div>
+    </div>
+    ${_effBars((ag.buckets || []).map(b => ({ label: b.label, count: b.count })), { kind: 'aging' })}
+    <div class="efoot">${_effT('aging_foot', { d: ag.threshold_days || 7, n: ag.over_threshold || 0 })}</div>
+  </div>`;
+
+  _effState.thresholdDays = ag.threshold_days || 7;
+  const wipItems = (wip.items || []).map(i => ({ label: i.name, count: i.count, open: i.open, completed: i.completed, kind: i.kind }));
+  html += `<div class="ecard">
+    <h3>${_effT('kpi_wip_dist')}<span class="efcnt">${_effT('wip_dist_sub')}</span></h3>
+    ${wipItems.length ? _effWipBars(wipItems)
+      : `<div class="ts t3" style="padding:12px 0">${_effT('no_data')}</div>`}
+    <div class="efleg"><span><i style="background:var(--a)"></i>${_effT('wip_open')}</span><span><i style="background:var(--g)"></i>${_effT('wip_done')}</span><span>${_effT('wip_bar_len')}</span></div>
+    <div class="efoot">${_effT('wip_dist_foot', { top2: Math.round((wip.top2_share || 0) * 100), bot: wip.bot_total || 0 })}</div>
+  </div>`;
+
+  // ⑩ 全宽
+  html += `<div class="ecard wide">
+    <h3>${_effT('kpi_delivery')}
+      <span class="efcnt">${_effT('sample_total', { n: gData.sample || 0, t: td.total_tasks || 0 })}</span>
+      <span class="eseg">
+        ${segBtn('all', _effT('grp_all'))}
+        ${segBtn('completed', _effT('grp_completed'))}
+        ${segBtn('failed', _effT('grp_failed'))}
+        ${segBtn('cancelled', _effT('grp_cancelled'))}
+      </span>
+    </h3>
+    <div class="epair">
+      <div class="efcell"><div class="efv">${_effFmtTriple(gData.p50_min, gData.p90_min, gData.p99_min)[0]}</div><div class="efl">P50</div></div>
+      <div class="efcell"><div class="efv">${_effFmtTriple(gData.p50_min, gData.p90_min, gData.p99_min)[1]}</div><div class="efl">P90</div></div>
+      <div class="efcell"><div class="efv">${_effFmtTriple(gData.p50_min, gData.p90_min, gData.p99_min)[2]}</div><div class="efl">P99</div></div>
+    </div>
+    ${_effBars((gData.buckets || []).map(b => ({ label: b.label, count: b.count })), {})}
+  </div>`;
+
   html += '</div>';
   c.innerHTML = html;
+
+  if (typeof echarts !== 'undefined') {
+    const el = document.getElementById('effChart-tp');
+    if (el) {
+      try {
+        if (_effCharts.tp) _effCharts.tp.dispose();
+        _effCharts.tp = echarts.init(el);
+        _effCharts.tp.setOption(_effThroughputOption(t.throughput || {}));
+      } catch (e) { el.innerHTML = ''; }
+    }
+  }
+
+  // ⑥ 图表点击某周 → 该周每日拆解
+  if (_effCharts.tp) {
+    _effCharts.tp.off('click');
+    _effCharts.tp.on('click', params => {
+      const wk = ((t.throughput || {}).week_labels_full || [])[params.dataIndex];
+      if (wk) _effOpenDaily(wk);
+    });
+  }
+  // ④ 火花柱点击某周
+  c.querySelectorAll('.efsp-clk[data-week]').forEach(el => {
+    el.addEventListener('click', () => _effOpenDaily(el.getAttribute('data-week')));
+  });
+  // ⑤⑦⑧ 桶行点击 → issue 列表（含场景）
+  c.querySelectorAll('.efrow[data-kind]').forEach(el => {
+    el.addEventListener('click', () => {
+      const kind = el.getAttribute('data-kind');
+      const bucket = el.getAttribute('data-bucket') || '';
+      const label = el.getAttribute('data-title') || bucket;
+      _effOpenIssues(kind, bucket, _effT('issues_title', { bucket: label }));
+    });
+  });
+
+  const sel = document.getElementById('effWeeks');
+  if (sel && !sel._bound) {
+    sel._bound = true;
+    sel.addEventListener('change', () => {
+      _effState.weeks = Number(sel.value) || 12;
+      loadObsEfficiency(c);
+    });
+  }
+  c.querySelectorAll('[data-effgroup]').forEach(b => {
+    b.addEventListener('click', () => {
+      _effState.group = b.getAttribute('data-effgroup') || 'all';
+      renderEffBoard(c, _effState.data);
+    });
+  });
 }
 
 function loadObsEfficiency(c, isAutoRefresh) {
   if (!c) c = (typeof document !== 'undefined') ? document.getElementById('obsContent') : null;
   if (!c) return;
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+  if (!repo || !repo.fullName) {
+    c.innerHTML = `<div class="ts t3" style="text-align:center;padding:40px 0">${_effT('no_repo')}</div>`;
+    return;
+  }
+  const repoParam = '?repo=' + encodeURIComponent(repo.fullName)
+    + '&weeks=' + encodeURIComponent(_effState.weeks)
+    + '&group_by=' + encodeURIComponent(_effState.group);
   if (!isAutoRefresh && !c.innerHTML) {
     c.innerHTML = '<div class="loading">' + I18N.t('observability.loading') + '</div>';
   }
-  API.get('/dashboard/efficiency' + repoParam).then(d => {
-    renderObsEfficiency(c, d || {});
+  API.get('/dashboard/efficiency/board' + repoParam).then(d => {
+    _effState.data = d || {};
+    renderEffBoard(c, _effState.data);
   }).catch(e => {
     c.innerHTML = '<div class="error">' + I18N.t('observability.eff.load_failed', { msg: e.message }) + '</div>';
   });

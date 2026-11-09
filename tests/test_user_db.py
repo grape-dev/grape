@@ -1,7 +1,8 @@
-"""用户/凭据/托管/技能/引擎 DB 层单元测试（src/user/db.py）。
+"""用户/凭据/托管/技能/引擎 DB 层单元测试（src/user/db.py + grape_accounts 账号层）。
 
-覆盖：账户 CRUD、token、OAuth state、凭据与云主机、托管仓库与 bot token、
-技能、用户仓库缓存、meta、agent_runtimes 缓存与默认引擎。全部走真实测试库（conftest 会话重置）。
+覆盖：账号 CRUD（grape_accounts，Issue #1588 后不再测 user_accounts 老表）、token、
+OAuth state、凭据与云主机、托管仓库与 bot token、技能、用户仓库缓存、meta、
+agent_runtimes 缓存与默认引擎。全部走真实测试库（conftest 会话重置）。
 """
 import json
 import os
@@ -11,12 +12,8 @@ import pytest
 from unittest.mock import patch
 
 from src.user import db as udb
+from src.auth import grape_account_db as gad
 from src.session_manager import db, db_lock
-
-def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
-    return create_access_token(user_id, username, get_token_version(user_id))
 
 
 def _uid():
@@ -25,16 +22,18 @@ def _uid():
 
 def _mk_user(uname=None):
     uname = uname or _uid()
-    u = udb.create_user(uname, "pw123")
+    u = gad.create_grape_account(uname, email="", password="pw123")
     if not u:
-        u = udb.get_user_by_username(uname)
+        u = gad.get_grape_account_by_username(uname)
     return u, uname
 
 
 def _cleanup_user(uname):
-    u = udb.get_user_by_username(uname)
+    # Issue #1588：账号真源为 grape_accounts，软删（冷静期）+ 清理外部绑定/映射
+    u = gad.get_grape_account_by_username(uname)
     if u:
-        udb.delete_user(u["id"])
+        gad.delete_external_identity(u["id"], "gitcode")
+        gad.soft_delete_account(u["id"])
     with db_lock:
         db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (uname,))
         db.commit()
@@ -47,42 +46,43 @@ class TestAccounts:
     def test_create_and_get(self):
         u, uname = _mk_user()
         try:
-            got = udb.get_user(u["id"])
+            got = gad.get_grape_account_by_id(u["id"])
             assert got["username"] == uname
-            byname = udb.get_user_by_username(uname)
+            byname = gad.get_grape_account_by_username(uname)
             assert byname["id"] == u["id"]
-            assert udb.list_users()  # 非空
+            assert gad.get_grape_account_by_username("no_such_user_xyz") is None
         finally:
             _cleanup_user(uname)
 
     def test_create_duplicate_returns_none(self):
         u, uname = _mk_user()
         try:
-            assert udb.create_user(uname, "pw") is None
+            assert gad.create_grape_account(uname, email="", password="pw") is None
         finally:
             _cleanup_user(uname)
 
-    def test_delete_user(self):
+    def test_soft_delete_account(self):
         u, uname = _mk_user()
-        assert udb.delete_user(u["id"]) is True
-        assert udb.delete_user(u["id"]) is False  # 已删除
-        assert udb.get_user(u["id"]) is None
+        assert gad.soft_delete_account(u["id"]) is True
+        assert gad.soft_delete_account(u["id"]) is False  # 已软删（status!=1，不可重复删）
+        acc = gad.get_grape_account_by_id(u["id"])
+        assert acc and acc["status"] == 3  # 冷静期保留记录，可恢复
 
     def test_update_password(self):
         u, uname = _mk_user()
         try:
-            assert udb.update_password(u["id"], "newpass") is True
-            assert udb.update_password(999999, "x") is False
-            assert udb.verify_user(uname, "newpass") is not None
+            assert gad.update_password(u["id"], "newpass") is True
+            assert gad.update_password(999999, "x") is False
+            assert gad.verify_grape_account(uname, "newpass") is not None
         finally:
             _cleanup_user(uname)
 
-    def test_verify_user(self):
+    def test_verify_account(self):
         u, uname = _mk_user()
         try:
-            assert udb.verify_user(uname, "pw123") is not None
-            assert udb.verify_user(uname, "wrong") is None
-            assert udb.verify_user("nobody_exists", "pw123") is None
+            assert gad.verify_grape_account(uname, "pw123") is not None
+            assert gad.verify_grape_account(uname, "wrong") is None
+            assert gad.verify_grape_account("nobody_exists", "pw123") is None
         finally:
             _cleanup_user(uname)
 
@@ -118,13 +118,17 @@ class TestOAuth:
     def test_cleanup_expired(self):
         udb._cleanup_expired_oauth_states()  # 不应抛错
 
-    def test_get_user_by_gitcode_id(self):
+    def test_external_identity_binding(self):
+        """gitcode 绑定等价用例：Issue #1588 后绑定关系存 external_identities"""
         u, uname = _mk_user()
         try:
-            assert udb.get_user_by_gitcode_id("nonexistent_gid") is None
-            assert udb.link_gitcode_user(u["id"], "gid_123", "at", "rt") is True
-            got = udb.get_user_by_gitcode_id("gid_123")
-            assert got and got["id"] == u["id"]
+            assert gad.get_external_identity("gitcode", "nonexistent_gid") is None
+            assert gad.create_external_identity(
+                u["id"], "gitcode", "gid_123",
+                external_login=uname, access_token="at", refresh_token="rt") is True
+            got = gad.get_external_identity("gitcode", "gid_123")
+            assert got and got["grape_user_id"] == u["id"]
+            assert got["access_token"] == "at" and got["refresh_token"] == "rt"
         finally:
             _cleanup_user(uname)
 
@@ -335,21 +339,16 @@ class TestMetaAccounts:
             db.cursor().execute("DELETE FROM meta WHERE key=?", (key,))
             db.commit()
 
-    def test_account_extension(self):
-        uname = _uid()
-        udb.save_user_account(uname, {"nickname": "n1"})
+    def test_account_profile_extension(self):
+        """账户资料扩展等价用例：Issue #1588 后走 grape_accounts.update_profile"""
+        u, uname = _mk_user()
         try:
-            acc = udb.get_user_account(uname)
-            assert acc and acc["name"] == uname and acc["nickname"] == "n1"
-            assert acc["bot_usernames"] == []  # USER_ACCOUNT_FIELDS 不含该列，默认空
-            assert udb.get_user_account("nonexistent_user") is None
-            # 更新（保留 id）
-            udb.save_user_account(uname, {"nickname": "n2"})
-            acc2 = udb.get_user_account(uname)
-            assert acc2["nickname"] == "n2"
-            assert udb.get_all_user_accounts()
-            assert udb.delete_user_account(uname) is True
-            assert udb.delete_user_account(uname) is False
+            acc = gad.get_grape_account_by_username(uname)
+            assert acc and acc["nickname"] == ""
+            assert gad.update_profile(u["id"], nickname="n1") is True
+            acc2 = gad.get_grape_account_by_username(uname)
+            assert acc2["nickname"] == "n1" and acc2["id"] == u["id"]
+            assert gad.update_profile(999999, nickname="x") is False
         finally:
             _cleanup_user(uname)
 

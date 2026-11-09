@@ -1,18 +1,17 @@
 """用户系统数据库：users/credentials/vms/skills 表管理
 
 D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
-以下函数标记为 @deprecated——新代码不应调用，应使用 grape_account_db.py 中的对应函数：
-  get_user/get_user_by_username → get_grape_account_by_id/get_grape_account_by_username
-  create_user → create_grape_account
-  verify_user → verify_grape_account
-  update_password → grape_account_db.update_password
-  get_token_version → grape_account_db.get_token_version
-  increment_token_version → grape_account_db.increment_token_version
-  get_user_account → get_grape_account_by_username
-  link_gitcode_user/link_github_user → create_external_identity
-  get_user_by_gitcode_id/get_user_by_github_id → get_external_identity
+Issue #1588 B 批：老表包装函数（create_user/get_user/get_user_by_username/list_users/
+delete_user/update_password/verify_user/get_token_version/increment_token_version/
+get_user_by_gitcode_id/link_gitcode_user/get_all_user_accounts/get_user_account/
+save_user_account/delete_user_account 等 16 个包装、其私有别名与字段常量）
+已整体删除——新代码一律使用 src/auth/grape_account_db.py：
+  账号 CRUD → create_grape_account/get_grape_account_by_id/get_grape_account_by_username
+  密码/校验 → update_password/verify_grape_account
+  token_version → grape_account_db.get_token_version/increment_token_version
+  外部绑定 → create_external_identity/get_external_identity
 """
-import json, hashlib, re, time, os, warnings, threading
+import json, hashlib, re, time, os, threading
 from src.session_manager import db, db_lock
 from src.config import log
 
@@ -30,24 +29,6 @@ def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: s
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
 # OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
-
-
-def _deprecated_user_accounts_fn(replacement: str = ""):
-    """装饰器：标记 user_accounts 老表函数为 deprecated。
-    调用时发出 DeprecationWarning，日志记录。
-    """
-    import functools
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            msg = f"user_accounts.{fn.__name__}() is deprecated"
-            if replacement:
-                msg += f", use {replacement} instead"
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
-            log.warning(f"Deprecated function called: {fn.__name__}() — {msg}")
-            return fn(*args, **kwargs)
-        return wrapper
-    return decorator
 
 
 # ====== 用户账户表（合并 users + bot_accounts） ======
@@ -81,143 +62,6 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     last_active_at TEXT DEFAULT NULL  -- 最后活跃时间（用户在线状态判定）
 )
 """
-
-
-def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
-
-
-@_deprecated_user_accounts_fn("create_grape_account")
-def create_user(username: str, password: str, created_by: int = 0) -> dict | None:
-    """创建普通用户，返回用户信息或 None。
-
-    新用户自动创建个人组织（is_personal=1），实现组织特性向后兼容。
-    """
-    pw_hash = _hash_password(password)
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,datetime('now'))",
-                      (username, pw_hash, password, created_by))
-            db.commit()
-            uid = c.lastrowid
-            log.info(f"User created: {username} (id={uid}, by={created_by})")
-
-            # 自动创建个人组织
-            from src.user.org_db import create_org
-            slug = f"personal-{uid}"
-            create_org(
-                name=f"{username}的个人空间", slug=slug,
-                owner_id=uid, is_personal=1
-            )
-            log.info(f"Personal org created for user {uid}")
-
-            return {"id": uid, "username": username}
-    except Exception as e:
-        log.warning(f"Create user failed: {e}")
-        return None
-
-
-@_deprecated_user_accounts_fn("get_grape_account_by_id")
-def get_user(user_id: int) -> dict | None:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE id=?", (user_id,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
-
-
-@_deprecated_user_accounts_fn("get_grape_account_by_username")
-def get_user_by_username(username: str) -> dict | None:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, username, password_hash, created_by, created_at FROM user_accounts WHERE username=?", (username,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "password_hash": row[2], "created_by": row[3], "created_at": row[4]}
-
-
-@_deprecated_user_accounts_fn("admin/db.py list_grape_accounts")
-def list_users() -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts ORDER BY id")
-        return [{"id": r[0], "username": r[1], "created_by": r[2], "created_at": r[3]} for r in c.fetchall()]
-
-
-@_deprecated_user_accounts_fn("grape_account_db.soft_delete_account")
-def delete_user(user_id: int) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_accounts WHERE id=?", (user_id,))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Delete user failed: {e}")
-        return False
-
-
-@_deprecated_user_accounts_fn("grape_account_db.update_password")
-def update_password(user_id: int, new_password: str) -> bool:
-    try:
-        pw_hash = _hash_password(new_password)
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_accounts SET password_hash=?, password=? WHERE id=?", (pw_hash, new_password, user_id))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Update password failed: {e}")
-        return False
-
-
-@_deprecated_user_accounts_fn("grape_account_db.verify_grape_account")
-def verify_user(username: str, password: str) -> dict | None:
-    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None。
-
-    被管理员禁用的用户（is_disabled=1）返回 None（Issue #281：admin 禁用后旧体系登录口立即失效）。
-    """
-    user = get_user_by_username(username)
-    if not user:
-        return None
-    if user["password_hash"] != _hash_password(password):
-        return None
-    token_version = get_token_version(user["id"])
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT is_disabled FROM user_accounts WHERE id=?", (user["id"],))
-        row = c.fetchone()
-    if row and row[0]:
-        return None
-    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"], "token_version": token_version}
-
-
-# ====== JWT token_version 管理 ======
-
-@_deprecated_user_accounts_fn("grape_account_db.get_token_version")
-def get_token_version(user_id: int) -> int:
-    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效。
-    用户不存在时返回 -1（不等于任何有效 token 的 ver=0，使旧 token 失效）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT token_version FROM user_accounts WHERE id=?", (user_id,))
-        row = c.fetchone()
-    if not row:
-        return -1  # 用户不存在 → 任何 token 都失效
-    return (row[0] if row[0] is not None else 0)
-
-
-@_deprecated_user_accounts_fn("grape_account_db.increment_token_version")
-def increment_token_version(user_id: int) -> None:
-    """token_version+1——改密码/logout 时调用，使所有旧 token 失效"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
-        db.commit()
 
 
 def batch_update_last_active(uids: list) -> None:
@@ -459,72 +303,6 @@ def validate_oauth_state(state: str, provider: str = "") -> dict | None:
 
 
 
-
-
-@_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
-def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
-    """通过 GitCode 用户 ID 查找本地用户"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE gitcode_id=?", (gitcode_id,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
-
-
-@_deprecated_user_accounts_fn("grape_account_db.create_external_identity")
-def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_token: str = "") -> bool:
-    """绑定本地用户与 GitCode 用户，存储 access_token 到 user_credentials"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_accounts SET gitcode_id=? WHERE id=?", (gitcode_id, user_id))
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, "gitcode_oauth", json.dumps({
-                          "gitcode_id": gitcode_id,
-                          "access_token": access_token,
-                          "refresh_token": refresh_token,
-                          "fetched_at": int(time.time())
-                      })))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Link GitCode user failed: {e}")
-        return False
-
-
-@_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
-def get_user_by_github_id(github_id: str) -> dict | None:
-    """通过 GitHub 用户 ID 查找本地用户"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE github_id=?", (github_id,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
-
-
-@_deprecated_user_accounts_fn("grape_account_db.create_external_identity")
-def link_github_user(user_id: int, github_id: str, access_token: str, refresh_token: str = "") -> bool:
-    """绑定本地用户与 GitHub 用户，存储 access_token 到 user_credentials"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_accounts SET github_id=? WHERE id=?", (github_id, user_id))
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, "github_oauth", json.dumps({
-                          "github_id": github_id,
-                          "access_token": access_token,
-                          "refresh_token": refresh_token,
-                          "fetched_at": int(time.time())
-                      })))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Link GitHub user failed: {e}")
-        return False
 
 
 # ====== 凭据表 ======
@@ -2826,16 +2604,6 @@ def get_user_github_token(user_id: int) -> str:
     return get_user_github_token_by_id(user_id)
 
 
-def _get_username_by_id(user_id: int) -> str:
-    """根据 user_id 查 username（D32-补丁：查 grape_accounts，不查 user_accounts）。"""
-    try:
-        from src.auth.grape_account_db import get_grape_account_by_id
-        acc = get_grape_account_by_id(user_id)
-        return acc["username"] if acc else ""
-    except Exception:
-        return ""
-
-
 def refresh_gitcode_oauth_token(user_id: int) -> str | None:
     """用 refresh_token 刷新 GitCode OAuth access_token（Issue #52）。
 
@@ -2921,83 +2689,7 @@ def get_all_managed_repos() -> list[dict]:
                  "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5]} for r in c.fetchall()]
 
 
-# ====== 用户账户 CRUD ======
-
-USER_ACCOUNT_FIELDS = [
-    "id", "username", "password_hash", "gitcode_id",
-    "gitcode_api_token",
-    "github_id", "github_api_token", "github_login",
-    "nickname",
-    "feishu_app_id", "feishu_app_secret",
-    "huawei_cloud_ak", "huawei_cloud_sk",
-    "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
-    "gitcode_publish_repo", "github_publish_repo",
-    "password",
-    "created_by", "created_at",
-    "hw_iam_domain", "hw_iam_user", "hw_iam_password",
-    "hw_iam_account_type",
-]
-
-
-def get_all_user_accounts() -> list[dict]:
-    """获取所有用户账户"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts ORDER BY username")
-        rows = c.fetchall()
-    result = []
-    for r in rows:
-        d = dict(zip(USER_ACCOUNT_FIELDS, r))
-        d["name"] = d["username"]  # 向后兼容
-        try:
-            d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
-        except (json.JSONDecodeError, TypeError):
-            d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
-        result.append(d)
-    return result
-
-
-@_deprecated_user_accounts_fn("grape_account_db.get_grape_account_by_username")
-def get_user_account(username: str) -> dict | None:
-    """获取单个用户账户"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts WHERE username=?", (username,))
-        row = c.fetchone()
-    if not row:
-        return None
-    d = dict(zip(USER_ACCOUNT_FIELDS, row))
-    d["name"] = d["username"]  # 向后兼容
-    try:
-        d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
-    except (json.JSONDecodeError, TypeError):
-        d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
-    return d
-
-
-def save_user_account(username: str, data: dict):
-    """创建或更新用户账户（保留 id，不会因 INSERT OR REPLACE 产生新 id）"""
-    fields = {k: data.get(k, "") for k in USER_ACCOUNT_FIELDS if k not in ("id", "username", "created_at")}
-    set_clause = ",".join(f"{k}=?" for k in fields)
-    vals = list(fields.values())
-    with db_lock:
-        c = db.cursor()
-        existing = c.execute("SELECT id FROM user_accounts WHERE username=?", (username,)).fetchone()
-        if existing:
-            c.execute(f"UPDATE user_accounts SET {set_clause} WHERE username=?", vals + [username])
-        else:
-            c.execute(f"INSERT INTO user_accounts ({','.join(fields.keys())},username) VALUES ({','.join('?' for _ in fields)},?)", vals + [username])
-        db.commit()
-
-
-@_deprecated_user_accounts_fn("grape_account_db.soft_delete_account")
-def delete_user_account(username: str) -> bool:
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username=?", (username,))
-        db.commit()
-        return c.rowcount > 0
-
+# ====== Bot 用户名 ======
 
 def get_all_bot_usernames() -> list[str]:
     """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）。
@@ -3384,32 +3076,6 @@ def migrate_accounts_from_json():
                     log.info("Deleted default account (no config to migrate)")
     except Exception as e:
         log.warning(f"Migrate/delete default account failed: {e}")
-
-
-def link_user_provider(user_id: int, provider: str, external_id: str,
-                        access_token: str, refresh_token: str = "") -> bool:
-    """通用 OAuth 绑定——统一写入 user_credentials。
-
-    D32-补丁：不再写 user_accounts 老表专属列（gitcode_id/github_id）。
-    此函数已无外部调用方（_sync_legacy_binding 已删除），保留仅作历史兼容。
-    """
-    provider_key = f"{provider}_oauth"
-    try:
-        with db_lock:
-            c = db.cursor()
-            # 统一写入 user_credentials
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, provider_key, json.dumps({
-                          f"{provider}_id": external_id,
-                          "access_token": access_token,
-                          "refresh_token": refresh_token,
-                          "fetched_at": int(time.time())
-                      }, ensure_ascii=False)))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Link {provider} user failed: {e}")
-        return False
 
 
 def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:

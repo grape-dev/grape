@@ -432,14 +432,15 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
     """从 user_repos 表反查 repo_key 对应的 user_id。
 
     优先按 issue_creator（GitCode 用户名）查 unified_user_mapping 获取 user_id；
-    issue_creator 为空或查不到时，增加 user_accounts.username/gitcode_id 直接查询作为二级回退；
-    仍查不到时，user_repos 回退按创建者过滤（JOIN user_accounts），而非取第一个 join 用户。
+    issue_creator 为空或查不到时，改查 grape_accounts/external_identities
+    （平台 login 匹配 external_login，或平台数字 ID 匹配 external_id）作为二级回退；
+    仍查不到时，user_repos 回退按创建者过滤（JOIN grape_accounts），而非取第一个 join 用户。
 
     Issue #76 修复：原逻辑按 user_id ASC 取第一条 is_join=1 的记录，
     对于多用户仓库会返回"最早加入的用户"而非 Issue 创建者，
     导致 scope=user 引擎无法通过 claim_by_tag 认领任务。
 
-    Issue #211 增强：增加 user_accounts 二级回退 + user_repos 按创建者过滤，
+    Issue #211 增强：二级回退 + user_repos 按创建者过滤，
     确保已注册 grape 的项目组成员能正确映射而非落为 user_id=0。
     """
     if not repo_key:
