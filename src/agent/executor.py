@@ -9,6 +9,7 @@ from .hermes import HermesBackend
 from .codex import CodexBackend
 from .dsh import DshBackend
 from .hwcloud import HwcloudBackend
+from .aishell_acp import AishellDshACPBackend
 
 _bwrap_fail_notified = False
 
@@ -34,6 +35,7 @@ _BACKENDS = {
     "codex": CodexBackend(),
     "dsh": DshBackend(),
     "hwcloud": HwcloudBackend(),
+    "aishell-dsh": AishellDshACPBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -196,6 +198,7 @@ def discover_backends() -> list[dict]:
         "codex": {"cli": "codex", "pip": "@openai/codex"},
         "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
         "hwcloud": {"cli": "hwcloud", "pip": ""},
+        "aishell-dsh": {"cli": "aishell", "pip": ""},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []
@@ -443,6 +446,72 @@ def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
     label = f"{agent_label} " if agent_label else ""
 
     acp = HwcloudACPBackend()
+    env = acp.get_env(account=account, user_id=user_id)
+    env["DEVOPS_EVENT_TYPE"] = event_type
+
+    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
+                  label=label, bot_token=bot_token, user_token=user_token,
+                  user_id=user_id, repo_key=repo_key)
+    if agent_name:
+        env["AGENT_NAME"] = agent_name
+    if env_extra:
+        env.update(env_extra)
+
+    # 技能路径占位符替换（direct 模式）
+    try:
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
+    except Exception:
+        pass
+
+    # 脱敏 token 列表
+    _tokens = [t for t in (bot_token, user_token) if t]
+
+    def _redact_text(text):
+        if not text or not _tokens:
+            return text
+        s = str(text)
+        for t in _tokens:
+            if t:
+                s = s.replace(t, "[REDACTED]")
+        return s
+
+    for evt_type, data in acp.stream_execute(
+        prompt, cwd, session_id=session_id, env=env,
+        max_exec_seconds=max_exec_seconds, agent_label=label,
+    ):
+        if evt_type == "text":
+            yield ("text", _redact_text(data))
+        elif evt_type == "tool_use":
+            if isinstance(data, dict):
+                data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
+            yield ("tool_use", data)
+        elif evt_type == "tool_result":
+            yield ("tool_result", _redact_text(data))
+        elif evt_type == "done":
+            if isinstance(data, dict):
+                data["text"] = _redact_text(data.get("text", ""))
+                data["stderr"] = _redact_text(data.get("stderr", ""))
+            yield ("done", data)
+        else:
+            yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
+
+
+def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
+                            account, user_id, env_extra, bot_token, user_token,
+                            agent_name, agent_label, max_exec_seconds,
+                            repo_key: str = "") -> Generator:
+    """aishell-dsh ACP 模式入口：构建 env → 调 aishell_acp.AishellDshACPBackend.stream_execute。
+
+    与 _stream_hwcloud_acp 并行（docs/todo/2026-11-06-aishell-dsh-implement-plan.html）：
+    - 凭据设备预配置（D3/D4），grape 不注 key；模型路由 env AISHELL_DSH_MODEL 可选覆盖
+    - 脱敏/占位符/技能路径复用与 hwcloud 相同的收口
+    """
+    from src.agent.aishell_acp import AishellDshACPBackend
+
+    label = f"{agent_label} " if agent_label else ""
+
+    acp = AishellDshACPBackend()
     env = acp.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
 

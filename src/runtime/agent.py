@@ -579,6 +579,182 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
 
 
 
+def _probe_aishell_dsh_acp(cli_path: str) -> dict:
+    """aishell-dsh ACP 模式探活：initialize + session/new + set模型 + prompt 四步。
+
+    与 _probe_hwcloud_acp 同构（不做 --version 假探活）；差异（阶段 0 实测）：
+    - 启动命令 `aishell acp`
+    - session/new 后须按 configOptions 设模型（默认 trial 无凭据必失败），
+      value 从 options 原样取（自拼报 -32602），set_config_option 请求键是 configId
+    - 无 request_permission/turn_end，PromptResponse stopReason 收口
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import threading as _threading
+    import queue as _queue
+
+    agent_cmd = cli_path or _shutil.which("aishell") or _shutil.which("aishell.cmd")
+    if not agent_cmd:
+        return {"status": "fail", "latency": 0, "error": "aishell CLI not found"}
+
+    start = _time_mod.time()
+    proc = None
+    try:
+        # 二进制模式 + 读线程（避免 TextIOWrapper 缓冲吞字节导致假阴性，#441 同源教训）
+        proc = _subprocess.Popen(
+            [agent_cmd, "acp"],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.DEVNULL,
+            bufsize=0,
+            start_new_session=True,
+        )
+        lines: "_queue.Queue" = _queue.Queue()
+
+        def _reader():
+            try:
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    lines.put(line.decode("utf-8", errors="replace").strip())
+            except Exception:
+                pass
+            finally:
+                lines.put(None)
+
+        _threading.Thread(target=_reader, daemon=True).start()
+
+        def _send(msg: dict):
+            proc.stdin.write((_json.dumps(msg) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+
+        _next_id = [0]
+
+        def _rpc(method: str, params: dict | None, timeout: float) -> tuple[dict | None, str | None]:
+            _next_id[0] += 1
+            rid = _next_id[0]
+            msg = {"jsonrpc": "2.0", "id": rid, "method": method}
+            if params is not None:
+                msg["params"] = params
+            try:
+                _send(msg)
+            except Exception as e:
+                return None, f"write {method}: {e}"
+            deadline = _time_mod.time() + timeout
+            while _time_mod.time() < deadline:
+                if proc.poll() is not None:
+                    return None, f"{method}: process exited"
+                try:
+                    item = lines.get(timeout=0.3)
+                except _queue.Empty:
+                    continue
+                if item is None:
+                    return None, f"{method}: stdout EOF"
+                try:
+                    raw = _json.loads(item)
+                except _json.JSONDecodeError:
+                    continue
+                if raw.get("id") != rid:
+                    continue
+                if "error" in raw:
+                    err = raw["error"]
+                    return None, err.get("message", str(err))[:200]
+                return raw.get("result") or {}, None
+            return None, f"{method} timeout after {timeout}s"
+
+        result, err = _rpc("initialize", {
+            "protocolVersion": 1,
+            "clientInfo": {"name": "grape-probe", "version": "0.1.0"},
+            "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}},
+        }, 30)
+        if err:
+            return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                    "error": f"initialize: {err}"}
+        version = ((result or {}).get("agentInfo") or {}).get("version", "")
+
+        result, err = _rpc("session/new", {"cwd": "/tmp", "mcpServers": []}, 30)
+        if err:
+            return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                    "error": f"session/new: {err}"}
+        sid = (result or {}).get("sessionId", "")
+
+        # 设模型（默认 trial 无凭据必失败，跳过选第一个非 trial 路由；已配好则跳过）
+        for opt in (result or {}).get("configOptions") or []:
+            if not isinstance(opt, dict) or opt.get("id") != "model":
+                continue
+            cur = opt.get("currentValue", "")
+            if cur and cur != '["aishell","trial"]':
+                break
+            picked = ""
+            for g in (opt.get("options") or []):
+                for item in (g.get("options") or [] if isinstance(g, dict) else []):
+                    v = item.get("value", "") if isinstance(item, dict) else ""
+                    if v and v != '["aishell","trial"]':
+                        picked = v
+                        break
+                if picked:
+                    break
+            if picked:
+                _, err = _rpc("session/set_config_option", {
+                    "sessionId": sid, "configId": "model", "value": picked}, 20)
+                if err:
+                    return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                            "error": f"set_config_option: {err}"}
+            break
+
+        _prompt_id = _next_id[0] + 1
+        _next_id[0] += 1
+        _send({"jsonrpc": "2.0", "id": _prompt_id, "method": "session/prompt",
+               "params": {"sessionId": sid,
+                          "prompt": [{"type": "text", "text": "只回复 ok"}]}})
+        deadline = _time_mod.time() + 60
+        stop_reason = ""
+        while _time_mod.time() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                item = lines.get(timeout=0.3)
+            except _queue.Empty:
+                continue
+            if item is None:
+                break
+            try:
+                raw = _json.loads(item)
+            except _json.JSONDecodeError:
+                continue
+            if raw.get("id") == _prompt_id:
+                if "error" in raw:
+                    return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                            "error": f"prompt: {raw['error'].get('message', '')[:200]}"}
+                stop_reason = (raw.get("result") or {}).get("stopReason", "")
+                break
+
+        latency = int((_time_mod.time() - start) * 1000)
+        if stop_reason == "end_turn":
+            out = {"status": "ok", "latency": latency}
+            if version:
+                out["version"] = version
+            return out
+        return {"status": "fail", "latency": latency,
+                "error": f"prompt stopReason={stop_reason or 'none'}"}
+    except Exception as e:
+        return {"status": "fail", "latency": int((_time_mod.time() - start) * 1000),
+                "error": str(e)[:200]}
+    finally:
+        if proc is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -591,6 +767,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     # hwcloud 使用 ACP 模式探活（与实际任务执行路径一致：hwcloud serve --acp）
     if engine_name == "hwcloud":
         return _probe_hwcloud_acp(cli_path)
+    # aishell-dsh 使用 ACP 模式探活（与实际任务执行路径一致：aishell acp，四步全真）
+    if engine_name == "aishell-dsh":
+        return _probe_aishell_dsh_acp(cli_path)
 
 
     cmd = _PROBE_COMMANDS.get(engine_name)
