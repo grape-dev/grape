@@ -254,42 +254,59 @@ class AishellDshACPBackend:
             prompt_done.set(),
         )
 
-        # reader 线程（select 非阻塞方案，同 hwcloud_acp：readline 会阻塞半行数据）
+        # reader 线程。POSIX：select 非阻塞方案（同 hwcloud_acp，readline 会阻塞
+        # 半行数据——单线程轮询场景的问题）；**Windows：select 只支持 socket，对
+        # 管道 fd 直接抛 WinError 10038「非套接字」（2026-11-07 真任务实证，reader
+        # 一起跑即死、事件全丢）——改用专用阻塞 readline 线程（行及时投递，EOF
+        # 返回 b""，agent.py 探活同方案已真机验证）。
+        import sys as _sys
+        _is_win = _sys.platform == "win32"
         import select as _select
         _fd = proc.stdout.fileno()
-        import sys as _sys
-        if _sys.platform != "win32":
+        if not _is_win:
             import fcntl as _fcntl
             _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
             _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | os.O_NONBLOCK)
 
         _read_buf = b""
 
+        def _feed(chunk: bytes):
+            """切行并投递 client（select/read 与 readline 两条路共用）。"""
+            nonlocal _read_buf
+            _read_buf += chunk
+            while b"\n" in _read_buf:
+                line, _read_buf = _read_buf.split(b"\n", 1)
+                line_str = line.decode("utf-8", errors="replace").strip()
+                if not line_str:
+                    continue
+                try:
+                    client.handle_line(line_str)
+                except Exception as e:
+                    log.warning(f"{label}aishell-dsh ACP handle_line error: {e}")
+
         def _reader():
             nonlocal _read_buf
             try:
-                while True:
-                    readable, _, _ = _select.select([_fd], [], [], 0.5)
-                    if not readable:
-                        if proc.poll() is not None:
+                if _is_win:
+                    while True:
+                        chunk = proc.stdout.readline()  # 阻塞至一行/EOF，专线程无碍
+                        if not chunk:
                             break
-                        continue
-                    try:
-                        chunk = proc.stdout.read(4096)
-                    except (BlockingIOError, OSError):
-                        continue
-                    if not chunk:
-                        break
-                    _read_buf += chunk
-                    while b"\n" in _read_buf:
-                        line, _read_buf = _read_buf.split(b"\n", 1)
-                        line_str = line.decode("utf-8", errors="replace").strip()
-                        if not line_str:
+                        _feed(chunk)
+                else:
+                    while True:
+                        readable, _, _ = _select.select([_fd], [], [], 0.5)
+                        if not readable:
+                            if proc.poll() is not None:
+                                break
                             continue
                         try:
-                            client.handle_line(line_str)
-                        except Exception as e:
-                            log.warning(f"{label}aishell-dsh ACP handle_line error: {e}")
+                            chunk = proc.stdout.read(4096)
+                        except (BlockingIOError, OSError):
+                            continue
+                        if not chunk:
+                            break
+                        _feed(chunk)
             except Exception as e:
                 log.warning(f"{label}aishell-dsh ACP reader exception: {e}")
             finally:
