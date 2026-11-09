@@ -247,20 +247,34 @@ def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: i
     })
 
 
-def _augment_a2a_dispatch_response(result, seq: int, agent_name: str,
-                                   issue_number) -> dict:
+def _a2a_event_payload(seq, status, agent, issue_id, created_at=None) -> dict:
+    """Issue #1691：统一 A2A 事件字段口径（seq/status/agent/issue_id[/created_at]），
+    避免幂等、排队与并发回查等响应的 event 字面量再次漂移。"""
+    payload = {
+        "seq": seq,
+        "status": status,
+        "agent": agent,
+        "issue_id": issue_id,
+    }
+    if created_at is not None:
+        payload["created_at"] = created_at
+    return payload
+
+
+def _augment_a2a_dispatch_response(result, agent_name: str, issue_number) -> dict:
     """Issue #1691：成功派发响应补 `event`（seq/status/agent/issue_id）。
 
     与幂等/排队响应口径一致，CLI 可直接读取下游派发状态，无需再猜 seq=0/ok 的语义。
-    失败或未建事件（seq<=0）不补，保持原响应。
+    门槛以派发结果自身的 `seq>0` 为准：`run_a2a_dispatch` 在 auto-select 无引擎 /
+    异常时会先 `_fail_event(seq)` 把已建事件置 failed，再返回 `{"status":"ok","seq":0}`，
+    此时不得补 `event.status=running`，须保持与事件库真实状态一致。
     """
-    if isinstance(result, dict) and result.get("status") == "ok" and seq > 0:
-        result.setdefault("event", {
-            "seq": seq,
-            "status": "running",
-            "agent": agent_name,
-            "issue_id": f"#{issue_number}" if issue_number else "",
-        })
+    if isinstance(result, dict) and result.get("status") == "ok":
+        dispatch_seq = result.get("seq")
+        if isinstance(dispatch_seq, int) and dispatch_seq > 0:
+            result.setdefault("event", _a2a_event_payload(
+                dispatch_seq, "running", agent_name,
+                f"#{issue_number}" if issue_number else ""))
     return result
 
 
@@ -1392,9 +1406,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     "status": "ok", "seq": _existing["seq"], "agent": _existing["agent_type"] or agent_name,
                     "idempotent": True,
                     "message": "duplicate idempotency_key, existing event returned",
-                    "event": {"seq": _existing["seq"], "status": _existing["status"],
-                              "agent": _existing["agent_type"], "issue_id": _existing["issue_id"],
-                              "created_at": _existing["created_at"]},
+                    "event": _a2a_event_payload(
+                        _existing["seq"], _existing["status"],
+                        _existing["agent_type"], _existing["issue_id"],
+                        _existing["created_at"]),
                 })
 
         # PR 订阅模式拦截：PR 订阅触发的 QA 不允许 A2A（只做审查，不流转流水线）
@@ -1741,8 +1756,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         "reason": "active_a2a_event",
                         "existing_seq": _existing_seq, "queue_seq": _reused_seq,
                         "message": "same context already queued; existing queued event returned",
-                        "event": {"seq": _reused_seq, "status": "queued",
-                                  "agent": agent_name, "issue_id": f"#{issue_number}"},
+                        "event": _a2a_event_payload(
+                            _reused_seq, "queued", agent_name,
+                            f"#{issue_number}" if issue_number else ""),
                     })
                 if not _qseq:
                     log.error(f"A2A: queue event store failed for agent={agent_name}, issue=#{issue_number}")
@@ -1764,8 +1780,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     "message": "same issue+agent already has an active a2a event (existing_seq); "
                                "this handoff is queued and will be dispatched automatically "
                                "after that event reaches a terminal state",
-                    "event": {"seq": _qseq, "status": "queued", "agent": agent_name,
-                              "issue_id": f"#{issue_number}"},
+                    "event": _a2a_event_payload(
+                        _qseq, "queued", agent_name,
+                        f"#{issue_number}" if issue_number else ""),
                 })
             elif _existing_seq:
                 log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing_seq}")
@@ -1828,9 +1845,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 "status": "ok", "seq": -seq, "agent": (_dup or {}).get("agent_type") or agent_name,
                 "idempotent": True,
                 "message": "duplicate idempotency_key, existing event returned",
-                "event": {"seq": -seq, "status": (_dup or {}).get("status", ""),
-                          "agent": (_dup or {}).get("agent_type", ""), "issue_id": (_dup or {}).get("issue_id", ""),
-                          "created_at": (_dup or {}).get("created_at", "")},
+                "event": _a2a_event_payload(
+                    -seq, (_dup or {}).get("status", ""),
+                    (_dup or {}).get("agent_type", ""), (_dup or {}).get("issue_id", ""),
+                    (_dup or {}).get("created_at", "")),
             })
         if not seq:
             log.error(f"A2A: append_event returned 0, cannot create event for agent={agent_name}, issue=#{issue_number}")
@@ -1845,7 +1863,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             ref_seq=_a2a_ref_seq,
         )
         return _augment_a2a_dispatch_response(
-            _dispatch_result, seq, agent_name, issue_number)
+            _dispatch_result, agent_name, issue_number)
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸
