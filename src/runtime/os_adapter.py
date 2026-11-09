@@ -197,13 +197,20 @@ _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
 
 
 def engine_search_paths(engine_name: str) -> list[str]:
-    """引擎 CLI 在 Windows 上的常见安装路径（仅 Windows 调用）。
+    """引擎 CLI 的发现兜底路径（PATH 查不到时逐个 isfile 检查）。
 
-    返回路径列表，调用方逐一检查 isfile。
+    Windows: 常见安装路径（_ENGINE_WINDOWS_PATHS）。
+    Linux: pip/pipx --user 安装目录 ~/.local/bin——systemd 服务进程的 PATH
+    通常不含它（登录 shell 才由 .profile 追加），pip --user 装的 CLI（如
+    aishell）服务侧会"看不见"（2026-11-06 remote Worker E2E 实证）。通用候选，
+    非单一引擎特例；与 Windows 侧 _ENGINE_WINDOWS_PATHS 机制对称。
     """
-    if not _IS_WINDOWS:
+    if _IS_WINDOWS:
+        return [p for p in _ENGINE_WINDOWS_PATHS.get((engine_name or "").lower(), []) if p]
+    cli = (engine_name or "").strip().lower()
+    if not cli:
         return []
-    return [p for p in _ENGINE_WINDOWS_PATHS.get((engine_name or "").lower(), []) if p]
+    return [os.path.join(os.path.expanduser("~"), ".local", "bin", cli)]
 
 
 def find_cli(cli_name: str) -> str:
