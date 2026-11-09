@@ -4,7 +4,7 @@ D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
 Issue #1588 B 批：老表包装函数（create_user/get_user/get_user_by_username/list_users/
 delete_user/update_password/verify_user/get_token_version/increment_token_version/
 get_user_by_gitcode_id/link_gitcode_user/get_all_user_accounts/get_user_account/
-save_user_account/delete_user_account 及 _deprecated_user_accounts_fn/USER_ACCOUNT_FIELDS）
+save_user_account/delete_user_account 等 16 个包装、其私有别名与字段常量）
 已整体删除——新代码一律使用 src/auth/grape_account_db.py：
   账号 CRUD → create_grape_account/get_grape_account_by_id/get_grape_account_by_username
   密码/校验 → update_password/verify_grape_account
@@ -62,10 +62,6 @@ CREATE TABLE IF NOT EXISTS user_accounts (
     last_active_at TEXT DEFAULT NULL  -- 最后活跃时间（用户在线状态判定）
 )
 """
-
-
-def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
 
 
 def batch_update_last_active(uids: list) -> None:

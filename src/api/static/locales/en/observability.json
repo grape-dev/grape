@@ -424,7 +424,7 @@
     "unit_m": "min",
     "unit_h": "h",
     "unit_d": "d",
-    "unit_card": "",
+    "unit_card": "cards",
     "no_repo": "Select a repository first",
     "stale_warn": "Issue data last synced at {{last}} ({{days}} days ago) and is stale: zero inflow/completions and near-100% aged items are caused by stale data, not a full backlog.",
     "scope": "Scope: {{total}} cards · {{closed}} closed · {{open}} open",
