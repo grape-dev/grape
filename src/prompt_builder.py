@@ -101,10 +101,11 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     （issues / git-repo 等全量 261 端点），worker runtime / A2A 回连基址改由
     `RUNTIME_SERVER_URL`（见 `_resolve_server_url`）独立承载。
 
-    来源优先级：`task_business_api_url` 显式配置 > `server_base_url` > 本机直连
-    `127.0.0.1:{port}`（仅本机 runtime 且未显式配置时）。单地址部署时
-    `worker_connect_url` 回退 `server_base_url`，故与改造前 `_resolve_server_url`
-    返回值等价（向前兼容）。
+    来源优先级（与实际分支一致）：`task_business_api_url` 显式配置
+    > 本机 runtime 直连 `127.0.0.1:{port}` > `server_base_url`。
+    即：显式配置永远优先；未显式配置时，本机 runtime 走本机回环（`server_base_url`
+    不参与），远程 runtime 用 `server_base_url`。单地址部署时 `worker_connect_url`
+    回退 `server_base_url`，故与改造前 `_resolve_server_url` 返回值等价（向前兼容）。
     """
     try:
         from src.user.db import get_business_api_url, get_business_api_url_explicit

@@ -13,9 +13,15 @@ worker 任务内 `GRAPE_SERVER_URL` 被注入为 worker runtime 基址（仅 54 
 
 ## 范围
 - In：`src/prompt_builder.py`、`src/api/event_pipeline.py`、`src/api/routes/chat.py`
-  （对话入队同源注入）、`src/runtime/agent.py`、`src/user/db.py`、`src/api/routes/health.py`、
+  （Web 对话入队同源注入）、`src/im/handler_async.py`（飞书 IM 对话入队同源注入）、
+  `src/im/vod_handler_async.py`（VOD 入队）、`src/runtime/scheduler.py`（autopilot 入队）、
+  `src/runtime/agent.py`、`src/user/db.py`、`src/api/routes/health.py`、
   `src/config.py`、新增单测、`help/usage/agent-environment-variables.md`。
 - Out：grape-cli refresh 告警、grape-skills 文档（另仓承接）。
+
+> 对话入队定义：Web chat、飞书 IM chat、VOD、autopilot 四条入队链路均注入
+> `GRAPE_SERVER_URL` / `RUNTIME_SERVER_URL`（统一走 `resolve_task_server_env`），
+> 保证远端 worker 上任务内业务命令免 `--base-url` 可用。
 
 ## 验收标准
 - [ ] 双地址部署：新任务 `GRAPE_SERVER_URL`=业务 API，`RUNTIME_SERVER_URL`=worker runtime。

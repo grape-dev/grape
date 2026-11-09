@@ -24,8 +24,8 @@ GitCode 事件（Issue/PR/评论）
 
 | 环境变量 | 语义 | 适用 Agent | 注入来源 |
 |----------|------|-----------|----------|
-| `GRAPE_SERVER_URL` | **主控业务 API 基址**（issues / git-repo 等全量端点，skill 调业务 API / `grape` 业务命令用；**不是** worker runtime 地址）。来源：`task_business_api_url` 显式配置 > `server_base_url`；本机 runtime 未显式配置时回退 `127.0.0.1:{port}` | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`，chat 入队同源注入）/ agent.py 本机或单地址部署覆盖 |
-| `RUNTIME_SERVER_URL` | **worker runtime / A2A 回连基址**（任务 server_url 同语义；`grape` 的 runtime 绑定命令用）。来源：`worker_connect_url`（未配置回退 `server_base_url`） | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`，chat 入队同源注入）/ agent.py 本机或内网 worker 覆盖 |
+| `GRAPE_SERVER_URL` | **主控业务 API 基址**（issues / git-repo 等全量端点，skill 调业务 API / `grape` 业务命令用；**不是** worker runtime 地址）。来源：`task_business_api_url` 显式配置 > 本机 runtime 回退 `127.0.0.1:{port}` > `server_base_url`（本机 runtime 未显式配置时走回环，远程 runtime 用 `server_base_url`） | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`）/ 对话入队（`routes/chat.py`、`im/handler_async.py`、`im/vod_handler_async.py`、`runtime/scheduler.py`，均经 `resolve_task_server_env`）/ `agent.py` 本机或单地址部署覆盖 |
+| `RUNTIME_SERVER_URL` | **worker runtime / A2A 回连基址**（任务 server_url 同语义；`grape` 的 runtime 绑定命令用）。来源：`worker_connect_url`（未配置回退 `server_base_url`） | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`）/ 对话入队（`routes/chat.py`、`im/handler_async.py`、`im/vod_handler_async.py`、`runtime/scheduler.py`，均经 `resolve_task_server_env`）/ `agent.py` 本机或内网 worker 覆盖 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义）。**格式契约（#721）**：形如 `GTDTeam/CodeArts`——**无 host 前缀、无 provider 前缀（`gitcode:`/`github:`）、无 `.git` 后缀**；注入侧统一 `from_repo_key` 归一（幂等），runbook 拼接 clone URL 前仍应做一次归一兜底（见下「runbook clone URL 模板」） | 全部（devops 事件） | `_execute_agent` |
