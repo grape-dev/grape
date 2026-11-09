@@ -4843,6 +4843,20 @@ def get_worker_connect_url() -> str:
     return get_server_base_url()
 
 
+def get_business_api_url() -> str:
+    """主控业务 API 基址（任务内 grape 业务命令 issues / git-repo 等全量端点用）。
+
+    Issue #1577：与 worker 回连基址（get_worker_connect_url）语义拆分——
+    任务派发时 `GRAPE_SERVER_URL` 指向业务 API（本项），worker runtime 基址由
+    `RUNTIME_SERVER_URL` 独立承载。优先 task_business_api_url（server-config.json
+    > meta），未配置回退 server_base_url（单地址部署与改造前等价）。
+    """
+    _v = _split_url_configured_value("task_business_api_url")
+    if _v:
+        return _v
+    return get_server_base_url()
+
+
 def _split_url_configured_value(key: str) -> str:
     """读取拆分配置项（server-config.json > meta），空串表示未配置。
 

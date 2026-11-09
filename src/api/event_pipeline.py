@@ -3556,7 +3556,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    from src.prompt_builder import _resolve_server_url
+    from src.prompt_builder import _resolve_server_url, _resolve_business_server_url
     from src.repo_key import split_owner_repo as _sor2
     from src.repo_key import from_repo_key as _frk2
     _owner2, _repo_name2 = _sor2(repository)
@@ -3566,7 +3566,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "REPO_OWNER": _owner2,
         "REPO_NAME": _repo_name2,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
-        "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
+        # Issue #1577：GRAPE_SERVER_URL 承载业务 API 基址（issues/git-repo 全量端点），
+        # worker runtime / A2A 回连基址由 RUNTIME_SERVER_URL 独立承载（语义拆分）。
+        "GRAPE_SERVER_URL": _resolve_business_server_url(runtime_id),
+        "RUNTIME_SERVER_URL": _resolve_server_url(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
     # Issue #427：PR 订阅任务（evt 带 _pr_sub_scene_id）场景按订阅场景注入——
@@ -3828,8 +3831,10 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     env["REPO_OWNER"] = _owner
     env["REPO_NAME"] = _repo_name
     env["ACCOUNT"] = account
-    from src.prompt_builder import _resolve_server_url
-    env["GRAPE_SERVER_URL"] = _resolve_server_url(runtime_id)
+    from src.prompt_builder import _resolve_server_url, _resolve_business_server_url
+    # Issue #1577：GRAPE_SERVER_URL=业务 API 基址，RUNTIME_SERVER_URL=worker runtime 基址。
+    env["GRAPE_SERVER_URL"] = _resolve_business_server_url(runtime_id)
+    env["RUNTIME_SERVER_URL"] = _resolve_server_url(runtime_id)
     # ── 场景环境（work_branch / scene_id / custom_fields / linked_repos）──
     try:
         from src.runtime.repogit import _read_scene_work_branch

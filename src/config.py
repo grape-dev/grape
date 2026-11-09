@@ -315,6 +315,13 @@ def _load_accounts():
                 if _wcu:
                     set_meta_value("worker_connect_url", _wcu)
                     log.info(f"Configured worker_connect_url from server-config.json: {_wcu}")
+            # Issue #1577：业务 API 基址（任务内 GRAPE_SERVER_URL）可选配置，
+            # 未配置 getter 回退 server_base_url（单地址部署与改造前等价）。
+            if not get_meta_value("task_business_api_url"):
+                _tba = (_cfg.get("task_business_api_url") or "").strip().rstrip("/")
+                if _tba:
+                    set_meta_value("task_business_api_url", _tba)
+                    log.info(f"Configured task_business_api_url from server-config.json: {_tba}")
         except Exception:
             pass
     except Exception as e:

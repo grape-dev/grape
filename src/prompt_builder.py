@@ -40,8 +40,35 @@ def _vcs_name(repo_key: str) -> str:
     return "GitHub" if _is_github_repo(repo_key) else "GitCode"
 
 
+def _runtime_is_local(runtime_id: int = 0) -> bool:
+    """判断 runtime 是否本机直连/本机 worker。
+
+    判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1
+    （本机 worker）。查询异常一律按非本地处理（保守走对外地址）。
+    """
+    if not runtime_id or runtime_id <= 0:
+        return False
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
+            row = c.fetchone()
+            if not row:
+                return False
+            cid = row[0] or 0
+            if cid == 0:
+                return True
+            # 检查是否本机 worker（last_ip == 127.0.0.1）
+            c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
+            cred_row = c.fetchone()
+            return bool(cred_row and (cred_row[0] or "").startswith("127."))
+    except Exception:
+        return False
+
+
 def _resolve_server_url(runtime_id: int = 0) -> str:
-    """返回服务端可达地址（A2A/tasks 等对外调用用）。
+    """返回 worker runtime / A2A 回连基址（RUNTIME_SERVER_URL、task.server_url 用）。
 
     本地引擎走 localhost 直连，避免 NAT 回环不通
     （服务端无法通过自己的公网 IP 访问自己）；
@@ -53,21 +80,32 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     try:
         from src.user.db import get_worker_connect_url
         public_url = get_worker_connect_url()
-        if runtime_id and runtime_id > 0:
-            from src.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
-                row = c.fetchone()
-                if row:
-                    cid = row[0] or 0
-                    if cid == 0:
-                        return f"http://127.0.0.1:{_local_port()}"
-                    # 检查是否本机 worker（last_ip == 127.0.0.1）
-                    c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
-                    cred_row = c.fetchone()
-                    if cred_row and (cred_row[0] or "").startswith("127."):
-                        return f"http://127.0.0.1:{_local_port()}"
+        if _runtime_is_local(runtime_id):
+            return f"http://127.0.0.1:{_local_port()}"
+        return public_url
+    except Exception:
+        pass
+    # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
+    return f"http://localhost:{_local_port()}"
+
+
+def _resolve_business_server_url(runtime_id: int = 0) -> str:
+    """返回主控业务 API 基址（任务内 grape 业务命令用，GRAPE_SERVER_URL）。
+
+    Issue #1577：任务派发 env 语义拆分——`GRAPE_SERVER_URL` 承载业务 API 基址
+    （issues / git-repo 等全量 261 端点），worker runtime / A2A 回连基址改由
+    `RUNTIME_SERVER_URL`（见 `_resolve_server_url`）独立承载。
+
+    来源优先级：`task_business_api_url` 显式配置 > `server_base_url`；
+    本机直连（credential_id == 0 或本机 worker）回退 `127.0.0.1:{port}`。
+    单地址部署时 `worker_connect_url` 回退 `server_base_url`，故与改造前
+    `_resolve_server_url` 返回值等价（向前兼容）。
+    """
+    try:
+        from src.user.db import get_business_api_url
+        public_url = get_business_api_url()
+        if _runtime_is_local(runtime_id):
+            return f"http://127.0.0.1:{_local_port()}"
         return public_url
     except Exception:
         pass
