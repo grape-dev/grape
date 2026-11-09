@@ -138,6 +138,25 @@ class TestEngineSearchPaths:
                 with patch("os.path.isfile", return_value=True):
                     assert os_adapter.find_cli("aishell") == paths[0]
 
+    def test_windows_aishell_registry_fallback(self):
+        """AI Shell 装在非默认目录：经 Uninstall 注册表 InstallLocation 定位。"""
+        custom = r"D:\Example\AI Shell"
+        expected = os.path.join(custom, "resources", "runtime", "cli", "bin", "aishell.cmd")
+        with patch.object(os_adapter, "_IS_WINDOWS", True):
+            with patch.object(os_adapter, "_windows_registry_install_dirs",
+                              return_value=[custom]) as mreg:
+                paths = os_adapter.engine_search_paths("aishell")
+                assert expected in paths
+                # 全链：默认路径不存在（isfile 仅对注册表候选为真）→ 命中注册表路径
+                with patch("src.runtime.os_adapter.which", return_value=""):
+                    with patch("os.path.isfile", side_effect=lambda p: p == expected):
+                        assert os_adapter.find_cli("aishell") == expected
+            # 注册表兜底只在 aishell 键上生效，其他引擎不查注册表
+            with patch.object(os_adapter, "_windows_registry_install_dirs",
+                              return_value=[custom]) as mreg2:
+                os_adapter.engine_search_paths("codex")
+                mreg2.assert_not_called()
+
 
 class TestEngineSkillDirs:
     def test_hermes_skill_dir(self):

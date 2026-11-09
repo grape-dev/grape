@@ -207,18 +207,63 @@ _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
 }
 
 
+def _windows_registry_install_dirs(display_name_prefix: str) -> list[str]:
+    """HKCU/HKLM Uninstall 注册表按 DisplayName 前缀找安装目录（前缀不区分大小写）。
+
+    兜底硬编码路径覆盖不到的形态：AI Shell 装在非默认盘/自定义目录时，
+    NSIS 安装器会在 HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\<guid>
+    写 InstallLocation（真机实证：6a1b12ac-… DisplayName="AI Shell 0.2.1-rc.2"）。
+    """
+    if not _IS_WINDOWS:
+        return []
+    import winreg as _winreg
+
+    dirs: list[str] = []
+    for root in (_winreg.HKEY_CURRENT_USER, _winreg.HKEY_LOCAL_MACHINE):
+        try:
+            key = _winreg.OpenKey(root, r"Software\Microsoft\Windows\CurrentVersion\Uninstall")
+        except OSError:
+            continue
+        with key:
+            i = 0
+            while True:
+                try:
+                    sub = _winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with _winreg.OpenKey(key, sub) as sk:
+                        name = str(_winreg.QueryValueEx(sk, "DisplayName")[0])
+                        if not name.lower().startswith(display_name_prefix.lower()):
+                            continue
+                        loc = str(_winreg.QueryValueEx(sk, "InstallLocation")[0]).strip()
+                        if loc and os.path.isdir(loc):
+                            dirs.append(loc.rstrip("\\/"))
+                except OSError:
+                    continue
+    return dirs
+
+
 def engine_search_paths(engine_name: str) -> list[str]:
     """引擎 CLI 的发现兜底路径（PATH 查不到时逐个 isfile 检查）。
 
-    Windows: 常见安装路径（_ENGINE_WINDOWS_PATHS）。
+    Windows: 常见安装路径（_ENGINE_WINDOWS_PATHS）+ 注册表 InstallLocation
+    动态候选（aishell：AI Shell 装在非默认目录时经 Uninstall 注册表定位）。
     Linux: pip/pipx --user 安装目录 ~/.local/bin——systemd 服务进程的 PATH
     通常不含它（登录 shell 才由 .profile 追加），pip --user 装的 CLI（如
     aishell）服务侧会"看不见"（2026-11-06 remote Worker E2E 实证）。通用候选，
     非单一引擎特例；与 Windows 侧 _ENGINE_WINDOWS_PATHS 机制对称。
     """
+    name = (engine_name or "").strip().lower()
     if _IS_WINDOWS:
-        return [p for p in _ENGINE_WINDOWS_PATHS.get((engine_name or "").lower(), []) if p]
-    cli = (engine_name or "").strip().lower()
+        paths = [p for p in _ENGINE_WINDOWS_PATHS.get(name, []) if p]
+        if name == "aishell":
+            for loc in _windows_registry_install_dirs("AI Shell"):
+                paths.append(os.path.join(loc, "resources", "runtime", "cli", "bin", "aishell.cmd"))
+        seen: set = set()
+        return [p for p in paths if not (p in seen or seen.add(p))]
+    cli = name
     if not cli:
         return []
     return [os.path.join(os.path.expanduser("~"), ".local", "bin", cli)]
