@@ -125,3 +125,16 @@ class TestLocalWorkerOverride:
         from src.runtime import agent as agent_mod
         src = inspect.getsource(agent_mod)
         assert 'env["GRAPE_SERVER_URL"] = _local_base' not in src
+
+class TestReservedRuntimeEnv:
+    def test_runtime_server_url_reserved_in_scene_custom_env(self):
+        from src.scene_custom_env import is_reserved_name
+        assert is_reserved_name("RUNTIME_SERVER_URL")
+
+    def test_config_example_documents_business_api_url(self):
+        import json
+        path = os.path.join(ROOT, "configs", "server-config.example.json")
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        assert cfg.get("task_business_api_url") == "https://grape.example.com"
+        assert "task_business_api_url" in cfg.get("_comment_issue_1577", "")

@@ -3,5 +3,7 @@
   "webhook_url": "https://grape.example.com/webhook/gitcode",
   "_comment_issue_471": "Issue #471 E1 拆分项（可选，未配置回退 server_base_url）：browser_callback_url=浏览器回调（OAuth/附件/前端展示）；worker_connect_url=worker 回连（devstage/任务下发/远程 worker）。双地址部署（浏览器公网域名 ≠ worker 可达地址）时必须分别配置。",
   "browser_callback_url": "https://grape.example.com",
-  "worker_connect_url": "https://worker.grape.example.com"
+  "worker_connect_url": "https://worker.grape.example.com",
+  "_comment_issue_1577": "Issue #1577 任务业务 API 基址（可选，未配置回退 server_base_url）：task_business_api_url=worker 任务内 grape 业务命令（issues/git-repo 等）所用基址，需指向主控业务 API；与 worker_connect_url（worker 回连/runtime 基址）解耦。",
+  "task_business_api_url": "https://grape.example.com"
 }
