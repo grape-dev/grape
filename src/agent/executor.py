@@ -438,7 +438,7 @@ def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
 
     与 _stream_hermes_acp 并行（docs/hwcloud-runtime-acp-design.md）：
     - provider 凭据经 env 注入（HWCLOUD_PROVIDER_*，hwcloud_acp 写入 per-task
-      settings.json）；来源：env_extra（用户云凭据 provider=self-hosted provider 按 user_id 注入）
+      settings.json）；来源：env_extra（用户云凭据 provider=opengw 按 user_id 注入）
     - session_id 一期不使用（resume 不校验存在性，见设计实测行为 §5）
     """
     from src.agent.hwcloud_acp import HwcloudACPBackend

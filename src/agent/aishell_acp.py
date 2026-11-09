@@ -7,7 +7,7 @@
 - 会话路由：session/new 返回 configOptions（id="model"），默认 provider=aishell/trial
   无凭据必报 MISSING_CREDENTIAL —— 提示词前须 set_config_option 切到设备已配的
   provider（cordis.patch.yml 用户自配，grape 不持 key/不透传，D3/D4）
-- model option 的 value 不透明（JSON 串，如 '["self-hosted provider","glm-5.3"]'），必须从
+- model option 的 value 不透明（JSON 串，如 '["<provider>","<model>"]'），必须从
   options 原样取，自拼报 -32602
 - session/update 实测 5 类：agent_thought_chunk / agent_message_chunk /
   usage_update（{used,size} 上下文占用，非计费——一期忽略）/ tool_call /
@@ -64,7 +64,7 @@ class AishellDshACPBackend:
 
         aishell 与 dsh 同框架：其 bash 工具 spawn 时会 scrub 父进程 env 里所有
         匹配 /KEY|PASSWORD|SECRET|TOKEN/i 的变量名 → GRAPE_SESSION_TOKEN 被洗掉 →
-        grape CLI 无法认证（2026-11-06 remote worker vod 场景实证）。
+        grape CLI 无法认证（2026-11-06 远端 Worker vod 场景实证）。
 
         解法：token 写 0600 临时文件，路径经 GRAPE_AUTH_FILE 传递（变量名不命中
         scrub）；grape CLI config 先读该文件再 fallback 环境变量。
@@ -146,7 +146,7 @@ class AishellDshACPBackend:
         """
         label = f"{agent_label} " if agent_label else ""
         # CLI 定位统一走 find_cli（PATH 优先 + ~/.local/bin 兜底）——pip --user
-        # 安装的 aishell 在 systemd 服务的精简 PATH 里不可见，纯 which 会漏（remote Worker E2E 实证）
+        # 安装的 aishell 在 systemd 服务的精简 PATH 里不可见，纯 which 会漏（远端 Worker E2E 实证）
         from src.runtime.os_adapter import find_cli as _find_cli
 
         agent_cmd = _find_cli(self.binary) or shutil.which(self.binary + ".cmd")

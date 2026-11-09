@@ -1,18 +1,18 @@
 # aishell-dsh 引擎接入实施计划（一期上线 / 二期完善）
 
-> 📅 2026-11-06 ｜ 🌿 基于 weekly-10 @ 40be0820a (personal working branch with aishell-dsh commits) ｜ 📄 分期实施计划（设计结论详见 2026-11-05 设计 spec，本文自包含）
+> 📅 2026-11-06 ｜ 🌿 基于 weekly-10 @ 40be0820a（个人工作分支，含 aishell-dsh 系列提交）｜ 📄 分期实施计划（设计结论详见 2026-11-05 设计 spec，本文自包含）
 > ⚠️ 行号体系：§2/§4 行号锚定 40be0820a（实施前）；§3.1 增补（2026-11-07）引用的是**实施后**当前分支（含 aishell_acp.py 等）的行号——两套不可互相对照。
 
 ## 0. 背景约束与已裁定决策（承接设计 spec，实施必须遵守）
 
 ### ⚠️ 第一约束：同名不同物
 
-grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deployed to the cloud dev environment）。与本次接入的本地 aishell（华为 @huaweidevtools 基于 DeepSeek dsh 框架发行，CLI 名 `aishell`，`aishell acp` 提供 ACP-over-stdio）是**两个完全不同的产品**，同名共存是本方案第一约束。内部名与展示名统一 `aishell-dsh`。
+grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，部署绑定云开发环境）。与本次接入的本地 aishell（华为 @huaweidevtools 基于 DeepSeek dsh 框架发行，CLI 名 `aishell`，`aishell acp` 提供 ACP-over-stdio）是**两个完全不同的产品**，同名共存是本方案第一约束。内部名与展示名统一 `aishell-dsh`。
 
 | # | 决策 | 内容 |
 |---|---|---|
 | D1 | 命名 | 旧 hwcloud 内部名/路由键/binary/展示名 AI Shell **全保持不动**；新引擎内部名=展示名=`aishell-dsh`。旧名占用点（instances.py:31/51、settings.py:985-986 出口转换、AIShell.svg）全部不动；存量瑕疵 agent.py:1063 capitalize 与 instances.py upper 大小写不一致——不修 |
-| D2 | 接入模式 | 本地部署：自备机器/已有 worker 装 aishell，**不走 cloud-image preinstall、不建云环境** |
+| D2 | 接入模式 | 本地部署：自备机器/已有 worker 装 aishell，**不走云环境镜像预装、不建云环境** |
 | D3/D4 | 模型凭据与分工 | 设备预配置（acp profile cordis.patch.yml 用户自写，**grape 不提供模板**；key 预置 .credentials.yaml/env，**grape 不持模型 key、不下发、不透传**。注意：不透传指模型 key；平台自身的 VCS 收口凭据 GRAPE_SESSION_TOKEN 按任务注入并经 GRAPE_AUTH_FILE 穿透进 agent bash，见 §3.1 ⑧）。VCS 收口 grape CLI + GRAPE_SESSION_TOKEN，不在 aishell 侧装 MCP/插件 |
 | D5-D7 | usage/技能/遗留 | usage 解析轨、技能投送（物化 dest=`<cwd>/.dsh/skills` 已实证）、resume 等二期方案已定，详见 §5；#14 守卫不独立立项随查表顺带改 |
 
@@ -51,7 +51,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ### 2.3 标准③：正常工作 + A2A
 
-| 点 | 实现依据（2026-11-06 阶段 0 实测，aishell 0.0.2 + self-hosted provider 路由真机验证） |
+| 点 | 实现依据（2026-11-06 阶段 0 实测，aishell 0.0.2 + 自建 provider 路由真机验证） |
 |---|---|
 | 实时事件流 | session/update 流式，实测仅 5 类：agent_thought_chunk / agent_message_chunk / usage_update{used,size} / tool_call / tool_call_update。前两类+tool_call/update 映射统一事件契约 text/reasoning/tool_use/tool_result；**usage_update 一期忽略**（{used,size} 是上下文占用非计费，消费属二期 §5，一期不产生 usage 事件），无额外噪音事件 |
 | 结果格式化 | PromptResponse stopReason=end_turn 收口；done 携带 {exit_code, text, oc_session_id, errors, stderr}；结论评论 [$AGENT_NAME] 前缀与 PR 回写走通用链路 |
@@ -74,7 +74,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 **发现形态说明**：发现链对两种部署形态同构——本机 worker 与远程 ECS 上的 worker 走同一条 `discover_runtimes() → probe → register/heartbeat` 链（grape_worker_server.py:86-94，worker 启动扫本机 PATH），差异只是 aishell 装在哪台机器。以下步骤**对每台需要跑 aishell-dsh 任务的机器（本机或任一 ECS）各执行一遍**；验收 V1 对两种形态各验一次即可（用例同一条）。
 
 ```text
-1. 装 aishell 本体（PATH 可见）：.aishell-app + ~/.aishell     # 本地部署，no cloud env needed
+1. 装 aishell 本体（PATH 可见）：.aishell-app + ~/.aishell     # 本地部署，不需要云环境
 2. 配模型路由：acp profile cordis.patch.yml（用户自行编写）
      - 自建 provider（baseURL / apiKeyEnv / models）
      - agent-default-model（provider + model）
@@ -84,7 +84,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ## 3. 已踩坑（实施必读，全部真机实证）
 
-① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（如 self-hosted provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ session/set_config_option 的 RPC 参数键是 **configId** 非 id（2026-11-07 Windows aishell 0.0.2 真机复测：传 `id` 报 -32602 `Invalid input: expected string, received undefined`，传 `configId` 通过）；**「id」指的是 configOptions 列表里模型选项自身的标识字段**（据此过滤 `id=="model"`），不是 RPC 参数键——勿按旧表述改反代码；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）；⑦ **systemd 服务 PATH 不含 ~/.local/bin**（E2E 实证）：pip --user 安装的 CLI（aishell 即如此）人登录可见、服务进程不可见，且 install-worker.sh 重装会重置 unit PATH——由 §2.1 #9 的 Linux 发现兜底根治，不依赖运维改 PATH。
+① acp profile 默认 provider=aishell/trial，无凭据报 MISSING_CREDENTIAL「not authenticated with Huawei Cloud IAM」——须配自建 provider（自建 provider）+ agent-default-model；② model select 的 value 不透明，**必须从 options 原样取**（自拼报 -32602）；③ session/set_config_option 的 RPC 参数键是 **configId** 非 id（2026-11-07 Windows aishell 0.0.2 真机复测：传 `id` 报 -32602 `Invalid input: expected string, received undefined`，传 `configId` 通过）；**「id」指的是 configOptions 列表里模型选项自身的标识字段**（据此过滤 `id=="model"`），不是 RPC 参数键——勿按旧表述改反代码；④ prompt 前必须 session/new；⑤ atomic-write 锁被 kill 后可能留 0 字节僵尸锁，删锁即恢复；⑥ 同进程对活跃会话 resume 报 -32602（一期每任务 session/new 不涉及）；⑦ **systemd 服务 PATH 不含 ~/.local/bin**（E2E 实证）：pip --user 安装的 CLI（aishell 即如此）人登录可见、服务进程不可见，且 install-worker.sh 重装会重置 unit PATH——由 §2.1 #9 的 Linux 发现兜底根治，不依赖运维改 PATH。
 
 ### 3.1 已踩坑增补（2026-11-07 A2A 全链实测，独立于分期计划，接入任何引擎前必读）
 
@@ -96,7 +96,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 ⑪ **探活三副本必须同步登记**：agent.py:55（worker 心跳）/ engine_probe.py:20（主控每 10min，dashboard 本机行读内存不读 DB）/ local_probe.py:48（注册链）。漏任一份 → 页面「跳过 unknown engine」且可达性判死（skip 不在 ok/pending 白名单）。临时解法：主控单源 import agent._probe_aishell_dsh_acp；二期单源化+键集合护栏单测（todo: engine-probe-triple-duplication）。
 
-⑫ **凡涉及 worker 包内文件的修复，验收必须含远端版本确认**（四步）：①判定文件属 worker 包（worker 加载路径，remote worker /opt/grape/）；②找本次修复的新符号；③worker 上 `grep -c "<新符号>" <文件>` 必须命中，0=旧代码先同步再测；④`systemctl restart runtime-agent` 触发 auto-upgrade，日志见 `Auto-upgrade to h-xxxx` 再复测。**没这步会把「代码没同步」误判成「修复无效」**（2026-11-06 实证白跑一轮）。
+⑫ **凡涉及 worker 包内文件的修复，验收必须含远端版本确认**（四步）：①判定文件属 worker 包（worker 加载路径（如远端 Worker 的 /opt/grape/））；②找本次修复的新符号；③worker 上 `grep -c "<新符号>" <文件>` 必须命中，0=旧代码先同步再测；④`systemctl restart runtime-agent` 触发 auto-upgrade，日志见 `Auto-upgrade to h-xxxx` 再复测。**没这步会把「代码没同步」误判成「修复无效」**（2026-11-06 实证白跑一轮）。
 
 ⑬ **实体 configs 复制自 example 后必须查占位值**：email.example.json 的示例 SMTP 段（smtp.qq.com/your@qq.com）残留 → is_email_configured() 判 True → R7 注册降级被挡死（页面要求验证码但永远收不到）。部署后必查：`grep -E 'your@|your_smtp|example' configs/*.json | grep -v example`；send-code 应返回 EMAIL_NOT_CONFIGURED；注册页应注入 __EMAIL_CONFIGURED__=false。
 
@@ -267,7 +267,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 
 | 项 | 方案（已定） | 依据 |
 |---|---|---|
-| usage token 解析 | 解析 `~/.aishell/sessions/\<cwd\>/\<sid\>/session.v4.jsonl.zstd`（含 inputTokens/outputTokens/cacheReadTokens）；每任务独立文件无需 watermark/baseline；fail-open：v4 漂移/zstd 缺失返回 []+告警。zstd 依赖三级：zstandard 包 → zstd CLI → 缺口。**Windows 目录名映射（2026-11-07 实测）**：`\<cwd\>` 段是压扁路径——`C:\Users\<user>\AppData\Local\Temp` → `--C-Users-ZJ-AppData-Local-Temp--`（`:`→`-`、`\`→`-`、首尾各补 `-`），解析器必须按同规则映射 cwd，映射不到时回退目录扫描（并入 fail-open） | 账本位置已实测；opencode（SQLite）/hwcloud（日志）同为先例 |
+| usage token 解析 | 解析 `~/.aishell/sessions/\<cwd\>/\<sid\>/session.v4.jsonl.zstd`（含 inputTokens/outputTokens/cacheReadTokens）；每任务独立文件无需 watermark/baseline；fail-open：v4 漂移/zstd 缺失返回 []+告警。zstd 依赖三级：zstandard 包 → zstd CLI → 缺口。**Windows 目录名映射（实测）**：`\<cwd\>` 段是压扁路径——`C:\Users\<user>\AppData\Local\Temp` → `--C-Users-<user>-AppData-Local-Temp--`（`:`→`-`、`\`→`-`、首尾各补 `-`），解析器必须按同规则映射 cwd，映射不到时回退目录扫描（并入 fail-open） | 账本位置已实测；opencode（SQLite）/hwcloud（日志）同为先例 |
 | 技能投送 | 物化 dest 按引擎切换：aishell-dsh → `<cwd>/.dsh/skills`（**已实证引擎自动读取**：真实 SKILL.md 投放后会话识别技能名与内容）；无需软链/双写/env（skillsRoot 硬编码不可配已核实）。engine_skill_dirs 挂 ~/.dsh/skills 供卡片扫描 | asar 逆向 + 真机投放验证 |
 | resume chat | session/close → 跨进程 session/resume → 续聊上下文保留（已验证），configOptions 保留 | 另立 issue（阶段 4） |
 | Windows 路径 | os_adapter _ENGINE_WINDOWS_PATHS 条目（Linux 一期仅 PATH） | — |
@@ -275,7 +275,7 @@ grape 已有的「AI Shell」引擎 = **hwcloud**（openagent-go 构建，deploy
 | 引擎设置页补探活状态列 | 设置→引擎页只有在线/健康分，探活失败（如无凭据 MISSING_CREDENTIAL）在页面无线索，需去可观测页看——补四态探活列（✅延迟/❌/⏳）+ 悬停完整 probe_error，复用 observability.js:1214 既有渲染 | 2026-11-06 页面验收发现 |
 | 失败事件 Engine 行显示真实绑定引擎 | 事件页 Engine 行取 `data.runtime \|\| data.backend \|\| 'OpenCode'` 兜底，派发失败事件显示成 opencode 误导排障（实例：vod 绑 aishell-dsh 失败事件显示 Engine: opencode）——失败事件改显示绑定引擎名（失败文案里已有），events.js:140 | 2026-11-06 页面验收发现 |
 | **TODO（Windows）：hwcloud/hermes 任务链 select 轮询改 readline** | `hwcloud_acp.py:410`、`hermes_acp.py:407` 的 select 读线程在 Windows 首循环即抛 WinError 10038（select 仅支持 socket）→ ACP 任务事件流全丢，复现 aishell ⑱ 的「探活 ok（agent.py:271/469 已有 _win_acp_* 兼容层）、任务黑屏」割裂。修法照抄 aishell_acp 9ce71b005：win32 分支专用阻塞 readline 线程 + 切行抽 `_feed()` 共用，POSIX 路径不动，各 ~20 行 | 2026-11-07 aishell ⑱ 同族排查 |
-| **TODO（Windows）：agent shell 中文乱码——PS 5.1 按 GBK 解码子进程 UTF-8 输出** | 真任务实证（event 7）：PowerShell 工具跑 `grape issues get \| ConvertFrom-Json` 构建更新载荷时，未带 `[Console]::OutputEncoding=UTF8` 前缀的调用按控制台 CP936 解码 grape 的 UTF-8 输出 → body 变 `鍦╮eadme娣诲姞椤圭洰鍦板潃`（原文「在readme添加项目地址」），乱码载荷险些经 `issues update` 写穿（服务重启中断未执行）。候选修法：① 服务控制台启动即 `chcp 65001`（子 PS 继承，系统级根治，需验证）；② grape-skills 各 runbook 强制每条 grape 命令带 UTF-8 前缀（已有部分命令带，不一致）；③ grape CLI 增加输出编码自描述。防写穿对账：issues update 前检查载荷含 CJK 乱码特征（如 `鍦`/`娣诲姞`） | 2026-11-07 real-task evidence；同族根因见 executor.py PATH 注入注释块 |
+| **TODO（Windows）：agent shell 中文乱码——PS 5.1 按 GBK 解码子进程 UTF-8 输出** | 真任务实证（真任务实证）：PowerShell 工具跑 `grape issues get \| ConvertFrom-Json` 构建更新载荷时，未带 `[Console]::OutputEncoding=UTF8` 前缀的调用按控制台 CP936 解码 grape 的 UTF-8 输出 → body 变 `鍦╮eadme娣诲姞椤圭洰鍦板潃`（原文「在readme添加项目地址」），乱码载荷险些经 `issues update` 写穿（服务重启中断未执行）。候选修法：① 服务控制台启动即 `chcp 65001`（子 PS 继承，系统级根治，需验证）；② grape-skills 各 runbook 强制每条 grape 命令带 UTF-8 前缀（已有部分命令带，不一致）；③ grape CLI 增加输出编码自描述。防写穿对账：issues update 前检查载荷含 CJK 乱码特征（如 `鍦`/`娣诲姞`） | 2026-11-07 真任务实证；同族根因见 executor.py PATH 注入注释块 |
 
 ## 6. 实施顺序（一期）
 

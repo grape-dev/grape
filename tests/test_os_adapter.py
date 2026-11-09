@@ -107,9 +107,12 @@ class TestFindCli:
 
 
 class TestEngineSearchPaths:
-    def test_unix_returns_empty(self):
+    def test_unix_returns_local_bin_candidate(self):
+        # Linux 兜底语义：返回 ~/.local/bin/<cli> 候选（是否真实存在由 find_cli
+        # 的 isfile 判定，本函数不检查）——Windows 路径不得出现
         with patch.object(os_adapter, "_IS_WINDOWS", False):
-            assert os_adapter.engine_search_paths("opencode") == []
+            paths = os_adapter.engine_search_paths("opencode")
+        assert paths == [os.path.join(os.path.expanduser("~"), ".local", "bin", "opencode")]
 
     def test_windows_returns_paths(self):
         with patch.object(os_adapter, "_IS_WINDOWS", True):
@@ -126,20 +129,28 @@ class TestEngineSearchPaths:
         （discover_backends 与 aishell_acp.stream_execute 的调用形态）在 PATH
         查不到时必须经此条目命中——未启动过桌面的机器用户 PATH 无该目录。
         """
-        with patch.object(os_adapter, "_IS_WINDOWS", True):
+        with patch.object(os_adapter, "_IS_WINDOWS", True), \
+             patch.object(os_adapter, "_windows_registry_install_dirs", return_value=[]):
             paths = os_adapter.engine_search_paths("aishell")
-        assert len(paths) == 1
-        assert paths[0].lower().endswith("aishell.cmd")
-        assert "AI Shell" in paths[0]
-        assert os.path.join("resources", "runtime", "cli", "bin") in paths[0]
-        # find_cli 全链：PATH 落空 → 兜底路径存在即返回该 .cmd
-        with patch.object(os_adapter, "_IS_WINDOWS", True):
+            assert len(paths) == 1
+            assert paths[0].lower().endswith("aishell.cmd")
+            assert "AI Shell" in paths[0]
+            assert os.path.join("resources", "runtime", "cli", "bin") in paths[0]
+            # find_cli 全链：PATH 落空 → 兜底路径存在即返回该 .cmd
+            # （须与上面同作用域：registry mock 退出后 Linux 会走 winreg import）
             with patch("src.runtime.os_adapter.which", return_value=""):
                 with patch("os.path.isfile", return_value=True):
                     assert os_adapter.find_cli("aishell") == paths[0]
 
     def test_windows_aishell_registry_fallback(self):
-        """AI Shell 装在非默认目录：经 Uninstall 注册表 InstallLocation 定位。"""
+        """AI Shell 装在非默认目录：经 Uninstall 注册表 InstallLocation 定位。
+
+        注册表枚举仅 Windows 可验（winreg 为平台模块，Linux 上无法 patch 出
+        真实键值遍历）；Windows 真机已实证（6a1b12ac-… InstallLocation 命中），
+        此处跳过以免 Linux CI 假失败。
+        """
+        if not sys.platform.startswith("win"):
+            pytest.skip("registry enumeration requires real Windows")
         custom = r"D:\Example\AI Shell"
         expected = os.path.join(custom, "resources", "runtime", "cli", "bin", "aishell.cmd")
         with patch.object(os_adapter, "_IS_WINDOWS", True):

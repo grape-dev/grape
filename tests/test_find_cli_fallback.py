@@ -1,6 +1,6 @@
 """find_cli Linux 发现兜底单测（aishell-dsh 一期改动 #9）。
 
-背景（2026-11-06 remote Worker E2E 实证）：pip --user 安装的 CLI 落在 ~/.local/bin，
+背景（2026-11-06 远端 Worker E2E 实证）：pip --user 安装的 CLI 落在 ~/.local/bin，
 systemd 服务进程 PATH 不含该目录 → worker 发现链扫不到。本测锁死：
 - engine_search_paths 在 Linux 返回 ~/.local/bin/<cli> 通用候选
 - PATH 查不到时 find_cli 经兜底命中该文件

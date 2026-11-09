@@ -252,7 +252,7 @@ def engine_search_paths(engine_name: str) -> list[str]:
     动态候选（aishell：AI Shell 装在非默认目录时经 Uninstall 注册表定位）。
     Linux: pip/pipx --user 安装目录 ~/.local/bin——systemd 服务进程的 PATH
     通常不含它（登录 shell 才由 .profile 追加），pip --user 装的 CLI（如
-    aishell）服务侧会"看不见"（2026-11-06 remote Worker E2E 实证）。通用候选，
+    aishell）服务侧会"看不见"（2026-11-06 远端 Worker E2E 实证）。通用候选，
     非单一引擎特例；与 Windows 侧 _ENGINE_WINDOWS_PATHS 机制对称。
     """
     name = (engine_name or "").strip().lower()
