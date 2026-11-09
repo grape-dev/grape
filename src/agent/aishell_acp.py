@@ -83,7 +83,10 @@ class AishellDshACPBackend:
         try:
             import secrets as _secrets
             import tempfile
-            if cwd and os.path.isdir(cwd):
+            if cwd:
+                # 工位目录可能由 acp 服务稍后创建（prepare_env 先行）——主动建，
+                # 否则 isdir 为假会静默 fallback /tmp → bwrap 沙箱内不可见（实证）
+                os.makedirs(cwd, exist_ok=True)
                 auth_path = os.path.join(cwd, f".grape-sess-{_secrets.token_hex(4)}.tok")
                 fd = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w") as _f:
