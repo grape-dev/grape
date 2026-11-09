@@ -56,7 +56,7 @@ def main():
             xs = _cross_skill_refs(skill_md, name)
             if xs:
                 cross_skills.append((name, xs))
-            ok, missing = validate_skill_dir(os.path.join(root, name))
+            ok, missing, _extra, _vd = validate_skill_dir(os.path.join(root, name))
             if not ok:
                 broken_own.append((name, missing))
     print(f"\n扫描技能总数: {total}")

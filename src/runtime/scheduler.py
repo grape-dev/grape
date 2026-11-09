@@ -430,6 +430,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                                                    skill_mismatch_error)
         from src.runtime.task_log_stream import build_skill_source_message
         _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}
+        _sk_mat = (evt or {}).get("_skill_materialize") or {}
         if not _sv:
             # 判定缺失（物化异常等）→ 显式降级放行 + 告警，不静默当作通过
             log.warning(f"Autopilot exec {exec_id}: skill consistency verdict missing "
@@ -437,7 +438,9 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         else:
             _src_line = build_skill_source_message(
                 _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
-                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))["data"]["text"]
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""),
+                source_info=_sk_mat.get("source") or None,
+                drift=_sk_mat.get("drift") or None)["data"]["text"]
             log.info(f"Autopilot exec {exec_id}: skill source {_src_line}")
             if _sv.get("ok") is False:
                 _sv_err = skill_mismatch_error(_sv)

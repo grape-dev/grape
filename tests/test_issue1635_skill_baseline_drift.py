@@ -12,6 +12,8 @@
 """
 import io
 import os
+import subprocess
+import sys
 import zipfile
 
 import pytest
@@ -219,3 +221,83 @@ def test_baseline_unavailable_not_block_and_source_line(tmp_path):
     assert msg["data"]["skill_source"]["digest"] == info["source"]["digest"]
     assert msg["data"]["skill_source"]["drift"]["version"]["kind"] == \
         "baseline_unavailable"
+
+# ── 8. review 修复：兼容调用不误算漂移 / 回退与降级来源 ──────────
+
+def test_legacy_call_no_baseline_skips_drift(tmp_path):
+    """旧调用（无 scope/baseline）不自动解析基线，drift 为空、source 仍构造。"""
+    pkg = _write_skill(str(tmp_path / "pkg"), "issue-cli", {
+        "SKILL.md": SKILL_340,
+        "references/issue-runbook.md": "# runbook",
+    })
+    res = sm.materialize_skill_with_fallback(
+        str(tmp_path / ".skills"), "issue-cli", lambda: ("dir", pkg))
+    assert res["status"] == "ok"
+    assert res.get("drift") is None
+    assert res["source"]["scope"] == "unknown"
+    assert res["source"]["version"] == "3.4.0"
+
+
+def test_official_fallback_source_uses_official_scope(tmp_path, monkeypatch):
+    """官方包回退成功：逐源为 official、skill_id=0（不混用主渠道 id）。"""
+    official = _write_skill(str(tmp_path / "official"), "issue-cli", {
+        "SKILL.md": SKILL_310,
+        "references/issue-runbook.md": "# runbook",
+    })
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path",
+                        lambda name: os.path.join(official, "SKILL.md"))
+    res = sm.materialize_skill_with_fallback(
+        str(tmp_path / ".skills"), "issue-cli",
+        lambda: ("none", "zip unavailable"), scope="user", skill_id=999)
+    assert res["status"] == "fallback"
+    assert res["source"]["scope"] == "official"
+    assert res["source"]["skill_id"] == 0
+    assert res["source"]["version"] == "3.1.0"
+
+
+def test_degraded_has_source_and_drift(tmp_path, monkeypatch):
+    """degraded 结果也构造 source/drift，调用点取用不落空。"""
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    res = sm.materialize_skill_with_fallback(
+        str(tmp_path / ".skills"), "issue-cli",
+        lambda: ("none", "unavailable"), scope="user", skill_id=42)
+    assert res["status"] == "degraded"
+    assert res["source"]["skill_id"] == 42
+    assert res["source"]["scope"] == "user"
+    assert res["drift"]["baseline_available"] is False
+
+
+def test_agent_type_fallback_has_official_source(tmp_path, monkeypatch):
+    """agent_type 回退成功同样构造 official source/drift。"""
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    checker = _write_skill(str(tmp_path / "official"), "grape-skill-validator", {
+        "SKILL.md": "# checker\n",
+    })
+    resolver = lambda at: ({"skill_name": "grape-skill-validator", "skill_id": 2789,
+                            "skill_dir": checker} if at == "qa" else None)
+    res = sm.materialize_skill_with_fallback(
+        str(tmp_path / ".skills"), "missing-skill",
+        lambda: ("none", "not found"),
+        agent_type="qa", agent_type_fallback=resolver)
+    assert res["status"] == "fallback"
+    assert res["source"]["scope"] == "official"
+    assert res["source"]["skill_id"] == 2789
+    assert "drift" in res and res["drift"] is not None
+
+
+# ── 9. review 修复：全量扫描脚本按四元组解包可运行 ───────────────
+
+def test_scan_script_runs_without_unpack_error(tmp_path):
+    _write_skill(str(tmp_path), "issue-cli", {
+        "SKILL.md": SKILL_310,
+        "references/issue-runbook.md": "# runbook",
+    })
+    script = os.path.join(os.path.dirname(__file__), "..",
+                          "scripts", "scan_skill_cross_skill_refs.py")
+    out = subprocess.run([sys.executable, script, str(tmp_path)],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert "扫描技能总数: 1" in out.stdout

@@ -4217,7 +4217,10 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             else:
                 from src.config import resolve_official_skill_path as _resolve_skill_path
                 _real_skill_md = _resolve_skill_path(skill_name or "")
-                if not _real_skill_md:
+                if _real_skill_md:
+                    # review：按名命中官方路径须置 scope=official，否则漂移校验被跳过
+                    _primary_meta["scope"] = "official"
+                else:
                     _sp = evt.get("_skill_path", "") or ""
                     if _sp and os.path.isfile(_sp):
                         _real_skill_md = _sp
