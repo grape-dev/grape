@@ -19,6 +19,71 @@ from src.runtime.direct_executor import (
 _COMMENT_EVENT_TYPES = ("issue_comment", "note_hook_pr")
 
 
+def _get_issue_creator(repo_key: str, issue_number: str) -> str:
+    """Issue #1668: 读取 Issue 创建人登录名（issue.created_by，建档固化）。"""
+    num = str(issue_number or "").strip().lstrip("#")
+    if not repo_key or not num.isdigit():
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT created_by FROM issue WHERE repo_key=? AND issue_number=? "
+                "ORDER BY id LIMIT 1", (repo_key, int(num)))
+            row = c.fetchone()
+        return (row[0] or "").strip() if row else ""
+    except Exception as e:
+        log.warning(f"resolve issue creator failed repo={repo_key} issue=#{num}: {e}")
+        return ""
+
+
+def resolve_actor_account(evt: dict, repo_key: str = "") -> str:
+    """Issue #1668: 统一解析 ACCOUNT/actor（a2a_event 兜底链）。
+
+    优先级：a2a_event 为 payload.account → evt.actor → Issue creator；
+    其余事件为 evt.actor → payload.account → evt.account。
+    解析为空时输出结构化告警（event_type/issue_number），**禁止回退仓库属主**。
+    结果缓存在 evt，避免多处装配重复告警/重复查库。
+    """
+    if not isinstance(evt, dict):
+        evt = {}
+    if evt.get("_actor_account_resolved"):
+        return evt.get("_actor_account") or ""
+    payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
+    event_type = str(evt.get("type") or evt.get("event_type") or "")
+    issue_number = str(
+        payload.get("issue_number")
+        or evt.get("issue_id")
+        or evt.get("issue_number")
+        or ""
+    ).strip().lstrip("#")
+    if event_type == "a2a_event":
+        # a2a_event 不使用 evt.account（外部归一化可能回退成仓库属主），
+        # 严格按 payload.account → actor → Issue creator 解析。
+        account = str(payload.get("account") or evt.get("actor") or "").strip()
+        if not account:
+            account = _get_issue_creator(repo_key, issue_number)
+    else:
+        account = str(
+            evt.get("actor") or payload.get("account") or evt.get("account") or ""
+        ).strip()
+    if not account:
+        log.warning(
+            "ACCOUNT_MISSING "
+            + json.dumps({
+                "event_type": event_type or "unknown",
+                "issue_number": issue_number,
+                "repository": evt.get("repository", ""),
+                "repo_key": repo_key,
+                "fallback": "payload.account->issue_creator",
+                "owner_fallback": False,
+            }, ensure_ascii=False)
+        )
+    evt["_actor_account_resolved"] = True
+    evt["_actor_account"] = account
+    return account
+
+
 def _get_task_repo_token(repo_key: str) -> str:
     """Issue #372 R2.4: 获取 task 行 repo_gitcode_token，区分 token 来源。
 
@@ -563,7 +628,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
         "REPO_FULL_NAME": _full_name,
         "REPO_OWNER": _owner,
         "REPO_NAME": _repo_name,
-        "ACCOUNT": evt.get("actor") or evt.get("account") or "",
+        "ACCOUNT": resolve_actor_account(evt, repo_key),
     }
 
     # repo_gitcode_token（按 provider 分流，用户 token 写空由运行时实时获取）
@@ -1383,10 +1448,13 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         # 创建事件
         from src.api.event_store import append_event
         _title = f"PR 订阅 QA: {scene_id}"
+        _a2a_actor = resolve_actor_account(
+            {"type": "a2a_event", "actor": evt.get("actor", ""),
+             "issue_id": _pseudo_id, "payload": evt.get("payload", {})}, repo_key)
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
             title=_title, issue_id=_pseudo_id, source="a2a",
-            agent_type="qa", actor=evt.get("actor", ""),
+            agent_type="qa", actor=_a2a_actor,
             summary=f"PR 订阅并行: scene={scene_id} → qa",
             payload=evt.get("payload", {}), status="pending",
             scene_id=scene_id,
@@ -1617,10 +1685,13 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             _sub_title = f"A2A (订阅): {agent_type}"
         # Issue #252: 订阅事件继承原事件实体类型
         _sub_entity_type = "pull_request" if event_type in PR_EVENT_TYPES else ("issue" if event_type in ISSUE_EVENT_TYPES else "")
+        _a2a_actor = resolve_actor_account(
+            {"type": "a2a_event", "actor": evt.get("actor", ""),
+             "issue_id": issue_id, "payload": evt.get("payload", {})}, repo_key)
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
             title=_sub_title, issue_id=issue_id, source="a2a",
-            agent_type=agent_type, actor=evt.get("actor", ""),
+            agent_type=agent_type, actor=_a2a_actor,
             summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
             payload=evt.get("payload", {}), status="pending",
             entity_type=_sub_entity_type,
@@ -3826,7 +3897,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "REPO_FULL_NAME": _full_name2,
         "REPO_OWNER": _owner2,
         "REPO_NAME": _repo_name2,
-        "ACCOUNT": evt.get("actor") or evt.get("account") or "",
+        "ACCOUNT": resolve_actor_account(evt, repo_key),
         # Issue #1577：GRAPE_SERVER_URL 承载业务 API 基址（issues/git-repo 全量端点），
         # worker runtime / A2A 回连基址由 RUNTIME_SERVER_URL 独立承载（语义拆分）。
         # 统一复用 resolve_task_server_env，与 build_task_env / chat 入队同源，防双实现漂移。
@@ -5217,6 +5288,10 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         _title = f"VOD redispatch: {vod_skill}"
 
     # 创建新 event
+    _a2a_actor = resolve_actor_account(
+        {"type": "a2a_event", "issue_id": issue_id,
+         "payload": {"account": evt.get("account", ""),
+                     "issue_number": _issue_num}}, repo_key)
     seq = append_event(
         repo_key=repo_key,
         event_type="a2a_event",
@@ -5224,7 +5299,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         issue_id=issue_id,
         source="a2a",
         agent_type="vod",
-        actor="",
+        actor=_a2a_actor,
         summary=f"智能推荐完成 → VOD ({vod_skill})",
         payload={"repository": evt.get("repository", ""), "issue_number": _issue_num,
                  "context": "智能推荐完成，重派 VOD 执行完整工作流"},

@@ -31,7 +31,7 @@ GitCode 事件（Issue/PR/评论）
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义）。**格式契约（#721）**：形如 `GTDTeam/CodeArts`——**无 host 前缀、无 provider 前缀（`gitcode:`/`github:`）、无 `.git` 后缀**；注入侧统一 `from_repo_key` 归一（幂等），runbook 拼接 clone URL 前仍应做一次归一兜底（见下「runbook clone URL 模板」） | 全部（devops 事件） | `_execute_agent` |
 | `REPO_OWNER` | **仓库属主（owner，组织或个人的泛化概念）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
-| `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
+| `ACCOUNT` | **个人账号（webhook 触发人 / A2A 触发人，如 `Jason7602`）**；与仓库属主解耦，**解析为空时不会回退为仓库属主** | 全部（devops 事件） | `_execute_agent` / `_enqueue_pipeline_task`（`resolve_actor_account`：a2a_event 为 `payload.account` → `actor` → Issue `created_by`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `GRAPE_ISSUE_ID` | **需求卡片 id（issue 表主键，整数**；awaiting-input / pending-review / review-pass 的 `--issue_id` 用此值，**非 ISSUE_NUMBER**） | 事件任务（有 Issue） | `_execute_agent`（按 `(repo_key, issue_number)` 查卡片） |
 | `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent`（`_inject_issue_pr_env`：`payload.pr_number` → `evt._pr_sub_pr_number` → 嵌套键兜底 `payload.pull_request.number` / `payload.merge_request.number` / `payload.object_attributes.iid`，均为去 `#` 后纯数字，Issue #595。**note_hook_pr**：payload 优先（`noteable_iid` / `merge_request` / `pull_request`），缺失时从结构化 URL（`object_attributes.url` / `merge_request`、`pull_request` 的 `web_url`，形如 .../merge_requests/<N>）兜底，不从事件标题猜号；解析失败注入 `PR_NUMBER_PARSE_FAILED=1` 告警，禁止用 `ISSUE_NUMBER` 顶替，Issue #1579） |
@@ -51,6 +51,15 @@ GitCode 事件（Issue/PR/评论）
 > 注：`HUAWEICLOUD_SDK_AK/SK`、`CODEARTS_CLI_AK/SK`、`GITHUB_PUBLISH_REPO`、`GITCODE_PUBLISH_REPO`、
 > `CLAWHUB_OWNER_HANDLE` **已不再经环境变量注入**（#219 按需获取）——技能需要时通过自定义场景变量（场景高级选项 custom_fields，变量名直接注入）
 > 或按需 API 获取。
+
+> **`ACCOUNT` 取值优先级（Issue #1668）**：
+> 1. `a2a_event`：`payload.account`（A2A 交办方显式携带的触发人）→ 事件 `actor`；
+> 2. 其余事件：事件 `actor`（webhook 触发人）→ `payload.account`；
+> 3. 仅 `a2a_event`：上述为空时按 `issue_number` 查 `issue.created_by`（Issue 创建人）；
+> 4. 仍为空 → 注入空串，并在服务端事件日志输出结构化告警 `ACCOUNT_MISSING`（含 `event_type` / `issue_number` / `repository`）。
+>
+> **禁止回退为仓库属主（`REPO_OWNER`）**——个人账号与仓库属主解耦；A2A payload 的 `account` 与事件记录 `actor` 同步使用该解析结果。
+> `issue_opened` / PR 等非 A2A 事件的 `ACCOUNT` 仍取 webhook 触发人 `actor`，行为不变。
 
 > **`AGENT_NAME` 与 `DEVOPS_EVENT_TYPE` 的区别**：两者是正交的两个维度——
 > `AGENT_NAME` = **身份**（谁在执行，按 agent_type 的角色显示名，如 `QA Agent`，用于 `[$AGENT_NAME]` 评论前缀）；

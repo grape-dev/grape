@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from src.config import log
 from src.api.deps import get_user_or_none
-from src.api.event_pipeline import run_pipeline
+from src.api.event_pipeline import run_pipeline, resolve_actor_account
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
 
 router = APIRouter(tags=["webhook"])
@@ -818,7 +818,7 @@ def _cross_pipeline_handoff(
             issue_id=f"#{issue_number}",
             agent_type=target_node,
             source="a2a",
-            actor="",
+            actor=account,
             summary=f"Handoff to scene={_target_scene_name} node={target_node}",
             payload={
                 "repository": repository,
@@ -857,7 +857,7 @@ def _cross_pipeline_handoff(
             issue_id=f"#{issue_number}",
             source="a2a",
             agent_type=target_node,
-            actor="",
+            actor=account,
             summary=f"A2A: → {target_node} (cross-pipeline, scene={_target_scene_name})",
             payload={
                 "repository": repository,
@@ -893,7 +893,7 @@ def _cross_pipeline_handoff(
                         "type": "a2a_event",
                         "repository": repository,
                         "source": "a2a",
-                        "actor": "",
+                        "actor": account,
                         "account": account,
                         "issue_id": str(issue_number) if issue_number else "",
                         "_a2a_context": context,
@@ -1231,7 +1231,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
 
     repository = repository_early  # Issue #382/#395: 已校验为 str，直接复用，不再取原始对象
-    account = payload.get("account", "") or repository
+    # Issue #1668：不再用 repository（仓库属主）兜底 account；解析放到 repo_key/单号回填后。
+    account = str(payload.get("account", "") or "").strip()
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
     pr_number = payload.get("pr_number", "")
@@ -1258,6 +1259,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             log.info(f"A2A #755: issue_number backfilled to {_mapped_num} (via {_mapped_via}, repo={repo_key})")
     except Exception as _755_e:
         log.warning(f"A2A #755: entry issue_number backfill failed, keep original: {_755_e}")
+
+    # Issue #1668：a2a_event 触发人账号解析（payload.account → Issue creator，空则告警）。
+    # 禁止回退仓库属主：解析结果同步写入 payload.account / 事件 actor / 任务 ACCOUNT。
+    account = resolve_actor_account(
+        {"type": "a2a_event", "payload": payload, "issue_id": f"#{issue_number}" if issue_number else "",
+         "repository": repository},
+        repo_key,
+    )
+    payload["account"] = account
 
     # ── 仓库真实性校验（a2a-input-validation-fix 第4条，防假仓库）：
     # Issue #671 方案 B：注册表优先 + GitCode 可达性回退。
@@ -1458,7 +1468,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 repo_key=repo_key, event_type="a2a_event",
                 title=f"A2A 交接失败留痕: {agent_name}",
                 issue_id=f"#{issue_number}" if issue_number else "#0",
-                source="a2a", agent_type=agent_name, actor="",
+                source="a2a", agent_type=agent_name, actor=account,
                 summary=f"A2A failed before event creation: {str(_a2a_e)[:150]}",
                 payload={"a2a_trace": True, "fingerprint": _fingerprint,
                          "idempotency_key": _idem_key, "repository": repository,
@@ -1831,7 +1841,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             issue_id=f"#{issue_number}" if issue_number else "#0",
             source="a2a",
             agent_type=agent_name,
-            actor="",
+            actor=account,
             summary=f"A2A: → {agent_name}",
             payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint},
             status="running",
