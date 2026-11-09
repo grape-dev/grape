@@ -143,9 +143,12 @@
                 v-model="f.value"
                 :type="f.show ? 'text' : 'password'"
                 class="dbv-cfval"
-                placeholder="value"
+                :placeholder="f.keepValue ? '********' : 'value'"
+                @input="onFieldInput(f)"
               />
-              <button class="dbv-cfeye" @click="f.show = !f.show">{{ f.show ? '🙈' : '👁' }}</button>
+              <button class="dbv-cfeye" @click="f.keepValue ? openReveal(f) : (f.show = !f.show)">
+                {{ f.show ? '🙈' : '👁' }}
+              </button>
               <button class="dbv-cfdel" @click="advFields.splice(i, 1)">×</button>
             </div>
           </div>
@@ -219,6 +222,43 @@
                 class="dbv-desc-input"
                 @keyup.enter="saveInlineEdit('desc')"
               />
+            </div>
+            <div class="dbv-deployglobe">
+              <template v-if="!deployUrlEdit">
+                <a
+                  v-if="deployUrl"
+                  :href="deployUrl"
+                  target="_blank"
+                  rel="noopener"
+                  class="dbv-globe-link"
+                  :title="deployUrl"
+                  @contextmenu.prevent="startDeployUrlEdit()"
+                  @touchstart.passive="deployUrlPressStart()"
+                  @touchend="deployUrlPressEnd()"
+                  @touchmove="deployUrlPressEnd()"
+                  >🔗</a
+                >
+                <button
+                  v-else
+                  class="dbv-globe-empty"
+                  title="登记场景访问地址"
+                  @click="startDeployUrlEdit()"
+                >
+                  🌐
+                </button>
+              </template>
+              <template v-else>
+                <input
+                  v-model="deployUrlDraft"
+                  class="dbv-deployurl-input"
+                  placeholder="https://..."
+                  @keyup.enter="saveDeployUrl()"
+                />
+                <button class="ap-btn bt-mini" @click="saveDeployUrl()">{{ t('save') }}</button>
+                <button class="ap-btn bt-mini" @click="cancelDeployUrlEdit()">
+                  {{ t('cancel') }}
+                </button>
+              </template>
             </div>
             <button class="ap-btn" style="margin-top: 4px" @click="copySceneFromDetail()">
               {{ t('copy_scene') }}
@@ -401,9 +441,10 @@
                   v-model="f.value"
                   :type="f.show ? 'text' : 'password'"
                   class="dbv-cfval"
-                  placeholder="value"
+                  :placeholder="f.keepValue ? '********' : 'value'"
+                  @input="onFieldInput(f)"
                 />
-                <button class="dbv-cfeye" @click="f.show = !f.show">
+                <button class="dbv-cfeye" @click="f.keepValue ? openReveal(f) : (f.show = !f.show)">
                   {{ f.show ? '🙈' : '👁' }}
                 </button>
                 <span v-if="!f.preset" class="dbv-cfscope">
@@ -476,7 +517,7 @@
                 <div class="l">{{ t('stat_failed') }}</div>
               </div>
               <div class="pl-stat">
-                <div class="v" style="color: #0071e3">{{ scenePipes.length }}</div>
+                <div class="v" style="color: #0071e3">{{ scenePipeTotal }}</div>
                 <div class="l">{{ t('stat_total') }}</div>
               </div>
             </div>
@@ -546,13 +587,17 @@
             </table>
             <div v-if="pipeTotalPages > 1" class="dbv-pipepager">
               <span>{{ t('page_info', { cur: pipePage + 1, total: pipeTotalPages }) }}</span>
-              <button class="bt bt-o bt-s" :disabled="pipePage <= 0" @click="pipePage--">
+              <button
+                class="bt bt-o bt-s"
+                :disabled="pipePage <= 0"
+                @click="loadScenePipePage(detail && detail.id, pipePage - 1)"
+              >
                 {{ t('prev_page') }}
               </button>
               <button
                 class="bt bt-o bt-s"
                 :disabled="pipePage >= pipeTotalPages - 1"
-                @click="pipePage++"
+                @click="loadScenePipePage(detail && detail.id, pipePage + 1)"
               >
                 {{ t('next_page') }}
               </button>
@@ -619,9 +664,22 @@
         <div class="apple-card dbv-scenecard">
           <div class="cd-h dbv-scenehead">
             <h2>
-              {{ t('scene_center_title') }} <span class="dbv-scene-count">{{ scenes.length }}</span>
+              {{ t('scene_center_title') }}
+              <span class="dbv-scene-count">{{ sceneTotal }}</span>
             </h2>
-            <div style="display: flex; gap: 8px">
+            <div class="dbv-scenehead-right">
+              <div class="dbv-scenesearch">
+                <input
+                  v-model="sceneQuery"
+                  class="dbv-scenesearch-input"
+                  :placeholder="t('scene_search_placeholder')"
+                  @input="onSceneSearchInput"
+                  @keyup.enter="commitSceneSearch()"
+                />
+                <button v-if="sceneQuery" class="dbv-scenesearch-clear" @click="clearSceneSearch()">
+                  ✕
+                </button>
+              </div>
               <button class="ap-btn" @click="openSceneRecommendModal()">
                 {{ t('scene_recommend_rules') }}
               </button>
@@ -664,28 +722,54 @@
               </div>
             </div>
           </div>
+          <!-- Issue #501：服务端分页 -->
+          <div v-if="sceneTotalPages > 1" class="dbv-scenepager">
+            <span>{{ t('page_info', { cur: scenePage, total: sceneTotalPages }) }}</span>
+            <button
+              class="bt bt-o bt-s"
+              :disabled="scenePage <= 1"
+              @click="sceneGotoPage(scenePage - 1)"
+            >
+              {{ t('prev_page') }}
+            </button>
+            <button
+              class="bt bt-o bt-s"
+              :disabled="scenePage >= sceneTotalPages"
+              @click="sceneGotoPage(scenePage + 1)"
+            >
+              {{ t('next_page') }}
+            </button>
+          </div>
         </div>
       </template>
       <!-- 空场景 -->
       <template v-else>
-        <div class="apple-card dbv-marketcard">
-          <div class="dbv-marketrow">
-            <div style="font-size: 32px; flex-shrink: 0">🏪</div>
-            <div style="flex: 1; min-width: 0">
-              <div class="dbv-market-t">{{ t('market_intro_title') }}</div>
-              <div class="dbv-market-d">{{ t('market_intro_desc') }}</div>
+        <div v-if="sceneQuery.trim()" class="dbv-emptycard">
+          <div class="dbv-empty-ic">🔍</div>
+          <div class="dbv-empty-t">{{ t('scene_search_no_match') }}</div>
+          <div class="dbv-empty-d">{{ sceneQuery }}</div>
+          <button class="ap-btn" @click="clearSceneSearch()">{{ t('scene_search_clear') }}</button>
+        </div>
+        <template v-else>
+          <div class="apple-card dbv-marketcard">
+            <div class="dbv-marketrow">
+              <div style="font-size: 32px; flex-shrink: 0">🏪</div>
+              <div style="flex: 1; min-width: 0">
+                <div class="dbv-market-t">{{ t('market_intro_title') }}</div>
+                <div class="dbv-market-d">{{ t('market_intro_desc') }}</div>
+              </div>
+              <button class="ap-btn" @click="G.app.nav('scene-market')">
+                {{ t('goto_market') }} →
+              </button>
             </div>
-            <button class="ap-btn" @click="G.app.nav('scene-market')">
-              {{ t('goto_market') }} →
-            </button>
           </div>
-        </div>
-        <div class="dbv-emptycard">
-          <div class="dbv-empty-ic">📋</div>
-          <div class="dbv-empty-t">{{ t('no_scene_title') }}</div>
-          <div class="dbv-empty-d">{{ t('no_scene_desc') }}</div>
-          <button class="ap-btn" @click="enterCreateMode()">➕ {{ t('no_scene_create') }}</button>
-        </div>
+          <div class="dbv-emptycard">
+            <div class="dbv-empty-ic">📋</div>
+            <div class="dbv-empty-t">{{ t('no_scene_title') }}</div>
+            <div class="dbv-empty-d">{{ t('no_scene_desc') }}</div>
+            <button class="ap-btn" @click="enterCreateMode()">➕ {{ t('no_scene_create') }}</button>
+          </div>
+        </template>
       </template>
     </template>
 
@@ -708,12 +792,12 @@
               <div class="dbv-skillgroup">{{ g.label }} ({{ g.items.length }})</div>
               <div
                 v-for="s in g.items"
-                :key="s.skill_name"
-                :class="['dbv-skillopt', { sel: s.skill_name === skillPanel.current }]"
+                :key="skillKeyOf(s)"
+                :class="['dbv-skillopt', { sel: skillIsSelected(s) }]"
                 :title="s.description || ''"
-                @click="pickSkill(s.skill_name)"
+                @click="pickSkill(s.skill_name, skillKeyOf(s))"
               >
-                <span v-if="s.skill_name === skillPanel.current" class="dbv-skillcheck">✓</span>
+                <span v-if="skillIsSelected(s)" class="dbv-skillcheck">✓</span>
                 <span class="dbv-skillname-t">{{ s.display_name || s.skill_name }}</span>
               </div>
             </template>
@@ -786,8 +870,8 @@
                 />
                 <div class="dbv-engbody">
                   <div class="dbv-engname">
-                    {{ e.alias || e.name }}
-                    <span v-if="e.alias" class="dbv-engalias">({{ e.name }})</span>
+                    {{ e.alias || engineDisplayName(e) }}
+                    <span v-if="e.alias" class="dbv-engalias">({{ engineDisplayName(e) }})</span>
                     <span
                       v-for="tg in e.tags || []"
                       :key="tg"
@@ -852,6 +936,28 @@
       </div>
     </div>
 
+    <!-- ═══ 密钥明文取回（#885，密码二次确认） ═══ -->
+    <div v-if="revealDlg.open" class="rtv-modal-ov" @click.self="closeReveal()">
+      <div class="dbv-copymodal">
+        <h3>查看明文：{{ revealDlg.name }}</h3>
+        <p class="dbv-copy-hint">查看密钥明文需重新输入 Grape 密码确认，读取动作将记入审计日志。</p>
+        <input
+          v-model="revealDlg.password"
+          type="password"
+          class="dbv-copy-input"
+          placeholder="Grape 密码"
+          @keyup.enter="submitReveal()"
+        />
+        <div v-if="revealDlg.error" class="dbv-reveal-err">{{ revealDlg.error }}</div>
+        <div class="dbv-copy-btns">
+          <button class="ap-btn" @click="closeReveal()">{{ t('cancel') }}</button>
+          <button class="ap-btn" :disabled="revealDlg.busy" @click="submitReveal()">
+            {{ t('confirm') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ 智能推荐规则弹窗 ═══ -->
     <div v-if="recDlg.open" class="rtv-modal-ov" @click.self="recDlg.open = false">
       <div class="dbv-recmodal">
@@ -900,6 +1006,7 @@
           </div>
           <button
             class="ap-btn dbv-addbtn-sm"
+            :disabled="!recDlg.loaded"
             @click="recDlg.rules.push({ scene_id: '', condition: '' })"
           >
             + {{ t('recommend_add_rule') }}
@@ -908,7 +1015,9 @@
         </div>
         <div class="dbv-copy-btns" style="margin-top: 20px">
           <button class="ap-btn" @click="recDlg.open = false">{{ t('cancel') }}</button>
-          <button class="ap-btn" @click="saveSceneRecommend()">{{ t('save') }}</button>
+          <button class="ap-btn" :disabled="!recDlg.loaded" @click="saveSceneRecommend()">
+            {{ t('save') }}
+          </button>
         </div>
       </div>
     </div>
@@ -997,6 +1106,44 @@ const loadError = ref('')
 // 主页
 const dashData = ref(null)
 const scenes = ref([])
+// Issue #501：场景列表分页/检索（页码与检索词以 window._sceneList* 为准，app.js loadDash 读取）
+const sceneTotal = ref(0)
+const scenePage = ref(1)
+const sceneQuery = ref('')
+let sceneSearchTimer = null
+const scenePageSize = () => G.window._sceneListPageSize || 20
+const sceneTotalPages = computed(() =>
+  Math.max(1, Math.ceil((sceneTotal.value || 0) / scenePageSize()))
+)
+function onSceneSearchInput() {
+  clearTimeout(sceneSearchTimer)
+  sceneSearchTimer = setTimeout(commitSceneSearch, 300)
+}
+function commitSceneSearch() {
+  clearTimeout(sceneSearchTimer)
+  const q = (sceneQuery.value || '').trim()
+  if (q === (G.window._sceneListQ || '')) return
+  G.window._sceneListQ = q
+  G.window._sceneListPage = 1
+  reloadSceneList()
+}
+function clearSceneSearch() {
+  sceneQuery.value = ''
+  commitSceneSearch()
+}
+function sceneGotoPage(p) {
+  if (p < 1 || p > sceneTotalPages.value) return
+  G.window._sceneListPage = p
+  reloadSceneList()
+}
+function reloadSceneList() {
+  // 与 app.js 的局部重载契约对接：切走页面时不得把用户拉回 dash
+  if (typeof G.window._sceneReload === 'function' && G.window._currentView === 'dash') {
+    G.window._sceneReload()
+  } else if (G.window._currentView === 'dash') {
+    G.app.nav('dash')
+  }
+}
 const scenePipelines = ref({})
 const dashOwner = ref('')
 const dashName = ref('')
@@ -1043,6 +1190,8 @@ const skillPanel = reactive({
   open: false,
   agentType: '',
   current: '',
+  currentKey: '',
+  nameCounts: {},
   q: '',
   x: 0,
   y: 0,
@@ -1050,6 +1199,19 @@ const skillPanel = reactive({
   skills: [],
 })
 const skillPickCache = {}
+// Issue #978：下拉选择以唯一键（skill_id 优先，回退 scope:skill_name）为标识，
+// 官方/仓库/个人三档可同名，裸 skill_name 会互相覆盖显示名与勾选态
+function skillKeyOf(s) {
+  return s.skill_id || (s.scope || 'official') + ':' + s.skill_name
+}
+function skillIsSelected(s) {
+  if (skillPanel.currentKey && skillKeyOf(s) === skillPanel.currentKey) return true
+  return (
+    !!skillPanel.current &&
+    skillPanel.current === s.skill_name &&
+    (skillPanel.nameCounts[s.skill_name] || 0) === 1
+  )
+}
 // 引擎弹窗
 const engineModal = reactive({ open: false, agentType: '', q: '', filterType: '', filterScope: '' })
 const engCurIds = ref([])
@@ -1059,7 +1221,21 @@ const sceneTagsCache = ref(null)
 // 复制/删除/推荐弹窗
 const copyDlg = reactive({ open: false, name: '' })
 const deleteDlg = reactive({ open: false, id: '', name: '' })
-const recDlg = reactive({ open: false, fallback: '', scenes: [], rules: [] })
+const recDlg = reactive({ open: false, fallback: '', scenes: [], rules: [], loaded: false })
+// Issue #885: 密钥字段明文按需取回（密码二次确认）
+const revealDlg = reactive({
+  open: false,
+  field: null,
+  name: '',
+  password: '',
+  busy: false,
+  error: '',
+})
+// Issue #461: 场景级访问地址（详情页复制场景按钮前的地球仪，三态）
+const deployUrl = ref('')
+const deployUrlEdit = ref(false)
+const deployUrlDraft = ref('')
+let deployUrlPressTimer = null
 
 // ═══ 工具 ═══
 const API = () => G.API
@@ -1120,6 +1296,9 @@ function t(key, vars) {
     no_scene_title: '暂无场景',
     no_scene_desc: '还没有配置任何场景',
     no_scene_create: '创建新场景',
+    scene_search_placeholder: '搜索场景名称/描述',
+    scene_search_no_match: '没有匹配的场景',
+    scene_search_clear: '清除搜索',
     add_scene: '添加场景',
     scene_name_placeholder: '请输入场景名称',
     desc_optional: '描述（可选）',
@@ -1158,11 +1337,38 @@ function esc(s) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
 }
+// Issue #1310: 引擎显示名统一「引擎名（凭据名）」，worker-name.js 提供唯一实现
+function engineDisplayName(e) {
+  const fn = G.window.engineDisplayName
+  if (typeof fn === 'function') return fn(e)
+  const en = String(
+    (e && (e.display_name || e.engine_name || e.name || e.instance_name)) || ''
+  ).trim()
+  const wn = String((e && e.worker_name) || '').trim() || '未命名设备'
+  return en ? en + '（' + wn + '）' : wn
+}
 function currentRepo() {
   return app().currentRepo ? app().currentRepo() : null
 }
 function stripRepoPrefix(rk) {
   return String(rk || '').replace(/^(gitcode|github):/, '')
+}
+// Issue #393fc76e9：分支接口显式携带平台（repo_key），避免同名仓被 user_repos 的
+// github: 记录带偏（托管仓被误判 → 分支只剩 main）。仅在当前仓库与查询 owner/repo
+// 一致时携带，跨仓页面不会注入错误平台。
+function branchQS(owner, name) {
+  try {
+    const rk = (currentRepo() || {}).repoKey || ''
+    if (rk && rk.indexOf(':') > 0) {
+      const bare = stripRepoPrefix(rk)
+      if (!owner || !name || bare === owner + '/' + name) {
+        return '?repo_key=' + encodeURIComponent(rk)
+      }
+    }
+  } catch (e) {
+    /* ignore */
+  }
+  return ''
 }
 function resolveOwnerName(data) {
   let owner = ''
@@ -1223,13 +1429,19 @@ function collectFields(fields) {
   return {
     fields: fields
       .filter((f) => (f.name || '').trim())
-      .map((f) => ({
-        name: f.name.trim(),
-        value: (f.value || '').trim(),
-        is_secret: computeIsSecret(f.name, f.show === false),
-        scope: f.scope && f.scope.length ? f.scope : ['all'],
-        preset: !!f.preset,
-      })),
+      .map((f) => {
+        const sec = computeIsSecret(f.name, f.show === false)
+        const out = {
+          name: f.name.trim(),
+          value: (f.value || '').trim(),
+          is_secret: sec,
+          scope: f.scope && f.scope.length ? f.scope : ['all'],
+          preset: !!f.preset,
+        }
+        // Issue #885: 已配置未改动的密钥 → 服务端保留旧值，不回传明文
+        if (sec && f.keepValue) out.keep_value = true
+        return out
+      }),
   }
 }
 function onScopeToggle(f, sc) {
@@ -1240,6 +1452,58 @@ function onScopeToggle(f, sc) {
     const i = f.scope.indexOf('all')
     if (i >= 0) f.scope.splice(i, 1)
   }
+}
+// Issue #885: 用户改动密钥输入框 → 取消 keep_value 占位语义
+function onFieldInput(f) {
+  f.keepValue = false
+}
+function openReveal(f) {
+  revealDlg.field = f
+  revealDlg.name = f.name
+  revealDlg.password = ''
+  revealDlg.error = ''
+  revealDlg.busy = false
+  revealDlg.open = true
+}
+function closeReveal() {
+  revealDlg.open = false
+  revealDlg.field = null
+  revealDlg.password = ''
+}
+function submitReveal() {
+  const f = revealDlg.field
+  if (!f) return
+  const sceneId = detail.value ? detail.value.id : ''
+  if (!sceneId) {
+    revealDlg.error = '当前上下文不支持取回明文'
+    return
+  }
+  revealDlg.busy = true
+  revealDlg.error = ''
+  API()
+    .post(
+      '/scenes/' +
+        encodeURIComponent(sceneId) +
+        '/advanced-options/reveal?repo=' +
+        encodeURIComponent(dashOwner.value + '/' + dashName.value),
+      { name: revealDlg.name, password: revealDlg.password }
+    )
+    .then(function (d) {
+      f.value = (d && d.value) || ''
+      f.show = true
+      f.keepValue = false
+      revealDlg.busy = false
+      revealDlg.open = false
+    })
+    .catch(function (e) {
+      revealDlg.busy = false
+      const dd = (e && e.detail) || {}
+      if (dd.need_set_password) {
+        revealDlg.error = '请先在账户设置中设置登录密码后再取回明文'
+        return
+      }
+      revealDlg.error = dd.message || dd.detail || (e && e.message) || '取回明文失败'
+    })
 }
 // 场景标签显示名
 function ensureSceneTags(cb) {
@@ -1370,6 +1634,10 @@ function repairHost() {
 function renderDash(data) {
   dashData.value = data
   scenes.value = data._scenes || []
+  // Issue #501：分页总数（老后端无 total 时回退当前页条数）与页码/检索词回填
+  sceneTotal.value = typeof data._scenesTotal === 'number' ? data._scenesTotal : scenes.value.length
+  scenePage.value = G.window._sceneListPage || 1
+  sceneQuery.value = G.window._sceneListQ || ''
   role.value = data.role || 'Member'
   metrics.value = data.metrics || {}
   const [owner, name] = resolveOwnerName(data)
@@ -1382,8 +1650,16 @@ function renderDash(data) {
   mode.value = 'list'
   loaded.value = true
   loadError.value = ''
-  // 并行加载 pipeline_config（卡片技能链展示）
-  loadScenePipelines(owner, name)
+  // Issue #f5c6b25b9：进仓库后无引擎 → 引导添加设备（app.js 时序链）
+  try {
+    if (app()._checkEngineBanner) app()._checkEngineBanner()
+  } catch (e) {
+    /* ignore */
+  }
+  // 卡片技能链：app.js 的 with-pipeline 单一来源已带 _pipelines（Issue #501 A 方案），
+  // 缺失时才回退单独拉取，避免同表数据双请求
+  if (data._pipelines) scenePipelines.value = data._pipelines
+  else loadScenePipelines(owner, name)
   // Issue #407: 创建模式自动恢复
   const autoEdit = getDashEditMode()
   if (autoEdit && autoEdit.mode === 'create' && owner && name) {
@@ -1670,7 +1946,7 @@ function collectLinkedRepos() {
 function loadBranches(owner, name) {
   if (!owner || !name) return
   API()
-    .get('/scenes/branches/' + owner + '/' + name)
+    .get('/scenes/branches/' + owner + '/' + name + branchQS(owner, name))
     .then(function (b) {
       branches.value = (b && b.branches) || []
     })
@@ -1684,13 +1960,26 @@ function createNewBranch() {
     return
   }
   API()
-    .post('/scenes/branches/' + dashOwner.value + '/' + dashName.value, {
-      branch_name: newBranchName.value.trim(),
-      refs: newBranchRef.value || 'main',
-    })
+    .post(
+      '/scenes/branches/' +
+        dashOwner.value +
+        '/' +
+        dashName.value +
+        branchQS(dashOwner.value, dashName.value),
+      {
+        branch_name: newBranchName.value.trim(),
+        refs: newBranchRef.value || 'main',
+      }
+    )
     .then(function () {
       app().showToast(t('branch_created'))
-      return API().get('/scenes/branches/' + dashOwner.value + '/' + dashName.value)
+      return API().get(
+        '/scenes/branches/' +
+          dashOwner.value +
+          '/' +
+          dashName.value +
+          branchQS(dashOwner.value, dashName.value)
+      )
     })
     .then(function (b) {
       branches.value = (b && b.branches) || []
@@ -1711,7 +2000,13 @@ function loadLinkedBranches(i) {
   const parts = stripRepoPrefix(lr.repoKey).split('/')
   if (parts.length < 2) return
   API()
-    .get('/scenes/branches/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]))
+    .get(
+      '/scenes/branches/' +
+        encodeURIComponent(parts[0]) +
+        '/' +
+        encodeURIComponent(parts[1]) +
+        branchQS(parts[0], parts[1])
+    )
     .then(function (b) {
       lr.branches = (b && b.branches) || []
     })
@@ -1741,6 +2036,7 @@ function openSkillDropdown(agentType, e) {
   skillPanel.agentType = agentType
   const node = editNodes.value.find((n) => n.id === agentType)
   skillPanel.current = node ? node.skill || '' : ''
+  skillPanel.currentKey = ''
   skillPanel.q = ''
   skillPanel.x = rect.left
   skillPanel.w = Math.max(rect.width, 240)
@@ -1757,11 +2053,19 @@ function openSkillDropdown(agentType, e) {
     .get('/scenes/skills/' + agentType + repoParam)
     .then(function (r) {
       skillPanel.skills = r.skills || []
-      // 缓存 display_name
+      // Issue #978：缓存唯一键 → {name, display}；同名计数用于旧裸名回显兜底
       const cache = (skillPickCache[agentType] = {})
+      const counts = {}
       skillPanel.skills.forEach(function (s) {
-        cache[s.skill_name] = s.display_name || s.skill_name
+        cache[skillKeyOf(s)] = { name: s.skill_name, display: s.display_name || s.skill_name }
+        counts[s.skill_name] = (counts[s.skill_name] || 0) + 1
       })
+      skillPanel.nameCounts = counts
+      // 已选技能若在列表中唯一 → 用唯一键精确回显；同名多档不勾选
+      const hits = skillPanel.skills.filter(function (s) {
+        return s.skill_name === (skillPanel.current || '')
+      })
+      skillPanel.currentKey = hits.length === 1 ? skillKeyOf(hits[0]) : ''
     })
     .catch(function () {
       skillPanel.skills = []
@@ -1790,12 +2094,20 @@ const skillGroups = computed(() => {
     })
     .filter((g) => g.items.length)
 })
-function pickSkill(skillName) {
+function pickSkill(skillName, skillKey) {
   const node = editNodes.value.find((n) => n.id === skillPanel.agentType)
   if (node) {
     node.skill = skillName || ''
     const cache = skillPickCache[skillPanel.agentType] || {}
-    node.skill_display_name = skillName ? cache[skillName] || skillName : ''
+    // Issue #978：优先按唯一键命中缓存；无 key 时按 name 兜底（同名三档不再覆盖）
+    let entry = skillKey ? cache[skillKey] : null
+    if (!entry && skillName) {
+      const hit = Object.keys(cache).find(function (k) {
+        return cache[k] && cache[k].name === skillName
+      })
+      entry = hit ? cache[hit] : null
+    }
+    node.skill_display_name = skillName ? (entry && entry.display) || skillName : ''
   }
   skillPanel.open = false
   if (mode.value === 'create') saveCreateDraft()
@@ -1888,7 +2200,18 @@ const engModalFiltered = computed(() => {
   const q = engineModal.q.toLowerCase().trim()
   return engModalVisible.value.filter(function (e) {
     if (q) {
-      const hay = [e.name, e.alias, e.scope_label, (e.tags || []).join(' ')].join(' ').toLowerCase()
+      // Issue #1310：搜索引擎名/凭据名/设备名，与列表显示口径一致
+      const hay = [
+        engineDisplayName(e),
+        e.name,
+        e.alias,
+        e.worker_name || '',
+        e.engine_name || '',
+        e.scope_label,
+        (e.tags || []).join(' '),
+      ]
+        .join(' ')
+        .toLowerCase()
       if (!hay.includes(q)) return false
     }
     if (engineModal.filterType) {
@@ -1989,25 +2312,11 @@ function loadSceneDetail(sceneId) {
       G.window._dashboardData = dashData2
       // 高级选项加载
       loadAdvancedOptions(sceneId, owner, name)
-      // 延迟加载相关流水线
-      pipesLoading.value = true
-      scenePipes.value = []
-      pipePage.value = 0
-      API()
-        .get('/pipeline/' + owner + '/' + name)
-        .then(function (pipeData) {
-          pipesLoading.value = false
-          const allPipesRaw = (pipeData.active ? [pipeData.active] : []).concat(
-            pipeData.history || []
-          )
-          scenePipes.value = allPipesRaw.filter(function (p) {
-            return p.scene_id === sceneId
-          })
-        })
-        .catch(function () {
-          pipesLoading.value = false
-          scenePipes.value = []
-        })
+      // Issue #461: 场景级访问地址（地球仪三态）
+      loadSceneDeployUrl(sceneId)
+      // 延迟加载相关流水线（Issue #1077-S：按场景独立查询 + 服务端分页，
+      // 不再从整仓最近 50 条里前端过滤——仓越忙本场景越容易看不全）
+      loadScenePipePage(sceneId, 0)
       // Issue #407: 编辑模式自动恢复
       const autoEdit = getDashEditMode()
       if (autoEdit && autoEdit.mode === 'edit' && autoEdit.sceneId === sceneId) {
@@ -2040,13 +2349,18 @@ function loadAdvancedOptions(sceneId, owner, name) {
       detailWorkBranch.value = d.work_branch || 'main'
       advWorkBranch.value = d.work_branch || 'main'
       advFields.value = (d.custom_fields || []).map(function (f) {
+        const sec = computeIsSecret(f.name, f.is_secret)
         return {
           name: f.name || '',
           value: f.value || '',
-          show: !computeIsSecret(f.name, f.is_secret),
+          show: !sec,
           scope: f.scope || ['all'],
           preset: !!f.preset,
           description: f.description || '',
+          // Issue #885: 服务端对密钥只给占位（value:"" + has_value），标记 keepValue 后
+          // 保存时提交 keep_value 由服务端保留旧值；用户输入即清除
+          hasValue: !!f.has_value,
+          keepValue: !!(sec && f.has_value && !f.value),
         }
       })
       linkedRepos.value = (d.linked_repos || []).map(function (lr) {
@@ -2390,16 +2704,124 @@ function doDeleteScene() {
       app().showToast(t('delete_failed', { msg: e.detail?.message || e.message }))
     })
 }
-// ═══ 相关流水线 ═══
+// ═══ Issue #461: 场景级访问地址（地球仪三态） ═══
+function loadSceneDeployUrl(sceneId) {
+  if (!sceneId) return
+  API()
+    .get(
+      '/scenes/' +
+        encodeURIComponent(sceneId) +
+        '/deploy-url?repo=' +
+        encodeURIComponent(dashOwner.value + '/' + dashName.value)
+    )
+    .then(function (d) {
+      deployUrl.value = (d && d.deploy_url) || ''
+    })
+    .catch(function () {
+      deployUrl.value = ''
+    })
+}
+function startDeployUrlEdit() {
+  deployUrlDraft.value = deployUrl.value || ''
+  deployUrlEdit.value = true
+}
+function cancelDeployUrlEdit() {
+  deployUrlEdit.value = false
+}
+function saveDeployUrl() {
+  const v = (deployUrlDraft.value || '').trim()
+  if (v && !/^https?:\/\//i.test(v)) {
+    app().showToast('访问地址需以 http:// 或 https:// 开头')
+    return
+  }
+  const sceneId = detail.value ? detail.value.id : ''
+  if (!sceneId) return
+  API()
+    .put(
+      '/scenes/' +
+        encodeURIComponent(sceneId) +
+        '/deploy-url?repo=' +
+        encodeURIComponent(dashOwner.value + '/' + dashName.value),
+      { deploy_url: v }
+    )
+    .then(function () {
+      deployUrl.value = v
+      deployUrlEdit.value = false
+      app().showToast(t('save'))
+    })
+    .catch(function (e) {
+      app().showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败')
+    })
+}
+// 长按 600ms 进入编辑（桌面右键同样触发）
+function deployUrlPressStart() {
+  clearTimeout(deployUrlPressTimer)
+  deployUrlPressTimer = setTimeout(startDeployUrlEdit, 600)
+}
+function deployUrlPressEnd() {
+  clearTimeout(deployUrlPressTimer)
+}
+// ═══ 相关流水线（服务端按场景分页，Issue #1077-S） ═══
 const PIPE_SIZE = 10
-const pipeTotalPages = computed(() => Math.max(1, Math.ceil(scenePipes.value.length / PIPE_SIZE)))
-const scenePipePage = computed(() =>
-  scenePipes.value.slice(pipePage.value * PIPE_SIZE, (pipePage.value + 1) * PIPE_SIZE)
+const scenePipeTotal = ref(0)
+const scenePipeActiveN = ref(0)
+const scenePipeFailedN = ref(0)
+const scenePipeHasMore = ref(false)
+const scenePipeErr = ref('')
+const scenePipeSeq = ref(0)
+const pipeTotalPages = computed(() =>
+  Math.max(1, Math.ceil((scenePipeTotal.value || 0) / PIPE_SIZE))
 )
-const scenePipeActive = computed(() => scenePipes.value.filter((p) => p.executing).length)
+const scenePipePage = computed(() => scenePipes.value)
+const scenePipeActive = computed(
+  () => scenePipeActiveN.value || scenePipes.value.filter((p) => p.executing).length
+)
 const scenePipeFailed = computed(
-  () => scenePipes.value.filter((p) => p.statuses && p.statuses.some((s) => s === 3)).length
+  () =>
+    scenePipeFailedN.value ||
+    scenePipes.value.filter((p) => p.statuses && p.statuses.some((s) => s === 3)).length
 )
+function loadScenePipePage(sceneId, page) {
+  if (!sceneId) return
+  const repo = (dashData.value && dashData.value.repo) || ''
+  const bare = String(repo).replace(/^(gitcode|github):/, '')
+  if (bare.indexOf('/') < 0) return
+  const p = Math.max(0, parseInt(page, 10) || 0)
+  pipePage.value = p
+  pipesLoading.value = true
+  scenePipeErr.value = ''
+  const seq = ++scenePipeSeq.value
+  API()
+    .get(
+      '/pipeline/' +
+        bare +
+        '?scene_id=' +
+        encodeURIComponent(sceneId) +
+        '&history_limit=' +
+        PIPE_SIZE +
+        '&history_offset=' +
+        p * PIPE_SIZE
+    )
+    .then(function (d) {
+      if (seq !== scenePipeSeq.value) return // 场景已切换
+      pipesLoading.value = false
+      let rows = (d.history || []).slice()
+      if (d.active && p === 0) rows = [d.active].concat(rows)
+      scenePipes.value = rows
+      scenePipeTotal.value = (d.history_total || 0) + (d.active ? 1 : 0)
+      scenePipeHasMore.value = !!d.history_has_more
+      scenePipeActiveN.value = d.active_count || 0
+      scenePipeFailedN.value = d.failed_count || 0
+    })
+    .catch(function (e) {
+      if (seq !== scenePipeSeq.value) return
+      pipesLoading.value = false
+      if (e && e.name === 'AbortError' && e.silent) return
+      scenePipes.value = []
+      scenePipeTotal.value = 0
+      scenePipeErr.value = (e && e.message) || ''
+    })
+}
 function stageLabel(stage) {
   const map = { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', done: '完成' }
   return map[stage] || stage
@@ -2458,6 +2880,7 @@ function jumpFromScenePipeline(p) {
 // ═══ 智能推荐规则 ═══
 function openSceneRecommendModal() {
   recDlg.open = true
+  recDlg.loaded = false
   recDlg.fallback = ''
   recDlg.rules = []
   recDlg.scenes = []
@@ -2477,6 +2900,7 @@ function openSceneRecommendModal() {
       recDlg.rules = (cfg.rules || []).map(function (r) {
         return { scene_id: r.scene_id, condition: r.condition }
       })
+      recDlg.loaded = true // Issue #487：场景列表就绪前禁用添加/保存，避免空选项静默丢规则
     })
     .catch(function (e) {
       app().showToast('加载推荐配置失败: ' + (e.message || ''))
@@ -3804,6 +4228,106 @@ onBeforeUnmount(function () {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.dbv-reveal-err {
+  color: #ff3b30;
+  font-size: 12px;
+  margin: -8px 0 12px;
+  line-height: 1.4;
+}
+/* Issue #501: 场景列表检索 + 分页 */
+.dbv-scenehead-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.dbv-scenesearch {
+  position: relative;
+}
+.dbv-scenesearch-input {
+  width: 180px;
+  padding: 7px 26px 7px 12px;
+  border: 1px solid #e8e8ed;
+  border-radius: 999px;
+  background: #f5f5f7;
+  font-size: 12px;
+  outline: none;
+  color: #1d1d1f;
+  font-family: inherit;
+}
+.dbv-scenesearch-input:focus {
+  border-color: #0071e3;
+  background: #fff;
+}
+.dbv-scenesearch-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: #86868b;
+  font-size: 12px;
+  line-height: 1;
+}
+.dbv-scenepager {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 10px 16px 0;
+  font-size: 12px;
+  color: #86868b;
+}
+/* Issue #461: 场景访问地址地球仪三态 */
+.dbv-deployglobe {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.dbv-globe-link {
+  font-size: 16px;
+  line-height: 29px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.dbv-globe-empty {
+  border: 1px solid #e8e8ed;
+  background: #f5f5f7;
+  border-radius: 999px;
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  cursor: pointer;
+  color: #c7c7cc;
+  font-size: 14px;
+  line-height: 1;
+}
+.dbv-globe-empty:hover {
+  color: #86868b;
+  border-color: #d2d2d7;
+}
+.dbv-deployurl-input {
+  width: 200px;
+  padding: 5px 10px;
+  border: 1px solid #e8e8ed;
+  border-radius: 10px;
+  background: #f5f5f7;
+  font-size: 12px;
+  outline: none;
+  font-family: inherit;
+  color: #1d1d1f;
+}
+.dbv-deployurl-input:focus {
+  border-color: #0071e3;
+  background: #fff;
+}
+.bt-mini {
+  padding: 2px 10px;
+  font-size: 11px;
 }
 /* 推荐规则弹窗 */
 .dbv-recmodal {
