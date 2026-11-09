@@ -11,3 +11,5 @@
 - 升级方式：重新 `npm pack echarts@<ver>` 覆盖本文件并同步 LICENSE 与上面的 sha256/版本
 
 _审计提示：本目录只放第三方产物，不修改其内容；如需补丁请以 wrapper 形式放在业务侧。_
+
+- faro-web-sdk.iife.js — @grafana/faro-web-sdk 2.13.0 IIFE bundle (jsdelivr dist/bundle/faro-web-sdk.iife.js, 2026-11-04)，浏览器端 RUM/日志/异常采集，上报至 Alloy faro.receiver（/faro/collect 反代，spa.py）

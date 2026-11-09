@@ -829,317 +829,354 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
         _track_proc(proc)
-        # issue #351: prompt 经 stdin 传输（不进 argv，规避 cmd 壳多行截断）
-        _stdin = getattr(proc, "stdin", None)
-        if backend.prompt_via_stdin and _stdin is not None:
-            _stdin.write(prompt.encode("utf-8"))
-            _stdin.close()
+        # MR-3（2026-11-05）：引擎执行 span——展开 task.execute 的"黑盒"：
+        # spawn→流式输出→退出全程一段，带 backend/exit_code/输出统计。
+        # 手动生命周期（生成器不能用 with）；OTel 关闭时 _eng_span=None 零开销。
+        _eng_span = None
+        try:
+            from src.observability.otel import otel_enabled, start_external_span
+            if otel_enabled():
+                _eng_span = start_external_span("engine", backend.name, {
+                    "engine.backend": backend.name,
+                    "engine.session_id": session_id or "",
+                    "engine.repo_key": repo_key or "",
+                    "engine.event_type": event_type or "",
+                })
+        except Exception:
+            _eng_span = None
+        try:
+            # issue #351: prompt 经 stdin 传输（不进 argv，规避 cmd 壳多行截断）
+            _stdin = getattr(proc, "stdin", None)
+            if backend.prompt_via_stdin and _stdin is not None:
+                _stdin.write(prompt.encode("utf-8"))
+                _stdin.close()
 
-        collected_text = []
-        new_session_id = use_session_id
-        error_events = []
-        # issue #317：引擎遗言尾部缓冲（exit!=0 且 stderr 空时补采进 errors）
-        _log_tail = []
-        step_count = 0
-        _last_output = time.time()
-        _reader_total = 0
-        _text_count = 0      # 本次执行 text 事件数（假完成判定用，issue-P5）
-        _tool_count = 0      # 本次执行 tool_use 事件数（假完成判定用，issue-P5）
-        # 静默超时窗口：首个无输出窗口。与 hermes ACP _SILENT_TIMEOUT=600s 对齐，
-        # 可用 AGENT_SILENT_WINDOW 环境变量覆盖（模型流挂死 10 分钟即感知，不再干等 20min）。
-        # Issue #378: 优先读任务级 env dict（含 env_extra，由 _execute_task 按 agent_type 注入
-        # coding/qa=1200s），os.environ 次之（手动调参/测试），默认 min(600, max_exec_seconds)。
-        _silent_window = float(env.get("AGENT_SILENT_WINDOW",
-            os.environ.get("AGENT_SILENT_WINDOW", str(min(600, max_exec_seconds)))))
-        # 进程存活但无输出的累计延长上限（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
-        # 可用 AGENT_SILENT_EXTEND_CAP 调整（旧变量 AGENT_SILENT_LIMIT 亦兼容，语义=续期额度上限）。
-        _silent_extend_total = 0.0
-        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_EXTEND_CAP",
-                                                   os.environ.get("AGENT_SILENT_LIMIT", str(max_exec_seconds))))
-        # 超时总账（issue-P1）：单次执行最坏 ≈ _silent_window + _silent_extend_cap + grace 10s；
-        # RUNTIME_TASK_TIMEOUT=3600s 需 ≥ 2×(单次最坏) 才能容纳一次无效完成自动重跑。
-        # 600 + 600 + 10 = 1210s → 2 次 ≈ 2420s < 3600s，安全。
+            collected_text = []
+            new_session_id = use_session_id
+            error_events = []
+            # issue #317：引擎遗言尾部缓冲（exit!=0 且 stderr 空时补采进 errors）
+            _log_tail = []
+            step_count = 0
+            _last_output = time.time()
+            _reader_total = 0
+            _text_count = 0      # 本次执行 text 事件数（假完成判定用，issue-P5）
+            _tool_count = 0      # 本次执行 tool_use 事件数（假完成判定用，issue-P5）
+            # 静默超时窗口：首个无输出窗口。与 hermes ACP _SILENT_TIMEOUT=600s 对齐，
+            # 可用 AGENT_SILENT_WINDOW 环境变量覆盖（模型流挂死 10 分钟即感知，不再干等 20min）。
+            # Issue #378: 优先读任务级 env dict（含 env_extra，由 _execute_task 按 agent_type 注入
+            # coding/qa=1200s），os.environ 次之（手动调参/测试），默认 min(600, max_exec_seconds)。
+            _silent_window = float(env.get("AGENT_SILENT_WINDOW",
+                os.environ.get("AGENT_SILENT_WINDOW", str(min(600, max_exec_seconds)))))
+            # 进程存活但无输出的累计延长上限（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
+            # 可用 AGENT_SILENT_EXTEND_CAP 调整（旧变量 AGENT_SILENT_LIMIT 亦兼容，语义=续期额度上限）。
+            _silent_extend_total = 0.0
+            _silent_extend_cap = float(os.environ.get("AGENT_SILENT_EXTEND_CAP",
+                                                       os.environ.get("AGENT_SILENT_LIMIT", str(max_exec_seconds))))
+            # 超时总账（issue-P1）：单次执行最坏 ≈ _silent_window + _silent_extend_cap + grace 10s；
+            # RUNTIME_TASK_TIMEOUT=3600s 需 ≥ 2×(单次最坏) 才能容纳一次无效完成自动重跑。
+            # 600 + 600 + 10 = 1210s → 2 次 ≈ 2420s < 3600s，安全。
 
-        import threading
-        _line_queue = []
-        _line_queue_lock = threading.Lock()
-        _reader_done = False
+            import threading
+            _line_queue = []
+            _line_queue_lock = threading.Lock()
+            _reader_done = False
 
-        def _stdout_reader():
-            nonlocal _reader_done, _reader_total
-            try:
-                for raw_line in iter(proc.stdout.readline, b""):
-                    _reader_total += 1
-                    with _line_queue_lock:
-                        _line_queue.append(raw_line)
-            except Exception as e:
-                log.warning(f"{label}{backend.name} reader exception: {e}")
-            finally:
-                log.info(f"{label}{backend.name} reader EOF, total_lines={_reader_total}")
-                _reader_done = True
+            def _stdout_reader():
+                nonlocal _reader_done, _reader_total
+                try:
+                    for raw_line in iter(proc.stdout.readline, b""):
+                        _reader_total += 1
+                        with _line_queue_lock:
+                            _line_queue.append(raw_line)
+                except Exception as e:
+                    log.warning(f"{label}{backend.name} reader exception: {e}")
+                finally:
+                    log.info(f"{label}{backend.name} reader EOF, total_lines={_reader_total}")
+                    _reader_done = True
 
-        _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
-        _reader_thread.start()
+            _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+            _reader_thread.start()
 
-        # stderr reader 线程：持续排空 stderr 管道，防止 Windows 管道缓冲区满导致死锁；
-        # 尾采环形缓冲（issue #416）：仅保留末尾 ≥2000 字节，崩溃栈在末尾不丢
-        _stderr_tail = _StderrTailBuffer(_stderr_tail_bytes_for(env))
-        def _stderr_reader():
-            try:
-                for raw_line in iter(proc.stderr.readline, b""):
-                    _stderr_tail.append(raw_line.decode("utf-8", errors="replace"))
-            except Exception:
-                pass
-        _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
-        _stderr_thread.start()
+            # stderr reader 线程：持续排空 stderr 管道，防止 Windows 管道缓冲区满导致死锁；
+            # 尾采环形缓冲（issue #416）：仅保留末尾 ≥2000 字节，崩溃栈在末尾不丢
+            _stderr_tail = _StderrTailBuffer(_stderr_tail_bytes_for(env))
+            def _stderr_reader():
+                try:
+                    for raw_line in iter(proc.stderr.readline, b""):
+                        _stderr_tail.append(raw_line.decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+            _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
+            _stderr_thread.start()
 
-        _raw_count = 0
-        _parsed_count = 0
-        while True:
-            with _line_queue_lock:
-                if _line_queue:
-                    raw_lines = _line_queue[:]
-                    _line_queue.clear()
-                else:
-                    raw_lines = []
-            if raw_lines:
-                _last_output = time.time()
-                for raw_line in raw_lines:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line:
-                        continue
-                    _push_log_tail(_log_tail, line)
-                    parsed = backend.parse_output(line)
-                    if parsed is None:
-                        _raw_count += 1
-                        # opencode 会话失效错误经 stdout 以 ANSI 原始行输出（非 NDJSON），
-                        # 计入 error_events 使下方 session_missing 检测能命中（重跑无 session）
-                        if "session not found" in line.lower():
-                            error_events.append(_redact(line, _tokens))
-                        yield ("raw", _redact(line, _tokens))
-                        continue
-                    _parsed_count += 1
-                    et = parsed["type"]
-                    if et == "step_start":
-                        step_count += 1
-                        if parsed.get("sessionID"):
-                            new_session_id = parsed["sessionID"]
-                        yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
-                    elif et == "text":
-                        collected_text.append(parsed["text"])
-                        _text_count += 1
-                        yield ("text", _redact(parsed["text"], _tokens))
-                    elif et == "reasoning":
-                        yield ("reasoning", _redact(parsed["text"], _tokens))
-                    elif et == "tool_use":
-                        _tool_count += 1
-                        # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
-                        yield ("tool_use", {
-                            "tool": parsed.get("tool", ""),
-                            "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
-                        })
-                    elif et == "step_finish":
-                        _tok = parsed.get("tokens", "")
-                        yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
-                    elif et == "error":
-                        error_events.append(_redact(parsed["message"], _tokens))
-                        yield ("error", _redact(parsed["message"], _tokens))
-                    elif et in ("tool_finish", "tool_result", "api_call", "api_response", "session"):
-                        # Hermes verbose 模式新事件类型：直接转发 text 字段
-                        _txt = parsed.get("text", "")
-                        if _txt:
-                            yield (et, _redact(_txt, _tokens))
-                        # session 事件提取 sessionID
-                        if et == "session" and parsed.get("sessionID"):
-                            new_session_id = parsed["sessionID"]
+            _raw_count = 0
+            _parsed_count = 0
+            while True:
+                with _line_queue_lock:
+                    if _line_queue:
+                        raw_lines = _line_queue[:]
+                        _line_queue.clear()
                     else:
-                        yield ("other", et)
-            elif _reader_done:
-                log.info(f"{label}{backend.name} loop break on reader EOF: raw={_raw_count} parsed={_parsed_count} total_lines={_reader_total}")
-                break
-            else:
-                elapsed_silent = time.time() - _last_output
-                if elapsed_silent > _silent_window:
-                    # 若 opencode 进程仍存活（长 bash 命令/长思考中，如 pip install），
-                    # 不立即判超时——重置静默计时继续等待，避免长命令被误杀（见 #501 修复）。
-                    # 但累计延长受硬上限约束（AGENT_SILENT_EXTEND_CAP，默认 3×max_exec_seconds），
-                    # 防止进程活着的死循环永久挂起。
-                    if proc.poll() is None and _silent_extend_total < _silent_extend_cap:
-                        _silent_extend_total += elapsed_silent
-                        log.info(f"{label}{backend.name} silent {elapsed_silent:.0f}s but process alive, "
-                                 f"extending window (long cmd/reasoning, total_extend={_silent_extend_total:.0f}s)")
-                        _last_output = time.time()
-                        time.sleep(0.1)
-                        continue
-                    log.warning(f"{label}{backend.name} no output for {_silent_window:.0f}s"
-                                f"(extend_total={_silent_extend_total:.0f}s), terminating")
-                    # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
-                    _terminate_proc(proc, f"{label}{backend.name}")
-                    # 收尾窗口内尝试读取 SIGTERM 后 opencode 冲刷的最终输出（避免把已产出的收尾当卡死）
-                    _grace_tail = ""
-                    try:
-                        proc.stdout.settimeout(3)
-                        while True:
-                            try:
-                                line = proc.stdout.readline()
-                            except Exception:
-                                break
-                            if not line:
-                                break
-                            _grace_tail += line.decode("utf-8", errors="replace")
-                            _last_output = time.time()
-                    except Exception:
-                        pass
-                    for _gl in _grace_tail.strip().split("\n"):
-                        _gl = _gl.strip()
-                        if not _gl:
+                        raw_lines = []
+                if raw_lines:
+                    _last_output = time.time()
+                    for raw_line in raw_lines:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line:
                             continue
-                        _parsed = backend.parse_output(_gl)
-                        if _parsed:
-                            _parsed_count += 1
-                            if _parsed["type"] == "text":
-                                collected_text.append(_parsed["text"])
-                            elif _parsed["type"] == "tool_use":
-                                pass
-                    # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
-                    _killed = "-9" if _grace_tail.strip() == "" else "grace"
-                    log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
-                    # Issue #494：静默超时强杀必须带明确归因（不再只写英文 killed 短语）
-                    from src.agent.failure_attribution import timeout_error_text
-                    yield ("done", {
-                        "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
-                        "text": _redact("\n".join(collected_text), _tokens),
-                        "oc_session_id": new_session_id,
-                        "errors": error_events + ([timeout_error_text(
-                            _silent_window, f"{backend.name} 无输出静默超时被终止")] if _grace_tail.strip() == "" else []),
-                        "stderr": _redact(_stderr_tail.text(), _tokens),
-                        "backend": backend.name, "parsed_count": _parsed_count,
-                        "text_count": _text_count, "tool_count": _tool_count,
-                    })
-                    _untrack_proc(proc)
-                    # codearts 方案E2: 超时也要杀 serve
-                    if _serve_proc and _serve_proc.poll() is None:
+                        _push_log_tail(_log_tail, line)
+                        parsed = backend.parse_output(line)
+                        if parsed is None:
+                            _raw_count += 1
+                            # opencode 会话失效错误经 stdout 以 ANSI 原始行输出（非 NDJSON），
+                            # 计入 error_events 使下方 session_missing 检测能命中（重跑无 session）
+                            if "session not found" in line.lower():
+                                error_events.append(_redact(line, _tokens))
+                            yield ("raw", _redact(line, _tokens))
+                            continue
+                        _parsed_count += 1
+                        et = parsed["type"]
+                        if et == "step_start":
+                            step_count += 1
+                            if parsed.get("sessionID"):
+                                new_session_id = parsed["sessionID"]
+                            yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
+                        elif et == "text":
+                            collected_text.append(parsed["text"])
+                            _text_count += 1
+                            yield ("text", _redact(parsed["text"], _tokens))
+                        elif et == "reasoning":
+                            yield ("reasoning", _redact(parsed["text"], _tokens))
+                        elif et == "tool_use":
+                            _tool_count += 1
+                            # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
+                            yield ("tool_use", {
+                                "tool": parsed.get("tool", ""),
+                                "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
+                            })
+                        elif et == "step_finish":
+                            _tok = parsed.get("tokens", "")
+                            yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
+                        elif et == "error":
+                            error_events.append(_redact(parsed["message"], _tokens))
+                            yield ("error", _redact(parsed["message"], _tokens))
+                        elif et in ("tool_finish", "tool_result", "api_call", "api_response", "session"):
+                            # Hermes verbose 模式新事件类型：直接转发 text 字段
+                            _txt = parsed.get("text", "")
+                            if _txt:
+                                yield (et, _redact(_txt, _tokens))
+                            # session 事件提取 sessionID
+                            if et == "session" and parsed.get("sessionID"):
+                                new_session_id = parsed["sessionID"]
+                        else:
+                            yield ("other", et)
+                elif _reader_done:
+                    log.info(f"{label}{backend.name} loop break on reader EOF: raw={_raw_count} parsed={_parsed_count} total_lines={_reader_total}")
+                    break
+                else:
+                    elapsed_silent = time.time() - _last_output
+                    if elapsed_silent > _silent_window:
+                        # 若 opencode 进程仍存活（长 bash 命令/长思考中，如 pip install），
+                        # 不立即判超时——重置静默计时继续等待，避免长命令被误杀（见 #501 修复）。
+                        # 但累计延长受硬上限约束（AGENT_SILENT_EXTEND_CAP，默认 3×max_exec_seconds），
+                        # 防止进程活着的死循环永久挂起。
+                        if proc.poll() is None and _silent_extend_total < _silent_extend_cap:
+                            _silent_extend_total += elapsed_silent
+                            log.info(f"{label}{backend.name} silent {elapsed_silent:.0f}s but process alive, "
+                                     f"extending window (long cmd/reasoning, total_extend={_silent_extend_total:.0f}s)")
+                            _last_output = time.time()
+                            time.sleep(0.1)
+                            continue
+                        log.warning(f"{label}{backend.name} no output for {_silent_window:.0f}s"
+                                    f"(extend_total={_silent_extend_total:.0f}s), terminating")
+                        # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
+                        _terminate_proc(proc, f"{label}{backend.name}")
+                        # 收尾窗口内尝试读取 SIGTERM 后 opencode 冲刷的最终输出（避免把已产出的收尾当卡死）
+                        _grace_tail = ""
                         try:
-                            if hasattr(os, "getpgid"):
-                                os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
-                            else:
-                                _serve_proc.terminate()
-                            _serve_proc.wait(timeout=3)
+                            proc.stdout.settimeout(3)
+                            while True:
+                                try:
+                                    line = proc.stdout.readline()
+                                except Exception:
+                                    break
+                                if not line:
+                                    break
+                                _grace_tail += line.decode("utf-8", errors="replace")
+                                _last_output = time.time()
                         except Exception:
+                            pass
+                        for _gl in _grace_tail.strip().split("\n"):
+                            _gl = _gl.strip()
+                            if not _gl:
+                                continue
+                            _parsed = backend.parse_output(_gl)
+                            if _parsed:
+                                _parsed_count += 1
+                                if _parsed["type"] == "text":
+                                    collected_text.append(_parsed["text"])
+                                elif _parsed["type"] == "tool_use":
+                                    pass
+                        # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
+                        _killed = "-9" if _grace_tail.strip() == "" else "grace"
+                        log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
+                        # Issue #494：静默超时强杀必须带明确归因（不再只写英文 killed 短语）
+                        from src.agent.failure_attribution import timeout_error_text
+                        yield ("done", {
+                            "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
+                            "text": _redact("\n".join(collected_text), _tokens),
+                            "oc_session_id": new_session_id,
+                            "errors": error_events + ([timeout_error_text(
+                                _silent_window, f"{backend.name} 无输出静默超时被终止")] if _grace_tail.strip() == "" else []),
+                            "stderr": _redact(_stderr_tail.text(), _tokens),
+                            "backend": backend.name, "parsed_count": _parsed_count,
+                            "text_count": _text_count, "tool_count": _tool_count,
+                        })
+                        _untrack_proc(proc)
+                        # codearts 方案E2: 超时也要杀 serve
+                        if _serve_proc and _serve_proc.poll() is None:
                             try:
                                 if hasattr(os, "getpgid"):
-                                    os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                                    os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
                                 else:
-                                    _serve_proc.kill()
-                            except Exception: _serve_proc.kill()
-                    return
-                time.sleep(0.1)
+                                    _serve_proc.terminate()
+                                _serve_proc.wait(timeout=3)
+                            except Exception:
+                                try:
+                                    if hasattr(os, "getpgid"):
+                                        os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                                    else:
+                                        _serve_proc.kill()
+                                except Exception: _serve_proc.kill()
+                        return
+                    time.sleep(0.1)
 
-        try:
-            proc.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
-            _terminate_proc(proc, f"{label}{backend.name}")
+            try:
+                proc.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
+                _terminate_proc(proc, f"{label}{backend.name}")
+                _reader_thread.join(timeout=5)
+                _untrack_proc(proc)
+                # codearts 方案E2: 超时也要杀 serve
+                if _serve_proc and _serve_proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                        _serve_proc.wait(timeout=3)
+                    except Exception:
+                        try: os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                        except Exception: _serve_proc.kill()
+                yield ("done", {
+                    "exit_code": -1, "text": "", "oc_session_id": new_session_id,
+                    "errors": [f"{backend.name} timed out"], "stderr": ""
+                })
+                return
+
             _reader_thread.join(timeout=5)
-            _untrack_proc(proc)
-            # codearts 方案E2: 超时也要杀 serve
-            if _serve_proc and _serve_proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
-                    _serve_proc.wait(timeout=3)
-                except Exception:
-                    try: os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
-                    except Exception: _serve_proc.kill()
-            yield ("done", {
-                "exit_code": -1, "text": "", "oc_session_id": new_session_id,
-                "errors": [f"{backend.name} timed out"], "stderr": ""
-            })
-            return
 
-        _reader_thread.join(timeout=5)
-
-        stdout_remainder = ""
-        try:
-            stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-
-        if stdout_remainder:
-            for line in stdout_remainder.strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                parsed = backend.parse_output(line)
-                if parsed and parsed["type"] == "text":
-                    collected_text.append(parsed["text"])
-
-        full_text = "\n".join(collected_text)
-        # issue #416：stderr 尾巴（末尾 ≥2000B，崩溃栈在末尾），不再保头 500B
-        stderr_output = _stderr_tail.text()
-
-        log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
-        _untrack_proc(proc)
-
-        # codearts 方案E2: 杀掉 per-task codearts serve 子进程，释放内存
-        if _serve_proc and _serve_proc.poll() is None:
+            stdout_remainder = ""
             try:
-                _pgid = os.getpgid(_serve_proc.pid)
-                os.killpg(_pgid, signal.SIGTERM)
-                _serve_proc.wait(timeout=5)
-            except Exception:
-                try:
-                    _pgid = os.getpgid(_serve_proc.pid)
-                    os.killpg(_pgid, signal.SIGKILL)
-                except Exception:
-                    _serve_proc.kill()
-            log.info(f"{label}codearts serve (pid={_serve_proc.pid}) killed, RSS released")
-
-        # 清理 hermes 隔离的 HERMES_HOME 临时目录（state.db 等不再需要）
-        if backend.name == "hermes" and _iso_home:
-            try:
-                import shutil as _shutil
-                _shutil.rmtree(_iso_home, ignore_errors=True)
+                stdout_remainder = proc.stdout.read().decode("utf-8", errors="replace")
             except Exception:
                 pass
 
-        # ── 异常退出遗言补采（issue #317）──
-        # exit!=0 且 stderr 为空 = 引擎"无遗言"死亡：补采 stdout 尾部进 errors；
-        # returncode==-9（外部 SIGKILL，非本 executor 超时杀——那条路径已自带 done）
-        # 结合系统日志启发式判定 OOM。
-        _exit_code = proc.returncode
-        _final_errors = list(error_events)
-        # Issue #494：超时类死亡显式归因——returncode=124（timeout 命令）/ -15（SIGTERM）
-        # 时 stderr 常为空，尾采拿不到原因，直接构造「执行超时」文案进 errors。
-        from src.agent.failure_attribution import process_exit_attribution
-        _exit_attr = process_exit_attribution(_exit_code)
-        if _exit_attr:
-            _final_errors.append(_exit_attr)
-        # issue #416（E7）：进程退出码非 0 且无文本 → errors 写明 `<引擎> exited rc=N`，
-        # 不再让失败任务 errors 为空（旧形态：exit_code=-1、errors 空、stderr 截断）
-        if _exit_code != 0 and not full_text.strip():
-            _final_errors.append(f"{backend.name} exited rc={_exit_code}")
-        if _exit_code != 0:
-            if _exit_code == -9:
-                if _oom_kill_evidence():
-                    _final_errors.append(
-                        "suspected OOM (SIGKILL, kernel oom-killer evidence in system logs)")
-                else:
-                    _final_errors.append(
-                        "killed by SIGKILL (no oom-killer evidence in system logs)")
-            if not stderr_output.strip() and _log_tail:
-                _final_errors.append(
-                    "agent_logs tail (last 50 lines/4KB):\n"
-                    + _redact("\n".join(_log_tail), _tokens))
-                log.warning(f"{label}{backend.name} abnormal exit={_exit_code} with empty stderr, "
-                            f"supplemented errors from stdout tail ({len(_log_tail)} lines)")
+            if stdout_remainder:
+                for line in stdout_remainder.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parsed = backend.parse_output(line)
+                    if parsed and parsed["type"] == "text":
+                        collected_text.append(parsed["text"])
 
-        yield ("done", {
-            "exit_code": _exit_code, "text": _redact(full_text, _tokens),
-            "oc_session_id": new_session_id,
-            "errors": _final_errors, "stderr": _redact(stderr_output, _tokens),
-            "backend": backend.name, "reader_total": _reader_total, "parsed_count": _parsed_count,
-            "text_count": _text_count, "tool_count": _tool_count,
-        })
+            full_text = "\n".join(collected_text)
+            # issue #416：stderr 尾巴（末尾 ≥2000B，崩溃栈在末尾），不再保头 500B
+            stderr_output = _stderr_tail.text()
+
+            log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
+            if _eng_span is not None:
+                try:
+                    _eng_span.set_attribute("engine.exit_code", proc.returncode if proc.returncode is not None else -1)
+                    _eng_span.set_attribute("engine.text_len", len(full_text))
+                    _eng_span.set_attribute("engine.parsed_count", _parsed_count)
+                    _eng_span.end()
+                except Exception:
+                    pass
+                _eng_span = None
+            _untrack_proc(proc)
+
+            # codearts 方案E2: 杀掉 per-task codearts serve 子进程，释放内存
+            if _serve_proc and _serve_proc.poll() is None:
+                try:
+                    _pgid = os.getpgid(_serve_proc.pid)
+                    os.killpg(_pgid, signal.SIGTERM)
+                    _serve_proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        _pgid = os.getpgid(_serve_proc.pid)
+                        os.killpg(_pgid, signal.SIGKILL)
+                    except Exception:
+                        _serve_proc.kill()
+                log.info(f"{label}codearts serve (pid={_serve_proc.pid}) killed, RSS released")
+
+            # 清理 hermes 隔离的 HERMES_HOME 临时目录（state.db 等不再需要）
+            if backend.name == "hermes" and _iso_home:
+                try:
+                    import shutil as _shutil
+                    _shutil.rmtree(_iso_home, ignore_errors=True)
+                except Exception:
+                    pass
+
+            # ── 异常退出遗言补采（issue #317）──
+            # exit!=0 且 stderr 为空 = 引擎"无遗言"死亡：补采 stdout 尾部进 errors；
+            # returncode==-9（外部 SIGKILL，非本 executor 超时杀——那条路径已自带 done）
+            # 结合系统日志启发式判定 OOM。
+            _exit_code = proc.returncode
+            _final_errors = list(error_events)
+            # Issue #494：超时类死亡显式归因——returncode=124（timeout 命令）/ -15（SIGTERM）
+            # 时 stderr 常为空，尾采拿不到原因，直接构造「执行超时」文案进 errors。
+            from src.agent.failure_attribution import process_exit_attribution
+            _exit_attr = process_exit_attribution(_exit_code)
+            if _exit_attr:
+                _final_errors.append(_exit_attr)
+            # issue #416（E7）：进程退出码非 0 且无文本 → errors 写明 `<引擎> exited rc=N`，
+            # 不再让失败任务 errors 为空（旧形态：exit_code=-1、errors 空、stderr 截断）
+            if _exit_code != 0 and not full_text.strip():
+                _final_errors.append(f"{backend.name} exited rc={_exit_code}")
+            if _exit_code != 0:
+                if _exit_code == -9:
+                    if _oom_kill_evidence():
+                        _final_errors.append(
+                            "suspected OOM (SIGKILL, kernel oom-killer evidence in system logs)")
+                    else:
+                        _final_errors.append(
+                            "killed by SIGKILL (no oom-killer evidence in system logs)")
+                if not stderr_output.strip() and _log_tail:
+                    _final_errors.append(
+                        "agent_logs tail (last 50 lines/4KB):\n"
+                        + _redact("\n".join(_log_tail), _tokens))
+                    log.warning(f"{label}{backend.name} abnormal exit={_exit_code} with empty stderr, "
+                                f"supplemented errors from stdout tail ({len(_log_tail)} lines)")
+
+            yield ("done", {
+                "exit_code": _exit_code, "text": _redact(full_text, _tokens),
+                "oc_session_id": new_session_id,
+                "errors": _final_errors, "stderr": _redact(stderr_output, _tokens),
+                "backend": backend.name, "reader_total": _reader_total, "parsed_count": _parsed_count,
+                "text_count": _text_count, "tool_count": _tool_count,
+            })
+        finally:
+            # 架构审查 P2-7：异常/超时/提前 return/生成器被关闭时 span 也必须收口
+            # （原实现只在正常完成路径 end，异常路径的 span 永不导出）
+            if _eng_span is not None:
+                try:
+                    _rc = getattr(proc, "returncode", None)
+                    _eng_span.set_attribute("engine.exit_code", _rc if _rc is not None else -1)
+                    _eng_span.set_attribute("engine.aborted", True)
+                    _eng_span.end()
+                except Exception:
+                    pass
+                _eng_span = None
 
     # 执行一次；若因会话失效失败，降级重跑一次（不带 session）。
     # 判定覆盖两种情况：

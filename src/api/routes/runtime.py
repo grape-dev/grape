@@ -2144,3 +2144,75 @@ def set_runtime_alias(runtime_id: int, body: AliasBody,
     return {"alias": alias}
 
 
+# ===== MR-2b（2026-11-05）：worker trace 中继（LGTM 不对 worker 开放，经主控 C 进程转发）=====
+# 设计：docs/weekly-10/worker-trace-relay-layer2-design.md
+# - worker 的 OTLP/HTTP exporter 指向 {RUNTIME_SERVER_URL}/api/runtime/traces（既有通道+Bearer）
+# - 本端点透传 body（protobuf/json/gzip 原样，零解析）→ OTLP_RELAY_TARGET/v1/traces
+# - 鉴权复用 _require_credential（与 claim 同款）；失败透传状态码，业务零影响
+OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()
+
+from fastapi.responses import Response as _RelayResponse
+
+_relay_total = None
+try:
+    from prometheus_client import Counter as _PC
+    from src.observability import registry as _obs_registry
+    _relay_total = _PC("grape_trace_relay_requests_total",
+                       "Trace relay requests forwarded to LGTM",
+                       ["status"], registry=_obs_registry)
+except Exception:
+    _relay_total = None
+
+
+@router.post("/traces", operation_id="runtime_traces_relay",
+             summary="Relay worker OTLP traces to LGTM",
+             description="Transparently forwards worker OTLP/HTTP trace exports to the LGTM "
+                         "OTLP endpoint (env OTLP_RELAY_TARGET). Workers authenticate with "
+                         "their existing runtime token. Failures pass through the upstream "
+                         "status; LGTM unreachability returns 502 (worker exporters retry/drop "
+                         "asynchronously, zero business impact).")
+async def runtime_traces_relay(request: Request,
+                               credential_id: int = Depends(_require_credential)):
+    if not OTLP_RELAY_TARGET:
+        return _RelayResponse(status_code=503,
+                              content='{"detail":"trace relay disabled"}',
+                              media_type="application/json")
+    # 公开端点（虽要求 runtime token）仍需限体：OTLP 批量包通常 <512KB。
+    # 架构守护 Medium-1：先按 content-length 拒绝，避免超大包整块读入内存造成尖峰。
+    _max_body = int(os.environ.get("GRAPE_TRACE_RELAY_MAX_BODY", str(2 * 1024 * 1024)))
+    if int(request.headers.get("content-length") or 0) > _max_body:
+        return _RelayResponse(status_code=413,
+                              content='{"detail":"payload too large"}',
+                              media_type="application/json")
+    body = await request.body()
+    if len(body) > _max_body:
+        return _RelayResponse(status_code=413,
+                              content='{"detail":"payload too large"}',
+                              media_type="application/json")
+    ctype = request.headers.get("content-type", "application/x-protobuf")
+    cenc = request.headers.get("content-encoding", "")
+    fwd_headers = {"Content-Type": ctype}
+    if cenc:
+        fwd_headers["Content-Encoding"] = cenc
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as hc:
+            r = await hc.post(OTLP_RELAY_TARGET.rstrip("/") + "/v1/traces",
+                              content=body, headers=fwd_headers)
+        if _relay_total is not None:
+            try:
+                _relay_total.labels(status=str(r.status_code)).inc()
+            except Exception:
+                pass
+        return _RelayResponse(status_code=r.status_code, content=r.content,
+                              media_type=r.headers.get("content-type", "application/x-protobuf"))
+    except Exception as e:
+        if _relay_total is not None:
+            try:
+                _relay_total.labels(status="relay_unreachable").inc()
+            except Exception:
+                pass
+        log.warning(f"trace relay unreachable: {type(e).__name__}")
+        return _RelayResponse(status_code=502,
+                              content='{"detail":"lgtm unreachable"}',
+                              media_type="application/json")

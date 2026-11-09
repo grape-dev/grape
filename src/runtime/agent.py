@@ -2377,6 +2377,22 @@ async def _execute_task(client, task, engine_name: str = ""):
     task["cwd"] = cwd
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
 
+    # MR-2（2026-11-05）：任务执行 span——从任务行 trace_context 恢复 enqueue 的 trace
+    # （同一 trace 的子段，A→C→worker 全链串联）；OTel 未启用/坏数据 → 跳过零影响。
+    # span 存 task["__exec_span__"]，由外层调用的 finally 收口（覆盖超时/重试路径）。
+    _exec_span = None
+    try:
+        from src.observability.otel import start_task_span
+        _exec_span, _ = start_task_span(f"task {tid} execute {engine_name or ''}", {
+            "task_id": tid, "engine": engine_name, "agent_type": task.get("agent_type", ""),
+            "skill": task.get("skill", ""), "repo_key": task.get("repo_key", ""),
+            "attempts": task.get("attempts", 0),
+        }, trace_context=task.get("trace_context") or "")
+        if _exec_span is not None:
+            task["__exec_span__"] = _exec_span
+    except Exception:
+        _exec_span = None
+
     # LLM 用量采集（可观测性）：必须在引擎启动前记基线——hermes 的账本是累计值、
     # hwcloud 日志是 append-only，两者都要靠基线才能算出"本次任务"的增量。
     # 用本地 cwd（与各引擎 ACP 隔离目录的 cwd-hash 算法同源），失败静默降级。
@@ -3117,6 +3133,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                     (", will retry" if _will_retry else ""))
                                 _kill_stale_engine(t, _backend_for_engine(e))
                                 _result = None  # timeout → 重试或最终走 fail 路径
+                            finally:
+                                # MR-2：task.execute span 收口（本轮执行结束，含超时路径）
+                                _es = t.pop("__exec_span__", None)
+                                if _es is not None:
+                                    try:
+                                        _es.set_attribute("task.attempt", _attempt)
+                                        _es.end()
+                                    except Exception:
+                                        pass
                 except CredentialRevokedError:
                     # 凭据吊销——_execute_task 已杀引擎清理。置全局 Event 让主循环
                     # 下一轮退出进程（_wrap 是 create_task，异常不穿透主循环）。

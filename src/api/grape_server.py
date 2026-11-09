@@ -40,7 +40,7 @@ from src.api.routes import (
     auth, grape_auth, repos, dashboard, agents, events, chat, settings,
     skills, search, pipeline, scenes, templates, issues, feishu_onboard,
     feishu_card, task_logs, knowledge, health, devstage, latency,
-    feedback, autopilot, orgs, community, observability,
+    feedback, autopilot, orgs, community, observability, patrol,
 )
 from src.admin.routes import router as admin_router
 from src.api.git_repo_api import router as git_repo_router
@@ -112,6 +112,15 @@ async def lifespan(app: FastAPI):
             start_probe()
         except Exception as e:
             log.warning(f"Engine probe start failed: {e}")
+
+        # A2A 链路巡检器（Phase 1 只读，与 main.py 同款；A 职责——路由已含 patrol.router，
+        # 2026-11-03 补：路由与巡检循环在 #596 三进程拆分时双双遗漏，多进程入口 404/空表）
+        try:
+            from src.api.patrol import patrol_loop
+            asyncio.create_task(patrol_loop())
+            log.info("Patrol loop started")
+        except Exception as e:
+            log.warning(f"Patrol loop start failed: {e}")
 
         # lease 模式：默认开启，BOT_LEASE_DISABLED=true 退回旧模式
         from src.config import BOT_LEASE_DISABLED
@@ -404,7 +413,7 @@ for r in [
     skills.router, search.router, pipeline.router, scenes.router, templates.router,
     issues.router, feishu_onboard.router, feishu_card.router, task_logs.router,
     knowledge.router, health.router, devstage.router, latency.router, feedback.router,
-    autopilot.router, orgs.router, community.router, observability.router,
+    autopilot.router, orgs.router, community.router, observability.router, patrol.router,
     runtime_view_router,
 ]:
     app.include_router(r)
@@ -414,6 +423,13 @@ from src.observability import metrics_middleware, start_metrics_server, metrics_
 metrics_middleware(app)
 if metrics_enabled():
     start_metrics_server()
+
+# OTel HTTP spans（2026-11-05 MR-1）：LGTM Traces 接入，A 进程入口
+try:
+    from src.observability.otel import instrument_fastapi
+    instrument_fastapi(app, "grape-server-a")
+except Exception:
+    pass
 
 from src.api.middleware import install_request_middleware
 install_request_middleware(app)
