@@ -36,7 +36,9 @@ PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TI
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 # Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
 # 避免「回收器抢在真任务落库前判定终态」的竞态；时区解析规则同 _get_exec_agent_task。
-ZOMBIE_YOUNG_GRACE_SECONDS = 120
+# 窗口来源：Issue #1546 中派发链路（pick_engine → enqueue_task → 回写 execution）的落库时延，
+# 120s 为留足余量的默认值；不同部署的派发链耗时差异用 env 覆盖，与相邻两个宽限常量口径一致。
+ZOMBIE_YOUNG_GRACE_SECONDS = int(os.environ.get("ZOMBIE_YOUNG_GRACE_SECONDS", "120"))
 
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
