@@ -301,3 +301,110 @@ def test_scan_script_runs_without_unpack_error(tmp_path):
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert "扫描技能总数: 1" in out.stdout
+
+
+# ── 10. review 修复：来源 meta 惰性取值 + 调用点覆盖 ──────────────
+
+def test_lazy_scope_skill_id_resolved_after_primary(tmp_path, monkeypatch):
+    """scope/skill_id 传 callable 时须在 primary() 执行后取值。
+
+    复现事件：primary 内部才写入来源 meta，参数若在调用前求值则恒为
+    scope="" / skill_id=0，漂移校验被跳过。
+    """
+    official = _write_skill(str(tmp_path / "official"), "issue-cli", {
+        "SKILL.md": SKILL_310,
+        "references/issue-runbook.md": "# runbook",
+    })
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path",
+                        lambda name: os.path.join(official, "SKILL.md"))
+    meta = {}
+
+    def _primary():
+        meta["scope"] = "official"
+        meta["skill_id"] = 0
+        return ("dir", official)
+
+    res = sm.materialize_skill_with_fallback(
+        str(tmp_path / ".skills"), "issue-cli", _primary,
+        scope=lambda: meta.get("scope") or "",
+        skill_id=lambda: meta.get("skill_id") or 0)
+    assert res["status"] == "ok"
+    assert res["source"]["scope"] == "official"
+    assert res["source"]["skill_id"] == 0
+    # scope 非空 → 基线校验已启用（drift 必须有值，不能为 None）
+    assert res.get("drift") is not None
+    assert res["drift"]["baseline_available"] is True
+
+
+def test_direct_materialize_call_point_passes_lazy_source(tmp_path, monkeypatch):
+    """event_pipeline._materialize_direct_workdir 调用点：按名官方命中后
+    物化结果必须携带 official 来源与非空 drift（修复惰性 meta 恒空）。"""
+    import src.config as cfg
+    official = _write_skill(str(tmp_path / "official"), "demo-skill", {
+        "SKILL.md": "# demo\n",
+    })
+    monkeypatch.setattr(cfg, "resolve_official_skill_path",
+                        lambda name: os.path.join(official, "SKILL.md"))
+    from src.api.event_pipeline import _materialize_direct_workdir
+    evt = {"_skill_id": 0, "_skill_path": ""}
+    _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "issue",
+                                "demo-skill", evt, "",
+                                "{{SKILL_DIR}}/demo-skill/SKILL.md")
+    mat = evt.get("_skill_materialize") or {}
+    assert mat.get("status") == "ok"
+    assert mat["source"]["scope"] == "official"
+    assert mat["source"]["skill_id"] == 0
+    assert mat.get("drift") is not None
+
+
+# ── 11. review 修复：worker 官方回退来源口径 ─────────────────────
+
+def test_worker_official_same_name_fallback_uses_official_source(tmp_path, monkeypatch):
+    """worker 同名官方包回退：source 用 official/0，不沿用任务原始 skill_id。"""
+    import json
+    from src.runtime import agent as ra
+    import src.user.db as udb
+
+    monkeypatch.setattr(udb, "get_skill_by_id",
+                        lambda sid: {"id": sid, "scope": "user"})
+    official = _write_skill(str(tmp_path / "official"), "demo-skill", {
+        "SKILL.md": "---\nname: demo-skill\nversion: 9.9.9\n---\n# demo\n",
+    })
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path",
+                        lambda name: os.path.join(official, "SKILL.md"))
+    task = {"id": "t-1635", "cwd": str(tmp_path), "skill": "demo-skill",
+            "skill_id": 999, "skill_files": json.dumps({})}
+    env, skill_dir = {}, str(tmp_path / ".skills")
+    ra._materialize_worker_skill(task, env, "p", skill_dir)
+    meta = task.get("_skill_materialize_meta") or {}
+    src = meta.get("source") or {}
+    assert src.get("scope") == "official"
+    assert src.get("skill_id") == 0
+    assert src.get("version") == "9.9.9"
+
+
+def test_worker_agent_type_fallback_builds_source(tmp_path, monkeypatch):
+    """agent_type 检查器回退（异名，原技能名无 SKILL.md）也必须构造 source/drift。"""
+    import json
+    from src.runtime import agent as ra
+
+    checker = _write_skill(str(tmp_path / "official"), "grape-skill-validator", {
+        "SKILL.md": "# checker\n",
+    })
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path",
+                        lambda name: (os.path.join(checker, "SKILL.md")
+                                      if name == "grape-skill-validator" else ""))
+    task = {"id": "t-1635b", "cwd": str(tmp_path), "skill": "missing-skill",
+            "skill_files": json.dumps({}),
+            "skill_fallback": {"skill_name": "grape-skill-validator",
+                               "skill_id": 2789}}
+    env, skill_dir = {}, str(tmp_path / ".skills")
+    ra._materialize_worker_skill(task, env, "p", skill_dir)
+    meta = task.get("_skill_materialize_meta") or {}
+    src = meta.get("source") or {}
+    assert src.get("scope") == "official"
+    assert src.get("skill_id") == 2789
+    assert meta.get("drift") is not None
