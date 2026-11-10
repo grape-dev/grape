@@ -577,8 +577,19 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
                 yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
     finally:
         # prepare_env 在 cwd 下创建的 token 文件：任务结束即清（仅清 cwd 下的，
-        # /tmp fallback 的不主动删，避免误删并发任务文件）
-        if _auth_file and cwd and _auth_file.startswith(cwd + os.sep):
+        # /tmp fallback 的不主动删，避免误删并发任务文件）。
+        # QA 架构守护 C-2 补强：finally 只清记录在 _auth_file 的那个文件——进程被
+        # kill/超时后 finally 不执行、文件残留 → 平台收尾 git add -A 会把 token 提交
+        # 进任务分支。追加 glob 兜底：扫 cwd 下所有 .grape-sess-*.tok 一并清掉
+        # （同前缀专属命名空间，不会误删其它文件）。
+        if cwd and os.path.isdir(cwd):
+            import glob as _glob
+            for _stale in _glob.glob(os.path.join(cwd, ".grape-sess-*.tok")):
+                try:
+                    os.unlink(_stale)
+                except OSError:
+                    pass
+        elif _auth_file and _auth_file.startswith(os.sep):
             try:
                 os.unlink(_auth_file)
             except OSError:

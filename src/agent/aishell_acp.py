@@ -91,21 +91,36 @@ class AishellDshACPBackend:
                 fd = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w") as _f:
                     _f.write(sess_tok)
-                # 仓库级忽略（.git/info/exclude），不动工作区跟踪文件
+                # 仓库级忽略（.git/info/exclude），不动工作区跟踪文件。
+                # 用 git-path（兼容 linked worktree：返回 per-worktree 的 exclude 路径，
+                # rev-parse --git-dir 会返回主 .git/worktrees/<wt>，主仓 info/exclude
+                # 不作用于该 worktree 的 status——QA 架构守护 C-2 实证）；
+                # 失败必须留痕（log.warning），静默 pass 会让「exclude 没写成功」
+                # 在 token 残留泄漏链路上不可见。
                 try:
                     import subprocess as _sp
-                    _gitdir = _sp.run(["git", "-C", cwd, "rev-parse", "--git-dir"],
-                                      capture_output=True, text=True, timeout=5).stdout.strip()
-                    if _gitdir and os.path.isdir(_gitdir):
-                        excl = os.path.join(_gitdir, "info", "exclude")
-                        os.makedirs(os.path.dirname(excl), exist_ok=True)
-                        pat = os.path.basename(auth_path)
-                        with open(excl, "a+", encoding="utf-8") as _ef:
-                            _ef.seek(0)
-                            if pat not in _ef.read().splitlines():
-                                _ef.write(f"\n{pat}\n")
-                except Exception:
-                    pass  # 忽略失败只影响 git status 展示，不阻断认证
+                    _excl_path = _sp.run(["git", "-C", cwd, "rev-parse", "--git-path", "info/exclude"],
+                                         capture_output=True, text=True, timeout=5).stdout.strip()
+                    if _excl_path:
+                        if not os.path.isabs(_excl_path):
+                            _excl_path = os.path.join(cwd, _excl_path)
+                        os.makedirs(os.path.dirname(_excl_path), exist_ok=True)
+                        # 通配模式一行覆盖所有任务（旧实现写唯一文件名，每任务一行
+                        # 长期累积——QA Optional 建议采纳）
+                        _pat = ".grape-sess-*.tok"
+                        _exists = False
+                        if os.path.isfile(_excl_path):
+                            with open(_excl_path, encoding="utf-8") as _ef:
+                                _exists = _pat in _ef.read().splitlines()
+                        if not _exists:
+                            with open(_excl_path, "a", encoding="utf-8") as _ef:
+                                _ef.write(f"\n{_pat}\n")
+                    else:
+                        log.warning("prepare_env: git-path info/exclude returned empty for cwd=%s "
+                                    "(exclude not registered, token residue risk on crash)", cwd)
+                except Exception as _exc:
+                    log.warning("prepare_env: failed to register .git/info/exclude for cwd=%s: %s "
+                                "(token residue risk on crash)", cwd, _exc)
             else:
                 fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
                 os.write(fd, sess_tok.encode("utf-8"))
