@@ -59,15 +59,26 @@ def _seed(status="processing", stage="sre", scene_id=""):
     set_issue_stage(_REPO, f"#{_NUM}", stage, stage)
 
 
-def _seed_events(statuses: dict, qa_result=""):
+def _seed_events(statuses: dict, qa_result="", scene_id=""):
     with db_lock:
         c = db.cursor()
         for _ag, _st in statuses.items():
             _res = qa_result if _ag == "qa" else ""
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result) "
-                "VALUES (?,?,?,?,?,?)",
-                (_REPO, f"#{_NUM}", "a2a_event", _ag, _st, _res))
+                "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result, scene_id) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (_REPO, f"#{_NUM}", "a2a_event", _ag, _st, _res, scene_id))
+        db.commit()
+
+
+def _add_event(agent_type: str, status: str, result: str = "", scene_id: str = ""):
+    """按调用顺序追加事件（seq 递增），用于构造跨流水线时序。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result, scene_id) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (_REPO, f"#{_NUM}", "a2a_event", agent_type, status, result, scene_id))
         db.commit()
 
 
@@ -96,6 +107,24 @@ def test_classify_qa_conclusion_text_forms():
     assert classify_qa_conclusion("running", "") == "unknown"
 
 
+def test_classify_qa_conclusion_cancelled_is_fail():
+    """Spec：status=cancelled 视为未通过，不得放行自动关闭。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("cancelled", "") == "fail"
+    assert classify_qa_conclusion("canceled", "") == "fail"
+
+
+def test_classify_qa_conclusion_negation_forms():
+    """否定语境不得误判 fail，“无法通过”不得误判 pass。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("completed", "无失败，0 failure，无阻塞") != "fail"
+    assert classify_qa_conclusion("completed", "no fixes required") != "fail"
+    assert classify_qa_conclusion("completed", "no failures") != "fail"
+    assert classify_qa_conclusion("completed", "无法通过验收") == "fail"
+    assert classify_qa_conclusion("completed", "not passed") == "fail"
+    assert classify_qa_conclusion("completed", "no blocking issues, pass") == "pass"
+
+
 def test_qa_gate_blocks_completed_but_failed_text():
     _clear_annotation_cache()
     from src.api.qa_gate import qa_gate_check
@@ -105,6 +134,35 @@ def test_qa_gate_blocks_completed_but_failed_text():
     assert info["blocked"] is True
     assert info["conclusion"] == "fail"
     assert info["event_seq"] > 0
+
+
+def test_qa_gate_blocks_cancelled_event():
+    from src.api.qa_gate import qa_gate_check
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="")
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE events SET status='cancelled' WHERE repo_key=? AND agent_type='qa'",
+            (_REPO,))
+        db.commit()
+    info = qa_gate_check(_REPO, _NUM)
+    assert info["blocked"] is True
+    assert info["conclusion"] == "fail"
+
+
+def test_qa_gate_ignores_other_pipeline_events():
+    """跨流水线（不同 scene_id）的 qa 结论不得误拦当前流水线。"""
+    from src.api.qa_gate import qa_gate_check
+    _clear_annotation_cache()
+    _seed(scene_id="scene-A")
+    _add_event("qa", "completed", "pass，无阻塞", scene_id="scene-A")
+    _add_event("qa", "failed", "不通过", scene_id="scene-B")
+    _cfg = {"nodes": [{"id": "qa", "next": "done"}]}
+    with patch("src.api.pipeline_config.get_pipeline_config", return_value=_cfg):
+        info = qa_gate_check(_REPO, _NUM)
+    assert info["qa_present"] is True
+    assert info["blocked"] is False, info
 
 
 # ===================== 自动结单 =====================
@@ -227,13 +285,46 @@ def test_create_pull_forces_auto_close_false_when_qa_failed():
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
             patch.object(git_repo_api, "_provider", "gitcode"), \
             patch("src.vcs.api_client.VcsApiClient") as _cli:
-        _cli.return_value.post_issue_comment.return_value = {"ok": True}
+        _cli.return_value.list_issue_comments.return_value = []
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
         create_pull("org", "issue1739", PRCreateBody(
             title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
             body="close #1739", related_issue_nums=[_NUM], auto_close_issues=True),
             user={"id": 1, "username": "tester", "auth_type": "session_token"},
             p="gitcode")
     assert captured["payload"]["close_related_issue"] is False
+    _comment = _cli.return_value.post_issue_comment.call_args[0][1]
+    assert "QA 未通过" in _comment
+    assert "不通过" in _comment
+    assert "#9" in _comment
+
+
+def test_annotation_dedupes_by_existing_remote_marker():
+    """跨进程/重启：Issue 已有相同幂等标记的评论时不再重复标注。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    from src.api import git_repo_api, qa_gate
+    from src.api.git_repo_api import PRCreateBody, create_pull
+
+    _info = qa_gate.qa_gate_check(_REPO, _NUM)
+    _token = qa_gate._annotation_token(_info["event_seq"], _info["status"], _info["reason"])
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        return {"number": 9}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.vcs.api_client.VcsApiClient") as _cli:
+        _cli.return_value.list_issue_comments.return_value = [
+            {"body": f"之前的门禁评论\n{_token}"}]
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
+        create_pull("org", "issue1739", PRCreateBody(
+            title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
+            body="close #1739", related_issue_nums=[_NUM], auto_close_issues=True),
+            user={"id": 1, "username": "tester", "auth_type": "session_token"},
+            p="gitcode")
+    _cli.return_value.post_issue_comment.assert_not_called()
 
 
 def test_create_pull_keeps_auto_close_true_when_qa_passed():
@@ -279,9 +370,76 @@ def test_merge_blocked_when_qa_failed():
             patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.record_gate_log"), \
             patch("src.vcs.api_client.VcsApiClient") as _cli:
-        _cli.return_value.post_issue_comment.return_value = {"ok": True}
+        _cli.return_value.list_issue_comments.return_value = []
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
         with pytest.raises(HTTPException) as _exc:
             merge_pull("org", "issue1739", 9, PRMergeBody(), user={
                 "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
     assert _exc.value.status_code == 409
     assert _exc.value.detail["gate"]["phase"] == "pre_merge_qa"
+    _comment = _cli.return_value.post_issue_comment.call_args[0][1]
+    assert "不通过" in _comment
+    assert "#9" in _comment
+
+
+def test_merge_blocked_by_pr_issue_association_without_body_ref():
+    """PR body 不含 #N，但 PR 详情 issues 关联 Issue 时仍须门禁（inner_issue_nums 旁路）。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    from fastapi import HTTPException
+
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRMergeBody, merge_pull
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        if method == "GET" and "/pulls/9" in url:
+            return {"number": 9, "body": "仅描述改动，无 Issue 引用",
+                    "issues": [{"number": _NUM}], "state": "open"}
+        return {"merged": True, "sha": "abc"}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.merge_gate.get_pull_base", return_value={"ref": "weekly-mys", "sha": "b"}), \
+            patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
+            patch("src.api.merge_gate.record_gate_log"), \
+            patch("src.vcs.api_client.VcsApiClient") as _cli:
+        _cli.return_value.list_issue_comments.return_value = []
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
+        with pytest.raises(HTTPException) as _exc:
+            merge_pull("org", "issue1739", 9, PRMergeBody(), user={
+                "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
+    assert _exc.value.status_code == 409
+    assert _exc.value.detail["gate"]["issue"] == _NUM
+
+
+def test_merge_fail_open_on_pr_detail_upstream_error():
+    """PR 详情 404/502 属上游临时错误，门禁不得中断合入（fail-open）。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    from fastapi import HTTPException
+
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRMergeBody, merge_pull
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        if method == "GET" and "/pulls/9" in url:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": "upstream"})
+        return {"merged": True, "sha": "abc"}
+
+    captured = {}
+
+    def _record_gate_log(*a, **k):
+        captured["log"] = a
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.merge_gate.get_pull_base", return_value={"ref": "weekly-mys", "sha": "b"}), \
+            patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
+            patch("src.api.merge_gate.run_post_merge_gate", return_value={"decision": "passed"}), \
+            patch("src.api.merge_gate.record_gate_log", side_effect=_record_gate_log), \
+            patch("src.vcs.api_client.VcsApiClient"):
+        _res = merge_pull("org", "issue1739", 9, PRMergeBody(), user={
+            "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
+    assert _res.get("merged") is True

@@ -11,15 +11,20 @@
 ## 方案
 ### 1) 统一判定模块 `src/api/qa_gate.py`
 - `pipeline_has_qa_node`：读 Issue 场景 → 流水线 nodes，找 enabled 的 `qa` 节点。
-- `latest_qa_event`：按 seq 取该 Issue 最新 qa 事件（`#N`/`N` 兼容）。
+- `latest_qa_event`：按 seq 取该 Issue **同一流水线**（与 `pipeline_has_qa_node` 一致的
+  scene 口径，`events.scene_id` 过滤）最新 qa 事件（`#N`/`N` 兼容）。
 - `classify_qa_conclusion(status, text)`：`fail` / `pass` / `unknown`。
-  - 先剔除否定语境（无/非/0 + 阻塞/阻断/Critical/Required）；
+  - `status=failed/cancelled/error` → fail（取消同样视为未通过）；
+  - 先剔除否定语境（无/非/0/no + 阻塞/阻断/Critical/Required/失败/failure/fixes…）；
+  - “无法通过 / not passed”等否定式通过判 fail；
   - 失败优先（不通过、未通过、阻塞、驳回、整改、需人工复核、失败、❌…）；
   - 其次通过（通过、pass、✅…）；其余 unknown。
 - `qa_gate_check`：返回 `{blocked, qa_present, event_seq, status, conclusion, reason}`；
   无 qa 节点 / 无 qa 事件 / unknown / 异常 → `blocked=False`（fail-open）。
+- `gate_or_annotate`：统一门禁入口（check + 命中标注），各关闭判定点复用，避免样板散落。
 - `annotate_qa_failure`：best-effort Issue 评论（含 QA 结论、事件 seq、关联 PR、
-  `<!-- grape-qa-gate -->`），失败仅告警。
+  `<!-- grape-qa-gate seq=… hash=… -->`）；标注前查询已有评论同标记实现跨进程幂等，
+  seq=0 时以结论指纹区分不同失败，失败仅告警。
 
 ### 2) 关闭判定点接入
 - `auto_finalize_issue_on_last_node`：节点全部 completed 后、写 completed 前检查；
@@ -28,8 +33,9 @@
   `noop:qa_failed`，不置 completed、不落 stage=done。
 - `git-repo pulls create`：`related_issue_nums` 任一 issue qa 失败 → 强制
   `auto_close_issues=false` 并标注（不阻断建 PR）。
-- `git-repo pulls merge`：从 PR body 提取关联 Issue，qa 失败 → 409 阻断合入并标注；
-  内部异常 fail-open，不影响既有合并门禁。
+- `git-repo pulls merge`：关联 Issue 取 PR body 的 `#N` 引用 + PR 详情 `issues`
+  关联列表（覆盖 `inner_issue_nums` 显式关联但 body 无 `#N` 的旁路）；qa 失败 →
+  409 阻断合入并标注；仅本门禁自身的 409 阻断，PR 详情 404/502 等上游异常 fail-open。
 
 ### 3) 测试
 `tests/test_issue_1739_qa_close_gate.py`：
