@@ -1728,7 +1728,7 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
     }
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill cannot be resolved by the dispatch path (name resolution only sees a user-scope skill, or an explicit skill_id is invalid/inactive), so the scene node must be re-bound to a repo/official skill before dispatch. An explicit active skill_id is treated as authorized (same rule as dispatch).")
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Re-bind the node to a repo/official skill before dispatch.")
 def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）。
 
@@ -2159,42 +2159,37 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
 def _collect_scene_skill_scope_violations(nodes: list, repo_key: str, username: str = "",
                                           user_id="", allow_own_user: bool = True,
                                           expected_scope: str = "repo") -> list:
-    """收集场景节点技能 scope 冲突（Issue #657 / #1564），不抛异常、一次返回全部冲突。
+    """收集场景节点技能 scope 冲突（Issue #657 / #1564 / #1758），不抛异常、一次返回全部冲突。
 
-    仅当技能在 skill 表确以 user scope 存在（且无 repo/official 同名可用）时
-    判定冲突；allow_own_user=True 时 owner==当前登录用户的 user 技能放行
-    （repo 场景口径，派发身份即本人可正常解析）。市场模板保存路径传
-    allow_own_user=False，强制拒绝 user scope（含创建者本人）。
-    skill.owner_id 历史上既存过数字 user_id 也存过 username，两种口径都比对。
-    技能不在 skill 表（官方内置包形态）不计冲突（存量兼容，由派发侧 fail-fast 兜底）。
+    Issue #1758：判定收敛为单一判官 ``scene_skill_scope.evaluate``，四个入口
+    （保存/apply、audit、派发门禁、scene_precheck）共用同一结论。固定口径：
+    repo 级场景引用 user 技能一律冲突（含创建者本人），``allow_own_user`` /
+    ``username`` / ``user_id`` 仅为兼容旧调用签名保留，不再放宽判定。
+    技能不在 skill 表（官方内置包形态）不计冲突（存量兼容）。
     """
-    from src.user.db import get_skill_scope_info
-    _self_marks = {m for m in (username or "", str(user_id or "")) if m}
+    from src.api.scene_skill_scope import evaluate
     violations = []
+    cache: dict = {}
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
-        if node.get("enabled") is False:
+        result = evaluate(node, repo_key, expected_scope or "repo",
+                          {"username": username, "user_id": user_id},
+                          cache=cache)
+        if result["ok"]:
             continue
-        skill = (node.get("skill") or "").strip()
-        if not skill:
-            continue
-        info = get_skill_scope_info(skill, repo_key)
-        if info.get("found") and not info.get("matched"):
-            if (allow_own_user and info.get("scope") == "user"
-                    and (info.get("owner_id") or "") in _self_marks):
-                # #657 follow-up: 自己的个人技能放行（对齐 SRE 引擎 user scope 校验口径）
-                continue
-            node_id = node.get("id") or node.get("tag") or ""
-            node_tag = node.get("tag") or node_id
-            violations.append({
-                "node_id": node_id or node_tag,
-                "node_tag": node_tag,
-                "skill": skill,
-                "actual_scope": info.get("scope") or "",
-                "expected_scope": expected_scope,
-                "owner_id": info.get("owner_id") or "",
-            })
+        violations.append({
+            "node_id": result.get("node_id") or result.get("node_tag") or "",
+            "node_tag": result.get("node_tag") or result.get("node_id") or "",
+            "skill": result.get("skill") or "",
+            "actual_scope": result.get("actual_scope") or "",
+            "expected_scope": result.get("expected_scope") or expected_scope,
+            "owner_id": result.get("owner_id") or "",
+            "reason": result.get("reason") or "",
+            "skill_id": result.get("skill_id") or 0,
+            "source": result.get("source") or "",
+            "rebind_candidates": list(result.get("rebind_candidates") or []),
+        })
     return violations
 
 
@@ -2209,77 +2204,28 @@ def _project_scene_scope_violation(v: dict) -> dict:
 
 def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
                             cache: dict | None = None) -> dict:
-    """单节点技能可解析性前置判定（Issue #1721）。
+    """单节点技能可解析性前置判定（Issue #1721 / #1758）。
 
-    与派发侧同一判定口径：
-    - 节点带非零 `skill_id` 且该技能仍 active → 派发侧
-      `resolve_skill_dispatch` 直接按 id 授权直用并跳过名字级 scope 门禁，
-      故此处同样判为可解析（即使技能为 user scope）；
-    - 否则按技能名复用派发侧 `_skill_scope_mismatch`（上游私有符号契约：
-      `(skill_name, repo_key) -> (mismatch, info)`，上游签名变更需同步此处）。
-    detail 阶段尚未派发，reason 使用“保存/派发时将拦截”措辞，不复用派发侧
-    “派发已阻断”文案以免误导。
+    判定统一委托给 ``scene_skill_scope.evaluate``：显式 skill_id 仍需 scope
+    校验（user scope 即使由本人显式绑定也不放行），失效 id 回退按名解析，
+    查询异常按统一 fail-closed 策略处理。detail 只做结果投影，不再 import
+    其它模块的私有判定函数。
     返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
     `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
     """
-    from src.api.event_pipeline import _skill_scope_mismatch
-    skill = (node.get("skill") or "").strip()
-    node_tag = node.get("tag") or node.get("id") or ""
-    if not skill:
-        return {"resolvable": True,
-                "scope_check": {"ok": True, "skill": "", "actual_scope": "",
-                                "expected_scope": "repo", "reason": ""}}
-    if node.get("enabled") is False:
-        return {"resolvable": True,
-                "scope_check": {"ok": True, "skill": skill, "actual_scope": "",
-                                "expected_scope": "repo",
-                                "reason": "节点未启用，跳过技能 scope 校验"}}
-    try:
-        skill_id = int(node.get("skill_id") or 0)
-    except (TypeError, ValueError):
-        skill_id = 0
-    bound = None
-    if skill_id:
-        _id_key = ("id", skill_id)
-        if cache is not None and _id_key in cache:
-            bound = cache[_id_key]
-        else:
-            try:
-                from src.user.db import get_skill_by_id
-                bound = get_skill_by_id(skill_id)
-            except Exception as e:
-                log.warning(f"_scene_node_scope_check get_skill_by_id failed: {e}")
-                bound = None
-            if cache is not None:
-                cache[_id_key] = bound
-    if bound:
-        _bound_scope = bound.get("scope") or ""
-        return {"resolvable": True,
-                "scope_check": {
-                    "ok": True,
-                    "skill": bound.get("skill_name") or skill,
-                    "actual_scope": _bound_scope,
-                    "expected_scope": "repo",
-                    "reason": (f"节点已显式绑定 skill_id={skill_id}"
-                               f"（scope={_bound_scope or '-'}），"
-                               f"派发侧按显式绑定授权直用，跳过名字级 scope 门禁")}}
-    _name_key = ("name", skill)
-    if cache is not None and _name_key in cache:
-        mismatch, info = cache[_name_key]
-    else:
-        mismatch, info = _skill_scope_mismatch(skill, repo_key)
-        if cache is not None:
-            cache[_name_key] = (mismatch, info)
-    check = {"ok": not mismatch, "skill": skill,
-             "actual_scope": (info or {}).get("scope") or "",
-             "expected_scope": "repo", "reason": ""}
-    if mismatch:
-        _scope = (info or {}).get("scope") or "user"
-        check["reason"] = (
-            f"技能 '{skill}' scope 不匹配（技能 scope={_scope}，场景 scope=repo）；"
-            f"repo 级场景不可引用 user 级技能，保存/派发时将拦截"
-            f"（scene={scene_id or '-'}，node={node_tag or '-'}）")
-    return {"resolvable": not mismatch, "scope_check": check}
+    from src.api.scene_skill_scope import evaluate
+    result = evaluate(node, repo_key, "repo", None, scene_id=scene_id,
+                      cache=cache)
+    return {
+        "resolvable": bool(result["ok"]),
+        "scope_check": {
+            "ok": bool(result["ok"]),
+            "skill": result.get("skill") or "",
+            "actual_scope": result.get("actual_scope") or "",
+            "expected_scope": result.get("expected_scope") or "repo",
+            "reason": result.get("reason") or "",
+        },
+    }
 
 
 def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
@@ -2302,60 +2248,32 @@ def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
 
 
 def _skill_agent_type_by_name(skill_name: str) -> str:
-    """按技能名取 agent_type（Issue #1721 改绑建议用），查不到返回空串。"""
-    if not skill_name:
-        return ""
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1 "
-                "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END "
-                "LIMIT 1", (skill_name,)).fetchone()
-        return (row[0] or "") if row else ""
-    except Exception as e:
-        log.warning(f"_skill_agent_type_by_name failed: {e}")
-        return ""
+    """按技能名取 agent_type（Issue #1721 改绑建议用），委托单一判官模块。"""
+    from src.api.scene_skill_scope import skill_agent_type_by_name
+    return skill_agent_type_by_name(skill_name)
 
 
 def _suggest_repo_official_skills(skill_name: str, repo_key: str,
                                   agent_type: str = "", limit: int = 5) -> list:
     """为冲突的 user 级技能列出可改绑的 repo/official 级同类技能（Issue #1721）。
 
-    仅输出指引，不做任何改绑/写库；优先本仓 repo 级，其次 official 级。
+    委托 ``scene_skill_scope.rebind_candidates``，仅输出指引、不写库。
     """
-    if not skill_name:
-        return []
-    try:
-        from src.session_manager import db, db_lock
-        sql = ("SELECT id, skill_name, scope, agent_type FROM skill "
-               "WHERE is_active=1 AND skill_name<>? AND "
-               "((scope='repo' AND owner_id=?) OR scope='official')")
-        params = [skill_name, repo_key]
-        if agent_type:
-            sql += " AND agent_type=?"
-            params.append(agent_type)
-        sql += (" ORDER BY CASE scope WHEN 'repo' THEN 0 ELSE 1 END, "
-                "skill_name LIMIT ?")
-        params.append(limit)
-        with db_lock:
-            rows = db.cursor().execute(sql, params).fetchall()
-        return [{"skill_id": r[0], "skill_name": r[1], "scope": r[2],
-                 "agent_type": r[3] or ""} for r in rows]
-    except Exception as e:
-        log.warning(f"_suggest_repo_official_skills failed: {e}")
-        return []
+    from src.api.scene_skill_scope import rebind_candidates
+    return rebind_candidates(skill_name, repo_key, agent_type=agent_type,
+                             limit=limit)
 
 
 def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id="",
                                 allow_own_user: bool = True, expected_scope: str = "repo"):
-    """场景节点技能 scope 校验（Issue #657 / #1564）：冲突时抛 HTTPException(400)。
+    """场景节点技能 scope 校验（Issue #657 / #1564 / #1758）：冲突时抛 HTTPException(400)。
 
-    Issue #1564：改为收集式校验，400 detail 一次性返回全部冲突节点
+    Issue #1564：收集式校验，400 detail 一次性返回全部冲突节点
     violations[{node_id,node_tag,skill,actual_scope,expected_scope}]（供前端整表单标红），
     同时保留顶层 skill/actual_scope/expected_scope（兼容既有调用方）。
-    文案含「scope 不匹配」+ 技能名 + 双方 scope 值。
-    市场模板保存路径以 allow_own_user=False 强制拒绝 user scope（含创建者本人）。
+    Issue #1758：判定统一走单一判官，user scope 一律拒绝（含创建者本人）；
+    400 额外返回 skill_scope / scene_scope / rebind_candidates / rebinds，
+    rebinds 为逐节点改绑建议。``allow_own_user`` 仅为旧调用签名兼容保留。
     """
     violations = _collect_scene_skill_scope_violations(
         nodes, repo_key, username=username, user_id=user_id,
@@ -2363,17 +2281,26 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
     if not violations:
         return
     _msgs = []
+    _rebind = []
     for v in violations:
+        _cand = list(v.get("rebind_candidates") or [])
         _m = (f"节点 {v['node_tag']} 引用技能 '{v['skill']}' scope 不匹配："
-              f"技能 scope={v['actual_scope']}，场景 scope=repo，")
-        if allow_own_user:
-            _m += "repo 级场景不可引用他人的 user 级技能"
-            if v.get("owner_id"):
-                _m += f"（技能 owner={v['owner_id']}）"
-            _m += "，请改用本人个人技能或 repo/official 级技能"
+              f"技能 scope={v['actual_scope'] or '-'}，场景 scope={v['expected_scope'] or 'repo'}，"
+              f"repo 级场景不可引用 user 级技能（含创建者本人）")
+        if _cand:
+            _names = ", ".join(f"{c.get('skill_name')}({c.get('scope')})" for c in _cand)
+            _m += f"；可改绑为：{_names}"
         else:
-            _m += "市场模板为全仓共享配置，不可引用 user 级技能（含创建者本人），请改用 repo/official 级技能"
+            _m += "；请改用 repo/official 级技能"
         _msgs.append(_m)
+        _rebind.append({
+            "node_id": v.get("node_id") or "",
+            "node_tag": v.get("node_tag") or "",
+            "skill": v.get("skill") or "",
+            "skill_scope": v.get("actual_scope") or "",
+            "scene_scope": v.get("expected_scope") or "repo",
+            "rebind_candidates": _cand,
+        })
     _first = violations[0]
     raise HTTPException(status_code=400, detail={
         "code": 400,
@@ -2381,6 +2308,10 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
         "skill": _first["skill"],
         "actual_scope": _first["actual_scope"],
         "expected_scope": _first["expected_scope"],
+        "skill_scope": _first["actual_scope"],
+        "scene_scope": _first["expected_scope"],
+        "rebind_candidates": _rebind[0]["rebind_candidates"],
+        "rebinds": _rebind,
         "violations": [_project_scene_scope_violation(v) for v in violations],
     })
 

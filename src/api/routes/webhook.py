@@ -1552,37 +1552,50 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_name, scene_id=_a2a_issue_scene, user_id=_a2a_issue_uid)
                     if _pipe_skill:
                         skill_name = _pipe_skill
-                        from src.user.db import resolve_skill_id, get_skill_by_id
-                        _new_sid = resolve_skill_id(_pipe_skill, repo_key=repo_key, user_id=_a2a_issue_uid)
-                        if _new_sid:
-                            skill_id = _new_sid
-                            _sk = get_skill_by_id(_new_sid)
-                            skill_path = (_sk.get("skill_path") or _pipe_skill) if _sk else _pipe_skill
-                        else:
-                            skill_path = _pipe_skill
-                            skill_id = 0
-                            # Issue #657: skill 解析为空（仅 user scope 可用，scope 不匹配）
-                            # → 立即落 skill_resolve_failed 错误事件并返回 failed，不再派发
-                            from src.api.event_pipeline import (
-                                _skill_scope_mismatch, _skill_scope_mismatch_reason,
-                                _fail_skill_resolve_event)
-                            _mm, _mm_info = _skill_scope_mismatch(_pipe_skill, repo_key)
-                            if _mm:
-                                _reason = _skill_scope_mismatch_reason(
-                                    _pipe_skill, _mm_info, _a2a_issue_scene, agent_name)
-                                _fr = _fail_skill_resolve_event(
-                                    repo_key, _pipe_skill, _a2a_issue_scene, agent_name,
-                                    _reason,
-                                    issue_id=f"#{issue_number}" if issue_number else "")
-                                return JSONResponse(
-                                    status_code=400,
-                                    content={"code": 400, "status": "failed",
-                                             "seq": _fr.get("seq", 0),
-                                             "agent": agent_name,
-                                             "skill": _pipe_skill,
-                                             "skill_resolve_failed": True,
-                                             "message": _reason})
-                        log.info(f"A2A: issue scene skill override: {agent_name}={_pipe_skill} sid={skill_id} (scene={_a2a_issue_scene})")
+                        # Issue #657/#1758: 统一 scope 判官，显式 skill_id 同样校验；
+                        # 不匹配 → skill_resolve_failed 事件 + 400 结构化字段。
+                        from src.api.event_pipeline import (
+                            _fail_skill_resolve_event, resolve_scene_node_skill_id)
+                        from src.api.scene_skill_scope import evaluate as _eval_scope
+                        _node_sid = 0
+                        try:
+                            _node_sid = resolve_scene_node_skill_id(
+                                repo_key, agent_name, scene_id=_a2a_issue_scene,
+                                user_id=_a2a_issue_uid)
+                        except Exception:
+                            _node_sid = 0
+                        _ev = _eval_scope(
+                            {"skill": _pipe_skill, "skill_id": _node_sid,
+                             "tag": agent_name, "id": agent_name},
+                            repo_key, "repo", user,
+                            scene_id=_a2a_issue_scene)
+                        if not _ev["ok"]:
+                            _reason = _ev["reason"]
+                            _fr = _fail_skill_resolve_event(
+                                repo_key, _pipe_skill, _a2a_issue_scene, agent_name,
+                                _reason,
+                                issue_id=f"#{issue_number}" if issue_number else "",
+                                scope_info=_ev)
+                            return JSONResponse(
+                                status_code=400,
+                                content={"code": 400, "status": "failed",
+                                         "seq": _fr.get("seq", 0),
+                                         "agent": agent_name,
+                                         "skill": _pipe_skill,
+                                         "skill_resolve_failed": True,
+                                         "skill_scope": _ev.get("actual_scope") or "",
+                                         "scene_scope": _ev.get("expected_scope") or "repo",
+                                         "rebind_candidates": list(_ev.get("rebind_candidates") or []),
+                                         "message": _reason})
+                        from src.user.db import resolve_skill_dispatch
+                        _res = resolve_skill_dispatch(
+                            _pipe_skill, _node_sid, repo_key=repo_key,
+                            user_id=_a2a_issue_uid, scene_id=_a2a_issue_scene,
+                            node_tag=agent_name)
+                        skill_id = _res["skill_id"]
+                        skill_name = _res.get("skill_name") or _pipe_skill
+                        skill_path = _res.get("skill_path") or _pipe_skill
+                        log.info(f"A2A: issue scene skill override: {agent_name}={skill_name} sid={skill_id} (scene={_a2a_issue_scene})")
             except Exception as _oe:
                 log.warning(f"A2A: issue scene skill override failed: {_oe}")
 

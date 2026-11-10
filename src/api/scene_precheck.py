@@ -4,11 +4,13 @@
 1) 绑定引擎在 agent_runtimes 存在；
 2) 至少一台可用（沿用派发链路的在线/心跳判定 + 健康分阈值）；
 3) 引擎归属合法（user 档属创建者本人，repo 档属当前仓库）；
-4) 节点技能对创建者可解析（skill_id 有效或 resolve_skill_id 命中）。
+4) 节点技能与 repo 级场景 scope 兼容（Issue #1758 统一委托
+   `scene_skill_scope.evaluate`；user scope 一律不可解析）。
 
 另有结构校验（next 悬空 / 节点 id 重复）与三类豁免（非 SRE 空绑定、
 enabled=false、skill 为空）。配置缺失/解析失败回落默认全开（不因缺配置跳过
-校验），查询/探测异常逐一 fail-open，避免误拦正常建单。
+校验）；引擎查询/探测异常仍 fail-open，技能 scope 查询异常按单一判官
+fail-closed，避免与保存/派发结论漂移。
 """
 import json
 import os
@@ -199,24 +201,14 @@ def _available_engines(rows: list[dict]) -> list[dict]:
 
 
 def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
-    skill_name = str(node.get("skill") or "").strip()
-    skill_id = _node_skill_id(node)
-    if skill_id:
-        try:
-            from src.user.db import get_skill_by_id
-            if get_skill_by_id(skill_id):
-                return True
-        except Exception as e:
-            log.warning(f"scene_precheck: get_skill_by_id failed (fail-open): {e}")
-            return True
-    if not skill_name:
-        return False
-    try:
-        from src.user.db import resolve_skill_id
-        return bool(resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""))
-    except Exception as e:
-        log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")
-        return True
+    """节点技能对 repo 级场景可解析（Issue #1758：统一委托单一 scope 判官）。
+
+    不再 fail-open：技能 scope 查询异常按判官默认 fail-closed 处理，
+    避免前置检查与保存/派发结论漂移。
+    """
+    from src.api.scene_skill_scope import evaluate
+    return bool(evaluate(node, repo_key, "repo",
+                         {"user_id": user_id})["ok"])
 
 
 def _ownership_problem(rows: list[dict], repo_key: str,
@@ -359,13 +351,24 @@ def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str
 
 def _check_skill(node: dict, tag: str, repo_key: str, user_id: str,
                  cfg: dict, problems: list) -> None:
+    from src.api.scene_skill_scope import evaluate
     skill_name = str(node.get("skill") or "").strip()
     skill_id = _node_skill_id(node)
-    if (skill_name or skill_id) and not _skill_resolvable(node, repo_key, user_id):
-        _append_problem(
-            problems, cfg, "skill_unresolvable", tag, [],
-            message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}",
-            suggestion="重新选择技能或确认技能对当前用户/仓库可见")
+    if not (skill_name or skill_id):
+        return
+    result = evaluate(node, repo_key, "repo", {"user_id": user_id})
+    if result["ok"]:
+        return
+    _suggestion = "重新选择技能或确认技能对当前用户/仓库可见"
+    _cand = list(result.get("rebind_candidates") or [])
+    if _cand:
+        _names = ", ".join(f"{c.get('skill_name')}({c.get('scope')})" for c in _cand)
+        _suggestion = f"repo 级场景不可引用 user 级技能，请改绑为：{_names}"
+    _append_problem(
+        problems, cfg, "skill_unresolvable", tag, [],
+        message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}"
+                f"（{result.get('reason') or 'skill scope 不匹配'}）",
+        suggestion=_suggestion)
 
 
 def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,

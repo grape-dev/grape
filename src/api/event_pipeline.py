@@ -1731,36 +1731,57 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         log.warning(f"Pipeline subscription dispatch failed: {e}")
 
 
-def _skill_scope_mismatch(skill_name: str, repo_key: str) -> tuple:
-    """派发前技能 scope 匹配判定（Issue #657）。
+def _skill_scope_mismatch(skill_name: str, repo_key: str,
+                          skill_id: int = 0, node_tag: str = "",
+                          scene_id: str = "") -> tuple:
+    """派发前技能 scope 匹配判定（Issue #657，Issue #1758 收敛到单一判官）。
 
-    返回 (mismatch, info)：技能在 skill 表仅以 user scope 存在
-    （无 repo/official 同名可用）→ mismatch=True（repo 级场景不可引用
-    user 级技能）；技能不存在（官方内置包形态）→ mismatch=False（兼容）。
+    返回 (mismatch, info)；判定完全委托 ``scene_skill_scope.evaluate``，
+    本函数仅保留旧签名兼容，禁止其它模块再 import 它做独立判定。
     """
-    if not skill_name:
+    if not skill_name and not skill_id:
         return False, {}
-    try:
-        from src.user.db import get_skill_scope_info
-        info = get_skill_scope_info(skill_name, repo_key)
-        return bool(info.get("found") and not info.get("matched")), info
-    except Exception as e:
-        log.warning(f"Pipeline: _skill_scope_mismatch check failed: {e}")
-        return False, {}
+    from src.api.scene_skill_scope import evaluate
+    result = evaluate({"skill": skill_name, "skill_id": skill_id,
+                       "tag": node_tag or "", "id": node_tag or ""},
+                      repo_key, "repo", None, scene_id=scene_id)
+    info = {
+        "found": result.get("source") in ("skill_id", "name"),
+        "matched": bool(result.get("ok")),
+        "scope": result.get("actual_scope") or "",
+        "skill_id": result.get("skill_id") or 0,
+        "owner_id": result.get("owner_id") or "",
+        "reason": result.get("reason") or "",
+        "rebind_candidates": list(result.get("rebind_candidates") or []),
+    }
+    return (not result.get("ok")), info
+
+
+def _evaluate_skill_scope(skill_name: str, repo_key: str, skill_id: int = 0,
+                          node_tag: str = "", scene_id: str = "") -> dict:
+    """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。"""
+    from src.api.scene_skill_scope import evaluate
+    return evaluate({"skill": skill_name, "skill_id": skill_id,
+                     "tag": node_tag or "", "id": node_tag or ""},
+                    repo_key, "repo", None, scene_id=scene_id)
 
 
 def _skill_scope_mismatch_reason(skill_name: str, info: dict,
                                  scene_id: str = "", agent_type: str = "") -> str:
     """scope 不匹配文案（含技能名/双方 scope 值/场景/节点，Issue #657）。"""
+    reason = (info or {}).get("reason")
+    if reason:
+        return reason
     scope = (info or {}).get("scope") or "user"
-    return (f"技能 '{skill_name}' scope 不匹配（技能 scope={scope}，场景 scope=repo），"
-            f"repo 级场景不可引用 user 级技能，派发已阻断"
+    return (f"技能 '{skill_name}' scope 不匹配（技能 scope={scope}，场景 scope=repo）："
+            f"repo 级场景不可引用 user 级技能（含创建者本人），保存/派发均会阻断"
             f"（scene={scene_id or '-'}，node={agent_type or '-'}）")
 
 
 def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
                               agent_type: str, reason: str,
-                              issue_id: str = "", seq: int = 0) -> dict:
+                              issue_id: str = "", seq: int = 0,
+                              scope_info: dict | None = None) -> dict:
     """派发前技能解析失败 fail-fast（Issue #657）。
 
     - seq>0（事件已创建）→ 走 _fail_event 同款通路：既有事件置 failed、
@@ -1772,15 +1793,23 @@ def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
     返回 result 字典（调用方直接 return，不再派发 → 替代
     pending_self_report 1800s timeout_failed 静默超时）。
     """
+    _scope = scope_info or {}
+    _skill_scope = _scope.get("actual_scope") or ""
+    _scene_scope = _scope.get("expected_scope") or "repo"
+    _rebind = list(_scope.get("rebind_candidates") or [])
     _result = {"seq": seq, "event_type": "skill_resolve_failed", "skill": skill_name,
                "repo_key": repo_key, "ok": False, "status": "failed",
-               "skill_resolve_failed": True}
+               "skill_resolve_failed": True,
+               "skill_scope": _skill_scope, "scene_scope": _scene_scope,
+               "rebind_candidates": _rebind}
     _msg = f"[skill_resolve_failed] {reason}"
     try:
         if seq:
             _fail_event(seq, _msg, diag={
                 "code": "skill_resolve_failed", "skill": skill_name,
                 "scene_id": scene_id, "agent_type": agent_type,
+                "skill_scope": _skill_scope, "scene_scope": _scene_scope,
+                "rebind_candidates": _rebind,
                 "reason": reason[:300]})
         else:
             from src.api.event_store import append_event
@@ -1791,7 +1820,9 @@ def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
                 issue_id=issue_id, agent_type=agent_type, source="pipeline",
                 summary=reason[:200],
                 payload={"skill": skill_name, "scene_id": scene_id,
-                         "agent_type": agent_type, "reason": reason[:500]},
+                         "agent_type": agent_type, "reason": reason[:500],
+                         "skill_scope": _skill_scope, "scene_scope": _scene_scope,
+                         "rebind_candidates": _rebind},
                 status="failed", result=_msg, scene_id=scene_id)
             _result["seq"] = _seq or 0
     except Exception as e:
@@ -2647,30 +2678,28 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 只传 repo_key，个人同名技能被静默跳过落到 official）
         _sub_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=_issue_scene,
                                                user_id=_issue_scene_uid)
-        _sub_degraded = False
         try:
             from src.user.db import resolve_skill_dispatch
             _res = resolve_skill_dispatch(skill_name, _sub_sid, repo_key=repo_key,
                                           user_id=_issue_scene_uid,
                                           scene_id=_issue_scene, node_tag="qa")
             skill_id = _res["skill_id"]
-            _sub_degraded = bool(_res.get("degraded"))
             if _res.get("skill_name"):
                 skill_name = _res["skill_name"]
             if _res.get("skill_path"):
                 skill_path = _res["skill_path"]
         except Exception as _se979:
             log.warning(f"Pipeline (PR-sub): skill dispatch resolve failed: {_se979}")
-        # Issue #657: 派发前技能 scope 校验——skill 解析为空（仅 user scope 可用）
-        # → 立即 fail-fast 落错误事件，不再派发（替代 1800s 超时）
-        # Issue #979: skill_id 显式命中（非降级）= 用户授权绑定，跳过名字级 scope 门禁
-        if _sub_degraded or not skill_id:
-            _mm, _mm_info = _skill_scope_mismatch(skill_name, repo_key)
-            if _mm:
-                return _fail_skill_resolve_event(
-                    repo_key, skill_name, _issue_scene, agent_type,
-                    _skill_scope_mismatch_reason(skill_name, _mm_info, _issue_scene, agent_type),
-                    issue_id=_pre_issue_id or "")
+        # Issue #657/#1758: 派发前技能 scope 校验（单一判官）——显式 skill_id
+        # 同样需要 scope 校验；user scope 或查询异常 → fail-fast 落错误事件。
+        _ev_sub = _evaluate_skill_scope(
+            skill_name, repo_key, skill_id=_sub_sid,
+            node_tag=agent_type, scene_id=_issue_scene)
+        if not _ev_sub["ok"]:
+            return _fail_skill_resolve_event(
+                repo_key, skill_name, _issue_scene, agent_type,
+                _ev_sub["reason"], issue_id=_pre_issue_id or "",
+                scope_info=_ev_sub)
         backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
         log.info(f"Pipeline (PR-sub): skill from scene nodes: {skill_name} sid={skill_id} (scene={_issue_scene})")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
@@ -2695,21 +2724,21 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _res = resolve_skill_dispatch(_pipe_skill, _node_sid, repo_key=repo_key,
                                           user_id=_issue_scene_uid,
                                           scene_id=_issue_scene, node_tag=agent_type)
+            # Issue #657/#1758: 单一判官校验（显式 skill_id 仍需 scope 校验）
+            _ev_pipe = _evaluate_skill_scope(
+                _pipe_skill, repo_key, skill_id=_node_sid,
+                node_tag=agent_type, scene_id=_issue_scene)
+            if not _ev_pipe["ok"]:
+                return _fail_skill_resolve_event(
+                    repo_key, _pipe_skill, _issue_scene, agent_type,
+                    _ev_pipe["reason"], issue_id=_pre_issue_id or "",
+                    scope_info=_ev_pipe)
             if _res["skill_id"]:
                 skill_id = _res["skill_id"]
                 skill_path = _res.get("skill_path") or _pipe_skill
             else:
                 skill_path = _pipe_skill
                 skill_id = 0
-                # Issue #657: skill 解析为空（仅 user scope 可用，scope 不匹配）→
-                # 立即 fail-fast 落错误事件，不再派发（替代 1800s 超时）
-                _mm, _mm_info = _skill_scope_mismatch(_pipe_skill, repo_key)
-                if _mm:
-                    return _fail_skill_resolve_event(
-                        repo_key, _pipe_skill, _issue_scene, agent_type,
-                        _skill_scope_mismatch_reason(_pipe_skill, _mm_info,
-                                                     _issue_scene, agent_type),
-                        issue_id=_pre_issue_id or "")
             log.info(f"Pipeline (plugin): issue scene skill override: {agent_type}={_pipe_skill} sid={skill_id} (scene={_issue_scene})")
     if not backend or not skill_name:
         if _is_pr_sub:
@@ -2724,18 +2753,19 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_name = _pipe_skill
                 backend = backend or ""
                 log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill} (scene={_issue_scene})")
-                # Issue #657: 派发前技能 scope 校验——skill 解析为空（仅 user scope 可用）
-                # → 立即 fail-fast 落错误事件，不再派发
-                # Issue #979: skill_id 已由权威解析命中（id 显式绑定=授权）→ 跳过
-                # 名字级 scope 门禁（与上方覆盖分支口径一致）
-                if not skill_id:
-                    _mm, _mm_info = _skill_scope_mismatch(_pipe_skill, repo_key)
-                    if _mm:
-                        return _fail_skill_resolve_event(
-                            repo_key, _pipe_skill, _issue_scene, agent_type,
-                            _skill_scope_mismatch_reason(_pipe_skill, _mm_info,
-                                                         _issue_scene, agent_type),
-                            issue_id=_pre_issue_id or "")
+                # Issue #657/#1758: 派发前技能 scope 校验（单一判官）——显式 skill_id
+                # 同样需要 scope 校验，不再按“id 显式绑定即授权”跳过。
+                _fb_sid = resolve_scene_node_skill_id(
+                    repo_key, agent_type, scene_id=_issue_scene,
+                    user_id=_issue_scene_uid)
+                _ev_fb = _evaluate_skill_scope(
+                    _pipe_skill, repo_key, skill_id=_fb_sid,
+                    node_tag=agent_type, scene_id=_issue_scene)
+                if not _ev_fb["ok"]:
+                    return _fail_skill_resolve_event(
+                        repo_key, _pipe_skill, _issue_scene, agent_type,
+                        _ev_fb["reason"], issue_id=_pre_issue_id or "",
+                        scope_info=_ev_fb)
         if not skill_name and not _is_scene_recommend:
             # 推荐模式不需要 skill（用 build_scene_recommender_prompt 内置 prompt），
             # 跳过 fallback 的 no_agent_session 检查，直接走引擎选择 → 广播入队
@@ -5329,24 +5359,24 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         from src.runtime.engine_select import _repo_user_id
         _scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
 
-    # skill 解析
+    # skill 解析 + 单一判官 scope 校验（Issue #657/#1758：显式 id 仍需校验）
     from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
     skill_name = vod_skill
+    _vod_sid = resolve_scene_node_skill_id(repo_key, "vod", scene_id=_scene_id,
+                                           user_id=_scene_uid)
+    _ev_vod = _evaluate_skill_scope(vod_skill, repo_key, skill_id=_vod_sid,
+                                    node_tag="vod", scene_id=_scene_id)
+    if not _ev_vod["ok"]:
+        _fail_skill_resolve_event(
+            repo_key, vod_skill, _scene_id, "vod",
+            _ev_vod["reason"], issue_id=issue_id, seq=seq,
+            scope_info=_ev_vod)
+        return False
     skill_id = resolve_skill_id(vod_skill, repo_key=repo_key, user_id=_scene_uid) or 0
     skill_path = vod_skill
     if skill_id:
         _sk = get_skill_by_id(skill_id)
         skill_path = (_sk.get("skill_path") or vod_skill) if _sk else vod_skill
-    else:
-        # Issue #657: skill 解析为空（仅 user scope 可用，scope 不匹配）→
-        # 立即失败既有事件（seq 已创建），不再派发（替代 1800s 超时）
-        _mm, _mm_info = _skill_scope_mismatch(vod_skill, repo_key)
-        if _mm:
-            _fail_skill_resolve_event(
-                repo_key, vod_skill, _scene_id, "vod",
-                _skill_scope_mismatch_reason(vod_skill, _mm_info, _scene_id, "vod"),
-                issue_id=issue_id, seq=seq)
-            return False
 
     # 构建 evt 副本（_enqueue_pipeline_task 内部会构建 prompt）
     evt_copy = dict(evt)

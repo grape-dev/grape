@@ -896,8 +896,12 @@ def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
     return path
 
 
-def get_skill_by_id(skill_id) -> dict | None:
-    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）"""
+def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
+    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）
+
+    Issue #1758: raise_on_error=True 时数据库异常上抛，供单一 scope 判官按
+    fail-closed 策略处理；默认 False 维持既有吞异常返回 None 的兼容语义。
+    """
     if not skill_id:
         return None
     try:
@@ -915,6 +919,8 @@ def get_skill_by_id(skill_id) -> dict | None:
                 "content_hash": row[9] or "",
             }
     except Exception as e:
+        if raise_on_error:
+            raise
         log.warning(f"get_skill_by_id failed: {e}")
         return None
 
@@ -1144,7 +1150,8 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
     return out
 
 
-def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
+def get_skill_scope_info(skill_name: str, repo_key: str = "",
+                         *, raise_on_error: bool = False) -> dict:
     """技能 scope 与场景（repo 级）scope 匹配判定（Issue #657）。
 
     按 repo → official → user（任意 owner）顺序查 skill 表：
@@ -1155,6 +1162,8 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
       由调用方走内置包兜底/派发侧门禁，维持存量场景兼容）。
 
     返回 {found, matched, scope, skill_id, owner_id}。
+    Issue #1758: raise_on_error=True 时数据库异常上抛（供单一 scope 判官
+    fail-closed）；默认 False 维持吞异常返回 found=False 的兼容语义。
     """
     info = {"found": False, "matched": False, "scope": "", "skill_id": 0, "owner_id": ""}
     if not skill_name:
@@ -1186,6 +1195,8 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
                             skill_id=row[0], owner_id=row[1] or "")
                 return info
     except Exception as e:
+        if raise_on_error:
+            raise
         log.warning(f"get_skill_scope_info failed: {e}")
     return info
 
