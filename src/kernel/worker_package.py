@@ -55,8 +55,10 @@ MANIFEST = [
     "src/api/session_store.py",
     "src/api/knowledge.py",
     "src/api/merge_gate.py",  # Issue #752: worktree_guard 依赖（冲突标记扫描）
+    # worker 侧 otel 实现在 src/domains/insight/observability/，已由 "src/domains/" 覆盖
     "src/domains/runtime/agents/",
     "src/domains/runtime/engine/",
+
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra

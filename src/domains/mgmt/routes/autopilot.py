@@ -19,6 +19,8 @@ from pydantic import BaseModel, field_validator
 from src.api.deps import get_current_user, check_repo_access
 from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
+from src.domains.runtime.engine.scheduler import _get_exec_agent_task
+
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
@@ -471,18 +473,24 @@ def list_executions(
     """查询执行日志（可按 task_id / status 筛选，分页）。
 
     Issue #258: 响应增加 agent_task_ids 字段（老流水线任务，通过 issue_number + repo_key 关联）。
-    Issue #261: 响应增加 agent_task_id 字段（单 agent 定时任务，通过 event_seq=exec_id 关联），
-    新版 autopilot 无 issue_number，agent_task_id 为主要日志查看入口。
+    Issue #261: 响应增加 agent_task_id 字段（单 agent 定时任务，日志查看入口）。
+    Issue #1546: 关联按 agent_task_id 直连优先，历史空值按 event_type + started_at 兜底，
+    不再裸用 event_seq 反查。
     """
     # 如果指定了 task_id，校验归属
     if task_id is not None:
         _check_task_access(user, task_id)
     # v3.0: autopilot_executions 不再有 issue_number 列（旧字段物理保留则兼容读取）
-    _has_issue_num_col = "issue_number" in _autopilot_exec_cols()
+    _exec_cols = _autopilot_exec_cols()
+    _has_issue_num_col = "issue_number" in _exec_cols
     _issue_num_expr = "e.issue_number" if _has_issue_num_col else "'' AS issue_number"
+    # Issue #1546（架构审查 M2）：agent_task_id 为新增列，迁移未落（MySQL 已盖章但列未建）
+    # 时列表查询不能直撞 1054 → 500；与 issue_number 同一列探测口径做表达式兜底。
+    _has_agent_task_id_col = "agent_task_id" in _exec_cols
+    _agent_task_id_expr = "e.agent_task_id" if _has_agent_task_id_col else "'' AS agent_task_id"
     sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
            "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
-           + _issue_num_expr + " FROM autopilot_executions e WHERE 1=1")
+           + _issue_num_expr + ", " + _agent_task_id_expr + " FROM autopilot_executions e WHERE 1=1")
     count_sql = "SELECT COUNT(*) FROM autopilot_executions e WHERE 1=1"
     conditions = []
     params = []
@@ -518,17 +526,18 @@ def list_executions(
         exec_id = r[0]
         tid = r[1]
         issue_number = r[11] or ""
-        # 反查 agent_task_id（event_seq = exec_id，旧路径）
-        agent_task_id = ""
-        try:
-            with db_lock:
-                c2 = db.cursor()
-                c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (exec_id,))
-                at_row = c2.fetchone()
-                if at_row:
-                    agent_task_id = at_row[0]
-        except Exception:
-            pass
+        # 反查 agent_task_id（Issue #1546：agent_task_id 直连优先，历史空值受约束兜底）
+        # 主查询已带回 agent_task_id/started_at/created_at，避免逐行重查执行记录（N+1）。
+        agent_task_id = r[12] or ""
+        if not agent_task_id:
+            try:
+                with db_lock:
+                    c2 = db.cursor()
+                    at_row = _get_exec_agent_task(c2, exec_id, "", r[6], r[8])
+                    if at_row:
+                        agent_task_id = at_row[0]
+            except Exception as e:
+                log.warning(f"Autopilot: resolve agent_task_id failed for exec {exec_id}: {e}")
         # Issue #258: 查 agent_task_ids（issue_number + repo_key 关联，支持多阶段）
         agent_task_ids: list[str] = []
         if issue_number:

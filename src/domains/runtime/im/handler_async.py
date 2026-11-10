@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING
 
 from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.kernel.session_manager import get_or_create_session, update_session, update_conversation, db
-from src.kernel.prompt_builder import build_chat_prompt
+from src.kernel.prompt_builder import build_chat_prompt, resolve_task_server_env
 from src.domains.runtime.engine.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
+
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 from src.api.chat_session_env import chat_session_env_extra
 from src.kernel.token_service import is_auth_401_error
@@ -1878,7 +1879,10 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         # 会话凭据（chat_session_env.py，与 direct/Web 同语义）+ IM 上下文一并下发；
                         # enqueue_task 内部会再以 task_id 为 session_key 补签/覆盖 GRAPE_SESSION_TOKEN
                         env_extra={**chat_session_env_extra(uid, conv_id or "", repo_key or ""),
-                                   "IM_CHAT_ID": chat_id},
+                                   "IM_CHAT_ID": chat_id,
+                                   # Issue #1577：与 Web chat 同源注入两项服务基址，
+                                   # 否则远端 IM chat worker 业务命令落默认 base_url 不可用。
+                                   **resolve_task_server_env(runtime_id)},
                         pool_agent_type="chat",
                     )
                     log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")

@@ -34,6 +34,11 @@ _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id �
 # 剩余工序经常超 30 分钟被误判 timeout_failed；配合判死前活跃流豁免（见 sweep）双保险。
 PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "5400"))
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
+# Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
+# 避免「回收器抢在真任务落库前判定终态」的竞态；时区解析规则同 _get_exec_agent_task。
+# 窗口来源：Issue #1546 中派发链路（pick_engine → enqueue_task → 回写 execution）的落库时延，
+# 120s 为留足余量的默认值；不同部署的派发链耗时差异用 env 覆盖，与相邻两个宽限常量口径一致。
+ZOMBIE_YOUNG_GRACE_SECONDS = int(os.environ.get("ZOMBIE_YOUNG_GRACE_SECONDS", "120"))
 
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
@@ -351,9 +356,18 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
+    from src.prompt_builder import resolve_task_server_env
+    # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key）。
+    from src.repo_key import derive_repo_identity
+    _full_name, _repo_owner, _repo_name = derive_repo_identity(repository, repo_key)
     env_extra = {
-        "REPO_FULL_NAME": repository,
+        "REPO_FULL_NAME": _full_name or repository,
+        "REPO_OWNER": _repo_owner,
+        "REPO_NAME": _repo_name,
         "ACCOUNT": repository,
+        # Issue #1577：与事件/chat 同源注入两项服务基址，远端 autopilot worker
+        # 的业务命令免 --base-url 可用（direct 模式注入本机回环同样正确）。
+        **resolve_task_server_env(engine_id),
     }
     # 注入 custom_fields（自定义环境变量）和 work_branch
     _task_custom_fields = task.get("custom_fields") or ""
@@ -588,6 +602,18 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             log.warning(f"Autopilot exec {exec_id}: enqueue_task failed")
             _update_execution_result(exec_id, "failed", error="入队失败")
             return
+
+        # Issue #1546：执行记录直接持有 agent_tasks.id，反查不再依赖 event_seq 撞号。
+        # 回写失败只告警，不影响派发主流程（历史空值行走受约束兜底）。
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "UPDATE autopilot_executions SET agent_task_id=? WHERE id=?",
+                    (str(task_id), exec_id))
+                db.commit()
+        except Exception as _at_e:
+            log.warning(f"Autopilot exec {exec_id}: persist agent_task_id failed: {_at_e}")
 
         log.info(f"Autopilot exec {exec_id}: enqueued task_id={task_id}, waiting for worker...")
 
@@ -986,11 +1012,85 @@ def _update_task_run_info(task_id: int, next_run: str):
         db.commit()
 
 
+def _parse_iso_aware(value):
+    """解析 ISO 时间串为 aware datetime（无时区按 UTC 补齐），失败返回 None。"""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace(" ", "T"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+_AGENT_TASK_SELECT = "id, status, result_text, exit_code, skill, env_extra, runtime_id"
+
+
+def _agent_task_view(row):
+    """将 agent_tasks 行（`_AGENT_TASK_SELECT` 列序）映射为 evidence 校验用 dict。"""
+    return {
+        "status": row[1] or "",
+        "result_text": row[2] or "",
+        "skill": row[4] or "",
+        "env_extra": row[5] or "",
+        "runtime_id": row[6] or 0,
+    }
+
+
+def _get_exec_agent_task(c, exec_id, agent_task_id="", started_at="", created_at=""):
+    """按执行记录解析对应 agent_tasks 行（Issue #1546）。
+
+    入参为执行记录的显式字段（调用方按列名取值后传入，避免行内魔数下标契约）：
+    `exec_id`（= events 序列旁路关联键）、`agent_task_id`、`started_at`、`created_at`。
+
+    - `agent_task_id` 非空：按任务主键 `id` 直查（唯一权威关联）；
+    - 为空（历史行）：受约束兜底 `event_seq=? AND event_type='autopilot_event'
+      AND created_at >= exec.started_at`（started_at 空则用 created_at，aware
+      比较；started_at/created_at 为空或解析失败均视为不匹配）；
+    - 两路皆无 → 返回 None（调用方跳过，禁止退回裸 event_seq）。
+
+    返回列序：id, status, result_text, exit_code, skill, env_extra, runtime_id。
+    """
+    _atid = str(agent_task_id or "").strip()
+    if _atid:
+        try:
+            return c.execute(
+                f"SELECT {_AGENT_TASK_SELECT} FROM agent_tasks WHERE id=? LIMIT 1",
+                (_atid,)).fetchone()
+        except Exception as e:
+            log.warning(f"Autopilot: lookup agent_task {_atid} failed: {e}")
+            return None
+
+    if started_at:
+        _since = _parse_iso_aware(started_at)
+    else:
+        _since = _parse_iso_aware(created_at)
+    if _since is None:
+        return None
+    try:
+        _rows = c.execute(
+            f"SELECT {_AGENT_TASK_SELECT}, created_at FROM agent_tasks "
+            "WHERE event_seq=? AND event_type='autopilot_event' "
+            "ORDER BY created_at DESC LIMIT 5",
+            (exec_id,)).fetchall()
+    except Exception as e:
+        log.warning(f"Autopilot: legacy agent_task fallback failed for exec {exec_id}: {e}")
+        return None
+    for _r in _rows:
+        _seen = _parse_iso_aware(_r[7])
+        if _seen is not None and _seen >= _since:
+            return _r
+    return None
+
+
 async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
                                      poll_interval: float = 10.0) -> str:
     """轮询 dispatched 状态的 exec 等待 worker 完成执行。
 
-    通过查 agent_tasks（event_seq=exec_id）的状态推断 autopilot_executions 终态：
+    通过 agent_task_id 直连优先、历史空值按 event_type+started_at 兜底解析任务，
+    据其状态推断 autopilot_executions 终态：
     - agent_tasks status=completed/success → exec success（部署类任务先过 evidence 校验）
     - agent_tasks status=failed → exec failed
     - agent_tasks status=timeout_failed → exec failed（带超时说明，不等自身 3600s）
@@ -1005,24 +1105,22 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
         try:
             with db_lock:
                 c = db.cursor()
-                # 查 agent_tasks 按 event_seq=exec_id（含 skill/env_extra/runtime_id 供 evidence 校验）
-                row = c.execute(
-                    "SELECT status, result_text, exit_code, skill, env_extra, runtime_id "
-                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
-                    (exec_id,)
-                ).fetchone()
+                _erow = c.execute(
+                    "SELECT agent_task_id, started_at, created_at "
+                    "FROM autopilot_executions WHERE id=?",
+                    (exec_id,)).fetchone()
+                if _erow is None:
+                    row = None
+                else:
+                    _atid, _started, _created = _erow
+                    # Issue #1546：优先按 agent_task_id 直连，历史行受约束兜底；无命中跳过
+                    row = _get_exec_agent_task(c, exec_id, _atid, _started, _created)
             if not row:
                 continue
-            _at_status = row[0] or ""
-            _result_text = row[1] or ""
-            _exit_code = row[2]
-            _at_task = {
-                "status": _at_status,
-                "result_text": _result_text,
-                "skill": row[3] or "",
-                "env_extra": row[4] or "",
-                "runtime_id": row[5] or 0,
-            }
+            _at_status = row[1] or ""
+            _result_text = row[2] or ""
+            _exit_code = row[3]
+            _at_task = _agent_task_view(row)
 
             if _at_status in ("completed", "success"):
                 # 部署类任务收口前证据校验（Issue #537 P1-1 纵深防御）
@@ -1321,33 +1419,37 @@ def _reap_zombie_executions() -> None:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id FROM autopilot_executions "
+                "SELECT id, agent_task_id, started_at, created_at "
+                "FROM autopilot_executions "
                 "WHERE status IN ('running', 'dispatched') "
                 "ORDER BY id DESC LIMIT 20"
             )
             stuck = c.fetchall()
         for row in stuck:
-            _exec_id = row[0]
+            _exec_id, _exec_atid, _exec_started, _exec_created = row
+            # Issue #1546 D1：年轻度保护——派发协程尚未 enqueue 落库时回收器已开跑，
+            # started_at/created_at 距今 < 120s 的执行本轮跳过，避免误判历史同号行。
+            # 时区解析规则同 C1：started_at 空则用 created_at，为空或解析失败均跳过。
+            if _exec_started:
+                _ref_ts = _parse_iso_aware(_exec_started)
+            else:
+                _ref_ts = _parse_iso_aware(_exec_created)
+            if _ref_ts is None:
+                continue
+            _age = datetime.now(timezone.utc).timestamp() - _ref_ts.timestamp()
+            if _age < ZOMBIE_YOUNG_GRACE_SECONDS:
+                continue
             with db_lock:
                 c2 = db.cursor()
-                c2.execute(
-                    "SELECT id, status, result_text, exit_code, skill, env_extra, runtime_id "
-                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
-                    (_exec_id,)
-                )
-                at_row = c2.fetchone()
+                # Issue #1546：agent_task_id 直连优先，历史空值受约束兜底；无命中跳过
+                at_row = _get_exec_agent_task(
+                    c2, _exec_id, _exec_atid, _exec_started, _exec_created)
             if not at_row:
                 continue
             _at_id = at_row[0]
             _at_status = at_row[1] or ""
             _result_text = at_row[2] or ""
-            _at_task = {
-                "status": _at_status,
-                "result_text": _result_text,
-                "skill": at_row[4] or "",
-                "env_extra": at_row[5] or "",
-                "runtime_id": at_row[6] or 0,
-            }
+            _at_task = _agent_task_view(at_row)
             if _at_status in ("completed", "success"):
                 # 部署类任务收口前证据校验（Issue #537 P1-1）
                 # QA R1 三表终态一致性取舍：同 finalize——evidence 判失败仅 exec 侧 failed，
@@ -1398,8 +1500,8 @@ def _reap_zombie_executions() -> None:
                         c3.execute(
                             "SELECT t.runtime_id, ar.status, ar.last_seen_at FROM agent_tasks t "
                             "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                            "WHERE t.event_seq=? ORDER BY t.created_at DESC LIMIT 1",
-                            (_exec_id,)
+                            "WHERE t.id=? LIMIT 1",
+                            (_at_id,)
                         )
                         _rt_row = c3.fetchone()
                     _rt_id = (_rt_row[0] or 0) if _rt_row else 0

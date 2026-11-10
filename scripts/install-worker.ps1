@@ -215,6 +215,7 @@ try {
     #   Extract verification failed: VERSION unchanged ... after extraction）
     $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing `
         -Headers @{ Authorization = "Bearer $Token" } -ErrorAction Stop
+
     $expectedVersion = ("" + $lvi.version).Trim()
     if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
 } catch {
@@ -349,9 +350,19 @@ if ($expectedVersion) {
     }
     Log "Extract verified against package VERSION=$finalVersion (idempotent reinstall OK)"
 } elseif ($finalVersion -and $finalVersion -eq $preVersion) {
-    # 连包内 VERSION 都读不到时才走到这里：无法证明解压落地，但也不能凭「版本未变」判定失败
-    # —— 同版本重装是合法的（VERSION 必然不变）。降级为告警，让安装流程走完。
-    Log "Warning: VERSION unchanged ('$finalVersion') and no package VERSION available; continuing (idempotent reinstall assumed)"
+    # 幂等重装：已装版本 == 本次包版本 → 本来就最新，跳过重装直接启动 worker。
+    # 真机实证（2026-11-10）：changed-or-not fallback 下「无变化」被误报为解压失败，
+    # 用户反复重装最新版必然撞上；旧逻辑无法区分「已最新」与「解压未落地」。
+    Log "Already up-to-date (VERSION=$finalVersion), skipping reinstall and starting worker"
+    $startScript = Join-Path $Dir "start-worker.ps1"
+    if (Test-Path $startScript) {
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
+        Log "Worker started (no reinstall needed)"
+        exit 0
+    }
+    Log "start-worker.ps1 not found - install is current; start the worker manually"
+    exit 0
+
 }
 Remove-Item $TmpPkg -ErrorAction SilentlyContinue
 

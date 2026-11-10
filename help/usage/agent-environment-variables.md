@@ -24,7 +24,8 @@ GitCode 事件（Issue/PR/评论）
 
 | 环境变量 | 语义 | 适用 Agent | 注入来源 |
 |----------|------|-----------|----------|
-| `GRAPE_SERVER_URL` | Grape 服务端地址（skill 调 API 用） | 全部 | `_execute_agent` / agent.py 本机修正 |
+| `GRAPE_SERVER_URL` | **主控业务 API 基址**（issues / git-repo 等全量端点，skill 调业务 API / `grape` 业务命令用；**不是** worker runtime 地址）。来源：`task_business_api_url` 显式配置 > 本机 runtime 回退 `127.0.0.1:{port}` > `server_base_url`（本机 runtime 未显式配置时走回环，远程 runtime 用 `server_base_url`） | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`）/ 对话入队（`routes/chat.py`、`im/handler_async.py`、`im/vod_handler_async.py`、`runtime/scheduler.py`，均经 `resolve_task_server_env`）/ `agent.py` 本机或单地址部署覆盖 |
+| `RUNTIME_SERVER_URL` | **worker runtime / A2A 回连基址**（任务 server_url 同语义；`grape` 的 runtime 绑定命令用）。来源：`worker_connect_url`（未配置回退 `server_base_url`） | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`）/ 对话入队（`routes/chat.py`、`im/handler_async.py`、`im/vod_handler_async.py`、`runtime/scheduler.py`，均经 `resolve_task_server_env`）/ `agent.py` 本机或内网 worker 覆盖 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义）。**格式契约（#721）**：形如 `GTDTeam/CodeArts`——**无 host 前缀、无 provider 前缀（`gitcode:`/`github:`）、无 `.git` 后缀**；注入侧统一 `from_repo_key` 归一（幂等），runbook 拼接 clone URL 前仍应做一次归一兜底（见下「runbook clone URL 模板」） | 全部（devops 事件） | `_execute_agent` |
@@ -33,7 +34,7 @@ GitCode 事件（Issue/PR/评论）
 | `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `GRAPE_ISSUE_ID` | **需求卡片 id（issue 表主键，整数**；awaiting-input / pending-review / review-pass 的 `--issue_id` 用此值，**非 ISSUE_NUMBER**） | 事件任务（有 Issue） | `_execute_agent`（按 `(repo_key, issue_number)` 查卡片） |
-| `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent`（`_inject_issue_pr_env`：`payload.pr_number` → `evt._pr_sub_pr_number` → 嵌套键兜底 `payload.pull_request.number` / `payload.merge_request.number` / `payload.object_attributes.iid`，均为去 `#` 后纯数字，Issue #595） |
+| `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent`（`_inject_issue_pr_env`：`payload.pr_number` → `evt._pr_sub_pr_number` → 嵌套键兜底 `payload.pull_request.number` / `payload.merge_request.number` / `payload.object_attributes.iid`，均为去 `#` 后纯数字，Issue #595。**note_hook_pr**：payload 优先（`noteable_iid` / `merge_request` / `pull_request`），缺失时从结构化 URL（`object_attributes.url` / `merge_request`、`pull_request` 的 `web_url`，形如 .../merge_requests/<N>）兜底，不从事件标题猜号；解析失败注入 `PR_NUMBER_PARSE_FAILED=1` 告警，禁止用 `ISSUE_NUMBER` 顶替，Issue #1579） |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
 | `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra |

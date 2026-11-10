@@ -331,10 +331,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             })
     except Exception:
         pass
+    # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME（repository）派生，缺失回退 repo_key；
+    # **禁止**用 exec_account（触发人账号/带前缀全名）充当 REPO_OWNER——否则触发人≠仓库 owner 时
+    # 会注入 REPO_OWNER=<触发人>、REPO_NAME=""（反馈 2874）。Issue #94 的前缀剥离由派生入口统一处理。
+    from src.repo_key import derive_repo_identity as _derive_env
+    _full_name_env, _repo_owner_env, _repo_name_env = _derive_env(repository, repo_key)
     env_extra = {
-        "REPO_FULL_NAME": repository,
-        "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
-        "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
+        "REPO_FULL_NAME": _full_name_env or repository,
+        "REPO_OWNER": _repo_owner_env,
+        "REPO_NAME": _repo_name_env,
         "ACCOUNT": evt.get("actor") or exec_account or "",
     }
     # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
@@ -344,6 +349,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
     env_extra["REPO_OWNER"] = _repo_owner_env
     env_extra["REPO_NAME"] = _repo_name_env
+
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入
     try:
@@ -770,7 +776,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             try:
-                _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key)
+                _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key,
+                                      agent_result=True, task_id=task_id, seq=seq)
             except Exception as _pe:
                 # R20.3.2: _post_result_to_issue 失败时 append RESULT_POST_FAILED
                 log.warning(f"Exec agent: post result to issue failed: {_pe}")
@@ -802,7 +809,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     if new_status == "completed" and result_text and evt.get("_pr_sub_pr_number"):
         _pr_num = str(evt["_pr_sub_pr_number"])
         if _pr_num and repo_gitcode_token:
-            _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key)
+            _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key,
+                               agent_result=True, task_id=task_id, seq=seq)
 
     # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
     # Issue #468: 登记逻辑抽为共享函数 register_sre_deploy_url，与远程 worker

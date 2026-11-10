@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token, require_org_member
+from src.domains.runtime.engine.health import apply_runtime_state
 from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
@@ -143,6 +144,87 @@ def _require_credential(request: Request) -> int:
 
 # ===== 协议端点（M3）=====
 
+def _resolve_probe_fresh_window() -> int:
+    """解析 register healthy-guard 探活新鲜窗口（秒）。
+
+    默认 2×RUNTIME_PROBE_INTERVAL（interval 默认 600s → 窗口 1200s）；
+    RUNTIME_PROBE_FRESH_WINDOW 可显式覆盖。非法值（非整数/非正数/超范围）
+    回退默认并告警，不抛异常——否则守卫会静默失效（#837 Suggested-1，
+    对齐 acp_bootstrap._resolve_acp_check_timeout 模式）。
+    """
+    _interval_raw = (os.environ.get("RUNTIME_PROBE_INTERVAL") or "").strip()
+    _interval = 600
+    if _interval_raw:
+        try:
+            _val = int(_interval_raw)
+        except ValueError:
+            log.warning(f"RUNTIME_PROBE_INTERVAL 非法值 '{_interval_raw}'（非整数），回退默认 600s")
+            _val = 600
+        if _val < 1 or _val > 86400:
+            log.warning(f"RUNTIME_PROBE_INTERVAL 非法值 '{_interval_raw}'（超出 1~86400 范围），回退默认 600s")
+        else:
+            _interval = _val
+    _default = 2 * _interval
+    _raw = (os.environ.get("RUNTIME_PROBE_FRESH_WINDOW") or "").strip()
+    if not _raw:
+        return _default
+    try:
+        _window = int(_raw)
+    except ValueError:
+        log.warning(f"RUNTIME_PROBE_FRESH_WINDOW 非法值 '{_raw}'（非整数），回退默认 {_default}s")
+        return _default
+    if _window < 1 or _window > 86400:
+        log.warning(f"RUNTIME_PROBE_FRESH_WINDOW 非法值 '{_raw}'（超出 1~86400 范围），回退默认 {_default}s")
+        return _default
+    return _window
+
+def _register_healthy_guard(c, rid: int, reported: bool) -> int:
+    """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
+
+    震荡根因：worker re-register（每 300s）用 ACP 握手探测（15s 总闸）判
+    healthy，Windows 冷启动易超时 → 上报 False；而心跳探活（每 600s）真跑
+    ACP 成功后把 healthy 升回 1。两写入源打架导致 healthy 大部分时间为 0。
+
+    守卫规则（仅作用于 UPDATE 分支的 1→0 方向）：
+    - DB 行 healthy=1 且 probe_status='ok' 且 probe_last 距今 ≤ 新鲜窗口
+      （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
+      → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
+    - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
+      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除）。
+
+    INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
+    """
+    try:
+        row = c.execute(
+            "SELECT healthy, probe_status, probe_last FROM agent_runtimes WHERE id=?",
+            (rid,)).fetchone()
+        if not row:
+            return 1 if reported else 0
+        cur_healthy, probe_status, probe_last = (row[0] or 0), (row[1] or ""), (row[2] or "")
+        if reported or not cur_healthy:
+            return 1 if reported else 0
+        # 仅剩「当前 healthy=1、上报 False」的降级方向需要守卫
+        if (probe_status or "").strip().lower() != "ok":
+            return 0
+        _window = _resolve_probe_fresh_window()
+        try:
+            _last = datetime.fromisoformat(probe_last)
+            if _last.tzinfo is None:
+                _last = _last.replace(tzinfo=timezone.utc)
+            fresh = (datetime.now(timezone.utc) - _last).total_seconds() <= _window
+        except Exception:
+            fresh = False
+        if fresh:
+            log.info(f"register healthy-guard: runtime={rid} probe ok within {_window}s, "
+                     f"keep healthy=1 (transient ACP check downgrade suppressed)")
+            return 1
+        return 0
+    except Exception as _ge:
+        # 守卫自身异常绝不阻塞注册主链路（保守：按上报值）
+        log.warning(f"register healthy-guard failed (runtime={rid}): {_ge}")
+        return 1 if reported else 0
+
+
 @router.post("/register")
 def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int = Depends(_require_credential)):
     """凭据校验 + 按实例键 upsert agent_runtimes（幂等），返回 server 权威 runtime IDs。
@@ -192,14 +274,53 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             if not name:
                 continue
             _ls_json = skills_by_name.get(name, "[]")
-            c.execute("SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
-                      (credential_id, name, cred_scope, owner_id))
+            # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——scope/owner_id/org_id/repo_key
+            # 是凭据派生属性，命中既有行后原地同步（引擎 id 天然稳定）
+            c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
+                      "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
+                      (credential_id, name))
             row = c.fetchone()
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=? WHERE id=?",
-                          (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
+                # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
+                # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
+                # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
+                # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
+                # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
+                apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
+                _upd_sql = ("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
+                            + (", role_tags=?" if _role_tags_json else "")
+                            + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                            + " WHERE id=?")
+                # 参数顺序 bug 修复（#865 基线缺陷，2026-11-10 真机实证）：rid 必须是
+                # 最后一个参数（对应 WHERE id=?）——旧实现把 rid 固定在元组第 6 位再
+                # 追加 role_tags/model 值，一旦带上 model 分支占位符与参数错位，
+                # sqlite binding 异常 → 该引擎行整个 UPDATE 失败（表现为「检测到
+                # 模型的引擎 worker_version 卡旧版且 model_name 恒空」；INSERT 新行
+                # 路径参数固定无误，故首台远程 Worker 首注册侥幸成功）。
+                _upd_args = [rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
+                             rt.get("cli_path", ""), _ls_json, body.cli_version]
+                if _role_tags_json:
+                    _upd_args.append(_role_tags_json)
+                if _model_name:
+                    _upd_args += [_model_name, datetime.now(timezone.utc).isoformat()]
+                _upd_args.append(rid)
+                c.execute(_upd_sql, _upd_args)
+                # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
+                # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
+                if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
+                        or (row[3] or "") != (cred_repo_key or "")
+                        or (row[4] or 0) != cred_org_id):
+                    c.execute("UPDATE agent_runtimes SET scope=?, owner_id=?, repo_key=?, org_id=? WHERE id=?",
+                              (cred_scope, owner_id, cred_repo_key, cred_org_id, rid))
+                    _ev = {"event": "engine_scope_synced", "credential_id": credential_id,
+                           "runtime_id": rid, "engine": name,
+                           "old": {"scope": row[1] or "", "owner_id": row[2] or "",
+                                   "repo_key": row[3] or "", "org_id": row[4] or 0},
+                           "new": {"scope": cred_scope, "owner_id": owner_id,
+                                   "repo_key": cred_repo_key, "org_id": cred_org_id}}
+                    log.info("engine_change_event: " + json.dumps(_ev, ensure_ascii=False))
+
             else:
                 c.execute(
                     "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1806,3 +1927,75 @@ def set_runtime_alias(runtime_id: int, body: AliasBody,
     return {"alias": alias}
 
 
+# ===== MR-2b（2026-11-05）：worker trace 中继（LGTM 不对 worker 开放，经主控 C 进程转发）=====
+# 设计：docs/weekly-10/worker-trace-relay-layer2-design.md
+# - worker 的 OTLP/HTTP exporter 指向 {RUNTIME_SERVER_URL}/api/runtime/traces（既有通道+Bearer）
+# - 本端点透传 body（protobuf/json/gzip 原样，零解析）→ OTLP_RELAY_TARGET/v1/traces
+# - 鉴权复用 _require_credential（与 claim 同款）；失败透传状态码，业务零影响
+OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()
+
+from fastapi.responses import Response as _RelayResponse
+
+_relay_total = None
+try:
+    from prometheus_client import Counter as _PC
+    from src.observability import registry as _obs_registry
+    _relay_total = _PC("grape_trace_relay_requests_total",
+                       "Trace relay requests forwarded to LGTM",
+                       ["status"], registry=_obs_registry)
+except Exception:
+    _relay_total = None
+
+
+@router.post("/traces", operation_id="runtime_traces_relay",
+             summary="Relay worker OTLP traces to LGTM",
+             description="Transparently forwards worker OTLP/HTTP trace exports to the LGTM "
+                         "OTLP endpoint (env OTLP_RELAY_TARGET). Workers authenticate with "
+                         "their existing runtime token. Failures pass through the upstream "
+                         "status; LGTM unreachability returns 502 (worker exporters retry/drop "
+                         "asynchronously, zero business impact).")
+async def runtime_traces_relay(request: Request,
+                               credential_id: int = Depends(_require_credential)):
+    if not OTLP_RELAY_TARGET:
+        return _RelayResponse(status_code=503,
+                              content='{"detail":"trace relay disabled"}',
+                              media_type="application/json")
+    # 公开端点（虽要求 runtime token）仍需限体：OTLP 批量包通常 <512KB。
+    # 架构守护 Medium-1：先按 content-length 拒绝，避免超大包整块读入内存造成尖峰。
+    _max_body = int(os.environ.get("GRAPE_TRACE_RELAY_MAX_BODY", str(2 * 1024 * 1024)))
+    if int(request.headers.get("content-length") or 0) > _max_body:
+        return _RelayResponse(status_code=413,
+                              content='{"detail":"payload too large"}',
+                              media_type="application/json")
+    body = await request.body()
+    if len(body) > _max_body:
+        return _RelayResponse(status_code=413,
+                              content='{"detail":"payload too large"}',
+                              media_type="application/json")
+    ctype = request.headers.get("content-type", "application/x-protobuf")
+    cenc = request.headers.get("content-encoding", "")
+    fwd_headers = {"Content-Type": ctype}
+    if cenc:
+        fwd_headers["Content-Encoding"] = cenc
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as hc:
+            r = await hc.post(OTLP_RELAY_TARGET.rstrip("/") + "/v1/traces",
+                              content=body, headers=fwd_headers)
+        if _relay_total is not None:
+            try:
+                _relay_total.labels(status=str(r.status_code)).inc()
+            except Exception:
+                pass
+        return _RelayResponse(status_code=r.status_code, content=r.content,
+                              media_type=r.headers.get("content-type", "application/x-protobuf"))
+    except Exception as e:
+        if _relay_total is not None:
+            try:
+                _relay_total.labels(status="relay_unreachable").inc()
+            except Exception:
+                pass
+        log.warning(f"trace relay unreachable: {type(e).__name__}")
+        return _RelayResponse(status_code=502,
+                              content='{"detail":"lgtm unreachable"}',
+                              media_type="application/json")

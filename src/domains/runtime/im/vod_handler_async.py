@@ -7,10 +7,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
+from src.api.chat_session_env import chat_repo_env
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.kernel.token_service import is_auth_401_error
+
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
@@ -230,10 +232,12 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     parts.append("## 角色定义")
     parts.append(_VOD_ROLE_DEFINITION)
 
-    # 替换 {{SERVER_URL}} 为服务端可达地址（A2A/tasks 等对外调用；worker 端会再替换一次，幂等）
+    # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
+    # （Issue #1577 / 架构审查 M3；worker 端会再替换一次，幂等）
     try:
-        from src.kernel.prompt_builder import _resolve_server_url
-        return "\n".join(parts).replace("{{SERVER_URL}}", _resolve_server_url())
+        from src.prompt_builder import _apply_server_url_placeholders
+        return _apply_server_url_placeholders("\n".join(parts))
+
     except Exception:
         return "\n".join(parts)
 
@@ -291,6 +295,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             _queue_repo_token = repo_token or ""
             if _token_result.level == "user":
                 _queue_repo_token = ""  # 路径 B: repo_gitcode_token 留空，与 pipeline 一致
+            from src.prompt_builder import resolve_task_server_env
             tid = enqueue_task(
                 agent_session_id=f"vod:{repo_key}",
                 runtime_id=runtime_id,
@@ -303,6 +308,10 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 repo_gitcode_token=_queue_repo_token,
                 skill_path=skill_path or "",
                 skill_id=agent_session.get("skill_id", 0) or 0,
+                # Issue #1577：与事件/Web chat 同源注入两项服务基址，远端 VOD worker
+                # 的业务命令（issues/git-repo）免 --base-url 可用。
+                env_extra={**resolve_task_server_env(runtime_id),
+                           **chat_repo_env(repo_key)},
             )
             log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={kind}")
             task = await wait_task_terminal(tid)
@@ -341,10 +350,11 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                               "engine_id": int(engine_id or 0)})
         _mu.start()
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
-                                                            backend_name=_be, account=repo_key,
+                                                           backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, user_token=_user_token,
                                                            agent_name="VOD Agent",
-                                                           agent_label=f"[Agent:vod|repo:{repo_key}]"):
+                                                           agent_label=f"[Agent:vod|repo:{repo_key}]",
+                                                           env_extra=chat_repo_env(repo_key)):
             _mu.feed(event_type, data)
             if event_type == "done":
                 final_text = data.get("text", "")

@@ -95,12 +95,20 @@ class _JsonFormatter(logging.Formatter):
 
     def format(self, record):
         import time as _t
+        # OTel trace 关联（2026-11-05 MR-1 Step 3）：注入 trace_id/span_id
+        try:
+            from src.observability.otel import inject_trace_ids
+            inject_trace_ids(record)
+        except Exception:
+            pass
         log_entry = {
             "ts": _t.strftime("%Y-%m-%dT%H:%M:%S.", _t.gmtime(record.created))
                   + f"{record.msecs:03.0f}Z",
             "level": record.levelname,
             "component": record.name,
             "request_id": getattr(record, "request_id", "-"),
+            "trace_id": getattr(record, "trace_id", "") or "",
+            "span_id": getattr(record, "span_id", "") or "",
             "message": record.getMessage(),
         }
         # 提取 extra 字段（HTTP 请求日志中间件注入的结构化维度）
@@ -340,6 +348,13 @@ def _load_accounts():
                 if _wcu:
                     set_meta_value("worker_connect_url", _wcu)
                     log.info(f"Configured worker_connect_url from server-config.json: {_wcu}")
+            # Issue #1577：业务 API 基址（任务内 GRAPE_SERVER_URL）可选配置，
+            # 未配置 getter 回退 server_base_url（单地址部署与改造前等价）。
+            if not get_meta_value("task_business_api_url"):
+                _tba = (_cfg.get("task_business_api_url") or "").strip().rstrip("/")
+                if _tba:
+                    set_meta_value("task_business_api_url", _tba)
+                    log.info(f"Configured task_business_api_url from server-config.json: {_tba}")
         except Exception:
             pass
     except Exception as e:

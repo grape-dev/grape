@@ -896,6 +896,8 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     -- v3.0 新增字段
     agent_type      TEXT DEFAULT '',                     -- 执行快照
     findings_json   MEDIUMTEXT DEFAULT '',               -- findings list JSON
+    -- Issue #1546：执行记录直接持有的 agent_tasks.id（非 events.seq），反查唯一权威来源
+    agent_task_id   TEXT DEFAULT NULL,                   -- agent_tasks.id（字符串，空=历史行）
     -- Feishu subscription notification: terminal-state notify idempotency guard
     notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
 )
@@ -1868,6 +1870,13 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
+def _strip_null_default(ddl: str) -> str:
+    """Issue #1546 修复：仅剥离尾部 `DEFAULT NULL`（与可空列的隐式默认完全等价）；
+    其它显式默认值（0/'' 等）原样保留——剥掉会改变历史行语义。"""
+    import re as _re
+    return _re.sub(r"\s+DEFAULT\s+NULL\s*$", "", (ddl or "").strip(), flags=_re.IGNORECASE)
+
+
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    strict: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
@@ -1878,8 +1887,11 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
     1. 首选 ``ALGORITHM=INSTANT``（8.0 加可空列默认 INSTANT，不锁表）；
     2. INSTANT 不支持 → 降级重试 ``ALGORITHM=INPLACE, LOCK=NONE``（显式声明，
        做不到就报错而非默默锁全表）；
+    2.5 带 ``DEFAULT NULL`` 的 TEXT/MEDIUMTEXT 列上述两者都不支持（Issue #1546 实测）→
+       剥离该默认值后重试两者（与可空列隐式默认等价，不改历史行语义）；
     3. 再失败 → 记 ERROR 进人工处理清单，**绝不静默降级到 COPY**；
-       列未建成，下次启动幂等重试。
+       注意：此处不抛异常，调用方迁移仍会盖章 → 该列不会自动重试，只能另行补一条
+       幂等修复迁移（参考 202611090002）。
 
     allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
     补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
@@ -1917,6 +1929,23 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
         if _is_mdl_timeout(_inplace_err):
             _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
             raise _MdlWaitTimeout(str(_inplace_err))
+        # Issue #1546 修复（2026-11-09）：带 DEFAULT NULL 的 TEXT/MEDIUMTEXT 列在 MySQL 上
+        # INSTANT 与 INPLACE,LOCK=NONE 均不支持；此前直接落人工清单后正常返回 → 迁移照样盖章、
+        # 列永不创建也不重试（SQLite 全绿，生产运行时才 1054）。DEFAULT NULL 与可空列隐式默认
+        # 等价，剥离后重试，既能把列补上、又不必退到 COPY 锁全表。
+        _ddl_nd = _strip_null_default(ddl)
+        if _ddl_nd != ddl:
+            _base_nd = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_nd}"
+            for _algo_nd in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
+                try:
+                    c.execute(f"{_base_nd}, {_algo_nd}")
+                    log.info(f"_ensure_column({tbl}.{col}) 剥离 DEFAULT NULL 后补列成功（{_algo_nd}）")
+                    return
+                except Exception as _nd_err:
+                    if _is_mdl_timeout(_nd_err):
+                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
+                        raise _MdlWaitTimeout(str(_nd_err))
+                    _inplace_err = _nd_err
         if allow_copy:
             try:
                 c.execute(base_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
@@ -2850,7 +2879,7 @@ def _fn_task_liveness_index_and_revived_at() -> None:
 
 
 register_migration(
-    version="202611050001",
+    version="202611080004",
     name="task-liveness-revived-at",
     kind="safe",
     fn=_fn_task_liveness_index_and_revived_at,
@@ -2868,10 +2897,34 @@ def _fn_create_grape_t_merge_gate_log() -> None:
 register_migration(
     # 20261105 修复：远端曾误改为 0001（与 issue658_role_tags 撞号），且生产版本表
     # 已按 0002 落库——回到 0002 对齐生产；issue865 挪至 0004 避让。
-    version="202611030002",
+    # 2026-11-10：目标库 202611030002 已被 issue865_agent_runtimes_model 占用（同号不同名，
+    # 本次迁移被判已执行永久跳过）→ renumber 到 202611100002。该迁移只做
+    # CREATE TABLE IF NOT EXISTS，重跑幂等无损。
+    version="202611100002",
     name="create-merge-gate-log-table",
     kind="safe",
     fn=_fn_create_grape_t_merge_gate_log,
+)
+
+
+def _fn_add_agent_tasks_trace_context() -> None:
+    """MR-2（weekly-10）：存量库补 agent_tasks.trace_context（幂等补列）。
+
+    _migrate_tables 里的同名 _ensure_column 只在 legacy 全量迁移路径执行，已盖章的
+    存量库不会再跑那一段，缺列时代码侧 _TASK_COLUMNS_LIST 含该列会让
+    _create_direct_task 的严格 INSERT 直接抛错、任务行永不落库。故补一条独立迁移。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
+        db.commit()
+
+
+register_migration(
+    version="202611100001",
+    name="add-agent-tasks-trace-context",
+    kind="safe",
+    fn=_fn_add_agent_tasks_trace_context,
 )
 
 
@@ -2915,6 +2968,56 @@ register_migration(
     name="add-branch-guard-pending-columns",
     kind="safe",
     fn=_fn_add_branch_guard_pending_columns,
+)
+
+
+def _fn_add_ap_exec_agent_task_id() -> None:
+    """Issue #1546：autopilot_executions 直接持有 agent_tasks.id（存量库幂等补列 + 索引）。
+
+    反查任务不再依赖 `event_seq`（= exec_id）与 events.seq 的跨序列撞号；索引
+    支撑按 agent_task_id 直连查询。列/索引已存在时正常返回并盖章，失败抛出由
+    迁移执行器跳过不盖章（幂等重试）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "autopilot_executions", "agent_task_id", "TEXT DEFAULT NULL")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ap_exec_agent_task "
+            "ON autopilot_executions(agent_task_id)")
+        db.commit()
+
+
+register_migration(
+    # 撞号避让（2026-11-09 变基）：weekly-10 已用 202611060003 给
+    # backfill_events_terminal_completed_at，同号后登记项会被判「已执行」永久跳过。
+    version="202611090001",
+    name="add-autopilot-exec-agent-task-id",
+    kind="safe",
+    fn=_fn_add_ap_exec_agent_task_id,
+)
+
+
+def _fn_repair_ap_exec_agent_task_id() -> None:
+    """Issue #1546 修复（2026-11-09）：原迁移在 MySQL 上可能「已盖章但列未创建」。
+
+    _ensure_column 两级降级失败时不抛异常、只记人工清单，迁移仍会被盖章 → 该列再也
+    不会补。本迁移幂等重查一次：列存在则只补索引（无副作用），缺失则按修正后的
+    剥离 DEFAULT NULL 路径补列；即使仍失败，下次启动也会重试（未被提前盖章掩盖）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "autopilot_executions", "agent_task_id", "TEXT DEFAULT NULL")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ap_exec_agent_task "
+            "ON autopilot_executions(agent_task_id)")
+        db.commit()
+
+
+register_migration(
+    version="202611090002",
+    name="repair-autopilot-exec-agent-task-id",
+    kind="safe",
+    fn=_fn_repair_ap_exec_agent_task_id,
 )
 
 
@@ -6047,6 +6150,10 @@ def _migrate_tables():
             # §6.4 追踪：trace_id（任务级轨迹）+ pipeline_trace_id（同一 issue 流程共享）
             _ensure_column(c, "agent_tasks", "trace_id", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "pipeline_trace_id", "TEXT DEFAULT ''")
+            # 架构守护 BLOCKED-2（2026-11-09）：MR-2 跨进程 trace 串联依赖该列。
+            # 之前只在 dev 库手工加列，新库/未 ALTER 的存量库会被 _avail 列过滤静默剔除，
+            # 导致 worker 取不到 traceparent、execute/finish 各自成为新根 trace。
+            _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
             # 告警策略层（P1-1）：规则侧节流/聚合/时段/升级 + 事件侧通知状态
             # P2-1 SLO：采样表补"在线"列（老库迁移；历史行只能为 0 = 数据不足）
             _ensure_column(c, "obs_runtime_samples", "online", "INTEGER NOT NULL DEFAULT 0")

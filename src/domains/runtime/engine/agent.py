@@ -1,3 +1,4 @@
+
 """RuntimeAgent 边端入口（python -m runtime.agent，仅外连）。
 
 见 agent-runtime-design.md §7.4 / tech-impl.md §1.4 / skill-delivery-remote.md §3.5。
@@ -578,6 +579,187 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
 
 
 
+def _probe_aishell_dsh_acp(cli_path: str) -> dict:
+    """aishell-dsh ACP 模式探活：initialize + session/new + set模型 + prompt 四步。
+
+    与 _probe_hwcloud_acp 同构（不做 --version 假探活）；差异（阶段 0 实测）：
+    - 启动命令 `aishell acp`
+    - session/new 后须按 configOptions 设模型（默认 trial 无凭据必失败），
+      value 从 options 原样取（自拼报 -32602），set_config_option 请求键是 configId
+    - 无 request_permission/turn_end，PromptResponse stopReason 收口
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import threading as _threading
+    import queue as _queue
+    import tempfile as _tempfile
+
+    # CLI 定位统一走 find_cli（PATH → 默认安装目录 → Uninstall 注册表 InstallLocation
+    # 三层兜底）；裸 shutil.which 只是历史上 PATH 时期的后备，装在非默认目录的
+    # AI Shell 会漏——与 aishell_acp.py 任务链同一寻路源。
+    from src.runtime.os_adapter import find_cli as _find_cli
+    agent_cmd = cli_path or _find_cli("aishell")
+    if not agent_cmd:
+        return {"status": "fail", "latency": 0, "error": "aishell CLI not found"}
+
+    start = _time_mod.time()
+    proc = None
+    try:
+        # 二进制模式 + 读线程（避免 TextIOWrapper 缓冲吞字节导致假阴性，#441 同源教训）
+        proc = _subprocess.Popen(
+            [agent_cmd, "acp"],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.DEVNULL,
+            bufsize=0,
+            start_new_session=True,
+        )
+        lines: "_queue.Queue" = _queue.Queue()
+
+        def _reader():
+            try:
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    lines.put(line.decode("utf-8", errors="replace").strip())
+            except Exception:
+                pass
+            finally:
+                lines.put(None)
+
+        _threading.Thread(target=_reader, daemon=True).start()
+
+        def _send(msg: dict):
+            proc.stdin.write((_json.dumps(msg) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+
+        _next_id = [0]
+
+        def _rpc(method: str, params: dict | None, timeout: float) -> tuple[dict | None, str | None]:
+            _next_id[0] += 1
+            rid = _next_id[0]
+            msg = {"jsonrpc": "2.0", "id": rid, "method": method}
+            if params is not None:
+                msg["params"] = params
+            try:
+                _send(msg)
+            except Exception as e:
+                return None, f"write {method}: {e}"
+            deadline = _time_mod.time() + timeout
+            while _time_mod.time() < deadline:
+                if proc.poll() is not None:
+                    return None, f"{method}: process exited"
+                try:
+                    item = lines.get(timeout=0.3)
+                except _queue.Empty:
+                    continue
+                if item is None:
+                    return None, f"{method}: stdout EOF"
+                try:
+                    raw = _json.loads(item)
+                except _json.JSONDecodeError:
+                    continue
+                if raw.get("id") != rid:
+                    continue
+                if "error" in raw:
+                    err = raw["error"]
+                    return None, err.get("message", str(err))[:200]
+                return raw.get("result") or {}, None
+            return None, f"{method} timeout after {timeout}s"
+
+        result, err = _rpc("initialize", {
+            "protocolVersion": 1,
+            "clientInfo": {"name": "grape-probe", "version": "0.1.0"},
+            "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}},
+        }, 30)
+        if err:
+            return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
+                    "error": f"initialize: {err}"}
+        version = ((result or {}).get("agentInfo") or {}).get("version", "")
+
+        result, err = _rpc("session/new", {"cwd": _tempfile.gettempdir(), "mcpServers": []}, 30)
+        if err:
+            return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
+                    "error": f"session/new: {err}"}
+        sid = (result or {}).get("sessionId", "")
+
+        # 设模型（默认 trial 无凭据必失败，跳过选第一个非 trial 路由；已配好则跳过）
+        for opt in (result or {}).get("configOptions") or []:
+            if not isinstance(opt, dict) or opt.get("id") != "model":
+                continue
+            cur = opt.get("currentValue", "")
+            if cur and cur != '["aishell","trial"]':
+                break
+            picked = ""
+            for g in (opt.get("options") or []):
+                for item in (g.get("options") or [] if isinstance(g, dict) else []):
+                    v = item.get("value", "") if isinstance(item, dict) else ""
+                    if v and v != '["aishell","trial"]':
+                        picked = v
+                        break
+                if picked:
+                    break
+            if picked:
+                _, err = _rpc("session/set_config_option", {
+                    "sessionId": sid, "configId": "model", "value": picked}, 20)
+                if err:
+                    return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
+                            "error": f"set_config_option: {err}"}
+            break
+
+        _prompt_id = _next_id[0] + 1
+        _next_id[0] += 1
+        _send({"jsonrpc": "2.0", "id": _prompt_id, "method": "session/prompt",
+               "params": {"sessionId": sid,
+                          "prompt": [{"type": "text", "text": "只回复 ok"}]}})
+        deadline = _time_mod.time() + 60
+        stop_reason = ""
+        while _time_mod.time() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                item = lines.get(timeout=0.3)
+            except _queue.Empty:
+                continue
+            if item is None:
+                break
+            try:
+                raw = _json.loads(item)
+            except _json.JSONDecodeError:
+                continue
+            if raw.get("id") == _prompt_id:
+                if "error" in raw:
+                    return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
+                            "error": f"prompt: {raw['error'].get('message', '')[:200]}"}
+                stop_reason = (raw.get("result") or {}).get("stopReason", "")
+                break
+
+        latency = round(_time_mod.time() - start, 1)
+        if stop_reason == "end_turn":
+            out = {"status": "ok", "latency": latency}
+            if version:
+                out["version"] = version
+            return out
+        return {"status": "fail", "latency": latency,
+                "error": f"prompt stopReason={stop_reason or 'none'}"}
+    except Exception as e:
+        return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
+                "error": str(e)[:200]}
+    finally:
+        if proc is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -590,6 +772,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     # hwcloud 使用 ACP 模式探活（与实际任务执行路径一致：hwcloud serve --acp）
     if engine_name == "hwcloud":
         return _probe_hwcloud_acp(cli_path)
+    # aishell-dsh 使用 ACP 模式探活（与实际任务执行路径一致：aishell acp，四步全真）
+    if engine_name == "aishell-dsh":
+        return _probe_aishell_dsh_acp(cli_path)
 
 
     cmd = _PROBE_COMMANDS.get(engine_name)
@@ -1077,19 +1262,21 @@ def _remap_cwd(path: str) -> str:
 
 
 def _backend_for_engine(engine_name: str | None = "") -> str:
-    """由引擎实例名推导执行后端（hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；其余默认 opencode）。"""
-    name = (engine_name or "").lower()
-    if name.startswith("hermes"):
-        return "hermes"
-    if name.startswith("codearts"):
-        return "codearts"
-    if name.startswith("codex"):
-        return "codex"
-    if name.startswith("hwcloud") or name.startswith("aishell"):
-        return "hwcloud"
-    if name.startswith("dsh"):
-        return "dsh"
-    return "opencode"
+    """由引擎实例名推导执行后端——统一走 canonical_engine 查表（前缀最长匹配）。
+
+    hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；
+    aishell-dsh-xxx → aishell-dsh（新引擎，先于 aishell 前缀命中）；
+    hwcloud-xxx / aishell-xxx → hwcloud（旧轨不变）；其余默认 opencode。
+    """
+    from src.runtime.instances import canonical_engine
+
+    return canonical_engine(engine_name)
+
+
+def _usage_retry_engine(engine_name: str | None) -> bool:
+    from src.runtime.instances import usage_retry_engine
+
+    return usage_retry_engine(engine_name)
 
 
 def _scan_local_skills() -> list[dict]:
@@ -1331,6 +1518,51 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
     with _worker_url_probe_lock:
         _worker_url_probe_cache[cache_key] = (now, ok)
     return ok
+
+
+def _same_url_host(a: str, b: str) -> bool:
+    """比较两个 URL 是否指向同一端点（scheme + host + port + path，忽略尾部斜杠）。
+
+    用于判定单地址部署：业务基址与 worker 回连基址同源时，内网 worker 必须
+    继续把业务基址覆盖为本机直连，否则公网/NAT 回环不通（改造前语义）。
+
+    仅比较 netloc 会把「同 host:port、不同 path 前缀」的双地址部署（如业务 API 与
+    runtime 分路径承载）误判为单地址，进而把业务基址覆盖为 localhost；因此纳入
+    scheme 与 path 比较，任一不同即视为双地址、保留显式业务基址。
+    """
+    if not a or not b:
+        return False
+    try:
+        from urllib.parse import urlsplit
+        ua = urlsplit(a.strip())
+        ub = urlsplit(b.strip())
+        if (ua.scheme.lower(), ua.netloc.lower()) != (ub.scheme.lower(), ub.netloc.lower()):
+            return False
+        pa = (ua.path or "").rstrip("/")
+        pb = (ub.path or "").rstrip("/")
+        return pa == pb
+    except Exception:
+        return a.strip().lower().rstrip("/") == b.strip().lower().rstrip("/")
+
+
+def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
+    """本机/内网 worker 修正回连基址（Issue #1577 语义拆分）。
+
+    - `RUNTIME_SERVER_URL` / `task["server_url"]` 覆盖为本 worker 直连地址
+      （A2A / tasks 等回连调用，走公网会 NAT 回环不通）。
+    - 业务 API 基址 `GRAPE_SERVER_URL`：双地址部署（显式业务基址与 worker 回连
+      基址不同主机）时保留不动，任务内 grape 业务命令需要全量端点；单地址部署
+      （未提供业务基址，或业务基址与回连基址同主机）时仍覆盖为本机直连地址，
+      与改造前等价，避免内网 worker 走公网 NAT 回环不通。
+    """
+    _business_base = env.get("GRAPE_SERVER_URL") or ""
+    _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
+    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
+    env["RUNTIME_SERVER_URL"] = local_base
+    task["server_url"] = local_base
+    if _single_address:
+        env["GRAPE_SERVER_URL"] = local_base
+        log.info("local worker: single-address deploy, override GRAPE_SERVER_URL -> %s", local_base)
 
 
 def _current_username() -> "str | None":
@@ -2316,6 +2548,22 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     task["cwd"] = cwd
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
 
+    # MR-2（2026-11-05）：任务执行 span——从任务行 trace_context 恢复 enqueue 的 trace
+    # （同一 trace 的子段，A→C→worker 全链串联）；OTel 未启用/坏数据 → 跳过零影响。
+    # span 存 task["__exec_span__"]，由外层调用的 finally 收口（覆盖超时/重试路径）。
+    _exec_span = None
+    try:
+        from src.observability.otel import start_task_span
+        _exec_span, _ = start_task_span(f"task {tid} execute {engine_name or ''}", {
+            "task_id": tid, "engine": engine_name, "agent_type": task.get("agent_type", ""),
+            "skill": task.get("skill", ""), "repo_key": task.get("repo_key", ""),
+            "attempts": task.get("attempts", 0),
+        }, trace_context=task.get("trace_context") or "")
+        if _exec_span is not None:
+            task["__exec_span__"] = _exec_span
+    except Exception:
+        _exec_span = None
+
     # LLM 用量采集（可观测性）：必须在引擎启动前记基线——hermes 的账本是累计值、
     # hwcloud 日志是 append-only，两者都要靠基线才能算出"本次任务"的增量。
     # 用本地 cwd（与各引擎 ACP 隔离目录的 cwd-hash 算法同源），失败静默降级。
@@ -2417,9 +2665,11 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             if ":" not in _local_base.split("://", 1)[1]:
                 _local_base = _local_base + ":3000"
         # 其他（http:// 内网域名/IP 无端口）：保持原样，不猜端口
-        env["GRAPE_SERVER_URL"] = _local_base
-        task["server_url"] = _local_base
-        log.info(f"local worker: override GRAPE_SERVER_URL/server_url -> {_local_base}")
+        # Issue #1577：本机/内网 worker 覆盖 worker runtime 基址（RUNTIME_SERVER_URL /
+        # task.server_url，A2A/tasks 直连用）；双地址部署保留显式业务 API 基址
+        # GRAPE_SERVER_URL，单地址部署仍覆盖为本机直连（改造前等价，避免 NAT 回环不通）。
+        _apply_local_worker_base_override(env, task, _local_base)
+        log.info(f"local worker: override RUNTIME_SERVER_URL/server_url -> {_local_base}")
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
@@ -2457,8 +2707,14 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"linked repos worktree init failed: {e}")
     skill_dir = _os.path.join(cwd, ".skills")
-    prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir) \
-                                       .replace("{{SERVER_URL}}", task.get("server_url") or "")
+    prompt = (task.get("prompt") or "").replace("{{SKILL_DIR}}", skill_dir)
+    # Issue #1577 / 架构审查 M3：worker 端残留占位符按同一语义兜底——
+    # {{SERVER_URL}}=业务 API（env GRAPE_SERVER_URL）、{{RUNTIME_SERVER_URL}}=回连基址，
+    # 不再把业务占位符填成 A2A 地址（先替换长占位符，避免子串误命中）。
+    _prompt_biz_url = env.get("GRAPE_SERVER_URL") or task.get("server_url") or ""
+    _prompt_runtime_url = env.get("RUNTIME_SERVER_URL") or task.get("server_url") or ""
+    prompt = (prompt.replace("{{RUNTIME_SERVER_URL}}", _prompt_runtime_url)
+                    .replace("{{SERVER_URL}}", _prompt_biz_url))
     # 本机 worker：prompt 里 build_prompt 已把 {{SERVER_URL}} 替换成公网 server_base_url
     # （worker 端此处 .replace("{{SERVER_URL}}") 是空操作），需把 prompt 里已硬编码的公网
     # 地址回改为 localhost，否则本机 worker 的 A2A 走公网 NAT 回环不通（超时）。
@@ -2698,7 +2954,7 @@ async def _report_llm_usage(client, tid: str, collector, done) -> None:
     try:
         sid = done.get("oc_session_id") if isinstance(done, dict) else ""
         usages = collector.finish(session_id=sid or "")
-        if not usages and collector.engine in ("hermes", "hwcloud", "aishell"):
+        if not usages and _usage_retry_engine(collector.engine):
             await asyncio.sleep(1.5)
             usages = collector.finish(session_id=sid or "")
         if not usages:
@@ -3043,6 +3299,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                     (", will retry" if _will_retry else ""))
                                 _kill_stale_engine(t, _backend_for_engine(e))
                                 _result = None  # timeout → 重试或最终走 fail 路径
+                            finally:
+                                # MR-2：task.execute span 收口（本轮执行结束，含超时路径）
+                                _es = t.pop("__exec_span__", None)
+                                if _es is not None:
+                                    try:
+                                        _es.set_attribute("task.attempt", _attempt)
+                                        _es.end()
+                                    except Exception:
+                                        pass
                 except CredentialRevokedError:
                     # 凭据吊销——_execute_task 已杀引擎清理。置全局 Event 让主循环
                     # 下一轮退出进程（_wrap 是 create_task，异常不穿透主循环）。
