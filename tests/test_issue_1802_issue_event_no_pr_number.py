@@ -21,6 +21,7 @@ from src.api.event_pipeline import (
     _inject_issue_pr_env,
     _is_pr_entity_event,
 )
+from src.api.routes.webhook import _a2a_pr_number
 
 _TEST_REPO = "gitcode:owner/repo"
 
@@ -88,6 +89,35 @@ class TestIssueEntityNoPrNumber:
         )
         assert (pr_num, source) == ("", "")
 
+    def test_note_hook_pr_issue_noteable_not_pr_number(self):
+        """note_hook_pr + noteable_type=Issue：Issue 实体优先，不得注入 Issue 编号。"""
+        env = {}
+        _inject_issue_pr_env(env, _issue_evt(
+            event_type="note_hook_pr",
+            payload={"object_attributes": {
+                "noteable_type": "Issue",
+                "noteable_iid": 1802,
+                "iid": 99001,
+            }},
+        ), _TEST_REPO)
+        assert env.get("ISSUE_NUMBER") == "1802"
+        assert "PR_NUMBER" not in env
+        assert env.get("PR_NUMBER") != env.get("ISSUE_NUMBER")
+
+    def test_issue_event_with_pr_structural_keys_not_pr_number(self):
+        """Issue 事件即使携带 source_branch 等结构键，也不得把 Issue 编号当 PR 号。"""
+        env = {}
+        _inject_issue_pr_env(env, _issue_evt(payload={
+            "object_attributes": {
+                "iid": 1802,
+                "source_branch": "feat/issue-1802",
+                "target_branch": "weekly-mys",
+            },
+        }), _TEST_REPO)
+        assert env.get("ISSUE_NUMBER") == "1802"
+        assert "PR_NUMBER" not in env
+        assert "PR_NUMBER_PARSE_FAILED" not in env
+
     def test_pr_entity_gate(self):
         assert _is_pr_entity_event("pull_request_opened", {}) is True
         assert _is_pr_entity_event("note_hook_pr", {}) is True
@@ -96,6 +126,20 @@ class TestIssueEntityNoPrNumber:
             "object_attributes": {"noteable_type": "Issue"}}) is False
         assert _is_pr_entity_event("legacy_event", {
             "merge_request": {"iid": 7}}) is True
+
+    def test_pr_entity_gate_noteable_issue_wins_over_event_type(self):
+        """noteable_type=Issue 优先于事件类型白名单：note_hook_pr 也判 False。"""
+        assert _is_pr_entity_event("note_hook_pr", {
+            "object_attributes": {"noteable_type": "Issue"}}) is False
+        assert _is_pr_entity_event("pr_comment", {
+            "object_attributes": {"noteable_type": "issue"}}) is False
+
+    def test_pr_entity_gate_issue_event_structural_keys(self):
+        """已知 Issue 事件不因 object_attributes 结构键被误判为 PR 实体。"""
+        assert _is_pr_entity_event("issue_opened", {
+            "object_attributes": {"iid": 1802, "source_branch": "feat/x"}}) is False
+        assert _is_pr_entity_event("issue_updated", {
+            "object_attributes": {"merge_status": "can_be_merged"}}) is False
 
 
 class TestPrEntityStillInjects:
@@ -158,6 +202,18 @@ class TestPrEntityStillInjects:
         }, _TEST_REPO)
         assert env.get("PR_NUMBER") == "1803"
 
+    def test_issue_opened_with_linked_pull_request_injects_pr_number(self):
+        """AC2：Issue 事件带真实关联 PR（payload.pull_request.number）仍注入正确 PR 号。"""
+        env = {}
+        _inject_issue_pr_env(env, _issue_evt(payload={
+            "object_attributes": {"iid": 1802},
+            "pull_request": {"number": 1803},
+        }), _TEST_REPO)
+        assert env.get("ISSUE_NUMBER") == "1802"
+        assert env.get("PR_NUMBER") == "1803"
+        assert env.get("PR_NUMBER") != env.get("ISSUE_NUMBER")
+        assert "PR_NUMBER_PARSE_FAILED" not in env
+
 
 class TestPrParseFailureWarning:
     """PR 实体解析失败：不注入 PR_NUMBER，但保留排障告警。"""
@@ -184,14 +240,43 @@ class TestPrParseFailureWarning:
 class TestA2aPayloadNoIssueNumberFallback:
     """无 PR 时 A2A payload 的 pr_number 为空串，严禁回落 issue_number。"""
 
-    def test_a2a_pr_number_empty_when_no_real_pr(self):
+    def test_a2a_pr_number_passthrough_no_issue_fallback(self):
+        """AC4：生产链路 webhook 只透传显式 pr_number，不回落 issue_number。"""
+        payload = {"repository": "owner/repo", "issue_number": "1802"}
+        assert _a2a_pr_number(payload) == ""
+        assert _a2a_pr_number(payload) != "1802"
+
+    def test_a2a_pr_number_passthrough_explicit_value(self):
+        payload = {"repository": "owner/repo", "issue_number": "1802", "pr_number": 1803}
+        assert _a2a_pr_number(payload) == "1803"
+
+    def test_a2a_event_env_no_pr_number_when_no_real_pr(self):
+        """AC4：生产链路透传的空 pr_number 进入管道后不注入 PR_NUMBER。"""
+        a2a_payload = {"repository": "owner/repo", "issue_number": "1802"}
         env = {}
-        _inject_issue_pr_env(env, _issue_evt(payload={
-            "object_attributes": {"iid": 1802},
-        }), _TEST_REPO)
-        payload = {
-            "issue_number": env.get("ISSUE_NUMBER", ""),
-            "pr_number": env.get("PR_NUMBER", ""),
-        }
-        assert payload["pr_number"] == ""
-        assert payload["pr_number"] != payload["issue_number"]
+        _inject_issue_pr_env(env, {
+            "type": "a2a_event",
+            "issue_id": "#1802",
+            "payload": {
+                "repository": "owner/repo",
+                "issue_number": "1802",
+                "pr_number": _a2a_pr_number(a2a_payload),
+            },
+        }, _TEST_REPO)
+        assert env.get("ISSUE_NUMBER") == "1802"
+        assert "PR_NUMBER" not in env
+
+    def test_a2a_event_env_injects_explicit_pr_number(self):
+        a2a_payload = {"repository": "owner/repo", "issue_number": "1802", "pr_number": 1803}
+        env = {}
+        _inject_issue_pr_env(env, {
+            "type": "a2a_event",
+            "issue_id": "#1802",
+            "payload": {
+                "repository": "owner/repo",
+                "issue_number": "1802",
+                "pr_number": _a2a_pr_number(a2a_payload),
+            },
+        }, _TEST_REPO)
+        assert env.get("PR_NUMBER") == "1803"
+        assert env.get("PR_NUMBER") != env.get("ISSUE_NUMBER")

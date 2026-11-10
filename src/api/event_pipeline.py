@@ -933,11 +933,10 @@ def _pr_number_from_url(*values) -> str:
 
 # Issue #1802：PR/MR 实体事件白名单。只有这些事件才允许从对象结构里取 PR 号；
 # Issue 实体的 object_attributes.iid 是 Issue 自身编号，永不作 PR 号来源。
-# 兼容历史别名（pr_opened/pr_updated/pr_merged/pr_comment），当前 canonical 值为
-# pull_request_* / note_hook_pr（见 src/vcs/event_types.py）。
-_PR_ENTITY_EVENT_TYPES = set(PR_EVENT_TYPES) | {
-    "pr_opened", "pr_updated", "pr_closed", "pr_merged", "pr_comment",
-}
+# 直接复用 src/api/routing.py 的 PR_EVENT_TYPES（单一事实源）；历史别名
+# pr_opened/pr_updated/pr_closed/pr_merged/pr_comment 由下方 "pr_" 前缀统一兜住，
+# 不再维护第二份清单（避免后续漂移）。
+_PR_ENTITY_EVENT_TYPES = set(PR_EVENT_TYPES)
 
 # payload 中 PR/MR 实体的结构特征（GitLab MR hook 的 object_attributes 含这些键；
 # Issue hook 的 object_attributes 不含）。
@@ -947,13 +946,29 @@ _PR_OBJECT_ATTR_KEYS = ("source_branch", "target_branch", "merge_status")
 _NOTE_HOOK_EVENT_TYPES = {"note_hook_pr", "pr_comment"}
 
 
+def _noteable_type(payload: dict) -> str:
+    """取 object_attributes.noteable_type 归一化小写；缺失/非法返回空串。"""
+    if not isinstance(payload, dict):
+        return ""
+    obj_attrs = payload.get("object_attributes")
+    if not isinstance(obj_attrs, dict):
+        return ""
+    return str(obj_attrs.get("noteable_type") or "").strip().lower()
+
+
 def _is_pr_entity_event(event_type: str, payload: dict) -> bool:
     """Issue #1802：判定事件实体是否为 PR/MR。
 
     准入 = 事件类型白名单 **或** payload 带 PR/MR 实体结构特征。目的是把
     「Issue 事件的 object_attributes.iid」挡在 PR 号候选链之外，避免 Issue 编号
     被当成不存在的 PR 编号注入。
+
+    Issue 实体优先：`object_attributes.noteable_type == Issue` 一律判 False，
+    不再被 note_hook_pr 等事件白名单短路（与 `_is_pr_payload` 口径一致）。
     """
+    noteable = _noteable_type(payload)
+    if noteable == "issue":
+        return False
     et = str(event_type or "").strip().lower()
     if et in _PR_ENTITY_EVENT_TYPES:
         return True
@@ -963,13 +978,28 @@ def _is_pr_entity_event(event_type: str, payload: dict) -> bool:
         return False
     if isinstance(payload.get("pull_request"), dict) or isinstance(payload.get("merge_request"), dict):
         return True
+    if noteable in ("mergerequest", "pullrequest"):
+        return True
+    if et in ISSUE_EVENT_TYPES:
+        # 已知 Issue 实体事件：object_attributes 属于 Issue 自身，结构键不可作 PR 依据
+        return False
     obj_attrs = payload.get("object_attributes")
-    if isinstance(obj_attrs, dict):
-        if str(obj_attrs.get("noteable_type") or "").lower() in ("mergerequest", "pullrequest"):
-            return True
-        if any(k in obj_attrs for k in _PR_OBJECT_ATTR_KEYS):
-            return True
+    if isinstance(obj_attrs, dict) and any(k in obj_attrs for k in _PR_OBJECT_ATTR_KEYS):
+        return True
     return False
+
+
+def _as_payload_dict(value) -> dict:
+    """把 events.payload（可能是 JSON 字符串）归一为 dict；非法值返回空 dict。"""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, str]:
@@ -986,6 +1016,7 @@ def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, 
     等对象结构来源只对 PR/MR 实体事件开放。Issue Hook 的 object_attributes 就是
     该 Issue 自身，其 iid 即 Issue 编号，不得落入 PR 号候选链。
     """
+    payload = _as_payload_dict(payload)
     merge_req = payload.get("merge_request")
     pull_req = payload.get("pull_request")
     obj_attrs = payload.get("object_attributes")
@@ -997,15 +1028,19 @@ def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, 
         payload.get("pr_number"),
         evt.get("_pr_sub_pr_number"),
     ]
-    if _is_pr_entity_event(event_type, payload):
+    # 单次解析只判定一次实体类型，避免重复解析（Issue #1802 复审）
+    is_pr_entity = _is_pr_entity_event(event_type, payload)
+    if is_pr_entity:
         if str(event_type or "").strip().lower() in _NOTE_HOOK_EVENT_TYPES:
             candidates.extend([
                 merge_req.get("iid"),
                 merge_req.get("number"),
                 pull_req.get("iid"),
                 pull_req.get("number"),
-                obj_attrs.get("noteable_iid"),
             ])
+            # noteable_type=Issue 时 noteable_iid 是 Issue 编号，永不作 PR 号来源
+            if _noteable_type(payload) != "issue":
+                candidates.append(obj_attrs.get("noteable_iid"))
         else:
             candidates.extend([
                 pull_req.get("number"),
@@ -1019,7 +1054,7 @@ def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, 
         if num:
             return num, "payload"
 
-    if _is_pr_entity_event(event_type, payload):
+    if is_pr_entity:
         url_num = _pr_number_from_url(
             obj_attrs.get("url"),
             merge_req.get("web_url"),
@@ -1078,7 +1113,7 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
         env_extra["GRAPE_ISSUE_ID"] = _card_id
     elif _issue_num:
         log.info(f"Pipeline env: non-numeric issue_id '{_issue_num}', skip ISSUE_NUMBER/GRAPE_ISSUE_ID injection (Issue #528)")
-    _payload = evt.get("payload", {}) or {}
+    _payload = _as_payload_dict(evt.get("payload", {}))
     _event_type = str(evt.get("type", "") or evt.get("event_type", "") or "")
     _pr_num, _pr_source = _extract_pr_number(evt, _payload, _event_type)
     if _pr_num:
@@ -1509,11 +1544,9 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         _extra_evt["_pr_sub_scene_id"] = scene_id
         _extra_evt["_pr_sub_skill"] = qa_skill
         _extra_evt["_pr_sub_engine_ids"] = qa_engine_ids
-        # 提取 PR 号用于回帖
-        _payload = evt.get("payload", {}) or {}
-        _pr_obj = _payload.get("pull_request", {}) or _payload.get("merge_request", {}) or {}
-        _obj_attrs = _payload.get("object_attributes", {}) or {}
-        _pr_num = _pr_obj.get("number", _pr_obj.get("iid", "")) or _obj_attrs.get("iid", "")
+        # 提取 PR 号用于回帖（统一走 _extract_pr_number，Issue 实体 iid 不作 PR 号来源）
+        _payload = _as_payload_dict(evt.get("payload", {}))
+        _pr_num, _ = _extract_pr_number(_extra_evt, _payload, event_type)
         if _pr_num:
             _extra_evt["_pr_sub_pr_number"] = _pr_num
         # 构造伪 issue_id（带 scene_id 区分）
@@ -1578,7 +1611,6 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
     """
     try:
         from src.session_manager import db, db_lock
-        import json as _json
 
         repo_key = evt.get("repo_key", "") or ""
 
@@ -1603,13 +1635,10 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         qa_skill = qa_node["skill"]
         qa_engine_ids = qa_node.get("engine_runtime_ids", [])
 
-        # 提取 PR 号
-        _payload = evt.get("payload", {}) or {}
-        if isinstance(_payload, str):
-            _payload = _json.loads(_payload)
-        _pr_obj = _payload.get("pull_request", {}) or _payload.get("merge_request", {}) or {}
-        _obj_attrs = _payload.get("object_attributes", {}) or {}
-        _pr_num = _pr_obj.get("number", _pr_obj.get("iid", "")) or _obj_attrs.get("iid", "")
+        # 提取 PR 号（统一走 _extract_pr_number，Issue 实体 iid 不作 PR 号来源）
+        event_type = str(evt.get("type", "") or evt.get("event_type", "") or "")
+        _payload = _as_payload_dict(evt.get("payload", {}))
+        _pr_num, _ = _extract_pr_number(evt, _payload, event_type)
 
         # 伪 issue_id（跟 _dispatch_pr_subscription_extra 一致）
         _pseudo_id = f"#pr_{_pr_num}_{scene_id}" if _pr_num else ""
@@ -2836,9 +2865,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         issue_id = _resolve_event_issue_id(evt, repo_key)
     # PR 订阅：用 PR 号 + scene_id 构造伪 issue_id 参与去重（区分不同场景）
     if not issue_id and evt.get("_pr_sub_scene_id"):
-        pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
-        obj_attrs = payload.get("object_attributes", {}) or {}
-        pr_num = pr_obj.get("number", pr_obj.get("iid", "")) or obj_attrs.get("iid", "")
+        # 统一走 _extract_pr_number：Issue 实体 iid 不作 PR 号来源（Issue #1802 复审）
+        pr_num, _ = _extract_pr_number(evt, _as_payload_dict(payload), event_type)
         if pr_num:
             _sub_scene = evt["_pr_sub_scene_id"]
             issue_id = f"#pr_{pr_num}_{_sub_scene}"

@@ -1198,6 +1198,16 @@ def _a2a_register_repo(repo_key: str) -> bool:
         return False
 
 
+def _a2a_pr_number(payload: dict) -> str:
+    """A2A 交办 PR 号透传：只取显式 payload.pr_number，绝不回落 issue_number。
+
+    Issue #1802：Issue 实体没有真实关联 PR 时应为空串，避免下游把 Issue 编号
+    当作 PR 号注入 PR_NUMBER。
+    """
+    value = (payload or {}).get("pr_number", "")
+    return "" if value in (None, "") else str(value)
+
+
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Hand off to another agent (A2A)", description="Agent-to-Agent handoff: dispatches a new event to the target agent. Accepts JWT/session token/API key (public) plus internal bot-token.")
 async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
@@ -1235,7 +1245,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     account = str(payload.get("account", "") or "").strip()
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
-    pr_number = payload.get("pr_number", "")
+    pr_number = _a2a_pr_number(payload)
 
     # repo_key 解析：带前缀按前缀；无前缀查 managed_repos 反查实际 provider
     # （Issue #544 审查修正②：与 GET /api/a2a/status 统一走 _resolve_a2a_repo_key）
