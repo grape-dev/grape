@@ -3001,8 +3001,14 @@ async def _recover_orphans_on_rid_change(client, prev_ids, new_ids, active_tasks
 
 
 async def _reregister(client, prev_installed, device_name, cli_version: str = "",
-                      recover_orphans: bool = True) -> tuple[list[int], dict, list] | None:
+                      recover_orphans: bool = False) -> tuple[list[int], dict, list] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
+
+    Issue #1750：``recover_orphans`` 默认 False——本函数只负责刷新 runtime id，
+    不在无显式声明时回收孤儿。所有生产重注册路径均显式传 False（周期重注册 /
+    心跳失败重连），由调用方按 rid 集合变化携带 ``active_tasks`` 白名单回收；
+    进程启动路径不经本函数，``main()`` 直接 ``client.register`` 后对每个 rid
+    显式空白名单 ``client.recover_orphans(rid)``（清理上次进程遗留）。
 
     Issue #471 C1：
     - 每次重注册前重新发现本机引擎（不用启动时快照）——启动时无引擎的 worker，
@@ -3034,9 +3040,10 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         _ls = _scan_local_skills()
         ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
-            # Issue #1750 P1-B：周期/心跳失败重注册默认不再无条件回收
-            # （recover_orphans=False），由调用方按 rid 集合变化决定是否携带活跃
-            # 白名单回收；仅启动路径沿用默认 True + 空白名单（清理上次进程遗留）。
+            # Issue #1750 P1-B：重注册默认不回收孤儿（recover_orphans=False）。
+            # 周期重注册与心跳失败重连均显式传 False，由调用方按 rid 集合变化
+            # 决定是否携带活跃白名单回收；启动路径在 main() 中直接空白名单回收
+            # 上次进程遗留（不经本函数）。本开关仅用于调用方显式要求时的兼容回收。
             if recover_orphans:
                 for rid in ids:
                     await client.recover_orphans(rid)
@@ -3478,7 +3485,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                # Issue #1750 P1-B（审查修复）：心跳断连重注册是同进程重连，与周期
+                # Issue #1750 P1-B：心跳断连重注册是同进程重连，与周期
                 # 重注册同语义——不得空白名单无条件回收（内存 active_tasks 里的
                 # 静默型长任务会被误判孤儿转池，导致同机双跑/重复执行）；
                 # 仅 rid 集合变化时携带 active_tasks 白名单回收。
@@ -4019,8 +4026,10 @@ def main():
                          for rid, r in zip(ids, installed)}
         log.info(f"RuntimeAgent registered: {ids} -> {server}, engines={list(engine_by_rid.values())}, "
                  f"poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
+        # Issue #1750：进程启动路径显式空白名单回收（清理上次进程遗留）；重注册
+        # 路径不经过此处，也不会无显式声明地回收。
         for rid in ids:
-            await client.recover_orphans(rid)
+            await client.recover_orphans(rid, active_task_ids=None)
         # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
         await asyncio.to_thread(_worker_probe_once)
