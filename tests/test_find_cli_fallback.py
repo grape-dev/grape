@@ -12,7 +12,8 @@ import sys
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from src.runtime.os_adapter import engine_search_paths, find_cli
+from src.domains.runtime.engine.os_adapter import engine_search_paths, find_cli
+
 
 
 def test_linux_search_path_candidate(monkeypatch):

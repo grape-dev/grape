@@ -26,6 +26,7 @@ def _local_port() -> str:
         for i, a in enumerate(argv):
             if a == "--port" and i + 1 < len(argv):
                 return argv[i + 1]
+
             if a.startswith("--port="):
                 return a.split("=", 1)[1]
     except Exception:

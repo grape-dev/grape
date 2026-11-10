@@ -216,6 +216,7 @@ try {
     $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing `
         -Headers @{ Authorization = "Bearer $Token" } -ErrorAction Stop
 
+
     $expectedVersion = ("" + $lvi.version).Trim()
     if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
 } catch {
@@ -362,6 +363,7 @@ if ($expectedVersion) {
     }
     Log "start-worker.ps1 not found - install is current; start the worker manually"
     exit 0
+
 
 }
 Remove-Item $TmpPkg -ErrorAction SilentlyContinue

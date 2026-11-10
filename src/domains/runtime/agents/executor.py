@@ -9,6 +9,7 @@ from .hermes import HermesBackend
 from .codex import CodexBackend
 from .dsh import DshBackend
 from .hwcloud import HwcloudBackend
+from .aishell_acp import AishellDshACPBackend
 
 _bwrap_fail_notified = False
 
@@ -34,6 +35,7 @@ _BACKENDS = {
     "codex": CodexBackend(),
     "dsh": DshBackend(),
     "hwcloud": HwcloudBackend(),
+    "aishell-dsh": AishellDshACPBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -195,6 +197,7 @@ def discover_backends() -> list[dict]:
         "codex": {"cli": "codex", "pip": "@openai/codex"},
         "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
         "hwcloud": {"cli": "hwcloud", "pip": ""},
+        "aishell-dsh": {"cli": "aishell", "pip": ""},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []
@@ -493,6 +496,105 @@ def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
             yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
 
 
+def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
+                            account, user_id, env_extra, bot_token, user_token,
+                            agent_name, agent_label, max_exec_seconds,
+                            repo_key: str = "") -> Generator:
+    """aishell-dsh ACP 模式入口：构建 env → 调 aishell_acp.AishellDshACPBackend.stream_execute。
+
+    与 _stream_hwcloud_acp 并行（docs/todo/2026-11-06-aishell-dsh-implement-plan.html）：
+    - 凭据设备预配置（D3/D4），grape 不注 key；模型路由 env AISHELL_DSH_MODEL 可选覆盖
+    - 脱敏/占位符/技能路径复用与 hwcloud 相同的收口
+    """
+    from src.domains.runtime.agents.aishell_acp import AishellDshACPBackend
+
+    label = f"{agent_label} " if agent_label else ""
+
+    acp = AishellDshACPBackend()
+    env = acp.get_env(account=account, user_id=user_id)
+    env["DEVOPS_EVENT_TYPE"] = event_type
+
+    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
+                  label=label, bot_token=bot_token, user_token=user_token,
+                  user_id=user_id, repo_key=repo_key)
+    if agent_name:
+        env["AGENT_NAME"] = agent_name
+    if env_extra:
+        env.update(env_extra)
+
+    # 任务级 env 合并完成后的收尾钩子（同 executor 通用 CLI 路径语义）：
+    # aishell（dsh 框架）会 scrub env 里 /TOKEN/i 变量，prepare_env 把
+    # GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE 穿透。
+    # 必须在 env_extra 之后：token 是任务级的，此刻才进 env。
+    _auth_file = None
+    try:
+        _prepare_env = getattr(acp, "prepare_env", None)
+        if callable(_prepare_env):
+            # 传 cwd：bwrap 沙箱 /tmp 为私有 tmpfs，token 文件须落工位目录才沙箱内可见
+            _auth_file = _prepare_env(env, cwd=cwd)
+    except Exception as _pe:
+        log.warning(f"{label}prepare_env failed: {_pe}")
+
+    # 技能路径占位符替换（direct 模式）
+    try:
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
+    except Exception:
+        pass
+
+    # 脱敏 token 列表
+    _tokens = [t for t in (bot_token, user_token) if t]
+
+    def _redact_text(text):
+        if not text or not _tokens:
+            return text
+        s = str(text)
+        for t in _tokens:
+            if t:
+                s = s.replace(t, "[REDACTED]")
+        return s
+
+    try:
+        for evt_type, data in acp.stream_execute(
+            prompt, cwd, session_id=session_id, env=env,
+            max_exec_seconds=max_exec_seconds, agent_label=label,
+        ):
+            if evt_type == "text":
+                yield ("text", _redact_text(data))
+            elif evt_type == "tool_use":
+                if isinstance(data, dict):
+                    data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
+                yield ("tool_use", data)
+            elif evt_type == "tool_result":
+                yield ("tool_result", _redact_text(data))
+            elif evt_type == "done":
+                if isinstance(data, dict):
+                    data["text"] = _redact_text(data.get("text", ""))
+                    data["stderr"] = _redact_text(data.get("stderr", ""))
+                yield ("done", data)
+            else:
+                yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
+    finally:
+        # prepare_env 在 cwd 下创建的 token 文件：任务结束即清（仅清 cwd 下的，
+        # /tmp fallback 的不主动删，避免误删并发任务文件）。
+        # QA 架构守护 C-2 补强：finally 只清记录在 _auth_file 的那个文件——进程被
+        # kill/超时后 finally 不执行、文件残留 → 平台收尾 git add -A 会把 token 提交
+        # 进任务分支。追加 glob 兜底：扫 cwd 下所有 .grape-sess-*.tok 一并清掉
+        # （同前缀专属命名空间，不会误删其它文件）。
+        if cwd and os.path.isdir(cwd):
+            import glob as _glob
+            for _stale in _glob.glob(os.path.join(cwd, ".grape-sess-*.tok")):
+                try:
+                    os.unlink(_stale)
+                except OSError:
+                    pass
+        elif _auth_file and _auth_file.startswith(os.sep):
+            try:
+                os.unlink(_auth_file)
+            except OSError:
+                pass
+
+
 def _assemble_env(env: dict, *, kind: str, label: str = "",
                   bot_token: str = "", user_token: str = "", user_id: int = 0,
                   repo_key: str = "", username: str = "") -> None:
@@ -506,6 +608,29 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
       chat/任务需要的模型凭据，与 VCS 平台 token 无关。
     - 参数 bot_token/user_token 仅用于日志脱敏（_tokens 列表），不再写入 env。
     """
+    # grape CLI PATH 注入（Windows 部署缺口：install-worker.ps1 未像 install-worker.sh:615
+    # 把 worker venv bin 注册进 PATH，agent shell 里 `grape` 找不到——2026-11-07 真任务
+    # 实证 event 1）。目录存在才前缀注入；机器级 PATH 修复后此注入自然冗余无害。
+    # agent 调用继续用裸 `grape`，无需绝对路径/prompt 模板改动。
+    #
+    # 为什么不用「Linux 同等方法」（把 venv bin 注册进用户/机器 PATH）——四个实测/结构性风险：
+    #   1. 影子命令：worker venv Scripts 里有 python.exe/pip.exe 等，注册进用户 PATH 会
+    #      shadow 全机 python/pip（真机 ls 实证 12 个 exe）；
+    #   2. setx 1024 字符截断：用户 PATH 超长被静默截断，直接损坏；
+    #   3. 非幂等：重复安装/升级重复追加，卸载通常不清理 → PATH 残骸累积；
+    #   4. 作用域错位：Linux unit Environment 仅服务进程可见，Windows 用户 PATH 全局生效
+    #      且已运行进程不重启不生效。
+    # 正规部署修复应注册「只含 grape 启动器 shim 的专用目录」（不含 python/pip），见
+    # plan 文档 §5 TODO；本注入与该修复可并存。
+    try:
+        from src.domains.runtime.engine.os_adapter import default_install_dir
+        _gbin = os.path.join(default_install_dir(), ".venv",
+                             "Scripts" if os.name == "nt" else "bin")
+        _gexe = "grape.exe" if os.name == "nt" else "grape"
+        if os.path.isfile(os.path.join(_gbin, _gexe)):
+            env["PATH"] = _gbin + os.pathsep + env.get("PATH", "")
+    except Exception:
+        pass
     # 平台 VCS token 不再注入（P2）。bot_token/user_token 保留仅作日志脱敏用途，
     # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
     # Issue #344: 改用带预刷新的 token 获取函数，避免拿到过期 token。
@@ -645,6 +770,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     # ── hwcloud ACP 专用路径（docs/hwcloud-runtime-acp-design.md）──
     if backend_name == "hwcloud":
         yield from _stream_hwcloud_acp(
+            prompt, cwd, session_id, event_type, backend,
+            account, user_id, env_extra, bot_token, user_token,
+            agent_name, agent_label, max_exec_seconds,
+            repo_key=repo_key,
+        )
+        return
+
+    # ── aishell-dsh ACP 专用路径（docs/issues/aishell-dsh-runtime-acp-implement-plan.md）──
+    if backend_name == "aishell-dsh":
+        yield from _stream_aishell_dsh_acp(
             prompt, cwd, session_id, event_type, backend,
             account, user_id, env_extra, bot_token, user_token,
             agent_name, agent_label, max_exec_seconds,

@@ -14,6 +14,54 @@ from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
+from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
+
+def _register_healthy_guard(c, rid: int, reported: bool) -> int:
+    """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
+
+    震荡根因：worker re-register（每 300s）用 ACP 握手探测（15s 总闸）判
+    healthy，Windows 冷启动易超时 → 上报 False；而心跳探活（每 600s）真跑
+    ACP 成功后把 healthy 升回 1。两写入源打架导致 healthy 大部分时间为 0。
+
+    守卫规则（仅作用于 UPDATE 分支的 1→0 方向）：
+    - DB 行 healthy=1 且 probe_status='ok' 且 probe_last 距今 ≤ 新鲜窗口
+      （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
+      → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
+    - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
+      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除）。
+
+    INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
+    """
+    try:
+        row = c.execute(
+            "SELECT healthy, probe_status, probe_last FROM agent_runtimes WHERE id=?",
+            (rid,)).fetchone()
+        if not row:
+            return 1 if reported else 0
+        cur_healthy, probe_status, probe_last = (row[0] or 0), (row[1] or ""), (row[2] or "")
+        if reported or not cur_healthy:
+            return 1 if reported else 0
+        # 仅剩「当前 healthy=1、上报 False」的降级方向需要守卫
+        if (probe_status or "").strip().lower() != "ok":
+            return 0
+        _window = _resolve_probe_fresh_window()
+        try:
+            _last = datetime.fromisoformat(probe_last)
+            if _last.tzinfo is None:
+                _last = _last.replace(tzinfo=timezone.utc)
+            fresh = (datetime.now(timezone.utc) - _last).total_seconds() <= _window
+        except Exception:
+            fresh = False
+        if fresh:
+            log.info(f"register healthy-guard: runtime={rid} probe ok within {_window}s, "
+                     f"keep healthy=1 (transient ACP check downgrade suppressed)")
+            return 1
+        return 0
+    except Exception as _ge:
+        # 守卫自身异常绝不阻塞注册主链路（保守：按上报值）
+        log.warning(f"register healthy-guard failed (runtime={rid}): {_ge}")
+        return 1 if reported else 0
+
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
@@ -274,24 +322,31 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             if not name:
                 continue
             _ls_json = skills_by_name.get(name, "[]")
-            # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——scope/owner_id/org_id/repo_key
-            # 是凭据派生属性，命中既有行后原地同步（引擎 id 天然稳定）
+            # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——
+            # scope/owner_id/org_id/repo_key 是凭据派生属性，命中既有行后原地同步，
+            # 引擎 id 天然稳定（scope 往返切换不再 INSERT 新行 + id 全量变更）。
+            # 多行历史脏数据时取 MAX(id)（与 scope 切换去重「保留最新行」口径一致，
+            # 重复行已由上方 merge_duplicate_engine_rows 合并）。
+
             c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
                       "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
                       (credential_id, name))
             row = c.fetchone()
-            # Issue #658：role_tags 显式声明（JSON 数组）；空列表不覆盖已有手工配置
-            _role_tags_json = ""
-            try:
-                _rt_tags = rt.get("role_tags") or []
-                if isinstance(_rt_tags, list) and _rt_tags:
-                    _role_tags_json = json.dumps([str(t).strip().lower() for t in _rt_tags if str(t).strip()], ensure_ascii=False)
-            except Exception:
-                _role_tags_json = ""
-            # Issue #865：配置模型（worker 上报；空=未上报，不覆盖既有值）
-            _model_name = str(rt.get("model") or "").strip()[:120]
+
             if row:
                 rid = row[0]
+                # Issue #658：role_tags 显式声明（JSON 数组）；空列表不覆盖已有手工配置
+                _role_tags_json = ""
+                try:
+                    _rt = rt.get("role_tags") or []
+                    if isinstance(_rt, list) and _rt:
+                        _role_tags_json = json.dumps([str(t).strip().lower() for t in _rt if str(t).strip()], ensure_ascii=False)
+                except Exception:
+                    _role_tags_json = ""
+                # Issue #865：配置模型（worker 上报本机配置解析结果；空=未上报，
+                # 不覆盖既有值——未升级 worker 重注册不会抹掉历史/兜底值，同 #658 模式）
+                _model_name = str(rt.get("model") or "").strip()[:120]
+
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
                 # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
