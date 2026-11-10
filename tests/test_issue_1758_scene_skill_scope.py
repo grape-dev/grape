@@ -225,7 +225,7 @@ class TestFourEntryConsistency:
         try:
             # 1) 保存/apply 预检 → 400，含结构化字段与改绑候选
             with pytest.raises(HTTPException) as ei:
-                _validate_scene_skill_scope(nodes, repo, "alice", "1")
+                _validate_scene_skill_scope(nodes, repo)
             detail = ei.value.detail
             assert ei.value.status_code == 400
             assert detail["skill_scope"] == "user"
@@ -282,7 +282,7 @@ class TestFourEntryConsistency:
                 {"id": "coding", "tag": "coding", "skill": s2, "enabled": True},
             ]
             with pytest.raises(HTTPException) as ei:
-                _validate_scene_skill_scope(nodes, repo, "alice", "1")
+                _validate_scene_skill_scope(nodes, repo)
             detail = ei.value.detail
             assert len(detail["violations"]) == 2
             assert {v["skill"] for v in detail["violations"]} == {s1, s2}
@@ -312,7 +312,7 @@ class TestFourEntryConsistency:
             assert [c["skill_name"] for c in ev["rebind_candidates"]] == [s_repo]
 
             with pytest.raises(HTTPException) as ei:
-                _validate_scene_skill_scope(nodes, repo, "alice", "1")
+                _validate_scene_skill_scope(nodes, repo)
             detail = ei.value.detail
             assert [c["skill_name"] for c in detail["rebind_candidates"]] == [s_repo]
             assert s_repo in detail["message"]

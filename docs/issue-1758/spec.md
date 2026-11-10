@@ -3,7 +3,7 @@
 > Source: Issue #1758 body + Issue Agent Spec (comment id=199533517) | Base branch: weekly-mys (pipeline work baseline)
 
 ## Objective
-- 抽出唯一判定入口 `scene_skill_scope.evaluate(node, repo_key, scene_scope, caller)`，
+- 抽出唯一判定入口 `scene_skill_scope.evaluate(node, repo_key, scene_scope)`，
   把「场景节点引用技能」的 scope 判定从 4 处各自实现改为统一调用。
 - 固定口径：repo 级场景引用 user scope 技能一律不放行（含创建者本人）；
   显式 `skill_id` 仍需 scope 校验；查询异常统一 fail-closed。

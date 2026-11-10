@@ -265,13 +265,3 @@ def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
             source="db_error",
             reason=f"技能 scope 查询异常，按 fail-closed 拒绝：{e}",
             repo_key=repo_key)
-
-
-def evaluate_many(nodes, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
-                  *, scene_id: str = "",
-                  on_error: str = DEFAULT_ERROR_POLICY) -> list:
-    """Evaluate a batch of nodes sharing one lookup cache."""
-    cache: dict = {}
-    return [evaluate(node, repo_key, scene_scope, scene_id=scene_id,
-                     on_error=on_error, cache=cache)
-            for node in (nodes or [])]

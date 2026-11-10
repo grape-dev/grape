@@ -11,12 +11,12 @@ node_id, node_tag, rebind_candidates}`，各入口只负责传上下文与映射
      on_error="deny", cache=None)`：skill_id 优先、失效回退名字；repo/official
      兼容、user 一律拒绝（含本人）；repo 档校验归属仓库；未知技能按官方内置包
      兼容放行；查询异常默认 fail-closed，可显式 `on_error="allow"` 降级。
-   - `evaluate_many`、`rebind_candidates`、`_skill_agent_type_by_name`。
+   - `rebind_candidates`、`skill_agent_type_by_name`、`format_rebind_hint`。
 2. `src/user/db.py`：`get_skill_by_id` / `get_skill_scope_info` 增加仅关键字
    参数 `raise_on_error=False`，判官传 True 以区分查询异常与未命中。
 3. `scenes.py`
-   - `_collect_scene_skill_scope_violations` 改为批量调用 `evaluate`
-     （`allow_own_user` 仅为签名兼容，不再放宽）。
+   - `_collect_scene_skill_scope_violations` 改为逐节点调用 `evaluate`
+     并复用查询 cache。
    - `_validate_scene_skill_scope` 400 增加 `skill_scope` / `scene_scope` /
      `rebind_candidates` / `rebinds`，逐节点 reason 含改绑候选。
    - `_scene_node_scope_check` 改为判官结果投影，删除对

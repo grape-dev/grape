@@ -647,10 +647,9 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     except Exception:
         nodes = []
 
-    # Issue #1564 R2：应用市场模板前以「应用者身份」复核技能 scope——
-    # 本人 user 技能放行（派发身份即本人），他人 user 技能 400。
-    _validate_scene_skill_scope(
-        nodes, repo_key, user.get("username") or "", user.get("id") or "")
+    # Issue #1758：应用市场模板前复核技能 scope——repo 级场景引用 user 技能
+    # 一律拒绝（含创建者本人）。
+    _validate_scene_skill_scope(nodes, repo_key)
 
     # 检查场景引用的 skill 是否都存在（基于 scene_skill_ref 的 skill_id 查 skill 表）
     from src.session_manager import db, db_lock
@@ -1327,9 +1326,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     _validate_scene_node_roles(body.nodes)
 
     # Issue #1564 R1：市场模板为全仓共享配置，保存即强制拒绝 user scope（含创建者本人）
-    _validate_scene_skill_scope(
-        body.nodes, repo_key, user.get("username") or "", user.get("id") or "",
-        allow_own_user=False)
+    _validate_scene_skill_scope(body.nodes, repo_key)
 
     nodes_json = json.dumps(body.nodes, ensure_ascii=False)
 
@@ -1406,9 +1403,7 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     # Issue #1564 R1：市场模板保存强制拒绝 user scope（含创建者本人）；
     # update 无 repo 入参，repo_key 取市场行自身归属。
     if body.nodes:
-        _validate_scene_skill_scope(
-            body.nodes, scene.get("repo_key", ""), user.get("username") or "",
-            user.get("id") or "", allow_own_user=False)
+        _validate_scene_skill_scope(body.nodes, scene.get("repo_key", ""))
 
     nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
 
@@ -2001,8 +1996,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     _validate_scene_node_roles(nodes_json := [n.model_dump() for n in body.nodes])
     _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
 
-    # Issue #657: 保存即拦截——节点技能仅他人 user scope 可用 → 400（scope 不匹配）
-    _validate_scene_skill_scope(nodes_json, repo_key, user.get("username") or "", user.get("id") or "")
+    # Issue #1758: 保存即拦截——repo 级场景引用 user 技能一律拒绝（含创建者本人）→ 400
+    _validate_scene_skill_scope(nodes_json, repo_key)
 
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     if body.pr_subscription_enabled:
@@ -2077,9 +2072,9 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
     # body.nodes 为空时不覆盖已有 nodes（只更新 pr_subscription_enabled 等字段）
     _update_nodes = nodes_json if body.nodes else existing.get("nodes", [])
-    # Issue #657: 保存即拦截——节点技能仅他人 user scope 可用 → 400（scope 不匹配）
+    # Issue #1758: 保存即拦截——repo 级场景引用 user 技能一律拒绝（含创建者本人）→ 400
     if repo_key and body.nodes:
-        _validate_scene_skill_scope(_update_nodes, repo_key, user.get("username") or "", user.get("id") or "")
+        _validate_scene_skill_scope(_update_nodes, repo_key)
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
         name=body.name, description=body.description, icon=body.icon,
@@ -2237,8 +2232,7 @@ def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
     return result
 
 
-def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id="",
-                                allow_own_user: bool = True, expected_scope: str = "repo"):
+def _validate_scene_skill_scope(nodes: list, repo_key: str, expected_scope: str = "repo"):
     """场景节点技能 scope 校验（Issue #657 / #1564 / #1758）：冲突时抛 HTTPException(400)。
 
     Issue #1564：收集式校验，400 detail 一次性返回全部冲突节点
@@ -2246,7 +2240,7 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
     同时保留顶层 skill/actual_scope/expected_scope（兼容既有调用方）。
     Issue #1758：判定统一走单一判官，user scope 一律拒绝（含创建者本人）；
     400 额外返回 skill_scope / scene_scope / rebind_candidates / rebinds，
-    rebinds 为逐节点改绑建议。``allow_own_user`` 仅为旧调用签名兼容保留。
+    rebinds 为逐节点改绑建议。
     """
     from src.api.scene_skill_scope import format_rebind_hint
     violations = _collect_scene_skill_scope_violations(
@@ -2306,7 +2300,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
 
     # Issue #657: 节点技能 scope 校验（repo 级场景不可引用 user 级技能），
     # Pass 1 只读阶段拦截，落库前直接拒绝
-    _validate_scene_skill_scope(nodes, repo_key, user.get("username") or "", user.get("id") or "")
+    _validate_scene_skill_scope(nodes, repo_key)
 
     # R25.9 回声治理：应用场景不触碰 token（原 get_repo_token_with_refresh 把 bot/用户级
     # token 回填 session，第 1 级命中 bot token → 自循环检测放行 bot 评论 → 回声）。
