@@ -1050,6 +1050,7 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     # 并在 Issue 上标注 QA 失败原因与 PR，便于回流修复；门禁异常 fail-open 保持原行为。
     # 门禁不受调用方 auto_close_issues 影响：默认 false 时同样必须校验并标注（AC1/AC2）。
     _auto_close = body.auto_close_issues
+    _auto_close_explicit = "auto_close_issues" in getattr(body, "model_fields_set", set())
     _qa_failures: list[dict] = []
     _qa_rk = ""
     if related:
@@ -1072,7 +1073,8 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     # `Closes #N`（auto_close_issues 被 provider 丢弃）。仅当本次 QA 门禁判定失败时
     # 才降级为 `Related to #N`；qa 通过 / 无 qa 阶段必须沿用原 `Closes` 语义，避免
     # 正常关闭链路因默认 auto_close_issues=false 而悄悄失效。
-    if p == "github" and not _qa_failures:
+    # 但调用方显式传 auto_close_issues=false 时必须尊重其关闭意愿，不得用默认值冒充。
+    if p == "github" and not _qa_failures and not _auto_close_explicit:
         _auto_close = True
     neutral = {
         "title": body.title,
