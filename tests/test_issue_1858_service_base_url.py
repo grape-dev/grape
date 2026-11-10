@@ -188,14 +188,69 @@ class TestLocalWorkerOverride:
         assert env["GRAPE_A2A_BASE_URL"] == "https://a2a.example.com:8082"
         assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:8083"
 
-    def test_missing_service_bases_filled_with_local_base(self):
+    def test_same_host_different_port_vcs_issue_preserved(self):
+        """分端口部署（业务 8081 / runtime 8083，同 host）不得把 VCS/Issue 改成 8083。"""
+        from src.runtime.agent import _apply_local_worker_base_override
+        env = {
+            "GRAPE_SERVER_URL": "http://127.0.0.1:8081",
+            "RUNTIME_SERVER_URL": "http://127.0.0.1:8083",
+            "GRAPE_VCS_BASE_URL": "http://127.0.0.1:8081",
+            "GRAPE_ISSUE_BASE_URL": "http://127.0.0.1:8081",
+            "GRAPE_A2A_BASE_URL": "http://127.0.0.1:8083",
+        }
+        task = {"server_url": "http://127.0.0.1:8083"}
+        _apply_local_worker_base_override(env, task, "http://127.0.0.1:8083")
+        assert env["GRAPE_SERVER_URL"] == "http://127.0.0.1:8081"
+        assert env["GRAPE_VCS_BASE_URL"] == "http://127.0.0.1:8081"
+        assert env["GRAPE_ISSUE_BASE_URL"] == "http://127.0.0.1:8081"
+        # A2A 仍跟随 runtime 直连
+        assert env["GRAPE_A2A_BASE_URL"] == "http://127.0.0.1:8083"
+        assert env["RUNTIME_SERVER_URL"] == "http://127.0.0.1:8083"
+
+    def test_missing_service_bases_follow_effective_business_base(self):
+        """缺失三面基址时，VCS/Issue 回退生效业务基址，A2A 回退 runtime 直连。"""
         from src.runtime.agent import _apply_local_worker_base_override
         env = {"GRAPE_SERVER_URL": "https://biz.example.com:8081"}
         _apply_local_worker_base_override(
             env, {"server_url": "https://rt.example.com:8083"}, "http://127.0.0.1:8083")
-        assert env["GRAPE_VCS_BASE_URL"] == "http://127.0.0.1:8083"
-        assert env["GRAPE_ISSUE_BASE_URL"] == "http://127.0.0.1:8083"
+        assert env["GRAPE_VCS_BASE_URL"] == "https://biz.example.com:8081"
+        assert env["GRAPE_ISSUE_BASE_URL"] == "https://biz.example.com:8081"
         assert env["GRAPE_A2A_BASE_URL"] == "http://127.0.0.1:8083"
+
+
+class TestServiceDiagnosticsModule:
+    def test_a2a_base_skips_business_probe(self):
+        """公开 resolve_a2a_base 不得为取 A2A 基址触发业务 API 探测。"""
+        from src import prompt_builder
+        with patch("src.prompt_builder._resolve_business_base",
+                   side_effect=AssertionError("business probe must not run")), \
+             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.user.db.get_task_gateway_base_url", return_value=""), \
+             patch("src.prompt_builder._resolve_server_url", return_value=RT):
+            assert prompt_builder.resolve_a2a_base(7) == RT
+
+    def test_a2a_base_prefers_gateway_prefix(self):
+        from src import prompt_builder
+        with patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.user.db.get_task_gateway_base_url", return_value=GW):
+            assert prompt_builder.resolve_a2a_base(7) == GW + "/a2a"
+
+    def test_gateway_config_read_once_per_env_build(self):
+        """_build_service_base_env 只解析一次聚合网关基址。"""
+        from src import prompt_builder
+        with _patch_bases(), \
+             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.user.db.get_task_gateway_base_url", return_value=GW) as gw:
+            prompt_builder.resolve_service_base_env(7)
+        assert gw.call_count == 1
+
+    def test_candidates_live_in_shared_diagnostics_module(self):
+        from src.service_diagnostics import (
+            format_base_url_candidates,
+            service_for_endpoint,
+        )
+        assert callable(format_base_url_candidates)
+        assert service_for_endpoint("/api/a2a/status") == "a2a"
 
 
 class TestFailureDiagnostics:

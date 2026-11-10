@@ -1378,8 +1378,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
                     # Issue #1858：A2A 派发改用 A2A 控制面基址（含可选网关 /a2a 前缀），
                     # 不再复用业务/runtime 网关地址。
-                    from src.prompt_builder import _resolve_a2a_base
-                    _a2a_base = _resolve_a2a_base()
+                    from src.prompt_builder import resolve_a2a_base
+                    _a2a_base = resolve_a2a_base()
                     if not _a2a_base:
                         raise RuntimeError("A2A base_url unresolved")
                     _a2a_req = _url_req.Request(

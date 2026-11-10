@@ -49,8 +49,8 @@ class TestA2ARedispatchUrl:
         assert '"http://localhost:8000/api/a2a"' not in src, \
             "hardcoded localhost:8000/api/a2a still present"
         # Issue #1858：改用按服务解析的 A2A 基址（显式配置 > 网关 /a2a 前缀 > 回连基址）
-        assert "_resolve_a2a_base" in src, \
-            "_resolve_a2a_base not used in events.py"
+        assert "resolve_a2a_base" in src, \
+            "resolve_a2a_base not used in events.py"
         assert "format_base_url_candidates" in src, \
             "A2A 失败路径应输出候选 base_url"
 

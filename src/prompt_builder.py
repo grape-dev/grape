@@ -1,6 +1,11 @@
 """Prompt 构建：角色定义、事件 prompt、飞书 prompt"""
 import json, os, re, sys, threading, time, urllib.request
 from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
+from src.service_diagnostics import (
+    SERVICE_BASE_ENV_KEYS as _SERVICE_BASE_ENV_KEYS,
+    format_base_url_candidates,
+    service_for_endpoint,
+)
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -351,17 +356,7 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
 # ===== Issue #1858：按服务基址（业务 VCS/Issue 与控制面 A2A）=====
 # 默认按服务注入；可选聚合网关按前缀路由。三面来源均单独记录，不借用
 # GRAPE_SERVER_URL 的标签冒充，任务 env 中通过 GRAPE_BASE_URL_SOURCES 可追溯。
-_SERVICE_BASE_ENV_KEYS = {
-    "vcs": "GRAPE_VCS_BASE_URL",
-    "issue": "GRAPE_ISSUE_BASE_URL",
-    "a2a": "GRAPE_A2A_BASE_URL",
-}
 _SERVICE_GATEWAY_PREFIXES = {"vcs": "/vcs", "issue": "/issue", "a2a": "/a2a"}
-_SERVICE_ENDPOINT_PREFIXES = (
-    ("/api/a2a", "a2a"),
-    ("/api/git-repo", "vcs"),
-    ("/api/issues", "issue"),
-)
 
 
 def _join_base_prefix(base_url: str, prefix: str) -> str:
@@ -370,25 +365,21 @@ def _join_base_prefix(base_url: str, prefix: str) -> str:
 
 
 def _resolve_service_base(service: str, business_url: str, business_source: str,
-                          runtime_url: str) -> tuple[str, str]:
+                          runtime_url: str, *, gateway: str = "",
+                          explicit: str = "") -> tuple[str, str]:
     """解析单服务基址，返回 (url, source)。
 
     优先级：显式 `task_<service>_api_url` > 聚合网关前缀 > 业务/回连基址回退。
     - vcs / issue 回退业务 API 基址（与 GRAPE_SERVER_URL 同值，但来源单独记录）；
     - a2a 回退 worker 回连基址（RUNTIME_SERVER_URL，控制面语义），不与业务基址混用。
-    显式配置不探测、不改写，避免按服务路由被其它基址冒充。
+    显式配置不探测、不改写，避免按服务路由被其它基址冒充。网关/显式配置由调用方
+    一次解析后透传，避免同一请求重复读取配置。
     """
-    try:
-        from src.user.db import get_task_gateway_base_url, get_task_service_api_url_explicit
-        explicit = get_task_service_api_url_explicit(service)
-        if explicit:
-            return explicit, f"explicit_{service}_api_url"
-        gateway = get_task_gateway_base_url()
-        if gateway:
-            return (_join_base_prefix(gateway, _SERVICE_GATEWAY_PREFIXES.get(service, "/" + service)),
-                    f"gateway_prefix_{service}")
-    except Exception:
-        pass
+    if explicit:
+        return explicit, f"explicit_{service}_api_url"
+    if gateway:
+        return (_join_base_prefix(gateway, _SERVICE_GATEWAY_PREFIXES.get(service, "/" + service)),
+                f"gateway_prefix_{service}")
     if service == "a2a":
         return (runtime_url or "").rstrip("/"), "runtime_server_url_fallback"
     return (business_url or "").rstrip("/"), f"business_api_fallback:{business_source}"
@@ -396,21 +387,33 @@ def _resolve_service_base(service: str, business_url: str, business_source: str,
 
 def _build_service_base_env(business_url: str, business_source: str,
                             runtime_url: str) -> dict:
-    """由已解析的业务/回连基址构建三面基址 env（避免重复探测）。"""
+    """由已解析的业务/回连基址构建三面基址 env（网关只解析一次）。"""
+    gateway = ""
+    explicit_by_service: dict = {}
+    try:
+        from src.user.db import get_task_gateway_base_url
+        gateway = get_task_gateway_base_url() or ""
+    except Exception:
+        gateway = ""
+    try:
+        from src.user.db import get_task_service_api_url_explicit
+        explicit_by_service = {
+            service: (get_task_service_api_url_explicit(service) or "")
+            for service in _SERVICE_BASE_ENV_KEYS
+        }
+    except Exception:
+        explicit_by_service = {}
     env: dict = {}
     sources: dict = {"business": business_source}
     for service, env_key in _SERVICE_BASE_ENV_KEYS.items():
-        url, source = _resolve_service_base(service, business_url, business_source, runtime_url)
+        url, source = _resolve_service_base(
+            service, business_url, business_source, runtime_url,
+            gateway=gateway, explicit=explicit_by_service.get(service, ""))
         env[env_key] = url
         sources[service] = source
-    try:
-        from src.user.db import get_task_gateway_base_url
-        gateway = get_task_gateway_base_url()
-        if gateway:
-            env["GRAPE_GATEWAY_BASE_URL"] = gateway
-            sources["gateway"] = "explicit_task_gateway_base_url"
-    except Exception:
-        pass
+    if gateway:
+        env["GRAPE_GATEWAY_BASE_URL"] = gateway
+        sources["gateway"] = "explicit_task_gateway_base_url"
     env["GRAPE_BASE_URL_SOURCES"] = json.dumps(sources, ensure_ascii=False, sort_keys=True)
     return env
 
@@ -422,40 +425,23 @@ def resolve_service_base_env(runtime_id: int = 0) -> dict:
     return _build_service_base_env(business_url, business_source, runtime_url)
 
 
-def _resolve_a2a_base(runtime_id: int = 0) -> str:
-    """A2A 控制面基址（平台侧 handoff/status 自调用用，Issue #1858）。"""
-    return resolve_service_base_env(runtime_id).get("GRAPE_A2A_BASE_URL", "")
+def resolve_a2a_base(runtime_id: int = 0) -> str:
+    """A2A 控制面基址（平台侧 handoff/status 自调用用，Issue #1858）。
 
-
-def service_for_endpoint(endpoint: str) -> str:
-    """端点路径 → 服务名（vcs/issue/a2a）；非三面端点返回空串。"""
-    path = (endpoint or "").split("?", 1)[0]
-    for prefix, service in _SERVICE_ENDPOINT_PREFIXES:
-        if path == prefix or path.startswith(prefix + "/"):
-            return service
-    return ""
-
-
-def format_base_url_candidates(endpoint: str = "", runtime_id: int = 0) -> str:
-    """生成 404/405 诊断文案：按端点前缀给出候选 base_url 与来源。
-
-    与 grape-cli #151 的候选地址提示对齐；平台侧自调用告警复用，明确非 0 退出码，
-    禁止调用方静默回退 localhost。
+    仅解析 A2A 显式配置 > 聚合网关 `/a2a` 前缀 > `RUNTIME_SERVER_URL` 回退，
+    不触发业务 API 可达性探测——重派/续办的诊断路径无需业务端点在线。
     """
-    env = resolve_service_base_env(runtime_id)
     try:
-        sources = json.loads(env.get("GRAPE_BASE_URL_SOURCES") or "{}")
+        from src.user.db import get_task_gateway_base_url, get_task_service_api_url_explicit
+        explicit = get_task_service_api_url_explicit("a2a")
+        if explicit:
+            return explicit.rstrip("/")
+        gateway = get_task_gateway_base_url()
+        if gateway:
+            return _join_base_prefix(gateway, _SERVICE_GATEWAY_PREFIXES["a2a"])
     except Exception:
-        sources = {}
-    service = service_for_endpoint(endpoint)
-    services = [service] if service else list(_SERVICE_BASE_ENV_KEYS)
-    lines = []
-    for svc in services:
-        key = _SERVICE_BASE_ENV_KEYS[svc]
-        lines.append(f"{key}={env.get(key, '')} (source={sources.get(svc, '')})")
-    return ("候选 base_url: " + "；".join(lines) +
-            "；base_url 不可达或端点返回 404/405 时请显式指定 --base-url，"
-            "命令将以非 0 退出码返回")
+        pass
+    return (_resolve_server_url(runtime_id) or "").rstrip("/")
 
 
 def _apply_server_url_placeholders(text: str, runtime_id: int = 0) -> str:

@@ -21,19 +21,24 @@
    - `_build_service_base_env()` / `resolve_service_base_env()`：输出三面基址与
      `GRAPE_BASE_URL_SOURCES` 来源图；
    - `resolve_task_server_env()` 在原有两项基础上注入三面基址（复用已解析基址，避免重复探测）；
-   - `service_for_endpoint()` / `format_base_url_candidates()`：按端点前缀输出候选 base_url
-     与「非 0 退出码」提示，供平台自调用告警与回归用例复用。
+   - `src/service_diagnostics.py`：`service_for_endpoint()` / `format_base_url_candidates()`
+     独立承载端点→服务映射与候选 base_url 诊断，供平台自调用告警与回归用例复用；
+   - `resolve_a2a_base()`：公开的 A2A 专用解析入口，仅读显式配置/网关/回连基址，
+     不触发业务 API 探测。
 4. 派发/执行路径
    - `src/runtime/direct_executor.py`：direct 执行 env 复用 `resolve_task_server_env`；
    - `src/api/routes/runtime.py`：worker 执行前 `GET /tasks/{id}/env` 按任务 runtime 下发三面基址，
      覆盖历史任务/旧快照；
    - `src/api/chat_session_env.py`：chat 会话同样注入三面基址；
    - `src/agent/executor.py`：旧快照缺失时仅补缺失键（不覆盖显式值）。
-5. 本机/内网 worker：`src/runtime/agent.py::_apply_local_worker_base_override` 对缺失或与
-   回退基址同端点的服务基址覆盖为 `local_base`，显式分服务基址保留；更新来源图。
+5. 本机/内网 worker：`src/runtime/agent.py::_apply_local_worker_base_override`
+   - VCS / Issue 跟随「生效的业务基址」`GRAPE_SERVER_URL`：单地址部署覆盖为 `local_base`，
+     分端口部署（业务 8081 / runtime 8083）保留业务基址，绝不改成 runtime 端口；
+   - A2A 继续跟随 runtime 直连覆盖为 `local_base`；
+   - 显式分服务基址保留，更新来源图。
 6. A2A 自调用
    - `src/api/routes/events.py` 重派 A2A、`src/api/routes/issues.py` 恢复续办改用
-     `_resolve_a2a_base()`；失败日志/响应附 `format_base_url_candidates("/api/a2a")`。
+     `resolve_a2a_base()`；失败日志/响应附 `format_base_url_candidates("/api/a2a")`。
 7. runbook 前置校验：worker 执行前对三面基址做缺失显式告警（禁止静默回退 localhost）。
 
 ## 风险与缓解

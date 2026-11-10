@@ -1169,8 +1169,8 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
             try:
                 import urllib.request, json as _json
                 # Issue #1858：恢复续办走 A2A 控制面基址（含可选网关 /a2a 前缀）。
-                from src.prompt_builder import _resolve_a2a_base
-                _a2a_base = _resolve_a2a_base()
+                from src.prompt_builder import resolve_a2a_base
+                _a2a_base = resolve_a2a_base()
                 if not _a2a_base:
                     raise RuntimeError("A2A base_url unresolved")
                 _a2a_url = _a2a_base.rstrip("/") + "/api/a2a"

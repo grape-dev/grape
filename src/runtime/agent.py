@@ -1583,21 +1583,25 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     if _single_address:
         env["GRAPE_SERVER_URL"] = local_base
         log.info("local worker: single-address deploy, override GRAPE_SERVER_URL -> %s", local_base)
-    # Issue #1858：按服务基址跟随本机直连修正——
-    # - 缺失或与对应回退基址同端点（单地址部署）→ 覆盖为 local_base（避免 NAT 回环）；
-    # - 显式分服务基址（如 VCS 8081 / A2A 8082 与业务/回连基址不同）保留不动，
-    #   交由运维配置可达地址，绝不用其它基址冒充。
+    # Issue #1858：按服务基址跟随生效基址修正——
+    # - vcs / issue 跟随「生效的业务基址」`GRAPE_SERVER_URL`：单地址部署时该值为
+    #   local_base（避免 NAT 回环）；分端口部署（业务 8081 / runtime 8083）时保留
+    #   业务基址，绝不改成 runtime 端口的 local_base，否则 VCS/Issue 404 复现。
+    #   仅在缺失或与业务基址同端点时改写，显式分服务基址保留。
+    # - a2a 继续跟随 runtime 直连：缺失或与回连基址同端点时覆盖为 local_base。
+    _business_effective = env.get("GRAPE_SERVER_URL") or ""
     _svc_refs = (
-        ("GRAPE_VCS_BASE_URL", "vcs", _business_base),
-        ("GRAPE_ISSUE_BASE_URL", "issue", _business_base),
-        ("GRAPE_A2A_BASE_URL", "a2a", _runtime_base),
+        ("GRAPE_VCS_BASE_URL", "vcs", _business_base, _business_effective),
+        ("GRAPE_ISSUE_BASE_URL", "issue", _business_base, _business_effective),
+        ("GRAPE_A2A_BASE_URL", "a2a", _runtime_base, local_base),
     )
     _overridden = {}
-    for _key, _svc, _ref in _svc_refs:
+    for _key, _svc, _ref, _target in _svc_refs:
         _val = env.get(_key) or ""
         if not _val or (_ref and _same_url_host(_val, _ref)):
-            env[_key] = local_base
-            _overridden[_svc] = "local_worker_override"
+            if _target and _target != _val:
+                env[_key] = _target
+                _overridden[_svc] = "local_worker_override"
     if _overridden:
         try:
             import json as _json_base_src
