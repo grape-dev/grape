@@ -260,25 +260,44 @@ class VcsApiClient:
             self._ledger("issue_comment", _cid or issue_number, issue_number, body)
         return _resp
 
-    def list_issue_comments(self, issue_number: int, per_page: int = 100) -> list:
+    def list_issue_comments(self, issue_number: int, per_page: int = 100,
+                            max_pages: int = 20) -> list:
         """获取 Issue 评论列表（Issue #1739：门禁标注跨进程幂等去重用）。
 
+        分页拉取全部评论：只取首页会让评论超过 per_page 的 Issue 漏查旧标记，
+        导致跨进程去重失效、重复标注。上游忽略 page（返回同一页）或空页即停止，
+        最多 ``max_pages`` 页，避免异常上游无界翻页。
+
         Returns:
-            list: 评论列表；失败返回空列表。
+            list: 评论列表；失败返回已取到的部分（保持 best-effort 语义）。
         """
-        if self.provider == "gitcode":
-            _resp = self._gitcode_request(
-                "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments?per_page={per_page}")
-        elif self.provider == "github":
-            _resp = self._github_request(
-                "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments?per_page={per_page}")
-        elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
-            _resp = self._gitlab_request(
-                "GET", f"/projects/{project_id}/issues/{issue_number}/notes?per_page={per_page}")
-        else:
-            return []
-        return _resp if isinstance(_resp, list) else []
+        _out: list = []
+        _prev = None
+        for _page in range(1, max_pages + 1):
+            if self.provider == "gitcode":
+                _resp = self._gitcode_request(
+                    "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
+                    f"/comments?per_page={per_page}&page={_page}")
+            elif self.provider == "github":
+                _resp = self._github_request(
+                    "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
+                    f"/comments?per_page={per_page}&page={_page}")
+            elif self.provider == "gitlab":
+                project_id = f"{self.owner}%2F{self.repo}"
+                _resp = self._gitlab_request(
+                    "GET", f"/projects/{project_id}/issues/{issue_number}"
+                    f"/notes?per_page={per_page}&page={_page}")
+            else:
+                return _out
+            if not isinstance(_resp, list) or not _resp:
+                break
+            if _resp == _prev:
+                break
+            _prev = _resp
+            _out.extend(_resp)
+            if len(_resp) < per_page:
+                break
+        return _out
 
     # === Issue 查询 ===
 
