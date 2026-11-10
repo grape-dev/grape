@@ -1045,16 +1045,51 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     if not related and _body:
         from src.vcs.issue_ref_filter import extract_related_issue_nums
         related = extract_related_issue_nums(_body)
+    # Issue #1739：关联 Issue 的同一流水线 qa 最新结论为 fail 时，不得因建 PR 自动关闭
+    # Issue（GitCode close_related_issue 会在合入时关闭关联 Issue）——强制关闭开关为 false，
+    # 并在 Issue 上标注 QA 失败原因与 PR，便于回流修复；门禁异常 fail-open 保持原行为。
+    _auto_close = body.auto_close_issues
+    _qa_blocked = None
+    if related and _auto_close:
+        try:
+            from src.api.qa_gate import qa_gate_check
+            from src.repo_key import to_repo_key
+
+            _rk = to_repo_key(f"{owner}/{repo}", p)
+            for _rnum in related:
+                _qa_info = qa_gate_check(_rk, _rnum)
+                if _qa_info.get("blocked"):
+                    _auto_close = False
+                    _qa_blocked = (_rk, _rnum, _qa_info)
+                    log.info(f"qa gate: force auto_close_issues=false "
+                             f"{_rk}/#{_rnum} (qa seq={_qa_info.get('event_seq')})")
+                    break
+        except Exception as _e:
+            log.warning(f"qa gate: create_pull check failed (fail-open) "
+                        f"{owner}/{repo}: {_e}")
     neutral = {
         "title": body.title,
         "head": body.head,
         "base": body.base,
         "body": _body,
         "related_issue_nums": related,
-        "auto_close_issues": body.auto_close_issues,
+        "auto_close_issues": _auto_close,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    # Issue #1739：QA 失败被门禁拦截时，在建 PR 成功后补充 Issue 标注（关联本次 PR）。
+    if _qa_blocked:
+        try:
+            from src.api.qa_gate import annotate_qa_failure
+            from src.outbound_ledger import extract_content_id
+
+            _pr_s = str(extract_content_id(resp, "issue") or "").strip()
+            _pr_num = int(_pr_s) if _pr_s.isdigit() else 0
+            annotate_qa_failure(_qa_blocked[0], _qa_blocked[1], _qa_blocked[2],
+                                pr_number=_pr_num)
+        except Exception as _e:
+            log.warning(f"qa gate: create_pull annotation failed (fail-open) "
+                        f"{owner}/{repo}: {_e}")
     # Issue #453 台账（S29-G2，网关 PR 端点族补全）：建 PR 入账——同族 update_pull/merge_pull
     # 已入账，此端点原先漏账（外部 API 调用者经网关建 PR 的回流无台账防线）。
     # best-effort：入账失败不阻断、不影响响应。bot 建 PR 回流由 S24 豁免先于台账判定放行给
@@ -1169,6 +1204,42 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     _repo_key = f"{owner}/{repo}"
     # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
     _base_info = get_pull_base(owner, repo, number, p, _token)
+    # Issue #1739：合入前 QA 结论门禁——关联 Issue 同一流水线 qa 最新结论为 fail 时
+    # 阻断合入（合入会触发 VCS 自动关闭 Issue，未经验证的需求将被误判为已解决）。
+    # 内部异常 fail-open，不影响既有冲突标记/结构门禁与正常合入。
+    try:
+        from src.api.qa_gate import annotate_qa_failure, qa_gate_check
+        from src.repo_key import to_repo_key
+        from src.vcs.issue_ref_filter import extract_related_issue_nums
+
+        _pr_detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _token)
+        _pr_body = ""
+        if isinstance(_pr_detail, dict):
+            _pr_body = str(_pr_detail.get("body") or _pr_detail.get("description") or "")
+        _rel_nums = extract_related_issue_nums(_pr_body) if _pr_body else []
+        _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+        for _rel_num in _rel_nums:
+            _qa_info = qa_gate_check(_qa_rk, _rel_num)
+            if not _qa_info.get("blocked"):
+                continue
+            annotate_qa_failure(_qa_rk, _rel_num, _qa_info, pr_number=number)
+            record_gate_log(_repo_key, number, "pre_merge_qa", "blocked",
+                            {"qa_failed": {"issue": _rel_num,
+                                           "event_seq": _qa_info.get("event_seq"),
+                                           "status": _qa_info.get("status")}})
+            raise HTTPException(status_code=409, detail={
+                "code": 409,
+                "message": (f"merge blocked by QA gate (Issue #1739): latest qa conclusion "
+                            f"for issue #{_rel_num} is fail (seq={_qa_info.get('event_seq')}); "
+                            f"fix and re-run qa before merge. reason: "
+                            f"{(_qa_info.get('reason') or '')[:200]}"),
+                "gate": {"phase": "pre_merge_qa", "issue": _rel_num,
+                         "event_seq": _qa_info.get("event_seq"),
+                         "status": _qa_info.get("status")}})
+    except HTTPException:
+        raise
+    except Exception as _e:
+        log.warning(f"qa gate: merge pre-check failed (fail-open) {owner}/{repo}#{number}: {_e}")
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)

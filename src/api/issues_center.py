@@ -618,7 +618,22 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
 
 def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
                          statuses: tuple = ("pending_review",)) -> bool:
-    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。"""
+    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。
+
+    Issue #1739：落 completed 前统一校验同一流水线 qa 最新结论，fail 时不收尾。
+    """
+    try:
+        from src.api.qa_gate import annotate_qa_failure, qa_gate_check
+        _qa_info = qa_gate_check(repo_key, issue_number)
+        if _qa_info.get("blocked"):
+            annotate_qa_failure(repo_key, issue_number, _qa_info)
+            log.info(f"Issue #1739: qa failed → refuse complete "
+                     f"{repo_key}/#{issue_number} (seq={_qa_info.get('event_seq')})")
+            return False
+    except Exception as _qe:
+        # 门禁自身异常 fail-open，保持既有收尾链路
+        log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                    f"{repo_key}/#{issue_number}: {_qe}")
     with db_lock:
         c = db.cursor()
         _ph = ",".join("?" * len(statuses))
@@ -901,9 +916,33 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
                 set_issue_stage(repo_key, _tag, "pending_review", agent_type)
                 log.info(f"Issue #656: node {_nid} failed → pending_review "
                          f"(manual confirm path) {repo_key}/{_tag}")
+                if _nid == "qa":
+                    # Issue #1739：qa 失败保留失败原因与关联 PR，便于回流修复
+                    try:
+                        from src.api.qa_gate import annotate_qa_failure, qa_gate_check
+                        _qa = qa_gate_check(repo_key, _num)
+                        annotate_qa_failure(repo_key, _num, _qa or {
+                            "event_seq": 0, "status": _st, "reason": "qa 节点失败"})
+                    except Exception as _qe:
+                        log.warning(f"qa gate annotation failed {repo_key}/{_tag}: {_qe}")
                 return "pending_review_fallback"
             if _st != "completed":
                 return f"noop:node_pending:{_nid}"
+
+        # Issue #1739：QA 结论门禁——同一流水线 qa 最新结论为 fail 时不得自动结单。
+        # 兼容 qa 以 status=completed + result “不通过/阻塞” 自报失败的实际形态。
+        try:
+            from src.api.qa_gate import annotate_qa_failure, qa_gate_check
+            _qa_info = qa_gate_check(repo_key, _num)
+            if _qa_info.get("blocked"):
+                annotate_qa_failure(repo_key, _num, _qa_info)
+                log.info(f"Issue #1739: qa failed → keep issue open "
+                         f"{repo_key}/{_tag} (seq={_qa_info.get('event_seq')})")
+                return "qa_failed_blocked"
+        except Exception as _qe:
+            # 门禁自身异常 fail-open，不阻断正常收尾（与原关闭链路一致）
+            log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                        f"{repo_key}/{_tag}: {_qe}")
 
         # 条件齐备 → issue 级收尾迁移（幂等：仅可变状态放行）
         with db_lock:
@@ -950,6 +989,21 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
       回读真实 status 后分类，调用方据此给出 changed=false + 真实 status + 原因码）。
     """
     try:
+        # Issue #1739：统一 QA 结论门禁——仅在本次调用会收尾（target=done 或末节点归一
+        # done）时校验；target=processing 的「继续处理」不受影响。
+        _will_done = (target == "done") or _is_last_stage_node(repo_key, issue_number)
+        if _will_done:
+            try:
+                from src.api.qa_gate import annotate_qa_failure, qa_gate_check
+                _qa_info = qa_gate_check(repo_key, issue_number)
+                if _qa_info.get("blocked"):
+                    annotate_qa_failure(repo_key, issue_number, _qa_info)
+                    log.info(f"Issue #1739: qa failed → review-pass blocked "
+                             f"{repo_key}/#{issue_number} target={target}")
+                    return "noop:qa_failed"
+            except Exception as _qe:
+                log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                            f"{repo_key}/#{issue_number}: {_qe}")
         if target == "done":
             if _is_last_stage_node(repo_key, issue_number):
                 # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
