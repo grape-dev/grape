@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+from collections import OrderedDict
 
 from src.config import log
 
@@ -42,9 +44,14 @@ _QA_NEGATION_RE = re.compile(
     r"整改|修复)[\s、,，/和及:：]*)+",
     re.IGNORECASE,
 )
-# “critical: none / required: 0 / blocking issues: none”等否定收尾（否定词在后）
+# “critical: none / required: 0 / required fixes: none / blocking issues: none”
+# 等否定收尾（否定词在后）。前置修饰词（required fixes / blocking issues）必须
+# 连同量词一起剔除，否则残留的 required/critical 会命中英文失败词误判 fail。
 _QA_NEG_TRAILING_RE = re.compile(
-    r"\b(?:critical|required|blockers?|blocking|failures?|fails?|issues?|fixes?)"
+    r"\b(?:(?:critical|required|blocking|blocker|major|minor|any|all|"
+    r"remaining|open|known)\s+)*"
+    r"(?:critical|required|blockers?|blocking|failures?|fails?|issues?|fixes?|"
+    r"problems?|bugs?|findings?|changes?)"
     r"\s*[:：=-]?\s*(?:none|zero|0|no)\b",
     re.IGNORECASE,
 )
@@ -58,12 +65,36 @@ _QA_NEG_CN_TRAILING_RE = re.compile(
 _QA_FAIL_EN_RE = re.compile(r"\b(?:fail|failed|failure|fails)\b", re.IGNORECASE)
 _QA_PASS_EN_RE = re.compile(r"\b(?:pass|passed|ok)\b", re.IGNORECASE)
 
-# 否定式“通过”= 实际未通过（“无法通过/没有通过/not passed”不能被下面的通过语义吞掉）
+# 否定式“通过”= 实际未通过（“无法通过/没有通过/not passed”不能被下面的通过语义吞掉）。
+# 否定词与通过词之间允许“全部/完全/达到/测试”等修饰语（未全部通过 / 未达到通过标准 /
+# not all tests passed / not fully passed），但不能跨越无关子句（not required, tests
+# passed 中的 not 不得命中后面的 passed）。
 _QA_NEG_PASS_RE = re.compile(
     r"(?:无法|不能|不可|未能|未|没有|没|不会|no\s+way\s+to|"
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
     r"did\s+not|does\s+not|didn't|doesn't|never|not)\s*"
+    r"(?:(?:全部|所有|完全|能够|能|均|都|达到|达|满足|"
+    r"all|every|any|fully|completely|entirely|be|been)\s*)*"
+    r"(?:(?:测试|用例|检查|项|tests?|checks?|cases?)\s*)*"
     r"(?:通过|pass(?:ed)?|ok|succeed|approved|合并|合入)",
+    re.IGNORECASE,
+)
+# 未达标语义（否定词可能在通过词之后）：通过率未达 100% / 未达到通过标准 /
+# not reach the passing standard——这些都表示未通过，不能被“通过”一词吞成 pass。
+_QA_UNMET_STANDARD_RE = re.compile(
+    r"(?:通过率|合格率|达标率|pass\s+rate)\s*[^。;\n]{0,10}?"
+    r"(?:未|没有|没|不)\s*(?:达到|达|到|满足|达标|符合)\s*"
+    r"(?:100\s*%|百分之百|标准|要求|门槛|预期|目标)?"
+    r"|(?:未|没有|没|不)\s*(?:达到|达|满足|符合)\s*(?:通过|验收)?\s*(?:标准|要求|门槛)"
+    r"|(?:not|did\s+not|does\s+not|failed\s+to)\s+(?:reach|meet|achieve|satisfy)\s+"
+    r"(?:the\s+)?(?:pass(?:ing)?\s+)?(?:standard|criteria|threshold|requirement)",
+    re.IGNORECASE,
+)
+# 部分通过 = 未全部通过（部分用例通过 / tests partially passed）。
+_QA_PARTIAL_PASS_RE = re.compile(
+    r"(?:partially|partly)\s*(?:pass(?:ed)?|succeed(?:ed)?|ok)"
+    r"|(?:部分|部份)\s*(?:用例|测试|检查|项)?\s*(?:通过|合格)"
+    r"|(?:some|only\s+some)\s+(?:tests?|checks?|cases?)\s+(?:pass(?:ed)?|succeed(?:ed)?)",
     re.IGNORECASE,
 )
 
@@ -72,15 +103,28 @@ _QA_PASS_TERMS = ("通过", "✅")
 
 _QA_ANNOTATION_MARKER = "<!-- grape-qa-gate"
 _ANNOTATED_MAX = 2048
-_annotated: set[tuple[str, int, str]] = set()
+# 进程内幂等缓存：仅作远程查询的快速前置（跨进程去重仍以远端评论标记为准）。
+# 用 OrderedDict 实现 LRU，超限淘汰最久未命中项；并发 worker 共享同进程缓存，需加锁。
+_annotated: OrderedDict[tuple[str, int, str], None] = OrderedDict()
+_annotated_lock = threading.Lock()
 
 
 def _remember_annotation(key: tuple[str, int, str]) -> None:
-    """进程内幂等缓存：仅作远程查询的快速前置，超出上限时淘汰旧条目避免无界增长。"""
-    _annotated.add(key)
-    if len(_annotated) > _ANNOTATED_MAX:
-        for _old in list(_annotated)[:len(_annotated) - _ANNOTATED_MAX]:
-            _annotated.discard(_old)
+    """记录已标注键（LRU 淘汰，线程安全）。"""
+    with _annotated_lock:
+        _annotated[key] = None
+        _annotated.move_to_end(key)
+        while len(_annotated) > _ANNOTATED_MAX:
+            _annotated.popitem(last=False)
+
+
+def _is_annotated(key: tuple[str, int, str]) -> bool:
+    """命中的键刷新 LRU 顺序，返回是否已标注。"""
+    with _annotated_lock:
+        if key not in _annotated:
+            return False
+        _annotated.move_to_end(key)
+        return True
 
 
 def _issue_tags(issue_number) -> tuple[str, str] | None:
@@ -196,8 +240,12 @@ def classify_qa_conclusion(status: str, text: str) -> str:
     _blob = (text or "").strip()
     if not _blob:
         return "unknown"
-    # 否定式通过优先于泛化的“通过”词（“无法通过/没有通过验收”不能再判 pass）
+    # 否定式通过/未达标/部分通过优先于泛化的“通过”词
     if _QA_NEG_PASS_RE.search(_blob):
+        return "fail"
+    if _QA_UNMET_STANDARD_RE.search(_blob):
+        return "fail"
+    if _QA_PARTIAL_PASS_RE.search(_blob):
         return "fail"
     _normalized = _QA_NEG_TRAILING_RE.sub("", _blob)
     _normalized = _QA_NEG_CN_TRAILING_RE.sub("", _normalized)
@@ -395,7 +443,7 @@ def annotate_qa_failure(repo_key: str, issue_number, qa_info: dict,
         _status = (qa_info or {}).get("status") or ""
         _token = _annotation_token(_seq, _status, _reason)
         _key = (repo_key, _num, _token)
-        if _key in _annotated:
+        if _is_annotated(_key):
             return "skipped"
         _pr = int(pr_number or 0) or _latest_pr_number(repo_key, _num)
         _lines = [
