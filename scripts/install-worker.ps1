@@ -209,7 +209,12 @@ if (Test-Path $versionFilePath) {
 }
 $expectedVersion = ""
 try {
-    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+    # 必须带凭据头：/install/latest 走 _require_credential（rta_），
+    # 匿名调用恒 401 → expectedVersion 永远空 → 后面「VERSION 未变」被误判为失败
+    # （2026-11-10 实测：Windows 重装同版本时必报
+    #   Extract verification failed: VERSION unchanged ... after extraction）
+    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing `
+        -Headers @{ Authorization = "Bearer $Token" } -ErrorAction Stop
     $expectedVersion = ("" + $lvi.version).Trim()
     if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
 } catch {
@@ -304,23 +309,51 @@ with tarfile.open(tmp) as t:
 } catch {
     Fail "Extract failed: $_"
 }
-Remove-Item $TmpPkg -ErrorAction SilentlyContinue
 
 # ===== 解压后最终校验：目标版本没落地就明确失败 =====
+# 注意：$TmpPkg 要留到读完包内 VERSION 之后再删（见下方校验）
 # 宁可让本次安装报错并留下日志，也不要用旧代码继续走完安装流程 ——
 # 那会让 worker 以旧版本重启，下一轮又发现版本不一致，形成无限升级循环。
 $finalVersion = ""
 if (Test-Path $versionFilePath) {
     $finalVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
 }
+
+# 包内自带 VERSION（不落盘、直接读 tar）——用于「控制器版本取不到」时校验解压是否真落地。
+# 语义对照：expectedVersion 缺失 ≠ 解压失败；同版本重装时 VERSION 本来就不会变。
+$pkgVersion = ""
+try {
+    if ($tarExe) {
+        $pkgVersion = (("" + (& $tarExe -xzOf $TmpPkg "grape-worker/VERSION" 2>$null)) -replace '\s', '')
+    }
+} catch {}
+if (-not $pkgVersion) {
+    # 从已解压的目录兜底读同一份 VERSION（解压成功时它与包内一致）
+    try {
+        if (Test-Path (Join-Path $Dir "VERSION")) {
+            $pkgVersion = ((Get-Content (Join-Path $Dir "VERSION") -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+        }
+    } catch {}
+}
+if ($pkgVersion) { Log "Package VERSION: $pkgVersion (installed before: '$preVersion')" }
+
 if ($expectedVersion) {
     if ($finalVersion -ne $expectedVersion) {
         Fail "Extract verification failed: expected VERSION=$expectedVersion but got '$finalVersion'. Extraction did not land - check that PATH does not shadow tar with MSYS/git (tar -xzf on C:\ paths exits 2)."
     }
     Log "Extract verified: VERSION=$finalVersion"
+} elseif ($pkgVersion) {
+    # 用包内 VERSION 做基准：解压后磁盘版本必须等于包内版本（同版本重装时两者相等 → 通过）
+    if ($finalVersion -ne $pkgVersion) {
+        Fail "Extract verification failed: package VERSION=$pkgVersion but installed '$finalVersion'. Extraction did not land - check that PATH does not shadow tar with MSYS/git (tar -xzf on C:\ paths exits 2)."
+    }
+    Log "Extract verified against package VERSION=$finalVersion (idempotent reinstall OK)"
 } elseif ($finalVersion -and $finalVersion -eq $preVersion) {
-    Fail "Extract verification failed: VERSION unchanged ('$finalVersion') after extraction."
+    # 连包内 VERSION 都读不到时才走到这里：无法证明解压落地，但也不能凭「版本未变」判定失败
+    # —— 同版本重装是合法的（VERSION 必然不变）。降级为告警，让安装流程走完。
+    Log "Warning: VERSION unchanged ('$finalVersion') and no package VERSION available; continuing (idempotent reinstall assumed)"
 }
+Remove-Item $TmpPkg -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $CfgDir)) {
     New-Item -ItemType Directory -Path $CfgDir -Force | Out-Null
