@@ -8,6 +8,7 @@
 - force=true 可越过门禁（保持人工强制派发语义）。
 """
 import os
+import shutil
 import uuid
 
 from src.session_manager import db, db_lock
@@ -17,7 +18,10 @@ class TestA2ADispatchGuard1770:
     def _clean(self):
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM agent_tasks")
+            c.execute(
+                "DELETE FROM agent_tasks WHERE event_seq IN "
+                "(SELECT seq FROM events WHERE repo_key LIKE 'gitcode:owner/repo%' "
+                "OR repo_key LIKE 'owner/repo%')")
             c.execute("DELETE FROM events WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
             c.execute("DELETE FROM event_skipped WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
             c.execute(
@@ -27,12 +31,19 @@ class TestA2ADispatchGuard1770:
                 "DELETE FROM agent_runtimes WHERE credential_id IN "
                 "(SELECT id FROM runtime_credentials WHERE name LIKE 'guard-cred-%')")
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'guard-cred-%'")
-            c.execute("DELETE FROM skill WHERE skill_name='implementation-guard'")
+            c.execute("DELETE FROM skill WHERE skill_name='implementation' AND scope='repo'")
             try:
                 c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:owner/repo'")
             except Exception:
                 pass
             db.commit()
+        try:
+            from src.config import SKILLS_DIR
+            shutil.rmtree(
+                os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation"),
+                ignore_errors=True)
+        except Exception:
+            pass
 
     def _seed(self):
         with db_lock:
@@ -228,11 +239,96 @@ class TestA2ADispatchGuard1770:
         assert result["count"] >= 2
         assert result["window"] > 0
 
-    def test_idempotency_key_includes_scene_and_agent(self):
-        from src.api.a2a_dispatch_guard import idempotency_key
-        base = idempotency_key("5", "default", "coding")
+    def test_window_key_includes_scene_and_agent(self):
+        from src.api.a2a_dispatch_guard import window_key
+        base = window_key("5", "default", "coding")
         assert base.startswith("a2a:")
-        assert base == idempotency_key("5", "default", "coding")
-        assert base != idempotency_key("5", "default", "qa")
-        assert base != idempotency_key("5", "other", "coding")
-        assert base != idempotency_key("6", "default", "coding")
+        assert base == window_key("5", "default", "coding")
+        assert base != window_key("5", "default", "qa")
+        assert base != window_key("5", "other", "coding")
+        assert base != window_key("6", "default", "coding")
+
+    def test_failed_dispatch_can_retry_immediately(self):
+        """P2：失败事件不应计入时间窗去重，必须允许立即重试。"""
+        client = self._setup()
+        first = client.post("/api/a2a", json=self._body(agent="coding")).json()
+        first_seq = first["seq"]
+        assert first_seq > 0
+        from src.api.event_store import update_event_complete
+        update_event_complete(first_seq, "failed", result="首次执行失败")
+
+        retry = client.post("/api/a2a", json=self._body(agent="coding"))
+        assert retry.status_code == 200, retry.text
+        data = retry.json()
+        assert data.get("skipped") not in ("duplicate_key", "active_dispatch"), data
+        assert data["seq"] > 0 and data["seq"] != first_seq
+        assert len(self._events_for("coding")) == 2
+
+    def test_active_different_context_is_intercepted(self):
+        """P3：同 issue+scene+agent 活跃时，不同 context 也不得另建第二个事件。"""
+        client = self._setup()
+        first = client.post("/api/a2a", json=self._body(agent="coding")).json()
+        first_seq = first["seq"]
+        assert first_seq > 0
+
+        second = client.post(
+            "/api/a2a", json=self._body(agent="coding", context="不同上下文的再次派发"))
+        assert second.status_code == 200, second.text
+        data = second.json()
+        assert data["skipped"] == "active_dispatch", data
+        assert data["reason"] == f"active_dispatch:{first_seq}"
+        assert data["existing_seq"] == first_seq
+        assert data["seq"] == 0
+        assert len(self._events_for("coding")) == 1, "活跃期不同 context 不应创建第二个事件"
+        assert any(r[0] == f"active_dispatch:{first_seq}" for r in self._skips_for())
+
+    def test_repeated_skips_trigger_storm_alert(self):
+        """P5：跳过路径不落 events，告警统计必须纳入 event_skipped 次数。"""
+        client = self._setup()
+        self._seed_event(agent="qa", status="running")
+        for _ in range(2):
+            resp = client.post("/api/a2a", json=self._body(agent="coding"))
+            assert resp.json()["skipped"] == "downstream_running"
+
+        from src.api.a2a_dispatch_guard import detect_dispatch_storm
+        result = detect_dispatch_storm(
+            "gitcode:owner/repo", "5", "coding", upcoming=0)
+        assert result["alerted"] is True, result
+        assert result["count"] >= 2, result
+
+    def test_guarded_insert_is_atomic_under_concurrency(self):
+        """P4：并发同键派发在同一 db_lock 内「复查+落库」，只允许一行。"""
+        self._clean()
+        self._seed()
+        from concurrent.futures import ThreadPoolExecutor
+        from src.api.a2a_context import a2a_context_key
+        from src.api.a2a_dispatch_guard import append_guarded_a2a_event
+
+        ctx_key = a2a_context_key("", "并发同键派发")
+        payload = {"issue_number": "5", "context": "并发同键派发",
+                   "idempotency_key": ""}
+
+        def _dispatch(_i):
+            return append_guarded_a2a_event(
+                "gitcode:owner/repo", "5", "coding", "default",
+                title="A2A: coding", summary="A2A: → coding",
+                payload=dict(payload), context_key=ctx_key)
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(_dispatch, range(8)))
+
+        ok = [r for r in results if r[0] == "ok"]
+        dup = [r for r in results if r[0] in ("duplicate_key", "active_dispatch")]
+        assert len(ok) == 1, f"并发同键应只落一行, got {results}"
+        assert len(dup) == len(results) - 1, results
+        assert len(self._events_for("coding")) == 1
+
+    def test_dispatch_persists_issue_scene_id(self):
+        """P6：普通 a2a 落库应持久化 Issue 场景维度，而非空 scene。"""
+        client = self._setup()
+        resp = client.post("/api/a2a", json=self._body(agent="coding")).json()
+        assert resp["seq"] > 0
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT scene_id FROM events WHERE seq=?", (resp["seq"],)).fetchone()
+        assert row and row[0] == "default", row

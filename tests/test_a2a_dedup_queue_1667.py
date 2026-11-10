@@ -149,6 +149,13 @@ class TestA2ADedupQueue1667:
         client = self._setup()
         first = client.post("/api/a2a", json=self._body(context="T3 补测"))
         assert first.json()["seq"] > 0
+        # Issue #1770：短窗内同 issue+scene+agent 活跃重复被门禁拦截；窗口外的
+        # 不同 context 仍按 #1667 语义放行（将首事件时间前移出 120s 窗口）。
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE events SET created_at=datetime('now','-1 hour') WHERE seq=?",
+                      (first.json()["seq"],))
+            db.commit()
         second = client.post("/api/a2a", json=self._body(context="PR 交付"))
         assert second.status_code == 200, second.text
         data = second.json()
@@ -206,6 +213,12 @@ class TestA2ADedupQueue1667:
         client = self._setup()
         first = client.post("/api/a2a", json=self._body(context="ctx-a", idem="task-1:coding"))
         assert first.json()["seq"] > 0
+        # Issue #1770：短窗内活跃重复拦截优先，窗口外不同幂等键仍可区分派发。
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE events SET created_at=datetime('now','-1 hour') WHERE seq=?",
+                      (first.json()["seq"],))
+            db.commit()
         second = client.post("/api/a2a", json=self._body(context="ctx-a", idem="task-2:coding"))
         assert second.status_code == 200, second.text
         data = second.json()
