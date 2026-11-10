@@ -69,3 +69,16 @@
 - 多 Issue PR：建 PR / 合入门禁遍历全部关联 Issue，逐一标注 qa 失败 Issue（409 列出全部）。
 - `gate_or_annotate` 增加 `node_failure` 语义，`auto_finalize_issue_on_last_node` 的 qa 节点
   失败分支改走统一入口。
+
+## 复审补充（PR #1094 round 4）
+- 中文否定式通过：`_QA_NEG_PASS_RE` 补 `没有/没`，`没有通过/没通过/没有通过` 判 fail；
+  `未通过/不通过/无法通过` 保持 fail。
+- 中文后置否定：新增 `_QA_NEG_CN_TRAILING_RE`（阻塞/阻断 … 为零/0），否定前缀集合补
+  `没` 与 `不通过/未通过`，`阻塞为零/阻塞 0/无不通过项` 不再误判 fail。
+- GitHub 自动关闭旁路：`auto_close_issues=false` 时清除调用方 body 自带的
+  `Closes/Fixes/Resolves #N` 并降级 `Related to #N`；无 related 列表时也由
+  `_gh_auto_close` 清理；`auto_close=true` 时避免重复追加 `Closes`。
+- 建 PR 门禁不再依赖 `auto_close_issues`：默认 false 时同样校验并标注 QA 失败 Issue。
+- 门禁样板收敛：新增 `collect_qa_failures` / `annotate_qa_failures`，`create_pull` 与
+  `merge_pull` 复用；合入门禁抽为 `_pre_merge_qa_gate`。
+- 清理不可达的 `_scene_key or "default"` 分支；进程内标注缓存增加上限淘汰。
