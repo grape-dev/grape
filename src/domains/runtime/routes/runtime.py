@@ -280,6 +280,16 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                       "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
                       (credential_id, name))
             row = c.fetchone()
+            # Issue #658：role_tags 显式声明（JSON 数组）；空列表不覆盖已有手工配置
+            _role_tags_json = ""
+            try:
+                _rt_tags = rt.get("role_tags") or []
+                if isinstance(_rt_tags, list) and _rt_tags:
+                    _role_tags_json = json.dumps([str(t).strip().lower() for t in _rt_tags if str(t).strip()], ensure_ascii=False)
+            except Exception:
+                _role_tags_json = ""
+            # Issue #865：配置模型（worker 上报；空=未上报，不覆盖既有值）
+            _model_name = str(rt.get("model") or "").strip()[:120]
             if row:
                 rid = row[0]
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
