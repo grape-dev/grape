@@ -117,9 +117,11 @@ def _aishell_dsh_model() -> str:
                     return _sanitize(cfg.get("model"))
         except Exception:
             pass
-        # 正则兜底（无 pyyaml）：agent-default-model 段内的 provider/model
-        m = re.search(r"- id:\s*agent-default-model\s*(?:\n(?!\s*-\s+id:).)*",
-                      raw, re.S)
+        # 正则兜底（无 pyyaml）：agent-default-model 段内的 model。
+        # [^\S\n]* 只吃行内空白——贪婪 \s* 会吞掉换行+缩进使 (?:\n...) 起点落空，
+        # 块匹配恒空（真机实证 2026-11-10：worker 无 pyyaml 走此分支必得空串）
+        m = re.search(r"- id:\s*agent-default-model[^\S\n]*(?:\n(?!\s*-\s+id:)[^\n]*)*",
+                      raw)
         if m:
             block = m.group(0)
             mm = re.search(r"^\s+model:\s*([^\s#]+)", block, re.M)
