@@ -31,6 +31,45 @@ ENGINE_DISPLAY_NAMES = {
     "hwcloud": "aishell",
 }
 
+# 引擎名规范化表（aishell-dsh 接入，2026-11-06）：实例名前缀 → 规范引擎键。
+# 解决散落各处的 startswith/in 判定顺序问题（aishell-dsh 必须先于 aishell 命中）：
+# 匹配用最长前缀（与书写顺序无关），所有引擎判定点统一改走 canonical_engine()。
+# 注意：hwcloud 与 aishell 前缀都映射回 hwcloud 后端（D1：旧名不动，backend 键不变）。
+ENGINE_CANONICAL_PREFIXES = {
+    "aishell-dsh": "aishell-dsh",
+    "aishell": "hwcloud",
+    "hwcloud": "hwcloud",
+    "hermes": "hermes",
+    "codearts": "codearts",
+    "codex": "codex",
+    "dsh": "dsh",
+}
+
+
+def canonical_engine(engine_name: str | None) -> str:
+    """由引擎实例名推导规范引擎键（前缀最长匹配；未知名字 → opencode）。
+
+    长前缀优先保证 aishell-dsh-xxx 命中 aishell-dsh 而非 aishell；表序无关。
+    单测锁死：tests/test_canonical_engine.py。
+    """
+    name = (engine_name or "").strip().lower()
+    best_key = ""
+    best_val = ""
+    for prefix, canonical in ENGINE_CANONICAL_PREFIXES.items():
+        if name.startswith(prefix) and len(prefix) > len(best_key):
+            best_key, best_val = prefix, canonical
+    return best_val if best_key else "opencode"
+
+
+# usage 为空时值得短重试的引擎（日志/账本异步落盘型）；aishell-dsh 的账本
+# 在会话文件（二期解析），一期虽无 usage 也保留重试口径一致。
+USAGE_RETRY_ENGINES = {"hermes", "hwcloud", "aishell-dsh"}
+
+
+def usage_retry_engine(engine_name: str | None) -> bool:
+    """该引擎 usage 为空时是否值得短重试一次（统一判定，替代散落的元组成员检查）。"""
+    return canonical_engine(engine_name) in USAGE_RETRY_ENGINES
+
 
 def engine_display_name(engine_type: str) -> str:
     """内部引擎名 → 展示名（小写，instance_name 派生用）；未映射原样返回。"""

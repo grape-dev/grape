@@ -53,6 +53,12 @@ MANIFEST = [
     "src/api/merge_gate.py",
     "src/agent/",
     "src/runtime/",
+    # 架构守护 BLOCKED-1（2026-11-09）：worker 侧 task/engine span 与 trace relay
+    # 依赖 src.observability.otel；漏列会让 worker 上所有埋点静默失效
+    # （executor/agent 的 import 在 try/except 内，不会有任何告警）。
+    # 只带包入口 + otel 客户端，不带 metrics/rollup 等服务端专属模块（依赖 prometheus/DB）。
+    "src/observability/__init__.py",
+    "src/observability/otel.py",
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     "requirements-worker.txt",

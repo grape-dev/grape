@@ -11,9 +11,13 @@
   var TRACING = window.GrafanaFaroWebTracing;
 
   var ver = (window.GRAPE_VERSION || (document.documentElement.getAttribute('data-version')) || 'dev');
-  var env = 'prod';
-  if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') env = 'local';
-  else if (location.hostname.indexOf('.topxtopx.com') === -1) env = 'dev';
+  // 环境标识：优先读服务端注入的 <meta name="grape-env">，否则仅按回环地址判 local，
+  // 其余一律 dev（不在前端硬编码任何内部域名，QA §1.1-1-5）。
+  var envMeta = document.querySelector('meta[name="grape-env"]');
+  var env = (envMeta && envMeta.content) || '';
+  if (!env) {
+    env = (location.hostname === '127.0.0.1' || location.hostname === 'localhost') ? 'local' : 'dev';
+  }
 
   var instrumentations = undefined;
   if (TRACING && TRACING.TracingInstrumentation) {

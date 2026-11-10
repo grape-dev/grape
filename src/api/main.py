@@ -1008,6 +1008,7 @@ def _check_and_sync_templates() -> bool:
         _result = _sp.run(
             ["bash", _sync_script],
             capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace",  # Windows 宿主：控制台输出可能是 GBK，固定 utf-8+replace 防 reader 线程解码崩溃
             env={**_os.environ, "TEMPLATES_REPO": "https://gitcode.com/grape-dev/grape-template.git"}
         )
         if _result.returncode == 0:

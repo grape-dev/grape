@@ -3980,6 +3980,19 @@ def fail_task(task_id, error, exit_code=-1):
             return
     except Exception as _e:
         log.warning(f"fail_task: transient retry check failed for {task_id}: {_e}")
+    # MR-2（2026-11-05）：task.finish span（fail 终态，与 complete_task 同款串联）。
+    # 架构审查 P2-6：放在全部幂等判定（completed / failed / timeout_failed / 过期上报 /
+    # 瞬时重试）之后——被跳过的重放调用不再产生误导性的 finish FAIL span。
+    try:
+        from src.observability.otel import start_task_span
+        _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
+            "task_id": task_id, "exit_code": exit_code,
+            "outcome": "failed", "error_head": str(error or "")[:200],
+        }, trace_context=(task or {}).get("trace_context") or "")
+        if _fin_span is not None:
+            _fin_span.end()
+    except Exception:
+        pass
     _result_show = None  # Issue #403：耗尽判死 → 分类失败摘要（无 event_seq 时保持 None）
     if task and task.get("event_seq"):
         try:

@@ -357,8 +357,13 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
     from src.prompt_builder import resolve_task_server_env
+    # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key）。
+    from src.repo_key import derive_repo_identity
+    _full_name, _repo_owner, _repo_name = derive_repo_identity(repository, repo_key)
     env_extra = {
-        "REPO_FULL_NAME": repository,
+        "REPO_FULL_NAME": _full_name or repository,
+        "REPO_OWNER": _repo_owner,
+        "REPO_NAME": _repo_name,
         "ACCOUNT": repository,
         # Issue #1577：与事件/chat 同源注入两项服务基址，远端 autopilot worker
         # 的业务命令免 --base-url 可用（direct 模式注入本机回环同样正确）。

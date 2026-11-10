@@ -1150,10 +1150,10 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
 
 # ====== 引擎绑定真实性同步（docs/weekly-06/engine-binding-truth-sync-design.md）======
 
-# 引擎离线判定为真死、触发场景绑定清理的阈值（秒）。默认 8h：
-# 心跳周期 15s，8h 无恢复 = 连续 ~1920 个心跳周期全丢，机器不会自己回来。
-# 置 0 禁用自动解绑（只提示不清理）。
-_ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "28800"))
+# 引擎离线判定为真死、触发场景绑定清理的阈值（秒）。默认 0 = 禁用自动解绑（只提示不清理）；
+# 需要自动清理时显式设置 ENGINE_DETACH_AFTER_SECONDS（如 28800 = 8h：心跳 15s，8h 无恢复
+# = 连续 ~1920 个心跳周期全丢，机器不会自己回来）。
+_ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "0"))
 
 
 def cleanup_scene_engine_bindings(rid_list: list) -> int:

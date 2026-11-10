@@ -5,8 +5,9 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 
 设计要点（docs/weekly-10/full-observability-tracing-plan.md）：
 - OTEL_EXPORTER_OTLP_ENDPOINT（grape.env）非空才启用；缺省禁用零开销
-- 尾部采样：正常流量按 OTEL_SAMPLER_RATIO（默认 0.1）抽；错误/慢请求全采
-  ——先保护 Tempo 14 天盘，后续按量调参
+- 采样现状（架构守护 Medium-3）：head-based ParentBased(TraceIdRatioBased)，
+  默认比例 OTEL_SAMPLER_RATIO=0.1；错误/慢请求「全采」尚未实现——需在
+  Alloy/collector 侧接入 tail_sampling 后才生效，当前文档不再作该项承诺
 - 失败不致命：全链 try/except，Tempo 断网/超时对业务零影响（exporter 异步）
 - service.name 由调用方传入（grape-server-a/b/c、grape-webhook、grape-worker），
   resource 统一补 host/env/version
@@ -19,6 +20,7 @@ import os
 from contextlib import contextmanager
 
 _inited_service = None
+_inited_provider = None
 
 
 def otel_enabled() -> bool:
@@ -101,17 +103,22 @@ def _worker_relay_exporter_kwargs():
 
 
 def init_otel(service_name: str):
-    """初始化本进程的 OTel。幂等（同 service 重复调用直接返回已初始化 Provider）。
+    """初始化本进程的 OTel。进程级幂等：本进程只要成功初始化过一次，后续任何
+    service_name 的重复调用都直接复用同一个 Provider（架构审查 P2-4）。
+
+    早期实现以 service_name 作为幂等键，导致同一进程内 A 入口初始化
+    grape-server-a 后，start_task_span 内部再调 init_otel("grape-task") 不命中，
+    会重建 Provider 并二次 set_tracer_provider（SDK 拒绝，产生空转
+    BatchSpanProcessor + warning）。service.name 仍由首次初始化确定。
 
     返回 TracerProvider（成功）/ None（未启用或初始化失败——调用方跳过埋点）。
     """
-    global _inited_service
+    global _inited_service, _inited_provider
     try:
         if not otel_enabled():
             return None
-        if _inited_service == service_name:
-            from opentelemetry.trace import get_tracer_provider
-            return get_tracer_provider()
+        if _inited_provider is not None:
+            return _inited_provider
 
         from opentelemetry import trace, metrics
         from opentelemetry.sdk.resources import Resource
@@ -150,6 +157,7 @@ def init_otel(service_name: str):
         trace.set_tracer_provider(provider)
 
         _inited_service = service_name
+        _inited_provider = provider
         return provider
     except Exception as e:
         try:
@@ -177,18 +185,20 @@ def instrument_fastapi(app, service_name: str):
             "/runtime/heartbeat,/runtime/register,"
             "grape-worker[.]tar[.]gz,/runtime/install"
         ))
-        # DB span（2026-11-05）：pymysql 自动插桩——每条 SQL 一个 span（statement/耗时），
-        # 让调用链瀑布能看到"请求 → DB 查询"最深一层。PyMySQL 官方插桩按 connection patch，
-        # 对本项目 mysql_compat.py 的直连/池化均生效。失败不致命。
+        # DB span 采用「单一来源」策略（架构审查 P2-2）：只保留 mysql_compat.py 的
+        # 手动埋点（start_db_span/end_db_span，带 db.operation/rowcount 且显式挂父上下文），
+        # 不启用 opentelemetry-instrumentation-pymysql 自动插桩。原因：
+        #   1) 两套并存时同一 SQL 会产生两个兄弟 db.query span（start_span 不入 ctx）；
+        #   2) 自动插桩按 connection patch，对池化复用连接的语义不透明；
+        #   3) 少一个依赖，requirements.txt 无需声明 instrumentation-pymysql。
+        # 唯一例外：检测到自动插桩已生效（外部按需安装）时给出告警，避免无意双轨。
         try:
-            from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
-            PyMySQLInstrumentor().instrument()
-        except Exception as e:
-            try:
-                from src.config import log
-                log.warning(f"PyMySQL OTel instrument failed (DB spans disabled): {e}")
-            except Exception:
-                pass
+            from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor  # noqa: F401
+            from src.config import log as _log
+            _log.warning("PyMySQL auto-instrumentation detected while manual DB spans are active "
+                         "— duplicate db.query spans possible; disable one of them")
+        except Exception:
+            pass
         return True
     except Exception as e:
         try:
@@ -201,11 +211,19 @@ def instrument_fastapi(app, service_name: str):
 
 def start_db_span(sql: str):
     """SQL 执行 span（DB 阶段拆解 2026-11-05）：在 execute 调用点创建，自动挂当前
-    请求 trace（contextvars 传播）。OTel 未启用/无有效 span → None（零开销）。"""
+    请求 trace（contextvars 传播）。OTel 未启用/无有效父 span → None（零开销）。
+
+    架构审查 P2-3：无父上下文时（后台线程/启动期 SQL）不建 span——否则每条 SQL
+    都会成为独立 trace 的根，按采样率灌进 Tempo 产生大量孤儿 trace。
+    """
     if not otel_enabled():
         return None
     try:
         from opentelemetry import trace as _trace
+        # 无有效父上下文 → 不建（避免孤儿 trace）
+        _parent = _trace.get_current_span()
+        if _parent is None or not _parent.get_span_context().is_valid:
+            return None
         _span = _trace.get_tracer(__name__).start_span("db.query")
         if not _span.get_span_context().is_valid:
             return None
@@ -260,8 +278,6 @@ def resume_trace_context(trace_context: str):
         ctx = TraceContextTextMapPropagator().extract(carrier)
         # 校验恢复出有效 trace id（坏数据返回 INVALID）
         from opentelemetry.trace import INVALID_SPAN_CONTEXT, get_current_span
-        if ctx.get("current-span", None) is None:
-            pass
         span_ctx = get_current_span(ctx).get_span_context()
         if span_ctx.trace_id == 0:
             return None
@@ -321,7 +337,13 @@ def snapshot_trace_context(span=None) -> str:
               else trace.get_current_span().get_span_context())
         if not sc or not sc.is_valid:
             return ""
-        return "traceparent|00-%s-%s-01" % (format(sc.trace_id, "032x"), format(sc.span_id, "016x"))
+        return "traceparent|00-%s-%s-%s" % (
+            format(sc.trace_id, "032x"),
+            format(sc.span_id, "016x"),
+            # 架构审查 P3：透传真实采样标志（00=未采样 / 01=已采样），
+            # 硬编码 01 会在根未采样时让子段被 ParentBased 误导出
+            format(sc.trace_flags, "02x"),
+        )
     except Exception:
         return ""
 
