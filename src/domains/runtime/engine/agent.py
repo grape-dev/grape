@@ -3034,9 +3034,9 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         _ls = _scan_local_skills()
         ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
-            # Issue #1750 P1-B：周期重注册默认不再无条件回收（recover_orphans=False），
-            # 由调用方按 rid 集合变化决定是否携带活跃白名单回收；启动/心跳失败路径沿用
-            # 默认 True + 空白名单（清理上次进程遗留）。
+            # Issue #1750 P1-B：周期/心跳失败重注册默认不再无条件回收
+            # （recover_orphans=False），由调用方按 rid 集合变化决定是否携带活跃
+            # 白名单回收；仅启动路径沿用默认 True + 空白名单（清理上次进程遗留）。
             if recover_orphans:
                 for rid in ids:
                     await client.recover_orphans(rid)
@@ -3478,11 +3478,20 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+                # Issue #1750 P1-B（审查修复）：心跳断连重注册是同进程重连，与周期
+                # 重注册同语义——不得空白名单无条件回收（内存 active_tasks 里的
+                # 静默型长任务会被误判孤儿转池，导致同机双跑/重复执行）；
+                # 仅 rid 集合变化时携带 active_tasks 白名单回收。
+                _prev_runtime_ids = list(runtime_ids)
+                _rr = await _reregister(client, installed, device_name,
+                                        cli_version=_read_local_worker_version(),
+                                        recover_orphans=False)
                 if _rr is not None:
                     runtime_ids, _new_ebr, installed = _rr
                     if _new_ebr:
                         engine_by_rid = _new_ebr
+                    await _recover_orphans_on_rid_change(client, _prev_runtime_ids,
+                                                         runtime_ids, active_tasks)
                     heartbeat_fail_streak = 0
                     last_reregister = asyncio.get_running_loop().time()
                 else:

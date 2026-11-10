@@ -235,6 +235,39 @@ def test_a5_rid_unchanged_does_not_recover(setup_db):
     assert client.recovered == []
 
 
+def test_a5_heartbeat_failure_reregister_keeps_whitelist(setup_db):
+    """心跳失败重注册是同进程重连：不得空白名单无条件回收；rid 变化时携带白名单。
+
+    审查修复（PR #1096 Required）：该路径此前沿用默认 recover_orphans=True 空白名单
+    无条件回收，本机 active_tasks 中的静默型长任务会被误回收转池导致双跑。
+    """
+    from unittest.mock import AsyncMock
+    from src.runtime import agent as agent_mod
+
+    async def _drive(coro, duration=0.25):
+        t = asyncio.ensure_future(coro)
+        await asyncio.sleep(duration)
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    client = AsyncMock()
+    client.get_tags.return_value = []
+    client.claim_by_tag.return_value = None
+    client.claim.return_value = None
+    client.heartbeat.return_value = None  # 网络错误 → 连续失败触发重注册
+    with patch.object(agent_mod, "_reregister",
+                      new=AsyncMock(return_value=([2001], {}, []))) as m_rr:
+        asyncio.run(_drive(agent_mod._run_loop(
+            client, [1001], poll_interval=0.01, heartbeat_interval=0.01,
+            max_concurrent=4, _test_active_tasks={"t_hb_live": "sid"})))
+    assert m_rr.await_args.kwargs.get("recover_orphans") is False, \
+        "心跳失败重注册不得默认空白名单无条件回收"
+    client.recover_orphans.assert_awaited_with(2001, active_task_ids=["t_hb_live"])
+
+
 # ===== A6：E2E 跨周期仍 running 最终 completed =====
 
 def test_a6_silent_task_survives_periodic_cycle_then_completes(setup_db):

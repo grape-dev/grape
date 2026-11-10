@@ -16,8 +16,8 @@
 - 保持既有 SQL 参数化更新与事件回写不变。
 
 ### 切片 3：worker 回收时机（P1-B）
-- 红：`test_a5_periodic_reregister_does_not_recover`、`test_a5_startup_empty_whitelist_recovers`、`test_a5_rid_change_recovers_with_whitelist`、`test_a5_rid_unchanged_does_not_recover`。
-- 绿：`_reregister(..., recover_orphans=False)`；`_recover_orphans_on_rid_change`；主循环周期路径先记录旧 rid、重注册后再按集合变化回收；启动仍空白名单回收。
+- 红：`test_a5_periodic_reregister_does_not_recover`、`test_a5_startup_empty_whitelist_recovers`、`test_a5_rid_change_recovers_with_whitelist`、`test_a5_rid_unchanged_does_not_recover`、`test_a5_heartbeat_failure_reregister_keeps_whitelist`。
+- 绿：`_reregister(..., recover_orphans=False)`；`_recover_orphans_on_rid_change`；主循环周期路径与心跳失败重注册路径（审查修复：同进程重连不再默认空白名单无条件回收）先记录旧 rid、重注册后再按集合变化携带白名单回收；启动仍空白名单回收。
 
 ### 切片 4：client 透传与 E2E
 - `test_client_recover_orphans_default_body_empty`、`test_client_recover_orphans_passes_whitelist`。
