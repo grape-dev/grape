@@ -8,8 +8,7 @@
 - 鉴权安全：clone 用 `-c http.extraheader` 内联注入（不写 config、不入日志）；push 用 GIT_ASKPASS
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
-import base64, json, os, re, shutil, subprocess, threading, time
-import urllib.request
+import base64, os, re, shutil, subprocess, threading, time
 from src import config
 from src.config import log
 
@@ -195,6 +194,7 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
                 return None
             # Issue #1841: 记录远端默认分支（init --bare + fetch 不会自动写 origin/HEAD）
             _run_git(["-C", base, "remote", "set-head", "origin", "--auto"], token=token, timeout=60)
+            _mark_mirror_fresh(repo_key)
             return base
         except Exception as e:
             log.warning(f"repogit ensure_repo_base failed {repo_key}: {e}")
@@ -353,10 +353,50 @@ def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
 
 _BRANCH_LIST_TTL = 90.0
 _BRANCH_LIST_FAIL_TTL = 30.0
+_BRANCH_MIRROR_TTL = 120.0
 _MAX_BRANCH_PAGES = 50
 _branch_list_cache = {}  # repo_key -> (timestamp, branches: set|None, default_branch)
 _branch_list_force_remote = set()
+_branch_mirror_fresh_at = {}  # repo_key -> 最近一次成功的 mirror 刷新时间
 _branch_list_lock = threading.Lock()
+
+
+def _mark_mirror_fresh(repo_key: str) -> None:
+    with _branch_list_lock:
+        _branch_mirror_fresh_at[repo_key] = time.time()
+
+
+def _mirror_is_stale(repo_key: str) -> bool:
+    """本地 mirror 是否超过刷新 TTL（未知按 stale 处理，避免长期信任陈旧 refs）。"""
+    with _branch_list_lock:
+        ts = _branch_mirror_fresh_at.get(repo_key)
+    if ts is None:
+        base = repo_base_dir(repo_key)
+        try:
+            ts = os.path.getmtime(base) if base and os.path.isdir(base) else 0.0
+        except OSError:
+            ts = 0.0
+    return (time.time() - ts) > _BRANCH_MIRROR_TTL
+
+
+def _refresh_local_mirror(repo_key: str, token: str = "") -> bool:
+    """`fetch --prune` 刷新本地 bare mirror（含平台外新建/删除的分支）。"""
+    base = repo_base_dir(repo_key)
+    if not base or not os.path.isdir(base):
+        return False
+    with _lock_for(repo_key):
+        r = _run_git_retry(
+            ["-C", base, "fetch", "--prune", "origin",
+             "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"],
+            token=token)
+        if r is None or r.returncode != 0:
+            log.warning(f"work_branch: refresh mirror failed repo={repo_key}: "
+                        f"{(r.stderr if r else 'git exec failed')[:200]}")
+            return False
+        _run_git(["-C", base, "remote", "set-head", "origin", "--auto"],
+                 token=token, timeout=60)
+    _mark_mirror_fresh(repo_key)
+    return True
 
 
 def _branch_list_cache_get(repo_key: str = "", refresh: bool = False):
@@ -474,25 +514,25 @@ def _fetch_remote_default_branch(repo_key: str, token: str = "") -> str:
         return ""
 
 
-def _fetch_remote_branch_names(repo_key: str, token: str = ""):
-    """经 VCS 分支列表 API 拉取真实分支集合 + 默认分支；失败返回 (None, "")。
+def fetch_repo_branch_records(repo_key: str, token: str = "",
+                              max_pages: int = _MAX_BRANCH_PAGES):
+    """经 VCS 分支列表 API 拉取分支记录（含 protected）；供 scenes 路由复用。
 
-    分页上限 50 页（5000 分支）。超过上限仍满页时返回 None（不可核实），
-    避免把「列表被截断」误判为「分支确实不存在」。
+    返回 (records: list[dict]|None, truncated: bool)。None 表示请求失败。
+    统一分页实现，避免 repogit 与 scenes.list_repo_branches 两套维护漂移。
     """
     from src.repo import Repo
     from src.repo_key import split_owner_repo
     owner, name = split_owner_repo(repo_key)
     tok = token or _branch_lookup_token(repo_key)
     if not owner or not name or not tok:
-        return None, ""
+        return None, False
     api = Repo(repo_key).api_base
     req = _api_request_for(repo_key)
-    branches = set()
-    truncated = False
+    records = []
     try:
         page = 1
-        while page <= _MAX_BRANCH_PAGES:
+        while page <= max_pages:
             data = req("GET", f"{api}/repos/{owner}/{name}/branches"
                               f"?per_page=100&page={page}", tok)
             if isinstance(data, dict):
@@ -501,39 +541,59 @@ def _fetch_remote_branch_names(repo_key: str, token: str = ""):
                 break
             for b in data:
                 if isinstance(b, dict) and b.get("name"):
-                    branches.add(b["name"])
+                    records.append({"name": b["name"],
+                                    "protected": bool(b.get("protected", False))})
                 elif isinstance(b, str) and b:
-                    branches.add(b)
+                    records.append({"name": b, "protected": False})
             if len(data) < 100:
                 break
             page += 1
         else:
-            truncated = True
+            return records, True
     except Exception as e:
         log.warning(f"work_branch: list branches failed repo={repo_key}: {e}")
+        return None, False
+    return records, False
+
+
+def _fetch_remote_branch_names(repo_key: str, token: str = ""):
+    """经 VCS 分支列表 API 拉取真实分支集合 + 默认分支；失败返回 (None, "")。
+
+    分页上限 50 页（5000 分支）。超过上限仍满页时返回 None（不可核实），
+    避免把「列表被截断」误判为「分支确实不存在」。
+    """
+    records, truncated = fetch_repo_branch_records(repo_key, token=token)
+    if records is None:
         return None, ""
     if truncated:
         log.warning(f"work_branch: branch list truncated at {_MAX_BRANCH_PAGES} pages "
                     f"for repo={repo_key}; treat as unverifiable")
         return None, ""
+    branches = {r["name"] for r in records if r.get("name")}
     default = _fetch_remote_default_branch(repo_key, token=token)
     return (branches or None), default
 
 
-def list_repo_branches(repo_key: str, token: str = "", refresh: bool = False):
+def list_repo_branches(repo_key: str, token: str = "", refresh: bool = False,
+                       remote_only: bool = False):
     """返回 (branches: set|None, default_branch)。
 
-    先读本地 bare mirror（无网络开销），无镜像再穿透 VCS 分支列表 API；
-    建分支后的失效会强制下一次走远端，避免 mirror 陈旧误判。
-    结果按 repo 缓存（成功 90s / 失败 30s）。branches=None 表示无法核实。
+    - 先读本地 bare mirror（无网络开销）；mirror 超过 TTL 时先 `fetch --prune`
+      刷新，确保平台外新建/删除的分支可见，避免陈旧 refs 双向误判。
+    - 无镜像或 remote_only=True 时穿透 VCS 分支列表 API（保存校验以此为权威）。
+    - 建分支后的失效会强制下一次走远端。
+    - 结果按 repo 缓存（成功 90s / 失败 30s）。branches=None 表示无法核实。
     """
-    forced = _consume_force_remote(repo_key)
+    forced = remote_only or _consume_force_remote(repo_key)
     cached = _branch_list_cache_get(repo_key, refresh=refresh or forced)
     if cached is not None:
         return cached
     branches, default = None, ""
     if not forced:
         branches, default = _local_repo_branch_names(repo_key)
+        if branches is not None and _mirror_is_stale(repo_key):
+            if _refresh_local_mirror(repo_key, token=token):
+                branches, default = _local_repo_branch_names(repo_key)
     if branches is None:
         branches, default = _fetch_remote_branch_names(repo_key, token=token)
     elif not default:
@@ -555,6 +615,8 @@ def refresh_repo_branch_mirror(repo_key: str, branch: str, token: str = "") -> b
     if not ok:
         log.warning(f"work_branch: refresh mirror branch '{branch}' failed repo={repo_key}: "
                     f"{(r.stderr if r else 'git exec failed')[:200]}")
+    else:
+        _mark_mirror_fresh(repo_key)
     return ok
 
 
@@ -568,12 +630,26 @@ def pick_default_branch(branches: set, default_branch: str = "") -> str:
     return sorted(branches)[0] if branches else (default_branch or "main")
 
 
-def _classify_work_branch(repo_key: str, branch: str, token: str = ""):
+def _classify_work_branch(repo_key: str, branch: str, token: str = "",
+                          authoritative: bool = False):
     """统一分支判定：返回 (exists: bool|None, default_branch, branches)。
 
+    - authoritative=True（保存校验）：直接以 VCS 远端分支列表为准，避免 mirror
+      仍含平台外已删除分支而误放行。
+    - authoritative=False（注入）：mirror 未命中目标分支时强制远端复核，避免
+      平台外新建分支（如 weekly 发布流水线）被误判失效；mirror 超 TTL 已由
+      list_repo_branches 自动 fetch --prune 刷新。
     exists=None 表示分支列表不可核实（无 token/网络失败/分页截断）。
     """
-    branches, default = list_repo_branches(repo_key, token=token)
+    branches, default = list_repo_branches(repo_key, token=token,
+                                           remote_only=authoritative)
+    if branches is not None and branch not in branches and not authoritative:
+        remote_branches, remote_default = list_repo_branches(
+            repo_key, token=token, refresh=True, remote_only=True)
+        if remote_branches is None:
+            # 远端不可核实 → 不把 mirror 未命中当作确定失效，保持原配置
+            return None, default or remote_default, None
+        branches, default = remote_branches, remote_default or default
     if branches is None:
         return None, default, None
     return (branch in branches), default, branches
@@ -612,7 +688,8 @@ def validate_work_branch_exists(repo_key: str, branch: str, token: str = "") -> 
     cfg = (branch or "").strip()
     if not cfg:
         return False, "工作分支不能为空", ""
-    exists, default, branches = _classify_work_branch(repo_key, cfg, token=token)
+    exists, default, branches = _classify_work_branch(
+        repo_key, cfg, token=token, authoritative=True)
     if exists is None:
         log.warning(f"work_branch: cannot verify '{cfg}' for repo={repo_key} on save (branch list unavailable)")
         return True, "", default

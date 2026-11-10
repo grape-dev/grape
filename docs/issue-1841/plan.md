@@ -4,9 +4,10 @@
 
 统一入口放在 `src/runtime/repogit.py`（`_read_scene_work_branch` 附近），三条注入路径与保存校验、存量脚本复用同一套分支列表查询/缓存逻辑：
 
-- `list_repo_branches(repo_key)`：优先本地 bare mirror 的 `refs/remotes/origin` 分支列表（无网络开销），无镜像再穿透 VCS `/branches` API；结果按仓库缓存（成功 90s、失败 30s）。仅使用「分支列表显式比对」，不依赖 GitCode ref/tree 查询（ref 不存在会静默回退默认分支）。默认分支由 mirror 的 `origin/HEAD`（`ensure_repo_base` 刷新时记录）或 VCS 仓库信息 API 提供；分页上限 50 页，超限按「不可核实」处理，避免截断误判。
+- `list_repo_branches(repo_key)`：优先本地 bare mirror 的 `refs/remotes/origin` 分支列表（无网络开销），mirror 超过刷新 TTL（120s）时先 `fetch --prune`，确保平台外新建/删除的分支可见；无镜像或 `remote_only=True` 时穿透 VCS `/branches` API；结果按仓库缓存（成功 90s、失败 30s）。仅使用「分支列表显式比对」，不依赖 GitCode ref/tree 查询（ref 不存在会静默回退默认分支）。默认分支由 mirror 的 `origin/HEAD`（`ensure_repo_base` 刷新时记录）或 VCS 仓库信息 API 提供；分页上限 50 页，超限按「不可核实」处理，避免截断误判。分页实现由 `fetch_repo_branch_records` 统一提供，`src/api/routes/scenes.py` 的分支查询复用同一实现，避免两套维护漂移。
 - `resolve_work_branch(repo_key, configured)`：有效分支原样返回；失效则回退仓库默认分支（`default_branch` → `main`/`master` → 原配置）并输出 WARNING（原配置值 + 仓库 + 生效分支）。分支列表不可核实（无 token/网络失败）时保持原配置，不误判。
-- `validate_work_branch_exists(repo_key, branch)`：保存前校验，失效返回可直接展示的明确错误与建议默认分支；不可核实时不阻塞保存。
+- `validate_work_branch_exists(repo_key, branch)`：保存前校验，直接以 VCS 远端分支列表为准（`authoritative=True`），避免 mirror 仍含平台外已删除分支而误放行；失效返回可直接展示的明确错误与建议默认分支；不可核实时不阻塞保存。
+- 注入侧（`resolve_work_branch`）：mirror 未命中目标分支时强制远端复核，避免平台外新建分支被误判失效；远端也不可核实时保持原配置。
 - `read_effective_scene_work_branch(repo_key, issue_id)`：场景读取 + 校验统一入口。
 - `refresh_repo_branch_mirror(repo_key, branch)` + `invalidate_branch_list_cache(repo_key)`：建分支成功后增量刷新本地 mirror 并失效缓存，下一次查询强制走远端，避免刚建分支被判不存在。
 

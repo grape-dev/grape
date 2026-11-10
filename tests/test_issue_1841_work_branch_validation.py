@@ -49,7 +49,7 @@ def _clean():
 def _patch_branch_list(monkeypatch, branches, default="main", target=None):
     mod = target or repogit
 
-    def _fake(repo_key, token="", refresh=False):
+    def _fake(repo_key, token="", refresh=False, remote_only=False):
         if branches is None:
             return None, ""
         return set(branches), default
@@ -356,6 +356,63 @@ def test_resolve_main_validates_when_branch_list_available(monkeypatch):
     ok, msg, suggestion = repogit.validate_work_branch_exists(RK, "master")
     assert ok is False
     assert suggestion == "develop" and "master" in msg
+
+
+def test_resolve_remote_recheck_when_mirror_misses_branch(monkeypatch):
+    """平台外新建分支：mirror 未命中时强制远端复核，不应误回退。"""
+    calls = []
+
+    def _fake(repo_key, token="", refresh=False, remote_only=False):
+        calls.append(remote_only)
+        if remote_only:
+            return {"main", "weekly-out-of-band"}, "main"
+        return {"main"}, "main"
+
+    monkeypatch.setattr(repogit, "list_repo_branches", _fake)
+    effective, note = repogit.resolve_work_branch(RK, "weekly-out-of-band")
+    assert effective == "weekly-out-of-band"
+    assert note == ""
+    assert calls == [False, True], "mirror 未命中时应追加一次远端复核"
+
+
+def test_save_validation_remote_authority_detects_deleted_branch(monkeypatch):
+    """平台外删除分支：mirror 仍含该值，保存校验以远端为准应拒绝。"""
+    calls = []
+
+    def _fake(repo_key, token="", refresh=False, remote_only=False):
+        calls.append(remote_only)
+        if remote_only:
+            return {"main"}, "main"
+        return {"main", "weekly-deleted"}, "main"
+
+    monkeypatch.setattr(repogit, "list_repo_branches", _fake)
+    ok, msg, suggestion = repogit.validate_work_branch_exists(RK, "weekly-deleted")
+    assert ok is False
+    assert "weekly-deleted" in msg
+    assert suggestion == "main"
+    assert calls == [True], "保存校验应直接以远端为准"
+
+
+def test_mirror_ttl_refreshes_before_reading(monkeypatch):
+    """mirror 超过 TTL：先 fetch --prune 再读取，平台外删除分支不再被信任。"""
+    state = {"branches": {"main", "weekly-deleted"}, "refreshed": False}
+
+    def _fake_local(_rk):
+        return set(state["branches"]), "main"
+
+    def _fake_refresh(_rk, token=""):
+        state["branches"] = {"main"}
+        state["refreshed"] = True
+        return True
+
+    monkeypatch.setattr(repogit, "_local_repo_branch_names", _fake_local)
+    monkeypatch.setattr(repogit, "_mirror_is_stale", lambda _rk: True)
+    monkeypatch.setattr(repogit, "_refresh_local_mirror", _fake_refresh)
+    repogit.invalidate_branch_list_cache(force_remote=False)
+
+    branches, _default = repogit.list_repo_branches(RK)
+    assert state["refreshed"] is True
+    assert branches == {"main"}
 
 
 @pytest.fixture

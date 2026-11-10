@@ -1083,8 +1083,6 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     前端托管仓场景应直接传（/repos/managed 返回的 repo_key 自带前缀）。
     Issue #542：TTL 缓存 90s（分支变更低频），refresh=1 强制穿透；仅缓存成功结果。
     """
-    from src.user.repo_manager import _req, _github_req
-
     owner, repo = _normalize_owner_repo(owner, repo)
     if repo_key:
         # repo_key 优先：自带前缀，直接解析
@@ -1103,65 +1101,31 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         if _cached is not None:
             return {**_cached, "cached": True}
 
+    from src.repo_key import to_repo_key
+    rk = to_repo_key(f"{owner}/{repo}", provider=provider)
     if provider == "github":
         from src.user.db import get_github_token
-        from src.repo_key import to_repo_key
-        rk = to_repo_key(f"{owner}/{repo}", provider="github")
         token = get_github_token(repo_key=rk)
         if not token:
             raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法查询分支"})
-        branches = []
-        try:
-            page = 1
-            while page <= 5:
-                url = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}"
-                data = _github_req("GET", url, token)
-                if not isinstance(data, list) or not data:
-                    break
-                for b in data:
-                    branches.append({
-                        "name": b.get("name", ""),
-                        "protected": bool(b.get("protected", False)),
-                    })
-                if len(data) < 100:
-                    break
-                page += 1
-        except Exception as e:
-            log.warning(f"List branches failed for GitHub {owner}/{repo}: {e}")
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
-        payload = {"branches": branches}
-        _branches_cache_put(_cache_key, payload)
-        return {**payload, "cached": False}
+    else:
+        # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
+        from src.user.db import get_repo_token_with_refresh
+        token = get_repo_token_with_refresh(rk) or ""
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
 
-    # GitCode（原逻辑）
-    # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
-    from src.user.db import get_repo_token_with_refresh
-    from src.repo_key import to_repo_key
-    token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
-    if not token:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
+    # Issue #1841：复用 repogit 的统一分页实现，避免同一能力两套维护漂移
+    from src.runtime.repogit import fetch_repo_branch_records
+    records, _truncated = fetch_repo_branch_records(rk, token=token)
+    if records is None:
+        log.warning(f"List branches failed for {provider} {owner}/{repo}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "查询分支失败"})
 
-    branches = []
-    try:
-        page = 1
-        while page <= 5:
-            url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
-            data = _req("GET", url, token)
-            if not isinstance(data, list) or not data:
-                break
-            for b in data:
-                branches.append({
-                    "name": b.get("name", ""),
-                    "protected": bool(b.get("protected", False)),
-                })
-            if len(data) < 100:
-                break
-            page += 1
-    except Exception as e:
-        log.warning(f"List branches failed for {owner}/{repo}: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
-
-    payload = {"branches": branches}
+    payload = {"branches": [
+        {"name": b.get("name", ""), "protected": bool(b.get("protected", False))}
+        for b in records
+    ]}
     _branches_cache_put(_cache_key, payload)
     return {**payload, "cached": False}
 
