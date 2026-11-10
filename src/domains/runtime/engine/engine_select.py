@@ -197,25 +197,22 @@ def _member_scope(m: dict, repo: str) -> str:
 
 
 def _health_ok(m: dict) -> bool:
-    """健康判定：远端按 status='online' + last_seen_at 新鲜；本机按 installed+healthy。
+    """健康判定：唯一真源 src.domains.runtime.engine.health.engine_health_ok
+    （Issue #592 / #259 / #1487 / #1496 收敛，对齐 origin/weekly-10）——派发与认领共用同一把尺子，
+    禁止在此复制判定逻辑（arch 分叉期间此处曾保留独立实现，导致与认领侧口径分叉）。
 
-    远端引擎（credential_id>0）必须 last_seen_at 在 _RUNTIME_STALE_SECONDS 内才算健康，
-    防止 AI DevSpace 环境被删后 runtime 行残留 status=online 但实际不可达（模式 QQ）。
+    本机直连（credential_id=0）→ installed+healthy，不判心跳（本机不参与 15s worker 心跳）；
+    远端（credential_id>0）→ status 在线 + healthy==1 + last_seen_at 在 _RUNTIME_STALE_SECONDS 内。
     """
-    cid = m.get("credential_id") or 0
-    if cid == 0:
-        return bool(m.get("installed")) and bool(m.get("healthy"))
-    if (m.get("status") or "") != "online":
-        return False
-    # 远端引擎检查心跳新鲜度
-    last_seen = m.get("last_seen_at") or ""
-    if last_seen:
-        from src.domains.runtime.engine.health import parse_dt
-        import time as _time
-        ts = parse_dt(last_seen)
-        if ts is not None and _time.time() - ts > _RUNTIME_STALE_SECONDS:
-            return False
-    return True
+    from src.domains.runtime.engine.health import engine_health_ok
+    return engine_health_ok(
+        m.get("credential_id") or 0,
+        m.get("status"),
+        m.get("healthy"),
+        m.get("installed"),
+        m.get("last_seen_at"),
+        stale_seconds=_RUNTIME_STALE_SECONDS,
+    )
 
 
 def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:

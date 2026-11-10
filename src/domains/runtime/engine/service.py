@@ -56,27 +56,24 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
     for eid in engine_ids:
         try:
             c = db.cursor()
-            # 引擎在线 + healthy + probe 正常？
-            c.execute("SELECT status, healthy, probe_status, last_seen_at FROM agent_runtimes WHERE id=?", (eid,))
+            # 健康可达判定统一走唯一真源 engine_health_ok（Issue #592/#259/#1487，对齐 origin/weekly-10）：
+            # 禁止在此复制判定——#1487 的根因就是派发侧与认领侧各拿一把尺子（派发说健康、认领说失联，
+            # 任务入队即判死）。本机直连（credential_id=0）按 installed+healthy，不判心跳新鲜度：
+            # 本机不参与 15s worker 心跳，last_seen_at 仅由 10min 本机探活循环刷新，套 100s 阈值
+            # 会把健康的本机引擎在其探活间隔内误判不可达（Seq #8093 直接 failed 的根因）。
+            c.execute(
+                "SELECT status, healthy, probe_status, last_seen_at, credential_id, installed "
+                "FROM agent_runtimes WHERE id=?", (eid,))
             r = c.fetchone()
-            if not r or (r[0] or "") != "online":
+            if not r:
                 continue
-            # Issue #259：心跳新鲜度检查——status=online 但 last_seen_at 过期 = 刚断线的窗口期，
-            # 引擎实际不可达（与 _health_ok / reap 同一把尺子），不算 reachable。
-            _ls = r[3] or ""
-            if _ls:
-                from src.domains.runtime.engine.health import parse_dt as _parse_dt
-                _ts = _parse_dt(_ls)
-                if _ts is not None and time.time() - _ts > _RUNTIME_STALE_SECONDS:
-                    continue
-            else:
-                # 从未心跳过（last_seen_at NULL/空）但 status=online 的幽灵行 → 不可达
+            from src.domains.runtime.engine.health import engine_health_ok as _health_ok_fn
+            if not _health_ok_fn(r[4] or 0, r[0], r[1], r[5], r[3],
+                                 stale_seconds=_RUNTIME_STALE_SECONDS):
                 continue
-            _healthy = r[1] if r[1] is not None else 0
             _probe = r[2] or ""
-            if _healthy != 1:
-                continue
-            if _probe not in ("ok", "pending", ""):
+            if (r[4] or 0) and _probe not in ("ok", "pending", ""):
+                # 认领侧对远端的附加关（既有口径，Issue #1487 未改）：probe 失败 = 引擎跑不了活
                 continue
             # 有 tag 能力？
             c.execute(
@@ -1521,12 +1518,22 @@ def get_task(task_id) -> dict | None:
     return dict(zip(_cols, row)) if row else None
 
 
-def _has_verified_executor(probe_status: str, worker_version: str) -> bool:
+def _has_verified_executor(probe_status: str, worker_version: str,
+                           credential_id: int = 0, installed=None, healthy=None) -> bool:
     """引擎是否有可信的执行器（可安全参与任务认领）。
 
     本机 CLI 探测注册的引擎 worker_version 为空；在探活通过（probe_status=ok）
     之前它们只是"展示用"条目，认领后任务会零输出挂死（event seq=9491 事故）。
+
+    本机直连（credential_id=0）例外口径（Issue #592 对齐 origin/weekly-10）：
+    本机探活结果**不落库**（save_agent_runtimes 只写 installed/version/healthy，
+    probe_status 仅由远端 worker 上报写入），因此本机行的 probe_status 恒为 pending。
+    若仍按 probe_status 判定，闸门会永久拒领所有本机引擎（实测 95k+ 条
+    "has no verified executor ... skip claiming"）。改为按 installed+healthy 判定：
+    既放行真实可用的本机引擎，也保留「未安装 / 探活失败(healthy=0) 不得认领」的 9491 保护。
     """
+    if not (credential_id or 0):
+        return bool(installed) and bool(healthy)
     return bool(worker_version) or probe_status not in ("pending", "failed")
 
 
@@ -1565,11 +1572,16 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             # 列探测分两步做：老库/SQLite 测试 schema 可能还没有 worker_version 列，
             # 缺列时按"未知执行器"处理（只挡 pending/failed），不让整条 claim 失败。
             try:
-                c.execute("SELECT probe_status FROM agent_runtimes WHERE id=?", (runtime_id,))
+                c.execute("SELECT probe_status, credential_id, installed, healthy "
+                          "FROM agent_runtimes WHERE id=?", (runtime_id,))
                 _pv = c.fetchone()
                 _probe_status = (_pv[0] or "") if _pv else ""
+                _cred_id = (_pv[1] or 0) if _pv else 0
+                _installed = bool(_pv[2]) if _pv else False
+                _healthy = bool(_pv[3]) if _pv else False
             except Exception:
                 _probe_status = ""
+                _cred_id, _installed, _healthy = 0, False, False
             _worker_version = ""
             try:
                 c.execute("SELECT worker_version FROM agent_runtimes WHERE id=?", (runtime_id,))
@@ -1577,7 +1589,9 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 _worker_version = (_wv[0] or "") if _wv else ""
             except Exception:
                 pass
-            if not _has_verified_executor(_probe_status, _worker_version):
+            if not _has_verified_executor(_probe_status, _worker_version,
+                                          credential_id=_cred_id,
+                                          installed=_installed, healthy=_healthy):
                 log.warning(f"claim_by_tag: runtime={runtime_id} has no verified executor "
                             f"(probe={_probe_status or '-'}, worker_version=-), skip claiming")
                 return None
