@@ -136,6 +136,10 @@ class TestWorkerPackage:
             "import src.config\n"           # 启动链第一环（事故死因）
             "import src.runtime.agent\n"    # worker 主模块全量闭包
             "import src.observability.otel\n"  # PR #1077：worker 侧 span/中继依赖（漏打=静默失效）
+            # 架构守护 F1（2026-11-10）：prompt_builder 在包内且新增顶层
+            # src.service_diagnostics 导入；此前的闭包只导 config/agent/otel，
+            # 漏列 service_diagnostics 不会被任何用例拦住（worker 侧静默降级）。
+            "import src.prompt_builder\n"
             "print('IMPORT_CLOSURE_OK')\n"
         )
         r = subprocess.run(

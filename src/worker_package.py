@@ -32,6 +32,11 @@ MANIFEST = [
     "src/config.py",
     "src/repo_key.py",
     "src/prompt_builder.py",
+    # 架构守护 F1（2026-11-10）：prompt_builder 顶层 import src.service_diagnostics
+    # （#1858 三面基址的候选地址诊断），漏列会让 worker 包内 prompt_builder 导入即
+    # ModuleNotFoundError —— executor 的两处 try/except 静默降级、scheduler 的
+    # resolve_task_server_env 直接抛错。纯 stdlib 单文件，随包下发无副作用。
+    "src/service_diagnostics.py",
     "src/session_manager.py",
     "src/mysql_compat.py",
     "src/token_service.py",
