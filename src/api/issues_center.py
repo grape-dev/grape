@@ -1554,16 +1554,27 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
     return affected
 
 
+_CANCELLABLE_ISSUE_STATUSES = ("active", "processing", "awaiting_input", "pending_review")
+
+
+def cancel_issue_rows(c, repo_key: str, issue_number: int) -> int:
+    """Issue #1741：把同一 repo_key+issue_number 的可取消行统一置为终态取消。
+
+    评论取消路径（cancel_issue_task）与 cancel 端点共用，避免跨层重复实现；
+    completed/cancelled 行保持终态不变，重复取消不再刷新 completed_at（幂等）。
+    """
+    c.execute(
+        "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+        "WHERE repo_key=? AND issue_number=? AND status IN (?,?,?,?)",
+        (repo_key, issue_number, *_CANCELLABLE_ISSUE_STATUSES))
+    return c.rowcount
+
+
 def cancel_issue_task(repo_key: str, issue_number: int):
     """Issue 评论取消任务（Issue #1741：状态集合补齐 awaiting_input/pending_review，避免静默失效）"""
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? "
-            "AND status IN ('active','processing','awaiting_input','pending_review')",
-            (repo_key, issue_number))
-        affected = c.rowcount
+        affected = cancel_issue_rows(c, repo_key, issue_number)
         db.commit()
     log.info(f"Issue #{issue_number} cancelled ({affected} tasks)")
     # Issue #1748 补充：取消后同样回收自动转存媒体（保留用户手工附件）

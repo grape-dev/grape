@@ -9,7 +9,6 @@
 import asyncio
 import os
 import sys
-import unittest
 from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -29,6 +28,7 @@ def _cleanup():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
+        c.execute("DELETE FROM agent_tasks WHERE repo_key=?", (REPO,))
         db.commit()
 
 
@@ -61,6 +61,28 @@ def _count(issue_number: int) -> int:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM issue WHERE repo_key=? AND issue_number=?", (REPO, issue_number))
         return c.fetchone()[0]
+
+
+def _seed_agent_task(issue_number: int, status: str = "running") -> str:
+    import uuid
+
+    _id = f"at-{uuid.uuid4().hex[:10]}"
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, issue_id, repo_key, prompt, status) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (_id, "sess", 1, None, f"#{issue_number}", REPO, "", status))
+        db.commit()
+    return _id
+
+
+def _agent_status(task_id: str) -> str:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        return row[0] if row else ""
 
 
 def _drop_unique_index():
@@ -158,6 +180,54 @@ def test_route_cancel_and_resume_all_rows_idempotent():
             statuses = [r[0] for r in c.fetchall()]
         assert statuses == ["processing"] * 3, statuses
         assert _count(5) == 3, "resume must not insert duplicate cards"
+    finally:
+        _cleanup()
+        _restore_unique_index()
+
+
+def test_repeat_cancel_is_idempotent_no_completed_at_refresh():
+    """重复取消已是 cancelled 的行不得刷新 completed_at，同时仍收口残留可取消行。"""
+    from src.api.routes.issues import cancel_issue
+
+    _drop_unique_index()
+    main_id = _seed(6, "awaiting_input")
+    _seed(6, "active")
+    try:
+        assert asyncio.run(cancel_issue(main_id, user={"id": 999}))["status"] == "cancelled"
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE issue SET completed_at='2000-01-01 00:00:00' WHERE id=?", (main_id,))
+            db.commit()
+
+        result = asyncio.run(cancel_issue(main_id, user={"id": 999}))
+        assert result.get("already_cancelled") is True
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT completed_at FROM issue WHERE id=?", (main_id,))
+            assert c.fetchone()[0] == "2000-01-01 00:00:00", "already-cancelled row refreshed completed_at"
+            c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id", (REPO, 6))
+            assert [r[0] for r in c.fetchall()] == ["cancelled", "cancelled"]
+    finally:
+        _cleanup()
+        _restore_unique_index()
+
+
+def test_already_cancelled_main_closes_duplicate_running_agents():
+    """主卡已 cancelled 的幂等分支也要终止历史重复行上残留的 running agent_tasks。"""
+    from src.api.routes.issues import cancel_issue
+
+    _drop_unique_index()
+    main_id = _seed(7, "cancelled")
+    dup_id = _seed(7, "awaiting_input")
+    task_id = _seed_agent_task(7, status="running")
+    try:
+        result = asyncio.run(cancel_issue(main_id, user={"id": 999}))
+        assert result.get("already_cancelled") is True
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status FROM issue WHERE id=?", (dup_id,))
+            assert c.fetchone()[0] == "cancelled"
+        assert _agent_status(task_id) == "cancelled"
     finally:
         _cleanup()
         _restore_unique_index()

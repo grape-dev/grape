@@ -23,7 +23,8 @@ from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
-                                   _read_issue_status, _find_github_mirror_repo_key)
+                                   _read_issue_status, _find_github_mirror_repo_key,
+                                   cancel_issue_rows)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -1068,6 +1069,41 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
             "issue_closed": _issue_closed}
 
 
+def _cancel_issue_agents(c, repo_key: str, issue_id: str) -> int:
+    """Issue #1741：终止某需求卡片下仍在跑的 agent_tasks，返回终止数量。
+
+    取消端点主路径与「主卡已取消」幂等收口分支共用，避免历史重复行残留 running agent 继续执行。
+    """
+    if not issue_id:
+        return 0
+    c.execute(
+        "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+        (repo_key, issue_id))
+    _agent_rows = c.fetchall()
+    for _at_id, _at_seq in _agent_rows:
+        try:
+            from src.runtime.service import cancel_task as _cancel_agent
+            _cancel_agent(_at_id)
+        except Exception:
+            pass
+        try:
+            if _at_seq:
+                from src.api.event_pipeline import cancel_direct_task
+                cancel_direct_task(_at_seq)
+        except Exception:
+            pass
+        try:
+            if _at_seq:
+                from src.api.event_store import update_event_status
+                update_event_status(_at_seq, "cancelled")
+        except Exception:
+            pass
+    c.execute(
+        "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+        (repo_key, issue_id))
+    return len(_agent_rows)
+
+
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
@@ -1080,54 +1116,22 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         status, repo_key, issue_number = row[0], row[1], row[2]
+        _issue_id = f"#{issue_number}" if issue_number else ""
         if status == 'cancelled':
             # Issue #1741：主卡已是 cancelled 时仍对同一需求的历史多行做幂等收口，
-            # 防止残留 awaiting_input 行继续出现在待澄清列表。
+            # 防止残留 awaiting_input 行继续出现在待澄清列表；并同步终止其残留 agent_tasks。
             if repo_key and issue_number:
-                c.execute(
-                    "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', "
-                    "completed_at=datetime('now') WHERE repo_key=? AND issue_number=? AND status != 'completed'",
-                    (repo_key, issue_number))
+                _cancel_issue_agents(c, repo_key, _issue_id)
+                cancel_issue_rows(c, repo_key, issue_number)
                 db.commit()
             return {"ok": True, "already_cancelled": True}
         if status == 'completed':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
-        _issue_id = f"#{issue_number}" if issue_number else ""
-        _cancelled_agents = 0
-        if _issue_id:
-            c.execute(
-                "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
-                (repo_key, _issue_id))
-            _agent_rows = c.fetchall()
-            for _at_id, _at_seq in _agent_rows:
-                try:
-                    from src.runtime.service import cancel_task as _cancel_agent
-                    _cancel_agent(_at_id)
-                except Exception:
-                    pass
-                try:
-                    if _at_seq:
-                        from src.api.event_pipeline import cancel_direct_task
-                        cancel_direct_task(_at_seq)
-                except Exception:
-                    pass
-                try:
-                    if _at_seq:
-                        from src.api.event_store import update_event_status
-                        update_event_status(_at_seq, "cancelled")
-                except Exception:
-                    pass
-                _cancelled_agents += 1
-            c.execute(
-                "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
-                (repo_key, _issue_id))
+        _cancelled_agents = _cancel_issue_agents(c, repo_key, _issue_id)
         # Issue #1741：同一 repo_key+issue_number 的历史多行全量幂等取消，
-        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成行保持终态不受影响。
+        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成/已取消行保持终态不受影响。
         if repo_key and issue_number:
-            c.execute(
-                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
-                "WHERE repo_key=? AND issue_number=? AND status != 'completed'",
-                (repo_key, issue_number))
+            cancel_issue_rows(c, repo_key, issue_number)
         else:
             c.execute(
                 "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
