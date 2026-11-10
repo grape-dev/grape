@@ -148,12 +148,14 @@ async def start_mgmt_tasks(app) -> dict:
             log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
 
         # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json
+        # 4 进程拆分后由 mgmt 作为契约 owner 合并四进程 spec（tasks/patrol/pipeline-handoff
+        # 迁到 worker/insight，不合并会让契约驱动的 `grape` CLI 丢掉整组命令）
         try:
-            from src.api.openapi import custom_openapi
+            from src.api.openapi_merge import build_contract
             from src.kernel.help_page_gen import write_openapi_contract
-            _schema = custom_openapi(app)
+            _schema = build_contract(app)
             _n_paths = write_openapi_contract(_schema)
-            log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
+            log.info(f"OpenAPI: contract dumped ({_n_paths} paths, version={_schema.get('info', {}).get('version')}) -> /static/openapi.json")
         except Exception as e:
             log.warning(f"OpenAPI: contract dump failed: {e}")
 

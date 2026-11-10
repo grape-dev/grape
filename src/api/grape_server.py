@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
 
 app = server_common.build_app(
     title="Grape Mgmt Server",
-    version="2.2.1",
+    version="2.2.2",
     lifespan=lifespan,
 )
 
@@ -125,6 +125,7 @@ app = server_common.build_app(
 from src.domains.mgmt.routes import (
     auth, grape_auth, repos, agents, settings, skills, scenes, templates,
     feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community,
+    patrol,
 )
 app.include_router(grape_auth.router)
 app.include_router(auth.router)
@@ -141,6 +142,8 @@ app.include_router(feedback.router)
 app.include_router(autopilot.router)
 app.include_router(orgs.router)
 app.include_router(community.router)
+# 巡检（Issue: 4 进程拆分时漏挂，导致 /api/patrol/* 404 且契约丢失）
+app.include_router(patrol.router)
 
 # Admin 管理后台（/api/admin/*）
 from src.domains.mgmt.admin.routes import router as admin_router
