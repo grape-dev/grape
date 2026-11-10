@@ -39,9 +39,9 @@ _QA_NEGATION_RE = re.compile(
     r"(?:无|非|不|未|没有|没|不存在|未见|未发现|无需|不需要|no|not|without|zero|none|0)\s*"
     r"(?:任何|的|个|条|项)?\s*"
     r"(?:(?:阻塞|阻断|冲突|critical|required|硬违规|失败|不通过|未通过|未达标|不达标|"
-    r"问题|缺陷|违规|驳回|打回|"
+    r"问题|缺陷|违规|违反|越界|超出范围|最差|驳回|打回|"
     r"failures?|fails?|issues?|problems?|bugs?|blockers?|blocking|fixes?|"
-    r"整改|修复)[\s、,，/和及:：]*)+",
+    r"整改|需修复|需要修复|待修复|修复)[\s、,，/和及:：]*)+",
     re.IGNORECASE,
 )
 # “critical: none / required: 0 / required fixes: none / blocking issues: none”
@@ -76,10 +76,12 @@ _QA_PASS_EN_RE = re.compile(r"\b(?:pass|passed|ok)\b", re.IGNORECASE)
 _QA_NEG_PASS_RE = re.compile(
     r"(?:无法|不能|不可|未能|未|没有|没|不会|no\s+way\s+to|"
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
-    r"did\s+not|does\s+not|didn't|doesn't|never|not)\s*"
+    r"did\s+not|does\s+not|didn't|doesn't|never|not|"
+    # 英文量词否定：none of the tests passed / no tests passed / 0 tests passed
+    r"none|no|zero|0)\s*"
     r"(?:(?:全部|所有|全|完全|百分百|100%|能够|能|均|都|达到|达|满足|"
     r"all|every|any|fully|completely|entirely|be|been|"
-    r"have|has|had|are|is|were|was|of|the|do|does|did)\s*)*"
+    r"have|has|had|are|is|were|was|of|the|them|these|those|do|does|did)\s*)*"
     r"(?:(?:测试|用例|检查|项|tests?|checks?|cases?)\s*)*"
     # 测试名后允许助动词（not all tests have passed / tests are not passing）
     r"(?:(?:have|has|had|are|is|were|was|been|be|do|does|did)\s*)*"
@@ -109,6 +111,27 @@ _QA_PARTIAL_PASS_RE = re.compile(
     r"|(?:部分|部份)\s*(?:用例|测试|检查|项)?\s*(?:通过|合格)"
     r"|(?:some|only\s+some)\s+(?:tests?|checks?|cases?)\s+(?:pass(?:ed)?|succeed(?:ed)?)",
     re.IGNORECASE,
+)
+
+# 真实 qa 结论常见形态是“项数汇总”而非“不通过/失败”字样
+# （Standards: 3 项…；Spec: 4 项需修复…）。Spec 轴报告的正向项数即代表未通过，
+# 不能依赖“失败/不通过”字面，也不能被缺陷描述里出现的英文 “pass” 吞成通过。
+_QA_SUMMARY_COUNT_RE = re.compile(
+    r"(?<![A-Za-z])(?:Spec|规格|需求(?:评审|规格)?|验收(?:评审|标准)?)(?![A-Za-z])"
+    r"\s*[:：]?\s*(?:发现|存在|共|有)?\s*[1-9]\d*\s*(?:项|个|条)"
+    r"|[1-9]\d*\s*(?:项|个|条)\s*(?:需|需要|待)\s*修复",
+    re.IGNORECASE,
+)
+# 汇总语义里的失败信号（在剔除否定语境后判定，避免“无违反/无需修复”误判）。
+_QA_SUMMARY_KEYWORD_RE = re.compile(
+    r"最差|违反|越界|超出范围|需修复|需要修复|待修复|未达(?!标)"
+)
+# 零失败率表示全量通过（失败率为 0 / 失败数为 0 / 0% 的失败率），
+# 需在“失败”字面判定前归一为通过，且不影响同段其他真实失败信号。
+_QA_ZERO_FAIL_RATE_RE = re.compile(
+    r"(?:失败率|失败数|失败次数|未通过率|错误率|错误数)\s*"
+    r"(?:[:：=]|为|是)?\s*(?:零|0)\s*(?:%|％|项|个|条|次)?"
+    r"|(?:零|0)\s*(?:%|％)?\s*(?:的)?\s*(?:失败率|失败数|失败次数)"
 )
 
 # 通过语义（在失败语义之后判定）
@@ -218,28 +241,99 @@ def latest_qa_event(repo_key: str, issue_number) -> dict | None:
 
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT seq, status, result, summary FROM events "
-                "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
-                f"AND {_scene_clause} "
-                "ORDER BY seq DESC LIMIT 1",
-                (repo_key, _tags[0], _tags[1], _scene_arg))
+            _base_sql = ("SELECT seq, status, result, summary"
+                         "{structured_col} FROM events "
+                         "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
+                         f"AND {_scene_clause} "
+                         "ORDER BY seq DESC LIMIT 1")
+            try:
+                # 优先读取结构化产出（archive.output.conclusion / next_step）
+                c.execute(_base_sql.format(structured_col=", structured_output"),
+                          (repo_key, _tags[0], _tags[1], _scene_arg))
+            except Exception:
+                # 旧库无 structured_output 列时回退纯文本判定
+                c.execute(_base_sql.format(structured_col=""),
+                          (repo_key, _tags[0], _tags[1], _scene_arg))
             _row = c.fetchone()
         if not _row:
             return None
+        _structured = None
+        if len(_row) > 4 and _row[4]:
+            try:
+                _parsed = json.loads(_row[4])
+                _structured = _parsed if isinstance(_parsed, dict) else None
+            except Exception:
+                _structured = None
         return {"seq": int(_row[0] or 0), "status": (_row[1] or "").strip(),
-                "result": _row[2] or "", "summary": _row[3] or ""}
+                "result": _row[2] or "", "summary": _row[3] or "",
+                "structured": _structured}
     except Exception as _e:
         log.warning(f"qa gate: latest qa event query failed {repo_key}/#{issue_number}: {_e}")
         return None
 
 
-def classify_qa_conclusion(status: str, text: str) -> str:
+def _qa_fail_by_terms(text: str) -> bool:
+    return (any(_t in text for _t in _QA_FAIL_TERMS)
+            or any(_w in text for _w in _QA_FAIL_WORDS)
+            or bool(_QA_FAIL_EN_WORD_RE.search(text))
+            or bool(_QA_FAIL_EN_RE.search(text)))
+
+
+def _qa_pass_by_terms(text: str) -> bool:
+    return (any(_t in text for _t in _QA_PASS_TERMS)
+            or bool(_QA_PASS_EN_RE.search(text)))
+
+
+def _classify_qa_text(blob: str) -> str:
+    """结论文本的有序规则判定。
+
+    规则表按顺序命中即返回，显式表达优先级（复审：避免多组正则隐式依赖命中顺序）：
+    1. 项数汇总（Spec N 项 / N 项需修复）→ fail；
+    2. 零失败率归一为“通过”（失败率为 0）；
+    3. 剔除后置定量否定（0 tests failed / 未通过项 0）；
+    4. 否定式通过 / 未达标 / 部分通过 → fail；
+    5. 剔除否定语境（无违反 / 无阻塞 / no failures）；
+    6. 汇总失败词 → fail；
+    7. 失败语义 → fail，其次通过语义 → pass；
+    8. 不可判定 → unknown（fail-open）。
+    """
+    # 规则 1：真实 qa 失败结论多为项数汇总，不能依赖“失败/不通过”字面。
+    if _QA_SUMMARY_COUNT_RE.search(blob):
+        return "fail"
+    # 规则 2：失败率/失败数为 0 表示全量通过。
+    _normalized = _QA_ZERO_FAIL_RATE_RE.sub("通过", blob)
+    # 规则 3：先剔除后置定量否定，否则“未通过 0 项”会被否定式通过误判。
+    _normalized = _QA_NEG_TRAILING_RE.sub("", _normalized)
+    _normalized = _QA_NEG_CN_TRAILING_RE.sub("", _normalized)
+    # 规则 4：否定式通过/未达标/部分通过优先于泛化的“通过”词。
+    if _QA_NEG_PASS_RE.search(_normalized):
+        return "fail"
+    if _QA_UNMET_STANDARD_RE.search(_normalized):
+        return "fail"
+    if _QA_PARTIAL_PASS_RE.search(_normalized):
+        return "fail"
+    # 规则 5：剔除否定语境后再做失败/通过语义判定。
+    _normalized = _QA_NEGATION_RE.sub("", _normalized)
+    # 规则 6：汇总失败词（最差/违反/越界/需修复/未达）→ fail。
+    if _QA_SUMMARY_KEYWORD_RE.search(_normalized):
+        return "fail"
+    # 规则 7：失败语义优先于通过语义。
+    if _qa_fail_by_terms(_normalized):
+        return "fail"
+    if _qa_pass_by_terms(_normalized):
+        return "pass"
+    return "unknown"
+
+
+def classify_qa_conclusion(status: str, text: str,
+                           structured: dict | None = None) -> str:
     """判定 QA 结论：``fail`` / ``pass`` / ``unknown``。
 
     - status=failed/cancelled/error/failure → fail（Spec：取消同样视为未通过）；
     - running/dispatched/pending/queued → unknown（尚无结论）；
-    - completed 时解析 result 文本：先剔除否定语境，失败语义优先，其次通过语义；
+    - completed 时优先使用结构化产出 ``archive.output``：
+      ``conclusion`` 作为结论文本，``next_step`` 指示需 coding 修复时兜底判 fail；
+    - 无结构化时解析 result 文本（先剔除否定语境，失败语义优先，其次通过语义）；
       其中“无法通过/not passed”等否定式通过判 fail。
     """
     _st = (status or "").strip().lower()
@@ -251,33 +345,21 @@ def classify_qa_conclusion(status: str, text: str) -> str:
         return "unknown"
 
     _blob = (text or "").strip()
+    _next_step = ""
+    if isinstance(structured, dict):
+        _structured_conclusion = str(structured.get("conclusion") or "").strip()
+        if _structured_conclusion:
+            _blob = _structured_conclusion
+        _next_step = str(structured.get("next_step") or "").strip().lower()
     if not _blob:
+        # 结构化产出无 conclusion，但 next_step 明确交办 coding 修复 → 未通过。
+        if _next_step.startswith("a2a_coding"):
+            return "fail"
         return "unknown"
-    # 先剔除后置定量否定（0 tests failed / 未通过项 0），否则会被误判为失败或否定式通过
-    _normalized = _QA_NEG_TRAILING_RE.sub("", _blob)
-    _normalized = _QA_NEG_CN_TRAILING_RE.sub("", _normalized)
-    # 否定式通过/未达标/部分通过优先于泛化的“通过”词（未全通过 / 未达到 100% 通过率）
-    if _QA_NEG_PASS_RE.search(_normalized):
+    _verdict = _classify_qa_text(_blob)
+    if _verdict == "unknown" and _next_step.startswith("a2a_coding"):
         return "fail"
-    if _QA_UNMET_STANDARD_RE.search(_normalized):
-        return "fail"
-    if _QA_PARTIAL_PASS_RE.search(_normalized):
-        return "fail"
-    _normalized = _QA_NEGATION_RE.sub("", _normalized)
-
-    if any(_t in _normalized for _t in _QA_FAIL_TERMS):
-        return "fail"
-    if any(_w in _normalized for _w in _QA_FAIL_WORDS):
-        return "fail"
-    if _QA_FAIL_EN_WORD_RE.search(_normalized):
-        return "fail"
-    if _QA_FAIL_EN_RE.search(_normalized):
-        return "fail"
-    if any(_t in _normalized for _t in _QA_PASS_TERMS):
-        return "pass"
-    if _QA_PASS_EN_RE.search(_normalized):
-        return "pass"
-    return "unknown"
+    return _verdict
 
 
 def qa_gate_check(repo_key: str, issue_number) -> dict:
@@ -298,7 +380,8 @@ def qa_gate_check(repo_key: str, issue_number) -> dict:
         if not _evt:
             return _result
         _result.update(event_seq=_evt.get("seq") or 0, status=_evt.get("status") or "")
-        _verdict = classify_qa_conclusion(_result["status"], _evt.get("result") or "")
+        _verdict = classify_qa_conclusion(_result["status"], _evt.get("result") or "",
+                                          structured=_evt.get("structured"))
         _result["conclusion"] = _verdict
         if _verdict == "fail":
             _reason = " ".join((_evt.get("result") or "").split())[:300]
