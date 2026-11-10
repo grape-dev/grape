@@ -733,3 +733,118 @@ def test_merge_reuses_single_pull_detail_request():
             "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
     assert _res.get("merged") is True
     assert len(_get_calls) == 1, _get_calls
+
+
+# ===================== 复审补充（PR #1094 round 6） =====================
+
+def test_classify_qa_conclusion_partial_negation_is_fail():
+    """部分否定/未达标句式表示 QA 未通过，不得误判 pass 绕过门禁。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _fail_cases = [
+        "未全部通过", "没有全部通过", "未完全通过", "未能全部通过",
+        "通过率未达 100%", "未达到通过标准",
+        "not all tests passed", "not fully passed",
+        "tests did not all pass", "tests partially passed",
+    ]
+    for _case in _fail_cases:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+
+
+def test_classify_qa_conclusion_partial_pass_positive_stays_pass():
+    """真正的全量通过仍判 pass（避免把“全部通过/所有测试通过”误伤为 fail）。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("completed", "全部通过") == "pass"
+    assert classify_qa_conclusion("completed", "所有测试通过") == "pass"
+    assert classify_qa_conclusion("completed", "all tests passed") == "pass"
+    assert classify_qa_conclusion("completed", "通过率 100%") == "pass"
+
+
+def test_classify_qa_conclusion_required_fixes_none_not_fail():
+    """英文后置否定带前置修饰（required fixes: none）不得误判 fail。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("completed", "required fixes: none") != "fail"
+    assert classify_qa_conclusion("completed", "blocking issues: none") != "fail"
+    assert classify_qa_conclusion("completed", "required fixes: 2") == "fail"
+
+
+def test_github_create_pull_respects_explicit_auto_close_false():
+    """调用方显式 auto_close_issues=false 时，qa 通过也不得被强制改写为 Closes。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="pass")
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRCreateBody, create_pull
+    captured = {}
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        captured["payload"] = body
+        return {"number": 1094}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.qa_gate.collect_qa_failures", return_value=[]), \
+            patch("src.vcs.api_client.VcsApiClient"):
+        create_pull("org", "issue1739", PRCreateBody(
+            title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
+            body="feat: #1739 test", related_issue_nums=[_NUM],
+            auto_close_issues=False),
+            user={"id": 1, "username": "tester", "auth_type": "session_token"},
+            p="github")
+    _body = captured["payload"]["body"]
+    assert "Closes #1739" not in _body
+    assert "Related to #1739" in _body
+
+
+def test_list_issue_comments_paginates_all_pages():
+    """评论超过首页 100 条时须继续翻页，避免去重漏查旧标注。"""
+    from src.vcs.api_client import VcsApiClient
+
+    _pages = {
+        1: [{"body": "a"}, {"body": "b"}],
+        2: [{"body": "c"}],
+    }
+    _calls = []
+
+    def _fake_github_request(method, path, data=None):
+        _calls.append(path)
+        _page = 1 if "page=1" in path else 2
+        return _pages.get(_page, [])
+
+    _client = VcsApiClient("github", "tok", "org", "repo")
+    with patch.object(_client, "_github_request", side_effect=_fake_github_request):
+        _out = _client.list_issue_comments(9, per_page=2)
+    assert [c["body"] for c in _out] == ["a", "b", "c"]
+    assert any("page=1" in _c for _c in _calls)
+    assert any("page=2" in _c for _c in _calls)
+
+
+def test_list_issue_comments_stops_when_upstream_ignores_page():
+    """上游忽略 page 返回同一页时停止翻页，避免重复累积。"""
+    from src.vcs.api_client import VcsApiClient
+
+    _same = [{"body": "a"}, {"body": "b"}]
+    _client = VcsApiClient("gitcode", "tok", "org", "repo")
+    with patch.object(_client, "_gitcode_request", return_value=_same):
+        _out = _client.list_issue_comments(9, per_page=2)
+    assert [c["body"] for c in _out] == ["a", "b"]
+
+
+def test_annotation_cache_is_lru_and_bounded():
+    """进程内标注缓存按 LRU 淘汰最久未使用项，且不无界增长。"""
+    from src.api import qa_gate
+    qa_gate._annotated.clear()
+    _orig_max = qa_gate._ANNOTATED_MAX
+    try:
+        qa_gate._ANNOTATED_MAX = 2
+        _k1, _k2, _k3 = ("r", 1, "t1"), ("r", 2, "t2"), ("r", 3, "t3")
+        qa_gate._remember_annotation(_k1)
+        qa_gate._remember_annotation(_k2)
+        assert qa_gate._is_annotated(_k1) is True
+        qa_gate._remember_annotation(_k1)
+        qa_gate._remember_annotation(_k3)
+        assert qa_gate._is_annotated(_k2) is False
+        assert qa_gate._is_annotated(_k1) is True
+        assert qa_gate._is_annotated(_k3) is True
+    finally:
+        qa_gate._ANNOTATED_MAX = _orig_max
+        qa_gate._annotated.clear()
