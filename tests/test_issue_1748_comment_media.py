@@ -179,7 +179,7 @@ def test_collect_video_success(monkeypatch):
     r = _collect_issue_media_attachments("grape-dev", "grape", 1748, [f"看视频 {V1}"])
     assert r["failed"] == []
     import re
-    assert re.match(r"^[0-9a-f]{32}\.mp4$", r["ok"][0]["filename"])
+    assert re.match(r"^user-attachment-[0-9a-f]{32}\.mp4$", r["ok"][0]["filename"])
     assert r["ok"][0]["kind"] == "video"
     assert r["ok"][0]["url"].endswith("/" + r["ok"][0]["filename"])
     assert "已分析video" in r["ok"][0]["analysis"]

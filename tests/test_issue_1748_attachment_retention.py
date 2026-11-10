@@ -21,15 +21,15 @@ def test_auto_transferred_name_matrix():
     """只认平台自动转存的文件名形态；用户手工命名不误伤。"""
     assert ic._is_auto_transferred_attachment("user-image-1.png")
     assert ic._is_auto_transferred_attachment("user-attachment-3.mp4")
-    # #1748 的 UUID 命名（spec 约定）
-    assert ic._is_auto_transferred_attachment("c311ec5f5d4744448b0fc6bc77a59559.mp4")
-    assert ic._is_auto_transferred_attachment("c311ec5f5d4744448b0fc6bc77a59559.PNG")
-    # 用户手工上传：命名不像自动转存 → 保留
+    # #1748：固定前缀 + UUID（MR !1145 Informational-2：不再靠 32hex 形态启发式）
+    assert ic._is_auto_transferred_attachment(
+        "user-attachment-c311ec5f5d4744448b0fc6bc77a59559.mp4")
+    # 用户手工上传：没有平台前缀一律保留（含恰好 32 位十六进制 + 媒体扩展名的名字）
     assert not ic._is_auto_transferred_attachment("设计评审截图.png")
     assert not ic._is_auto_transferred_attachment("report.pdf")
+    assert not ic._is_auto_transferred_attachment("c311ec5f5d4744448b0fc6bc77a59559.mp4")
     assert not ic._is_auto_transferred_attachment("c311ec5f5d4744448b0fc6bc77a59559.zip")
     assert not ic._is_auto_transferred_attachment("")
-    # 长度不是 32 的十六进制串（手工命名的短名）不删
     assert not ic._is_auto_transferred_attachment("abc123.mp4")
 
 
@@ -38,7 +38,7 @@ def test_cleanup_removes_only_auto_transferred_local(tmp_path, monkeypatch):
     issue_dir = tmp_path / "issue_attachments" / "acme-org" / "demo" / "7"
     issue_dir.mkdir(parents=True)
     for name in ("user-image-1.png", "user-image-2.jpg",
-                 "c311ec5f5d4744448b0fc6bc77a59559.mp4",
+                 "user-attachment-c311ec5f5d4744448b0fc6bc77a59559.mp4",
                  "设计评审截图.png", "requirements.docx"):
         (issue_dir / name).write_bytes(b"x")
 

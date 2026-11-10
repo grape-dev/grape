@@ -1410,20 +1410,11 @@ def _cleanup_issue_attachments(repo_key: str, issue_number):
 # #1748 = <uuid32>.<媒体扩展名>（UUID 命名由 spec 约定）。只回收这两类，
 # 用户手工上传的附件一律保留。
 _AUTO_TRANSFER_PREFIXES = ("user-image-", "user-attachment-")
-_AUTO_TRANSFER_MEDIA_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi",
-                             ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
-
-
 def _is_auto_transferred_attachment(name: str) -> bool:
     """判断附件名是否由平台自动转存（评论媒体/编辑器图片）而来。"""
     if not name:
         return False
-    if name.startswith(_AUTO_TRANSFER_PREFIXES):
-        return True
-    stem, ext = os.path.splitext(name)
-    if ext.lower() not in _AUTO_TRANSFER_MEDIA_EXTS or len(stem) != 32:
-        return False
-    return all(ch in "0123456789abcdef" for ch in stem.lower())
+    return name.startswith(_AUTO_TRANSFER_PREFIXES)
 
 
 def _cleanup_auto_transferred_attachments(repo_key: str, issue_number) -> int:
@@ -2958,7 +2949,10 @@ def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo
                 continue
             kind, ext = info
             if use_uuid:
-                filename = f"{uuid.uuid4().hex}{ext}"
+                # MR !1145 Informational-2：#1748 也用固定前缀（user-attachment-<uuid>），
+                # 让「自动转存」可仅凭前缀判定，避免"32 hex + 媒体扩展名"启发式误删
+                # 恰好同形的用户手工附件。
+                filename = f"{filename_prefix}-{uuid.uuid4().hex}{ext}"
             else:
                 seq += 1
                 filename = f"{filename_prefix}-{seq}{ext}"
