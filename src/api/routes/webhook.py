@@ -1665,6 +1665,67 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             },
         }
 
+        _force = bool(getattr(body, "force", False) or payload.get("force"))
+        _queue = bool(getattr(body, "queue", False) or payload.get("queue"))
+        _a2a_ctx_key = _a2a_context_key(_idem_key, context)
+
+        # Issue #1770：A2A 派发门禁——下游 running 时不再派发上游 + 幂等时间窗去重 + 短窗告警。
+        # 必须早于 issue_state 阶段推进：被跳过的派发不应改写 Issue 阶段归属。
+        # force=true 保持原有语义：人工强制派发可越过门禁。
+        if issue_number and not _force:
+            from src.api.a2a_dispatch_guard import (
+                find_running_downstream, find_window_duplicate, resolve_scene,
+                record_skip, detect_dispatch_storm, idempotency_key as _guard_key)
+            _guard_scene, _guard_nodes = resolve_scene(repo_key, issue_number)
+            _down = find_running_downstream(
+                repo_key, issue_number, agent_name, _guard_scene, _guard_nodes)
+            if _down:
+                _reason = f"downstream_running:{_down['seq']}"
+                record_skip(
+                    repo_key, issue_number, agent_name, _reason,
+                    detail=f"target={agent_name} downstream={_down['agent']} "
+                           f"seq={_down['seq']} status={_down['status']}")
+                detect_dispatch_storm(
+                    repo_key, issue_number, agent_name, upcoming=1)
+                log.info(f"A2A #1770: skip upstream dispatch — issue=#{issue_number} "
+                         f"agent={agent_name} downstream={_down['agent']} running "
+                         f"seq={_down['seq']}")
+                return JSONResponse(status_code=200, content={
+                    "status": "ok", "seq": 0, "agent": agent_name,
+                    "skipped": "downstream_running", "queued": False,
+                    "reason": _reason, "scene": _guard_scene,
+                    "downstream_event": _down,
+                    "idempotency_key": _guard_key(issue_number, _guard_scene, agent_name),
+                    "message": f"same issue already has a running downstream event "
+                               f"('{_down['agent']}' seq={_down['seq']}); upstream "
+                               f"dispatch of '{agent_name}' is skipped to avoid an idle run",
+                })
+            _dup = find_window_duplicate(
+                repo_key, issue_number, agent_name, _guard_scene)
+            if _dup:
+                _reason = f"duplicate_key:{_dup['seq']}"
+                record_skip(
+                    repo_key, issue_number, agent_name, _reason,
+                    detail=f"target={agent_name} scene={_guard_scene} "
+                           f"existing_seq={_dup['seq']} existing_status={_dup.get('status', '')} "
+                           f"created_at={_dup.get('created_at', '')}")
+                detect_dispatch_storm(
+                    repo_key, issue_number, agent_name, upcoming=1)
+                log.info(f"A2A #1770: duplicate dispatch within idempotency window — "
+                         f"issue=#{issue_number} agent={agent_name} "
+                         f"existing_seq={_dup['seq']}")
+                return JSONResponse(status_code=200, content={
+                    "status": "ok", "seq": 0, "agent": agent_name,
+                    "skipped": "duplicate_key", "queued": False,
+                    "reason": _reason, "scene": _guard_scene,
+                    "existing_seq": _dup["seq"],
+                    "idempotency_key": _guard_key(issue_number, _guard_scene, agent_name),
+                    "message": "same issue+scene+agent already dispatched within the "
+                               "idempotency time window; duplicate dispatch dropped. "
+                               "Use force=true to dispatch immediately",
+                    "original_event": _duplicate_a2a_original_refs(repo_key, _dup["seq"]),
+                })
+
         # Issue 生命周期阶段推进（D9/D10，见 vod-skill-upgrade-plan.md §3.0.2）
         # A2A 交办 → issue_state 归属转移到目标 agent（允许回退，如 qa 回 coding）
         # 不做跳步修正、不做回退取消：stage-owner 机制保证最新归属的 agent 负责处理
@@ -1733,9 +1794,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
         # Issue #1667：去重键增加 context/idempotency_key 维度；命中活跃事件时支持
         #   queue=true（排队，前序终态后自动派发）/ force=true（立即新建事件）。
-        _force = bool(getattr(body, "force", False) or payload.get("force"))
-        _queue = bool(getattr(body, "queue", False) or payload.get("queue"))
-        _a2a_ctx_key = _a2a_context_key(_idem_key, context)
+        # _force / _queue / _a2a_ctx_key 已在 #1770 派发门禁前解析。
         if issue_number:
             _existing_seq = _has_active_a2a_event(
                 repo_key, f"#{issue_number}", agent_name, context_key=_a2a_ctx_key)
@@ -1893,6 +1952,14 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             log.error(f"A2A: append_event returned 0, cannot create event for agent={agent_name}, issue=#{issue_number}")
             return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A"})
         log.info(f"A2A: event created, seq={seq}")
+
+        # Issue #1770：短时间窗内同 Issue 同目标 agent 多次派发 → 告警日志（编排抖动观测）。
+        if issue_number:
+            try:
+                from src.api.a2a_dispatch_guard import detect_dispatch_storm
+                detect_dispatch_storm(repo_key, issue_number, agent_name, upcoming=0)
+            except Exception as _storm_e:
+                log.warning(f"A2A #1770: storm detection failed: {_storm_e}")
 
         _dispatch_result = run_a2a_dispatch(
             repo_key, seq, agent_name, evt,
