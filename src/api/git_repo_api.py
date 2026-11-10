@@ -1068,6 +1068,12 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
         except Exception as _e:
             log.warning(f"qa gate: create_pull check failed (fail-open) "
                         f"{owner}/{repo}: {_e}")
+    # Issue #1739（AC3）：GitHub 无原生关闭开关，历史语义是关联 Issue 即追加
+    # `Closes #N`（auto_close_issues 被 provider 丢弃）。仅当本次 QA 门禁判定失败时
+    # 才降级为 `Related to #N`；qa 通过 / 无 qa 阶段必须沿用原 `Closes` 语义，避免
+    # 正常关闭链路因默认 auto_close_issues=false 而悄悄失效。
+    if p == "github" and not _qa_failures:
+        _auto_close = True
     neutral = {
         "title": body.title,
         "head": body.head,
@@ -1185,13 +1191,30 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
             "remaining_issue_nums": _remaining, "pr": resp}
 
 
+def _fetch_pull_detail(owner: str, repo: str, number: int, p: str,
+                       token: str) -> dict | None:
+    """best-effort 取 PR 详情：成功返回 dict，上游异常返回 None（fail-open 放行）。
+
+    供合入门禁与 base 快照复用同一次响应，避免合入路径重复 GET 同一 PR。
+    """
+    try:
+        _detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), token)
+        return _detail if isinstance(_detail, dict) else None
+    except Exception as _e:
+        log.warning(f"qa gate: pull detail fetch failed (fail-open) "
+                    f"{owner}/{repo}#{number}: {_e}")
+        return None
+
+
 def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
-                       repo_key: str) -> None:
+                       repo_key: str, pr_detail: dict | None = None,
+                       detail_loaded: bool = False) -> None:
     """合入前 QA 结论门禁（Issue #1739）：qa 最新结论 fail 时标注并 409 阻断。
 
     - 关联来源 = PR body 的 #N 引用 + PR 详情 ``issues`` 关联（``inner_issue_nums``
       显式关联的 PR body 可能不含 #N，只读 body 会被绕过）；
     - 多 Issue PR 逐一校验并标注全部失败 Issue；
+    - ``pr_detail``/``detail_loaded``：复用调用方已取得的 PR 详情，避免重复请求；
     - 仅本门禁自身的 409 才阻断合入；查询异常（PR 详情 404/502 等）fail-open，
       不破坏合入可用性。
     """
@@ -1202,12 +1225,13 @@ def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
 
     _failures: list[dict] = []
     try:
-        _pr_detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), token)
+        _pr = pr_detail if detail_loaded else _fetch_pull_detail(
+            owner, repo, number, p, token)
         _pr_body = ""
         _rel_nums = []
-        if isinstance(_pr_detail, dict):
-            _pr_body = str(_pr_detail.get("body") or _pr_detail.get("description") or "")
-            _linked = _pr_detail.get("issues")
+        if isinstance(_pr, dict):
+            _pr_body = str(_pr.get("body") or _pr.get("description") or "")
+            _linked = _pr.get("issues")
             if isinstance(_linked, list):
                 for _it in _linked:
                     _n = _it.get("number") if isinstance(_it, dict) else None
@@ -1261,12 +1285,18 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     # Issue #752（M1）：合入前冲突标记扫描门禁——PR 变更文件硬命中 `<<<<<<< `/`>>>>>>> `
     # → 阻断 409（防残留进入基线分支，AC1）；仅孤立 `=======` 软命中 → 告警放行（防误杀
     # markdown 下划线）；扫描自身异常 fail-open。每次决策写合入日志（AC3）。
-    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, get_pull_base, record_gate_log
+    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, record_gate_log
     _repo_key = f"{owner}/{repo}"
+    # Issue #1739 审查：PR 详情只取一次，base 快照与 QA 门禁复用同一响应。
+    _pr_detail = _fetch_pull_detail(owner, repo, number, p, _token)
     # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
-    _base_info = get_pull_base(owner, repo, number, p, _token)
+    _base_info = {"ref": "", "sha": ""}
+    _base = (_pr_detail or {}).get("base") if isinstance(_pr_detail, dict) else None
+    if isinstance(_base, dict):
+        _base_info = {"ref": _base.get("ref") or "", "sha": _base.get("sha") or ""}
     # Issue #1739：合入前 QA 结论门禁（统一入口见 ``_pre_merge_qa_gate``）。
-    _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key)
+    _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key,
+                       pr_detail=_pr_detail, detail_loaded=True)
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)

@@ -351,8 +351,11 @@ def _pr_link(repo_key: str, pr_number: int) -> str:
     _provider, _owner, _repo = parse_repo_key(repo_key)
     if not _owner or not _repo:
         return ""
-    _host = "github.com" if _provider == "github" else "gitcode.com"
-    return f"https://{_host}/{_owner}/{_repo}/pull/{pr_number}"
+    # Issue #1739：GitHub 为 /pull/{n}，GitCode（及 GitLab 语义 provider）为
+    # /merge_requests/{n}；统一拼 /pull 会让 GitCode 关联 PR 链接 404。
+    if _provider == "github":
+        return f"https://github.com/{_owner}/{_repo}/pull/{pr_number}"
+    return f"https://gitcode.com/{_owner}/{_repo}/merge_requests/{pr_number}"
 
 
 def _annotation_token(seq: int, status: str, reason: str) -> str:

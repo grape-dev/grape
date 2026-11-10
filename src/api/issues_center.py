@@ -617,22 +617,27 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
 
 
 def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
-                         statuses: tuple = ("pending_review",)) -> bool:
+                         statuses: tuple = ("pending_review",),
+                         qa_info: dict | None = None) -> bool:
     """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。
 
     Issue #1739：落 completed 前统一校验同一流水线 qa 最新结论，fail 时不收尾。
+    ``qa_info`` 为调用方已完成的门禁结果：传入时直接复用，避免同一收尾动作重复
+    查询/标注；未传入（None）时自行校验，保持既有调用契约。
     """
-    try:
-        from src.api.qa_gate import gate_or_annotate
-        _qa_info = gate_or_annotate(repo_key, issue_number)
-        if _qa_info.get("blocked"):
-            log.info(f"Issue #1739: qa failed → refuse complete "
-                     f"{repo_key}/#{issue_number} (seq={_qa_info.get('event_seq')})")
-            return False
-    except Exception as _qe:
-        # 门禁自身异常 fail-open，保持既有收尾链路
-        log.warning(f"Issue #1739: qa gate check failed (fail-open) "
-                    f"{repo_key}/#{issue_number}: {_qe}")
+    if qa_info is None:
+        try:
+            from src.api.qa_gate import gate_or_annotate
+            qa_info = gate_or_annotate(repo_key, issue_number)
+        except Exception as _qe:
+            # 门禁自身异常 fail-open，保持既有收尾链路
+            log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                        f"{repo_key}/#{issue_number}: {_qe}")
+            qa_info = {}
+    if qa_info.get("blocked"):
+        log.info(f"Issue #1739: qa failed → refuse complete "
+                 f"{repo_key}/#{issue_number} (seq={qa_info.get('event_seq')})")
+        return False
     with db_lock:
         c = db.cursor()
         _ph = ",".join("?" * len(statuses))
@@ -991,6 +996,7 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
         # Issue #1739：统一 QA 结论门禁——仅在本次调用会收尾（target=done 或末节点归一
         # done）时校验；target=processing 的「继续处理」不受影响。
         _will_done = (target == "done") or _is_last_stage_node(repo_key, issue_number)
+        _qa_info: dict | None = None
         if _will_done:
             try:
                 from src.api.qa_gate import gate_or_annotate
@@ -1002,15 +1008,18 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
             except Exception as _qe:
                 log.warning(f"Issue #1739: qa gate check failed (fail-open) "
                             f"{repo_key}/#{issue_number}: {_qe}")
+                _qa_info = {}
         if target == "done":
             if _is_last_stage_node(repo_key, issue_number):
                 # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
                 if _complete_issue_done(repo_key, issue_number, evidence,
-                                        ("pending_review", "active", "processing", "awaiting_input")):
+                                        ("pending_review", "active", "processing", "awaiting_input"),
+                                        qa_info=_qa_info):
                     return "passed_done"
                 return _review_noop_reason(repo_key, issue_number, "completed")
             # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
-            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",)):
+            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",),
+                                    qa_info=_qa_info):
                 return "passed_done"
             return _review_noop_reason(repo_key, issue_number, "completed")
         if _is_last_stage_node(repo_key, issue_number):
@@ -1018,7 +1027,8 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
             log.info(f"Issue review-pass normalized last-node target=processing→done: "
                      f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
             if _complete_issue_done(repo_key, issue_number, evidence,
-                                    ("pending_review", "active", "processing", "awaiting_input")):
+                                    ("pending_review", "active", "processing", "awaiting_input"),
+                                    qa_info=_qa_info):
                 return "passed_done"
             return _review_noop_reason(repo_key, issue_number, "completed")
         with db_lock:
