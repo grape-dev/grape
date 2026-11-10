@@ -29,7 +29,13 @@ def _assignee_list(v, neutral, native, ctx):
 
 def _gh_close_body(nums, neutral, native, ctx):
     body = neutral.get("body") or ""
-    line = " ".join(f"Closes #{n}" for n in nums)
+    # Issue #1739：qa 失败时调用方会置 auto_close_issues=false，但 GitHub 无原生
+    # 关闭开关、Closes #N 即自动关闭。此时必须降级为 Related 语义（仅关联不关闭），
+    # 否则经 VCS UI 合入仍会自动关闭 Issue，绕过合入门禁。
+    if neutral.get("auto_close_issues") is False:
+        line = " ".join(f"Related to #{n}" for n in nums)
+    else:
+        line = " ".join(f"Closes #{n}" for n in nums)
     native["body"] = (body.rstrip() + "\n\n" + line).strip()
 
 

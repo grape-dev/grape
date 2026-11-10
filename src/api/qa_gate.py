@@ -30,13 +30,21 @@ _QA_FAIL_TERMS = (
 )
 
 # 单独词项需先剔除否定语境（无阻塞 / 非阻塞 / 无 Critical / 0 Required / no failure）
-_QA_FAIL_WORDS = ("阻塞", "阻断", "critical", "required")
+_QA_FAIL_WORDS = ("阻塞", "阻断")
+# 英文词按词边界匹配（避免 "criticality" 之类子串误命中）
+_QA_FAIL_EN_WORD_RE = re.compile(r"\b(?:critical|required)\b", re.IGNORECASE)
 _QA_NEGATION_RE = re.compile(
-    r"(?:无|非|不|未|没有|不存在|未见|未发现|无需|不需要|no|without|zero|0)\s*"
+    r"(?:无|非|不|未|没有|不存在|未见|未发现|无需|不需要|no|not|without|zero|none|0)\s*"
     r"(?:任何|的|个|条|项)?\s*"
     r"(?:(?:阻塞|阻断|冲突|critical|required|硬违规|失败|问题|缺陷|违规|"
     r"failures?|fails?|issues?|problems?|bugs?|blockers?|blocking|fixes?|"
-    r"整改|修复)[\s、,，/和及]*)+",
+    r"整改|修复)[\s、,，/和及:：]*)+",
+    re.IGNORECASE,
+)
+# “critical: none / required: 0 / blocking issues: none”等否定收尾（否定词在后）
+_QA_NEG_TRAILING_RE = re.compile(
+    r"\b(?:critical|required|blockers?|blocking|failures?|fails?|issues?|fixes?)"
+    r"\s*[:：=-]?\s*(?:none|zero|0|no)\b",
     re.IGNORECASE,
 )
 
@@ -73,15 +81,16 @@ def _issue_number_int(issue_number) -> int:
     return int(_tags[1]) if _tags else 0
 
 
-def _issue_scene_key(repo_key: str, issue_number) -> str:
+def _issue_scene_key(repo_key: str, issue_number) -> str | None:
     """该 Issue 当前流水线场景标识（与 events.scene_id 对齐；空场景归一 ``default``）。
 
     与 ``pipeline_has_qa_node`` 使用同一解析口径，保证“同一流水线”判定一致。
-    无法解析（非法编号/查询异常）返回空串。
+    非法编号或查询异常返回 ``None``——调用方须按“查询异常均放行”处理，
+    不得退化为 ``default`` 流水线判定。
     """
     _tags = _issue_tags(issue_number)
     if not _tags:
-        return ""
+        return None
     try:
         from src.api.session_store import get_issue_scene
 
@@ -89,15 +98,22 @@ def _issue_scene_key(repo_key: str, issue_number) -> str:
         return (_scene[0] if _scene and _scene[0] else "") or "default"
     except Exception as _e:
         log.warning(f"qa gate: issue scene resolve failed {repo_key}/#{issue_number}: {_e}")
-        return ""
+        return None
 
 
 def pipeline_has_qa_node(repo_key: str, issue_number) -> bool:
-    """该 Issue 所属流水线是否存在启用中的 qa 节点（无 qa 阶段 → 不启用门禁）。"""
+    """该 Issue 所属流水线是否存在启用中的 qa 节点（无 qa 阶段 → 不启用门禁）。
+
+    场景解析异常（含非法编号）→ False（放行，不按 default 流水线判定）。
+    """
     try:
         from src.api.pipeline_config import get_pipeline_config
 
-        _scene_id = _issue_scene_key(repo_key, issue_number) or "default"
+        _scene_key = _issue_scene_key(repo_key, issue_number)
+        if _scene_key is None:
+            log.info(f"qa gate: scene unresolved, skip gate {repo_key}/#{issue_number}")
+            return False
+        _scene_id = _scene_key or "default"
         _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
         for _n in _nodes:
             _nid = str(_n.get("id") or _n.get("tag") or "").strip().lower()
@@ -115,6 +131,10 @@ def latest_qa_event(repo_key: str, issue_number) -> dict | None:
     if not _tags:
         return None
     _scene_id = _issue_scene_key(repo_key, issue_number)
+    if _scene_id is None:
+        # 场景解析异常 → 放行，不按 default 流水线匹配历史事件
+        log.info(f"qa gate: scene unresolved, skip latest event {repo_key}/#{issue_number}")
+        return None
     if _scene_id in ("", "default"):
         # 仓库默认/未绑定场景：历史事件的 scene_id 可能为空串或 "default"
         _scene_clause = "(scene_id=? OR scene_id='' OR scene_id IS NULL)"
@@ -165,12 +185,14 @@ def classify_qa_conclusion(status: str, text: str) -> str:
     # 否定式通过优先于泛化的“通过”词（“无法通过验收”不能再判 pass）
     if _QA_NEG_PASS_RE.search(_blob):
         return "fail"
-    _normalized = _QA_NEGATION_RE.sub("", _blob)
-    _lower = _normalized.lower()
+    _normalized = _QA_NEG_TRAILING_RE.sub("", _blob)
+    _normalized = _QA_NEGATION_RE.sub("", _normalized)
 
     if any(_t in _normalized for _t in _QA_FAIL_TERMS):
         return "fail"
-    if any(_w in _lower for _w in _QA_FAIL_WORDS):
+    if any(_w in _normalized for _w in _QA_FAIL_WORDS):
+        return "fail"
+    if _QA_FAIL_EN_WORD_RE.search(_normalized):
         return "fail"
     if _QA_FAIL_EN_RE.search(_normalized):
         return "fail"
@@ -213,16 +235,32 @@ def qa_gate_check(repo_key: str, issue_number) -> dict:
         return _result
 
 
-def gate_or_annotate(repo_key: str, issue_number, pr_number: int = 0) -> dict:
+def gate_or_annotate(repo_key: str, issue_number, pr_number: int = 0,
+                     node_failure: dict | None = None) -> dict:
     """统一门禁入口：校验 QA 结论，命中 fail 时写入 Issue 标注，返回校验结果。
 
     各关闭/合入判定点复用此函数，避免 `qa_gate_check → annotate_qa_failure`
     样板散落多处（Issue #1739 审查：门禁策略变更需多点同步）。自身不抛异常。
+
+    ``node_failure``：流水线节点失败分支（如 qa 节点 status=failed）使用的
+    节点失败语义。即使结论文本不可判定，也按节点失败标注，避免该分支自行手写
+    门禁样板。
     """
     _info = qa_gate_check(repo_key, issue_number)
-    if _info.get("blocked"):
+    _annotate_info = None
+    if node_failure:
+        _annotate_info = dict(_info or {})
+        if not _annotate_info.get("reason"):
+            _annotate_info["reason"] = (node_failure.get("reason")
+                                        or "qa 节点失败")
+        if not _annotate_info.get("status"):
+            _annotate_info["status"] = node_failure.get("status") or ""
+    elif _info.get("blocked"):
+        _annotate_info = _info
+    if _annotate_info is not None:
         try:
-            annotate_qa_failure(repo_key, issue_number, _info, pr_number=pr_number)
+            annotate_qa_failure(repo_key, issue_number, _annotate_info,
+                                pr_number=pr_number)
         except Exception as _e:
             log.warning(f"qa gate: annotate via guard failed "
                         f"{repo_key}/#{issue_number}: {_e}")

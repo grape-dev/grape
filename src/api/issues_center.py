@@ -917,11 +917,12 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
                          f"(manual confirm path) {repo_key}/{_tag}")
                 if _nid == "qa":
                     # Issue #1739：qa 失败保留失败原因与关联 PR，便于回流修复
+                    # 走统一入口，以节点失败语义标注（与其余门禁点口径一致）
                     try:
-                        from src.api.qa_gate import annotate_qa_failure, qa_gate_check
-                        _qa = qa_gate_check(repo_key, _num)
-                        annotate_qa_failure(repo_key, _num, _qa or {
-                            "event_seq": 0, "status": _st, "reason": "qa 节点失败"})
+                        from src.api.qa_gate import gate_or_annotate
+                        gate_or_annotate(repo_key, _num,
+                                         node_failure={"status": _st,
+                                                       "reason": "qa 节点失败"})
                     except Exception as _qe:
                         log.warning(f"qa gate annotation failed {repo_key}/{_tag}: {_qe}")
                 return "pending_review_fallback"
