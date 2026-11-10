@@ -59,3 +59,13 @@
 ## 风险与回退
 - 误判风险通过“否定语境剔除 + 不可判定放行 + 异常 fail-open”收敛。
 - 如门禁导致合入异常，可临时移除 merge 检查点，其余路径独立生效。
+## 复审补充（PR #1094 round 3）
+- GitHub 建 PR：qa fail 时 `auto_close_issues=false` 无法由 provider 表达，关联降级为
+  `Related to #N`（不注入 `Closes #N`），避免经 VCS UI 合入仍自动关闭 Issue。
+- 结论文本判定：否定语境补 `not/none` 与「critical/required: none」后置否定，英文失败词
+  改为词边界匹配。
+- 场景解析异常：`_issue_scene_key` 返回 `None`，`pipeline_has_qa_node` / `latest_qa_event`
+  直接放行，不再退化为 `default` 流水线判定。
+- 多 Issue PR：建 PR / 合入门禁遍历全部关联 Issue，逐一标注 qa 失败 Issue（409 列出全部）。
+- `gate_or_annotate` 增加 `node_failure` 语义，`auto_finalize_issue_on_last_node` 的 qa 节点
+  失败分支改走统一入口。
