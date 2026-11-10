@@ -791,12 +791,19 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     from src.runtime.service import _collect_server_env, sync_task_session_token
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, account FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT user_id, account, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         return {"env": {}}
-    user_id, account = row[0] or 0, row[1] or ""
+    user_id, account, runtime_id = row[0] or 0, row[1] or "", row[2] or 0
     env = _collect_server_env(user_id, account)
+    # Issue #1858：worker 执行前重拉任务 env 时，按任务 runtime 下发三面基址，
+    # 覆盖历史任务/旧快照（此前只下发凭据，旁路路径仍可能缺 GRAPE_A2A_BASE_URL）。
+    try:
+        from src.prompt_builder import resolve_task_server_env
+        env.update(resolve_task_server_env(runtime_id))
+    except Exception as _base_e:
+        log.warning(f"runtime_task_env service base resolve failed for task={task_id}: {_base_e}")
     # Issue #990：会话 token 与 shell 环境快照同步——valid 时复用快照 token，
     # 失效/轮换时签发新 token 并回写 agent_tasks.env_extra，随后返回给 worker。
     # Issue #990：只同步 GRAPE_SESSION_TOKEN，不覆盖任务快照中的其它显式 env

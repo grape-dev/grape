@@ -330,6 +330,15 @@ def _load_accounts():
                 if _tba:
                     set_meta_value("task_business_api_url", _tba)
                     log.info(f"Configured task_business_api_url from server-config.json: {_tba}")
+            # Issue #1858：按服务任务基址（VCS/Issue/A2A）+ 可选聚合网关。
+            # 双写 server-config.json > meta；未配置不写，getter 回退业务/回连基址。
+            for _svc_key in ("task_vcs_api_url", "task_issue_api_url",
+                             "task_a2a_api_url", "task_gateway_base_url"):
+                if not get_meta_value(_svc_key):
+                    _svc_val = (_cfg.get(_svc_key) or "").strip().rstrip("/")
+                    if _svc_val:
+                        set_meta_value(_svc_key, _svc_val)
+                        log.info(f"Configured {_svc_key} from server-config.json: {_svc_val}")
         except Exception:
             pass
     except Exception as e:

@@ -1376,9 +1376,12 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         pass
                     import urllib.request as _url_req
                     _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
-                    # Issue #372 §15.2: A2A re-dispatch URL 从 get_server_base_url 获取
-                    from src.user.db import get_server_base_url as _gsb
-                    _a2a_base = _gsb() or "http://localhost:8000"
+                    # Issue #1858：A2A 派发改用 A2A 控制面基址（含可选网关 /a2a 前缀），
+                    # 不再复用业务/runtime 网关地址。
+                    from src.prompt_builder import _resolve_a2a_base
+                    _a2a_base = _resolve_a2a_base()
+                    if not _a2a_base:
+                        raise RuntimeError("A2A base_url unresolved")
                     _a2a_req = _url_req.Request(
                         f"{_a2a_base}/api/a2a",
                         data=_a2a_body,
@@ -1407,8 +1410,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 except HTTPException:
                     raise
                 except Exception as e:
-                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}")
-                    raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
+                    from src.prompt_builder import format_base_url_candidates
+                    try:
+                        _candidates = format_base_url_candidates("/api/a2a")
+                    except Exception:
+                        _candidates = ""
+                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}; {_candidates}")
+                    raise HTTPException(status_code=500, detail={"code": 500,
+                        "message": f"重派异常: {str(e)[:100]}；{_candidates}"})
 
             # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行

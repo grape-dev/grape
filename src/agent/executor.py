@@ -673,6 +673,14 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
         log.info(f"{label}devops event task: bot token present (len={len(bot_token)}), NOT injecting into env (P2)")
         # GitHub bot token 不再注入（agent 侧一律 grape CLI 转发）
 
+    # Issue #1858：旧快照/旁路路径三面基址兜底（仅补缺失键，不覆盖显式值）。
+    # A2A 回退 worker 回连基址（控制面语义），不与业务基址混用。
+    if env.get("GRAPE_SERVER_URL"):
+        env.setdefault("GRAPE_VCS_BASE_URL", env["GRAPE_SERVER_URL"])
+        env.setdefault("GRAPE_ISSUE_BASE_URL", env["GRAPE_SERVER_URL"])
+        env.setdefault("GRAPE_A2A_BASE_URL",
+                       env.get("RUNTIME_SERVER_URL") or env["GRAPE_SERVER_URL"])
+
     # VCS API base URL + 名称注入（skill 中 $VCS_API_BASE 引用，适配多 VCS provider）
     if repo_key:
         try:

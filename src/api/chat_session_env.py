@@ -65,6 +65,14 @@ def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str, *,
     except Exception as e:
         log.warning(f"chat_session_env_extra: resolve server url failed for conv={conv_id}: {e}")
 
+    # Issue #1858：chat 会话同样注入三面基址（VCS/Issue/A2A），与任务派发同源，
+    # 避免 chat 场景下 A2A 自调用仍落到业务基址。
+    try:
+        from src.prompt_builder import resolve_service_base_env
+        env.update(resolve_service_base_env(runtime_id or 0))
+    except Exception as e:
+        log.warning(f"chat_session_env_extra: resolve service bases failed for conv={conv_id}: {e}")
+
     env.update(chat_repo_env(repo_key))
     if repo_key and not repo_key.startswith("chat:"):
         try:

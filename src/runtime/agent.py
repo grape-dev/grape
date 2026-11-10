@@ -1583,6 +1583,32 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     if _single_address:
         env["GRAPE_SERVER_URL"] = local_base
         log.info("local worker: single-address deploy, override GRAPE_SERVER_URL -> %s", local_base)
+    # Issue #1858：按服务基址跟随本机直连修正——
+    # - 缺失或与对应回退基址同端点（单地址部署）→ 覆盖为 local_base（避免 NAT 回环）；
+    # - 显式分服务基址（如 VCS 8081 / A2A 8082 与业务/回连基址不同）保留不动，
+    #   交由运维配置可达地址，绝不用其它基址冒充。
+    _svc_refs = (
+        ("GRAPE_VCS_BASE_URL", "vcs", _business_base),
+        ("GRAPE_ISSUE_BASE_URL", "issue", _business_base),
+        ("GRAPE_A2A_BASE_URL", "a2a", _runtime_base),
+    )
+    _overridden = {}
+    for _key, _svc, _ref in _svc_refs:
+        _val = env.get(_key) or ""
+        if not _val or (_ref and _same_url_host(_val, _ref)):
+            env[_key] = local_base
+            _overridden[_svc] = "local_worker_override"
+    if _overridden:
+        try:
+            import json as _json_base_src
+            _sources = _json_base_src.loads(env.get("GRAPE_BASE_URL_SOURCES") or "{}")
+            _sources.update(_overridden)
+            env["GRAPE_BASE_URL_SOURCES"] = _json_base_src.dumps(
+                _sources, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            pass
+        log.info("local worker: override service base env -> %s (%s)",
+                 local_base, ",".join(sorted(_overridden)))
 
 
 def _current_username() -> "str | None":
@@ -2735,6 +2761,15 @@ async def _execute_task(client, task, engine_name: str = ""):
         # GRAPE_SERVER_URL，单地址部署仍覆盖为本机直连（改造前等价，避免 NAT 回环不通）。
         _apply_local_worker_base_override(env, task, _local_base)
         log.info(f"local worker: override RUNTIME_SERVER_URL/server_url -> {_local_base}")
+    # Issue #1858：执行前三面基址前置校验——缺失即显式告警（禁止静默回退 localhost），
+    # 提示服务端派发/worker env 重拉注入，便于 runbook 前置检查定位。
+    _missing_svc_bases = [k for k in ("GRAPE_VCS_BASE_URL", "GRAPE_ISSUE_BASE_URL",
+                                      "GRAPE_A2A_BASE_URL") if not (env.get(k) or "").strip()]
+    if _missing_svc_bases:
+        log.warning(
+            "task %s missing service base env: %s; server dispatch should inject "
+            "GRAPE_VCS_BASE_URL / GRAPE_ISSUE_BASE_URL / GRAPE_A2A_BASE_URL "
+            "(worker env refresh covers historical snapshots)", tid, ",".join(_missing_svc_bases))
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。

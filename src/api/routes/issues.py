@@ -1168,8 +1168,12 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
             set_issue_stage(repo_key, _issue_id, _resume_stage, "resume")
             try:
                 import urllib.request, json as _json
-                from src.prompt_builder import _resolve_server_url
-                _a2a_url = _resolve_server_url() + "/api/a2a"
+                # Issue #1858：恢复续办走 A2A 控制面基址（含可选网关 /a2a 前缀）。
+                from src.prompt_builder import _resolve_a2a_base
+                _a2a_base = _resolve_a2a_base()
+                if not _a2a_base:
+                    raise RuntimeError("A2A base_url unresolved")
+                _a2a_url = _a2a_base.rstrip("/") + "/api/a2a"
                 _a2a_payload = _json.dumps({
                     "agent": _resume_stage,
                     "payload": {
@@ -1186,7 +1190,12 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 urllib.request.urlopen(_req, timeout=5)
                 log.info(f"Issue #{issue_id} resumed → re-dispatched to stage={_resume_stage}")
             except Exception as _e:
-                log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}")
+                from src.prompt_builder import format_base_url_candidates
+                try:
+                    _candidates = format_base_url_candidates("/api/a2a")
+                except Exception:
+                    _candidates = ""
+                log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}; {_candidates}")
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 

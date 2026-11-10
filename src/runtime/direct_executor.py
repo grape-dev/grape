@@ -98,7 +98,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         register_scene_deploy_url, register_sre_deploy_url,
     )
     from src.runtime.executor import stream_devops_agent
-    from src.prompt_builder import build_devops_agent_prompt
+    from src.prompt_builder import build_devops_agent_prompt, resolve_task_server_env
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output, _extract_tool_command,
         append_skipped_event,
@@ -340,6 +340,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #1668：统一 actor 解析（a2a_event 回退 payload.account/Issue creator），
         # 禁止用 exec_account（仓库全名）冒充个人账号。
         "ACCOUNT": resolve_actor_account(evt, repo_key),
+        # Issue #1858：direct 执行同样注入三面基址（与 enqueue/重派/worker 同源）。
+        **resolve_task_server_env(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入

@@ -4564,6 +4564,34 @@ def get_business_api_port() -> str:
     return str(os.environ.get("GRAPE_BUSINESS_PORT") or "").strip()
 
 
+# Issue #1858：任务环境按服务注入基址——业务面（VCS / Issue）与控制面（A2A）分离。
+# 显式配置键（server-config.json > meta）；未配置由 prompt_builder 按聚合网关前缀
+# 或业务/回连基址回退，且来源在 env 中显式记录（不乱冒充）。
+_TASK_SERVICE_API_KEYS = {
+    "vcs": "task_vcs_api_url",
+    "issue": "task_issue_api_url",
+    "a2a": "task_a2a_api_url",
+}
+
+
+def get_task_service_api_url_explicit(service: str) -> str:
+    """显式配置的按服务任务基址（vcs/issue/a2a）；未配置返回空串。
+
+    Issue #1858：同一 base_url 无法同时承载 8081 业务 API 与 8082 A2A 时，
+    运维可分别配置 `task_vcs_api_url` / `task_issue_api_url` / `task_a2a_api_url`。
+    """
+    key = _TASK_SERVICE_API_KEYS.get((service or "").strip().lower(), "")
+    return _split_url_configured_value(key) if key else ""
+
+
+def get_task_gateway_base_url() -> str:
+    """可选聚合网关基址（按 /vcs /issue /a2a 前缀路由三面）；未配置返回空串。
+
+    Issue #1858：网关就绪时作为默认分服务变量的替代（二者择一，显式服务键优先）。
+    """
+    return _split_url_configured_value("task_gateway_base_url")
+
+
 def _split_url_configured_value(key: str) -> str:
     """读取拆分配置项（server-config.json > meta），空串表示未配置。
 
