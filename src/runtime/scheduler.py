@@ -387,6 +387,16 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
 
+    # Issue #1811：定时调度与 event_pipeline 同源注入 bot 身份，单点覆盖 DIRECT/REMOTE。
+    # 函数内延迟 import，避免 scheduler ↔ event_pipeline 模块级循环依赖。
+    from src.api.event_pipeline import _inject_bot_agent_env
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
+    if not env_extra.get("BOT_USERNAME"):
+        log.warning(
+            f"Autopilot exec {exec_id}: BOT_USERNAME unresolved for repo={repository}; "
+            "skill author filtering will degrade"
+        )
+
     # 7. 分流执行
     if _is_direct:
         # DIRECT 模式：本机执行
