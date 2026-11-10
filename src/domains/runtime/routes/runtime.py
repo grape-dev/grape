@@ -13,6 +13,54 @@ from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
+from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
+
+def _register_healthy_guard(c, rid: int, reported: bool) -> int:
+    """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
+
+    震荡根因：worker re-register（每 300s）用 ACP 握手探测（15s 总闸）判
+    healthy，Windows 冷启动易超时 → 上报 False；而心跳探活（每 600s）真跑
+    ACP 成功后把 healthy 升回 1。两写入源打架导致 healthy 大部分时间为 0。
+
+    守卫规则（仅作用于 UPDATE 分支的 1→0 方向）：
+    - DB 行 healthy=1 且 probe_status='ok' 且 probe_last 距今 ≤ 新鲜窗口
+      （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
+      → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
+    - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
+      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除）。
+
+    INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
+    """
+    try:
+        row = c.execute(
+            "SELECT healthy, probe_status, probe_last FROM agent_runtimes WHERE id=?",
+            (rid,)).fetchone()
+        if not row:
+            return 1 if reported else 0
+        cur_healthy, probe_status, probe_last = (row[0] or 0), (row[1] or ""), (row[2] or "")
+        if reported or not cur_healthy:
+            return 1 if reported else 0
+        # 仅剩「当前 healthy=1、上报 False」的降级方向需要守卫
+        if (probe_status or "").strip().lower() != "ok":
+            return 0
+        _window = _resolve_probe_fresh_window()
+        try:
+            _last = datetime.fromisoformat(probe_last)
+            if _last.tzinfo is None:
+                _last = _last.replace(tzinfo=timezone.utc)
+            fresh = (datetime.now(timezone.utc) - _last).total_seconds() <= _window
+        except Exception:
+            fresh = False
+        if fresh:
+            log.info(f"register healthy-guard: runtime={rid} probe ok within {_window}s, "
+                     f"keep healthy=1 (transient ACP check downgrade suppressed)")
+            return 1
+        return 0
+    except Exception as _ge:
+        # 守卫自身异常绝不阻塞注册主链路（保守：按上报值）
+        log.warning(f"register healthy-guard failed (runtime={rid}): {_ge}")
+        return 1 if reported else 0
+
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
@@ -192,14 +240,56 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             if not name:
                 continue
             _ls_json = skills_by_name.get(name, "[]")
-            c.execute("SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
-                      (credential_id, name, cred_scope, owner_id))
+            # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——
+            # scope/owner_id/org_id/repo_key 是凭据派生属性，命中既有行后原地同步，
+            # 引擎 id 天然稳定（scope 往返切换不再 INSERT 新行 + id 全量变更）。
+            # 多行历史脏数据时取 MAX(id)（与 scope 切换去重「保留最新行」口径一致，
+            # 重复行已由上方 merge_duplicate_engine_rows 合并）。
+            c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
+                      "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
+                      (credential_id, name))
             row = c.fetchone()
+
             if row:
                 rid = row[0]
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=? WHERE id=?",
-                          (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
-                           datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
+                # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
+                # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
+                # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
+                # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
+                # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
+                apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
+                _upd_sql = ("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
+                            + (", role_tags=?" if _role_tags_json else "")
+                            + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                            + " WHERE id=?")
+                # 参数顺序 bug 修复（#865 基线缺陷，2026-11-10 真机实证）：rid 必须是
+                # 最后一个参数（对应 WHERE id=?）——旧实现把 rid 固定在元组第 6 位再
+                # 追加 role_tags/model 值，一旦带上 model 分支占位符与参数错位，
+                # sqlite binding 异常 → 该引擎行整个 UPDATE 失败（表现为「检测到
+                # 模型的引擎 worker_version 卡旧版且 model_name 恒空」；INSERT 新行
+                # 路径参数固定无误，故首台远程 Worker 首注册侥幸成功）。
+                _upd_args = [rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
+                             rt.get("cli_path", ""), _ls_json, body.cli_version]
+                if _role_tags_json:
+                    _upd_args.append(_role_tags_json)
+                if _model_name:
+                    _upd_args += [_model_name, datetime.now(timezone.utc).isoformat()]
+                _upd_args.append(rid)
+                c.execute(_upd_sql, _upd_args)
+                # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
+                # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
+                if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
+                        or (row[3] or "") != (cred_repo_key or "")
+                        or (row[4] or 0) != cred_org_id):
+                    c.execute("UPDATE agent_runtimes SET scope=?, owner_id=?, repo_key=?, org_id=? WHERE id=?",
+                              (cred_scope, owner_id, cred_repo_key, cred_org_id, rid))
+                    _ev = {"event": "engine_scope_synced", "credential_id": credential_id,
+                           "runtime_id": rid, "engine": name,
+                           "old": {"scope": row[1] or "", "owner_id": row[2] or "",
+                                   "repo_key": row[3] or "", "org_id": row[4] or 0},
+                           "new": {"scope": cred_scope, "owner_id": owner_id,
+                                   "repo_key": cred_repo_key, "org_id": cred_org_id}}
+                    log.info("engine_change_event: " + json.dumps(_ev, ensure_ascii=False))
             else:
                 c.execute(
                     "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
