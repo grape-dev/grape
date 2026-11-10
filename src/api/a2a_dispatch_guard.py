@@ -3,7 +3,7 @@
 背景：同一 Issue 在下游（qa）审查 running 期间仍被重复派发上游（coding），
 上游会话只能幂等空跑，浪费执行槽位（#2955 实证）。
 
-本模块在 A2A 派发入口提供四段门禁：
+本模块在 A2A 派发入口提供三段拦截 + 一段观测：
 1. 下游 running 判定：目标 agent 的上游被派发时，若同 Issue 同场景存在
    running/dispatched 的下游事件 → 跳过本次派发；
 2. 时间窗去重：issue + scene + target agent 在时间窗内已有 completed 派发

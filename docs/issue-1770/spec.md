@@ -1,7 +1,7 @@
 # Spec: Issue #1770 — a2a_event 派发去重/幂等门禁
 
 ## Objective
-编排侧 `a2a_event` 派发增加三段门禁，避免同一 Issue 在下游（qa）审查 running 期间重复派发上游（coding）导致会话空跑、浪费执行槽位（#2955 实证：qa seq 62528 running 期间两次派发 coding seq 62535 / 62540）。
+编排侧 `a2a_event` 派发增加三段拦截 + 一段观测，避免同一 Issue 在下游（qa）审查 running 期间重复派发上游（coding）导致会话空跑、浪费执行槽位（#2955 实证：qa seq 62528 running 期间两次派发 coding seq 62535 / 62540）。
 
 ## Scope
 ### In Scope
