@@ -443,3 +443,112 @@ def test_merge_fail_open_on_pr_detail_upstream_error():
         _res = merge_pull("org", "issue1739", 9, PRMergeBody(), user={
             "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
     assert _res.get("merged") is True
+
+# ===================== 复审补充（PR #1094 round 3） =====================
+
+def test_classify_qa_conclusion_trailing_negation_forms():
+    """英文“critical: none / not required / required: none”不得误判 fail。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("completed", "critical: none") != "fail"
+    assert classify_qa_conclusion("completed", "not required") != "fail"
+    assert classify_qa_conclusion("completed", "required: none") != "fail"
+    assert classify_qa_conclusion("completed", "critical issue found") == "fail"
+
+
+def test_qa_gate_fail_open_on_scene_resolve_error():
+    """场景解析异常必须放行，不得退化为 default 流水线判定。"""
+    from src.api.qa_gate import qa_gate_check
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    with patch("src.api.session_store.get_issue_scene",
+               side_effect=RuntimeError("scene store unavailable")):
+        info = qa_gate_check(_REPO, _NUM)
+    assert info["blocked"] is False, info
+    assert info["qa_present"] is False
+
+
+def test_github_create_pull_uses_related_when_auto_close_off():
+    """qa fail 时 GitHub 关联降级为 Related，不注入 Closes（避免 UI 合入自动关闭）。"""
+    from src.vcs.providers import translate_inbound
+    payload = translate_inbound("github", "pulls", "create", {
+        "title": "t", "head": "h", "base": "b", "body": "body",
+        "related_issue_nums": [1739], "auto_close_issues": False,
+    }, {"owner_repo": "org/repo"})
+    assert "Closes #1739" not in payload["body"]
+    assert "Related to #1739" in payload["body"]
+    payload2 = translate_inbound("github", "pulls", "create", {
+        "title": "t", "head": "h", "base": "b", "body": "body",
+        "related_issue_nums": [1739], "auto_close_issues": True,
+    }, {"owner_repo": "org/repo"})
+    assert "Closes #1739" in payload2["body"]
+
+
+def _seed_failed_issue(issue_number: int):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result, scene_id) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (_REPO, f"#{issue_number}", "a2a_event", "qa", "completed",
+             "审查完成：不通过", ""))
+        db.commit()
+
+
+def test_create_pull_annotates_all_failed_issues():
+    """多 Issue PR：所有 qa 失败的关联 Issue 都要标注，而非只标首个。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    _seed_failed_issue(1740)
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRCreateBody, create_pull
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        return {"number": 9}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.vcs.api_client.VcsApiClient") as _cli:
+        _cli.return_value.list_issue_comments.return_value = []
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
+        create_pull("org", "issue1739", PRCreateBody(
+            title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
+            body="multi", related_issue_nums=[_NUM, 1740], auto_close_issues=True),
+            user={"id": 1, "username": "tester", "auth_type": "session_token"},
+            p="gitcode")
+    _commented = [c[0][0] for c in _cli.return_value.post_issue_comment.call_args_list]
+    assert _NUM in _commented and 1740 in _commented, _commented
+
+
+def test_merge_annotates_all_failed_issues():
+    """多 Issue PR 合入阻断：所有 qa 失败 Issue 都标注，409 列出全部。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    _seed_failed_issue(1740)
+    from fastapi import HTTPException
+
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRMergeBody, merge_pull
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        if method == "GET" and "/pulls/9" in url:
+            return {"number": 9, "body": "close #1739 #1740", "state": "open"}
+        return {"merged": True, "sha": "abc"}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.merge_gate.get_pull_base", return_value={"ref": "weekly-mys", "sha": "b"}), \
+            patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
+            patch("src.api.merge_gate.record_gate_log"), \
+            patch("src.vcs.api_client.VcsApiClient") as _cli:
+        _cli.return_value.list_issue_comments.return_value = []
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
+        with pytest.raises(HTTPException) as _exc:
+            merge_pull("org", "issue1739", 9, PRMergeBody(), user={
+                "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
+    assert _exc.value.status_code == 409
+    assert sorted(_exc.value.detail["gate"]["issues"]) == [_NUM, 1740]
+    _commented = [c[0][0] for c in _cli.return_value.post_issue_comment.call_args_list]
+    assert _NUM in _commented and 1740 in _commented, _commented
