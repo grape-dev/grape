@@ -765,19 +765,17 @@ def cancel_direct_task(seq: int) -> bool:
                     if tr:
                         _task = {"id": tr[0], "runtime_id": tr[1], "cwd": tr[2], "agent_type": tr[3]}
                         # 推断 backend
+                        from src.domains.runtime.engine.agent import _backend_for_engine, _kill_stale_engine
                         _backend = "opencode"
                         try:
                             with db_lock:
                                 c2 = db.cursor()
                                 c2.execute("SELECT name FROM agent_runtimes WHERE id=?", (tr[1],))
                                 rn = c2.fetchone()
-                            if rn and "hermes" in (rn[0] or "").lower():
-                                _backend = "hermes"
-                            elif rn and "codearts" in (rn[0] or "").lower():
-                                _backend = "codearts"
+                            if rn:
+                                _backend = _backend_for_engine(rn[0] or "")
                         except Exception:
                             pass
-                        from src.domains.runtime.engine.agent import _kill_stale_engine
                         _kill_stale_engine(_task, _backend)
                         cancelled = True
                 except Exception as e:

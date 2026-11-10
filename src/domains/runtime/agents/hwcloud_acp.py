@@ -271,10 +271,10 @@ class HwcloudACPBackend:
 
         # 注册到全局进程表（供 shutdown 时终止）—— 延迟导入避免循环引用
         try:
-            from src.domains.runtime.engine.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.engine.executor import _track_proc, _untrack_proc, _safe_terminate
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
-            _terminate_proc = lambda p, l: None
+            _safe_terminate = lambda p, l: None
 
         # TaskResourceStack: unified resource lifecycle (effect/dispose pattern)
         from src.domains.runtime.engine.resource_stack import TaskResourceStack
@@ -633,7 +633,7 @@ class HwcloudACPBackend:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                _terminate_proc(proc, f"{label}hwcloud ACP")
+                _safe_terminate(proc, f"{label}hwcloud ACP")
 
             reader_thread.join(timeout=3)
 
@@ -688,7 +688,7 @@ class HwcloudACPBackend:
             except Exception:
                 pass
             if proc.poll() is None:
-                _terminate_proc(proc, f"{label}hwcloud ACP")
+                _safe_terminate(proc, f"{label}hwcloud ACP")
             # iso_home 不清理：会话 sqlite 供 session/resume 长期续接（已确认决策），
             # settings.json 含明文 api_key 但目录已 0700。
             _res.dispose(kill_procs=False)

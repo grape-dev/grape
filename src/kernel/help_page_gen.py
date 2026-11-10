@@ -34,10 +34,12 @@ USAGE_ORDER = [
     "pipeline.md",
     "skills.md",
     "runtimes.md",
+    "atomcode.md",
     "ai-shell-devbridge-deploy.md",
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
+    "server-environment-variables.md",
 ]
 
 # 独立参考文档（首页独立入口，不归入使用文档或 API 文档）

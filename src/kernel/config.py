@@ -849,6 +849,7 @@ BWRAP_RO_ENGINE = {
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
+    "atomcode": ("~/.local", "~/.cargo/bin", "~/.nvm"),
     # hwcloud: 二进制在 ~/.local/bin（同 hermes），settings/会话由 OPENAGENT_CLI_CONFIG
     # 指到 ~/.cache/hwcloud-acp-homes/<cwd-hash>/（BWRAP_RW_ENGINE rw 挂载）。
     "hwcloud": ("~/.local",),
@@ -866,6 +867,7 @@ BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
     "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": (_hermes_home,),
+    "atomcode": (os.path.expanduser(os.environ.get("ATOMCODE_HOME") or "~/.atomcode"),),
     # hwcloud: 会话 sqlite + per-task settings.json 全在 ~/.cache/hwcloud-acp-homes/
     # （hwcloud_acp._task_home_root，按 cwd-hash 分片；sandbox 模块同 hermes overlay
     # 按 md5(cwd) 动态 rw-bind，这里是根目录兜底挂载）

@@ -58,6 +58,7 @@ _PROBE_COMMANDS = {
     "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
     "cursor": ["cursor", "run", "hello"],
     "dsh": ["dsh", "headless", "hello"],
+    "atomcode": ["atomcode", "-p", "Reply OK", "--ephemeral", "--no-tools"],
 }
 _PROBE_TIMEOUT = 30
 _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
@@ -1265,7 +1266,7 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
     """由引擎实例名推导执行后端——统一走 canonical_engine 查表（前缀最长匹配）。
 
     hermes-xxx → hermes；codearts-xxx → codearts；codex-xxx → codex；
-    aishell-dsh-xxx → aishell-dsh（新引擎，先于 aishell 前缀命中）；
+    atomcode-xxx → atomcode；aishell-dsh-xxx → aishell-dsh（新引擎，先于 aishell 前缀命中）；
     hwcloud-xxx / aishell-xxx → hwcloud（旧轨不变）；其余默认 opencode。
     """
     from src.domains.runtime.engine.instances import canonical_engine
@@ -1295,6 +1296,7 @@ def _scan_local_skills() -> list[dict]:
         "hermes": engine_skill_dirs("hermes"),
         "opencode": engine_skill_dirs("opencode"),
         "codearts": engine_skill_dirs("codearts"),
+        "atomcode": engine_skill_dirs("atomcode"),
         # hwcloud(AIShell)：~/.hwcloud/skills——修复引擎卡片 skills 列表全空
         # （扫描映射漏此引擎 → local_skills 上报无 entry → DB 空 → 前端空）
         "hwcloud": engine_skill_dirs("hwcloud"),
@@ -1366,6 +1368,7 @@ def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
     home = _os.path.expanduser("~")
     engine_dirs = {
         "hermes": [_os.path.join(home, ".hermes", "skills")],
+        "atomcode": [_os.path.join(_os.path.expanduser(_os.environ.get("ATOMCODE_HOME") or "~/.atomcode"), "skills")],
         "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
         "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
         # hwcloud(AIShell)：与 _scan_local_skills/engine_skill_dirs 对齐
@@ -1591,10 +1594,15 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
     按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。
 
-    Windows 用 taskkill /T /F（无 cwd 精确匹配，按 CommandLine 匹配）。"""
+    AtomCode 使用 executor 登记的进程与精确 cwd；其他引擎在 Windows 上按
+    CommandLine 匹配后使用 taskkill /T /F。"""
     from src.domains.runtime.engine.os_adapter import is_windows, find_process_by_cwd, kill_process_tree
     import subprocess, signal, time as _time
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
+    if backend == "atomcode":
+        from src.domains.runtime.agents.executor import terminate_task_agents
+        terminate_task_agents(backend, cwd)
+        return
     # hermes ACP 模式用 `hermes acp`，CLI 模式用 `hermes chat`；两个模式都匹配
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
@@ -1677,6 +1685,19 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
             log.warning(f"_kill_stale_engine({backend}, pattern={pattern}) failed: {e}")
     if not killed_any:
         log.info(f"_kill_stale_engine({backend}): no matching process found for cwd={cwd}")
+
+
+def _kill_stale_engine_safe(task: dict, backend: str = "opencode"):
+    """_kill_stale_engine 的容错包装：杀引擎失败只记日志，不向上抛。
+
+    Windows 下 taskkill /T /F 失败会抛 RuntimeError（executor._terminate_proc 新语义）。
+    该异常若从 worker 主循环的取消/超时路径逸出，会击穿 worker 进程——杀不掉引擎
+    不该让 worker 整体退出。调用方只需"尽力杀掉"，失败降级为日志。
+    """
+    try:
+        _kill_stale_engine(task, backend)
+    except Exception as e:
+        log.warning(f"_kill_stale_engine_safe({backend}, cwd={task.get('cwd')}) failed: {e}")
 
 
 def _fetch_skill_zip_by_key(obs_key: str, task_id: str = "") -> bytes | None:
@@ -2993,7 +3014,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         # PR 提交跳过（GitCode token 虽可用，但凭据已吊销说明设备已被管理员移除，
         # 不应继续产出——避免"代码合入但服务端状态脱节"）。
         log.error(f"task {tid}: credential revoked during execution, killing engine and aborting")
-        _kill_stale_engine(task, _backend_for_engine(engine_name))
+        _kill_stale_engine_safe(task, _backend_for_engine(engine_name))
         _res.dispose()
         _cleanup_task_workdir(task, env)
         raise
@@ -3435,7 +3456,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                     f"{_attempt}/{_retry_max + 1}, source={_timeout_src}), killing "
                                     f"child processes and failing" +
                                     (", will retry" if _will_retry else ""))
-                                _kill_stale_engine(t, _backend_for_engine(e))
+                                _kill_stale_engine_safe(t, _backend_for_engine(e))
                                 _result = None  # timeout → 重试或最终走 fail 路径
                             finally:
                                 # MR-2：task.execute span 收口（本轮执行结束，含超时路径）
@@ -3567,7 +3588,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             _task = active_task_objs.get(_tid)
                             log.warning(f"heartbeat: task {_tid} cancelled, killing engine")
                             if _task:
-                                _kill_stale_engine(_task, _backend_for_engine(_task.get("_engine_name", "")))
+                                _kill_stale_engine_safe(_task, _backend_for_engine(_task.get("_engine_name", "")))
                             active_sessions.discard(_sid)
                             active_tasks.pop(_tid, None)
                             active_task_objs.pop(_tid, None)

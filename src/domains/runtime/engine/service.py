@@ -1238,17 +1238,15 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                         c.execute("SELECT cwd, runtime_id FROM agent_tasks WHERE id=?", (_tid,))
                         _old = c.fetchone()
                         if _old:
+                            from src.domains.runtime.engine.agent import _backend_for_engine, _kill_stale_engine
                             _backend = "opencode"
                             try:
                                 c.execute("SELECT name FROM agent_runtimes WHERE id=?", (_old[1],))
                                 _rn = c.fetchone()
-                                if _rn and "hermes" in (_rn[0] or "").lower():
-                                    _backend = "hermes"
-                                elif _rn and "codearts" in (_rn[0] or "").lower():
-                                    _backend = "codearts"
+                                if _rn:
+                                    _backend = _backend_for_engine(_rn[0] or "")
                             except Exception:
                                 pass
-                            from src.domains.runtime.engine.agent import _kill_stale_engine
                             _kill_stale_engine({"cwd": _old[0], "id": _tid}, _backend)
                     except Exception as _ke:
                         log.warning(f"recover: kill stale engine failed for task {_tid}: {_ke}")

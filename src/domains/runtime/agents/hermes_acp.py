@@ -250,10 +250,10 @@ class HermesACPBackend:
 
         # 注册到全局进程表（供 shutdown 时终止）—— 延迟导入避免循环引用
         try:
-            from src.domains.runtime.engine.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.engine.executor import _track_proc, _untrack_proc, _safe_terminate
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
-            _terminate_proc = lambda p, l: None
+            _safe_terminate = lambda p, l: None
 
         # issue #416：stderr 尾采环形缓冲（崩溃栈在末尾，仅保留末尾 ≥2000 字节）
         try:
@@ -681,7 +681,7 @@ class HermesACPBackend:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                _terminate_proc(proc, f"{label}hermes ACP")
+                _safe_terminate(proc, f"{label}hermes ACP")
 
             reader_thread.join(timeout=3)
 
@@ -764,7 +764,7 @@ class HermesACPBackend:
             except Exception:
                 pass
             if proc.poll() is None:
-                _terminate_proc(proc, f"{label}hermes ACP")
+                _safe_terminate(proc, f"{label}hermes ACP")
             # 不再 dispose overlay 目录：iso_home 现在是稳定路径（基于 cwd hash），
             # state.db 需要持久化供下次 session/resume 使用（chat-ctx-fix §方向一）。
             # 只杀进程，不删目录。

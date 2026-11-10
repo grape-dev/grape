@@ -125,7 +125,7 @@ def check_optional_deps():
 
 def check_agent_cli():
     """4. Agent CLI 检查"""
-    clis = ["opencode", "codearts"]
+    clis = ["opencode", "codearts", "atomcode"]
     found = []
     missing = []
     for cli in clis:
@@ -140,7 +140,7 @@ def check_agent_cli():
     return CheckResult(
         "Agent CLI", "warn",
         f"未安装任何 Agent CLI ({', '.join(missing)})",
-        "npm install -g opencode 或 pip install codearts-cli"
+        "npm install -g opencode 或 pip install codearts-cli 或 npm install -g @atomgit.com/atomcode（基于 Rust）"
     )
 
 

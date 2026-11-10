@@ -174,7 +174,11 @@ pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 npm install -g opencode          # 基于 Node.js
 # 或
 pip install codearts-cli         # 基于 Python
+# 或安装 AtomCode
+npm install -g @atomgit.com/atomcode  # 基于 Rust，通过 npm 安装
 ```
+
+AtomCode 的模型配置、Worker 接入及会话续接版本要求见 [AtomCode 安装与使用](help/usage/atomcode.md)。
 
 ### 环境自检（可选）
 

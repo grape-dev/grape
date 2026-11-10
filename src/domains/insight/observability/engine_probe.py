@@ -22,6 +22,8 @@ _PROBE_COMMANDS = {
     "hermes": ["hermes", "chat", "-q", "hello", "--yolo", "-Q", "--source", "probe"],
     "codearts": ["codearts", "run", "hello"],
     "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
+    # AtomCode：ephemeral 不落会话，--no-tools 不执行工具；只验证 CLI 与模型认证可用
+    "atomcode": ["atomcode", "-p", "Reply OK", "--ephemeral", "--no-tools"],
 }
 
 _PROBE_TIMEOUT = 30  # 秒
