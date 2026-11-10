@@ -12,7 +12,7 @@ import sys
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from src.runtime.instances import canonical_engine, usage_retry_engine
+from src.domains.runtime.engine.instances import canonical_engine, usage_retry_engine
 
 
 def test_four_way_mapping():
@@ -36,7 +36,7 @@ def test_other_engines_unchanged():
 def test_longest_prefix_order_independent():
     # 表序无关：即便把 aishell 排在 aishell-dsh 前面（打乱 dict 顺序重建），结果不变
     import importlib
-    from src.runtime import instances
+    from src.domains.runtime.engine import instances
 
     saved = dict(instances.ENGINE_CANONICAL_PREFIXES)
     try:
@@ -59,7 +59,7 @@ def test_longest_prefix_order_independent():
 
 
 def test_backend_for_engine_same_table():
-    from src.runtime.agent import _backend_for_engine
+    from src.domains.runtime.engine.agent import _backend_for_engine
 
     assert _backend_for_engine("aishell-dsh-worker-1") == "aishell-dsh"
     assert _backend_for_engine("aishell-worker-1") == "hwcloud"
@@ -69,7 +69,7 @@ def test_backend_for_engine_same_table():
 
 
 def test_engine_type_of_same_table():
-    from src.api.routes.settings import _engine_type_of
+    from src.domains.mgmt.routes.settings import _engine_type_of
 
     assert _engine_type_of({"name": "aishell-dsh-worker-1"}) == "aishell-dsh"
     assert _engine_type_of({"instance_name": "aishell-dsh-node2"}) == "aishell-dsh"

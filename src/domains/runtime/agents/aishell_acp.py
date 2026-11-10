@@ -34,7 +34,7 @@ from typing import Generator
 log = logging.getLogger(__name__)
 
 # 复用 hwcloud_acp 的通用件（请求客户端 / 超时 / 辅助函数）
-from src.agent.hwcloud_acp import (  # noqa: E402
+from src.domains.runtime.agents.hwcloud_acp import (  # noqa: E402
     _ACPSimpleClient,
     _done_result,
     _extract_session_id,
@@ -162,7 +162,7 @@ class AishellDshACPBackend:
         label = f"{agent_label} " if agent_label else ""
         # CLI 定位统一走 find_cli（PATH 优先 + ~/.local/bin 兜底）——pip --user
         # 安装的 aishell 在 systemd 服务的精简 PATH 里不可见，纯 which 会漏（远端 Worker E2E 实证）
-        from src.runtime.os_adapter import find_cli as _find_cli
+        from src.domains.runtime.engine.os_adapter import find_cli as _find_cli
 
         agent_cmd = _find_cli(self.binary) or shutil.which(self.binary + ".cmd")
         if not agent_cmd:
@@ -191,12 +191,12 @@ class AishellDshACPBackend:
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
         try:
-            from src.agent.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _terminate_proc
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
             _terminate_proc = lambda p, l: None
 
-        from src.runtime.resource_stack import TaskResourceStack
+        from src.domains.runtime.engine.resource_stack import TaskResourceStack
         _res = TaskResourceStack(task_id="", cwd=cwd)
         _res.track_proc(proc)
 
@@ -471,7 +471,7 @@ class AishellDshACPBackend:
             log.info(f"{label}aishell-dsh ACP done: stopReason={stop_reason}")
 
             if stop_reason == "timeout" and not error_events:
-                from src.agent.failure_attribution import timeout_error_text
+                from src.domains.runtime.agents.failure_attribution import timeout_error_text
                 error_events.append(timeout_error_text(
                     _timeout_secs if _timeout_secs is not None else _GLOBAL_TIMEOUT,
                     "aishell-dsh ACP stopReason=timeout"))

@@ -598,7 +598,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
     # CLI 定位统一走 find_cli（PATH → 默认安装目录 → Uninstall 注册表 InstallLocation
     # 三层兜底）；裸 shutil.which 只是历史上 PATH 时期的后备，装在非默认目录的
     # AI Shell 会漏——与 aishell_acp.py 任务链同一寻路源。
-    from src.runtime.os_adapter import find_cli as _find_cli
+    from src.domains.runtime.engine.os_adapter import find_cli as _find_cli
     agent_cmd = cli_path or _find_cli("aishell")
     if not agent_cmd:
         return {"status": "fail", "latency": 0, "error": "aishell CLI not found"}
@@ -1268,13 +1268,13 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
     aishell-dsh-xxx → aishell-dsh（新引擎，先于 aishell 前缀命中）；
     hwcloud-xxx / aishell-xxx → hwcloud（旧轨不变）；其余默认 opencode。
     """
-    from src.runtime.instances import canonical_engine
+    from src.domains.runtime.engine.instances import canonical_engine
 
     return canonical_engine(engine_name)
 
 
 def _usage_retry_engine(engine_name: str | None) -> bool:
-    from src.runtime.instances import usage_retry_engine
+    from src.domains.runtime.engine.instances import usage_retry_engine
 
     return usage_retry_engine(engine_name)
 

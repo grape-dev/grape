@@ -138,7 +138,7 @@ class TestEngineSearchPaths:
             assert os.path.join("resources", "runtime", "cli", "bin") in paths[0]
             # find_cli 全链：PATH 落空 → 兜底路径存在即返回该 .cmd
             # （须与上面同作用域：registry mock 退出后 Linux 会走 winreg import）
-            with patch("src.runtime.os_adapter.which", return_value=""):
+            with patch("src.domains.runtime.engine.os_adapter.which", return_value=""):
                 with patch("os.path.isfile", return_value=True):
                     assert os_adapter.find_cli("aishell") == paths[0]
 
@@ -159,7 +159,7 @@ class TestEngineSearchPaths:
                 paths = os_adapter.engine_search_paths("aishell")
                 assert expected in paths
                 # 全链：默认路径不存在（isfile 仅对注册表候选为真）→ 命中注册表路径
-                with patch("src.runtime.os_adapter.which", return_value=""):
+                with patch("src.domains.runtime.engine.os_adapter.which", return_value=""):
                     with patch("os.path.isfile", side_effect=lambda p: p == expected):
                         assert os_adapter.find_cli("aishell") == expected
             # 注册表兜底只在 aishell 键上生效，其他引擎不查注册表

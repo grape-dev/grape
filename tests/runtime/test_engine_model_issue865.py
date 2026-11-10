@@ -174,7 +174,7 @@ class TestAishellDshModel:
         monkeypatch.setattr(builtins, "__import__", _no_yaml)
 
     def test_block_yaml_parses_agent_default_model(self, tmp_path, monkeypatch):
-        from src.runtime.engine_model import _aishell_dsh_model
+        from src.domains.runtime.engine.engine_model import _aishell_dsh_model
         home = self._write_profile(tmp_path, self._PROFILE)
         monkeypatch.setenv("AISHELL_HOME", str(home))
         got = _aishell_dsh_model()
@@ -183,28 +183,28 @@ class TestAishellDshModel:
         assert "INTERNAL_KEY" not in got and "internal.example" not in got
 
     def test_no_pyyaml_regex_fallback(self, tmp_path, monkeypatch):
-        from src.runtime.engine_model import _aishell_dsh_model
+        from src.domains.runtime.engine.engine_model import _aishell_dsh_model
         home = self._write_profile(tmp_path, self._PROFILE)
         monkeypatch.setenv("AISHELL_HOME", str(home))
         self._block_yaml(monkeypatch)
         assert _aishell_dsh_model() == "glm-5.3"
 
     def test_gbk_encoded_profile(self, tmp_path, monkeypatch):
-        from src.runtime.engine_model import _aishell_dsh_model
+        from src.domains.runtime.engine.engine_model import _aishell_dsh_model
         text = "# 中文注释：默认模型配置\n" + self._PROFILE
         home = self._write_profile(tmp_path, text.encode("gbk"))
         monkeypatch.setenv("AISHELL_HOME", str(home))
         assert _aishell_dsh_model() == "glm-5.3"
 
     def test_crlf_profile_regex_fallback(self, tmp_path, monkeypatch):
-        from src.runtime.engine_model import _aishell_dsh_model
+        from src.domains.runtime.engine.engine_model import _aishell_dsh_model
         home = self._write_profile(tmp_path, self._PROFILE.replace("\n", "\r\n"))
         monkeypatch.setenv("AISHELL_HOME", str(home))
         self._block_yaml(monkeypatch)
         assert _aishell_dsh_model() == "glm-5.3"
 
     def test_missing_profile_degrades_to_empty(self, tmp_path, monkeypatch):
-        from src.runtime.engine_model import _aishell_dsh_model
+        from src.domains.runtime.engine.engine_model import _aishell_dsh_model
         home = tmp_path / "empty"
         home.mkdir()
         monkeypatch.setenv("AISHELL_HOME", str(home))

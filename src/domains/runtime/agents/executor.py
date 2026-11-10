@@ -506,7 +506,7 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
     - 凭据设备预配置（D3/D4），grape 不注 key；模型路由 env AISHELL_DSH_MODEL 可选覆盖
     - 脱敏/占位符/技能路径复用与 hwcloud 相同的收口
     """
-    from src.agent.aishell_acp import AishellDshACPBackend
+    from src.domains.runtime.agents.aishell_acp import AishellDshACPBackend
 
     label = f"{agent_label} " if agent_label else ""
 
@@ -623,7 +623,7 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     # 正规部署修复应注册「只含 grape 启动器 shim 的专用目录」（不含 python/pip），见
     # plan 文档 §5 TODO；本注入与该修复可并存。
     try:
-        from src.runtime.os_adapter import default_install_dir
+        from src.domains.runtime.engine.os_adapter import default_install_dir
         _gbin = os.path.join(default_install_dir(), ".venv",
                              "Scripts" if os.name == "nt" else "bin")
         _gexe = "grape.exe" if os.name == "nt" else "grape"
