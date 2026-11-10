@@ -937,7 +937,14 @@ class ImEngine:
         scan_interval: float = 30.0,
     ) -> None:
         self.db_path = db_path
-        self.instance_id = instance_id or "im-engine-local"
+        # instance_id 必须逐实例唯一：固定名会让哈希环只剩一个节点，多实例互斥退化成
+        # 抢锁抖动（2026-11-10 四主滚动升级实证：四台同名 im-engine-local，35 个安装
+        # 只有 18 个拿到租约，其余 17 个无人建连）。留空则按 hostname-随机后缀生成。
+        if not instance_id:
+            from src.im.bot_lease import generate_instance_id
+            self.instance_id = generate_instance_id()
+        else:
+            self.instance_id = instance_id
         self._registry = registry
         self._lease_store = lease_store
         self._api_factory = api_factory
