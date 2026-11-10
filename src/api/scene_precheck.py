@@ -203,7 +203,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     skill_id = _node_skill_id(node)
     if skill_id:
         try:
-            from src.user.db import get_skill_by_id
+            from src.domains.mgmt.user.db import get_skill_by_id
             if get_skill_by_id(skill_id):
                 return True
         except Exception as e:
@@ -212,7 +212,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     if not skill_name:
         return False
     try:
-        from src.user.db import resolve_skill_id
+        from src.domains.mgmt.user.db import resolve_skill_id
         return bool(resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""))
     except Exception as e:
         log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")

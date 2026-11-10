@@ -409,7 +409,7 @@ def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
             else:
                 # 本地磁盘后端：一次 listdir 顶层目录 = 全部 issue 编号
                 from src.api.issues_center import _attach_base_dir
-                from src.user.db import get_browser_callback_url as _bcb
+                from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
                 _base_url = (_bcb() or "").rstrip("/")
                 base = _attach_base_dir(owner, rname, "")
                 if _os.path.isdir(base):

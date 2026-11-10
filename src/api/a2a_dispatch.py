@@ -108,7 +108,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     """
     try:
         from src.api.event_pipeline import is_plugin_mode
-        from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
+        from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
         if is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
             import asyncio as _aio
             from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
@@ -171,8 +171,8 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
         log.warning(f"A2A plugin event-driven path failed: {e}, falling back to legacy dispatch")
 
     # Legacy dispatch (also serves as fallback for plugin mode)
-    from src.runtime.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
-    from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+    from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+    from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
     # A2A 交办的场景来自 issue_state（智能推荐完成或用户手动选择已持久化）
     _a2a_scene, _a2a_scene_uid = "default", 0
     if issue_number:
@@ -200,7 +200,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
         return {"status": "failed", "seq": 0, "agent": agent_name, "error": f"no available engine for agent '{agent_name}' (repo={repository}): 目标引擎不可用，任务未派发，请按失败降级流程处理"}
     # Plugin 模式 + engine_id=0：非 direct 模式均走广播（queue_remote + auto）；仅 direct 走本机 direct
     from src.api.event_pipeline import is_plugin_mode as _is_plugin
-    from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
+    from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
     if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
         from src.api.event_pipeline import _enqueue_pipeline_task
         _be = backend or "opencode"
@@ -223,7 +223,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                     update_event_status(seq, "failed")
             _err541 = "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"
             try:
-                from src.runtime.engine_select import scene_dispatch_failure_reason
+                from src.domains.runtime.engine.engine_select import scene_dispatch_failure_reason
                 _err541 = scene_dispatch_failure_reason(
                     _a2a_scene, agent_name, repo_key=repo_key or "", user_id=_a2a_scene_uid) or _err541
             except Exception:

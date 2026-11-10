@@ -76,7 +76,7 @@ def _insert_event_row(c, repo_key: str, event_type: str, title: str, issue_id: s
     不 commit：由调用方统一提交，便于排队幂等「查重 + 插入」在同一事务内原子完成
     （Issue #1667 审查修复②）。
     """
-    from src.user.org_db import get_org_id_by_repo_key
+    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
     _org_id = get_org_id_by_repo_key(repo_key)
     _payload_json = json.dumps(payload or {})
     if idempotency_key:

@@ -74,7 +74,7 @@ def _store_refresh(repo_key: str, info: dict) -> None:
 
 def _fetch_gitcode_numbers(owner: str, repo: str, token: str) -> Optional[set[int]]:
     """分页拉取 GitCode issue 编号；仅在空页终止，短页不代表末页（防索引截断误删）。"""
-    from src.user.repo_manager import _req
+    from src.domains.mgmt.user.repo_manager import _req
 
     numbers: set[int] = set()
     page = 1
@@ -101,7 +101,7 @@ def _fetch_gitcode_numbers(owner: str, repo: str, token: str) -> Optional[set[in
 
 def _fetch_github_numbers(owner: str, repo: str, token: str) -> Optional[set[int]]:
     """分页拉取 GitHub issue 编号；仅在空页终止，短页不代表末页（防索引截断误删）。"""
-    from src.user.repo_manager import _github_req
+    from src.domains.mgmt.user.repo_manager import _github_req
 
     numbers: set[int] = set()
     page = 1
@@ -143,13 +143,13 @@ def vcs_issue_numbers(repo_key: str) -> Optional[frozenset[int]]:
     result: Optional[frozenset[int]] = None
     try:
         if provider == "github":
-            from src.user.db import get_github_token
+            from src.domains.mgmt.user.db import get_github_token
             token = get_github_token(repo_key=repo_key) or ""
             if token:
                 raw = _fetch_github_numbers(owner, repo, token)
                 result = frozenset(raw) if raw else None
         elif provider == "gitcode":
-            from src.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.user.db import get_repo_token_with_refresh
             token = get_repo_token_with_refresh(repo_key) or ""
             if token:
                 raw = _fetch_gitcode_numbers(owner, repo, token)

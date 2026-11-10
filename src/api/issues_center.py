@@ -2304,7 +2304,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
         if not _scene_for_precheck:
             try:
-                from src.user.db import get_repo_scene
+                from src.domains.mgmt.user.db import get_repo_scene
                 _scene_for_precheck = get_repo_scene(repo_key) or ""
             except Exception as _rs_err:
                 log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")

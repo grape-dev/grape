@@ -127,7 +127,7 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     回退 `server_base_url`，故与改造前 `_resolve_server_url` 返回值等价（向前兼容）。
     """
     try:
-        from src.user.db import get_business_api_url, get_business_api_url_explicit
+        from src.domains.mgmt.user.db import get_business_api_url, get_business_api_url_explicit
         # Spec 优先级：显式 task_business_api_url 优先于本机回环回退。
         explicit = get_business_api_url_explicit()
         if explicit:

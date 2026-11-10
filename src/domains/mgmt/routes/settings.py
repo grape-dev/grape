@@ -1158,7 +1158,7 @@ def _engine_type_of(rt: dict) -> str:
     n = (rt.get("instance_name") or rt.get("name") or "").lower()
     if not n:
         return ""
-    from src.runtime.instances import canonical_engine
+    from src.domains.runtime.engine.instances import canonical_engine
 
     c = canonical_engine(n)
     if c == "aishell-dsh":

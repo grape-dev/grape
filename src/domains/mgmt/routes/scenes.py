@@ -1972,7 +1972,7 @@ def _collect_scene_skill_scope_violations(nodes: list, repo_key: str, username: 
     skill.owner_id 历史上既存过数字 user_id 也存过 username，两种口径都比对。
     技能不在 skill 表（官方内置包形态）不计冲突（存量兼容，由派发侧 fail-fast 兜底）。
     """
-    from src.user.db import get_skill_scope_info
+    from src.domains.mgmt.user.db import get_skill_scope_info
     _self_marks = {m for m in (username or "", str(user_id or "")) if m}
     violations = []
     for node in nodes or []:
