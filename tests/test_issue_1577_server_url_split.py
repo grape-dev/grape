@@ -54,8 +54,10 @@ class TestResolveBusinessServerUrl:
         with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
+             patch("src.user.db.get_business_api_port", return_value=""), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
-             patch.object(prompt_builder, "_local_port", return_value="3456"):
+             patch.object(prompt_builder, "_local_port", return_value="3456"), \
+             patch.object(prompt_builder, "_probe_business_api", return_value=True):
             assert prompt_builder._resolve_business_server_url(3) == "http://127.0.0.1:3456"
 
     def test_local_runtime_respects_explicit_business_base(self):

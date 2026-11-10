@@ -5,5 +5,7 @@
   "browser_callback_url": "https://grape.example.com",
   "worker_connect_url": "https://worker.grape.example.com",
   "_comment_issue_1577": "Issue #1577 任务业务 API 基址（可选，未配置回退 server_base_url）：task_business_api_url=worker 任务内 grape 业务命令（issues/git-repo 等）所用基址，需指向主控业务 API；与 worker_connect_url（worker 回连/runtime 基址）解耦。",
-  "task_business_api_url": "https://grape.example.com"
+  "task_business_api_url": "https://grape.example.com",
+  "_comment_issue_1731": "Issue #1731 本机业务 API 端口（可选）：task_business_api_port=单机多进程部署时业务 API 端口（runtime 与业务 API 端口不同，如 runtime 8083 / 业务 8081），本机 runtime 分支优先用本端口探测业务端点；未配置回退 GRAPE_BUSINESS_PORT > GRAPE_PORT > GRAPE_MAIN_PORT > 3000。",
+  "task_business_api_port": 8081
 }

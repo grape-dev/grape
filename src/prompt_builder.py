@@ -1,5 +1,5 @@
 """Prompt 构建：角色定义、事件 prompt、飞书 prompt"""
-import json, os, re
+import json, os, re, threading, time, urllib.request
 from src.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
@@ -94,6 +94,111 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     return f"http://localhost:{_local_port()}"
 
 
+# ===== Issue #1731：业务 API 基址可用性探测 =====
+# 本机 runtime 场景下 GRAPE_PORT 可能指向 runtime 网关（如 8083），直接把它当作
+# 业务基址会让 issues/knowledge/repos 全量 404。返回回环候选前先探测业务端点，
+# 失败即跳过并回退 server_base_url。
+_BUSINESS_PROBE_DEFAULT_TIMEOUT = 1.0   # 秒；整体探测预算（health + openapi 共享）
+_BUSINESS_PROBE_DEFAULT_TTL = 60.0      # 秒；同一候选基址的进程内探测结果缓存
+_business_probe_cache: dict = {}
+_business_probe_lock = threading.Lock()
+
+
+def _business_probe_timeout() -> float:
+    """探测整体超时（秒），可由 GRAPE_BUSINESS_API_PROBE_TIMEOUT 覆盖。"""
+    try:
+        return max(0.05, float(os.environ.get("GRAPE_BUSINESS_API_PROBE_TIMEOUT")
+                               or _BUSINESS_PROBE_DEFAULT_TIMEOUT))
+    except (TypeError, ValueError):
+        return _BUSINESS_PROBE_DEFAULT_TIMEOUT
+
+
+def _business_probe_ttl() -> float:
+    """探测结果进程内缓存 TTL（秒），可由 GRAPE_BUSINESS_API_PROBE_TTL 覆盖。"""
+    try:
+        return max(0.0, float(os.environ.get("GRAPE_BUSINESS_API_PROBE_TTL")
+                              or _BUSINESS_PROBE_DEFAULT_TTL))
+    except (TypeError, ValueError):
+        return _BUSINESS_PROBE_DEFAULT_TTL
+
+
+def _business_port() -> str:
+    """本机业务 API 端口：显式配置 > GRAPE_BUSINESS_PORT > `_local_port()` 兼容默认。"""
+    try:
+        from src.user.db import get_business_api_port
+        port = get_business_api_port()
+        if port:
+            return port
+    except Exception:
+        pass
+    return _local_port()
+
+
+def _local_business_base() -> str:
+    """本机业务 API 基址候选（回环 + 业务端口）。"""
+    return f"http://127.0.0.1:{_business_port()}"
+
+
+def _http_get_json(url: str, timeout: float):
+    """GET 并解析 JSON；非 2xx / 超时 / 解析失败返回 None（探测失败不抛异常）。"""
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            if status != 200:
+                return None
+            raw = resp.read()
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _probe_health(base_url: str, timeout: float) -> bool:
+    """`/api/health` 探测：业务 API 返回 server=ok；runtime 网关无此端点即 404。"""
+    payload = _http_get_json(base_url.rstrip("/") + "/api/health", timeout)
+    return isinstance(payload, dict) and payload.get("server") == "ok"
+
+
+def _probe_openapi_family(base_url: str, timeout: float) -> bool:
+    """`/openapi.json` 端点族探测：含 issues / git-repo 视为业务 API。"""
+    payload = _http_get_json(base_url.rstrip("/") + "/openapi.json", timeout)
+    paths = (payload or {}).get("paths") if isinstance(payload, dict) else None
+    if not isinstance(paths, dict):
+        return False
+    return any("/issues" in p or "/git-repo" in p for p in paths)
+
+
+def _probe_business_api(base_url: str) -> bool:
+    """探测候选基址是否承载业务 API（health 优先，失败再探 openapi 端点族）。
+
+    结果按基址进程内缓存（TTL 默认 60s），同一任务/多次派发不重复探测。
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return False
+    now = time.monotonic()
+    ttl = _business_probe_ttl()
+    with _business_probe_lock:
+        cached = _business_probe_cache.get(base)
+        if cached and now - cached[0] < ttl:
+            return cached[1]
+    deadline = now + _business_probe_timeout()
+    ok = _probe_health(base, max(0.05, deadline - time.monotonic()))
+    if not ok:
+        remaining = deadline - time.monotonic()
+        if remaining >= 0.05:
+            ok = _probe_openapi_family(base, remaining)
+    with _business_probe_lock:
+        _business_probe_cache[base] = (time.monotonic(), ok)
+    return ok
+
+
+def _clear_business_probe_cache() -> None:
+    """清空探测缓存（测试与配置热更新场景用）。"""
+    with _business_probe_lock:
+        _business_probe_cache.clear()
+
+
 def _resolve_business_server_url(runtime_id: int = 0) -> str:
     """返回主控业务 API 基址（任务内 grape 业务命令用，GRAPE_SERVER_URL）。
 
@@ -101,29 +206,69 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     （issues / git-repo 等全量 261 端点），worker runtime / A2A 回连基址改由
     `RUNTIME_SERVER_URL`（见 `_resolve_server_url`）独立承载。
 
-    来源优先级（与实际分支一致）：`task_business_api_url` 显式配置
-    > 本机 runtime 直连 `127.0.0.1:{port}` > `server_base_url`。
-    即：显式配置永远优先；未显式配置时，本机 runtime 走本机回环（`server_base_url`
-    不参与），远程 runtime 用 `server_base_url`。单地址部署时 `worker_connect_url`
-    回退 `server_base_url`，故与改造前 `_resolve_server_url` 返回值等价（向前兼容）。
+    Issue #1731：本机 runtime 分支不再直接返回回环地址，而是对业务端口候选做
+    可用性探测；探测失败跳过并回退 `server_base_url`（再次探测），仍不可用则
+    末尾兜底并记 warning。来源优先级：`task_business_api_url` 显式配置（不探测）
+    > 本机业务端口（探测通过）> `server_base_url`（探测通过）> 兜底。
+    远程 runtime 沿用 `server_base_url`（`get_business_api_url`），行为不变。
+    单地址部署时 `worker_connect_url` 回退 `server_base_url`，与改造前等价。
     """
     try:
         from src.user.db import get_business_api_url, get_business_api_url_explicit
-        # Spec 优先级：显式 task_business_api_url 优先于本机回环回退。
+        # 显式配置体现运维意图，保持最高优先级且不做网络探测。
         explicit = get_business_api_url_explicit()
         if explicit:
             return explicit
-        public_url = get_business_api_url()
+        public_url = (get_business_api_url() or "").strip().rstrip("/")
         local = _runtime_is_local(runtime_id)
         if local is None:
             raise RuntimeError("runtime locality lookup failed")
         if local:
-            return f"http://127.0.0.1:{_local_port()}"
+            local_base = _local_business_base()
+            if _probe_business_api(local_base):
+                return local_base
+            try:
+                from src.config import log as _log
+                _log.info(
+                    "prompt_builder: local business API candidate unreachable "
+                    f"({local_base}); falling back to server_base_url")
+            except Exception:
+                pass
+            if public_url and _probe_business_api(public_url):
+                return public_url
+            try:
+                from src.config import log as _log
+                _log.warning(
+                    "prompt_builder: no reachable business API candidate "
+                    f"(local={local_base}, server_base_url={public_url or '-'}); "
+                    "falling back to server_base_url")
+            except Exception:
+                pass
+            return public_url or local_base
         return public_url
     except Exception:
         pass
     # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
     return f"http://localhost:{_local_port()}"
+
+
+def _business_server_url_source(url: str, runtime_id: int = 0) -> str:
+    """推导业务基址命中来源分支（仅用于审计日志，不做额外网络探测）。"""
+    try:
+        from src.user.db import get_business_api_url, get_business_api_url_explicit
+        _url = (url or "").rstrip("/")
+        explicit = (get_business_api_url_explicit() or "").rstrip("/")
+        if explicit and _url == explicit:
+            return "explicit_config"
+        if _runtime_is_local(runtime_id) is False:
+            return "server_base_url"
+        if _url == _local_business_base():
+            return "local_business_port"
+        if _url == (get_business_api_url() or "").rstrip("/"):
+            return "server_base_url"
+        return "exception_fallback"
+    except Exception:
+        return "unknown"
 
 
 def _apply_server_url_placeholders(text: str, runtime_id: int = 0) -> str:
@@ -143,10 +288,24 @@ def resolve_task_server_env(runtime_id: int = 0) -> dict:
 
     - `GRAPE_SERVER_URL`：主控业务 API 基址
     - `RUNTIME_SERVER_URL`：worker runtime / A2A 回连基址
+
+    Issue #1731：注入结果写审计日志（最终地址 + 命中来源分支，不含 token），
+    便于运维定位基址错配。
     """
+    business_url = _resolve_business_server_url(runtime_id)
+    runtime_url = _resolve_server_url(runtime_id)
+    try:
+        from src.config import log as _log
+        _log.info(
+            "task server env resolved: "
+            f"GRAPE_SERVER_URL={business_url} "
+            f"(source={_business_server_url_source(business_url, runtime_id)}); "
+            f"RUNTIME_SERVER_URL={runtime_url}")
+    except Exception:
+        pass
     return {
-        "GRAPE_SERVER_URL": _resolve_business_server_url(runtime_id),
-        "RUNTIME_SERVER_URL": _resolve_server_url(runtime_id),
+        "GRAPE_SERVER_URL": business_url,
+        "RUNTIME_SERVER_URL": runtime_url,
     }
 
 

@@ -4873,6 +4873,30 @@ def get_business_api_url() -> str:
     return get_server_base_url()
 
 
+def get_business_api_port() -> str:
+    """本机业务 API 端口（单机多进程部署时与 runtime 端口解耦，Issue #1731）。
+
+    优先 task_business_api_port（server-config.json > meta），其次环境变量
+    `GRAPE_BUSINESS_PORT`；未配置返回空串，由调用方回退 `_local_port()` 兼容默认
+    （GRAPE_PORT > GRAPE_MAIN_PORT > 3000）。runtime 端口可能指向 runtime 网关
+    （如 8083）而非业务 API（如 8081），故业务端口需独立配置。
+    """
+    try:
+        from src.config import read_server_config
+        _v = str((read_server_config() or {}).get("task_business_api_port") or "").strip()
+        if _v:
+            return _v
+    except Exception:
+        pass
+    try:
+        _v = str(get_meta_value("task_business_api_port") or "").strip()
+        if _v:
+            return _v
+    except Exception:
+        pass
+    return str(os.environ.get("GRAPE_BUSINESS_PORT") or "").strip()
+
+
 def _split_url_configured_value(key: str) -> str:
     """读取拆分配置项（server-config.json > meta），空串表示未配置。
 
