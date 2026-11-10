@@ -9,6 +9,7 @@
 - 建 PR 在 qa fail 时强制 auto_close_issues=false；
 - 合入 PR 在 qa fail 时 409 阻断。
 """
+import json
 import os
 from unittest.mock import patch
 
@@ -904,3 +905,129 @@ def test_annotation_cache_is_lru_and_bounded():
     finally:
         qa_gate._ANNOTATED_MAX = _orig_max
         qa_gate._annotated.clear()
+
+
+# ===================== 复审补充（PR #1094 round 9：真实 qa 结论） =====================
+
+def test_classify_qa_conclusion_real_qa_summaries_are_fail():
+    """本 Issue 真实 qa 事件 result：项数汇总型失败结论必须判 fail（AC1 不可绕过）。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _real_fail_results = [
+        # seq 62266
+        "Standards: 发现 3 项（merge fail-open 失效、标注去重仅进程内、门禁样板重复）；"
+        "Spec: 发现 5 项（cancelled 未判 fail、合入仅读 body、未按同一流水线过滤、"
+        "结论文本双向误判、验收断言缺失）；merge-danger: door=two-way / blast radius 大。",
+        # seq 62328
+        "Standards: 5 项（2 建议/3 判断项，最差提交粒度）；"
+        "Spec: 4 项需修复（最差 GitHub 自动关闭旁路）；merge-danger: two-way / blast radius 大",
+        # seq 62367（缺陷描述里出现英文 pass，不得判通过）
+        "Standards: 3 项(2 判断项/1 低，样板重复)；"
+        "Spec: 3 项(最差：中文否定式误判 pass 绕过门禁 + GitHub body Closes 旁路)；"
+        "merge-danger: two-way/large blast radius",
+        # seq 63140（违反/越界，无“失败”字面）
+        "Standards 3 项（最差：变基后 23/32 文件为非本 Issue 变更，违反 CONTRIBUTING §2.2/§5）；"
+        "Spec 4 项（最差：变基导致范围越界把 #1635/#1668/#1721 带入 weekly-mys；"
+        "GitHub qa pass 路径由 Closes 降级 Related 改变正常关闭语义）；"
+        "merge-danger: door=one-way / blast radius 大",
+        # seq 63326
+        "Standards 3 项（最差：GitHub auto_close 覆盖显式入参）；"
+        "Spec 3 项（最差：未全部通过/未达到通过标准等句式误判 pass，绕过门禁）；"
+        "merge-danger: door=two-way / blast radius 大",
+        # seq 63344
+        "Standards: 0 硬违规（2 判断项）；Spec: 2 项（高：未达到 100% 通过率/测试未全通过 "
+        "fail→pass；中：后置否定 pass→fail）；merge-danger: door two-way / blast radius 大",
+        # seq 63385
+        "Standards: 0 硬违规（1 低判断项）；Spec: 2 项（高：中文通过率非100%判 pass；"
+        "中高：英文部分否定/失败名词漏判）；merge-danger: two-way / #1739 相关 9 文件",
+    ]
+    for _case in _real_fail_results:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+
+
+def test_classify_qa_conclusion_real_pass_summary_stays_pass():
+    """项数为 0 / 明确通过的真实汇总结论仍判 pass（不得误伤 AC3）。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion(
+        "completed",
+        "Standards: 0 硬违规；Spec: 0 项；结论：通过；merge-danger: none") == "pass"
+    assert classify_qa_conclusion("completed", "Spec: 0 项需修复；结论：通过") == "pass"
+
+
+def test_classify_qa_conclusion_english_quantifier_negation_is_fail():
+    """英文量词否定（none/no/0 ... passed / not all of them passed）必须判 fail。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _fail_cases = [
+        "none of the tests passed", "no tests passed", "0 tests passed",
+        "not all of them passed", "not all of them have passed",
+        "not all of these tests passed",
+    ]
+    for _case in _fail_cases:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+    assert classify_qa_conclusion("completed", "all of them passed") == "pass"
+    assert classify_qa_conclusion("completed", "all of the tests have passed") == "pass"
+
+
+def test_classify_qa_conclusion_zero_failure_rate_is_pass():
+    """失败率为 0 / 失败数为 0 表示全量通过，不得误判 fail（AC3）。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _pass_cases = [
+        "失败率为0", "失败率为 0%", "失败率0%", "失败数为 0", "0% 的失败率",
+    ]
+    for _case in _pass_cases:
+        assert classify_qa_conclusion("completed", _case) == "pass", _case
+    assert classify_qa_conclusion("completed", "失败率为 20%") == "fail"
+    assert classify_qa_conclusion("completed", "失败率为 0%，但有 3 项阻塞") == "fail"
+
+
+def test_qa_gate_prefers_structured_conclusion_over_result_text():
+    """优先读取事件归档结构化 conclusion：result 显示通过、结构化结论为失败时仍须阻断。"""
+    _clear_annotation_cache()
+    from src.api import qa_gate
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result, "
+            "scene_id, structured_output) VALUES (?,?,?,?,?,?,?,?)",
+            (_REPO, f"#{_NUM}", "a2a_event", "qa", "completed", "全部通过", "",
+             json.dumps({"conclusion": "Spec: 2 项需修复（最差：真实结论未被识别）",
+                         "next_step": "a2a_coding"}, ensure_ascii=False)))
+        db.commit()
+    info = qa_gate.qa_gate_check(_REPO, _NUM)
+    assert info["blocked"] is True
+    assert info["conclusion"] == "fail"
+
+
+def test_qa_gate_uses_structured_next_step_when_conclusion_empty():
+    """结构化 conclusion 为空时，next_step=a2a_coding 表示需修复，兜底判 fail。"""
+    _clear_annotation_cache()
+    from src.api import qa_gate
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result, "
+            "scene_id, structured_output) VALUES (?,?,?,?,?,?,?,?)",
+            (_REPO, f"#{_NUM}", "a2a_event", "qa", "completed", "", "",
+             json.dumps({"next_step": "a2a_coding"}, ensure_ascii=False)))
+        db.commit()
+    info = qa_gate.qa_gate_check(_REPO, _NUM)
+    assert info["blocked"] is True
+
+
+def test_qa_gate_structured_pass_does_not_block():
+    """结构化结论为通过（Spec 0 项）时正常放行。"""
+    _clear_annotation_cache()
+    from src.api import qa_gate
+    _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, result, "
+            "scene_id, structured_output) VALUES (?,?,?,?,?,?,?,?)",
+            (_REPO, f"#{_NUM}", "a2a_event", "qa", "completed", "", "",
+             json.dumps({"conclusion": "Standards: 0 硬违规；Spec: 0 项；结论：通过",
+                         "next_step": "done"}, ensure_ascii=False)))
+        db.commit()
+    info = qa_gate.qa_gate_check(_REPO, _NUM)
+    assert info["blocked"] is False
