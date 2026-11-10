@@ -14,10 +14,13 @@
 - `build_fold_context_error(idempotency_key, missing_fields)`：错误体含 idempotency_key、缺失清单、schema 示例、hint。
 
 ### 2. `src/api/routes/webhook.py::a2a_endpoint`
-- 幂等键格式校验之后、跨场景/事件创建之前插入折叠任务守卫。
+- 折叠任务 context 在幂等键格式校验后先归一为字符串；四要素守卫放在鉴权与
+  `find_event_by_idempotency_key` 幂等命中短路之后、事件创建之前，保证已存在事件
+  同键重试仍返回已有事件。
 - 命中折叠任务且四要素缺失：
   - 默认 `HTTPException(400, detail=build_fold_context_error(...))`；
-  - 降级模式 `log.warning` 留痕（含 task 标识与 idempotency_key）后放行。
+  - 降级模式放行，拒绝/降级均输出 `a2a_fold_context_event=` 结构化 JSON 告警事件
+    （含 task 标识、idempotency_key、缺失字段、仓库与单号）。
 - 折叠任务的非字符串 context 归一为 JSON 字符串，保证下游 `context[:500]` 与去重键逻辑不变。
 - 非折叠任务不进入守卫，payload 结构与幂等语义保持原样。
 
@@ -28,7 +31,7 @@
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | 空 context 处理 | 默认 400 + 配置可降级 | 折叠任务误落点是实质伤害；灰度期可降级避免误伤 |
-| 判定位置 | 幂等键格式校验后、事件创建前 | 纯读判断，不写库不改幂等键链路 |
+| 判定位置 | 幂等命中短路后、事件创建前 | 纯读判断；已存在 fold 事件同键重试不得被 context 误判 400 |
 | 判定来源 | idempotency_key 单源函数 | 端点仅可见 payload 与幂等键，集中一处便于演进 |
 | context 形态 | 文本行字段名 + 结构化 dict/JSON | 人读与机器校验兼顾，顶层 payload 结构不变 |
 

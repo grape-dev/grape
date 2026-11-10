@@ -20,7 +20,8 @@ A2A 端点对空/缺项 context 做兜底拦截，承接方无需从 idempotency
 - sweeper 折叠算法重构；coding-runbook 段落（属 grape-skills 侧资产）。
 
 ## 验收标准
-- [x] 折叠任务 context 非空且四要素齐全，承接方仅凭 context 即可确定落点。
-- [x] 空/缺项 context 被 400 拦截，或降级时产生含 task 标识与 idempotency_key 的告警。
-- [x] 非折叠任务同仓同键重复请求仍返回已有事件、不重复派发。
+- [x] 折叠任务 context 四要素齐全时放行，入库 context 保留四要素——本仓范围可验证；
+      「承接方仅凭 context 即可确定落点」属 sweeper-v2 承接链路，不在本仓验证范围。
+- [x] 空/缺项 context 被 400 拦截；降级时输出含 task 标识与 idempotency_key 的结构化告警事件。
+- [x] 已存在 fold 事件同键重试返回已有事件（守卫位于幂等命中短路之后）；非折叠任务同仓同键重复请求仍返回已有事件、不重复派发。
 - [x] 判定逻辑单源，端点与测试共用；新增测试通过且现有测试全绿。
