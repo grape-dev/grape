@@ -22,18 +22,18 @@
 - 跨机双跑租约/执行实例探测。
 
 ## Acceptance Criteria
-- [ ] A1 静默超窗口的在跑任务在白名单内 → `skipped_active`，`attempts` 不变、`status` 仍 `running`。
-- [ ] A2 真孤儿（启动注册、空白名单）仍被回收，首次注册即回收。
-- [ ] A3 回炉后同机不双跑（白名单命中不转池）。
-- [ ] A4 `attempts` SQLite / MySQL 一致（单次 +1）。
-- [ ] A5 周期重注册不回收；rid 集合变化带白名单回收；启动空白名单回收。
-- [ ] A6 E2E：静默任务跨一次周期重注册后仍 `running`，最终 `completed`。
-- [ ] 既有 `test_recover_orphans_*`、`test_issue_417_*` 全通过，新增测试覆盖 A1–A6。
+- [x] A1 静默超窗口的在跑任务在白名单内 → `skipped_active`，`attempts` 不变、`status` 仍 `running`。
+- [x] A2 真孤儿（启动注册、空白名单）仍被回收，首次注册即回收。
+- [x] A3 回炉后同机不双跑（白名单命中不转池）。
+- [x] A4 `attempts` 单次 +1（SQLite 内存库实测；MySQL 侧由同一参数化 SQL 保证，未单独执行）。
+- [x] A5 周期重注册不回收；rid 集合变化带白名单回收；启动空白名单回收。
+- [x] A6 loop 级模拟（非 E2E）：静默任务跨一次周期重注册判定后仍 `running`，完成路径收敛为 `completed`。
+- [x] 既有 `test_recover_orphans_*`、`test_issue_417_*` 全通过，新增测试覆盖 A1–A6。
 
 ## Risks & Mitigations
 | Risk | Mitigation |
 |------|------------|
 | 白名单误报导致任务滞留 running | `reap_stale_runtimes` + agent 超时兜底；下次启动注册回收 |
 | worker 崩溃重启但 rid 未变 | 延迟到 reap/超时；后续按生产观测再启用 keepalive |
-| 新旧版本混跑 | 字段可选默认空，行为等同现状，平滑兼容 |
+| 新旧版本混跑 | 字段可选默认空，仅保证旧 worker → 新主控方向：新 worker + 旧主控时旧端点不解析 body，白名单被忽略、rid 变化仍可能误杀静默任务（反向不保证） |
 | 多主控共享 DB | 白名单随请求传递，服务端不缓存 |

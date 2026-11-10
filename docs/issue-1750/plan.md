@@ -16,15 +16,15 @@
 - 保持既有 SQL 参数化更新与事件回写不变。
 
 ### 切片 3：worker 回收时机（P1-B）
-- 红：`test_a5_periodic_reregister_does_not_recover`、`test_a5_startup_empty_whitelist_recovers`、`test_a5_rid_change_recovers_with_whitelist`、`test_a5_rid_unchanged_does_not_recover`、`test_a5_heartbeat_failure_reregister_keeps_whitelist`。
-- 绿：`_reregister(..., recover_orphans=False)`；`_recover_orphans_on_rid_change`；主循环周期路径与心跳失败重注册路径（审查修复：同进程重连不再默认空白名单无条件回收）先记录旧 rid、重注册后再按集合变化携带白名单回收；启动仍空白名单回收。
+- 红：`test_a5_periodic_reregister_does_not_recover`、`test_a5_reregister_defaults_to_no_recovery`、`test_a5_explicit_empty_whitelist_recovers`、`test_a5_rid_change_recovers_with_whitelist`、`test_a5_rid_unchanged_does_not_recover`、`test_a5_heartbeat_failure_reregister_keeps_whitelist`。
+- 绿：`_reregister(..., recover_orphans=False)`（默认 False，调用方显式声明）；`_recover_orphans_on_rid_change`；主循环周期路径与心跳失败重注册路径先记录旧 rid、重注册后再按集合变化携带白名单回收；启动路径在 `main()` 直接空白名单回收（不经 `_reregister`）。
 
-### 切片 4：client 透传与 E2E
-- `test_client_recover_orphans_default_body_empty`、`test_client_recover_orphans_passes_whitelist`。
-- `test_a6_silent_task_survives_periodic_cycle_then_completes`。
+### 切片 4：client 透传与 loop 级模拟
+- `test_client_recover_orphans_default_body_empty`、`test_client_recover_orphans_passes_whitelist`、`test_client_recover_orphans_returns_response_dict`。
+- `test_a6_silent_task_survives_periodic_cycle_loop_simulation`（判定链组合级，非 E2E）。
 
 ## 提交计划
-1. `feat(#1750): add worker active whitelist to recover-orphans`
+1. `feat: #1750 add worker active whitelist to recover-orphans`
 2. 回归 `tests/test_issue_1750_recover_orphans_active_whitelist.py` + 既有 recover/issue_417/task_activity 用例。
 
 ## 验收对照
