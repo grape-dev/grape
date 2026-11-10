@@ -552,3 +552,68 @@ def test_merge_annotates_all_failed_issues():
     assert sorted(_exc.value.detail["gate"]["issues"]) == [_NUM, 1740]
     _commented = [c[0][0] for c in _cli.return_value.post_issue_comment.call_args_list]
     assert _NUM in _commented and 1740 in _commented, _commented
+
+
+# ===================== 复审补充（PR #1094 round 4） =====================
+
+def test_classify_qa_conclusion_chinese_negated_pass_is_fail():
+    """中文否定式通过（没有/没/未/不）不得被“通过”吞成 pass。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("completed", "没有通过测试") == "fail"
+    assert classify_qa_conclusion("completed", "没通过") == "fail"
+    assert classify_qa_conclusion("completed", "没有通过") == "fail"
+    assert classify_qa_conclusion("completed", "未通过") == "fail"
+    assert classify_qa_conclusion("completed", "不通过") == "fail"
+    assert classify_qa_conclusion("completed", "无法通过") == "fail"
+
+
+def test_classify_qa_conclusion_chinese_trailing_negation():
+    """中文后置否定（阻塞为零 / 阻塞 0 / 无不通过项）不得误判 fail。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    assert classify_qa_conclusion("completed", "阻塞为零") != "fail"
+    assert classify_qa_conclusion("completed", "阻塞 0") != "fail"
+    assert classify_qa_conclusion("completed", "无不通过项") != "fail"
+    assert classify_qa_conclusion("completed", "阻塞 1 项") == "fail"
+    assert classify_qa_conclusion("completed", "阻断: 0 项") != "fail"
+
+
+def test_github_create_pull_strips_caller_closes_when_auto_close_off():
+    """调用方 body 自带 Closes #N 时，auto_close=false 必须清除并降级为 Related。"""
+    from src.vcs.providers import translate_inbound
+    payload = translate_inbound("github", "pulls", "create", {
+        "title": "t", "head": "h", "base": "b", "body": "Closes #12",
+        "related_issue_nums": [12], "auto_close_issues": False,
+    }, {"owner_repo": "org/repo"})
+    assert "Closes #12" not in payload["body"]
+    assert "Related to #12" in payload["body"]
+    payload2 = translate_inbound("github", "pulls", "create", {
+        "title": "t", "head": "h", "base": "b", "body": "Closes #12",
+        "related_issue_nums": [12], "auto_close_issues": True,
+    }, {"owner_repo": "org/repo"})
+    assert payload2["body"] == "Closes #12"
+
+
+def test_create_pull_gates_and_annotates_when_auto_close_default_false():
+    """默认 auto_close_issues=false 时仍须校验并标注 QA 失败（AC1/AC2）。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRCreateBody, create_pull
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        return {"number": 9}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.vcs.api_client.VcsApiClient") as _cli:
+        _cli.return_value.list_issue_comments.return_value = []
+        _cli.return_value.post_issue_comment.return_value = {"id": 1}
+        create_pull("org", "issue1739", PRCreateBody(
+            title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
+            body="multi", related_issue_nums=[_NUM]),
+            user={"id": 1, "username": "tester", "auth_type": "session_token"},
+            p="gitcode")
+    _cli.return_value.post_issue_comment.assert_called_once()
+    _comment = _cli.return_value.post_issue_comment.call_args[0][1]
+    assert "QA 未通过" in _comment
