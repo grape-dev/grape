@@ -5,7 +5,8 @@
   * mode=time desc：PR 伪卡片按 created_at 与真实 Issue 混排，最新在最前
   * mode=time asc：整体反转，PR 位置同步
   * mode=default：状态分组正确、组内按时间，PR 与同状态 Issue 混排
-  * per_page>0：PR 卡仅混入第 1 页，total / has_more 口径不变
+  * per_page>0：分页下 total 含 PR 卡、逐页无重复无丢失（PR 卡并入统一
+    LIMIT/OFFSET 窗口，可跨页出现；本用例的 PR 卡恰为最新一条，故落在第 1 页）
 - 流水线页（GET /api/pipeline/{o}/{r}）：PR#N 记录按 raw_issue_id 的真实最大 seq
   参与倒序混排（场景过滤后的场景详情页数据同源自动一致）。
 """
@@ -145,7 +146,7 @@ class TestIssue1816PrCardOrdering:
         assert seq == [7201, 72, 7202, 73, 7203], seq
         assert len([it for it in d["issues"] if it.get("is_pr_event")]) == 2
 
-    def test_paged_pr_card_only_in_first_page_total_unchanged(self):
+    def test_paged_total_includes_pr_cards_no_duplicate_no_loss(self):
         self._mk_issue(7301, "processing", "2026-10-01 10:00:00")
         self._mk_issue(7302, "processing", "2026-10-02 10:00:00")
         self._mk_issue(7303, "processing", "2026-10-03 10:00:00")
@@ -154,7 +155,8 @@ class TestIssue1816PrCardOrdering:
         d1 = self._get_issues("?mode=time&sort_order=desc&per_page=2&page=1").json()
         assert d1["total"] == 4
         assert d1["has_more"] is True
-        assert any(it.get("is_pr_event") for it in d1["issues"]), "最新 PR 卡应在第 1 页"
+        # 本用例中 PR 卡恰为最新一条，落在第 1 页；分页契约本身允许 PR 卡跨页出现
+        assert any(it.get("is_pr_event") for it in d1["issues"]), "本用例 PR 卡应出现在第 1 页"
 
         seen = []
         pg = 1

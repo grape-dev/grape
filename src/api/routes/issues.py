@@ -2447,9 +2447,9 @@ def list_repo_issues(owner: str, repo: str,
                 it["attachments"] = _att
             it["attachments_count"] = len(_att)
 
-    # PR 订阅事件伪卡片混入（Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
+    # PR 订阅事件伪卡片混入。Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
     # Issue #1816：非分页（线上全量）路径不再整块追加到末尾，PR 伪卡片与真实 Issue
-    # 同键合并重排，复用 _merge_sort_items 与 SQL/分页路径同源排序口径）
+    # 同键合并重排，复用 _merge_sort_items 与 SQL/分页路径同源排序口径。
     if per_page > 0:
         issues.extend(_page_pr)
     else:
