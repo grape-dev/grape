@@ -62,11 +62,9 @@ def test_1564_user_scope_rejected_in_repo_scope():
         {"id": "n4", "tag": "issue", "skill": mine, "enabled": False},  # 停用节点不校验
     ]
     try:
-        repo_v = _collect_scene_skill_scope_violations(
-            nodes, repo, username="alice", user_id="1", allow_own_user=True)
+        repo_v = _collect_scene_skill_scope_violations(nodes, repo)
         assert sorted(v["node_id"] for v in repo_v) == ["n1", "n2"], repo_v
-        market_v = _collect_scene_skill_scope_violations(
-            nodes, repo, username="alice", user_id="1", allow_own_user=False)
+        market_v = _collect_scene_skill_scope_violations(nodes, repo)
         assert sorted(v["node_id"] for v in market_v) == ["n1", "n2"], market_v
         assert market_v[0]["expected_scope"] == "repo"
         assert market_v[0]["actual_scope"] == "user"

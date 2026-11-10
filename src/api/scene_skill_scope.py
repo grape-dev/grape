@@ -38,6 +38,10 @@ def _node_label(node: dict) -> str:
     return str(node.get("tag") or node.get("id") or "").strip()
 
 
+def _node_role(node: dict) -> str:
+    return str(node.get("id") or node.get("tag") or "").strip()
+
+
 def _result(node: dict, expected_scope: str, *, ok: bool, skill: str = "",
             skill_id: int = 0, actual_scope: str = "", reason: str = "",
             source: str = "", owner_id: str = "",
@@ -89,8 +93,9 @@ def skill_agent_type_by_name(skill_name: str, repo_key: str = "") -> str:
         with db_lock:
             row = db.cursor().execute(
                 "SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1 "
-                "ORDER BY CASE scope WHEN 'repo' THEN 0 WHEN 'official' THEN 1 ELSE 2 END "
-                "LIMIT 1", (skill_name,)).fetchone()
+                "ORDER BY CASE WHEN scope='repo' AND owner_id=? THEN 0 "
+                "WHEN scope='official' THEN 1 WHEN scope='repo' THEN 2 ELSE 3 END "
+                "LIMIT 1", (skill_name, repo_key or "")).fetchone()
         return (row[0] or "") if row else ""
     except Exception as e:
         log.warning(f"scene_skill_scope: resolve agent_type failed: {e}")
@@ -127,11 +132,20 @@ def rebind_candidates(skill_name: str, repo_key: str, agent_type: str = "",
         return []
 
 
+def format_rebind_hint(candidates: list | None,
+                       fallback: str = "请改用 repo/official 级技能") -> str:
+    """Human-readable re-bind guidance shared by save precheck and dispatch."""
+    names = ", ".join(
+        f"{c.get('skill_name')}({c.get('scope')})"
+        for c in (candidates or []) if isinstance(c, dict))
+    return f"可改绑为：{names}" if names else fallback
+
+
 def _mismatch(node: dict, expected_scope: str, skill: str, actual_scope: str,
               *, skill_id: int = 0, owner_id: str = "", source: str = "",
               reason: str = "", repo_key: str = "") -> dict:
     candidates = rebind_candidates(
-        skill, repo_key, agent_type=_node_label(node))
+        skill, repo_key, agent_type=_node_role(node))
     return _result(
         node, expected_scope, ok=False, skill=skill, skill_id=skill_id,
         actual_scope=actual_scope, reason=reason, source=source,
@@ -148,8 +162,7 @@ def _scope_mismatch_reason(skill: str, actual_scope: str,
 
 
 def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
-             caller: dict | None = None, *, scene_id: str = "",
-             on_error: str = DEFAULT_ERROR_POLICY,
+             *, scene_id: str = "", on_error: str = DEFAULT_ERROR_POLICY,
              cache: dict | None = None) -> dict:
     """Judge whether a scene node may reference its skill under scene scope.
 
@@ -158,8 +171,8 @@ def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
 
     ``source`` records the decision provenance: ``empty`` / ``disabled`` /
     ``skill_id`` / ``name`` / ``unresolved`` / ``db_error`` /
-    ``invalid_skill_id``.  ``caller`` is accepted for future explicit caller
-    dimensions but never grants a user-scope exception (fixed rule).
+    ``invalid_skill_id``.  The caller is deliberately not part of the rule:
+    no owner/caller exception exists for user-scope skills.
     """
     node = node if isinstance(node, dict) else {}
     expected_scope = scene_scope or SCENE_SCOPE_REPO
@@ -255,10 +268,10 @@ def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
 
 
 def evaluate_many(nodes, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
-                  caller: dict | None = None, *, scene_id: str = "",
+                  *, scene_id: str = "",
                   on_error: str = DEFAULT_ERROR_POLICY) -> list:
     """Evaluate a batch of nodes sharing one lookup cache."""
     cache: dict = {}
-    return [evaluate(node, repo_key, scene_scope, caller, scene_id=scene_id,
+    return [evaluate(node, repo_key, scene_scope, scene_id=scene_id,
                      on_error=on_error, cache=cache)
             for node in (nodes or [])]

@@ -1693,24 +1693,17 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
             rows = [(r[0], r[1], "", r[2]) for r in c.fetchall()]
     violations = []
     conflict_scenes = set()
-    _suggestion_cache = {}
     for scene_id, name, display_name, nodes_json in rows:
         try:
             nodes = json.loads(nodes_json) if nodes_json else []
         except Exception:
             nodes = []
         scene_name = display_name or name or scene_id
-        for v in _collect_scene_skill_scope_violations(
-                nodes, repo_key, allow_own_user=False):
+        for v in _collect_scene_skill_scope_violations(nodes, repo_key):
             item = _project_scene_scope_violation(v)
             item["scene_id"] = scene_id
             item["scene_name"] = scene_name
-            _skill = v.get("skill") or ""
-            if _skill not in _suggestion_cache:
-                _suggestion_cache[_skill] = _suggest_repo_official_skills(
-                    _skill, repo_key,
-                    agent_type=_skill_agent_type_by_name(_skill))
-            item["suggested_skills"] = list(_suggestion_cache[_skill])
+            item["suggested_skills"] = list(v.get("rebind_candidates") or [])
             violations.append(item)
             conflict_scenes.add(scene_id)
     return {
@@ -2156,15 +2149,13 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
     return {"message": "场景已删除"}
 
 
-def _collect_scene_skill_scope_violations(nodes: list, repo_key: str, username: str = "",
-                                          user_id="", allow_own_user: bool = True,
+def _collect_scene_skill_scope_violations(nodes: list, repo_key: str,
                                           expected_scope: str = "repo") -> list:
     """收集场景节点技能 scope 冲突（Issue #657 / #1564 / #1758），不抛异常、一次返回全部冲突。
 
     Issue #1758：判定收敛为单一判官 ``scene_skill_scope.evaluate``，四个入口
     （保存/apply、audit、派发门禁、scene_precheck）共用同一结论。固定口径：
-    repo 级场景引用 user 技能一律冲突（含创建者本人），``allow_own_user`` /
-    ``username`` / ``user_id`` 仅为兼容旧调用签名保留，不再放宽判定。
+    repo 级场景引用 user 技能一律冲突（含创建者本人）。
     技能不在 skill 表（官方内置包形态）不计冲突（存量兼容）。
     """
     from src.api.scene_skill_scope import evaluate
@@ -2174,7 +2165,6 @@ def _collect_scene_skill_scope_violations(nodes: list, repo_key: str, username: 
         if not isinstance(node, dict):
             continue
         result = evaluate(node, repo_key, expected_scope or "repo",
-                          {"username": username, "user_id": user_id},
                           cache=cache)
         if result["ok"]:
             continue
@@ -2214,7 +2204,7 @@ def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
     `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
     """
     from src.api.scene_skill_scope import evaluate
-    result = evaluate(node, repo_key, "repo", None, scene_id=scene_id,
+    result = evaluate(node, repo_key, "repo", scene_id=scene_id,
                       cache=cache)
     return {
         "resolvable": bool(result["ok"]),
@@ -2247,23 +2237,6 @@ def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
     return result
 
 
-def _skill_agent_type_by_name(skill_name: str) -> str:
-    """按技能名取 agent_type（Issue #1721 改绑建议用），委托单一判官模块。"""
-    from src.api.scene_skill_scope import skill_agent_type_by_name
-    return skill_agent_type_by_name(skill_name)
-
-
-def _suggest_repo_official_skills(skill_name: str, repo_key: str,
-                                  agent_type: str = "", limit: int = 5) -> list:
-    """为冲突的 user 级技能列出可改绑的 repo/official 级同类技能（Issue #1721）。
-
-    委托 ``scene_skill_scope.rebind_candidates``，仅输出指引、不写库。
-    """
-    from src.api.scene_skill_scope import rebind_candidates
-    return rebind_candidates(skill_name, repo_key, agent_type=agent_type,
-                             limit=limit)
-
-
 def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", user_id="",
                                 allow_own_user: bool = True, expected_scope: str = "repo"):
     """场景节点技能 scope 校验（Issue #657 / #1564 / #1758）：冲突时抛 HTTPException(400)。
@@ -2275,9 +2248,9 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
     400 额外返回 skill_scope / scene_scope / rebind_candidates / rebinds，
     rebinds 为逐节点改绑建议。``allow_own_user`` 仅为旧调用签名兼容保留。
     """
+    from src.api.scene_skill_scope import format_rebind_hint
     violations = _collect_scene_skill_scope_violations(
-        nodes, repo_key, username=username, user_id=user_id,
-        allow_own_user=allow_own_user, expected_scope=expected_scope)
+        nodes, repo_key, expected_scope=expected_scope)
     if not violations:
         return
     _msgs = []
@@ -2287,11 +2260,7 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, username: str = "", 
         _m = (f"节点 {v['node_tag']} 引用技能 '{v['skill']}' scope 不匹配："
               f"技能 scope={v['actual_scope'] or '-'}，场景 scope={v['expected_scope'] or 'repo'}，"
               f"repo 级场景不可引用 user 级技能（含创建者本人）")
-        if _cand:
-            _names = ", ".join(f"{c.get('skill_name')}({c.get('scope')})" for c in _cand)
-            _m += f"；可改绑为：{_names}"
-        else:
-            _m += "；请改用 repo/official 级技能"
+        _m += f"；{format_rebind_hint(_cand)}"
         _msgs.append(_m)
         _rebind.append({
             "node_id": v.get("node_id") or "",

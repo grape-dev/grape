@@ -78,7 +78,7 @@ class TestEvaluate:
         try:
             _mk_skill("user", "1", s)
             ev = evaluate({"id": "issue", "tag": "issue", "skill": s},
-                          repo, "repo", {"username": "alice", "user_id": "1"})
+                          repo, "repo")
             assert ev["ok"] is False
             assert ev["actual_scope"] == "user"
             assert ev["expected_scope"] == "repo"
@@ -218,7 +218,7 @@ class TestFourEntryConsistency:
         from src.api.routes.scenes import (
             _validate_scene_skill_scope, audit_scene_skill_scope,
             get_scene_detail)
-        from src.api.event_pipeline import _skill_scope_mismatch
+        from src.api.event_pipeline import _evaluate_skill_scope
         from src.api import scene_precheck
 
         repo, scene_id, s_user, s_repo, nodes = self._setup()
@@ -244,10 +244,10 @@ class TestFourEntryConsistency:
             assert av["expected_scope"] == "repo"
             assert any(c["skill_name"] == s_repo for c in av["suggested_skills"])
 
-            # 3) 派发门禁 → mismatch=True，reason 与判官一致
-            mismatch, info = _skill_scope_mismatch(s_user, repo)
-            assert mismatch is True
-            assert info["scope"] == "user"
+            # 3) 派发门禁 → ok=False，reason 与判官一致
+            info = _evaluate_skill_scope(s_user, repo)
+            assert info["ok"] is False
+            assert info["actual_scope"] == "user"
             assert "scope 不匹配" in info["reason"]
 
             # 4) scene_precheck → skill_unresolvable
@@ -291,6 +291,39 @@ class TestFourEntryConsistency:
             _rm_skill(s1)
             _rm_skill(s2)
 
+    def test_rebind_candidates_follow_node_role_not_display_tag(self):
+        """回归 QA 审查 AC2：tag 为展示名（非 agent_type）时仍能给出改绑候选。"""
+        from src.api.routes.scenes import (
+            _validate_scene_skill_scope, audit_scene_skill_scope)
+        from src.api.scene_skill_scope import evaluate
+        repo = _repo_key()
+        scene_id = f"sc-{_unique()}"
+        s_user = f"usk1758_{_unique()}"
+        s_repo = f"rsk1758_{_unique()}"
+        try:
+            _mk_skill("user", "42", s_user, agent_type="coding")
+            _mk_skill("repo", repo, s_repo, agent_type="coding")
+            nodes = [{"id": "coding", "tag": "编码", "skill": s_user,
+                      "skill_id": 0, "enabled": True}]
+            _create_scene(scene_id, repo, nodes)
+
+            ev = evaluate(nodes[0], repo, "repo")
+            assert ev["ok"] is False
+            assert [c["skill_name"] for c in ev["rebind_candidates"]] == [s_repo]
+
+            with pytest.raises(HTTPException) as ei:
+                _validate_scene_skill_scope(nodes, repo, "alice", "1")
+            detail = ei.value.detail
+            assert [c["skill_name"] for c in detail["rebind_candidates"]] == [s_repo]
+            assert s_repo in detail["message"]
+
+            audit = audit_scene_skill_scope(repo=repo, limit=200, user={})
+            assert [c["skill_name"] for c in audit["violations"][0]["suggested_skills"]] == [s_repo]
+        finally:
+            _cleanup(repo, scene_id)
+            _rm_skill(s_user)
+            _rm_skill(s_repo)
+
 
 class TestA2A400StructuredFields:
     """R3：a2a 派发失败 400 结构化字段。"""
@@ -323,3 +356,67 @@ class TestA2A400StructuredFields:
         finally:
             _cleanup(repo, "")
             _rm_skill(s)
+
+    def test_a2a_endpoint_returns_structured_scope_fields(self, monkeypatch):
+        """真实 /api/a2a 端点：issue 场景覆盖被 scope 判官拒绝 → 400 结构化字段。"""
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        from src.api.deps import get_user_or_none
+        from src.api.routes import webhook as wh
+        import src.api.session_store as store
+        import src.api.event_pipeline as ep
+        import src.user.db as user_db
+
+        repo = _repo_key()
+        owner, name = repo.split(":", 1)[1].split("/", 1)
+        scene_id = f"sc-{_unique()}"
+        s_user = f"usk1758_{_unique()}"
+        _mk_skill("user", "42", s_user, agent_type="coding")
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "INSERT OR IGNORE INTO managed_repos "
+                    "(repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
+                    (repo, owner, name, f"{owner}/{name}"))
+                db.commit()
+
+            app.dependency_overrides[get_user_or_none] = lambda: {
+                "id": 1, "username": "alice", "auth_type": "jwt"}
+            monkeypatch.setattr(user_db, "get_managed_repos",
+                                lambda uid: [{"repo_key": repo}])
+            monkeypatch.setattr(wh, "_issue_exists_in_db", lambda *a, **k: True)
+            monkeypatch.setattr(wh, "_scene_node_check", lambda *a, **k: {
+                "in_scene": True, "scene_id": scene_id,
+                "nodes": [{"id": "coding"}]})
+            monkeypatch.setattr(store, "get_issue_scene",
+                                lambda *a, **k: (scene_id, 1))
+            monkeypatch.setattr(store, "is_agent_enabled",
+                                lambda *a, **k: True)
+            monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+            monkeypatch.setattr(ep, "resolve_skill_from_pipeline",
+                                lambda *a, **k: s_user)
+            monkeypatch.setattr(ep, "resolve_scene_node_skill_id",
+                                lambda *a, **k: 0)
+
+            client = TestClient(app)
+            resp = client.post("/api/a2a", json={
+                "agent": "coding",
+                "payload": {"repository": f"{owner}/{name}",
+                            "issue_number": "5",
+                            "context": "scope 400 endpoint test"},
+            })
+            assert resp.status_code == 400, resp.text
+            data = resp.json()
+            assert data["skill_resolve_failed"] is True
+            assert data["skill_scope"] == "user"
+            assert data["scene_scope"] == "repo"
+            assert isinstance(data["rebind_candidates"], list)
+        finally:
+            app.dependency_overrides.pop(get_user_or_none, None)
+            with db_lock:
+                db.cursor().execute(
+                    "DELETE FROM managed_repos WHERE repo_key=?", (repo,))
+                db.commit()
+            _cleanup(repo, scene_id)
+            _rm_skill(s_user)

@@ -1731,51 +1731,13 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         log.warning(f"Pipeline subscription dispatch failed: {e}")
 
 
-def _skill_scope_mismatch(skill_name: str, repo_key: str,
-                          skill_id: int = 0, node_tag: str = "",
-                          scene_id: str = "") -> tuple:
-    """派发前技能 scope 匹配判定（Issue #657，Issue #1758 收敛到单一判官）。
-
-    返回 (mismatch, info)；判定完全委托 ``scene_skill_scope.evaluate``，
-    本函数仅保留旧签名兼容，禁止其它模块再 import 它做独立判定。
-    """
-    if not skill_name and not skill_id:
-        return False, {}
-    from src.api.scene_skill_scope import evaluate
-    result = evaluate({"skill": skill_name, "skill_id": skill_id,
-                       "tag": node_tag or "", "id": node_tag or ""},
-                      repo_key, "repo", None, scene_id=scene_id)
-    info = {
-        "found": result.get("source") in ("skill_id", "name"),
-        "matched": bool(result.get("ok")),
-        "scope": result.get("actual_scope") or "",
-        "skill_id": result.get("skill_id") or 0,
-        "owner_id": result.get("owner_id") or "",
-        "reason": result.get("reason") or "",
-        "rebind_candidates": list(result.get("rebind_candidates") or []),
-    }
-    return (not result.get("ok")), info
-
-
 def _evaluate_skill_scope(skill_name: str, repo_key: str, skill_id: int = 0,
                           node_tag: str = "", scene_id: str = "") -> dict:
     """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。"""
     from src.api.scene_skill_scope import evaluate
     return evaluate({"skill": skill_name, "skill_id": skill_id,
                      "tag": node_tag or "", "id": node_tag or ""},
-                    repo_key, "repo", None, scene_id=scene_id)
-
-
-def _skill_scope_mismatch_reason(skill_name: str, info: dict,
-                                 scene_id: str = "", agent_type: str = "") -> str:
-    """scope 不匹配文案（含技能名/双方 scope 值/场景/节点，Issue #657）。"""
-    reason = (info or {}).get("reason")
-    if reason:
-        return reason
-    scope = (info or {}).get("scope") or "user"
-    return (f"技能 '{skill_name}' scope 不匹配（技能 scope={scope}，场景 scope=repo）："
-            f"repo 级场景不可引用 user 级技能（含创建者本人），保存/派发均会阻断"
-            f"（scene={scene_id or '-'}，node={agent_type or '-'}）")
+                    repo_key, "repo", scene_id=scene_id)
 
 
 def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,

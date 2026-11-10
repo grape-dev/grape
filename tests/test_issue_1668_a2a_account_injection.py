@@ -277,7 +277,8 @@ class TestDerivedA2AActorBackfill:
 
         with patch("src.api.event_store.append_event", side_effect=_capture_append), \
              patch("src.api.session_store.get_issue_scene", return_value=("default", 1)), \
-             patch.object(ep, "_skill_scope_mismatch", return_value=(False, {})), \
+             patch.object(ep, "_evaluate_skill_scope",
+                          return_value={"ok": True, "reason": ""}), \
              patch("src.runtime.engine_select.pick_engine", return_value=None), \
              patch.object(ep, "_fail_event"):
             ep._redispatch_vod_after_recommend(_REPO_KEY, "#5", "vod", evt, 0)

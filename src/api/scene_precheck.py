@@ -200,17 +200,6 @@ def _available_engines(rows: list[dict]) -> list[dict]:
         return healthy
 
 
-def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
-    """节点技能对 repo 级场景可解析（Issue #1758：统一委托单一 scope 判官）。
-
-    不再 fail-open：技能 scope 查询异常按判官默认 fail-closed 处理，
-    避免前置检查与保存/派发结论漂移。
-    """
-    from src.api.scene_skill_scope import evaluate
-    return bool(evaluate(node, repo_key, "repo",
-                         {"user_id": user_id})["ok"])
-
-
 def _ownership_problem(rows: list[dict], repo_key: str,
                        names: set[str], uids: set[str]) -> dict | None:
     """返回首个归属非法引擎信息；合法/无法判定返回 None。"""
@@ -349,21 +338,21 @@ def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str
             suggestion="启动引擎或重新选择在线机器后重试")
 
 
-def _check_skill(node: dict, tag: str, repo_key: str, user_id: str,
+def _check_skill(node: dict, tag: str, repo_key: str,
                  cfg: dict, problems: list) -> None:
-    from src.api.scene_skill_scope import evaluate
+    from src.api.scene_skill_scope import evaluate, format_rebind_hint
     skill_name = str(node.get("skill") or "").strip()
     skill_id = _node_skill_id(node)
     if not (skill_name or skill_id):
         return
-    result = evaluate(node, repo_key, "repo", {"user_id": user_id})
+    result = evaluate(node, repo_key, "repo")
     if result["ok"]:
         return
     _suggestion = "重新选择技能或确认技能对当前用户/仓库可见"
     _cand = list(result.get("rebind_candidates") or [])
     if _cand:
-        _names = ", ".join(f"{c.get('skill_name')}({c.get('scope')})" for c in _cand)
-        _suggestion = f"repo 级场景不可引用 user 级技能，请改绑为：{_names}"
+        _suggestion = ("repo 级场景不可引用 user 级技能，"
+                       f"{format_rebind_hint(_cand)}")
     _append_problem(
         problems, cfg, "skill_unresolvable", tag, [],
         message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}"
@@ -385,7 +374,7 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
         eids = _normalize_engine_ids(n.get("engine_runtime_ids"))
         _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
                               cfg, problems)
-        _check_skill(n, tag, repo_key, user_id, cfg, problems)
+        _check_skill(n, tag, repo_key, cfg, problems)
 
 
 def _scene_unresolved(scene: dict | None, scene_id: str) -> bool:

@@ -1567,7 +1567,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         _ev = _eval_scope(
                             {"skill": _pipe_skill, "skill_id": _node_sid,
                              "tag": agent_name, "id": agent_name},
-                            repo_key, "repo", user,
+                            repo_key, "repo",
                             scene_id=_a2a_issue_scene)
                         if not _ev["ok"]:
                             _reason = _ev["reason"]
