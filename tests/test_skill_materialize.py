@@ -491,3 +491,66 @@ def test_worker_exception_branch_writes_fallback(tmp_path):
     assert "demo-skill" in content
     assert "grape skills detail --skill demo-skill" in content
     assert "exception" in content
+
+
+# ── Issue #1845：点文件路径归一化 + 非法相对路径安全闸 ─────
+
+def test_zip_materialize_preserves_dot_files(skills_root):
+    # T1：zip 含 .gitignore 与嵌套点目录 .grader/rules.md
+    files = {"SKILL.md": "# plain skill without references\n",
+             ".gitignore": "dist/\n",
+             ".grader/rules.md": "# grader rules"}
+    ok, skills, reason = sm.materialize_skill_zip_atomic(skills_root, _mk_zip(files))
+    assert ok, reason
+    assert "demo-skill" in skills
+    dst = os.path.join(skills_root, "demo-skill")
+    with open(os.path.join(dst, ".gitignore"), encoding="utf-8") as f:
+        assert f.read() == "dist/\n"
+    assert os.path.isfile(os.path.join(dst, ".grader", "rules.md"))
+
+
+@pytest.mark.parametrize("key", ["./.gitignore", ".gitignore"])
+def test_files_materialize_preserves_dotfile(skills_root, key):
+    # T2：files 字典键带/不带 ./ 前缀两种形态，落盘均为 .gitignore
+    files = {"SKILL.md": "# plain skill without references\n", key: "dist/\n"}
+    ok, reason = sm.materialize_skill_files_atomic(skills_root, "demo-skill", files)
+    assert ok, reason
+    dst = os.path.join(skills_root, "demo-skill")
+    assert os.path.isfile(os.path.join(dst, ".gitignore"))
+    assert not os.path.exists(os.path.join(dst, "gitignore"))
+
+
+def test_dir_materialize_preserves_dot_files(skills_root, tmp_path):
+    # T3：目录物化源目录含点文件/点目录
+    src = tmp_path / "official" / "demo-skill"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("# plain skill without references\n", encoding="utf-8")
+    (src / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    (src / ".grader").mkdir()
+    (src / ".grader" / "rules.md").write_text("# grader rules", encoding="utf-8")
+    ok, reason = sm.materialize_skill_dir_atomic(skills_root, "demo-skill", str(src))
+    assert ok, reason
+    dst = os.path.join(skills_root, "demo-skill")
+    assert os.path.isfile(os.path.join(dst, ".gitignore"))
+    assert os.path.isfile(os.path.join(dst, ".grader", "rules.md"))
+
+
+@pytest.mark.parametrize("bad", ["../evil", "/abs/path", "C:\\x"])
+def test_illegal_relative_path_rejected(skills_root, tmp_path, bad):
+    # T4：非法相对路径在 validate 侧 fail closed，在 files 侧拒绝且不落盘
+    src = tmp_path / "src-skill"
+    src.mkdir()
+    (src / "SKILL.md").write_text("# plain skill without references\n", encoding="utf-8")
+    ok, missing, _extra, _vd = sm.validate_skill_dir(str(src), [bad])
+    assert not ok
+    assert bad in missing
+
+    ok, reason = sm.materialize_skill_files_atomic(
+        skills_root, "demo-skill",
+        {bad: "x", "SKILL.md": "# plain skill without references\n"})
+    assert not ok
+    assert reason == f"illegal relative path: {bad}"
+    assert not os.path.isdir(os.path.join(skills_root, "demo-skill"))
+    assert not os.path.exists(os.path.join(tmp_path, "evil"))
+    assert not os.path.exists(os.path.join(skills_root, "evil"))
+    assert not [p for p in os.listdir(skills_root) if p.startswith(sm.TMP_PREFIX)]

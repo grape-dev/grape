@@ -60,6 +60,24 @@ def _rmtree_safe(path: str):
         pass
 
 
+def _normalize_rel_path(rel) -> str:
+    """归一化技能包内相对路径：仅剥显式 ``./`` 前缀，非法路径抛 ValueError。
+
+    Issue #1845：旧写法 ``str(rel).lstrip("./")`` 按字符集剥离，会把
+    ``.gitignore`` 削成 ``gitignore``、把 ``../evil`` 偶然削成 ``evil``。改为真前缀
+    剥离后必须显式拒绝绝对路径/盘符/``..`` 段，避免 ``os.path.join`` 写出目标目录。
+    """
+    original = str(rel)
+    rel = original[2:] if original.startswith("./") else original
+    if not rel or rel == ".":
+        raise ValueError(f"illegal relative path: {original}")
+    if rel.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", rel):
+        raise ValueError(f"illegal relative path: {original}")
+    if any(seg == ".." for seg in re.split(r"[\\/]", rel)):
+        raise ValueError(f"illegal relative path: {original}")
+    return rel
+
+
 def parse_skill_md_references(skill_md_path: str, skill_name: str = "") -> list:
     """解析 SKILL.md 正文中引用的 references/ 相对路径（去重保序）。
 
@@ -278,7 +296,12 @@ def validate_skill_dir(skill_dir: str, expected_files=None, baseline_dir=None,
     if not os.path.isfile(skill_md):
         missing.append("SKILL.md")
     for rel in (expected_files or []):
-        rel = str(rel).lstrip("./")
+        try:
+            rel = _normalize_rel_path(rel)
+        except ValueError:
+            # 非法路径 fail closed：计入 missing，不放行
+            missing.append(str(rel))
+            continue
         if rel and rel != "SKILL.md" and not os.path.isfile(os.path.join(skill_dir, rel)):
             missing.append(rel)
     if os.path.isfile(skill_md):
@@ -384,7 +407,11 @@ def materialize_skill_files_atomic(skills_root: str, skill_name: str, files: dic
     try:
         expected = []
         for rel, content in (files or {}).items():
-            rel = str(rel).lstrip("./")
+            try:
+                rel = _normalize_rel_path(rel)
+            except ValueError:
+                _rmtree_safe(tmp_dir)
+                return False, f"illegal relative path: {rel}"
             dest = os.path.join(tmp_dir, rel)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, "w", encoding="utf-8") as f:
