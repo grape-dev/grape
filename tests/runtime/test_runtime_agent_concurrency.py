@@ -247,9 +247,18 @@ def test_reregister_unpacks_register_tuple():
     （worker 全离线事故，2026-08-17 实测）。
     """
     client = FakeRegClient([54, 55])
-    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test"))
+    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test",
+                                               recover_orphans=True))
     assert result[0] == [54, 55], "应返回真正的 ids 列表，而非 (ids, probe_url) 元组"
     assert client.recovered == [54, 55], "recover_orphans 应逐个收到单值 id，不能收到 [54, 55] 列表"
+
+
+def test_reregister_default_does_not_recover():
+    """Issue #1750 P1-B：默认不回收，只有显式 recover_orphans=True 才逐 rid 回收。"""
+    client = FakeRegClient([54, 55])
+    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test"))
+    assert result[0] == [54, 55], "元组解包不受回收开关影响"
+    assert client.recovered == []
 
 
 def test_reregister_handles_empty_ids():
