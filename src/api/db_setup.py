@@ -3523,8 +3523,8 @@ def _fn_scene_pin_columns() -> None:
     """
     with db_lock:
         c = db.cursor()
-        _ensure_column(c, "devops_pipeline_scene", "is_pinned", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(c, "devops_pipeline_scene", "pinned_at", "VARCHAR(32) DEFAULT NULL")
+        _ensure_column(c, "devops_pipeline_scene", "is_pinned", "INTEGER NOT NULL DEFAULT 0", strict=True)
+        _ensure_column(c, "devops_pipeline_scene", "pinned_at", "VARCHAR(32) DEFAULT NULL", strict=True)
         db.commit()
 
 

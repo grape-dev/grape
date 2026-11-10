@@ -470,7 +470,7 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "onboarding": s.get("onboarding") or "repo-onboarding",
              "scene_type": s.get("scene_type") or "standard",
              "pr_subscription_enabled": s.get("pr_subscription_enabled", 0),
-"linked_repos": s.get("linked_repos") or [],
+             "linked_repos": s.get("linked_repos") or [],
              "is_pinned": int(s.get("is_pinned") or 0),
              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
