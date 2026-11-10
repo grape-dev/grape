@@ -307,14 +307,24 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                 # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
                 # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
                 apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
-                          + (", role_tags=?" if _role_tags_json else "")
-                          + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
-                          + " WHERE id=?",
-                          (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
-                           rt.get("cli_path", ""), _ls_json, body.cli_version, rid)
-                          + ((_role_tags_json,) if _role_tags_json else ())
-                          + ((_model_name, datetime.now(timezone.utc).isoformat()) if _model_name else ()))
+                _upd_sql = ("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
+                            + (", role_tags=?" if _role_tags_json else "")
+                            + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                            + " WHERE id=?")
+                # 参数顺序 bug 修复（#865 基线缺陷，2026-11-10 真机实证）：rid 必须是
+                # 最后一个参数（对应 WHERE id=?）——旧实现把 rid 固定在元组第 6 位再
+                # 追加 role_tags/model 值，一旦带上 model 分支占位符与参数错位，
+                # sqlite binding 异常 → 该引擎行整个 UPDATE 失败（表现为「检测到
+                # 模型的引擎 worker_version 卡旧版且 model_name 恒空」；INSERT 新行
+                # 路径参数固定无误，故首台远程 Worker 首注册侥幸成功）。
+                _upd_args = [rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
+                             rt.get("cli_path", ""), _ls_json, body.cli_version]
+                if _role_tags_json:
+                    _upd_args.append(_role_tags_json)
+                if _model_name:
+                    _upd_args += [_model_name, datetime.now(timezone.utc).isoformat()]
+                _upd_args.append(rid)
+                c.execute(_upd_sql, _upd_args)
                 # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
                 # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
                 if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
