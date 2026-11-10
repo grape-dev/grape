@@ -255,15 +255,6 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     wb = task.get("work_branch", "")
     if wb:
         env_lines.append("- GRAPE_WORK_BRANCH")
-        try:
-            from src.runtime.repogit import resolve_work_branch
-            _effective_wb, _wb_note = resolve_work_branch(repo_key, wb)
-            if _wb_note:
-                env_lines.append(f"  - 实际生效分支: {_effective_wb}（原配置 '{wb}' 不存在，已回退默认分支）")
-            elif _effective_wb:
-                env_lines.append(f"  - 实际生效分支: {_effective_wb}")
-        except Exception:
-            pass
     cf_raw = task.get("custom_fields", "")
     if cf_raw:
         try:
@@ -394,11 +385,7 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
             log.warning(f"Autopilot exec {exec_id}: inject custom_fields failed: {_e}")
     _task_work_branch = task.get("work_branch") or ""
     if _task_work_branch:
-        # Issue #1841：注入前校验分支存在性，失效配置回退仓库默认分支并告警
-        from src.runtime.repogit import resolve_work_branch
-        _effective_wb, _ = resolve_work_branch(repo_key, _task_work_branch)
-        if _effective_wb:
-            env_extra["GRAPE_WORK_BRANCH"] = _effective_wb
+        env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
 
     # Issue #1811：定时调度与 event_pipeline 同源注入 bot 身份，单点覆盖 DIRECT/REMOTE。
     # 函数内延迟 import，避免 scheduler ↔ event_pipeline 模块级循环依赖。

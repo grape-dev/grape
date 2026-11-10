@@ -4054,8 +4054,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 订阅场景 custom_fields（口令/IP）全丢；无关联 Issue 时 override 与伪 id
     # 正则解析结果同值，行为不变；普通任务无该键 → 空串回退。
     try:
-        from src.runtime.repogit import read_effective_scene_work_branch
-        _wb = read_effective_scene_work_branch(repo_key, issue_id)
+        from src.runtime.repogit import _read_scene_work_branch
+        _wb = _read_scene_work_branch(repo_key, issue_id)
         if _wb:
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
@@ -4543,8 +4543,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     env.update(resolve_task_server_env(runtime_id))
     # ── 场景环境（work_branch / scene_id / custom_fields / linked_repos）──
     try:
-        from src.runtime.repogit import read_effective_scene_work_branch
-        _wb = read_effective_scene_work_branch(repo_key, issue_id)
+        from src.runtime.repogit import _read_scene_work_branch
+        _wb = _read_scene_work_branch(repo_key, issue_id)
         if _wb:
             env["GRAPE_WORK_BRANCH"] = _wb
     except Exception:

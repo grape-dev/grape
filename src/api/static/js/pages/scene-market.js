@@ -658,7 +658,7 @@ function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFi
       _navAfterApply('');
     }).catch(function(e) {
       console.warn('Advanced options save failed:', e);
-      _navAfterApply('（高级选项保存失败：' + ((e && e.message) || '') + '）');
+      _navAfterApply('（高级选项保存失败）');
     });
   }).catch(function(e) {
     if (onFail) {
