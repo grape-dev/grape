@@ -931,6 +931,47 @@ def _pr_number_from_url(*values) -> str:
     return ""
 
 
+# Issue #1802：PR/MR 实体事件白名单。只有这些事件才允许从对象结构里取 PR 号；
+# Issue 实体的 object_attributes.iid 是 Issue 自身编号，永不作 PR 号来源。
+# 兼容历史别名（pr_opened/pr_updated/pr_merged/pr_comment），当前 canonical 值为
+# pull_request_* / note_hook_pr（见 src/vcs/event_types.py）。
+_PR_ENTITY_EVENT_TYPES = set(PR_EVENT_TYPES) | {
+    "pr_opened", "pr_updated", "pr_closed", "pr_merged", "pr_comment",
+}
+
+# payload 中 PR/MR 实体的结构特征（GitLab MR hook 的 object_attributes 含这些键；
+# Issue hook 的 object_attributes 不含）。
+_PR_OBJECT_ATTR_KEYS = ("source_branch", "target_branch", "merge_status")
+
+# PR 评论事件别名（canonical = note_hook_pr；兼容历史/外部事件名）。
+_NOTE_HOOK_EVENT_TYPES = {"note_hook_pr", "pr_comment"}
+
+
+def _is_pr_entity_event(event_type: str, payload: dict) -> bool:
+    """Issue #1802：判定事件实体是否为 PR/MR。
+
+    准入 = 事件类型白名单 **或** payload 带 PR/MR 实体结构特征。目的是把
+    「Issue 事件的 object_attributes.iid」挡在 PR 号候选链之外，避免 Issue 编号
+    被当成不存在的 PR 编号注入。
+    """
+    et = str(event_type or "").strip().lower()
+    if et in _PR_ENTITY_EVENT_TYPES:
+        return True
+    if et.startswith(("pull_request", "merge_request", "pr_")):
+        return True
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("pull_request"), dict) or isinstance(payload.get("merge_request"), dict):
+        return True
+    obj_attrs = payload.get("object_attributes")
+    if isinstance(obj_attrs, dict):
+        if str(obj_attrs.get("noteable_type") or "").lower() in ("mergerequest", "pullrequest"):
+            return True
+        if any(k in obj_attrs for k in _PR_OBJECT_ATTR_KEYS):
+            return True
+    return False
+
+
 def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, str]:
     """Issue #1579：统一 PR 号解析链，note_hook_pr 与普通事件共用同一来源。
 
@@ -939,6 +980,11 @@ def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, 
     误用会把评论号当成 PR 号；改为从 object_attributes.url（.../merge_requests/<N>）
     等结构化 URL 兜底。仅消费结构化字段，不从事件标题猜号——真实事件标题是 MR/Issue
     标题（如 `fix: #1412 ...`），不含 `note_hook_pr #<N>` 标记。
+
+    Issue #1802：按事件实体类型设准入闸门。payload.pr_number / evt._pr_sub_pr_number
+    是显式 PR 号来源，始终可信；pull_request / merge_request / object_attributes
+    等对象结构来源只对 PR/MR 实体事件开放。Issue Hook 的 object_attributes 就是
+    该 Issue 自身，其 iid 即 Issue 编号，不得落入 PR 号候选链。
     """
     merge_req = payload.get("merge_request")
     pull_req = payload.get("pull_request")
@@ -951,34 +997,38 @@ def _extract_pr_number(evt: dict, payload: dict, event_type: str) -> tuple[str, 
         payload.get("pr_number"),
         evt.get("_pr_sub_pr_number"),
     ]
-    if event_type == "note_hook_pr":
-        candidates.extend([
-            merge_req.get("iid"),
-            merge_req.get("number"),
-            pull_req.get("iid"),
-            pull_req.get("number"),
-            obj_attrs.get("noteable_iid"),
-        ])
-    else:
-        candidates.extend([
-            pull_req.get("number"),
-            merge_req.get("number"),
-            obj_attrs.get("iid"),
-        ])
+    if _is_pr_entity_event(event_type, payload):
+        if str(event_type or "").strip().lower() in _NOTE_HOOK_EVENT_TYPES:
+            candidates.extend([
+                merge_req.get("iid"),
+                merge_req.get("number"),
+                pull_req.get("iid"),
+                pull_req.get("number"),
+                obj_attrs.get("noteable_iid"),
+            ])
+        else:
+            candidates.extend([
+                pull_req.get("number"),
+                pull_req.get("iid"),
+                merge_req.get("number"),
+                merge_req.get("iid"),
+                obj_attrs.get("iid"),
+            ])
     for value in candidates:
         num = _numeric_value(value)
         if num:
             return num, "payload"
 
-    url_num = _pr_number_from_url(
-        obj_attrs.get("url"),
-        merge_req.get("web_url"),
-        merge_req.get("url"),
-        pull_req.get("web_url"),
-        pull_req.get("url"),
-    )
-    if url_num:
-        return url_num, "url"
+    if _is_pr_entity_event(event_type, payload):
+        url_num = _pr_number_from_url(
+            obj_attrs.get("url"),
+            merge_req.get("web_url"),
+            merge_req.get("url"),
+            pull_req.get("web_url"),
+            pull_req.get("url"),
+        )
+        if url_num:
+            return url_num, "url"
     return "", ""
 
 
@@ -1002,6 +1052,10 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     object_attributes.url / merge_request、pull_request 的 URL（.../merge_requests/<N>）
     兜底；不从事件标题猜号。解析失败注入 PR_NUMBER_PARSE_FAILED=1 并告警，
     禁止用 ISSUE_NUMBER 顶替。
+
+    Issue #1802：无真实关联 PR 时静默不注入 PR_NUMBER（不写占位值）。
+    仅 PR/MR 实体事件解析失败保留 PR_NUMBER_PARSE_FAILED=1 告警；Issue 实体事件
+    本就不该有 PR，不写告警，避免把「Issue 无 PR」误报成解析故障。
     """
     _issue_num = str(evt.get("issue_id", "") or (evt.get("payload", {}) or {}).get("issue_number", "") or "").lstrip("#")
     if _issue_num.isdigit():
@@ -1031,8 +1085,8 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
         env_extra["PR_NUMBER"] = _pr_num
         if _pr_source == "url":
             log.info(f"Pipeline env: PR #{_pr_num} resolved from event URL (Issue #1579)")
-    elif _event_type == "note_hook_pr":
-        log.warning(f"Pipeline env: note_hook_pr PR number parse failed "
+    elif _is_pr_entity_event(_event_type, _payload):
+        log.warning(f"Pipeline env: {_event_type or 'pr'} PR number parse failed "
                     f"(issue=#{_issue_num or '-'}, title={evt.get('title', '') or '-'})")
         env_extra["PR_NUMBER_PARSE_FAILED"] = "1"
 

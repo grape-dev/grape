@@ -100,8 +100,11 @@ def test_1579_note_hook_pr_number_sources():
     # 4) Note Hook 的 object_attributes.iid 是评论 id，不得采用
     num, src = _extract_pr_number({}, {"object_attributes": {"iid": 999}}, "note_hook_pr")
     assert (num, src) == ("", "")
-    # 5) 普通事件走 object_attributes.iid（契约不变）
-    num, _ = _extract_pr_number({}, {"object_attributes": {"iid": "77"}}, "a2a_event")
+    # 5) Issue #1802 收紧：非 PR/MR 实体事件不再把 object_attributes.iid 当 PR 号；
+    #    显式 payload.pr_number 仍正常解析（A2A 交办使用该显式字段）。
+    num, src = _extract_pr_number({}, {"object_attributes": {"iid": "77"}}, "a2a_event")
+    assert (num, src) == ("", "")
+    num, _ = _extract_pr_number({}, {"pr_number": "77"}, "a2a_event")
     assert num == "77"
     # 6) 标题不再参与猜号（真实标题是 MR 标题）
     num, _ = _extract_pr_number({"title": "fix: #1412 note_hook_pr #1011"}, {}, "note_hook_pr")
