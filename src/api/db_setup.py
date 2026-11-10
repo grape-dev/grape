@@ -3529,7 +3529,11 @@ def _fn_scene_pin_columns() -> None:
 
 
 register_migration(
-    version="202611100001",
+    # 2026-11-10：202611100001 已被 add-agent-tasks-trace-context 占用（rebase 到
+    # weekly-mys 后同号不同名，本迁移会被判「已执行」永久跳过）→ 顺延到
+    # 202611100003（202611100002 已被 create-merge-gate-log-table 占用）。
+    # 迁移只做 _ensure_column 幂等补列，重跑无损。
+    version="202611100003",
     name="scene-pin-columns",
     kind="safe",
     fn=_fn_scene_pin_columns,

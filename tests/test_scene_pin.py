@@ -115,7 +115,7 @@ def test_baseline_ddl_and_migration_registered():
     ddl_start = src.index("_PIPELINE_SCENE_DDL")
     ddl = src[ddl_start:src.index('"""', src.index("CREATE TABLE", ddl_start))]
     assert "is_pinned" in ddl and "pinned_at" in ddl
-    assert src.count('version="202611100001"') == 1
+    assert src.count('version="202611100003"') == 1
     assert 'name="scene-pin-columns"' in src
 
 
