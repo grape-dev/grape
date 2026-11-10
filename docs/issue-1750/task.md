@@ -9,3 +9,4 @@
 - [x] T7 回归 `test_recover_orphans_*`、`test_issue_417_*`、`test_issue_1495_*` 全通过。
 - [x] T8 心跳失败重注册复用 `_recover_orphans_on_rid_change` 判定，不再默认空白名单无条件回收；新增 `test_a5_heartbeat_failure_reregister_keeps_whitelist`。
 - [x] T9 新测试接入 CI linux-backend job；文档与测试文件补末尾换行。
+- [x] T10 契约翻转后迁移受影响既有用例：`test_runtime_agent.py::TestReregister` 显式开关回收 + 默认不回收断言、`test_runtime_agent_concurrency.py` 重注册元组解包看护（显式 `recover_orphans=True` + 默认不回收）、`test_runtime_client.py` 参数化用例期望 `None → {}`；上述用例精确接入 linux-backend CI。
