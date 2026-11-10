@@ -157,6 +157,10 @@ def test_ensure_column_adds_once_on_temp_sqlite():
 def test_default_sort_pinned_first(client):
     assert _ids(client) == ["1735-a", "1735-b", "1735-c"]
 
+    # 先置顶 a 再置顶 c：置顶组内必须按 pinned_at DESC（c 后置顶 → 排前）。
+    # 若错误地按 id 排序，结果会是 a,c,b，本断言可真实暴露 pinned_at 缺失。
+    _pin(client, "1735-a")
+    time.sleep(0.01)
     _pin(client, "1735-c")
     assert _ids(client) == ["1735-c", "1735-a", "1735-b"]
 
@@ -166,6 +170,7 @@ def test_default_sort_pinned_first(client):
 
     _pin(client, "1735-b", False)
     _pin(client, "1735-c", False)
+    _pin(client, "1735-a", False)
     assert _ids(client) == ["1735-a", "1735-b", "1735-c"]
 
 
@@ -174,10 +179,11 @@ def test_default_sort_pinned_first(client):
 def test_latest_sort_pinned_first_and_unpinned_created_desc(client):
     assert _ids(client, sort="latest") == ["1735-c", "1735-b", "1735-a"]
 
-    _pin(client, "1735-a")
-    time.sleep(0.01)
+    # 先置顶 c 再置顶 a：置顶组按 pinned_at DESC → a,c；若按 created_at DESC 则 c,a。
     _pin(client, "1735-c")
-    assert _ids(client, sort="latest") == ["1735-c", "1735-a", "1735-b"]
+    time.sleep(0.01)
+    _pin(client, "1735-a")
+    assert _ids(client, sort="latest") == ["1735-a", "1735-c", "1735-b"]
 
     _pin(client, "1735-a", False)
     _pin(client, "1735-c", False)
@@ -194,6 +200,18 @@ def test_repeat_pin_does_not_refresh_pinned_at(client):
     r = _pin(client, "1735-c")
     assert r.json()["is_pinned"] == 1
     assert _pinned_at("1735-c") == first
+
+
+def test_repeat_pin_tolerates_zero_rowcount(client, monkeypatch):
+    """模拟 MySQL 未启用 CLIENT_FOUND_ROWS：匹配但值未变的 UPDATE 返回 0。
+
+    路由已先做存在性校验，rowcount==0 不得再判 404（验收 5 重复置顶 200）。
+    """
+    from src.api import pipeline_config
+
+    monkeypatch.setattr(pipeline_config, "set_scene_pinned", lambda *a, **k: 0)
+    r = _pin(client, "1735-c")
+    assert r.json() == {"message": "置顶状态已更新", "scene_id": "1735-c", "is_pinned": 1}
 
 
 def test_unpin_twice_clears_state(client):
@@ -237,15 +255,12 @@ def test_missing_pin_columns_degrades(monkeypatch):
 # ===== 验收 7：归属校验 =====
 
 def test_bob_cannot_pin_alice_scene(client):
-    from fastapi import HTTPException
-    from src.api.deps import check_repo_access
-
     _as(2)
-    with pytest.raises(HTTPException) as ei:
-        check_repo_access({"id": 2, "auth_type": "jwt"}, ALICE_REPO)
-    assert ei.value.status_code == 403
-
+    # 端点级：bob 用自己的仓库置顶 alice 场景 → 仓库内无该场景 → 404
     _pin(client, "1735-a", True, repo="bob/repo2", expect=404)
+    # 端点级：bob 指定 alice 仓库 → 无仓库权限（check_repo_access 口径）→ 403
+    _pin(client, "1735-a", True, repo=ALICE_SLUG, expect=403)
+
     _as(1)
     rows = [s for s in client.get(f"/api/scenes?repo={ALICE_SLUG}").json()["scenes"]
             if s["id"] == "1735-a"]

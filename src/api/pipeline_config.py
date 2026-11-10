@@ -274,8 +274,12 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 _where_extra, _q_params = _scene_search_where(q, _cols)
                 _params = [repo_key] + _q_params
                 if _has_pin:
-                    _order = ("ORDER BY is_pinned DESC, created_at DESC, id DESC"
-                              if sort == "latest" else "ORDER BY is_pinned DESC, id")
+                    if _has_pinat:
+                        _order = ("ORDER BY is_pinned DESC, pinned_at DESC, created_at DESC, id DESC"
+                                  if sort == "latest" else "ORDER BY is_pinned DESC, pinned_at DESC, id")
+                    else:
+                        _order = ("ORDER BY is_pinned DESC, created_at DESC, id DESC"
+                                  if sort == "latest" else "ORDER BY is_pinned DESC, id")
                 else:
                     _order = "ORDER BY id" if sort != "latest" else "ORDER BY created_at DESC, id DESC"
                 # LIMIT/OFFSET 走占位符（评审遗留提醒2：与同函数参数化风格一致；
@@ -466,9 +470,9 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "onboarding": s.get("onboarding") or "repo-onboarding",
              "scene_type": s.get("scene_type") or "standard",
              "pr_subscription_enabled": s.get("pr_subscription_enabled", 0),
-              "linked_repos": s.get("linked_repos") or [],
-              "is_pinned": int(s.get("is_pinned") or 0),
-              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
+"linked_repos": s.get("linked_repos") or [],
+             "is_pinned": int(s.get("is_pinned") or 0),
+             "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -792,7 +796,9 @@ def update_custom_scene(scene_id: str, repo_key: str,
 def set_scene_pinned(scene_id: str, repo_key: str, pinned: bool) -> int:
     """设置仓库场景置顶状态（仓库共享；重复置顶不刷新 pinned_at）。
 
-    返回受影响行数（0 = 场景不存在/未激活/不属于该仓库）。
+    返回受影响行数。MySQL 未启用 CLIENT_FOUND_ROWS 时，匹配但值未变的 UPDATE
+    会返回 0（如重复置顶/重复取消），因此调用方必须先做存在性校验，不能把
+    rowcount==0 当作「场景不存在」。
     """
     db, lock = _db()
     from datetime import datetime, timezone

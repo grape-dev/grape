@@ -2101,6 +2101,7 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 def pin_scene(scene_id: str, body: PinSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """设置/取消场景置顶（仓库共享，不区分用户）。"""
     from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
+    from src.api.deps import check_repo_access
 
     repo_key = ""
     if repo:
@@ -2113,13 +2114,15 @@ def pin_scene(scene_id: str, body: PinSceneRequest, user: dict = Depends(require
         except Exception:
             pass
 
+    if repo_key:
+        check_repo_access(user, repo_key)
+
     existing = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
 
-    rowcount = set_scene_pinned(scene_id, repo_key, body.pinned)
-    if rowcount == 0:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+    # 存在性已校验；MySQL 对「值未变」的 UPDATE 返回 changed=0，不能据此再判 404
+    set_scene_pinned(scene_id, repo_key, body.pinned)
 
     log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
     return {"message": "置顶状态已更新", "scene_id": scene_id,
