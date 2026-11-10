@@ -346,8 +346,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入
     try:
-        from src.runtime.repogit import _read_scene_work_branch
-        _wb = _read_scene_work_branch(repo_key, issue_id)
+        from src.runtime.repogit import read_effective_scene_work_branch
+        _wb = read_effective_scene_work_branch(repo_key, issue_id)
         if _wb:
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:

@@ -384,6 +384,15 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
         check_repo_access(user, body.repo_key)
     # Issue #486: 服务端校验 engine_runtime_ids 归属（与 #277 引擎可见性口径一致）
     _validate_engine_runtime_ids(user, body.repo_key or "", body.engine_runtime_ids or [])
+    # Issue #1841：保存时校验 work_branch 是否存在于目标仓库
+    if body.work_branch and body.work_branch.strip():
+        from src.runtime.repogit import validate_work_branch_exists
+        _wb_ok, _wb_err, _wb_default = validate_work_branch_exists(body.repo_key or "", body.work_branch)
+        if not _wb_ok:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": _wb_err, "field": "work_branch",
+                "work_branch": body.work_branch.strip(), "default_branch": _wb_default,
+            })
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
     engine_ids_json = json.dumps(body.engine_runtime_ids) if body.engine_runtime_ids else ""
@@ -414,6 +423,16 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
     # Issue #486: engine_runtime_ids 服务端归属校验（生效仓库 = 提交的 repo_key 或任务原 repo_key）
     if body.engine_runtime_ids is not None:
         _validate_engine_runtime_ids(user, body.repo_key or task.get("repo_key") or "", body.engine_runtime_ids)
+    # Issue #1841：保存时校验 work_branch 是否存在于目标仓库（清空 = 关闭开关，跳过校验）
+    if body.work_branch and body.work_branch.strip():
+        from src.runtime.repogit import validate_work_branch_exists
+        _wb_repo = body.repo_key or task.get("repo_key") or ""
+        _wb_ok, _wb_err, _wb_default = validate_work_branch_exists(_wb_repo, body.work_branch)
+        if not _wb_ok:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": _wb_err, "field": "work_branch",
+                "work_branch": body.work_branch.strip(), "default_branch": _wb_default,
+            })
     fields = []
     params = []
     updates = body.model_dump(exclude_none=True)

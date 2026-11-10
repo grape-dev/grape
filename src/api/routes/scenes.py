@@ -1223,6 +1223,12 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
             log.info(f"Branch created: {body.branch_name} in GitHub {owner}/{repo}")
             # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
             _branches_cache_invalidate(owner, repo)
+            # Issue #1841：同步失效 work_branch 校验缓存（保存校验/注入判定立即看到新分支）
+            try:
+                from src.runtime.repogit import invalidate_branch_list_cache
+                invalidate_branch_list_cache(_resolve_repo_key(f"{owner}/{repo}"))
+            except Exception:
+                pass
             return {"name": body.branch_name.strip(), "message": "分支已创建"}
         except RuntimeError as e:
             err_msg = str(e)
@@ -1256,6 +1262,12 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         log.info(f"Branch created: {body.branch_name} in {owner}/{repo}")
         # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
         _branches_cache_invalidate(owner, repo)
+        # Issue #1841：同步失效 work_branch 校验缓存（保存校验/注入判定立即看到新分支）
+        try:
+            from src.runtime.repogit import invalidate_branch_list_cache
+            invalidate_branch_list_cache(_resolve_repo_key(f"{owner}/{repo}"))
+        except Exception:
+            pass
         return {"name": body.branch_name.strip(), "message": "分支已创建"}
     except RuntimeError as e:
         err_msg = str(e)
@@ -2717,6 +2729,15 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
     existing = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+
+    # Issue #1841：校验 work_branch 是否真实存在于目标仓库（不存在返回明确校验错误，前端 toast 提示）
+    from src.runtime.repogit import validate_work_branch_exists
+    _wb_ok, _wb_err, _wb_default = validate_work_branch_exists(repo_key, body.work_branch)
+    if not _wb_ok:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": _wb_err, "field": "work_branch",
+            "work_branch": body.work_branch.strip(), "default_branch": _wb_default,
+        })
 
     # 校验 custom_fields name 非空/大写/保留冲突且不重复
     from src.scene_custom_env import custom_env_error, normalize_custom_field

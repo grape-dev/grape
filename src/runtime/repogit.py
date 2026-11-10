@@ -8,7 +8,8 @@
 - 鉴权安全：clone 用 `-c http.extraheader` 内联注入（不写 config、不入日志）；push 用 GIT_ASKPASS
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
-import base64, os, re, shutil, subprocess, threading, time
+import base64, json, os, re, shutil, subprocess, threading, time
+import urllib.request
 from src import config
 from src.config import log
 
@@ -346,6 +347,212 @@ def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
         return opts.get("work_branch", "") or ""
     except Exception:
         return ""
+
+
+_BRANCH_LIST_TTL = 90.0
+_BRANCH_LIST_FAIL_TTL = 30.0
+_branch_list_cache = {}  # repo_key -> (timestamp, branches: set|None, default_branch)
+_branch_list_lock = threading.Lock()
+
+
+def _branch_list_cache_get(repo_key: str = "", refresh: bool = False):
+    """读分支列表缓存；失败结果短 TTL，避免注入链路反复穿透外部 API。"""
+    now = time.time()
+    with _branch_list_lock:
+        if refresh:
+            return None
+        entry = _branch_list_cache.get(repo_key)
+        if not entry:
+            return None
+        ttl = _BRANCH_LIST_TTL if entry[1] is not None else _BRANCH_LIST_FAIL_TTL
+        if now - entry[0] < ttl:
+            return entry[1], entry[2]
+    return None
+
+
+def _branch_list_cache_put(repo_key: str, branches, default_branch: str = "") -> None:
+    with _branch_list_lock:
+        _branch_list_cache[repo_key] = (time.time(), branches, default_branch or "")
+
+
+def invalidate_branch_list_cache(repo_key: str = "") -> None:
+    """失效分支列表缓存（建分支等写操作后调用；空 repo_key = 全清）。"""
+    with _branch_list_lock:
+        if repo_key:
+            _branch_list_cache.pop(repo_key, None)
+        else:
+            _branch_list_cache.clear()
+
+
+def _local_repo_branch_names(repo_key: str):
+    """本地 bare mirror 的 remote-tracking 分支列表（不依赖外部 API；不存在返回 None）。"""
+    base = repo_base_dir(repo_key)
+    if not base or not os.path.isdir(base):
+        return None, ""
+    r = _run_git(["-C", base, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"])
+    if r is None or r.returncode != 0:
+        return None, ""
+    branches = set()
+    for line in (r.stdout or "").splitlines():
+        name = line.strip()
+        if name.startswith("origin/"):
+            name = name[len("origin/"):]
+        if name and name != "HEAD":
+            branches.add(name)
+    default = ""
+    rh = _run_git(["-C", base, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if rh is not None and rh.returncode == 0:
+        default = (rh.stdout or "").strip()
+        if default.startswith("origin/"):
+            default = default[len("origin/"):]
+    return (branches or None), default
+
+
+def _branch_lookup_token(repo_key: str) -> str:
+    """分支查询 token：bot token 优先，GitCode 路径 B / GitHub 用户 token 兜底。"""
+    try:
+        from src.repo import Repo
+        tok = Repo(repo_key).bot_token or ""
+    except Exception:
+        tok = ""
+    if tok:
+        return tok
+    provider = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+    try:
+        if provider == "github":
+            from src.user.db import get_github_token
+            return get_github_token(repo_key=repo_key) or ""
+        from src.user.db import get_repo_token_with_refresh
+        return get_repo_token_with_refresh(repo_key) or ""
+    except Exception:
+        return ""
+
+
+def _fetch_remote_branch_names(repo_key: str, token: str = ""):
+    """经 VCS 分支列表 API 拉取真实分支集合 + 默认分支；失败返回 (None, "")。"""
+    from src.repo import Repo
+    from src.repo_key import split_owner_repo
+    provider = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+    owner, name = split_owner_repo(repo_key)
+    tok = token or _branch_lookup_token(repo_key)
+    if not owner or not name or not tok:
+        return None, ""
+    api = Repo(repo_key).api_base
+    headers = {"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"}
+    branches = set()
+    try:
+        for page in range(1, 6):
+            url = f"{api}/repos/{owner}/{name}/branches?per_page=100&page={page}"
+            req = urllib.request.Request(url, headers=headers)
+            data = json.load(urllib.request.urlopen(req, timeout=8))
+            if isinstance(data, dict):
+                data = data.get("branches") or []
+            if not isinstance(data, list) or not data:
+                break
+            for b in data:
+                if isinstance(b, dict) and b.get("name"):
+                    branches.add(b["name"])
+                elif isinstance(b, str) and b:
+                    branches.add(b)
+            if len(data) < 100:
+                break
+    except Exception as e:
+        log.warning(f"work_branch: list branches failed repo={repo_key}: {e}")
+        return None, ""
+    default = ""
+    try:
+        req = urllib.request.Request(f"{api}/repos/{owner}/{name}", headers=headers)
+        info = json.load(urllib.request.urlopen(req, timeout=8))
+        if isinstance(info, dict):
+            default = info.get("default_branch") or ""
+    except Exception:
+        pass
+    return (branches or None), default
+
+
+def list_repo_branch_names(repo_key: str, token: str = "", refresh: bool = False):
+    """返回 (branches: set|None, default_branch)。
+
+    先读本地 bare mirror（无网络开销），无镜像再穿透 VCS 分支列表 API；
+    结果按 repo 缓存（成功 90s / 失败 30s）。branches=None 表示无法核实。
+    """
+    cached = _branch_list_cache_get(repo_key, refresh=refresh)
+    if cached is not None:
+        return cached
+    branches, default = _local_repo_branch_names(repo_key)
+    if branches is None:
+        branches, default = _fetch_remote_branch_names(repo_key, token=token)
+    _branch_list_cache_put(repo_key, branches, default)
+    return branches, default
+
+
+def _has_local_mirror(repo_key: str) -> bool:
+    base = repo_base_dir(repo_key)
+    return bool(base and os.path.isdir(base))
+
+
+def _pick_default_branch(branches: set, default_branch: str = "") -> str:
+    if default_branch and default_branch in branches:
+        return default_branch
+    for cand in ("main", "master"):
+        if cand in branches:
+            return cand
+    return sorted(branches)[0] if branches else (default_branch or "main")
+
+
+def resolve_work_branch(repo_key: str, configured: str, token: str = "") -> tuple[str, str]:
+    """注入/保存前校验 work_branch 是否存在，失效则回退仓库默认分支并告警。
+
+    Returns (effective_branch, fallback_note)。fallback_note 为空表示未回退。
+    - 仅用「分支列表显式比对」，不依赖 GitCode ref/tree 查询（ref 不存在会静默回退默认分支）。
+    - 无法拉取分支列表（无 token/网络失败）时保持原配置，不误判回退。
+    - main/master 且无本地 mirror 时跳过远端查询（通用兜底名，避免无谓网络开销）。
+    """
+    cfg = (configured or "").strip()
+    if not cfg:
+        return "", ""
+    if cfg in ("main", "master") and not _has_local_mirror(repo_key):
+        return cfg, ""
+    branches, default = list_repo_branch_names(repo_key, token=token)
+    if branches is None:
+        log.warning(f"work_branch: cannot verify '{cfg}' for repo={repo_key} (branch list unavailable); keep configured value")
+        return cfg, ""
+    if cfg in branches:
+        return cfg, ""
+    fallback = _pick_default_branch(branches, default)
+    note = (f"configured work_branch '{cfg}' does not exist in repo {repo_key}; "
+            f"fallback to default branch '{fallback}'")
+    log.warning(note)
+    return fallback, note
+
+
+def validate_work_branch_exists(repo_key: str, branch: str, token: str = "") -> tuple[bool, str, str]:
+    """保存前校验 work_branch 是否存在。
+
+    Returns (ok, message, default_branch)。
+    - ok=True 也包含「无法核实」（无 token/网络失败），避免离线阻塞保存。
+    - ok=False 时 message 为可直接展示给用户的明确校验错误。
+    """
+    cfg = (branch or "").strip()
+    if not cfg:
+        return False, "工作分支不能为空", ""
+    if cfg in ("main", "master") and not _has_local_mirror(repo_key):
+        return True, "", cfg
+    branches, default = list_repo_branch_names(repo_key, token=token)
+    if branches is None:
+        log.warning(f"work_branch: cannot verify '{cfg}' for repo={repo_key} on save (branch list unavailable)")
+        return True, "", default
+    if cfg in branches:
+        return True, "", default
+    suggestion = _pick_default_branch(branches, default)
+    return False, (f"工作分支 '{cfg}' 在仓库中不存在，请从现有分支选择（默认分支：{suggestion}）"), suggestion
+
+
+def read_effective_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
+    """读取场景 work_branch 并返回校验后的实际生效分支（三条注入路径统一入口）。"""
+    configured = _read_scene_work_branch(repo_key, issue_id)
+    effective, _ = resolve_work_branch(repo_key, configured)
+    return effective
 
 
 def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_work_branch: str = "") -> str:

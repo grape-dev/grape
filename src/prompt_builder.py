@@ -627,6 +627,16 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         lines.append("Custom scene options are injected as environment variables. Before executing, you MUST read the following environment variables:")
         if wb:
             lines.append("- GRAPE_WORK_BRANCH: work baseline branch (printenv GRAPE_WORK_BRANCH)")
+            # Issue #1841：标注实际生效分支与回退原因（prompt 可见，避免 Agent 按失效配置排期）
+            try:
+                from src.runtime.repogit import resolve_work_branch
+                _effective_wb, _wb_note = resolve_work_branch(repo_key, wb)
+                if _wb_note:
+                    lines.append(f"  - 实际生效分支: {_effective_wb}（原配置 '{wb}' 不存在于仓库，已回退默认分支）")
+                elif _effective_wb:
+                    lines.append(f"  - 实际生效分支: {_effective_wb}")
+            except Exception:
+                pass
         lines.append("Read all configured options first, then start working.")
         result = "\n".join(lines)
         _advanced_options_cache[_cache_key] = (result, now)
