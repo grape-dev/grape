@@ -181,6 +181,21 @@ class TestAuditSourceAccuracy:
         assert url == "https://api.grape.example.com"
         assert source == "unreachable_fallback"
 
+    def test_exception_path_probes_local_before_gateway_fallback(self):
+        """求值异常时也不直接落 localhost:local_port，先探测本机业务端口。"""
+        from src import prompt_builder
+        prompt_builder._clear_business_probe_cache()
+        with patch("src.user.db.get_business_api_url_explicit",
+                   side_effect=RuntimeError("boom")), \
+             patch("src.user.db.get_business_api_port", return_value="8081"), \
+             patch.object(prompt_builder, "_local_port", return_value="8083"), \
+             patch.object(prompt_builder, "_probe_business_api",
+                          side_effect=lambda u: u == "http://127.0.0.1:8081") as probe:
+            url, source = prompt_builder._resolve_business_base(3)
+        assert url == "http://127.0.0.1:8081"
+        assert source == "local_business_port"
+        probe.assert_called_once_with("http://127.0.0.1:8081")
+
     def test_audit_log_reports_unreachable_fallback(self, caplog):
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
@@ -267,6 +282,26 @@ class TestBusinessApiProbe:
                                                   "/api/issues/{number}": {}}}):
             assert prompt_builder._probe_openapi_family("http://127.0.0.1:8081", 0.2) is True
 
+    def test_openapi_family_rejects_runtime_gateway(self):
+        """runtime 网关 openapi 含 `/api/runtime/issues/...`，不得误判为业务 API。"""
+        from src import prompt_builder
+        gateway_paths = {
+            "/api/runtime/issues/takeover-context": {},
+            "/api/runtime/nodes": {},
+            "/api/runtime/tasks/{task_id}": {},
+        }
+        with patch.object(prompt_builder, "_http_get_json",
+                          return_value={"paths": gateway_paths}):
+            assert prompt_builder._probe_openapi_family("http://127.0.0.1:8083", 0.2) is False
+
+    def test_openapi_family_requires_business_prefix(self):
+        """仅前缀匹配业务路由；近似的非业务路径（如 `/api/issuesfoo`）不算业务 API。"""
+        from src import prompt_builder
+        with patch.object(prompt_builder, "_http_get_json",
+                          return_value={"paths": {"/api/issuesfoo": {},
+                                                  "/other/issues": {}}}):
+            assert prompt_builder._probe_openapi_family("http://127.0.0.1:8083", 0.2) is False
+
 
 class TestTaskServerEnvAuditLog:
     def test_env_resolution_logs_address_and_source_without_token(self, caplog):
@@ -301,6 +336,26 @@ class TestTaskServerEnvAuditLog:
         assert "tk_abc" not in text
         assert "user@" not in text
         assert "https://biz.example.com/api" in text
+
+    def test_redact_url_masks_schemeless_base(self):
+        """无 scheme 基址无法结构化脱敏，整体返回 ***，避免 userinfo/query 泄漏。"""
+        from src import prompt_builder
+        assert prompt_builder._redact_url(
+            "user:secret@host/api?token=tk_abc") == "***"
+        assert prompt_builder._redact_url("") == ""
+
+    def test_audit_log_redacts_schemeless_userinfo_and_query(self, caplog):
+        from src import prompt_builder
+        explicit = "user:secret@host/api?token=tk_abc"
+        with patch("src.user.db.get_business_api_url_explicit", return_value=explicit), \
+             patch.object(prompt_builder, "_resolve_server_url",
+                          return_value="https://worker.grape.example.com"):
+            with caplog.at_level(logging.INFO, logger="devops-bot"):
+                prompt_builder.resolve_task_server_env(3)
+        text = caplog.text
+        assert "secret" not in text
+        assert "tk_abc" not in text
+        assert "GRAPE_SERVER_URL=***" in text
 
     def test_config_example_documents_business_api_port(self):
         import json

@@ -103,8 +103,9 @@ _BUSINESS_PROBE_DEFAULT_TTL = 60.0      # 秒；同一候选基址的进程内�
 _BUSINESS_PROBE_CACHE_MAX = 64          # 缓存条数上限（长驻进程防无界增长）
 _business_probe_cache: dict = {}
 _business_probe_lock = threading.Lock()
-# 最近一次业务基址解析的命中来源（线程内，仅审计日志用；见 `_business_server_url_source`）
-_business_source_hint = threading.local()
+# 业务 API 端点族前缀（Issue #1731）：只认主控业务路由，显式排除 `/api/runtime/...`
+# 等 runtime 网关路径（后者天然含 `/issues` 字样，不能作为业务 API 判据）。
+_BUSINESS_API_PATH_PREFIXES = ("/api/issues", "/api/git-repo")
 
 
 def _business_probe_timeout() -> float:
@@ -163,12 +164,23 @@ def _probe_health(base_url: str, timeout: float) -> bool:
 
 
 def _probe_openapi_family(base_url: str, timeout: float) -> bool:
-    """`/openapi.json` 端点族探测：含 issues / git-repo 视为业务 API。"""
+    """`/openapi.json` 端点族探测：含业务路由前缀才视为业务 API。
+
+    Issue #1731：runtime 网关的 openapi 含 `/api/runtime/issues/takeover-context`
+    等路径，若仅做子串匹配会把 runtime 网关误判成业务 API。这里收紧为
+    业务路由前缀（`/api/issues`、`/api/git-repo`），并显式排除 `/api/runtime/`。
+    """
     payload = _http_get_json(base_url.rstrip("/") + "/openapi.json", timeout)
     paths = (payload or {}).get("paths") if isinstance(payload, dict) else None
     if not isinstance(paths, dict):
         return False
-    return any("/issues" in p or "/git-repo" in p for p in paths)
+    for path in paths:
+        if not isinstance(path, str) or path.startswith("/api/runtime/"):
+            continue
+        for prefix in _BUSINESS_API_PATH_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return True
+    return False
 
 
 def _remember_probe_result(base: str, ok: bool) -> None:
@@ -232,7 +244,9 @@ def _redact_url(url: str) -> str:
         from urllib.parse import urlsplit, urlunsplit
         parts = urlsplit(url)
         if not parts.netloc:
-            return url
+            # 无 scheme 的显式基址（如 `user:secret@host/api?token=tk`）无法安全
+            # 结构化脱敏，整体掩码，避免 userinfo/query 落审计日志。
+            return "***"
         host = parts.hostname or ""
         netloc = f"{host}:{parts.port}" if parts.port else host
         return urlunsplit((parts.scheme, netloc, parts.path, "***" if parts.query else "", ""))
@@ -283,6 +297,11 @@ def _resolve_business_base(runtime_id: int = 0) -> tuple[str, str]:
         return _select_local_business_base(public_url)
     except Exception:
         pass
+    # 求值异常时仍先探测本机业务端口，避免直接落到 runtime 网关（Issue #1731）。
+    try:
+        return _select_local_business_base("")
+    except Exception:
+        pass
     # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
     return f"http://localhost:{_local_port()}", "exception_fallback"
 
@@ -301,17 +320,8 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     远程 runtime 沿用 `server_base_url`（`get_business_api_url`），行为不变。
     单地址部署时 `worker_connect_url` 回退 `server_base_url`，与改造前等价。
     """
-    url, source = _resolve_business_base(runtime_id)
-    _business_source_hint.value = ((url or "").rstrip("/"), runtime_id, source)
+    url, _source = _resolve_business_base(runtime_id)
     return url
-
-
-def _business_server_url_source(url: str, runtime_id: int = 0) -> str:
-    """返回业务基址命中来源分支（读取解析时记录的决策，不重复求值/探测）。"""
-    hint = getattr(_business_source_hint, "value", None)
-    if hint and hint[0] == (url or "").rstrip("/") and hint[1] == runtime_id:
-        return hint[2]
-    return "unknown"
 
 
 def _apply_server_url_placeholders(text: str, runtime_id: int = 0) -> str:
@@ -333,15 +343,16 @@ def resolve_task_server_env(runtime_id: int = 0) -> dict:
     - `RUNTIME_SERVER_URL`：worker runtime / A2A 回连基址
 
     Issue #1731：注入结果写审计日志（最终地址 + 命中来源分支，不含 token），
-    便于运维定位基址错配。
+    便于运维定位基址错配。来源由 `_resolve_business_base` 显式返回，不再依赖
+    线程内隐式通道。
     """
-    business_url = _resolve_business_server_url(runtime_id)
+    business_url, business_source = _resolve_business_base(runtime_id)
     runtime_url = _resolve_server_url(runtime_id)
     _log_safe(
         "info",
         "task server env resolved: "
         f"GRAPE_SERVER_URL={_redact_url(business_url)} "
-        f"(source={_business_server_url_source(business_url, runtime_id)}); "
+        f"(source={business_source}); "
         f"RUNTIME_SERVER_URL={_redact_url(runtime_url)}")
     return {
         "GRAPE_SERVER_URL": business_url,
@@ -491,8 +502,7 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         _advanced_options_cache[_cache_key] = (result, now)
         return result
     except Exception as _e:
-        from src.config import log as _log
-        _log.warning(f"prompt_builder: inject advanced options failed: {_e}")
+        _log_safe("warning", f"prompt_builder: inject advanced options failed: {_e}")
         return ""
 
 
@@ -930,11 +940,7 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
             parts.append(_ui)
     except Exception as _e:
         # 降级不阻塞：注入失败仅记录，主流程继续
-        try:
-            from src.config import log as _log
-            _log.warning(f"user-image injection failed: {_e}")
-        except Exception:
-            pass
+        _log_safe("warning", f"user-image injection failed: {_e}")
 
 
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,

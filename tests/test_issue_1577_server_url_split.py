@@ -80,8 +80,8 @@ class TestResolveBusinessServerUrl:
 
     def test_resolve_task_server_env_returns_both_bases(self):
         from src import prompt_builder
-        with patch.object(prompt_builder, "_resolve_business_server_url",
-                          return_value="https://api.grape.example.com"), \
+        with patch.object(prompt_builder, "_resolve_business_base",
+                          return_value=("https://api.grape.example.com", "server_base_url")), \
              patch.object(prompt_builder, "_resolve_server_url",
                           return_value="https://worker.grape.example.com"):
             env = prompt_builder.resolve_task_server_env(7)
@@ -109,8 +109,8 @@ class TestResolveBusinessServerUrl:
 class TestBuildTaskEnv:
     def _build(self, runtime_id=0):
         from src.api.event_pipeline import build_task_env
-        with patch("src.prompt_builder._resolve_business_server_url",
-                   return_value="https://api.grape.example.com"), \
+        with patch("src.prompt_builder._resolve_business_base",
+                   return_value=("https://api.grape.example.com", "server_base_url")), \
              patch("src.prompt_builder._resolve_server_url",
                    return_value="https://worker.grape.example.com"), \
              patch("src.api.event_pipeline._inject_scene_env"), \
