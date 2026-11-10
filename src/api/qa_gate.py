@@ -117,10 +117,29 @@ _QA_PARTIAL_PASS_RE = re.compile(
 # （Standards: 3 项…；Spec: 4 项需修复…）。Spec 轴报告的正向项数即代表未通过，
 # 不能依赖“失败/不通过”字面，也不能被缺陷描述里出现的英文 “pass” 吞成通过。
 _QA_SUMMARY_COUNT_RE = re.compile(
-    r"(?<![A-Za-z])(?:Spec|规格|需求(?:评审|规格)?|验收(?:评审|标准)?)(?![A-Za-z])"
-    r"\s*[:：]?\s*(?:发现|存在|共|有)?\s*[1-9]\d*\s*(?:项|个|条)"
+    r"(?<![A-Za-z])(?:Standards|Spec|规范|标准|规格|需求(?:评审|规格)?|验收(?:评审|标准)?)"
+    r"(?![A-Za-z])\s*[:：]?\s*(?:发现|存在|共|有)?\s*([0-9]+)\s*(?:项|个|条)"
     r"|[1-9]\d*\s*(?:项|个|条)\s*(?:需|需要|待)\s*修复",
     re.IGNORECASE,
+)
+# 汇总中的硬失败语义（出现即按未通过处理，显式“结论：通过”也不能覆盖）。
+_QA_SUMMARY_HARD_RE = re.compile(
+    r"需修复|需要修复|待修复|硬违规|违反|越界|超出范围|最差|"
+    r"不通过|未通过|未达标|不达标|阻塞|阻断|失败|漏判|误判|绕过|失效|缺陷|违规|"
+    r"(?:中高|高)\s*[:：]"
+)
+# 仅属建议/低判断项的汇总项：项数 > 0 也不应视为失败（需结合显式通过结论）。
+_QA_SUMMARY_SUGGEST_RE = re.compile(
+    r"建议|判断项|可选|优化|低\s*[:：]|低\s*(?:严重|风险|优先)"
+)
+# 显式通过结论：用于放行“仅含建议/低判断项”的项数汇总。
+_QA_EXPLICIT_PASS_RE = re.compile(
+    r"结论\s*[:：]?\s*(?:为|是)?\s*(?:通过|pass(?:ed)?\b|✅)",
+    re.IGNORECASE,
+)
+# 无轴标签的“N 项需修复”汇总（N > 0 即视为未通过）。
+_QA_SUMMARY_FIX_RE = re.compile(
+    r"[1-9]\d*\s*(?:项|个|条)\s*(?:需|需要|待)\s*修复"
 )
 # 汇总语义里的失败信号（在剔除否定语境后判定，避免“无违反/无需修复”误判）。
 _QA_SUMMARY_KEYWORD_RE = re.compile(
@@ -284,11 +303,47 @@ def _qa_pass_by_terms(text: str) -> bool:
             or bool(_QA_PASS_EN_RE.search(text)))
 
 
+def _qa_summary_verdict(blob: str) -> str | None:
+    """项数汇总判定：区分硬失败项与建议/低判断项。
+
+    - 任一轴存在硬失败项（需修复/违反/最差/阻塞/失败等）→ ``fail``；
+    - 正项数未标注为建议/低判断项 → ``fail``（对齐历史“N 项即未通过”语义）；
+    - 全部正项数均为建议/低判断项且含显式通过结论 → ``pass``；
+    - 无正项数 / 无汇总标签 → ``None``（交由后续规则判定）。
+    """
+    _matches = list(_QA_SUMMARY_COUNT_RE.finditer(blob))
+    _has_positive = False
+    _suggestion_only = False
+    for _i, _m in enumerate(_matches):
+        if _m.group(1) is None:
+            # 无轴标签的“N 项需修复”汇总是明确失败项。
+            return "fail"
+        _count = int(_m.group(1))
+        if _count <= 0:
+            continue
+        _end = _matches[_i + 1].start() if _i + 1 < len(_matches) else len(blob)
+        _seg = blob[_m.end():_end]
+        if _QA_SUMMARY_HARD_RE.search(_seg):
+            return "fail"
+        _has_positive = True
+        if not _QA_SUMMARY_SUGGEST_RE.search(_seg):
+            # 未标注为建议/低判断项的正项数 → 视为失败项
+            return "fail"
+        _suggestion_only = True
+    if not _has_positive:
+        return "fail" if _QA_SUMMARY_FIX_RE.search(blob) else None
+    # 全部正项数均为建议/低判断项：仅显式通过结论时才放行。
+    if _suggestion_only and _QA_EXPLICIT_PASS_RE.search(blob):
+        return "pass"
+    return None
+
+
 def _classify_qa_text(blob: str) -> str:
     """结论文本的有序规则判定。
 
     规则表按顺序命中即返回，显式表达优先级（复审：避免多组正则隐式依赖命中顺序）：
-    1. 项数汇总（Spec N 项 / N 项需修复）→ fail；
+    1. 项数汇总（Standards/Spec N 项 / N 项需修复）→ 硬失败项 fail；仅建议/低判断项
+       且显式“结论：通过”→ pass；
     2. 零失败率归一为“通过”（失败率为 0）；
     3. 剔除后置定量否定（0 tests failed / 未通过项 0）；
     4. 否定式通过 / 未达标 / 部分通过 → fail；
@@ -297,9 +352,11 @@ def _classify_qa_text(blob: str) -> str:
     7. 失败语义 → fail，其次通过语义 → pass；
     8. 不可判定 → unknown（fail-open）。
     """
-    # 规则 1：真实 qa 失败结论多为项数汇总，不能依赖“失败/不通过”字面。
-    if _QA_SUMMARY_COUNT_RE.search(blob):
-        return "fail"
+    # 规则 1：真实 qa 失败结论多为项数汇总，不能依赖“失败/不通过”字面；
+    # 但“仅建议/低判断项 + 显式通过”不应拦截正常关闭链路。
+    _summary_verdict = _qa_summary_verdict(blob)
+    if _summary_verdict is not None:
+        return _summary_verdict
     # 规则 2：失败率/失败数为 0 表示全量通过。
     _normalized = _QA_ZERO_FAIL_RATE_RE.sub("通过", blob)
     # 规则 3：先剔除后置定量否定，否则“未通过 0 项”会被否定式通过误判。
