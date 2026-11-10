@@ -25,11 +25,20 @@ USER_IMAGE_MAX_COUNT = 8                 # 单 Issue 最多采集 8 张（超出
 # 该类资源匿名拉取 401，需带平台 token 下载。
 _USER_ATTACHMENT_URL_RE = re.compile(r"https://gitcode\.com/user-attachments/[^\s\)\"'<>]+")
 _USER_ATTACHMENT_URL_PREFIX = "https://gitcode.com/user-attachments/"
-USER_ATTACHMENT_MAX_SIZE = 100 * 1024 * 1024   # 单个附件 100MB 上限
+USER_ATTACHMENT_MAX_SIZE = 50 * 1024 * 1024    # 与视频理解 50MB 阈值一致，避免整段下载后才判超限
 USER_ATTACHMENT_TIMEOUT = 60                   # 下载 60s 超时（视频较大）
 USER_ATTACHMENT_MAX_COUNT = 6                  # 单次评论最多采集 6 个
 _USER_ATTACHMENT_ALLOWED_CTYPES = ("image/", "video/", "application/octet-stream")
-_USER_ATTACHMENT_VIDEO_EXTS = {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".flv"}
+# 单一扩展名白名单：落盘前必须命中，杜绝外部扩展名（.html/.php/.js 等）直通公开静态目录。
+USER_ATTACHMENT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+USER_ATTACHMENT_VIDEO_EXTS = {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".flv"}
+USER_ATTACHMENT_ALLOWED_EXTS = USER_ATTACHMENT_IMAGE_EXTS | USER_ATTACHMENT_VIDEO_EXTS
+_CONTENT_TYPE_EXT_MAP = {
+    "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+    "image/svg+xml": ".svg", "image/png": ".png", "image/bmp": ".bmp",
+    "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
+    "video/x-msvideo": ".avi", "video/x-matroska": ".mkv",
+}
 
 
 def paginate_pages(fetch_page, page_size: int = 100, max_pages: int = 20) -> list | dict:
@@ -64,25 +73,25 @@ def extract_gitcode_user_image_urls(text: "str | None") -> list[str]:
     return list(dict.fromkeys(urls))
 
 
-def _download_user_image(url: str, token: str, max_size: int = USER_IMAGE_MAX_SIZE,
-                         timeout: int = USER_IMAGE_TIMEOUT) -> dict:
-    """带 token 下载单张 user-images 图片（内部实现，供 VcsApiClient 复用）。
+def _download_authed(url: str, token: str, *, allowed_prefix: str, ctype_prefixes: tuple,
+                     max_size: int, timeout: int, accept: str = "", label: str = "asset",
+                     ctype_error: str = "unsupported content-type") -> dict:
+    """Issue #315/#1748 共用：带 token 下载白名单 URL 的通用实现（消除重复代码）。
 
     返回 {"content": bytes, "content_type": str, "size": int} 或 {"error": str}。
     token 仅构造 Authorization 请求头，绝不写入日志或返回值。
     """
-    if not url.startswith(_USER_IMAGE_URL_PREFIX):
-        return {"error": "url not allowed (only raw.gitcode.com/user-images)"}
-    req = urllib.request.Request(url, method="GET", headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "image/*",
-    })
+    if not url.startswith(allowed_prefix):
+        return {"error": f"url not allowed (only {allowed_prefix})"}
+    headers = {"Authorization": f"Bearer {token}"}
+    if accept:
+        headers["Accept"] = accept
+    req = urllib.request.Request(url, method="GET", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            if not ctype.startswith("image/"):
-                # 非图片（如 403 返回 JSON 的场景已被 HTTPError 分支拦截，这里防御其他 200 非图）
-                return {"error": f"non-image content-type: {ctype or 'unknown'}"}
+            if ctype_prefixes and not any(ctype.startswith(p) for p in ctype_prefixes):
+                return {"error": f"{ctype_error}: {ctype or 'unknown'}"}
             chunks = []
             total = 0
             while True:
@@ -91,25 +100,34 @@ def _download_user_image(url: str, token: str, max_size: int = USER_IMAGE_MAX_SI
                     break
                 total += len(chunk)
                 if total > max_size:
-                    return {"error": f"image exceeds size limit ({max_size} bytes)"}
+                    return {"error": f"{label} exceeds size limit ({max_size} bytes)"}
                 chunks.append(chunk)
             if total == 0:
-                return {"error": "empty image content"}
+                return {"error": f"empty {label} content"}
             content = b"".join(chunks)
             return {"content": content, "content_type": ctype, "size": total}
     except urllib.error.HTTPError as e:
-        log.warning(f"user-image download failed: {url} -> HTTP {e.code}")
+        log.warning(f"{label} download failed: {url} -> HTTP {e.code}")
         return {"error": f"HTTP {e.code}"}
     except urllib.error.URLError as e:
         _reason = getattr(e, "reason", e)
         if "timed out" in str(_reason).lower() or "timeout" in str(_reason).lower():
-            log.warning(f"user-image download failed: {url} -> timeout ({timeout}s)")
+            log.warning(f"{label} download failed: {url} -> timeout ({timeout}s)")
             return {"error": "timeout"}
-        log.warning(f"user-image download failed: {url} -> {_reason}")
+        log.warning(f"{label} download failed: {url} -> {_reason}")
         return {"error": str(_reason)}
     except Exception as e:
-        log.warning(f"user-image download failed: {url} -> {e}")
+        log.warning(f"{label} download failed: {url} -> {e}")
         return {"error": str(e)}
+
+
+def _download_user_image(url: str, token: str, max_size: int = USER_IMAGE_MAX_SIZE,
+                         timeout: int = USER_IMAGE_TIMEOUT) -> dict:
+    """带 token 下载单张 user-images 图片（内部实现，供 VcsApiClient 复用）。"""
+    return _download_authed(
+        url, token, allowed_prefix=_USER_IMAGE_URL_PREFIX, ctype_prefixes=("image/",),
+        max_size=max_size, timeout=timeout, accept="image/*", label="image",
+        ctype_error="non-image content-type")
 
 
 def extract_gitcode_user_attachment_urls(text: "str | None") -> list[str]:
@@ -124,6 +142,12 @@ def extract_gitcode_user_attachment_urls(text: "str | None") -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+def _url_ext(url: str) -> str:
+    """取 URL 末段小写扩展名（忽略查询串），无扩展名返回空串。"""
+    last = (url or "").split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    return os.path.splitext(last)[1].lower()
+
+
 def attachment_kind(url: str, content_type: str = "") -> str:
     """按 Content-Type / URL 扩展名判定附件类型：image / video / file。"""
     ct = (content_type or "").split(";")[0].strip().lower()
@@ -131,75 +155,43 @@ def attachment_kind(url: str, content_type: str = "") -> str:
         return "image"
     if ct.startswith("video/"):
         return "video"
-    last = (url or "").rstrip("/").rsplit("/", 1)[-1]
-    ext = os.path.splitext(last)[1].lower()
-    if ext in _USER_ATTACHMENT_VIDEO_EXTS:
+    ext = _url_ext(url)
+    if ext in USER_ATTACHMENT_VIDEO_EXTS:
         return "video"
-    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"):
+    if ext in USER_ATTACHMENT_IMAGE_EXTS:
         return "image"
     return "file"
 
 
+def is_media_attachment_url(url: str) -> bool:
+    """已知扩展名时预先过滤非媒体附件（避免下载/转存 zip 等），未知扩展名放行待 Content-Type 判定。"""
+    ext = _url_ext(url)
+    return (not ext) or ext in USER_ATTACHMENT_ALLOWED_EXTS
+
+
 def _attachment_ext(url: str, content_type: str = "", kind: str = "") -> str:
-    """从 URL 末段/Content-Type 推断附件扩展名（默认按类型给 .bin/.mp4/.png）。"""
-    last = (url or "").rstrip("/").rsplit("/", 1)[-1]
-    ext = os.path.splitext(last)[1].lower()
-    if ext and len(ext) <= 6:
+    """从 URL 末段/Content-Type 推断附件扩展名，仅接受媒体白名单；不合法返回空串。
+
+    外部扩展名（.html/.php/.js 等）绝不透传，避免平台公开静态目录存储型 XSS；
+    调用方拿到空串时应拒绝落盘。
+    """
+    ext = _url_ext(url)
+    if ext in USER_ATTACHMENT_ALLOWED_EXTS:
         return ext
     ct = (content_type or "").split(";")[0].strip().lower()
-    ct_map = {
-        "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
-        "image/svg+xml": ".svg", "image/png": ".png",
-        "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
-    }
-    if ct in ct_map:
-        return ct_map[ct]
-    return ".mp4" if kind == "video" else (".png" if kind == "image" else ".bin")
+    ct_ext = _CONTENT_TYPE_EXT_MAP.get(ct)
+    if ct_ext in USER_ATTACHMENT_ALLOWED_EXTS:
+        return ct_ext
+    return ""
 
 
 def _download_user_attachment(url: str, token: str, max_size: int = USER_ATTACHMENT_MAX_SIZE,
                               timeout: int = USER_ATTACHMENT_TIMEOUT) -> dict:
-    """Issue #1748：带平台 token 下载评论附件（gitcode.com/user-attachments/...）。
-
-    返回 {"content": bytes, "content_type": str, "size": int} 或 {"error": str}。
-    token 仅构造 Authorization 请求头，绝不写入日志或返回值。
-    """
-    if not url.startswith(_USER_ATTACHMENT_URL_PREFIX):
-        return {"error": "url not allowed (only gitcode.com/user-attachments)"}
-    req = urllib.request.Request(url, method="GET", headers={
-        "Authorization": f"Bearer {token}",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-            if not any(ctype.startswith(p) for p in _USER_ATTACHMENT_ALLOWED_CTYPES):
-                return {"error": f"unsupported content-type: {ctype or 'unknown'}"}
-            chunks = []
-            total = 0
-            while True:
-                chunk = resp.read(64 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_size:
-                    return {"error": f"attachment exceeds size limit ({max_size} bytes)"}
-                chunks.append(chunk)
-            if total == 0:
-                return {"error": "empty attachment content"}
-            return {"content": b"".join(chunks), "content_type": ctype, "size": total}
-    except urllib.error.HTTPError as e:
-        log.warning(f"user-attachment download failed: HTTP {e.code}")
-        return {"error": f"HTTP {e.code}"}
-    except urllib.error.URLError as e:
-        _reason = getattr(e, "reason", e)
-        if "timed out" in str(_reason).lower() or "timeout" in str(_reason).lower():
-            log.warning(f"user-attachment download failed: timeout ({timeout}s)")
-            return {"error": "timeout"}
-        log.warning(f"user-attachment download failed: {_reason}")
-        return {"error": str(_reason)}
-    except Exception as e:
-        log.warning(f"user-attachment download failed: {e}")
-        return {"error": str(e)}
+    """Issue #1748：带平台 token 下载评论附件（gitcode.com/user-attachments/...）。"""
+    return _download_authed(
+        url, token, allowed_prefix=_USER_ATTACHMENT_URL_PREFIX,
+        ctype_prefixes=_USER_ATTACHMENT_ALLOWED_CTYPES, max_size=max_size, timeout=timeout,
+        label="attachment", ctype_error="unsupported content-type")
 
 
 class VcsApiClient:

@@ -786,9 +786,6 @@ Never include in the comment body: thinking narration ("让我…", "现在…",
 """
 
 
-# 附件文件扩展名分类
-_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-
 # Issue #315: user-images 鉴权下载结果缓存（repo_key+issue 维度，TTL 一次流水线）
 _USER_IMAGE_CACHE: dict = {}
 _USER_IMAGE_CACHE_TTL = 600  # 秒
@@ -872,36 +869,38 @@ def _collect_user_images_for_injection(repo_key: str, owner: str, repo: str, iss
 _COMMENT_MEDIA_CACHE: dict = {}
 _COMMENT_MEDIA_CACHE_TTL = 600  # 秒
 _COMMENT_MEDIA_CACHE_MAX = 256
+_COMMENT_MEDIA_ANALYSIS_MAX_CHARS = 2000  # Spec L30：分析摘要限长，防止事件注入膨胀
 
 
 def _comment_media_texts(evt) -> list[str]:
-    """Issue #1748：收集可能含评论媒体附件的文本（评论正文 / A2A 前序摘要）。"""
+    """Issue #1748：仅在 issue_comment 事件收集评论文本（Spec 限定评论事件）。
+
+    不读取 `_a2a_context`：任意事件（A2A 下游/变更事件）不应触发附件采集，
+    避免超出 Spec 触发面，同时避免下游摘要变化导致缓存指纹漂移、重复下载。
+    """
+    if not evt or (evt or {}).get("type") != "issue_comment":
+        return []
     payload = (evt or {}).get("payload", {}) or {}
-    texts: list[str] = []
     note = ""
     if isinstance(payload.get("object_attributes"), dict):
         note = str(payload["object_attributes"].get("note") or "")
     if not note and isinstance(payload.get("comment"), dict):
         note = str(payload["comment"].get("body") or "")
-    if note:
-        texts.append(note)
-    a2a = str((evt or {}).get("_a2a_context") or "")
-    if a2a:
-        texts.append(a2a)
-    return texts
+    return [note] if note else []
 
 
 def _collect_comment_media_for_injection(repo_key: str, owner: str, repo: str, issue_num: str,
                                          agent_type: str, evt=None) -> str:
     """Issue #1748：评论媒体附件（视频/图片）→ 服务端凭证下载 → 媒体分析注入段。
 
-    - 触发范围：评论事件正文 / A2A 前序摘要中含 gitcode.com/user-attachments 链接。
+    - 触发范围：仅 issue_comment 事件正文含 gitcode.com/user-attachments 链接。
     - 附件直链匿名访问 401，由服务端带凭证下载并经 `_attach_save` 转存为平台附件 URL，
-      Agent 使用注入的读取通道访问不再 401。
-    - 图片复用「用户上传的图片分析」、视频复用「用户上传的视频分析」；不可读/分析失败
-      均注入明确原因，无静默丢失。
-    - 结果按 (repo_key, issue_num, 文本指纹) 进程内缓存，流水线多 agent 不重复下载/转写。
-    - token 绝不进入返回文本。
+      Agent 使用注入的读取通道访问不再 401（所有角色均注入读取通道）。
+    - 图片复用「用户上传的图片分析」、视频复用「用户上传的视频分析」；不可读/分析失败/
+      采集异常均注入明确原因，无静默丢失。
+    - 成功结果按 (repo_key, issue_num, 评论文本指纹) 进程内缓存，流水线多 agent 不重复下载/
+      转写；异常结果不缓存，避免瞬时故障被 600s 固定放大。
+    - 分析摘要按 _COMMENT_MEDIA_ANALYSIS_MAX_CHARS 限长；token 绝不进入返回文本。
     """
     import hashlib as _hashlib
     import time as _time
@@ -917,14 +916,17 @@ def _collect_comment_media_for_injection(repo_key: str, owner: str, repo: str, i
     else:
         from src.api.issues_center import _collect_issue_media_attachments
         collected = _collect_issue_media_attachments(owner, repo, issue_num, texts, repo_key=repo_key)
-        if len(_COMMENT_MEDIA_CACHE) >= _COMMENT_MEDIA_CACHE_MAX:
-            for _k in list(_COMMENT_MEDIA_CACHE.keys())[: _COMMENT_MEDIA_CACHE_MAX // 2]:
-                _COMMENT_MEDIA_CACHE.pop(_k, None)
-        _COMMENT_MEDIA_CACHE[cache_key] = (now, collected)
+        # 异常结果不缓存：下次组装可重试，避免瞬时失败被 TTL 固化为静默丢失
+        if not collected.get("error"):
+            if len(_COMMENT_MEDIA_CACHE) >= _COMMENT_MEDIA_CACHE_MAX:
+                for _k in list(_COMMENT_MEDIA_CACHE.keys())[: _COMMENT_MEDIA_CACHE_MAX // 2]:
+                    _COMMENT_MEDIA_CACHE.pop(_k, None)
+            _COMMENT_MEDIA_CACHE[cache_key] = (now, collected)
 
     ok_items = collected.get("ok") or []
     failed_items = collected.get("failed") or []
-    if not ok_items and not failed_items:
+    collect_error = collected.get("error")
+    if not ok_items and not failed_items and not collect_error:
         return ""
 
     lines = ["\n## Comment Media Attachments (GitCode comment-uploaded media)",
@@ -934,13 +936,13 @@ def _collect_comment_media_for_injection(repo_key: str, owner: str, repo: str, i
     if ok_items:
         for a in ok_items:
             _kind = a.get("kind") or "file"
-            if agent_type == "issue":
-                lines.append(f"- {_kind} {a['filename']}")
-            else:
-                lines.append(f"- {_kind} {a['filename']}: {a['url']}")
+            lines.append(f"- {_kind} {a['filename']}: {a['url']}")
     for a in ok_items:
         if a.get("analysis"):
-            lines.append("\n" + str(a["analysis"]).rstrip())
+            _analysis = str(a["analysis"]).rstrip()
+            if len(_analysis) > _COMMENT_MEDIA_ANALYSIS_MAX_CHARS:
+                _analysis = _analysis[:_COMMENT_MEDIA_ANALYSIS_MAX_CHARS] + "\n...(analysis truncated)"
+            lines.append("\n" + _analysis)
         elif (a.get("kind") or "file") in ("image", "video"):
             lines.append(f"\n## 用户上传的{a.get('kind')}分析\n"
                          f"附件已读取，但内容分析不可用（reason: empty analysis）。"
@@ -952,6 +954,9 @@ def _collect_comment_media_for_injection(repo_key: str, owner: str, repo: str, i
             if len(_url_short) > 100:
                 _url_short = _url_short[:97] + "..."
             lines.append(f"- ⚠️ attachment unreadable: {_url_short} (reason: {f.get('reason')})")
+    if collect_error:
+        lines.append("\n### 附件采集异常（降级说明，非静默丢失）")
+        lines.append(f"- ⚠️ attachment collection failed: {collect_error}")
     return "\n".join(lines) + "\n"
 
 

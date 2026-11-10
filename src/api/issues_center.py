@@ -2604,7 +2604,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
-_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
 # Issue #648：GitCode 同步评论是永久评论，不能写 7 天签名 URL（到期失效）；
 # 同步时重新签发长效链接（10 年）作为永久可访问 URL 的过渡方案
 _ATTACH_SYNC_URL_EXPIRES = 10 * 365 * 24 * 3600
@@ -2814,44 +2814,40 @@ def _attach_cleanup_dir(owner: str, repo: str, issue_number):
 
 def _user_image_ext(url: str, content_type: str = "") -> str:
     """从 URL 末段/Content-Type 推断图片扩展名（默认 .png）。"""
-    last = url.rstrip("/").rsplit("/", 1)[-1]
+    last = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
     ext = os.path.splitext(last)[1].lower()
     if ext in _ATTACH_IMAGE_EXTS:
         return ext
-    ct_map = {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg"}
+    ct_map = {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+              "image/svg+xml": ".svg", "image/bmp": ".bmp"}
     return ct_map.get(content_type, ".png")
 
 
-def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_key: str = "") -> dict:
-    """提取 Issue 正文/评论中 raw.gitcode.com/user-images 图片链接并鉴权下载转存为平台附件。
+def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo_key: str, *,
+                                extract_urls, download_method: str, max_count: int,
+                                classify, filename_prefix: str, use_uuid: bool = False,
+                                prefilter=None, analyzer=None) -> dict:
+    """Issue #315/#1748 共用采集编排：提取链接 → 鉴权下载 → 白名单校验 → 转存平台附件。
 
-    复用 _attach_save 存储语义（OBS 签名 URL 或 /static/issue_attachments/）。
+    参数化差异：链接提取函数、下载方法、类型/扩展名判定、文件名策略、预过滤、分析器。
     token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
-
-    Args:
-        texts: 可迭代字符串（Issue 正文、各评论 body 等）。
-        repo_key: 调用方已知的仓库全键（如 "gitcode:owner/repo"）；缺省按 gitcode 拼接。
-
-    Returns:
-        {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}
-        顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
+    顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
     """
-    from src.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
     result: dict = {"ok": [], "failed": []}
     try:
         urls: list[str] = []
         for t in texts or []:
             if not t:
                 continue
-            for u in extract_gitcode_user_image_urls(str(t)):
+            for u in extract_urls(str(t)):
                 if u not in urls:
                     urls.append(u)
         if not urls:
             return result
         # 数量上限：超出部分降级说明（不静默丢弃）
-        for u in urls[USER_IMAGE_MAX_COUNT:]:
+        for u in urls[max_count:]:
             result["failed"].append({"url": u, "reason": "exceeds count limit"})
-        urls = urls[:USER_IMAGE_MAX_COUNT]
+        urls = urls[:max_count]
 
         repo_key = repo_key or f"gitcode:{owner}/{repo}"
         token = ""
@@ -2865,29 +2861,72 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
                 result["failed"].append({"url": u, "reason": "no repo token"})
             return result
 
+        import uuid
         from src.vcs.api_client import create_client
         client = create_client(repo_key, token)
         seq = 0
         for u in urls:
-            dl = client.download_user_image(u)
+            if prefilter is not None and not prefilter(u):
+                log.info(f"{filename_prefix} ignored (non-media): {owner}/{repo}/{issue_number}")
+                continue
+            dl = getattr(client, download_method)(u)
             if "error" in dl:
                 result["failed"].append({"url": u, "reason": str(dl["error"])})
                 continue
-            seq += 1
-            ext = _user_image_ext(u, str(dl.get("content_type") or ""))
-            filename = f"user-image-{seq}{ext}"
+            content_type = str(dl.get("content_type") or "")
+            info = classify(u, content_type)
+            if not info:
+                log.info(f"{filename_prefix} ignored (unsupported type): "
+                         f"{owner}/{repo}/{issue_number} ct={content_type or 'unknown'}")
+                continue
+            kind, ext = info
+            if use_uuid:
+                filename = f"{uuid.uuid4().hex}{ext}"
+            else:
+                seq += 1
+                filename = f"{filename_prefix}-{seq}{ext}"
             try:
                 url = _attach_save(owner, repo, issue_number, filename, dl["content"])
-                result["ok"].append({"filename": filename, "url": url, "size": dl.get("size", len(dl["content"]))})
-                log.info(f"user-image saved: {owner}/{repo}/{issue_number}/{filename} ({dl.get('size', 0)} bytes)")
+                item = {"filename": filename, "url": url,
+                        "size": dl.get("size", len(dl["content"]))}
+                analysis = ""
+                if analyzer is not None and kind in ("image", "video"):
+                    analysis = analyzer(kind, dl["content"], ext)
+                if kind is not None:
+                    item["kind"] = kind
+                    item["source_url"] = u
+                if analyzer is not None:
+                    item["analysis"] = analysis
+                result["ok"].append(item)
+                log.info(f"{filename_prefix} saved: {owner}/{repo}/{issue_number}/{filename} "
+                         f"({dl.get('size', 0)} bytes, kind={kind}, analyzed={bool(analysis)})")
             except Exception as e:
-                seq -= 1
                 result["failed"].append({"url": u, "reason": f"save failed: {e}"})
     except Exception as e:
-        # 顶层兜底：任何异常都转为降级说明，不阻塞主流程
         result["error"] = str(e)
-        log.warning(f"_collect_issue_user_images failed: {owner}/{repo}/{issue_number} -> {e}")
+        log.warning(f"_collect_authed_attachments failed: {owner}/{repo}/{issue_number} -> {e}")
     return result
+
+
+# === Issue #315: GitCode 编辑器上传图片（user-images）服务端鉴权下载 ===
+
+def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_key: str = "") -> dict:
+    """提取 Issue 正文/评论中 raw.gitcode.com/user-images 图片链接并鉴权下载转存为平台附件。
+
+    复用 _attach_save 存储语义（OBS 签名 URL 或 /static/issue_attachments/）。
+    返回值 {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}，
+    顶层异常不外抛（返回带 error 字段的降级结果）。
+    """
+    from src.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
+
+    def _classify(u: str, content_type: str):
+        return (None, _user_image_ext(u, content_type))
+
+    return _collect_authed_attachments(
+        owner, repo, issue_number, texts, repo_key,
+        extract_urls=extract_gitcode_user_image_urls,
+        download_method="download_user_image", max_count=USER_IMAGE_MAX_COUNT,
+        classify=_classify, filename_prefix="user-image")
 
 
 # === Issue #1748: 评论媒体附件（gitcode.com/user-attachments，视频/图片）服务端鉴权下载 ===
@@ -2921,74 +2960,29 @@ def _collect_issue_media_attachments(owner: str, repo: str, issue_number, texts,
     本函数在事件构建期用服务端凭证下载，经 `_attach_save` 转存为平台附件，
     返回无 401 的读取通道 URL，供上层注入媒体分析段落。
 
-    Returns:
-        {"ok": [{"filename", "url", "size", "kind", "source_url"}],
-         "failed": [{"url", "reason"}]}
-        顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
-        token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
+    Spec 限定 media-only：非媒体扩展名预过滤、未知类型下载后按 Content-Type 再判，
+    非图片/视频一律不落盘不注入；扩展名仅接受媒体白名单并以 UUID 命名。
+    返回值顶层异常不外抛（带 error 字段），绝不阻塞 prompt 组装主流程。
     """
     from src.vcs.api_client import (
         extract_gitcode_user_attachment_urls, USER_ATTACHMENT_MAX_COUNT,
+        attachment_kind, _attachment_ext, is_media_attachment_url,
     )
-    result: dict = {"ok": [], "failed": []}
-    try:
-        urls: list[str] = []
-        for t in texts or []:
-            if not t:
-                continue
-            for u in extract_gitcode_user_attachment_urls(str(t)):
-                if u not in urls:
-                    urls.append(u)
-        if not urls:
-            return result
-        for u in urls[USER_ATTACHMENT_MAX_COUNT:]:
-            result["failed"].append({"url": u, "reason": "exceeds count limit"})
-        urls = urls[:USER_ATTACHMENT_MAX_COUNT]
 
-        repo_key = repo_key or f"gitcode:{owner}/{repo}"
-        token = ""
-        try:
-            from src.user.db import get_gitcode_token
-            token = get_gitcode_token(repo_key=repo_key) or ""
-        except Exception:
-            token = ""
-        if not token:
-            for u in urls:
-                result["failed"].append({"url": u, "reason": "no repo token"})
-            return result
+    def _classify(u: str, content_type: str):
+        kind = attachment_kind(u, content_type)
+        ext = _attachment_ext(u, content_type, kind)
+        if kind not in ("image", "video") or not ext:
+            return None
+        return (kind, ext)
 
-        from src.vcs.api_client import create_client, attachment_kind, _attachment_ext
-        client = create_client(repo_key, token)
-        seq = 0
-        for u in urls:
-            dl = client.download_user_attachment(u)
-            if "error" in dl:
-                result["failed"].append({"url": u, "reason": str(dl["error"])})
-                continue
-            kind = attachment_kind(u, str(dl.get("content_type") or ""))
-            ext = _attachment_ext(u, str(dl.get("content_type") or ""), kind)
-            seq += 1
-            filename = f"user-attachment-{seq}{ext}"
-            try:
-                url = _attach_save(owner, repo, issue_number, filename, dl["content"])
-                analysis = ""
-                if analyze and kind in ("image", "video"):
-                    analysis = _analyze_media_attachment(kind, dl["content"], ext)
-                result["ok"].append({
-                    "filename": filename, "url": url,
-                    "size": dl.get("size", len(dl["content"])),
-                    "kind": kind, "source_url": u, "analysis": analysis,
-                })
-                log.info(f"user-attachment saved: {owner}/{repo}/{issue_number}/{filename} "
-                         f"({dl.get('size', 0)} bytes, kind={kind}, "
-                         f"analyzed={bool(analysis)})")
-            except Exception as e:
-                seq -= 1
-                result["failed"].append({"url": u, "reason": f"save failed: {e}"})
-    except Exception as e:
-        result["error"] = str(e)
-        log.warning(f"_collect_issue_media_attachments failed: {owner}/{repo}/{issue_number} -> {e}")
-    return result
+    return _collect_authed_attachments(
+        owner, repo, issue_number, texts, repo_key,
+        extract_urls=extract_gitcode_user_attachment_urls,
+        download_method="download_user_attachment", max_count=USER_ATTACHMENT_MAX_COUNT,
+        classify=_classify, filename_prefix="user-attachment", use_uuid=True,
+        prefilter=is_media_attachment_url,
+        analyzer=_analyze_media_attachment if analyze else None)
 
 
 def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:

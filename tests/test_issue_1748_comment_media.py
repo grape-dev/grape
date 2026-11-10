@@ -11,7 +11,6 @@
 import os
 import sys
 import urllib.error
-import pytest
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
@@ -64,6 +63,17 @@ def test_attachment_kind():
     assert attachment_kind(I1, "image/png") == "image"
     assert attachment_kind(V2, "") == "video"
     assert attachment_kind(BARE, "application/zip") == "file"
+
+
+def test_attachment_ext_whitelist():
+    from src.vcs.api_client import _attachment_ext, is_media_attachment_url
+    assert _attachment_ext(V1, "video/mp4") == ".mp4"
+    assert _attachment_ext("https://gitcode.com/user-attachments/x.html", "application/octet-stream") == ""
+    assert _attachment_ext("https://gitcode.com/user-attachments/x.php", "application/octet-stream") == ""
+    assert _attachment_ext("https://gitcode.com/user-attachments/x", "image/png") == ".png"
+    assert is_media_attachment_url(V1)
+    assert not is_media_attachment_url(BARE)
+    assert is_media_attachment_url("https://gitcode.com/user-attachments/x")
 
 
 # ---------- 下载 ----------
@@ -168,11 +178,50 @@ def test_collect_video_success(monkeypatch):
     from src.api.issues_center import _collect_issue_media_attachments
     r = _collect_issue_media_attachments("grape-dev", "grape", 1748, [f"看视频 {V1}"])
     assert r["failed"] == []
-    assert r["ok"][0]["filename"] == "user-attachment-1.mp4"
+    import re
+    assert re.match(r"^[0-9a-f]{32}\.mp4$", r["ok"][0]["filename"])
     assert r["ok"][0]["kind"] == "video"
-    assert r["ok"][0]["url"].endswith("/user-attachment-1.mp4")
+    assert r["ok"][0]["url"].endswith("/" + r["ok"][0]["filename"])
     assert "已分析video" in r["ok"][0]["analysis"]
-    assert saved[0] == ("user-attachment-1.mp4", b"vid")
+    assert saved[0] == (r["ok"][0]["filename"], b"vid")
+
+
+def test_collect_uuid_filename_no_cross_comment_overwrite(monkeypatch):
+    _patch_collect_env(monkeypatch, download_results={
+        V1: {"content": b"vid", "content_type": "video/mp4", "size": 3},
+    })
+    from src.api.issues_center import _collect_issue_media_attachments
+    r1 = _collect_issue_media_attachments("grape-dev", "grape", 1748, [V1])
+    r2 = _collect_issue_media_attachments("grape-dev", "grape", 1748, [V1])
+    assert r1["ok"][0]["filename"] != r2["ok"][0]["filename"]
+
+
+def test_collect_non_media_ignored(monkeypatch):
+    called = {"n": 0}
+
+    def fake_client(*a, **k):
+        class _C:
+            def download_user_attachment(self, url, **kw):
+                called["n"] += 1
+                return {"content": b"zip", "content_type": "application/zip", "size": 3}
+        return _C()
+
+    import src.api.issues_center as ic
+    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="": "tk-fake", raising=False)
+    monkeypatch.setattr("src.vcs.api_client.create_client", fake_client)
+    r = ic._collect_issue_media_attachments("grape-dev", "grape", 1748, [f"附件 {BARE}"])
+    assert r == {"ok": [], "failed": []}
+    assert called["n"] == 0
+
+
+def test_collect_unknown_ext_non_media_after_download_ignored(monkeypatch):
+    url = "https://gitcode.com/user-attachments/files/1/2/payload"
+    _patch_collect_env(monkeypatch, download_results={
+        url: {"content": b"x", "content_type": "application/zip", "size": 1},
+    })
+    from src.api.issues_center import _collect_issue_media_attachments
+    r = _collect_issue_media_attachments("grape-dev", "grape", 1748, [url])
+    assert r == {"ok": [], "failed": []}
 
 
 def test_collect_image_and_failed_mixed(monkeypatch):
@@ -326,7 +375,7 @@ def test_inject_empty_analysis_reason(monkeypatch):
     assert "内容分析不可用" in out
 
 
-def test_inject_issue_role_no_url(monkeypatch):
+def test_inject_issue_role_has_read_url(monkeypatch):
     collected = {
         "ok": [{"filename": "user-attachment-1.mp4", "url": "http://srv/secret-url.mp4", "size": 1,
                 "kind": "video", "source_url": V1, "analysis": "## 用户上传的视频分析\n内容"}],
@@ -334,7 +383,27 @@ def test_inject_issue_role_no_url(monkeypatch):
     }
     out = _inject(monkeypatch, "issue", note=f"{V1}", collected=collected)
     assert "user-attachment-1.mp4" in out
-    assert "http://srv/secret-url.mp4" not in out
+    assert "http://srv/secret-url.mp4" in out
+
+
+def test_inject_collect_error_visible(monkeypatch):
+    collected = {"ok": [], "failed": [], "error": "boom"}
+    out = _inject(monkeypatch, "coding", note=f"{V1}", collected=collected)
+    assert "attachment collection failed" in out
+    assert "boom" in out
+
+
+def test_inject_analysis_truncated(monkeypatch):
+    from src.prompt_builder import _COMMENT_MEDIA_ANALYSIS_MAX_CHARS
+    long_analysis = "## 用户上传的视频分析\n" + ("x" * (_COMMENT_MEDIA_ANALYSIS_MAX_CHARS + 100))
+    collected = {
+        "ok": [{"filename": "user-attachment-1.mp4", "url": "http://srv/v.mp4", "size": 1,
+                "kind": "video", "source_url": V1, "analysis": long_analysis}],
+        "failed": [],
+    }
+    out = _inject(monkeypatch, "coding", note=f"{V1}", collected=collected)
+    assert "...(analysis truncated)" in out
+    assert len(out) < len(long_analysis) + 500
 
 
 def test_inject_pure_text_no_regression(monkeypatch):
@@ -343,11 +412,11 @@ def test_inject_pure_text_no_regression(monkeypatch):
     assert out == ""
 
 
-def test_inject_a2a_context_triggers(monkeypatch):
-    captured = {}
+def test_inject_non_comment_event_does_not_collect(monkeypatch):
+    calls = {"n": 0}
 
-    def fake_collect(owner, repo, n, texts, repo_key="", analyze=True):
-        captured["texts"] = list(texts)
+    def fake_collect(*a, **k):
+        calls["n"] += 1
         return {"ok": [], "failed": []}
 
     import src.prompt_builder as pb
@@ -356,10 +425,11 @@ def test_inject_a2a_context_triggers(monkeypatch):
                         lambda *a, **k: {"ok": [], "failed": []}, raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_media_attachments", fake_collect, raising=False)
     pb._COMMENT_MEDIA_CACHE.clear()
+    evt = _comment_evt(note="", a2a=f"前序摘要含视频 {V1}")
+    evt["type"] = "a2a_event"
     parts = []
-    pb._inject_attachments_by_role(parts, "gitcode:grape-dev/grape", "#1748", "coding", 0,
-                                   evt=_comment_evt(note="", a2a=f"前序摘要含视频 {V1}"))
-    assert any(V1 in t for t in captured["texts"])
+    pb._inject_attachments_by_role(parts, "gitcode:grape-dev/grape", "#1748", "coding", 0, evt=evt)
+    assert calls["n"] == 0
 
 
 def test_inject_cache_no_recollect(monkeypatch):
