@@ -309,6 +309,10 @@ function renderDashboard(data) {
       .scn-list{display:flex;flex-direction:column;gap:12px}
       .scn-row{display:flex;align-items:center;gap:16px;padding:16px 20px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;cursor:pointer;transition:all .25s ease;position:relative;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.05)}
       .scn-row:hover{background:rgba(255,255,255,.8);box-shadow:0 3px 16px rgba(0,0,0,.08)}
+      .scn-row.is-pinned{background:rgba(255,255,255,.78)}
+      .scn-pin-btn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0;border-radius:999px;border:1px solid rgba(0,0,0,.12);background:transparent;cursor:pointer;font-size:13px;line-height:1;transition:all .2s;filter:grayscale(1);opacity:.65}
+      .scn-pin-btn:hover{opacity:1;background:rgba(0,113,227,.08);border-color:rgba(0,113,227,.3)}
+      .scn-pin-btn.is-pinned{background:#0071e3;border-color:#0071e3;filter:none;opacity:1}
       .scn-row-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:#fff;font-weight:600}
       .scn-row-name{font-size:15px;font-weight:600;color:#1d1d1f;white-space:nowrap;letter-spacing:-.2px}
       .scn-row-mid{flex:0 1 30%;min-width:0;display:flex;flex-direction:column;gap:3px}
@@ -512,6 +516,24 @@ function renderDashboard(data) {
   _loadPipelines();
 }
 
+// ── 场景置顶（仓库共享；无乐观更新，成功后局部刷新）──
+window._toggleScenePin = function(sceneId, ev) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  var dd = window._dashboardData || {};
+  var scenes = dd._scenes || [];
+  var s = scenes.find(function(x) { return x.id === sceneId; });
+  var target = !(s && s.is_pinned);
+  var owner = dd._owner || '';
+  var name = dd._name || '';
+  API.post('/scenes/' + encodeURIComponent(sceneId) + '/pin?repo=' + encodeURIComponent(owner + '/' + name),
+    {pinned: target}).then(function() {
+      if (typeof window._sceneReload === 'function') window._sceneReload();
+    }).catch(function(err) {
+      var msg = (err && err.detail && err.detail.message) || (err && err.message) || '';
+      app.showToast(I18N.t('dashboard.scene_pin_failed', {msg: msg}));
+    });
+};
+
 // ── 渲染单个场景行（列表式，一行一个场景）──
 let _deleteMode = false;
 function _renderLocalSceneCard(s, isApplied, idx) {
@@ -534,13 +556,17 @@ function _renderLocalSceneCard(s, isApplied, idx) {
   const barColor = morandiColors[idx % morandiColors.length];
   var isPRSub = !!s.pr_subscription_enabled;
   var prBadge = isPRSub ? '<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">已开启 PR 订阅</span>' : '';
+  var isPinned = !!s.is_pinned;
+  var pinnedBadge = s.is_pinned ? `<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(0,113,227,.1);color:#0071e3;border:1px solid rgba(0,113,227,.2)">${I18N.t('dashboard.scene_pinned')}</span>` : '';
+  var pinBtn = `<button class="scn-pin-btn${isPinned ? ' is-pinned' : ''}" title="${I18N.t(isPinned ? 'dashboard.scene_unpin' : 'dashboard.scene_pin')}" onclick="event.stopPropagation(); window._toggleScenePin('${s.id}', event)">📌</button>`;
 
-  return `<div class="scn-row" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
+  return `<div class="scn-row${isPinned ? ' is-pinned' : ''}" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
     <div class="scn-row-icon" style="background:${barColor}">${icon}</div>
     <div class="scn-row-mid">
       <div style="display:flex;align-items:center;gap:8px">
         <span class="scn-row-name">${s.display_name || s.name}</span>
         ${createdBy ? `<span style="font-size:10px;color:var(--t3)">@${createdBy}</span>` : ''}
+        ${pinnedBadge}
       </div>
       <div style="display:flex;align-items:center;gap:8px;min-width:0">
         <span class="scn-row-desc" title="${desc.replace(/"/g, '&quot;')}">${desc || '—'}</span>
@@ -548,6 +574,7 @@ function _renderLocalSceneCard(s, isApplied, idx) {
     </div>
     <div class="scn-row-chain">${chain}</div>
     <div class="scn-row-right">
+      ${pinBtn}
       ${prBadge}
       <span class="scn-branch-tag">🌿 ${workBranch}</span>
       ${isApplied ? '' : ''}

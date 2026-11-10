@@ -237,6 +237,8 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
     _has_pr_sub = False
     _has_linked_repos = False
     _has_ca = False
+    _has_pin = False
+    _has_pinat = False
     with lock:
         c = db.cursor()
         try:
@@ -255,6 +257,8 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 _has_pr_sub = "pr_subscription_enabled" in _cols
                 _has_linked_repos = "linked_repos" in _cols
                 _has_ca = "created_at" in _cols
+                _has_pin = "is_pinned" in _cols
+                _has_pinat = "pinned_at" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
@@ -263,11 +267,17 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 if _has_st: _extra += ", scene_type"
                 if _has_pr_sub: _extra += ", pr_subscription_enabled"
                 if _has_linked_repos: _extra += ", linked_repos"
+                if _has_pin: _extra += ", is_pinned"
+                if _has_pinat: _extra += ", pinned_at"
                 if _has_ca and sort == "latest": _extra += ", created_at"
                 # 检索 WHERE：共享构建器（与 _count_scenes_from_db 单一来源）
                 _where_extra, _q_params = _scene_search_where(q, _cols)
                 _params = [repo_key] + _q_params
-                _order = "ORDER BY id" if sort != "latest" else "ORDER BY created_at DESC, id DESC"
+                if _has_pin:
+                    _order = ("ORDER BY is_pinned DESC, created_at DESC, id DESC"
+                              if sort == "latest" else "ORDER BY is_pinned DESC, id")
+                else:
+                    _order = "ORDER BY id" if sort != "latest" else "ORDER BY created_at DESC, id DESC"
                 # LIMIT/OFFSET 走占位符（评审遗留提醒2：与同函数参数化风格一致；
                 # int() 强转保留为双保险）
                 _limit_sql = " LIMIT ? OFFSET ?" if limit is not None else ""
@@ -328,6 +338,15 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 linked_repos = json.loads(r[col_offset] or "[]") if r[col_offset] else []
             except Exception:
                 linked_repos = []
+            col_offset += 1
+        is_pinned = 0
+        if _has_pin and len(r) > col_offset:
+            is_pinned = int(r[col_offset] or 0)
+            col_offset += 1
+        pinned_at = ""
+        if _has_pinat and len(r) > col_offset:
+            pinned_at = r[col_offset] or ""
+            col_offset += 1
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
             "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
@@ -336,6 +355,8 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
             "icon": icon, "scene_type": scene_type,
             "pr_subscription_enabled": pr_subscription_enabled,
             "linked_repos": linked_repos,
+            "is_pinned": is_pinned,
+            "pinned_at": pinned_at,
         })
     return result
 
@@ -445,7 +466,9 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "onboarding": s.get("onboarding") or "repo-onboarding",
              "scene_type": s.get("scene_type") or "standard",
              "pr_subscription_enabled": s.get("pr_subscription_enabled", 0),
-             "linked_repos": s.get("linked_repos") or []} for s in db_scenes]
+              "linked_repos": s.get("linked_repos") or [],
+              "is_pinned": int(s.get("is_pinned") or 0),
+              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -764,6 +787,32 @@ def update_custom_scene(scene_id: str, repo_key: str,
             tuple(params))
         db.commit()
     invalidate_scene_cache(scene_id, repo_key)
+
+
+def set_scene_pinned(scene_id: str, repo_key: str, pinned: bool) -> int:
+    """设置仓库场景置顶状态（仓库共享；重复置顶不刷新 pinned_at）。
+
+    返回受影响行数（0 = 场景不存在/未激活/不属于该仓库）。
+    """
+    db, lock = _db()
+    from datetime import datetime, timezone
+    with lock:
+        c = db.cursor()
+        if pinned:
+            now = datetime.now(timezone.utc).isoformat()
+            c.execute(
+                "UPDATE devops_pipeline_scene SET "
+                "pinned_at=CASE WHEN is_pinned=1 THEN pinned_at ELSE ? END, "
+                "is_pinned=1 WHERE scene_id=? AND repo_key=? AND is_active=1",
+                (now, scene_id, repo_key))
+        else:
+            c.execute(
+                "UPDATE devops_pipeline_scene SET is_pinned=0, pinned_at=NULL "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1",
+                (scene_id, repo_key))
+        rowcount = c.rowcount
+        db.commit()
+    return int(rowcount or 0)
 
 
 def delete_custom_scene(scene_id: str, repo_key: str):

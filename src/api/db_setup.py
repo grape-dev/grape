@@ -644,6 +644,8 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
     scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
+    is_pinned   INTEGER NOT NULL DEFAULT 0,
+    pinned_at   VARCHAR(32) DEFAULT NULL,
     UNIQUE (scene_id, repo_key)
 )
 """
@@ -3510,6 +3512,27 @@ register_migration(
     name="backfill_events_terminal_completed_at_1497",
     kind="safe",
     fn=_fn_backfill_events_terminal_completed_at_1497,
+)
+
+
+def _fn_scene_pin_columns() -> None:
+    """Issue #1735：devops_pipeline_scene 补置顶列（存量库幂等补列）。
+
+    is_pinned / pinned_at 供项目场景列表「置顶」（仓库共享、pinned_at 倒序）。
+    异常必须抛出（不吞），保证执行器不盖章、下次启动重试。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "devops_pipeline_scene", "is_pinned", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "devops_pipeline_scene", "pinned_at", "VARCHAR(32) DEFAULT NULL")
+        db.commit()
+
+
+register_migration(
+    version="202611100001",
+    name="scene-pin-columns",
+    kind="safe",
+    fn=_fn_scene_pin_columns,
 )
 
 

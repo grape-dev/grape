@@ -172,5 +172,9 @@
   "sre_aksk_required": "请输入 Access Key 和 Secret Key",
   "sre_add_device_title": "添加设备",
   "scene_detail": "场景详情",
-  "scene_engine_ctx_missing": "场景上下文未就绪，请先进入场景编辑页"
+  "scene_engine_ctx_missing": "场景上下文未就绪，请先进入场景编辑页",
+  "scene_pin": "置顶",
+  "scene_pinned": "已置顶",
+  "scene_unpin": "取消置顶",
+  "scene_pin_failed": "置顶操作失败: {{msg}}"
 }

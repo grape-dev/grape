@@ -277,6 +277,8 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "scene_type": s.get("scene_type") or "standard",
                        "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
                        "linked_repos": s.get("linked_repos") or [],
+                       "is_pinned": int(s.get("is_pinned") or 0),
+                       "pinned_at": s.get("pinned_at") or "",
                        "pipeline": cfg})
     return {"scenes": result, "total": _total}
 
@@ -1864,6 +1866,9 @@ class UpdateSceneRequest(BaseModel):
     pr_subscription_enabled: bool | None = None
     linked_repos: list | None = None  # None=不更新；[] = 清空关联仓库
 
+class PinSceneRequest(BaseModel):
+    pinned: bool
+
 class ApplySceneRequest(BaseModel):
     scene_id: str
     strict: bool = False  # Issue #524: true=任一节点 skipped（声明引擎不健康）时整单拒绝；默认部分应用
@@ -2090,6 +2095,35 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
+
+
+@router.post("/{scene_id}/pin", operation_id="scenes_pin", summary="Pin scene", description="Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).")
+def pin_scene(scene_id: str, body: PinSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
+    """设置/取消场景置顶（仓库共享，不区分用户）。"""
+    from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
+
+    repo_key = ""
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
+
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+
+    rowcount = set_scene_pinned(scene_id, repo_key, body.pinned)
+    if rowcount == 0:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+
+    log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
+    return {"message": "置顶状态已更新", "scene_id": scene_id,
+            "is_pinned": 1 if body.pinned else 0}
 
 
 @router.delete("/{scene_id}", operation_id="scenes_delete", summary="Delete scene", description="Deletes a custom scene (soft delete; official undeletable).")
