@@ -75,6 +75,27 @@ def _seed_task(task_id, issue_id, event_type="a2a_event", event_seq=0):
         db.commit()
 
 
+def _seed_event(seq, event_type="a2a_event", title="PR 订阅 QA"):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO events (seq, repo_key, issue_id, event_type, title) "
+            "VALUES (?,?,?,?,?)",
+            (seq, RK, f"#{N}", event_type, title))
+        db.commit()
+
+
+def _seed_managed_repo(dev_scene):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO managed_repos "
+            "(repo_key, repo_owner, repo_name, full_name, dev_scene) "
+            "VALUES (?,?,?,?,?)",
+            (RK, "org", "scene1745", "org/scene1745", dev_scene))
+        db.commit()
+
+
 def _plain_evt(scene_id=STALE):
     return {
         "seq": 1745001, "repo_key": RK, "issue_id": f"#{N}",
@@ -167,6 +188,35 @@ def test_reconcile_task_scene_env_skips_pr_event_main_route():
     assert env["GRAPE_SCENE_ID"] == SUB
 
 
+def test_reconcile_task_scene_env_skips_pr_subscription_title_real_issue():
+    """#427 既有形态：真实关联 Issue 号 + a2a_event + 「PR 订阅」标题，执行前不得校正。"""
+    from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_issue(N, TARGET)
+    _seed_event(1745002, event_type="a2a_event", title="PR 订阅 QA")
+    _seed_task("t_1745_pr_title", f"#{N}", event_type="a2a_event", event_seq=1745002)
+    env = {"GRAPE_SCENE_ID": SUB}
+    out = reconcile_task_scene_env("t_1745_pr_title", env)
+    assert out == SUB
+    assert env["GRAPE_SCENE_ID"] == SUB
+
+
+def test_is_pr_subscription_task_event_seq_title_path():
+    from src.api.event_pipeline import _is_pr_subscription_task
+    _seed_event(1745003, event_type="a2a_event", title="PR 订阅 Coding")
+    assert _is_pr_subscription_task(f"#{N}", 1745003, "a2a_event") is True
+
+
+def test_reconcile_task_scene_env_no_fallback_when_issue_unbound():
+    """Issue 未绑定场景：不回退仓库默认场景，按「未选定=空串」口径清空陈旧快照。"""
+    from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_managed_repo("repo-default-scene")
+    _seed_task("t_1745_unbound", f"#{N}", event_type="issue_comment")
+    env = {"GRAPE_SCENE_ID": STALE}
+    out = reconcile_task_scene_env("t_1745_unbound", env)
+    assert out == ""
+    assert env["GRAPE_SCENE_ID"] == ""
+
+
 def test_reconcile_task_scene_env_noop_when_already_truth():
     from src.api.event_pipeline import reconcile_task_scene_env
     _seed_issue(N, TARGET)
@@ -186,3 +236,17 @@ def test_scene_env_mismatch_diagnostic_is_actionable():
     assert "issues detail" in msg
     assert "scenes detail" in msg
     assert "待确认" in msg
+
+
+def test_reconcile_task_scene_env_logs_actionable_diagnostic(monkeypatch):
+    """AC3：校正时运行期输出含双方取值与恢复指引的诊断（非仅死代码文案）。"""
+    from src.api import event_pipeline
+    msgs = []
+    monkeypatch.setattr(event_pipeline.log, "info",
+                        lambda msg, *a, **k: msgs.append(str(msg)))
+    _seed_issue(N, TARGET)
+    _seed_task("t_1745_diag", f"#{N}", event_type="a2a_event")
+    env = {"GRAPE_SCENE_ID": STALE}
+    assert event_pipeline.reconcile_task_scene_env("t_1745_diag", env) == TARGET
+    assert any(STALE in m and TARGET in m and "issues detail" in m
+               and "scenes detail" in m for m in msgs)
