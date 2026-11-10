@@ -2897,10 +2897,34 @@ def _fn_create_grape_t_merge_gate_log() -> None:
 register_migration(
     # 20261105 修复：远端曾误改为 0001（与 issue658_role_tags 撞号），且生产版本表
     # 已按 0002 落库——回到 0002 对齐生产；issue865 挪至 0004 避让。
-    version="202611030002",
+    # 2026-11-10：目标库 202611030002 已被 issue865_agent_runtimes_model 占用（同号不同名，
+    # 本次迁移被判已执行永久跳过）→ renumber 到 202611100002。该迁移只做
+    # CREATE TABLE IF NOT EXISTS，重跑幂等无损。
+    version="202611100002",
     name="create-merge-gate-log-table",
     kind="safe",
     fn=_fn_create_grape_t_merge_gate_log,
+)
+
+
+def _fn_add_agent_tasks_trace_context() -> None:
+    """MR-2（weekly-10）：存量库补 agent_tasks.trace_context（幂等补列）。
+
+    _migrate_tables 里的同名 _ensure_column 只在 legacy 全量迁移路径执行，已盖章的
+    存量库不会再跑那一段，缺列时代码侧 _TASK_COLUMNS_LIST 含该列会让
+    _create_direct_task 的严格 INSERT 直接抛错、任务行永不落库。故补一条独立迁移。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
+        db.commit()
+
+
+register_migration(
+    version="202611100001",
+    name="add-agent-tasks-trace-context",
+    kind="safe",
+    fn=_fn_add_agent_tasks_trace_context,
 )
 
 
