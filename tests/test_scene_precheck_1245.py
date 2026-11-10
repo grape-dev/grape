@@ -158,13 +158,45 @@ def test_own_personal_engine_allowed(monkeypatch):
         _cleanup([rid], [cid])
 
 
+def _insert_skill_row(scope, owner, sname, agent_type="coding"):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO skill (skill_name, display_name, description, agent_type, "
+            "skill_path, file_path, scope, owner_id, is_active) "
+            "VALUES (?,?,?,?,?,?,?,?,1)",
+            (sname, sname, "desc", agent_type, sname, "", scope, owner))
+        db.commit()
+
+
+def _delete_skill_row(sname):
+    with db_lock:
+        db.cursor().execute("DELETE FROM skill WHERE skill_name=?", (sname,))
+        db.commit()
+
+
 def test_skill_unresolvable(monkeypatch):
+    """#1758：repo 场景引用 user scope 技能 → 单一判官判定不可解析。"""
+    import uuid
     rid = _insert_engine("skill-engine")
+    sname = f"usk1245_{uuid.uuid4().hex[:8]}"
+    _insert_skill_row("user", "42", sname)
     try:
-        out = _run(monkeypatch, [_node("coding", eids=[rid], skill="ghost-skill")],
-                   resolve_result=0)
+        out = _run(monkeypatch, [_node("coding", eids=[rid], skill=sname)])
         assert out["ok"] is False
         assert any(p["reason_code"] == "skill_unresolvable" for p in out["problems"])
+    finally:
+        _cleanup([rid])
+        _delete_skill_row(sname)
+
+
+def test_unknown_skill_keeps_legacy_compat(monkeypatch):
+    """#1758：不在 skill 表的官方内置包形态技能维持存量兼容放行。"""
+    rid = _insert_engine("legacy-skill-engine")
+    try:
+        out = _run(monkeypatch, [_node("coding", eids=[rid], skill="ghost-skill")])
+        assert out["ok"] is True
+        assert not any(p["reason_code"] == "skill_unresolvable" for p in out["problems"])
     finally:
         _cleanup([rid])
 

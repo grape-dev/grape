@@ -220,8 +220,8 @@ class TestCreateUpdateSceneScopeMismatch:
         finally:
             _delete_skills(sname)
 
-    def test_create_scene_own_user_scope_skill_passes(self):
-        """#657 follow-up：自己的个人技能（owner==当前用户）→ 放行。"""
+    def test_create_scene_own_user_scope_skill_rejected(self):
+        """#1758 固定口径：本人 user 技能同样拒绝（派发身份是 agent，不是本人）。"""
         from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
@@ -232,9 +232,15 @@ class TestCreateUpdateSceneScopeMismatch:
             body = CreateSceneRequest(
                 name="t", scene_id=scene_id,
                 nodes=[SceneNodeInput(id="issue", tag="issue", skill=sname)])
-            resp = create_scene(body, user={"username": "me657", "id": 1},
-                                repo=f"{owner}/{repo}")
-            assert resp.get("scene_id") == scene_id
+            with pytest.raises(HTTPException) as ei:
+                create_scene(body, user={"username": "me657", "id": 1},
+                             repo=f"{owner}/{repo}")
+            assert ei.value.status_code == 400
+            detail = ei.value.detail
+            assert "scope 不匹配" in detail["message"] and sname in detail["message"]
+            assert "含创建者本人" in detail["message"]
+            assert detail["skill_scope"] == "user"
+            assert detail["scene_scope"] == "repo"
         finally:
             _delete_skills(sname)
             _cleanup(repo_key, scene_id)
@@ -252,7 +258,8 @@ class TestCreateUpdateSceneScopeMismatch:
                 create_scene(body, user={"username": "me657", "id": 1},
                              repo=f"{owner}/{repo}")
             assert ei.value.status_code == 400
-            assert "他人的 user 级技能" in ei.value.detail["message"]
+            assert "user 级技能" in ei.value.detail["message"]
+            assert "scope 不匹配" in ei.value.detail["message"]
         finally:
             _delete_skills(sname)
 

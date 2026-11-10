@@ -47,8 +47,8 @@ def _rm_skill(sname):
 
 
 # ============================== #1564 ==============================
-def test_1564_own_user_skill_allowed_in_repo_scope_only():
-    """repo 场景：本人 user 技能放行、他人 user 技能拦；市场口径 allow_own_user=False 全拦。"""
+def test_1564_user_scope_rejected_in_repo_scope():
+    """#1758 固定口径：repo 场景引用 user 技能一律拦（含本人），市场口径同样全拦。"""
     from src.api.routes.scenes import _collect_scene_skill_scope_violations
     repo = f"gitcode:t{_sfx()}/r-{_sfx()}"
     mine, other, shared = f"usk_{_sfx()}", f"usk_{_sfx()}", f"rsk_{_sfx()}"
@@ -64,7 +64,7 @@ def test_1564_own_user_skill_allowed_in_repo_scope_only():
     try:
         repo_v = _collect_scene_skill_scope_violations(
             nodes, repo, username="alice", user_id="1", allow_own_user=True)
-        assert [v["node_id"] for v in repo_v] == ["n2"], repo_v
+        assert sorted(v["node_id"] for v in repo_v) == ["n1", "n2"], repo_v
         market_v = _collect_scene_skill_scope_violations(
             nodes, repo, username="alice", user_id="1", allow_own_user=False)
         assert sorted(v["node_id"] for v in market_v) == ["n1", "n2"], market_v

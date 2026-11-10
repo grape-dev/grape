@@ -150,8 +150,8 @@ class TestSceneDetailScopeCheck:
             _cleanup_repo(repo_key, scene_id)
             _delete_skill(s_repo)
 
-    def test_detail_explicit_skill_id_is_authorized(self):
-        """显式 skill_id 命中即授权：与派发侧 resolve_skill_dispatch 口径一致。"""
+    def test_detail_explicit_user_skill_id_still_conflicts(self):
+        """#1758：显式 skill_id 仍需 scope 校验，user scope 不再视为授权。"""
         from src.api.routes.scenes import get_scene_detail
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
@@ -166,12 +166,12 @@ class TestSceneDetailScopeCheck:
             detail = get_scene_detail(
                 scene_id, repo=f"{owner}/{repo}", user={"username": "me", "id": 1})
             node = detail["nodes"][0]
-            assert node["resolvable"] is True
+            assert node["resolvable"] is False
             check = node["scope_check"]
-            assert check["ok"] is True
+            assert check["ok"] is False
             assert check["skill"] == s_user
             assert check["actual_scope"] == "user"
-            assert "skill_id" in check["reason"]
+            assert "scope 不匹配" in check["reason"]
         finally:
             _cleanup_repo(repo_key, scene_id)
             _delete_skill(s_user)
@@ -201,7 +201,7 @@ class TestSceneDetailScopeCheck:
     def test_detail_after_rebind_to_repo_skill_is_resolvable(self):
         """AC4 回归：user 技能节点改绑 repo 级技能后详情可解析、派发门禁放行。"""
         from src.api.routes.scenes import get_scene_detail
-        from src.api.event_pipeline import _skill_scope_mismatch
+        from src.api.scene_skill_scope import evaluate
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
         scene_id = f"sc-{_unique()}"
@@ -228,8 +228,8 @@ class TestSceneDetailScopeCheck:
             assert node["resolvable"] is True
             assert node["scope_check"]["ok"] is True
             assert node["scope_check"]["actual_scope"] == "repo"
-            mismatch, _info = _skill_scope_mismatch(s_repo, repo_key)
-            assert mismatch is False
+            assert evaluate({"skill": s_repo, "skill_id": repo_skill_id},
+                            repo_key, "repo")["ok"] is True
         finally:
             _cleanup_repo(repo_key, scene_id)
             _delete_skill(s_user)

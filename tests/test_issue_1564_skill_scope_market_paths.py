@@ -9,7 +9,7 @@ Issue #657 已覆盖 repo 场景 create/update/apply 的保存期校验，但市
 
 本文件覆盖：
   R1 market create/update 强制拒绝 user scope（含创建者本人）；
-  R2 market apply 以应用者身份复核（本人放行 / 他人 400）；
+  R2 market apply 以应用者身份复核（user scope 一律 400，含本人）；
   R3 400 一次性返回全部冲突节点 violations[]；
   R5 GET /scenes/skill-scope-audit 只读体检与汇总计数。
 """
@@ -213,7 +213,7 @@ class TestMarketSaveScope:
 
 
 class TestMarketApplyScope:
-    """R2：应用市场模板以应用者身份复核——本人放行，他人 400。"""
+    """R2：应用市场模板以应用者身份复核——user scope 一律 400（#1758 含本人）。"""
 
     def test_apply_market_rejects_other_user_skill(self):
         from src.api.routes.scenes import apply_market_scene
@@ -242,7 +242,8 @@ class TestMarketApplyScope:
                 _delete_market(market_id)
             _delete_skill(sname)
 
-    def test_apply_market_allows_applicant_own_user_skill(self):
+    def test_apply_market_rejects_applicant_own_user_skill(self):
+        """#1758 固定口径：应用者本人 user 技能同样拒绝（repo 场景全仓共享）。"""
         from src.api.routes.scenes import apply_market_scene
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
@@ -254,10 +255,15 @@ class TestMarketApplyScope:
                 f"m-{_unique_suffix()}", repo_key,
                 [{"id": "issue", "tag": "issue", "skill": sname, "enabled": True}],
                 source_user_id=1)
-            resp = apply_market_scene(
-                market_id, user={"username": "me", "id": 1},
-                owner=owner, repo=repo)
-            assert resp.get("scene_id")
+            with pytest.raises(HTTPException) as ei:
+                apply_market_scene(
+                    market_id, user={"username": "me", "id": 1},
+                    owner=owner, repo=repo)
+            assert ei.value.status_code == 400
+            detail = ei.value.detail
+            assert "scope 不匹配" in detail["message"] and sname in detail["message"]
+            assert detail["skill_scope"] == "user"
+            assert detail["scene_scope"] == "repo"
         finally:
             _cleanup_repo(repo_key)
             if market_id:
