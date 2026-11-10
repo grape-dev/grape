@@ -1048,23 +1048,23 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     # Issue #1739：关联 Issue 的同一流水线 qa 最新结论为 fail 时，不得因建 PR 自动关闭
     # Issue（GitCode close_related_issue 会在合入时关闭关联 Issue）——强制关闭开关为 false，
     # 并在 Issue 上标注 QA 失败原因与 PR，便于回流修复；门禁异常 fail-open 保持原行为。
+    # 门禁不受调用方 auto_close_issues 影响：默认 false 时同样必须校验并标注（AC1/AC2）。
     _auto_close = body.auto_close_issues
-    _qa_blocked: list[tuple[str, int, dict]] = []
-    if related and _auto_close:
+    _qa_failures: list[dict] = []
+    _qa_rk = ""
+    if related:
         try:
-            from src.api.qa_gate import qa_gate_check
+            from src.api.qa_gate import collect_qa_failures
             from src.repo_key import to_repo_key
 
-            _rk = to_repo_key(f"{owner}/{repo}", p)
-            # 多 Issue PR：逐个检查，任一失败即关闭自动关闭开关，并记录全部失败
-            # Issue 以便逐一标注（不在首个失败处 break）
-            for _rnum in related:
-                _qa_info = qa_gate_check(_rk, _rnum)
-                if _qa_info.get("blocked"):
-                    _auto_close = False
-                    _qa_blocked.append((_rk, _rnum, _qa_info))
+            _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+            _qa_failures = collect_qa_failures(_qa_rk, related)
+            if _qa_failures:
+                _auto_close = False
+                for _f in _qa_failures:
                     log.info(f"qa gate: force auto_close_issues=false "
-                             f"{_rk}/#{_rnum} (qa seq={_qa_info.get('event_seq')})")
+                             f"{_qa_rk}/#{_f['issue']} "
+                             f"(qa seq={_f['info'].get('event_seq')})")
         except Exception as _e:
             log.warning(f"qa gate: create_pull check failed (fail-open) "
                         f"{owner}/{repo}: {_e}")
@@ -1080,15 +1080,14 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
     # Issue #1739：QA 失败被门禁拦截时，在建 PR 成功后补充 Issue 标注（关联本次 PR）。
     # 多 Issue PR：每个 qa 失败的关联 Issue 都要标注，不能只标首个。
-    if _qa_blocked:
+    if _qa_failures and _qa_rk:
         try:
-            from src.api.qa_gate import annotate_qa_failure
+            from src.api.qa_gate import annotate_qa_failures
             from src.outbound_ledger import extract_content_id
 
             _pr_s = str(extract_content_id(resp, "issue") or "").strip()
             _pr_num = int(_pr_s) if _pr_s.isdigit() else 0
-            for _b_rk, _b_num, _b_info in _qa_blocked:
-                annotate_qa_failure(_b_rk, _b_num, _b_info, pr_number=_pr_num)
+            annotate_qa_failures(_qa_rk, _qa_failures, pr_number=_pr_num)
         except Exception as _e:
             log.warning(f"qa gate: create_pull annotation failed (fail-open) "
                         f"{owner}/{repo}: {_e}")
@@ -1186,6 +1185,66 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
             "remaining_issue_nums": _remaining, "pr": resp}
 
 
+def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
+                       repo_key: str) -> None:
+    """合入前 QA 结论门禁（Issue #1739）：qa 最新结论 fail 时标注并 409 阻断。
+
+    - 关联来源 = PR body 的 #N 引用 + PR 详情 ``issues`` 关联（``inner_issue_nums``
+      显式关联的 PR body 可能不含 #N，只读 body 会被绕过）；
+    - 多 Issue PR 逐一校验并标注全部失败 Issue；
+    - 仅本门禁自身的 409 才阻断合入；查询异常（PR 详情 404/502 等）fail-open，
+      不破坏合入可用性。
+    """
+    from src.api.merge_gate import record_gate_log
+    from src.api.qa_gate import annotate_qa_failures, collect_qa_failures
+    from src.repo_key import to_repo_key
+    from src.vcs.issue_ref_filter import extract_related_issue_nums
+
+    _failures: list[dict] = []
+    try:
+        _pr_detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), token)
+        _pr_body = ""
+        _rel_nums = []
+        if isinstance(_pr_detail, dict):
+            _pr_body = str(_pr_detail.get("body") or _pr_detail.get("description") or "")
+            _linked = _pr_detail.get("issues")
+            if isinstance(_linked, list):
+                for _it in _linked:
+                    _n = _it.get("number") if isinstance(_it, dict) else None
+                    if isinstance(_n, int) and _n > 0:
+                        _rel_nums.append(_n)
+        if _pr_body:
+            _rel_nums.extend(extract_related_issue_nums(_pr_body))
+        _rel_nums = list(dict.fromkeys(_rel_nums))  # 去重且保序
+        if _rel_nums:
+            _failures = collect_qa_failures(to_repo_key(f"{owner}/{repo}", p), _rel_nums)
+    except Exception as _e:
+        log.warning(f"qa gate: merge pre-check failed (fail-open) {owner}/{repo}#{number}: {_e}")
+        return
+    if not _failures:
+        return
+    _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+    annotate_qa_failures(_qa_rk, _failures, pr_number=number)
+    _first = _failures[0]
+    record_gate_log(repo_key, number, "pre_merge_qa", "blocked",
+                    {"qa_failed": {"issue": _first["issue"],
+                                   "event_seq": _first["info"].get("event_seq"),
+                                   "status": _first["info"].get("status")},
+                     "qa_failed_issues": [f["issue"] for f in _failures]})
+    _all_ids = ", ".join(f"#{f['issue']}" for f in _failures)
+    raise HTTPException(status_code=409, detail={
+        "code": 409,
+        "message": (f"merge blocked by QA gate (Issue #1739): latest qa conclusion "
+                    f"is fail for issue(s) {_all_ids} "
+                    f"(seq={_first['info'].get('event_seq')}); "
+                    f"fix and re-run qa before merge. reason: "
+                    f"{(_first['info'].get('reason') or '')[:200]}"),
+        "gate": {"phase": "pre_merge_qa", "issue": _first["issue"],
+                 "issues": [f["issue"] for f in _failures],
+                 "event_seq": _first["info"].get("event_seq"),
+                 "status": _first["info"].get("status")}})
+
+
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge",
             summary="Merge pull request",
             description="Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message.")
@@ -1206,65 +1265,8 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     _repo_key = f"{owner}/{repo}"
     # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
     _base_info = get_pull_base(owner, repo, number, p, _token)
-    # Issue #1739：合入前 QA 结论门禁——关联 Issue 同一流水线 qa 最新结论为 fail 时
-    # 阻断合入（合入会触发 VCS 自动关闭 Issue，未经验证的需求将被误判为已解决）。
-    # 关联来源 = PR body 的 #N 引用 + PR 详情 issues 关联（inner_issue_nums 显式关联的
-    # PR body 可能不含 #N，只读 body 会被绕过）。仅本门禁自身的 409 才阻断合入；
-    # 上游临时错误（PR 详情 404/502 等）必须 fail-open，不得破坏合入可用性。
-    _qa_blocks: list[tuple[str, int, dict]] = []
-    try:
-        from src.api.qa_gate import qa_gate_check
-        from src.repo_key import to_repo_key
-        from src.vcs.issue_ref_filter import extract_related_issue_nums
-
-        _pr_detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _token)
-        _pr_body = ""
-        _rel_nums = []
-        if isinstance(_pr_detail, dict):
-            _pr_body = str(_pr_detail.get("body") or _pr_detail.get("description") or "")
-            _linked = _pr_detail.get("issues")
-            if isinstance(_linked, list):
-                for _it in _linked:
-                    _n = _it.get("number") if isinstance(_it, dict) else None
-                    if isinstance(_n, int) and _n > 0:
-                        _rel_nums.append(_n)
-        if _pr_body:
-            _rel_nums.extend(extract_related_issue_nums(_pr_body))
-        _rel_nums = list(dict.fromkeys(_rel_nums))  # 去重且保序
-        _qa_rk = to_repo_key(f"{owner}/{repo}", p)
-        for _rel_num in _rel_nums:
-            _qa_info = qa_gate_check(_qa_rk, _rel_num)
-            if _qa_info.get("blocked"):
-                # 多 Issue PR：记录全部失败 Issue，逐一标注（不在首个失败处 break）
-                _qa_blocks.append((_qa_rk, _rel_num, _qa_info))
-    except Exception as _e:
-        log.warning(f"qa gate: merge pre-check failed (fail-open) {owner}/{repo}#{number}: {_e}")
-    if _qa_blocks:
-        try:
-            from src.api.qa_gate import annotate_qa_failure
-
-            for _b_rk, _b_num, _b_info in _qa_blocks:
-                annotate_qa_failure(_b_rk, _b_num, _b_info, pr_number=number)
-        except Exception as _e:
-            log.warning(f"qa gate: merge annotation failed (fail-open) "
-                        f"{owner}/{repo}#{number}: {_e}")
-        _qa_rk, _rel_num, _qa_info = _qa_blocks[0]
-        record_gate_log(_repo_key, number, "pre_merge_qa", "blocked",
-                        {"qa_failed": {"issue": _rel_num,
-                                       "event_seq": _qa_info.get("event_seq"),
-                                       "status": _qa_info.get("status")},
-                         "qa_failed_issues": [b[1] for b in _qa_blocks]})
-        _all_ids = ", ".join(f"#{b[1]}" for b in _qa_blocks)
-        raise HTTPException(status_code=409, detail={
-            "code": 409,
-            "message": (f"merge blocked by QA gate (Issue #1739): latest qa conclusion "
-                        f"is fail for issue(s) {_all_ids} (seq={_qa_info.get('event_seq')}); "
-                        f"fix and re-run qa before merge. reason: "
-                        f"{(_qa_info.get('reason') or '')[:200]}"),
-            "gate": {"phase": "pre_merge_qa", "issue": _rel_num,
-                     "issues": [b[1] for b in _qa_blocks],
-                     "event_seq": _qa_info.get("event_seq"),
-                     "status": _qa_info.get("status")}})
+    # Issue #1739：合入前 QA 结论门禁（统一入口见 ``_pre_merge_qa_gate``）。
+    _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key)
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
