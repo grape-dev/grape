@@ -2980,7 +2980,28 @@ def _register_failed(ids: list[int], installed: list[dict]) -> bool:
     return (not ids) and bool(installed)
 
 
-async def _reregister(client, prev_installed, device_name, cli_version: str = "") -> tuple[list[int], dict, list] | None:
+async def _recover_orphans_on_rid_change(client, prev_ids, new_ids, active_tasks) -> bool:
+    """Issue #1750 P1-B：仅在 runtime id 集合变化时回收遗留任务（携带活跃白名单）。
+
+    周期重注册不再无条件回收：rid 集合不变说明同一批引擎仍在线，本机内存
+    ``active_tasks`` 里的任务就是仍在执行的长任务（编译/terraform/深度思考等静默型），
+    回收会把它们误判孤儿。仅当 rid 集合变化（引擎重装/新增/下线）时才清理遗留，
+    并携带 ``active_tasks`` 的 task id 作为白名单，让服务端对这些任务 skipped_active。
+    真孤儿（上次进程遗留、不在当前 active_tasks）仍按既有年龄闸门/活跃窗口回收。
+    """
+    if set(new_ids) == set(prev_ids):
+        return False
+    _active = list((active_tasks or {}).keys())
+    for rid in new_ids:
+        try:
+            await client.recover_orphans(rid, active_task_ids=_active)
+        except Exception as e:
+            log.warning(f"recover-orphans after rid change failed rid={rid}: {e}")
+    return True
+
+
+async def _reregister(client, prev_installed, device_name, cli_version: str = "",
+                      recover_orphans: bool = True) -> tuple[list[int], dict, list] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
 
     Issue #471 C1：
@@ -3013,8 +3034,12 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         _ls = _scan_local_skills()
         ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
-            for rid in ids:
-                await client.recover_orphans(rid)
+            # Issue #1750 P1-B：周期重注册默认不再无条件回收（recover_orphans=False），
+            # 由调用方按 rid 集合变化决定是否携带活跃白名单回收；启动/心跳失败路径沿用
+            # 默认 True + 空白名单（清理上次进程遗留）。
+            if recover_orphans:
+                for rid in ids:
+                    await client.recover_orphans(rid)
             from src.domains.runtime.engine.instances import instance_name
             # S2：按 name 配对（服务端返回顺序/跳过与本地发现列表可能不一致，
             # zip 位置对齐在个别引擎被跳过时会错位）
@@ -3135,11 +3160,19 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+            # Issue #1750 P1-B：周期重注册只刷新 runtime id，不再无条件回收孤儿。
+            # 回收仅在 rid 集合变化时进行（携带 active_tasks 白名单），避免静默型
+            # 长任务被每 RUNTIME_REREGISTER_INTERVAL 次的周期回收误判孤儿。
+            _prev_runtime_ids = list(runtime_ids)
+            _rr = await _reregister(client, installed, device_name,
+                                    cli_version=_read_local_worker_version(),
+                                    recover_orphans=False)
             if _rr is not None:
                 runtime_ids, _new_ebr, installed = _rr
                 if _new_ebr:
                     engine_by_rid = _new_ebr
+                await _recover_orphans_on_rid_change(client, _prev_runtime_ids,
+                                                     runtime_ids, active_tasks)
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
