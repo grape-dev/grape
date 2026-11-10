@@ -2448,11 +2448,13 @@ def list_repo_issues(owner: str, repo: str,
             it["attachments_count"] = len(_att)
 
     # PR 订阅事件伪卡片混入（Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
-    # 非分页 legacy 模式保持「全部 PR 卡追加在末尾」旧口径，per_page=0 兼容）
+    # Issue #1816：非分页（线上全量）路径不再整块追加到末尾，PR 伪卡片与真实 Issue
+    # 同键合并重排，复用 _merge_sort_items 与 SQL/分页路径同源排序口径）
     if per_page > 0:
         issues.extend(_page_pr)
     else:
         issues.extend(pr_items)
+        _merge_sort_items(issues, mode, sort_order)
 
     # Issue #995：存在性标注——PR 伪卡片来自 PR 事件而非 issue 台账，不参与已删除过滤；
     # 普通卡片按 repo_key 的校验结果给出 vcs_check，vcs_exists=false 即 VCS 侧已删除。

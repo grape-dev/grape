@@ -609,7 +609,9 @@ def get_pipeline(owner: str, repo: str,
 
     # 按 Issue 最新活动倒序：用预建索引中的最大 seq 排序（O(N)，避免反复遍历全量 events）
     _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
-    pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
+    # Issue #1816：PR 伪 issue 的 issue_id 已在返回体改写为展示值 PR#N，缓存键是原始 id
+    # （#pr_<n>_<scene>），必须用 raw_issue_id 查，否则键恒 0 沉底并按 PR 号正序。
+    pipelines.sort(key=lambda p: _max_seq_cache.get(p.get("raw_issue_id") or p["issue_id"], 0), reverse=True)
 
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，
