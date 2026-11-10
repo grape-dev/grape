@@ -3,7 +3,7 @@
 覆盖 docs/new-version2/feishu-qr-app-onboarding-plan.md §10 的用例：
 - start 参数校验 / 并发限制
 - on_qr_code 回调 → waiting_confirm + qr_url 落库
-- 扫码成功 → connected + chat_agent_session / devops_agent_session 落库
+- 扫码成功 → connected + grape_t_channel_installation 落库（A2 收尾：legacy im_* 不再写）
 - 异常（用户拒绝 / 过期 / 通用错误）→ failed
 - status 端点权限（不存在 / 越权）
 - cancel 幂等
@@ -67,7 +67,6 @@ def teardown_module():
             c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (_uid["id"],))
             c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"repo_{_uid['id']}", f"gitcode:owner{_uid['id']}%"))
             c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%' OR bot_app_id LIKE 'cli_vod_%'")
             db.commit()
         grape_account_db.soft_delete_account(_uid["id"])
 
@@ -78,8 +77,33 @@ def _clean_tasks():
         c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (_uid["id"],))
         # 清理 VOD 用例产生的 devops_agent_session 行（UNIQUE(repo_key, agent_type)）
         c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"gitcode:repo_{_uid['id']}%", f"gitcode:owner{_uid['id']}%"))
-        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%'")
         db.commit()
+    _clean_inst("cli_onboard_%")
+
+
+def _inst_for(scope: str, owner_or_repo: str):
+    """按归属取扫码产生的最新安装行（A2 收尾：凭证真相源）。"""
+    from src.im.engine_wiring import _connect, default_db_path
+    col = "owner_user_id" if scope == "user" else "repo_key"
+    conn = _connect(default_db_path())
+    try:
+        row = conn.execute(
+            "SELECT legacy_app_id, status, config FROM grape_t_channel_installation "
+            f"WHERE scope=? AND {col}=? AND legacy_app_id LIKE 'cli_onboard_%' "
+            "ORDER BY updated_at DESC LIMIT 1", (scope, owner_or_repo)).fetchone()
+    finally:
+        conn.close()
+    return row
+
+
+def _clean_inst(pattern: str):
+    from src.im.engine_wiring import _connect, default_db_path
+    conn = _connect(default_db_path())
+    try:
+        conn.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id LIKE ?", (pattern,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _patch_register(side_effect):
@@ -271,109 +295,78 @@ class TestStatusFlow:
         _clean_tasks()
 
     def test_chat_connected_persists_chat_session(self):
-        """扫码成功 chat_bot → chat_agent_session + global_im_bot_config 落库。"""
+        """扫码成功 chat_bot → grape_t_channel_installation(user 轨) 落库并 active。"""
         _clean_tasks()
-        result = _result()
         task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
+        row = _inst_for("user", str(_uid["id"]))
+        assert row, "应建出 chat 安装行"
+        app_id, status, cfg = row
+        assert app_id.startswith("cli_onboard_") and status == "active"
+        assert "sec_onboard_" in (cfg or "")
+        # A2 Phase B：legacy im_* 列已 DROP，只有安装表这一条写路径
         with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT im_app_id, im_app_secret FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1",
-                (_uid["id"],),
-            ).fetchone()
-            reg = c.execute(
-                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
-                (row[0],) if row else ("",),
-            ).fetchone()
-        assert row and row[0].startswith("cli_onboard_")
-        assert row[1].startswith("sec_onboard_")
-        assert reg and reg[0] == "chat_bot"
+            cols = [r[1] for r in db.cursor().execute("PRAGMA table_info(chat_agent_session)").fetchall()]
+        assert "im_app_id" not in cols, "legacy im_app_id 列应已 DROP"
         _clean_tasks()
 
     def test_vod_connected_persists_devops_session(self):
-        """扫码成功 vod_bot → devops_agent_session + global_im_bot_config 落库。"""
+        """扫码成功 vod_bot → grape_t_channel_installation(repo 轨) 落库并 active。"""
         _clean_tasks()
         from src.repo_key import to_repo_key
-        repo_key = to_repo_key(f"repo_{_uid['id']}")  # 与 _apply_vod_credentials 归一化后一致
-        from src.api.routes import feishu_onboard as f
-        # 预建 devops_agent_session 行（vod）
-        import datetime
+        repo_key = to_repo_key(f"repo_{_uid['id']}")
         with db_lock:
-            c = db.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_provider) VALUES (?,?,?,?,datetime('now'),'feishu')",
-                (f"vod_{_uid['id']}", repo_key, "vod", "idle"),
-            )
+            db.cursor().execute(
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at) "
+                "VALUES (?,?,?,?,datetime('now'))",
+                (f"vod_{_uid['id']}", repo_key, "vod", "idle"))
             db.commit()
         with _patch_register(_fake_success) as patched:
             from src.api.routes import feishu_onboard as f
-            # 改用 vod 专用返回
             async def _fake_vod(**kwargs):
                 kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
                 return _result()
             patched.side_effect = _fake_vod
-            task_id = _await_run("vod_bot", repo_key, patched=patched)
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT im_app_id, im_app_secret FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
-                (repo_key,),
-            ).fetchone()
-            reg = c.execute(
-                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
-                (row[0],) if row else ("",),
-            ).fetchone()
-        assert row and row[0].startswith("cli_onboard_")
-        assert row[1].startswith("sec_onboard_")
-        assert reg and reg[0] == "vod_bot"
+            _await_run("vod_bot", repo_key, patched=patched)
+        row = _inst_for("repo", repo_key)
+        assert row, "应建出 VOD 安装行"
+        app_id, status, cfg = row
+        assert app_id.startswith("cli_onboard_") and status == "active"
+        assert "sec_onboard_" in (cfg or "")
         _clean_tasks()
 
     def test_vod_no_existing_row_creates_with_prefix(self):
-        """前端传无前缀 repo_key（owner/repo）且 devops_agent_session 无既有 vod 行时，
-        应归一化为 gitcode:owner/repo 并 INSERT 建行——否则凭据丢失（历史 bug）。"""
-        _clean_tasks()
-        repo_key = f"owner{_uid['id']}/sample-repo"
-        from src.repo_key import to_repo_key
-        with _patch_register(_fake_success) as patched:
-            from src.api.routes import feishu_onboard as f
-            async def _fake_vod(**kwargs):
-                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
-                return _result()
-            patched.side_effect = _fake_vod
-            task_id = _await_run("vod_bot", repo_key, patched=patched)
-        from src.session_manager import db as _db
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT repo_key, im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
-                (to_repo_key(repo_key),),
-            ).fetchone()
-            reg = c.execute(
-                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
-                (row[1],) if row else ("",),
-            ).fetchone()
-        assert row, "无既有 vod 行时扫码应自动 INSERT 建行"
-        assert row[0] == to_repo_key(repo_key), f"repo_key 应归一化带前缀，实际 {row[0]!r}"
-        assert row[1].startswith("cli_onboard_")
-        assert row[2].startswith("sec_onboard_")
-        assert row[3] == "feishu"
-        assert reg and reg[0] == "vod_bot"
-        _clean_tasks()
-
-    def test_vod_update_existing_row_preserves_session(self):
-        """已有 vod 行时 UPDATE 凭据，且 session id 不变（不重建）。"""
+        """无既有 vod 行时：repo_key 归一化带前缀 + INSERT 占位行 + 安装行落库。"""
         _clean_tasks()
         repo_key = f"owner{_uid['id']}/sample-repo"
         from src.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
-        import uuid as _uuid
-        sess_id = str(_uuid.uuid4())
+        with _patch_register(_fake_success) as patched:
+            from src.api.routes import feishu_onboard as f
+            async def _fake_vod(**kwargs):
+                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+                return _result()
+            patched.side_effect = _fake_vod
+            _await_run("vod_bot", repo_key, patched=patched)
         with db_lock:
-            c = db.cursor()
-            c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_provider) VALUES (?,?,?,?,datetime('now'),'feishu')",
-                (sess_id, rk, "vod", "idle"),
-            )
+            row = db.cursor().execute(
+                "SELECT repo_key FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (rk,)).fetchone()
+        assert row and row[0] == rk, f"repo_key 应归一化带前缀，实际 {row}"
+        inst = _inst_for("repo", rk)
+        assert inst and inst[0].startswith("cli_onboard_") and inst[1] == "active"
+        _clean_tasks()
+
+    def test_vod_update_existing_row_preserves_session(self):
+        """已有 vod 行时保留 session id（不重建），安装行 active。"""
+        _clean_tasks()
+        repo_key = f"owner{_uid['id']}/sample-repo"
+        from src.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
+        sess_id = str(uuid.uuid4())
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at) "
+                "VALUES (?,?,?,?,datetime('now'))", (sess_id, rk, "vod", "idle"))
             db.commit()
         with _patch_register(_fake_success) as patched:
             from src.api.routes import feishu_onboard as f
@@ -381,19 +374,16 @@ class TestStatusFlow:
                 kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
                 return _result()
             patched.side_effect = _fake_vod
-            task_id = _await_run("vod_bot", repo_key, patched=patched)
+            _await_run("vod_bot", repo_key, patched=patched)
         with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT id, im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
-                (rk,),
-            ).fetchone()
-        assert row, "vod 行应存在"
-        assert row[0] == sess_id, "UPDATE 不应改变 session id"
-        assert row[1].startswith("cli_onboard_")
-        assert row[2].startswith("sec_onboard_")
-        assert row[3] == "feishu"
+            row = db.cursor().execute(
+                "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (rk,)).fetchone()
+        assert row and row[0] == sess_id, "UPDATE 不应改变 session id"
+        inst = _inst_for("repo", rk)
+        assert inst and inst[1] == "active"
         _clean_tasks()
+
 
     def test_access_denied_fails(self):
         """用户拒绝授权 → AppAccessDeniedError → failed"""

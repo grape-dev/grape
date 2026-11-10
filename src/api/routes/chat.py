@@ -1,5 +1,5 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, tempfile, os, threading, time
+import json, asyncio, hashlib, tempfile, os, threading, time
 
 from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.prompt_builder import build_general_chat_prompt, resolve_task_server_env
@@ -36,6 +36,38 @@ from src.session_manager import (
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 支持的 IM 渠道（Issue #956 provider 化 → #1254 加 wecom → #1309 加 slack）。
+# 单一来源：回显归一、保存校验、解绑清理三处共用，避免新增渠道时漏改其中一处。
+# Slack 是双令牌渠道：im_app_id 存 Bot Token（xoxb-）、im_app_secret 存 App Token（xapp-）。
+_IM_PROVIDERS = ("feishu", "dingtalk", "wecom", "slack", "telegram", "wechat")
+
+
+def _safe_im_app_ref(app_id: str, provider: str = "") -> str:
+    """日志里的 IM app 标识：Slack 的 app_id 位存 Bot Token → 只输出不可逆摘要。
+
+    非 Slack 渠道保持既有前缀；Slack 渠道或形如 xoxb-/xapp- 的值一律摘要，
+    绝不把令牌片段写进日志。
+    """
+    value = str(app_id or "")
+    prov = str(provider or "").strip().lower()
+    if prov == "slack" or value.startswith(("xoxb-", "xapp-")):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"slack:{digest}"
+    if prov == "telegram" or _looks_like_telegram_token(value):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"telegram:{digest}"
+    if prov == "wechat":
+        # 微信 ilink bot_token 敏感；app_id 位存 ilink_bot_id（非密），日志仍摘要化避免串号
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"wechat:{digest}"
+    return value[:30]
+
+
+def _looks_like_telegram_token(value: str) -> bool:
+    """Telegram Bot Token 形态 `123456:ABC-DEF…` → 日志只留摘要，不落明文片段。"""
+    head, sep, tail = str(value or "").partition(":")
+    return bool(sep and head.isdigit() and len(tail) >= 10)
 
 
 class ChatMessage(BaseModel):
@@ -319,46 +351,31 @@ def _auto_title(conv: dict, message: str):
         update_conversation(conv["id"], title=title)
 
 
-def _dispatch_push_to_main_loop(coro):
-    """把 web→飞书推送协程投递到主事件循环执行。
+_feishu_push_ctx_cache: dict = {}
 
-    agent_fn 运行在 ChatTaskManager 后台线程，`asyncio.run(coro)` 会新建事件循环，
-    而复用的共享 aiohttp ClientSession 绑定主 loop → 跨 loop 抛
-    "Timeout context manager should be used inside a task"。这里用 run_coroutine_threadsafe
-    投递回 BotManager 保存的主 loop，与共享 session 同 loop。
 
-    返回主 loop 的 Future（调用方不等待——fire-and-forget），失败仅告警。
-    """
-    import asyncio
-    from src import api as _api_pkg
-    bm = getattr(getattr(_api_pkg, "main", None), "bot_manager", None)
-    loop = getattr(bm, "loop", None)
-    if loop is not None and loop.is_running():
-        try:
-            fut = asyncio.run_coroutine_threadsafe(coro, loop)
-            fut.add_done_callback(lambda f: f.exception() if not f.cancelled() and f.exception() else None)
-            return fut
-        except Exception as e:
-            log.warning(f"Chat web->feishu push dispatch failed: {e}")
-    # 无主 loop（启动异常/测试）→ 兜底同步跑
-    try:
-        asyncio.run(coro)
-    except Exception as e:
-        log.warning(f"Chat web->feishu push (fallback) failed: {e}")
-    return None
+def _feishu_push_ctx(app_id: str, app_secret: str):
+    """按 app_id 复用 BotContext（token 缓存挂在 ctx 上，避免每次推送重新换 token）。"""
+    ctx = _feishu_push_ctx_cache.get(app_id)
+    if ctx is None:
+        from src.im.feishu_async import BotContext
+        ctx = BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot")
+        _feishu_push_ctx_cache[app_id] = ctx
+    return ctx
 
 
 async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
     """web 答复推送到飞书（feishu-web-chat-unified-design.md §3.2）。
 
-    conversation 已被飞书接入（im_channel_id 非空）时，用该用户配置的 chat_bot
-    主动推送答复给其飞书 open_id。P2P 场景 im_channel_id 即用户 open_id。
+    conversation 已被飞书接入（im_channel_id 非空）时，用该用户当前 **活跃的飞书安装**
+    （读 grape_t_channel_installation，旧 IM 下线 A2 M2 后不再经 BotManager）主动推送答复。
+
+    说明：每次推送按 app_id 复用一份 FeishuAsync（同一主事件循环内使用）。
     """
     try:
         im_channel_id = (conv or {}).get("im_channel_id", "")
         if not im_channel_id:
             return
-        from src.session_manager import db, db_lock
         from src.api.issues_center import _get_feishu_open_id
         _repo_key = (conv or {}).get("repo_key", "")
         open_id = _get_feishu_open_id(user.get("username", ""), _repo_key)
@@ -366,26 +383,23 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
             open_id = im_channel_id
         if not open_id:
             return
-        from src.api import main as api_main
-        bm = api_main.bot_manager
-        if not bm or not bm.api:
+        from src.im.engine_wiring import get_active_installation
+        inst = get_active_installation("user", owner_user_id=str(user.get("id") or ""),
+                                       channel_type="feishu")
+        if not inst:
             return
-        app_id = ""
-        with db_lock:
-            c = db.cursor()
-            row = c.execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1", (user.get("id") or 0,)).fetchone()
-            if row:
-                app_id = row[0]
-        if not app_id:
+        cfg = inst.get("config") or {}
+        app_id, app_secret = str(cfg.get("app_id", "")), str(cfg.get("app_secret", ""))
+        if not app_id or not app_secret:
             return
-        ctx = bm.get_bot(app_id)
-        if not ctx:
-            return
-        await bm.api.send_card_to_user(ctx, open_id, f"[来自Web] {text[:1800]}", title="Chat Agent")
-        from src.config import log
-        log.info(f"Chat web->feishu push: conv={(conv or {}).get('id')} open_id={open_id[:20]} text_len={len(text)}")
+        from src.im.engine_wiring import feishu_api
+        from src.im.feishu_async import BotContext
+        api = feishu_api(app_id)
+        ctx = _feishu_push_ctx(app_id, app_secret)
+        await api.send_card_to_user(ctx, open_id, f"[来自Web] {text[:1800]}", title="Chat Agent")
+        log.info(f"Chat web->feishu push: conv={(conv or {}).get('id')} "
+                 f"open_id={open_id[:20]} text_len={len(text)}")
     except Exception as e:
-        from src.config import log
         log.warning(f"Chat web->feishu push failed: {e}")
 
 
@@ -1443,10 +1457,34 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         except Exception:
             pass
 
-    # 从用户级 chat_agent_session 读取 Chat Agent 凭证状态（每用户独立）
-    # 不再查 global_im_bot_config（该表仅作类型注册，不承载用户 IM 配置）
-    im_app_id = cfg.get("im_app_id", "") or ""
-    im_app_secret = cfg.get("im_app_secret", "") or ""
+    # A2 收尾：凭证状态改读 grape_t_channel_installation（legacy im_* 三列不再是真相源）
+    # 按渠道分别回显：每个渠道取**该用户自己的**最新一条可用安装（active/disabled），
+    # 而不是"最近更新的那一条"——多渠并存时后者只有最后绑的那个渠道能回显
+    # （企微明明连着也显示"未接入"，前端据此误判）。
+    # 任何情况不回传 secret（仅布尔）。
+    _inst = _active_im_installation(user["id"])
+    im_provider = str((_inst or {}).get("channel_type", "") or "").strip().lower()
+    if im_provider not in _IM_PROVIDERS:
+        # 空值/历史脏值归一 feishu（#825 前旧行均为飞书）
+        im_provider = "feishu"
+    _user_installs = _user_im_installations(user["id"])
+
+    def _im_echo(provider: str) -> dict:
+        entry = _user_installs.get(provider) or {}
+        cfg = entry.get("config") or {}
+        app_id = str(cfg.get("app_id", "") or "")
+        secret = str(cfg.get("app_secret", "") or "")
+        echo_app_id = app_id
+        if provider in ("slack", "telegram") and app_id:
+            # Issue #1309 / #1613：Slack 的 app_id 位存 Bot Token，Telegram 只有单 Bot Token
+            # （均敏感）→ 只回显脱敏占位；前端未改动时原样回传 ********，后端按"保留原值"处理
+            echo_app_id = "********"
+        return {
+            "connected": bool(app_id),   # 兼容旧字段：= 已配置；真连接看 installation_status
+            "app_id": echo_app_id,
+            "app_secret_exists": bool(secret),
+            "installation_status": str(entry.get("status", "") or ""),
+        }
 
     # 当前配置技能的 scope（用于前端下拉回显同名技能）
     skill_scope = cfg.get("skill_scope", "")
@@ -1473,25 +1511,81 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         "_backends": backends,
         "_skills": chat_skills,
         "im": {
-            "feishu": {
-                "connected": bool(im_app_id),
-                "app_id": im_app_id,
-                "app_secret_exists": bool(im_app_secret),
-            },
-            "wecom": {"connected": False, "app_id": ""},
-            "dingtalk": {"connected": False, "app_id": ""},
+            # Issue #956：当前绑定渠道（feishu|dingtalk），前端回显当前选中卡
+            "provider": im_provider,
+            "feishu": _im_echo("feishu"),
+            "wecom": _im_echo("wecom"),
+            "dingtalk": _im_echo("dingtalk"),
+            "slack": _im_echo("slack"),
+            "telegram": _im_echo("telegram"),
+            "wechat": _im_echo("wechat"),
         }
     }
 
 
-def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> None:
-    """Chat IM 解绑清理（Issue #294）：注册表释放 + 渠道会话清理 + unified_user_mapping 对账。
+def _active_im_installation(user_id):
+    """当前用户 active 的 IM 安装（A2 收尾后凭证真相源；无则 {}）。"""
+    try:
+        from src.im.engine_wiring import get_active_installation
+        return get_active_installation("user", owner_user_id=str(user_id)) or {}
+    except Exception as e:
+        log.warning(f"Chat IM: read installation failed: {e}")
+        return {}
 
-    - 该 app_id 无其他用户引用 → 删除 global_im_bot_config 的 chat_bot 注册行，并清空
-      unified_user_mapping 中所有该 app 的 open_id/feishu_name/app_id（open_id 为 app 级，
-      app 释放后失效，重绑需重新 p2p 确认）；
-    - 仍被其他用户引用 → 只清空当前用户自己的映射行；
-    - 该渠道（im_channel_id=old_app_id）的 chat_conversations 一律删除（对齐换绑清理逻辑）。
+
+def _get_provider_installation(user_id, channel_type: str) -> dict:
+    """按渠道取该用户 active 安装（多渠并存时按渠道隔离旧值，不能取"全局最近一条"）。"""
+    try:
+        from src.im.engine_wiring import get_active_installation
+        return get_active_installation("user", owner_user_id=str(user_id),
+                                       channel_type=str(channel_type or "")) or {}
+    except Exception as e:
+        log.warning(f"Chat IM: read installation({channel_type}) failed: {e}")
+        return {}
+
+
+def _user_im_installations(user_id) -> dict:
+    """该用户每个渠道最新一条可用安装（active/disabled）→ {channel_type: {status, config}}。
+
+    前端多渠并存（如微信 + 企业微信同时启用）时，各渠道表单需要各自的凭证回显；
+    只取"全局最近一条"会让其余渠道恒为空 → 误显示"未接入"。
+    """
+    out: dict = {}
+    try:
+        from src.im.engine_wiring import _connect, default_db_path
+        conn = _connect(default_db_path())
+        try:
+            rows = conn.execute(
+                "SELECT channel_type, status, config FROM grape_t_channel_installation "
+                "WHERE scope='user' AND owner_user_id=? AND status IN ('active','disabled') "
+                "ORDER BY updated_at DESC", (str(user_id),)).fetchall()
+        finally:
+            conn.close()
+        for ctype, st, raw in rows or []:
+            key = str(ctype or "").strip().lower()
+            if not key or key in out:
+                continue
+            try:
+                cfg = json.loads(raw or "{}")
+            except Exception:
+                cfg = {}
+            out[key] = {"status": str(st or ""), "config": cfg if isinstance(cfg, dict) else {}}
+    except Exception as e:
+        log.warning(f"Chat IM: read user installations failed: {e}")
+    return out
+
+
+def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
+                            provider: str = "feishu") -> None:
+    """Chat IM 解绑清理（Issue #294，#956 补 provider 维度）：注册表释放 + 渠道会话清理。
+
+    - 该 app_id 无其他活跃安装引用 → 清空该 app 的飞书映射（A2 收尾：不再有 legacy 登记行）；
+    - 飞书（provider=feishu）才清空 unified_user_mapping 的 open_id/feishu_name/app_id
+      （app 级 open_id 为飞书专属概念，钉钉解绑不碰）；
+    - 仍被其他用户引用 → 只清空当前用户自己的映射行（仅飞书）；
+    - 该渠道（im_channel_id=old_app_id）的 chat_conversations 一律删除（对齐换绑清理逻辑）；
+    - repo_im_group_binding / bot_seen_messages 与渠道无关，一律清理；
+    - feishu_onboard_task 为飞书扫码专属，仅 feishu 解绑清理（钉钉无此链路）。
     """
     if not old_app_id:
         return
@@ -1500,14 +1594,28 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> 
     try:
         with _db_lock:
             c = _db.cursor()
-            c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE im_app_id=? AND user_id!=? AND im_app_id!=''", (old_app_id, user_id))
-            other_refs = c.fetchone()[0]
+            # A2 收尾：引用判定改看 active 安装行（不含当前用户本人的这条）
+            other_refs = 0
+            try:
+                from src.im.engine_wiring import _connect, default_db_path
+                _conn = _connect(default_db_path())
+                try:
+                    other_refs = int(_conn.execute(
+                        "SELECT COUNT(*) FROM grape_t_channel_installation "
+                        "WHERE legacy_app_id=? AND status='active' "
+                        "  AND NOT (scope='user' AND owner_user_id=?)",
+                        (old_app_id, str(user_id))).fetchone()[0])
+                finally:
+                    _conn.close()
+            except Exception as e:
+                log.warning(f"Chat IM: installation ref check failed: {e}")
             _now = _dt.now().isoformat()
+            is_feishu = (provider or "feishu").strip().lower() == "feishu"
             if other_refs == 0:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=? AND bot_type='chat_bot'", (old_app_id,))
-                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
-                          (_now, old_app_id))
-            elif gitcode_user:
+                if is_feishu:
+                    c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
+                              (_now, old_app_id))
+            elif gitcode_user and is_feishu:
                 # FR-21.10: 按 user_id 精确清当前用户的飞书映射——不按用户名扫列
                 # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
                 # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
@@ -1517,77 +1625,108 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> 
             # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
             # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
             c.execute("DELETE FROM repo_im_group_binding WHERE im_app_id=?", (old_app_id,))
-            # 解绑干净：消息去重缓存 + 绑定过程记录一并清，避免该 app 的历史数据残留
-            #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息）
+            # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
+            #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
             c.execute("DELETE FROM bot_seen_messages WHERE app_id=?", (old_app_id,))
-            c.execute("DELETE FROM feishu_onboard_task WHERE app_id=?", (old_app_id,))
+            if is_feishu:
+                c.execute("DELETE FROM feishu_onboard_task WHERE app_id=?", (old_app_id,))
             _db.commit()
-        log.info(f"Chat IM: unbound old app_id={old_app_id[:30]} user={user_id} (other_refs={other_refs})")
+        log.info(f"Chat IM: unbound old app_id={_safe_im_app_ref(old_app_id, provider)} provider={provider} user={user_id} (other_refs={other_refs})")
     except Exception as e:
         log.warning(f"Chat IM: unbind cleanup failed: {e}")
 
 
 @router.put("/config", operation_id="chat_config_update", summary="Update chat config", description="Updates chat config.")
-async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
+async def update_chat_config(body: dict, request: Request,
+                             user: dict = Depends(require_no_session_token), repo: str = ""):
+    # Issue #956：provider 化载荷解析（新形态 im.provider + 平铺 app_id/app_secret，
+    # 兼容旧形态 im.feishu / im.dingtalk 子 dict；无 im 键仍为普通保存，#431 语义不变）
     im = body.get("im", {})
-    feishu = im.get("feishu", {})
-    # Issue #431：body 未携带 im 键（或 im 下无 feishu 键）时为普通保存（换引擎/技能），不写任何 im_
-    # 字段，保持现有 IM 配置不变；仅显式携带 im.feishu 且 app_id 为空才视为解绑
-    # （沿用 _purge_chat_im_binding 清理链路，Issue #294）
-    explicit_unbind = ("im" in body) and ("feishu" in im) and not feishu.get("app_id")
+    provider = str(im.get("provider") or "").strip().lower()
+    if provider and provider not in _IM_PROVIDERS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"暂不支持该 IM 渠道：{provider}（当前支持 feishu / dingtalk / wecom / slack / telegram / wechat）"})
+    channel = im.get(provider) if provider else None
+    if channel is None and not provider:
+        if "feishu" in im:
+            provider, channel = "feishu", im["feishu"]
+        elif "dingtalk" in im:
+            provider, channel = "dingtalk", im["dingtalk"]
+    if provider and channel is None:
+        # 新形态平铺载荷：im = {provider, app_id, app_secret}
+        channel = {"app_id": im.get("app_id", ""), "app_secret": im.get("app_secret", "")}
+    if not isinstance(channel, dict):
+        channel = {}
+    # Issue #1309：Slack 是双令牌渠道，Bot Token（app_id 位）属敏感信息，GET /config
+    # 只回显 ********；前端未改动时原样回传占位符 → 这里按"保留存量值"处理，
+    # 绝不把占位符写进 im_app_id（否则下一次连接拿 ******** 当 token）。
+    if str(channel.get("app_id") or "") == "********":
+        channel = dict(channel)
+        channel["app_id"] = str((_get_provider_installation(user["id"], provider).get("config") or {}).get("app_id", "") or "")
+    # Issue #1613：Telegram 单 Bot Token —— 前端只提交一栏 app_id；内部把 token 同时作为
+    # secret 位用于安装行创建（secret 语义键不透出、日志摘要化），避免"单凭据渠道因
+    # 缺 secret 建不出安装"。
+    if provider == "telegram" and channel.get("app_id") and not channel.get("app_secret"):
+        channel = dict(channel)
+        channel["app_secret"] = channel["app_id"]
+    # Issue #1728：微信单 bot_token —— 手动保存时 token 同时作为 secret 位建安装
+    if provider == "wechat" and channel.get("app_id") and not channel.get("app_secret"):
+        channel = dict(channel)
+        channel["app_secret"] = channel["app_id"]
+    # Issue #431：body 未携带 im 键（或 im 下无渠道键）时为普通保存（换引擎/技能），不写任何 im_
+    # 字段，保持现有 IM 配置不变；仅显式携带渠道载荷且 app_id 为空才视为解绑
+    # （沿用 _purge_chat_im_binding 清理链路，Issue #294；#956 按 provider 维度清理）
+    channel_hit = ("im" in body) and bool(provider) and (("feishu" in im) or ("dingtalk" in im) or "provider" in im)
+    explicit_unbind = channel_hit and not channel.get("app_id")
     kwargs = {}
-    if feishu.get("app_id"):
-        app_id = feishu["app_id"]
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            # 强约束：一个 app_id 全局唯一。类型注册表校验 VOD 占用 + 其他用户占用
-            c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
-            row = c.fetchone()
-            if row and row[0] == "vod_bot":
-                raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
-            # 其他用户是否已占用（app_id 全局唯一）
-            c.execute("SELECT user_id FROM chat_agent_session WHERE im_app_id=? AND user_id>0 AND user_id!=? AND im_app_id!='' LIMIT 1", (app_id, user["id"]))
-            other = c.fetchone()
-            if other:
-                raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被其他用户使用，不能重复绑定"})
-
-            old_cfg = _get_chat_config(user["id"])
-            old_app_id = old_cfg.get("im_app_id", "")
-            if old_app_id and old_app_id != app_id:
-                # 更换 app_id：检查旧 app_id 是否还被其他用户/其他记录引用
-                c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE im_app_id=? AND user_id!=? AND im_app_id!=''", (old_app_id, user["id"]))
-                other_refs = c.fetchone()[0]
-                if other_refs == 0:
-                    c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=? AND bot_type='chat_bot'", (old_app_id,))
-                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-                log.info(f"Chat IM: replaced old app_id={old_app_id[:30]} with new app_id={app_id[:30]}")
-
-            app_secret = feishu.get("app_secret", "")
-            if app_secret and app_secret != "********":
-                c.execute(
-                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
-                    (app_id, "chat_bot")
-                )
-                db.commit()
-                kwargs["im_app_id"] = app_id
-                kwargs["im_app_secret"] = app_secret
-                log.info(f"Chat IM: saved im config for user={user['id']} app_id={app_id[:30]}")
-            else:
-                kwargs["im_app_id"] = app_id
-    elif explicit_unbind:
-        # 显式解绑：清空 IM 三字段（配合 _purge_chat_im_binding 完成注册表/渠道清理）
-        old_cfg = _get_chat_config(user["id"])
-        old_app_id = old_cfg.get("im_app_id", "")
-        kwargs["im_app_id"] = ""
-        kwargs["im_app_secret"] = ""
-        kwargs["im_provider"] = ""
+    # A2 收尾：IM 凭证唯一真相源 = grape_t_channel_installation（legacy im_* 三列不再写）
+    # 带渠道载荷时旧值必须按渠道取：多渠并存（微信 + 企微同时 active）时若取"全局最近一条"，
+    # 保存企微会拿微信当旧值 → 误删微信会话并 revoke 微信安装。
+    _hit_prov = provider or "feishu"
+    if channel_hit:
+        _old_inst = _get_provider_installation(user["id"], _hit_prov)
+        # 解绑兜底（#956 口径）：载荷声明的 provider 自己没有生效安装时（旧前端/脏载荷），
+        # 按"存量绑定渠道"清理，否则飞书专属映射/会话会漏清。
+        if explicit_unbind and not str(((_old_inst or {}).get("config") or {}).get("app_id", "") or ""):
+            _old_inst = _active_im_installation(user["id"])
     else:
-        # Issue #431：普通保存（body 无 im 键）——只读旧值供对账，不动任何 im_ 字段
-        old_cfg = _get_chat_config(user["id"])
-        old_app_id = old_cfg.get("im_app_id", "")
-    if feishu.get("app_secret") and feishu["app_secret"] != "********":
-        kwargs["im_app_secret"] = feishu["app_secret"]
+        _old_inst = _active_im_installation(user["id"])
+    old_app_id = str((_old_inst.get("config") or {}).get("app_id", "") or "")
+    old_channel = str((_old_inst or {}).get("channel_type", "") or "").strip().lower()
+    if old_channel not in _IM_PROVIDERS:
+        old_channel = _hit_prov if channel_hit else "feishu"
+
+    if channel.get("app_id"):
+        app_id = channel["app_id"]
+        # 强约束：一个 app_id 全局唯一。查 active 安装行：repo 轨=被 VOD 占用，user 轨他人=被别人占用
+        from src.im.engine_wiring import _connect, default_db_path
+        _conn = _connect(default_db_path())
+        try:
+            _holders = _conn.execute(
+                "SELECT scope, owner_user_id FROM grape_t_channel_installation "
+                "WHERE legacy_app_id=? AND status='active'", (app_id,)).fetchall()
+        finally:
+            _conn.close()
+        if any(str(r[0]) == "repo" for r in _holders):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
+        if any(str(r[0]) == "user" and str(r[1]) != str(user["id"]) for r in _holders):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被其他用户使用，不能重复绑定"})
+
+        if old_app_id and old_app_id != app_id:
+            # 更换 app_id：清旧渠道会话（安装行由下方 sync/revoke 处理，不再动 legacy 表）
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
+                db.commit()
+            log.info(f"Chat IM: replaced old app_id={_safe_im_app_ref(old_app_id, old_channel)} "
+                     f"with new app_id={_safe_im_app_ref(app_id, provider)}")
+        log.info(f"Chat IM: saved im config for user={user['id']} provider={provider} "
+                 f"app_id={_safe_im_app_ref(app_id, provider)}")
+    elif explicit_unbind:
+        kwargs["im_app_secret"] = ""
+    if channel.get("app_secret") and channel["app_secret"] != "********":
+        kwargs["im_app_secret"] = channel["app_secret"]
+
     # Issue #508：backend 无类型校验直传落库 → _resolve_chat_runtime_id（str 形参）
     # → TypeError → 500（GET /config 返回对象形态 {"type": ...} 被调用方回填即触发）。
     # 显式校验：仅接受字符串（本 Issue 口径：对象形态显式 400 拒绝，不归一——
@@ -1660,45 +1799,170 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         kwargs["skill_scope"] = skill_scope
     _set_chat_config(user["id"], **kwargs)
 
-    # Issue #294：解绑（显式携带 im.feishu 且 app_id 置空）→ 清理全局注册表/渠道会话 + unified_user_mapping 对账
+    # Issue #294：解绑（显式携带渠道载荷且 app_id 置空）→ 清理全局注册表/渠道会话 + unified_user_mapping 对账
+    # Issue #956：按 provider 维度清理（钉钉不碰飞书专属 unified_user_mapping/feishu_onboard_task）；
+    # 清理维度取「存量绑定的渠道」（安装行 channel_type），载荷 provider 仅兜底——避免旧绑为飞书、
+    # 载荷却声明 dingtalk 时漏清飞书映射
     if explicit_unbind and old_app_id:
-        _purge_chat_im_binding(user["id"], user.get("username", ""), old_app_id)
+        _purge_provider = old_channel
+        if _purge_provider not in _IM_PROVIDERS:
+            _purge_provider = "feishu"
+        _purge_chat_im_binding(user["id"], user.get("username", ""), old_app_id, provider=_purge_provider)
 
     # 手动配置换 app：对账 unified_user_mapping（feishu-app-scoped-openid-fix.md §2.3）
     # 新旧 im_app_id 不同 → 刷新 app_id 并清空 open_id/feishu_name，要求用户重新 p2p 确认
-    _new_app = kwargs.get("im_app_id") or ""
+    _new_app = str(channel.get("app_id") or "")
     if _new_app and old_app_id and old_app_id != _new_app:
         try:
             # FR-18.7: 注册名语境——用 bind_feishu_identity 只清飞书三列，不碰平台列
             from src.session_manager import bind_feishu_identity
             bind_feishu_identity(user["id"], open_id="", app_id=_new_app)
-            log.info(f"Chat IM: app changed {old_app_id[:30]} -> {_new_app[:30]}, reconciled unified_user_mapping (open_id cleared)")
+            log.info(f"Chat IM: app changed {_safe_im_app_ref(old_app_id, old_channel)} -> "
+                     f"{_safe_im_app_ref(_new_app, provider)}, reconciled unified_user_mapping (open_id cleared)")
         except Exception as e:
             log.warning(f"Chat IM: reconcile unified_user_mapping failed: {e}")
 
-    # Chat IM：通过 BotManager 动态增删 Bot
+    # Issue #871 写方向反转：保存/解绑/换 app 直写 grape_t_channel_installation（请求内生效，
+    # 不依赖扫描窗口）；new 模式下写桥自动反向回写 legacy。失败只告警不阻断。
+    # Issue #956：revoke 按「旧渠道类型」匹配安装行（钉钉行走 channel_type=dingtalk，
+    # 不传会用默认 feishu 导致 revoke 落空 → 安装行不 revoked、引擎不归零）
     try:
-        from src.api.bot_manager_registry import get_bot_manager
-        bot_manager = get_bot_manager()
-        if bot_manager and bot_manager.api:
-            if feishu.get("app_id") and feishu.get("app_id") == app_id:
-                new_secret = kwargs.get("im_app_secret", "")
-                if new_secret and new_secret != "********":
-                    if old_app_id and old_app_id != app_id:
-                        await bot_manager.remove_bot(old_app_id)
-                        log.info(f"Chat IM: removed old bot {old_app_id[:30]} from BotManager")
-                    if app_id in bot_manager._bots:
-                        await bot_manager.remove_bot(app_id)
-                    await bot_manager.add_bot(app_id, new_secret, bot_type="chat_bot")
-                    log.info(f"Chat IM: added bot {app_id[:30]} to BotManager")
-            elif explicit_unbind and old_app_id:
-                # Issue #431：仅显式解绑才摘除 BotManager 中在跑的 bot，普通保存不动
-                await bot_manager.remove_bot(old_app_id)
-                log.info(f"Chat IM: removed bot {old_app_id[:30]} from BotManager")
+        from src.im.engine_wiring import revoke_installation, sync_installation
+        _uid = str(user["id"])
+        _old_channel = old_channel
+        if explicit_unbind and old_app_id:
+            revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
+                                       channel_type=_old_channel)
+        elif _new_app:
+            # Issue #956：写入口透传 channel_type=provider（feishu|dingtalk），
+            # 引擎侧按渠道类型路由到对应工厂（#936 DINGTALK 工厂已注册）
+            # Issue #1309：Slack 双令牌 → config 额外落 bot_token/app_token 语义键
+            _extra = None
+            if (provider or "") == "slack":
+                _extra = {"bot_token": _new_app}
+                _app_token = kwargs.get("im_app_secret", "") or ""
+                if _app_token:
+                    _extra["app_token"] = _app_token
+            elif (provider or "") == "telegram":
+                # Issue #1613：单 Bot Token → config 落 bot_token 语义键，工厂据此建连
+                _extra = {"bot_token": _new_app}
+            elif (provider or "") == "wechat":
+                # Issue #1728：微信 ilink bot_token → config 落 bot_token 语义键
+                _extra = {"bot_token": kwargs.get("im_app_secret", "") or _new_app}
+            sync_installation("user", owner_user_id=_uid, app_id=_new_app,
+                                     app_secret=kwargs.get("im_app_secret", "") or "",
+                                     channel_type=provider or "feishu",
+                                     extra_config=_extra)
+        if _new_app and old_app_id and old_app_id != _new_app:
+            revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
+                                       channel_type=_old_channel)
     except Exception as e:
-        log.warning(f"Chat BotManager update failed: {e}")
+        log.warning(f"Chat IM: sync grape_t_channel_installation failed: {e}")
+
+    # C3 审计：IM 凭证保存/解绑留痕（detail 只记渠道与 app 摘要，绝不落 secret）
+    if channel_hit:
+        try:
+            from src.auth import audit as auth_audit
+            _ip = ""
+            try:
+                _ip = (request.client.host if request.client else "") or ""
+            except Exception:
+                _ip = ""
+            auth_audit.log_audit(
+                "im_installation_change",
+                user_id=int(user["id"]),
+                operator_id=int(user["id"]),
+                ip=_ip,
+                detail={"action": "unbind" if explicit_unbind else "credential_save",
+                        "provider": _hit_prov,
+                        "app_ref": _safe_im_app_ref(channel.get("app_id", "") or "", _hit_prov),
+                        "scope": "repo" if repo else "user",
+                        "repo": repo or ""},
+            )
+        except Exception as _ae:
+            log.warning(f"Chat IM audit log failed: {_ae}")
 
     return {"message": "配置已更新"}
+
+
+# ===== 微信 ilink 扫码绑定（Issue #1728 §5.1）=====
+
+@router.post("/im/wechat/login/start", operation_id="chat_wechat_login_start",
+             summary="Start WeChat ilink QR login",
+             description="Requests an ilink bot QR code and returns login_id + qrcode_img_content; poll status until confirmed.")
+async def chat_wechat_login_start(user: dict = Depends(require_no_session_token)):
+    """取微信 ilink 绑定二维码（进程内状态机 TTL 10 分钟）。"""
+    from src.im.adapters.wechat.login import default_login_manager
+    manager = default_login_manager()
+    try:
+        return await manager.start()
+    except Exception as e:
+        log.warning(f"Chat IM: wechat login start failed: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "获取微信绑定二维码失败，请稍后重试"})
+
+
+def _persist_wechat_login(user: dict, credentials: dict) -> bool:
+    """confirmed 凭证落 `grape_t_channel_installation`（A2 收尾：不再回写 legacy im_* 三列）。"""
+    bot_token = str(credentials.get("bot_token") or "")
+    bot_id = str(credentials.get("ilink_bot_id") or "")
+    if not bot_token or not bot_id:
+        return False
+    baseurl = str(credentials.get("baseurl") or "")
+    ilink_user_id = str(credentials.get("ilink_user_id") or "")
+    from datetime import datetime as _dt
+    extra = {
+        "bot_token": bot_token,
+        "ilink_user_id": ilink_user_id,
+        "bound_at": _dt.now().isoformat(),
+    }
+    if baseurl:
+        extra["baseurl"] = baseurl
+    try:
+        from src.im.engine_wiring import sync_installation
+        sync_installation(
+            "user", owner_user_id=str(user["id"]), app_id=bot_id,
+            app_secret=bot_token, channel_type="wechat", extra_config=extra)
+    except Exception as e:
+        log.warning(f"Chat IM: wechat login installation write failed: {e}")
+        return False
+    log.info(f"Chat IM: wechat bound app_id={_safe_im_app_ref(bot_id, 'wechat')} user={user['id']}")
+    # C3 审计：扫码绑定=凭证写入类操作，必须留痕（detail 只带 app 摘要，绝不含 bot_token）
+    try:
+        from src.auth import audit as auth_audit
+        auth_audit.log_audit(
+            "im_installation_change",
+            user_id=int(user["id"]), operator_id=int(user["id"]),
+            detail={"action": "wechat_qr_bind", "provider": "wechat",
+                    "app_ref": _safe_im_app_ref(bot_id, "wechat"), "scope": "user"},
+        )
+    except Exception as _ae:
+        log.warning(f"Chat IM: wechat bind audit failed: {_ae}")
+    return True
+
+
+@router.get("/im/wechat/login/status", operation_id="chat_wechat_login_status",
+            summary="Get WeChat ilink login status",
+            description="Short-poll proxy for ilink qrcode status: wait|scaned|need_verifycode|confirmed|expired. On confirmed the credential is stored to grape_t_channel_installation.")
+async def chat_wechat_login_status(id: str = Query(""), verify_code: str = Query(""),
+                                   user: dict = Depends(require_no_session_token)):
+    """扫码状态短轮询；`need_verifycode` 时前端提交 PIN（verify_code 透传）。"""
+    from src.im.adapters.wechat.login import default_login_manager
+    manager = default_login_manager()
+    session = manager.get(id)
+    if session is None:
+        return {"status": "expired", "message": "登录会话不存在或已过期"}
+    try:
+        result = await manager.status(id, verify_code=verify_code)
+    except Exception as e:
+        log.warning(f"Chat IM: wechat login status failed: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "查询扫码状态失败，请稍后重试"})
+    credentials = result.pop("credentials", None)
+    if result.get("status") == "confirmed" and isinstance(credentials, dict):
+        if not credentials.get("_bound"):
+            if _persist_wechat_login(user, credentials):
+                credentials["_bound"] = True
+    result.pop("_bound", None)
+    return result
 
 
 # ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====

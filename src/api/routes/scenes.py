@@ -2429,7 +2429,6 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     runtime_id=runtime_id, skill=skill, skill_id=skill_id,
                     repo_gitcode_token=None, status="idle",
                     enable=None, subscribe_events=None,
-                    im_app_id=None, im_app_secret=None, im_provider=None,
                 )
                 updated += 1
             except Exception as e:

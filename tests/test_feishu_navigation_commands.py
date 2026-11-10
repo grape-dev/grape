@@ -24,6 +24,17 @@ def _clear_repo_bind_cache():
     _repo_bind_cache.clear()
 
 
+def _seed_chat_install(user_id, app_id, row_id=None, channel_type="feishu"):
+    """A2 Phase B：IM 凭证只认 grape_t_channel_installation（chat_agent_session.im_* 列已 DROP）。"""
+    from src.im.engine_wiring import sync_installation
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
+                  (row_id or f"seed-{user_id}-{app_id}", user_id))
+        db.commit()
+    sync_installation("user", owner_user_id=str(user_id), app_id=app_id,
+                      app_secret="sec", channel_type=channel_type)
+
 def _ctx(app_id="cli_nav"):
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-nav")
 
@@ -40,6 +51,7 @@ def _clean():
             except Exception:
                 pass
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'nav-%'")
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id IN ('cli_nav','cli_jason')")
         c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
     from src.im.handler_async import _clear_pending_selection
@@ -50,7 +62,7 @@ def _seed():
     _clean()
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('nav-sess', 1, 'cli_nav')")
+        _seed_chat_install(1, "cli_nav", row_id="nav-sess")
         for i, (rk, admin, join) in enumerate([
             ("gitcode:navuser/repo-a", 1, 1),
             ("gitcode:navuser/repo-b", 0, 1),
@@ -145,11 +157,26 @@ def _pending():
     return _get_pending_selection("nav_chat")
 
 
+def _as_card_dict(card):
+    """Issue #1095：handler 构造渠道中立 Card IR → 渲染回 lark dict 供既有断言。"""
+    if isinstance(card, dict):
+        return card
+    from src.im.channel.renderers.feishu import FeishuCardRenderer
+    return FeishuCardRenderer().render(card).payload
+
+
 def _card_text(api):
     if api.reply_card.called:
         return api.reply_card.call_args[0][2]
     if api.send_card_to_user.called:
         return api.send_card_to_user.call_args[0][2]
+    # Issue #1008 出站收敛：自定义卡片统一走 egress.send_raw_card（卡片体在调用参数里）
+    src = getattr(api, "send_raw_card", None)
+    if src is not None and getattr(src, "called", False):
+        card = _as_card_dict(src.call_args[0][2] or {})
+        for el in (card.get("elements") or (card.get("body") or {}).get("elements") or []):
+            if isinstance(el, dict) and el.get("tag") == "div":
+                return (el.get("text") or {}).get("content", "")
     # 通过 _send_card_reply / _send_bind_success_card / _send_repo_card 发送的卡片文本
     if getattr(api, '_last_card_text', None):
         return api._last_card_text
@@ -187,6 +214,16 @@ def _card_cmds(api):
                         cmds.append(val["cmd"])
     except Exception:
         pass
+    # Issue #1095：Card IR 直读（egress.send_raw_card mock 收到 Card 对象时）
+    src = getattr(api, "send_raw_card", None)
+    if src is not None and getattr(src, "called", False):
+        card = src.call_args[0][2]
+        if not isinstance(card, dict) and hasattr(card, "blocks"):
+            for block in card.blocks:
+                for opt in (getattr(block, "options", None) or ()):
+                    cmds.append("/" + opt.id + (f" {opt.params['num']}" if "num" in opt.params else ""))
+            for act in card.actions:
+                cmds.append("/" + act.id)
     return cmds
 
 
@@ -430,7 +467,7 @@ def _seed_unbound():
         c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
         # 残留全局 ws_feishu_app_id（历史 bug 触发条件）→ 指向 Jason7602
         c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', 'cli_jason')")
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('nav-jason', 99, 'cli_jason')")
+        _seed_chat_install(99, "cli_jason", row_id="nav-jason")
         c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (99, 'gitcode:Jason7602/secret-repo', 'Jason7602', 'secret-repo', 1, 1)")
         db.commit()
 

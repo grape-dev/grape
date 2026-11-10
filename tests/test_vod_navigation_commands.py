@@ -25,6 +25,7 @@ def _clean():
         c = db.cursor()
         c.execute("DELETE FROM vod_conversations WHERE im_chat_id=?", (CHAT,))
         c.execute("DELETE FROM devops_agent_session WHERE id LIKE 'sess-vod-%' OR repo_key LIKE 'gitcode:owner/vod-repo-%'")
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (APP,))
         db.commit()
     from src.im.handler_async import _clear_pending_selection
     _clear_pending_selection(CHAT)
@@ -37,10 +38,14 @@ def _seed(repos):
         for rk in repos:
             sid = "sess-vod-" + rk.split("/")[-1]
             c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, im_app_id, repo_gitcode_token, skill, status) "
-                "VALUES (?,?,'vod',?, '','vod','idle')",
-                (sid, rk, APP))
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, repo_gitcode_token, skill, status) "
+                "VALUES (?,?,'vod','','vod','idle')",
+                (sid, rk))
         db.commit()
+    # A2 Phase B：/"repo 候选读 grape_t_channel_installation（devops_agent_session.im_app_id 已 DROP）
+    from src.im.engine_wiring import sync_installation
+    for rk in repos:
+        sync_installation("repo", repo_key=rk, app_id=APP, app_secret="sec", channel_type="feishu")
 
 
 def _run(text):

@@ -39,11 +39,28 @@ _VOD_ROLE_DEFINITION = """
 """
 
 
+def _repo_app_ids(repo_key: str) -> set:
+    """仓库轨该仓库当前 active 的 IM app_id 集合（grape_t_channel_installation 是唯一真相）。
+
+    A2 收尾（Phase B）后 `devops_agent_session.im_app_id` 已 DROP：原来靠那一列判断
+    "这个仓库是不是当前 bot 配的 VOD"，改由安装表回答（一个仓库可能有多渠道安装）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT legacy_app_id FROM grape_t_channel_installation "
+                      "WHERE scope='repo' AND repo_key=? AND status='active' "
+                      "AND COALESCE(legacy_app_id,'')<>''", (repo_key,))
+            return {str(r[0]) for r in c.fetchall() if r[0]}
+    except Exception:
+        return set()
+
+
 def _get_vod_session(repo_key: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, runtime_id, skill, skill_id, im_app_id, repo_gitcode_token "
+            c.execute("SELECT id, repo_key, runtime_id, skill, skill_id, repo_gitcode_token "
                       "FROM devops_agent_session WHERE agent_type='vod' AND repo_key=?", (repo_key,))
             row = c.fetchone()
         if row:
@@ -54,8 +71,9 @@ def _get_vod_session(repo_key: str) -> dict | None:
                 if brow and brow[0]:
                     backend = brow[0]
             return {"id": row[0], "repo_key": row[1], "runtime_id": row[2] or 0, "backend": backend,
-                    "skill": row[3] or "vod", "skill_id": row[4] or 0, "im_app_id": row[5] or "",
-                    "repo_gitcode_token": row[6] or ""}
+                    "skill": row[3] or "vod", "skill_id": row[4] or 0,
+                    "app_ids": _repo_app_ids(repo_key),
+                    "repo_gitcode_token": row[5] or ""}
     except Exception:
         pass
     return None
@@ -83,12 +101,14 @@ def _get_or_create_conversation(chat_id: str, agent_session_id: str) -> dict:
 
 
 def _list_vod_repos(bot_app_id: str) -> list:
+    """当前 bot 名下有 VOD 配置的仓库（读 grape_t_channel_installation 的 repo 轨安装）。"""
     results = []
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM devops_agent_session WHERE agent_type='vod' AND im_app_id=?",
-                      (bot_app_id,))
+            c.execute("SELECT DISTINCT repo_key FROM grape_t_channel_installation "
+                      "WHERE scope='repo' AND status='active' AND legacy_app_id=? "
+                      "AND COALESCE(repo_key,'')<>''", (bot_app_id,))
             for r in c.fetchall():
                 results.append({"repo_key": r[0]})
     except Exception:
@@ -112,7 +132,7 @@ def _current_vod_repo(chat_id: str) -> str:
     return ""
 
 
-async def _send_vod_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str, page: int = 1) -> bool:
+async def _send_vod_repo_card(ctx: "BotContext", egress: "FeishuAsync", chat_id: str, msg_id: str, page: int = 1) -> bool:
     """生成并发送 `/repo` 卡片（候选=当前 bot 名下已配置 VOD 的仓库），设置 pending。无候选返回 False。"""
     from src.im.handler_async import _set_pending_selection, _candidate_card, _PENDING_SELECT_PAGE_SIZE
     from src.repo_key import from_repo_key
@@ -128,11 +148,11 @@ async def _send_vod_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: st
         marker = "【绑定中】" if r["repo_key"] == bound else ""
         items.append(f"{full}{marker}")
     _set_pending_selection(chat_id, {"action": "vod_repo", "items": repos, "page": page})
-    await api.reply_card(ctx, msg_id, _candidate_card("📁", f"VOD 仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
+    await egress.reply_card(ctx, msg_id, _candidate_card("📁", f"VOD 仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo"))
     return True
 
 
-async def _handle_vod_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
+async def _handle_vod_selection(ctx: "BotContext", egress: "FeishuAsync", chat_id: str, msg_id: str,
                                 num: str, pending: dict):
     """卡片命令编号选择执行（vod-navigation-commands-design.md §3.2，action=vod_repo）。"""
     try:
@@ -140,19 +160,19 @@ async def _handle_vod_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: 
         from src.repo_key import from_repo_key
         if num == "0":
             _clear_pending_selection(chat_id)
-            await api.reply_card(ctx, msg_id, "**✅ 已取消选择**")
+            await egress.reply_card(ctx, msg_id, "**✅ 已取消选择**")
             return
         items = pending.get("items") or []
         page = int(pending.get("page") or 1)
         page_size = int(pending.get("page_size") or _PENDING_SELECT_PAGE_SIZE)
         idx = (page - 1) * page_size + (int(num) - 1)
         if idx < 0 or idx >= len(items):
-            await api.reply_card(ctx, msg_id, f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。")
+            await egress.reply_card(ctx, msg_id, f"**⚠️ 无效编号 {num}**\n回复 `0` 取消。")
             return
         repo = items[idx]
         agent_session = _get_vod_session(repo["repo_key"])
-        if not agent_session or agent_session["im_app_id"] != ctx.app_id:
-            await api.reply_card(ctx, msg_id, "**❌ 该仓库未配置当前 bot 的 VOD Agent**")
+        if not agent_session or ctx.app_id not in (agent_session.get("app_ids") or set()):
+            await egress.reply_card(ctx, msg_id, "**❌ 该仓库未配置当前 bot 的 VOD Agent**")
             return
         # 绑定/换绑 vod_conversations（vod-navigation-commands-design.md §3.4）：
         # 已存在 → UPDATE agent_session_id + 清空 runtime_session_id（防旧仓库 opencode 上下文污染）；不存在 → INSERT
@@ -170,11 +190,11 @@ async def _handle_vod_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: 
                     (agent_session["id"], chat_id, ""))
             db.commit()
         _clear_pending_selection(chat_id)
-        await api.reply_card(ctx, msg_id, f"**✅ 已绑定 `{from_repo_key(repo['repo_key'])}`**\n后续消息将进入该仓库的 VOD 会话。")
+        await egress.reply_card(ctx, msg_id, f"**✅ 已绑定 `{from_repo_key(repo['repo_key'])}`**\n后续消息将进入该仓库的 VOD 会话。")
     except Exception as e:
         log.warning(f"[VOD:{ctx.name}] selection error: {e}")
         try:
-            await api.reply_text(ctx, msg_id, f"❌ 选择处理失败: {e}")
+            await egress.reply_text(ctx, msg_id, f"❌ 选择处理失败: {e}")
         except Exception:
             pass
 
@@ -442,7 +462,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     return final_text.strip() if final_text else "处理完成，但未生成回复"
 
 
-async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict):
+async def process_vod_async(ctx: "BotContext", egress: "FeishuAsync", parsed: dict):
     """异步 VOD 消息处理入口"""
     try:
         if parsed.get("type") != "message":
@@ -460,7 +480,7 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
 
         # 即时反馈：进处理前先加 OK 反应（对齐 chat bot，避免 agent 执行期间无任何回应）
         try:
-            await api.add_reaction(ctx, msg_id, "OK")
+            await egress.add_reaction(ctx, msg_id, "OK")
         except Exception:
             pass
 
@@ -472,11 +492,11 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             from src.im.handler_async import _get_pending_selection
             pending = _get_pending_selection(chat_id)
             if pending and pending.get("action") == "vod_repo":
-                await _handle_vod_selection(ctx, api, chat_id, msg_id, text, pending)
+                await _handle_vod_selection(ctx, egress, chat_id, msg_id, text, pending)
                 return
 
         if cmd == "/help":
-            await api.reply_card(ctx, msg_id,
+            await egress.reply_card(ctx, msg_id,
                 "**🤖 VOD Bot 命令**\n"
                 "/repo — 列出并绑定仓库（回复编号）\n"
                 "/where — 当前位置\n"
@@ -488,15 +508,15 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             # 与 chat 一致用 /where（/status 兼容别名，vod-navigation-commands-design.md）
             repo = _current_vod_repo(chat_id)
             if repo:
-                await api.reply_card(ctx, msg_id, f"**📍 当前位置**\n仓库：`{repo}`")
+                await egress.reply_card(ctx, msg_id, f"**📍 当前位置**\n仓库：`{repo}`")
             else:
-                await api.reply_card(ctx, msg_id, "**📍 当前位置**\n仓库：未绑定（回复 `/repo` 选择绑定）")
+                await egress.reply_card(ctx, msg_id, "**📍 当前位置**\n仓库：未绑定（回复 `/repo` 选择绑定）")
             return
 
         if cmd == "/repo":
-            if await _send_vod_repo_card(ctx, api, chat_id, msg_id, 1):
+            if await _send_vod_repo_card(ctx, egress, chat_id, msg_id, 1):
                 return
-            await api.reply_card(ctx, msg_id, "**📁 当前 bot 名下暂无已配置 VOD 的仓库**\n请联系管理员配置。")
+            await egress.reply_card(ctx, msg_id, "**📁 当前 bot 名下暂无已配置 VOD 的仓库**\n请联系管理员配置。")
             return
 
         if cmd == "/bind" and len(cmd_parts) >= 2:
@@ -504,13 +524,13 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             repo_key = cmd_parts[1]
             agent_session = _get_vod_session(repo_key)
             if not agent_session:
-                await api.reply_text(ctx, msg_id, f"❌ 仓库 `{repo_key}` 未配置 VOD Agent")
+                await egress.reply_text(ctx, msg_id, f"❌ 仓库 `{repo_key}` 未配置 VOD Agent")
                 return
-            if agent_session["im_app_id"] != ctx.app_id:
-                await api.reply_text(ctx, msg_id, f"❌ 仓库使用了其他机器人凭证")
+            if ctx.app_id not in (agent_session.get("app_ids") or set()):
+                await egress.reply_text(ctx, msg_id, f"❌ 仓库使用了其他机器人凭证")
                 return
             _get_or_create_conversation(chat_id, agent_session["id"])
-            await api.reply_text(ctx, msg_id, f"✅ 已绑定 `{repo_key}`")
+            await egress.reply_text(ctx, msg_id, f"✅ 已绑定 `{repo_key}`")
             return
 
         try:
@@ -529,22 +549,22 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             repos = _list_vod_repos(ctx.app_id)
             log.info(f"[VOD:{ctx.name}] no conv, vod_repos={[r['repo_key'] for r in repos]}")
             if len(repos) == 0:
-                await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n当前 bot 名下暂无已配置 VOD 的仓库，请联系管理员配置。")
+                await egress.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n当前 bot 名下暂无已配置 VOD 的仓库，请联系管理员配置。")
                 return
             elif len(repos) == 1:
                 agent_session = _get_vod_session(repos[0]["repo_key"])
                 if agent_session:
                     conv = _get_or_create_conversation(chat_id, agent_session["id"])
-                    await api.reply_card(ctx, msg_id, f"**✅ 已自动绑定**\n`{repos[0]['repo_key']}`")
+                    await egress.reply_card(ctx, msg_id, f"**✅ 已自动绑定**\n`{repos[0]['repo_key']}`")
                     row = (agent_session["id"], conv["runtime_session_id"])
                 else:
-                    await api.reply_card(ctx, msg_id, "**❌ 自动绑定失败**")
+                    await egress.reply_card(ctx, msg_id, "**❌ 自动绑定失败**")
                     return
             else:
                 # ≥2 仓库：自动弹 /repo 卡片（编号选择，替代纯文本列表，vod-navigation-commands-design.md §3.3）
-                if await _send_vod_repo_card(ctx, api, chat_id, msg_id, 1):
+                if await _send_vod_repo_card(ctx, egress, chat_id, msg_id, 1):
                     return
-                await api.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n请联系管理员配置。")
+                await egress.reply_card(ctx, msg_id, "**⚠️ 未绑定仓库**\n请联系管理员配置。")
                 return
 
         agent_session_id = row[0]
@@ -567,11 +587,11 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
                 db.commit()
             repos = _list_vod_repos(ctx.app_id)
             if len(repos) == 0:
-                await api.reply_text(ctx, msg_id, "❌ 未绑定仓库，请联系管理员配置")
+                await egress.reply_text(ctx, msg_id, "❌ 未绑定仓库，请联系管理员配置")
                 return
             agent_session = _get_vod_session(repos[0]["repo_key"])
             if not agent_session:
-                await api.reply_text(ctx, msg_id, "❌ 自动绑定失败")
+                await egress.reply_text(ctx, msg_id, "❌ 自动绑定失败")
                 return
             conv = _get_or_create_conversation(chat_id, agent_session["id"])
             agent_session_id = agent_session["id"]
@@ -608,15 +628,15 @@ async def process_vod_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict)
             # agent 主动跳过（对齐 chat），不回
             pass
         elif reply:
-            await api.reply_card(ctx, msg_id, reply[:2000], title="VOD Agent", template="green")
+            await egress.reply_card(ctx, msg_id, reply[:2000], title="VOD Agent", template="green")
         else:
             # 空回复（无引擎/出错/未生成）→ 明确提示，避免静默无回应（对齐 chat）
-            await api.reply_card(ctx, msg_id, "⚠️ 处理完成但未生成回复，请稍后重试或换个说法。", title="VOD Agent", template="green")
+            await egress.reply_card(ctx, msg_id, "⚠️ 处理完成但未生成回复，请稍后重试或换个说法。", title="VOD Agent", template="green")
 
     except Exception as e:
         log.error(f"[VOD:{ctx.name}] process error: {e}")
         try:
             if msg_id:
-                await api.reply_text(ctx, msg_id, "❌ 处理消息时出错")
+                await egress.reply_text(ctx, msg_id, "❌ 处理消息时出错")
         except:
             pass

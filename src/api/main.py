@@ -1,5 +1,7 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
-import sys, os, asyncio
+import sys
+import os
+import asyncio
 
 # Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.main:app` 的启动方式，
 # 在业务模块导入链触发前显式提示并退出。
@@ -15,9 +17,10 @@ from contextlib import asynccontextmanager
 from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口
 
 from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability, patrol
+from src.api.routes import im as im_api  # Issue #825：IM 新引擎状态/安装/模式开关
 
 
-bot_manager = None
+im_engine = None  # 新引擎运行时句柄（2026-11-10 起 IM 只有这一条路）
 
 
 def _startup_security_check():
@@ -371,13 +374,19 @@ def _start_vcs_exists_backfill_task():
 # ===== main.py lifespan（单进程兼容模式，Issue #596 后保留）=====
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot_manager
     from src.config import log
+
+    # 卡死诊断（2026-11-05 事故）：SIGUSR1 手动 dump + 事件循环 stall 自动 dump
+    try:
+        from src.api.diagnostics import install as _diag_install
+        _diag_install(log)
+    except Exception as _diag_err:
+        log.warning(f"[diag] install failed: {_diag_err}")
 
     # 生产环境启动安全门禁
     try:
         _startup_security_check()
-    except SystemExit as e:
+    except SystemExit:
         raise
 
     # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
@@ -392,53 +401,19 @@ async def lifespan(app: FastAPI):
     except Exception as _bw:
         log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
+    # psutil CPU 基准预热：interval=None 模式需要先调一次建立基准
     try:
-        from src.im.feishu_async import BotManager
-        from src.im.handler_async import process_chat_async
-        from src.im.vod_handler_async import process_vod_async
+        import psutil as _ps_init
+        _ps_init.cpu_percent(interval=None)
+    except Exception:
+        pass
 
-        # psutil CPU 基准预热：interval=None 模式需要先调一次建立基准
-        try:
-            import psutil as _ps_init
-            _ps_init.cpu_percent(interval=None)
-        except Exception:
-            pass
-
-        # 启动引擎健康探测线程（每 10 分钟对引擎发起 CLI 测试对话）
-        try:
-            from src.observability.engine_probe import start_probe
-            start_probe()
-        except Exception as e:
-            log.warning(f"Engine probe start failed: {e}")
-
-        # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
-        from src.config import BOT_LEASE_DISABLED
-        lease_store = None
-        if not BOT_LEASE_DISABLED:
-            from src.im.bot_lease import BotLeaseStore, generate_instance_id
-            instance_id = generate_instance_id()
-            lease_store = BotLeaseStore(instance_id=instance_id)
-            log.info(f"IM WS: lease enabled, instance_id={instance_id}")
-
-        bot_manager = BotManager(max_concurrent_per_bot=10, lease_store=lease_store)
-        await bot_manager.start()
-
-        async def _on_message(ctx, parsed):
-            if ctx.bot_type == "vod_bot":
-                await process_vod_async(ctx, bot_manager.api, parsed)
-            else:
-                await process_chat_async(ctx, bot_manager.api, parsed)
-
-        bot_manager.set_message_handler(_on_message)
-        await bot_manager.load_from_db()
-
-        hc = bot_manager.health_check()
-        log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
-        # Issue #596 P1：注册进进程级 registry（跨模块 IM 访问统一走 get_bot_manager）
-        from src.api.bot_manager_registry import set_bot_manager
-        set_bot_manager(bot_manager)
+    # 启动引擎健康探测线程（每 10 分钟对引擎发起 CLI 测试对话）
+    try:
+        from src.observability.engine_probe import start_probe
+        start_probe()
     except Exception as e:
-        log.warning(f"IM WS startup failed: {e}")
+        log.warning(f"Engine probe start failed: {e}")
 
     # 模板自愈：启动时检查 project-templates.json + examples/ 是否存在，
     # 缺失则自动从 grape-template 仓库拉取（防 git merge 删除后模板页变空）
@@ -480,11 +455,78 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"OpenAPI: contract dump failed: {e}")
 
-    # lease sweep 循环（问题 J：变量名 _lease_sweep_task 区分）
-    _lease_sweep_task = None
-    if bot_manager and bot_manager._lease_store:
-        _lease_sweep_task = asyncio.create_task(bot_manager.lease_sweep_loop())
-        log.info("Lease sweep loop started")
+    # Issue #825：IM 总开关——on=新引擎（Supervisor+SqliteInstallationProvider+
+    # FeishuChannel+Router），off=完全不起 IM 链路（旧 BotManager 已下线，无回退位）。
+    # 开关值由 engine_wiring.engine_mode() 决定（env GRAPE_IM_ENGINE + 运行期可改的
+    # data/im_engine_mode 覆盖文件），_im_mode_watcher 5s 轮询实现秒级切换。
+    try:
+        from src.im import engine_wiring
+        _im_engine_mode = engine_wiring.engine_mode()
+    except Exception as _em:
+        log.warning(f"IM engine mode detect failed: {_em}")
+        _im_engine_mode = "off"
+
+    async def _start_engine_im():
+        global im_engine
+        if im_engine is not None:
+            return
+        im_engine = await engine_wiring.start_im_engine()
+        if im_engine is None:
+            # 旧 IM（legacy BotManager）已下线，不再有回退位
+            log.warning("IM engine: start failed (legacy fallback retired)")
+        else:
+            # /health/realtime 读 app.state（health_endpoints 由 weekly-10 抽出后不再看模块全局）
+            app.state.im_engine = im_engine
+
+    async def _stop_engine_im():
+        global im_engine
+        if im_engine is not None:
+            await im_engine.stop()
+            im_engine = None
+        try:
+            app.state.im_engine = None
+        except Exception:
+            pass
+
+    # 旧 IM 传输层（legacy BotManager：飞书 WS + 自建 lease sweep）已于 2026-11-10 下线，
+    # 这里不再保留任何 legacy 启停路径；data/im_engine_mode 只剩"新引擎 on/off"总开关语义。
+
+    try:
+        if _im_engine_mode == "on":
+            await _start_engine_im()
+        else:
+            log.info("IM engine mode=off: IM 总开关关闭，不启动任何 IM 链路")
+    except Exception as e:
+        log.warning(f"IM WS startup failed: {e}")
+
+    # Issue #825：秒级切回 watcher——每 5s 重读 mode（文件/env），
+    # 翻转时先停旧链路再起新链路（新旧 lease 互斥，无双回复窗口）。
+    _im_mode_task = None
+
+    async def _im_mode_watcher():
+        mode = _im_engine_mode
+        while True:
+            await asyncio.sleep(engine_wiring.MODE_WATCH_INTERVAL)
+            try:
+                new_mode = engine_wiring.engine_mode()
+            except Exception:
+                continue
+            if new_mode == mode:
+                continue
+            mode = new_mode
+            log.info(f"IM runtime mode switch -> {mode}")
+            try:
+                if mode == "off":
+                    await _stop_engine_im()
+                else:
+                    await _start_engine_im()
+            except Exception as e:
+                log.warning(f"IM runtime mode switch failed: {e}")
+
+    try:
+        _im_mode_task = asyncio.create_task(_im_mode_watcher())
+    except Exception as e:
+        log.warning(f"IM mode watcher start failed: {e}")
 
     # sweeper：Issue done 后清理 workdir（见 multi-issue-isolation-design.md §3.4.2）
     _sweep_task = None
@@ -660,7 +702,6 @@ async def lifespan(app: FastAPI):
     _probe_task = None
     try:
         async def _local_probe_loop():
-            import time as _t
             from src.runtime.registry import discover_runtimes
             while True:
                 def _run():
@@ -783,15 +824,17 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("IM WS: stopping...")
-    # 问题 H：先 cancel lease_sweep_task（不再抢新锁）→ 再 stop bot_manager（停 bot + 释放 lease）
-    if _lease_sweep_task:
-        _lease_sweep_task.cancel()
+    # 先停 mode watcher（不再翻转链路）→ 停新引擎（含 lease 释放）。
+    if _im_mode_task:
+        _im_mode_task.cancel()
         try:
-            await asyncio.wait_for(_lease_sweep_task, timeout=5)
+            await asyncio.wait_for(_im_mode_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
-    if bot_manager:
-        await bot_manager.stop()
+    try:
+        await _stop_engine_im()          # 旧 IM 传输层已下线，只停新引擎
+    except Exception as e:
+        log.warning(f"IM runtime stop failed: {e}")
     if _sweep_task:
         _sweep_task.cancel()
     if _probe_task:
@@ -931,6 +974,7 @@ app.include_router(templates.router)
 app.include_router(tasks.router)
 app.include_router(issues.router)
 app.include_router(runtime.router)
+app.include_router(im_api.router)
 app.include_router(feishu_onboard.router)
 app.include_router(feishu_card.router)
 app.include_router(task_logs.router)

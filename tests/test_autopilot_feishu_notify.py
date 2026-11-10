@@ -164,12 +164,17 @@ def notify_env(sched):
 
     class _BM:
         api = "apiX"
+    # 用 sys.modules 打桩三个依赖模块 —— 必须保存并在 teardown 原样还原，
+    # 否则后续测试文件会拿到缺属性的假模块（曾导致 test_table* 大面积 ImportError）。
+    _stub_names = ("src.api.main", "src.api.issues_center", "src.prompt_builder")
+    _saved_mods = {n: sys.modules.get(n) for n in _stub_names}
     fm = types.ModuleType("src.api.main")
     fm.bot_manager = _BM()
     sys.modules["src.api.main"] = fm
     ic = types.ModuleType("src.api.issues_center")
     ic._get_feishu_open_id_by_user_id = lambda uid: "ou-X"
-    ic._resolve_user_chat_bot = lambda bm, uid: "ctxX"
+    # A2 M2 后的契约：返回 BotContext（有 app_id），api 由调用方按 app_id 取共享客户端
+    ic._resolve_user_chat_bot = lambda bm, uid: types.SimpleNamespace(app_id="appX")
     sys.modules["src.api.issues_center"] = ic
     pb = types.ModuleType("src.prompt_builder")
     pb._resolve_server_url = lambda rid=0: "http://web"
@@ -185,11 +190,22 @@ def notify_env(sched):
         sched.db, sched.db_lock = old_sdb, old_slock
         sched._run_autopilot_notify = old_send
         sm.db, sm.db_lock = old_db, old_lock
+        for _n in _stub_names:
+            if _saved_mods[_n] is None:
+                sys.modules.pop(_n, None)
+            else:
+                sys.modules[_n] = _saved_mods[_n]
         conn.close()
 
 
 def test_notify_subscribers_fanout_and_idempotency(sched, notify_env):
     sent = notify_env["sent"]
+    # 保存并还原"当前事件循环"：本用例自建 loop 后若不还原，后续用
+    # asyncio.get_event_loop() 的测试会抛 RuntimeError: no current event loop。
+    try:
+        _prev_loop = asyncio.get_event_loop()
+    except RuntimeError:
+        _prev_loop = None
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -203,6 +219,7 @@ def test_notify_subscribers_fanout_and_idempotency(sched, notify_env):
         assert sorted(sent) == [8, 9]
     finally:
         loop.close()
+        asyncio.set_event_loop(_prev_loop)
 
 
 def test_exec_task_id_lookup(sched, notify_env):

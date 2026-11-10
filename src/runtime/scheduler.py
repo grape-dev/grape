@@ -874,14 +874,14 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
                                result_summary, findings_result, _web_url)
         # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
         from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
-        from src.api import main as api_main
-        bm = getattr(api_main, "bot_manager", None)
+        from src.im.engine_wiring import feishu_api
         _loop = asyncio.get_event_loop()
         for user_id, _, _ in rows:
             try:
                 open_id = _get_feishu_open_id_by_user_id(user_id) or ""
-                ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
-                api = bm.api if bm else None
+                ctx = _resolve_user_chat_bot(None, user_id)
+                # 旧 IM 下线 A2 M2：api 不再来自 BotManager，按本人 bot 的 app_id 取共享客户端
+                api = feishu_api(ctx.app_id) if ctx is not None else None
                 _loop.create_task(_run_autopilot_notify(ctx, api, user_id, open_id,
                                                         card, task_id, exec_id))
             except Exception as e:

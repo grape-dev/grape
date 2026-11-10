@@ -93,7 +93,7 @@ def pack_backend(ts):
         items.append((help_dir, "help"))
     # 仓库根文件 (Dockerfile, docker-compose.yml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
-    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
+    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：机器绝对路径硬编码版）。
     for rf in ["Dockerfile", "docker-compose.yml",
                "README.md", "README.zh.md", "requirements.txt",
                "requirements-worker.txt", ".gitignore"]:
@@ -148,7 +148,7 @@ def pack_database(ts):
     # meta 仅 execution_mode/pipeline_mode 两个系统键（运行模式，其余为环境私有数据不入包）。
     seed_tables = [
         "admin_users", "admin_roles", "admin_permission_menus", "admin_role_menu_rel",
-        "agent_type", "skill", "event_route_config", "global_im_bot_config",
+        "agent_type", "skill", "event_route_config",
         "flyway_schema_history",
         "scene_category", "skill_category", "agent_type_runtime_pool",
         "featured_templates",

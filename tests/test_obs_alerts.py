@@ -6,8 +6,10 @@
 3. **`for_sec` 语义**：条件需持续满足才触发（抖动不触发），条件恢复后转 resolved
 4. **开放事件唯一**：同一 (规则, 维度) 反复求值不会刷出重复行，而是更新 last_seen_at
 """
+import contextlib
 import os
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -406,14 +408,42 @@ class _FakeApi:
         return "om_test_msg_id" if self.ok else ""
 
 
-class _FakeCtx:
-    app_id = "cli_test_bot_123456"
+def _run(coro):
+    """独立跑一个协程：不依赖"当前事件循环"。
+
+    踩过：同一次 pytest 里前面的用例用了 asyncio.run()（结束时把当前 loop 置 None），
+    后面再 asyncio.get_event_loop() 就抛 RuntimeError: no current event loop。
+    """
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
-class _FakeBM:
-    def __init__(self, api, ctx=None):
-        self.api = api
-        self._ctx = ctx if ctx is not None else _FakeCtx()
+@contextlib.contextmanager
+def _fake_feishu(fake_api, open_id="ou_test_open_id", has_ctx=True):
+    """把告警链的飞书依赖打桩成 _FakeApi。
+
+    A2 M2 后的真实契约：
+      _resolve_user_chat_bot(None, uid) → BotContext(app_id)（无安装则 None）
+      engine_wiring.feishu_api(app_id)  → 共享 FeishuAsync
+    两个桩必须成对出现，否则会掉进"无 api → skipped/failed"分支。
+    """
+    import src.api.issues_center as ic
+    import src.im.engine_wiring as ew
+
+    orig = (ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id, ew.feishu_api)
+    ic._resolve_user_chat_bot = (
+        (lambda bm, uid: types.SimpleNamespace(app_id="appX")) if has_ctx else (lambda bm, uid: None)
+    )
+    ic._get_feishu_open_id_by_user_id = lambda uid: open_id
+    ew.feishu_api = lambda app_id="": fake_api
+    try:
+        yield
+    finally:
+        ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id, ew.feishu_api = orig
 
 
 def _bind_open_id(uid, open_id, username="u-notify"):
@@ -439,7 +469,7 @@ def test_notify_skips_when_no_channel_configured():
     from src.observability import alerts as al2
     import asyncio
     _set_rule("task_stuck", notify_channels="")
-    stats = asyncio.run(
+    stats = _run(
         al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                   "threshold": 0, "metric": "task_stuck", "severity": "warning"}]))
     assert stats["sent"] == 0 and stats["skipped"] == 1, stats
@@ -449,34 +479,18 @@ def test_notify_feishu_uses_recipients_own_bot(monkeypatch=None):
     """配了 feishu → 用收件人本人的 chat bot 发私聊；收件人取该仓库成员。"""
     import asyncio
     from src.observability import alerts as al2
-    import src.api.main as api_main
 
     _bind_open_id(UID, "ou_test_open_id")
     _set_rule("task_stuck", notify_channels="feishu")
     fake_api = _FakeApi(ok=True)
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(fake_api)
-    # 打桩“取本人 bot”与“按 user_id 取 open_id”，避免依赖真实 IM 层
-    import src.api.issues_center as ic
-    orig_resolve = ic._resolve_user_chat_bot
-    orig_oid = ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id" if int(uid) == UID else ""
+    # 打桩“取本人 bot（BotContext）”与“按 user_id 取 open_id” + 共享 api 客户端
     try:
-        stats = asyncio.run(
-            al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 3,
-                                      "threshold": 0, "metric": "task_stuck", "severity": "warning",
-                                      "silenced_until": ""}]))
+        with _fake_feishu(fake_api):
+            stats = _run(
+                al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 3,
+                                          "threshold": 0, "metric": "task_stuck", "severity": "warning",
+                                          "silenced_until": ""}]))
     finally:
-        ic._resolve_user_chat_bot = orig_resolve
-        ic._get_feishu_open_id_by_user_id = orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
     assert stats["sent"] == 1, stats
     assert fake_api.sent and fake_api.sent[0][0] == "ou_test_open_id"
@@ -487,31 +501,14 @@ def test_notify_send_failure_counted_not_raised():
     """飞书返回空 message_id（token/权限问题）→ 计 failed，不影响求值。"""
     import asyncio
     from src.observability import alerts as al2
-    import src.api.main as api_main
     import src.api.issues_center as ic
 
     _set_rule("task_stuck", notify_channels="feishu")
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(_FakeApi(ok=False))
-    orig_resolve = ic._resolve_user_chat_bot
-    orig_oid = ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_x"
-    try:
-        stats = asyncio.run(
+    with _fake_feishu(_FakeApi(ok=False), open_id="ou_x"):
+        stats = _run(
             al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                       "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                       "silenced_until": ""}]))
-    finally:
-        ic._resolve_user_chat_bot = orig_resolve
-        ic._get_feishu_open_id_by_user_id = orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
     assert stats["failed"] >= 1, stats
 
 
@@ -521,7 +518,7 @@ def test_notify_skips_silenced_event():
     from src.observability import alerts as al2
     _set_rule("task_stuck", notify_channels="feishu")
     future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
-    stats = asyncio.run(
+    stats = _run(
         al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                   "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                   "silenced_until": future}]))
@@ -532,42 +529,26 @@ def test_test_notification_reports_reason():
     """测试通道：未绑定 open_id / 未配 bot 要给出**可操作的原因**，不能只说失败。"""
     import asyncio
     from src.observability import alerts as al2
-    import src.api.issues_center as ic
-    import src.api.main as api_main
-
-    # 1) 未绑定飞书身份
-    _unbind_open_id(UID)
-    r = asyncio.run(
-        al2.send_test_notification({"id": UID, "username": "u"}))
-    assert r["ok"] is False and r["reason"] == "no_open_id", r
-
-    # 2) 绑定了但没有 bot 连接
-    _bind_open_id(UID, "ou_test_open_id")
-    orig_oid = ic._get_feishu_open_id_by_user_id
-    orig_resolve = ic._resolve_user_chat_bot
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id"
-    ic._resolve_user_chat_bot = lambda bm, uid: None
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(_FakeApi())
     try:
-        r = asyncio.run(
+        # 1) 未绑定飞书身份
+        _unbind_open_id(UID)
+        r = _run(
             al2.send_test_notification({"id": UID, "username": "u"}))
-        assert r["ok"] is False and r["reason"] == "no_bot", r
-        # 3) 正常路径
-        ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-        r = asyncio.run(
-            al2.send_test_notification({"id": UID, "username": "u"}))
-        assert r["ok"] is True and r["message_id"], r
+        assert r["ok"] is False and r["reason"] == "no_open_id", r
+
+        # 2) 绑定了但没有可用安装（BotContext 为 None）
+        _bind_open_id(UID, "ou_test_open_id")
+        with _fake_feishu(_FakeApi(), has_ctx=False):
+            r = _run(
+                al2.send_test_notification({"id": UID, "username": "u"}))
+            assert r["ok"] is False and r["reason"] == "no_bot", r
+
+            # 3) 正常路径
+            with _fake_feishu(_FakeApi()):
+                r = _run(
+                    al2.send_test_notification({"id": UID, "username": "u"}))
+                assert r["ok"] is True and r["message_id"], r
     finally:
-        ic._get_feishu_open_id_by_user_id = orig_oid
-        ic._resolve_user_chat_bot = orig_resolve
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
 
 
@@ -887,46 +868,33 @@ def test_notify_repeat_suppression_and_state_writeback():
     """repeat_sec=0：只通知一次（第二次跳过）；成功后写 notify_count/last_notified_at。"""
     import asyncio
     from src.observability.alert_policy import AGGREGATOR
-    import src.api.main as api_main
     import src.api.issues_center as ic
 
     _bind_open_id(UID, "ou_test_open_id")
     fake_api = _FakeApi(ok=True)
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(fake_api)
-    orig_resolve, orig_oid = ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id"
     rid = _rules_by_name()["task_stuck"]["id"]
     ev = {"rule_name": "task_stuck", "repo_key": REPO, "value": 1, "threshold": 0,
           "metric": "task_stuck", "severity": "warning", "silenced_until": ""}
     loop = asyncio.new_event_loop()
     try:
-        al.set_rule_policy(rid, {"notify_channels": "feishu", "repeat_sec": 0})
-        ev["id"] = _insert_event(rid, "task_stuck", REPO)
-        s1 = loop.run_until_complete(al.notify_fired_events([dict(ev)]))
-        assert s1["sent"] == 1, s1
-        row = _events(rule_id=rid)[0]
-        assert row["last_notified_at"] and int(row["notify_count"]) == 1, row
+        with _fake_feishu(fake_api):
+            al.set_rule_policy(rid, {"notify_channels": "feishu", "repeat_sec": 0})
+            ev["id"] = _insert_event(rid, "task_stuck", REPO)
+            s1 = loop.run_until_complete(al.notify_fired_events([dict(ev)]))
+            assert s1["sent"] == 1, s1
+            row = _events(rule_id=rid)[0]
+            assert row["last_notified_at"] and int(row["notify_count"]) == 1, row
 
-        # 第二轮：真实循环会带库里的 last_notified_at 进来 → 重复抑制
-        s2 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
-        assert s2["sent"] == 0 and s2["skipped"] == 1, s2
+            # 第二轮：真实循环会带库里的 last_notified_at 进来 → 重复抑制
+            s2 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
+            assert s2["sent"] == 0 and s2["skipped"] == 1, s2
 
-        # repeat_sec>0 且未到间隔 → 仍抑制
-        al.set_rule_policy(rid, {"repeat_sec": 3600})
-        s3 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
-        assert s3["sent"] == 0 and s3["skipped"] == 1, s3
+            # repeat_sec>0 且未到间隔 → 仍抑制
+            al.set_rule_policy(rid, {"repeat_sec": 3600})
+            s3 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
+            assert s3["sent"] == 0 and s3["skipped"] == 1, s3
     finally:
         loop.close()
-        ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id = orig_resolve, orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
         AGGREGATOR.clear()
 
@@ -935,47 +903,34 @@ def test_notify_aggregate_buffers_then_flushes_summary():
     """聚合规则：不发单条 → 进缓冲；窗口到期 → 一条汇总（含维度与最大当前值）。"""
     import asyncio
     from src.observability.alert_policy import AGGREGATOR
-    import src.api.main as api_main
     import src.api.issues_center as ic
     from datetime import timedelta as _td
 
     _bind_open_id(UID, "ou_test_open_id")
     fake_api = _FakeApi(ok=True)
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(fake_api)
-    orig_resolve, orig_oid = ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id"
     rid = _rules_by_name()["task_stuck"]["id"]
     loop = asyncio.new_event_loop()
     try:
-        al.set_rule_policy(rid, {"notify_channels": "feishu", "aggregate_mode": "rule",
-                                 "aggregate_window_sec": 300, "repeat_sec": 0})
-        ev = {"id": _insert_event(rid, "task_stuck", REPO), "rule_name": "task_stuck",
-              "repo_key": REPO, "value": 4, "threshold": 0, "metric": "task_stuck",
-              "severity": "warning", "silenced_until": ""}
-        s = loop.run_until_complete(al.notify_fired_events([ev]))
-        assert s["aggregated"] == 1 and s["sent"] == 0, s
-        assert AGGREGATOR.pending() == 1
-        g = list(AGGREGATOR._groups.values())[0]
-        text = al._aggregate_text(g)
-        assert "汇总" in text and "task_stuck" in text and "受影响" in text, text
+        with _fake_feishu(fake_api):
+            al.set_rule_policy(rid, {"notify_channels": "feishu", "aggregate_mode": "rule",
+                                     "aggregate_window_sec": 300, "repeat_sec": 0})
+            ev = {"id": _insert_event(rid, "task_stuck", REPO), "rule_name": "task_stuck",
+                  "repo_key": REPO, "value": 4, "threshold": 0, "metric": "task_stuck",
+                  "severity": "warning", "silenced_until": ""}
+            s = loop.run_until_complete(al.notify_fired_events([ev]))
+            assert s["aggregated"] == 1 and s["sent"] == 0, s
+            assert AGGREGATOR.pending() == 1
+            g = list(AGGREGATOR._groups.values())[0]
+            text = al._aggregate_text(g)
+            assert "汇总" in text and "task_stuck" in text and "受影响" in text, text
 
-        # 强制窗口到期 → flush 发出汇总
-        g["window_end"] = datetime.now(timezone.utc) - _td(seconds=1)
-        f = loop.run_until_complete(al.flush_aggregates())
-        assert f["summaries"] == 1 and f["sent"] == 1, f
-        assert "汇总" in fake_api.sent[-1][1], fake_api.sent
-        assert AGGREGATOR.pending() == 0
+            # 强制窗口到期 → flush 发出汇总
+            g["window_end"] = datetime.now(timezone.utc) - _td(seconds=1)
+            f = loop.run_until_complete(al.flush_aggregates())
+            assert f["summaries"] == 1 and f["sent"] == 1, f
+            assert "汇总" in fake_api.sent[-1][1], fake_api.sent
+            assert AGGREGATOR.pending() == 0
     finally:
         loop.close()
-        ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id = orig_resolve, orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
         AGGREGATOR.clear()

@@ -13,6 +13,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.im import feishu_async as fa
+from src.im import seen_store as ss  # 旧 IM 下线 M1：seen 去重持久化迁到中立模块
+from src.im.adapters.feishu import wire as fw  # M1：WS 帧/事件解析辅助迁到适配器侧
 from src.session_manager import db, db_lock
 
 
@@ -32,17 +34,17 @@ class TestSeenMsgIds:
     def test_persist_then_load(self):
         app = _app_id()
         try:
-            fa._persist_seen_msg_id(app, "msg-1")
-            fa._persist_seen_msg_id(app, "msg-1")  # 幂等
-            fa._persist_seen_msg_id(app, "msg-2")
-            loaded = fa._load_seen_msg_ids(app)
+            ss._persist_seen_msg_id(app, "msg-1")
+            ss._persist_seen_msg_id(app, "msg-1")  # 幂等
+            ss._persist_seen_msg_id(app, "msg-2")
+            loaded = ss._load_seen_msg_ids(app)
             assert loaded == {"msg-1", "msg-2"}
         finally:
             self._clean(app)
 
     def test_load_returns_empty_when_none(self):
         app = _app_id()
-        assert fa._load_seen_msg_ids(app) == set()
+        assert ss._load_seen_msg_ids(app) == set()
 
     def test_cleanup_removes_expired(self):
         app = _app_id()
@@ -54,8 +56,8 @@ class TestSeenMsgIds:
                 c.execute("INSERT INTO bot_seen_messages (app_id, message_id, seen_at) VALUES (?,?,?)",
                           (app, "new", time.time()))
                 db.commit()
-            fa._cleanup_seen_msg_ids(app)
-            loaded = fa._load_seen_msg_ids(app)
+            ss._cleanup_seen_msg_ids(app)
+            loaded = ss._load_seen_msg_ids(app)
             assert "old" not in loaded and "new" in loaded
         finally:
             self._clean(app)
@@ -144,148 +146,40 @@ def _receive_payload(message_type="text", content='{"text":"hello"}', sender_ope
     return json.dumps(msg)
 
 
-class TestParseWsMessage:
-    def test_invalid_json_returns_none(self):
-        assert fa.parse_ws_message("not-json{{{") is None
-
-    def test_ping(self):
-        assert fa.parse_ws_message('{"type":"ping"}') == {"ws_type": "ping"}
-
-    def test_pong(self):
-        assert fa.parse_ws_message('{"type":"pong"}') == {"ws_type": "pong"}
-
-    def test_unknown_type_returns_none(self):
-        assert fa.parse_ws_message('{"type":"whatever"}') is None
-
-    def test_text_message(self):
-        parsed = fa.parse_ws_message(_receive_payload())
-        assert parsed["ws_type"] == "message"
-        assert parsed["text"] == "hello"
-        assert parsed["chat_id"] == "c1"
-        assert parsed["sender_open_id"] == "ou1"
-        assert parsed["message_id"] == "m1"
-
-    def test_text_content_not_json(self):
-        parsed = fa.parse_ws_message(_receive_payload(content="plain text"))
-        assert parsed["text"] == "plain text"
-
-    def test_at_mention_stripped(self):
-        parsed = fa.parse_ws_message(_receive_payload(at="bot"))
-        assert "@_bot" not in parsed["text"]
-
-    def test_post_message_dict_content(self):
-        content = json.dumps({"content": {"zh_cn": [[{"tag": "text", "text": "hi "},
-                                                     {"tag": "text", "text": "there"}]]}})
-        parsed = fa.parse_ws_message(_receive_payload(message_type="post", content=content))
-        assert parsed["text"] == "hi  there"
-
-    def test_post_message_bad_content_falls_back(self):
-        parsed = fa.parse_ws_message(_receive_payload(message_type="post", content="not json"))
-        assert parsed["text"] == "not json"
-
-    def test_non_message_event(self):
-        payload = json.dumps({"type": "event", "event": {"header": {"event_type": "im.chat.updated"}}})
-        assert fa.parse_ws_message(payload) == {"ws_type": "event", "event_type": "im.chat.updated"}
-
-
 class TestParseEvent:
     def test_non_message_returns_none(self):
-        assert fa._parse_event({"header": {"event_type": "im.chat.updated"}}) is None
+        assert fw._parse_event({"header": {"event_type": "im.chat.updated"}}) is None
 
     def test_text_message(self):
         data = json.loads(_receive_payload())
         evt = data["event"]
-        parsed = fa._parse_event(evt)
+        parsed = fw._parse_event(evt)
         assert parsed["type"] == "message" and parsed["text"] == "hello"
         assert parsed["chat_type"] == "group"
 
     def test_post_message(self):
         content = json.dumps({"content": [[{"tag": "text", "text": "a"}, {"tag": "text", "text": "b"}]]})
         data = json.loads(_receive_payload(message_type="post", content=content))
-        parsed = fa._parse_event(data["event"])
+        parsed = fw._parse_event(data["event"])
         assert parsed["text"] == "a b"
 
 
 class TestFrameHelpers:
     def test_get_header_found(self):
         h = [MagicMock(key="k1", value="v1"), MagicMock(key="k2", value="v2")]
-        assert fa._get_header(h, "k2") == "v2"
-        assert fa._get_header(h, "missing") == ""
+        assert fw._get_header(h, "k2") == "v2"
+        assert fw._get_header(h, "missing") == ""
 
     def test_build_ack_frame(self):
         frame = MagicMock()
         frame.SerializeToString.return_value = b"\x01\x02"
-        out = fa._build_ack_frame(frame)
+        out = fw._build_ack_frame(frame)
         frame.payload = json.dumps({"code": 200}).encode("utf-8")
         assert out == b"\x01\x02"
         assert json.loads(frame.payload) == {"code": 200}
 
 
 # ====== BotManager ======
-
-
-class TestBotManager:
-    def test_add_get_remove(self):
-        bm = fa.BotManager()
-        ctx = asyncio.run(bm.add_bot("app1", "secret1", name="b1"))
-        assert bm.get_bot("app1") is ctx
-        assert bm.get_bot("nope") is None
-        assert "app1" in bm.get_all_bots()
-        asyncio.run(bm.remove_bot("app1"))
-        assert bm.get_bot("app1") is None
-        asyncio.run(bm.remove_bot("app1"))  # 幂等
-
-    def test_add_duplicate_returns_existing(self):
-        bm = fa.BotManager()
-        c1 = asyncio.run(bm.add_bot("app1", "s", name="a"))
-        c2 = asyncio.run(bm.add_bot("app1", "s", name="b"))
-        assert c1 is c2
-
-    def test_add_bot_with_handler_creates_task(self):
-        bm = fa.BotManager()
-        bm._api = MagicMock()
-        bm.set_message_handler(lambda ctx, parsed: None)
-        with patch.object(fa, "run_bot", new=MagicMock()), \
-             patch("asyncio.create_task", return_value=MagicMock()) as m_ct:
-            asyncio.run(bm.add_bot("app1", "s", name="b1"))
-        m_ct.assert_called_once()
-
-    def test_health_check(self):
-        bm = fa.BotManager()
-        asyncio.run(bm.add_bot("app1", "s", name="b1"))
-        asyncio.run(bm.add_bot("app2", "s", name="b2"))
-        bm._bots["app1"].state = fa.BotState.CONNECTED
-        h = bm.health_check()
-        assert h["total_bots"] == 2 and h["connected"] == 1 and h["disconnected"] == 1
-        assert "app1" in h["bots"]
-
-    def test_load_from_db(self):
-        app = _app_id()
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("INSERT INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret) "
-                          "VALUES (?, 7, '', ?, 'sec')", ("sess-%s" % app, app))
-                db.commit()
-            bm = fa.BotManager()
-            asyncio.run(bm.load_from_db())
-            assert bm.get_bot(app) is not None
-            assert bm.get_bot(app).bot_type == "chat_bot"
-        finally:
-            with db_lock:
-                db.cursor().execute("DELETE FROM chat_agent_session WHERE im_app_id=?", (app,))
-                db.commit()
-
-    def test_start_stop(self):
-        bm = fa.BotManager()
-        with patch("aiohttp.ClientSession"), patch("aiohttp.TCPConnector"), patch("aiohttp.ClientTimeout"):
-            asyncio.run(bm.start())
-        assert bm.api is not None
-        asyncio.run(bm.stop())
-        assert bm._bots == {}
-
-
-# ====== FeishuAsync HTTP 层（mock aiohttp session） ======
 
 
 class _FakeResp:
@@ -472,7 +366,7 @@ class TestFeishuAsyncHttp:
                                      "issue_number": "#7", "conv_id": "c1"}},
             },
         }
-        parsed = fa._parse_card_action(evt)
+        parsed = fw._parse_card_action(evt)
         assert parsed["text"] == "/task-open"
         assert parsed["_card_value"]["repo_key"] == "gitcode:a/b"
         assert parsed["_card_value"]["conv_id"] == "c1"
@@ -529,48 +423,3 @@ class TestFeishuAsyncHttp:
         api, sess = _api_with_session()
         with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
             assert asyncio.run(api.get_user_name(_ctx(), "")) == ""
-
-
-class TestWsPermanentFailure:
-    """永久失效 Bot 自动停用（feishu_async.py _WS_PERMANENT_ERROR_CODES）。"""
-
-    def test_permanent_codes_trigger_disable(self):
-        """10002/10014/10003 永久错误码 → _disable_bot 写入 DB is_active=0"""
-        from src.session_manager import db, db_lock
-        app_id = "cli_test_perm_" + str(int(time.time()))
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, is_active) VALUES (?,?,?)",
-                          (app_id, "chat_bot", 1))
-                db.commit()
-            # 直接测试 _disable_bot
-            asyncio.run(fa._disable_bot(app_id))
-            with db_lock:
-                c = db.cursor()
-                r = c.execute("SELECT is_active FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()
-            assert r and r[0] == 0
-        finally:
-            with db_lock:
-                db.cursor().execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
-                db.commit()
-
-    def test_permanent_codes_in_constant(self):
-        """_WS_PERMANENT_ERROR_CODES 包含 10002/10014/10003，不包含 0/-1（正常/网络错误）"""
-        codes = fa.FeishuAsync._WS_PERMANENT_ERROR_CODES
-        assert 10002 in codes
-        assert 10014 in codes
-        assert 10003 in codes
-        assert 0 not in codes
-        assert -1 not in codes
-
-    def test_ws_endpoint_returns_error_code(self):
-        """get_ws_endpoint 失败时返回 (url, error_code)，非 0 错误码"""
-        api, sess = _api_with_session()
-        sess.post.return_value = _HttpCtx(_FakeResp({"code": 10014}))
-        ctx = _ctx()
-        url, code = asyncio.run(api.get_ws_endpoint(ctx))
-        assert url == ""
-        assert code == 10014
-        assert "endpoint api error" in ctx.metrics.last_error
-        sess.get.assert_not_called()

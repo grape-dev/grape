@@ -659,6 +659,8 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
         except Exception as _se:
             log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
         log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+        # A4：完成通知扇出到该用户全部已连接渠道（去重窗口内只发一轮）
+        _notify_done(repo_key, issue_number, "审核已通过，该需求已完成。")
     return _changed
 
 
@@ -976,6 +978,7 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
                 log.warning(f"auto-finalize stage=done retry failed {repo_key}/{_tag}: {_se2} "
                             f"(will be compensated on next event)")
         _closed = _close_vcs_issue_auto(repo_key, _num)
+        _notify_done(repo_key, _num, "流水线全部节点已完成，需求已自动结单。")
         log.info(f"Issue #656: auto-finalized {repo_key}/{_tag} by {source} "
                  f"(agent={agent_type}, vcs_close={_closed})")
         return "auto_done"
@@ -1253,6 +1256,15 @@ def _notify_note() -> str:
     return f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
 
+def _notify_done(repo_key: str, issue_number: int, text: str) -> None:
+    """完成通知（A4）：扇出到该用户全部已连接渠道；异常不影响结单主流程。"""
+    try:
+        from src.im.notify import notify_issue_event
+        notify_issue_event(repo_key, int(issue_number or 0), "done", text)
+    except Exception as _e:
+        log.warning(f"[im-notify] done notify failed {repo_key}#{issue_number}: {_e}")
+
+
 _IM_NOTIFY_COUNTERS: dict[str, int] = {}
 
 
@@ -1306,22 +1318,18 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
 
         # 飞书仅作通知（D3）
         _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
-        if open_id and api and ctx:
-            notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
-                           if (task_description or "").strip() else "你有一条新任务待处理。")
-            try:
-                await api.send_card_to_user(
-                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["task"],
-                    template=_IM_NOTIFY_TEMPLATES["task"],
-                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
-                    fields=_build_notify_fields(repo_key, issue_number),
-                    note=_notify_note())
-                _im_notify_counter("sent_ok")
-            except Exception as e:
-                _im_notify_counter("sent_failed")
-                log.warning(f"Task notify feishu failed: {e}")
+        # A4（2026-11-10）：扇出到该用户全部已连接渠道（不再只认飞书本人 bot）
+        from src.im.notify import notify_user
+        notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
+                       if (task_description or "").strip() else "你有一条新任务待处理。")
+        _res = await notify_user(user_id, "task", notify_text, repo_key=repo_key,
+                                 issue_number=issue_number, conv_id=conv_id)
+        if _res.get("sent"):
+            _im_notify_counter("sent_ok")
         else:
-            _im_notify_skip("task", issue_number, user_id, ctx, open_id)
+            _im_notify_counter("sent_failed")
+            log.warning(f"Task notify: no channel delivered (sent={_res.get('sent')} "
+                        f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
 
@@ -1345,22 +1353,18 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
                 log.warning(f"Task awaiting: template write failed: {e}")
 
         _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
-        if open_id and api and ctx:
-            notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
-                           if (questions or "").strip() else "Agent 需要你补充信息。")
-            try:
-                await api.send_card_to_user(
-                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["awaiting"],
-                    template=_IM_NOTIFY_TEMPLATES["awaiting"],
-                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
-                    fields=_build_notify_fields(repo_key, issue_number),
-                    note=_notify_note())
-                _im_notify_counter("sent_ok")
-            except Exception as e:
-                _im_notify_counter("sent_failed")
-                log.warning(f"Task awaiting feishu failed: {e}")
+        # A4：全渠道扇出（微信/企微/Slack/企微等没有卡片就降级文本+回数字）
+        from src.im.notify import notify_user
+        notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
+                       if (questions or "").strip() else "Agent 需要你补充信息。")
+        _res = await notify_user(user_id, "awaiting", notify_text, repo_key=repo_key,
+                                 issue_number=issue_number, conv_id=conv_id)
+        if _res.get("sent"):
+            _im_notify_counter("sent_ok")
         else:
-            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
+            _im_notify_counter("sent_failed")
+            log.warning(f"Task awaiting: no channel delivered (sent={_res.get('sent')} "
+                        f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
@@ -1386,55 +1390,42 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
                 log.warning(f"Issue pending-review: template write failed: {e}")
 
         _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
-        if open_id and api and ctx:
-            notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
-                           if (review_points or "").strip() else "请审核确认交付结果。")
-            try:
-                await api.send_card_to_user(
-                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pending_review"],
-                    template=_IM_NOTIFY_TEMPLATES["pending_review"],
-                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
-                    fields=_build_notify_fields(repo_key, issue_number),
-                    note=_notify_note())
-                _im_notify_counter("sent_ok")
-            except Exception as e:
-                _im_notify_counter("sent_failed")
-                log.warning(f"Issue pending-review feishu failed: {e}")
+        # A4：全渠道扇出（待审核 = 必须主动触达，用户可能只开着某一个渠）
+        from src.im.notify import notify_user
+        notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
+                       if (review_points or "").strip() else "请审核确认交付结果。")
+        _res = await notify_user(user_id, "pending_review", notify_text, repo_key=repo_key,
+                                 issue_number=issue_number, conv_id=conv_id)
+        if _res.get("sent"):
+            _im_notify_counter("sent_ok")
         else:
-            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
+            _im_notify_counter("sent_failed")
+            log.warning(f"Issue pending-review: no channel delivered (sent={_res.get('sent')} "
+                        f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
 
 def _resolve_user_chat_bot(bm, user_id: int):
-    """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
+    """按用户取"本人 chat bot"的 BotContext（open_id 为 app 级，必须用本人 bot 发送）。
 
-    用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
-    可观测（cluster-im-lease-stability-design.md §3.1）：区分 no_bm / no_session_row /
-    bot_not_in_memory（sticky-lease 场景）→ 让"未收到通知"有日志可查。
+    旧 IM 下线 A2 M2：凭证来源从 legacy BotManager 内存表改为 grape_t_channel_installation；
+    入参 bm 保留仅为了旧调用点兼容，**不再使用**。
+    用户未配置本人 bot → 返回 None（不通知，不回落他人 bot，避免命名空间不匹配静默失败）。
     """
-    if not bm:
-        log.info(f"[im-notify] resolve user={user_id} reason=no_bm")
+    from src.im.engine_wiring import get_active_installation
+    inst = get_active_installation("user", owner_user_id=str(user_id), channel_type="feishu")
+    if not inst:
+        log.info(f"[im-notify] resolve user={user_id} reason=no_installation")
         return None
-    try:
-        bots = bm.get_all_bots()
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
-                (user_id,)).fetchone()
-        if not row or not row[0]:
-            log.warning(f"[im-notify] resolve user={user_id} reason=no_session_row")
-            return None
-        bot = bots.get(row[0])
-        if bot:
-            log.info(f"[im-notify] resolve user={user_id} bot={row[0]} ok")
-        else:
-            log.warning(f"[im-notify] resolve user={user_id} bot={row[0]} reason=bot_not_in_memory hint=sticky-lease")
-        return bot
-    except Exception as e:
-        log.warning(f"[im-notify] resolve user={user_id} reason=bot_error err={e}")
+    cfg = inst.get("config") or {}
+    app_id, secret = str(cfg.get("app_id", "")), str(cfg.get("app_secret", ""))
+    if not app_id or not secret:
+        log.warning(f"[im-notify] resolve user={user_id} reason=empty_credential")
         return None
+    from src.im.feishu_async import BotContext
+    log.info(f"[im-notify] resolve user={user_id} bot={app_id} ok")
+    return BotContext(app_id=app_id, app_secret=secret, bot_type="chat_bot")
 
 
 class TaskCreateBody(BaseModel):
@@ -1549,6 +1540,8 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
     from src.api.session_store import set_issue_stage
     set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
     log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
+    if affected:
+        _notify_done(repo_key, issue_number, f"需求已确认完成（{confirmed_by}）。")
     # Issue #1748 补充：关闭后回收平台自动转存的评论媒体/编辑器图片（保留用户手工附件）
     _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
@@ -2913,7 +2906,11 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
                 from src.storage import get_storage
                 _storage = get_storage()
                 if _storage:
-                    _safe_name = _url.rsplit("/", 1)[-1].split("?")[0]
+                    # 文件名只能从 URL 的 **path** 里取：OBS 签名串（Signature=…）
+                    # 本身可能含 "/"，按整串 rsplit 会把签名碎片当文件名，
+                    # 重新签发出来的对象键不存在 → 评论链接 404（2026-11-06 实障）。
+                    from urllib.parse import urlparse
+                    _safe_name = urlparse(_url).path.rsplit("/", 1)[-1]
                     if _safe_name:
                         _att["url"] = _storage.temporary_url(
                             _attach_obs_key(owner, rname, issue_number, _safe_name),

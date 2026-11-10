@@ -113,109 +113,108 @@ def _on_qr(task_id: str, info: dict):
 
 
 def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple[str, str]:
-    """Chat Agent 落库：chat_agent_session + global_im_bot_config + 换绑清理。
+    """Chat Agent 落库（A2 收尾）：只写 grape_t_channel_installation，legacy 表不再读写。
 
     返回 (error_msg, old_app_id)。error_msg 非空表示校验/写入失败。
     """
-    from src.session_manager import db, db_lock, get_chat_config, set_chat_config
-    old_app_id = get_chat_config(user_id).get("im_app_id", "")
-    with db_lock:
-        c = db.cursor()
-        # 强约束：一个 app_id 全局唯一。类型注册表校验 VOD 占用 + 其他用户占用
-        c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
-        row = c.fetchone()
-        if row and row[0] == "vod_bot":
-            return "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent", old_app_id
-        c.execute(
-            "SELECT user_id FROM chat_agent_session WHERE im_app_id=? AND user_id>0 AND user_id!=? AND im_app_id!='' LIMIT 1",
-            (app_id, user_id),
-        )
-        other = c.fetchone()
-        if other:
-            return "该凭证已被其他用户使用，不能重复绑定", old_app_id
-        # 换绑：旧 app_id 释放（无其他引用时从登记表删除）
-        if old_app_id and old_app_id != app_id:
-            c.execute(
-                "SELECT COUNT(*) FROM chat_agent_session WHERE im_app_id=? AND user_id!=? AND im_app_id!=''",
-                (old_app_id, user_id),
-            )
-            other_refs = c.fetchone()[0]
-            if other_refs == 0:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=? AND bot_type='chat_bot'", (old_app_id,))
+    from src.session_manager import db, db_lock
+    from src.im.engine_wiring import (_connect, default_db_path, get_active_installation,
+                                       revoke_installation, sync_installation)
+    _inst = get_active_installation("user", owner_user_id=str(user_id)) or {}
+    old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
+
+    # 强约束：一个 app_id 全局唯一（查 active 安装行：repo 轨=VOD 占用，user 轨他人=被占用）
+    _conn = _connect(default_db_path())
+    try:
+        _holders = _conn.execute(
+            "SELECT scope, owner_user_id FROM grape_t_channel_installation "
+            "WHERE legacy_app_id=? AND status='active'", (app_id,)).fetchall()
+    finally:
+        _conn.close()
+    if any(str(r[0]) == "repo" for r in _holders):
+        return "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent", old_app_id
+    if any(str(r[0]) == "user" and str(r[1]) != str(user_id) for r in _holders):
+        return "该凭证已被其他用户使用，不能重复绑定", old_app_id
+
+    if old_app_id and old_app_id != app_id:
+        with db_lock:
+            c = db.cursor()
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-            log.info(f"Feishu onboard: replaced old app_id={old_app_id[:20]} with {app_id[:20]}")
-        c.execute(
-            "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
-            (app_id, "chat_bot"),
-        )
-        db.commit()
-    set_chat_config(user_id, im_app_id=app_id, im_app_secret=app_secret, im_provider="feishu")
+            db.commit()
+        log.info(f"Feishu onboard: replaced old app_id={old_app_id[:20]} with {app_id[:20]}")
+    try:
+        if sync_installation("user", owner_user_id=str(user_id),
+                             app_id=app_id, app_secret=app_secret):
+            log.info(f"Feishu onboard: grape_t_channel_installation synced (user={user_id})")
+        if old_app_id and old_app_id != app_id:
+            revoke_installation("user", owner_user_id=str(user_id), app_id=old_app_id)
+    except Exception as e:
+        log.warning(f"Feishu onboard: sync grape_t_channel_installation failed: {e}")
+        return "写入 IM 安装失败，请重试", old_app_id
     return "", old_app_id
 
 
 def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple[str, str]:
-    """VOD Agent 落库：devops_agent_session + global_im_bot_config + 换绑清理。
+    """VOD Agent 落库（A2 收尾）：只写 grape_t_channel_installation；devops 行只用来挂会话。
 
-    repo_key 统一经 to_repo_key 归一化（前端传 owner/repo，DB 存 gitcode:owner/repo）；
-    若无该 repo 的 vod 配置行则 INSERT 新建（否则 UPDATE 匹配不到行，凭据丢失）。
+    repo_key 统一经 to_repo_key 归一化；若无该 repo 的 vod 配置行则建一行占位，
+    凭证本身在 grape_t_channel_installation。
     返回 (error_msg, old_app_id)。
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     import uuid
     from src.session_manager import db, db_lock
+    from src.im.engine_wiring import (_connect, default_db_path, get_active_installation,
+                                       revoke_installation, sync_installation)
+    _inst = get_active_installation("repo", repo_key=repo_key) or {}
+    old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
+
+    # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
+    _conn = _connect(default_db_path())
+    try:
+        _holders = _conn.execute(
+            "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
+            (app_id,)).fetchall()
+    finally:
+        _conn.close()
+    if any(str(r[0]) == "user" for r in _holders):
+        return "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent", old_app_id
+
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
-        row = c.fetchone()
-        if row and row[0] == "chat_bot":
-            return "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent", ""
-        # 换绑清理（对齐 agents.py update_agent_config）
-        c.execute("SELECT id, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
-        old_row = c.fetchone()
-        old_session_id = old_row[0] if old_row else ""
-        old_app_id = old_row[1] if old_row else ""
-        if old_app_id and old_app_id != app_id:
-            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
-            other_refs = c.fetchone()[0]
-            if other_refs == 0:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
-            c.execute(
-                "DELETE FROM vod_conversations WHERE agent_session_id=?",
-                (old_session_id,),
-            )
+        row = c.execute("SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                        (repo_key,)).fetchone()
+        old_session_id = row[0] if row else ""
+        if old_app_id and old_app_id != app_id and old_session_id:
+            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (old_session_id,))
             log.info(f"Feishu onboard: replaced vod app_id={old_app_id[:20]} with {app_id[:20]}")
-        c.execute(
-            "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
-            (app_id, "vod_bot"),
-        )
-        if old_session_id:
+        if not old_session_id:
             c.execute(
-                "UPDATE devops_agent_session SET im_app_id=?, im_app_secret=?, im_provider='feishu' WHERE id=?",
-                (app_id, app_secret, old_session_id),
-            )
-        else:
-            c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,datetime('now'),?,?,?)",
-                (str(uuid.uuid4()), repo_key, "vod", "idle", app_id, app_secret, "feishu"),
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at) "
+                "VALUES (?,?,?,?,datetime('now'))",
+                (str(uuid.uuid4()), repo_key, "vod", "idle"),
             )
         db.commit()
+    try:
+        if sync_installation("repo", repo_key=repo_key,
+                             app_id=app_id, app_secret=app_secret):
+            log.info(f"Feishu onboard: grape_t_channel_installation synced (repo={repo_key})")
+        if old_app_id and old_app_id != app_id:
+            revoke_installation("repo", repo_key=repo_key, app_id=old_app_id)
+    except Exception as e:
+        log.warning(f"Feishu onboard: sync grape_t_channel_installation failed: {e}")
+        return "写入 IM 安装失败，请重试", old_app_id
     return "", old_app_id
 
 
 async def _connect_bot(bot_type: str, repo_key: str, app_id: str, app_secret: str, old_app_id: str):
-    """通过 BotManager 动态建连（换绑时先移除旧 bot）。"""
-    try:
-        from src.api.bot_manager_registry import get_bot_manager
-        bot_manager = get_bot_manager()
-        if bot_manager and bot_manager.api:
-            if old_app_id and old_app_id != app_id:
-                await bot_manager.remove_bot(old_app_id)
-                log.info(f"Feishu onboard: removed old bot {old_app_id[:20]}")
-            await bot_manager.add_bot(app_id, app_secret, bot_type=bot_type)
-            log.info(f"Feishu onboard: added bot {app_id[:20]} ({bot_type})")
-    except Exception as e:
-        log.warning(f"Feishu onboard add_bot failed: {e}")
+    """旧 IM 下线 A2 M2：绑定结果已写 grape_t_channel_installation，新引擎 ≤30s 扫描自动建连。
+
+    保留函数签名（调用点在注册流程里），不再经 legacy BotManager 热加载。
+    """
+    log.info(f"Feishu onboard: installation written app_id={app_id[:20]} ({bot_type}); "
+             f"engine will pick it up within scan interval")
 
 
 async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: int, username: str = ""):

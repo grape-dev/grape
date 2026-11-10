@@ -466,7 +466,8 @@ class TestScheduledTaskOwnership:
     #     master logging / knowledge migrate / D32）---
     def test_a_starts_user_facing_schedulers(self):
         src = self._entry_src("grape_server")
-        for marker in ("lease_sweep_loop", "knowledge_sync_loop", "knowledge_write_worker",
+        # A2：legacy bot lease sweep 已下线，A 改为启动新 IM 引擎（start_im_engine）
+        for marker in ("start_im_engine", "knowledge_sync_loop", "knowledge_write_worker",
                        "start_skill_sync_scheduler", "start_feedback_reconcile_scheduler",
                        "start_upload_cleanup_scheduler", "start_cooldown_scheduler",
                        "_start_server_metrics_task", "_start_obs_alert_task",
@@ -509,7 +510,7 @@ class TestScheduledTaskOwnership:
     def test_main_single_process_starts_everything(self):
         """单进程兼容模式 main.py 保留全部定时任务（A+B+C 全集）。"""
         content = (REPO_ROOT / "src/api/main.py").read_text(encoding="utf-8")
-        for marker in ("lease_sweep_loop", "knowledge_sync_loop", "start_skill_sync_scheduler",
+        for marker in ("start_im_engine", "knowledge_sync_loop", "start_skill_sync_scheduler",
                        "start_upload_cleanup_scheduler", "start_cooldown_scheduler",
                        "start_bot_token_health", "start_local_claimer", "start_scheduler",
                        "start_health_refresh_scheduler", "probe_local_engines",
@@ -557,71 +558,53 @@ class TestSharedModules:
             src = Path(mod.__file__).read_text(encoding="utf-8")
             assert f'service_name="{expect}"' in src, f"{mod.__name__} health service name mismatch"
 
-    def test_bot_manager_registry(self):
-        from src.api import bot_manager_registry
-        bot_manager_registry.set_bot_manager(None)
-        assert bot_manager_registry.get_bot_manager() is None
+    def test_legacy_bot_manager_registry_retired(self):
+        """A2（2026-11-10）：legacy BotManager 桥模块已删除，不再有 registry 槽位。"""
+        import importlib
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("src.api.bot_manager_registry")
 
 
 # ------------------------------------------- IM 单一归属（§10.7）
 
 class TestIMOwnership:
-    def test_im_bot_manager_only_in_a(self):
-        """§10.7：IM WS（BotManager）只在 A 进程启动。"""
+    def test_im_engine_only_in_a_and_main(self):
+        """§10.7 + A2：新 IM 引擎只在 A 进程 / 单进程入口启动。"""
         for mod_name in ("grape_event_server", "grape_worker_server"):
             mod = __import__(f"src.api.{mod_name}", fromlist=["x"])
             src = Path(mod.__file__).read_text(encoding="utf-8")
-            assert "BotManager" not in src, f"{mod_name} must not start IM BotManager"
+            assert "start_im_engine" not in src, f"{mod_name} must not start the IM engine"
 
-    def test_a_starts_bot_manager(self):
+    def test_a_starts_im_engine(self):
         from src.api import grape_server
         src = Path(grape_server.__file__).read_text(encoding="utf-8")
-        assert "BotManager" in src
-        assert "set_bot_manager" in src
+        assert "engine_wiring.start_im_engine" in src
+        assert "bot_manager_registry" not in src, "A2: legacy registry must be gone from the A entry"
+        assert "import BotManager" not in src, "A2: A entry must not start the legacy BotManager"
 
-    def test_main_registers_bot_manager_to_registry(self):
+    def test_main_starts_im_engine(self):
         content = (REPO_ROOT / "src/api/main.py").read_text(encoding="utf-8")
-        assert "set_bot_manager" in content
+        assert "engine_wiring.start_im_engine" in content
+        assert "set_bot_manager" not in content
 
 
-# -------------------------- P1-P3 审查修复（bot_manager 迁移 + 状态驱动取消）
+# -------------------------- P1-P3 审查修复（A2 后：legacy 调用点已清零 + 状态驱动取消）
 
-class TestReviewFixBotManagerMigration:
-    """审查 Required #1：多进程下 IM 动态增删 bot 的调用点必须走 registry。"""
+class TestReviewFixLegacyBotManagerRemoved:
+    """A2（2026-11-10）：多进程 bot 动态增删链路整体下线，路由文件不得再引用 legacy 桥。"""
 
-    CALL_SITES = [
-        ("src/api/routes/feishu_card.py", 2),
-        ("src/api/routes/feishu_onboard.py", 1),
-        ("src/api/routes/chat.py", 1),
-        ("src/api/routes/agents.py", 2),
+    ROUTE_FILES = [
+        "src/api/routes/feishu_card.py",
+        "src/api/routes/feishu_onboard.py",
+        "src/api/routes/chat.py",
+        "src/api/routes/agents.py",
     ]
 
-    def test_no_route_file_imports_bot_manager_from_main(self):
-        for rel, _ in self.CALL_SITES:
+    def test_no_route_file_references_legacy_bot_manager(self):
+        for rel in self.ROUTE_FILES:
             content = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            assert "from src.api.main import bot_manager" not in content, \
-                f"{rel} must not import bot_manager from src.api.main (module-level None in A process)"
-
-    def test_call_sites_use_registry(self):
-        for rel, count in self.CALL_SITES:
-            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            got = content.count("from src.api.bot_manager_registry import get_bot_manager")
-            assert got >= count, \
-                f"{rel} must call get_bot_manager() at {count} site(s), found {got}"
-
-    def test_migrated_sites_still_work_with_registry_slot(self):
-        """registry 槽位注入 mock 后，迁移后的调用点语义等价（非 None 透传）。"""
-        from src.api import bot_manager_registry
-
-        class _FakeBM:
-            api = object()
-
-        bm = _FakeBM()
-        bot_manager_registry.set_bot_manager(bm)
-        try:
-            assert bot_manager_registry.get_bot_manager() is bm
-        finally:
-            bot_manager_registry.set_bot_manager(None)
+            assert "bot_manager_registry" not in content, f"{rel} still imports the legacy registry"
+            assert "from src.api.main import bot_manager" not in content, f"{rel} still imports bot_manager"
 
 
 class TestReviewFixDirectTerminateStateDriven:

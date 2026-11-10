@@ -857,9 +857,9 @@ class TestChat:
         # 清理
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM chat_agent_session WHERE im_app_id=? OR user_id IN (?,?)", (app_a, _uid["id"], user_b["id"]))
+            c.execute("DELETE FROM chat_agent_session WHERE user_id IN (?,?)", (_uid["id"], user_b["id"]))
             c.execute("DELETE FROM grape_accounts WHERE id=?", (user_b["id"],))
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_a,))
+            c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_a,))
             db.commit()
 
     def test_chat_im_app_id_global_unique(self):
@@ -895,9 +895,9 @@ class TestChat:
         # 清理
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM chat_agent_session WHERE im_app_id=? OR user_id IN (?,?)", (app_id, _uid["id"], user_b["id"]))
+            c.execute("DELETE FROM chat_agent_session WHERE user_id IN (?,?)", (_uid["id"], user_b["id"]))
             c.execute("DELETE FROM grape_accounts WHERE id=?", (user_b["id"],))
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+            c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,))
             db.commit()
 
     def test_chat_im_vod_conflict(self):
@@ -906,10 +906,13 @@ class TestChat:
         from src.session_manager import db, db_lock
 
         app_id = "cli_" + uuid.uuid4().hex[:12]
-        # 登记一个 vod_bot
+        # 登记一个 vod_bot（A2 收尾：占用关系看 grape_t_channel_installation 的 repo 轨安装）
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, 'vod_bot')", (app_id,))
+            c.execute("INSERT INTO grape_t_channel_installation (id, channel_type, scope, owner_user_id, "
+                      "repo_key, config, status, legacy_app_id) VALUES (?, 'feishu', 'repo', '', "
+                      "'gitcode:org/vodconflict', ?, 'active', ?)",
+                      ("vod-" + app_id, '{"app_id": "%s", "app_secret": "s"}' % app_id, app_id))
             db.commit()
 
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}}, headers=_headers)
@@ -920,11 +923,11 @@ class TestChat:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (_uid["id"],))
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+            c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,))
             db.commit()
 
     def test_chat_im_release_old_app_id(self):
-        """用户更换 app_id 后，旧 app_id 应从 global_im_bot_config 释放"""
+        """用户更换 app_id 后，旧安装行应释放（不再 active）"""
         import uuid
         from src.session_manager import db, db_lock
 
@@ -935,7 +938,7 @@ class TestChat:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (_uid["id"],))
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id IN (?,?)", (old_app, new_app))
+            c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id IN (?,?)", (old_app, new_app))
             db.commit()
 
         # 用户先绑定旧 app_id
@@ -943,15 +946,15 @@ class TestChat:
         assert r.status_code == 200, f"old save failed: {r.text[:200]}"
         with db_lock:
             c = db.cursor()
-            assert c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (old_app,)).fetchone()[0] == 1
+            assert c.execute("SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'", (old_app,)).fetchone()[0] == 1
 
         # 再绑定新 app_id（换绑）
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": new_app, "app_secret": "sec_new"}}}, headers=_headers)
         assert r.status_code == 200, f"new save failed: {r.text[:200]}"
         with db_lock:
             c = db.cursor()
-            assert c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (old_app,)).fetchone()[0] == 0, "old app_id should be released"
-            assert c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (new_app,)).fetchone()[0] == 1
+            assert c.execute("SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'", (old_app,)).fetchone()[0] == 0, "old app_id should be released"
+            assert c.execute("SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'", (new_app,)).fetchone()[0] == 1
 
         # 用户读到新 app_id
         r = client.get("/api/chat/config", headers=_headers)
@@ -961,7 +964,7 @@ class TestChat:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND repo_key=''", (_uid["id"],))
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id IN (?,?)", (old_app, new_app))
+            c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id IN (?,?)", (old_app, new_app))
             db.commit()
 
     def test_chat_config_skills_include_user_repo(self):

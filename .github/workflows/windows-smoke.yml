@@ -61,6 +61,12 @@ jobs:
         run: python -m pytest tests/test_issue_581_labels_dual_channel.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
+      - name: IM adapter tests (issue #1613)
+        # Issue #1613 QA 审查：tests/im（含新增 Telegram 用例）此前未被流水线执行，
+        # 回归无法被门禁发现；此处接入全量 IM 适配器用例。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/im -q
       - name: Destructive DDL guard + Issue #536 migration safety tests
         # Issue #536 QA-Impt：CI 显式接入 DDL 卡点与新增用例；base 显式传目标分支
         # （GitCode 注入 CI_MERGE_REQUEST_TARGET_BRANCH_NAME，GitHub 用 PR base），

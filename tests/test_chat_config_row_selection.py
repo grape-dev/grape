@@ -76,15 +76,14 @@ def _seed_engine():
         db.commit()
 
 
-def _row(uid, row_id, runtime_id, last_active, im_app_id=""):
+def _row(uid, row_id, runtime_id, last_active, skill="chat"):
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT OR REPLACE INTO chat_agent_session "
-            "(id, user_id, repo_key, runtime_id, skill, skill_id, im_app_id, im_app_secret, "
-            " im_provider, created_at, last_active_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),?)",
-            (row_id, uid, "", runtime_id, "chat", 0, im_app_id, "", "", last_active))
+            "(id, user_id, repo_key, runtime_id, skill, skill_id, created_at, last_active_at) "
+            "VALUES (?,?,?,?,?,?,datetime('now'),?)",
+            (row_id, uid, "", runtime_id, skill, 0, last_active))
         db.commit()
 
 
@@ -180,13 +179,13 @@ def test_cross_space_row_belonging_to_other_user_is_not_picked():
     """
     _snap = _snapshot_runtime_ids(); _seed_engine(); _clean(UID); _clean(UID2)
     # UID2 的行名是 UID2 的 canonical 名，但 user_id 是 UID（别人）
-    _row(UID, f"sess-cfg-{UID2}", R_OK, "2026-10-17 09:00:00", im_app_id="cli_someone_else")
+    _row(UID, f"sess-cfg-{UID2}", R_OK, "2026-10-17 09:00:00", skill="skill_someone_else")
     # UID2 自己真正的行（非 canonical 名）
     _row(UID2, "sess-cfg-77001", R_OK, "2026-10-14 09:00:00")
     try:
         cfg = get_chat_config(UID2)
-        assert cfg["im_app_id"] != "cli_someone_else", \
-            f"不得读到别人的行（拿到了别人的飞书 app_id），实际 {cfg}"
+        assert cfg["skill"] != "skill_someone_else", \
+            f"不得读到别人的配置行（拿到了别人的技能），实际 {cfg}"
     finally:
         _clean(UID); _clean(UID2); _clean_engine(); _restore_runtimes(_snap); _reset_engine_cache()
 

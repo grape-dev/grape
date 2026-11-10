@@ -135,6 +135,38 @@ class TestSyncComment:
         # 评论里是长效 URL，而非原 7 天签名 URL
         assert calls == [(85, "## 附件\n[doc.md](http://long/%s)" % resign_calls[0][0])]
 
+    def test_obs_signature_with_slash_keeps_real_filename(self, monkeypatch):
+        # 回归（2026-11-06 实障）：OBS 签名串可含 "/"，按整串 rsplit 会把签名碎片
+        # 当文件名 → 重签发的是不存在的对象键，评论链接 404。
+        import src.api.issues_center as ic
+        import src.storage as storage_mod
+        import src.user.db as udb
+        import src.vcs.api_client as vac
+        keys = []
+
+        class FakeStorage:
+            def temporary_url(self, key, expires=300):
+                keys.append(key)
+                return f"http://long/{key}"
+
+        monkeypatch.setattr(storage_mod, "get_storage", lambda: FakeStorage())
+        monkeypatch.setattr(vac, "VcsApiClient", type("C", (), {
+            "__init__": lambda self, *a, **k: None,
+            "post_issue_comment": lambda self, n, body: {"id": 1}
+        }))
+        monkeypatch.setattr(udb, "get_gitcode_token", lambda repo_key="": "tok")
+        signed_url = ("https://bucket.obs.cn-north-4.myhuaweicloud.com/grape/"
+                      "issue_attachments/own/repo648/1254/ea056975.md"
+                      "?Expires=1794537983&AccessKeyId=HPUANG&Signature=7rDURFuPz0ri/uTx%2Fk")
+        ok = ic.sync_issue_attachment_comment(
+            "gitcode:own/repo648", 1254,
+            {"filename": "im-wecom-adapter-requirements.md", "url": signed_url, "is_image": False})
+        assert ok is True
+        assert len(keys) == 1
+        # 键必须以真实文件名结尾，且绝不能带签名碎片（uTx 来自 Signature 段）
+        assert keys[0].endswith("/issue_attachments/own/repo648/1254/ea056975.md")
+        assert "uTx" not in keys[0] and "Signature" not in keys[0]
+
     def test_resign_failure_falls_back_to_original_url(self, monkeypatch):
         # 重签异常降级：仍用原 URL 发评论（best-effort 不阻塞）
         import src.api.issues_center as ic

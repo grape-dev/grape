@@ -76,8 +76,8 @@ test('unbindImChannelConfig：确认后 PUT /chat/config 置空 app_id/app_secre
   const calls = runUnbind(true);
   assert.ok(calls.put, '确认后应发起 PUT /chat/config');
   assert.strictEqual(calls.put.url, '/chat/config?repo=grape-dev%2Fgrape', '应带当前仓库查询参数');
-  assert.deepStrictEqual(calls.put.body, { im: { feishu: { app_id: '', app_secret: '' } } },
-    '解绑应走 app_id 置空语义（复用既有 PUT 端点）');
+  assert.deepStrictEqual(calls.put.body, { im: { provider: 'feishu', app_id: '', app_secret: '' } },
+    '解绑应走 app_id 置空语义（复用既有 PUT 端点；Issue #956 provider 化载荷形态）');
   assert.deepStrictEqual(calls.toasts, ['T:unbind_success'], '成功后应提示 unbind_success');
   assert.strictEqual(calls.reloads, 1, '成功后应重新拉取配置刷新渠道状态');
 });
@@ -105,7 +105,7 @@ test('unbindVodIm：PUT /agents/vod/{owner}/{repo}，body 仅含 im_unbind=true'
 
 // ─── 测试 5：Chat 后端解绑清理 ───
 test('chat.py：解绑补齐注册表/会话/映射清理，且仅无其他引用时删注册表行', () => {
-  assert.ok(/def _purge_chat_im_binding\(user_id: int, gitcode_user: str, old_app_id: str\)/.test(chatPy), '应存在解绑清理函数');
+  assert.ok(/def _purge_chat_im_binding\(user_id: int, gitcode_user: str, old_app_id: str,\s*\n\s*provider: str = "feishu"\)/.test(chatPy), '应存在解绑清理函数（Issue #956 带 provider 维度）');
   const fn = chatPy.match(/def _purge_chat_im_binding[\s\S]*?\n\n\n@router\.put\("\/config"/);
   assert.ok(fn, '应能定位解绑清理实现');
   const body = fn[0];
@@ -114,8 +114,8 @@ test('chat.py：解绑补齐注册表/会话/映射清理，且仅无其他引�
     '无其他引用时才删除 chat_bot 注册行');
   assert.ok(body.indexOf("DELETE FROM chat_conversations WHERE im_channel_id=?") >= 0, '应清理该渠道会话');
   assert.ok(body.indexOf("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id=''") >= 0, '应对账 unified_user_mapping');
-  assert.ok(/"im" in body and not feishu\.get\("app_id"\) and old_app_id:\s*\n\s*_purge_chat_im_binding\(/.test(chatPy),
-    '解绑请求（显式携带 im 且 app_id 置空）应触发清理');
+  assert.ok(/explicit_unbind and old_app_id:\s*\n\s*_purge_provider = .*\n[\s\S]*?_purge_chat_im_binding\(/.test(chatPy),
+    '解绑请求（显式携带渠道载荷且 app_id 置空）应按 provider 维度触发清理');
   assert.ok(/kwargs\["im_provider"\] = ""/.test(chatPy), '解绑应同时清空 im_provider');
 });
 

@@ -8,6 +8,7 @@
 """
 import asyncio, os, shutil, time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from src import config
 from src.config import log, CHAT_CWD_BASE
 from src.session_manager import db, db_lock
@@ -634,6 +635,8 @@ def sweep_once() -> int:
             log.debug(f"sweeper im-instance purge skipped: {e}")
         # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
         cleaned += _sweep_branch_guard_state()
+        # A7/F4：IM 只增表（去重/入站流水/卡片台账）TTL 清理
+        cleaned += _sweep_im_tables()
 
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
@@ -697,6 +700,45 @@ def sweep_once() -> int:
         log.warning(f"sweep_once failed: {e}")
         return 0
 
+
+
+def _sweep_im_tables() -> int:
+    """A7/F4：IM 只增表按 created_at TTL 清理（sqlite / MySQL 双后端同一写法）。
+
+    时间比较走**应用层预计算 cutoff + `?` 参数**：`datetime('now','-N hours')` 是
+    SQLite 私有修饰符方言，mysql_compat 只翻译无参形式，带修饰符会在 MySQL 报 1305
+    （B1 强制约束，参照 src/runtime/branch_guard.py / src/runtime/table_maintenance.py）。
+
+    - grape_t_channel_inbound_dedup：去重窗口仅 90s，历史行无保留价值 → 24h
+    - grape_t_channel_inbound_message：入站消息流水（问题定位用）→ 24h
+    - grape_t_channel_outbound_card：卡片台账（重启后回调反查用）→ 7d
+    失败记 warning（不静默），单表失败不影响其余表。
+    """
+    cleaned = 0
+    specs = (
+        ("grape_t_channel_inbound_dedup", "created_at", 24),
+        ("grape_t_channel_inbound_message", "created_at", 24),
+        ("grape_t_channel_outbound_card", "created_at", 24 * 7),
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        from src.session_manager import db, db_lock
+        for table, col, hours in specs:
+            try:
+                cutoff = (now - timedelta(hours=int(hours))).strftime("%Y-%m-%d %H:%M:%S")
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
+                    n = c.rowcount or 0
+                    db.commit()
+                cleaned += n
+                if n:
+                    log.info(f"sweeper: purged {n} rows from {table} (older than {hours}h)")
+            except Exception as e:
+                log.warning(f"sweeper im-table purge failed ({table}): {e}")
+    except Exception as e:
+        log.warning(f"sweeper im-table purge failed: {e}")
+    return cleaned
 
 
 def _sweep_branch_guard_state() -> int:
@@ -962,6 +1004,8 @@ def sweep_events_once() -> int:
             log.debug(f"sweeper im-instance purge skipped: {e}")
         # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
         cleaned += _sweep_branch_guard_state()
+        # A7/F4：IM 只增表（去重/入站流水/卡片台账）TTL 清理
+        cleaned += _sweep_im_tables()
 
         from src.runtime import repogit
         if _has_db_tables:

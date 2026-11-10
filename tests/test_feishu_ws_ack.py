@@ -1,7 +1,7 @@
-"""飞书 WS ack 回传测试 — 防止消息重复消费。
+"""飞书 WS ack 帧构造测试（原 run_bot 专用用例在旧 IM 下线 M1 时退役）。
 
-验证 run_bot 对每条 DATA(EVENT) 帧回传 ack（payload={"code":200}），
-否则飞书会用新的 message_id 反复投递同一消息。
+ack 帧 payload={"code":200} 的构造仍在用（新引擎 FeishuChannel 每帧 ack 先行）；
+该行为的链路级覆盖见 tests/im/test_feishu_channel_lifecycle.py。
 """
 import asyncio
 import json
@@ -89,7 +89,7 @@ async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
     ft = FrameType(parsed_frame.method)
     assert ft == FrameType.DATA
     hs = parsed_frame.headers
-    from src.im.feishu_async import _get_header, _build_ack_frame, _parse_event as pe
+    from src.im.adapters.feishu.wire import _get_header, _build_ack_frame, _parse_event as pe
     type_ = _get_header(hs, "type")
     assert type_ == MessageType.EVENT.value
     event_data = json.loads(parsed_frame.payload.decode("utf-8"))
@@ -101,7 +101,7 @@ async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
 
 def test_ack_frame_payload_is_ok():
     """ack 帧 payload 应为 {"code":200}，且 message_id header 保留。"""
-    from src.im.feishu_async import _build_ack_frame
+    from src.im.adapters.feishu.wire import _build_ack_frame
     from lark_oapi.ws.enum import FrameType
 
     frame = _make_event_frame("om_ack_1")
@@ -112,42 +112,8 @@ def test_ack_frame_payload_is_ok():
     # payload 为 {"code":200}
     assert json.loads(ack.payload.decode("utf-8")) == {"code": 200}
     # headers 保留 message_id
-    from src.im.feishu_async import _get_header
+    from src.im.adapters.feishu.wire import _get_header
     assert _get_header(ack.headers, "message_id") == "om_ack_1"
     assert _get_header(ack.headers, "type") == "event"
 
 
-def test_run_bot_acks_event_frame():
-    """run_bot 收到 EVENT 帧后应回传 ack 帧。"""
-    import asyncio
-    from src.im.feishu_async import _build_ack_frame
-
-    frame = _make_event_frame("om_ack_2", "你好")
-    raw = frame.SerializeToString()
-
-    # 模拟 run_bot：ws 迭代产出该帧，验证会调用 ws.send(ack)
-    ws = MagicMock()
-    ws.__aiter__ = lambda: iter([raw])
-    sent = []
-    async def fake_send(data):
-        sent.append(data)
-    ws.send = fake_send
-
-    parsed, ack = asyncio.run(_run_single_event(raw))
-    assert parsed and parsed.get("text") == "你好"
-    # 验证 ack 是可解析的帧且 code=200
-    ack_parsed = _frame_from_bytes(ack)
-    assert json.loads(ack_parsed.payload.decode("utf-8")) == {"code": 200}
-
-
-def test_ack_on_unknown_event():
-    """非消息事件（如已读回执）也应 ack，防止飞书重推。"""
-    from src.im.feishu_async import _parse_event
-    # 事件类型不是 im.message.receive_v1 → _parse_event 返回 None，但仍须 ack
-    event_data = {"header": {"event_type": "im.message.read"}}
-    assert _parse_event(event_data) is None
-    # ack 构造不依赖事件内容，仅依赖 frame
-    frame = _make_event_frame("om_ack_3")
-    from src.im.feishu_async import _build_ack_frame
-    ack = _frame_from_bytes(_build_ack_frame(frame))
-    assert json.loads(ack.payload.decode("utf-8")) == {"code": 200}

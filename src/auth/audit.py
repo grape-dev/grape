@@ -47,6 +47,7 @@ EVENT_TYPES = frozenset({
     "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）
     "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
     "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）
+    "im_installation_change",       # IM 渠道安装变更（凭证保存/解绑/引擎启停/卡片配置；detail 只记动作与标识，不含 secret）
 })
 
 

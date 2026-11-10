@@ -538,9 +538,7 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
 def upsert_agent_session(*, repo_key: str, agent_type: str,
                          runtime_id: int = 0, skill: str = "", skill_id: int = 0,
                          repo_gitcode_token: str | None = None, status: str = "idle",
-                         enable: int | None = None, subscribe_events: str | None = None,
-                         im_app_id: str | None = None, im_app_secret: str | None = None,
-                         im_provider: str | None = None) -> str:
+                         enable: int | None = None, subscribe_events: str | None = None) -> str:
     """创建或更新 Agent 会话，保留既有主键 id。
 
     背景（2026-08 事故）：id 是 TEXT 主键 + UNIQUE(repo_key, agent_type)。旧实现每次用
@@ -548,8 +546,9 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
     导致 vod_conversations.agent_session_id 悬空（"agent_session_id not found, auto-rebind"）。
     修复：已存在 → UPDATE 保留 id；不存在 → INSERT。
 
-    enable/subscribe_events/im_*/repo_gitcode_token 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
-    传具体值 = 覆盖（im 三字段仅显式传值才写，防 apply_scene/ensure_default 误清飞书绑定）。
+    enable/subscribe_events/repo_gitcode_token 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
+    传具体值 = 覆盖。
+    A2 收尾：IM 凭证不再落 devops_agent_session（im_* 三列改读 grape_t_channel_installation）。
     repo_gitcode_token 同样 None=保留（R25.9 回声治理：session 行只允许存用户显式配置的
     agent 专属 token，低级别 token 永不回填；清空走 unbind 的专门 SQL 路径）。
     返回会话 id。
@@ -573,11 +572,6 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
             if subscribe_events is not None:
                 sets.append("subscribe_events=?")
                 params.append(subscribe_events)
-            for col, val in (("im_app_id", im_app_id), ("im_app_secret", im_app_secret),
-                             ("im_provider", im_provider)):
-                if val is not None:
-                    sets.append(f"{col}=?")
-                    params.append(val)
             params.append(sid)
             c.execute(f"UPDATE devops_agent_session SET {', '.join(sets)} WHERE id=?", params)
             db.commit()
@@ -586,9 +580,9 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
         _enable = enable if enable is not None else get_agent_type_enable(agent_type)
         _sub = subscribe_events if subscribe_events is not None else "[]"
         c.execute(
-            "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, im_app_id, im_app_secret, im_provider, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+            "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
             (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token or "",
-             status, _enable, _sub, im_app_id or "", im_app_secret or "", im_provider or ""))
+             status, _enable, _sub))
         db.commit()
         return sid
 
@@ -710,7 +704,6 @@ def ensure_default_agent_sessions(repo_key: str):
                     runtime_id=_rid, skill=_sk, skill_id=_skill_id,
                     repo_gitcode_token=None, status="idle",
                     enable=None, subscribe_events=None,
-                    im_app_id=None, im_app_secret=None, im_provider=None,
                 )
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")

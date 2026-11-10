@@ -172,9 +172,6 @@ db.execute("""
         source TEXT, repository TEXT, status TEXT,
         runtime TEXT DEFAULT 'opencode',
         skill TEXT DEFAULT '',
-        im_provider TEXT DEFAULT '',
-        im_app_id TEXT DEFAULT '',
-        im_app_secret TEXT DEFAULT '',
         event_history MEDIUMTEXT DEFAULT '[]',
         created_at TEXT, last_active_at TEXT
     )
@@ -308,18 +305,6 @@ except:
     pass
 try:
     db.execute("ALTER TABLE chat_agent_session ADD COLUMN skill TEXT DEFAULT ''")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN im_provider TEXT DEFAULT ''")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN im_app_id TEXT DEFAULT ''")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN im_app_secret TEXT DEFAULT ''")
 except:
     pass
 try:
@@ -929,9 +914,11 @@ def _chat_config_candidate_rows(c, user_id: int):
     而原先的读路径是 `... WHERE user_id=? ... LIMIT 1`（**无 ORDER BY**）→ 读到哪行由存储顺序
     决定，出现"界面改了配置读不回来"（读路径按写入的主键行取，避免同一用户多行时读到旧行）。
 
-    返回 [(row_id, (runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider)), ...]
+    返回 [(row_id, (runtime_id, skill, skill_id)), ...]
+
+    A2 收尾：im_* 三列已不是凭证真相源（改读 grape_t_channel_installation），这里不再 SELECT。
     """
-    _cols = "id, runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider"
+    _cols = "id, runtime_id, skill, skill_id"
     seen, out = set(), []
     # 必须**同时**校验 user_id：云端存在 id 与 user_id 跨空间错位的行（如 id='sess-cfg-37' 却属于 user_id=1），
     # 只按 id 取会把**别人的配置（含飞书 app_id/secret）**当成自己的（实测 user 37 读到 user 1 的行）。
@@ -1013,7 +1000,7 @@ def get_chat_config(user_id: int) -> dict:
         picked_id, row, backend_name = _pick_chat_config_row(c, user_id)
         if row is None:
             # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
-            cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "", user_id=user_id)
+            cfg = _chat_config_with_local_backend("", 0, "", 0, "", user_id=user_id)
             if cfg.get("runtime_id"):
                 try:
                     _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
@@ -1025,11 +1012,11 @@ def get_chat_config(user_id: int) -> dict:
             log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
                      f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
-                                               row[3] or "", row[4] or "", row[5] or "", "", user_id=user_id)
+                                               "", user_id=user_id)
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
-                                    im_app_id, im_app_secret, im_provider, updated_at, user_id: int = 0) -> dict:
+                                    updated_at, user_id: int = 0) -> dict:
     """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
 
     有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
@@ -1051,7 +1038,7 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
         except Exception:
             pass
     return {"backend": backend, "runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
-            "im_app_id": im_app_id, "im_app_secret": im_app_secret, "im_provider": im_provider, "updated_at": updated_at}
+            "updated_at": updated_at}
 
 
 def _resolve_chat_runtime_id(backend: str) -> int:
@@ -1078,8 +1065,7 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
 
 
-def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", skill_id: int = 0,
-                           im_app_id: str = "", im_app_secret: str = "", im_provider: str = ""):
+def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", skill_id: int = 0):
     sid = f"sess-cfg-{user_id}"
     with db_lock:
         c = db.cursor()
@@ -1087,8 +1073,8 @@ def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", s
         c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND id!=?",
                   (user_id, sid))
         c.execute(
-            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
-            (sid, user_id, "", runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider)
+            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, skill_id, created_at, last_active_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (sid, user_id, "", runtime_id, skill, skill_id)
         )
         db.commit()
 
@@ -1098,7 +1084,8 @@ def set_chat_config(user_id: int, **kwargs):
 
     runtime_id 优先级：显式传入（前端带 id，方案 B）> 由 backend 名解析（方案 A）。
     """
-    allowed = {"backend", "runtime_id", "skill", "skill_id", "im_app_id", "im_app_secret", "im_provider"}
+    # A2 收尾：im_* 不再经 chat 配置落库（凭证只走 grape_t_channel_installation）
+    allowed = {"backend", "runtime_id", "skill", "skill_id"}
     data = get_chat_config(user_id)
     for k, v in kwargs.items():
         if k in allowed and v is not None:
@@ -1116,5 +1103,4 @@ def set_chat_config(user_id: int, **kwargs):
         from src.user.db import resolve_skill_id
         data["skill_id"] = resolve_skill_id(data["skill"], user_id=user_id)
     _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
-                           skill_id=data.get("skill_id", 0), im_app_id=data["im_app_id"],
-                           im_app_secret=data["im_app_secret"], im_provider=data["im_provider"])
+                           skill_id=data.get("skill_id", 0))

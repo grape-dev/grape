@@ -38,7 +38,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
 
     - service_name：进程标识（server / event-server / worker-server），
       健康响应携带（§4.7）；
-    - bot_manager 状态读取走 `app.state.bot_manager`（A 进程设置；
+    - IM 状态读取走 `app.state.im_engine`（A 进程装配新引擎；
       B/C 无 IM，realtime 不报 im 字段）。
     """
 
@@ -129,10 +129,13 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
             "pid": os.getpid(),
         }
 
-        # IM bot 状态（A 进程有 bot_manager；B/C 不报）
-        bot_manager = getattr(app.state, "bot_manager", None)
-        if bot_manager:
-            result["im"] = bot_manager.health_check()
+        # IM 状态：新引擎（A2 后唯一链路；legacy BotManager 已下线）
+        im_engine = getattr(app.state, "im_engine", None)
+        if im_engine is not None:
+            try:
+                result["im"] = im_engine.health()
+            except Exception as e:
+                result["im"] = {"error": str(e)}
 
         try:
             with db_lock:

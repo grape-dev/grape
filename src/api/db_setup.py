@@ -60,9 +60,6 @@ CREATE TABLE IF NOT EXISTS devops_agent_session (
     backend_session_id TEXT DEFAULT '',
     repo_gitcode_token TEXT DEFAULT '',
     status TEXT DEFAULT 'idle',
-    im_provider TEXT DEFAULT '',
-    im_app_id TEXT DEFAULT '',
-    im_app_secret TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     last_active_at TEXT DEFAULT (datetime('now')),
     UNIQUE(repo_key, agent_type)
@@ -272,22 +269,6 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     task_id TEXT,
     generate_status INTEGER DEFAULT NULL,
     deleted INTEGER DEFAULT 0
-)
-"""
-
-_GLOBAL_IM_BOT_CONFIG_DDL = """
-CREATE TABLE IF NOT EXISTS global_im_bot_config (
-    bot_app_id        VARCHAR(191) PRIMARY KEY,
-    bot_type          VARCHAR(32) NOT NULL,
-    im_provider       VARCHAR(32) DEFAULT 'feishu',
-    is_active         INTEGER DEFAULT 1,
-    bot_name          VARCHAR(128) DEFAULT '',
-    lease_token       VARCHAR(128) DEFAULT NULL,
-    lease_expires_at  DATETIME DEFAULT NULL,
-    lease_owner       VARCHAR(128) DEFAULT NULL,
-    lease_acquired_at DATETIME DEFAULT NULL,
-    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """
 
@@ -953,7 +934,6 @@ _NEW_TABLES = [
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
-    ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
@@ -1743,6 +1723,18 @@ def _create_tables():
             log.info(f"Table '{name}' ready")
         except Exception as e:
             log.warning(f"Create table '{name}' failed: {e}")
+
+    # IM 渠道 4 表（Issue #742 §5.1）：DDL 与引擎启动迁移共用 scripts/migrations/001_channel_tables，
+    # 在此统一建/补（幂等），保证 MySQL 后端下即使 IM 引擎模式为 off 也表示层完整（P1 回填/对账依赖）。
+    try:
+        from src.im.engine_wiring import ensure_channel_schema
+        with db_lock:
+            ensure_channel_schema(db)
+            db.commit()
+        log.info("IM channel tables ready "
+                 "(grape_t_channel_installation / session_binding / inbound_dedup / sender_identity)")
+    except Exception as e:
+        log.warning(f"IM channel tables setup failed: {e}")
 
     # grape_accounts email 唯一索引（D12: 统一用 NULL + 普通唯一索引，SQLite 和 MySQL 统一语法）
     # 幂等补列：verification_codes.ip（老库可能缺此列）
@@ -5365,9 +5357,6 @@ def _migrate_tables():
         "ALTER TABLE events ADD COLUMN agent_logs TEXT DEFAULT '[]'",
         "ALTER TABLE events ADD COLUMN started_at TEXT DEFAULT ''",
         "ALTER TABLE events ADD COLUMN completed_at TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN im_provider TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN im_app_id TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN im_app_secret TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN backend_session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN agent_session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN backend_session_id TEXT DEFAULT ''",
@@ -5410,14 +5399,6 @@ def _migrate_tables():
         "ALTER TABLE user_accounts ADD COLUMN github_id TEXT DEFAULT ''",
         "ALTER TABLE user_accounts ADD COLUMN github_api_token TEXT DEFAULT ''",
         "ALTER TABLE user_accounts ADD COLUMN github_login TEXT DEFAULT ''",
-        # 飞书 Bot Lease——集群部署保证同一 bot 同一时刻只有一个实例连 WebSocket
-        "ALTER TABLE global_im_bot_config ADD COLUMN bot_name VARCHAR(128) DEFAULT ''",
-        "ALTER TABLE global_im_bot_config ADD COLUMN lease_token VARCHAR(128) DEFAULT NULL",
-        "ALTER TABLE global_im_bot_config ADD COLUMN lease_expires_at DATETIME DEFAULT NULL",
-        "ALTER TABLE global_im_bot_config ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL",
-        "ALTER TABLE global_im_bot_config ADD COLUMN lease_acquired_at DATETIME DEFAULT NULL",
-        # SQLite 不支持 ALTER ADD COLUMN non-constant default（CURRENT_TIMESTAMP 会静默失败）
-        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at TEXT DEFAULT ''",
         # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
         "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
@@ -5526,25 +5507,6 @@ def _migrate_tables():
         _rebuild_scene_market_unique()
     except Exception as e:
         log.warning(f"Scene market unique rebuild failed: {e}")
-    # 迁移 im 凭证到 im_bot_config 统一表
-    try:
-        with db_lock:
-            c = db.cursor()
-            # 迁移旧表 im_bot_config -> global_im_bot_config(保留 bot_type,secret 移入 devops_agent_session)
-            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            if "im_bot_config" in _tables and "global_im_bot_config" not in _tables:
-                c.execute("ALTER TABLE im_bot_config RENAME TO global_im_bot_config")
-                db.commit()
-                log.info("Migrated table im_bot_config -> global_im_bot_config")
-            elif "im_bot_config" in _tables and "global_im_bot_config" in _tables:
-                c.execute("INSERT OR IGNORE INTO global_im_bot_config (bot_app_id, bot_type) SELECT bot_app_id, bot_type FROM im_bot_config")
-                # 补齐 secret 到 devops_agent_session
-                c.execute("UPDATE devops_agent_session SET im_app_secret=(SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=devops_agent_session.im_app_id) WHERE im_app_id!='' AND im_app_secret=''")
-                c.execute("DROP TABLE im_bot_config")
-                db.commit()
-                log.info("Migrated im_bot_config -> global_im_bot_config (data moved)")
-    except Exception as e:
-        log.info(f"Migrate global_im_bot_config skipped: {e}")
     # 迁移旧表 chat_config -> chat_agent_session(合并 user 配置)
     try:
         with db_lock:
@@ -5556,8 +5518,8 @@ def _migrate_tables():
                     if not r[0]:
                         continue
                     sid = f"sess-cfg-{r[0]}"
-                    c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend, skill, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,'feishu',datetime('now'),datetime('now'))",
-                              (sid, r[0], "", r[1] or "opencode", r[2] or "", r[3] or "", r[4] or ""))
+                    c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend, skill, created_at, last_active_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))",
+                              (sid, r[0], "", r[1] or "opencode", r[2] or ""))
                 db.commit()
                 log.info("Migrated chat_config -> chat_agent_session")
     except Exception as e:
@@ -5693,23 +5655,6 @@ def _migrate_tables():
                         log.info("Migrated repo_im_group_binding: chat_id -> im_chat_id")
     except Exception as e:
         log.warning(f"Migrate repo_im_group_binding columns failed: {e}")
-    # 迁移 repo_im_group_binding 的 im_app_id='default' -> Chat Bot app_id(清理 default 兜底账户)
-    try:
-        with db_lock:
-            c = db.cursor()
-            _tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            if "repo_im_group_binding" in _tables:
-                c.execute("SELECT COUNT(*) FROM repo_im_group_binding WHERE im_app_id='default' OR im_app_id IS NULL OR im_app_id=''")
-                cnt = c.fetchone()[0]
-                if cnt > 0:
-                    c.execute("SELECT bot_app_id FROM global_im_bot_config WHERE bot_type='chat_bot' LIMIT 1")
-                    row = c.fetchone()
-                    if row and row[0]:
-                        c.execute("UPDATE repo_im_group_binding SET im_app_id=? WHERE im_app_id='default' OR im_app_id IS NULL OR im_app_id=''", (row[0],))
-                        db.commit()
-                        log.info(f"Migrated {cnt} repo_im_group_binding im_app_id='default' -> {row[0]}")
-    except Exception as e:
-        log.warning(f"Migrate repo_im_group_binding im_app_id failed: {e}")
     # 清理历史 bot_username 占位值 + 纠正跨平台回填错误
     # Issue #345: 按 repo_key 前缀分流——github: 取 github_bot_username，其余取 GitCode bot name
     try:
@@ -5804,7 +5749,7 @@ def _migrate_tables():
                 log.info("Migrated table agent_sessions -> devops_agent_session")
             elif "agent_sessions" in _tables and "devops_agent_session" in _tables:
                 # 新表已被创建但旧表仍存在(历史库),迁移数据后删除旧表
-                c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at, im_provider, im_app_id, im_app_secret FROM agent_sessions")
+                c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at FROM agent_sessions")
                 c.execute("DROP TABLE agent_sessions")
                 db.commit()
                 log.info("Migrated agent_sessions data into devops_agent_session and dropped agent_sessions")
@@ -5860,26 +5805,6 @@ def _migrate_tables():
             log.info("Dropped legacy tables: agent_type_config, user_skills, repo_skill_mapping")
     except Exception as e:
         log.warning(f"Drop legacy skill tables failed: {e}")
-    # 迁移 devops_agent_session:vod_bot_app_id -> im_app_id(通用化,保留 im_* 通用字段)
-    try:
-        with db_lock:
-            c = db.cursor()
-            cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
-            if "vod_bot_app_id" in cols:
-                # 1. vod_bot_app_id -> im_app_id + im_provider='feishu' + im_app_secret 补齐
-                c.execute("UPDATE devops_agent_session SET im_app_id=vod_bot_app_id, im_provider='feishu' WHERE vod_bot_app_id!='' AND vod_bot_app_id IS NOT NULL")
-                _tables2 = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-                if "im_bot_config" in _tables2:
-                    c.execute("UPDATE devops_agent_session SET im_app_secret=(SELECT bot_app_secret FROM im_bot_config WHERE bot_app_id=devops_agent_session.im_app_id) WHERE im_app_id!='' AND im_app_secret=''")
-                db.commit()
-                # 2. 删除 vod_bot_app_id 列
-                _ok = _destructive_ddl(c, "ALTER TABLE devops_agent_session DROP COLUMN vod_bot_app_id",
-                                       kind_hint="cleanup")
-                db.commit()
-                if _ok:
-                    log.info("Migrated devops_agent_session vod_bot_app_id -> im_app_id, dropped vod_bot_app_id")
-    except Exception as e:
-        log.warning(f"Migrate vod_bot_app_id -> im_app_id failed: {e}")
     # 迁移 devops_agent_session.oc_session_id -> backend_session_id
     try:
         with db_lock:

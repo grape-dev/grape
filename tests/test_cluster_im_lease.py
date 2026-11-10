@@ -20,49 +20,70 @@ def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM grape_im_instance")
-        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'imtest-%'")
+        # A2 M3：租约在 grape_t_channel_lease（键 "feishu:imtest-*"），归属校验看 grape_t_channel_installation
+        c.execute("DELETE FROM grape_t_channel_lease WHERE lease_key LIKE '%imtest-%'")
+        c.execute("DELETE FROM grape_t_channel_installation WHERE id LIKE 'imtest-%'")
         db.commit()
 
 
 class TestImRing:
+    """一致性哈希环语义（旧 IM 下线 M1：实现从 feishu_async 的 _im_ring/_im_owner
+    迁到新引擎的 src.im.engine.hashring.build_ring/owner，断言不变）。"""
+
+    @staticmethod
+    def _ring(instances):
+        from src.im.engine.hashring import build_ring
+        return build_ring(instances)
+
+    @staticmethod
+    def _owner(ring, key):
+        from src.im.engine.hashring import owner
+        return owner(ring, key)
+
     def test_deterministic_and_sticky(self):
         bots = ["cli_a1", "cli_b2", "cli_c3", "cli_d4", "cli_e5", "cli_f6"]
-        ring = fa._im_ring(["inst-a", "inst-b", "inst-c"], 50)
-        first = {b: fa._im_owner(ring, b) for b in bots}
+        ring = self._ring(["inst-a", "inst-b", "inst-c"])
+        first = {b: self._owner(ring, b) for b in bots}
         # 确定性：同环两次计算一致
-        assert first == {b: fa._im_owner(ring, b) for b in bots}
+        assert first == {b: self._owner(ring, b) for b in bots}
         # 归属只能落在实例集合内
         assert set(first.values()) <= {"inst-a", "inst-b", "inst-c"}
         assert len(set(first.values())) >= 2  # 尽量覆盖多个实例
 
     def test_minimal_migration_on_join(self):
         bots = [f"cli_t{i}" for i in range(200)]
-        ring_a = fa._im_ring(["a", "b", "c"], 50)
-        ring_b = fa._im_ring(["a", "b", "c", "d"], 50)  # 新实例 d 加入
-        moved = sum(1 for b in bots if fa._im_owner(ring_a, b) != fa._im_owner(ring_b, b))
+        ring_a = self._ring(["a", "b", "c"])
+        ring_b = self._ring(["a", "b", "c", "d"])  # 新实例 d 加入
+        moved = sum(1 for b in bots if self._owner(ring_a, b) != self._owner(ring_b, b))
         # 一致性哈希：新增实例只扰动一部分（多数保持粘性）
         assert 0 < moved < 120
 
     def test_empty_ring_owner_empty(self):
-        assert fa._im_owner([], "x") == ""
+        assert self._owner([], "x") == ""
 
 
 class TestLeaseTakeoverProtection:
-    def _bot(self, app_id="imtest-1", expires_sql=None, owner=""):
+    def _bot(self, key="feishu:imtest-1", expires_sql=None, owner=""):
+        """种一条 active 安装 + 对应的 grape_t_channel_lease 行（键 = "<type>:<installation_id>"）。"""
+        installation_id = key.split(":", 1)[-1]
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+            c.execute(
+                "INSERT OR REPLACE INTO grape_t_channel_installation (id, channel_type, scope, status) "
+                "VALUES (?, 'feishu', 'user', 'active')", (installation_id,))
+            c.execute("DELETE FROM grape_t_channel_lease WHERE lease_key=?", (key,))
             if expires_sql:
                 c.execute(
-                    f"INSERT INTO global_im_bot_config (bot_app_id, bot_type, is_active, lease_token, "
-                    f"lease_expires_at, lease_owner) VALUES (?, 'chat_bot', 1, 'tok', {expires_sql}, NULLIF(?,''))",
-                    (app_id, owner),
+                    f"INSERT INTO grape_t_channel_lease (lease_key, channel_type, installation_id, "
+                    f"lease_token, lease_expires_at, lease_owner) "
+                    f"VALUES (?, 'feishu', ?, 'tok', {expires_sql}, NULLIF(?,''))",
+                    (key, installation_id, owner),
                 )
             else:
                 c.execute(
-                    "INSERT INTO global_im_bot_config (bot_app_id, bot_type, is_active, lease_token) "
-                    "VALUES (?, 'chat_bot', 1, 'tok')",
-                    (app_id,),
+                    "INSERT INTO grape_t_channel_lease (lease_key, channel_type, installation_id, lease_token) "
+                    "VALUES (?, 'feishu', ?, 'tok')",
+                    (key, installation_id),
                 )
             db.commit()
 
@@ -82,14 +103,14 @@ class TestLeaseTakeoverProtection:
         self._bot(expires_sql="datetime('now','-20 seconds')", owner="instB")
         self._alive("instB", age_before_s=5)
         c = bl.BotLeaseStore(instance_id="instC")
-        assert c.try_acquire("imtest-1", steal_after=60, instance_timeout=45) is None
+        assert c.try_acquire("feishu:imtest-1", steal_after=60, instance_timeout=45) is None
 
     def test_owner_alive_past_steal_window_forced(self):
         # lease 已过期 200s，owner instB 仍心跳存活 → 超过 steal_after 允许强制接管（防假死）
         self._bot(expires_sql="datetime('now','-200 seconds')", owner="instB")
         self._alive("instB", age_before_s=5)
         c = bl.BotLeaseStore(instance_id="instC")
-        tok = c.try_acquire("imtest-1", steal_after=60, instance_timeout=45)
+        tok = c.try_acquire("feishu:imtest-1", steal_after=60, instance_timeout=45)
         assert tok  # 允许接管
 
     def test_owner_dead_stolen(self):
@@ -97,7 +118,7 @@ class TestLeaseTakeoverProtection:
         self._bot(expires_sql="datetime('now','-120 seconds')", owner="instB")
         self._alive("instB", age_before_s=300)  # 5 分钟前心跳 → 失联
         c = bl.BotLeaseStore(instance_id="instC")
-        assert c.try_acquire("imtest-1", steal_after=60, instance_timeout=45)
+        assert c.try_acquire("feishu:imtest-1", steal_after=60, instance_timeout=45)
 
     def test_heartbeat_and_active_instances(self):
         self._alive("imtest-heart", age_before_s=5)
@@ -173,21 +194,20 @@ class TestNotifyObservability:
         assert ic._resolve_user_chat_bot(_Bm(), 999999) is None
 
     def test_resolve_bot_not_in_memory(self):
+        """A2 M2/M3 后凭证只认 grape_t_channel_installation：用户没有安装行 → 一律 None。
+
+        （原用例语义是"会话行有 app_id 但 BotManager 内存里没有"，bm 参数已弃用，
+        现在等价于"没有本人安装行"这条负路径。）
+        """
         from src.api import issues_center as ic
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE user_id=91001")
-            c.execute("INSERT INTO chat_agent_session (id, user_id, im_app_id) VALUES ('imobs-s', 91001, 'cli_imobs')")
             db.commit()
         class _Bm:
             def get_all_bots(self):
-                return {}  # 与 session 记录不一致 → bot_not_in_memory（#9708 场景）
-        try:
-            assert ic._resolve_user_chat_bot(_Bm(), 91001) is None
-        finally:
-            with db_lock:
-                db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=91001")
-                db.commit()
+                return {}
+        assert ic._resolve_user_chat_bot(_Bm(), 91001) is None
 
     def test_pending_review_notify_skip_no_ctx_counter(self):
         import asyncio as _a

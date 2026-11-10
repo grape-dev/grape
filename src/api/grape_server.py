@@ -20,7 +20,7 @@ A 进程职责：
 `uvicorn src.api.main:app` 行为不变。多进程模式用本入口。
 
 启动：
-    uvicorn src.api.grape_server:app --host 0.0.0.0 --port 38080 --workers 2
+    uvicorn src.api.grape_server:app --host 0.0.0.0 --port 38080 --workers 1
 """
 import sys, os, asyncio
 
@@ -48,7 +48,7 @@ from src.api.git_repo_api import router as git_repo_router
 from src.api.routes.runtime_view import view_router as runtime_view_router
 
 
-bot_manager = None
+im_engine = None
 
 
 def _startup_security_check():
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     - sweep_loop 拆分：A 不参与事件/任务回收（B/C 各自跑）；
     - table_maintenance 拆分：A 只清 task_messages，agent_tasks 部分归 C。
     """
-    global bot_manager
+    global im_engine
     from src.config import log
 
     # 生产环境启动安全门禁
@@ -92,12 +92,12 @@ async def lifespan(app: FastAPI):
     except Exception as _bw:
         log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
-    # ===== IM WebSocket BotManager（§10.7：归 A——用户面聊天依赖 IM 消息处理）=====
-    _lease_sweep_task = None
+    # ===== IM 引擎（§10.7：归 A——用户面聊天依赖 IM 消息处理）=====
+    # A2（2026-11-10）：legacy BotManager（飞书 WS + bot lease sweep）已下线，
+    # A 进程与单进程入口一致，改起新引擎（Supervisor + 渠道适配器）。
+    im_engine = None
     try:
-        from src.im.feishu_async import BotManager
-        from src.im.handler_async import process_chat_async
-        from src.im.vod_handler_async import process_vod_async
+        from src.im import engine_wiring
 
         # psutil CPU 基准预热
         try:
@@ -122,42 +122,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Patrol loop start failed: {e}")
 
-        # lease 模式：默认开启，BOT_LEASE_DISABLED=true 退回旧模式
-        from src.config import BOT_LEASE_DISABLED
-        lease_store = None
-        if not BOT_LEASE_DISABLED:
-            from src.im.bot_lease import BotLeaseStore, generate_instance_id
-            instance_id = generate_instance_id()
-            lease_store = BotLeaseStore(instance_id=instance_id)
-            log.info(f"IM WS: lease enabled, instance_id={instance_id}")
-
-        bot_manager = BotManager(max_concurrent_per_bot=10, lease_store=lease_store)
-        await bot_manager.start()
-
-        async def _on_message(ctx, parsed):
-            if ctx.bot_type == "vod_bot":
-                await process_vod_async(ctx, bot_manager.api, parsed)
+        _im_mode = engine_wiring.engine_mode()
+        if _im_mode == "on":
+            im_engine = await engine_wiring.start_im_engine()
+            if im_engine is not None:
+                app.state.im_engine = im_engine
+                log.info("IM engine started (mode=on, instance=%s)",
+                         getattr(im_engine, "instance_id", ""))
             else:
-                await process_chat_async(ctx, bot_manager.api, parsed)
-
-        bot_manager.set_message_handler(_on_message)
-        await bot_manager.load_from_db()
-
-        hc = bot_manager.health_check()
-        log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
-        # Issue #596 P1：注册进进程级 registry（跨模块 IM 访问统一走 get_bot_manager）
-        from src.api.bot_manager_registry import set_bot_manager
-        set_bot_manager(bot_manager)
-        app.state.bot_manager = bot_manager
+                log.warning("IM engine: start failed (legacy fallback retired)")
+        else:
+            log.info("IM engine mode=off: IM 总开关关闭，不启动任何 IM 链路")
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
 
     # ===== A 归属定时任务（设计文档 §6 分配表）=====
 
-    # lease sweep 循环（IM Bot lease 过期清理——A）
-    if bot_manager and bot_manager._lease_store:
-        _lease_sweep_task = asyncio.create_task(bot_manager.lease_sweep_loop())
-        log.info("Lease sweep loop started")
 
     # 知识库 OBS 同步：后台定时迁移老数据到 OBS（每小时）
     _knowledge_sync_task = None
@@ -345,14 +325,15 @@ async def lifespan(app: FastAPI):
 
     # ===== 优雅关闭 =====
     log.info("A process (server) stopping...")
-    if _lease_sweep_task:
-        _lease_sweep_task.cancel()
+    if im_engine is not None:
         try:
-            await asyncio.wait_for(_lease_sweep_task, timeout=5)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+            await im_engine.stop()
+        except Exception as _e:
+            log.warning(f"IM engine stop failed: {_e}")
+        try:
+            app.state.im_engine = None
+        except Exception:
             pass
-    if bot_manager:
-        await bot_manager.stop()
     if _knowledge_write_task:
         _knowledge_write_task.cancel()
         try:

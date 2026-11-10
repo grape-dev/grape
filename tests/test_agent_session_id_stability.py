@@ -5,7 +5,9 @@ agents.update_agent_config 三处原本用「新 uuid + INSERT OR REPLACE」写 
 REPLACE 遇 UNIQUE(repo_key, agent_type) 冲突会删旧行插新行 → id 每次重存都换新，
 导致 vod_conversations.agent_session_id 悬空，飞书 VOD 收到消息时报
 "[VOD:...] agent_session_id=... not found, auto-rebind"。
-且 apply_scene 的 INSERT 不含 im_app_id/im_app_secret/im_provider，REPLACE 会清空飞书绑定。
+且 apply_scene 的 INSERT 不含用户级开关/订阅，REPLACE 会清空这些配置。
+（A2 Phase B 起 devops_agent_session.im_* 三列已 DROP，IM 绑定只认 grape_t_channel_installation，
+  本文件只覆盖会话 id / 开关 / 订阅的稳定性。）
 
 修复：新增 session_store.upsert_agent_session 统一「已存在→UPDATE 保留 id；不存在→INSERT」，
 im 三字段仅显式传值才写。三处全部改用它。
@@ -40,48 +42,27 @@ def _get_session(repo_key: str, agent_type: str):
     with db_lock:
         c = db.cursor()
         return c.execute(
-            "SELECT id, im_app_id, im_app_secret, im_provider, enable, subscribe_events "
+            "SELECT id, enable, subscribe_events "
             "FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
             (repo_key, agent_type)).fetchone()
 
 
 class TestUpsertKeepsSessionId:
-    def test_update_preserves_id_and_im_fields(self):
-        """已存在会话：重复 upsert 保留 id 与 im 三字段，仅更新显式传入的字段"""
+    def test_update_preserves_id(self):
+        """已存在会话：重复 upsert 保留 id，仅更新显式传入的字段"""
         repo = _unique()
         try:
             sid1 = upsert_agent_session(
-                repo_key=repo, agent_type="vod", runtime_id=1, skill="vod",
-                im_app_id="cli_abc", im_app_secret="sec", im_provider="feishu")
+                repo_key=repo, agent_type="vod", runtime_id=1, skill="vod")
             sid2 = upsert_agent_session(
-                repo_key=repo, agent_type="vod", runtime_id=2, skill="vod-new",
-                im_app_id=None, im_app_secret=None, im_provider=None)
+                repo_key=repo, agent_type="vod", runtime_id=2, skill="vod-new")
             assert sid1 == sid2, "重复 upsert 不得更换会话 id"
             row = _get_session(repo, "vod")
             assert row[0] == sid1
-            assert row[1] == "cli_abc", "im_app_id 应保留"
-            assert row[2] == "sec", "im_app_secret 应保留"
-            assert row[3] == "feishu", "im_provider 应保留"
             with db_lock:
                 c = db.cursor()
                 r = c.execute("SELECT runtime_id, skill FROM devops_agent_session WHERE id=?", (sid1,)).fetchone()
             assert r[0] == 2 and r[1] == "vod-new", "显式传入字段应更新"
-        finally:
-            _cleanup(repo)
-
-    def test_explicit_im_overwrites(self):
-        """显式传 im_app_id 时才覆盖（换绑场景）"""
-        repo = _unique()
-        try:
-            sid = upsert_agent_session(
-                repo_key=repo, agent_type="vod", im_app_id="cli_old", im_app_secret="s",
-                im_provider="feishu")
-            upsert_agent_session(
-                repo_key=repo, agent_type="vod", im_app_id="cli_new", im_app_secret="s2",
-                im_provider="feishu")
-            row = _get_session(repo, "vod")
-            assert row[0] == sid
-            assert row[1] == "cli_new" and row[2] == "s2"
         finally:
             _cleanup(repo)
 
@@ -110,26 +91,22 @@ class TestApplySceneKeepsSessionId:
         from src.api.routes.scenes import apply_scene, ApplySceneRequest
         return apply_scene(owner, repo, ApplySceneRequest(scene_id="default"), {})
 
-    def test_apply_twice_keeps_id_and_im(self):
-        """apply_scene 重复应用：id 不变、vod 飞书绑定不清空、enable/订阅保留"""
+    def test_apply_twice_keeps_id_and_settings(self):
+        """apply_scene 重复应用：id 不变、enable/订阅保留"""
         owner, repo = "sessowner", _unique()
         repo_key = f"gitcode:{owner}/{repo}"
         try:
             # 先通过 upsert 建立带飞书绑定的 vod 会话 + 用户自定 enable/订阅
             sid = upsert_agent_session(
                 repo_key=repo_key, agent_type="vod", runtime_id=1, skill="vod",
-                enable=0, subscribe_events='[{"event_type":"push"}]',
-                im_app_id="cli_vod", im_app_secret="vsec", im_provider="feishu")
-            # 场景应用不应换 id / 清绑定
+                enable=0, subscribe_events='[{"event_type":"push"}]')
+            # 场景应用不应换 id / 清开关
             self._apply(owner, repo)
             self._apply(owner, repo)
             row = _get_session(repo_key, "vod")
             assert row[0] == sid, "apply_scene 后会话 id 应保持不变"
-            assert row[1] == "cli_vod", "apply_scene 不得清空 vod im_app_id"
-            assert row[2] == "vsec", "apply_scene 不得清空 vod im_app_secret"
-            assert row[3] == "feishu", "apply_scene 不得清空 vod im_provider"
-            assert row[4] == 0, "apply_scene 不得重置仓库级 enable（用户开关为准）"
-            assert row[5] == '[{"event_type":"push"}]', "apply_scene 不得清空订阅配置"
+            assert row[1] == 0, "apply_scene 不得重置仓库级 enable（用户开关为准）"
+            assert row[2] == '[{"event_type":"push"}]', "apply_scene 不得清空订阅配置"
             # 其余 agent 也应创建
             for at in ("issue", "coding", "qa", "sre"):
                 assert _get_session(repo_key, at) is not None, f"{at} 会话未创建"
@@ -161,19 +138,15 @@ class TestEnsureDefaultKeepsSessionId:
         with patch("builtins.open", unittest.mock.mock_open(read_data=_json.dumps(fake_cfg))):
             session_store.ensure_default_agent_sessions(repo_key)
 
-    def test_ensure_twice_keeps_id_and_im(self):
-        """ensure_default_agent_sessions 重复执行（重新托管）：id 不变、vod 飞书绑定不清空"""
+    def test_ensure_twice_keeps_id(self):
+        """ensure_default_agent_sessions 重复执行（重新托管）：id 不变"""
         repo_key = f"gitcode:ensowner/{_unique()}"
         try:
-            sid = upsert_agent_session(
-                repo_key=repo_key, agent_type="vod", im_app_id="cli_vod2",
-                im_app_secret="v2", im_provider="feishu")
+            sid = upsert_agent_session(repo_key=repo_key, agent_type="vod")
             self._ensure(repo_key)
             self._ensure(repo_key)
             row = _get_session(repo_key, "vod")
             assert row[0] == sid, "ensure_default 重复执行后 id 应保持不变"
-            assert row[1] == "cli_vod2", "ensure_default 不得清空已配置的 vod im_app_id"
-            assert row[2] == "v2" and row[3] == "feishu"
             for at in ("issue", "coding", "qa", "sre"):
                 assert _get_session(repo_key, at) is not None, f"{at} 会话未创建"
         finally:

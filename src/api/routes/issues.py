@@ -691,6 +691,14 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
 # 迁移自 /api/tasks/{task_id}/...：`{issue_id}` 即原 `{task_id}`（= issue.id），定位/逻辑零改动。
 
 
+def _feishu_api_for_ctx(ctx):
+    """按 ctx 的 app_id 取 FeishuAsync（旧 IM 下线 A2 M2：不再依赖 BotManager.api）。"""
+    if not ctx:
+        return None
+    from src.im.engine_wiring import feishu_api
+    return feishu_api(getattr(ctx, "app_id", "") or "")
+
+
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="Open issue session", description="Opens the Issue conversation entry: validates ownership and returns the current status without flipping it. User-only (front-end navigation preflight).")
 async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。
@@ -1669,10 +1677,8 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     if changed:
         from src.api.issues_center import _get_feishu_open_id_by_user_id
         open_id = _get_feishu_open_id_by_user_id(user_id) or _get_feishu_open_id(assignee, repo_key)
-        from src.api import main as api_main
-        bm = api_main.bot_manager
-        ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
-        api = bm.api if bm else None
+        ctx = _resolve_user_chat_bot(None, user_id)
+        api = _feishu_api_for_ctx(ctx)
         cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
         asyncio.create_task(_run_awaiting_notify(ctx, api, user_id, conv_id, open_id,
                                                  questions, repo_key, issue_number, cfg))
@@ -1861,10 +1867,8 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                                _resolve_user_chat_bot, _run_pending_review_notify)
             from src.session_manager import get_chat_config
             _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"], it.get("repo_key", ""))
-            from src.api import main as api_main
-            bm = api_main.bot_manager
-            _ctx = _resolve_user_chat_bot(bm, it["user_id"]) if bm else None
-            _api = bm.api if bm else None
+            _ctx = _resolve_user_chat_bot(None, it["user_id"])
+            _api = _feishu_api_for_ctx(ctx)
             _cfg = get_chat_config(it["user_id"]) if it["user_id"] else {"backend": "opencode"}
             asyncio.create_task(_run_pending_review_notify(
                 _ctx, _api, it["user_id"], conv_id, _open_id, review_points,
