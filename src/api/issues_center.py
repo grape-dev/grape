@@ -623,10 +623,9 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
     Issue #1739：落 completed 前统一校验同一流水线 qa 最新结论，fail 时不收尾。
     """
     try:
-        from src.api.qa_gate import annotate_qa_failure, qa_gate_check
-        _qa_info = qa_gate_check(repo_key, issue_number)
+        from src.api.qa_gate import gate_or_annotate
+        _qa_info = gate_or_annotate(repo_key, issue_number)
         if _qa_info.get("blocked"):
-            annotate_qa_failure(repo_key, issue_number, _qa_info)
             log.info(f"Issue #1739: qa failed → refuse complete "
                      f"{repo_key}/#{issue_number} (seq={_qa_info.get('event_seq')})")
             return False
@@ -932,10 +931,9 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
         # Issue #1739：QA 结论门禁——同一流水线 qa 最新结论为 fail 时不得自动结单。
         # 兼容 qa 以 status=completed + result “不通过/阻塞” 自报失败的实际形态。
         try:
-            from src.api.qa_gate import annotate_qa_failure, qa_gate_check
-            _qa_info = qa_gate_check(repo_key, _num)
+            from src.api.qa_gate import gate_or_annotate
+            _qa_info = gate_or_annotate(repo_key, _num)
             if _qa_info.get("blocked"):
-                annotate_qa_failure(repo_key, _num, _qa_info)
                 log.info(f"Issue #1739: qa failed → keep issue open "
                          f"{repo_key}/{_tag} (seq={_qa_info.get('event_seq')})")
                 return "qa_failed_blocked"
@@ -994,10 +992,9 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
         _will_done = (target == "done") or _is_last_stage_node(repo_key, issue_number)
         if _will_done:
             try:
-                from src.api.qa_gate import annotate_qa_failure, qa_gate_check
-                _qa_info = qa_gate_check(repo_key, issue_number)
+                from src.api.qa_gate import gate_or_annotate
+                _qa_info = gate_or_annotate(repo_key, issue_number)
                 if _qa_info.get("blocked"):
-                    annotate_qa_failure(repo_key, issue_number, _qa_info)
                     log.info(f"Issue #1739: qa failed → review-pass blocked "
                              f"{repo_key}/#{issue_number} target={target}")
                     return "noop:qa_failed"

@@ -4,8 +4,8 @@
 VCS Issue，未经验证的需求被误判为已解决。
 
 设计：
-- 统一从 events 表读取该 Issue 在同一流水线中的最新 qa 结论；
-- qa 事件 status=failed 直接判失败；status=completed 时解析 result 结论文本，
+- 统一从 events 表读取该 Issue 在同一流水线（同一 scene_id）中的最新 qa 结论；
+- qa 事件 status=failed/cancelled 直接判失败；status=completed 时解析 result 结论文本，
   兼容 qa Agent 以 completed + “不通过/阻塞” 自报失败的实际形态；
 - 流水线无 qa 节点、无 qa 事件、结论不可判定、查询异常 → 放行（fail-open，
   绝不误杀正常关闭链路）；
@@ -13,6 +13,7 @@ VCS Issue，未经验证的需求被误判为已解决。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -28,24 +29,35 @@ _QA_FAIL_TERMS = (
     "失败", "❌", "✗",
 )
 
-# 单独词项需先剔除否定语境（无阻塞 / 非阻塞 / 无 Critical / 0 Required）
+# 单独词项需先剔除否定语境（无阻塞 / 非阻塞 / 无 Critical / 0 Required / no failure）
 _QA_FAIL_WORDS = ("阻塞", "阻断", "critical", "required")
 _QA_NEGATION_RE = re.compile(
-    r"(?:无|非|不|未|没有|no|n/a|0)\s*(?:的)?\s*"
-    r"(?:阻塞|阻断|冲突|critical|required|硬违规)"
-    r"(?:\s*[/、,，和及]\s*(?:阻塞|阻断|冲突|critical|required|硬违规))*",
+    r"(?:无|非|不|未|没有|不存在|未见|未发现|无需|不需要|no|without|zero|0)\s*"
+    r"(?:任何|的|个|条|项)?\s*"
+    r"(?:(?:阻塞|阻断|冲突|critical|required|硬违规|失败|问题|缺陷|违规|"
+    r"failures?|fails?|issues?|problems?|bugs?|blockers?|blocking|fixes?|"
+    r"整改|修复)[\s、,，/和及]*)+",
     re.IGNORECASE,
 )
 
 # 英文失败/通过按词边界识别（避免 "ok" 命中 "broken"、"fail" 命中 "failsafe" 之类子串误判）
-_QA_FAIL_EN_RE = re.compile(r"\b(?:fail|failed|failure)\b", re.IGNORECASE)
+_QA_FAIL_EN_RE = re.compile(r"\b(?:fail|failed|failure|fails)\b", re.IGNORECASE)
 _QA_PASS_EN_RE = re.compile(r"\b(?:pass|passed|ok)\b", re.IGNORECASE)
+
+# 否定式“通过”= 实际未通过（“无法通过/not passed”不能被下面的通过语义吞掉）
+_QA_NEG_PASS_RE = re.compile(
+    r"(?:无法|不能|不可|未能|未|不会|no\s+way\s+to|"
+    r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
+    r"did\s+not|does\s+not|didn't|doesn't|never|not)\s*"
+    r"(?:通过|pass(?:ed)?|ok|succeed|approved|合并|合入)",
+    re.IGNORECASE,
+)
 
 # 通过语义（在失败语义之后判定）
 _QA_PASS_TERMS = ("通过", "✅")
 
-_QA_ANNOTATION_MARKER = "<!-- grape-qa-gate -->"
-_annotated: set[tuple[str, int, int]] = set()
+_QA_ANNOTATION_MARKER = "<!-- grape-qa-gate"
+_annotated: set[tuple[str, int, str]] = set()
 
 
 def _issue_tags(issue_number) -> tuple[str, str] | None:
@@ -61,17 +73,31 @@ def _issue_number_int(issue_number) -> int:
     return int(_tags[1]) if _tags else 0
 
 
+def _issue_scene_key(repo_key: str, issue_number) -> str:
+    """该 Issue 当前流水线场景标识（与 events.scene_id 对齐；空场景归一 ``default``）。
+
+    与 ``pipeline_has_qa_node`` 使用同一解析口径，保证“同一流水线”判定一致。
+    无法解析（非法编号/查询异常）返回空串。
+    """
+    _tags = _issue_tags(issue_number)
+    if not _tags:
+        return ""
+    try:
+        from src.api.session_store import get_issue_scene
+
+        _scene = get_issue_scene(repo_key, _tags[0])
+        return (_scene[0] if _scene and _scene[0] else "") or "default"
+    except Exception as _e:
+        log.warning(f"qa gate: issue scene resolve failed {repo_key}/#{issue_number}: {_e}")
+        return ""
+
+
 def pipeline_has_qa_node(repo_key: str, issue_number) -> bool:
     """该 Issue 所属流水线是否存在启用中的 qa 节点（无 qa 阶段 → 不启用门禁）。"""
     try:
         from src.api.pipeline_config import get_pipeline_config
-        from src.api.session_store import get_issue_scene
 
-        _tags = _issue_tags(issue_number)
-        if not _tags:
-            return False
-        _scene = get_issue_scene(repo_key, _tags[0])
-        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _scene_id = _issue_scene_key(repo_key, issue_number) or "default"
         _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
         for _n in _nodes:
             _nid = str(_n.get("id") or _n.get("tag") or "").strip().lower()
@@ -84,10 +110,18 @@ def pipeline_has_qa_node(repo_key: str, issue_number) -> bool:
 
 
 def latest_qa_event(repo_key: str, issue_number) -> dict | None:
-    """该 Issue 最新一条 qa 事件（按 seq 最大）。无记录/异常返回 None。"""
+    """该 Issue 同一流水线最新一条 qa 事件（按 seq 最大）。无记录/异常返回 None。"""
     _tags = _issue_tags(issue_number)
     if not _tags:
         return None
+    _scene_id = _issue_scene_key(repo_key, issue_number)
+    if _scene_id in ("", "default"):
+        # 仓库默认/未绑定场景：历史事件的 scene_id 可能为空串或 "default"
+        _scene_clause = "(scene_id=? OR scene_id='' OR scene_id IS NULL)"
+        _scene_arg = "default"
+    else:
+        _scene_clause = "scene_id=?"
+        _scene_arg = _scene_id
     try:
         from src.session_manager import db, db_lock
 
@@ -96,8 +130,9 @@ def latest_qa_event(repo_key: str, issue_number) -> dict | None:
             c.execute(
                 "SELECT seq, status, result, summary FROM events "
                 "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
+                f"AND {_scene_clause} "
                 "ORDER BY seq DESC LIMIT 1",
-                (repo_key, _tags[0], _tags[1]))
+                (repo_key, _tags[0], _tags[1], _scene_arg))
             _row = c.fetchone()
         if not _row:
             return None
@@ -111,14 +146,15 @@ def latest_qa_event(repo_key: str, issue_number) -> dict | None:
 def classify_qa_conclusion(status: str, text: str) -> str:
     """判定 QA 结论：``fail`` / ``pass`` / ``unknown``。
 
-    - status=failed/error/failure → fail；
+    - status=failed/cancelled/error/failure → fail（Spec：取消同样视为未通过）；
     - running/dispatched/pending/queued → unknown（尚无结论）；
-    - completed 时解析 result 文本：先剔除否定语境，失败语义优先，其次通过语义。
+    - completed 时解析 result 文本：先剔除否定语境，失败语义优先，其次通过语义；
+      其中“无法通过/not passed”等否定式通过判 fail。
     """
     _st = (status or "").strip().lower()
-    if _st in ("failed", "failure", "error"):
+    if _st in ("failed", "failure", "error", "cancelled", "canceled"):
         return "fail"
-    if _st in ("running", "dispatched", "pending", "queued", "cancelled"):
+    if _st in ("running", "dispatched", "pending", "queued"):
         return "unknown"
     if _st not in ("", "completed", "success", "succeeded"):
         return "unknown"
@@ -126,6 +162,9 @@ def classify_qa_conclusion(status: str, text: str) -> str:
     _blob = (text or "").strip()
     if not _blob:
         return "unknown"
+    # 否定式通过优先于泛化的“通过”词（“无法通过验收”不能再判 pass）
+    if _QA_NEG_PASS_RE.search(_blob):
+        return "fail"
     _normalized = _QA_NEGATION_RE.sub("", _blob)
     _lower = _normalized.lower()
 
@@ -174,6 +213,22 @@ def qa_gate_check(repo_key: str, issue_number) -> dict:
         return _result
 
 
+def gate_or_annotate(repo_key: str, issue_number, pr_number: int = 0) -> dict:
+    """统一门禁入口：校验 QA 结论，命中 fail 时写入 Issue 标注，返回校验结果。
+
+    各关闭/合入判定点复用此函数，避免 `qa_gate_check → annotate_qa_failure`
+    样板散落多处（Issue #1739 审查：门禁策略变更需多点同步）。自身不抛异常。
+    """
+    _info = qa_gate_check(repo_key, issue_number)
+    if _info.get("blocked"):
+        try:
+            annotate_qa_failure(repo_key, issue_number, _info, pr_number=pr_number)
+        except Exception as _e:
+            log.warning(f"qa gate: annotate via guard failed "
+                        f"{repo_key}/#{issue_number}: {_e}")
+    return _info
+
+
 def _latest_pr_number(repo_key: str, issue_number) -> int:
     """best-effort：从该 Issue 最近 PR 事件中取关联 PR 编号，取不到返回 0。"""
     _tags = _issue_tags(issue_number)
@@ -217,6 +272,31 @@ def _pr_link(repo_key: str, pr_number: int) -> str:
     return f"https://{_host}/{_owner}/{_repo}/pull/{pr_number}"
 
 
+def _annotation_token(seq: int, status: str, reason: str) -> str:
+    """幂等标记：seq + 结论指纹，避免 seq=0 时不同失败被折叠成一条评论。"""
+    _h = hashlib.md5(f"{status}|{reason}".encode("utf-8")).hexdigest()[:8]
+    return f"{_QA_ANNOTATION_MARKER} seq={seq} hash={_h} -->"
+
+
+def _annotation_exists(client, issue_number: int, token: str) -> bool:
+    """best-effort：查询 Issue 已有评论是否包含相同幂等标记（跨进程/重启去重）。
+
+    查询失败或返回结构异常 → False（宁可重复一次，也不漏标注）。
+    """
+    try:
+        _comments = client.list_issue_comments(issue_number)
+    except Exception as _e:
+        log.info(f"qa gate: list comments failed, skip remote dedupe: {_e}")
+        return False
+    if not isinstance(_comments, list):
+        return False
+    for _c in _comments:
+        _body = _c.get("body") if isinstance(_c, dict) else ""
+        if _body and token in str(_body):
+            return True
+    return False
+
+
 def annotate_qa_failure(repo_key: str, issue_number, qa_info: dict,
                         pr_number: int = 0) -> str:
     """在 Issue 上标注 QA 失败原因与关联 PR（best-effort，返回 success/skipped/failed）。"""
@@ -225,12 +305,13 @@ def annotate_qa_failure(repo_key: str, issue_number, qa_info: dict,
         _seq = int((qa_info or {}).get("event_seq") or 0)
         if not _num:
             return "skipped"
-        _key = (repo_key, _num, _seq)
+        _reason = (qa_info or {}).get("reason") or "qa 未通过"
+        _status = (qa_info or {}).get("status") or ""
+        _token = _annotation_token(_seq, _status, _reason)
+        _key = (repo_key, _num, _token)
         if _key in _annotated:
             return "skipped"
         _pr = int(pr_number or 0) or _latest_pr_number(repo_key, _num)
-        _reason = (qa_info or {}).get("reason") or "qa 未通过"
-        _status = (qa_info or {}).get("status") or ""
         _lines = [
             "[Grape QA Gate] ⚠️ QA 未通过，Issue 暂不自动关闭。",
             "",
@@ -242,7 +323,7 @@ def annotate_qa_failure(repo_key: str, issue_number, qa_info: dict,
             _lines.append(f"- 关联 PR：#{_pr}" + (f"（{_link}）" if _link else ""))
         _lines.append("")
         _lines.append("请完成整改并重新通过 QA 验证；QA 通过后将按原逻辑自动关闭。")
-        _lines.append(_QA_ANNOTATION_MARKER)
+        _lines.append(_token)
         _body = "\n".join(_lines)
         return _post_issue_comment(repo_key, _num, _body, _key)
     except Exception as _e:
@@ -251,7 +332,7 @@ def annotate_qa_failure(repo_key: str, issue_number, qa_info: dict,
 
 
 def _post_issue_comment(repo_key: str, issue_number: int, body: str,
-                        key: tuple[str, int, int]) -> str:
+                        key: tuple[str, int, str]) -> str:
     try:
         from src.repo_key import parse_repo_key
         from src.vcs.api_client import VcsApiClient
@@ -268,6 +349,10 @@ def _post_issue_comment(repo_key: str, issue_number: int, body: str,
             log.info(f"qa gate: no bot token for {repo_key}, skip annotation")
             return "skipped"
         _client = VcsApiClient(_provider, _token, _owner, _repo)
+        if _annotation_exists(_client, issue_number, key[2]):
+            _annotated.add(key)
+            log.info(f"qa gate: annotation already present {repo_key}/#{issue_number}")
+            return "skipped"
         _resp = _client.post_issue_comment(issue_number, body)
         if isinstance(_resp, dict) and "error" not in _resp:
             _annotated.add(key)

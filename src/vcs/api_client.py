@@ -260,6 +260,26 @@ class VcsApiClient:
             self._ledger("issue_comment", _cid or issue_number, issue_number, body)
         return _resp
 
+    def list_issue_comments(self, issue_number: int, per_page: int = 100) -> list:
+        """获取 Issue 评论列表（Issue #1739：门禁标注跨进程幂等去重用）。
+
+        Returns:
+            list: 评论列表；失败返回空列表。
+        """
+        if self.provider == "gitcode":
+            _resp = self._gitcode_request(
+                "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments?per_page={per_page}")
+        elif self.provider == "github":
+            _resp = self._github_request(
+                "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments?per_page={per_page}")
+        elif self.provider == "gitlab":
+            project_id = f"{self.owner}%2F{self.repo}"
+            _resp = self._gitlab_request(
+                "GET", f"/projects/{project_id}/issues/{issue_number}/notes?per_page={per_page}")
+        else:
+            return []
+        return _resp if isinstance(_resp, list) else []
+
     # === Issue 查询 ===
 
     def get_issue(self, issue_number: int) -> dict:
