@@ -795,6 +795,34 @@ def test_classify_qa_conclusion_post_negation_count_zero_not_fail():
     assert classify_qa_conclusion("completed", "3 tests failed") == "fail"
 
 
+def test_classify_qa_conclusion_pass_rate_non_full_is_fail():
+    """中文“通过率非 100%”变体（不是/不足/未满/低于/仅/只）必须判 fail，不得绕过门禁。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _fail_cases = [
+        "通过率不是100%", "通过率不足100%", "通过率未满100%", "通过率低于100%",
+        "通过率不是 100%", "通过率不足 100 %", "通过率仅为80%", "通过率只有50%",
+    ]
+    for _case in _fail_cases:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+    assert classify_qa_conclusion("completed", "通过率 100%") == "pass"
+    assert classify_qa_conclusion("completed", "通过率100%") == "pass"
+
+
+def test_classify_qa_conclusion_english_auxiliary_and_fail_nouns_is_fail():
+    """英文部分否定含助动词/介词、失败名词复数/进行时均须判 fail，不得 fail-open。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _fail_cases = [
+        "not all tests have passed", "not all of the tests passed",
+        "not all of the tests have passed",
+        "2 failures", "test failures: 2", "failures: 2",
+        "tests are failing", "3 errors", "1 error",
+    ]
+    for _case in _fail_cases:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+    assert classify_qa_conclusion("completed", "no errors") != "fail"
+    assert classify_qa_conclusion("completed", "0 errors") != "fail"
+
+
 def test_github_create_pull_respects_explicit_auto_close_false():
     """调用方显式 auto_close_issues=false 时，qa 通过也不得被强制改写为 Closes。"""
     _clear_annotation_cache()
