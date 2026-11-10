@@ -209,7 +209,11 @@ if (Test-Path $versionFilePath) {
 }
 $expectedVersion = ""
 try {
-    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+    # latest 端点要求 rta_ 鉴权（runtime.py _require_credential）；裸请求必 401 →
+    # 恒走 changed-or-not fallback（真机实证 2026-11-10）。带 Token 请求可拿到
+    # 精确目标版本，解压校验走 expected-version 精确分支，消除「已最新 vs 未落地」歧义。
+    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop `
+        -Headers @{ "Authorization" = "Bearer $Token" }
     $expectedVersion = ("" + $lvi.version).Trim()
     if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
 } catch {
