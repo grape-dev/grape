@@ -65,7 +65,8 @@ _QA_NEG_CN_TRAILING_RE = re.compile(
 )
 
 # 英文失败/通过按词边界识别（避免 "ok" 命中 "broken"、"fail" 命中 "failsafe" 之类子串误判）
-_QA_FAIL_EN_RE = re.compile(r"\b(?:fail|failed|failure|fails)\b", re.IGNORECASE)
+_QA_FAIL_EN_RE = re.compile(
+    r"\b(?:fail|failed|fails|failure|failures|failing|errors?)\b", re.IGNORECASE)
 _QA_PASS_EN_RE = re.compile(r"\b(?:pass|passed|ok)\b", re.IGNORECASE)
 
 # 否定式“通过”= 实际未通过（“无法通过/没有通过/not passed”不能被下面的通过语义吞掉）。
@@ -77,8 +78,11 @@ _QA_NEG_PASS_RE = re.compile(
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
     r"did\s+not|does\s+not|didn't|doesn't|never|not)\s*"
     r"(?:(?:全部|所有|全|完全|百分百|100%|能够|能|均|都|达到|达|满足|"
-    r"all|every|any|fully|completely|entirely|be|been)\s*)*"
+    r"all|every|any|fully|completely|entirely|be|been|"
+    r"have|has|had|are|is|were|was|of|the|do|does|did)\s*)*"
     r"(?:(?:测试|用例|检查|项|tests?|checks?|cases?)\s*)*"
+    # 测试名后允许助动词（not all tests have passed / tests are not passing）
+    r"(?:(?:have|has|had|are|is|were|was|been|be|do|does|did)\s*)*"
     r"(?:通过|pass(?:ed)?|ok|succeed|approved|合并|合入)",
     re.IGNORECASE,
 )
@@ -88,6 +92,10 @@ _QA_UNMET_STANDARD_RE = re.compile(
     r"(?:通过率|合格率|达标率|pass\s+rate)\s*[^。;\n]{0,10}?"
     r"(?:未|没有|没|不)\s*(?:达到|达|到|满足|达标|符合)\s*"
     r"(?:100\s*%|百分之百|标准|要求|门槛|预期|目标)?"
+    # 通过率 + 不是/不足/未满/低于/仅/只 + 数字%（通过率不是100% / 不足100% / 仅80%）
+    r"|(?:通过率|合格率|达标率|pass\s+rate)\s*[^。;\n]{0,10}?"
+    r"(?:不是|不足|不满|未满|低于|少于|不够|仅为?|只有?|仅|只)\s*"
+    r"(?:\d+\s*%|百分之百|标准|要求|门槛|预期|目标)"
     r"|(?:未|没有|没|不|无法|未能)\s*(?:能)?\s*(?:达到|达|满足|符合|实现|到)\s*"
     r"[^，,。;；\n]{0,16}?(?:通过率|通过标准|达标率|合格率|验收标准|标准|要求|合格|达标)"
     r"|(?:未|没有|没|不)\s*(?:达到|达|满足|符合)\s*(?:通过|验收)?\s*(?:标准|要求|门槛)"
