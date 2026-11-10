@@ -82,3 +82,15 @@
 - 门禁样板收敛：新增 `collect_qa_failures` / `annotate_qa_failures`，`create_pull` 与
   `merge_pull` 复用；合入门禁抽为 `_pre_merge_qa_gate`。
 - 清理不可达的 `_scene_key or "default"` 分支；进程内标注缓存增加上限淘汰。
+
+## 复审补充（PR #1094 round 5）
+- 分支范围收敛：从最新 `weekly-mys`（4ebe33b7b）重建 `feat/issue-1739`，仅 cherry-pick
+  本 Issue 的 feat/fix/test/docs 提交，diff 收敛为 9 个文件，不再携带 #1635/#1668/#1721。
+- GitHub 自动关闭语义（AC3）：仅当 QA 门禁判定失败时降级为 `Related to #N`；qa 通过或
+  无 qa 阶段恢复原 `Closes #N` 行为（GitHub 无原生 auto_close 开关）。
+- GitCode 关联 PR 链接：按 provider 区分路径（GitCode `/merge_requests/{n}`，GitHub
+  `/pull/{n}`），修复 Issue 标注链接 404。
+- review-pass(done) 单一门禁入口：`_complete_issue_done` 接受调用方已完成的 `qa_info`，
+  同一收尾动作不再二次查询/标注。
+- 合入路径 PR 详情复用：`_fetch_pull_detail` 只取一次，base 快照与 QA 门禁共用同一响应，
+  上游请求不再翻倍。
