@@ -136,6 +136,81 @@ class TestDetectEngineModel:
             monkeypatch.setenv("HERMES_HOME", str(her))
 
 
+class TestAishellDshModel:
+    """aishell-dsh 的 acp profile（patch 列表）解析（Issue #865 覆盖缺口）。"""
+
+    _PROFILE = (
+        "- id: unrelated-patch\n"
+        "  config:\n"
+        "    model: should-not-be-used\n"
+        "- id: agent-default-model\n"
+        "  config:\n"
+        "    provider: internal-gw\n"
+        "    model: glm-5.3\n"
+        "    apiKeyEnv: INTERNAL_KEY_ENV\n"
+        "    baseUrl: https://internal.example/v1\n"
+    )
+
+    def _write_profile(self, tmp_path, data):
+        home = tmp_path / "aishell"
+        acp = home / "profiles" / "acp"
+        acp.mkdir(parents=True)
+        path = acp / "default.patch.yml"
+        if isinstance(data, bytes):
+            path.write_bytes(data)
+        else:
+            path.write_text(data, encoding="utf-8")
+        return home
+
+    def _block_yaml(self, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def _no_yaml(name, *a, **kw):
+            if name == "yaml":
+                raise ImportError("no yaml in worker env")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", _no_yaml)
+
+    def test_block_yaml_parses_agent_default_model(self, tmp_path, monkeypatch):
+        from src.runtime.engine_model import _aishell_dsh_model
+        home = self._write_profile(tmp_path, self._PROFILE)
+        monkeypatch.setenv("AISHELL_HOME", str(home))
+        got = _aishell_dsh_model()
+        assert got == "glm-5.3"
+        # 安全约束：apiKeyEnv / baseUrl 绝不进入返回值
+        assert "INTERNAL_KEY" not in got and "internal.example" not in got
+
+    def test_no_pyyaml_regex_fallback(self, tmp_path, monkeypatch):
+        from src.runtime.engine_model import _aishell_dsh_model
+        home = self._write_profile(tmp_path, self._PROFILE)
+        monkeypatch.setenv("AISHELL_HOME", str(home))
+        self._block_yaml(monkeypatch)
+        assert _aishell_dsh_model() == "glm-5.3"
+
+    def test_gbk_encoded_profile(self, tmp_path, monkeypatch):
+        from src.runtime.engine_model import _aishell_dsh_model
+        text = "# 中文注释：默认模型配置\n" + self._PROFILE
+        home = self._write_profile(tmp_path, text.encode("gbk"))
+        monkeypatch.setenv("AISHELL_HOME", str(home))
+        assert _aishell_dsh_model() == "glm-5.3"
+
+    def test_crlf_profile_regex_fallback(self, tmp_path, monkeypatch):
+        from src.runtime.engine_model import _aishell_dsh_model
+        home = self._write_profile(tmp_path, self._PROFILE.replace("\n", "\r\n"))
+        monkeypatch.setenv("AISHELL_HOME", str(home))
+        self._block_yaml(monkeypatch)
+        assert _aishell_dsh_model() == "glm-5.3"
+
+    def test_missing_profile_degrades_to_empty(self, tmp_path, monkeypatch):
+        from src.runtime.engine_model import _aishell_dsh_model
+        home = tmp_path / "empty"
+        home.mkdir()
+        monkeypatch.setenv("AISHELL_HOME", str(home))
+        assert _aishell_dsh_model() == ""
+
+
 class TestRegisterWithModel:
     def test_register_persists_model(self, client):
         token = _make_token()
@@ -168,6 +243,30 @@ class TestRegisterWithModel:
             row = db.cursor().execute(
                 "SELECT model_name FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
         assert row[0] == "glm-5.3"
+
+    def test_update_combines_role_tags_and_model(self, client):
+        """role_tags 与 model 同时上报（UPDATE 分支）时参数不得错位（#865 基线缺陷）。"""
+        token = _make_token("test865-combo")
+        headers = {"Authorization": f"Bearer {token}"}
+        first = {"device_name": "ci-865-combo", "cli_version": "worker-1.0",
+                 "runtimes": [{"name": "test_aishell_dsh", "version": "v1", "healthy": True}]}
+        r1 = client.post("/api/runtime/register", json=first, headers=headers)
+        assert r1.status_code == 200, r1.text
+        rid = r1.json()["runtimes"][0]["id"]
+        second = {"device_name": "ci-865-combo", "cli_version": "worker-2.0",
+                  "runtimes": [{"name": "test_aishell_dsh", "version": "v2", "healthy": True,
+                                "role_tags": ["CODING", " Vod ", ""], "model": "glm-5.3"}]}
+        r2 = client.post("/api/runtime/register", json=second, headers=headers)
+        assert r2.status_code == 200, r2.text
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT role_tags, model_name, model_source, worker_version, version "
+                "FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
+        assert json.loads(row[0]) == ["coding", "vod"]
+        assert row[1] == "glm-5.3"
+        assert row[2] == "worker_report"
+        assert row[3] == "worker-2.0"
+        assert row[4] == "v2"
 
 
 class TestRecentModelsAggregation:
