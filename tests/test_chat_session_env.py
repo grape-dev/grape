@@ -30,6 +30,9 @@ def _cleanup():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE user_id=99991 OR session_key LIKE 'conv:test-conv%'")
+        for (cid,) in c.execute("SELECT id FROM chat_conversations WHERE user_id=99991").fetchall():
+            c.execute("DELETE FROM chat_messages WHERE conversation_id=?", (cid,))
+            c.execute("DELETE FROM chat_conversations WHERE id=?", (cid,))
         db.commit()
 
 
@@ -80,3 +83,92 @@ class TestChatSessionEnvExtra:
         assert "GRAPE_CLI_MODE" not in env
         assert env["USER_ID"] == "99991"
         assert env["CONVERSATION_ID"] == "test-conv"
+
+class TestChatSessionEnvRepoInjection:
+    """Issue #1757：chat 三条路径补齐 REPO_* / ISSUE_NUMBER / GRAPE_SERVER_URL。"""
+
+    def setup_method(self):
+        _cleanup()
+
+    def teardown_method(self):
+        _cleanup()
+
+    def test_real_repo_injects_repo_vars_and_server_url(self):
+        """真仓库 → REPO_FULL_NAME/OWNER/NAME（无前缀）+ GRAPE_SERVER_URL 非空。"""
+        env = chat_session_env_extra(99991, "test-conv", "gitcode:owner/repo", runtime_id=0)
+        assert env["REPO_OWNER"] == "owner"
+        assert env["REPO_NAME"] == "repo"
+        assert env["REPO_FULL_NAME"] == "owner/repo"
+        assert env["GRAPE_SERVER_URL"].startswith("http")
+
+    def test_github_prefix_stripped(self):
+        """github: 前缀同样剥掉，口径与 build_task_env 一致。"""
+        env = chat_session_env_extra(99991, "test-conv", "github:o/r", runtime_id=0)
+        assert env["REPO_FULL_NAME"] == "o/r"
+        assert env["REPO_OWNER"] == "o"
+        assert env["REPO_NAME"] == "r"
+
+    def test_pseudo_or_empty_repo_no_repo_keys(self):
+        """伪仓库/空/None → REPO_* 与 ISSUE_NUMBER 键不出现，其余保留。"""
+        for rk in ("", None, "chat:1"):
+            env = chat_session_env_extra(99991, "conv-x", rk, issue_number=1735)
+            for key in ("REPO_FULL_NAME", "REPO_OWNER", "REPO_NAME", "ISSUE_NUMBER"):
+                assert key not in env, (rk, key)
+            assert env["USER_ID"] == "99991"
+            assert env["CONVERSATION_ID"] == "conv-x"
+            assert env["GRAPE_SERVER_URL"].startswith("http")
+
+    def test_issue_number_numeric_task_conversation(self):
+        """task 会话纯数字 Issue 编号 → ISSUE_NUMBER 注入（含 # 前缀剥离）。"""
+        from src.session_manager import create_conversation
+        cid = create_conversation(99991, "gitcode:owner/repo", title="Issue #1735",
+                                  conv_type="task", issue_number=1735)
+        env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
+        assert env["ISSUE_NUMBER"] == "1735"
+        env_explicit = chat_session_env_extra(99991, "test-conv", "gitcode:owner/repo",
+                                              issue_number="#1735")
+        assert env_explicit["ISSUE_NUMBER"] == "1735"
+
+    def test_issue_number_non_numeric_not_injected(self):
+        """非数字 Issue 编号 → 不注入 ISSUE_NUMBER（#528 口径）。"""
+        env = chat_session_env_extra(99991, "", "gitcode:owner/repo",
+                                     issue_number="3f40dd97-ab9a-4b1c")
+        assert "ISSUE_NUMBER" not in env
+        assert env["REPO_OWNER"] == "owner"
+
+    def test_issue_number_non_task_conversation_not_injected(self):
+        """非 task 会话 → 不注入 ISSUE_NUMBER。"""
+        from src.session_manager import create_conversation
+        cid = create_conversation(99991, "gitcode:owner/repo", title="一般对话")
+        env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
+        assert "ISSUE_NUMBER" not in env
+
+    def test_resolve_server_url_failure_degrades(self):
+        """业务基址解析抛异常 → helper 不抛，仅缺 GRAPE_SERVER_URL，其余键仍在。"""
+        with patch("src.prompt_builder._resolve_business_server_url", side_effect=Exception("x")):
+            env = chat_session_env_extra(99991, "test-conv", "gitcode:owner/repo", runtime_id=0)
+        assert "GRAPE_SERVER_URL" not in env
+        assert env["REPO_OWNER"] == "owner"
+        assert env["REPO_NAME"] == "repo"
+
+    def test_skill_declared_keys_present(self):
+        """输出键集合 ⊇ chat SKILL 声明的五个变量。"""
+        from src.session_manager import create_conversation
+        cid = create_conversation(99991, "gitcode:owner/repo", title="Issue #1735",
+                                  conv_type="task", issue_number=1735)
+        env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
+        declared = {"REPO_FULL_NAME", "REPO_OWNER", "REPO_NAME", "ISSUE_NUMBER", "GRAPE_SERVER_URL"}
+        assert declared.issubset(set(env))
+
+    def test_rendered_grape_command_has_no_empty_segments(self):
+        """注入后的 env 渲染技能命令 → 无空参数/空路径段。"""
+        from src.session_manager import create_conversation
+        cid = create_conversation(99991, "gitcode:owner/repo", title="Issue #1735",
+                                  conv_type="task", issue_number=1735)
+        env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
+        cmd = ('grape git-repo issues get --owner "%s" --repo "%s" --number "%s"'
+               % (env["REPO_OWNER"], env["REPO_NAME"], env["ISSUE_NUMBER"]))
+        assert '--owner ""' not in cmd
+        assert '--repo ""' not in cmd
+        assert '--number ""' not in cmd
+        assert "//" not in cmd

@@ -1877,7 +1877,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         account=exec_account, user_id=uid,
                         # 会话凭据（chat_session_env.py，与 direct/Web 同语义）+ IM 上下文一并下发；
                         # enqueue_task 内部会再以 task_id 为 session_key 补签/覆盖 GRAPE_SESSION_TOKEN
-                        env_extra={**chat_session_env_extra(uid, conv_id or "", repo_key or ""),
+                        env_extra={**chat_session_env_extra(
+                                       uid, conv_id or "", repo_key or "", runtime_id=_rid,
+                                       issue_number=(conv or {}).get("issue_number") or ""),
                                    "IM_CHAT_ID": chat_id,
                                    # Issue #1577：与 Web chat 同源注入两项服务基址，
                                    # 否则远端 IM chat worker 业务命令落默认 base_url 不可用。
@@ -1921,7 +1923,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 # 会话凭据注入（feishu-task-chat-direct-session-token-injection-design.md）：
                 # 任务会话（真实仓库）与 Web chat 同语义签发 tk_ → GRAPE_SESSION_TOKEN + GRAPE_CLI_MODE=WORKER，
                 # 否则 agent 无会话凭据，`grape issues comment` 回写 Issue 会失败（生产事故 Issue #6）。
-                _direct_env = chat_session_env_extra(user_id, conv_id or "", repo_key or "")
+                _direct_env = chat_session_env_extra(
+                    user_id, conv_id or "", repo_key or "", runtime_id=_rid,
+                    issue_number=(conv or {}).get("issue_number") or "")
                 _direct_env["IM_CHAT_ID"] = chat_id
                 # 用量采集（合并保留双方功能）：审计 2026-10-17 起 IM 直连也要记 token（P2-1 口径 B）
                 from src.observability.master_usage import MasterRun, new_run_id

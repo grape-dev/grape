@@ -650,6 +650,23 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             log.info(f"{label}chat task: user token present (len={len(user_token)}), NOT injecting into env (P2)")
         else:
             log.warning(f"{label}NO user platform token available for chat; VCS ops go through grape CLI + session token")
+        # chat env 兜底（Issue #1757）：仅补缺失键，env_extra 显式值优先，绝不覆盖。
+        if repo_key and not repo_key.startswith("chat:") and "REPO_OWNER" not in env:
+            try:
+                from src.repo_key import split_owner_repo
+                owner, name = split_owner_repo(repo_key)
+                if owner and name:
+                    env.setdefault("REPO_FULL_NAME", f"{owner}/{name}")
+                    env.setdefault("REPO_OWNER", owner)
+                    env.setdefault("REPO_NAME", name)
+            except Exception as e:
+                log.warning(f"{label}chat env fallback repo split failed: {e}")
+        if "GRAPE_SERVER_URL" not in env:
+            try:
+                from src.prompt_builder import _local_port
+                env["GRAPE_SERVER_URL"] = f"http://127.0.0.1:{_local_port()}"
+            except Exception as e:
+                log.warning(f"{label}chat env fallback server url failed: {e}")
     elif bot_token:
         log.info(f"{label}devops event task: bot token present (len={len(bot_token)}), NOT injecting into env (P2)")
         # GitHub bot token 不再注入（agent 侧一律 grape CLI 转发）

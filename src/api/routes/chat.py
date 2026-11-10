@@ -585,7 +585,7 @@ def _understand_video(video_data: str) -> str:
 
 # direct 模式 chat 会话凭据注入（chat-direct-session-token-injection-design.md / feishu-task 版）：
 # 公共 helper 与飞书 IM 共用，防两组逻辑漂移（src/api/chat_session_env.py）。
-from src.api.chat_session_env import chat_session_env_extra, chat_repo_env
+from src.api.chat_session_env import chat_session_env_extra
 
 
 @router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
@@ -727,7 +727,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                     repo_key=repo_key,
-                    env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
+                    env_extra=chat_session_env_extra(
+                        user["id"], conv_id, repo_key, runtime_id=_rid,
+                        issue_number=(conv or {}).get("issue_number") or ""),
                 ):
                     _mu.feed(evt_type, data)   # 用量采集
                     # 日志输出
@@ -946,8 +948,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
                     user_gitcode_token="",  # Issue #344: no plaintext token in task payload
-                    env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
-                               **chat_repo_env(repo_key),
+                    env_extra={**chat_session_env_extra(
+                                  user["id"], conv_id, repo_key, runtime_id=runtime_id,
+                                  issue_number=(conv or {}).get("issue_number") or ""),
                                **resolve_task_server_env(runtime_id)},
                 )
                 log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")
@@ -1012,7 +1015,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                     repo_key=repo_key,
-                    env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
+                    env_extra=chat_session_env_extra(
+                        user["id"], conv_id, repo_key, runtime_id=rid,
+                        issue_number=(conv or {}).get("issue_number") or ""),
                 ):
                     _mu.feed(evt_type, data)
                     # 日志输出（对齐 master 分支 im/handler.py）
@@ -1240,8 +1245,9 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
         runtime_session_id=session.get("runtime_session_id") or "",
         event_type="chat", account=user.get("username") or "", user_id=user["id"],
         repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-        env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
-                   **chat_repo_env(repo_key),
+        env_extra={**chat_session_env_extra(
+                      user["id"], conv_id, repo_key, runtime_id=runtime_id,
+                      issue_number=(conv or {}).get("issue_number") or ""),
                    **resolve_task_server_env(runtime_id)},
     )
     _log.info(f"Chat enqueued: task={tid} user={user['id']} conv={conv_id} mode={get_execution_mode()}")
@@ -1854,7 +1860,9 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                     repo_key=repo_key,
-                    env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
+                    env_extra=chat_session_env_extra(
+                        user["id"], conv_id, repo_key, runtime_id=rid,
+                        issue_number=(conv or {}).get("issue_number") or ""),
                 ):
                     # Issue #442 跨主控兜底：撤回请求可能落在另一台主控（ChatTaskManager 是进程内
                     # 状态），此时本地 cancel 不会触发。撤回标记写在共享库（chat_messages.deleted），
@@ -1965,8 +1973,9 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
             repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-            env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
-                       **chat_repo_env(repo_key),
+            env_extra={**chat_session_env_extra(
+                          user["id"], conv_id, repo_key, runtime_id=rid,
+                          issue_number=(conv or {}).get("issue_number") or ""),
                        **resolve_task_server_env(rid)},
         )
         log.info(f"Chat submit enqueued: enqueue_tid={enqueue_tid} chat_task_id={chat_task_id}")
@@ -2250,8 +2259,9 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
             repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-            env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id,
-                       **chat_repo_env(repo_key),
+            env_extra={**chat_session_env_extra(
+                          user["id"], conv_id, repo_key, runtime_id=rid,
+                          issue_number=(conv or {}).get("issue_number") or ""),
                        **resolve_task_server_env(rid)},
         )
         with _chat_tasks_lock:
@@ -2379,7 +2389,9 @@ def _execute_chat_task(task_id: str):
                 event_type="chat",
                 account=user.get("username") or "", user_id=user.get("id", 0),
                 repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
-                env_extra={"USER_ID": str(user.get("id", 0)), "CONVERSATION_ID": conv_id,
+                env_extra={**chat_session_env_extra(
+                              user.get("id", 0), conv_id, repo_key, runtime_id=rid,
+                              issue_number=(conv or {}).get("issue_number") or ""),
                            **resolve_task_server_env(rid)},
             )
             # 同步等待任务完成
