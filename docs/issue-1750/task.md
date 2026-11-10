@@ -7,3 +7,5 @@
 - [x] T5 周期重注册不回收；rid 集合变化时携带 `active_tasks` 白名单回收。
 - [x] T6 新增 `tests/test_issue_1750_recover_orphans_active_whitelist.py` 覆盖 A1–A6。
 - [x] T7 回归 `test_recover_orphans_*`、`test_issue_417_*`、`test_issue_1495_*` 全通过。
+- [x] T8（PR #1096 审查修复 Required）心跳失败重注册复用 `_recover_orphans_on_rid_change` 判定，不再默认空白名单无条件回收；新增 `test_a5_heartbeat_failure_reregister_keeps_whitelist`。
+- [x] T9（PR #1096 审查修复 Optional）新测试接入 CI linux-backend job；docs 与测试文件补末尾换行。

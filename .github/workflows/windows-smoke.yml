@@ -83,3 +83,10 @@ jobs:
         run: |
           python3 scripts/check-openapi-endpoints.py --require-baseline
           python -m pytest tests/api/test_check_openapi_endpoints.py -v
+      - name: Recover-orphans active whitelist tests (issue #1750)
+        # Issue #1750（PR #1096 审查修复 Optional）：worker 自报活跃白名单 +
+        # 回收时机收紧（周期/心跳重注册 rid 变化携带白名单，启动空白名单）；
+        # 同时接入 recover_orphans 系列既有回归（slots/optimization），CI 守门。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_1750_recover_orphans_active_whitelist.py tests/runtime/test_recover_orphans_slots.py tests/api/test_recover_orphans_optimization.py -v
