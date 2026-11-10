@@ -17,7 +17,7 @@
 
 ## Technical Approach
 - 新增 `src/api/a2a_dispatch_guard.py`：场景/节点顺序解析、下游 running 查询、时间窗去重、活跃重复判定、窗口键派生、原子「复查+落库」、短窗告警、跳过留痕。
-- `src/api/routes/webhook.py` 在既有活跃事件去重之后、事件落库之前调用门禁：
+- `src/api/routes/webhook.py` 在既有活跃事件去重（#1667 `_has_active_a2a_event`）之前、事件落库之前调用门禁：
   1. 下游 running：按 Issue 当前场景 pipeline 节点顺序，若运行中事件 agent 位于目标 agent 之后 → 跳过；
   2. 时间窗去重：同 Issue + 同场景 + 同目标 agent 在窗口内已有 completed 派发 → 丢弃；failed/cancelled/timeout 允许立即重试；活跃事件由下一步拦截；
   3. 活跃重复：同 Issue + 同场景 + 同目标 agent 在短窗内已有 running/dispatched 事件且 context 不同 → 丢弃（force 可越过，queue 走 #1667 排队）。
