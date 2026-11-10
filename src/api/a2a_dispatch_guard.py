@@ -3,27 +3,35 @@
 背景：同一 Issue 在下游（qa）审查 running 期间仍被重复派发上游（coding），
 上游会话只能幂等空跑，浪费执行槽位（#2955 实证）。
 
-本模块在 A2A 派发入口提供三段门禁：
+本模块在 A2A 派发入口提供四段门禁：
 1. 下游 running 判定：目标 agent 的上游被派发时，若同 Issue 同场景存在
    running/dispatched 的下游事件 → 跳过本次派发；
-2. 幂等键：issue + scene + target agent + 时间窗，窗口内重复派发丢弃；
-3. 观测：同 Issue 同目标 agent 短时间窗内多次派发输出告警日志。
+2. 时间窗去重：issue + scene + target agent 在时间窗内已有 completed 派发
+   → 重复派发丢弃；failed/cancelled/timeout 允许立即重试；
+3. 活跃重复判定：同 Issue + 同场景 + 同目标 agent 在短窗内已存在
+   running/dispatched 事件且上下文不同 → 跳过（force 可越过）；
+4. 观测：同 Issue 同目标 agent 短时间窗内多次派发/跳过输出告警日志。
 
 跳过均通过 ``event_skipped`` 审计表留痕（reason 可读），并返回结构化响应。
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
 from src.config import log
+from src.api.a2a_context import a2a_context_key
 
 A2A_IDEMPOTENCY_WINDOW_SECONDS = int(os.getenv("A2A_IDEMPOTENCY_WINDOW_SECONDS", "120"))
 A2A_DISPATCH_STORM_WINDOW_SECONDS = int(os.getenv("A2A_DISPATCH_STORM_WINDOW_SECONDS", "600"))
 A2A_DISPATCH_STORM_THRESHOLD = int(os.getenv("A2A_DISPATCH_STORM_THRESHOLD", "2"))
 
+# running/dispatched 视为活跃；queued 走 #1667 排队语义，不计入下游 running 判定。
 _ACTIVE_STATUS = ("running", "dispatched")
+# 仅 completed 计入时间窗去重；failed/cancelled/timeout 属失败/取消，应允许立即重试。
+_WINDOW_DEDUP_STATUS = ("completed",)
 
 
 def _parse_ts(value: str):
@@ -92,21 +100,22 @@ def pipeline_order(nodes: list) -> list:
     return ids
 
 
-def _scene_filter(scene_id: str):
-    """同场景口径：显式场景行 + 历史无场景行（普通 A2A 事件 scene_id=''）。"""
-    return scene_id or ""
+def _normalize_scene(scene_id: str) -> str:
+    """归一化 scene_id：None/空白统一为 ''（'' 兼容历史无场景事件行）。"""
+    return str(scene_id or "").strip()
 
 
 def _query_active_events(repo_key: str, issue_id: str):
     try:
         from src.session_manager import db, db_lock
+        _placeholders = ",".join("?" for _ in _ACTIVE_STATUS)
         with db_lock:
             c = db.cursor()
             c.execute(
                 "SELECT seq, agent_type, status, created_at, scene_id FROM events "
                 "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
-                "AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 50",
-                (repo_key, issue_id))
+                f"AND status IN ({_placeholders}) ORDER BY seq DESC LIMIT 50",
+                (repo_key, issue_id, *_ACTIVE_STATUS))
             return c.fetchall() or []
     except Exception as _e:
         log.warning(f"A2A guard: active event query failed: {_e}")
@@ -117,19 +126,27 @@ def find_running_downstream(repo_key: str, issue_number, target_agent: str,
                             scene_id: str, nodes: list) -> dict:
     """目标 agent 为上游且同 Issue 同场景存在 running 下游事件时返回该事件。
 
-    返回 {"seq", "agent"}；无命中返回 {}。
+    返回 ``{"seq", "agent", "status", "created_at"}``；无命中返回 ``{}``。
+    ``nodes`` 为空（场景未配置/解析失败）时门禁静默失效——此处显式告警，
+    便于排查「配置缺失导致误放行」而非无痕。
     """
     order = pipeline_order(nodes)
+    if not order:
+        log.warning(
+            "A2A guard: pipeline nodes empty — downstream-running gate disabled "
+            "repo=%s issue=#%s target=%s (scene config missing?)",
+            repo_key, issue_number, target_agent)
+        return {}
     if target_agent not in order:
         return {}
     target_idx = order.index(target_agent)
-    scene_id = _scene_filter(scene_id)
+    scene_id = _normalize_scene(scene_id)
     for seq, agent, status, created_at, row_scene in _query_active_events(
             repo_key, f"#{issue_number}"):
         agent = str(agent or "").strip()
         if agent == target_agent or agent not in order:
             continue
-        _row_scene = str(row_scene or "").strip()
+        _row_scene = _normalize_scene(row_scene)
         if _row_scene and scene_id and _row_scene != scene_id:
             continue
         if order.index(agent) > target_idx:
@@ -140,18 +157,19 @@ def find_running_downstream(repo_key: str, issue_number, target_agent: str,
 
 def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
                           scene_id: str, window_seconds: int | None = None) -> dict:
-    """同 Issue + 同场景 + 同目标 agent 在时间窗内已有派发记录时返回该记录。
+    """同 Issue + 同场景 + 同目标 agent 在时间窗内已有 completed 派发时返回该记录。
 
-    仅统计已终态的历史派发：running/dispatched/queued 由既有 A2A 活跃去重与
-    排队语义处理（Issue #1667 允许活跃事件存在时按不同 context 另派），此处不重复拦截。
+    仅 ``completed`` 计入窗口去重：``failed`` / ``cancelled`` / ``timeout`` 属失败或
+    取消，应允许立即重试（Issue #1770 审查 P2）。running/dispatched/queued 由活跃
+    门禁与 #1667 排队语义处理，不在此重复拦截。
 
-    返回 {"seq", "created_at", "status"}；无命中返回 {}。
+    返回 ``{"seq", "created_at", "status"}``；无命中返回 ``{}``。
     """
     window = A2A_IDEMPOTENCY_WINDOW_SECONDS if window_seconds is None else window_seconds
     if window <= 0:
         return {}
     cutoff = _utc_now() - timedelta(seconds=window)
-    scene_id = _scene_filter(scene_id)
+    scene_id = _normalize_scene(scene_id)
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -166,9 +184,9 @@ def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
         log.warning(f"A2A guard: window duplicate query failed: {_e}")
         return {}
     for seq, created_at, status, row_scene in rows:
-        if str(status or "").strip() in ("running", "dispatched", "queued"):
+        if str(status or "").strip() not in _WINDOW_DEDUP_STATUS:
             continue
-        _row_scene = str(row_scene or "").strip()
+        _row_scene = _normalize_scene(row_scene)
         if _row_scene and scene_id and _row_scene != scene_id:
             continue
         dt = _parse_ts(created_at)
@@ -178,9 +196,71 @@ def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
     return {}
 
 
-def idempotency_key(issue_number, scene_id: str, target_agent: str,
-                    window_seconds: int | None = None) -> str:
-    """幂等键 = issue + scene + target agent + 时间窗分桶（可读前缀便于排查）。"""
+def find_active_duplicate(repo_key: str, issue_number, target_agent: str,
+                          scene_id: str, context_key: str = "",
+                          window_seconds: int | None = None,
+                          include_same_context: bool = False) -> dict:
+    """同 Issue + 同场景 + 同目标 agent 在短窗内存在活跃事件时返回该事件。
+
+    默认仅命中「请求上下文键非空且与活跃事件上下文不同」的场景（Issue #1770
+    审查 P3：同 issue+scene+agent 活跃时不再另建第二个事件空跑）；同上下文重复
+    仍交由 #1667 ``duplicate_a2a`` 处理以保留其 ``original_event`` 响应。
+    ``include_same_context=True`` 供原子落库复查使用（并发同键只允许落一行）。
+
+    返回 ``{"seq", "agent", "status", "created_at"}``；无命中返回 ``{}``。
+    """
+    if not include_same_context and not context_key:
+        return {}
+    window = A2A_IDEMPOTENCY_WINDOW_SECONDS if window_seconds is None else window_seconds
+    if window <= 0:
+        return {}
+    cutoff = _utc_now() - timedelta(seconds=window)
+    scene_id = _normalize_scene(scene_id)
+    _placeholders = ",".join("?" for _ in _ACTIVE_STATUS)
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, created_at, status, scene_id, payload FROM events "
+                "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
+                f"AND agent_type=? AND status IN ({_placeholders}) "
+                "ORDER BY seq DESC LIMIT 20",
+                (repo_key, f"#{issue_number}", target_agent, *_ACTIVE_STATUS))
+            rows = c.fetchall() or []
+    except Exception as _e:
+        log.warning(f"A2A guard: active duplicate query failed: {_e}")
+        return {}
+    for seq, created_at, status, row_scene, payload_raw in rows:
+        dt = _parse_ts(created_at)
+        if dt is None or dt < cutoff:
+            continue
+        _row_scene = _normalize_scene(row_scene)
+        if _row_scene and scene_id and _row_scene != scene_id:
+            continue
+        _row_idem, _row_ctx = "", ""
+        try:
+            _p = json.loads(payload_raw or "{}")
+            if isinstance(_p, dict):
+                _row_idem = str(_p.get("idempotency_key") or "")
+                _row_ctx = str(_p.get("context") or "")
+        except Exception:
+            pass
+        _row_key = a2a_context_key(_row_idem, _row_ctx)
+        if not include_same_context and (not _row_key or _row_key == context_key):
+            continue
+        return {"seq": seq, "agent": target_agent, "status": status,
+                "created_at": created_at}
+    return {}
+
+
+def window_key(issue_number, scene_id: str, target_agent: str,
+               window_seconds: int | None = None) -> str:
+    """时间窗键 = issue + scene + target agent + 时间窗分桶（可读前缀便于排查）。
+
+    仅用于观测/排查；实际去重以 ``find_window_duplicate`` 的 created_at 时间窗为准，
+    因此响应字段命名为 ``window_key`` 而非 ``idempotency_key``（Issue #1770 审查 P1）。
+    """
     window = A2A_IDEMPOTENCY_WINDOW_SECONDS if window_seconds is None else window_seconds
     bucket = int(_utc_now().timestamp() // max(window, 1))
     raw = f"{str(issue_number).lstrip('#')}|{scene_id or ''}|{target_agent}|{window}|{bucket}"
@@ -189,9 +269,11 @@ def idempotency_key(issue_number, scene_id: str, target_agent: str,
 
 def detect_dispatch_storm(repo_key: str, issue_number, target_agent: str,
                           upcoming: int = 1, window_seconds: int | None = None) -> dict:
-    """短时间窗内同 Issue + 同目标 agent 多次派发 → 告警日志（可观测）。
+    """短时间窗内同 Issue + 同目标 agent 多次派发/跳过 → 告警日志（可观测）。
 
-    返回 {"count", "alerted", "window"}；count 含本次即将发生的派发（upcoming）。
+    ``count`` 含本次即将发生的派发（upcoming）与窗口内 ``event_skipped`` 跳过
+    次数——跳过路径不落 events，若不纳入跳过计数则反复跳过永不告警
+    （Issue #1770 审查 P5）。返回 ``{"count", "alerted", "window"}``。
     """
     window = A2A_DISPATCH_STORM_WINDOW_SECONDS if window_seconds is None else window_seconds
     cutoff = _utc_now() - timedelta(seconds=max(window, 1))
@@ -205,7 +287,21 @@ def detect_dispatch_storm(repo_key: str, issue_number, target_agent: str,
                 "AND event_type='a2a_event' AND agent_type=? ORDER BY seq DESC LIMIT 50",
                 (repo_key, f"#{issue_number}", target_agent))
             rows = c.fetchall() or []
+            # 跳过路径不写 events：把 event_skipped 同窗口跳过次数纳入统计。
+            c.execute(
+                "SELECT created_at, detail FROM event_skipped WHERE repo_key=? "
+                "AND issue_id=? AND event_type='a2a_event' ORDER BY id DESC LIMIT 100",
+                (repo_key, f"#{issue_number}"))
+            skip_rows = c.fetchall() or []
         for (created_at,) in rows:
+            dt = _parse_ts(created_at)
+            if dt is not None and dt >= cutoff:
+                count += 1
+        _marker = f"target={target_agent} "
+        for created_at, detail in skip_rows:
+            _detail = str(detail or "")
+            if _detail != f"target={target_agent}" and not _detail.startswith(_marker):
+                continue
             dt = _parse_ts(created_at)
             if dt is not None and dt >= cutoff:
                 count += 1
@@ -220,6 +316,56 @@ def detect_dispatch_storm(repo_key: str, issue_number, target_agent: str,
             window, repo_key, issue_number, target_agent, count,
             A2A_DISPATCH_STORM_THRESHOLD)
     return {"count": count, "alerted": alerted, "window": window}
+
+
+def append_guarded_a2a_event(repo_key: str, issue_number, target_agent: str,
+                             scene_id: str, *, title: str, summary: str,
+                             payload: dict, actor: str = "", status: str = "running",
+                             context_key: str = "", idempotency_key: str = "",
+                             window_seconds: int | None = None):
+    """原子「门禁复查 + 事件落库」（Issue #1770 审查 P4）。
+
+    在同一 ``db_lock``（RLock）内先复查时间窗/活跃重复，再调用 ``append_event``
+    落库，消除「门禁查询」与「事件插入」分属不同锁段导致的并发同键双落库。
+    返回 ``(kind, value)``：
+
+    - ``("ok", seq)``：已落库；
+    - ``("duplicate_key", {...})``：时间窗内已有 completed 或同上下文活跃事件；
+    - ``("active_dispatch", {...})``：短窗内已有不同上下文的活跃事件。
+    """
+    from src.session_manager import db_lock
+    from src.api.event_store import append_event
+    with db_lock:
+        _dup = find_window_duplicate(
+            repo_key, issue_number, target_agent, scene_id, window_seconds)
+        if _dup:
+            return "duplicate_key", _dup
+        _active = find_active_duplicate(
+            repo_key, issue_number, target_agent, scene_id, context_key,
+            window_seconds)
+        if _active:
+            return "active_dispatch", _active
+        # 并发复查：同上下文活跃事件已存在 → 按重复处理，禁止第二次落库。
+        _same = find_active_duplicate(
+            repo_key, issue_number, target_agent, scene_id, context_key,
+            window_seconds, include_same_context=True)
+        if _same:
+            return "duplicate_key", _same
+        seq = append_event(
+            repo_key=repo_key,
+            event_type="a2a_event",
+            title=title,
+            issue_id=f"#{issue_number}" if issue_number else "#0",
+            source="a2a",
+            agent_type=target_agent,
+            actor=actor,
+            summary=summary,
+            payload=payload,
+            status=status,
+            scene_id=scene_id,
+            idempotency_key=idempotency_key,
+        )
+        return "ok", seq
 
 
 def record_skip(repo_key: str, issue_number, target_agent: str, reason: str,
