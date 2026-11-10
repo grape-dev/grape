@@ -52,13 +52,16 @@ _QA_NEG_TRAILING_RE = re.compile(
     r"remaining|open|known)\s+)*"
     r"(?:critical|required|blockers?|blocking|failures?|fails?|issues?|fixes?|"
     r"problems?|bugs?|findings?|changes?)"
-    r"\s*[:：=-]?\s*(?:none|zero|0|no)\b",
+    r"\s*[:：=-]?\s*(?:none|zero|0|no)\b"
+    # 英文后置定量否定：0/no tests failed / 0 failures（实际为全部通过，不能判失败）
+    r"|\b(?:no|zero|0)\s+(?:\w+\s+){0,3}?(?:failures?|fails?|failed|errors?)\b",
     re.IGNORECASE,
 )
-# 中文后置否定（“阻塞为零 / 阻塞 0 / 阻断: 0”）——中文无词边界，单独处理
+# 中文后置否定（“阻塞为零 / 阻塞 0 / 阻断: 0 / 未通过项 0”）——中文无词边界，单独处理
 _QA_NEG_CN_TRAILING_RE = re.compile(
     r"(?:阻塞|阻断|冲突|硬违规|失败|不通过|未通过|问题|缺陷|违规|整改|修复)"
-    r"\s*(?:[:：=]|为|是)?\s*(?:零|0)\s*(?:项|个|条)?",
+    r"\s*(?:的)?\s*(?:项|个|条|例|处|次|数量|数)?\s*(?:[:：=]|为|是)?\s*"
+    r"(?:零|0)\s*(?:项|个|条|例|处|次)?",
 )
 
 # 英文失败/通过按词边界识别（避免 "ok" 命中 "broken"、"fail" 命中 "failsafe" 之类子串误判）
@@ -73,7 +76,7 @@ _QA_NEG_PASS_RE = re.compile(
     r"(?:无法|不能|不可|未能|未|没有|没|不会|no\s+way\s+to|"
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
     r"did\s+not|does\s+not|didn't|doesn't|never|not)\s*"
-    r"(?:(?:全部|所有|完全|能够|能|均|都|达到|达|满足|"
+    r"(?:(?:全部|所有|全|完全|百分百|100%|能够|能|均|都|达到|达|满足|"
     r"all|every|any|fully|completely|entirely|be|been)\s*)*"
     r"(?:(?:测试|用例|检查|项|tests?|checks?|cases?)\s*)*"
     r"(?:通过|pass(?:ed)?|ok|succeed|approved|合并|合入)",
@@ -85,6 +88,8 @@ _QA_UNMET_STANDARD_RE = re.compile(
     r"(?:通过率|合格率|达标率|pass\s+rate)\s*[^。;\n]{0,10}?"
     r"(?:未|没有|没|不)\s*(?:达到|达|到|满足|达标|符合)\s*"
     r"(?:100\s*%|百分之百|标准|要求|门槛|预期|目标)?"
+    r"|(?:未|没有|没|不|无法|未能)\s*(?:能)?\s*(?:达到|达|满足|符合|实现|到)\s*"
+    r"[^，,。;；\n]{0,16}?(?:通过率|通过标准|达标率|合格率|验收标准|标准|要求|合格|达标)"
     r"|(?:未|没有|没|不)\s*(?:达到|达|满足|符合)\s*(?:通过|验收)?\s*(?:标准|要求|门槛)"
     r"|(?:not|did\s+not|does\s+not|failed\s+to)\s+(?:reach|meet|achieve|satisfy)\s+"
     r"(?:the\s+)?(?:pass(?:ing)?\s+)?(?:standard|criteria|threshold|requirement)",
@@ -240,15 +245,16 @@ def classify_qa_conclusion(status: str, text: str) -> str:
     _blob = (text or "").strip()
     if not _blob:
         return "unknown"
-    # 否定式通过/未达标/部分通过优先于泛化的“通过”词
-    if _QA_NEG_PASS_RE.search(_blob):
-        return "fail"
-    if _QA_UNMET_STANDARD_RE.search(_blob):
-        return "fail"
-    if _QA_PARTIAL_PASS_RE.search(_blob):
-        return "fail"
+    # 先剔除后置定量否定（0 tests failed / 未通过项 0），否则会被误判为失败或否定式通过
     _normalized = _QA_NEG_TRAILING_RE.sub("", _blob)
     _normalized = _QA_NEG_CN_TRAILING_RE.sub("", _normalized)
+    # 否定式通过/未达标/部分通过优先于泛化的“通过”词（未全通过 / 未达到 100% 通过率）
+    if _QA_NEG_PASS_RE.search(_normalized):
+        return "fail"
+    if _QA_UNMET_STANDARD_RE.search(_normalized):
+        return "fail"
+    if _QA_PARTIAL_PASS_RE.search(_normalized):
+        return "fail"
     _normalized = _QA_NEGATION_RE.sub("", _normalized)
 
     if any(_t in _normalized for _t in _QA_FAIL_TERMS):

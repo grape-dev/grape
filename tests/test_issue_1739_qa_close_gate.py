@@ -767,6 +767,34 @@ def test_classify_qa_conclusion_required_fixes_none_not_fail():
     assert classify_qa_conclusion("completed", "required fixes: 2") == "fail"
 
 
+# ===================== 复审补充（PR #1094 round 7） =====================
+
+def test_classify_qa_conclusion_reversed_unmet_standard_is_fail():
+    """反向语序/部分否定（未达到 100% 通过率 / 测试未全通过）必须判 fail，不得被“通过”吞掉。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _fail_cases = [
+        "未达到 100% 通过率", "未达到100%通过率", "测试未全通过",
+        "未达到验收标准", "通过率未达到100%",
+    ]
+    for _case in _fail_cases:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+    assert classify_qa_conclusion("completed", "测试全部通过") == "pass"
+    assert classify_qa_conclusion("completed", "通过率 100%") == "pass"
+
+
+def test_classify_qa_conclusion_post_negation_count_zero_not_fail():
+    """后置定量否定（未通过 0 项 / 0 tests failed）表示无未通过项，不得误判 fail。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _not_fail = [
+        "未通过 0 项", "未通过项 0", "失败 0 项",
+        "0 tests failed", "no tests failed",
+    ]
+    for _case in _not_fail:
+        assert classify_qa_conclusion("completed", _case) != "fail", _case
+    assert classify_qa_conclusion("completed", "未通过 2 项") == "fail"
+    assert classify_qa_conclusion("completed", "3 tests failed") == "fail"
+
+
 def test_github_create_pull_respects_explicit_auto_close_false():
     """调用方显式 auto_close_issues=false 时，qa 通过也不得被强制改写为 Closes。"""
     _clear_annotation_cache()
