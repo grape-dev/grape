@@ -811,6 +811,12 @@ def _is_pr_payload(payload: dict) -> bool:
     object_attributes 解析 → 子任务 issue_id=#0。
     改为：仅当有 pull_request/merge_request 键，或 object_attributes 含 PR 特有字段
     （source_branch/target_branch）时才判定为 PR。
+
+    分工（Issue #1802）：本函数只服务 `resolve_issue_id`——决定 Issue 编号该从
+    `object_attributes` 还是 PR 关联 issues 解析。为保证既有 issue_id 契约与 #89
+    用例不变，这里对 `source_branch` 等结构键从宽判 PR。PR_NUMBER 的实体准入另由
+    `_is_pr_entity_event` 负责（Issue 实体优先、已知 Issue 事件一律判 False），两者
+    口径不同是有意的，请勿互相复用。
     """
     if bool(payload.get("pull_request")) or bool(payload.get("merge_request")):
         return True
@@ -964,7 +970,9 @@ def _is_pr_entity_event(event_type: str, payload: dict) -> bool:
     被当成不存在的 PR 编号注入。
 
     Issue 实体优先：`object_attributes.noteable_type == Issue` 一律判 False，
-    不再被 note_hook_pr 等事件白名单短路（与 `_is_pr_payload` 口径一致）。
+    不再被 note_hook_pr 等事件白名单短路。已知 Issue 事件（`ISSUE_EVENT_TYPES`）
+    即使携带 `source_branch` 等结构键也判 False——此处是 PR_NUMBER 的严格准入，
+    与 `_is_pr_payload`（服务 `resolve_issue_id`、对结构键从宽判 PR）分工不同。
     """
     noteable = _noteable_type(payload)
     if noteable == "issue":
