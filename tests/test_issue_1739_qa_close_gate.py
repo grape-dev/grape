@@ -617,3 +617,119 @@ def test_create_pull_gates_and_annotates_when_auto_close_default_false():
     _cli.return_value.post_issue_comment.assert_called_once()
     _comment = _cli.return_value.post_issue_comment.call_args[0][1]
     assert "QA 未通过" in _comment
+
+
+# ===================== 复审补充（PR #1094 round 5） =====================
+
+def test_github_create_pull_keeps_closes_when_qa_passed():
+    """AC3：qa 通过时 GitHub 沿用原语义，追加 Closes 而非 Related。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="pass，无 Critical/Required")
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRCreateBody, create_pull
+    captured = {}
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        captured["payload"] = body
+        return {"number": 1094}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.qa_gate.collect_qa_failures", return_value=[]), \
+            patch("src.vcs.api_client.VcsApiClient"):
+        create_pull("org", "issue1739", PRCreateBody(
+            title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
+            body="feat: #1739 test", related_issue_nums=[_NUM]),
+            user={"id": 1, "username": "tester", "auth_type": "session_token"},
+            p="github")
+    _body = captured["payload"]["body"]
+    assert "Closes #1739" in _body
+    assert "Related to" not in _body
+
+
+def test_github_create_pull_downgrades_to_related_when_qa_failed():
+    """qa 失败时 GitHub 仅 Related 关联，且清除调用方 body 自带的 Closes。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRCreateBody, create_pull
+    captured = {}
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        captured["payload"] = body
+        return {"number": 1094}
+
+    _info = {"blocked": True, "qa_present": True, "event_seq": 1,
+             "status": "completed", "conclusion": "fail",
+             "reason": "审查完成：不通过"}
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.qa_gate.collect_qa_failures",
+                  return_value=[{"issue": _NUM, "info": _info}]), \
+            patch("src.api.qa_gate.annotate_qa_failures"), \
+            patch("src.vcs.api_client.VcsApiClient"):
+        create_pull("org", "issue1739", PRCreateBody(
+            title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
+            body="Closes #1739", related_issue_nums=[_NUM]),
+            user={"id": 1, "username": "tester", "auth_type": "session_token"},
+            p="github")
+    _body = captured["payload"]["body"]
+    assert "Closes #1739" not in _body
+    assert "Related to #1739" in _body
+
+
+def test_pr_link_uses_provider_specific_path():
+    """GitCode 关联 PR 链接必须用 /merge_requests/{n}（/pull 会 404）。"""
+    from src.api.qa_gate import _pr_link
+    assert _pr_link(_REPO, 1094).endswith("/merge_requests/1094")
+    assert _pr_link("github:org/issue1739", 1094).endswith("/pull/1094")
+
+
+def test_review_pass_done_runs_qa_gate_once():
+    """review-pass(done) 收尾只查询/标注一次 QA 门禁。"""
+    from src.api import qa_gate
+    from src.api.issues_center import _review_pass
+    _clear_annotation_cache()
+    _seed(status="processing", stage="sre")
+    with db_lock:
+        db.cursor().execute("UPDATE issue SET status='pending_review' "
+                            "WHERE repo_key=? AND issue_number=?", (_REPO, _NUM))
+        db.commit()
+    _seed_events(_ALL_COMPLETED, qa_result="pass")
+    with patch.object(qa_gate, "gate_or_annotate",
+                      wraps=qa_gate.gate_or_annotate) as _g, \
+            patch("src.vcs.api_client.VcsApiClient"):
+        _res = _review_pass(_REPO, _NUM, target="done", evidence="test")
+    assert _res == "passed_done", _res
+    assert _g.call_count == 1, _g.call_count
+
+
+def test_merge_reuses_single_pull_detail_request():
+    """合入路径 base 快照与 QA 门禁复用同一次 PR 详情请求。"""
+    _clear_annotation_cache()
+    _seed()
+    _seed_events(_ALL_COMPLETED, qa_result="pass")
+    from src.api import git_repo_api
+    from src.api.git_repo_api import PRMergeBody, merge_pull
+
+    _get_calls = []
+
+    def _fake_vcs_req(provider, method, url, token, body=None):
+        if method == "GET" and "/pulls/9" in url:
+            _get_calls.append(url)
+            return {"number": 9, "body": "close #1739", "state": "open",
+                    "base": {"ref": "weekly-mys", "sha": "b"}}
+        return {"merged": True, "sha": "abc"}
+
+    with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
+            patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
+            patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
+            patch("src.api.merge_gate.run_post_merge_gate", return_value={"decision": "passed"}), \
+            patch("src.api.merge_gate.record_gate_log"), \
+            patch("src.vcs.api_client.VcsApiClient"):
+        _res = merge_pull("org", "issue1739", 9, PRMergeBody(), user={
+            "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
+    assert _res.get("merged") is True
+    assert len(_get_calls) == 1, _get_calls
