@@ -953,6 +953,30 @@ def test_classify_qa_conclusion_real_pass_summary_stays_pass():
     assert classify_qa_conclusion("completed", "Spec: 0 项需修复；结论：通过") == "pass"
 
 
+def test_classify_qa_conclusion_standards_only_summary_is_fail():
+    """仅有 Standards 轴失败项时也必须判 fail（Standards-only 汇总不可放行）。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _fail_cases = [
+        "Standards: 3 项（命名不规范、样板重复、缺换行）；Spec: 0 项",
+        "Standards: 3 项（命名不规范、样板重复、缺换行）；Spec: 0 项；结论：通过",
+        "Standards 2 项（硬违规：命名不规范）；Spec: 0 项",
+    ]
+    for _case in _fail_cases:
+        assert classify_qa_conclusion("completed", _case) == "fail", _case
+
+
+def test_classify_qa_conclusion_explicit_pass_with_low_suggestions_is_pass():
+    """显式通过 + 仅建议/低判断项汇总不应误拦（AC3）。"""
+    from src.api.qa_gate import classify_qa_conclusion
+    _pass_cases = [
+        "Spec: 1 项建议（命名可优化）；结论：通过",
+        "Spec: 2 项（低：文档措辞建议）；结论：通过",
+        "Standards: 0 硬违规；Spec: 1 项建议；结论：通过",
+    ]
+    for _case in _pass_cases:
+        assert classify_qa_conclusion("completed", _case) == "pass", _case
+
+
 def test_classify_qa_conclusion_english_quantifier_negation_is_fail():
     """英文量词否定（none/no/0 ... passed / not all of them passed）必须判 fail。"""
     from src.api.qa_gate import classify_qa_conclusion
