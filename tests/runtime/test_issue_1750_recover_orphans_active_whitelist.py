@@ -4,9 +4,9 @@
 - A1 白名单内静默任务 → skipped_active，attempts 不变、仍 running（优先于年龄闸门/窗口）
 - A2 真孤儿（启动注册、空白名单）→ 首次调用即回收
 - A3 白名单命中 → runtime_id 不变（不会转池被异机认领，同机不双跑）
-- A4 attempts 单次 +1（SQLite 后端参数化更新，不出现 +2）
+- A4 attempts 单次 +1（SQLite 内存库实测；MySQL 侧由同一参数化 SQL 保证）
 - A5 周期重注册不回收 / rid 变化带白名单回收 / 启动空白名单回收
-- A6 E2E：跨一次周期重注册后仍 running，最终 completed
+- A6 loop 级模拟：跨一次周期重注册判定后仍 running，完成路径收敛为 completed
 """
 import asyncio
 import os
@@ -156,7 +156,11 @@ def test_a3_whitelisted_task_not_pooled(setup_db):
 # ===== A4：attempts 单次 +1 =====
 
 def test_a4_attempts_single_increment(setup_db):
-    """每次回收 attempts 仅 +1（参数化更新，不出现 SQLite/MySQL 分叉的 +2）。"""
+    """每次回收 attempts 仅 +1（SQLite 内存库实测；MySQL 侧由同一参数化 SQL 保证）。
+
+    服务端回收 SQL 全参数化且两后端共用同一语句，SQLite 实测单次 +1 即可证明
+    不再出现 MySQL 同 UPDATE 读新值的 +2 分叉；MySQL 实库执行不在本用例范围内。
+    """
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots) VALUES (704,'codex','online',1,1)")
     _seed(c, "t_att", runtime_id=704, started_seconds_ago=3600, messages_ago=None)
@@ -205,14 +209,25 @@ def test_a5_periodic_reregister_does_not_recover(setup_db):
     assert client.recovered == [], "周期重注册不得回收"
 
 
-def test_a5_startup_empty_whitelist_recovers(setup_db):
-    """启动注册（默认 recover_orphans=True）→ 空白名单回收上次遗留。"""
+def test_a5_reregister_defaults_to_no_recovery(setup_db):
+    """_reregister 默认不回收：生产启动路径不经过它，重注册调用方必须显式声明。"""
     from src.domains.runtime.engine import agent as agent_mod
     client = _FakeClient([801])
     with patch.object(agent_mod, "_discover_local_runtimes", return_value=[]):
         result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="dev"))
     assert result[0] == [801]
-    assert client.recovered == [(801, None)], "启动回收应空白名单"
+    assert client.recovered == [], "默认 recover_orphans=False，不得无显式声明回收"
+
+
+def test_a5_explicit_empty_whitelist_recovers(setup_db):
+    """显式 recover_orphans=True → 空白名单回收（开关语义；启动路径在 main() 直接调用）。"""
+    from src.domains.runtime.engine import agent as agent_mod
+    client = _FakeClient([801])
+    with patch.object(agent_mod, "_discover_local_runtimes", return_value=[]):
+        result = asyncio.run(agent_mod._reregister(
+            client, prev_installed=[], device_name="dev", recover_orphans=True))
+    assert result[0] == [801]
+    assert client.recovered == [(801, None)], "显式要求回收时应空白名单"
 
 
 def test_a5_rid_change_recovers_with_whitelist(setup_db):
@@ -236,13 +251,9 @@ def test_a5_rid_unchanged_does_not_recover(setup_db):
 
 
 def test_a5_heartbeat_failure_reregister_keeps_whitelist(setup_db):
-    """心跳失败重注册是同进程重连：不得空白名单无条件回收；rid 变化时携带白名单。
-
-    审查修复（PR #1096 Required）：该路径此前沿用默认 recover_orphans=True 空白名单
-    无条件回收，本机 active_tasks 中的静默型长任务会被误回收转池导致双跑。
-    """
+    """心跳失败重注册是同进程重连：不得空白名单无条件回收；rid 变化时携带白名单。"""
     from unittest.mock import AsyncMock
-    from src.runtime import agent as agent_mod
+    from src.domains.runtime.engine import agent as agent_mod
 
     async def _drive(coro, duration=0.25):
         t = asyncio.ensure_future(coro)
@@ -268,10 +279,15 @@ def test_a5_heartbeat_failure_reregister_keeps_whitelist(setup_db):
     client.recover_orphans.assert_awaited_with(2001, active_task_ids=["t_hb_live"])
 
 
-# ===== A6：E2E 跨周期仍 running 最终 completed =====
+# ===== A6：loop 级模拟跨周期仍 running 最终 completed =====
 
-def test_a6_silent_task_survives_periodic_cycle_then_completes(setup_db):
-    """静默长任务跨一次周期重注册：不回收 → 白名单调用 skipped_active → 最终 completed。"""
+def test_a6_silent_task_survives_periodic_cycle_loop_simulation(setup_db):
+    """loop 级模拟（非 E2E）：静默任务跨一次周期重注册判定仍 running，完成路径收敛 completed。
+
+    本用例在判定链组合级别验证：直接调用 _recover_orphans_on_rid_change 模拟周期
+    判定，再直接调用 recover_orphans 端点验证白名单，最后模拟完成路径写 completed。
+    不经过 _run_loop / HTTP / worker 真实链路，故不属于 E2E。
+    """
     from src.domains.runtime.engine import agent as agent_mod
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots) VALUES (1001,'codex','online',1,1)")
@@ -335,11 +351,19 @@ def _client():
 
 def test_client_recover_orphans_default_body_empty():
     c = _client()
-    asyncio.run(c.recover_orphans(5))
+    out = asyncio.run(c.recover_orphans(5))
     assert c._session.request.call_args.kwargs["json"] == {}
+    assert out == {}
 
 
 def test_client_recover_orphans_passes_whitelist():
     c = _client()
     asyncio.run(c.recover_orphans(5, active_task_ids=["t1", "t2"]))
     assert c._session.request.call_args.kwargs["json"] == {"active_task_ids": ["t1", "t2"]}
+
+
+def test_client_recover_orphans_returns_response_dict():
+    c = _client()
+    c._session.request.return_value = _Ctx(_FakeResp(body={"skipped_active": ["t1"]}))
+    out = asyncio.run(c.recover_orphans(5, active_task_ids=["t1"]))
+    assert out["skipped_active"] == ["t1"]

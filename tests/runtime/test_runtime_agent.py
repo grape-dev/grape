@@ -348,6 +348,7 @@ class TestRunLoop:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
         m_rr.assert_awaited()
+        assert m_rr.await_args.kwargs.get("recover_orphans") is False
 
     def test_claims_and_executes(self):
         client = AsyncMock()
