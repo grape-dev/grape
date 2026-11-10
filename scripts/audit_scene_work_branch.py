@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from src.session_manager import db, db_lock  # noqa: E402
-from src.runtime.repogit import list_repo_branch_names  # noqa: E402
+from src.runtime.repogit import list_repo_branches, pick_default_branch  # noqa: E402
 
 
 def _scene_rows(repo_key: str = "", limit: int = 0) -> list[dict]:
@@ -41,15 +41,6 @@ def _scene_rows(repo_key: str = "", limit: int = 0) -> list[dict]:
         rows = c.execute(sql, params).fetchall()
     return [{"scene_id": r[0], "name": r[1], "repo_key": r[2],
              "advanced_options": r[3]} for r in rows]
-
-
-def _suggest_default(branches: set, default_branch: str) -> str:
-    if default_branch and default_branch in branches:
-        return default_branch
-    for cand in ("main", "master"):
-        if cand in branches:
-            return cand
-    return sorted(branches)[0] if branches else (default_branch or "main")
 
 
 def scan(repo_key: str = "", limit: int = 0) -> dict:
@@ -77,7 +68,7 @@ def scan(repo_key: str = "", limit: int = 0) -> dict:
         checked += 1
         rk = row["repo_key"]
         if rk not in branch_cache:
-            branch_cache[rk] = list_repo_branch_names(rk)
+            branch_cache[rk] = list_repo_branches(rk)
         branches, default_branch = branch_cache[rk]
         item = {
             "scene_id": row["scene_id"],
@@ -90,7 +81,7 @@ def scan(repo_key: str = "", limit: int = 0) -> dict:
             unknown.append(item)
         elif wb not in branches:
             item["status"] = "invalid"
-            item["suggested_branch"] = _suggest_default(branches, default_branch)
+            item["suggested_branch"] = pick_default_branch(branches, default_branch)
             invalid.append(item)
     return {"invalid": invalid, "unknown": unknown, "checked": checked,
             "scenes_total": len(rows)}

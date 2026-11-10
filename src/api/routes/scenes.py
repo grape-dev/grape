@@ -1223,10 +1223,13 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
             log.info(f"Branch created: {body.branch_name} in GitHub {owner}/{repo}")
             # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
             _branches_cache_invalidate(owner, repo)
-            # Issue #1841：同步失效 work_branch 校验缓存（保存校验/注入判定立即看到新分支）
+            # Issue #1841：刷新本地 mirror + 失效缓存（保存校验/注入判定立即看到新分支）
             try:
-                from src.runtime.repogit import invalidate_branch_list_cache
-                invalidate_branch_list_cache(_resolve_repo_key(f"{owner}/{repo}"))
+                from src.runtime.repogit import (invalidate_branch_list_cache,
+                                                 refresh_repo_branch_mirror)
+                _wb_rk = _resolve_repo_key(f"{owner}/{repo}")
+                refresh_repo_branch_mirror(_wb_rk, body.branch_name.strip(), token=token)
+                invalidate_branch_list_cache(_wb_rk)
             except Exception:
                 pass
             return {"name": body.branch_name.strip(), "message": "分支已创建"}
@@ -1262,10 +1265,13 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         log.info(f"Branch created: {body.branch_name} in {owner}/{repo}")
         # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
         _branches_cache_invalidate(owner, repo)
-        # Issue #1841：同步失效 work_branch 校验缓存（保存校验/注入判定立即看到新分支）
+        # Issue #1841：刷新本地 mirror + 失效缓存（保存校验/注入判定立即看到新分支）
         try:
-            from src.runtime.repogit import invalidate_branch_list_cache
-            invalidate_branch_list_cache(_resolve_repo_key(f"{owner}/{repo}"))
+            from src.runtime.repogit import (invalidate_branch_list_cache,
+                                             refresh_repo_branch_mirror)
+            _wb_rk = _resolve_repo_key(f"{owner}/{repo}")
+            refresh_repo_branch_mirror(_wb_rk, body.branch_name.strip(), token=token)
+            invalidate_branch_list_cache(_wb_rk)
         except Exception:
             pass
         return {"name": body.branch_name.strip(), "message": "分支已创建"}
