@@ -7,4 +7,4 @@
 - [x] BOT_USERNAME 空值输出含 exec id + repo 的 WARNING
 - [x] 回归 #573 注入用例与 autopilot 引擎过滤用例
 - [x] 自审查（代码质量 + 开源前置增量检查）
-- [ ] 建 PR + Issue 评论 + A2A 通知 QA
+- [x] 建 PR #1124 + Issue 评论 + A2A 通知 QA（seq=63156）
