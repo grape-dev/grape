@@ -108,6 +108,7 @@ def _plain_evt(scene_id=STALE):
 def test_redispatch_drops_stale_scene_after_cross_scene_handoff():
     from src.api.routes.events import _redispatch_scene_override
     from src.api.event_pipeline import build_task_env
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     evt = _plain_evt(STALE)
     assert _redispatch_scene_override(evt) == ""
@@ -159,6 +160,7 @@ def test_pr_subscription_env_still_uses_subscription_scene():
 
 def test_reconcile_task_scene_env_corrects_stale_snapshot():
     from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     _seed_task("t_1745_stale", f"#{N}", event_type="a2a_event")
     env = {"GRAPE_SCENE_ID": STALE, "KEEP": "1"}
@@ -170,6 +172,7 @@ def test_reconcile_task_scene_env_corrects_stale_snapshot():
 
 def test_reconcile_task_scene_env_skips_pr_subscription_pseudo_id():
     from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     _seed_task("t_1745_pr_pseudo", f"#pr_42_{SUB}", event_type="a2a_event")
     env = {"GRAPE_SCENE_ID": SUB}
@@ -180,6 +183,7 @@ def test_reconcile_task_scene_env_skips_pr_subscription_pseudo_id():
 
 def test_reconcile_task_scene_env_skips_pr_event_main_route():
     from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     _seed_task("t_1745_pr_event", f"#{N}", event_type="pull_request_updated")
     env = {"GRAPE_SCENE_ID": SUB}
@@ -191,6 +195,7 @@ def test_reconcile_task_scene_env_skips_pr_event_main_route():
 def test_reconcile_task_scene_env_skips_pr_subscription_title_real_issue():
     """#427 既有形态：真实关联 Issue 号 + a2a_event + 「PR 订阅」标题，执行前不得校正。"""
     from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     _seed_event(1745002, event_type="a2a_event", title="PR 订阅 QA")
     _seed_task("t_1745_pr_title", f"#{N}", event_type="a2a_event", event_seq=1745002)
@@ -206,19 +211,38 @@ def test_is_pr_subscription_task_event_seq_title_path():
     assert _is_pr_subscription_task(f"#{N}", 1745003, "a2a_event") is True
 
 
-def test_reconcile_task_scene_env_no_fallback_when_issue_unbound():
-    """Issue 未绑定场景：不回退仓库默认场景，按「未选定=空串」口径清空陈旧快照。"""
+def test_reconcile_task_scene_env_unbound_falls_back_to_dev_scene():
+    """Issue 未绑定场景：与 DIRECT(`_resolve_scene_id`) 同源回退仓库默认场景。
+
+    #1745 复审口径变更：原实现清成空串，导致同一任务本机执行拿 dev_scene、
+    远端 worker 拿空串（口径分裂）。现两条路径统一回退 dev_scene；
+    dev_scene 也为空/场景已失效时才回到「未选定=空串」。
+    """
     from src.api.event_pipeline import reconcile_task_scene_env
-    _seed_managed_repo("repo-default-scene")
+    _seed_managed_repo(TARGET)
+    _seed_scene(TARGET)
+    _seed_issue(N, "")
     _seed_task("t_1745_unbound", f"#{N}", event_type="issue_comment")
     env = {"GRAPE_SCENE_ID": STALE}
     out = reconcile_task_scene_env("t_1745_unbound", env)
+    assert out == TARGET
+    assert env["GRAPE_SCENE_ID"] == TARGET
+
+
+def test_reconcile_task_scene_env_unbound_without_dev_scene_clears():
+    """未绑定且仓库无默认场景 → 按「未选定=空串」清空陈旧快照。"""
+    from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_managed_repo("")
+    _seed_task("t_1745_unbound2", f"#{N}", event_type="issue_comment")
+    env = {"GRAPE_SCENE_ID": STALE}
+    out = reconcile_task_scene_env("t_1745_unbound2", env)
     assert out == ""
     assert env["GRAPE_SCENE_ID"] == ""
 
 
 def test_reconcile_task_scene_env_noop_when_already_truth():
     from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     _seed_task("t_1745_same", f"#{N}", event_type="issue_comment")
     env = {"GRAPE_SCENE_ID": TARGET}
@@ -302,6 +326,7 @@ def test_reconcile_task_scene_env_logs_actionable_diagnostic(monkeypatch):
     msgs = []
     monkeypatch.setattr(event_pipeline.log, "info",
                         lambda msg, *a, **k: msgs.append(str(msg)))
+    _seed_scene(TARGET)
     _seed_issue(N, TARGET)
     _seed_task("t_1745_diag", f"#{N}", event_type="a2a_event")
     env = {"GRAPE_SCENE_ID": STALE}

@@ -23,6 +23,17 @@ DEFAULT_ERROR_POLICY = "deny"
 ERROR_POLICIES = ("deny", "allow")
 
 
+def _env_error_policy() -> str:
+    """入口未显式传 on_error 时的默认策略（Issue #1758 复审：给运维留一个降级开关）。
+
+    `GRAPE_SCENE_SCOPE_ON_ERROR=allow` 时，技能 scope 查询异常按放行处理（记日志 +
+    source=db_error），用于 DB 故障期间避免整仓派发被 fail-closed 打死；默认仍是 deny。
+    """
+    import os
+    value = (os.environ.get("GRAPE_SCENE_SCOPE_ON_ERROR") or "").strip().lower()
+    return value if value in ERROR_POLICIES else DEFAULT_ERROR_POLICY
+
+
 def _node_skill_name(node: dict) -> str:
     return str(node.get("skill") or "").strip()
 
@@ -162,7 +173,7 @@ def _scope_mismatch_reason(skill: str, actual_scope: str,
 
 
 def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
-             *, scene_id: str = "", on_error: str = DEFAULT_ERROR_POLICY,
+             *, scene_id: str = "", on_error: str = "",
              cache: dict | None = None) -> dict:
     """Judge whether a scene node may reference its skill under scene scope.
 
@@ -177,7 +188,7 @@ def evaluate(node, repo_key: str, scene_scope: str = SCENE_SCOPE_REPO,
     node = node if isinstance(node, dict) else {}
     expected_scope = scene_scope or SCENE_SCOPE_REPO
     if on_error not in ERROR_POLICIES:
-        on_error = DEFAULT_ERROR_POLICY
+        on_error = _env_error_policy()
     skill = _node_skill_name(node)
     skill_id = _node_skill_id(node)
     node_tag = _node_label(node)

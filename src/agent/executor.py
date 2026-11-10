@@ -651,12 +651,14 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
         else:
             log.warning(f"{label}NO user platform token available for chat; VCS ops go through grape CLI + session token")
         # chat env 兜底（Issue #1757）：仅补缺失键，env_extra 显式值优先，绝不覆盖。
+        # Issue #1757 复审：仓库身份统一走 derive_repo_identity（与 chat_repo_env / 事件链同源），
+        # 不再自己调 split_owner_repo，避免两份派生逻辑漂移。
         if repo_key and not repo_key.startswith("chat:") and "REPO_OWNER" not in env:
             try:
-                from src.repo_key import split_owner_repo
-                owner, name = split_owner_repo(repo_key)
+                from src.repo_key import derive_repo_identity
+                full_name, owner, name = derive_repo_identity(repo_key, repo_key)
                 if owner and name:
-                    env.setdefault("REPO_FULL_NAME", f"{owner}/{name}")
+                    env.setdefault("REPO_FULL_NAME", full_name or repo_key)
                     env.setdefault("REPO_OWNER", owner)
                     env.setdefault("REPO_NAME", name)
             except Exception as e:

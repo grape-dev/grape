@@ -1443,14 +1443,24 @@ def _cleanup_auto_transferred_attachments(repo_key: str, issue_number) -> int:
         from src.storage import get_storage
         storage = get_storage()
         if storage:
-            for _key in storage.list_keys(_attach_obs_key(_owner, _rname, _num, "")):
-                if _is_auto_transferred_attachment(os.path.basename(str(_key))):
-                    if storage.delete_object(_key):
-                        removed += 1
-            if removed:
-                log.info(f"Attachment cleanup (auto-transferred): {removed} object(s) "
-                         f"for {_owner}/{_rname}/{_num}")
-            return removed
+            # Issue #1748 复审：OBS 模式下 list_keys + 每对象 delete_object 都是网络往返
+            # （N 个文件 ≈ N+1 RTT），不能挂在「关闭/取消 issue」的同步链路上 →
+            # 丢给后台线程执行，接口立即返回（清理失败只丢日志，不影响业务）。
+            def _reap_obs() -> None:
+                _n = 0
+                try:
+                    for _key in storage.list_keys(_attach_obs_key(_owner, _rname, _num, "")):
+                        if _is_auto_transferred_attachment(os.path.basename(str(_key))):
+                            if storage.delete_object(_key):
+                                _n += 1
+                except Exception as _e:
+                    log.warning(f"Attachment cleanup (obs, async) failed: {_e}")
+                if _n:
+                    log.info(f"Attachment cleanup (auto-transferred): {_n} object(s) "
+                             f"for {_owner}/{_rname}/{_num}")
+            import threading
+            threading.Thread(target=_reap_obs, name="attach-reap", daemon=True).start()
+            return 0
         _dir = _attach_base_dir(_owner, _rname, _num)
         if os.path.isdir(_dir):
             for _name in os.listdir(_dir):

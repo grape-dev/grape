@@ -921,6 +921,47 @@ def _inject_bot_agent_env(env_extra: dict, repo_key: str, agent_type: str) -> No
 
 _PR_URL_NUMBER_RE = re.compile(r"/(?:merge_requests|pulls|pull)/(\d+)(?:[#/?]|$)")
 
+# Issue #1802 复审：URL 兜底取到的 PR 号做一次存在性校验（issue 反馈建议第 2 条）。
+# 只对 `_pr_source == "url"` 这条罕见路径生效，避免给正常 PR 事件加网络依赖。
+_PR_EXISTS_CACHE: dict = {}
+_PR_EXISTS_TTL = 60.0
+_PR_EXISTS_MAX = 128
+
+
+def _pr_number_exists(repo_key: str, pr_num: str) -> bool:
+    """PR 号是否真实存在（仓库内）。仅 URL 来源调用，结果 60s 缓存。
+
+    只有明确的 404/未找到才判不存在；网络异常、无 token、其它错误一律按「存在」处理，
+    避免把一次抖动变成「PR_NUMBER 消失」的新故障。
+    """
+    if not repo_key or not str(pr_num or "").isdigit():
+        return True
+    key = (repo_key, str(pr_num))
+    now = time.time()
+    cached = _PR_EXISTS_CACHE.get(key)
+    if cached and now - cached[0] < _PR_EXISTS_TTL:
+        return cached[1]
+    exists = True
+    try:
+        from src.user.db import get_gitcode_token
+        from src.vcs.api_client import create_client
+        token = get_gitcode_token(repo_key=repo_key) or ""
+        if token:
+            resp = create_client(repo_key, token).get_pr(int(pr_num))
+            if not isinstance(resp, dict) or not resp:
+                exists = False
+            elif "error" in resp:
+                err = str(resp.get("error") or "").lower()
+                exists = not any(m in err for m in ("404", "not found", "不存在"))
+    except Exception as e:
+        log.info(f"Pipeline env: PR #{pr_num} existence check skipped ({e})")
+        exists = True
+    if len(_PR_EXISTS_CACHE) >= _PR_EXISTS_MAX:
+        for _k in list(_PR_EXISTS_CACHE.keys())[:_PR_EXISTS_MAX // 2]:
+            _PR_EXISTS_CACHE.pop(_k, None)
+    _PR_EXISTS_CACHE[key] = (now, exists)
+    return exists
+
 
 def _numeric_value(value) -> str:
     """返回去 # 前缀后的纯数字字符串；非数字/空返回空串。"""
@@ -1124,6 +1165,10 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     _payload = _as_payload_dict(evt.get("payload", {}))
     _event_type = str(evt.get("type", "") or evt.get("event_type", "") or "")
     _pr_num, _pr_source = _extract_pr_number(evt, _payload, _event_type)
+    if _pr_num and _pr_source == "url" and not _pr_number_exists(repo_key, _pr_num):
+        log.warning(f"Pipeline env: PR #{_pr_num} resolved from event URL does not exist "
+                    f"(issue=#{_issue_num or '-'} repo={repo_key}); skip PR_NUMBER injection")
+        _pr_num, _pr_source = "", ""
     if _pr_num:
         env_extra["PR_NUMBER"] = _pr_num
         if _pr_source == "url":
@@ -4101,6 +4146,14 @@ def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
             scene_id = (row[0] if row else "") or ""
         except Exception:
             scene_id = ""
+    # Issue #1745 复审修复：绑定的场景已被删除时，不注入幽灵 scene_id（scenes detail 必 404），
+    # 回退仓库默认场景；也不可用则按「未判定=空串」返回，与 reconcile 侧同源。
+    if scene_id and not _scene_binding_valid(repo_key, scene_id):
+        log.warning(f"[scene-env] resolved scene no longer resolvable "
+                    f"(scene={scene_id} repo={repo_key}); falling back to dev_scene")
+        scene_id = _repo_dev_scene(repo_key) or ""
+        if scene_id and not _scene_binding_valid(repo_key, scene_id):
+            scene_id = ""
     return scene_id
 
 
@@ -4124,10 +4177,54 @@ def _issue_authoritative_scene(repo_key: str, issue_id: str = ""):
     try:
         from src.api.session_store import get_issue_bound_scene
         _sid, _ = get_issue_bound_scene(repo_key, _iid)
-        return _sid or ""
     except Exception:
         log.warning(f"[scene-env] authoritative scene lookup failed: "
                     f"issue={_iid} repo={repo_key}")
+        return None
+    if not _sid:
+        return ""
+    # Issue #1745 复审修复：绑定场景已删除时不得继续注入幽灵 scene_id
+    # （agent 拿它调 scenes detail 必 404，症状与原报障相同）→ 按「未绑定」处理。
+    if not _scene_binding_valid(repo_key, _sid):
+        log.warning(f"[scene-env] issue binding points to a deleted scene "
+                    f"(scene={_sid} issue={_iid} repo={repo_key}); treat as unbound")
+        return ""
+    return _sid
+
+
+def _scene_binding_valid(repo_key: str, scene_id: str) -> bool:
+    """场景是否仍可解析（仓库副本 / 官方模板 / 内置 pipelines.json）。
+
+    Issue #1745 复审：只用 `get_pipeline_config` 这一条解析链（与 scenes detail 同源），
+    避免另造一份存在性口径；解析异常一律按「可用」处理，不因 DB 抖动误清空场景。
+    """
+    if not scene_id:
+        return False
+    try:
+        from src.api.pipeline_config import get_pipeline_config
+        cfg = get_pipeline_config(scene_id, repo_key)
+    except Exception as e:
+        log.warning(f"[scene-env] scene existence check failed (treat as valid): "
+                    f"scene={scene_id} repo={repo_key}: {e}")
+        return True
+    if not cfg:
+        return False
+    # 解析链回落到了别的场景（如 default/full fallback）→ 该 scene_id 实际不存在
+    return not cfg.get("fallback")
+
+
+def _repo_dev_scene(repo_key: str):
+    """仓库默认开发场景（managed_repos.dev_scene）；查询异常返回 None（未判定）。"""
+    if not repo_key:
+        return None
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,)).fetchone()
+        return (row[0] if row else "") or ""
+    except Exception as e:
+        log.warning(f"[scene-env] dev_scene lookup failed for {repo_key}: {e}")
         return None
 
 
@@ -4250,6 +4347,14 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _authoritative = _issue_authoritative_scene(_repo_key, _issue_id)
     if _authoritative is None:
         return _snapshot
+    if not _authoritative:
+        # Issue #1745 复审修复：未绑定场景时与 DIRECT(`_resolve_scene_id`) 同源，
+        # 回退仓库默认场景（dev_scene），不再把快照清成空串——否则同一任务
+        # 本机执行拿 dev_scene、远端 worker 拿空串，出现口径分裂。
+        _dev = _repo_dev_scene(_repo_key)
+        if _dev is None:
+            return _snapshot
+        _authoritative = _dev
     if _authoritative != _snapshot:
         env["GRAPE_SCENE_ID"] = _authoritative
         log.info(scene_env_mismatch_diagnostic(_snapshot, _authoritative) +
