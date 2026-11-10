@@ -14,32 +14,23 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 def _redispatch_scene_override(evt: dict) -> str:
     """重派时是否沿用事件行 scene_id 作为 env 场景 override（Issue #1745）。
 
-    仅 PR 订阅事件需要 override（Issue #427：订阅场景可不同于关联 Issue 场景）；
-    普通 Issue/A2A/评论事件在跨场景转交后，事件行 scene_id 仍是源场景，若继续
-    作为 override 会覆盖 Issue 当前归属场景，导致注入的 GRAPE_SCENE_ID 陈旧。
-    普通事件一律返回空串，交由 build_task_env 按 issue_id 重新解析真值。
+    仅 PR 订阅事件需要 override（Issue #427：订阅场景可不同于关联 Issue 场景），
+    判定与执行前校正共用 `_is_pr_subscription_task` 单一入口。普通 Issue/A2A/评论
+    事件在跨场景转交后，事件行 scene_id 仍是源场景，若继续作为 override 会覆盖
+    Issue 当前归属场景，导致注入的 GRAPE_SCENE_ID 陈旧；普通事件一律返回空串，
+    交由 build_task_env 按 issue_id 重新解析真值。
     """
     _scene = (evt.get("scene_id") or "").strip()
     if not _scene:
         return ""
-    _iid = str(evt.get("issue_id") or "")
-    if _iid.lstrip("#").startswith("pr_"):
+    from src.api.event_pipeline import _is_pr_subscription_task
+    if _is_pr_subscription_task(
+            issue_id=evt.get("issue_id") or "",
+            event_type=evt.get("event_type") or "",
+            title=evt.get("title") or ""):
         return _scene
-    try:
-        from src.api.routing import PR_EVENT_TYPES
-    except Exception:
-        PR_EVENT_TYPES = set()
-    if (evt.get("event_type") or "") in PR_EVENT_TYPES:
-        return _scene
-    if str(evt.get("title") or "").startswith("PR 订阅"):
-        return _scene
-    # 普通事件：事件行场景可能是转交前源场景，丢弃 override，改用 Issue 归属场景（真值）
-    from src.api.event_pipeline import _issue_authoritative_scene
-    _repo_key = evt.get("repo_key") or ""
-    _authoritative = _issue_authoritative_scene(_repo_key, _iid) if _repo_key else ""
-    if _authoritative and _authoritative != _scene:
-        log.info(f"[redispatch] seq={evt.get('seq')} drop stale event scene override: "
-                 f"event_scene={_scene}, issue_bound={_authoritative}, issue={_iid}")
+    log.info(f"[redispatch] seq={evt.get('seq')} drop event scene override: "
+             f"event_scene={_scene}, issue={evt.get('issue_id') or ''}")
     return ""
 
 

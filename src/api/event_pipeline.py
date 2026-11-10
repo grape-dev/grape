@@ -4109,14 +4109,12 @@ def _issue_authoritative_scene(repo_key: str, issue_id: str = "") -> str:
 
     与 `_resolve_scene_id` 的区别：只读真实绑定（issue_state → issue 单表），
     空时**不**回退仓库默认场景，用于识别 `GRAPE_SCENE_ID` 与 Issue 归属的
-    不一致（诊断/执行前校正）。PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）场景编码
-    在 id 内，视为真实绑定。
+    不一致（诊断/执行前校正）。PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）由
+    `get_issue_bound_scene` 统一解析，不在此处重复手写。
     """
     _iid = str(issue_id or "")
     if not _iid:
         return ""
-    if _iid.lstrip("#").startswith("pr_"):
-        return _resolve_scene_id(repo_key, _iid)
     try:
         from src.api.session_store import get_issue_bound_scene
         _sid, _ = get_issue_bound_scene(repo_key, _iid)
@@ -4136,32 +4134,41 @@ def scene_env_mismatch_diagnostic(injected: str, authoritative: str) -> str:
     )
 
 
-def _is_pr_subscription_task(repo_key: str, issue_id: str = "", event_seq: int = 0,
-                             event_type: str = "") -> bool:
-    """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 校正时保留订阅场景）。
+_PR_SUB_ISSUE_ID_RE = re.compile(r"^#?pr_\d+_")
 
-    三条命中路径：
+
+def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
+                             event_type: str = "", title: str = "") -> bool:
+    """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 唯一判定入口）。
+
+    四条命中路径：
     1. issue_id 为 PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）；
-    2. agent_tasks.event_type 为 PR 事件类型（PR 关联 Issue 的主路由订阅任务）；
-    3. 关联 events 行的 event_type 为 PR 事件类型（agent_tasks.event_type 可能为空）。
+    2. event_type 为 PR 事件类型（PR 关联 Issue 的主路由订阅任务）；
+    3. 事件标题为「PR 订阅」派发（真实关联 Issue 号 + a2a_event 的既有形态，Issue #427）；
+    4. 关联 events 行的 event_type / title 命中 2/3（agent_tasks 可能未带标题）。
     """
-    _iid = str(issue_id or "")
-    if _iid.lstrip("#").startswith("pr_"):
+    if _PR_SUB_ISSUE_ID_RE.match(str(issue_id or "")):
         return True
     try:
         from src.api.routing import PR_EVENT_TYPES
     except Exception:
-        return False
+        PR_EVENT_TYPES = set()
     if (event_type or "") in PR_EVENT_TYPES:
+        return True
+    if str(title or "").startswith("PR 订阅"):
         return True
     if event_seq:
         try:
             from src.session_manager import db, db_lock
             with db_lock:
                 _row = db.cursor().execute(
-                    "SELECT event_type FROM events WHERE seq=?", (event_seq,)).fetchone()
-            if _row and (_row[0] or "") in PR_EVENT_TYPES:
-                return True
+                    "SELECT event_type, title FROM events WHERE seq=?",
+                    (event_seq,)).fetchone()
+            if _row:
+                if (_row[0] or "") in PR_EVENT_TYPES:
+                    return True
+                if str(_row[1] or "").startswith("PR 订阅"):
+                    return True
         except Exception:
             pass
     return False
@@ -4173,8 +4180,9 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     worker 执行前拉取服务端最新 env（`GET /runtimes/{id}/tasks/{task_id}/env`），
     此前只同步 AK/SK 与会话 token，`GRAPE_SCENE_ID` 仍是入队时快照。跨场景转交后，
     转交前入队的任务（或重派沿用了源事件场景的任务）会拿到源场景。此处在执行前按
-    `agent_tasks → issue 当前归属场景`（与 `issues detail.scene_id` 同源）重算并覆盖
-    陈旧快照；PR 订阅任务保持订阅场景语义不校正。
+    `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
+    `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
+    PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理。
 
     返回校正后的 scene_id（无需校正时为快照原值）。
     """
@@ -4197,18 +4205,13 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _event_type = _row[3] or ""
     if not _repo_key or not _issue_id:
         return _snapshot
-    if _is_pr_subscription_task(_repo_key, _issue_id, _event_seq, _event_type):
+    if _is_pr_subscription_task(_issue_id, _event_seq, _event_type):
         return _snapshot
-    _authoritative = _resolve_scene_id(_repo_key, _issue_id)
-    if _authoritative and _authoritative != _snapshot:
+    _authoritative = _issue_authoritative_scene(_repo_key, _issue_id)
+    if _authoritative != _snapshot:
         env["GRAPE_SCENE_ID"] = _authoritative
-        try:
-            from src.config import log
-            log.info(f"[scene-env] task={task_id} corrected stale GRAPE_SCENE_ID: "
-                     f"snapshot={_snapshot or '(empty)'} -> issue-bound={_authoritative} "
-                     f"(issue={_issue_id}, repo={_repo_key})")
-        except Exception:
-            pass
+        log.info(scene_env_mismatch_diagnostic(_snapshot, _authoritative) +
+                 f" [scene-env reconcile] task={task_id} issue={_issue_id} repo={_repo_key}")
         return _authoritative
     return _snapshot
 
@@ -4232,13 +4235,12 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
     """
     try:
         _override = (scene_id_override or "").strip()
-        _authoritative = _issue_authoritative_scene(repo_key, issue_id)
-        if _override and _authoritative and _override != _authoritative:
-            from src.config import log
-            log.info(f"[scene-env] override differs from issue-bound scene "
-                     f"(issue={issue_id}, repo={repo_key}): "
-                     f"override={_override}, issue-bound={_authoritative}; "
-                     f"PR subscription overrides are expected")
+        if _override:
+            _authoritative = _issue_authoritative_scene(repo_key, issue_id)
+            if _authoritative and _override != _authoritative:
+                log.info(scene_env_mismatch_diagnostic(_override, _authoritative) +
+                         f" [scene-env inject] issue={issue_id} repo={repo_key}; "
+                         f"PR subscription overrides are expected")
         scene_id = _override or _resolve_scene_id(repo_key, issue_id)
         env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
@@ -4246,7 +4248,6 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
         from src.session_manager import db, db_lock
         from src.scene_custom_env import is_upper_name, is_reserved_name, normalize_scope
         import json as _json
-        from src.config import log
         # 读 advanced_options 的 custom_fields
         with db_lock:
             c = db.cursor()
@@ -4272,7 +4273,6 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
                 continue
             env_extra[name] = str(f.get("value", ""))
     except Exception as _e:
-        from src.config import log
         log.warning(f"inject scene env failed: {_e}")
 
 
