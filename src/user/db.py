@@ -4881,19 +4881,9 @@ def get_business_api_port() -> str:
     （GRAPE_PORT > GRAPE_MAIN_PORT > 3000）。runtime 端口可能指向 runtime 网关
     （如 8083）而非业务 API（如 8081），故业务端口需独立配置。
     """
-    try:
-        from src.config import read_server_config
-        _v = str((read_server_config() or {}).get("task_business_api_port") or "").strip()
-        if _v:
-            return _v
-    except Exception:
-        pass
-    try:
-        _v = str(get_meta_value("task_business_api_port") or "").strip()
-        if _v:
-            return _v
-    except Exception:
-        pass
+    _v = _split_url_configured_value("task_business_api_port")
+    if _v:
+        return _v
     return str(os.environ.get("GRAPE_BUSINESS_PORT") or "").strip()
 
 
@@ -4905,13 +4895,13 @@ def _split_url_configured_value(key: str) -> str:
     """
     try:
         from src.config import read_server_config
-        _v = (read_server_config().get(key) or "").strip().rstrip("/")
+        _v = str(read_server_config().get(key) or "").strip().rstrip("/")
         if _v:
             return _v
     except Exception:
         pass
     try:
-        return (get_meta_value(key) or "").strip().rstrip("/")
+        return str(get_meta_value(key) or "").strip().rstrip("/")
     except Exception:
         return ""
 

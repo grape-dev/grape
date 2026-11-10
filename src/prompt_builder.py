@@ -100,8 +100,11 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
 # 失败即跳过并回退 server_base_url。
 _BUSINESS_PROBE_DEFAULT_TIMEOUT = 1.0   # 秒；整体探测预算（health + openapi 共享）
 _BUSINESS_PROBE_DEFAULT_TTL = 60.0      # 秒；同一候选基址的进程内探测结果缓存
+_BUSINESS_PROBE_CACHE_MAX = 64          # 缓存条数上限（长驻进程防无界增长）
 _business_probe_cache: dict = {}
 _business_probe_lock = threading.Lock()
+# 最近一次业务基址解析的命中来源（线程内，仅审计日志用；见 `_business_server_url_source`）
+_business_source_hint = threading.local()
 
 
 def _business_probe_timeout() -> float:
@@ -168,6 +171,20 @@ def _probe_openapi_family(base_url: str, timeout: float) -> bool:
     return any("/issues" in p or "/git-repo" in p for p in paths)
 
 
+def _remember_probe_result(base: str, ok: bool) -> None:
+    """写入探测缓存：先清过期项，再按最旧优先淘汰，保持条数上限。"""
+    now = time.monotonic()
+    ttl = _business_probe_ttl()
+    with _business_probe_lock:
+        _business_probe_cache[base] = (now, ok)
+        stale = [k for k, (ts, _) in _business_probe_cache.items() if now - ts >= ttl]
+        for k in stale:
+            _business_probe_cache.pop(k, None)
+        while len(_business_probe_cache) > _BUSINESS_PROBE_CACHE_MAX:
+            oldest = min(_business_probe_cache, key=lambda k: _business_probe_cache[k][0])
+            _business_probe_cache.pop(oldest, None)
+
+
 def _probe_business_api(base_url: str) -> bool:
     """探测候选基址是否承载业务 API（health 优先，失败再探 openapi 端点族）。
 
@@ -188,8 +205,7 @@ def _probe_business_api(base_url: str) -> bool:
         remaining = deadline - time.monotonic()
         if remaining >= 0.05:
             ok = _probe_openapi_family(base, remaining)
-    with _business_probe_lock:
-        _business_probe_cache[base] = (time.monotonic(), ok)
+    _remember_probe_result(base, ok)
     return ok
 
 
@@ -197,6 +213,78 @@ def _clear_business_probe_cache() -> None:
     """清空探测缓存（测试与配置热更新场景用）。"""
     with _business_probe_lock:
         _business_probe_cache.clear()
+
+
+def _log_safe(level: str, message: str) -> None:
+    """审计/诊断日志尽力而为，不因日志依赖异常影响基址解析。"""
+    try:
+        from src.config import log as _log
+        getattr(_log, level)(message)
+    except Exception:
+        pass
+
+
+def _redact_url(url: str) -> str:
+    """日志脱敏：抹掉 userinfo 与 query（可能含 token/密码），保留 scheme+host+path。"""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        if not parts.netloc:
+            return url
+        host = parts.hostname or ""
+        netloc = f"{host}:{parts.port}" if parts.port else host
+        return urlunsplit((parts.scheme, netloc, parts.path, "***" if parts.query else "", ""))
+    except Exception:
+        return "***"
+
+
+def _select_local_business_base(public_url: str) -> tuple[str, str]:
+    """本机/未知 locality 的候选链求值：本机业务端口 → server_base_url → 兜底。
+
+    返回 (基址, 命中来源)；探测失败的候选不认领来源标签，避免审计失真。
+    """
+    local_base = _local_business_base()
+    if _probe_business_api(local_base):
+        return local_base, "local_business_port"
+    _log_safe(
+        "info",
+        "prompt_builder: local business API candidate unreachable "
+        f"({_redact_url(local_base)}); falling back to server_base_url")
+    if public_url and _probe_business_api(public_url):
+        return public_url, "server_base_url"
+    _log_safe(
+        "warning",
+        "prompt_builder: no reachable business API candidate "
+        f"(local={_redact_url(local_base)}, "
+        f"server_base_url={_redact_url(public_url) or '-'}); "
+        "falling back to best-effort base")
+    # 没有任何候选通过探测：优先保留 server_base_url（运维显式声明），否则用本机业务端口。
+    if public_url:
+        return public_url, "unreachable_fallback"
+    return local_base, "unreachable_fallback"
+
+
+def _resolve_business_base(runtime_id: int = 0) -> tuple[str, str]:
+    """求值业务 API 基址并返回 (基址, 命中来源分支)。"""
+    try:
+        from src.user.db import get_business_api_url, get_business_api_url_explicit
+        # 显式配置体现运维意图，保持最高优先级且不做网络探测。
+        explicit = get_business_api_url_explicit()
+        if explicit:
+            return explicit, "explicit_config"
+        public_url = (get_business_api_url() or "").strip().rstrip("/")
+        local = _runtime_is_local(runtime_id)
+        if local is False:
+            return public_url, "server_base_url"
+        # local=True（本机）与 local=None（locality 查询异常，未知）都先探测本机候选，
+        # 避免未知分支直接落到 runtime 网关端口。
+        return _select_local_business_base(public_url)
+    except Exception:
+        pass
+    # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
+    return f"http://localhost:{_local_port()}", "exception_fallback"
 
 
 def _resolve_business_server_url(runtime_id: int = 0) -> str:
@@ -213,62 +301,17 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     远程 runtime 沿用 `server_base_url`（`get_business_api_url`），行为不变。
     单地址部署时 `worker_connect_url` 回退 `server_base_url`，与改造前等价。
     """
-    try:
-        from src.user.db import get_business_api_url, get_business_api_url_explicit
-        # 显式配置体现运维意图，保持最高优先级且不做网络探测。
-        explicit = get_business_api_url_explicit()
-        if explicit:
-            return explicit
-        public_url = (get_business_api_url() or "").strip().rstrip("/")
-        local = _runtime_is_local(runtime_id)
-        if local is None:
-            raise RuntimeError("runtime locality lookup failed")
-        if local:
-            local_base = _local_business_base()
-            if _probe_business_api(local_base):
-                return local_base
-            try:
-                from src.config import log as _log
-                _log.info(
-                    "prompt_builder: local business API candidate unreachable "
-                    f"({local_base}); falling back to server_base_url")
-            except Exception:
-                pass
-            if public_url and _probe_business_api(public_url):
-                return public_url
-            try:
-                from src.config import log as _log
-                _log.warning(
-                    "prompt_builder: no reachable business API candidate "
-                    f"(local={local_base}, server_base_url={public_url or '-'}); "
-                    "falling back to server_base_url")
-            except Exception:
-                pass
-            return public_url or local_base
-        return public_url
-    except Exception:
-        pass
-    # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
-    return f"http://localhost:{_local_port()}"
+    url, source = _resolve_business_base(runtime_id)
+    _business_source_hint.value = ((url or "").rstrip("/"), runtime_id, source)
+    return url
 
 
 def _business_server_url_source(url: str, runtime_id: int = 0) -> str:
-    """推导业务基址命中来源分支（仅用于审计日志，不做额外网络探测）。"""
-    try:
-        from src.user.db import get_business_api_url, get_business_api_url_explicit
-        _url = (url or "").rstrip("/")
-        explicit = (get_business_api_url_explicit() or "").rstrip("/")
-        if explicit and _url == explicit:
-            return "explicit_config"
-        if _runtime_is_local(runtime_id) is False:
-            return "server_base_url"
-        if _url == _local_business_base():
-            return "local_business_port"
-        if _url == (get_business_api_url() or "").rstrip("/"):
-            return "server_base_url"
-        return "exception_fallback"
-    except Exception:
-        return "unknown"
+    """返回业务基址命中来源分支（读取解析时记录的决策，不重复求值/探测）。"""
+    hint = getattr(_business_source_hint, "value", None)
+    if hint and hint[0] == (url or "").rstrip("/") and hint[1] == runtime_id:
+        return hint[2]
+    return "unknown"
 
 
 def _apply_server_url_placeholders(text: str, runtime_id: int = 0) -> str:
@@ -294,15 +337,12 @@ def resolve_task_server_env(runtime_id: int = 0) -> dict:
     """
     business_url = _resolve_business_server_url(runtime_id)
     runtime_url = _resolve_server_url(runtime_id)
-    try:
-        from src.config import log as _log
-        _log.info(
-            "task server env resolved: "
-            f"GRAPE_SERVER_URL={business_url} "
-            f"(source={_business_server_url_source(business_url, runtime_id)}); "
-            f"RUNTIME_SERVER_URL={runtime_url}")
-    except Exception:
-        pass
+    _log_safe(
+        "info",
+        "task server env resolved: "
+        f"GRAPE_SERVER_URL={_redact_url(business_url)} "
+        f"(source={_business_server_url_source(business_url, runtime_id)}); "
+        f"RUNTIME_SERVER_URL={_redact_url(runtime_url)}")
     return {
         "GRAPE_SERVER_URL": business_url,
         "RUNTIME_SERVER_URL": runtime_url,
