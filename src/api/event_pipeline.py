@@ -924,6 +924,9 @@ _PR_URL_NUMBER_RE = re.compile(r"/(?:merge_requests|pulls|pull)/(\d+)(?:[#/?]|$)
 # Issue #1802 复审：URL 兜底取到的 PR 号做一次存在性校验（issue 反馈建议第 2 条）。
 # 只对 `_pr_source == "url"` 这条罕见路径生效，避免给正常 PR 事件加网络依赖。
 _PR_EXISTS_CACHE: dict = {}
+# 取值依据（MR !1145 Critical-3）：60s 与本文件既有「事件级缓存」同量级，覆盖同一事件
+# 在流水线多 agent 组装 prompt 的重复校验窗口；128 条上限对应「1 分钟内最多 128 个
+# 不同 (repo, PR) 组合」，按单仓每分钟 PR 事件量级取整（超出按 FIFO 淘汰一半）。
 _PR_EXISTS_TTL = 60.0
 _PR_EXISTS_MAX = 128
 
@@ -4193,24 +4196,30 @@ def _issue_authoritative_scene(repo_key: str, issue_id: str = ""):
 
 
 def _scene_binding_valid(repo_key: str, scene_id: str) -> bool:
-    """场景是否仍可解析（仓库副本 / 官方模板 / 内置 pipelines.json）。
+    """绑定场景是否「显式失效」（Issue #1745 复审，MR !1145 Critical-1）。
 
-    Issue #1745 复审：只用 `get_pipeline_config` 这一条解析链（与 scenes detail 同源），
-    避免另造一份存在性口径；解析异常一律按「可用」处理，不因 DB 抖动误清空场景。
+    只判一种情况：`devops_pipeline_scene` 里**存在该场景行但已全部 is_active=0**
+    （软删除/停用）→ 失效。**行不存在不算失效**：存量绑定可能来自
+    pipelines.json 内置场景、官方场景市场，或尚未落库的 Task Center 选择，
+    沿用 #568「issue 绑定即注入」的既有契约，避免 GRAPE_SCENE_ID 静默丢失。
+    查询异常一律按有效处理，不因 DB 抖动误清空场景。
     """
     if not scene_id:
         return False
     try:
-        from src.api.pipeline_config import get_pipeline_config
-        cfg = get_pipeline_config(scene_id, repo_key)
+        from src.session_manager import db, db_lock
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT is_active FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND (repo_key=? OR repo_key='')",
+                (scene_id, repo_key or "")).fetchall()
     except Exception as e:
-        log.warning(f"[scene-env] scene existence check failed (treat as valid): "
+        log.warning(f"[scene-env] scene activity check failed (treat as valid): "
                     f"scene={scene_id} repo={repo_key}: {e}")
         return True
-    if not cfg:
-        return False
-    # 解析链回落到了别的场景（如 default/full fallback）→ 该 scene_id 实际不存在
-    return not cfg.get("fallback")
+    if not rows:
+        return True
+    return any((r[0] if r else 0) for r in rows)
 
 
 def _repo_dev_scene(repo_key: str):

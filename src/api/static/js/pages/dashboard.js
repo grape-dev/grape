@@ -312,7 +312,12 @@ function renderDashboard(data) {
       .scn-row.is-pinned{background:rgba(255,255,255,.78)}
       .scn-pin-btn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0;border-radius:999px;border:1px solid rgba(0,0,0,.12);background:transparent;cursor:pointer;font-size:13px;line-height:1;transition:all .2s;filter:grayscale(1);opacity:.65}
       .scn-pin-btn:hover{opacity:1;background:rgba(0,113,227,.08);border-color:rgba(0,113,227,.3)}
-      .scn-pin-btn.is-pinned{background:#0071e3;border-color:#0071e3;filter:none;opacity:1}
+      .scn-pin-btn.is-pinned{background:#0a84ff;border-color:#0a84ff;filter:none;opacity:1}
+      [data-theme-mode="dark"] .scn-row.is-pinned{background:rgba(58,58,60,.72)}
+      [data-theme-mode="dark"] .scn-row.is-pinned:hover{background:rgba(58,58,60,.86)}
+      [data-theme-mode="dark"] .scn-pin-btn{border-color:rgba(255,255,255,.18)}
+      [data-theme-mode="dark"] .scn-pin-btn:hover{background:rgba(10,132,255,.16);border-color:rgba(10,132,255,.42)}
+      [data-theme-mode="dark"] .scn-pin-btn.is-pinned{background:#0a84ff;border-color:#0a84ff}
       .scn-row-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:#fff;font-weight:600}
       .scn-row-name{font-size:15px;font-weight:600;color:#1d1d1f;white-space:nowrap;letter-spacing:-.2px}
       .scn-row-mid{flex:0 1 30%;min-width:0;display:flex;flex-direction:column;gap:3px}

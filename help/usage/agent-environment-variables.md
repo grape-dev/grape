@@ -38,6 +38,7 @@ GitCode 事件（Issue/PR/评论）
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot）——**作者过滤/幂等查重必须用它**，缺失时不得退化为「按评论形态判定」 | 全部 devops 事件 + 定时调度（autopilot） | 四条执行路径统一 `_inject_bot_agent_env`（`event_pipeline` ×2 / `direct_executor` / `runtime/scheduler`）；`_resolve_bot_username` 解析为空时**打 warning 而非静默降级** |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
 | `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default）。**#1745**：跨场景转交后以 Issue 当前归属场景为真值；重派/执行前会按 `issues detail.scene_id` 校正陈旧快照（PR 订阅任务保留订阅场景）。未绑定场景时本机执行与远端 worker **同源回退仓库默认场景 `dev_scene`**（不再一边给 dev_scene、一边清空）；绑定的场景已被删除时按「未绑定」处理，不注入幽灵 scene_id | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra；执行前 `reconcile_task_scene_env` |
+| `GRAPE_SCENE_SCOPE_ON_ERROR` | 场景技能 scope 判定降级开关（服务端读，非注入给 agent）：`deny`（默认）= 查询异常 fail-closed；`allow` = 查询异常按放行并标 source=db_error，仅在 DB 抖动阻断派发时临时打开 | 平台进程 | `scene_skill_scope._env_error_policy` |
 | 场景自定义变量（`custom_fields`） | 场景高级选项配置的自定义环境变量，**以变量名直接注入**（如 `MY_API_KEY`、`HUAWEI_AK`），技能 `os.environ.get('VAR_NAME')` 直接读取；支持 `is_secret`（页面掩码）与 `scope`（按 agent 过滤，默认 all） | 配置了 custom_fields 的场景（按 scope 匹配的 agent） | `_inject_scene_env` → env_extra |
 | `BOT_GITCODE_TOKEN` | 仓库 bot token（仓库身份，事件任务） | **非 chat**（devops 事件） | `_assemble_env`（互斥） |
 | `BOT_GITHUB_TOKEN` | GitHub 仓库 bot token | 非 chat（GitHub 仓库） | `_assemble_env`（互斥） |

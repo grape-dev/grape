@@ -115,6 +115,8 @@ def skill_agent_type_by_name(skill_name: str, repo_key: str = "") -> str:
 
 def rebind_candidates(skill_name: str, repo_key: str, agent_type: str = "",
                       limit: int = 5) -> list:
+    # limit=5 取值依据（MR !1145 Critical-3）：400 响应体里给「可直接改绑的去向」，
+    # 5 条覆盖同 agent_type 下 repo 优先 + 官方兜底的常见组合，再多前端展示反而不可选。
     """List repo/official skills a conflicting user skill can be rebound to.
 
     Read-only guidance only; never mutates the scene or skill table.

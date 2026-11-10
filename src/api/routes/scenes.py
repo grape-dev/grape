@@ -2086,8 +2086,15 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
 
 @router.post("/{scene_id}/pin", operation_id="scenes_pin", summary="Pin scene", description="Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).")
-def pin_scene(scene_id: str, body: PinSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
-    """设置/取消场景置顶（仓库共享，不区分用户）。"""
+def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
+              user: dict = Depends(require_no_session_token), repo: str = ""):
+    """设置/取消场景置顶（仓库共享，不区分用户）。
+
+    Issue #1735 复审（MR !1145 Critical-2 / Medium-1）：
+    - 必须带仓库上下文：repo_key 为空时直接 400，禁止落到 `repo_key=''` 的全局/官方行；
+    - 访问权无条件校验（不再以 repo_key 非空为前提）；
+    - 写操作落 audit_logs（scene_pin），可按 actor/target 追溯。
+    """
     from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
     from src.api.deps import check_repo_access
 
@@ -2102,8 +2109,10 @@ def pin_scene(scene_id: str, body: PinSceneRequest, user: dict = Depends(require
         except Exception:
             pass
 
-    if repo_key:
-        check_repo_access(user, repo_key)
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "请指定仓库（--repo owner/repo）；置顶状态按仓库共享，不接受空仓库上下文"})
+    check_repo_access(user, repo_key)
 
     existing = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not existing:
@@ -2112,6 +2121,11 @@ def pin_scene(scene_id: str, body: PinSceneRequest, user: dict = Depends(require
     # 存在性已校验；MySQL 对「值未变」的 UPDATE 返回 changed=0，不能据此再判 404
     set_scene_pinned(scene_id, repo_key, body.pinned)
 
+    from src.auth import audit as auth_audit
+    auth_audit.log_audit(
+        "scene_pin", operator_id=user.get("id") or 0,
+        ip=(request.client.host if request and request.client else ""),
+        detail={"scene_id": scene_id, "repo_key": repo_key, "pinned": bool(body.pinned)})
     log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
     return {"message": "置顶状态已更新", "scene_id": scene_id,
             "is_pinned": 1 if body.pinned else 0}

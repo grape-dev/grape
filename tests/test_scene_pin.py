@@ -286,3 +286,29 @@ def test_list_contracts_carry_pin_fields(client):
     body = r3.json()
     assert body["scene_id"] == "1735-b"
     assert body["is_pinned"] == 1
+
+# ===== MR !1145 复审：审计留痕 + 仓库上下文必填 =====
+
+def test_pin_writes_audit_log(client):
+    """Critical-2：置顶是仓库共享状态变更，必须落 audit_logs（可按 actor/target 追溯）。"""
+    import json as _json
+    _pin(client, "1735-a")
+    from src.session_manager import db, db_lock
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT operator_id, detail FROM audit_logs WHERE event_type='scene_pin' "
+            "ORDER BY seq DESC LIMIT 1").fetchall()
+    assert rows, "scene_pin 未写审计日志"
+    op, detail = rows[0]
+    payload = _json.loads(detail) if isinstance(detail, str) else (detail or {})
+    assert op == 1
+    assert payload.get("scene_id") == "1735-a"
+    assert payload.get("repo_key") == ALICE_REPO
+    assert payload.get("pinned") is True
+
+
+def test_pin_requires_repo_context(client):
+    """Medium-1：无仓库上下文时拒绝（不得落到 repo_key='' 的全局/官方行）。"""
+    r = client.post("/api/scenes/1735-a/pin", json={"pinned": True})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == 400

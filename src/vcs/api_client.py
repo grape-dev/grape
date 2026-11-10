@@ -27,7 +27,11 @@ _USER_ATTACHMENT_URL_RE = re.compile(r"https://gitcode\.com/user-attachments/[^\
 _USER_ATTACHMENT_URL_PREFIX = "https://gitcode.com/user-attachments/"
 USER_ATTACHMENT_MAX_SIZE = 50 * 1024 * 1024    # 与视频理解 50MB 阈值一致，避免整段下载后才判超限
 USER_ATTACHMENT_TIMEOUT = 60                   # 下载 60s 超时（视频较大）
-USER_ATTACHMENT_MAX_COUNT = 6                  # 单次评论最多采集 6 个
+# 单次评论最多采集的媒体附件数。取值依据（Issue #1748 复审，MR !1145 Critical-3）：
+# 与同族 USER_IMAGE_MAX_COUNT（编辑器上传图片）对齐为 8，避免「同一评论里图片比编辑器
+# 图片少采 2 个」的口径分裂；8 也是单条评论里人工可一次性上传/贴链的实际上限，
+# 超出部分按「exceeds count limit」降级说明（不静默丢弃）。
+USER_ATTACHMENT_MAX_COUNT = USER_IMAGE_MAX_COUNT
 _USER_ATTACHMENT_ALLOWED_CTYPES = ("image/", "video/", "application/octet-stream")
 # 单一扩展名白名单：落盘前必须命中，杜绝外部扩展名（.html/.php/.js 等）直通公开静态目录。
 USER_ATTACHMENT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
