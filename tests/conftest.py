@@ -1,7 +1,6 @@
 """Shared fixtures for all tests."""
 from __future__ import annotations
 
-import json
 import pytest
 import os
 import sys
@@ -73,52 +72,3 @@ def _reset_db_path():
     _test_db = os.path.join(ROOT, "data", "test_sessions.db")
     os.environ["DEVOPS_DB_PATH"] = _test_db
     yield
-
-
-@pytest.fixture
-def a2a_event_repo():
-    """A2A 事件测试仓库隔离助手（Issue #1667 / #1806 共用）。"""
-    from src.session_manager import db, db_lock
-
-    class _A2AEventRepo:
-        def clean(self, repo_key):
-            with db_lock:
-                c = db.cursor()
-                c.execute("DELETE FROM events WHERE repo_key=?", (repo_key,))
-                for table in ("issue", "managed_repos"):
-                    try:
-                        c.execute(f"DELETE FROM {table} WHERE repo_key=?", (repo_key,))
-                    except Exception:
-                        pass
-                db.commit()
-
-        def seed(self, repo_key, owner, name):
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "INSERT OR IGNORE INTO managed_repos "
-                    "(repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
-                    (repo_key, owner, name, f"{owner}/{name}"))
-                db.commit()
-
-        def count_events(self, repo_key, event_type="a2a_event"):
-            with db_lock:
-                return db.cursor().execute(
-                    "SELECT COUNT(*) FROM events WHERE event_type=? AND repo_key=?",
-                    (event_type, repo_key)).fetchone()[0]
-
-        def event(self, seq):
-            with db_lock:
-                row = db.cursor().execute(
-                    "SELECT seq, status, agent_type, issue_id, payload FROM events WHERE seq=?",
-                    (seq,)).fetchone()
-            if not row:
-                return None
-            try:
-                payload = json.loads(row[4] or "{}")
-            except Exception:
-                payload = {}
-            return {"seq": row[0], "status": row[1], "agent": row[2],
-                    "issue_id": row[3], "payload": payload}
-
-    return _A2AEventRepo()
