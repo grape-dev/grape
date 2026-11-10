@@ -86,6 +86,12 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
 
 from src.api.a2a_context import a2a_context_key as _a2a_context_key
 from src.api.a2a_context import a2a_event_context_key as _a2a_event_context_key
+from src.api.a2a_context_guard import (
+    build_fold_context_error,
+    fold_context_enforcement_enabled,
+    is_fold_task,
+    missing_fold_context_fields,
+)
 
 
 def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
@@ -1366,6 +1372,27 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "message": "invalid idempotency_key: 1-128 chars of [A-Za-z0-9_:.-] expected"
                        " (derive it from source task_id + target agent, e.g. 'task-42:qa')"})
 
+    # ── Issue #1806：sweeper 折叠任务 context 四要素守卫 ──
+    # idempotency_key 形如 sweeper-v2-pr754-fold620 的折叠任务必须显式携带
+    # 源 PR / 目标 PR / 落点文件 / 折叠原因，禁止承接方从幂等键反推落点。
+    # 默认硬拒绝 400；设 GRAPE_A2A_FOLD_CONTEXT_ENFORCE=0 可降级为放行 + 告警留痕。
+    if _idem_key and is_fold_task(_idem_key):
+        if not isinstance(context, str):
+            context = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        _fold_missing = missing_fold_context_fields(context)
+        if _fold_missing:
+            _fold_task_ref = (
+                payload.get("task_id") or payload.get("task_ref")
+                or f"issue=#{issue_number},pr={pr_number or '-'}")
+            if fold_context_enforcement_enabled():
+                log.warning(
+                    f"A2A #1806: fold-task context rejected task={_fold_task_ref} "
+                    f"idempotency_key={_idem_key} missing={_fold_missing}")
+                raise HTTPException(status_code=400,
+                                    detail=build_fold_context_error(_idem_key, _fold_missing))
+            log.warning(
+                f"A2A #1806: fold-task context incomplete, enforcement degraded, allowed "
+                f"task={_fold_task_ref} idempotency_key={_idem_key} missing={_fold_missing}")
 
     # ── Issue #544 L3：失败留痕 ──
     # 请求指纹（幂等键缺省时核对接口按它查询）；处理异常且尚未建事件 → 落失败留痕事件
