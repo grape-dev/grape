@@ -7,7 +7,7 @@ node_id, node_tag, rebind_candidates}`，各入口只负责传上下文与映射
 
 ## 实现步骤
 1. 新增 `src/api/scene_skill_scope.py`
-   - `evaluate(node, repo_key, scene_scope="repo", caller=None, *, scene_id,
+   - `evaluate(node, repo_key, scene_scope="repo", *, scene_id,
      on_error="deny", cache=None)`：skill_id 优先、失效回退名字；repo/official
      兼容、user 一律拒绝（含本人）；repo 档校验归属仓库；未知技能按官方内置包
      兼容放行；查询异常默认 fail-closed，可显式 `on_error="allow"` 降级。
