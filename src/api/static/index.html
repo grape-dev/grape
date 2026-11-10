@@ -322,6 +322,9 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/qrcode.min.js?v=1" defer></script>
 <script src="/static/js/vendor/select2.min.js?v=1" defer></script>
 <script src="/static/vendor/echarts.min.js?v=1" defer></script><!-- 可观测性图表（vendored，不走 CDN） -->
+<script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /faro/collect 反代） -->
+<script src="/static/js/vendor/faro-web-tracing.iife.js?v=1" defer></script><!-- Faro 追踪（fetch 注入 traceparent，前后端 trace 关联） -->
+<script src="/static/js/faro.js?v=7" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
 <script src="/static/js/api.js?v=32" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
@@ -339,8 +342,8 @@ function _toggleAppLang(){
 <script src="/static/js/pages/scene-market.js?v=50" defer></script>
 <script src="/static/js/pages/skills.js?v=48" defer></script>
 <script src="/static/js/pages/knowledge.js?v=150" defer></script>
-<script src="/static/js/pages/runtimes.js?v=95" defer></script>
-<script src="/static/js/pages/observability.js?v=73" defer></script>
+<script src="/static/js/pages/runtimes.js?v=96" defer></script>
+<script src="/static/js/pages/observability.js?v=74" defer></script>
 <script src="/static/js/pages/organizations.js?v=17" defer></script>
 <script src="/static/js/pages/feedback.js?v=9" defer></script>
 <script src="/static/js/pages/my_feedback.js?v=7" defer></script>

@@ -21,7 +21,7 @@ def _sql(script):
 @pytest.fixture(scope="session", autouse=True)
 def setup():
     _sql(f'''import sqlite3, os; db=sqlite3.connect(os.environ['DEVOPS_DB_PATH'],timeout=30); c=db.cursor();
-         c.execute('DELETE FROM user_accounts WHERE username="uitest"');
+         c.execute('DELETE FROM grape_accounts WHERE username="uitest"');
          c.execute('DELETE FROM managed_repos WHERE repo_key LIKE "test_%" OR repo_key LIKE "gitcode:test_%"');
          c.execute('DELETE FROM events WHERE repo_key LIKE "test_%" OR repo_key LIKE "gitcode:test_%"');
          db.commit();db.close()''')
@@ -31,7 +31,7 @@ def setup():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(5)
     _sql(f"import sys; sys.path.insert(0, r'{ROOT}'); "
-         "from src.user import db as udb; print(udb.create_user('uitest','test123'))")
+         "from src.auth import grape_account_db; print(grape_account_db.create_grape_account('uitest', '', 'test123'))")
     yield
     if _SERVER: _SERVER.terminate(); _SERVER.wait()
 
@@ -62,8 +62,8 @@ def login(page, tk):
 def join_repo(tk):
     # 「加入」endpoint 已下线：改为 DB 直插托管登记（与 join 行为等价：managed_repos + is_join）
     _sql("import sys;sys.path.insert(0,r'EXTRA');"
-         "from src.user import db as udb;"
-         "u=udb.get_user_account('uitest');"
+         "from src.auth import grape_account_db as udb;"
+         "u=udb.get_grape_account_by_username('uitest');"
          "udb.add_managed_repo('gitcode:org/test-repo','org','test-repo',webhook_id=0);"
          "udb.mark_user_repo_join(u['id'],'gitcode:org/test-repo',is_join=True)".replace("EXTRA", ROOT))
 

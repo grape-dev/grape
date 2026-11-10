@@ -162,7 +162,10 @@ _smoke_check() {
     log "New code import smoke check passed"
     return 0
   else
-    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" 2>&1 | tail -1)"
+    # 2026-11-09 架构守护 BLOCKED-1：otel 模块缺失时 worker 侧埋点会静默失效
+    # （executor/agent 的 import 在 try/except 内），故把 src.observability.otel
+    # 纳入包体冒烟，缺包直接中止升级。
+    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent; import src.observability.otel" 2>&1 | tail -1)"
     log "!!! New code import smoke check failed: $_smoke_err"
     log "!!! Upgrade rejected (old code untouched, worker keeps running the current version) -- please report this log to the controller maintainer"
     return 1
@@ -612,7 +615,7 @@ ExecStart=$VENV/bin/python -m src.runtime.agent
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=$INSTALL_DIR/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=$INSTALL_DIR/.venv/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]

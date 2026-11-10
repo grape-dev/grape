@@ -302,7 +302,7 @@ def _start_obs_sample_task():
                 r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
                 if r.get("inserted"):
                     log.debug(f"Observability runtime samples: {r}")
-                _nc = await asyncio.to_thread(_obs_log.maybe_cleanup)
+                _nc = await asyncio.to_thread(_obs_logs.maybe_cleanup)
                 if _nc:
                     log.info(f"Observability logs cleaned: {_nc} rows")
                     _obs_loops.beat("obs_log_cleanup")
@@ -891,6 +891,12 @@ app.add_middleware(
 # 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
 from src.observability import metrics_middleware, start_metrics_server, metrics_enabled
 metrics_middleware(app)
+# OTel HTTP spans（2026-11-05 MR-1）：legacy 单进程入口
+try:
+    from src.observability.otel import instrument_fastapi
+    instrument_fastapi(app, "grape-main")
+except Exception:
+    pass
 if metrics_enabled():
     start_metrics_server()
 
@@ -1002,6 +1008,7 @@ def _check_and_sync_templates() -> bool:
         _result = _sp.run(
             ["bash", _sync_script],
             capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace",  # Windows 宿主：控制台输出可能是 GBK，固定 utf-8+replace 防 reader 线程解码崩溃
             env={**_os.environ, "TEMPLATES_REPO": "https://gitcode.com/grape-dev/grape-template.git"}
         )
         if _result.returncode == 0:

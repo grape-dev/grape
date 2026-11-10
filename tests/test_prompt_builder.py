@@ -499,3 +499,41 @@ class TestIssueSummaryExcludesCurrent:
         finally:
             self._clean()
 
+
+class TestLocalPortAutoDiscovery:
+    """_local_port：GRAPE_PORT env > GRAPE_MAIN_PORT > 本进程 argv --port > 3000。
+
+    2026-11-07 Windows 实证：uvicorn --port 8080 而 env 未设 GRAPE_PORT 时，
+    GRAPE_SERVER_URL 落 3000 → 任务内 `grape` CLI 全部 502。argv 自动发现让
+    部署方不必重复声明端口。
+    """
+
+    def test_argv_port_flag(self, monkeypatch):
+        monkeypatch.delenv("GRAPE_PORT", raising=False)
+        monkeypatch.delenv("GRAPE_MAIN_PORT", raising=False)
+        monkeypatch.setattr(sys, "argv",
+                            ["python", "-m", "uvicorn", "src.api.main:app",
+                             "--host", "0.0.0.0", "--port", "8080"])
+        from src.prompt_builder import _local_port
+        assert _local_port() == "8080"
+
+    def test_argv_port_equals_form(self, monkeypatch):
+        monkeypatch.delenv("GRAPE_PORT", raising=False)
+        monkeypatch.delenv("GRAPE_MAIN_PORT", raising=False)
+        monkeypatch.setattr(sys, "argv", ["x", "--port=9090"])
+        from src.prompt_builder import _local_port
+        assert _local_port() == "9090"
+
+    def test_env_overrides_argv(self, monkeypatch):
+        monkeypatch.setenv("GRAPE_PORT", "7777")
+        monkeypatch.setattr(sys, "argv", ["x", "--port", "8080"])
+        from src.prompt_builder import _local_port
+        assert _local_port() == "7777"
+
+    def test_default_3000_without_any_hint(self, monkeypatch):
+        monkeypatch.delenv("GRAPE_PORT", raising=False)
+        monkeypatch.delenv("GRAPE_MAIN_PORT", raising=False)
+        monkeypatch.setattr(sys, "argv", ["pytest", "tests/test_x.py"])
+        from src.prompt_builder import _local_port
+        assert _local_port() == "3000"
+

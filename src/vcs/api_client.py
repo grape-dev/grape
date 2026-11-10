@@ -376,26 +376,47 @@ class VcsApiClient:
         })
 
     @staticmethod
-    def _do_request(url: str, method: str, data: dict | None = None, headers: dict | None = None) -> dict:
-        """执行 HTTP 请求，返回 JSON dict。"""
-        try:
-            body = json.dumps(data).encode("utf-8") if data else None
-            req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            # Issue #558：错误 dict 补 status_code、detail 保留上游全文（不截断），
-            # 供调用方保留上游状态语义；error 键不变保兼容
-            err_body = ""
+    def _do_request(url: str, method: str, data: dict | None = None, headers: dict | None = None,
+                    _span_target: str = "") -> dict:
+        """执行 HTTP 请求，返回 JSON dict。
+
+        _span_target：调用方传入的脱敏目标（provider + path，不含 token/url），
+        用于调用链 span（MR-3）；未传时从 url 提取 path（去 query，防 token 泄漏）。
+        """
+        if not _span_target:
+            from urllib.parse import urlparse as _up
+            _p = _up(url)
+            _span_target = "%s%s" % (_p.netloc.split(".")[0], _p.path)
+        from src.observability.otel import external_call_span
+        with external_call_span("vcs", _span_target,
+                                {"vcs.method": method, "vcs.path": _span_target}) as _span:
             try:
-                err_body = e.read().decode()
-            except Exception:
-                pass
-            log.warning(f"VcsApiClient: {method} {url} → HTTP {e.code}: {err_body}")
-            return {"error": f"HTTP {e.code}", "status_code": e.code, "detail": err_body}
-        except Exception as e:
-            log.warning(f"VcsApiClient: {method} {url} → {e}")
-            return {"error": str(e)}
+                body = json.dumps(data).encode("utf-8") if data else None
+                req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                    if _span is not None:
+                        _span.set_attribute("http.status_code", 200)
+                        _span.set_attribute("vcs.result", "ok" if "error" not in payload else "api_error")
+                    return payload
+            except urllib.error.HTTPError as e:
+                # Issue #558：错误 dict 补 status_code、detail 保留上游全文（不截断），
+                # 供调用方保留上游状态语义；error 键不变保兼容
+                err_body = ""
+                try:
+                    err_body = e.read().decode()
+                except Exception:
+                    pass
+                log.warning(f"VcsApiClient: {method} {url} → HTTP {e.code}: {err_body}")
+                if _span is not None:
+                    _span.set_attribute("http.status_code", e.code)
+                    _span.set_attribute("vcs.result", "http_error")
+                return {"error": f"HTTP {e.code}", "status_code": e.code, "detail": err_body}
+            except Exception as e:
+                log.warning(f"VcsApiClient: {method} {url} → {e}")
+                if _span is not None:
+                    _span.set_attribute("vcs.result", "exception")
+                return {"error": str(e)}
 
 
 

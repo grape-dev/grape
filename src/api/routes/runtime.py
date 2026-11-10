@@ -307,14 +307,24 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                 # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
                 # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
                 apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
-                c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
-                          + (", role_tags=?" if _role_tags_json else "")
-                          + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
-                          + " WHERE id=?",
-                          (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
-                           rt.get("cli_path", ""), _ls_json, body.cli_version, rid)
-                          + ((_role_tags_json,) if _role_tags_json else ())
-                          + ((_model_name, datetime.now(timezone.utc).isoformat()) if _model_name else ()))
+                _upd_sql = ("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
+                            + (", role_tags=?" if _role_tags_json else "")
+                            + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                            + " WHERE id=?")
+                # 参数顺序 bug 修复（#865 基线缺陷，2026-11-10 真机实证）：rid 必须是
+                # 最后一个参数（对应 WHERE id=?）——旧实现把 rid 固定在元组第 6 位再
+                # 追加 role_tags/model 值，一旦带上 model 分支占位符与参数错位，
+                # sqlite binding 异常 → 该引擎行整个 UPDATE 失败（表现为「检测到
+                # 模型的引擎 worker_version 卡旧版且 model_name 恒空」；INSERT 新行
+                # 路径参数固定无误，故首台远程 Worker 首注册侥幸成功）。
+                _upd_args = [rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
+                             rt.get("cli_path", ""), _ls_json, body.cli_version]
+                if _role_tags_json:
+                    _upd_args.append(_role_tags_json)
+                if _model_name:
+                    _upd_args += [_model_name, datetime.now(timezone.utc).isoformat()]
+                _upd_args.append(rid)
+                c.execute(_upd_sql, _upd_args)
                 # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
                 # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
                 if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
@@ -2144,3 +2154,75 @@ def set_runtime_alias(runtime_id: int, body: AliasBody,
     return {"alias": alias}
 
 
+# ===== MR-2b（2026-11-05）：worker trace 中继（LGTM 不对 worker 开放，经主控 C 进程转发）=====
+# 设计：docs/weekly-10/worker-trace-relay-layer2-design.md
+# - worker 的 OTLP/HTTP exporter 指向 {RUNTIME_SERVER_URL}/api/runtime/traces（既有通道+Bearer）
+# - 本端点透传 body（protobuf/json/gzip 原样，零解析）→ OTLP_RELAY_TARGET/v1/traces
+# - 鉴权复用 _require_credential（与 claim 同款）；失败透传状态码，业务零影响
+OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()
+
+from fastapi.responses import Response as _RelayResponse
+
+_relay_total = None
+try:
+    from prometheus_client import Counter as _PC
+    from src.observability import registry as _obs_registry
+    _relay_total = _PC("grape_trace_relay_requests_total",
+                       "Trace relay requests forwarded to LGTM",
+                       ["status"], registry=_obs_registry)
+except Exception:
+    _relay_total = None
+
+
+@router.post("/traces", operation_id="runtime_traces_relay",
+             summary="Relay worker OTLP traces to LGTM",
+             description="Transparently forwards worker OTLP/HTTP trace exports to the LGTM "
+                         "OTLP endpoint (env OTLP_RELAY_TARGET). Workers authenticate with "
+                         "their existing runtime token. Failures pass through the upstream "
+                         "status; LGTM unreachability returns 502 (worker exporters retry/drop "
+                         "asynchronously, zero business impact).")
+async def runtime_traces_relay(request: Request,
+                               credential_id: int = Depends(_require_credential)):
+    if not OTLP_RELAY_TARGET:
+        return _RelayResponse(status_code=503,
+                              content='{"detail":"trace relay disabled"}',
+                              media_type="application/json")
+    # 公开端点（虽要求 runtime token）仍需限体：OTLP 批量包通常 <512KB。
+    # 架构守护 Medium-1：先按 content-length 拒绝，避免超大包整块读入内存造成尖峰。
+    _max_body = int(os.environ.get("GRAPE_TRACE_RELAY_MAX_BODY", str(2 * 1024 * 1024)))
+    if int(request.headers.get("content-length") or 0) > _max_body:
+        return _RelayResponse(status_code=413,
+                              content='{"detail":"payload too large"}',
+                              media_type="application/json")
+    body = await request.body()
+    if len(body) > _max_body:
+        return _RelayResponse(status_code=413,
+                              content='{"detail":"payload too large"}',
+                              media_type="application/json")
+    ctype = request.headers.get("content-type", "application/x-protobuf")
+    cenc = request.headers.get("content-encoding", "")
+    fwd_headers = {"Content-Type": ctype}
+    if cenc:
+        fwd_headers["Content-Encoding"] = cenc
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as hc:
+            r = await hc.post(OTLP_RELAY_TARGET.rstrip("/") + "/v1/traces",
+                              content=body, headers=fwd_headers)
+        if _relay_total is not None:
+            try:
+                _relay_total.labels(status=str(r.status_code)).inc()
+            except Exception:
+                pass
+        return _RelayResponse(status_code=r.status_code, content=r.content,
+                              media_type=r.headers.get("content-type", "application/x-protobuf"))
+    except Exception as e:
+        if _relay_total is not None:
+            try:
+                _relay_total.labels(status="relay_unreachable").inc()
+            except Exception:
+                pass
+        log.warning(f"trace relay unreachable: {type(e).__name__}")
+        return _RelayResponse(status_code=502,
+                              content='{"detail":"lgtm unreachable"}',
+                              media_type="application/json")

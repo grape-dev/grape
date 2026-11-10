@@ -8,7 +8,47 @@
 """
 import os
 import time
-from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+
+# prometheus_client 是服务端依赖（A/B/C 都装）；worker 包按最小依赖原则不带它，
+# 但 worker 侧需要通过 src.observability.otel 报 span（架构守护 BLOCKED-1）。
+# 因此这里做可选导入：缺失时提供 no-op 指标桩，保证模块可导入（worker 不采集指标）。
+try:
+    from prometheus_client import (Counter, Histogram, Gauge, CollectorRegistry,
+                                   generate_latest, CONTENT_TYPE_LATEST)
+    _PROMETHEUS_AVAILABLE = True
+except Exception:  # pragma: no cover - worker 包路径
+    _PROMETHEUS_AVAILABLE = False
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+
+    class _NoopMetric:  # type: ignore[no-redef]
+        """无 prometheus_client 时的指标桩：所有操作静默成功。"""
+
+        def __init__(self, *a, **k):
+            pass
+
+        def labels(self, *a, **k):
+            return self
+
+        def inc(self, *a, **k):
+            pass
+
+        def dec(self, *a, **k):
+            pass
+
+        def observe(self, *a, **k):
+            pass
+
+        def set(self, *a, **k):
+            pass
+
+    Counter = Histogram = Gauge = _NoopMetric  # type: ignore[misc,assignment]
+
+    class CollectorRegistry:  # type: ignore[no-redef]
+        def __init__(self, *a, **k):
+            pass
+
+    def generate_latest(*a, **k) -> bytes:  # type: ignore[misc]
+        return b""
 
 # ===== 配置（参考 multica metrics/config.go）=====
 
@@ -482,8 +522,9 @@ def _stuck_minutes() -> int:
     return get_stuck_threshold_minutes()
 
 
-# 采样器 Gauge 描述（用 ConstMetric，避免 stale series）
-from prometheus_client import Gauge as _Gauge
+# 采样器 Gauge 描述（用 ConstMetric，避免 stale series）。
+# worker 包不带 prometheus_client：这里复用上面的可选导入（缺失时 _Gauge 为 no-op 桩）。
+_Gauge = Gauge
 
 SAMPLER_TASK_QUEUED = _Gauge(
     "grape_task_queued",

@@ -568,7 +568,8 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             exit_code=None, result_text="", errors="", stderr="",
             usage_json="{}", started_at=now, completed_at=None, created_at=now,
             pending_since=None,
-            user_gitcode_token="")
+            user_gitcode_token="",
+            trace_context="")
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -672,7 +673,8 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
             pending_since=None,
-            user_gitcode_token="")
+            user_gitcode_token="",
+            trace_context="")
         with db_lock:
             c = db.cursor()
             c.execute(

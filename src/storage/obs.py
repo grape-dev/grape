@@ -64,26 +64,30 @@ class ObsStorage(StorageBackend):
 
     # ---- 写入 ----
     def save_bytes(self, key: str, data: bytes) -> str:
-        try:
-            resp = self.client.putObject(self.bucket, self._full(key), data)
-            if not self._ok(resp):
-                raise StorageError(f"putObject {key} failed: status={getattr(resp, 'status', '?')}")
-            return key
-        except StorageError:
-            raise
-        except Exception as e:
-            raise StorageError(f"putObject {key} error: {e}") from e
+        from src.observability.otel import external_call_span
+        with external_call_span("obs", "put %s" % key, {"obs.op": "put", "obs.size": len(data)}):
+            try:
+                resp = self.client.putObject(self.bucket, self._full(key), data)
+                if not self._ok(resp):
+                    raise StorageError(f"putObject {key} failed: status={getattr(resp, 'status', '?')}")
+                return key
+            except StorageError:
+                raise
+            except Exception as e:
+                raise StorageError(f"putObject {key} error: {e}") from e
 
     def save_stream(self, key: str, source: str) -> str:
-        try:
-            resp = self.client.putFile(self.bucket, self._full(key), source)
-            if not self._ok(resp):
-                raise StorageError(f"putFile {key} failed: status={getattr(resp, 'status', '?')}")
-            return key
-        except StorageError:
-            raise
-        except Exception as e:
-            raise StorageError(f"putFile {key} error: {e}") from e
+        from src.observability.otel import external_call_span
+        with external_call_span("obs", "putFile %s" % key, {"obs.op": "put_file"}):
+            try:
+                resp = self.client.putFile(self.bucket, self._full(key), source)
+                if not self._ok(resp):
+                    raise StorageError(f"putFile {key} failed: status={getattr(resp, 'status', '?')}")
+                return key
+            except StorageError:
+                raise
+            except Exception as e:
+                raise StorageError(f"putFile {key} error: {e}") from e
 
     # ---- 读取 ----
     def read_bytes(self, key: str) -> bytes | None:
