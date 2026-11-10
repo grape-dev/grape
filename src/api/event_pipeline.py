@@ -4104,6 +4104,115 @@ def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
     return scene_id
 
 
+def _issue_authoritative_scene(repo_key: str, issue_id: str = "") -> str:
+    """Issue 真实归属场景（`issues detail.scene_id` 同源，Issue #1745）。
+
+    与 `_resolve_scene_id` 的区别：只读真实绑定（issue_state → issue 单表），
+    空时**不**回退仓库默认场景，用于识别 `GRAPE_SCENE_ID` 与 Issue 归属的
+    不一致（诊断/执行前校正）。PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）场景编码
+    在 id 内，视为真实绑定。
+    """
+    _iid = str(issue_id or "")
+    if not _iid:
+        return ""
+    if _iid.lstrip("#").startswith("pr_"):
+        return _resolve_scene_id(repo_key, _iid)
+    try:
+        from src.api.session_store import get_issue_bound_scene
+        _sid, _ = get_issue_bound_scene(repo_key, _iid)
+        return _sid or ""
+    except Exception:
+        return ""
+
+
+def scene_env_mismatch_diagnostic(injected: str, authoritative: str) -> str:
+    """场景注入值与 Issue 真实归属不一致时的可操作诊断（Issue #1745，不阻断）。"""
+    return (
+        "场景环境诊断：GRAPE_SCENE_ID 与 Issue 真实归属场景不一致，"
+        f"注入值={injected or '(空)'}，真实值={authoritative or '(空)'}。"
+        "请以 `grape issues detail` 返回的 scene_id 为准执行 "
+        "`grape scenes detail --scene_id <真实值>` 重取节点后重试；"
+        "仅当真实场景确实不含目标节点时才进入待确认。"
+    )
+
+
+def _is_pr_subscription_task(repo_key: str, issue_id: str = "", event_seq: int = 0,
+                             event_type: str = "") -> bool:
+    """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 校正时保留订阅场景）。
+
+    三条命中路径：
+    1. issue_id 为 PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）；
+    2. agent_tasks.event_type 为 PR 事件类型（PR 关联 Issue 的主路由订阅任务）；
+    3. 关联 events 行的 event_type 为 PR 事件类型（agent_tasks.event_type 可能为空）。
+    """
+    _iid = str(issue_id or "")
+    if _iid.lstrip("#").startswith("pr_"):
+        return True
+    try:
+        from src.api.routing import PR_EVENT_TYPES
+    except Exception:
+        return False
+    if (event_type or "") in PR_EVENT_TYPES:
+        return True
+    if event_seq:
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                _row = db.cursor().execute(
+                    "SELECT event_type FROM events WHERE seq=?", (event_seq,)).fetchone()
+            if _row and (_row[0] or "") in PR_EVENT_TYPES:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def reconcile_task_scene_env(task_id: str, env: dict) -> str:
+    """执行前用 Issue 归属场景校正任务快照中的 GRAPE_SCENE_ID（Issue #1745）。
+
+    worker 执行前拉取服务端最新 env（`GET /runtimes/{id}/tasks/{task_id}/env`），
+    此前只同步 AK/SK 与会话 token，`GRAPE_SCENE_ID` 仍是入队时快照。跨场景转交后，
+    转交前入队的任务（或重派沿用了源事件场景的任务）会拿到源场景。此处在执行前按
+    `agent_tasks → issue 当前归属场景`（与 `issues detail.scene_id` 同源）重算并覆盖
+    陈旧快照；PR 订阅任务保持订阅场景语义不校正。
+
+    返回校正后的 scene_id（无需校正时为快照原值）。
+    """
+    if not isinstance(env, dict):
+        return ""
+    _snapshot = str(env.get("GRAPE_SCENE_ID") or "")
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            _row = db.cursor().execute(
+                "SELECT repo_key, issue_id, event_seq, event_type FROM agent_tasks WHERE id=?",
+                (task_id,)).fetchone()
+    except Exception:
+        return _snapshot
+    if not _row:
+        return _snapshot
+    _repo_key = _row[0] or ""
+    _issue_id = _row[1] or ""
+    _event_seq = _row[2] or 0
+    _event_type = _row[3] or ""
+    if not _repo_key or not _issue_id:
+        return _snapshot
+    if _is_pr_subscription_task(_repo_key, _issue_id, _event_seq, _event_type):
+        return _snapshot
+    _authoritative = _resolve_scene_id(_repo_key, _issue_id)
+    if _authoritative and _authoritative != _snapshot:
+        env["GRAPE_SCENE_ID"] = _authoritative
+        try:
+            from src.config import log
+            log.info(f"[scene-env] task={task_id} corrected stale GRAPE_SCENE_ID: "
+                     f"snapshot={_snapshot or '(empty)'} -> issue-bound={_authoritative} "
+                     f"(issue={_issue_id}, repo={_repo_key})")
+        except Exception:
+            pass
+        return _authoritative
+    return _snapshot
+
+
 def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
                       agent_type: str = "", scene_id_override: str = "") -> None:
     """注入场景相关环境变量：GRAPE_SCENE_ID + 高级选项 custom_fields（Issue #236 直接注入）。
@@ -4118,9 +4227,19 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
       issue_id 会解析为真实 Issue 编号，场景被误判为 Issue 场景，订阅场景 custom_fields
       （口令/IP 等）全部丢失；显式传入订阅场景（evt._pr_sub_scene_id）短路 issue_id
       解析。空串/未传 → 回退现有 _resolve_scene_id 逻辑，普通任务零破坏。
+      Issue #1745：普通 Issue/A2A 重派不得再把事件行旧 scene_id 作为 override
+      （跨场景转交后事件行仍是源场景），否则会覆盖 Issue 当前归属场景。
     """
     try:
-        scene_id = scene_id_override or _resolve_scene_id(repo_key, issue_id)
+        _override = (scene_id_override or "").strip()
+        _authoritative = _issue_authoritative_scene(repo_key, issue_id)
+        if _override and _authoritative and _override != _authoritative:
+            from src.config import log
+            log.info(f"[scene-env] override differs from issue-bound scene "
+                     f"(issue={issue_id}, repo={repo_key}): "
+                     f"override={_override}, issue-bound={_authoritative}; "
+                     f"PR subscription overrides are expected")
+        scene_id = _override or _resolve_scene_id(repo_key, issue_id)
         env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return

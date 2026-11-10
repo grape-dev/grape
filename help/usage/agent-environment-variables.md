@@ -37,7 +37,7 @@ GitCode 事件（Issue/PR/评论）
 | `PR_NUMBER` | PR 编号 | 事件任务（有真实 PR） | `_execute_agent`（`_inject_issue_pr_env` → `_extract_pr_number`）：`payload.pr_number` → `evt._pr_sub_pr_number` 为显式来源、始终可信；仅 **PR/MR 实体事件**才开放对象结构来源（`payload.pull_request.{number,iid}` / `payload.merge_request.{number,iid}` / `payload.object_attributes.iid`），均为去 `#` 后纯数字，Issue #595。**note_hook_pr**：payload 优先（`noteable_iid` / `merge_request` / `pull_request`），缺失时从结构化 URL（`object_attributes.url` / `merge_request`、`pull_request` 的 `web_url`，形如 .../merge_requests/<N>）兜底，不从事件标题猜号，Issue #1579。**Issue #1802 口径**：Issue 实体事件的 `object_attributes.iid` 是 Issue 自身编号，**永不作 PR 号来源**；无真实关联 PR 时**静默不注入** `PR_NUMBER`（不写占位值、不用 `ISSUE_NUMBER` 顶替）；仅 PR/MR 实体解析失败才注入 `PR_NUMBER_PARSE_FAILED=1` 告警 |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
-| `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra |
+| `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default）。**#1745**：跨场景转交后以 Issue 当前归属场景为真值；重派/执行前会按 `issues detail.scene_id` 校正陈旧快照（PR 订阅任务保留订阅场景） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra；执行前 `reconcile_task_scene_env` |
 | 场景自定义变量（`custom_fields`） | 场景高级选项配置的自定义环境变量，**以变量名直接注入**（如 `MY_API_KEY`、`HUAWEI_AK`），技能 `os.environ.get('VAR_NAME')` 直接读取；支持 `is_secret`（页面掩码）与 `scope`（按 agent 过滤，默认 all） | 配置了 custom_fields 的场景（按 scope 匹配的 agent） | `_inject_scene_env` → env_extra |
 | `BOT_GITCODE_TOKEN` | 仓库 bot token（仓库身份，事件任务） | **非 chat**（devops 事件） | `_assemble_env`（互斥） |
 | `BOT_GITHUB_TOKEN` | GitHub 仓库 bot token | 非 chat（GitHub 仓库） | `_assemble_env`（互斥） |
@@ -113,6 +113,9 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
    `custom_fields`，变量名直接注入）读取，或在技能 SKILL.md 中声明按需获取方式。
 5. **场景读取**：`printenv GRAPE_SCENE_ID` 确认当前 Issue 绑定的场景（空串=尚未判定）；
    自定义字段以**变量名直接注入**——`printenv <NAME>` / `os.environ.get('<NAME>')` 直接读值。
+   **跨场景转交/重入时以 `issues detail` 返回的 `scene_id` 为权威**，`GRAPE_SCENE_ID` 作兜底：
+   两者不一致时按真实值执行 `scenes detail --scene_id <真实值>` 重取节点后重试，
+   仅当真实场景确实不含目标节点时才进入待确认（Issue #1745）。
 6. **git 操作**：用 `GRAPE_WORK_BRANCH` 作工作基线；`GIT_ASKPASS` 已注入 `$BOT_GITCODE_TOKEN`。
 7. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
    平台已有脱敏（[REDACTED]）。token 仅在进程内有效、删除即失效（GRAPE_SESSION_TOKEN 生命周期=任务）。

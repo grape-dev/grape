@@ -804,6 +804,14 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     session_token = sync_task_session_token(task_id)
     if session_token:
         env["GRAPE_SESSION_TOKEN"] = session_token
+    # Issue #1745：跨场景转交后，任务快照中的 GRAPE_SCENE_ID 可能仍是源场景；
+    # 执行前按 Issue 当前归属场景（issues detail.scene_id 同源）校正，PR 订阅任务保留订阅语义。
+    try:
+        from src.api.event_pipeline import reconcile_task_scene_env
+        reconcile_task_scene_env(task_id, env)
+    except Exception as _scene_e:
+        from src.config import log
+        log.warning(f"runtime_task_env scene reconcile failed for task={task_id}: {_scene_e}")
     return {"env": env}
 
 

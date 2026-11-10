@@ -11,6 +11,38 @@ from src.token_service import is_auth_401_error
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
+def _redispatch_scene_override(evt: dict) -> str:
+    """重派时是否沿用事件行 scene_id 作为 env 场景 override（Issue #1745）。
+
+    仅 PR 订阅事件需要 override（Issue #427：订阅场景可不同于关联 Issue 场景）；
+    普通 Issue/A2A/评论事件在跨场景转交后，事件行 scene_id 仍是源场景，若继续
+    作为 override 会覆盖 Issue 当前归属场景，导致注入的 GRAPE_SCENE_ID 陈旧。
+    普通事件一律返回空串，交由 build_task_env 按 issue_id 重新解析真值。
+    """
+    _scene = (evt.get("scene_id") or "").strip()
+    if not _scene:
+        return ""
+    _iid = str(evt.get("issue_id") or "")
+    if _iid.lstrip("#").startswith("pr_"):
+        return _scene
+    try:
+        from src.api.routing import PR_EVENT_TYPES
+    except Exception:
+        PR_EVENT_TYPES = set()
+    if (evt.get("event_type") or "") in PR_EVENT_TYPES:
+        return _scene
+    if str(evt.get("title") or "").startswith("PR 订阅"):
+        return _scene
+    # 普通事件：事件行场景可能是转交前源场景，丢弃 override，改用 Issue 归属场景（真值）
+    from src.api.event_pipeline import _issue_authoritative_scene
+    _repo_key = evt.get("repo_key") or ""
+    _authoritative = _issue_authoritative_scene(_repo_key, _iid) if _repo_key else ""
+    if _authoritative and _authoritative != _scene:
+        log.info(f"[redispatch] seq={evt.get('seq')} drop stale event scene override: "
+                 f"event_scene={_scene}, issue_bound={_authoritative}, issue={_iid}")
+    return ""
+
+
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                          task_id: str = ""):
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
@@ -731,7 +763,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             runtime_id=_orig_rid,
                             account=old.get("account") or "",
                             issue_number=old.get("issue_id") or "",
-                            scene_id_override=evt.get("scene_id") or "")
+                            scene_id_override=_redispatch_scene_override(evt))
         _new_task_id = enqueue_task(
             agent_session_id=old.get("agent_session_id") or "",
             runtime_id=_orig_rid,
@@ -1247,7 +1279,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                     runtime_id=_rid,
                                     account=old.get("account") or "",
                                     issue_number=old.get("issue_id") or "",
-                                    scene_id_override=evt.get("scene_id") or "")
+                                    scene_id_override=_redispatch_scene_override(evt))
                 _new_task_id = enqueue_task(
                     agent_session_id=old.get("agent_session_id") or "",
                     runtime_id=_rid,
