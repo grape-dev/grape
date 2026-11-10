@@ -2890,6 +2890,107 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
     return result
 
 
+# === Issue #1748: 评论媒体附件（gitcode.com/user-attachments，视频/图片）服务端鉴权下载 ===
+
+def _analyze_media_attachment(kind: str, content: bytes, ext: str = "") -> str:
+    """Issue #1748：复用现有图片/视频理解能力分析已下载的评论媒体附件。
+
+    返回带「## 用户上传的图片/视频分析」标题的注入文本；分析不可用时返回空串。
+    分析模块缺失/异常一律降级为空串，由上层注入明确原因，不阻塞主流程。
+    """
+    try:
+        if kind == "image":
+            from src.agent.image_understanding import understand_image_from_bytes
+            return understand_image_from_bytes(content, ext or ".png")
+        if kind == "video":
+            from src.agent.image_understanding import understand_video_from_bytes
+            text = understand_video_from_bytes(content, ext or ".mp4")
+            if text and "## 用户上传的视频分析" not in text:
+                text = f"## 用户上传的视频分析\n{text}\n\n## 请基于以上视频信息回答用户问题"
+            return text
+    except Exception as e:
+        log.warning(f"_analyze_media_attachment failed ({kind}): {e}")
+    return ""
+
+
+def _collect_issue_media_attachments(owner: str, repo: str, issue_number, texts,
+                                     repo_key: str = "", analyze: bool = True) -> dict:
+    """Issue #1748：提取评论中的 user-attachments 媒体附件并鉴权下载转存为平台附件。
+
+    评论附件直链需登录态（匿名 401），且事件注入原本不含媒体分析，形成双重断链。
+    本函数在事件构建期用服务端凭证下载，经 `_attach_save` 转存为平台附件，
+    返回无 401 的读取通道 URL，供上层注入媒体分析段落。
+
+    Returns:
+        {"ok": [{"filename", "url", "size", "kind", "source_url"}],
+         "failed": [{"url", "reason"}]}
+        顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
+        token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
+    """
+    from src.vcs.api_client import (
+        extract_gitcode_user_attachment_urls, USER_ATTACHMENT_MAX_COUNT,
+    )
+    result: dict = {"ok": [], "failed": []}
+    try:
+        urls: list[str] = []
+        for t in texts or []:
+            if not t:
+                continue
+            for u in extract_gitcode_user_attachment_urls(str(t)):
+                if u not in urls:
+                    urls.append(u)
+        if not urls:
+            return result
+        for u in urls[USER_ATTACHMENT_MAX_COUNT:]:
+            result["failed"].append({"url": u, "reason": "exceeds count limit"})
+        urls = urls[:USER_ATTACHMENT_MAX_COUNT]
+
+        repo_key = repo_key or f"gitcode:{owner}/{repo}"
+        token = ""
+        try:
+            from src.user.db import get_gitcode_token
+            token = get_gitcode_token(repo_key=repo_key) or ""
+        except Exception:
+            token = ""
+        if not token:
+            for u in urls:
+                result["failed"].append({"url": u, "reason": "no repo token"})
+            return result
+
+        from src.vcs.api_client import create_client, attachment_kind, _attachment_ext
+        client = create_client(repo_key, token)
+        seq = 0
+        for u in urls:
+            dl = client.download_user_attachment(u)
+            if "error" in dl:
+                result["failed"].append({"url": u, "reason": str(dl["error"])})
+                continue
+            kind = attachment_kind(u, str(dl.get("content_type") or ""))
+            ext = _attachment_ext(u, str(dl.get("content_type") or ""), kind)
+            seq += 1
+            filename = f"user-attachment-{seq}{ext}"
+            try:
+                url = _attach_save(owner, repo, issue_number, filename, dl["content"])
+                analysis = ""
+                if analyze and kind in ("image", "video"):
+                    analysis = _analyze_media_attachment(kind, dl["content"], ext)
+                result["ok"].append({
+                    "filename": filename, "url": url,
+                    "size": dl.get("size", len(dl["content"])),
+                    "kind": kind, "source_url": u, "analysis": analysis,
+                })
+                log.info(f"user-attachment saved: {owner}/{repo}/{issue_number}/{filename} "
+                         f"({dl.get('size', 0)} bytes, kind={kind}, "
+                         f"analyzed={bool(analysis)})")
+            except Exception as e:
+                seq -= 1
+                result["failed"].append({"url": u, "reason": f"save failed: {e}"})
+    except Exception as e:
+        result["error"] = str(e)
+        log.warning(f"_collect_issue_media_attachments failed: {owner}/{repo}/{issue_number} -> {e}")
+    return result
+
+
 def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
     """从 tasks 表取 repo_key + issue_number + conversation_id（关联 agent_tasks 的键）。"""
     with db_lock:

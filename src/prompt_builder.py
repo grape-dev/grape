@@ -868,6 +868,93 @@ def _collect_user_images_for_injection(repo_key: str, owner: str, repo: str, iss
     return "\n".join(lines) + "\n"
 
 
+# Issue #1748: 评论媒体附件（user-attachments）采集+分析结果缓存（repo+issue+评论文本指纹维度）
+_COMMENT_MEDIA_CACHE: dict = {}
+_COMMENT_MEDIA_CACHE_TTL = 600  # 秒
+_COMMENT_MEDIA_CACHE_MAX = 256
+
+
+def _comment_media_texts(evt) -> list[str]:
+    """Issue #1748：收集可能含评论媒体附件的文本（评论正文 / A2A 前序摘要）。"""
+    payload = (evt or {}).get("payload", {}) or {}
+    texts: list[str] = []
+    note = ""
+    if isinstance(payload.get("object_attributes"), dict):
+        note = str(payload["object_attributes"].get("note") or "")
+    if not note and isinstance(payload.get("comment"), dict):
+        note = str(payload["comment"].get("body") or "")
+    if note:
+        texts.append(note)
+    a2a = str((evt or {}).get("_a2a_context") or "")
+    if a2a:
+        texts.append(a2a)
+    return texts
+
+
+def _collect_comment_media_for_injection(repo_key: str, owner: str, repo: str, issue_num: str,
+                                         agent_type: str, evt=None) -> str:
+    """Issue #1748：评论媒体附件（视频/图片）→ 服务端凭证下载 → 媒体分析注入段。
+
+    - 触发范围：评论事件正文 / A2A 前序摘要中含 gitcode.com/user-attachments 链接。
+    - 附件直链匿名访问 401，由服务端带凭证下载并经 `_attach_save` 转存为平台附件 URL，
+      Agent 使用注入的读取通道访问不再 401。
+    - 图片复用「用户上传的图片分析」、视频复用「用户上传的视频分析」；不可读/分析失败
+      均注入明确原因，无静默丢失。
+    - 结果按 (repo_key, issue_num, 文本指纹) 进程内缓存，流水线多 agent 不重复下载/转写。
+    - token 绝不进入返回文本。
+    """
+    import hashlib as _hashlib
+    import time as _time
+    texts = _comment_media_texts(evt)
+    if not texts:
+        return ""
+    fingerprint = _hashlib.md5("\n".join(texts).encode("utf-8", "ignore")).hexdigest()
+    cache_key = (repo_key, issue_num, fingerprint)
+    now = _time.time()
+    cached = _COMMENT_MEDIA_CACHE.get(cache_key)
+    if cached and now - cached[0] < _COMMENT_MEDIA_CACHE_TTL:
+        collected = cached[1]
+    else:
+        from src.api.issues_center import _collect_issue_media_attachments
+        collected = _collect_issue_media_attachments(owner, repo, issue_num, texts, repo_key=repo_key)
+        if len(_COMMENT_MEDIA_CACHE) >= _COMMENT_MEDIA_CACHE_MAX:
+            for _k in list(_COMMENT_MEDIA_CACHE.keys())[: _COMMENT_MEDIA_CACHE_MAX // 2]:
+                _COMMENT_MEDIA_CACHE.pop(_k, None)
+        _COMMENT_MEDIA_CACHE[cache_key] = (now, collected)
+
+    ok_items = collected.get("ok") or []
+    failed_items = collected.get("failed") or []
+    if not ok_items and not failed_items:
+        return ""
+
+    lines = ["\n## Comment Media Attachments (GitCode comment-uploaded media)",
+             "The following media attachments were uploaded in the issue comment; "
+             "the platform downloaded them with server-side authentication and provides "
+             "credential-free read URLs (no 401):"]
+    if ok_items:
+        for a in ok_items:
+            _kind = a.get("kind") or "file"
+            if agent_type == "issue":
+                lines.append(f"- {_kind} {a['filename']}")
+            else:
+                lines.append(f"- {_kind} {a['filename']}: {a['url']}")
+    for a in ok_items:
+        if a.get("analysis"):
+            lines.append("\n" + str(a["analysis"]).rstrip())
+        elif (a.get("kind") or "file") in ("image", "video"):
+            lines.append(f"\n## 用户上传的{a.get('kind')}分析\n"
+                         f"附件已读取，但内容分析不可用（reason: empty analysis）。"
+                         f"可通过读取通道查看原始附件。")
+    if failed_items:
+        lines.append("\n### 附件不可读（降级说明，非静默丢失）")
+        for f in failed_items:
+            _url_short = str(f.get("url") or "")
+            if len(_url_short) > 100:
+                _url_short = _url_short[:97] + "..."
+            lines.append(f"- ⚠️ attachment unreadable: {_url_short} (reason: {f.get('reason')})")
+    return "\n".join(lines) + "\n"
+
+
 def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_id=0, evt=None):
     """统一附件注入入口。按 agent_type 分级，从 OBS/文件系统扫描附件。
 
@@ -958,6 +1045,18 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
     except Exception as _e:
         # 降级不阻塞：注入失败仅记录，主流程继续
         _log_safe("warning", f"user-image injection failed: {_e}")
+
+    # --- Issue #1748：评论媒体附件（user-attachments 视频/图片）鉴权下载 + 媒体分析注入 ---
+    try:
+        _cm = _collect_comment_media_for_injection(repo_key, _owner, _rname, _issue_num, agent_type, evt)
+        if _cm:
+            parts.append(_cm)
+    except Exception as _e:
+        try:
+            from src.config import log as _log
+            _log.warning(f"comment-media injection failed: {_e}")
+        except Exception:
+            pass
 
 
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
