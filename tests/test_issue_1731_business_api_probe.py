@@ -310,11 +310,17 @@ class TestTaskServerEnvAuditLog:
                           return_value=("https://api.grape.example.com",
                                         "server_base_url")), \
              patch.object(prompt_builder, "_resolve_server_url",
-                          return_value="https://worker.grape.example.com"):
+                          return_value="https://worker.grape.example.com"), \
+             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.user.db.get_task_gateway_base_url", return_value=""):
             with caplog.at_level(logging.INFO, logger="devops-bot"):
                 env = prompt_builder.resolve_task_server_env(7)
-        assert env == {"GRAPE_SERVER_URL": "https://api.grape.example.com",
-                       "RUNTIME_SERVER_URL": "https://worker.grape.example.com"}
+        assert env["GRAPE_SERVER_URL"] == "https://api.grape.example.com"
+        assert env["RUNTIME_SERVER_URL"] == "https://worker.grape.example.com"
+        # Issue #1858：三面基址追加注入，原两项语义不变。
+        assert env["GRAPE_VCS_BASE_URL"] == "https://api.grape.example.com"
+        assert env["GRAPE_ISSUE_BASE_URL"] == "https://api.grape.example.com"
+        assert env["GRAPE_A2A_BASE_URL"] == "https://worker.grape.example.com"
         text = caplog.text
         assert "GRAPE_SERVER_URL=https://api.grape.example.com" in text
         assert "RUNTIME_SERVER_URL=https://worker.grape.example.com" in text

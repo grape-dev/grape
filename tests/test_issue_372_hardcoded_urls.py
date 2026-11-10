@@ -38,7 +38,7 @@ class TestSettingsNoLocalhostFallback:
 # ===========================================================================
 
 class TestA2ARedispatchUrl:
-    """测试 A2A re-dispatch URL 从 get_server_base_url 获取。"""
+    """测试 A2A re-dispatch URL 从 A2A 控制面基址获取（Issue #1858）。"""
 
     def test_t10_02_no_hardcoded_localhost_8000(self):
         """T10-02: events.py A2A re-dispatch 不再硬编码 localhost:8000。"""
@@ -48,9 +48,11 @@ class TestA2ARedispatchUrl:
         # 不应有硬编码 http://localhost:8000/api/a2a
         assert '"http://localhost:8000/api/a2a"' not in src, \
             "hardcoded localhost:8000/api/a2a still present"
-        # 应该用 get_server_base_url
-        assert "get_server_base_url" in src, \
-            "get_server_base_url not used in events.py"
+        # Issue #1858：改用按服务解析的 A2A 基址（显式配置 > 网关 /a2a 前缀 > 回连基址）
+        assert "_resolve_a2a_base" in src, \
+            "_resolve_a2a_base not used in events.py"
+        assert "format_base_url_candidates" in src, \
+            "A2A 失败路径应输出候选 base_url"
 
     def test_t10_03_a2a_url_uses_server_base_url(self):
         """T10-03: get_server_base_url() 有值时 A2A URL 含正确地址。"""
