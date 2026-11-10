@@ -18,9 +18,9 @@ from src.repo_key import derive_repo_identity  # noqa: E402
 
 class TestDeriveRepoIdentity:
     def test_repository_is_authoritative_over_trigger_account(self):
-        """反馈 2874 场景：REPO_FULL_NAME=GTDTeam/GTD-Portal，触发人≠owner → 取 REPO_FULL_NAME。"""
-        full, owner, name = derive_repo_identity("GTDTeam/GTD-Portal", "gitcode:zhujinting/GTD-Portal")
-        assert (full, owner, name) == ("GTDTeam/GTD-Portal", "GTDTeam", "GTD-Portal")
+        """反馈 2874 场景：REPO_FULL_NAME=acme-org/demo-portal，触发人≠owner → 取 REPO_FULL_NAME。"""
+        full, owner, name = derive_repo_identity("acme-org/demo-portal", "gitcode:alice/demo-portal")
+        assert (full, owner, name) == ("acme-org/demo-portal", "acme-org", "demo-portal")
 
     def test_repository_with_provider_prefix_normalized(self):
         full, owner, name = derive_repo_identity("gitcode:Owner/Repo", "")
@@ -45,13 +45,13 @@ class TestDeriveRepoIdentity:
 class TestBuildTaskEnvDerivesFromFullName:
     def test_redispatch_env_owner_name_match_full_name(self):
         from src.api.event_pipeline import build_task_env
-        env = build_task_env("gitcode:GTDTeam/GTD-Portal", "coding", "",
-                             runtime_id=0, account="zhujinting")
-        assert env["REPO_FULL_NAME"] == "GTDTeam/GTD-Portal"
-        assert env["REPO_OWNER"] == "GTDTeam"
-        assert env["REPO_NAME"] == "GTD-Portal"
+        env = build_task_env("gitcode:acme-org/demo-portal", "coding", "",
+                             runtime_id=0, account="alice")
+        assert env["REPO_FULL_NAME"] == "acme-org/demo-portal"
+        assert env["REPO_OWNER"] == "acme-org"
+        assert env["REPO_NAME"] == "demo-portal"
         # ACCOUNT 语义仍是触发人，不得污染 REPO_OWNER
-        assert env["ACCOUNT"] == "zhujinting"
+        assert env["ACCOUNT"] == "alice"
         assert env["REPO_OWNER"] != env["ACCOUNT"]
 
     def test_repo_name_never_empty_when_full_name_present(self):
@@ -73,9 +73,9 @@ class TestDirectExecutorDerivesFromRepository:
 
     def test_chat_repo_env_real_repo(self):
         from src.api.chat_session_env import chat_repo_env
-        env = chat_repo_env("gitcode:GTDTeam/GTD-Portal")
-        assert env == {"REPO_FULL_NAME": "GTDTeam/GTD-Portal",
-                       "REPO_OWNER": "GTDTeam", "REPO_NAME": "GTD-Portal"}
+        env = chat_repo_env("gitcode:acme-org/demo-portal")
+        assert env == {"REPO_FULL_NAME": "acme-org/demo-portal",
+                       "REPO_OWNER": "acme-org", "REPO_NAME": "demo-portal"}
 
     def test_chat_repo_env_pseudo_repo_skipped(self):
         from src.api.chat_session_env import chat_repo_env

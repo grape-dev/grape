@@ -4,8 +4,8 @@
 
 ## 目标
 
-- `grape a2a handoff` 在注入 base 指向主服务（A 进程，如 8081）时不再返回裸 405：命中 405 时 CLI 渲染服务端 `detail.message` 给出可执行 base_url 指引，地址不在客户端硬编码。
-- runbook 明确主服务（业务 API，如 8081）/事件服（webhook + a2a，如 8082）/公共网关的职责边界、默认 base 来源与 handoff 推荐 base。
+- `grape a2a handoff` 在注入 base 指向主服务（业务 API 进程，如 `<main-port>`）时不再返回裸 405：命中 405 时 CLI 渲染服务端 `detail.message` 给出可执行 base_url 指引，地址不在客户端硬编码。
+- runbook 明确主服务（业务 API，如 `<main-port>`）/事件服（webhook + a2a，如 `<event-port>`）/公共网关的职责边界、默认 base 来源与 handoff 推荐 base。
 - handoff 成功后校验 `seq > 0` 与下游派发状态；`status=failed` 或未建事件时显式报错，不静默返回成功。
 
 ## 范围

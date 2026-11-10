@@ -10,7 +10,7 @@
 
 ## 现象
 
-实际运行 `REPO_FULL_NAME=GTDTeam/GTD-Portal`，但 `REPO_NAME` 为空、`REPO_OWNER=zhujinting`（触发人账号）。
+实际运行 `REPO_FULL_NAME=acme-org/demo-portal`，但 `REPO_NAME` 为空、`REPO_OWNER=alice`（触发人账号）。
 
 ## 根因
 
