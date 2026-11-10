@@ -363,12 +363,15 @@ else
 fi
 
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====
-# 保留已有 HERMES_CUSTOM_* 等 API key（重装不应覆盖本地配置）：
-# ① 备份旧文件中的 HERMES_CUSTOM 行 ② cat 覆盖 RUNTIME_*  ③ 追加回 HERMES_CUSTOM 行
+# 保留旧文件中「非本脚本管理」的所有行（重装/自动升级不应覆盖本地配置）：
+# ① 读出旧文件中除 6 个 RUNTIME_* 受管键之外的键值行 ② cat 覆盖受管键 ③ 追加回保留行
+# 事故（2026-11-10）：旧逻辑只保留 ^HERMES_CUSTOM，worker 自动升级后
+# OPENGW_API_KEY（aishell-dsh 第三方模型）被抹掉 → 任务报
+#   llm-pi-ai: no credential for provider route "opengw"
 umask 077
 _PRESERVED_KEYS=""
 if [ -f "$ENV_FILE" ]; then
-  _PRESERVED_KEYS=$(grep '^HERMES_CUSTOM' "$ENV_FILE" 2>/dev/null || true)
+  _PRESERVED_KEYS=$(grep -vE '^(RUNTIME_TOKEN|RUNTIME_SERVER_URL|RUNTIME_DEVICE_NAME|RUNTIME_MAX_CONCURRENT_TASKS|RUNTIME_POLL_INTERVAL|RUNTIME_HEARTBEAT_INTERVAL)=' "$ENV_FILE" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true)
 fi
 cat > "$ENV_FILE" <<EOF
 RUNTIME_TOKEN=$TOKEN
@@ -378,7 +381,7 @@ RUNTIME_MAX_CONCURRENT_TASKS=20
 RUNTIME_POLL_INTERVAL=3
 RUNTIME_HEARTBEAT_INTERVAL=15
 EOF
-# 追加旧配置中保留的 HERMES_CUSTOM keys（防重装丢 key → opencode 401）
+# 追加旧配置中保留的自定义 keys（防重装/升级丢 key → opencode 401 / aishell 无凭据）
 if [ -n "$_PRESERVED_KEYS" ]; then
   printf '%s\n' "$_PRESERVED_KEYS" >> "$ENV_FILE"
 fi
@@ -391,6 +394,7 @@ fi
 _HERMES_API_KEYS=(
   HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY
   HERMES_CUSTOM_OPENGW_CLOUDDEVELOPER_CLUB_API_KEY
+  OPENGW_API_KEY
 )
 for _key_name in "${_HERMES_API_KEYS[@]}"; do
   _key_value="${!_key_name:-}"
