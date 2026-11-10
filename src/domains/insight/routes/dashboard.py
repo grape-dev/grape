@@ -1508,8 +1508,30 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     agent_engines = {}
     try:
         from src.domains.runtime.engine.engine_select import query_engines
-        from src.domains.runtime.engine.instances import instance_name
+        from src.domains.runtime.engine.instances import instance_name, to_display
         _uname = user.get("username") or ""
+
+        # Issue #1310（对齐 origin/weekly-10 dashboard.py）：凭据名缓存，供前端引擎下拉展示
+        # 「引擎名（凭据名）」。缺这两个字段时前端 engineDisplayName() 会退化成
+        # 「opencode-cred0（未命名设备）」——即场景弹窗里显示设备原始名的问题。
+        _cred_name_cache = {}
+
+        def _cred_name(_cid):
+            if not _cid:
+                return ""
+            if _cid in _cred_name_cache:
+                return _cred_name_cache[_cid]
+            _n = ""
+            try:
+                with db_lock:
+                    _cc = db.cursor()
+                    _cc.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                    _cr = _cc.fetchone()
+                    _n = (_cr[0] or "") if _cr else ""
+            except Exception:
+                _n = ""
+            _cred_name_cache[_cid] = _n
+            return _n
         for atype in all_types:
             # SRE 专属（sre-repo-worker-relax §1.3）：user + repo 两档
             # （global 池不放行：SRE 执行部署/运维命令，广播责任边界不清）
@@ -1522,7 +1544,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                            + query_engines(repo_key, "repo", agent_type=atype)
                            + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
-            from src.domains.runtime.engine.health import derive_runtime_health
+            from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
             import time as _time
             _now = _time.time()
             _seen_ids = set()
@@ -1538,8 +1560,20 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                 _deduped = [e for e in _deduped if (e.get("org_id") or 0) == _filter_org_id]
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
+                                     # Issue #1310（对齐 origin/weekly-10）：前端 engineDisplayName() 依赖
+                                     # engine_name（引擎类型名）+ worker_name（凭据名；本机直连回退 host_name）。
+                                     # 缺这两个字段时前端退化为「instance_name（未命名设备）」。
+                                     "engine_name": to_display(e.get("name", "")),
+                                     "worker_name": ((e.get("host_name") or "") if (e.get("credential_id") or 0) == 0
+                                                     else _cred_name(e.get("credential_id") or 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
+                                     # Issue #592（对齐 origin/weekly-10 dashboard.py）：本机直连（credential_id=0）
+                                     # 不参与 worker 15s 心跳，last_seen_at 仅由 10min 本机探活循环刷新——
+                                     # 统一走 derive_runtime_health 会把探活间隔内的本机引擎误判 recently_lost
+                                     # （场景引擎弹窗/详情页「全显失联」的根因）。本机按 installed+healthy 派生。
+                                     "status": (derive_local_runtime_health(bool(e.get("installed")), bool(e.get("healthy")))
+                                                if (e.get("credential_id") or 0) == 0
+                                                else derive_runtime_health(e["status"], e.get("last_seen_at"), _now)),
                                      "tags": e.get("tags", []),
                                      "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
