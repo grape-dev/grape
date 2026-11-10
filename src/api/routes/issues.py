@@ -1081,6 +1081,14 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         status, repo_key, issue_number = row[0], row[1], row[2]
         if status == 'cancelled':
+            # Issue #1741：主卡已是 cancelled 时仍对同一需求的历史多行做幂等收口，
+            # 防止残留 awaiting_input 行继续出现在待澄清列表。
+            if repo_key and issue_number:
+                c.execute(
+                    "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', "
+                    "completed_at=datetime('now') WHERE repo_key=? AND issue_number=? AND status != 'completed'",
+                    (repo_key, issue_number))
+                db.commit()
             return {"ok": True, "already_cancelled": True}
         if status == 'completed':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
@@ -1113,9 +1121,17 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
             c.execute(
                 "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
                 (repo_key, _issue_id))
-        c.execute(
-            "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
-            (issue_id,))
+        # Issue #1741：同一 repo_key+issue_number 的历史多行全量幂等取消，
+        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成行保持终态不受影响。
+        if repo_key and issue_number:
+            c.execute(
+                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status != 'completed'",
+                (repo_key, issue_number))
+        else:
+            c.execute(
+                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
+                (issue_id,))
         db.commit()
     log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
     return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
@@ -1136,9 +1152,17 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
         status, repo_key, issue_number = row[0], row[1], row[2]
         if status != 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仅已取消需求可恢复"})
-        c.execute(
-            "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
-            (issue_id,))
+        # Issue #1741：同一 repo_key+issue_number 多行全量幂等恢复（只改状态，不插入新卡，
+        # 避免恢复后产生重复卡片）。
+        if repo_key and issue_number:
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='cancelled'",
+                (repo_key, issue_number))
+        else:
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
+                (issue_id,))
         db.commit()
     _issue_id = f"#{issue_number}" if issue_number else ""
     if _issue_id:
@@ -2133,7 +2157,7 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
 
 
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses.")
-async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|)?$"),
+async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),

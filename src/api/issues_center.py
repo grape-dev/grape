@@ -347,7 +347,12 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 c.execute(
                     "UPDATE issue SET org_id=? WHERE id=? AND (org_id IS NULL OR org_id != ?)",
                     (org_id, task_id, org_id))
-            if _cur_st not in ("active", "processing"):
+            if _cur_st == "cancelled":
+                # Issue #1741：cancelled 是终态，迟到事件（issue_comment/a2a/agent 回调）不得复活，
+                # 仅显式 POST /issues/{id}/resume 可恢复（避免取消后卡片重新回到待澄清列表）。
+                log.info(f"ensure_issue_task: keep cancelled issue #{issue_number} repo={repo_key} "
+                         f"(late event must not revive; resume endpoint only)")
+            elif _cur_st not in ("active", "processing"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
                           (task_id,))
@@ -1550,12 +1555,13 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
 
 
 def cancel_issue_task(repo_key: str, issue_number: int):
-    """Issue 评论取消任务"""
+    """Issue 评论取消任务（Issue #1741：状态集合补齐 awaiting_input/pending_review，避免静默失效）"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            "WHERE repo_key=? AND issue_number=? "
+            "AND status IN ('active','processing','awaiting_input','pending_review')",
             (repo_key, issue_number))
         affected = c.rowcount
         db.commit()
