@@ -3,24 +3,21 @@
 覆盖：
 - 折叠任务判定单源：`sweeper-v2-<任意>-fold<数字>` 命中，其余不命中；
 - 折叠任务空/缺项 context → 默认 400，错误体含 idempotency_key、缺失清单与 schema 示例；
-- 折叠任务四要素齐全（文本 / 结构化）→ 放行并创建事件；
-- 配置开关降级 → 放行并产生含 task 标识与 idempotency_key 的告警；
-- 非折叠任务空 context 行为与幂等语义不变：同仓同键仍返回已有事件。
+- 折叠任务四要素齐全（文本 / 结构化 / 同行分隔符）→ 放行，入库 context 保留四要素；
+- 配置开关降级 → 放行并产生含 task 标识与 idempotency_key 的结构化告警；
+- 非折叠任务空 context 行为与幂等语义不变：同仓同键仍返回已有事件；
+- 已存在 fold 事件同键重试仍返回已有事件（守卫位于幂等命中短路之后）。
 """
-import os
-import sys
+import json
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pytest
 
-import pytest  # noqa: E402
-
-from src.api.a2a_context_guard import (  # noqa: E402
+from src.api.a2a_context_guard import (
     FOLD_CONTEXT_ENFORCE_ENV,
     FOLD_CONTEXT_REQUIRED_FIELDS,
     is_fold_task,
     missing_fold_context_fields,
 )
-from src.session_manager import db, db_lock  # noqa: E402
 
 REPO_FULL_NAME = "owner/fold1806"
 REPO_KEY = f"gitcode:{REPO_FULL_NAME}"
@@ -70,31 +67,28 @@ class TestFoldTaskDetection:
         }
         assert missing_fold_context_fields(context) == []
 
+    def test_inline_separator_text_context_supported(self):
+        context = (
+            "source_pr: 754, target_pr: #620, "
+            "target_files: src/api/routes/webhook.py, fold_reason: same file"
+        )
+        assert missing_fold_context_fields(context) == []
+
+    def test_generic_aliases_do_not_satisfy_fields(self):
+        context = "files: a.py\nreason: borrowed alias\n落点: b.py\n原因: 泛化键"
+        assert missing_fold_context_fields(context) == list(FOLD_CONTEXT_REQUIRED_FIELDS)
+
+    def test_empty_containers_treated_as_missing(self):
+        context = {
+            "source_pr": {},
+            "target_pr": [],
+            "target_files": {},
+            "fold_reason": [],
+        }
+        assert missing_fold_context_fields(context) == list(FOLD_CONTEXT_REQUIRED_FIELDS)
+
 
 class TestFoldTaskContextGuardEndpoint:
-    def _clean(self):
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM events WHERE repo_key=?", (REPO_KEY,))
-            try:
-                c.execute("DELETE FROM issue WHERE repo_key=?", (REPO_KEY,))
-            except Exception:
-                pass
-            try:
-                c.execute("DELETE FROM managed_repos WHERE repo_key=?", (REPO_KEY,))
-            except Exception:
-                pass
-            db.commit()
-
-    def _seed(self):
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "INSERT OR IGNORE INTO managed_repos "
-                "(repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
-                (REPO_KEY, "owner", "fold1806", REPO_FULL_NAME))
-            db.commit()
-
     def _body(self, key, context, issue_number="1806"):
         return {
             "agent": "coding",
@@ -112,21 +106,32 @@ class TestFoldTaskContextGuardEndpoint:
     def _post(self, client, body):
         return client.post("/api/a2a", json=body)
 
-    def _event_count(self):
-        with db_lock:
-            return db.cursor().execute(
-                "SELECT COUNT(*) FROM events WHERE event_type='a2a_event' AND repo_key=?",
-                (REPO_KEY,)).fetchone()[0]
-
-    def _client(self):
+    def _client(self, repo):
         from fastapi.testclient import TestClient
         from src.api.main import app
-        self._clean()
-        self._seed()
+        self._repo = repo
+        repo.clean(REPO_KEY)
+        repo.seed(REPO_KEY, "owner", "fold1806")
         return TestClient(app)
 
-    def test_fold_task_empty_context_rejected_400(self):
-        client = self._client()
+    def _event_count(self):
+        return self._repo.count_events(REPO_KEY)
+
+    def _stored_context(self, seq):
+        event = self._repo.event(seq)
+        payload = event.get("payload") or {}
+        return str(payload.get("context") or "")
+
+    def _assert_context_complete(self, seq):
+        stored = self._stored_context(seq)
+        for field in FOLD_CONTEXT_REQUIRED_FIELDS:
+            assert field in stored, f"入库 context 缺少 {field}: {stored!r}"
+        assert "754" in stored
+        assert "#620" in stored
+        assert "src/api/routes/webhook.py" in stored
+
+    def test_fold_task_empty_context_rejected_400(self, a2a_event_repo):
+        client = self._client(a2a_event_repo)
         r = self._post(client, self._body(FOLD_KEY, ""))
         assert r.status_code == 400, r.text
         detail = r.json()["detail"]
@@ -135,23 +140,25 @@ class TestFoldTaskContextGuardEndpoint:
         assert "source_pr:" in detail["context_schema_example"]
         assert self._event_count() == 0, "被拦截的折叠任务不得创建事件"
 
-    def test_fold_task_missing_fields_rejected_400(self):
-        client = self._client()
+    def test_fold_task_missing_fields_rejected_400(self, a2a_event_repo):
+        client = self._client(a2a_event_repo)
         r = self._post(client, self._body(FOLD_KEY, "source_pr: 754\ntarget_pr: #620"))
         assert r.status_code == 400, r.text
         detail = r.json()["detail"]
         assert detail["missing_fields"] == ["target_files", "fold_reason"]
         assert self._event_count() == 0
 
-    def test_fold_task_valid_text_context_allowed(self):
-        client = self._client()
+    def test_fold_task_valid_text_context_allowed(self, a2a_event_repo):
+        client = self._client(a2a_event_repo)
         r = self._post(client, self._body(FOLD_KEY, VALID_CONTEXT))
         assert r.status_code == 200, r.text
-        assert r.json().get("seq", 0) > 0
+        seq = r.json().get("seq", 0)
+        assert seq > 0
         assert self._event_count() == 1
+        self._assert_context_complete(seq)
 
-    def test_fold_task_valid_structured_context_allowed(self):
-        client = self._client()
+    def test_fold_task_valid_structured_context_allowed(self, a2a_event_repo):
+        client = self._client(a2a_event_repo)
         context = {
             "source_pr": "754",
             "target_pr": "#620",
@@ -160,12 +167,15 @@ class TestFoldTaskContextGuardEndpoint:
         }
         r = self._post(client, self._body(FOLD_KEY, context))
         assert r.status_code == 200, r.text
-        assert r.json().get("seq", 0) > 0
+        seq = r.json().get("seq", 0)
+        assert seq > 0
         assert self._event_count() == 1
+        self._assert_context_complete(seq)
 
-    def test_fold_task_degraded_mode_allows_with_warning(self, monkeypatch, caplog):
+    def test_fold_task_degraded_mode_allows_with_structured_warning(
+            self, a2a_event_repo, monkeypatch, caplog):
         monkeypatch.setenv(FOLD_CONTEXT_ENFORCE_ENV, "0")
-        client = self._client()
+        client = self._client(a2a_event_repo)
         with caplog.at_level("WARNING"):
             r = self._post(client, self._body(FOLD_KEY, ""))
         assert r.status_code == 200, r.text
@@ -173,9 +183,36 @@ class TestFoldTaskContextGuardEndpoint:
         assert self._event_count() == 1
         assert FOLD_KEY in caplog.text
         assert "task-1806-fold" in caplog.text
+        assert "a2a_fold_context_event" in caplog.text
+        assert "degraded_allowed" in caplog.text
 
-    def test_non_fold_task_empty_context_and_idempotency_unchanged(self):
-        client = self._client()
+    def test_fold_task_rejection_emits_structured_warning(self, a2a_event_repo, caplog):
+        client = self._client(a2a_event_repo)
+        with caplog.at_level("WARNING"):
+            r = self._post(client, self._body(FOLD_KEY, "source_pr: 754"))
+        assert r.status_code == 400, r.text
+        assert "a2a_fold_context_event" in caplog.text
+        assert "rejected" in caplog.text
+        event_line = next(
+            line for line in caplog.text.splitlines() if "a2a_fold_context_event=" in line)
+        payload = json.loads(event_line.split("a2a_fold_context_event=", 1)[1])
+        assert payload["event"] == "a2a_fold_context_guard"
+        assert payload["idempotency_key"] == FOLD_KEY
+        assert payload["missing_fields"] == ["target_pr", "target_files", "fold_reason"]
+
+    def test_existing_fold_event_idempotent_retry_not_rejected(self, a2a_event_repo):
+        client = self._client(a2a_event_repo)
+        first = self._post(client, self._body(FOLD_KEY, VALID_CONTEXT))
+        assert first.status_code == 200, first.text
+        seq = first.json()["seq"]
+        retry = self._post(client, self._body(FOLD_KEY, ""))
+        assert retry.status_code == 200, retry.text
+        assert retry.json().get("idempotent") is True
+        assert retry.json()["seq"] == seq
+        assert self._event_count() == 1
+
+    def test_non_fold_task_empty_context_and_idempotency_unchanged(self, a2a_event_repo):
+        client = self._client(a2a_event_repo)
         key = "task-1806:nonfold"
         r1 = self._post(client, self._body(key, ""))
         assert r1.status_code == 200, r1.text
