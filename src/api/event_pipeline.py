@@ -4104,23 +4104,31 @@ def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
     return scene_id
 
 
-def _issue_authoritative_scene(repo_key: str, issue_id: str = "") -> str:
+def _issue_authoritative_scene(repo_key: str, issue_id: str = ""):
     """Issue 真实归属场景（`issues detail.scene_id` 同源，Issue #1745）。
 
     与 `_resolve_scene_id` 的区别：只读真实绑定（issue_state → issue 单表），
     空时**不**回退仓库默认场景，用于识别 `GRAPE_SCENE_ID` 与 Issue 归属的
     不一致（诊断/执行前校正）。PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）由
     `get_issue_bound_scene` 统一解析，不在此处重复手写。
+
+    返回值三态（Issue #1745 复审修复）：
+    - 非空字符串：Issue 已绑定该场景（权威真值）；
+    - 空字符串：查询成功且确认 Issue 未绑定场景（调用方按「未选定=空串」处理）；
+    - `None`：查询异常/缺少 issue_id，**未判定**——调用方必须跳过校正，
+      不得把正确的 GRAPE_SCENE_ID 误清空。
     """
     _iid = str(issue_id or "")
     if not _iid:
-        return ""
+        return None
     try:
         from src.api.session_store import get_issue_bound_scene
         _sid, _ = get_issue_bound_scene(repo_key, _iid)
         return _sid or ""
     except Exception:
-        return ""
+        log.warning(f"[scene-env] authoritative scene lookup failed: "
+                    f"issue={_iid} repo={repo_key}")
+        return None
 
 
 def scene_env_mismatch_diagnostic(injected: str, authoritative: str) -> str:
@@ -4135,27 +4143,36 @@ def scene_env_mismatch_diagnostic(injected: str, authoritative: str) -> str:
 
 
 _PR_SUB_ISSUE_ID_RE = re.compile(r"^#?pr_\d+_")
+_PR_SUB_PROMPT_MARKERS = ("本任务来自 PR 订阅场景", "## PR 审查任务")
 
 
-def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
-                             event_type: str = "", title: str = "") -> bool:
-    """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 唯一判定入口）。
+def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
+                           event_type: str = "", title: str = "",
+                           prompt: str = ""):
+    """判定任务是否属于 PR 订阅场景，返回三态（Issue #1745 复审修复）。
 
-    四条命中路径：
+    - `True`：确认是 PR 订阅任务；
+    - `False`：确认不是（普通 Issue/A2A/评论任务）；
+    - `None`：未判定（events 查询异常/事件行缺失），调用方应保守跳过校正。
+
+    命中路径（Issue #427 语义）：
     1. issue_id 为 PR 订阅伪 id（`#pr_<PR号>_<scene_id>`）；
     2. event_type 为 PR 事件类型（PR 关联 Issue 的主路由订阅任务）；
-    3. 事件标题为「PR 订阅」派发（真实关联 Issue 号 + a2a_event 的既有形态，Issue #427）；
-    4. 关联 events 行的 event_type / title 命中 2/3（agent_tasks 可能未带标题）。
+    3. 事件标题为「PR 订阅」派发（真实关联 Issue 号 + a2a_event 的既有形态）；
+    4. 关联 events 行的 event_type / title 命中 2/3；
+    5. 事件行不可用（event_seq=0/缺失）时，回退任务 prompt 快照中的订阅标记。
     """
     if _PR_SUB_ISSUE_ID_RE.match(str(issue_id or "")):
         return True
     try:
         from src.api.routing import PR_EVENT_TYPES
     except Exception:
-        PR_EVENT_TYPES = set()
+        return None
     if (event_type or "") in PR_EVENT_TYPES:
         return True
     if str(title or "").startswith("PR 订阅"):
+        return True
+    if any(_m in str(prompt or "") for _m in _PR_SUB_PROMPT_MARKERS):
         return True
     if event_seq:
         try:
@@ -4164,14 +4181,32 @@ def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
                 _row = db.cursor().execute(
                     "SELECT event_type, title FROM events WHERE seq=?",
                     (event_seq,)).fetchone()
-            if _row:
-                if (_row[0] or "") in PR_EVENT_TYPES:
-                    return True
-                if str(_row[1] or "").startswith("PR 订阅"):
-                    return True
         except Exception:
-            pass
+            log.warning(f"[scene-env] events lookup failed for seq={event_seq}, "
+                        f"skip scene reconcile conservatively")
+            return None
+        if not _row:
+            log.warning(f"[scene-env] events row missing for seq={event_seq}, "
+                        f"skip scene reconcile conservatively")
+            return None
+        if (_row[0] or "") in PR_EVENT_TYPES:
+            return True
+        if str(_row[1] or "").startswith("PR 订阅"):
+            return True
+        return False
     return False
+
+
+def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
+                             event_type: str = "", title: str = "",
+                             prompt: str = "") -> bool:
+    """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 唯一判定入口）。
+
+    保守口径：未判定（`None`）也视为 PR 订阅/需保留订阅场景，避免 PR 订阅任务被
+    误校正为 Issue 场景而重现 #427。详见 `_pr_subscription_state` 三态说明。
+    """
+    return _pr_subscription_state(
+        issue_id, event_seq, event_type, title, prompt) is not False
 
 
 def reconcile_task_scene_env(task_id: str, env: dict) -> str:
@@ -4182,7 +4217,9 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     转交前入队的任务（或重派沿用了源事件场景的任务）会拿到源场景。此处在执行前按
     `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
     `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
-    PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理。
+    PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理；
+    PR 订阅判定未定（events 查询异常/事件行缺失）或 Issue 归属查询异常时一律跳过，
+    不覆盖快照，避免误清空正确的 GRAPE_SCENE_ID。
 
     返回校正后的 scene_id（无需校正时为快照原值）。
     """
@@ -4193,7 +4230,8 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
         from src.session_manager import db, db_lock
         with db_lock:
             _row = db.cursor().execute(
-                "SELECT repo_key, issue_id, event_seq, event_type FROM agent_tasks WHERE id=?",
+                "SELECT repo_key, issue_id, event_seq, event_type, prompt "
+                "FROM agent_tasks WHERE id=?",
                 (task_id,)).fetchone()
     except Exception:
         return _snapshot
@@ -4203,11 +4241,15 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _issue_id = _row[1] or ""
     _event_seq = _row[2] or 0
     _event_type = _row[3] or ""
+    _prompt = _row[4] or ""
     if not _repo_key or not _issue_id:
         return _snapshot
-    if _is_pr_subscription_task(_issue_id, _event_seq, _event_type):
+    if _pr_subscription_state(_issue_id, _event_seq, _event_type,
+                              prompt=_prompt) is not False:
         return _snapshot
     _authoritative = _issue_authoritative_scene(_repo_key, _issue_id)
+    if _authoritative is None:
+        return _snapshot
     if _authoritative != _snapshot:
         env["GRAPE_SCENE_ID"] = _authoritative
         log.info(scene_env_mismatch_diagnostic(_snapshot, _authoritative) +

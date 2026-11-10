@@ -64,14 +64,14 @@ def _seed_scene(scene_id, advanced_options="{}"):
         db.commit()
 
 
-def _seed_task(task_id, issue_id, event_type="a2a_event", event_seq=0):
+def _seed_task(task_id, issue_id, event_type="a2a_event", event_seq=0, prompt="x"):
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, "
             "issue_id, repo_key, agent_type, event_type, event_seq) "
-            "VALUES (?, 'sess-row', 0, 'x', ?, ?, 'issue', ?, ?)",
-            (task_id, issue_id, RK, event_type, event_seq))
+            "VALUES (?, 'sess-row', 0, ?, ?, ?, 'issue', ?, ?)",
+            (task_id, prompt, issue_id, RK, event_type, event_seq))
         db.commit()
 
 
@@ -117,7 +117,7 @@ def test_redispatch_drops_stale_scene_after_cross_scene_handoff():
     assert env["GRAPE_SCENE_ID"] == TARGET
 
 
-def test_redispatch_keeps_scene_when_event_scene_matches_issue():
+def test_redispatch_drops_scene_override_when_event_scene_matches_issue():
     from src.api.routes.events import _redispatch_scene_override
     _seed_issue(N, TARGET)
     evt = _plain_evt(TARGET)
@@ -224,6 +224,64 @@ def test_reconcile_task_scene_env_noop_when_already_truth():
     env = {"GRAPE_SCENE_ID": TARGET}
     assert reconcile_task_scene_env("t_1745_same", env) == TARGET
     assert env["GRAPE_SCENE_ID"] == TARGET
+
+
+# ===== 3b. 异常/事件行缺失的保守路径（复审修复） =====
+
+def test_is_pr_subscription_task_events_query_error_is_conservative(monkeypatch):
+    """events 查询异常时视为未判定/订阅，避免 PR 订阅任务被误校正（#427 回归）。"""
+    from src.api.event_pipeline import _is_pr_subscription_task
+
+    class _BoomCursor:
+        def execute(self, *a, **k):
+            raise RuntimeError("events query boom")
+
+    class _BoomDB:
+        def cursor(self):
+            return _BoomCursor()
+
+    monkeypatch.setattr("src.session_manager.db", _BoomDB())
+    assert _is_pr_subscription_task(f"#{N}", 1745999, "a2a_event") is True
+
+
+def test_reconcile_task_scene_env_skips_when_event_row_missing():
+    """event_seq 存在但 events 行缺失：未判定，保留快照不清空。"""
+    from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_issue(N, TARGET)
+    _seed_task("t_1745_missing_evt", f"#{N}", event_type="a2a_event",
+               event_seq=1745998)
+    env = {"GRAPE_SCENE_ID": SUB}
+    out = reconcile_task_scene_env("t_1745_missing_evt", env)
+    assert out == SUB
+    assert env["GRAPE_SCENE_ID"] == SUB
+
+
+def test_reconcile_task_scene_env_skips_subscription_via_prompt_snapshot():
+    """event_seq=0 时回退任务 prompt 快照识别 PR 订阅，跳过校正。"""
+    from src.api.event_pipeline import reconcile_task_scene_env
+    _seed_issue(N, TARGET)
+    _seed_task("t_1745_prompt_sub", f"#{N}", event_type="a2a_event", event_seq=0,
+               prompt="## PR 审查任务\n本任务来自 PR 订阅场景，PR 无关联 Issue。")
+    env = {"GRAPE_SCENE_ID": SUB}
+    out = reconcile_task_scene_env("t_1745_prompt_sub", env)
+    assert out == SUB
+    assert env["GRAPE_SCENE_ID"] == SUB
+
+
+def test_reconcile_task_scene_env_skips_when_authoritative_lookup_fails(monkeypatch):
+    """Issue 归属查询异常：未判定，不得清空正确的 GRAPE_SCENE_ID。"""
+    from src.api import event_pipeline
+    _seed_issue(N, TARGET)
+    _seed_task("t_1745_lookup_boom", f"#{N}", event_type="issue_comment")
+
+    def _boom(*a, **k):
+        raise RuntimeError("authoritative lookup boom")
+
+    monkeypatch.setattr("src.api.session_store.get_issue_bound_scene", _boom)
+    env = {"GRAPE_SCENE_ID": STALE}
+    out = event_pipeline.reconcile_task_scene_env("t_1745_lookup_boom", env)
+    assert out == STALE
+    assert env["GRAPE_SCENE_ID"] == STALE
 
 
 # ===== 4. 可操作诊断 =====

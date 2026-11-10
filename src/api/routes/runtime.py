@@ -810,7 +810,6 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
         from src.api.event_pipeline import reconcile_task_scene_env
         reconcile_task_scene_env(task_id, env)
     except Exception as _scene_e:
-        from src.config import log
         log.warning(f"runtime_task_env scene reconcile failed for task={task_id}: {_scene_e}")
     return {"env": env}
 
