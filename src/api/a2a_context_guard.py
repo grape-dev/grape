@@ -29,23 +29,22 @@ _FOLD_TASK_RE = re.compile(FOLD_TASK_IDEMPOTENCY_PATTERN)
 _FIELD_ALIASES = {
     "source_pr": ("source_pr", "source pr", "sourcepr", "源 pr", "源pr", "本单 pr", "本单pr"),
     "target_pr": ("target_pr", "target pr", "targetpr", "目标 pr", "目标pr"),
-    "target_files": ("target_files", "target files", "targetfiles", "落点文件", "落点", "files"),
-    "fold_reason": ("fold_reason", "fold reason", "foldreason", "折叠原因", "原因", "reason"),
+    "target_files": ("target_files", "target files", "targetfiles", "落点文件"),
+    "fold_reason": ("fold_reason", "fold reason", "foldreason", "折叠原因"),
 }
 _ALIAS_TO_FIELD = {
     alias: field for field, aliases in _FIELD_ALIASES.items() for alias in aliases
 }
-_LINE_RE = re.compile(r"^\s*([^:=：]+?)\s*[:=：]\s*(.*)$")
-
-
-def match_fold_task(idempotency_key: str):
-    """返回折叠任务 idempotency_key 的正则匹配对象（非折叠任务返回 None）。"""
-    return _FOLD_TASK_RE.match((idempotency_key or "").strip())
+_ALIAS_PATTERN = "|".join(
+    re.escape(alias) for alias in sorted(_ALIAS_TO_FIELD, key=len, reverse=True))
+_FIELD_START_RE = re.compile(
+    rf"(?<!\w)(?P<key>{_ALIAS_PATTERN})\s*[:=：]\s*", re.IGNORECASE)
+_TRAILING_SEPARATORS = ",，;；、"
 
 
 def is_fold_task(idempotency_key: str) -> bool:
     """折叠任务唯一判定入口：``sweeper-v2-<任意>-fold<数字>``。"""
-    return match_fold_task(idempotency_key) is not None
+    return _FOLD_TASK_RE.match((idempotency_key or "").strip()) is not None
 
 
 def _normalize_key(key: str) -> str:
@@ -54,9 +53,33 @@ def _normalize_key(key: str) -> str:
 
 
 def _scalar(value) -> str:
+    """把结构化值归一为非空文本；空 dict / 空 list 及其中的空容器视为缺失。"""
+    if isinstance(value, dict):
+        if not value:
+            return ""
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
     if isinstance(value, (list, tuple, set)):
-        return ", ".join(str(v).strip() for v in value if str(v).strip())
+        parts = [_scalar(item) for item in value]
+        return ", ".join(part for part in parts if part)
     return str(value if value is not None else "").strip()
+
+
+def _assign_alias(result: dict, raw_key, value: str) -> None:
+    """dict / 文本分支共用的 alias→首个非空值写入。"""
+    field = _ALIAS_TO_FIELD.get(_normalize_key(raw_key))
+    if field and value and not result.get(field):
+        result[field] = value
+
+
+def _text_fields(text: str):
+    """逐行切出显式字段；支持同一行用逗号/分号分隔多个字段。"""
+    for line in text.splitlines():
+        starts = list(_FIELD_START_RE.finditer(line))
+        for index, start in enumerate(starts):
+            end = starts[index + 1].start() if index + 1 < len(starts) else len(line)
+            value = line[start.end():end].strip().strip("`*").strip()
+            value = value.rstrip(_TRAILING_SEPARATORS).strip()
+            yield start.group("key"), value
 
 
 def normalize_fold_context(context) -> dict:
@@ -66,12 +89,7 @@ def normalize_fold_context(context) -> dict:
     if isinstance(context, dict):
         result = {}
         for raw_key, raw_value in context.items():
-            field = _ALIAS_TO_FIELD.get(_normalize_key(raw_key))
-            if not field:
-                continue
-            value = _scalar(raw_value)
-            if value and not result.get(field):
-                result[field] = value
+            _assign_alias(result, raw_key, _scalar(raw_value))
         return result
 
     text = str(context).strip()
@@ -85,16 +103,8 @@ def normalize_fold_context(context) -> dict:
         return normalize_fold_context(parsed)
 
     result = {}
-    for line in text.splitlines():
-        match = _LINE_RE.match(line)
-        if not match:
-            continue
-        field = _ALIAS_TO_FIELD.get(_normalize_key(match.group(1)))
-        if not field:
-            continue
-        value = match.group(2).strip().strip("`*").strip()
-        if value and not result.get(field):
-            result[field] = value
+    for key, value in _text_fields(text):
+        _assign_alias(result, key, value)
     return result
 
 
