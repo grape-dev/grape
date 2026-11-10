@@ -1396,13 +1396,76 @@ class TaskConfirmBody(BaseModel):
 
 
 def _cleanup_issue_attachments(repo_key: str, issue_number):
-    """删除指定 issue 的所有附件。任务完成/取消时调用。"""
+    """删除指定 issue 的所有附件（含用户手工上传）。**破坏性**：整目录清理，
+    仅供明确丢弃场景使用；issue 关闭走 `_cleanup_auto_transferred_attachments`。"""
     try:
         from src.repo_key import split_owner_repo
         _owner, _rname = split_owner_repo(repo_key)
         _attach_cleanup_dir(_owner, _rname, str(issue_number))
     except Exception as _e:
         log.warning(f"Attachment cleanup failed: {_e}")
+
+
+# Issue #1748 补充：平台自动转存媒体的文件名形态——#315 = user-image-<n>.<ext>；
+# #1748 = <uuid32>.<媒体扩展名>（UUID 命名由 spec 约定）。只回收这两类，
+# 用户手工上传的附件一律保留。
+_AUTO_TRANSFER_PREFIXES = ("user-image-", "user-attachment-")
+_AUTO_TRANSFER_MEDIA_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi",
+                             ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def _is_auto_transferred_attachment(name: str) -> bool:
+    """判断附件名是否由平台自动转存（评论媒体/编辑器图片）而来。"""
+    if not name:
+        return False
+    if name.startswith(_AUTO_TRANSFER_PREFIXES):
+        return True
+    stem, ext = os.path.splitext(name)
+    if ext.lower() not in _AUTO_TRANSFER_MEDIA_EXTS or len(stem) != 32:
+        return False
+    return all(ch in "0123456789abcdef" for ch in stem.lower())
+
+
+def _cleanup_auto_transferred_attachments(repo_key: str, issue_number) -> int:
+    """Issue #1748：回收平台自动转存的评论媒体/编辑器图片，保留用户手工附件。
+
+    issue 确认完成/取消时调用。单条评论的自动转存副本对已关闭 issue 无复用价值，
+    但用户手工上传的附件（可能是交付依据/证据）不能删，故不做整目录清理。
+    异常一律吞掉，清理失败不影响关闭流程；返回删除数量。
+    """
+    removed = 0
+    try:
+        from src.repo_key import split_owner_repo
+        _owner, _rname = split_owner_repo(repo_key)
+        if not _owner or not _rname:
+            return 0
+        _num = str(issue_number)
+        from src.storage import get_storage
+        storage = get_storage()
+        if storage:
+            for _key in storage.list_keys(_attach_obs_key(_owner, _rname, _num, "")):
+                if _is_auto_transferred_attachment(os.path.basename(str(_key))):
+                    if storage.delete_object(_key):
+                        removed += 1
+            if removed:
+                log.info(f"Attachment cleanup (auto-transferred): {removed} object(s) "
+                         f"for {_owner}/{_rname}/{_num}")
+            return removed
+        _dir = _attach_base_dir(_owner, _rname, _num)
+        if os.path.isdir(_dir):
+            for _name in os.listdir(_dir):
+                if not _is_auto_transferred_attachment(_name):
+                    continue
+                try:
+                    os.remove(os.path.join(_dir, _name))
+                    removed += 1
+                except OSError as _e:
+                    log.warning(f"Attachment cleanup: remove {_name} failed: {_e}")
+            if removed:
+                log.info(f"Attachment cleanup (auto-transferred): {removed} file(s) in {_dir}")
+    except Exception as _e:
+        log.warning(f"Auto-transferred attachment cleanup failed: {_e}")
+    return removed
 
 
 def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "issue_comment"):
@@ -1418,6 +1481,8 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
     from src.api.session_store import set_issue_stage
     set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
     log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
+    # Issue #1748 补充：关闭后回收平台自动转存的评论媒体/编辑器图片（保留用户手工附件）
+    _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
 
 
@@ -1432,6 +1497,8 @@ def cancel_issue_task(repo_key: str, issue_number: int):
         affected = c.rowcount
         db.commit()
     log.info(f"Issue #{issue_number} cancelled ({affected} tasks)")
+    # Issue #1748 补充：取消后同样回收自动转存媒体（保留用户手工附件）
+    _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
 
 

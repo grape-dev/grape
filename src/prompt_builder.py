@@ -798,11 +798,22 @@ def _collect_user_images_for_injection(repo_key: str, owner: str, repo: str, iss
 
     - texts 来源：Issue 正文（payload.issue.body/description、object_attributes.description）、
       评论 note、A2A 前序摘要 —— 均为事件 payload 内已有字段，零额外网络调用。
-    - 结果按 (repo_key, issue_num) 进程内缓存（TTL 600s），流水线多 agent 不重复采集下载。
+    - 结果按 (repo_key, issue_num, 评论指纹) 进程内缓存（TTL 600s），流水线多 agent 不重复采集下载。
+      评论指纹只取当前评论 note：同一 issue 的第二条评论（不同图）不会命中上一条的缓存而静默漏采；
+      A2A 摘要不参与指纹，避免下游摘要变化导致重复下载。
     - 失败项一律注入降级说明（含原因短码），无静默丢失；token 绝不进入返回文本。
     """
+    import hashlib as _hashlib
     import time as _time
-    cache_key = (repo_key, issue_num)
+    _note_text = ""
+    try:
+        _oa = ((evt or {}).get("payload", {}) or {}).get("object_attributes")
+        if isinstance(_oa, dict) and _oa.get("note"):
+            _note_text = str(_oa["note"])
+    except Exception:
+        _note_text = ""
+    _note_fp = _hashlib.md5(_note_text.encode("utf-8", "ignore")).hexdigest() if _note_text else ""
+    cache_key = (repo_key, issue_num, _note_fp)
     now = _time.time()
     cached = _USER_IMAGE_CACHE.get(cache_key)
     if cached and now - cached[0] < _USER_IMAGE_CACHE_TTL:
