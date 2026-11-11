@@ -16,11 +16,15 @@ from src.kernel.session_manager import db, db_lock
 _holder = f"{socket.gethostname()}-{secrets.token_hex(4)}"
 
 
-def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
+def acquire_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
     """抢分布式锁，成功返回 True。
 
     ttl: 锁过期时间（秒），过期后可被其他实例抢占。
+    holder: 可选，调用方自带的本把锁持有者标识（缺省用实例级标识）。
+        传入 per-call 唯一值时，release_lock 只删本次调用自己的锁，
+        避免同进程内不同调用方互相误删（QA 标注链路依赖这个语义）。
     """
+    _h = (holder or "").strip() or _holder
     now = int(time.time())
     with db_lock:
         c = db.cursor()
@@ -29,7 +33,7 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
             c.execute(
                 "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, update_at, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (lock_key, _holder, now, now + ttl, now, now))
+                (lock_key, _h, now, now + ttl, now, now))
             db.commit()
             return True  # INSERT 成功 = 拿到锁
         except Exception:
@@ -45,7 +49,7 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
                 c.execute(
                     "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, update_at, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (lock_key, _holder, now, now + ttl, now, now))
+                    (lock_key, _h, now, now + ttl, now, now))
                 db.commit()
                 return True
             except Exception:
@@ -57,24 +61,28 @@ def acquire_lock(lock_key: str, ttl: int = 60) -> bool:
                 "UPDATE distributed_locks SET holder=?, locked_at=?, "
                 "expires_at=?, update_at=? "
                 "WHERE lock_key=? AND expires_at < ?",
-                (_holder, now, now + ttl, now, lock_key, now))
+                (_h, now, now + ttl, now, lock_key, now))
             db.commit()
             row2 = c.execute(
                 "SELECT holder FROM distributed_locks WHERE lock_key=?",
                 (lock_key,)).fetchone()
-            return row2 and row2[0] == _holder
+            return row2 and row2[0] == _h
 
         # 4. 未过期 → 抢锁失败
         return False
 
 
-def release_lock(lock_key: str):
-    """释放锁。只删自己的锁，不会误删别人的。"""
+def release_lock(lock_key: str, holder: str = ""):
+    """释放锁。只删自己的锁，不会误删别人的。
+
+    holder: 与 acquire_lock 传入值一致时，只删该 holder 的锁（per-call 隔离）。
+    """
+    _h = (holder or "").strip() or _holder
     with db_lock:
         c = db.cursor()
         c.execute(
             "DELETE FROM distributed_locks WHERE lock_key=? AND holder=?",
-            (lock_key, _holder))
+            (lock_key, _h))
         db.commit()
 
 
