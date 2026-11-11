@@ -157,7 +157,7 @@ def test_1547_codegraph_unindexed_detection():
 # ============================== #1546 ==============================
 def test_1546_agent_task_id_direct_lookup_and_legacy_fallback():
     """agent_task_id 直连优先；历史空值行按 event_seq+created_at 受约束兜底；无命中不猜。"""
-    from src.runtime.scheduler import _get_exec_agent_task, ZOMBIE_YOUNG_GRACE_SECONDS
+    from src.domains.runtime.engine.scheduler import _get_exec_agent_task, ZOMBIE_YOUNG_GRACE_SECONDS
     assert ZOMBIE_YOUNG_GRACE_SECONDS == 120
     atid = f"t_{_sfx()}"
     seq = 900000 + int(_sfx(), 16) % 100000

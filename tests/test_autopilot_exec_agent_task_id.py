@@ -102,7 +102,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_same_seq_history_not_used_when_real_task_later(self):
         """E1-1：历史同号 completed(a2a_event) 不得让 exec 误收口 success。"""
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_hist", EXEC_BASE + 1, "completed", "a2a_event", result_text="",
                    created_at=_iso(_utcnow() - timedelta(hours=2)))
         _seed_task("t_i1546_real", EXEC_BASE + 1, "running", "autopilot_event",
@@ -117,7 +117,7 @@ class TestReverseLookupUsesAgentTaskId:
         旧代码 `event_seq=? ORDER BY created_at DESC LIMIT 1` 无 event_type/时间过滤，
         会命中历史 a2a_event completed 行并写 success（本用例在 pre-fix 会失败）。
         """
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_only_hist", EXEC_BASE + 2, "completed", "a2a_event",
                    result_text="", created_at=_iso(_utcnow() - timedelta(hours=2)))
         _seed_exec(EXEC_BASE + 2, started_at=_iso(_utcnow() - timedelta(hours=1)))
@@ -127,7 +127,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_direct_agent_task_id_skips_event_seq_query(self):
         """E1-2：agent_task_id 非空只按 id 取行，绝不触发 event_seq 查询。"""
-        from src.runtime import scheduler
+        from src.domains.runtime.engine import scheduler
         executed = []
 
         class _Cursor:
@@ -148,7 +148,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_young_execution_not_reaped(self):
         """E1-3：started_at=now 的执行本轮跳过（回收器竞态保护）。"""
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_hist2", EXEC_BASE + 4, "completed", "a2a_event", result_text="old",
                    created_at=_iso(_utcnow() - timedelta(hours=2)))
         _seed_exec(EXEC_BASE + 4, started_at=_iso(_utcnow()))
@@ -157,7 +157,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_fallback_boundary_created_before_started_not_matched(self):
         """E1-4：兜底要求 task.created_at >= exec.started_at，早于则视为不匹配。"""
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_old", EXEC_BASE + 5, "completed", "autopilot_event", result_text="old",
                    created_at=_iso(_utcnow() - timedelta(hours=3)))
         _seed_exec(EXEC_BASE + 5, started_at=_iso(_utcnow() - timedelta(hours=2)))

@@ -88,7 +88,7 @@ class TestFrontendIncremental:
     """源码级：Pipeline.vue 应包含增量拉取逻辑（Vue 迁移后老 pipeline.js 已删除）"""
 
     def test_pipeline_js_incremental_fetch(self):
-p = os.path.join(os.path.dirname(__file__), "..", "..",
+        p = os.path.join(os.path.dirname(__file__), "..", "..",
                          "src", "api", "frontend", "app", "src", "views", "Pipeline.vue")
         src = open(p, encoding="utf-8").read()
         assert "function ensurePage" in src, "缺少增量拉取函数"
@@ -98,7 +98,7 @@ p = os.path.join(os.path.dirname(__file__), "..", "..",
 
     def test_locales_loading_more(self):
         for lang in ("zh", "en"):
-p = os.path.join(os.path.dirname(__file__), "..", "..",
+            p = os.path.join(os.path.dirname(__file__), "..", "..",
                              "src", "api", "frontend", "legacy", "locales", lang, "pipeline.json")
             import json
             d = json.load(open(p, encoding="utf-8"))

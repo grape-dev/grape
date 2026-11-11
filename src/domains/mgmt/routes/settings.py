@@ -861,6 +861,68 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 # 本文件无内置 range() 调用（AST 扫描确认），仅函数内作用域无实际冲突。
 RTRange = Literal["", "all", "repo", "user"]
 
+# Issue #865：引擎「最近使用模型」聚合保留 Top N
+_RECENT_MODELS_TOP_N = 3
+
+
+def _recent_models_by_runtime(runtime_ids: list[int]) -> dict[int, list[dict]]:
+    """按 runtime_ids 批量聚合 obs_llm_usage 的最近实际使用模型（top N）。
+
+    单条 GROUP BY（engine_id × model 维度一次查询，避免 N+1），
+    top N 在应用层排序（count desc → last_used desc）。
+    返回 {runtime_id: [{model, count, last_used_at}, ...]}；无用量/异常返回空 dict。
+    安全约束（Issue #865 Spec）：仅聚合模型名字段，不取 base_url/api_key。
+    """
+    ids = [int(rid) for rid in (runtime_ids or []) if rid]
+    if not ids:
+        return {}
+    from src.session_manager import db, db_lock
+    out: dict[int, list[dict]] = {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            ph = ",".join("?" * len(ids))
+            c.execute(
+                f"SELECT engine_id, model_key, model_raw, COUNT(*) AS cnt, MAX(created_at) AS last_used "
+                f"FROM obs_llm_usage WHERE engine_id IN ({ph}) GROUP BY engine_id, model_key, model_raw",
+                ids)
+            for eng_id, m_key, m_raw, cnt, last_used in c.fetchall():
+                model = str(m_key or m_raw or "").strip()
+                if not model:
+                    continue
+                out.setdefault(int(eng_id or 0), []).append(
+                    {"model": model[:120], "count": int(cnt or 0), "last_used_at": last_used or ""})
+    except Exception as e:
+        log.warning(f"recent_models aggregation failed: {e}")
+        return {}
+    for rows in out.values():
+        rows.sort(key=lambda r: (-r["count"], r["last_used_at"]))
+        del rows[_RECENT_MODELS_TOP_N:]
+    return out
+
+
+def _attach_engine_models(runtimes: list[dict]) -> None:
+    """为列表/详情的引擎行附加模型字段（Issue #865）。
+
+    - recent_models：obs_llm_usage 聚合（批量单查，无 N+1）
+    - 配置模型：DB model_name（worker 上报）；本机直连（credential_id=0）且未上报时
+      服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
+    仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
+    """
+    from src.domains.runtime.engine.engine_model import detect_engine_model
+    recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
+    for rt in runtimes:
+        rt["recent_models"] = recent.get(rt.get("id"), [])
+        if not (rt.get("model_name") or "") and (rt.get("credential_id") or 0) == 0:
+            try:
+                _m = detect_engine_model(rt.get("name") or "")
+            except Exception:
+                _m = ""
+            if _m:
+                rt["model_name"] = _m
+                rt["model_source"] = "local_config"
+
+
 @router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo. Issue #472: q/type/scene/tag params apply search/filters server-side over the full visible set (not just the current page) and the response carries health_stats (total + health distribution over the whole filtered result) so the stats bar reflects the overall search result, decoupled from pagination. Issue #473: range param narrows the viewing scope - empty/all (default, full visibility), repo (repo scope only), user (current user's user-scope + own local engines); invalid range values are rejected with 422.")
 def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 0,
                        scope: str = "", repo: str = "", range: RTRange = "",
@@ -1139,11 +1201,13 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         _page = max(page, 1)
         _offset = (_page - 1) * page_size
         paged_runtimes = visible_runtimes[_offset:_offset + page_size]
+        _attach_engine_models(paged_runtimes)  # Issue #865：附加配置模型/最近使用模型
         return {"runtimes": paged_runtimes, "devices": devices,
                 "total": total_runtimes, "page": _page, "page_size": page_size,
                 "avail_scopes": _avail_scopes, "avail_types": _avail_types,
                 "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
                 "health_stats": health_stats}
+    _attach_engine_models(visible_runtimes)  # Issue #865：附加配置模型/最近使用模型
     return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes,
             "avail_scopes": _avail_scopes, "avail_types": _avail_types,
             "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,

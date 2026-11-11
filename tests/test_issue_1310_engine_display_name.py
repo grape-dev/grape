@@ -28,7 +28,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username="t1310"):
     from src.api.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 

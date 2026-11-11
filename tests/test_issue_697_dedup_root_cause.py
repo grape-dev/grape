@@ -46,7 +46,7 @@ def sched():
     sys.modules["src.session_manager"] = sm
     try:
         spec = importlib.util.spec_from_file_location(
-            "sched_697_test", os.path.join(SRC_DIR, "src", "runtime", "scheduler.py"))
+            "sched_697_test", os.path.join(SRC_DIR, "src", "domains", "runtime", "engine", "scheduler.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         _SCHED = mod
@@ -107,7 +107,7 @@ class TestSchedulerDedupRule:
 
 @pytest.fixture(scope="module")
 def ap():
-    from src.domains.runtime.routes import autopilot
+    from src.domains.mgmt.routes import autopilot
     return autopilot
 
 
