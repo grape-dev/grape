@@ -13,4 +13,4 @@
 - [x] T11 测试 `tests/runtime/test_issue_1938_cascade_compensation.py`（三条路径 / timeout_failed / 回填 / 幂等 / 守卫 / 展示 / 指标）
 - [x] T12 回归：`test_issue_587_event_convergence.py`、`test_terminate_event.py`、`test_obs_*`、`test_issue_1497_*`
 - [x] T13 文档 `docs/issue-1938/{spec,plan,task}.md`
-- [ ] T14 自审查（5 轴 + 开源前置增量检查）→ 建 PR（base `arch-weekly-11`）→ Issue 评论 → A2A QA
+- [x] T14 自审查（5 轴 + 开源前置增量检查）→ 建 PR（base `arch-weekly-11`）→ Issue 评论 → A2A QA
