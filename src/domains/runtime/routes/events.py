@@ -81,8 +81,13 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                 "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output, scene_id FROM events WHERE seq=?",
                 (seq,))
             row = c.fetchone()
+            # Issue #1938：补偿归因（老库缺列时为空 dict → 展示层退回普通回复口径）
+            from src.domains.runtime.engine import cascade as _cascade
+            _cascade_meta = _cascade.fetch_display_meta(
+                c, [seq], {seq: ((row[19] if row else "") or "")})
         except Exception:
             row = None
+            _cascade_meta = {}
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
@@ -127,6 +132,12 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #1938：补偿归因标注——result 若为系统补偿（原始回报丢失），显式标出
+    # 补偿路径/原始任务终态/最后已知事件状态，并从「Agent 答复结论」口径排除。
+    _cmeta = _cascade_meta.get(seq) or {}
+    result["cascade"] = _cmeta
+    result["result_kind"] = _cmeta.get("result_kind", "agent")
+    result["is_agent_conclusion"] = _cmeta.get("is_agent_conclusion", True)
     # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
     _structured_raw = row[20] if len(row) > 20 else None
     _structured = None
@@ -1668,14 +1679,14 @@ async def _iter_with_timeout(aiter, timeout: float):
         yield item
 
 
-async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_seq, repo_key, agent_type, backend_name="hermes"):
+async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_seq, repo_key, agent_type, account="", backend_name="hermes"):
     """直接模式单次执行：yield (text/thinking) 事件；以 sentinel 结束（_stuck / _done）。"""
     from src.domains.runtime.engine.executor import consume_stream_async
     acc = ""
     new_oc = ""
     gen = consume_stream_async(
         prompt, ws, session_id=session_id, event_type="event_conversation",
-        backend_name=backend_name, account=repository, bot_token=bot_token,
+        backend_name=backend_name, account=account, bot_token=bot_token,
         agent_name="Event Dialogue Agent",
         agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
     )
@@ -1739,6 +1750,9 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     from src.kernel.repo import Repo
     bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
+    # Issue #1819：对话执行同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
+    from src.api.event_pipeline import resolve_actor_account
+    account = resolve_actor_account(evt, repo_key)
 
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
     final_text = ""
@@ -1789,7 +1803,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                 from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
                 _conv_env = _bte(repo_key=repo_key, agent_type=agent_type,
                                  issue_id=issue_id or "", runtime_id=runtime_id or 0,
-                                 account=repository or "",
+                                 account=account,
                                  issue_number=issue_id or "")
                 tid = enqueue_task(
                     agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
@@ -1799,7 +1813,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                     repo_key=repo_key, agent_type=agent_type,
                     skill="event-dialogue",                 # Fix A：打包下发对话技能
                     skill_path=event_dialogue_path,
-                    account=repository, repo_gitcode_token=bot_token,
+                    account=account, repo_gitcode_token=bot_token,
                     issue_id=issue_id or "#0",
                     env_extra=_conv_env,
                     pool_agent_type=agent_type if not runtime_id else "",  # plugin 广播模式下需要 pool_tag
@@ -1838,7 +1852,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
         os.makedirs(ws, exist_ok=True)
         result = None
         async for kind, data in _direct_attempt(prompt, ws, oc_session_id, repository,
-                                                bot_token, anchor_seq, repo_key, agent_type):
+                                                bot_token, anchor_seq, repo_key, agent_type,
+                                                account=account):
             if kind == "_stuck":
                 yield ("thinking", "对话执行异常，正在重置会话重试...")
             elif kind == "_done":
@@ -1852,7 +1867,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                 update_issue_session(issue_sess_id, runtime_session_id="")
             oc_session_id = ""
             async for kind, data in _direct_attempt(prompt, ws, "", repository,
-                                                    bot_token, anchor_seq, repo_key, agent_type):
+                                                    bot_token, anchor_seq, repo_key, agent_type,
+                                                    account=account):
                 if kind == "_done":
                     result = data
                 elif kind != "_stuck":
@@ -2132,6 +2148,9 @@ def _execute_conv_task(task_id: str, loop):
         from src.kernel.repo import Repo
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
+        # Issue #1819：worker 模式对话同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
+        from src.api.event_pipeline import resolve_actor_account
+        account = resolve_actor_account(evt, repo_key)
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
         # 用量采集（审计 2026-10-17）：本机直跑的事件对话以前不记 token
@@ -2142,7 +2161,7 @@ def _execute_conv_task(task_id: str, loop):
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(
             prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
-            backend_name="hermes", account=repository, bot_token=bot_token,
+            backend_name="hermes", account=account, bot_token=bot_token,
             agent_name="Event Dialogue Agent",
             agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
         ):
@@ -2446,6 +2465,15 @@ def list_events(owner: str, repo: str,
                  "result": r[7] or "", "issue_id": r[8] or "", "task_id": r[9] or ""}
                 for r in c.fetchall()
             ]
+            # Issue #1938：补偿标注——「系统补偿，原始回报丢失」的记录不计入 Agent 答复口径
+            from src.domains.runtime.engine import cascade as _cascade
+            _meta = _cascade.fetch_display_meta(
+                c, [e["seq"] for e in events], {e["seq"]: e["result"] for e in events})
+            for e in events:
+                _m = _meta.get(e["seq"]) or {}
+                e["cascade"] = _m
+                e["result_kind"] = _m.get("result_kind", "agent")
+                e["is_agent_conclusion"] = _m.get("is_agent_conclusion", True)
         except Exception:
             return {"events": [], "total": 0, "page": page, "page_size": page_size}
 

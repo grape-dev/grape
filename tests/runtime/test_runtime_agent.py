@@ -198,6 +198,22 @@ class TestReregister:
         return c
 
     def test_success_recovers_orphans(self):
+        """显式开关 recover_orphans=True 时逐 rid 回收（兼容旧行为）。"""
+        c = MagicMock()
+        c.register = AsyncMock(return_value=([1, 2], "https://p/probe"))
+        c.recover_orphans = AsyncMock()
+        c.reset_session = AsyncMock()
+        with patch.object(ra, "_discover_local_runtimes",
+                          return_value=[{"name": "opencode", "installed": True, "cli_path": "/bin/oc"}]):
+            result = asyncio.run(ra._reregister(c, [], "dev", recover_orphans=True))
+        assert result is not None
+        ids, engine_by_rid, installed = result
+        assert ids == [1, 2]
+        assert installed and installed[0]["name"] == "opencode"
+        assert c.recover_orphans.await_count == 2
+
+    def test_defaults_to_no_recovery(self):
+        """Issue #1750 P1-B：未显式声明时重注册不回收孤儿。"""
         c = MagicMock()
         c.register = AsyncMock(return_value=([1, 2], "https://p/probe"))
         c.recover_orphans = AsyncMock()
@@ -206,10 +222,8 @@ class TestReregister:
                           return_value=[{"name": "opencode", "installed": True, "cli_path": "/bin/oc"}]):
             result = asyncio.run(ra._reregister(c, [], "dev"))
         assert result is not None
-        ids, engine_by_rid, installed = result
-        assert ids == [1, 2]
-        assert installed and installed[0]["name"] == "opencode"
-        assert c.recover_orphans.await_count == 2
+        assert result[0] == [1, 2]
+        assert c.recover_orphans.await_count == 0
 
     def test_empty_ids_no_engines_is_success(self):
         """C1：无引擎时重注册返回 ([], {}, []) 而非 None——空引擎为正常状态。"""
@@ -348,6 +362,7 @@ class TestRunLoop:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
         m_rr.assert_awaited()
+        assert m_rr.await_args.kwargs.get("recover_orphans") is False
 
     def test_claims_and_executes(self):
         client = AsyncMock()

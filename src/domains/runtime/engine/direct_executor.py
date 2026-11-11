@@ -100,6 +100,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _post_result_to_issue, _post_result_to_pr, _post_subtask_completion_to_parent,
         _read_scene_linked_repos, _redispatch_vod_after_recommend, _submit_direct_linked_prs,
         _sync_issue_comments_to_conversation, _update_direct_task, get_agent_display_name,
+        resolve_actor_account,
         get_agent_workdir, register_scene_deploy_url, register_sre_deploy_url,
     )
     from src.domains.runtime.engine.executor import stream_devops_agent
@@ -340,7 +341,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "REPO_FULL_NAME": _full_name_env or repository,
         "REPO_OWNER": _repo_owner_env,
         "REPO_NAME": _repo_name_env,
-        "ACCOUNT": evt.get("actor") or exec_account or "",
+        # Issue #1668：统一 actor 解析（a2a_event 回退 payload.account/Issue creator），
+        # 禁止用 exec_account（仓库全名）冒充个人账号。
+        "ACCOUNT": resolve_actor_account(evt, repo_key),
     }
     # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
     # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。

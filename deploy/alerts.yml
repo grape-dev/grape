@@ -84,3 +84,15 @@ groups:
         annotations:
           summary: "Task queue backlog"
           description: "{{ $value }} tasks queued for more than 10 minutes."
+
+      # Issue #1938：事件回报丢失补偿频发
+      # 语义：任务已终态但事件回报未落库，服务端级联收敛并自行生成/回填结论。
+      # 频发 = worker 回报链路在丢消息，且事件结论已不属于 Agent 真实答复口径。
+      - alert: GrapeCascadeCompensationHigh
+        expr: sum by (agent_type, trigger) (increase(grape_event_cascade_compensation_total[10m])) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event report-missing compensation is frequent"
+          description: "{{ $value }} cascade compensations in the last 10 minutes (agent={{ $labels.agent_type }}, trigger={{ $labels.trigger }}) — agent report was lost; check the worker report/callback path."

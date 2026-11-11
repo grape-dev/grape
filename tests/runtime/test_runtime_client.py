@@ -199,11 +199,12 @@ class TestBusinessMethods:
     ])
     def test_simple_post_methods(self, method, args, kwargs, path):
         c = _client(_Ctx(_FakeResp(200, {})))
-        # task_start and report_messages return _request result ({} on success);
-        # other methods are fire-and-forget (return None).
+        # task_start/report_messages/recover_orphans return _request result ({} on success);
+        # other methods are fire-and-forget (return None). Issue #1750：recover_orphans
+        # 返回契约由 None 改为 dict（含 recovered/skipped_active），便于观测白名单生效。
         result = _run(getattr(c, method)(*args, **kwargs))
-        if method in ("task_start", "report_messages"):
-            assert result is not None  # {} on success
+        if method in ("task_start", "report_messages", "recover_orphans"):
+            assert result == {}  # {} on success
         else:
             assert result is None
         req = c._session.request.call_args

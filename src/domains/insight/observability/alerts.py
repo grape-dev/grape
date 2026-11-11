@@ -57,6 +57,16 @@ SEED_RULES: List[Dict[str, Any]] = [
         "severity": "warning", "seed_source": "GrapeTaskQueueBacklog",
         "description": "排队任务超过 10 个且持续 10 分钟",
     },
+    # Issue #1938：回报丢失补偿——事件回报未落库、结论由服务端级联收敛补偿生成/回填。
+    # 频发说明 worker 回报链路（report/complete 回调）在丢消息；补偿记录本身不计入 Agent 答复口径。
+    {
+        "name": "cascade_compensation", "kind": "metric", "level": "user",
+        "metric": "cascade_compensation",
+        "comparator": "gt", "threshold": 3, "window_sec": 600, "for_sec": 300,
+        "severity": "warning", "seed_source": "GrapeCascadeCompensationHigh",
+        "description": "近 10 分钟事件「回报丢失补偿」超过 3 次（Agent 原始回报未落库，"
+                       "结论由系统补偿生成），建议排查该仓库 worker 回报/回调链路",
+    },
     {
         "name": "all_runtimes_offline", "kind": "metric", "level": "platform",
         "metric": "runtimes_online",
@@ -415,6 +425,30 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                     m["_mut1_bad"] += float(n1 or 0)
     except Exception as e:
         log.warning(f"obs repo metrics failed: {e}")
+    # ⑤ Issue #1938：事件回报丢失补偿计数（cascade_compensation）
+    #   口径：窗口内被级联收敛补偿的事件数（events.report_missing=1，即 Agent 原始回报丢失、
+    #   结论由服务端补偿生成或回填）。按 repo_key 聚合供 cascade_compensation 告警规则消费。
+    #   独立 try/except：老库未迁出 report_missing 列时降级「不出指标」（未知不告警），
+    #   不拖累上面既有的卡住/失败率/排队口径。
+    try:
+        with db_lock:
+            c = db.cursor()
+            _cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
+            if "report_missing" in _cols:
+                c.execute(
+                    "SELECT repo_key, COUNT(*) FROM events"
+                    " WHERE repo_key IS NOT NULL AND repo_key != ''"
+                    "   AND report_missing=1"
+                    "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+                    " GROUP BY repo_key", (fail_cutoff,))
+                for repo_key, n in c.fetchall():
+                    m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
+                                                  "_done": 0.0, "_bad": 0.0,
+                                                  "_mut0_tot": 0.0, "_mut0_bad": 0.0,
+                                                  "_mut1_tot": 0.0, "_mut1_bad": 0.0})
+                    m["cascade_compensation"] = m.get("cascade_compensation", 0.0) + float(n or 0)
+    except Exception as e:
+        log.warning(f"obs repo metrics: cascade compensation agg failed: {e}")
     for m in out.values():
         tot = m["_done"]
         m["task_failure_rate"] = round(m["_bad"] / tot, 4) if tot else 0.0

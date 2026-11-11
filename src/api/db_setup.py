@@ -34,7 +34,12 @@ CREATE TABLE IF NOT EXISTS events (
     idempotency_key TEXT DEFAULT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
-    completed_at TEXT DEFAULT ''
+    completed_at TEXT DEFAULT '',
+    cascade_reason VARCHAR(64) DEFAULT '',
+    report_missing INTEGER DEFAULT 0,
+    triggered_by VARCHAR(64) DEFAULT '',
+    cascade_task_status VARCHAR(32) DEFAULT '',
+    cascade_prev_event_status VARCHAR(32) DEFAULT ''
 )
 """
 
@@ -6144,6 +6149,23 @@ def _migrate_tables():
             log.info("Added events.structured_output column")
     except Exception as e:
         log.warning(f"Add events.structured_output column failed: {e}")
+    # ===== Issue #1938：events 表补级联收敛补偿归因列 =====
+    # 补偿结论结构化落库（cascade_reason / report_missing / triggered_by + 原始任务终态 +
+    # 最后已知事件状态），文案由字段渲染，展示层据此标注/过滤「系统补偿，原始回报丢失」。
+    # 列类型用 VARCHAR + INTEGER（不用 TEXT）：MySQL 的 TEXT 列不支持 DEFAULT ''，
+    # _ensure_column 的 INSTANT/INPLACE 降级路径会因此建不出列。
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "cascade_reason", "VARCHAR(64) DEFAULT ''")
+            _ensure_column(c, "events", "report_missing", "INTEGER DEFAULT 0")
+            _ensure_column(c, "events", "triggered_by", "VARCHAR(64) DEFAULT ''")
+            _ensure_column(c, "events", "cascade_task_status", "VARCHAR(32) DEFAULT ''")
+            _ensure_column(c, "events", "cascade_prev_event_status", "VARCHAR(32) DEFAULT ''")
+            db.commit()
+            log.info("Added events cascade compensation columns (Issue #1938)")
+    except Exception as e:
+        log.warning(f"Add events cascade compensation columns failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

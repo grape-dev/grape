@@ -148,6 +148,16 @@ class MessagesBody(BaseModel):
     messages: list = []
 
 
+class RecoverOrphansBody(BaseModel):
+    """Issue #1750：worker 自报活跃任务白名单（可选）。
+
+    调用方（worker）在请求体里显式携带内存 active_tasks 的 task id；命中白名单的
+    任务视为「worker 自认仍在执行」，直接 skipped_active，优先于年龄闸门与活跃窗口。
+    旧版 worker 发空 body → 默认空列表，行为等同现状（字段可选、平滑兼容）。
+    """
+    active_task_ids: list[str] = []
+
+
 class UsageBody(BaseModel):
     """LLM 用量上报。
 
@@ -956,7 +966,8 @@ def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_cre
 
 
 @router.post("/runtimes/{runtime_id}/recover-orphans")
-def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_require_credential)):
+def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = None,
+                            credential_id: int = Depends(_require_credential)):
     """启动/重注册时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。
 
     2026-10-08 自噬循环修复（生产 exec#310 实锤）：
@@ -985,7 +996,12 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
     _now = datetime.now(timezone.utc)
     _active_cutoff = (_now - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
     _grace_cutoff_dt = _now - timedelta(seconds=RECOVER_GRACE_SECONDS)
+    # Issue #1750 P1-A：worker 自报活跃白名单（请求体可选，缺省空集合）。
+    # 白名单是「调用方主动声明」的正向信号，优先级最高——命中即跳过往返，
+    # 静默型长任务（长时间无 task_messages）不再被误判孤儿。
+    _active_whitelist = set((body.active_task_ids if body else []) or [])
     recovered, skipped_active, force_failed, skipped_young = [], [], [], []
+    skipped_active_reason = {}
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -997,6 +1013,13 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
         for tid, attempts, rid, ev_seq, _sa, _ca in rows:
             _seq_by_tid[tid] = ev_seq
         for tid, attempts, rid, _ev_seq, started_at, created_at in rows:
+            # Issue #1750 P1-A：白名单命中 → worker 自报仍在跑，直接 skipped_active。
+            # 位置在年龄闸门与活跃窗口之前（白名单优先级最高）：静默型长任务即使
+            # 超龄且窗口内无消息，也绝不会被回炉。
+            if tid in _active_whitelist:
+                skipped_active.append(tid)
+                skipped_active_reason[tid] = "active_whitelist"
+                continue
             # 年龄闸门（Issue #370）：started_at（NULL 兜底 created_at）距 now 不足
             # 宽限期 → 直接 skipped，防止刚派发的新任务被误判孤儿反复回炉。
             # 时间戳解析失败保守跳过闸门，继续后续活跃度检查（保持旧行为：回收）。
@@ -1018,6 +1041,7 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                     (tid, _active_cutoff))
                 if c.fetchone():
                     skipped_active.append(tid)
+                    skipped_active_reason[tid] = "recent_activity"
                     continue
             except Exception:
                 pass  # 查询失败保守跳过检查（保持旧行为：回收）
@@ -1092,10 +1116,11 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
             log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
     if recovered or skipped_active or force_failed or skipped_young:
         log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "
-                 f"skipped_active={skipped_active} skipped_young={skipped_young} force_failed={force_failed}")
+                 f"skipped_active={skipped_active} skipped_active_reason={skipped_active_reason} "
+                 f"skipped_young={skipped_young} force_failed={force_failed}")
     return {"message": "orphans recovered", "recovered": recovered,
-            "skipped_active": skipped_active, "skipped_young": skipped_young,
-            "force_failed": force_failed}
+            "skipped_active": skipped_active, "skipped_active_reason": skipped_active_reason,
+            "skipped_young": skipped_young, "force_failed": force_failed}
 
 
 # ===== 用户态端点（M2，保留）=====

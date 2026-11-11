@@ -83,3 +83,23 @@ jobs:
         run: |
           python3 scripts/check-openapi-endpoints.py --require-baseline
           python -m pytest tests/api/test_check_openapi_endpoints.py -v
+      - name: Recover-orphans active whitelist tests (issue #1750)
+        # Issue #1750：worker 自报活跃白名单 +
+        # 回收时机收紧（周期/心跳重注册 rid 变化携带白名单，启动空白名单）；
+        # 同时回归 recover_orphans 系列既有用例（slots/optimization）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_1750_recover_orphans_active_whitelist.py tests/runtime/test_recover_orphans_slots.py tests/api/test_recover_orphans_optimization.py -v
+      - name: Reregister/client contract regression tests (issue #1750)
+        # Issue #1750：_reregister 默认不回收 + client.recover_orphans 返回 dict
+        # 属契约变更，须回归受影响既有用例，避免同类回退再次漏过 CI：
+        # - test_runtime_agent.py::TestReregister（显式开关回收 / 默认不回收）
+        # - test_runtime_agent_concurrency.py 的两个重注册用例（元组解包事故看护；
+        #   该文件另有基线既有红灯 TestRequeueTask，故按 node 精确接入）
+        # - test_runtime_client.py（参数化 POST 方法返回契约 None → dict）
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_runtime_agent.py::TestReregister -v
+          python -m pytest tests/runtime/test_runtime_agent_concurrency.py::test_reregister_unpacks_register_tuple tests/runtime/test_runtime_agent_concurrency.py::test_reregister_default_does_not_recover -v
+          python -m pytest tests/runtime/test_runtime_client.py -v

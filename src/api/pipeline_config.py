@@ -634,8 +634,13 @@ def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
                         display_name: str = "", created_by: str = "", icon: str = "",
                         scene_type: str = "standard", pr_subscription_enabled: int = 0,
-                        linked_repos: list = None) -> int:
-    """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
+                        linked_repos: list = None,
+                        advanced_options: dict | None = None) -> int:
+    """Create or reactivate a repo-scoped custom scene in DB. Returns DB id.
+
+    Issue #1844：``advanced_options`` 可选（None=不写该列，保持既有创建路径行为）。
+    场景复制需要一次性写回工作分支/自定义变量声明，故复用本函数统一落库。
+    """
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
     linked_repos_json = json.dumps(linked_repos or [], ensure_ascii=False)
@@ -659,6 +664,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             _try_set_scene_type(c, existing[0], scene_type)
             _try_set_pr_sub_enabled(c, existing[0], pr_subscription_enabled)
             _try_set_linked_repos(c, existing[0], linked_repos_json)
+            _try_set_advanced_options(c, existing[0], advanced_options)
             db.commit()
             invalidate_scene_cache(scene_id, repo_key)
             return existing[0]
@@ -674,9 +680,22 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         _try_set_scene_type(c, new_id, scene_type)
         _try_set_pr_sub_enabled(c, new_id, pr_subscription_enabled)
         _try_set_linked_repos(c, new_id, linked_repos_json)
+        _try_set_advanced_options(c, new_id, advanced_options)
         db.commit()
         invalidate_scene_cache(scene_id, repo_key)
         return new_id
+
+
+def _try_set_advanced_options(c, row_id: int, advanced_options: dict | None):
+    """幂等写入 advanced_options（None=不写；列不存在时忽略）。"""
+    if advanced_options is None:
+        return
+    try:
+        c.execute(
+            "UPDATE devops_pipeline_scene SET advanced_options=? WHERE id=?",
+            (json.dumps(advanced_options, ensure_ascii=False), row_id))
+    except Exception:
+        pass
 
 
 def _try_set_created_by(c, row_id: int, created_by: str):

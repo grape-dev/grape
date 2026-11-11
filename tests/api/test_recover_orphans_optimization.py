@@ -48,9 +48,16 @@ def _clean():
 
 
 def _register_runtime(client, token):
-    """注册一个 runtime 返回其 id。"""
+    """注册一个 runtime 返回其 id。
+
+    cli_version 会落库为 agent_runtimes.worker_version：claim_by_tag 的
+    「幽灵引擎闸门」（event seq=9491）要求远端凭据注册的引擎带 worker_version
+    或 probe_status=ok，否则拒绝认领（本用例的「回炉后可再次认领」断言会拿到
+    None）。真实 worker 每次注册都会带 cli_version，这里对齐真实注册报文。
+    """
     r = client.post("/api/runtime/register",
-                    json={"device_name": "ci-orphans", "runtimes": [{"name": "opencode"}]},
+                    json={"device_name": "ci-orphans", "cli_version": "ci-test-1.0",
+                          "runtimes": [{"name": "opencode"}]},
                     headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200, r.text
     return r.json()["runtimes"][0]["id"]

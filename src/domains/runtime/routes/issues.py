@@ -67,8 +67,13 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
                 f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id LIKE ? ORDER BY seq DESC",
                 (*repo_keys, "#pr_%"))
             rows = c.fetchall()
+            # Issue #1938：补偿归因（PR 订阅卡片同口径标注「系统补偿，原始回报丢失」）
+            from src.domains.runtime.engine import cascade as _cascade
+            _cascade_map = _cascade.fetch_display_meta(
+                c, [r[0] for r in rows], {r[0]: (r[9] or "") for r in rows}) if rows else {}
         except Exception:
             rows = []
+            _cascade_map = {}
     if not rows:
         return items
     # 按 PR 号聚合（取最新一条作为卡片状态，同时保留全量审查历史）
@@ -89,6 +94,11 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             "result": r[9] or "",
             "scene_id": r[10] if len(r) > 10 else "",
         }
+        # Issue #1938：补偿记录显式标注，不计入 Agent 答复结论口径
+        _cm = _cascade_map.get(r[0]) or {}
+        _ev["cascade"] = _cm
+        _ev["result_kind"] = _cm.get("result_kind", "agent")
+        _ev["is_agent_conclusion"] = _cm.get("is_agent_conclusion", True)
         if pr_num not in _pr_map:
             _pr_map[pr_num] = _ev
         _pr_history.setdefault(pr_num, []).append(_ev)
@@ -276,17 +286,24 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     with db_lock:
         c = db.cursor()
         try:
-            cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
-            _has_so = "structured_output" in cols
-            _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill"
-                    + (", structured_output, agent_logs" if _has_so else ""))
+            # Issue #1938：补取 result 列（与事件列表/详情/PR 订阅三处调用点同口径），
+            # 供 fetch_display_meta 兜底识别存量（#587 时代）补偿记录的历史固定文案。
+            # 列序固定：0 seq … 8 created_at、9 entity_type（#252 PR 事件过滤）、
+            # 10 runtime、11 skill、12 result。本视图不取 structured_output/agent_logs
+            # （Issue 列表一次加载全仓库事件，不加载整份执行日志）。
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, entity_type "
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, "
+                f"created_at, entity_type, runtime, skill, result "
                 f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
                 repo_keys + _num_params)
             rows = c.fetchall()
+            # Issue #1938：补偿归因（Issue 流水线/处理记录同口径标注）
+            from src.domains.runtime.engine import cascade as _cascade
+            _cascade_map = _cascade.fetch_display_meta(
+                c, [r[0] for r in rows], {r[0]: (r[12] or "") for r in rows}) if rows else {}
         except Exception:
             rows = []
+            _cascade_map = {}
     for r in rows:
         iid = r[1]
         _entity_type = r[9] if len(r) > 9 else ""
@@ -301,20 +318,14 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             "title": r[4] or r[2], "actor": r[5] or "",
             "summary": r[6] or r[4] or r[2],
             "status": r[7], "created_at": normalize_event_time(r[8]),
-            "runtime": r[9] if len(r) > 9 else "",
-            "skill": r[10] if len(r) > 10 else "",
+            "runtime": r[10] if len(r) > 10 else "",
+            "skill": r[11] if len(r) > 11 else "",
         }
-        if len(r) > 11:  # structured_output / agent_logs 存在
-            raw_so = r[11]
-            try:
-                item["output"] = _json.loads(raw_so) if raw_so else None
-            except Exception:
-                item["output"] = None
-            try:
-                raw_logs = r[12] if len(r) > 12 else None
-                item["logs"] = _json.loads(raw_logs) if raw_logs else []
-            except Exception:
-                item["logs"] = []
+        # Issue #1938：补偿记录标注 + 「Agent 答复结论」口径（合成补偿不计入）
+        _cm = _cascade_map.get(r[0]) or {}
+        item["cascade"] = _cm
+        item["result_kind"] = _cm.get("result_kind", "agent")
+        item["is_agent_conclusion"] = _cm.get("is_agent_conclusion", True)
         out.setdefault(n, []).append(item)
     return out
 
@@ -542,6 +553,19 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
                 "artifacts": _out.get("artifacts", []),
                 "issue_summary": _out.get("issue_summary", ev.get("summary", "")),
             }
+        # Issue #1938：补偿记录不得伪装成 Agent 答复——
+        # ① 结构化补偿归因随 segment 下发；② 合成补偿的 conclusion 显式标注「系统补偿，原始回报丢失」
+        _cm = ev.get("cascade") or {}
+        if _cm.get("system_cascade"):
+            seg["cascade"] = _cm
+            seg["result_kind"] = _cm.get("result_kind", "")
+            seg["is_agent_conclusion"] = _cm.get("is_agent_conclusion", False)
+            if not _cm.get("is_agent_conclusion"):
+                _label = _cm.get("cascade_label") or "系统补偿，原始回报丢失"
+                seg["output"]["conclusion"] = _label
+                seg["output"]["issue_summary"] = _label
+        else:
+            seg["is_agent_conclusion"] = True
         segments.append(seg)
     return {"issue": {"number": int(number)} if str(number).isdigit() else {"number": number},
             "summary": (segments[-1]["output"]["issue_summary"] if segments else ""),

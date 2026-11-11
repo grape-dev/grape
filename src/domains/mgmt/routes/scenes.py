@@ -1685,6 +1685,7 @@ class SceneNodeInput(BaseModel):
     tag: str = ""
     skill: str = ""
     skill_id: int = 0  # Issue #979：权威技能标识（三档同名派发锁定）；0=仅名字（老场景，派发按名降级）
+    skill_pending: str = ""  # Issue #1844：复制时技能 scope 校验不通过，保留原名待重选
     mode: str = "emit"
     next: str = "done"
     handoff: str = "a2a"
@@ -1702,6 +1703,9 @@ class CreateSceneRequest(BaseModel):
     scene_type: str = "standard"  # deprecated, 保留向后兼容
     pr_subscription_enabled: bool = False
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
+    # Issue #1844：advanced_options 不在此开放——外部创建必须先建场景再走
+    # PUT /scenes/{id}/advanced-options（复用变量名/保留字/重名/scope/关联仓库校验），
+    # 复制路径由 copy_scene 直接调用 create_custom_scene 内部写入，避免绕过校验。
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
@@ -1874,6 +1878,325 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
 
     log.info(f"Scene created: id={scene_id} repo={repo_key} by user={user.get('id')}")
     return {"scene_id": scene_id, "db_id": db_id, "message": "场景创建成功"}
+
+
+def _scene_copy_source_meta(scene_id: str, repo_key: str):
+    """读取复制源场景的 created_by / advanced_options / icon（列缺失时降级为空）。
+
+    created_by 为空（老场景）由调用方按「非创建者」从严处理。
+    返回 ``(created_by, advanced_options, icon, parse_error)``；老场景
+    ``advanced_options`` 非法 JSON / 非对象时按空配置处理，并以 parse_error=True
+    计入复制响应明细（Spec 风险表要求）。
+    """
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT created_by, advanced_options, icon FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+    except Exception as e:
+        log.warning(f"scene copy: read source meta failed: {e}")
+        return "", {}, "", False
+    if not row:
+        return "", {}, "", False
+    created_by = row[0] or ""
+    opts, parse_error = {}, False
+    if row[1]:
+        try:
+            _o = json.loads(row[1])
+            if isinstance(_o, dict):
+                opts = _o
+            else:
+                parse_error = True
+        except Exception:
+            opts, parse_error = {}, True
+    return created_by, opts, (row[2] or ""), parse_error
+
+
+def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
+    """返回「当前用户在该仓库可选引擎 id（按角色）」查询闭包。
+
+    口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
+    global+user+repo+local 四档；非个人组织按 org_id 隔离。
+    """
+    from src.domains.runtime.engine.engine_select import query_engines
+    _filter_org = 0
+    try:
+        from src.domains.mgmt.user.org_db import is_org_personal
+        if org_id and not is_org_personal(org_id):
+            _filter_org = int(org_id)
+    except Exception:
+        _filter_org = 0
+    _cache: dict = {}
+
+    def _ids(role: str) -> list:
+        if role in _cache:
+            return _cache[role]
+        if not role:
+            _cache[role] = []
+            return _cache[role]
+        try:
+            if role == "sre":
+                engines = (query_engines(repo_key, "user", agent_type="sre", username=username)
+                           + query_engines(repo_key, "repo", agent_type="sre"))
+            else:
+                engines = (query_engines(repo_key, "global", agent_type=role)
+                           + query_engines(repo_key, "user", agent_type=role, username=username)
+                           + query_engines(repo_key, "repo", agent_type=role)
+                           + query_engines(repo_key, "local", agent_type=role, username=username))
+        except Exception as e:
+            log.warning(f"scene copy: query engines failed for role {role}: {e}")
+            engines = []
+        _ids_out, _seen = [], set()
+        for e in engines:
+            _rid = e.get("runtime_id")
+            if _rid in _seen:
+                continue
+            _seen.add(_rid)
+            if _filter_org and int(e.get("org_id") or 0) != _filter_org:
+                continue
+            _ids_out.append(_rid)
+        _cache[role] = _ids_out
+        return _ids_out
+
+    return _ids
+
+
+def _scene_copy_repo_accessible(user: dict, repo_key: str) -> bool:
+    """当前用户是否有权访问关联仓库（口径对齐 check_repo_access，仅不抛异常）。"""
+    if not repo_key:
+        return False
+    if (user.get("auth_type") or "jwt") in ("session_token", "api_key"):
+        return True
+    uid = user.get("id", 0)
+    if not uid:
+        return False
+    try:
+        from src.repo_key import to_repo_key
+        from src.domains.mgmt.user import db as user_db
+        rk = to_repo_key(repo_key)
+        base = rk.split(":", 1)[1] if ":" in rk else rk
+        candidates = {f"gitcode:{base}", f"github:{base}"}
+        return any((r or {}).get("repo_key") in candidates
+                   for r in user_db.get_managed_repos(uid))
+    except Exception as e:
+        log.warning(f"scene copy: linked repo access check failed: {e}")
+        return False
+
+
+def _scene_copy_name(requested: str, source_name: str, existing_names) -> str:
+    """副本命名：缺省 <源名>-copy；冲突追加序号；长度 ≤40。"""
+    base = (requested or "").strip() or f"{(source_name or 'scene').strip()}-copy"
+    base = base[:40]
+    taken = {str(n).strip() for n in (existing_names or []) if n}
+    if base not in taken:
+        return base
+    for i in range(2, 100):
+        suf = str(i)
+        cand = base[:40 - len(suf)] + suf
+        if cand not in taken:
+            return cand
+    return base
+
+
+class CopySceneRequest(BaseModel):
+    name: str = ""
+
+
+@router.post("/{scene_id}/copy", operation_id="scenes_copy", summary="Copy a scene", description="Copies a repo scene. The creator copies all custom-field values; other users only copy the field declarations (values cleared) and lose access to unavailable engines/skills/linked repos.")
+def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
+               user: dict = Depends(require_no_session_token), repo: str = ""):
+    """复制场景（Issue #1844）。
+
+    创建者：全量复制（含 custom_fields 明文值与 secret 明文）。
+    非创建者：custom_fields 只复制声明（value=""），技能/引擎/关联仓库按当前用户
+    可达性清洗；不中断复制，响应回传各清洗明细。
+    """
+    from src.api.pipeline_config import (
+        create_custom_scene, _query_scene_by_id, _query_scenes_from_db)
+    from src.scene_custom_env import normalize_custom_field
+    import uuid
+
+    repo_key = _resolve_repo_key(repo) if repo else ""
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
+
+    # 复制目标仓库归属校验（对齐 pin / deploy-url / reveal 端点），
+    # 防止 JWT 用户在无归属仓库通过 repo 参数创建场景（session_token/api_key
+    # 作用域已限定，由 check_repo_access 内部放行）。
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+
+    username = user.get("username") or ""
+    source_created_by, source_opts, source_icon, source_parse_error = _scene_copy_source_meta(scene_id, repo_key)
+    # 老场景 created_by 为空 → 从严按「非创建者」处理
+    is_creator = bool(source_created_by) and username == source_created_by
+
+    nodes = json.loads(json.dumps(existing.get("nodes") or [], ensure_ascii=False))
+    _allowed = _scene_copy_allowed_engines(repo_key, username, user.get("org_id") or 0)
+    dropped_engines, cleared_skills = [], []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        role = (node.get("id") or node.get("tag") or "").strip()
+        _ok_ids = set(_allowed(role))
+        _kept = []
+        for eid in (node.get("engine_runtime_ids") or []):
+            try:
+                _eid = int(eid)
+            except (TypeError, ValueError):
+                _eid = eid
+            if _eid in _ok_ids:
+                _kept.append(_eid)
+            else:
+                dropped_engines.append({"node_id": role, "engine_runtime_id": _eid})
+        node["engine_runtime_ids"] = _kept
+        # SRE 启用但清洗后无引擎 → 停用（与前端既有规则一致，避免创建被拒绝）
+        if role == "sre" and node.get("enabled") is not False and not _kept:
+            node["enabled"] = False
+
+    # 技能：复用 arch 侧既有 scope 判官（_collect_scene_skill_scope_violations，repo 场景口径），
+    # 冲突节点保留原名到 skill_pending，复制不中断（不再自建第二份判定）
+    _skill_violations = _collect_scene_skill_scope_violations(
+        nodes, repo_key, username=username, user_id=user.get("id") or "",
+        allow_own_user=True, expected_scope="repo")
+    for _v in _skill_violations:
+        _tag = (_v.get("node_tag") or "").strip()
+        _target = next((n for n in nodes if isinstance(n, dict)
+                        and (n.get("id") or n.get("tag") or "").strip() == _tag), None)
+        if _target is None:
+            continue
+        _orig_skill = _target.get("skill") or ""
+        _target["skill_pending"] = _orig_skill
+        _target["skill"] = ""
+        _target["skill_id"] = 0
+        if "skill_display_name" in _target:
+            _target["skill_display_name"] = ""
+        cleared_skills.append({"node_id": _tag, "skill": _orig_skill})
+
+    work_branch = source_opts.get("work_branch") or "main"
+    redacted_fields, custom_fields = [], []
+    for f in (source_opts.get("custom_fields") or []):
+        if not isinstance(f, dict):
+            continue
+        nf = normalize_custom_field(f)
+        if not nf.get("name"):
+            continue
+        _value = nf.get("value") or ""
+        if not is_creator and _value:
+            redacted_fields.append(nf["name"])
+        custom_fields.append({
+            "name": nf["name"],
+            "value": _value if is_creator else "",
+            "is_secret": bool(nf.get("is_secret")),
+            "scope": nf.get("scope") or ["all"],
+            "preset": bool(nf.get("preset")),
+            "default_value": nf.get("default_value") or "",
+            "description": nf.get("description") or "",
+        })
+    preset_fields = [json.loads(json.dumps(f, ensure_ascii=False))
+                     for f in (source_opts.get("preset_custom_fields") or [])
+                     if isinstance(f, dict)]
+
+    source_linked = source_opts.get("linked_repos")
+    if source_linked is None:
+        source_linked = existing.get("linked_repos") or []
+    linked_repos, dropped_linked_repos = [], []
+    for lr in (source_linked or []):
+        if not isinstance(lr, dict):
+            continue
+        _rk = (lr.get("repo_key") or "").strip()
+        if not _rk:
+            continue
+        _item = {"repo_key": _rk, "branch": (lr.get("branch") or "").strip() or "main"}
+        if not is_creator and not _scene_copy_repo_accessible(user, _rk):
+            dropped_linked_repos.append(_rk)
+            continue
+        linked_repos.append(_item)
+
+    # PR 订阅：QA 节点不满足「启用 + 有技能」→ 降级为 0（否则后续保存/派发不成立）
+    pr_sub = int(existing.get("pr_subscription_enabled") or 0)
+    pr_disabled = False
+    if pr_sub:
+        _qa = next((n for n in nodes if isinstance(n, dict)
+                    and (n.get("id") == "qa" or n.get("tag") == "qa")), None)
+        if not _qa or _qa.get("enabled") is False or not (_qa.get("skill") or ""):
+            pr_sub = 0
+            pr_disabled = True
+
+    advanced_options = {
+        "work_branch": work_branch,
+        "custom_fields": custom_fields,
+        "linked_repos": linked_repos,
+    }
+    if preset_fields:
+        advanced_options["preset_custom_fields"] = preset_fields
+
+    _existing_names = []
+    try:
+        for s in (_query_scenes_from_db(repo_key=repo_key) or []):
+            _existing_names.append(s.get("name") or "")
+            _existing_names.append(s.get("display_name") or "")
+    except Exception:
+        pass
+    final_name = _scene_copy_name(
+        (body.name if body else "") or "",
+        existing.get("display_name") or existing.get("name") or "",
+        _existing_names)
+
+    new_scene_id = str(uuid.uuid4())
+    try:
+        db_id = create_custom_scene(
+            scene_id=new_scene_id, name=final_name,
+            description=existing.get("description") or "",
+            repo_key=repo_key, nodes=nodes, display_name=final_name,
+            created_by=username, icon=source_icon or "",
+            scene_type=existing.get("scene_type") or "standard",
+            pr_subscription_enabled=pr_sub,
+            linked_repos=linked_repos, advanced_options=advanced_options)
+    except Exception as e:
+        err_upper = str(e).upper()
+        if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
+            raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 ID '{new_scene_id}' 已存在"})
+        raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+
+    log.info(f"Scene copied: src={scene_id} new={new_scene_id} repo={repo_key} "
+             f"by={username} creator={is_creator}")
+    # Issue #1844 复审：创建者复制会带走 secret 明文，必须留痕（与同文件 pin 端点同口径）。
+    # detail 只记标识与清洗计数，不落任何变量值。
+    try:
+        from src.domains.mgmt.auth import audit as auth_audit
+        auth_audit.log_audit(
+            "scene_copy", operator_id=user.get("id") or 0,
+            detail={"scene_id": scene_id, "new_scene_id": new_scene_id, "repo_key": repo_key,
+                    "operator": username, "is_creator": is_creator,
+                    "redacted_field_count": len(redacted_fields),
+                    "secret_field_count": sum(1 for f in custom_fields if f.get("is_secret")),
+                    "dropped_engine_count": len(dropped_engines),
+                    "cleared_skill_count": len(cleared_skills),
+                    "dropped_linked_repo_count": len(dropped_linked_repos),
+                    "pr_subscription_disabled": pr_disabled})
+    except Exception as _audit_err:
+        log.warning(f"Scene copy audit failed src={scene_id} new={new_scene_id}: {_audit_err}")
+    return {
+        "scene_id": new_scene_id,
+        "db_id": db_id,
+        "name": final_name,
+        "is_creator": is_creator,
+        "redacted_fields": redacted_fields,
+        "cleared_skills": cleared_skills,
+        "dropped_engines": dropped_engines,
+        "dropped_linked_repos": dropped_linked_repos,
+        "pr_subscription_disabled": pr_disabled,
+        "source_config_parse_error": source_parse_error,
+    }
 
 
 @router.put("/{scene_id}", operation_id="scenes_update", summary="Update scene", description="Updates a scene (repo/user scope directly; official immutable).")

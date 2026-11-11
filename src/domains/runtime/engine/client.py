@@ -348,8 +348,20 @@ class RuntimeClient:
             return ""
         return data.get("status") or ""
 
-    async def recover_orphans(self, runtime_id: int):
-        await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans", {}, retries=2)
+    async def recover_orphans(self, runtime_id: int, active_task_ids: list[str] | None = None) -> dict:
+        """清理该 runtime 遗留任务（Issue #1750：可携带 worker 自报活跃白名单）。
+
+        active_task_ids 为本 worker 内存 active_tasks 的 task id 列表；服务端命中白名单
+        即 skipped_active，优先于年龄闸门与活跃窗口。None 时发送空 body，保持旧行为
+        （启动注册清理上次遗留）且兼容旧服务端（字段可选）。
+
+        返回服务端响应 dict（含 recovered/skipped_active/skipped_active_reason），
+        便于 worker 观测白名单是否生效；请求失败返回空 dict。
+        """
+        body = {} if active_task_ids is None else {"active_task_ids": list(active_task_ids)}
+        resp = await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans",
+                                   body, retries=2)
+        return resp if isinstance(resp, dict) else {}
 
     async def report_skills(self, runtime_id: int, skills: list[dict]):
         """回报 skill 扫描结果给服务端（scan_request 指令的响应）。"""

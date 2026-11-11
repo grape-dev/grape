@@ -251,6 +251,7 @@ EXPECTED_PUBLIC = {
     "scenes_branch_create": ("post", "/api/scenes/branches/{owner}/{repo}"),
     "scenes_branches": ("get", "/api/scenes/branches/{owner}/{repo}"),
     "scenes_check_name": ("get", "/api/scenes/check-name"),
+    "scenes_copy": ("post", "/api/scenes/{scene_id}/copy"),
     "scenes_create": ("post", "/api/scenes"),
     "scenes_delete": ("delete", "/api/scenes/{scene_id}"),
     "scenes_deploy_url_get": ("get", "/api/scenes/{scene_id}/deploy-url"),
