@@ -78,6 +78,27 @@ function Invoke-PipQuiet {
     return $exitCode
 }
 
+
+# 判定进程是否是 grape worker agent（arch 分支入口 = src.domains.runtime.engine.agent，
+# 旧包/遗留目录 = src.runtime.agent；升级时必须两者都认，否则会误判"进程缺失"→回滚，
+# 且旧 agent 停不掉会与新 agent 双跑）
+function Test-GrapeAgentProcess {
+    param($Proc)
+    if (-not $Proc -or -not $Proc.CommandLine) { return $false }
+    $cl = $Proc.CommandLine
+    return ($cl -like "*src.domains.runtime.engine.agent*") -or ($cl -like "*src.runtime.agent*")
+}
+
+
+# 启动失败时把日志尾部打出来（否则用户只拿到一个路径，无法判断是 import 崩还是注册失败）
+function Show-WorkerLogTail {
+    param($Path, [int]$Lines = 15)
+    if (-not (Test-Path $Path)) { return }
+    Log "----- worker log tail ($Lines) -----"
+    Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue | ForEach-Object { Log $_ }
+    Log "----- end log tail -----"
+}
+
 # ===== 参数校验 =====
 if (-not $Token) {
     # 尝试从环境变量读取
@@ -198,13 +219,14 @@ function restore_upgrade_backup {
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
     Start-Sleep -Seconds 5
     $restoredProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -like "*src.runtime.agent*"
+        Test-GrapeAgentProcess $_
     } | Select-Object -First 1
     if ($restoredProc) {
         Log "Rollback OK: old agent restored and running"
         return $true
     }
     Log "Agent still not running after rollback - worker offline, check log: $workerLog"
+    Show-WorkerLogTail $workerLog
     return $false
 }
 
@@ -576,6 +598,21 @@ try {
 }
 Log "Config written to $EnvFile (token + controller address)"
 
+
+# 清理遗留模块目录（arch 分支已把 src/runtime、src/agent、src/user 迁到 src/domains/*；
+# 解压是覆盖式，旧目录会残留并被 import 优先命中，导致旧 agent 崩溃/协议不匹配）
+foreach ($legacy in @("runtime", "agent", "user")) {
+    $legacyPath = Join-Path (Join-Path $Dir "src") $legacy
+    if ((Test-Path $legacyPath) -and -not (Test-Path (Join-Path $Dir "src\domains\runtime\engine\agent.py"))) {
+        Log "Skip legacy cleanup (canonical agent missing, keep as-is): src\$legacy"
+        continue
+    }
+    if (Test-Path $legacyPath) {
+        try { Remove-Item -Recurse -Force $legacyPath; Log "Removed legacy module dir: src\$legacy" }
+        catch { Log "Warning: failed to remove legacy dir src\$legacy (non-blocking)" }
+    }
+}
+
 # ===== 6. 生成启动脚本并启动 =====
 $startScript = Join-Path $Dir "start-worker.ps1"
 
@@ -599,7 +636,7 @@ Start-Sleep -Seconds 1
 
 # 停掉旧 worker（按 grape 目录路径匹配 python 进程）
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-    $_.ExecutablePath -like "*grape*" -and $_.CommandLine -like "*src.runtime.agent*"
+    $_.ExecutablePath -like "*grape*" -and (Test-GrapeAgentProcess $_)
 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 1
@@ -617,13 +654,14 @@ Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Execution
 Start-Sleep -Seconds 3
 
 $workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -like "*src.runtime.agent*"
+    Test-GrapeAgentProcess $_
 } | Select-Object -First 1
 
 if (-not $workerProc) {
     Log "New agent failed to start (process missing), rolling back..."
+    Show-WorkerLogTail $workerLog
     restore_upgrade_backup
-    Fail "New agent failed to start (rollback attempted), log: $workerLog"
+    Fail "New agent failed to start (rollback attempted), see log tail above / $workerLog"
 }
 
 Log "New agent started (pid $($workerProc.ProcessId)), waiting for registration..."
