@@ -379,10 +379,12 @@ def test_safe_terminate_swallows_failure(monkeypatch):
 
 
 def test_credential_revoked_path_uses_safe_kill_wrapper():
-    """凭据吊销路径必须走容错包装，不能让杀进程异常顶掉原异常。
+    """凭据吊销路径与终态中断路径必须走容错包装，不能让杀进程异常顶掉原异常。
 
     _terminate_proc 在 Windows 下 taskkill 失败会抛 RuntimeError；若不被吞掉，
     该异常会顶掉 CredentialRevokedError，调用方依赖的"上抛让 worker 退出"语义丢失。
+    _abort_task_terminal 同理：异常逸出会跳过 res.dispose()/_cleanup_task_workdir()
+    并顶掉返回的 _error 契约。
     """
     import ast
     from pathlib import Path
@@ -415,6 +417,15 @@ def test_credential_revoked_path_uses_safe_kill_wrapper():
         if "_kill_stale_engine" in names:
             assert "_kill_stale_engine_safe" in names, \
                 "凭据吊销路径未使用 _kill_stale_engine_safe，杀进程异常会顶掉原异常"
+
+    aborts = [n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_abort_task_terminal"]
+    assert aborts, "未找到 _abort_task_terminal"
+    abort_names = called_names(aborts[0])
+    assert "_kill_stale_engine" not in abort_names, \
+        "_abort_task_terminal 不应裸调 _kill_stale_engine，异常会跳过 res.dispose/_cleanup_task_workdir"
+    assert "_kill_stale_engine_safe" in abort_names, \
+        "_abort_task_terminal 必须使用 _kill_stale_engine_safe，杀进程异常不能顶掉 _error 契约"
 
 
 def test_acp_backends_use_safe_terminate():
