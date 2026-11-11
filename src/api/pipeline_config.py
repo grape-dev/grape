@@ -5,16 +5,22 @@ Official scenes live in scene_market(source='official'); repo scenes are copies
 applied to a repo (issue-39 方案 B: scenes only bound to repo_key).
 Backward compatible: if DB table missing/no scenes, falls back to configs/pipelines.json.
 """
+
 import json
+
 import os
+
 import time
+
 import threading
+
 from typing import Optional
 
 from src.kernel.config import CONFIG_DIR, log
 
 # File-based fallback (used during migration or if DB not ready)
 _PIPELINES_PATH = os.path.join(CONFIG_DIR, "pipelines.json")
+
 _LEGACY_PATH = os.path.join(CONFIG_DIR, "agent-skill-mapping.json")
 
 # Node color mapping (same as frontend agentColors)
@@ -27,19 +33,16 @@ NODE_COLORS = {
     "chat": "var(--sk)",
 }
 
-# ====== Process-level cache (P1-B, Issue #357) ======
-# Eliminates N+1: get_pipeline_config called per-card in _query_tasks (348×),
-# each doing SHOW COLUMNS + scene query + market fallback = ~1000 DB round-trips.
-# Cache TTL 60s (scenes are low-frequency config; write paths invalidate immediately).
-
 _SCENE_CACHE_TTL = 60.0  # seconds
+
 _SCENE_CACHE: dict[tuple, tuple] = {}  # (scene_id, repo_key) → (result_dict|None, expiry_ts)
+
 _SCENE_CACHE_LOCK = threading.Lock()
 
 # SHOW COLUMNS result cached once per process (table structure only changes on migration)
 _SCENE_COLUMNS_CACHE: set[str] | None = None
-_SCENE_COLUMNS_LOCK = threading.Lock()
 
+_SCENE_COLUMNS_LOCK = threading.Lock()
 
 def _get_scene_columns() -> set[str]:
     """Return column names of devops_pipeline_scene (cached once per process).
@@ -81,7 +84,6 @@ def _get_scene_columns() -> set[str]:
             _SCENE_COLUMNS_CACHE = cols
         return _SCENE_COLUMNS_CACHE
 
-
 def _cache_get(scene_id: str, repo_key: str):
     """Get cached pipeline config. Returns (result, hit) tuple."""
     key = (scene_id, repo_key)
@@ -94,14 +96,12 @@ def _cache_get(scene_id: str, repo_key: str):
             del _SCENE_CACHE[key]
     return None, False
 
-
 def _cache_put(scene_id: str, repo_key: str, result):
     """Store pipeline config in cache with TTL."""
     key = (scene_id, repo_key)
     expiry = time.time() + _SCENE_CACHE_TTL
     with _SCENE_CACHE_LOCK:
         _SCENE_CACHE[key] = (result, expiry)
-
 
 def invalidate_scene_cache(scene_id: str = "", repo_key: str = ""):
     """Invalidate cache entries. Called by write paths (create/update/delete scene).
@@ -128,11 +128,9 @@ def invalidate_scene_cache(scene_id: str = "", repo_key: str = ""):
         for key in keys_to_del:
             del _SCENE_CACHE[key]
 
-
 def _db():
     from src.kernel.session_manager import db, db_lock
     return db, db_lock
-
 
 def _load_pipelines_file() -> dict:
     """Load pipelines.json directly from file (fallback only)."""
@@ -142,7 +140,6 @@ def _load_pipelines_file() -> dict:
     except Exception as e:
         log.warning(f"pipelines.json load failed ({e})")
         return {"scenes": {}}
-
 
 def _load_legacy() -> dict:
     """Convert agent-skill-mapping.json to pipelines format (legacy fallback)."""
@@ -168,7 +165,6 @@ def _load_legacy() -> dict:
         log.warning(f"legacy mapping load failed: {e}")
         return {"scenes": {}}
 
-
 def _load_official_scene_from_market(scene_id: str) -> Optional[dict]:
     """Look up an official scene (template) from scene_market(source='official').
 
@@ -193,7 +189,6 @@ def _load_official_scene_from_market(scene_id: str) -> Optional[dict]:
             log.warning(f"_load_official_scene_from_market failed: {e}")
     return None
 
-
 def _scene_search_where(q: str, cols: set[str]) -> tuple[str, list]:
     """Issue #501 检索 WHERE 片段单一来源（评审遗留提醒3）：
     q 非空时按 name/description/display_name（列存在时）三字段 LIKE 构建过滤，
@@ -209,7 +204,6 @@ def _scene_search_where(q: str, cols: set[str]) -> tuple[str, list]:
         fields.append("display_name")
     where = " AND (" + " OR ".join(f"{f} LIKE ?" for f in fields) + ")"
     return where, [like] * len(fields)
-
 
 def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0,
                           q: str = "", sort: str = "id", minimal: bool = False) -> list[dict]:
@@ -237,6 +231,8 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
     _has_pr_sub = False
     _has_linked_repos = False
     _has_ca = False
+    _has_pin = False
+    _has_pinat = False
     with lock:
         c = db.cursor()
         try:
@@ -255,6 +251,8 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 _has_pr_sub = "pr_subscription_enabled" in _cols
                 _has_linked_repos = "linked_repos" in _cols
                 _has_ca = "created_at" in _cols
+                _has_pin = "is_pinned" in _cols
+                _has_pinat = "pinned_at" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
@@ -263,11 +261,21 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 if _has_st: _extra += ", scene_type"
                 if _has_pr_sub: _extra += ", pr_subscription_enabled"
                 if _has_linked_repos: _extra += ", linked_repos"
+                if _has_pin: _extra += ", is_pinned"
+                if _has_pinat: _extra += ", pinned_at"
                 if _has_ca and sort == "latest": _extra += ", created_at"
                 # 检索 WHERE：共享构建器（与 _count_scenes_from_db 单一来源）
                 _where_extra, _q_params = _scene_search_where(q, _cols)
                 _params = [repo_key] + _q_params
-                _order = "ORDER BY id" if sort != "latest" else "ORDER BY created_at DESC, id DESC"
+                if _has_pin:
+                    if _has_pinat:
+                        _order = ("ORDER BY is_pinned DESC, pinned_at DESC, created_at DESC, id DESC"
+                                  if sort == "latest" else "ORDER BY is_pinned DESC, pinned_at DESC, id")
+                    else:
+                        _order = ("ORDER BY is_pinned DESC, created_at DESC, id DESC"
+                                  if sort == "latest" else "ORDER BY is_pinned DESC, id")
+                else:
+                    _order = "ORDER BY id" if sort != "latest" else "ORDER BY created_at DESC, id DESC"
                 # LIMIT/OFFSET 走占位符（评审遗留提醒2：与同函数参数化风格一致；
                 # int() 强转保留为双保险）
                 _limit_sql = " LIMIT ? OFFSET ?" if limit is not None else ""
@@ -328,6 +336,15 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
                 linked_repos = json.loads(r[col_offset] or "[]") if r[col_offset] else []
             except Exception:
                 linked_repos = []
+            col_offset += 1
+        is_pinned = 0
+        if _has_pin and len(r) > col_offset:
+            is_pinned = int(r[col_offset] or 0)
+            col_offset += 1
+        pinned_at = ""
+        if _has_pinat and len(r) > col_offset:
+            pinned_at = r[col_offset] or ""
+            col_offset += 1
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
             "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
@@ -336,9 +353,10 @@ def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0
             "icon": icon, "scene_type": scene_type,
             "pr_subscription_enabled": pr_subscription_enabled,
             "linked_repos": linked_repos,
+            "is_pinned": is_pinned,
+            "pinned_at": pinned_at,
         })
     return result
-
 
 def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
     """Query a specific repo-scoped scene from DB by scene_id + repo_key.
@@ -398,7 +416,6 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
             log.warning(f"_query_scene_by_id failed: {e}")
     return None
 
-
 def _count_scenes_from_db(repo_key: str = "", q: str = "") -> int:
     """Count active repo-scoped scenes (Issue #501: 分页 total，不拉 nodes_json).
 
@@ -423,7 +440,6 @@ def _count_scenes_from_db(repo_key: str = "", q: str = "") -> int:
             log.warning(f"_count_scenes_from_db failed: {e}")
             return 0
 
-
 def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
                q: str = "", sort: str = "id", minimal: bool = False) -> list[dict]:
     """Return scene list [{id, name, display_name, scope, description, work_branch, created_by, icon, nodes, onboarding}] for this repo.
@@ -445,8 +461,9 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "onboarding": s.get("onboarding") or "repo-onboarding",
              "scene_type": s.get("scene_type") or "standard",
              "pr_subscription_enabled": s.get("pr_subscription_enabled", 0),
-             "linked_repos": s.get("linked_repos") or []} for s in db_scenes]
-
+             "linked_repos": s.get("linked_repos") or [],
+             "is_pinned": int(s.get("is_pinned") or 0),
+             "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
     """Return pipeline config for a repo-scoped scene: {name, nodes: [...], onboarding}.
@@ -521,7 +538,6 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
     _cache_put(scene_id, repo_key, result)
     return result
 
-
 def _query_user_market_scene_nodes(scene_id: str, user_id: int) -> Optional[list]:
     """Issue #979: 查用户个人场景（scene_market scope='user'）的 nodes。
 
@@ -546,7 +562,6 @@ def _query_user_market_scene_nodes(scene_id: str, user_id: int) -> Optional[list
         except Exception as e:
             log.warning(f"_query_user_market_scene_nodes failed: {e}")
     return None
-
 
 def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 0) -> Optional[dict]:
     """Find a node by tag in a scene's pipeline.
@@ -578,7 +593,6 @@ def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 
                     return _n
     return node
 
-
 def get_first_node(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
     """Return the first node of a scene's pipeline (entry point).
 
@@ -588,7 +602,6 @@ def get_first_node(scene_id: str = "default", repo_key: str = "") -> Optional[di
     if not cfg or not cfg.get("nodes"):
         return None
     return cfg["nodes"][0]
-
 
 def get_next_node(scene_id: str, current_node_id: str) -> Optional[dict]:
     """Return the next node after the current one, respecting skip list."""
@@ -615,7 +628,6 @@ def get_next_node(scene_id: str, current_node_id: str) -> Optional[dict]:
                     return n2
     return None
 
-
 def is_node_skipped(scene_id: str, node_id: str) -> bool:
     """Check if a node is in any other node's skip list."""
     cfg = get_pipeline_config(scene_id)
@@ -626,9 +638,6 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
         if node_id in skip:
             return True
     return False
-
-
-# ===== Scene CRUD (for custom scenes) =====
 
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
@@ -685,7 +694,6 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         invalidate_scene_cache(scene_id, repo_key)
         return new_id
 
-
 def _try_set_advanced_options(c, row_id: int, advanced_options: dict | None):
     """幂等写入 advanced_options（None=不写；列不存在时忽略）。"""
     if advanced_options is None:
@@ -697,7 +705,6 @@ def _try_set_advanced_options(c, row_id: int, advanced_options: dict | None):
     except Exception:
         pass
 
-
 def _try_set_created_by(c, row_id: int, created_by: str):
     """幂等写入 created_by（列不存在时忽略）。"""
     if not created_by:
@@ -707,14 +714,12 @@ def _try_set_created_by(c, row_id: int, created_by: str):
     except Exception:
         pass
 
-
 def _try_set_icon(c, row_id: int, icon: str):
     """幂等写入 icon（列不存在时忽略）。"""
     try:
         c.execute("UPDATE devops_pipeline_scene SET icon=? WHERE id=?", (icon, row_id))
     except Exception:
         pass
-
 
 def _try_set_scene_type(c, row_id: int, scene_type: str):
     """幂等写入 scene_type（列不存在时忽略）。"""
@@ -730,7 +735,6 @@ def _try_set_pr_sub_enabled(c, row_id: int, enabled: int):
     except Exception:
         pass
 
-
 def _try_set_linked_repos(c, row_id: int, linked_repos_json: str):
     """幂等写入 linked_repos（列不存在时忽略）。"""
     try:
@@ -738,14 +742,12 @@ def _try_set_linked_repos(c, row_id: int, linked_repos_json: str):
     except Exception:
         pass
 
-
 def _try_set_display_name(c, row_id: int, display_name: str):
     """幂等写入 display_name（列不存在时忽略，兼容旧库）。"""
     try:
         c.execute("UPDATE devops_pipeline_scene SET display_name=? WHERE id=?", (display_name, row_id))
     except Exception:
         pass
-
 
 def update_custom_scene(scene_id: str, repo_key: str,
                         nodes: list, name: str | None = None, description: str | None = None,
@@ -784,7 +786,6 @@ def update_custom_scene(scene_id: str, repo_key: str,
         db.commit()
     invalidate_scene_cache(scene_id, repo_key)
 
-
 def delete_custom_scene(scene_id: str, repo_key: str):
     """Hard-delete a repo-scoped custom scene. 精确匹配 scene_id + repo_key，不影响其他仓库。"""
     db, lock = _db()
@@ -802,7 +803,6 @@ def delete_custom_scene(scene_id: str, repo_key: str):
         _sanitize_recommend_config(repo_key)
     except Exception:
         pass
-
 
 def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0) -> Optional[str]:
     """按场景名从 scene_market 查 market_id 并应用到仓库，返回仓内副本真实 scene_id。
@@ -830,7 +830,7 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
     market_id = row[0]
 
     # 从 repo_key 拆 owner/repo（apply_market_scene 需要这两个参数）
-    full_name = from_repo_key(repo_key)  # "XOcto/repo-name"
+    full_name = from_repo_key(repo_key)  # "example-org/repo-name"
     parts = full_name.split("/", 1)
     if len(parts) != 2:
         log.warning(f"apply_market_scene_by_name: invalid repo_key '{repo_key}'")
@@ -840,7 +840,13 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
     # 调 apply_market_scene，走场景中心完整逻辑
     # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
     from src.domains.mgmt.routes.scenes import apply_market_scene
-    result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
+    try:
+        result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
+    except Exception as _e:
+        # apply_market_scene 以 HTTPException 表达业务拒绝（如技能缺失/重名 409）
+        log.warning(f"apply_market_scene_by_name: apply market scene {market_id} ({scene_name}) "
+                    f"to {repo_key} rejected: {_e}")
+        return None
     log.info(f"apply_market_scene_by_name: applied market scene {market_id} ({scene_name}) to {repo_key}: {result}")
     # Issue #541：提取仓内副本真实 scene_id（weekly-09：每次应用生成 custom-{uuid}）
     real_scene_id = ""
@@ -850,7 +856,6 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
         log.warning(f"apply_market_scene_by_name: no scene_id in apply result for {repo_key}: {result}")
         return None
     return real_scene_id
-
 
 def scene_exists_in_repo(scene_id: str, repo_key: str) -> bool:
     """校验 scene_id 是否为该仓库内已存在的场景副本（devops_pipeline_scene 行）。
@@ -872,7 +877,6 @@ def scene_exists_in_repo(scene_id: str, repo_key: str) -> bool:
             log.warning(f"scene_exists_in_repo: query failed: {e}")
             return False
 
-
 def _query_official_scene_ids() -> set[str]:
     """Return set of official scene_ids available in scene_market(source='official')."""
     db, lock = _db()
@@ -886,7 +890,6 @@ def _query_official_scene_ids() -> set[str]:
         except Exception as e:
             log.warning(f"_query_official_scene_ids failed: {e}")
             return set()
-
 
 def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
                              user_id: int = 0) -> dict:
@@ -935,7 +938,6 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
             out_ids.append(_xi)
     return {"status": "bound", "engine_ids": out_ids}
 
-
 def get_scene_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> list[int]:
     """Get engine_runtime_ids from a scene's node for a specific agent_type.
 
@@ -943,3 +945,30 @@ def get_scene_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", use
     （Issue #653：需要区分空值语义时请改用 get_scene_engine_binding。）
     """
     return get_scene_engine_binding(scene_id, agent_type, repo_key=repo_key, user_id=user_id)["engine_ids"]
+
+def set_scene_pinned(scene_id: str, repo_key: str, pinned: bool) -> int:
+    """设置仓库场景置顶状态（仓库共享；重复置顶不刷新 pinned_at）。
+
+    返回受影响行数。MySQL 未启用 CLIENT_FOUND_ROWS 时，匹配但值未变的 UPDATE
+    会返回 0（如重复置顶/重复取消），因此调用方必须先做存在性校验，不能把
+    rowcount==0 当作「场景不存在」。
+    """
+    db, lock = _db()
+    from datetime import datetime, timezone
+    with lock:
+        c = db.cursor()
+        if pinned:
+            now = datetime.now(timezone.utc).isoformat()
+            c.execute(
+                "UPDATE devops_pipeline_scene SET "
+                "pinned_at=CASE WHEN is_pinned=1 THEN pinned_at ELSE ? END, "
+                "is_pinned=1 WHERE scene_id=? AND repo_key=? AND is_active=1",
+                (now, scene_id, repo_key))
+        else:
+            c.execute(
+                "UPDATE devops_pipeline_scene SET is_pinned=0, pinned_at=NULL "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1",
+                (scene_id, repo_key))
+        rowcount = c.rowcount
+        db.commit()
+    return int(rowcount or 0)

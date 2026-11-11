@@ -1,18 +1,23 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
+
 import io as _io
+
 import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
+
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response
+
 from pydantic import BaseModel
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
+
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
-
 # 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
-
 
 def _resolve_repo_key(repo: str, strict: bool = False) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。
@@ -30,12 +35,17 @@ def _resolve_repo_key(repo: str, strict: bool = False) -> str:
         from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            rows = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
-                             (f"gitcode:{repo}", f"github:{repo}")).fetchall()
-            if len(rows) == 2 and strict:
+            from src.kernel.repo_key import repo_key_candidates
+            _rks = tuple(repo_key_candidates(repo))
+            rows = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({','.join('?' * len(_rks))})",
+                             _rks).fetchall()
+            # S100/D75：歧义守卫 >= 2（候选集已卡派生多平台，写死 ==2 会漏
+            # ≥3 平台同名仓）；文案动态列出命中平台，不再硬编码双平台
+            if len(rows) >= 2 and strict:
+                _hit = [((r[0] or "").split(":", 1)[0] or "裸键") for r in rows]
                 raise HTTPException(status_code=400, detail={
                     "code": 400,
-                    "message": f"仓库 {repo} 同时存在于 gitcode 与 github，请指定完整仓库标识（如 gitcode:{repo}）后重试"})
+                    "message": f"仓库 {repo} 同时存在于 {'、'.join(_hit)}，请指定完整仓库标识（如 gitcode:{repo}）后重试"})
             if rows:
                 return rows[0][0]
     except HTTPException:
@@ -43,7 +53,6 @@ def _resolve_repo_key(repo: str, strict: bool = False) -> str:
     except Exception:
         pass
     return rk
-
 
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     """规范化重打包技能 zip：根 = {skill_name}/，逐文件保留权限位（external_attr），
@@ -62,7 +71,6 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
                 with open(full, "rb") as fh:
                     zf.writestr(info, fh.read())
     return buf.getvalue()
-
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
 def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",
@@ -86,7 +94,7 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
     repo_key = _resolve_repo_key(repo) if repo else ""
 
     # 构建查询条件
-    _org_id = user.get("org_id", 0)
+    _org_id = user.get("org_id", "")
     conditions = ["is_active=1"]
     params = []
     if scope == "all":
@@ -112,14 +120,14 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
         conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
         params.append(str(user["id"]))
 
-    # 组织隔离（2026-10-12 修正）：official 技能（org_id=0）对所有组织可见；
+    # 组织隔离（2026-10-12 修正）：official 技能（org_id=''）对所有组织可见；
     # user/repo scope 的技能没有"组织级"概念——org_id 只是迁移时的数据归属标记，
     # 可见性依据是 owner：repo 技能跟着仓库走（owner_id=repo_key 精确限定，
     # 用户能访问该仓库即能看其技能，见 skills-org-visibility 修复），user 技能
     # owner_id=user.id 已是本人限定。故组织过滤仅作用于 official 之外的兜底场景，
     # 不再对 repo/user 分支追加 org_id 条件（否则跨组织的仓库技能会被错误滤掉）。
     if _org_id and scope not in ("repo", "user"):
-        conditions.append("(org_id=0 OR org_id=?)")
+        conditions.append("(org_id='' OR org_id=?)")
         params.append(_org_id)
 
     # 搜索过滤
@@ -196,7 +204,7 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
             pass
 
     # 批量查 liked_by_me
-    liked_map = batch_skill_liked(user.get("id", 0), skill_ids) if skill_ids else {}
+    liked_map = batch_skill_liked(str(user.get("id") or ""), skill_ids) if skill_ids else {}
     # 批量查使用统计（按本页 skill_ids 过滤）
     usage_stats = get_skill_usage_stats(skill_ids) if skill_ids else {}
     # 批量查所属场景
@@ -214,9 +222,6 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
         return {"skills": skills, "total": total, "page": page, "page_size": page_size}
     return {"skills": skills}
 
-
-# ===== Skill Market API（技能市场）=====
-
 @router.post("/{skill_id}/like", operation_id="skills_like_toggle", summary="Toggle skill like", description="Toggles a skill like.")
 def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_token)):
     """点赞 toggle：已赞→取消，未赞→点赞"""
@@ -230,9 +235,8 @@ def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_tok
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
-    liked, like_count = _toggle(user.get("id", 0), skill_id)
+    liked, like_count = _toggle(str(user.get("id") or ""), skill_id)
     return {"liked": liked, "like_count": like_count}
-
 
 @router.get("/featured", operation_id="skills_featured", summary="List featured skills", description="Featured skills: is_featured=1 official skills ordered by like_count desc (default limit 5).")
 def list_featured_skills(user: dict = Depends(require_no_session_token), limit: int = 0):
@@ -247,7 +251,7 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
 
     skill_ids = [s["id"] for s in skills]
     # 补充 liked_by_me
-    liked_map = batch_skill_liked(user.get("id", 0), skill_ids)
+    liked_map = batch_skill_liked(str(user.get("id") or ""), skill_ids)
     # 补充使用统计和所属场景（按 skill_id 关联）
     usage_stats = get_skill_usage_stats(skill_ids) if skill_ids else {}
     scenes_map = batch_skill_scenes(skill_ids) if skill_ids else {}
@@ -278,7 +282,6 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         except Exception:
             pass
     return {"skills": skills}
-
 
 @router.get("/agent-stats", operation_id="skills_agent_stats", summary="Skill stats (total + by agent_type)", description="Skill total + per agent_type counts; scope/repo filters match list_skills. User-only (web UI stats).")
 def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str = "", repo: str = ""):
@@ -333,7 +336,6 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
             pass
     return {"total": total, "agents": agents}
 
-
 @router.get("/stats", operation_id="skills_stats", summary="Skill usage stats (scene/repo aggregation)", description="Skill usage stats aggregated from scene_skill_ref: {skill_name: {scene_count, repo_count}}.")
 def get_skill_stats(user: dict = Depends(require_no_session_token)):
     """技能使用统计（通过 scene_skill_ref 关联表 SQL 聚合）。
@@ -343,14 +345,12 @@ def get_skill_stats(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import get_skill_usage_stats
     return {"stats": get_skill_usage_stats()}
 
-
 @router.get("/categories", operation_id="skills_categories", summary="List skill categories",
             description="Lists skill categories (Issue #179 skill-sync-category).")
 def list_categories(user: dict = Depends(require_no_session_token)):
     """返回技能分类列表（Issue #179）。"""
     from src.domains.mgmt.user.db import list_skill_categories
     return {"categories": list_skill_categories()}
-
 
 @router.get("/search", operation_id="skills_search", summary="Search skills",
             description="Skill lookup for a task description: exact skill_name match first, then keyword match on description/display_name/agent_type.")
@@ -441,7 +441,6 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
 
     return {"skills": results}
 
-
 @router.get("/template")
 def download_skill_template():
     """下载技能模板 ZIP（skills/_template 目录打包）。免鉴权（token 通过 query 传递）。"""
@@ -476,7 +475,6 @@ def download_skill_template():
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="skill-template.zip"'},
     )
-
 
 @router.get("/by-id/{skill_id}/download", operation_id="skills_download", summary="Download skill ZIP", description="Downloads a skill package zip with a short-lived signed URL; OBS mode returns {url, expires_in}.")
 def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
@@ -527,7 +525,6 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
 
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且技能对象缺失，下载失败。请检查服务端存储配置后重试。"})
 
-
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
 def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key),
                                  repo: str = ""):
@@ -538,7 +535,20 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
       未知名称返回 404 而非 422，避免把「名称当 id 解析失败」暴露成参数错误。
     查到后按 scope 校验归属权限：official 可见；user 需本人；repo 需当前用户托管。
     """
+    # Issue #630：name→sid 解析（复用 resolve_skill_id 的 user scope 逻辑）
+    _raw = str(skill_id or "").strip()
+    if not _raw.isdigit():
+        from src.domains.mgmt.user.db import resolve_skill_id
+        _repo_key = _resolve_repo_key(repo) if repo else ""
+        _sid = resolve_skill_id(_raw, repo_key=_repo_key, user_id=str(user.get("id", "")))
+        if not _sid:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+        skill_id = _sid
+    else:
+        skill_id = int(_raw)
+
     from src.kernel.session_manager import db, db_lock
+    from src.kernel.config import SKILLS_DIR
 
     _raw = str(skill_id or "").strip()
     with db_lock:
@@ -584,7 +594,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
 
     # 扩展字段：liked_by_me + 所属场景
     from src.domains.mgmt.user.db import is_skill_liked, get_skill_scenes
-    liked_by_me = is_skill_liked(user.get("id", 0), row[7])
+    liked_by_me = is_skill_liked(str(user.get("id") or ""), skill_id)
     scenes = get_skill_scenes(row[7])  # row[7] = skill.id
 
     skill_dir = row[4] or row[0]
@@ -656,7 +666,6 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
         "category_id": category_id,
         "category_name": category_name,
     }
-
 
 @router.post("/upload", operation_id="skills_upload", summary="Upload skill (user personal / repo)", description="Uploads a skill ZIP. scope=user stores a personal skill; scope=repo requires repo. agent_type is required.")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user_or_api_key),
@@ -792,7 +801,6 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-
 @router.delete("/by-id/{skill_id}", operation_id="skills_delete", summary="Delete skill", description="Deletes a skill by id after an ownership check. official undeletable; user=owner; repo=managed by caller.")
 def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_token),
                         scope: str = "user", repo: str = ""):
@@ -862,9 +870,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
 
     return {"message": f"技能 {skill_name} 已删除"}
 
-
 VALID_SKILL_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
-
 
 @router.post("/by-id/{skill_id}/update", operation_id="skills_update",
              summary="Update skill by uploading a new ZIP (Issue #561)",
@@ -1012,12 +1018,10 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-
 class ConvertSkillRequest(BaseModel):
     skill_name: str
     repo: str  # 目标仓库 repo_key（如 Jason7602/skill-evaluator）
     source_scope: str = "user"  # 源技能 scope：user 或 repo（默认 user 兼容旧调用）
-
 
 @router.post("/convert", operation_id="skills_convert", summary="Convert skill (cross scope)", description="Copies a skill between personal(user) and repo scope; the original record and directory are kept (copy, not move).")
 def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_session_token)):
@@ -1121,7 +1125,6 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     # local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能转换失败。请检查服务端 OBS 配置后重试。"})
 
-
 def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
     """子技能端点 OBS 分支共用（Issue #448）：取技能 zip 字节。
 
@@ -1137,7 +1140,6 @@ def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
         raise HTTPException(status_code=503, detail={
             "code": 503, "message": "OBS 存储未启用，子技能读取不可用。请检查服务端 OBS 配置后重试。"})
     return get_skill_zip_bytes(object_key)
-
 
 @router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package", description="Lists a skill package's sub-skills from the references/ directory.")
 def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
@@ -1210,7 +1212,6 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
     return {"skill_name": skill_name, "sub_skills": subs}
 
-
 @router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
 def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取技能包子技能的 SKILL.md 内容"""
@@ -1265,7 +1266,6 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
                     refs.append({"name": r, "content": ""})
 
     return {"name": sub_name, "content": content, "references": refs}
-
 
 @router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
 def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
@@ -1332,3 +1332,37 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
         "content": content,
         "type": "package-sub",
     }
+
+def _safe_zip_name(filename: str | None) -> str:
+    """净化 multipart filename 为安全 .zip 文件名（CWE-22 路径穿越防护，Issue #856）。
+
+    - None/空白 → 默认 "skill.zip"（保持原有缺省行为）
+    - 含 / 或 \\ 路径分隔符（绝对路径、目录穿越片段）→ 非法（返回空串，调用方返回 400）
+    - 必须以 .zip 结尾，否则非法
+    """
+    if not filename or not filename.strip():
+        return "skill.zip"
+    name = filename.strip()
+    if "/" in name or "\\" in name or name in (".", ".."):
+        return ""
+    if not name.lower().endswith(".zip"):
+        return ""
+    return name
+
+def _restore_zip_permissions(zf: zipfile.ZipFile, extract_dir: str) -> None:
+    """恢复解压成员的 Unix 权限位（Python 3.12+ extractall 不再恢复）。
+
+    chmod 前对每个成员做 realpath 前缀校验（Issue #856 纵深防御）：
+    不在 extract_dir 下的成员跳过并记日志，杜绝 info.filename 伪造穿越。
+    """
+    from src.kernel.config import log
+    real_root = os.path.realpath(extract_dir)
+    for info in zf.infolist():
+        mode = info.external_attr >> 16
+        if mode and not info.is_dir():
+            p = os.path.join(extract_dir, info.filename)
+            if os.path.realpath(p).startswith(real_root + os.sep):
+                if os.path.isfile(p):
+                    os.chmod(p, mode & 0o777)
+            else:
+                log.warning("skill zip member escapes extract dir, skip chmod: %r", info.filename)

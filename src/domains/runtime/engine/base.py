@@ -56,7 +56,7 @@ class AgentRuntime:
             return {"type": "error", "message": err}
         return {"type": "other", "raw": et}
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         return {}
 
     def pre_exec(self, cwd: str, env: dict) -> dict:

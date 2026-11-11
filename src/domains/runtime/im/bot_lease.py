@@ -7,22 +7,20 @@
   BOT_LEASE_RENEW_INTERVAL=20  续约间隔（秒）
   BOT_LEASE_SWEEP_INTERVAL=10  sweep 扫描间隔（秒）
 """
-import secrets, socket, time
-from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
 
+import secrets, socket, time
+
+from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
 
 def generate_instance_id() -> str:
     hostname = socket.gethostname() or "unknown"
     return f"{hostname}-{secrets.token_hex(4)}"
 
-
 def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
-
 def _future(seconds: int):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + seconds))
-
 
 class BotLeaseStore:
     # 心跳"未来值"容差（秒）：晚于 now+该值的心跳一律不算活（覆盖主机时钟漂移；
@@ -38,16 +36,20 @@ class BotLeaseStore:
         self.sweep_interval = sweep_interval
         self._disabled = False
 
-    def try_acquire(self, app_id: str, steal_after: int = 60,
+    def try_acquire(self, key: str, steal_after: int = 60,
                     instance_timeout: float = 45.0) -> str | None:
         token = secrets.token_hex(16)
         expires_at = _future(self.ttl)
+        channel_type, installation_id = split_lease_key(key)
         try:
+            # 归属安装必须仍 active：安装被 revoke/disable 后不得再被抢锁建连
+            if not self._installation_active(installation_id):
+                return None
             # 接管保护（cluster-im-lease-stability-design.md §2.3）：
             # lease 虽过期，但旧 owner 心跳存活且刚过期（≤ steal_after）→ 不抢（防活体误抢）；
             # 超过 steal_after 才允许从存活实例强制接管（防 owner 假死卡住）。
             try:
-                info = self.lease_owner_info(app_id)
+                info = self.lease_owner_info(key)
                 owner = info.get("owner") or ""
                 if owner and owner != self.instance_id and self.is_owner_alive(owner, instance_timeout):
                     exp = (info.get("expires_at") or "").strip()
@@ -60,17 +62,27 @@ class BotLeaseStore:
                         except ValueError:
                             pass
             except Exception as e:
-                log.warning(f"[lease] owner-alive precheck error {app_id}: {e}")
+                log.warning(f"[lease] owner-alive precheck error {key}: {e}")
             from src.kernel.session_manager import db, db_lock
             with db_lock:
+                # 时钟口径统一（#869）：写入（_future=Python UTC）与比较（_now=Python UTC）
+                # 同钟——不用 SQL datetime('now')/MySQL NOW()（后者为服务器本地时间 CST，
+                # 与 UTC 写入差 8h → 锁出生即过期，互斥失效）。
+                now = _now()
                 c = db.cursor()
+                # 行惰性创建（不预铺全量安装行）：先补行再 CAS，两句同一事务
                 c.execute(
-                    "UPDATE global_im_bot_config "
+                    "INSERT OR IGNORE INTO grape_t_channel_lease "
+                    "(lease_key, channel_type, installation_id, updated_at) VALUES (?,?,?,?)",
+                    (key, channel_type, installation_id, now),
+                )
+                c.execute(
+                    "UPDATE grape_t_channel_lease "
                     "SET lease_token = ?, lease_expires_at = ?, "
-                    "    lease_owner = ?, lease_acquired_at = datetime('now') "
-                    "WHERE bot_app_id = ? AND is_active = 1 "
-                    "  AND (lease_token IS NULL OR lease_expires_at < datetime('now'))",
-                    (token, expires_at, self.instance_id, app_id),
+                    "    lease_owner = ?, lease_acquired_at = ?, updated_at = ? "
+                    "WHERE lease_key = ? "
+                    "  AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)",
+                    (token, expires_at, self.instance_id, now, now, key, now),
                 )
                 db.commit()
                 if c.rowcount > 0:
@@ -81,17 +93,48 @@ class BotLeaseStore:
             log.error(f"[lease] acquire error: {e}")
             return None
 
-    def renew(self, app_id: str, token: str) -> bool | None:
+    def _installation_active(self, installation_id: str) -> bool:
+        """归属安装是否仍 active（revoke/disable 后不得再被抢锁建连）。
+
+        先查主连接（生产：session_manager 的 MySQL/共享库），查不到再回落 engine_wiring
+        的同源连接——两者在生产指向同一个库，只有测试里可能各挂一个 sqlite 文件。
+        两处都查不到（表缺失/异常）→ 放行，避免租约整体失效（与旧实现"表缺则跳过"一致）。
+        """
+        from src.kernel.session_manager import db, db_lock
+        try:
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT status FROM grape_t_channel_installation WHERE id=?", (installation_id,)
+                ).fetchone()
+            if row is not None:
+                return str(row[0]) == "active"
+        except Exception as e:
+            log.warning(f"[lease] installation check (main db) error {installation_id}: {e}")
+        try:
+            from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+            conn = _connect(default_db_path())
+            try:
+                row = conn.execute(
+                    "SELECT status FROM grape_t_channel_installation WHERE id=?", (installation_id,)
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is not None:
+                return str(row[0]) == "active"
+        except Exception as e:
+            log.warning(f"[lease] installation check (wiring db) error {installation_id}: {e}")
+        return True
+
+    def renew(self, key: str, token: str) -> bool | None:
         expires_at = _future(self.ttl)
         try:
             from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "UPDATE global_im_bot_config "
-                    "SET lease_expires_at = ? "
-                    "WHERE bot_app_id = ? AND lease_token = ? AND is_active = 1",
-                    (expires_at, app_id, token),
+                    "UPDATE grape_t_channel_lease SET lease_expires_at = ?, updated_at = ? "
+                    "WHERE lease_key = ? AND lease_token = ?",
+                    (expires_at, _now(), key, token),
                 )
                 db.commit()
                 if c.rowcount > 0:
@@ -101,46 +144,56 @@ class BotLeaseStore:
             log.warning(f"[lease] renew error: {e}")
             return None
 
-    def release(self, app_id: str, token: str) -> None:
+    def release(self, key: str, token: str) -> None:
         try:
             from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "UPDATE global_im_bot_config "
+                    "UPDATE grape_t_channel_lease "
                     "SET lease_token = NULL, lease_expires_at = NULL, "
-                    "    lease_owner = NULL, lease_acquired_at = NULL "
-                    "WHERE bot_app_id = ? AND lease_token = ?",
-                    (app_id, token),
+                    "    lease_owner = NULL, lease_acquired_at = NULL, updated_at = ? "
+                    "WHERE lease_key = ? AND lease_token = ?",
+                    (_now(), key, token),
                 )
                 db.commit()
         except Exception as e:
             log.warning(f"[lease] release error: {e}")
 
     def release_all(self, held_bots: dict[str, str]) -> None:
-        for app_id, token in held_bots.items():
-            self.release(app_id, token)
+        for key, token in held_bots.items():
+            self.release(key, token)
 
     def list_expired_or_unheld(self, cursor: str = "", limit: int = 500) -> list[dict]:
+        """active 安装里「没有有效租约」的清单（巡检/对账用）。
+
+        A2 M3 起租约键=安装键，本方法的自然语义变成"哪些安装当前没被任何实例锁住"。
+        注意：Supervisor 的扫描源是 InstallationProvider（grape_t_channel_installation），
+        不依赖本方法；这里只服务运维排查与测试。
+        """
         try:
             from src.kernel.session_manager import db, db_lock
+            now = _now()
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "SELECT bot_app_id, bot_type, bot_name, is_active "
-                    "FROM global_im_bot_config "
-                    "WHERE is_active = 1 "
-                    "  AND (lease_token IS NULL OR lease_expires_at < datetime('now')) "
-                    "  AND bot_app_id > ? "
-                    "ORDER BY bot_app_id "
-                    "LIMIT ?",
+                    "SELECT id, channel_type FROM grape_t_channel_installation "
+                    "WHERE status='active' AND id > ? ORDER BY id LIMIT ?",
                     (cursor, limit),
                 )
-                return [
-                    {"bot_app_id": r[0], "bot_type": r[1] or "chat_bot",
-                     "bot_name": r[2] or "", "is_active": r[3]}
-                    for r in c.fetchall()
-                ]
+                rows = c.fetchall()
+                c.execute(
+                    "SELECT lease_key FROM grape_t_channel_lease "
+                    "WHERE lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
+                    "  AND lease_expires_at >= ?",
+                    (now,),
+                )
+                leased = {r[0] for r in c.fetchall()}
+            return [
+                {"installation_id": r[0], "channel_type": r[1] or ""}
+                for r in rows
+                if f"{r[1] or ''}:{r[0]}" not in leased
+            ]
         except Exception as e:
             log.warning(f"[lease] list_expired error: {e}")
             return []
@@ -155,16 +208,16 @@ class BotLeaseStore:
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "UPDATE global_im_bot_config SET lease_expires_at = ? "
-                    "WHERE lease_owner = ? AND is_active = 1",
-                    (expires_at, self.instance_id),
+                    "UPDATE grape_t_channel_lease SET lease_expires_at = ?, updated_at = ? "
+                    "WHERE lease_owner = ? AND lease_token IS NOT NULL",
+                    (expires_at, _now(), self.instance_id),
                 )
                 db.commit()
-                app_ids = list(held_bots.keys())
-                ph = ",".join(["?"] * len(app_ids))
+                keys = list(held_bots.keys())
+                ph = ",".join(["?"] * len(keys))
                 c.execute(
-                    f"SELECT bot_app_id, lease_token FROM global_im_bot_config "
-                    f"WHERE bot_app_id IN ({ph})", app_ids,
+                    f"SELECT lease_key, lease_token FROM grape_t_channel_lease "
+                    f"WHERE lease_key IN ({ph})", keys,
                 )
                 db_tokens = {r[0]: r[1] for r in c.fetchall()}
                 for app_id, my_token in held_bots.items():
@@ -306,16 +359,16 @@ class BotLeaseStore:
             log.warning(f"[lease] list_active_instances error: {e}")
             return []
 
-    def lease_owner_info(self, app_id: str) -> dict:
-        """返回某 bot 当前 lease_owner（串 'owner|token'，便于查存活与防误抢）。"""
+    def lease_owner_info(self, key: str) -> dict:
+        """返回某租约键当前 owner/token/到期时间（查存活与防误抢）。"""
         try:
             from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
                     "SELECT COALESCE(lease_owner,''), COALESCE(lease_token,''), lease_expires_at "
-                    "FROM global_im_bot_config WHERE bot_app_id=?",
-                    (app_id,),
+                    "FROM grape_t_channel_lease WHERE lease_key=?",
+                    (key,),
                 )
                 r = c.fetchone()
                 return {"owner": (r[0] or "") if r else "", "token": (r[1] or "") if r else "",
@@ -342,7 +395,6 @@ class BotLeaseStore:
         except Exception as e:
             log.warning(f"[lease] is_owner_alive error: {e}")
             return False
-
 
 def purge_stale_instances(older_than_hours: float = 24.0) -> int:
     """清理长期无心跳的实例行（`grape_im_instance` 只增不减，需周期兜底）。
@@ -372,3 +424,23 @@ def purge_stale_instances(older_than_hours: float = 24.0) -> int:
         else:
             log.warning(f"[lease] purge_stale_instances error: {_msg}")
         return 0
+
+def split_lease_key(key: str) -> tuple[str, str]:
+    """'<channel_type>:<installation_id>' → (channel_type, installation_id)。"""
+    if ":" in key:
+        channel_type, installation_id = key.split(":", 1)
+        return channel_type, installation_id
+    return "", key
+
+"""安装级 Lease 分布式锁——保证同一（渠道 + 安装）同一时刻只有一个实例建连。
+
+A2 M3：锁从 legacy 表 `global_im_bot_config` 迁到独立表 `grape_t_channel_lease`，
+键为 lease_key = "<channel_type>:<installation_id>"（不再翻译成 bot_app_id）。
+
+基于 CAS（lease_token + lease_expires_at，Python UTC 字符串比较）。
+
+参数（config.py）：
+  BOT_LEASE_TTL=60             lease 存活时间（秒）
+  BOT_LEASE_RENEW_INTERVAL=20  续约间隔（秒）
+  BOT_LEASE_SWEEP_INTERVAL=10  sweep 扫描间隔（秒）
+"""

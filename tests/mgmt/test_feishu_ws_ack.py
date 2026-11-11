@@ -3,15 +3,20 @@
 验证 run_bot 对每条 DATA(EVENT) 帧回传 ack（payload={"code":200}），
 否则飞书会用新的 message_id 反复投递同一消息。
 """
+
 import asyncio
+
 import json
+
 import os
+
 import sys
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
-os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
+os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 def _make_event_frame(message_id="om_test_001", text="你好"):
     """构造一条飞书 im.message.receive_v1 的 DATA(EVENT) 帧字节流。"""
@@ -53,19 +58,16 @@ def _make_event_frame(message_id="om_test_001", text="你好"):
     frame.payload = json.dumps(event_data, ensure_ascii=False).encode("utf-8")
     return frame
 
-
 def _make_ctx(app_id="cli_acktest"):
     from src.domains.runtime.im.feishu_async import BotContext
     ctx = BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="ack-test")
     return ctx
-
 
 def _frame_from_bytes(data: bytes):
     from lark_oapi.ws.pb.pbbp2_pb2 import Frame
     f = Frame()
     f.ParseFromString(data)
     return f
-
 
 async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
     """在 run_bot 的简化环境中消费一条 EVENT 帧，返回 ws.send 的调用记录。"""
@@ -89,7 +91,7 @@ async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
     ft = FrameType(parsed_frame.method)
     assert ft == FrameType.DATA
     hs = parsed_frame.headers
-    from src.domains.runtime.im.feishu_async import _get_header, _build_ack_frame, _parse_event as pe
+    from src.domains.runtime.im.adapters.feishu.wire import _get_header, _build_ack_frame, _parse_event as pe
     type_ = _get_header(hs, "type")
     assert type_ == MessageType.EVENT.value
     event_data = json.loads(parsed_frame.payload.decode("utf-8"))
@@ -98,10 +100,9 @@ async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
     ack_bytes = _build_ack_frame(parsed_frame)
     return parsed, ack_bytes
 
-
 def test_ack_frame_payload_is_ok():
     """ack 帧 payload 应为 {"code":200}，且 message_id header 保留。"""
-    from src.domains.runtime.im.feishu_async import _build_ack_frame
+    from src.domains.runtime.im.adapters.feishu.wire import _build_ack_frame
     from lark_oapi.ws.enum import FrameType
 
     frame = _make_event_frame("om_ack_1")
@@ -112,10 +113,9 @@ def test_ack_frame_payload_is_ok():
     # payload 为 {"code":200}
     assert json.loads(ack.payload.decode("utf-8")) == {"code": 200}
     # headers 保留 message_id
-    from src.domains.runtime.im.feishu_async import _get_header
+    from src.domains.runtime.im.adapters.feishu.wire import _get_header
     assert _get_header(ack.headers, "message_id") == "om_ack_1"
     assert _get_header(ack.headers, "type") == "event"
-
 
 def test_run_bot_acks_event_frame():
     """run_bot 收到 EVENT 帧后应回传 ack 帧。"""
@@ -139,7 +139,6 @@ def test_run_bot_acks_event_frame():
     ack_parsed = _frame_from_bytes(ack)
     assert json.loads(ack_parsed.payload.decode("utf-8")) == {"code": 200}
 
-
 def test_ack_on_unknown_event():
     """非消息事件（如已读回执）也应 ack，防止飞书重推。"""
     from src.domains.runtime.im.feishu_async import _parse_event
@@ -151,3 +150,9 @@ def test_ack_on_unknown_event():
     from src.domains.runtime.im.feishu_async import _build_ack_frame
     ack = _frame_from_bytes(_build_ack_frame(frame))
     assert json.loads(ack.payload.decode("utf-8")) == {"code": 200}
+
+"""飞书 WS ack 帧构造测试（原 run_bot 专用用例在旧 IM 下线 M1 时退役）。
+
+ack 帧 payload={"code":200} 的构造仍在用（新引擎 FeishuChannel 每帧 ack 先行）；
+该行为的链路级覆盖见 tests/domains/runtime/im/test_feishu_channel_lifecycle.py。
+"""

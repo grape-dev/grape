@@ -176,7 +176,7 @@ function selPipe(idx) {
   const owner = displayPipe.current_owner || '';
   const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>' : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
 
-  let flowHtml = `<div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${_pipeData.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${_pipeData.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${_pipeData.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+  let flowHtml = `<div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${window.escHtml(data.repo || '')}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + window.escHtml(displayPipe.title) + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${_pipeData.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${_pipeData.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${_pipeData.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
   var pipeNodes = _getPipeNodes(data, displayPipe);
   pipeNodes.forEach(function(node, i) {
     var tag = node.tag || node.id;
@@ -286,10 +286,10 @@ function renderPipeline(data, focusIssueNum) {
       : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
     // 触发 SRE 部署按钮：stage 非 done 时显示
     const _issueNum = String(iss).replace(/^#/, '');
-    const _repoFullName = (data.repo_key || '').replace(/^(gitcode|github):/, '');
+    const _repoFullName = window.stripRepoPrefix(data.repo_key || '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${window.escHtml(data.repo || '')}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + window.escHtml(displayPipe.title) + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
       var tag = node.tag || node.id;
@@ -359,7 +359,7 @@ function renderPipeline(data, focusIssueNum) {
   if (data.has_tasks_without_events) {
     const _twe = data.tasks_without_events || [];
     const _hintItems = _twe.slice(0, 5).map(function(t) {
-      return `<span class="tg tg-i" style="font-size:10px;margin:2px">${t.issue_id} ${t.title ? '· ' + t.title.substring(0, 30) : ''}</span>`;
+      return `<span class="tg tg-i" style="font-size:10px;margin:2px">${t.issue_id} ${t.title ? '· ' + window.escHtml(t.title.substring(0, 30)) : ''}</span>`;
     }).join('');
     const _more = _twe.length > 5 ? `<span class="ts t3" style="font-size:10px;margin-left:4px">+${_twe.length - 5}</span>` : '';
     html += `<div style="background:#fff8e8;border:1px solid #ff9f0a;border-radius:12px;padding:10px 16px;margin:0 0 8px;display:flex;align-items:center;gap:8px;flex-shrink:0"><span style="font-size:14px">⚠️</span><span style="font-size:12px;color:#86868b">${I18N.t('pipeline.tasks_without_events_hint')}</span><div style="margin-left:auto;display:flex;align-items:center;gap:2px;flex-wrap:wrap">${_hintItems}${_more}</div></div>`;
@@ -458,7 +458,7 @@ function triggerSREDeploy(repoFullName, issueNum, stage) {
       payload: {
         repository: repoFullName,
         account: repoFullName,
-        issue_number: parseInt(issueNum) || issueNum,
+        issue_number: issueNum,
         context: ctx
       }
     }).then(d => {

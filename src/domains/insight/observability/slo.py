@@ -26,20 +26,25 @@
 
 **边界**：仓库范围 SLO = L1 用户面（在调用者可见仓库上算）；`engine_availability` 这类平台目标 = L2。
 """
+
 from __future__ import annotations
 
 import json
+
 import os
+
 from datetime import datetime, timedelta, timezone
+
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.kernel.config import log
 
-# ---------------------------------------------------------------- 常量
-
 SLI_SUCCESS = "task_success_rate"
+
 SLI_LATENCY = "task_queue_wait_p95"
+
 SLI_AVAIL = "engine_availability"
+
 SLI_TYPES = (SLI_SUCCESS, SLI_LATENCY, SLI_AVAIL)
 
 #: 默认 SLO（幂等 seed；目标值可由管理台改）
@@ -53,17 +58,23 @@ DEFAULTS: List[Dict[str, Any]] = [
 ]
 
 STATE_OK = "ok"
+
 STATE_WARNING = "warning"
+
 STATE_BREACHED = "breached"
+
 STATE_NO_DATA = "no_data"
 
 #: 预算消耗比例 ≥ 该值 → warning；≥ 1.0 → breached。
 #: 比较时带 EPS：预算总量是 `(1-target)×桶数` 的浮点结果（如 0.01*400=4.000000000000004），
 #: 3 个坏桶本意是"刚好 75%"，不留容差会被判成 ok（单测实测踩到）。
 WARN_CONSUMED = 0.75
+
 _EPS = 1e-9
+
 #: 窗口最长回看（与小时底座留存一致）
 MAX_WINDOW_DAYS = 30
+
 #: 单次计算最多返回的燃尽点（超长窗口抽稀，避免前端画 720 个点）
 MAX_BURN_POINTS = 240
 
@@ -72,10 +83,12 @@ _RES_HOUR = "hour"
 #: SLO 评估周期（Issue #437）：指标 60s 才采样一次，30s 一轮全窗现算太密。
 #: meta 表热更新优先，其次环境变量，默认 300s，下限 60s（允许测试/紧急调快）。
 EVAL_INTERVAL_META_KEY = "slo_eval_interval_sec"
-EVAL_INTERVAL_ENV = "SLO_EVAL_INTERVAL_SEC"
-DEFAULT_EVAL_INTERVAL_SEC = 300
-MIN_EVAL_INTERVAL_SEC = 60
 
+EVAL_INTERVAL_ENV = "SLO_EVAL_INTERVAL_SEC"
+
+DEFAULT_EVAL_INTERVAL_SEC = 300
+
+MIN_EVAL_INTERVAL_SEC = 60
 
 def eval_interval_sec() -> int:
     """SLO 评估周期（秒）：meta 表 `slo_eval_interval_sec` > 环境变量 > 默认 300s。
@@ -97,14 +110,11 @@ def eval_interval_sec() -> int:
         return DEFAULT_EVAL_INTERVAL_SEC
     return max(MIN_EVAL_INTERVAL_SEC, v)
 
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
-
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
-
 
 def _dt(raw: Any) -> Optional[datetime]:
     s = str(raw or "").strip().replace("Z", "+00:00")
@@ -116,7 +126,6 @@ def _dt(raw: Any) -> Optional[datetime]:
         return None
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-
 def _json(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -125,9 +134,6 @@ def _json(raw: Any) -> Dict[str, Any]:
         return v if isinstance(v, dict) else {}
     except Exception:
         return {}
-
-
-# ---------------------------------------------------------------- 配置读写
 
 def seed_defaults() -> int:
     """幂等写入 3 条默认 SLO（按 name 唯一）。返回新增条数。"""
@@ -151,7 +157,6 @@ def seed_defaults() -> int:
         log.warning(f"slo seed failed: {e}")
     return added
 
-
 def _row_to_slo(row: tuple, cols: List[str]) -> Dict[str, Any]:
     d = dict(zip(cols, row))
     d["target"] = float(d.get("target") or 0)
@@ -160,10 +165,8 @@ def _row_to_slo(row: tuple, cols: List[str]) -> Dict[str, Any]:
     d["threshold"] = _json(d.get("threshold_json"))
     return d
 
-
 _SLO_COLS = ("id", "name", "sli_type", "scope_type", "scope_key", "target", "window_days",
              "threshold_json", "enabled", "created_by", "created_at", "updated_at")
-
 
 def list_slos(enabled_only: bool = True) -> List[Dict[str, Any]]:
     from src.kernel.session_manager import db, db_lock
@@ -182,7 +185,6 @@ def list_slos(enabled_only: bool = True) -> List[Dict[str, Any]]:
         log.warning(f"slo list failed: {e}")
     return out
 
-
 def get_slo(slo_id: int) -> Optional[Dict[str, Any]]:
     from src.kernel.session_manager import db, db_lock
     try:
@@ -194,7 +196,6 @@ def get_slo(slo_id: int) -> Optional[Dict[str, Any]]:
     except Exception as e:
         log.warning(f"slo get failed: {e}")
         return None
-
 
 def create_slo(name: str, sli_type: str, scope_type: str = "global", scope_key: str = "",
                target: float = 0.99, window_days: int = 30,
@@ -223,9 +224,7 @@ def create_slo(name: str, sli_type: str, scope_type: str = "global", scope_key: 
         db.commit()
         return int(c.lastrowid or 0)
 
-
 _UPDATABLE = ("target", "window_days", "threshold_json", "enabled", "scope_type", "scope_key")
-
 
 def update_slo(slo_id: int, **fields: Any) -> bool:
     """改配置（管理台统一设定目标值）。只允许白名单字段。"""
@@ -258,9 +257,6 @@ def update_slo(slo_id: int, **fields: Any) -> bool:
         log.warning(f"slo update failed: {e}")
         return False
 
-
-# ---------------------------------------------------------------- 计算（三类 SLI → 桶序列）
-
 def _hour_buckets(start: datetime, end: datetime) -> List[datetime]:
     out: List[datetime] = []
     cur = start.replace(minute=0, second=0, microsecond=0)
@@ -271,12 +267,10 @@ def _hour_buckets(start: datetime, end: datetime) -> List[datetime]:
         cur = cur + timedelta(hours=1)
     return out
 
-
 def _rollup_hour_series(metrics: List[str], dim_keys: List[str],
                         start: datetime, end: datetime) -> Dict[str, List[Dict[str, Any]]]:
     from src.domains.insight.observability import metric_rollup
     return metric_rollup.series(metrics, dim_keys, start, end, _RES_HOUR)
-
 
 def _success_buckets(dim_keys: List[str], start: datetime, end: datetime
                      ) -> List[Tuple[str, float, float]]:
@@ -292,7 +286,6 @@ def _success_buckets(dim_keys: List[str], start: datetime, end: datetime
             slot = idx.setdefault(b, {"good": 0.0, "bad": 0.0})
             slot["good" if metric == "task_done" else "bad"] += float(pt.get("value") or 0)
     return [(b, v["good"], v["good"] + v["bad"]) for b, v in sorted(idx.items())]
-
 
 def _latency_buckets(dim_keys: List[str], start: datetime, end: datetime, max_p95_sec: float
                      ) -> Tuple[List[Tuple[str, float, float]], Optional[float]]:
@@ -314,7 +307,6 @@ def _latency_buckets(dim_keys: List[str], start: datetime, end: datetime, max_p9
     vals.sort()
     k = max(0, min(len(vals) - 1, int(round(0.95 * (len(vals) - 1)))))
     return rows, round(vals[k], 3)
-
 
 def _availability_raw_buckets(start: datetime, end: datetime
                               ) -> List[Tuple[str, float, float]]:
@@ -340,7 +332,6 @@ def _availability_raw_buckets(start: datetime, end: datetime
         b = f"{h}:00:00+00:00"
         out.append((b, float(good or 0), float(total or 0)))
     return out
-
 
 def _availability_buckets(start: datetime, end: datetime,
                           not_before: Optional[datetime] = None
@@ -426,7 +417,6 @@ def _availability_buckets(start: datetime, end: datetime,
         out.extend(_availability_raw_buckets(max(start, cur_hour), end))
     return out, pending_hours
 
-
 def _iter_closed_hours(h1: datetime, closed_end: datetime) -> List[datetime]:
     h = h1
     out: List[datetime] = []
@@ -434,7 +424,6 @@ def _iter_closed_hours(h1: datetime, closed_end: datetime) -> List[datetime]:
         out.append(h)
         h += timedelta(hours=1)
     return out
-
 
 def _engine_avail_covered_hours(h1: datetime, closed_end: datetime) -> set:
     """窗口内已有 `engine_avail_total`（global, hour）行的桶集合（行存在=已覆盖）。"""
@@ -453,12 +442,10 @@ def _engine_avail_covered_hours(h1: datetime, closed_end: datetime) -> set:
         log.warning(f"slo availability covered query failed: {e}")
     return out
 
-
 def window_of(slo: Dict[str, Any], now: Optional[datetime] = None) -> Tuple[datetime, datetime]:
     days = max(1, min(int(slo.get("window_days") or 30), MAX_WINDOW_DAYS))
     end = now or _now()
     return end - timedelta(days=days), end
-
 
 def compute(slo: Dict[str, Any], dim_keys: List[str], now: Optional[datetime] = None,
             allow_engine: bool = False, with_burn: bool = True) -> Dict[str, Any]:
@@ -535,7 +522,6 @@ def compute(slo: Dict[str, Any], dim_keys: List[str], now: Optional[datetime] = 
         out["burn"] = burn_series(data_buckets, target, start, end)
     return out
 
-
 def burn_series(data_buckets: List[Tuple[str, float, float]], target: float,
                 start: datetime, end: datetime) -> List[Dict[str, Any]]:
     """燃尽曲线：逐桶累计消耗（%）。点太多时等距抽稀（保留首末）。"""
@@ -556,15 +542,11 @@ def burn_series(data_buckets: List[Tuple[str, float, float]], target: float,
         pts = thinned
     return pts
 
-
 def summary_for(slo: Dict[str, Any], dim_keys: List[str], now: Optional[datetime] = None,
                 allow_engine: bool = False) -> Dict[str, Any]:
     """前端用的精简结论（不含燃尽序列）：状态 + 值 + 预算剩余。"""
     full = compute(slo, dim_keys, now=now, allow_engine=allow_engine, with_burn=False)
     return {k: v for k, v in full.items() if k != "burn"}
-
-
-# ---------------------------------------------------------------- 快照（燃尽与历史回溯）
 
 def write_snapshot(summary: Dict[str, Any], bucket_start: Optional[datetime] = None) -> bool:
     """把一次计算写进小时快照（唯一 (slo_id, bucket_start)，重复算覆盖）。"""
@@ -591,7 +573,6 @@ def write_snapshot(summary: Dict[str, Any], bucket_start: Optional[datetime] = N
         log.warning(f"slo snapshot write failed: {e}")
         return False
 
-
 def snapshots(slo_id: int, limit: int = 168) -> List[Dict[str, Any]]:
     """取快照（默认最近 168 小时 ≈ 7 天）。"""
     from src.kernel.session_manager import db, db_lock
@@ -611,13 +592,11 @@ def snapshots(slo_id: int, limit: int = 168) -> List[Dict[str, Any]]:
         log.warning(f"slo snapshots failed: {e}")
     return out
 
-# ---------------------------------------------------------------- 作用域 / 违约事件 / 周期评估
-
 #: SLO 违约不是"规则"驱动的事件：rule_id 固定 0（表里是 NOT NULL），rule_name 稳定为下面这个，
 #: 既避免与 obs_alert_rules 里的真实规则冲突，也便于统一事件视图按 kind 识别。
 SLO_RULE_ID = 0
-SLO_RULE_NAME = "slo_breached"
 
+SLO_RULE_NAME = "slo_breached"
 
 def repo_dims(repo: str, user: Optional[Dict[str, Any]] = None,
               check_visible: bool = True) -> List[str]:
@@ -630,7 +609,7 @@ def repo_dims(repo: str, user: Optional[Dict[str, Any]] = None,
     sk = str(repo or "").strip()
     if not sk:
         return []
-    want = {to_repo_key(sk), to_repo_key(sk, "github")}
+    want = set(repo_key_candidates(to_repo_key(sk)))  # S94/D69：候选集统一
     if check_visible:
         from src.domains.insight.observability.overview import RepoNotVisible, visible_repo_keys
         hit = sorted(want & set(visible_repo_keys(user or {})))
@@ -639,7 +618,6 @@ def repo_dims(repo: str, user: Optional[Dict[str, Any]] = None,
         return [f"repo:{hit[0]}"]
     key = sorted(want)[0]
     return [f"repo:{key}"]
-
 
 def scope_dims(slo: Dict[str, Any], user: Optional[Dict[str, Any]] = None,
                global_scope: bool = False, repo: str = "") -> List[str]:
@@ -663,7 +641,6 @@ def scope_dims(slo: Dict[str, Any], user: Optional[Dict[str, Any]] = None,
         log.warning(f"slo scope dims failed: {e}")
         return []
 
-
 def _visible(slo: Dict[str, Any], user: Optional[Dict[str, Any]]) -> bool:
     """L1 可见性：仓库范围的 SLO 只对可见该仓库的人出。"""
     if (slo.get("scope_type") or "global") != "repo" or not slo.get("scope_key"):
@@ -675,7 +652,6 @@ def _visible(slo: Dict[str, Any], user: Optional[Dict[str, Any]]) -> bool:
         return sk in keys or f"gitcode:{sk}" in keys
     except Exception:
         return False
-
 
 def list_summaries(user: Optional[Dict[str, Any]] = None, global_scope: bool = False,
                    now: Optional[datetime] = None, repo: str = "") -> List[Dict[str, Any]]:
@@ -695,7 +671,6 @@ def list_summaries(user: Optional[Dict[str, Any]] = None, global_scope: bool = F
         out.append(compute(slo, dims, now=now, allow_engine=bool(global_scope), with_burn=False))
     return out
 
-
 def detail(slo_id: int, user: Optional[Dict[str, Any]] = None, global_scope: bool = False,
            now: Optional[datetime] = None, repo: str = "") -> Optional[Dict[str, Any]]:
     """单条详情（含燃尽序列）。不可见/不存在 → None（调用方给 404）。"""
@@ -708,7 +683,6 @@ def detail(slo_id: int, user: Optional[Dict[str, Any]] = None, global_scope: boo
         return None
     dims = scope_dims(slo, user=user, global_scope=global_scope, repo=repo)
     return compute(slo, dims, now=now, allow_engine=bool(global_scope), with_burn=True)
-
 
 def _sync_violation(slo: Dict[str, Any], summary: Dict[str, Any], now: datetime) -> str:
     """违约 → 写/续一条 `source='slo'` 的事件（进统一事件视图，复用静默/通知）；恢复 → resolved。
@@ -757,10 +731,8 @@ def _sync_violation(slo: Dict[str, Any], summary: Dict[str, Any], now: datetime)
         log.warning(f"slo violation sync failed (slo={slo.get('id')}): {e}")
     return result
 
-
 #: 上次快照清理所在的小时桶（Issue #437：cleanup 从"每轮评估"降为"小时桶变更时"）
 _last_cleanup_hour: str = ""
-
 
 def evaluate_all(now: Optional[datetime] = None) -> Dict[str, int]:
     """周期评估（循环调用）：算每条 SLO → 落小时快照 → 同步违约事件 → 清老快照（按小时降频）。
@@ -793,7 +765,6 @@ def evaluate_all(now: Optional[datetime] = None) -> Dict[str, int]:
         _last_cleanup_hour = hour_key
     return stats
 
-
 def cleanup_snapshots(now: Optional[datetime] = None, keep_days: int = 90) -> int:
     """清理老快照（小时快照留 90 天）。返回删除行数。"""
     from src.kernel.session_manager import db, db_lock
@@ -808,3 +779,5 @@ def cleanup_snapshots(now: Optional[datetime] = None, keep_days: int = 90) -> in
     except Exception as e:
         log.warning(f"slo snapshot cleanup failed: {e}")
         return 0
+
+from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一

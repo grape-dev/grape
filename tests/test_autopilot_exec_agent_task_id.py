@@ -24,7 +24,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 RT_ID = 15461
 RK = "gitcode:autopilot/test1546"
@@ -102,7 +102,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_same_seq_history_not_used_when_real_task_later(self):
         """E1-1：历史同号 completed(a2a_event) 不得让 exec 误收口 success。"""
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_hist", EXEC_BASE + 1, "completed", "a2a_event", result_text="",
                    created_at=_iso(_utcnow() - timedelta(hours=2)))
         _seed_task("t_i1546_real", EXEC_BASE + 1, "running", "autopilot_event",
@@ -117,7 +117,7 @@ class TestReverseLookupUsesAgentTaskId:
         旧代码 `event_seq=? ORDER BY created_at DESC LIMIT 1` 无 event_type/时间过滤，
         会命中历史 a2a_event completed 行并写 success（本用例在 pre-fix 会失败）。
         """
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_only_hist", EXEC_BASE + 2, "completed", "a2a_event",
                    result_text="", created_at=_iso(_utcnow() - timedelta(hours=2)))
         _seed_exec(EXEC_BASE + 2, started_at=_iso(_utcnow() - timedelta(hours=1)))
@@ -127,7 +127,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_direct_agent_task_id_skips_event_seq_query(self):
         """E1-2：agent_task_id 非空只按 id 取行，绝不触发 event_seq 查询。"""
-        from src.runtime import scheduler
+        from src.domains.runtime.engine import scheduler
         executed = []
 
         class _Cursor:
@@ -148,7 +148,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_young_execution_not_reaped(self):
         """E1-3：started_at=now 的执行本轮跳过（回收器竞态保护）。"""
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_hist2", EXEC_BASE + 4, "completed", "a2a_event", result_text="old",
                    created_at=_iso(_utcnow() - timedelta(hours=2)))
         _seed_exec(EXEC_BASE + 4, started_at=_iso(_utcnow()))
@@ -157,7 +157,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_fallback_boundary_created_before_started_not_matched(self):
         """E1-4：兜底要求 task.created_at >= exec.started_at，早于则视为不匹配。"""
-        from src.runtime.scheduler import _reap_zombie_executions
+        from src.domains.runtime.engine.scheduler import _reap_zombie_executions
         _seed_task("t_i1546_old", EXEC_BASE + 5, "completed", "autopilot_event", result_text="old",
                    created_at=_iso(_utcnow() - timedelta(hours=3)))
         _seed_exec(EXEC_BASE + 5, started_at=_iso(_utcnow() - timedelta(hours=2)))
@@ -187,6 +187,8 @@ def _fresh_migration_conn(tmp_path, name, legacy_stamped):
     conn = sqlite3.connect(str(tmp_path / name))
     conn.execute(db_setup._SCHEMA_MIGRATIONS_DDL)
     conn.execute("CREATE TABLE autopilot_executions (id INTEGER PRIMARY KEY)")
+    # 重放段先补 agent_tasks.trace_context——探表跳过需表存在形态
+    conn.execute("CREATE TABLE agent_tasks (id TEXT PRIMARY KEY)")
     if legacy_stamped:
         conn.execute(
             "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
@@ -197,10 +199,12 @@ def _fresh_migration_conn(tmp_path, name, legacy_stamped):
 
 
 def _counting_migration(db_setup, calls):
+    # G4 撞号根治后：基线 add/repair-autopilot-exec-agent-task-id 在本链零注册，
+    # 列+索引由 202611110003 的幂等重放段（_fn_replay_weekly10_agent_task_idents）承担。
     def _fn():
         calls.append(1)
-        db_setup._fn_add_ap_exec_agent_task_id()
-    return db_setup.Migration("202611090001", "add-autopilot-exec-agent-task-id",
+        db_setup._fn_replay_weekly10_agent_task_idents()
+    return db_setup.Migration("202611110003", "replay-weekly10-migrations-skipped-by-version-collision",
                               "safe", _fn)
 
 
@@ -214,7 +218,7 @@ def _assert_column_and_index(conn, check_stamp=True):
     if check_stamp:
         stamped = conn.execute(
             "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE version=?",
-            ("202611090001",)).fetchone()[0]
+            ("202611110003",)).fetchone()[0]
         assert stamped == 1, "迁移未盖章"
 
 
@@ -222,19 +226,21 @@ class TestMigration:
     def test_registered_safe_migration(self):
         from src.api import db_setup
         by_version = {m.version: m for m in db_setup._MIGRATIONS}
-        assert "202611090001" in by_version
-        mig = by_version["202611090001"]
-        assert mig.name == "add-autopilot-exec-agent-task-id"
+        assert "202611110003" in by_version
+        mig = by_version["202611110003"]
+        assert mig.name == "replay-weekly10-migrations-skipped-by-version-collision"
         assert mig.kind == "safe"
 
     def test_fn_creates_column_and_index_idempotent(self, tmp_path, monkeypatch):
         from src.api import db_setup
         conn = sqlite3.connect(str(tmp_path / "ap1546.db"))
         conn.execute("CREATE TABLE autopilot_executions (id INTEGER PRIMARY KEY)")
+        # 重放段先补 agent_tasks.trace_context——探表跳过需表存在形态
+        conn.execute("CREATE TABLE agent_tasks (id TEXT PRIMARY KEY)")
         conn.commit()
         monkeypatch.setattr(db_setup, "db", _DBFacade(conn))
-        db_setup._fn_add_ap_exec_agent_task_id()
-        db_setup._fn_add_ap_exec_agent_task_id()   # 幂等：二次执行不报错
+        db_setup._fn_replay_weekly10_agent_task_idents()
+        db_setup._fn_replay_weekly10_agent_task_idents()   # 幂等：二次执行不报错
         _assert_column_and_index(conn, check_stamp=False)
         conn.close()
 
@@ -279,5 +285,5 @@ class TestMigration:
 class TestTaskColumnsUnchanged:
     def test_agent_task_columns_not_extended(self):
         """E4：agent_tasks 的 _TASK_COLUMNS 未被本改动扩展（常量直接对拍）。"""
-        from src.runtime.service import _TASK_COLUMNS_LIST
+        from src.domains.runtime.engine.service import _TASK_COLUMNS_LIST
         assert "agent_task_id" not in _TASK_COLUMNS_LIST

@@ -493,7 +493,7 @@ class TestSessionTokenForExecution:
 
 class TestRuntimeTaskEnvSync:
     def test_exec_env_matches_snapshot(self):
-        from src.api.routes.runtime import runtime_task_env
+        from src.domains.runtime.routes.runtime import runtime_task_env
         tid = _new_task()
         try:
             old = _task_env(tid)["GRAPE_SESSION_TOKEN"]
@@ -509,7 +509,7 @@ class TestRuntimeTaskEnvSync:
             _cleanup([tid])
 
     def test_exec_env_reuses_valid_snapshot(self):
-        from src.api.routes.runtime import runtime_task_env
+        from src.domains.runtime.routes.runtime import runtime_task_env
         tid = _new_task()
         try:
             snapshot = _task_env(tid)["GRAPE_SESSION_TOKEN"]

@@ -323,15 +323,15 @@ def _run_stream_capture_env(monkeypatch, backend, env_extra):
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from unittest import mock
-    import tests.test_executor_token_env as _tenv
+    import tests.runtime.test_executor_token_env as _tenv
 
     fake_popen = _tenv._FakePopen()
-    with mock.patch("src.agent.executor.get_backend", return_value=backend), \
-         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=backend), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
          mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
-         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
-         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
-         mock.patch("src.user.db.get_credentials", return_value=[]):
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]):
         from src.domains.runtime.engine.executor import stream_agent
         list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
@@ -355,18 +355,18 @@ def test_executor_tolerates_backend_without_prepare_env():
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from unittest import mock
-    import tests.test_executor_token_env as _tenv
+    import tests.runtime.test_executor_token_env as _tenv
 
     class _PlainBackend(_tenv._FakeBackend):
         pass  # 无 prepare_env
 
     fake_popen = _tenv._FakePopen()
-    with mock.patch("src.agent.executor.get_backend", return_value=_PlainBackend()), \
-         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_PlainBackend()), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
          mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
-         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
-         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
-         mock.patch("src.user.db.get_credentials", return_value=[]):
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]):
         from src.domains.runtime.engine.executor import stream_agent
         list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
@@ -380,19 +380,19 @@ def test_executor_swallows_prepare_env_failure():
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from unittest import mock
-    import tests.test_executor_token_env as _tenv
+    import tests.runtime.test_executor_token_env as _tenv
 
     class _BoomBackend(_tenv._FakeBackend):
         def prepare_env(self, env):
             raise RuntimeError("boom")
 
     fake_popen = _tenv._FakePopen()
-    with mock.patch("src.agent.executor.get_backend", return_value=_BoomBackend()), \
-         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_BoomBackend()), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
          mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
-         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
-         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
-         mock.patch("src.user.db.get_credentials", return_value=[]):
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]):
         from src.domains.runtime.engine.executor import stream_agent
         events = list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",

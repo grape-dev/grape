@@ -61,6 +61,12 @@ jobs:
         run: python -m pytest tests/runtime/test_issue_581_labels_dual_channel.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
+      - name: IM adapter tests (issue #1613)
+        # Issue #1613 QA 审查：tests/im（含新增 Telegram 用例）此前未被流水线执行，
+        # 回归无法被门禁发现；此处接入全量 IM 适配器用例。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/im -q
       - name: AtomCode engine integration tests
         # AtomCode CLI 接入的回归卡点：协议映射、用量拆分、空回复不重开会话、
         # 取消/超时清理提示词文件、沙箱只读挂载、注册完整性、安装器行为。

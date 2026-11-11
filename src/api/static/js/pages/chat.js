@@ -90,28 +90,29 @@ function _getChatLastConv() {
 
 /**
  * Issue #293: 剥离标题行首 "Issue #N · " 前缀，返回清理后标题与编号。
+ * D102-O：N 兼容字符串 ident（gitee "IKTVZQ"），issueNumber 保形为字符串
  * @param {string} title - 原始标题（可能含 "Issue #N · {title}" 前缀）
- * @returns {{title: string, issueNumber: number}}
+ * @returns {{title: string, issueNumber: string}}
  */
 function _stripIssuePrefix(title) {
-  if (!title) return {title: '', issueNumber: 0};
-  var m = title.match(/^Issue\s*#(\d+)\s*·\s*/);
+  if (!title) return {title: '', issueNumber: ''};
+  var m = title.match(/^Issue\s*#(\S+?)\s*·\s*/);
   if (m) {
-    return {title: title.substring(m[0].length), issueNumber: parseInt(m[1], 10) || 0};
+    return {title: title.substring(m[0].length), issueNumber: m[1] || ''};
   }
-  return {title: title, issueNumber: 0};
+  return {title: title, issueNumber: ''};
 }
 
 /**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
  * @param {string} text - 原始文本
- * @param {string} repoKey - 仓库 key（如 "songspace/hello-blog"），用于构建 URL
+ * @param {string} repoKey - 仓库 key（如 "example-user/example-repo"），用于构建 URL
  * @returns {string} HTML 字符串，Issue #N 变为 <a> 标签
  */
 function linkifyIssueNumbers(text, repoKey) {
   if (!text) return '';
-  // 匹配 "Issue #N" 或 "issue #N"（N 为数字）
-  return text.replace(/(Issue\s*#(\d+))/gi, (match, full, num) => {
+  // 匹配 "Issue #N" 或 "issue #N"（N 兼容字符串 ident，如 gitee "IKTVZQ"）
+  return text.replace(/(Issue\s*#([A-Za-z0-9]+))/gi, (match, full, num) => {
     if (repoKey) {
       const url = _vcsUrl(repoKey, '/issues/' + num);
       return `<a href="${url}" target="_blank" rel="noopener">${full}</a>`;
@@ -288,9 +289,9 @@ function _buildModelPicker() {
       const rid = parseInt(b.runtime_id || 0, 10);
       const isActive = (selRid > 0 && rid === selRid) || (selRid <= 0 && b.name.toLowerCase() === curType);
       const icon = b.scope === 'local' ? '🖥' : '☁';
-      return `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="${b.name}" data-rid="${b.runtime_id || ''}" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
+      return `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="${_escChatAttr(b.name)}" data-rid="${b.runtime_id || ''}" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
         <span style="font-size:14px">${icon}</span>
-        <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.display_name || b.name}</span>
+        <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${window.escHtml(b.display_name || b.name)}</span>
         <span style="display:flex;align-items:center;gap:6px">${isActive ? '<span style="font-size:10px;color:var(--a)">' + I18N.t('chat.current_engine') + '</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}</span>
       </div>`;
     }).join('');
@@ -352,7 +353,7 @@ function _renderSkillListItems(container) {
     html += filtered.map(s => {
       const isActive = String(s.id) === String(skillId);
       return `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="${s.id}" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
-        <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.display_name || s.name}</span>
+        <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${window.escHtml(s.display_name || s.name)}</span>
         ${isActive ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
       </div>`;
     }).join('');
@@ -428,10 +429,11 @@ function loadConversations(autoSelect) {
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
       const stripped = _stripIssuePrefix(c.title || '');
-      const issueNum = (c.issue_number && c.issue_number > 0) ? c.issue_number : stripped.issueNumber;
+      // D102-O：issue_number 保形比较（字符串 ident "IKTVZQ" > 0 为 false，勿按数字过滤）
+      const issueNum = c.issue_number ? c.issue_number : stripped.issueNumber;
       const cleanTitle = stripped.title || (c.title ? '' : I18N.t('chat.conversation.default_title'));
       const safeTitle = String(cleanTitle).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const metaHtml = issueNum > 0
+      const metaHtml = issueNum
         ? '#' + issueNum + ' · ' + fmtLocalTime(c.created_at).substring(0,16)
         : fmtLocalTime(c.created_at).substring(0,16);
       html += `<div class="conv-item" data-id="${c.id}"${active}>
@@ -453,7 +455,8 @@ function loadConversations(autoSelect) {
     if (autoSelect && !_currentConvId) {
       if (_issueParam) {
         // Issues Center 跳转：会话可能已删除，调 ensure-issue 重建
-        API.post('/chat/conversations/ensure-issue', {repo_key: _issueParam.repo, issue_number: parseInt(_issueParam.num)}).then(r => {
+        // D102-O：ident 原生保形直传（gitee 字符串 ident parseInt 会变 NaN→null）
+        API.post('/chat/conversations/ensure-issue', {repo_key: _issueParam.repo, issue_number: _issueParam.num}).then(r => {
           loadConversations(false);
           if (r.conversation_id) switchConversation(r.conversation_id);
         }).catch(() => {
@@ -555,6 +558,33 @@ function _closeChatDelPopover() {
  * 用户消息气泡 HTML：带 data-msg-id + hover 撤回按钮。
  * @param {number|string} msgId - 消息 id（0/空 = live 未回填，不显示撤回入口）
  * @param {string} innerHtml - 气泡内容（已转义/渲染）
+ */
+/** HTML 属性转义（& < > " '）。 */
+ function _escChatAttr(s) {
+   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+ }
+ /** [chat_img:url] → 安全缩略图：url 属性级转义，无内嵌 onclick（点击走容器级事件委托）。 */
+ function _chatImgThumbHtml(url) {
+   var e = _escChatAttr(url);
+   return '<img src="' + e + '?thumb=1" data-chat-img-url="' + e + '" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" alt="">';
+ }
+ var _chatImgDelegated = false;
+ /** chat 图片缩略图点击 → 新窗口打开原图（事件委托，替代内嵌 onclick，杜绝 url 注入 JS）。 */
+ function _installChatImgDelegation() {
+   if (_chatImgDelegated) return;
+   _chatImgDelegated = true;
+   document.addEventListener('click', function(ev) {
+     var t = ev.target;
+     if (t && t.tagName === 'IMG' && t.dataset && t.dataset.chatImgUrl) {
+       ev.preventDefault();
+       window.open(t.dataset.chatImgUrl, '_blank', 'noopener');
+     }
+   });
+ }
+/**
+ * 用户消息气泡 HTML：带 data-msg-id + hover 撤回按钮。
+ * @param {number|string} msgId - 消息 id（0/空 = live 未回填，不显示撤回入口）
+ * @param {string} innerHtml - 气泡内容（已转义/渲染）
  * @param {string} originalText - 原文（剥离 [chat_img:] 标记），注册到 _chatRecallTexts 供重新编辑
  */
 function _userMsgHtml(msgId, innerHtml, originalText) {
@@ -562,7 +592,7 @@ function _userMsgHtml(msgId, innerHtml, originalText) {
   if (id > 0) {
     if (typeof originalText === 'string' && originalText) _chatRecallTexts[id] = originalText;
     return '<div class="msg r" data-msg-id="' + id + '">'
-      + '<span class="msg-recall-btn" onclick="recallChatMessage(' + id + ', event)" title="' + I18N.t('chat.recall.action') + '">'
+      + '<span class="msg-recall-btn" onclick="recallChatMessage(\'' + id + '\', event)" title="' + I18N.t('chat.recall.action') + '">'
       + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v4h4"/><path d="M3.5 11a9 9 0 1 0 2.1-5.4L3 8"/><path d="M9 17l6-6"/><path d="M15 17l-6-6"/></svg>'
       + I18N.t('chat.recall.action') + '</span>'
       + innerHtml + '</div>';
@@ -576,7 +606,7 @@ function _recalledMsgHtml(msgId, originalText) {
   if (id > 0 && typeof originalText === 'string' && originalText) _chatRecallTexts[id] = originalText;
   return '<div class="msg r chat-msg-recalled" data-msg-id="' + (id || '') + '">'
     + '<span>' + I18N.t('chat.recall.hint') + '</span>'
-    + (id > 0 ? ' <a href="javascript:void(0)" onclick="_recallReEdit(' + id + ')">' + I18N.t('chat.recall.re_edit') + '</a>' : '')
+    + (id > 0 ? ' <a href="javascript:void(0)" onclick="_recallReEdit(\'' + id + '\')">' + I18N.t('chat.recall.re_edit') + '</a>' : '')
     + '</div>';
 }
 
@@ -607,7 +637,7 @@ function _applyRecallUI(msgId, taskId) {
     hint.className = 'msg r chat-msg-recalled';
     hint.setAttribute('data-msg-id', msgId);
     hint.innerHTML = '<span>' + I18N.t('chat.recall.hint') + '</span>'
-      + ' <a href="javascript:void(0)" onclick="_recallReEdit(' + msgId + ')">' + I18N.t('chat.recall.re_edit') + '</a>';
+      + ' <a href="javascript:void(0)" onclick="_recallReEdit(\'' + msgId + '\')">' + I18N.t('chat.recall.re_edit') + '</a>';
     el.replaceWith(hint);
   }
   // 终止该轮执行的前端表现：中止 SSE + 移除三点占位 + 清任务态
@@ -696,16 +726,18 @@ function switchConversation(convId) {
         // Issue #442: 已撤回 → 原位置撤回提示 + 重新编辑
         if (m.deleted) return _recalledMsgHtml(m.id, _stripChatImgMarkers(m.content));
         let rendered = renderMarkdown(m.content);
-        // 将 [chat_img:url] 标记替换为图片缩略图
+        // 将 [chat_img:url] 标记替换为图片缩略图（url 转义 + 事件委托，无内嵌 onclick）
+        _installChatImgDelegation();
         rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
-          return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
+          return _chatImgThumbHtml(url);
         });
         return _userMsgHtml(m.id, linkifyIssueNumbers(rendered, conv.repo_key || ''), _stripChatImgMarkers(m.content));
       }
       let rendered = renderMarkdown(m.content);
-      // 将 [chat_img:url] 标记替换为图片缩略图
+      // 将 [chat_img:url] 标记替换为图片缩略图（url 转义 + 事件委托，无内嵌 onclick）
+      _installChatImgDelegation();
       rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
-        return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
+        return _chatImgThumbHtml(url);
       });
       return `<div class="msg ${m.role === 'user' ? 'r' : 'l'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
     }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
@@ -1105,7 +1137,7 @@ function doSend(input, body) {
         if (btn) {
           btn.style.display = '';
           btn.setAttribute('title', I18N.t('chat.recall.action'));
-          btn.setAttribute('onclick', 'recallChatMessage(' + r.message_id + ', event)');
+          btn.setAttribute('onclick', 'recallChatMessage(\'' + r.message_id + '\', event)');
           btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v4h4"/><path d="M3.5 11a9 9 0 1 0 2.1-5.4L3 8"/><path d="M9 17l6-6"/><path d="M15 17l-6-6"/></svg>' + I18N.t('chat.recall.action');
         }
         _chatRecallTexts[r.message_id] = msg;
@@ -1289,9 +1321,10 @@ function renderChatMessages(messages) {
   body.innerHTML = '';
   messages.forEach(m => {
     let content = m.content || '';
-    // 将 [chat_img:url] 标记替换为图片缩略图
+    // 将 [chat_img:url] 标记替换为图片缩略图（url 转义 + 事件委托，无内嵌 onclick）
+    _installChatImgDelegation();
     const imgHtml = content.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
-      return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
+      return _chatImgThumbHtml(url);
     });
     // 移除标记后的纯文本（用于 escaped 显示）
     const textOnly = content.replace(/\[chat_img:[^\]]+\]/g, '').trim();

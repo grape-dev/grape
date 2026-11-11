@@ -9,24 +9,31 @@ v3.0 重构：
 - 新增 POST /executions/{id}/dispatch 派发问题为真实 Issue
 - 新增 POST /polish 润色巡检指令
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
-from src.api.deps import get_current_user, check_repo_access
-from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
-from src.domains.runtime.engine.scheduler import _get_exec_agent_task
 
+from datetime import datetime, timezone
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from pydantic import BaseModel, field_validator
+
+from src.api.deps import get_current_user, check_repo_access
+
+from src.kernel.config import log
+
+from src.kernel.session_manager import db, db_lock
+
+from src.domains.runtime.engine.scheduler import _get_exec_agent_task
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
 # agent_type 不再由用户选择，内部固定为 'issue'
 _FIXED_AGENT_TYPE = "issue"
-
 
 def _validate_cron(cron_expr: str) -> bool:
     """校验 cron 表达式格式（5 段制）。"""
@@ -36,7 +43,6 @@ def _validate_cron(cron_expr: str) -> bool:
         return True
     except Exception:
         return False
-
 
 def _compute_next_run(cron_expr: str) -> str:
     """计算 cron 下次触发时间（本地时区，ISO 格式）。"""
@@ -51,7 +57,6 @@ def _compute_next_run(cron_expr: str) -> str:
     except Exception:
         return ""
 
-
 def _check_task_access(user: dict, task_id: int) -> dict:
     """校验 task 归属并返回 task dict（含 repo_key）。"""
     with db_lock:
@@ -65,7 +70,6 @@ def _check_task_access(user: dict, task_id: int) -> dict:
     if task_repo_key:
         check_repo_access(user, task_repo_key)
     return {"id": row[0], "repo_key": task_repo_key}
-
 
 def _check_exec_access(user: dict, exec_id: int) -> dict:
     """校验 execution 归属并返回 dict（含 task_id, repo_key）。"""
@@ -83,7 +87,6 @@ def _check_exec_access(user: dict, exec_id: int) -> dict:
         check_repo_access(user, repo_key)
     return {"id": row[0], "task_id": row[1], "repo_key": repo_key}
 
-
 def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) -> None:
     """Issue #486: 服务端校验 engine_runtime_ids 归属（复用 #277 可见性口径）。
 
@@ -96,7 +99,7 @@ def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) ->
     from src.kernel.repo_key import from_repo_key
     from src.domains.mgmt.user import db as user_db
     from src.domains.mgmt.routes.settings import _build_cred_map, _make_visible_credential_fn
-    uid = user.get("id") or 0
+    uid = str(user.get("id") or "")
     uname = user.get("username") or ""
     user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
     repo_base = from_repo_key(repo_key or "")
@@ -129,14 +132,12 @@ def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) ->
             "code": 400,
             "message": f"engine runtime ids not available for this repo/user: {', '.join(invalid)}"})
 
-
 def _autopilot_exec_cols() -> list:
     """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
     with db_lock:
         c = db.cursor()
         c.execute("PRAGMA table_info(autopilot_executions)")
         return [r[1] for r in c.fetchall()]
-
 
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
@@ -173,9 +174,6 @@ def _row_to_task(row) -> dict:
         "custom_fields": custom_fields,
         "work_branch": work_branch or "",
     }
-
-
-# ====== 请求模型 ======
 
 class CreateTaskBody(BaseModel):
     name: str
@@ -217,7 +215,6 @@ class CreateTaskBody(BaseModel):
             raise ValueError(f"无效的 cron 表达式: {v}")
         return v
 
-
 class UpdateTaskBody(BaseModel):
     name: Optional[str] = None
     repo_key: Optional[str] = None
@@ -244,9 +241,6 @@ class UpdateTaskBody(BaseModel):
             raise ValueError(f"无效的 cron 表达式: {v}")
         return v
 
-
-# ====== 任务 CRUD ======
-
 @router.get("/tasks")
 def list_tasks(
     user: dict = Depends(get_current_user),
@@ -265,8 +259,10 @@ def list_tasks(
     # 跨平台前缀兼容（与 check_repo_access 对齐）：gitcode:↔github: 互换匹配
     if repo_key:
         base = repo_key.split(":", 1)[1] if ":" in repo_key else repo_key
-        conditions.append("(repo_key=? OR repo_key=? OR repo_key=?)")
-        params.extend([repo_key, f"gitcode:{base}", f"github:{base}"])
+        from src.kernel.repo_key import repo_key_candidates
+        _cands = repo_key_candidates(repo_key)
+        conditions.append("(" + " OR ".join(["repo_key=?"] * len(_cands)) + ")")
+        params.extend(_cands)
     if enabled is not None:
         conditions.append("enabled=?")
         params.append(enabled)
@@ -279,7 +275,7 @@ def list_tasks(
     # 过滤：只返回当前用户有权访问的仓库的任务
     # 跨平台前缀兼容（与 check_repo_access 对齐）：gitcode:↔github: 互换匹配
     from src.domains.mgmt.user.db import get_managed_repos
-    user_repos = {r["repo_key"] for r in get_managed_repos(user.get("id", 0))}
+    user_repos = {r["repo_key"] for r in get_managed_repos(str(user.get("id") or ""))}
     # 构建跨平台候选集：user_repos 中每个 repo_key 的 gitcode:/github: 变体都算匹配
     _repo_base = set()
     for rk in user_repos:
@@ -315,7 +311,6 @@ def list_tasks(
         log.warning(f"list_tasks: engine_detached hints failed: {_he}")
     return {"tasks": tasks}
 
-
 @router.get("/tasks/{task_id}")
 def get_task(task_id: int, user: dict = Depends(get_current_user)):
     """获取单个自动化任务详情。"""
@@ -345,7 +340,6 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         log.warning(f"get_task: engine_detached hints failed: {_he}")
     return task
 
-
 @router.post("/tasks")
 def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     """创建自动化任务。"""
@@ -354,7 +348,7 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     if body.repo_key:
         # 检查用户 managed_repos 中是否有匹配的仓库（跨平台前缀兼容）
         from src.domains.mgmt.user.db import get_managed_repos
-        user_repos = {r["repo_key"] for r in get_managed_repos(user.get("id", 0))}
+        user_repos = {r["repo_key"] for r in get_managed_repos(str(user.get("id") or ""))}
         body_base = body.repo_key.split(":", 1)[1] if ":" in body.repo_key else body.repo_key
         _matched_repo_key = ""
         for rk in user_repos:
@@ -379,14 +373,13 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
             "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (body.name, body.repo_key, _FIXED_AGENT_TYPE, body.instruction, body.skill_name,
-             body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0,
+             body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, str(user.get("id") or ""),
              engine_ids_json, custom_fields_json, body.work_branch or "")
         )
         db.commit()
         task_id = c.lastrowid
     log.info(f"Autopilot: task created id={task_id} name='{body.name}' by user={user.get('username', '')}")
     return {"id": task_id, "message": "task created", "next_run_at": next_run}
-
 
 @router.put("/tasks/{task_id}")
 def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_current_user)):
@@ -432,7 +425,6 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
     log.info(f"Autopilot: task {task_id} updated by user={user.get('username', '')}")
     return {"message": "task updated"}
 
-
 @router.delete("/tasks/{task_id}")
 def delete_task(task_id: int, user: dict = Depends(get_current_user)):
     """删除自动化任务（同时删除关联执行记录）。"""
@@ -445,9 +437,6 @@ def delete_task(task_id: int, user: dict = Depends(get_current_user)):
     log.info(f"Autopilot: task {task_id} deleted by user={user.get('username', '')}")
     return {"message": "task deleted"}
 
-
-# ====== 手动触发 ======
-
 @router.post("/tasks/{task_id}/trigger")
 async def trigger_task(task_id: int, user: dict = Depends(get_current_user)):
     """手动触发自动化任务执行。"""
@@ -458,9 +447,6 @@ async def trigger_task(task_id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=409, detail={"code": 409, "message": result["message"]})
     log.info(f"Autopilot: task {task_id} manually triggered by user={user.get('username', '')}")
     return {"message": result["message"]}
-
-
-# ====== 执行日志查询 ======
 
 @router.get("/executions")
 def list_executions(
@@ -544,7 +530,8 @@ def list_executions(
             rk = repo_key_map.get(tid, "")
             if rk:
                 try:
-                    agent_task_ids = _find_agent_task_ids(rk, int(issue_number))
+                    from src.domains.runtime.vcs.api_client import _native_issue_number
+                    agent_task_ids = _find_agent_task_ids(rk, _native_issue_number(issue_number))
                 except Exception:
                     agent_task_ids = []
         executions.append({
@@ -564,9 +551,6 @@ def list_executions(
             "agent_task_ids": agent_task_ids,
         })
     return {"executions": executions, "total": total, "limit": limit, "offset": offset}
-
-
-# ====== findings 查询 ======
 
 @router.get("/executions/{exec_id}/findings")
 def get_findings(exec_id: int, user: dict = Depends(get_current_user)):
@@ -591,9 +575,6 @@ def get_findings(exec_id: int, user: dict = Depends(get_current_user)):
             return {"result": "", "summary": "", "findings": [], "parse_error": "invalid json in findings_json"}
     return {"result": "", "summary": "", "findings": [], "parse_error": "no findings"}
 
-
-# ====== 问题派发 ======
-
 class DispatchBody(BaseModel):
     finding_id: str
     title: Optional[str] = None
@@ -602,7 +583,6 @@ class DispatchBody(BaseModel):
     # Issue #697：疑似重复（suspected_duplicate）需跟踪单 owner agent 确认后方可并入挂靠
     dedup_confirmed: bool = False
     dedup_confirmed_by: str = ""
-
 
 # Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
 try:
@@ -633,7 +613,6 @@ except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同
     def sanitize_dedup_confirmed_by(raw):
         return " ".join(str(raw or "").split())[:64]
 
-
 def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
     """疑似重复派发门禁（Issue #697，代码级强制）。
 
@@ -652,7 +631,6 @@ def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
             "dedup_note": sanitize_dedup_note(finding.get("dedup_note")),
         })
 
-
 def _append_dedup_note(description: str, finding: dict) -> str:
     """Issue #697：派发描述追加判定级别与差异说明，保留根因对比证据链。
 
@@ -669,7 +647,6 @@ def _append_dedup_note(description: str, finding: dict) -> str:
         lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入")
     return "\n".join(lines)
 
-
 def _save_findings_json(exec_id: int, findings_data: dict) -> None:
     """Issue #697：findings_json 回写（确认标记/派发号共用，统一加锁提交）。"""
     with db_lock:
@@ -679,7 +656,6 @@ def _save_findings_json(exec_id: int, findings_data: dict) -> None:
             (json.dumps(findings_data, ensure_ascii=False), exec_id)
         )
         db.commit()
-
 
 async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                  title: str = "", description: str = "",
@@ -742,12 +718,10 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     # 获取 bot token
     repo_token = ""
     try:
-        if repo_key.startswith("github:"):
-            from src.domains.mgmt.user.db import get_github_token
-            repo_token = get_github_token(repo_key=repo_key) or ""
-        else:
-            from src.domains.mgmt.user.db import get_gitcode_token
-            repo_token = get_gitcode_token(repo_key=repo_key) or ""
+        # S75：provider 感知四级策略链（原 github/else 二分把 gitee 折叠成
+        # gitcode 专用列 → 取空 token）
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        repo_token = get_repo_token_with_refresh(repo_key) or ""
     except Exception:
         pass
 
@@ -773,7 +747,6 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
         return {"ok": True, "issue_number": issue_number, "message": f"已创建 Issue #{issue_number}"}
     return {"ok": False, "message": f"创建 Issue 失败: {result}"}
 
-
 @router.post("/executions/{exec_id}/dispatch")
 async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depends(get_current_user)):
     """将某个 finding 派发为真实 Issue，走完整流水线。"""
@@ -789,9 +762,6 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
                                         dedup_confirmed_by=str((user or {}).get("username")
                                                                or body.dedup_confirmed_by or ""))
 
-
-# ====== 飞书订阅（autopilot-feishu-subscription-design.md §4.3）======
-
 def _check_subscription_table() -> bool:
     """表结构保障：订阅表缺失（建表失败极端场景）时接口明确报错，而非裸 500。
 
@@ -806,7 +776,6 @@ def _check_subscription_table() -> bool:
     except Exception as e:
         log.warning(f"Autopilot subscription table check failed: {e}")
         return False
-
 
 @router.post("/tasks/{task_id}/subscribe")
 def subscribe_task(task_id: int, user: dict = Depends(get_current_user)):
@@ -826,7 +795,6 @@ def subscribe_task(task_id: int, user: dict = Depends(get_current_user)):
         log.info(f"Autopilot subscribe: task={task_id} user={user['id']} already subscribed or conflict")
     return {"ok": True, "subscribed": True}
 
-
 @router.delete("/tasks/{task_id}/subscribe")
 def unsubscribe_task(task_id: int, user: dict = Depends(get_current_user)):
     """退订任务飞书通知（幂等：不存在也返回成功）。"""
@@ -840,7 +808,6 @@ def unsubscribe_task(task_id: int, user: dict = Depends(get_current_user)):
         db.commit()
     return {"ok": True, "subscribed": False}
 
-
 @router.get("/tasks/{task_id}/subscription")
 def get_subscription(task_id: int, user: dict = Depends(get_current_user)):
     """查询当前用户对此任务的订阅状态（详情页按钮渲染用）。"""
@@ -853,13 +820,9 @@ def get_subscription(task_id: int, user: dict = Depends(get_current_user)):
                         (task_id, user["id"])).fetchone()
     return {"subscribed": bool(row)}
 
-
-# ====== 巡检指令润色 ======
-
 class PolishBody(BaseModel):
     name: str = ""
     instruction: str = ""
-
 
 @router.post("/polish")
 async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_user)):
@@ -954,3 +917,18 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     except Exception as e:
         log.warning(f"Autopilot polish: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"润色失败: {e}"})
+
+def _skill_display_name(skill_name: str) -> str:
+    """skill 表 display_name（与场景选择处同款查询条件）；无/空返回空串由前端回退 Skill ID。"""
+    if not skill_name:
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                (skill_name,))
+            row = c.fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""

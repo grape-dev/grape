@@ -479,11 +479,7 @@ function _renderRuntimesSkeleton(data) {
   }
 }
 
-function _escHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+function _escHtml(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml（app.js 定义）
 
 // Issue #364: 重建引擎多源索引（Engines 列表缓存 ∪ Workers 设备承载引擎）
 // 设备来源条目用设备级字段补齐 worker/scope/owner（缺 health_score 等派生字段，标记 _partial）
@@ -1021,7 +1017,7 @@ function doCreateCredentialInPanel() {
     var render = function() {
       var oneCmd = 'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl;
       var winCmd = '& ([scriptblock]::Create((irm ' + serverUrl + '/api/runtime/install.ps1))) -Token ' + token + ' -Server ' + serverUrl;
-    var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m src.runtime.agent';
+    var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m src.domains.runtime.engine.agent';
     if (area) area.innerHTML =
       '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
         // 警告
@@ -2266,7 +2262,7 @@ function _showCreateEnvForm() {
     var repoKey = repo ? repo.fullName : '';
     // 2026-10-15：grape_server 优先用服务端权威地址（/api/health 返回 server_base_url），
     // 拿不到才回退 window.location.origin。用户浏览页面的 origin 不一定等于 CLI 可达地址
-    // （如生产页面 www.grapedev.cn，worker/CLI 实际连 worker.grapedev.cn）。
+    // （如生产页面 <public-host>，worker/CLI 实际连 <worker-host>）。
     var credName = envName.slice(0, 20);
     var _startCreate = function(grapeServer) {
       _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);

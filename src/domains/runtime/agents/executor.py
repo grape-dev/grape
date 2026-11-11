@@ -684,13 +684,23 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     if kind == "chat":
         if not user_token and user_id > 0:
             try:
-                from src.api.deps import get_user_token_with_refresh
+                # D37/S57：repo 上下文按 repo_key 前缀派生 provider；无 repo_key 时
+                # 按用户已绑定身份的第一条（由数据决定，代码不写平台名）
+                from src.api.deps import get_user_token_for, get_user_token_for_repo
                 from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                 _acc = get_grape_account_by_id(user_id)
                 if _acc:
-                    user_token = get_user_token_with_refresh(_acc["username"], user_id=user_id) or ""
+                    if repo_key:
+                        user_token = get_user_token_for_repo(repo_key, _acc["username"],
+                                                             user_id=user_id) or ""
+                    else:
+                        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+                        _ids = get_user_identities(str(user_id)) or []
+                        _prov = str((_ids[0] or {}).get("provider") or "") if _ids else ""
+                        user_token = (get_user_token_for(_acc["username"], user_id=user_id,
+                                                         provider=_prov) or "") if _prov else ""
             except Exception as e:
-                log.warning(f"Fallback resolve user gitcode token failed: {e}")
+                log.warning(f"Fallback resolve user platform token failed: {e}")
                 user_token = ""
         if user_token:
             log.info(f"{label}chat task: user token present (len={len(user_token)}), NOT injecting into env (P2)")

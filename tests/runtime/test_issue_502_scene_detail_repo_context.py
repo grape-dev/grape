@@ -8,35 +8,43 @@
 - 无仓库上下文（无 repo 参数 + 无会话上下文）→ 按全局/官方解析，仓库级 uuid 场景不误回退默认
 - get_pipeline_config：repo_key 为空时仍允许按 scene_id 做全局/官方解析；file default 兜底带 fallback 标记
 """
+
 import os
+
 import sys
+
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
+
 os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 
 import pytest  # noqa: E402
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
+
 from src.domains.mgmt.auth import grape_account_db  # noqa: E402
+
 from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 _TEST_REPO = "issue502/demo"
+
 _TEST_REPO_KEY = f"gitcode:{_TEST_REPO}"
 
 client = TestClient(app)
 
 _uid = None
-_headers = {}
 
+_headers = {}
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     return create_access_token(user_id, username, 0)
-
 
 def setup_module():
     global _uid, _headers
@@ -46,7 +54,6 @@ def setup_module():
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 
-
 def teardown_module():
     with db_lock:
         try:
@@ -54,7 +61,6 @@ def teardown_module():
         except Exception:
             pass
         db.commit()
-
 
 @pytest.fixture(autouse=True)
 def _clean_scenes():
@@ -78,14 +84,12 @@ def _clean_scenes():
         db.commit()
     invalidate_scene_cache()
 
-
 def _seed_repo_scene(scene_id, name="仓库自定义场景", nodes=None, repo_key=_TEST_REPO_KEY):
     from src.api.pipeline_config import create_custom_scene
     return create_custom_scene(
         scene_id=scene_id, name=name, description="desc", repo_key=repo_key,
         nodes=nodes or [{"id": "issue", "skill": "issue-v2", "mode": "emit", "next": "done"}],
     )
-
 
 def _seed_global_scene(scene_id, name="全局场景"):
     from src.api.pipeline_config import create_custom_scene
@@ -94,10 +98,9 @@ def _seed_global_scene(scene_id, name="全局场景"):
         nodes=[{"id": "issue", "skill": "issue-v2", "mode": "emit", "next": "done"}],
     )
 
-
 class TestSceneDetailRepoContext:
     def test_detail_with_repo_matches_list(self):
-        """?repo= 指定仓库：detail 的 name/nodes 与 list --repo 该 id 条目完全一致。"""
+        """?repo= 指定仓库：detail 的 name/既有 nodes 字段与 list --repo 该 id 条目一致。"""
         sid = f"uuid-{uuid.uuid4().hex[:8]}"
         _seed_repo_scene(sid, name="仓库自定义场景")
 
@@ -111,7 +114,16 @@ class TestSceneDetailRepoContext:
         body = resp.json()
         assert body["id"] == sid
         assert body["name"] == entries[0]["name"] == "仓库自定义场景"
-        assert body["nodes"] == entries[0]["nodes"]
+        # Issue #1721：detail 节点新增 resolvable/scope_check 增量字段，
+        # 既有字段保持与 list 一致。
+        list_nodes = entries[0]["nodes"]
+        detail_nodes = body["nodes"]
+        assert len(detail_nodes) == len(list_nodes)
+        for detail_node, list_node in zip(detail_nodes, list_nodes):
+            for key, value in list_node.items():
+                assert detail_node[key] == value
+            assert "resolvable" in detail_node
+            assert "scope_check" in detail_node
 
     def test_detail_with_repo_scene_name(self):
         """?repo= 指定仓库：按场景名（非 uuid）也能解析到仓库内场景。"""
@@ -165,7 +177,6 @@ class TestSceneDetailRepoContext:
         resp = client.get(f"/api/scenes/{sid}", headers=_headers)
         assert resp.status_code == 404
 
-
 class TestPipelineConfigResolution:
     def test_get_pipeline_config_empty_repo_key_queries_global_row(self):
         """repo_key 为空时允许按 scene_id 查全局/官方作用域行（devops_pipeline_scene repo_key=''）。"""
@@ -203,3 +214,10 @@ class TestPipelineConfigResolution:
         assert cfg is not None
         assert cfg["scene_id"] == "cloud-native"
         assert not cfg.get("fallback")
+
+from src.domains.mgmt.auth import grape_account_db  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

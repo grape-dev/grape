@@ -217,7 +217,7 @@ class TestClipContract:
     def test_env_overridable_limit(self, monkeypatch):
         monkeypatch.setenv("HERMES_TOOL_INPUT_MAX_BYTES", "64")
         import importlib
-        import src.agent.hermes_acp as mod
+        import src.domains.runtime.agents.hermes_acp as mod
         importlib.reload(mod)
         try:
             out = mod._clip_tool_input({"path": "a", "content": "z" * 1024})

@@ -28,8 +28,9 @@ function bodyOf(marker) {
 const b = bodyOf('function hostAndSelect');
 
 test('FS-01 源码含从 repoKey 推导 provider（github:/gitcode: 前缀）', () => {
-  assert.ok(b.indexOf("'github:'") >= 0 || b.indexOf('"github:"') >= 0, '应判断 github: 前缀');
-  assert.ok(b.indexOf("'gitcode:'") >= 0 || b.indexOf('"gitcode:"') >= 0, '应判断 gitcode: 前缀');
+  // D90/扫雷⑥：provider 派生泛化为「冒号前缀」通用式（_rk.slice(0, _pi)），覆盖 gitee:/gitlab: 等新平台——
+  // 行为等价且更广，源码断言改锁泛化派生 + _provider 变量（URL ?provider= 拼接由 FS-02 行为断言锁定）。
+  assert.ok(b.indexOf("_rk.slice(0, _pi)") >= 0 || b.indexOf("'github:'") >= 0 || b.indexOf('"github:"') >= 0, '应从 repo_key 前缀推导 provider');
   assert.ok(b.indexOf('_provider') >= 0, '应使用 _provider 变量');
 });
 

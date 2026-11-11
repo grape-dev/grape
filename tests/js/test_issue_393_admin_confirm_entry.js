@@ -51,9 +51,13 @@ function makeSandbox(repoCache) {
     'I18N', '_isRepoAdmin393',
     'return function _renderTaskActionsInline(t) {' + renderActionsBody + '}')(
     I18N, null);
+  // D22/D105 合并后 _isRepoAdmin393 走全局 window.stripRepoPrefix（app.js 唯一实现）
+  const windowMock = {
+    stripRepoPrefix: (s) => String(s || '').replace(/^(gitcode|github|gitlab|gitee):/, ''),
+  };
   const _isRepoAdmin393 = new Function(
-    'localStorage', 'return function _isRepoAdmin393(repoKey) {' + isAdminBody + '}')(
-    localStorage);
+    'localStorage', 'window', 'return function _isRepoAdmin393(repoKey) {' + isAdminBody + '}')(
+    localStorage, windowMock);
   return { localStorage, _isRepoAdmin393, _renderTaskActionsInline, calls, I18N };
 }
 
@@ -74,7 +78,8 @@ const memberCache = { repos: [{ repo_key: REPO_KEY, full_name: 'org/repo393', ro
 // ── 1/5: admin 渲染可点按钮 ──
 {
   const { html } = renderWith(adminCache, { id: 1, status: 'processing', repo_key: REPO_KEY });
-  assert.ok(html.includes('adminConfirmTaskDone(1'), 'admin 应渲染可点的 adminConfirmTaskDone 按钮');
+  // D22/D105 合并：inline onclick 的任务 id 统一加引号（跨平台 id 可能非数字）
+  assert.ok(html.includes("adminConfirmTaskDone('1'"), 'admin 应渲染可点的 adminConfirmTaskDone 按钮');
   assert.ok(!html.includes('disabled'), 'admin 按钮不应置灰');
   assert.ok(html.includes('tasks.admin_confirm_done'), '按钮文案用 tasks.admin_confirm_done');
 }

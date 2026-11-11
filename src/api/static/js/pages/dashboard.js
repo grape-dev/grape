@@ -192,7 +192,7 @@ function renderDashboard(data) {
       <div class="ap-hero-row">
         <div class="ap-hero-icon">■</div>
         <div style="flex:1">
-          <div class="ap-hero-title">${owner}/${name}</div>
+          <div class="ap-hero-title">${window.escHtml(owner)}/${window.escHtml(name)}</div>
           <div class="ap-hero-sub">${I18N.t('dashboard.webhook_ok')}</div>
         </div>
         <div class="ap-stats">
@@ -309,6 +309,15 @@ function renderDashboard(data) {
       .scn-list{display:flex;flex-direction:column;gap:12px}
       .scn-row{display:flex;align-items:center;gap:16px;padding:16px 20px;background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;cursor:pointer;transition:all .25s ease;position:relative;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.05)}
       .scn-row:hover{background:rgba(255,255,255,.8);box-shadow:0 3px 16px rgba(0,0,0,.08)}
+      .scn-row.is-pinned{background:rgba(255,255,255,.78)}
+      .scn-pin-btn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;padding:0;border-radius:999px;border:1px solid rgba(0,0,0,.12);background:transparent;cursor:pointer;font-size:13px;line-height:1;transition:all .2s;filter:grayscale(1);opacity:.65}
+      .scn-pin-btn:hover{opacity:1;background:rgba(0,113,227,.08);border-color:rgba(0,113,227,.3)}
+      .scn-pin-btn.is-pinned{background:#0a84ff;border-color:#0a84ff;filter:none;opacity:1}
+      [data-theme-mode="dark"] .scn-row.is-pinned{background:rgba(58,58,60,.72)}
+      [data-theme-mode="dark"] .scn-row.is-pinned:hover{background:rgba(58,58,60,.86)}
+      [data-theme-mode="dark"] .scn-pin-btn{border-color:rgba(255,255,255,.18)}
+      [data-theme-mode="dark"] .scn-pin-btn:hover{background:rgba(10,132,255,.16);border-color:rgba(10,132,255,.42)}
+      [data-theme-mode="dark"] .scn-pin-btn.is-pinned{background:#0a84ff;border-color:#0a84ff}
       .scn-row-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:#fff;font-weight:600}
       .scn-row-name{font-size:15px;font-weight:600;color:#1d1d1f;white-space:nowrap;letter-spacing:-.2px}
       .scn-row-mid{flex:0 1 30%;min-width:0;display:flex;flex-direction:column;gap:3px}
@@ -339,7 +348,7 @@ function renderDashboard(data) {
       <div class="ap-hero-row">
         <div class="ap-hero-icon">■</div>
         <div style="flex:1">
-          <div class="ap-hero-title">${owner}/${name} <span style="font-size:10px;font-weight:500;color:#0071e3;background:#e3edfd;padding:2px 8px;border-radius:6px;vertical-align:middle;margin-left:4px">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')}</span></div>
+          <div class="ap-hero-title">${window.escHtml(owner)}/${window.escHtml(name)} <span style="font-size:10px;font-weight:500;color:#0071e3;background:#e3edfd;padding:2px 8px;border-radius:6px;vertical-align:middle;margin-left:4px">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')}</span></div>
           <div class="ap-hero-sub">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')} · ${I18N.t('dashboard.webhook_ok')}</div>
         </div>
         <div class="ap-stats">
@@ -483,7 +492,7 @@ function renderDashboard(data) {
       '<p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">' + sceneName + '</p>' +
       '<div style="display:flex;justify-content:flex-end;gap:8px">' +
         '<button class="ap-btn" onclick="this.closest(\'[style*=fixed]\').remove()">' + (I18N.t('common.cancel')||'取消') + '</button>' +
-        '<button class="ap-btn ap-btn-d" id="confirmDeleteCardBtn">' + (I18N.t('common.delete')||'删除') + '</button>' +
+        '<button class="ap-btn ap-btn-d" id="confirmDeleteCardBtn">' +  + '</button>' +
       '</div></div>';
     document.body.appendChild(overlay);
     document.getElementById('confirmDeleteCardBtn').onclick = function() {
@@ -512,6 +521,24 @@ function renderDashboard(data) {
   _loadPipelines();
 }
 
+// ── 场景置顶（仓库共享；无乐观更新，成功后局部刷新）──
+window._toggleScenePin = function(sceneId, ev) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  var dd = window._dashboardData || {};
+  var scenes = dd._scenes || [];
+  var s = scenes.find(function(x) { return x.id === sceneId; });
+  var target = !(s && s.is_pinned);
+  var owner = dd._owner || '';
+  var name = dd._name || '';
+  API.post('/scenes/' + encodeURIComponent(sceneId) + '/pin?repo=' + encodeURIComponent(owner + '/' + name),
+    {pinned: target}).then(function() {
+      if (typeof window._sceneReload === 'function') window._sceneReload();
+    }).catch(function(err) {
+      var msg = (err && err.detail && err.detail.message) || (err && err.message) || '';
+      app.showToast(I18N.t('dashboard.scene_pin_failed', {msg: msg}));
+    });
+};
+
 // ── 渲染单个场景行（列表式，一行一个场景）──
 let _deleteMode = false;
 function _renderLocalSceneCard(s, isApplied, idx) {
@@ -534,20 +561,25 @@ function _renderLocalSceneCard(s, isApplied, idx) {
   const barColor = morandiColors[idx % morandiColors.length];
   var isPRSub = !!s.pr_subscription_enabled;
   var prBadge = isPRSub ? '<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">已开启 PR 订阅</span>' : '';
+  var isPinned = !!s.is_pinned;
+  var pinnedBadge = s.is_pinned ? `<span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(0,113,227,.1);color:#0071e3;border:1px solid rgba(0,113,227,.2)">${I18N.t('dashboard.scene_pinned')}</span>` : '';
+  var pinBtn = `<button class="scn-pin-btn${isPinned ? ' is-pinned' : ''}" title="${I18N.t(isPinned ? 'dashboard.scene_unpin' : 'dashboard.scene_pin')}" onclick="event.stopPropagation(); window._toggleScenePin('${s.id}', event)">📌</button>`;
 
-  return `<div class="scn-row" data-scene-id="${s.id}" data-scene-name="${(s.display_name||s.name||'').replace(/"/g,'&quot;')}" onclick="app.nav('scene-detail-local','${s.id}')">
+  return `<div class="scn-row" data-scene-id="${s.id}" data-scene-name="${window.escHtml(s.display_name||s.name||'')}" onclick="app.nav('scene-detail-local','${s.id}')">
     <div class="scn-row-icon" style="background:${barColor}">${icon}</div>
     <div class="scn-row-mid">
       <div style="display:flex;align-items:center;gap:8px">
-        <span class="scn-row-name">${s.display_name || s.name}</span>
+        <span class="scn-row-name">${window.escHtml(s.display_name || s.name)}</span>
         ${createdBy ? `<span style="font-size:10px;color:var(--t3)">@${createdBy}</span>` : ''}
+        ${pinnedBadge}
       </div>
       <div style="display:flex;align-items:center;gap:8px;min-width:0">
-        <span class="scn-row-desc" title="${desc.replace(/"/g, '&quot;')}">${desc || '—'}</span>
+        <span class="scn-row-desc" title="${window.escHtml(desc)}">${window.escHtml(desc || '—')}</span>
       </div>
     </div>
     <div class="scn-row-chain">${chain}</div>
     <div class="scn-row-right">
+      ${pinBtn}
       ${prBadge}
       <span class="scn-branch-tag">🌿 ${workBranch}</span>
       ${isApplied ? '' : ''}
@@ -654,7 +686,7 @@ function _scenePipeRowHtml(p, sceneId, dashData) {
   };
   const _issueNum = String(p.issue_id || '').replace(/^#/, '');
   const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
-  const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
+  const _issueHost = _repoWebHost(dashData.repo);  // S103/UC9：host 走卡目录，gitee 等不再硬编码二元分叉
   const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
   const agentTags = ['vod', 'issue', 'coding', 'qa', 'sre'].map((at, j) => {
     const hasAgent = p.statuses && p.statuses[j] > 0;
@@ -680,7 +712,7 @@ function _scenePipeRowHtml(p, sceneId, dashData) {
   }
   return `<tr onclick="_jumpFromScenePipeline('${_issueNum}','${sceneId}','${latestSeq}')">
         <td><b>${p.issue_id || '?'}</b> ${execBadge}</td>
-        <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${(p.title || '—').substring(0, 40)}</a></td>
+        <td><a href="${_issueUrl || '#'}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline;font-size:11px">${window.escHtml((p.title || '—').substring(0, 40))}</a></td>
         <td>${dur}</td>
         <td>${agentTags}</td>
         <td><span style="font-size:11px;color:${p.stage === 'done' ? '#34c759' : '#86868b'}">${stageName}</span></td>
@@ -909,7 +941,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
 
       <span id="sceneDeployGlobe" style="margin-top:4px;font-size:12px;line-height:29px;flex-shrink:0"></span><!-- Issue #461: 场景级访问地址地球仪图标（复制场景按钮前，异步渲染三态） -->
       <button class="ap-btn" style="margin-top:4px" onclick="_copySceneFromDetail()">${I18N.t('dashboard.copy_scene')||'复制场景'}</button>
-      ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
+      ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}', decodeURIComponent('${encodeURIComponent(scene.display_name||scene.name||'')}'),null)">${I18N.t('common.delete')}</button>` : ''}
     </div>
   </div>`;
 
@@ -1236,7 +1268,7 @@ window._createNewBranchInline = function(owner, name) {
       <p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">${sn}</p>
       <div style="display:flex;justify-content:flex-end;gap:8px">
         <button class="ap-btn" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
-        <button class="ap-btn ap-btn-d" id="confirmDeleteSceneBtn2">${I18N.t('common.delete')||'删除'}</button>
+        <button class="ap-btn ap-btn-d" id="confirmDeleteSceneBtn2">${I18N.t('common.delete')}</button>
       </div>
     </div>`;
     document.body.appendChild(overlay);
@@ -1491,7 +1523,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
         <span style="width:22px;height:22px;border-radius:6px;background:${bgColor}22;color:${bgColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</span>
         <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skIcon} ${skLabel}</span>
       </div>
-      <div class="ap-nd-desc">${descs[tag] || meta.description || ''}</div>
+      <div class="ap-nd-desc">${window.escHtml(descs[tag] || meta.description || '')}</div>
       <div style="height:1px;background:#e8e8ed;margin:8px 0"></div>
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center">
         <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_skill')||'技能'}</div>
@@ -1823,7 +1855,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
         <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skIcon} ${skLabel}</span>
         ${toggleBtn}
       </div>
-      ${enabled ? `<div class="ap-nd-desc">${descs[tag] || meta.description || ''}</div>` : `<div style="font-size:10px;color:#86868b;margin-bottom:8px">${I18N.t('dashboard.not_needed_in_scene')||'此场景下不需要'}</div>`}
+      ${enabled ? `<div class="ap-nd-desc">${window.escHtml(descs[tag] || meta.description || '')}</div>` : `<div style="font-size:10px;color:#86868b;margin-bottom:8px">${I18N.t('dashboard.not_needed_in_scene')}</div>`}
       <div style="height:1px;background:#e8e8ed;margin:8px 0"></div>
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center">
         <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_skill')||'技能'}</div>

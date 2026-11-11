@@ -35,7 +35,7 @@ def _now() -> int:
 # ===================== 方式 A：会话级临时 token =====================
 
 def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
-                        user_id: int = 0, ttl: int = SESSION_TOKEN_TTL) -> str:
+                        user_id: str = "", ttl: int = SESSION_TOKEN_TTL) -> str:
     """签发会话级临时 token，返回明文（仅注入 env，不落盘）。
 
     明文的 sha256 落 `session_api_tokens`；`session_key` 记录了会话（task_id / conv_id）。
@@ -139,7 +139,7 @@ def purge_expired_session_tokens() -> int:
 
 # ===================== 方式 B：用户级长期 API Key =====================
 
-def generate_api_token(user_id: int, name: str = "") -> dict | None:
+def generate_api_token(user_id: str, name: str = "") -> dict | None:
     """生成用户级 API Key，返回 {token(明文一次), id}；None 表示失败。
 
     明文仅创建返回一次；落库 sha256；同名（user_id, name）冲突时返回 None。
@@ -190,7 +190,7 @@ def verify_api_token(token: str) -> dict | None:
         return None
 
 
-def revoke_api_token(user_id: int, token_id: int) -> bool:
+def revoke_api_token(user_id: str, token_id: int) -> bool:
     """吊销用户级 API Key（软删：revoked=1，保审计）。"""
     try:
         with db_lock:
@@ -203,7 +203,7 @@ def revoke_api_token(user_id: int, token_id: int) -> bool:
         return False
 
 
-def list_api_tokens(user_id: int) -> list[dict]:
+def list_api_tokens(user_id: str) -> list[dict]:
     """列出用户全部未吊销 API Key（不含明文/sha256）。"""
     try:
         with db_lock:
@@ -227,3 +227,55 @@ def list_api_tokens(user_id: int) -> list[dict]:
     except Exception as e:
         log.warning(f"List api tokens failed: {e}")
         return []
+
+
+SESSION_TOKEN_RECOVERY_HINT = (
+    "Invalid or expired session token; if the shell environment snapshot is stale, "
+    "re-read GRAPE_SESSION_TOKEN from the agent runtime process environment and retry"
+)
+
+
+def _utc_iso() -> str:
+    """当前 UTC 时刻的 ISO 字符串（秒级列 created_at 的口径，Issue #1477）。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
+                         user_id: int = 0, ttl: int = SESSION_TOKEN_TTL,
+                         commit: bool = True) -> str:
+    """轮换会话 token：同一事务内先作废旧 token、再签发新 token。
+
+    Issue #990：会话 token 轮换时若只签发新 token、不刷新 shell 环境快照
+    （agent_tasks.env_extra），Agent 会继续用旧快照 token 调 grape → 全量 401。
+    调用方（service.sync_task_session_token）用 ``commit=False`` 把「轮换 + 快照回写」
+    放进同一事务，避免过期/签发/回写分步提交导致跨进程交错误伤新 token。
+
+    任一步失败即回滚并抛出，保证不会出现「旧 token 已作废、新 token 未落库」的半状态。
+    """
+    token = SESSION_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = _now()
+    with db_lock:
+        c = db.cursor()
+        try:
+            # 只提前作废仍有效的旧 token；已过期行保持原样（purge 清理）
+            c.execute(
+                "UPDATE session_api_tokens SET expires_at=? "
+                "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+                (now, session_key, now),
+            )
+            c.execute(
+                "INSERT INTO session_api_tokens (session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, _sha256(token), now + ttl),
+            )
+            if commit:
+                db.commit()
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"Rotate session token failed for {session_key}: {e}")
+            raise
+    return token

@@ -20,13 +20,16 @@ T3 60s 内第 6 条 bot 建单 → event_skipped 记 bot_open_recommend_rate_lim
 T4 bot issue_comment → 仍被 self_loop 拦截（回归保护）
 T5 人建 issue_opened → 行为与现状一致（放行 + 推荐，不限流）
 """
+
 import json
+
 import sys
+
 import threading
+
 from unittest.mock import patch, MagicMock
 
 import pytest
-
 
 # 测试隔离（同 test_issue_453_self_loop.py 的 mock 方案）：每测试独立内存库，
 # 防止混跑时其他模块 reload(session_manager) 导致写读两侧库分裂。
@@ -34,7 +37,6 @@ class _DbProxy:
     def __getattr__(self, attr):
         import src.kernel.session_manager as _sm
         return getattr(_sm.db, attr)
-
 
 class _DbLockProxy:
     def __enter__(self):
@@ -45,17 +47,16 @@ class _DbLockProxy:
     def __exit__(self, *args):
         return self._real.__exit__(*args)
 
-
 db = _DbProxy()
+
 db_lock = _DbLockProxy()
 
 _PATCH_DB_MODULES = (
-    "src.kernel.session_manager", "src.api.event_store", "src.domains.runtime.pipeline.event_pipeline",
+    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
     "src.domains.mgmt.user.db", "src.api.session_store", "src.api.issues_center",
     "src.api.db_setup", "src.domains.runtime.routes.events", "src.api.token_resolver",
     "src.domains.runtime.engine.service",
 )
-
 
 @pytest.fixture(autouse=True)
 def _mock_db(monkeypatch):
@@ -84,8 +85,15 @@ def _mock_db(monkeypatch):
                 _m.db_lock = _real_lock
         except Exception:
             pass
+    # D45/S67：关闭连接前排空后台 pi-refresh 线程（同 test_issue_453：
+    # 在飞 DB 语句 × close 并发 = sqlite UAF 段错误实测现场）
+    # （weekly-08 graft：weekly-10 版测试文件为底，保留我们的排空钩）
+    try:
+        from src.api.event_pipeline import wait_pi_refresh_drain
+        wait_pi_refresh_drain(timeout=35.0)
+    except Exception:
+        pass
     _conn.close()
-
 
 from src.api import event_pipeline as ep
 
@@ -101,14 +109,12 @@ _clean_sql = [
     "DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:test/i565%'",
 ]
 
-
 def _clean():
     with db_lock:
         c = db.cursor()
         for sql in _clean_sql:
             c.execute(sql)
         db.commit()
-
 
 def _issue_opened_payload(username, num, description="bot 批量建单需求"):
     return {
@@ -120,7 +126,6 @@ def _issue_opened_payload(username, num, description="bot 批量建单需求"):
         "user": {"username": username},
     }
 
-
 def _issue_comment_payload(username, note="bot 自评回帖", num=9):
     return {
         "object_kind": "note",
@@ -130,12 +135,10 @@ def _issue_comment_payload(username, note="bot 自评回帖", num=9):
         "user": {"username": username},
     }
 
-
 def _session_level_result():
     from src.kernel.token_resolver import TokenResult
     return TokenResult(token="SESSION_PAT", level="session",
                        provider=MagicMock(), repo_key=RK)
-
 
 def _skipped_count(reason=None):
     with db_lock:
@@ -147,13 +150,11 @@ def _skipped_count(reason=None):
             c.execute("SELECT COUNT(*) FROM event_skipped WHERE repo_key=?", (RK,))
         return c.fetchone()[0]
 
-
 def _events_count():
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM events WHERE repo_key=?", (RK,))
         return c.fetchone()[0]
-
 
 def _dispatch_patches(handler_self_loop=True):
     """公共 patch 集：session 级 token + 引擎广播派发 mock（捕获 _enqueue_pipeline_task）。"""
@@ -176,20 +177,18 @@ def _dispatch_patches(handler_self_loop=True):
         patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
         patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),
         patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=1),
-        patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True),
+        patch("src.api.event_pipeline.is_plugin_mode", return_value=True),
         patch("src.domains.runtime.engine.service.get_execution_mode", return_value="remote"),
-        patch("src.domains.runtime.pipeline.event_pipeline._enqueue_pipeline_task",
+        patch("src.api.event_pipeline._enqueue_pipeline_task",
               side_effect=_fake_enqueue),
         patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""),
         patch("src.domains.runtime.project_info.builder.maybe_refresh_project_info", lambda *a, **k: None),
     ]
 
-
 def _run(payload: dict, header="Issue Hook"):
     raw = json.dumps(payload).encode()
     return ep.run_pipeline(raw, {"X-GitCode-Event": header},
                            account="test/i565", repo_key_override="test/i565")
-
 
 class TestT1BotIssueOpenedRecommends:
     def test_t1_bot_issue_opened_allowed_recommend_scene_only(self):
@@ -219,7 +218,7 @@ class TestT1BotIssueOpenedRecommends:
         assert _ae.called, ("bot 建单必须重派 VOD 执行棒"
                             "（GRAPE_BOT_OPENED_FULL_PIPELINE 默认 1）")
         # 3b) 开关显式置 0 → 回退旧行为：scene-only，不新增事件
-        with patch("src.config.GRAPE_BOT_OPENED_FULL_PIPELINE", False), \
+        with patch("src.kernel.config.GRAPE_BOT_OPENED_FULL_PIPELINE", False), \
              patch("src.api.event_store.append_event", return_value=1) as _ae2:
             ep._redispatch_vod_after_recommend(RK, "#201", "vod",
                                                {"_bot_opened": True, "payload": {}}, 0)
@@ -251,7 +250,6 @@ class TestT1BotIssueOpenedRecommends:
         assert redispatch_calls[0]["evt"].get("_bot_opened") is True, \
             "worker 侧必须按建单人还原 _bot_opened 短路标记"
 
-
 class TestT2ExistingSceneSkipsRecommend:
     def test_t2_bot_open_with_existing_scene_skips_recommend(self):
         """T2: issue 卡已有场景的 bot 建单 → 跳过推荐（is_scene_recommend=False，不重复判定）。"""
@@ -268,7 +266,6 @@ class TestT2ExistingSceneSkipsRecommend:
         assert captured, "已有场景走正常 vod 派发"
         assert captured[0]["is_scene_recommend"] is False, \
             "issue 已有场景 → 跳过推荐（不重复判定）"
-
 
 class TestT3RateLimit:
     def test_t3_over_limit_bot_open_within_60s_rate_limited(self):
@@ -287,7 +284,6 @@ class TestT3RateLimit:
         assert _events_count() == _lim, f"前 {_lim} 条正常入流水线（各 1 条事件）"
         assert _skipped_count("self_loop") == 0, "限流≠自循环，不得误记 self_loop"
 
-
 class TestT4BotCommentStillIntercepted:
     def test_t4_bot_issue_comment_still_self_loop(self):
         """T4: bot 的 issue_comment → 仍被 self_loop 拦截（评论族闸门不动，回归保护）。"""
@@ -300,7 +296,6 @@ class TestT4BotCommentStillIntercepted:
             _run(_issue_comment_payload("grape_bot"), header="Note Hook")
         assert _skipped_count("self_loop") == 1, "bot 评论必须继续被入口拦截"
         assert _skipped_count() == 1, "不应产生其他 skip 记录"
-
 
 class TestT5HumanIssueOpenedUnchanged:
     def test_t5_human_issue_opened_behavior_unchanged(self):

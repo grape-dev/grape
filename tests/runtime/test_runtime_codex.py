@@ -251,7 +251,7 @@ class TestParseOutput:
         line = json.dumps({
             "type": "item.completed",
             "item": {"id": "i5", "type": "file_change",
-                     "changes": [{"path": "src/main.py", "kind": "update"},
+                     "changes": [{"path": "src/api/main.py", "kind": "update"},
                                  {"path": "README.md", "kind": "add"}],
                      "status": "completed"}
         })

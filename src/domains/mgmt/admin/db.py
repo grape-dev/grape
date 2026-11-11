@@ -136,7 +136,7 @@ def list_grape_users(page: int = 1, per_page: int = 20, q: str = "") -> dict:
     }
 
 
-def get_grape_user_detail(user_id: int) -> dict | None:
+def get_grape_user_detail(user_id: str) -> dict | None:
     """获取用户详情（含绑定信息和是否有密码）。"""
     from src.kernel.session_manager import db, db_lock
     from src.domains.mgmt.auth.grape_account_db import get_user_identities, has_password
@@ -167,7 +167,7 @@ def get_grape_user_detail(user_id: int) -> dict | None:
     }
 
 
-def disable_grape_user(user_id: int, reason: str = "") -> bool:
+def disable_grape_user(user_id: str, reason: str = "") -> bool:
     """禁用用户（status=0）。"""
     from src.kernel.session_manager import db, db_lock
     try:
@@ -186,7 +186,7 @@ def disable_grape_user(user_id: int, reason: str = "") -> bool:
         return False
 
 
-def restore_grape_user(user_id: int) -> bool:
+def restore_grape_user(user_id: str) -> bool:
     """恢复用户（status=0 禁用 或 status=3 冷静期 → status=1）。"""
     from src.kernel.session_manager import db, db_lock
     try:
@@ -263,23 +263,53 @@ def delete_signup_whitelist(item_id: int) -> bool:
 # ===== OAuth Login Whitelist CRUD (Issue #332) =====
 
 def list_login_whitelist() -> list[dict]:
-    """List OAuth login whitelist entries."""
+    """List OAuth login whitelist entries.
+
+    D90-N5：渠道列动态化——SELECT * + PRAGMA 列清单组装（新渠道列自动出现，
+    不再写死双列）。
+    """
     try:
         with db_lock:
             c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
+            whitelist_cols = [col for col in cols
+                              if col.endswith("_username") and col != "id"]
+            select_cols = ", ".join(["id"] + whitelist_cols + ["remark", "created_at"])
             c.execute(
-                "SELECT id, gitcode_username, github_username, remark, created_at "
-                "FROM login_whitelist ORDER BY created_at DESC"
+                f"SELECT {select_cols} FROM login_whitelist ORDER BY created_at DESC"
             )
             rows = c.fetchall()
     except Exception as e:
         log.warning(f"List login whitelist failed: {e}")
         return []
-    return [
-        {"id": r[0], "gitcode_username": r[1] or "", "github_username": r[2] or "",
-         "remark": r[3] or "", "created_at": r[4] or ""}
-        for r in rows
-    ]
+    out = []
+    for r in rows:
+        item = {"id": r[0], "remark": r[-2] or "", "created_at": r[-1] or ""}
+        for i, col in enumerate(whitelist_cols, start=1):
+            item[col] = r[i] or ""
+        out.append(item)
+    return out
+
+
+# D43/S63：登录白名单平台列映射（存量两渠道；新渠道列归批次 1 DDL）
+def _whitelist_column_for(provider: str) -> str | None:
+    """D90-N5（2026-11-07）：白名单列名 provider 配置驱动（原写死双渠道映射）。
+
+    来源 = providers 渠道卡的 whitelist_column（gitee 卡=N5-1 新增
+    gitee_username）；config-only 渠道无声明时按 {provider}_username 派生
+    （与 _ensure_whitelist_columns 同形）。未注册渠道返回 None（拒绝）。
+    列物理存在由 _ensure_whitelist_columns 启动动态建列保证。
+    """
+    if not provider:
+        return None
+    try:
+        from src.domains.mgmt.auth.providers import get_provider
+        cfg = get_provider(provider) or {}
+        col = cfg.get("whitelist_column") or f"{provider}_username"
+        import re as _re
+        return col if _re.match(r"^[a-z_]+$", col) else None
+    except Exception:
+        return None
 
 
 def add_login_whitelist(provider: str, username: str, remark: str = "") -> bool:
@@ -287,7 +317,12 @@ def add_login_whitelist(provider: str, username: str, remark: str = "") -> bool:
 
     provider: 'gitcode' or 'github'
     """
-    col = "gitcode_username" if provider == "gitcode" else "github_username"
+    # D43/S63 + D90-N5：白名单列 provider 配置驱动（新渠道加卡即接入，零代码）
+    _col = _whitelist_column_for(provider or "")
+    if not _col:
+        log.warning(f"add_login_whitelist: provider {provider!r} has no whitelist column, rejected")
+        return False
+    col = _col
     try:
         with db_lock:
             c = db.cursor()
@@ -363,16 +398,17 @@ def create_grape_user(username: str, email: str, password: str, nickname: str = 
     from src.domains.mgmt.auth.password import hash_password
     pw_hash = hash_password(password)
     email = (email or "").lower().strip() or None
+    from src.id_gen import uuid7_str
+    uid = uuid7_str()                   # D105 第二批：主键应用层 UUIDv7
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO grape_accounts (username, email, email_source, password_hash, nickname, status, token_version, email_verified) "
-                "VALUES (?,?, 'user',?,?,1,0,1)",  # P2-3: email_verified=1 (admin-created users are pre-verified)
-                (username, email, pw_hash, nickname),
+                "INSERT INTO grape_accounts (id, username, email, email_source, password_hash, nickname, status, token_version, email_verified) "
+                "VALUES (?,?,?, 'user',?,?,1,0,1)",  # P2-3: email_verified=1 (admin-created users are pre-verified)
+                (uid, username, email, pw_hash, nickname),
             )
             db.commit()
-            uid = c.lastrowid
             return {"id": uid, "username": username, "email": email or "", "nickname": nickname}
     except Exception as e:
         err = str(e).lower()
@@ -387,7 +423,7 @@ def create_grape_user(username: str, email: str, password: str, nickname: str = 
         return None
 
 
-def update_grape_user(user_id: int, email: str = None, nickname: str = None) -> bool | str:
+def update_grape_user(user_id: str, email: str = None, nickname: str = None) -> bool | str:
     """Edit user info (email, nickname).
 
     email semantics:
@@ -429,7 +465,7 @@ def update_grape_user(user_id: int, email: str = None, nickname: str = None) -> 
         return False
 
 
-def reset_grape_user_password(user_id: int, new_password: str) -> bool:
+def reset_grape_user_password(user_id: str, new_password: str) -> bool:
     """Reset user password and invalidate old tokens.
 
     Uses bcrypt hashing (auth.password.hash_password) for security parity

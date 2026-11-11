@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import efficiency as eff  # noqa: E402
+from src.domains.insight.observability import efficiency as eff  # noqa: E402
 
 NOW = datetime(2026, 11, 9, 12, 0, 0)   # 2026-11-09 是周一，ISO 2026-W46
 
@@ -294,8 +294,8 @@ def test_wip_distribution_grouping_order_and_total():
 
 def test_wip_falls_back_to_uid_mapping():
     conn, c = _cursor()
-    c.execute("CREATE TABLE unified_user_mapping (user_id INTEGER, gitcode_user TEXT, github_login TEXT)")
-    c.execute("INSERT INTO unified_user_mapping VALUES (7,'carol','')")
+    c.execute("CREATE TABLE grape_accounts (id TEXT PRIMARY KEY, username TEXT)")
+    c.execute("INSERT INTO grape_accounts VALUES ('7','carol')")
     c.connection.commit()
     _seed(c, [{"created_at": "2026-11-01 09:00:00", "created_by": "", "assignee": "", "user_id": 7}])
     rows = c.execute(

@@ -13,21 +13,29 @@ OBS 改造（feat/knowledge-obs）：
 - read_knowledge 查 DB obs_key：非空走 OBS 存储 + hash 缓存；空走本地文件（保持原行为）
 - storage_key 生成不依赖 rel_path，只依赖 repo_key + scope + filename
 """
+
 import hashlib
+
 import json
+
 import os
+
 import threading
+
 from datetime import datetime, timedelta
+
 from src.kernel.config import log, WORKSPACE_DIR
+
 from src.kernel.lock import acquire_lock, release_lock, renew_lock
+
 from src.kernel.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
+
 from src.kernel.session_manager import db, db_lock
 
 _AGENT_NAME_MAP = {
     "vod": "VOD", "issue": "Issue", "coding": "Coding",
     "qa": "QA", "sre": "SRE", "chat": "Chat",
 }
-
 
 def derive_knowledge_name(scope: str, agent_type: str = "",
                           issue_num: int = 0, file_path: str = "") -> str:
@@ -66,7 +74,6 @@ def derive_knowledge_name(scope: str, agent_type: str = "",
         return f"Issue #{issue_num or 0} - {_an} 知识"
     return "未命名知识"
 
-
 _AGENT_DESC_MAP = {
     "vod": "VOD Agent：需求分析、拆解 Issue、规划开发路径",
     "coding": "Coding Agent：代码实现、修复缺陷、创建 PR",
@@ -74,7 +81,6 @@ _AGENT_DESC_MAP = {
     "sre": "SRE Agent：部署发布、监控告警、运维排障",
     "chat": "Chat Agent：对话交互、知识沉淀、流程控制",
 }
-
 
 def derive_knowledge_description(scope: str, agent_type: str = "",
                                  issue_num: int = 0, file_path: str = "") -> str:
@@ -112,13 +118,14 @@ def derive_knowledge_description(scope: str, agent_type: str = "",
         return ""
     return ""
 
-
 # ===== 内存缓存（hash 比对——不用 TTL，全实例立即一致） =====
 _knowledge_cache: dict[str, tuple[str, str]] = {}  # storage_key -> (content, content_hash)
-_knowledge_cache_lock = threading.Lock()
-KNOWLEDGE_CACHE_MAX = int(os.environ.get("KNOWLEDGE_CACHE_MAX", "1000"))  # 最大缓存条数，可配置
-_sync_not_found: set[int] = set()  # sync_loop 文件不存在的记录 ID（跳过重复处理）
 
+_knowledge_cache_lock = threading.Lock()
+
+KNOWLEDGE_CACHE_MAX = int(os.environ.get("KNOWLEDGE_CACHE_MAX", "1000"))  # 最大缓存条数，可配置
+
+_sync_not_found: set[int] = set()  # sync_loop 文件不存在的记录 ID（跳过重复处理）
 
 def read_with_cache(storage_key: str, db_hash: str) -> str | None:
     """从内存缓存或 OBS 存储读取知识正文（hash 比对保证一致性）。
@@ -154,7 +161,6 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
             oldest_key = next(iter(_knowledge_cache))
             _knowledge_cache.pop(oldest_key, None)
     return content
-
 
 def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash: str = "") -> str:
     """读取知识条目正文（业务层）。
@@ -196,13 +202,11 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
             log.warning(f"Local read failed for {repo_key}/{file_path}: {e}")
     return ""
 
-
 def _issue_num_from(issue_id) -> int:
     """'#5' / '5' / 5 → 5；无法解析返回 0。"""
     import re
     m = re.search(r"(\d+)", str(issue_id or ""))
     return int(m.group(1)) if m else 0
-
 
 def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """按 scope 返回知识文件绝对路径（scope 见 3.1.1）。"""
@@ -215,7 +219,6 @@ def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: i
     if scope == "issue_agent":
         return os.path.join(base, "issues", str(issue_num), agent_type or "agent", "knowledge.md")
     raise ValueError(f"unknown knowledge scope: {scope}")
-
 
 def knowledge_storage_key(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """生成 OBS 存储 key（不依赖 rel_path，只依赖 repo_key + scope + filename）。
@@ -235,15 +238,18 @@ def knowledge_storage_key(repo_key: str, scope: str, agent_type: str = "", issue
         return f"{prefix}/issues/{issue_num}/{agent_type or 'agent'}/knowledge.md"
     raise ValueError(f"unknown knowledge scope: {scope}")
 
-
 def _query_knowledge_obs(repo_key: str, scope: str, agent_type: str, issue_num: int) -> tuple[str, str]:
     """查 DB 拿 obs_key + content_hash（最新一条 accepted 记录）。
 
+    S103/D77：repo_key 候选集匹配（repo_key_in_params）——读侧入参可能是
+    裸键/异前缀，单值 repo_key=? 精确匹配在前缀不一致时静默丢注入
+    （外部扫描报告 P2 项）；候选集含入参本身，既有命中形态不变。
     返回 (obs_key, content_hash)；无记录或异常返回 ("", "")。
     """
-    sql = ("SELECT obs_key, content_hash FROM agent_shared_knowledge "
-           "WHERE repo_key=? AND scope=? AND status='accepted' AND archived=0")
-    params: list = [repo_key, scope]
+    _ph, _rk_args = repo_key_in_params(repo_key or "")
+    sql = (f"SELECT obs_key, content_hash FROM agent_shared_knowledge "
+           f"WHERE repo_key IN ({_ph}) AND scope=? AND status='accepted' AND archived=0")
+    params: list = list(_rk_args) + [scope]
     if scope == "issue_agent":
         sql += " AND agent_type=?"
         params.append(agent_type)
@@ -263,7 +269,6 @@ def _query_knowledge_obs(repo_key: str, scope: str, agent_type: str, issue_num: 
     except Exception:
         pass
     return "", ""
-
 
 def read_knowledge(repo_key: str, agent_type: str = "", issue_num: int = 0) -> dict:
     """读当前作用域下的 accepted 知识，返回 {scope: content}（仅文件存在时）。
@@ -301,7 +306,6 @@ def read_knowledge(repo_key: str, agent_type: str = "", issue_num: int = 0) -> d
         except Exception:
             continue
     return out
-
 
 def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "accepted",
                     agent_type: str = "", issue_num: int = 0,
@@ -369,12 +373,10 @@ def write_knowledge(*, repo_key: str, scope: str, content: str, status: str = "a
     # 拿不到锁 → 返回 task_id，任务留 pending，worker 兜底
     return task_id
 
-
 def _knowledge_lock_key(repo_key: str, scope: str, agent_type: str, issue_num: int) -> str:
     """分布式锁 key——MD5 压缩防 VARCHAR(128) 溢出。"""
     raw = f"{repo_key}:{scope}:{agent_type}:{issue_num}"
     return f"knowledge_write:{hashlib.md5(raw.encode()).hexdigest()[:16]}"
-
 
 def _enqueue_knowledge_write(*, repo_key, scope, agent_type, issue_num, content, status,
                              source_seq, created_by, source, description, name) -> int:
@@ -390,7 +392,6 @@ def _enqueue_knowledge_write(*, repo_key, scope, agent_type, issue_num, content,
              source_seq, created_by, source, description, name))
         db.commit()
         return c.lastrowid
-
 
 def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, status,
                         source_seq, created_by, source, description, name):
@@ -531,14 +532,12 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     if knowledge_id and scope != "member":
         _auto_generate_knowledge_ref(knowledge_id, scope, agent_type, issue_num)
 
-
 def _delete_queue_task(task_id: int):
     """任务处理成功后直接 DELETE。"""
     with db_lock:
         db.cursor().execute(
             "DELETE FROM knowledge_write_queue WHERE id=?", (task_id,))
         db.commit()
-
 
 def _fail_queue_task(task_id: int, error: str, retry_count: int):
     """任务处理失败——更新 last_error + next_retry_at（指数退避）。
@@ -573,11 +572,7 @@ def _fail_queue_task(task_id: int, error: str, retry_count: int):
             (new_count, error[:500], next_retry, next_retry, task_id))
         db.commit()
 
-
-# ===== 第二层消费者：后台 worker =====
-
 _worker_pool = None
-
 
 def _get_worker_pool():
     """模块级全局 ThreadPoolExecutor 复用。"""
@@ -586,7 +581,6 @@ def _get_worker_pool():
         from concurrent.futures import ThreadPoolExecutor
         _worker_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kwq-worker")
     return _worker_pool
-
 
 async def knowledge_write_worker():
     """后台 worker：每 3 秒轮询 pending 任务，线程池并行消费。
@@ -634,7 +628,6 @@ async def knowledge_write_worker():
             log.exception("Knowledge write worker error")
         await asyncio.sleep(3)
 
-
 def _worker_process_task(row):
     """worker 线程内处理单条任务。拿到锁后连续处理同维度所有 pending。"""
     task_id = row[0]
@@ -677,7 +670,6 @@ def _worker_process_task(row):
     finally:
         release_lock(lock_key)
 
-
 def _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
                       content, status, source_seq, created_by,
                       source, description, name, retry_count):
@@ -697,7 +689,6 @@ def _process_one_task(task_id, repo_key, scope, agent_type, issue_num,
         _delete_queue_task(task_id)
     except Exception as e:
         _fail_queue_task(task_id, str(e), retry_count)
-
 
 def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str = "", issue_num: int = 0):
     """系统写入知识时按 scope 规则自动生成 scene_knowledge_ref 关联记录。
@@ -722,9 +713,6 @@ def _auto_generate_knowledge_ref(knowledge_id: int, scope: str, agent_type: str 
             (knowledge_id, ref["scene_id"], ref["agent_type"], ref["issue_num"], "system")
         )
         db.commit()
-
-
-
 
 def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
     """查 ref 表返回关联的 agent 沉淀知识（source='agent'），供 worker 物化到 .knowledge/。
@@ -766,7 +754,6 @@ def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 
                 files[rel] = {"content": content, "obs_key": ""}
     return files
 
-
 # 默认值——配置文件 configs/credential-filter.json 不存在时使用
 _DEFAULT_CREDENTIAL_SUBSTRINGS = (
     "credential", "token", "secret", "password", "passwd",
@@ -775,6 +762,7 @@ _DEFAULT_CREDENTIAL_SUBSTRINGS = (
     "access_key", "access-key",
     "repo-cr",
 )
+
 # Issue #95：精确匹配的凭证文件名（basename 完全匹配）
 # "cr" 单独作为子串会误伤 cr-notes.md / scrum-cr.md
 # 但 cr.json / cr.yaml 是凭证文件——用精确匹配避免误伤
@@ -782,6 +770,7 @@ _DEFAULT_CREDENTIAL_EXACT_NAMES = frozenset({
     "cr.json", "cr.yaml", "cr.yml", "cr.txt",
     "cr.env",
 })
+
 _DEFAULT_CREDENTIAL_EXTENSIONS = (".pem", ".key", ".env", ".p12", ".pfx")
 
 def _load_credential_filter():
@@ -798,7 +787,6 @@ def _load_credential_filter():
 
 _CREDENTIAL_SUBSTRINGS, _CREDENTIAL_EXTENSIONS = _load_credential_filter()
 
-
 def _is_credential_file(rel_path: str) -> bool:
     """按文件名判断是否凭证类文件（token/密钥/password 等），用于知识库物化前过滤。
 
@@ -814,11 +802,9 @@ def _is_credential_file(rel_path: str) -> bool:
         return True
     return any(sub in name for sub in _CREDENTIAL_SUBSTRINGS)
 
-
 def member_files(repo_key: str) -> dict:
     """[Issue #95 废弃] 用户上传知识统一由 member_files_pi 走 ref 表注入，此函数保留向后兼容但不再被调用。"""
     return {}
-
 
 def member_files_pi(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> dict:
     """查 ref 表返回关联的用户知识（source='manual'），key 相对 project-info 目录。
@@ -867,11 +853,9 @@ def member_files_pi(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
         pass  # ref 表异常时 member 不注入（符合"没关联不注入"设计）
     return files
 
-
 def agent_files(repo_key: str, agent_type: str = "") -> dict:
     """[Issue #95 废弃] 用户上传知识统一由 member_files_pi 走 ref 表注入，此函数保留向后兼容但不再被调用。"""
     return {}
-
 
 async def knowledge_sync_loop():
     """后台定时同步老数据到 OBS——每小时一次，分批 500 条。
@@ -1019,7 +1003,6 @@ async def knowledge_sync_loop():
             set_meta_value(SYNC_LOCK_KEY, "")
         await asyncio.sleep(3600)
 
-
 def _sync_baseline_files():
     """扫描本地 project-info 目录，把缺失的 baseline 文件写入 OBS + DB。
 
@@ -1130,3 +1113,5 @@ def _sync_baseline_files():
                     log.warning(f"[knowledge] sync baseline failed {repo_key}/{fname}: {e}")
         finally:
             release_lock(_repo_lock)
+
+from src.kernel.repo_key import knowledge_obs_prefix, repo_key_in_params, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK

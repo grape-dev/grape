@@ -176,7 +176,7 @@ function loadCfgOptions() {
       let html = defaultOpt +
         filtered.map((s, i) => {
           const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
-          return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
+          return `<option value="${s.id}" ${selected ? 'selected' : ''}>${window.escHtml(s.display_name || s.name)}</option>`;
         }).join('');
       // 项目/个人 scope 下无 skill → 显示空提示
       if (filtered.length === 0) {

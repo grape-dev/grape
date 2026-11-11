@@ -85,7 +85,8 @@ function loadObs(dom, payloads) {
   };
   const sandbox = {
     document: dom,
-    window: { _currentView: 'observability', history: { pushState() {}, replaceState() {}, state: null }, location: { hash: '' }, addEventListener: () => {} },
+    window: { _currentView: 'observability', history: { pushState() {}, replaceState() {}, state: null }, location: { hash: '' }, addEventListener: () => {} , _repoWebHost: (rk) => { const p = String(rk || '').split(':')[0]; const H = { github: 'github.com', gitcode: 'gitcode.com', gitee: 'gitee.com', gitlab: 'gitlab.com' }; return H[p] || 'gitcode.com'; } },
+    stripRepoPrefix: (rk) => String(rk || '').replace(/^(github|gitcode|gitee|gitlab):/, ''),
     localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {}, clear: () => {} },
     API: { get: (u) => { state.api.push(u); return pick(u); }, post: (u) => { state.api.push(u); return pick(u); } },
     I18N: { t: realT('zh'), getLang: () => 'zh' },

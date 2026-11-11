@@ -8,22 +8,31 @@
 
 对应设计文档：docs/new-version2/feishu-qr-app-onboarding-plan.md
 """
+
 import asyncio
+
 import time
+
 import uuid
+
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, Query
+
 from pydantic import BaseModel
 
 from src.api.deps import require_no_session_token
+
 from src.kernel.config import log
 
 router = APIRouter(prefix="/api/feishu/onboard", tags=["feishu-onboard"])
 
 _STATUS_PENDING = "pending"
+
 _STATUS_WAITING = "waiting_confirm"
+
 _STATUS_CONNECTED = "connected"
+
 _STATUS_FAILED = "failed"
 
 # 进行中任务最大存活秒数：超过即视为 stale（用户可能已离开/二维码过期/进程重启丢协程），
@@ -54,13 +63,11 @@ _ADDONS = {
     },
 }
 
-
 class StartBody(BaseModel):
     bot_type: str = "chat_bot"  # chat_bot | vod_bot
     repo_key: str = ""
 
-
-def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: int):
+def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: str):  # D105：uuid 字符串
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -69,7 +76,6 @@ def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: int):
             (task_id, bot_type, repo_key, user_id, _STATUS_PENDING),
         )
         db.commit()
-
 
 def _update_task(task_id: str, **fields):
     if not fields:
@@ -81,7 +87,6 @@ def _update_task(task_id: str, **fields):
         c = db.cursor()
         c.execute(f"UPDATE feishu_onboard_task SET {cols} WHERE task_id=?", (*vals, task_id))
         db.commit()
-
 
 def _get_task(task_id: str) -> dict | None:
     from src.kernel.session_manager import db, db_lock
@@ -100,7 +105,6 @@ def _get_task(task_id: str) -> dict | None:
         "qr_url": row[7] or "", "expire_in": row[8] or 0, "error": row[9] or "",
     }
 
-
 def _on_qr(task_id: str, info: dict):
     """SDK 二维码就绪回调（同步）：写入 qr_url + expire_in，状态 → waiting_confirm"""
     _update_task(
@@ -111,97 +115,99 @@ def _on_qr(task_id: str, info: dict):
     )
     log.info(f"Feishu onboard: QR ready for task={task_id}, expire_in={info.get('expire_in')}")
 
-
-def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple[str, str]:
-    """Chat Agent 落库：chat_agent_session + global_im_bot_config + 换绑清理。
+def _apply_chat_credentials(user_id: str, app_id: str, app_secret: str) -> tuple[str, str]:  # D105：uuid 字符串
+    """Chat Agent 落库（A2 收尾）：只写 grape_t_channel_installation，legacy 表不再读写。
 
     返回 (error_msg, old_app_id)。error_msg 非空表示校验/写入失败。
     """
-    from src.kernel.session_manager import db, db_lock, get_chat_config, set_chat_config
-    old_app_id = get_chat_config(user_id).get("im_app_id", "")
-    with db_lock:
-        c = db.cursor()
-        # 强约束：一个 app_id 全局唯一。类型注册表校验 VOD 占用 + 其他用户占用
-        c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
-        row = c.fetchone()
-        if row and row[0] == "vod_bot":
-            return "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent", old_app_id
-        c.execute(
-            "SELECT user_id FROM chat_agent_session WHERE im_app_id=? AND user_id>0 AND user_id!=? AND im_app_id!='' LIMIT 1",
-            (app_id, user_id),
-        )
-        other = c.fetchone()
-        if other:
-            return "该凭证已被其他用户使用，不能重复绑定", old_app_id
-        # 换绑：旧 app_id 释放（无其他引用时从登记表删除）
-        if old_app_id and old_app_id != app_id:
-            c.execute(
-                "SELECT COUNT(*) FROM chat_agent_session WHERE im_app_id=? AND user_id!=? AND im_app_id!=''",
-                (old_app_id, user_id),
-            )
-            other_refs = c.fetchone()[0]
-            if other_refs == 0:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=? AND bot_type='chat_bot'", (old_app_id,))
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime.im.engine_wiring import (_connect, default_db_path, get_active_installation,
+                                       revoke_installation, sync_installation)
+    _inst = get_active_installation("user", owner_user_id=str(user_id)) or {}
+    old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
+
+    # 强约束：一个 app_id 全局唯一（查 active 安装行：repo 轨=VOD 占用，user 轨他人=被占用）
+    _conn = _connect(default_db_path())
+    try:
+        _holders = _conn.execute(
+            "SELECT scope, owner_user_id FROM grape_t_channel_installation "
+            "WHERE legacy_app_id=? AND status='active'", (app_id,)).fetchall()
+    finally:
+        _conn.close()
+    if any(str(r[0]) == "repo" for r in _holders):
+        return "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent", old_app_id
+    if any(str(r[0]) == "user" and str(r[1]) != str(user_id) for r in _holders):
+        return "该凭证已被其他用户使用，不能重复绑定", old_app_id
+
+    if old_app_id and old_app_id != app_id:
+        with db_lock:
+            c = db.cursor()
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-            log.info(f"Feishu onboard: replaced old app_id={old_app_id[:20]} with {app_id[:20]}")
-        c.execute(
-            "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
-            (app_id, "chat_bot"),
-        )
-        db.commit()
-    set_chat_config(user_id, im_app_id=app_id, im_app_secret=app_secret, im_provider="feishu")
+            db.commit()
+        log.info(f"Feishu onboard: replaced old app_id={old_app_id[:20]} with {app_id[:20]}")
+    try:
+        if sync_installation("user", owner_user_id=str(user_id),
+                             app_id=app_id, app_secret=app_secret):
+            log.info(f"Feishu onboard: grape_t_channel_installation synced (user={user_id})")
+        if old_app_id and old_app_id != app_id:
+            revoke_installation("user", owner_user_id=str(user_id), app_id=old_app_id)
+    except Exception as e:
+        log.warning(f"Feishu onboard: sync grape_t_channel_installation failed: {e}")
+        return "写入 IM 安装失败，请重试", old_app_id
     return "", old_app_id
 
-
 def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple[str, str]:
-    """VOD Agent 落库：devops_agent_session + global_im_bot_config + 换绑清理。
+    """VOD Agent 落库（A2 收尾）：只写 grape_t_channel_installation；devops 行只用来挂会话。
 
-    repo_key 统一经 to_repo_key 归一化（前端传 owner/repo，DB 存 gitcode:owner/repo）；
-    若无该 repo 的 vod 配置行则 INSERT 新建（否则 UPDATE 匹配不到行，凭据丢失）。
+    repo_key 统一经 to_repo_key 归一化；若无该 repo 的 vod 配置行则建一行占位，
+    凭证本身在 grape_t_channel_installation。
     返回 (error_msg, old_app_id)。
     """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     import uuid
     from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime.im.engine_wiring import (_connect, default_db_path, get_active_installation,
+                                       revoke_installation, sync_installation)
+    _inst = get_active_installation("repo", repo_key=repo_key) or {}
+    old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
+
+    # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
+    _conn = _connect(default_db_path())
+    try:
+        _holders = _conn.execute(
+            "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
+            (app_id,)).fetchall()
+    finally:
+        _conn.close()
+    if any(str(r[0]) == "user" for r in _holders):
+        return "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent", old_app_id
+
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
-        row = c.fetchone()
-        if row and row[0] == "chat_bot":
-            return "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent", ""
-        # 换绑清理（对齐 agents.py update_agent_config）
-        c.execute("SELECT id, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
-        old_row = c.fetchone()
-        old_session_id = old_row[0] if old_row else ""
-        old_app_id = old_row[1] if old_row else ""
-        if old_app_id and old_app_id != app_id:
-            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
-            other_refs = c.fetchone()[0]
-            if other_refs == 0:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
-            c.execute(
-                "DELETE FROM vod_conversations WHERE agent_session_id=?",
-                (old_session_id,),
-            )
+        row = c.execute("SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                        (repo_key,)).fetchone()
+        old_session_id = row[0] if row else ""
+        if old_app_id and old_app_id != app_id and old_session_id:
+            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (old_session_id,))
             log.info(f"Feishu onboard: replaced vod app_id={old_app_id[:20]} with {app_id[:20]}")
-        c.execute(
-            "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?,?)",
-            (app_id, "vod_bot"),
-        )
-        if old_session_id:
+        if not old_session_id:
             c.execute(
-                "UPDATE devops_agent_session SET im_app_id=?, im_app_secret=?, im_provider='feishu' WHERE id=?",
-                (app_id, app_secret, old_session_id),
-            )
-        else:
-            c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,datetime('now'),?,?,?)",
-                (str(uuid.uuid4()), repo_key, "vod", "idle", app_id, app_secret, "feishu"),
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at) "
+                "VALUES (?,?,?,?,datetime('now'))",
+                (str(uuid.uuid4()), repo_key, "vod", "idle"),
             )
         db.commit()
+    try:
+        if sync_installation("repo", repo_key=repo_key,
+                             app_id=app_id, app_secret=app_secret):
+            log.info(f"Feishu onboard: grape_t_channel_installation synced (repo={repo_key})")
+        if old_app_id and old_app_id != app_id:
+            revoke_installation("repo", repo_key=repo_key, app_id=old_app_id)
+    except Exception as e:
+        log.warning(f"Feishu onboard: sync grape_t_channel_installation failed: {e}")
+        return "写入 IM 安装失败，请重试", old_app_id
     return "", old_app_id
-
 
 async def _connect_bot(bot_type: str, repo_key: str, app_id: str, app_secret: str, old_app_id: str):
     """通过 BotManager 动态建连（换绑时先移除旧 bot）。"""
@@ -217,7 +223,7 @@ async def _connect_bot(bot_type: str, repo_key: str, app_id: str, app_secret: st
         log.warning(f"Feishu onboard add_bot failed: {e}")
 
 
-async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: int, username: str = ""):
+async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: str, username: str = ""):  # D105：uuid 字符串
     """后台运行 aregister_app 全流程。"""
     try:
         import lark_oapi as lark
@@ -281,7 +287,6 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
     finally:
         _TASKS.pop(task_id, None)
 
-
 @router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
 async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
     """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
@@ -341,14 +346,13 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
     log.info(f"Feishu onboard start: task={task_id} bot_type={body.bot_type} user={user['id']}")
     return {"task_id": task_id, "status": _STATUS_PENDING}
 
-
 @router.get("/status", operation_id="feishu_onboard_status", summary="Get Feishu onboarding status", description="Queries the scan-onboarding task status.")
 def onboard_status(task_id: str = Query(...), user: dict = Depends(require_no_session_token)):
     """查询扫码任务状态（前端轮询）。"""
     t = _get_task(task_id)
     if not t:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
-    if t["user_id"] != user["id"]:
+    if str(t["user_id"] or "") != str(user["id"] or ""):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权查看该任务"})
     return {
         "task_id": t["task_id"],
@@ -360,16 +364,14 @@ def onboard_status(task_id: str = Query(...), user: dict = Depends(require_no_se
         "error": t["error"],
     }
 
-
 class CancelBody(BaseModel):
     task_id: str = ""
-
 
 @router.post("/cancel", operation_id="feishu_onboard_cancel", summary="Cancel Feishu onboarding", description="Cancels an in-progress scan task. connected tasks cancel idempotently without affecting saved config.")
 def cancel_onboard(body: CancelBody, user: dict = Depends(require_no_session_token)):
     """取消进行中的扫码任务。已 connected 的任务取消为幂等，不影响已保存配置。"""
     t = _get_task(body.task_id)
-    if not t or t["user_id"] != user["id"]:
+    if not t or str(t["user_id"] or "") != str(user["id"] or ""):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     if t["status"] in (_STATUS_CONNECTED, _STATUS_FAILED):
         return {"message": "任务已结束，无需取消", "status": t["status"]}

@@ -43,11 +43,34 @@ class TestDerivedTableSQLText:
         out = []
         toks = list(_tok.generate_tokens(_io.StringIO(src).readline))
         buf = None
+        in_fstr = 0    # f-string 嵌套深度（FSTRING_START..END）
+
+        def _flush():
+            nonlocal buf
+            if buf is not None:
+                out.append(" ".join(buf.split()))
+                buf = None
+
         for t in toks:
-            if t.type == _tok.STRING:
+            # Python 3.12+ (PEP 701) 把 f-string 拆成 FSTRING_START/MIDDLE/END；
+            # 旧版是单个 STRING。两种都还原为纯文本并容忍隐式拼接；
+            # 插值表达式 {table} 还原为 "{table}" 占位符，保证 SQL 形态可匹配。
+            if t.type == getattr(_tok, "FSTRING_START", -1):
+                in_fstr += 1
+                buf = buf  # 开始一段 f-string，保持缓冲以拼接隐式相邻字面量
+            elif t.type == getattr(_tok, "FSTRING_MIDDLE", -1):
+                buf = (buf or "") + t.string
+            elif t.type == getattr(_tok, "FSTRING_END", -1):
+                in_fstr -= 1
+            elif t.type == _tok.STRING:
                 m = re.match(r"^[a-zA-Z]*('''|\"\"\"|'|\")((?:\\.|(?!\1).)*)\1", t.string, re.S)
                 if m:
                     buf = (buf or "") + m.group(2)
+            elif in_fstr > 0:
+                # 表达式 token 原样拼回（OP '{'/'}'、NAME 等），
+                # 还原出 "{table}" 形态占位符，保证 SQL 形态可匹配
+                buf = (buf or "") + t.string
+                continue
             elif t.type in (_tok.NL, _tok.NEWLINE, _tok.INDENT, _tok.DEDENT, _tok.COMMENT):
                 continue
             else:

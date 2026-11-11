@@ -3,32 +3,44 @@
 覆盖：会话 token 自动定位（T1）、作用域不匹配（T2/T3）、JWT 用户维度（T4 正/T5 反）、
 终态幂等（T6）、未认证（T7）。
 """
+
 import os
+
 import sys
+
 import uuid
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_task_complete.db")
+
 os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 
 import pytest
+
 from fastapi.testclient import TestClient
 
 from src.api import auth_token
+
 from src.api.main import app
+
 from src.kernel.auth_sdk.jwt_utils import create_access_token
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
+
 from src.api.db_setup import init_database
 
 init_database()
 
 REPO = "gitcode:o/r"
+
 TASK = "t_complete_test"
 
 _client = TestClient(app)
-
 
 @pytest.fixture(autouse=True)
 def _clean():
@@ -49,7 +61,6 @@ def _clean():
         c.execute("DELETE FROM user_repos WHERE repo_key=?", (REPO,))
         db.commit()
 
-
 def _seed_task(status="running"):
     with db_lock:
         db.cursor().execute(
@@ -59,23 +70,19 @@ def _seed_task(status="running"):
         )
         db.commit()
 
-
 def _session_token(repo=REPO, session_key=TASK) -> str:
     return auth_token.issue_session_token(session_key=session_key, repo_key=repo, agent_type="vod")
-
 
 def _task_status() -> str:
     with db_lock:
         r = db.cursor().execute("SELECT status FROM agent_tasks WHERE id=?", (TASK,)).fetchone()
         return r[0] if r else None
 
-
 def _post_complete(token, payload, headers=None):
     h = {"Authorization": f"Bearer {token}"}
     if headers:
         h.update(headers)
     return _client.post("/api/tasks/complete", json=payload, headers=h)
-
 
 def test_t1_session_token_auto_locates_and_completes():
     _seed_task("running")
@@ -85,7 +92,6 @@ def test_t1_session_token_auto_locates_and_completes():
     assert r.json()["status"] == "completed"
     assert _task_status() == "completed"
 
-
 def test_t2_foreign_session_cannot_target_other_task():
     _seed_task("running")
     tok = _session_token(session_key="t_another")  # 该 token 只能定位它自己的 session
@@ -93,12 +99,10 @@ def test_t2_foreign_session_cannot_target_other_task():
     assert _post_complete(tok, {"result_text": "x"}).status_code == 404
     assert _task_status() == "running"
 
-
 def test_t3_repo_mismatch_forbidden():
     _seed_task("running")
     tok = _session_token(repo="gitcode:other/r")
     assert _post_complete(tok, {"result_text": "x"}).status_code == 403
-
 
 def test_t4_jwt_user_with_managed_repo_allowed():
     _seed_task("running")
@@ -115,14 +119,12 @@ def test_t4_jwt_user_with_managed_repo_allowed():
     assert r.status_code == 200
     assert _task_status() == "completed"
 
-
 def test_t5_jwt_user_without_repo_forbidden():
     _seed_task("running")
     u = grape_account_db.create_grape_account(f"tc2_{uuid.uuid4().hex[:6]}", email=None, password="pw")
     jwt = create_access_token(u["id"], u["username"])
     assert _post_complete(jwt, {"task_id": TASK, "result_text": "x"}).status_code == 403
     assert _task_status() == "running"
-
 
 def test_t6_terminal_idempotent():
     _seed_task("completed")
@@ -132,10 +134,8 @@ def test_t6_terminal_idempotent():
     assert r.json()["already"] is True
     assert r.json()["status"] == "completed"
 
-
 def test_t7_no_token_401():
     assert _client.post("/api/tasks/complete", json={"result_text": "x"}).status_code == 401
-
 
 def test_t8_structured_fields_compose_result_text():
     import json
@@ -157,7 +157,6 @@ def test_t8_structured_fields_compose_result_text():
     assert "PR #1" in d["artifacts"]
     assert d["next_step"] == "qa_review"
 
-
 def test_t9_narrative_only_backfills_structured_conclusion():
     """issue-219：仅传叙述 result_text（无结构化字段）时，服务端回填 conclusion/issue_summary，
     保证归档结构化产出非空（否则详情页「处理记录与答复结论」为空）。"""
@@ -175,7 +174,6 @@ def test_t9_narrative_only_backfills_structured_conclusion():
     assert d["next_step"] in ("", None)
     assert d["issue_summary"] == "已回复 Issue #3 并归档为终态"
 
-
 def test_t10_structured_conclusion_preferred_over_narrative():
     """结论回填优先级：显式 conclusion 优先，不因同时传 result_text 被覆盖。"""
     import json
@@ -187,3 +185,14 @@ def test_t10_structured_conclusion_preferred_over_narrative():
         row = db.cursor().execute("SELECT result_text FROM agent_tasks WHERE id=?", (TASK,)).fetchone()
     d = json.loads(row[0])
     assert d["conclusion"] == "显式结论"
+
+from src.domains.mgmt.auth import grape_account_db
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_shared_db_env():
+    """混跑污染修复（D46/S68）：模块级私有库 env 全程不恢复——本文件跑完后，
+    后续任何按 env 重开连接的导入/reload 全部错开共享测试库（实测混跑
+    no such table / locked 族）。用例结束后恢复 conftest 的共享库路径。
+    本文件自身用例在 fixture 生效前已绑定各自连接，不受影响。"""
+    yield
+    os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_sessions.db")

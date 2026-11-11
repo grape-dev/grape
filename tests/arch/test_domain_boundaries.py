@@ -61,6 +61,10 @@ def test_legacy_dir_shims_removed():
     """Issue #699 cleanup: legacy top-level shim dirs are gone; imports must fail."""
     import importlib
     import pytest
+    # 与基线 13c6d0979 同清单（含 src.user / src.vcs 顶层 shim 断言：head 树上
+    # 这些目录确不存在、断言可通过——恢复守护面，防顶层 shim 回潮）。
+    # src.domains.mgmt.user / src.domains.runtime.vcs 是 arch 布局的合法真实模块，
+    # 不在"应不可导入"清单。
     for legacy in ("src.auth", "src.user", "src.admin", "src.runtime", "src.agent",
                    "src.im", "src.vcs", "src.storage", "src.observability",
                    "src.project_info", "src.api.routes"):

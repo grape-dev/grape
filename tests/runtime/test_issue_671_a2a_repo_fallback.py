@@ -10,7 +10,9 @@
 
 测试 seam：/api/a2a HTTP 响应 + managed_repos 行数（公开行为）。
 """
+
 import os
+
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -18,15 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import pytest  # noqa: E402
 
 from src.session_manager import db, db_lock  # noqa: E402
+
 from src.api.db_setup import init_database  # noqa: E402
 
 REPO_KEY = "gitcode:owner/repo671"
 
-
 @pytest.fixture(scope="module", autouse=True)
 def _init_db():
     init_database()
-
 
 class TestA2ARepoFallback:
     def _clean(self):
@@ -83,14 +84,14 @@ class TestA2ARepoFallback:
         return TestClient(app)
 
     def _session_token(self):
-        from src.api.auth_token import issue_session_token
+        from src.kernel.auth_sdk.auth_token import issue_session_token
         return issue_session_token(session_key="sess-671", repo_key=REPO_KEY, agent_type="coding")
 
     # ── 回退 verdict 判定（_a2a_repo_fallback_check） ──────────────────────
 
     def test_fallback_check_verdicts(self, monkeypatch):
         from src.domains.runtime.routes.webhook import _a2a_repo_fallback_check
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {})
@@ -104,7 +105,7 @@ class TestA2ARepoFallback:
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "conn timeout"})
         assert _a2a_repo_fallback_check(REPO_KEY) == "unreachable"
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "")
         assert _a2a_repo_fallback_check(REPO_KEY) == "no_token"
 
@@ -147,7 +148,7 @@ class TestA2ARepoFallback:
     def test_unregistered_session_fallback_ok_registers(self, monkeypatch):
         """未注册 + 会话 token + GitCode 可达 → 放行 + 幂等补录。"""
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {})
@@ -166,7 +167,7 @@ class TestA2ARepoFallback:
 
     def test_unregistered_session_fallback_not_found_400(self, monkeypatch):
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 404", "status_code": 404})
@@ -179,7 +180,7 @@ class TestA2ARepoFallback:
 
     def test_unregistered_session_fallback_no_permission_400(self, monkeypatch):
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 403", "status_code": 403})
@@ -193,7 +194,7 @@ class TestA2ARepoFallback:
     def test_unregistered_session_no_token_keeps_not_hosted(self, monkeypatch):
         """回退无法判定（无 token）→ 维持「未托管」安全默认。"""
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "")
         token = self._session_token()
         r = self._client().post("/api/a2a", json=self._body(),
@@ -201,7 +202,6 @@ class TestA2ARepoFallback:
         assert r.status_code == 400, (r.status_code, r.text)
         assert "not hosted" in r.text
         self._clean()
-
 
 class TestCreateRepoFallbackRegistration:
     """Issue #671 ②：创建后托管失败/webhook_url 缺失 → 兜底注册最小行。"""
@@ -219,11 +219,22 @@ class TestCreateRepoFallbackRegistration:
     def test_create_host_missing_registers_minimal_row(self, monkeypatch):
         self._clean()
         from src.domains.mgmt.routes.repos import create_new_repo, CreateRepoBody
-        monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh",
-                            lambda username, user_id=0, **kw: "tok-u")
-        monkeypatch.setattr("src.domains.mgmt.routes.repos.create_repo",
-                            lambda api_token, name, description="", private=False, **kw: {
-                                "full_name": "owner/newrepo671", "owner": "owner", "name": name})
+        # S115/D88 顺手迁移（S114 域1 漏网点 + D42 建仓链迁移漏网点）：
+        # ①旧符号 get_user_token_with_refresh 已删（S57/D30 统一 get_user_token_for，
+        #   repos.py L832 调用点）——keyword 形态 mock；
+        # ②建仓已走适配器端口（D42：create_provider(provider).create_repo），
+        #   旧 mock src.domains.mgmt.routes.repos.create_repo 符号不再被消费（mock 穿透）——
+        #   改 mock 工厂缝 create_provider 返回桩适配器（对齐域1 "mock 缝不 mock
+        #   端口类全族"口径：只换 create_provider 返回值，方法面最小）。
+        monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_for",
+                            lambda username, user_id=0, provider="": "tok-u")
+
+        class _StubProv:
+            def create_repo(self, api_token="", name="", description="", private=False, **kw):
+                return {"full_name": "owner/newrepo671", "owner": "owner", "name": name}
+
+        monkeypatch.setattr("src.kernel.token_resolver.create_provider",
+                            lambda provider="": _StubProv())
         monkeypatch.setattr("src.domains.mgmt.user.db.get_webhook_url", lambda: "")
         monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache", lambda *a, **kw: [])
         user = {"id": 1, "username": "u671", "auth_type": "jwt"}
@@ -247,7 +258,6 @@ class TestCreateRepoFallbackRegistration:
         assert managed_repo_exists("") is False
         self._clean()
 
-
 class TestRunbookDoc:
     """Issue #671 ③：A2A runbook 含 400 repo not hosted 降级路径。"""
 
@@ -258,3 +268,7 @@ class TestRunbookDoc:
             text = f.read()
         assert "repo not hosted" in text
         assert "重试" in text and "人工交办" in text
+
+from src.kernel.session_manager import db, db_lock  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

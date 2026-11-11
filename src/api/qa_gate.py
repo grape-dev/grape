@@ -691,10 +691,10 @@ def _post_issue_comment(repo_key: str, issue_number: int, body: str,
         _provider, _owner, _repo = parse_repo_key(repo_key)
         if not _owner or not _repo:
             return "skipped"
-        if _provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_token
-        else:
-            from src.user.db import get_repo_bot_token as _get_token
+        # 平台由 repo_key 前缀派生（卡驱动）：不再按平台名分叉取 token。
+        # 注：arch 基线此处 import 了已迁走的 src.user 模块（src/user 在架构布局下不存在），
+        # 会导致注解静默跳过（"No module named 'src.user'"）——按 canonical 模块修正。
+        from src.domains.mgmt.user.db import get_repo_bot_token as _get_token
         _token = _get_token(repo_key=repo_key) or ""
         if not _token:
             log.info(f"qa gate: no bot token for {repo_key}, skip annotation")

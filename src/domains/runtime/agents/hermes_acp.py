@@ -19,20 +19,30 @@ ACP 协议流程：
 
 通信格式：每行一个 JSON-RPC 消息（NDJSON over stdin/stdout）
 """
+
 import os
+
 import stat as _stat
+
 import json
+
 import re
+
 import time
+
 import threading
+
 import subprocess
+
 import shutil
+
 import signal
+
 from typing import Generator
+
 from src.kernel.config import log
 
 _bwrap_fail_notified = False
-
 
 def _note_bwrap_fail_once(message: str) -> None:
     """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
@@ -46,7 +56,6 @@ def _note_bwrap_fail_once(message: str) -> None:
         return
     _bwrap_fail_notified = True
     log.warning(message)
-
 
 def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hermes ACP 内循环全局墙钟上限（#282 对齐修复）。
@@ -68,13 +77,11 @@ def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> flo
         _v = 3600.0
     return max(_v, float(max_exec_seconds))
 
-
 # 「疑似提前结束」标记：模型输出 text 后静默超过文本静默上限、且累计输出里没有收尾记录
 # （actions/conclusion）时打上。语义 = 任务被放行（exit 0）但工作可能没做完；
 # 平台侧靠这个标记做可见性（src/domains/runtime/engine/service.py::complete_task 会把它落到
 # agent_tasks.errors + 事件 result 前缀），不降 failed、不触发重跑。
 PREMATURE_END_MARKER = "[PREMATURE_END_TURN]"
-
 
 def _text_incomplete_timeout_for() -> float:
     """text 静默且无收尾记录时的等待上限（默认 300s，与 tool 静默窗口对齐）。
@@ -93,7 +100,6 @@ def _text_incomplete_timeout_for() -> float:
         _v = 300.0
     return max(_v, 0.0)
 
-
 def _silent_timeout_for(env: dict | None = None) -> float:
     """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）。
 
@@ -108,7 +114,6 @@ def _silent_timeout_for(env: dict | None = None) -> float:
     except Exception:
         return 300.0
 
-
 def _init_timeout_for(env: dict | None = None) -> float:
     """hermes ACP initialize 握手超时（HERMES_INIT_TIMEOUT env 可调，默认 100s）。
 
@@ -121,7 +126,6 @@ def _init_timeout_for(env: dict | None = None) -> float:
         return max(float(_src), 1.0)
     except Exception:
         return 100.0
-
 
 def _init_retries_for(env: dict | None = None) -> int:
     """initialize 超时后的重试次数（HERMES_INIT_RETRIES env 可调，默认 1，≥0）。
@@ -136,14 +140,13 @@ def _init_retries_for(env: dict | None = None) -> int:
     except Exception:
         return 1
 
-
 class HermesACPBackend:
     """Hermes ACP 后端 — 不走 build_args/parse_output，直接 stream_execute yield 事件。"""
     name = "hermes"
     binary = "hermes"
     prompt_via_stdin = False  # ACP 模式不用 stdin 传 prompt，用 JSON-RPC
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:  # D105: TEXT PK domain
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
@@ -770,11 +773,6 @@ class HermesACPBackend:
             # 只杀进程，不删目录。
             _res.dispose(kill_procs=False, keep_overlays=True)
 
-
-# ══════════════════════════════════════════════════════════════
-# ACP JSON-RPC 客户端（学习 multica hermesClient）
-# ══════════════════════════════════════════════════════════════
-
 class _ACPSimpleClient:
     """极简 ACP JSON-RPC 客户端：request/response + notification 处理。"""
 
@@ -1000,11 +998,6 @@ class _ACPSimpleClient:
             stop_reason = update.get("stopReason", "")
             self.on_prompt_done({"stopReason": stop_reason, "result": update})
 
-
-# ══════════════════════════════════════════════════════════════
-# 辅助函数
-# ══════════════════════════════════════════════════════════════
-
 _UPDATE_TYPE_MAP = {
     "agentmessagechunk": "agent_message_chunk",
     "agentthoughtchunk": "agent_thought_chunk",
@@ -1020,7 +1013,6 @@ def _normalize_update_type(t: str) -> str:
     return _UPDATE_TYPE_MAP.get(key, "")
 
 _TOOL_INPUT_MAX_BYTES = int(os.environ.get("HERMES_TOOL_INPUT_MAX_BYTES") or 262144)
-
 
 def _extract_tool_call_input(update: dict) -> dict:
     """issue #976：按 ACP 语义提取 tool_call 入参。
@@ -1043,7 +1035,6 @@ def _extract_tool_call_input(update: dict) -> dict:
             if isinstance(parsed, dict) and parsed:
                 return _clip_tool_input(parsed)
     return _clip_tool_input(_input_from_content_blocks(update.get("content")))
-
 
 def _input_from_content_blocks(content) -> dict:
     """从 ACP tool_call 的 content 块（diff / text）还原入参。"""
@@ -1074,7 +1065,6 @@ def _input_from_content_blocks(content) -> dict:
         return {"text": "\n".join(texts)}
     return {}
 
-
 def _clip_tool_input(inp: dict) -> dict:
     """issue #976 裁剪契约：超限入参不静默截断，带可校验元数据。
 
@@ -1097,7 +1087,6 @@ def _clip_tool_input(inp: dict) -> dict:
         "sha256_prefix": digest,
         "preview": payload[:2048],
     }
-
 
 def _tool_name_from_title(title: str) -> str:
     if not title:
@@ -1131,7 +1120,6 @@ def _extract_session_id(result) -> str:
                 return sid
     return ""
 
-
 def _has_completion_record(chunks: list) -> bool:
     """累计 text 输出里是否已出现 agent 的收尾记录（actions + conclusion）。
 
@@ -1163,7 +1151,6 @@ def _has_completion_record(chunks: list) -> bool:
                 return True
     return False
 
-
 def _detect_structured_output(text: str) -> bool:
     """检测 agent 累积输出中是否包含结构化 JSON 记录块。
 
@@ -1180,7 +1167,6 @@ def _detect_structured_output(text: str) -> bool:
     compact = re.sub(r'\s+', '', text)
     return '"actions"' in compact and '"conclusion"' in compact and '"issue_summary"' in compact
 
-
 def _detect_findings_block(text: str) -> bool:
     """检测 agent 输出中是否包含 autopilot findings JSON 块。
 
@@ -1192,14 +1178,10 @@ def _detect_findings_block(text: str) -> bool:
     compact = re.sub(r'\s+', '', text)
     return '"summary"' in compact and '"findings"' in compact
 
-
-# ── JSON 鲁棒拼接辅助函数（源头预防 flush 边界损坏）──
-
 _KNOWN_JSON_FIELDS = ("actions", "conclusion", "artifacts", "next_step", "issue_summary")
 
 _FINDINGS_JSON_FIELDS = ("summary", "findings", "id", "title", "severity",
                          "category", "description", "suggested_assignee", "suggested_skill")
-
 
 def _robust_join_json(chunks: list) -> str:
     """拼接 collected_text，修复 flush 边界导致的 JSON 损坏。
@@ -1229,7 +1211,6 @@ def _robust_join_json(chunks: list) -> str:
     # 修复 3: 补闭合 } 如果缺失
     json_part = _ensure_closed(json_part)
     return full[:start] + json_part
-
 
 def _robust_join_findings(chunks: list) -> str:
     """拼接 collected_text，修复 autopilot findings JSON 的 flush 边界损坏。
@@ -1262,7 +1243,6 @@ def _robust_join_findings(chunks: list) -> str:
     json_part = _ensure_closed(json_part)
     return full[:start] + json_part
 
-
 def _fix_json_newlines(json_str: str) -> str:
     """去掉 JSON 中非字符串值内的换行符，字符串内的裸 \\n 转为 \\\\n。"""
     result = []
@@ -1288,7 +1268,6 @@ def _fix_json_newlines(json_str: str) -> str:
             continue
         result.append(ch)
     return "".join(result)
-
 
 def _ensure_closed(json_str: str) -> str:
     """如果 JSON 缺少闭合 }，按括号深度补上（忽略字符串内的 {{ }}）。"""
@@ -1318,7 +1297,6 @@ def _ensure_closed(json_str: str) -> str:
         s += '}' * depth
     return s
 
-
 def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
     return {
         "exit_code": exit_code, "text": text,
@@ -1332,10 +1310,12 @@ _OVERLAY_WRITABLE_DIRS = frozenset({
     "cron", "sessions", "logs", "log", "cache", "tmp", "temp",
     "memories", "history", "backups", "output", "outputs", "data",
 })
+
 # lock/pid 类：真实空文件（引擎自行接管内容）
 _OVERLAY_LOCK_FILES = frozenset({
     "processes.json", ".port-locks", "gateway.pid", "hermes.pid",
 })
+
 # 只读共享资产：保留 symlink（Linux 不回归；symlink 失败降级复制）
 _OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
     "skills", "plugins", "venv", "assets", "themes", "prompts",
@@ -1350,12 +1330,12 @@ _OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
     # 启动恢复秒级。
     "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
 })
+
 # 新归入 symlink 的 hermes 自管运行时目录（构建期遇到历史真实空目录/下载残骸时
 # 删除重建 symlink；见 overlay 构建分支 2026-10-28 修复）
 _OVERLAY_RUNTIME_SYMLINK_DIRS = frozenset({
     "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
 })
-
 
 def _overlay_entry_kind(entry: str, src_path: str | None = None) -> str:
     """分类 overlay 条目的构建类型："dir"（真实目录）/ "file"（真实空文件）/
@@ -1375,7 +1355,6 @@ def _overlay_entry_kind(entry: str, src_path: str | None = None) -> str:
         return "dir"
     return "symlink"
 
-
 def _is_reparse_point_or_link(path: str) -> bool:
     """判断 path 是否为 symlink / Windows reparse point（junction 等）。
 
@@ -1394,7 +1373,6 @@ def _is_reparse_point_or_link(path: str) -> bool:
             return False
     return False
 
-
 def _remove_path(path: str):
     """删除文件/链接/目录（构建期遗留清理用）。
 
@@ -1411,7 +1389,6 @@ def _remove_path(path: str):
         shutil.rmtree(path)
     elif os.path.exists(path):
         os.remove(path)
-
 
 def ensure_overlay_writable_dirs(iso_home: str):
     """issue #439 worker 写前兜底：确保可写状态目录为真实目录。
@@ -1432,7 +1409,6 @@ def ensure_overlay_writable_dirs(iso_home: str):
             os.makedirs(p, exist_ok=True)
         except Exception as _e:
             log.warning(f"hermes ACP overlay: ensure real dir '{name}' failed: {_e}")
-
 
 def _build_overlay_home(iso_home: str, src_home: str):
     """构建 per-task HERMES_HOME overlay（学习 multica mirrorSharedHermesHome）。
@@ -1578,12 +1554,9 @@ def _build_overlay_home(iso_home: str, src_home: str):
     except Exception as e:
         log.warning(f"hermes ACP overlay build error: {e}")
 
-
-
 # ── issue #416（E7/T5）：Windows overlay home 无符号链接权限时的降级镜像 ──
 # 单文件复制上限：防止把超大缓存（模型/向量库）整体拷进 overlay 拖死启动。
 _MIRROR_FILE_MAX_BYTES = 10 * 1024 * 1024
-
 
 def _mirror_without_symlink(src: str, dst: str, entry: str, reason: str):
     """symlink 失败后的降级镜像：文件复制（≤10MB），目录浅层复制一层。
@@ -1633,3 +1606,52 @@ def _cleanup_overlay(iso_home: str):
         shutil.rmtree(iso_home, ignore_errors=True)
     except Exception:
         pass
+
+def _extract_prompt_usage(result) -> dict | None:
+    """issue #727：从 `session/prompt` 的 PromptResponse result 里提取 `usage`。
+
+    hermes 0.9.0 起 PromptResponse result 携带 usage（token 计数字段命名跨版本
+    有波动：input_tokens/input、completion_tokens/output……），这里是治本路径——
+    用量经事件流 `("usage", {...})` 直报给 UsageCollector，不依赖 state.db 表结构。
+
+    返回形态与 UsageCollector.feed 的 usage dict 对齐：
+    {model, provider, input, output, cache_read, cache_write, reasoning}；全 0/缺失返回 None。
+    """
+    if not isinstance(result, dict):
+        return None
+    usage = result.get("usage")
+    if not isinstance(usage, dict) or not usage:
+        return None
+    tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
+    try:
+        from src.domains.insight.observability.llm_usage import normalize_tokens
+        _n = normalize_tokens(usage)
+        tok = {
+            "input": _n.get("input_tokens", 0),
+            "output": _n.get("output_tokens", 0),
+            "cache_read": _n.get("cache_read_tokens", 0),
+            "cache_write": _n.get("cache_write_tokens", 0),
+            "reasoning": _n.get("reasoning_tokens", 0),
+        }
+    except Exception:
+        # 归一化器不可用时退化为常见 snake/camel 键的手工解析
+        for canon, aliases in (
+            ("input", ("input_tokens", "input", "prompt_tokens")),
+            ("output", ("output_tokens", "output", "completion_tokens")),
+            ("cache_read", ("cache_read_tokens", "cache_read")),
+            ("cache_write", ("cache_write_tokens", "cache_write")),
+            ("reasoning", ("reasoning_tokens", "reasoning")),
+        ):
+            for a in aliases:
+                v = usage.get(a)
+                if isinstance(v, (int, float)) and v > 0:
+                    tok[canon] = int(v)
+                    break
+    if not any(tok.values()):
+        return None
+    model = str(usage.get("model") or result.get("model") or "")
+    provider = str(usage.get("provider") or result.get("provider") or "")
+    rec = dict(tok)
+    rec["model"] = model
+    rec["provider"] = provider
+    return rec

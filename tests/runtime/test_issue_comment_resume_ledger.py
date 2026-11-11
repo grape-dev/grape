@@ -13,16 +13,20 @@
 - QA-04：bot/系统作者评论（台账命中、Issue 非等待态）→ 仍 outbound_ledger_hit skip（S11-1 回归护栏）
 - QA-07：/done 指令经 noteable_iid 解析 → confirm_issue_done 生效（RC-B 旁证）
 """
+
 import json
+
 import sys
+
 import threading
+
 from unittest.mock import patch
 
 import pytest
 
 import sys as _sys
-import sqlite3
 
+import sqlite3
 
 class _DbProxy:
     """动态转发到当前 session_manager.db（被 fixture patch 后即 mock 库）。"""
@@ -30,7 +34,6 @@ class _DbProxy:
     def __getattr__(self, attr):
         import src.kernel.session_manager as _sm
         return getattr(_sm.db, attr)
-
 
 class _DbLockProxy:
     def __enter__(self):
@@ -41,16 +44,15 @@ class _DbLockProxy:
     def __exit__(self, *args):
         return self._real.__exit__(*args)
 
-
 db = _DbProxy()
+
 db_lock = _DbLockProxy()
 
 _PATCH_DB_MODULES = (
-    "src.kernel.session_manager", "src.api.event_store", "src.domains.runtime.pipeline.event_pipeline",
+    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
     "src.domains.mgmt.user.db", "src.api.session_store", "src.api.issues_center",
     "src.api.db_setup", "src.domains.runtime.routes.events", "src.api.token_resolver",
 )
-
 
 @pytest.fixture(autouse=True)
 def _mock_db(monkeypatch):
@@ -67,14 +69,21 @@ def _mock_db(monkeypatch):
         monkeypatch.setattr(_mod, "db_lock", _lock, raising=False)
     _dbs.init_database()
     yield
+    # D45/S67：关闭连接前排空后台 pi-refresh 线程（在飞 DB 语句 × close
+    # 并发 = sqlite UAF 段错误实测现场，同族 fixture 统一接线）
+    try:
+        from src.api.event_pipeline import wait_pi_refresh_drain
+        wait_pi_refresh_drain(timeout=35.0)
+    except Exception:
+        pass
     _conn.close()
 
-
 from src.api import event_pipeline as ep
+
 from src.kernel import outbound_ledger as ol
 
-
 RK = "gitcode:test/rsum"
+
 _clean_sql = [
     "DELETE FROM events WHERE repo_key LIKE 'gitcode:test/rsum%'",
     "DELETE FROM event_skipped WHERE repo_key LIKE 'gitcode:test/rsum%'",
@@ -84,7 +93,6 @@ _clean_sql = [
     "DELETE FROM agent_tasks WHERE repo_key LIKE 'gitcode:test/rsum%'",
     "DELETE FROM outbound_content_ledger WHERE repo_key LIKE 'gitcode:test/rsum%'",
 ]
-
 
 def _clean():
     ol._ensure_table()
@@ -99,12 +107,10 @@ def _clean():
                 pass
         db.commit()
 
-
 def _run(payload: dict, header="Note Hook"):
     raw = json.dumps(payload).encode()
     headers = {"X-GitCode-Event": header}
     return ep.run_pipeline(raw, headers, account="test/rsum", repo_key_override="test/rsum")
-
 
 def _seed_issue(status="awaiting_input", num=8):
     """构造 issue 卡片（status 可指定 awaiting_input / pending_review / processing ...）。"""
@@ -120,7 +126,6 @@ def _seed_issue(status="awaiting_input", num=8):
             (RK, f"#{num}", "vod", "vod"))
         db.commit()
 
-
 def _issue_status(num=8):
     with db_lock:
         r = db.cursor().execute(
@@ -128,13 +133,11 @@ def _issue_status(num=8):
             (RK, num)).fetchone()
         return r[0] if r else None
 
-
 def _skipped_reasons():
     with db_lock:
         c = db.cursor()
         c.execute("SELECT reason FROM event_skipped WHERE repo_key=? ORDER BY rowid DESC LIMIT 5", (RK,))
         return [r[0] for r in c.fetchall()]
-
 
 def _comment_payload_noteable(username="realuser", note="回答问题", num=8, cid=90001):
     """GitCode Note Hook 真实形态：issue 号在 noteable_iid，iid 缺省/id 是评论自身 id。"""
@@ -145,18 +148,12 @@ def _comment_payload_noteable(username="realuser", note="回答问题", num=8, c
         "user": {"username": username},
     }
 
-
-# ---------- QA-01：noteable_iid 仅含、无台账 → resume 生效（RC-B） ----------
-
 def test_qa01_noteable_iid_resume_awaiting():
     _clean()
     _seed_issue(status="awaiting_input")
     _run(_comment_payload_noteable())
     assert _issue_status() == "processing", _issue_status()
     assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
-
-
-# ---------- QA-02：同 QA-01 但评论 ID 已在台账 → resume 优先于台账（RC-A） ----------
 
 def test_qa02_ledger_hit_resume_supersedes():
     _clean()
@@ -166,9 +163,6 @@ def test_qa02_ledger_hit_resume_supersedes():
     assert _issue_status() == "processing", _issue_status()
     assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
 
-
-# ---------- QA-03：pending_review 用户回复 → 恢复 processing，不被台账拦 ----------
-
 def test_qa03_pending_review_resume():
     _clean()
     _seed_issue(status="pending_review")
@@ -177,18 +171,12 @@ def test_qa03_pending_review_resume():
     assert _issue_status() == "processing", _issue_status()
     assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
 
-
-# ---------- QA-04：bot 作者 + 台账命中 + 非等待态 → 仍被台账拦（S11-1 回归护栏） ----------
-
 def test_qa04_bot_self_post_still_ledger_blocked():
     _clean()
     _seed_issue(status="processing")
     ol.record_outbound("gitcode", RK, "issue_comment", "90004", issue_number="8")
     _run(_comment_payload_noteable(username="grape_bot", cid=90004))
     assert "outbound_ledger_hit" in _skipped_reasons(), _skipped_reasons()
-
-
-# ---------- QA-07：/done 指令经 noteable_iid 解析 → confirm_issue_done（RC-B 旁证） ----------
 
 def test_qa07_done_command_via_noteable_iid():
     """/done 经 noteable_iid 解析 → confirm_issue_done 生效（RC-B 旁证）。
@@ -202,18 +190,12 @@ def test_qa07_done_command_via_noteable_iid():
     assert _issue_status() == "completed", _issue_status()
     assert "user_confirm_done" in _skipped_reasons(), _skipped_reasons()
 
-
-# ---------- 补充护栏：Issue 非等待态 + 台账命中 → 台账照常拦（豁免不开窗） ----------
-
 def test_ledger_still_blocks_when_not_waiting():
     _clean()
     _seed_issue(status="processing")
     ol.record_outbound("gitcode", RK, "issue_comment", "90005", issue_number="8")
     _run(_comment_payload_noteable(cid=90005))
     assert "outbound_ledger_hit" in _skipped_reasons(), _skipped_reasons()
-
-
-# ---------- 写侧净化（§2.2）：git-repo API 评论记账按 agent_type 区分不增垃圾台账 ----------
 
 def _post_comment_via_git_repo(agent_type: str, body: str = "测试评论", num: int = 8,
                                monkeypatch=None, gitcode_calls=None) -> int:
@@ -250,16 +232,16 @@ def _post_comment_via_git_repo(agent_type: str, body: str = "测试评论", num:
             "WHERE repo_key=? AND content_type='issue_comment' AND content_id='90099'",
             (RK,)).fetchone()[0]
 
-
 def test_qa05_chat_relay_not_ledgered(monkeypatch):
     """chat 会话（用户 token 代发 = 用户真实回复）→ 不记台账（回声必须触发恢复）。"""
     _clean()
     n = _post_comment_via_git_repo("chat", body="用户澄清回复", monkeypatch=monkeypatch)
     assert n == 0, n
 
-
 def test_qa06_devops_agent_still_ledgered(monkeypatch):
     """devops 事件 agent（bot 身份系统回帖）→ 仍记台账（防自循环不回退）。"""
     _clean()
     n = _post_comment_via_git_repo("vod", body="系统回帖", monkeypatch=monkeypatch)
     assert n == 1, n
+
+from src import outbound_ledger as ol

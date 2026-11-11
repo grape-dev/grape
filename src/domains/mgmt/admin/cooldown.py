@@ -6,20 +6,26 @@
 触发方式：asyncio 定时任务（启动后每 24 小时执行一次）
 失败不阻塞服务，打 WARNING 日志
 """
+
 import asyncio
+
 import logging
 
 from src.kernel.config import log
+
 from src.kernel.session_manager import db, db_lock
+
 from src.kernel.mysql_compat import get_db_backend
 
 logger = logging.getLogger(__name__)
+
 _bg_tasks: set[asyncio.Task] = set()
 
 _COOLDOWN_INTERVAL = 86400.0  # 每 24 小时执行一次
-_COOLDOWN_DAYS = 30           # 冷静期天数
-_INITIAL_DELAY = 300.0        # 启动后 5 分钟首次执行
 
+_COOLDOWN_DAYS = 30           # 冷静期天数
+
+_INITIAL_DELAY = 300.0        # 启动后 5 分钟首次执行
 
 def _get_expired_accounts() -> list[int]:
     """查询冷静期超 30 天的账号 ID 列表。"""
@@ -46,8 +52,7 @@ def _get_expired_accounts() -> list[int]:
         log.warning(f"Cooldown: query expired accounts failed: {e}")
         return []
 
-
-def _anonymize_account(user_id: int):
+def _anonymize_account(user_id: str):
     """匿名化账号（单事务，幂等设计）。
 
     需求 8：Step 1-4 在同一个 with db_lock 事务内，任一失败整体 rollback。
@@ -149,7 +154,6 @@ def _anonymize_account(user_id: int):
 
     log.info(f"Cooldown: user {user_id} anonymized")
 
-
 def _cleanup_login_failures():
     """清理过期的 login_failures 记录（24 小时前）。
 
@@ -171,7 +175,6 @@ def _cleanup_login_failures():
             log.info(f"Cooldown: cleaned {deleted} expired login_failures records")
     except Exception as e:
         log.warning(f"Cooldown: cleanup login_failures failed: {e}")
-
 
 def _cleanup_audit_logs():
     """清理过期审计日志（需求 16：保留期限至少 180 天）。
@@ -195,7 +198,6 @@ def _cleanup_audit_logs():
             log.info(f"Cooldown: cleaned {deleted} expired audit_logs records (>180 days)")
     except Exception as e:
         log.warning(f"Cooldown: cleanup audit_logs failed: {e}")
-
 
 def run_cooldown_cleanup():
     """执行一次冷静期清理 + login_failures + audit_logs 过期记录清理。
@@ -232,7 +234,6 @@ def run_cooldown_cleanup():
     finally:
         release_lock(_LOCK_KEY)
 
-
 async def _cooldown_worker(interval: float = _COOLDOWN_INTERVAL):
     """定时任务 worker。"""
     await asyncio.sleep(_INITIAL_DELAY)  # 启动后延迟首次执行
@@ -243,14 +244,12 @@ async def _cooldown_worker(interval: float = _COOLDOWN_INTERVAL):
             log.warning(f"Cooldown worker error: {e}")
         await asyncio.sleep(interval)
 
-
 def start_cooldown_scheduler():
     """启动冷静期定时任务。"""
     t = asyncio.create_task(_cooldown_worker())
     _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)
     log.info("Cooldown scheduler started")
-
 
 async def stop_cooldown_scheduler():
     """停止冷静期定时任务。"""

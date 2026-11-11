@@ -288,12 +288,14 @@ class TestSuppressionLedger:
 # =====================================================================
 
 class TestCallSitesExplicit:
+    # 路径按 arch 布局（Issue #699 起 src/api/event_pipeline.py、src/token_resolver.py 均为
+    # sys.modules 别名 shim，实现分别在 domains/runtime/pipeline 与 kernel）。
     FILES = [
-        "src/api/event_pipeline.py",
-        "src/runtime/direct_executor.py",
-        "src/runtime/service.py",
+        "src/domains/runtime/pipeline/event_pipeline.py",
+        "src/domains/runtime/engine/direct_executor.py",
+        "src/domains/runtime/engine/service.py",
         "src/api/pr_merged_sre_retry.py",
-        "src/token_resolver.py",
+        "src/kernel/token_resolver.py",
     ]
     NAMES = {"_post_result_to_issue", "_post_result_to_pr"}
 
@@ -318,4 +320,5 @@ class TestCallSitesExplicit:
                 kws = {k.arg for k in node.keywords if k.arg}
                 assert "agent_result" in kws, \
                     f"{rel}:{node.lineno} 调用 {name} 未显式传 agent_result"
-        assert total == 7, f"应为 7 个调用点，实际 {total}"
+        # 9 = 上列文件的全部调用点（基线 7 处迁移后拆分/新增 2 处，逐点已显式传参）
+        assert total == 9, f"应为 9 个调用点，实际 {total}"

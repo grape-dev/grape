@@ -4,12 +4,14 @@
 使用自增序列号保证链顺序，数据库行锁保证并发安全。
 不记录密码、验证码等敏感信息。
 """
+
 import hashlib
+
 import json
 
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
 
+from src.kernel.session_manager import db, db_lock
 
 # 事件类型
 EVENT_TYPES = frozenset({
@@ -46,14 +48,16 @@ EVENT_TYPES = frozenset({
     "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
     "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）
     "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
-    "scene_copy",                   # 场景复制（Issue #1844：创建者复制含 secret 明文，须留痕；detail 含源/新 scene_id、is_creator、清洗计数，不落值）
+    "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）
+    "system_credential_create",     # D100：grape_t_system_credentials 新建（detail 只记 scope/cred_type/值尾4位，不落明文）
+    "system_credential_update",     # D100：grape_t_system_credentials 更新（detail 含旧值指纹——admin 改凭据可归因）
+    "system_credential_delete",     # D100：grape_t_system_credentials 删除（删除即失效，审计靠 usage_log 历史 id）
+    "im_installation_change",       # IM 渠道安装变更（凭证保存/解绑/引擎启停/卡片配置；detail 只记动作与标识，不含 secret）
 })
-
 
 def _now_str() -> str:
     import time
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 def _get_last_hash() -> str:
     """获取最后一条审计日志的哈希值。"""
@@ -68,7 +72,6 @@ def _get_last_hash() -> str:
     except Exception:
         return ""
 
-
 def _next_seq() -> int:
     """获取下一个序列号。"""
     try:
@@ -80,10 +83,9 @@ def _next_seq() -> int:
     except Exception:
         return 1
 
-
 def log_audit(
     event_type: str,
-    user_id: int = 0,
+    user_id: str = "",
     operator_id: int = 0,
     ip: str = "",
     detail: "dict | None" = None,
@@ -144,11 +146,6 @@ def log_audit(
     except Exception as e:
         log.warning(f"Audit log failed: {e}")
 
-
-# ---------------------------------------------------------------------------
-# 脱敏工具
-# ---------------------------------------------------------------------------
-
 def mask_email(email: str) -> str:
     """邮箱脱敏：alice@example.com → a***@example.com"""
     if not email or "@" not in email:
@@ -157,7 +154,6 @@ def mask_email(email: str) -> str:
     if len(name) <= 1:
         return f"*@{domain}"
     return f"{name[0]}***@{domain}"
-
 
 def mask_identifier(identifier: str) -> str:
     """标识符脱敏：邮箱用 mask_email，用户名保留首尾字符。"""

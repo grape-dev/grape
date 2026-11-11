@@ -20,21 +20,22 @@ c.lastrowid / c.rowcount / c.description / PRAGMA table_info / sqlite_master 查
    （datetime('now','-60 seconds')）是 SQLite 私有方言，禁止使用——应用层
    预计算 cutoff + `?` 参数（UTC 基线统一见 fix/time-utc-baseline 分支）。
 """
+
 import json
+
 import os
+
 import re
+
 import threading
 
 import pymysql
 
 from src.kernel.config import log
 
-# ====== 配置读取 ======
-
 _DB_BACKEND_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "configs", "db-backend.json"
 )
-
 
 def load_db_backend_config() -> dict:
     """读取 configs/db-backend.json 开关配置（不存在时返回默认 sqlite）。"""
@@ -51,7 +52,6 @@ def load_db_backend_config() -> dict:
         pass
     return default
 
-
 def get_db_backend() -> str:
     """当前数据库后端：环境变量 DEVOPS_DB_BACKEND 优先，其次配置文件，默认 sqlite。"""
     env = os.environ.get("DEVOPS_DB_BACKEND", "").lower()
@@ -60,7 +60,6 @@ def get_db_backend() -> str:
     if env in ("sqlite", "0", "false"):
         return "sqlite"
     return load_db_backend_config().get("backend", "sqlite")
-
 
 def mysql_config() -> dict:
     """从配置文件读取 MySQL 连接配置（环境变量 DEVOPS_DB_* 可覆盖）。"""
@@ -88,60 +87,68 @@ def mysql_config() -> dict:
         "charset": "utf8mb4",
     }
 
-
-# ====== SQL 方言翻译 ======
-
 _PRAGMA_TABLE_INFO_RE = re.compile(r"^\s*PRAGMA\s+table_info\(\s*([`\"']?)(\w+)\1\s*\)\s*$", re.I)
+
 _SQLITE_MASTER_NAME_RE = re.compile(
     r"^\s*SELECT\s+name\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s*$", re.I
 )
+
 # F7/M-11: 参数化判存变体（user/db.py:792 legacy 表清理）——原正则只认无参数形式，
 # MySQL 上静默跳过 legacy 表清理。标记后由 Cursor 特判走 information_schema。
 _SQLITE_MASTER_NAME_PARAM_RE = re.compile(
     r"^\s*SELECT\s+name\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s+AND\s+name\s*=\s*\?\s*$", re.I
 )
+
 _SQLITE_MASTER_SQL_RE = re.compile(
     r"^\s*SELECT\s+sql\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s+AND\s+name\s*=\s*['\"]([\w]+)['\"]\s*$",
     re.I,
 )
+
 _CREATE_UNIQUE_INDEX_RE = re.compile(
     r"^\s*CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(\w+)\s*\((.+)\)\s*$", re.I
 )
+
 _CREATE_INDEX_RE = re.compile(
     r"^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(\w+)\s*\((.+?)\)\s*(?:WHERE\s+(.+))?\s*$", re.I
 )
+
 _CREATE_INDEX_WHERE_RE = re.compile(r"\bWHERE\b", re.I)
+
 _PRAGMA_IGNORE_RE = re.compile(
-    r"^\s*PRAGMA\s+(journal_mode|busy_timeout|synchronous|foreign_keys|locking_mode|cache_size|wal_autocheckpoint|temp_store)",
+    r"^\s*PRAGMA\s+(journal_mode|busy_timeout|synchronous|foreign_keys|locking_mode|cache_size|wal_autocheckpoint|temp_store|wal_checkpoint)",
     re.I,
 )
+
 _PRAGMA_INDEX_LIST_RE = re.compile(r"^\s*PRAGMA\s+index_list\(\s*([`\"'\w]+)\s*\)\s*$", re.I)
+
 _PRAGMA_INDEX_INFO_RE = re.compile(r"^\s*PRAGMA\s+index_info\(\s*([`\"'\w]+)\s*\)\s*$", re.I)
-# 仅处理 'gitcode:' || col 拼接模式（代码中唯一用法）
+
+# 旧窄口径正则（'gitcode:' || col 专用）保留为兼容别名：tests/test_patrol_unit.py
+# 依赖其「不匹配 action_meta||' | x'」的断言语义；实际翻译已统一走 _CONCAT_PAIR_RE。
 _CONCAT_RE = re.compile(r"'gitcode:'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
 
-# 通用字面量拼接：'<lit>' || <col> → CONCAT('<lit>', <col>)
-# MySQL 默认 sql_mode 下 `||` 是逻辑 OR：'#'||n 求值为 (0 OR n) → 1，比较恒不相等，
-# 不翻译会静默返回错误数据（pipeline.py 的 e.issue_id='#'||i.issue_number 即此类）。
-# 只有左操作数是字符串字面量时才翻译，真正的逻辑 OR 写法不受影响。
-_LIT_CONCAT_RE = re.compile(r"'((?:[^'\\]|\\.)*)'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
+_LIT_CONCAT_RE = re.compile(
+    r"'((?:[^'\\]|\\.)*)'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
+
 
 # CREATE TABLE 语句中的列行级翻译
 _COL_TEXT_PK_RE = re.compile(r"^(\s*)([`\"\w]+)\s+TEXT\s+PRIMARY\s+KEY\b", re.I)
-# TEXT 系列列（TEXT/MEDIUMTEXT/LONGTEXT）DEFAULT 字面量 → 表达式（MySQL 8.0.13 前不允许 DEFAULT 字面量）
+
 _COL_TEXT_DEFAULT_RE = re.compile(
     r"^(\s*)([`\"\w]+)\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\s+NOT\s+NULL\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
 )
+
 _COL_TEXT_DEFAULT2_RE = re.compile(
     r"^(\s*)([`\"\w]+)\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
 )
+
 _COL_INT_PK_AUTOINC_RE = re.compile(
     r"^(\s*)([`\"\w]+)\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", re.I
 )
+
 _COL_DATETIME_DEFAULT_RE = re.compile(
     r"(datetime\('now'\))", re.I
 )
-
 
 def _split_create_columns(body: str) -> list[str]:
     """按逗号分割 CREATE TABLE 列定义（括号深度感知，剥离行尾 -- 注释）。"""
@@ -182,7 +189,6 @@ def _split_create_columns(body: str) -> list[str]:
     if cur.strip():
         cols.append(cur.strip())
     return cols
-
 
 def _translate_create_table(sql: str) -> str:
     """翻译 CREATE TABLE：TEXT 主键/唯一列→VARCHAR(191)、AUTOINCREMENT→AUTO_INCREMENT、
@@ -237,23 +243,17 @@ def _translate_create_table(sql: str) -> str:
         c = _COL_INT_PK_AUTOINC_RE.sub(
             lambda mm: f"{mm.group(1)}{mm.group(2)} INT AUTO_INCREMENT PRIMARY KEY", c
         )
-        # TEXT NOT NULL DEFAULT 'x' / TEXT DEFAULT 'x' → 表达式默认值（8.0.13+）
-        if _COL_TEXT_DEFAULT_RE.search(c) or _COL_TEXT_DEFAULT2_RE.search(c):
-            if re.match(r"^[`\"\w]+\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I) and "PRIMARY KEY" not in c.upper():
-                def _expr_default(mm):
-                    prefix, name, val = mm.group(1), mm.group(2), mm.group(3)
-                    # 保留原始 TEXT 变体类型（MEDIUMTEXT/LONGTEXT/TEXT）
-                    type_m = re.match(r"^[`\"\w]+\s+(MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I)
-                    col_type = type_m.group(1).upper() if type_m else "TEXT"
-                    not_null = " NOT NULL" if "NOT NULL" in mm.string[:mm.start()].upper() or "NOT NULL" in c.upper() else ""
-                    return f"{prefix}{name} {col_type}{not_null} DEFAULT ('{val}')"
-                c = _COL_TEXT_DEFAULT_RE.sub(_expr_default, c)
-                c = _COL_TEXT_DEFAULT2_RE.sub(_expr_default, c)
+        # TEXT 系列列：剥除字面量 DEFAULT（'' / '{}' / 0 等）。MySQL 的 TEXT/BLOB 列
+        # 不接受字面量默认值（1101），字面量包成表达式 DEFAULT ('') 在部分版本/SQL 模式
+        # 下仍触发 1064（drill4 实锤）。剥除后 MySQL 语义为默认 NULL；应用层读取这些列
+        # 均按 ``or ''`` 兜底（写入点总是显式提供值），语义等价。表达式 DEFAULT
+        # （DEFAULT (datetime('now')) 等）保留，datetime('now') 已在下面统一翻译。
+        if _COL_TEXT_TYPE_RE.match(c) and "PRIMARY KEY" not in c.upper():
+            c = _COL_TEXT_LITERAL_DEFAULT_RE.sub("", c)
         # datetime('now') → CAST(NOW() AS CHAR)（字符串语义与 SQLite 一致，且避免 % 占位冲突）
         c = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", c)
         out.append(c)
     return head + ", ".join(out) + ")" + trailing
-
 
 # INSERT ... ON CONFLICT(<pk>) DO UPDATE SET <col>=<expr(excluded.col)> ... → MySQL ON DUPLICATE KEY UPDATE
 # 匹配到 DO UPDATE SET 子句末尾（到语句尾；不跨多语句）。
@@ -271,7 +271,6 @@ def _mysql_upsert_repl(m):
     _sets = re.sub(r"excluded\.`([^`]*)`", r"VALUES(`\1`)", _sets)
     _sets = re.sub(r"excluded\.([A-Za-z0-9_]+)", r"VALUES(\1)", _sets)
     return "ON DUPLICATE KEY UPDATE " + _sets
-
 
 def translate_sql(sql: str) -> str:
     """把 SQLite 方言 SQL 翻译为 MySQL 方言。"""
@@ -314,10 +313,8 @@ def translate_sql(sql: str) -> str:
     # datetime('now') → CAST(NOW() AS CHAR)（仅无参形式；UTC 基线统一在
     # fix/time-utc-baseline 分支处理，本分支只修语法层方言）
     sql = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", sql)
-    # 'gitcode:' || col → CONCAT('gitcode:', col)
-    sql = _CONCAT_RE.sub(r"CONCAT('gitcode:', \1)", sql)
-    # 其余字面量拼接：'<lit>' || col → CONCAT('<lit>', col)（见 _LIT_CONCAT_RE 注释）
-    sql = _LIT_CONCAT_RE.sub(r"CONCAT('\1', \2)", sql)
+    # `a || b` → CONCAT(a, b)（F3 通用化，见 _translate_concat）
+    sql = _translate_concat(sql)
     # CAST(x AS TEXT) → CAST(x AS CHAR)（MySQL 不支持 TEXT 作为 CAST 目标类型，1064 语法错误；
     #   CHAR 在 SQLite 中按 TEXT 亲和性处理，双方言兼容）
     sql = re.sub(r"\bCAST\((.+?)\s+AS\s+TEXT\)", r"CAST(\1 AS CHAR)", sql, flags=re.I)
@@ -374,10 +371,8 @@ def translate_sql(sql: str) -> str:
                 sql = "DELETE FROM `" + tbl + "`" + rest
     return sql
 
-
 # 已有的 MySQL 原生占位符（少数模块直接写 %s / %(name)s）——不能逃逸，否则会被双重转义
 _NATIVE_PLACEHOLDER_RE = re.compile(r"%(?:\([^)]+\))?s")
-
 
 def _replace_qmarks(sql: str) -> str:
     """把 SQL 中的 ? 占位符替换为 %s，跳过字符串字面量内的 ?。
@@ -419,7 +414,6 @@ def _replace_qmarks(sql: str) -> str:
         i += 1
     return "".join(out)
 
-
 def _backtick_key(sql: str) -> str:
     """把 meta 表 SQL 中字符串字面量外的 key 列名加反引号（MySQL 保留字）。
 
@@ -456,10 +450,6 @@ def _backtick_key(sql: str) -> str:
     for idx, kw in enumerate(placeholders):
         result = result.replace(f"__KWP{idx}__", kw)
     return result
-
-
-# ====== Cursor / Connection 兼容实现 ======
-
 
 class MySQLCompatCursor:
     """模拟 sqlite3.Cursor 的最小接口。"""
@@ -627,7 +617,7 @@ class MySQLCompatCursor:
         # 保证挂到请求 trace 下。OTel 未启用/无 span 时零开销（noop span）。
         _otel_span = None
         try:
-            from src.observability.otel import start_db_span
+            from src.domains.insight.observability.otel import start_db_span
             _otel_span = start_db_span(t)
         except Exception:
             _otel_span = None
@@ -636,7 +626,7 @@ class MySQLCompatCursor:
         finally:
             if _otel_span is not None:
                 try:
-                    from src.observability.otel import end_db_span
+                    from src.domains.insight.observability.otel import end_db_span
                     end_db_span(_otel_span, rowcount=getattr(cur, "rowcount", None))
                 except Exception:
                     _otel_span = None
@@ -701,7 +691,6 @@ class MySQLCompatCursor:
                 pass
         self._pycur = None
 
-
 class MySQLCompatDB:
     """模拟 sqlite3.Connection：MySQL 连接池化（DBUtils PooledDB）。
 
@@ -746,6 +735,8 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                # UTC 基线（F3）：NOW() 恒 UTC，对齐 SQLite datetime('now')。
+                init_command="SET time_zone='+00:00'",
             )
             log.info("MySQLCompatDB: connection pool initialized "
                      f"(min={os.environ.get('DB_POOL_MIN', '2')}, "
@@ -793,6 +784,8 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                # UTC 基线（F3）：NOW() 恒 UTC，对齐 SQLite datetime('now')。
+                init_command="SET time_zone='+00:00'",
             )
             self._local.conn = conn
         try:
@@ -807,6 +800,7 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                init_command="SET time_zone='+00:00'",
             )
             self._local.conn = conn
         return conn.cursor()
@@ -878,7 +872,6 @@ class MySQLCompatDB:
         """
         return DedicatedConnection(pymysql.connect(**_dedicated_connect_params(self._cfg)))
 
-
 def _dedicated_connect_params(cfg: dict) -> dict:
     """池外专用连接的参数（与 _raw_cursor 的 per-thread 回退路径保持一致）。"""
     return {
@@ -890,8 +883,9 @@ def _dedicated_connect_params(cfg: dict) -> dict:
         "charset": cfg.get("charset", "utf8mb4"),
         "autocommit": False,
         "connect_timeout": 10,
+        # UTC 基线（F3）：池外专用连接同样固定 UTC 会话时区。
+        "init_command": "SET time_zone='+00:00'",
     }
-
 
 class DedicatedConnection:
     """池外专用连接：包装一条独立于连接池的裸 pymysql 连接。
@@ -925,3 +919,63 @@ class DedicatedConnection:
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
+
+def _translate_concat(sql: str) -> str:
+    """`a || b` → CONCAT(a, b)。
+
+    先把字符串字面量掩码为 \\x00N\\x00 占位符再匹配操作数对，避免误匹配字面量
+    内部的标识符（如 'keep || inside'）；不匹配的复杂形式（含子查询的拼接）
+    原样保留并打日志，交由调用方改为应用层拼接。
+    """
+    lits: list = []
+
+    def _mask(m):
+        lits.append(m.group(0))
+        return f"\x00{len(lits) - 1}\x00"
+
+    masked = _CONCAT_LIT_RE.sub(_mask, sql)
+    for _ in range(10):
+        new = _CONCAT_MASKED_PAIR_RE.sub(r"CONCAT(\1, \2)", masked)
+        if new == masked:
+            break
+        masked = new
+    if "||" in masked:
+        log.warning(f"[mysql-compat] untranslated || concat remains: {sql[:200]}")
+    return _CONCAT_MASK_RE.sub(lambda m: lits[int(m.group(1))], masked)
+
+# F3：通用 `a || b` → CONCAT(a, b) 翻译。操作数限定为三类「无子查询」的简单形式：
+#   1) ? 占位符；2) SQL 字符串字面量（'' 内不含反斜杠，团队规则1）；3) 标识符
+#   （可带 schema/table 前缀）或一级函数调用（参数内不得再含嵌套括号，如
+#   COALESCE(result,'')）。不匹配则保留原样（避免误改复杂表达式/子查询拼接）。
+_CONCAT_OPERAND = (
+    r"(?:\?"
+    r"|'(?:[^'\\]|'')*'"
+    r"|(?:COALESCE|IFNULL|NULLIF|CONCAT|TRIM|LOWER|UPPER|CAST)\s*\((?:[^()]|\([^()]*\))*\)"
+    r"|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
+)
+
+_CONCAT_PAIR_RE = re.compile(
+    rf"({_CONCAT_OPERAND})\s*\|\|\s*({_CONCAT_OPERAND})"
+)
+
+# 字符串字面量（'' 内不含反斜杠，团队规则1）
+_CONCAT_LIT_RE = re.compile(r"'(?:[^'\\]|'')*'")
+
+_CONCAT_MASK_RE = re.compile(r"\x00(\d+)\x00")
+
+# 掩码后的操作数 = 简单操作数 | 字面量占位符
+_CONCAT_MASKED_OPERAND = rf"(?:\x00\d+\x00|{_CONCAT_OPERAND})"
+
+_CONCAT_MASKED_PAIR_RE = re.compile(
+    rf"({_CONCAT_MASKED_OPERAND})\s*\|\|\s*({_CONCAT_MASKED_OPERAND})"
+)
+
+# TEXT 系列列（TEXT/MEDIUMTEXT/LONGTEXT）：MySQL 不允许字面量 DEFAULT（8.0.13 前 1101/
+# 1064，8.0.13+ 表达式形式也只认括号表达式）。根修（fresh-install G4）：直接剥除字面量
+# DEFAULT 子句——MySQL 语义下 TEXT 无默认即 NULL，应用层读取均按 ``or ''`` 兜底；
+# 带括号的表达式 DEFAULT（如 DEFAULT (datetime('now'))→(CAST(NOW() AS CHAR))）保留。
+_COL_TEXT_TYPE_RE = re.compile(r"^[`\"'\w]+\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\b", re.I)
+
+_COL_TEXT_LITERAL_DEFAULT_RE = re.compile(
+    r"\s+DEFAULT\s+(?:'(?:[^'\\]|\\.)*'|[+-]?\d+(?:\.\d+)?)(?=[,\s)]|$)", re.I
+)

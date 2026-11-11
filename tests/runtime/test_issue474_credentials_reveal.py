@@ -45,11 +45,11 @@ def setup_module():
             ver = row[1] or 0
         else:
             c.execute(
-                "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                "VALUES (?,?,?,?,1,0)",
-                ("test_474_reveal", None, hash_password("test123"), "test_474_reveal"))
+                "INSERT INTO grape_accounts (id, username, email, password_hash, nickname, status, token_version) "
+                "VALUES (?,?,?,?,?,1,0)",
+                (str(__import__("uuid").uuid4()), "test_474_reveal", None, hash_password("test123"), "test_474_reveal"))
             db.commit()
-            _uid = {"id": c.lastrowid}
+            _uid = {"id": c.execute("SELECT id FROM grape_accounts WHERE username=?", ("test_474_reveal",)).fetchone()[0]}
             ver = 0
         # 清理本用户可能残留的凭据 / 取回日志，保证用例间状态干净
         c.execute("DELETE FROM user_credentials WHERE user_id=?", (_uid["id"],))
@@ -213,11 +213,11 @@ class TestCredentialsRevealNoPassword:
                 ver = row[1] or 0
             else:
                 c.execute(
-                    "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                    "VALUES (?,?,?,?,1,0)",
-                    ("test_474_nopwd", None, "", "test_474_nopwd"))
+                    "INSERT INTO grape_accounts (id, username, email, password_hash, nickname, status, token_version) "
+                    "VALUES (?,?,?,?,?,1,0)",
+                    (str(__import__("uuid").uuid4()), "test_474_nopwd", None, "", "test_474_nopwd"))
                 db.commit()
-                cls.uid = {"id": c.lastrowid}
+                cls.uid = {"id": c.execute("SELECT id FROM grape_accounts WHERE username=?", ("test_474_nopwd",)).fetchone()[0]}
                 ver = 0
         cls.headers = {"Authorization": "Bearer " + create_access_token(cls.uid["id"], "test_474_nopwd", ver)}
 

@@ -11,21 +11,26 @@ D 组（纯逻辑）见 tests/test_feishu_pure_logic.py；
 （旧 /bind /unbind /status /autodev /notify 命令已于 feishu-repo-navigation-commands-design.md 删除，
   其验收用例同步移除。）
 """
+
 import asyncio
+
 from src.domains.mgmt.auth import grape_account_db
+
 import json
+
 import os
+
 import sys
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
-os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
+os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 def _make_ctx(app_id="cli_remed"):
     from src.domains.runtime.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="remed-test")
-
 
 def _make_api_with_session():
     from src.domains.runtime.im.feishu_async import FeishuAsync
@@ -34,17 +39,12 @@ def _make_api_with_session():
     api._get_session = AsyncMock(return_value=session)
     return api, session
 
-
 def _http_response(payload):
     resp = MagicMock()
     resp.json = AsyncMock(return_value=payload)
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=False)
     return resp
-
-
-# ===== B. FeishuAsync.sync_repo_feishu_mapping =====
-
 
 class TestSyncRepoFeishuMapping:
     async def _run(self, members, collabs, bot_token="bot_tok"):
@@ -54,7 +54,9 @@ class TestSyncRepoFeishuMapping:
         ctx = _make_ctx()
         api.get_chat_members = AsyncMock(return_value=members)
         from src.domains.mgmt.user import db as user_db
-        with patch.object(user_db, "get_bot_token_by_repo", return_value=bot_token):
+        # D44/S66 接缝迁移：R20.11.1 起 token 统一入口为 token_service.get_repo_bot_token
+        #（patch user.db.get_bot_token_by_repo 不再生效——调用期不再经过该属性）
+        with patch("src.kernel.token_service.get_repo_bot_token", return_value=bot_token):
             with patch("src.domains.runtime.im.feishu_async._fetch_gitcode_collaborators", return_value=collabs):
                 matched = await api.sync_repo_feishu_mapping(ctx, "gitcode:owner/repo", "oc_b")
         return matched, api
@@ -129,3 +131,5 @@ class TestSyncRepoFeishuMapping:
         with db_lock:
             db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lisi'")
             db.commit()
+
+from src.domains.mgmt.auth import grape_account_db

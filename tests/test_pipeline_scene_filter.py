@@ -13,7 +13,7 @@
 import os
 import re
 
-SRC = os.path.join(os.path.dirname(__file__), "..", "src", "api", "routes", "pipeline.py")
+SRC = os.path.join(os.path.dirname(__file__), "..", "src", "domains", "runtime", "routes", "pipeline.py")
 
 
 def _src():

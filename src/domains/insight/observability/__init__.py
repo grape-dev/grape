@@ -10,7 +10,7 @@ import os
 import time
 
 # prometheus_client 是服务端依赖（A/B/C 都装）；worker 包按最小依赖原则不带它，
-# 但 worker 侧需要通过 src.observability.otel 报 span（架构守护 BLOCKED-1）。
+# 但 worker 侧需要通过 src.domains.insight.observability.otel 报 span（架构守护 BLOCKED-1）。
 # 因此这里做可选导入：缺失时提供 no-op 指标桩，保证模块可导入（worker 不采集指标）。
 try:
     from prometheus_client import (Counter, Histogram, Gauge, CollectorRegistry,

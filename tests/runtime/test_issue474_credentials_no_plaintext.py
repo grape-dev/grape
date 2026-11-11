@@ -45,11 +45,11 @@ def setup_module():
             ver = row[1] or 0
         else:
             c.execute(
-                "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                "VALUES (?,?,?,?,1,0)",
-                ("test_474", None, hash_password("test123"), "test_474"))
+                "INSERT INTO grape_accounts (id, username, email, password_hash, nickname, status, token_version) "
+                "VALUES (?,?,?,?,?,1,0)",
+                (str(__import__("uuid").uuid4()), "test_474", None, hash_password("test123"), "test_474"))
             db.commit()
-            _uid = {"id": c.lastrowid}
+            _uid = {"id": c.execute("SELECT id FROM grape_accounts WHERE username=?", ("test_474",)).fetchone()[0]}
             ver = 0
         # 清理本用户可能残留的凭据，保证用例间状态干净
         c.execute("DELETE FROM user_credentials WHERE user_id=?", (_uid["id"],))

@@ -10,11 +10,17 @@ docs/weekly-09/grape-unified-implementation-design.md §6）。
 src.domains.runtime.pipeline.event_pipeline，本模块以函数级延迟 import
 引用，避免 engine ↔ pipeline 模块级环（scripts/check-arch.py R5）。
 """
+
 import json, os, threading
+
 from concurrent.futures import ThreadPoolExecutor, Future
+
 from datetime import datetime, timezone
+
 from src.kernel.config import log
+
 from src.kernel.session_manager import db, db_lock
+
 from src.kernel.token_service import is_auth_401_error
 
 # 有界并发池（替代无界 threading.Thread，见 engine-selection-design.md §9.3）
@@ -22,10 +28,11 @@ _DIRECT_POOL = ThreadPoolExecutor(
     max_workers=int(os.environ.get("RUNTIME_MAX_CONCURRENT_TASKS", "20")),
     thread_name_prefix="ag-direct",
 )
+
 # {event_seq: Future} — 供 sweeper 取消排队中的 direct 任务
 _DIRECT_FUTURES: dict[int, Future] = {}
-_DIRECT_FUTURES_LOCK = threading.Lock()
 
+_DIRECT_FUTURES_LOCK = threading.Lock()
 
 def start_direct_agent(fn, args, name=""):
     """提交一个本机 direct 执行任务到有界池（webhook / run_pipeline 共用）。"""
@@ -36,7 +43,6 @@ def start_direct_agent(fn, args, name=""):
         with _DIRECT_FUTURES_LOCK:
             _DIRECT_FUTURES[seq] = future
     return future
-
 
 def _execute_agent(repo_key: str, seq: int, agent_type: str,
                    backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
@@ -86,7 +92,6 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             )
         except Exception:
             pass
-
 
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
@@ -177,16 +182,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.domains.mgmt.user.db import get_host_user_id
         _host_uid = get_host_user_id(repo_key)
-        if _host_uid > 0:
+        if str(_host_uid or "") not in ("", "0"):
             from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
             _host_acc = get_grape_account_by_id(_host_uid)
             if _host_acc and _host_acc.get("username"):
-                if repo_key.startswith("github:"):
-                    from src.api.deps import get_user_github_token_with_refresh
-                    _user_token_for_redact = get_user_github_token_with_refresh(_host_acc["username"], _host_uid) or ""
-                else:
-                    from src.api.deps import get_user_token_with_refresh
-                    _user_token_for_redact = get_user_token_with_refresh(_host_acc["username"], _host_uid) or ""
+                # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode），
+                # K1 分叉包装器已退役（D3），统一走 get_user_token_for_repo
+                from src.api.deps import get_user_token_for_repo
+                _user_token_for_redact = get_user_token_for_repo(repo_key, _host_acc["username"], str(_host_uid)) or ""
     except Exception:
         pass
 
@@ -324,7 +327,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
             _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
                              _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
-                             reason=_sk_src.get("reason") or "")
+                             reason=_sk_src.get("reason") or "",
+                             source_info=_sk_mat.get("source") or None,
+                             drift=_sk_mat.get("drift") or None)
             agent_logs.append({
                 "time": datetime.utcnow().isoformat(),
                 "type": "skill_source",
@@ -335,8 +340,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME（repository）派生，缺失回退 repo_key；
     # **禁止**用 exec_account（触发人账号/带前缀全名）充当 REPO_OWNER——否则触发人≠仓库 owner 时
     # 会注入 REPO_OWNER=<触发人>、REPO_NAME=""（反馈 2874）。Issue #94 的前缀剥离由派生入口统一处理。
-    from src.repo_key import derive_repo_identity as _derive_env
+    from src.kernel.repo_key import derive_repo_identity as _derive_env
     _full_name_env, _repo_owner_env, _repo_name_env = _derive_env(repository, repo_key)
+    from src.kernel.prompt_builder import resolve_task_server_env
+    from src.kernel.auth_sdk.auth_token import issue_session_token
     env_extra = {
         "REPO_FULL_NAME": _full_name_env or repository,
         "REPO_OWNER": _repo_owner_env,
@@ -344,6 +351,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #1668：统一 actor 解析（a2a_event 回退 payload.account/Issue creator），
         # 禁止用 exec_account（仓库全名）冒充个人账号。
         "ACCOUNT": resolve_actor_account(evt, repo_key),
+        # Issue #1858：direct 执行同样注入三面基址（与 enqueue/重派/worker 同源）。
+        **resolve_task_server_env(runtime_id),
     }
     # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
     # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。
@@ -471,7 +480,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
     # Issue-45 M2：direct 会话签发会话级临时 token（session_key=task_id 或 d_{seq}）
     try:
-        from src.kernel.auth_sdk.auth_token import issue_session_token
+        from src.domains.runtime.engine.service import session_token_for_execution
         if repo_key and agent_type:
             env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
@@ -490,6 +499,37 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                            engine_id=int(runtime_id or 0))
     _mu.start()
 
+    # Issue #596 P1-P3 审查修复：direct 模式跨进程终止（状态驱动取消）。
+    # 三进程拆分后 terminate 请求落在 B 进程，cancel_direct_task 只能操作
+    # 本进程 _DIRECT_FUTURES（direct 执行在 C），B 侧 futures 恒为空。
+    # 参照 worker 模式的心跳匹配取消：B 侧 fail_task/update_event_status 先落库，
+    # C 侧执行流周期性探测 DB，发现任务/事件已被外部置终态（failed/cancelled）
+    # 即刻杀引擎子进程并中断流（终态回写有幂等保护，不会翻转状态）。
+    import time as _probe_time
+    _PROBE_INTERVAL = 10.0
+    _last_status_probe = 0.0
+
+    def _external_terminal() -> str:
+        """探测本任务/事件是否已被其它进程（terminate/超时等）置为终态。"""
+        try:
+            from src.kernel.session_manager import db as _pdb, db_lock as _pdl
+            if task_id:
+                with _pdl:
+                    c = _pdb.cursor()
+                    c.execute("SELECT status FROM agent_tasks WHERE id=?", (task_id,))
+                    trow = c.fetchone()
+                if trow and trow[0] in ("failed", "cancelled"):
+                    return f"task:{trow[0]}"
+            with _pdl:
+                c = _pdb.cursor()
+                c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+                erow = c.fetchone()
+            if erow and erow[0] in ("failed", "cancelled"):
+                return f"event:{erow[0]}"
+        except Exception as _pe:
+            log.debug(f"direct exec status probe failed (seq={seq}): {_pe}")
+        return ""
+
     try:
         for evt_type, data in stream_devops_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
@@ -507,6 +547,23 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             if _user_token_for_redact:
                 _msg = _msg.replace(_user_token_for_redact, "[REDACTED]")
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": _msg})
+            # 状态驱动取消探测：周期性查库，外部 terminate 已置终态 → 杀引擎并中断流
+            if evt_type != "done":
+                _now_probe = _probe_time.monotonic()
+                if _now_probe - _last_status_probe >= _PROBE_INTERVAL:
+                    _last_status_probe = _now_probe
+                    _ext_term = _external_terminal()
+                    if _ext_term:
+                        log.warning(
+                            f"Exec agent: seq={seq} externally terminated ({_ext_term}), "
+                            f"killing engine subprocess (state-driven cancel)"
+                        )
+                        try:
+                            from src.domains.runtime.engine.agent import _kill_stale_engine
+                            _kill_stale_engine({"cwd": ws, "id": task_id}, backend)
+                        except Exception as _ke:
+                            log.warning(f"Exec agent: state-driven kill failed (seq={seq}): {_ke}")
+                        break
             # 实时推送：direct 模式复用 worker 的 report_messages（落库 task_messages + fanout SSE）
             # 让前端「实时日志」面板在 hermes 执行期间就能看到逐步输出，不用等执行完成
             _mu.feed(evt_type, data)
@@ -664,6 +721,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # R21.7.1: agent 完成后立即更新 devops_agent_session status='idle'
         # 缩小 session 兜底误拦窗口（R21.7.4: status=idle → 兜底查询不命中 → 无误拦）
         try:
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -718,11 +776,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _exec_err_detail = " ".join(str(e) for e in _exec_done_errors) + " " + str(_exec_done_stderr)
         if _exec_err_detail.strip():
             _err_lower = _exec_err_detail.lower()
+            from src.kernel.token_service import is_auth_401_error
             _is_401 = is_auth_401_error(_err_lower)
             if _is_401:
                 try:
-                    from src.kernel.token_service import detect_and_mark_expired
-                    _pipeline_error_code = detect_and_mark_expired(repo_key) or ""
+                    from src.kernel.token_service import detect_and_mark_repo_token_expired
+                    _pipeline_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                     if _pipeline_error_code:
                         log.warning(f"Exec agent: token expired during direct exec (error_code={_pipeline_error_code}), repo={repo_key}")
                 except Exception as _pe:
@@ -837,6 +896,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.warning(f"Exec agent: post result to issue failed: {_pe}")
                 if task_id:
                     try:
+                        from src.kernel.session_manager import db, db_lock
+                        import json
                         with db_lock:
                             c = db.cursor()
                             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
@@ -939,3 +1000,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _issue_num = _issue_num_from(issue_id)
         if _issue_num and repo_gitcode_token:
             _sync_issue_comments_to_conversation(repo_key, _issue_num, repo_gitcode_token, agent_type, repository)
+
+import os, threading, traceback
+
+"""本机 direct 执行器——从 event_pipeline.py 迁移（P0, Issue #596）。
+
+负责本机引擎的 Agent 执行（stream_devops_agent → 结果回写 → 事件更新）。
+迁移后 event_pipeline.py (B 进程) 只负责入队，不再直接执行；
+本模块由 C 进程的 local_claimer 认领后调用。
+
+设计文档：docs/weekly-09/grape-three-process-split-design.md §3
+"""

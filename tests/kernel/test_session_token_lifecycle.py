@@ -71,7 +71,9 @@ def test_enqueue_issues_token_and_injects_env():
     plain = env.get("GRAPE_SESSION_TOKEN", "")
     assert plain.startswith("tk_")
     row = _session_row(tid)
-    assert row is not None and row[1] == "gitcode:o/r" and row[2] == "vod" and row[3] == 0
+    # D105b（docs/weekly-09/multi-platform-decouple/d105b-account-fk-user-id-text-design.md）：
+    # session_api_tokens.user_id 列 TEXT 化后 SQLite 以文本回读，语义仍是「无 user_id」哨兵 0。
+    assert row is not None and row[1] == "gitcode:o/r" and row[2] == "vod" and str(row[3] or "") in ("0", "")
     assert row[4] == auth_token._sha256(plain)  # 落库 sha256，非明文
 
 
@@ -82,9 +84,11 @@ def test_chat_task_binds_user_id():
     plain = _task_env(tid)["GRAPE_SESSION_TOKEN"]
     assert plain.startswith("tk_")
     row = _session_row(tid)
-    assert row[2] == "chat" and row[3] == 123
+    # 同上：TEXT 化后按值比较，语义 = chat 会话绑定 USER_ID。
+    assert row[2] == "chat" and str(row[3]) == "123"
     info = auth_token.verify_session_token(plain)
-    assert info is not None and info["user_id"] == 123 and info["repo_key"] == "chat:123"
+    # D105b：user_id 列 TEXT 化，按值比较（语义仍是 chat 会话绑定 USER_ID=123）。
+    assert info is not None and str(info["user_id"]) == "123" and info["repo_key"] == "chat:123"
 
 
 def test_task_terminal_revokes_token():

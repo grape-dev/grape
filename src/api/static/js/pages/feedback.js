@@ -66,11 +66,7 @@
       '</div>';
   }
 
-  function _esc(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
+  function _esc(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml
 
   window.openFeedbackDialog = function (opts) {
     // 移除已有弹窗

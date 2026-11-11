@@ -1,21 +1,33 @@
 """项目模板（project-templates）路由与一键创建链路测试"""
+
 import os
+
 import sys
+
 import json
+
 import asyncio
+
 from unittest.mock import patch
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src")
+
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 
 os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_sessions.db")
 
 from fastapi import HTTPException
+
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.mgmt.routes import templates as templates_mod
+
 from src.domains.mgmt.user import db as user_db
+
 from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
+
 from src.domains.mgmt.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_username,
     get_token_version as grape_get_token_version,
@@ -35,11 +47,12 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 _uid = None
+
 _token = ""
+
 _headers = {}
 
 CONFIG_PATH = os.path.join(ROOT, "configs", "project-templates.json")
-
 
 def setup_module():
     global _uid, _token, _headers
@@ -65,7 +78,6 @@ def setup_module():
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 
-
 def teardown_module():
     if _uid:
         with sm_lock:
@@ -74,10 +86,8 @@ def teardown_module():
             c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
             sm_db.commit()
 
-
 def _reload_config():
     return templates_mod._load_templates()
-
 
 # ===================== 配置合法性 =====================
 class TestConfig:
@@ -132,7 +142,6 @@ class TestConfig:
                 sid = t.get("scene_id") or cat.get("scene_id")
                 assert sid in scenes, f"模板场景 '{sid}' 不在 agent-skill-mapping 中"
 
-
 # ===================== GET 列表 =====================
 class TestList:
     def test_list_requires_auth(self):
@@ -146,7 +155,6 @@ class TestList:
         assert len(cats) >= 1
         first = cats[0]
         assert "templates" in first and isinstance(first["templates"], list)
-
 
 # ===================== POST 创建 =====================
 class TestCreate:
@@ -167,8 +175,8 @@ class TestCreate:
         """同名仓库已存在（GitCode 返回 409）→ 409 错误提示"""
         with patch.object(templates_mod, "_find_template",
                           return_value={"template": {"id": "hello-skill", "source": "local"}, "scene_id": "skill-dev"}), \
-             patch.object(templates_mod, "get_user_gitcode_login", return_value="test_tmpl"), \
-             patch.object(templates_mod, "create_repo",
+             patch.object(GitCodeProvider, "get_user_login", return_value="test_tmpl"), \
+             patch.object(GitCodeProvider, "create_repo",
                           side_effect=RuntimeError("GitCode API POST https://api.gitcode.com/api/v5/user/repos failed (409): exists")):
             r = client.post("/api/project-templates/create",
                             json={"template_id": "hello-skill", "repo_name": "dup-repo"},
@@ -213,8 +221,8 @@ class TestCreate:
                           return_value={"template": {"id": "hello-skill", "source": "local",
                                                      "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
                                         "scene_id": "skill-dev"}), \
-             patch.object(templates_mod, "get_user_gitcode_login", return_value="test_tmpl"), \
-             patch.object(templates_mod, "create_repo", return_value={"full_name": "test_tmpl/hello-skill"}), \
+             patch.object(GitCodeProvider, "get_user_login", return_value="test_tmpl"), \
+             patch.object(GitCodeProvider, "create_repo", return_value={"full_name": "test_tmpl/hello-skill"}), \
              patch.object(templates_mod, "push_template_to_repo", return_value=True), \
              patch("src.domains.mgmt.routes.repos.host_repo", new=_fake_host), \
              patch("src.domains.mgmt.routes.scenes.apply_scene", new=_fake_apply_scene):
@@ -235,8 +243,8 @@ class TestCreate:
                           return_value={"template": {"id": "hello-skill", "source": "local",
                                                      "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
                                         "scene_id": "skill-dev"}), \
-             patch.object(templates_mod, "get_user_gitcode_login", return_value="test_tmpl"), \
-             patch.object(templates_mod, "create_repo", return_value={"full_name": "test_tmpl/hello-skill"}), \
+             patch.object(GitCodeProvider, "get_user_login", return_value="test_tmpl"), \
+             patch.object(GitCodeProvider, "create_repo", return_value={"full_name": "test_tmpl/hello-skill"}), \
              patch.object(templates_mod, "push_template_to_repo", return_value=True), \
              patch("src.domains.mgmt.routes.repos.host_repo", side_effect=RuntimeError("webhook boom")):
             r = client.post("/api/project-templates/create",
@@ -248,14 +256,11 @@ class TestCreate:
             assert data["host_warning"]  # 托管失败时有提醒
             assert "webhook boom" in data["host_warning"]  # 包含原始错误信息
 
-
 def _fake_host(body, user, request=None, provider=""):
     return {"message": "仓库托管成功", "webhook_id": 123}
 
-
 def _fake_apply_scene(owner, repo, body, user):
     return {"message": "ok", "updated": 5}
-
 
 # ===================== repo_manager 新函数 =====================
 class TestRepoManager:
@@ -317,3 +322,7 @@ class TestRepoManager:
             assert len(remote_calls) > 0, f"expected remote add, got: {mock_git.call_args_list}"
             target_url = remote_calls[0][0][0][3]
             assert "oauth2:user_tok@" in target_url, f"expected user token in URL, got: {target_url}"
+
+from src.domains.mgmt.routes import templates as templates_mod
+
+from src.kernel.token_resolver import GitCodeProvider

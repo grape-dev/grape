@@ -14,10 +14,15 @@ sandbox/config.json allow_all: bash 命令中的网络请求不被拦截
 
 输出协议：NDJSON 事件流，与 opencode 完全兼容（parse_output 复用基类解析）。
 """
+
 import json
+
 import os
+
 import subprocess
+
 import threading
+
 from .base import AgentRuntime
 
 # 预写的权限配置：write/edit/external_directory_write=allow
@@ -31,7 +36,6 @@ _ALLOW_PERMS = [
     {"permission": "external_directory_read", "pattern": "*", "action": "allow"},
     {"permission": "dotfile", "pattern": "*", "action": "ask"},
 ]
-
 
 def write_trust_settings(data_dir: str, trusted_dirs: list[str]) -> None:
     """Issue #471 C2：预写/合并 codearts 目录信任配置，根治无 TTY 致命退出。
@@ -78,7 +82,6 @@ def write_trust_settings(data_dir: str, trusted_dirs: list[str]) -> None:
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
-
 def probe_env(cwd: str = "") -> dict:
     """Issue #471 C2：codearts 引擎探测专用环境（隔离数据目录 + 目录信任）。
 
@@ -100,7 +103,6 @@ def probe_env(cwd: str = "") -> dict:
         except OSError:
             pass
     return {"KERNEL_DATA_DIR": data_dir}
-
 
 class CodeArtsRuntime(AgentRuntime):
     name = "codearts"
@@ -159,7 +161,7 @@ class CodeArtsRuntime(AgentRuntime):
             args.append(prompt)
         return args
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         from src.domains.runtime.engine.os_adapter import home_dir
         home = home_dir()
         env = os.environ.copy()

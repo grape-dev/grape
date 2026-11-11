@@ -297,7 +297,7 @@ function loadApiKeys() {
             </div>
           </div>
           <button class="bt" style="font-size:11px;padding:5px 12px;background:var(--r);color:#fff;border:none;border-radius:6px;cursor:pointer"
-            onclick="revokeApiKey(${k.id}, '${_escApi(k.name).replace(/'/g, "\\'")}')">${I18N.t('app.account.revoke')}</button>
+            onclick="revokeApiKey('${k.id}', '${_escApi(k.name).replace(/'/g, "\\'")}')">${I18N.t('app.account.revoke')}</button>
         </div>
       `).join('');
     }

@@ -85,7 +85,7 @@ class TestDashboardNoSlice:
         """验证 dashboard.js 中 _buildRelatedPipelineHTML 不再使用 slice(0, 20)"""
         import os
         js_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "src", "api", "static", "js", "pages", "dashboard.js"
+            os.path.dirname(__file__), "..", "..", "..", "src", "api", "static", "js", "pages", "dashboard.js"
         )
         with open(js_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -102,7 +102,7 @@ class TestPipelinePyFailedCountInReturn:
         """验证 pipeline.py 源码中 get_pipeline 返回字典包含 failed_count"""
         import os
         py_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "src", "api", "routes", "pipeline.py"
+            os.path.dirname(__file__), "..", "..", "..", "src", "domains", "runtime", "routes", "pipeline.py"
         )
         with open(py_path, "r", encoding="utf-8") as f:
             content = f.read()

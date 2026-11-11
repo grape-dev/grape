@@ -91,6 +91,39 @@ WHITELIST: dict[str, dict[str, str]] = {
     "src/kernel/auth_sdk/jwt_utils.py": {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
     },
+    # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
+    # Phase 5 inverts them through src/domains/contracts.
+    "src/kernel/mysql_compat.py": {
+        "R1": {"targets": ["src.domains.insight.observability.otel"],
+              "reason": "deferred otel db-span instrumentation; due Phase 5 -> contracts"},
+    },
+    "src/kernel/repo_key.py": {
+        "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
+              "reason": "deferred platform-card lookups; due Phase 5 -> contracts"},
+    },
+    "src/kernel/repo.py": {
+        "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
+              "reason": "deferred platform-card lookup; due Phase 5 -> contracts"},
+    },
+    "src/kernel/auth_sdk/channel_strategy.py": {
+        "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.mgmt.user"],
+              "reason": "deferred provider/strategy resolution; due Phase 5 -> contracts"},
+    },
+    "src/kernel/auth_sdk/provider_link.py": {
+        "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.runtime.vcs.platform_card"],
+              "reason": "deferred provider + vcs-card enumeration; due Phase 5 -> contracts"},
+    },
+    # R6: legacy shim imports due Phase 5 contracts. Evidence: check-arch at
+    # base 13c6d0979 fails with these 13 R6 findings before this PR's changes
+    # (run `python scripts/check-arch.py` on the base tree to reproduce).
+    "src/domains/runtime/agents/aishell_acp.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/pipeline/event_pipeline.py": {"R6": {"targets": ["src.outbound_ledger", "src.prompt_builder", "src.repo_key"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/engine/direct_executor.py": {"R6": {"targets": ["src.session_manager"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/routes/webhook.py": {"R6": {"targets": ["src.api.event_pipeline", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/routes/events.py": {"R6": {"targets": ["src.api.event_pipeline"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/routes/issues.py": {"R6": {"targets": ["src.api.event_pipeline"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
     # R5: known import cycles inherited from the pre-Phase-1 layout.
     # agents <-> engine: M0 compat forwarding layer (src.domains.runtime.agents re-exported
     #   src.domains.runtime.engine backends); importing src.domains.runtime.agents before src.domains.runtime.engine fails
@@ -98,8 +131,9 @@ WHITELIST: dict[str, dict[str, str]] = {
     #   executor/base coupling when _execute_agent moves out.
     # vcs.providers <-> vcs.providers.base: small registration cycle in the
     #   vcs provider plugin loader; harmless (parent init completes first).
-    "CYCLE:src.domains.runtime.agents+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.engine.engine_select+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine.registry+src.domains.runtime.engine.service": {
-        "R5": "pre-existing agents<->engine M0 forwarding cycle; Phase 3 direct_executor cleanup",
+    "CYCLE:src.domains.runtime.agents+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.engine.engine_select+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine.registry+src.domains.runtime.engine.service+src.domains.runtime.agents.aishell_acp+src.domains.runtime.agents.atomcode+src.domains.runtime.agents.hwcloud_acp": {
+        "R5": "agents<->engine M0 forwarding cycle, due Phase 3 direct_executor cleanup."
+             " Evidence: red at base 13c6d0979 (reproduce: check-arch on the base tree).",
     },
     "CYCLE:src.domains.runtime.vcs.providers+src.domains.runtime.vcs.providers.base": {
         "R5": "pre-existing vcs provider registration cycle (harmless init order)",
@@ -229,12 +263,28 @@ def main() -> int:
         if "." in mod and parent in file_modules:
             graph[mod].append(parent)
         allowed = WHITELIST.get(os.path.relpath(path, REPO_ROOT), {})
+
+        def _exempt(rule: str, imported: str) -> bool:
+            """白名单豁免判定（PR #1231 架构复审 Medium-1：精确粒度）。
+
+            - 值为字符串（历史形态）：该文件整条规则豁免（存量条目兼容）。
+            - 值为 dict：**仅豁免 targets 里登记的导入目标**——同文件今后新增
+              的 kernel→domains / shim import 不被吞掉，守卫面不被静默收窄。
+            """
+            a = allowed.get(rule)
+            if a is None:
+                return False
+            if isinstance(a, str):
+                return True
+            if isinstance(a, dict):
+                return imported in a.get("targets", ())
+            return False
         for imp in imps:
             target = layer_of(imp)
             if own == "kernel":
-                if target in DOMAIN_NAMES and target != "contracts" and "R1" not in allowed:
+                if target in DOMAIN_NAMES and target != "contracts" and not _exempt("R1", imp):
                     r1.append((mod, imp))
-                if imp.startswith("src.api") and "R2" not in allowed:
+                if imp.startswith("src.api") and not _exempt("R2", imp):
                     r2.append((mod, imp))
             elif own in DOMAIN_NAMES:
                 if imp.startswith("apps.") or imp == "apps":
@@ -242,7 +292,7 @@ def main() -> int:
                 if target in DOMAIN_NAMES and target != own and target != "contracts" and own != "contracts":
                     r4.append((mod, imp))
             # R6 applies to every kernel/domains file
-            if "R6" not in allowed and any(imp == p or imp.startswith(p + ".") for p in LEGACY_SHIM_PREFIXES):
+            if not _exempt("R6", imp) and any(imp == p or imp.startswith(p + ".") for p in LEGACY_SHIM_PREFIXES):
                 r6.append((mod, imp))
 
     # R5 cycle detection (recursive Tarjan SCC)

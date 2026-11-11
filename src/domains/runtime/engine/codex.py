@@ -203,7 +203,7 @@ class CodexRuntime(AgentRuntime):
         # 未知 item 类型
         return {"type": "other", "raw": f"{event_type}:{item_type}"}
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         """注入 codex 凭据环境变量。
 
         codex CLI 优先读 CODEX_API_KEY，回退 OPENAI_API_KEY。

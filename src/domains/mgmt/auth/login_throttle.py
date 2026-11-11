@@ -29,11 +29,11 @@ IP_WINDOW = 600                   # IP 维度统计窗口 10 分钟（秒）
 
 
 def _now_str() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
 def _since_str(window: int) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - window))
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - window))
 
 
 def record_failure(identifier: str, ip: str) -> None:

@@ -231,11 +231,13 @@ class TestOAuthCallback:
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True), \
-             patch("src.domains.mgmt.user.db.create_user", return_value=None):
+             patch("src.domains.mgmt.routes.grape_auth.create_grape_account_oauth",
+                   return_value=None):
 
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
-        # grape_auth callback 建号失败（create_grape_account_oauth=None，Issue #1588 后无 create_user）
+        # grape_auth callback 建号失败（create_grape_account_oauth=None；D32 后 user_accounts
+        # 死表写函数已删除，建号唯一路径是 grape_accounts）
         # 仍走 302 重定向（oauth_error），不 500
         assert r.status_code == 302
 

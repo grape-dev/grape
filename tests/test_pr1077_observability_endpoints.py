@@ -64,7 +64,7 @@ def test_faro_collect_proxies_to_configured_upstream(monkeypatch):
 
 
 def _relay_app(monkeypatch, target: str, max_body: int | None = None):
-    from src.api.routes import runtime as rt
+    from src.domains.runtime.routes import runtime as rt
 
     monkeypatch.setattr(rt, "OTLP_RELAY_TARGET", target, raising=True)
     if max_body is not None:
@@ -92,7 +92,7 @@ def test_trace_relay_rejects_oversized_body(monkeypatch):
 
 def test_trace_relay_body_limit_default_is_two_mb(monkeypatch):
     """默认上限 2MB（OTLP 批量包余量足够）。"""
-    from src.api.routes import runtime as rt
+    from src.domains.runtime.routes import runtime as rt
 
     monkeypatch.delenv("GRAPE_TRACE_RELAY_MAX_BODY", raising=False)
     client = TestClient(_relay_app(monkeypatch, target="http://127.0.0.1:9"))
@@ -116,7 +116,7 @@ def _isolate_otel_env(monkeypatch):
 
 def test_otel_enabled_follows_endpoint_env(monkeypatch):
     """OTEL_EXPORTER_OTLP_ENDPOINT 为空 → 禁用；非空 → 启用。"""
-    from src.observability import otel
+    from src.domains.insight.observability import otel
 
     _isolate_otel_env(monkeypatch)
     assert otel.otel_enabled() is False
@@ -126,7 +126,7 @@ def test_otel_enabled_follows_endpoint_env(monkeypatch):
 
 def test_start_db_span_returns_none_without_parent(monkeypatch):
     """无有效父上下文时不建 span（避免孤儿 trace）。"""
-    from src.observability import otel
+    from src.domains.insight.observability import otel
 
     _isolate_otel_env(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
@@ -134,7 +134,7 @@ def test_start_db_span_returns_none_without_parent(monkeypatch):
 
 
 def test_start_db_span_none_when_disabled(monkeypatch):
-    from src.observability import otel
+    from src.domains.insight.observability import otel
 
     _isolate_otel_env(monkeypatch)
     assert otel.start_db_span("SELECT 1") is None
@@ -142,7 +142,7 @@ def test_start_db_span_none_when_disabled(monkeypatch):
 
 def test_trace_context_roundtrip(monkeypatch):
     """入队 span 的 traceparent 能被 resume 还原为同一 trace_id（跨进程串联前提）。"""
-    from src.observability import otel
+    from src.domains.insight.observability import otel
 
     _isolate_otel_env(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
@@ -162,7 +162,7 @@ def test_trace_context_roundtrip(monkeypatch):
 
 def test_init_otel_is_process_level_idempotent(monkeypatch):
     """同一进程内不同 service_name 重复 init 不会重建 Provider（P2-4）。"""
-    from src.observability import otel
+    from src.domains.insight.observability import otel
 
     _isolate_otel_env(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
@@ -179,8 +179,8 @@ def test_worker_manifest_ships_otel_client():
     from src import worker_package
 
     manifest = list(worker_package.MANIFEST)
-    assert "src/observability/__init__.py" in manifest
-    assert "src/observability/otel.py" in manifest
+    assert "src/domains/insight/observability/__init__.py" in manifest
+    assert "src/domains/insight/observability/otel.py" in manifest
 
 
 def test_agent_tasks_trace_context_has_schema_migration():
@@ -194,14 +194,14 @@ def test_agent_tasks_trace_context_has_schema_migration():
 
 
 def test_observability_package_imports_without_prometheus(monkeypatch):
-    """worker 包不带 prometheus_client 时，src.observability 仍必须可导入（otel 依赖它）。"""
+    """worker 包不带 prometheus_client 时，src.domains.insight.observability 仍必须可导入（otel 依赖它）。"""
     import importlib
     import sys
 
-    from src import observability
+    from src.domains.insight import observability
 
     assert hasattr(observability, "_PROMETHEUS_AVAILABLE")
     # 桩实现路径：缺失 prometheus 时指标操作为 no-op，不抛异常
     if not observability._PROMETHEUS_AVAILABLE:
         observability.Counter("x", "y", ["l"]).labels(l="v").inc()
-    assert importlib.import_module("src.observability").__name__ == "src.observability"
+    assert importlib.import_module("src.domains.insight.observability").__name__ == "src.domains.insight.observability"

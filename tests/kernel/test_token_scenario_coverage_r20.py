@@ -6,9 +6,10 @@
 - R20.11.5: Repo 不直接 import TokenResolver（避免循环依赖）
 - R20.7.1-R20.7.15: 29 场景中通过薄包装函数获取 token 的已自动覆盖
 """
-import pytest
-from unittest.mock import patch, MagicMock
 
+import pytest
+
+from unittest.mock import patch, MagicMock
 
 class TestRepoBotTokenUnified:
     """R20.11: Repo.bot_token 统一入口。"""
@@ -54,13 +55,16 @@ class TestRepoBotTokenUnified:
         from src.kernel.token_service import get_repo_bot_token
         assert get_repo_bot_token("") == ""
 
-    def test_token_service_detect_and_mark_expired(self):
-        """R20.8.1: detect_and_mark_expired 供 Chat/飞书调用"""
-        from src.kernel.token_service import detect_and_mark_expired
-        with patch("src.kernel.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"):
-            result = detect_and_mark_expired("gitcode:owner/repo")
-            assert result == "TOKEN_EXPIRED"
+    def test_token_service_detect_and_mark_repo_token_expired(self):
+        """R20.8.1: detect_and_mark_repo_token_expired 供 Chat/飞书调用
 
+        D101 方案三（T8 b 案）：门面改名——session 级过期概念随第 1 级删除消亡，
+        旧名 detect_and_mark_expired 已退役（tests/test_d101s_session_cleanup.py 防复活守卫）。
+        """
+        from src.kernel.token_service import detect_and_mark_repo_token_expired
+        with patch("src.kernel.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"):
+            result = detect_and_mark_repo_token_expired("gitcode:owner/repo")
+            assert result == "TOKEN_EXPIRED"
 
 class TestScenarioCoverageAutoInherited:
     """R20.7: 验证薄包装函数已委托 TokenResolver（场景自动覆盖）。"""

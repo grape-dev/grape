@@ -10,15 +10,17 @@
 - get_current_user 提取 login_provider 并传递
 - refresh 端点从旧 refresh_token 继承 login_provider
 """
+
 import uuid
 
 import pytest
+
 from unittest.mock import patch
 
 from src.kernel.auth_sdk.jwt_utils import (create_access_token, verify_access_token,
                                create_refresh_token, verify_refresh_token)
-from src.domains.mgmt.routes.repos import _get_user_provider_and_token
 
+from src.domains.mgmt.routes.repos import _get_user_provider_and_token
 
 class TestCreateAccessTokenLoginProvider:
     """create_access_token 写入 login_provider 字段"""
@@ -48,81 +50,74 @@ class TestCreateAccessTokenLoginProvider:
         assert payload is not None
         assert "login_provider" not in payload
 
-
 class TestGetUserProviderAndToken:
     """_get_user_provider_and_token 按 login_provider 优先选择"""
 
     def test_gitcode_login_prefers_gitcode_token(self):
         """login_provider=gitcode + 双平台 token 共存 → 返回 gitcode"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("alice", login_provider="gitcode")
+        with _mock_tokens("repos", "gh_tok", "gc_tok"):
+                provider, token = _get_user_provider_and_token("alice", login_provider="gitcode")
         assert provider == "gitcode"
         assert token == "gc_tok"
 
     def test_github_login_prefers_github_token(self):
         """login_provider=github + 双平台 token 共存 → 返回 github"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("bob", login_provider="github")
+        with _mock_tokens("repos", "gh_tok", "gc_tok"):
+                provider, token = _get_user_provider_and_token("bob", login_provider="github")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_no_login_provider_fallback_github_first(self):
         """无 login_provider → fallback 现有逻辑（github 优先）"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("carol")
+        with _mock_tokens("repos", "gh_tok", "gc_tok"):
+                provider, token = _get_user_provider_and_token("carol")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_gitcode_login_but_no_gitcode_token_fallback(self):
         """login_provider=gitcode 但无 gitcode token → fallback 到 github"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value=""):
-            provider, token = _get_user_provider_and_token("dave", login_provider="gitcode")
+        with _mock_tokens("repos", "gh_tok", ""):
+                provider, token = _get_user_provider_and_token("dave", login_provider="gitcode")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_github_login_but_no_github_token_fallback(self):
         """login_provider=github 但无 github token → fallback 到 gitcode"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value=""), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("eve", login_provider="github")
+        with _mock_tokens("repos", "", "gc_tok"):
+                provider, token = _get_user_provider_and_token("eve", login_provider="github")
         assert provider == "gitcode"
         assert token == "gc_tok"
 
     def test_no_tokens_returns_empty(self):
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value=""), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value=""):
-            provider, token = _get_user_provider_and_token("frank", login_provider="gitcode")
+        with _mock_tokens("repos", "", ""):
+                provider, token = _get_user_provider_and_token("frank", login_provider="gitcode")
         assert provider == ""
         assert token == ""
 
     def test_gitcode_login_only_gitcode_token(self):
         """login_provider=gitcode + 仅 gitcode token → 返回 gitcode"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value=""), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("grace", login_provider="gitcode")
+        with _mock_tokens("repos", "", "gc_tok"):
+                provider, token = _get_user_provider_and_token("grace", login_provider="gitcode")
         assert provider == "gitcode"
         assert token == "gc_tok"
 
     def test_github_login_only_github_token(self):
         """login_provider=github + 仅 github token → 返回 github"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value=""):
-            provider, token = _get_user_provider_and_token("henry", login_provider="github")
+        with _mock_tokens("repos", "gh_tok", ""):
+                provider, token = _get_user_provider_and_token("henry", login_provider="github")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_unknown_login_provider_fallback(self):
-        """未知 login_provider 值 → fallback 到现有逻辑"""
-        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("ivan", login_provider="gitlab")
+        """未配置平台的 login_provider 值 → fallback 到现有逻辑（github 优先）。
+
+        D85 迁移注记：原断言用 "gitlab" 当未知值——S83 平台卡文件化后 gitlab
+        是已配平台（configs/platforms/gitlab.json），会被 login_provider 优先
+        逻辑尊重（预期行为变化，非回归）。改用真正未配置的平台名。"""
+        with _mock_tokens("repos", "gh_tok", "gc_tok"):
+            provider, token = _get_user_provider_and_token("ivan", login_provider="nosuchplatform")
         assert provider == "github"
         assert token == "gh_tok"
-
 
 class TestGetCurrentUserLoginProvider:
     """get_current_user 提取 login_provider 并放入返回 dict"""
@@ -153,7 +148,6 @@ class TestGetCurrentUserLoginProvider:
             assert user_obj["login_provider"] == ""
         finally:
             soft_delete_account(u["id"])
-
 
 class TestCreateRefreshTokenLoginProvider:
     """create_refresh_token 写入 login_provider 并在滚动续期时继承"""
@@ -193,7 +187,6 @@ class TestCreateRefreshTokenLoginProvider:
         assert new_payload["login_provider"] == "github"
         # max_exp 也继承
         assert new_payload["max_exp"] == old_max_exp
-
 
 class TestRefreshEndpointLoginProvider:
     """refresh 端点从旧 refresh_token 继承 login_provider"""
@@ -249,3 +242,16 @@ class TestRefreshEndpointLoginProvider:
             assert "login_provider" not in payload
         finally:
             soft_delete_account(u["id"])
+
+from contextlib import ExitStack
+
+def _mock_tokens(repo_mod_attr, gh_tok, gc_tok):
+    """D85 迁移：旧双符号 get_user_github_token_with_refresh/get_user_token_with_refresh
+    已统一为 deps.get_user_token_for（provider 无关，S57/D30）。按 provider 分发 mock：
+    模块级绑定（repos.L14 from-import）与 deps 源（repos 内局部 import 点）双点位同时激活（ExitStack 组合单上下文——for+顺序 with 不嵌套，只有最后一个生效）。"""
+    def _f(username, user_id=0, provider="gitcode"):
+        return gh_tok if provider == "github" else gc_tok
+    stack = ExitStack()
+    stack.enter_context(patch(f"src.domains.mgmt.routes.{repo_mod_attr}.get_user_token_for", _f))
+    stack.enter_context(patch("src.api.deps.get_user_token_for", _f))
+    return stack

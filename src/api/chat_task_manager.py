@@ -24,7 +24,7 @@ from src.kernel.config import log
 class ChatTask:
     """单个 chat 任务的内存状态"""
 
-    def __init__(self, task_id: str, conv_id: str, user_id: int, username: str):
+    def __init__(self, task_id: str, conv_id: str, user_id: str, username: str):
         self.task_id = task_id
         self.conv_id = conv_id
         self.user_id = user_id
@@ -155,7 +155,7 @@ class ChatTaskManager:
             log.info(f"ChatTaskManager cleanup {len(stale)} stale tasks")
 
     @classmethod
-    def register_idle(cls, task_id: str, conv_id: str, user_id: int, username: str) -> ChatTask:
+    def register_idle(cls, task_id: str, conv_id: str, user_id: str, username: str) -> ChatTask:
         """登记一个由外部驱动的事件缓冲任务（不启动后台线程）。
 
         feishu-chat-stream-unified-design.md Step 2：
@@ -222,7 +222,7 @@ class ChatTaskManager:
                  f"text_len={len(task.final_text)}")
 
     @classmethod
-    def submit(cls, task_id: str, conv_id: str, user_id: int, username: str,
+    def submit(cls, task_id: str, conv_id: str, user_id: str, username: str,
                agent_fn: Callable[[], Generator]) -> ChatTask:
         """启动后台 agent 线程，立即返回 ChatTask。
 

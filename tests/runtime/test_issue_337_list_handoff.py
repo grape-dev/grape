@@ -57,6 +57,35 @@ from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.domains.runtime.routes.issues import targets_issue, handoff_issue, IssueHandoffBody  # noqa: E402
 from src.api.issues_center import get_handoff_targets  # noqa: E402
 
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_shared_db_env():
+    """混跑污染修复（D46/S68）：模块级把 DEVOPS_DB_PATH/DB_PATH 指到独立库
+    且全程不恢复——本文件跑完后，后续任何按 env 重开连接的导入/reload
+    全部错开共享测试库（实测混跑 no such table / database is locked 族）。
+    本文件全部用例结束后：恢复 conftest 共享库 env + config，reload
+    session_manager/db_setup 回真连接，并把所有捕获了本文件私有连接的
+    模块重绑回共享连接（本文件用例使用模块级捕获的 db 引用，已完成，
+    不受影响）。"""
+    import importlib
+    _shared = os.path.join(ROOT, "data", "test_sessions.db")
+    _private_conn = db
+    yield
+    os.environ["DEVOPS_DB_PATH"] = _shared
+    import src.kernel.config as _cfg
+    _cfg.DB_PATH = _shared
+    import src.kernel.session_manager as _sm
+    import src.api.db_setup as _dbs
+    importlib.reload(_sm)
+    importlib.reload(_dbs)
+    _shared_conn = _sm.db
+    for _m in list(sys.modules.values()):
+        try:
+            if getattr(_m, "db", None) is _private_conn:
+                _m.db = _shared_conn
+        except Exception:
+            pass
+
 REPO = "gitcode:org/test-337"
 
 

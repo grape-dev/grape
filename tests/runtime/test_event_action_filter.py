@@ -21,7 +21,7 @@ def _clean_event_rules():
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM event_action_filter WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
+        c.execute("DELETE FROM event_action_filter WHERE event_type IN ('issue_updated','pull_request_opened','pull_request_merged')  -- S86/D62: 旧语句引用产品从不存在的 repo_key 列（陈旧 fixture，事件族 ~30 预存量失败根因）；按本 fixture 注入的 event_type 清理")
         cur = c
         def _ins(evt, act, allow, actor="any", req="", block="", se=""):
             cur.execute(
@@ -44,7 +44,7 @@ def _clean_event_rules():
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM event_action_filter WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
+        c.execute("DELETE FROM event_action_filter WHERE event_type IN ('issue_updated','pull_request_opened','pull_request_merged')  -- S86/D62: 旧语句引用产品从不存在的 repo_key 列（陈旧 fixture，事件族 ~30 预存量失败根因）；按本 fixture 注入的 event_type 清理")
         db.commit()
     event_rule.load_event_action_rule(force=True)
 
@@ -170,11 +170,12 @@ class TestResolveIssueStageAgent:
                 db.commit()
 
     def test_issue_comment_route(self):
-        # issue 类事件：vod→vod，issue 及之后（coding/qa/sre）→issue，done→不分发
+        # issue 类事件：vod→vod，issue→issue；coding/qa/sre 阶段评论归当前阶段 agent
+        # （S86/D62 特征更新：矩阵自 issue-49 起即阶段自归，旧期望 coding→issue 陈旧）
         assert self._resolve("issue_comment", "vod") == "vod"
         assert self._resolve("issue_comment", "issue") == "issue"
-        assert self._resolve("issue_comment", "coding") == "issue"
-        assert self._resolve("issue_comment", "sre") == "issue"
+        assert self._resolve("issue_comment", "coding") == "coding"
+        assert self._resolve("issue_comment", "sre") == "sre"
         assert self._resolve("issue_comment", "done") == ""
 
     def test_pr_opened_route(self):
@@ -187,7 +188,9 @@ class TestResolveIssueStageAgent:
 
     def test_pr_merged_route(self):
         assert self._resolve("pull_request_merged", "coding") == "coding"
-        assert self._resolve("pull_request_merged", "qa") == "qa"
+        # S86/D62 特征更新：qa→sre 为 #544 有意设计（merged 后 SRE 收口），
+        # 旧期望 qa→qa 写于 #544 之前且因 fixture 损坏从未真正运行
+        assert self._resolve("pull_request_merged", "qa") == "sre"
         assert self._resolve("pull_request_merged", "sre") == "sre"
 
     def test_issue_opened_always_vod(self):

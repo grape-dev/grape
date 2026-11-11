@@ -38,7 +38,23 @@ let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #4
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
 let _taskFilterStatuses = []; // 按状态多选筛选（空=全部；Issue #926：映射 statuses= 发服务端）
 let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部；Issue #805: 值域改为 creator，请求携 creators=）
-let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
+// Issue #1740：「我的需求 / 仓库全部」视图模式持久化，刷新后保持上次选择
+const _TASKS_VIEW_MODE_KEY = 'tasks_view_mode';
+function _loadTasksViewMode() {
+  try {
+    var saved = localStorage.getItem(_TASKS_VIEW_MODE_KEY);
+    if (saved === 'mine' || saved === 'repo_all') return saved;
+  } catch (e) { /* localStorage 不可用/被污染 → 回退默认 */ }
+  return 'mine';
+}
+function _saveTasksViewMode(mode) {
+  try {
+    if (mode === 'mine' || mode === 'repo_all') {
+      localStorage.setItem(_TASKS_VIEW_MODE_KEY, mode);
+    }
+  } catch (e) { /* ignore */ }
+}
+let _tasksViewMode = _loadTasksViewMode();  // 'mine' | 'repo_all'（Issue #72/#1740）
 let _taskFilterPopoverOpen = false;  // 筛选 popover 展开状态（跨 _render 保持）
 
 // ===== Issue #1077-F：仓库全部 · 看板按列独立分页 =====
@@ -343,6 +359,7 @@ function _tasksReload(resetAll) {
 window._switchTasksViewMode = function(mode) {
   if (_tasksViewMode === mode) return;
   _tasksViewMode = mode;
+  _saveTasksViewMode(mode);  // Issue #1740：持久化，刷新后保持上次选择
   _taskSel = null;
   _taskPage = 1;
   _taskFilterStatuses = [];
@@ -397,13 +414,40 @@ function _stopScenePoll() {
 }
 
 let _deployUrl = '';
+
+// ── S2/D102 载入顺序/隔离环境降级垫片 ─────────────────────────────────
+// app.js（全局唯一 escHtml/stripRepoPrefix/_repoWebHost 权威实现）在本文件之后
+// defer 执行；本文件先于 app.js 载入时（或单测/隔离环境只加载本文件时），
+// 降级在位提供等价实现。app.js 载入后无条件覆盖，权威口径始终以 app.js 为准
+// （与 autopilot.js / scene-market.js 的「优先全局 + 在位降级」同款约定）。
+(function () {
+  if (typeof window.escHtml !== 'function') {
+    window.escHtml = function (s) {
+      if (!s) return '';
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    };
+  }
+  if (typeof window.stripRepoPrefix !== 'function') {
+    window.stripRepoPrefix = function (s) {
+      return String(s || '').replace(/^(gitcode|github|gitlab|gitee):/, '');
+    };
+  }
+  if (typeof window._repoWebHost !== 'function') {
+    var _KNOWN_HOSTS = { github: 'github.com', gitcode: 'gitcode.com',
+                         gitee: 'gitee.com', gitlab: 'gitlab.com' };
+    window._repoWebHost = function (repoKey) {
+      var prov = ((repoKey || '').split(':')[0] || 'gitcode');
+      if (prov.indexOf('/') !== -1) prov = 'gitcode';
+      return _KNOWN_HOSTS[prov] || 'gitcode.com';
+    };
+  }
+})();
+
 let _deployEditing = false;
 let _deployLongPressTimer = null;
 
-function _escapeHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+function _escapeHtml(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml
 
 function _isValidDeployUrl(url) {
   if (!url) return true;
@@ -680,15 +724,25 @@ function _openDeeplinkDetailViaApi(repo, issueNum) {
   });
 }
 
-function _mapStatusL(t) {
-  if (t.status === 'cancelled') return 'cancelled';
-  if (t.status === 'completed' || t.stage === 'done') return 'done';
-  if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
-  if (t.status === 'awaiting_input') return 'awaiting_input';
-  if (['vod','issue','coding','qa','sre'].includes(t.stage)) return 'in_progress';
-  if (t.status === 'processing') return 'in_progress';
+// Issue #1740：看板/列表/筛选项统一分组映射（单一事实源）。
+// 兼容 /issues/mine 与 /issues/{owner}/{repo} 返回的 status / stage 两套字段口径：
+// - status：数据库任务状态 active/processing/awaiting_input/pending_review/completed/cancelled
+// - stage：流水线节点 vod/issue/coding/qa/sre/done/pending_review...
+// 同一条记录 status 与 stage 可能不同步，任一字段能确定列即按「终态 > 待审/待澄清 > 进行中 > 待处理」优先。
+function _mapStatus(t) {
+  if (!t) return 'pending';
+  var status = String(t.status || '').toLowerCase();
+  var stage = String(t.stage || '').toLowerCase();
+  if (status === 'cancelled' || stage === 'cancelled') return 'cancelled';
+  if (status === 'completed' || stage === 'done' || stage === 'completed') return 'done';
+  if (status === 'pending_review' || stage === 'pending_review') return 'pending_review';
+  if (status === 'awaiting_input' || stage === 'awaiting_input') return 'awaiting_input';
+  if (status === 'processing' || stage === 'processing' ||
+      ['vod', 'issue', 'coding', 'qa', 'sre'].indexOf(stage) >= 0) return 'in_progress';
   return 'pending';
 }
+// 兼容历史调用名（看板/列表/筛选横跨多处，统一委托 _mapStatus）
+function _mapStatusL(t) { return _mapStatus(t); }
 
 function _filteredTasks() {
   let list = _tasksAll;
@@ -726,6 +780,42 @@ function _filteredTasks() {
   return list;
 }
 
+// Issue #1740：清理详情态与详情轮询（返回看板/场景/列表时统一调用）
+function _clearTaskDetailState() {
+  window._currentDetailTask = null;
+  if (window._taskPipeTimer) { clearInterval(window._taskPipeTimer); window._taskPipeTimer = null; }
+}
+
+// Issue #1740：从详情返回看板——先用缓存立即渲染（各列都有数据），
+// 再后台校准并恢复场景轮询；仓库全部看板按列合并刷新，避免全局分页覆盖列游标缓存。
+function _resumeTasksAfterDetail() {
+  _startScenePoll();
+  if (_boardPagingActive()) {
+    if (_tasksAll.length > 0) {
+      _render();
+      _boardLoadAll({ merge: true });
+    } else {
+      _tasksReload();
+    }
+    return;
+  }
+  if (_tasksAll.length > 0) {
+    _render();
+    loadTasks({ merge: true });
+  } else {
+    loadTasks();
+  }
+}
+
+// 统一「返回」入口：场景来源回退历史栈，其余回到需求中心看板
+window._backToBoard = function() {
+  var _fromScene = !!window._taskDetailFromScene;
+  window._taskDetailFromScene = null;
+  _clearTaskDetailState();
+  if (_fromScene) { window.history.back(); return; }
+  _resumeTasksAfterDetail();
+};
+
 window._openBoardDetail = function(taskId) {
   const t = window._tasksById[taskId];
   if (!t) return;
@@ -744,21 +834,20 @@ window._openBoardDetail = function(taskId) {
   window._pipeEventsShown = 20;
   // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
-  var _backAction = 'loadTasks()';
+  var _backAction = '_backToBoard()';  // Issue #1740：统一返回链路
   if (window._taskDetailFromScene) {
     _backLabel = '← ' + (I18N.t('dashboard.scene_detail')||'场景详情');
-    _backAction = "window._taskDetailFromScene=null;window.history.back()";
   }
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
       <button class="tsk-btn tsk-btn-ghost" onclick="${_backAction}" style="padding:6px 14px">${_backLabel}</button>
-      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
+      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escapeHtml(t.title || '')}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, '/issues/' + t.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button>
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('issues.detail.go_conversation')}</button>
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById['${t.id}'])">${I18N.t('issues.detail.go_conversation')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal('${t.id}')">⎘ ${I18N.t('issues.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
       ${_renderCrossPipelineButton(t)}
     </div>
@@ -793,9 +882,10 @@ window._openPRDetail = function(t) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
-  var _vcsBase = t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com';
+  // 扫雷⑥ P0：host 统一走全局 _repoWebHost（卡目录派生），前缀统一 stripRepoPrefix
+  var _vcsBase = window._repoWebHost(t.repo_key);
   var _vcsPath = '/pull/' + t.issue_number;
-  var _vcsUrl = 'https://' + _vcsBase + '/' + t.repo_key.replace(/^(github|gitcode):/, '') + _vcsPath;
+  var _vcsUrl = 'https://' + _vcsBase + '/' + window.stripRepoPrefix(t.repo_key) + _vcsPath;
   var _statusColor = t.status === 'completed' ? '#34c759' : t.status === 'cancelled' ? '#ff3b30' : t.status === 'processing' ? '#3b82f6' : '#86868b';
   var _statusText = t.status === 'completed' ? '审查完成' : t.status === 'cancelled' ? '审查失败' : t.status === 'processing' ? '审查中' : '待处理';
   var _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
@@ -807,8 +897,8 @@ window._openPRDetail = function(t) {
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
-      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">${_backLabel}</button>
-      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
+      <button class="tsk-btn tsk-btn-ghost" onclick="_backToBoard()" style="padding:6px 14px">${_backLabel}</button>
+      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escapeHtml(t.title || '')}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl}','_blank')">查看 PR ↗</button>
@@ -819,7 +909,7 @@ window._openPRDetail = function(t) {
       <div style="${_cardTitle}">PR 审查</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">状态</span><b style="${_valueStyle};color:${_statusColor}">${_statusText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">PR</span><b style="${_valueStyle}"><a href="${_vcsUrl}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${window.stripRepoPrefix(t.repo_key)}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">触发者</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">触发时间</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       <div style="${_rowStyle};border-bottom:none"><span style="${_labelStyle}">事件数</span><b style="${_valueStyle}">${t.events_count || 0}</b></div>
@@ -925,7 +1015,7 @@ window._openPRDetail = function(t) {
 window._jumpToPipeline = function(nodeId) {
   const t = window._currentDetailTask;
   if (!t || !t.repo_key) { console.warn('jumpToPipeline: no current detail task'); return; }
-  const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
+  const repoKey = window.stripRepoPrefix(t.repo_key);
   const parts = repoKey.split('/');
   if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
   // 设置当前 repo 到 sessionStorage（app.currentRepo 从这里读）
@@ -952,7 +1042,7 @@ window._jumpToNodeEvent = function(seq) {
   window._eventNavFromTask = true;
   // 设置当前 repo 到 sessionStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
-    const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
+    const repoKey = window.stripRepoPrefix(t.repo_key);
     const parts = repoKey.split('/');
     if (parts.length >= 2) {
       const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
@@ -967,7 +1057,7 @@ window._jumpToNodeEvent = function(seq) {
 window._jumpToPipePage = function() {
   const t = window._currentDetailTask;
   if (!t || !t.repo_key) { console.warn('jumpToPipePage: no current detail task'); return; }
-  const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
+  const repoKey = window.stripRepoPrefix(t.repo_key);
   const parts = repoKey.split('/');
   if (parts.length < 2) return;
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
@@ -1115,8 +1205,8 @@ function _renderPipelineSection(data) {
       html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${crossSceneIcon}${e.agent_type || e.event_type || ''}${crossSceneBadge}</span>`;
       html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${_fmtEventTime(e.created_at)}</span>`;
       html += `</div>`;
-      if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>`;
-      if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${e.summary}</div>`;
+      if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escapeHtml(e.title)}</div>`;
+      if (e.summary) html += `<div style="font-size:9px;color:var(--t3,#86868b);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${_escapeHtml(e.summary)}</div>`;
       html += `</div></div>`;
     });
     // 「加载更早的事件」按钮：置列表底部（事件行最新在顶，更早的在下方追加）；
@@ -1163,7 +1253,7 @@ function _boardCardHtml(t, colKey, meta) {
   const sel = _taskSel && _taskSel.id === t.id ? ';border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)' : '';
   const _cardCls = _isRunning ? ' tsk-card-radar' : '';
   const _cardOverflow = _isRunning ? ';overflow:hidden' : '';
-  let html = `<div onclick="_openBoardDetail(${t.id})" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
+  let html = `<div onclick="_openBoardDetail('${t.id}')" class="${_cardCls.trim()}" style="position:relative;flex:0 0 auto;min-height:76px;background:var(--c,#fff);border:0.5px solid var(--b,#e5e5ea);border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)${_cardOverflow}${sel}" onmouseover="this.style.borderColor='rgba(59,130,246,.3)';this.style.boxShadow='0 2px 8px rgba(0,0,0,.06)'" onmouseout="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">`;
   if (_isRunning) {
     html += `<div class="tsk-radar-sweep" style="background:conic-gradient(from 0deg,transparent 0deg,${_stageColor}14 40deg,transparent 90deg)"></div>`;
   }
@@ -1172,9 +1262,9 @@ function _boardCardHtml(t, colKey, meta) {
             <span style="font-size:11px;color:var(--t3,#86868b);font-weight:500;font-family:-apple-system,BlinkMacSystemFont,sans-serif">${t.issue_number ? '#' + t.issue_number : ''}</span>
             ${_tagHtml}
           </div>
-          <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
+          <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${_escapeHtml(t.title || '')}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : (window.stripRepoPrefix(t.repo_key || ''))}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at || '').substring(5, 10)}</span>
           </div>
         </div>`;
@@ -1301,17 +1391,17 @@ function _taskRowHtml(t) {
     return `<div class="tsk-row${sel}" onclick="app.nav('event','${t.pr_seq}')">
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
-        <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+        <div class="tsk-r-title">PR #${t.issue_number} · ${_escapeHtml(t.title || '')}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${window.stripRepoPrefix(t.repo_key)}${_assigneeHtml}</div>
       </div>
       <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
     </div>`;
   }
-  return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById[${t.id}];_render()" ondblclick="openTaskConversation(window._tasksById[${t.id}])">
+  return `<div class="tsk-row${sel}" onclick="_taskSel=window._tasksById['${t.id}'];_render()" ondblclick="openTaskConversation(window._tasksById['${t.id}'])">
     <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
     <div class="tsk-r-main">
-      <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-      <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
+      <div class="tsk-r-title">Issue #${t.issue_number} · ${_escapeHtml(t.title || '')}</div>
+      <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${window.stripRepoPrefix(t.repo_key)}${_creatorHtml}</div>
     </div>
     <span class="tsk-tag ${si.cls}">${si.text}</span>
   </div>`;
@@ -1562,7 +1652,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column"><div id="taskListBody">${listHtml}</div><div style="flex:1"></div><div id="taskListPager">${pagerHtml}</div></div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}${_renderCrossPipelineButton(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById['${_taskSel.id}'])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal('${_taskSel.id}')">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}${_renderCrossPipelineButton(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
@@ -1690,7 +1780,7 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.issue_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.creator || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${t.is_pr ? 'PR' : 'Issue'}</span><b style="${_valueStyle}"><a href="${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${window.stripRepoPrefix(t.repo_key)}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.pipeline_scene')||'流水线场景'}</span><b style="${_valueStyle}">${sceneName}${sceneBadge}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.task_mode')}</span><b style="${_valueStyle}">${subtaskBadge}${parentIssue}</b></div>
@@ -1705,7 +1795,7 @@ function _detailHtml(t) {
         <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:0.5px solid rgba(0,113,227,.3);font-size:12px;color:#0071e3" onmouseover="this.style.background='rgba(0,113,227,.06)'" onmouseout="this.style.background='transparent'">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           上传附件
-          <input type="file" style="display:none" onchange="_onTaskAttachSelect(this,${t.id})">
+          <input type="file" style="display:none" onchange="_onTaskAttachSelect(this,'${t.id}')">
         </label>
       </div>` : ''}
     </div>`;
@@ -1853,7 +1943,7 @@ function _renderTaskActionsInline(t) {
   let html = '';
   // Issue #131: 任意阶段均可确认完成（cancelled/completed 不显示）
   if (_status !== 'completed' && _status !== 'cancelled') {
-    html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
+    html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone('${t.id}',event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
   }
   // Issue #393: 仓库 admin 专用「管理员确认完成」终审入口——
   // 角色数据源 /repos/member 缓存（role==='Admin'）；非 admin 置灰 + 提示。
@@ -1861,16 +1951,16 @@ function _renderTaskActionsInline(t) {
   if (_status !== 'completed' && _status !== 'cancelled') {
     const _isAdmin = _isRepoAdmin393(t.repo_key);
     html += _isAdmin
-      ? `<button class="tsk-btn tsk-btn-primary" onclick="adminConfirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600;background:#34c759">🛡 ${I18N.t('tasks.admin_confirm_done')}</button>`
+      ? `<button class="tsk-btn tsk-btn-primary" onclick="adminConfirmTaskDone('${t.id}',event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600;background:#34c759">🛡 ${I18N.t('tasks.admin_confirm_done')}</button>`
       : `<button class="tsk-btn tsk-btn-ghost" disabled title="${I18N.t('tasks.admin_only_hint')}" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600;opacity:.45;cursor:not-allowed">🛡 ${I18N.t('tasks.admin_confirm_done')}</button>`;
   }
   // 取消任务
   if (_status !== 'completed' && _status !== 'cancelled') {
-    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')}</button>`;
+    html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask('${t.id}',event)" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')}</button>`;
   }
   // 恢复任务
   if (_status === 'cancelled') {
-    html += `<button class="tsk-btn tsk-btn-primary" onclick="resumeTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↻ ${I18N.t('tasks.resume_task')}</button>`;
+    html += `<button class="tsk-btn tsk-btn-primary" onclick="resumeTask('${t.id}')" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↻ ${I18N.t('tasks.resume_task')}</button>`;
   }
   return html;
 }
@@ -1882,7 +1972,7 @@ function _isRepoAdmin393(repoKey) {
     const cached = JSON.parse(localStorage.getItem('repo_member_cache') || 'null');
     const repos = (cached && cached.repos) || [];
     const rk = String(repoKey || '');
-    const bare = rk.replace(/^(github|gitcode):/, '');
+    const bare = window.stripRepoPrefix(rk);
     const hit = repos.find(function(r) {
       return r.repo_key === rk || r.repo_key === bare || r.full_name === bare;
     });
@@ -1927,8 +2017,8 @@ window._grapeConfirm = function(opts, event) {
   if (dlgY > window.innerHeight - 160) dlgY = window.innerHeight - 160;
   dlg.style.cssText = `position:fixed;left:${dlgX}px;top:${dlgY}px;background:var(--c,#fff);border-radius:12px;padding:14px 18px;max-width:${dlgW}px;width:90%;box-shadow:0 6px 30px rgba(0,0,0,.12);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;transform:scale(1.05);transition:transform .2s cubic-bezier(.4,0,.2,1)`;
   dlg.innerHTML = `
-    <div style="font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:4px;text-align:center">${title||(I18N.t('tasks.confirm')||'确认')}</div>
-    <div style="font-size:11px;color:var(--t2,#3a3a3c);line-height:1.35;text-align:center;margin-bottom:12px;white-space:pre-line">${message||''}</div>
+    <div style="font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:4px;text-align:center">${_escapeHtml(title||(I18N.t('tasks.confirm')||'确认'))}</div>
+    <div style="font-size:11px;color:var(--t2,#3a3a3c);line-height:1.35;text-align:center;margin-bottom:12px;white-space:pre-line">${_escapeHtml(message||'')}</div>
     <div style="display:flex;gap:6px">
       <button id="_grapeCancel" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:rgba(0,0,0,.06);font-size:11px;font-weight:500;color:var(--t1,#1d1d1f);cursor:pointer;font-family:inherit">${cancelText||(I18N.t('tasks.cancel')||'取消')}</button>
       <button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:${danger?'#ff3b30':'#0071e3'};font-size:11px;font-weight:600;color:#fff;cursor:pointer;font-family:inherit">${confirmText||(I18N.t('tasks.confirm')||'确认')}</button>
@@ -2033,7 +2123,7 @@ function openTaskConversation(t) {
   const go = () => app.nav('chat', param);
   if (t && t.id && t.status === 'active') {
     // Issue #175: 给按钮加 loading 反馈，防止用户以为没点到反复点击
-    var btn = document.querySelector('[onclick*="openTaskConversation(' + t.id + ')"]');
+    var btn = document.querySelector('[onclick*="openTaskConversation(\'' + t.id + '\')"]');
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
     var _restoreBtn = function() { if (btn) { btn.disabled = false; btn.style.opacity = '1'; } };
     API.post('/issues/' + t.id + '/start').then(d => {
@@ -2054,7 +2144,7 @@ function openPrInterveneModal() {
   var t = window._currentDetailTask;
   if (!t || !t.is_pr_event) return;
   const repo = app.currentRepo();
-  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  const defaultRepo = repo ? repo.fullName : window.stripRepoPrefix(t.repo_key || '');
   var prUrl = _vcsUrl(t.repo_key, '/pull/' + t.issue_number) || '';
   // 从 qa_history 提取去重的场景列表
   var scenes = {};
@@ -2316,7 +2406,7 @@ function openTaskCopyModal(taskId) {
   const t = window._tasksById[taskId] || window._currentDetailTask;
   if (!t) return;
   const repo = app.currentRepo();
-  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  const defaultRepo = repo ? repo.fullName : window.stripRepoPrefix(t.repo_key || '');
   if (_taskCopyModal) _taskCopyModal.remove();
   _createAttachments = [];
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2424,7 +2514,7 @@ function copyTaskSubmit() {
 function _renderCrossPipelineButton(t) {
   // Show handoff button for all statuses (including completed/cancelled/failed)
   var _label = I18N.t('issues.cross_pipeline.handoff_btn')||'移交到其他流水线';
-  return `<button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px;color:#0071e3;border-color:rgba(0,113,227,.3)" onclick="openCrossPipelineModal(${t.id})">⇄ ${_label}</button>`;
+  return `<button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px;color:#0071e3;border-color:rgba(0,113,227,.3)" onclick="openCrossPipelineModal('${t.id}')">⇄ ${_label}</button>`;
 }
 
 let _crossPipelineModal = null;
@@ -2457,7 +2547,7 @@ window.openCrossPipelineModal = function(taskId) {
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
       <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('crossPipelineOverlay').remove()">${I18N.t('tasks.create.btn_cancel')||'取消'}</button>
-      <button class="tsk-btn tsk-btn-primary" id="cpSubmitBtn" onclick="crossPipelineSubmit(${t.id})" style="background:#0071e3">${I18N.t('issues.cross_pipeline.btn_submit')||'确认移交'}</button>
+      <button class="tsk-btn tsk-btn-primary" id="cpSubmitBtn" onclick="crossPipelineSubmit('${t.id}')" style="background:#0071e3">${I18N.t('issues.cross_pipeline.btn_submit')||'确认移交'}</button>
     </div>
   </div>`;
   ov.id = 'crossPipelineOverlay';

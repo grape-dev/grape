@@ -76,9 +76,6 @@ CHANGES_KEY_MAP = {
     "assignee_id": "assignees",
     "assignee_ids": "assignees",
 }
-# 注意：files / deleted_files / changed_files 不在此折叠为同一 canonical 键。
-# 多个文件维度键同时出现时后写会覆盖前值（Issue #996 复审），统一交给
-# normalize_files() 逐桶归一并保留 added/modified/deleted 三个维度。
 
 
 def normalize_changes(raw_changes: dict) -> dict:
@@ -92,17 +89,21 @@ def normalize_changes(raw_changes: dict) -> dict:
     return result
 
 
-# === 文件级变更清单（Issue #996）===
-# 需要携带 files{added,modified,deleted} 的事件类型：产物清理/自动合入前清理
-# 事件都落在这三类上（push、PR merged、PR updated）。
+SKILL_RESOLVE_FAILED = "skill_resolve_failed"
+
+
 FILE_EVENT_TYPES = {PUSH, PR_MERGED, PR_UPDATED}
 
-# added/modified 单桶上限；deleted 永不截断（审计需要完整删除路径，
-# 见 Issue #996 AC：truncated=true 但 deleted 全量保留）。
+
 FILES_BUCKET_LIMIT = 200
 
+
 _STATUS_ADDED = {"added", "created", "new", "add", "create", "A"}
+
+
 _STATUS_MODIFIED = {"modified", "changed", "updated", "edit", "modify", "M", "R", "renamed"}
+
+
 _STATUS_DELETED = {"removed", "deleted", "delete", "D"}
 
 

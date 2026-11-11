@@ -38,7 +38,7 @@ def list_findings(status: str = Query("", description="filter by status (open/cl
     _norm = (lambda v: v if isinstance(v, int) else 0)
     if not isinstance(limit, int) or limit < 1:
         limit = 100
-    uid = int(user.get("id") or 0)
+    uid = str(user.get("id") or "")
     where, params = [], []
     if status:
         where.append("status=?")
@@ -99,7 +99,7 @@ def dismiss_finding(finding_id: str, body: DismissBody = None, user: dict = Depe
     """
     body = body or DismissBody()
     from src.api.patrol import _now_iso
-    uid = int(user.get("id") or 0)
+    uid = str(user.get("id") or "")
     with db_lock:
         c = db.cursor()
         try:
@@ -109,8 +109,8 @@ def dismiss_finding(finding_id: str, body: DismissBody = None, user: dict = Depe
                 raise HTTPException(status_code=404, detail={"code": 404,
                                                              "message": "finding 不存在"})
             owner = row[0]
-            owner = owner if isinstance(owner, int) else int(owner or 0)
-            if owner != uid or owner == 0:
+            owner = str(row[0] or "").strip()
+            if owner != uid or owner in ("", "0"):
                 # 非归属人 / unowned：admin 兜底（admin_accounts 台账核对）
                 c.execute("SELECT id FROM admin_accounts WHERE id=?", (uid,))
                 if not c.fetchone():

@@ -461,12 +461,12 @@ def get_pipeline(owner: str, repo: str,
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    # 同时查 gitcode: 和 github: 前缀的事件（用户可能切换了 provider）
-    _repo_keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        _repo_keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        _repo_keys.append(f"gitcode:{_owner_repo}")
+    # 同时查各平台前缀的事件（用户可能切换了 provider）
+    # S104/D78：候选集卡派生（合并重同步——weekly-10 版回退成写死
+    # gitcode/github 互查，gitee/gitlab 仓的流水线历史因此查不出来；
+    # 恢复 weekly-08 的 repo_key_candidates 全平台候选）
+    from src.kernel.repo_key import repo_key_candidates
+    _repo_keys = repo_key_candidates(_owner_repo)
 
     from src.kernel.session_manager import db, db_lock
 
@@ -610,7 +610,9 @@ def get_pipeline(owner: str, repo: str,
 
     # 按 Issue 最新活动倒序：用预建索引中的最大 seq 排序（O(N)，避免反复遍历全量 events）
     _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
-    pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
+    # Issue #1816：PR 伪 issue 的 issue_id 已在返回体改写为展示值 PR#N，缓存键是原始 id
+    # （#pr_<n>_<scene>），必须用 raw_issue_id 查，否则键恒 0 沉底并按 PR 号正序。
+    pipelines.sort(key=lambda p: _max_seq_cache.get(p.get("raw_issue_id") or p["issue_id"], 0), reverse=True)
 
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，

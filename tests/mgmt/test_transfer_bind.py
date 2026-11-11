@@ -66,7 +66,8 @@ class TestBindingTicketLifecycle:
         assert data is not None
         assert data["provider"] == "gitcode"
         assert data["external_id"] == "gc_abc123"
-        assert data["original_user_id"] == 99
+        # 根修 A（202611091000）：original_user_id 列归一 TEXT 亲和，存量/新写入恒 text 保值
+        assert str(data["original_user_id"]) == "99"
 
     def test_ticket_one_time_consumption(self):
         """票据一次性消费——第二次校验返回 None。"""
@@ -514,3 +515,58 @@ class TestTransferBindAPI:
         })
 
         assert resp.status_code == 500
+
+
+class TestUuidUserIdBindingTicket:
+    """UUIDv7 主键回归（根修C）：uuid 形态 user id 走 save/validate 全链不误判。"""
+
+    UUID_A = "01913b2a-7c1d-7f60-9a2b-3d4e5f6a7b8c"
+    UUID_B = "01913b2b-8d2e-8a71-0b3c-4e5f6a7b8c9d"
+
+    def test_uuid_ticket_full_chain(self):
+        """uuid-id 用户发起绑定 → validate(initiating_user_id) 双侧 str 归一，不 410。"""
+        from src.domains.mgmt.auth.grape_account_db import save_binding_ticket, validate_binding_ticket, consume_binding_ticket
+
+        ticket = save_binding_ticket(
+            initiating_user_id=self.UUID_A,
+            provider="gitcode",
+            external_id="gc_uuid_chain",
+            external_login="uuiduser",
+            original_user_id=self.UUID_B,
+        )
+        assert ticket
+
+        data = validate_binding_ticket(ticket, self.UUID_A, consume=False)
+        assert data is not None
+        assert data["original_user_id"] == self.UUID_B
+
+        # 重复校验（consume=False）幂等
+        assert validate_binding_ticket(ticket, self.UUID_A, consume=False) is not None
+
+        assert consume_binding_ticket(ticket) is True
+        # 消费后不可再用 → validate 返回 None（transfer-bind 端点据此 410，但这是合法一次性语义）
+        assert validate_binding_ticket(ticket, self.UUID_A, consume=False) is None
+
+    def test_uuid_ticket_mismatch_rejected(self):
+        """uuid 票据对另一 uuid 用户校验必须拒绝（防越权）。"""
+        from src.domains.mgmt.auth.grape_account_db import save_binding_ticket, validate_binding_ticket
+
+        ticket = save_binding_ticket(
+            initiating_user_id=self.UUID_A,
+            provider="github",
+            external_id="gh_uuid_x",
+            original_user_id=self.UUID_B,
+        )
+        assert ticket
+        assert validate_binding_ticket(ticket, self.UUID_B, consume=False) is None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_shared_db_env():
+    """混跑污染修复（D46/S68）：模块级私有库 env 全程不恢复——本文件跑完后，
+    后续任何按 env 重开连接的导入/reload 全部错开共享测试库（实测混跑
+    no such table / locked 族）。用例结束后恢复 conftest 的共享库路径。
+    本文件自身用例在 fixture 生效前已绑定各自连接，不受影响。"""
+    yield
+    os.environ["DEVOPS_DB_PATH"] = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "test_sessions.db")

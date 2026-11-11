@@ -10,8 +10,8 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
-from src.api.routes import webhook
-from src.api.routes.webhook import (
+from src.domains.runtime.routes import webhook
+from src.domains.runtime.routes.webhook import (
     A2AHandoffBody,
     _a2a_event_payload,
     _augment_a2a_dispatch_response,

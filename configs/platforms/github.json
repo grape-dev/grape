@@ -1,0 +1,20 @@
+{
+  "name": "GitHub",
+  "dialect": "github",
+  "host": "github.com",
+  "issue_search": true,
+  "branch_create_form": "refs_sha",
+  "webhook_path": "/webhook/github",
+  "event_header": "X-GitHub-Event",
+  "api_base": "https://api.github.com",
+  "api_auth": "token_header",
+  "webhook_verify": "hmac",
+  "clone_auth": "x_access_token",
+  "download_base": "https://codeload.github.com",
+  "pat_create_url": "https://github.com/settings/tokens",
+  "pr_comment_endpoint": "issues",
+  "pr_labels_via_issues": true,
+  "git_tree_family": "github_api",
+  "brand_color": "#0969DA",
+  "legacy_token_symbol": "get_user_github_token_with_refresh"
+}

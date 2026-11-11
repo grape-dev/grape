@@ -6,7 +6,7 @@ from .event_types import (
     ISSUE_ASSIGNED, ISSUE_LABELED, ISSUE_COMMENT,
     PR_OPENED, PR_UPDATED, PR_CLOSED, PR_MERGED, PR_COMMENT,
     PUSH, TAG_CREATED, RELEASE_CREATED, BUILD_START,
-    normalize_changes, normalize_files, has_file_changes, FILE_EVENT_TYPES,
+    normalize_changes,
 )
 
 
@@ -36,12 +36,6 @@ class GitLabBackend(VcsBackend):
         payload["_raw_action"] = action
         payload["_changes"] = changes
 
-        # Issue #996：变更类事件携带文件清单（payload 自带 commits/changes 时直接归一）
-        if evt_type in FILE_EVENT_TYPES:
-            _files = normalize_files(payload)
-            if has_file_changes(_files):
-                payload["files"] = _files
-
         return {
             "source": "gitlab",
             "type": evt_type,
@@ -51,6 +45,18 @@ class GitLabBackend(VcsBackend):
             "payload": payload,
             "title": title,
         }
+
+    def verify(self, headers: dict, raw_body: bytes, secret: str) -> "tuple[bool, str]":
+        """S70（实弹发现补齐）：GitLab webhook 验签——X-Gitlab-Token 头 = secret
+        明文常量时间比对（generic webhook 路由调本方法，原缺失 → 500）。"""
+        import hmac as _hmac
+        _h = {str(k).lower(): v for k, v in (headers or {}).items()}
+        token = _h.get("x-gitlab-token") or ""
+        if not token:
+            return False, "missing signature"
+        if _hmac.compare_digest(token, secret or "\x00"):
+            return True, ""
+        return False, "signature mismatch"
 
     def _map_event_type(self, object_kind: str, action: str, changes: dict, payload: dict) -> str:
         # Issue events

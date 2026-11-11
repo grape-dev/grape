@@ -114,20 +114,26 @@ class TestCreateStandardTask:
         """桩掉 _find_open_issue_by_title / _post_gitcode_issue，模拟 GitCode API。"""
         created = {"issues": [], "calls": 0}
 
-        def fake_find(token, owner, repo, title):
+        def fake_find(token, owner, repo, title, provider="gitcode"):
             for it in created["issues"]:
                 if it["title"] == title:
                     return it["number"]
             return None
 
-        def fake_post(token, owner, repo, title, body="", assignee=""):
+        def fake_post(token, provider, owner, repo, title, body="", assignee=""):
             created["calls"] += 1
             n = len(created["issues"]) + 1
             created["issues"].append({"title": title, "number": n})
             return {"number": n}
 
         monkeypatch.setattr(parts, "_find_open_issue_by_title", fake_find)
-        monkeypatch.setattr(parts, "_post_gitcode_issue", fake_post)
+        # 接缝迁移：create_standard_task 直接走 VcsApiClient.create_issue（D21），
+        # 桩挂类方法上（保持"模拟建单"语义，不打真实 API）
+        from src.domains.runtime.vcs.api_client import VcsApiClient as _VCS
+        monkeypatch.setattr(_VCS, "create_issue",
+                            lambda self, title, body="", assignee="": fake_post(
+                                self.token, self.provider, self.owner, self.repo,
+                                title, body, assignee))
         return created
 
     def test_create_and_then_reuse(self, parts, monkeypatch):

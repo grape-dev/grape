@@ -1,20 +1,28 @@
-
 """Settings 路由：凭据、通知偏好、GitCode Repo、Backend Runtimes"""
+
 import json
+
 from datetime import datetime, timedelta
+
 from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Depends, Request, Response
+
 from pydantic import BaseModel
+
 from src.domains.mgmt.user import db as user_db
+
 from src.api.deps import require_no_session_token, require_org_member
+
 from src.kernel.config import log
+
 from src.api.time_utils import normalize_event_time
+
 from src.kernel.repo_key import from_repo_key
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-
-def _check_login_method_before_unbind(user_id: int, provider: str):
+def _check_login_method_before_unbind(user_id: str, provider: str):
     """P0-4: 手动令牌解绑前检查至少保留一种登录方式。
 
     与 grape_auth.py 的 unbind_provider 保持一致：
@@ -33,7 +41,6 @@ def _check_login_method_before_unbind(user_id: int, provider: str):
             },
         )
 
-
 def _resolve_repo_key(owner_repo: str) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
     from src.kernel.repo_key import to_repo_key
@@ -44,24 +51,40 @@ def _resolve_repo_key(owner_repo: str) -> str:
         from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-                            (f"gitcode:{owner_repo}", f"github:{owner_repo}")).fetchone()
+            from src.kernel.repo_key import repo_key_candidates
+            _rks = tuple(repo_key_candidates(owner_repo))
+            row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({','.join('?' * len(_rks))}) LIMIT 1",
+                            _rks).fetchone()
             if row:
                 return row[0]
     except Exception:
         pass
     return rk
 
-
-# ====== Credentials ======
-
 @router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
-    from src.api.deps import get_user_token, get_user_github_token_with_refresh
+    from src.api.deps import get_user_token, get_user_token_for
     from src.domains.mgmt.auth.grape_account_db import get_user_identities
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvcs
+    _vcs_platform_list = list(_lvcs())  # D102-P 统一：全平台走泛型 <p>_pat 存在性键
     gitcode_token = get_user_token(user["username"])
-    github_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+    github_token = get_user_token_for(user["username"], user_id=user["id"], provider="github")
+    # S63 守卫收口（LABEL_COLOR 同款契约开关派生）：存量专用字段平台（表单键
+    # <p>_token，provider 模块声明 SETTINGS_TOKEN_FIELD_SUFFIX="token"）的 PAT
+    # 存在性回退不按平台名比较——按开关派生在下方 _legacy_dedicated_pat 里
+    # 现取（get_user_token_for 按平台卡派生 provider），未声明平台恒空。
+    from src.domains.runtime.vcs.providers import module_for as _vcs_module_for
+
+    def _legacy_dedicated_pat(p: str) -> str:
+        try:
+            if getattr(_vcs_module_for(p), "SETTINGS_TOKEN_FIELD_SUFFIX", "") == "token":
+                # 数据驱动取数：统一走 get_user_token_for 泛型链（按 provider 查
+                # 凭据域——对 gitcode 同样成立，get_user_token 与其同链仅多刷新）。
+                return get_user_token_for(user["username"], user_id=user["id"], provider=p)
+        except Exception:
+            pass
+        return ""
     identities = {ident["provider"]: ident for ident in get_user_identities(user["id"])}
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
@@ -99,6 +122,24 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
             "token_expired": _github_expired,
         },
         "global_bot_token_status": _global_token_status,
+        # D102-P：泛型平台 PAT 存在性（gitee/gitlab 等平台卡驱动平台）——
+        # 只回存在性+login，不回 token 值（凭据 tab 清除按钮的判定数据源）。
+        **{
+            f"{_p}_pat": (
+                {"exists": True, "login": (_cred or {}).get("login", ""),
+                 **({"workflows_write": _cred["workflows_write"]}
+                    if isinstance(_cred, dict) and "workflows_write" in _cred else {})}
+                if (_cred := user_db.get_credential(user["id"], f"{_p}_pat"))
+                # 存量专用字段平台（契约开关派生）：PAT 走专用字段（token 存 ei），
+                # 存在性对齐专用键——泛型 <p>_pat 凭据域未命中时回退
+                else (
+                    {"exists": True, "login": ""}
+                    if _legacy_dedicated_pat(_p)
+                    else {}
+                )
+            )
+            for _p in _vcs_platform_list
+        },
         "huawei_cloud": {
             "ak_exists": bool(hw_cred.get("ak")),
             "sk_exists": bool(hw_cred.get("sk")),
@@ -109,16 +150,15 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         },
     }
 
-
 # ====== Credential Reveal（Issue #474 方案A：按需取回明文）======
 # GET /credentials 已收敛为「凭据只回存在性」；需要查看/复制明文时走本接口：
 #   二次确认（重新输入 Grape 密码）+ 审计日志 + 明文仅当次返回（Cache-Control: no-store）
 #   + 高频取回告警（窗口内计数超阈值 → 429）。
 _REVEAL_WINDOW_SECONDS = 600      # 高频窗口：10 分钟
+
 _REVEAL_MAX_PER_WINDOW = 10       # 窗口内最大取回次数（第 11 次起告警并拒绝）
 
-
-def _count_reveals_in_window(user_id: int) -> int:
+def _count_reveals_in_window(user_id: str) -> int:
     """统计窗口内该用户的凭据取回次数（幂等；表不存在时返回 0）。
 
     created_at 由 DDL 默认 datetime('now')（UTC）写入；取回日志与审计都走 UTC，
@@ -136,8 +176,7 @@ def _count_reveals_in_window(user_id: int) -> int:
     except Exception:
         return 0
 
-
-def _record_reveal(user_id: int, provider: str, field: str, ip: str):
+def _record_reveal(user_id: str, provider: str, field: str, ip: str):
     """记录一次凭据取回（供高频告警计数；不存明文）。"""
     try:
         from src.kernel.session_manager import db as _sdb, db_lock as _sdl
@@ -150,12 +189,10 @@ def _record_reveal(user_id: int, provider: str, field: str, ip: str):
     except Exception as e:
         log.warning(f"record reveal failed: {e}")
 
-
 class CredentialRevealBody(BaseModel):
     provider: str = "huawei_cloud"   # huawei_cloud / codearts
     field: str = "ak"                # ak / sk
     password: str = ""
-
 
 @router.post("/credentials/reveal", operation_id="settings_credentials_reveal", summary="Reveal a third-party credential plaintext once", description="Returns the plaintext value of one credential field once, after the user re-enters their Grape password. The response carries Cache-Control: no-store and a successful reveal is written to the audit log (provider/field only, never the secret). Repeated reveals within a short window are rate-limited (429).")
 def reveal_credential(body: CredentialRevealBody, user: dict = Depends(require_no_session_token),
@@ -217,7 +254,6 @@ def reveal_credential(body: CredentialRevealBody, user: dict = Depends(require_n
         response.headers["Pragma"] = "no-cache"
     return {"provider": provider, "field": field, "value": value}
 
-
 class UpdateCredentials(BaseModel):
     huawei_cloud_ak: str = ""
     huawei_cloud_sk: str = ""
@@ -225,8 +261,11 @@ class UpdateCredentials(BaseModel):
     codearts_sk: str = ""
     github_token: str = ""
     gitcode_token: str = ""
+    # D32/S52：config-only 平台 PAT 绑定入口（泛型 {provider: token}）。
+    # github/gitcode 走上方既有专用字段，路径零改动；新平台（gitee 等）
+    # 验证后双写 user_credentials <p>_pat（UserToken 级）+ external_identities（归属源）。
+    platform_tokens: dict = {}
     repo_key: str = ""
-
 
 # 占位符凭据（2026-08-17 修复，issue #72）：前端曾把 demo 占位符回显进输入框，
 # 用户直接保存会把占位符当真实值写库，覆盖真实 AK/SK → 部署任务注入占位符持续 401。
@@ -234,7 +273,6 @@ class UpdateCredentials(BaseModel):
 _PLACEHOLDER_VALUES = {
     "AK-demo-access-key-xxxx", "SK-demo-secret-key-xxxx", "ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx",
 }
-
 
 def _is_placeholder(value: str) -> bool:
     v = (value or "").strip()
@@ -245,7 +283,6 @@ def _is_placeholder(value: str) -> bool:
     if v.startswith(("AK-demo-", "SK-demo-", "ghp_devopsbot_")):
         return True
     return "xxxx" in v.lower()
-
 
 @router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected. Sending an empty string explicitly clears the field; omitting a field leaves it unchanged.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
@@ -288,20 +325,29 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     from src.domains.mgmt.auth.grape_account_db import get_external_identity, get_external_identity_any_status, create_external_identity, update_external_identity_tokens, save_binding_ticket
                     existing = get_external_identity("github", gh_id)
                     if existing:
-                        if existing["grape_user_id"] != user["id"]:
+                        if str(existing["grape_user_id"] or "") != str(user["id"] or ""):
                             raise HTTPException(
                                 status_code=409,
                                 detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
                             )
+                        # D105k 解耦收口：PAT 权威存储=凭据域 <p>_pat，ei 只落归属行
+                        #（access_token 置空清残留）——ei.access_token 从此 OAuth 独占
+                        from src.domains.mgmt.user.db import set_credential as _sc
+                        _sc(user["id"], "github_pat", {"token": _gh_tok, "login": gh_login})
                         _ok = update_external_identity_tokens(existing["grape_user_id"], "github",
-                                                               access_token=_gh_tok,
+                                                               access_token="",
                                                                external_name=_gh_user.get("name", ""))
+                        # D105k：不 clear ei token——OAuth+PAT 共存时 ei.token 是
+                        # OAuth 回落凭据，清掉=清除 PAT 后无回落（能力丢失）。
+                        # 历史 PAT 残留由启动回填搬家逻辑按证据分级处理。
+                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
+                        mark_identity_pat(existing["grape_user_id"], "github", pat_login=gh_login)
                         if not _ok:
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     else:
                         # 检查是否存在解绑记录（status=0）属于其他用户
                         any_status = get_external_identity_any_status("github", gh_id)
-                        if any_status and any_status["status"] == 0 and any_status["grape_user_id"] != user["id"]:
+                        if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(user["id"] or ""):
                             # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
                             _ticket = save_binding_ticket(
                                 initiating_user_id=user["id"],
@@ -323,12 +369,17 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                                 },
                             )
                         # 无解绑记录或解绑记录属于当前用户 → 正常创建（create_internal 自动恢复同账号解绑记录）
+                        # D105k：归属行不带 token，PAT 进凭据域
+                        from src.domains.mgmt.user.db import set_credential as _sc
+                        _sc(user["id"], "github_pat", {"token": _gh_tok, "login": gh_login})
                         _ok = create_external_identity(
                             grape_user_id=user["id"], provider="github",
                             external_id=gh_id, external_login=gh_login,
                             external_name=_gh_user.get("name", ""),
-                            access_token=_gh_tok,
+                            access_token="",
                         )
+                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
+                        mark_identity_pat(user["id"], "github", pat_login=gh_login)
                         if not _ok:
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
@@ -342,9 +393,10 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                                 "INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)",
                                 (user["id"],)
                             )
+                            # S92/D68：um 平台归属列停写（身份域+启动回填喂养）
                             _um_c.execute(
-                                "UPDATE unified_user_mapping SET github_login=?, updated_at=datetime('now') WHERE user_id=?",
-                                (gh_login, user["id"])
+                                "UPDATE unified_user_mapping SET updated_at=datetime('now') WHERE user_id=?",
+                                (user["id"],)
                             )
                             _um_db.commit()
                         log.info(f"unified_user_mapping synced: user_id={user['id']}, github_login={gh_login}")
@@ -373,11 +425,8 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     detail={"code": 502, "message": f"GitHub token 验证失败: {_e}"},
                 )
         elif not _gh_tok:
-            # 清除：从 external_identities 删除 GitHub 绑定
-            # P0-4: 解绑前检查至少保留一种登录方式
-            _check_login_method_before_unbind(user["id"], "github")
-            from src.domains.mgmt.auth.grape_account_db import delete_external_identity
-            delete_external_identity(user["id"], "github")
+            # 清除 PAT：级联按 OAuth 共存与否分流（D105k 四象限）
+            _cascade_pat_clear(user, "github")
 
     # GitCode Token（写入时需验证 token 并获取用户信息；清除时无需验证）
     if "gitcode_token" in explicit:
@@ -400,22 +449,30 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     )
                     existing = get_external_identity("gitcode", gc_id)
                     if existing:
-                        if existing["grape_user_id"] != user["id"]:
+                        if str(existing["grape_user_id"] or "") != str(user["id"] or ""):
                             raise HTTPException(
                                 status_code=409,
                                 detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
                             )
+                        # D105k 解耦收口：PAT 权威存储=凭据域 <p>_pat，ei 只落归属行
+                        from src.domains.mgmt.user.db import set_credential as _sc
+                        _sc(user["id"], "gitcode_pat", {"token": _gc_tok, "login": gc_login})
                         _ok = update_external_identity_tokens(
                             existing["grape_user_id"], "gitcode",
-                            access_token=_gc_tok,
+                            access_token="",
                             external_name=_gc_user.get("name", ""),
                         )
+                        # D105k：不 clear ei token——OAuth+PAT 共存时 ei.token 是
+                        # OAuth 回落凭据，清掉=清除 PAT 后无回落（能力丢失）。
+                        # 历史 PAT 残留由启动回填搬家逻辑按证据分级处理。
+                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
+                        mark_identity_pat(existing["grape_user_id"], "gitcode", pat_login=gc_login)
                         if not _ok:
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     else:
                         # 检查是否存在解绑记录（status=0）属于其他用户
                         any_status = get_external_identity_any_status("gitcode", gc_id)
-                        if any_status and any_status["status"] == 0 and any_status["grape_user_id"] != user["id"]:
+                        if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(user["id"] or ""):
                             # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
                             _ticket = save_binding_ticket(
                                 initiating_user_id=user["id"],
@@ -437,12 +494,17 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                                 },
                             )
                         # 无解绑记录或解绑记录属于当前用户 → 正常创建
+                        # D105k：归属行不带 token，PAT 进凭据域
+                        from src.domains.mgmt.user.db import set_credential as _sc
+                        _sc(user["id"], "gitcode_pat", {"token": _gc_tok, "login": gc_login})
                         _ok = create_external_identity(
                             grape_user_id=user["id"], provider="gitcode",
                             external_id=gc_id, external_login=gc_login,
                             external_name=_gc_user.get("name", ""),
-                            access_token=_gc_tok,
+                            access_token="",
                         )
+                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
+                        mark_identity_pat(user["id"], "gitcode", pat_login=gc_login)
                         if not _ok:
                             log.error(f"GitCode bind FAILED: create_external_identity returned False for user={user['id']}, gc_id={gc_id}, gc_login={gc_login}")
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
@@ -452,18 +514,9 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     # pipeline 用 actor（gc_login）查 unified_user_mapping → 必须写 gc_login 作为 gitcode_user
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 github_login 等其他平台字段）
                     try:
-                        from src.kernel.session_manager import db as _um_db, db_lock as _um_dl
-                        with _um_dl:
-                            _um_c = _um_db.cursor()
-                            _um_c.execute(
-                                "INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)",
-                                (user["id"],)
-                            )
-                            _um_c.execute(
-                                "UPDATE unified_user_mapping SET gitcode_user=?, gitcode_nickname=?, updated_at=datetime('now') WHERE user_id=?",
-                                (gc_login, _gc_user.get("name", ""), user["id"])
-                            )
-                            _um_db.commit()
+                        # S99/D74：昵称写收敛 channel_directory（单一权威访问层）
+                        from src.domains.runtime.im.channel_directory import set_gitcode_nickname
+                        set_gitcode_nickname(user["id"], _gc_user.get("name", ""))
                         log.info(f"unified_user_mapping synced: user_id={user['id']}, gitcode_user={gc_login}")
                     except Exception as _um_e:
                         log.warning(f"update_credentials: sync unified_user_mapping failed: {_um_e}")
@@ -489,13 +542,96 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     detail={"code": 502, "message": f"GitCode token 验证失败: {_e}"},
                 )
         elif not _gc_tok:
-            # P0-4: 解绑前检查至少保留一种登录方式
-            _check_login_method_before_unbind(user["id"], "gitcode")
-            from src.domains.mgmt.auth.grape_account_db import delete_external_identity
-            delete_external_identity(user["id"], "gitcode")
+            # 清除 PAT：级联按 OAuth 共存与否分流（D105k 四象限）
+            _cascade_pat_clear(user, "gitcode")
+
+    # D32/S52：config-only 平台 PAT 绑定（泛型 platform_tokens）。github/gitcode
+    # 走上方既有专用字段路径（零改动）；新平台验证后双写
+    # user_credentials <p>_pat（UserToken 级）+ external_identities（D31 归属源）。
+    # 边界：新平台暂不含跨用户转移票据流（冲突直接 409，文档已注明）；
+    # 空值=清除 PAT 凭据（identity 解绑走既有解绑流程，不在此处删）。
+    _platform_tokens = explicit.get("platform_tokens") or {}
+    if _platform_tokens:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        _known_platforms = set(list_vcs_platforms())
+        from src.domains.mgmt.user.db import set_credential
+        from src.domains.mgmt.auth.grape_account_db import (
+            get_external_identity, create_external_identity, update_external_identity_tokens)
+        for _p, _raw_tok in (_platform_tokens.items() if isinstance(_platform_tokens, dict) else []):
+            _p = str(_p or "").strip()
+            # D105-18：值支持对象形态 {"token":..., "workflows_write": bool}
+            #（凭据级能力三态显式声明；字符串形态向后兼容=未声明）
+            _wf_declared = False
+            _wf_write = False
+            if isinstance(_raw_tok, dict):
+                _wf_declared = "workflows_write" in _raw_tok
+                _wf_write = bool(_raw_tok.get("workflows_write") or False)
+                _raw_tok = str(_raw_tok.get("token", "") or "")
+            _tok = str(_raw_tok or "").strip()
+            if not _p:
+                continue
+            # D102-P 统一（口径 v6 终态）：泛型路径全平台生效——存量
+            # gitcode/github 的 <p>_pat 与专用字段语义等价（同账号同 token），
+            # 写入走卡验证 + ei 归属（同专用分支形态）；空串 → 走既有解绑路径
+            # （登录方式保底检查在 delete_external_identity 调用链）。
+            # 专用字段分支保留仅为旧前端兼容（新前端统一发 platform_tokens）。
+            if _p not in _known_platforms:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "message": f"未注册的平台: {_p}（先在管理面配置平台卡）"})
+            if _tok and not _is_placeholder(_tok):
+                try:
+                    from src.kernel.token_resolver import create_provider
+                    _info = create_provider(_p).verify_token(_tok)
+                except HTTPException:
+                    raise
+                except Exception as _ve:
+                    raise HTTPException(status_code=502, detail={
+                        "code": 502, "message": f"{_p} token 验证失败: {_ve}"})
+                if not isinstance(_info, dict) or not _info.get("login") or not _info.get("id"):
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "error_code": "TOKEN_INVALID",
+                        "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
+                _ext_id = str(_info.get("id"))
+                _ext_login = str(_info.get("login", ""))
+                _existing = get_external_identity(_p, _ext_id)
+                if _existing and str(_existing.get("grape_user_id") or "") != str(user["id"] or ""):
+                    raise HTTPException(status_code=409, detail={
+                        "code": 409, "message": f"该 {_p} 账号已被其他 Grape 账号绑定"})
+                # D102-P 职责分域（2026-11-08 用户裁定）：PAT 与 OAuth token 是
+                # 两种东西——归属行只记身份（external_id/login/name），不承载
+                # token（access_token 恒空）；PAT 权威存储=凭据域 <p>_pat，
+                # 供给链 fetch_user_token ① 命中凭据域（token_resolver）。
+                # 历史形态（PAT 写 identity.access_token）由启动回填迁移。
+                if _existing:
+                    _ok = update_external_identity_tokens(
+                        user["id"], _p, access_token="",
+                        external_name=str(_info.get("name", "")))
+                else:
+                    _ok = create_external_identity(
+                        grape_user_id=user["id"], provider=_p,
+                        external_id=_ext_id, external_login=_ext_login,
+                        external_name=str(_info.get("name", "")),
+                        access_token="")
+                if not _ok:
+                    raise HTTPException(status_code=500, detail={
+                        "code": 500, "message": "凭据保存失败"})
+                from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
+                mark_identity_pat(user["id"], _p, pat_login=_ext_login)
+                _pat_cfg = {"token": _tok, "login": _ext_login}
+                if _wf_declared:
+                    _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
+                set_credential(user["id"], f"{_p}_pat", _pat_cfg)
+                log.info(f"platform_tokens: {_p} PAT bound for user={user['id']} login={_ext_login}")
+            elif not _tok:
+                # D105k：清除 = 级联按 OAuth 共存与否分流（四象限）——
+                # 无 OAuth 平台级解绑（ei 归属行+凭据+user_repos 全清，
+                # 修复"清 PAT 后仓库列表残留"）；有 OAuth 只清 PAT 供给 ② 接管
+                set_credential(user["id"], f"{_p}_pat", {})
+                _cascade_pat_clear(user, _p)
 
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
     if "github_token" in explicit or "gitcode_token" in explicit:
+
         try:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
             with _sm_dl:
@@ -506,21 +642,41 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
             log.warning(f"update_credentials: clear user_repos failed: {e}")
 
     # FR-4/FR-10.1: PAT 保存后追加权限探测提示（不阻断保存）
+    # 卡驱动：探测范围 = 全部平台卡目录；token 字段名走 provider 模块契约开关
+    # SETTINGS_TOKEN_FIELD_SUFFIX（LABEL_COLOR 同款模式）：声明 "token" 的平台
+    # （gitcode/github 存量专用字段）用 <p>_token，其余平台走 <p>_pat 凭据键
+    # （与凭据域 D31 存储口径一致）；模块缺失/未声明时回退 <p>_pat 泛型口径。
     _scope_warnings = []
-    for _provider, _token_field in [("gitcode", "gitcode_token"), ("github", "github_token")]:
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+        _probe_platforms = _lvp()
+    except Exception:
+        _probe_platforms = ["gitcode", "github"]
+    for _provider in _probe_platforms:
+        try:
+            from src.domains.runtime.vcs.providers import module_for as _module_for
+            _suffix = getattr(_module_for(_provider), "SETTINGS_TOKEN_FIELD_SUFFIX", "pat")
+        except Exception:
+            _suffix = "pat"
+        _token_field = f"{_provider}_{_suffix}"
         if _token_field in explicit:
             _tok = (explicit[_token_field] or "").strip()
             if _tok and not _is_placeholder(_tok):
                 try:
+                    # D43/S63：探测 URL/鉴权形态按平台卡派生（query_token→参数、其余→头）
                     import requests as _req
-                    if _provider == "gitcode":
+                    from src.domains.runtime.vcs.platform_card import get_platform_card
+                    _card = get_platform_card(_provider)
+                    if _card is None:
+                        raise RuntimeError(f"platform card missing: {_provider}")
+                    if _card.api_auth == "query_token":
                         _hooks_resp = _req.get(
-                            f"https://gitcode.com/api/v5/user/repos?per_page=1",
+                            f"{_card.api_base}/user/repos?per_page=1",
                             params={"access_token": _tok}, timeout=10)
                     else:
                         _hooks_resp = _req.get(
-                            f"https://api.github.com/user/repos?per_page=1",
-                            headers={"Authorization": f"Bearer {_tok}", "Accept": "application/vnd.github+json"},
+                            f"{_card.api_base}/user/repos?per_page=1",
+                            headers={"Authorization": f"Bearer {_tok}", "Accept": "application/json"},
                             timeout=10)
                     if _hooks_resp.status_code == 403:
                         _scope_warnings.append(f"{_provider}: Token 缺少 repo 读权限，仓库状态探活/托管校验将不可用")
@@ -530,12 +686,12 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                             _scope_warnings.append(f"{_provider}: Token 可能缺少 repo 读权限（返回空列表），探活可能不可用")
                 except Exception:
                     pass  # 探测失败不阻断保存
-                # FR-10.1: 检测该用户名下 path B 仓库（host_user_id>0），提示 issue 写权限影响
+                # FR-10.1: 检测该用户名下 path B 仓库（str(host_user_id or "") not in ("", "0")），提示 issue 写权限影响
                 try:
                     from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
                     with _sm_dl:
                         _c = _sm_db.cursor()
-                        _c.execute("SELECT repo_key FROM managed_repos WHERE host_user_id=? AND host_user_id>0 LIMIT 5",
+                        _c.execute("SELECT repo_key FROM managed_repos WHERE host_user_id=? AND (host_user_id IS NOT NULL AND host_user_id != '' AND host_user_id != '0') LIMIT 5",
                                    (user["id"],))
                         _path_b_repos = [r[0] for r in _c.fetchall()]
                     if _path_b_repos:
@@ -545,16 +701,18 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 except Exception:
                     pass
 
+    # D105k：返回最新 bindings（对齐解绑路由 D42 口径）——清除级联可能删了
+    # ei 归属行，前端凭 localStorage.user.bindings 快照判定绑定态（S12f 引导页
+    # 触发依赖），不同步则"清 PAT 后空项目页而非引导页"
+    from src.domains.mgmt.auth.grape_account_db import get_user_identities
+    remaining = [i["provider"] for i in get_user_identities(user["id"])]
     if _scope_warnings:
-        return {"message": "凭据已更新", "scope_warnings": _scope_warnings}
-    return {"message": "凭据已更新"}
-
-
-# ====== API Keys (Issue #69: grape_ 前缀用户级 key 管理) ======
+        return {"message": "凭据已更新", "scope_warnings": _scope_warnings,
+                "bindings": remaining}
+    return {"message": "凭据已更新", "bindings": remaining}
 
 class CreateApiKeyBody(BaseModel):
     name: str = ""
-
 
 @router.post("/api-keys", operation_id="settings_key_create", summary="Create API key", description="Generates a grape_-prefixed API key. Plaintext is returned exactly once; the DB stores the SHA-256 hash.")
 def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_session_token)):
@@ -583,7 +741,6 @@ def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_sessi
         "message": "API Key 已生成，明文仅展示此次，请立即保存",
     }
 
-
 @router.get("/api-keys", operation_id="settings_keys", summary="List API keys", description="Lists the current user's API keys without plaintext (name + status + timestamps only).")
 def list_api_keys(user: dict = Depends(require_no_session_token)):
     """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
@@ -601,7 +758,6 @@ def list_api_keys(user: dict = Depends(require_no_session_token)):
         for t in tokens
     ]}
 
-
 @router.delete("/api-keys/{key_id}", operation_id="settings_key_delete", summary="Revoke API key", description="Revokes an API key (soft delete, revoked=1); takes effect immediately and keeps audit.")
 def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
     """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
@@ -614,16 +770,13 @@ def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
     log.info(f"API key revoked: user={user['username']} id={key_id}")
     return {"message": "API Key 已吊销，立即失效"}
 
-
-# ====== Notifications ======
-
 @router.get("/notifications", operation_id="settings_notifications_get", summary="Get notification preferences", description="Returns notification preferences.")
 def get_notifications(user: dict = Depends(require_no_session_token)):
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding LIMIT 1")
+            c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding ORDER BY id DESC LIMIT 1")
             row = c.fetchone()
             auto_impl = bool(row[0]) if row else True
             notify = bool(row[1]) if row else True
@@ -638,7 +791,6 @@ def get_notifications(user: dict = Depends(require_no_session_token)):
         "notifications_enabled": notify,
     }
 
-
 class NotificationPrefs(BaseModel):
     issues: bool = True
     pr: bool = True
@@ -646,7 +798,6 @@ class NotificationPrefs(BaseModel):
     release: bool = True
     vod: bool = False
     notifications_enabled: bool = True
-
 
 @router.put("/notifications", operation_id="settings_notifications_update", summary="Update notification preferences", description="Updates notification preferences.")
 def update_notifications(body: NotificationPrefs, user: dict = Depends(require_no_session_token)):
@@ -661,9 +812,6 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
             pass
     return {"message": "通知偏好已更新", "prefs": body.model_dump()}
 
-
-# ====== GitCode Repo ======
-
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
@@ -674,12 +822,15 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
     _resolve_result = TokenResolver(_provider).resolve(_rk)
     bot_token = _resolve_result.token
     _resolved_level = _resolve_result.level  # "session"/"repo_bot"/"global_bot"/"user"/""
-    bot_username = "devops-bot"
+    # D99：bot_username 默认值走来源链（平台卡 bot_identity/global bot/托管行），
+    # 消灭 'devops-bot' 硬编码兜底（gitee 等平台配置页显示错误身份）
+    from src.domains.mgmt.user.repo_manager import resolve_bot_username as _rbu_settings
+    bot_username = _rbu_settings(_provider.provider_name) or ""
     target_key = _resolve_repo_key(f"{owner}/{repo}")
     repos = user_db.get_managed_repos(user["id"])
     for r in repos:
         if _resolve_repo_key(f'{r.get("repo_owner", "")}/{r.get("repo_name", "")}') == target_key:
-            bot_username = r.get("bot_username", "") or "devops-bot"
+            bot_username = r.get("bot_username", "") or bot_username
             break
 
     # R16.2.3: 返回仓库级 bot token 状态
@@ -687,17 +838,29 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
     _has_repo_bot_token = False
     try:
         from src.kernel.session_manager import db, db_lock
-        # FR-21.4: 按 repo_key 前缀选列——GitHub 仓查 bot_github_token
+        # FR-21.4: 按 repo_key 前缀选列（D43/S63：列名卡派生）
         from src.kernel.repo_key import parse_repo_key
+        from src.kernel.token_resolver import create_provider as _cp_cfg
         _provider_name, _, _ = parse_repo_key(_rk)
-        _token_col = "bot_github_token" if _provider_name == "github" else "bot_gitcode_token"
-        with db_lock:
-            c = db.cursor()
-            c.execute(f"SELECT bot_token_status, {_token_col} FROM managed_repos WHERE repo_key=? LIMIT 1", (_rk,))
-            _row = c.fetchone()
+        _token_col = _cp_cfg(_provider_name).token_storage_field()
+        if _token_col:
+            with db_lock:
+                c = db.cursor()
+                c.execute(f"SELECT bot_token_status, {_token_col} FROM managed_repos WHERE repo_key=? LIMIT 1", (_rk,))
+                _row = c.fetchone()
+                if _row:
+                    _bot_token_status = _row[0] or ""
+                    _has_repo_bot_token = bool(_row[1])
+        else:
+            # F4/D106：卡列空平台（gitee/gitlab 终态）→ 状态列 + rc 权威行
+            from src.domains.mgmt.user.db import get_repo_credential_value
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT bot_token_status FROM managed_repos WHERE repo_key=? LIMIT 1", (_rk,))
+                _row = c.fetchone()
             if _row:
                 _bot_token_status = _row[0] or ""
-                _has_repo_bot_token = bool(_row[1])
+                _has_repo_bot_token = bool(get_repo_credential_value(_rk, "bot"))
     except Exception:
         pass
 
@@ -710,11 +873,9 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
         "bot_username": bot_username,
     }
 
-
 class GitCodeRepoConfig(BaseModel):
     bot_token: str = ""
     bot_username: str = "devops-bot"
-
 
 @router.put("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_update", summary="Update repo GitCode config", description="Updates GitCode config for a specific repo.")
 def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
@@ -796,9 +957,6 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
         _response["scope_warnings"] = [f"该 Token 变更将影响 {len(_result['related_repos'])} 个关联仓库的跨仓信任域"]
     return _response
 
-
-# ====== OAuth 凭据（管理员配置）======
-
 @router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config", description="Returns whether GitCode OAuth is configured (client id/redirect uri; secret masked).")
 def get_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import get_meta_value
@@ -807,12 +965,10 @@ def get_oauth_config(user: dict = Depends(require_no_session_token)):
         "gitcode_oauth_redirect_uri": get_meta_value("oauth_gitcode_redirect_uri"),
     }
 
-
 class OAuthConfig(BaseModel):
     gitcode_oauth_client_id: str = ""
     gitcode_oauth_client_secret: str = ""
     gitcode_oauth_redirect_uri: str = ""
-
 
 @router.put("/oauth", operation_id="settings_oauth_update", summary="Update GitCode OAuth config", description="Updates the GitCode OAuth client config.")
 def update_oauth_config(body: OAuthConfig, user: dict = Depends(require_no_session_token)):
@@ -825,12 +981,10 @@ def update_oauth_config(body: OAuthConfig, user: dict = Depends(require_no_sessi
         set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
 
-
 class GitHubOAuthConfig(BaseModel):
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
     github_oauth_redirect_uri: str = ""
-
 
 @router.get("/oauth-github", operation_id="settings_oauth_github_get", summary="Get GitHub OAuth config", description="Returns GitHub OAuth configuration status (secret masked).")
 def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
@@ -839,7 +993,6 @@ def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
         "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
         "github_oauth_redirect_uri": get_meta_value("oauth_github_redirect_uri"),
     }
-
 
 @router.put("/oauth-github", operation_id="settings_oauth_github_update", summary="Update GitHub OAuth config", description="Updates the GitHub OAuth client config.")
 def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(require_no_session_token)):
@@ -851,9 +1004,6 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
     if body.github_oauth_redirect_uri:
         set_meta_value("oauth_github_redirect_uri", body.github_oauth_redirect_uri)
     return {"message": "GitHub OAuth 配置已更新"}
-
-
-# ====== Agent Runtimes ======
 
 # Issue #473 范围参数合法值（PR #668 审查修复）：Literal 校验——非法值 422，
 # 不再静默回落全量（QA Nice-to-have）。空串=默认全量口径（与前端不传参一致）。
@@ -894,7 +1044,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     from src.domains.runtime.engine.instances import instance_name
     from src.kernel.session_manager import db, db_lock
 
-    uid = user.get("id") or 0
+    uid = str(user.get("id") or "")
     uname = user.get("username") or ""
     user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
 
@@ -923,21 +1073,21 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         _rt["last_seen_at"] = normalize_event_time(_rt_last) if _rt_last else _rt_last
         _rt_upd = _rt.get("updated_at")
         _rt["updated_at"] = normalize_event_time(_rt_upd) if _rt_upd else _rt_upd
-    _org_id = user.get("org_id", 0)
+    _org_id = user.get("org_id", "")
     # 判断当前组织是否是个人组织（个人组织显示 global 引擎，非个人组织严格隔离）
     _is_personal_org = False
     if _org_id:
         from src.domains.mgmt.user.org_db import is_org_personal
         _is_personal_org = is_org_personal(_org_id)
-    _filter_org_id = 0 if _is_personal_org else _org_id
+    _filter_org_id = "" if _is_personal_org else _org_id
     now = __import__("time").time()
     visible_runtimes = []
     for rt in cached:
         # 组织隔离：
-        # 非个人组织：只显示 org_id 匹配的引擎（不含 global org_id=0）
-        # 个人组织：只显示 org_id=0（全局/本机）和 org_id=自身个人组织的引擎，
+        # 非个人组织：只显示 org_id 匹配的引擎（不含 global org_id=''）
+        # 个人组织：只显示 org_id=''（全局/本机）和 org_id=自身个人组织的引擎，
         #           不显示其他非个人组织的引擎
-        rt_org_id = rt.get("org_id") or 0
+        rt_org_id = rt.get("org_id") or ""
         if _filter_org_id:
             # 非个人组织：严格 org_id 隔离
             # Issue #371：repo scope 引擎豁免——切换为仓库级后 org_id 可能对齐到仓库所属组织
@@ -956,7 +1106,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             _own_user_worker = (_cred_early.get("scope") == "user"
                                 and (_cred_early.get("owner_name") or "") == uname)
             if not _own_user_worker:
-                # 个人组织：跳过其他非个人组织（org_id>0 且不是自己）的引擎
+                # 个人组织：跳过其他非个人组织（org_id != '' 且不是自己）的引擎
                 # 但需要检查该 org 是否是个人组织——如果是个人组织则不跳过
                 from src.domains.mgmt.user.org_db import is_org_personal
                 if not is_org_personal(rt_org_id):
@@ -1047,12 +1197,12 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     _devices_cached = cached
     if _filter_org_id:
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if (v.get("org_id") or 0) == _filter_org_id
+                             if (v.get("org_id") or "") == _filter_org_id
                              or v.get("scope") == "repo"}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) == _filter_org_id
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") == _filter_org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     elif _is_personal_org:
-        # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
+        # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（可见性由 _visible_credential 的 owner 判定收敛）
         # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
@@ -1060,10 +1210,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if (v.get("org_id") or 0) in (0, _org_id)
+                             if (v.get("org_id") or "") in ("", _org_id)
                              or v.get("scope") == "repo"
                              or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") in ("", _org_id)
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
                                      valid_users, _devices_cached, now)
@@ -1149,7 +1299,6 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
             "health_stats": health_stats}
 
-
 def _engine_type_of(rt: dict) -> str:
     """从引擎名派生类型标签——走 canonical_engine 查表后转展示类型名
     （canonical 是后端键：aishell/hwcloud → hwcloud；本函数是页面类型：
@@ -1184,9 +1333,7 @@ def _engine_type_of(rt: dict) -> str:
         return "atomcode"
     return ""
 
-
 _HEALTH_STAT_KEYS = ("online", "recently_lost", "offline", "about_to_gc")
-
 
 def _health_stats(items: list) -> dict:
     """Issue #472: 整体搜索结果的健康分布（total + 四态计数），统计栏全局口径数据源。"""
@@ -1198,22 +1345,19 @@ def _health_stats(items: list) -> dict:
     counts["total"] = len(items)
     return counts
 
-
 def _runtime_health(rt: dict, now: float) -> str:
     """单引擎健康态：
     - credential_id>0（远端边端）：status+last_seen 四态
     - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
     """
-    from src.domains.runtime.engine.health import derive_runtime_health
+    from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
     if rt.get("credential_id"):
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
     if rt.get("installed") and rt.get("healthy"):
         return "online"
     return "offline"
 
-
 _DEVICE_ONLINE_WINDOW = 60  # 心跳间隔 15s，容差 60s 内视为在线
-
 
 def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     """设备（凭据维度）健康态：由心跳新鲜度派生。
@@ -1234,9 +1378,6 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
         return "about_to_gc"
     return "offline"
 
-
-# ====== 共享 helper（Issue #185 审查修复：消除 agent-runtimes / runtime-devices 重复代码 + N+1 查询）======
-
 def _build_cred_map(db, db_lock) -> dict:
     """构建 credential_id -> 凭据信息映射，两个端点共用。"""
     cred_map = {}
@@ -1248,10 +1389,9 @@ def _build_cred_map(db, db_lock) -> dict:
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
                              "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or "", "org_id": corg_id or 0,
+                             "repo_key": crepo_key or "", "org_id": corg_id or "",
                              "spec": cspec or ""}
     return cred_map
-
 
 def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = ""):
     """返回 _visible_credential 闭包，两个端点共用。
@@ -1282,7 +1422,6 @@ def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = 
         return False
     return _visible_credential
 
-
 def _rt_in_range(scope: str, owner: str, is_local: bool, rt_range: str, uname: str,
                  local_owner: str = "") -> bool:
     """Issue #473 范围筛选判定（列表查看范围，与 scope 标签筛选互补）。
@@ -1307,7 +1446,6 @@ def _rt_in_range(scope: str, owner: str, is_local: bool, rt_range: str, uname: s
             return (local_owner or "").strip() == uname
         return (owner or "") == uname and (scope or "global") == "user"
     return True
-
 
 def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_users: set,
                            local_runtimes: list, now: float) -> list:
@@ -1346,8 +1484,6 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 # Issue #1310：承载引擎 chip 显示「引擎名（凭据名）」——补凭据名 worker_name
-                 "worker_name": cred.get("name", ""),
                  "health": derive_runtime_health(x[5], x[6], now),
                  "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
                  "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
@@ -1408,8 +1544,6 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                 "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
                 "instance_name": rt.get("instance_name", rt.get("name", "")),
-                # Issue #1310：本机直连按 host_name 兜底凭据名
-                "worker_name": _hn,
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
@@ -1434,8 +1568,6 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 "id": rt["id"], "name": rt["name"], "version": rt.get("version", ""),
                 "healthy": rt.get("healthy", False), "installed": rt.get("installed", False),
                 "instance_name": rt.get("instance_name", rt.get("name", "")),
-                # Issue #1310：本机直连按 host_name 兜底凭据名
-                "worker_name": _hn,
                 "health": rt.get("health", "offline"),
                 "local_skills": rt.get("local_skills", []),
                 "skill_scan_result": rt.get("skill_scan_result", []),
@@ -1452,9 +1584,6 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             d["health"] = "online" if any(rt.get("health") == "online" for rt in d.get("runtimes", [])) else "offline"
 
     return devices
-
-
-# ====== Runtime Devices（设备级分页端点，Issue #185）======
 
 @router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245). Issue #277: repo param filters repo-scoped devices to only the current repo. Issue #473: range param narrows the viewing scope - empty/all (default), repo (repo scope only), user (current user's user-scope + own local engines); invalid range values are rejected with 422.")
 def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 20,
@@ -1477,7 +1606,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     from src.kernel.session_manager import db as _db, db_lock as _dl
     import time as _time
 
-    uid = user.get("id") or 0
+    uid = str(user.get("id") or "")
     uname = user.get("username") or ""
     user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
     now = _time.time()
@@ -1502,29 +1631,29 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
 
     # 组织隔离：非个人组织只显示 org_id 匹配的引擎/凭据
     from src.domains.mgmt.user.org_db import is_org_personal
-    _org_id = user.get("org_id", 0)
+    _org_id = user.get("org_id", "")
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
-    _filter_org_id = 0 if _is_personal_org else _org_id
+    _filter_org_id = "" if _is_personal_org else _org_id
     if _filter_org_id:
         # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
         # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == _filter_org_id
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == _filter_org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if (v.get("org_id") or 0) == _filter_org_id
+                    if (v.get("org_id") or "") == _filter_org_id
                     or v.get("scope") == "repo"}
     elif _is_personal_org:
-        # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
+        # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（与 dashboard 个人组织视图语义一致）
         # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == 0
-                           or (rt.get("org_id") or 0) == _org_id
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == ""
+                           or (rt.get("org_id") or "") == _org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if (v.get("org_id") or 0) in (0, _org_id)
+                    if (v.get("org_id") or "") in ("", _org_id)
                     or v.get("scope") == "repo"
                     or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
 
@@ -1588,7 +1717,6 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
             "avail_scopes": _avail_scopes, "avail_types": _avail_types,
             "health_stats": health_stats}
 
-
 def _device_engine_types(d: dict) -> list:
     """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
     _KNOWN = [("hermes", "hermes"), ("opencode", "opencode"),
@@ -1602,18 +1730,15 @@ def _device_engine_types(d: dict) -> list:
                 found.append(_label)
     return found
 
-
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
 @router.get("/backend-agents", operation_id="settings_backend_agents", summary="List backend agents (legacy alias)", description="Legacy alias for listing agent runtimes.")
 def get_backend_agents(user: dict = Depends(require_no_session_token)):
     cached = user_db_get_backend_agents_alias()
     return {"backends": cached}
 
-
 def user_db_get_backend_agents_alias():
     from src.domains.mgmt.user import db as user_db
     return user_db.get_backend_agents()
-
 
 @router.get("/agent-runtimes/{rid}", operation_id="settings_agent_runtime_detail", summary="Get agent runtime detail", description="Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.")
 def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
@@ -1628,7 +1753,6 @@ def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member),
         if rt.get("id") == rid:
             return rt
     raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
-
 
 @router.post("/agent-runtimes/{rid}/health-reset", operation_id="settings_agent_runtime_health_reset", summary="Reset runtime health score", description="Resets a single runtime engine's health score (Issue #394). Writes agent_runtimes.health_reset_at as the pardon point so the health-score window restarts from the reset moment; previously accumulated failures are pardoned. Only repo-scope (repo members) and personal-scope (owner) worker engines are resettable; global engines return 403. Invisible or missing ids return 404.")
 def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
@@ -1660,7 +1784,6 @@ def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member
              f"health_reset_at={data.get('updated_at')} health_score={data.get('health_score')}")
     return {"runtime_id": rid, "health_reset_at": data.get("health_reset_at"),
             "health_score": data.get("health_score")}
-
 
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")
 def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
@@ -1701,24 +1824,18 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
 async def refresh_backend_agents(user: dict = Depends(require_org_member)):
     return refresh_agent_runtimes(user)
 
-
-# ====== Runtime Credentials（rta_ token，见 agent-runtime-event-full-design.md §4.1 / §10）======
-
 _SCOPE_ALIAS = {"user": "user", "个人": "user", "repo": "repo", "仓库": "repo", "global": "global", "全局": "global"}
-
 
 class RuntimeCredBody(BaseModel):
     name: str
     scope: str = "user"       # user(个人)/repo(仓库)/global(全局)，默认个人
     repo_key: str = ""        # scope=repo 时必填（目标仓库全名，如 owner/repo）
 
-
 def _normalize_scope(scope: str) -> str:
     s = _SCOPE_ALIAS.get((scope or "").strip().lower())
     if not s:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user/repo/global（个人/仓库/全局）"})
     return s
-
 
 @router.post("/runtime-credentials", operation_id="settings_runtime_credential_create", summary="Create runtime credential", description="Creates an rta_ credential; plaintext shown once, DB stores sha256. owner = current user (not selectable); scope defaults to personal.")
 def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_org_member)):
@@ -1742,9 +1859,9 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         if raw_key:
             repo_key = _resolve_repo_key(raw_key)
     # 解析当前组织 org_id
-    _org_id = user.get("org_id", 0)
+    _org_id = user.get("org_id", "")
     _is_personal = is_org_personal(_org_id) if _org_id else True
-    _cred_org_id = 0 if _is_personal else _org_id
+    _cred_org_id = "" if _is_personal else _org_id
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
@@ -1769,9 +1886,8 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         log.warning(f"预构建 worker 安装包失败: {_e}")
     return {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
 
-
 @router.put("/runtime-credentials/{cid}", operation_id="settings_runtime_credential_rename", summary="Rename runtime credential", description="Renames a credential (worker name); globally unique, duplicates rejected. owner/scope unchanged.")
-def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
+def rename_runtime_credential(cid: str, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
     """改名凭据（worker 名）：全局唯一，重名拒绝。owner/scope 不可改。"""
     from src.kernel.session_manager import db, db_lock
     name = (body.name or "").strip()
@@ -1798,14 +1914,12 @@ def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depe
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"改名失败: {e}"})
     return {"message": f"凭据已改名为 {name}"}
 
-
 class CredScopeBody(BaseModel):
     scope: str = "user"
     repo_key: str = ""
 
-
 @router.put("/runtime-credentials/{cid}/scope", operation_id="settings_runtime_credential_scope", summary="Change credential scope", description="Switches a credential scope (repo/personal). Owner-only, active-only; global is not allowed.")
-def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(require_org_member)):
+def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(require_org_member)):
     """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
     from src.kernel.session_manager import db, db_lock
     scope = _normalize_scope(body.scope)
@@ -1816,20 +1930,20 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 scope 需填写 repo_key"})
     repo_key = _resolve_repo_key(raw_key) if raw_key else ""
     # Issue #371：切换 scope 时同步 org_id，消除「scope 已改但 org_id 仍是旧归属」的脏数据。
-    # - repo scope：org_id 对齐到仓库所属组织（managed_repos.org_id 权威单一来源），无组织归属时置 0；
+    # - repo scope：org_id 对齐到仓库所属组织（managed_repos.org_id 权威单一来源），无组织归属时置 ''；
     #   这样非个人组织视图按 org_id 过滤时 repo scope 引擎不会被错误滤除。
     # - user scope：org_id 对齐到当前操作者所在组织（用户在该组织下操作，设备应在该组织下可见）；
     #   个人组织操作时 org_id=个人组织 ID，非个人组织操作时 org_id=该组织 ID。
-    _new_org_id = 0
+    _new_org_id = ""
     if scope == "repo" and repo_key:
         try:
             from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
             _new_org_id = get_org_id_by_repo_key(repo_key)
         except Exception as _e:
             log.warning(f"change_credential_scope: resolve org_id for repo_key={repo_key} failed: {_e}")
-            _new_org_id = 0
+            _new_org_id = ""
     elif scope == "user":
-        _new_org_id = user.get("org_id") or 0
+        _new_org_id = user.get("org_id") or ""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
@@ -1849,19 +1963,12 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
                   (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
-        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）
-        # 先删除 offline 重复行（只保留每个引擎名最新的一行），再 UPDATE 剩余行
-        c.execute(
-            "DELETE FROM engine_capabilities WHERE runtime_id IN ("
-            "SELECT id FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
-            "SELECT MAX(id) FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)))",
-            (cid, cid)
-        )
-        c.execute(
-            "DELETE FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
-            "SELECT max_id FROM (SELECT MAX(id) as max_id FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)) t)",
-            (cid, cid)
-        )
+        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）。
+        # Issue #654：先按 (credential_id, lower(name)) 去重合并（保留 MAX(id)）：
+        # 被替换行的 engine_capabilities / tags_user_set 迁移到存活行（priority/标签不回默认），
+        # 引用旧引擎 id 的配置（场景 engine_runtime_ids / agent backend）由 remap 改指向存活行。
+        from src.domains.runtime.engine.engine_select import merge_duplicate_engine_rows, remap_engine_references
+        _rid_map = merge_duplicate_engine_rows(cid, c)
         c.execute(
             "UPDATE agent_runtimes SET scope=?, owner_id=?, org_id=?, repo_key=? WHERE credential_id=?",
             (scope, _new_owner_id, _new_org_id, repo_key or None, cid)
@@ -1869,7 +1976,6 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         db.commit()
     log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key} org_id={_new_org_id}")
     return {"scope": scope, "repo_key": repo_key}
-
 
 @router.get("/runtime-credentials", operation_id="settings_runtime_credentials", summary="List runtime credentials", description="Lists runtime credentials without token_hash/plaintext.")
 def list_runtime_credentials(user: dict = Depends(require_org_member)):
@@ -1880,7 +1986,7 @@ def list_runtime_credentials(user: dict = Depends(require_org_member)):
     """
     from src.kernel.session_manager import db, db_lock
     from src.domains.mgmt.user.org_db import is_org_personal
-    org_id = user.get("org_id", 0)
+    org_id = user.get("org_id", "")
     _is_personal = is_org_personal(org_id) if org_id else True
     with db_lock:
         c = db.cursor()
@@ -1897,7 +2003,6 @@ def list_runtime_credentials(user: dict = Depends(require_org_member)):
             for r in c.fetchall()
         ]}
 
-
 def _cleanup_scene_engine_runtime_ids(rid_list: list):
     """清理场景配置中引用了即将被删除的 runtime_id 的 engine_runtime_ids（Issue #250）。
 
@@ -1910,9 +2015,8 @@ def _cleanup_scene_engine_runtime_ids(rid_list: list):
     from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings
     cleanup_scene_engine_bindings(rid_list)
 
-
 @router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")
-def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_token)):
+def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_token)):
     """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
 
     2026-08-17 用户指示「吊销=删除」：删除后 token 即刻失效（_auth_credential
@@ -1927,9 +2031,14 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,))
-        if not c.fetchone():
+        c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cid,))
+        _row = c.fetchone()
+        if not _row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        # 扫雷⑨-H2：仅凭据 owner 可吊销（对齐同文件 scope 端点的 owner 校验范式）
+        _owner = _row[0] or ""
+        if _owner != (user.get("username") or ""):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可吊销"})
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
         rid_list = [r[0] for r in c.fetchall()]
         if rid_list:
@@ -1952,22 +2061,18 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
         db.commit()
     return {"message": f"凭据 {cid} 已吊销并删除"}
 
-
 class ExecModeBody(BaseModel):
     mode: str
-
 
 @router.get("/execution-mode", operation_id="settings_execution_mode_get", summary="Get execution mode", description="Returns the current execution mode.")
 def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
     from src.domains.runtime.engine.service import get_execution_mode
     return {"mode": get_execution_mode()}
 
-
 @router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode", description="Returns the current pipeline mode.")
 def get_pipeline_mode_api(user: dict = Depends(require_no_session_token)):
     from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
-
 
 @router.put("/pipeline-mode", operation_id="settings_pipeline_mode_set", summary="Set pipeline mode", description="Sets the pipeline mode.")
 def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_token)):
@@ -1978,7 +2083,6 @@ def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_to
     set_meta_value("pipeline_mode", mode)
     return {"message": f"管线模式已切换为 {'插件模式' if mode == 'plugin' else '传统模式'}", "mode": mode}
 
-
 @router.put("/execution-mode", operation_id="settings_execution_mode_set", summary="Set execution mode", description="Sets the execution mode.")
 def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_session_token)):
     from src.domains.runtime.engine.service import set_execution_mode
@@ -1987,18 +2091,13 @@ def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_s
     set_execution_mode(body.mode)
     return {"message": f"执行模式已切换为 {body.mode}", "mode": body.mode}
 
-
-# ===== 引擎标签管理（event-dispatch-redesign-v2.md §2.4）=====
-
 class EngineTagBody(BaseModel):
     tag: str
     priority: int = 50
 
-
 class EngineTagUpdateBody(BaseModel):
     priority: int = 50
     enabled: int = 1
-
 
 def _sync_agent_tags(rid: int, cursor):
     """engine_capabilities 变更后，回写 agent_runtimes.agent_tags（JSON 快照）。
@@ -2009,7 +2108,6 @@ def _sync_agent_tags(rid: int, cursor):
     cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
     tags = [r[0] for r in cursor.fetchall()]
     cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
-
 
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
 def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
@@ -2031,7 +2129,6 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
          "enabled": bool(r[3]), "created_at": r[4], "updated_at": r[5]}
         for r in rows
     ]}
-
 
 @router.post("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tag_create", summary="Add engine tag", description="Adds an engine tag (idempotent: updates if present).")
 def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_no_session_token)):
@@ -2075,7 +2172,6 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
     log.info(f"Engine tag added: runtime={rid} tag={tag} priority={body.priority}")
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
-
 @router.put("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_update", summary="Update engine tag", description="Updates an engine tag configuration.")
 def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
                             user: dict = Depends(require_no_session_token)):
@@ -2103,7 +2199,6 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"message": f"标签 {tag} 已更新"}
 
-
 @router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
 def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_session_token)):
     """删除引擎标签"""
@@ -2125,9 +2220,6 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_sessio
     log.info(f"Engine tag deleted: runtime={rid} tag={tag}")
     return {"message": f"标签 {tag} 已删除"}
 
-
-# ===== Issue #49：Webhook 事件 action 过滤规则（event_action_filter 管理）=====
-
 class EventActionFilterBody(BaseModel):
     event_type: str
     action: str
@@ -2139,7 +2231,6 @@ class EventActionFilterBody(BaseModel):
     priority: int = 0
     enabled: int = 1
 
-
 class EventActionFilterUpdateBody(BaseModel):
     allow: int | None = None
     actor: str | None = None
@@ -2148,7 +2239,6 @@ class EventActionFilterUpdateBody(BaseModel):
     handle_side_effect: str | None = None
     priority: int | None = None
     enabled: int | None = None
-
 
 @router.get("/event-action-filters", operation_id="settings_event_action_filters", summary="List event action filter rules", description="Lists all event action filter rules (hot-reloadable).")
 def list_event_action_filters(user: dict = Depends(require_no_session_token)):
@@ -2175,7 +2265,6 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
         for r in rows
     ]}
 
-
 @router.post("/event-action-filters", operation_id="settings_event_action_rule_create", summary="Add event action filter rule", description="Adds an event action filter rule (idempotent: skips an existing event_type x action combo).")
 def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(require_no_session_token)):
     """新增事件 action 过滤规则（幂等：同 event_type×action 已存在则跳过）。"""
@@ -2200,7 +2289,6 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"message": "规则已添加", "event_type": body.event_type, "action": body.action}
-
 
 @router.put("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_update", summary="Update event action filter rule", description="Updates an event action filter rule (allow/actor/changes/side-effect/priority/enabled; hot within 30s).")
 def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
@@ -2240,7 +2328,6 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
         pass
     return {"message": "规则已更新"}
 
-
 @router.delete("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_delete", summary="Delete event action filter rule", description="Deletes an event action filter rule (no rules = allow all).")
 def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_session_token)):
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
@@ -2264,7 +2351,6 @@ def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_sessi
         pass
     return {"message": "规则已删除"}
 
-
 # ===== 内测申请代理（转发到 Admin Console）=====
 class BetaApplyBody(BaseModel):
     accountType: str
@@ -2274,7 +2360,6 @@ class BetaApplyBody(BaseModel):
     phone: str = ""
     reason: str = ""
     surveyData: dict = {}
-
 
 @router.post("/beta-apply/submit")
 def beta_apply_submit(body: BetaApplyBody):
@@ -2305,3 +2390,133 @@ def beta_apply_submit(body: BetaApplyBody):
         raise HTTPException(status_code=504, detail={"code": 504, "message": "内测申请服务超时"})
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"内测申请服务不可达: {e}"})
+
+def _cascade_pat_clear(user: dict, provider: str) -> dict:
+    """D105k：清除 PAT 的正确级联（四象限矩阵，2026-11-09 用户裁定）。
+
+    - 有 OAuth 绑定（has_oauth_token）：只清 PAT 凭据（供给 ② OAuth 自动接管，
+      ei OAuth token 保留=回落能力）
+    - 无 OAuth：PAT 即该平台唯一供给 → 平台级解绑级联：删 ei 归属行（PAT 行
+      非登录凭据）+ revoke 凭据 + D42 user_repos 缓存清理（供给没了列表不残留）
+
+    返回 {oauth_kept: bool}。
+    """
+    from src.domains.mgmt.auth.grape_account_db import (
+        get_user_identities, delete_external_identity, revoke_provider_credentials)
+    ident = next((i for i in get_user_identities(user["id"]) if i["provider"] == provider), None)
+    has_oauth = bool(ident and ident.get("has_oauth_token"))
+    _check_login_method_before_unbind(user["id"], provider)
+    revoke_provider_credentials(user["id"], provider)
+    if not has_oauth:
+        delete_external_identity(user["id"], provider)
+        # D42：user_repos 缓存清理（仅平台级解绑；OAuth 共存时供给②接管，列表保留）
+        try:
+            from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+            with _sm_dl:
+                _c = _sm_db.cursor()
+                _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ?",
+                           (user["id"], f"{provider}:%"))
+                _sm_db.commit()
+        except Exception as _e:
+            log.warning(f"_cascade_pat_clear: user_repos cleanup failed (user={user['id']}, "
+                        f"provider={provider}): {_e}")
+    return {"oauth_kept": has_oauth}
+
+@router.get("/vcs/platforms", operation_id="settings_vcs_platforms",
+            summary="List visible vcs platforms (builtin + configured)")
+def list_vcs_platforms_public():
+    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+    from src.domains.mgmt.user.db import get_meta_value
+    # D102-N 续（2026-11-08 用户裁定）：部署级平台隐藏名单——meta
+    # vcs_platforms_hidden（JSON 数组，provider 名单）。未启用的平台
+    # （实例：GitLab）不进目录 → 引导页/凭据页不渲染。缺省空=全可见。
+    try:
+        _hidden = set(json.loads(get_meta_value("vcs_platforms_hidden") or "[]"))
+        if not isinstance(_hidden, (set, list)):
+            _hidden = set()
+    except Exception:
+        _hidden = set()
+    # GitCode/GitHub = 默认平台（2026-11-08 用户裁定）：恒显示；其余平台
+    # 按 OAuth 是否配置显示（oauth_<p>_client_id 存在）。
+    _DEFAULT_PLATFORMS = {"gitcode", "github"}
+    out = []
+    for provider in list_vcs_platforms():
+        if provider in _hidden:
+            continue
+        if provider not in _DEFAULT_PLATFORMS:
+            _cfgd = bool(get_meta_value(f"oauth_{provider}_client_id"))
+            if not _cfgd:
+                continue
+        card = get_platform_card(provider)
+        if card is None:
+            continue
+        out.append({
+            "provider": provider,
+            "name": card.name,
+            "host": card.host,
+            "dialect": card.dialect,
+            "pat_create_url": f"https://{card.host}/profile/personal_access_tokens",
+            "brand_color": card.brand_color,  # 台阶2：品牌资产进卡（#RRGGBB，空=前端兜底）
+        })
+    return {"platforms": out}
+
+def _recent_models_by_runtime(runtime_ids: list[int]) -> dict[int, list[dict]]:
+    """按 runtime_ids 批量聚合 obs_llm_usage 的最近实际使用模型（top N）。
+
+    单条 GROUP BY（engine_id × model 维度一次查询，避免 N+1），
+    top N 在应用层排序（count desc → last_used desc）。
+    返回 {runtime_id: [{model, count, last_used_at}, ...]}；无用量/异常返回空 dict。
+    安全约束（Issue #865 Spec）：仅聚合模型名字段，不取 base_url/api_key。
+    """
+    ids = [int(rid) for rid in (runtime_ids or []) if rid]
+    if not ids:
+        return {}
+    from src.kernel.session_manager import db, db_lock
+    out: dict[int, list[dict]] = {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            ph = ",".join("?" * len(ids))
+            c.execute(
+                f"SELECT engine_id, model_key, model_raw, COUNT(*) AS cnt, MAX(created_at) AS last_used "
+                f"FROM obs_llm_usage WHERE engine_id IN ({ph}) GROUP BY engine_id, model_key, model_raw",
+                ids)
+            for eng_id, m_key, m_raw, cnt, last_used in c.fetchall():
+                model = str(m_key or m_raw or "").strip()
+                if not model:
+                    continue
+                out.setdefault(int(eng_id or 0), []).append(
+                    {"model": model[:120], "count": int(cnt or 0), "last_used_at": last_used or ""})
+    except Exception as e:
+        log.warning(f"recent_models aggregation failed: {e}")
+        return {}
+    for rows in out.values():
+        rows.sort(key=lambda r: (-r["count"], r["last_used_at"]))
+        del rows[_RECENT_MODELS_TOP_N:]
+    return out
+
+def _attach_engine_models(runtimes: list[dict]) -> None:
+    """为列表/详情的引擎行附加模型字段（Issue #865）。
+
+    - recent_models：obs_llm_usage 聚合（批量单查，无 N+1）
+    - 配置模型：DB model_name（worker 上报）；本机直连（credential_id=0）且未上报时
+      服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
+    仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
+    """
+    from src.domains.runtime.engine.engine_model import detect_engine_model
+    recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
+    for rt in runtimes:
+        rt["recent_models"] = recent.get(rt.get("id"), [])
+        if not (rt.get("model_name") or "") and (rt.get("credential_id") or 0) == 0:
+            try:
+                _m = detect_engine_model(rt.get("name") or "")
+            except Exception:
+                _m = ""
+            if _m:
+                rt["model_name"] = _m
+                rt["model_source"] = "local_config"
+
+# D43/S63：存量 PAT 专用字段平台集合（S52：这些平台走专用字段路径，数据非分支）
+_LEGACY_PAT_FIELD_PROVIDERS = {"gitcode", "github"}
+
+_RECENT_MODELS_TOP_N = 3

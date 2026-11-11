@@ -433,7 +433,8 @@ function _durHuman(sec) {
 function _obsIssueUrl(e) {
   const num = String(e.issue_id || '').replace(/^#/, '');
   const path = String(e.repo_key || '').split(':').pop();
-  return (path && num) ? 'https://gitcode.com/' + path + '/issues/' + num : '';
+  // D102-J: host 走统一派生器（原硬编码 gitcode.com——gitee 仓 issue 跳错站）
+  return (path && num) ? 'https://' + window._repoWebHost(e.repo_key) + '/' + path + '/issues/' + num : '';
 }
 
 // 注意：真实 I18N.t 在**缺键时返回 key 本身**（不是 undefined），所以 `t(k) || 兜底` 永远
@@ -1862,7 +1863,7 @@ function loadA2aHealth() {
     if (d.recent_a2a && d.recent_a2a.length) {
       html += table(['Seq', 'Type', 'Repo', 'Issue', 'Status', 'Time'],
         d.recent_a2a.map(a => [
-          a.seq, a.event_type.substring(0,20), (a.repo_key||'').replace('gitcode:','').substring(0,15),
+          a.seq, a.event_type.substring(0,20), stripRepoPrefix(a.repo_key||'').substring(0,15),
           a.issue_id || '-', a.status || '-', `<span class="ts t3">${fmtLocalTime(a.created_at)}</span>`
         ])
       );
@@ -1889,7 +1890,7 @@ function renderAnomalyTab(container, ops, rerender) {
   }
 
   const _enc = s => encodeURIComponent(JSON.stringify({
-    issue:s.issue_id, seq:s.event_seq, repo:(s.repo_key||'').replace('gitcode:',''),
+    issue:s.issue_id, seq:s.event_seq, repo:stripRepoPrefix(s.repo_key||''),
     created:s.completed_at||s.started_at||'',
     errors:s.errors||[], exit_code:s.exit_code, result_text:s.result_text||''
   }));
@@ -1906,7 +1907,7 @@ function renderAnomalyTab(container, ops, rerender) {
       badge = `<span style="color:var(--r)">🔴 STUCK</span>`;
     }
     return [`<a onclick="openTaskLogModal('${s.id}','${_enc(s)}')" style="cursor:pointer;color:var(--a);text-decoration:underline"><b>${is}</b></a>`,
-      s.agent_type || '-', (s.repo_key||'').replace('gitcode:','').substring(0,20),
+      s.agent_type || '-', stripRepoPrefix(s.repo_key||'').substring(0,20),
       `<span class="ts t3">${time.substring(0,19)}</span>`, badge];
   };
 
@@ -3068,7 +3069,8 @@ function _filterTimelineIssues() {
   function _issueUrl(issueId, issueRepoKey) {
     const num = (issueId || '').replace(/^#/, '');
     const repoPath = stripRepoPrefix(issueRepoKey || '') || _timelineGlobalRepoPath;
-    return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
+    // D102-J: host 走统一派生器（原硬编码 gitcode.com）
+    return repoPath && num ? 'https://' + (window._repoWebHost ? window._repoWebHost(issueRepoKey || '') : 'gitcode.com') + '/' + repoPath + '/issues/' + num : '';
   }
 
   // 分页：先筛选，再按 _timelinePage/_timelinePageSize 切片
@@ -3428,7 +3430,7 @@ function openSessionLogModal(sessionId, infoEnc) {
     }
     // 取最近一个任务
     const task = tasks[0];
-    const taskEnc = encodeURIComponent(JSON.stringify({issue:task.issue_id||'', seq:task.event_seq||0, repo:(task.repo_key||'').replace('gitcode:',''), created:task.created_at||''}));
+    const taskEnc = encodeURIComponent(JSON.stringify({issue:task.issue_id||'', seq:task.event_seq||0, repo:stripRepoPrefix(task.repo_key||''), created:task.created_at||''}));
     // 加载该任务的日志
     API.get('/task-logs/' + task.id + '/messages?since=0').then(msgs => {
       renderTaskLogMessages(document.getElementById('rtLogModalBody'), msgs || [], JSON.parse(decodeURIComponent(taskEnc)));
@@ -3477,11 +3479,11 @@ function renderRuntimeTaskList(container, tasks, rtName) {
   html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent_skill') + '</th><th>' + I18N.t('observability.col_repo') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_token') + '</th><th>' + I18N.t('observability.col_created') + '</th></tr></thead><tbody>';
   tasks.forEach(t => {
     const issueSeq = (t.issue_id && t.event_seq) ? `${t.issue_id} #${t.event_seq}` : (t.event_seq ? `#${t.event_seq}` : t.id.substring(0,12));
-    const infoEnc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:(t.repo_key||'').replace('gitcode:',''), created:t.created_at||''}));
+    const infoEnc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:stripRepoPrefix(t.repo_key||''), created:t.created_at||''}));
     html += `<tr style="cursor:pointer" onclick="openTaskLogModal('${t.id}', '${infoEnc}')">
       <td class="ts"><b>${issueSeq}</b></td>
       <td><b>${t.agent_type || '-'}</b><br><span class="ts t3">${t.skill || '-'}</span></td>
-      <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
+      <td class="ts t3">${stripRepoPrefix(t.repo_key || '').substring(0,20)}</td>
       <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</span></td>
       <td class="ts t2">${_obsTokTaskFor(t.id)}</td>
       <td class="ts t3">${fmtLocalTime(t.created_at || '').substring(0,16)}</td>

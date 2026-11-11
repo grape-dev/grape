@@ -33,7 +33,7 @@ class UpdateOrgBody(BaseModel):
 
 class AddMemberBody(BaseModel):
     username: str = ""
-    user_id: int = 0
+    user_id: str = ""
     role: str = "member"
 
 
@@ -41,7 +41,7 @@ class UpdateMemberBody(BaseModel):
     role: str
 
 
-def _ensure_slug(slug: str, name: str, user_id: int) -> str:
+def _ensure_slug(slug: str, name: str, user_id: str) -> str:
     """生成唯一 slug。"""
     if not slug:
         slug = name.lower().replace(" ", "-").replace("/", "-")[:32]
@@ -89,7 +89,7 @@ def create_organization(body: CreateOrgBody, user: dict = Depends(require_no_ses
 
 
 @router.get("/{org_id}", operation_id="orgs_detail", summary="获取组织详情")
-def get_organization(org_id: int, user: dict = Depends(require_no_session_token)):
+def get_organization(org_id: str, user: dict = Depends(require_no_session_token)):
     if not is_org_member(user["id"], org_id):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "不是该组织的成员"})
     org = get_org(org_id)
@@ -113,7 +113,7 @@ def get_organization(org_id: int, user: dict = Depends(require_no_session_token)
 
 
 @router.put("/{org_id}", operation_id="orgs_update", summary="更新组织信息")
-def update_organization(org_id: int, body: UpdateOrgBody,
+def update_organization(org_id: str, body: UpdateOrgBody,
                         user: dict = Depends(require_no_session_token)):
     # Issue #381/#395: 写接口鉴权绑定路径 org_id（组织不存在→404；非成员→403；非管理员→403），
     # 不再用 require_org_admin（resolve_org_context 回退个人组织的上下文型鉴权，与路径脱钩可越权）
@@ -133,7 +133,7 @@ def update_organization(org_id: int, body: UpdateOrgBody,
 
 
 @router.delete("/{org_id}", operation_id="orgs_delete", summary="删除组织（个人组织不可删）")
-def delete_organization(org_id: int, user: dict = Depends(require_no_session_token)):
+def delete_organization(org_id: str, user: dict = Depends(require_no_session_token)):
     # Issue #381/#395: 删除接口鉴权同样绑定路径 org_id（404/403 语义与 PUT 一致）
     from src.api.deps import require_path_org_admin
     role = require_path_org_admin(user["id"], org_id)
@@ -168,7 +168,7 @@ def search_users(q: str = "", user: dict = Depends(require_no_session_token)):
 
 
 @router.get("/{org_id}/members", operation_id="orgs_members_list", summary="列出组织成员")
-def list_members(org_id: int, user: dict = Depends(require_no_session_token)):
+def list_members(org_id: str, user: dict = Depends(require_no_session_token)):
     if not is_org_member(user["id"], org_id):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "不是该组织的成员"})
     members = get_org_members(org_id)
@@ -185,7 +185,7 @@ def list_members(org_id: int, user: dict = Depends(require_no_session_token)):
 
 
 @router.post("/{org_id}/members", operation_id="orgs_members_add", summary="添加成员")
-def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_no_session_token)):
+def add_member(org_id: str, body: AddMemberBody, user: dict = Depends(require_no_session_token)):
     # Issue #381/#395: 同因越权修复——路径 org_id 绑定鉴权（非成员/非管理员无法对他人组织加人）
     from src.api.deps import require_path_org_admin
     require_path_org_admin(user["id"], org_id)
@@ -215,7 +215,7 @@ def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_no
 
 
 @router.patch("/{org_id}/members/{user_id}", operation_id="orgs_members_update", summary="修改成员角色")
-def update_member(org_id: int, user_id: int, body: UpdateMemberBody,
+def update_member(org_id: str, user_id: str, body: UpdateMemberBody,
                   user: dict = Depends(require_no_session_token)):
     # Issue #381/#395: 同因越权修复——路径 org_id 绑定鉴权
     from src.api.deps import require_path_org_admin
@@ -229,7 +229,7 @@ def update_member(org_id: int, user_id: int, body: UpdateMemberBody,
 
 
 @router.delete("/{org_id}/members/{user_id}", operation_id="orgs_members_remove", summary="移除成员")
-def remove_member(org_id: int, user_id: int, user: dict = Depends(require_no_session_token)):
+def remove_member(org_id: str, user_id: str, user: dict = Depends(require_no_session_token)):
     # Issue #381/#395: 同因越权修复——路径 org_id 绑定鉴权
     from src.api.deps import require_path_org_admin
     require_path_org_admin(user["id"], org_id)
@@ -240,7 +240,7 @@ def remove_member(org_id: int, user_id: int, user: dict = Depends(require_no_ses
 
 
 @router.post("/{org_id}/leave", operation_id="orgs_leave", summary="离开组织")
-def leave_org(org_id: int, user: dict = Depends(require_no_session_token)):
+def leave_org(org_id: str, user: dict = Depends(require_no_session_token)):
     role = get_member_role(user["id"], org_id)
     if not role:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "不是该组织的成员"})

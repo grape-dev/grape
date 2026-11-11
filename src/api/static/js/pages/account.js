@@ -106,9 +106,19 @@ var _emailConfigured = false;
 
 function _accountLoadSecurity() {
   // R7: 先获取 email_configured 状态，再渲染安全 tab
-  API.get('/auth/providers').then(function(providersData) {
+  Promise.all([
+    API.get('/auth/providers'),
+    API.get('/settings/credentials').catch(function() { return {}; })
+  ]).then(function(results) {
+    var providersData = results[0];
     window._emailConfigured = !!(providersData && providersData.email_configured);
     _accountProvidersData = providersData;
+    // 绑定来源判定（D102-M：Manual PAT > OAuth）——安全 tab 只"陈述"来源，
+    // PAT 操作归凭据管理（2026-11-08 用户裁定：职责分离但模式可见）
+    window._secCredSource = function(provider) {
+      var c = results[1] || {};
+      return !!(c[provider + '_pat'] && Object.keys(c[provider + '_pat']).length > 0) ? 'PAT' : 'OAuth';
+    };
     _accountRenderSecurity();
   }).catch(function() {
     window._emailConfigured = true; // 获取失败默认显示邮箱卡片
@@ -191,8 +201,36 @@ function _accountRenderSecurity() {
       var providersHtml = providers.map(function(p) {
         var bound = bindings.indexOf(p.provider) >= 0;
         var identity = identities.find(function(i) { return i.provider === p.provider; });
-        var expired = !!_expiredMap[p.provider];
-        return _accountRenderProviderRow(p.name, p.provider, bound, identity, expired);
+        // D105k（2026-11-09 用户裁定）：安全 tab 行 = 纯 OAuth 三态，PAT 彻底退出本行。
+        // ①渠道已配置+OAuth 绑定（后端 has_oauth_token 声明制）→ 已绑定+解绑
+        // ②渠道已配置+未绑定 → 绑定按钮
+        // ③渠道未配置 → 不支持 OAuth（灰ⓘ），绑定/解绑全不渲染。
+        // PAT 的一切（配置/清除/来源标签）只在凭据 tab，本行不再展示。
+        var oauthBound = !!(bound && identity && identity.has_oauth_token === true);
+        // D102-L：token 过期告警归凭据 tab——安全 tab 只展示绑定关系，恒 false
+        var expired = false;
+        var _secOauthState = (p.configured === false) ? 'unconfigured'
+          : (oauthBound ? 'bound' : 'unbound');
+        var _badgeTitle, _badgeBg, _badgeGlyph;
+        if (_secOauthState === 'unconfigured') {
+          _badgeTitle = I18N.t('app.account.sec_oauth_unconfigured_hint');
+          _badgeBg = 'background:var(--bg);color:var(--t3)';
+          _badgeGlyph = 'ⓘ';
+        } else if (_secOauthState === 'bound') {
+          _badgeTitle = I18N.t('app.account.sec_oauth_bound');
+          _badgeBg = 'background:rgba(52,199,89,.15);color:#34c759';
+          _badgeGlyph = '✓';
+        } else {
+          _badgeTitle = I18N.t('app.account.sec_oauth_unbound');
+          _badgeBg = 'background:rgba(10,132,255,.12);color:#0a84ff';
+          _badgeGlyph = 'ⓘ';
+        }
+        var _secStatusBadge = '<span class="sec-status-badge" title="' + _badgeTitle.replace(/"/g, '&quot;') + '"'
+          + ' style="font-size:10px;font-weight:700;min-width:16px;height:16px;padding:0 4px;'
+          + 'display:inline-flex;align-items:center;justify-content:center;border-radius:8px;cursor:help;' + _badgeBg + '">' + _badgeGlyph + '</span>';
+        return _accountRenderProviderRow(p.name, p.provider, _secOauthState === 'bound', identity, expired, {
+          state: _secOauthState, badge: _secStatusBadge, badgeTitle: _badgeTitle,
+          oauthConfigured: p.configured });
       }).join('');
       listEl.innerHTML = providersHtml;
   }).catch(function(e) {
@@ -206,6 +244,85 @@ function _accountLoadCredentials() {
   var el = document.getElementById('accountTabContent');
   if (!el) return;
   el.innerHTML = '<div class="loading">' + (I18N.t('app.account.loading')) + '</div>';
+
+  // D102-L: 第三方仓库凭据卡（凭据域——平台清单卡驱动 + 过期态）
+  Promise.all([
+    API.get('/settings/vcs/platforms'),
+    API.get('/auth/me'),
+    API.get('/settings/credentials'),
+    API.get('/auth/providers').catch(function() { return { providers: [] }; })
+  ]).then(function(results) {
+    var _plats = (results[0] && results[0].platforms) || [];
+    var _me = results[1] || {};
+    var _creds = results[2] || {};
+    var _expiredMap = {};
+    (_me.token_expired_providers || []).forEach(function(ep) {
+      _expiredMap[typeof ep === 'object' ? ep.provider : ep] = true;
+    });
+    // 2026-11-08 用户裁定：凭据双模式（OAuth / PAT）三态角标矩阵。
+    // OAuth 状态机：unconfigured（灰，入口置灰）/ unbound（跳安全页绑定）
+    // / available。PAT 独立徽章；清除=PUT 空串。
+    // 平台取消 OAuth 配置后按 unconfigured 显示，绑定记录不动（不清除）。
+    var _oauthCfgMap = {};
+    ((results[3] && results[3].providers) || []).forEach(function(pp) { _oauthCfgMap[pp.provider] = !!pp.configured; });
+    var _bindings = {};
+    (_me.bindings || []).forEach(function(b) { _bindings[b] = true; });
+    window._accountRepoCredSource = function(provider) {
+      var hasManual = !!(_creds[provider + '_pat'] && Object.keys(_creds[provider + '_pat']).length > 0);
+      if (hasManual) return {key: 'manual', label: I18N.t('app.account.cred_source_manual')};
+      if (_bindings[provider]) return {key: 'oauth', label: I18N.t('app.account.cred_source_oauth')};
+      return {key: 'none', label: I18N.t('app.account.cred_source_none')};
+    };
+    var _repoCredHtml = '';
+    _plats.forEach(function(p) {
+      var _oauthState = _bindings[p.provider] ? 'available'
+        : (_oauthCfgMap[p.provider] === false ? 'unconfigured' : 'unbound');
+      // D102-P 统一（口径 v6 终态）：全平台泛型键——后端已对存量平台做
+      // 专用字段→<p>_pat 存在性映射，前端零分派。
+      var _hasPat = !!(_creds[p.provider + '_pat'] && Object.keys(_creds[p.provider + '_pat']).length > 0);
+      // 2026-11-08 用户裁定：凭据行=徽章即状态，不做跳转账号页的入口。
+      // OAuth 徽章三态：平台未配置 OAuth（灰）/未绑定（蓝）/绑定生效中（绿）；
+      // PAT 徽章两态：已配置 PAT（绿）/PAT 未配置（灰）。操作仅 PAT 配置/清除。
+      var _oauthBadge, _oauthTitle;
+      if (_oauthState === 'unconfigured') {
+        _oauthBadge = I18N.t('app.account.oauth_badge_unconfigured');
+        _oauthTitle = I18N.t('app.account.oauth_title_unconfigured');
+      } else if (_oauthState === 'unbound') {
+        _oauthBadge = I18N.t('app.account.oauth_badge_unbound');
+        _oauthTitle = I18N.t('app.account.oauth_title_unbound');
+      } else {
+        _oauthBadge = I18N.t('app.account.oauth_badge_bound');
+        _oauthTitle = _hasPat ? I18N.t('app.account.oauth_title_bound_pat') : I18N.t('app.account.oauth_title_bound');
+      }
+      var _oauthBadgeHtml = '<span class="tg" title="' + _oauthTitle + '" style="font-size:10px;padding:2px 6px;border-radius:4px;' + (_oauthState === 'unconfigured' ? 'background:var(--bg);color:var(--t3)' : _oauthState === 'unbound' ? 'background:rgba(10,132,255,.12);color:#0a84ff' : 'background:rgba(52,199,89,.15);color:#34c759') + '">' + _oauthBadge + '</span>';
+      var _patBadge = _hasPat
+        ? '<span class="tg" title="' + I18N.t('app.account.pat_badge_manual_title') + '" style="font-size:10px;background:rgba(52,199,89,.15);color:#34c759;padding:2px 6px;border-radius:4px">' + I18N.t('app.account.pat_badge_configured') + '</span>'
+        : '<span class="tg" title="' + I18N.t('app.account.pat_badge_none_title') + '" style="font-size:10px;background:var(--bg);color:var(--t3);padding:2px 6px;border-radius:4px">' + I18N.t('app.account.pat_badge_none') + '</span>';
+      var _expired = !!_expiredMap[p.provider];
+      var _expiredBadge = _expired
+        ? '<span class="tg" style="font-size:10px;background:var(--r);color:#fff;padding:2px 6px;border-radius:4px">' + (I18N.t('app.account.token_expired') || 'Token Expired') + '</span>'
+        : '';
+      var _patBtns = '<button class="bt bt-s bt-p" style="font-size:11px" onclick="_accountOpenPatForm(\'' + p.provider + '\')">' + (_hasPat ? I18N.t('app.account.pat_btn_reconfigure') : I18N.t('app.account.pat_btn_configure')) + '</button>'
+        + (_hasPat ? ' <button class="bt bt-s" style="font-size:11px" title="' + I18N.t('app.account.pat_btn_clear_title') + '" onclick="_accountClearPat(\'' + p.provider + '\')">' + I18N.t('app.account.pat_btn_clear') + '</button>' : '');
+      _repoCredHtml += '<div style="display:flex;align-items:center;gap:14px;padding:12px 16px;border:1px solid var(--b);border-radius:12px;background:var(--c);margin-bottom:10px">'
+        + '<div style="flex:1">'
+          + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' + (typeof platformIcon === 'function' ? platformIcon(p.provider, 18) : '') + '<span style="font-size:14px;font-weight:600">' + _accountEsc(p.name) + '</span>' + _expiredBadge + _oauthBadgeHtml + _patBadge + '</div>'
+        + '</div>'
+        + '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">' + _patBtns + '</div>'
+      + '</div>';
+    });
+    window._accountRepoCredHtml = _repoCredHtml;
+    // 拿到仓库平台数据后再拉凭据详情渲染整个 tab
+    _accountLoadCredentialsContinue();
+  }).catch(function() {
+    window._accountRepoCredHtml = '';
+    _accountLoadCredentialsContinue();
+  });
+}
+
+function _accountLoadCredentialsContinue() {
+  var el = document.getElementById('accountTabContent');
+  if (!el) return;
 
   API.get('/settings/credentials').then(function(d) {
     var hw = d.huawei_cloud || {};
@@ -224,6 +341,12 @@ function _accountLoadCredentials() {
     }
 
     var html = '';
+
+    // 卡片: 第三方仓库凭据（D102-L——仓库平台 PAT 配置归凭据域）
+    html += '<div class="cd"><div class="cd-h"><h2>' + I18N.t('app.account.third_party_repo_credentials') + '</h2></div>';
+    html += (window._accountRepoCredHtml || '<p class="tx t2" style="padding:8px 0">' + (I18N.t('app.account.loading') || '') + '</p>');
+    html += '<p class="tx t2 mt8" style="font-size:12px">' + I18N.t('app.account.repo_cred_desc') + '</p>';
+    html += '</div>';
 
     // 卡片: Huawei Cloud AK/SK — 和原通用配置保持一致风格
     html += '<div class="cd"><div class="cd-h"><h2>Huawei Cloud</h2></div>';
@@ -247,10 +370,48 @@ function _accountLoadCredentials() {
   });
 }
 
-function _accountRenderProviderRow(label, provider, bound, identity, expired) {
+
+// ── PlatformCatalog（F1/S24）：VCS 平台目录——后端默认卡常在（gitcode/github），
+// 其他平台有卡自动出现；PAT 表单按目录渲染，前端零平台名分支。─────────────
+var _vcsPlatformCatalog = null;
+function _accountLoadVcsCatalog() {
+  if (_vcsPlatformCatalog) return Promise.resolve(_vcsPlatformCatalog);
+  return API.get('/settings/vcs/platforms').then(function(d) {
+    _vcsPlatformCatalog = {};
+    (d.platforms || []).forEach(function(p) { _vcsPlatformCatalog[p.provider] = p; });
+    return _vcsPlatformCatalog;
+  }).catch(function() { _vcsPlatformCatalog = {}; return _vcsPlatformCatalog; });
+}
+function _accountPlatformName(provider) {
+  // 平台名来源优先级（D102-L 实弹修正 2026-11-08）：
+  // /auth/providers 渠道卡（含华为账号等纯登录/未入目录渠道）→
+  // 仓库平台目录 → 平台 id 原样兜底。
+  // 禁止兜底硬编码 'GitCode'——旧兜底把 huawei 错标成 GitCode，
+  // 第三方账号列表出现两个"GitCode"且华为账号消失（事故见
+  // tests/test_account_platform_label.py）。
+  var pd = (typeof _accountProvidersData !== 'undefined' && _accountProvidersData && _accountProvidersData.providers) || [];
+  for (var i = 0; i < pd.length; i++) {
+    if (pd[i].provider === provider && pd[i].name) return pd[i].name;
+  }
+  var c = _vcsPlatformCatalog || {};
+  if (c[provider] && c[provider].name) return c[provider].name;
+  return {github: 'GitHub', gitee: 'Gitee'}[provider] || provider;
+}
+function _accountPatCreateUrl(provider) {
+  // 存量两平台保留官方直达链接（带 scopes/description 预选参数）；
+  // 其他平台按目录卡 pat_create_url 渲染
+  if (provider === 'github') return 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps';
+  if (provider === 'gitcode') return 'https://gitcode.com/setting/token-classic/create';
+  var c = _vcsPlatformCatalog || {};
+  return (c[provider] && c[provider].pat_create_url) || '';
+}
+
+function _accountRenderProviderRow(label, provider, bound, identity, expired, opts) {
+  opts = opts || {};
   var isZh = _accountIsZh();
   var icon = (typeof platformIcon === 'function') ? platformIcon(provider, 20) : '';
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  if (opts.badge) icon = '<span style="position:relative;display:inline-flex">' + icon + opts.badge + '</span>';
+  var pName = _accountPlatformName(provider);
 
   // R10: token 过期时显示过期提示 + 重新绑定按钮
   if (bound && expired) {
@@ -297,12 +458,15 @@ function _accountRenderProviderRow(label, provider, bound, identity, expired) {
           + icon
           + '<span style="font-size:14px;font-weight:600;color:var(--t)">' + _accountEsc(pName) + '</span>'
           + '<span class="tg tg-d" style="font-size:10px">' + (I18N.t('app.account.linked_badge')) + '</span>'
+          + (opts.sourceTag || '')
         + '</div>'
         + '<div style="font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _accountEsc(nameLine) + '</div>'
         + (timeLine ? '<div style="font-size:11px;color:var(--t3);margin-top:2px">' + _accountEsc(timeLine) + '</div>' : '')
       + '</div>'
       + '<div style="display:flex;gap:6px;flex-shrink:0">'
-        + '<button class="bt bt-s bt-o" style="font-size:11px" onclick="_accountBindProvider(\'' + provider + '\')">' + (I18N.t('app.account.update')) + '</button>'
+        + (opts.oauthConfigured === false
+          ? ''  // PAT 绑定（平台未配置 OAuth）：更新 OAuth 无意义，仅解绑（2026-11-08 用户裁定）
+          : '<button class="bt bt-s bt-o" style="font-size:11px" onclick="_accountBindProvider(\'' + provider + '\')">' + (I18N.t('app.account.update')) + '</button>')
         + '<button class="bt bt-s" style="color:var(--r);border-color:var(--r);font-size:11px" onclick="_accountUnbindProvider(\'' + provider + '\')">' + (I18N.t('app.account.unbind')) + '</button>'
       + '</div>'
     + '</div>';
@@ -318,7 +482,9 @@ function _accountRenderProviderRow(label, provider, bound, identity, expired) {
       + '</div>'
       + '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + (I18N.t('app.account.link_to_manage_repos')) + '</div>'
     + '</div>'
-    + '<button class="bt bt-s bt-p" style="font-size:11px" onclick="_accountBindProvider(\'' + provider + '\')">' + (I18N.t('app.account.link_btn')) + '</button>'
+    + (opts.state === 'unconfigured'
+        ? '<button class="bt bt-s bt-p" aria-disabled="true" title="' + (opts.badgeTitle || I18N.t('app.account.oauth_badge_unconfigured')).replace(/"/g, '&quot;') + '" style="font-size:11px;opacity:.45;cursor:not-allowed">' + (I18N.t('app.account.link_btn')) + '</button>'
+        : '<button class="bt bt-s bt-p" style="font-size:11px" onclick="_accountBindProvider(\'' + provider + '\')">' + (I18N.t('app.account.link_btn')) + '</button>')
   + '</div>';
 }
 
@@ -346,7 +512,7 @@ function _accountShowChangePassword() {
 // 场景区分），副文案给用户可行动的下一步（普通用户=联系管理员，管理员=按文档配置），
 // toast 附「查看配置帮助」深链 help.html 邮件配置章节（§5.2 SMTP/Resend）。
 function _accountShowEmailNotConfiguredToast(contextKey) {
-  var link = I18N.t('app.account.email_view_config_help', null, '查看配置帮助');
+  var link = I18N.t('app.account.email_view_config_help', null, I18N.t('app.account.view_config_help'));
   app.showToast(
     I18N.t(contextKey, null, I18N.t('app.account.email_not_configured')),
     I18N.t('app.account.email_not_configured_hint'),
@@ -530,9 +696,17 @@ function _accountDoChangeEmail() {
 // ===== Bind / Unbind provider =====
 
 // 绑定方式选择弹窗（OAuth + 手动令牌）
-function _accountBindProvider(provider) {
+function _accountBindProvider(provider, allowPat) {
+    // 2026-11-08 用户裁定（口径 v5 → v6 职责分域）：弹窗结构=基线形态
+    // （OAuth 已配 → stabs 双页签 [OAuth 授权](默认)+[手动令牌 PAT]；
+    //   未配 → PAT 表单；引导页双模式 v4 不变）。
+    // allowPat=上下文分域——安全 tab 第三方账号行(缺省 false)=纯 OAuth 域
+    // （仅授权/重授权，无 PAT 表单）；引导页(true)=双模式（首次打通用）。
+    // PAT 的一切归 凭据 tab。
+    allowPat = allowPat === true;
+    _accountLoadVcsCatalog();
   var isZh = _accountIsZh();
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   var icon = (typeof platformIcon === 'function') ? platformIcon(provider, 24) : '';
   var bindings = (_accountProfile && _accountProfile.bindings) || [];
   var alreadyBound = bindings.indexOf(provider) >= 0;
@@ -553,14 +727,14 @@ function _accountBindProvider(provider) {
   var html = '<h3 style="display:flex;align-items:center;gap:8px">' + icon + ' ' + titleText + '</h3>';
 
   if (_oauthConfigured) {
-    // OAuth App 已配——显示 OAuth tab + 手动令牌 tab
-    // 选项卡
-    html += '<div class="stabs" style="margin-bottom:16px">';
-    html += '<a class="ac" id="bindTabOauth" onclick="_accountSwitchBindTab(\'oauth\')">' + (I18N.t('app.account.oauth_auth')) + '</a>';
-    html += '<a id="bindTabToken" onclick="_accountSwitchBindTab(\'token\')">' + (I18N.t('app.account.manual_token')) + '</a>';
-    html += '</div>';
+    // 基线形态：经典 stabs 双页签（OAuth 默认选中 + 手动令牌 PAT）
+    if (allowPat) {
+      html += '<div class="stabs" style="margin-bottom:16px">';
+      html += '<a class="ac" id="bindTabOauth" onclick="_accountSwitchBindTab(\'oauth\')">' + (I18N.t('app.account.oauth_auth')) + '</a>';
+      html += '<a id="bindTabToken" onclick="_accountSwitchBindTab(\'token\')">' + (I18N.t('app.account.manual_token')) + '</a>';
+      html += '</div>';
+    }
 
-    // OAuth panel (默认选中)
     var oauthBtnText = alreadyBound ? (I18N.t('app.account.re_authorize')) : (I18N.t('app.account.authorize'));
     html += '<div id="bindPanelOauth">';
     var hintKey = alreadyBound ? 'app.account.oauth_rebind_hint' : 'app.account.oauth_redirect_hint';
@@ -568,14 +742,24 @@ function _accountBindProvider(provider) {
     html += '<button class="bt bt-p" style="width:100%" onclick="_accountDoOauthBind(\'' + provider + '\')">' + oauthBtnText + '</button>';
     html += '</div>';
 
-    // Token panel (隐藏)
-    html += '<div id="bindPanelToken" style="display:none">';
-    html += _accountManualBindForm(provider, isZh, pName, true);
-    html += '</div>';
-  } else {
-    // R7.4: OAuth App 未配——只显示手动令牌输入，不显示 tab 切换
+    if (allowPat) {
+      html += '<div id="bindPanelToken" style="display:none">';
+      html += _accountManualBindForm(provider, isZh, pName, true);
+      html += '</div>';
+    }
+  } else if (allowPat) {
+    // 引导页上下文：OAuth 未配置 → PAT 表单直达（首次打通用）
     html += '<div id="bindPanelToken">';
     html += _accountManualBindForm(provider, isZh, pName, false);
+    html += '</div>';
+  } else {
+    // 安全 tab 上下文（allowPat=false）：OAuth 未配 → 指路凭据管理（PAT 归凭据域）
+    html += '<div style="background:var(--bg);border:1px solid var(--b);border-radius:10px;padding:14px;margin-bottom:12px">';
+    html += '<p class="tx t2" style="margin-bottom:10px">' + (isZh
+      ? I18N.t('app.account.oauth_not_enabled_prefix') + _accountEsc(pName) + I18N.t('app.account.oauth_not_enabled_suffix')
+      : 'OAuth authorization is not enabled for this platform yet. Configure a repository credential (PAT) for ' + _accountEsc(pName) + ' from the Credentials tab.');
+    html += '</div>';
+    html += '<button class="bt bt-o" style="width:100%" onclick="_accountGoCredentialsTab()">' + (isZh ? I18N.t('app.account.go_configure_repo_cred') : 'Configure credential') + '</button>';
     html += '</div>';
   }
 
@@ -597,6 +781,86 @@ function _accountBindProvider(provider) {
       _renderBindModal();
     });
   }
+}
+
+function _accountOpenPatForm(provider) {
+  // D102-L: 凭据 tab 的 PAT 配置入口（表单复用绑定模态的 manual form——
+  // 写入接口 /settings/credentials 原样）
+  var isZh = _accountIsZh();
+  var pName = _accountPlatformName(provider);
+  var icon = (typeof platformIcon === 'function') ? platformIcon(provider, 24) : '';
+  var html = '<h3 style="display:flex;align-items:center;gap:8px">' + icon + ' ' + _accountEsc(pName) + ' PAT</h3>';
+  html += _accountManualBindForm(provider, isZh, pName, false);
+  _accountShowModal(html);
+}
+
+function _accountClearPat(provider) {
+  // 清除 PAT = PUT 空串（空=显式清除），D105k 统一确认弹层（文案按四象限语义区分）
+  _accountClearPatConfirmMsg(provider, function(msg) {
+    app.showConfirm(msg, function() {
+      _accountDoClearPat(provider);
+    }, {danger: true});
+  });
+}
+
+function _accountDoClearPat(provider) {
+  // D102-P 统一（口径 v6 终态）：全平台清除走泛型 platform_tokens 空串；
+  // D102-M：清除后回落 OAuth 供给（如已绑定）
+  var body = {platform_tokens: {}};
+  body.platform_tokens[provider] = '';
+  API.put('/settings/credentials', body, 15000).then(function(d) {
+    app.showToast(I18N.t('app.account.pat_cleared'));
+    // D105k：清除可能触发平台级解绑级联（无 OAuth 时删 ei 归属行+user_repos）——
+    // 失效仓库页缓存与 _projectsContent，否则项目页复用"清空期间"的空列表缓存
+    try {
+      if (typeof app !== 'undefined' && app._clearCachedReposData) app._clearCachedReposData();
+      localStorage.removeItem('repo_member_cache');
+      if (d && d.bindings) {
+        var _u = JSON.parse(localStorage.getItem('user') || '{}');
+        _u.bindings = d.bindings;
+        localStorage.setItem('user', JSON.stringify(_u));
+      }
+      // R1 对齐解绑 handler：当前选中仓库属于被清平台 → 清理
+      var _cr = JSON.parse(sessionStorage.getItem('currentRepo') || 'null');
+      if (_cr && _cr.repoKey && _cr.repoKey.indexOf(provider + ':') === 0) {
+        sessionStorage.removeItem('currentRepo');
+      }
+      // R2 对齐解绑 handler：角色可能变化（托管仓库归属）
+      if (typeof app !== 'undefined' && app.loadProfile) app.loadProfile();
+    } catch (e) {}
+    if (typeof window.invalidateProjectsCache === 'function') window.invalidateProjectsCache();
+    _accountLoadCredentials();
+  }).catch(function(e) {
+    app.showToast(e.message || I18N.t('app.account.pat_clear_failed'));
+  });
+}
+
+function _accountClearPatConfirmMsg(provider, cb) {
+  var pName = _accountPlatformName(provider);
+  var msg = I18N.t('app.account.confirm_clear_pat_prefix') + pName + I18N.t('app.account.confirm_clear_pat_suffix');
+  // 有 OAuth 绑定 → 清除后回落 OAuth 供给；无 OAuth → 平台级解绑（项目列表同步清除）
+  fetch('/auth/identities', {headers: {Authorization: 'Bearer ' + (localStorage.getItem('token') || '')}})
+    .then(function(r) { return r.json(); }).catch(function() { return {identities: []}; })
+    .then(function(d) {
+      var ident = (d.identities || []).find(function(i) { return i.provider === provider; });
+      var hasOAuth = !!(ident && ident.has_oauth_token);
+      msg += hasOAuth
+        ? I18N.t('app.account.pat_clear_fallback_note')
+        : I18N.t('app.account.pat_clear_unbound_note');
+      cb(msg);
+    });
+}
+
+function _accountGoSecurityTab() {
+  // D102-K 续（用户纠偏）：引导页 → 用户设置安全 tab（绑定关系正式管理入口）
+  try { _accountCloseModal(); } catch (e) {}
+  renderAccount('security');
+}
+
+function _accountGoCredentialsTab() {
+  // D102-L: 绑定弹窗 OAuth 未配置 → 指路凭据管理（PAT=显式回退正式路径）
+  _accountCloseModal();
+  renderAccount('credentials');
 }
 
 function _accountSwitchBindTab(tab) {
@@ -622,14 +886,14 @@ function _accountManualBindForm(provider, isZh, pName, oauthConfigured) {
   // 令牌创建直达链接（实测 200 / 官方支持的预选参数）：
   // - GitHub: scopes=repo 预勾选仓库权限，description 预填备注
   // - GitCode: gitcode.com/settings/personal-access-tokens/new
-  var tokenCreateUrl = provider === 'github'
-    ? 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps'
-    : 'https://gitcode.com/setting/token-classic/create';
-  var tokenCreateLabel = provider === 'github' ? 'github.com' : 'gitcode.com';
+  var tokenCreateUrl = _accountPatCreateUrl(provider);
+  var tokenCreateLabel = tokenCreateUrl ? (tokenCreateUrl.split('/')[2] || '') : '';
   // 帮助文案第一步做成超链接，直达令牌创建页（新标签页打开）
-  var helpSteps = provider === 'github'
-    ? (I18N.t('app.account.github_token_help'))
-    : (I18N.t('app.account.gitcode_token_help'));
+  // D102：帮助文案按 provider 查表（gitee 曾错用 gitcode 文案——引导指错站点）
+  var _helpKey = {github: 'app.account.github_token_help',
+                  gitee: 'app.account.gitee_token_help',
+                  gitcode: 'app.account.gitcode_token_help'}[provider] || 'app.account.gitcode_token_help';
+  var helpSteps = I18N.t(_helpKey);
   // 单一直达入口（方案 A）：通栏按钮是唯一的令牌创建链接，帮助步骤保持纯文本
   // （步骤 2/3 是权限/复制指引有增量；第 1 步链接与按钮同目标，属重复入口，已移除）
   var createLinkBtn = '<a href="' + tokenCreateUrl + '" target="_blank" rel="noopener noreferrer" class="bt" '
@@ -692,7 +956,11 @@ function _accountDoOauthBind(provider) {
   // 移动端：直接全页跳转，不用弹窗
   if (_isMobile()) {
     API.get('/auth/bind/' + provider + promptParam.replace('&', '?')).then(function(d) {
-      if (d.redirect_url) window.location.href = d.redirect_url;
+      // 口径 v7：标记只在真正发起 OAuth 跳转时打——弹窗打开/取消不残留
+      if (d.redirect_url) {
+        try { sessionStorage.setItem('_bindReturnView', 'account'); } catch (e) {}
+        window.location.href = d.redirect_url;
+      }
     }).catch(function(e) {
       if (btn) { btn.disabled = false; btn.textContent = btn.dataset.origText || ''; }
       app.showToast(e.message || I18N.t('app.account.error_failed'));
@@ -855,7 +1123,7 @@ function _accountConfirmBindSuccess(provider, btn, fromPostMessage) {
 
 function _accountShowBindSuccessToast(provider) {
   // 居中成功提示层——不依赖 modal，用户始终看到明确反馈
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   var overlay = document.createElement('div');
   overlay.id = 'bindSuccessToast';
   overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.15);backdrop-filter:blur(4px);animation:fadeBg .2s ease';
@@ -912,7 +1180,7 @@ function _accountFetchTransferContext(provider, btn) {
 
 function _accountTranslateOAuthError(errorCode, provider) {
   if (!errorCode) return I18N.t('app.account.bind_failed');
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   // 复用已有的错误码翻译逻辑
   var errorKey = 'app.login.oauth_error_' + errorCode;
   var translated = I18N.t(errorKey);
@@ -928,7 +1196,7 @@ function _accountTranslateOAuthError(errorCode, provider) {
 
 function _accountDoManualBind(provider) {
   var isZh = _accountIsZh();
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   var tokenEl = document.getElementById('manualTokenInput');
   var errEl = document.getElementById('manualBindError');
   var btn = document.getElementById('manualBindBtn');
@@ -947,9 +1215,17 @@ function _accountDoManualBind(provider) {
   btn.dataset.origText = origText;
   if (errEl) errEl.style.display = 'none';
 
-  var field = provider === 'github' ? 'github_token' : 'gitcode_token';
+  // D90-N5（2026-11-07）：存量双平台走专用字段路径（S52 防双路径写同一域）；
+  // 新平台（gitee/gitlab/...）走 platform_tokens 泛型入口（settings.py 已就绪，
+  // verify + 双写 user_credentials <p>_pat + external_identities）
+  var _LEGACY_FIELDS = { github: 'github_token', gitcode: 'gitcode_token' };
   var body = {};
-  body[field] = token;
+  if (_LEGACY_FIELDS[provider]) {
+    body[_LEGACY_FIELDS[provider]] = token;
+  } else {
+    body.platform_tokens = {};
+    body.platform_tokens[provider] = token;
+  }
 
   API.put('/settings/credentials', body, 15000).then(function(d) {
     localStorage.removeItem('repo_member_cache');
@@ -981,7 +1257,7 @@ function _accountDoManualBind(provider) {
 }
 
 function _accountTranslateBindError(e, provider, isZh) {
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   var code = 0;
   if (e && e.detail && typeof e.detail === 'object') code = e.detail.code || 0;
   else if (e && e.status) code = e.status;
@@ -1000,7 +1276,7 @@ function _accountTranslateBindError(e, provider, isZh) {
 }
 
 function _accountShowTransferConfirm(provider, ticket, token) {
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   var html = '<h3>' + I18N.t('app.account.transfer_confirm_title') + '</h3>' +
     '<p class="tx" style="margin-bottom:8px;line-height:1.5">' + I18N.t('app.account.transfer_confirm_msg', {platform: pName}) + '</p>' +
     '<p class="tx t2" style="margin-bottom:20px;line-height:1.5">' + I18N.t('app.account.transfer_confirm_desc') + '</p>' +
@@ -1132,6 +1408,11 @@ function _accountCleanupAfterUnbind(provider) {
   if (typeof app !== 'undefined' && app._clearCachedReposData) {
     app._clearCachedReposData();
   }
+  // D105k：项目页渲染缓存同失效——否则解绑后回项目页复用解绑前的
+  // _projectsContent，"被解绑且无 OAuth 的项目"仍显示（用户实弹）
+  if (typeof window.invalidateProjectsCache === 'function') {
+    window.invalidateProjectsCache();
+  }
 
   // R2: 刷新角色（无条件——解绑可能影响托管仓库列表，角色可能变化）
   if (typeof app !== 'undefined' && app.loadProfile) {
@@ -1141,7 +1422,7 @@ function _accountCleanupAfterUnbind(provider) {
 
 // R30: 解绑成功提示——含受影响仓库数量
 function _accountShowUnbindSuccess(provider, d, isZh) {
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountPlatformName(provider);
   var affected = (d && d.affected_repos) || 0;
   if (affected > 0) {
     app.showToast(I18N.t('app.account.platform_unbound', {platform: pName}),
@@ -1316,7 +1597,7 @@ function _accountLoadApiKeys() {
         '<div style="font-size:10px;color:var(--t3);margin-top:2px">' + (I18N.t('app.account.created')) + ': ' + _accountEsc(fmtTimestamp8(k.created_at) || '—') +
         ' · ' + (I18N.t('app.account.last_used')) + ': ' + (k.last_used_at ? _accountEsc(fmtTimestamp8(k.last_used_at)) : I18N.t('app.account.last_used_never')) + '</div>' +
         '</div>' +
-        '<button class="bt bt-s" style="color:var(--r)" onclick="_accountRevokeApiKey(' + k.id + ',\'' + _accountJsStr(k.name) + '\')">' + (I18N.t('app.account.revoke')) + '</button>' +
+        '<button class="bt bt-s" style="color:var(--r)" onclick="_accountRevokeApiKey(\'' + k.id + '\',\'' + _accountJsStr(k.name) + '\')">' + (I18N.t('app.account.revoke')) + '</button>' +
         '</div>';
     }).join('');
     listEl.innerHTML = html;
@@ -1426,7 +1707,7 @@ function _accountShowDeleteAccount() {
       html += '<button class="bt bt-r" style="width:100%" onclick="_accountDaOauth(\'' + bindings[0] + '\')">' + (I18N.t('app.account.confirm_delete')) + '</button>';
     } else {
       bindings.forEach(function(p) {
-        var pName = p === 'github' ? 'GitHub' : 'GitCode';
+        var pName = _accountPlatformName(p);  // D102: 查表（gitee 曾显示 GitCode）
         html += '<button class="bt bt-o" style="width:100%;margin-bottom:6px" onclick="_accountDaOauth(\'' + p + '\')">' + pName + '</button>';
       });
     }

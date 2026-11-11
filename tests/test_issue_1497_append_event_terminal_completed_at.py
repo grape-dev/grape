@@ -41,7 +41,7 @@ def test_db(monkeypatch):
     from src.session_manager import db_lock
     monkeypatch.setattr("src.api.event_store.db_lock", db_lock)
     try:
-        import src.user.org_db as _org_db
+        import src.domains.mgmt.user.org_db as _org_db
         monkeypatch.setattr(_org_db, "get_org_id_by_repo_key", lambda _rk: 0)
     except Exception:
         pass

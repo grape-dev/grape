@@ -6,15 +6,12 @@
 - T10-05~08: providers.py _get_trusted_host 支持 X-Forwarded-Host
 - T10-09~11: config.py _detect_server_base 端口从 GRAPE_PORT 读取
 """
+
 import os
+
 from unittest.mock import patch, MagicMock
 
 import pytest
-
-
-# ===========================================================================
-# T10-01: settings.py 去掉 localhost 兜底
-# ===========================================================================
 
 class TestSettingsNoLocalhostFallback:
     """测试 settings.py webhook_url 不再有 localhost 兜底。"""
@@ -32,13 +29,8 @@ class TestSettingsNoLocalhostFallback:
         assert 'get_webhook_url() or ""' in src, \
             "webhook_url should fall back to empty string"
 
-
-# ===========================================================================
-# T10-02~04: events.py A2A re-dispatch 用 get_server_base_url
-# ===========================================================================
-
 class TestA2ARedispatchUrl:
-    """测试 A2A re-dispatch URL 从 get_server_base_url 获取。"""
+    """测试 A2A re-dispatch URL 从 A2A 控制面基址获取（Issue #1858）。"""
 
     def test_t10_02_no_hardcoded_localhost_8000(self):
         """T10-02: events.py A2A re-dispatch 不再硬编码 localhost:8000。"""
@@ -48,9 +40,11 @@ class TestA2ARedispatchUrl:
         # 不应有硬编码 http://localhost:8000/api/a2a
         assert '"http://localhost:8000/api/a2a"' not in src, \
             "hardcoded localhost:8000/api/a2a still present"
-        # 应该用 get_server_base_url
-        assert "get_server_base_url" in src, \
-            "get_server_base_url not used in events.py"
+        # Issue #1858：改用按服务解析的 A2A 基址（显式配置 > 网关 /a2a 前缀 > 回连基址）
+        assert "resolve_a2a_base" in src, \
+            "resolve_a2a_base not used in events.py"
+        assert "format_base_url_candidates" in src, \
+            "A2A 失败路径应输出候选 base_url"
 
     def test_t10_03_a2a_url_uses_server_base_url(self):
         """T10-03: get_server_base_url() 有值时 A2A URL 含正确地址。"""
@@ -72,11 +66,6 @@ class TestA2ARedispatchUrl:
             # events.py 中 `or "http://localhost:8000"` 是额外 fallback
             a2a_base = base or "http://localhost:8000"
             assert "localhost" in a2a_base  # 本地开发兼容
-
-
-# ===========================================================================
-# T10-05~08: providers.py _get_trusted_host 支持 X-Forwarded-Host
-# ===========================================================================
 
 class TestGetTrustedHostForwarded:
     """测试 _get_trusted_host 优先读 X-Forwarded-Host。"""
@@ -138,11 +127,6 @@ class TestGetTrustedHostForwarded:
             # 都是 localhost → 返回 Host 头（原行为）
             assert "localhost" in result or "127.0.0.1" in result
 
-
-# ===========================================================================
-# T10-09~11: config.py _detect_server_base 端口从 GRAPE_PORT 读取
-# ===========================================================================
-
 class TestDetectServerBasePort:
     """测试 _detect_server_base 端口从 GRAPE_PORT 环境变量读取。"""
 
@@ -186,11 +170,6 @@ class TestDetectServerBasePort:
         # 应该用 GRAPE_PORT
         assert "GRAPE_PORT" in src, \
             "GRAPE_PORT not used in config.py"
-
-
-# ===========================================================================
-# T10-12~15: 剩余硬编码 localhost:8080 fallback 修复
-# ===========================================================================
 
 class TestRemainingLocalhostFallback:
     """测试剩余硬编码 localhost:8080 fallback 已修复。"""

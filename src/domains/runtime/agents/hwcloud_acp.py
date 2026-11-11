@@ -33,18 +33,26 @@ ACP 协议流程（与 hermes 同构）：
 
 通信格式：每行一个 JSON-RPC 消息（NDJSON over stdin/stdout）
 """
+
 import os
+
 import json
+
 import hashlib
+
 import time
+
 import threading
+
 import subprocess
+
 import shutil
+
 from typing import Generator
+
 from src.kernel.config import log
 
 _bwrap_fail_notified = False
-
 
 def _note_bwrap_fail_once(message: str) -> None:
     """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
@@ -58,7 +66,6 @@ def _note_bwrap_fail_once(message: str) -> None:
         return
     _bwrap_fail_notified = True
     log.warning(message)
-
 
 def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hwcloud ACP 内循环全局墙钟上限（#282 对齐，与 hermes_acp 同一配置源）。
@@ -76,14 +83,7 @@ def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> flo
         _v = 3600.0
     return max(_v, float(max_exec_seconds))
 
-
-# ── per-task settings.json 模板 ──
-# provider 段由 get_env 调用方（executor _stream_hwcloud_acp）通过 env 注入
-# HWCLOUD_PROVIDER_BASE_URL / HWCLOUD_PROVIDER_API_KEY / HWCLOUD_PROVIDER_MODELS
-# （来源：用户云凭据 provider=opengw）。目录权限 0700、文件 0600（含明文 api_key）。
-
 _PROVIDER_NAME = "opengw"
-
 
 def _build_task_settings(iso_home: str) -> str:
     """在 per-task 目录写 settings.json（opengw provider + default_mode=auto）。
@@ -144,7 +144,6 @@ def _build_task_settings(iso_home: str) -> str:
         pass
     return settings_path
 
-
 def _task_home_root() -> str:
     """per-task hwcloud 数据目录根（~/.cache/hwcloud-acp-homes/，按 cwd-hash 分片）。
 
@@ -156,14 +155,13 @@ def _task_home_root() -> str:
     os.makedirs(root, exist_ok=True)
     return root
 
-
 class HwcloudACPBackend:
     """hwcloud ACP 后端 — 不走 build_args/parse_output，直接 stream_execute yield 事件。"""
     name = "hwcloud"
     binary = "hwcloud"
     prompt_via_stdin = False  # ACP 模式不用 stdin 传 prompt，用 JSON-RPC
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
@@ -693,11 +691,6 @@ class HwcloudACPBackend:
             # settings.json 含明文 api_key 但目录已 0700。
             _res.dispose(kill_procs=False)
 
-
-# ══════════════════════════════════════════════════════════════
-# ACP JSON-RPC 客户端（复制自 hermes_acp._ACPSimpleClient，适配 hwcloud 差异）
-# ══════════════════════════════════════════════════════════════
-
 class _ACPSimpleClient:
     """极简 ACP JSON-RPC 客户端：request/response + notification 处理。"""
 
@@ -965,11 +958,6 @@ class _ACPSimpleClient:
             stop_reason = update.get("stopReason", "")
             self.on_prompt_done({"stopReason": stop_reason, "result": update})
 
-
-# ══════════════════════════════════════════════════════════════
-# 辅助函数
-# ══════════════════════════════════════════════════════════════
-
 # hwcloud 噪音事件（阶段 0 实测）：available_*/mcp_servers/session_info/usage
 _IGNORED_UPDATE_TYPES = {
     "available_commands_update",
@@ -990,11 +978,9 @@ _UPDATE_TYPE_MAP = {
     "endturn": "turn_end",
 }
 
-
 def _normalize_update_type(t: str) -> str:
     key = t.lower().replace("_", "").replace("-", "")
     return _UPDATE_TYPE_MAP.get(key, "")
-
 
 def _tool_name_from_title(title: str) -> str:
     if not title:
@@ -1009,7 +995,6 @@ def _tool_name_from_title(title: str) -> str:
         return title
     return title
 
-
 def _extract_session_id(result) -> str:
     if not result or not isinstance(result, dict):
         return ""
@@ -1018,7 +1003,6 @@ def _extract_session_id(result) -> str:
     if sid:
         return sid
     return ""
-
 
 def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
     return {

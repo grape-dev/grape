@@ -123,7 +123,7 @@ class MasterRun:
 
 
 def for_task(task_id: str, engine: str, cwd: str = "", session_id: str = "", *,
-             seq: Any = "", repo_key: str = "", agent_type: str = "", user_id: int = 0,
+             seq: Any = "", repo_key: str = "", agent_type: str = "", user_id: str = "",
              engine_id: int = 0, kind_fallback: str = "devops", source: str = "") -> "MasterRun":
     """`for_task`：给**事件流水线 / autopilot 这类"通常有 agent_tasks 行"**的运行用。
 
@@ -135,7 +135,7 @@ def for_task(task_id: str, engine: str, cwd: str = "", session_id: str = "", *,
     - `task_id` 为空（少数 `d_<seq>` 兜底路径）→ `run_kind=kind_fallback` + attr 兜底。
     """
     attr = {"repo_key": repo_key, "agent_type": agent_type,
-            "user_id": int(user_id or 0), "engine_id": int(engine_id or 0)}
+            "user_id": str(user_id or 0), "engine_id": int(engine_id or 0)}
     if task_id:
         # task 口径：归属以 agent_tasks 为准，attr 只做补空（如 task 行 runtime_id 为空时补引擎 id）
         return MasterRun("task", str(task_id), engine, cwd=cwd, session_id=session_id,

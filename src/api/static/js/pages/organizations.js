@@ -28,7 +28,7 @@ function _loadOrgs() {
     d.forEach(function(org) {
       var badge = org.is_personal ? '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:var(--c);color:var(--t2);margin-left:6px">' + I18N.t("organizations.badge_personal") + '</span>' : '';
       var roleColor = org.role === 'owner' ? 'var(--g)' : org.role === 'admin' ? 'var(--a)' : 'var(--t3)';
-      html += '<div style="border:1px solid var(--b);border-radius:12px;padding:16px;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="_showOrgDetail(' + org.id + ')">' +
+      html += '<div style="border:1px solid var(--b);border-radius:12px;padding:16px;display:flex;align-items:center;gap:12px;cursor:pointer" onclick="_showOrgDetail(\'' + org.id + '\')">' +
         '<div style="width:40px;height:40px;border-radius:10px;background:var(--c);display:flex;align-items:center;justify-content:center;font-size:18px">🏢</div>' +
         '<div style="flex:1"><div style="font-weight:600;font-size:14px">' + (org.name || '') + badge + '</div>' +
         '<div style="font-size:12px;color:var(--t3)">' + (org.slug || '') + ' · ' + (org.member_count || 0) + ' ' + I18N.t("organizations.members") + '</div></div>' +
@@ -115,7 +115,7 @@ function _showOrgDetail(orgId) {
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
       '<h3 style="margin:0;font-size:14px">' + I18N.t("organizations.detail.members_title") + ' (' + members.length + ')</h3>';
     if ((org.role === 'owner' || org.role === 'admin') && !org.is_personal) {
-      html += '<button onclick="_showAddMemberDialog(' + orgId + ')" style="padding:6px 12px;border:none;border-radius:6px;background:var(--a);color:#fff;cursor:pointer;font-size:12px">' + I18N.t("organizations.detail.add_member") + '</button>';
+      html += '<button onclick="_showAddMemberDialog(\'' + orgId + '\')" style="padding:6px 12px;border:none;border-radius:6px;background:var(--a);color:#fff;cursor:pointer;font-size:12px">' + I18N.t("organizations.detail.add_member") + '</button>';
     }
     html += '</div>';
     members.forEach(function(m) {
@@ -126,7 +126,7 @@ function _showOrgDetail(orgId) {
         '<div style="font-size:11px;color:var(--t3)">' + (m.username || '') + '</div></div>' +
         '<span style="font-size:12px;color:' + roleColor + '">' + (m.role || '') + '</span>';
       if ((org.role === 'owner') && m.role !== 'owner') {
-        html += '<button onclick="_removeMember(' + orgId + ',' + m.user_id + ',\'' + (m.username || '').replace(/'/g, "\\'") + '\')" style="margin-left:8px;padding:4px 8px;border:1px solid var(--r);border-radius:4px;background:transparent;color:var(--r);cursor:pointer;font-size:11px">' + I18N.t("common.remove") + '</button>';
+        html += '<button onclick="_removeMember(' + orgId + ',\'' + m.user_id + '\',\'' + (m.username || '').replace(/'/g, "\\'") + '\')" style="margin-left:8px;padding:4px 8px;border:1px solid var(--r);border-radius:4px;background:transparent;color:var(--r);cursor:pointer;font-size:11px">' + I18N.t("common.remove") + '</button>';
       }
       html += '</div>';
     });
@@ -135,12 +135,12 @@ function _showOrgDetail(orgId) {
     // 切换到该组织 + 编辑 + 删除组织
     html += '<div style="border:1px solid var(--b);border-radius:12px;padding:16px;display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">';
     if (org.role === 'owner' || org.role === 'admin') {
-      html += '<button onclick="_showEditOrgDialog(' + orgId + ',\'' + (org.name || '').replace(/'/g, "\\'") + '\',\'' + (org.description || '').replace(/'/g, "\\'") + '\',' + (org.max_members || 50) + ',' + (org.max_workers || 10) + ',' + (org.is_personal ? 1 : 0) + ')" style="padding:10px 20px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);cursor:pointer;font-size:12px">' + (I18N.t("organizations.detail.edit_org") || '编辑组织') + '</button>';
+      html += '<button onclick="_showEditOrgDialog(\'' + orgId + '\',\'' + (org.name || '').replace(/'/g, "\\'") + '\',\'' + (org.description || '').replace(/'/g, "\\'") + '\',' + (org.max_members || 50) + ',' + (org.max_workers || 10) + ',' + (org.is_personal ? 1 : 0) + ')" style="padding:10px 20px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);cursor:pointer;font-size:12px">' + (I18N.t("organizations.detail.edit_org") || '编辑组织') + '</button>';
     }
     if (!org.is_personal && (org.role === 'owner')) {
-      html += '<button onclick="_deleteOrg(' + orgId + ',\'' + (org.name || '').replace(/'/g, "\\'") + '\')" style="padding:10px 20px;border:1px solid var(--r);border-radius:8px;background:transparent;color:var(--r);cursor:pointer;font-size:12px">' + I18N.t("organizations.detail.delete_org") + '</button>';
+      html += '<button onclick="_deleteOrg(\'' + orgId + '\',\'' + (org.name || '').replace(/'/g, "\\'") + '\')" style="padding:10px 20px;border:1px solid var(--r);border-radius:8px;background:transparent;color:var(--r);cursor:pointer;font-size:12px">' + I18N.t("organizations.detail.delete_org") + '</button>';
     }
-    html += '<button onclick="_switchOrg(' + orgId + ')" style="padding:10px 24px;border:none;border-radius:8px;background:var(--a);color:#fff;cursor:pointer;font-size:13px">' + I18N.t("organizations.detail.switch_to") + '</button>' +
+    html += '<button onclick="_switchOrg(\'' + orgId + '\')" style="padding:10px 24px;border:none;border-radius:8px;background:var(--a);color:#fff;cursor:pointer;font-size:13px">' + I18N.t("organizations.detail.switch_to") + '</button>' +
       '</div>';
 
     d.innerHTML = html;
@@ -209,7 +209,7 @@ function _searchOrgUsers() {
       if (!d || d.length === 0) { suggest.style.display = 'none'; return; }
       var html = '';
       d.forEach(function(u) {
-        html += '<div onclick="_selectOrgUser(' + u.id + ',\'' + (u.username || '').replace(/'/g, "\\'") + '\')" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--b);font-size:12px">' +
+        html += '<div onclick="_selectOrgUser(\'' + u.id + '\',\'' + (u.username || '').replace(/'/g, "\\'") + '\')" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--b);font-size:12px">' +
           '<span style="font-weight:500">' + (u.username || '') + '</span>' +
           (u.nickname ? '<span style="color:var(--t3);margin-left:6px">' + u.nickname + '</span>' : '') +
           '</div>';

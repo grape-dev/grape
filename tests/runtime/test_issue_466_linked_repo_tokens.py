@@ -73,3 +73,45 @@ class TestInjectLinkedRepoTokens:
         with patch("src.kernel.token_service.get_repo_bot_token", lambda rk: ""):
             _inject_linked_repo_tokens(env, json.dumps(_LINKED))
         assert "GRAPE_LINKED_REPO_TOKENS" not in env
+
+
+# ---------------------------------------------------------------------------
+# 收口补漏（r5 livefire 实锤）：owner 路径段带 provider 前缀时必须剥成裸 owner
+# 再拼上游 URL——否则 github:example-user/demo 被 quote 成 github%3Aexample-user 404。
+# ---------------------------------------------------------------------------
+
+def test_strip_provider_prefix_card_driven():
+    """前缀集数据驱动（平台卡注册表）+ 未知前缀原样返回。"""
+    from src.kernel.repo_key import strip_provider_prefix
+
+    assert strip_provider_prefix("gitcode:acme") == "acme"
+    assert strip_provider_prefix("github:acme") == "acme"
+    assert strip_provider_prefix("gitee:acme") == "acme"
+    assert strip_provider_prefix("gitlab:acme") == "acme"
+    assert strip_provider_prefix("unknown:acme") == "unknown:acme"
+    assert strip_provider_prefix("acme") == "acme"
+    assert strip_provider_prefix("") == ""
+
+
+def test_vcs_url_prefixed_owner_equals_naked():
+    """git-repo 代理面：带前缀 owner 与裸 owner 拼出的上游 URL 完全一致。"""
+    from src.api.git_repo_api import _vcs_url
+
+    assert _vcs_url("github:example-user", "demo", "repos", provider="github") == \
+        _vcs_url("example-user", "demo", "repos", provider="github")
+
+
+def test_vcs_api_client_owner_stripped():
+    """适配器面：VcsApiClient 上游 URL 一律裸 owner（repo_key 派生不受影响）。"""
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+
+    assert VcsApiClient("github", "t", "github:example-user", "demo").owner == "example-user"
+    assert VcsApiClient("gitee", "t", "gitee:example-user", "demo").owner == "example-user"
+
+
+def test_repos_strip_provider_prefix_thin_delegation():
+    """repos.py 薄委托与单一入口行为等价（既有 3 个调用点零改动）。"""
+    from src.domains.mgmt.routes import repos as repos_mod
+
+    assert repos_mod._strip_provider_prefix("gitee:acme") == "acme"
+    assert repos_mod._strip_provider_prefix("acme") == "acme"

@@ -32,15 +32,18 @@
 from __future__ import annotations
 
 import hashlib
+
 import logging
+
 import re
+
 from datetime import datetime, timedelta, timezone
+
 from decimal import Decimal
+
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 log = logging.getLogger("observability.llm_usage")
-
-# ---------------------------------------------------------------- 字段归一化
 
 # 各引擎对同一语义的字段叫法不同,统一映射到台账列
 _TOKEN_FIELDS: Dict[str, Sequence[str]] = {
@@ -52,7 +55,6 @@ _TOKEN_FIELDS: Dict[str, Sequence[str]] = {
 }
 
 _MODEL_SEP_RE = re.compile(r"[\s_]+")
-
 
 def _to_int(v: Any) -> int:
     if isinstance(v, bool) or v is None:
@@ -67,7 +69,6 @@ def _to_int(v: Any) -> int:
         return n if n > 0 else 0
     return 0
 
-
 def normalize_tokens(raw: Dict[str, Any]) -> Dict[str, int]:
     """把任意引擎的 usage 字典拍平成台账的 token 列(缺失=0)。"""
     out: Dict[str, int] = {}
@@ -79,7 +80,6 @@ def normalize_tokens(raw: Dict[str, Any]) -> Dict[str, int]:
                 break
         out.setdefault(col, 0)
     return out
-
 
 def normalize_model(name: str) -> str:
     """P0 轻量归一化:去空白、转小写、去掉 provider 前缀、空白/下划线→连字符。
@@ -94,12 +94,8 @@ def normalize_model(name: str) -> str:
     s = _MODEL_SEP_RE.sub("-", s)
     return s.strip("-")
 
-
 def normalize_provider(name: str) -> str:
     return (name or "").strip().lower()
-
-
-# ---------------------------------------------------------------- 幂等键
 
 def stable_seq(source: str, model_key: str, turn: int = 0) -> int:
     """确定性 seq:同一 (source, model, turn) 永远得到同一个值。
@@ -109,9 +105,6 @@ def stable_seq(source: str, model_key: str, turn: int = 0) -> int:
     """
     raw = f"{source}|{model_key}|{turn}".encode("utf-8")
     return int(hashlib.sha1(raw).hexdigest()[:8], 16) & 0x7FFFFFFF
-
-
-# ---------------------------------------------------------------- 归属反查
 
 def _attribution(task_id: str, cursor) -> Dict[str, Any]:
     """从 agent_tasks 反查归属维度。查不到就返回空(不阻塞落库)。"""
@@ -135,10 +128,9 @@ def _attribution(task_id: str, cursor) -> Dict[str, Any]:
         "repo_key": repo_key or "",
         "agent_type": agent_type or "",
         "engine_id": int(runtime_id or 0),
-        "user_id": int(user_id or 0),
+        "user_id": str(user_id or 0),
         "scene_id": _scene_of(repo_key or "", issue_id or ""),
     }
-
 
 def _scene_of(repo_key: str, issue_id: str) -> str:
     """场景归属(P0 尽力而为):查不到就空串,不编造。"""
@@ -152,9 +144,6 @@ def _scene_of(repo_key: str, issue_id: str) -> str:
     except Exception:
         pass
     return ""
-
-
-# ---------------------------------------------------------------- 落库
 
 _INSERT_SQL = (
     "INSERT INTO obs_llm_usage ("
@@ -176,7 +165,6 @@ _INSERT_SQL = (
 # run_kind 取值（其它值也接受，只是排不进 KNOWN 分类）
 RUN_KINDS = ("task", "chat", "devops", "im", "wiki")
 
-
 def dedup_key_for(run_kind: str, task_id: str, run_id: str, seq: int) -> str:
     """幂等键：**worker 任务沿用老格式** `{task_id}:{seq}`（升级后重报仍命中老行，不翻倍）；
     其它运行类型用 `{run_kind}:{run_id}:{seq}`。
@@ -185,11 +173,7 @@ def dedup_key_for(run_kind: str, task_id: str, run_id: str, seq: int) -> str:
         return f"{task_id}:{seq}"
     return f"{run_kind}:{run_id}:{seq}"
 
-
-# ---------------------------------------------------------------- 年度归档
-
 ARCHIVE_KEEP_DAYS = 365     # 台账保留近一年；更早的行搬到 obs_llm_usage_archive
-
 
 def archive_old_usage(keep_days: int = ARCHIVE_KEEP_DAYS, batch: int = 2000) -> Dict[str, int]:
     """把超过保留期的台账行**搬**到 `obs_llm_usage_archive`（审计决定 2026-10-17：年度归档）。
@@ -259,7 +243,6 @@ def archive_old_usage(keep_days: int = ARCHIVE_KEEP_DAYS, batch: int = 2000) -> 
     except Exception as e:
         log.warning(f"llm_usage archive failed: {e}")
     return out
-
 
 def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "report",
                  run_kind: str = "task", run_id: str = "",
@@ -340,11 +323,6 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
     log.info(f"llm_usage: run_kind={kind} subject={subject} source={source} rows={written}")
     return written
 
-
-# ---------------------------------------------------------------- 汇总查询
-
-# ---------------------------------------------------------------- 执行模型统一取值（Issue #1255）
-
 def _agent_runtimes_has_model_name(cursor) -> bool:
     """agent_runtimes 是否已有 model_name 列（#865 老库可能缺列，缺列时配置回落跳过不报错）。
 
@@ -361,7 +339,6 @@ def _agent_runtimes_has_model_name(cursor) -> bool:
         return True
     except Exception:
         return False
-
 
 def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
     """任务执行模型的统一取值口径（事件详情页/实时日志弹窗共用，防止口径漂移）。
@@ -419,23 +396,19 @@ def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
         log.warning(f"llm_usage: task_model_summary config fallback failed task={task_id}: {e}")
     return {"model": "", "source": "unknown", "models": []}
 
-
 def _plain(v: Any) -> Any:
     """pymysql 会把 SUM/REAL 列返回成 Decimal——转成 JSON 可序列化的原始类型。"""
     if isinstance(v, Decimal):
         return int(v) if v == v.to_integral_value() else float(v)
     return v
 
-
 def _dict_rows(cursor) -> List[Dict[str, Any]]:
     cols = [d[0] for d in cursor.description]
     return [{k: _plain(v) for k, v in zip(cols, r)} for r in cursor.fetchall()]
 
-
 _USAGE_COLS = ("model_key, model_raw, source, turn,"
                " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
                " reasoning_tokens, cost_usd, cost_status")
-
 
 def _query_usage(where: str = "", params: Sequence[Any] = (), order: str = " ORDER BY model_key, turn",
                  limit: int = 0) -> List[Dict[str, Any]]:
@@ -455,16 +428,13 @@ def _query_usage(where: str = "", params: Sequence[Any] = (), order: str = " ORD
         log.warning(f"llm_usage: read failed ({where.strip()[:40]}): {e}")
         return []
 
-
 def task_usage(task_id: str) -> List[Dict[str, Any]]:
     """单个**任务**的用量行（P1 任务详情用）。只出 run_kind='task' 的行。"""
     return _query_usage(" WHERE task_id=? AND run_kind='task'", (str(task_id),))
 
-
 def run_usage(run_kind: str, run_id: str) -> List[Dict[str, Any]]:
     """某个**非任务运行**（chat/devops/im/wiki）的用量明细。"""
     return _query_usage(" WHERE run_kind=? AND run_id=?", (str(run_kind), str(run_id)))
-
 
 def usage_by_kind(since: Optional[str] = None) -> List[Dict[str, Any]]:
     """按运行类型聚合（报表/对账用）：每类多少行、多少 token。"""
@@ -485,7 +455,6 @@ def usage_by_kind(since: Optional[str] = None) -> List[Dict[str, Any]]:
     except Exception as e:
         log.warning(f"llm_usage: usage_by_kind failed: {e}")
         return []
-
 
 def summarize(repo_key: Optional[str] = None, since: Optional[str] = None,
               limit: int = 50, run_kind: Optional[str] = None) -> List[Dict[str, Any]]:

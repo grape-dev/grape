@@ -8,6 +8,9 @@
 5. 未指定 → 返回用户的个人组织 ID（兼容现有行为）
 
 校验：用户必须是该组织的成员（org_member 表），否则 403。
+
+D105 第三批：org_id 全链路 str，哨兵 0 → ''（''=全局/未归属；MySQL TEXT 列与 0
+数值比较会把非数字串强转 0 误匹配，哨兵必须用空串）。
 """
 from __future__ import annotations
 
@@ -18,49 +21,39 @@ from src.domains.mgmt.user.org_db import (
 )
 
 
-def resolve_org_context(request: Request, user_id: int) -> int:
-    """解析当前请求的组织上下文，返回 org_id。
+def resolve_org_context(request: Request, user_id: str) -> str:
+    """解析当前请求的组织上下文，返回 org_id（str；未归属为 ''）。
 
     未指定时回退到用户的个人组织（兼容现有 API 行为）。
     指定时校验成员关系，非成员 → 403。
     """
-    org_id = 0
+    org_id = ""
 
-    # 1. X-Org-ID header
-    org_id_str = request.headers.get("X-Org-ID", "")
-    if org_id_str:
-        try:
-            org_id = int(org_id_str)
-        except ValueError:
-            pass
+    # 1. X-Org-ID header（不透明 id 透传，不 int() 强转——uuid 形态 org_id 合法）
+    org_id = (request.headers.get("X-Org-ID", "") or "").strip()
 
     # 2. X-Org-Slug header
-    if org_id == 0:
+    if not org_id:
         slug = request.headers.get("X-Org-Slug", "")
         if slug:
             org = get_org_by_slug(slug)
             if org:
-                org_id = org["id"]
+                org_id = str(org["id"])
 
     # 3. ?org_id query
-    if org_id == 0:
-        qp = request.query_params.get("org_id", "")
-        if qp:
-            try:
-                org_id = int(qp)
-            except ValueError:
-                pass
+    if not org_id:
+        org_id = (request.query_params.get("org_id", "") or "").strip()
 
     # 4. ?org_slug query
-    if org_id == 0:
+    if not org_id:
         slug = request.query_params.get("org_slug", "")
         if slug:
             org = get_org_by_slug(slug)
             if org:
-                org_id = org["id"]
+                org_id = str(org["id"])
 
     # 5. 未指定 → 回退到个人组织
-    if org_id == 0:
+    if not org_id:
         org_id = get_personal_org_id(user_id)
     else:
         # 校验成员关系

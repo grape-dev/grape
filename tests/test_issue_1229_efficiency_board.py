@@ -7,7 +7,7 @@
 3. **bot 排除** —— bot 用户名不是协作者（bot 是执行方不是需求方）。
 4. **token 归属链** —— obs_llm_usage(run_kind='task') → agent_tasks.issue_id
    → issue 创建人；total = input+output+cache_read+cache_write（不含 reasoning，
-   与 src/observability/tokens.py 同口径）；孤儿任务（无 issue 行/bot 的 issue）丢弃。
+   与 src/domains/insight/observability/tokens.py 同口径）；孤儿任务（无 issue 行/bot 的 issue）丢弃。
 5. **仓库隔离 + 鉴权** —— 只统计 repo 参数指定仓库；匿名请求 401。
 """
 import os
@@ -61,7 +61,7 @@ def _seed_issue(repo_key, number, creator="", assignee="", status="active",
 
 def _grant_repo_access(user_id=122901):
     """给测试用户注册仓库可见性（check_repo_access 需要 managed_repos + user_repos）。"""
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     for rk, base in (("gitcode:org/repo", ("org", "repo")),
                      ("gitcode:other/repo2", ("other", "repo2"))):
         _exec("DELETE FROM managed_repos WHERE repo_key=?", (rk,))
@@ -80,7 +80,7 @@ def _seed_task_task_usage(task_id, repo_key, issue_number, usage,
         " (?,'sess',7,'p',?,'coding',?,'completed')",
         (task_id, repo_key, f"#{issue_number}"))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu(task_id, [usage], source="hermes")
 
 
@@ -218,7 +218,7 @@ def test_t6_bot_and_subtasks_excluded():
     _seed_issue(REPO, 401, creator=BOT)                    # bot 创建 → 排除
     _seed_issue(REPO, 402, creator="alice", is_subtask=1)  # 子任务 → 排除
     _seed_issue(REPO, 403, creator="alice")
-    with patch("src.user.db.get_all_bot_usernames", return_value=[BOT]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=[BOT]):
         cli, app, _dep = _client()
         try:
             body = cli.get("/api/dashboard/efficiency",
@@ -237,7 +237,7 @@ def test_t6b_bot_issue_tokens_dropped():
     _seed_task_task_usage("t_1229_bot", REPO, 404,
                           {"model": "glm-5.3", "input": 80, "output": 8,
                            "turn": 0})
-    with patch("src.user.db.get_all_bot_usernames", return_value=[BOT]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=[BOT]):
         cli, app, _dep = _client()
         try:
             body = cli.get("/api/dashboard/efficiency",

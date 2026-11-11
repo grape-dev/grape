@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.api import scene_precheck
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _REPO = "gitcode:foo/bar"
 _SCENE_ID = "scene_1245"
@@ -97,7 +97,7 @@ def _node(node_id, *, eids=None, skill="skill-ok", enabled=True, next_="done"):
 
 def _run(monkeypatch, nodes, user=None, resolve_result=999):
     _patch_scene(monkeypatch, nodes)
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "resolve_skill_id", lambda *a, **kw: resolve_result)
     return scene_precheck.precheck_scene(_SCENE_ID, _REPO,
                                          user or {"username": "me", "id": ""})
@@ -158,13 +158,45 @@ def test_own_personal_engine_allowed(monkeypatch):
         _cleanup([rid], [cid])
 
 
+def _insert_skill_row(scope, owner, sname, agent_type="coding"):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO skill (skill_name, display_name, description, agent_type, "
+            "skill_path, file_path, scope, owner_id, is_active) "
+            "VALUES (?,?,?,?,?,?,?,?,1)",
+            (sname, sname, "desc", agent_type, sname, "", scope, owner))
+        db.commit()
+
+
+def _delete_skill_row(sname):
+    with db_lock:
+        db.cursor().execute("DELETE FROM skill WHERE skill_name=?", (sname,))
+        db.commit()
+
+
 def test_skill_unresolvable(monkeypatch):
+    """#1758：repo 场景引用 user scope 技能 → 单一判官判定不可解析。"""
+    import uuid
     rid = _insert_engine("skill-engine")
+    sname = f"usk1245_{uuid.uuid4().hex[:8]}"
+    _insert_skill_row("user", "42", sname)
     try:
-        out = _run(monkeypatch, [_node("coding", eids=[rid], skill="ghost-skill")],
-                   resolve_result=0)
+        out = _run(monkeypatch, [_node("coding", eids=[rid], skill=sname)])
         assert out["ok"] is False
         assert any(p["reason_code"] == "skill_unresolvable" for p in out["problems"])
+    finally:
+        _cleanup([rid])
+        _delete_skill_row(sname)
+
+
+def test_unknown_skill_keeps_legacy_compat(monkeypatch):
+    """#1758：不在 skill 表的官方内置包形态技能维持存量兼容放行。"""
+    rid = _insert_engine("legacy-skill-engine")
+    try:
+        out = _run(monkeypatch, [_node("coding", eids=[rid], skill="ghost-skill")])
+        assert out["ok"] is True
+        assert not any(p["reason_code"] == "skill_unresolvable" for p in out["problems"])
     finally:
         _cleanup([rid])
 
@@ -187,7 +219,7 @@ def test_user_personal_scene_resolved(monkeypatch):
     # 标准解析未命中，回落 pipelines.json default（fallback）
     monkeypatch.setattr(pc, "get_pipeline_config", lambda *a, **kw: {
         "scene_id": "default", "fallback": True, "nodes": []})
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "resolve_skill_id", lambda *a, **kw: 999)
     try:
         out = scene_precheck.precheck_scene(_SCENE_ID, _REPO,
@@ -306,7 +338,7 @@ def test_webhook_failure_comment_contains_reason_code(monkeypatch):
 
     monkeypatch.setattr(ep, "_gitcode_post_issue_comment_ledgered", _fake_comment)
     monkeypatch.setattr(ep, "_is_github_repo", lambda repo_key: False)
-    import src.token_service as ts
+    import src.kernel.token_service as ts
     monkeypatch.setattr(ts, "get_repo_bot_token", lambda repo_key: "bot-token")
     ep._notify_scene_precheck_failure(
         _REPO, "#123",
