@@ -453,6 +453,69 @@ def is_plugin_mode() -> bool:
     return os.environ.get("GRAPE_PIPELINE_MODE", "plugin").lower() == "plugin"
 
 
+def _evaluate_skill_scope(skill_name: str, repo_key: str, skill_id: int = 0,
+                          node_tag: str = "", scene_id: str = "") -> dict:
+    """派发门禁统一 scope 判定（Issue #1758）：直接调用单一判官。"""
+    from src.api.scene_skill_scope import evaluate
+    return evaluate({"skill": skill_name, "skill_id": skill_id,
+                     "tag": node_tag or "", "id": node_tag or ""},
+                    repo_key, "repo", scene_id=scene_id)
+
+
+def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
+                              agent_type: str, reason: str,
+                              issue_id: str = "", seq: int = 0,
+                              scope_info: dict | None = None) -> dict:
+    """派发前技能解析失败 fail-fast（Issue #657）。
+
+    - seq>0（事件已创建）→ 走 _fail_event 同款通路：既有事件置 failed、
+      agent_tasks 同步 failed（result 带 [skill_resolve_failed] 前缀 + diag）；
+    - seq=0（事件尚未创建）→ 落 skill_resolve_failed 错误事件
+      （status=failed，result 带 [skill_resolve_failed] 前缀文案，
+      含场景/节点/技能名/原因）。
+
+    返回 result 字典（调用方直接 return，不再派发 → 替代
+    pending_self_report 1800s timeout_failed 静默超时）。
+    """
+    _scope = scope_info or {}
+    _skill_scope = _scope.get("actual_scope") or ""
+    _scene_scope = _scope.get("expected_scope") or "repo"
+    _rebind = list(_scope.get("rebind_candidates") or [])
+    _result = {"seq": seq, "event_type": "skill_resolve_failed", "skill": skill_name,
+               "repo_key": repo_key, "ok": False, "status": "failed",
+               "skill_resolve_failed": True,
+               "skill_scope": _skill_scope, "scene_scope": _scene_scope,
+               "rebind_candidates": _rebind}
+    _msg = f"[skill_resolve_failed] {reason}"
+    try:
+        if seq:
+            _fail_event(seq, _msg, diag={
+                "code": "skill_resolve_failed", "skill": skill_name,
+                "scene_id": scene_id, "agent_type": agent_type,
+                "skill_scope": _skill_scope, "scene_scope": _scene_scope,
+                "rebind_candidates": _rebind,
+                "reason": reason[:300]})
+        else:
+            from src.api.event_store import append_event
+            from src.vcs.event_types import SKILL_RESOLVE_FAILED
+            _seq = append_event(
+                repo_key=repo_key, event_type=SKILL_RESOLVE_FAILED,
+                title=f"技能解析失败: {skill_name}",
+                issue_id=issue_id, agent_type=agent_type, source="pipeline",
+                summary=reason[:200],
+                payload={"skill": skill_name, "scene_id": scene_id,
+                         "agent_type": agent_type, "reason": reason[:500],
+                         "skill_scope": _skill_scope, "scene_scope": _scene_scope,
+                         "rebind_candidates": _rebind},
+                status="failed", result=_msg, scene_id=scene_id)
+            _result["seq"] = _seq or 0
+    except Exception as e:
+        log.warning(f"Pipeline: _fail_skill_resolve_event failed: {e}")
+    log.warning(f"Pipeline: skill resolve failed (fail-fast), skill={skill_name}, "
+                f"scene={scene_id}, agent={agent_type}: {reason[:200]}")
+    return _result
+
+
 def resolve_skill_from_pipeline(repo_key: str, agent_type: str, scene_id: str = "", user_id: int = 0) -> str:
     """Look up skill name from DB (plugin mode).
 
@@ -2413,6 +2476,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_path = _res["skill_path"]
         except Exception as _se979:
             log.warning(f"Pipeline (PR-sub): skill dispatch resolve failed: {_se979}")
+
+        # Issue #657/#1758：派发前技能 scope 校验（单一判官）——显式 skill_id 同样校验
+        _ev_sub = _evaluate_skill_scope(
+            skill_name, repo_key, skill_id=_sub_sid,
+            node_tag=agent_type, scene_id=_issue_scene)
+        if not _ev_sub["ok"]:
+            return _fail_skill_resolve_event(
+                repo_key, skill_name, _issue_scene, agent_type,
+                _ev_sub["reason"], issue_id=_pre_issue_id or "",
+                scope_info=_ev_sub)
         backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
         log.info(f"Pipeline (PR-sub): skill from scene nodes: {skill_name} sid={skill_id} (scene={_issue_scene})")
     # Issue 级场景优先：scene 非 default 时，用 issue scene 的 skill 覆盖 session 的 skill
@@ -2437,6 +2510,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _res = resolve_skill_dispatch(_pipe_skill, _node_sid, repo_key=repo_key,
                                           user_id=_issue_scene_uid,
                                           scene_id=_issue_scene, node_tag=agent_type)
+            # Issue #657/#1758：单一判官校验（显式 skill_id 仍需 scope 校验）
+            _ev_pipe = _evaluate_skill_scope(
+                _pipe_skill, repo_key, skill_id=_node_sid,
+                node_tag=agent_type, scene_id=_issue_scene)
+            if not _ev_pipe["ok"]:
+                return _fail_skill_resolve_event(
+                    repo_key, _pipe_skill, _issue_scene, agent_type,
+                    _ev_pipe["reason"], issue_id=_pre_issue_id or "",
+                    scope_info=_ev_pipe)
             if _res["skill_id"]:
                 skill_id = _res["skill_id"]
                 skill_path = _res.get("skill_path") or _pipe_skill
@@ -2457,6 +2539,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_name = _pipe_skill
                 backend = backend or ""
                 log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill} (scene={_issue_scene})")
+                # Issue #657/#1758：派发前 scope 校验（统一判官）——显式 skill_id 同样校验
+                _fb_sid = resolve_scene_node_skill_id(
+                    repo_key, agent_type, scene_id=_issue_scene,
+                    user_id=_issue_scene_uid)
+                _ev_fb = _evaluate_skill_scope(
+                    _pipe_skill, repo_key, skill_id=_fb_sid,
+                    node_tag=agent_type, scene_id=_issue_scene)
+                if not _ev_fb["ok"]:
+                    return _fail_skill_resolve_event(
+                        repo_key, _pipe_skill, _issue_scene, agent_type,
+                        _ev_fb["reason"], issue_id=_pre_issue_id or "",
+                        scope_info=_ev_fb)
         if not skill_name and not _is_scene_recommend:
             # 推荐模式不需要 skill（用 build_scene_recommender_prompt 内置 prompt），
             # 跳过 fallback 的 no_agent_session 检查，直接走引擎选择 → 广播入队
@@ -3476,6 +3570,23 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     降级判定按 scene 保守处理）。调用方未显式传时：带 pool_engine_ids 且
     evt 带 scene 上下文 → 'scene'，否则 'auto'。
     """
+    # Issue #657/#1758：派发前统一 scope 门禁（单一判官）。
+    # 所有派发路径（issue / PR 订阅 / fallback / vod / 订阅）都经由本函数入队，
+    # 在此兜底校验，避免上层分支遗漏导致 user 档技能被当成"显式授权"放行。
+    if skill_name:
+        try:
+            _gate_scene = evt.get("scene_id") or evt.get("_scene_id") or ""
+            _ev_gate = _evaluate_skill_scope(
+                skill_name, repo_key, skill_id=int(skill_id or 0),
+                node_tag=agent_type or "", scene_id=_gate_scene)
+            if not _ev_gate["ok"]:
+                return _fail_skill_resolve_event(
+                    repo_key, skill_name, _gate_scene, agent_type or "",
+                    _ev_gate["reason"], issue_id=issue_id or "", seq=seq or 0,
+                    scope_info=_ev_gate)
+        except Exception as _gate_e:
+            log.warning(f"Pipeline: skill scope gate check failed: {_gate_e}")
+
     from src.api.event_archive import init_event_json
     from src.domains.runtime.engine.service import enqueue_task, get_execution_mode
     from src.domains.runtime.engine.instances import runtime_instance_name

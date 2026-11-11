@@ -105,9 +105,9 @@ async def lifespan(app: FastAPI):
 
         # IM 多通道引擎（weekly-11 新引擎；mode=off 时不启动任何 IM 链路）
         try:
-            from src.im import engine_wiring as _im_wiring
-            if _im_wiring.engine_mode() == "on":
-                im_engine = await _im_wiring.start_im_engine()
+            from src.im import engine_wiring
+            if engine_wiring.engine_mode() == "on":
+                im_engine = await engine_wiring.start_im_engine()
                 if im_engine is not None:
                     app.state.im_engine = im_engine
                     log.info("IM engine started (mode=on, instance=%s)",
