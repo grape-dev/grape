@@ -418,17 +418,21 @@ def test_credential_revoked_path_uses_safe_kill_wrapper():
 
 
 def test_acp_backends_use_safe_terminate():
-    """ACP 后端（hermes/hwcloud）必须用容错终止。
+    """ACP 后端（hermes/hwcloud/aishell 等全部 *_acp.py）必须用容错终止。
 
-    该调用点在 finally 中裸调 _terminate_proc 时，Windows 下 taskkill 失败抛出的
-    RuntimeError 会覆盖 try 块内的原始异常。
+    裸调 _terminate_proc 时，Windows 下 taskkill 失败抛出的 RuntimeError 会逸出：
+    except subprocess.TimeoutExpired 分支内被吞掉超时原因、finally 内覆盖 try 块
+    原始异常并跳过后续资源释放。自动遍历 agents/*_acp.py，防新增 ACP 后端再漏。
     """
     import ast
     from pathlib import Path
 
     root = Path(__file__).parents[2] / "src" / "domains" / "runtime" / "agents"
-    for name in ("hermes_acp.py", "hwcloud_acp.py"):
-        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+    acp_files = sorted(root.glob("*_acp.py"))
+    assert acp_files, "no *_acp.py files found under src/domains/runtime/agents"
+    for path in acp_files:
+        name = path.name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         calls = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
