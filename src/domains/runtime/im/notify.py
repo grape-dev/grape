@@ -91,7 +91,7 @@ def issue_url(repo_key: str, issue_number: int) -> str:
 def build_card(kind: str, *, text: str, repo_key: str = "", issue_number: int = 0,
                conv_id: str = "", note: str = "", numbered: bool = False) -> Any:
     """通知内容 → Card IR（同一份内容各渠道自行渲染，业务层不出现平台格式）。"""
-    from src.im.channel.card import (
+    from src.domains.runtime.im.channel.card import (
         Action, ButtonStyle, Card, Tone, fields_block, row_block, select_block,
         text_block,
     )
@@ -141,7 +141,7 @@ def build_card(kind: str, *, text: str, repo_key: str = "", issue_number: int = 
 # ---------------------------------------------------------------- 目标解析
 
 def _conn():
-    from src.im.engine_wiring import _connect, default_db_path
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
     return _connect(default_db_path())
 
 
@@ -232,7 +232,7 @@ def _register_numbered_reply(chat_id: str, conv_id: str, repo_key: str, issue_nu
     if not conv_id:
         return
     try:
-        from src.im import handler_async as h
+        from src.domains.runtime.im import handler_async as h
         payload = {
             "action": "chat",
             "items": [{"id": conv_id, "title": f"Issue #{issue_number}" if issue_number else "任务会话",
@@ -247,9 +247,9 @@ def _register_numbered_reply(chat_id: str, conv_id: str, repo_key: str, issue_nu
 
 def _render(channel, channel_type: str, card, text_card=None) -> tuple[Any, bool]:
     """(OutboundMessage, degraded)——有 RICH_CARD 走 renderer，否则文本降级。"""
-    from src.im.channel.capability import Capability
-    from src.im.channel.message import OutboundMessage
-    from src.im.channel.card import render_text
+    from src.domains.runtime.im.channel.capability import Capability
+    from src.domains.runtime.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.channel.card import render_text
 
     caps = Capability.TEXT
     try:
@@ -258,7 +258,7 @@ def _render(channel, channel_type: str, card, text_card=None) -> tuple[Any, bool
         pass
     if (caps & Capability.RICH_CARD):
         try:
-            from src.im.engine_wiring import _card_renderer_for
+            from src.domains.runtime.im.engine_wiring import _card_renderer_for
             renderer = _card_renderer_for(channel_type)
             if renderer is not None:
                 payload = renderer.render(card).payload

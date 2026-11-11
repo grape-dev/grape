@@ -3,15 +3,15 @@ import json
 
 import pytest
 
-from src.im.adapters.wechat.outbound import (
+from src.domains.runtime.im.adapters.wechat.outbound import (
     WECHAT_CAPABILITIES,
     WechatSender,
     split_text,
 )
-from src.im.adapters.wechat.protocol import TEXT_LIMIT, WechatApiError, WechatClient
-from src.im.adapters.wechat.resolvers import WechatRouteRegistry
-from src.im.channel.capability import Capability
-from src.im.channel.message import OutboundMessage
+from src.domains.runtime.im.adapters.wechat.protocol import TEXT_LIMIT, WechatApiError, WechatClient
+from src.domains.runtime.im.adapters.wechat.resolvers import WechatRouteRegistry
+from src.domains.runtime.im.channel.capability import Capability
+from src.domains.runtime.im.channel.message import OutboundMessage
 
 
 def _client(responses=None, calls=None):

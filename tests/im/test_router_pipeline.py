@@ -4,13 +4,13 @@ import time
 
 import pytest
 
-from src.im.channel import (
+from src.domains.runtime.im.channel import (
     ChatType, InboundMessage, MsgType, Source, Type, Capability, OutboundMessage, SendResult,
 )
-from src.im.engine.dedup import InboundDedup, InMemoryDedupStore
-from src.im.engine.replier import Replier
-from src.im.engine.router import Installation, Router
-from src.im.engine.session import InMemoryBindingStore, binding_key
+from src.domains.runtime.im.engine.dedup import InboundDedup, InMemoryDedupStore
+from src.domains.runtime.im.engine.replier import Replier
+from src.domains.runtime.im.engine.router import Installation, Router
+from src.domains.runtime.im.engine.session import InMemoryBindingStore, binding_key
 
 
 def _msg(mid, text="hi", chat_type=ChatType.P2P, addressed=True, command_text="", media=None):
@@ -87,7 +87,7 @@ def test_group_filter_runs_before_identity():
 
 
 def _new_ctx():
-    from src.im.channel import CancelContext
+    from src.domains.runtime.im.channel import CancelContext
     return CancelContext()
 
 
@@ -180,7 +180,7 @@ def test_media_vlm_not_in_handler():
         record.append("vlm_worker")
 
     router._media_worker = media_worker
-    from src.im.channel import MediaRef
+    from src.domains.runtime.im.channel import MediaRef
     msg = _msg("m12", media=[MediaRef(type=MsgType.MEDIA, storage_key="file_v2_v")])
 
     async def timed():
@@ -217,7 +217,7 @@ def test_infra_error_returns_exception_and_releases():
 
 def test_repo_scope_default_vod_route():
     """vod 轨：无绑定历史 → 默认该 repo 的 vod agent（L522 语义）。"""
-    from src.im.engine.session import resolve_route
+    from src.domains.runtime.im.engine.session import resolve_route
     inst = Installation(installation_id="i", channel_type="feishu", scope="repo", repo_key="iso/repo-1")
     decision = resolve_route(inst, binding=None)
     assert decision.repo_key == "iso/repo-1" and decision.agent_type == "vod"
@@ -225,7 +225,7 @@ def test_repo_scope_default_vod_route():
 
 def test_chat_scope_session_stickiness():
     """会话粘性：绑定行 agent_type 优先于兜底（§6）。"""
-    from src.im.engine.session import SessionBinding, resolve_route
+    from src.domains.runtime.im.engine.session import SessionBinding, resolve_route
     inst = Installation(installation_id="i", channel_type="feishu", scope="user")
     binding = SessionBinding(installation_id="i", binding_key="oc-1", agent_type="issue")
     d = resolve_route(inst, binding)
@@ -233,7 +233,7 @@ def test_chat_scope_session_stickiness():
 
 
 def test_explicit_agent_mention_wins():
-    from src.im.engine.session import SessionBinding, resolve_route
+    from src.domains.runtime.im.engine.session import SessionBinding, resolve_route
     inst = Installation(installation_id="i", channel_type="feishu", scope="user")
     binding = SessionBinding(installation_id="i", binding_key="oc-1", agent_type="chat")
     d = resolve_route(inst, binding, explicit_agent="issue")

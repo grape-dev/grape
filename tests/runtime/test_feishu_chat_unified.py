@@ -208,7 +208,7 @@ class _FakeBotManager:
 
 def _seed_chat_install(user_id, app_id, row_id=None, channel_type="feishu"):
     """A2 Phase B：IM 凭证只认 grape_t_channel_installation（chat_agent_session.im_* 列已 DROP）。"""
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
@@ -250,7 +250,7 @@ def test_push_sends_card_to_feishu():
     conv = get_conversation(cid)
     fake_bm = _FakeBotManager("cli_test_app")
     try:
-        with patch("src.im.engine_wiring.feishu_api", return_value=fake_bm.api):
+        with patch("src.domains.runtime.im.engine_wiring.feishu_api", return_value=fake_bm.api):
             asyncio.run(_import_push()(conv, {"id": 1, "username": "alice"}, "你好"))
     finally:
         _clean_feishu_binding(1, "alice", "cli_test_app")

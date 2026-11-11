@@ -8,13 +8,13 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from src.im.adapters.wechat.outbound import WechatSender
-from src.im.adapters.wechat.protocol import WechatClient
-from src.im.channel.card import Action, Card, Tone, row_block, text_block
-from src.im.channel.renderers.wechat import WechatCardRenderer
-from src.im.engine.egress import HandlerEgress, _always_valid, _card_payload_empty
-from src.im.engine.metrics import EngineMetrics
-from src.im.engine.replier import Replier
+from src.domains.runtime.im.adapters.wechat.outbound import WechatSender
+from src.domains.runtime.im.adapters.wechat.protocol import WechatClient
+from src.domains.runtime.im.channel.card import Action, Card, Tone, row_block, text_block
+from src.domains.runtime.im.channel.renderers.wechat import WechatCardRenderer
+from src.domains.runtime.im.engine.egress import HandlerEgress, _always_valid, _card_payload_empty
+from src.domains.runtime.im.engine.metrics import EngineMetrics
+from src.domains.runtime.im.engine.replier import Replier
 
 
 async def _no_sleep(_delay):

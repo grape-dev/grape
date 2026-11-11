@@ -2632,7 +2632,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # span 存 task["__exec_span__"]，由外层调用的 finally 收口（覆盖超时/重试路径）。
     _exec_span = None
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _exec_span, _ = start_task_span(f"task {tid} execute {engine_name or ''}", {
             "task_id": tid, "engine": engine_name, "agent_type": task.get("agent_type", ""),
             "skill": task.get("skill", ""), "repo_key": task.get("repo_key", ""),

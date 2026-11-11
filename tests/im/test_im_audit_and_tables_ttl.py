@@ -47,14 +47,14 @@ def audit_recorder(monkeypatch):
 
 
 def _ew():
-    from src.im.engine_wiring import _connect, default_db_path, run_startup_migration
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path, run_startup_migration
     path = default_db_path()
     run_startup_migration(path)
     return _connect, path
 
 
 def _seed(app_id, channel_type="wechat"):
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     _ew()
     assert sync_installation("user", owner_user_id=str(UID), app_id=app_id,
                              app_secret="sec_audit", channel_type=channel_type)

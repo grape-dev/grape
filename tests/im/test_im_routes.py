@@ -8,7 +8,7 @@ import sqlite3
 
 import pytest
 
-from src.im import engine_wiring
+from src.domains.runtime.im import engine_wiring
 
 
 @pytest.fixture()
@@ -62,7 +62,7 @@ def test_installations_list_masks_secret_and_filters_scope(ui_db):
 
 def test_toggle_status_hides_from_provider(ui_db):
     from src.api.routes.im import InstallationStatusBody, im_set_installation_status
-    from src.im.engine.installations import SqliteInstallationProvider
+    from src.domains.runtime.im.engine.installations import SqliteInstallationProvider
     import asyncio
 
     engine_wiring.sync_installation("user", owner_user_id="1234",

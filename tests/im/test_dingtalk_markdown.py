@@ -5,7 +5,7 @@
   - 代码围栏闭合：块内 "```" 奇数次 → 尾部补闭合 + 下一块开栏续接；
   - 多字节字符不截断（中文/emoji 安全）。
 """
-from src.im.adapters.dingtalk.markdown import (
+from src.domains.runtime.im.adapters.dingtalk.markdown import (
     DINGTALK_MARKDOWN_LIMIT,
     split_markdown,
 )

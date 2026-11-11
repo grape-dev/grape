@@ -1021,11 +1021,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _task_span = None
     _task_trace_context = ""
     try:
-        from src.observability.otel import start_task_span, snapshot_trace_context
+        from src.kernel.otel import start_task_span, snapshot_trace_context
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.observability.trace import pipeline_trace_id
+                from src.domains.insight.observability.trace import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
@@ -2688,7 +2688,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     覆盖 complete 与 fail 两个终态（fail_task 单独埋同款）。未启用/坏数据 → 零影响。
     """
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _fin_span, _ = start_task_span(f"task {task_id} finish", {
             "task_id": task_id, "exit_code": exit_code,
             "result_len": len(result_text or ""),
@@ -3389,7 +3389,7 @@ def friendly_failure_hint(task: dict | None) -> tuple[str, str]:
 def fail_task(task_id, error, exit_code=-1):
     # MR-2（2026-11-05）：task.finish span（fail 终态，与 complete_task 同款串联）
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
             "task_id": task_id, "exit_code": exit_code,
             "outcome": "failed", "error_head": str(error or "")[:200],
@@ -3455,7 +3455,7 @@ def fail_task(task_id, error, exit_code=-1):
     # 架构审查 P2-6：放在全部幂等判定（completed / failed / timeout_failed / 过期上报 /
     # 瞬时重试）之后——被跳过的重放调用不再产生误导性的 finish FAIL span。
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
             "task_id": task_id, "exit_code": exit_code,
             "outcome": "failed", "error_head": str(error or "")[:200],

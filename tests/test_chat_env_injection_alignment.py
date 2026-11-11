@@ -14,7 +14,7 @@ sys.path.insert(0, SRC)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(SRC, "data", "test_sessions.db"))
 
 import src.domains.runtime.engine.agent  # noqa: F401,E402  先入 runtime 打破循环导入
-from src.agent.executor import _assemble_env  # noqa: E402
+from src.domains.runtime.agents.executor import _assemble_env  # noqa: E402
 
 
 def _read(rel_path: str) -> str:

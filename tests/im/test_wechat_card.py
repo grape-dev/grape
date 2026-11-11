@@ -1,5 +1,5 @@
 """微信卡片降级测试（Issue #1728 M3）——「标题 + 正文 + 编号」。"""
-from src.im.channel.card import (
+from src.domains.runtime.im.channel.card import (
     Action,
     Card,
     Tone,
@@ -10,7 +10,7 @@ from src.im.channel.card import (
     simple_card,
     text_block,
 )
-from src.im.channel.renderers.wechat import WechatCardRenderer
+from src.domains.runtime.im.channel.renderers.wechat import WechatCardRenderer
 
 RENDERER = WechatCardRenderer()
 

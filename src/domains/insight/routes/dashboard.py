@@ -384,7 +384,7 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
     """
     from src.kernel.repo_key import to_repo_key
     from src.kernel.session_manager import db, db_lock
-    from src.observability.efficiency import build_board
+    from src.domains.insight.observability.efficiency import build_board
 
     repo_keys = []
     repo_key_out = ""
@@ -445,7 +445,7 @@ def get_efficiency_daily(repo: str = "", week: str = "",
                          user: dict = Depends(require_org_member)):
     from datetime import datetime as _dt
     from src.kernel.session_manager import db, db_lock
-    from src.observability.efficiency import (build_daily, parse_week_label,
+    from src.domains.insight.observability.efficiency import (build_daily, parse_week_label,
                                               _fetch_issue_rows, iso_week_label)
 
     repo_keys, repo_key_out = _eff_repo_keys(repo)
@@ -477,7 +477,7 @@ def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
                           threshold_days: int = 7, limit: int = 20, offset: int = 0,
                           user: dict = Depends(require_org_member)):
     from src.kernel.session_manager import db, db_lock
-    from src.observability.efficiency import build_issue_list
+    from src.domains.insight.observability.efficiency import build_issue_list
 
     repo_keys, repo_key_out = _eff_repo_keys(repo)
     if not repo_keys:

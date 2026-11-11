@@ -43,7 +43,7 @@ def _seed(repos):
                 (sid, rk))
         db.commit()
     # A2 Phase B：/"repo 候选读 grape_t_channel_installation（devops_agent_session.im_app_id 已 DROP）
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     for rk in repos:
         sync_installation("repo", repo_key=rk, app_id=APP, app_secret="sec", channel_type="feishu")
 

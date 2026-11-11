@@ -13,12 +13,12 @@ import sqlite3
 
 import pytest
 
-from src.im import engine_wiring
-from src.im.channel.channel import CancelContext, ChannelConfig
-from src.im.channel.message import InboundMessage, Source
-from src.im.channel.registry import ChannelRegistry
-from src.im.channel.types import ChatType, MsgType, Scope, Type
-from src.im.engine_wiring import ImEngine, SqliteBindingStore, run_startup_migration
+from src.domains.runtime.im import engine_wiring
+from src.domains.runtime.im.channel.channel import CancelContext, ChannelConfig
+from src.domains.runtime.im.channel.message import InboundMessage, Source
+from src.domains.runtime.im.channel.registry import ChannelRegistry
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Scope, Type
+from src.domains.runtime.im.engine_wiring import ImEngine, SqliteBindingStore, run_startup_migration
 
 
 def _legacy_tables(conn: sqlite3.Connection) -> None:
@@ -181,8 +181,8 @@ def _build_engine(db_path, rec):
 
 def test_dingtalk_factory_registered():
     """工厂注册：Type.DINGTALK 可 build（注册成功 = 钉钉可用）。"""
-    from src.im.adapters.dingtalk.channel import DingtalkChannel
-    from src.im.adapters.dingtalk.outbound import DingtalkSender
+    from src.domains.runtime.im.adapters.dingtalk.channel import DingtalkChannel
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
     engine = ImEngine("unused.db", registry=ChannelRegistry(), lease_store=NoopLease(),
                       scan_interval=3600)
     cfg = ChannelConfig(type=Type.DINGTALK, raw={"app_id": "ding_x", "app_secret": "s"},
@@ -235,7 +235,7 @@ async def test_dual_install_session_isolation(dual_db):
 
 async def test_typed_binding_store_writes_channel_type(dual_db):
     """_TypedBindingStore：dingtalk upsert 落真实 channel_type。"""
-    from src.im.engine.session import SessionBinding
+    from src.domains.runtime.im.engine.session import SessionBinding
     store = SqliteBindingStore(dual_db)
     typed = engine_wiring._TypedBindingStore(store, "dingtalk")
     b = SessionBinding(installation_id="inst-dt-1", binding_key="cid-ding-9",
@@ -253,7 +253,7 @@ async def test_typed_binding_store_writes_channel_type(dual_db):
 
 def test_binding_store_default_stays_feishu(dual_db):
     """默认 channel_type=feishu：旧调用路径（飞书工厂）行为不变。"""
-    from src.im.engine.session import SessionBinding
+    from src.domains.runtime.im.engine.session import SessionBinding
     store = SqliteBindingStore(dual_db)
     store.upsert(SessionBinding(installation_id="i", binding_key="oc-x"))
     conn = sqlite3.connect(dual_db)

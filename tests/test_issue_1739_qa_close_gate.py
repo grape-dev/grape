@@ -173,7 +173,7 @@ def test_auto_finalize_blocked_when_qa_failed_status():
     _clear_annotation_cache()
     _seed()
     _seed_events({**_ALL_COMPLETED, "qa": "failed"}, qa_result="[skill_mismatch] qa 未执行")
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res in ("pending_review_fallback", "qa_failed_blocked"), _res
         _cli.return_value.close_issue.assert_not_called()
@@ -187,7 +187,7 @@ def test_auto_finalize_blocked_when_qa_completed_but_failed_text():
     _clear_annotation_cache()
     _seed()
     _seed_events(_ALL_COMPLETED, qa_result="PR #9 审查完成：不通过（1 项阻塞）")
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res == "qa_failed_blocked", _res
         _cli.return_value.close_issue.assert_not_called()
@@ -202,7 +202,7 @@ def test_auto_finalize_closes_when_qa_passed():
     _clear_annotation_cache()
     _seed()
     _seed_events(_ALL_COMPLETED, qa_result="pass，无 Critical/Required")
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _inst = _cli.return_value
         _inst.get_issue_state.return_value = "open"
         _inst.close_issue.return_value = {"ok": True}
@@ -225,7 +225,7 @@ def test_auto_finalize_closes_when_pipeline_has_no_qa_node():
         {"id": "coding", "next": "sre"}, {"id": "sre", "next": "done"},
     ]}
     with patch("src.api.pipeline_config.get_pipeline_config", return_value=_no_qa_cfg), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _inst = _cli.return_value
         _inst.get_issue_state.return_value = "open"
         _inst.close_issue.return_value = {"ok": True}
@@ -246,7 +246,7 @@ def test_review_pass_done_blocked_when_qa_failed():
                             "WHERE repo_key=? AND issue_number=?", (_REPO, _NUM))
         db.commit()
     _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
-    with patch("src.vcs.api_client.VcsApiClient"):
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = _review_pass(_REPO, _NUM, target="done", evidence="test")
     assert _res == "noop:qa_failed", _res
     assert _issue_row()[0] == "pending_review"
@@ -262,7 +262,7 @@ def test_review_pass_processing_not_blocked_when_qa_failed():
                             "WHERE repo_key=? AND issue_number=?", (_REPO, _NUM))
         db.commit()
     _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
-    with patch("src.vcs.api_client.VcsApiClient"):
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = _review_pass(_REPO, _NUM, target="processing", evidence="resume")
     assert _res == "passed_processing", _res
     assert _issue_row()[0] == "processing"
@@ -285,7 +285,7 @@ def test_create_pull_forces_auto_close_false_when_qa_failed():
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
             patch.object(git_repo_api, "_provider", "gitcode"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = []
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
         create_pull("org", "issue1739", PRCreateBody(
@@ -316,7 +316,7 @@ def test_annotation_dedupes_by_existing_remote_marker():
 
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = [
             {"body": f"之前的门禁评论\n{_token}"}]
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
@@ -342,7 +342,7 @@ def test_create_pull_keeps_auto_close_true_when_qa_passed():
 
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         create_pull("org", "issue1739", PRCreateBody(
             title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
             body="close #1739", related_issue_nums=[_NUM], auto_close_issues=True),
@@ -370,7 +370,7 @@ def test_merge_blocked_when_qa_failed():
             patch("src.api.merge_gate.get_pull_base", return_value={"ref": "weekly-mys", "sha": "b"}), \
             patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.record_gate_log"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = []
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
         with pytest.raises(HTTPException) as _exc:
@@ -404,7 +404,7 @@ def test_merge_blocked_by_pr_issue_association_without_body_ref():
             patch("src.api.merge_gate.get_pull_base", return_value={"ref": "weekly-mys", "sha": "b"}), \
             patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.record_gate_log"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = []
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
         with pytest.raises(HTTPException) as _exc:
@@ -440,7 +440,7 @@ def test_merge_fail_open_on_pr_detail_upstream_error():
             patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.run_post_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.record_gate_log", side_effect=_record_gate_log), \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = merge_pull("org", "issue1739", 9, PRMergeBody(), user={
             "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
     assert _res.get("merged") is True
@@ -471,7 +471,7 @@ def test_qa_gate_fail_open_on_scene_resolve_error():
 
 def test_github_create_pull_uses_related_when_auto_close_off():
     """qa fail 时 GitHub 关联降级为 Related，不注入 Closes（避免 UI 合入自动关闭）。"""
-    from src.vcs.providers import translate_inbound
+    from src.domains.runtime.vcs.providers import translate_inbound
     payload = translate_inbound("github", "pulls", "create", {
         "title": "t", "head": "h", "base": "b", "body": "body",
         "related_issue_nums": [1739], "auto_close_issues": False,
@@ -510,7 +510,7 @@ def test_create_pull_annotates_all_failed_issues():
 
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = []
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
         create_pull("org", "issue1739", PRCreateBody(
@@ -543,7 +543,7 @@ def test_merge_annotates_all_failed_issues():
             patch("src.api.merge_gate.get_pull_base", return_value={"ref": "weekly-mys", "sha": "b"}), \
             patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.record_gate_log"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = []
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
         with pytest.raises(HTTPException) as _exc:
@@ -580,7 +580,7 @@ def test_classify_qa_conclusion_chinese_trailing_negation():
 
 def test_github_create_pull_strips_caller_closes_when_auto_close_off():
     """调用方 body 自带 Closes #N 时，auto_close=false 必须清除并降级为 Related。"""
-    from src.vcs.providers import translate_inbound
+    from src.domains.runtime.vcs.providers import translate_inbound
     payload = translate_inbound("github", "pulls", "create", {
         "title": "t", "head": "h", "base": "b", "body": "Closes #12",
         "related_issue_nums": [12], "auto_close_issues": False,
@@ -607,7 +607,7 @@ def test_create_pull_gates_and_annotates_when_auto_close_default_false():
 
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
-            patch("src.vcs.api_client.VcsApiClient") as _cli:
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _cli.return_value.list_issue_comments.return_value = []
         _cli.return_value.post_issue_comment.return_value = {"id": 1}
         create_pull("org", "issue1739", PRCreateBody(
@@ -638,7 +638,7 @@ def test_github_create_pull_keeps_closes_when_qa_passed():
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
             patch("src.api.qa_gate.collect_qa_failures", return_value=[]), \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         create_pull("org", "issue1739", PRCreateBody(
             title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
             body="feat: #1739 test", related_issue_nums=[_NUM]),
@@ -670,7 +670,7 @@ def test_github_create_pull_downgrades_to_related_when_qa_failed():
             patch("src.api.qa_gate.collect_qa_failures",
                   return_value=[{"issue": _NUM, "info": _info}]), \
             patch("src.api.qa_gate.annotate_qa_failures"), \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         create_pull("org", "issue1739", PRCreateBody(
             title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
             body="Closes #1739", related_issue_nums=[_NUM]),
@@ -701,7 +701,7 @@ def test_review_pass_done_runs_qa_gate_once():
     _seed_events(_ALL_COMPLETED, qa_result="pass")
     with patch.object(qa_gate, "gate_or_annotate",
                       wraps=qa_gate.gate_or_annotate) as _g, \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = _review_pass(_REPO, _NUM, target="done", evidence="test")
     assert _res == "passed_done", _res
     assert _g.call_count == 1, _g.call_count
@@ -729,7 +729,7 @@ def test_merge_reuses_single_pull_detail_request():
             patch("src.api.merge_gate.run_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.run_post_merge_gate", return_value={"decision": "passed"}), \
             patch("src.api.merge_gate.record_gate_log"), \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = merge_pull("org", "issue1739", 9, PRMergeBody(), user={
             "id": 1, "username": "tester", "auth_type": "session_token"}, p="gitcode")
     assert _res.get("merged") is True
@@ -840,7 +840,7 @@ def test_github_create_pull_respects_explicit_auto_close_false():
     with patch.object(git_repo_api, "_vcs_req", _fake_vcs_req), \
             patch.object(git_repo_api, "_repo_token", lambda *a, **k: "tok"), \
             patch("src.api.qa_gate.collect_qa_failures", return_value=[]), \
-            patch("src.vcs.api_client.VcsApiClient"):
+            patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         create_pull("org", "issue1739", PRCreateBody(
             title="feat: #1739 test", head="feat/issue-1739", base="weekly-mys",
             body="feat: #1739 test", related_issue_nums=[_NUM],
@@ -854,7 +854,7 @@ def test_github_create_pull_respects_explicit_auto_close_false():
 
 def test_list_issue_comments_paginates_all_pages():
     """评论超过首页 100 条时须继续翻页，避免去重漏查旧标注。"""
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
 
     _pages = {
         1: [{"body": "a"}, {"body": "b"}],
@@ -877,7 +877,7 @@ def test_list_issue_comments_paginates_all_pages():
 
 def test_list_issue_comments_stops_when_upstream_ignores_page():
     """上游忽略 page 返回同一页时停止翻页，避免重复累积。"""
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
 
     _same = [{"body": "a"}, {"body": "b"}]
     _client = VcsApiClient("gitcode", "tok", "org", "repo")

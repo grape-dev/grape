@@ -15,21 +15,21 @@ import json
 
 import pytest
 
-from src.im.adapters.slack.channel import (
+from src.domains.runtime.im.adapters.slack.channel import (
     SlackChannel,
     default_connection_opener,
     is_permanent_credentials_error,
 )
-from src.im.adapters.slack.outbound import SLACK_CAPABILITIES, SlackApiError, SlackClient, SlackSender
-from src.im.channel.capability import Capability
-from src.im.channel.channel import (
+from src.domains.runtime.im.adapters.slack.outbound import SLACK_CAPABILITIES, SlackApiError, SlackClient, SlackSender
+from src.domains.runtime.im.channel.capability import Capability
+from src.domains.runtime.im.channel.channel import (
     CancelContext,
     ChannelConfig,
     ChannelError,
     PermanentChannelError,
 )
-from src.im.channel.registry import ChannelRegistry
-from src.im.channel.types import Scope, Type
+from src.domains.runtime.im.channel.registry import ChannelRegistry
+from src.domains.runtime.im.channel.types import Scope, Type
 
 BOT = "xoxb-test-token"
 APP = "xapp-test-token"
@@ -257,7 +257,7 @@ async def test_disconnect_closes_socket():
 # ── 装配 ────────────────────────────────────────────────────
 
 def test_slack_factory_builds_channel_with_full_capabilities(tmp_path):
-    from src.im.engine_wiring import ImEngine
+    from src.domains.runtime.im.engine_wiring import ImEngine
 
     engine = ImEngine(str(tmp_path / "im.db"), registry=ChannelRegistry(),
                       lease_store=object(), scan_interval=3600)

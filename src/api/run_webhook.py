@@ -12,7 +12,7 @@ app.include_router(webhook_router)
 
 # OTel HTTP spans（2026-11-05 MR-1）：webhook 入口
 try:
-    from src.observability.otel import instrument_fastapi
+    from src.kernel.otel import instrument_fastapi
     instrument_fastapi(app, "grape-webhook")
 except Exception:
     pass

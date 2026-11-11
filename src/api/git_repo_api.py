@@ -914,7 +914,7 @@ def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
     from src.api.merge_gate import record_gate_log
     from src.api.qa_gate import annotate_qa_failures, collect_qa_failures
     from src.kernel.repo_key import to_repo_key
-    from src.vcs.issue_ref_filter import extract_related_issue_nums
+    from src.domains.runtime.vcs.issue_ref_filter import extract_related_issue_nums
 
     _failures: list[dict] = []
     try:

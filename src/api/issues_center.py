@@ -2665,7 +2665,7 @@ def _attach_count(owner: str, repo: str, issue_number) -> int:
 
     与 _attach_list 同存储口径，但跳过 URL 预签名与元数据 dict 构造。
     """
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from src.kernel.config import log
 from src.kernel.repo_key import parse_repo_key
-from src.vcs.event_types import (
+from src.domains.runtime.vcs.event_types import (
     FILE_EVENT_TYPES, normalize_files, has_file_changes,
 )
 

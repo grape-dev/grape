@@ -18,12 +18,12 @@ import pytest
 from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
 
-from src.im.channel.channel import (
+from src.domains.runtime.im.channel.channel import (
     CancelContext, ChannelConfig, ChannelError, PermanentChannelError,
 )
-from src.im.channel.types import Scope, Type
-from src.im.adapters.feishu.channel import PERMANENT_WS_ERROR_CODES, FeishuChannel
-from src.im.adapters.feishu.outbound import FeishuSender
+from src.domains.runtime.im.channel.types import Scope, Type
+from src.domains.runtime.im.adapters.feishu.channel import PERMANENT_WS_ERROR_CODES, FeishuChannel
+from src.domains.runtime.im.adapters.feishu.outbound import FeishuSender
 
 
 # ── 帧构造 ──────────────────────────────────────────────
@@ -289,7 +289,7 @@ async def _test_cancelled_ctx_returns_cleanly_impl():
 
 async def _test_permanent_codes_match_legacy_impl():
     """永久错误码集合与 legacy 常量一致（A5 继承）。"""
-    from src.im.feishu_async import FeishuAsync
+    from src.domains.runtime.im.feishu_async import FeishuAsync
     assert set(PERMANENT_WS_ERROR_CODES) == {str(c) for c in FeishuAsync._WS_PERMANENT_ERROR_CODES}
 
 

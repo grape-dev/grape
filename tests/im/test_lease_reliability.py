@@ -16,13 +16,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.im.bot_lease import BotLeaseStore
-from src.im.channel import (
+from src.domains.runtime.im.bot_lease import BotLeaseStore
+from src.domains.runtime.im.channel import (
     CancelContext, Channel, ChannelConfig, OutboundMessage, SendResult, Type,
 )
-from src.im.channel.registry import ChannelRegistry as Registry
-from src.im.engine.lease import lease_key
-from src.im.engine.supervisor import Supervisor
+from src.domains.runtime.im.channel.registry import ChannelRegistry as Registry
+from src.domains.runtime.im.engine.lease import lease_key
+from src.domains.runtime.im.engine.supervisor import Supervisor
 
 _NOW_FMT = "%Y-%m-%d %H:%M:%S"
 

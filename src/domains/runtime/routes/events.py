@@ -345,7 +345,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
     # Issue #1255：执行模型展示（用量优先、配置模型回落，与 task-logs info 同一取值函数）
     try:
-        from src.observability.llm_usage import task_model_summary
+        from src.domains.insight.observability.llm_usage import task_model_summary
         _ms = task_model_summary(str(task_info.get("task_id") or ""),
                                  int(task_info.get("runtime_id") or 0))
     except Exception:

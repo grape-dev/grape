@@ -14,19 +14,19 @@ import asyncio
 
 import pytest
 
-from src.im.adapters.slack.markdown import (
+from src.domains.runtime.im.adapters.slack.markdown import (
     SLACK_TEXT_LIMIT,
     format_mrkdwn,
     split_text,
 )
-from src.im.adapters.slack.outbound import (
+from src.domains.runtime.im.adapters.slack.outbound import (
     SlackAdapterApi,
     SlackApiError,
     SlackClient,
     SlackSender,
 )
-from src.im.adapters.slack.resolvers import SlackMediaCache, SlackMediaFetcher, SlackRouteRegistry
-from src.im.channel.message import OutboundMessage, ReplyCtx
+from src.domains.runtime.im.adapters.slack.resolvers import SlackMediaCache, SlackMediaFetcher, SlackRouteRegistry
+from src.domains.runtime.im.channel.message import OutboundMessage, ReplyCtx
 
 BOT = "xoxb-test"
 

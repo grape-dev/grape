@@ -135,7 +135,7 @@ def test_pr_state_prefers_latest_match_across_pages():
 
 
 def test_fetch_pr_state_uses_paginated_client(monkeypatch):
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     captured = {}
 
     def _list_prs(self, state="all", head="", max_pages=20):
@@ -151,7 +151,7 @@ def test_fetch_pr_state_uses_paginated_client(monkeypatch):
 
 def test_list_prs_gitcode_paginates_until_short_page():
     """VcsApiClient.list_prs：>1 页时按 page 翻页，短页即停。"""
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
 
     calls = []
 
@@ -178,7 +178,7 @@ def test_list_prs_gitcode_paginates_until_short_page():
 
 
 def test_list_prs_github_uses_head_owner_branch():
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
 
     calls = []
 
@@ -197,7 +197,7 @@ def test_list_prs_github_uses_head_owner_branch():
 
 
 def test_list_prs_gitlab_encodes_project_path():
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
 
     calls = []
 
@@ -216,7 +216,7 @@ def test_list_prs_gitlab_encodes_project_path():
 
 
 def test_list_prs_error_passthrough():
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
 
     c = VcsApiClient("gitcode", "tok", "owner", "repo")
     monkeypatch = pytest.MonkeyPatch()
@@ -229,7 +229,7 @@ def test_list_prs_error_passthrough():
 
 
 def test_paginate_pages_shared_helper():
-    from src.vcs.api_client import paginate_pages
+    from src.domains.runtime.vcs.api_client import paginate_pages
 
     pages = {1: [1, 2], 2: [3]}
     got = paginate_pages(lambda p: pages.get(p, []), page_size=2, max_pages=5)
@@ -539,7 +539,7 @@ def test_agent_linked_push_path_uses_guard(tmp_path, monkeypatch):
     import json as _json
 
     from src.domains.runtime.engine import agent, repogit
-    from src.vcs import api_client
+    from src.domains.runtime.vcs import api_client
 
     wt, remote = _make_worktree_repo(tmp_path)
     seen = _patch_guard(monkeypatch)
@@ -569,7 +569,7 @@ def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
     import src.repo as repo_mod
     from src.api import event_pipeline
     from src.domains.runtime.engine import repogit
-    from src.vcs import api_client
+    from src.domains.runtime.vcs import api_client
 
     wt, remote = _make_worktree_repo(tmp_path)
     seen = _patch_guard(monkeypatch)

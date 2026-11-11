@@ -12,14 +12,14 @@ import json
 
 import pytest
 
-from src.im.adapters.wecom.cards import (
+from src.domains.runtime.im.adapters.wecom.cards import (
     CardLedger,
     build_template_card,
     decode_action_key,
     encode_action_key,
     event_key_to_command,
 )
-from src.im.channel.card import (
+from src.domains.runtime.im.channel.card import (
     Action,
     Card,
     button_block,
@@ -30,8 +30,8 @@ from src.im.channel.card import (
     simple_card,
     text_block,
 )
-from src.im.channel.renderers.wecom import WecomCardRenderer
-from src.im.engine.egress import _card_payload_empty
+from src.domains.runtime.im.channel.renderers.wecom import WecomCardRenderer
+from src.domains.runtime.im.engine.egress import _card_payload_empty
 
 
 def _bind_options(n=3):

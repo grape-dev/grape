@@ -1,7 +1,7 @@
 """飞书 markdown 渲染 —— 复用既有 src/im/lark_md（A 资产，不重写）。"""
 from __future__ import annotations
 
-from src.im.lark_md import to_lark_md as _to_lark
+from src.domains.runtime.im.lark_md import to_lark_md as _to_lark
 
 
 def render_markdown(text: str) -> str:

@@ -16,12 +16,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.im.channel.channel import CancelContext, ChannelConfig
-from src.im.channel.message import InboundMessage, Source
-from src.im.channel.registry import ChannelRegistry
-from src.im.channel.types import ChatType, MsgType, Scope, Type
-from src.im import engine_wiring
-from src.im.engine_wiring import (
+from src.domains.runtime.im.channel.channel import CancelContext, ChannelConfig
+from src.domains.runtime.im.channel.message import InboundMessage, Source
+from src.domains.runtime.im.channel.registry import ChannelRegistry
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Scope, Type
+from src.domains.runtime.im import engine_wiring
+from src.domains.runtime.im.engine_wiring import (
     ImEngine, SqliteBindingStore, SqliteDedupStore,
     engine_mode, run_startup_migration,
 )
@@ -407,7 +407,7 @@ def test_dedup_store_two_phase(db_path):
 
 
 def test_binding_store_upsert_roundtrip(db_path):
-    from src.im.engine.session import SessionBinding
+    from src.domains.runtime.im.engine.session import SessionBinding
     run_startup_migration(db_path)
     store = SqliteBindingStore(db_path)
     assert store.get("inst-1", "oc-1") is None
@@ -445,7 +445,7 @@ def test_start_im_engine_supports_mysql_backend(monkeypatch, db_path):
 
 
 def test_inbound_to_parsed_contract():
-    from src.im.engine_wiring import _inbound_to_parsed
+    from src.domains.runtime.im.engine_wiring import _inbound_to_parsed
     msg = InboundMessage(
         event_id="e1", message_id="om_9",
         source=Source(channel_type=Type.FEISHU, chat_id="oc-2",
@@ -529,7 +529,7 @@ def test_card_action_translation_keeps_open_message_id_and_context():
     旧实现把 event_id 当 message_id 用 → 回复报 99992354（invalid open_message_id），
     用户观感就是"点按钮没反应"。
     """
-    from src.im.adapters.feishu.inbound import parse_card_action, parsed_to_inbound
+    from src.domains.runtime.im.adapters.feishu.inbound import parse_card_action, parsed_to_inbound
 
     raw = {
         "header": {"event_id": "evt_hash_32"},
@@ -555,7 +555,7 @@ def test_card_action_translation_keeps_open_message_id_and_context():
 
 
 def test_plain_message_reply_id_is_message_id():
-    from src.im.adapters.feishu.inbound import parsed_to_inbound
+    from src.domains.runtime.im.adapters.feishu.inbound import parsed_to_inbound
     parsed = {"type": "message", "text": "hi", "chat_id": "oc_1", "chat_type": "p2p",
               "sender_open_id": "ou_1", "message_id": "om_normal_1", "msg_type": "text"}
     msg = parsed_to_inbound(parsed, {})

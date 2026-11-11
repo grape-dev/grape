@@ -533,7 +533,7 @@ class VcsApiClient:
             from urllib.parse import urlparse as _up
             _p = _up(url)
             _span_target = "%s%s" % (_p.netloc.split(".")[0], _p.path)
-        from src.observability.otel import external_call_span
+        from src.kernel.otel import external_call_span
         with external_call_span("vcs", _span_target,
                                 {"vcs.method": method, "vcs.path": _span_target}) as _span:
             try:

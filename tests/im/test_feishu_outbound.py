@@ -1,8 +1,8 @@
 """飞书出站测试 —— update_multi 坑断言（Issue #742 §7.6 / multica 陷阱 1）。"""
 import asyncio
 
-from src.im.adapters.feishu.outbound import FeishuSender, _wants_card
-from src.im.channel import Capability, OutboundMessage
+from src.domains.runtime.im.adapters.feishu.outbound import FeishuSender, _wants_card
+from src.domains.runtime.im.channel import Capability, OutboundMessage
 
 
 def test_markdown_goes_card_plain_goes_text():

@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from src.im.engine.installations import SqliteInstallationProvider
+from src.domains.runtime.im.engine.installations import SqliteInstallationProvider
 
 _MIG = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "migrations", "001_channel_tables.py")
 _spec = importlib.util.spec_from_file_location("migrations_001", _MIG)

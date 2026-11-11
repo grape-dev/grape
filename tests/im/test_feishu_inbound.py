@@ -1,8 +1,8 @@
 """飞书入站翻译测试（Issue #742 §7.6 golden 驱动 + P0 双写对比基线）。"""
 import pytest
 
-from src.im.adapters.feishu.inbound import parse_card_action, parsed_to_inbound
-from src.im.channel import ChatType, MsgType, Type
+from src.domains.runtime.im.adapters.feishu.inbound import parse_card_action, parsed_to_inbound
+from src.domains.runtime.im.channel import ChatType, MsgType, Type
 
 
 def test_text_message_translation():

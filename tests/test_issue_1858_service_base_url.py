@@ -145,7 +145,7 @@ class TestResolveTaskServerEnv:
 
     def test_legacy_snapshot_env_backfill(self):
         """旧快照缺失三面基址时，executor 仅补缺失键（A2A 用回连基址）。"""
-        from src.agent.executor import _assemble_env
+        from src.domains.runtime.agents.executor import _assemble_env
         env = {"GRAPE_SERVER_URL": BIZ, "RUNTIME_SERVER_URL": RT}
         _assemble_env(env, kind="devops", label="t")
         assert env["GRAPE_VCS_BASE_URL"] == BIZ

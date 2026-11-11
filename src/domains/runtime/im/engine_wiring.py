@@ -67,20 +67,20 @@ def _looks_like_telegram_token(value: str) -> bool:
     head, sep, tail = str(value or "").partition(":")
     return bool(sep and head.isdigit() and len(tail) >= 10)
 
-from src.im.channel.capability import Capability  # noqa: F401  (re-export convenience)
-from src.im.channel.card import self_check_card_capabilities  # Issue #1095 启动自检
-from src.im.channel.channel import ChannelConfig
-from src.im.channel.message import InboundMessage
-from src.im.channel.registry import ChannelRegistry, default_registry
-from src.im.channel.types import MsgType, Scope, Type
+from src.domains.runtime.im.channel.capability import Capability  # noqa: F401  (re-export convenience)
+from src.domains.runtime.im.channel.card import self_check_card_capabilities  # Issue #1095 启动自检
+from src.domains.runtime.im.channel.channel import ChannelConfig
+from src.domains.runtime.im.channel.message import InboundMessage
+from src.domains.runtime.im.channel.registry import ChannelRegistry, default_registry
+from src.domains.runtime.im.channel.types import MsgType, Scope, Type
 
-from src.im.engine.dedup import InboundDedup
-from src.im.engine.egress import EGRESS_ENV, HandlerEgress, egress_mode, legacy_send_card_reply
-from src.im.engine.metrics import CountingSender, EngineMetrics
-from src.im.engine.router import Identity, Installation, Router
-from src.im.engine.session import SessionBinding
-from src.im.engine.replier import Replier
-from src.im.engine.supervisor import Supervisor
+from src.domains.runtime.im.engine.dedup import InboundDedup
+from src.domains.runtime.im.engine.egress import EGRESS_ENV, HandlerEgress, egress_mode, legacy_send_card_reply
+from src.domains.runtime.im.engine.metrics import CountingSender, EngineMetrics
+from src.domains.runtime.im.engine.router import Identity, Installation, Router
+from src.domains.runtime.im.engine.session import SessionBinding
+from src.domains.runtime.im.engine.replier import Replier
+from src.domains.runtime.im.engine.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
 
@@ -280,7 +280,7 @@ def feishu_api(app_id: str = ""):
     """
     api = _feishu_api_cache.get(app_id)
     if api is None:
-        from src.im.feishu_async import FeishuAsync
+        from src.domains.runtime.im.feishu_async import FeishuAsync
         api = FeishuAsync()
         _feishu_api_cache[app_id] = api
     return api
@@ -811,9 +811,9 @@ def _msg_id_validator_for(channel_type: str):
     飞书：om_ 形态校验；钉钉：conversationId 路由恒可用（msgId 形态无关）。
     """
     if str(channel_type).lower() in ("dingtalk", "wecom", "slack", "wechat"):
-        from src.im.engine.egress import _always_valid
+        from src.domains.runtime.im.engine.egress import _always_valid
         return _always_valid
-    from src.im.engine.egress import _is_feishu_id_valid
+    from src.domains.runtime.im.engine.egress import _is_feishu_id_valid
     return _is_feishu_id_valid
 
 
@@ -829,7 +829,7 @@ def dingtalk_card_mode(raw: dict) -> tuple[str, str]:
     if not tpl:
         return "action_card", ""
     try:
-        from src.im.adapters.dingtalk.cards import card_mode_enabled
+        from src.domains.runtime.im.adapters.dingtalk.cards import card_mode_enabled
         switched_on = card_mode_enabled()
     except Exception:
         switched_on = False
@@ -840,27 +840,27 @@ def dingtalk_card_mode(raw: dict) -> tuple[str, str]:
 
 def _card_renderer_for(channel_type: str):
     """渠道 CardRenderer（Issue #1095）：声明不协商——每渠道一个实现，wiring 注入。"""
-    from src.im.channel.card import BUILTIN_CARD_RENDERERS
+    from src.domains.runtime.im.channel.card import BUILTIN_CARD_RENDERERS
     if str(channel_type).lower() in BUILTIN_CARD_RENDERERS:
         if str(channel_type).lower() == "dingtalk":
-            from src.im.channel.renderers.dingtalk import DingtalkCardRenderer
+            from src.domains.runtime.im.channel.renderers.dingtalk import DingtalkCardRenderer
             return DingtalkCardRenderer()
         if str(channel_type).lower() == "wecom":
-            from src.im.channel.renderers.wecom import WecomCardRenderer
+            from src.domains.runtime.im.channel.renderers.wecom import WecomCardRenderer
             return WecomCardRenderer()
         if str(channel_type).lower() == "slack":
             # Issue #1309：Slack 是唯一「真回调 + 原地更新 + 线程」齐全的渠道
-            from src.im.channel.renderers.slack import SlackCardRenderer
+            from src.domains.runtime.im.channel.renderers.slack import SlackCardRenderer
             return SlackCardRenderer()
         if str(channel_type).lower() == "telegram":
             # Issue #1613：文本 + InlineKeyboardMarkup（callback_data 64B 短码）
-            from src.im.channel.renderers.telegram import TelegramCardRenderer
+            from src.domains.runtime.im.channel.renderers.telegram import TelegramCardRenderer
             return TelegramCardRenderer()
         if str(channel_type).lower() == "wechat":
             # Issue #1728：纯文本 + 编号选项（无按钮/无回调，数字选择复用 pending）
-            from src.im.channel.renderers.wechat import WechatCardRenderer
+            from src.domains.runtime.im.channel.renderers.wechat import WechatCardRenderer
             return WechatCardRenderer()
-        from src.im.channel.renderers.feishu import FeishuCardRenderer
+        from src.domains.runtime.im.channel.renderers.feishu import FeishuCardRenderer
         return FeishuCardRenderer()
     return None
 
@@ -941,7 +941,7 @@ class ImEngine:
         # 抢锁抖动（2026-11-10 四主滚动升级实证：四台同名 im-engine-local，35 个安装
         # 只有 18 个拿到租约，其余 17 个无人建连）。留空则按 hostname-随机后缀生成。
         if not instance_id:
-            from src.im.bot_lease import generate_instance_id
+            from src.domains.runtime.im.bot_lease import generate_instance_id
             self.instance_id = generate_instance_id()
         else:
             self.instance_id = instance_id
@@ -985,11 +985,11 @@ class ImEngine:
         registry = self._registry or default_registry()
         lease = self._lease_store
         if lease is None:
-            from src.im.bot_lease import BotLeaseStore, generate_instance_id
+            from src.domains.runtime.im.bot_lease import BotLeaseStore, generate_instance_id
             self.instance_id = self.instance_id or generate_instance_id()
             lease = BotLeaseStore(instance_id=self.instance_id)
 
-        from src.im.engine.installations import SqliteInstallationProvider
+        from src.domains.runtime.im.engine.installations import SqliteInstallationProvider
         provider = SqliteInstallationProvider(lambda: _connect(self.db_path))
         self.supervisor = Supervisor(
             registry=registry,
@@ -1012,12 +1012,12 @@ class ImEngine:
         registry.register(Type.WECHAT, self._wechat_factory)
         # Issue #1095：启动自检——声明 RICH_CARD 必有 CardRenderer（告警不阻断）
         try:
-            from src.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
-            from src.im.adapters.feishu.outbound import FEISHU_CAPABILITIES
-            from src.im.adapters.slack.outbound import SLACK_CAPABILITIES
-            from src.im.adapters.telegram.outbound import TELEGRAM_CAPABILITIES
-            from src.im.adapters.wechat.outbound import WECHAT_CAPABILITIES
-            from src.im.adapters.wecom.outbound import WECOM_CAPABILITIES
+            from src.domains.runtime.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
+            from src.domains.runtime.im.adapters.feishu.outbound import FEISHU_CAPABILITIES
+            from src.domains.runtime.im.adapters.slack.outbound import SLACK_CAPABILITIES
+            from src.domains.runtime.im.adapters.telegram.outbound import TELEGRAM_CAPABILITIES
+            from src.domains.runtime.im.adapters.wechat.outbound import WECHAT_CAPABILITIES
+            from src.domains.runtime.im.adapters.wecom.outbound import WECOM_CAPABILITIES
             problems = self_check_card_capabilities({
                 "feishu": FEISHU_CAPABILITIES, "dingtalk": DINGTALK_CAPABILITIES,
                 "wecom": WECOM_CAPABILITIES, "slack": SLACK_CAPABILITIES,
@@ -1064,7 +1064,7 @@ class ImEngine:
         if self._ctx_factory is not None:
             pair = (self._ctx_factory(inst), self._api_factory() if self._api_factory else None)
         else:
-            from src.im.feishu_async import BotContext, FeishuAsync
+            from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
             scope = inst.get("scope", "user")
             bot_type = "vod_bot" if scope == "repo" else "chat_bot"
             ctx = BotContext(
@@ -1117,23 +1117,23 @@ class ImEngine:
                              card_renderer=_card_renderer_for(channel_type))
 
     def _legacy_process_chat(self):
-        from src.im.handler_async import process_chat_async
+        from src.domains.runtime.im.handler_async import process_chat_async
         return process_chat_async
 
     def _legacy_process_vod(self):
-        from src.im.vod_handler_async import process_vod_async
+        from src.domains.runtime.im.vod_handler_async import process_vod_async
         return process_vod_async
 
     def _legacy_process_command(self):
-        from src.im.handler_async import process_command_async
+        from src.domains.runtime.im.handler_async import process_command_async
         return process_command_async
 
     def _legacy_handle_selection(self):
-        from src.im.handler_async import _handle_selection
+        from src.domains.runtime.im.handler_async import _handle_selection
         return _handle_selection
 
     def _legacy_get_pending_selection(self):
-        from src.im.handler_async import _get_pending_selection
+        from src.domains.runtime.im.handler_async import _get_pending_selection
         return _get_pending_selection
 
     # ---------------- 渠道工厂（per installation Router 六注入点，多平台通用）
@@ -1156,20 +1156,20 @@ class ImEngine:
                 del self._built_apps[app_id]
 
     def _feishu_factory(self, cfg: ChannelConfig):
-        from src.im.adapters.feishu.outbound import FeishuSender
+        from src.domains.runtime.im.adapters.feishu.outbound import FeishuSender
 
         def _build_channel(cfg_, sender):
-            from src.im.adapters.feishu.channel import FeishuChannel
+            from src.domains.runtime.im.adapters.feishu.channel import FeishuChannel
             return FeishuChannel(cfg_, sender)
 
         return self._channel_factory(cfg, "feishu", FeishuSender, _build_channel)
 
     def _dingtalk_factory(self, cfg: ChannelConfig):
         """钉钉工厂（Issue #936 P2）：与飞书同一套 Router 装配，仅渠道实现/发送器不同。"""
-        from src.im.adapters.dingtalk.outbound import DingtalkSender
+        from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
 
         def _build_channel(cfg_, sender):
-            from src.im.adapters.dingtalk.channel import DingtalkChannel
+            from src.domains.runtime.im.adapters.dingtalk.channel import DingtalkChannel
             return DingtalkChannel(cfg_, sender)
 
         return self._channel_factory(cfg, "dingtalk", DingtalkSender, _build_channel)
@@ -1181,15 +1181,15 @@ class ImEngine:
         （channel 建连后 attach 同一条 WS），因此经 sender_factory 注入；
         媒体入站已在收帧时下载解密，handler 侧 api 覆盖为缓存读取。
         """
-        from src.im.adapters.wecom.cards import CardLedger
-        from src.im.adapters.wecom.channel import WecomChannel
-        from src.im.adapters.wecom.outbound import (
+        from src.domains.runtime.im.adapters.wecom.cards import CardLedger
+        from src.domains.runtime.im.adapters.wecom.channel import WecomChannel
+        from src.domains.runtime.im.adapters.wecom.outbound import (
             WecomAdapterApi,
             WecomReplyRegistry,
             WecomSender,
             WecomTransport,
         )
-        from src.im.adapters.wecom.resolvers import WecomMediaResolver
+        from src.domains.runtime.im.adapters.wecom.resolvers import WecomMediaResolver
 
         bot_id = str(cfg.raw.get("bot_id") or cfg.raw.get("app_id") or "")
         transport = WecomTransport(bot_id)
@@ -1229,9 +1229,9 @@ class ImEngine:
         App Token；config 里同时补齐 `bot_token`/`app_token` 语义键与 `app_id`/`app_secret`
         兼容键（`_channel_factory` 以 app_id 做安装反查与去重）。
         """
-        from src.im.adapters.slack.channel import SlackChannel
-        from src.im.adapters.slack.outbound import SlackAdapterApi, SlackClient, SlackSender
-        from src.im.adapters.slack.resolvers import (
+        from src.domains.runtime.im.adapters.slack.channel import SlackChannel
+        from src.domains.runtime.im.adapters.slack.outbound import SlackAdapterApi, SlackClient, SlackSender
+        from src.domains.runtime.im.adapters.slack.resolvers import (
             SlackMediaFetcher,
             SlackRouteRegistry,
             SlackUserResolver,
@@ -1279,14 +1279,14 @@ class ImEngine:
           - `message_id → chat_id` 台账由 channel 与 api 共用（edit/reaction 只有 message_id）；
           - offset（`update_id + 1`）持久化在 grape_t_channel_installation.config，重启不重投。
         """
-        from src.im.adapters.telegram.cards import default_ledger
-        from src.im.adapters.telegram.channel import TelegramChannel
-        from src.im.adapters.telegram.outbound import (
+        from src.domains.runtime.im.adapters.telegram.cards import default_ledger
+        from src.domains.runtime.im.adapters.telegram.channel import TelegramChannel
+        from src.domains.runtime.im.adapters.telegram.outbound import (
             TelegramAdapterApi,
             TelegramClient,
             TelegramSender,
         )
-        from src.im.adapters.telegram.resolvers import (
+        from src.domains.runtime.im.adapters.telegram.resolvers import (
             TelegramMediaFetcher,
             TelegramRouteRegistry,
             TelegramUserResolver,
@@ -1335,15 +1335,15 @@ class ImEngine:
           - `context_token` 由 channel 入站缓存、sender 出站回传；
           - 卡片无按钮/回调，renderer 降级为「标题 + 正文 + 编号」。
         """
-        from src.im.adapters.wechat.channel import WechatChannel
-        from src.im.adapters.wechat.media import WechatMediaUploader
-        from src.im.adapters.wechat.outbound import (
+        from src.domains.runtime.im.adapters.wechat.channel import WechatChannel
+        from src.domains.runtime.im.adapters.wechat.media import WechatMediaUploader
+        from src.domains.runtime.im.adapters.wechat.outbound import (
             WechatAdapterApi,
             WechatClient,
             WechatSender,
         )
-        from src.im.adapters.wechat.protocol import DEFAULT_BASE_URL
-        from src.im.adapters.wechat.resolvers import (
+        from src.domains.runtime.im.adapters.wechat.protocol import DEFAULT_BASE_URL
+        from src.domains.runtime.im.adapters.wechat.resolvers import (
             WechatMediaFetcher,
             WechatRouteRegistry,
             WechatTypingCache,
@@ -1486,7 +1486,7 @@ class ImEngine:
             sender = sender_factory(app_id, cfg.raw)
         elif channel_type == "dingtalk":
             # 钉钉传输：sessionWebhook（入站登记，出站复用）；缺失/过期回落机器人 API
-            from src.im.adapters.dingtalk.outbound import (
+            from src.domains.runtime.im.adapters.dingtalk.outbound import (
                 DingtalkAdapterApi, DingtalkRobotApi,
                 send_action_card_with_fallback, send_markdown_with_fallback,
                 send_text_with_fallback,
@@ -1516,7 +1516,7 @@ class ImEngine:
             _card_mode, _tpl = dingtalk_card_mode(cfg.raw)
             _card_client = None
             if _card_mode == "interactive":
-                from src.im.adapters.dingtalk.cards import DingtalkCardClient
+                from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient
                 _card_client = DingtalkCardClient(app_id, str(cfg.raw.get("app_secret", "")))
             sender = sender_cls(_dt_text, _dt_md, _dt_action, card_mode=_card_mode,
                                 card_template_id=_tpl, card_client=_card_client)

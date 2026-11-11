@@ -139,9 +139,9 @@ class TestSyncComment:
         # 回归（2026-11-06 实障）：OBS 签名串可含 "/"，按整串 rsplit 会把签名碎片
         # 当文件名 → 重签发的是不存在的对象键，评论链接 404。
         import src.api.issues_center as ic
-        import src.storage as storage_mod
+        import src.domains.runtime.storage as storage_mod
         import src.user.db as udb
-        import src.vcs.api_client as vac
+        import src.domains.runtime.vcs.api_client as vac
         keys = []
 
         class FakeStorage:

@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from src.im.channel import (
+from src.domains.runtime.im.channel import (
     Capability, CancelContext, Channel, ChannelConfig, ChannelRegistry,
     ChatType, InboundMessage, MediaRef, MsgType, OutboundMessage, SendResult,
     Source, Type, Scope,

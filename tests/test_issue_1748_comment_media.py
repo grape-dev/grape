@@ -15,7 +15,7 @@ import urllib.error
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from src.vcs.api_client import (
+from src.domains.runtime.vcs.api_client import (
     extract_gitcode_user_attachment_urls,
     _download_user_attachment,
     attachment_kind,
@@ -66,7 +66,7 @@ def test_attachment_kind():
 
 
 def test_attachment_ext_whitelist():
-    from src.vcs.api_client import _attachment_ext, is_media_attachment_url
+    from src.domains.runtime.vcs.api_client import _attachment_ext, is_media_attachment_url
     assert _attachment_ext(V1, "video/mp4") == ".mp4"
     assert _attachment_ext("https://gitcode.com/user-attachments/x.html", "application/octet-stream") == ""
     assert _attachment_ext("https://gitcode.com/user-attachments/x.php", "application/octet-stream") == ""
@@ -99,7 +99,7 @@ class _FakeResp:
 
 
 def test_download_video_success(monkeypatch):
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen",
                         lambda req, timeout=None: _FakeResp("video/mp4", b"vid"))
     r = _download_user_attachment(V1, "tk")
     assert r["content"] == b"vid"
@@ -110,19 +110,19 @@ def test_download_video_success(monkeypatch):
 def test_download_401(monkeypatch):
     def fake_urlopen(req, timeout=None):
         raise urllib.error.HTTPError(V1, 401, "Unauthorized", {}, None)
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen", fake_urlopen)
     assert _download_user_attachment(V1, "tk")["error"] == "HTTP 401"
 
 
 def test_download_unsupported_content_type(monkeypatch):
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen",
                         lambda req, timeout=None: _FakeResp("text/html", b"<html>"))
     r = _download_user_attachment(V1, "tk")
     assert "unsupported content-type" in r["error"]
 
 
 def test_download_size_limit(monkeypatch):
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen",
                         lambda req, timeout=None: _FakeResp("video/mp4", b"x" * 2048))
     r = _download_user_attachment(V1, "tk", max_size=1024)
     assert "size limit" in r["error"]
@@ -131,7 +131,7 @@ def test_download_size_limit(monkeypatch):
 def test_download_timeout(monkeypatch):
     def fake_urlopen(req, timeout=None):
         raise urllib.error.URLError("timed out")
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen", fake_urlopen)
     assert _download_user_attachment(V1, "tk")["error"] == "timeout"
 
 
@@ -155,7 +155,7 @@ def _patch_collect_env(monkeypatch, token="tk-fake", download_results=None, save
         def download_user_attachment(self, url, **kw):
             return (download_results or {}).get(url, {"error": "HTTP 401"})
 
-    monkeypatch.setattr("src.vcs.api_client.create_client", lambda repo_key, token="": _FakeClient())
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.create_client", lambda repo_key, token="": _FakeClient())
     monkeypatch.setattr(ic, "_analyze_media_attachment",
                         lambda kind, content, ext="": f"## 用户上传的{kind}分析\n已分析{kind}", raising=False)
 
@@ -208,7 +208,7 @@ def test_collect_non_media_ignored(monkeypatch):
 
     import src.api.issues_center as ic
     monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="": "tk-fake", raising=False)
-    monkeypatch.setattr("src.vcs.api_client.create_client", fake_client)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.create_client", fake_client)
     r = ic._collect_issue_media_attachments("grape-dev", "grape", 1748, [f"附件 {BARE}"])
     assert r == {"ok": [], "failed": []}
     assert called["n"] == 0
@@ -274,13 +274,13 @@ def test_collect_top_level_exception_not_raised(monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr("src.vcs.api_client.extract_gitcode_user_attachment_urls", boom)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.extract_gitcode_user_attachment_urls", boom)
     r = ic._collect_issue_media_attachments("grape-dev", "grape", 1748, [V1])
     assert "error" in r
 
 
 def test_analyze_media_attachment_image(monkeypatch):
-    import src.agent.image_understanding as iu
+    import src.domains.runtime.agents.image_understanding as iu
     monkeypatch.setattr(iu, "understand_image_from_bytes",
                         lambda content, ext=".png": "## 用户上传的图片分析\n图里有报错", raising=False)
     from src.api.issues_center import _analyze_media_attachment
@@ -289,7 +289,7 @@ def test_analyze_media_attachment_image(monkeypatch):
 
 
 def test_analyze_media_attachment_video_header(monkeypatch):
-    import src.agent.image_understanding as iu
+    import src.domains.runtime.agents.image_understanding as iu
     monkeypatch.setattr(iu, "understand_video_from_bytes",
                         lambda content, ext=".mp4": "视频文件过大（超过50MB），无法分析。", raising=False)
     from src.api.issues_center import _analyze_media_attachment

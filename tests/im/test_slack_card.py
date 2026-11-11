@@ -8,15 +8,15 @@
   - 动作往返：renderer 写出的 value → `block_actions` → `/bind 2`（同一份 `_handle_selection`）；
   - egress 走 slack renderer（payload=blocks，degraded 归因透传）。
 """
-from src.im.adapters.slack.cards import (
+from src.domains.runtime.im.adapters.slack.cards import (
     MAX_ACTION_ELEMENTS,
     MAX_BLOCKS,
     MAX_FIELD_CHARS,
     MAX_SECTION_CHARS,
     parse_action_value,
 )
-from src.im.adapters.slack.inbound import block_actions_to_inbound
-from src.im.channel.card import (
+from src.domains.runtime.im.adapters.slack.inbound import block_actions_to_inbound
+from src.domains.runtime.im.channel.card import (
     Action,
     ButtonStyle,
     Card,
@@ -28,7 +28,7 @@ from src.im.channel.card import (
     select_block,
     text_block,
 )
-from src.im.channel.renderers.slack import SlackCardRenderer
+from src.domains.runtime.im.channel.renderers.slack import SlackCardRenderer
 
 RENDERER = SlackCardRenderer()
 
@@ -184,8 +184,8 @@ def test_action_payload_matches_renderer_value():
 # ── egress 集成（renderer 注入 + degraded 归因）─────────────
 
 def test_egress_renders_card_to_blocks_and_keeps_degraded():
-    from src.im.engine.egress import HandlerEgress
-    from src.im.channel.capability import Capability
+    from src.domains.runtime.im.engine.egress import HandlerEgress
+    from src.domains.runtime.im.channel.capability import Capability
 
     class _Replier:
         def caps(self):
@@ -199,8 +199,8 @@ def test_egress_renders_card_to_blocks_and_keeps_degraded():
 
 
 def test_slack_capability_self_check_is_clean():
-    from src.im.adapters.slack.outbound import SLACK_CAPABILITIES
-    from src.im.channel.card import self_check_card_capabilities
+    from src.domains.runtime.im.adapters.slack.outbound import SLACK_CAPABILITIES
+    from src.domains.runtime.im.channel.card import self_check_card_capabilities
 
     assert self_check_card_capabilities({"slack": SLACK_CAPABILITIES}) == []
 
@@ -211,7 +211,7 @@ def test_slack_capability_self_check_is_clean():
 # 只抽 lark header/elements → 恒返回空串 → 有内容的卡片被判空拦截。
 
 def test_slack_blocks_payload_is_not_treated_as_empty():
-    from src.im.engine.egress import _card_payload_empty
+    from src.domains.runtime.im.engine.egress import _card_payload_empty
 
     rendered = RENDERER.render(Card(
         title="📁 选择仓库",
@@ -225,7 +225,7 @@ def test_slack_blocks_payload_is_not_treated_as_empty():
 
 
 def test_empty_blocks_payload_still_guarded():
-    from src.im.engine.egress import _card_payload_empty
+    from src.domains.runtime.im.engine.egress import _card_payload_empty
 
     assert _card_payload_empty({"blocks": []}) is True
     assert _card_payload_empty({"blocks": [{"type": "divider"}]}) is False

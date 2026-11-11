@@ -213,7 +213,7 @@ class TestAutoFinalizeRegression:
         from src.api.issues_center import auto_finalize_issue_on_last_node
         _seed_issue("pending_review", "sre")
         self._seed_events(self._ALL_COMPLETED)
-        with patch("src.vcs.api_client.VcsApiClient") as _cli:
+        with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
             _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
             assert _res == "noop:pending_review", _res
             _cli.return_value.close_issue.assert_not_called()
@@ -224,7 +224,7 @@ class TestAutoFinalizeRegression:
         from src.api.issues_center import auto_finalize_issue_on_last_node
         _seed_issue("processing", "sre")
         self._seed_events(self._ALL_COMPLETED)
-        with patch("src.vcs.api_client.VcsApiClient") as _cli:
+        with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
             _inst = _cli.return_value
             _inst.get_issue_state.return_value = "open"
             _inst.close_issue.return_value = {"ok": True}

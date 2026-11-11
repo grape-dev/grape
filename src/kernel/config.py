@@ -97,7 +97,7 @@ class _JsonFormatter(logging.Formatter):
         import time as _t
         # OTel trace 关联（2026-11-05 MR-1 Step 3）：注入 trace_id/span_id
         try:
-            from src.observability.otel import inject_trace_ids
+            from src.kernel.otel import inject_trace_ids
             inject_trace_ids(record)
         except Exception:
             pass

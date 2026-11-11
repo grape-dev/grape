@@ -8,8 +8,8 @@ import json
 
 import pytest
 
-from src.im.adapters.wechat.outbound import split_text
-from src.im.adapters.wechat.protocol import (
+from src.domains.runtime.im.adapters.wechat.outbound import split_text
+from src.domains.runtime.im.adapters.wechat.protocol import (
     ITEM_FILE,
     ITEM_IMAGE,
     ITEM_TEXT,

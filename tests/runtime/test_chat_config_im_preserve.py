@@ -40,7 +40,7 @@ def _client():
 
 
 def _ew():
-    from src.im.engine_wiring import _connect, default_db_path, run_startup_migration
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path, run_startup_migration
     run_startup_migration(default_db_path())   # 幂等：建表 + 空表兜底
     return _connect, default_db_path
 
@@ -62,7 +62,7 @@ def _cleanup_inst(app_id=None):
 
 def _seed_im_binding(app_id, secret="sec_431"):
     """复刻真实绑定态：grape_t_channel_installation 里一条 active 安装。"""
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     _ew()
     assert sync_installation("user", owner_user_id=str(UID), app_id=app_id, app_secret=secret)
 

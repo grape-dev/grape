@@ -11,11 +11,11 @@ import sqlite3
 
 import pytest
 
-from src.im.channel.channel import CancelContext, ChannelError
-from src.im.channel.message import OutboundMessage
-from src.im.channel.registry import ChannelRegistry
-from src.im.engine.metrics import CountingSender, EngineMetrics
-from src.im.engine_wiring import ImEngine
+from src.domains.runtime.im.channel.channel import CancelContext, ChannelError
+from src.domains.runtime.im.channel.message import OutboundMessage
+from src.domains.runtime.im.channel.registry import ChannelRegistry
+from src.domains.runtime.im.engine.metrics import CountingSender, EngineMetrics
+from src.domains.runtime.im.engine_wiring import ImEngine
 
 from test_engine_wiring import (
     FakeApi, NoopLease, Recorder, _build_engine, _fake_ctx, _msg, db_path,
@@ -156,13 +156,13 @@ async def test_one_roundtrip_increments_received_and_sent(db_path):
 
 async def test_send_failure_increments_failed(db_path):
     """发送器结果钩子失败路径：failed +1（验收项 2 失败分支）。"""
-    from src.im.engine.metrics import CountingSender
+    from src.domains.runtime.im.engine.metrics import CountingSender
 
     metrics = EngineMetrics()
 
     class FailingInner:
         def capabilities(self):
-            from src.im.channel.capability import Capability
+            from src.domains.runtime.im.channel.capability import Capability
             return Capability.TEXT
 
         async def send(self, out):
@@ -170,16 +170,16 @@ async def test_send_failure_increments_failed(db_path):
 
     class OkInner:
         def capabilities(self):
-            from src.im.channel.capability import Capability
+            from src.domains.runtime.im.channel.capability import Capability
             return Capability.TEXT
 
         async def send(self, out):
-            from src.im.channel.message import SendResult
+            from src.domains.runtime.im.channel.message import SendResult
             return SendResult(ok=False, error="rejected")
 
     failing = CountingSender(FailingInner(), metrics)
     ok_false = CountingSender(OkInner(), metrics)
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.channel.message import OutboundMessage
     out = OutboundMessage(chat_id="oc-1", text="hi")
     with pytest.raises(RuntimeError):
         await failing.send(out)

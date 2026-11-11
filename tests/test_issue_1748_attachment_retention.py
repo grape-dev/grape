@@ -43,7 +43,7 @@ def test_cleanup_removes_only_auto_transferred_local(tmp_path, monkeypatch):
         (issue_dir / name).write_bytes(b"x")
 
     monkeypatch.setattr(ic, "_attach_base_dir", lambda o, r, n: str(issue_dir))
-    monkeypatch.setattr("src.storage.get_storage", lambda: None)
+    monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: None)
 
     removed = ic._cleanup_auto_transferred_attachments(REPO_KEY, 7)
 
@@ -56,7 +56,7 @@ def test_cleanup_swallows_errors(monkeypatch):
     """清理失败不能影响关闭流程。"""
     def boom(*_a, **_k):
         raise RuntimeError("obs down")
-    monkeypatch.setattr("src.storage.get_storage", boom)
+    monkeypatch.setattr("src.domains.runtime.storage.get_storage", boom)
     assert ic._cleanup_auto_transferred_attachments(REPO_KEY, 7) == 0
 
 

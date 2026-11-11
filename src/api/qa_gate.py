@@ -623,7 +623,7 @@ def _post_issue_comment(repo_key: str, issue_number: int, body: str,
                         key: tuple[str, int, str]) -> str:
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.api_client import VcsApiClient
 
         _provider, _owner, _repo = parse_repo_key(repo_key)
         if not _owner or not _repo:

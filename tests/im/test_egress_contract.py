@@ -15,13 +15,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.im.channel.capability import Capability
-from src.im.channel.message import OutboundMessage, SendResult
-from src.im.engine.egress import (
+from src.domains.runtime.im.channel.capability import Capability
+from src.domains.runtime.im.channel.message import OutboundMessage, SendResult
+from src.domains.runtime.im.engine.egress import (
     HandlerEgress, egress_mode, _always_valid, _is_feishu_id_valid,
 )
-from src.im.engine.metrics import EngineMetrics
-from src.im.engine.replier import Replier
+from src.domains.runtime.im.engine.metrics import EngineMetrics
+from src.domains.runtime.im.engine.replier import Replier
 
 
 class FakeSender:
@@ -112,7 +112,7 @@ def test_empty_route_records_failed_not_silent():
 
 def test_dingtalk_webhook_missing_route_raises_for_counting():
     """钉钉传输：conversation 无 sessionWebhook → 显式异常（可被计数），不静默成功。"""
-    from src.im.adapters.dingtalk.outbound import (
+    from src.domains.runtime.im.adapters.dingtalk.outbound import (
         WebhookRegistry, send_markdown_via_webhook, send_text_via_webhook,
     )
 

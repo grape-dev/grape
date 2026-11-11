@@ -20,16 +20,16 @@ import os
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from src.im.adapters.wecom.channel import WecomChannel
-from src.im.adapters.wecom.outbound import WecomReplyRegistry, WecomSender, WecomTransport
-from src.im.adapters.wecom.resolvers import WecomMediaResolver
-from src.im.channel.channel import (
+from src.domains.runtime.im.adapters.wecom.channel import WecomChannel
+from src.domains.runtime.im.adapters.wecom.outbound import WecomReplyRegistry, WecomSender, WecomTransport
+from src.domains.runtime.im.adapters.wecom.resolvers import WecomMediaResolver
+from src.domains.runtime.im.channel.channel import (
     CancelContext,
     ChannelConfig,
     ChannelError,
     PermanentChannelError,
 )
-from src.im.channel.types import ChatType, Scope, MsgType, Type
+from src.domains.runtime.im.channel.types import ChatType, Scope, MsgType, Type
 
 
 # ── 帧工具 ──────────────────────────────────────────
@@ -397,17 +397,17 @@ def test_group_at_other_user_is_not_addressed_when_bot_name_configured():
 def test_capabilities_come_from_sender():
     ws = FakeWS([])
     ch, _, _ = _channel(ws, Recorder())
-    from src.im.adapters.wecom.outbound import WECOM_CAPABILITIES
+    from src.domains.runtime.im.adapters.wecom.outbound import WECOM_CAPABILITIES
     assert ch.capabilities() == WECOM_CAPABILITIES
     assert ch.type() is Type.WECOM
 
 # ── 装配注册（engine_wiring，约 40 行的改动不能被静默跳过）──────────────
 
 def test_wiring_registers_wecom_renderer_and_validator():
-    from src.im.channel.card import BUILTIN_CARD_RENDERERS, self_check_card_capabilities
-    from src.im.channel.renderers.wecom import WecomCardRenderer
-    from src.im.engine_wiring import _card_renderer_for, _msg_id_validator_for
-    from src.im.adapters.wecom.outbound import WECOM_CAPABILITIES
+    from src.domains.runtime.im.channel.card import BUILTIN_CARD_RENDERERS, self_check_card_capabilities
+    from src.domains.runtime.im.channel.renderers.wecom import WecomCardRenderer
+    from src.domains.runtime.im.engine_wiring import _card_renderer_for, _msg_id_validator_for
+    from src.domains.runtime.im.adapters.wecom.outbound import WECOM_CAPABILITIES
 
     assert isinstance(_card_renderer_for("wecom"), WecomCardRenderer)
     # 企微按 chatid/userid 路由回复，msg_id 形态无关 → 恒可用
@@ -419,7 +419,7 @@ def test_wiring_registers_wecom_renderer_and_validator():
 
 def test_wecom_factory_goes_through_generic_channel_factory():
     """工厂必须复用 _channel_factory（同一套 Router 装配 + 去重），只换实现。"""
-    from src.im.engine_wiring import ImEngine
+    from src.domains.runtime.im.engine_wiring import ImEngine
 
     engine = ImEngine.__new__(ImEngine)      # 跳过构造（DB 装配与本用例无关）
     seen: dict = {}

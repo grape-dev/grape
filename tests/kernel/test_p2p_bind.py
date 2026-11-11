@@ -50,7 +50,7 @@ def _seed_user_and_bot(username, app_id, user_id):
                   (f"sess-{app_id}", real_uid))
         db.commit()
     # A2 Phase B：bot → 用户 的归属看 grape_t_channel_installation（user 轨 owner）
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     sync_installation("user", owner_user_id=str(real_uid), app_id=app_id,
                       app_secret="sec", channel_type="feishu")
     return {"id": real_uid, "username": username}

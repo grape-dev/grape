@@ -217,7 +217,7 @@ def _feishu_api_for_ctx(ctx):
     """按 ctx 的 app_id 取 FeishuAsync（旧 IM 下线 A2 M2：不再依赖 BotManager.api）。"""
     if not ctx:
         return None
-    from src.im.engine_wiring import feishu_api
+    from src.domains.runtime.im.engine_wiring import feishu_api
     return feishu_api(getattr(ctx, "app_id", "") or "")
 
 

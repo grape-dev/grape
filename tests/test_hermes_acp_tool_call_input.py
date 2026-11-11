@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.agent.__init__ 循环导入）
+import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.domains.runtime.agents.__init__ 循环导入）
 from src.domains.runtime.agents.hermes_acp import (  # noqa: E402
     _ACPSimpleClient,
     _clip_tool_input,
@@ -217,7 +217,7 @@ class TestClipContract:
     def test_env_overridable_limit(self, monkeypatch):
         monkeypatch.setenv("HERMES_TOOL_INPUT_MAX_BYTES", "64")
         import importlib
-        import src.agent.hermes_acp as mod
+        import src.domains.runtime.agents.hermes_acp as mod
         importlib.reload(mod)
         try:
             out = mod._clip_tool_input({"path": "a", "content": "z" * 1024})

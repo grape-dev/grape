@@ -874,7 +874,7 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
                                result_summary, findings_result, _web_url)
         # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
         from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
-        from src.im.engine_wiring import feishu_api
+        from src.domains.runtime.im.engine_wiring import feishu_api
         _loop = asyncio.get_event_loop()
         for user_id, _, _ in rows:
             try:

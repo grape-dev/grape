@@ -64,7 +64,7 @@ def lookup_chat(out_track_id: str) -> str:
 
 def _connect():
     """复用引擎的双方言连接（sqlite3 / MySQLCompatDB）。"""
-    from src.im.engine_wiring import default_db_path, _connect as _engine_connect
+    from src.domains.runtime.im.engine_wiring import default_db_path, _connect as _engine_connect
     return _engine_connect(default_db_path())
 
 

@@ -920,7 +920,7 @@ async def _send_event_text(rule: Dict[str, Any], ev: Dict[str, Any], text: str,
         for uid, open_id in recipients:
             try:
                 from src.api.issues_center import _resolve_user_chat_bot
-                from src.im.engine_wiring import feishu_api
+                from src.domains.runtime.im.engine_wiring import feishu_api
                 ctx = _resolve_user_chat_bot(None, uid)
                 api = feishu_api(ctx.app_id) if ctx else None
                 if not ctx or not api:
@@ -1066,7 +1066,7 @@ async def send_test_notification(user: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": "no_bot",
                 "message": "本人 chat bot 未配置（grape_t_channel_installation 无活跃飞书安装）——"
                            "请先在「Chat Agent」页扫码配置飞书"}
-    from src.im.engine_wiring import feishu_api
+    from src.domains.runtime.im.engine_wiring import feishu_api
     api = feishu_api(ctx.app_id)
     if not api:
         return {"ok": False, "reason": "no_api", "message": "IM 客户端未初始化"}

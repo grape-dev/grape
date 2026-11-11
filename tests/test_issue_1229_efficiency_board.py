@@ -80,7 +80,7 @@ def _seed_task_task_usage(task_id, repo_key, issue_number, usage,
         " (?,'sess',7,'p',?,'coding',?,'completed')",
         (task_id, repo_key, f"#{issue_number}"))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu(task_id, [usage], source="hermes")
 
 

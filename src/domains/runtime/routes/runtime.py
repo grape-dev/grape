@@ -2004,7 +2004,7 @@ from fastapi.responses import Response as _RelayResponse
 _relay_total = None
 try:
     from prometheus_client import Counter as _PC
-    from src.observability import registry as _obs_registry
+    from src.domains.insight.observability import registry as _obs_registry
     _relay_total = _PC("grape_trace_relay_requests_total",
                        "Trace relay requests forwarded to LGTM",
                        ["status"], registry=_obs_registry)

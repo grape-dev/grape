@@ -149,7 +149,7 @@ def test_unassigned_tokens_attributed_to_bucket():
         " repo_key, agent_type, issue_id, status) VALUES"
         " ('t_1337_u','sess',7,'p',?,'coding','#614','completed')", (REPO,))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu("t_1337_u", [{"model": "glm-5.3", "input": 30, "output": 3, "turn": 0}],
        source="hermes")
     cli, app, _dep = _client()
@@ -188,7 +188,7 @@ def test_bot_rule_in_token_chain():
         " repo_key, agent_type, issue_id, status) VALUES"
         " ('t_1337_bot','sess',7,'p',?,'coding','#625','completed')", (REPO,))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu("t_1337_bot",
        [{"model": "glm-5.3", "input": 80, "output": 8, "turn": 0}],
        source="hermes")
@@ -263,7 +263,7 @@ def test_issue_row_with_null_user_id_tokens_fall_into_unassigned(_issue_user_id_
             f" ('{tid}','sess',7,'p',?,'coding','#{615 if tid == 't_1337_null' else 999}','completed')",
             (REPO,))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu("t_1337_null",
        [{"model": "glm-5.3", "input": 40, "output": 4, "turn": 0}],
        source="hermes")

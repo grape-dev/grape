@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from src.im.adapters.wechat.media import (
+from src.domains.runtime.im.adapters.wechat.media import (
     WechatMediaUploader,
     aes_decrypt,
     aes_encrypt,
@@ -15,7 +15,7 @@ from src.im.adapters.wechat.media import (
     pkcs7_pad,
     pkcs7_unpad,
 )
-from src.im.adapters.wechat.protocol import WechatApiError
+from src.domains.runtime.im.adapters.wechat.protocol import WechatApiError
 
 
 def test_key_accepts_hex32_and_base64():

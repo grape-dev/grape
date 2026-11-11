@@ -167,7 +167,7 @@ class TestRepoCardUnboundHint:
         """Issue #1095：Card IR → lark dict（外观等价断言用）。"""
         if isinstance(card, dict):
             return card
-        from src.im.channel.renderers.feishu import FeishuCardRenderer
+        from src.domains.runtime.im.channel.renderers.feishu import FeishuCardRenderer
         return FeishuCardRenderer().render(card).payload
 
     """未绑定仓库时 `/repo` 卡片应带明确提示（feishu-task-session-repo-alignment-design.md 补充）。"""

@@ -1,9 +1,9 @@
 """两阶段去重测试（Issue #742 §7.3 ③ / A3）。"""
 import asyncio
 
-from src.im.adapters.feishu.inbound import parsed_to_inbound
-from src.im.channel import InboundMessage, Source, ChatType, MsgType, Type
-from src.im.engine.dedup import InMemoryDedupStore, InboundDedup, Verdict
+from src.domains.runtime.im.adapters.feishu.inbound import parsed_to_inbound
+from src.domains.runtime.im.channel import InboundMessage, Source, ChatType, MsgType, Type
+from src.domains.runtime.im.engine.dedup import InMemoryDedupStore, InboundDedup, Verdict
 
 
 def _msg(mid: str) -> InboundMessage:

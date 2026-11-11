@@ -627,7 +627,7 @@ class MySQLCompatCursor:
         # 保证挂到请求 trace 下。OTel 未启用/无 span 时零开销（noop span）。
         _otel_span = None
         try:
-            from src.observability.otel import start_db_span
+            from src.kernel.otel import start_db_span
             _otel_span = start_db_span(t)
         except Exception:
             _otel_span = None
@@ -636,7 +636,7 @@ class MySQLCompatCursor:
         finally:
             if _otel_span is not None:
                 try:
-                    from src.observability.otel import end_db_span
+                    from src.kernel.otel import end_db_span
                     end_db_span(_otel_span, rowcount=getattr(cur, "rowcount", None))
                 except Exception:
                     _otel_span = None

@@ -12,16 +12,16 @@ import asyncio
 
 import pytest
 
-from src.im.adapters.wechat.channel import WechatChannel
-from src.im.adapters.wechat.protocol import WechatApiError
-from src.im.channel.channel import (
+from src.domains.runtime.im.adapters.wechat.channel import WechatChannel
+from src.domains.runtime.im.adapters.wechat.protocol import WechatApiError
+from src.domains.runtime.im.channel.channel import (
     CancelContext,
     ChannelConfig,
     ChannelError,
     PermanentChannelError,
 )
-from src.im.channel.message import SendResult
-from src.im.channel.types import Type
+from src.domains.runtime.im.channel.message import SendResult
+from src.domains.runtime.im.channel.types import Type
 
 
 class FakeSender:
@@ -32,7 +32,7 @@ class FakeSender:
         self.typing = []
 
     def capabilities(self):
-        from src.im.adapters.wechat.outbound import WECHAT_CAPABILITIES
+        from src.domains.runtime.im.adapters.wechat.outbound import WECHAT_CAPABILITIES
         return WECHAT_CAPABILITIES
 
     async def send(self, out):
