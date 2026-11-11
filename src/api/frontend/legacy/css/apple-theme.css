@@ -1348,6 +1348,19 @@
   --result-fg: #e0e6f0;
   --result-link: #5b9eff;
   --result-code: #b8c2d6;
+  /* 主题语义 token 暗色档（与 auto 暗色块同源镜像；改一处必须改两处） */
+  --edge: #3a3a3e;
+  --hairline: rgba(255,255,255,.09);
+  --hover-row: rgba(255,255,255,.045);
+  --hover-card: rgba(255,255,255,.06);
+  --hover-accent: rgba(10,132,255,.14);
+  --chip-bg: rgba(255,255,255,.07);
+  --on-accent: #fff;
+  --scrim: rgba(0,0,0,.5);
+  --glass-hero: rgba(35,35,38,.72);
+  --glass-hero-strong: rgba(48,48,52,.85);
+  /* 纯黑上阴影不可见 → 收窄阴影，面板靠 --edge 立边界 */
+  --sh: 0 1px 2px rgba(0,0,0,.45);
 }
 [data-theme="apple"][data-theme-mode="dark"] .sb {
   background: rgba(28,28,30,0.8);
@@ -1364,12 +1377,19 @@
 [data-theme="apple"][data-theme-mode="dark"] .msg pre {
   background: #000;
 }
-[data-theme="apple"][data-theme-mode="dark"] .project-hero-btn { background: #2d2d2f !important; }
-[data-theme="apple"][data-theme-mode="dark"] .project-hero-btn:hover { background: #3d3d3f !important; }
-[data-theme="apple"][data-theme-mode="dark"] .project-card { border-color: rgba(255,255,255,0.08) !important; }
-[data-theme="apple"][data-theme-mode="dark"] .project-card:hover { background: rgba(255,255,255,0.04) !important; border-color: rgba(255,255,255,0.12) !important; }
-[data-theme="apple"][data-theme-mode="dark"] .template-card { border-color: rgba(255,255,255,0.08) !important; }
-[data-theme="apple"][data-theme-mode="dark"] .template-card:hover { background: rgba(255,255,255,0.04) !important; }
+/* ── 暗色档：状态标签 / 任务图标 / hero 横幅（与浅色同语义，降到深色可读对比） ── */
+[data-theme="apple"][data-theme-mode="dark"] .tg-v { background: rgba(185,27,94,.20); color: #ffa8c8; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-i { background: rgba(193,41,41,.20); color: #ff9b9b; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-c { background: rgba(35,94,199,.22); color: #9dc0ff; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-q { background: rgba(119,40,212,.22); color: #c9a6ff; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-s { background: rgba(209,84,8,.20); color: #ffb37a; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-ch { background: rgba(12,122,170,.22); color: #8fd8f5; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-a { background: rgba(255,255,255,.08); color: #b9c0cc; }
+[data-theme="apple"][data-theme-mode="dark"] .tg-d { background: var(--chip-bg); color: var(--t2); }
+[data-theme="apple"][data-theme-mode="dark"] .tsk-ic-p, .tsk-det-ic-p { background: linear-gradient(135deg,rgba(234,90,12,.18),rgba(216,48,118,.16)); color: #ffb27a; box-shadow: inset 0 0 0 1px rgba(234,90,12,.14); }
+[data-theme="apple"][data-theme-mode="dark"] .tsk-ic-d, .tsk-det-ic-d { background: linear-gradient(135deg,rgba(28,164,76,.18),rgba(49,104,224,.16)); color: #7ee0a0; box-shadow: inset 0 0 0 1px rgba(28,164,76,.14); }
+[data-theme="apple"][data-theme-mode="dark"] .tsk-ic-pr, .tsk-det-ic-pr { background: linear-gradient(135deg,rgba(49,104,224,.18),rgba(123,60,242,.16)); color: #9dc0ff; box-shadow: inset 0 0 0 1px rgba(49,104,224,.14); }
+[data-theme="apple"][data-theme-mode="dark"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.16) 0%,rgba(123,60,242,.13) 45%,rgba(216,48,118,.10) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
 
 @media (prefers-color-scheme: dark) {
   [data-theme="apple"][data-theme-mode="auto"] {
@@ -1385,6 +1405,18 @@
     --result-fg: #e0e6f0;
     --result-link: #5b9eff;
     --result-code: #b8c2d6;
+    /* 主题语义 token 暗色档（与强制 dark 块同源镜像） */
+    --edge: #3a3a3e;
+    --hairline: rgba(255,255,255,.09);
+    --hover-row: rgba(255,255,255,.045);
+    --hover-card: rgba(255,255,255,.06);
+    --hover-accent: rgba(10,132,255,.14);
+    --chip-bg: rgba(255,255,255,.07);
+    --on-accent: #fff;
+    --scrim: rgba(0,0,0,.5);
+    --glass-hero: rgba(35,35,38,.72);
+    --glass-hero-strong: rgba(48,48,52,.85);
+    --sh: 0 1px 2px rgba(0,0,0,.45);
   }
   [data-theme="apple"][data-theme-mode="auto"] .sb {
     background: rgba(28,28,30,0.8);
@@ -1401,6 +1433,19 @@
   [data-theme="apple"][data-theme-mode="auto"] .msg pre {
     background: #000;
   }
+/* ── 暗色档：状态标签 / 任务图标 / hero 横幅（与浅色同语义，降到深色可读对比） ── */
+  [data-theme="apple"][data-theme-mode="auto"] .tg-v { background: rgba(185,27,94,.20); color: #ffa8c8; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-i { background: rgba(193,41,41,.20); color: #ff9b9b; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-c { background: rgba(35,94,199,.22); color: #9dc0ff; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-q { background: rgba(119,40,212,.22); color: #c9a6ff; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-s { background: rgba(209,84,8,.20); color: #ffb37a; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-ch { background: rgba(12,122,170,.22); color: #8fd8f5; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-a { background: rgba(255,255,255,.08); color: #b9c0cc; }
+  [data-theme="apple"][data-theme-mode="auto"] .tg-d { background: var(--chip-bg); color: var(--t2); }
+  [data-theme="apple"][data-theme-mode="auto"] .tsk-ic-p, .tsk-det-ic-p { background: linear-gradient(135deg,rgba(234,90,12,.18),rgba(216,48,118,.16)); color: #ffb27a; box-shadow: inset 0 0 0 1px rgba(234,90,12,.14); }
+  [data-theme="apple"][data-theme-mode="auto"] .tsk-ic-d, .tsk-det-ic-d { background: linear-gradient(135deg,rgba(28,164,76,.18),rgba(49,104,224,.16)); color: #7ee0a0; box-shadow: inset 0 0 0 1px rgba(28,164,76,.14); }
+  [data-theme="apple"][data-theme-mode="auto"] .tsk-ic-pr, .tsk-det-ic-pr { background: linear-gradient(135deg,rgba(49,104,224,.18),rgba(123,60,242,.16)); color: #9dc0ff; box-shadow: inset 0 0 0 1px rgba(49,104,224,.14); }
+  [data-theme="apple"][data-theme-mode="auto"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.16) 0%,rgba(123,60,242,.13) 45%,rgba(216,48,118,.10) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
 
   /* ── Project Workspace ── */
   [data-theme="apple"][data-theme-mode="auto"] .project-hero-btn { background: #2d2d2f !important; }

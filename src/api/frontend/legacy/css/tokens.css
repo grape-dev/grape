@@ -6,19 +6,43 @@
 :root{
   --s:#0c1222;--s2:#161e30;--s3:#1e2940;
   --bg:#f5f6f8;--c:#fff;--b:#e3e6ee;
-  --t:#101724;--t2:#5b667b;--t3:#8d97a8;
+  --t:#101724;--t2:#5b667b;--t3:#7c8698;
   --a:#3168e0;--ah:#2556c2;--g:#1ca44c;--y:#d49c0f;
   --r:#dc2828;--pu:#7b3cf2;--or:#ea5a0c;--pk:#d83076;--sk:#0c92d4;
   --rd:8px;--r2:12px;
   --sh:0 1px 3px rgba(0,0,0,.04);
+  /* ── 主题语义 token（2026-11-11 暗色收敛）─────────────────────
+     组件只用这些名字，不写 [data-theme-mode="dark"] 分支。
+     light 值在此，dark 值在 apple-theme.css 的两个暗色块里同源镜像。 */
+  --edge:transparent;                    /* 面板描边：light 靠阴影/--b，dark 靠它立边界 */
+  --hairline:#e3e6ee;                    /* 细分隔线；dark 必须翻白透明，否则看不见 */
+  --hover-row:#f8f9fb;                   /* 表格/列表行 hover */
+  --hover-card:#fbfbfd;                  /* 卡片/仓库卡 hover */
+  --hover-accent:#f0f5ff;                /* accent 按钮/加号卡 hover 浅蓝底 */
+  --chip-bg:rgba(0,0,0,.05);             /* 中性小标签/分段底 */
+  --on-accent:#fff;                      /* 彩色底上的字（两主题同值） */
+  --scrim:rgba(0,0,0,.28);               /* 弹窗遮罩 */
+  --glass-hero:rgba(255,255,255,.72);    /* scene 页玻璃（唯一允许玻璃的地方） */
+  --glass-hero-strong:rgba(255,255,255,.85);
 }
 
 [data-theme="apple"]{
   --s:#f5f5f7;--s2:#fff;--s3:#eaeaec;
   --bg:#f5f5f7;--c:#fff;--b:#d2d2d7;
-  --t:#1d1d1f;--t2:#6e6e73;--t3:#86868b;
+  --t:#1d1d1f;--t2:#6e6e73;--t3:#7d7d82;
   --a:#0071e3;--ah:#0077ed;--g:#34c759;--y:#ff9f0a;
   --r:#ff3b30;--pu:#af52de;--or:#ff9f0a;--pk:#ff2d92;--sk:#5ac8fa;
   --rd:12px;--r2:18px;
   --sh:0 2px 8px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.06);
+  /* 主题语义 token 的 Apple 浅色档（比默认档更冷、更淡） */
+  --edge:transparent;
+  --hairline:#e8e8ed;
+  --hover-row:#f5f5f7;
+  --hover-card:#fafafc;
+  --hover-accent:#f5f9ff;
+  --chip-bg:rgba(0,0,0,.05);
+  --on-accent:#fff;
+  --scrim:rgba(0,0,0,.28);
+  --glass-hero:rgba(255,255,255,.72);
+  --glass-hero-strong:rgba(255,255,255,.85);
 }
