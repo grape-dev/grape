@@ -1360,8 +1360,8 @@ onMounted(function () {
 }
 .sk__upload-btn {
   color: var(--on-accent);
-  background: var(--g);
-  border-color: var(--g);
+  background: var(--g-fill);
+  border-color: var(--g-fill);
 }
 .sk__norepo {
   padding: 12px;

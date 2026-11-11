@@ -50,22 +50,23 @@
  * 旧实现只写 @media(prefers-color-scheme:dark)，于是「强制浅色 + 系统深色」
  * 会把这些 accent 调淡 → 白底上发灰。2026-11-11 修正键位。 */
 [data-theme='apple'][data-theme-mode='dark'] {
-  --c-accent: #6fb4ff;
-  --c-accent-soft: rgba(111, 180, 255, 0.16);
-  --c-danger: #ff7a70;
-  --c-danger-soft: rgba(255, 122, 112, 0.16);
-  --c-success: #72d98c;
-  --c-warning: #ffc66e;
-  --btn-outline: rgba(111, 180, 255, 0.4);
+  /* 对齐 tokens 的 HIG 暗色系彩（2026-11-11 demo 配色）：直接引用变量，别再自造浅色 */
+  --c-accent: #2997ff;
+  --c-accent-soft: rgba(10, 132, 255, 0.16);
+  --c-danger: #ff453a;
+  --c-danger-soft: rgba(255, 69, 58, 0.16);
+  --c-success: #30d158;
+  --c-warning: #ff9f0a;
+  --btn-outline: rgba(41, 151, 255, 0.4);
 }
 @media (prefers-color-scheme: dark) {
   [data-theme='apple'][data-theme-mode='auto'] {
-    --c-accent: #6fb4ff;
-    --c-accent-soft: rgba(111, 180, 255, 0.16);
-    --c-danger: #ff7a70;
-    --c-danger-soft: rgba(255, 122, 112, 0.16);
-    --c-success: #72d98c;
-    --c-warning: #ffc66e;
-    --btn-outline: rgba(111, 180, 255, 0.4);
+    --c-accent: #2997ff;
+    --c-accent-soft: rgba(10, 132, 255, 0.16);
+    --c-danger: #ff453a;
+    --c-danger-soft: rgba(255, 69, 58, 0.16);
+    --c-success: #30d158;
+    --c-warning: #ff9f0a;
+    --btn-outline: rgba(41, 151, 255, 0.4);
   }
 }

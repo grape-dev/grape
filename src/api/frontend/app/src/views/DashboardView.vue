@@ -555,7 +555,7 @@
                   <span
                     v-if="p.executing"
                     class="tg tg-c"
-                    style="color: var(--on-accent); background: var(--g)"
+                    style="color: var(--on-accent); background: var(--g-fill)"
                     >⚡</span
                   >
                 </td>

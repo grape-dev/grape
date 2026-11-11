@@ -30,21 +30,23 @@ function parseVars(block) {
   while ((m = re.exec(block))) out[m[1]] = m[2].trim()
   return out
 }
-/** 取某个选择器块的 var 集合（简单括号配对，够用） */
+/** 取某个选择器块的 var 集合（先把注释剥掉，否则注释里的同名选择器会误导 indexOf） */
 function blockOf(css, selector) {
-  const i = css.indexOf(selector)
-  if (i < 0) return {}
-  const start = css.indexOf('{', i)
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const sel = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = new RegExp(sel + '\\s*\\{').exec(clean)
+  if (!m) return {}
+  const start = clean.indexOf('{', m.index)
   let depth = 0
   let end = start
-  for (; end < css.length; end++) {
-    if (css[end] === '{') depth++
-    else if (css[end] === '}') {
+  for (; end < clean.length; end++) {
+    if (clean[end] === '{') depth++
+    else if (clean[end] === '}') {
       depth--
       if (depth === 0) break
     }
   }
-  return parseVars(css.slice(start, end))
+  return parseVars(clean.slice(start, end))
 }
 
 const tokensCss = fs.readFileSync(TOKENS, 'utf8')
@@ -53,8 +55,8 @@ const themeCss = fs.readFileSync(THEME, 'utf8')
 const LIGHT = { ...blockOf(tokensCss, ':root'), ...blockOf(tokensCss, '[data-theme="apple"]') }
 const lightBase = blockOf(tokensCss, ':root')
 const lightApple = blockOf(tokensCss, '[data-theme="apple"]')
-const DARK_FORCED = blockOf(themeCss, '[data-theme="apple"][data-theme-mode="dark"] {')
-const DARK_AUTO = blockOf(themeCss, '[data-theme="apple"][data-theme-mode="auto"] {')
+const DARK_FORCED = blockOf(themeCss, '[data-theme="apple"][data-theme-mode="dark"]')
+const DARK_AUTO = blockOf(themeCss, '[data-theme="apple"][data-theme-mode="auto"]')
 
 /** 解析 #rgb/#rrggbb/rgba()/颜色名（只支持本仓用到的写法） */
 function parseColor(v) {
@@ -105,7 +107,7 @@ const PAIRS = [
   ['三级 --t3 / --bg', '--t3', '--bg', 3.0],
   ['彩色底白字 --on-accent / --a', '--on-accent', '--a', 3.0],
   ['白字 --on-accent / --r', '--on-accent', '--r', 3.0],
-  ['白字 --on-accent / --g', '--on-accent', '--g', 3.0],
+  ['白字 --on-accent / --g-fill', '--on-accent', '--g-fill', 3.0],
 ]
 
 console.log('\n== 明暗 token 对比度核算（WCAG 2.1）==\n')
@@ -118,7 +120,7 @@ for (const [theme, env, base] of [
 ]) {
   console.log(`— ${theme} —`)
   for (const [label, fgK, bgK, min] of PAIRS) {
-    const fg = resolve(env, fgK)
+    let fg = resolve(env, fgK)
     let bg = resolve(env, bgK)
     if (!fg || !bg) {
       console.log(`  ${label.padEnd(30)} 跳过（含 color-mix/透明）`)

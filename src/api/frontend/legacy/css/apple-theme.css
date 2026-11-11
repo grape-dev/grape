@@ -1337,31 +1337,42 @@
 /* ── 强制深色模式（方案A 10-26）：与 auto 暗色变量保持同源镜像 ──
    语义：data-theme-mode="dark" 时无条件应用暗色（不看系统偏好） */
 [data-theme="apple"][data-theme-mode="dark"] {
+  /* 暗色档对齐 grape-release-demo.html（2026-11-11 主人指定配色）：
+     抬升中性色（不是纯黑）+ HIG 暗色系彩 */
   --s: #1c1c1e;
   --s2: #2c2c2e;
-  --s3: #3a3a3c;
-  --bg: #000000;
-  --c: #1c1c1e;
-  --b: #38383a;
+  --s3: #3a3a3e;
+  --bg: #161618;
+  --c: #232326;
+  --b: #3a3a3e;
+  --b-strong: #48484c;
   --t: #f5f5f7;
-  --t2: #aeaeb2;
+  --t2: rgba(235,235,245,.62);
   --t3: #8e8e93;
+  --a: #0a84ff;
+  --ah: #0077ed;
+  --g: #30d158;
+  --y: #ff9f0a;
+  --r: #ff453a;
+  --pu: #bf5af2;
+  --sk: #64d2ff;
   --result-fg: #e0e6f0;
   --result-link: #5b9eff;
   --result-code: #b8c2d6;
   /* 主题语义 token 暗色档（与 auto 暗色块同源镜像；改一处必须改两处） */
   --edge: #3a3a3e;
-  --hairline: rgba(255,255,255,.09);
-  --hover-row: rgba(255,255,255,.045);
-  --hover-card: rgba(255,255,255,.06);
-  --hover-accent: rgba(10,132,255,.14);
+  --hairline: rgba(255,255,255,.08);
+  --hover-row: #2c2c2e;
+  --hover-card: #2c2c2e;
+  --hover-accent: rgba(10,132,255,.16);
   --chip-bg: rgba(255,255,255,.07);
+  --g-fill: #22873c;
   --on-accent: #fff;
   --scrim: rgba(0,0,0,.5);
   --glass-hero: rgba(35,35,38,.72);
   --glass-hero-strong: rgba(48,48,52,.85);
   /* 纯黑上阴影不可见 → 收窄阴影，面板靠 --edge 立边界 */
-  --sh: 0 1px 2px rgba(0,0,0,.45);
+  --sh: 0 1px 3px rgba(0,0,0,.4);
 }
 [data-theme="apple"][data-theme-mode="dark"] .sidebar {
   background: rgba(28,28,30,0.85) !important;
@@ -1386,30 +1397,40 @@
 
 @media (prefers-color-scheme: dark) {
   [data-theme="apple"][data-theme-mode="auto"] {
+    /* 与强制 dark 块同源镜像（改一处必须改两处） */
     --s: #1c1c1e;
     --s2: #2c2c2e;
-    --s3: #3a3a3c;
-    --bg: #000000;
-    --c: #1c1c1e;
-    --b: #38383a;
+    --s3: #3a3a3e;
+    --bg: #161618;
+    --c: #232326;
+    --b: #3a3a3e;
+    --b-strong: #48484c;
     --t: #f5f5f7;
-    --t2: #aeaeb2;
+    --t2: rgba(235,235,245,.62);
     --t3: #8e8e93;
+    --a: #0a84ff;
+    --ah: #0077ed;
+    --g: #30d158;
+    --y: #ff9f0a;
+    --r: #ff453a;
+    --pu: #bf5af2;
+    --sk: #64d2ff;
     --result-fg: #e0e6f0;
     --result-link: #5b9eff;
     --result-code: #b8c2d6;
     /* 主题语义 token 暗色档（与强制 dark 块同源镜像） */
     --edge: #3a3a3e;
-    --hairline: rgba(255,255,255,.09);
-    --hover-row: rgba(255,255,255,.045);
-    --hover-card: rgba(255,255,255,.06);
-    --hover-accent: rgba(10,132,255,.14);
+    --hairline: rgba(255,255,255,.08);
+    --hover-row: #2c2c2e;
+    --hover-card: #2c2c2e;
+    --hover-accent: rgba(10,132,255,.16);
     --chip-bg: rgba(255,255,255,.07);
+    --g-fill: #22873c;
     --on-accent: #fff;
     --scrim: rgba(0,0,0,.5);
     --glass-hero: rgba(35,35,38,.72);
     --glass-hero-strong: rgba(48,48,52,.85);
-    --sh: 0 1px 2px rgba(0,0,0,.45);
+    --sh: 0 1px 3px rgba(0,0,0,.4);
   }
   [data-theme="apple"][data-theme-mode="auto"] .sidebar {
     background: rgba(28,28,30,0.85) !important;

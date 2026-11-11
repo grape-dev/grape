@@ -14,6 +14,8 @@
   /* ── 主题语义 token（2026-11-11 暗色收敛）─────────────────────
      组件只用这些名字，不写 [data-theme-mode="dark"] 分支。
      light 值在此，dark 值在 apple-theme.css 的两个暗色块里同源镜像。 */
+  --b-strong:#d2d2d7;                    /* 强描边（ghost 按钮/分段框） */
+  --g-fill:#1ca44c;                      /* 绿色「填充底」：承载白字的深绿（--g 是亮绿，只作文字/圆点） */
   --edge:transparent;                    /* 面板描边：light 靠阴影/--b，dark 靠它立边界 */
   --hairline:#e3e6ee;                    /* 细分隔线；dark 必须翻白透明，否则看不见 */
   --hover-row:#f8f9fb;                   /* 表格/列表行 hover */
@@ -35,6 +37,8 @@
   --rd:12px;--r2:18px;
   --sh:0 2px 8px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.06);
   /* 主题语义 token 的 Apple 浅色档（比默认档更冷、更淡） */
+  --b-strong:#d2d2d7;
+  --g-fill:#18843c;                      /* apple 浅色档：白字压亮绿不达标，填充用深绿 */
   --edge:transparent;
   --hairline:#e8e8ed;
   --hover-row:#f5f5f7;
