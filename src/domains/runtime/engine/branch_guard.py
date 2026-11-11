@@ -17,6 +17,7 @@ PR 已合并后继续向 head 分支 push 无任何提示，修复静默丢失�
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import shlex
@@ -44,6 +45,12 @@ log = _LazyLog()
 LEASE_PREFIX = "branch_guard:"
 DEFAULT_TTL = 1800  # 30 分钟；租约仅覆盖一次写窗口，过期自动释放
 HOOK_MARKER = "# grape-branch-guard (Issue #993)"
+# Issue #2028：钩子模板版本指纹。install_pre_push_hook 依据它识别存量旧模板并重装；
+# 模板内容（fail-open/加载路径/自检）变化时必须递增，否则现网存量 worktree 永不升级。
+HOOK_TEMPLATE_VERSION = "2028-02"
+HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
+# 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
+HOOK_DEP_MODULES = ("src.lock", "src.kernel.session_manager")
 
 
 def lease_key(repo_key: str, head_branch: str) -> str:
@@ -511,6 +518,62 @@ def _hooks_dir(wt_dir: str) -> str:
     return path if os.path.isabs(path) else os.path.join(wt_dir, path)
 
 
+def _hook_module_path() -> str:
+    """当前 canonical 守卫模块绝对路径（随 #699 迁移到 src/domains/runtime/engine/）。"""
+    return os.path.abspath(__file__)
+
+
+def _hook_root() -> str:
+    """仓库/安装根目录：``<root>/src/domains/runtime/engine/branch_guard.py`` 上溯 5 层。"""
+    root = _hook_module_path()
+    for _ in range(5):
+        root = os.path.dirname(root)
+    return root
+
+
+def _hook_entry_code(root: str, module_path: str) -> str:
+    """生成钩子内联 Python 代码：加载守卫模块并执行 hook_main。
+
+    Issue #2028：模块加载与 ``hook_main()`` 调用一并纳入 try/except，
+    守卫自身异常一律 fail-open（stderr 明确告警 + exit 0），真实违规仍由
+    ``hook_main`` 显式 return 1 阻断。
+    """
+    return (
+        "import sys, importlib.util; "
+        f"sys.path.insert(0, {json.dumps(root)}); "
+        f"_spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
+        "_m = importlib.util.module_from_spec(_spec); "
+        "\ntry:\n"
+        "    _spec.loader.exec_module(_m)\n"
+        "    _rc = _m.hook_main()\n"
+        "except Exception as _e:\n"
+        f"    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
+        f"(fail-open): %r [module=%s]\\n' % (_e, {json.dumps(module_path)}))\n"
+        "    _rc = 0\n"
+        "sys.exit(_rc)"
+    )
+
+
+def _missing_hook_deps() -> list:
+    """钩子依赖自检：返回无法导入的依赖描述列表（空=齐全）。"""
+    missing = []
+    for name in HOOK_DEP_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception as e:
+            missing.append(f"{name} ({e.__class__.__name__}: {e})")
+    return missing
+
+
+def _fail_open(reason: str) -> None:
+    """守卫自身异常/依赖缺失：放行本次 push 并输出可定位告警。"""
+    sys.stderr.write(f"\n[branch-guard] WARNING {reason}；守卫已放行本次 push（fail-open）\n")
+    try:
+        log.warning(f"branch guard fail-open: {reason}")
+    except Exception:
+        pass
+
+
 def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
     """安装 pre-push 守卫（幂等）。
 
@@ -540,26 +603,22 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
                     if os.path.isfile(preserved):
                         os.remove(preserved)
                     os.replace(hook_path, preserved)
+                elif HOOK_VERSION_LINE in existing:
+                    # 存量钩子已是当前模板版本：幂等跳过重写。
+                    return True
             except Exception:
                 pass
-        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        # Issue #993 R8：钩子按文件路径直接加载本模块，绕过 src/runtime/__init__.py 的
-        # 重型依赖链（base/opencode/service/engine_select …，实测 115ms）。钩子的快路径
-        # （tag 推送、删分支、空 stdin）因此从 ~290ms 降到 ~40ms；真正要判分支时
-        # src.kernel.lock/session_manager 仍会导入 config，那是必要成本。
-        module_path = os.path.join(root, "src", "runtime", "branch_guard.py")
-        code = (
-            "import sys, importlib.util; "
-            f"sys.path.insert(0, {json.dumps(root)}); "
-            f"_spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
-            "_m = importlib.util.module_from_spec(_spec); "
-            "\ntry: _spec.loader.exec_module(_m)\nexcept Exception: sys.exit(0) "
-            "\nsys.exit(_m.hook_main())"
-        )
+        root = _hook_root()
+        # Issue #993 R8：钩子按文件路径直接加载本模块，绕过运行时包 __init__ 的重型依赖链。
+        # Issue #2028：模板必须按当前 canonical 布局（src/domains/runtime/engine/）定位，
+        # 不能沿用 #699 迁移前的 src/runtime/ 路径，否则守卫模块加载必失败、静默 no-op。
+        module_path = _hook_module_path()
+        code = _hook_entry_code(root, module_path)
         interpreter = sys.executable or "python3"
         lines = [
             "#!/bin/sh",
             HOOK_MARKER,
+            HOOK_VERSION_LINE,
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
             "trap 'rm -f \"$STDIN_TMP\"' EXIT INT TERM HUP",
@@ -582,12 +641,29 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
 
 
 def hook_main(argv: list | None = None) -> int:
-    """pre-push 钩子入口：stdin 为 ``<local_ref> <local_sha> <remote_ref> <remote_sha>``。
+    """pre-push 钩子入口（fail-open 兜底）。
+
+    Issue #2028：守卫自身任何未预期异常（含依赖 ImportError）都不得阻断交付，
+    统一 stderr 告警 + 返回 0；真实拦截由 ``_hook_main`` 显式返回 1。
+    """
+    try:
+        return _hook_main(argv)
+    except Exception as e:
+        _fail_open(f"branch guard runtime error {e.__class__.__name__}: {e}")
+        return 0
+
+
+def _hook_main(argv: list | None = None) -> int:
+    """pre-push 钩子主逻辑：stdin 为 ``<local_ref> <local_sha> <remote_ref> <remote_sha>``。
 
     不固化分支：逐条解析 stdin 的 remote ref，对本次实际被推的每个 head 分支独立
     获取租约、查 PR/漂移并在全部通过后记录 local sha。返回 0=放行；1=阻断
     （stderr 提示 + 任务日志告警双通道）。查询异常 fail-open。
     """
+    missing = _missing_hook_deps()
+    if missing:
+        _fail_open("branch guard dependency missing: " + "; ".join(missing))
+        return 0
     args = argv if argv is not None else sys.argv[1:]
     repo_key = args[0] if len(args) > 0 else ""
     if not repo_key:

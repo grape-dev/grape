@@ -86,24 +86,28 @@ def release_lock(lock_key: str, holder: str = ""):
         db.commit()
 
 
-def renew_lock(lock_key: str, ttl: int = 60) -> bool:
+def renew_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
     """续期锁（只续自己的）。返回 True=续期成功，False=锁已被别人抢走。
 
     不依赖 cursor.rowcount（MySQL/pymysql 对 UPDATE 返回 rowcount=0 不可靠），
     改为 UPDATE + SELECT 验证 holder 是否还是自己。
+
+    holder: 与 acquire_lock 传入值一致时，只续该 holder 的锁。branch_guard 的
+        分支写租约按 ``task_id:进程holder`` 续期（Issue #2028），缺省仍用实例级标识。
     """
+    _h = (holder or "").strip() or _holder
     now = int(time.time())
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE distributed_locks SET expires_at=?, update_at=? "
             "WHERE lock_key=? AND holder=?",
-            (now + ttl, now, lock_key, _holder))
+            (now + ttl, now, lock_key, _h))
         db.commit()
         row = c.execute(
             "SELECT holder FROM distributed_locks WHERE lock_key=?",
             (lock_key,)).fetchone()
-        return row and row[0] == _holder
+        return row and row[0] == _h
 
 
 def cleanup_expired_locks():
