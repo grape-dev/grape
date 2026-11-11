@@ -385,7 +385,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 
 const G = globalThis
 
@@ -605,9 +605,24 @@ const engineText = computed(() => {
       (d.engine_device ? '<span class="ts t3"> · ' + esc(d.engine_device) + '</span>' : '') +
       (d.engine_ip ? '<span class="ts t3"> · ' + esc(d.engine_ip) + '</span>' : '') +
       health
+    // Issue #1255：引擎行补模型段（用量优先；已派发但无模型 → 「模型未知」；未派发不展示）
+    inner += modelSegment(d)
   }
   return '<span style="color:var(--t3)">Engine:</span> ' + inner
 })
+// Issue #1255：引擎模型段——后端 engine_model 由 obs_llm_usage 聚合优先，缺失时给统一占位
+function modelSegment(d) {
+  if (!d || !d.engine_instance) return ''
+  if (d.engine_model)
+    return (
+      ' · <span style="color:var(--t3)">' +
+      esc(t('model') || '模型') +
+      '</span> <b>' +
+      esc(d.engine_model) +
+      '</b>'
+    )
+  return ' · <span class="ts t3">' + esc(t('model_unknown') || '模型未知') + '</span>'
+}
 const durationText = computed(() => {
   const d = data.value
   return '<span style="color:var(--t3)">Duration:</span> ' + (d.duration ? d.duration + 's' : '—')
@@ -675,26 +690,52 @@ const statusText = computed(() => {
       '</button>'
   return html
 })
+const failExpanded = ref(false)
 const failReasonText = computed(() => {
   const d = data.value
+  if (d.status !== 'failed') return ''
+  // Issue #494：result 为空/不足时补 task.errors 归因（超时等失败此前零归因）
   const txt = (d.result || '').toString().trim()
-  if (d.status === 'failed' && txt) {
-    return (
-      '<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>' +
-      esc(t('fail_reason')) +
-      '：</b>' +
-      esc(String(txt).substring(0, 500)) +
-      '</div>'
-    )
-  }
-  if (d.status === 'failed')
+  const errs = ((d.task && d.task.task_errors) || [])
+    .map((e) => String(e || '').trim())
+    .filter(Boolean)
+  const parts = []
+  if (txt) parts.push(txt)
+  if (errs.length && errs.join('\n') !== txt) parts.push(errs.join('\n'))
+  const full = parts.join('\n')
+  if (!full)
     return (
       '<div style="margin-top:6px;font-size:11px;color:var(--t3,#86868b)">' +
       esc(t('no_fail_reason')) +
       '</div>'
     )
-  return ''
+  // 长文本折叠：默认 200 字，展开/收起走事件委托
+  const LIMIT = 200
+  const short = full.length > LIMIT ? full.slice(0, LIMIT) + '…' : full
+  const expandable = full.length > LIMIT
+  const shown = expandable && failExpanded.value ? full : short
+  let html =
+    '<div class="ev-fail-box" style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>' +
+    esc(t('fail_reason')) +
+    '：</b><span style="white-space:pre-wrap">' +
+    esc(shown) +
+    '</span>'
+  if (expandable) {
+    html +=
+      ' <a href="javascript:void(0)" data-ev-act="failtoggle" style="color:var(--a);white-space:nowrap">' +
+      esc(t(failExpanded.value ? 'fail_collapse' : 'fail_expand')) +
+      '</a>'
+  }
+  html += '</div>'
+  return html
 })
+// 换事件时收起失败原因（避免上一条的展开状态串到下一条）
+watch(
+  () => data.value && data.value.seq,
+  () => {
+    failExpanded.value = false
+  }
+)
 const logRowText = computed(() => {
   const d = data.value
   if (d.task && d.task.task_id)
@@ -801,6 +842,7 @@ function onInfoClick(ev) {
   else if (act === 'terminate') doTerminateEvent(data.value.seq)
   else if (act === 'tasklog') openTaskLog(data.value.task.task_id, 'seq#' + data.value.seq)
   else if (act === 'inlinelog') openInlineLog(data.value.seq, 'seq#' + data.value.seq)
+  else if (act === 'failtoggle') failExpanded.value = !failExpanded.value // Issue #494：失败原因展开/收起
 }
 // ── 折叠区块 ──
 const openSections = reactive({ ctxInfo: true, promptBody: false })
