@@ -175,6 +175,133 @@ _PROJECT_INFO_SUMMARY_CHARS = 400
 # Issue #358：知识注入 prompt 时的单条最大字符数，超出截断并提示可用 read tool 读取全文
 _KNOWLEDGE_INJECT_MAX_CHARS = 8000
 
+# Issue：用户「回复」bot 长评论时，GitCode 会把被回复内容以 ">" 引用块形式放在 body
+# 最前面，用户自己的话在最后。旧实现直接 json.dumps(note)[:1000]，引用块把额度吃光，
+# 用户提问被切掉（实测：引用 5000 字符时正文一个字都进不了 prompt）。
+# 现口径：只在开头连续出现的引用段才剥离；引用摘最多 300 字符（保留「用户指的是哪一段」
+# 的上下文），正文独享 4000 字符预算，且截断按**原文**计算（json.dumps 的转义不占额度）。
+_COMMENT_BODY_CHAR_LIMIT = 4000
+_COMMENT_QUOTE_EXCERPT_CHARS = 300
+_QUOTE_NOISE_RE = re.compile(r"^\[@[^\]]+\]\([^)]*\)\s*$")
+
+
+def _clip_raw_text(text: str, limit: int, marker: str = "\n[truncated]") -> str:
+    """按原文字符数截断并标注（调用方负责后续 json 化）。"""
+    raw = text or ""
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + marker
+
+
+def _next_fence_state(fence: str, text: str) -> str:
+    """代码围栏状态机：返回打开中的围栏标记（``` / ~~~）或空串。"""
+    body = (text or "").strip()
+    if not fence:
+        if body.startswith("```"):
+            return "```"
+        if body.startswith("~~~"):
+            return "~~~"
+        return ""
+    return "" if body.startswith(fence) else fence
+
+
+def _scan_leading_quote(lines: list, allow_fence: bool = True) -> tuple:
+    """扫描开头连续引用段，返回 (引用行文本, 引用结束位置)；无引用段时位置为 None。
+
+    allow_fence=True 时，引用块内打开的代码围栏（围栏内行不带 ``>``）继续算作引用。
+    """
+    quoted: list = []
+    fence = ""
+    i = 0
+    while i < len(lines):
+        has_marker = lines[i].lstrip().startswith(">")
+        if not has_marker and not (allow_fence and fence):
+            # 引用块内部出现无 ">" 行：若整段像代码/日志且之后又接回 ">" 行，
+            # 说明它属于被引用的原文（GitCode 引用的代码块不带 ">"），继续算引用。
+            _run_end = _code_run_end(lines, i) if allow_fence else None
+            if _run_end is None:
+                break
+            for _j in range(i, _run_end):
+                _seg = lines[_j].strip()
+                fence = _next_fence_state(fence, _seg)
+                quoted.append(_seg)
+            i = _run_end
+            continue
+        text = (re.sub(r"^\s*>+", "", lines[i]).strip() if has_marker else lines[i].strip())
+        fence = _next_fence_state(fence, text)
+        quoted.append(text)
+        i += 1
+    return quoted, (i if quoted else None)
+
+
+def _fence_unclosed(quoted: list) -> bool:
+    """引用段是否以未闭合的代码围栏结尾（未闭合时不可信任围栏继续吞行）。"""
+    fence = ""
+    for text in quoted:
+        fence = _next_fence_state(fence, text)
+    return bool(fence)
+
+
+# 无围栏的代码/日志行特征：缩进行（4/2 空格或 tab）、堆栈与异常首行、shell 提示符。
+_CODE_LINE_RE = re.compile(
+    r"^(?:Traceback \(most recent call last\)|Caused by:|\w*(?:Error|Exception)\b:?"
+    r"|at\s+\S+|File \".+\"|File .+, line \d+|>>> |\$ )"
+)
+
+
+def _looks_like_code(line: str) -> bool:
+    """该行是否像代码/日志（用于判断引用块内部的无 ">" 行）。"""
+    text = line or ""
+    if text.startswith("\t") or (len(text) - len(text.lstrip(" ")) >= 2):
+        return True
+    return bool(_CODE_LINE_RE.match(text.strip()))
+
+
+def _code_run_end(lines: list, start: int, limit: int = 200):
+    """从 start 起的一段「全代码/日志/空行」运行是否被后续 ">" 行接回引用块。
+
+    命中返回运行结束位置（即后续 ">" 行的下标），否则返回 None。规则要求整段都像代码、
+    且之后确实还有 ">" 行，避免把用户的正文当成引用吞掉。
+    """
+    i = start
+    seen_code = False
+    while i < len(lines) and i - start < limit:
+        line = lines[i]
+        if line.lstrip().startswith(">"):
+            return i if seen_code else None
+        if line.strip() and _looks_like_code(line):
+            seen_code = True
+        elif line.strip():
+            return None                      # 出现普通文本 → 认定正文开始
+        i += 1
+    return None
+
+
+def _split_leading_quote_block(note: str) -> tuple[str, str]:
+    """拆出「开头引用块摘要」与「用户正文」。
+
+    - 引用行判定：`line.lstrip().startswith(">")`（GitCode 实测两种形态 `>文字` 与 `> 文字`，
+      嵌套为 `>>`；引用块内空行写作单独一个 `>`）。
+    - 只剥**开头连续**的引用段：遇到第一行非引用即认定正文开始。引用块内夹代码块时，
+      围栏内的行在 GitCode 上不带 `>`，故按围栏状态把它继续算作引用（否则剩余引用会被当成
+      正文吃掉正文额度，实测 7437 字原文里用户原话仍被截掉）；围栏未闭合时退回严格模式
+      （只认 `>` 行），宁可少剥也不吞掉用户正文。
+    - 引用块之后的 UI 噪音行（`[@bot](url)`）跳过。
+    - 正文为空（纯引用/纯转发）→ 回退原文当正文，摘要置空，绝不把整条评论弄没。
+    """
+    lines = (note or "").splitlines()
+    quoted, end = _scan_leading_quote(lines, allow_fence=True)
+    if end is not None and _fence_unclosed(quoted):
+        quoted, end = _scan_leading_quote(lines, allow_fence=False)
+    i = end if end is not None else 0
+    while i < len(lines) and (not lines[i].strip() or _QUOTE_NOISE_RE.match(lines[i].strip())):
+        i += 1
+    body = "\n".join(lines[i:]).strip()
+    if not body:
+        return "", note or ""
+    excerpt = " ".join(seg for seg in quoted if seg)[:_COMMENT_QUOTE_EXCERPT_CHARS]
+    return excerpt, body
+
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
 
@@ -262,35 +389,14 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
     if cached and now - cached[1] < 60:
         return cached[0]
     try:
-        from src.kernel.session_manager import db, db_lock
-        # 1. 优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene
-        scene_id = ""
-        if issue_id:
-            try:
-                from src.api.session_store import get_issue_scene
-                scene_id, _ = get_issue_scene(repo_key, issue_id)
-            except Exception:
-                scene_id = ""
-        if not scene_id:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-                row = c.fetchone()
-            scene_id = (row[0] if row else "") or ""
-        if not scene_id:
-            return ""
+        # 1. 解析 Issue 当前绑定场景（快照优先，空则回退仓库默认场景）
         # 2. 读 devops_pipeline_scene.advanced_options
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT advanced_options FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (scene_id, repo_key))
-            row = c.fetchone()
-        if not row or not row[0]:
+        # Issue #1753：统一走 session_store 公共 helper，避免与 webhook/repogit 重复查询。
+        from src.api.session_store import resolve_scene_id, get_scene_advanced_options
+        scene_id = resolve_scene_id(repo_key, issue_id)
+        if not scene_id:
             return ""
-        import json as _json
-        opts = _json.loads(row[0]) if row[0] else {}
+        opts = get_scene_advanced_options(repo_key, scene_id)
         if not opts:
             return ""
         # 3. 判断有哪些配置项（决定是否输出指引；自定义变量指引按 Issue #236 移除，使用方式见技能 SKILL.md）
@@ -312,6 +418,104 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
         from src.kernel.config import log as _log
         _log.warning(f"prompt_builder: inject advanced options failed: {_e}")
         return ""
+
+
+def _build_cross_pipeline_baseline(repo_key: str, issue_id: str = "") -> str:
+    """Issue #1753: 承接侧基线一致性校验指引。
+
+    跨流水线转交后，carried_context.target_branch 由转交链写入承接场景 work_branch
+    （与运行时 GRAPE_WORK_BRANCH 同源）。承接侧 issue Agent 生成/刷新 Spec 前需以该值为准，
+    发现 Spec 头部目标分支不一致时纠正并留痕（原文 → 纠正值）。无转交上下文时返回空串。
+    """
+    _num = None
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+    except Exception:
+        _num = None
+    if not _num or not repo_key:
+        return ""
+    try:
+        from src.api.session_store import get_carried_context
+        cc = get_carried_context(repo_key, _num) or {}
+    except Exception:
+        return ""
+    _target_branch = str(cc.get("target_branch", "") or "").strip()
+    if not _target_branch:
+        return ""
+    from src.api.session_store import (
+        TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH,
+        get_scene_work_branch,
+    )
+    _source = str(cc.get("target_branch_source", "") or "").strip()
+    _replaced = str(cc.get("target_branch_replaced", "") or "").strip()
+    # 复审（需修）：API 进程不持有任务级 GRAPE_WORK_BRANCH（该变量只按任务写入
+    # worker env_extra），直接读 os.environ 会恒为空，令快照漂移保护失效。
+    # 派发时基线改为现读承接场景 work_branch（与任务 env 同源），
+    # os.environ 仅作可选覆盖（测试 / 显式覆盖）。
+    _runtime_branch = str(os.environ.get("GRAPE_WORK_BRANCH", "") or "").strip()
+    if not _runtime_branch:
+        # 与任务 env 注入同源：event_pipeline.build_task_env / scheduler 也用
+        # repogit._read_scene_work_branch 取场景 work_branch 注入 GRAPE_WORK_BRANCH。
+        # 不要用 #1841 已整组回退的「生效分支」helper —— 它已被删除，import 会 ImportError
+        # 并被此处的 except 吞掉，导致口径静默降级。
+        try:
+            from src.domains.runtime.engine.repogit import _read_scene_work_branch
+            _runtime_branch = str(_read_scene_work_branch(repo_key, issue_id=issue_id) or "").strip()
+        except Exception:
+            try:
+                _runtime_branch = str(get_scene_work_branch(repo_key, issue_id=issue_id) or "").strip()
+            except Exception:
+                _runtime_branch = ""
+    header = "\n## Cross-pipeline Baseline (Issue #1753)"
+
+    # Issue #1753 复审：只有转交链标注 target_scene_work_branch 的值才是承接流水线权威基线。
+    # 旧 carried_context（无 source 标记 / 承接场景无 work_branch 的失效标记）可能残留
+    # 源会话分支（如 weekly-10），必须显式标为「未确认/不可作为权威」，
+    # 防止承接侧按旧分支生成 Spec。
+    if _source != TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH:
+        lines = [
+            header,
+            f"- carried_context.target_branch = `{_target_branch}` is UNCONFIRMED: "
+            f"target_branch_source=`{_source or 'missing'}` (not `target_scene_work_branch`).",
+            "- DO NOT treat this value as the authoritative baseline of the accepting pipeline; "
+            "it may be a stale branch inherited from the source session.",
+            "- Before publishing/refreshing the Spec, resolve the accepting pipeline's actual "
+            "baseline from the current scene configuration / runtime `GRAPE_WORK_BRANCH`, "
+            "then align the Spec header to that value (or ask for clarification if it is unavailable).",
+        ]
+        # 复审判断项：运行时 GRAPE_WORK_BRANCH 可取到时直接给出实际值，减少二次误判。
+        if _runtime_branch:
+            lines.append(
+                f"- Runtime `GRAPE_WORK_BRANCH` is `{_runtime_branch}`; prefer it as the "
+                "accepting baseline when it is available."
+            )
+        if _replaced:
+            lines.append(f"- Historical branch recorded as replaced: `{_replaced}` "
+                         "(also UNCONFIRMED; never treat it as the authoritative baseline).")
+        return "\n".join(lines)
+
+    lines = [
+        header,
+        f"- carried_context.target_branch = `{_target_branch}` "
+        "(authoritative baseline of the accepting pipeline, same source as runtime GRAPE_WORK_BRANCH).",
+        "- Before publishing/refreshing the Spec, compare this value with the Spec header target branch.",
+        "- If they differ (e.g. the Spec header still carries the source session branch), "
+        "rewrite the Spec header to this value and leave an audit trail in the Issue comment / A2A context "
+        "(original → corrected). Keep the value unchanged when it already matches.",
+    ]
+    # 转交快照与派发时运行时值可能漂移：承接场景 work_branch 在转交后变更时，
+    # 运行时 GRAPE_WORK_BRANCH 才是 coding 实际使用的基线，须以其为准并留痕。
+    if _runtime_branch and _runtime_branch != _target_branch:
+        lines.append(
+            f"- Runtime `GRAPE_WORK_BRANCH` is `{_runtime_branch}`, which differs from the handoff-time "
+            f"snapshot `{_target_branch}` (scene work_branch changed after handoff). The runtime value "
+            f"wins: align the Spec header to `{_runtime_branch}` and record the drift "
+            f"(`{_target_branch}` → `{_runtime_branch}`) in the audit trail."
+        )
+    if _replaced:
+        lines.append(f"- Source session branch recorded as replaced: `{_replaced}` "
+                     "(document it as the original value in the audit trail).")
+    return "\n".join(lines)
 
 
 def build_role_definition(skills=None, agent_type="", repo_key="") -> str:
@@ -768,7 +972,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
     title = json.dumps(issue_data.get("title", ""), ensure_ascii=False)
-    body = json.dumps(issue_data.get("body", issue_data.get("description", "")), ensure_ascii=False)[:4000]
+    body = json.dumps(_clip_raw_text(str(issue_data.get("body", issue_data.get("description", "")) or ""), 4000),
+                      ensure_ascii=False)
     parts = []
     evt_type = evt.get("type", "event")
 
@@ -808,7 +1013,12 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         prefix = f"User commented on issue #{number} of {repo}" if number is not None else f"User commented on {repo}"
         parts.append(prefix)
         if note:
-            parts.append(f'Comment: {json.dumps(note, ensure_ascii=False)[:1000]}')
+            # 引用块剥离 + 正文优先截断（见 _split_leading_quote_block 的形态说明）。
+            _quote_excerpt, _comment_body = _split_leading_quote_block(note)
+            if _quote_excerpt:
+                parts.append(f"(User quoted earlier content: {_quote_excerpt})")
+            parts.append(
+                f'Comment: {json.dumps(_clip_raw_text(_comment_body, _COMMENT_BODY_CHAR_LIMIT), ensure_ascii=False)}')
             # 检测是否 @ 了 Bot
             if any(f"@{u}" in note for u in __import__("src.domains.mgmt.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
@@ -883,6 +1093,12 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         _adv = _build_scene_advanced_options(repo_key, _issue_id_for_scene)
         if _adv:
             parts.append(_adv)
+
+    # Issue #1753: 承接侧 issue Agent 基线一致性校验指引（跨流水线转交上下文）
+    if agent_type == "issue":
+        _baseline = _build_cross_pipeline_baseline(repo_key, evt.get("issue_id", "") or "")
+        if _baseline:
+            parts.append(_baseline)
 
     # 子任务/多任务模式上下文注入
     _issue_id = evt.get("issue_id", "")
@@ -1313,7 +1529,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
     elif isinstance(payload.get("object_attributes"), dict):
         issue_data = payload["object_attributes"]
     title = issue_data.get("title", "")
-    body = issue_data.get("body", issue_data.get("description", ""))[:4000]
+    body = _clip_raw_text(str(issue_data.get("body", issue_data.get("description", "")) or ""), 4000)
 
     parts = []
 

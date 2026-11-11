@@ -639,6 +639,55 @@ def _cross_pipeline_handoff(
         log.info(f"A2A #329: target scene '{target_scene_id}' does not contain node '{target_node}', nodes={target_node_ids}")
         return {"ok": False, "error": "target_scene_missing_node"}
 
+    # 1.2 Issue #1753: 转交上下文携带承接流水线权威基线 target_branch。
+    #     以承接场景 work_branch 覆盖源会话固化值（如源 weekly-10 → 承接 weekly-mys），
+    #     承接侧 issue Agent 据此校验/纠正 Spec 头部目标分支并留痕。
+    #     复审（多跳链）：承接场景无 work_branch 时必须失效历史权威标记，防止
+    #     A→B（B 写入 source）后 B→C（C 未配置）时 C 把 B 的分支当权威基线。
+    from src.api.session_store import (
+        TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH,
+        TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH,
+        get_scene_work_branch,
+    )
+    _target_branch_1753 = get_scene_work_branch(repo_key, scene_id=target_scene_id)
+    if isinstance(carried_context, dict) and not _target_branch_1753 \
+            and carried_context.get("target_branch_source") == TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH:
+        carried_context["target_branch_source"] = TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH
+        # 留痕口径统一：多跳失效后 target_branch 整体不可作为权威，
+        # 上一跳的 replaced 标记同步清除，避免 prompt / A2A 继续宣称「已刷新」。
+        _stale_replaced_1753 = carried_context.pop("target_branch_replaced", "")
+        log.info(f"A2A #1753: accepting scene has no work_branch, invalidate stale authoritative "
+                 f"target_branch={carried_context.get('target_branch', '')} "
+                 f"(replaced={_stale_replaced_1753 or '-'}, multi-hop residue, issue=#{issue_number})")
+    if _target_branch_1753 and isinstance(carried_context, dict):
+        _prev_branch_1753 = str(carried_context.get("target_branch", "") or "").strip()
+        carried_context["target_branch"] = _target_branch_1753
+        carried_context["target_branch_source"] = TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH
+        if _prev_branch_1753 and _prev_branch_1753 != _target_branch_1753:
+            # 留痕：保留被覆盖的源会话分支，供承接侧说明「原文 → 纠正值」
+            carried_context["target_branch_replaced"] = _prev_branch_1753
+            log.info(f"A2A #1753: carried target_branch replaced {_prev_branch_1753} -> {_target_branch_1753} "
+                     f"(target scene={target_scene_id}, issue=#{issue_number})")
+        else:
+            log.info(f"A2A #1753: carried target_branch={_target_branch_1753} "
+                     f"(target scene={target_scene_id}, issue=#{issue_number})")
+
+    # 1.5 Issue #755 方案A：跨仓单号回填——转交 payload 沿用源仓单号时（目标仓 VCS 404），
+    #     解析真实落地单号（carried_context.target_issue_number / DB 反查 source_issue_number）
+    #     并替换 issue_number；后续去重检查 / issue_state / 事件 / 派发 payload 全部使用真实单号，
+    #     下游任务注入的 ISSUE_NUMBER 即命中目标仓真实 Issue。未命中不改写（行为不变）。
+    try:
+        _cc_pre = carried_context if isinstance(carried_context, dict) else {}
+        _resolved_num, _resolved_via = _resolve_cross_repo_issue_number(repo_key, issue_number, _cc_pre)
+        if _resolved_via in ("target_field", "db_mapping") and _resolved_num != str(issue_number).strip().lstrip("#"):
+            log.info(f"A2A #755: cross-pipeline issue_number backfilled {issue_number} -> {_resolved_num} "
+                     f"(via {_resolved_via}, repo={repo_key})")
+            issue_number = _resolved_num
+            if isinstance(carried_context, dict):
+                carried_context["target_issue_number"] = int(_resolved_num)
+    except Exception as _755_e:
+        log.warning(f"A2A #755: cross-pipeline issue_number backfill failed, keep original: {_755_e}")
+
     # 2. Duplicate handoff check: same Issue already has a non-terminal event in target scene
     #    Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
     _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "", scene_id=target_scene_id)
@@ -758,6 +807,32 @@ def _cross_pipeline_handoff(
     _handoff_context = context
     if not _handoff_context and _cc:
         _handoff_context = f"跨流水线接续：来源 Issue #{_cc.get('source_issue_number', issue_number)}，目标场景 {target_scene_id}，评级 {_cc.get('rating', 'N/A')}。Spec 参考: {_cc.get('spec_ref', 'N/A')}"
+    # Issue #1753: 显式在 A2A 上下文中声明承接基线，承接侧 issue Agent 可直接比对
+    # Spec 头部目标分支；不一致时以该值为准纠正并留痕。
+    # 复审：声明同样以 target_branch_source == target_scene_work_branch 为门——承接场景
+    # 未配置 work_branch 时（含多跳残留的失效标记），旧分支只能标 UNCONFIRMED，
+    # 不得宣称为「取自承接流水线运行时 GRAPE_WORK_BRANCH」的权威基线。
+    _tb_1753 = str(_cc.get("target_branch", "") or "").strip()
+    _tb_source_1753 = str(_cc.get("target_branch_source", "") or "").strip()
+    if _tb_1753 and _tb_source_1753 == TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH:
+        _baseline_note_1753 = (
+            f"承接基线（目标分支）：{_tb_1753}"
+            "（取自承接流水线运行时 GRAPE_WORK_BRANCH，Spec 头部源会话分支作废）"
+        )
+        if _cc.get("target_branch_replaced"):
+            _baseline_note_1753 += f"；原值 {_cc['target_branch_replaced']} 已刷新"
+    elif _tb_1753:
+        _baseline_note_1753 = (
+            f"承接基线（目标分支）：{_tb_1753}（UNCONFIRMED：未取到承接场景 work_branch，"
+            "可能为源会话/上一跳残留分支，勿作为权威基线；以承接场景配置或运行时 GRAPE_WORK_BRANCH 为准）"
+        )
+        if _cc.get("target_branch_replaced"):
+            _baseline_note_1753 += f"；历史原值 {_cc['target_branch_replaced']}（UNCONFIRMED，勿作为权威）"
+    else:
+        _baseline_note_1753 = ""
+    if _baseline_note_1753:
+        # 复审判断项：声明前置，避免长上下文整体 [:500] 截断时把基线声明整段截掉。
+        _handoff_context = f"{_baseline_note_1753}\n{_handoff_context}" if _handoff_context else _baseline_note_1753
 
     try:
         from src.api.event_store import append_event
@@ -782,6 +857,7 @@ def _cross_pipeline_handoff(
                 "issue_number": issue_number,
                 "pr_number": "",
                 "context": _handoff_context[:500],
+                "handoff_baseline_note": _baseline_note_1753,
                 "target_scene_id": target_scene_id,
                 "carried_context": _cc,
                 "engine_config": engine_config,
@@ -813,13 +889,14 @@ def _cross_pipeline_handoff(
                         "actor": "",
                         "account": account,
                         "issue_id": str(issue_number) if issue_number else "",
-                        "_a2a_context": context,
+                        "_a2a_context": _handoff_context,
                         "payload": {
                             "repository": repository,
                             "account": account,
                             "issue_number": issue_number,
                             "pr_number": None,
-                            "context": context,
+                            "context": _handoff_context,
+                            "handoff_baseline_note": _baseline_note_1753,
                             "carried_context": carried_context or {},
                             "engine_config": engine_config,
                             "target_scene_id": target_scene_id,
