@@ -142,9 +142,7 @@
               <div v-for="wk in pageWorkers" :key="wkKey(wk)" class="obv-wkcard">
                 <div class="obv-wk-head">
                   <span class="obv-wk-dot">{{ healthDot(wk.health) }}</span>
-                  <b class="obv-wk-name">{{
-                    wk.device_name || wk.name || t('worker_id', { id: wk.id })
-                  }}</b>
+                  <b class="obv-wk-name">{{ workerDisplayName(wk) }}</b>
                   <span class="obv-wk-health" :style="{ color: healthColor(wk.health) }">{{
                     t(wk.health || 'offline')
                   }}</span>
@@ -266,7 +264,9 @@
                           rti.mode === 'local' ? t('mode_local') : t('mode_remote')
                         }}</span>
                       </td>
-                      <td class="ts t3">{{ rti.device_name || '-' }}</td>
+                      <td class="ts t3">
+                        {{ rti.device_name ? workerDisplayName({ name: rti.device_name }) : '-' }}
+                      </td>
                     </tr>
                   </tbody>
                 </table>
@@ -498,6 +498,17 @@
 
           <!-- events 子 Tab（统一事件视图） -->
           <template v-else-if="tab === 'events'">
+            <!-- Issue #476：跨仓「failed 且 result 为空」占比摘要（异步、失败静默不阻塞列表） -->
+            <div v-if="evGap && evGap.total_failed" class="obv-gap">
+              <span class="obv-gap-t">{{ t('ev_failed_gap_title') }}</span>
+              <span>Failed {{ evGap.total_failed }}</span>
+              <span :style="{ color: evGap.empty_ratio > 0 ? 'var(--r)' : 'var(--g)' }">
+                {{ (evGap.empty_ratio * 100).toFixed(1) }}% {{ t('ev_failed_empty') }}
+              </span>
+              <span class="ts t3">{{ evGap.empty_result }} {{ t('ev_failed_empty_unit') }}</span>
+              <span class="ts t3">legacy {{ evGap.legacy }}</span>
+              <span class="ts t3">{{ evGap.with_diag }} {{ t('ev_failed_with_diag') }}</span>
+            </div>
             <div class="cd obv-evfilter">
               <div class="obv-evfilter-row">
                 <span style="font-weight: 600">{{ t('events_title') }}</span>
@@ -674,7 +685,7 @@
             <select v-model="resRt" class="ip ip-s obv-ressel">
               <option value="">{{ t('res.all') }}</option>
               <option v-for="r in resRuntimes" :key="r.id" :value="String(r.id)">
-                {{ r.device_name || r.name || '#' + r.id }}
+                {{ workerDisplayName(r) }}
               </option>
             </select>
             <span class="stabs obv-rangbar">
@@ -1377,6 +1388,13 @@ function t(key, vars) {
   const v = G.I18N.t('observability.' + key, vars)
   return v && v !== 'observability.' + key ? v : key
 }
+// Issue #701：worker/设备显示名唯一来源 runtime_credentials.name，空名统一占位「未命名设备」
+function workerDisplayName(wk) {
+  const n = String((wk && wk.name) || '').trim()
+  if (n) return n
+  const v = G.I18N.t('common.unnamed_worker')
+  return v && v !== 'common.unnamed_worker' ? v : '未命名设备'
+}
 // t() 缺键回退（老代码 _obsTOr 同款语义：值===key 视为未命中）
 function tOr(key, fallback) {
   const v = G.I18N.t(key, {})
@@ -1470,8 +1488,21 @@ function switchTab(tb) {
   timelinePage.value = 0
   // 用缓存数据渲染（不重新 fetch）——Vue 里 computed 自动联动，只需触发 tab 专属异步加载
   if (tb === 'errorlogs') loadLogs()
-  else if (tb === 'events') eventReload()
-  else if (tb === 'tasks' && !timelineIssues.value.length) loadTimeline()
+  else if (tb === 'events') {
+    eventReload()
+    loadEventGap()
+  } else if (tb === 'tasks' && !timelineIssues.value.length) loadTimeline()
+}
+// ── Issue #476：跨仓失败空结果占比（异步摘要卡，失败静默） ──
+const evGap = ref(null)
+function loadEventGap() {
+  G.API.get('/obs/events/failed-result-gap?limit=5')
+    .then((d) => {
+      evGap.value = d && d.total_failed ? d : null
+    })
+    .catch(() => {
+      evGap.value = null
+    })
 }
 function switchOvRange(r) {
   ovRange.value = r
@@ -1862,8 +1893,8 @@ const opsRuntimes = computed(() => (realOps.value || {}).runtimes || {})
 const taskStats = computed(() => ((realOps.value || {}).tasks || {}).issue_stats || {})
 const sortedWorkers = computed(() =>
   (opsWorkers.value.list || [] || []).slice().sort((a, b) => {
-    const na = (a.device_name || a.name || '').toLowerCase()
-    const nb = (b.device_name || b.name || '').toLowerCase()
+    const na = workerDisplayName(a).toLowerCase()
+    const nb = workerDisplayName(b).toLowerCase()
     return na < nb ? -1 : na > nb ? 1 : 0
   })
 )
@@ -3541,6 +3572,22 @@ onBeforeUnmount(function () {
 /* 事件视图 */
 .obv-evfilter {
   padding: 12px 14px;
+}
+/* Issue #476：失败空结果占比摘要条 */
+.obv-gap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  background: rgba(255, 59, 48, 0.05);
+  border: 1px solid rgba(255, 59, 48, 0.12);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+.obv-gap-t {
+  font-weight: 600;
 }
 .obv-evfilter-row {
   display: flex;
