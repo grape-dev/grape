@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""重新生成前端弱密码黑名单（与后端 src/auth/password.py 同源）。
+"""重新生成前端弱密码黑名单（与后端 src/domains/mgmt/auth/password.py 同源）。
 
 用法：.venv/bin/python scripts/gen-pwd-blocklist.py
 后端 _WEAK_PASSWORDS 变更后运行一次，产物 src/api/frontend/legacy/js/pwd-blocklist.js。
@@ -10,12 +10,12 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.auth.password import _WEAK_PASSWORDS  # noqa: E402
+from src.domains.mgmt.auth.password import _WEAK_PASSWORDS  # noqa: E402
 
 words = sorted(_WEAK_PASSWORDS)
 out = ROOT / "src/api/frontend/legacy/js/pwd-blocklist.js"
 out.write_text(
-    "// 自动生成：与后端 src/auth/password.py _WEAK_PASSWORDS 同源（后端更新后须重新生成，scripts/gen-pwd-blocklist.py）\n"
+    "// 自动生成：与后端 src/domains/mgmt/auth/password.py _WEAK_PASSWORDS 同源（后端更新后须重新生成，scripts/gen-pwd-blocklist.py）\n"
     "// 勿手改\n"
     "window.PWD_BLOCKLIST = new Set(" + json.dumps(words) + ");\n"
     "// 唯一谓词（复核 #3 收敛，2026-10-28）：所有前端密码入口（注册/改密/设密/忘记密码）\n"

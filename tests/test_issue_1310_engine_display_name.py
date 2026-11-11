@@ -16,8 +16,8 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
-from src.auth import grape_account_db
+from src.kernel.session_manager import db, db_lock
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 

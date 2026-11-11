@@ -16,7 +16,7 @@ from typing import Any
 
 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
 from src.api.pipeline_config import get_pipeline_config, get_node_by_tag, get_next_node, is_node_skipped
-from src.config import log
+from src.kernel.config import log
 
 _bus = get_event_bus()
 
@@ -210,9 +210,9 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                           runtime_id, issue_id, pool_tag, skill_id=0, skill_path=""):
     """Sync wrapper: calls _enqueue_pipeline_task from event_pipeline.py."""
     try:
-        from src.api.event_pipeline import _enqueue_pipeline_task, is_plugin_mode
-        from src.runtime.engine_select import pick_engine
-        from src.session_manager import db, db_lock
+        from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task, is_plugin_mode
+        from src.domains.runtime.engine.engine_select import pick_engine
+        from src.kernel.session_manager import db, db_lock
 
         # Validate runtime_id: if the engine no longer exists or is offline,
         # drop it to 0 so the task becomes a pool task (claim_by_tag can pick it up).
@@ -227,8 +227,8 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                 _row = c.fetchone()
                 _alive = False
                 if _row and _row[0]:
-                    from src.runtime.health import parse_dt as _parse_dt
-                    from src.runtime.engine_select import _RUNTIME_STALE_SECONDS
+                    from src.domains.runtime.engine.health import parse_dt as _parse_dt
+                    from src.domains.runtime.engine.engine_select import _RUNTIME_STALE_SECONDS
                     _ts = _parse_dt(_row[0])
                     if _ts is not None and time.time() - _ts <= _RUNTIME_STALE_SECONDS:
                         _alive = True
@@ -257,7 +257,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
             # scene_user_id=0 时兜底反查（Task Center 建 repo 级场景任务时可能漏写 scene_uid）
             if not _scene_uid:
                 try:
-                    from src.runtime.engine_select import _repo_user_id
+                    from src.domains.runtime.engine.engine_select import _repo_user_id
                     _scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
                 except Exception:
                     pass
@@ -268,7 +268,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                 return {"error": "no engine available"}
             runtime_id = _picked
             # 场景 engine 限定广播范围（Issue #259：写入前已按健康过滤）
-            from src.runtime.engine_select import get_scene_pool_engine_ids
+            from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
             _pool_eids = get_scene_pool_engine_ids(_scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid,
                                                    issue_creator=evt.get("actor", ""))
             if _pool_eids is None:

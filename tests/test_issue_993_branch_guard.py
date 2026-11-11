@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from src.runtime import branch_guard as bg
+from src.domains.runtime.engine import branch_guard as bg
 
 
 REPO_KEY = "gitcode:owner/repo"
@@ -446,14 +446,14 @@ def test_hook_multi_ref_blocks_before_recording(monkeypatch):
 # ===================== preflight_push / resolve_remote_head =====================
 
 def test_resolve_remote_head_parses_ls_remote(monkeypatch):
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     monkeypatch.setattr(repogit, "_run_git",
                         lambda *a, **k: _R(0, "abc123\trefs/heads/feat/issue-993\n"))
     assert bg.resolve_remote_head(REPO_KEY, BRANCH) == "abc123"
 
 
 def test_resolve_remote_head_fail_open(monkeypatch):
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     monkeypatch.setattr(repogit, "_run_git", lambda *a, **k: _R(1, "", "boom"))
     assert bg.resolve_remote_head(REPO_KEY, BRANCH) == ""
 
@@ -520,7 +520,7 @@ def _make_worktree_repo(tmp_path, branch="feat/issue-42"):
 
 
 def _patch_guard(monkeypatch):
-    from src.runtime import branch_guard
+    from src.domains.runtime.engine import branch_guard
     seen = {"acquire": [], "release": [], "pre": [], "record": []}
     monkeypatch.setattr(branch_guard, "acquire_branch_lease",
                         lambda rk, br, *a, **k: (seen["acquire"].append((rk, br))
@@ -538,7 +538,7 @@ def _patch_guard(monkeypatch):
 def test_agent_linked_push_path_uses_guard(tmp_path, monkeypatch):
     import json as _json
 
-    from src.runtime import agent, repogit
+    from src.domains.runtime.engine import agent, repogit
     from src.vcs import api_client
 
     wt, remote = _make_worktree_repo(tmp_path)
@@ -568,7 +568,7 @@ def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
 
     import src.repo as repo_mod
     from src.api import event_pipeline
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     from src.vcs import api_client
 
     wt, remote = _make_worktree_repo(tmp_path)

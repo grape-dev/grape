@@ -18,7 +18,7 @@ os.environ["OBS_PREFIX"] = "grape/test"
 apply_runtime_obs_env()  # 注入 OBS_ACCESS_KEY / OBS_SECRET_KEY（缺失则明确报错）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.storage import get_storage, reset_storage, skill_key, parse_skill_key  # noqa: E402
+from src.domains.runtime.storage import get_storage, reset_storage, skill_key, parse_skill_key  # noqa: E402
 
 reset_storage()
 storage = get_storage()

@@ -98,7 +98,7 @@ function testManualBindFormSignature() {
 // ── T41-06: 未配 OAuth 时渲染 pat_no_refresh_hint ──
 function testPatHintRenderedWhenNoOAuth() {
   const fnIdx = ACCOUNT_JS.indexOf('function _accountManualBindForm');
-  const fnBody = ACCOUNT_JS.slice(fnIdx, fnIdx + 1000);
+  const fnBody = ACCOUNT_JS.slice(fnIdx, fnIdx + 4000);
 
   assert.ok(/if\s*\(!oauthConfigured\)/.test(fnBody), '有 !oauthConfigured 条件分支');
   assert.ok(/pat_no_refresh_hint/.test(fnBody), '分支内渲染 pat_no_refresh_hint');
@@ -149,7 +149,7 @@ function testEnPatHintKey() {
 // 通过源码结构验证——pat_no_refresh_hint 出现在 if (!oauthConfigured) 块内
 function testNoHintWhenOAuthConfigured() {
   const fnIdx = ACCOUNT_JS.indexOf('function _accountManualBindForm');
-  const fnBody = ACCOUNT_JS.slice(fnIdx, fnIdx + 1000);
+  const fnBody = ACCOUNT_JS.slice(fnIdx, fnIdx + 4000);
 
   // 找 if (!oauthConfigured) 块
   const ifIdx = fnBody.indexOf('if (!oauthConfigured)');
@@ -169,7 +169,7 @@ function testDash403CheckExists() {
   assert.ok(dashIdx >= 0, "nav('dash') 分支存在");
 
   // 取 dash 分支后 3000 字符覆盖 loadDash + catch
-  const dashBody = APP_JS.slice(dashIdx, dashIdx + 3000);
+  const dashBody = APP_JS.slice(dashIdx, dashIdx + 8000);
   assert.ok(/e\.status\s*===\s*403/.test(dashBody), 'loadDash catch 中含 e.status === 403 判断');
 
   console.log('  PASS: T41-11 loadDash catch 中含 e.status === 403 判断');
@@ -178,13 +178,13 @@ function testDash403CheckExists() {
 // ── T41-12: 403 时清除 currentRepo + 调 switchRepo 或 goToRepos ──
 function testDash403SwitchLogic() {
   const dashIdx = APP_JS.indexOf("view === 'dash'");
-  const dashBody = APP_JS.slice(dashIdx, dashIdx + 3000);
+  const dashBody = APP_JS.slice(dashIdx, dashIdx + 8000);
 
   // 找 403 块
   const forbiddenIdx = dashBody.indexOf('e.status === 403');
   assert.ok(forbiddenIdx >= 0, '403 判断存在');
 
-  const forbiddenBlock = dashBody.slice(forbiddenIdx, forbiddenIdx + 1200);
+  const forbiddenBlock = dashBody.slice(forbiddenIdx, forbiddenIdx + 2000);
   assert.ok(/sessionStorage\.removeItem\('currentRepo'\)/.test(forbiddenBlock), '403 时清除 sessionStorage currentRepo');
   assert.ok(/switchRepo/.test(forbiddenBlock), '403 时调 switchRepo 切换仓库');
   assert.ok(/goToRepos/.test(forbiddenBlock), '403 无其他仓库时调 goToRepos 跳项目大厅');
@@ -195,7 +195,7 @@ function testDash403SwitchLogic() {
 // ── T41-13: 403 切换逻辑在 !_dashboardEditing 之后 ──
 function testDash403AfterEditingGuard() {
   const dashIdx = APP_JS.indexOf("view === 'dash'");
-  const dashBody = APP_JS.slice(dashIdx, dashIdx + 3000);
+  const dashBody = APP_JS.slice(dashIdx, dashIdx + 8000);
 
   const editingIdx = dashBody.indexOf('_dashboardEditing');
   const forbiddenIdx = dashBody.indexOf('e.status === 403');

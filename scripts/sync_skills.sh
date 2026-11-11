@@ -5,7 +5,7 @@
 #
 # 作用：
 #   1. 从 grape-skills 仓库拉取官方技能（skills/<agent_type>/<skill>）
-#   2. 铺入部署根 skills/（保留运行时目录 custom/、repo/）
+#   2. 铺入 .grape/skills/（保留运行时目录 custom/、repo/）
 #   3. 铺入 skill-description.json（官方技能清单，供 DB seed / sync-official）
 #   4. 铺入官方场景（scenes/<scene_name>/scene.json + README.md + icon.*）
 #      到 configs/scenes/（官方场景库与技能同仓；scene_sync 运行时另有远程同步）
@@ -34,12 +34,12 @@ echo "[sync-skills] fetch ${SKILLS_REPO}@${SKILLS_REF}"
 # 使用环境当前身份（git credential store 按 URL 自动匹配 ~/.git-credentials），不强绑特定账号
 git clone --depth 1 --branch "$SKILLS_REF" "$SKILLS_REPO" "$STAGE/skills-repo" >/dev/null 2>&1
 
-# 1) 官方技能 → 部署根 skills/<agent>/（只清官方技能，保留 custom/ repo/ 运行时目录）
+# 1) 官方技能 → .grape/skills/<agent>/（只清官方技能，保留 custom/ repo/ 运行时目录）
 for d in "${SKILL_AGENT_DIRS[@]}"; do
-  rm -rf "$ROOT_DIR/skills/$d"
+  rm -rf "$ROOT_DIR/.grape/skills/$d"
   if [ -d "$STAGE/skills-repo/skills/$d" ]; then
-    cp -a "$STAGE/skills-repo/skills/$d" "$ROOT_DIR/skills/$d"
-    echo "[sync-skills] synced skills/$d"
+    cp -a "$STAGE/skills-repo/skills/$d" "$ROOT_DIR/.grape/skills/$d"
+    echo "[sync-skills] synced .grape/skills/$d"
   else
     echo "[sync-skills] WARN: skills/$d missing in repo, skip"
   fi

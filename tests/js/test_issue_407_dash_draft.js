@@ -228,14 +228,15 @@ test('D2. confirmEngineBtn2 确认回调内调用 saveDraftCb（try/catch 防御
 
 test('D3. 编辑模式 openEngineModal 传入 _saveEditDraft', () => {
   const src = readDashboardSrc();
-  const m = src.match(/_openEngineModalImpl\(agentType,\s*editNodes,\s*agents,\s*agentEngines,\s*owner,\s*name,\s*sceneId,\s*_saveEditDraft\)/g) || [];
-  assert.strictEqual(m.length, 1, '编辑模式 openEngineModal 应传 _saveEditDraft，实际 ' + m.length + ' 处');
+  // Issue #501 后草稿回调经 window._engineModalCtx.saveDraftCb 注入
+  const m = src.match(/saveDraftCb:\s*_saveEditDraft/g) || [];
+  assert.strictEqual(m.length, 1, '编辑模式应把 _saveEditDraft 注入 _engineModalCtx.saveDraftCb，实际 ' + m.length + ' 处');
 });
 
 test('D4. 创建模式 openEngineModal 传入 _saveCreateDraft', () => {
   const src = readDashboardSrc();
-  const m = src.match(/_openEngineModalImpl\(agentType,\s*editNodes,\s*agents,\s*agentEngines,\s*owner,\s*name,\s*'',\s*_saveCreateDraft\)/g) || [];
-  assert.strictEqual(m.length, 1, '创建模式 openEngineModal 应传 _saveCreateDraft，实际 ' + m.length + ' 处');
+  const m = src.match(/saveDraftCb:\s*_saveCreateDraft/g) || [];
+  assert.strictEqual(m.length, 1, '创建模式应把 _saveCreateDraft 注入 _engineModalCtx.saveDraftCb，实际 ' + m.length + ' 处');
 });
 
 // ═══ E. 零场景分支恢复检查（R2 修复，静态断言） ═══

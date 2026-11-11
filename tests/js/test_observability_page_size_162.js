@@ -78,6 +78,9 @@ function loadObs(dom, extraInit) {
     encodeURIComponent, decodeURIComponent, URLSearchParams,
     CustomEvent: function(){}, AbortController: function(){ this.abort=()=>{}; this.signal={}; },
     AbortSignal: { timeout: ()=>({}) }, openRuntimeSessionModal: ()=>{},
+    stripRepoPrefix: (s) => String(s || '').replace(/^(gitcode|github|gitlab):/, ''),
+    // Issue #701：worker 显示名统一走 worker-name.js 的 workerDisplayName
+    workerDisplayName: (wk) => { var n = (wk && wk.name) || ''; return String(n).trim() || '未命名设备'; },
   };
   const sKeys = Object.keys(sandbox);
   const sVals = sKeys.map(k => sandbox[k]);

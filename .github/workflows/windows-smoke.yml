@@ -24,11 +24,11 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -e ".[all,dev]"
       - name: Windows prompt smoke tests (issue #351 + #452)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/test_issue_351_windows_prompt.py tests/test_os_adapter.py tests/test_issue_452_windows_install.py -v
+        run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py -v
 
   linux-backend:
     runs-on: ubuntu-latest
@@ -46,19 +46,19 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -e ".[all,dev]"
       - name: Backend range-filter tests (issue #473)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/test_issue_473_range_filter.py tests/test_issue_473_local_engine_range.py -v
+        run: python -m pytest tests/runtime/test_issue_473_range_filter.py tests/runtime/test_issue_473_local_engine_range.py -v
       - name: Event convergence regression tests (issue #587)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/test_issue_587_event_convergence.py tests/test_terminate_event.py -v
+        run: python -m pytest tests/runtime/test_issue_587_event_convergence.py tests/runtime/test_terminate_event.py -v
       - name: Labels dual-channel tests (issue #581)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/test_issue_581_labels_dual_channel.py -v
+        run: python -m pytest tests/runtime/test_issue_581_labels_dual_channel.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
       - name: Destructive DDL guard + Issue #536 migration safety tests
@@ -70,7 +70,7 @@ jobs:
           DDL_BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           python3 scripts/check-destructive-ddl.py "$DDL_BASE"
-          python -m pytest tests/atomic/test_issue_536_migrations.py tests/test_check_destructive_ddl.py -v
+          python -m pytest tests/atomic/test_issue_536_migrations.py tests/kernel/test_check_destructive_ddl.py -v
       - name: OpenAPI contract endpoint completeness guard (issue #897)
         # Issue #897 P0：契约 v2.2.0 曾被 A 进程子集落盘覆盖，丢失 /api/a2a、
         # /api/tasks/* 等核心工作流端点导致 CLI 命令组不渲染。CI 卡点：
@@ -82,4 +82,4 @@ jobs:
           GITCODE_API_TOKEN: test_token
         run: |
           python3 scripts/check-openapi-endpoints.py --require-baseline
-          python -m pytest tests/test_check_openapi_endpoints.py -v
+          python -m pytest tests/api/test_check_openapi_endpoints.py -v

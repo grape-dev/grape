@@ -24,7 +24,7 @@ sys.path.insert(0, ROOT)
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "sessions.db"))
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 LEGACY_REASON = "[legacy] 历史失败事件未记录原因（#476 存量标记）"
 

@@ -130,7 +130,7 @@ cd grape
 # 或手动操作：
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements-local.txt
+pip install -e .                   # 最小依赖（不含 OBS/MySQL/飞书）
 Copy-Item .env.example .env
 New-Item -ItemType Directory -Force -Path data
 python -m src.api.run --dev    # 开发模式，打开 http://localhost:3000
@@ -146,8 +146,8 @@ cd grape
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-local.txt     # 最小依赖（不含 OBS/MySQL/飞书）
-# pip install -r requirements.txt         # 完整依赖
+pip install -e .                   # 最小依赖（不含 OBS/MySQL/飞书）
+# pip install -e ".[all]"          # 完整依赖
 
 cp .env.example .env
 mkdir -p data
@@ -158,7 +158,7 @@ python -m src.api.run --dev                # 开发模式，打开 http://localh
 
 ```bash
 # PyPI 阿里云镜像
-pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
+pip install -e . -i https://mirrors.aliyun.com/pypi/simple/
 
 # 永久配置：
 pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
@@ -268,8 +268,7 @@ python -m src.api.run --dev    # 开发：单端口 3000，热重载
 # 安装依赖（本地开发最小集）
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
-pip install -r requirements-local.txt
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"            # 核心依赖 + 开发/测试依赖
 
 # 运行测试
 mkdir -p data                    # Windows: New-Item -ItemType Directory -Force data

@@ -42,7 +42,7 @@ if (-not $NoDaemon) {
         Write-Host "[$ts] Starting worker (attempt $($RestartCount + 1))..."
         # 注意：不用 -NoNewWindow + -RedirectStandardOutput（隐藏窗口下静默返回 $null）
         # Python logging 已写入 data/logs/devops-bot.log，不需要 stdout/stderr redirect
-        $proc = Start-Process -FilePath $Python -ArgumentList '-m','src.runtime.agent' `
+        $proc = Start-Process -FilePath $Python -ArgumentList '-m','src.domains.runtime.engine.agent' `
             -WorkingDirectory $WorkerDir -WindowStyle Hidden -PassThru
         $proc.WaitForExit()
         $ExitCode = $proc.ExitCode
@@ -70,4 +70,4 @@ if (-not $NoDaemon) {
 }
 
 # ===== 非 daemon 模式：前台直接运行 =====
-& $Python -m src.runtime.agent
+& $Python -m src.domains.runtime.engine.agent

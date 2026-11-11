@@ -289,7 +289,7 @@ def run_direct(args) -> int:
         print("    注意：本项会 import 主服务代码，可能触发其 import 期自检（如清理废弃列）")
         try:
             # 用**主服务自己的 DB 句柄**（pymysql 直连不认 `?` 占位符，必须走 compat 层）
-            from src.session_manager import db as appdb, db_lock, _pick_chat_config_row
+            from src.kernel.session_manager import db as appdb, db_lock, _pick_chat_config_row
             print(f"      （用主服务配置的库计算：{getattr(appdb, 'backend', '') or 'configs/db-backend.json'}）")
             with db_lock:
                 ac = appdb.cursor()

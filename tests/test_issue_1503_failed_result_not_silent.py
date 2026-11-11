@@ -172,7 +172,7 @@ class TestBareFailedGuard:
 def svc_db(monkeypatch):
     """自包含 service 级 fixture（#369 先例模式）：不依赖共享测试库，避免跨文件污染。"""
     import threading
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     test_db = sqlite3.connect(":memory:", check_same_thread=False)
     test_db.execute("PRAGMA foreign_keys=OFF")
     test_db.executescript("""
@@ -229,7 +229,7 @@ class TestFailTaskEmptyResultFallback:
 
     def test_fail_task_empty_error_writes_default_summary(self, svc_db):
         from datetime import datetime, timezone
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         c = svc_db
         c.execute("INSERT INTO events (seq, repo_key, event_type, status, result) "
                   "VALUES (15061, 'gitcode:test/repo', 'issue_opened', 'running', '')")

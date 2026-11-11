@@ -69,6 +69,8 @@ function loadObs(dom, extraInit) {
     encodeURIComponent, decodeURIComponent, URLSearchParams,
     CustomEvent: function(){}, AbortController: function(){ this.abort=()=>{}; this.signal={}; },
     AbortSignal: { timeout: ()=>({}) }, openRuntimeSessionModal: ()=>{},
+    // Issue #701：worker 显示名统一走 worker-name.js 的 workerDisplayName
+    workerDisplayName: (wk) => { var n = (wk && wk.name) || ''; return String(n).trim() || '未命名设备'; },
   };
   const sKeys = Object.keys(sandbox);
   const sVals = sKeys.map(k => sandbox[k]);
@@ -196,6 +198,7 @@ test('T11 空状态文案使用 no_matching_engine（渲染级）', () => {
     encodeURIComponent, decodeURIComponent, URLSearchParams,
     CustomEvent: function(){}, AbortController: function(){ this.abort=()=>{}; this.signal={}; },
     AbortSignal: { timeout: ()=>({}) }, openRuntimeSessionModal: ()=>{},
+    workerDisplayName: (wk) => { var n = (wk && wk.name) || ''; return String(n).trim() || '未命名设备'; },
   };
   const sKeys = Object.keys(sandbox);
   const sVals = sKeys.map(k => sandbox[k]);
@@ -237,6 +240,7 @@ test('T13 同 sandbox 全链路：初始 4 行 → 搜索 → 计数正确（ren
     encodeURIComponent, decodeURIComponent, URLSearchParams,
     CustomEvent: function(){}, AbortController: function(){ this.abort=()=>{}; this.signal={}; },
     AbortSignal: { timeout: ()=>({}) }, openRuntimeSessionModal: ()=>{},
+    workerDisplayName: (wk) => { var n = (wk && wk.name) || ''; return String(n).trim() || '未命名设备'; },
   };
   const sKeys = Object.keys(sandbox);
   const sVals = sKeys.map(k => sandbox[k]);
@@ -281,6 +285,7 @@ __cnt = function(){ return document.getElementById('obs-runtime-count').textCont
     encodeURIComponent, decodeURIComponent, URLSearchParams,
     CustomEvent: function(){}, AbortController: function(){ this.abort=()=>{}; this.signal={}; },
     AbortSignal: { timeout: ()=>({}) }, openRuntimeSessionModal: ()=>{},
+    workerDisplayName: (wk) => { var n = (wk && wk.name) || ''; return String(n).trim() || '未命名设备'; },
   };
   const sKeys = Object.keys(sandbox);
   const sVals = sKeys.map(k => sandbox[k]);

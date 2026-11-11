@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grape"
+version = "2.2.0"
+description = "Grape — Agentic DevOps platform (三域四进程融合架构)"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+authors = [{name = "Grape Team"}]
+keywords = ["agentic", "devops", "fastapi"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+]
+dependencies = [
+    # --- Web framework ---
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.23",
+    "python-multipart>=0.0.9",
+    "websockets>=12.0",
+    # --- HTTP / async ---
+    "aiohttp>=3.9",
+    "httpx>=0.24",
+    "requests>=2.31",
+    # --- Auth / crypto ---
+    "python-jose[cryptography]>=3.3",
+    "bcrypt>=4.0",
+    # --- Serialization / templating ---
+    "markdown>=3.4",
+    "pyyaml>=6.0",
+    # --- CLI ---
+    "click>=8.0",
+    # --- Infrastructure ---
+    "paramiko>=3.0",
+    "prometheus_client>=0.20",
+    "psutil>=5.9",
+    "croniter>=3.0",
+]
+
+[project.optional-dependencies]
+# MySQL backend (production cluster mode)
+mysql = [
+    "pymysql>=1.1",
+    "DBUtils>=3.0",
+]
+# OpenTelemetry tracing (Loki trace_id <-> Tempo)
+otel = [
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+    "opentelemetry-instrumentation-fastapi>=0.41b0",
+    "opentelemetry-instrumentation-requests>=0.41b0",
+]
+# Huawei OBS object storage
+obs = [
+    "esdk-obs-python>=3.26",
+]
+# Feishu / Lark IM integration
+im = [
+    "lark-oapi>=1.0",
+]
+# Worker-only dependencies (minimal set for runtime-agent)
+# NOTE: install-worker.sh installs these from bundled wheels (offline);
+#       listed here as the source of truth for wheel bundling.
+worker = [
+    "aiohttp>=3.9",
+    "bcrypt>=4.0",
+    "click>=8.0",
+    "httpx>=0.24",
+]
+# Development / testing
+dev = [
+    "pytest>=7.4",
+    "pytest-mock>=3.12",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "pytest-randomly>=3.15",
+    "pytest-timeout>=2.2",
+    "pytest-xdist>=3.5",
+    "pytest-rerunfailures>=13.0",
+    "playwright>=1.40",
+]
+# All optional features (equivalent to old requirements.txt)
+all = [
+    "grape[mysql,obs,im]",
+]
+# All + dev (full local development)
+all-dev = [
+    "grape[mysql,obs,im,dev]",
+]
+
+[project.urls]
+Homepage = "https://gitcode.com/grape-dev/grape"
+Repository = "https://gitcode.com/grape-dev/grape"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+exclude = ["tests*", "docs*", "scripts*", "deploy*", "wheels*", "data*"]
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]

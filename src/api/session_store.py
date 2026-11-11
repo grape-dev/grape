@@ -1,8 +1,8 @@
 """Agent Session 管理 — per (repo_key, agent_type) 独立会话"""
 import uuid, json
 from datetime import datetime
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 
 
@@ -122,7 +122,7 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
                 _assignee = assignee or (fields.get("assignee") or "")
                 if _assignee:
                     # FR-CQ-1: 提取为 um_column_for_repo 工具函数
-                    from src.repo_key import um_column_for_repo
+                    from src.kernel.repo_key import um_column_for_repo
                     _col = um_column_for_repo(repo_key)
                     _usr_expr = (f"COALESCE((SELECT m.user_id FROM unified_user_mapping m "
                                  f"WHERE m.{_col} = ? AND m.user_id > 0 "
@@ -142,7 +142,7 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             db.commit()
     except Exception as e:
-        from src.config import log as _log2
+        from src.kernel.config import log as _log2
         _log2.warning(f"sync issue table failed for {repo_key} #{_num}: {e}")
 
 
@@ -159,7 +159,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
         "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
         "a2a_seq": a2a_seq,
     }, ensure_row=True, assignee=assignee)
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
     # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled/pending_review）
@@ -241,7 +241,7 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     # 与 _resolve_scene_id / repogit / prompt_builder 的仓库默认场景语义一致；
     # 仓库未配置默认场景时保持 ("", 0)，由调用方决定走智能推荐。
     try:
-        from src.user.db import get_repo_scene
+        from src.domains.mgmt.user.db import get_repo_scene
         _repo_scene = get_repo_scene(repo_key) or ""
         if _repo_scene:
             return _repo_scene, 0
@@ -293,7 +293,7 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
     """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},
                        ensure_row=True)
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
 
 
@@ -347,7 +347,7 @@ def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
 def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
     """标记 Issue 为子任务（设置 parent_issue_id）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"parent_issue_id": parent_issue_id or ""}, ensure_row=True)
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
 
 
@@ -361,7 +361,7 @@ def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
     """标记 Issue 为多任务模式（父任务）。Phase C3：仅写 issue 单表。"""
     val = 1 if enabled else 0
     _sync_issue_fields(repo_key, issue_id, {"is_subtask_mode": val}, ensure_row=True)
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
 
 
@@ -465,10 +465,10 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
         runtime_id = int(runtime_id or 0)
         if not runtime_id and backend:
             # 引擎集合优先（engine-selection-design.md v2）；无集合回退按类型名解析（legacy）
-            from src.runtime.engine_select import pick_engine
+            from src.domains.runtime.engine.engine_select import pick_engine
             runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0) or 0
             if not runtime_id:
-                from src.user.db import get_runtime_id_by_name, ensure_default_backend
+                from src.domains.mgmt.user.db import get_runtime_id_by_name, ensure_default_backend
                 runtime_id = get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
         _enable = get_agent_type_enable(agent_type)
         try:
@@ -632,7 +632,7 @@ def ensure_default_agent_sessions(repo_key: str):
     _mapping = _cfg.get("scenes", {}).get("default", {}).get("mapping", {})
     # 读仓库开发场景（managed_repos.dev_scene），按场景读映射——skill-dev 仓库自动创建 skill-creator/skill-tester/skill-publish
     try:
-        from src.user.db import get_repo_scene
+        from src.domains.mgmt.user.db import get_repo_scene
         _scene_id = get_repo_scene(repo_key) or "default"
         _scene_mapping = _cfg.get("scenes", {}).get(_scene_id, {}).get("mapping", {})
         if _scene_mapping:
@@ -648,10 +648,10 @@ def ensure_default_agent_sessions(repo_key: str):
     # 执行链实时取已足够（claim 注入 + _get_task_token）。
     with db_lock:
         c = db.cursor()
-        from src.runtime.engine_select import resolve_default_engine
+        from src.domains.runtime.engine.engine_select import resolve_default_engine
         for _at, _sk in _mapping.items():
             try:
-                from src.user.db import resolve_skill_id
+                from src.domains.mgmt.user.db import resolve_skill_id
                 _skill_id = resolve_skill_id(_sk, repo_key=repo_key)
                 # 默认引擎：按 专属→全局→本机 选择，写入 session 主引擎；
                 # 无候选则 runtime_id=0（agent 标识"无 engine，不可用"）

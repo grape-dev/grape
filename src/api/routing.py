@@ -5,8 +5,8 @@
 见 vod-skill-upgrade-plan.md §3.0.3/§3.0.4：Issue/PR 事件按 issue_state 阶段矩阵判定；
 非 Issue 事件（vod_signal/release/build/deploy 等）用静态映射兜底；订阅声明不再作为路由依据。
 """
-from src.config import log
-from src.vcs.event_types import (
+from src.kernel.config import log
+from src.domains.runtime.vcs.event_types import (
     ALL_ISSUE_EVENTS, ALL_PR_EVENTS,
     ISSUE_OPENED, ISSUE_CLOSED, ISSUE_REOPENED, ISSUE_ASSIGNED,
     PR_CLOSED, PUSH, BUILD_START, BUILD_FAILURE, DEPLOY_START, DEPLOY_FINISH,

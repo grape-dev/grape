@@ -51,8 +51,8 @@ function _esc(s) {
 function _apRenderLogBtn(execId, agentTaskId, agentTaskIds, status, inline) {
   var tid = agentTaskId || (agentTaskIds && agentTaskIds.length > 0 ? agentTaskIds[0] : '');
   if (!tid) return inline ? '' : '<span style="color:var(--t3)">—</span>';
-  var isRunning = (status === 'running' || status === 'dispatched' || status === 'pending' || status === 'retrying');
-  var label = isRunning ? _apt('exec.log_btn_running') : _apt('exec.log_btn');
+  // 当前 autopilot.js 的日志按钮不再区分运行/终态，统一 _apt('exec.log_btn')
+  var label = _apt('exec.log_btn');
   var stopProp = inline ? 'event.stopPropagation();' : '';
   return '<a href="javascript:void(0)" onclick="' + stopProp + '_apOpenTaskLog(\'' + _esc(tid) + '\',' + execId + ')" style="cursor:pointer;color:var(--a);text-decoration:underline;white-space:nowrap;font-size:12px;flex-shrink:0">' + label + '</a>';
 }
@@ -136,14 +136,14 @@ function testI18nEnLocale() {
   _locale = 'en';
   try {
     var htmlRun = _apRenderLogBtn(5, 't_abc', [], 'running', false);
-    assert.ok(htmlRun.indexOf('Live log (running)') > -1, 'en running should show localized label');
+    assert.ok(htmlRun.indexOf('Logs') > -1, 'en running should show localized label');
     assert.ok(htmlRun.indexOf('执行中') === -1, 'en running must not contain Chinese');
     var htmlDone = _apRenderLogBtn(5, 't_abc', [], 'success', false);
     assert.ok(htmlDone.indexOf('Logs') > -1, 'en terminal should show localized label');
     _lastOpenCall = null;
     _apOpenTaskLog('t_abc', 9);
     assert.strictEqual(_lastOpenCall.title, 'Automation #9', 'en dialog title should be localized');
-    assert.ok(PACKS.en.exec.log_btn_running && PACKS.zh.exec.log_btn_running, 'log_btn_running key exists in both locales');
+    assert.ok(PACKS.en.exec.log_btn && PACKS.zh.exec.log_btn, 'exec.log_btn key exists in both locales');
   } finally {
     _locale = 'zh';
   }
@@ -153,9 +153,9 @@ function testI18nEnLocale() {
 function testRunningStatuses() {
   ['running', 'dispatched', 'pending', 'retrying'].forEach(function(st) {
     var html = _apRenderLogBtn(5, 't_abc', [], st, false);
-    assert.ok(html.indexOf('执行中') > -1, st + ' should show "执行中"');
+    assert.ok(html.indexOf('日志') > -1, st + ' should show "日志"（按钮文案已统一）');
   });
-  console.log('  PASS: all running statuses show "执行中"');
+  console.log('  PASS: all running statuses show "日志"（按钮文案统一，Issue #261 后产品收敛）');
 }
 
 function testTerminalStatuses() {

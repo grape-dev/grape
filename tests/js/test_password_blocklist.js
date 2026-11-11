@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 
 const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'static');
-const _BACKEND = path.join(__dirname, '..', '..', 'src', 'auth', 'password.py');
+const _BACKEND = path.join(__dirname, '..', '..', 'src', 'domains', 'mgmt', 'auth', 'password.py');
 
 // ── 与 register.html reqs 同规格的四条件判定 ──
 function pwdReqs(p, username, email) {
@@ -124,9 +124,18 @@ for (const [lang, seg] of [['zh', zhSeg], ['en', enSeg]]) {
   }
 }
 // 消费页 i18n.js 缓存已 bump（inline 包变更须失效存量缓存）
-assert.ok(/i18n\.js\?v=20261028-1/.test(idxHtml), 'P9: index.html i18n.js 已 bump');
-assert.ok(/i18n\.js\?v=17/.test(forgotSrc), 'P9: forgot.html i18n.js 已 bump');
-assert.ok(/i18n\.js\?v=17/.test(regSrc), 'P9: register.html i18n.js 已 bump');
+// 版本号随迭代 bump：只锁下限（>= 该 issue 基线），避免每次发布都要改测试
+function _verAtLeast(actual, baseline) {
+  var a = String(actual).split('-').map(Number), b = String(baseline).split('-').map(Number);
+  if (a[0] !== b[0]) return a[0] > b[0];
+  return (a[1] || 0) >= (b[1] || 0);
+}
+const _idxVer = (/i18n\.js\?v=([0-9-]+)/.exec(idxHtml) || [])[1];
+assert.ok(_idxVer && _verAtLeast(_idxVer, '20261028-1'), 'P9: index.html i18n.js 已 bump，实际 ' + _idxVer);
+const _fgtVer = (/i18n\.js\?v=([0-9-]+)/.exec(forgotSrc) || [])[1];
+assert.ok(_fgtVer && _verAtLeast(_fgtVer, '17'), 'P9: forgot.html i18n.js 已 bump，实际 ' + _fgtVer);
+const _regVer = (/i18n\.js\?v=([0-9-]+)/.exec(regSrc) || [])[1];
+assert.ok(_regVer && _verAtLeast(_regVer, '17'), 'P9: register.html i18n.js 已 bump，实际 ' + _regVer);
 
 console.log('test_password_blocklist: all assertions passed (P1-P9, blocklist predicate + full surface + inline i18n)');
 

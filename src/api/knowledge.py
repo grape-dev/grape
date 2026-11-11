@@ -18,10 +18,10 @@ import json
 import os
 import threading
 from datetime import datetime, timedelta
-from src.config import log, WORKSPACE_DIR
-from src.lock import acquire_lock, release_lock, renew_lock
-from src.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
-from src.session_manager import db, db_lock
+from src.kernel.config import log, WORKSPACE_DIR
+from src.kernel.lock import acquire_lock, release_lock, renew_lock
+from src.kernel.repo_key import knowledge_obs_prefix, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
+from src.kernel.session_manager import db, db_lock
 
 _AGENT_NAME_MAP = {
     "vod": "VOD", "issue": "Issue", "coding": "Coding",
@@ -135,7 +135,7 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
             _knowledge_cache[storage_key] = cached  # 重新插入到末尾（LRU）
             return cached[0]
     # 缓存 miss 或 hash 不一致 → 从存储拉
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage is None:
         return None
@@ -168,7 +168,7 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
                 content = read_with_cache(obs_key, content_hash)
                 if content is not None:
                     return content
-            from src.storage import get_storage
+            from src.domains.runtime.storage import get_storage
             storage = get_storage()
             if storage is not None:
                 data = storage.read_bytes(obs_key)
@@ -187,7 +187,7 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
                 with open(full, "r", encoding="utf-8") as f:
                     return f.read()
             # Issue #190：兼容旧格式 file_path（不含 provider 前缀）
-            from src.repo_key import workspace_repo_dir
+            from src.kernel.repo_key import workspace_repo_dir
             alt = os.path.join(workspace_repo_dir(repo_key), file_path)
             if os.path.isfile(alt):
                 with open(alt, "r", encoding="utf-8") as f:
@@ -206,7 +206,7 @@ def _issue_num_from(issue_id) -> int:
 
 def knowledge_path(repo_key: str, scope: str, agent_type: str = "", issue_num: int = 0) -> str:
     """按 scope 返回知识文件绝对路径（scope 见 3.1.1）。"""
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     base = workspace_repo_dir(repo_key)
     if scope == "project":
         return os.path.join(base, "project-info", "knowledge.md")
@@ -473,7 +473,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     # 1. 文件追加（仅当文件没有此 content）
     if not file_has_content:
         try:
-            from src.localfs import read_text, write_text
+            from src.kernel.localfs import read_text, write_text
             marker = f"- [seq {source_seq or 0} / {created_by or ''}] {content}\n"
             _existing = read_text(file_path) or ""
             write_text(file_path, _existing + marker)
@@ -484,7 +484,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     obs_key = ""
     content_hash = ""
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         storage = get_storage()
         if storage is not None:
             obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
@@ -880,9 +880,9 @@ async def knowledge_sync_loop():
     防止多实例同时执行 sync_loop 导致重复写 OBS + DB。
     """
     import asyncio, hashlib, time
-    from src.session_manager import db, db_lock
-    from src.storage import get_storage
-    from src.user.db import get_meta_value, set_meta_value
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime.storage import get_storage
+    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
 
     storage = get_storage()
     if not storage:
@@ -926,7 +926,7 @@ async def knowledge_sync_loop():
                     try:
                         # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（含 provider 前缀），
                         # member 文档：用 file_path 生成
-                        from src.repo_key import workspace_repo_dir
+                        from src.kernel.repo_key import workspace_repo_dir
                         _ws_repo = workspace_repo_dir(repo_key)
                         _ws_repo_rel = os.path.relpath(_ws_repo, WORKSPACE_DIR)
                         if file_path.startswith(_ws_repo_rel + "/"):
@@ -1030,8 +1030,8 @@ def _sync_baseline_files():
     Issue #103：加分布式锁保护，防止多实例同时写 baseline。
     """
     import hashlib as _hl
-    from src.repo_key import parse_repo_key
-    from src.storage import get_storage
+    from src.kernel.repo_key import parse_repo_key
+    from src.domains.runtime.storage import get_storage
 
     storage = get_storage()
     if not storage:
@@ -1054,7 +1054,7 @@ def _sync_baseline_files():
             _provider, owner, repo = parse_repo_key(repo_key)
             if not owner or not repo:
                 continue
-            from src.repo_key import workspace_repo_dir
+            from src.kernel.repo_key import workspace_repo_dir
             pi_dir = os.path.join(workspace_repo_dir(repo_key), "project-info")
             if not os.path.isdir(pi_dir):
                 continue

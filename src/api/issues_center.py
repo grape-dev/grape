@@ -1,6 +1,6 @@
 """需求中心（Issues Center）领域逻辑（issues_center）。
 
-从 src/api/routes/tasks.py 拆分（tasks-module-refactor-and-task-id-disambiguation-design.md）：
+从 src/domains/runtime/routes/tasks.py 拆分（tasks-module-refactor-and-task-id-disambiguation-design.md）：
 - issue 建档/状态流转/VCS 创建/附件/任务对话/平台映射/需求列表查询等「需求中心」领域函数集中于此，
 - routes/tasks.py 只保留「执行实例」动作（complete/current），其他路由与业务模块均从本模块导入，
 - 本模块为叶子：**不得 import routes.tasks / routes.issues**（防环形依赖）。
@@ -14,8 +14,8 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
 from src.api.time_utils import normalize_event_time
-from src.config import log, WORKSPACE_DIR
-from src.session_manager import db, db_lock, get_chat_config, create_conversation, add_message
+from src.kernel.config import log, WORKSPACE_DIR
+from src.kernel.session_manager import db, db_lock, get_chat_config, create_conversation, add_message
 
 def _require_session_repo_token(request: Request, repo_key: str) -> dict:
     """notify 等 agent 动作端点鉴权：仅接受 `tk_` 会话 token，且仓库作用域必须匹配。
@@ -24,7 +24,7 @@ def _require_session_repo_token(request: Request, repo_key: str) -> dict:
     会话 token 由执行期注入（event_pipeline 按 task_id/repo_key/agent_type 签发），
     仓库作用域经 `verify_session_token_for_repo` 校验（同一仓库执行期的 agent 凭据才能调用）。
     """
-    from src.api.auth_token import verify_session_token_for_repo
+    from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "需会话 token（tk_）"})
@@ -76,7 +76,7 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
         c = db.cursor()
         try:
             # FR-CQ-1: 提取为 um_column_for_repo 工具函数
-            from src.repo_key import um_column_for_repo
+            from src.kernel.repo_key import um_column_for_repo
             _col = um_column_for_repo(repo_key)
             row = c.execute(
                 f"SELECT um.user_id FROM unified_user_mapping um "
@@ -104,7 +104,7 @@ def _get_feishu_open_id(gitcode_user: str, repo_key: str = "") -> str:
     if not gitcode_user:
         return ""
     # FR-CQ-1: 提取为 um_column_for_repo 工具函数
-    from src.repo_key import um_column_for_repo
+    from src.kernel.repo_key import um_column_for_repo
     _col = um_column_for_repo(repo_key)
     with db_lock:
         c = db.cursor()
@@ -214,7 +214,7 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
     - 新建：create_conversation(conv_type="task") 并写入任务上下文消息。
     - 失败返回空串（不抛异常，旁路不影响任务建档）。
     """
-    from src.session_manager import get_user_conversations, create_conversation, update_conversation, add_message
+    from src.kernel.session_manager import get_user_conversations, create_conversation, update_conversation, add_message
     conv_id = ""
     new_title = _build_task_conversation_title(issue_number, title)
     old_title = f"Issue #{issue_number}"
@@ -264,7 +264,7 @@ def _resolve_issue_org_id(repo_key: str, explicit_org: int = 0) -> int:
     - 无托管记录 / 无显式 org → 0（个人视图豁免 org 过滤，创建者仍可见）。
     """
     if repo_key:
-        from src.user.org_db import get_org_id_by_repo_key
+        from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
         return get_org_id_by_repo_key(repo_key) or 0
     return explicit_org or 0
 
@@ -290,7 +290,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     - Issue #805：creator（创建人 login）落库 created_by；复用路径仅空值回填（幂等不覆盖），
       assignee 流转不改变创建人。
     """
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
     try:
         owner = split_owner_repo(repo_key)[0] or ""
@@ -322,7 +322,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # org 归属 = 仓库托管组织（repo 关联需求的唯一权威，issue-244-org-attribution-fix-design.md 方案 B）。
     # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
     # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
-    from src.user.org_db import get_org_id_by_repo_key
+    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
     _repo_org = get_org_id_by_repo_key(repo_key) or 0
     if org_id and org_id != _repo_org:
         log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
@@ -426,7 +426,7 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
     Issue #51 修订：不再直接 completed，而是先设为 pending_review 等待开发者审核。
     只有 stage 已经是 done/pending_review 时才直接关闭。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     from src.api.session_store import get_issue_stage, set_issue_stage
     repo_key = to_repo_key(repo_key)
     _issue_id = f"#{issue_number}"
@@ -522,6 +522,17 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         return c.rowcount
 
 
+# 进入 pending_review 时可能写入的哨兵 owner_agent（非真实流水线节点）；
+# resume 回落 stage 时不能直接采用，避免阶段取值非法。
+_RESUME_STAGE_SENTINELS = ("", "bot_takeover", "issue_closed", "pending_review")
+
+
+def _resume_stage(owner_agent: str) -> str:
+    """pending_review 恢复到哪个阶段：真实节点用 owner_agent，哨兵回落到默认首节点 issue。"""
+    _owner = (owner_agent or "").strip()
+    return "issue" if _owner in _RESUME_STAGE_SENTINELS else _owner
+
+
 def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
 
@@ -529,16 +540,30 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     - webhook `issue_comment` 自动恢复（非 bot 用户评论）；
     - `issues clarify` / Agent 显式续接。
     仅当 issue 正处于 `awaiting_input` 或 `pending_review` 时翻回，返回是否真正翻转（幂等、可观测）。
+
+    Issue #1599（审核态漂移收敛）：翻转 status 时同步把 `stage=pending_review` 回落到
+    `owner_agent`，避免库内 `status=processing` 但 `stage` 仍停在 pending_review，
+    导致展示态继续显示「待审核」而 review-reject 必然 noop。
     """
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
+                "SELECT stage, owner_agent FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            _row = c.fetchone()
+            _stage = ((_row[0] if _row else "") or "").strip()
+            _owner = ((_row[1] if _row else "") or "").strip()
+            c.execute(
                 "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('awaiting_input','pending_review')",
                 (repo_key, issue_number))
-            db.commit()
             _changed = c.rowcount > 0
+            if _changed and _stage == "pending_review":
+                c.execute(
+                    "UPDATE issue SET stage=? WHERE repo_key=? AND issue_number=?",
+                    (_resume_stage(_owner), repo_key, issue_number))
+            db.commit()
         if _changed:
             log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing")
         return _changed
@@ -613,6 +638,43 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
     return _changed
 
 
+# Issue #1599：审核动作未命中原因分类所依赖的终态集合
+_ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
+
+
+def _read_issue_status(repo_key: str, issue_number: int) -> str:
+    """回读 issue 表真实 status（空串 = 无行或回读失败，由调用方兜底）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            _r = c.fetchone()
+        return ((_r[0] if _r else "") or "").strip()
+    except Exception as _e:
+        log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
+        return ""
+
+
+def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) -> str:
+    """审核动作未命中时回读真实 status 并给出机器可读原因码。
+
+    - `noop:already_target`：已处于目标态（幂等，无需变更）；
+    - `noop:terminal`：已完成/已取消，不可再变更；
+    - `noop:not_pending_review`：前置态不符（如 awaiting_input/active）；
+    - `noop:error`：回读失败（无行/DB 异常）。
+    """
+    _cur = _read_issue_status(repo_key, issue_number)
+    if not _cur:
+        return "noop:error"
+    if _cur == target_status:
+        return "noop:already_target"
+    if _cur in _ISSUE_TERMINAL_STATUSES:
+        return "noop:terminal"
+    return "noop:not_pending_review"
+
+
 # Issue #656: 自动结单完成原因（区别于 review_passed/user_confirmed 人工确认路径）
 _AUTO_FINALIZED_REASON = "auto_finalized"
 
@@ -656,8 +718,8 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
     通过 full_name 匹配。找不到返回空串。
     """
     try:
-        from src.repo_key import split_owner_repo
-        from src.session_manager import db, db_lock
+        from src.kernel.repo_key import split_owner_repo
+        from src.kernel.session_manager import db, db_lock
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return ""
@@ -675,21 +737,21 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
 def _close_vcs_one_auto(repo_key: str, issue_number: int) -> str:
     """对单个 repo_key 幂等关闭 VCS Issue（bot token，降级不阻断）。"""
     try:
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         provider, owner, repo = parse_repo_key(repo_key)
         if not owner or not repo:
             return "skipped"
         token = ""
         if provider == "github":
-            from src.user.db import get_github_token as _get_gh
+            from src.domains.mgmt.user.db import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
         else:
-            from src.user.db import get_repo_bot_token as _get_gc
+            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
         if not token:
             log.info(f"auto-finalize: no bot token for {repo_key}, skip VCS close")
             return "skipped"
-        from src.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.api_client import VcsApiClient
         client = VcsApiClient(provider, token, owner, repo)
         try:
             if client.get_issue_state(issue_number) == "closed":
@@ -884,7 +946,8 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
       如 PR 已合入但需求卡 active → 原路径 noop）。防中间节点误终态：非末节点仍仅 pending_review 可退出。
     - target=processing：仅 pending_review → processing（继续流水线）；末节点触达则归一 done
       （review-pass-last-node-force-done-design.md，无下游可续）。
-    - 非命中 → noop。
+    - 未命中 → `noop:already_target|terminal|not_pending_review|error`（Issue #1599：
+      回读真实 status 后分类，调用方据此给出 changed=false + 真实 status + 原因码）。
     """
     try:
         if target == "done":
@@ -893,16 +956,19 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                 if _complete_issue_done(repo_key, issue_number, evidence,
                                         ("pending_review", "active", "processing", "awaiting_input")):
                     return "passed_done"
-                return "noop"
+                return _review_noop_reason(repo_key, issue_number, "completed")
             # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
-            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
-                                                          ("pending_review",)) else "noop"
+            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",)):
+                return "passed_done"
+            return _review_noop_reason(repo_key, issue_number, "completed")
         if _is_last_stage_node(repo_key, issue_number):
             # 末节点 + processing → 归一 done（无下游可续）
             log.info(f"Issue review-pass normalized last-node target=processing→done: "
                      f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
-            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
-                                                          ("pending_review", "active", "processing", "awaiting_input")) else "noop"
+            if _complete_issue_done(repo_key, issue_number, evidence,
+                                    ("pending_review", "active", "processing", "awaiting_input")):
+                return "passed_done"
+            return _review_noop_reason(repo_key, issue_number, "completed")
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -914,15 +980,20 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
         if _changed:
             log.info(f"Issue review-pass(processing): {repo_key}/#{issue_number} evidence={evidence[:60]}")
             return "passed_processing"
-        return "noop"
+        return _review_noop_reason(repo_key, issue_number, "processing")
     except Exception as _e:
         log.warning(f"review_pass failed {repo_key}/#{issue_number}: {_e}")
-        return "noop"
+        return "noop:error"
 
 
 def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
                    reason: str = "") -> str:
-    """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。"""
+    """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。
+
+    返回 `rejected_processing|rejected_awaiting_input`（命中）；未命中返回
+    `noop:already_target|terminal|not_pending_review|error`（Issue #1599：回读真实 status 分类，
+    不再以 `noop` 冒充 `status=pending_review`）。
+    """
     try:
         _t = target if target in ("processing", "awaiting_input") else "processing"
         with db_lock:
@@ -936,10 +1007,10 @@ def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
         if _changed:
             log.info(f"Issue review-reject({_t}): {repo_key}/#{issue_number} reason={reason[:60]}")
             return f"rejected_{_t}"
-        return "noop"
+        return _review_noop_reason(repo_key, issue_number, _t)
     except Exception as _e:
         log.warning(f"review_reject failed {repo_key}/#{issue_number}: {_e}")
-        return "noop"
+        return "noop:error"
 
 
 def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
@@ -1045,7 +1116,7 @@ def _vcs_issue_url(repo_key: str, issue_number: int) -> str:
 
     无编号 / 坏仓库（缺 owner 或 repo）→ ''。未知 provider 前缀 → 默认 GitCode。
     """
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     if not issue_number:
         return ""
     owner, repo = split_owner_repo(repo_key)
@@ -1095,7 +1166,7 @@ _IM_NOTIFY_TITLES = {
 
 def _build_notify_fields(repo_key: str, issue_number: int) -> list:
     """通知卡结构化键值对字段：仓库 / Issue（带 VCS 链接）/ 需求标题（替代纯文本行，移动端对齐更好）。"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     _iss = f"#{issue_number}" if issue_number else ""
     _iss_link = ""
     if _iss:
@@ -1157,7 +1228,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         # 任务上下文/描述已由 _ensure_task_conversation 预写入，此处仅追加指针消息，不重复内容。
         if conv_id:
             try:
-                from src.repo_key import from_repo_key
+                from src.kernel.repo_key import from_repo_key
                 _tpl = (f"📋 任务已分配 · Issue #{issue_number}\n\n"
                         f"仓库: {from_repo_key(repo_key)}\n\n"
                         f"请到任务中心『去对话』查看并处理。你的第一条回复将创建会话。")
@@ -1195,7 +1266,7 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
     进入 awaiting_input 的语义就是「等用户输入」，必须主动触达用户；fd：本人 chat bot（open_id 为 app 级）。
     """
     try:
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         if conv_id:
             try:
                 _tpl = (f"❓ 需要你补充信息 · Issue #{issue_number}\n\n"
@@ -1235,7 +1306,7 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
     进入 pending_review 的语义就是「交付审核点请用户拍板」，必须主动触达用户；本机本人 chat bot（open_id 为 app 级）。
     """
     try:
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         _refs_suffix = (f"\n\n参考: {references}" if (references or "").strip() else "")
         if conv_id:
             try:
@@ -1327,7 +1398,7 @@ class TaskConfirmBody(BaseModel):
 def _cleanup_issue_attachments(repo_key: str, issue_number):
     """删除指定 issue 的所有附件。任务完成/取消时调用。"""
     try:
-        from src.repo_key import split_owner_repo
+        from src.kernel.repo_key import split_owner_repo
         _owner, _rname = split_owner_repo(repo_key)
         _attach_cleanup_dir(_owner, _rname, str(issue_number))
     except Exception as _e:
@@ -1468,7 +1539,7 @@ def _release_subissue_body(repo_key: str, issue_number: int, candidate_sha: str,
                            target_env: str, evidence_ref: str,
                            approved_by: int, approved_at: str) -> str:
     """发布子单 body：`## 父任务`（现有子任务识别机制）+ `## 发布绑定`（绑定要素落平台）。"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
     _lines = [
         f"## 父任务",
@@ -1523,7 +1594,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
     绑定字段 → stage=sre（直通 sre，不经 vod/issue/coding/qa）→ dispatch=True 时服务内
     直调 a2a_endpoint 派发 sre 执行部署。子单终态 release_result 即发布结果三分支。
     """
-    from src.repo_key import to_repo_key, split_owner_repo, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, split_owner_repo, parse_repo_key
     repo_key = to_repo_key(repo_key)
     # PR #799 R1 语义保留：落库前统一小写——唯一绑定与验收记录对照口径一致，
     # 大小写变体不得绕过唯一性重复创建发布子单
@@ -1714,8 +1785,8 @@ def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: in
     回填按 task.issue_id 反查 issue 行即可）。
     """
     import json as _json
-    from src.repo_key import from_repo_key
-    from src.api.routes.webhook import a2a_endpoint, A2AHandoffBody
+    from src.kernel.repo_key import from_repo_key
+    from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
     _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
     _account = _repository.split("/", 1)[0] if "/" in _repository else ""
     _context = (f"发布子单 #{sub_issue_number}：源需求 #{issue_number} 已完成 SRE 验收并经用户批准"
@@ -1861,7 +1932,7 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
     import urllib.parse as _ul
     if provider == "github":
         # Issue #344: 改用 GitHub Search API 精确匹配 title，不再分页遍历
-        from src.user.repo_manager import _github_req
+        from src.domains.mgmt.user.repo_manager import _github_req
         try:
             _q = _ul.quote(f'{title} in:title repo:{owner}/{repo} is:issue is:open')
             data = _github_req("GET",
@@ -1887,7 +1958,7 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
         return None
     # GitCode — Issue #344: 取消 10 页上限，while True 靠末页终止
     # 安全阀：最多遍历 1000 页（50000 条），防止 API 异常时无限循环
-    from src.user.repo_manager import _req
+    from src.domains.mgmt.user.repo_manager import _req
     page = 1
     _max_pages = 1000
     while page <= _max_pages:
@@ -1988,7 +2059,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
 def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
                        body_text: str = "", assignee: str = "") -> dict:
     """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
-    from src.user.repo_manager import _github_req
+    from src.domains.mgmt.user.repo_manager import _github_req
     body = {"title": title}
     if body_text:
         body["body"] = body_text
@@ -2011,31 +2082,31 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
     # Issue #453 台账（S21，第六轮补漏）：多任务模式 patch issue body → issue_edit 记账，
     # 编辑回声对账（原先 marker 检测在 GitCode 必 miss）
     try:
-        from src.outbound_ledger import record_outbound, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         record_outbound("gitcode", to_repo_key(f"{owner}/{repo}", "gitcode"), "issue_edit",
                         str(issue_num), issue_number=str(issue_num),
                         content_hash=content_hash_md5(body_text))
     except Exception as _le:
-        from src.config import log as _log
+        from src.kernel.config import log as _log
         _log.warning(f"outbound_ledger record (_patch_issue_body) failed: {_le}")
     return _out
 
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
-    from src.user.repo_manager import _github_req
+    from src.domains.mgmt.user.repo_manager import _github_req
     _out = _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
                        api_token, {"body": body_text})
     # Issue #453 台账（S21，第六轮补漏）：GitHub 多任务模式 patch issue body → issue_edit 记账
     try:
-        from src.outbound_ledger import record_outbound, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         record_outbound("github", to_repo_key(f"{owner}/{repo}", "github"), "issue_edit",
                         str(issue_num), issue_number=str(issue_num),
                         content_hash=content_hash_md5(body_text))
     except Exception as _le:
-        from src.config import log as _log
+        from src.kernel.config import log as _log
         _log.warning(f"outbound_ledger record (_patch_github_issue_body) failed: {_le}")
     return _out
 
@@ -2049,7 +2120,7 @@ def create_standard_task(repo_key: str, title: str, description: str,
     - token：bot_token 注入（onboarding 无登录用户上下文，用仓库 bot token）
     - 不额外写入任何消息：任务上下文消息只由 ensure_issue_task → _ensure_task_conversation 产生 1 条
     """
-    from src.repo_key import to_repo_key, split_owner_repo, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, split_owner_repo, parse_repo_key
     repo_key = to_repo_key(repo_key)
     owner, rname = split_owner_repo(repo_key)
     _provider, _, _ = parse_repo_key(repo_key)
@@ -2084,7 +2155,7 @@ def create_standard_task(repo_key: str, title: str, description: str,
         issue_num = int(n)
         # Issue #453 代发台账（写点6/7）：建任务主通道入账
         try:
-            from src.outbound_ledger import record_outbound, content_hash_md5
+            from src.kernel.outbound_ledger import record_outbound, content_hash_md5
             record_outbound(_provider, repo_key, "issue", str(issue_num), issue_number=str(issue_num),
                             content_hash=content_hash_md5((description or "").strip()))
         except Exception as _le:
@@ -2110,7 +2181,7 @@ def _refresh_user_gitcode_token(user: dict) -> str:
         from src.api.deps import try_refresh_gitcode_token
         return try_refresh_gitcode_token(user.get("id") or 0) or ""
     except Exception as _e:
-        from src.config import log as _log
+        from src.kernel.config import log as _log
         _log.warning(f"create_task: refresh user gitcode token failed: {_e}")
         return ""
 
@@ -2121,7 +2192,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     端点 `POST /api/tasks/create` 已废弃移除（Phase C2，见 issues-api-execution-plan.md）——
     对外统一入口为 `POST /api/issues/{owner}/{repo}`（issues.py 复用本逻辑）。
     """
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     if not body.repo_key or not body.title.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库和标题必填"})
     if not (body.description or "").strip():
@@ -2142,7 +2213,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         api_token = _preauth_token
     elif _is_github:
         # Issue #343: GitHub 写操作同样走仓库 bot token
-        from src.user.db import get_github_token
+        from src.domains.mgmt.user.db import get_github_token
         api_token = get_github_token(repo_key=repo_key)
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
@@ -2166,7 +2237,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
     _creator_login = user["username"]
     try:
-        from src.auth.grape_account_db import get_user_identities
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities
         _provider_name = "github" if _is_github else "gitcode"
         for ident in get_user_identities(user["id"]):
             if ident.get("provider") == _provider_name and ident.get("external_login"):
@@ -2174,16 +2245,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 break
     except Exception:
         pass  # 查不到就用 grape username fallback
-    # Issue #649: 本次建单请求级 trace_id（错误响应附带，便于排查定位）
-    import uuid as _uuid
-    _trace_id = f"tr_{_uuid.uuid4().hex[:16]}"
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
         issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
                                               provider="github" if _is_github else "gitcode")
     except RuntimeError as _dedup_err:
-        from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
+        from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
             # 用户自己的 GitCode token 401 → 主动刷新一次并重试；仍失败给「重新登录」引导
             _renewed = _refresh_user_gitcode_token(user)
@@ -2236,7 +2304,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
         if not _scene_for_precheck:
             try:
-                from src.user.db import get_repo_scene
+                from src.domains.mgmt.user.db import get_repo_scene
                 _scene_for_precheck = get_repo_scene(repo_key) or ""
             except Exception as _rs_err:
                 log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")
@@ -2344,13 +2412,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _using_user_token:
                     # 用户自己的 GitCode token 401 且刷新失败 → 401 + reauth_required，
                     # 前端自动跳 GitCode OAuth 授权页强制重新授权（用户登录凭据已失效）
-                    from src.vcs.token_error import GITCODE_USER_TOKEN_INVALID_MSG
+                    from src.domains.runtime.vcs.token_error import GITCODE_USER_TOKEN_INVALID_MSG
                     raise HTTPException(status_code=401, detail={
                         "code": 401,
                         "message": f"创建 Issue 失败：{GITCODE_USER_TOKEN_INVALID_MSG}",
                         "action": "reauth_required",
                     })
-                from src.vcs.token_error import BOT_TOKEN_INVALID_MSG
+                from src.domains.runtime.vcs.token_error import BOT_TOKEN_INVALID_MSG
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
                     "message": f"创建 Issue 失败：{BOT_TOKEN_INVALID_MSG}",
@@ -2369,8 +2437,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         issue_num = int(n)
         # Issue #453 代发台账（写点6/7，前端建单入口）：入账
         try:
-            from src.outbound_ledger import record_outbound, content_hash_md5
-            from src.repo_key import parse_repo_key
+            from src.kernel.outbound_ledger import record_outbound, content_hash_md5
+            from src.kernel.repo_key import parse_repo_key
             _prov, _, _ = parse_repo_key(repo_key)
             record_outbound(_prov, repo_key, "issue", str(issue_num), issue_number=str(issue_num),
                             content_hash=content_hash_md5(_desc_with_attach))
@@ -2378,7 +2446,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"outbound_ledger record (create issue) failed: {_le}")
         created = True
         # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         _storage = get_storage()
         _pending_atts = _attach_list(owner, rname, "pending")
         if _pending_atts:
@@ -2407,14 +2475,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     #    保证对话通道创建的 Issue 详情页「流水线场景」不显示 --。
     try:
         from src.api.session_store import set_issue_scene
-        from src.runtime.engine_select import _repo_user_id
+        from src.domains.runtime.engine.engine_select import _repo_user_id
         _scene_to_write = ""
         if body.scene_id and body.scene_id != "vod-auto":
             _scene_to_write = body.scene_id
         else:
             # 无显式场景 → 仓库默认场景兜底（未配置则保持空，走智能推荐）
             try:
-                from src.user.db import get_repo_scene
+                from src.domains.mgmt.user.db import get_repo_scene
                 _scene_to_write = get_repo_scene(repo_key) or ""
             except Exception as _re:
                 log.warning(f"create_task: get_repo_scene failed: {_re}")
@@ -2427,14 +2495,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.info(f"create_task: scene={_scene_to_write} set for #{issue_num}"
                      + ("" if (body.scene_id and body.scene_id != "vod-auto") else " (repo default fallback)"))
     except Exception as _e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"create_task: set_issue_scene failed: {_e}")
     # 3) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
         try:
             from src.api.pipeline_config import _query_scene_by_id
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key)
             if _scene_obj:
                 _nodes = _scene_obj.get("nodes", []) or []
@@ -2443,7 +2511,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     _auto_subtask_mode = 1
                     _log.info(f"Auto multi-task mode: scene={body.scene_id} issue skill=issue-multitask")
         except Exception as _e:
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             _log.warning(f"Auto multi-task detection failed: {_e}")
 
     # 4) 按既有流程幂等建档（同 issue 任务 id 复用）；org 归属由 ensure_issue_task 统一以仓库为准
@@ -2458,7 +2526,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             from src.api.session_store import set_subtask_mode
             set_subtask_mode(repo_key, f"#{issue_num}", True)
         except Exception as _e:
-            from src.config import log
+            from src.kernel.config import log
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
@@ -2471,7 +2539,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except HTTPException:
             raise  # reauth_required 需要传递给前端
         except Exception as _e:
-            from src.config import log
+            from src.kernel.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
 
     # Issue #89: 同步触发 pipeline 事件，不依赖 webhook（webhook 异步可能丢事件）
@@ -2479,7 +2547,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 复用已有 Issue 时创建 a2a_event 事件 → issue Agent 处理
     if created:
         try:
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             from src.api.session_store import set_issue_stage
             # 初始化 issue_state（vod 阶段）
             set_issue_stage(repo_key, f"#{issue_num}", "vod", "vod", assignee=assignee or "")
@@ -2519,12 +2587,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 审查 P0-1 修正：run_pipeline 调用移回 if/else 之外（两平台共用）——
             # 原版本误缩进进 else（GitCode）分支，GitHub 建单后不再同步触发流水线。
             _pipe_payload["_grape_internal_trigger"] = True
-            from src.api.event_pipeline import run_pipeline
+            from src.domains.runtime.pipeline.event_pipeline import run_pipeline
             _pipe_result = run_pipeline(_pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
                                         account=repo_key, repo_key_override=repo_key)
             _log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
         except Exception as _e:
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             _log.warning(f"create_task: sync pipeline trigger failed: {_e}")
 
     # task_id 语义 = 需求卡片 issue.id（issues_center P2：主字段 issue_id，兼容保留 task_id）
@@ -2547,7 +2615,7 @@ _ATTACH_MAX_SIZE = (int(os.environ.get("ATTACH_MAX_SIZE_MB", "200")) * 1024 * 10
 
 def _attach_obs_key(owner: str, repo: str, issue_number, filename: str) -> str:
     """生成 OBS 对象键：{PREFIX}/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"""
-    from src.config import OBS_PREFIX
+    from src.kernel.config import OBS_PREFIX
     prefix = (OBS_PREFIX or "").strip("/")
     return f"{prefix}/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
@@ -2559,7 +2627,7 @@ def _attach_base_dir(owner: str, repo: str, issue_number) -> str:
 
 def _attach_save(owner: str, repo: str, issue_number, filename: str, content: bytes) -> str:
     """保存附件。OBS 启用时上传到 OBS，否则写本地磁盘。返回可访问 URL。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         key = _attach_obs_key(owner, repo, issue_number, filename)
@@ -2573,14 +2641,14 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     fpath = os.path.join(attach_dir, filename)
     with open(fpath, "wb") as f:
         f.write(content)
-    from src.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
 
 def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
     """删除单个附件。OBS 启用时删 OBS 对象，否则删本地文件。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         key = _attach_obs_key(owner, repo, issue_number, filename)
@@ -2612,12 +2680,12 @@ def _attach_count(owner: str, repo: str, issue_number) -> int:
 
 def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     """列出附件。返回 [{filename, url, size, is_image}]。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
         items, _ = storage.list_objects_with_meta(prefix_key)
-        from src.user.db import get_meta_value as _gmv
+        from src.domains.mgmt.user.db import get_meta_value as _gmv
         result = []
         for item in items:
             fname = item["key"].rsplit("/", 1)[-1]
@@ -2634,7 +2702,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     # 本地降级
     attach_dir = _attach_base_dir(owner, repo, issue_number)
     # Issue #471 E1：附件 URL 是浏览器面地址——走 browser_callback_url
-    from src.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     result = []
     if os.path.isdir(attach_dir):
@@ -2682,7 +2750,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
     仅支持 gitcode（GitHub 附件同步不在本次范围）。
     """
     try:
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         _prov, owner, rname = parse_repo_key(repo_key)
         if _prov != "gitcode":
             return False
@@ -2692,7 +2760,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         # OBS 后端启用时按对象键重新签发长效链接（本地降级路径 URL 本身永久，无需处理）
         if _url:
             try:
-                from src.storage import get_storage
+                from src.domains.runtime.storage import get_storage
                 _storage = get_storage()
                 if _storage:
                     _safe_name = _url.rsplit("/", 1)[-1].split("?")[0]
@@ -2706,12 +2774,12 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.user.db import get_gitcode_token
+        from src.domains.mgmt.user.db import get_gitcode_token
         token = get_gitcode_token(repo_key=repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
             return False
-        from src.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.api_client import VcsApiClient
         client = VcsApiClient("gitcode", token, owner, rname)
         client.post_issue_comment(int(issue_number), _md.strip())
         log.info(f"attachment sync comment posted: repo={repo_key} issue=#{issue_number}"
@@ -2724,7 +2792,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
 
 def _attach_cleanup_dir(owner: str, repo: str, issue_number):
     """删除整个 issue 的附件目录。任务完成/取消时调用。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
@@ -2765,7 +2833,7 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
         {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}
         顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
     """
-    from src.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
+    from src.domains.runtime.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
     result: dict = {"ok": [], "failed": []}
     try:
         urls: list[str] = []
@@ -2785,7 +2853,7 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
         repo_key = repo_key or f"gitcode:{owner}/{repo}"
         token = ""
         try:
-            from src.user.db import get_gitcode_token
+            from src.domains.mgmt.user.db import get_gitcode_token
             token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             token = ""
@@ -2794,7 +2862,7 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
                 result["failed"].append({"url": u, "reason": "no repo token"})
             return result
 
-        from src.vcs.api_client import create_client
+        from src.domains.runtime.vcs.api_client import create_client
         client = create_client(repo_key, token)
         seq = 0
         for u in urls:
@@ -2837,7 +2905,7 @@ def _find_agent_task_ids(repo_key: str, issue_number) -> list[str]:
     - int 56 或 '56' → 规范化为 '#56'（agent_tasks.issue_id 统一带 # 前缀存储）
     - '#56' → 原样使用
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(repo_key)
     iid = str(issue_number).strip()
     if not iid.startswith("#"):
@@ -2886,7 +2954,7 @@ def _batch_fetch_pr_issue_keys(keys: list) -> set:
     ② 不算 PR——否则需求流转到待审核/已完成时详情页 Issue 行错标成 PR。
     只有"存在 PR 事件且从无 issue 生命周期事件"的编号才判为 ①。
     """
-    from src.vcs.event_types import ALL_PR_EVENTS, ALL_ISSUE_EVENTS
+    from src.domains.runtime.vcs.event_types import ALL_PR_EVENTS, ALL_ISSUE_EVENTS
     _pr_types = tuple(ALL_PR_EVENTS)
     _issue_types = tuple(ALL_ISSUE_EVENTS)
     out: set = set()
@@ -2982,7 +3050,7 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
     Returns:
         {(repo_key, issue_id): [{agent, label, status, status_num, latest_seq, latest_title}, ...]}
     """
-    from src.api.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
+    from src.domains.runtime.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
 
     out: dict = {}
     if not keys:
@@ -3111,7 +3179,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     if not rows:
         return []
 
-    from src.repo_key import to_repo_key, from_repo_key
+    from src.kernel.repo_key import to_repo_key, from_repo_key
     from src.api.pipeline_config import get_pipeline_config
 
     _keys = [(r[2] or "", f"#{r[3]}") for r in rows]
@@ -3127,7 +3195,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         if _rk in _repo_default_scene:
             continue
         try:
-            from src.user.db import get_repo_scene
+            from src.domains.mgmt.user.db import get_repo_scene
             _repo_default_scene[_rk] = get_repo_scene(_rk) or ""
         except Exception:
             _repo_default_scene[_rk] = ""

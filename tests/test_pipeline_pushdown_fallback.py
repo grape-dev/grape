@@ -11,7 +11,7 @@ import sys
 
 os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
-from src.api.routes import pipeline as pipeline_route
+from src.domains.runtime.routes import pipeline as pipeline_route
 import src.session_manager as sm
 
 REPO = "gitcode:fallback/repo"

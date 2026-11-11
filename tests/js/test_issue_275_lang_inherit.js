@@ -36,7 +36,7 @@ function makeEnv(opts) {
 
   const cookieJar = { value: '' };
   const document = {
-    documentElement: { setAttribute() {}, removeAttribute() {}, hasAttribute() { return false; } },
+    documentElement: { setAttribute() {}, removeAttribute() {}, hasAttribute() { return false; }, classList: { _s: new Set(), add(c){this._s.add(c);}, remove(c){this._s.delete(c);}, contains(c){return this._s.has(c);}, toggle(c){ this._s.has(c)?this._s.delete(c):this._s.add(c); } } },
     querySelectorAll() { const a = []; a.forEach = Array.prototype.forEach; return a; },
     cookie: '',
     set cookieVal(v) { cookieJar.value = v; },

@@ -8,12 +8,24 @@ NoCacheStaticMiddleware、i18n boost 注入、auth 页面、SPA catch-all、
 不提供前端页面。
 """
 import json as _json_mod
+import logging
 import os
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+
+log = logging.getLogger(__name__)
+
+# Faro 上报反代上游（Alloy faro.receiver）。必须经 GRAPE_FARO_UPSTREAM 显式配置，
+# 无默认值：未配置时 /faro/collect 直接 503 disabled，避免把部署拓扑写进代码
+# （QA §1.1-1-5 / 架构审查 P2-1）。
+_FARO_UPSTREAM = os.environ.get("GRAPE_FARO_UPSTREAM", "").strip()
+# 单次上报体上限（SDK 批量上报通常 <64KB；公开端点防滥用）
+_FARO_MAX_BODY = int(os.environ.get("GRAPE_FARO_MAX_BODY", str(256 * 1024)))
+# 同源校验开关（默认开；无 Origin 的探针请求放行）
+_FARO_STRICT_ORIGIN = os.environ.get("GRAPE_FARO_STRICT_ORIGIN", "1").strip() not in ("0", "false", "no")
 
 
 def install_spa_routes(app: FastAPI) -> None:
@@ -21,7 +33,7 @@ def install_spa_routes(app: FastAPI) -> None:
 
     main.py 拆分时同样调用本函数（其原内联块删除）。
     """
-    from src.config import WORKSPACE_DIR as _WS_DIR
+    from src.kernel.config import WORKSPACE_DIR as _WS_DIR
 
     # Issue 附件静态服务（必须在 /static 之前 mount）
     _ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
@@ -70,7 +82,7 @@ def install_spa_routes(app: FastAPI) -> None:
 
     app.add_middleware(NoCacheStaticMiddleware)
 
-    from src.auth.email_service import is_email_configured as _is_email_configured
+    from src.domains.mgmt.auth.email_service import is_email_configured as _is_email_configured
 
     # ── i18n boost: 服务端注入翻译数据，消除首屏 i18n 闪动 ──
     _I18N_BOOST_CACHE = None
@@ -192,8 +204,8 @@ document.documentElement.classList.remove('i18n-loading');})();
 
     def _inject_email_configured(html: str) -> str:
         """在 </head> 前注入邮箱/OAuth 配置状态 + i18n boost 翻译数据。"""
-        from src.auth.providers import get_provider, list_providers
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.auth.providers import get_provider, list_providers
+        from src.domains.mgmt.user.db import get_meta_value
         configured = _is_email_configured()
         val = 'true' if configured else 'false'
         cls = 'email-configured' if configured else 'email-not-configured'
@@ -227,6 +239,56 @@ document.documentElement.classList.remove('i18n-loading');})();
             html = f.read()
         html = _inject_email_configured(html)
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
+
+    @app.post("/faro/collect")
+    async def faro_collect_proxy(request: Request):
+        """Faro 上报反代 → Alloy faro.receiver（前端 RUM）。
+
+        同源路径，避免浏览器直连内部地址 + 硬编码 host。
+        上游必须由 GRAPE_FARO_UPSTREAM 提供；未配置时返回 503 disabled。
+        透传 JSON body（gzip 由 SDK 自带 transport 处理），非 2xx 原样透传状态码。
+
+        公开端点防护（架构守护 Medium-2）：
+        - 同源校验：Origin/Referer 的 host 必须与请求 host 一致，否则 403
+          （可用 GRAPE_FARO_STRICT_ORIGIN=0 关闭，便于本地调试/无 Origin 的探针）
+        - 双重限体：content-length 预判 + 实际 body 校验，超限 413
+        - 无鉴权（浏览器 RUM 无法携带 token）；限速建议在 nginx 层配置
+        """
+        if not _FARO_UPSTREAM:
+            return Response(content='{"error":"faro relay disabled"}', status_code=503,
+                            media_type="application/json")
+        # 同源校验（Origin 优先，其次 Referer）
+        if _FARO_STRICT_ORIGIN:
+            _origin = request.headers.get("origin") or request.headers.get("referer") or ""
+            if _origin:
+                from urllib.parse import urlparse
+                _ohost = (urlparse(_origin).hostname or "").lower()
+                _rhost = (request.headers.get("host") or request.url.hostname or "").lower()
+                _rhost = _rhost.split(":")[0]
+                if _ohost and _rhost and _ohost != _rhost:
+                    return Response(content='{"error":"cross-origin denied"}', status_code=403,
+                                    media_type="application/json")
+        if int(request.headers.get("content-length") or 0) > _FARO_MAX_BODY:
+            return Response(content='{"error":"payload too large"}', status_code=413,
+                            media_type="application/json")
+        import httpx
+        body = await request.body()
+        if len(body) > _FARO_MAX_BODY:
+            return Response(content='{"error":"payload too large"}', status_code=413,
+                            media_type="application/json")
+        headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+        if request.headers.get("content-encoding"):
+            headers["Content-Encoding"] = request.headers["content-encoding"]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                upstream = await client.post(
+                    _FARO_UPSTREAM, content=body, headers=headers)
+            return Response(content=upstream.content, status_code=upstream.status_code,
+                            media_type="application/json")
+        except Exception as e:
+            log.warning(f"faro collect proxy error: {e}")
+            return Response(content='{"error":"faro upstream unavailable"}', status_code=502,
+                            media_type="application/json")
 
     @app.get("/")
     async def serve_spa():

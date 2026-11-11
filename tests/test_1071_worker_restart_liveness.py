@@ -99,7 +99,7 @@ STRUCTURED = json.dumps({
 
 def test_sweep_renews_task_with_fresh_messages():
     """pending_since 已过 30 分钟，但 worker 最近还在产出 → 不判死。"""
-    from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+    from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
     tid = "t_1071_alive"
     _seed_task(tid, "pending_self_report", pending_since=_iso(-2400), started_at=_iso(-3000))
     _seed_message(tid, _iso(-60))  # 1 分钟前还在写日志
@@ -110,7 +110,7 @@ def test_sweep_renews_task_with_fresh_messages():
 
 def test_sweep_kills_task_without_activity():
     """真死兜底：pending_since 过 30 分钟且完全没有产出 → 照旧判死（真死任务仍回收）。"""
-    from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+    from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
     tid = "t_1071_dead"
     _seed_task(tid, "pending_self_report", pending_since=_iso(-6000), started_at=_iso(-7000))
     _sweep_pending_self_report_timeouts()
@@ -121,7 +121,7 @@ def test_sweep_kills_task_without_activity():
 
 def test_sweep_handles_legacy_naive_timestamp_with_activity():
     """存量无时区 pending_since + 新口径带时区消息混合：不能被字符串比较误判。"""
-    from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+    from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
     tid = "t_1071_legacy_alive"
     _seed_task(tid, "pending_self_report", pending_since=_legacy(-2400), started_at=_iso(-3000))
     _seed_message(tid, _iso(-120))
@@ -132,7 +132,7 @@ def test_sweep_handles_legacy_naive_timestamp_with_activity():
 # ---------- 1-3 判死不收钥匙 ----------
 
 def test_timeout_failed_keeps_session_token(monkeypatch):
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     calls = []
     import src.api.auth_token as auth_token
     monkeypatch.setattr(auth_token, "revoke_session_token", lambda tid: calls.append(tid))
@@ -149,7 +149,7 @@ def test_timeout_failed_keeps_session_token(monkeypatch):
 # ---------- 1-2 回炉守卫 ----------
 
 def test_requeue_skips_running_task_with_recent_activity():
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     tid = "t_1071_requeue_alive"
     _seed_task(tid, "running", started_at=_iso(-600))
     _seed_message(tid, _iso(-30))
@@ -160,7 +160,7 @@ def test_requeue_skips_running_task_with_recent_activity():
 
 
 def test_requeue_still_works_when_no_recent_activity():
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     tid = "t_1071_requeue_idle"
     _seed_task(tid, "running", started_at=_iso(-7200))
     _seed_message(tid, _iso(-7000))  # 窗口外（默认 600s）
@@ -176,8 +176,8 @@ def test_worker_completes_after_restart_without_409():
     这条是主人那个问题的正面答案：重启后还在跑的 worker 不该被 1800s 判死，
     判死后也不该被 409/401 挡住交付。
     """
-    from src.runtime import service
-    from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+    from src.domains.runtime.engine import service
+    from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
     tid = "t_1071_full_chain"
     evt = 91070
     _seed_event(evt, "running")
@@ -203,7 +203,7 @@ def test_worker_completes_after_restart_without_409():
 
 def test_revive_late_structured_result():
     """判死 10 分钟后 worker 交出完整结构化收尾 → 复活为 completed，事件侧同步改判。"""
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     tid = "t_1071_revive"
     evt = 91071
     _seed_event(evt, "failed")
@@ -224,7 +224,7 @@ def test_revive_late_structured_result():
 
 def test_revive_rejects_business_failure():
     """业务失败（不是兜底超时）永远不复活——seq#2488 的「失败被成功覆盖」不重开。"""
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     tid = "t_1071_revive_biz"
     evt = 91072
     _seed_event(evt, "failed")
@@ -236,7 +236,7 @@ def test_revive_rejects_business_failure():
 
 
 def test_revive_rejects_unstructured_result_and_stale_window():
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     evt = 91073
     _seed_event(evt, "failed")
     marker = TIMEOUT_ERRORS
@@ -251,7 +251,7 @@ def test_revive_rejects_unstructured_result_and_stale_window():
 
 
 def test_revive_only_once():
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     evt = 91074
     _seed_event(evt, "failed")
     tid = "t_1071_revive_once"

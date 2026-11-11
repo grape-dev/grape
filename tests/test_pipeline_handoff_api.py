@@ -21,8 +21,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from src.api.main import app
-from src.api.routes import webhook
-from src.api.routes.webhook import A2AHandoffBody, pipeline_handoff_endpoint
+from src.domains.runtime.routes import webhook
+from src.domains.runtime.routes.webhook import A2AHandoffBody, pipeline_handoff_endpoint
 
 client = TestClient(app)
 

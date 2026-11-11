@@ -18,7 +18,7 @@ import asyncio
 import json
 from collections import deque
 from typing import Callable, Generator, Any
-from src.config import log
+from src.kernel.config import log
 
 
 class ChatTask:

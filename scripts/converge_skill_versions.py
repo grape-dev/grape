@@ -16,8 +16,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.storage import get_storage, skill_key, parse_skill_key  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.domains.runtime.storage import get_storage, skill_key, parse_skill_key  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 
 def main():

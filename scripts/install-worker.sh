@@ -158,11 +158,13 @@ rm -f "$TMP_PKG"
 # 注意：全新安装（无旧代码）时冒烟失败同样 fail，避免装出必死的实例。
 _smoke_check() {
   [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
-  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" >/dev/null 2>&1; then
+  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.domains.runtime.engine.agent" >/dev/null 2>&1; then
     log "New code import smoke check passed"
     return 0
   else
-    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" 2>&1 | tail -1)"
+    # worker 侧埋点依赖 otel：缺包直接中止升级（架构守护 BLOCKED-1）
+    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.domains.runtime.engine.agent; import src.observability.otel" 2>&1 | tail -1)"
+
     log "!!! New code import smoke check failed: $_smoke_err"
     log "!!! Upgrade rejected (old code untouched, worker keeps running the current version) -- please report this log to the controller maintainer"
     return 1
@@ -310,19 +312,22 @@ else
     PIP_CMD="$VENV/bin/pip3"
   fi
 fi
-if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
+# Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
+# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
+WORKER_DEPS="aiohttp bcrypt click httpx"
+if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   # 优先离线安装：包内已带依赖 wheels（grape-worker/wheels/），免网络下载
   if [ -d "$INSTALL_DIR/wheels" ] && ls "$INSTALL_DIR/wheels"/*.whl >/dev/null 2>&1; then
     log "Installing deps offline (bundled wheels: $(ls "$INSTALL_DIR/wheels"/*.whl | wc -l) files, no network needed)"
     if "$PIP_CMD" install --quiet --no-index --find-links "$INSTALL_DIR/wheels" \
-        -r "$INSTALL_DIR/requirements-worker.txt"; then
+        $WORKER_DEPS; then
       log "Deps installed offline (wheels auto-matched to arch $TARGET_ARCH by pip)"
     else
       log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
       if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
-          -r "$INSTALL_DIR/requirements-worker.txt"; then
+          $WORKER_DEPS; then
         log "Dependency install failed. Check network and retry, or specify a reachable mirror:"
         log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple bash -c 'curl -fsSL $SERVER/api/runtime/install | bash -s -- --token <token> --server $SERVER'"
         fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
@@ -331,7 +336,7 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   else
     log "Installing deps online (mirror: $PIP_INDEX, first run takes minutes)"
     if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
-        -r "$INSTALL_DIR/requirements-worker.txt"; then
+        $WORKER_DEPS; then
       fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
     fi
   fi
@@ -358,12 +363,15 @@ else
 fi
 
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====
-# 保留已有 HERMES_CUSTOM_* 等 API key（重装不应覆盖本地配置）：
-# ① 备份旧文件中的 HERMES_CUSTOM 行 ② cat 覆盖 RUNTIME_*  ③ 追加回 HERMES_CUSTOM 行
+# 保留旧文件中「非本脚本管理」的所有行（重装/自动升级不应覆盖本地配置）：
+# ① 读出旧文件中除 6 个 RUNTIME_* 受管键之外的键值行 ② cat 覆盖受管键 ③ 追加回保留行
+# 事故（2026-11-10）：旧逻辑只保留 ^HERMES_CUSTOM，worker 自动升级后
+# OPENGW_API_KEY（aishell-dsh 第三方模型）被抹掉 → 任务报
+#   llm-pi-ai: no credential for provider route "opengw"
 umask 077
 _PRESERVED_KEYS=""
 if [ -f "$ENV_FILE" ]; then
-  _PRESERVED_KEYS=$(grep '^HERMES_CUSTOM' "$ENV_FILE" 2>/dev/null || true)
+  _PRESERVED_KEYS=$(grep -vE '^(RUNTIME_TOKEN|RUNTIME_SERVER_URL|RUNTIME_DEVICE_NAME|RUNTIME_MAX_CONCURRENT_TASKS|RUNTIME_POLL_INTERVAL|RUNTIME_HEARTBEAT_INTERVAL)=' "$ENV_FILE" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true)
 fi
 cat > "$ENV_FILE" <<EOF
 RUNTIME_TOKEN=$TOKEN
@@ -373,7 +381,7 @@ RUNTIME_MAX_CONCURRENT_TASKS=20
 RUNTIME_POLL_INTERVAL=3
 RUNTIME_HEARTBEAT_INTERVAL=15
 EOF
-# 追加旧配置中保留的 HERMES_CUSTOM keys（防重装丢 key → opencode 401）
+# 追加旧配置中保留的自定义 keys（防重装/升级丢 key → opencode 401 / aishell 无凭据）
 if [ -n "$_PRESERVED_KEYS" ]; then
   printf '%s\n' "$_PRESERVED_KEYS" >> "$ENV_FILE"
 fi
@@ -386,6 +394,7 @@ fi
 _HERMES_API_KEYS=(
   HERMES_CUSTOM_API_DEEPSEEK_COM_API_KEY
   HERMES_CUSTOM_OPENGW_CLOUDDEVELOPER_CLUB_API_KEY
+  OPENGW_API_KEY
 )
 for _key_name in "${_HERMES_API_KEYS[@]}"; do
   _key_value="${!_key_name:-}"
@@ -507,7 +516,7 @@ install_engine
 # 目录直接 exit 1。把 worker 安装目录与 codearts tasks 目录合并进
 # ~/.codeartsdoer/cli-data/settings.json 的 trustedFolders（保留已有配置）。
 # ⚠️ Issue #471 QA S4：合并语义（保留 enabled 标志、trustedFolders 并入、
-# 保留其它顶层键）与 src/runtime/codearts.write_trust_settings 逐条对齐——
+# 保留其它顶层键）与 src/domains/runtime/agents/codearts.write_trust_settings 逐条对齐——
 # 修改任意一处必须同步另一处（worker 运行态用 Python 版，安装态用本段自包含实现）。
 provision_codearts_trust() {
   command -v codearts >/dev/null 2>&1 || return 0
@@ -519,7 +528,7 @@ provision_codearts_trust() {
     "$VENV/bin/python" -c "
 import sys
 sys.path.insert(0, '$INSTALL_DIR')
-from src.runtime.codearts import write_trust_settings
+from src.domains.runtime.agents.codearts import write_trust_settings
 write_trust_settings('$_oc_data', ['$INSTALL_DIR', '$_oc_tasks'])
 " && log "codearts folder trust configured (write_trust_settings: trustedFolders += $INSTALL_DIR)" && return 0
   fi
@@ -608,11 +617,11 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$VENV/bin/python -m src.runtime.agent
+ExecStart=$VENV/bin/python -m src.domains.runtime.engine.agent
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=$INSTALL_DIR/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=$INSTALL_DIR/.venv/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]
@@ -696,7 +705,7 @@ fi
 cd "$INSTALL_DIR"
 export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 set -a; . "$ENV_FILE"; set +a
-exec "$VENV/bin/python" -m src.runtime.agent
+exec "$VENV/bin/python" -m src.domains.runtime.engine.agent
 EOF
   chmod +x "$START_SCRIPT"
   # 停掉旧 daemon（start-worker.sh 的 bash 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
@@ -708,10 +717,10 @@ EOF
   pkill -f "$_daemon_pat" >/dev/null 2>&1 || true
   sleep 1
   # 停掉旧 worker——限定到本安装目录自己的实例（按 venv python 路径匹配）
-  # ⚠️ 不能用裸 "python -m src.runtime.agent" 匹配：会误杀同机其他安装目录/其他用户
+  # ⚠️ 不能用裸 "python -m src.domains.runtime.engine.agent" 匹配：会误杀同机其他安装目录/其他用户
   #    的 worker（2026-10-08 实测：root 升级 /opt/grape 时误杀 liufei ~/grape-worker 的
   #    实例，恰好只因为 root 侧 cmdline 带 -u 才躲过反向误杀）。
-  #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.runtime.agent
+  #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.domains.runtime.engine.agent
   #    （$VENV 展开为绝对路径，跨目录/跨用户天然隔离；pgrep -f 按子串匹配含路径）
   _pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
   pkill -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1 || true

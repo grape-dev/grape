@@ -3,7 +3,7 @@
 # 功能：
 #   1. 检查 Python 版本 (>= 3.9)
 #   2. 创建/激活虚拟环境 (.venv)
-#   3. 安装依赖（本地开发用 requirements-local.txt，可用 -Full 安装完整依赖）
+#   3. 安装依赖（本地开发用 pip install -e .，可用 -Full 安装完整依赖）
 #   4. 复制 .env.example → .env（首次启动）
 #   5. 运行 doctor.py 自检
 #   6. 启动开发模式服务
@@ -69,15 +69,16 @@ if (-not (Test-Path $VenvPython)) {
 
 # ===== 3. 依赖安装 =====
 if (-not $NoInstall) {
-    $ReqFile = if ($Full) { "requirements.txt" } else { "requirements-local.txt" }
-    $ReqPath = Join-Path $ScriptDir $ReqFile
+    # Issue #699 Phase 0: requirements*.txt merged into pyproject.toml
+    $InstallSpec = if ($Full) { ".[all]" } else { "." }
+    $PyprojectPath = Join-Path $ScriptDir "pyproject.toml"
 
-    if (-not (Test-Path $ReqPath)) {
-        Write-Warn "依赖文件 $ReqFile 不存在，跳过安装"
+    if (-not (Test-Path $PyprojectPath)) {
+        Write-Warn "pyproject.toml 不存在，跳过安装"
     } else {
-        Write-Step "安装依赖 ($ReqFile)..."
+        Write-Step "安装依赖 (pip install -e $InstallSpec)..."
         Write-Host "  国内网络可加镜像加速: -i https://mirrors.aliyun.com/pypi/simple/"
-        $InstallArgs = @("install", "-r", $ReqPath)
+        $InstallArgs = @("install", "-e", $InstallSpec)
         & $VenvPip @InstallArgs 2>&1 | ForEach-Object {
             if ($_ -match 'error|ERROR') { Write-Host "  $_" -ForegroundColor Red }
             elseif ($_ -match 'Successfully installed') { Write-OK "依赖安装完成" }
@@ -85,7 +86,7 @@ if (-not $NoInstall) {
         }
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "依赖安装可能未完全成功，尝试继续..."
-            Write-Host "  手动安装: $VenvPip install -r $ReqFile -i https://mirrors.aliyun.com/pypi/simple/"
+            Write-Host "  手动安装: $VenvPip install -e $InstallSpec -i https://mirrors.aliyun.com/pypi/simple/"
         }
     }
 }

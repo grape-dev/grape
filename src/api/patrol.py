@@ -26,8 +26,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from src.config import CONFIG_DIR, log
-from src.session_manager import db, db_lock
+from src.kernel.config import CONFIG_DIR, log
+from src.kernel.session_manager import db, db_lock
 
 # ====== 配置面（决策变更 2026-11-02 负责人拍板）：全部走 configs/patrol-config.json
 # （example 入库、正式文件 gitignored，缺省即全默认=能力全开），不再读任何 env。
@@ -142,7 +142,7 @@ def _seed_meta_from_file() -> int:
     db_setup._migrate_whitelist_from_file 同款语义：此后以表为准，文件不再参与）。"""
     seeded = []
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         for k, mkey in _META_KEY_OF.items():
             v = _cfg.get(k)
             if v is None:
@@ -163,7 +163,7 @@ _LOOKBACK_RUNTIME_DAYS = 7    # runtime 回看窗（设计定值；audit 模式�
 _RUNNING_ZOMBIE_HOURS = 2     # running 无信号僵尸窗（D12 判例定值）
 _QUEUED_ZOMBIE_HOURS = 24     # queued 引擎在线观察兜底窗（D12 判例定值）
 # 引擎心跳新鲜度不设 patrol 副本：_engine_unreachable 内单源引用
-# src.runtime.engine_select._RUNTIME_STALE_SECONDS（平台既有 RUNTIME_STALE_SECONDS 配置）。
+# src.domains.runtime.engine.engine_select._RUNTIME_STALE_SECONDS（平台既有 RUNTIME_STALE_SECONDS 配置）。
 _LEADER_TTL_MULTIPLIER = 2  # 心跳窗 = 2×周期（集群时钟漂移余量，设计 §八）
 
 _LEADER_KEY = "patrol:leader"
@@ -201,7 +201,7 @@ def _parse_dt(s: str):
     - agent_tasks.completed_at：aware ISO（+00:00）
     - events.created_at：naive 空格格式 'YYYY-MM-DD HH:MM:SS'
     naive 归一与存储层口径一致（Issue #512）：sqlite=UTC；mysql=CST(+08:00)。
-    注意：src.runtime.health.parse_dt 返回 float 时间戳而非 datetime，勿混用。
+    注意：src.domains.runtime.engine.health.parse_dt 返回 float 时间戳而非 datetime，勿混用。
     """
     if not s:
         return None
@@ -240,7 +240,7 @@ def _minutes_since(dt) -> float:
 def _meta_value(key: str) -> str:
     """读 meta 键（动态配置源，异常回退空串=未配置）。"""
     try:
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.user.db import get_meta_value
         return (get_meta_value(key) or "").strip()
     except Exception:
         return ""
@@ -780,7 +780,7 @@ def _engine_unreachable(runtime_id: int) -> bool:
             dt = _parse_dt(last_seen)
             if dt is not None:
                 # 评审四轮：心跳新鲜度单源引用平台口径（engine_select，env RUNTIME_STALE_SECONDS）
-                from src.runtime.engine_select import _RUNTIME_STALE_SECONDS
+                from src.domains.runtime.engine.engine_select import _RUNTIME_STALE_SECONDS
                 if (datetime.now(timezone.utc) - dt).total_seconds() > _RUNTIME_STALE_SECONDS:
                     return True
         return False
@@ -1069,6 +1069,16 @@ async def patrol_loop():
                 # D23（实现后审计）：run_patrol_once 是持 db_lock 的同步全表扫描，
                 # 裸调会卡住整个事件循环——经 asyncio.to_thread 卸载（DB 车道竞争
                 # 仍在，但 API 事件循环不再被整轮冻结）。
+                # Issue #1667：排队 A2A 滞留兜底对账（终态旁路/竞态窗口的最终防线）。
+                # 无 repo 谓词 = 全仓 queued 扫描，但只派发「前序已不活跃」的行，
+                # 正常在途排队不受影响；持 db_lock 的同步段经 to_thread 卸载。
+                try:
+                    from src.api.event_pipeline import reconcile_queued_a2a
+                    _drained = await asyncio.to_thread(reconcile_queued_a2a)
+                    if _drained:
+                        log.info(f"[patrol] a2a queue reconcile: dispatched {len(_drained)}")
+                except Exception as e:
+                    log.warning(f"[patrol] a2a queue reconcile failed: {e}")
                 try:
                     await asyncio.to_thread(run_patrol_once)
                 except PatrolScanInProgress:

@@ -12,8 +12,8 @@ Issue #46 重构：移除「模拟 issue_opened 事件 + 预分配 Issue 号」�
 import os
 import json
 
-from src.config import log, CONFIG_DIR
-from src.session_manager import db, db_lock
+from src.kernel.config import log, CONFIG_DIR
+from src.kernel.session_manager import db, db_lock
 
 
 # 引导任务类型（模板配置可扩展，此处仅作默认标题派生/兜底说明，不写全量枚举）
@@ -24,23 +24,23 @@ _DEFAULT_TITLES = {
 
 
 def _is_onboarded(repo_key: str) -> bool:
-    from src.user.db import get_meta_value
+    from src.domains.mgmt.user.db import get_meta_value
     return get_meta_value(f"onboarded:{repo_key}") == "1"
 
 
 def _mark_onboarding_started(repo_key: str):
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value(f"onboarded:{repo_key}", "1")
 
 
 def _mark_task_done(repo_key: str, task_type: str):
     """按任务 type 记录完成态（稳定键，不随标题变更丢失）。"""
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value(f"onboarded_task:{repo_key}:{task_type}", "1")
 
 
 def _task_done(repo_key: str, task_type: str) -> bool:
-    from src.user.db import get_meta_value
+    from src.domains.mgmt.user.db import get_meta_value
     return get_meta_value(f"onboarded_task:{repo_key}:{task_type}") == "1"
 
 
@@ -52,7 +52,7 @@ def clear_onboarding_mark(repo_key: str):
     删除，未走解除托管流程，标记残留）——作废它，使新仓库重新触发引导。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         keys = [f"onboarded:{repo_key}"]
         if repo_key.startswith("gitcode:"):
             keys.append(f"onboarded:{repo_key[8:]}")
@@ -93,7 +93,7 @@ def cleanup_stale_repo_data(repo_key: str):
     在 trigger_onboarding 之前调用（repo_created=True 时），确保新仓库干净启动。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         keys = [repo_key]
         if repo_key.startswith("gitcode:"):
             keys.append(repo_key[8:])
@@ -226,7 +226,7 @@ def _load_onboarding_template(repo_key: str, scene_id: str = "", template_id: st
     # 1. 仓库根目录自定义模板
     #    repository 物化根目录 = {WORKSPACE_DIR}/{provider}/{owner}/{repo}（与 repogit codebase mirror 同基）
     try:
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         _repo_root = workspace_repo_dir(repo_key)
         _p = os.path.join(_repo_root, "onboarding-tasks.json")
         if os.path.isfile(_p):
@@ -247,7 +247,7 @@ def _load_onboarding_template(repo_key: str, scene_id: str = "", template_id: st
     #    从服务器本地 examples/ 读取模板专属 onboarding（与 push 时用的同一份文件）。
     if template_id:
         try:
-            from src.config import EXAMPLE_DIR
+            from src.kernel.config import EXAMPLE_DIR
             _p = os.path.join(EXAMPLE_DIR, template_id, "onboarding-tasks.json")
             if os.path.isfile(_p):
                 try:
@@ -282,12 +282,12 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     - 完成层自愈：仅创建 `onboarded_task:{repo}:{type}` 未完成的任务；全部成功后置位总闸
     - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
-    from src.api.routes.tasks import create_standard_task
+    from src.domains.runtime.routes.tasks import create_standard_task
     task_defs = _load_onboarding_template(repo_key, template_id=template_id)
     if not task_defs:
         log.info(f"[Onboarding|repo:{repo_key}] 无 onboarding 任务模板，跳过")
         return
-    from src.repo import Repo
+    from src.kernel.repo import Repo
     bot_token = Repo(repo_key).bot_token
     if not bot_token:
         log.warning(f"[Onboarding|repo:{repo_key}] 无仓库 bot token，跳过 onboarding 任务创建")
@@ -300,14 +300,14 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     # 读取仓库当前场景（managed_repos.dev_scene），用于绑定到每个 onboarding Issue
     _repo_scene = ""
     try:
-        from src.user.db import get_repo_scene
+        from src.domains.mgmt.user.db import get_repo_scene
         _repo_scene = get_repo_scene(repo_key) or ""
     except Exception:
         pass
     # 解析 scene_user_id（owner → user_id）
     _scene_uid = 0
     try:
-        from src.api.routes.tasks import _get_user_id_by_gitcode
+        from src.domains.runtime.routes.tasks import _get_user_id_by_gitcode
         _scene_uid = _get_user_id_by_gitcode(owner, repo_key) or 0
     except Exception:
         pass
@@ -363,8 +363,8 @@ def retry_onboarding_task(repo_key: str, owner: str, task_type: str) -> dict:
         return {"ok": False, "reason": f"task type not in template: {task_type}"}
     if _task_done(repo_key, task_type):
         return {"ok": True, "reason": "task already complete, no retry needed"}
-    from src.api.routes.tasks import create_standard_task
-    from src.repo import Repo
+    from src.domains.runtime.routes.tasks import create_standard_task
+    from src.kernel.repo import Repo
     bot_token = Repo(repo_key).bot_token
     if not bot_token:
         return {"ok": False, "reason": "no repo bot token"}

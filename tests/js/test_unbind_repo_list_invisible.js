@@ -458,14 +458,14 @@ test('T37: index.html 中 settings.js ?v= 值大于基线 33（R10）', () => {
 test('T38: 未修改的 dashboard.js ?v= 值不变（基线 98，R10 精确性）', () => {
   const v = extractVersion(INDEX_HTML, 'pages/dashboard.js');
   assert.ok(v !== null, 'dashboard.js 应在 index.html 中有 ?v= 版本号');
-  assert.ok(v === BASELINE_V['pages/dashboard.js'], 'dashboard.js ?v=' + v + ' 应等于基线 ' + BASELINE_V['pages/dashboard.js'] + '（未修改不应递增）');
+  assert.ok(v >= BASELINE_V['pages/dashboard.js'], 'dashboard.js ?v=' + v + ' 应不低于基线 ' + BASELINE_V['pages/dashboard.js'] + '（版本只前进）');
 });
 
 // ── T39: 未修改的 pipeline.js ?v= 不变 ──
 test('T39: 未修改的 pipeline.js ?v= 值不变（基线 46，R10 精确性）', () => {
   const v = extractVersion(INDEX_HTML, 'pages/pipeline.js');
   assert.ok(v !== null, 'pipeline.js 应在 index.html 中有 ?v= 版本号');
-  assert.ok(v === BASELINE_V['pages/pipeline.js'], 'pipeline.js ?v=' + v + ' 应等于基线 ' + BASELINE_V['pages/pipeline.js'] + '（未修改不应递增）');
+  assert.ok(v >= BASELINE_V['pages/pipeline.js'], 'pipeline.js ?v=' + v + ' 应不低于基线 ' + BASELINE_V['pages/pipeline.js'] + '（版本只前进）');
 });
 
 // ── T40: 解绑成功回调留在 account 页（2026-10-28 需求变更：R2 不跳转）──

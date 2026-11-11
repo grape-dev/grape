@@ -5,7 +5,7 @@ events.payload 可能包含完整 webhook 体，接口层只需 files / guard_im
 """
 import json
 
-from src.config import log
+from src.kernel.config import log
 
 
 def payload_view(payload) -> dict:

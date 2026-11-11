@@ -13,7 +13,7 @@ SQLITE_PATH = 'data/grape-test.db'
 def main():
     # 1. 用 SQLite 模式初始化 grape 让它建表
     os.environ['DEVOPS_DB_BACKEND'] = 'sqlite'
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # 补缺失列（MySQL 有但 SQLite 建表时没加的）

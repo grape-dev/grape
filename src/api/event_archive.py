@@ -6,7 +6,7 @@
 """
 import json, os, threading, tempfile, re
 from datetime import datetime, timezone
-from src.config import WORKSPACE_DIR, log
+from src.kernel.config import WORKSPACE_DIR, log
 
 _repo_locks: dict[str, threading.Lock] = {}
 _lock_guard = threading.Lock()
@@ -56,13 +56,13 @@ def _legacy_no_provider_dir(repo_key: str) -> str:
     """2026-09-14 前的无 provider 隔离路径（{WORKSPACE_DIR}/{owner}/{repo}/issues）。
     仅供兼容读取；新写入一律走 workspace_repo_dir（含 provider 前缀）。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     return os.path.join(WORKSPACE_DIR, from_repo_key(repo_key), "issues")
 
 
 def get_event_json_path(repo_key: str, issue_num) -> str:
     """事件归档路径（与 agent 工作区/event_pipeline 统一，见 repo_key.py 约定）。"""
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), "event.json")
 
 
@@ -124,7 +124,7 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
     优先显式 hint（任务自带 issue_id）；其次 events 表**按 seq 精确查**（无 LIMIT，消除事件量大漏命中）；
     最后扫描 issues 目录（多 provider 兼容）。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     if issue_num_hint:
         num = _extract_num(issue_num_hint)
         if num:
@@ -132,7 +132,7 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
         return "", ""
     # 事件表精确查：by seq（不依赖 limit=200，避免仓库事件量大时漏命中）
     try:
-        from src.session_manager import db, db_lock as _dl
+        from src.kernel.session_manager import db, db_lock as _dl
         with _dl:
             c = db.cursor()
             c.execute(
@@ -146,7 +146,7 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
     except Exception as _e:
         log.warning(f"_locate_by_seq events lookup failed: repo={repo_key} seq={seq}: {_e}")
     # 兜底：扫描 issues 目录（新 provider 隔离 + 旧无 provider + 历史带前缀）
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     for base in (os.path.join(workspace_repo_dir(repo_key), "issues"),
                  _legacy_no_provider_dir(repo_key),
                  _legacy_base_dir(repo_key)):
@@ -206,7 +206,7 @@ def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:
     lines = [f"## Issue #{issue_num} 档案摘要"]
     gathered = False
     try:
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         rk = repo_key or ""
         keys = [rk]
         if ":" in rk:

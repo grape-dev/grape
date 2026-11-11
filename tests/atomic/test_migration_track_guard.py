@@ -8,12 +8,22 @@
 报 `Unknown column (1054)` —— 而调用方普遍 except 后返回空列表，症状是
 「接口 200 但页面全空」（2026-11-06 的 issue.vcs_exists / Issue #995）。
 
-两道守卫
+静态守卫
 --------
 1. test_legacy_track_is_frozen：AST 比对 `_run_all_migrations()` 里的迁移调用
    集合与 `LEGACY_TRACK_FROZEN` 快照，多一条（有人塞新迁移）即失败；
 2. test_registered_versions_unique：注册式迁移的 version 必须全局唯一，
    同号会被版本表判「已执行」永久跳过（202611050001 / 202611060001 两次事故）。
+
+运行时守卫（Issue #1412）
+------------------------
+本文件的静态守卫只比对源码内唯一性，看不见「源码 vs 目标库」的跨分支撞号
+（同号可能已被其它分支落库的迁移盖章）。执行器 `_run_migrations_with_conn`
+在 checksum 漂移判定前新增「同号不同名」守卫：库内盖章名 ≠ 本次注册名时
+log.error（含 version / 库内名 / 注册名 / 修复指引），行为仍跳过不执行以
+保证启动可用性。运行时用例见
+tests/atomic/test_issue_536_migrations.py:
+`test_same_version_diff_name_reports_error_and_skips`。
 """
 import ast
 import collections

@@ -8,8 +8,8 @@
 """
 import re
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 # 反馈状态枚举（与 routes/feedback.py update_feedback_status 白名单一致）
 FEEDBACK_STATUS_OPEN = "open"
@@ -92,7 +92,7 @@ def _provider_module(provider: str):
 
 def _repo_target(repo_key: str):
     """repo_key → (provider, owner, repo)。"""
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     return (provider or "gitcode", owner or "", repo or "")
 

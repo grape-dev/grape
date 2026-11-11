@@ -11,7 +11,7 @@ import time
 import threading
 from typing import Optional
 
-from src.config import CONFIG_DIR, log
+from src.kernel.config import CONFIG_DIR, log
 
 # File-based fallback (used during migration or if DB not ready)
 _PIPELINES_PATH = os.path.join(CONFIG_DIR, "pipelines.json")
@@ -130,7 +130,7 @@ def invalidate_scene_cache(scene_id: str = "", repo_key: str = ""):
 
 
 def _db():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
 
@@ -558,7 +558,7 @@ def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 
     default 兜底）后补查用户个人场景（scene_market scope='user'），避免个人
     场景节点查不到而静默走名字降级（user_id 此前为死参数）。
     """
-    from src.runtime.engine_select import node_matches_agent_role
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     node = None
     if cfg:
@@ -779,7 +779,7 @@ def delete_custom_scene(scene_id: str, repo_key: str):
 
     # 自检推荐配置：清理指向被删场景的规则/兜底
     try:
-        from src.prompt_builder import _sanitize_recommend_config
+        from src.kernel.prompt_builder import _sanitize_recommend_config
         _sanitize_recommend_config(repo_key)
     except Exception:
         pass
@@ -794,7 +794,7 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
     返回 None 表示失败（market 模板名查不到 / repo_key 无效 / 应用被拒）；
     truthiness 语义与旧 bool 返回兼容（session_store 布尔用法不受影响）。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
 
     # 按 name 查 scene_market 拿 market_id
     db, lock = _db()
@@ -820,14 +820,8 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
 
     # 调 apply_market_scene，走场景中心完整逻辑
     # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
-    from src.api.routes.scenes import apply_market_scene
-    try:
-        result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
-    except Exception as _e:
-        # apply_market_scene 以 HTTPException 表达业务拒绝（如技能缺失/重名 409）
-        log.warning(f"apply_market_scene_by_name: apply market scene {market_id} ({scene_name}) "
-                    f"to {repo_key} rejected: {_e}")
-        return None
+    from src.domains.mgmt.routes.scenes import apply_market_scene
+    result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
     log.info(f"apply_market_scene_by_name: applied market scene {market_id} ({scene_name}) to {repo_key}: {result}")
     # Issue #541：提取仓内副本真实 scene_id（weekly-09：每次应用生成 custom-{uuid}）
     real_scene_id = ""
@@ -902,7 +896,7 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
     node = None
     # Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），tag 为展示
     # 阶段名；非标准 tag（如中文阶段名）的存量场景按 id 匹配恢复引擎绑定
-    from src.runtime.engine_select import node_matches_agent_role
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role
     for n in cfg.get("nodes") or []:
         if node_matches_agent_role(n, agent_type):
             node = n

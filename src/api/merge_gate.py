@@ -4,8 +4,7 @@
 runbook 364→1037 行、11 处 `>>>>>>>`/`=======` 残留覆盖已合入功能修改。
 
 设计（docs/issue-752/plan.md §1.1）：
-- 硬命中 = `<<<<<<< ` / `>>>>>>> ` 行首标记 → 合入前阻断（409）；
-- 软命中 = 孤立 `=======` 行 → 仅告警放行（markdown 标题下划线是合法语法，防误杀）；
+- 硬命中 = `<<<<<<< ` / `- 软命中 = 孤立 `=======` 行 → 仅告警放行（markdown 标题下划线是合法语法，防误杀）；
 - 合入后再扫 base 分支合入结果（pre-merge base sha → 合入后 tip 的 compare diff），
   命中 → 告警 + 合入日志（覆盖自动复测等旁路写入 base 分支的残留，PR #874 审查修正）；
 - 门禁 fail-open：扫描自身异常记 warning 放行，不阻断正常合入流水线；
@@ -17,7 +16,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from src.config import log
+from src.kernel.config import log
 
 # 行首锚定：仅识别冲突标记形态，避免正文提及 ">>>>>>>" 字样误报
 _CONFLICT_START_RE = re.compile(r"^<{7}( .*)?$")   # <<<<<<< HEAD / <<<<<<< feat/issue-N
@@ -459,7 +458,7 @@ def record_gate_log(repo_key: str, pr_number: int, phase: str, decision: str,
     try:
         import json
 
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute(
                 "INSERT INTO grape_t_merge_gate_log "

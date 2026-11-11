@@ -16,7 +16,7 @@
 - 项目仅单一 `:root` token 表（无深色 token 覆盖 `.msg` 区域），深浅外观共用该 token，均满足。
 
 ## 测试 seam
-新增 `tests/frontend/test_chat_recall_464.js`（node:test 静态断言 app.css 规则文本，与既有 test_chat_recall_442.js 同风格）：
+新增 `tests/js/test_chat_recall_464.js`（node:test 静态断言 app.css 规则文本，与既有 test_chat_recall_442.js 同风格）：
 1. 桥接规则存在且 hover 态 `pointer-events:auto`、默认 `none`、覆盖宽度 ≥58px；
 2. `.chat-body .msg.r.chat-msg-recalled a` 覆盖规则存在且 `color:var(--a)`，specificity 高于白规则；
 3. 回归断言：#442 hover 显示规则、`.chat-msg-recalled` 按钮隐藏规则仍在。

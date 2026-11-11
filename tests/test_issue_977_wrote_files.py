@@ -53,7 +53,7 @@ def _cleanup(task_id: str):
 class TestWroteFiles:
     def test_write_and_patch_yield_two_entries(self):
         """write(57KB) + patch 两条 tool_use → wrote_files 恰 2 条，bytes 与原文一致、seq 对得上。"""
-        from src.api.routes.task_logs import get_task_runtime_info
+        from src.domains.runtime.routes.task_logs import get_task_runtime_info
         task_id = _insert_task()
         big_content = "x" * 57 * 1024
         try:
@@ -77,7 +77,7 @@ class TestWroteFiles:
 
     def test_no_write_yields_empty_list_and_other_fields_intact(self):
         """任务无 write 类消息 → wrote_files == []，其余字段与既有口径逐字段一致。"""
-        from src.api.routes.task_logs import get_task_runtime_info
+        from src.domains.runtime.routes.task_logs import get_task_runtime_info
         task_id = _insert_task()
         try:
             _insert_tool_use(task_id, 1, "read", {"path": "src/other.py"})

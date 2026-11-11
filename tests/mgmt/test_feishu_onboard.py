@@ -1,0 +1,562 @@
+"""飞书扫码一键建应用（feishu_onboard）测试
+
+覆盖 docs/new-version2/feishu-qr-app-onboarding-plan.md §10 的用例：
+- start 参数校验 / 并发限制
+- on_qr_code 回调 → waiting_confirm + qr_url 落库
+- 扫码成功 → connected + chat_agent_session / devops_agent_session 落库
+- 异常（用户拒绝 / 过期 / 通用错误）→ failed
+- status 端点权限（不存在 / 越权）
+- cancel 幂等
+"""
+import asyncio
+import os
+import sys
+import uuid
+from unittest.mock import patch, AsyncMock
+
+SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
+os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
+
+from fastapi.testclient import TestClient
+from src.api.main import app
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
+from src.kernel.session_manager import db, db_lock
+# JWT access token helper（替代旧的 create_session_token）
+def _jwt_access_token(user_id, username="test"):
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
+    return create_access_token(user_id, username, get_token_version(user_id))
+
+client = TestClient(app)
+
+_uid = None
+_username = None
+_token = ""
+_headers = {}
+
+QR_URL = "https://accounts.feishu.cn/authorize?device_code=abc"
+
+
+def _result():
+    """动态生成唯一 app_id/app_secret，避免测试库残留绑定污染（app_id 全局唯一强约束）。"""
+    return {
+        "client_id": "cli_onboard_" + uuid.uuid4().hex[:12],
+        "client_secret": "sec_onboard_" + uuid.uuid4().hex[:12],
+        "user_info": {"open_id": "ou_xxx", "tenant_brand": "feishu"},
+    }
+
+
+def setup_module():
+    global _uid, _username, _token, _headers
+    _username = "onboard_" + uuid.uuid4().hex[:8]
+    _uid = grape_account_db.create_grape_account(_username, email=None, password="pw123")
+    if not _uid:
+        _uid = grape_account_db.get_grape_account_by_username(_username)
+    _token = _jwt_access_token(_uid["id"], _uid["username"])
+    _headers = {"Authorization": f"Bearer {_token}"}
+
+
+def teardown_module():
+    global _uid
+    if _uid:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (_uid["id"],))
+            c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (_uid["id"],))
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"repo_{_uid['id']}", f"gitcode:owner{_uid['id']}%"))
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
+            c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%' OR bot_app_id LIKE 'cli_vod_%'")
+            db.commit()
+        grape_account_db.soft_delete_account(_uid["id"])
+
+
+def _clean_tasks():
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (_uid["id"],))
+        # 清理 VOD 用例产生的 devops_agent_session 行（UNIQUE(repo_key, agent_type)）
+        c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"gitcode:repo_{_uid['id']}%", f"gitcode:owner{_uid['id']}%"))
+        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%'")
+        db.commit()
+
+
+def _patch_register(side_effect):
+    """patch lark_oapi.aregister_app（SDK 顶层函数），side_effect 为 async 协程工厂。"""
+    return patch("lark_oapi.aregister_app", side_effect=side_effect)
+
+
+async def _fake_success(**kwargs):
+    """正常流程：先触发 on_qr_code，再返回 RESULT"""
+    kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+    return _result()
+
+
+def _await_run(bot_type, repo_key="", patched=None):
+    """直接 await 后台协程（同步测试辅助），确保状态已落库。"""
+    from src.domains.mgmt.routes import feishu_onboard as f
+    task_id = uuid.uuid4().hex
+    f._create_task(task_id, bot_type, repo_key, _uid["id"])
+    with patched:
+        asyncio.run(f._run_registration(task_id, bot_type, repo_key, _uid["id"]))
+    return task_id
+
+
+# ===================== A. start 端点 =====================
+class TestStart:
+    def test_start_returns_task_id(self):
+        _clean_tasks()
+        async def _stub(**kwargs):
+            kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+            return _result()
+
+        with _patch_register(_stub) as m:
+            r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["status"] == "pending"
+            assert data["task_id"]
+            m.assert_awaited()
+        _clean_tasks()
+
+    def test_start_invalid_bot_type(self):
+        r = client.post("/api/feishu/onboard/start", json={"bot_type": "xxx"}, headers=_headers)
+        assert r.status_code == 400
+        assert "bot_type" in r.json()["detail"]["message"]
+
+    def test_start_vod_requires_repo_key(self):
+        r = client.post("/api/feishu/onboard/start", json={"bot_type": "vod_bot"}, headers=_headers)
+        assert r.status_code == 400
+        assert "repo_key" in r.json()["detail"]["message"]
+
+    def test_start_concurrency_409(self):
+        _clean_tasks()
+        from src.domains.mgmt.routes import feishu_onboard as f
+        # 先插入一条进行中的任务
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status) VALUES (?,?,?,?)",
+                ("concurrent_task", "chat_bot", _uid["id"], "waiting_confirm"),
+            )
+            db.commit()
+        try:
+            with _patch_register(AsyncMock()) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 409, r.text
+                m.assert_not_awaited()
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='concurrent_task'")
+                db.commit()
+
+    def test_start_409_detail_carries_old_task_id(self):
+        """UT-01：并发 409 的 detail 必须携带旧任务 task_id（供前端确认重开作废旧任务）。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status) VALUES (?,?,?,?)",
+                ("ut01_old_task", "chat_bot", _uid["id"], "waiting_confirm"),
+            )
+            db.commit()
+        try:
+            with _patch_register(AsyncMock()) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 409, r.text
+                d = r.json().get("detail", {})
+                assert d.get("task_id") == "ut01_old_task", f"409 detail 应含旧 task_id，got {d}"
+                assert d.get("code") == 409
+                m.assert_not_awaited()
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut01_old_task'")
+                db.commit()
+
+    def test_start_stale_waiting_confirm_auto_expires_and_allows_new(self):
+        """UT-04：旧 waiting_confirm 任务超过 STALE_TTL → 自动置 failed 并放行新任务。"""
+        _clean_tasks()
+        from src.domains.mgmt.routes.feishu_onboard import _STATUS_FAILED, _STATUS_PENDING
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status, qr_url, created_at) "
+                "VALUES (?,?,?,?,?, datetime('now','-1 hour'))",
+                ("ut04_stale_task", "chat_bot", _uid["id"], "waiting_confirm", "qr://test"),
+            )
+            db.commit()
+        try:
+            async def _stub(**kwargs):
+                kwargs.get("on_qr_code")({"url": "qr://new", "expire_in": 300})
+                return _result()
+            with _patch_register(_stub) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                # stale 任务被自动作废 → 不再 409，可启动新任务
+                assert r.status_code == 200, r.text
+                assert r.json().get("status") == "pending"
+                assert r.json().get("task_id")
+                m.assert_awaited()
+            from src.domains.mgmt.routes import feishu_onboard as f
+            stale = f._get_task("ut04_stale_task")
+            assert stale["status"] == _STATUS_FAILED, f"stale 任务应被自动作废为 failed，got {stale['status']}"
+            assert "stale" in stale["error"].lower(), f"error 应标注 stale，got {stale['error']}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_stale_task' OR task_id IN (SELECT task_id FROM feishu_onboard_task WHERE user_id=? AND status=?)", (_uid["id"], _STATUS_PENDING))
+                db.commit()
+
+    def test_start_recent_waiting_confirm_still_409(self):
+        """UT-04 反向：未过期（最近）的 waiting_confirm 仍应 409（不得误作废）。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status) VALUES (?,?,?,?)",
+                ("ut04_fresh_task", "chat_bot", _uid["id"], "waiting_confirm"),
+            )
+            db.commit()
+        try:
+            with _patch_register(AsyncMock()) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 409, r.text
+                m.assert_not_awaited()
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_fresh_task'")
+                db.commit()
+
+    def test_start_pending_stale_also_expires(self):
+        """UT-04：pending 状态旧任务同样受 STALE_TTL 约束（不止 waiting_confirm）。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status, created_at) "
+                "VALUES (?,?,?,?, datetime('now','-1 hour'))",
+                ("ut04_stale_pending", "chat_bot", _uid["id"], "pending"),
+            )
+            db.commit()
+        try:
+            async def _stub(**kwargs):
+                kwargs.get("on_qr_code")({"url": "qr://p", "expire_in": 300})
+                return _result()
+            with _patch_register(_stub) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 200, r.text
+                m.assert_awaited()
+            from src.domains.mgmt.routes import feishu_onboard as f
+            assert f._get_task("ut04_stale_pending")["status"] == "failed"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_stale_pending' OR task_id IN (SELECT task_id FROM feishu_onboard_task WHERE user_id=? AND status!='failed')", (_uid["id"],))
+                db.commit()
+
+
+# ===================== B. 扫码回调 / 状态流转 =====================
+class TestStatusFlow:
+    def test_qr_callback_sets_waiting_confirm(self):
+        """on_qr_code 触发后任务置 waiting_confirm 且 qr_url 落库。"""
+        _clean_tasks()
+        task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
+        from src.domains.mgmt.routes import feishu_onboard as f
+        t = f._get_task(task_id)
+        assert t["status"] == "connected"
+        assert t["qr_url"] == QR_URL
+        _clean_tasks()
+
+    def test_chat_connected_persists_chat_session(self):
+        """扫码成功 chat_bot → chat_agent_session + global_im_bot_config 落库。"""
+        _clean_tasks()
+        result = _result()
+        task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT im_app_id, im_app_secret FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1",
+                (_uid["id"],),
+            ).fetchone()
+            reg = c.execute(
+                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
+                (row[0],) if row else ("",),
+            ).fetchone()
+        assert row and row[0].startswith("cli_onboard_")
+        assert row[1].startswith("sec_onboard_")
+        assert reg and reg[0] == "chat_bot"
+        _clean_tasks()
+
+    def test_vod_connected_persists_devops_session(self):
+        """扫码成功 vod_bot → devops_agent_session + global_im_bot_config 落库。"""
+        _clean_tasks()
+        from src.kernel.repo_key import to_repo_key
+        repo_key = to_repo_key(f"repo_{_uid['id']}")  # 与 _apply_vod_credentials 归一化后一致
+        from src.domains.mgmt.routes import feishu_onboard as f
+        # 预建 devops_agent_session 行（vod）
+        import datetime
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_provider) VALUES (?,?,?,?,datetime('now'),'feishu')",
+                (f"vod_{_uid['id']}", repo_key, "vod", "idle"),
+            )
+            db.commit()
+        with _patch_register(_fake_success) as patched:
+            from src.domains.mgmt.routes import feishu_onboard as f
+            # 改用 vod 专用返回
+            async def _fake_vod(**kwargs):
+                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+                return _result()
+            patched.side_effect = _fake_vod
+            task_id = _await_run("vod_bot", repo_key, patched=patched)
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT im_app_id, im_app_secret FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (repo_key,),
+            ).fetchone()
+            reg = c.execute(
+                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
+                (row[0],) if row else ("",),
+            ).fetchone()
+        assert row and row[0].startswith("cli_onboard_")
+        assert row[1].startswith("sec_onboard_")
+        assert reg and reg[0] == "vod_bot"
+        _clean_tasks()
+
+    def test_vod_no_existing_row_creates_with_prefix(self):
+        """前端传无前缀 repo_key（owner/repo）且 devops_agent_session 无既有 vod 行时，
+        应归一化为 gitcode:owner/repo 并 INSERT 建行——否则凭据丢失（历史 bug）。"""
+        _clean_tasks()
+        repo_key = f"owner{_uid['id']}/sample-repo"
+        from src.kernel.repo_key import to_repo_key
+        with _patch_register(_fake_success) as patched:
+            from src.domains.mgmt.routes import feishu_onboard as f
+            async def _fake_vod(**kwargs):
+                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+                return _result()
+            patched.side_effect = _fake_vod
+            task_id = _await_run("vod_bot", repo_key, patched=patched)
+        from src.kernel.session_manager import db as _db
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT repo_key, im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (to_repo_key(repo_key),),
+            ).fetchone()
+            reg = c.execute(
+                "SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1",
+                (row[1],) if row else ("",),
+            ).fetchone()
+        assert row, "无既有 vod 行时扫码应自动 INSERT 建行"
+        assert row[0] == to_repo_key(repo_key), f"repo_key 应归一化带前缀，实际 {row[0]!r}"
+        assert row[1].startswith("cli_onboard_")
+        assert row[2].startswith("sec_onboard_")
+        assert row[3] == "feishu"
+        assert reg and reg[0] == "vod_bot"
+        _clean_tasks()
+
+    def test_vod_update_existing_row_preserves_session(self):
+        """已有 vod 行时 UPDATE 凭据，且 session id 不变（不重建）。"""
+        _clean_tasks()
+        repo_key = f"owner{_uid['id']}/sample-repo"
+        from src.kernel.repo_key import to_repo_key
+        rk = to_repo_key(repo_key)
+        import uuid as _uuid
+        sess_id = str(_uuid.uuid4())
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at, im_provider) VALUES (?,?,?,?,datetime('now'),'feishu')",
+                (sess_id, rk, "vod", "idle"),
+            )
+            db.commit()
+        with _patch_register(_fake_success) as patched:
+            from src.domains.mgmt.routes import feishu_onboard as f
+            async def _fake_vod(**kwargs):
+                kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
+                return _result()
+            patched.side_effect = _fake_vod
+            task_id = _await_run("vod_bot", repo_key, patched=patched)
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT id, im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                (rk,),
+            ).fetchone()
+        assert row, "vod 行应存在"
+        assert row[0] == sess_id, "UPDATE 不应改变 session id"
+        assert row[1].startswith("cli_onboard_")
+        assert row[2].startswith("sec_onboard_")
+        assert row[3] == "feishu"
+        _clean_tasks()
+
+    def test_access_denied_fails(self):
+        """用户拒绝授权 → AppAccessDeniedError → failed"""
+        _clean_tasks()
+        from lark_oapi.scene.registration import AppAccessDeniedError
+
+        async def _denied(**kwargs):
+            raise AppAccessDeniedError("access_denied", "user denied")
+
+        task_id = _await_run("chat_bot", patched=_patch_register(_denied))
+        from src.domains.mgmt.routes import feishu_onboard as f
+        t = f._get_task(task_id)
+        assert t["status"] == "failed"
+        _clean_tasks()
+
+    def test_expired_fails(self):
+        """二维码过期 → AppExpiredError → failed"""
+        _clean_tasks()
+        from lark_oapi.scene.registration import AppExpiredError
+
+        async def _expired(**kwargs):
+            raise AppExpiredError("expired_token", "polling timed out")
+
+        task_id = _await_run("chat_bot", patched=_patch_register(_expired))
+        from src.domains.mgmt.routes import feishu_onboard as f
+        t = f._get_task(task_id)
+        assert t["status"] == "failed"
+        assert "expired" in t["error"].lower()
+        _clean_tasks()
+
+    def test_generic_error_fails(self):
+        """通用异常 → failed"""
+        _clean_tasks()
+
+        async def _boom(**kwargs):
+            raise RuntimeError("network down")
+
+        task_id = _await_run("chat_bot", patched=_patch_register(_boom))
+        from src.domains.mgmt.routes import feishu_onboard as f
+        t = f._get_task(task_id)
+        assert t["status"] == "failed"
+        assert "network down" in t["error"]
+        _clean_tasks()
+
+
+# ===================== C. status 端点 =====================
+class TestStatusEndpoint:
+    def test_status_connected(self):
+        _clean_tasks()
+        task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
+        r = client.get(f"/api/feishu/onboard/status?task_id={task_id}", headers=_headers)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["status"] == "connected"
+        assert d["app_id"].startswith("cli_onboard_")
+        assert d["app_secret_exists"] is True
+        _clean_tasks()
+
+    def test_status_not_found(self):
+        r = client.get("/api/feishu/onboard/status?task_id=no_such_task", headers=_headers)
+        assert r.status_code == 404
+
+    def test_status_cross_user_403(self):
+        """他人 task_id → 403 防越权"""
+        _clean_tasks()
+        user_b = grape_account_db.create_grape_account("onboard_b_" + uuid.uuid4().hex[:6], email=None, password="pw123")
+        task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
+        # 换用 user_b 查询
+        token_b = _jwt_access_token(user_b["id"], user_b["username"])
+        r = client.get(
+            f"/api/feishu/onboard/status?task_id={task_id}",
+            headers={"Authorization": f"Bearer {token_b}"},
+        )
+        assert r.status_code == 403
+        grape_account_db.soft_delete_account(user_b["id"])
+        _clean_tasks()
+
+
+# ===================== D. cancel 端点 =====================
+class TestCancel:
+    def test_cancel_pending_task(self):
+        _clean_tasks()
+        # 直接建一条 waiting_confirm 任务（无后台协程，cancel 幂等即可）
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status, qr_url) VALUES (?,?,?,?,?)",
+                ("cancel_task", "chat_bot", _uid["id"], "waiting_confirm", QR_URL),
+            )
+            db.commit()
+        try:
+            r = client.post("/api/feishu/onboard/cancel", json={"task_id": "cancel_task"}, headers=_headers)
+            assert r.status_code == 200, r.text
+            from src.domains.mgmt.routes import feishu_onboard as f
+            t = f._get_task("cancel_task")
+            assert t["status"] == "failed"
+            assert "取消" in t["error"]
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='cancel_task'")
+                db.commit()
+
+    def test_cancel_already_connected_idempotent(self):
+        """已 connected 的任务 cancel 幂等，不改状态。"""
+        _clean_tasks()
+        task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
+        r = client.post("/api/feishu/onboard/cancel", json={"task_id": task_id}, headers=_headers)
+        assert r.status_code == 200
+        assert r.json()["status"] == "connected"
+        from src.domains.mgmt.routes import feishu_onboard as f
+        t = f._get_task(task_id)
+        assert t["status"] == "connected"
+        _clean_tasks()
+
+    def test_cancel_not_found(self):
+        r = client.post("/api/feishu/onboard/cancel", json={"task_id": "no_such"}, headers=_headers)
+        assert r.status_code == 404
+
+
+# ===================== E. addons schema 看护 =====================
+class TestAddonsSchema:
+    """看护 _ADDONS 结构，防止引入 SDK 不支持的键（如 preset）导致扫码必失败。
+
+    背景：lark-oapi 1.7.0 的 _normalize_addons 仅允许顶层 scopes/events/callbacks，
+    文档中的 addons.preset 在实测中抛 ValueError('addons.preset is not allowed')，
+    曾导致所有扫码任务直接 failed（见 feishu-qr-app-onboarding-plan.md 修复记录）。
+    """
+
+    def test_addons_top_level_keys_allowed(self):
+        """_ADDONS 顶层键必须 ⊆ SDK 允许集 {scopes, events, callbacks}。"""
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
+        allowed = {"scopes", "events", "callbacks"}
+        unknown = set(_ADDONS) - allowed
+        assert not unknown, f"addons 含 SDK 不支持的键: {unknown}"
+
+    def test_addons_sdk_normalize_accepts(self):
+        """_ADDONS 必须能被 SDK 的 _normalize_addons 校验通过（不抛 ValueError）。
+
+        直接调用 SDK 校验函数，等于模拟 aregister_app 内部首个校验步骤；
+        若校验抛错则说明 schema 与 SDK 版本不兼容，扫码必失败。
+        """
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
+        from lark_oapi.scene.registration import _normalize_addons
+        normalized = _normalize_addons(_ADDONS)
+        assert "scopes" in normalized
+        assert "tenant" in normalized["scopes"]
+        assert "im:message:send_as_bot" in normalized["scopes"]["tenant"]
+        assert "events" in normalized
+        assert "im.message.receive_v1" in normalized["events"]["items"]["tenant"]
+
+    def test_addons_encode_addons_no_error(self):
+        """_ADDONS 必须能通过 SDK 完整编码（gzip+base64），模拟真实调用路径。"""
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
+        from lark_oapi.scene.registration import _encode_addons
+        encoded = _encode_addons(_ADDONS)
+        assert encoded, "addons 编码结果不应为空"
+
+    def test_addons_has_required_scopes_and_event(self):
+        """关键依赖：发送消息 scope + im.message.receive_v1 事件不可缺失。"""
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
+        tenant_scopes = _ADDONS["scopes"]["tenant"]
+        assert "im:message:send_as_bot" in tenant_scopes
+        assert "im:chat:readonly" in tenant_scopes
+        events = _ADDONS["events"]["items"]["tenant"]
+        assert "im.message.receive_v1" in events

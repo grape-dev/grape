@@ -17,8 +17,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from src.config import log
-from src.repo_key import parse_repo_key
+from src.kernel.config import log
+from src.kernel.repo_key import parse_repo_key
 
 # 索引 TTL（秒）：GitCode/GitHub 侧删除/新建卡片在该窗口内可容忍短暂不一致。
 VCS_INDEX_TTL_SECONDS = 300
@@ -74,7 +74,7 @@ def _store_refresh(repo_key: str, info: dict) -> None:
 
 def _fetch_gitcode_numbers(owner: str, repo: str, token: str) -> Optional[set[int]]:
     """分页拉取 GitCode issue 编号；仅在空页终止，短页不代表末页（防索引截断误删）。"""
-    from src.user.repo_manager import _req
+    from src.domains.mgmt.user.repo_manager import _req
 
     numbers: set[int] = set()
     page = 1
@@ -101,7 +101,7 @@ def _fetch_gitcode_numbers(owner: str, repo: str, token: str) -> Optional[set[in
 
 def _fetch_github_numbers(owner: str, repo: str, token: str) -> Optional[set[int]]:
     """分页拉取 GitHub issue 编号；仅在空页终止，短页不代表末页（防索引截断误删）。"""
-    from src.user.repo_manager import _github_req
+    from src.domains.mgmt.user.repo_manager import _github_req
 
     numbers: set[int] = set()
     page = 1
@@ -143,13 +143,13 @@ def vcs_issue_numbers(repo_key: str) -> Optional[frozenset[int]]:
     result: Optional[frozenset[int]] = None
     try:
         if provider == "github":
-            from src.user.db import get_github_token
+            from src.domains.mgmt.user.db import get_github_token
             token = get_github_token(repo_key=repo_key) or ""
             if token:
                 raw = _fetch_github_numbers(owner, repo, token)
                 result = frozenset(raw) if raw else None
         elif provider == "gitcode":
-            from src.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.user.db import get_repo_token_with_refresh
             token = get_repo_token_with_refresh(repo_key) or ""
             if token:
                 raw = _fetch_gitcode_numbers(owner, repo, token)
@@ -215,7 +215,7 @@ def _apply_existence(repo_key: str, numbers: frozenset[int]) -> Optional[frozens
     返回 ``None`` 表示读/写失败（调用方必须映射为 unavailable/fail-open）；
     返回编号集合表示回写成功，集合内为“无法确认存在性”的编号（卡片级 unknown）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 读台账（短暂持有 db_lock；网络复核必须在锁外，避免阻塞其它 DB 访问）。
     with db_lock:
@@ -375,7 +375,7 @@ def backfill_vcs_exists(repo_keys: Optional[list[str]] = None) -> dict:
     - 分批（默认 200 卡/批）限速，避免启动期/VCS 限流；
     - 仅做软标记，不删除台账行，保留审计与事件链。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     if repo_keys is None:
         try:

@@ -12,7 +12,7 @@ provider 无关——GitCode 和 GitHub 读 API 都走此包装器。
                           重试后 403(无 token 关键词) 则业务权限不足返回"无权限"
     否：直接返回"无权限"不触发刷新
 """
-from src.config import log
+from src.kernel.config import log
 
 
 def _is_token_error(err: Exception) -> bool:
@@ -65,7 +65,7 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
     返回 api_call_fn 的结果，或抛 HTTPException。
     """
     from fastapi import HTTPException
-    from src.user.db import refresh_oauth_token
+    from src.domains.mgmt.user.db import refresh_oauth_token
 
     user_id = user["id"]
     username = user["username"]

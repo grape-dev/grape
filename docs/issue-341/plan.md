@@ -23,7 +23,7 @@
 - 畸形 hash `#tasks/abc`：非数字 param 直接走原列表逻辑，不报错。
 
 ## 测试方案
-新增 `tests/frontend/test_issue_341_tasks_deeplink.js`（node:test + vm 沙箱，mock DOM/API）：
+新增 `tests/js/test_issue_341_tasks_deeplink.js`（node:test + vm 沙箱，mock DOM/API）：
 1. `renderTasks('341')` 设置 `_pendingIssueNumber`/`_deeplinkIssueNumber`；
 2. `renderTasks()` / `renderTasks('abc')` 不设置且清理深链标志（#tasks 零回归）；
 3. loadTasks 深链命中 → `_openBoardDetail` 被调用、深链标志清除；

@@ -17,7 +17,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/runtimes.js'), 'utf8');
-const SETTINGS_PY = fs.readFileSync(path.join(ROOT, 'src/api/routes/settings.py'), 'utf8');
+const SETTINGS_PY = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/settings.py'), 'utf8');
 
 // 1. 范围状态与选项
 assert.ok(/let _rtRange = 'all';/.test(RUNTIMES_JS), '应有范围状态 _rtRange 默认 all');

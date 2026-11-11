@@ -20,7 +20,7 @@ import pytest
 from fastapi import HTTPException
 
 from src.session_manager import db, db_lock
-from src.runtime import engine_select as es
+from src.domains.runtime.engine import engine_select as es
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,7 @@ class TestSceneNodeRoleValidation:
     """Issue #955 写侧：节点 id 角色枚举校验（非法 → 400）。"""
 
     def test_invalid_role_rejected_400(self):
-        from src.api.routes.scenes import _validate_scene_node_roles
+        from src.domains.runtime.routes.scenes import _validate_scene_node_roles
         with pytest.raises(HTTPException) as ei:
             _validate_scene_node_roles([{"id": "prepare", "tag": "准备工作"}])
         assert ei.value.status_code == 400
@@ -107,15 +107,15 @@ class TestSceneNodeRoleValidation:
             assert role in msg
 
     def test_chinese_tag_with_valid_id_passes(self):
-        from src.api.routes.scenes import _validate_scene_node_roles
+        from src.domains.runtime.routes.scenes import _validate_scene_node_roles
         _validate_scene_node_roles([{"id": "vod", "tag": "准备工作", "skill": "vod"}])
 
     def test_chat_role_passes(self):
-        from src.api.routes.scenes import _validate_scene_node_roles
+        from src.domains.runtime.routes.scenes import _validate_scene_node_roles
         _validate_scene_node_roles([{"id": "chat", "tag": "对话阶段"}])
 
     def test_create_scene_invalid_role_400(self):
-        from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
+        from src.domains.runtime.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
         body = CreateSceneRequest(
             name="t955", nodes=[SceneNodeInput(id="prepare", tag="准备工作", skill="vod")])
         with pytest.raises(HTTPException) as ei:
@@ -125,7 +125,7 @@ class TestSceneNodeRoleValidation:
 
     def test_update_scene_invalid_role_400(self):
         from src.api.pipeline_config import create_custom_scene
-        from src.api.routes.scenes import update_scene, UpdateSceneRequest, SceneNodeInput
+        from src.domains.runtime.routes.scenes import update_scene, UpdateSceneRequest, SceneNodeInput
         create_custom_scene(scene_id="s955-upd", name="s955-upd", description="",
                             repo_key="gitcode:955/repo",
                             nodes=[{"id": "vod", "tag": "vod", "skill": "vod"}])
@@ -138,8 +138,8 @@ class TestSceneNodeRoleValidation:
 
     def test_role_source_single_definition(self):
         """角色全集统一引用 engine_select.KNOWN_AGENT_ROLES，避免重复定义漂移。"""
-        from src.api.routes.scenes import _validate_scene_node_roles
-        from src.runtime.engine_select import KNOWN_AGENT_ROLES
+        from src.domains.runtime.routes.scenes import _validate_scene_node_roles
+        from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
         with pytest.raises(HTTPException) as ei:
             _validate_scene_node_roles([{"id": "drift_probe_role", "tag": "x"}])
         msg = ei.value.detail["message"]
@@ -228,7 +228,7 @@ class TestValidateSceneEngineIdsCapability:
     def test_all_capability_wildcard_allowed(self):
         """引擎仅有 tag='all' 能力 → 放行（follow-up 恢复通配，存量引擎兼容）。"""
         eng = _mk_engine("opencode-955w", credential_id=_mk_cred("c-955w"), cap_tags=("all",))
-        from src.api.routes.scenes import _validate_scene_engine_ids
+        from src.domains.runtime.routes.scenes import _validate_scene_engine_ids
         _validate_scene_engine_ids(
             [{"id": "coding", "tag": "开发阶段", "skill": "implementation",
               "engine_runtime_ids": [eng]}], "gitcode:955/repo")
@@ -236,7 +236,7 @@ class TestValidateSceneEngineIdsCapability:
     def test_role_capability_passes_with_chinese_tag(self):
         """引擎有角色能力标签 + 节点 tag 为中文阶段名 → 校验按 id 角色通过。"""
         eng = _mk_engine("opencode-955r", credential_id=_mk_cred("c-955r"), cap_tags=("coding",))
-        from src.api.routes.scenes import _validate_scene_engine_ids
+        from src.domains.runtime.routes.scenes import _validate_scene_engine_ids
         _validate_scene_engine_ids(
             [{"id": "coding", "tag": "开发阶段", "skill": "implementation",
               "engine_runtime_ids": [eng]}], "gitcode:955/repo")
@@ -244,7 +244,7 @@ class TestValidateSceneEngineIdsCapability:
     def test_display_tag_capability_not_accepted(self):
         """引擎只挂展示 tag（中文阶段名）能力 → 按角色校验不通过。"""
         eng = _mk_engine("opencode-955t", credential_id=_mk_cred("c-955t"), cap_tags=("开发阶段",))
-        from src.api.routes.scenes import _validate_scene_engine_ids
+        from src.domains.runtime.routes.scenes import _validate_scene_engine_ids
         with pytest.raises(HTTPException) as ei:
             _validate_scene_engine_ids(
                 [{"id": "coding", "tag": "开发阶段", "skill": "implementation",
@@ -253,7 +253,7 @@ class TestValidateSceneEngineIdsCapability:
 
     def test_tag_only_legacy_payload_sre_guard_kept(self):
         """纯函数历史调用（仅 tag 无 id）兜底仍生效：SRE 空 400。"""
-        from src.api.routes.scenes import _validate_scene_engine_ids
+        from src.domains.runtime.routes.scenes import _validate_scene_engine_ids
         with pytest.raises(HTTPException) as ei:
             _validate_scene_engine_ids(
                 [{"tag": "sre", "enabled": True, "engine_runtime_ids": []}],
@@ -265,7 +265,7 @@ class TestMarketSceneRoleValidation:
     """Issue #955 QA 复审：market create/update 同样挂载节点 id 角色枚举校验。"""
 
     def test_market_create_invalid_role_400(self):
-        from src.api.routes.scenes import create_market_scene, CreateMarketSceneRequest
+        from src.domains.runtime.routes.scenes import create_market_scene, CreateMarketSceneRequest
         body = CreateMarketSceneRequest(
             name="mkt955bad",
             nodes=[{"id": "prepare", "tag": "准备工作", "skill": "vod"}])
@@ -275,8 +275,8 @@ class TestMarketSceneRoleValidation:
         assert "prepare" in ei.value.detail["message"]
 
     def test_market_update_invalid_role_400(self, monkeypatch):
-        from src.api.routes.scenes import update_market_scene, UpdateMarketSceneRequest
-        import src.user.db as user_db
+        from src.domains.runtime.routes.scenes import update_market_scene, UpdateMarketSceneRequest
+        import src.domains.mgmt.user.db as user_db
         monkeypatch.setattr(user_db, "get_scene_market_by_id",
                             lambda mid: {"id": mid, "scope": "repo", "name": "mkt"})
         body = UpdateMarketSceneRequest(
@@ -288,7 +288,7 @@ class TestMarketSceneRoleValidation:
 
     def test_market_update_empty_nodes_skips_validation(self):
         """nodes 为空（不更新节点）→ 跳过校验，不误伤纯元数据更新。"""
-        from src.api.routes.scenes import _validate_scene_node_roles
+        from src.domains.runtime.routes.scenes import _validate_scene_node_roles
         _validate_scene_node_roles([])
 
 
@@ -296,20 +296,20 @@ class TestNodeAgentRoleHelper:
     """Issue #955 QA 复审：id 优先、tag 兜底 helper 统一三处重复匹配逻辑。"""
 
     def test_id_first_tag_fallback(self):
-        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        from src.domains.runtime.engine.engine_select import node_agent_role, node_matches_agent_role
         node = {"id": "vod", "tag": "准备工作"}
         assert node_agent_role(node) == "vod"
         assert node_matches_agent_role(node, "vod") is True
         assert node_matches_agent_role(node, "准备工作") is True
 
     def test_tag_only_legacy_node(self):
-        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        from src.domains.runtime.engine.engine_select import node_agent_role, node_matches_agent_role
         node = {"tag": "sre"}
         assert node_agent_role(node) == "sre"
         assert node_matches_agent_role(node, "sre") is True
 
     def test_non_dict_and_empty_role(self):
-        from src.runtime.engine_select import node_agent_role, node_matches_agent_role
+        from src.domains.runtime.engine.engine_select import node_agent_role, node_matches_agent_role
         assert node_agent_role("not-a-node") == ""
         assert node_matches_agent_role({"id": "vod"}, "") is False
         assert node_matches_agent_role(None, "vod") is False
@@ -343,7 +343,7 @@ class TestApplySceneIdFirst:
             session_store, "upsert_agent_session",
             lambda **kw: recorded.append(kw))
 
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        from src.domains.runtime.routes.scenes import apply_scene, ApplySceneRequest
         result = apply_scene("955", "repo", ApplySceneRequest(scene_id="s955-apply"),
                              user={"username": "tester", "id": 1})
         assert result.get("updated", 0) >= 1

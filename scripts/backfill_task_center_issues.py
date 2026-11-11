@@ -19,9 +19,9 @@ def main() -> list:  # type: ignore[return]
     dry_run = "--dry-run" in sys.argv
     os.environ.setdefault("DEVOPS_DB_BACKEND", "mysql")
 
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
-    from src.api.routes.tasks import ensure_issue_task
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime.routes.tasks import ensure_issue_task
 
     with db_lock:
         c = db.cursor()
@@ -59,7 +59,7 @@ def main() -> list:  # type: ignore[return]
             print(f"  {rk} #{n}")
 
     # 第二阶段：存量任务补「去对话」会话关联（user_id>0 且未关联）
-    from src.api.routes.tasks import _ensure_task_conversation
+    from src.domains.runtime.routes.tasks import _ensure_task_conversation
     linked = 0
     with db_lock:
         c = db.cursor()

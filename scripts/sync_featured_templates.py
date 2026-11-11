@@ -190,7 +190,7 @@ def search_github(keywords, limit=5):
 def save_to_db(items):
     """存入 DB"""
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for item in items:

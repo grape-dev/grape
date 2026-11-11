@@ -1,4 +1,5 @@
-data/
+data/*
+!data/.gitkeep
 *.db
 *.exe
 devops-bot
@@ -52,7 +53,9 @@ ADD-WHITELIST.md
 opencode-incident-*.md
 OPENCODE-CUSTOM-PROVIDER-CONFIG.md
 temp/
-.grape/
+.grape/*
+!.grape/skills/
+!.grape/docs/
 .skills/
 .hermes/
 .venv/
@@ -69,7 +72,8 @@ temp/
 # MCP installed marker (regenerated on use)
 .codeartsdoer/.installed
 python/
-wheels/
+wheels/*
+!wheels/.gitkeep
 SHA256SUMS
 VERSION
 *.swp
@@ -114,8 +118,6 @@ admin/
 logs/
 examples/
 skills/
-!.opencode/
-!.opencode/skills/
 trace_*.py
 diag_*.py
 configs/scene-sync.json

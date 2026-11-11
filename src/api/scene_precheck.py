@@ -14,7 +14,7 @@ import json
 import os
 import uuid
 
-from src.config import CONFIG_DIR, log
+from src.kernel.config import CONFIG_DIR, log
 
 REASON_CODES = (
     "engine_missing",
@@ -132,7 +132,7 @@ def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
     """单次批量查询引擎存在性、归属与在线信息（1 次 DB 查询/节点）。"""
     if not engine_ids:
         return {}
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     placeholders = ",".join("?" * len(engine_ids))
     with db_lock:
         c = db.cursor()
@@ -165,7 +165,7 @@ def _read_health_scores(runtime_ids: list[int]) -> dict[int, int]:
     """只读查询健康分（不触发 health_scorer 的现算落库，保持预校验零副作用）。"""
     if not runtime_ids:
         return {}
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     placeholders = ",".join("?" * len(runtime_ids))
     with db_lock:
         c = db.cursor()
@@ -180,13 +180,13 @@ def _available_engines(rows: list[dict]) -> list[dict]:
     """按派发链路同一把尺子判定可用：status/心跳 + 健康分阈值（只读）。"""
     if not rows:
         return []
-    from src.runtime.engine_select import _health_ok
+    from src.domains.runtime.engine.engine_select import _health_ok
     healthy = [r for r in rows if _health_ok(r)]
     if not healthy:
         return []
     try:
         try:
-            from src.runtime.health_scorer import _HEALTH_THRESHOLD as _score_threshold
+            from src.domains.runtime.engine.health_scorer import _HEALTH_THRESHOLD as _score_threshold
         except Exception:
             _score_threshold = _HEALTH_THRESHOLD
         scores = _read_health_scores([r["runtime_id"] for r in healthy])
@@ -203,7 +203,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     skill_id = _node_skill_id(node)
     if skill_id:
         try:
-            from src.user.db import get_skill_by_id
+            from src.domains.mgmt.user.db import get_skill_by_id
             if get_skill_by_id(skill_id):
                 return True
         except Exception as e:
@@ -212,7 +212,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     if not skill_name:
         return False
     try:
-        from src.user.db import resolve_skill_id
+        from src.domains.mgmt.user.db import resolve_skill_id
         return bool(resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""))
     except Exception as e:
         log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")
@@ -222,7 +222,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
 def _ownership_problem(rows: list[dict], repo_key: str,
                        names: set[str], uids: set[str]) -> dict | None:
     """返回首个归属非法引擎信息；合法/无法判定返回 None。"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     current_repo = (from_repo_key(repo_key or "") or "").strip()
     names_lower = {n.lower() for n in names if n}
     uid_set = {u for u in uids if u}

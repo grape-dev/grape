@@ -18,11 +18,11 @@
 import os
 import asyncio
 
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 # 官方技能仓库（owner 唯一固定、无其它值；无 env 覆盖——反馈目标恒为官方技能仓。
-# 与 src/storage/scene_sync.py 同源：grape-dev/grape-skills）
+# 与 src/domains/runtime/storage/scene_sync.py 同源：grape-dev/grape-skills）
 _OFFICIAL_SKILLS_REPO = "grape-dev/grape-skills"
 # 项目自身组件反馈标识（CLI / 平台）→ 一律进官方技能仓（official-repo-config-unify-design.md §3.2）
 _OFFICIAL_COMPONENT_KINDS = {"cli", "platform"}
@@ -35,7 +35,7 @@ FEEDBACK_CATEGORY_OTHER = "other"
 
 
 def _provider_module(provider: str):
-    from src.vcs.providers import _MODULES
+    from src.domains.runtime.vcs.providers import _MODULES
     mod = _MODULES.get(provider)
     if mod is None:
         raise ValueError(f"Git provider 未支持: {provider}")
@@ -56,10 +56,10 @@ def _official_skills_target():
     mod = _provider_module(GRAPE_SKILLS_PROVIDER)
     try:
         if GRAPE_SKILLS_PROVIDER == "github":
-            from src.user.db import get_global_github_bot_token
+            from src.domains.mgmt.user.db import get_global_github_bot_token
             token = get_global_github_bot_token()
         else:
-            from src.user.db import get_global_gitcode_bot_token
+            from src.domains.mgmt.user.db import get_global_gitcode_bot_token
             token = get_global_gitcode_bot_token()
     except Exception:
         token = ""
@@ -73,7 +73,7 @@ def _feedback_official_issue_enabled() -> bool:
 
 def _repo_target(repo_key: str):
     """反馈所属仓库目标：返回 (provider, owner, repo)。"""
-    from src.repo_key import parse_repo_key, split_owner_repo
+    from src.kernel.repo_key import parse_repo_key, split_owner_repo
     provider, _ = parse_repo_key(repo_key) or ("gitcode", "")
     provider = provider or "gitcode"
     owner, repo = split_owner_repo(repo_key)
@@ -82,7 +82,7 @@ def _repo_target(repo_key: str):
 
 def _repo_bot_token(repo_key: str):
     """反馈所属仓库 bot token（provider 模块解析）。"""
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, _ = parse_repo_key(repo_key) or ("gitcode", "")
     provider = provider or "gitcode"
     try:
@@ -99,7 +99,7 @@ def _create_provider_issue(provider: str, owner: str, repo: str, token: str,
     但走服务端身份（bot token），不走 session_only 透传端点。
     """
     import urllib.parse
-    from src.vcs.providers import translate_inbound
+    from src.domains.runtime.vcs.providers import translate_inbound
     mod = _provider_module(provider)
     url = f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/issues"
     neutral = {"title": title, "body": body, "assignee": ""}
@@ -237,7 +237,7 @@ def _build_issue_body(row: dict) -> str:
     fail_summary / description 可能含内网 IP、绝对路径、凭据串 —— 出转发前统一脱敏
     （docs/weekly-08/feedback-issue-body-redact-m1-design.md）。
     """
-    from src.observability.redact_issue_body import redact_issue_text
+    from src.domains.insight.observability.redact_issue_body import redact_issue_text
     if (row.get("source") or "agent") == "user":
         # 用户反馈（Issue #673）：来源/提交人/仓库/事件 + 反馈内容
         lines = [
@@ -295,7 +295,7 @@ def _sync_statuses():
 
 async def feedback_reconcile_loop(interval: float = 300.0):
     """周期性扫描转换（与 skill-sync serial worker 同套路：分布式锁 + 崩溃安全）。"""
-    from src.runtime.task_lock import run_with_distributed_lock
+    from src.domains.runtime.engine.task_lock import run_with_distributed_lock
     _fail = 0
     while True:
         try:

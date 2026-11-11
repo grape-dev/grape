@@ -47,7 +47,11 @@ function Fail([string]$msg) { Write-Error "[install-worker] ERROR: $msg"; exit 1
 function Invoke-PipQuiet {
     param(
         [Parameter(Mandatory)][string]$CommandPath,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        # 第三个位置参数：包名/需求参数（Issue #699 起各调用点传 $workerDeps）
+        # 之前签名只有两个参数，三参调用会报
+        #   "找不到接受自变量 'System.Object[]' 的位置参数"
+        [string[]]$ExtraArguments
     )
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -57,8 +61,12 @@ function Invoke-PipQuiet {
     $prevUTF8 = $env:PYTHONUTF8
     $env:PYTHONUTF8 = "1"
     $exitCode = 1
+    # 合并位置参数与额外参数（$workerDeps 这类包名数组）
+    $allArgs = @()
+    if ($Arguments) { $allArgs += $Arguments }
+    if ($ExtraArguments) { $allArgs += $ExtraArguments }
     try {
-        & $CommandPath @Arguments 2>&1 | Out-Null
+        & $CommandPath @allArgs 2>&1 | Out-Null
         $exitCode = $LASTEXITCODE
     } catch {
         $exitCode = 1
@@ -68,6 +76,27 @@ function Invoke-PipQuiet {
     }
     $ErrorActionPreference = $prevEAP
     return $exitCode
+}
+
+
+# 判定进程是否是 grape worker agent（arch 分支入口 = src.domains.runtime.engine.agent，
+# 旧包/遗留目录 = src.runtime.agent；升级时必须两者都认，否则会误判"进程缺失"→回滚，
+# 且旧 agent 停不掉会与新 agent 双跑）
+function Test-GrapeAgentProcess {
+    param($Proc)
+    if (-not $Proc -or -not $Proc.CommandLine) { return $false }
+    $cl = $Proc.CommandLine
+    return ($cl -like "*src.domains.runtime.engine.agent*") -or ($cl -like "*src.runtime.agent*")
+}
+
+
+# 启动失败时把日志尾部打出来（否则用户只拿到一个路径，无法判断是 import 崩还是注册失败）
+function Show-WorkerLogTail {
+    param($Path, [int]$Lines = 15)
+    if (-not (Test-Path $Path)) { return }
+    Log "----- worker log tail ($Lines) -----"
+    Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue | ForEach-Object { Log $_ }
+    Log "----- end log tail -----"
 }
 
 # ===== 参数校验 =====
@@ -190,13 +219,14 @@ function restore_upgrade_backup {
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
     Start-Sleep -Seconds 5
     $restoredProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -like "*src.runtime.agent*"
+        Test-GrapeAgentProcess $_
     } | Select-Object -First 1
     if ($restoredProc) {
         Log "Rollback OK: old agent restored and running"
         return $true
     }
     Log "Agent still not running after rollback - worker offline, check log: $workerLog"
+    Show-WorkerLogTail $workerLog
     return $false
 }
 
@@ -209,7 +239,14 @@ if (Test-Path $versionFilePath) {
 }
 $expectedVersion = ""
 try {
-    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+    # 必须带凭据头：/install/latest 走 _require_credential（rta_），
+    # 匿名调用恒 401 → expectedVersion 永远空 → 后面「VERSION 未变」被误判为失败
+    # （2026-11-10 实测：Windows 重装同版本时必报
+    #   Extract verification failed: VERSION unchanged ... after extraction）
+    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing `
+        -Headers @{ Authorization = "Bearer $Token" } -ErrorAction Stop
+
+
     $expectedVersion = ("" + $lvi.version).Trim()
     if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
 } catch {
@@ -304,23 +341,62 @@ with tarfile.open(tmp) as t:
 } catch {
     Fail "Extract failed: $_"
 }
-Remove-Item $TmpPkg -ErrorAction SilentlyContinue
 
 # ===== 解压后最终校验：目标版本没落地就明确失败 =====
+# 注意：$TmpPkg 要留到读完包内 VERSION 之后再删（见下方校验）
 # 宁可让本次安装报错并留下日志，也不要用旧代码继续走完安装流程 ——
 # 那会让 worker 以旧版本重启，下一轮又发现版本不一致，形成无限升级循环。
 $finalVersion = ""
 if (Test-Path $versionFilePath) {
     $finalVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
 }
+
+# 包内自带 VERSION（不落盘、直接读 tar）——用于「控制器版本取不到」时校验解压是否真落地。
+# 语义对照：expectedVersion 缺失 ≠ 解压失败；同版本重装时 VERSION 本来就不会变。
+$pkgVersion = ""
+try {
+    if ($tarExe) {
+        $pkgVersion = (("" + (& $tarExe -xzOf $TmpPkg "grape-worker/VERSION" 2>$null)) -replace '\s', '')
+    }
+} catch {}
+if (-not $pkgVersion) {
+    # 从已解压的目录兜底读同一份 VERSION（解压成功时它与包内一致）
+    try {
+        if (Test-Path (Join-Path $Dir "VERSION")) {
+            $pkgVersion = ((Get-Content (Join-Path $Dir "VERSION") -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+        }
+    } catch {}
+}
+if ($pkgVersion) { Log "Package VERSION: $pkgVersion (installed before: '$preVersion')" }
+
 if ($expectedVersion) {
     if ($finalVersion -ne $expectedVersion) {
         Fail "Extract verification failed: expected VERSION=$expectedVersion but got '$finalVersion'. Extraction did not land - check that PATH does not shadow tar with MSYS/git (tar -xzf on C:\ paths exits 2)."
     }
     Log "Extract verified: VERSION=$finalVersion"
+} elseif ($pkgVersion) {
+    # 用包内 VERSION 做基准：解压后磁盘版本必须等于包内版本（同版本重装时两者相等 → 通过）
+    if ($finalVersion -ne $pkgVersion) {
+        Fail "Extract verification failed: package VERSION=$pkgVersion but installed '$finalVersion'. Extraction did not land - check that PATH does not shadow tar with MSYS/git (tar -xzf on C:\ paths exits 2)."
+    }
+    Log "Extract verified against package VERSION=$finalVersion (idempotent reinstall OK)"
 } elseif ($finalVersion -and $finalVersion -eq $preVersion) {
-    Fail "Extract verification failed: VERSION unchanged ('$finalVersion') after extraction."
+    # 幂等重装：已装版本 == 本次包版本 → 本来就最新，跳过重装直接启动 worker。
+    # 真机实证（2026-11-10）：changed-or-not fallback 下「无变化」被误报为解压失败，
+    # 用户反复重装最新版必然撞上；旧逻辑无法区分「已最新」与「解压未落地」。
+    Log "Already up-to-date (VERSION=$finalVersion), skipping reinstall and starting worker"
+    $startScript = Join-Path $Dir "start-worker.ps1"
+    if (Test-Path $startScript) {
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
+        Log "Worker started (no reinstall needed)"
+        exit 0
+    }
+    Log "start-worker.ps1 not found - install is current; start the worker manually"
+    exit 0
+
+
 }
+Remove-Item $TmpPkg -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $CfgDir)) {
     New-Item -ItemType Directory -Path $CfgDir -Force | Out-Null
@@ -410,8 +486,11 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
     }
 }
 
-$reqFile = Join-Path $Dir "requirements-worker.txt"
-if (Test-Path $reqFile) {
+# Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
+# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx")
+$pyprojectFile = Join-Path $Dir "pyproject.toml"
+if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL
     if (-not $pipIndex) { $pipIndex = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 
@@ -424,17 +503,17 @@ if (Test-Path $reqFile) {
     }
     if ($useWheels) {
         Log "Installing deps from bundled wheels (offline)"
-        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir, "-r", $reqFile)
+        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir) $workerDeps
         if ($rc -ne 0) {
             Log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
-            $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
+            $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30") $workerDeps
             if ($rc -ne 0) {
                 Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
             }
         }
     } else {
         Log "Installing deps online (mirror: $pipIndex, first run takes minutes)"
-        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
+        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30") $workerDeps
         if ($rc -ne 0) {
             Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
         }
@@ -519,6 +598,21 @@ try {
 }
 Log "Config written to $EnvFile (token + controller address)"
 
+
+# 清理遗留模块目录（arch 分支已把 src/runtime、src/agent、src/user 迁到 src/domains/*；
+# 解压是覆盖式，旧目录会残留并被 import 优先命中，导致旧 agent 崩溃/协议不匹配）
+foreach ($legacy in @("runtime", "agent", "user")) {
+    $legacyPath = Join-Path (Join-Path $Dir "src") $legacy
+    if ((Test-Path $legacyPath) -and -not (Test-Path (Join-Path $Dir "src\domains\runtime\engine\agent.py"))) {
+        Log "Skip legacy cleanup (canonical agent missing, keep as-is): src\$legacy"
+        continue
+    }
+    if (Test-Path $legacyPath) {
+        try { Remove-Item -Recurse -Force $legacyPath; Log "Removed legacy module dir: src\$legacy" }
+        catch { Log "Warning: failed to remove legacy dir src\$legacy (non-blocking)" }
+    }
+}
+
 # ===== 6. 生成启动脚本并启动 =====
 $startScript = Join-Path $Dir "start-worker.ps1"
 
@@ -542,7 +636,7 @@ Start-Sleep -Seconds 1
 
 # 停掉旧 worker（按 grape 目录路径匹配 python 进程）
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-    $_.ExecutablePath -like "*grape*" -and $_.CommandLine -like "*src.runtime.agent*"
+    $_.ExecutablePath -like "*grape*" -and (Test-GrapeAgentProcess $_)
 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 1
@@ -560,13 +654,14 @@ Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Execution
 Start-Sleep -Seconds 3
 
 $workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -like "*src.runtime.agent*"
+    Test-GrapeAgentProcess $_
 } | Select-Object -First 1
 
 if (-not $workerProc) {
     Log "New agent failed to start (process missing), rolling back..."
+    Show-WorkerLogTail $workerLog
     restore_upgrade_backup
-    Fail "New agent failed to start (rollback attempted), log: $workerLog"
+    Fail "New agent failed to start (rollback attempted), see log tail above / $workerLog"
 }
 
 Log "New agent started (pid $($workerProc.ProcessId)), waiting for registration..."

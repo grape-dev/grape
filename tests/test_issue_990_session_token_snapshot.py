@@ -29,7 +29,7 @@ from fastapi.testclient import TestClient
 
 from src.api import auth_token
 from src.api.deps import get_current_user_or_api_key
-from src.runtime.service import (
+from src.domains.runtime.engine.service import (
     enqueue_task, session_token_for_execution, sync_task_session_token,
 )
 from src.session_manager import db, db_lock
@@ -97,7 +97,7 @@ def _cleanup(task_ids):
 @pytest.fixture(autouse=True)
 def _reset_lock_conn_state():
     """Issue #990 复审：锁连接改为跨次复用，测试间必须清掉进程级连接。"""
-    import src.runtime.service as _svc
+    import src.domains.runtime.engine.service as _svc
     _svc._lock_conn_state["conn"] = None
     _svc._lock_conn_state["guard"] = threading.Lock()
     yield
@@ -268,7 +268,7 @@ class TestSyncTaskSessionToken:
         try:
             old = _task_env(tid)["GRAPE_SESSION_TOKEN"]
             _expire_token(old)
-            import src.runtime.service as service_mod
+            import src.domains.runtime.engine.service as service_mod
 
             class _FailCommit:
                 def __init__(self, real):
@@ -300,7 +300,7 @@ class TestSyncTaskSessionToken:
 
     def test_mysql_path_uses_named_lock_and_rotates(self, monkeypatch):
         """MySQL 后端走专用连接 GET_LOCK 串行化，且锁内轮换/回写成功。"""
-        import src.runtime.service as service_mod
+        import src.domains.runtime.engine.service as service_mod
         import src.session_manager as sm
 
         tid = _new_task()
@@ -326,7 +326,7 @@ class TestSyncTaskSessionToken:
 
     def test_mysql_lock_not_acquired_fails_closed(self, monkeypatch):
         """MySQL 命名锁拿不到 → 不轮换、不改快照（fail-closed）。"""
-        import src.runtime.service as service_mod
+        import src.domains.runtime.engine.service as service_mod
         import src.session_manager as sm
 
         tid = _new_task()
@@ -345,7 +345,7 @@ class TestSyncTaskSessionToken:
 
     def test_mysql_dedicated_connection_unavailable_fails_closed(self, monkeypatch):
         """MySQL 后端没有专用连接通道 → 不无锁轮换（fail-closed）。"""
-        import src.runtime.service as service_mod
+        import src.domains.runtime.engine.service as service_mod
         import src.session_manager as sm
 
         tid = _new_task()
@@ -398,7 +398,7 @@ class TestSyncTaskSessionToken:
         script = (
             "import os,sys\n"
             "sys.path.insert(0, os.environ['I990_ROOT'])\n"
-            "from src.runtime.service import sync_task_session_token\n"
+            "from src.domains.runtime.engine.service import sync_task_session_token\n"
             "open(sys.argv[2], 'w').write(sync_task_session_token(sys.argv[1]))\n"
         )
         env = dict(os.environ)
@@ -466,7 +466,7 @@ class TestSessionTokenForExecution:
         try:
             snapshot = _task_env(tid)["GRAPE_SESSION_TOKEN"]
             before = _session_rows(tid)
-            import src.runtime.service as service_mod
+            import src.domains.runtime.engine.service as service_mod
             monkeypatch.setattr(service_mod, "sync_task_session_token", lambda _tid: "")
             got = service_mod.session_token_for_execution(
                 tid, session_key_fallback="d_990",

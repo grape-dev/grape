@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import threading
 
-from src.config import log
+from src.kernel.config import log
 
 _DEFAULT_ATTEMPTS = 6    # 首次离线后最多自动重试次数
 _DEFAULT_BASE_DELAY = 60  # 首次重试延迟（秒），指数退避
@@ -117,7 +117,7 @@ def _schedule_attempt(n: int, p: dict, attempts: int, base_delay=None) -> None:
 
 def _pick_ready_engine(p: dict):
     """引擎池就绪判定：返回 (engine_id, pool) 或 (None, None)（未就绪）。"""
-    from src.runtime.engine_select import get_scene_pool_engine_ids, pick_engine
+    from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids, pick_engine
     pool = get_scene_pool_engine_ids(p["scene_id"], p["agent_type"],
                                      repo_key=p["repo_key"], user_id=p["scene_uid"])
     if pool is None:
@@ -158,7 +158,7 @@ def _claim_for_redispatch(seq: int) -> bool:
     复位语义与 event_store.reset_event_terminal 对齐（清 exit_code/structured_output，
     并重抢 event guard 防重跑期间并发事件滑入）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -209,7 +209,7 @@ def _redispatch(p: dict, engine_id: int, pool: str) -> bool:
         # claim 已把事件复位 running，重派失败 → 收口回 failed
         # （不收口会成为无任务支撑的僵尸 running）
         try:
-            from src.api.event_pipeline import _fail_event
+            from src.domains.runtime.pipeline.event_pipeline import _fail_event
             _fail_event(seq, f"[Issue #496] 引擎恢复后自动重派失败：{str(e)[:150]}")
         except Exception as _fe:
             log.warning(f"[496-retry] seq={seq} fail-close error: {_fe}")
@@ -219,8 +219,8 @@ def _redispatch(p: dict, engine_id: int, pool: str) -> bool:
 
 def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
     """与 run_pipeline 派发段（引擎选中后的入队/直连分支）保持同一语义。"""
-    from src.runtime.engine_select import engine_name
-    from src.api.event_pipeline import is_plugin_mode, _enqueue_pipeline_task
+    from src.domains.runtime.engine.engine_select import engine_name
+    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode, _enqueue_pipeline_task
     seq = p["seq"]
     _be = engine_name(engine_id) or p["backend"] or ""
     if not engine_id and is_plugin_mode():
@@ -240,7 +240,7 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
     if not _be or not p["skill_name"]:
         raise RuntimeError(f"missing dispatch params backend={_be!r} "
                            f"skill={p['skill_name']!r}")
-    from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+    from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
     if runtime_execution_kind(engine_id) != EXEC_MODE_DIRECT:
         # 远程定向：确定性路由到恢复的引擎
         _enqueue_pipeline_task(p["repo_key"], seq, p["agent_type"], _be,
@@ -250,7 +250,8 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
                                pool_engine_source="scene")
         return
     # 本机直连：建任务行（防 sweeper）+ 提交执行
-    from src.api.event_pipeline import _create_direct_task, start_direct_agent, _execute_agent
+    from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
+    from src.domains.runtime.engine.direct_executor import start_direct_agent, _execute_agent
     tid = _create_direct_task(p["repo_key"], seq, p["agent_type"], _be,
                               p["skill_name"], p["skill_path"], engine_id,
                               p["evt"], p["issue_id"], skill_id=p["skill_id"])
@@ -273,9 +274,9 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
     if not num.isdigit() or num == "0":
         return False
     try:
-        from src.user.db import get_repo_token_with_refresh
-        from src.api.event_pipeline import _post_result_to_issue
-        from src.repo_key import from_repo_key
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
+        from src.kernel.repo_key import from_repo_key
         token = get_repo_token_with_refresh(repo_key) or ""
         repo = from_repo_key(repo_key)
         if not token or not repo:
@@ -283,7 +284,7 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
             return False
         body = (f"[sre agent] ⚠️ PR 合并收尾（merge→sre）交接链路断链提示：{note}\n"
                 f"事件已留痕（含失败原因），可人工重派或在引擎恢复后重试。")
-        _post_result_to_issue(repo, num, body, token, "sre", repo_key)
+        _post_result_to_issue(repo, num, body, token, "sre", repo_key, agent_result=False)
         log.info(f"[544-broken-chain] issue comment posted for {repo_key}#{num}")
         return True
     except Exception as e:
@@ -304,7 +305,7 @@ def _mark_retry_exhausted(seq: int, attempts: int, err=None) -> None:
     status = ""
     _bk_repo, _bk_issue = "", ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT status, repo_key, issue_id FROM events WHERE seq=?", (seq,))
@@ -323,7 +324,7 @@ def _mark_retry_exhausted(seq: int, attempts: int, err=None) -> None:
     if status == "running":
         # reset_event_terminal 后重派链路异常 → 收口回 failed，防僵尸 running
         try:
-            from src.api.event_pipeline import _fail_event
+            from src.domains.runtime.pipeline.event_pipeline import _fail_event
             _fail_event(seq, note)
         except Exception as e:
             log.warning(f"[496-retry] exhausted fail-close seq={seq} error: {e}")

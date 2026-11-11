@@ -101,6 +101,8 @@ function loadObs(dom, extra) {
     encodeURIComponent, decodeURIComponent, URLSearchParams,
     CustomEvent: function () {}, AbortController: function () { this.abort = () => {}; this.signal = {}; },
     AbortSignal: { timeout: () => ({}) }, openRuntimeSessionModal: () => {},
+    workerDisplayName: (wk) => { var n = (wk && wk.name) || ''; return String(n).trim() || '未命名设备'; },
+    stripRepoPrefix: (s) => String(s || '').replace(/^(gitcode|github|gitlab):/, ''),
   };
   Object.assign(sandbox, extra || {});
   const sKeys = Object.keys(sandbox);

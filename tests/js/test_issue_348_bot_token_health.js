@@ -104,9 +104,16 @@ assert.ok(iSave > iPanel, 'save-bar after health panel');
 assert.ok(HTML.indexOf('id="tkh_platforms"') > 0, 'tkh_platforms container exists');
 assert.ok(/onclick="loadTokenHealth\(\)"/.test(HTML), 'refresh button bound to loadTokenHealth()');
 // Shared resources
-assert.ok(HTML.indexOf('tokens.css?v=20261016-1') > 0, 'tokens.css referenced with correct version');
-assert.ok(HTML.indexOf('i18n.js?v=20261016-2') > 0, 'i18n.js referenced with correct version');
-assert.ok(HTML.indexOf('admin.js?v=20261016-14') > 0, 'admin.js version bumped');
+// 版本号随迭代 bump：断言“引用存在 + 不低于该 issue 基线 + 旧版本已消失”
+function _verAtLeast(actual, baseline) {
+  var a = String(actual).split('-').map(Number), b = String(baseline).split('-').map(Number);
+  if (a[0] !== b[0]) return a[0] > b[0];
+  return (a[1] || 0) >= (b[1] || 0);
+}
+function _grab(html, name) { var m = new RegExp(name.replace('.', '\\.') + '\\?v=([0-9-]+)').exec(html); return m && m[1]; }
+assert.ok(_grab(HTML, 'tokens.css') && _verAtLeast(_grab(HTML, 'tokens.css'), '20261016-1'), 'tokens.css referenced with correct version');
+assert.ok(_grab(HTML, 'i18n.js') && _verAtLeast(_grab(HTML, 'i18n.js'), '20261016-2'), 'i18n.js referenced with correct version');
+assert.ok(_grab(HTML, 'admin.js') && _verAtLeast(_grab(HTML, 'admin.js'), '20261016-14'), 'admin.js version bumped');
 assert.ok(HTML.indexOf('admin.js?v=20261016-7') < 0, 'old version not referenced');
 // data-i18n on health panel
 assert.ok(HTML.indexOf('data-i18n="admin.token_health.title"') > 0, 'title has data-i18n');

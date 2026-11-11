@@ -17,7 +17,7 @@ import uuid as _uuid
 
 from fastapi import FastAPI, Request
 
-from src.config import request_id_var, repo_var, user_var, log as _log
+from src.kernel.config import request_id_var, repo_var, user_var, log as _log
 
 # webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
 _WEBHOOK_PREFIX = "/webhook/"
@@ -80,7 +80,7 @@ def install_request_middleware(app: FastAPI) -> None:
                 if _payload and _payload.get("sub"):
                     _uid = str(_payload["sub"])
                 else:
-                    from src.user.db import validate_token
+                    from src.domains.mgmt.user.db import validate_token
                     _uid_val = validate_token(_auth[7:])
                     if _uid_val:
                         _uid = str(_uid_val)
@@ -91,7 +91,7 @@ def install_request_middleware(app: FastAPI) -> None:
         # Issue #372 §14.2.2: 已认证请求到达时从 Host 头推导 webhook_url / server_base_url
         if _uid:
             try:
-                from src.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
+                from src.domains.mgmt.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
                 _host = request.headers.get("host", "")
                 _fwd_host = request.headers.get("x-forwarded-host", "")
                 _fwd_proto = request.headers.get("x-forwarded-proto", "")
@@ -157,10 +157,10 @@ def install_request_middleware(app: FastAPI) -> None:
                     _log.info(msg, extra=extra)
                 # 慢请求入库（方案C）
                 try:
-                    from src.config import SLOW_REQUEST_THRESHOLD_MS
+                    from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
                     if duration >= SLOW_REQUEST_THRESHOLD_MS:
                         try:
-                            from src.session_manager import db as _sdb, db_lock as _sdbl
+                            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
                             with _sdbl:
                                 _sdb.execute(
                                     "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "

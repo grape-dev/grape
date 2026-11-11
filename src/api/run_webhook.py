@@ -3,12 +3,19 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI
-from src.api.routes.webhook import router as webhook_router
+from src.domains.runtime.routes.webhook import router as webhook_router
 from src.api.db_setup import init_database
-from src.config import _load_accounts, log
+from src.kernel.config import _load_accounts, log
 
 app = FastAPI(title="Agentic DevOps Webhook", version="2.0.0")
 app.include_router(webhook_router)
+
+# OTel HTTP spans（2026-11-05 MR-1）：webhook 入口
+try:
+    from src.observability.otel import instrument_fastapi
+    instrument_fastapi(app, "grape-webhook")
+except Exception:
+    pass
 
 init_database()
 _load_accounts()

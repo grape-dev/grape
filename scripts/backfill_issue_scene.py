@@ -20,12 +20,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 
 def candidates() -> list[dict]:
     """返回待补绑候选行（scene_id 为空 + 解析仓库默认场景）。"""
-    from src.user.db import get_repo_scene
+    from src.domains.mgmt.user.db import get_repo_scene
     with db_lock:
         c = db.cursor()
         c.execute(

@@ -6,7 +6,7 @@
   ├── SHA256SUMS          (相对路径校验)
   ├── backend/            (grape 后端 src + 静态资源 + configs example)
   ├── database/           (MySQL DDL + 种子数据)
-  ├── skills/             (grape-skills 全量，从独立仓库读取)
+  ├── skills/             (grape-skills 全量，从独立仓库读取；部署时解压到 .grape/skills/)
   ├── templates/          (grape-template 项目模板，从独立仓库读取)
   └── tools/              (worker 运行时 + install-worker.sh)
 
@@ -94,15 +94,20 @@ def pack_backend(ts):
     help_dir = os.path.join(ROOT, "help")
     if os.path.isdir(help_dir):
         items.append((help_dir, "help"))
-    # 仓库根文件 (Dockerfile, docker-compose.yml, README 等)
+    # 仓库根文件 (pyproject.toml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
     #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
-    for rf in ["Dockerfile", "docker-compose.yml",
-               "README.md", "README.zh.md", "requirements.txt",
-               "requirements-worker.txt", ".gitignore"]:
+    # Issue #699 Phase 0: requirements*.txt merged into pyproject.toml;
+    #   Dockerfile/docker-compose.yml/nginx moved to deploy/
+    for rf in ["pyproject.toml", "Makefile",
+               "README.md", "README.zh.md", ".gitignore"]:
         p = os.path.join(ROOT, rf)
         if os.path.isfile(p):
             items.append((p, rf))
+    # deploy/ (Dockerfile, docker-compose.yml, nginx-grape.conf, alerts.yml)
+    deploy_dir = os.path.join(ROOT, "deploy")
+    if os.path.isdir(deploy_dir):
+        items.append((deploy_dir, "deploy"))
     # configs (只保留 *.example.json + 种子 json)
     # 2026-10-14 账号体系重构补充：security / oauth-providers / email 三个 example 模板——
     # 账号系统（登录/OAuth/凭据加密/邮件验证）依赖 security.json + oauth-providers.json，
@@ -119,13 +124,12 @@ def pack_backend(ts):
         p = os.path.join(ROOT, "configs", cf)
         if os.path.isfile(p):
             items.append((p, f"configs/{cf}"))
-    # requirements (顶层也放一份)
-    for rf in ["requirements.txt", "requirements-worker.txt"]:
-        p = os.path.join(ROOT, rf)
-        if os.path.isfile(p):
-            items.append((p, rf))
-    # Dockerfile
-    df = os.path.join(ROOT, "Dockerfile")
+    # pyproject.toml (顶层也放一份; Issue #699 Phase 0: replaces requirements*.txt)
+    pt = os.path.join(ROOT, "pyproject.toml")
+    if os.path.isfile(pt):
+        items.append((pt, "pyproject.toml"))
+    # Dockerfile (Issue #699 Phase 0: moved to deploy/)
+    df = os.path.join(ROOT, "deploy", "Dockerfile")
     if os.path.isfile(df):
         items.append((df, "Dockerfile"))
     make_subtar_gz(items, out)
@@ -272,17 +276,17 @@ def pack_skills(ts):
     if not os.path.isdir(skills_dir):
         print(f"[WARN] skills 目录不存在 ({SKILLS_REPO}/skills)，跳过")
         return None
-    # skills/ 和 scenes/ 一起打包，部署时都解压到 grape 根目录
+    # Issue #699 Phase 0: skills → .grape/skills/, scenes → configs/scenes/
     items = []
     if os.path.isdir(skills_dir):
         for item in os.listdir(skills_dir):
             s = os.path.join(skills_dir, item)
-            a = os.path.join("skills", item)
+            a = os.path.join(".grape", "skills", item)
             items.append((s, a))
     if os.path.isdir(scenes_dir):
         for item in os.listdir(scenes_dir):
             s = os.path.join(scenes_dir, item)
-            a = os.path.join("scenes", item)
+            a = os.path.join("configs", "scenes", item)
             items.append((s, a))
     else:
         print(f"[WARN] scenes 目录不存在 ({SKILLS_REPO}/scenes)，仅打包 skills")
@@ -300,31 +304,31 @@ def pack_templates(ts):
     return out
 
 def pack_tools(ts):
-    """worker 运行时: src/runtime + src/agent + install-worker.sh + requirements-worker.txt"""
+    """worker 运行时: src/domains/runtime/engine + src/domains/runtime/agents + install-worker.sh + pyproject.toml"""
     out = os.path.join(OUT_DIR, f"staging/tools/grape-toolkit-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
     # worker 运行闭包（与 src/worker_package.py MANIFEST 一致）
     manifest_files = [
         "src/__init__.py", "src/config.py", "src/repo_key.py", "src/session_manager.py",
-        "src/mysql_compat.py", "src/user/__init__.py", "src/user/db.py",
+        "src/mysql_compat.py", "src/domains/mgmt/user/__init__.py", "src/domains/mgmt/user/db.py",
         "src/api/__init__.py", "src/api/routing.py", "src/api/time_utils.py",
         "src/api/event_store.py", "src/api/event_archive.py", "src/api/session_store.py",
-        "src/api/knowledge.py",
+        "src/api/knowledge.py", "src/api/merge_gate.py",
     ]
     for f in manifest_files:
         p = os.path.join(ROOT, f)
         if os.path.isfile(p):
             items.append((p, f))
     # 整目录
-    for d in ["src/agent", "src/runtime"]:
+    for d in ["src/domains/runtime/agents", "src/domains/runtime/engine"]:
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
             items.append((p, d))
-    # requirements-worker.txt
-    rw = os.path.join(ROOT, "requirements-worker.txt")
-    if os.path.isfile(rw):
-        items.append((rw, "requirements-worker.txt"))
+    # pyproject.toml (Issue #699 Phase 0: replaces requirements-worker.txt)
+    pt = os.path.join(ROOT, "pyproject.toml")
+    if os.path.isfile(pt):
+        items.append((pt, "pyproject.toml"))
     # install-worker.sh
     iw = os.path.join(ROOT, "scripts/install-worker.sh")
     if os.path.isfile(iw):
@@ -364,7 +368,7 @@ Grape Server (1 台, 部署全部服务端组件)
   └── nginx            (:80/:443 TLS, 反代 main+webhook)
 
 Remote Workers (N 台, 仅装 worker 运行时)
-  └── runtime-agent   (python -m src.runtime.agent)
+  └── runtime-agent   (python -m src.domains.runtime.engine.agent)
 
 注: grape-admin 运营管理台为独立项目，单独部署
 ```
@@ -403,7 +407,7 @@ tar xzf /path/to/backend/grape-backend-{ts}.tar.gz
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv python install 3.12
 uv venv --python 3.12 --clear .venv
-uv pip install --python .venv/bin/python3 -r requirements.txt
+uv pip install --python .venv/bin/python3 -e ".[all]"
 
 # 数据目录
 mkdir -p data
@@ -444,8 +448,8 @@ mysql -h<HOST> -u<USER> -p <DB> < grape-db-{ts}.sql
 # 解压 skills + scenes 到 grape 仓库根目录
 cd /opt/grape
 tar xzf /path/to/skills/grape-skills-{ts}.tar.gz
-# skills/ 目录覆盖到 /opt/grape/skills/
-# scenes/ 目录覆盖到 /opt/grape/scenes/
+# .grape/skills/ 目录覆盖到 /opt/grape/.grape/skills/
+# configs/scenes/ 目录覆盖到 /opt/grape/configs/scenes/
 ```
 
 ### 3.5 systemd 服务
@@ -513,7 +517,7 @@ curl -fsSL https://<grape主控域名>/api/runtime/install | bash -s -- --token 
 tar xzf /path/to/tools/grape-toolkit-{ts}.tar.gz -C /opt/grape
 cd /opt/grape
 python3.12 -m venv .venv
-.venv/bin/pip install -r requirements-worker.txt
+.venv/bin/pip install aiohttp bcrypt click httpx
 bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 ```
 
@@ -523,7 +527,7 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 |------|------|----------|
 | backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs | /opt/grape/ |
 | database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据 | MySQL |
-| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) + 官方场景 (8 scenes，独立仓库) | /opt/grape/skills/ + /opt/grape/scenes/ |
+| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) + 官方场景 (8 scenes，独立仓库) | /opt/grape/.grape/skills/ + /opt/grape/configs/scenes/ |
 | templates/grape-templates-{ts}.tar.gz | 项目模板 (独立仓库) | /opt/grape/examples/ |
 | tools/grape-toolkit-{ts}.tar.gz | worker 运行时 + 注册脚本 | /opt/grape/ (worker 机) |
 

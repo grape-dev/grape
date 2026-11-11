@@ -45,4 +45,4 @@ ENV_FILE="$HOME/.grape/runtime.env"
 if [ -f "$ENV_FILE" ]; then
   set -a; . "$ENV_FILE"; set +a
 fi
-exec "$PYTHON" -m src.runtime.agent
+exec "$PYTHON" -m src.domains.runtime.engine.agent

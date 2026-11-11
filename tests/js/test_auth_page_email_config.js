@@ -40,10 +40,7 @@ const MAIN_PY = read('src/api/main.py');
 const REGISTER_HTML = read('src/api/frontend/legacy/register.html');
 const FORGOT_HTML = read('src/api/frontend/legacy/forgot.html');
 const INDEX_HTML = read('src/api/frontend/legacy/index.html');
-const GRAPE_AUTH_PY = read('src/api/routes/grape_auth.py');
-const AUTH_JS = read('src/api/frontend/legacy/js/auth.js');
-const ZH_APP = JSON.parse(read('src/api/frontend/legacy/locales/zh/app.json'));
-const EN_APP = JSON.parse(read('src/api/frontend/legacy/locales/en/app.json'));
+const GRAPE_AUTH_PY = read('src/domains/mgmt/routes/auth.py');
 
 // ── T01: main.py 含 _serve_auth_page ──
 test('T01: main.py 含 _serve_auth_page 函数', () => {

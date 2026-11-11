@@ -1,6 +1,6 @@
 """Grape 场景测试 — 远端 http://203.0.113.2"""
 import sys, os, time
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 import pytest, requests
 
 # 端到端 UI 场景测试：需真实浏览器 + 远端服务 + 破坏性生产库操作（受 DEVOPS_UI_TEST 安全闸保护）。
@@ -184,7 +184,7 @@ class TestFirstLoginNoRepos:
         c.close()
 
         # 创建一个普通用户（无 GitCode 管理员权限）
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         uid = grape_account_db.create_grape_account("normal_user", email=None, password="test123")
         if not uid:
             uid = grape_account_db.get_grape_account_by_username("normal_user")

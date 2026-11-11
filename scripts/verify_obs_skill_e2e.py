@@ -25,8 +25,8 @@ from obs_credentials import apply_runtime_obs_env  # noqa: E402
 apply_runtime_obs_env()  # 注入 OBS_ACCESS_KEY / OBS_SECRET_KEY（缺失则明确报错）
 sys.path.insert(0, "/home/yangaiwu/grape")
 
-from src.storage import get_storage, reset_storage, skill_key, skill_md_content, get_skill_zip_bytes  # noqa: E402
-from src.api.routes.skills import _normalize_skill_zip  # noqa: E402
+from src.domains.runtime.storage import get_storage, reset_storage, skill_key, skill_md_content, get_skill_zip_bytes  # noqa: E402
+from src.domains.mgmt.routes.skills import _normalize_skill_zip  # noqa: E402
 
 SKILL = "e2e-ops"
 WORK = tempfile.mkdtemp(prefix="e2e_")

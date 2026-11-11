@@ -19,15 +19,15 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import src.runtime.registry  # noqa: E402,F401 先触发（绕开 src.agent.__init__ 循环导入）
-from src.agent.hermes_acp import (  # noqa: E402
+import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.agent.__init__ 循环导入）
+from src.domains.runtime.agents.hermes_acp import (  # noqa: E402
     _ACPSimpleClient,
     _clip_tool_input,
     _extract_tool_call_input,
     _input_from_content_blocks,
 )
 from src.session_manager import db, db_lock  # noqa: E402
-from src.runtime import service  # noqa: E402
+from src.domains.runtime.engine import service  # noqa: E402
 
 
 BIG_CONTENT = ("line of file content for fidelity check\n" * 2100)[:57 * 1024]
@@ -283,9 +283,9 @@ class TestEndToEnd:
         from fastapi.testclient import TestClient
         api = TestClient(__import__("src.api.main", fromlist=["app"]).app)
         from src.api.jwt_utils import create_access_token
-        from src.auth.grape_account_db import get_token_version
+        from src.domains.mgmt.auth.grape_account_db import get_token_version
         import uuid
-        from src.auth import grape_account_db
+        from src.domains.mgmt.auth import grape_account_db
         u = grape_account_db.create_grape_account(f"hermes976_{uuid.uuid4().hex[:8]}",
                                                   email=None, password="pw123456")
         token = create_access_token(u["id"], u["username"], get_token_version(u["id"]))
