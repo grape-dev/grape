@@ -25,6 +25,19 @@
               statusLabel(item.status)
             }}</span>
           </div>
+          <!-- Issue #673：反馈转换成的 Issue 链接 + 处理进度 -->
+          <div>
+            <span class="mfd__label">{{ t('field_issue') }}</span>
+            <template v-if="item.issue_url">
+              <a :href="item.issue_url" target="_blank" rel="noopener" class="mfd__issue"
+                >#{{ item.issue_number || '' }}</a
+              >
+              <span class="mfd__issue-prog">{{
+                t('issue_progress', { status: statusLabel(item.status) })
+              }}</span>
+            </template>
+            <span v-else class="mfd__muted">{{ t('issue_none') }}</span>
+          </div>
           <div>
             <span class="mfd__label">{{ t('field_created_at') }}</span>
             {{ fmtTime(item.created_at, 19) }}
@@ -228,6 +241,23 @@ onMounted(function () {
   color: var(--c-text-3);
   display: inline-block;
   min-width: 60px;
+}
+/* Issue #673：关联 Issue 链接与处理进度 */
+.mfd__issue {
+  color: var(--c-accent, #0071e3);
+  font-weight: 600;
+  text-decoration: none;
+}
+.mfd__issue:hover {
+  text-decoration: underline;
+}
+.mfd__issue-prog {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--c-text-3);
+}
+.mfd__muted {
+  color: var(--c-text-3);
 }
 .mfd__sec {
   font-size: var(--f-caption);

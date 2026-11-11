@@ -21,6 +21,17 @@
         <div class="myfb__row-head">
           <span :class="['myfb__status', `st-${item.status}`]">{{ statusLabel(item.status) }}</span>
           <span class="myfb__title">{{ item.title || '—' }}</span>
+          <!-- Issue #673：反馈转换成需求后展示 Issue 链接（点击不触发整行跳详情） -->
+          <a
+            v-if="item.issue_url"
+            :href="item.issue_url"
+            target="_blank"
+            rel="noopener"
+            class="myfb__issue"
+            :title="t('field_issue')"
+            @click.stop
+            >#{{ item.issue_number || '' }}</a
+          >
           <span class="myfb__time">{{ fmtTime(item.created_at, 16) }}</span>
           <AGButton variant="danger" size="sm" class="myfb__del" @click.stop="del(item.id, $event)">
             {{ t('delete') }}
@@ -240,6 +251,17 @@ onMounted(load)
   font-size: 11px;
   color: var(--c-text-3);
   flex-shrink: 0;
+}
+/* Issue #673：关联网 Issue 链接 */
+.myfb__issue {
+  font-size: 12px;
+  color: var(--c-accent, #0071e3);
+  font-weight: 500;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.myfb__issue:hover {
+  text-decoration: underline;
 }
 .myfb__del {
   flex-shrink: 0;

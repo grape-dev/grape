@@ -65,7 +65,8 @@
     "runtime_params_desc": "Timeout & DevSpace specs",
     "runtime_timeout_hint": "Task timeout (seconds, default 3600); engine global timeout/watchdog/stuck alert/orphan recovery derive from it. env RUNTIME_TASK_TIMEOUT overrides",
     "devstage_hint": "AI DevSpace default spec (3c6g/ARM); leave blank to keep current value. env GRAPE_DEVSTAGE_* overrides",
-    "effective_value": "effective {{v}} (env override)"
+    "effective_value": "effective {{v}} (env override)",
+    "runtime_effective": "Effective value"
   },
   "token_health": {
     "title": "Bot Token Health",

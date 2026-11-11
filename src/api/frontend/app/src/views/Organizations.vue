@@ -5,6 +5,10 @@
       <div class="org__bar">
         <h2>{{ t('title') }}</h2>
         <div class="sp"></div>
+        <!-- Issue #456：从个人中心进组织页后可一键回工作台 -->
+        <AGButton variant="plain" @click="G.app._accountGoBack()">{{
+          t('back_to_workspace')
+        }}</AGButton>
         <AGButton @click="showCreate = true">{{ t('create_org') }}</AGButton>
       </div>
       <div class="org__list">

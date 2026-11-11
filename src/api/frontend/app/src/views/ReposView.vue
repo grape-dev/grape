@@ -764,7 +764,21 @@ function hostAndSelect(r, event) {
           G.app.loadProfile().then(() => selectRepoGlobal(fullName, owner, name, repoKey))
         }
       })
-      .catch((e) => G.app.showToast(t('repos.sync.host_failed', { msg: e.message })))
+      .catch((e) => {
+        // Issue #455：后端 error_code 明确映射——403 属权限/归属，502 类属上游可重试
+        const code = (e && (e.error_code || (e.detail && e.detail.error_code))) || ''
+        let toastMsg
+        if (code === 'PERMISSION_DENIED' || code === 'TOKEN_PERMISSION_INSUFFICIENT') {
+          toastMsg = t('repos.host.permission_denied')
+        } else if (code === 'REPO_NOT_FOUND') {
+          toastMsg = t('repos.host.repo_not_found', { repo: fullName })
+        } else if (String(code).indexOf('UPSTREAM_') === 0) {
+          toastMsg = t('repos.host.upstream_error', { msg: (e && e.message) || '' })
+        } else {
+          toastMsg = t('repos.sync.host_failed', { msg: (e && e.message) || '' })
+        }
+        G.app.showToast(toastMsg)
+      })
   }
   if (G.window._grapeConfirm) {
     G.window._grapeConfirm(

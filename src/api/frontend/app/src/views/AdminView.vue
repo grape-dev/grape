@@ -294,6 +294,47 @@
               {{ t('token_health.no_platforms') }}
             </div>
           </div>
+          <!-- Issue #470：运行参数（超时 / DevSpace 规格）——改完当前实例即时生效 -->
+          <div class="card">
+            <div class="card-h">
+              <h2>
+                {{ t('config.runtime_params') }}
+                <span class="tag">{{ t('config.runtime_params_desc') }}</span>
+              </h2>
+            </div>
+            <div class="f-row">
+              <label>runtime_task_timeout</label>
+              <input v-model="cfg.runtime_task_timeout" type="number" min="1" placeholder="3600" />
+            </div>
+            <div class="hint">{{ t('config.runtime_timeout_hint') }}</div>
+            <div class="f-row">
+              <label>devstage_template_id</label>
+              <input v-model="cfg.devstage_template_id" placeholder="4ef59a2b…" />
+            </div>
+            <div class="f-row">
+              <label>devstage_flavor_id</label>
+              <input v-model="cfg.devstage_flavor_id" placeholder="23ebdfe3…" />
+            </div>
+            <div class="f-row">
+              <label>devstage_cores</label>
+              <input v-model="cfg.devstage_cores" type="number" min="1" placeholder="3" />
+            </div>
+            <div class="f-row">
+              <label>devstage_memory</label>
+              <input v-model="cfg.devstage_memory" type="number" min="1" placeholder="6" />
+            </div>
+            <div class="f-row">
+              <label>devstage_arch</label>
+              <select v-model="cfg.devstage_arch">
+                <option value="ARM">ARM</option>
+                <option value="x86">x86</option>
+              </select>
+            </div>
+            <div class="hint">{{ t('config.devstage_hint') }}</div>
+            <div v-if="cfgP.runtime_task_timeout_effective" class="hint">
+              {{ t('config.runtime_effective') }}: {{ cfgP.runtime_task_timeout_effective }}s
+            </div>
+          </div>
           <div class="save-bar">
             <button class="btn btn-p" :disabled="saving" @click="saveConfig">
               {{ t('config.save') }}
@@ -636,6 +677,13 @@ const cfg = reactive({
   github_oauth_client_secret: '',
   github_oauth_redirect_uri: '',
   bot_usernames: '',
+  // Issue #470：运行参数（空 = 不改；数值字段由后端校验正整数）
+  runtime_task_timeout: '',
+  devstage_template_id: '',
+  devstage_flavor_id: '',
+  devstage_cores: '',
+  devstage_memory: '',
+  devstage_arch: '',
 })
 const cfgP = reactive({}) // presence flags from server (placeholders only, never rendered value)
 const st = reactive({ gitcode_api_token: '', github_bot_token: '', gitcode_webhook_token: '' })
@@ -875,6 +923,21 @@ function showCfg() {
       cfg.github_oauth_redirect_uri = c.github_oauth_redirect_uri || ''
       cfg.bot_usernames = (c.bot_usernames || []).join(', ')
       cfg.webhook_url = c.webhook_url || ''
+      // Issue #470：运行参数（GET 已回显设置值/默认值 + 当前生效值）
+      cfg.runtime_task_timeout =
+        c.runtime_task_timeout === undefined || c.runtime_task_timeout === null
+          ? ''
+          : String(c.runtime_task_timeout)
+      cfg.devstage_template_id = c.devstage_template_id || ''
+      cfg.devstage_flavor_id = c.devstage_flavor_id || ''
+      cfg.devstage_cores =
+        c.devstage_cores === undefined || c.devstage_cores === null ? '' : String(c.devstage_cores)
+      cfg.devstage_memory =
+        c.devstage_memory === undefined || c.devstage_memory === null
+          ? ''
+          : String(c.devstage_memory)
+      cfg.devstage_arch = c.devstage_arch || ''
+      cfgP.runtime_task_timeout_effective = c.runtime_task_timeout_effective || ''
     })
     .catch((e) => {
       toast(t('config.load_failed') + ': ' + errMsg(e), false)
@@ -907,6 +970,20 @@ function saveConfig() {
   if (cfg.webhook_url.trim()) body.webhook_url = cfg.webhook_url.trim()
   if (cfg.gitcode_webhook_token.trim())
     body.gitcode_webhook_token = cfg.gitcode_webhook_token.trim()
+  // Issue #470：运行参数——非空才提交（空 = 保持现值）；数值字段转 int
+  const _rtTimeout = String(cfg.runtime_task_timeout || '').trim()
+  if (_rtTimeout) {
+    const n = parseInt(_rtTimeout, 10)
+    if (n > 0) body.runtime_task_timeout = n
+  }
+  ;['devstage_template_id', 'devstage_flavor_id', 'devstage_arch'].forEach(function (k) {
+    const v = String(cfg[k] || '').trim()
+    if (v) body[k] = v
+  })
+  ;['devstage_cores', 'devstage_memory'].forEach(function (k) {
+    const v = parseInt(String(cfg[k] || '').trim(), 10)
+    if (v > 0) body[k] = v
+  })
   api('/config', { method: 'PUT', body })
     .then(() => {
       toast(t('config.save_success'), true)
