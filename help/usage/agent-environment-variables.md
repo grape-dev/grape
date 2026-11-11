@@ -198,3 +198,15 @@ python3 -c 'import os; print(os.environ.get("HUAWEI_AK",""))'
 | env 落库 | `src/runtime/service.py` `enqueue_task` env_extra（L574-591） |
 | Worker 侧加载 | `src/runtime/agent.py` `_execute_task`（~L950） |
 | 引擎 get_env | `src/runtime/opencode.py` / `codearts.py` / `hermes.py` / `codex.py` |
+## AtomCode 引擎配置
+
+| 变量 | 行为 |
+|------|------|
+| `GRAPE_ATOMCODE_PROVIDER` | 与 `GRAPE_ATOMCODE_MODEL` 同时配置，传入 CLI `--provider` |
+| `GRAPE_ATOMCODE_MODEL` | 与 provider 同时配置，传入 CLI `--model`；仅设置其中一项时任务明确失败 |
+| `ATOMCODE_HOME` | 官方 CLI 用户目录，默认 `~/.atomcode`；技能目录为其 `skills` 子目录 |
+
+provider/model 的优先级为任务执行环境 > worker 环境；均未配置时使用 CLI 自身默认值。
+登录在实际执行机器上运行 `atomcode login`，不通过 Grape 保存或修改 CLI 登录凭据。
+首版使用独立任务模式，不原生 resume，支持 macOS/Linux，Windows 暂不支持。
+安装与排障步骤参见 [README](../../README.zh.md#atomcode-引擎macos--linux)。

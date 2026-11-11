@@ -603,7 +603,7 @@ function _apOpenEnginePickerInner() {
   var _availScopes = [];
   sorted.forEach(function(e) {
     var n = (e.name || '').toLowerCase();
-    var tn = n.includes('hermes') ? 'hermes' : n.includes('opencode') ? 'opencode' : n.includes('codearts') ? 'codearts' : n.includes('codex') ? 'codex' : '';
+    var tn = n.includes('hermes') ? 'hermes' : n.includes('opencode') ? 'opencode' : n.includes('codearts') ? 'codearts' : n.includes('codex') ? 'codex' : n.includes('atomcode') ? 'atomcode' : '';
     if (tn && _availTypes.indexOf(tn) < 0) _availTypes.push(tn);
     var sc = e.scope || 'global';
     if (_availScopes.indexOf(sc) < 0) _availScopes.push(sc);

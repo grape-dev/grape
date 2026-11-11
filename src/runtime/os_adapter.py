@@ -304,6 +304,7 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
     home = home_dir()
     key = (engine_name or "").strip().lower()
     mapping = {
+        "atomcode": [os.path.join(os.path.expanduser(os.environ.get("ATOMCODE_HOME") or os.path.join(home, ".atomcode")), "skills")],
         "hermes": [os.path.join(home, ".hermes", "skills")],
         "opencode": [os.path.join(home, ".config", "opencode", "skills")],
         "codearts": [os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
@@ -487,6 +488,7 @@ def find_process_by_cwd(backend: str, cwd: str) -> list[int]:
             "hermes": ["hermes acp", "hermes chat", "hermes -z"],
             "codearts": ["codearts run"],
             "codex": ["codex exec"],
+            "atomcode": ["atomcode"],
         }.get(backend, ["opencode run"])
         pids = []
         for pattern in patterns:
@@ -509,6 +511,7 @@ def find_process_by_cwd(backend: str, cwd: str) -> list[int]:
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
         "codearts": ["codearts run"],
         "codex": ["codex exec"],
+        "atomcode": ["atomcode"],
     }.get(backend, ["opencode run"])
     user = os.environ.get("USER", "")
     if not user and hasattr(os, "getlogin"):

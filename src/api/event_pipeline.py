@@ -769,7 +769,9 @@ def cancel_direct_task(seq: int) -> bool:
                                 c2 = db.cursor()
                                 c2.execute("SELECT name FROM agent_runtimes WHERE id=?", (tr[1],))
                                 rn = c2.fetchone()
-                            if rn and "hermes" in (rn[0] or "").lower():
+                            if rn and (rn[0] or "").lower().startswith("atomcode"):
+                                _backend = "atomcode"
+                            elif rn and "hermes" in (rn[0] or "").lower():
                                 _backend = "hermes"
                             elif rn and "codearts" in (rn[0] or "").lower():
                                 _backend = "codearts"

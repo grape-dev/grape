@@ -1410,7 +1410,9 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None) -> dict | 
                             try:
                                 c.execute("SELECT name FROM agent_runtimes WHERE id=?", (_old[1],))
                                 _rn = c.fetchone()
-                                if _rn and "hermes" in (_rn[0] or "").lower():
+                                if _rn and (_rn[0] or "").lower().startswith("atomcode"):
+                                    _backend = "atomcode"
+                                elif _rn and "hermes" in (_rn[0] or "").lower():
                                     _backend = "hermes"
                                 elif _rn and "codearts" in (_rn[0] or "").lower():
                                     _backend = "codearts"

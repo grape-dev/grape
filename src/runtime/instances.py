@@ -42,6 +42,7 @@ ENGINE_CANONICAL_PREFIXES = {
     "hermes": "hermes",
     "codearts": "codearts",
     "codex": "codex",
+    "atomcode": "atomcode",
     "dsh": "dsh",
 }
 

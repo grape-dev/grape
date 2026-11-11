@@ -1979,7 +1979,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
       currentIds = window._engCurIds.slice();
     }
   }
-  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; return ''; }).filter(Boolean))];
+  const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; if (n.includes('atomcode')) return 'atomcode'; return ''; }).filter(Boolean))];
   const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
   const _availScenes = [...new Set(sorted.flatMap(e => e.scene_tags || []))].filter(Boolean);
   const _SCOPE_LABELS_ALL = {global:'全局', user:'个人', repo:'仓库', local:'本机'};

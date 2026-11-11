@@ -23,6 +23,10 @@ def _probe_one(eng: dict) -> dict:
     if not cli or not eng.get("installed"):
         return {**eng, "version": "", "healthy": False}
     out = {**eng}
+    if (eng.get("name") or "").lower() == "atomcode":
+        from src.runtime.atomcode_probe import cached_atomcode_probe
+        result = cached_atomcode_probe(cli)
+        return {**eng, "healthy": result.get("status") == "ok", "version": eng.get("version", "")}
     out.pop("probe_args", None)
     acp_probe = out.pop("acp_probe", None)
     try:

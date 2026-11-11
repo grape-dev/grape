@@ -25,6 +25,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
+      - name: AtomCode Windows unsupported contract
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_atomcode_runtime.py -k windows -v
       - name: Windows prompt smoke tests (issue #351 + #452)
         env:
           GITCODE_API_TOKEN: test_token
@@ -47,6 +51,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
+      - name: AtomCode engine contracts
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_atomcode_runtime.py tests/test_atomcode_worker_integration.py tests/test_atomcode_ui.py tests/test_atomcode_package.py tests/test_atomcode_acceptance.py -v
+          node tests/js/test_atomcode_filters.js
       - name: Backend range-filter tests (issue #473)
         env:
           GITCODE_API_TOKEN: test_token

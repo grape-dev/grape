@@ -173,6 +173,40 @@ npm install -g opencode          # Node.js based
 pip install codearts-cli         # Python based
 ```
 
+### AtomCode engine (macOS / Linux)
+
+Install the official [AtomCode CLI](https://github.com/atomgit-atomcode/atomcode#readme),
+put `atomcode` on the Grape server or worker's `PATH`, and log in on that machine:
+
+```bash
+atomcode login
+atomcode --version
+```
+
+Grape supports AtomCode's headless JSONL schema 1 (verified with CLI 5.2.3–5.2.6).
+Select the discovered `atomcode` engine in engine management and bind its instance
+in your scene or Chat configuration. A successful version check indicates installation;
+health requires a successful, bounded model probe. Windows execution is not supported yet.
+
+The CLI's default provider/model is used unless **both** `GRAPE_ATOMCODE_PROVIDER`
+and `GRAPE_ATOMCODE_MODEL` are set. Task environment overrides worker environment;
+provider/model values are passed as separate command arguments, never shell text.
+`ATOMCODE_HOME` defaults to `~/.atomcode`; Grape discovers its `skills` directory.
+
+Each task runs with `--ephemeral`: Grape supplies context without resuming or writing
+native CLI sessions. Prompts travel over stdin. Grape does not add `-y` or change CLI
+login/permission files; configure permissions using the official
+[permission model](https://github.com/atomgit-atomcode/atomcode/blob/main/docs/security/permission-model.md).
+Headless shell commands can still run under CLI policy. If a tool requires interactive
+approval, the task fails with an actionable error instead of silently succeeding.
+
+For failures, check login, the provider/model pair, required JSONL flags and schema,
+and CLI permissions on the executing machine. Missing completion events, rate-limited
+completion and permission denial are failures. Grape does not automatically rerun an
+AtomCode task after a failure or timeout; inspect partial effects before manually retrying.
+Health probes disable tools and session persistence, use a temporary directory and a
+60-second timeout, and consume a small model request under the existing probe schedule.
+
 ### Environment Check (Optional)
 
 ```bash

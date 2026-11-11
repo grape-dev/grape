@@ -1183,6 +1183,8 @@ def _engine_type_of(rt: dict) -> str:
         return "codearts"
     if "codex" in n:
         return "codex"
+    if "atomcode" in n:
+        return "atomcode"
     return ""
 
 
@@ -1655,7 +1657,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
 def _device_engine_types(d: dict) -> list:
     """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
     _KNOWN = [("hermes", "hermes"), ("opencode", "opencode"),
-              ("codearts", "codearts"), ("codex", "codex")]
+              ("codearts", "codearts"), ("codex", "codex"), ("atomcode", "atomcode")]
     found = []
     for rt in d.get("runtimes", []):
         n = (rt.get("name") or "").lower()

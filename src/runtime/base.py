@@ -7,10 +7,18 @@ class AgentRuntime:
     name = ""
     binary = ""
     prompt_via_stdin = True  # issue #351: 默认 stdin 传 prompt，规避 argv 经 cmd 壳截断多行提示词
+    text_separator = "\n"
+    requires_terminal_event = False
+    allow_auto_retry = True
+    supports_session = True
     _serve_port = 0  # codearts 方案E2: serve 端口（pre_exec 设置，build_args 读取）
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         raise NotImplementedError
+
+    def build_args_for_env(self, prompt: str, session_id: str, env: dict) -> list[str]:
+        """Build arguments using the fully assembled task environment."""
+        return self.build_args(prompt, session_id)
 
     def parse_output(self, line: str) -> dict | None:
         """NDJSON 逐行解析，返回统一事件 dict 或 None"""

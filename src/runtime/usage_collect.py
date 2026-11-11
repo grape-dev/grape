@@ -205,7 +205,7 @@ class UsageCollector:
                 # token 解析轨二期接入（session.v4.jsonl.zstd，方案已定见设计 spec §5）
                 log.info("usage_collect: aishell-dsh usage gap (phase 2 will parse session file)")
                 return []
-            if self.engine == "codex":
+            if self.engine in ("codex", "atomcode"):
                 return self._fed
             if self.engine == "opencode":
                 return self._opencode_usage()

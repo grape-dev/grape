@@ -176,6 +176,33 @@ npm install -g opencode          # 基于 Node.js
 pip install codearts-cli         # 基于 Python
 ```
 
+### AtomCode 引擎（macOS / Linux）
+
+按[官方安装说明](https://github.com/atomgit-atomcode/atomcode#readme)安装 AtomCode CLI，
+将 `atomcode` 加入 Grape 服务端或 worker 的 `PATH`，并在实际执行机器上登录：
+
+```bash
+atomcode login
+atomcode --version
+```
+
+Grape 使用 headless JSONL schema 1，已核对 CLI 5.2.3–5.2.6。发现引擎后，在引擎管理中
+选择 `atomcode`，并在场景或 Chat 配置中绑定对应实例。版本检查成功只说明已安装；健康状态
+需要有时限的真实模型探测成功。首版暂不支持 Windows 执行。
+
+默认使用 CLI 配置中的 provider/model；也可以**同时**配置 `GRAPE_ATOMCODE_PROVIDER`
+与 `GRAPE_ATOMCODE_MODEL`。任务环境优先于 worker 环境，参数按独立 argv 传入。
+`ATOMCODE_HOME` 默认是 `~/.atomcode`，Grape 会发现其 `skills` 目录。
+
+每项任务使用 `--ephemeral`，由 Grape 提供上下文，不续接或持久化 CLI 原生会话，提示词通过
+stdin 传输。Grape 不添加 `-y`，不改写登录与权限文件；请参考[官方权限模型](https://github.com/atomgit-atomcode/atomcode/blob/main/docs/security/permission-model.md)
+配置所需权限。CLI 策略仍可能允许无头 shell 执行；需要交互批准的工具被拒绝时，任务会明确失败。
+
+排障时检查执行机器上的登录状态、provider/model 是否成对、CLI 是否支持必需的 JSONL 参数与
+schema，以及工具权限。缺失完成事件、限流终止和权限拒绝均判为失败。失败或超时后 Grape
+不会自动重跑整项 AtomCode 任务；人工重派前应检查部分操作是否已执行。健康探测关闭工具与
+会话持久化，使用临时目录，最长 60 秒；沿用现有探活周期，会消耗少量模型请求额度。
+
 ### 环境自检（可选）
 
 ```bash

@@ -558,6 +558,7 @@ function renderRuntimes(data) {
         if (n.includes('opencode')) return 'opencode';
         if (n.includes('codearts')) return 'codearts';
         if (n.includes('codex')) return 'codex';
+        if (n.includes('atomcode')) return 'atomcode';
         return '';
       }).filter(Boolean))])
     : (_rtDevAvailTypes || []);
@@ -566,7 +567,7 @@ function renderRuntimes(data) {
   // 筛选标签从后端返回的 avail_scopes 生成（不依赖当前页数据）
   const _availScopes = _runtimeTab === 'engines' ? (data.avail_scopes || []) : (_rtDevAvailScopes || []);
   const _hasScope = (sc) => _availScopes.includes(sc);
-  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', aishell: '#0a8cd8', 'aishell-dsh': '#22c55e' };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', atomcode: '#ea580c', aishell: '#0a8cd8', 'aishell-dsh': '#22c55e' };
   // 收集可用场景和标签（Issue #472: 优先用后端返回的全量可见集派生值）
   const _allRuntimes = (data.runtimes || []);
   const _availScenes = (data.avail_scenes || [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))]).filter(Boolean);

@@ -3,6 +3,7 @@ import os, subprocess, json, time, signal
 from typing import Generator, AsyncGenerator
 from src.config import log
 from .base import AgentBackend
+from .atomcode import AtomCodeBackend
 from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
@@ -36,6 +37,7 @@ _BACKENDS = {
     "dsh": DshBackend(),
     "hwcloud": HwcloudBackend(),
     "aishell-dsh": AishellDshACPBackend(),
+    "atomcode": AtomCodeBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -43,16 +45,31 @@ _BACKENDS = {
 import threading as _threading
 _active_procs: set[subprocess.Popen] = set()
 _active_procs_lock = _threading.Lock()
+_active_proc_metadata: dict = {}
 
 
-def _track_proc(proc: subprocess.Popen):
+def _track_proc(proc: subprocess.Popen, backend: str = "", cwd: str = ""):
     with _active_procs_lock:
         _active_procs.add(proc)
+        if backend and cwd:
+            _active_proc_metadata[proc] = (backend, os.path.realpath(cwd))
 
 
 def _untrack_proc(proc: subprocess.Popen):
     with _active_procs_lock:
         _active_procs.discard(proc)
+        _active_proc_metadata.pop(proc, None)
+
+
+def terminate_tracked_agents(backend: str, cwd: str) -> bool:
+    """Terminate only registered processes for this exact backend/workspace."""
+    target = (backend, os.path.realpath(cwd))
+    with _active_procs_lock:
+        procs = [p for p, metadata in _active_proc_metadata.items() if metadata == target]
+    for proc in procs:
+        _terminate_proc(proc, backend, grace_seconds=3)
+        _untrack_proc(proc)
+    return bool(procs)
 
 
 def terminate_active_agents(grace_seconds: int = 5):
@@ -76,6 +93,7 @@ def terminate_active_agents(grace_seconds: int = 5):
     with _active_procs_lock:
         procs = list(_active_procs)
         _active_procs.clear()
+        _active_proc_metadata.clear()
     for proc in procs:
         try:
             _terminate_proc(proc, "shutdown")
@@ -200,6 +218,7 @@ def discover_backends() -> list[dict]:
         "hwcloud": {"cli": "hwcloud", "pip": ""},
         "aishell-dsh": {"cli": "aishell", "pip": ""},
         "cursor": {"cli": "cursor", "pip": "cursor"},
+        "atomcode": {"cli": "atomcode", "pip": ""},
     }
     results = []
     for name, info in known.items():
@@ -850,6 +869,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     # 需要脱敏的 token 列表（用于日志/事件输出；_assemble_env 已把 token/凭据注入 env）
     _tokens = [t for t in (bot_token, user_token) if t]
+    if backend.name == "atomcode" and env.get("GRAPE_SESSION_TOKEN"):
+        _tokens = [*_tokens, env["GRAPE_SESSION_TOKEN"]]
 
     # codearts 方案E2: serve 启动移到 _run_once 内部（每次执行启动自己的 serve，避免单例并发串号）
     # pre_exec/post_exec 由 _run_once 内部调用，serve 信息用局部变量
@@ -905,7 +926,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         else:
             _serve_env = env
 
-        args = backend.build_args(prompt, use_session_id)
+        try:
+            args = backend.build_args_for_env(prompt, use_session_id, _serve_env)
+        except (ValueError, RuntimeError) as exc:
+            yield ("done", {"exit_code": -1, "text": "", "oc_session_id": "",
+                            "errors": [str(exc)], "stderr": "", "backend": backend.name})
+            return
         log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
         log.info(f"{label}{backend.name} cwd: {cwd}")
 
@@ -985,12 +1011,20 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
 
         # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
-        proc = subprocess.Popen(
-            _cmd,
-            stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
-        )
-        _track_proc(proc)
+        try:
+            proc = subprocess.Popen(
+                _cmd,
+                stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
+            )
+        except OSError as exc:
+            if not backend.requires_terminal_event:
+                raise
+            yield ("done", {"exit_code": -1, "text": "", "oc_session_id": "",
+                            "errors": [f"AtomCode could not start: {type(exc).__name__}"],
+                            "stderr": "", "backend": backend.name})
+            return
+        _track_proc(proc, backend.name, cwd)
         # MR-3（2026-11-05）：引擎执行 span——展开 task.execute 的"黑盒"：
         # spawn→流式输出→退出全程一段，带 backend/exit_code/输出统计。
         # 手动生命周期（生成器不能用 with）；OTel 关闭时 _eng_span=None 零开销。
@@ -1010,11 +1044,22 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             # issue #351: prompt 经 stdin 传输（不进 argv，规避 cmd 壳多行截断）
             _stdin = getattr(proc, "stdin", None)
             if backend.prompt_via_stdin and _stdin is not None:
-                _stdin.write(prompt.encode("utf-8"))
-                _stdin.close()
+                try:
+                    _stdin.write(prompt.encode("utf-8"))
+                    _stdin.close()
+                except BrokenPipeError:
+                    if not backend.requires_terminal_event:
+                        raise
+                    # Continue draining stdout/stderr to report the CLI failure.
+                    try:
+                        _stdin.close()
+                    except BrokenPipeError:
+                        pass
 
             collected_text = []
-            new_session_id = use_session_id
+            new_session_id = use_session_id if backend.supports_session else ""
+            protocol_started = False
+            terminal_events = []
             error_events = []
             # issue #317：引擎遗言尾部缓冲（exit!=0 且 stderr 空时补采进 errors）
             _log_tail = []
@@ -1071,6 +1116,79 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
             _stderr_thread.start()
 
+            def _consume_lines(raw_lines):
+                nonlocal _raw_count, _parsed_count, protocol_started
+                nonlocal step_count, new_session_id, _text_count, _tool_count
+                for raw_line in raw_lines:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    _push_log_tail(_log_tail, line)
+                    parsed = backend.parse_output(line)
+                    if parsed is None:
+                        if backend.requires_terminal_event:
+                            error_events.append("Malformed AtomCode JSONL event")
+                        _raw_count += 1
+                        # opencode 会话失效错误经 stdout 以 ANSI 原始行输出（非 NDJSON），
+                        # 计入 error_events 使下方 session_missing 检测能命中（重跑无 session）
+                        if "session not found" in line.lower():
+                            error_events.append(_redact(line, _tokens))
+                        yield ("raw", _redact(line, _tokens))
+                        continue
+                    _parsed_count += 1
+                    et = parsed["type"]
+                    if backend.requires_terminal_event:
+                        if et == "step_start":
+                            if protocol_started or terminal_events:
+                                error_events.append("Invalid AtomCode protocol event order")
+                            protocol_started = True
+                        elif not protocol_started and et not in ("warning", "error"):
+                            error_events.append("AtomCode event before run.started")
+                        elif terminal_events:
+                            error_events.append("AtomCode event after terminal")
+                    if et == "terminal":
+                        terminal_events.append(parsed)
+                        if not parsed.get("ok"):
+                            error_events.append(_redact(parsed.get("message", "AtomCode failed"), _tokens))
+                    elif et == "usage":
+                        yield ("usage", parsed["usage"])
+                    elif et == "warning":
+                        yield ("warning", _redact(parsed.get("message", ""), _tokens))
+                    elif et == "step_start":
+                        step_count += 1
+                        if parsed.get("sessionID"):
+                            new_session_id = parsed["sessionID"]
+                        yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
+                    elif et == "text":
+                        collected_text.append(parsed["text"])
+                        _text_count += 1
+                        yield ("text", _redact(parsed["text"], _tokens))
+                    elif et == "reasoning":
+                        yield ("reasoning", _redact(parsed["text"], _tokens))
+                    elif et == "tool_use":
+                        _tool_count += 1
+                        # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
+                        yield ("tool_use", {
+                            "tool": parsed.get("tool", ""),
+                            "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
+                        })
+                    elif et == "step_finish":
+                        _tok = parsed.get("tokens", "")
+                        yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
+                    elif et == "error":
+                        error_events.append(_redact(parsed["message"], _tokens))
+                        yield ("error", _redact(parsed["message"], _tokens))
+                    elif et in ("tool_finish", "tool_result", "api_call", "api_response", "session"):
+                        # Hermes verbose 模式新事件类型：直接转发 text 字段
+                        _txt = parsed.get("text", "")
+                        if _txt:
+                            yield (et, _redact(_txt, _tokens))
+                        # session 事件提取 sessionID
+                        if et == "session" and parsed.get("sessionID"):
+                            new_session_id = parsed["sessionID"]
+                    else:
+                        yield ("other", et)
+
             _raw_count = 0
             _parsed_count = 0
             while True:
@@ -1082,56 +1200,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         raw_lines = []
                 if raw_lines:
                     _last_output = time.time()
-                    for raw_line in raw_lines:
-                        line = raw_line.decode("utf-8", errors="replace").strip()
-                        if not line:
-                            continue
-                        _push_log_tail(_log_tail, line)
-                        parsed = backend.parse_output(line)
-                        if parsed is None:
-                            _raw_count += 1
-                            # opencode 会话失效错误经 stdout 以 ANSI 原始行输出（非 NDJSON），
-                            # 计入 error_events 使下方 session_missing 检测能命中（重跑无 session）
-                            if "session not found" in line.lower():
-                                error_events.append(_redact(line, _tokens))
-                            yield ("raw", _redact(line, _tokens))
-                            continue
-                        _parsed_count += 1
-                        et = parsed["type"]
-                        if et == "step_start":
-                            step_count += 1
-                            if parsed.get("sessionID"):
-                                new_session_id = parsed["sessionID"]
-                            yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
-                        elif et == "text":
-                            collected_text.append(parsed["text"])
-                            _text_count += 1
-                            yield ("text", _redact(parsed["text"], _tokens))
-                        elif et == "reasoning":
-                            yield ("reasoning", _redact(parsed["text"], _tokens))
-                        elif et == "tool_use":
-                            _tool_count += 1
-                            # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
-                            yield ("tool_use", {
-                                "tool": parsed.get("tool", ""),
-                                "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
-                            })
-                        elif et == "step_finish":
-                            _tok = parsed.get("tokens", "")
-                            yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
-                        elif et == "error":
-                            error_events.append(_redact(parsed["message"], _tokens))
-                            yield ("error", _redact(parsed["message"], _tokens))
-                        elif et in ("tool_finish", "tool_result", "api_call", "api_response", "session"):
-                            # Hermes verbose 模式新事件类型：直接转发 text 字段
-                            _txt = parsed.get("text", "")
-                            if _txt:
-                                yield (et, _redact(_txt, _tokens))
-                            # session 事件提取 sessionID
-                            if et == "session" and parsed.get("sessionID"):
-                                new_session_id = parsed["sessionID"]
-                        else:
-                            yield ("other", et)
+                    yield from _consume_lines(raw_lines)
                 elif _reader_done:
                     log.info(f"{label}{backend.name} loop break on reader EOF: raw={_raw_count} parsed={_parsed_count} total_lines={_reader_total}")
                     break
@@ -1185,11 +1254,11 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         # Issue #494：静默超时强杀必须带明确归因（不再只写英文 killed 短语）
                         from src.agent.failure_attribution import timeout_error_text
                         yield ("done", {
-                            "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
-                            "text": _redact("\n".join(collected_text), _tokens),
+                            "exit_code": -9 if backend.requires_terminal_event or _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
+                            "text": _redact(backend.text_separator.join(collected_text), _tokens),
                             "oc_session_id": new_session_id,
                             "errors": error_events + ([timeout_error_text(
-                                _silent_window, f"{backend.name} 无输出静默超时被终止")] if _grace_tail.strip() == "" else []),
+                                _silent_window, f"{backend.name} 无输出静默超时被终止")] if backend.requires_terminal_event or _grace_tail.strip() == "" else []),
                             "stderr": _redact(_stderr_tail.text(), _tokens),
                             "backend": backend.name, "parsed_count": _parsed_count,
                             "text_count": _text_count, "tool_count": _tool_count,
@@ -1243,19 +1312,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 pass
 
             if stdout_remainder:
-                for line in stdout_remainder.strip().split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parsed = backend.parse_output(line)
-                    if parsed and parsed["type"] == "text":
-                        collected_text.append(parsed["text"])
+                yield from _consume_lines(line.encode("utf-8") for line in stdout_remainder.splitlines())
 
-            full_text = "\n".join(collected_text)
+            full_text = backend.text_separator.join(collected_text)
             # issue #416：stderr 尾巴（末尾 ≥2000B，崩溃栈在末尾），不再保头 500B
+            _stderr_thread.join(timeout=5)
             stderr_output = _stderr_tail.text()
 
-            log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
+            log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={_redact(stderr_output, _tokens)[:120]!r}")
             if _eng_span is not None:
                 try:
                     _eng_span.set_attribute("engine.exit_code", proc.returncode if proc.returncode is not None else -1)
@@ -1295,6 +1359,15 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             # 结合系统日志启发式判定 OOM。
             _exit_code = proc.returncode
             _final_errors = list(error_events)
+            if backend.requires_terminal_event:
+                if not protocol_started or len(terminal_events) != 1:
+                    _final_errors.append("AtomCode missing or invalid terminal event")
+                if "[denied]" in stderr_output.lower():
+                    _final_errors.append("AtomCode requires interactive approval; configure CLI permissions")
+                if not full_text.strip():
+                    _final_errors.append("AtomCode completed without a conclusion")
+                if _final_errors:
+                    _exit_code = _exit_code or 1
             # Issue #494：超时类死亡显式归因——returncode=124（timeout 命令）/ -15（SIGTERM）
             # 时 stderr 常为空，尾采拿不到原因，直接构造「执行超时」文案进 errors。
             from src.agent.failure_attribution import process_exit_attribution
@@ -1328,6 +1401,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 "text_count": _text_count, "tool_count": _tool_count,
             })
         finally:
+            if backend.requires_terminal_event and proc.poll() is None:
+                _terminate_proc(proc, backend.name, grace_seconds=3)
+            _untrack_proc(proc)
             # 架构审查 P2-7：异常/超时/提前 return/生成器被关闭时 span 也必须收口
             # （原实现只在正常完成路径 end，异常路径的 span 永不导出）
             if _eng_span is not None:
@@ -1355,6 +1431,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         else:
             yield (evt_type, data)
     if done is None:
+        return
+    if not backend.allow_auto_retry:
+        yield ("done", done)
         return
 
     _stderr = (done.get("stderr") or "").lower()

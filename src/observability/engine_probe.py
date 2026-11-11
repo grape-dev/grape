@@ -38,6 +38,10 @@ _probing: bool = False  # 是否正在探测中（防止并发探测）
 
 def _probe_engine(engine_name: str, cli_path: str) -> dict:
     """对单个引擎发起测试对话，返回探测结果。"""
+    if engine_name == "atomcode":
+        from src.runtime.atomcode_probe import probe_atomcode
+        return probe_atomcode(cli_path)
+
     # hermes 使用 ACP 模式探活（和实际任务执行路径一致）
     if engine_name == "hermes":
         return _probe_hermes_acp(cli_path)

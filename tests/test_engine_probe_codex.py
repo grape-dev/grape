@@ -72,5 +72,15 @@ class TestWorkerSideProbeCommands:
 
     def test_all_known_engines_covered_worker(self):
         from src.runtime.agent import _PROBE_COMMANDS
-        for eng in ("opencode", "hermes", "codearts", "codex"):
+        for eng in ("opencode", "codearts", "codex"):
             assert eng in _PROBE_COMMANDS, f"{eng} missing from worker _PROBE_COMMANDS"
+        # ACP and AtomCode use dedicated probes rather than command templates.
+        from unittest.mock import patch
+        from src.runtime.agent import _probe_engine_worker
+        expected = {"status": "ok", "latency": 0, "error": ""}
+        with patch("src.runtime.agent._probe_hermes_acp", return_value=expected) as hermes:
+            assert _probe_engine_worker("hermes", "/opt/hermes") == expected
+            hermes.assert_called_once_with("/opt/hermes")
+        with patch("src.runtime.atomcode_probe.probe_atomcode", return_value=expected) as atomcode:
+            assert _probe_engine_worker("atomcode", "/opt/atomcode") == expected
+            atomcode.assert_called_once_with("/opt/atomcode")

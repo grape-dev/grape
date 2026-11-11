@@ -386,6 +386,12 @@ def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool =
         if not row:
             return False
         status, attempts, _stored_errors, event_seq = row
+        with db_lock:
+            engine = db.cursor().execute(
+                "SELECT ar.name FROM agent_tasks t JOIN agent_runtimes ar ON ar.id=t.runtime_id WHERE t.id=?",
+                (task_id,)).fetchone()
+        if engine and (engine[0] or "").lower().startswith("atomcode"):
+            return False
         if status != "running":
             return False
     except Exception as e:

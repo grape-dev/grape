@@ -4,6 +4,7 @@
 实现核心在 registry.py / executor.py，base/opencode/codearts 为 runtime 命名实现。
 """
 from .base import AgentRuntime
+from .atomcode import AtomCodeRuntime
 from .opencode import OpencodeRuntime
 from .codearts import CodeArtsRuntime
 from .codex import CodexRuntime

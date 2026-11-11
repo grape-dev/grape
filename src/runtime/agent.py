@@ -766,6 +766,10 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     hermes 使用 ACP 模式探活（和实际任务执行路径一致）；
     其他引擎使用 CLI 测试对话。
     """
+    if engine_name == "atomcode":
+        from src.runtime.atomcode_probe import probe_atomcode
+        return probe_atomcode(cli_path)
+
     # hermes 使用 ACP 模式探活
     if engine_name == "hermes":
         return _probe_hermes_acp(cli_path)
@@ -1236,6 +1240,9 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
+        if (r["name"] or "").lower() == "atomcode":
+            with _worker_probe_lock:
+                healthy = _worker_probe_results.get("atomcode", {}).get("status") == "ok"
         # hermes：ACP 依赖可用才算真健康（缺失时已尝试自动补装）
         if healthy and (r["name"] or "").lower() == "hermes":
             healthy = _ensure_hermes_acp(cli)
@@ -1293,6 +1300,14 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
     return canonical_engine(engine_name)
 
 
+def _timeout_retry_limit(task: dict, engine_name: str) -> int:
+    """Whole-run replay can duplicate AtomCode tools and must be manual."""
+    if _backend_for_engine(engine_name) == "atomcode":
+        return 0
+    from src.runtime.task_timeout import timeout_retry_count
+    return timeout_retry_count(task)
+
+
 def _usage_retry_engine(engine_name: str | None) -> bool:
     from src.runtime.instances import usage_retry_engine
 
@@ -1312,6 +1327,7 @@ def _scan_local_skills() -> list[dict]:
 
     # per-engine 专属 skill 目录（跨平台）
     engine_dirs = {
+        "atomcode": engine_skill_dirs("atomcode"),
         "hermes": engine_skill_dirs("hermes"),
         "opencode": engine_skill_dirs("opencode"),
         "codearts": engine_skill_dirs("codearts"),
@@ -1383,8 +1399,10 @@ def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
             skill_names = entry.get("skills") or []
             break
 
+    from src.runtime.os_adapter import engine_skill_dirs
     home = _os.path.expanduser("~")
     engine_dirs = {
+        "atomcode": engine_skill_dirs("atomcode"),
         "hermes": [_os.path.join(home, ".hermes", "skills")],
         "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
         "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
@@ -1645,6 +1663,9 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     from src.runtime.os_adapter import is_windows, find_process_by_cwd, kill_process_tree
     import subprocess, signal, time as _time
     cwd = _remap_cwd(task.get("cwd") or os.getcwd())
+    from src.agent.executor import terminate_tracked_agents
+    if terminate_tracked_agents(backend, cwd):
+        return
     # hermes ACP 模式用 `hermes acp`，CLI 模式用 `hermes chat`；两个模式都匹配
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
@@ -1652,6 +1673,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         "codearts": ["codearts run"],
         "codex": ["codex exec"],
         "dsh": ["dsh headless"],
+        "atomcode": ["atomcode"],
     }.get(backend, ["opencode run"])
 
     if is_windows():
@@ -3348,11 +3370,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 # Issue #516 M1：超时上限配置化——读取链 per-skill > per-repo > agent 默认
                 # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/runtime/task_timeout.py。
                 # （#470 任务级 env_extra 优先语义已包含：链条第 1 优先级即任务级显式 env。）
-                from src.runtime.task_timeout import (resolve_task_timeout, timeout_retry_count,
-                                                      retry_backoff_sec)
+                from src.runtime.task_timeout import (resolve_task_timeout, retry_backoff_sec)
                 task_timeout, _timeout_src = resolve_task_timeout(t)
                 # Issue #516 M2：超时失败有限次自动重试（默认 1 次，可配置禁用）
-                _retry_max = timeout_retry_count(t)
+                _retry_max = _timeout_retry_limit(t, e)
                 _retry_backoff = retry_backoff_sec()
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑

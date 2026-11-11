@@ -830,6 +830,7 @@ BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
 #   未实测（当前环境无 codearts 引擎），目录按推断补齐，留待真实环境 K6 验证。
 BWRAP_RO_ENGINE_COMMON = ("/usr/local",)
 BWRAP_RO_ENGINE = {
+    "atomcode": ("~/.local/bin",),
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
@@ -847,6 +848,7 @@ BWRAP_RO_ENGINE = {
 # codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
 _hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
 BWRAP_RW_ENGINE = {
+    "atomcode": (os.path.expanduser(os.environ.get("ATOMCODE_HOME") or "~/.atomcode"),),
     "opencode": ("/var/cache/bun-compile",),
     "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": (_hermes_home,),
