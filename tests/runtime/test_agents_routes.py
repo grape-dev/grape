@@ -18,6 +18,27 @@ UID = 98901
 USERNAME = "agent_tester"
 
 
+def _inst_row(app_id: str):
+    """读 grape_t_channel_installation（走 engine_wiring 自己的连接，与写入方同一条路径）。"""
+    from src.im.engine_wiring import _connect, default_db_path
+    conn = _connect(default_db_path())
+    try:
+        return conn.execute(
+            "SELECT status, config FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def _cleanup_inst(app_id: str) -> None:
+    from src.im.engine_wiring import _connect, default_db_path
+    conn = _connect(default_db_path())
+    try:
+        conn.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @pytest.fixture(autouse=True)
 def _client():
     app.dependency_overrides[get_current_user] = lambda: {"id": UID, "username": USERNAME, "auth_type": "api_key"}
@@ -46,16 +67,25 @@ def _seed_agent_types():
         db.commit()
 
 
-def _seed_session(repo_key, agent_type, rid=0, im_app_id=""):
+def _seed_session(repo_key, agent_type, rid=0, im_app_id="", im_app_secret="sec"):
+    """建 devops agent 会话；给了 im_app_id 就在安装表建对应 repo 轨安装行。
+
+    A2 Phase B 后 devops_agent_session.im_* 三列已 DROP —— IM 绑定只认
+    grape_t_channel_installation。
+    """
     sid = "agsess-%s" % uuid.uuid4().hex[:8]
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, status, runtime_session_id, repo_gitcode_token, im_app_id, enable, subscribe_events) "
-            "VALUES (?,?,?,?,?,?,?,?,?,1,'[]')",
-            (sid, repo_key, agent_type, rid or None, "askill", "idle", "sess_x", "tok", im_app_id))
+            "INSERT OR REPLACE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, status, runtime_session_id, repo_gitcode_token, enable, subscribe_events) "
+            "VALUES (?,?,?,?,?,?,?,?,1,'[]')",
+            (sid, repo_key, agent_type, rid or None, "askill", "idle", "sess_x", "tok"))
         db.commit()
-        return sid
+    if im_app_id:
+        from src.im.engine_wiring import sync_installation
+        sync_installation("repo", repo_key=repo_key, app_id=im_app_id,
+                          app_secret=im_app_secret)
+    return sid
 
 
 def _seed_engine():
@@ -145,18 +175,23 @@ class TestDetail:
         _seed_agent_types()
         rk = "gitcode:org/agvod1"
         sid = _seed_session(rk, "vod", im_app_id="cli_vod")
+        from src.im.engine_wiring import sync_installation
+        assert sync_installation("repo", repo_key=rk, app_id="cli_vod", app_secret="s")
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO vod_conversations (agent_session_id, im_chat_id, status) VALUES (?,?,?)", (sid, "oc_v", "active"))
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES ('cli_vod','vod_bot')")
             db.commit()
-        r = _client.get("/api/agents/vod/org/agvod1")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["im"] is not None
-        assert data["im"]["connected"] is True
-        assert len(data["im"]["conversations"]) == 1
-        assert data["im"]["conversations"][0]["chat_id"] == "oc_v"
+        try:
+            r = _client.get("/api/agents/vod/org/agvod1")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["im"] is not None
+            assert data["im"]["connected"] is True
+            assert len(data["im"]["conversations"]) == 1
+            assert data["im"]["conversations"][0]["chat_id"] == "oc_v"
+            assert data["im"]["im_app_id"] == "cli_vod"
+        finally:
+            _cleanup_inst("cli_vod")
 
     # ── Issue #127: 搜索 + 分页测试 ──
 
@@ -345,25 +380,30 @@ class TestUpdateConfig:
         assert row and row[0] == rid
 
     def test_vod_chat_bot_conflict_400(self, _client):
+        """A2 收尾：独占校验查 active 安装行——user 轨已占用的 app_id 不能绑 VOD。"""
         _seed_agent_types()
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES ('cli_chatx','chat_bot')")
-            db.commit()
-        r = _client.put("/api/agents/vod/org/repo", json={"im_app_id": "cli_chatx", "im_app_secret": "s"})
-        assert r.status_code == 400
-        assert "Chat Agent" in r.json()["detail"]["message"]
+        from src.im.engine_wiring import sync_installation
+        assert sync_installation("user", owner_user_id=str(UID), app_id="cli_chatx", app_secret="s")
+        try:
+            r = _client.put("/api/agents/vod/org/repo", json={"im_app_id": "cli_chatx", "im_app_secret": "s"})
+            assert r.status_code == 400
+            assert "Chat Agent" in r.json()["detail"]["message"]
+        finally:
+            _cleanup_inst("cli_chatx")
 
     def test_vod_success_adds_bot(self, _client):
+        """A2 M2：VOD 保存 IM 后不再经 BotManager 热加载，改为新表安装行 active。"""
         _seed_agent_types()
-        bm = MagicMock()
-        bm.api = MagicMock()
-        bm.add_bot = AsyncMock()
-        bm.remove_bot = AsyncMock()
-        with patch("src.api.main.bot_manager", bm):
-            r = _client.put("/api/agents/vod/org/agv1", json={"im_app_id": "cli_vodx", "im_app_secret": "sec"})
-        assert r.status_code == 200, r.text
-        bm.add_bot.assert_awaited_once()
+        app_id = "cli_vodx"
+        try:
+            r = _client.put("/api/agents/vod/org/agv1", json={"im_app_id": app_id, "im_app_secret": "sec"})
+            assert r.status_code == 200, r.text
+            row = _inst_row(app_id)
+            assert row and row[0] == "active", f"应建出 active 安装行，实际={row}"
+            # secret 快照进 config，引擎扫描时无需再回查 legacy 表
+            assert "sec" in (row[1] or ""), f"config 应含 app_secret 快照，实际={row[1]}"
+        finally:
+            _cleanup_inst(app_id)
 
     def test_skill_repo_resolution(self, _client):
         _seed_agent_types()
@@ -385,17 +425,17 @@ class TestUpdateConfig:
         _seed_agent_types()
         rk = "gitcode:org/agv2"
         _seed_session(rk, "vod", im_app_id="cli_vodx2")
-        with db_lock:
-            db.cursor().execute("UPDATE devops_agent_session SET im_app_secret='stored_sec' WHERE repo_key=? AND agent_type='vod'", (rk,))
-            db.commit()
-        bm = MagicMock()
-        bm.api = MagicMock()
-        bm.add_bot = AsyncMock()
-        bm.remove_bot = AsyncMock()
-        with patch("src.api.main.bot_manager", bm):
-            r = _client.put("/api/agents/vod/org/agv2", json={"im_app_id": "cli_vodx2", "im_app_secret": "********"})
-        assert r.status_code == 200, r.text
-        bm.add_bot.assert_awaited_once()
+        from src.im.engine_wiring import sync_installation
+        app_id = "cli_vodx2"
+        assert sync_installation("repo", repo_key=rk, app_id=app_id, app_secret="stored_sec")
+        try:
+            r = _client.put("/api/agents/vod/org/agv2", json={"im_app_id": app_id, "im_app_secret": "********"})
+            assert r.status_code == 200, r.text
+            row = _inst_row(app_id)
+            assert row and row[0] == "active", f"应建出 active 安装行，实际={row}"
+            assert "stored_sec" in (row[1] or ""), f"占位 secret 应复用库里旧值，实际 config={row[1]}"
+        finally:
+            _cleanup_inst(app_id)
 
     def test_vod_unbind_clears_im_only(self, _client):
         """Issue #294：VOD 解绑（im_unbind）→ IM 三字段清空 + 释放注册表 + 删群会话，引擎/技能保留。"""
@@ -406,48 +446,38 @@ class TestUpdateConfig:
         sid = _seed_session(rk, "vod", im_app_id=app_id)
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE devops_agent_session SET im_app_secret='sec', im_provider='feishu', runtime_id=?, skill='askill', skill_id=7 WHERE id=?",
+            c.execute("UPDATE devops_agent_session SET runtime_id=?, skill='askill', skill_id=7 WHERE id=?",
                       (rid, sid))
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, 'vod_bot')", (app_id,))
             c.execute("INSERT INTO vod_conversations (agent_session_id, im_chat_id, status) VALUES (?, 'oc_unb', 'active')", (sid,))
             db.commit()
-        bm = MagicMock()
-        bm.api = MagicMock()
-        bm.remove_bot = AsyncMock()
-        bm.add_bot = AsyncMock()
+        from src.im.engine_wiring import revoke_installation, sync_installation
+        assert sync_installation("repo", repo_key=rk, app_id=app_id, app_secret="sec")
         try:
-            with patch("src.api.main.bot_manager", bm):
-                r = _client.put("/api/agents/vod/org/agunb1", json={"im_unbind": True})
+            # A2 M2：解绑不再经 BotManager 摘 bot，改为把新表安装行置 revoked
+            r = _client.put("/api/agents/vod/org/agunb1", json={"im_unbind": True})
             assert r.status_code == 200, r.text
             assert r.json()["session_id"] == sid
-            bm.remove_bot.assert_awaited_once_with(app_id)
-            bm.add_bot.assert_not_awaited()
+            row_inst = _inst_row(app_id)
+            assert row_inst and row_inst[0] == "revoked", f"解绑应把安装行置 revoked，实际={row_inst}"
             with db_lock:
                 c = db.cursor()
-                row = c.execute("SELECT im_app_id, im_app_secret, im_provider, runtime_id, skill_id FROM devops_agent_session WHERE id=?", (sid,)).fetchone()
-                reg = c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()[0]
+                row = c.execute("SELECT runtime_id, skill_id FROM devops_agent_session WHERE id=?", (sid,)).fetchone()
                 conv = c.execute("SELECT COUNT(*) FROM vod_conversations WHERE agent_session_id=?", (sid,)).fetchone()[0]
-            assert tuple(row[:3]) == ("", "", ""), "解绑后 im_app_id/secret/provider 应为空（显式传空串生效）"
-            assert row[3] == rid and row[4] == 7, "解绑不应重置引擎/技能配置"
-            assert reg == 0, "解绑后 vod_bot 注册行应被删除（无其他引用）"
+            assert row[0] == rid and row[1] == 7, "解绑不应重置引擎/技能配置"
             assert conv == 0, "解绑后该仓库群会话应被清理"
             # 解绑后同一凭证可重新绑定
-            with patch("src.api.main.bot_manager", bm):
-                r2 = _client.put("/api/agents/vod/org/agunb1", json={"im_app_id": app_id, "im_app_secret": "sec"})
+            r2 = _client.put("/api/agents/vod/org/agunb1", json={"im_app_id": app_id, "im_app_secret": "sec"})
             assert r2.status_code == 200, r2.text
-            with db_lock:
-                c = db.cursor()
-                row2 = c.execute("SELECT im_app_id, im_provider FROM devops_agent_session WHERE id=?", (sid,)).fetchone()
-                reg2 = c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()
-            assert tuple(row2) == (app_id, "feishu"), "解绑后应可重新绑定同一凭证"
-            assert reg2 and reg2[0] == "vod_bot"
+            row_inst2 = _inst_row(app_id)
+            assert row_inst2 and row_inst2[0] == "active", f"重绑后安装行应回到 active，实际={row_inst2}"
+
         finally:
             with db_lock:
                 c = db.cursor()
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
                 c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (sid,))
                 c.execute("DELETE FROM devops_agent_session WHERE id=?", (sid,))
                 db.commit()
+            _cleanup_inst(app_id)
 
     def test_vod_plain_save_keeps_im(self, _client):
         """Issue #294：不带 IM 字段/解绑标记的普通保存不得误清既有 IM 绑定。"""
@@ -456,23 +486,16 @@ class TestUpdateConfig:
         app_id = "cli_vodkeep_%s" % uuid.uuid4().hex[:6]
         rk = "gitcode:org/agkeep1"
         sid = _seed_session(rk, "vod", im_app_id=app_id)
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE devops_agent_session SET im_app_secret='sec', im_provider='feishu' WHERE id=?", (sid,))
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, 'vod_bot')", (app_id,))
-            db.commit()
         try:
             r = _client.put("/api/agents/vod/org/agkeep1", json={"backends": ["ag_rt"]})
             assert r.status_code == 200, r.text
-            with db_lock:
-                c = db.cursor()
-                row = c.execute("SELECT im_app_id, im_app_secret, im_provider FROM devops_agent_session WHERE id=?", (sid,)).fetchone()
-                reg = c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()[0]
-            assert tuple(row) == (app_id, "sec", "feishu"), "普通保存不应清空既有 IM 绑定"
-            assert reg == 1, "普通保存不应删除注册表行"
+            row = _inst_row(app_id)
+            assert row and row[0] == "active", f"普通保存不应把安装行置非 active，实际={row}"
+            assert app_id in (row[1] or "") and "sec" in (row[1] or ""), \
+                f"普通保存不应清空既有 IM 绑定，实际 config={row[1]}"
         finally:
             with db_lock:
                 c = db.cursor()
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
                 c.execute("DELETE FROM devops_agent_session WHERE id=?", (sid,))
                 db.commit()
+            _cleanup_inst(app_id)

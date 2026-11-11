@@ -5,7 +5,7 @@ import pytest
 
 from src.domains.runtime.engine.registry import discover_runtimes, register_runtime, get_runtime
 from src.domains.runtime.engine.base import AgentRuntime
-from src.domains.runtime.im.base import IMChannel
+from src.im.base import IMChannel
 from src.domains.runtime.vcs.base import VcsBackend
 
 

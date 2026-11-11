@@ -7,6 +7,8 @@
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 import asyncio, os, shutil, time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from src.kernel import config
 from src.kernel.config import log, CHAT_CWD_BASE
 from src.kernel.session_manager import db, db_lock
@@ -558,10 +560,14 @@ def sweep_once() -> int:
         # 注意：**不能**放在上面 `if _has_db_tables:` 块里 —— 那个判断查的是 SQLite 的
         # sqlite_master，MySQL 后端恒为 False，钩子会被整块跳过（实测踩过）。
         try:
-            from src.domains.runtime.im.bot_lease import purge_stale_instances
+            from src.im.bot_lease import purge_stale_instances
             cleaned += purge_stale_instances(older_than_hours=24)
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
+        # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
+        cleaned += _sweep_branch_guard_state()
+        # A7/F4：IM 只增表（去重/入站流水/卡片台账）TTL 清理
+        cleaned += _sweep_im_tables()
 
         from src.kernel.repo_key import split_owner_repo
         from src.domains.runtime.engine import repogit
@@ -624,6 +630,60 @@ def sweep_once() -> int:
         return cleaned
     except Exception as e:
         log.warning(f"sweep_once failed: {e}")
+        return 0
+
+
+
+def _sweep_im_tables() -> int:
+    """A7/F4：IM 只增表按 created_at TTL 清理（sqlite / MySQL 双后端同一写法）。
+
+    时间比较走**应用层预计算 cutoff + `?` 参数**：`datetime('now','-N hours')` 是
+    SQLite 私有修饰符方言，mysql_compat 只翻译无参形式，带修饰符会在 MySQL 报 1305
+    （B1 强制约束，参照 src/runtime/branch_guard.py / src/runtime/table_maintenance.py）。
+
+    - grape_t_channel_inbound_dedup：去重窗口仅 90s，历史行无保留价值 → 24h
+    - grape_t_channel_inbound_message：入站消息流水（问题定位用）→ 24h
+    - grape_t_channel_outbound_card：卡片台账（重启后回调反查用）→ 7d
+    失败记 warning（不静默），单表失败不影响其余表。
+    """
+    cleaned = 0
+    specs = (
+        ("grape_t_channel_inbound_dedup", "created_at", 24),
+        ("grape_t_channel_inbound_message", "created_at", 24),
+        ("grape_t_channel_outbound_card", "created_at", 24 * 7),
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        from src.kernel.session_manager import db, db_lock
+        for table, col, hours in specs:
+            try:
+                cutoff = (now - timedelta(hours=int(hours))).strftime("%Y-%m-%d %H:%M:%S")
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
+                    n = c.rowcount or 0
+                    db.commit()
+                cleaned += n
+                if n:
+                    log.info(f"sweeper: purged {n} rows from {table} (older than {hours}h)")
+            except Exception as e:
+                log.warning(f"sweeper im-table purge failed ({table}): {e}")
+    except Exception as e:
+        log.warning(f"sweeper im-table purge failed: {e}")
+    return cleaned
+
+
+def _sweep_branch_guard_state() -> int:
+    """Issue #993 R9：按 updated_at TTL 清理 branch_guard_state（每分支一行、只增不减）。
+
+    MySQL 后端下不能放在 `_has_db_tables` 判定块里（sqlite_master 检测恒 False）。
+    有 pending 候选的行由 prune_guard_state 保留，避免漏一次漂移比对。
+    """
+    try:
+        from src.domains.runtime.engine.branch_guard import prune_guard_state
+        return prune_guard_state()
+    except Exception as e:
+        log.debug(f"sweeper branch-guard prune skipped: {e}")
         return 0
 
 
@@ -843,10 +903,14 @@ async def sweep_events_loop() -> None:
             except Exception as e:
                 log.warning(f"Event sweeper stuck-event sweep failed: {e}")
             try:
-                from src.domains.runtime.im.bot_lease import purge_stale_instances
+                from src.im.bot_lease import purge_stale_instances
                 cleaned += purge_stale_instances(older_than_hours=24)
             except Exception as e:
                 log.debug(f"Event sweeper im-instance purge skipped: {e}")
+            # Issue #993 R9：分支守卫状态表 TTL 清理
+            cleaned += _sweep_branch_guard_state()
+            # A7/F4：IM 只增表 TTL 清理
+            cleaned += _sweep_im_tables()
 
             active = _active_issue_sessions()
             for repo_key, issue_id in _done_issues():

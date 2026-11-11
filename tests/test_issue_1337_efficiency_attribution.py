@@ -75,7 +75,7 @@ def _seed_mapping(user_id, gitcode_user="", github_login=""):
 
 
 def _grant_repo_access(user_id=133701):
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     base = ("org", "repo")
     _exec("DELETE FROM managed_repos WHERE repo_key=?", (REPO,))
     user_db.add_managed_repo(REPO, base[0], base[1])
@@ -149,7 +149,7 @@ def test_unassigned_tokens_attributed_to_bucket():
         " repo_key, agent_type, issue_id, status) VALUES"
         " ('t_1337_u','sess',7,'p',?,'coding','#614','completed')", (REPO,))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu("t_1337_u", [{"model": "glm-5.3", "input": 30, "output": 3, "turn": 0}],
        source="hermes")
     cli, app, _dep = _client()
@@ -188,7 +188,7 @@ def test_bot_rule_in_token_chain():
         " repo_key, agent_type, issue_id, status) VALUES"
         " ('t_1337_bot','sess',7,'p',?,'coding','#625','completed')", (REPO,))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu("t_1337_bot",
        [{"model": "glm-5.3", "input": 80, "output": 8, "turn": 0}],
        source="hermes")
@@ -263,7 +263,7 @@ def test_issue_row_with_null_user_id_tokens_fall_into_unassigned(_issue_user_id_
             f" ('{tid}','sess',7,'p',?,'coding','#{615 if tid == 't_1337_null' else 999}','completed')",
             (REPO,))
     lu = __import__(
-        "src.observability.llm_usage", fromlist=["record_usage"]).record_usage
+        "src.domains.insight.observability.llm_usage", fromlist=["record_usage"]).record_usage
     lu("t_1337_null",
        [{"model": "glm-5.3", "input": 40, "output": 4, "turn": 0}],
        source="hermes")
@@ -298,7 +298,7 @@ def test_ensure_assignee_task_card_writes_created_by():
 
 
 def test_ensure_issue_task_writes_created_by_from_sender():
-    from src.api.routes.tasks import ensure_issue_task
+    from src.domains.runtime.routes.tasks import ensure_issue_task
     _seed_mapping(_UID_BASE + 5, gitcode_user="erin")
     task_id = ensure_issue_task(REPO, 632, title="t", sender="erin")
     assert task_id

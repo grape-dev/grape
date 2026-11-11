@@ -11,6 +11,29 @@ from src.kernel.token_service import is_auth_401_error
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
+def _redispatch_scene_override(evt: dict) -> str:
+    """重派时是否沿用事件行 scene_id 作为 env 场景 override（Issue #1745）。
+
+    仅 PR 订阅事件需要 override（Issue #427：订阅场景可不同于关联 Issue 场景），
+    判定与执行前校正共用 `_is_pr_subscription_task` 单一入口。普通 Issue/A2A/评论
+    事件在跨场景转交后，事件行 scene_id 仍是源场景，若继续作为 override 会覆盖
+    Issue 当前归属场景，导致注入的 GRAPE_SCENE_ID 陈旧；普通事件一律返回空串，
+    交由 build_task_env 按 issue_id 重新解析真值。
+    """
+    _scene = (evt.get("scene_id") or "").strip()
+    if not _scene:
+        return ""
+    from src.api.event_pipeline import _is_pr_subscription_task
+    if _is_pr_subscription_task(
+            issue_id=evt.get("issue_id") or "",
+            event_type=evt.get("event_type") or "",
+            title=evt.get("title") or ""):
+        return _scene
+    log.info(f"[redispatch] seq={evt.get('seq')} drop event scene override: "
+             f"event_scene={_scene}, issue={evt.get('issue_id') or ''}")
+    return ""
+
+
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                          task_id: str = ""):
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
@@ -708,7 +731,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             runtime_id=_orig_rid,
                             account=old.get("account") or "",
                             issue_number=old.get("issue_id") or "",
-                            scene_id_override=evt.get("scene_id") or "")
+                            scene_id_override=_redispatch_scene_override(evt))
         _new_task_id = enqueue_task(
             agent_session_id=old.get("agent_session_id") or "",
             runtime_id=_orig_rid,
@@ -1214,7 +1237,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                     runtime_id=_rid,
                                     account=old.get("account") or "",
                                     issue_number=old.get("issue_id") or "",
-                                    scene_id_override=evt.get("scene_id") or "")
+                                    scene_id_override=_redispatch_scene_override(evt))
                 _new_task_id = enqueue_task(
                     agent_session_id=old.get("agent_session_id") or "",
                     runtime_id=_rid,
@@ -1320,9 +1343,12 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         pass
                     import urllib.request as _url_req
                     _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
-                    # Issue #372 §15.2: A2A re-dispatch URL 从 get_server_base_url 获取
-                    from src.domains.mgmt.user.db import get_server_base_url as _gsb
-                    _a2a_base = _gsb() or "http://localhost:8000"
+                    # Issue #1858：A2A 派发改用 A2A 控制面基址（含可选网关 /a2a 前缀），
+                    # 不再复用业务/runtime 网关地址。
+                    from src.kernel.prompt_builder import resolve_a2a_base
+                    _a2a_base = resolve_a2a_base()
+                    if not _a2a_base:
+                        raise RuntimeError("A2A base_url unresolved")
                     _a2a_req = _url_req.Request(
                         f"{_a2a_base}/api/a2a",
                         data=_a2a_body,
@@ -1351,8 +1377,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 except HTTPException:
                     raise
                 except Exception as e:
-                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}")
-                    raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
+                    from src.prompt_builder import format_base_url_candidates
+                    try:
+                        _candidates = format_base_url_candidates("/api/a2a")
+                    except Exception:
+                        _candidates = ""
+                    log.warning(f"[redispatch] seq={seq} a2a re-dispatch failed: {e}; {_candidates}")
+                    raise HTTPException(status_code=500, detail={"code": 500,
+                        "message": f"重派异常: {str(e)[:100]}；{_candidates}"})
 
             # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行

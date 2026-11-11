@@ -7,6 +7,7 @@ import sys
 import threading
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -205,6 +206,17 @@ class _FakeBotManager:
         return SimpleNamespace(app_id=app_id) if app_id == self._app_id else None
 
 
+def _seed_chat_install(user_id, app_id, row_id=None, channel_type="feishu"):
+    """A2 Phase B：IM 凭证只认 grape_t_channel_installation（chat_agent_session.im_* 列已 DROP）。"""
+    from src.im.engine_wiring import sync_installation
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
+                  (row_id or f"seed-{user_id}-{app_id}", user_id))
+        db.commit()
+    sync_installation("user", owner_user_id=str(user_id), app_id=app_id,
+                      app_secret="sec", channel_type=channel_type)
+
 def _seed_feishu_binding(user_id, gitcode_user, open_id, app_id):
     """写入 unified_user_mapping + chat_agent_session（供 _push_reply_to_feishu 解析）"""
     with db_lock:
@@ -212,9 +224,7 @@ def _seed_feishu_binding(user_id, gitcode_user, open_id, app_id):
         c.execute(
             "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id) VALUES (?,?,?)",
             (user_id, gitcode_user, open_id))
-        c.execute(
-            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES (?,?,?)",
-            (f"test-{app_id}", user_id, app_id))
+        _seed_chat_install(user_id, app_id, row_id=f"test-{app_id}")
         db.commit()
 
 
@@ -223,24 +233,26 @@ def _clean_feishu_binding(user_id, gitcode_user, app_id):
         c = db.cursor()
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
         c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,))
         db.commit()
 
 
 def test_push_sends_card_to_feishu():
-    """T12：conversation 已绑定 + 用户有 open_id + 有 chat_bot → send_card_to_user 被调用（带 [来自Web] 前缀）"""
+    """T12：conversation 已绑定 + 用户有 open_id + 有飞书安装 → send_card_to_user 被调用（带 [来自Web] 前缀）
+
+    A2 M2 后推送走 engine_wiring.feishu_api(app_id)（不再经 BotManager），
+    所以这里打桩 feishu_api 而不是 bot_manager。
+    """
     _clean()
-    from src.api import main as api_main
     _seed_feishu_binding(1, "alice", "ou_111", "cli_test_app")
     cid = _mk_conv(1, title="A")
     update_conversation(cid, im_channel_id="ou_111")
     conv = get_conversation(cid)
     fake_bm = _FakeBotManager("cli_test_app")
-    saved = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = fake_bm
     try:
-        asyncio.run(_import_push()(conv, {"id": 1, "username": "alice"}, "你好"))
+        with patch("src.im.engine_wiring.feishu_api", return_value=fake_bm.api):
+            asyncio.run(_import_push()(conv, {"id": 1, "username": "alice"}, "你好"))
     finally:
-        api_main.bot_manager = saved
         _clean_feishu_binding(1, "alice", "cli_test_app")
     assert len(fake_bm.api.calls) == 1
     ctx, open_id, text, title = fake_bm.api.calls[0]

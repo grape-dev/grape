@@ -1,5 +1,5 @@
 """飞书 Chat 复用 Web Chat conversation 会话测试（feishu-chat-reuse-web-session.md §6.1）"""
-from src.domains.runtime.im.handler_async import _resolve_oc_sid
+from src.im.handler_async import _resolve_oc_sid
 
 
 def test_conv_priority_when_nonempty():

@@ -473,7 +473,7 @@ class TestDegradedModuleCandidates:
     @pytest.fixture(autouse=True)
     def _reset_warned(self):
         """QA 修复 #666：恢复模块级全局告警态，避免跨测试泄漏。"""
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         old = b._codegraph_warned
         b._codegraph_warned = False
         yield
@@ -481,7 +481,7 @@ class TestDegradedModuleCandidates:
 
     def _degraded_build(self, monkeypatch, caplog=None):
         import logging
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         monkeypatch.setattr(b, "_codegraph_available", lambda: False)
         if caplog is not None:
             with caplog.at_level(logging.WARNING, logger="devops-bot"):
@@ -492,7 +492,7 @@ class TestDegradedModuleCandidates:
 
     def test_degraded_with_git_tree_candidates(self, _tmp_workspace, monkeypatch):
         """git tree 可用 → 降级 graph 含模块级候选（Architecture/Modules/Key Files 非 N/A）。"""
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         monkeypatch.setattr(b, "_git_tree_paths",
                             lambda repo_key: ["src", "scripts", "README.md",
                                               "src/config.py", "src/api", "src/worker_package.py"])
@@ -512,7 +512,7 @@ class TestDegradedModuleCandidates:
 
     def test_degraded_api_fallback(self, _tmp_workspace, monkeypatch):
         """git tree 不可用 → GitCode API 兜底，来源标注 GitCode API。"""
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
         monkeypatch.setattr(b, "_api_tree_paths",
                             lambda repo_key, owner, rname, token="": ["src", "src/main.py", "README.md"])
@@ -529,7 +529,7 @@ class TestDegradedModuleCandidates:
     def test_degraded_api_fallback_logs_warning(self, _tmp_workspace, monkeypatch, caplog):
         """QA 修复 #666：API 兜底失败不再静默吞错，记 log.warning（不含 token）。"""
         import logging
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         caplog.set_level(logging.WARNING, logger="devops-bot")
         monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
 
@@ -544,7 +544,7 @@ class TestDegradedModuleCandidates:
 
     def test_degraded_no_source_falls_back(self, _tmp_workspace, monkeypatch):
         """git tree 与 API 均不可用 → 回落现状（N/A + 降级说明），不崩溃。"""
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
         monkeypatch.setattr(b, "_api_tree_paths",
                             lambda repo_key, owner, rname, token="": [])
@@ -561,7 +561,7 @@ class TestDegradedModuleCandidates:
     def test_degraded_then_codegraph_available_full_restore(self, _tmp_workspace, monkeypatch):
         """QA 修复 #666（Spec 恢复路径证据）：degraded 基线 + codegraph 就位
         → should_refresh 触发 → 重建 degraded=false 全量恢复（非降级候选）。"""
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         from src.repo_key import workspace_repo_dir
         # ① 先降级生成（无候选来源）
         monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
@@ -592,7 +592,7 @@ class TestDegradedModuleCandidates:
     def test_degraded_tree_max_entries_invalid_env_fallback(self, _tmp_workspace, monkeypatch, caplog):
         """QA 修复 #666（Standards #1）：env 非数字不再致 import/调用崩溃，惰性兜底默认 200。"""
         import logging
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         caplog.set_level(logging.WARNING, logger="devops-bot")
         monkeypatch.setenv("PROJECT_INFO_DEGRADED_TREE_ENTRIES", "not-a-number")
         assert b._degraded_tree_max_entries() == 200
@@ -604,7 +604,7 @@ class TestDegradedModuleCandidates:
     def test_warn_codegraph_missing_once(self, _tmp_workspace, monkeypatch, caplog):
         """Issue #666 (M1)：告警一次性——首次 generate 完整告警，第二次仅简讯。"""
         import logging
-        import src.project_info.builder as b
+        import src.domains.runtime.project_info.builder as b
         caplog.set_level(logging.WARNING, logger="devops-bot")
         b._codegraph_warned = False
         monkeypatch.setattr(b, "_codegraph_available", lambda: False)

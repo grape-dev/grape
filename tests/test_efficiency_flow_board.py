@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import efficiency as eff  # noqa: E402
+from src.domains.insight.observability import efficiency as eff  # noqa: E402
 
 NOW = datetime(2026, 11, 9, 12, 0, 0)   # 2026-11-09 是周一，ISO 2026-W46
 

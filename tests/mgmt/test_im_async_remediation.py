@@ -23,12 +23,12 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 
 def _make_ctx(app_id="cli_remed"):
-    from src.domains.runtime.im.feishu_async import BotContext
+    from src.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="remed-test")
 
 
 def _make_api_with_session():
-    from src.domains.runtime.im.feishu_async import FeishuAsync
+    from src.im.feishu_async import FeishuAsync
     api = FeishuAsync()
     session = MagicMock()
     api._get_session = AsyncMock(return_value=session)
@@ -49,13 +49,13 @@ def _http_response(payload):
 class TestSyncRepoFeishuMapping:
     async def _run(self, members, collabs, bot_token="bot_tok"):
         """执行 sync_repo_feishu_mapping：mock 群成员 + 协作者拉取。"""
-        from src.domains.runtime.im.feishu_async import FeishuAsync
+        from src.im.feishu_async import FeishuAsync
         api = FeishuAsync()
         ctx = _make_ctx()
         api.get_chat_members = AsyncMock(return_value=members)
         from src.domains.mgmt.user import db as user_db
         with patch.object(user_db, "get_bot_token_by_repo", return_value=bot_token):
-            with patch("src.domains.runtime.im.feishu_async._fetch_gitcode_collaborators", return_value=collabs):
+            with patch("src.im.feishu_async._fetch_gitcode_collaborators", return_value=collabs):
                 matched = await api.sync_repo_feishu_mapping(ctx, "gitcode:owner/repo", "oc_b")
         return matched, api
 
@@ -89,7 +89,7 @@ class TestSyncRepoFeishuMapping:
 
     def test_b3_no_bot_token_returns_zero(self):
         """B3: 无 bot token（含全局兜底失败）时返回 0。"""
-        from src.domains.runtime.im.feishu_async import FeishuAsync
+        from src.im.feishu_async import FeishuAsync
         api = FeishuAsync()
         ctx = _make_ctx()
         api.get_chat_members = AsyncMock(return_value=[{"name": "张三", "open_id": "ou_b3"}])
@@ -97,7 +97,7 @@ class TestSyncRepoFeishuMapping:
         with patch.object(user_db, "get_bot_token_by_repo", return_value=""):
             with patch("builtins.open") as mock_open:
                 mock_open.side_effect = FileNotFoundError  # 全局兜底文件不存在
-                with patch("src.domains.runtime.im.feishu_async._fetch_gitcode_collaborators") as mock_fetch:
+                with patch("src.im.feishu_async._fetch_gitcode_collaborators") as mock_fetch:
                     matched = asyncio.run(api.sync_repo_feishu_mapping(ctx, "gitcode:owner/repo", "oc_b3"))
         assert matched == 0
         mock_fetch.assert_not_called()

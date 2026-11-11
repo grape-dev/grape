@@ -109,7 +109,7 @@ class TestSyncIssuePipelineTerminalCompletedAt:
     """admin-confirm 收敛 running→completed 必须补 completed_at。"""
 
     def test_running_event_converged_with_completed_at(self, test_db):
-        from src.api.routes.issues import _sync_issue_pipeline_terminal
+        from src.domains.runtime.routes.issues import _sync_issue_pipeline_terminal
         _insert_event(test_db, 1301, status="running")
         _sync_issue_pipeline_terminal("test/repo", 1)
         row = test_db.execute(
@@ -118,7 +118,7 @@ class TestSyncIssuePipelineTerminalCompletedAt:
         assert row[1], "#1105: 收敛为 completed 必须落 completed_at"
 
     def test_terminal_event_completed_at_untouched(self, test_db):
-        from src.api.routes.issues import _sync_issue_pipeline_terminal
+        from src.domains.runtime.routes.issues import _sync_issue_pipeline_terminal
         _insert_event(test_db, 1302, status="completed")
         test_db.execute(
             "UPDATE events SET completed_at='2026-11-03T08:00:00' WHERE seq=1302")

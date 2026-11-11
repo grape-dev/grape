@@ -9,12 +9,12 @@
 """
 import json
 
-from src.vcs.gitcode import GitCodeBackend
-from src.vcs.github import GitHubBackend
-from src.vcs.gitlab import GitLabBackend
-from src.vcs.event_types import normalize_files
-from src.vcs.files_enrich import enrich_event_files
-from src.vcs.guard_impact import scan_guard_impact, is_guard_script
+from src.domains.runtime.vcs.gitcode import GitCodeBackend
+from src.domains.runtime.vcs.github import GitHubBackend
+from src.domains.runtime.vcs.gitlab import GitLabBackend
+from src.domains.runtime.vcs.event_types import normalize_files
+from src.domains.runtime.vcs.files_enrich import enrich_event_files
+from src.domains.runtime.vcs.guard_impact import scan_guard_impact, is_guard_script
 from src.domains.runtime.engine.cleanup import ArtifactScope, clean_issue_artifacts, precheck_issue_artifacts
 
 
@@ -200,7 +200,7 @@ def test_normalize_files_recognizes_top_level_aliases():
 
 
 def test_change_map_does_not_fold_file_keys():
-    from src.vcs.event_types import normalize_changes
+    from src.domains.runtime.vcs.event_types import normalize_changes
     result = normalize_changes({
         "deleted_files": ["docs/issue-996/spec.md"],
         "changed_files": ["src/app.py"],

@@ -223,7 +223,7 @@ def require_admin(authorization: str = Header(None)) -> dict:
     token_ver = int(payload.get("ver", 0))
     if not uid:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "USER_NOT_FOUND", "message": "User not found"})
-    from src.domains.mgmt.admin.db import get_admin_token_version
+    from src.domains.mgmt.user.db import get_admin_token_version
     db_ver = get_admin_token_version(uid)
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "Session revoked"})

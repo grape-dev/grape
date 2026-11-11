@@ -649,9 +649,36 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             log.info(f"{label}chat task: user token present (len={len(user_token)}), NOT injecting into env (P2)")
         else:
             log.warning(f"{label}NO user platform token available for chat; VCS ops go through grape CLI + session token")
+        # chat env 兜底（Issue #1757）：仅补缺失键，env_extra 显式值优先，绝不覆盖。
+        # Issue #1757 复审：仓库身份统一走 derive_repo_identity（与 chat_repo_env / 事件链同源），
+        # 不再自己调 split_owner_repo，避免两份派生逻辑漂移。
+        if repo_key and not repo_key.startswith("chat:") and "REPO_OWNER" not in env:
+            try:
+                from src.repo_key import derive_repo_identity
+                full_name, owner, name = derive_repo_identity(repo_key, repo_key)
+                if owner and name:
+                    env.setdefault("REPO_FULL_NAME", full_name or repo_key)
+                    env.setdefault("REPO_OWNER", owner)
+                    env.setdefault("REPO_NAME", name)
+            except Exception as e:
+                log.warning(f"{label}chat env fallback repo split failed: {e}")
+        if "GRAPE_SERVER_URL" not in env:
+            try:
+                from src.prompt_builder import _local_port
+                env["GRAPE_SERVER_URL"] = f"http://127.0.0.1:{_local_port()}"
+            except Exception as e:
+                log.warning(f"{label}chat env fallback server url failed: {e}")
     elif bot_token:
         log.info(f"{label}devops event task: bot token present (len={len(bot_token)}), NOT injecting into env (P2)")
         # GitHub bot token 不再注入（agent 侧一律 grape CLI 转发）
+
+    # Issue #1858：旧快照/旁路路径三面基址兜底（仅补缺失键，不覆盖显式值）。
+    # A2A 回退 worker 回连基址（控制面语义），不与业务基址混用。
+    if env.get("GRAPE_SERVER_URL"):
+        env.setdefault("GRAPE_VCS_BASE_URL", env["GRAPE_SERVER_URL"])
+        env.setdefault("GRAPE_ISSUE_BASE_URL", env["GRAPE_SERVER_URL"])
+        env.setdefault("GRAPE_A2A_BASE_URL",
+                       env.get("RUNTIME_SERVER_URL") or env["GRAPE_SERVER_URL"])
 
     # VCS API base URL + 名称注入（skill 中 $VCS_API_BASE 引用，适配多 VCS provider）
     if repo_key:

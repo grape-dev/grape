@@ -30,7 +30,7 @@ ROOT = None  # pytest.ini pythonpath=src；conftest 已引导 ROOT
 def setup_db(monkeypatch):
     """内存 SQLite 双表最小环境：替换 svc/rt/session_manager 的 db/db_lock。"""
     from src.domains.runtime.engine import service as svc
-    import src.api.routes.runtime as rt
+    import src.domains.runtime.routes.runtime as rt
     # event_store 必须同批替换：claim 回收的 force-fail 分支与 recover-orphans 判死
     # 回写都会函数内 from src.api.event_store import update_event_complete——该模块
     # 全局 db 是首次 import 时绑定的连接对象，若不替换会在真测试库上回写（组合运行
@@ -107,7 +107,7 @@ class TestRecoverOrphansFormat:
 
         旧字节比较：同日 ' '(0x20) < 'T'(0x54) → 恒判孤儿 → attempts+1 回炉（本用例红）。
         """
-        from src.api.routes.runtime import runtime_recover_orphans
+        from src.domains.runtime.routes.runtime import runtime_recover_orphans
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (601, 'codex', 'online', 1, 1, 4)")
@@ -127,7 +127,7 @@ class TestRecoverOrphansFormat:
 
         旧字节比较：同秒第 19 字节 '+'(0x2B) < '.'(0x2E) → 同秒窗口塌陷（本用例红）。
         """
-        from src.api.routes.runtime import runtime_recover_orphans
+        from src.domains.runtime.routes.runtime import runtime_recover_orphans
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (602, 'codex', 'online', 1, 1, 4)")
@@ -144,7 +144,7 @@ class TestRecoverOrphansFormat:
 
     def test_unparseable_message_not_active_orphan_recovered(self, setup_db):
         """仅含不可解析 created_at 的消息行 → 不计活跃（保守取舍），真孤儿仍回炉。"""
-        from src.api.routes.runtime import runtime_recover_orphans
+        from src.domains.runtime.routes.runtime import runtime_recover_orphans
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
                   "VALUES (603, 'codex', 'online', 1, 1, 4)")
@@ -232,7 +232,7 @@ class TestWindowConstants:
 
     def test_recover_orphans_uses_task_activity_window(self, setup_db, monkeypatch):
         """recover_orphans 活跃窗口随 task_activity 常量联动（不再各自拼字面量）。"""
-        from src.api.routes.runtime import runtime_recover_orphans
+        from src.domains.runtime.routes.runtime import runtime_recover_orphans
         from src.domains.runtime.engine import task_activity
         c = setup_db
         c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "

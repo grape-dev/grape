@@ -8,9 +8,9 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.domains.runtime.im.feishu_async import BotContext
+from src.im.feishu_async import BotContext
 from src.kernel.session_manager import db, db_lock
-from src.domains.runtime.im.vod_handler_async import process_vod_async
+from src.im.vod_handler_async import process_vod_async
 
 CHAT = "vod_chat"
 APP = "cli_vod"
@@ -25,8 +25,9 @@ def _clean():
         c = db.cursor()
         c.execute("DELETE FROM vod_conversations WHERE im_chat_id=?", (CHAT,))
         c.execute("DELETE FROM devops_agent_session WHERE id LIKE 'sess-vod-%' OR repo_key LIKE 'gitcode:owner/vod-repo-%'")
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (APP,))
         db.commit()
-    from src.domains.runtime.im.handler_async import _clear_pending_selection
+    from src.im.handler_async import _clear_pending_selection
     _clear_pending_selection(CHAT)
 
 
@@ -37,10 +38,14 @@ def _seed(repos):
         for rk in repos:
             sid = "sess-vod-" + rk.split("/")[-1]
             c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, im_app_id, repo_gitcode_token, skill, status) "
-                "VALUES (?,?,'vod',?, '','vod','idle')",
-                (sid, rk, APP))
+                "INSERT INTO devops_agent_session (id, repo_key, agent_type, repo_gitcode_token, skill, status) "
+                "VALUES (?,?,'vod','','vod','idle')",
+                (sid, rk))
         db.commit()
+    # A2 Phase B：/"repo 候选读 grape_t_channel_installation（devops_agent_session.im_app_id 已 DROP）
+    from src.im.engine_wiring import sync_installation
+    for rk in repos:
+        sync_installation("repo", repo_key=rk, app_id=APP, app_secret="sec", channel_type="feishu")
 
 
 def _run(text):
@@ -57,7 +62,7 @@ def _card(api):
 
 
 def _pending():
-    from src.domains.runtime.im.handler_async import _get_pending_selection
+    from src.im.handler_async import _get_pending_selection
     return _get_pending_selection(CHAT)
 
 
@@ -145,11 +150,11 @@ def test_v09_clean_no_longer_special():
 
 def test_v10_chat_vod_pending_independent():
     _seed(["gitcode:owner/vod-repo-a", "gitcode:owner/vod-repo-b"])
-    from src.domains.runtime.im.handler_async import _set_pending_selection
+    from src.im.handler_async import _set_pending_selection
     _set_pending_selection("other_chat", {"action": "chat", "items": [{"id": "x"}], "page": 1})
     _run("/repo")
     assert _pending() is not None and _pending()["action"] == "vod_repo"
-    from src.domains.runtime.im.handler_async import _get_pending_selection as _g
+    from src.im.handler_async import _get_pending_selection as _g
     assert _g("other_chat")["action"] == "chat"
     _clean()
 

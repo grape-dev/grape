@@ -33,14 +33,22 @@ MANIFEST = [
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
     "src/kernel/",
-    # 历史导入路径 src.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
+    # 历史导入路径 src.domains.runtime.routes.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
     "src/config.py",
     "src/repo_key.py",
     "src/prompt_builder.py",
+    # 架构守护 F1（2026-11-10）：prompt_builder 顶层 import src.service_diagnostics
+    # （#1858 三面基址的候选地址诊断），漏列会让 worker 包内 prompt_builder 导入即
+    # ModuleNotFoundError —— executor 的两处 try/except 静默降级、scheduler 的
+    # resolve_task_server_env 直接抛错。纯 stdlib 单文件，随包下发无副作用。
+    "src/service_diagnostics.py",
     "src/session_manager.py",
     "src/mysql_compat.py",
+    # worker 侧 OTel 关联与效率上报仍在 src/observability/（kernel.config / mysql_compat
+    # 延迟 import otel；合并后 worker 包缺该目录会导致 import 闭包失败）
+    "src/observability/",
     "src/token_service.py",
     "src/token_resolver.py",
     "src/domains/mgmt/user/__init__.py",

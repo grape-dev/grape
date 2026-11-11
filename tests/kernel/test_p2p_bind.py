@@ -21,7 +21,7 @@ def _clean_mapping():
 
 
 def _make_ctx(app_id="cli_p2ptest"):
-    from src.domains.runtime.im.feishu_async import BotContext
+    from src.im.feishu_async import BotContext
     ctx = BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="p2p-test")
     return ctx
 
@@ -45,15 +45,19 @@ def _seed_user_and_bot(username, app_id, user_id):
             real_uid = c.lastrowid
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM chat_agent_session WHERE im_app_id=?", (app_id,))
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_provider) VALUES (?,?,?,?,?)",
-                  (f"sess-{app_id}", real_uid, "", app_id, "feishu"))
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,))
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
+                  (f"sess-{app_id}", real_uid))
         db.commit()
+    # A2 Phase B：bot → 用户 的归属看 grape_t_channel_installation（user 轨 owner）
+    from src.im.engine_wiring import sync_installation
+    sync_installation("user", owner_user_id=str(real_uid), app_id=app_id,
+                      app_secret="sec", channel_type="feishu")
     return {"id": real_uid, "username": username}
 
 
 async def _send(parsed, app_id="cli_p2ptest"):
-    from src.domains.runtime.im.handler_async import process_chat_async
+    from src.im.handler_async import process_chat_async
     ctx = _make_ctx(app_id)
     api = AsyncMock()
     await process_chat_async(ctx, api, parsed)

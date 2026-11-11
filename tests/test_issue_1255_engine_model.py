@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import llm_usage as lu
+from src.domains.insight.observability import llm_usage as lu
 
 
 def _make_task(task_id: str, runtime_id: int = 7):

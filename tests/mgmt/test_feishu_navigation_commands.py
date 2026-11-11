@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.domains.runtime.im.feishu_async import BotContext
+from src.im.feishu_async import BotContext
 from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat, get_conversation,
@@ -18,11 +18,22 @@ from src.kernel.session_manager import (
 @pytest.fixture(autouse=True)
 def _clear_repo_bind_cache():
     """每个测试前清除 _repo_bind_cache，防止跨测试缓存污染。"""
-    from src.domains.runtime.im.handler_async import _repo_bind_cache
+    from src.im.handler_async import _repo_bind_cache
     _repo_bind_cache.clear()
     yield
     _repo_bind_cache.clear()
 
+
+def _seed_chat_install(user_id, app_id, row_id=None, channel_type="feishu"):
+    """A2 Phase B：IM 凭证只认 grape_t_channel_installation（chat_agent_session.im_* 列已 DROP）。"""
+    from src.im.engine_wiring import sync_installation
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
+                  (row_id or f"seed-{user_id}-{app_id}", user_id))
+        db.commit()
+    sync_installation("user", owner_user_id=str(user_id), app_id=app_id,
+                      app_secret="sec", channel_type=channel_type)
 
 def _ctx(app_id="cli_nav"):
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-nav")
@@ -40,9 +51,10 @@ def _clean():
             except Exception:
                 pass
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'nav-%'")
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id IN ('cli_nav','cli_jason')")
         c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
-    from src.domains.runtime.im.handler_async import _clear_pending_selection
+    from src.im.handler_async import _clear_pending_selection
     _clear_pending_selection("nav_chat")
 
 
@@ -50,7 +62,7 @@ def _seed():
     _clean()
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('nav-sess', 1, 'cli_nav')")
+        _seed_chat_install(1, "cli_nav", row_id="nav-sess")
         for i, (rk, admin, join) in enumerate([
             ("gitcode:navuser/repo-a", 1, 1),
             ("gitcode:navuser/repo-b", 0, 1),
@@ -68,7 +80,7 @@ def _seed():
 
 
 def _run_cmd(text, chat_id="nav_chat", api=None, ctx=None):
-    from src.domains.runtime.im.handler_async import process_command_async
+    from src.im.handler_async import process_command_async
     ctx = ctx or _ctx()
     api = api or _make_api_mock()
     asyncio.run(process_command_async(ctx, api, text, chat_id, "sender_1", db, account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav"))
@@ -76,7 +88,7 @@ def _run_cmd(text, chat_id="nav_chat", api=None, ctx=None):
 
 
 def _run_msg(text, chat_id="nav_chat", api=None, ctx=None):
-    from src.domains.runtime.im.handler_async import process_chat_async
+    from src.im.handler_async import process_chat_async
     ctx = ctx or _ctx()
     api = api or _make_api_mock()
     parsed = {"type": "message", "text": text, "chat_id": chat_id,
@@ -141,8 +153,16 @@ class _mock_response:
 
 
 def _pending():
-    from src.domains.runtime.im.handler_async import _get_pending_selection
+    from src.im.handler_async import _get_pending_selection
     return _get_pending_selection("nav_chat")
+
+
+def _as_card_dict(card):
+    """Issue #1095：handler 构造渠道中立 Card IR → 渲染回 lark dict 供既有断言。"""
+    if isinstance(card, dict):
+        return card
+    from src.im.channel.renderers.feishu import FeishuCardRenderer
+    return FeishuCardRenderer().render(card).payload
 
 
 def _card_text(api):
@@ -150,6 +170,13 @@ def _card_text(api):
         return api.reply_card.call_args[0][2]
     if api.send_card_to_user.called:
         return api.send_card_to_user.call_args[0][2]
+    # Issue #1008 出站收敛：自定义卡片统一走 egress.send_raw_card（卡片体在调用参数里）
+    src = getattr(api, "send_raw_card", None)
+    if src is not None and getattr(src, "called", False):
+        card = _as_card_dict(src.call_args[0][2] or {})
+        for el in (card.get("elements") or (card.get("body") or {}).get("elements") or []):
+            if isinstance(el, dict) and el.get("tag") == "div":
+                return (el.get("text") or {}).get("content", "")
     # 通过 _send_card_reply / _send_bind_success_card / _send_repo_card 发送的卡片文本
     if getattr(api, '_last_card_text', None):
         return api._last_card_text
@@ -187,6 +214,16 @@ def _card_cmds(api):
                         cmds.append(val["cmd"])
     except Exception:
         pass
+    # Issue #1095：Card IR 直读（egress.send_raw_card mock 收到 Card 对象时）
+    src = getattr(api, "send_raw_card", None)
+    if src is not None and getattr(src, "called", False):
+        card = src.call_args[0][2]
+        if not isinstance(card, dict) and hasattr(card, "blocks"):
+            for block in card.blocks:
+                for opt in (getattr(block, "options", None) or ()):
+                    cmds.append("/" + opt.id + (f" {opt.params['num']}" if "num" in opt.params else ""))
+            for act in card.actions:
+                cmds.append("/" + act.id)
     return cmds
 
 
@@ -238,7 +275,7 @@ def test_number_without_pending_goes_normal_chat():
 
 def test_expired_pending_not_intercepted():
     _seed()
-    from src.domains.runtime.im.handler_async import _pending_selections
+    from src.im.handler_async import _pending_selections
     _pending_selections["nav_chat"] = {"action": "repo", "repo_key": "", "items": [], "page": 1,
                                        "expires": 0, "page_size": 10}
     _run_msg("5")
@@ -390,8 +427,8 @@ def test_bind_intent_clears_stale_pointer():
     _seed()
     old = create_conversation(1, "gitcode:navuser/repo-a", title="旧会话")
     join_feishu_chat("nav_chat", old, 1)
-    from src.domains.runtime.im.handler_async import detect_bind_intent
-    with patch("src.domains.runtime.im.handler_async.detect_bind_intent", return_value="navuser/repo-b"):
+    from src.im.handler_async import detect_bind_intent
+    with patch("src.im.handler_async.detect_bind_intent", return_value="navuser/repo-b"):
         _run_msg("绑定到 navuser/repo-b")
     assert get_conversation(old)["im_channel_id"] == ""
     assert get_conversation_by_im("nav_chat", 1) is None
@@ -430,7 +467,7 @@ def _seed_unbound():
         c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
         # 残留全局 ws_feishu_app_id（历史 bug 触发条件）→ 指向 Jason7602
         c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('ws_feishu_app_id', 'cli_jason')")
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('nav-jason', 99, 'cli_jason')")
+        _seed_chat_install(99, "cli_jason", row_id="nav-jason")
         c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (99, 'gitcode:Jason7602/secret-repo', 'Jason7602', 'secret-repo', 1, 1)")
         db.commit()
 
@@ -497,7 +534,7 @@ def test_unbound_with_managed_repos_auto_repo_card():
 # ---- 飞书侧 prompt 按会话类型分流（2026-08-17，feishu-web-chat-unified-design.md §11）----
 
 def _build_prompt(conv_id, text="hi", repo="gitcode:navuser/repo-a", skills=None, account="navuser"):
-    from src.domains.runtime.im.handler_async import _build_feishu_chat_prompt
+    from src.im.handler_async import _build_feishu_chat_prompt
     return _build_feishu_chat_prompt(text, repo, [], skills or ["chat"], account, 0, conv_id)
 
 
@@ -557,7 +594,7 @@ class TestTaskOpenQuickAction:
         cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #3", conv_type="task", issue_number=3)
         ctx = _ctx()
         api = _make_api_mock()
-        from src.domains.runtime.im.handler_async import process_command_async
+        from src.im.handler_async import process_command_async
         asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
                                           account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav",
                                           card_value={"repo_key": "gitcode:navuser/repo-a",
@@ -572,7 +609,7 @@ class TestTaskOpenQuickAction:
         _seed()
         ctx = _ctx()
         api = _make_api_mock()
-        from src.domains.runtime.im.handler_async import process_command_async
+        from src.im.handler_async import process_command_async
         asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
                                           account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav"))
         assert "使用通知卡片" in _card_text(api)
@@ -582,7 +619,7 @@ class TestTaskOpenQuickAction:
         _seed()
         ctx = _ctx()
         api = _make_api_mock()
-        from src.domains.runtime.im.handler_async import process_command_async
+        from src.im.handler_async import process_command_async
         asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
                                           account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav",
                                           card_value={"repo_key": "gitcode:navuser/repo-a",

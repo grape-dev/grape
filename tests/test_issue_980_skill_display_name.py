@@ -202,7 +202,7 @@ class TestScenesRouteUsesSharedResolver:
             db.commit()
 
     def test_node_display_matches_user_scope(self, three_scope_same_name):
-        from src.domains.runtime.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
         resp = list_scenes_with_pipeline(
             user={"auth_type": "session_token", "id": UID}, repo="i980/repo")
         nodes = {n["id"]: n for n in resp["scenes"][0]["pipeline"]["nodes"]}
@@ -210,7 +210,7 @@ class TestScenesRouteUsesSharedResolver:
         assert nodes["qa"]["skill_display_name"] == "唯一技能显示名"
 
     def test_node_display_matches_repo_scope_without_user_id(self, three_scope_same_name):
-        from src.domains.runtime.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
         resp = list_scenes_with_pipeline(
             user={"auth_type": "session_token", "id": ""}, repo="i980/repo")
         nodes = {n["id"]: n for n in resp["scenes"][0]["pipeline"]["nodes"]}
@@ -241,7 +241,7 @@ class TestDashboardRouteUsesSharedResolver:
             db.commit()
 
     def _agents_map(self, user):
-        from src.domains.runtime.routes.dashboard import get_dashboard
+        from src.domains.insight.routes.dashboard import get_dashboard
         resp = get_dashboard(self.OWNER, self.REPO, user=user)
         return {a["agent_type"]: a for a in resp["agents"]}
 

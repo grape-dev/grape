@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.domains.runtime.im.feishu_async import BotContext
+from src.im.feishu_async import BotContext
 from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat,
@@ -26,7 +26,7 @@ from src.kernel.session_manager import (
 
 @pytest.fixture(autouse=True)
 def _clear_repo_bind_cache():
-    from src.domains.runtime.im.handler_async import _repo_bind_cache
+    from src.im.handler_async import _repo_bind_cache
     _repo_bind_cache.clear()
     yield
     _repo_bind_cache.clear()
@@ -35,6 +35,17 @@ def _clear_repo_bind_cache():
 def _ctx(app_id="cli_nav"):
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-nav")
 
+
+def _seed_chat_install(user_id, app_id, row_id=None, channel_type="feishu"):
+    """A2 Phase B：IM 凭证只认 grape_t_channel_installation（chat_agent_session.im_* 列已 DROP）。"""
+    from src.im.engine_wiring import sync_installation
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
+                  (row_id or f"seed-{user_id}-{app_id}", user_id))
+        db.commit()
+    sync_installation("user", owner_user_id=str(user_id), app_id=app_id,
+                      app_secret="sec", channel_type=channel_type)
 
 def _clean():
     with db_lock:
@@ -45,6 +56,7 @@ def _clean():
             except Exception:
                 pass
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'nav-%'")
+        c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id IN ('cli_nav','cli_jason')")
         db.commit()
 
 
@@ -53,7 +65,7 @@ def _seed(bound_repo_key, conv_repo_key, title="repo 会话"):
     _clean()
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('nav-sess', 1, 'cli_nav')")
+        _seed_chat_install(1, "cli_nav", row_id="nav-sess")
         c.execute(
             "INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) "
             "VALUES ('nav_chat', ?, 'gitcode', 'sender_1', 'cli_nav')", (bound_repo_key,))
@@ -63,7 +75,7 @@ def _seed(bound_repo_key, conv_repo_key, title="repo 会话"):
 
 
 def _run_where():
-    from src.domains.runtime.im.handler_async import process_command_async
+    from src.im.handler_async import process_command_async
     api = AsyncMock()
     asyncio.run(process_command_async(
         _ctx(), api, "/where", "nav_chat", "sender_1", db,

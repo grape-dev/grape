@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 from src.api import server_common, server_tasks
 
-bot_manager = None
+im_engine = None
 
 
 def _startup_security_check():
@@ -75,7 +75,7 @@ def _startup_security_check():
         errors.append("生产环境必须设置 COOKIE_SECURE=true（refresh_token cookie 需要 Secure 标志）")
 
     # 6. OAuth redirect_uri 配置校验（需求 11：每个 provider 必须配置 redirect_uri）
-    from src.domains.mgmt.auth.providers import get_provider, list_providers
+    from src.domains.runtime.vcs.providers import get_provider, list_providers
     missing_redirect = [p for p in list_providers() if not (get_provider(p) or {}).get("redirect_uri")]
     if missing_redirect:
         errors.append(f"生产环境必须配置 redirect_uri，缺少: {', '.join(missing_redirect)}")
@@ -90,6 +90,7 @@ def _startup_security_check():
 async def lifespan(app: FastAPI):
     global bot_manager
     from src.kernel.config import log
+    global im_engine
 
     # 生产环境启动安全门禁
     try:
@@ -102,6 +103,22 @@ async def lifespan(app: FastAPI):
     if _gsb is not None:
         await _gsb.startup()
 
+        # IM 多通道引擎（weekly-11 新引擎；mode=off 时不启动任何 IM 链路）
+        try:
+            from src.im import engine_wiring as _im_wiring
+            if _im_wiring.engine_mode() == "on":
+                im_engine = await _im_wiring.start_im_engine()
+                if im_engine is not None:
+                    app.state.im_engine = im_engine
+                    log.info("IM engine started (mode=on, instance=%s)",
+                             getattr(im_engine, "instance_id", ""))
+                else:
+                    log.warning("IM engine: start failed (legacy fallback retired)")
+            else:
+                log.info("IM engine mode=off: IM 总开关关闭，不启动任何 IM 链路")
+        except Exception as _im_e:
+            log.warning(f"IM engine startup failed: {_im_e}")
+
     # Mgmt 进程定时任务（设计 §5.1）
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
@@ -113,6 +130,17 @@ async def lifespan(app: FastAPI):
         await _gsb.shutdown()
     await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
     log.info("Grape Mgmt Server lifespan stopped")
+
+    # IM 引擎优雅关闭
+    if im_engine is not None:
+        try:
+            await im_engine.stop()
+        except Exception as _im_stop_e:
+            log.warning(f"IM engine stop failed: {_im_stop_e}")
+        try:
+            app.state.im_engine = None
+        except Exception:
+            pass
 
 
 app = server_common.build_app(
@@ -151,7 +179,9 @@ app.include_router(admin_router)
 
 # Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo）
 from src.api.git_repo_api import router as git_repo_router
+from src.api.routes import im as im_routes   # IM 渠道/会话（weekly-11 新引擎）
 app.include_router(git_repo_router)
+app.include_router(im_routes.router)
 
 # 运行域用户面路由（设计 §5.5 跨进程分配）
 from src.domains.runtime.routes import events, chat, issues, pipeline, task_logs, runtime

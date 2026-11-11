@@ -75,7 +75,7 @@ def _startup_security_check():
         errors.append("生产环境必须设置 COOKIE_SECURE=true（refresh_token cookie 需要 Secure 标志）")
 
     # 6. OAuth redirect_uri 配置校验（需求 11：每个 provider 必须配置 redirect_uri）
-    from src.domains.mgmt.auth.providers import get_provider, list_providers
+    from src.domains.runtime.vcs.providers import get_provider, list_providers
     missing_redirect = [p for p in list_providers() if not (get_provider(p) or {}).get("redirect_uri")]
     if missing_redirect:
         errors.append(f"生产环境必须配置 redirect_uri，缺少: {', '.join(missing_redirect)}")

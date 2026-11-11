@@ -81,7 +81,7 @@ def _issue_number_from_issue_url(issue_url: str) -> str:
 
 
 def _provider_module(provider: str):
-    """provider 模块解析（与 feedback_issue_converter 同源取 src.vcs.providers，
+    """provider 模块解析（与 feedback_issue_converter 同源取 src.domains.runtime.vcs.providers，
     但不反向 import converter 私有实现，避免双向耦合，Issue #673 QA 判断项）。"""
     from src.domains.runtime.vcs.providers import _MODULES
     mod = _MODULES.get(provider)

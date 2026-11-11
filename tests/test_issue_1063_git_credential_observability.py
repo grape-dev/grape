@@ -70,7 +70,7 @@ def test_bot_lookup_exception_stage(client, monkeypatch, caplog):
     def _raise(*a, **k):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr("src.user.db.get_gitcode_token", _raise)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", _raise)
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "")
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
@@ -103,7 +103,7 @@ def test_user_refresh_exception_stage(client, monkeypatch, caplog):
     def _raise(*a, **k):
         raise RuntimeError("oauth upstream 502")
 
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", _raise)
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
@@ -122,7 +122,7 @@ def test_user_refresh_exception_stage(client, monkeypatch, caplog):
 def test_both_empty_stage(client, monkeypatch, caplog):
     caplog.set_level(logging.WARNING)
     _set_user(agent_type="vod")
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "")
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
@@ -143,7 +143,7 @@ def test_both_empty_stage(client, monkeypatch, caplog):
 
 def test_failure_response_does_not_leak_token(client, monkeypatch):
     _set_user(agent_type="vod")
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "")
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
@@ -162,7 +162,7 @@ def test_bot_exception_message_not_in_response(client, monkeypatch, caplog):
     def _raise(*a, **k):
         raise RuntimeError("db error token=" + BOT_TOKEN)
 
-    monkeypatch.setattr("src.user.db.get_gitcode_token", _raise)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", _raise)
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "")
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
@@ -204,7 +204,7 @@ def test_unexpected_exception_500_with_request_id(caplog):
         try:
             err_client = TestClient(app, raise_server_exceptions=False)
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT_TOKEN)
+                mp.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT_TOKEN)
                 r = err_client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
         finally:
             repos_mod._strip_provider_prefix = orig
@@ -232,7 +232,7 @@ def test_github_bot_lookup_exception_stage(client, monkeypatch):
     def _raise(*a, **k):
         raise RuntimeError("github db error")
 
-    monkeypatch.setattr("src.user.db.get_github_token", _raise)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", _raise)
     monkeypatch.setattr("src.api.deps.get_user_github_token_with_refresh", lambda *a, **k: "")
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
@@ -247,7 +247,7 @@ def test_github_bot_lookup_exception_stage(client, monkeypatch):
 def test_success_path_still_returns_credential(client, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG)
     _set_user(agent_type="vod")
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT_TOKEN)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT_TOKEN)
 
     r = client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
     assert r.status_code == 200

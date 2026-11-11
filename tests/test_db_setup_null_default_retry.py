@@ -11,7 +11,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import src.runtime  # noqa: F401  规避环形导入
+import src.domains.runtime.routes.runtime  # noqa: F401  规避环形导入
 from src.api import db_setup as d
 
 

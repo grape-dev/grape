@@ -347,7 +347,12 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 c.execute(
                     "UPDATE issue SET org_id=? WHERE id=? AND (org_id IS NULL OR org_id != ?)",
                     (org_id, task_id, org_id))
-            if _cur_st not in ("active", "processing"):
+            if _cur_st == "cancelled":
+                # Issue #1741：cancelled 是终态，迟到事件（issue_comment/a2a/agent 回调）不得复活，
+                # 仅显式 POST /issues/{id}/resume 可恢复（避免取消后卡片重新回到待澄清列表）。
+                log.info(f"ensure_issue_task: keep cancelled issue #{issue_number} repo={repo_key} "
+                         f"(late event must not revive; resume endpoint only)")
+            elif _cur_st not in ("active", "processing"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
                           (task_id,))
@@ -617,8 +622,27 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
 
 
 def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
-                         statuses: tuple = ("pending_review",)) -> bool:
-    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。"""
+                         statuses: tuple = ("pending_review",),
+                         qa_info: dict | None = None) -> bool:
+    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。
+
+    Issue #1739：落 completed 前统一校验同一流水线 qa 最新结论，fail 时不收尾。
+    ``qa_info`` 为调用方已完成的门禁结果：传入时直接复用，避免同一收尾动作重复
+    查询/标注；未传入（None）时自行校验，保持既有调用契约。
+    """
+    if qa_info is None:
+        try:
+            from src.api.qa_gate import gate_or_annotate
+            qa_info = gate_or_annotate(repo_key, issue_number)
+        except Exception as _qe:
+            # 门禁自身异常 fail-open，保持既有收尾链路
+            log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                        f"{repo_key}/#{issue_number}: {_qe}")
+            qa_info = {}
+    if qa_info.get("blocked"):
+        log.info(f"Issue #1739: qa failed → refuse complete "
+                 f"{repo_key}/#{issue_number} (seq={qa_info.get('event_seq')})")
+        return False
     with db_lock:
         c = db.cursor()
         _ph = ",".join("?" * len(statuses))
@@ -635,6 +659,8 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
         except Exception as _se:
             log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
         log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+        # A4：完成通知扇出到该用户全部已连接渠道（去重窗口内只发一轮）
+        _notify_done(repo_key, issue_number, "审核已通过，该需求已完成。")
     return _changed
 
 
@@ -901,9 +927,33 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
                 set_issue_stage(repo_key, _tag, "pending_review", agent_type)
                 log.info(f"Issue #656: node {_nid} failed → pending_review "
                          f"(manual confirm path) {repo_key}/{_tag}")
+                if _nid == "qa":
+                    # Issue #1739：qa 失败保留失败原因与关联 PR，便于回流修复
+                    # 走统一入口，以节点失败语义标注（与其余门禁点口径一致）
+                    try:
+                        from src.api.qa_gate import gate_or_annotate
+                        gate_or_annotate(repo_key, _num,
+                                         node_failure={"status": _st,
+                                                       "reason": "qa 节点失败"})
+                    except Exception as _qe:
+                        log.warning(f"qa gate annotation failed {repo_key}/{_tag}: {_qe}")
                 return "pending_review_fallback"
             if _st != "completed":
                 return f"noop:node_pending:{_nid}"
+
+        # Issue #1739：QA 结论门禁——同一流水线 qa 最新结论为 fail 时不得自动结单。
+        # 兼容 qa 以 status=completed + result “不通过/阻塞” 自报失败的实际形态。
+        try:
+            from src.api.qa_gate import gate_or_annotate
+            _qa_info = gate_or_annotate(repo_key, _num)
+            if _qa_info.get("blocked"):
+                log.info(f"Issue #1739: qa failed → keep issue open "
+                         f"{repo_key}/{_tag} (seq={_qa_info.get('event_seq')})")
+                return "qa_failed_blocked"
+        except Exception as _qe:
+            # 门禁自身异常 fail-open，不阻断正常收尾（与原关闭链路一致）
+            log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                        f"{repo_key}/{_tag}: {_qe}")
 
         # 条件齐备 → issue 级收尾迁移（幂等：仅可变状态放行）
         with db_lock:
@@ -928,6 +978,7 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
                 log.warning(f"auto-finalize stage=done retry failed {repo_key}/{_tag}: {_se2} "
                             f"(will be compensated on next event)")
         _closed = _close_vcs_issue_auto(repo_key, _num)
+        _notify_done(repo_key, _num, "流水线全部节点已完成，需求已自动结单。")
         log.info(f"Issue #656: auto-finalized {repo_key}/{_tag} by {source} "
                  f"(agent={agent_type}, vcs_close={_closed})")
         return "auto_done"
@@ -950,15 +1001,33 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
       回读真实 status 后分类，调用方据此给出 changed=false + 真实 status + 原因码）。
     """
     try:
+        # Issue #1739：统一 QA 结论门禁——仅在本次调用会收尾（target=done 或末节点归一
+        # done）时校验；target=processing 的「继续处理」不受影响。
+        _will_done = (target == "done") or _is_last_stage_node(repo_key, issue_number)
+        _qa_info: dict | None = None
+        if _will_done:
+            try:
+                from src.api.qa_gate import gate_or_annotate
+                _qa_info = gate_or_annotate(repo_key, issue_number)
+                if _qa_info.get("blocked"):
+                    log.info(f"Issue #1739: qa failed → review-pass blocked "
+                             f"{repo_key}/#{issue_number} target={target}")
+                    return "noop:qa_failed"
+            except Exception as _qe:
+                log.warning(f"Issue #1739: qa gate check failed (fail-open) "
+                            f"{repo_key}/#{issue_number}: {_qe}")
+                _qa_info = {}
         if target == "done":
             if _is_last_stage_node(repo_key, issue_number):
                 # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
                 if _complete_issue_done(repo_key, issue_number, evidence,
-                                        ("pending_review", "active", "processing", "awaiting_input")):
+                                        ("pending_review", "active", "processing", "awaiting_input"),
+                                        qa_info=_qa_info):
                     return "passed_done"
                 return _review_noop_reason(repo_key, issue_number, "completed")
             # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
-            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",)):
+            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",),
+                                    qa_info=_qa_info):
                 return "passed_done"
             return _review_noop_reason(repo_key, issue_number, "completed")
         if _is_last_stage_node(repo_key, issue_number):
@@ -966,7 +1035,8 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
             log.info(f"Issue review-pass normalized last-node target=processing→done: "
                      f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
             if _complete_issue_done(repo_key, issue_number, evidence,
-                                    ("pending_review", "active", "processing", "awaiting_input")):
+                                    ("pending_review", "active", "processing", "awaiting_input"),
+                                    qa_info=_qa_info):
                 return "passed_done"
             return _review_noop_reason(repo_key, issue_number, "completed")
         with db_lock:
@@ -1186,6 +1256,15 @@ def _notify_note() -> str:
     return f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
 
+def _notify_done(repo_key: str, issue_number: int, text: str) -> None:
+    """完成通知（A4）：扇出到该用户全部已连接渠道；异常不影响结单主流程。"""
+    try:
+        from src.im.notify import notify_issue_event
+        notify_issue_event(repo_key, int(issue_number or 0), "done", text)
+    except Exception as _e:
+        log.warning(f"[im-notify] done notify failed {repo_key}#{issue_number}: {_e}")
+
+
 _IM_NOTIFY_COUNTERS: dict[str, int] = {}
 
 
@@ -1239,22 +1318,18 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
 
         # 飞书仅作通知（D3）
         _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
-        if open_id and api and ctx:
-            notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
-                           if (task_description or "").strip() else "你有一条新任务待处理。")
-            try:
-                await api.send_card_to_user(
-                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["task"],
-                    template=_IM_NOTIFY_TEMPLATES["task"],
-                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
-                    fields=_build_notify_fields(repo_key, issue_number),
-                    note=_notify_note())
-                _im_notify_counter("sent_ok")
-            except Exception as e:
-                _im_notify_counter("sent_failed")
-                log.warning(f"Task notify feishu failed: {e}")
+        # A4（2026-11-10）：扇出到该用户全部已连接渠道（不再只认飞书本人 bot）
+        from src.im.notify import notify_user
+        notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
+                       if (task_description or "").strip() else "你有一条新任务待处理。")
+        _res = await notify_user(user_id, "task", notify_text, repo_key=repo_key,
+                                 issue_number=issue_number, conv_id=conv_id)
+        if _res.get("sent"):
+            _im_notify_counter("sent_ok")
         else:
-            _im_notify_skip("task", issue_number, user_id, ctx, open_id)
+            _im_notify_counter("sent_failed")
+            log.warning(f"Task notify: no channel delivered (sent={_res.get('sent')} "
+                        f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
 
@@ -1278,22 +1353,18 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
                 log.warning(f"Task awaiting: template write failed: {e}")
 
         _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
-        if open_id and api and ctx:
-            notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
-                           if (questions or "").strip() else "Agent 需要你补充信息。")
-            try:
-                await api.send_card_to_user(
-                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["awaiting"],
-                    template=_IM_NOTIFY_TEMPLATES["awaiting"],
-                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
-                    fields=_build_notify_fields(repo_key, issue_number),
-                    note=_notify_note())
-                _im_notify_counter("sent_ok")
-            except Exception as e:
-                _im_notify_counter("sent_failed")
-                log.warning(f"Task awaiting feishu failed: {e}")
+        # A4：全渠道扇出（微信/企微/Slack/企微等没有卡片就降级文本+回数字）
+        from src.im.notify import notify_user
+        notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
+                       if (questions or "").strip() else "Agent 需要你补充信息。")
+        _res = await notify_user(user_id, "awaiting", notify_text, repo_key=repo_key,
+                                 issue_number=issue_number, conv_id=conv_id)
+        if _res.get("sent"):
+            _im_notify_counter("sent_ok")
         else:
-            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
+            _im_notify_counter("sent_failed")
+            log.warning(f"Task awaiting: no channel delivered (sent={_res.get('sent')} "
+                        f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
@@ -1319,55 +1390,42 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
                 log.warning(f"Issue pending-review: template write failed: {e}")
 
         _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
-        if open_id and api and ctx:
-            notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
-                           if (review_points or "").strip() else "请审核确认交付结果。")
-            try:
-                await api.send_card_to_user(
-                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pending_review"],
-                    template=_IM_NOTIFY_TEMPLATES["pending_review"],
-                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
-                    fields=_build_notify_fields(repo_key, issue_number),
-                    note=_notify_note())
-                _im_notify_counter("sent_ok")
-            except Exception as e:
-                _im_notify_counter("sent_failed")
-                log.warning(f"Issue pending-review feishu failed: {e}")
+        # A4：全渠道扇出（待审核 = 必须主动触达，用户可能只开着某一个渠）
+        from src.im.notify import notify_user
+        notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
+                       if (review_points or "").strip() else "请审核确认交付结果。")
+        _res = await notify_user(user_id, "pending_review", notify_text, repo_key=repo_key,
+                                 issue_number=issue_number, conv_id=conv_id)
+        if _res.get("sent"):
+            _im_notify_counter("sent_ok")
         else:
-            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
+            _im_notify_counter("sent_failed")
+            log.warning(f"Issue pending-review: no channel delivered (sent={_res.get('sent')} "
+                        f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
 
 def _resolve_user_chat_bot(bm, user_id: int):
-    """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
+    """按用户取"本人 chat bot"的 BotContext（open_id 为 app 级，必须用本人 bot 发送）。
 
-    用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
-    可观测（cluster-im-lease-stability-design.md §3.1）：区分 no_bm / no_session_row /
-    bot_not_in_memory（sticky-lease 场景）→ 让"未收到通知"有日志可查。
+    旧 IM 下线 A2 M2：凭证来源从 legacy BotManager 内存表改为 grape_t_channel_installation；
+    入参 bm 保留仅为了旧调用点兼容，**不再使用**。
+    用户未配置本人 bot → 返回 None（不通知，不回落他人 bot，避免命名空间不匹配静默失败）。
     """
-    if not bm:
-        log.info(f"[im-notify] resolve user={user_id} reason=no_bm")
+    from src.im.engine_wiring import get_active_installation
+    inst = get_active_installation("user", owner_user_id=str(user_id), channel_type="feishu")
+    if not inst:
+        log.info(f"[im-notify] resolve user={user_id} reason=no_installation")
         return None
-    try:
-        bots = bm.get_all_bots()
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
-                (user_id,)).fetchone()
-        if not row or not row[0]:
-            log.warning(f"[im-notify] resolve user={user_id} reason=no_session_row")
-            return None
-        bot = bots.get(row[0])
-        if bot:
-            log.info(f"[im-notify] resolve user={user_id} bot={row[0]} ok")
-        else:
-            log.warning(f"[im-notify] resolve user={user_id} bot={row[0]} reason=bot_not_in_memory hint=sticky-lease")
-        return bot
-    except Exception as e:
-        log.warning(f"[im-notify] resolve user={user_id} reason=bot_error err={e}")
+    cfg = inst.get("config") or {}
+    app_id, secret = str(cfg.get("app_id", "")), str(cfg.get("app_secret", ""))
+    if not app_id or not secret:
+        log.warning(f"[im-notify] resolve user={user_id} reason=empty_credential")
         return None
+    from src.im.feishu_async import BotContext
+    log.info(f"[im-notify] resolve user={user_id} bot={app_id} ok")
+    return BotContext(app_id=app_id, app_secret=secret, bot_type="chat_bot")
 
 
 class TaskCreateBody(BaseModel):
@@ -1396,13 +1454,77 @@ class TaskConfirmBody(BaseModel):
 
 
 def _cleanup_issue_attachments(repo_key: str, issue_number):
-    """删除指定 issue 的所有附件。任务完成/取消时调用。"""
+    """删除指定 issue 的所有附件（含用户手工上传）。**破坏性**：整目录清理，
+    仅供明确丢弃场景使用；issue 关闭走 `_cleanup_auto_transferred_attachments`。"""
     try:
         from src.kernel.repo_key import split_owner_repo
         _owner, _rname = split_owner_repo(repo_key)
         _attach_cleanup_dir(_owner, _rname, str(issue_number))
     except Exception as _e:
         log.warning(f"Attachment cleanup failed: {_e}")
+
+
+# Issue #1748 补充：平台自动转存媒体的文件名形态——#315 = user-image-<n>.<ext>；
+# #1748 = <uuid32>.<媒体扩展名>（UUID 命名由 spec 约定）。只回收这两类，
+# 用户手工上传的附件一律保留。
+_AUTO_TRANSFER_PREFIXES = ("user-image-", "user-attachment-")
+def _is_auto_transferred_attachment(name: str) -> bool:
+    """判断附件名是否由平台自动转存（评论媒体/编辑器图片）而来。"""
+    if not name:
+        return False
+    return name.startswith(_AUTO_TRANSFER_PREFIXES)
+
+
+def _cleanup_auto_transferred_attachments(repo_key: str, issue_number) -> int:
+    """Issue #1748：回收平台自动转存的评论媒体/编辑器图片，保留用户手工附件。
+
+    issue 确认完成/取消时调用。单条评论的自动转存副本对已关闭 issue 无复用价值，
+    但用户手工上传的附件（可能是交付依据/证据）不能删，故不做整目录清理。
+    异常一律吞掉，清理失败不影响关闭流程；返回删除数量。
+    """
+    removed = 0
+    try:
+        from src.repo_key import split_owner_repo
+        _owner, _rname = split_owner_repo(repo_key)
+        if not _owner or not _rname:
+            return 0
+        _num = str(issue_number)
+        from src.domains.runtime.storage import get_storage
+        storage = get_storage()
+        if storage:
+            # Issue #1748 复审：OBS 模式下 list_keys + 每对象 delete_object 都是网络往返
+            # （N 个文件 ≈ N+1 RTT），不能挂在「关闭/取消 issue」的同步链路上 →
+            # 丢给后台线程执行，接口立即返回（清理失败只丢日志，不影响业务）。
+            def _reap_obs() -> None:
+                _n = 0
+                try:
+                    for _key in storage.list_keys(_attach_obs_key(_owner, _rname, _num, "")):
+                        if _is_auto_transferred_attachment(os.path.basename(str(_key))):
+                            if storage.delete_object(_key):
+                                _n += 1
+                except Exception as _e:
+                    log.warning(f"Attachment cleanup (obs, async) failed: {_e}")
+                if _n:
+                    log.info(f"Attachment cleanup (auto-transferred): {_n} object(s) "
+                             f"for {_owner}/{_rname}/{_num}")
+            import threading
+            threading.Thread(target=_reap_obs, name="attach-reap", daemon=True).start()
+            return 0
+        _dir = _attach_base_dir(_owner, _rname, _num)
+        if os.path.isdir(_dir):
+            for _name in os.listdir(_dir):
+                if not _is_auto_transferred_attachment(_name):
+                    continue
+                try:
+                    os.remove(os.path.join(_dir, _name))
+                    removed += 1
+                except OSError as _e:
+                    log.warning(f"Attachment cleanup: remove {_name} failed: {_e}")
+            if removed:
+                log.info(f"Attachment cleanup (auto-transferred): {removed} file(s) in {_dir}")
+    except Exception as _e:
+        log.warning(f"Auto-transferred attachment cleanup failed: {_e}")
+    return removed
 
 
 def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "issue_comment"):
@@ -1418,20 +1540,38 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
     from src.api.session_store import set_issue_stage
     set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
     log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
+    if affected:
+        _notify_done(repo_key, issue_number, f"需求已确认完成（{confirmed_by}）。")
+    # Issue #1748 补充：关闭后回收平台自动转存的评论媒体/编辑器图片（保留用户手工附件）
+    _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
 
 
+_CANCELLABLE_ISSUE_STATUSES = ("active", "processing", "awaiting_input", "pending_review")
+
+
+def cancel_issue_rows(c, repo_key: str, issue_number: int) -> int:
+    """Issue #1741：把同一 repo_key+issue_number 的可取消行统一置为终态取消。
+
+    评论取消路径（cancel_issue_task）与 cancel 端点共用，避免跨层重复实现；
+    completed/cancelled 行保持终态不变，重复取消不再刷新 completed_at（幂等）。
+    """
+    c.execute(
+        "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+        "WHERE repo_key=? AND issue_number=? AND status IN (?,?,?,?)",
+        (repo_key, issue_number, *_CANCELLABLE_ISSUE_STATUSES))
+    return c.rowcount
+
+
 def cancel_issue_task(repo_key: str, issue_number: int):
-    """Issue 评论取消任务"""
+    """Issue 评论取消任务（Issue #1741：状态集合补齐 awaiting_input/pending_review，避免静默失效）"""
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (repo_key, issue_number))
-        affected = c.rowcount
+        affected = cancel_issue_rows(c, repo_key, issue_number)
         db.commit()
     log.info(f"Issue #{issue_number} cancelled ({affected} tasks)")
+    # Issue #1748 补充：取消后同样回收自动转存媒体（保留用户手工附件）
+    _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
 
 
@@ -2601,7 +2741,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
-_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+_ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
 # Issue #648：GitCode 同步评论是永久评论，不能写 7 天签名 URL（到期失效）；
 # 同步时重新签发长效链接（10 年）作为永久可访问 URL 的过渡方案
 _ATTACH_SYNC_URL_EXPIRES = 10 * 365 * 24 * 3600
@@ -2763,7 +2903,11 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
                 from src.domains.runtime.storage import get_storage
                 _storage = get_storage()
                 if _storage:
-                    _safe_name = _url.rsplit("/", 1)[-1].split("?")[0]
+                    # 文件名只能从 URL 的 **path** 里取：OBS 签名串（Signature=…）
+                    # 本身可能含 "/"，按整串 rsplit 会把签名碎片当文件名，
+                    # 重新签发出来的对象键不存在 → 评论链接 404（2026-11-06 实障）。
+                    from urllib.parse import urlparse
+                    _safe_name = urlparse(_url).path.rsplit("/", 1)[-1]
                     if _safe_name:
                         _att["url"] = _storage.temporary_url(
                             _attach_obs_key(owner, rname, issue_number, _safe_name),
@@ -2811,44 +2955,40 @@ def _attach_cleanup_dir(owner: str, repo: str, issue_number):
 
 def _user_image_ext(url: str, content_type: str = "") -> str:
     """从 URL 末段/Content-Type 推断图片扩展名（默认 .png）。"""
-    last = url.rstrip("/").rsplit("/", 1)[-1]
+    last = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
     ext = os.path.splitext(last)[1].lower()
     if ext in _ATTACH_IMAGE_EXTS:
         return ext
-    ct_map = {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg"}
+    ct_map = {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+              "image/svg+xml": ".svg", "image/bmp": ".bmp"}
     return ct_map.get(content_type, ".png")
 
 
-def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_key: str = "") -> dict:
-    """提取 Issue 正文/评论中 raw.gitcode.com/user-images 图片链接并鉴权下载转存为平台附件。
+def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo_key: str, *,
+                                extract_urls, download_method: str, max_count: int,
+                                classify, filename_prefix: str, use_uuid: bool = False,
+                                prefilter=None, analyzer=None) -> dict:
+    """Issue #315/#1748 共用采集编排：提取链接 → 鉴权下载 → 白名单校验 → 转存平台附件。
 
-    复用 _attach_save 存储语义（OBS 签名 URL 或 /static/issue_attachments/）。
+    参数化差异：链接提取函数、下载方法、类型/扩展名判定、文件名策略、预过滤、分析器。
     token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
-
-    Args:
-        texts: 可迭代字符串（Issue 正文、各评论 body 等）。
-        repo_key: 调用方已知的仓库全键（如 "gitcode:owner/repo"）；缺省按 gitcode 拼接。
-
-    Returns:
-        {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}
-        顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
+    顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
     """
-    from src.domains.runtime.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
     result: dict = {"ok": [], "failed": []}
     try:
         urls: list[str] = []
         for t in texts or []:
             if not t:
                 continue
-            for u in extract_gitcode_user_image_urls(str(t)):
+            for u in extract_urls(str(t)):
                 if u not in urls:
                     urls.append(u)
         if not urls:
             return result
         # 数量上限：超出部分降级说明（不静默丢弃）
-        for u in urls[USER_IMAGE_MAX_COUNT:]:
+        for u in urls[max_count:]:
             result["failed"].append({"url": u, "reason": "exceeds count limit"})
-        urls = urls[:USER_IMAGE_MAX_COUNT]
+        urls = urls[:max_count]
 
         repo_key = repo_key or f"gitcode:{owner}/{repo}"
         token = ""
@@ -2862,29 +3002,131 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
                 result["failed"].append({"url": u, "reason": "no repo token"})
             return result
 
+        import uuid
         from src.domains.runtime.vcs.api_client import create_client
         client = create_client(repo_key, token)
         seq = 0
         for u in urls:
-            dl = client.download_user_image(u)
+            if prefilter is not None and not prefilter(u):
+                log.info(f"{filename_prefix} ignored (non-media): {owner}/{repo}/{issue_number}")
+                continue
+            dl = getattr(client, download_method)(u)
             if "error" in dl:
                 result["failed"].append({"url": u, "reason": str(dl["error"])})
                 continue
-            seq += 1
-            ext = _user_image_ext(u, str(dl.get("content_type") or ""))
-            filename = f"user-image-{seq}{ext}"
+            content_type = str(dl.get("content_type") or "")
+            info = classify(u, content_type)
+            if not info:
+                log.info(f"{filename_prefix} ignored (unsupported type): "
+                         f"{owner}/{repo}/{issue_number} ct={content_type or 'unknown'}")
+                continue
+            kind, ext = info
+            if use_uuid:
+                # MR !1145 Informational-2：#1748 也用固定前缀（user-attachment-<uuid>），
+                # 让「自动转存」可仅凭前缀判定，避免"32 hex + 媒体扩展名"启发式误删
+                # 恰好同形的用户手工附件。
+                filename = f"{filename_prefix}-{uuid.uuid4().hex}{ext}"
+            else:
+                seq += 1
+                filename = f"{filename_prefix}-{seq}{ext}"
             try:
                 url = _attach_save(owner, repo, issue_number, filename, dl["content"])
-                result["ok"].append({"filename": filename, "url": url, "size": dl.get("size", len(dl["content"]))})
-                log.info(f"user-image saved: {owner}/{repo}/{issue_number}/{filename} ({dl.get('size', 0)} bytes)")
+                item = {"filename": filename, "url": url,
+                        "size": dl.get("size", len(dl["content"]))}
+                analysis = ""
+                if analyzer is not None and kind in ("image", "video"):
+                    analysis = analyzer(kind, dl["content"], ext)
+                if kind is not None:
+                    item["kind"] = kind
+                    item["source_url"] = u
+                if analyzer is not None:
+                    item["analysis"] = analysis
+                result["ok"].append(item)
+                log.info(f"{filename_prefix} saved: {owner}/{repo}/{issue_number}/{filename} "
+                         f"({dl.get('size', 0)} bytes, kind={kind}, analyzed={bool(analysis)})")
             except Exception as e:
-                seq -= 1
                 result["failed"].append({"url": u, "reason": f"save failed: {e}"})
     except Exception as e:
-        # 顶层兜底：任何异常都转为降级说明，不阻塞主流程
         result["error"] = str(e)
-        log.warning(f"_collect_issue_user_images failed: {owner}/{repo}/{issue_number} -> {e}")
+        log.warning(f"_collect_authed_attachments failed: {owner}/{repo}/{issue_number} -> {e}")
     return result
+
+
+# === Issue #315: GitCode 编辑器上传图片（user-images）服务端鉴权下载 ===
+
+def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_key: str = "") -> dict:
+    """提取 Issue 正文/评论中 raw.gitcode.com/user-images 图片链接并鉴权下载转存为平台附件。
+
+    复用 _attach_save 存储语义（OBS 签名 URL 或 /static/issue_attachments/）。
+    返回值 {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}，
+    顶层异常不外抛（返回带 error 字段的降级结果）。
+    """
+    from src.domains.runtime.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
+
+    def _classify(u: str, content_type: str):
+        return (None, _user_image_ext(u, content_type))
+
+    return _collect_authed_attachments(
+        owner, repo, issue_number, texts, repo_key,
+        extract_urls=extract_gitcode_user_image_urls,
+        download_method="download_user_image", max_count=USER_IMAGE_MAX_COUNT,
+        classify=_classify, filename_prefix="user-image")
+
+
+# === Issue #1748: 评论媒体附件（gitcode.com/user-attachments，视频/图片）服务端鉴权下载 ===
+
+def _analyze_media_attachment(kind: str, content: bytes, ext: str = "") -> str:
+    """Issue #1748：复用现有图片/视频理解能力分析已下载的评论媒体附件。
+
+    返回带「## 用户上传的图片/视频分析」标题的注入文本；分析不可用时返回空串。
+    分析模块缺失/异常一律降级为空串，由上层注入明确原因，不阻塞主流程。
+    """
+    try:
+        if kind == "image":
+            from src.domains.runtime.agents.image_understanding import understand_image_from_bytes
+            return understand_image_from_bytes(content, ext or ".png")
+        if kind == "video":
+            from src.domains.runtime.agents.image_understanding import understand_video_from_bytes
+            text = understand_video_from_bytes(content, ext or ".mp4")
+            if text and "## 用户上传的视频分析" not in text:
+                text = f"## 用户上传的视频分析\n{text}\n\n## 请基于以上视频信息回答用户问题"
+            return text
+    except Exception as e:
+        log.warning(f"_analyze_media_attachment failed ({kind}): {e}")
+    return ""
+
+
+def _collect_issue_media_attachments(owner: str, repo: str, issue_number, texts,
+                                     repo_key: str = "", analyze: bool = True) -> dict:
+    """Issue #1748：提取评论中的 user-attachments 媒体附件并鉴权下载转存为平台附件。
+
+    评论附件直链需登录态（匿名 401），且事件注入原本不含媒体分析，形成双重断链。
+    本函数在事件构建期用服务端凭证下载，经 `_attach_save` 转存为平台附件，
+    返回无 401 的读取通道 URL，供上层注入媒体分析段落。
+
+    Spec 限定 media-only：非媒体扩展名预过滤、未知类型下载后按 Content-Type 再判，
+    非图片/视频一律不落盘不注入；扩展名仅接受媒体白名单并以 UUID 命名。
+    返回值顶层异常不外抛（带 error 字段），绝不阻塞 prompt 组装主流程。
+    """
+    from src.domains.runtime.vcs.api_client import (
+        extract_gitcode_user_attachment_urls, USER_ATTACHMENT_MAX_COUNT,
+        attachment_kind, _attachment_ext, is_media_attachment_url,
+    )
+
+    def _classify(u: str, content_type: str):
+        kind = attachment_kind(u, content_type)
+        ext = _attachment_ext(u, content_type, kind)
+        if kind not in ("image", "video") or not ext:
+            return None
+        return (kind, ext)
+
+    return _collect_authed_attachments(
+        owner, repo, issue_number, texts, repo_key,
+        extract_urls=extract_gitcode_user_attachment_urls,
+        download_method="download_user_attachment", max_count=USER_ATTACHMENT_MAX_COUNT,
+        classify=_classify, filename_prefix="user-attachment", use_uuid=True,
+        prefilter=is_media_attachment_url,
+        analyzer=_analyze_media_attachment if analyze else None)
 
 
 def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:

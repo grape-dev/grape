@@ -23,8 +23,8 @@ from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
-                                   _read_issue_status)
-
+                                   _read_issue_status, _find_github_mirror_repo_key,
+                                   cancel_issue_rows)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -579,6 +579,14 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
 # 迁移自 /api/tasks/{task_id}/...：`{issue_id}` 即原 `{task_id}`（= issue.id），定位/逻辑零改动。
 
 
+def _feishu_api_for_ctx(ctx):
+    """按 ctx 的 app_id 取 FeishuAsync（旧 IM 下线 A2 M2：不再依赖 BotManager.api）。"""
+    if not ctx:
+        return None
+    from src.im.engine_wiring import feishu_api
+    return feishu_api(getattr(ctx, "app_id", "") or "")
+
+
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="Open issue session", description="Opens the Issue conversation entry: validates ownership and returns the current status without flipping it. User-only (front-end navigation preflight).")
 async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。
@@ -979,6 +987,41 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
             "issue_closed": _issue_closed}
 
 
+def _cancel_issue_agents(c, repo_key: str, issue_id: str) -> int:
+    """Issue #1741：终止某需求卡片下仍在跑的 agent_tasks，返回终止数量。
+
+    取消端点主路径与「主卡已取消」幂等收口分支共用，避免历史重复行残留 running agent 继续执行。
+    """
+    if not issue_id:
+        return 0
+    c.execute(
+        "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+        (repo_key, issue_id))
+    _agent_rows = c.fetchall()
+    for _at_id, _at_seq in _agent_rows:
+        try:
+            from src.domains.runtime.engine.service import cancel_task as _cancel_agent
+            _cancel_agent(_at_id)
+        except Exception:
+            pass
+        try:
+            if _at_seq:
+                from src.api.event_pipeline import cancel_direct_task
+                cancel_direct_task(_at_seq)
+        except Exception:
+            pass
+        try:
+            if _at_seq:
+                from src.api.event_store import update_event_status
+                update_event_status(_at_seq, "cancelled")
+        except Exception:
+            pass
+    c.execute(
+        "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+        (repo_key, issue_id))
+    return len(_agent_rows)
+
+
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
@@ -991,42 +1034,26 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         status, repo_key, issue_number = row[0], row[1], row[2]
+        _issue_id = f"#{issue_number}" if issue_number else ""
         if status == 'cancelled':
+            # Issue #1741：主卡已是 cancelled 时仍对同一需求的历史多行做幂等收口，
+            # 防止残留 awaiting_input 行继续出现在待澄清列表；并同步终止其残留 agent_tasks。
+            if repo_key and issue_number:
+                _cancel_issue_agents(c, repo_key, _issue_id)
+                cancel_issue_rows(c, repo_key, issue_number)
+                db.commit()
             return {"ok": True, "already_cancelled": True}
         if status == 'completed':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
-        _issue_id = f"#{issue_number}" if issue_number else ""
-        _cancelled_agents = 0
-        if _issue_id:
+        _cancelled_agents = _cancel_issue_agents(c, repo_key, _issue_id)
+        # Issue #1741：同一 repo_key+issue_number 的历史多行全量幂等取消，
+        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成/已取消行保持终态不受影响。
+        if repo_key and issue_number:
+            cancel_issue_rows(c, repo_key, issue_number)
+        else:
             c.execute(
-                "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
-                (repo_key, _issue_id))
-            _agent_rows = c.fetchall()
-            for _at_id, _at_seq in _agent_rows:
-                try:
-                    from src.domains.runtime.engine.service import cancel_task as _cancel_agent
-                    _cancel_agent(_at_id)
-                except Exception:
-                    pass
-                try:
-                    if _at_seq:
-                        from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task
-                        cancel_direct_task(_at_seq)
-                except Exception:
-                    pass
-                try:
-                    if _at_seq:
-                        from src.api.event_store import update_event_status
-                        update_event_status(_at_seq, "cancelled")
-                except Exception:
-                    pass
-                _cancelled_agents += 1
-            c.execute(
-                "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
-                (repo_key, _issue_id))
-        c.execute(
-            "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
-            (issue_id,))
+                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
+                (issue_id,))
         db.commit()
     log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
     return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
@@ -1047,9 +1074,17 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
         status, repo_key, issue_number = row[0], row[1], row[2]
         if status != 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仅已取消需求可恢复"})
-        c.execute(
-            "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
-            (issue_id,))
+        # Issue #1741：同一 repo_key+issue_number 多行全量幂等恢复（只改状态，不插入新卡，
+        # 避免恢复后产生重复卡片）。
+        if repo_key and issue_number:
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='cancelled'",
+                (repo_key, issue_number))
+        else:
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
+                (issue_id,))
         db.commit()
     _issue_id = f"#{issue_number}" if issue_number else ""
     if _issue_id:
@@ -1079,8 +1114,12 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
             set_issue_stage(repo_key, _issue_id, _resume_stage, "resume")
             try:
                 import urllib.request, json as _json
-                from src.kernel.prompt_builder import _resolve_server_url
-                _a2a_url = _resolve_server_url() + "/api/a2a"
+                # Issue #1858：恢复续办走 A2A 控制面基址（含可选网关 /a2a 前缀）。
+                from src.kernel.prompt_builder import resolve_a2a_base
+                _a2a_base = resolve_a2a_base()
+                if not _a2a_base:
+                    raise RuntimeError("A2A base_url unresolved")
+                _a2a_url = _a2a_base.rstrip("/") + "/api/a2a"
                 _a2a_payload = _json.dumps({
                     "agent": _resume_stage,
                     "payload": {
@@ -1097,7 +1136,12 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 urllib.request.urlopen(_req, timeout=5)
                 log.info(f"Issue #{issue_id} resumed → re-dispatched to stage={_resume_stage}")
             except Exception as _e:
-                log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}")
+                from src.prompt_builder import format_base_url_candidates
+                try:
+                    _candidates = format_base_url_candidates("/api/a2a")
+                except Exception:
+                    _candidates = ""
+                log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}; {_candidates}")
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 
@@ -1412,10 +1456,8 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     if changed:
         from src.api.issues_center import _get_feishu_open_id_by_user_id
         open_id = _get_feishu_open_id_by_user_id(user_id) or _get_feishu_open_id(assignee, repo_key)
-        from src.api import main as api_main
-        bm = api_main.bot_manager
-        ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
-        api = bm.api if bm else None
+        ctx = _resolve_user_chat_bot(None, user_id)
+        api = _feishu_api_for_ctx(ctx)
         cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
         asyncio.create_task(_run_awaiting_notify(ctx, api, user_id, conv_id, open_id,
                                                  questions, repo_key, issue_number, cfg))
@@ -1493,10 +1535,8 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                                _resolve_user_chat_bot, _run_pending_review_notify)
             from src.kernel.session_manager import get_chat_config
             _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"], it.get("repo_key", ""))
-            from src.api import main as api_main
-            bm = api_main.bot_manager
-            _ctx = _resolve_user_chat_bot(bm, it["user_id"]) if bm else None
-            _api = bm.api if bm else None
+            _ctx = _resolve_user_chat_bot(None, it["user_id"])
+            _api = _feishu_api_for_ctx(ctx)
             _cfg = get_chat_config(it["user_id"]) if it["user_id"] else {"backend": "opencode"}
             asyncio.create_task(_run_pending_review_notify(
                 _ctx, _api, it["user_id"], conv_id, _open_id, review_points,
@@ -1782,7 +1822,7 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
 
 
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses.")
-async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|)?$"),
+async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
@@ -2076,12 +2116,14 @@ def list_repo_issues(owner: str, repo: str,
                 it["attachments"] = _att
             it["attachments_count"] = len(_att)
 
-    # PR 订阅事件伪卡片混入（Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
-    # 非分页 legacy 模式保持「全部 PR 卡追加在末尾」旧口径，per_page=0 兼容）
+    # PR 订阅事件伪卡片混入。Issue #926：分页模式已按合并序切页挑出本页 PR 卡；
+    # Issue #1816：非分页（线上全量）路径不再整块追加到末尾，PR 伪卡片与真实 Issue
+    # 同键合并重排，复用 _merge_sort_items 与 SQL/分页路径同源排序口径。
     if per_page > 0:
         issues.extend(_page_pr)
     else:
         issues.extend(pr_items)
+        _merge_sort_items(issues, mode, sort_order)
 
     # Issue #542：分页模式返回服务端分页元数据；非分页模式 total 维持 len(issues)（兼容旧语义）
     if _total is not None:

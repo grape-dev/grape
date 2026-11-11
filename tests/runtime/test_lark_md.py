@@ -8,7 +8,7 @@ import sys
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.domains.runtime.im.lark_md import to_lark_md, to_lark_elements
+from src.im.lark_md import to_lark_md, to_lark_elements
 
 
 def test_table_converts_to_bullet_list():

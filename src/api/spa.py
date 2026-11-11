@@ -184,7 +184,7 @@ document.documentElement.classList.remove('i18n-loading');})();
 
     def _inject_email_configured(html: str) -> str:
         """在 </head> 前注入邮箱/OAuth 配置状态 + i18n boost 翻译数据。"""
-        from src.domains.mgmt.auth.providers import get_provider, list_providers
+        from src.domains.runtime.vcs.providers import get_provider, list_providers
         from src.domains.mgmt.user.db import get_meta_value
         configured = _is_email_configured()
         val = 'true' if configured else 'false'

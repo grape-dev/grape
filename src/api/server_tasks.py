@@ -110,9 +110,9 @@ async def start_mgmt_tasks(app) -> dict:
         log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
     try:
-        from src.domains.runtime.im.feishu_async import BotManager
-        from src.domains.runtime.im.handler_async import process_chat_async
-        from src.domains.runtime.im.vod_handler_async import process_vod_async
+        from src.im.feishu_async import BotManager
+        from src.im.handler_async import process_chat_async
+        from src.im.vod_handler_async import process_vod_async
 
         # psutil CPU 基准预热：interval=None 模式需要先调一次建立基准
         try:
@@ -163,7 +163,7 @@ async def start_mgmt_tasks(app) -> dict:
         from src.kernel.config import BOT_LEASE_DISABLED
         lease_store = None
         if not BOT_LEASE_DISABLED:
-            from src.domains.runtime.im.bot_lease import BotLeaseStore, generate_instance_id
+            from src.im.bot_lease import BotLeaseStore, generate_instance_id
             instance_id = generate_instance_id()
             lease_store = BotLeaseStore(instance_id=instance_id)
             log.info(f"IM WS: lease enabled, instance_id={instance_id}")

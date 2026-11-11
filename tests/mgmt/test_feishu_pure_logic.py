@@ -27,20 +27,20 @@ def _bind_repo(chat_id, repo_key, account):
 
 
 def test_d1_detect_bind_intent():
-    from src.domains.runtime.im.handler_async import detect_bind_intent
+    from src.im.handler_async import detect_bind_intent
     assert detect_bind_intent("绑定到 owner/repo") == "owner/repo"
     assert detect_bind_intent("帮我绑定到 org/devops-toolkit") == "org/devops-toolkit"
     assert detect_bind_intent("使用 a/b 仓库") == "a/b"
 
 
 def test_d2_detect_bind_intent_none():
-    from src.domains.runtime.im.handler_async import detect_bind_intent
+    from src.im.handler_async import detect_bind_intent
     assert detect_bind_intent("查一下状态") == ""
     assert detect_bind_intent("你好呀") == ""
 
 
 def test_d3_detect_clean_intent_true():
-    from src.domains.runtime.im.handler_async import detect_clean_intent
+    from src.im.handler_async import detect_clean_intent
     assert detect_clean_intent("清除会话缓存") is True
     assert detect_clean_intent("重置Agent上下文") is True
     assert detect_clean_intent("重来一下") is True
@@ -48,26 +48,26 @@ def test_d3_detect_clean_intent_true():
 
 
 def test_d4_detect_clean_intent_false():
-    from src.domains.runtime.im.handler_async import detect_clean_intent
+    from src.im.handler_async import detect_clean_intent
     assert detect_clean_intent("你好") is False
     assert detect_clean_intent("仓库状态如何") is False
 
 
 def test_d5_resolve_repo_from_binding():
-    from src.domains.runtime.im.handler_async import resolve_repo
+    from src.im.handler_async import resolve_repo
     from src.kernel.session_manager import db
     _bind_repo("oc_d5", "owner/repo", "cli_d5")
     assert resolve_repo("现在如何", "oc_d5", "u1", db, "cli_d5") == "gitcode:owner/repo"
 
 
 def test_d6_resolve_repo_explicit():
-    from src.domains.runtime.im.handler_async import resolve_repo
+    from src.im.handler_async import resolve_repo
     # 显式 owner/repo 命中正则，DB 无关
     assert resolve_repo("owner/repo 怎么样", "oc_d6", "u1", db=None, account="") == "owner/repo"
 
 
 def test_d6b_resolve_repo_bind_intent_wins():
-    from src.domains.runtime.im.handler_async import resolve_repo
+    from src.im.handler_async import resolve_repo
     from src.kernel.session_manager import db
     _bind_repo("oc_d6b", "already/bound", "cli_d6b")
     # 自然语言绑定意图优先于已绑定仓库

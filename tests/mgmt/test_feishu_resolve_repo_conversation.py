@@ -26,7 +26,7 @@ from src.kernel.session_manager import db, db_lock, create_conversation, join_fe
 @pytest.fixture(autouse=True)
 def _clear_repo_bind_cache():
     """每个测试前清 _repo_bind_cache，防跨测试缓存污染（群未绑定↔已绑定切换）。"""
-    from src.domains.runtime.im.handler_async import _repo_bind_cache
+    from src.im.handler_async import _repo_bind_cache
     _repo_bind_cache.clear()
     yield
     _repo_bind_cache.clear()
@@ -59,7 +59,7 @@ def _seed_user(binding_repo=None, chat_id="oc_test_conv", uid=1, account="cli_te
 
 
 def _resolve(text, chat_id="oc_test_conv", user_id=1, account="cli_test"):
-    from src.domains.runtime.im.handler_async import resolve_repo
+    from src.im.handler_async import resolve_repo
     return resolve_repo(text, chat_id, "sender_1", db, account=account, user_id=user_id)
 
 

@@ -93,11 +93,14 @@ def pack_backend(ts):
         items.append((help_dir, "help"))
     # 仓库根文件 (pyproject.toml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
-    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
     # Issue #699 Phase 0: requirements*.txt merged into pyproject.toml;
     #   Dockerfile/docker-compose.yml/nginx moved to deploy/
+    # 兼容 weekly-11：根目录若仍存在 requirements*.txt / Dockerfile，一并打入（os.path.isfile 保护）
     for rf in ["pyproject.toml", "Makefile",
-               "README.md", "README.zh.md", ".gitignore"]:
+               "README.md", "README.zh.md", ".gitignore",
+               "Dockerfile", "docker-compose.yml",
+               "requirements.txt", "requirements-worker.txt",
+               "requirements-local.txt"]:
         p = os.path.join(ROOT, rf)
         if os.path.isfile(p):
             items.append((p, rf))
@@ -152,7 +155,7 @@ def pack_database(ts):
     # meta 仅 execution_mode/pipeline_mode 两个系统键（运行模式，其余为环境私有数据不入包）。
     seed_tables = [
         "admin_users", "admin_roles", "admin_permission_menus", "admin_role_menu_rel",
-        "agent_type", "skill", "event_route_config", "global_im_bot_config",
+        "agent_type", "skill", "event_route_config",
         "flyway_schema_history",
         "scene_category", "skill_category", "agent_type_runtime_pool",
         "featured_templates",
@@ -312,13 +315,17 @@ def pack_tools(ts):
         "src/api/__init__.py", "src/api/routing.py", "src/api/time_utils.py",
         "src/api/event_store.py", "src/api/event_archive.py", "src/api/session_store.py",
         "src/api/knowledge.py", "src/api/merge_gate.py",
+        "src/domains/insight/__init__.py", "src/domains/runtime/__init__.py",
     ]
     for f in manifest_files:
         p = os.path.join(ROOT, f)
         if os.path.isfile(p):
             items.append((p, f))
     # 整目录
-    for d in ["src/domains/runtime/agents", "src/domains/runtime/engine"]:
+    # worker 侧 runtime engine 会发 OTel span / 任务观测事件（延迟 import），
+    # 包内需带 insight/observability，否则运行时 ModuleNotFoundError（合并后新增依赖）
+    for d in ["src/domains/runtime/agents", "src/domains/runtime/engine",
+              "src/domains/insight/observability"]:
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
             items.append((p, d))

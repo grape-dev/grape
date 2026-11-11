@@ -96,7 +96,7 @@ class TestScenarioCoverageAutoInherited:
     def test_feishu_sync_uses_resolver_delegated_function(self):
         """R20.7.3: 飞书 sync_repo_feishu_mapping 通过已委托的函数获取 token"""
         import inspect
-        from src.domains.runtime.im.feishu_async import FeishuAsync
+        from src.im.feishu_async import FeishuAsync
         # 找到 sync_repo_feishu_mapping 方法
         source = inspect.getsource(FeishuAsync.sync_repo_feishu_mapping)
         # get_github_token / get_repo_token_with_refresh 已委托 TokenResolver

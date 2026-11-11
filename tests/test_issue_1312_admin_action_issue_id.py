@@ -42,7 +42,7 @@ def _event_row(seq):
 class TestAuditInheritsOwnership:
     def test_audit_inherits_target_issue(self):
         from src.api.event_store import append_event
-        from src.api.routes.events import _audit_admin_action
+        from src.domains.insight.observability.events import _audit_admin_action
 
         target_seq = append_event(REPO, "issue_comment", title="real issue event",
                                   issue_id="#30", agent_type="issue")
@@ -65,7 +65,7 @@ class TestAuditInheritsOwnership:
         assert p["related"] is True
 
     def test_audit_missing_target_has_no_ownership(self):
-        from src.api.routes.events import _audit_admin_action
+        from src.domains.insight.observability.events import _audit_admin_action
 
         _audit_admin_action(REPO, 999999, "terminate", {"username": "ops"})
 

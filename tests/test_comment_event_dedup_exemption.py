@@ -193,7 +193,7 @@ class TestBotActorStillSelfLoop:
         from src.token_resolver import TokenResult
         _bot_level = TokenResult(token="REPO_BOT", level="repo_bot",
                                  provider=MagicMock(), repo_key=RK)
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _bot_level):
             _run(_pr_comment_payload(username="grape_bot", cid=70061))

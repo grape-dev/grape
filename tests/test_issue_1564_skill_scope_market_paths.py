@@ -9,7 +9,7 @@ Issue #657 已覆盖 repo 场景 create/update/apply 的保存期校验，但市
 
 本文件覆盖：
   R1 market create/update 强制拒绝 user scope（含创建者本人）；
-  R2 market apply 以应用者身份复核（本人放行 / 他人 400）；
+  R2 market apply 以应用者身份复核（user scope 一律 400，含本人）；
   R3 400 一次性返回全部冲突节点 violations[]；
   R5 GET /scenes/skill-scope-audit 只读体检与汇总计数。
 """
@@ -58,7 +58,7 @@ def _unique_owner():
 
 
 def _create_market(name, repo_key, nodes, scope="repo", source_user_id=0):
-    from src.user.db import create_scene_market
+    from src.domains.mgmt.user.db import create_scene_market
     return create_scene_market(
         name=name, display_name=name, description="issue 1564 test",
         scope=scope, repo_key=repo_key, source_user_id=source_user_id,
@@ -95,7 +95,7 @@ class TestMarketSaveScope:
 
     def test_create_market_rejects_own_user_scope(self):
         """创建者本人引用的 user 技能同样被拒绝（模板全仓共享）。"""
-        from src.api.routes.scenes import (create_market_scene,
+        from src.domains.mgmt.routes.scenes import (create_market_scene,
                                            CreateMarketSceneRequest)
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
@@ -124,7 +124,7 @@ class TestMarketSaveScope:
 
     def test_create_market_accepts_repo_scope(self):
         """repo 级技能不触发拦截，模板正常创建。"""
-        from src.api.routes.scenes import (create_market_scene,
+        from src.domains.mgmt.routes.scenes import (create_market_scene,
                                            CreateMarketSceneRequest)
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
@@ -146,7 +146,7 @@ class TestMarketSaveScope:
 
     def test_update_market_rejects_user_scope_using_market_repo_key(self):
         """update 无 repo 入参，repo_key 取市场行自身归属，user scope 一律拒绝。"""
-        from src.api.routes.scenes import (update_market_scene,
+        from src.domains.mgmt.routes.scenes import (update_market_scene,
                                            UpdateMarketSceneRequest)
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
@@ -175,7 +175,7 @@ class TestMarketSaveScope:
 
     def test_market_violations_return_all_conflicting_nodes(self):
         """R3：一次返回全部冲突节点，而非命中即抛。"""
-        from src.api.routes.scenes import (create_market_scene,
+        from src.domains.mgmt.routes.scenes import (create_market_scene,
                                            CreateMarketSceneRequest)
         owner, repo = _unique_owner(), _unique_suffix()
         s1 = f"usk1564_{_unique_suffix()}"
@@ -213,10 +213,10 @@ class TestMarketSaveScope:
 
 
 class TestMarketApplyScope:
-    """R2：应用市场模板以应用者身份复核——本人放行，他人 400。"""
+    """R2：应用市场模板以应用者身份复核——user scope 一律 400（#1758 含本人）。"""
 
     def test_apply_market_rejects_other_user_skill(self):
-        from src.api.routes.scenes import apply_market_scene
+        from src.domains.mgmt.routes.scenes import apply_market_scene
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
         sname = f"usk1564_{_unique_suffix()}"
@@ -242,8 +242,9 @@ class TestMarketApplyScope:
                 _delete_market(market_id)
             _delete_skill(sname)
 
-    def test_apply_market_allows_applicant_own_user_skill(self):
-        from src.api.routes.scenes import apply_market_scene
+    def test_apply_market_rejects_applicant_own_user_skill(self):
+        """#1758 固定口径：应用者本人 user 技能同样拒绝（repo 场景全仓共享）。"""
+        from src.domains.mgmt.routes.scenes import apply_market_scene
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
         sname = f"usk1564_{_unique_suffix()}"
@@ -254,10 +255,15 @@ class TestMarketApplyScope:
                 f"m-{_unique_suffix()}", repo_key,
                 [{"id": "issue", "tag": "issue", "skill": sname, "enabled": True}],
                 source_user_id=1)
-            resp = apply_market_scene(
-                market_id, user={"username": "me", "id": 1},
-                owner=owner, repo=repo)
-            assert resp.get("scene_id")
+            with pytest.raises(HTTPException) as ei:
+                apply_market_scene(
+                    market_id, user={"username": "me", "id": 1},
+                    owner=owner, repo=repo)
+            assert ei.value.status_code == 400
+            detail = ei.value.detail
+            assert "scope 不匹配" in detail["message"] and sname in detail["message"]
+            assert detail["skill_scope"] == "user"
+            assert detail["scene_scope"] == "repo"
         finally:
             _cleanup_repo(repo_key)
             if market_id:
@@ -269,7 +275,7 @@ class TestSkillScopeAudit:
     """R5：存量场景只读体检接口。"""
 
     def test_audit_lists_conflicts_and_is_read_only(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{_unique_suffix()}"
@@ -316,7 +322,7 @@ class TestSkillScopeAudit:
             _delete_skill(s_repo)
 
     def test_audit_clean_repo_returns_zero_conflicts(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         owner, repo = _unique_owner(), _unique_suffix()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{_unique_suffix()}"
@@ -335,7 +341,7 @@ class TestSkillScopeAudit:
             _delete_skill(s_repo)
 
     def test_audit_requires_repo(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         with pytest.raises(HTTPException) as ei:
             audit_scene_skill_scope(repo="", limit=200, user={})
         assert ei.value.status_code == 400
@@ -375,7 +381,7 @@ class TestAuditRouteAndFallback:
                 return _FakeCursor()
 
         monkeypatch.setattr(sm, "db", _FakeDB())
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         result = audit_scene_skill_scope(repo="gitcode:o/r", limit=200, user={})
         assert result["checked_scenes"] == 1
         assert result["total_conflicts"] == 0
@@ -396,6 +402,6 @@ class TestAuditRouteAndFallback:
                 return _FakeCursor()
 
         monkeypatch.setattr(sm, "db", _FakeDB())
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         with pytest.raises(RuntimeError):
             audit_scene_skill_scope(repo="gitcode:o/r", limit=200, user={})

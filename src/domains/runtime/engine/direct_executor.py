@@ -92,19 +92,20 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                          task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
-    # 迁移注记（Phase 3）：本函数自 event_pipeline 原样迁出，执行链依赖的
-    # pipeline 侧 helper 在此函数级延迟 import（模块级会成环）。
+    # P0 (Issue #596): lazy import from event_pipeline to avoid circular import
     from src.domains.runtime.pipeline.event_pipeline import (
-        _fail_event, _inject_bot_agent_env, _inject_issue_pr_env, _inject_linked_repo_tokens,
-        _inject_scene_env, _issue_num_from, _materialize_direct_workdir, _post_all_subtasks_done,
-        _post_result_to_issue, _post_result_to_pr, _post_subtask_completion_to_parent,
-        _read_scene_linked_repos, _redispatch_vod_after_recommend, _submit_direct_linked_prs,
-        _sync_issue_comments_to_conversation, _update_direct_task, get_agent_display_name,
-        resolve_actor_account,
-        get_agent_workdir, register_scene_deploy_url, register_sre_deploy_url,
+        _fail_event, _inject_bot_agent_env, _inject_issue_pr_env,
+        _inject_linked_repo_tokens, _inject_scene_env, _issue_num_from,
+        _materialize_direct_workdir, _post_all_subtasks_done,
+        _post_result_to_issue, _post_result_to_pr,
+        _post_subtask_completion_to_parent, _read_scene_linked_repos,
+        _redispatch_vod_after_recommend, _submit_direct_linked_prs,
+        _sync_issue_comments_to_conversation, _update_direct_task,
+        get_agent_display_name, get_agent_workdir, resolve_actor_account,
+        register_scene_deploy_url, register_sre_deploy_url,
     )
     from src.domains.runtime.engine.executor import stream_devops_agent
-    from src.kernel.prompt_builder import build_devops_agent_prompt
+    from src.kernel.prompt_builder import build_devops_agent_prompt, resolve_task_server_env
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output, _extract_tool_command,
         append_skipped_event,
@@ -324,7 +325,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
             _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
                              _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
-                             reason=_sk_src.get("reason") or "")
+                             reason=_sk_src.get("reason") or "",
+                             source_info=_sk_mat.get("source") or None,
+                             drift=_sk_mat.get("drift") or None)
             agent_logs.append({
                 "time": datetime.utcnow().isoformat(),
                 "type": "skill_source",
@@ -344,6 +347,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # Issue #1668：统一 actor 解析（a2a_event 回退 payload.account/Issue creator），
         # 禁止用 exec_account（仓库全名）冒充个人账号。
         "ACCOUNT": resolve_actor_account(evt, repo_key),
+        # Issue #1858：direct 执行同样注入三面基址（与 enqueue/重派/worker 同源）。
+        **resolve_task_server_env(runtime_id),
     }
     # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
     # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。

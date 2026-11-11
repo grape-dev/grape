@@ -147,7 +147,7 @@ def test_milestone_scan_does_not_stop_at_short_page(monkeypatch):
 
 def test_upstream_unavailable_during_readback_still_5xx(monkeypatch):
     """AC4：回读时上游真实不可用 → 502（不被 4xx 掩盖）。"""
-    from src.user.repo_manager import UpstreamAPIError
+    from src.domains.mgmt.user.repo_manager import UpstreamAPIError
 
     calls = []
     state = {"n": 0}

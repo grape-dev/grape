@@ -1119,8 +1119,12 @@ def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
     return path
 
 
-def get_skill_by_id(skill_id) -> dict | None:
-    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）"""
+def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
+    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）
+
+    Issue #1758: raise_on_error=True 时数据库异常上抛，供单一 scope 判官按
+    fail-closed 策略处理；默认 False 维持既有吞异常返回 None 的兼容语义。
+    """
     if not skill_id:
         return None
     try:
@@ -1138,6 +1142,8 @@ def get_skill_by_id(skill_id) -> dict | None:
                 "content_hash": row[9] or "",
             }
     except Exception as e:
+        if raise_on_error:
+            raise
         log.warning(f"get_skill_by_id failed: {e}")
         return None
 
@@ -1329,7 +1335,8 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
     return out
 
 
-def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
+def get_skill_scope_info(skill_name: str, repo_key: str = "",
+                         *, raise_on_error: bool = False) -> dict:
     """技能 scope 与场景（repo 级）scope 匹配判定（Issue #657）。
 
     按 repo → official → user（任意 owner）顺序查 skill 表：
@@ -1340,6 +1347,8 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
       由调用方走内置包兜底/派发侧门禁，维持存量场景兼容）。
 
     返回 {found, matched, scope, skill_id, owner_id}。
+    Issue #1758: raise_on_error=True 时数据库异常上抛（供单一 scope 判官
+    fail-closed）；默认 False 维持吞异常返回 found=False 的兼容语义。
     """
     info = {"found": False, "matched": False, "scope": "", "skill_id": 0, "owner_id": ""}
     if not skill_name:
@@ -1371,6 +1380,8 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
                             skill_id=row[0], owner_id=row[1] or "")
                 return info
     except Exception as e:
+        if raise_on_error:
+            raise
         log.warning(f"get_skill_scope_info failed: {e}")
     return info
 
@@ -3416,7 +3427,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         return None
 
     # 2. 获取 token_url（从 provider 配置）
-    from src.domains.mgmt.auth.providers import get_provider
+    from src.domains.runtime.vcs.providers import get_provider
     cfg = get_provider(provider)
     if not cfg:
         log.warning(f"refresh_oauth: provider {provider} not configured")
@@ -4798,6 +4809,48 @@ def get_business_api_url() -> str:
     return get_server_base_url()
 
 
+def get_business_api_port() -> str:
+    """本机业务 API 端口（单机多进程部署时与 runtime 端口解耦，Issue #1731）。
+
+    优先 task_business_api_port（server-config.json > meta），其次环境变量
+    `GRAPE_BUSINESS_PORT`；未配置返回空串，由调用方回退 `_local_port()` 兼容默认
+    （GRAPE_PORT > GRAPE_MAIN_PORT > 3000）。runtime 端口可能指向 runtime 网关
+    （如 8083）而非业务 API（如 8081），故业务端口需独立配置。
+    """
+    _v = _split_url_configured_value("task_business_api_port")
+    if _v:
+        return _v
+    return str(os.environ.get("GRAPE_BUSINESS_PORT") or "").strip()
+
+
+# Issue #1858：任务环境按服务注入基址——业务面（VCS / Issue）与控制面（A2A）分离。
+# 显式配置键（server-config.json > meta）；未配置由 prompt_builder 按聚合网关前缀
+# 或业务/回连基址回退，且来源在 env 中显式记录（不乱冒充）。
+_TASK_SERVICE_API_KEYS = {
+    "vcs": "task_vcs_api_url",
+    "issue": "task_issue_api_url",
+    "a2a": "task_a2a_api_url",
+}
+
+
+def get_task_service_api_url_explicit(service: str) -> str:
+    """显式配置的按服务任务基址（vcs/issue/a2a）；未配置返回空串。
+
+    Issue #1858：同一 base_url 无法同时承载 8081 业务 API 与 8082 A2A 时，
+    运维可分别配置 `task_vcs_api_url` / `task_issue_api_url` / `task_a2a_api_url`。
+    """
+    key = _TASK_SERVICE_API_KEYS.get((service or "").strip().lower(), "")
+    return _split_url_configured_value(key) if key else ""
+
+
+def get_task_gateway_base_url() -> str:
+    """可选聚合网关基址（按 /vcs /issue /a2a 前缀路由三面）；未配置返回空串。
+
+    Issue #1858：网关就绪时作为默认分服务变量的替代（二者择一，显式服务键优先）。
+    """
+    return _split_url_configured_value("task_gateway_base_url")
+
+
 def _split_url_configured_value(key: str) -> str:
     """读取拆分配置项（server-config.json > meta），空串表示未配置。
 
@@ -4806,13 +4859,13 @@ def _split_url_configured_value(key: str) -> str:
     """
     try:
         from src.kernel.config import read_server_config
-        _v = (read_server_config().get(key) or "").strip().rstrip("/")
+        _v = str(read_server_config().get(key) or "").strip().rstrip("/")
         if _v:
             return _v
     except Exception:
         pass
     try:
-        return (get_meta_value(key) or "").strip().rstrip("/")
+        return str(get_meta_value(key) or "").strip().rstrip("/")
     except Exception:
         return ""
 

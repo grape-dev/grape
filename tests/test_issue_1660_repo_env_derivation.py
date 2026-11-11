@@ -65,7 +65,7 @@ class TestBuildTaskEnvDerivesFromFullName:
 class TestDirectExecutorDerivesFromRepository:
     def test_direct_branch_source_no_longer_uses_exec_account_for_owner(self):
         import inspect
-        from src.runtime import direct_executor
+        from src.domains.runtime.routes.runtime import direct_executor
         source = inspect.getsource(direct_executor._execute_agent_inner)
         assert "derive_repo_identity" in source
         assert 'REPO_OWNER": (exec_account' not in source

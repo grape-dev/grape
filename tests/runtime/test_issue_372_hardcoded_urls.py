@@ -38,7 +38,7 @@ class TestSettingsNoLocalhostFallback:
 # ===========================================================================
 
 class TestA2ARedispatchUrl:
-    """测试 A2A re-dispatch URL 从 get_server_base_url 获取。"""
+    """测试 A2A re-dispatch URL 从 A2A 控制面基址获取（Issue #1858）。"""
 
     def test_t10_02_no_hardcoded_localhost_8000(self):
         """T10-02: events.py A2A re-dispatch 不再硬编码 localhost:8000。"""
@@ -48,9 +48,11 @@ class TestA2ARedispatchUrl:
         # 不应有硬编码 http://localhost:8000/api/a2a
         assert '"http://localhost:8000/api/a2a"' not in src, \
             "hardcoded localhost:8000/api/a2a still present"
-        # 应该用 get_server_base_url
-        assert "get_server_base_url" in src, \
-            "get_server_base_url not used in events.py"
+        # Issue #1858：改用按服务解析的 A2A 基址（显式配置 > 网关 /a2a 前缀 > 回连基址）
+        assert "resolve_a2a_base" in src, \
+            "resolve_a2a_base not used in events.py"
+        assert "format_base_url_candidates" in src, \
+            "A2A 失败路径应输出候选 base_url"
 
     def test_t10_03_a2a_url_uses_server_base_url(self):
         """T10-03: get_server_base_url() 有值时 A2A URL 含正确地址。"""
@@ -93,7 +95,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_05_forwarded_host_used_for_redirect_uri(self):
         """T10-05: nginx 代理场景，X-Forwarded-Host 含公网域名 → 用公网域名（需设 TRUSTED_HOSTS）。"""
-        from src.domains.mgmt.auth.providers import _get_trusted_host
+        from src.domains.runtime.vcs.providers import _get_trusted_host
         # R11.1: 未设 TRUSTED_HOSTS 时不读 X-Forwarded-Host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}, clear=False):
             req = self._mock_request(host="127.0.0.1:3000", fwd_host="grape.example.com")
@@ -102,7 +104,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_06_fallback_to_host_when_no_forwarded(self):
         """T10-06: 无 X-Forwarded-Host 时 fallback 到 Host 头。"""
-        from src.domains.mgmt.auth.providers import _get_trusted_host
+        from src.domains.runtime.vcs.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="1.2.3.4:3000", fwd_host="")
@@ -111,7 +113,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_07_trusted_hosts_validates_forwarded(self):
         """T10-07: TRUSTED_HOSTS 白名单校验 X-Forwarded-Host 的值（不在白名单 → 用 fallback）。"""
-        from src.domains.mgmt.auth.providers import _get_trusted_host
+        from src.domains.runtime.vcs.providers import _get_trusted_host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "trusted.com"}):
             req = self._mock_request(host="127.0.0.1:3000", fwd_host="evil.com")
             result = _get_trusted_host(req)
@@ -120,7 +122,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_08_localhost_forwarded_excluded(self):
         """T10-08: X-Forwarded-Host 是 localhost 时排除，fallback 到 Host 头。"""
-        from src.domains.mgmt.auth.providers import _get_trusted_host
+        from src.domains.runtime.vcs.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="1.2.3.4:3000", fwd_host="localhost")
@@ -130,7 +132,7 @@ class TestGetTrustedHostForwarded:
 
     def test_both_localhost_returns_host(self):
         """两个都是 localhost 时保持原行为（开发环境）。"""
-        from src.domains.mgmt.auth.providers import _get_trusted_host
+        from src.domains.runtime.vcs.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="localhost:8080", fwd_host="127.0.0.1:3000")
