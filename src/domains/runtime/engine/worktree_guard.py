@@ -24,11 +24,15 @@ Issue #2041（docs/issue-2041/plan.md）：worktree 删除/重置入口曾无条
   --remotes` 先判，命中疑似未推送时用远端分支 SHA 复核——平台 push 用
   `HEAD:refs/heads/<branch>` 不带 `-u`，`@{upstream}` 仍指向基线分支，只靠本地
   判定会把已推送的干净 worktree 误判为有未推送内容）+ 白名单外的未提交/未跟踪改动；
-  HEAD 不可解析（unborn/元数据损坏）不再早退放行，仍按工作区扫描判风险；
+  HEAD 不可解析（unborn/元数据损坏）不再早退放行，仍按工作区扫描判风险；扫描本身
+  失败 → scan_failed=true 且一律判风险，不区分 HEAD 是否可解析（扫描失败不能
+  用来证明「无内容可丢」）；
 - `archive_worktree_before_reset`：命中风险 → `git bundle create HEAD`（只打 HEAD
   链，避免 `--all` 把整仓 refs 打包）+ `git bundle verify` + `git diff HEAD --binary`
-  补丁 + untracked 文件快照（跳过/拷贝失败 = 未保全 → ok=False）+ manifest/record
-  （任一步失败 → ok=False，调用方拒绝重置）；归档目录 0700、产物 0600；
+  补丁（dirty 非空但 diff 失败/空输出 = tracked 改动未保全 → ok=False）+
+  untracked 文件快照（跳过/拷贝失败 = 未保全 → ok=False）+ manifest/record
+  （任一步失败 → ok=False，调用方拒绝重置）；scan_failed → dirty/untracked 清单
+  不可枚举、归档无从保全 → 直接拒绝删除；归档树新建各级目录 0700、产物 0600；
 - `inject_reset_context`：下一轮任务派发时把 record（worktree_reset/lost_commits/
   bundle_path/archived_at/reset_reason）注入 env + prompt，禁止「实现已在本地」
   的过时自述被无校验继承；注入带「仅当本轮工作区无改动才 reset」前置条件，并
@@ -550,18 +554,20 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "") -> d
 
     返回 {"risk", "dirty", "untracked", "unpushed_count", "lost_commits",
           "compare_ref", "branch", "head", "head_missing", "remote_head",
-          "dirty_count", "untracked_count", "untracked_overflow"}：
+          "dirty_count", "untracked_count", "untracked_overflow", "scan_failed"}：
     - 未推送：本地 ref 链优先（零网络），疑似未推送时远端 `ls-remote` 复核
       （见 _collect_unpushed）；计数失败保守视为有风险（unpushed_count=-1）；
     - HEAD 不可解析（unborn / git 元数据损坏）不再早退放行：仍执行
-      porcelain 扫描，按 dirty/untracked 判风险；扫描本身失败且 HEAD 不可解析
-      → 无法证明无内容可丢，判风险（口径同「守卫异常视为风险」）；
+      porcelain 扫描，按 dirty/untracked 判风险；
+    - 工作区扫描失败（index.lock/索引损坏/超时/权限异常）→ scan_failed=true
+      且一律判风险，不区分 HEAD 是否可解析（第 2 轮审查 Required#1：扫描失败
+      不能用来证明「无内容可丢」，归档侧据此拒绝删除）；
     - dirty/untracked 为白名单外路径清单（各带上限，count 为真实总数）。
     """
     out = {"risk": False, "dirty": [], "untracked": [], "unpushed_count": 0,
            "lost_commits": [], "compare_ref": "", "branch": "", "head": "",
            "head_missing": False, "remote_head": "", "dirty_count": 0,
-           "untracked_count": 0, "untracked_overflow": 0}
+           "untracked_count": 0, "untracked_overflow": 0, "scan_failed": False}
     from src.domains.runtime.engine.repogit import _run_git
     try:
         head = _run_git(["-C", wt_dir, "rev-parse", "HEAD"], token=token)
@@ -582,9 +588,11 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "") -> d
 
         entries = _porcelain_entries_all(wt_dir, token=token)
         if entries is None:
-            # 工作区扫描失败：HEAD 也不可解析时无法排除未跟踪内容 → 保守判风险
-            if out["head_missing"]:
-                out["risk"] = True
+            # 工作区扫描失败：无法证明「无内容可丢」（index.lock/索引损坏/
+            # 超时/权限异常）→ 一律判风险并标记 scan_failed，不区分 HEAD 是否
+            # 可解析（第 2 轮审查 Required#1：HEAD 可解析时曾直接放行=fail-open）
+            out["risk"] = True
+            out["scan_failed"] = True
             return out
         dirty, untracked = [], []
         for xy, path in entries:
@@ -601,9 +609,11 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "") -> d
                            or out["unpushed_count"] != 0)
         return out
     except Exception as e:
-        # 守卫自身异常 → 视为有风险（归档时 bundle 会再失败 → 调用方拒绝重置）
+        # 守卫自身异常 → 视为有风险且无法枚举内容（scan_failed），
+        # 归档侧据此拒绝删除（宁可残留，不可丢改动）
         log.warning(f"worktree reset guard: risk collect failed {wt_dir}: {e}")
         out["risk"] = True
+        out["scan_failed"] = True
         return out
 
 
@@ -620,12 +630,26 @@ def reset_record_path(repo_key: str, issue_num, agent_type: str) -> str:
 
 
 def _ensure_private_dir(path: str) -> None:
-    """归档目录 0700（含凭据类未跟踪文件时，同机其它任务不可读）。"""
+    """归档树目录 0700（含凭据类未跟踪文件时，同机其它任务不可读）。
+
+    新建的每一级（.grape / archive / {issue} / 叶子）都收紧 0700，不再只对
+    叶子目录 chmod（第 2 轮审查建议项：父目录按 umask 0755 会暴露归档清单
+    元数据）；已存在的目录不回写（不动仓库工作区等外部属主目录）。
+    """
+    full = os.path.abspath(path)
+    missing, cur = [], full
+    while cur and not os.path.isdir(cur):
+        missing.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
     os.makedirs(path, exist_ok=True)
-    try:
-        os.chmod(path, 0o700)
-    except Exception:
-        pass
+    for d in missing + [full]:
+        try:
+            os.chmod(d, 0o700)
+        except Exception:
+            pass
 
 
 def _chmod_private(path: str) -> None:
@@ -737,11 +761,14 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
                                   task_id: str = "") -> dict:
     """重置/删除前的归档保全（Issue #2041 核心）。
 
-    流程：collect_reset_risk → 无风险原样返回（零副作用，AC-c/AC-d）；有风险：
-    bundle create（仅 HEAD 链）→ bundle verify → dirty.patch（未提交改动）→
-    untracked 快照（逐文件，跳过/失败即「未保全」）→ manifest.json +
-    {agent}-reset.json 机器可读记录。任一步失败或存在未保全的未跟踪文件 →
-    ok=False（调用方必须拒绝重置，保留现场）。
+    流程：collect_reset_risk → 无风险原样返回（零副作用，AC-c/AC-d）；
+    scan_failed（工作区扫描失败/守卫异常）→ dirty/untracked 清单不可枚举、
+    归档无从保全未提交内容 → 直接拒绝删除（不产「空归档」假保全）；有风险：
+    bundle create（仅 HEAD 链）→ bundle verify → dirty.patch（dirty 非空但
+    diff 失败/空输出 = tracked 改动未保全 → ok=False）→ untracked 快照
+    （逐文件，跳过/失败即「未保全」）→ manifest.json + {agent}-reset.json
+    机器可读记录。任一步失败或存在未保全的未跟踪文件 → ok=False（调用方必须
+    拒绝重置，保留现场）。
 
     返回 {"risk", "archived", "ok", "error", "archive_dir", "bundle_path",
           "record_path", "record", "skipped"}。
@@ -758,6 +785,17 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
     risk = collect_reset_risk(wt_dir, token=token, base_branch=base_branch)
     res["risk"] = risk["risk"]
     if not risk["risk"]:
+        return res
+    if risk.get("scan_failed"):
+        # 工作区扫描失败（index.lock/索引损坏/超时/权限/守卫异常）：dirty/
+        # untracked 清单不可枚举，bundle 只含已提交对象、归档无从保全未提交
+        # 与未跟踪内容 → 拒绝删除保留现场（第 2 轮审查 Required#1，fail-closed：
+        # 不产「空归档」假保全后放行删除）
+        res["ok"] = False
+        res["error"] = ("worktree scan failed: cannot enumerate "
+                        "uncommitted/untracked content to archive")
+        log.warning(f"worktree reset guard: refuse reset, worktree scan failed "
+                    f"{repo_key} issue={issue_num} agent={agent_type}")
         return res
 
     archived_at = datetime.now(timezone.utc).isoformat()
@@ -783,20 +821,30 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
         res["error"] = "bundle verify failed"
         return res
 
-    # 未提交改动：bundle 只含已提交对象，`git diff HEAD --binary` 单独保全
+    # 未提交改动：bundle 只含已提交对象，`git diff HEAD --binary` 单独保全。
+    # dirty 非空说明存在 tracked 未提交改动：diff 执行失败（None/非零返回码）
+    # 或输出为空 = 补丁未保全 → 拒绝删除（第 2 轮审查 Required#2：不留空的
+    # dirty_patch 后 ok=True 删除 = 归档链 fail-open）。
     dirty_patch = ""
     if risk["dirty"]:
         r = _run_git(["-C", wt_dir, "diff", "HEAD", "--binary"], token=token)
-        if r is not None and (r.stdout or "").strip():
-            dirty_patch = os.path.join(archive_dir, DIRTY_PATCH_NAME)
-            try:
-                with open(dirty_patch, "w", encoding="utf-8") as f:
-                    f.write(r.stdout)
-                _chmod_private(dirty_patch)
-            except Exception as e:
-                res["ok"] = False
-                res["error"] = f"dirty patch write failed: {e}"
-                return res
+        if r is None or r.returncode != 0 or not (r.stdout or "").strip():
+            res["ok"] = False
+            res["error"] = (f"dirty diff failed: {len(risk['dirty'])} tracked "
+                            f"path(s) with uncommitted changes not archived")
+            log.warning(f"worktree reset guard: dirty diff failed "
+                        f"{repo_key} issue={issue_num} agent={agent_type} "
+                        f"-> refuse reset")
+            return res
+        dirty_patch = os.path.join(archive_dir, DIRTY_PATCH_NAME)
+        try:
+            with open(dirty_patch, "w", encoding="utf-8") as f:
+                f.write(r.stdout)
+            _chmod_private(dirty_patch)
+        except Exception as e:
+            res["ok"] = False
+            res["error"] = f"dirty patch write failed: {e}"
+            return res
 
     snap_files, snap_skipped = _snapshot_untracked(
         wt_dir, archive_dir, risk["untracked"],

@@ -8,6 +8,8 @@
 - c) 无风险路径零改动：不产 bundle、不产记录，既有清理语义保持（repogit 旧用例不回归）
 - d) upstream 与 HEAD 一致（已推送）且干净 → 零副作用
 失败路径：bundle create 失败 / bundle verify 失败 / 守卫异常 → 拒绝删除保留现场
+第 2 轮审查（fail-closed）：工作区扫描失败（HEAD 可解析也拒绝）/ dirty diff
+失败或空输出 → 拒绝删除保留现场
 """
 import json
 import os
@@ -633,3 +635,93 @@ def test_bundle_timeouts_are_named_constants(repo, monkeypatch):
     ok, err = repogit.fetch_from_bundle("/wt", "/tmp/x.bundle")
     assert ok and err == ""
     assert seen and seen[0][1] == repogit._BUNDLE_FETCH_TIMEOUT
+
+
+# ===================== 第 2 轮审查整改：归档链 fail-closed（review Required） =====================
+
+def test_scan_failure_with_resolvable_head_refuses_cleanup(repo, monkeypatch):
+    """R1：HEAD 可解析 + status 扫描失败 → 一律判风险且 cleanup False、目录保留。
+
+    扫描失败（index.lock/索引损坏/超时/权限）不能证明「无内容可丢」：dirty/
+    untracked 清单不可枚举，bundle 只含已提交对象、归档无从保全未提交内容，
+    不得产「空归档」后放行删除（曾按 HEAD 可解析直接放行 = fail-open）。
+    """
+    wt = _wt(repo, "37")
+    with open(os.path.join(wt, "unseen.txt"), "w", encoding="utf-8") as f:
+        f.write("invisible to a failed scan\n")
+    monkeypatch.setattr(wg, "_porcelain_entries_all",
+                        lambda wt_dir, token="": None)
+    r = wg.collect_reset_risk(wt)
+    assert r["risk"] is True
+    assert r["scan_failed"] is True, "扫描失败必须显式标记（归档侧据此拒绝）"
+    assert repogit.cleanup_issue_worktree(repo, "coding", "37") is False
+    assert os.path.isdir(wt), "扫描失败必须保留 worktree"
+    assert os.path.isfile(os.path.join(wt, "unseen.txt")), "不可枚举的内容不得被删"
+    assert wg.load_reset_record(repo, "37", "coding") is None, \
+        "清单不可枚举不得产 reset 记录（避免误告知已保全）"
+
+
+def test_dirty_diff_failure_refuses_cleanup(repo, monkeypatch):
+    """R2：dirty 非空 + `git diff HEAD --binary` 执行失败 → cleanup False、
+    worktree 保留、无 reset 记录（tracked 未提交改动不得无声丢失）。"""
+    wt = _wt(repo, "38")
+    with open(os.path.join(wt, "a.txt"), "w", encoding="utf-8") as f:
+        f.write("dirty\n")
+    real_run = repogit._run_git
+
+    def _fail_diff(args, *a, **k):
+        if "diff" in args and "HEAD" in args:
+            return None  # git exec failed（超时/锁/仓库异常）
+        return real_run(args, *a, **k)
+
+    monkeypatch.setattr(repogit, "_run_git", _fail_diff)
+    assert repogit.cleanup_issue_worktree(repo, "coding", "38") is False
+    assert os.path.isdir(wt), "补丁未保全必须保留 worktree"
+    assert open(os.path.join(wt, "a.txt"), encoding="utf-8").read() == "dirty\n"
+    assert wg.load_reset_record(repo, "38", "coding") is None, \
+        "dirty.patch 缺失不得产 reset 记录（避免误告知已保全）"
+
+
+def test_dirty_diff_empty_output_refuses_cleanup(repo, monkeypatch):
+    """R2：dirty 非空但 diff 空输出 → 同判未保全，拒绝删除（不留空 patch 放行）。"""
+    wt = _wt(repo, "39")
+    with open(os.path.join(wt, "a.txt"), "w", encoding="utf-8") as f:
+        f.write("dirty\n")
+    real_run = repogit._run_git
+
+    class _Empty:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _empty_diff(args, *a, **k):
+        if "diff" in args and "HEAD" in args:
+            return _Empty()
+        return real_run(args, *a, **k)
+
+    monkeypatch.setattr(repogit, "_run_git", _empty_diff)
+    res = wg.archive_worktree_before_reset(wt, repo, "39", "coding")
+    assert res["ok"] is False
+    assert "dirty diff failed" in res["error"]
+    assert repogit.cleanup_issue_worktree(repo, "coding", "39") is False
+    assert os.path.isdir(wt)
+    assert wg.load_reset_record(repo, "39", "coding") is None
+
+
+def test_archive_tree_dirs_private(repo):
+    """建议项：归档树新建各级目录（.grape / archive / {issue} / 叶子）全部 0700，
+    不再只收紧叶子目录（父目录按 umask 0755 会暴露归档清单元数据）。"""
+    wt = _wt(repo, "40")
+    with open(os.path.join(wt, "secret.env"), "w", encoding="utf-8") as f:
+        f.write("TOKEN=placeholder\n")
+    assert repogit.cleanup_issue_worktree(repo, "coding", "40") is True
+    rec = wg.load_reset_record(repo, "40", "coding")
+    assert rec
+    leaf = os.path.dirname(rec["bundle_path"])           # {archive}/{issue}/{stamp}
+    issue_dir = os.path.dirname(leaf)                    # {archive}/{issue}
+    archive_root = wg.reset_archive_root(repo)           # {repo}/.grape/archive
+    for d, name in ((leaf, "归档叶子"), (issue_dir, "issue 目录"),
+                    (archive_root, "archive 目录"),
+                    (os.path.dirname(archive_root), ".grape 目录")):
+        assert oct(os.stat(d).st_mode & 0o777) == oct(0o700), \
+            f"{name} 必须 0700: {d}"
