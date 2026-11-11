@@ -167,13 +167,20 @@
               <div class="ac__cred-row">
                 <input
                   v-model="hwAk"
-                  type="password"
+                  :type="hwAkRevealed ? 'text' : 'password'"
                   autocomplete="new-password"
                   :placeholder="t('access_key')"
                   class="ac__flex1"
                 />
-                <button type="button" class="ac__eye" @click="toggleSecret('hwAk')">
-                  {{ hwAkVisible ? '🙈' : '👁' }}
+                <!-- Issue #474：已配置才给 👁，走 reveal 接口二次确认取明文，不落缓存 -->
+                <button
+                  v-if="hwAkExists"
+                  type="button"
+                  class="ac__eye"
+                  :title="hwAkRevealed ? t('hide_plaintext') : t('reveal_plaintext')"
+                  @click="onRevealClick('ak')"
+                >
+                  {{ hwAkRevealed ? '🙈' : '👁' }}
                 </button>
               </div>
             </div>
@@ -182,13 +189,19 @@
               <div class="ac__cred-row">
                 <input
                   v-model="hwSk"
-                  type="password"
+                  :type="hwSkRevealed ? 'text' : 'password'"
                   autocomplete="new-password"
                   :placeholder="t('secret_key')"
                   class="ac__flex1"
                 />
-                <button type="button" class="ac__eye" @click="toggleSecret('hwSk')">
-                  {{ hwSkVisible ? '🙈' : '👁' }}
+                <button
+                  v-if="hwSkExists"
+                  type="button"
+                  class="ac__eye"
+                  :title="hwSkRevealed ? t('hide_plaintext') : t('reveal_plaintext')"
+                  @click="onRevealClick('sk')"
+                >
+                  {{ hwSkRevealed ? '🙈' : '👁' }}
                 </button>
               </div>
             </div>
@@ -367,6 +380,33 @@
         </div>
       </div>
     </Teleport>
+
+    <!-- Issue #474：查看明文凭据（重新输入密码二次确认；明文只留在本次页面，不落缓存） -->
+    <Teleport to="body">
+      <div v-if="revealModal.open" class="ac__modal-mask" @click.self="revealModal.open = false">
+        <div class="ac__modal">
+          <h3>{{ t('reveal_title') }}</h3>
+          <p class="tx t2 ac__reveal-desc">{{ t('reveal_desc') }}</p>
+          <div class="srow">
+            <label>{{ t('password') }}</label>
+            <input
+              v-model="revealModal.password"
+              type="password"
+              autocomplete="current-password"
+              :placeholder="t('enter_password')"
+              @keydown.enter.prevent="doReveal"
+            />
+          </div>
+          <div v-if="revealModal.error" class="ac__err">{{ revealModal.error }}</div>
+          <div class="ac__modal-btns">
+            <button class="bt bt-o" @click="revealModal.open = false">{{ t('cancel') }}</button>
+            <button class="bt bt-p" :disabled="revealModal.busy" @click="doReveal">
+              {{ revealModal.busy ? t('loading') : t('reveal_confirm') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -441,6 +481,17 @@ const DEFAULTS = {
   close: '关闭',
   change_email_btn: '更换邮箱',
   set_email: '设置邮箱',
+  // Issue #474：明文按需取回
+  reveal_plaintext: '查看明文',
+  hide_plaintext: '隐藏明文',
+  reveal_title: '查看明文凭据',
+  reveal_desc:
+    '为安全起见，请重新输入当前 Grape 密码确认身份。明文将仅显示本次，不会保存在浏览器中。',
+  reveal_confirm: '确认查看',
+  reveal_failed: '明文取回失败',
+  reveal_not_configured: '该凭据未配置',
+  enter_password: '输入密码',
+  cancel: '取消',
 }
 function modeLabel(m) {
   return t(m === 'light' ? 'light_mode' : m === 'dark' ? 'dark_mode' : 'auto_mode')
@@ -1590,22 +1641,87 @@ function doDeleteOauth(provider) {
     })
 }
 
-// ── credentials ──
+// ── credentials（Issue #474：接口只回存在性，字段用 ******** 占位，明文按需 reveal）──
+const MASK = '********'
 const hwAk = ref('')
 const hwSk = ref('')
-const hwAkVisible = ref(false)
-const hwSkVisible = ref(false)
-let cloudCredOriginal = { ak: null, sk: null }
-function toggleSecret(which) {
-  if (which === 'hwAk') hwAkVisible.value = !hwAkVisible.value
-  else hwSkVisible.value = !hwSkVisible.value
+const hwAkExists = ref(false)
+const hwSkExists = ref(false)
+const hwAkRevealed = ref(false)
+const hwSkRevealed = ref(false)
+let cloudCredOriginal = { ak: '', sk: '' }
+let cloudCredRevealed = { ak: null, sk: null }
+const revealModal = reactive({ open: false, field: '', password: '', busy: false, error: '' })
+function maskField(field) {
+  if (field === 'ak') {
+    hwAk.value = hwAkExists.value ? MASK : ''
+    hwAkRevealed.value = false
+  } else {
+    hwSk.value = hwSkExists.value ? MASK : ''
+    hwSkRevealed.value = false
+  }
+}
+function onRevealClick(field) {
+  const revealed = field === 'ak' ? hwAkRevealed.value : hwSkRevealed.value
+  if (revealed) {
+    // 再点一次 = 收回明文，回到掩码占位
+    cloudCredRevealed = { ...cloudCredRevealed, [field]: null }
+    maskField(field)
+    return
+  }
+  revealModal.open = true
+  revealModal.field = field
+  revealModal.password = ''
+  revealModal.error = ''
+  revealModal.busy = false
+}
+function doReveal() {
+  const pwd = (revealModal.password || '').trim()
+  if (!pwd) {
+    revealModal.error = t('enter_password')
+    return
+  }
+  revealModal.busy = true
+  revealModal.error = ''
+  // provider 固定 huawei_cloud（本页只有华为云 AK/SK 走 reveal）
+  G.API.post(
+    '/settings/credentials/reveal',
+    { provider: 'huawei_cloud', field: revealModal.field, password: pwd },
+    15000
+  )
+    .then(function (d) {
+      const value = (d && d.value) || ''
+      revealModal.busy = false
+      revealModal.open = false
+      if (!value) {
+        G.app.showToast(t('reveal_not_configured'))
+        return
+      }
+      if (revealModal.field === 'ak') {
+        hwAk.value = value
+        hwAkRevealed.value = true
+      } else {
+        hwSk.value = value
+        hwSkRevealed.value = true
+      }
+      cloudCredRevealed = { ...cloudCredRevealed, [revealModal.field]: value }
+    })
+    .catch(function (e) {
+      revealModal.busy = false
+      const msg = (e && ((e.detail && e.detail.message) || e.message)) || ''
+      // 服务端提示（密码错误/频率限制）已可读，优先原样展示
+      revealModal.error = msg || t('reveal_failed')
+    })
 }
 function saveCloudCreds() {
   const body = {}
   const akVal = hwAk.value.trim()
   const skVal = hwSk.value.trim()
-  if (akVal !== '********' && akVal !== cloudCredOriginal.ak) body.huawei_cloud_ak = akVal
-  if (skVal !== '********' && skVal !== cloudCredOriginal.sk) body.huawei_cloud_sk = skVal
+  // 占位符/未改动/reveal 回来的原值都不回传（清空 = 显式清除）
+  if (akVal !== MASK && akVal !== cloudCredOriginal.ak && akVal !== (cloudCredRevealed.ak || ''))
+    body.huawei_cloud_ak = akVal
+  if (skVal !== MASK && skVal !== cloudCredOriginal.sk && skVal !== (cloudCredRevealed.sk || ''))
+    body.huawei_cloud_sk = skVal
   if (Object.keys(body).length === 0) {
     G.app.showToast(t('no_changes'))
     return
@@ -1799,9 +1915,15 @@ function loadTab() {
     G.API.get('/settings/credentials')
       .then(function (d) {
         const hw = d.huawei_cloud || {}
-        hwAk.value = hw.ak_exists ? hw.ak || '' : ''
-        hwSk.value = hw.sk_exists ? hw.sk || '' : ''
+        // Issue #474：接口只回存在性（ak_exists/sk_exists），不回明文 → 已配置显示 ******** 占位
+        hwAkExists.value = !!hw.ak_exists
+        hwSkExists.value = !!hw.sk_exists
+        hwAk.value = hwAkExists.value ? MASK : ''
+        hwSk.value = hwSkExists.value ? MASK : ''
+        hwAkRevealed.value = false
+        hwSkRevealed.value = false
         cloudCredOriginal = { ak: hwAk.value, sk: hwSk.value }
+        cloudCredRevealed = { ak: null, sk: null }
         tabLoading.value = false
       })
       .catch(function (e) {
@@ -2166,6 +2288,15 @@ onMounted(function () {
 .ac__keybox code {
   font-size: 12px;
   word-break: break-all;
+}
+/* Issue #474：reveal 弹窗说明与错误提示（与弹窗同宽的内联文案） */
+.ac__reveal-desc {
+  margin-bottom: 12px;
+}
+.ac__err {
+  color: var(--r);
+  font-size: 12px;
+  margin-top: 8px;
 }
 .ac__disabled {
   background: #f1f5f9;
