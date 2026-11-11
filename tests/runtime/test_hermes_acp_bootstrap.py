@@ -334,15 +334,22 @@ class TestLocalProbeHermesArgs:
         assert "acp_probe" not in seen["opencode"]
 
     def test_probe_one_hermes_uses_handshake(self):
-        """hermes 探测：版本走 --version，健康走真实 ACP 握手。"""
-        from src.domains.runtime.engine.local_probe import _probe_one
+        """hermes 探测：版本走 --version，健康走真实 ACP 握手。
+
+        Issue #1982 R1：握手等待显式传剩余预算 kwarg，且不超过单引擎
+        LOCAL_PROBE_TIMEOUT 口径（不得落入 ACP_CHECK_TIMEOUT 默认 20s）。
+        """
+        from src.domains.runtime.engine.local_probe import _probe_one, LOCAL_PROBE_TIMEOUT
         with patch("subprocess.run", return_value=_run_ok(0, stdout="0.9.0")), \
              patch("src.domains.runtime.engine.acp_bootstrap._acp_check", return_value=True) as chk:
             out = _probe_one({"name": "hermes", "cli_path": "/bin/hermes",
                               "installed": True, "acp_probe": True})
         assert out["healthy"] is True
         assert out["version"] == "0.9.0"
-        chk.assert_called_once_with("/bin/hermes")
+        chk.assert_called_once()
+        _args, _kwargs = chk.call_args
+        assert _args[0] == "/bin/hermes"
+        assert 0 < _kwargs.get("timeout", LOCAL_PROBE_TIMEOUT + 1) <= LOCAL_PROBE_TIMEOUT
 
     def test_probe_one_non_hermes_version_only(self):
         from src.domains.runtime.engine.local_probe import _probe_one

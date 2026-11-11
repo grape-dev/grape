@@ -115,9 +115,11 @@ def _is_jsonrpc_response(line: str) -> bool:
     return any(k in msg for k in ("id", "result", "error", "method"))
 
 
-def _acp_probe_detailed(cli: str) -> dict:
+def _acp_probe_detailed(cli: str, timeout: float | None = None) -> dict:
     """对 `hermes acp` 做真实握手探测，返回带 error 文本的结构化结果。
 
+    timeout：握手响应等待上限（秒）；None 用 ACP_CHECK_TIMEOUT（服务端心跳口径）。
+    本机直连探测（local_probe）传剩余预算，保证单引擎总时长不超过 LOCAL_PROBE_TIMEOUT。
     返回 {"healthy": bool, "status": str, "reason": str, "error": str}。
     status/reason 取值：
     - ok：stdout 收到 JSON-RPC 响应；
@@ -173,9 +175,10 @@ def _acp_probe_detailed(cli: str) -> dict:
             except Exception:
                 box["line"] = ""
 
+        _wait = ACP_CHECK_TIMEOUT if timeout is None else max(0.1, float(timeout))
         reader = threading.Thread(target=_read, daemon=True)
         reader.start()
-        reader.join(ACP_CHECK_TIMEOUT)
+        reader.join(_wait)
         line = (box.get("line") if not reader.is_alive() else "") or ""
         line = line.strip()
         if line:
@@ -203,25 +206,28 @@ def _acp_probe_detailed(cli: str) -> dict:
             out.update(status=ACP_DEPS_MISSING, reason=ACP_DEPS_MISSING, error=err.strip()[:300])
         else:
             out.update(status=ACP_MODEL_UNREACHABLE, reason=ACP_MODEL_UNREACHABLE,
-                       error=(err.strip() or f"no JSON-RPC response within {ACP_CHECK_TIMEOUT}s")[:300])
+                       error=(err.strip() or f"no JSON-RPC response within {_wait}s")[:300])
         return out
     finally:
         _cleanup()
 
 
-def _acp_probe(cli: str) -> tuple:
+def _acp_probe(cli: str, timeout: float | None = None) -> tuple:
     """兼容调用方：返回 (healthy, status)。
 
     Issue #1982 起 status 三态化：ok / spawn_failed / model_unreachable；
     保留 no_acp_subcommand / deps_missing / fail 细分诊断供日志与测试使用。
     """
-    det = _acp_probe_detailed(cli)
+    det = _acp_probe_detailed(cli, timeout=timeout)
     return bool(det.get("healthy")), det.get("status") or ACP_FAIL
 
 
-def _acp_check(cli: str) -> bool:
-    """真实 ACP 握手探测（兼容旧调用方），握手成功视为 ACP 依赖可用。"""
-    ok, _reason = _acp_probe(cli)
+def _acp_check(cli: str, timeout: float | None = None) -> bool:
+    """真实 ACP 握手探测（兼容旧调用方），握手成功视为 ACP 依赖可用。
+
+    timeout 透传 _acp_probe_detailed（None = ACP_CHECK_TIMEOUT 服务端心跳口径）。
+    """
+    ok, _reason = _acp_probe(cli, timeout=timeout)
     return ok
 
 

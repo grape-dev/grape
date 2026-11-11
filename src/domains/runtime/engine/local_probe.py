@@ -4,6 +4,7 @@
 统一走此模块：线程池 + 单引擎超时 + 总时长限制，不阻塞事件循环。
 """
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _CFTimeout
 
 from src.kernel.config import log
@@ -23,13 +24,17 @@ def _probe_one(eng: dict) -> dict:
     if not cli or not eng.get("installed"):
         return {**eng, "version": "", "healthy": False}
     try:
+        _t0 = time.monotonic()
         res = subprocess.run([cli, "--version"], capture_output=True, text=True,
                              timeout=LOCAL_PROBE_TIMEOUT)
         healthy = res.returncode == 0
         version = (res.stdout or "").strip().split("\n")[0][:60] if healthy else ""
         if healthy and eng.get("acp_probe"):
             from src.domains.runtime.engine.acp_bootstrap import _acp_check
-            healthy = _acp_check(cli)
+            # Issue #1982 R1：握手等待显式传剩余预算（≤LOCAL_PROBE_TIMEOUT 单引擎口径），
+            # 不落 ACP_CHECK_TIMEOUT 默认 20s（服务端心跳口径，超出本机直连单引擎预算）。
+            _budget = round(max(1.0, LOCAL_PROBE_TIMEOUT - (time.monotonic() - _t0)), 2)
+            healthy = _acp_check(cli, timeout=_budget)
         out = {**eng, "version": version, "healthy": healthy}
         out.pop("probe_args", None)
         return out
