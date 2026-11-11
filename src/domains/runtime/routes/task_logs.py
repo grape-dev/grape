@@ -110,7 +110,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     runtime_id = row[18] if len(row) > 18 else 0
     # Issue #1255：执行模型（用量优先、配置模型回落，与事件详情同一取值函数，口径一致）
     try:
-        from src.observability.llm_usage import task_model_summary
+        from src.domains.insight.observability.llm_usage import task_model_summary
         model_summary = task_model_summary(task_id, int(runtime_id or 0))
     except Exception:
         model_summary = {"model": "", "source": "unknown", "models": []}

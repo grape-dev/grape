@@ -103,7 +103,7 @@ def _user_identities(user) -> tuple[set[str], set[str]]:
     if uid.isdigit() and int(uid) > 0:
         uids.add(uid)
     try:
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             get_grape_account_by_id,
             get_grape_account_by_username,
         )

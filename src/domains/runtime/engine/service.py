@@ -1025,7 +1025,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.observability.trace import pipeline_trace_id
+                from src.domains.insight.observability.trace import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass

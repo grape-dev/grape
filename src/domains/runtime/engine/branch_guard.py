@@ -459,7 +459,7 @@ def fetch_pr_state(repo_key: str, head_branch: str, token: str = "") -> dict:
         return _fetch_pr_state_via_grape(repo_key, head_branch)
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.api_client import VcsApiClient
         provider, owner, repo = parse_repo_key(repo_key)
         client = VcsApiClient(provider=provider, token=token, owner=owner, repo=repo)
         items = client.list_prs(state="all", head=head_branch)
@@ -476,7 +476,7 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
     """pre-push 钩子无 VCS token 时，通过 grape CLI（会话 token）查 PR 状态。"""
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.vcs.api_client import paginate_pages
+        from src.domains.runtime.vcs.api_client import paginate_pages
         provider, owner, repo = parse_repo_key(repo_key)
 
         def _fetch(page):

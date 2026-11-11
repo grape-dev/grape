@@ -2365,7 +2365,7 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
     """
     from src.kernel.session_manager import db, db_lock
     from src.kernel.scene_custom_env import normalize_custom_field
-    from src.api.routes.settings import (
+    from src.domains.mgmt.routes.settings import (
         _count_reveals_in_window, _record_reveal, _REVEAL_MAX_PER_WINDOW)
     import json as _json
 
@@ -2383,8 +2383,8 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
 
     # 二次确认：重新输入当前密码（与 #474 reveal 一致，密码校验前置于字段枚举之前，
     # 防止无正确密码探测密钥字段存在性/配置状态）
-    from src.auth.password import verify_password
-    from src.auth.grape_account_db import get_grape_account_by_id
+    from src.domains.mgmt.auth.password import verify_password
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
     account = get_grape_account_by_id(user["id"]) or {}
     password_hash = account.get("password_hash") or ""
     if not password_hash:
@@ -2435,7 +2435,7 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
 
     # 审计：谁/何时/取了哪个场景的哪个字段（detail 不含明文）
     ip = request.client.host if request and request.client else ""
-    from src.auth import audit as auth_audit
+    from src.domains.mgmt.auth import audit as auth_audit
     auth_audit.log_audit("scene_secret_reveal", user_id=user["id"], ip=ip,
                          detail={"scene_id": scene_id, "repo_key": repo_key, "name": name})
     _record_reveal(user["id"], "scene_advanced_options", name, ip)

@@ -373,7 +373,7 @@ def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
             log.warning(f"issues: attachments batch skip bad repo_key={rk}: {e}")
             continue
         try:
-            from src.storage import get_storage
+            from src.domains.runtime.storage import get_storage
             from src.api.issues_center import _ATTACH_IMAGE_EXTS
             import os as _os
             storage = get_storage()
