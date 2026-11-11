@@ -186,11 +186,9 @@
               >
               <span :class="['rtv-sbadge', scopeKey(rt)]">{{ scopeBadgeLabel(rt) }}</span>
               <span class="rtv-ename">
-                <span class="rtv-ename-b">{{
-                  rt.alias || rt.instance_name || rt.name || '—'
-                }}</span>
+                <span class="rtv-ename-b">{{ rt.alias || engineDisplayName(rt) || '—' }}</span>
                 <span v-if="rt.alias" class="rtv-ename-s"
-                  >({{ rt.instance_name || rt.name || '—' }})</span
+                  >({{ engineDisplayName(rt) || '—' }})</span
                 >
                 <svg
                   class="rtv-copy"
@@ -239,6 +237,11 @@
               <div class="rtv-kv">
                 <span class="rtv-k">健康分</span> <span v-html="healthScoreHtml(rt)"></span>
               </div>
+              <!-- Issue #865：模型（配置模型优先，回退最近使用；title 说明来源） -->
+              <div class="rtv-kv rtv-kv-full" :title="engineModelTooltip(rt)">
+                <span class="rtv-k">{{ t('label.model') }}</span>
+                <span class="rtv-vellipsis">{{ engineModelDisplay(rt) }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -265,7 +268,7 @@
         <div v-else class="rtv-grid">
           <div
             v-for="d in sortedDevices"
-            :key="d.credential_id + '-' + (d.name || d.device_name)"
+            :key="d.credential_id + '-' + workerDisplayName(d)"
             class="rtv-wcard"
             :style="cardLeftBorder(d.health)"
           >
@@ -279,7 +282,7 @@
                 }}</span
               >
               <span :class="['rtv-sbadge', scopeKey(d)]">{{ scopeBadgeLabel(d) }}</span>
-              <span class="rtv-wname">{{ d.name || d.device_name || '?' }}</span>
+              <span class="rtv-wname">{{ workerDisplayName(d) }}</span>
               <span class="rtv-wip">{{ d.worker_ip || '' }}</span>
               <button v-if="canManage(d)" class="bt bt-o rtv-wbtn" @click="openScopeSwitcher(d)">
                 {{ scopeShort(d.scope) }}
@@ -374,10 +377,10 @@
             ><span class="rtv-dot7"></span>{{ healthLabel(engineDetail.health) }}</span
           >
           <span class="rtv-ed-name">{{
-            engineDetail.alias || engineDetail.instance_name || engineDetail.name
+            engineDetail.alias || engineDisplayName(engineDetail)
           }}</span>
           <span v-if="engineDetail.alias" class="rtv-ename-s"
-            >({{ engineDetail.instance_name || engineDetail.name }})</span
+            >({{ engineDisplayName(engineDetail) }})</span
           >
           <button class="bt bt-o rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
             {{ t('action.edit_alias') }}
@@ -407,6 +410,21 @@
             <span class="rtv-k" style="min-width: 70px">{{ t('label.worker') }}</span>
             {{ engineDetail.worker_name || (engineDetail.is_local ? t('label.local') : '—') }}
           </div>
+          <!-- Issue #865：配置模型 + 最后使用 -->
+          <div class="rtv-kv">
+            <span class="rtv-k" style="min-width: 70px">{{ t('label.model_configured') }}</span>
+            <span :title="engineModelTooltip(engineDetail)" class="rtv-vellipsis">{{
+              engineDetail.model_name || '—'
+            }}</span>
+          </div>
+          <div class="rtv-kv">
+            <span class="rtv-k" style="min-width: 70px">{{ t('label.model_last_used') }}</span>
+            <span class="rtv-ts">{{
+              recentModelList(engineDetail)[0]
+                ? relTime(recentModelList(engineDetail)[0].last_used_at)
+                : '—'
+            }}</span>
+          </div>
           <div class="rtv-kv">
             <span class="rtv-k" style="min-width: 70px">IP</span>
             {{ engineDetail.worker_ip || '—' }}
@@ -433,6 +451,26 @@
             >
               {{ t('action.reset_health') }}
             </button>
+          </div>
+        </div>
+        <!-- Issue #865：最近使用模型（按用量 Top 3，来源 agent_tasks 上报） -->
+        <div class="rtv-ed-sec">
+          <div class="rtv-ed-sechead">
+            <span>{{ t('label.recent_models') }}</span>
+            <span class="rtv-ts">{{ t('label.recent_models_desc') }}</span>
+          </div>
+          <div v-if="!recentModelList(engineDetail).length" class="rtv-muted">
+            {{ t('label.recent_models_empty') }}
+          </div>
+          <div v-else class="rtv-models">
+            <div v-for="m in recentModelList(engineDetail)" :key="m.model" class="rtv-model-row">
+              <span class="rtv-vellipsis">{{ m.model }}</span>
+              <span class="rtv-ts">{{ t('label.model_used_count', { count: m.count }) }}</span>
+              <span class="rtv-ts"
+                >{{ t('label.model_last_used') }}
+                {{ m.last_used_at ? relTime(m.last_used_at) : '—' }}</span
+              >
+            </div>
           </div>
         </div>
         <!-- 场景标签 -->
@@ -1137,6 +1175,40 @@ function relTime(iso) {
     return iso
   }
 }
+// Issue #701：worker/设备显示名唯一来源 runtime_credentials.name；空名统一占位「未命名设备」，
+// 不回退边端自报 device_name（#465 的回退口径已废弃，避免同一机器在不同页面叫不同名字）。
+function workerDisplayName(wk) {
+  const n = String((wk && wk.name) || '').trim()
+  return n || tc('unnamed_worker')
+}
+// Issue #1310：引擎显示名统一「引擎名（凭据名）」——引擎名取 display_name/engine_name/name，
+// instance_name 仅作最后兼容，避免展示设备派生名。
+function engineDisplayName(rt) {
+  if (!rt) return ''
+  return rt.display_name || rt.engine_name || rt.name || rt.instance_name || ''
+}
+// Issue #865：模型展示——配置模型（worker 上报/本机配置）优先 → 最近使用模型 → —
+function engineModelDisplay(rt) {
+  const configured = (rt && rt.model_name) || ''
+  if (configured) return configured
+  const recent = ((rt && rt.recent_models) || [])[0]
+  if (recent && recent.model) return recent.model + ' (' + t('label.model_recent_short') + ')'
+  return '—'
+}
+function engineModelTooltip(rt) {
+  const configured = (rt && rt.model_name) || ''
+  if (configured) {
+    const src =
+      rt.model_source === 'local_config'
+        ? t('label.model_source_local')
+        : t('label.model_source_report')
+    return configured + ' · ' + src
+  }
+  return t('label.model_fallback_hint')
+}
+function recentModelList(rt) {
+  return (rt && rt.recent_models) || []
+}
 function copyText(txt) {
   try {
     G.navigator.clipboard.writeText(txt).then(() => app().showToast(t('credential.toast_copied')))
@@ -1270,7 +1342,7 @@ function rebuildEngineIndex() {
       if (!rt || rt.id === undefined || engineIndex[rt.id]) return
       engineIndex[rt.id] = Object.assign({}, rt, {
         credential_id: d.credential_id,
-        worker_name: d.name || d.device_name || '',
+        worker_name: workerDisplayName(d),
         worker_ip: d.worker_ip || '',
         scope: d.scope || 'global',
         owner: d.owner || '',
@@ -1381,7 +1453,7 @@ const availTypes = computed(() => {
   if (tab.value === 'engines') {
     const types = []
     runtimes.value.forEach((e) => {
-      const n = (e.instance_name || e.name || '').toLowerCase()
+      const n = (e.display_name || e.name || e.instance_name || '').toLowerCase()
       const tn =
         n.includes('aishell') || n.includes('hwcloud')
           ? 'aishell'
@@ -1438,7 +1510,7 @@ function filterEngines(list) {
       if (!hay.includes(q)) return false
     }
     if (filterType.value) {
-      const ename = (rt.instance_name || rt.name || '').toLowerCase()
+      const ename = (rt.display_name || rt.name || rt.instance_name || '').toLowerCase()
       if (!ename.includes(filterType.value)) return false
     }
     if (filterScene.value.length > 0) {
@@ -1483,10 +1555,15 @@ function sortByHealth(list) {
     return ha - hb
   })
 }
+// Issue #1310/#701：引擎按「引擎名（凭据名）」排序、设备按显示名（workerDisplayName）排序
+function sortListName(x) {
+  if (x && Array.isArray(x.runtimes)) return workerDisplayName(x) || ''
+  return engineDisplayName(x) || x.instance_name || x.name || ''
+}
 function sortByName(list) {
   return list.sort((a, b) => {
-    const na = (a.instance_name || a.name || a.device_name || '').toLowerCase()
-    const nb = (b.instance_name || b.name || b.device_name || '').toLowerCase()
+    const na = sortListName(a).toLowerCase()
+    const nb = sortListName(b).toLowerCase()
     return na.localeCompare(nb)
   })
 }
@@ -1571,7 +1648,7 @@ function closeEngineDetail() {
   }
 }
 function copyEngineName(rt) {
-  copyText(rt.instance_name || rt.name || '')
+  copyText(engineDisplayName(rt))
 }
 // 场景可用角色
 function sceneAvailableRoles(sceneTags) {
@@ -2534,6 +2611,38 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+/* Issue #865：模型行跨两列 + 值省略号（不与 .rtv-ellipsis 的弱化字色混用） */
+.rtv-kv-full {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.rtv-vellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.rtv-ts {
+  font-size: 11px;
+  color: var(--t3);
+  flex-shrink: 0;
+}
+.rtv-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rtv-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--t2);
+  min-width: 0;
+}
+.rtv-model-row > .rtv-vellipsis {
+  flex: 1;
 }
 .rtv-k {
   color: var(--t3);
