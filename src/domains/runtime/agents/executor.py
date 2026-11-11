@@ -48,16 +48,71 @@ _active_procs: set[subprocess.Popen] = set()
 _active_procs_lock = _threading.Lock()
 
 
+# Issue #1982：任务执行作用域。stream_agent 每轮执行创建独立 scope，记录本轮
+# spawn 的所有引擎子进程；正常路径由 _untrack_proc 逐个关闭管道，异常/提前中断
+# （cancel/requeue/stream 提前 break/GeneratorExit）由 scope finally 兜底 terminate
+# + 关闭管道，保证 fd 不随任务数累积。
+_exec_scope = _threading.local()
+
+
+def _close_proc_pipes(proc, label: str = "") -> None:
+    """显式关闭子进程 stdin/stdout/stderr 管道（幂等，异常吞掉）。
+
+    仅 terminate/kill 不关闭 PIPE 时，fd 要等 Popen 对象被 GC 才释放；读线程持有
+    引用会让释放更晚，长跑 worker 因此累积匿名 pipe 直至 EMFILE（Issue #1982）。
+    """
+    if proc is None:
+        return
+    for _name in ("stdin", "stdout", "stderr"):
+        _stream = getattr(proc, _name, None)
+        if _stream is None:
+            continue
+        try:
+            _stream.close()
+        except Exception:
+            pass
+
+
+def _scope_procs():
+    """当前 stream_agent 作用域的进程集合（不在作用域内返回 None）。"""
+    return getattr(_exec_scope, "procs", None)
+
+
 def _track_proc(proc: subprocess.Popen, backend: str = "", cwd: str = ""):
     with _active_procs_lock:
         proc._grape_backend = backend
         proc._grape_cwd = os.path.normcase(os.path.realpath(cwd)) if cwd else ""
         _active_procs.add(proc)
+    procs = _scope_procs()
+    if procs is not None:
+        procs.add(proc)
 
 
 def _untrack_proc(proc: subprocess.Popen):
     with _active_procs_lock:
         _active_procs.discard(proc)
+    procs = _scope_procs()
+    if procs is not None:
+        procs.discard(proc)
+    _close_proc_pipes(proc)
+
+
+def _close_exec_scope(prev_scope):
+    """结束本轮执行作用域：terminate 尚未回收的进程并关闭全部管道。"""
+    procs = _scope_procs()
+    _exec_scope.procs = prev_scope
+    for proc in list(procs or ()):
+        try:
+            if proc.poll() is None:
+                _terminate_proc(proc, "stream-scope", grace_seconds=3)
+        except Exception:
+            pass
+        try:
+            _close_proc_pipes(proc)
+        except Exception:
+            pass
+        with _active_procs_lock:
+            _active_procs.discard(proc)
 
 
 def active_task_processes(backend: str, cwd: str) -> list:
@@ -102,6 +157,7 @@ def terminate_active_agents(grace_seconds: int = 5):
             _terminate_proc(proc, "shutdown")
         except Exception:
             pass
+        _close_proc_pipes(proc)
     if procs:
         log.info(f"terminate_active_agents: terminated {len(procs)} running agent subprocess(es)")
     # 标记 DB 中 running/dispatched 任务（防止重启后悬空）。
@@ -847,6 +903,35 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  agent_label: str = "",
                  repo_key: str = "",
                  max_exec_seconds: int = 600) -> Generator:
+    """流式执行 Agent（执行作用域包装）。
+
+    Issue #1982：为本轮所有引擎子进程建立 fd 收口作用域——正常结束由
+    _untrack_proc 关闭管道；异常/cancel/requeue/消费方提前中断/GeneratorExit
+    由 finally 兜底 terminate + 关闭 stdin/stdout/stderr，避免 pipe fd 泄漏。
+    """
+    prev_scope = _scope_procs()
+    _exec_scope.procs = set()
+    try:
+        yield from _stream_agent_impl(
+            prompt, cwd, session_id=session_id, event_type=event_type,
+            backend_name=backend_name, account=account, user_id=user_id,
+            env_extra=env_extra, bot_token=bot_token, user_token=user_token,
+            agent_name=agent_name, agent_label=agent_label,
+            repo_key=repo_key, max_exec_seconds=max_exec_seconds,
+        )
+    finally:
+        _close_exec_scope(prev_scope)
+
+
+def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
+                       event_type: str = "", backend_name: str = "",
+                       account: str = "", user_id: int = 0,
+                       env_extra: dict | None = None,
+                       bot_token: str = "", user_token: str = "",
+                       agent_name: str = "",
+                       agent_label: str = "",
+                       repo_key: str = "",
+                       max_exec_seconds: int = 600) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
 
     **会话失效自动重建**：当 opencode 会话在服务端已不存在（如被清理/误删）时，

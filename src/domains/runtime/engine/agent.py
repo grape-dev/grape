@@ -182,6 +182,31 @@ def _win_acp_drain_stderr(proc):
     return buf
 
 
+def _close_proc_pipes(proc, label: str = "") -> None:
+    """Issue #1982：显式关闭引擎子进程 stdin/stdout/stderr 管道（幂等）。
+
+    探活/任务路径的 Popen 均使用 PIPE；若只在 finally 里 terminate/kill 而不关闭
+    管道，fd 只在对象被 GC 时释放，长跑 worker 会持续累积匿名 pipe 直到 EMFILE。
+    关闭异常一律吞掉（句柄已关闭/已失效/被读线程持有均属正常）。
+    """
+    if proc is None:
+        return
+    for _name in ("stdin", "stdout", "stderr"):
+        _stream = getattr(proc, _name, None)
+        if _stream is None:
+            continue
+        try:
+            _stream.close()
+        except Exception:
+            pass
+    # Windows 探活缓存按 id(proc) 持有引用，关闭后一并释放，避免对象常驻
+    try:
+        _win_acp_pumps.pop(id(proc), None)
+        _win_acp_stderr.pop(id(proc), None)
+    except Exception:
+        pass
+
+
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
@@ -391,6 +416,13 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": f"timeout ({_ACP_PROBE_TIMEOUT + _ACP_PROMPT_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "hermes CLI not found"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
@@ -404,6 +436,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_pipes(proc)
         # 探针临时 cwd 清理（hwcloud 探针同款；session 随子进程 terminate 终止）
         try:
             _shutil.rmtree(_probe_cwd, ignore_errors=True)
@@ -564,6 +597,13 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
 
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "hwcloud CLI not found"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
@@ -577,6 +617,7 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_pipes(proc)
 
 
 
@@ -745,6 +786,13 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
             return out
         return {"status": "fail", "latency": latency,
                 "error": f"prompt stopReason={stop_reason or 'none'}"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                 "error": str(e)[:200]}
@@ -759,6 +807,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_pipes(proc)
 
 
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
@@ -810,6 +859,13 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": f"timeout ({_PROBE_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "CLI not found"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
@@ -1196,11 +1252,10 @@ def _env_int(name, default):
 def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
 
-    hermes 额外做 ACP 依赖自举（hermes-acp-auto-bootstrap-design.md）：
-    --version 探测不出 ACP 依赖缺失（可选 extra），必须 `hermes acp --check`
-    才能暴露；缺失时自动补装 agent-client-protocol==0.9.0，补装失败则
-    healthy=False（引擎照常注册，但服务端 engine_select 只挑 healthy，
-    不会再把任务派到一台调不通的机器上）。
+    hermes 额外做 ACP 握手探测（hermes-acp-auto-bootstrap-design.md / Issue #1982）：
+    --version 探测不出 ACP 依赖缺失（可选 extra），必须真实握手才能暴露；
+    探测失败只输出带 error 文本的诊断（不再自动补装），healthy=False 时引擎
+    照常注册，但服务端 engine_select 只挑 healthy，不会把任务派到调不通的机器。
     """
     from src.domains.runtime.engine.registry import discover_runtimes
     from src.domains.runtime.engine.acp_bootstrap import _ensure_hermes_acp
@@ -1220,7 +1275,7 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
-        # hermes：ACP 依赖可用才算真健康（缺失时已尝试自动补装）
+        # hermes：ACP 握手通过才算真健康（失败只诊断，不自动补装）
         if healthy and (r["name"] or "").lower() == "hermes":
             healthy = _ensure_hermes_acp(cli)
         # display_name：展示名映射（hwcloud → AIShell；register 接口落 DB display_name 列）

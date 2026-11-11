@@ -510,7 +510,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                             "WHERE name=? AND credential_id=?",
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
-                    elif _pstatus == "fail":
+                    elif _pstatus in ("fail", "model_unreachable"):
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, "
                             "probe_fail_count=probe_fail_count+1, "
@@ -518,6 +518,19 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                             "WHERE name=? AND credential_id=?",
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
+                        if _pstatus == "model_unreachable":
+                            log.warning(f"runtime probe model_unreachable: engine={_pname} "
+                                        f"credential={credential_id} error={_perror[:200]}")
+                    elif _pstatus == "spawn_failed":
+                        # Issue #1982：子进程起不来（fd 打满/资源不足）= 环境故障，
+                        # 不计入「探活连续失败」，不触发引擎摘除；仅单独告警留痕。
+                        c.execute(
+                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
+                            "WHERE name=? AND credential_id=?",
+                            (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                        )
+                        log.warning(f"runtime probe spawn_failed (not counted as consecutive failure): "
+                                    f"engine={_pname} credential={credential_id} error={_perror[:200]}")
                     else:
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
