@@ -166,7 +166,10 @@
             <div>
               <span class="apv-lbl">{{ tt('detail.repo_label') }}</span> {{ detail.repo_key }}
             </div>
-            <div><span class="apv-lbl">Skill:</span> {{ detail.skill_name || '—' }}</div>
+            <div>
+              <span class="apv-lbl">Skill:</span>
+              {{ detail.display_name || detail.skill_name || '—' }}
+            </div>
             <div>
               <span class="apv-lbl">{{ tt('detail.engine_label') }}</span> {{ engineNamesText }}
             </div>
@@ -307,7 +310,16 @@
                     <div v-for="f in findingsMap[e.id]" :key="f.id" class="apv-finding">
                       <span class="apv-find-ic">{{ sevIcon(f.severity) }}</span>
                       <div class="apv-find-body">
-                        <div class="apv-find-t">{{ f.title }}</div>
+                        <div class="apv-find-t">
+                          {{ f.title }}
+                          <!-- Issue #697：疑似重复（根因不一致）需 owner 确认后再派发 -->
+                          <span
+                            v-if="f.dedup_level === 'suspected_duplicate'"
+                            class="apv-dup-badge"
+                            :title="f.dedup_note || ''"
+                            >{{ tt('findings.suspected_dup_badge') }}</span
+                          >
+                        </div>
                         <div class="apv-find-d">{{ f.description || '' }}</div>
                         <div class="apv-find-sev" :style="{ color: sevColor(f.severity) }">
                           {{ f.severity || 'medium' }}{{ f.category ? ' · ' + f.category : '' }}
@@ -716,8 +728,8 @@
                 />
                 <div class="apv-pick-body">
                   <div class="apv-pick-name">
-                    {{ e.alias || e.name }}
-                    <span v-if="e.alias" class="apv-pick-alias">({{ e.name }})</span>
+                    {{ e.alias || engineDisplayName(e) }}
+                    <span v-if="e.alias" class="apv-pick-alias">({{ engineDisplayName(e) }})</span>
                     <span
                       v-for="tg in e.tags || []"
                       :key="tg"
@@ -730,15 +742,32 @@
                     }}</span>
                   </div>
                   <div class="apv-pick-meta">
-                    {{ e.instance_name || e.name
-                    }}{{
-                      e.host_name || e.worker_name ? ' · ' + (e.host_name || e.worker_name) : ''
-                    }}
+                    {{ engineDisplayName(e) !== e.name ? engineDisplayName(e) + ' · ' : ''
+                    }}{{ e.host_name || e.worker_name || e.name }}
                   </div>
                 </div>
                 <span class="apv-pick-online">{{ tt('engine_picker.online') }}</span>
               </label>
             </template>
+          </template>
+          <!-- Issue #486：编辑态原绑定但已超出当前可见范围的引擎，仅可移除 -->
+          <template v-if="detachedEngineIds.length">
+            <div class="apv-pick-group apv-detached-g">
+              {{ tt('engine_picker.detached_group') }} ({{ detachedEngineIds.length }})
+            </div>
+            <label
+              v-for="eid in detachedEngineIds"
+              :key="'detached-' + eid"
+              class="apv-pick-item apv-detached"
+              :class="{ on: true }"
+            >
+              <input type="checkbox" :checked="true" @change="toggleEngine(eid)" />
+              <div class="apv-pick-body">
+                <div class="apv-pick-name">#{{ eid }}</div>
+                <div class="apv-pick-meta">{{ tt('engine_picker.detached_hint') }}</div>
+              </div>
+              <span class="apv-pick-online apv-detached-warn">⚠️</span>
+            </label>
           </template>
         </div>
         <div class="apv-pick-foot">
@@ -810,6 +839,17 @@
           <button class="apv-dlg-close" @click="dispatchDlg.open = false">×</button>
         </div>
         <div class="apv-disp-body">
+          <!-- Issue #697：疑似重复（根因不一致）派发前给 owner 明确提示 -->
+          <div
+            v-if="dispatchDlg.finding && dispatchDlg.finding.dedup_level === 'suspected_duplicate'"
+            class="apv-dup-warn"
+          >
+            <span class="apv-dup-ic">⚠️</span>
+            <div>
+              <b>{{ tt('findings.suspected_dup_badge') }}</b>
+              <div class="apv-dup-note">{{ dispatchDlg.finding.dedup_note || '' }}</div>
+            </div>
+          </div>
           <div class="apv-fld">
             <label class="apv-lbl-s">{{ tt('dispatch.field_title') }}</label>
             <input v-model="dispatchDlg.title" type="text" class="apv-input" />
@@ -965,11 +1005,15 @@ const dlg = reactive({
   expanded: false,
   polishing: false,
   submitting: false,
+  repoKey: '', // Issue #486：编辑态原任务仓库（新建时空 = 取当前仓库）
 })
 const dlgCustomFields = ref([])
 const dlgBranches = ref([])
 const selectedEngines = reactive(new Set())
 const engines = ref([])
+// Issue #486：引擎列表按表单所属仓库过滤并缓存，切仓需重拉（避免跨仓串缓存）
+let enginesRepoKey = ''
+const enginesLoaded = ref(false)
 const selectedSkill = ref('')
 const autoSkills = ref([])
 const engPicker = reactive({ open: false, q: '', type: '', scope: '' })
@@ -1647,7 +1691,7 @@ function loadBranches(repoKeyRaw, target) {
   const parts = rk.split('/')
   if (parts.length !== 2) return
   API()
-    .get('/scenes/branches/' + parts[0] + '/' + parts[1])
+    .get('/scenes/branches/' + parts[0] + '/' + parts[1] + '?repo_key=' + encodeURIComponent(rk))
     .then(function (b) {
       const branches = (b && b.branches) || []
       target.value = branches
@@ -1916,6 +1960,7 @@ function showCreate(templateId) {
   const tpl = templateId ? TEMPLATES.find((t) => t.id === templateId) : null
   dlg.open = true
   dlg.editingId = null
+  dlg.repoKey = ''
   dlg.name = tpl ? tt(tpl.title_key) : ''
   dlg.instruction = tpl ? tpl.instruction : ''
   dlg.maxRetry = 3
@@ -1942,6 +1987,7 @@ function editTask(id) {
     .get('/autopilot/tasks/' + id)
     .then(function (t) {
       dlg.open = true
+      dlg.repoKey = t.repo_key || '' // Issue #486：引擎列表按该仓库过滤
       dlg.name = t.name || ''
       dlg.instruction = t.instruction || ''
       dlg.maxRetry = typeof t.max_retry === 'number' ? t.max_retry : 3
@@ -2052,15 +2098,36 @@ function submitForm() {
 }
 
 // ═══ 引擎选择器 ═══
-function loadEngines() {
-  if (engines.value.length) return
-  API()
-    .get('/settings/agent-runtimes')
+// Issue #1310：引擎显示名统一「引擎名（凭据名）」——instance_name 仅作最后兼容
+function engineDisplayName(e) {
+  if (!e) return ''
+  return e.display_name || e.engine_name || e.name || e.instance_name || ''
+}
+// Issue #486：表单对应仓库 full_name（无平台前缀）；编辑态用原任务仓库，新建用当前仓库
+function formRepoKey() {
+  let rk = (dlg.repoKey || '').replace(/^(gitcode|github):/, '')
+  if (!rk) {
+    const cur = currentRepo()
+    rk = String((cur && (cur.repoKey || cur.fullName)) || '').replace(/^(gitcode|github):/, '')
+  }
+  return rk.split('/').length === 2 ? rk : ''
+}
+function loadEngines(force) {
+  const key = formRepoKey()
+  if (!force && enginesLoaded.value && enginesRepoKey === key) return Promise.resolve()
+  // 后端按 #277 口径过滤：当前仓库 + 本人 + 全局引擎
+  const qs = key ? '?repo=' + encodeURIComponent(key) : ''
+  return API()
+    .get('/settings/agent-runtimes' + qs)
     .then(function (d) {
       engines.value = (d.runtimes || d || []).filter((e) => e.status === 'online')
+      enginesRepoKey = key
+      enginesLoaded.value = true
     })
     .catch(function () {
       engines.value = []
+      enginesRepoKey = key
+      enginesLoaded.value = true
     })
 }
 function openEnginePicker() {
@@ -2071,9 +2138,20 @@ function openEnginePicker() {
   engPicker.scope = ''
 }
 function toggleEngine(id) {
-  if (selectedEngines.has(id)) selectedEngines.delete(id)
-  else selectedEngines.add(id)
+  if (selectedEngines.has(id)) {
+    selectedEngines.delete(id)
+    return
+  }
+  // Issue #486：已超出当前可见范围的引擎只允许取消，不允许重新选中
+  if (detachedEngineIds.value.indexOf(id) >= 0) return
+  selectedEngines.add(id)
 }
+// Issue #486：编辑态原绑定但不在当前可见列表里的引擎（仅可移除）
+const detachedEngineIds = computed(() => {
+  if (!enginesLoaded.value) return []
+  const visible = new Set(engines.value.map((e) => e.id))
+  return Array.from(selectedEngines).filter((eid) => !visible.has(eid))
+})
 const engAvailTypes = computed(() => {
   const types = []
   engines.value.forEach(function (e) {
@@ -2104,6 +2182,7 @@ const engFiltered = computed(() => {
   return engines.value.filter(function (e) {
     if (q) {
       const hay = [
+        engineDisplayName(e),
         e.name,
         e.alias,
         e.host_name,
@@ -3342,5 +3421,47 @@ onBeforeUnmount(function () {
 }
 .apv-rowmenu-del:hover {
   background: rgba(220, 53, 69, 0.08) !important;
+}
+/* Issue #486：超范围引擎分组 */
+.apv-detached-g {
+  color: #d32f2f;
+}
+.apv-detached {
+  background: #fff5f5;
+  opacity: 0.85;
+}
+.apv-detached-warn {
+  color: #d32f2f;
+}
+/* Issue #697：疑似重复徽标与派发提示 */
+.apv-dup-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(232, 160, 0, 0.125);
+  color: #e8a000;
+  vertical-align: middle;
+}
+.apv-dup-warn {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(232, 160, 0, 0.08);
+  border: 1px solid rgba(232, 160, 0, 0.2);
+  font-size: 12px;
+  color: var(--t2, #5b667b);
+  line-height: 1.6;
+}
+.apv-dup-ic {
+  flex-shrink: 0;
+}
+.apv-dup-note {
+  margin-top: 2px;
+  color: var(--t3, #86868b);
 }
 </style>
