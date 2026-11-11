@@ -174,24 +174,38 @@
       <button class="pl__pbtn" :disabled="page <= 1" @click="prevPage()">‹</button>
       <template v-for="n in pageButtons" :key="n">
         <span v-if="n === '...'" class="dots">…</span>
-        <button v-else :class="['pl__pbtn', { act: n === page }]" @click="page = n">{{ n }}</button>
+        <button v-else :class="['pl__pbtn', { act: n === page }]" @click="goPage(n)">
+          {{ n }}
+        </button>
       </template>
       <button class="pl__pbtn" :disabled="page >= totalPages" @click="nextPage()">›</button>
-      <span class="pager-info">{{
-        t('pipeline.pagination_total', { total: totalPipes, page, pages: totalPages })
-      }}</span>
+      <span class="pager-info">
+        {{
+          t('pipeline.pagination_total', {
+            total: pagerTotal,
+            page,
+            pages: totalPages,
+          })
+        }}
+        <template v-if="loadingMore"> · {{ t('common.loading') || '加载中' }}…</template>
+      </span>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 
 const G = globalThis
 
 const props = defineProps({ data: { type: Object, required: true } })
 
 const PER_PAGE = 10
+// Issue #542：history 增量分页——后端默认截断最近 50 条，翻页时按 offset 续拉
+const HISTORY_PAGE = 100
+const pipeData = ref(props.data)
+const loadingMore = ref(false)
+let pollTimer = null
 const agentIds = ['vod', 'issue', 'coding', 'qa', 'sre']
 const tagCls = ['tg-v', 'tg-i', 'tg-c', 'tg-q', 'tg-s']
 const agentColors = ['#e86aa8', '#ff7a70', '#6fb4ff', '#b39bf2', '#ffc66e']
@@ -236,12 +250,13 @@ function stageLabelFn(stage) {
 }
 
 const allPipes = computed(function () {
-  const active = props.data.active
-  const history = props.data.history || []
+  const d = pipeData.value || {}
+  const active = d.active
+  const history = d.history || []
   return active ? [active, ...history] : history
 })
 const displayPipe = computed(function () {
-  return allPipes.value[activeIdx.value] || props.data.active
+  return allPipes.value[activeIdx.value] || (pipeData.value || {}).active
 })
 const filteredPipes = computed(function () {
   if (!appliedQuery.value) return allPipes.value
@@ -265,8 +280,19 @@ const filteredPipes = computed(function () {
 const totalPipes = computed(function () {
   return filteredPipes.value.length
 })
+// Issue #542：分页信息的总数以服务端全量为准（未加载的历史也算）
+const pagerTotal = computed(function () {
+  const d = pipeData.value || {}
+  const cap = (d.active ? 1 : 0) + (typeof d.history_total === 'number' ? d.history_total : 0)
+  return Math.max(totalPipes.value, cap)
+})
 const totalPages = computed(function () {
-  return Math.ceil(totalPipes.value / PER_PAGE)
+  // Issue #542：未加载的历史也算进页数（history_total = 后端全量条数）
+  const d = pipeData.value || {}
+  const loaded = totalPipes.value
+  const hasTotal = typeof d.history_total === 'number' && d.history_total > 0
+  const cap = hasTotal ? (d.active ? 1 : 0) + d.history_total : loaded
+  return Math.max(1, Math.ceil(Math.max(loaded, cap) / PER_PAGE))
 })
 const pagePipes = computed(function () {
   const s = (page.value - 1) * PER_PAGE
@@ -291,7 +317,7 @@ const pageButtons = computed(function () {
 })
 
 const pipeNodes = computed(function () {
-  return getPipeNodes(props.data, displayPipe.value)
+  return getPipeNodes(pipeData.value, displayPipe.value)
 })
 function getPipeNodes(data, pipe) {
   let cfg = pipe && pipe.pipeline_config
@@ -397,13 +423,113 @@ function applySearch() {
   page.value = 1
   clampPage()
 }
-function prevPage() {
-  page.value--
+// ── Issue #542：history 增量分页 ──
+function ownerRepo() {
+  let rk = (pipeData.value && pipeData.value.repo_key) || (props.data && props.data.repo_key) || ''
+  rk = String(rk).replace(/^(github|gitcode):/, '')
+  const i = rk.indexOf('/')
+  if (i < 0) return ['', '']
+  return [rk.slice(0, i), rk.slice(i + 1)]
+}
+function loadedCount() {
+  const d = pipeData.value || {}
+  return (d.active ? 1 : 0) + (d.history || []).length
+}
+// 翻到未加载的页 → 按 offset 续拉一段 history 并追加（按 issue_id 去重）
+function ensurePage(target) {
+  const d = pipeData.value
+  if (!d) return
+  if (target * PER_PAGE <= loadedCount()) return
+  if (d.history_has_more === false) return
+  if (loadingMore.value) return
+  const pair = ownerRepo()
+  if (!pair[0] || !pair[1]) return
+  loadingMore.value = true
+  G.API.get(
+    '/pipeline/' +
+      pair[0] +
+      '/' +
+      pair[1] +
+      '?history_limit=' +
+      HISTORY_PAGE +
+      '&history_offset=' +
+      (d.history || []).length
+  )
+    .then(function (r) {
+      loadingMore.value = false
+      if (G.window._currentView !== 'pipe') return
+      const merged = (d.history || []).slice()
+      const seen = {}
+      merged.forEach(function (p) {
+        seen[p.issue_id] = 1
+      })
+      ;((r && r.history) || []).forEach(function (p) {
+        if (!p || seen[p.issue_id]) return
+        merged.push(p)
+        seen[p.issue_id] = 1
+      })
+      pipeData.value = Object.assign({}, d, {
+        history: merged,
+        history_has_more: !!(r && r.history_has_more === true),
+      })
+    })
+    .catch(function () {
+      loadingMore.value = false
+      G.app.showToast(t('pipeline.load_failed') || '加载失败')
+    })
+}
+// ── Issue #600：静默轮询——重派/新终态到达后卡片状态自动刷新 ──
+function anyRunning() {
+  return allPipes.value.some(function (p) {
+    return (p.statuses || []).some(function (s) {
+      return s === 1 // 1 = 进行中（后端数字状态码）
+    })
+  })
+}
+function refreshFirstScreen() {
+  const d = pipeData.value
+  if (!d) return
+  const pair = ownerRepo()
+  if (!pair[0] || !pair[1] || loadingMore.value) return
+  G.API.get(
+    '/pipeline/' + pair[0] + '/' + pair[1] + '?history_limit=' + HISTORY_PAGE + '&history_offset=0'
+  )
+    .then(function (r) {
+      if (G.window._currentView !== 'pipe' || !r) return
+      // active 直接替换；history 按 issue_id 原地更新，已深翻的部分保留
+      const merged = (d.history || []).slice()
+      const idx = {}
+      merged.forEach(function (p, i) {
+        idx[p.issue_id] = i
+      })
+      ;(r.history || []).forEach(function (p) {
+        if (!p) return
+        if (idx[p.issue_id] === undefined) merged.push(p)
+        else merged[idx[p.issue_id]] = p
+      })
+      pipeData.value = Object.assign({}, d, {
+        active: r.active || d.active,
+        history: merged,
+        history_total: r.history_total === undefined ? d.history_total : r.history_total,
+        history_has_more:
+          r.history_has_more === undefined ? d.history_has_more : !!r.history_has_more,
+      })
+    })
+    .catch(function () {
+      /* 静默：下一轮再试 */
+    })
+}
+function goPage(p) {
+  const tgt = Math.min(Math.max(1, p), totalPages.value)
+  ensurePage(tgt)
+  page.value = tgt
   clampPage()
 }
+function prevPage() {
+  goPage(page.value - 1)
+}
 function nextPage() {
-  page.value++
-  clampPage()
+  goPage(page.value + 1)
 }
 function clampPage() {
   if (page.value > totalPages.value) page.value = 1
@@ -505,6 +631,28 @@ function focus(num) {
   }
 }
 defineExpose({ focus })
+// 换数据源（重新 renderPipeline）时重置分页与选中
+watch(
+  () => props.data,
+  function (d) {
+    pipeData.value = d
+    page.value = 1
+    activeIdx.value = 0
+  }
+)
+onMounted(function () {
+  // Issue #600：有进行中的流水线时每 30s 静默刷新，重派/终态到达无需手动刷新
+  pollTimer = setInterval(function () {
+    if (G.window._currentView !== 'pipe') return
+    if (anyRunning()) refreshFirstScreen()
+  }, 30000)
+})
+onBeforeUnmount(function () {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
 </script>
 
 <style scoped>
