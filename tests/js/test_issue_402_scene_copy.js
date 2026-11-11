@@ -1,17 +1,18 @@
 /**
- * Issue #402: 项目场景详情页「复制场景」按钮 — 纯前端实现（后端接口零改动）验证测试。
+ * Issue #402 场景复制按钮 + Issue #1844 服务端复制改造 — 前端回归测试。
  *
  * 运行：node tests/js/test_issue_402_scene_copy.js
  *
  * 验证点：
  * 1. _renderLocalSceneDetailPage 头部含「复制场景」按钮（不在 isCustomScene 条件内）
  * 2. window._copySceneFromDetail 已定义：弹窗名称预填 <源场景名>-copy（40 字符截断）且可编辑
- * 3. 提交走既有 POST /scenes?repo=…（无新增后端端点），body 含 name/nodes/scope
- * 4. 引擎清洗：engine_runtime_ids 按当前用户可选引擎（agentEngines）过滤；SRE 空引擎节点置停用
- * 5. 名称冲突自动追加序号（行为断言：连续复制两次第二个副本为 <名>-copy2，≤40 字符）
- * 6. 成功后跳转 app.nav('scene-detail-local', 新id)
- * 7. i18n 文案 key 中英齐全
- * 8. 语法完整（Function 构造可解析）
+ * 3. 提交走 POST /scenes/{id}/copy?repo=…（Issue #1844 服务端复制），body 只带 name
+ * 4. 复制明细由服务端响应渲染（redacted_fields / dropped_engines / cleared_skills / pr_subscription_disabled）
+ * 5. 成功后跳转 app.nav('scene-detail-local', 新id)
+ * 6. 名称去重工具行为不变（服务端同样兜底）
+ * 7. skill_pending 提示渲染、重选技能后清空、保存节点时保留
+ * 8. i18n 文案 key 中英齐全
+ * 9. 语法完整（Function 构造可解析）
  */
 const assert = require('assert');
 const path = require('path');
@@ -35,7 +36,6 @@ function copyFnSection() {
   return dashSrc.slice(start, end);
 }
 
-// 加载 dashboard.js 中提取的 window._generateCopySceneName（沙箱执行，返回可调用函数）
 function loadGenerateCopySceneName() {
   const start = dashSrc.indexOf('window._generateCopySceneName = function');
   assert(start >= 0, 'window._generateCopySceneName 未找到（应作为顶层可测函数定义）');
@@ -47,18 +47,17 @@ function loadGenerateCopySceneName() {
   return sandboxWindow._generateCopySceneName;
 }
 
-console.log('Issue #402 复制场景（纯前端实现）— 前端回归测试\n');
+console.log('Issue #1844 场景复制（服务端复制）— 前端回归测试\n');
 
 test('dashboard.js 语法完整', () => {
   new Function(dashSrc);
 });
 
-test('后端零改动：scenes.py / pipeline_config.py 无 copy 相关新增', () => {
+test('后端已新增服务端复制端点（scenes_copy）', () => {
   const scenesPy = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/scenes.py'), 'utf8');
-  assert(!scenesPy.includes('scenes_copy'), 'scenes.py 不应包含新增 copy 端点（scenes_copy）');
-  assert(!scenesPy.includes('_clean_scene_engine_ids_for_copy'), 'scenes.py 不应包含 copy 清洗助手');
+  assert(scenesPy.includes('operation_id="scenes_copy"'), 'scenes.py 应包含服务端复制端点 scenes_copy');
   const pcPy = fs.readFileSync(path.join(ROOT, 'src/api/pipeline_config.py'), 'utf8');
-  assert(!/def _generate_copy_scene_name/.test(pcPy), 'pipeline_config.py 不应包含 copy 命名助手');
+  assert(/advanced_options/.test(pcPy), 'pipeline_config.py 应支持 advanced_options 落库');
 });
 
 test('详情页头部含「复制场景」按钮', () => {
@@ -71,7 +70,7 @@ test('详情页头部含「复制场景」按钮', () => {
   assert(btnLine && !btnLine.includes('isCustomScene ?'), '复制按钮不应限定 isCustomScene');
 });
 
-test('_copySceneFromDetail 定义于详情页渲染函数内（闭包捕获 scene/nodes/agentEngines/owner/name/dashData）', () => {
+test('_copySceneFromDetail 定义于详情页渲染函数内（闭包捕获 scene/owner/name）', () => {
   const start = dashSrc.indexOf('function _renderLocalSceneDetailPage');
   const end = dashSrc.indexOf('\nfunction ', start + 10);
   const section = dashSrc.slice(start, end);
@@ -92,56 +91,35 @@ test('弹窗名称输入可编辑（maxlength=40 且非只读）', () => {
   assert(!/readonly|disabled/.test(inputLine), '输入框不应只读/禁用');
 });
 
-test('提交复用既有 POST /scenes 创建接口（不新增后端端点）', () => {
+test('提交走 POST /scenes/{id}/copy?repo=…（服务端复制）', () => {
   const section = copyFnSection();
-  assert(section.includes("API.post('/scenes?repo='"), "应调用既有 POST /scenes?repo=…（创建场景接口）");
-  assert(!section.includes("/copy?repo="), '不应调用新增的 /scenes/{id}/copy 端点');
-  assert(section.includes('name:'), 'POST body 应含 name 字段');
-  assert(section.includes('nodes:'), 'POST body 应含 nodes 字段');
-  assert(section.includes("scope: 'repo'"), "POST body scope 应为 'repo'");
+  assert(section.includes("API.post('/scenes/' + encodeURIComponent(scene.id) + '/copy?repo='"), '应调用 POST /scenes/{id}/copy?repo=…');
+  assert(!section.includes("API.post('/scenes?repo='"), '不应再复用既有 POST /scenes?repo=… 创建接口');
 });
 
-test('源配置优先取 dashData._scenes（含 icon/PR 订阅/关联仓库）', () => {
+test('请求体只带 name（取值矩阵由服务端执行）', () => {
   const section = copyFnSection();
-  assert(section.includes('dashData._scenes'), '应从 dashData._scenes 读取源场景完整配置');
-  assert(section.includes('icon: src.icon'), '副本应携带源场景 icon');
-  assert(section.includes('linked_repos: src.linked_repos'), '副本应携带源场景关联仓库');
-  assert(section.includes('pr_subscription_enabled:'), '副本应携带 PR 订阅开关');
+  assert(/\{\s*name:\s*want\s*\}/.test(section), '请求体应只带 { name: want }');
+  assert(!section.includes('nodes: copyNodes'), '前端不应再提交 nodes');
+  assert(!section.includes('linked_repos: src.linked_repos'), '前端不应再提交 linked_repos');
 });
 
-test('引擎清洗：按 agentEngines 过滤 engine_runtime_ids，SRE 空引擎节点置停用', () => {
+test('复制明细由服务端响应渲染', () => {
   const section = copyFnSection();
-  assert(section.includes('agentEngines'), '应基于 agentEngines（当前用户可选引擎）过滤');
-  assert(/n\.enabled = false/.test(section), 'SRE 节点无可用引擎时应置 enabled=false');
-  assert(section.includes("tag === 'sre'"), '应针对 sre 节点特判');
+  for (const k of ['redacted_fields', 'dropped_engines', 'cleared_skills', 'pr_subscription_disabled']) {
+    assert(section.includes(k), '应读取响应字段 ' + k);
+  }
+  for (const k of ['copy_fields_redacted', 'copy_engines_dropped', 'copy_skills_cleared', 'copy_pr_sub_disabled']) {
+    assert(section.includes(k), '应展示明细文案 ' + k);
+  }
 });
 
-test('名称冲突自动追加序号（提交路径调用 _generateCopySceneName）', () => {
+test('复制成功后跳转新场景详情', () => {
   const section = copyFnSection();
-  assert(section.includes('existing[') || section.includes('existing.'), '应基于已有场景名判定冲突');
-  assert(section.includes('window._generateCopySceneName(want, existing)'), '提交命名应调用 window._generateCopySceneName(want, existing)');
+  assert(section.includes("app.nav('scene-detail-local', r.scene_id)"), "成功后应 app.nav('scene-detail-local', 新id)");
 });
 
-test('行为断言：连续复制两次，第二个副本名称为 <名>-copy2（≤40 字符）', () => {
-  const gen = loadGenerateCopySceneName();
-  const sn = '源场景展示名';
-  // 模拟既有场景名集合（与 dashboard.js 相同的 existing 构造方式）
-  const existing = {};
-  existing[sn] = 1;
-  // 第一次复制：默认名 <名>-copy，无冲突
-  const firstWant = (sn + '-copy').slice(0, 40);
-  const firstName = gen(firstWant, existing);
-  assert.strictEqual(firstName, firstWant, '第一次副本名应为 <名>-copy');
-  assert.ok(firstName.length <= 40, '第一次副本名 ≤40 字符');
-  // 第一次复制成功后占用 <名>-copy（与 dashboard.js 一致：创建成功即进入场景列表）
-  existing[firstName] = 1;
-  // 第二次复制同名源场景：默认名仍为 <名>-copy，但已被占用 → 应追加序号
-  const secondName = gen(firstWant, existing);
-  assert.strictEqual(secondName, sn + '-copy2', `第二个副本名应为 ${sn}-copy2，实际为 ${secondName}`);
-  assert.ok(secondName.length <= 40, '第二个副本名 ≤40 字符');
-});
-
-test('行为断言：序号连续递增（-copy / -copy2 / -copy3），全占用时不返回已占用名', () => {
+test('行为断言：名称去重工具 -copy / -copy2 / -copy3', () => {
   const gen = loadGenerateCopySceneName();
   const sn = 'S';
   const existing = {};
@@ -153,33 +131,69 @@ test('行为断言：序号连续递增（-copy / -copy2 / -copy3），全占用
   assert.strictEqual(n1, 'S-copy', '第 1 个副本名应为 S-copy');
   assert.strictEqual(n2, 'S-copy2', '第 2 个副本名应为 S-copy2');
   assert.strictEqual(n3, 'S-copy3', '第 3 个副本名应为 S-copy3');
-  assert.ok(!existing[n3], '返回的名称不应与已占用名重复');
 });
 
-test('行为断言：超长名称冲突追加序号后仍 ≤40 字符', () => {
-  const gen = loadGenerateCopySceneName();
-  const longSn = '很'.repeat(40); // 40 字符源场景名
-  const want = (longSn + '-copy').slice(0, 40); // 40 字符
-  const existing = {};
-  existing[want] = 1; // <名>-copy 已被第一次副本占用
-  const second = gen(want, existing);
-  assert.strictEqual(second.length, 40, '追加序号后应恰为 40 字符（截尾补序号）');
-  assert.ok(second.endsWith('2'), '应以序号 2 结尾');
-  assert.notStrictEqual(second, want, '不应返回已被占用的 40 字符原名');
-  assert.ok(!existing[second], '不应与已占用名重复');
+test('skill_pending 提示渲染（查看模式与编辑模式）', () => {
+  assert(dashSrc.includes('node.skill_pending'), '应渲染 node.skill_pending');
+  assert(dashSrc.includes('skill_pending_hint'), '应使用 skill_pending_hint 文案');
+  assert((dashSrc.match(/skill_pending_hint/g) || []).length >= 2, '查看/编辑两种卡片都应提示需重选技能');
 });
 
-test('复制成功后跳转新场景详情', () => {
-  const section = copyFnSection();
-  assert(section.includes("app.nav('scene-detail-local', r.scene_id)"), "成功后应 app.nav('scene-detail-local', 新id)");
+test('重选技能后清空 skill_pending', () => {
+  assert((dashSrc.match(/node\.skill_pending = '';/g) || []).length >= 2, '编辑与创建两处 selectAgentSkill 都应清空 skill_pending');
+});
+
+test('保存节点 payload 保留 skill_pending', () => {
+  assert((dashSrc.match(/skill_pending: n\.skill_pending \|\| ''/g) || []).length >= 2, '编辑/创建保存 payload 都应保留 skill_pending');
 });
 
 test('i18n 文案 key 中英齐全', () => {
-  for (const k of ['copy_scene', 'confirm_copy_scene', 'copy_scene_hint', 'copy_scene_name_label', 'scene_copied', 'copy_engines_dropped', 'copy_failed']) {
+  for (const k of ['copy_scene', 'confirm_copy_scene', 'copy_scene_hint', 'copy_scene_name_label',
+                   'scene_copied', 'copy_engines_dropped', 'copy_fields_redacted',
+                   'copy_skills_cleared', 'copy_pr_sub_disabled', 'skill_pending_hint', 'copy_failed']) {
     assert(zhJson[k], `zh/dashboard.json 缺失 ${k}`);
     assert(enJson[k], `en/dashboard.json 缺失 ${k}`);
   }
   assert(String(zhJson.copy_failed).includes('{{msg}}'), 'zh copy_failed 应含 {{msg}} 插值');
+  assert(String(zhJson.skill_pending_hint).includes('{{skill}}'), 'zh skill_pending_hint 应含 {{skill}} 插值');
+});
+
+function addCustomFieldSections() {
+  const sections = [];
+  let idx = dashSrc.indexOf('window._addCustomFieldInline = function');
+  const marker = 'window._addCustomFieldInline = function';
+  while (idx >= 0) {
+    const nextWindow = dashSrc.slice(idx + 10).search(/\n\s*window\._/);
+    const end = nextWindow > 0 ? idx + 10 + nextWindow : dashSrc.indexOf('\n};', idx);
+    sections.push(dashSrc.slice(idx, end));
+    const next = dashSrc.indexOf(marker, idx + marker.length);
+    if (next < 0) break;
+    idx = next;
+  }
+  return sections;
+}
+
+test('高级选项 name/value 渲染前转义（防存储型 XSS，覆盖两份实现）', () => {
+  const sections = addCustomFieldSections();
+  assert(sections.length >= 2, `应同时覆盖全局与创建模式两份 _addCustomFieldInline，实际 ${sections.length} 份`);
+  sections.forEach((section, i) => {
+    assert(section.includes('_skillEsc(name'), `第 ${i + 1} 份实现 name 应经 _skillEsc 转义`);
+    assert(section.includes('_skillEsc(_val'), `第 ${i + 1} 份实现 value 应经 _skillEsc 转义`);
+    assert(section.includes('_skillEsc(_desc'), `第 ${i + 1} 份实现 description 应经 _skillEsc 转义`);
+  });
+});
+
+test('离开创建模式恢复全局 _addCustomFieldInline', () => {
+  assert(dashSrc.includes('_addCustomFieldInlineGlobal = window._addCustomFieldInline'), '应保存全局实现引用');
+  const start = dashSrc.indexOf('function _resetCreateMode()');
+  assert(start >= 0, '_resetCreateMode 未找到');
+  const section = dashSrc.slice(start, dashSrc.indexOf('}', start));
+  assert(section.includes('window._addCustomFieldInline = window._addCustomFieldInlineGlobal'), '退出创建模式时应恢复全局实现');
+});
+
+test('skill_pending_hint 文案不自带 ⚠（模板已前置，避免双图标）', () => {
+  assert(!String(zhJson.skill_pending_hint).includes('⚠'), 'zh skill_pending_hint 不应自带 ⚠');
+  assert(!String(enJson.skill_pending_hint).includes('⚠'), 'en skill_pending_hint 不应自带 ⚠');
 });
 
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

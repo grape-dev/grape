@@ -1115,15 +1115,18 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
     var _desc = (description || '').trim();
+    // name/value/description 均来自库内用户输入，插入 innerHTML 前统一转义，防存储型 XSS
+    var _nameSafe = _skillEsc(name || '');
+    var _valSafe = _skillEsc(_val);
     // preset 项：name 只读 label（不可改名/增删），scope 组隐藏，不显示删除按钮；description 小字 hint
     var _nameEl = preset
       ? '<span style="display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center;min-width:140px">' +
-          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
-          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + _nameSafe + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _skillEsc(_desc) + '</span>' : '') +
         '</span>'
-      : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
+      : '<input class="adv-kv-key" placeholder="name" value="' + _nameSafe + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
     row.innerHTML = _nameEl +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" value="' + _val + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" value="' + _valSafe + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(!i)return;if(i.getAttribute(\'data-keep-value\')===\'1\'){window._cfRevealSecretField(i,b);return;}i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="adv-del" onclick="this.parentElement.remove()">×</button>') +
@@ -1139,6 +1142,8 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       }
     }
   };
+// 详情/编辑模式使用的全局实现：创建模式会临时覆盖同名函数，退出创建模式时恢复这一份
+window._addCustomFieldInlineGlobal = window._addCustomFieldInline;
 
 window._createNewBranchInline = function(owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
@@ -1177,11 +1182,9 @@ window._createNewBranchInline = function(owner, name) {
       .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
   };
 
-  // 复制场景（Issue #402，纯前端实现，后端接口零改动）：
-  // 源配置取自页面已加载数据（dashData._scenes 含 description/icon/PR 订阅/关联仓库/nodes），
-  // 按当前用户可选引擎（agentEngines）清洗 engine_runtime_ids——不可用/无权限引擎剔除；
-  // SRE 节点无可用引擎时副本置为停用（启用+空引擎会被创建接口拒绝）；
-  // 名称冲突自动追加序号，最终复用既有 POST /scenes 创建副本，成功后跳转新场景详情。
+  // 复制场景（Issue #1844：服务端复制）：
+  // 服务端按复制者是否为源场景创建者执行取值矩阵（非创建者只复制自定义配置声明、
+  // 技能/引擎/关联仓库按当前用户可达性清洗），前端只提交副本名并展示清洗明细。
   window._copySceneFromDetail = function() {
     const sn = scene.display_name || scene.name || '';
     const defaultName = (sn + '-copy').slice(0, 40);
@@ -1203,49 +1206,18 @@ window._createNewBranchInline = function(owner, name) {
     document.getElementById('confirmCopySceneBtn').onclick = function() {
       const btn = this;
       btn.disabled = true;
-      // ① 源场景完整配置：优先 dashData._scenes（含 icon/description/PR 订阅/关联仓库），页面 nodes 兜底
-      const srcList = (dashData && dashData._scenes) || [];
-      let src = srcList.find(function(s) { return s && s.id === scene.id; });
-      if (!src) src = { description: scene.description || '', icon: '', nodes: nodes || [],
-                        pr_subscription_enabled: scene.pr_subscription_enabled ? 1 : 0, linked_repos: [] };
-      // ② 引擎清洗：仅保留当前用户在该角色下可选的引擎（他人个人机器/失效引擎/他仓库引擎自动剔除）
-      const _okEng = {};
-      Object.keys(agentEngines || {}).forEach(function(t) {
-        _okEng[t] = (agentEngines[t] || []).map(function(e) { return e && e.id; });
-      });
-      const copyNodes = JSON.parse(JSON.stringify(src.nodes || []));
-      let _dropped = false;
-      copyNodes.forEach(function(n) {
-        const tag = n.tag || n.id || '';
-        const ok = _okEng[tag] || [];
-        const eids = (n.engine_runtime_ids || []).filter(function(eid) {
-          return ok.some(function(oid) { return oid == eid; });
-        });
-        if (eids.length !== (n.engine_runtime_ids || []).length) _dropped = true;
-        n.engine_runtime_ids = eids;
-        if (tag === 'sre' && n.enabled !== false && !eids.length) n.enabled = false;
-      });
-      // ③ 副本名称：用户输入（默认 <源场景名>-copy），冲突自动追加序号、超 40 字符截断
-      const existing = {};
-      srcList.forEach(function(s) {
-        existing[(s.name || '').trim()] = 1;
-        existing[((s.display_name) || s.name || '').trim()] = 1;
-      });
-      let want = (((document.getElementById('copySceneNameInput') || {}).value || '').trim() || defaultName).slice(0, 40);
-      const finalName = window._generateCopySceneName(want, existing);
-      // ④ 复用既有创建接口 POST /scenes 生成副本（后端零改动）
-      API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), {
-        name: finalName,
-        description: src.description || '',
-        scope: 'repo',
-        nodes: copyNodes,
-        icon: src.icon || '',
-        pr_subscription_enabled: !!src.pr_subscription_enabled,
-        linked_repos: src.linked_repos || []
-      }).then(function(r) {
+      // 副本名称：用户输入（默认 <源场景名>-copy）；冲突去重与 40 字符截断由服务端统一处理
+      const want = (((document.getElementById('copySceneNameInput') || {}).value || '').trim() || defaultName).slice(0, 40);
+      API.post('/scenes/' + encodeURIComponent(scene.id) + '/copy?repo=' + encodeURIComponent(owner + '/' + name), { name: want })
+      .then(function(r) {
         overlay.remove();
+        const parts = [];
+        if ((r.redacted_fields || []).length) parts.push((I18N.t('dashboard.copy_fields_redacted') || '已留空的配置项') + ' ' + r.redacted_fields.length + ' 个');
+        if ((r.dropped_engines || []).length) parts.push((I18N.t('dashboard.copy_engines_dropped') || '不可用引擎已剔除') + ' ' + r.dropped_engines.length + ' 个');
+        if ((r.cleared_skills || []).length) parts.push((I18N.t('dashboard.copy_skills_cleared') || '需重选技能') + ' ' + r.cleared_skills.length + ' 处');
+        if (r.pr_subscription_disabled) parts.push(I18N.t('dashboard.copy_pr_sub_disabled') || '已关闭 PR 订阅');
         let _msg = I18N.t('dashboard.scene_copied') || '场景复制成功';
-        if (_dropped) _msg += '（' + (I18N.t('dashboard.copy_engines_dropped') || '不可用引擎已剔除') + '）';
+        if (parts.length) _msg += '（' + parts.join(' / ') + '）';
         app.showToast(_msg);
         app.nav('scene-detail-local', r.scene_id);
       }).catch(function(e) {
@@ -1524,6 +1496,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center">
         <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_skill')||'技能'}</div>
         ${skillName ? `<span style="font-size:11px;font-weight:500;color:#1d1d1f">${skillName}</span>` : '<span style="font-size:11px;color:#86868b">none</span>'}
+        ${node.skill_pending ? `<span style="font-size:10px;color:#ff9f0a;margin-top:4px">⚠ ${I18N.t('dashboard.skill_pending_hint', {skill: _skillEsc(node.skill_pending)}, '需重选技能（原：' + _skillEsc(node.skill_pending) + '）')}</span>` : ''}
       </div>
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center">
         <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_engine')||'引擎'}</div>
@@ -1603,13 +1576,13 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   if (_editDraft && _editDraft.nodes) {
     editNodes.forEach(function(en) {
       var dn = _editDraft.nodes.find(function(n) { return n.id === en.id; });
-      if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; }
+      if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.skill_pending = dn.skill_pending || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; }
     });
     if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
   }
   // Issue #407: 编辑草稿自动保存
   function _saveEditDraft() {
-    _saveDashDraft(owner, name, 'edit', sceneId, { nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }) });
+    _saveDashDraft(owner, name, 'edit', sceneId, { nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, skill_pending: n.skill_pending, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }) });
   }
 
   // 编辑操作函数
@@ -1643,6 +1616,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
       });
     }
     node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
+    node.skill_pending = '';
     // Issue #1564：修正技能后即时清除该节点标红
     _clearNodeScopeViolation(agentType);
     _saveEditDraft();
@@ -1669,7 +1643,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     }
     const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
-      return { id: n.id, tag: n.tag, skill: n.skill || '', mode: n.mode || 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: n.skip || [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
+      return { id: n.id, tag: n.tag, skill: n.skill || '', skill_pending: n.skill_pending || '', mode: n.mode || 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: n.skip || [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
     API.put('/scenes/' + encodeURIComponent(sceneId) + '?repo=' + encodeURIComponent(owner + '/' + name), { nodes: nodesPayload }).then(() => {
       window._dashboardEditing = false;
@@ -1804,9 +1778,12 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     const ag = agents.find(a => a.agent_type === tag) || {};
     // 创建模式（方案B）：不借用当前仓库场景的 skill 做显示回退——显示与保存校验保持一致，
     // 不替用户预选（editNodes.skill 为空时显示「选择技能」占位）。编辑已有场景仍可继承场景数据。
-    const skillDisplay = node.skill_display_name || node.skill
-      ? (node.skill_display_name || node.skill)
-      : (window._isCreateMode ? '' : (ag.skill_display_name || ag.skill || ''));
+    // Issue #1844：复制时因 scope 不匹配被清空的技能（skill_pending）不回退显示旧技能名
+    const _pendingSkill = (!node.skill && node.skill_pending) ? node.skill_pending : '';
+    const skillDisplay = _pendingSkill ? ''
+      : (node.skill_display_name || node.skill
+        ? (node.skill_display_name || node.skill)
+        : (window._isCreateMode ? '' : (ag.skill_display_name || ag.skill || '')));
     const badgeHtml = window._engineBadgeHtml(node.engine_runtime_ids || [], agentEngines, tag);
     const enabled = node.enabled !== false;
 
@@ -1818,7 +1795,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     // Skill 下拉（Issue #292：分组 + 搜索下拉面板，禁用时显示已停用）
     let skillHtml;
     if (enabled) {
-      skillHtml = `<button type="button" class="ap-skill-select" data-current="${_skillEsc(node.skill || '')}" onclick="event.stopPropagation();_openSkillDropdown('${tag}', this)" style="width:100%;padding:6px 10px;border:1px solid #e8e8ed;border-radius:8px;font-size:11px;background:#f5f5f7;color:${skillDisplay ? '#1d1d1f' : '#86868b'};outline:none;cursor:pointer;transition:all .15s;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">${skillDisplay ? _skillEsc(skillDisplay) : I18N.t('dashboard.select_skill')}</button>`;
+      skillHtml = `<button type="button" class="ap-skill-select" data-current="${_skillEsc(node.skill || '')}" onclick="event.stopPropagation();_openSkillDropdown('${tag}', this)" style="width:100%;padding:6px 10px;border:1px solid #e8e8ed;border-radius:8px;font-size:11px;background:#f5f5f7;color:${skillDisplay ? '#1d1d1f' : '#86868b'};outline:none;cursor:pointer;transition:all .15s;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">${skillDisplay ? _skillEsc(skillDisplay) : I18N.t('dashboard.select_skill')}</button>` + (_pendingSkill ? `<div style="font-size:10px;color:#ff9f0a;margin-top:4px;line-height:1.3">⚠ ${I18N.t('dashboard.skill_pending_hint', {skill: _skillEsc(_pendingSkill)}, '需重选技能（原：' + _skillEsc(_pendingSkill) + '）')}</div>` : '');
     } else {
       skillHtml = `<span style="font-size:11px;color:#86868b">${I18N.t('dashboard.agent_disabled')||'已停用'}</span>`;
     }
@@ -2108,7 +2085,11 @@ let _pendingSceneDesc = '';
 // 创建模式标志挂 window（供 _renderEditFlowCards 的 skillDisplay 判断用），
 // 保存成功/返回/导航离开时复位，避免状态残留污染后续编辑模式。
 window._isCreateMode = false;
-function _resetCreateMode() { window._isCreateMode = false; }
+function _resetCreateMode() {
+  window._isCreateMode = false;
+  // 创建模式会覆盖 _addCustomFieldInline，退出时恢复全局（详情）实现，避免未转义版本泄漏到详情页
+  if (window._addCustomFieldInlineGlobal) window._addCustomFieldInline = window._addCustomFieldInlineGlobal;
+}
 
 window.enterCreateMode = function() {
   const data = window._dashboardData || {};
@@ -2253,7 +2234,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (_nameInput && _draft.sceneName) _nameInput.value = _draft.sceneName;
     if (_descInput && _draft.sceneDesc) _descInput.value = _draft.sceneDesc;
     if (_draft.icon) { _createSceneIcon = _draft.icon; var _iconEl = document.getElementById('createSceneIconDisplay'); if (_iconEl) _iconEl.textContent = _draft.icon; }
-    if (_draft.nodes) { editNodes.forEach(function(en) { var dn = _draft.nodes.find(function(n) { return n.id === en.id; }); if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; } }); var _fc = document.getElementById('flowCardsContainer'); if (_fc) _fc.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes); }
+    if (_draft.nodes) { editNodes.forEach(function(en) { var dn = _draft.nodes.find(function(n) { return n.id === en.id; }); if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.skill_pending = dn.skill_pending || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; } }); var _fc = document.getElementById('flowCardsContainer'); if (_fc) _fc.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes); }
   }
 
   // Issue #307: 加载托管仓库列表供关联仓库选择
@@ -2269,7 +2250,7 @@ function _enterCreateStandardMode(data, owner, name) {
   function _saveCreateDraft() {
     var _n = (document.getElementById('createSceneName') || {}).value || '';
     var _d = (document.getElementById('createSceneDesc') || {}).value || '';
-    _saveDashDraft(owner, name, 'create', null, { sceneName: _n, sceneDesc: _d, icon: _createSceneIcon, nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }), prSubEnabled: _createPrSubEnabled });
+    _saveDashDraft(owner, name, 'create', null, { sceneName: _n, sceneDesc: _d, icon: _createSceneIcon, nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, skill_pending: n.skill_pending, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }), prSubEnabled: _createPrSubEnabled });
   }
   var _nameI = document.getElementById('createSceneName');
   var _descI = document.getElementById('createSceneDesc');
@@ -2339,6 +2320,7 @@ function _enterCreateStandardMode(data, owner, name) {
       });
     }
     node.skill_display_name = skillName ? ((entry && entry.display) || skillName) : '';
+    node.skill_pending = '';
     // Issue #1564：修正技能后即时清除该节点标红
     _clearNodeScopeViolation(agentType);
     _saveCreateDraft();
@@ -2367,14 +2349,17 @@ function _enterCreateStandardMode(data, owner, name) {
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
     var _desc = (description || '').trim();
+    // name/value/description 均来自库内用户输入，插入 innerHTML 前统一转义，防存储型 XSS
+    var _nameSafe = _skillEsc(name || '');
+    var _valSafe = _skillEsc(_val);
     var _nameEl = preset
       ? '<span style="flex:0 0 150px;display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center">' +
-          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + (name || '') + '</span>' +
-          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:12px;line-height:1.3">' + _nameSafe + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _skillEsc(_desc) + '</span>' : '') +
         '</span>'
-      : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
+      : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + _nameSafe + '">';
     row.innerHTML = _nameEl +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _valSafe + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(!i)return;if(i.getAttribute(\'data-keep-value\')===\'1\'){window._cfRevealSecretField(i,b);return;}i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>') +
@@ -2427,7 +2412,7 @@ function _enterCreateStandardMode(data, owner, name) {
     }
     const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
-      return { id: n.id, tag: n.tag, skill: n.skill || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
+      return { id: n.id, tag: n.tag, skill: n.skill || '', skill_pending: n.skill_pending || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
     API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, pr_subscription_enabled: _createPrSubEnabled }).then(r => {
       window._dashboardEditing = false;
