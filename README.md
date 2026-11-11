@@ -208,7 +208,7 @@ Health probes disable tools and session persistence, use a temporary directory a
 60-second timeout, and consume a small model request under the existing probe schedule.
 
 If the CLI reports `ProviderError` with HTTP 403 and `model is not enabled for
-codingplan`, login succeeded but the selected model is unavailable for that account's
+codingplan`, the request reached plan/model validation but the selected model is unavailable for that account's
 plan. Select an enabled model in the CLI or set both overrides in the environment of
 the Grape server/worker that executes the task, then restart that process. For example,
 the following pair passed a real Grape coding task with CLI 5.2.5; availability depends
