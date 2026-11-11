@@ -204,6 +204,14 @@
                         <button class="bt bt-o bt-s" @click.stop="openDetail(s.id)">
                           {{ tt2('action.view') }}
                         </button>
+                        <!-- Issue #561：直接覆盖更新（免删了重传；ID/场景引用/点赞保留） -->
+                        <button
+                          v-if="s.scope !== 'official'"
+                          class="bt bt-o bt-s"
+                          @click.stop="askUpdate(s)"
+                        >
+                          {{ tt2('action.update_skill') }}
+                        </button>
                         <button
                           v-if="s.scope !== 'official'"
                           class="bt bt-o bt-s sk__del-btn"
@@ -428,6 +436,38 @@
       </template>
     </AGModal>
 
+    <!-- ═══ Issue #561：上传更新技能（覆盖当前内容） ═══ -->
+    <AGModal
+      :open="updateCtx.open"
+      :title="tt2('update.title') + (updateCtx.name ? ' — ' + updateCtx.name : '')"
+      @close="updateCtx.open = false"
+    >
+      <div class="sk__form">
+        <div class="sk__fmt-hint">{{ tt2('update.tip') }}</div>
+        <div class="sk__file-fld">
+          <label>{{ tt2('upload.file_label') }}</label>
+          <input
+            type="file"
+            accept=".zip"
+            class="sk__file"
+            @change="updateCtx.file = $event.target.files[0] || null"
+          />
+        </div>
+        <div v-if="updateCtx.pct > 0 && !updateCtx.done" class="sk__upload-prog">
+          <div class="sk__upload-txt">{{ tt2('upload.uploading') }} {{ updateCtx.pct }}%</div>
+          <div class="sk__upload-bar"><div :style="{ width: updateCtx.pct + '%' }"></div></div>
+        </div>
+      </div>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="updateCtx.open = false">{{
+          tt2('action.cancel')
+        }}</AGButton>
+        <AGButton size="sm" :disabled="updateCtx.busy" @click="doUpdate">
+          {{ updateCtx.busy ? tt2('upload.uploading') : tt2('action.confirm_update') }}
+        </AGButton>
+      </template>
+    </AGModal>
+
     <!-- ═══ 删除确认弹窗 ═══ -->
     <AGModal
       :open="deleteCtx.open"
@@ -557,6 +597,15 @@ const KEY2_DEFAULTS = {
   'upload.file_label': '技能 ZIP 包',
   'upload.format_req': 'ZIP 内含 SKILL.md',
   'upload.uploading': '上传中',
+  // Issue #561：覆盖更新
+  'action.update_skill': '上传更新',
+  'action.confirm_update': '确认覆盖更新',
+  'update.title': '上传更新技能',
+  'update.tip':
+    '上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致',
+  'toast.select_zip': '请选择技能 ZIP 文件',
+  'toast.update_success': '更新成功',
+  'toast.update_failed': '更新失败',
 }
 const HUAWEI_DEFAULTS = {
   back: '返回',
@@ -1080,6 +1129,54 @@ function doUpload() {
       uploading.value = false
       uploadPct.value = 0
       var msg = (e && e.message) || '上传失败'
+      if (e && e.errors && Array.isArray(e.errors) && e.errors.length > 0) msg = e.errors.join('；')
+      G.app.showToast(msg)
+    })
+}
+
+// ── Issue #561：上传更新技能（覆盖当前内容，ID/场景引用/点赞保留） ──
+const updateCtx = reactive({
+  open: false,
+  id: 0,
+  name: '',
+  file: null,
+  busy: false,
+  pct: 0,
+  done: false,
+})
+function askUpdate(s) {
+  updateCtx.open = true
+  updateCtx.id = s && s.id
+  updateCtx.name = (s && (s.display_name || s.name)) || ''
+  updateCtx.file = null
+  updateCtx.busy = false
+  updateCtx.pct = 0
+  updateCtx.done = false
+}
+function doUpdate() {
+  if (!updateCtx.file) {
+    G.app.showToast(tt2('toast.select_zip'))
+    return
+  }
+  const fd = new FormData()
+  fd.append('file', updateCtx.file)
+  updateCtx.busy = true
+  updateCtx.pct = 0
+  updateCtx.done = false
+  G.API.upload('/skills/by-id/' + encodeURIComponent(updateCtx.id) + '/update', fd, function (pct) {
+    updateCtx.pct = pct
+  })
+    .then(function (r) {
+      updateCtx.busy = false
+      updateCtx.done = true
+      updateCtx.open = false
+      G.app.showToast((r && r.message) || tt2('toast.update_success'))
+      loadAll()
+    })
+    .catch(function (e) {
+      updateCtx.busy = false
+      updateCtx.pct = 0
+      let msg = (e && e.message) || tt2('toast.update_failed')
       if (e && e.errors && Array.isArray(e.errors) && e.errors.length > 0) msg = e.errors.join('；')
       G.app.showToast(msg)
     })

@@ -46,6 +46,35 @@
             {{ t('settings.host.unhost_title') }}
           </button>
         </div>
+        <!-- Issue #543：仓库迁移到其他组织（repo_key 及各关联数据原子改写） -->
+        <div class="cd mt16">
+          <div class="cd-h">
+            <h2>{{ t('settings.host.migrate_title') }}</h2>
+          </div>
+          <p class="tx t2 sv__migrate-desc">{{ t('settings.host.migrate_desc') }}</p>
+          <div class="srow">
+            <label>{{ t('settings.host.migrate_target_repo') }}</label>
+            <input
+              type="text"
+              :value="repo.name"
+              readonly
+              class="sv__migrate-repo"
+              :title="t('settings.host.migrate_repo_readonly_hint')"
+            />
+          </div>
+          <div class="srow">
+            <label>{{ t('settings.host.migrate_target_owner') }}</label>
+            <select v-model="migrateOwner" class="sv__migrate-owner">
+              <option value="">{{ migratePlaceholder }}</option>
+              <option v-for="o in migrateOptions" :key="o.value" :value="o.value">
+                {{ o.label }}
+              </option>
+            </select>
+          </div>
+          <button class="bt bt-p mt8" @click="migrateRepo">
+            {{ t('settings.host.migrate_btn') }}
+          </button>
+        </div>
       </template>
     </div>
   </div>
@@ -195,6 +224,94 @@ function unhost() {
   )
 }
 
+// ── Issue #543：仓库迁移到其他组织 ──
+const migrateOwner = ref('')
+const migrateState = ref({ loading: false, loaded: false, failed: false, orgs: [], personal: '' })
+const migratePlaceholder = computed(() => {
+  const s = migrateState.value
+  if (s.loading) return t('settings.host.migrate_orgs_loading')
+  if (s.failed) return t('settings.host.migrate_orgs_load_failed')
+  if (!migrateOptions.value.length) return t('settings.host.migrate_orgs_empty')
+  return t('settings.host.migrate_owner_placeholder')
+})
+// 排除当前仓库所属组织（迁到自身无意义）；个人号单独一项
+const migrateOptions = computed(() => {
+  const s = migrateState.value
+  const curOwner = (repo.value && repo.value.owner) || ''
+  const out = []
+  if (s.personal && s.personal !== curOwner) {
+    out.push({
+      value: s.personal,
+      label: s.personal + ' (' + t('settings.host.migrate_personal') + ')',
+    })
+  }
+  ;(s.orgs || []).forEach(function (o) {
+    if (!o || !o.login || o.login === curOwner) return
+    out.push({
+      value: o.login,
+      label: o.name && o.name !== o.login ? o.login + ' (' + o.name + ')' : o.login,
+    })
+  })
+  return out
+})
+function loadMigrateOrgs() {
+  migrateState.value = { loading: true, loaded: false, failed: false, orgs: [], personal: '' }
+  G.API.get('/repos/migrate-orgs')
+    .then((d) => {
+      migrateState.value = {
+        loading: false,
+        loaded: true,
+        failed: false,
+        orgs: (d && d.orgs) || [],
+        personal: (d && d.personal) || '',
+      }
+    })
+    .catch(() => {
+      migrateState.value = { loading: false, loaded: true, failed: true, orgs: [], personal: '' }
+      G.app.showToast(t('settings.host.migrate_orgs_load_failed'), 'warning')
+    })
+}
+function migrateRepo() {
+  const r = repo.value
+  if (!r) return
+  const target = (migrateOwner.value || '').trim()
+  if (!target) {
+    G.app.showToast(t('settings.host.migrate_owner_required'))
+    return
+  }
+  G.app.showConfirm(
+    t('settings.host.migrate_confirm', { target: target }),
+    function () {
+      G.API.post('/repos/migrate', {
+        repo_key: 'gitcode:' + r.fullName,
+        target_owner: target,
+        target_repo: '',
+      })
+        .then((rr) => {
+          G.app.showToast(
+            t('settings.host.migrate_done', { newKey: (rr && rr.new_repo_key) || '' })
+          )
+          try {
+            localStorage.removeItem('repo_member_cache')
+          } catch (e) {
+            /* ignore */
+          }
+          try {
+            sessionStorage.removeItem('currentRepo')
+          } catch (e) {
+            /* ignore */
+          }
+          G.app.initSidebarRepos()
+          G.app.nav('dash')
+        })
+        .catch((e) =>
+          G.app.showToast(t('settings.host.migrate_failed', { msg: (e && e.message) || '' }))
+        )
+    },
+    { danger: true, confirmText: t('settings.host.migrate_btn') }
+  )
+}
+
 onMounted(() => {
   try {
     repo.value = G.app.currentRepo()
@@ -203,6 +320,7 @@ onMounted(() => {
   }
   const r = repo.value
   if (!r) return // no current repo → select_repo_first hint (legacy behavior)
+  loadMigrateOrgs() // Issue #543：目标组织下拉数据
   G.API.get('/settings/gitcode-repo/' + r.owner + '/' + r.name)
     .then((d) => {
       data.value = d
@@ -251,5 +369,16 @@ onMounted(() => {
   color: #fff;
   border: none;
   padding: 8px 16px;
+}
+/* Issue #543：迁移卡 */
+.sv__migrate-desc {
+  margin-bottom: 8px;
+}
+.sv__migrate-repo {
+  background: #f1f5f9;
+  color: var(--t2);
+}
+.sv__migrate-owner {
+  background: var(--c);
 }
 </style>
