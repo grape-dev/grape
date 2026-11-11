@@ -1,0 +1,30 @@
+# Tasks: Issue #2041
+
+- [x] Task 0: 入口确认——逐一核对 Spec 推断模块在本分支的真实路径与实际重置/删除入口
+  - Acceptance: 落点全部指向 arch-weekly-11 真实代码；service.py/a2a_context.py 判定不改
+  - Verify: docs/issue-2041/spec.md「实际入口确认」表
+  - Files: docs/issue-2041/spec.md
+- [x] Task 1: 守卫核心——worktree_guard.py 新增 #2041 段（风险检查 / bundle+快照归档 / record / 注入 / 僵尸路径闸）
+  - Acceptance: collect_reset_risk 覆盖未推送+脏+未跟踪；归档含 bundle/verify/patch/untracked/manifest/record；失败路径全部 ok=False
+  - Verify: pytest tests/test_worktree_reset_archive.py -k "risk or archive"
+  - Files: src/domains/runtime/engine/worktree_guard.py
+- [x] Task 2: repogit 接线——bundle 封装 + cleanup_issue_worktree 守卫 + remove_issue_worktree_if_pushed 透传
+  - Acceptance: 无风险清理行为不变；有风险先归档后删；归档失败返回 False 保留目录
+  - Verify: pytest tests/test_worktree_reset_archive.py tests/runtime/test_repogit.py
+  - Files: src/domains/runtime/engine/repogit.py
+- [x] Task 3: cleanup.py 适配——sweep 调用计收返回值；僵尸 rmtree 过 guard_issue_workdir_removal
+  - Acceptance: 拒绝删除时不计数、目录保留；非 worktree 残留清理不受影响
+  - Verify: pytest tests/test_worktree_reset_archive.py -k "zombie or parse"
+  - Files: src/domains/runtime/engine/cleanup.py
+- [x] Task 4: 下一轮告知注入——agent.py（worker）+ direct_executor.py（direct）
+  - Acceptance: record 命中时 env 双变量 + prompt 提示块；无 record 零改动
+  - Verify: pytest tests/test_worktree_reset_archive.py -k inject
+  - Files: src/domains/runtime/engine/agent.py, src/domains/runtime/engine/direct_executor.py
+- [x] Task 5: 全场景单测——clean / dirty-untracked / unpushed / upstream 已推送 / 归档失败 / verify 失败 / 守卫异常 / 恢复命令可用
+  - Acceptance: 验收 a-d 全覆盖，含 `git fetch <bundle> && git reset --hard FETCH_HEAD` 实测恢复
+  - Verify: python -m pytest tests/test_worktree_reset_archive.py tests/runtime/test_repogit.py tests/runtime/test_issue_752_worktree_guard.py
+  - Files: tests/test_worktree_reset_archive.py
+- [ ] Task 6: 自审查 + 提交推送 + 建 PR（base=arch-weekly-11）+ Issue 评论 + A2A 通知 QA
+  - Acceptance: 5 轴审查通过；pre-pr 增量检查（黑名单/敏感扫描/英文 commit）通过
+  - Verify: grape git status/diff 核对；grape tasks complete 汇报
+  - Files: —
