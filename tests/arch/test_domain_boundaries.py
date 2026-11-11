@@ -61,9 +61,9 @@ def test_legacy_dir_shims_removed():
     """Issue #699 cleanup: legacy top-level shim dirs are gone; imports must fail."""
     import importlib
     import pytest
-    for legacy in ("src.auth", "src.user", "src.domains.mgmt.admin", "src.runtime", "src.domains.runtime.agents",
-                   "src.domains.runtime.im", "src.domains.runtime.vcs", "src.domains.runtime.storage", "src.domains.insight.observability",
-                   "src.project_info", "src.api.routes"):
+    # 只校验「已删除的 legacy 顶层目录」；src.domains.* 是 canonical 实现，必须可导入。
+    for legacy in ("src.auth", "src.user", "src.runtime", "src.project_info", "src.api.routes",
+                   "src.im", "src.vcs", "src.agent", "src.storage", "src.admin", "src.observability"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(legacy)
 

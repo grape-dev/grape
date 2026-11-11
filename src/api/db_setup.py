@@ -277,6 +277,22 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 # 一律按 **UTC** 比较 last_heartbeat。因此**写入方必须显式传 last_heartbeat（UTC 值）**，
 # 不要依赖默认值——历史上就是 MySQL 分支用 CAST(NOW() AS CHAR) 写 CST，导致幽灵实例占满一致性
 # 哈希环、bot 永不连接（issue #365 / commit f7f9951005）。默认值保留仅为兼容旧插入路径。
+_GLOBAL_IM_BOT_CONFIG_DDL = """
+CREATE TABLE IF NOT EXISTS global_im_bot_config (
+    bot_app_id        VARCHAR(191) PRIMARY KEY,
+    bot_type          VARCHAR(32) NOT NULL,
+    im_provider       VARCHAR(32) DEFAULT 'feishu',
+    is_active         INTEGER DEFAULT 1,
+    bot_name          VARCHAR(128) DEFAULT '',
+    lease_token       VARCHAR(128) DEFAULT NULL,
+    lease_expires_at  DATETIME DEFAULT NULL,
+    lease_owner       VARCHAR(128) DEFAULT NULL,
+    lease_acquired_at DATETIME DEFAULT NULL,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 _IM_INSTANCE_DDL = """
 CREATE TABLE IF NOT EXISTS grape_im_instance (
     instance_id      VARCHAR(64) PRIMARY KEY,
@@ -935,6 +951,7 @@ _NEW_TABLES = [
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
+    ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
     ("issue", _ISSUE_DDL),
