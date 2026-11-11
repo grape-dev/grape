@@ -207,6 +207,21 @@ AtomCode task after a failure or timeout; inspect partial effects before manuall
 Health probes disable tools and session persistence, use a temporary directory and a
 60-second timeout, and consume a small model request under the existing probe schedule.
 
+If the CLI reports `ProviderError` with HTTP 403 and `model is not enabled for
+codingplan`, login succeeded but the selected model is unavailable for that account's
+plan. Select an enabled model in the CLI or set both overrides in the environment of
+the Grape server/worker that executes the task, then restart that process. For example,
+the following pair passed a real Grape coding task with CLI 5.2.5; availability depends
+on your account, so this is an example rather than a new default:
+
+```bash
+export GRAPE_ATOMCODE_PROVIDER=AtomGit-glm5.3-flash
+export GRAPE_ATOMCODE_MODEL=glm5.3-flash
+```
+
+The provider is the CLI configuration alias; the model is the upstream model ID.
+Grape does not automatically switch models after a provider error.
+
 ### Environment Check (Optional)
 
 ```bash

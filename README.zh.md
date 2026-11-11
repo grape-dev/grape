@@ -203,6 +203,18 @@ schema，以及工具权限。缺失完成事件、限流终止和权限拒绝�
 不会自动重跑整项 AtomCode 任务；人工重派前应检查部分操作是否已执行。健康探测关闭工具与
 会话持久化，使用临时目录，最长 60 秒；沿用现有探活周期，会消耗少量模型请求额度。
 
+若 CLI 返回 `ProviderError`、HTTP 403，并提示 `model is not enabled for codingplan`，
+说明已登录，但当前模型未对该账号的套餐启用。请在 CLI 中选择可用模型，或者在实际执行任务的
+Grape 服务端/worker 进程环境中同时设置以下变量，再重启该进程。下面这组配置已在 CLI 5.2.5
+上通过 Grape 的真实编码任务验证；模型可用性取决于账号，此处仅为示例，不作为新默认值：
+
+```bash
+export GRAPE_ATOMCODE_PROVIDER=AtomGit-glm5.3-flash
+export GRAPE_ATOMCODE_MODEL=glm5.3-flash
+```
+
+provider 是 CLI 配置中的别名，model 是上游模型 ID。Grape 不会在 provider 出错后自动切换模型。
+
 ### 环境自检（可选）
 
 ```bash
