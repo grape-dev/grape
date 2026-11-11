@@ -3,8 +3,7 @@
 只驱动真实函数（classify_qa_conclusion / qa_gate_check / _review_pass /
 auto_finalize_issue_on_last_node），造数走真实表结构与 session_store 接口。
 
-跑法：cd /root/arch-port-2wt && PYTHONPATH=. /root/grape-oss/.venv/bin/python -m pytest -q \
-        tests/runtime/test_port_qa_gate_p1_acceptance.py
+跑法（仓库根目录）：PYTHONPATH=. python -m pytest -q tests/runtime/test_port_qa_gate_p1_acceptance.py
 """
 import os
 

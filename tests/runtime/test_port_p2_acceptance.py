@@ -2,8 +2,7 @@
 
 只驱动真实函数与真实 git 临时仓；不复制业务逻辑。
 
-跑法：cd /root/arch-port-2wt && PYTHONPATH=. /root/grape-oss/.venv/bin/python -m pytest -q \
-        tests/runtime/test_port_p2_acceptance.py
+跑法（仓库根目录）：PYTHONPATH=. python -m pytest -q tests/runtime/test_port_p2_acceptance.py
 """
 import json
 import os
