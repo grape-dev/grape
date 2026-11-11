@@ -85,6 +85,6 @@ def test_clone_url_template_empty_value_guard():
 
 def test_injection_checklist_family_keys_present():
     """#584/#595/#721 一致性：三键均为注入清单保留名，不被场景自定义变量覆盖。"""
-    from src.scene_custom_env import is_reserved_name
+    from src.kernel.scene_custom_env import is_reserved_name
     for name in ("REPO_FULL_NAME", "BOT_USERNAME", "PR_NUMBER"):
         assert is_reserved_name(name), f"{name} 应为保留注入名"

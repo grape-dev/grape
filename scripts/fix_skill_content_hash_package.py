@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只扫描报告，不写库")
     args = parser.parse_args()
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # ── 1. 扫描污染行 ──────────────────────────────────────
     with db_lock:

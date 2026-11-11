@@ -2677,7 +2677,7 @@ def _seed_admin_accounts():
 # ===== 迁移锁（2026-10-18 修复 + 采纳 MR#516 可取之处）=====
 # GET_LOCK 是 MySQL **连接级**锁：获取与释放必须在同一条物理连接上。
 # 旧路径借的是连接池的连接：SELECT 类语句执行后自动 commit 把连接还池
-# （src/mysql_compat.py 的 _raw_cursor 借还逻辑），持锁连接留在池里 Sleep，
+# （src/kernel/mysql_compat.py 的 _raw_cursor 借还逻辑），持锁连接留在池里 Sleep，
 # 之后 RELEASE_LOCK 落在重借的另一条连接上（返回 0，静默失败）→ 锁泄漏：
 # 下次启动（哪怕另一台主）在 GET_LOCK 上等满 timeout，实测 174/79 每次重启
 # 都卡、需人工 KILL 解围。修复：锁全程绑一条**池外专用连接**
@@ -5242,7 +5242,7 @@ def _tasks_to_issue_rename_pre_create():
 def _migrate_global_bot_token_to_db():
     """Issue #345: 全局 bot token 从文件迁移到 DB meta 表。
 
-    集群安全：用 src/lock.py distributed_locks 表保护，N 个实例同时启动不冲突。
+    集群安全：用 src/kernel/lock.py distributed_locks 表保护，N 个实例同时启动不冲突。
     set_meta_value 本身是 INSERT OR REPLACE（UPSERT 语义），多实例并发写同一值结果一致。
     幂等：DB 已有值则跳过。
     """

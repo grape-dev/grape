@@ -31,18 +31,19 @@ from collections import defaultdict
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(REPO_ROOT, "src")
 
-# Layers scanned (canonical Phase 1 layout only; shims at src/ top level are
-# compatibility surface, not architecture).
+# Layers scanned (canonical Phase 1 layout only; legacy top-level module paths
+# are compatibility surface, not architecture).
 KERNEL = "src/kernel"
 DOMAINS = "src/domains"
 DOMAIN_NAMES = ("mgmt", "runtime", "insight", "contracts")
 
-# Legacy top-level module paths that still exist only as re-export shims.
-# Issue #699 cleanup: every legacy *directory* shim (src/auth, src/user,
-# src/runtime, src/agent, src/im, src/vcs, src/storage, src/observability,
-# src/admin, src/project_info, src/api/routes/*) has been removed once all
-# importers migrated to src.domains.*; only the thin top-level module shims
-# kept for external callers remain forbidden inside kernel/domains.
+# Legacy top-level module paths (Issue #699 thin compat shims). Issue #2010
+# moved these modules into src/repos, src/authn, src/help and src/infra, and
+# src/__init__.py resolves the old names through lazy aliases. They stay
+# forbidden inside kernel/domains so internal code always targets canonical
+# modules; every legacy *directory* shim (src/auth, src/user, src/runtime,
+# src/agent, src/im, src/vcs, src/storage, src/observability, src/admin,
+# src/project_info, src/api/routes/*) remains removed.
 LEGACY_SHIM_PREFIXES = (
     "src.config", "src.session_manager", "src.lock", "src.repo_key", "src.repo",
     "src.repo_cleanup", "src.repo_migrate", "src.mysql_compat", "src.token_service",

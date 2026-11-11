@@ -158,7 +158,7 @@ def run_startup_migration(db_path: str) -> dict:
     旧列不存在后启动再跑回填会直接 no such column。
 
     必须在 worker 线程内调用；连接由 _connect 按后端选择（MySQL 走池化共享连接，
-    SQLite 走本地文件连接），方言统一经 src.mysql_compat 翻译。
+    SQLite 走本地文件连接），方言统一经 src.kernel.mysql_compat 翻译。
     """
     migrations = _load_migration_module()
     conn = _connect(db_path)
@@ -191,7 +191,7 @@ def _connect(db_path: str):
     """取一条数据库连接：MySQL 后端复用 session_manager 的池化连接，SQLite 后端开本地连接。
 
     Issue #825 MySQL 适配：仓储层原本写死 sqlite3（PRAGMA/?/datetime 等），
-    统一交给 src.mysql_compat 方言翻译（? → %s、INSERT OR IGNORE、ON CONFLICT
+    统一交给 src.kernel.mysql_compat 方言翻译（? → %s、INSERT OR IGNORE、ON CONFLICT
     upsert、datetime('now')、CREATE TABLE 的 TEXT 主键 → VARCHAR(191) 等）。
     返回的连接统一支持 execute/cursor/commit/rollback/close；共享连接由
     _SharedConn 代理，close() 为空操作（不能关掉全局单例）。
@@ -1642,7 +1642,7 @@ class ImEngine:
 async def start_im_engine(db_path: Optional[str] = None) -> Optional[ImEngine]:
     """main.py 启动入口：装配并启动新引擎；失败返回 None（调用方保持 legacy 兜底）。
 
-    MySQL 后端走 session_manager 的池化连接（方言由 src.mysql_compat 翻译）；
+    MySQL 后端走 session_manager 的池化连接（方言由 src.kernel.mysql_compat 翻译）；
     渠道 4 表由 run_startup_migration → ensure_channel_tables 幂等建/补。
     """
     try:

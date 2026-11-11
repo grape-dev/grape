@@ -2011,7 +2011,7 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     """解除托管时的同步清理：关联数据表 + 仓库 skill 目录 + workspace 目录。
 
     Issue #340：升级为级联清理（issue/issue_state/agent_tasks/devops_pipeline_scene 等
-    全量关联数据 + 事务化 + 审计日志），统一入口见 src/repo_cleanup.py。
+    全量关联数据 + 事务化 + 审计日志），统一入口见 src/kernel/repo_cleanup.py。
     本函数保留为兼容包装（历史调用方/测试）；DB 事务失败时降级为旧行为（记日志不抛出）。
 
     repo_key 为 owner/repo（无前缀）；兼容历史可能存在的 gitcode: 前缀数据。

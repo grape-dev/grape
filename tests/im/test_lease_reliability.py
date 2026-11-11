@@ -179,7 +179,7 @@ def test_list_active_instances_heartbeat_window(sqlite_db):
 
 def test_lease_sql_translates_for_mysql_backend():
     """MySQL 方言翻译后不引入 NOW()（时钟已 Python 参数化，双方言等价）。"""
-    from src.mysql_compat import translate_sql
+    from src.kernel.mysql_compat import translate_sql
     acquire_sql = (
         "UPDATE grape_t_channel_lease "
         "SET lease_token = ?, lease_expires_at = ?, "

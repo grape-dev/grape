@@ -36,13 +36,12 @@ MANIFEST = [
     # 历史导入路径 src.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
-    "src/config.py",
-    "src/repo_key.py",
-    "src/prompt_builder.py",
-    "src/session_manager.py",
-    "src/mysql_compat.py",
-    "src/token_service.py",
-    "src/token_resolver.py",
+    # Issue #2010: 原顶层模块已按职责迁入子包；旧路径（src.config 等）由
+    # src/__init__.py 的兼容别名解析到新位置，整目录打包以覆盖 worker 懒加载模块。
+    "src/infra/",
+    "src/repos/",
+    "src/authn/",
+    "src/help/",
     "src/domains/mgmt/user/__init__.py",
     "src/domains/mgmt/user/db.py",
     "src/domains/mgmt/auth/",

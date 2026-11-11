@@ -427,7 +427,7 @@ def test_binding_store_upsert_roundtrip(db_path):
 
 def test_start_im_engine_supports_mysql_backend(monkeypatch, db_path):
     """MySQL 后端同样启动新引擎（2026-11 适配：仓储走 session_manager 池化连接，
-    方言由 src.mysql_compat 翻译）——不再像 P0/P1 那样直接跳过。"""
+    方言由 src.kernel.mysql_compat 翻译）——不再像 P0/P1 那样直接跳过。"""
     class _FakeEngine:
         async def start(self):
             self.started = True

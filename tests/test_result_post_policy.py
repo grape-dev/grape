@@ -293,7 +293,7 @@ class TestCallSitesExplicit:
         "src/runtime/direct_executor.py",
         "src/runtime/service.py",
         "src/api/pr_merged_sre_retry.py",
-        "src/token_resolver.py",
+        "src/authn/token_resolver.py",
     ]
     NAMES = {"_post_result_to_issue", "_post_result_to_pr"}
 

@@ -50,13 +50,13 @@ def test_pipeline_resolve_feishu_name_uses_provider_split():
 
 def test_session_manager_get_feishu_open_id_has_github_fallback():
     """T20-05: session_manager get_feishu_open_id 有 github_login 回退（FR-20.8）。"""
-    assert _grep_source("src/session_manager.py", "github_login")
-    assert _grep_source("src/session_manager.py", "FR-20.8")
+    assert _grep_source("src/authn/session_manager.py", "github_login")
+    assert _grep_source("src/authn/session_manager.py", "FR-20.8")
 
 
 def test_session_manager_update_uses_insert_ignore_not_replace():
     """T20-06: session_manager update_unified_user_info 用 INSERT OR IGNORE（非 REPLACE）。"""
-    with open(os.path.join(ROOT, "src/session_manager.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "src/authn/session_manager.py"), encoding="utf-8") as f:
         content = f.read()
     idx = content.find("def update_unified_user_info")
     assert idx > 0, "update_unified_user_info function not found"
@@ -74,7 +74,7 @@ def test_session_manager_update_uses_insert_ignore_not_replace():
 
 def test_prompt_builder_uses_insert_ignore_not_replace():
     """T20-07: prompt_builder agent 指令用 INSERT OR IGNORE（非 REPLACE）。"""
-    with open(os.path.join(ROOT, "src/prompt_builder.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "src/infra/prompt_builder.py"), encoding="utf-8") as f:
         content = f.read()
     idx = content.find("Save User Mapping")
     assert idx > 0, "Save User Mapping section not found"

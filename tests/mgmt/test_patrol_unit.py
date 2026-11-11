@@ -821,7 +821,7 @@ def test_s21_1_handoff_key_single_source_and_nonempty_guard():
 
 
 def test_s22_1_mysql_dialect_compliance():
-    from src.mysql_compat import _CONCAT_RE, _SQLITE_MASTER_SQL_RE
+    from src.kernel.mysql_compat import _CONCAT_RE, _SQLITE_MASTER_SQL_RE
     src_comp = open(os.path.join(ROOT, "src", "api", "patrol_compensate.py"),
                     encoding="utf-8").read()
     assert "action_meta=action_meta||" not in src_comp

@@ -90,7 +90,7 @@ class TestA2ARepoFallback:
 
     def test_fallback_check_verdicts(self, monkeypatch):
         from src.domains.runtime.routes.webhook import _a2a_repo_fallback_check
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {})
@@ -104,7 +104,7 @@ class TestA2ARepoFallback:
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "conn timeout"})
         assert _a2a_repo_fallback_check(REPO_KEY) == "unreachable"
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "")
         assert _a2a_repo_fallback_check(REPO_KEY) == "no_token"
 
@@ -147,7 +147,7 @@ class TestA2ARepoFallback:
     def test_unregistered_session_fallback_ok_registers(self, monkeypatch):
         """未注册 + 会话 token + GitCode 可达 → 放行 + 幂等补录。"""
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {})
@@ -166,7 +166,7 @@ class TestA2ARepoFallback:
 
     def test_unregistered_session_fallback_not_found_400(self, monkeypatch):
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 404", "status_code": 404})
@@ -179,7 +179,7 @@ class TestA2ARepoFallback:
 
     def test_unregistered_session_fallback_no_permission_400(self, monkeypatch):
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
         monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 403", "status_code": 403})
@@ -193,7 +193,7 @@ class TestA2ARepoFallback:
     def test_unregistered_session_no_token_keeps_not_hosted(self, monkeypatch):
         """回退无法判定（无 token）→ 维持「未托管」安全默认。"""
         self._clean()
-        monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
+        monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "")
         token = self._session_token()
         r = self._client().post("/api/a2a", json=self._body(),

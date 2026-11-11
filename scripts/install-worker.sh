@@ -158,12 +158,12 @@ rm -f "$TMP_PKG"
 # 注意：全新安装（无旧代码）时冒烟失败同样 fail，避免装出必死的实例。
 _smoke_check() {
   [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
-  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.domains.runtime.engine.agent" >/dev/null 2>&1; then
+  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.kernel.config; import src.domains.runtime.engine.agent" >/dev/null 2>&1; then
     log "New code import smoke check passed"
     return 0
   else
     # worker 侧埋点依赖 otel：缺包直接中止升级（架构守护 BLOCKED-1）
-    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.domains.runtime.engine.agent; import src.observability.otel" 2>&1 | tail -1)"
+    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.kernel.config; import src.domains.runtime.engine.agent; import src.observability.otel" 2>&1 | tail -1)"
 
     log "!!! New code import smoke check failed: $_smoke_err"
     log "!!! Upgrade rejected (old code untouched, worker keeps running the current version) -- please report this log to the controller maintainer"

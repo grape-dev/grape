@@ -6,3 +6,4 @@
 import sys as _sys
 import src.kernel.help_page_gen as _impl
 _sys.modules[__name__] = _impl
+# Issue #2010: relocated from src/help_page_gen.py to src/help/help_page_gen.py (top-level layout cleanup).

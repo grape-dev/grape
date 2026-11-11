@@ -338,7 +338,7 @@ def test_webhook_failure_comment_contains_reason_code(monkeypatch):
 
     monkeypatch.setattr(ep, "_gitcode_post_issue_comment_ledgered", _fake_comment)
     monkeypatch.setattr(ep, "_is_github_repo", lambda repo_key: False)
-    import src.token_service as ts
+    import src.kernel.token_service as ts
     monkeypatch.setattr(ts, "get_repo_bot_token", lambda repo_key: "bot-token")
     ep._notify_scene_precheck_failure(
         _REPO, "#123",

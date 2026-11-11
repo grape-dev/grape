@@ -133,7 +133,7 @@ def main():
     parser.add_argument("--backup-file", default="", help="normalize backup path")
     args = parser.parse_args()
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()

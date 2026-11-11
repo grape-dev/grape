@@ -68,8 +68,43 @@ def test_legacy_dir_shims_removed():
             importlib.import_module(legacy)
 
 
+LEGACY_MODULE_TARGETS = {
+    "src.config": "src.kernel.config",
+    "src.featured_order": "src.kernel.featured_order",
+    "src.help_docs_sync": "src.kernel.help_docs_sync",
+    "src.help_page_gen": "src.kernel.help_page_gen",
+    "src.localfs": "src.kernel.localfs",
+    "src.lock": "src.kernel.lock",
+    "src.mysql_compat": "src.kernel.mysql_compat",
+    "src.outbound_ledger": "src.kernel.outbound_ledger",
+    "src.prompt_builder": "src.kernel.prompt_builder",
+    "src.repo": "src.kernel.repo",
+    "src.repo_cleanup": "src.kernel.repo_cleanup",
+    "src.repo_key": "src.kernel.repo_key",
+    "src.repo_migrate": "src.kernel.repo_migrate",
+    "src.scene_custom_env": "src.kernel.scene_custom_env",
+    "src.service_diagnostics": "src.infra.service_diagnostics",
+    "src.session_manager": "src.authn.session_manager",
+    "src.token_resolver": "src.authn.token_resolver",
+    "src.token_service": "src.authn.token_service",
+    "src.worker_package": "src.infra.worker_package",
+}
+
+
 def test_top_level_module_shims_still_work():
-    """Thin module-level compat shims kept for external callers."""
+    """Thin module-level compat shims kept for external callers.
+
+    Issue #2010 把顶层模块迁入 src/repos、src/authn、src/help、src/infra，
+    旧路径（src.config、src.lock 等）由 src/__init__.py 的懒加载别名解析，
+    语义等价：别名指向同一个模块对象（monkeypatch 仍然有效）。
+    """
+    import importlib
+
+    for legacy, canonical in LEGACY_MODULE_TARGETS.items():
+        legacy_module = importlib.import_module(legacy)
+        canonical_module = importlib.import_module(canonical)
+        assert legacy_module is canonical_module, f"{legacy} not aliased to {canonical}"
+
     from src.kernel.config import log as old_log
     from src.kernel.config import log as new_log
     assert old_log is new_log

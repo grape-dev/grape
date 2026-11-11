@@ -7,7 +7,7 @@ Without coordination, cleanup/sync tasks execute N times concurrently, causing:
 - Race conditions on shared state
 
 This module provides ``run_with_distributed_lock`` — a context manager that
-uses the existing ``distributed_locks`` table (src/lock.py) to ensure only one
+uses the existing ``distributed_locks`` table (src/kernel/lock.py) to ensure only one
 worker executes a given task at a time.
 
 Usage in scheduler workers::

@@ -150,7 +150,7 @@ def _collect_tool_uses_from_agent_logs(event_seq) -> list:
         return []
 
 
-# ── R51 退避与上限（常量集中在 src/config.py，借鉴 PR #573 惯例）──
+# ── R51 退避与上限（常量集中在 src/kernel/config.py，借鉴 PR #573 惯例）──
 
 def retry_max() -> int:
     try:

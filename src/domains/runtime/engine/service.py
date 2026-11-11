@@ -340,7 +340,7 @@ def _runtime_timeout_env_kv() -> dict:
     _execute_task env.update(env_extra) 后：
       - 看门狗 _watchdog_timeout_for(env) 任务级优先
       - hermes/hwcloud _global_timeout_for(max_exec, env) 任务级优先
-    worker 本地 os.environ 显式设置仍最高优（优先级语义见 src/config.py）。
+    worker 本地 os.environ 显式设置仍最高优（优先级语义见 src/kernel/config.py）。
     """
     return {"RUNTIME_TASK_TIMEOUT": str(_get_runtime_task_timeout_cfg())}
 

@@ -42,7 +42,7 @@ class TestBusinessApiUrlGetter:
 
 class TestResolveBusinessServerUrl:
     def test_remote_runtime_uses_business_base(self):
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
@@ -50,7 +50,7 @@ class TestResolveBusinessServerUrl:
             assert prompt_builder._resolve_business_server_url(7) == "https://api.grape.example.com"
 
     def test_local_runtime_uses_localhost(self):
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
@@ -62,7 +62,7 @@ class TestResolveBusinessServerUrl:
 
     def test_local_runtime_respects_explicit_business_base(self):
         """Spec 优先级：显式 task_business_api_url > server_base_url > 本机 127.0.0.1。"""
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch("src.user.db.get_business_api_url_explicit",
                    return_value="https://api.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
@@ -71,7 +71,7 @@ class TestResolveBusinessServerUrl:
 
     def test_runtime_lookup_error_keeps_localhost_fallback(self):
         """DB 查询异常（未知）保留改造前 localhost 回退，不等同于「非本地」。"""
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch.object(prompt_builder, "_runtime_is_local", return_value=None), \
              patch.object(prompt_builder, "_local_port", return_value="3456"), \
              patch("src.user.db.get_worker_connect_url",
@@ -79,7 +79,7 @@ class TestResolveBusinessServerUrl:
             assert prompt_builder._resolve_server_url(5) == "http://localhost:3456"
 
     def test_resolve_task_server_env_returns_both_bases(self):
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch.object(prompt_builder, "_resolve_business_base",
                           return_value=("https://api.grape.example.com", "server_base_url")), \
              patch.object(prompt_builder, "_resolve_server_url",
@@ -97,7 +97,7 @@ class TestResolveBusinessServerUrl:
         assert "runtime_server_url_fallback" in env["GRAPE_BASE_URL_SOURCES"]
 
     def test_runtime_resolver_keeps_worker_connect_semantics(self):
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch("src.user.db.get_worker_connect_url",
                    return_value="https://worker.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False):
@@ -105,7 +105,7 @@ class TestResolveBusinessServerUrl:
 
     def test_single_address_equivalence(self):
         """单地址部署（未配拆分项）：业务基址与 runtime 基址取值等价旧行为。"""
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""), \
              patch("src.user.db.get_server_base_url", return_value="https://grape.example.com"), \
@@ -224,7 +224,7 @@ class TestBusinessApiWarningAndHealth:
 
 class TestReservedRuntimeEnv:
     def test_runtime_server_url_reserved_in_scene_custom_env(self):
-        from src.scene_custom_env import is_reserved_name
+        from src.kernel.scene_custom_env import is_reserved_name
         assert is_reserved_name("RUNTIME_SERVER_URL")
 
     def test_config_example_documents_business_api_url(self):

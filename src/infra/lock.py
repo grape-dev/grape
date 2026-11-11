@@ -6,3 +6,4 @@
 import sys as _sys
 import src.kernel.lock as _impl
 _sys.modules[__name__] = _impl
+# Issue #2010: relocated from src/lock.py to src/infra/lock.py (top-level layout cleanup).

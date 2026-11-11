@@ -166,7 +166,7 @@ def run(conn, dry_run: bool = False) -> dict:
 
 
 if __name__ == "__main__":  # 运维手动执行
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     _dry = "--dry-run" in sys.argv
     with db_lock:

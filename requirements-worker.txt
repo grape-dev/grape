@@ -5,7 +5,7 @@
 # grape CLI is installed offline with the package (wheels/grape-*.whl); its deps click/httpx are declared
 # here so the offline wheels cover them fully (Issue: _ensure_grape_cli_wheel --no-deps missed deps).
 # Note: binary wheels for the aiohttp chain are bundled for a platform matrix (linux x86_64 /
-# linux aarch64 / win_amd64, see src/worker_package.py WHEEL_PLATFORMS); pip matches the exact
+# linux aarch64 / win_amd64, see src/infra/worker_package.py WHEEL_PLATFORMS); pip matches the exact
 # platform via wheel tags on offline install, and the install script falls back to the online
 # mirror automatically on platform/python mismatch (see install-worker.sh/ps1).
 # Requires Python >= 3.10 (code uses X | None union syntax); recommended: build venv with python3.12:

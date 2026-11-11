@@ -190,11 +190,11 @@ class TestBotActorStillSelfLoop:
     def test_t6_bot_note_hook_pr_self_loop(self):
         _clean()
         _seed_issue(8, "coding")
-        from src.token_resolver import TokenResult
+        from src.kernel.token_resolver import TokenResult
         _bot_level = TokenResult(token="REPO_BOT", level="repo_bot",
                                  provider=MagicMock(), repo_key=RK)
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _bot_level):
             _run(_pr_comment_payload(username="grape_bot", cid=70061))
         assert _events("note_hook_pr", "#8") == [], "bot 评论不得建事件"

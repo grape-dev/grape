@@ -1,7 +1,7 @@
 """IM 渠道层 MySQL 适配冒烟（Issue #742/#760/#825 + 本地 MySQL 适配）。
 
 做法：用**临时库**（默认 im_adapt_check，跑完即删）走真实代码路径——
-DEVOPS_DB_BACKEND=mysql 时 src.session_manager.db 就是 MySQLCompatDB，
+DEVOPS_DB_BACKEND=mysql 时 src.kernel.session_manager.db 就是 MySQLCompatDB，
 engine_wiring 的仓储、迁移、去重、绑定、对账全部跑在这条连接上。
 
 用法：
@@ -45,7 +45,7 @@ def check(label: str, ok: bool, extra: str = "") -> None:
 
 
 def main() -> int:
-    from src.mysql_compat import mysql_config
+    from src.kernel.mysql_compat import mysql_config
     from src.im.channel.types import ChatType, MsgType, Scope, Type
 
     cfg = mysql_config()
@@ -60,7 +60,7 @@ def main() -> int:
     print(f"[1] 临时库 {DB_NAME} 已建（{cfg['host']}:{cfg['port']}）")
 
     # 用临时库的 compat 连接建历史表（A2 Phase B：不再种 legacy im_* 行）
-    from src.mysql_compat import MySQLCompatDB
+    from src.kernel.mysql_compat import MySQLCompatDB
     tmp_cfg = dict(cfg, database=DB_NAME)
     conn = MySQLCompatDB(**tmp_cfg)
     for ddl in LEGACY_DDL:

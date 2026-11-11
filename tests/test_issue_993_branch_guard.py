@@ -566,7 +566,7 @@ def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
     import json as _json
     from types import SimpleNamespace
 
-    import src.repo as repo_mod
+    import src.kernel.repo as repo_mod
     from src.api import event_pipeline
     from src.domains.runtime.engine import repogit
     from src.domains.runtime.vcs import api_client
