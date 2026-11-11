@@ -47,7 +47,11 @@ function Fail([string]$msg) { Write-Error "[install-worker] ERROR: $msg"; exit 1
 function Invoke-PipQuiet {
     param(
         [Parameter(Mandatory)][string]$CommandPath,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        # 第三个位置参数：包名/需求参数（Issue #699 起各调用点传 $workerDeps）
+        # 之前签名只有两个参数，三参调用会报
+        #   "找不到接受自变量 'System.Object[]' 的位置参数"
+        [string[]]$ExtraArguments
     )
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -57,8 +61,12 @@ function Invoke-PipQuiet {
     $prevUTF8 = $env:PYTHONUTF8
     $env:PYTHONUTF8 = "1"
     $exitCode = 1
+    # 合并位置参数与额外参数（$workerDeps 这类包名数组）
+    $allArgs = @()
+    if ($Arguments) { $allArgs += $Arguments }
+    if ($ExtraArguments) { $allArgs += $ExtraArguments }
     try {
-        & $CommandPath @Arguments 2>&1 | Out-Null
+        & $CommandPath @allArgs 2>&1 | Out-Null
         $exitCode = $LASTEXITCODE
     } catch {
         $exitCode = 1
