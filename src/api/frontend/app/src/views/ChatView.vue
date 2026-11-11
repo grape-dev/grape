@@ -36,11 +36,30 @@
           <template v-else>
             <div
               v-for="(m, i) in messages"
-              :key="i"
-              :class="['msg', m.role === 'user' ? 'r' : 'l']"
+              :key="m.id || i"
+              :class="['msg', m.role === 'user' ? 'r' : 'l', m.recalled ? 'chat-msg-recalled' : '']"
+              :data-msg-id="m.id || ''"
             >
-              <!-- eslint-disable-next-line vue/no-v-html — 老代码用 renderMarkdown+chat_img 替换产出 HTML -->
-              <span v-html="renderMsg(m)"></span>
+              <!-- Issue #442：已撤回 → 原地提示 + 重新编辑；撤回入口只在有 id 的用户消息上悬停出现 -->
+              <template v-if="m.recalled">
+                <span>{{ t('recall.hint') }}</span>
+                <a v-if="m.id" href="javascript:void(0)" @click.prevent="reEditRecalled(m)">{{
+                  t('recall.re_edit')
+                }}</a>
+              </template>
+              <template v-else>
+                <button
+                  v-if="m.role === 'user' && m.id"
+                  class="msg-recall-btn"
+                  type="button"
+                  :title="t('recall.action')"
+                  @click.stop="recallMessage(m, i)"
+                >
+                  ↺ {{ t('recall.action') }}
+                </button>
+                <!-- eslint-disable-next-line vue/no-v-html — 老代码用 renderMarkdown+chat_img 替换产出 HTML -->
+                <span v-html="renderMsg(m)"></span>
+              </template>
             </div>
           </template>
           <!-- 进行中任务的流式气泡 -->
@@ -347,7 +366,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 
 const G = globalThis
 const uid = Math.random().toString(36).slice(2, 8)
@@ -404,6 +423,12 @@ const DEFAULTS = {
   load_failed: '加载失败',
   'config.saved': '已保存',
   'config.save_failed': '保存失败',
+  // Issue #442：撤回
+  'recall.action': '撤回',
+  'recall.confirm': '撤回会删除该消息，并停止 agent 的执行',
+  'recall.hint': '消息已撤回',
+  'recall.re_edit': '重新编辑',
+  'recall.failed': '撤回失败: {msg}',
   'skill.select_required': '请选择一个技能',
   image_max_reached: '最多 {max} 张图片',
   image_max_exceeded: '最多 {max} 张图片，超出部分已忽略',
@@ -866,6 +891,64 @@ function doDeleteConv() {
 }
 
 // ── 消息渲染 ──
+// ═══════════ Issue #442：消息撤回（二次确认 → 终止该轮执行 → 原文可重新编辑） ═══════════
+const recallTexts = new Map() // msgId → 原文（剥离 [chat_img:] 标记，供「重新编辑」）
+function stripChatImgMarkers(content) {
+  return String(content || '')
+    .replace(/\[chat_img:[^\]]+\]/g, '')
+    .trim()
+}
+// 消息列表变化时登记用户消息原文（撤回后仍能重新编辑）
+watch(messages, function (list) {
+  ;(list || []).forEach(function (m) {
+    const id = m && parseInt(m.id, 10)
+    if (!id || m.role !== 'user' || m.recalled) return
+    const text = stripChatImgMarkers(m.content || '')
+    if (text) recallTexts.set(id, text)
+  })
+})
+function recallMessage(m, idx) {
+  const id = parseInt(m && m.id, 10) || 0
+  if (!id) return
+  G.app.showConfirm(
+    t('recall.confirm'),
+    function () {
+      G.API.post('/chat/messages/' + id + '/recall')
+        .then(function () {
+          // 原地换成撤回提示（服务端软删除，刷新后该条不再返回）
+          const cur = messages.value[idx]
+          if (cur && (parseInt(cur.id, 10) || 0) === id) {
+            messages.value[idx] = { role: 'user', id: id, recalled: true }
+          }
+          // 终止该轮的前端表现：中止 SSE + 移除三点占位（后端已终止任务）
+          if (streamAbort) {
+            streamAbort.abort()
+            streamAbort = null
+          }
+          streaming.value = null
+        })
+        .catch(function (e) {
+          G.app.showToast(t('recall.failed', { msg: (e && e.message) || '' }))
+        })
+    },
+    { danger: true, confirmText: t('recall.action') }
+  )
+}
+// 「重新编辑」：原文追加到输入框现有内容之后（不覆盖）
+function reEditRecalled(m) {
+  const id = parseInt(m && m.id, 10) || 0
+  const text = recallTexts.get(id) || ''
+  if (!text) return
+  draft.value = draft.value ? draft.value + '\n' + text : text
+  nextTick(function () {
+    const el = G.window.document.getElementById('chatInput')
+    if (el) {
+      el.focus()
+      if (typeof G.window._autoResizeTextarea === 'function') G.window._autoResizeTextarea(el)
+    }
+  })
+}
+
 function renderMsg(m) {
   // 流式转正气泡带 _html（SSE 阶段渲染好的 markdown），优先使用
   if (m._html) return m._html
