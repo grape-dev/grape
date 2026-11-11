@@ -14,18 +14,25 @@ LOCAL_PROBE_MAX_TOTAL = 25       # 全量探测总上限（秒）
 
 
 def _probe_one(eng: dict) -> dict:
-    """探测单个引擎：跑 [cli, --version]（可用 probe_args 覆盖），healthy=returncode==0。
+    """探测单个引擎：跑 [cli, --version]（非 hermes 可用 probe_args 覆盖），healthy=returncode==0。
 
-    hermes 版本走 `--version`，健康态走真实 ACP 握手（acp_probe=True）：
-    `--version` 探测不出 ACP 依赖缺失（可选 extra 不被触碰），且 Issue #1982 起
-    不再自动补装，只用握手结果 + 诊断信息反映真实可用性。
+    Issue #1982 C1：保留非 hermes 引擎的 probe_args 覆盖能力（自定义探测命令，
+    假 CLI/非标准 CLI 场景）；hermes 不消费 probe_args，统一 `--version` 取版本号、
+    健康态走真实 ACP 握手（acp_probe=True）：`--version` 探测不出 ACP 依赖缺失
+    （可选 extra 不被触碰），且 Issue #1982 起不再自动补装，只用握手结果 + 诊断
+    信息反映真实可用性。
     """
     cli = eng.get("cli_path") or ""
     if not cli or not eng.get("installed"):
         return {**eng, "version": "", "healthy": False}
     try:
         _t0 = time.monotonic()
-        res = subprocess.run([cli, "--version"], capture_output=True, text=True,
+        # hermes 固定 --version（健康由 acp_probe 握手判定）；其余引擎保留 probe_args 覆盖
+        if (eng.get("name") or "").lower() == "hermes":
+            _args = ["--version"]
+        else:
+            _args = eng.get("probe_args") or ["--version"]
+        res = subprocess.run([cli] + _args, capture_output=True, text=True,
                              timeout=LOCAL_PROBE_TIMEOUT)
         healthy = res.returncode == 0
         version = (res.stdout or "").strip().split("\n")[0][:60] if healthy else ""
@@ -48,8 +55,9 @@ def probe_local_engines(engines: list | None = None) -> list[dict]:
     """探测本机已安装引擎，返回 [{name, version, healthy, cli_path, installed, ...}]。
 
     engines 缺省 = `discover_backends()`（含 cli_path/installed）。
-    hermes 自动带 probe_args=["acp", "--check"]（ACP 依赖缺失 → healthy=False，
-    与 worker 注册口径一致，见 hermes-acp-auto-bootstrap-design.md）。
+    hermes 自动置 acp_probe=True（健康走真实 ACP 握手，ACP 依赖缺失 → healthy=False，
+    与 worker 注册口径一致，见 hermes-acp-auto-bootstrap-design.md）；非 hermes 引擎
+    保留 probe_args 覆盖（缺省 ["--version"]）。
     线程池并发 + 单引擎 5s 超时 + 总时长 ≤ LOCAL_PROBE_MAX_TOTAL（超时未完成引擎置 healthy=False）。
     """
     if engines is None:
