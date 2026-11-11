@@ -317,20 +317,20 @@
     </template>
 
     <!-- ═══ 应用场景弹窗（高级选项） ═══ -->
-    <AGModal
-      :open="applyCtx.open"
-      :title="applyCtx.isOverwrite ? tt('apply_confirm_title') : tt('apply_scene')"
-      @close="applyCtx.open = false"
-    >
+    <AGModal :open="applyCtx.open" :title="tt('apply_scene')" @close="applyCtx.open = false">
       <div class="sm__form">
-        <!-- 覆盖警告 -->
-        <div v-if="applyCtx.isOverwrite" class="sm__warn">
-          <span class="sm__warn-ic">⚠️</span>
-          <div class="sm__warn-txt">
-            {{ tt('apply_confirm_desc')
-            }}<template v-if="applyCtx.sceneName">（{{ applyCtx.sceneName }}）</template>，{{
-              tt('apply_confirm_warning')
-            }}
+        <!-- 场景名称（weekly-09：每次应用可编辑，预填模板名） -->
+        <div class="sm__fld">
+          <label class="sm__lbl">{{ tt('apply_scene_name_label') }}</label>
+          <input
+            v-model="applyCtx.sceneName"
+            class="sm__scenename"
+            maxlength="50"
+            :placeholder="tt('apply_scene_name_label')"
+            @input="applyCtx.sceneNameError = ''"
+          />
+          <div v-if="applyCtx.sceneNameError" class="sm__nameerr">
+            {{ applyCtx.sceneNameError }}
           </div>
         </div>
         <!-- 华为云提示 -->
@@ -411,7 +411,7 @@
           td2('common.cancel')
         }}</AGButton>
         <AGButton size="sm" :disabled="applyCtx.busy" @click="confirmApply">
-          {{ applyCtx.isOverwrite ? tt('apply_confirm_btn') : tt('apply_scene') }}
+          {{ tt('apply_scene') }}
         </AGButton>
       </template>
     </AGModal>
@@ -817,8 +817,8 @@ function onLike(s) {
 const applyCtx = reactive({
   open: false,
   sceneId: 0,
-  isOverwrite: false,
   sceneName: '',
+  sceneNameError: '',
   isHwCloudScene: false,
   owner: '',
   repoName: '',
@@ -867,21 +867,18 @@ function onApply(s) {
       : typeof s.skills === 'string' && s.skills
         ? s.skills.split(',')
         : []
-  var isHw = s.name === 'huawei-skill' || skillsArr.indexOf('huawei-cloud') >= 0
-  G.API.get('/scenes/market/' + s.id + '/applied?owner=' + owner + '&repo=' + repoName)
-    .then(function (check) {
-      showApplyModal(s, owner, repoName, check.applied, check.scene_name, isHw)
-    })
-    .catch(function () {
-      showApplyModal(s, owner, repoName, false, '', isHw)
-    })
+  // weekly-09 修正：按技能集判断华为云场景（_applyScene 第二参已改 display_name，不能再比 name）
+  var isHw = skillsArr.indexOf('huawei-cloud') >= 0
+  // weekly-09 修订：删除「已应用预检」——每次应用都是全新场景（后端 custom-{uuid}），
+  // 同一用户基于同一模板建多个场景是正当需求，没有覆盖语义
+  showApplyModal(s, owner, repoName, s.display_name || s.name || '', isHw)
 }
-function showApplyModal(s, owner, repoName, isOverwrite, sceneName, isHwCloudScene) {
+function showApplyModal(s, owner, repoName, sceneName, isHwCloudScene) {
   applyCtx.sceneId = s.id
   applyCtx.owner = owner
   applyCtx.repoName = repoName
-  applyCtx.isOverwrite = !!isOverwrite
   applyCtx.sceneName = sceneName || ''
+  applyCtx.sceneNameError = ''
   applyCtx.isHwCloudScene = !!isHwCloudScene
   applyCtx.workBranch = 'main' // 老代码语义：默认选中 main，分支列表回来后校正（含 catch 兜底，勿留空——select :value 空值匹配不到 option 会显示空白）
   applyCtx.branches = [{ name: 'main' }]
@@ -920,58 +917,7 @@ function showApplyModal(s, owner, repoName, isOverwrite, sceneName, isHwCloudSce
         addField('HUAWEICLOUD_SDK_SK', '', { readOnlyKey: true })
       })
   }
-  // 覆盖应用：回填已有高级选项
-  if (isOverwrite) {
-    var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName)
-    G.API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(repoFull))
-      .then(function (pipeData) {
-        if (!applyCtx.open) return null
-        var scenesArr = (pipeData && pipeData.scenes) || []
-        var target = sceneName
-          ? scenesArr.find(function (x) {
-              return x.name === sceneName || x.display_name === sceneName
-            })
-          : null
-        if (!target) return null
-        return G.API.get(
-          '/scenes/' +
-            encodeURIComponent(target.id) +
-            '/advanced-options?repo=' +
-            encodeURIComponent(repoFull)
-        )
-      })
-      .then(function (d) {
-        if (!d || !applyCtx.open) return
-        if (d.work_branch) {
-          applyCtx.workBranch = d.work_branch
-          if (
-            !applyCtx.branches.some(function (x) {
-              return x.name === d.work_branch
-            })
-          ) {
-            applyCtx.branches.unshift({ name: d.work_branch })
-          }
-        }
-        var hwKeys = isHwCloudScene ? ['HUAWEICLOUD_SDK_AK', 'HUAWEICLOUD_SDK_SK'] : []
-        ;(d.custom_fields || []).forEach(function (f) {
-          var fname = f.name || f.key || ''
-          if (hwKeys.indexOf(fname) >= 0) {
-            // 已有 AK/SK 行 → 只更新 value
-            applyCtx.fields.forEach(function (row) {
-              if (row.name === fname) row.value = f.value !== undefined ? f.value : ''
-            })
-            return
-          }
-          addField(fname, f.value !== undefined ? f.value : '', {
-            isSecret: f.is_secret,
-            scope: f.scope,
-            preset: f.preset,
-            description: f.description,
-          })
-        })
-      })
-      .catch(function () {})
-  }
+  // weekly-09：无覆盖语义——每次应用都是全新场景，不再回填旧高级选项
 }
 function addField(name, value, opts) {
   opts = opts || {}
@@ -1066,13 +1012,27 @@ function confirmApply() {
         preset: !!f.preset,
       }
     })
+  // weekly-09：场景名称必填（空名/撞名时弹窗保留，改名重试）
+  var sceneDisplayName = (applyCtx.sceneName || '').trim()
+  if (!sceneDisplayName) {
+    applyCtx.sceneNameError = tt('apply_scene_name_empty')
+    return
+  }
   applyCtx.busy = true
   applyCtx.open = false
-  doApplyScene(applyCtx.sceneId, applyCtx.owner, applyCtx.repoName, applyCtx.workBranch, fields)
+  doApplyScene(
+    applyCtx.sceneId,
+    applyCtx.owner,
+    applyCtx.repoName,
+    applyCtx.workBranch,
+    fields,
+    sceneDisplayName
+  )
 }
-function doApplyScene(sceneId, owner, repoName, workBranch, customFields) {
+function doApplyScene(sceneId, owner, repoName, workBranch, customFields, sceneDisplayName) {
   var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName)
-  G.API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName)
+  var reqBody = sceneDisplayName ? { display_name: sceneDisplayName } : {}
+  G.API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName, reqBody)
     .then(function (r) {
       var sceneIdLocal = r.scene_id
       var navAfter = function (extraMsg) {
@@ -1110,8 +1070,15 @@ function doApplyScene(sceneId, owner, repoName, workBranch, customFields) {
         })
     })
     .catch(function (e) {
-      if (e && e.status === 409) showConflict(e.message, e.detail && e.detail.full_name)
-      else G.app.showToast(tf('toast.apply_failed', '应用失败') + ': ' + ((e && e.message) || ''))
+      // weekly-09：失败时弹窗保留，用户改名重试（409 撞名直接落在名称输入框下方）
+      applyCtx.busy = false
+      applyCtx.open = true
+      var msg = (e && (e.message || (e.detail && e.detail.message))) || ''
+      if (e && e.status === 409) {
+        applyCtx.sceneNameError = msg || tt('apply_scene_name_conflict')
+        return
+      }
+      G.app.showToast(tf('toast.apply_failed', '应用失败') + ': ' + msg)
     })
 }
 function selectRepoAndNav(fullName) {
@@ -1984,5 +1951,26 @@ onMounted(function () {
 }
 .sm {
   min-height: 100%;
+}
+/* weekly-09：应用弹窗的场景名称输入 */
+.sm__scenename {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 1px solid var(--b, #e8e8ed);
+  border-radius: 10px;
+  font-size: 13px;
+  outline: none;
+  background: var(--bg, #f5f5f7);
+}
+.sm__scenename:focus {
+  border-color: #0071e3;
+  background: #fff;
+}
+.sm__nameerr {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #ff3b30;
+  line-height: 1.5;
 }
 </style>
