@@ -278,7 +278,7 @@ def test_overview_trends_from_rollup_and_fallback():
 def test_overview_rollup_exception_falls_back_to_live(monkeypatch):
     """rollup 聚合查询抛异常时，降级分支应记录 warning 并回退 live，而非 NameError/500。"""
     from src.domains.insight.observability import overview
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     _grant(REPO)
     user = {"id": UID, "username": "roll-tester", "org_id": 0, "org_role": "owner"}

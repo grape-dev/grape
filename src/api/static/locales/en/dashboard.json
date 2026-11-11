@@ -172,5 +172,9 @@
   "sre_aksk_required": "Please enter Access Key and Secret Key",
   "sre_add_device_title": "Add device",
   "scene_detail": "Scene Detail",
-  "scene_engine_ctx_missing": "Scene context not ready, open scene edit first"
+  "scene_engine_ctx_missing": "Scene context not ready, open scene edit first",
+  "scene_pin": "Pin",
+  "scene_pinned": "Pinned",
+  "scene_unpin": "Unpin",
+  "scene_pin_failed": "Pin failed: {{msg}}"
 }

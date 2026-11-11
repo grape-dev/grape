@@ -161,6 +161,15 @@ class TestTaskSessionRepoAlignment:
 
 
 class TestRepoCardUnboundHint:
+
+    @staticmethod
+    def _render(card):
+        """Issue #1095：Card IR → lark dict（外观等价断言用）。"""
+        if isinstance(card, dict):
+            return card
+        from src.im.channel.renderers.feishu import FeishuCardRenderer
+        return FeishuCardRenderer().render(card).payload
+
     """未绑定仓库时 `/repo` 卡片应带明确提示（feishu-task-session-repo-alignment-design.md 补充）。"""
 
     @staticmethod
@@ -186,7 +195,7 @@ class TestRepoCardUnboundHint:
 
     def test_ut09_unbound_hint_shown(self):
         """"你好"未绑定仓库触发卡片时，含「未绑定仓库」提示 + red 头。"""
-        card = self._call(unbound_hint=True)
+        card = self._render(self._call(unbound_hint=True))
         assert card["header"]["template"] == "red"
         assert "未绑定仓库" in card["header"]["title"]["content"]
         body = json.dumps(card["elements"], ensure_ascii=False)
@@ -199,7 +208,7 @@ class TestRepoCardUnboundHint:
 
     def test_ut09b_explicit_repo_no_hint(self):
         """/repo 显式命令仍为普通列表（blue，无未绑定提示）。"""
-        card = self._call(unbound_hint=False)
+        card = self._render(self._call(unbound_hint=False))
         assert card["header"]["template"] == "blue"
         assert "未绑定仓库" not in card["header"]["title"]["content"]
 
@@ -225,6 +234,6 @@ class TestRepoCardUnboundHint:
                                   "sender_id": "u1", "sender_open_id": "ou_1", "chat_type": "group"}
                         asyncio.run(process_chat_async(ctx, api, parsed))
         assert got, "应发出 /repo 卡片"
-        card = got[0]
+        card = self._render(got[0])
         assert card["header"]["template"] == "red"
         assert "未绑定仓库" in card["header"]["title"]["content"]

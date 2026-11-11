@@ -10,7 +10,7 @@ env_extra 仅注入 ISSUE_NUMBER，PR_NUMBER 缺失，Agent 只能从标题猜�
 4. 解析失败 → PR_NUMBER_PARSE_FAILED=1 + 告警，禁止用 ISSUE_NUMBER 顶替。
 5. 非 note_hook_pr 事件（含 a2a_event）注入逻辑不回归。
 """
-from src.api.event_pipeline import _inject_issue_pr_env
+from src.domains.runtime.pipeline.event_pipeline import _inject_issue_pr_env
 
 _TEST_REPO = "gitcode:owner/repo"
 

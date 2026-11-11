@@ -185,7 +185,7 @@ def _confirm_missing(repo_key: str, numbers: list[int]) -> tuple[set[int], set[i
     confirmed: set[int] = set()
     unresolved: set[int] = set()
     try:
-        from src.api.event_pipeline import fetch_issue_via_vcs
+        from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
     except Exception as exc:
         log.warning(f"issue_vcs_index: import fetch_issue_via_vcs failed: {exc}")
         return set(), set(numbers)

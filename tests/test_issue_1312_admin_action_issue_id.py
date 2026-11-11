@@ -14,7 +14,7 @@ os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:test1312/repo"
 
@@ -144,7 +144,7 @@ def _seed_pipeline_db():
 
 
 def _patch_pipeline(monkeypatch, conn):
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     monkeypatch.setattr(sm, "db", conn)
     monkeypatch.setattr(sm, "db_lock", contextlib.nullcontext())
     monkeypatch.setattr("src.api.deps.check_repo_access", lambda *a, **k: None)

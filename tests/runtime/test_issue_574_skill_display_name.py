@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.mgmt.auth import grape_account_db
 from src.api.jwt_utils import create_access_token
 

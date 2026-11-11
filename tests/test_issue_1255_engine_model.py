@@ -17,7 +17,7 @@ from src.observability import llm_usage as lu
 
 
 def _make_task(task_id: str, runtime_id: int = 7):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_tasks WHERE id=?", (task_id,))
@@ -30,7 +30,7 @@ def _make_task(task_id: str, runtime_id: int = 7):
 
 
 def _cleanup(task_id: str):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM obs_llm_usage WHERE task_id=?", (task_id,))
@@ -40,7 +40,7 @@ def _cleanup(task_id: str):
 
 
 def _make_runtime(runtime_id: int, name: str, model_name: str = ""):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_runtimes WHERE id=?", (runtime_id,))
@@ -90,7 +90,7 @@ def test_model_key_empty_or_unknown_falls_back_to_raw():
     """model_key 为空/unknown 时用 model_raw；两者皆空的行跳过。"""
     tid = "t_1255_raw"
     _make_task(tid)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(

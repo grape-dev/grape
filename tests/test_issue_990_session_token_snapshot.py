@@ -32,7 +32,7 @@ from src.api.deps import get_current_user_or_api_key
 from src.domains.runtime.engine.service import (
     enqueue_task, session_token_for_execution, sync_task_session_token,
 )
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _seed_session_and_runtime(repo_key="gitcode:issue990/r", agent_type="coding"):
@@ -301,7 +301,7 @@ class TestSyncTaskSessionToken:
     def test_mysql_path_uses_named_lock_and_rotates(self, monkeypatch):
         """MySQL 后端走专用连接 GET_LOCK 串行化，且锁内轮换/回写成功。"""
         import src.domains.runtime.engine.service as service_mod
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
 
         tid = _new_task()
         try:
@@ -327,7 +327,7 @@ class TestSyncTaskSessionToken:
     def test_mysql_lock_not_acquired_fails_closed(self, monkeypatch):
         """MySQL 命名锁拿不到 → 不轮换、不改快照（fail-closed）。"""
         import src.domains.runtime.engine.service as service_mod
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
 
         tid = _new_task()
         try:
@@ -346,7 +346,7 @@ class TestSyncTaskSessionToken:
     def test_mysql_dedicated_connection_unavailable_fails_closed(self, monkeypatch):
         """MySQL 后端没有专用连接通道 → 不无锁轮换（fail-closed）。"""
         import src.domains.runtime.engine.service as service_mod
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
 
         tid = _new_task()
         try:

@@ -169,7 +169,7 @@ def test_skill_mismatch_error_and_contract_key():
 def test_worker_official_fallback_writes_back_declared(tmp_path, monkeypatch):
     # 物化官方目录名（checker-x）≠绑定名 → 回写 task.skill_fallback，
     # 门 verify 识别为 declared_fallback 放行，而非 local_cache 拒绝
-    import src.config as cfg
+    import src.kernel.config as cfg
     skill_dir = str(tmp_path / ".skills")
     official = tmp_path / "official" / "checker-x"
     official.mkdir(parents=True)
@@ -190,7 +190,7 @@ def test_worker_official_fallback_writes_back_declared(tmp_path, monkeypatch):
 
 def test_worker_official_fallback_diff_name_writes_back(tmp_path, monkeypatch):
     # 无 skill_fallback claim，官方按名解析到目录名不同的包 → 同样回写 declared
-    import src.config as cfg
+    import src.kernel.config as cfg
     skill_dir = str(tmp_path / ".skills")
     official = tmp_path / "official" / "caserun-alt"
     official.mkdir(parents=True)
@@ -393,13 +393,13 @@ def test_gate_scans_engine_native_dirs(tmp_path, monkeypatch):
 # ── 5. direct 端（event_pipeline._materialize_direct_workdir） ─────
 
 def test_direct_materialize_consistency_ok(tmp_path, monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     official = tmp_path / "off" / "caserun-prep"
     official.mkdir(parents=True)
     (official / "SKILL.md").write_text("# caserun-prep\n", encoding="utf-8")
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(official / "SKILL.md"))
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
                                  "caserun-prep", evt, "", "prompt")
@@ -410,11 +410,11 @@ def test_direct_materialize_consistency_ok(tmp_path, monkeypatch):
 
 def test_direct_materialize_local_cache_leftover_refused(tmp_path, monkeypatch):
     # direct 端：绑定未物化 + 工位缓存残留其它流水线技能 → ok=False（调用方拒绝派发）
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     skill_dir = tmp_path / ".skills"
     _mk_skill(str(skill_dir), "casegen-prep")
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
                                 "caserun-prep", evt, "", "prompt")
@@ -428,7 +428,7 @@ def test_direct_materialize_engine_native_leftover_refused(tmp_path, monkeypatch
     # QA 复审修复：seq=46108 原生缓存变体——绑定未物化 + 工位 .skills 空 +
     # casegen-prep 残留引擎原生缓存 → direct 端判定必须 ok=False（不再静默放行），
     # 与 worker 门（_skill_consistency_gate）扫描口径一致。
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     skill_dir = str(tmp_path / ".skills")
     native = str(tmp_path / "native")
@@ -439,7 +439,7 @@ def test_direct_materialize_engine_native_leftover_refused(tmp_path, monkeypatch
     # 物化降级会写 FALLBACK.md（#607 权威取回优先于原生缓存判定放行）——
     # 本用例聚焦「无 FALLBACK 指引时的原生缓存残留拒绝」，屏蔽降级文件写入。
     monkeypatch.setattr(sm, "write_skill_fallback", lambda *a, **k: None)
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
                                 "caserun-prep", evt, "", "prompt",
@@ -453,7 +453,7 @@ def test_direct_materialize_engine_native_leftover_refused(tmp_path, monkeypatch
 def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypatch):
     # 绑定技能存在于引擎原生缓存（内容一致的本地副本）→ 放行并显式标注
     # source=engine_native、actual=bound（不因原生目录存在而误拒）。
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     skill_dir = str(tmp_path / ".skills")
     native = str(tmp_path / "native")
@@ -462,7 +462,7 @@ def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypat
     import src.domains.runtime.engine.os_adapter as osa
     monkeypatch.setattr(osa, "engine_skill_dirs", lambda name: [native])
     monkeypatch.setattr(sm, "write_skill_fallback", lambda *a, **k: None)
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
                                 "caserun-prep", evt, "", "prompt",
@@ -476,7 +476,7 @@ def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypat
 # ── 6. 派发 payload 携带绑定 skill（env GRAPE_BOUND_SKILL） ─────────
 
 def test_enqueue_task_carries_bound_skill_env():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.domains.runtime.engine import service as svc
     tid = svc.enqueue_task(agent_session_id="sess-887", runtime_id=1,
                            prompt="p", skill="caserun-prep",
@@ -498,7 +498,7 @@ def test_enqueue_task_carries_bound_skill_env():
 
 def test_enqueue_task_bound_skill_env_empty_when_unbound():
     from src.domains.runtime.engine import service as svc
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     tid = svc.enqueue_task(agent_session_id="sess-887", runtime_id=1,
                            prompt="p", skill="",
                            repo_key="gitcode:o/test887", agent_type="qa")
@@ -520,7 +520,7 @@ def test_enqueue_task_bound_skill_env_empty_when_unbound():
 # ── 6b. GRAPE_BOUND_SKILL 权威注入（不可被 env_extra 覆盖，QA 修复） ──
 
 def test_enqueue_task_overrides_spoofed_bound_skill_env():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.domains.runtime.engine import service as svc
     tid = svc.enqueue_task(agent_session_id="sess-887", runtime_id=1,
                             prompt="p", skill="caserun-prep",
@@ -544,7 +544,7 @@ def test_enqueue_task_overrides_spoofed_bound_skill_env():
 # ── 7. 健康检查聚合项（QA AC4：check_skill_consistency 接入端点汇总） ──
 
 def test_aggregate_skill_consistency_counts_refusals():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.domains.runtime.engine.health import aggregate_skill_consistency
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()

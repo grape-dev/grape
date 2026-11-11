@@ -38,7 +38,23 @@ let _tasksSortOrder = 'desc'; // desc=最新在前 / asc=最早在前（Issue #4
 let _tasksMode = 'time';     // time=纯时间序（唯一模式）
 let _taskFilterStatuses = []; // 按状态多选筛选（空=全部；Issue #926：映射 statuses= 发服务端）
 let _taskFilterAssignees = []; // 按创建人多选筛选（空=全部；Issue #805: 值域改为 creator，请求携 creators=）
-let _tasksViewMode = 'mine';  // 'mine' | 'repo_all'（Issue #72: 仓库全部视图）
+// Issue #1740：「我的需求 / 仓库全部」视图模式持久化，刷新后保持上次选择
+const _TASKS_VIEW_MODE_KEY = 'tasks_view_mode';
+function _loadTasksViewMode() {
+  try {
+    var saved = localStorage.getItem(_TASKS_VIEW_MODE_KEY);
+    if (saved === 'mine' || saved === 'repo_all') return saved;
+  } catch (e) { /* localStorage 不可用/被污染 → 回退默认 */ }
+  return 'mine';
+}
+function _saveTasksViewMode(mode) {
+  try {
+    if (mode === 'mine' || mode === 'repo_all') {
+      localStorage.setItem(_TASKS_VIEW_MODE_KEY, mode);
+    }
+  } catch (e) { /* ignore */ }
+}
+let _tasksViewMode = _loadTasksViewMode();  // 'mine' | 'repo_all'（Issue #72/#1740）
 let _taskFilterPopoverOpen = false;  // 筛选 popover 展开状态（跨 _render 保持）
 
 // ===== Issue #1077-F：仓库全部 · 看板按列独立分页 =====
@@ -343,6 +359,7 @@ function _tasksReload(resetAll) {
 window._switchTasksViewMode = function(mode) {
   if (_tasksViewMode === mode) return;
   _tasksViewMode = mode;
+  _saveTasksViewMode(mode);  // Issue #1740：持久化，刷新后保持上次选择
   _taskSel = null;
   _taskPage = 1;
   _taskFilterStatuses = [];
@@ -678,15 +695,25 @@ function _openDeeplinkDetailViaApi(repo, issueNum) {
   });
 }
 
-function _mapStatusL(t) {
-  if (t.status === 'cancelled') return 'cancelled';
-  if (t.status === 'completed' || t.stage === 'done') return 'done';
-  if (t.status === 'pending_review' || t.stage === 'pending_review') return 'pending_review';
-  if (t.status === 'awaiting_input') return 'awaiting_input';
-  if (['vod','issue','coding','qa','sre'].includes(t.stage)) return 'in_progress';
-  if (t.status === 'processing') return 'in_progress';
+// Issue #1740：看板/列表/筛选项统一分组映射（单一事实源）。
+// 兼容 /issues/mine 与 /issues/{owner}/{repo} 返回的 status / stage 两套字段口径：
+// - status：数据库任务状态 active/processing/awaiting_input/pending_review/completed/cancelled
+// - stage：流水线节点 vod/issue/coding/qa/sre/done/pending_review...
+// 同一条记录 status 与 stage 可能不同步，任一字段能确定列即按「终态 > 待审/待澄清 > 进行中 > 待处理」优先。
+function _mapStatus(t) {
+  if (!t) return 'pending';
+  var status = String(t.status || '').toLowerCase();
+  var stage = String(t.stage || '').toLowerCase();
+  if (status === 'cancelled' || stage === 'cancelled') return 'cancelled';
+  if (status === 'completed' || stage === 'done' || stage === 'completed') return 'done';
+  if (status === 'pending_review' || stage === 'pending_review') return 'pending_review';
+  if (status === 'awaiting_input' || stage === 'awaiting_input') return 'awaiting_input';
+  if (status === 'processing' || stage === 'processing' ||
+      ['vod', 'issue', 'coding', 'qa', 'sre'].indexOf(stage) >= 0) return 'in_progress';
   return 'pending';
 }
+// 兼容历史调用名（看板/列表/筛选横跨多处，统一委托 _mapStatus）
+function _mapStatusL(t) { return _mapStatus(t); }
 
 function _filteredTasks() {
   let list = _tasksAll;
@@ -724,6 +751,42 @@ function _filteredTasks() {
   return list;
 }
 
+// Issue #1740：清理详情态与详情轮询（返回看板/场景/列表时统一调用）
+function _clearTaskDetailState() {
+  window._currentDetailTask = null;
+  if (window._taskPipeTimer) { clearInterval(window._taskPipeTimer); window._taskPipeTimer = null; }
+}
+
+// Issue #1740：从详情返回看板——先用缓存立即渲染（各列都有数据），
+// 再后台校准并恢复场景轮询；仓库全部看板按列合并刷新，避免全局分页覆盖列游标缓存。
+function _resumeTasksAfterDetail() {
+  _startScenePoll();
+  if (_boardPagingActive()) {
+    if (_tasksAll.length > 0) {
+      _render();
+      _boardLoadAll({ merge: true });
+    } else {
+      _tasksReload();
+    }
+    return;
+  }
+  if (_tasksAll.length > 0) {
+    _render();
+    loadTasks({ merge: true });
+  } else {
+    loadTasks();
+  }
+}
+
+// 统一「返回」入口：场景来源回退历史栈，其余回到需求中心看板
+window._backToBoard = function() {
+  var _fromScene = !!window._taskDetailFromScene;
+  window._taskDetailFromScene = null;
+  _clearTaskDetailState();
+  if (_fromScene) { window.history.back(); return; }
+  _resumeTasksAfterDetail();
+};
+
 window._openBoardDetail = function(taskId) {
   const t = window._tasksById[taskId];
   if (!t) return;
@@ -742,10 +805,9 @@ window._openBoardDetail = function(taskId) {
   window._pipeEventsShown = 20;
   // Issue #166: 从场景详情页进入时，返回按钮回到场景详情页
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
-  var _backAction = 'loadTasks()';
+  var _backAction = '_backToBoard()';  // Issue #1740：统一返回链路
   if (window._taskDetailFromScene) {
     _backLabel = '← ' + (I18N.t('dashboard.scene_detail')||'场景详情');
-    _backAction = "window._taskDetailFromScene=null;window.history.back()";
   }
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
@@ -805,7 +867,7 @@ window._openPRDetail = function(t) {
   el.innerHTML = `
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
-      <button class="tsk-btn tsk-btn-ghost" onclick="loadTasks()" style="padding:6px 14px">${_backLabel}</button>
+      <button class="tsk-btn tsk-btn-ghost" onclick="_backToBoard()" style="padding:6px 14px">${_backLabel}</button>
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">

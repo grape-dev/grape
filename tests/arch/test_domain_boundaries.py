@@ -33,7 +33,7 @@ def test_kernel_new_import_path():
 
 
 def test_old_import_path_reexport():
-    from src.config import log as old_log
+    from src.kernel.config import log as old_log
     from src.kernel.config import log as new_log
     assert old_log is new_log
 
@@ -70,7 +70,7 @@ def test_legacy_dir_shims_removed():
 
 def test_top_level_module_shims_still_work():
     """Thin module-level compat shims kept for external callers."""
-    from src.config import log as old_log
+    from src.kernel.config import log as old_log
     from src.kernel.config import log as new_log
     assert old_log is new_log
     from src.api.jwt_utils import create_access_token as old_create

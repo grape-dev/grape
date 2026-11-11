@@ -523,7 +523,7 @@ def test_manifest_covers_worktree_guard_deps():
     import pathlib
     import re
 
-    from src.worker_package import MANIFEST
+    from src.kernel.worker_package import MANIFEST
 
     txt = pathlib.Path("src/domains/runtime/engine/worktree_guard.py").read_text(encoding="utf-8")
     deps = set(re.findall(r"from\s+src\.api\.([a-zA-Z0-9_]+)\s+import", txt))
@@ -536,6 +536,6 @@ class TestManifestCodegraphInstaller:
     """Issue #666 (M4)：worker 包随包下发 codegraph 离线安装脚本。"""
 
     def test_manifest_contains_install_codegraph(self):
-        from src.worker_package import MANIFEST, ROOT
+        from src.kernel.worker_package import MANIFEST, ROOT
         assert "scripts/install-codegraph.sh" in MANIFEST
         assert os.path.isfile(os.path.join(ROOT, "scripts", "install-codegraph.sh"))

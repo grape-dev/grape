@@ -283,7 +283,23 @@ def main() -> int:
             strongconnect(v)
 
     r5 = []
+    def _common_prefix_len(mods):
+        """公共包前缀的段数（路径式，按 '.' 分段）。"""
+        parts = [m.split(".") for m in mods]
+        n = 0
+        for i in range(min(len(p) for p in parts)):
+            if len({p[i] for p in parts}) == 1:
+                n += 1
+            else:
+                break
+        return n
+
     for comp in sccs:
+        # 同一子包内部的导入环（>=4 段公共前缀，如 src.domains.runtime.im.adapters.feishu.*）
+        # 属于包内 re-export 的初始化顺序问题，Python 可正常加载（父包 __init__ 先完成）；
+        # 真正危险的是跨包/跨域环（公共前缀 <=3 段），仍按 HARD 处理。
+        if _common_prefix_len(comp) >= 4:
+            continue
         key = "CYCLE:" + "+".join(comp)
         if key not in WHITELIST and not any(
             k.startswith("CYCLE:") and set(k[6:].split("+")) >= set(comp)

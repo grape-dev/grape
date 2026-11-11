@@ -1,0 +1,34 @@
+# Tasks: Issue #1758
+
+- [x] T1 单一判官模块
+  - Acceptance: `evaluate` 返回 `{ok,skill,skill_id,actual_scope,expected_scope,reason,source,...}`；user 一律拒绝、显式 id 仍校验、查询异常 fail-closed、可显式降级
+  - Verify: `tests/test_issue_1758_scene_skill_scope.py::TestEvaluate`
+  - Files: `src/api/scene_skill_scope.py`, `src/user/db.py`
+- [x] T2 保存/apply 预检收敛 + 改绑候选
+  - Acceptance: 400 一次性返回全部冲突；含 `skill_scope`/`scene_scope`/`rebind_candidates`
+  - Verify: `TestFourEntryConsistency`, #657/#1564 用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T3 audit 复用判官
+  - Acceptance: 冲突计数与保存预检一致；suggested_skills 复用判官候选
+  - Verify: `TestFourEntryConsistency`, #1564 audit 用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T4 派发门禁收敛（PR 订阅 / issue 场景 / fallback / VOD）
+  - Acceptance: 显式 user skill_id 也 fail-fast；400/事件带结构化 scope 字段
+  - Verify: `TestA2A400StructuredFields`, #979/#657 用例
+  - Files: `src/api/event_pipeline.py`, `src/api/routes/webhook.py`
+- [x] T5 scene_precheck 收敛
+  - Acceptance: user scope 技能判 skill_unresolvable；查询异常 fail-closed
+  - Verify: `TestFourEntryConsistency`, #1245 用例
+  - Files: `src/api/scene_precheck.py`
+- [x] T6 detail 去私有依赖
+  - Acceptance: 仅投影判官结果；不再 import `_skill_scope_mismatch`
+  - Verify: #1721 detail 用例
+  - Files: `src/api/routes/scenes.py`
+- [x] T7 四入口交叉断言
+  - Acceptance: #1722 报障配置在保存/audit/派发/precheck/detail 结论一致
+  - Verify: `pytest tests/test_issue_1758_scene_skill_scope.py`
+  - Files: `tests/test_issue_1758_scene_skill_scope.py`
+- [x] T8 既有用例同步
+  - Acceptance: #657/#1564/#1721/#979/#1245 与新固定口径对齐
+  - Verify: 相关测试文件全绿（基线既有环境型失败除外）
+  - Files: `tests/*`

@@ -12,7 +12,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.engine_model import detect_engine_model
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -299,7 +299,7 @@ class TestRecentModelsAggregation:
 
     def test_batch_group_by_no_n_plus_1(self):
         from src.domains.mgmt.routes.settings import _recent_models_by_runtime, _RECENT_MODELS_TOP_N
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
         rid = self._seed()
         calls = {"n": 0}
         real_db = sm.db

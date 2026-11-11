@@ -24,7 +24,7 @@ BOT = "bot_tok_752"
 @pytest.fixture(autouse=True)
 def _client(monkeypatch):
     # 清残留合入日志（sqlite db 跨 pytest 会话持久化，防跨会话串扰断言）
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     try:
         db.execute("DELETE FROM grape_t_merge_gate_log")
         db.commit()
@@ -136,7 +136,7 @@ def _fake_req_dispatch(files_payload, merge_payload=None, get_error=None,
 
 
 def _gate_rows(number=9):
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     c = db.cursor()
     c.execute("SELECT phase, decision, hits_json FROM grape_t_merge_gate_log "
               "WHERE pr_number=? ORDER BY rowid", (number,))

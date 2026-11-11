@@ -38,7 +38,7 @@ def _legacy(offset_seconds: float = 0) -> str:
 
 def _seed_task(tid: str, status: str, *, pending_since=None, errors="", event_seq=None,
                started_at=None, completed_at=None, result_text="", revived_at=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_tasks WHERE id=?", (tid,))
@@ -55,7 +55,7 @@ def _seed_task(tid: str, status: str, *, pending_since=None, errors="", event_se
 
 
 def _seed_message(tid: str, created_at: str, seq: int = 1):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -67,7 +67,7 @@ def _seed_message(tid: str, created_at: str, seq: int = 1):
 
 
 def _seed_event(seq: int, status: str):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM events WHERE seq=?", (seq,))
@@ -80,7 +80,7 @@ def _seed_event(seq: int, status: str):
 
 
 def _status(tid: str):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         r = db.cursor().execute(
             "SELECT status, started_at, errors, revived_at, completed_at FROM agent_tasks WHERE id=?",
@@ -189,7 +189,7 @@ def test_worker_completes_after_restart_without_409():
     assert _status(tid)[0] == "pending_self_report", "重启 30 分钟后活着的任务被判死了"
 
     # worker 干完活自报（pending_self_report 属活动态，补报守卫放行）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         tok = db.cursor().execute("SELECT started_at FROM agent_tasks WHERE id=?", (tid,)).fetchone()[0]
     assert service.validate_run_token(service.get_task(tid), tok) == "ok"
@@ -216,7 +216,7 @@ def test_revive_late_structured_result():
     row = _status(tid)
     assert row[0] == "completed", f"复活后应为 completed: {row}"
     assert row[3], "revived_at 必须落痕（只复活一次）"
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         ev_status = db.cursor().execute("SELECT status FROM events WHERE seq=?", (evt,)).fetchone()[0]
     assert ev_status == "completed", f"事件侧应改判 completed，实际 {ev_status}"
@@ -275,7 +275,7 @@ def test_event_terminal_guard_unaffected_without_flag():
     evt = 91075
     _seed_event(evt, "failed")
     update_event_complete(evt, "completed", exit_code=0, completed_at=_iso(), result="attempt")
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         st = db.cursor().execute("SELECT status FROM events WHERE seq=?", (evt,)).fetchone()[0]
     assert st == "failed", "正常 complete 路径不得覆盖 failed 事件"

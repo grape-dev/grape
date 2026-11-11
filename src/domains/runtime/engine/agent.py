@@ -1563,6 +1563,36 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     if _single_address:
         env["GRAPE_SERVER_URL"] = local_base
         log.info("local worker: single-address deploy, override GRAPE_SERVER_URL -> %s", local_base)
+    # Issue #1858：按服务基址跟随生效基址修正——
+    # - vcs / issue 跟随「生效的业务基址」`GRAPE_SERVER_URL`：单地址部署时该值为
+    #   local_base（避免 NAT 回环）；分端口部署（业务 8081 / runtime 8083）时保留
+    #   业务基址，绝不改成 runtime 端口的 local_base，否则 VCS/Issue 404 复现。
+    #   仅在缺失或与业务基址同端点时改写，显式分服务基址保留。
+    # - a2a 继续跟随 runtime 直连：缺失或与回连基址同端点时覆盖为 local_base。
+    _business_effective = env.get("GRAPE_SERVER_URL") or ""
+    _svc_refs = (
+        ("GRAPE_VCS_BASE_URL", "vcs", _business_base, _business_effective),
+        ("GRAPE_ISSUE_BASE_URL", "issue", _business_base, _business_effective),
+        ("GRAPE_A2A_BASE_URL", "a2a", _runtime_base, local_base),
+    )
+    _overridden = {}
+    for _key, _svc, _ref, _target in _svc_refs:
+        _val = env.get(_key) or ""
+        if not _val or (_ref and _same_url_host(_val, _ref)):
+            if _target and _target != _val:
+                env[_key] = _target
+                _overridden[_svc] = "local_worker_override"
+    if _overridden:
+        try:
+            import json as _json_base_src
+            _sources = _json_base_src.loads(env.get("GRAPE_BASE_URL_SOURCES") or "{}")
+            _sources.update(_overridden)
+            env["GRAPE_BASE_URL_SOURCES"] = _json_base_src.dumps(
+                _sources, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            pass
+        log.info("local worker: override service base env -> %s (%s)",
+                 local_base, ",".join(sorted(_overridden)))
 
 
 def _current_username() -> "str | None":
@@ -2164,6 +2194,20 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
     try:
         # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
         _skill_notes = []
+        # Issue #1635：来源溯源 + 双向漂移校验（scope 由 skill_id 解析，失败则跳过）
+        _skill_id = int(task.get("skill_id") or 0)
+        _skill_scope = ""
+        try:
+            if _skill_id:
+                from src.user.db import get_skill_by_id
+                _skill_scope = (get_skill_by_id(_skill_id) or {}).get("scope") or ""
+        except Exception as _sse:
+            log.warning(f"[skill] scope resolve failed: {_sse}")
+        _skill_meta: dict = {}
+        # Issue #1635 review：官方回退成功后的有效来源（物化名/scope/skill_id）。
+        # 官方内容 digest/version 必须与 official 来源口径一致，不能沿用任务原始
+        # skill_id/_skill_scope（否则构成「主来源 id + 官方 digest」错配）。
+        _fb_source: dict = {}
 
         def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
             """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。
@@ -2198,6 +2242,11 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                     _skill_dir, _dst_name, os.path.dirname(_official))
                 if _ok:
                     _env["DEVOPS_SKILLS_DIR"] = _skill_dir
+                    # 同名官方包回退 → official/0；agent_type 检查器回退（异名）→
+                    # official + 检查器 skill_id（与共享物化实现口径一致）。
+                    _fb_source["skill_name"] = _dst_name
+                    _fb_source["scope"] = "official"
+                    _fb_source["skill_id"] = 0 if _dst_name == _skill_name else _fb_id
                     if _dst_name != _skill_name:
                         # Issue #887（QA 修复）：物化名≠绑定名时回写 task.skill_fallback，
                         # 使 _skill_consistency_gate 将其识别为 declared_fallback
@@ -2253,7 +2302,8 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
             from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
             raw = _b64.b64decode(skill_zip_b64)
-            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
+            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(
+                skill_dir, raw, baseline_dir="", scope=_skill_scope, meta=_skill_meta)
             # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
             # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
             #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
@@ -2265,6 +2315,11 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                 _fb_hit = str(_fb_info.get("skill_name") or "")
                 if _fb_hit and _fb_hit in _skills_ok:
                     log.info(f"[skill] target '{_target_skill}' miss, checker '{_fb_hit}' materialized")
+                    # Issue #1635 review：zip 内命中官方检查器（异名）→ 来源按
+                    # official + 检查器 skill_id 构造，供执行前来源行读取。
+                    _fb_source["skill_name"] = _fb_hit
+                    _fb_source["scope"] = "official"
+                    _fb_source["skill_id"] = int(_fb_info.get("skill_id") or 0)
                     _skill_notes.append(
                         f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
                         f"(fallback): skill '{_target_skill}' not found; materialized official "
@@ -2321,7 +2376,9 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
             _per_skill = []  # [(skill_name, ok, reason)]
             for _sn, files in skill_files.items():
-                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
+                _ok_s, _r_s = materialize_skill_files_atomic(
+                    skill_dir, _sn, files or {},
+                    baseline_dir="", scope=_skill_scope, meta=_skill_meta)
                 _per_skill.append((_sn, _ok_s, _r_s))
                 if not _ok_s:
                     log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
@@ -2350,6 +2407,25 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
                                          _reason, stage="skill_files")
         if _skill_notes:
             prompt += "".join(_skill_notes)
+        # Issue #1635：物化成功（含回退）→ 计算最终来源与漂移，供执行前来源行上报
+        # Issue #1635 review：官方回退（同名/agent_type 检查器异名）时，来源必须取
+        # 实际落盘的技能名 + official/0（或检查器 id），不得沿用任务原始 skill_id/
+        # _skill_scope；否则 digest/version 来自官方内容而 id 指向主来源造成错配，
+        # 且异名回退时原技能名无 SKILL.md 会漏掉 source/drift（来源行缺字段）。
+        _final_skill = (_fb_source.get("skill_name") or task.get("skill") or "")
+        _final_id = _fb_source.get("skill_id", _skill_id) if _fb_source else _skill_id
+        _final_scope = (_fb_source.get("scope", _skill_scope)
+                        if _fb_source else _skill_scope)
+        if _final_skill and os.path.isfile(os.path.join(
+                skill_dir, _final_skill, "SKILL.md")):
+            try:
+                from src.domains.runtime.engine.skill_materialize import build_skill_drift_and_source
+                _skill_meta.update(build_skill_drift_and_source(
+                    skill_dir, _final_skill, _final_id, _final_scope,
+                    task.get("agent_type") or ""))
+            except Exception as _sme:
+                log.warning(f"[skill] drift/source build failed: {_sme}")
+        task["_skill_materialize_meta"] = _skill_meta
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
         # Issue #607：物化异常分支同样写 FALLBACK.md 降级指引 + 留痕
@@ -2414,10 +2490,13 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
         _sv = verify_skill_execution_consistency(
             task.get("skill") or "", skill_dir, task.get("skill_fallback") or None,
             extra_scan_dirs=_extra_dirs)
+        _mm = task.get("_skill_materialize_meta") or {}
         try:
             await client.report_messages(tid, [build_skill_source_message(
                 _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
-                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))])
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""),
+                source_info=_mm.get("source") or None,
+                drift=_mm.get("drift") or None)])
         except Exception as _rme:
             log.warning(f"task {tid}: skill source log report failed: {_rme}")
         if not _sv.get("ok"):
@@ -2670,6 +2749,15 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         # GRAPE_SERVER_URL，单地址部署仍覆盖为本机直连（改造前等价，避免 NAT 回环不通）。
         _apply_local_worker_base_override(env, task, _local_base)
         log.info(f"local worker: override RUNTIME_SERVER_URL/server_url -> {_local_base}")
+    # Issue #1858：执行前三面基址前置校验——缺失即显式告警（禁止静默回退 localhost），
+    # 提示服务端派发/worker env 重拉注入，便于 runbook 前置检查定位。
+    _missing_svc_bases = [k for k in ("GRAPE_VCS_BASE_URL", "GRAPE_ISSUE_BASE_URL",
+                                      "GRAPE_A2A_BASE_URL") if not (env.get(k) or "").strip()]
+    if _missing_svc_bases:
+        log.warning(
+            "task %s missing service base env: %s; server dispatch should inject "
+            "GRAPE_VCS_BASE_URL / GRAPE_ISSUE_BASE_URL / GRAPE_A2A_BASE_URL "
+            "(worker env refresh covers historical snapshots)", tid, ",".join(_missing_svc_bases))
     # git worktree 前置（coding/qa/sre，X 工作模型）：必须先建 worktree 再落地技能，
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。

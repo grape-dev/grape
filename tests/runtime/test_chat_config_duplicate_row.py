@@ -32,17 +32,20 @@ def _clean():
 
 
 def _seed_rows(user_id):
-    """同 user 两条 repo_key='' 行：先空行后带配置行（复刻账号迁移残留）。"""
+    """同 user 两条 repo_key='' 行：先空行后带配置行（复刻账号迁移残留）。
+
+    A2 收尾后 get_chat_config 不再回显 im_*，用 skill 作为「有配置」的判别字段。
+    """
     with db_lock:
         c = db.cursor()
         # 空行（先插入，get_chat_config 无序时会被命中）
         c.execute(
-            "INSERT INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) "
-            "VALUES ('sess-cfg-%d-a', %d, '', '', '', '')" % (user_id, user_id))
-        # 带 im 配置的行（真绑定行）
+            "INSERT INTO chat_agent_session (id, user_id, repo_key, skill) "
+            "VALUES ('sess-cfg-%d-a', %d, '', '')" % (user_id, user_id))
+        # 带配置的行（真配置行）
         c.execute(
-            "INSERT INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) "
-            "VALUES ('sess-cfg-%d-b', %d, '', 'app_%d', 'sec_%d', 'feishu')" % (user_id, user_id, user_id, user_id))
+            "INSERT INTO chat_agent_session (id, user_id, repo_key, skill) "
+            "VALUES ('sess-cfg-%d-b', %d, '', 'cfg_skill_%d')" % (user_id, user_id, user_id))
         db.commit()
 
 
@@ -62,43 +65,42 @@ class TestGetChatConfigDuplicateRow:
         """UT-01：存在空行 + 配置行时，get_chat_config 返回配置行的 im_app_id。"""
         _seed_rows(9001)
         cfg = get_chat_config(9001)
-        assert cfg["im_app_id"] == "app_9001", f"应命中已配置行, got {cfg['im_app_id']!r}"
+        assert cfg["skill"] == "cfg_skill_9001", f"应命中已配置行, got {cfg['skill']!r}"
 
     def test_ut02_empty_only(self):
         """UT-02：仅空配置行，返回空 im_app_id（兜底，不抛错）。"""
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) "
-                "VALUES ('sess-cfg-9002-a', 9002, '', '', '', '')")
+                "INSERT INTO chat_agent_session (id, user_id, repo_key, skill) "
+                "VALUES ('sess-cfg-9002-a', 9002, '', '')")
             db.commit()
         cfg = get_chat_config(9002)
-        assert cfg["im_app_id"] == ""
+        assert cfg["skill"] == ""
 
     def test_ut03_set_clears_configured_row(self):
         """UT-03：set_chat_config 清空 im 字段后，DB 配置行真被清空（不只剩空行为空）。"""
         _seed_rows(9003)
-        set_chat_config(9003, im_app_id="", im_app_secret="", im_provider="")
+        set_chat_config(9003, skill="")
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, im_app_id, im_app_secret, im_provider FROM chat_agent_session "
+                "SELECT id, skill FROM chat_agent_session "
                 "WHERE user_id=9003 AND repo_key='' ORDER BY id").fetchall()
-        # 断言：所有行 im 字段均为空（真绑定行被清掉，不再残留 app）
-        for rid, aid, sec, prov in rows:
-            assert aid == "", f"行 {rid} im_app_id 应被清空, got {aid!r}"
-            assert prov == "", f"行 {rid} im_provider 应被清空, got {prov!r}"
+        # 断言：写路径收敛成一行且配置清空（重复行被清理，不再残留旧配置）
+        assert len(rows) == 1, f"应只剩写路径一行, got {rows}"
+        assert rows[0][1] == "", f"skill 应被清空, got {rows[0][1]!r}"
 
 
 class TestWriteRowDedup:
     def test_ut05_write_cleans_duplicates(self):
         """UT-05：_write_chat_config_row 写配置前清理同 user 重复 repo_key='' 行，只留一条。"""
         _seed_rows(9001)
-        _write_chat_config_row(9001, im_app_id="app_x", im_app_secret="s", im_provider="feishu")
+        _write_chat_config_row(9001, skill="cfg_x")
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, im_app_id FROM chat_agent_session WHERE user_id=9001 AND repo_key=''").fetchall()
+                "SELECT id, skill FROM chat_agent_session WHERE user_id=9001 AND repo_key=''").fetchall()
         assert len(rows) == 1, f"应只剩一条, got {rows}"
-        assert rows[0][1] == "app_x"
+        assert rows[0][1] == "cfg_x"
 
 
 class TestDedupMigration:
@@ -110,19 +112,19 @@ class TestDedupMigration:
         _cleanup_dup_chat_config_rows()
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, im_app_id FROM chat_agent_session WHERE user_id=9001 AND repo_key=''").fetchall()
+                "SELECT id FROM chat_agent_session WHERE user_id=9001 AND repo_key=''").fetchall()
         assert len(rows) == 1, f"迁移后应只剩一条, got {rows}"
 
     def test_ut06b_single_row_unchanged(self):
         """UT-06b：仅一条配置行时迁移无副作用。"""
         from src.api.db_setup import _cleanup_dup_chat_config_rows
-        _write_chat_config_row(9002, im_app_id="app_9002", im_app_secret="s", im_provider="feishu")
+        _write_chat_config_row(9002, skill="cfg_9002")
         _cleanup_dup_chat_config_rows()
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, im_app_id FROM chat_agent_session WHERE user_id=9002 AND repo_key=''").fetchall()
+                "SELECT id, skill FROM chat_agent_session WHERE user_id=9002 AND repo_key=''").fetchall()
         assert len(rows) == 1
-        assert rows[0][1] == "app_9002"
+        assert rows[0][1] == "cfg_9002"
 
 
 class TestUnbindCleansGroupBinding:

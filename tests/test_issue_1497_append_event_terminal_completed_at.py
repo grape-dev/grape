@@ -36,9 +36,9 @@ def test_db(monkeypatch):
         )
     """)
     _conn.commit()
-    monkeypatch.setattr("src.session_manager.db", _conn)
+    monkeypatch.setattr("src.kernel.session_manager.db", _conn)
     monkeypatch.setattr("src.api.event_store.db", _conn)
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     monkeypatch.setattr("src.api.event_store.db_lock", db_lock)
     try:
         import src.user.org_db as _org_db

@@ -334,7 +334,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME（repository）派生，缺失回退 repo_key；
     # **禁止**用 exec_account（触发人账号/带前缀全名）充当 REPO_OWNER——否则触发人≠仓库 owner 时
     # 会注入 REPO_OWNER=<触发人>、REPO_NAME=""（反馈 2874）。Issue #94 的前缀剥离由派生入口统一处理。
-    from src.repo_key import derive_repo_identity as _derive_env
+    from src.kernel.repo_key import derive_repo_identity as _derive_env
     _full_name_env, _repo_owner_env, _repo_name_env = _derive_env(repository, repo_key)
     env_extra = {
         "REPO_FULL_NAME": _full_name_env or repository,

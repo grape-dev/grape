@@ -26,7 +26,7 @@ from src.domains.runtime.agents.hermes_acp import (  # noqa: E402
     _extract_tool_call_input,
     _input_from_content_blocks,
 )
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.domains.runtime.engine import service  # noqa: E402
 
 

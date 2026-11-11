@@ -19,22 +19,60 @@ def chat_repo_env(repo_key: str) -> dict:
     rk = (repo_key or "").strip()
     if not rk or rk.startswith("chat:"):
         return {}
-    from src.repo_key import derive_repo_identity, from_repo_key
+    from src.kernel.repo_key import derive_repo_identity, from_repo_key
     full_name, owner, name = derive_repo_identity(from_repo_key(rk), rk)
     if not full_name:
         return {}
     return {"REPO_FULL_NAME": full_name, "REPO_OWNER": owner, "REPO_NAME": name}
 
 
-def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
+def _resolve_issue_number(issue_number, conv_id: str) -> str:
+    """解析任务会话 Issue 编号（仅 conv_type == "task" 且为纯数字时返回，否则空串）。
+
+    issue_number 入参为空时按 conv_id 兜底查会话；#528 口径：非数字/占位值不注入。
+    """
+    value = issue_number
+    if not value and conv_id:
+        try:
+            from src.kernel.session_manager import get_conversation
+            conv = get_conversation(conv_id)
+            if conv and conv.get("conv_type") == "task":
+                value = conv.get("issue_number")
+        except Exception as e:
+            log.warning(f"chat_session_env_extra: resolve issue number failed for conv={conv_id}: {e}")
+            value = ""
+    text = str(value or "").lstrip("#").strip()
+    return text if text.isdigit() else ""
+
+
+def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str, *,
+                           runtime_id: int = 0, issue_number="") -> dict:
     """任务会话（真实仓库）chat 会话凭据注入。
 
-    返回 env dict：恒含 USER_ID / CONVERSATION_ID；repo_key 为真实仓库时附加
-    REPO_FULL_NAME/REPO_OWNER/REPO_NAME、GRAPE_SESSION_TOKEN（tk_，session_key=`conv:{conv_id}`）
-    与 GRAPE_CLI_MODE=WORKER。
-    issue_session_token 抛异常（DB 不可用等）时仅缺 token 字段、不抛，chat 仍可正常回复。
+    返回 env dict：恒含 USER_ID / CONVERSATION_ID / GRAPE_SERVER_URL；repo_key 为真实仓库时
+    附加 REPO_FULL_NAME / REPO_OWNER / REPO_NAME、GRAPE_SESSION_TOKEN（tk_，
+    session_key=`conv:{conv_id}`）与 GRAPE_CLI_MODE=WORKER；任务会话且 Issue 编号为纯数字时
+    附加 ISSUE_NUMBER。伪仓库/空仓库不注入 REPO_* / ISSUE_NUMBER（键不出现）。
+    各外部解析抛异常时仅缺对应字段、不抛，chat 仍可正常回复。
     """
     env = {"USER_ID": str(user_id), "CONVERSATION_ID": conv_id or ""}
+
+    # 恒注入业务 API 基址（Issue #1577：GRAPE_SERVER_URL 承载业务端点，非 runtime 回连地址）；
+    # 解析失败仅缺该键，不中断聊天。
+    try:
+        from src.kernel.prompt_builder import _resolve_business_server_url
+        env["GRAPE_SERVER_URL"] = _resolve_business_server_url(runtime_id or 0)
+    except Exception as e:
+        log.warning(f"chat_session_env_extra: resolve server url failed for conv={conv_id}: {e}")
+
+    # Issue #1858：chat 会话同样注入三面基址（VCS/Issue/A2A），与任务派发同源，
+    # 避免 chat 场景下 A2A 自调用仍落到业务基址。
+    try:
+        from src.kernel.prompt_builder import resolve_service_base_env
+        env.update(resolve_service_base_env(runtime_id or 0))
+    except Exception as e:
+        log.warning(f"chat_session_env_extra: resolve service bases failed for conv={conv_id}: {e}")
+
     env.update(chat_repo_env(repo_key))
     if repo_key and not repo_key.startswith("chat:"):
         try:
@@ -45,4 +83,7 @@ def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
             env["GRAPE_CLI_MODE"] = "WORKER"
         except Exception as e:
             log.warning(f"chat_session_env_extra: issue session token failed for conv={conv_id}: {e}")
+        _issue = _resolve_issue_number(issue_number, conv_id)
+        if _issue:
+            env["ISSUE_NUMBER"] = _issue
     return env

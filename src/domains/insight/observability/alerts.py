@@ -920,8 +920,9 @@ async def _send_event_text(rule: Dict[str, Any], ev: Dict[str, Any], text: str,
         for uid, open_id in recipients:
             try:
                 from src.api.issues_center import _resolve_user_chat_bot
-                ctx = _resolve_user_chat_bot(bm, uid) if (bm := _bot_manager()) else None
-                api = bm.api if bm else None
+                from src.im.engine_wiring import feishu_api
+                ctx = _resolve_user_chat_bot(None, uid)
+                api = feishu_api(ctx.app_id) if ctx else None
                 if not ctx or not api:
                     stats["skipped"] += 1
                     log.info(f"obs alert feishu: user={uid} 未配置/未连接本人 chat bot，跳过")
@@ -943,14 +944,6 @@ async def _send_event_text(rule: Dict[str, Any], ev: Dict[str, Any], text: str,
             stats["failed"] += 1
             log.warning(f"obs alert webhook failed: {e}")
     return did_send
-
-
-def _bot_manager():
-    try:
-        from src.api import main as api_main
-        return api_main.bot_manager
-    except Exception:
-        return None
 
 
 async def notify_fired_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -1068,17 +1061,13 @@ async def send_test_notification(user: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": "no_open_id",
                 "message": "本人未绑定飞书身份（unified_user_mapping.feishu_open_id 为空）——"
                            "请先在「Chat Agent」页扫码配置飞书"}
-    try:
-        from src.api import main as api_main
-        bm = api_main.bot_manager
-    except Exception:
-        bm = None
-    ctx = _resolve_user_chat_bot(bm, uid) if bm else None
+    ctx = _resolve_user_chat_bot(None, uid)
     if not ctx:
         return {"ok": False, "reason": "no_bot",
-                "message": "本人 chat bot 未连接（chat_agent_session.im_app_id 为空或 bot 不在内存）——"
+                "message": "本人 chat bot 未配置（grape_t_channel_installation 无活跃飞书安装）——"
                            "请先在「Chat Agent」页扫码配置飞书"}
-    api = bm.api if bm else None
+    from src.im.engine_wiring import feishu_api
+    api = feishu_api(ctx.app_id)
     if not api:
         return {"ok": False, "reason": "no_api", "message": "IM 客户端未初始化"}
     text = ("[Grape 告警·测试] 这是一条测试告警，用于验证飞书通知通道。"

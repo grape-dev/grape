@@ -11,13 +11,13 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _tmp_workspace(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setattr("src.project_info.builder.WORKSPACE_DIR", str(tmp_path))
     yield tmp_path
 
 
 def _pi_dir(repo_key="gitcode:org/test"):
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "project-info")
 
 

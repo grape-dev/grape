@@ -5,7 +5,7 @@
 - sync_feedback_statuses：已转换反馈状态联动更新；只升不降（不覆盖 admin 手工终态）
 - 未转换（issue_url=''）/ 无 issue_id 的反馈不受同步影响
 """
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import init_database
 
 init_database()  # issue 表按需建（本用例组需要 issue 单表 join）

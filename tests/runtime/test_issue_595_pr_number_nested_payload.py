@@ -16,7 +16,7 @@ lstrip("#").isdigit() 校验。
 4. PR 订阅（无关联 Issue，仅 _pr_sub_pr_number）形态不回归。
 5. 嵌套值非数字 → 不注入（沿用 Issue #528 纯数字校验）。
 """
-from src.api.event_pipeline import _inject_issue_pr_env
+from src.domains.runtime.pipeline.event_pipeline import _inject_issue_pr_env
 
 _TEST_REPO = "gitcode:owner/repo"
 

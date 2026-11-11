@@ -219,7 +219,7 @@ class TestT1BotIssueOpenedRecommends:
         assert _ae.called, ("bot 建单必须重派 VOD 执行棒"
                             "（GRAPE_BOT_OPENED_FULL_PIPELINE 默认 1）")
         # 3b) 开关显式置 0 → 回退旧行为：scene-only，不新增事件
-        with patch("src.config.GRAPE_BOT_OPENED_FULL_PIPELINE", False), \
+        with patch("src.kernel.config.GRAPE_BOT_OPENED_FULL_PIPELINE", False), \
              patch("src.api.event_store.append_event", return_value=1) as _ae2:
             ep._redispatch_vod_after_recommend(RK, "#201", "vod",
                                                {"_bot_opened": True, "payload": {}}, 0)

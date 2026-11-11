@@ -20,7 +20,7 @@ BRANCH = "feat/issue-993"
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     try:
         db.execute("DELETE FROM distributed_locks WHERE lock_key LIKE 'branch_guard:%'")
         db.execute("DELETE FROM branch_guard_state")
@@ -44,7 +44,7 @@ def test_lease_key_is_branch_scoped():
 
 
 def test_lease_contention_only_one_writer(monkeypatch):
-    import src.lock as lock
+    import src.kernel.lock as lock
     monkeypatch.setattr(lock, "_holder", "host-task-A")
     first = bg.acquire_branch_lease(REPO_KEY, BRANCH, expected_remote_sha="sha-old")
     assert first["ok"] is True
@@ -317,7 +317,7 @@ def test_hook_cross_process_holder_rejects_self_lock(monkeypatch, capsys):
     自动推送路径因此改用 ``--no-verify``（自身已持租约并完成等价 preflight），
     避免 push 触发的新进程钩子把本任务自己锁在门外。
     """
-    import src.lock as lock
+    import src.kernel.lock as lock
     monkeypatch.setattr(lock, "_holder", "host-task-A")
     assert bg.acquire_branch_lease(REPO_KEY, BRANCH)["ok"] is True
     try:
@@ -595,7 +595,7 @@ def test_direct_linked_push_path_uses_guard(tmp_path, monkeypatch):
 
 def test_lease_contention_message_contains_task_id(monkeypatch):
     """AC1：租约 holder 含任务 ID 时，争用提示可定位到具体任务。"""
-    import src.lock as lock
+    import src.kernel.lock as lock
     monkeypatch.setattr(lock, "_holder", "host-task-A")
     first = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_taskA")
     assert first["ok"] is True
@@ -616,7 +616,7 @@ def test_lease_contention_message_contains_task_id(monkeypatch):
 
 def test_same_task_id_across_workers_still_mutually_exclusive(monkeypatch):
     """同一 task_id 调度的两个 worker 不得互相续期成功（holder 须含进程标识）。"""
-    import src.lock as lock
+    import src.kernel.lock as lock
     monkeypatch.setattr(lock, "_holder", "worker-A")
     first = bg.acquire_branch_lease(REPO_KEY, BRANCH, task_id="t_shared")
     assert first["ok"] is True

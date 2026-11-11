@@ -1531,7 +1531,7 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
                             detail={"code": 400, "message": "请先选择仓库"})
     if not isinstance(limit, int) or limit < 1:
         limit = 200
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:

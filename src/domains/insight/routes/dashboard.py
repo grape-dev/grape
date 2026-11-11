@@ -382,8 +382,8 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
     - 仓库隔离：repo 空 → 空态（不做全库聚合）；越权 → 沿用 check_repo_access 的 403/404。
     - 任何查询异常不外抛，按段降级为空结果（与 /efficiency 同策略），不拖垮页面。
     """
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     from src.observability.efficiency import build_board
 
     repo_keys = []
@@ -430,7 +430,7 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
 
 def _eff_repo_keys(repo: str):
     """repo 入参归一化 → (repo_keys, repo_key_out)。空入参返回空（仓库维度视图）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     if not (repo and repo.strip()):
         return [], ""
     base = repo.split(":", 1)[1] if ":" in repo else repo
@@ -444,7 +444,7 @@ def _eff_repo_keys(repo: str):
 def get_efficiency_daily(repo: str = "", week: str = "",
                          user: dict = Depends(require_org_member)):
     from datetime import datetime as _dt
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.observability.efficiency import (build_daily, parse_week_label,
                                               _fetch_issue_rows, iso_week_label)
 
@@ -476,7 +476,7 @@ def get_efficiency_daily(repo: str = "", week: str = "",
 def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
                           threshold_days: int = 7, limit: int = 20, offset: int = 0,
                           user: dict = Depends(require_org_member)):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.observability.efficiency import build_issue_list
 
     repo_keys, repo_key_out = _eff_repo_keys(repo)

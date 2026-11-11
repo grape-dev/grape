@@ -134,7 +134,7 @@ def test_validate_skill_dir_cross_skill_refs_not_missing(skills_root):
         "SKILL.md": SKILL_MD_CROSS,
         "references/local-runbook.md": "# local",
     })
-    ok, missing = sm.validate_skill_dir(d)
+    ok, missing, _extra, _vd = sm.validate_skill_dir(d)
     assert ok, missing
     assert missing == []
 

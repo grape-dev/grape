@@ -32,18 +32,18 @@ def sched():
     if _SCHED is not None:
         yield _SCHED
         return
-    saved = {k: sys.modules.get(k) for k in ("src.config", "src.session_manager")}
-    cfg = types.ModuleType("src.config")
+    saved = {k: sys.modules.get(k) for k in ("src.kernel.config", "src.kernel.session_manager")}
+    cfg = types.ModuleType("src.kernel.config")
     cfg.log = _log
     src_pkg = sys.modules.get("src") or types.ModuleType("src")
     if not hasattr(src_pkg, "__path__"):
         src_pkg.__path__ = [os.path.join(SRC_DIR, "src")]
     sys.modules["src"] = src_pkg
-    sys.modules["src.config"] = cfg
-    sm = types.ModuleType("src.session_manager")
+    sys.modules["src.kernel.config"] = cfg
+    sm = types.ModuleType("src.kernel.session_manager")
     sm.db = None
     sm.db_lock = threading.Lock()
-    sys.modules["src.session_manager"] = sm
+    sys.modules["src.kernel.session_manager"] = sm
     try:
         spec = importlib.util.spec_from_file_location(
             "sched_697_test", os.path.join(SRC_DIR, "src", "runtime", "scheduler.py"))

@@ -43,7 +43,7 @@ def _read_file(rel_path):
 @pytest.fixture(autouse=True)
 def _seed_scenes():
     """Seed 25 scenes (page_size boundary cases: 20 -> 2 pages, remainder 5)."""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()
@@ -305,7 +305,7 @@ class TestPagingIntegrity:
 
     def test_t1_06_soft_deleted_rows_excluded_from_list_and_total(self):
         """软删（is_active=0）不计入列表也不计入 total——COUNT 与列表 WHERE 一致。"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.domains.mgmt.routes.scenes import list_scenes
 
         with db_lock:
@@ -333,7 +333,7 @@ class TestPagingIntegrity:
 
     def test_t1_07_repo_scope_isolation(self):
         """仓隔离：另一仓库的场景不出现在本仓列表，也不计入 total。"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.domains.mgmt.routes.scenes import list_scenes
 
         other = "gitcode:test-scene-paging/other-repo"
@@ -372,7 +372,7 @@ class TestPagingIntegrity:
 
     def test_t2_05_paged_nodes_match_full_version(self):
         """分页 enrich 对齐：分页返回的某场景 nodes 与全量返回的同场景 nodes 完全一致。"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
 
         nodes = [{"id": "n1", "tag": "vod", "skill": "skill-a", "enabled": True}]
@@ -429,7 +429,7 @@ class TestSceneSearch:
     def test_t6_02_q_hits_display_name_and_description(self):
         """q 命中 display_name / description 字段。"""
         from src.domains.mgmt.routes.scenes import list_scenes
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         with db_lock:
             c = db.cursor()
@@ -592,7 +592,7 @@ class TestSingleSourceAndMinimal:
     def test_t9_01_with_pipeline_items_carry_icon(self):
         """A 前置：with-pipeline 补 icon——卡片渲染可完全改吃该接口。"""
         from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         with db_lock:
             c = db.cursor()

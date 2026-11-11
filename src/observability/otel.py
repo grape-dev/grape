@@ -161,7 +161,7 @@ def init_otel(service_name: str):
         return provider
     except Exception as e:
         try:
-            from src.config import log
+            from src.kernel.config import log
             log.warning(f"OTel init failed (service={service_name}, tracing disabled): {e}")
         except Exception:
             pass
@@ -194,7 +194,7 @@ def instrument_fastapi(app, service_name: str):
         # 唯一例外：检测到自动插桩已生效（外部按需安装）时给出告警，避免无意双轨。
         try:
             from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor  # noqa: F401
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             _log.warning("PyMySQL auto-instrumentation detected while manual DB spans are active "
                          "— duplicate db.query spans possible; disable one of them")
         except Exception:
@@ -202,7 +202,7 @@ def instrument_fastapi(app, service_name: str):
         return True
     except Exception as e:
         try:
-            from src.config import log
+            from src.kernel.config import log
             log.warning(f"FastAPI OTel instrument failed ({service_name}): {e}")
         except Exception:
             pass

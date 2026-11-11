@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 import pytest
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 import src.domains.runtime.engine  # 环形导入防护（src.domains.runtime.agents.* / routes 侧导入顺序）
 import src.domains.runtime.routes.issues as iss
@@ -118,7 +118,7 @@ def test_legacy_db_without_payload_columns(monkeypatch):
         def cursor(self):
             return _Cur()
 
-    monkeypatch.setattr("src.session_manager.db", _DB())
+    monkeypatch.setattr("src.kernel.session_manager.db", _DB())
     out = iss._group_events_by_issue([REPO])
     assert out["9"][0]["runtime"] == "rt"
     assert calls["n"] == 0, "旧库不应触发 payload 补查"

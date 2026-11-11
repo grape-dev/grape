@@ -59,7 +59,7 @@ def derive_repo_identity(repository: str = "", repo_key: str = "") -> tuple[str,
         nonlocal _log
         try:
             if _log is None:
-                from src.config import log as _log
+                from src.kernel.config import log as _log
             _log.warning(msg)
         except Exception:
             pass

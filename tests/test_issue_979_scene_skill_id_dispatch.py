@@ -17,7 +17,7 @@ import uuid
 import pytest
 
 from src.domains.mgmt.user import db as udb
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline
 from src.api.pipeline_config import create_custom_scene, get_node_by_tag
 from src.api.db_setup import _fn_scene_nodes_skill_id_backfill

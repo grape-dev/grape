@@ -210,7 +210,7 @@ def test_change_map_does_not_fold_file_keys():
 
 
 def test_prompt_shows_all_deleted_paths():
-    from src.prompt_builder import build_devops_agent_prompt
+    from src.kernel.prompt_builder import build_devops_agent_prompt
     deleted = [{"path": f"docs/issue-996/old{i}.md"} for i in range(80)]
     evt = {
         "type": "pull_request_updated",

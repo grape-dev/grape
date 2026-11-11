@@ -109,7 +109,7 @@ def test_run_merge_gate_passes_clean(monkeypatch):
 
 
 def test_gate_decision_recorded_to_log():
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     try:
         db.execute("DELETE FROM grape_t_merge_gate_log")
         db.commit()

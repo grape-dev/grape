@@ -67,7 +67,7 @@ def setup_db(monkeypatch):
     monkeypatch.setattr(svc, "db_lock", threading.RLock())
     monkeypatch.setattr(rt, "db", test_db)
     monkeypatch.setattr(rt, "db_lock", svc.db_lock)
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     monkeypatch.setattr(_sm, "db", test_db)
     monkeypatch.setattr(_sm, "db_lock", svc.db_lock)
     monkeypatch.setattr(_es, "db", test_db)

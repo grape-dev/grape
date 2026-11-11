@@ -23,12 +23,12 @@ BOT = "grape_bot"
 
 
 def _db():
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     return db
 
 
 def _exec(sql, params=()):
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     with db_lock:
         c = _db().cursor()
         c.execute(sql, tuple(params))

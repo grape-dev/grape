@@ -16,7 +16,7 @@ C2 回归：
 import json
 from unittest.mock import patch
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _REPO = "gitcode:XOcto/i1573-repo"
 _NUM = 1573
@@ -95,7 +95,7 @@ def _merged_payload():
 
 def _run_pipeline(monkeypatch):
     import src.api.event_pipeline as ep
-    import src.runtime.engine_select as es
+    import src.domains.runtime.engine.engine_select as es
     import src.api.pr_merged_sre_retry as retry_mod
     monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
     monkeypatch.setattr(es, "get_scene_pool_engine_ids", lambda *a, **kw: None)

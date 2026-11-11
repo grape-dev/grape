@@ -766,7 +766,7 @@ def _drain_a2a_queue_after_terminal(seq: int) -> None:
       二次终态钩子在 drain 期间直接短路，不形成递归链。
     """
     try:
-        from src.api.event_pipeline import drain_queued_a2a
+        from src.domains.runtime.pipeline.event_pipeline import drain_queued_a2a
         try:
             _loop = asyncio.get_running_loop()
         except RuntimeError:

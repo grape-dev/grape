@@ -28,7 +28,7 @@ OTHER_HOLDER = "other-master-01"          # 模拟的另一台主控
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -41,7 +41,7 @@ def _clean():
 
 
 def _mk_cred(name, status="active"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name,"
@@ -55,7 +55,7 @@ def _mk_cred(name, status="active"):
 
 
 def _mk_sample(runtime_id, device, minutes_ago, cpu=10.0):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ts = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
     with db_lock:
         c = db.cursor()
@@ -68,7 +68,7 @@ def _mk_sample(runtime_id, device, minutes_ago, cpu=10.0):
 
 def _seed_other_holder(expires_at: int):
     """伪造另一台主控持有租约（直写锁行，等价于那台主控 acquire 成功后的状态）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = int(time.time())
     with db_lock:
         c = db.cursor()
@@ -80,7 +80,7 @@ def _seed_other_holder(expires_at: int):
 
 
 def _count_samples(runtime_id) -> int:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM obs_runtime_samples WHERE runtime_id=?", (int(runtime_id),))
@@ -89,7 +89,7 @@ def _count_samples(runtime_id) -> int:
 
 def _count_prefix_samples() -> int:
     """数本测试 PREFIX 的样本行（对其他用例/环境残留行免疫，隔离既有约定同 test_obs_rollup）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM obs_runtime_samples WHERE device_name LIKE ?", (PREFIX + "%",))
@@ -148,7 +148,7 @@ class TestSampleLease:
         assert sample_lease.acquire_lease() is False  # 释放后他人可正常持有
 
     def test_acquire_degrades_to_false_when_lock_table_broken(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("DROP TABLE IF EXISTS distributed_locks")
             db.commit()

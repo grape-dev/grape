@@ -32,7 +32,7 @@ def legacy_stamped_db(monkeypatch):
         "VALUES ('202610300001','legacy-run-all-migrations','legacy-stamp','2026-10-30 00:00:00')")
     conn.commit()
 
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     monkeypatch.setattr(sm, "db", conn, raising=False)
     yield conn
     conn.close()

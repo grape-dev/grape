@@ -301,7 +301,7 @@ class TestMessagesReplay:
 
 class TestServiceSeqRange:
     def _make_task(self, task_id="t_seq975"):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("INSERT OR IGNORE INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status) "
@@ -309,7 +309,7 @@ class TestServiceSeqRange:
             db.commit()
 
     def _clean(self, task_id="t_seq975"):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM task_messages WHERE task_id=?", (task_id,))

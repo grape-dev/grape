@@ -29,7 +29,7 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
         _target_issue = ""
         _related = False
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT repo_key, issue_id FROM events WHERE repo_key=? AND seq=?",

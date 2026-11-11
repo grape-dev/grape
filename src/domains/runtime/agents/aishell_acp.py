@@ -135,7 +135,7 @@ class AishellDshACPBackend:
         """基础 env（D3/D4：模型凭据设备预配置，grape 不注 key/不透传）。"""
         env = os.environ.copy()
         try:
-            from src.config import SKILLS_DIR
+            from src.kernel.config import SKILLS_DIR
             env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         except Exception:
             pass

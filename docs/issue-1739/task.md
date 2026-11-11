@@ -1,0 +1,22 @@
+# Tasks: Issue #1739
+
+- [x] T1 统一 QA 结论判定模块
+  - Acceptance: 取最新 qa 事件；兼容 status=failed 与 completed+失败文本；无 qa 节点/不可判定放行
+  - Verify: `pytest tests/test_issue_1739_qa_close_gate.py -k qa_gate`
+  - Files: `src/api/qa_gate.py`
+- [x] T2 自动结单接入门禁
+  - Acceptance: qa fail 时 auto_finalize 不置 completed、不关 VCS，返回 qa_failed_blocked
+  - Verify: `pytest tests/test_issue_1739_qa_close_gate.py -k auto_finalize`
+  - Files: `src/api/issues_center.py`
+- [x] T3 审核收尾接入门禁
+  - Acceptance: qa fail 时 review-pass(done) 返回 noop:qa_failed，不改变终态
+  - Verify: `pytest tests/test_issue_1739_qa_close_gate.py -k review_pass`
+  - Files: `src/api/issues_center.py`
+- [x] T4 PR 创建/合入接入门禁
+  - Acceptance: qa fail 时建 PR 强制 auto_close=false；合入返回 409 并标注
+  - Verify: `pytest tests/test_issue_1739_qa_close_gate.py -k pull`
+  - Files: `src/api/git_repo_api.py`
+- [x] T5 失败标注与回归
+  - Acceptance: Issue 可见 QA 结论/关联 PR；qa pass / 无 qa 阶段关闭行为不变
+  - Verify: `pytest tests/test_issue_1739_qa_close_gate.py tests/test_issue_656_auto_finalize.py`
+  - Files: `src/api/qa_gate.py`, `tests/test_issue_1739_qa_close_gate.py`

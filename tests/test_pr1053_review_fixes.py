@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from src.api.routes import autopilot as ap
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 EXEC_ID = 1905300001
@@ -87,7 +87,7 @@ def test_server_url_placeholders_use_matching_bases(monkeypatch):
 
 def test_zombie_young_grace_env_override():
     """M1：常量可由 env 覆盖，默认 120。"""
-    code = ("from src.runtime.scheduler import ZOMBIE_YOUNG_GRACE_SECONDS as v;"
+    code = ("from src.domains.runtime.engine.scheduler import ZOMBIE_YOUNG_GRACE_SECONDS as v;"
             "print(v)")
     for env_value, expected in (("77", "77"), (None, "120")):
         env = dict(os.environ)

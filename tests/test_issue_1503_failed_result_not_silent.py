@@ -21,7 +21,7 @@ if ROOT not in sys.path:
 
 import pytest
 
-from src.session_manager import db as _db, db_lock as _db_lock
+from src.kernel.session_manager import db as _db, db_lock as _db_lock
 
 
 @pytest.fixture
@@ -42,9 +42,9 @@ def test_db(monkeypatch):
         )
     """)
     _conn.commit()
-    monkeypatch.setattr("src.session_manager.db", _conn)
+    monkeypatch.setattr("src.kernel.session_manager.db", _conn)
     monkeypatch.setattr("src.api.event_store.db", _conn)
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     monkeypatch.setattr("src.api.event_store.db_lock", db_lock)
     yield _conn
     _conn.close()
@@ -214,7 +214,7 @@ def svc_db(monkeypatch):
     """)
     monkeypatch.setattr(svc, "db", test_db)
     monkeypatch.setattr(svc, "db_lock", threading.Lock())
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.event_store as _es
     monkeypatch.setattr(_sm, "db", test_db)
     monkeypatch.setattr(_sm, "db_lock", threading.Lock())

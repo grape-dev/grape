@@ -1702,7 +1702,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
             "创建发布子单 Issue 失败（平台响应无 issue number）", status=502)
     # Issue #453 代发台账：建单入账（webhook 回声对账）
     try:
-        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.kernel.outbound_ledger import record_outbound, content_hash_md5
         record_outbound(_provider, repo_key, "issue", str(_sub_num),
                         issue_number=str(_sub_num),
                         content_hash=content_hash_md5(_body_txt))

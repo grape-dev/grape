@@ -46,7 +46,7 @@ def setup_module():
 
 
 def teardown_module():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for t in ("events", "issue_state", "issue", "agent_tasks"):

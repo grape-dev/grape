@@ -1414,7 +1414,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 # 审查修复①：覆盖「活跃判定 → 排队落库」竞态窗口——若前序在间隙内已终态，
                 # 终态钩子已在本次写入前执行完，排队行将无人派发；此处立即对账兜底。
                 try:
-                    from src.api.event_pipeline import reconcile_queued_a2a
+                    from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                     reconcile_queued_a2a(repo_key)
                 except Exception as _re:
                     log.warning(f"A2A: queue reconcile after enqueue failed: {_re}")

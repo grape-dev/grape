@@ -25,12 +25,12 @@ _UID_BASE = 133700
 
 
 def _db():
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     return db
 
 
 def _exec(sql, params=()):
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     with db_lock:
         c = _db().cursor()
         c.execute(sql, tuple(params))
@@ -210,7 +210,7 @@ def _issue_user_id_nullable():
     等价可空副本整体替换 issue（唯一放宽 user_id 的 NOT NULL，其余列/索引/数据
     原样保留），用例结束后按原 DDL 还原并把 NULL user_id 归零，不影响其他用例。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         cols = [r[1] for r in c.execute("PRAGMA table_info(issue)").fetchall()]

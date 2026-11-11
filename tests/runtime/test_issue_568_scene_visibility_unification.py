@@ -122,7 +122,14 @@ def test_nodes_consistent_between_detail_and_a2a():
         assert r.status_code == 200, r.text
         detail_nodes = r.json()["nodes"]
         a2a_nodes = _scene_node_check(REPO_A, ISSUE_NO, "coding")["nodes"]
-        assert detail_nodes == a2a_nodes
+        # Issue #1721：detail 节点附加 resolvable/scope_check 增量字段，
+        # 既有节点字段与 a2a 路径保持一致。
+        assert len(detail_nodes) == len(a2a_nodes)
+        for detail_node, a2a_node in zip(detail_nodes, a2a_nodes):
+            for key, value in a2a_node.items():
+                assert detail_node[key] == value
+            assert "resolvable" in detail_node
+            assert "scope_check" in detail_node
         assert [n["id"] for n in a2a_nodes] == ["vod", "issue", "coding", "qa"]
         assert _scene_node_check(REPO_A, ISSUE_NO, "coding")["in_scene"] is True
     finally:
@@ -158,8 +165,15 @@ def test_detail_session_bound_scene_fallback_when_repo_scope_miss():
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["id"] == SID
-        # 与 a2a 路径（issue 绑定场景 → get_pipeline_config）节点集合一致
-        assert body["nodes"] == _scene_node_check(REPO_A, ISSUE_NO, "coding")["nodes"]
+        # 与 a2a 路径（issue 绑定场景 → get_pipeline_config）既有节点字段一致；
+        # Issue #1721 后 detail 额外携带 resolvable/scope_check 增量字段。
+        a2a_nodes = _scene_node_check(REPO_A, ISSUE_NO, "coding")["nodes"]
+        assert len(body["nodes"]) == len(a2a_nodes)
+        for detail_node, a2a_node in zip(body["nodes"], a2a_nodes):
+            for key, value in a2a_node.items():
+                assert detail_node[key] == value
+            assert "resolvable" in detail_node
+            assert "scope_check" in detail_node
     finally:
         app.dependency_overrides.clear()
 

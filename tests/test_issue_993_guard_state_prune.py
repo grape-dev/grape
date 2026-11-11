@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 
 import src.domains.runtime.engine.branch_guard as bg
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 RK = "gitcode:prune993/repo"
 

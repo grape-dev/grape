@@ -356,9 +356,9 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
-    from src.prompt_builder import resolve_task_server_env
+    from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key）。
-    from src.repo_key import derive_repo_identity
+    from src.kernel.repo_key import derive_repo_identity
     _full_name, _repo_owner, _repo_name = derive_repo_identity(repository, repo_key)
     env_extra = {
         "REPO_FULL_NAME": _full_name or repository,
@@ -386,6 +386,16 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     _task_work_branch = task.get("work_branch") or ""
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
+
+    # Issue #1811：定时调度与 event_pipeline 同源注入 bot 身份，单点覆盖 DIRECT/REMOTE。
+    # 函数内延迟 import，避免 scheduler ↔ event_pipeline 模块级循环依赖。
+    from src.domains.runtime.pipeline.event_pipeline import _inject_bot_agent_env
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
+    if not env_extra.get("BOT_USERNAME"):
+        log.warning(
+            f"Autopilot exec {exec_id}: BOT_USERNAME unresolved for repo={repository}; "
+            "skill author filtering will degrade"
+        )
 
     # 7. 分流执行
     if _is_direct:
@@ -430,6 +440,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                                                    skill_mismatch_error)
         from src.domains.runtime.engine.task_log_stream import build_skill_source_message
         _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}
+        _sk_mat = (evt or {}).get("_skill_materialize") or {}
         if not _sv:
             # 判定缺失（物化异常等）→ 显式降级放行 + 告警，不静默当作通过
             log.warning(f"Autopilot exec {exec_id}: skill consistency verdict missing "
@@ -437,7 +448,9 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         else:
             _src_line = build_skill_source_message(
                 _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
-                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))["data"]["text"]
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""),
+                source_info=_sk_mat.get("source") or None,
+                drift=_sk_mat.get("drift") or None)["data"]["text"]
             log.info(f"Autopilot exec {exec_id}: skill source {_src_line}")
             if _sv.get("ok") is False:
                 _sv_err = skill_mismatch_error(_sv)
@@ -861,14 +874,14 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
                                result_summary, findings_result, _web_url)
         # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
         from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
-        from src.api import main as api_main
-        bm = getattr(api_main, "bot_manager", None)
+        from src.im.engine_wiring import feishu_api
         _loop = asyncio.get_event_loop()
         for user_id, _, _ in rows:
             try:
                 open_id = _get_feishu_open_id_by_user_id(user_id) or ""
-                ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
-                api = bm.api if bm else None
+                ctx = _resolve_user_chat_bot(None, user_id)
+                # 旧 IM 下线 A2 M2：api 不再来自 BotManager，按本人 bot 的 app_id 取共享客户端
+                api = feishu_api(ctx.app_id) if ctx is not None else None
                 _loop.create_task(_run_autopilot_notify(ctx, api, user_id, open_id,
                                                         card, task_id, exec_id))
             except Exception as e:

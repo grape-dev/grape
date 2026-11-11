@@ -23,7 +23,7 @@ sys.path.insert(0, ROOT)
 import pytest  # noqa: E402
 
 from src.api.db_setup import init_database  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 init_database()
 
@@ -292,7 +292,7 @@ def test_a2a_endpoint_vcs_unknown_not_blocked(monkeypatch):
 # ══════════════════ resolve_issue_id 防御性映射 ══════════════════
 
 def test_resolve_issue_id_target_mapping():
-    from src.api.event_pipeline import resolve_issue_id
+    from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
     # payload 单号 == source_issue_number 且带 target_issue_number → 真实单号
     assert resolve_issue_id({
         "issue_number": "1099",

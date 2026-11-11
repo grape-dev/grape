@@ -1073,7 +1073,7 @@ async def patrol_loop():
                 # 无 repo 谓词 = 全仓 queued 扫描，但只派发「前序已不活跃」的行，
                 # 正常在途排队不受影响；持 db_lock 的同步段经 to_thread 卸载。
                 try:
-                    from src.api.event_pipeline import reconcile_queued_a2a
+                    from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                     _drained = await asyncio.to_thread(reconcile_queued_a2a)
                     if _drained:
                         log.info(f"[patrol] a2a queue reconcile: dispatched {len(_drained)}")

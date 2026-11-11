@@ -498,7 +498,7 @@ class TestDegradedModuleCandidates:
                                               "src/config.py", "src/api", "src/worker_package.py"])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
         assert "module candidate" in graph
@@ -518,7 +518,7 @@ class TestDegradedModuleCandidates:
                             lambda repo_key, owner, rname, token="": ["src", "src/main.py", "README.md"])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
         assert "GitCode API" in graph
@@ -550,7 +550,7 @@ class TestDegradedModuleCandidates:
                             lambda repo_key, owner, rname, token="": [])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
         assert "codegraph 不可用，降级生成" in graph
@@ -562,7 +562,7 @@ class TestDegradedModuleCandidates:
         """QA 修复 #666（Spec 恢复路径证据）：degraded 基线 + codegraph 就位
         → should_refresh 触发 → 重建 degraded=false 全量恢复（非降级候选）。"""
         import src.project_info.builder as b
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         # ① 先降级生成（无候选来源）
         monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
         monkeypatch.setattr(b, "_api_tree_paths", lambda repo_key, owner, rname, token="": [])

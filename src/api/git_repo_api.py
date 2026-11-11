@@ -736,16 +736,60 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     if not related and _body:
         from src.domains.runtime.vcs.issue_ref_filter import extract_related_issue_nums
         related = extract_related_issue_nums(_body)
+    # Issue #1739：关联 Issue 的同一流水线 qa 最新结论为 fail 时，不得因建 PR 自动关闭
+    # Issue（GitCode close_related_issue 会在合入时关闭关联 Issue）——强制关闭开关为 false，
+    # 并在 Issue 上标注 QA 失败原因与 PR，便于回流修复；门禁异常 fail-open 保持原行为。
+    # 门禁不受调用方 auto_close_issues 影响：默认 false 时同样必须校验并标注（AC1/AC2）。
+    _auto_close = body.auto_close_issues
+    _auto_close_explicit = "auto_close_issues" in getattr(body, "model_fields_set", set())
+    _qa_failures: list[dict] = []
+    _qa_rk = ""
+    if related:
+        try:
+            from src.api.qa_gate import collect_qa_failures
+            from src.kernel.repo_key import to_repo_key
+
+            _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+            _qa_failures = collect_qa_failures(_qa_rk, related)
+            if _qa_failures:
+                _auto_close = False
+                for _f in _qa_failures:
+                    log.info(f"qa gate: force auto_close_issues=false "
+                             f"{_qa_rk}/#{_f['issue']} "
+                             f"(qa seq={_f['info'].get('event_seq')})")
+        except Exception as _e:
+            log.warning(f"qa gate: create_pull check failed (fail-open) "
+                        f"{owner}/{repo}: {_e}")
+    # Issue #1739（AC3）：GitHub 无原生关闭开关，历史语义是关联 Issue 即追加
+    # `Closes #N`（auto_close_issues 被 provider 丢弃）。仅当本次 QA 门禁判定失败时
+    # 才降级为 `Related to #N`；qa 通过 / 无 qa 阶段必须沿用原 `Closes` 语义，避免
+    # 正常关闭链路因默认 auto_close_issues=false 而悄悄失效。
+    # 但调用方显式传 auto_close_issues=false 时必须尊重其关闭意愿，不得用默认值冒充。
+    if p == "github" and not _qa_failures and not _auto_close_explicit:
+        _auto_close = True
     neutral = {
         "title": body.title,
         "head": body.head,
         "base": body.base,
         "body": _body,
         "related_issue_nums": related,
-        "auto_close_issues": body.auto_close_issues,
+        "auto_close_issues": _auto_close,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    # Issue #1739：QA 失败被门禁拦截时，在建 PR 成功后补充 Issue 标注（关联本次 PR）。
+    # 多 Issue PR：每个 qa 失败的关联 Issue 都要标注，不能只标首个。
+    if _qa_failures and _qa_rk:
+        try:
+            from src.api.qa_gate import annotate_qa_failures
+            from src.kernel.outbound_ledger import extract_content_id
+
+            _pr_s = str(extract_content_id(resp, "issue") or "").strip()
+            _pr_num = int(_pr_s) if _pr_s.isdigit() else 0
+            annotate_qa_failures(_qa_rk, _qa_failures, pr_number=_pr_num)
+        except Exception as _e:
+            log.warning(f"qa gate: create_pull annotation failed (fail-open) "
+                        f"{owner}/{repo}: {_e}")
     # Issue #453 台账（S29-G2，网关 PR 端点族补全）：建 PR 入账——同族 update_pull/merge_pull
     # 已入账，此端点原先漏账（外部 API 调用者经网关建 PR 的回流无台账防线）。
     # best-effort：入账失败不阻断、不影响响应。bot 建 PR 回流由 S24 豁免先于台账判定放行给
@@ -830,7 +874,7 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
                     {"inner_issue_nums": _inner})
     # Issue #453 台账（对齐 update_pull：PR 变更入账，best-effort 不阻断）
     try:
-        from src.outbound_ledger import record_outbound
+        from src.kernel.outbound_ledger import record_outbound
         from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", str(number),
                         issue_number=str(issue_number))
@@ -838,6 +882,84 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
         log.warning(f"outbound_ledger record (unlink_pull_issue) failed: {_e}")
     return {"unlinked": True, "pr_number": number, "issue_number": issue_number,
             "remaining_issue_nums": _remaining, "pr": resp}
+
+
+def _fetch_pull_detail(owner: str, repo: str, number: int, p: str,
+                       token: str) -> dict | None:
+    """best-effort 取 PR 详情：成功返回 dict，上游异常返回 None（fail-open 放行）。
+
+    供合入门禁与 base 快照复用同一次响应，避免合入路径重复 GET 同一 PR。
+    """
+    try:
+        _detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), token)
+        return _detail if isinstance(_detail, dict) else None
+    except Exception as _e:
+        log.warning(f"qa gate: pull detail fetch failed (fail-open) "
+                    f"{owner}/{repo}#{number}: {_e}")
+        return None
+
+
+def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
+                       repo_key: str, pr_detail: dict | None = None,
+                       detail_loaded: bool = False) -> None:
+    """合入前 QA 结论门禁（Issue #1739）：qa 最新结论 fail 时标注并 409 阻断。
+
+    - 关联来源 = PR body 的 #N 引用 + PR 详情 ``issues`` 关联（``inner_issue_nums``
+      显式关联的 PR body 可能不含 #N，只读 body 会被绕过）；
+    - 多 Issue PR 逐一校验并标注全部失败 Issue；
+    - ``pr_detail``/``detail_loaded``：复用调用方已取得的 PR 详情，避免重复请求；
+    - 仅本门禁自身的 409 才阻断合入；查询异常（PR 详情 404/502 等）fail-open，
+      不破坏合入可用性。
+    """
+    from src.api.merge_gate import record_gate_log
+    from src.api.qa_gate import annotate_qa_failures, collect_qa_failures
+    from src.kernel.repo_key import to_repo_key
+    from src.vcs.issue_ref_filter import extract_related_issue_nums
+
+    _failures: list[dict] = []
+    try:
+        _pr = pr_detail if detail_loaded else _fetch_pull_detail(
+            owner, repo, number, p, token)
+        _pr_body = ""
+        _rel_nums = []
+        if isinstance(_pr, dict):
+            _pr_body = str(_pr.get("body") or _pr.get("description") or "")
+            _linked = _pr.get("issues")
+            if isinstance(_linked, list):
+                for _it in _linked:
+                    _n = _it.get("number") if isinstance(_it, dict) else None
+                    if isinstance(_n, int) and _n > 0:
+                        _rel_nums.append(_n)
+        if _pr_body:
+            _rel_nums.extend(extract_related_issue_nums(_pr_body))
+        _rel_nums = list(dict.fromkeys(_rel_nums))  # 去重且保序
+        if _rel_nums:
+            _failures = collect_qa_failures(to_repo_key(f"{owner}/{repo}", p), _rel_nums)
+    except Exception as _e:
+        log.warning(f"qa gate: merge pre-check failed (fail-open) {owner}/{repo}#{number}: {_e}")
+        return
+    if not _failures:
+        return
+    _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+    annotate_qa_failures(_qa_rk, _failures, pr_number=number)
+    _first = _failures[0]
+    record_gate_log(repo_key, number, "pre_merge_qa", "blocked",
+                    {"qa_failed": {"issue": _first["issue"],
+                                   "event_seq": _first["info"].get("event_seq"),
+                                   "status": _first["info"].get("status")},
+                     "qa_failed_issues": [f["issue"] for f in _failures]})
+    _all_ids = ", ".join(f"#{f['issue']}" for f in _failures)
+    raise HTTPException(status_code=409, detail={
+        "code": 409,
+        "message": (f"merge blocked by QA gate (Issue #1739): latest qa conclusion "
+                    f"is fail for issue(s) {_all_ids} "
+                    f"(seq={_first['info'].get('event_seq')}); "
+                    f"fix and re-run qa before merge. reason: "
+                    f"{(_first['info'].get('reason') or '')[:200]}"),
+        "gate": {"phase": "pre_merge_qa", "issue": _first["issue"],
+                 "issues": [f["issue"] for f in _failures],
+                 "event_seq": _first["info"].get("event_seq"),
+                 "status": _first["info"].get("status")}})
 
 
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge",
@@ -855,10 +977,18 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     _token = _repo_token(owner, repo, user, p)
     # Issue #752（M1）：合入前冲突标记扫描门禁——PR 变更文件硬命中 `<<<<<<< `/`    # → 阻断 409（防残留进入基线分支，AC1）；仅孤立 `=======` 软命中 → 告警放行（防误杀
     # markdown 下划线）；扫描自身异常 fail-open。每次决策写合入日志（AC3）。
-    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, get_pull_base, record_gate_log
+    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, record_gate_log
     _repo_key = f"{owner}/{repo}"
+    # Issue #1739 审查：PR 详情只取一次，base 快照与 QA 门禁复用同一响应。
+    _pr_detail = _fetch_pull_detail(owner, repo, number, p, _token)
     # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
-    _base_info = get_pull_base(owner, repo, number, p, _token)
+    _base_info = {"ref": "", "sha": ""}
+    _base = (_pr_detail or {}).get("base") if isinstance(_pr_detail, dict) else None
+    if isinstance(_base, dict):
+        _base_info = {"ref": _base.get("ref") or "", "sha": _base.get("sha") or ""}
+    # Issue #1739：合入前 QA 结论门禁（统一入口见 ``_pre_merge_qa_gate``）。
+    _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key,
+                       pr_detail=_pr_detail, detail_loaded=True)
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
@@ -868,7 +998,7 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
                 f"unresolved merge conflict markers found in PR changed files: {_files}")
         # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
         try:
-            from src.outbound_ledger import record_outbound
+            from src.kernel.outbound_ledger import record_outbound
             from src.kernel.repo_key import to_repo_key
             record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
                             issue_number=str(number), origin_channel="api")
