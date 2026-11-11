@@ -20,7 +20,6 @@ import hashlib
 import importlib
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -48,7 +47,9 @@ DEFAULT_TTL = 1800  # 30 分钟；租约仅覆盖一次写窗口，过期自动�
 HOOK_MARKER = "# grape-branch-guard (Issue #993)"
 # Issue #2028：钩子模板版本指纹。install_pre_push_hook 依据它识别存量旧模板并重装；
 # 模板内容（fail-open/加载路径/自检）变化时必须递增，否则现网存量 worktree 永不升级。
-HOOK_TEMPLATE_VERSION = "2028-02"
+# 2028-03：固化元数据改为单行 marker 注释（hook-interpreter/hook-module-path/
+# hook-repo-key），修复 _existing_hook_usable 解析多行内联代码恒 False 的缺陷。
+HOOK_TEMPLATE_VERSION = "2028-03"
 HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
 # 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
 HOOK_DEP_MODULES = ("src.lock", "src.kernel.session_manager")
@@ -532,42 +533,31 @@ def _hook_root() -> str:
     return root
 
 
-_HOOK_CODE_MODULE_RE = re.compile(
-    r"spec_from_file_location\('grape_branch_guard',\s*(\"(?:[^\"\\]|\\.)*\")\)")
-
-
 def _existing_hook_usable(existing: str, repo_key: str) -> bool:
     """版本指纹命中后仍校验钩子内固化的运行时路径是否可用（Issue #2028）。
 
-    钩子把解释器绝对路径、守卫模块路径与 repo_key 烧进脚本；解释器升级/目录搬迁后
-    旧路径失效会让钩子以 127 退出 → git 拒绝所有 push（fail-closed），fail-open
-    无从执行。任一项失效即返回 False，触发重写自愈。
+    钩子通过单行 marker 注释（``# hook-interpreter:/hook-module-path:/hook-repo-key:``）
+    固化解释器绝对路径、守卫模块路径与 repo_key；解释器升级/目录搬迁后旧路径失效
+    会让钩子以 127 退出 → git 拒绝所有 push（fail-closed），fail-open 无从执行。
+    任一项缺失或失效即返回 False，触发重写自愈。
+
+    注意不要回退到解析内联 Python 代码（2028-02 的做法）：代码经 shlex.quote 后
+    跨物理行，``splitlines()`` 首行引号未闭合，``shlex.split`` 抛 ValueError 被吞，
+    校验恒 False，「版本命中→校验→幂等跳过」分支退化为死代码（QA 第 2 轮 M-2 复现）。
     """
-    try:
-        for line in existing.splitlines():
-            if " -c " not in line:
-                continue
-            tokens = shlex.split(line)
-            if "-c" not in tokens:
-                continue
-            i = tokens.index("-c")
-            interpreter = tokens[0] if tokens else ""
-            code = tokens[i + 1] if len(tokens) > i + 1 else ""
-            baked_repo_key = tokens[i + 2] if len(tokens) > i + 2 else ""
-            if not interpreter or not os.path.isfile(interpreter):
-                return False
-            m = _HOOK_CODE_MODULE_RE.search(code)
-            if not m:
-                return False
-            module_path = json.loads(m.group(1))
-            if not module_path or not os.path.isfile(module_path):
-                return False
-            if baked_repo_key != repo_key:
-                return False
-            return True
-    except Exception:
-        pass
-    return False
+    markers = {}
+    for line in existing.splitlines():
+        for key in ("hook-interpreter", "hook-module-path", "hook-repo-key"):
+            prefix = f"# {key}: "
+            if line.startswith(prefix):
+                markers[key] = line[len(prefix):].strip()
+    if len(markers) != 3:
+        return False
+    if not markers["hook-interpreter"] or not os.path.isfile(markers["hook-interpreter"]):
+        return False
+    if not markers["hook-module-path"] or not os.path.isfile(markers["hook-module-path"]):
+        return False
+    return markers["hook-repo-key"] == repo_key
 
 
 def _hook_entry_code(root: str, module_path: str) -> str:
@@ -662,6 +652,11 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             "#!/bin/sh",
             HOOK_MARKER,
             HOOK_VERSION_LINE,
+            # Issue #2028：固化元数据单行 marker，供 _existing_hook_usable 解析
+            # （2028-02 解析多行内联代码恒 False 的教训，勿再回退）。
+            f"# hook-interpreter: {interpreter}",
+            f"# hook-module-path: {module_path}",
+            f"# hook-repo-key: {repo_key}",
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
             "trap 'rm -f \"$STDIN_TMP\"' EXIT INT TERM HUP",

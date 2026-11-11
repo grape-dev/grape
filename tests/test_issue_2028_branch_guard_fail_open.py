@@ -263,3 +263,21 @@ def test_install_rewrites_hook_when_repo_key_changed(tmp_path):
     content = (hooks / "pre-push").read_text(encoding="utf-8")
     assert "gitcode:other/repo" not in content
     assert REPO_KEY in content
+
+
+def test_existing_hook_usable_accepts_freshly_installed_hook(tmp_path):
+    """Issue #2028（QA 第2轮 M-2）：全新安装的钩子必须通过可用性校验。
+
+    2028-02 版解析多行内联代码恒 False，该函数是死代码、幂等跳过分支永不生效；
+    本用例直接断言校验路径可达，防止再次退化。
+    """
+    repo = _init_repo(tmp_path / "repo")
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
+    hook = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+
+    assert bg._existing_hook_usable(hook, REPO_KEY) is True
+    # repo_key 不一致 → False（触发重写自愈）
+    assert bg._existing_hook_usable(hook, "gitcode:other/repo") is False
+    # marker 缺失（如 2028-02 旧模板无 marker）→ False → 重写升级
+    assert bg._existing_hook_usable(
+        hook.replace("# hook-interpreter: ", "# removed: "), REPO_KEY) is False
