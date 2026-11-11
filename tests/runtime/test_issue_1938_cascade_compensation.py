@@ -312,6 +312,22 @@ class TestDisplayLayer:
         assert item["is_agent_conclusion"] is False
         assert item["cascade"]["cascade_triggered_by"] == cascade.TRIGGER_UPDATE_TASK_STATUS
 
+    def test_issue_group_view_recognizes_legacy_compensation(self):
+        """Issue 分组视图（处理记录/流水线）对存量补偿文案须与事件列表同口径识别。"""
+        from src.domains.runtime.routes.issues import _group_events_by_issue
+        _insert_event(19423, status="completed")
+        with db_lock:
+            db.cursor().execute(
+                "UPDATE events SET result=?, runtime=?, skill=? WHERE seq=?",
+                ("任务已完成：级联收敛（回报丢失补偿）", "hermes", "coding-cli-1", 19423))
+            db.commit()
+        groups = _group_events_by_issue([REPO])
+        ev = next(e for e in groups["1938"] if e["seq"] == 19423)
+        assert ev["result_kind"] == "system_compensation_synthesized", \
+            "存量补偿文案须在本视图识别（SELECT 补 result 列 + 传 result_by_seq）"
+        assert ev["is_agent_conclusion"] is False
+        assert ev["runtime"] == "hermes" and ev["skill"] == "coding-cli-1"
+
     def test_pipeline_segment_marked(self):
         from src.domains.runtime.routes.issues import _pipeline_from_events
         _insert_event(19422, status="running")

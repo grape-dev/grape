@@ -286,18 +286,21 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     with db_lock:
         c = db.cursor()
         try:
-            cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
-            _has_so = "structured_output" in cols
-            _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill"
-                    + (", structured_output, agent_logs" if _has_so else ""))
+            # Issue #1938：补取 result 列（与事件列表/详情/PR 订阅三处调用点同口径），
+            # 供 fetch_display_meta 兜底识别存量（#587 时代）补偿记录的历史固定文案。
+            # 列序固定：0 seq … 8 created_at、9 entity_type（#252 PR 事件过滤）、
+            # 10 runtime、11 skill、12 result。本视图不取 structured_output/agent_logs
+            # （Issue 列表一次加载全仓库事件，不加载整份执行日志）。
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, entity_type "
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, "
+                f"created_at, entity_type, runtime, skill, result "
                 f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
                 repo_keys + _num_params)
             rows = c.fetchall()
             # Issue #1938：补偿归因（Issue 流水线/处理记录同口径标注）
             from src.domains.runtime.engine import cascade as _cascade
-            _cascade_map = _cascade.fetch_display_meta(c, [r[0] for r in rows]) if rows else {}
+            _cascade_map = _cascade.fetch_display_meta(
+                c, [r[0] for r in rows], {r[0]: (r[12] or "") for r in rows}) if rows else {}
         except Exception:
             rows = []
             _cascade_map = {}
@@ -315,20 +318,9 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             "title": r[4] or r[2], "actor": r[5] or "",
             "summary": r[6] or r[4] or r[2],
             "status": r[7], "created_at": normalize_event_time(r[8]),
-            "runtime": r[9] if len(r) > 9 else "",
-            "skill": r[10] if len(r) > 10 else "",
+            "runtime": r[10] if len(r) > 10 else "",
+            "skill": r[11] if len(r) > 11 else "",
         }
-        if len(r) > 11:  # structured_output / agent_logs 存在
-            raw_so = r[11]
-            try:
-                item["output"] = _json.loads(raw_so) if raw_so else None
-            except Exception:
-                item["output"] = None
-            try:
-                raw_logs = r[12] if len(r) > 12 else None
-                item["logs"] = _json.loads(raw_logs) if raw_logs else []
-            except Exception:
-                item["logs"] = []
         # Issue #1938：补偿记录标注 + 「Agent 答复结论」口径（合成补偿不计入）
         _cm = _cascade_map.get(r[0]) or {}
         item["cascade"] = _cm
