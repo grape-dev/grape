@@ -25,7 +25,7 @@
 
 ## 提交计划
 1. `feat: #1750 add worker active whitelist to recover-orphans`
-2. 回归 `tests/test_issue_1750_recover_orphans_active_whitelist.py` + 既有 recover/issue_417/task_activity 用例。
+2. 回归 `tests/runtime/test_issue_1750_recover_orphans_active_whitelist.py` + 既有 recover/issue_417/task_activity 用例。
 
 ## 验收对照
 | AC | 落点 |
@@ -34,4 +34,4 @@
 | A2 / A3 / A4 | 切片 2 |
 | A5 | 切片 3 |
 | A6 | 切片 4 |
-| 既有回归 | `test_recover_orphans_slots.py`、`test_recover_orphans_optimization.py`、`test_issue_417_revoked_runtime_residue.py`、`test_issue_1495_task_activity_format.py` |
+| 既有回归 | `tests/runtime/test_recover_orphans_slots.py`、`tests/api/test_recover_orphans_optimization.py`、`tests/runtime/test_issue_417_revoked_runtime_residue.py`、`tests/test_issue_1495_task_activity_format.py` |

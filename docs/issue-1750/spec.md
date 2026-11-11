@@ -1,6 +1,6 @@
 # Spec: Issue #1750 — recover_orphans 增加 worker 自报活跃白名单
 
-> 来源：Issue #1750 官方 Spec（Issue 评论 `199515616`）| 评级 ready | 目标分支 `weekly-10` @ `8a80db968`（PR 已合并该基线并通过回归）
+> 来源：Issue #1750 官方 Spec（Issue 评论 `199515616`）| 评级 ready | 目标分支 `arch-weekly-11` @ `73d2b3e07`（PR 已 rebase 到该基线并解决目录迁移冲突：服务端/客户端/agent 迁至 `src/domains/runtime/`）
 
 ## Objective
 - 为 `recover_orphans` 增加「worker 自报活跃」白名单信号（`active_task_ids`），命中的任务直接 `skipped_active`，优先于年龄闸门与活跃窗口。
