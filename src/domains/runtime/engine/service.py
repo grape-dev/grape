@@ -2055,23 +2055,30 @@ _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 # 文案由字段渲染；有真实结论（agent_tasks.result_text）时优先回填，取不到才写补偿文案。
 
 
-def _cascade_real_result(cursor, event_seq: int, task_result_text: str = None) -> str:
+def _cascade_real_result(cursor, event_seq: int, task_result_text: str = None,
+                         task_id: str = "") -> str:
     """取本次补偿可回填的真实结论（取不到返回空串）。
 
     优先用调用方传入的 `task_result_text`（同事务内刚 UPDATE 进 agent_tasks 的值），
-    否则按 event_seq 反查最新任务行的 result_text（同事务同游标，可见本次写入）。
+    否则按 (event_seq, task_id) 反查本任务行的 result_text（同事务同游标，可见本次写入）。
+    任务 id 必须限定：同一 event_seq 可能有多条重试任务，只按 event_seq 取最新会把
+    **另一条任务**的结论回填到本事件（结论错配，Issue #1938 QA 复审指出）。
     已是补偿文案的文本不再当作「真实结论」回填（防自我复制成假答复）。
     """
     _cand = (task_result_text or "").strip()
     if not _cand:
         try:
+            _sql = ("SELECT result_text FROM agent_tasks WHERE event_seq=? "
+                    "AND result_text IS NOT NULL AND result_text!='' ")
+            _params: tuple = (event_seq,)
+            if task_id:
+                _sql += "AND id=? "
+                _params = (event_seq, task_id)
             _row = cursor.execute(
-                "SELECT result_text FROM agent_tasks WHERE event_seq=? "
-                "AND result_text IS NOT NULL AND result_text!='' "
-                "ORDER BY created_at DESC LIMIT 1", (event_seq,)).fetchone()
+                _sql + "ORDER BY created_at DESC LIMIT 1", _params).fetchone()
             _cand = ((_row[0] if _row else "") or "").strip()
         except Exception as _e:
-            log.warning(f"_cascade_real_result: lookup failed for seq={event_seq}: {_e}")
+            log.warning(f"_cascade_real_result: lookup failed for seq={event_seq} task={task_id}: {_e}")
             return ""
     if not _cand or _cascade.is_cascade_result_text(_cand):
         return ""
@@ -2080,7 +2087,8 @@ def _cascade_real_result(cursor, event_seq: int, task_result_text: str = None) -
 
 def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None,
                             triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
-                            task_status: str = "", task_result_text: str = None):
+                            task_status: str = "", task_result_text: str = None,
+                            task_id: str = ""):
     """Issue #587/#1938: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
@@ -2104,7 +2112,7 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
             return False
         _task_status = (task_status or status or "").strip()
         _event_status, _event_exit = _cascade.cascade_event_terminal_state(_task_status, exit_code)
-        _real = _cascade_real_result(cursor, event_seq, task_result_text)
+        _real = _cascade_real_result(cursor, event_seq, task_result_text, task_id=task_id)
         if _real:
             _reason = _cascade.REASON_BACKFILLED
             _result = _real
@@ -2175,7 +2183,8 @@ def converge_event_to_task(task_id: str) -> dict:
         converged = _cascade_event_terminal(
             c, _seq, _task_status, exit_code=task.get("exit_code"),
             triggered_by=_cascade.TRIGGER_CONVERGE_EVENT,
-            task_result_text=task.get("result_text") or "")
+            task_result_text=task.get("result_text") or "",
+            task_id=task_id)
         db.commit()
         # 回读真实事件终态与归因字段（老库缺列时降级为 before，不阻断补偿主流程）
         try:
@@ -2264,7 +2273,8 @@ def update_task_status(task_id, status, **kw):
                                                exit_code=kw.get("exit_code"),
                                                triggered_by=_cascade_trigger,
                                                task_status=status,
-                                               task_result_text=kw.get("result_text")):
+                                               task_result_text=kw.get("result_text"),
+                                               task_id=task_id):
                         _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
                                  f"{status} for task {task_id} "

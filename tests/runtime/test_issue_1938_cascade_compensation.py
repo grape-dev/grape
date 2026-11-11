@@ -227,6 +227,19 @@ class TestRealResultBackfill:
         row = _event_row(19403)
         assert row[4] == cascade.REASON_SYNTHESIZED
 
+    def test_backfill_limited_to_own_task(self):
+        """同一 event_seq 多条重试任务时，不得把另一条任务的结论回填到本事件。"""
+        _insert_event(19404, status="running")
+        _insert_task("task-1938-other", 19404, status="failed", exit_code=1,
+                     result_text="另一条重试任务的结论（不得本事件使用）")
+        _insert_task("task-1938-self", 19404, status="failed", exit_code=2)
+        res = service.converge_event_to_task("task-1938-self")
+        assert res["status"] == "converged"
+        row = _event_row(19404)
+        assert "另一条重试任务的结论" not in (row[1] or ""), "结论回填须限定本任务 id"
+        assert row[4] == cascade.REASON_SYNTHESIZED
+        assert int(row[5]) == 1
+
 
 class TestIdempotencyAndGuard:
     """幂等 + event_active_guard 释放语义不退化。"""

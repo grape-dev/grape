@@ -14,3 +14,7 @@
 - [x] T12 回归：`test_issue_587_event_convergence.py`、`test_terminate_event.py`、`test_obs_*`、`test_issue_1497_*`
 - [x] T13 文档 `docs/issue-1938/{spec,plan,task}.md`
 - [x] T14 自审查（5 轴 + 开源前置增量检查）→ 建 PR（base `arch-weekly-11`）→ Issue 评论 → A2A QA
+- [x] T15 QA 复审遗留①：`issues.py::_group_events_by_issue` SELECT 补 `result` 列并传 `result_by_seq`，
+      存量（#587 时代）补偿记录在 Issue 处理记录/流水线视图与事件列表/详情/PR 卡片同口径
+- [x] T16 QA 复审遗留②：`_cascade_real_result` 兜底 SQL 增加 `AND id=?` 任务限定（三条触发路径均透传
+      `task_id`，含 sweeper 的 `_terminal_by_seq`），避免同一 `event_seq` 多条重试任务时结论错配

@@ -344,11 +344,12 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                 with db_lock:
                     _tc = db.cursor()
                     _tc.execute(
-                        f"SELECT event_seq, status, exit_code FROM agent_tasks "
+                        f"SELECT event_seq, status, exit_code, id FROM agent_tasks "
                         f"WHERE event_seq IN ({ph2}) AND status IN ('completed','failed','cancelled') "
                         f"ORDER BY created_at ASC", dead)
-                    for _s, _st, _ec in _tc.fetchall():
-                        _terminal_by_seq[_s] = (_st, _ec)
+                    for _s, _st, _ec, _tid in _tc.fetchall():
+                        # 同一 event_seq 多条重试任务时以最新任务为准（结论回填须限定任务 id）
+                        _terminal_by_seq[_s] = (_st, _ec, _tid)
             except Exception as _te:
                 log.warning(f"sweeper: terminal task lookup failed: {_te}")
             try:
@@ -362,8 +363,8 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                     for s in dead:
                         if s in _terminal_by_seq:
                             # 任务已终态 → 级联到任务终态（探活收敛，幂等）
-                            _st, _ec = _terminal_by_seq[s]
-                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
+                            _st, _ec, _tid = _terminal_by_seq[s]
+                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec, task_id=_tid):
                                 fixed += 1
                             continue
                         _txt = _timeout_txt if s in _with_task_rows else _no_task_txt
