@@ -24,7 +24,13 @@
   - Acceptance: 验收 a-d 全覆盖，含 `git fetch <bundle> && git reset --hard FETCH_HEAD` 实测恢复
   - Verify: python -m pytest tests/test_worktree_reset_archive.py tests/runtime/test_repogit.py tests/runtime/test_issue_752_worktree_guard.py
   - Files: tests/test_worktree_reset_archive.py
-- [ ] Task 6: 自审查 + 提交推送 + 建 PR（base=arch-weekly-11）+ Issue 评论 + A2A 通知 QA
+- [x] Task 6: 自审查 + 提交推送 + 建 PR（base=arch-weekly-11）+ Issue 评论 + A2A 通知 QA
   - Acceptance: 5 轴审查通过；pre-pr 增量检查（黑名单/敏感扫描/英文 commit）通过
   - Verify: grape git status/diff 核对；grape tasks complete 汇报
   - Files: —
+- [x] Task 7: PR #1228 审查整改（3 Required / 1 Could / 2 建议 + 架构守护 F1/F2/F3/I1/I5）
+  - Acceptance: 未保全即拒绝删除；record 只注入一次；HEAD 不可解析不再放行；rename 两列判定；
+    已推送（不带 -u）零副作用；旧布局过闸；bundle 仅 HEAD；归档 0700/0600
+  - Verify: python -m pytest tests/test_worktree_reset_archive.py（36 passed）+ 回归套件与基线同形
+  - Files: src/domains/runtime/engine/worktree_guard.py, src/domains/runtime/engine/repogit.py,
+    tests/test_worktree_reset_archive.py, docs/issue-2041/{spec,plan}.md
