@@ -74,18 +74,6 @@ class GitCodeBackend(VcsBackend):
 
         repo = self._extract_repo(payload)
         actor = self._extract_actor(payload)
-        # TEMP DIAG（排查 PR 评论 actor 误判为 bot）：Note Hook 打印 actor 来源链
-        if event_header == "Note Hook":
-            try:
-                _u = (payload.get("user") or {}).get("username") if isinstance(payload.get("user"), dict) else None
-                _s = (payload.get("sender") or {}).get("username") if isinstance(payload.get("sender"), dict) else None
-                _oa = payload.get("object_attributes") or {}
-                _mr = payload.get("merge_request") or {}
-                _mra = (_mr.get("author") or {}).get("username") if isinstance(_mr.get("author"), dict) else None
-                log.info(f"DIAG note_hook: actor={actor} | payload.user={_u} | sender={_s} | "
-                         f"obj.author_id={_oa.get('author_id')} | mr.author={_mra} | mr.author_id={_mr.get('author_id')}")
-            except Exception as _e:
-                log.info(f"DIAG note_hook log failed: {_e}")
         branch = self._extract_branch(payload)
         title = self._extract_title(payload)
 
