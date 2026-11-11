@@ -1309,6 +1309,12 @@ if (getToken()) {
 
 <style>
 /* migrated from admin.html inline styles (unscoped: page is standalone, admin.css tokens live in tokens.css) */
+/* ── Auth 区（登录 / 二次校验）= 固定深色场景 ─────────────────────────
+   判定（2026-11-11）：apple-design-suite 的 scene 例外——登录页自带深色地面
+   （linear-gradient(180deg,#1d1d1f,#000)）+ 玻璃卡，两主题下都保持深色，不跟随
+   主题翻转。所以这里的 --auth-* 是「场景局部 token」，不是主题 token：
+   --auth-text/#f5f5f7、--auth-text-secondary/#86868b 是深色地面上的固定前景。
+   新增 auth 样式时继续用这套，别改成 var(--t)/var(--t3)。 */
 .admv-root {
   min-height: 100vh;
 }
@@ -1386,7 +1392,7 @@ if (getToken()) {
   border-radius: 980px;
   border: none;
   background: var(--auth-accent, #0071e3);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 15px;
   font-weight: 500;
   cursor: pointer;
@@ -1450,7 +1456,7 @@ if (getToken()) {
 }
 .lang-btn.active {
   background: var(--a, #3168e0);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 /* Main frame */
@@ -1461,7 +1467,7 @@ if (getToken()) {
 .sb {
   width: 232px;
   background: #0c1222;
-  color: #fff;
+  color: var(--on-accent);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -1513,11 +1519,11 @@ if (getToken()) {
 }
 .sb-nav a:hover {
   background: #161e30;
-  color: #fff;
+  color: var(--on-accent);
 }
 .sb-nav a.act {
   background: var(--a, #3168e0);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 500;
 }
 .sb-nav .grp {
@@ -1560,7 +1566,7 @@ if (getToken()) {
   background: rgba(255, 255, 255, 0.1);
   font-size: 10px;
   font-weight: 600;
-  color: #fff;
+  color: var(--on-accent);
 }
 .sb-ft .out {
   color: #ff6b6b;
@@ -1664,7 +1670,7 @@ if (getToken()) {
   border: 1px solid var(--b, #e3e6ee);
   font-size: 13px;
   outline: none;
-  background: #fff;
+  background: var(--c);
   color: var(--t, #101724);
 }
 .f-row input:focus {
@@ -1697,7 +1703,7 @@ if (getToken()) {
   border: 1px solid var(--b, #e3e6ee);
   font-size: 13px;
   outline: none;
-  background: #fff;
+  background: var(--c);
   color: var(--t, #101724);
 }
 .f-row select:focus {
@@ -1728,7 +1734,7 @@ if (getToken()) {
 }
 .btn-p {
   background: var(--a, #3168e0);
-  color: #fff;
+  color: var(--on-accent);
 }
 .btn-p:disabled {
   opacity: 0.5;
@@ -1763,7 +1769,7 @@ if (getToken()) {
   padding: 6px 10px 6px 32px;
   font-size: 13px;
   margin-bottom: 0;
-  background: #fff;
+  background: var(--c);
   color: var(--t, #101724);
   border: 1px solid var(--b, #e3e6ee);
   border-radius: 8px;
@@ -1845,7 +1851,7 @@ if (getToken()) {
   padding: 4px 10px;
   border: 1px solid var(--b, #e3e6ee);
   border-radius: 6px;
-  background: #fff;
+  background: var(--c);
   cursor: pointer;
   font-size: 14px;
   color: var(--t2, #5b667b);
@@ -1860,7 +1866,7 @@ if (getToken()) {
   right: 0;
   top: 100%;
   margin-top: 4px;
-  background: #fff;
+  background: var(--c);
   border: 1px solid var(--b, #e3e6ee);
   border-radius: 10px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
@@ -1927,7 +1933,7 @@ if (getToken()) {
   padding: 5px 12px;
   border: 1px solid var(--b, #e3e6ee);
   border-radius: 7px;
-  background: #fff;
+  background: var(--c);
   font-size: 12px;
   cursor: pointer;
   color: var(--t2, #5b667b);
@@ -1982,7 +1988,7 @@ if (getToken()) {
 .mbox {
   width: 420px;
   max-width: 92vw;
-  background: #fff;
+  background: var(--c);
   border-radius: 18px;
   padding: 26px;
 }
@@ -2022,6 +2028,6 @@ if (getToken()) {
 }
 .m-btn-p {
   background: var(--a, #0071e3);
-  color: #fff;
+  color: var(--on-accent);
 }
 </style>

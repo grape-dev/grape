@@ -1612,7 +1612,7 @@ onMounted(function () {
   width: 28px;
   height: 28px;
   border-radius: 999px;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 12px;
   display: flex;
   align-items: center;
@@ -1965,7 +1965,7 @@ onMounted(function () {
 }
 .sm__scenename:focus {
   border-color: #0071e3;
-  background: #fff;
+  background: var(--c);
 }
 .sm__nameerr {
   margin-top: 6px;

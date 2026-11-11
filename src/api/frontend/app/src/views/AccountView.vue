@@ -242,7 +242,10 @@
                       class="ac__pv-line"
                       style="width: 40%; background: #5b667b; height: 3px"
                     ></div>
-                    <div class="ac__pv-card" style="background: #fff; border-color: #e3e6ee"></div>
+                    <div
+                      class="ac__pv-card"
+                      style="background: var(--c); border-color: var(--hairline)"
+                    ></div>
                   </div>
                 </div>
                 <p class="ac__themedesc">{{ t('theme_default_desc') }}</p>
@@ -266,17 +269,17 @@
                   <div class="ac__pv-main">
                     <div
                       class="ac__pv-line"
-                      style="width: 60%; background: #1d1d1f; height: 4px"
+                      style="width: 60%; background: var(--t); height: 4px"
                     ></div>
                     <div
                       class="ac__pv-line"
-                      style="width: 40%; background: #6e6e73; height: 3px"
+                      style="width: 40%; background: var(--t2); height: 3px"
                     ></div>
                     <div
                       class="ac__pv-card"
                       style="
-                        background: #fff;
-                        border-color: #d2d2d7;
+                        background: var(--c);
+                        border-color: var(--hairline);
                         border-radius: 12px;
                         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
                       "
@@ -2019,7 +2022,7 @@ onMounted(function () {
 .ac__expired-tag {
   font-size: 10px;
   background: var(--r);
-  color: #fff;
+  color: var(--on-accent);
   padding: 2px 6px;
   border-radius: 4px;
 }
@@ -2206,7 +2209,7 @@ onMounted(function () {
 }
 .ac__modebtn--on {
   background: var(--a);
-  color: #fff;
+  color: var(--on-accent);
   border-color: var(--a);
 }
 .ac__keybtn {

@@ -1672,7 +1672,7 @@ onMounted(function () {
   height: 18px;
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.6);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   cursor: pointer;
   font-size: 12px;
@@ -1756,7 +1756,7 @@ onMounted(function () {
 }
 .cv__scope-tab.active {
   background: var(--a);
-  color: #fff;
+  color: var(--on-accent);
   border-color: var(--a);
 }
 /* 删除气泡（复用 .chat-del-* 壳类） */
@@ -1800,7 +1800,7 @@ onMounted(function () {
   padding: 10px 0;
 }
 .cv__qr-wrap {
-  background: #fff;
+  background: var(--c);
   border: 1px solid var(--b);
   border-radius: 8px;
   padding: 12px;

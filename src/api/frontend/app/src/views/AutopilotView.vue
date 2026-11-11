@@ -395,7 +395,7 @@
             <div class="apv-fld">
               <label class="apv-lbl-s">{{ tt('form.skill_label') }}</label>
               <div class="apv-pickerbtn" @click="openSkillPicker">
-                <span :style="{ color: selectedSkill ? '#0071e3' : '#86868b', fontWeight: 500 }">
+                <span :style="{ color: selectedSkill ? 'var(--a)' : 'var(--t3)', fontWeight: 500 }">
                   {{ selectedSkill || tt('form.skill_empty') }}
                 </span>
               </div>
@@ -2220,7 +2220,7 @@ const ENG_TAG_COLORS = {
   qa: '#a855f7',
   sre: '#f59e0b',
 }
-const SCOPE_COLORS = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: '#86868b' }
+const SCOPE_COLORS = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: 'var(--t3)' }
 function tagColor(t) {
   return ENG_TAG_COLORS[t] || '#999'
 }
@@ -2565,7 +2565,7 @@ onBeforeUnmount(function () {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--on-accent);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   transition: left 0.2s;
 }
@@ -3235,7 +3235,7 @@ onBeforeUnmount(function () {
   margin: 0 0 4px;
   font-size: 17px;
   font-weight: 600;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .apv-pick-sub {
   font-size: 12px;
@@ -3256,14 +3256,14 @@ onBeforeUnmount(function () {
   padding: 3px 10px;
   border-radius: 999px;
   border: 1px solid var(--b, #e8e8ed);
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   background: var(--bg, #f5f5f7);
   font-weight: 500;
   transition: all 0.15s;
 }
 .apv-pick-tags > span.on {
   border-color: var(--a, #0071e3);
-  color: #fff;
+  color: var(--on-accent);
   background: var(--a, #0071e3);
 }
 .apv-tag-sep {
@@ -3339,7 +3339,7 @@ onBeforeUnmount(function () {
 .apv-pick-name {
   font-weight: 600;
   font-size: 13px;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -3366,7 +3366,7 @@ onBeforeUnmount(function () {
   font-size: 9px;
   padding: 2px 7px;
   border-radius: 999px;
-  color: #fff;
+  color: var(--on-accent);
   margin-left: 4px;
   font-weight: 500;
 }

@@ -2228,6 +2228,15 @@ function renderOverviewCharts() {
 }
 // 模板 ref 收集（图表容器）
 const chartEls = {}
+function cssVar(name, fallback) {
+  try {
+    const cs = G.getComputedStyle(G.document.documentElement)
+    const v = cs.getPropertyValue(name).trim()
+    return v || fallback
+  } catch (e) {
+    return fallback
+  }
+}
 function chartRefsEl(name) {
   return chartEls[name]
 }
@@ -3777,7 +3786,7 @@ function effThroughputOption(tp) {
         name: t('eff2.leg_items'),
         nameTextStyle: { fontSize: 9 },
         axisLabel: { fontSize: 10 },
-        splitLine: { lineStyle: { color: '#eef0f4' } },
+        splitLine: { lineStyle: { color: cssVar('--hairline', '#eef0f4') } },
       },
       {
         type: 'value',
@@ -3888,7 +3897,7 @@ function renderEffDailyChart() {
       {
         type: 'value',
         axisLabel: { fontSize: 10 },
-        splitLine: { lineStyle: { color: '#eef0f4' } },
+        splitLine: { lineStyle: { color: cssVar('--hairline', '#eef0f4') } },
       },
       { type: 'value', axisLabel: { fontSize: 10 }, splitLine: { show: false } },
     ],
@@ -4100,7 +4109,7 @@ onBeforeUnmount(function () {
 .obv-bigtabs a.on {
   border-color: var(--a);
   background: var(--a);
-  color: #fff;
+  color: var(--on-accent);
 }
 .obv-tab-ic {
   font-size: 20px;
@@ -4546,7 +4555,7 @@ onBeforeUnmount(function () {
 }
 .obv-chip.on {
   background: var(--a);
-  color: #fff;
+  color: var(--on-accent);
 }
 .obv-evq {
   flex: 1;
@@ -4678,13 +4687,13 @@ onBeforeUnmount(function () {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 .obv-logtime {
-  color: #5b667b;
+  color: var(--t2);
 }
 .obv-logsrc {
   color: #5b9eff;
 }
 .obv-logcomp {
-  color: #8d97a8;
+  color: var(--t3);
 }
 .obv-logctx {
   color: #7f8ea3;
@@ -4693,12 +4702,12 @@ onBeforeUnmount(function () {
   color: #e0e6f0;
 }
 .obv-logsub {
-  color: #8d97a8;
+  color: var(--t3);
 }
 .obv-logempty {
   padding: 12px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  color: #8d97a8;
+  color: var(--t3);
 }
 /* 弹窗通用 */
 .rtv-modal-ov {
@@ -4795,7 +4804,7 @@ onBeforeUnmount(function () {
   margin-left: auto;
   padding: 2px 8px;
   border-radius: 4px;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 10px;
   font-weight: 600;
 }
@@ -5129,7 +5138,7 @@ onBeforeUnmount(function () {
 }
 .eff-seg button.on {
   background: var(--a);
-  color: #fff;
+  color: var(--on-accent);
 }
 .eff-spark {
   display: flex;

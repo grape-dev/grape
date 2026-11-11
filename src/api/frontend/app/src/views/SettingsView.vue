@@ -366,7 +366,7 @@ onMounted(() => {
 }
 .sv__unhost-btn {
   background: var(--r);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   padding: 8px 16px;
 }

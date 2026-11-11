@@ -976,7 +976,7 @@ onBeforeUnmount(function () {
   font-size: 11px;
 }
 .pl__table .exec {
-  color: #fff;
+  color: var(--on-accent);
   background: var(--c-success);
 }
 .pl__table .tg {

@@ -1251,7 +1251,7 @@ function engineTagSummary(tags) {
   return tags
     .map(
       (x) =>
-        `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${RT_TAG_COLORS[x] || '#999'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
+        `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#999'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
     )
     .join('')
 }
@@ -1262,7 +1262,7 @@ function sceneTagSummary(tags) {
     .map((x) => {
       const dn = sceneDisplayName(x)
       const color = SCENE_TAG_COLORS[x] || '#10b981'
-      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color:#fff;background:${color};margin:0 2px">${esc(dn)}</span>`
+      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
     })
     .join('')
 }
@@ -2290,7 +2290,7 @@ onBeforeUnmount(function () {
   border-radius: 10px 0 0 10px;
   font-size: 13px;
   background: var(--bg);
-  color: var(--t1);
+  color: var(--t);
   transition: border-color 0.2s;
   outline: none;
   min-width: 0;
@@ -2313,7 +2313,7 @@ onBeforeUnmount(function () {
 }
 .rtv-searchbtn:hover {
   background: #0071e3;
-  color: #fff;
+  color: var(--on-accent);
 }
 .rtv-addbtn {
   margin-left: auto;
@@ -2324,7 +2324,7 @@ onBeforeUnmount(function () {
   border: none;
   border-radius: 10px;
   background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -2351,7 +2351,7 @@ onBeforeUnmount(function () {
 .rtv-empty-t {
   font-size: 15px;
   font-weight: 600;
-  color: var(--t1);
+  color: var(--t);
 }
 .rtv-empty-d {
   font-size: 13px;
@@ -2380,14 +2380,14 @@ onBeforeUnmount(function () {
   padding: 4px 12px;
   border-radius: 999px;
   border: 1px solid var(--b);
-  color: var(--t1);
+  color: var(--t);
   background: var(--c);
   font-weight: 500;
   transition: all 0.2s;
 }
 .rtv-chip.on {
   border-color: #0071e3;
-  color: #fff;
+  color: var(--on-accent);
   background: #0071e3;
 }
 .rtv-chip-dot {
@@ -2411,7 +2411,7 @@ onBeforeUnmount(function () {
   font-size: 11px;
   padding: 4px 12px;
   border-radius: 999px;
-  color: #86868b;
+  color: var(--t3);
   font-weight: 400;
 }
 .rtv-clear:hover {
@@ -2449,7 +2449,7 @@ onBeforeUnmount(function () {
   font-size: 9px;
   padding: 1px 7px;
   border-radius: 999px;
-  color: #fff;
+  color: var(--on-accent);
 }
 /* 汇总 */
 .rtv-summary {
@@ -2553,7 +2553,7 @@ onBeforeUnmount(function () {
   padding: 1px 8px;
   white-space: nowrap;
   vertical-align: middle;
-  color: #fff;
+  color: var(--on-accent);
 }
 .rtv-sbadge.global {
   background: #3168e0;
@@ -2726,7 +2726,7 @@ onBeforeUnmount(function () {
   border: 1px solid var(--b);
   border-radius: 6px;
   background: var(--c);
-  color: var(--t1);
+  color: var(--t);
   font-size: 12px;
   cursor: pointer;
   margin: 0 2px;
@@ -2734,7 +2734,7 @@ onBeforeUnmount(function () {
 .rtv-pager button.on {
   border-color: #0071e3;
   background: #0071e3;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .rtv-pager button:disabled {
@@ -2886,7 +2886,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   font-size: 14px;
   background: var(--bg);
-  color: var(--t1);
+  color: var(--t);
   outline: none;
 }
 .rtv-skcount {
@@ -2902,7 +2902,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   font-size: 13px;
   background: var(--bg);
-  color: var(--t1);
+  color: var(--t);
   outline: none;
   margin-bottom: 8px;
 }
@@ -2924,7 +2924,7 @@ onBeforeUnmount(function () {
 .rtv-sk-name {
   font-weight: 600;
   font-size: 13px;
-  color: var(--t1);
+  color: var(--t);
 }
 .rtv-sk-desc {
   font-size: 11px;
@@ -2992,7 +2992,7 @@ onBeforeUnmount(function () {
   background: var(--bg);
   margin-bottom: 8px;
   font-size: 13px;
-  color: var(--t1);
+  color: var(--t);
 }
 .rtv-sm-item.on {
   border-color: #0071e3;
@@ -3009,7 +3009,7 @@ onBeforeUnmount(function () {
   border-radius: 6px;
   font-size: 12px;
   background: var(--bg);
-  color: var(--t1);
+  color: var(--t);
   outline: none;
 }
 .rtv-sm-btns {
@@ -3141,7 +3141,7 @@ onBeforeUnmount(function () {
 .rtv-sb-opt-t {
   font-size: 15px;
   font-weight: 600;
-  color: var(--t1);
+  color: var(--t);
   line-height: 1.3;
 }
 .rtv-sb-opt-d {
@@ -3197,7 +3197,7 @@ onBeforeUnmount(function () {
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 14px;
-  color: var(--t1);
+  color: var(--t);
 }
 .rtv-cred-fld {
   margin-bottom: 12px;
@@ -3218,7 +3218,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   font-size: 13px;
   background: var(--c);
-  color: var(--t1);
+  color: var(--t);
   font-family: inherit;
 }
 .rtv-cred-disabled {
@@ -3271,7 +3271,7 @@ onBeforeUnmount(function () {
 .rtv-cred-sub {
   font-size: 12px;
   font-weight: 600;
-  color: var(--t1);
+  color: var(--t);
   margin-bottom: 5px;
 }
 .rtv-cred-fullbtn {
@@ -3303,7 +3303,7 @@ onBeforeUnmount(function () {
   font-size: 14px;
   font-weight: 600;
   flex: 1;
-  color: #fff;
+  color: var(--on-accent);
 }
 .rtv-dev-auto {
   font-size: 10px;
@@ -3311,7 +3311,7 @@ onBeforeUnmount(function () {
 }
 .rtv-dev-create {
   background: rgba(255, 255, 255, 0.2);
-  color: #fff;
+  color: var(--on-accent);
   border: 1px solid rgba(255, 255, 255, 0.25);
   border-radius: 6px;
   padding: 5px 12px;
@@ -3321,7 +3321,7 @@ onBeforeUnmount(function () {
 }
 .rtv-dev-refresh {
   background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  color: var(--on-accent);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 6px;
   padding: 5px 10px;

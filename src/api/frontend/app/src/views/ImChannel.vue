@@ -343,7 +343,7 @@ load()
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--on-accent);
   flex-shrink: 0;
 }
 .imc__banner-text {

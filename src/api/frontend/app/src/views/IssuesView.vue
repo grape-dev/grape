@@ -937,12 +937,12 @@ const STATUS_LABELS = computed(() => ({
   cancelled: t('status.tag_cancelled') || '已取消',
 }))
 const STATUS_COLORS = {
-  pending: '#86868b',
+  pending: 'var(--t3)',
   in_progress: '#3b82f6',
   awaiting_input: '#f59e0b',
   pending_review: '#10b981',
   done: '#34c759',
-  cancelled: '#86868b',
+  cancelled: 'var(--t3)',
 }
 const STAGE_LABELS = computed(() => ({
   vod: 'VOD',
@@ -962,7 +962,7 @@ const STAGE_COLORS = {
   sre: '#f59e0b',
   pending_review: '#10b981',
   done: '#34c759',
-  '': '#86868b',
+  '': 'var(--t3)',
 }
 function statusInfo(tk) {
   const ms = mapStatusL(tk)
@@ -1341,7 +1341,7 @@ function stageLabel(tk) {
   return STAGE_LABELS.value[st] || st || '—'
 }
 function stageColor(tk) {
-  return STAGE_COLORS[tk.stage || ''] || '#86868b'
+  return STAGE_COLORS[tk.stage || ''] || 'var(--t3)'
 }
 function stageStyle(tk) {
   const c = stageColor(tk)
@@ -1397,7 +1397,13 @@ const detailCardHtml = computed(() => {
     ? ' · ' + t('parent_task') + ' #' + tk.parent_issue_number
     : ''
   const issueLink = vcsUrl(tk.repo_key, (tk.is_pr ? '/pull/' : '/issues/') + tk.issue_number)
-  const statusColor = isDone ? '#34c759' : isCancelled ? '#86868b' : isProc ? '#3b82f6' : '#86868b'
+  const statusColor = isDone
+    ? '#34c759'
+    : isCancelled
+      ? 'var(--t3)'
+      : isProc
+        ? '#3b82f6'
+        : 'var(--t3)'
   return `
     <div class="isk-card isk-card-rel">
       <div class="isk-card-tt">${esc(td('detail_title'))}</div>
@@ -1421,8 +1427,8 @@ const agentStatusCardHtml = computed(() => {
   if (!tk || !(tk.agent_statuses || []).length) return ''
   const sm = {
     pending: {
-      color: '#86868b',
-      bg: 'rgba(0,0,0,.06)',
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
       icon: '○',
       label: t('agent_status.pending'),
     },
@@ -1430,8 +1436,8 @@ const agentStatusCardHtml = computed(() => {
     completed: { color: '#34c759', bg: '#34c759', icon: '✓', label: t('agent_status.completed') },
     failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
     cancelled: {
-      color: '#86868b',
-      bg: 'rgba(0,0,0,.06)',
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
       icon: '⊘',
       label: t('agent_status.cancelled'),
     },
@@ -1555,10 +1561,10 @@ const pipelineCardHtml = computed(() => {
           : isFailed
             ? '#ff3b30'
             : isCancelledN
-              ? '#86868b'
+              ? 'var(--t3)'
               : isSkipped
-                ? '#c7c7cc'
-                : '#86868b'
+                ? 'var(--t3)'
+                : 'var(--t3)'
       const bg = isCompleted
         ? '#34c759'
         : isCurrent
@@ -1566,10 +1572,10 @@ const pipelineCardHtml = computed(() => {
           : isFailed
             ? '#ff3b30'
             : isCancelledN
-              ? '#86868b'
+              ? 'var(--t3)'
               : isSkipped
-                ? '#c7c7cc'
-                : 'rgba(0,0,0,.06)'
+                ? 'var(--t3)'
+                : 'var(--chip-bg)'
       const pulse = isCurrent ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
       const nodeSeq = (n.latest_event && n.latest_event.seq) || ''
       // Issue #566：failed/cancelled 终态节点也可点进事件详情执行重新派发
@@ -1606,7 +1612,7 @@ const pipelineCardHtml = computed(() => {
           : e.status === 'failed'
             ? '#ef4444'
             : e.status === 'cancelled'
-              ? '#86868b'
+              ? 'var(--t3)'
               : '#3b82f6'
       const statusIcon =
         e.status === 'completed'
@@ -1705,7 +1711,7 @@ const prStatus = computed(() => {
           ? '#ff3b30'
           : st === 'processing'
             ? '#3b82f6'
-            : '#86868b',
+            : 'var(--t3)',
     text:
       st === 'completed'
         ? '审查完成'
@@ -2111,19 +2117,19 @@ window._grapeConfirm = function (opts, event) {
     dlgW +
     'px;width:90%;box-shadow:0 6px 30px rgba(0,0,0,.12);transform:scale(1.05);transition:transform .2s cubic-bezier(.4,0,.2,1)'
   dlg.innerHTML =
-    '<div style="font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:4px;text-align:center">' +
+    '<div style="font-size:13px;font-weight:600;color:var(--t,#1d1d1f);margin-bottom:4px;text-align:center">' +
     (title || t('confirm') || '确认') +
     '</div>' +
     '<div style="font-size:11px;color:var(--t2,#3a3a3c);line-height:1.35;text-align:center;margin-bottom:12px;white-space:pre-line">' +
     (message || '') +
     '</div>' +
     '<div style="display:flex;gap:6px">' +
-    '<button id="_grapeCancel" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:rgba(0,0,0,.06);font-size:11px;font-weight:500;color:var(--t1,#1d1d1f);cursor:pointer;font-family:inherit">' +
+    '<button id="_grapeCancel" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:rgba(0,0,0,.06);font-size:11px;font-weight:500;color:var(--t,#1d1d1f);cursor:pointer;font-family:inherit">' +
     (cancelText || t('cancel') || '取消') +
     '</button>' +
     '<button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:' +
     (danger ? '#ff3b30' : '#0071e3') +
-    ';font-size:11px;font-weight:600;color:#fff;cursor:pointer;font-family:inherit">' +
+    ';font-size:11px;font-weight:600;color: var(--on-accent);cursor:pointer;font-family:inherit">' +
     (confirmText || t('confirm') || '确认') +
     '</button></div>'
   overlay.appendChild(dlg)
@@ -2994,7 +3000,7 @@ onBeforeUnmount(function () {
 }
 .isk-viewtabs button.on {
   border-bottom-color: var(--a, #0071e3);
-  color: #fff;
+  color: var(--on-accent);
   background: var(--a, #0071e3);
 }
 /* 筛选 popover */
@@ -3050,7 +3056,7 @@ onBeforeUnmount(function () {
   border-bottom: 0.5px solid var(--b, #e8e8ed);
   font-size: 11px;
   font-weight: 600;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .isk-pop-head button {
   border: none;
@@ -3102,7 +3108,7 @@ onBeforeUnmount(function () {
   align-items: center;
   justify-content: center;
   font-size: 9px;
-  color: #fff;
+  color: var(--on-accent);
   flex-shrink: 0;
 }
 .isk-box.on {
@@ -3121,7 +3127,7 @@ onBeforeUnmount(function () {
   font-size: 11px;
   cursor: pointer;
   background: var(--bg, #f5f5f7);
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3135,7 +3141,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   cursor: pointer;
   font-size: 12px;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .isk-vopt.on {
   background: rgba(59, 130, 246, 0.06);
@@ -3177,7 +3183,7 @@ onBeforeUnmount(function () {
   border-radius: 12px;
   font-size: 13px;
   background: var(--c, #fff);
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   outline: none;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
@@ -3301,7 +3307,7 @@ onBeforeUnmount(function () {
 }
 .isk :deep(.isk-row b) {
   font-size: 13px;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   font-weight: 500;
   text-align: right;
   max-width: 60%;
@@ -3494,7 +3500,7 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
@@ -3571,7 +3577,7 @@ onBeforeUnmount(function () {
 .isk :deep(.isk-ev-type) {
   font-size: 11px;
   font-weight: 600;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .isk :deep(.isk-ev-time) {
   font-size: 10px;
@@ -3625,7 +3631,7 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
@@ -3685,7 +3691,7 @@ onBeforeUnmount(function () {
 .isk-board-name {
   font-weight: 600;
   font-size: 13px;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   letter-spacing: -0.2px;
 }
 .isk-board-cnt {
@@ -3769,7 +3775,7 @@ onBeforeUnmount(function () {
   margin: 0 0 6px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   line-height: 1.35;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -3940,7 +3946,7 @@ onBeforeUnmount(function () {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .isk-modal-close {
   background: none;
@@ -3952,7 +3958,7 @@ onBeforeUnmount(function () {
   line-height: 1;
 }
 .isk-modal-close:hover {
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .isk-modal-body {
   display: flex;
@@ -3965,7 +3971,7 @@ onBeforeUnmount(function () {
   color: var(--t3, #555);
 }
 .isk-modal-meta b {
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
 }
 .isk-fld label {
   display: flex;
@@ -3985,7 +3991,7 @@ onBeforeUnmount(function () {
   border: 1px solid var(--b, #ccc);
   border-radius: 6px;
   background: var(--c, #fff);
-  color: var(--t1, #111);
+  color: var(--t, #111);
   font-size: 13px;
   font-family: inherit;
 }

@@ -683,7 +683,7 @@ const statusText = computed(() => {
       '</button>'
   if (d.status === 'running' || d.status === 'pending')
     html +=
-      ' <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" data-ev-act="terminate" title="' +
+      ' <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--r, #e74c3c);border-color:var(--r, #e74c3c)" data-ev-act="terminate" title="' +
       esc(t('terminate_title')) +
       '">' +
       esc(t('btn_terminate')) +
@@ -905,7 +905,7 @@ function togglePromptFullscreen() {
     bar.style.cssText =
       'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #2a3140;flex-shrink:0'
     const title = document.createElement('span')
-    title.style.cssText = 'font-size:13px;font-weight:600;color:#fff;margin-right:auto'
+    title.style.cssText = 'font-size:13px;font-weight:600;color: var(--on-accent);margin-right:auto'
     title.textContent = t('section_prompt')
     const btn = document.createElement('button')
     btn.textContent = t('fullscreen_restore_btn')
@@ -1577,7 +1577,7 @@ async function taskLogStream() {
   })
     .then(function (resp) {
       if (!resp.ok) throw new Error('HTTP ' + resp.status)
-      tlStatus(t('status_connected'), 'var(--tgx, #2ecc71)')
+      tlStatus(t('status_connected'), 'var(--g, #2ecc71)')
       taskLog.hasMsg = false
       const reader = resp.body.getReader()
       const dec = new TextDecoder()
@@ -1607,7 +1607,7 @@ async function taskLogStream() {
               typeof evt.seq === 'number' && evt.seq > taskLog.seq ? evt.seq : taskLog.seq
             if (!taskLog.hasMsg) {
               taskLog.hasMsg = true
-              tlStatus(t('status_connected'), 'var(--tgx, #2ecc71)')
+              tlStatus(t('status_connected'), 'var(--g, #2ecc71)')
             }
             taskLog.logHtml += tlLine(evt)
             if (taskLog.following)
@@ -1623,7 +1623,7 @@ async function taskLogStream() {
     })
     .catch(function (err) {
       if (err && err.name === 'AbortError') return
-      tlStatus(t('status_disconnected'), 'var(--tr, #e74c3c)')
+      tlStatus(t('status_disconnected'), 'var(--r, #e74c3c)')
       setTimeout(function () {
         if (taskLog.open && !taskLog.inline) taskLogStream()
       }, 2000)
@@ -1644,7 +1644,7 @@ function terminateCurrentTask() {
   if (!taskLog.taskId) return
   G.API.post('/runtime/tasks/' + encodeURIComponent(taskLog.taskId) + '/cancel')
     .then(function () {
-      tlStatus(t('status_terminating'), 'var(--tr, #e74c3c)')
+      tlStatus(t('status_terminating'), 'var(--r, #e74c3c)')
       killBtnVisible.value = false
     })
     .catch(function (e) {
@@ -1903,7 +1903,7 @@ onMounted(function () {
   max-height: 400px;
   overflow-y: auto;
   background: #000;
-  color: #fff;
+  color: var(--on-accent);
   border-radius: 8px;
   padding: 14px 18px 28px;
   font-size: 14px;
@@ -2035,7 +2035,7 @@ onMounted(function () {
 }
 .ev__bubble--mine {
   background: var(--a);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
 }
 .ev__convhint {
@@ -2114,8 +2114,8 @@ onMounted(function () {
   cursor: pointer;
 }
 .ev__tl-kill {
-  border-color: var(--tr, #e74c3c);
-  color: var(--tr, #e74c3c);
+  border-color: var(--r, #e74c3c);
+  color: var(--r, #e74c3c);
 }
 .ev__tl-info {
   display: flex;
@@ -2133,7 +2133,7 @@ onMounted(function () {
   min-height: 0;
   overflow-y: auto;
   background: #000;
-  color: #fff;
+  color: var(--on-accent);
   padding: 14px 18px;
   font-size: 15px;
   font-family:
@@ -2156,11 +2156,11 @@ onMounted(function () {
 }
 .ev__glass {
   width: 340px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--glass-hero);
   backdrop-filter: blur(28px) saturate(200%);
   -webkit-backdrop-filter: blur(28px) saturate(200%);
   border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--hairline);
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.12),
     0 2px 8px rgba(0, 0, 0, 0.06);
@@ -2214,7 +2214,7 @@ onMounted(function () {
 .ev__glass-ok {
   padding: 8px 16px;
   font-size: 12px;
-  color: #fff;
+  color: var(--on-accent);
   border: none;
 }
 .ev__glass-ok--orange {
@@ -2243,7 +2243,7 @@ onMounted(function () {
   border-radius: 12px;
   cursor: pointer;
   border: 1px solid rgba(0, 0, 0, 0.06);
-  background: rgba(255, 255, 255, 0.55);
+  background: color-mix(in srgb, var(--c) 60%, transparent);
   transition: all 0.15s;
 }
 .ev__a2a-item--sel {

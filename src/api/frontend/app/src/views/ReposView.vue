@@ -582,7 +582,7 @@ function langCls(lg) {
 }
 function langStyle(lg) {
   return G.I18N.getLang() === lg
-    ? 'background:var(--a);color:#fff'
+    ? 'background:var(--a);color: var(--on-accent)'
     : 'background:none;color:var(--t3)'
 }
 function toggleOrgMenu() {
@@ -1025,7 +1025,7 @@ defineExpose({
   border-radius: 8px;
   border: 1px solid var(--b);
   background: var(--c);
-  color: var(--t1);
+  color: var(--t);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;

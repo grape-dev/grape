@@ -396,7 +396,7 @@ defineExpose({ show, close })
 .fb-title {
   font-size: 17px;
   font-weight: 600;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   margin-bottom: 16px;
 }
 .fb-ctx {
@@ -430,7 +430,7 @@ defineExpose({ show, close })
   font-size: 12px;
 }
 .fb-ctx-val {
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   font-size: 12px;
   word-break: break-all;
 }
@@ -490,7 +490,7 @@ defineExpose({ show, close })
   border: 1.5px solid var(--b, rgba(0, 0, 0, 0.12));
   background: var(--c, #fff);
   font-size: 14px;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   font-family: inherit;
   margin-bottom: 12px;
   outline: none;
@@ -503,7 +503,7 @@ defineExpose({ show, close })
   border: 1.5px solid var(--b, rgba(0, 0, 0, 0.12));
   background: var(--c, #fff);
   font-size: 13px;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   font-family: inherit;
   margin-bottom: 12px;
   outline: none;
@@ -547,7 +547,7 @@ defineExpose({ show, close })
   background: var(--b, rgba(0, 0, 0, 0.06));
   font-size: 13px;
   font-weight: 500;
-  color: var(--t1, #1d1d1f);
+  color: var(--t, #1d1d1f);
   cursor: pointer;
   font-family: inherit;
 }
@@ -558,7 +558,7 @@ defineExpose({ show, close })
   background: #0071e3;
   font-size: 13px;
   font-weight: 600;
-  color: #fff;
+  color: var(--on-accent);
   cursor: pointer;
   font-family: inherit;
 }

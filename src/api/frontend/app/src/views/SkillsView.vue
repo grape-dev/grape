@@ -1359,7 +1359,7 @@ onMounted(function () {
   background: var(--c);
 }
 .sk__upload-btn {
-  color: #fff;
+  color: var(--on-accent);
   background: var(--g);
   border-color: var(--g);
 }
