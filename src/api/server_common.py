@@ -597,9 +597,23 @@ def attach_frontend(app: FastAPI) -> None:
     os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
     app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
 
-    STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    # Vue 迁移后的静态根：优先 frontend/legacy（本仓布局），回退 arch 线的 static
+    _api_dir = os.path.dirname(os.path.abspath(__file__))
+    _legacy_dir = os.path.join(_api_dir, "frontend", "legacy")
+    STATIC_DIR = _legacy_dir if os.path.isdir(_legacy_dir) else os.path.join(_api_dir, "static")
     if os.path.isdir(STATIC_DIR):
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    # Vue 构建产物（phase 1 Gate 0 方案 A 的临时挂载）：迁移前保持与 /static-vue 等价入口
+    _VUE_DIST_DIR = os.path.join(_api_dir, "frontend", "static-dist")
+    if os.path.isdir(_VUE_DIST_DIR):
+        class _VueSPAStaticFiles(StaticFiles):
+            async def get_response(self, path, scope):
+                try:
+                    return await super().get_response(path, scope)
+                except Exception:
+                    return await super().get_response("index.html", scope)
+        app.mount("/static-vue", _VueSPAStaticFiles(directory=_VUE_DIST_DIR, html=True), name="static_vue")
 
     if os.path.isdir(STATIC_DIR):
         # Static assets (JS/CSS): allow browser caching with ETag revalidation.
@@ -806,7 +820,7 @@ document.documentElement.classList.remove('i18n-loading');})();
         """Admin 独立页面：返回 src/api/static/admin.html（frontend 单页）。"""
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)
-        _admin_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "admin.html")
+        _admin_html = os.path.join(STATIC_DIR, "admin.html")
         if os.path.isfile(_admin_html):
             resp = FileResponse(_admin_html)
             resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -822,7 +836,7 @@ document.documentElement.classList.remove('i18n-loading');})();
     @app.get("/oauth-popup-callback.html", include_in_schema=False)
     async def serve_oauth_popup_callback():
         """OAuth 弹窗回调中间页——极简 HTML，通过 postMessage 通知父窗口后关闭。"""
-        resp = FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "oauth-popup-callback.html"))
+        resp = FileResponse(os.path.join(STATIC_DIR, "oauth-popup-callback.html"))
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         resp.headers["Referrer-Policy"] = "no-referrer"
         return resp
@@ -831,9 +845,9 @@ document.documentElement.classList.remove('i18n-loading');})();
     async def spa_catch_all(path: str):
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)
-        if not os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")):
+        if not os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"), 'r', encoding='utf-8') as f:
+        with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:
             html = f.read()
         html = _inject_email_configured(html)
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
