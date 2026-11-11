@@ -15,6 +15,9 @@ from src.kernel.token_service import is_auth_401_error
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
 from src.domains.mgmt.user.db import get_task_token as _get_task_token
 
+# Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）
+from src.domains.runtime.engine import cascade as _cascade
+
 # R16.2.1: 统一 error_code → message 映射（task errors / dashboard 展示用）
 _R16_ERROR_MESSAGES = {
     "TOKEN_EXPIRED": "user token expired or revoked",
@@ -2045,53 +2048,97 @@ def validate_run_token(task: dict | None, run_token: str = "") -> str:
 
 _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
-# Issue #587: 任务终态 → 事件终态级联收敛的 result 文案
-_EVENT_CASCADE_RESULTS = {
-    "cancelled": "任务已取消：级联收敛（cancel 不作为业务通过，保留事件独立终态）",
-    "failed": "任务失败：级联收敛（update_task_status 补偿，未收到详写终态回报）",
-    "completed": "任务已完成：级联收敛（回报丢失补偿）",
-}
+# Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）集中在 cascade.py。
+# 原 #587 的实现把固定文案「任务已完成：级联收敛（回报丢失补偿）」直接写进 events.result，
+# 而该位置在事件列表/Issue 处理记录里就是「Agent 答复结论」——补偿伪装成 Agent 结论且不可归因。
+# 现改为结构化落库（cascade_reason/report_missing/triggered_by + 原始任务终态 + 最后已知事件状态），
+# 文案由字段渲染；有真实结论（agent_tasks.result_text）时优先回填，取不到才写补偿文案。
 
 
-def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None):
-    """Issue #587: 任务终态级联事件收敛（事务内，幂等，终态保护）。
+def _cascade_real_result(cursor, event_seq: int, task_result_text: str = None) -> str:
+    """取本次补偿可回填的真实结论（取不到返回空串）。
+
+    优先用调用方传入的 `task_result_text`（同事务内刚 UPDATE 进 agent_tasks 的值），
+    否则按 event_seq 反查最新任务行的 result_text（同事务同游标，可见本次写入）。
+    已是补偿文案的文本不再当作「真实结论」回填（防自我复制成假答复）。
+    """
+    _cand = (task_result_text or "").strip()
+    if not _cand:
+        try:
+            _row = cursor.execute(
+                "SELECT result_text FROM agent_tasks WHERE event_seq=? "
+                "AND result_text IS NOT NULL AND result_text!='' "
+                "ORDER BY created_at DESC LIMIT 1", (event_seq,)).fetchone()
+            _cand = ((_row[0] if _row else "") or "").strip()
+        except Exception as _e:
+            log.warning(f"_cascade_real_result: lookup failed for seq={event_seq}: {_e}")
+            return ""
+    if not _cand or _cascade.is_cascade_result_text(_cand):
+        return ""
+    return _cand
+
+
+def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None,
+                            triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
+                            task_status: str = "", task_result_text: str = None):
+    """Issue #587/#1938: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
     已终态事件不被另一终态覆盖（与 event_store.update_event_status 同语义）。
+
+    Issue #1938 变更：
+    - 补偿结论结构化落库（cascade_reason / report_missing / triggered_by / 原始任务终态 /
+      最后已知事件状态），文案由 :mod:`cascade` 由字段渲染，**不再有硬编码常量与拼串兜底**；
+    - 覆盖全部 ``TASK_TERMINAL_STATUSES``（含 ``timeout_failed``）：事件终态映射 `failed`、
+      exit_code 恒非 0，纠正「超时失败被记成 completed/0」的数据失真；
+    - 能取到真实结论（agent_tasks.result_text）时优先回填，取不到才写补偿文案。
+
     返回 True 表示本次发生收敛。
     """
     try:
         row = cursor.execute("SELECT status FROM events WHERE seq=?", (event_seq,)).fetchone()
         if not row:
             return False
-        if row[0] in _TERMINAL_STATUSES:
+        _prev_event_status = row[0] or ""
+        if _prev_event_status in _TERMINAL_STATUSES:
             return False
-        _now = datetime.now(timezone.utc).isoformat()
-        _result = _EVENT_CASCADE_RESULTS.get(status, f"级联收敛：任务{status}")
-        if status == "cancelled":
-            cursor.execute(
-                "UPDATE events SET status='cancelled', exit_code=-1, completed_at=?, result=? WHERE seq=?",
-                (_now, _result, event_seq))
-        elif status == "failed":
-            cursor.execute(
-                "UPDATE events SET status='failed', exit_code=COALESCE(?, 1), completed_at=?, result=? WHERE seq=?",
-                (exit_code, _now, _result, event_seq))
+        _task_status = (task_status or status or "").strip()
+        _event_status, _event_exit = _cascade.cascade_event_terminal_state(_task_status, exit_code)
+        _real = _cascade_real_result(cursor, event_seq, task_result_text)
+        if _real:
+            _reason = _cascade.REASON_BACKFILLED
+            _result = _real
+            _structured = _real if _cascade.is_structured_agent_output(_real) else None
         else:
-            cursor.execute(
-                "UPDATE events SET status='completed', exit_code=0, completed_at=?, result=? WHERE seq=?",
-                (_now, _result, event_seq))
+            _reason = _cascade.REASON_SYNTHESIZED
+            _result = _cascade.build_cascade_result(
+                task_status=_task_status, prev_event_status=_prev_event_status,
+                triggered_by=triggered_by)
+            _structured = None
+        _now = datetime.now(timezone.utc).isoformat()
+        cursor.execute(
+            "UPDATE events SET status=?, exit_code=?, completed_at=?, result=?, "
+            "structured_output=COALESCE(?, structured_output), "
+            "cascade_reason=?, report_missing=1, triggered_by=?, "
+            "cascade_task_status=?, cascade_prev_event_status=? WHERE seq=?",
+            (_event_status, _event_exit, _now, _result, _structured,
+             _reason, (triggered_by or ""), _task_status, _prev_event_status, event_seq))
         # Issue #587 审查修复：级联收敛须同步释放 event_active_guard（与
         # update_event_status 终态路径语义一致），否则守卫残留只能靠 TTL 30min 兜底。
         # 在同一事务/游标内完成，避免嵌套获取不可重入的 db_lock。
         try:
             _g = cursor.execute(
-                "SELECT repo_key, issue_id, agent_type FROM events WHERE seq=?",
+                "SELECT repo_key, issue_id, agent_type, scene_id FROM events WHERE seq=?",
                 (event_seq,)).fetchone()
             if _g:
                 cursor.execute(
                     "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
                     "AND agent_type=? AND seq=?",
                     (_g[0], _g[1] or "#0", _g[2] or "", event_seq))
+                # Issue #1938：按 agent / 场景统计「回报丢失补偿」次数（可观测）
+                _cascade.record_compensation(
+                    agent_type=_g[2] or "", scene_id=(_g[3] if len(_g) > 3 else "") or "",
+                    triggered_by=triggered_by, task_status=_task_status)
         except Exception as _ge:
             log.warning(f"_cascade_event_terminal: guard release failed for seq={event_seq}: {_ge}")
         return True
@@ -2105,6 +2152,10 @@ def converge_event_to_task(task_id: str) -> dict:
 
     供管理端补偿重试端点（routes/runtime.py /tasks/{id}/converge-event）与
     sweeper 兜底使用：任务已终态但事件仍 running/pending（回报丢失）时收敛。
+
+    Issue #1938：终态判定改用 ``TASK_TERMINAL_STATUSES``（``timeout_failed`` 任务同样可补偿，
+    此前会被误判 task_not_terminal → 超时任务的事件只能等 TTL 兜底）；补偿归因记为
+    ``triggered_by='converge_event'``，并透传真实结论用于回填。
     """
     task = get_task(task_id)
     if not task:
@@ -2113,7 +2164,7 @@ def converge_event_to_task(task_id: str) -> dict:
     _task_status = task.get("status") or ""
     if not _seq:
         return {"status": "no_event", "task_id": task_id, "task_status": _task_status}
-    if _task_status not in _TERMINAL_STATUSES:
+    if _task_status not in TASK_TERMINAL_STATUSES:
         return {"status": "task_not_terminal", "task_id": task_id,
                 "task_status": _task_status, "event_seq": _seq}
     with db_lock:
@@ -2121,9 +2172,21 @@ def converge_event_to_task(task_id: str) -> dict:
         c.execute("SELECT status FROM events WHERE seq=?", (_seq,))
         row = c.fetchone()
         before = row[0] if row else "(missing)"
-        converged = _cascade_event_terminal(c, _seq, _task_status,
-                                            exit_code=task.get("exit_code"))
+        converged = _cascade_event_terminal(
+            c, _seq, _task_status, exit_code=task.get("exit_code"),
+            triggered_by=_cascade.TRIGGER_CONVERGE_EVENT,
+            task_result_text=task.get("result_text") or "")
         db.commit()
+        # 回读真实事件终态与归因字段（老库缺列时降级为 before，不阻断补偿主流程）
+        try:
+            _after_row = c.execute(
+                "SELECT status, cascade_reason, report_missing, triggered_by, "
+                "cascade_task_status, cascade_prev_event_status FROM events WHERE seq=?",
+                (_seq,)).fetchone()
+        except Exception as _re:
+            log.warning(f"converge_event_to_task: attribution readback failed seq={_seq}: {_re}")
+            _after_row = None
+    _after = (_after_row[0] if _after_row else before)
     # Issue #1667：直接 SQL 收敛终态后补挂排队 drain（旁路兜底）
     if converged:
         try:
@@ -2134,11 +2197,21 @@ def converge_event_to_task(task_id: str) -> dict:
     return {"status": "converged" if converged else "noop",
             "task_id": task_id, "task_status": _task_status, "event_seq": _seq,
             "event_status_before": before,
-            "event_status_after": _task_status if converged else before}
+            "event_status_after": _after,
+            "cascade_reason": (_after_row[1] if _after_row else "") or "",
+            "report_missing": int((_after_row[2] if _after_row else 0) or 0),
+            "triggered_by": (_after_row[3] if _after_row else "") or "",
+            "cascade_task_status": (_after_row[4] if _after_row else "") or "",
+            "cascade_prev_event_status": (_after_row[5] if _after_row else "") or ""}
 
 
 def update_task_status(task_id, status, **kw):
-    """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2)."""
+    """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2).
+
+    Issue #1938：可选关键字 ``cascade_trigger``（``update_task_status`` / ``sweeper``）
+    用于给事件级联收敛补偿归因，不落 agent_tasks 列（不在 SQL 列清单内，安全忽略）。
+    """
+    _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
     with db_lock:
         c = db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
@@ -2178,16 +2251,24 @@ def update_task_status(task_id, status, **kw):
         # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
         # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的
         # 详写终态路径（update_event_complete 先行）在此为 no-op（事件已终态）。
+        # Issue #1938：触发集合扩到全部 TASK_TERMINAL_STATUSES（含 timeout_failed）。此前只覆盖
+        # completed/failed/cancelled，超时失败任务的事件永远停活跃态，只能靠 event_active_guard
+        # TTL 兜底；补偿结论按 cascade.py 的终态映射落库（timeout_failed → failed + 非零 exit_code）。
         _cascaded_seq = 0
-        if status in _TERMINAL_STATUSES:
+        if status in TASK_TERMINAL_STATUSES:
             try:
                 _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
                                      (task_id,)).fetchone()
                 if _evt_row and _evt_row[0]:
-                    if _cascade_event_terminal(c, _evt_row[0], status):
+                    if _cascade_event_terminal(c, _evt_row[0], status,
+                                               exit_code=kw.get("exit_code"),
+                                               triggered_by=_cascade_trigger,
+                                               task_status=status,
+                                               task_result_text=kw.get("result_text")):
                         _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
-                                 f"{status} for task {task_id} (Issue #587 convergence)")
+                                 f"{status} for task {task_id} "
+                                 f"(Issue #587 convergence, trigger={_cascade_trigger})")
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         db.commit()

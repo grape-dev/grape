@@ -81,8 +81,13 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                 "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output, scene_id FROM events WHERE seq=?",
                 (seq,))
             row = c.fetchone()
+            # Issue #1938：补偿归因（老库缺列时为空 dict → 展示层退回普通回复口径）
+            from src.domains.runtime.engine import cascade as _cascade
+            _cascade_meta = _cascade.fetch_display_meta(
+                c, [seq], {seq: ((row[19] if row else "") or "")})
         except Exception:
             row = None
+            _cascade_meta = {}
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
@@ -127,6 +132,12 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #1938：补偿归因标注——result 若为系统补偿（原始回报丢失），显式标出
+    # 补偿路径/原始任务终态/最后已知事件状态，并从「Agent 答复结论」口径排除。
+    _cmeta = _cascade_meta.get(seq) or {}
+    result["cascade"] = _cmeta
+    result["result_kind"] = _cmeta.get("result_kind", "agent")
+    result["is_agent_conclusion"] = _cmeta.get("is_agent_conclusion", True)
     # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
     _structured_raw = row[20] if len(row) > 20 else None
     _structured = None
@@ -2454,6 +2465,15 @@ def list_events(owner: str, repo: str,
                  "result": r[7] or "", "issue_id": r[8] or "", "task_id": r[9] or ""}
                 for r in c.fetchall()
             ]
+            # Issue #1938：补偿标注——「系统补偿，原始回报丢失」的记录不计入 Agent 答复口径
+            from src.domains.runtime.engine import cascade as _cascade
+            _meta = _cascade.fetch_display_meta(
+                c, [e["seq"] for e in events], {e["seq"]: e["result"] for e in events})
+            for e in events:
+                _m = _meta.get(e["seq"]) or {}
+                e["cascade"] = _m
+                e["result_kind"] = _m.get("result_kind", "agent")
+                e["is_agent_conclusion"] = _m.get("is_agent_conclusion", True)
         except Exception:
             return {"events": [], "total": 0, "page": page, "page_size": page_size}
 

@@ -45,7 +45,9 @@ SUM_METRICS = ("task_enqueued", "task_done", "task_failed", "task_cancelled",
                "token_input", "token_output", "token_cache", "token_total",
                "engine_avail_online", "engine_avail_total",
                # Issue #516 M3：超时失败（timed out after）按仓库聚合（趋势/仪表盘消费）
-               "task_timeout")
+               "task_timeout",
+               # Issue #1938：事件回报丢失补偿次数（cascade_compensation，按仓库聚合）
+               "cascade_compensation")
 RATE_METRICS = ("task_success_rate",)
 AVG_METRICS = ("task_queue_wait_avg", "task_duration_avg")
 P95_METRICS = ("task_queue_wait_p95", "task_duration_p95")
@@ -177,6 +179,22 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
         for repo_key, n in c.fetchall():
             bucket(repo_key).setdefault("task_timeout", []).append(float(n))
 
+        # ②c Issue #1938：事件回报丢失补偿次数（events.report_missing=1）按仓库计数。
+        #     与告警指标 cascade_compensation 同口径（窗口内补偿过的关联事件数）。
+        #     独立 try/except：老库未迁出该列时跳过，不影响既有桶。
+        try:
+            _ecols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
+            if "report_missing" in _ecols:
+                c.execute("SELECT repo_key, COUNT(*) FROM events"
+                          " WHERE completed_at >= ? AND completed_at < ?"
+                          "   AND report_missing=1"
+                          "   AND repo_key IS NOT NULL AND repo_key != ''"
+                          " GROUP BY repo_key", (s_iso, e_iso))
+                for repo_key, n in c.fetchall():
+                    bucket(repo_key).setdefault("cascade_compensation", []).append(float(n))
+        except Exception as e:
+            log.warning(f"obs rollup: cascade compensation agg failed: {e}")
+
         # ③ 排队等待与执行耗时（started_at 落在桶内的任务）
         c.execute("SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
                   " WHERE started_at >= ? AND started_at < ?"
@@ -237,7 +255,9 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
             n = int(sum(m["task_enqueued"]))
             row["task_enqueued"] = (float(n), n)
         for k, metric in (("task_done", "task_done"), ("task_failed", "task_failed"),
-                          ("task_cancelled", "task_cancelled"), ("task_timeout", "task_timeout")):
+                          ("task_cancelled", "task_cancelled"), ("task_timeout", "task_timeout"),
+                          # Issue #1938：回报丢失补偿次数
+                          ("cascade_compensation", "cascade_compensation")):
             if m.get(k):
                 n = int(sum(m[k]))
                 row[metric] = (float(n), n)

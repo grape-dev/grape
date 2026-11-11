@@ -659,6 +659,8 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
             exit_code=exit_code,
             result_text=final_text[:5000],
             completed_at=datetime.now(timezone.utc).isoformat(),
+            # Issue #1938：补偿归因——该路径由 scheduler 收尾，非任务自报
+            cascade_trigger="sweeper",
         )
     except Exception as e:
         log.warning(f"Autopilot exec {exec_id}: update agent_tasks failed: {e}")
@@ -1400,7 +1402,9 @@ def _sweep_pending_self_report_timeouts() -> int:
             try:
                 update_task_status(tid, "timeout_failed", exit_code=-1,
                                    errors=json.dumps([_reason], ensure_ascii=False),
-                                   completed_at=_now)
+                                   completed_at=_now,
+                                   # Issue #1938：补偿归因（sweeper 超时兜底）
+                                   cascade_trigger="sweeper")
                 if evt_seq:
                     try:
                         update_event_complete(evt_seq, "failed", exit_code=-1,
@@ -1536,7 +1540,9 @@ def _reap_zombie_executions() -> None:
                             from src.domains.runtime.engine.service import update_task_status
                             update_task_status(_at_id, "failed", exit_code=-1,
                                 errors=json.dumps([f"worker 引擎离线超过 {_offline_secs:.0f}s，任务无法完成"],
-                                                  ensure_ascii=False))
+                                                  ensure_ascii=False),
+                                # Issue #1938：补偿归因（sweeper 僵尸回收判死）
+                                cascade_trigger="sweeper")
                         except Exception as _tk:
                             log.warning(f"Autopilot zombie recovery: task {_at_id} mark failed failed: {_tk}")
                         log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed "
