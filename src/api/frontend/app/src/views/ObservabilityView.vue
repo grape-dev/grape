@@ -496,6 +496,385 @@
             </template>
           </template>
 
+          <!-- efficiency 子 Tab（Issue #1229 能效看板 2.0，flow efficiency） -->
+          <template v-else-if="tab === 'efficiency'">
+            <div v-if="!effRepoLabel" class="ts t3 eff-norepo">{{ t('eff2.no_repo') }}</div>
+            <div v-else-if="effLoading" class="loading">{{ t('loading') }}</div>
+            <div v-else-if="effError" class="error">{{ effError }}</div>
+            <template v-else-if="effState.data">
+              <div v-if="effDq.stale" class="eff-warn">
+                ⚠
+                {{
+                  t('eff2.stale_warn', {
+                    days: effDq.stale_days,
+                    last: effDq.issue_last_sync || '-',
+                  })
+                }}
+              </div>
+              <div class="eff-h">
+                <div class="eff-scope">
+                  {{
+                    t('eff2.scope', {
+                      total: Number(effSm.created_total || 0).toLocaleString(),
+                      closed: Number(effSm.completed_total || 0).toLocaleString(),
+                      open: Number(effSm.open_total || 0).toLocaleString(),
+                    })
+                  }}
+                </div>
+                <div class="eff-scope">{{ t('eff2.week_label', { week: effRg.week || '-' }) }}</div>
+                <div class="eff-spacer"></div>
+                <select v-model.number="effState.weeks" class="eff-wksel" @change="loadEff()">
+                  <option v-for="w in [4, 8, 12, 24]" :key="w" :value="w">
+                    {{ t('eff2.last_n_weeks', { n: w }) }}
+                  </option>
+                </select>
+              </div>
+
+              <div class="eff-grid">
+                <!-- ① 周净流入（正=积压增，红） -->
+                <div class="eff-card">
+                  <h3>{{ t('eff2.kpi_net') }}</h3>
+                  <div class="eff-big" :style="{ color: effNetColor }">
+                    {{ (effNet > 0 ? '+' : '') + effNet
+                    }}<span class="eff-unit">{{ t('eff2.unit_card') }}</span>
+                  </div>
+                  <div class="eff-sub">
+                    {{ effNf.week_created || 0 }} {{ t('eff2.created') }} −
+                    {{ effNf.week_completed || 0 }} {{ t('eff2.closed_word') }}
+                  </div>
+                  <div class="eff-sub">
+                    {{ t('eff2.last4_net') }}:
+                    {{
+                      (Number(effNf.last4_weeks_net || 0) > 0 ? '+' : '') +
+                      (effNf.last4_weeks_net || 0)
+                    }}
+                  </div>
+                  <div class="eff-foot">
+                    {{ t('eff2.backlog_now', { n: effNf.backlog || 0 }) }} · {{ effTrendTxt }}
+                  </div>
+                </div>
+
+                <!-- ② 总工作量 -->
+                <div class="eff-card">
+                  <h3>{{ t('eff2.kpi_total') }}</h3>
+                  <div class="eff-big">
+                    {{ Number(effSm.created_total || 0).toLocaleString()
+                    }}<span class="eff-unit">{{ t('eff2.unit_card') }}</span>
+                  </div>
+                  <div class="eff-sub">
+                    {{ t('eff2.closed_word') }}
+                    {{ Number(effSm.completed_total || 0).toLocaleString() }} +
+                    {{ t('eff2.open_word') }} {{ Number(effSm.open_total || 0).toLocaleString() }}
+                  </div>
+                  <div class="eff-foot">{{ t('eff2.total_foot') }}</div>
+                </div>
+
+                <!-- ③ 在制 WIP -->
+                <div class="eff-card">
+                  <h3>{{ t('eff2.kpi_wip') }}</h3>
+                  <div class="eff-big">
+                    {{ Number(effSm.open_total || 0).toLocaleString()
+                    }}<span class="eff-unit">{{ t('eff2.unit_card') }}</span>
+                  </div>
+                  <div class="eff-sub">{{ t('eff2.unassigned') }}: {{ effSm.unassigned || 0 }}</div>
+                  <div class="eff-foot">{{ t('eff2.wip_foot') }}</div>
+                </div>
+
+                <!-- ④ 本周完成 + 火花柱（点柱→该周每日） -->
+                <div class="eff-card">
+                  <h3>
+                    {{ t('eff2.kpi_done_week') }}<span class="eff-cnt">{{ effRg.week || '' }}</span>
+                  </h3>
+                  <div
+                    class="eff-big"
+                    :style="{
+                      color: Number(effNf.week_completed || 0) > 0 ? 'var(--g)' : 'var(--t3)',
+                    }"
+                  >
+                    {{ Number(effNf.week_completed || 0).toLocaleString()
+                    }}<span class="eff-unit">{{ t('eff2.unit_card') }}</span>
+                  </div>
+                  <div class="eff-sub">{{ t('eff2.attribution_closed') }}</div>
+                  <div v-if="effLast6.length" class="eff-spark">
+                    <div
+                      v-for="b in effLast6"
+                      :key="b.week"
+                      class="eff-sp eff-sp-clk"
+                      :title="b.l + ': ' + b.v"
+                      @click="openEffDaily(b.week)"
+                    >
+                      <div
+                        class="eff-sb"
+                        :style="{ height: Math.round((b.v / effSparkMax) * 100) + '%' }"
+                      ></div>
+                      <div class="eff-sl">{{ b.l }}</div>
+                    </div>
+                  </div>
+                  <div class="eff-foot">{{ t('eff2.done_foot', { week: effRg.week || '-' }) }}</div>
+                </div>
+
+                <!-- ⑤ 超龄未关（点行→issue 列表） -->
+                <div class="eff-card">
+                  <h3>
+                    {{ t('eff2.kpi_overdue')
+                    }}<span class="eff-cnt">{{ t('eff2.open_n', { n: effAg.open || 0 }) }}</span>
+                  </h3>
+                  <div
+                    class="eff-big"
+                    :style="{
+                      color: Number(effAg.over_threshold || 0) > 0 ? 'var(--y)' : 'var(--t3)',
+                    }"
+                  >
+                    {{ Number(effAg.over_threshold || 0).toLocaleString()
+                    }}<span class="eff-unit">{{ t('eff2.unit_card') }}</span>
+                  </div>
+                  <div class="eff-sub">
+                    {{ t('eff2.overdue_rule', { d: effAg.threshold_days || 7 }) }}
+                  </div>
+                  <div class="eff-bars">
+                    <div
+                      v-for="b in effAgingBars"
+                      :key="'ov-' + b.label"
+                      class="eff-brow eff-brow-clk"
+                      :class="{ zero: b.count === 0 }"
+                      :title="b.label + ': ' + b.count"
+                      @click="openEffIssues('aging', b.label)"
+                    >
+                      <div class="eff-lb">{{ b.label }}</div>
+                      <div class="eff-track">
+                        <div class="eff-l" :style="{ width: b.pct + '%' }"></div>
+                      </div>
+                      <div class="eff-num">{{ b.count }}</div>
+                    </div>
+                  </div>
+                  <div class="eff-foot">{{ t('eff2.overdue_foot') }}</div>
+                </div>
+
+                <!-- ⑥ 周吞吐与累计积压（柱线图，点周→每日） -->
+                <div class="eff-card">
+                  <h3>
+                    {{ t('eff2.kpi_throughput')
+                    }}<span class="eff-cnt">{{ t('eff2.throughput_sub') }}</span>
+                  </h3>
+                  <div :ref="(el) => setChartEl('effTp', el)" class="eff-chart"></div>
+                </div>
+
+                <!-- ⑦ 周期时间三分位（点行→已完成 issue） -->
+                <div class="eff-card">
+                  <h3>
+                    {{ t('eff2.kpi_cycle')
+                    }}<span class="eff-cnt">{{
+                      t('eff2.sample_n', { n: effCt.sample || 0 })
+                    }}</span>
+                  </h3>
+                  <div class="eff-pair">
+                    <div class="eff-cell">
+                      <div class="eff-v">
+                        {{ effCt.p50 === null || effCt.p50 === undefined ? '—' : effCt.p50 }}
+                      </div>
+                      <div class="eff-l">P50 · {{ effCycleUnit }}</div>
+                    </div>
+                    <div class="eff-cell">
+                      <div class="eff-v">
+                        {{ effCt.p75 === null || effCt.p75 === undefined ? '—' : effCt.p75 }}
+                      </div>
+                      <div class="eff-l">P75 · {{ effCycleUnit }}</div>
+                    </div>
+                    <div class="eff-cell">
+                      <div class="eff-v">
+                        {{ effCt.p90 === null || effCt.p90 === undefined ? '—' : effCt.p90 }}
+                      </div>
+                      <div class="eff-l">P90 · {{ effCycleUnit }}</div>
+                    </div>
+                  </div>
+                  <div class="eff-bars">
+                    <div
+                      v-for="b in effCycleBars"
+                      :key="'cy-' + b.label"
+                      class="eff-brow eff-brow-clk"
+                      :class="{ zero: b.count === 0 }"
+                      :title="b.label + ': ' + b.count"
+                      @click="openEffIssues('cycle', b.label)"
+                    >
+                      <div class="eff-lb">{{ b.label }}</div>
+                      <div class="eff-track">
+                        <div class="eff-l" :style="{ width: b.pct + '%' }"></div>
+                      </div>
+                      <div class="eff-num">{{ b.count }}</div>
+                    </div>
+                  </div>
+                  <div class="eff-foot">{{ t('eff2.cycle_foot') }}</div>
+                </div>
+
+                <!-- ⑧ 积压龄期分布（点行→未关 issue） -->
+                <div class="eff-card">
+                  <h3>
+                    {{ t('eff2.kpi_aging')
+                    }}<span class="eff-cnt">{{ t('eff2.open_n', { n: effAg.open || 0 }) }}</span>
+                  </h3>
+                  <div class="eff-pair">
+                    <div class="eff-cell">
+                      <div class="eff-v">{{ fmtDays(effAg.p50_days) }}</div>
+                      <div class="eff-l">P50</div>
+                    </div>
+                    <div class="eff-cell">
+                      <div class="eff-v">{{ fmtDays(effAg.p90_days) }}</div>
+                      <div class="eff-l">P90</div>
+                    </div>
+                  </div>
+                  <div class="eff-bars">
+                    <div
+                      v-for="b in effAgingBars"
+                      :key="'ag-' + b.label"
+                      class="eff-brow eff-brow-clk"
+                      :class="{ zero: b.count === 0 }"
+                      :title="b.label + ': ' + b.count"
+                      @click="openEffIssues('aging', b.label)"
+                    >
+                      <div class="eff-lb">{{ b.label }}</div>
+                      <div class="eff-track">
+                        <div class="eff-l" :style="{ width: b.pct + '%' }"></div>
+                      </div>
+                      <div class="eff-num">{{ b.count }}</div>
+                    </div>
+                  </div>
+                  <div class="eff-foot">
+                    {{
+                      t('eff2.aging_foot', {
+                        d: effAg.threshold_days || 7,
+                        n: effAg.over_threshold || 0,
+                      })
+                    }}
+                  </div>
+                </div>
+
+                <!-- ⑨ 在办分布（两段：蓝未关闭 / 绿已完成） -->
+                <div class="eff-card">
+                  <h3>
+                    {{ t('eff2.kpi_wip_dist')
+                    }}<span class="eff-cnt">{{ t('eff2.wip_dist_sub') }}</span>
+                  </h3>
+                  <template v-if="effWipItems.length">
+                    <div class="eff-bhead">
+                      <div class="eff-lb"></div>
+                      <div class="eff-barwrap"></div>
+                      <div class="eff-num">{{ t('eff2.wip_open') }}</div>
+                      <div class="eff-num2">{{ t('eff2.wip_done') }}</div>
+                    </div>
+                    <div class="eff-bars">
+                      <div
+                        v-for="i in effWipItems"
+                        :key="'wip-' + i.label"
+                        class="eff-brow eff-brow-wip"
+                        :class="[i.kind === 'bot' ? 'bot' : '', i.open === 0 ? 'zero' : '']"
+                        :title="
+                          i.label +
+                          ': ' +
+                          t('eff2.wip_total') +
+                          ' ' +
+                          i.total +
+                          ' · ' +
+                          t('eff2.wip_open') +
+                          ' ' +
+                          i.open +
+                          ' · ' +
+                          t('eff2.wip_done') +
+                          ' ' +
+                          i.completed
+                        "
+                      >
+                        <div class="eff-lb">{{ i.label }}</div>
+                        <div class="eff-barwrap">
+                          <div class="eff-track" :style="{ width: i.tw + '%' }">
+                            <div class="eff-l" :style="{ width: i.openPct + '%' }"></div>
+                            <div class="eff-lg" :style="{ width: 100 - i.openPct + '%' }"></div>
+                          </div>
+                        </div>
+                        <div class="eff-num">{{ i.open }}</div>
+                        <div class="eff-num2" :class="{ has: i.completed > 0 }">
+                          {{ i.completed }}
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                  <div v-else class="ts t3" style="padding: 12px 0">{{ t('eff2.no_data') }}</div>
+                  <div class="eff-leg">
+                    <span><i style="background: var(--a)"></i>{{ t('eff2.wip_open') }}</span>
+                    <span><i style="background: var(--g)"></i>{{ t('eff2.wip_done') }}</span>
+                    <span>{{ t('eff2.wip_bar_len') }}</span>
+                  </div>
+                  <div class="eff-foot">
+                    {{
+                      t('eff2.wip_dist_foot', {
+                        top2: Math.round((effWip.top2_share || 0) * 100),
+                        bot: effWip.bot_total || 0,
+                      })
+                    }}
+                  </div>
+                </div>
+
+                <!-- ⑩ 任务交付时长（全宽，分组切客户端 by_status） -->
+                <div class="eff-card wide">
+                  <h3>
+                    {{ t('eff2.kpi_delivery') }}
+                    <span class="eff-cnt">
+                      {{
+                        t('eff2.sample_total', {
+                          n: effGData.sample || 0,
+                          t: effTd.total_tasks || 0,
+                        })
+                      }}
+                    </span>
+                    <span class="eff-seg">
+                      <button
+                        v-for="g in [
+                          ['all', t('eff2.grp_all')],
+                          ['completed', t('eff2.grp_completed')],
+                          ['failed', t('eff2.grp_failed')],
+                          ['cancelled', t('eff2.grp_cancelled')],
+                        ]"
+                        :key="g[0]"
+                        :class="{ on: effState.group === g[0] }"
+                        @click="effState.group = g[0]"
+                      >
+                        {{ g[1] }}
+                      </button>
+                    </span>
+                  </h3>
+                  <div class="eff-pair">
+                    <div class="eff-cell">
+                      <div class="eff-v">{{ effTriple[0] }}</div>
+                      <div class="eff-l">P50</div>
+                    </div>
+                    <div class="eff-cell">
+                      <div class="eff-v">{{ effTriple[1] }}</div>
+                      <div class="eff-l">P90</div>
+                    </div>
+                    <div class="eff-cell">
+                      <div class="eff-v">{{ effTriple[2] }}</div>
+                      <div class="eff-l">P99</div>
+                    </div>
+                  </div>
+                  <div class="eff-bars">
+                    <div
+                      v-for="b in effDeliveryBars"
+                      :key="'dl-' + b.label"
+                      class="eff-brow"
+                      :class="{ zero: b.count === 0 }"
+                      :title="b.label + ': ' + b.count"
+                    >
+                      <div class="eff-lb">{{ b.label }}</div>
+                      <div class="eff-track">
+                        <div class="eff-l" :style="{ width: b.pct + '%' }"></div>
+                      </div>
+                      <div class="eff-num">{{ b.count }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </template>
+
           <!-- events 子 Tab（统一事件视图） -->
           <template v-else-if="tab === 'events'">
             <!-- Issue #476：跨仓「failed 且 result 为空」占比摘要（异步、失败静默不阻塞列表） -->
@@ -1213,6 +1592,128 @@
         </div>
       </div>
     </div>
+    <!-- ═══ 能效看板下钻弹窗（周→每日 / 桶→issue） ═══ -->
+    <div v-if="effModal.open" class="eff-mask" @click.self="closeEffModal">
+      <div class="eff-modal">
+        <button class="eff-x" :title="t('eff2.close')" @click="closeEffModal">×</button>
+        <h3 class="eff-mtitle">
+          {{ effModal.title }}<span class="eff-fin">{{ effModal.sub }}</span>
+        </h3>
+        <!-- 周 → 每日拆解 -->
+        <div v-if="effModal.kind === 'daily'" class="eff-msec">
+          <div v-if="effDaysLoading" class="loading">{{ t('loading') }}</div>
+          <div v-else-if="effDaysError" class="error">{{ effDaysError }}</div>
+          <div v-else-if="!effDays.length" class="eff-empty">{{ t('eff2.no_data') }}</div>
+          <template v-else>
+            <div :ref="(el) => setChartEl('effDaily', el)" class="eff-chart eff-chart-modal"></div>
+            <div class="eff-tblwrap">
+              <table class="eff-tbl">
+                <colgroup>
+                  <col style="width: 84px" />
+                  <col style="width: 56px" />
+                  <col style="width: 80px" />
+                  <col style="width: 80px" />
+                  <col style="width: 96px" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>{{ t('eff2.d_date') }}</th>
+                    <th>{{ t('eff2.d_weekday') }}</th>
+                    <th>{{ t('eff2.leg_created') }}</th>
+                    <th>{{ t('eff2.leg_completed') }}</th>
+                    <th>{{ t('eff2.leg_backlog') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(x, i) in effDays" :key="i">
+                    <td class="num">{{ x.label }}</td>
+                    <td>{{ x.weekday }}</td>
+                    <td class="num">{{ x.created }}</td>
+                    <td class="num">{{ x.completed }}</td>
+                    <td class="num">{{ x.backlog }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+        <!-- 桶 → issue 列表（分页懒加载） -->
+        <div v-else class="eff-msec">
+          <div class="eff-fin eff-count">{{ t('eff2.issues_count', { n: effIss.total }) }}</div>
+          <div v-if="effIss.loading" class="loading">{{ t('loading') }}</div>
+          <div v-else-if="effIss.error" class="error">{{ effIss.error }}</div>
+          <div v-else-if="!effIss.items.length" class="eff-empty">{{ t('eff2.no_data') }}</div>
+          <div v-else class="eff-tblwrap">
+            <table class="eff-tbl">
+              <colgroup>
+                <col style="width: 56px" />
+                <col />
+                <col style="width: 76px" />
+                <col style="width: 62px" />
+                <col style="width: 126px" />
+                <col style="width: 76px" />
+                <col style="width: 88px" />
+                <col style="width: 104px" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>{{ t('eff2.i_title') }}</th>
+                  <th>{{ t('eff2.i_status') }}</th>
+                  <th>{{ t('eff2.i_stage') }}</th>
+                  <th>{{ t('eff2.i_scene') }}</th>
+                  <th>{{ t('eff2.i_metric') }}</th>
+                  <th>{{ t('eff2.i_owner') }}</th>
+                  <th>{{ t('eff2.i_created') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="x in effIss.items" :key="x.number">
+                  <td class="num">#{{ x.number }}</td>
+                  <td class="eff-tdtl" :title="x.title">{{ x.title }}</td>
+                  <td>{{ x.status }}</td>
+                  <td>{{ x.stage || '—' }}</td>
+                  <td class="eff-tdtl" :title="x.scene || ''">{{ x.scene || '—' }}</td>
+                  <td class="num">{{ effMetricText(x) }}</td>
+                  <td>{{ x.created_by || '—' }}</td>
+                  <td class="num">{{ x.created_at || '' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="eff-pager">
+            <span class="eff-fin">
+              {{
+                t('eff2.page_range', {
+                  from: effIss.total === 0 ? 0 : effIss.page * effIss.pageSize + 1,
+                  to: Math.min(effIss.total, (effIss.page + 1) * effIss.pageSize),
+                  n: effIss.total,
+                })
+              }}
+            </span>
+            <span class="eff-spacer"></span>
+            <select class="eff-psize" :value="effIss.pageSize" @change="effIssSetSize">
+              <option v-for="n in [20, 50, 100]" :key="n" :value="n">
+                {{ t('eff2.per_page', { n: n }) }}
+              </option>
+            </select>
+            <button class="bt bt-o bt-s" :disabled="effIss.page <= 0" @click="effIssGo('prev')">
+              {{ t('eff2.prev_page') }}
+            </button>
+            <span class="eff-fin">{{
+              t('eff2.page_of', { p: effIss.page + 1, t: effIssPages })
+            }}</span>
+            <button
+              class="bt bt-o bt-s"
+              :disabled="effIss.page >= effIssPages - 1"
+              @click="effIssGo('next')"
+            >
+              {{ t('eff2.next_page') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1462,7 +1963,7 @@ function barColor(pct) {
 // ═══ Tab 结构 ═══
 const subTabs = computed(() =>
   section.value === 'inspect'
-    ? ['tasks', 'events', 'errorlogs']
+    ? ['tasks', 'efficiency', 'events', 'errorlogs']
     : section.value === 'devices'
       ? ['overview']
       : []
@@ -1488,6 +1989,7 @@ function switchTab(tb) {
   timelinePage.value = 0
   // 用缓存数据渲染（不重新 fetch）——Vue 里 computed 自动联动，只需触发 tab 专属异步加载
   if (tb === 'errorlogs') loadLogs()
+  else if (tb === 'efficiency') loadEff()
   else if (tb === 'events') {
     eventReload()
     loadEventGap()
@@ -1859,6 +2361,7 @@ function refreshObs(isAuto) {
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN')
     if (section.value === 'devices' || tab.value === 'tasks') loadTokCols()
     if (isAuto && section.value === 'inspect' && tab.value === 'events') eventSoftRefresh()
+    if (isAuto && section.value === 'inspect' && tab.value === 'efficiency') loadEff(true)
   })
 }
 const realOps = computed(() => {
@@ -3086,9 +3589,448 @@ onMounted(function () {
     else if (tab.value === 'tasks') loadTimeline()
   }
 })
+// ═══ 能效看板（Issue #1229：flow efficiency 10 段 + 下钻）═══
+// 数据源 /dashboard/efficiency/{board,daily,issues}；口径见
+// docs/weekly-10/efficiency-board-redesign-2026-11-09.md
+const effState = reactive({ weeks: 12, group: 'all', data: null, thresholdDays: 7 })
+const effLoading = ref(false)
+const effError = ref('')
+const effCharts = {}
+// 下钻弹窗：kind = 'daily'（某周每日拆解）| 'issues'（某桶 issue 列表）
+const effModal = reactive({ open: false, kind: '', title: '', sub: '' })
+const effDays = ref([])
+const effDaysLoading = ref(false)
+const effDaysError = ref('')
+const effIss = reactive({
+  kind: '',
+  bucket: '',
+  page: 0,
+  pageSize: 20,
+  total: 0,
+  items: [],
+  loading: false,
+  error: '',
+  reqId: 0,
+})
+const effIssCache = new Map()
+
+const effData = computed(() => effState.data || {})
+const effSm = computed(() => effData.value.summary || {})
+const effNf = computed(() => effData.value.net_flow || {})
+const effRg = computed(() => effData.value.range || {})
+const effAg = computed(() => effData.value.aging || {})
+const effCt = computed(() => effData.value.cycle_time || {})
+const effWip = computed(() => effData.value.wip_by_assignee || {})
+const effTd = computed(() => effData.value.task_delivery || {})
+const effDq = computed(() => effData.value.data_quality || {})
+const effRepoLabel = computed(() => {
+  const r = currentRepo()
+  return (r && r.fullName) || effData.value.repo || ''
+})
+const effNet = computed(() => Number(effNf.value.week_net || 0))
+// 正=积压增（红，坏事）；负=积压降（绿）
+const effNetColor = computed(() =>
+  effNet.value > 0 ? 'var(--r)' : effNet.value < 0 ? 'var(--g)' : 'var(--t)'
+)
+const effTrendTxt = computed(() => {
+  const tr = effNf.value.backlog_trend
+  if (tr === 'up') return t('eff2.trend_up')
+  if (tr === 'down') return t('eff2.trend_down')
+  return t('eff2.trend_flat')
+})
+const effCycleUnit = computed(() => {
+  const u = effCt.value.unit
+  if (u === 'days') return t('eff2.unit_d')
+  if (u === 'hours') return t('eff2.unit_h')
+  return t('eff2.unit_m')
+})
+// ④ 完成火花柱：最近 6 周（点柱→该周每日拆解）
+const effLast6 = computed(() => {
+  const tp = effData.value.throughput || {}
+  const weeks = tp.weeks || []
+  const done = tp.completed || []
+  const full = tp.week_labels_full || []
+  return weeks
+    .map((w, i) => ({
+      l: String(w).replace(/^W0*/, 'W'),
+      v: Number(done[i] || 0),
+      week: full[i] || w,
+    }))
+    .slice(-6)
+})
+const effSparkMax = computed(() => Math.max(1, ...effLast6.value.map((b) => b.v)))
+// ⑨ 分组切换：客户端切 by_status，不重新请求
+const effGData = computed(() => {
+  const td = effTd.value
+  return effState.group === 'all' ? td : (td.by_status || {})[effState.group] || {}
+})
+const effTriple = computed(() =>
+  fmtTriple(effGData.value.p50_min, effGData.value.p90_min, effGData.value.p99_min)
+)
+// ⑧ 在办分布：整条 = 该人合计，蓝=未关闭、绿=已完成
+const effWipItems = computed(() => {
+  const items = (effWip.value.items || []).map((i) => ({
+    label: i.name,
+    open: Number(i.open || i.count || 0),
+    completed: Number(i.completed || 0),
+    kind: i.kind,
+  }))
+  const tmax = Math.max(1, ...items.map((i) => i.open + i.completed))
+  return items.map((i) => {
+    const total = i.open + i.completed
+    return Object.assign(i, {
+      total,
+      tw: total > 0 ? Math.max(3, Math.round((total / tmax) * 100)) : 0,
+      openPct: total > 0 ? (i.open / total) * 100 : 0,
+    })
+  })
+})
+function effBarRows(list) {
+  const max = Math.max(1, ...list.map((b) => Number(b.count || 0)))
+  return list.map((b) => {
+    const n = Number(b.count || 0)
+    return { label: b.label, count: n, pct: n > 0 ? Math.max(2, Math.round((n / max) * 100)) : 0 }
+  })
+}
+const effAgingBars = computed(() => effBarRows(effAg.value.buckets || []))
+const effCycleBars = computed(() => effBarRows(effCt.value.buckets || []))
+const effDeliveryBars = computed(() => effBarRows(effGData.value.buckets || []))
+// 三个分位同单位（按 P90 量级定单位），避免「P50 11 秒 / P90 2.3 分钟」混排
+function fmtTriple(p50, p90, p99) {
+  const vals = [p50, p90, p99].map(Number).filter((v) => isFinite(v))
+  if (!vals.length) return ['—', '—', '—']
+  const ref = Number(p90)
+  let unit = 'unit_m'
+  let scale = 1
+  if (isFinite(ref) && ref < 1) {
+    unit = 'unit_s'
+    scale = 60
+  } else if (isFinite(ref) && ref >= 60) {
+    unit = 'unit_h'
+    scale = 1 / 60
+  }
+  return [p50, p90, p99].map((v) => {
+    if (v === null || v === undefined || v === '') return '—'
+    const n = Number(v) * scale
+    if (!isFinite(n)) return '—'
+    return (n < 10 ? n.toFixed(1) : String(Math.round(n))) + ' ' + t('eff2.' + unit)
+  })
+}
+function fmtDays(d) {
+  if (d === null || d === undefined || d === '') return '—'
+  const v = Number(d)
+  if (!isFinite(v)) return '—'
+  if (v < 1) return Math.round(v * 24) + ' ' + t('eff2.unit_h')
+  return (v < 10 ? v.toFixed(1) : String(Math.round(v))) + ' ' + t('eff2.unit_d')
+}
+function effRepoParam() {
+  const r = currentRepo()
+  return r && r.fullName ? 'repo=' + encodeURIComponent(r.fullName) : ''
+}
+function loadEff(isAuto) {
+  if (!effRepoParam()) {
+    effState.data = null
+    effLoading.value = false
+    return
+  }
+  if (!isAuto) {
+    effLoading.value = true
+    effError.value = ''
+  }
+  API()
+    .get(
+      '/dashboard/efficiency/board?' +
+        effRepoParam() +
+        '&weeks=' +
+        encodeURIComponent(effState.weeks) +
+        '&group_by=' +
+        encodeURIComponent(effState.group)
+    )
+    .then((d) => {
+      effState.data = d || {}
+      effState.thresholdDays = (d && d.aging && d.aging.threshold_days) || 7
+      effLoading.value = false
+      lastUpdate.value = new Date().toLocaleTimeString('zh-CN')
+      if (tab.value !== 'efficiency') return
+      nextTick(renderEffChart)
+    })
+    .catch((e) => {
+      effLoading.value = false
+      if (!isAuto) effError.value = t('eff2.load_failed', { msg: e.message || e })
+    })
+}
+function effThroughputOption(tp) {
+  const weeks = (tp.weeks || []).map((w) => String(w).replace(/^W0*/, 'W'))
+  return {
+    grid: { left: 34, right: 34, top: 26, bottom: 22 },
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, right: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 10 } },
+    xAxis: {
+      type: 'category',
+      data: weeks,
+      axisLabel: { fontSize: 10 },
+      axisTick: { show: false },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        name: t('eff2.leg_items'),
+        nameTextStyle: { fontSize: 9 },
+        axisLabel: { fontSize: 10 },
+        splitLine: { lineStyle: { color: '#eef0f4' } },
+      },
+      {
+        type: 'value',
+        name: t('eff2.leg_backlog'),
+        nameTextStyle: { fontSize: 9 },
+        axisLabel: { fontSize: 10 },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: t('eff2.leg_created'),
+        type: 'bar',
+        data: tp.created || [],
+        itemStyle: { color: '#4a7fd1' },
+        barMaxWidth: 14,
+      },
+      {
+        name: t('eff2.leg_completed'),
+        type: 'bar',
+        data: tp.completed || [],
+        itemStyle: { color: '#22a06b' },
+        barMaxWidth: 14,
+      },
+      {
+        name: t('eff2.leg_backlog'),
+        type: 'line',
+        yAxisIndex: 1,
+        data: tp.backlog || [],
+        symbolSize: 5,
+        itemStyle: { color: '#e0a02a' },
+        lineStyle: { color: '#e0a02a', width: 2 },
+      },
+    ],
+  }
+}
+function effInitChart(name, option) {
+  const el = chartEls[name]
+  const echarts = G.echarts
+  if (!el) return null
+  if (!echarts) {
+    el.innerHTML =
+      '<div class="ts t3" style="padding: 20px 0">' + t('ov.charts_unavailable') + '</div>'
+    return null
+  }
+  try {
+    const prev = echarts.getInstanceByDom && echarts.getInstanceByDom(el)
+    if (prev) prev.dispose()
+    if (effCharts[name]) {
+      effCharts[name].dispose()
+      effCharts[name] = null
+    }
+    const ch = echarts.init(el)
+    ch.setOption(option)
+    effCharts[name] = ch
+    return ch
+  } catch (e) {
+    el.innerHTML = '<div class="ts t3" style="padding: 20px 0">' + t('ov.chart_failed') + '</div>'
+    return null
+  }
+}
+function renderEffChart() {
+  const ch = effInitChart('effTp', effThroughputOption(effData.value.throughput || {}))
+  if (!ch) return
+  // ⑥ 点击某周 → 该周每日拆解
+  ch.on('click', (params) => {
+    const full = ((effData.value.throughput || {}).week_labels_full || [])[params.dataIndex]
+    if (full) openEffDaily(full)
+  })
+}
+// ④/⑥ 下钻：某周 → 每日拆解
+function openEffDaily(weekLabel) {
+  if (!effRepoParam()) return
+  effModal.open = true
+  effModal.kind = 'daily'
+  effModal.title = t('eff2.daily_title', { week: weekLabel })
+  effModal.sub = t('eff2.daily_sub')
+  effDays.value = []
+  effDaysError.value = ''
+  effDaysLoading.value = true
+  API()
+    .get('/dashboard/efficiency/daily?' + effRepoParam() + '&week=' + encodeURIComponent(weekLabel))
+    .then((d) => {
+      if (effModal.kind !== 'daily' || !effModal.open) return
+      effDays.value = (d && d.days) || []
+      effDaysLoading.value = false
+      nextTick(renderEffDailyChart)
+    })
+    .catch((e) => {
+      effDaysLoading.value = false
+      effDaysError.value = t('eff2.load_failed', { msg: e.message || e })
+    })
+}
+function renderEffDailyChart() {
+  const days = effDays.value || []
+  if (!days.length) return
+  effInitChart('effDaily', {
+    grid: { left: 34, right: 34, top: 26, bottom: 22 },
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, right: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 10 } },
+    xAxis: {
+      type: 'category',
+      data: days.map((x) => x.label),
+      axisLabel: { fontSize: 10 },
+      axisTick: { show: false },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        axisLabel: { fontSize: 10 },
+        splitLine: { lineStyle: { color: '#eef0f4' } },
+      },
+      { type: 'value', axisLabel: { fontSize: 10 }, splitLine: { show: false } },
+    ],
+    series: [
+      {
+        name: t('eff2.leg_created'),
+        type: 'bar',
+        data: days.map((x) => x.created),
+        itemStyle: { color: '#4a7fd1' },
+        barMaxWidth: 16,
+      },
+      {
+        name: t('eff2.leg_completed'),
+        type: 'bar',
+        data: days.map((x) => x.completed),
+        itemStyle: { color: '#22a06b' },
+        barMaxWidth: 16,
+      },
+      {
+        name: t('eff2.leg_backlog'),
+        type: 'line',
+        yAxisIndex: 1,
+        data: days.map((x) => x.backlog),
+        itemStyle: { color: '#e0a02a' },
+        lineStyle: { color: '#e0a02a', width: 2 },
+        symbolSize: 5,
+      },
+    ],
+  })
+}
+// ⑤⑦⑧ 下钻：某个桶 → 该桶 issue 列表（分页 + 懒加载缓存，翻回已看过的页不重取）
+function effIssKey(page, size) {
+  return effIss.kind + '|' + effIss.bucket + '|' + page + '|' + size
+}
+function effIssUrl(page) {
+  return (
+    '/dashboard/efficiency/issues?' +
+    effRepoParam() +
+    '&kind=' +
+    encodeURIComponent(effIss.kind) +
+    '&bucket=' +
+    encodeURIComponent(effIss.bucket || '') +
+    '&threshold_days=' +
+    encodeURIComponent(effState.thresholdDays || 7) +
+    '&limit=' +
+    encodeURIComponent(effIss.pageSize) +
+    '&offset=' +
+    encodeURIComponent(page * effIss.pageSize)
+  )
+}
+function openEffIssues(kind, bucket) {
+  if (!effRepoParam()) return
+  effModal.open = true
+  effModal.kind = 'issues'
+  effModal.title = t('eff2.issues_title', { bucket: bucket || '—' })
+  effModal.sub = t('eff2.issues_sub')
+  effIss.kind = kind
+  effIss.bucket = bucket || ''
+  effIss.page = 0
+  effIss.total = 0
+  effIss.items = []
+  effIss.error = ''
+  effIss.reqId = 0
+  effIssCache.clear()
+  loadEffIssPage()
+}
+function loadEffIssPage() {
+  const key = effIssKey(effIss.page, effIss.pageSize)
+  const cached = effIssCache.get(key)
+  if (cached) {
+    effIss.items = cached
+    effIss.loading = false
+    effIss.error = ''
+    return
+  }
+  const reqId = ++effIss.reqId
+  effIss.loading = true
+  effIss.error = ''
+  API()
+    .get(effIssUrl(effIss.page))
+    .then((d) => {
+      if (reqId !== effIss.reqId) return // 快速翻页：丢弃过期响应
+      effIss.total = (d && d.total) || 0
+      effIss.items = (d && d.items) || []
+      effIssCache.set(key, effIss.items)
+      effIss.loading = false
+    })
+    .catch((e) => {
+      if (reqId !== effIss.reqId) return
+      effIss.loading = false
+      effIss.error = t('eff2.load_failed', { msg: e.message || e })
+    })
+}
+const effIssPages = computed(() => Math.max(1, Math.ceil(effIss.total / effIss.pageSize)))
+function effIssGo(dir) {
+  const next =
+    dir === 'prev' ? Math.max(0, effIss.page - 1) : Math.min(effIssPages.value - 1, effIss.page + 1)
+  if (next === effIss.page) return
+  effIss.page = next
+  loadEffIssPage()
+}
+function effIssSetSize(ev) {
+  effIss.pageSize = Number(ev.target.value) || 20
+  effIss.page = 0
+  effIssCache.clear()
+  loadEffIssPage()
+}
+function closeEffModal() {
+  effModal.open = false
+  effDays.value = []
+  effIss.items = []
+  effIss.reqId = 0
+  if (effCharts.effDaily) {
+    effCharts.effDaily.dispose()
+    effCharts.effDaily = null
+  }
+}
+function effEscKey(e) {
+  if (e.key === 'Escape') closeEffModal()
+}
+watch(
+  () => effModal.open,
+  (open) => {
+    if (open) G.document.addEventListener('keydown', effEscKey)
+    else G.document.removeEventListener('keydown', effEscKey)
+  }
+)
+function effMetricText(x) {
+  if (x.metric === null || x.metric === undefined || x.metric === '') return '—'
+  return x.metric + ' ' + (x.metric_unit === 'days' ? t('eff2.unit_d') : t('eff2.unit_h'))
+}
+
 onBeforeUnmount(function () {
   stopAuto()
   stopTaskLogPoll()
+  G.document.removeEventListener('keydown', effEscKey)
+  Object.keys(effCharts).forEach(function (k) {
+    if (effCharts[k]) {
+      effCharts[k].dispose()
+      effCharts[k] = null
+    }
+  })
 })
 </script>
 <style scoped>
@@ -3917,5 +4859,466 @@ onBeforeUnmount(function () {
 .obv-sessiongrp-body {
   padding: 8px 12px;
   border-top: 1px solid var(--b);
+}
+/* ═══ 能效看板（Issue #1229） ═══ */
+.eff-norepo {
+  text-align: center;
+  padding: 40px 0;
+}
+.eff-warn {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.6;
+}
+.eff-h {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.eff-scope {
+  font-size: 11px;
+  color: var(--t2);
+}
+.eff-spacer {
+  flex: 1;
+}
+.eff-wksel {
+  padding: 4px 8px;
+  border: 1px solid var(--b);
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--c);
+  color: var(--t);
+  outline: none;
+}
+.eff-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.eff-card {
+  background: var(--c);
+  border: 1px solid var(--b);
+  border-radius: var(--r2);
+  padding: 14px 16px;
+  box-shadow: var(--sh);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.eff-card.wide {
+  grid-column: 1 / -1;
+}
+.eff-card h3 {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--t2);
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.eff-cnt {
+  font-weight: 400;
+  color: var(--t3);
+  font-size: 10px;
+}
+.eff-big {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--t);
+}
+.eff-unit {
+  font-size: 13px;
+  font-weight: 600;
+  margin-left: 2px;
+  color: var(--t2);
+}
+.eff-pair {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 2px 0 8px;
+}
+.eff-cell {
+  min-width: 64px;
+}
+.eff-cell .eff-v {
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+  color: var(--t);
+}
+.eff-cell .eff-l {
+  font-size: 10px;
+  color: var(--t3);
+}
+.eff-sub {
+  font-size: 11px;
+  color: var(--t2);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+.eff-foot {
+  font-size: 10px;
+  color: var(--t3);
+  line-height: 1.5;
+  margin-top: auto;
+  padding-top: 6px;
+  border-top: 1px dashed var(--b);
+}
+.eff-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.eff-brow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.eff-brow .eff-lb {
+  width: 64px;
+  flex-shrink: 0;
+  color: var(--t2);
+  text-align: right;
+}
+.eff-brow .eff-track {
+  flex: 1;
+  height: 7px;
+  background: var(--bg);
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 40px;
+  display: flex;
+}
+.eff-brow .eff-track .eff-l {
+  height: 100%;
+  border-radius: 5px;
+  background: var(--a);
+}
+.eff-brow .eff-num {
+  width: 40px;
+  text-align: right;
+  color: var(--t3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.eff-brow.bot .eff-lb {
+  color: var(--t3);
+}
+.eff-brow.bot .eff-track .eff-l {
+  background: #a9b1bd;
+}
+.eff-brow.zero .eff-num {
+  color: var(--t3);
+}
+.eff-brow-clk {
+  cursor: pointer;
+  border-radius: 4px;
+}
+.eff-brow-clk:hover {
+  background: var(--bg);
+}
+.eff-bhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--t3);
+  margin-bottom: 1px;
+}
+.eff-bhead .eff-lb {
+  width: 64px;
+  flex-shrink: 0;
+}
+.eff-bhead .eff-barwrap {
+  flex: 1;
+}
+.eff-bhead .eff-num {
+  width: 40px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.eff-bhead .eff-num2 {
+  width: 46px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.eff-brow .eff-num2 {
+  width: 46px;
+  text-align: right;
+  color: var(--t3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.eff-brow .eff-num2.has {
+  color: var(--g);
+}
+.eff-barwrap {
+  flex: 1;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+}
+/* 必须 flex:0 1 auto 并尊重内联 width，否则每行都会被拉满 */
+.eff-brow .eff-barwrap .eff-track {
+  flex: 0 1 auto;
+  display: flex;
+  height: 7px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.eff-barwrap .eff-l {
+  height: 100%;
+  background: var(--a);
+}
+.eff-barwrap .eff-lg {
+  height: 100%;
+  background: var(--g);
+}
+.eff-leg {
+  display: flex;
+  gap: 10px;
+  font-size: 9px;
+  color: var(--t3);
+  margin-top: 4px;
+}
+.eff-leg i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 3px;
+  vertical-align: -1px;
+}
+.eff-seg {
+  display: inline-flex;
+  border: 1px solid var(--b);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-left: auto;
+}
+.eff-seg button {
+  background: var(--c);
+  border: none;
+  padding: 3px 9px;
+  font-size: 10px;
+  color: var(--t2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.eff-seg button + button {
+  border-left: 1px solid var(--b);
+}
+.eff-seg button.on {
+  background: var(--a);
+  color: #fff;
+}
+.eff-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 64px;
+  margin: 6px 0 2px;
+}
+.eff-sp {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+.eff-sb {
+  width: 100%;
+  max-width: 22px;
+  border-radius: 3px 3px 0 0;
+  min-height: 2px;
+  opacity: 0.85;
+  background: var(--g);
+}
+.eff-sl {
+  font-size: 9px;
+  color: var(--t3);
+  margin-top: 3px;
+  white-space: nowrap;
+}
+.eff-sp-clk {
+  cursor: pointer;
+  border-radius: 3px;
+}
+.eff-sp-clk:hover {
+  background: var(--bg);
+}
+.eff-chart {
+  height: 220px;
+  min-width: 0;
+}
+/* 弹窗 */
+.eff-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(12, 18, 34, 0.45);
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  overflow: auto;
+}
+.eff-modal {
+  background: var(--c);
+  border-radius: var(--r2);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  width: min(920px, 100%);
+  max-height: min(62vh, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 20px 14px;
+  position: relative;
+  margin: auto;
+}
+.eff-mtitle {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  color: var(--t);
+}
+.eff-fin {
+  font-size: 10px;
+  color: var(--t3);
+  font-weight: 400;
+}
+.eff-count {
+  margin-bottom: 6px;
+}
+.eff-x {
+  position: absolute;
+  right: 14px;
+  top: 12px;
+  border: none;
+  background: var(--bg);
+  color: var(--t2);
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.eff-x:hover {
+  background: var(--b);
+}
+.eff-msec {
+  margin-top: 10px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.eff-msec .eff-chart-modal {
+  height: 200px;
+  flex: 0 0 auto;
+}
+.eff-tblwrap {
+  overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.eff-tbl {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.eff-tbl th {
+  font-size: 9px;
+  color: var(--t3);
+  font-weight: 500;
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--b);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--c);
+  z-index: 2;
+}
+.eff-tbl td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--b);
+  color: var(--t2);
+  vertical-align: top;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.eff-tbl td.num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--t);
+}
+.eff-tbl tr:hover td {
+  background: var(--bg);
+}
+.eff-tdtl {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--t);
+}
+.eff-empty {
+  text-align: center;
+  color: var(--t3);
+  font-size: 12px;
+  padding: 28px 0;
+}
+.eff-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--b);
+  flex: 0 0 auto;
+}
+.eff-psize {
+  padding: 3px 6px;
+  border: 1px solid var(--b);
+  border-radius: 6px;
+  font-size: 10px;
+  background: var(--c);
+  color: var(--t2);
+  outline: none;
+}
+@media (max-width: 1100px) {
+  .eff-grid {
+    grid-template-columns: 1fr;
+  }
+  .eff-card.wide {
+    grid-column: auto;
+  }
 }
 </style>

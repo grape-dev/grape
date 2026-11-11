@@ -1,182 +1,143 @@
 /*
- * Issue #1229 能效看板（任务与日志模块）前端源断言测试
+ * Issue #1229 能效看板（flow efficiency）前端源断言测试
+ *
+ * 历史：本文件原先断言 src/api/static/js/pages/observability.js 的旧实现（协作者表格版）。
+ * Phase 1 结构迁移 + vue-integration 全量 Vue 化后，该老页面已删除、路径整体搬到
+ * src/api/frontend/legacy；2026-11-11 移植 2.0 看板（10 段 + 下钻）到 Vue 视图时，
+ * 按 grape-vue-view-port §2「陈旧断言改成读 Vue 源码」重写为源断言。
  *
  * 运行：node tests/js/test_issue_1229_efficiency_board.js
  *
  * 验证点：
  *   T10a  inspect 分区子 Tab 注册 efficiency（能效看板入口存在）
- *   T10b  zh/en 语言包键集合一致 + 必备键存在（tab.efficiency / eff.*）
- *   T11a  渲染：KPI 汇总行 + 协作者表格行 + 占比条
- *   T11b  空态：contributors 为空时渲染空态文案，不渲染表格行
- *   T11c  安全：用户名 HTML 转义（<script> 不原样出现）
- *   T11d  取数：调用 /dashboard/efficiency 且带 repo 参数
+ *   T10b  zh/en eff2 键集合一致；视图用到的每个 eff2 键两边都有
+ *   T11a  10 段卡片 + 两个下钻入口（openEffDaily / openEffIssues）都在模板里
+ *   T11b  三条端点都在位（board / daily / issues）且都带 repo 参数
+ *   T11c  能效块不用 v-html（issue 标题走模板绑定，无拼接注入面）
+ *   T11d  分页：页缓存 + 请求序号防过期响应；周切换重取、分组切换不重取
  */
 
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const SRC = path.resolve(__dirname, '../../src/api/static/js/pages/observability.js');
-const ZH = JSON.parse(fs.readFileSync(
-  path.resolve(__dirname, '../../src/api/static/locales/zh/observability.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(
-  path.resolve(__dirname, '../../src/api/static/locales/en/observability.json'), 'utf8'));
+const ROOT = path.resolve(__dirname, '../..');
+const VIEW = path.join(ROOT, 'src/api/frontend/app/src/views/ObservabilityView.vue');
+const zh = JSON.parse(
+  fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/observability.json'), 'utf8')
+);
+const en = JSON.parse(
+  fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/observability.json'), 'utf8')
+);
 
-function makeDom() {
-  const elements = {};
-  for (const id of ['pageContent', 'obsContent', 'obsLastUpdate', 'obsEffBody']) {
-    elements[id] = {
-      _id: id, classList: {_s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, toggle() {}, contains(c) { return this._s.has(c); }},
-      style: {}, innerHTML: '', textContent: '', value: '',
-      querySelector: () => null, querySelectorAll: () => [], appendChild: () => {},
-      remove() {}, setAttribute() {}, onclick: null,
-    };
-  }
-  return {
-    getElementById(id) {
-      if (elements[id]) return elements[id];
-      elements[id] = { _id: id, classList: {_s: new Set(), add() {}, remove() {}, toggle() {}, contains() { return false; }}, style: {}, innerHTML: '', textContent: '', value: '', querySelector: () => null, querySelectorAll: () => [], appendChild: () => {}, remove() {}, setAttribute() {}, onclick: null };
-      return elements[id];
-    },
-    querySelector: () => null,
-    querySelectorAll: () => { const a = []; a.forEach = Array.prototype.forEach; return a; },
-    createElement: () => ({ style: {}, classList: { add() {}, remove() {} }, textContent: '', innerHTML: '', appendChild: () => {}, remove() {}, querySelector: () => null, setAttribute() {} }),
-    body: { appendChild: () => {} },
-    documentElement: { setAttribute() {}, removeAttribute() {} },
-    addEventListener: () => {},
-    _elements: elements,
-  };
-}
+const src = fs.readFileSync(VIEW, 'utf8');
+const tplEnd = src.indexOf('<script setup>');
+const tpl = src.slice(0, tplEnd);
+const script = src.slice(tplEnd);
+const effTplStart = tpl.indexOf("tab === 'efficiency'")
+// 内容区（10 段卡片）在下钻弹窗之前结束，弹窗单独在模板尾部
+const effTpl = tpl.slice(effTplStart, tpl.indexOf('<!-- events 子 Tab'))
+const effModalStart = tpl.indexOf('能效看板下钻弹窗')
+const effTplAll = effTpl + tpl.slice(effModalStart)
+const effScriptStart = script.indexOf('能效看板（Issue #1229');
+const effScript = script.slice(effScriptStart);
 
-function loadObs(dom, extraInit) {
-  const src = fs.readFileSync(SRC, 'utf8');
-  const I18N = { t: function (k, opts) {
-    const kk = k.replace(/^observability\./, '');
-    let v = kk.split('.').reduce((o, x) => (o || {})[x], ZH);
-    if (v === undefined || typeof v === 'object') v = k;
-    if (opts) { for (const [key, val] of Object.entries(opts)) v = String(v).split('{{' + key + '}}').join(val); }
-    return v;
-  }, getLang: () => 'zh' };
-  const sandbox = {
-    document: dom, window: { _currentView: '', history: { pushState() {}, replaceState() {}, state: null }, location: { hash: '' }, addEventListener: () => {} },
-    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {}, clear: () => {} },
-    sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
-    API: { get: () => Promise.resolve({}), post: () => Promise.resolve({}) }, I18N,
-    console: { log: () => {}, error: () => {}, warn: () => {} }, fmtLocalTime: (s) => s || '',
-    fetch: () => Promise.resolve({ json: () => Promise.resolve({}), text: () => Promise.resolve('') }),
-    setTimeout, clearTimeout, setInterval, clearInterval,
-    Date, JSON, Array, Object, String, Number, Boolean, Math,
-    encodeURIComponent, decodeURIComponent, URLSearchParams,
-    CustomEvent: function () {}, AbortController: function () { this.abort = () => {}; this.signal = {}; },
-    AbortSignal: { timeout: () => ({}) }, openRuntimeSessionModal: () => {},
-  };
-  const sKeys = Object.keys(sandbox);
-  const sVals = sKeys.map(k => sandbox[k]);
-  const exportsStr = '\n; return {' +
-    '_OBS_SECTIONS: typeof _OBS_SECTIONS !== "undefined" ? _OBS_SECTIONS : null,' +
-    'renderObsEfficiency: typeof renderObsEfficiency !== "undefined" ? renderObsEfficiency : null,' +
-    'loadObsEfficiency: typeof loadObsEfficiency !== "undefined" ? loadObsEfficiency : null' +
-  '};';
-  const fn = new Function(...sKeys, src + (extraInit || '') + exportsStr);
-  return fn(...sVals);
-}
-
-let passed = 0, failed = 0;
+let passed = 0;
+let failed = 0;
 function test(name, fn) {
-  try { fn(); passed++; console.log('  \u2713 ' + name); }
-  catch (e) { failed++; console.log('  \u2717 ' + name + '\n    ' + e.message); }
+  try {
+    fn();
+    passed++;
+    console.log('  \u2713 ' + name);
+  } catch (e) {
+    failed++;
+    console.log('  \u2717 ' + name + '\n    ' + e.message);
+  }
 }
 
 // ---------- T10a: 子 Tab 注册 ----------
 test('T10a inspect 分区子 Tab 注册 efficiency', () => {
-  const dom = makeDom();
-  const obs = loadObs(dom);
-  const subs = obs._OBS_SECTIONS.inspect.subs;
-  assert.ok(subs.indexOf('efficiency') >= 0, 'inspect.subs 缺 efficiency，实际: ' + JSON.stringify(subs));
-});
+  const m = script.match(/const subTabs = computed\(\(\) =>([\s\S]*?)\n\)/)
+  assert.ok(m, '未找到 subTabs computed')
+  assert.ok(m[1].includes("'efficiency'"), 'subTabs 缺 efficiency: ' + m[1])
+  assert.ok(/tb === 'efficiency'\) loadEff\(\)/.test(script), 'switchTab 未接 loadEff()')
+  assert.ok(
+    /tab\.value === 'efficiency'\) loadEff\(true\)/.test(script),
+    'refreshObs 自动刷新未接 loadEff(true)'
+  )
+})
 
 // ---------- T10b: i18n 键 ----------
-test('T10b zh/en 键集合一致 + 必备键存在', () => {
-  const need = ['tab.efficiency', 'eff.total_issues', 'eff.completed', 'eff.total_tokens',
-    'eff.th_user', 'eff.th_issues', 'eff.th_completed', 'eff.th_tokens',
-    'eff.empty', 'eff.load_failed'];
-  const get = (pack, key) => key.split('.').reduce((o, k) => (o || {})[k], pack);
-  for (const k of need) {
-    assert.ok(get(ZH, k), 'zh 缺 ' + k);
-    assert.ok(get(EN, k), 'en 缺 ' + k);
+test('T10b zh/en eff2 键集合一致 + 视图用到的键都存在', () => {
+  const zk = Object.keys(zh.eff2 || {}).sort()
+  const ek = Object.keys(en.eff2 || {}).sort()
+  assert.deepStrictEqual(zk, ek, 'zh/en eff2 键集合不一致')
+  assert.ok(zk.length >= 77, 'eff2 键数量不足: ' + zk.length)
+  assert.ok(zh.tab && zh.tab.efficiency, 'zh 缺 tab.efficiency')
+  assert.ok(en.tab && en.tab.efficiency, 'en 缺 tab.efficiency')
+  const used = new Set()
+  const re = /t\('eff2\.([a-z0-9_]+)'/g
+  let mm
+  while ((mm = re.exec(effTpl + effScript))) used.add(mm[1])
+  const missingZh = [...used].filter((k) => zh.eff2[k] === undefined)
+  const missingEn = [...used].filter((k) => en.eff2[k] === undefined)
+  assert.strictEqual(missingZh.length, 0, 'zh 缺键: ' + missingZh.join(','))
+  assert.strictEqual(missingEn.length, 0, 'en 缺键: ' + missingEn.join(','))
+  assert.ok(used.size >= 50, '视图只用到 ' + used.size + ' 个 eff2 键，疑似漏段')
+})
+
+// ---------- T11a: 10 段 + 下钻入口 ----------
+test('T11a 10 段卡片 + 两个下钻入口', () => {
+  const segs = [
+    'kpi_net',
+    'kpi_total',
+    'kpi_wip',
+    'kpi_done_week',
+    'kpi_overdue',
+    'kpi_throughput',
+    'kpi_cycle',
+    'kpi_aging',
+    'kpi_wip_dist',
+    'kpi_delivery',
+  ]
+  const missing = segs.filter((k) => !effTpl.includes("t('eff2." + k + "')"))
+  assert.strictEqual(missing.length, 0, '缺段: ' + missing.join(','))
+  assert.ok(/openEffDaily\(b\.week\)/.test(effTpl), '火花柱未接下钻')
+  assert.ok(/openEffIssues\('aging'/.test(effTpl), '龄期桶未接 issue 下钻')
+  assert.ok(/openEffIssues\('cycle'/.test(effTpl), '周期桶未接 issue 下钻')
+  assert.ok(/setChartEl\('effTp'/.test(effTpl), '周吞吐图容器缺失')
+})
+
+// ---------- T11b: 端点 ----------
+test('T11b 三条端点 + repo 参数', () => {
+  for (const p of ['/dashboard/efficiency/board', '/dashboard/efficiency/daily', '/dashboard/efficiency/issues']) {
+    assert.ok(effScript.includes(p), '缺端点 ' + p)
   }
-});
+  assert.ok(
+    /function effRepoParam\(\)[\s\S]*?repo=' \+ encodeURIComponent\(r\.fullName\)/.test(effScript),
+    'effRepoParam 未按 fullName 组 repo 参数'
+  )
+  assert.ok(/&weeks=' \+[\s\S]{0,80}effState\.weeks/.test(effScript), 'board 未带 weeks')
+  assert.ok(/threshold_days=/.test(effScript), 'issues 未带 threshold_days')
+  assert.ok(/effState\.thresholdDays = \(d && d\.aging/.test(effScript), '未从 board 回写 thresholdDays')
+})
 
-// ---------- T11a: 渲染 ----------
-test('T11a 渲染 KPI + 协作者行 + 占比条', () => {
-  const dom = makeDom();
-  loadObs(dom, `
-; renderObsEfficiency(document.getElementById('obsContent'), {
-  repo: 'gitcode:org/repo', total_issues: 5, completed_issues: 2, total_tokens: 300,
-  contributors: [
-    {user: 'alice', issues: 3, completed: 1, input_tokens: 100, output_tokens: 50, total_tokens: 150},
-    {user: 'bob', issues: 2, completed: 1, input_tokens: 100, output_tokens: 50, total_tokens: 150},
-  ],
-});`);
-  const html = dom._elements['obsContent'].innerHTML;
-  assert.ok(html.indexOf('alice') >= 0 && html.indexOf('bob') >= 0, '协作者行缺失');
-  assert.ok(html.indexOf('150') >= 0, 'token 数值缺失');
-  assert.ok(html.indexOf('width:') >= 0, '占比条样式缺失');
-});
+// ---------- T11c: 无 v-html ----------
+test('T11c 能效块不使用 v-html（无拼接注入面）', () => {
+  assert.ok(effTplAll.indexOf('v-html') < 0, '能效块出现 v-html')
+  assert.ok(/class="eff-tdtl" :title="x\.title"/.test(effTplAll), 'issue 标题应走属性/插值绑定')
+})
 
-// ---------- T11b: 空态 ----------
-test('T11b 空数据渲染空态文案', () => {
-  const dom = makeDom();
-  loadObs(dom, `
-; renderObsEfficiency(document.getElementById('obsContent'), {
-  repo: 'gitcode:org/repo', total_issues: 0, completed_issues: 0, total_tokens: 0, contributors: [],
-});`);
-  const html = dom._elements['obsContent'].innerHTML;
-  assert.ok(html.indexOf(ZH['eff']['empty']) >= 0, '空态文案缺失: ' + html.substring(html.length - 400));
-  assert.ok(html.indexOf('<table') < 0, '空态不应渲染表格');
-});
-
-// ---------- T11c: 转义 ----------
-test('T11c 用户名 HTML 转义', () => {
-  const dom = makeDom();
-  loadObs(dom, `
-; renderObsEfficiency(document.getElementById('obsContent'), {
-  repo: 'gitcode:org/repo', total_issues: 1, completed_issues: 0, total_tokens: 1,
-  contributors: [{user: '<script>alert(1)</script>', issues: 1, completed: 0, input_tokens: 0, output_tokens: 1, total_tokens: 1}],
-});`);
-  const html = dom._elements['obsContent'].innerHTML;
-  assert.ok(html.indexOf('<script>alert(1)</script>') < 0, 'script 未转义');
-  assert.ok(html.indexOf('&lt;script&gt;') >= 0, '应转义为 &lt;script&gt;');
-});
-
-// ---------- T11d: 取数 ----------
-test('T11d loadObsEfficiency 带 repo 参数请求端点', () => {
-  const dom = makeDom();
-  let called = null;
-  const obs = loadObs(dom);
-  // 重新以受控 API 加载，捕获请求路径
-  const src = fs.readFileSync(SRC, 'utf8');
-  const I18N = { t: (k) => k, getLang: () => 'zh' };
-  const sandbox = {
-    document: dom, window: { _currentView: '', history: { pushState() {}, replaceState() {}, state: null }, location: { hash: '' }, addEventListener: () => {} },
-    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
-    sessionStorage: { getItem: () => JSON.stringify({ fullName: 'org/repo' }), setItem: () => {}, removeItem: () => {} },
-    app: { currentRepo: () => ({ fullName: 'org/repo' }) },
-    API: { get: (p) => { called = p; return Promise.resolve({ contributors: [] }); }, post: () => Promise.resolve({}) }, I18N,
-    console: { log: () => {}, error: () => {}, warn: () => {} }, fmtLocalTime: (s) => s || '',
-    fetch: () => Promise.resolve({ json: () => Promise.resolve({}), text: () => Promise.resolve('') }),
-    setTimeout, clearTimeout, setInterval, clearInterval,
-    Date, JSON, Array, Object, String, Number, Boolean, Math,
-    encodeURIComponent, decodeURIComponent, URLSearchParams,
-    CustomEvent: function () {}, AbortController: function () { this.abort = () => {}; this.signal = {}; },
-    AbortSignal: { timeout: () => ({}) }, openRuntimeSessionModal: () => {},
-  };
-  const sKeys = Object.keys(sandbox);
-  const fn = new Function(...sKeys, src + '\n; loadObsEfficiency();');
-  fn(...sKeys.map(k => sandbox[k]));
-  assert.ok(called && called.indexOf('/dashboard/efficiency') >= 0, '未请求 /dashboard/efficiency: ' + called);
-  assert.ok(called.indexOf('repo=org%2Frepo') >= 0, 'repo 参数缺失: ' + called);
-});
+// ---------- T11d: 分页与刷新语义 ----------
+test('T11d 分页缓存 + 过期响应丢弃 + 分组不重取', () => {
+  assert.ok(/const effIssCache = new Map\(\)/.test(effScript), '缺页缓存')
+  assert.ok(/effIssCache\.get\(key\)/.test(effScript), '未先查缓存')
+  assert.ok(/reqId = \+\+effIss\.reqId/.test(effScript), '缺请求序号')
+  assert.ok(/if \(reqId !== effIss\.reqId\) return/.test(effScript), '未丢弃过期响应')
+  assert.ok(/@change="loadEff\(\)"/.test(effTpl), '周数切换未重取')
+  assert.ok(/@click="effState\.group = g\[0\]"/.test(effTpl), '分组切换应走客户端')
+  assert.ok(!/group_by=' \+[\s\S]{0,40}group = g\[/.test(effScript), '分组切换不应发请求')
+})
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
