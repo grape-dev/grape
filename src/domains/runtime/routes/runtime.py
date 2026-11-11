@@ -333,19 +333,20 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                       (credential_id, name))
             row = c.fetchone()
 
+            # Issue #658：role_tags 显式声明（JSON 数组）；空列表不覆盖已有手工配置
+            _role_tags_json = ""
+            try:
+                _rt = rt.get("role_tags") or []
+                if isinstance(_rt, list) and _rt:
+                    _role_tags_json = json.dumps([str(t).strip().lower() for t in _rt if str(t).strip()], ensure_ascii=False)
+            except Exception:
+                _role_tags_json = ""
+            # Issue #865：配置模型（worker 上报本机配置解析结果；空=未上报，
+            # 不覆盖既有值——未升级 worker 重注册不会抹掉历史/兜底值，同 #658 模式）
+            # 注意：UPDATE/INSERT 两个分支都要用，定义必须提到分支外
+            _model_name = str(rt.get("model") or "").strip()[:120]
             if row:
                 rid = row[0]
-                # Issue #658：role_tags 显式声明（JSON 数组）；空列表不覆盖已有手工配置
-                _role_tags_json = ""
-                try:
-                    _rt = rt.get("role_tags") or []
-                    if isinstance(_rt, list) and _rt:
-                        _role_tags_json = json.dumps([str(t).strip().lower() for t in _rt if str(t).strip()], ensure_ascii=False)
-                except Exception:
-                    _role_tags_json = ""
-                # Issue #865：配置模型（worker 上报本机配置解析结果；空=未上报，
-                # 不覆盖既有值——未升级 worker 重注册不会抹掉历史/兜底值，同 #658 模式）
-                _model_name = str(rt.get("model") or "").strip()[:120]
 
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
@@ -388,10 +389,13 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
 
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    # Issue #865：新建行同样落模型三字段（原来只有 UPDATE 分支带，新引擎首注册会丢模型）
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id, model_name, model_source, model_reported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id,
+                     _model_name, "worker_report" if _model_name else "",
+                     datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
             # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
             # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。

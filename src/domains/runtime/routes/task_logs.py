@@ -92,7 +92,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     with db_lock:
         c = db.cursor()
         c.execute(
-            """SELECT ar.name, ar.version, rc.device_name, rc.last_ip, rc.owner_name, t.prompt,
+            """SELECT ar.name, ar.version, rc.name, rc.last_ip, rc.owner_name, t.prompt,
                       t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key,
                       rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec, t.runtime_id
                FROM agent_tasks t

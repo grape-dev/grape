@@ -334,6 +334,22 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         except Exception:
             pass
         _uid = user.get("id", 0) if isinstance(user, dict) else 0
+        def _lookup_worker_name(_p):
+            """Issue #1310：凭据名（runtime_credentials.name）；本机直连回退 host_name。"""
+            _cid = _p.get("credential_id") or 0
+            _wname = ""
+            try:
+                with db_lock:
+                    c.execute(
+                        "SELECT name FROM runtime_credentials WHERE id=?" if _cid
+                        else "SELECT host_name FROM agent_runtimes WHERE id=?",
+                        (_cid,) if _cid else (_p.get("runtime_id") or 0,))
+                    _wr = c.fetchone()
+                    _wname = (_wr[0] or "") if _wr else ""
+            except Exception:
+                _wname = ""
+            return _wname
+
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
             from src.domains.runtime.engine.engine_select import _engines_by_ids, load_engine_selection, _norm_repo
@@ -342,6 +358,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             pool = _engines_by_ids(_eids, _repo, _cfg)
             for _p in pool:
                 _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
+                _p["worker_name"] = _lookup_worker_name(_p)  # Issue #1310：引擎 chip 显示「引擎名（凭据名）」
     except Exception:
         pass
 
