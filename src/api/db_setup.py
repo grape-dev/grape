@@ -2939,11 +2939,20 @@ def _fn_create_branch_guard_state() -> None:
         db.commit()
 
 
+# 撞号修复（2026-11-11）：202611060001 在历史库里已被 backfill_events_terminal_completed_at
+# 盖章，导致本迁移长期被判「已执行」而跳过 → branch_guard_state 表在 dev/生产都不存在
+# （启动日志 ERROR「迁移版本号撞号」即此）。改用未被占用的新版本号，并把 pending 列一起补齐，
+# 使迁移自包含、不依赖 202611060002 的执行顺序。
+def _fn_create_branch_guard_state_v2() -> None:
+    _fn_create_branch_guard_state()
+    _fn_add_branch_guard_pending_columns()
+
+
 register_migration(
-    version="202611060001",
+    version="202611110001",
     name="create-branch-guard-state-table",
     kind="safe",
-    fn=_fn_create_branch_guard_state,
+    fn=_fn_create_branch_guard_state_v2,
 )
 
 
