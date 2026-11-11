@@ -1428,6 +1428,8 @@ class KnowledgeBody(BaseModel):
 
 class A2ARedoBody(BaseModel):
     agent: str = ""
+    # Issue #1962（移植）：补发时排除源事件自身（0 = 缺省由路径 seq 自动填写，保持既有行为可感知）。
+    exclude_event_seq: int = 0
 
 
 @router.get("/{seq}/a2a-redo/scene", operation_id="events_a2a_redo_scene", summary="A2A redo scene info", description="Returns scene pipeline nodes for a completed event, used by the A2A redo modal: which agents are in-scene (selectable) and the default preselected next agent.")
@@ -1521,11 +1523,15 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
     _redo_user = dict(user or {})
     _redo_user["auth_type"] = "jwt"
     from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
+    # Issue #1962（移植）：补发排除源事件自身，否则同一 completed 事件会在幂等窗内
+    # 把补发再拦成 duplicate_key；显式传入优先，缺省取路径 seq。
+    _exclude_seq = int(getattr(body, "exclude_event_seq", 0) or 0) or int(seq or 0)
     _a2a_body = A2AHandoffBody(agent=agent_name, payload={
         "repository": repository,
         "account": actor,
         "issue_number": issue_id,
         "pr_number": "",
+        "exclude_event_seq": _exclude_seq,
         "context": f"用户手动补发 A2A：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
     })
     _res = await a2a_endpoint(None, _a2a_body, _redo_user)  # type: ignore[arg-type]  # jwt 分支不读 request

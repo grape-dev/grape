@@ -3,6 +3,7 @@
   "view_mine": "My Requirements",
   "view_repo_all": "All Repo Tasks",
   "loading": "Loading...",
+  "searching": "Searching...",
   "load_failed": "Failed to load: {{msg}}",
   "deeplink_not_found": "Issue #{{n}} not found, returned to task list",
   "view_list": "List",

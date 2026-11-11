@@ -15,6 +15,7 @@ from src.kernel.config import log
 _HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
 
 _GIT_AGENTS = ("coding", "qa", "sre")
+_INSPECTOR_AGENTS = ("qa",)
 
 _lock_guard = threading.Lock()
 _repo_locks = {}
@@ -36,6 +37,11 @@ def issue_num_from(issue_id: str) -> str:
 def is_git_agent(agent_type: str) -> bool:
     """仅 coding/qa/sre 需要本地 git 工作树。"""
     return agent_type in _GIT_AGENTS
+
+
+def is_inspector_agent(agent_type: str) -> bool:
+    """检测方（inspector）角色：需要按被检交付提交对齐工作区。"""
+    return agent_type in _INSPECTOR_AGENTS
 
 
 def repo_base_dir(repo_key: str) -> str:
@@ -300,7 +306,13 @@ def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
         if not _repo_token:
             log.warning(f"ensure_linked_repo_worktrees: no token for {rk}, skipping")
             continue
-        wt = ensure_issue_worktree(rk, agent_type, issue_num, token=_repo_token, work_branch=branch)
+        # Issue #1954：检测方（QA）关联仓同样要对齐到 coding 推送的交付分支，
+        # 不能把基线分支（linked branch，如 main/dev）当作交付分支。
+        _linked_kwargs = {}
+        if is_inspector_agent(agent_type):
+            _linked_kwargs["delivery_branch"] = f"feat/issue-{issue_num}"
+        wt = ensure_issue_worktree(
+            rk, agent_type, issue_num, token=_repo_token, work_branch=branch, **_linked_kwargs)
         if wt:
             worktrees.append({"repo_key": rk, "branch": branch, "worktree_dir": wt})
         else:
@@ -343,6 +355,96 @@ def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_wor
         if r is not None and r.returncode == 0:
             return cand
     return "main"
+
+
+def worktree_head_sha(wt_dir: str, token: str = "") -> str:
+    """读 worktree 当前 HEAD sha；不可读 → 空串（调用方降级）。"""
+    if not wt_dir:
+        return ""
+    r = _run_git(["-C", wt_dir, "rev-parse", "--verify", "--quiet", "HEAD"], token=token)
+    if r is None or r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def resolve_delivery_sha(base: str, branch: str, token: str = "",
+                         delivery_ref: str = "", delivery_sha: str = "") -> tuple[str, str]:
+    """解析被检交付提交 sha（Issue #1954）。
+
+    优先级：`origin/{branch}` 远端最新 → 任务上下文显式 delivery_sha → delivery_ref。
+    返回 (sha, source)；无法解析 → ("", "")。只读操作，失败不抛异常。
+    """
+    candidates = []
+    if branch:
+        candidates.append((f"origin/{branch}", f"origin/{branch}"))
+    if delivery_sha:
+        candidates.append((delivery_sha, "delivery_sha"))
+    if delivery_ref:
+        candidates.append((delivery_ref, "delivery_ref"))
+    for rev, label in candidates:
+        r = _run_git(["-C", base, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+                     token=token)
+        if r is not None and r.returncode == 0:
+            sha = (r.stdout or "").strip()
+            if sha:
+                return sha, label
+    return "", ""
+
+
+def _delivery_info(sha: str = "", aligned: bool = False, old_sha: str = "",
+                   new_sha: str = "", reason: str = "") -> dict:
+    """单点装配交付对齐结果（保证 delivery_info 写回协议一致）。"""
+    return {"sha": sha, "aligned": aligned, "old_sha": old_sha,
+            "new_sha": new_sha, "reason": reason}
+
+
+def _record_delivery_info(target: dict | None, info: dict) -> None:
+    """把对齐结果写回调用方传入的 delivery_info（可选）。"""
+    if isinstance(target, dict):
+        target.update(info)
+
+
+def align_worktree_to_delivery(wt_dir: str, delivery_sha: str, token: str = "") -> dict:
+    """复用 worktree 时受控对齐 HEAD 到被检交付 sha（Issue #1954）。
+
+    先查 dirty（含未跟踪文件）：有未提交/未跟踪残留仅告警跳过（不覆盖检测方内容）；
+    干净则以 `checkout --detach` 对齐（detach 不动其它 worktree 共享的分支 ref）。
+    返回 {"aligned": bool, "old_sha": str, "new_sha": str, "reason": str}。
+    """
+    out = {"aligned": False, "old_sha": "", "new_sha": "", "reason": ""}
+    if not wt_dir or not delivery_sha:
+        out["reason"] = "no_delivery_sha"
+        return out
+    old_sha = worktree_head_sha(wt_dir, token=token)
+    out["old_sha"] = old_sha
+    if old_sha == delivery_sha:
+        out["aligned"] = True
+        out["new_sha"] = old_sha
+        out["reason"] = "already_aligned"
+        return out
+    st = _run_git(["-C", wt_dir, "status", "--porcelain", "--untracked-files=normal", "--",
+                   ".", ":(exclude).git-askpass.sh",
+                   ":(exclude).git-askpass-wrapper.sh"], token=token)
+    if st is None or st.returncode != 0:
+        out["reason"] = "status_failed"
+        return out
+    if (st.stdout or "").strip():
+        out["reason"] = "dirty_skip"
+        log.warning(
+            f"repogit: worktree {wt_dir} dirty (tracked/untracked), skip delivery alignment "
+            f"old={old_sha[:12] if old_sha else '?'} target={delivery_sha[:12]}")
+        return out
+    r = _run_git(["-C", wt_dir, "checkout", "--detach", delivery_sha], token=token)
+    if r is None or r.returncode != 0:
+        out["reason"] = "checkout_failed"
+        return out
+    out["aligned"] = True
+    out["new_sha"] = worktree_head_sha(wt_dir, token=token)
+    out["reason"] = "aligned"
+    log.info(
+        f"repogit: worktree {wt_dir} aligned to delivery "
+        f"old={(old_sha or '?')[:12]} new={(out['new_sha'] or '?')[:12]}")
+    return out
 
 
 def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
@@ -406,10 +508,21 @@ def _install_branch_guard_hook(issue_dir: str, repo_key: str, branch: str) -> No
         log.warning(f"repogit branch guard hook install error {repo_key}:{branch}: {e}")
 
 
-def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "", work_branch: str = "") -> str | None:
+def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "",
+                          work_branch: str = "", delivery_ref: str = "",
+                          delivery_sha: str = "", delivery_branch: str = "",
+                          delivery_info: dict | None = None) -> str | None:
     """确保共享基线 + Issue 级 worktree（任务 cwd）。已存在则直接复用。
 
     work_branch 由调用方从 env_extra["GRAPE_WORK_BRANCH"] 传入（API 服务器从 MySQL 读取后注入）。
+
+    Issue #1954：检测类 agent（qa，或显式传入 delivery_ref/delivery_sha）建树/复用树时
+    对齐到被检交付提交——新建以 detached HEAD 检出交付 sha，复用漂移时受控
+    `checkout --detach`（含未跟踪残留的 dirty 仅告警不覆盖）。
+
+    分支语义显式分离：`work_branch` 仅是**基线分支**（产出方建树/同步用），不参与交付
+    解析；`delivery_branch` 是**交付分支**（PR head），未显式传入时取默认 `feat/issue-{N}`。
+    产出方（coding/sre）未显式传交付参数，行为不变（避免误 reset 掉未推送的实现提交）。
     """
     if not is_git_agent(agent_type):
         return None
@@ -419,9 +532,34 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
     os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
     branch = f"feat/issue-{issue_num}"
+    # 交付分支与基线分支严格区分：work_branch 不作为交付分支回退（否则关联仓
+    # QA 会把 main/dev 当交付分支，detach 到基线提交而非 coding 推送的交付提交）。
+    _delivery_branch = delivery_branch or branch
+    _align_delivery = bool(is_inspector_agent(agent_type) or delivery_ref or delivery_sha)
+    _delivery_commit = ""
+    _delivery_src = ""
+    if _align_delivery:
+        _delivery_commit, _delivery_src = resolve_delivery_sha(
+            base, _delivery_branch, token=token, delivery_ref=delivery_ref, delivery_sha=delivery_sha)
+        _record_delivery_info(delivery_info, _delivery_info(
+            sha=_delivery_commit, reason="" if _delivery_commit else "unresolved"))
+        if _delivery_commit:
+            log.info(f"repogit: delivery resolved {repo_key} issue={issue_num} "
+                     f"agent={agent_type} src={_delivery_src} sha={_delivery_commit[:12]}")
+        else:
+            log.warning(f"repogit: delivery ref unresolved for {repo_key} issue={issue_num} "
+                        f"agent={agent_type}; fallback to base branch {work_branch or 'default'}")
     if os.path.isdir(issue_dir) and (os.path.isdir(os.path.join(issue_dir, ".git"))
                                      or os.path.isfile(os.path.join(issue_dir, ".git"))):
         _write_askpass(issue_dir, repo_key)
+        if _align_delivery and _delivery_commit:
+            _align_res = align_worktree_to_delivery(issue_dir, _delivery_commit, token=token)
+            _record_delivery_info(delivery_info, _delivery_info(
+                sha=_delivery_commit,
+                aligned=_align_res.get("aligned", False),
+                old_sha=_align_res.get("old_sha", ""),
+                new_sha=_align_res.get("new_sha", ""),
+                reason=_align_res.get("reason", "")))
         # Issue #752（M2）：复用 worktree（如复测重跑）时同样重置保真基线——
         # 基线=本次任务开始（清理前）的功能文件指纹，任务结束时比对（worktree_guard.verify_fidelity）
         try:
@@ -434,16 +572,26 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
         return issue_dir
     with _lock_for(repo_key):
         try:
-            base_branch = _default_base_branch(base, token, repo_key, env_work_branch=work_branch)
-            br = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], token=token)
-            if br is not None and br.returncode == 0:
-                r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir, branch], token=token)
+            if _align_delivery and _delivery_commit:
+                # 检测类工作区：直接 detached HEAD 检出被检交付提交，不占用/共享
+                # 产出方的 feat/issue-N 分支 ref（避免两 worktree 共用分支互相拖拽）。
+                r = _run_git(["-C", base, "worktree", "add", "--force", "--detach",
+                              issue_dir, _delivery_commit], token=token)
             else:
-                r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch, f"origin/{base_branch}"], token=token)
+                base_branch = _default_base_branch(base, token, repo_key, env_work_branch=work_branch)
+                br = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], token=token)
+                if br is not None and br.returncode == 0:
+                    r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir, branch], token=token)
+                else:
+                    r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch, f"origin/{base_branch}"], token=token)
             if r is None or r.returncode != 0:
                 log.warning(f"repogit worktree add failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                 return None
             _write_askpass(issue_dir, repo_key)
+            if _align_delivery and _delivery_commit:
+                _record_delivery_info(delivery_info, _delivery_info(
+                    sha=_delivery_commit, aligned=True, new_sha=_delivery_commit,
+                    reason="created_detached"))
             # Issue #752（M2）：新建 worktree 后保存功能文件指纹基线（清理前快照）
             try:
                 from src.domains.runtime.engine.worktree_guard import save_baseline

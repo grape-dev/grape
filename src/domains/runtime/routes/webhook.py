@@ -87,6 +87,60 @@ from src.api.a2a_context import a2a_context_key as _a2a_context_key
 from src.api.a2a_context import a2a_event_context_key as _a2a_event_context_key
 
 
+def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
+                        repository: str, account: str, pr_number, context: str,
+                        carried_context, target_scene_id, engine_config,
+                        ref_seq: int, idem_key: str, fingerprint: str,
+                        context_key: str, existing_seq: int, reason: str,
+                        runtime_id, backend: str, skill_name: str, skill_id,
+                        skill_path: str, evt: dict, summary: str) -> int:
+    """Issue #1948（移植）：A2A 排队事件统一落库，供「下游 running」与「活跃去重」两个入队分支复用。
+
+    返回排队事件 seq：>0 = 新建；<0 = 幂等命中（绝对值即已有排队 seq）；0 = 落库失败。
+    payload 结构（context/ref_seq/idempotency_key/_a2a_queue.dispatch 等）在此集中组装，
+    避免两处队列语义日后漂移。
+    """
+    from src.api.event_store import append_queued_a2a_event
+    from datetime import datetime, timezone
+    _title = ""
+    try:
+        from src.api.issues_center import _get_issue_title
+        _title = _get_issue_title(repo_key, int(issue_number)) or ""
+    except Exception:
+        pass
+    if not _title:
+        _title = f"A2A: {agent_name}"
+    _payload = {
+        "repository": repository, "account": account,
+        "issue_number": issue_number, "pr_number": pr_number,
+        "context": context[:500],
+        "carried_context": carried_context if (target_scene_id or carried_context) else {},
+        "engine_config": engine_config if (target_scene_id or engine_config) else None,
+        "ref_seq": ref_seq,
+        "idempotency_key": idem_key,
+        "fingerprint": fingerprint,
+        "queued": True,
+        "_a2a_queue": {
+            "existing_seq": existing_seq,
+            "reason": reason,
+            "enqueued_at": datetime.now(timezone.utc).isoformat(),
+            "dispatch": {
+                "runtime_id": runtime_id or 0,
+                "backend": backend,
+                "skill_name": skill_name,
+                "skill_id": skill_id,
+                "skill_path": skill_path,
+                "evt": evt,
+            },
+        },
+    }
+    return append_queued_a2a_event(
+        repo_key, issue_id=f"#{issue_number}", agent_type=agent_name,
+        title=_title, summary=summary, payload=_payload,
+        context_key=context_key, idempotency_key=idem_key)
+
+
+
 def _a2a_force_resend_hint() -> str:
     """Issue #1942：重复交办被门禁跳过后，一次成功重发的统一提示句。
 
@@ -1276,26 +1330,85 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             # 场景与节点直接复用上面的 _scene_ck（与 scenes detail 同源，不重复查配置）。
             # force=true 越过全部三段（保持人工强制派发语义）。
             _guard_force = bool(getattr(body, "force", False) or payload.get("force"))
+            _guard_queue = bool(getattr(body, "queue", False) or payload.get("queue"))
             if not _guard_force:
                 from src.api.a2a_dispatch_guard import (
                     find_running_downstream, find_window_duplicate, find_active_duplicate)
                 _guard_scene = _scene_ck.get("scene_id") or ""
                 _guard_nodes = _scene_ck.get("nodes") or []
+                # Issue #1948：排除调用方自身事件，避免「qa 打回 coding」被自己的 running 自锁。
+                _caller_seq = _a2a_source_event_seq(_a2a_session_info)
+                # Issue #1962：显式 exclude_event_seq（手动补发传源事件 seq）优先于会话反查。
+                try:
+                    _payload_ex = int(payload.get("exclude_event_seq") or 0)
+                except Exception:
+                    _payload_ex = 0
+                if _payload_ex:
+                    _caller_seq = _payload_ex
                 _down = find_running_downstream(
-                    repo_key, issue_number, agent_name, _guard_scene, _guard_nodes)
+                    repo_key, issue_number, agent_name, _guard_scene, _guard_nodes,
+                    exclude_seq=_caller_seq)
                 if _down:
+                    if _guard_queue:
+                        # Issue #1948（方案 C）：声明排队 → 落 queued 事件，下游终态后自动补派，
+                        # 不再「跳过即丢弃」。
+                        _dq_qseq = _enqueue_a2a_queued(
+                            repo_key, issue_number, agent_name,
+                            repository=repository, account=account,
+                            pr_number=pr_number, context=context,
+                            carried_context=carried_context,
+                            target_scene_id=target_scene_id,
+                            engine_config=engine_config,
+                            ref_seq=_caller_seq, idem_key=_idem_key,
+                            fingerprint=_fingerprint,
+                            context_key=_a2a_context_key(_idem_key, context),
+                            existing_seq=_down["seq"], reason="downstream_running",
+                            runtime_id=runtime_id, backend=backend,
+                            skill_name=skill_name, skill_id=skill_id,
+                            skill_path=skill_path, evt=evt,
+                            summary=f"A2A: → {agent_name} (queued: downstream_running)")
+                        if _dq_qseq > 0:
+                            try:
+                                from src.api.event_pipeline import reconcile_queued_a2a
+                                reconcile_queued_a2a(repo_key)
+                            except Exception as _dqr:
+                                log.warning(f"A2A: downstream queue reconcile failed: {_dqr}")
+                            log.info(f"A2A: queued behind downstream_running "
+                                     f"(issue=#{issue_number} agent={agent_name} "
+                                     f"queue_seq={_dq_qseq} downstream_seq={_down['seq']})")
+                            return JSONResponse(status_code=200, content={
+                                "status": "ok", "seq": 0, "agent": agent_name,
+                                "skipped": "queued", "queued": True,
+                                "reason": "downstream_running",
+                                "downstream_event": _down, "queue_seq": _dq_qseq,
+                                "message": "same issue already has a running downstream event; "
+                                           "queued and will be dispatched automatically after that "
+                                           "event reaches a terminal state."})
+                        elif _dq_qseq < 0:
+                            _reused = -_dq_qseq
+                            return JSONResponse(status_code=200, content={
+                                "status": "ok", "seq": 0, "agent": agent_name,
+                                "skipped": "queued", "queued": True, "idempotent": True,
+                                "reason": "downstream_running",
+                                "downstream_event": _down, "queue_seq": _reused,
+                                "message": "same context already queued; existing queued event returned"})
+                        else:
+                            log.error(f"A2A: downstream queue event store failed agent={agent_name} "
+                                      f"issue=#{issue_number}")
                     return _a2a_guard_skip_response(
                         repo_key, issue_number, agent_name, _guard_scene,
                         "downstream_running", _down)
                 _win = find_window_duplicate(
-                    repo_key, issue_number, agent_name, _guard_scene)
+                    repo_key, issue_number, agent_name, _guard_scene,
+                    exclude_seq=_caller_seq)
                 if _win:
                     return _a2a_guard_skip_response(
                         repo_key, issue_number, agent_name, _guard_scene,
                         "duplicate_key", _win)
                 _active = find_active_duplicate(
                     repo_key, issue_number, agent_name, _guard_scene,
-                    context_key=_a2a_context_key(_idem_key, context))
+                    context_key=_a2a_context_key(_idem_key, context),
+                    exclude_seq=_caller_seq)
                 if _active:
                     return _a2a_guard_skip_response(
                         repo_key, issue_number, agent_name, _guard_scene,

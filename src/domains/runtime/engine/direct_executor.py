@@ -385,15 +385,66 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # git worktree（coding/qa/sre，direct 模式；见 multi-issue-isolation-design.md §3.4.1）
     # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 路径注入 agent env——
     # agent 侧 git 操作统一走 `grape git`（服务端 git-credential 会话凭据），不依赖 askpass env。
+    _is_inspector = False
+    _wt = ""
+    _delivery_info: dict = {}
     try:
         from src.domains.runtime.engine import repogit
         _gnum = repogit.issue_num_from(issue_id)
         if repogit.is_git_agent(agent_type) and _gnum and issue_session_id:
             _wb = env_extra.get("GRAPE_WORK_BRANCH", "")
-            _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum,
-                                                token=repo_gitcode_token, work_branch=_wb)
+            _is_inspector = repogit.is_inspector_agent(agent_type)
+            _wt = repogit.ensure_issue_worktree(
+                repo_key, agent_type, _gnum,
+                token=repo_gitcode_token, work_branch=_wb,
+                delivery_branch=f"feat/issue-{_gnum}" if _is_inspector else "",
+                delivery_info=_delivery_info if _is_inspector else None)
+            if _is_inspector and _wt:
+                # Issue #1954：direct 路径与 worker 路径一致，注入 CASE_DIR/交付 ref/sha/产出方工作区
+                try:
+                    from src.domains.runtime.engine.agent import _build_qa_delivery_env
+                    env_extra.update(_build_qa_delivery_env(
+                        env_extra, repo_key, _gnum, _wt,
+                        token=repo_gitcode_token, delivery_info=_delivery_info))
+                except Exception as e:
+                    log.warning(f"Exec agent: build QA delivery env failed: {e}")
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
+
+    # Issue #1954：direct QA 前置 sha 门禁独立执行，建树/上下文注入异常不得跳过阻断。
+    if _is_inspector and _wt:
+        try:
+            from src.domains.runtime.engine.worktree_guard import check_delivery_alignment
+            _guard_sha = ((_delivery_info.get("sha") or "").strip()
+                          or (env_extra.get("GRAPE_DELIVERY_SHA") or "").strip())
+            _align = check_delivery_alignment(_wt, _guard_sha, token=repo_gitcode_token)
+            if not _align.get("ok", True):
+                _msg = f"[delivery_baseline] {_align.get('message', '')}"
+                log.error(f"Exec agent: delivery baseline guard blocked execution: {_msg}")
+                if task_id:
+                    try:
+                        from src.session_manager import db as _gdbs, db_lock as _gdl
+                        with _gdl:
+                            _gc = _gdbs.cursor()
+                            _gc.execute(
+                                "UPDATE agent_tasks SET status='failed', exit_code=1, "
+                                "result_text=?, errors=?, completed_at=? WHERE id=? "
+                                "AND status IN ('running','queued','dispatched')",
+                                (_msg, _msg, datetime.utcnow().isoformat(), task_id))
+                            _gdbs.commit()
+                    except Exception as _ge:
+                        log.warning(f"Exec agent: mark delivery guard task failed failed: {_ge}")
+                _fail_event(seq, _msg, diag={
+                    "code": "delivery_baseline",
+                    "head_sha": _align.get("head_sha") or "",
+                    "delivery_sha": _align.get("delivery_sha") or "",
+                    "agent_type": agent_type, "repo_key": repo_key})
+                return
+            if _align.get("reason") != "aligned":
+                log.warning(f"Exec agent: delivery baseline guard degraded: "
+                            f"{_align.get('message', '')}")
+        except Exception as e:
+            log.warning(f"Exec agent: delivery baseline guard error: {e}")
 
     # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees

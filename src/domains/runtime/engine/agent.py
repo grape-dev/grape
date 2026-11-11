@@ -2520,6 +2520,62 @@ def _task_span(task: dict, engine_name: str = ""):
         return contextlib.nullcontext()
 
 
+def _build_qa_delivery_env(env: dict, repo_key: str, issue_num: str, wt_dir: str,
+                           token: str = "", delivery_info: dict | None = None) -> dict:
+    """Issue #1954：为 QA（检测方）任务组装取证上下文 env 增量。
+
+    注入 `GRAPE_DELIVERY_SHA`（以解析出的被检交付 sha 为准，解析失败才回退 env/HEAD，
+    供门禁据此比对工作区实际 HEAD 发现漂移）、`GRAPE_DELIVERY_REF`、
+    `GRAPE_PRODUCER_WORKSPACE`（按实际存在的产出方工作区解析，缺失回退本工作区）
+    与 `CASE_DIR`（产物目录，未显式配置时指向产出方工作区），使检测者无需自行推断
+    或跨工作区盲找产物。
+    """
+    from src.domains.runtime.engine import repogit
+    updates: dict = {}
+    info = delivery_info or {}
+    resolved = (info.get("sha") or "").strip()
+    head = repogit.worktree_head_sha(wt_dir, token=token) if wt_dir else ""
+    # 交付 sha 取「解析出的被检提交」（不是工作区实际 HEAD）：对齐失败时两者不一致，
+    # 由前置门禁据此阻断；解析不到才回退 env 注入值/实际 HEAD（降级）。
+    delivery_sha = resolved or (env.get("GRAPE_DELIVERY_SHA") or "").strip() or head
+    if delivery_sha:
+        updates["GRAPE_DELIVERY_SHA"] = delivery_sha
+    delivery_ref = (env.get("GRAPE_DELIVERY_REF") or "").strip()
+    if not delivery_ref and issue_num:
+        delivery_ref = f"origin/feat/issue-{issue_num}"
+    if delivery_ref:
+        updates["GRAPE_DELIVERY_REF"] = delivery_ref
+    producer = _resolve_producer_workspace(env, repo_key, issue_num, wt_dir)
+    if producer:
+        updates["GRAPE_PRODUCER_WORKSPACE"] = producer
+    if not (env.get("CASE_DIR") or "").strip():
+        updates["CASE_DIR"] = producer or (wt_dir or "")
+    return updates
+
+
+def _resolve_producer_workspace(env: dict, repo_key: str, issue_num: str, wt_dir: str) -> str:
+    """Issue #1954：按实际存在的产出方工作区解析，缺失回退本工作区。
+
+    显式 env 注入的产出方工作区优先（存在性校验）；否则依次探测 coding/sre/vod
+    的 Issue 工作区，取第一个存在且非本 QA 工作区的路径。全部缺失时回退 wt_dir，
+    保证 `CASE_DIR` 不指向不存在的目录。
+    """
+    from src.domains.runtime.engine import repogit
+    explicit = (env.get("GRAPE_PRODUCER_WORKSPACE") or "").strip()
+    if explicit and os.path.isdir(explicit):
+        return explicit
+    if explicit:
+        log.warning(f"QA delivery env: declared producer workspace missing: {explicit}")
+    for agent in ("coding", "sre", "vod"):
+        try:
+            candidate = repogit.issue_dir_for(repo_key, agent, issue_num)
+        except Exception:
+            continue
+        if candidate and os.path.isdir(candidate) and os.path.realpath(candidate) != os.path.realpath(wt_dir or ""):
+            return candidate
+    return wt_dir or ""
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务的外层包装：把 repo / issue / seq 绑进日志上下文。
 
@@ -2675,16 +2731,58 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
     # 见 coding-worktree-skill-collision.md §4.1（方案 A）。
     # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 注入 agent env——git 操作走 `grape git`。
+    _is_inspector = False
+    _wt_dir = ""
+    _delivery_info: dict = {}
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
-            repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=_get_task_token(task),
-                                          work_branch=_wb)
+            _agent_type = task.get("agent_type") or ""
+            _is_inspector = repogit.is_inspector_agent(_agent_type)
+            # Issue #1954：QA 工作区按被检交付 ref/sha 对齐；产出方保持原基线行为
+            _wt_dir = repogit.ensure_issue_worktree(
+                task.get("repo_key") or "", _agent_type, _num,
+                token=_get_task_token(task), work_branch=_wb,
+                delivery_branch=f"feat/issue-{_num}" if _is_inspector else "",
+                delivery_ref=env.get("GRAPE_DELIVERY_REF", "") if _is_inspector else "",
+                delivery_sha=env.get("GRAPE_DELIVERY_SHA", "") if _is_inspector else "",
+                delivery_info=_delivery_info if _is_inspector else None)
+            if _is_inspector and _wt_dir:
+                # Issue #1954：注入 CASE_DIR / 交付 ref/sha / 产出方工作区，供 QA runbook
+                # Step 1 直接取证；异常不跳过下面的独立前置门禁。
+                try:
+                    _delivery_env = _build_qa_delivery_env(
+                        env, task.get("repo_key") or "", _num, _wt_dir,
+                        token=_get_task_token(task), delivery_info=_delivery_info)
+                    env.update(_delivery_env)
+                except Exception as e:
+                    log.warning(f"task {tid}: build QA delivery env failed: {e}")
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
+    # Issue #1954：QA 前置 sha 一致性门禁独立于建树/上下文注入，保证异常路径仍会执行。
+    if _is_inspector and _wt_dir:
+        try:
+            from src.domains.runtime.engine.worktree_guard import check_delivery_alignment
+            _guard_sha = ((_delivery_info.get("sha") or "").strip()
+                          or (env.get("GRAPE_DELIVERY_SHA") or "").strip())
+            _align = check_delivery_alignment(
+                _wt_dir, _guard_sha, token=_get_task_token(task))
+            if not _align.get("ok", True):
+                log.error(f"task {tid}: delivery baseline guard blocked execution: "
+                          f"{_align.get('message', '')}")
+                try:
+                    _res.dispose()
+                except Exception:
+                    pass
+                return {"_error": f"[delivery_baseline] {_align.get('message', '')}",
+                        "_started": False}
+            if _align.get("reason") != "aligned":
+                log.warning(f"task {tid}: delivery baseline guard degraded: "
+                            f"{_align.get('message', '')}")
+        except Exception as e:
+            log.warning(f"task {tid}: delivery baseline guard error: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
     # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
     # token 解析 env 优先 → 本地 Repo.bot_token 回退

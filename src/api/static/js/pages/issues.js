@@ -148,7 +148,7 @@ function _renderBoardCols() {
     if (!el) { missing = true; return; }
     var list = filtered.filter(function (t) { return _mapStatusL(t) === c; });
     var top = el.scrollTop;
-    el.innerHTML = _boardColListHtml(c, list);
+    el.innerHTML = _boardColListHtml(c, list, _colCursor[_BOARD_CURSOR_OF_COL[c]]);
     el.scrollTop = top;
     var cnt = document.getElementById('colCount-' + c);
     if (cnt) cnt.textContent = _boardColCountText(c, list.length);
@@ -516,6 +516,8 @@ function loadTasks(opts) {
              (_taskFilterAssignees.length ? '&creators=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');  // Issue #805: 按创建人过滤
   }
   _tasksLoading = true;
+  // Issue #1961：重置类请求先渲染列表忙态（滚动追加/轮询合并保持局部更新不闪动）
+  if (!_append && !_merge) _renderTaskListBusyIfNeeded();
   API.get(apiUrl).then(d => {
     if (_seq !== _taskReqSeq) return;  // 已被更新的请求取代：旗标归最新请求所有，不由本发清除
     if (window._currentView !== 'tasks') { _tasksLoading = false; return; }  // stale guard
@@ -1180,9 +1182,52 @@ function _boardCardHtml(t, colKey, meta) {
   return html;
 }
 
+// Issue #1961：忙态文案——有搜索词用「搜索中...」，否则用「加载中...」
+function _tasksBusyText() {
+  return _taskQuery ? (I18N.t('tasks.searching') || '搜索中...') : (I18N.t('tasks.loading') || '加载中...');
+}
+
+// Issue #1961：列表视图是否处于忙态（本轮请求尚未发出 seq===0，或请求在途）
+function _tasksListBusy() {
+  return _tasksLoading || _taskReqSeq === 0;
+}
+
+// Issue #1961：列表视图忙态 HTML（非忙态返回空串）
+function _tasksListBusyHtml() {
+  if (!_tasksListBusy()) return '';
+  return `<div class="tsk-empty"><div>🗒</div><p>${_tasksBusyText()}</p></div>`;
+}
+
+// Issue #1961：列表视图空态——忙态显示忙态文案，已返回且确实 0 条才显示空态文案
+function _taskListEmptyHtml() {
+  var busy = _tasksListBusyHtml();
+  if (busy) return busy;
+  return `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+}
+
+// Issue #1961：「仓库全部 + 列表」重置类请求在途且本地无数据时，先渲染忙态，
+// 避免上一次搜索结果留下的空态文案在重拉期间被误认为新结果。
+function _renderTaskListBusyIfNeeded() {
+  if (_tasksViewMode !== 'repo_all' || _taskView !== 'list') return false;
+  if (_tasksAll.length > 0) return false;
+  var busy = _tasksListBusyHtml();
+  if (!busy) return false;
+  var body = document.getElementById('taskListBody');
+  if (!body) return false;
+  body.innerHTML = busy;
+  var pager = document.getElementById('taskListPager');
+  if (pager) pager.innerHTML = _taskListPagerHtml([]);
+  return true;
+}
+
 // 某列的卡片容器内容（含空态）
-function _boardColListHtml(colKey, list) {
+// Issue #1961：可选第三参 cur 为该列游标——seq===0（本轮未发出）/ loading（在途）输出忙态，
+// 仅「已返回且 list 为空」才输出空态文案；cur 缺省时保持旧行为。
+function _boardColListHtml(colKey, list, cur) {
   if (list.length === 0) {
+    if (cur && (cur.seq === 0 || cur.loading)) {
+      return `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${_tasksBusyText()}</div>`;
+    }
     return `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc') || '无需求'}</div>`;
   }
   const meta = _boardStageMeta();
@@ -1212,7 +1257,7 @@ function _boardColHtml(colKey, list) {
       <span id="colCount-${colKey}" style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${_boardColCountText(colKey, list.length)}</span>
     </div>`;
   html += `<div id="colList-${colKey}" style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
-  html += _boardColListHtml(colKey, list);
+  html += _boardColListHtml(colKey, list, _colCursor[_BOARD_CURSOR_OF_COL[colKey]]);
   html += `</div>`;
   html += `<div id="colFoot-${colKey}" style="flex-shrink:0">${_boardColFootHtml(colKey, list.length)}</div>`;
   html += `</div>`;
@@ -1368,7 +1413,7 @@ function _partialRenderTasks(newItems) {
     // merge / 分区模式：重绘列表容器内部（顶部与详情区不受影响）
     body.innerHTML = _taskListBodyHtml(filtered);
     if (!body.innerHTML) {
-      body.innerHTML = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+      body.innerHTML = _taskListEmptyHtml();
     }
   }
   pager.innerHTML = _taskListPagerHtml(filtered);
@@ -1457,7 +1502,7 @@ function _render() {
 
   let listHtml = _taskListBodyHtml(pageRows);
   if (!listHtml) {
-    listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+    listHtml = _taskListEmptyHtml();
   }
 
   // Issue #926：滚动加载 sentinel（替代分页控件）——触底自动追加下一屏

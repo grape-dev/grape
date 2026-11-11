@@ -1157,6 +1157,14 @@ function _closeA2aRedoGlass() {
   window._a2aRedoDoneAgents = [];
 }
 
+// Issue #1962（移植）：补发拦截优先展示结构化 reason（duplicate_key:64868 等）与 original_event。
+function _a2aRedoSkipReason(d) {
+  const reason = (d && d.reason) || (d && d.skipped) || '';
+  const orig = d && d.original_event;
+  const origSeq = orig && orig.seq;
+  return origSeq ? (reason + ' (original_event#' + origSeq + ')') : reason;
+}
+
 function _doA2aRedo(seq) {
   const agent = window._a2aRedoSel || '';
   if (!agent) { app.showToast(I18N.t('events.a2a_select_agent')); return; }
@@ -1167,7 +1175,7 @@ function _doA2aRedo(seq) {
       _closeA2aRedoGlass();
       API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
         if (d && d.skipped) {
-          app.showToast(I18N.t('events.a2a_redo_skipped', {reason: d.skipped}));
+          app.showToast(I18N.t('events.a2a_redo_skipped', {reason: _a2aRedoSkipReason(d)}));
         } else if (d && d.seq) {
           app.showToast(I18N.t('events.a2a_redo_success', {seq: d.seq}));
           app.nav('event', d.seq);
@@ -1184,7 +1192,7 @@ function _doA2aRedo(seq) {
   _closeA2aRedoGlass();
   API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
     if (d && d.skipped) {
-      app.showToast(I18N.t('events.a2a_redo_skipped', {reason: d.skipped}));
+      app.showToast(I18N.t('events.a2a_redo_skipped', {reason: _a2aRedoSkipReason(d)}));
     } else if (d && d.seq) {
       app.showToast(I18N.t('events.a2a_redo_success', {seq: d.seq}));
       app.nav('event', d.seq);

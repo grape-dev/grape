@@ -19,7 +19,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='40';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='41';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -331,12 +331,12 @@ function _toggleAppLang(){
 <script src="/static/js/pages/dashboard.js?v=113" defer></script>
 <script src="/static/js/pages/pipeline.js?v=47" defer></script>
 <script src="/static/js/pages/agents.js?v=29" defer></script>
-<script src="/static/js/pages/events.js?v=64" defer></script>
+<script src="/static/js/pages/events.js?v=65" defer></script>
 <script src="/static/js/pages/chat.js?v=49" defer></script>
 <script src="/static/js/pages/im_channel.js?v=21" defer></script>
 <script src="/static/js/pages/repos.js?v=62" defer></script>
 <script src="/static/js/pages/templates.js?v=37" defer></script>
-<script src="/static/js/pages/issues.js?v=134" defer></script>
+<script src="/static/js/pages/issues.js?v=136" defer></script>
 <script src="/static/js/pages/settings.js?v=38" defer></script>
 <script src="/static/js/pages/account.js?v=50" defer></script>
 <script src="/static/js/pages/scene-market.js?v=50" defer></script>
