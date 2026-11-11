@@ -2823,6 +2823,18 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         log.info(f"task {tid}: retry resumed from checkpoint {os.path.basename(_ckpt.path)}")
     elif int(task.get("_grape_resume_attempt") or 0) >= 2:
         log.info(f"task {tid}: retry without usable checkpoint, running from scratch")
+    # Issue #2041：worktree 重置保全告知——上一轮若发生过「归档后重置」，此处把
+    # 机器可读字段（worktree_reset/lost_commits/bundle_path/archived_at/reset_reason）
+    # 注入 env（GRAPE_WORKTREE_RESET*）与 prompt 提示块（含恢复命令），禁止下一轮
+    # 基于上一轮「实现已在本地」的过时自述推进。无记录 → 零改动（可单测）。
+    try:
+        from src.domains.runtime.engine.worktree_guard import inject_reset_context
+        prompt, _reset_notified = inject_reset_context(task, env, prompt)
+        if _reset_notified:
+            log.warning(f"task {tid}: worktree was reset before this run, "
+                        f"reset context injected into env/prompt")
+    except Exception as _rge:
+        log.warning(f"task {tid}: worktree reset context inject failed: {_rge}")
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
     # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)

@@ -586,14 +586,22 @@ def sweep_once() -> int:
                     if not os.path.isdir(issue_dir):
                         continue
                     try:
-                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
-                        cleaned += 1
+                        # Issue #2041：删除前过保全守卫（未推送/脏 → 先归档），
+                        # 守卫拒绝（归档失败）→ 返回 False，不计数（目录保留）。
+                        if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
+                                                          reason="sweep_done_issue"):
+                            cleaned += 1
                     except Exception as e:
                         log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
         # 僵尸兜底
         ttl = _ZOMBIE_TTL_DAYS * 86400
         for p in _zombie_issue_dirs(ttl):
             try:
+                # Issue #2041：workdir 删除前过保全闸（未推送/脏 → 先归档，
+                # 归档失败拒绝删除，目录保留待下轮重试）；非 worktree 残留照旧清理。
+                from src.domains.runtime.engine.worktree_guard import guard_issue_workdir_removal
+                if not guard_issue_workdir_removal(p, reason="zombie_ttl"):
+                    continue
                 shutil.rmtree(p, ignore_errors=True)
                 cleaned += 1
             except Exception as e:
@@ -856,8 +864,10 @@ async def sweep_events_loop() -> None:
                     if not os.path.isdir(issue_dir):
                         continue
                     try:
-                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
-                        cleaned += 1
+                        # Issue #2041：同 sweep_once——守卫拒绝时不计数（目录保留）。
+                        if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
+                                                          reason="event_sweep_done_issue"):
+                            cleaned += 1
                     except Exception as e:
                         log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
             if cleaned:
