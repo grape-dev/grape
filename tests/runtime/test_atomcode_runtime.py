@@ -511,3 +511,33 @@ def test_executor_emits_usage_fallback_when_usage_event_absent(fake_cli, tmp_pat
     usages = [data for kind, data in events if kind == "usage"]
     assert len(usages) == 1
     assert usages[0] == {"input": 60, "output": 20, "cache_read": 40}
+
+
+def test_abort_task_terminal_survives_kill_failure(monkeypatch):
+    """终态中断路径杀引擎失败时，仍须释放资源并保留 _error/_started 契约。
+
+    Windows 下 taskkill /T /F 失败会抛 RuntimeError（executor._terminate_proc 新语义）；
+    _abort_task_terminal 裸调 _kill_stale_engine 时该异常逸出 → res.dispose() 与
+    _cleanup_task_workdir() 被跳过，且 {"_error": …, "_started": …} 返回契约被顶掉
+    （PR #1102 复审 Required / PR #1957）。AST 契约断言只看调用形态，本用例补运行时行为。
+    """
+    from src.domains.runtime.engine import agent as ra
+
+    seen = {"kill": 0, "dispose": 0, "cleanup": 0}
+
+    class _Res:
+        def dispose(self):
+            seen["dispose"] += 1
+
+    def _boom(task, backend="opencode"):
+        seen["kill"] += 1
+        raise RuntimeError("failed to terminate process tree pid=1")
+
+    monkeypatch.setattr(ra, "_kill_stale_engine", _boom)
+    monkeypatch.setattr(ra, "_cleanup_task_workdir",
+                        lambda task, env=None: seen.__setitem__("cleanup", seen["cleanup"] + 1))
+
+    ret = ra._abort_task_terminal({"id": "t_probe"}, "atomcode", {}, _Res(), True, "probe")
+
+    assert seen == {"kill": 1, "dispose": 1, "cleanup": 1}
+    assert ret == {"_error": "task terminated by server (aborted probe)", "_started": True}
