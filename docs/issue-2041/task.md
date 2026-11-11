@@ -34,3 +34,11 @@
   - Verify: python -m pytest tests/test_worktree_reset_archive.py（36 passed）+ 回归套件与基线同形
   - Files: src/domains/runtime/engine/worktree_guard.py, src/domains/runtime/engine/repogit.py,
     tests/test_worktree_reset_archive.py, docs/issue-2041/{spec,plan}.md
+- [x] Task 8: PR #1228 第 2 轮复审整改（2 Required：归档链 fail-open + 1 建议项）
+  - Acceptance: 工作区扫描失败（HEAD 可解析也）→ scan_failed 一律判风险且归档侧直接拒绝删除，
+    不产「空归档」假保全；dirty 非空但 diff 失败/空输出 → ok=False 拒绝删除、无 reset 记录；
+    归档树新建各级目录（.grape/archive/{issue}/叶子）逐级 0700
+  - Verify: python -m pytest tests/test_worktree_reset_archive.py（40 passed：36+4 新增失败用例）
+    + 回归套件（repogit/752/cleanup）与基线红集完全一致，零新增失败
+  - Files: src/domains/runtime/engine/worktree_guard.py,
+    tests/test_worktree_reset_archive.py, docs/issue-2041/{plan,task}.md

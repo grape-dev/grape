@@ -9,17 +9,21 @@
        │    ├─ 远端 SHA == HEAD            → unpushed=0（已推送，不看 @{upstream}）
        │    ├─ 远端 SHA != HEAD            → rev-list --count <remote_sha>..HEAD
        │    └─ 远端无该分支 / 探测失败      → @{upstream} → 基线 ref → --not --remotes
-       ├─ HEAD 不可解析（unborn/元数据损坏）→ 仍扫 porcelain，按 dirty/untracked 判风险
-       ├─ 无风险 → 原路径放行（零副作用，AC-c/AC-d）
-       └─ 有风险（未推送 commit 或 白名单外 脏/未跟踪）
-            └─ archive_worktree_before_reset()
-                 ├─ git bundle create <path> HEAD + git bundle verify （提交链保全）
-                 ├─ git diff HEAD --binary → dirty.patch              （未提交改动保全）
-                 ├─ untracked 文件逐个拷贝 → untracked/                （新增文件保全）
-                 │    └─ 超 10MB / 超 2000 个 / 拷贝失败 → skipped，归档不完整
-                 ├─ manifest.json + {agent}-reset.json 记录            （机器可读告知源）
-                 ├─ 全部成功 → 放行删除
-                 └─ 任一失败或存在 skipped → 拒绝删除，保留 worktree（宁可残留，不可丢改动）
+        ├─ HEAD 不可解析（unborn/元数据损坏）→ 仍扫 porcelain，按 dirty/untracked 判风险
+        ├─ 工作区扫描失败（index.lock/索引损坏/超时/权限）→ scan_failed：一律判风险，
+        │    不区分 HEAD 是否可解析（扫描失败不能证明「无内容可丢」）
+        ├─ 无风险 → 原路径放行（零副作用，AC-c/AC-d）
+        └─ 有风险（未推送 commit 或 白名单外 脏/未跟踪 或 scan_failed）
+             └─ archive_worktree_before_reset()
+                  ├─ scan_failed → 清单不可枚举、归档无从保全 → 直接拒绝删除（不产「空归档」假保全）
+                  ├─ git bundle create <path> HEAD + git bundle verify （提交链保全）
+                  ├─ git diff HEAD --binary → dirty.patch              （未提交改动保全）
+                  │    └─ dirty 非空但 diff 失败/空输出 = 未保全 → 拒绝删除
+                  ├─ untracked 文件逐个拷贝 → untracked/                （新增文件保全）
+                  │    └─ 超 10MB / 超 2000 个 / 拷贝失败 → skipped，归档不完整
+                  ├─ manifest.json + {agent}-reset.json 记录            （机器可读告知源）
+                  ├─ 全部成功 → 放行删除
+                  └─ 任一失败或存在 skipped → 拒绝删除，保留 worktree（宁可残留，不可丢改动）
 下一轮任务派发（agent._execute_task / direct_executor）
   └─ inject_reset_context()  读 {agent}-reset.json
        ├─ env: GRAPE_WORKTREE_RESET=true / GRAPE_WORKTREE_RESET_INFO=<JSON>
@@ -36,12 +40,15 @@
 | 未推送判定口径 | 远端分支 SHA 优先（`ls-remote`），本地 ref 链仅兜底 | 平台 push 用 `HEAD:refs/heads/<branch>` 不带 `-u`，worktree 分支 upstream 仍是基线分支；用 `@{upstream}..HEAD` 会把「已推送且干净」误判为有未推送内容，每轮 sweep 都产整仓 bundle 并误注入（与 `remove_issue_worktree_if_pushed` 的 `ls-remote` 口径一致） |
 | 阻断粒度 | 归档成功才放行；失败拒绝删除 | 保清理流程连续性；失败硬阻断才不丢数据（守卫自身异常同判失败） |
 | HEAD 不可解析 | 不早退放行，仍扫 porcelain 判风险；扫描失败则判风险 | 空仓/元数据损坏时原实现 risk=False 直接删除，与同文件「守卫异常视为风险」口径不一致 |
+| 工作区扫描失败（第 2 轮审查 Required#1） | `scan_failed=true` 一律判风险（不区分 HEAD 是否可解析），归档侧直接拒绝删除 | 扫描失败（index.lock/索引损坏/超时/权限）时 dirty/untracked 清单不可枚举，bundle 只含已提交对象、归档无从保全未提交内容；曾按「HEAD 可解析」放行删除 = fail-open，不可枚举内容会被无声删掉 |
 | 未提交改动保全 | `git diff HEAD --binary` + untracked 文件拷贝 | bundle 只含已提交对象，未提交/未跟踪必须单独落盘（Issue #11 同时丢 commit 与新增包目录） |
+| dirty diff 失败/空输出（第 2 轮审查 Required#2） | dirty 非空但 diff 失败（None/非零返回码）或输出为空 → ok=False 拒绝删除 | dirty 非空证明存在 tracked 未提交改动；diff 失败/空输出时补丁未保全，若留空 patch 后 ok=True 会无声删除现场；归档链 fail-closed，不留「名义归档、实际未保全」的口子 |
 | 未跟踪文件超限 | 记为 `untracked_skipped` 并 ok=False（拒绝删除） | bundle/补丁都保不住未跟踪文件，"跳过"等于内容永久丢失；manifest 仍落盘供取证 |
 | 告知载体 | 归档 record 文件 + 任务派发时 env/prompt 注入 | A2A context 由上一轮 Agent 手工拼装不可控；派发注入与 #516 checkpoint 同模式，是平台可控的机器可读通道 |
 | 告知生命周期 | 注入即标记 `consumed_at`/`consumed_by_task`，一次生效 | record 只写不消费会让同一 (repo, issue, agent) 每轮任务都注入「已重置 + reset --hard FETCH_HEAD」，prompt 持续膨胀且可能误弃当轮改动 |
 | 记录位置 | workspace repo 目录下 .grape/archive | worktree 会被删除，记录必须在删除路径之外；per-repo 隔离随 worktree 同机（跨机可见性记录 worker 主机名，见风险） |
 | 归档权限 | 目录 0700、bundle/补丁/快照/记录 0600 | 未跟踪文件可能含 `.env`/凭据类内容，明文落盘时同机其它任务不可读 |
+| 归档树逐级权限（第 2 轮审查建议项） | 新建的 `.grape`/`archive`/`{issue}`/叶子逐级 0700（已存在目录不回写） | 仅叶子 0700 时父目录按 umask 0755，暴露归档清单元数据（issue 号/产物名）；产物 0600 已限制读取，目录逐级收紧属纵深防御 |
 | 无对比 ref 时 | `rev-list HEAD --not --remotes` 判定，失败视为有风险 | 无 upstream 也无基线 ref 的仓库，宁可多归档一次也不放过 |
 
 ## 落点
