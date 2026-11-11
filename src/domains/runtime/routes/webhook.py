@@ -5,8 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from src.kernel.config import log
 from src.api.deps import get_user_or_none
-from src.domains.runtime.pipeline.event_pipeline import run_pipeline
-
+from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
 
 router = APIRouter(tags=["webhook"])
 
@@ -672,22 +671,6 @@ def _cross_pipeline_handoff(
             log.info(f"A2A #1753: carried target_branch={_target_branch_1753} "
                      f"(target scene={target_scene_id}, issue=#{issue_number})")
 
-    # 1.5 Issue #755 方案A：跨仓单号回填——转交 payload 沿用源仓单号时（目标仓 VCS 404），
-    #     解析真实落地单号（carried_context.target_issue_number / DB 反查 source_issue_number）
-    #     并替换 issue_number；后续去重检查 / issue_state / 事件 / 派发 payload 全部使用真实单号，
-    #     下游任务注入的 ISSUE_NUMBER 即命中目标仓真实 Issue。未命中不改写（行为不变）。
-    try:
-        _cc_pre = carried_context if isinstance(carried_context, dict) else {}
-        _resolved_num, _resolved_via = _resolve_cross_repo_issue_number(repo_key, issue_number, _cc_pre)
-        if _resolved_via in ("target_field", "db_mapping") and _resolved_num != str(issue_number).strip().lstrip("#"):
-            log.info(f"A2A #755: cross-pipeline issue_number backfilled {issue_number} -> {_resolved_num} "
-                     f"(via {_resolved_via}, repo={repo_key})")
-            issue_number = _resolved_num
-            if isinstance(carried_context, dict):
-                carried_context["target_issue_number"] = int(_resolved_num)
-    except Exception as _755_e:
-        log.warning(f"A2A #755: cross-pipeline issue_number backfill failed, keep original: {_755_e}")
-
     # 2. Duplicate handoff check: same Issue already has a non-terminal event in target scene
     #    Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
     _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "", scene_id=target_scene_id)
@@ -784,7 +767,7 @@ def _cross_pipeline_handoff(
             issue_id=f"#{issue_number}",
             agent_type=target_node,
             source="a2a",
-            actor="",
+            actor=account,
             summary=f"Handoff to scene={_target_scene_name} node={target_node}",
             payload={
                 "repository": repository,
@@ -849,7 +832,7 @@ def _cross_pipeline_handoff(
             issue_id=f"#{issue_number}",
             source="a2a",
             agent_type=target_node,
-            actor="",
+            actor=account,
             summary=f"A2A: → {target_node} (cross-pipeline, scene={_target_scene_name})",
             payload={
                 "repository": repository,
@@ -886,7 +869,7 @@ def _cross_pipeline_handoff(
                         "type": "a2a_event",
                         "repository": repository,
                         "source": "a2a",
-                        "actor": "",
+                        "actor": account,
                         "account": account,
                         "issue_id": str(issue_number) if issue_number else "",
                         "_a2a_context": _handoff_context,
@@ -1042,7 +1025,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
 
     repository = repository_early  # Issue #382/#395: 已校验为 str，直接复用，不再取原始对象
-    account = payload.get("account", "") or repository
+    # Issue #1668：不再用 repository（仓库属主）兜底 account；解析放到 repo_key/单号回填后。
+    account = str(payload.get("account", "") or "").strip()
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")
     pr_number = payload.get("pr_number", "")
@@ -1051,6 +1035,21 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # （Issue #544 审查修正②：与 GET /api/a2a/status 统一走 _resolve_a2a_repo_key）
     repo_key = _resolve_a2a_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+
+    # Issue #1668：a2a_event 触发人账号解析（payload.account → 已认证调用方登录名 → Issue creator，空则告警）。
+    # 禁止回退仓库属主：解析结果同步写入 payload.account / 事件 actor / 任务 ACCOUNT。
+    _caller_login = ""
+    if isinstance(user, dict):
+        _caller_login = str(
+            user.get("username") or user.get("login") or user.get("name") or ""
+        ).strip()
+    account = resolve_actor_account(
+        {"type": "a2a_event", "actor": _caller_login, "payload": payload,
+         "issue_id": f"#{issue_number}" if issue_number else "",
+         "repository": repository},
+        repo_key,
+    )
+    payload["account"] = account
 
     # ── 仓库真实性校验（a2a-input-validation-fix 第4条，防假仓库）：
     # repo_key 必须存在于 managed_repos（本平台真实托管）。假仓库/拼错的仓库直接 400 拒绝，
@@ -1204,7 +1203,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 repo_key=repo_key, event_type="a2a_event",
                 title=f"A2A 交接失败留痕: {agent_name}",
                 issue_id=f"#{issue_number}" if issue_number else "#0",
-                source="a2a", agent_type=agent_name, actor="",
+                source="a2a", agent_type=agent_name, actor=account,
                 summary=f"A2A failed before event creation: {str(_a2a_e)[:150]}",
                 payload={"a2a_trace": True, "fingerprint": _fingerprint,
                          "idempotency_key": _idem_key, "repository": repository,
@@ -1554,7 +1553,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             issue_id=f"#{issue_number}" if issue_number else "#0",
             source="a2a",
             agent_type=agent_name,
-            actor="",
+            actor=account,
             summary=f"A2A: → {agent_name}",
             payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint},
             status="running",

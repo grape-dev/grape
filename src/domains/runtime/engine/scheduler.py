@@ -360,11 +360,28 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key）。
     from src.repo_key import derive_repo_identity
     _full_name, _repo_owner, _repo_name = derive_repo_identity(repository, repo_key)
+    # Issue #1819：autopilot 无事件 actor，不得把仓库全名（owner/repo）注入 $ACCOUNT。
+    # 取「任务创建者」账号作来源（autopilot_tasks.created_by → user_accounts.username）；
+    # 查不到才留空并告警。语义是创建者而非本次触发人，detail 里标明 account_source。
+    from src.domains.runtime.pipeline.account_env import log_account_alert, task_creator_account
+    _autopilot_account = task_creator_account(task.get("created_by") or 0)
+    if not _autopilot_account:
+        # created_by=0 的历史任务属常态，按 info 记录以免稀释真实 warning 信号。
+        log_account_alert(
+            "ACCOUNT_MISSING", level="info",
+            event_type="autopilot",
+            repository=repository,
+            repo_key=repo_key,
+            exec_id=exec_id,
+            fallback="autopilot_created_by->none",
+            owner_fallback=False,
+            account_source="task_creator",
+        )
     env_extra = {
         "REPO_FULL_NAME": _full_name or repository,
         "REPO_OWNER": _repo_owner,
         "REPO_NAME": _repo_name,
-        "ACCOUNT": repository,
+        "ACCOUNT": _autopilot_account,
         # Issue #1577：与事件/chat 同源注入两项服务基址，远端 autopilot worker
         # 的业务命令免 --base-url 可用（direct 模式注入本机回环同样正确）。
         **resolve_task_server_env(engine_id),
