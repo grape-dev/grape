@@ -20,14 +20,19 @@ Issue #2041（docs/issue-2041/plan.md）：worktree 删除/重置入口曾无条
 `worktree remove --force` + `rmtree`——push 被阻断后未推送 commit、未提交改动、
 未跟踪文件全部静默丢失且无告知（Issue #11 任务 t_3700b87233c0 实证整体返工）。
 本文件提供「前置检查 → 归档保全 → 机器可读告知」三段式守卫：
-- `collect_reset_risk`：未推送提交（`rev-list @{upstream}..HEAD`，无 upstream 回退
-  基线分支）+ 白名单外的未提交/未跟踪改动；
-- `archive_worktree_before_reset`：命中风险 → `git bundle create --all` +
-  `git bundle verify` + `git diff HEAD --binary` 补丁 + untracked 文件快照 +
-  manifest/record（任一步失败 → ok=False，调用方拒绝重置）；
+- `collect_reset_risk`：未推送提交（本地 ref 链 `@{upstream}`→基线 ref→`--not
+  --remotes` 先判，命中疑似未推送时用远端分支 SHA 复核——平台 push 用
+  `HEAD:refs/heads/<branch>` 不带 `-u`，`@{upstream}` 仍指向基线分支，只靠本地
+  判定会把已推送的干净 worktree 误判为有未推送内容）+ 白名单外的未提交/未跟踪改动；
+  HEAD 不可解析（unborn/元数据损坏）不再早退放行，仍按工作区扫描判风险；
+- `archive_worktree_before_reset`：命中风险 → `git bundle create HEAD`（只打 HEAD
+  链，避免 `--all` 把整仓 refs 打包）+ `git bundle verify` + `git diff HEAD --binary`
+  补丁 + untracked 文件快照（跳过/拷贝失败 = 未保全 → ok=False）+ manifest/record
+  （任一步失败 → ok=False，调用方拒绝重置）；归档目录 0700、产物 0600；
 - `inject_reset_context`：下一轮任务派发时把 record（worktree_reset/lost_commits/
   bundle_path/archived_at/reset_reason）注入 env + prompt，禁止「实现已在本地」
-  的过时自述被无校验继承。
+  的过时自述被无校验继承；注入带「仅当本轮工作区无改动才 reset」前置条件，并
+  立即标记 consumed（同一记录只告知一次，避免多轮重复注入与误 reset）。
 """
 from __future__ import annotations
 
@@ -391,8 +396,9 @@ _RESET_IGNORE_PREFIXES = (".skills/", ".project-info/", ".knowledge/")
 
 _MAX_LOST_COMMITS = 200          # manifest 记录的未推送提交上限
 _MAX_DIRTY_LIST = 200            # manifest 记录的脏文件清单上限
-_MAX_UNTRACKED_FILES = 2000      # untracked 快照文件数上限（超出记清单截断）
-_MAX_UNTRACKED_FILE_BYTES = 10 * 1024 * 1024  # 单文件快照上限（超大文件跳过）
+_MAX_UNTRACKED_FILES = 2000      # untracked 快照文件数上限（超出 → 归档不完整 → 拒绝删除）
+_MAX_UNTRACKED_FILE_BYTES = 10 * 1024 * 1024  # 单文件快照上限（超大 → 归档不完整 → 拒绝删除）
+_REMOTE_PROBE_TIMEOUT = 60       # `ls-remote` 远端事实探测上限（网络抖动不影响保守判定）
 
 
 def _is_reset_ignored_path(rel_path: str) -> bool:
@@ -405,18 +411,22 @@ def _is_reset_ignored_path(rel_path: str) -> bool:
     return any(p.startswith(prefix) for prefix in _RESET_IGNORE_PREFIXES)
 
 
-def _porcelain_entries_all(wt_dir: str, token: str = "") -> list:
+def _porcelain_entries_all(wt_dir: str, token: str = "") -> list | None:
     """`git status --porcelain=v1 -z --untracked-files=all` → [(xy, path)]。
 
-    -uall 展开未跟踪目录到文件级（新增包目录要逐文件保全）；rename/copy 的
-    原路径是紧随的独立字段，需跳过。执行失败 → []。
+    -uall 展开未跟踪目录到文件级（新增包目录要逐文件保全）；rename/copy 的原路径
+    是紧随的独立字段，需跳过——索引侧（`X`）与工作区侧（`Y`）都可能出现 R/C
+    （` R new\\0old\\0` 为未暂存 rename），两列都要判，否则后续条目错位。
+
+    执行失败 → None（调用方据此区分「工作区无改动」与「扫描本身失败」，
+    后者不可用来证明无内容可丢）。
     """
     from src.domains.runtime.engine.repogit import _run_git
     try:
         r = _run_git(["-C", wt_dir, "status", "--porcelain=v1", "-z",
                       "--untracked-files=all"], token=token)
         if r is None or r.returncode != 0:
-            return []
+            return None
         fields = (r.stdout or "").split("\0")
         out, i = [], 0
         while i < len(fields):
@@ -425,13 +435,13 @@ def _porcelain_entries_all(wt_dir: str, token: str = "") -> list:
             if not entry or len(entry) < 4:
                 continue
             xy, path = entry[:2], entry[3:]
-            if entry[0] in "RC" and i < len(fields):
+            if (xy[0] in "RC" or xy[1] in "RC") and i < len(fields):
                 i += 1
             if path:
                 out.append((xy, path))
         return out
     except Exception:
-        return []
+        return None
 
 
 def _resolve_compare_ref(wt_dir: str, token: str = "", base_branch: str = "") -> str:
@@ -455,58 +465,140 @@ def _resolve_compare_ref(wt_dir: str, token: str = "", base_branch: str = "") ->
     return ""
 
 
+def _remote_branch_head(wt_dir: str, branch: str, token: str = "") -> tuple:
+    """远端事实：`git ls-remote --heads origin refs/heads/<branch>` → (probed, sha)。
+
+    probed=False 表示远端不可达/探测失败（无网络、无 origin、鉴权失败），调用方
+    必须回退本地 ref 链判定，不能把「探测失败」当成「分支未推送」。
+    """
+    from src.domains.runtime.engine.repogit import _run_git
+    if not branch:
+        return False, ""
+    r = _run_git(["-C", wt_dir, "ls-remote", "--heads", "origin",
+                  f"refs/heads/{branch}"], token=token, timeout=_REMOTE_PROBE_TIMEOUT)
+    if r is None or r.returncode != 0:
+        return False, ""
+    out = (r.stdout or "").strip()
+    return True, (out.split()[0] if out else "")
+
+
+def _collect_unpushed(out: dict, wt_dir: str, token: str = "",
+                      base_branch: str = "") -> None:
+    """填充 out 的 unpushed_count / lost_commits / compare_ref / remote_head。
+
+    两步判定：
+    1. 本地 ref 链（零网络）：`@{upstream}`（worktree 分支由 `worktree add -b` 创建
+       时指向基线 `origin/<base>`）→ 基线 ref → `--not --remotes`。计数为 0 即
+       「相对基线无新增提交」→ 无可丢内容，直接返回；
+    2. 本地判定「疑似有未推送」→ 远端事实复核：`ls-remote --heads origin
+       refs/heads/<branch>`（平台 push 用 `HEAD:refs/heads/<branch>` 不带 `-u`，
+       upstream 仍是基线，只靠第 1 步会把「已推送且干净」误判为有未推送内容）。
+       远端 SHA==HEAD → unpushed=0；远端落后 → 以远端 SHA 为基点重算；
+       远端无该分支 / 探测失败 → 保留第 1 步的保守结论。
+    """
+    from src.domains.runtime.engine.repogit import _run_git
+    ref = _resolve_compare_ref(wt_dir, token=token, base_branch=base_branch)
+    out["compare_ref"] = ref
+    range_arg = f"{ref}..HEAD" if ref else "HEAD --not --remotes"
+    cnt = _run_git(["-C", wt_dir, "rev-list", "--count"] + range_arg.split(), token=token)
+    if cnt is None or cnt.returncode != 0:
+        # 无法计数 → 保守视为有未推送内容（宁可多归档，不放过丢失）
+        out["unpushed_count"] = -1
+        return
+    try:
+        out["unpushed_count"] = int((cnt.stdout or "0").strip() or 0)
+    except ValueError:
+        out["unpushed_count"] = -1
+    if out["unpushed_count"] == 0:
+        return
+    if out["unpushed_count"] > 0:
+        lst = _run_git(["-C", wt_dir, "rev-list"] + range_arg.split(), token=token)
+        if lst is not None and lst.returncode == 0:
+            out["lost_commits"] = [s for s in (lst.stdout or "").split()
+                                   if s][:_MAX_LOST_COMMITS]
+
+    probed, remote_sha = _remote_branch_head(wt_dir, out["branch"], token=token)
+    if not (probed and remote_sha):
+        return  # 探测失败 / 远端无该分支 → 保留本地保守结论
+    out["remote_head"] = remote_sha
+    out["compare_ref"] = f"ls-remote:origin/{out['branch']}"
+    if remote_sha == out["head"]:
+        out["unpushed_count"] = 0
+        out["lost_commits"] = []
+        return
+    cnt = _run_git(["-C", wt_dir, "rev-list", "--count",
+                    f"{remote_sha}..HEAD"], token=token)
+    if cnt is None or cnt.returncode != 0:
+        out["unpushed_count"] = -1
+        return
+    try:
+        out["unpushed_count"] = int((cnt.stdout or "0").strip() or 0)
+    except ValueError:
+        out["unpushed_count"] = -1
+        return
+    if out["unpushed_count"] > 0:
+        lst = _run_git(["-C", wt_dir, "rev-list", f"{remote_sha}..HEAD"], token=token)
+        if lst is not None and lst.returncode == 0:
+            out["lost_commits"] = [s for s in (lst.stdout or "").split()
+                                   if s][:_MAX_LOST_COMMITS]
+    else:
+        out["lost_commits"] = []
+
+
 def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "") -> dict:
     """重置前置检查：未推送提交 + 白名单外的未提交/未跟踪改动。
 
     返回 {"risk", "dirty", "untracked", "unpushed_count", "lost_commits",
-          "compare_ref", "branch", "head"}：
-    - 未推送：`rev-list --count <ref>..HEAD`；无对比 ref 时以
-      `rev-list HEAD --not --remotes` 兜底（HEAD 未被任一 remote-tracking ref
-      包含即视为未推送），计数失败保守视为有风险（unpushed_count=-1）；
-    - dirty/untracked 为白名单外路径清单（各带上限）。
+          "compare_ref", "branch", "head", "head_missing", "remote_head",
+          "dirty_count", "untracked_count", "untracked_overflow"}：
+    - 未推送：本地 ref 链优先（零网络），疑似未推送时远端 `ls-remote` 复核
+      （见 _collect_unpushed）；计数失败保守视为有风险（unpushed_count=-1）；
+    - HEAD 不可解析（unborn / git 元数据损坏）不再早退放行：仍执行
+      porcelain 扫描，按 dirty/untracked 判风险；扫描本身失败且 HEAD 不可解析
+      → 无法证明无内容可丢，判风险（口径同「守卫异常视为风险」）；
+    - dirty/untracked 为白名单外路径清单（各带上限，count 为真实总数）。
     """
     out = {"risk": False, "dirty": [], "untracked": [], "unpushed_count": 0,
-           "lost_commits": [], "compare_ref": "", "branch": "", "head": ""}
+           "lost_commits": [], "compare_ref": "", "branch": "", "head": "",
+           "head_missing": False, "remote_head": "", "dirty_count": 0,
+           "untracked_count": 0, "untracked_overflow": 0}
     from src.domains.runtime.engine.repogit import _run_git
     try:
         head = _run_git(["-C", wt_dir, "rev-parse", "HEAD"], token=token)
-        if head is None or head.returncode != 0:
-            return out  # 空仓（无任何 commit）→ 无可丢内容
-        out["head"] = (head.stdout or "").strip()
+        head_sha = ((head.stdout or "").strip()
+                    if head is not None and head.returncode == 0 else "")
+        out["head"] = head_sha
+        if not head_sha:
+            out["head_missing"] = True
+            log.warning(f"worktree reset guard: HEAD unresolvable in {wt_dir}, "
+                        f"fallback to worktree scan (no early pass)")
         br = _run_git(["-C", wt_dir, "rev-parse", "--abbrev-ref", "HEAD"], token=token)
         if br is not None and br.returncode == 0:
-            out["branch"] = (br.stdout or "").strip()
+            name = (br.stdout or "").strip()
+            out["branch"] = "" if name in ("", "HEAD") else name
 
-        ref = _resolve_compare_ref(wt_dir, token=token, base_branch=base_branch)
-        out["compare_ref"] = ref
-        range_arg = f"{ref}..HEAD" if ref else "HEAD --not --remotes"
-        cnt = _run_git(["-C", wt_dir, "rev-list", "--count"] + range_arg.split(),
-                       token=token)
-        if cnt is None or cnt.returncode != 0:
-            # 无法计数 → 保守视为有未推送内容（宁可多归档，不放过丢失）
-            out["unpushed_count"] = -1
-        else:
-            try:
-                out["unpushed_count"] = int((cnt.stdout or "0").strip() or 0)
-            except ValueError:
-                out["unpushed_count"] = -1
-        if out["unpushed_count"] > 0:
-            lst = _run_git(["-C", wt_dir, "rev-list"] + range_arg.split(),
-                           token=token)
-            if lst is not None and lst.returncode == 0:
-                out["lost_commits"] = [s for s in (lst.stdout or "").split()
-                                       if s][:_MAX_LOST_COMMITS]
+        if head_sha:
+            _collect_unpushed(out, wt_dir, token=token, base_branch=base_branch)
 
-        for xy, path in _porcelain_entries_all(wt_dir, token=token):
+        entries = _porcelain_entries_all(wt_dir, token=token)
+        if entries is None:
+            # 工作区扫描失败：HEAD 也不可解析时无法排除未跟踪内容 → 保守判风险
+            if out["head_missing"]:
+                out["risk"] = True
+            return out
+        dirty, untracked = [], []
+        for xy, path in entries:
             if _is_reset_ignored_path(path):
                 continue
-            if xy == "??":
-                out["untracked"].append(path)
-            else:
-                out["dirty"].append(path)
-        out["dirty"] = out["dirty"][:_MAX_DIRTY_LIST]
-        out["untracked"] = out["untracked"][:_MAX_UNTRACKED_FILES]
-        out["risk"] = bool(out["dirty"] or out["untracked"] or out["unpushed_count"] != 0)
+            (untracked if xy == "??" else dirty).append(path)
+        out["dirty_count"] = len(dirty)
+        out["untracked_count"] = len(untracked)
+        out["dirty"] = dirty[:_MAX_DIRTY_LIST]
+        out["untracked"] = untracked[:_MAX_UNTRACKED_FILES]
+        out["untracked_overflow"] = max(0, len(untracked) - _MAX_UNTRACKED_FILES)
+        out["risk"] = bool(out["dirty"] or out["untracked"]
+                           or out["untracked_overflow"]
+                           or out["unpushed_count"] != 0)
         return out
     except Exception as e:
         # 守卫自身异常 → 视为有风险（归档时 bundle 会再失败 → 调用方拒绝重置）
@@ -527,13 +619,31 @@ def reset_record_path(repo_key: str, issue_num, agent_type: str) -> str:
                        f"{agent_type or 'agent'}-reset.json")
 
 
-def _atomic_json_write(path: str, data: dict) -> bool:
-    """原子写 JSON（tmp + rename；借用 checkpoint 的防半截策略）。"""
+def _ensure_private_dir(path: str) -> None:
+    """归档目录 0700（含凭据类未跟踪文件时，同机其它任务不可读）。"""
+    os.makedirs(path, exist_ok=True)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.chmod(path, 0o700)
+    except Exception:
+        pass
+
+
+def _chmod_private(path: str) -> None:
+    """归档产物 0600（best effort；权限位失败不影响保全语义）。"""
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def _atomic_json_write(path: str, data: dict) -> bool:
+    """原子写 JSON（tmp + rename；借用 checkpoint 的防半截策略），产物 0600。"""
+    try:
+        _ensure_private_dir(os.path.dirname(path))
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
+        _chmod_private(tmp)
         os.replace(tmp, path)
         return True
     except Exception as e:
@@ -541,28 +651,84 @@ def _atomic_json_write(path: str, data: dict) -> bool:
         return False
 
 
-def _snapshot_untracked(wt_dir: str, archive_dir: str, untracked: list) -> list:
+def _snapshot_untracked(wt_dir: str, archive_dir: str, untracked: list,
+                        overflow: int = 0) -> tuple:
     """未跟踪文件内容快照（bundle 只含已提交对象，新增文件必须逐个拷贝）。
 
-    单文件超过 _MAX_UNTRACKED_FILE_BYTES / 总数超过 _MAX_UNTRACKED_FILES 跳过
-    （清单仍完整记录在 manifest）。目录按相对路径重建。
+    bundle/补丁都保不住未跟踪文件，因此「跳过」= 内容无法保全：单文件超过
+    _MAX_UNTRACKED_FILE_BYTES、文件数超 _MAX_UNTRACKED_FILES（overflow）、
+    非法类型、copy 抛异常，全部计入 skipped（reason + path），由调用方置
+    ok=False 拒绝删除（AC-a：归档成功才放行）。
+
+    返回 (copied, skipped)；skipped 元素形如
+    {"path": "<rel>", "reason": "too_large|not_regular_file|copy_error|file_count_cap"}。
     """
-    copied = []
+    copied, skipped = [], []
     dst_root = os.path.join(archive_dir, UNTRACKED_SNAPSHOT_DIR)
+    if overflow > 0:
+        skipped.append({"path": "", "reason": "file_count_cap",
+                        "skipped_count": int(overflow)})
     for rel in untracked[:_MAX_UNTRACKED_FILES]:
         src = os.path.join(wt_dir, rel)
         if not os.path.isfile(src):
+            skipped.append({"path": rel, "reason": "not_regular_file"})
             continue
         try:
-            if os.path.getsize(src) > _MAX_UNTRACKED_FILE_BYTES:
-                continue
+            size = os.path.getsize(src)
+        except Exception as e:
+            skipped.append({"path": rel, "reason": "copy_error", "error": str(e)[:200]})
+            continue
+        if size > _MAX_UNTRACKED_FILE_BYTES:
+            skipped.append({"path": rel, "reason": "too_large", "size": size})
+            continue
+        try:
             dst = os.path.join(dst_root, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            _ensure_private_dir(os.path.dirname(dst))
             shutil.copy2(src, dst)
+            _chmod_private(dst)
             copied.append(rel)
         except Exception as e:
-            log.warning(f"worktree reset guard: untracked snapshot skip {rel}: {e}")
-    return copied
+            log.warning(f"worktree reset guard: untracked snapshot failed {rel}: {e}")
+            skipped.append({"path": rel, "reason": "copy_error", "error": str(e)[:200]})
+    return copied, skipped
+
+
+def _build_reset_record(risk: dict, repo_key: str, issue_num, agent_type: str,
+                        bundle_path: str, dirty_patch: str,
+                        snap_files: list, snap_skipped: list, archived_at: str,
+                        reason: str, task_id: str) -> dict:
+    """归档 manifest / 机器可读记录（同一份内容，落两处）。"""
+    try:
+        bundle_size = os.path.getsize(bundle_path) if bundle_path else 0
+    except Exception:
+        bundle_size = 0
+    return {
+        "worktree_reset": True,
+        "archive_complete": not snap_skipped,
+        "lost_commits": risk["lost_commits"],
+        "unpushed_count": risk["unpushed_count"],
+        "dirty": risk["dirty"],
+        "untracked": risk["untracked"],
+        "untracked_snapshot": snap_files,
+        "untracked_skipped": snap_skipped,
+        "untracked_overflow": risk.get("untracked_overflow", 0),
+        "bundle_path": bundle_path,
+        "bundle_size": bundle_size,
+        "dirty_patch": dirty_patch,
+        "archived_at": archived_at,
+        "reset_reason": reason or "reset",
+        "repo_key": repo_key,
+        "issue_number": str(issue_num or ""),
+        "agent": agent_type or "",
+        "branch": risk["branch"],
+        "head": risk["head"],
+        "head_missing": bool(risk.get("head_missing")),
+        "compare_ref": risk["compare_ref"],
+        "remote_head": risk.get("remote_head", ""),
+        "task_id": task_id or "",
+        "worker": os.environ.get("HOSTNAME", ""),
+        "recovery": f"git fetch {bundle_path} && git reset --hard FETCH_HEAD",
+    }
 
 
 def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
@@ -572,19 +738,21 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
     """重置/删除前的归档保全（Issue #2041 核心）。
 
     流程：collect_reset_risk → 无风险原样返回（零副作用，AC-c/AC-d）；有风险：
-    bundle create --all → bundle verify → dirty.patch（未提交改动）→ untracked
-    快照 → manifest.json + {agent}-reset.json 机器可读记录。任一步失败 →
-    ok=False（调用方必须拒绝重置）。
+    bundle create（仅 HEAD 链）→ bundle verify → dirty.patch（未提交改动）→
+    untracked 快照（逐文件，跳过/失败即「未保全」）→ manifest.json +
+    {agent}-reset.json 机器可读记录。任一步失败或存在未保全的未跟踪文件 →
+    ok=False（调用方必须拒绝重置，保留现场）。
 
     返回 {"risk", "archived", "ok", "error", "archive_dir", "bundle_path",
-          "record_path", "record"}。
+          "record_path", "record", "skipped"}。
     """
     from datetime import datetime, timezone
     import uuid
     from src.domains.runtime.engine.repogit import _run_git, bundle_create, bundle_verify
 
     res = {"risk": False, "archived": False, "ok": True, "error": "",
-           "archive_dir": "", "bundle_path": "", "record_path": "", "record": {}}
+           "archive_dir": "", "bundle_path": "", "record_path": "", "record": {},
+           "skipped": []}
     if not wt_dir or not os.path.isdir(wt_dir):
         return res
     risk = collect_reset_risk(wt_dir, token=token, base_branch=base_branch)
@@ -598,7 +766,7 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
                               f"{stamp}-{uuid.uuid4().hex[:8]}")
     bundle_path = os.path.join(archive_dir, BUNDLE_NAME)
     try:
-        os.makedirs(archive_dir, exist_ok=True)
+        _ensure_private_dir(archive_dir)
     except Exception as e:
         res["ok"] = False
         res["error"] = f"archive mkdir failed: {e}"
@@ -609,6 +777,7 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
         res["ok"] = False
         res["error"] = f"bundle create failed: {err}"
         return res
+    _chmod_private(bundle_path)
     if not bundle_verify(wt_dir, bundle_path, token=token):
         res["ok"] = False
         res["error"] = "bundle verify failed"
@@ -623,43 +792,36 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
             try:
                 with open(dirty_patch, "w", encoding="utf-8") as f:
                     f.write(r.stdout)
+                _chmod_private(dirty_patch)
             except Exception as e:
                 res["ok"] = False
                 res["error"] = f"dirty patch write failed: {e}"
                 return res
 
-    snap_files = _snapshot_untracked(wt_dir, archive_dir, risk["untracked"])
-
-    try:
-        bundle_size = os.path.getsize(bundle_path)
-    except Exception:
-        bundle_size = 0
-    record = {
-        "worktree_reset": True,
-        "lost_commits": risk["lost_commits"],
-        "unpushed_count": risk["unpushed_count"],
-        "dirty": risk["dirty"],
-        "untracked": risk["untracked"],
-        "untracked_snapshot": snap_files,
-        "bundle_path": bundle_path,
-        "bundle_size": bundle_size,
-        "dirty_patch": dirty_patch,
-        "archived_at": archived_at,
-        "reset_reason": reason or "reset",
-        "repo_key": repo_key,
-        "issue_number": str(issue_num or ""),
-        "agent": agent_type or "",
-        "branch": risk["branch"],
-        "head": risk["head"],
-        "compare_ref": risk["compare_ref"],
-        "task_id": task_id or "",
-        "worker": os.environ.get("HOSTNAME", ""),
-        "recovery": f"git fetch {bundle_path} && git reset --hard FETCH_HEAD",
-    }
-    if not _atomic_json_write(os.path.join(archive_dir, MANIFEST_NAME), record):
+    snap_files, snap_skipped = _snapshot_untracked(
+        wt_dir, archive_dir, risk["untracked"],
+        overflow=risk.get("untracked_overflow") or 0)
+    record = _build_reset_record(risk, repo_key, issue_num, agent_type,
+                                 bundle_path, dirty_patch, snap_files, snap_skipped,
+                                 archived_at, reason, task_id)
+    manifest_path = os.path.join(archive_dir, MANIFEST_NAME)
+    if not _atomic_json_write(manifest_path, record):
         res["ok"] = False
         res["error"] = "manifest write failed"
         return res
+    if snap_skipped:
+        # 未跟踪内容无法完整保全（超限/拷贝失败）→ 拒绝删除，保留现场（AC-a）
+        res.update({"ok": False, "skipped": snap_skipped,
+                    "archive_dir": archive_dir, "bundle_path": bundle_path,
+                    "record": record,
+                    "error": (f"untracked snapshot incomplete: "
+                              f"{len(snap_skipped)} item(s) not archived")})
+        log.warning(f"worktree reset guard: archive incomplete {repo_key} "
+                    f"issue={issue_num} agent={agent_type} "
+                    f"untracked={risk['untracked_count']} "
+                    f"skipped={len(snap_skipped)} -> refuse reset")
+        return res
+
     # 机器可读最新记录（下一轮任务派发读取注入）
     record_path = reset_record_path(repo_key, issue_num, agent_type)
     if not _atomic_json_write(record_path, record):
@@ -689,11 +851,39 @@ def load_reset_record(repo_key: str, issue_num, agent_type: str) -> dict | None:
         return None
 
 
+def mark_reset_record_consumed(repo_key: str, issue_num, agent_type: str,
+                               task_id: str = "") -> bool:
+    """标记记录已被某轮任务消费（`consumed_at` / `consumed_by_task`）。
+
+    记录只用于「告知下一轮」，告知过即失效：否则同一 (repo, issue, agent) 之后
+    每一轮都会注入「worktree 已被重置 + git reset --hard FETCH_HEAD」提示与
+    env，多轮任务 prompt 持续膨胀，且 Agent 照抄恢复命令会丢弃当轮未提交改动。
+    归档目录内 manifest 不受影响（永久归档证据保留）。
+    """
+    from datetime import datetime, timezone
+    rec = load_reset_record(repo_key, issue_num, agent_type)
+    if not rec:
+        return False
+    rec["consumed_at"] = datetime.now(timezone.utc).isoformat()
+    rec["consumed_by_task"] = task_id or ""
+    path = reset_record_path(repo_key, issue_num, agent_type)
+    if not _atomic_json_write(path, rec):
+        log.warning(f"worktree reset guard: mark record consumed failed {path}")
+        return False
+    log.info(f"worktree reset guard: record consumed "
+             f"(repo={repo_key} issue={issue_num} agent={agent_type} task={task_id})")
+    return True
+
+
 def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
     """从 issue workdir 绝对路径解析 (repo_key, issue_num, agent_type)。
 
-    支持新结构 {provider}/{owner}/{repo}/issues/{n}/{agent} 与旧结构
-    {owner}/{repo}/issues/{n}/{agent}；非该形态或非 git agent → ("", "", "")。
+    支持结构：
+    - 新 `{provider}/{owner}/{repo}/issues/{n}/{agent}`；
+    - 旧 `{owner}/{repo}/issues/{n}/{agent}`（provider 回退 gitcode）；
+    - 过渡期旧 `{repo}/{agent}/issues/{n}`（cleanup._zombie_issue_dirs 仍扫描该布局，
+      不解析会绕开保全闸直接 rmtree）。
+    非该形态 / 非 git agent / 非数字 issue 号 → ("", "", "")。
     """
     from src.domains.runtime.engine.repogit import is_git_agent
     try:
@@ -703,21 +893,29 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
         if rel.startswith(".."):
             return "", "", ""
         parts = rel.split(os.sep)
-        if len(parts) < 5 or parts[-3] != "issues":
+        if len(parts) >= 5 and parts[-3] == "issues":
+            # {..}/issues/{n}/{agent}
+            agent, issue_part = parts[-1], parts[-2]
+            identity = parts[:-3]
+        elif len(parts) >= 4 and parts[-2] == "issues":
+            # 过渡期旧布局 {repo}/{agent}/issues/{n}
+            agent, issue_part = parts[-3], parts[-1]
+            identity = parts[:-3]
+            if not issue_part.isdigit():
+                return "", "", ""
+        else:
             return "", "", ""
-        agent = parts[-1]
         if not is_git_agent(agent):
             return "", "", ""
-        identity = parts[:-3]
         if len(identity) == 3:
             provider, owner, repo = identity
         elif len(identity) == 2:
             provider, owner, repo = "gitcode", identity[0], identity[1]
         else:
             return "", "", ""
-        if not provider or not owner or not repo:
+        if not provider or not owner or not repo or not issue_part:
             return "", "", ""
-        return f"{provider}:{owner}/{repo}", parts[-2], agent
+        return f"{provider}:{owner}/{repo}", issue_part, agent
     except Exception:
         return "", "", ""
 
@@ -726,9 +924,10 @@ def guard_issue_workdir_removal(path: str, reason: str = "zombie_ttl",
                                 token: str = "") -> bool:
     """僵尸/兜底目录删除前的保全闸（cleanup._zombie_issue_dirs 调用）。
 
-    - 非 issue workdir 形态 / 非 git agent / 非 git 工作树 → 直接放行（保持既有
-      清理行为，不误伤垃圾残留）；
-    - 解析成功 → archive_worktree_before_reset（归档失败拒绝删除）；
+    - 非 git 工作树（无 .git）→ 直接放行（保持既有清理行为，不误伤垃圾残留）；
+    - 含 .git 但无法解析归属（布局未知）→ 无法证明其无未推送内容，保守保留
+      + log.warning（宁可残留，不可静默 rmtree 掉带 .git 的现场）；
+    - 解析成功 → archive_worktree_before_reset（归档失败/不完整拒绝删除）；
     - 守卫自身异常 → 拒绝删除（保守保留现场）。
     返回 True=允许删除，False=保留。
     """
@@ -738,7 +937,9 @@ def guard_issue_workdir_removal(path: str, reason: str = "zombie_ttl",
             return True
         repo_key, issue_num, agent = parse_issue_workdir(path)
         if not repo_key or not issue_num or not agent:
-            return True
+            log.warning(f"worktree reset guard: unparsable workdir with .git, "
+                        f"keep it for manual inspection: {path}")
+            return False
         res = archive_worktree_before_reset(path, repo_key, issue_num, agent,
                                             token=token, reason=reason)
         if res.get("risk") and not res.get("ok"):
@@ -754,11 +955,13 @@ def guard_issue_workdir_removal(path: str, reason: str = "zombie_ttl",
 def inject_reset_context(task: dict, env: dict, prompt: str) -> tuple:
     """下一轮任务注入重置告知（worker _execute_task / direct_executor 调用）。
 
-    读该 (repo_key, issue, agent) 的最新重置记录，命中：
+    读该 (repo_key, issue, agent) 的最新重置记录，命中且未被消费：
     - env 注入 `GRAPE_WORKTREE_RESET=true` + `GRAPE_WORKTREE_RESET_INFO=<record JSON>`
       （机器可读，AC-b）；
-    - prompt 追加显式提示块：本地实现已归档、不可假定仍在 worktree、恢复命令。
-    无记录 / 非 git agent → 原样返回（零副作用）。返回 (prompt, injected)。
+    - prompt 追加显式提示块：本地实现已归档、不可假定仍在 worktree、恢复命令
+      与「仅当本轮工作区无改动时才执行恢复」的前置条件；
+    - 注入后立即标记 consumed（同一记录只告知一次，避免每轮重复注入/reset 误用）。
+    无记录 / 已消费 / 非 git agent → 原样返回（零副作用）。返回 (prompt, injected)。
     """
     try:
         from src.domains.runtime.engine.repogit import issue_num_from, is_git_agent
@@ -769,6 +972,9 @@ def inject_reset_context(task: dict, env: dict, prompt: str) -> tuple:
             return prompt, False
         record = load_reset_record(rk, num, ag)
         if not record or not record.get("worktree_reset"):
+            return prompt, False
+        if record.get("consumed_at"):
+            # 已告知过（同一记录只注入一次）→ 不再重复污染 prompt/env
             return prompt, False
         env["GRAPE_WORKTREE_RESET"] = "true"
         env["GRAPE_WORKTREE_RESET_INFO"] = json.dumps(record, ensure_ascii=False)
@@ -782,11 +988,17 @@ def inject_reset_context(task: dict, env: dict, prompt: str) -> tuple:
             f"Unpushed work was archived to: {record.get('bundle_path', '?')} "
             f"(unpushed commits: {record.get('unpushed_count', '?')}). "
             "Recover with: git fetch <bundle_path> && git reset --hard FETCH_HEAD "
-            "(env GRAPE_WORKTREE_RESET_INFO carries the full machine-readable record). "
+            "ONLY IF the current worktree has no local changes of this run; never "
+            "run reset --hard while this run has uncommitted or untracked work - "
+            "keep the current implementation and rebuild on top of it instead. "
+            "(env GRAPE_WORKTREE_RESET_INFO carries the full machine-readable record; "
+            "this notice is delivered once per reset record.) "
             "Machine-readable context: "
             + json.dumps(fields, ensure_ascii=False)
             + "\n"
         )
+        _task_id = str((task or {}).get("task_id") or (task or {}).get("id") or "")
+        mark_reset_record_consumed(rk, num, ag, task_id=_task_id)
         return prompt + block, True
     except Exception as e:
         log.warning(f"worktree reset guard: context inject failed: {e}")

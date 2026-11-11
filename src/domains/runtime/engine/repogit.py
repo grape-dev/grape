@@ -462,13 +462,26 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             return None
 
 
+# Issue #2041：归档产物超时（具名常量，rationale 见 docs/issue-2041/plan.md「归档 bundle 取值」）。
+# bundle 只打包 HEAD 链（不含 --all 的其它分支/基线），体积≈本分支历史；取默认 900s 的
+# 2 倍覆盖大仓冷缓存打包，同时不超过 sweeper 15min 周期的 2 倍，避免单 issue 长期
+# 占用串行 sweep 线程（超时 → 归档失败 → 保留现场，下轮重试）。
+_BUNDLE_CREATE_TIMEOUT = 1800
+# 从本地 bundle fetch 无网络依赖，600s 足够；超出即视为异常（失败 → 拒绝删除）。
+_BUNDLE_FETCH_TIMEOUT = 600
+
+
 def bundle_create(wt_dir: str, bundle_path: str, token: str = "") -> tuple:
-    """Issue #2041：`git bundle create <path> --all` 封装（worktree 全量 refs 归档）。
+    """Issue #2041：`git bundle create <path> HEAD` 封装（提交链归档）。
+
+    只打包 HEAD 可达提交：linked worktree 与主仓共享 refs，`--all` 会把其它 issue
+    分支与基线一并打包（归档体积≈整仓、sweeper 长时间阻塞），而恢复路径只需要
+    `git fetch <bundle> && git reset --hard FETCH_HEAD` 对应的 HEAD 链。
 
     返回 (ok, err)；token 经 `-c http.extraheader` 内联注入（不落盘、不进日志）。
     """
-    r = _run_git(["-C", wt_dir, "bundle", "create", bundle_path, "--all"],
-                 token=token, timeout=1800)
+    r = _run_git(["-C", wt_dir, "bundle", "create", bundle_path, "HEAD"],
+                 token=token, timeout=_BUNDLE_CREATE_TIMEOUT)
     if r is None:
         return False, "git exec failed"
     if r.returncode != 0:
@@ -486,7 +499,8 @@ def bundle_verify(wt_dir: str, bundle_path: str, token: str = "") -> bool:
 def fetch_from_bundle(wt_dir: str, bundle_path: str, token: str = "") -> tuple:
     """Issue #2041：从 bundle 恢复——`git fetch <bundle>`（FETCH_HEAD 指向 bundle
     的 HEAD，随后可 `git reset --hard FETCH_HEAD` 还原提交内容）。"""
-    r = _run_git(["-C", wt_dir, "fetch", bundle_path], token=token, timeout=600)
+    r = _run_git(["-C", wt_dir, "fetch", bundle_path], token=token,
+                 timeout=_BUNDLE_FETCH_TIMEOUT)
     if r is None:
         return False, "git exec failed"
     if r.returncode != 0:
