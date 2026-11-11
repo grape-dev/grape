@@ -34,6 +34,7 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
+from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
 #   丢失路径 B 托管仓库的实时获取+自动刷新回退，6/29 近期任务 token 为空会受影响。）
@@ -419,7 +420,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
     except OSError as e:
         latency = round(_time_mod.time() - start, 1)
         _msg = f"{type(e).__name__}: {e}"[:200]
-        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+        if _is_spawn_failure(e):
             return {"status": "spawn_failed", "latency": latency,
                     "error": f"spawn failed: {_msg}"}
         return {"status": "fail", "latency": latency, "error": _msg}
@@ -600,7 +601,7 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
     except OSError as e:
         latency = round(_time_mod.time() - start, 1)
         _msg = f"{type(e).__name__}: {e}"[:200]
-        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+        if _is_spawn_failure(e):
             return {"status": "spawn_failed", "latency": latency,
                     "error": f"spawn failed: {_msg}"}
         return {"status": "fail", "latency": latency, "error": _msg}
@@ -789,7 +790,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
     except OSError as e:
         latency = round(_time_mod.time() - start, 1)
         _msg = f"{type(e).__name__}: {e}"[:200]
-        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+        if _is_spawn_failure(e):
             return {"status": "spawn_failed", "latency": latency,
                     "error": f"spawn failed: {_msg}"}
         return {"status": "fail", "latency": latency, "error": _msg}
@@ -862,7 +863,7 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     except OSError as e:
         latency = round(_time_mod.time() - start, 1)
         _msg = f"{type(e).__name__}: {e}"[:200]
-        if getattr(e, "errno", None) == 24 or "too many open files" in _msg.lower():
+        if _is_spawn_failure(e):
             return {"status": "spawn_failed", "latency": latency,
                     "error": f"spawn failed: {_msg}"}
         return {"status": "fail", "latency": latency, "error": _msg}

@@ -25,6 +25,7 @@ agent-client-protocol。`hermes --version` 探测不出该缺失（不触碰 ACP
 对外契约不变：`_ensure_hermes_acp(cli) -> bool`，异常吞掉转 False，
 调用方（引擎注册）零改动。
 """
+import errno
 import json
 import os
 import re
@@ -75,6 +76,19 @@ ACP_FAIL = "fail"                          # 其他失败（非 JSON 输出/未�
 _SPAWN_FAILED_HINTS = ("too many open files", "errno 24", "errno: 24",
                        "cannot allocate memory", "resource temporarily unavailable")
 
+
+def _is_spawn_failure(exc: BaseException) -> bool:
+    """Issue #1982 R2：统一 spawn 失败判定口径（acp_bootstrap 与 agent.py 探针共用）。
+
+    资源类 errno（EMFILE/ENOMEM/EAGAIN）或文本特征命中即判定为 spawn 失败：
+    子进程根本没起来，属环境/资源故障，服务端不计入「探活连续失败」摘除。
+    """
+    if getattr(exc, "errno", None) in (errno.EMFILE, errno.ENOMEM, errno.EAGAIN):
+        return True
+    _text = f"{type(exc).__name__}: {exc}".lower()
+    return any(k in _text for k in _SPAWN_FAILED_HINTS)
+
+
 _NO_SUBCOMMAND_HINTS = ("unrecognized arguments", "unknown command",
                         "invalid choice", "no such option")
 _DEPS_MISSING_HINTS = ("modulenotfounderror", "importerror", "no module named",
@@ -120,8 +134,7 @@ def _acp_probe_detailed(cli: str) -> dict:
                                 text=True)
     except OSError as e:
         err = f"{type(e).__name__}: {e}"[:300]
-        low = err.lower()
-        if getattr(e, "errno", None) == 24 or any(k in low for k in _SPAWN_FAILED_HINTS):
+        if _is_spawn_failure(e):
             out.update(status=ACP_SPAWN_FAILED, reason=ACP_SPAWN_FAILED, error=err)
         else:
             out.update(status=ACP_FAIL, reason=ACP_FAIL, error=err)
