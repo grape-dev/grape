@@ -208,8 +208,11 @@ Health probes disable tools and session persistence, use a temporary directory a
 60-second timeout, and consume a small model request under the existing probe schedule.
 
 If the CLI reports `ProviderError` with HTTP 403 and `model is not enabled for
-codingplan`, the request reached plan/model validation but the selected model is unavailable for that account's
-plan. Select an enabled model in the CLI or set both overrides in the environment of
+codingplan`, the selected model is unavailable. Check the current model catalog first:
+local configuration can retain a retired model ID, so this response alone does not
+establish a login or subscription problem. The retired `deepseek-flash` ID remained in
+the local defaults during validation; selecting a current model resolved the failure.
+Select an available model in the CLI or set both overrides in the environment of
 the Grape server/worker that executes the task, then restart that process. For example,
 the following pair passed a real Grape coding task with CLI 5.2.5; availability depends
 on your account, so this is an example rather than a new default:
