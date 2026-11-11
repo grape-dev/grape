@@ -20,6 +20,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -531,6 +532,44 @@ def _hook_root() -> str:
     return root
 
 
+_HOOK_CODE_MODULE_RE = re.compile(
+    r"spec_from_file_location\('grape_branch_guard',\s*(\"(?:[^\"\\]|\\.)*\")\)")
+
+
+def _existing_hook_usable(existing: str, repo_key: str) -> bool:
+    """版本指纹命中后仍校验钩子内固化的运行时路径是否可用（Issue #2028）。
+
+    钩子把解释器绝对路径、守卫模块路径与 repo_key 烧进脚本；解释器升级/目录搬迁后
+    旧路径失效会让钩子以 127 退出 → git 拒绝所有 push（fail-closed），fail-open
+    无从执行。任一项失效即返回 False，触发重写自愈。
+    """
+    try:
+        for line in existing.splitlines():
+            if " -c " not in line:
+                continue
+            tokens = shlex.split(line)
+            if "-c" not in tokens:
+                continue
+            i = tokens.index("-c")
+            interpreter = tokens[0] if tokens else ""
+            code = tokens[i + 1] if len(tokens) > i + 1 else ""
+            baked_repo_key = tokens[i + 2] if len(tokens) > i + 2 else ""
+            if not interpreter or not os.path.isfile(interpreter):
+                return False
+            m = _HOOK_CODE_MODULE_RE.search(code)
+            if not m:
+                return False
+            module_path = json.loads(m.group(1))
+            if not module_path or not os.path.isfile(module_path):
+                return False
+            if baked_repo_key != repo_key:
+                return False
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _hook_entry_code(root: str, module_path: str) -> str:
     """生成钩子内联 Python 代码：加载守卫模块并执行 hook_main。
 
@@ -604,8 +643,12 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
                         os.remove(preserved)
                     os.replace(hook_path, preserved)
                 elif HOOK_VERSION_LINE in existing:
-                    # 存量钩子已是当前模板版本：幂等跳过重写。
-                    return True
+                    # 存量钩子已是当前模板版本：再校验钩子内固化的解释器/模块路径/
+                    # repo_key 是否仍可用（Issue #2028：解释器升级、目录搬迁后旧路径
+                    # 失效会让钩子 127 退出 → 所有 push 被 git 拒绝，fail-closed），
+                    # 任一失效即落到下方重写逻辑自愈；全部可用才幂等跳过。
+                    if _existing_hook_usable(existing, repo_key):
+                        return True
             except Exception:
                 pass
         root = _hook_root()
@@ -660,10 +703,6 @@ def _hook_main(argv: list | None = None) -> int:
     获取租约、查 PR/漂移并在全部通过后记录 local sha。返回 0=放行；1=阻断
     （stderr 提示 + 任务日志告警双通道）。查询异常 fail-open。
     """
-    missing = _missing_hook_deps()
-    if missing:
-        _fail_open("branch guard dependency missing: " + "; ".join(missing))
-        return 0
     args = argv if argv is not None else sys.argv[1:]
     repo_key = args[0] if len(args) > 0 else ""
     if not repo_key:
@@ -689,6 +728,13 @@ def _hook_main(argv: list | None = None) -> int:
             remote_sha = ""
         refs.append((pushed, local_sha, remote_sha))
     if not refs:
+        return 0
+
+    # 依赖自检放在快路径（tag 推送/删分支/空 stdin）之后：#993 R8 的快路径不触发
+    # config 链，自检的 import 开销只在确有分支要判定时才支付（Issue #2028 复审）。
+    missing = _missing_hook_deps()
+    if missing:
+        _fail_open("branch guard dependency missing: " + "; ".join(missing))
         return 0
 
     held: list[str] = []
@@ -723,7 +769,18 @@ def _hook_main(argv: list | None = None) -> int:
         return 0
     finally:
         for pushed in held:
-            release_branch_lease(repo_key, pushed)
+            try:
+                release_branch_lease(repo_key, pushed)
+            except Exception as e:
+                # Issue #2028：释放租约的 DB 异常不得覆盖待返回的退出码——真实拦截
+                # （return 1）若被 finally 异常顶掉，会被 hook_main 的 fail-open 兜底
+                # 翻转成放行。这里只告警，不改变既有判定结果。
+                try:
+                    log.warning(f"branch guard release lease failed {repo_key}:{pushed}: {e}")
+                except Exception:
+                    pass
+                sys.stderr.write(f"\n[branch-guard] WARNING release lease failed "
+                                 f"{pushed}: {e}\n")
 
 
 def _block(log_message: str, user_message: str) -> None:

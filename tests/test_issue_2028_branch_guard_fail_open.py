@@ -129,6 +129,24 @@ def test_hook_main_still_fail_closed_on_real_block(monkeypatch, capsys):
     assert "PR #42" in err
 
 
+def test_hook_main_release_failure_keeps_block_verdict(monkeypatch, capsys):
+    """租约释放 DB 异常不得把已判定的阻断（return 1）翻转为 fail-open 放行。"""
+    monkeypatch.setattr(bg, "acquire_branch_lease", lambda *a, **k: {"ok": True})
+
+    def _boom_release(*a, **k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(bg, "release_branch_lease", _boom_release)
+    monkeypatch.setattr(bg, "_fetch_pr_state_via_grape",
+                        lambda *a, **k: {"state": "merged", "number": 42,
+                                         "base": "arch-weekly-11"})
+    monkeypatch.setattr(bg.sys, "stdin", io.StringIO(_ref_line()))
+    assert bg.hook_main([REPO_KEY]) == 1
+    err = capsys.readouterr().err
+    assert "release lease failed" in err
+    assert "database is locked" in err
+
+
 # ===================== 存量钩子版本升级 =====================
 
 class _R:
@@ -187,3 +205,61 @@ def test_install_is_idempotent_for_current_template(tmp_path):
     first = hook.read_text(encoding="utf-8")
     assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
     assert hook.read_text(encoding="utf-8") == first
+
+
+def _current_version_hook_with(content_replacements, base, seq={"n": 0}):
+    """构造「版本指纹命中但固化路径失效」的存量钩子内容。"""
+    seq["n"] += 1
+    repo = _init_repo(base / f"gen-{seq['n']}")
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
+    content = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+    for old, new in content_replacements:
+        assert old in content, old
+        content = content.replace(old, new)
+    return content
+
+
+def _write_stale_hook(tmp_path, stale):
+    """初始化临时 git 仓库并写入失效的当前版本钩子，返回 hooks 目录。"""
+    repo = _init_repo(tmp_path / "repo")
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / "pre-push").write_text(stale, encoding="utf-8")
+    return repo, hooks
+
+
+def test_install_rewrites_hook_when_interpreter_missing(tmp_path):
+    stale = _current_version_hook_with([
+        (sys.executable, "/nonexistent/venv/bin/python3.0"),
+    ], tmp_path)
+    repo, hooks = _write_stale_hook(tmp_path, stale)
+
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
+    content = (hooks / "pre-push").read_text(encoding="utf-8")
+    assert "/nonexistent/venv/bin/python3.0" not in content
+    assert sys.executable in content
+
+
+def test_install_rewrites_hook_when_module_path_missing(tmp_path):
+    missing_module = "/nonexistent/src/domains/runtime/engine/branch_guard.py"
+    stale = _current_version_hook_with([
+        (bg._hook_module_path(), missing_module),
+    ], tmp_path)
+    repo, hooks = _write_stale_hook(tmp_path, stale)
+
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
+    content = (hooks / "pre-push").read_text(encoding="utf-8")
+    assert missing_module not in content
+    assert bg._hook_module_path() in content
+
+
+def test_install_rewrites_hook_when_repo_key_changed(tmp_path):
+    stale = _current_version_hook_with([
+        (REPO_KEY, "gitcode:other/repo"),
+    ], tmp_path)
+    repo, hooks = _write_stale_hook(tmp_path, stale)
+
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
+    content = (hooks / "pre-push").read_text(encoding="utf-8")
+    assert "gitcode:other/repo" not in content
+    assert REPO_KEY in content
