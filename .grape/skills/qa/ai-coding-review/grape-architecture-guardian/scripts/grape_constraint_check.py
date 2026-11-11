@@ -131,21 +131,21 @@ def check_bare_delete(root: Path):
 def check_worker_manifest(root: Path):
     """Gate 1-5: Worker MANIFEST 是否包含必要文件。"""
     findings = []
-    wp = root / "src" / "infra" / "worker_package.py"
+    wp = root / "src" / "kernel" / "worker_package.py"
     if not wp.exists():
         return findings
     try:
         text = wp.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return findings
-    # Issue #2010: 原顶层模块迁入职责子包，MANIFEST 以目录条目覆盖
-    required = ["src/kernel/", "src/authn/", "src/infra/"]
+    # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/，MANIFEST 以目录条目覆盖
+    required = ["src/kernel/"]
     for req in required:
         if req not in text:
             findings.append({
                 "gate": "1-5",
                 "severity": "BLOCKED",
-                "file": "src/infra/worker_package.py",
+                "file": "src/kernel/worker_package.py",
                 "line": 0,
                 "issue": f"Worker MANIFEST 缺少 {req}",
                 "evidence": f"在 MANIFEST 列表中未找到 {req}",

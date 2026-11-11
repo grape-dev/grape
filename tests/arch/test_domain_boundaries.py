@@ -83,19 +83,19 @@ LEGACY_MODULE_TARGETS = {
     "src.repo_key": "src.kernel.repo_key",
     "src.repo_migrate": "src.kernel.repo_migrate",
     "src.scene_custom_env": "src.kernel.scene_custom_env",
-    "src.service_diagnostics": "src.infra.service_diagnostics",
-    "src.session_manager": "src.authn.session_manager",
-    "src.token_resolver": "src.authn.token_resolver",
-    "src.token_service": "src.authn.token_service",
-    "src.worker_package": "src.infra.worker_package",
+    "src.service_diagnostics": "src.kernel.service_diagnostics",
+    "src.session_manager": "src.kernel.session_manager",
+    "src.token_resolver": "src.kernel.token_resolver",
+    "src.token_service": "src.kernel.token_service",
+    "src.worker_package": "src.kernel.worker_package",
 }
 
 
 def test_top_level_module_shims_still_work():
     """Thin module-level compat shims kept for external callers.
 
-    Issue #2010 把顶层模块迁入 src/repos、src/authn、src/help、src/infra，
-    旧路径（src.config、src.lock 等）由 src/__init__.py 的懒加载别名解析，
+    Issue #2010 的 canonical 实现全部落在 src/kernel，旧路径（src.config、
+    src.lock 等）由 src/__init__.py 的懒加载别名一跳解析，
     语义等价：别名指向同一个模块对象（monkeypatch 仍然有效）。
     """
     import importlib

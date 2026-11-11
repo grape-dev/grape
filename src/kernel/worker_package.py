@@ -36,12 +36,9 @@ MANIFEST = [
     # 历史导入路径 src.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
-    # Issue #2010: 原顶层模块已按职责迁入子包；旧路径（src.config 等）由
-    # src/__init__.py 的兼容别名解析到新位置，整目录打包以覆盖 worker 懒加载模块。
-    "src/infra/",
-    "src/repos/",
-    "src/authn/",
-    "src/help/",
+    # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/（旧路径
+    # src.config 等由 src/__init__.py 的别名一跳解析到该目录），故 "src/kernel/"
+    # 这一条即覆盖全部 19 个历史路径；首轮引入的中间子包目录条目已移除。
     "src/domains/mgmt/user/__init__.py",
     "src/domains/mgmt/user/db.py",
     "src/domains/mgmt/auth/",

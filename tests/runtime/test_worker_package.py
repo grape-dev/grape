@@ -40,7 +40,7 @@ class TestWorkerPackage:
         # 必须包含 VERSION / SHA256SUMS / 关键运行模块
         assert "grape-worker/VERSION" in names
         assert "grape-worker/SHA256SUMS" in names
-        assert "grape-worker/src/infra/config.py" in names  # Issue #2010: 顶层迁入 src/infra
+        assert "grape-worker/src/kernel/config.py" in names  # Issue #2010: 顶层模块的 canonical 实现
         assert "grape-worker/src/domains/runtime/engine/agent.py" in names
         assert "grape-worker/src/api/merge_gate.py" in names
         assert "grape-worker/src/domains/runtime/engine/worktree_guard.py" in names
@@ -89,7 +89,7 @@ class TestWorkerPackage:
         # 无 git 环境时版本指纹 = manifest 内容 sha256 指纹；内容变化触发指纹变化。
         # （mtime 不参与指纹——内容不变不应重建包，原断言 utime 触发指纹变化是错的）
         m1 = wp._manifest_version()
-        cf = os.path.join(wp.ROOT, "src", "infra", "config.py")  # Issue #2010
+        cf = os.path.join(wp.ROOT, "src", "kernel", "config.py")  # Issue #2010: canonical 实现
         with open(cf, "r", encoding="utf-8") as f:
             original = f.read()
         try:
@@ -114,7 +114,7 @@ class TestWorkerPackage:
         """import 闭包守卫：包解压后必须在干净子进程里可 import（防 MANIFEST 漏文件）。
 
         背景（2026-10-14 五台 worker 心跳全断事故）：8908cadb1 给 src/config.py（Issue #2010
-        后为 src/infra/config.py）加了
+        后为 src/kernel/config.py）加了
         顶层 ``from src.domains.mgmt.auth.security_config import ...``，config.py 在 worker 包里但
         src/domains/mgmt/auth/ 不在 → runtime-agent 启动即 ModuleNotFoundError，systemd 无限重启。
         当时的 test_build_package_contents 只防"多打文件"（服务端泄露），不防"漏打
@@ -129,7 +129,7 @@ class TestWorkerPackage:
         with tarfile.open(p) as tf:
             tf.extractall(tmp_path, filter="data")
         pkg_root = os.path.join(str(tmp_path), "grape-worker")
-        assert os.path.isfile(os.path.join(pkg_root, "src", "infra", "config.py"))
+        assert os.path.isfile(os.path.join(pkg_root, "src", "kernel", "config.py"))
 
         code = (
             "import sys\n"

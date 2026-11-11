@@ -38,18 +38,19 @@ DOMAINS = "src/domains"
 DOMAIN_NAMES = ("mgmt", "runtime", "insight", "contracts")
 
 # Legacy top-level module paths (Issue #699 thin compat shims). Issue #2010
-# moved these modules into src/repos, src/authn, src/help and src/infra, and
-# src/__init__.py resolves the old names through lazy aliases. They stay
-# forbidden inside kernel/domains so internal code always targets canonical
-# modules; every legacy *directory* shim (src/auth, src/user, src/runtime,
-# src/agent, src/im, src/vcs, src/storage, src/observability, src/admin,
-# src/project_info, src/api/routes/*) remains removed.
+# landed the canonical implementations in src/kernel/ and src/__init__.py
+# resolves the old names through lazy aliases straight to those modules (no
+# intermediate subpackage hop). They stay forbidden inside kernel/domains so
+# internal code always targets canonical modules; every legacy *directory*
+# shim (src/auth, src/user, src/runtime, src/agent, src/im, src/vcs,
+# src/storage, src/observability, src/admin, src/project_info,
+# src/api/routes/*) remains removed.
 LEGACY_SHIM_PREFIXES = (
     "src.config", "src.session_manager", "src.lock", "src.repo_key", "src.repo",
     "src.repo_cleanup", "src.repo_migrate", "src.mysql_compat", "src.token_service",
     "src.token_resolver", "src.prompt_builder", "src.worker_package", "src.localfs",
     "src.outbound_ledger", "src.scene_custom_env", "src.featured_order",
-    "src.help_docs_sync", "src.help_page_gen",
+    "src.help_docs_sync", "src.help_page_gen", "src.service_diagnostics",
     "src.api.event_pipeline", "src.api.jwt_utils", "src.api.auth_token",
 )
 

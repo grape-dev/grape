@@ -245,7 +245,7 @@ class TestServiceDiagnosticsModule:
         assert gw.call_count == 1
 
     def test_candidates_live_in_shared_diagnostics_module(self):
-        from src.infra.service_diagnostics import (
+        from src.kernel.service_diagnostics import (
             format_base_url_candidates,
             service_for_endpoint,
         )

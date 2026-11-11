@@ -1495,7 +1495,7 @@ def runtime_worker_package_public():
     包内仅含 worker 运行代码（无任何敏感信息，凭据由安装命令 --token 注入），
     供「凭据申请页一键安装命令」直接 curl 下载：
       curl -fsSL <server>/api/runtime/grape-worker.tar.gz -o grape-worker.tar.gz
-    首次请求动态打包 + 缓存（代码变更自动重建，见 src/infra/worker_package.py）。
+    首次请求动态打包 + 缓存（代码变更自动重建，见 src/kernel/worker_package.py）。
 
     并发限制：同时下载不超过 PKG_DOWNLOAD_MAX_CONCURRENT（默认 3），
     超出返回 429 让 worker 重试。

@@ -495,7 +495,7 @@ class TestDegradedModuleCandidates:
         import src.project_info.builder as b
         monkeypatch.setattr(b, "_git_tree_paths",
                             lambda repo_key: ["src", "scripts", "README.md",
-                                              "src/infra/config.py", "src/api", "src/infra/worker_package.py"])
+                                              "src/kernel/config.py", "src/api", "src/kernel/worker_package.py"])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
         from src.kernel.repo_key import workspace_repo_dir
@@ -503,7 +503,7 @@ class TestDegradedModuleCandidates:
         graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
         assert "module candidate" in graph
         assert "src/" in graph
-        assert "src/infra/config.py" in graph          # Key Files depth-2 展开非 N/A
+        assert "src/kernel/config.py" in graph         # Key Files depth-2 展开非 N/A
         assert "inferred" in graph               # 候选标注为推断
         assert "（降级：来自 git tree 的路径候选" in graph
         meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))

@@ -85,7 +85,7 @@ def pack_backend(ts):
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
     # help/ 帮助文档源目录（usage + api + reference + developer markdown）
-    # ⚠️ 必须打入：服务重启时 src/help_page_gen.py 依据 help/ 渲染 src/api/static/help.html；
+    # ⚠️ 必须打入：服务重启时 src/kernel/help_page_gen.py 依据 help/ 渲染 src/api/static/help.html；
     #    缺失则升级后文档无法再生成（一直用渲染旧内容的 help.html，升级总缺新文档的根因，
     #    2026-10-12 修复）。openapi.json 生成物已被 _tar_filter 过滤。
     help_dir = os.path.join(ROOT, "help")
@@ -305,7 +305,7 @@ def pack_tools(ts):
     out = os.path.join(OUT_DIR, f"staging/tools/grape-toolkit-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
-    # worker 运行闭包（与 src/infra/worker_package.py MANIFEST 一致）
+    # worker 运行闭包（与 src/kernel/worker_package.py MANIFEST 一致）
     manifest_files = [
         "src/__init__.py", "src/domains/mgmt/user/__init__.py", "src/domains/mgmt/user/db.py",
         "src/api/__init__.py", "src/api/routing.py", "src/api/time_utils.py",
@@ -317,9 +317,9 @@ def pack_tools(ts):
         if os.path.isfile(p):
             items.append((p, f))
     # 整目录
-    # Issue #2010: 原顶层模块迁入职责子包，按目录整包（与 worker MANIFEST 一致）
-    for d in ["src/infra", "src/repos", "src/authn", "src/help",
-              "src/domains/runtime/agents", "src/domains/runtime/engine"]:
+    # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/，旧路径（src.config 等）
+    # 由 src/__init__.py 的别名一跳解析到这里；与 worker MANIFEST 目录粒度一致。
+    for d in ["src/kernel", "src/domains/runtime/agents", "src/domains/runtime/engine"]:
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
             items.append((p, d))

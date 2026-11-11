@@ -542,14 +542,14 @@ def test_worker_manifest_covers_transient_retry_deps():
     entries = set(re.findall(r'"(src/[^"]+)"', manifest_src))
     deps = [
         "src/domains/runtime/engine/transient_retry.py",   # 本体（经目录条目或显式）
-        "src/infra/config.py",                              # Issue #2010: 原 src/config.py
-        "src/authn/session_manager.py",                     # Issue #2010: 原 src/session_manager.py
+        "src/kernel/config.py",                             # Issue #2010: 原 src/config.py
+        "src/kernel/session_manager.py",                    # Issue #2010: 原 src/session_manager.py
         "src/api/event_store.py",
-        "src/authn/token_service.py",                       # Issue #2010: 原 src/token_service.py
+        "src/kernel/token_service.py",                      # Issue #2010: 原 src/token_service.py
     ]
 
     def _covered(target: str) -> bool:
-        """显式条目命中，或被某个目录条目（如 src/infra/）覆盖。"""
+        """显式条目命中，或被某个目录条目（如 src/kernel/）覆盖。"""
         if target in entries:
             return True
         return any(e.endswith("/") and target.startswith(e) for e in entries)

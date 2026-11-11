@@ -288,12 +288,15 @@ class TestSuppressionLedger:
 # =====================================================================
 
 class TestCallSitesExplicit:
+    # 扫描对象必须是 canonical 实现文件：Issue #699 把 event_pipeline /
+    # direct_executor / service 迁入 src.domains.*，Issue #2010 把 token_resolver
+    # 的 canonical 实现落在 src/kernel/；旧顶层路径只剩别名，扫别名文件恒为 0 个调用点。
     FILES = [
-        "src/api/event_pipeline.py",
-        "src/runtime/direct_executor.py",
-        "src/runtime/service.py",
+        "src/domains/runtime/pipeline/event_pipeline.py",
+        "src/domains/runtime/engine/direct_executor.py",
+        "src/domains/runtime/engine/service.py",
         "src/api/pr_merged_sre_retry.py",
-        "src/authn/token_resolver.py",
+        "src/kernel/token_resolver.py",
     ]
     NAMES = {"_post_result_to_issue", "_post_result_to_pr"}
 
