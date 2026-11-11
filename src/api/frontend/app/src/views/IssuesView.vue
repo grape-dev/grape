@@ -158,7 +158,7 @@
 
       <!-- ═══ 列表模式：左列表 + 右详情 ═══ -->
       <div v-if="taskView === 'list'" class="tsk-layout isk-layout">
-        <div class="tsk-list isk-list">
+        <div ref="listScrollEl" class="tsk-list isk-list">
           <template v-if="pageRows.length">
             <div
               v-for="tk in pageRows"
@@ -196,8 +196,17 @@
             <p>{{ t('empty.no_tasks_desc') }}</p>
           </div>
           <div style="flex: 1"></div>
-          <!-- 分页 -->
-          <div v-if="totalPages > 1" class="isk-pager">
+          <!-- 分屏：尾部哨兵（IntersectionObserver 触底续拉；has_more=false 收尾） -->
+          <div v-if="serverPagedView" ref="listSentinelEl" class="isk-sentinel">
+            <span v-if="tasksAppendLoading || tasksLoading">{{ tc('loading') }}</span>
+            <span v-else-if="tasksHasMore" @click="loadMoreList">↓ {{ t('load_more') }}</span>
+            <span v-else class="isk-pager-sum"
+              >{{ t('tab.all') }} {{ filtered.length }}
+              <template v-if="tasksTotal !== null">/ {{ tasksTotal }}</template></span
+            >
+          </div>
+          <!-- 分页（我的需求：全量拉取后本地切页） -->
+          <div v-else-if="totalPages > 1" class="isk-pager">
             <button class="tsk-btn tsk-btn-ghost" :disabled="page <= 1" @click="prevPage">‹</button>
             <template v-for="pn in pageNums" :key="pn">
               <span v-if="pn === '…'" class="isk-ellipsis">…</span>
@@ -341,9 +350,9 @@
               :style="{ background: col.color, boxShadow: '0 0 6px ' + col.color + '40' }"
             ></span>
             <span class="isk-board-name">{{ col.lbl }}</span>
-            <span class="isk-board-cnt">{{ boardGrouped[col.k].length }}</span>
+            <span class="isk-board-cnt">{{ boardColCount(col.k) }}</span>
           </div>
-          <div class="isk-board-body">
+          <div class="isk-board-body" @scroll.passive="onBoardScroll(col.k, $event)">
             <div v-if="!boardGrouped[col.k].length" class="isk-board-empty">
               {{ t('empty.no_tasks_desc') }}
             </div>
@@ -372,6 +381,14 @@
                   <span>{{ (tk.created_at || '').substring(5, 10) }}</span>
                 </div>
               </div>
+            </div>
+            <!-- 列底：分屏提示（仅「仓库全部」看板；列内触底加载该列下一页） -->
+            <div v-if="boardPagedView" class="isk-board-foot">
+              <span v-if="boardCursorOf(col.k).loading">{{ tc('loading') }}</span>
+              <span v-else-if="boardCursorOf(col.k).hasMore">↓ {{ t('load_more') }}</span>
+              <span v-else-if="boardGrouped[col.k].length"
+                >— {{ t('tab.all') }} {{ boardGrouped[col.k].length }} —</span
+              >
             </div>
           </div>
         </div>
@@ -635,20 +652,39 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 
 const G = globalThis
 
+// Issue #1740：「我的需求 / 仓库全部」视图模式持久化（刷新后保持上次选择）
+const VIEW_MODE_KEY = 'tasks_view_mode'
+function loadViewMode() {
+  try {
+    const saved = localStorage.getItem(VIEW_MODE_KEY)
+    if (saved === 'mine' || saved === 'repo_all') return saved
+  } catch (e) {
+    /* localStorage 不可用 → 回退默认 */
+  }
+  return 'mine'
+}
+function saveViewMode(mode) {
+  try {
+    if (mode === 'mine' || mode === 'repo_all') localStorage.setItem(VIEW_MODE_KEY, mode)
+  } catch (e) {
+    /* ignore */
+  }
+}
+
 const loaded = ref(false)
 const props = defineProps({ initialParam: { type: [String, Number], default: null } })
-const tasks = ref([])
+const tasks = ref([]) // Issue #926：已加载卡片缓存（分屏增量追加，不是全量）
 const sel = ref(null) // 列表模式选中
 const detailView = ref(null) // 全屏详情（看板/深链）
 const query = ref('')
 const queryDraft = ref('')
-const page = ref(1)
+const page = ref(1) // 客户端分页页码（仅「我的需求」视图，全量拉取后本地切页）
 const taskView = ref('board') // 'board' | 'list'（老代码默认 board）
-const viewMode = ref('mine') // 'mine' | 'repo_all'
+const viewMode = ref(loadViewMode()) // 'mine' | 'repo_all'
 const sortOrder = ref('desc')
 const filterStatuses = ref([])
 const filterAssignees = ref([])
@@ -664,7 +700,18 @@ const deployEditing = ref(false)
 const deployDraft = ref('')
 let deployLongPressTimer = null
 let pollTimer = null
-const PER_PAGE = 15
+const PER_PAGE = 15 // 「我的需求」客户端分页（全量拉取后本地切页）
+const SERVER_PAGE = 30 // Issue #926：服务端分屏每屏条数（滚动追加）
+// Issue #926：服务端分页状态（仅「仓库全部」视图生效；我的需求条数有限，保持全量拉取）
+const tasksHasMore = ref(false) // 服务端 has_more，false 时停止滚动追加
+const tasksTotal = ref(null) // 服务端 total；null = 未给精确值（q 模式省 COUNT）
+const tasksLoading = ref(false) // 分屏请求在途（列表尾 sentinel 展示「加载中」）
+const tasksAppendLoading = ref(false) // 滚动追加在途（防并发重复拉同屏）
+let taskReqSeq = 0 // Issue #2984d027a：请求序号——重置类请求让旧在途响应失效
+let taskServerPage = 1 // 下一次要拉的服务端页码（成功后才推进）
+const listScrollEl = ref(null) // 列表滚动容器（IntersectionObserver 的 root）
+const listSentinelEl = ref(null) // 列表尾部哨兵
+let listObserver = null
 // 深链/场景跳转：从 window 实时读（onMounted 已在 loadTasks 前设置，dashboard.js 场景跳转先设再 nav）
 
 // ═══════════ I18N ═══════════
@@ -691,6 +738,9 @@ const TASK_DEFAULTS = {
   'empty.select_task_title': '选择一个需求',
   'empty.select_task_desc': '从左侧列表选择需求查看详情',
   'pager.summary': '共 {total} 条 · 第 {page}/{pages} 页',
+  'tab.all': '全部',
+  load_more: '滚动加载更多',
+  load_failed: '加载失败：{msg}',
   'status.tag_pending': '待处理',
   'status.tag_processing': '处理中',
   'status.tag_awaiting_input': '待澄清',
@@ -981,12 +1031,26 @@ const filtered = computed(() => {
   }
   return list
 })
+// Issue #926：分页模式判定
+// - 列表分屏：「仓库全部」+ 列表视图（服务端 per_page 滚动追加）
+// - 看板按列分屏：「仓库全部」+ 看板视图（每列一条游标，各拉各的）
+// 「我的需求」条数有限，保持全量拉取 + 客户端分页（与老口径一致）
+function repoOf() {
+  return currentRepo()
+}
+const serverPagedView = computed(
+  () => viewMode.value === 'repo_all' && taskView.value === 'list' && !!repoOf()
+)
+const boardPagedView = computed(
+  () => viewMode.value === 'repo_all' && taskView.value === 'board' && !!repoOf()
+)
 const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / PER_PAGE)))
 function clampPage() {
   if (page.value > totalPages.value) page.value = 1
   if (page.value < 1) page.value = 1
 }
 const pageRows = computed(() => {
+  if (serverPagedView.value) return filtered.value // 服务端已按屏加载，本地不再切页
   const s = (page.value - 1) * PER_PAGE
   return filtered.value.slice(s, s + PER_PAGE)
 })
@@ -1033,6 +1097,8 @@ function toggleFilterStatus(k) {
   if (i >= 0) filterStatuses.value.splice(i, 1)
   else filterStatuses.value.push(k)
   page.value = 1
+  // Issue #926：状态筛选映射 statuses= 走服务端过滤 → 重置回第 1 屏重拉
+  if (repoOf() && viewMode.value === 'repo_all') resetAndLoad()
 }
 function toggleFilterAssignee(a) {
   const i = filterAssignees.value.indexOf(a)
@@ -1049,10 +1115,14 @@ function clearAssigneeFilter() {
 function clearStatusFilter() {
   filterStatuses.value = []
   page.value = 1
+  if (repoOf() && viewMode.value === 'repo_all') resetAndLoad()
 }
 function switchTaskView(k) {
   taskView.value = k
   viewPopover.value = false
+  page.value = 1
+  // Issue #1077-F：板↔列表切换 → 分页链路必须从头拉（列表走全局分屏，看板走列游标）
+  if (repoOf() && viewMode.value === 'repo_all') resetAndLoad()
 }
 function prevPage() {
   page.value--
@@ -1065,10 +1135,13 @@ function nextPage() {
 function applySearch() {
   query.value = queryDraft.value
   page.value = 1
+  // Issue #926：分屏列表带 q= 走服务端搜索
+  if (serverPagedView.value) resetAndLoad()
 }
 function switchViewMode(mode) {
   if (viewMode.value === mode) return
   viewMode.value = mode
+  saveViewMode(mode) // Issue #1740：记住上次视图模式
   sel.value = null
   page.value = 1
   filterStatuses.value = []
@@ -1103,6 +1176,134 @@ const boardGrouped = computed(() => {
   })
   return grouped
 })
+
+// ═══════════ Issue #1077-F：看板按列独立分页 ═══════════
+// 每列一条游标，首屏 30 条；列内触底只拉该列下一页（不靠整页哨兵）。
+// 约束：服务端只能按 issue.status 过滤，而看板列是 status+stage 的派生映射，
+// 所以「待处理」「进行中」共享同一游标（statuses=active,processing），
+// 行最终落哪一列仍由 mapStatusL 决定（同一行不会重复渲染）。
+const BOARD_CURSOR_OF_COL = {
+  pending: 'active_flow',
+  in_progress: 'active_flow',
+  awaiting_input: 'awaiting_input',
+  pending_review: 'pending_review',
+  done: 'done',
+  cancelled: 'cancelled',
+}
+const BOARD_CURSOR_STATUSES = {
+  active_flow: 'active,processing',
+  awaiting_input: 'awaiting_input',
+  pending_review: 'pending_review',
+  done: 'completed',
+  cancelled: 'cancelled',
+}
+const colCursor = reactive({}) // cursor -> {page, hasMore, loading, total, seq}
+function resetBoardCursors() {
+  Object.keys(BOARD_CURSOR_STATUSES).forEach((k) => {
+    colCursor[k] = { page: 1, hasMore: true, loading: false, total: null, seq: 0 }
+  })
+  tasks.value = []
+  sel.value = null
+  tasksHasMore.value = false
+  tasksTotal.value = null
+  taskServerPage = 1
+  G.window._tasksById = {}
+}
+resetBoardCursors() // 先建空游标：看板分屏关闭时模板也能安全读取
+function boardCursorOf(colKey) {
+  return colCursor[BOARD_CURSOR_OF_COL[colKey]] || { page: 1, hasMore: false, loading: false }
+}
+function mergeBoardItems(items) {
+  const byId = {}
+  tasks.value.forEach((t) => {
+    byId[t.id] = t
+  })
+  items.forEach((t) => {
+    if (byId[t.id]) Object.assign(byId[t.id], t)
+    else tasks.value.push(t)
+  })
+  if (sel.value) {
+    const upd = tasks.value.find((t) => t.id === sel.value.id)
+    sel.value = upd || null
+  }
+  if (detailView.value) {
+    const upd = tasks.value.find((t) => t.id === detailView.value.id)
+    if (upd) detailView.value = upd
+  }
+}
+// 取某游标的一页（merge=true 只刷新第 1 屏，用于轮询对账）
+function boardFetch(key, opts) {
+  const repo = repoOf()
+  const cur = colCursor[key]
+  if (!repo || !cur) return Promise.resolve()
+  const merge = !!(opts && opts.merge)
+  if (cur.loading) return Promise.resolve()
+  if (!merge && !cur.hasMore) return Promise.resolve()
+  cur.loading = true
+  const seq = ++cur.seq
+  const page = merge ? 1 : cur.page
+  let url =
+    '/issues/' +
+    repo.owner +
+    '/' +
+    repo.name +
+    '?sort_order=' +
+    sortOrder.value +
+    '&mode=time&per_page=' +
+    SERVER_PAGE +
+    '&page=' +
+    page +
+    '&statuses=' +
+    encodeURIComponent(BOARD_CURSOR_STATUSES[key])
+  if (query.value) url += '&q=' + encodeURIComponent(query.value)
+  if (filterAssignees.value.length)
+    url += '&assignees=' + encodeURIComponent(filterAssignees.value.join(','))
+  return API()
+    .get(url)
+    .then(function (d) {
+      if (seq !== cur.seq) return // 已被本列更新的请求取代
+      cur.loading = false
+      const items = d.issues || d.tasks || []
+      if (!merge) cur.page = page + 1
+      cur.hasMore = !!d.has_more
+      cur.total = d.total === null || d.total === undefined ? null : d.total
+      mergeBoardItems(items)
+      loaded.value = true
+      loadError.value = ''
+    })
+    .catch(function (e) {
+      if (seq !== cur.seq) return
+      cur.loading = false
+      if (e && e.name === 'AbortError' && e.silent) return
+      if (G.window._currentView !== 'tasks') return
+      loadError.value = t('load_failed', { msg: e.message })
+      loaded.value = true
+    })
+}
+function loadBoardAll(opts) {
+  return Promise.all(Object.keys(BOARD_CURSOR_STATUSES).map((k) => boardFetch(k, opts)))
+}
+// 列内滚到接近底部 → 只加载该列所属游标的下一页
+function onBoardScroll(colKey, ev) {
+  if (!boardPagedView.value) return
+  const el = ev && ev.target
+  if (!el) return
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
+    boardFetch(BOARD_CURSOR_OF_COL[colKey])
+  }
+}
+// 列头计数：单列游标给「已加载/服务端总数」；共享游标（待处理+进行中）只给已加载数，
+// 因为一份 total 覆盖两列，直接展示会误导。
+function boardColCount(colKey) {
+  const loadedN = boardGrouped.value[colKey] ? boardGrouped.value[colKey].length : 0
+  if (!boardPagedView.value) return String(loadedN)
+  const key = BOARD_CURSOR_OF_COL[colKey]
+  const cur = colCursor[key]
+  const shared = boardCols.value.filter((c) => BOARD_CURSOR_OF_COL[c.k] === key).length > 1
+  if (shared || !cur || cur.total === null || cur.total === undefined) return String(loadedN)
+  return loadedN + '/' + cur.total
+}
+
 function isRunning(tk) {
   return (
     mapStatusL(tk) === 'in_progress' &&
@@ -2282,17 +2483,67 @@ function deployLongPressEnd() {
 }
 
 // ═══════════ 数据加载（loadTasks 等价，含深链/场景跳转链路） ═══════════
-function loadTasks() {
-  const repo = currentRepo()
+// Issue #926：分屏逐步加载——首屏 per_page=30，滚动触底按屏递增（append 按 id 去重合并）
+//   opts.append：列表滚动追加下一屏；opts.merge：轮询只拉第 1 屏做增量对账；缺省：重置回第 1 屏
+// Issue #2984d027a：重置类请求不再用 loading 闸门拦截（重复进页的第二发会被 nav 的 abort 吃掉 → 永久卡加载），
+//   改由 taskReqSeq 让最新一发胜出；只有滚动追加做并发去重。
+// 状态 → 服务端 issue.status 多值映射（statuses= 参数）；in_progress 下发 active+processing，
+//   服务端粗筛后仍由 filtered 按 stage 精筛（保持旧口径）。
+const TASK_STATUS_TO_API = {
+  pending: ['active'],
+  in_progress: ['active', 'processing'],
+  awaiting_input: ['awaiting_input'],
+  pending_review: ['pending_review'],
+  done: ['completed'],
+  cancelled: ['cancelled'],
+}
+// 重置回第 1 屏（筛选/搜索/板↔列表切换/换模式）：看板走列游标，列表走全局分屏
+function resetAndLoad() {
+  tasksHasMore.value = false
+  tasksTotal.value = null
+  taskServerPage = 1
+  return loadTasks()
+}
+function loadTasks(opts) {
+  const repo = repoOf()
   const repoKey = repo ? repo.repoKey || repo.fullName || '' : ''
   loadSortPref()
+  const append = !!(opts && opts.append)
+  const merge = !!(opts && opts.merge)
+  // 看板按列分屏：整体刷新一律走列游标重拉（各列各拉下一页）
+  if (!append && !merge && boardPagedView.value) {
+    resetBoardCursors()
+    return loadBoardAll()
+  }
+  if (append && tasksAppendLoading.value) return // 追加去重；重置请求一律放行
+  const seq = ++taskReqSeq
+  const reqPage = merge ? 1 : append ? taskServerPage : 1
+  // 「仓库全部」视图：服务端分页 + q/statuses 过滤；「我的需求」：条数有限，保持全量拉取
+  const usePaging = viewMode.value === 'repo_all' && !!repo
   let apiUrl
-  if (viewMode.value === 'repo_all' && repo) {
+  if (usePaging) {
+    const apiStatuses = [
+      ...new Set(
+        filterStatuses.value.reduce(function (acc, k) {
+          return acc.concat(TASK_STATUS_TO_API[k] || [])
+        }, [])
+      ),
+    ].join(',')
     apiUrl =
-      '/issues/' + repo.owner + '/' + repo.name + '?sort_order=' + sortOrder.value + '&mode=time'
-    if (filterAssignees.value.length) {
+      '/issues/' +
+      repo.owner +
+      '/' +
+      repo.name +
+      '?sort_order=' +
+      sortOrder.value +
+      '&mode=time&per_page=' +
+      SERVER_PAGE +
+      '&page=' +
+      reqPage
+    if (query.value) apiUrl += '&q=' + encodeURIComponent(query.value)
+    if (apiStatuses) apiUrl += '&statuses=' + encodeURIComponent(apiStatuses)
+    if (filterAssignees.value.length)
       apiUrl += '&assignees=' + encodeURIComponent(filterAssignees.value.join(','))
-    }
   } else {
     apiUrl =
       '/issues/mine?status=&repo_key=' +
@@ -2304,14 +2555,63 @@ function loadTasks() {
         ? '&assignees=' + encodeURIComponent(filterAssignees.value.join(','))
         : '')
   }
-  API()
+  if (append) {
+    tasksAppendLoading.value = true
+  } else tasksLoading.value = true
+  return API()
     .get(apiUrl)
     .then(function (d) {
-      if (G.window._currentView !== 'tasks') return // stale guard
-      tasks.value = d.issues || d.tasks || []
+      if (seq !== taskReqSeq) return // 已被更新的请求取代：loading 旗标归最新请求所有
+      if (G.window._currentView !== 'tasks') {
+        tasksLoading.value = false
+        tasksAppendLoading.value = false
+        return // stale guard
+      }
+      tasksAppendLoading.value = false
+      tasksLoading.value = false
+      const items = d.issues || d.tasks || []
+      if (append || merge) {
+        // 第 1 屏对账：未滚动时按第 1 屏清理已删除项（口径只覆盖已加载的第 1 屏）
+        if (merge && taskServerPage <= 2) {
+          const live = {}
+          items.forEach(function (t) {
+            live[t.id] = true
+          })
+          tasks.value = tasks.value.filter(function (t) {
+            return live[t.id]
+          })
+        }
+        // 按 id 去重合并：已有项原地更新字段（轮询不整表重排），新项尾部追加
+        const byId = {}
+        tasks.value.forEach(function (t) {
+          byId[t.id] = t
+        })
+        items.forEach(function (t) {
+          if (byId[t.id]) Object.assign(byId[t.id], t)
+          else tasks.value.push(t)
+        })
+      } else {
+        tasks.value = items
+      }
+      if (usePaging && d.page !== undefined) {
+        tasksTotal.value = d.total === null || d.total === undefined ? null : d.total
+        // 已滚动超过第 1 屏时，has_more 只能按已加载量对账（避免第 1 屏口径误停滚动）
+        const beyondFirst = taskServerPage > 2
+        tasksHasMore.value =
+          beyondFirst && (append || merge)
+            ? tasksTotal.value === null
+              ? !!d.has_more
+              : tasks.value.length < tasksTotal.value
+            : !!d.has_more
+        // 成功后才推进页码：失败不推进 → 重试不跳屏
+        if (!merge) taskServerPage = reqPage + 1
+      } else {
+        tasksTotal.value = items.length
+        tasksHasMore.value = false
+      }
       loaded.value = true
       loadError.value = ''
-      // Issue #175: 刷新选中指向新对象
+      // Issue #175: 刷新选中/详情指向新对象（旧引用字段已过时）
       if (sel.value) {
         const updated = tasks.value.find((tk) => tk.id === sel.value.id)
         sel.value = updated || null
@@ -2334,6 +2634,10 @@ function loadTasks() {
         if (match) {
           G.window._deeplinkIssueNumber = null
           openDetailFromBoard(match)
+        } else if (repo && (serverPagedView.value || viewMode.value === 'repo_all')) {
+          // Issue #926：分页后深链不再依赖全量已加载页 → 走详情接口直达
+          G.window._taskDetailFromScene = null
+          openDeeplinkDetailViaApi(repo, pinNum)
         } else if (fromScene && fromScene.latestSeq) {
           G.window._taskDetailFromScene = null
           app().nav('event', fromScene.latestSeq)
@@ -2351,8 +2655,16 @@ function loadTasks() {
         G.window._pendingTaskDetailId = null
         if (tasksById.value[pid]) openDetailFromBoard(tasksById.value[pid])
       }
+      if (append) {
+        // 空页兜底：服务端 has_more 与空页同时出现时停止续拉，避免空转请求
+        if (items.length === 0) tasksHasMore.value = false
+        setTimeout(maybeLoadMore, 80) // 追加后哨兵可能仍在视口内 → 主动续拉补满首屏
+      }
     })
     .catch(function (e) {
+      if (seq !== taskReqSeq) return // 已被更新的请求取代，静默丢弃
+      tasksAppendLoading.value = false
+      tasksLoading.value = false
       if (e.name === 'AbortError' && e.silent) return
       if (G.window._currentView !== 'tasks') return
       G.window._pendingTaskDetailId = null
@@ -2360,6 +2672,91 @@ function loadTasks() {
       loadError.value = t('load_failed', { msg: e.message })
       loaded.value = true
     })
+}
+
+// Issue #926：深链/待打开编号不在已加载分屏内 → 按详情接口构造卡片直达详情
+function openDeeplinkDetailViaApi(repo, issueNum) {
+  const dn = G.window._deeplinkIssueNumber
+  G.window._deeplinkIssueNumber = null
+  function giveUp() {
+    if (dn) app().showToast(t('deeplink_not_found', { n: dn }))
+  }
+  API()
+    .get('/issues/' + repo.owner + '/' + repo.name + '/' + issueNum)
+    .then(function (d) {
+      const card = {
+        id: d.issue_id,
+        issue_number: d.number,
+        number: d.number,
+        title: d.title || '',
+        status: d.task_status || 'active',
+        task_status: d.task_status || '',
+        stage: d.stage || '',
+        owner_agent: d.owner_agent || 'vod',
+        scene_id: d.scene_id || '',
+        assignee: d.assignee || '',
+        creator: d.creator || '',
+        is_subtask_mode: d.is_subtask_mode || 0,
+        parent_issue_id: d.parent_issue_id || '',
+        repo_key: repo.repoKey || repo.fullName || '',
+        created_at: '',
+        events_count: d.events_count || 0,
+        is_running: false,
+      }
+      if (card.id === null || card.id === undefined) {
+        // 详情无内部卡片行（纯 VCS 兜底）→ 无法进详情交互，回退列表 + 提示
+        giveUp()
+        return
+      }
+      G.window._tasksById = G.window._tasksById || {}
+      G.window._tasksById[card.id] = card
+      G.window._pendingTaskDetailId = null
+      openDetailFromBoard(card)
+    })
+    .catch(giveUp)
+}
+
+// Issue #926：列表滚动追加下一屏
+function loadMoreList() {
+  if (!serverPagedView.value) return
+  if (!tasksHasMore.value || tasksAppendLoading.value) return
+  loadTasks({ append: true })
+}
+// 哨兵可见性判定（IntersectionObserver 之外的兜底续拉；也用于首屏不满时自动补）
+function maybeLoadMore() {
+  if (!serverPagedView.value || !tasksHasMore.value || tasksAppendLoading.value) return
+  const sn = listSentinelEl.value
+  if (!sn) return
+  const sr = sn.getBoundingClientRect()
+  const el = listScrollEl.value
+  // 列表容器自身可滚动时用容器下沿判定，否则用视口下沿（老页面是整页滚动）
+  let bottom = window.innerHeight
+  if (el && el.scrollHeight > el.clientHeight + 4) {
+    bottom = el.getBoundingClientRect().bottom
+  }
+  if (sr.top <= bottom + 160) loadMoreList()
+}
+function setupListObserver() {
+  teardownListObserver()
+  if (typeof window === 'undefined' || !('IntersectionObserver' in window)) return
+  if (!listSentinelEl.value) return
+  const el = listScrollEl.value
+  const scrollable = !!(el && el.scrollHeight > el.clientHeight + 4)
+  listObserver = new window.IntersectionObserver(
+    function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) maybeLoadMore()
+      })
+    },
+    { root: scrollable ? el : null, rootMargin: '0px 0px 300px 0px', threshold: 0 }
+  )
+  listObserver.observe(listSentinelEl.value)
+}
+function teardownListObserver() {
+  if (listObserver) {
+    listObserver.disconnect()
+    listObserver = null
+  }
 }
 
 // ═══════════ 轮询（场景识别，30s） ═══════════
@@ -2373,7 +2770,10 @@ function startPoll() {
       )
     })
     if (needRefresh) {
-      loadTasks()
+      // Issue #926：分屏视图只刷新第 1 屏做增量对账，不重置已滚动加载的分屏
+      if (boardPagedView.value) loadBoardAll({ merge: true })
+      else if (serverPagedView.value) loadTasks({ merge: true })
+      else loadTasks()
     } else {
       clearInterval(pollTimer)
       pollTimer = null
@@ -2407,6 +2807,14 @@ G.window._backToTaskDetail = function (taskId) {
 G.window._jumpToNodeEvent = jumpToNodeEvent
 G.window._jumpToPipeline = jumpToPipePage
 
+// Issue #926：进入/离开列表分屏时挂载/卸载尾部哨兵观察器
+watch(serverPagedView, function () {
+  teardownListObserver()
+  nextTick(function () {
+    setupListObserver()
+  })
+})
+
 onMounted(function () {
   G.window._currentView = 'tasks' // renderTasks 入口契约（app.js 已设，防御性再设）
   // Issue #341: 纯数字 param 视为深链 issue_number
@@ -2427,6 +2835,7 @@ onMounted(function () {
 })
 onBeforeUnmount(function () {
   stopPoll()
+  teardownListObserver()
   if (deployLongPressTimer) clearTimeout(deployLongPressTimer)
 })
 </script>
@@ -2736,6 +3145,15 @@ onBeforeUnmount(function () {
   margin-left: 8px;
   font-size: 10px;
   color: var(--t3, #86868b);
+}
+/* Issue #926：列表尾部哨兵（滚动追加/收尾提示） */
+.isk-sentinel {
+  padding: 12px 8px 16px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--t3, #86868b);
+  cursor: pointer;
+  user-select: none;
 }
 /* PR 药丸 */
 .isk-pr-pill {
@@ -3154,6 +3572,13 @@ onBeforeUnmount(function () {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* Issue #1077-F：列底分屏提示 */
+.isk-board-foot {
+  padding: 8px 4px 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--t3, #86868b);
 }
 .isk-board-empty {
   padding: 24px 12px;
