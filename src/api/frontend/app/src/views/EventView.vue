@@ -617,6 +617,8 @@ function redispatchVisible(d) {
   const _created = d.created_at ? new Date(d.created_at).getTime() : 0
   return (
     d.status === 'failed' ||
+    // Issue #566：cancelled 与 failed 同样可重新派发
+    d.status === 'cancelled' ||
     ((d.status === 'running' || d.status === 'pending') &&
       ((_ts && Date.now() - _ts > 10 * 60 * 1000) ||
         (!_ts && _created && Date.now() - _created > 10 * 60 * 1000))) ||
@@ -632,18 +634,23 @@ const statusText = computed(() => {
       ? t('status_success')
       : d.status === 'failed'
         ? t('status_failed')
-        : d.status === 'pending'
-          ? t('status_pending') || '排队中'
-          : t('status_running_prefix') + d.status
+        : d.status === 'cancelled'
+          ? // Issue #566：cancelled 独立标签（此前被拼成「⏳ cancelled」）
+            t('status_cancelled') || '⊘ 已取消'
+          : d.status === 'pending'
+            ? t('status_pending') || '排队中'
+            : t('status_running_prefix') + d.status
   let html =
     '<span class="' +
     (d.status === 'completed'
       ? 'tgx'
       : d.status === 'failed'
         ? 'tr'
-        : d.status === 'pending'
-          ? ''
-          : 'ty') +
+        : d.status === 'cancelled'
+          ? 't3'
+          : d.status === 'pending'
+            ? ''
+            : 'ty') +
     '">' +
     esc(label) +
     '</span>'

@@ -179,7 +179,7 @@
                 </div>
                 <div class="tsk-r-meta">
                   ⏱ {{ fmtLocal(tk.created_at).substring(0, 16) }} · {{ bareRepo(tk.repo_key)
-                  }}{{ tk.assignee ? ' · 👤 ' + tk.assignee : '' }}
+                  }}{{ cardOwner(tk) ? ' · 👤 ' + cardOwner(tk) : '' }}
                 </div>
               </div>
               <span v-if="tk.is_pr_event" class="isk-pr-pill">PR</span>
@@ -230,6 +230,7 @@
         <div class="tsk-detail isk-detail">
           <template v-if="sel">
             <div v-html="detailCardHtml"></div>
+            <div v-html="reviewBannerHtml"></div>
             <div v-html="agentStatusCardHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
@@ -376,7 +377,7 @@
                 <p class="isk-bcard-title">{{ tk.title || '' }}</p>
                 <div class="isk-bcard-meta">
                   <span class="isk-ellipsis">{{
-                    tk.assignee ? '👤 ' + tk.assignee : bareRepo(tk.repo_key)
+                    cardOwner(tk) ? '👤 ' + cardOwner(tk) : bareRepo(tk.repo_key)
                   }}</span>
                   <span>{{ (tk.created_at || '').substring(5, 10) }}</span>
                 </div>
@@ -431,7 +432,7 @@
             <span>仓库</span><b>{{ bareRepo(detailView.repo_key) }}</b>
           </div>
           <div class="isk-row">
-            <span>触发者</span><b>{{ detailView.assignee || '—' }}</b>
+            <span>创建人</span><b>{{ detailView.creator || '—' }}</b>
           </div>
           <div class="isk-row">
             <span>触发时间</span><b>{{ fmtLocal(detailView.created_at).substring(0, 16) }}</b>
@@ -498,6 +499,7 @@
           </button>
         </div>
         <div v-html="detailCardHtml"></div>
+        <div v-html="reviewBannerHtml"></div>
         <div v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
           <div class="isk-card-tt">{{ td('attachments') }}</div>
@@ -594,6 +596,15 @@
             <div class="isk-fld">
               <label>
                 {{ t('create.desc_label') }} <span class="isk-required">*</span>
+                <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
+                <span
+                  class="isk-sync-title"
+                  role="button"
+                  :title="t('create.sync_title_to_desc')"
+                  :aria-label="t('create.sync_title_to_desc')"
+                  @click.prevent="syncTitleToDesc"
+                  >↧</span
+                >
                 <span class="isk-fld-hint">{{ t('create.desc_hint') }}</span>
                 <textarea
                   v-model="modal.desc"
@@ -780,6 +791,11 @@ const ISSUE_DEFAULTS = {
   'detail.status': '状态',
   'detail.issue_id': 'ID',
   'detail.assignee': '创建人',
+  'review_status.pending_review_hint': '需求待人工确认：阶段执行完成 ≠ 需求/生产发布完成',
+  'review_status.sre_pending': 'SRE 验收任务在途，尚无结论',
+  'review_status.sre_unavailable': '暂无 SRE 验收结论（无关联任务或结果不可读）',
+  'review_status.sre_task_ref': '验收任务',
+  'review_status.sre_result_title': 'SRE 验收结论',
   'detail.repo': '仓库',
   'detail.created_at': '创建时间',
   'detail.completed_at': '完成时间',
@@ -822,6 +838,13 @@ function vcsUrl(repoKey, path) {
 }
 function bareRepo(rk) {
   return String(rk || '').replace(/^(github|gitcode):/, '')
+}
+// Issue #805：卡片上展示的「人」——需求卡是创建人（creator），PR 伪卡是触发人（assignee）。
+// 回退链：creator → assignee，兼容旧库里 created_by 为空的行。
+function cardOwner(tk) {
+  if (!tk) return ''
+  if (tk.is_pr_event) return tk.assignee || tk.creator || ''
+  return tk.creator || tk.assignee || ''
 }
 function esc(s) {
   return String(s == null ? '' : s)
@@ -1006,7 +1029,8 @@ const filtered = computed(() => {
     list = list.filter((tk) => filterStatuses.value.includes(mapStatusL(tk)))
   }
   if (filterAssignees.value.length > 0) {
-    list = list.filter((tk) => filterAssignees.value.includes(tk.assignee))
+    // Issue #805：值域改为创建人（cardOwner），与后端 creators= 过滤同口径
+    list = list.filter((tk) => filterAssignees.value.includes(cardOwner(tk)))
   }
   if (query.value) {
     const q = query.value.toLowerCase().trim()
@@ -1019,6 +1043,7 @@ const filtered = computed(() => {
           String(tk.issue_number || ''),
           tk.repo_key || '',
           tk.assignee || '',
+          tk.creator || '',
           tk.scene_name || '',
           tk.status || '',
           tk.repo_display || '',
@@ -1081,7 +1106,7 @@ const statusOpts = computed(() => [
   { k: 'cancelled', lbl: STATUS_LABELS.value.cancelled },
 ])
 const assignees = computed(() =>
-  [...new Set(tasks.value.map((tk) => tk.assignee).filter(Boolean))].sort()
+  [...new Set(tasks.value.map((tk) => cardOwner(tk)).filter(Boolean))].sort()
 )
 const filterActive = computed(
   () => filterStatuses.value.length > 0 || filterAssignees.value.length > 0
@@ -1090,7 +1115,7 @@ function countStatus(k) {
   return tasks.value.filter((tk) => mapStatusL(tk) === k).length
 }
 function countAssignee(a) {
-  return tasks.value.filter((tk) => tk.assignee === a).length
+  return tasks.value.filter((tk) => cardOwner(tk) === a).length
 }
 function toggleFilterStatus(k) {
   const i = filterStatuses.value.indexOf(k)
@@ -1257,7 +1282,7 @@ function boardFetch(key, opts) {
     encodeURIComponent(BOARD_CURSOR_STATUSES[key])
   if (query.value) url += '&q=' + encodeURIComponent(query.value)
   if (filterAssignees.value.length)
-    url += '&assignees=' + encodeURIComponent(filterAssignees.value.join(','))
+    url += '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
   return API()
     .get(url)
     .then(function (d) {
@@ -1378,7 +1403,7 @@ const detailCardHtml = computed(() => {
       <div class="isk-card-tt">${esc(td('detail_title'))}</div>
       <div class="isk-row"><span>${esc(td('detail.status'))}</span><b style="color:${statusColor}">${esc(tagText)}</b></div>
       <div class="isk-row"><span>${esc(td('detail.issue_id'))}</span><b>#${tk.id}</b></div>
-      <div class="isk-row"><span>${esc(td('detail.assignee'))}</span><b>${esc(tk.assignee || '—')}</b></div>
+      <div class="isk-row"><span>${esc(td('detail.assignee'))}</span><b>${esc(tk.creator || tk.assignee || '—')}</b></div>
       <div class="isk-row"><span>${tk.is_pr ? 'PR' : 'Issue'}</span><b><a href="${esc(issueLink)}" target="_blank" rel="noopener" class="isk-link">#${tk.issue_number} ↗</a></b></div>
       <div class="isk-row"><span>${esc(td('detail.repo'))}</span><b>${esc(bareRepo(tk.repo_key))}</b></div>
       <div class="isk-row"><span>Stage</span><b>${esc(stageLabel(tk))}</b></div>
@@ -1434,6 +1459,57 @@ const agentStatusCardHtml = computed(() => {
     }
   })
   html += '</div></div>'
+  return html
+})
+
+// ═══════════ Issue #539：需求级业务状态 + SRE 验收结论 ═══════════
+// 数据来自 GET /issues/{id}/pipeline（review_status / sre_result）。
+// 目的：把「节点/事件执行结束」和「需求待人工确认 / 生产发布完成」分开说清，
+// 避免用户把节点 completed 误读成需求完成。
+const reviewBannerHtml = computed(() => {
+  const data = pipelineData()
+  const reviewStatus = data.review_status || ''
+  const sre = data.sre_result || null
+  const rr = (sre && sre.result_ref) || null
+  if (reviewStatus !== 'pending_review' && !rr) return ''
+  let html = ''
+  if (reviewStatus === 'pending_review') {
+    html +=
+      '<div class="isk-review-banner"><span class="isk-review-ic">◉</span><span><b>' +
+      esc(t('status.tag_pending_review')) +
+      '</b> — ' +
+      esc(td('review_status.pending_review_hint')) +
+      '</span></div>'
+  }
+  if (rr) {
+    const tr = (sre && sre.task_ref) || {}
+    let body
+    if (rr.status === 'available' && rr.summary) {
+      body = '<div class="isk-sre-summary">' + esc(String(rr.summary)) + '</div>'
+    } else if (rr.status === 'pending') {
+      body = '<div class="isk-sre-muted">' + esc(td('review_status.sre_pending')) + '</div>'
+    } else {
+      body = '<div class="isk-sre-muted">' + esc(td('review_status.sre_unavailable')) + '</div>'
+    }
+    let trLine = ''
+    if (tr.task_id) {
+      trLine =
+        '<div class="isk-sre-tref">' +
+        esc(td('review_status.sre_task_ref')) +
+        ': <b>' +
+        esc(String(tr.task_id)) +
+        '</b>' +
+        (tr.task_status ? ' (' + esc(String(tr.task_status)) + ')' : '') +
+        '</div>'
+    }
+    html +=
+      '<div class="isk-card"><div class="isk-card-tt">' +
+      esc(td('review_status.sre_result_title')) +
+      '</div>' +
+      body +
+      trLine +
+      '</div>'
+  }
   return html
 })
 
@@ -1496,7 +1572,8 @@ const pipelineCardHtml = computed(() => {
                 : 'rgba(0,0,0,.06)'
       const pulse = isCurrent ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
       const nodeSeq = (n.latest_event && n.latest_event.seq) || ''
-      const clickable = isCurrent || isCompleted
+      // Issue #566：failed/cancelled 终态节点也可点进事件详情执行重新派发
+      const clickable = isCurrent || isCompleted || isFailed || isCancelledN
       const clickAttr = clickable
         ? nodeSeq
           ? ` data-isk-jump="${nodeSeq}"`
@@ -2149,6 +2226,14 @@ function defaultRepoName() {
   if (modal.task) return bareRepo(modal.task.repo_key)
   return ''
 }
+// Issue #460：同步标题到描述——把标题追加进描述（幂等去重，空行分隔）
+function syncTitleToDesc() {
+  const title = (modal.title || '').trim()
+  if (!title) return
+  const desc = modal.desc || ''
+  if (desc.indexOf(title) >= 0) return
+  modal.desc = desc ? desc + '\n\n' + title : title
+}
 function openCreateModal() {
   modal.open = true
   modal.mode = 'create'
@@ -2543,7 +2628,7 @@ function loadTasks(opts) {
     if (query.value) apiUrl += '&q=' + encodeURIComponent(query.value)
     if (apiStatuses) apiUrl += '&statuses=' + encodeURIComponent(apiStatuses)
     if (filterAssignees.value.length)
-      apiUrl += '&assignees=' + encodeURIComponent(filterAssignees.value.join(','))
+      apiUrl += '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
   } else {
     apiUrl =
       '/issues/mine?status=&repo_key=' +
@@ -2552,7 +2637,7 @@ function loadTasks(opts) {
       sortOrder.value +
       '&mode=time' +
       (filterAssignees.value.length
-        ? '&assignees=' + encodeURIComponent(filterAssignees.value.join(','))
+        ? '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
         : '')
   }
   if (append) {
@@ -3141,6 +3226,18 @@ onBeforeUnmount(function () {
   color: var(--t3, #86868b);
   padding: 0 2px;
 }
+/* Issue #460：创建弹窗「同步标题到描述」图标 */
+.isk-sync-title {
+  cursor: pointer;
+  color: #0071e3;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  user-select: none;
+}
+.isk-sync-title:hover {
+  opacity: 0.7;
+}
 .isk-pager-sum {
   margin-left: 8px;
   font-size: 10px;
@@ -3338,6 +3435,41 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* Issue #539：需求级待审横幅（阶段执行完成 ≠ 需求/生产发布完成） */
+.isk :deep(.isk-review-banner) {
+  font-size: 11px;
+  color: #ff9f0a;
+  background: rgba(255, 159, 10, 0.08);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.5;
+}
+.isk :deep(.isk-review-ic) {
+  font-size: 13px;
+}
+/* Issue #539：SRE 验收结论引用块 */
+.isk :deep(.isk-sre-summary) {
+  font-size: 12px;
+  color: var(--t2, #3a3a3c);
+  line-height: 1.6;
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+.isk :deep(.isk-sre-muted) {
+  font-size: 11px;
+  color: var(--t3, #86868b);
+}
+.isk :deep(.isk-sre-tref) {
+  font-size: 10px;
+  color: var(--t3, #86868b);
+  margin-top: 6px;
 }
 .isk :deep(.isk-flowbar) {
   display: flex;
