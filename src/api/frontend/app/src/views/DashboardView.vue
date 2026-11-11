@@ -369,7 +369,7 @@
             </template>
             <div
               v-if="!(flowEditing ? editNodes : viewNodes).length"
-              style="padding: 20px; text-align: center; color: #86868b"
+              style="padding: 20px; text-align: center; color: var(--t3)"
             >
               无 Agent 节点
             </div>
@@ -524,13 +524,13 @@
           </div>
           <div
             v-if="pipesLoading"
-            style="text-align: center; padding: 24px; color: #86868b; font-size: 13px"
+            style="text-align: center; padding: 24px; color: var(--t3); font-size: 13px"
           >
             {{ t('loading') }}
           </div>
           <div
             v-else-if="!scenePipes.length"
-            style="text-align: center; padding: 24px; color: #86868b; font-size: 13px"
+            style="text-align: center; padding: 24px; color: var(--t3); font-size: 13px"
           >
             {{ t('no_issues') }}
           </div>
@@ -552,7 +552,10 @@
               >
                 <td>
                   <b>{{ p.issue_id || '?' }}</b>
-                  <span v-if="p.executing" class="tg tg-c" style="color: #fff; background: var(--g)"
+                  <span
+                    v-if="p.executing"
+                    class="tg tg-c"
+                    style="color: var(--on-accent); background: var(--g)"
                     >⚡</span
                   >
                 </td>
@@ -578,7 +581,10 @@
                 </td>
                 <td>
                   <span
-                    :style="{ fontSize: '11px', color: p.stage === 'done' ? '#34c759' : '#86868b' }"
+                    :style="{
+                      fontSize: '11px',
+                      color: p.stage === 'done' ? '#34c759' : 'var(--t3)',
+                    }"
                     >{{ stageLabel(p.stage) }}</span
                   >
                 </td>
@@ -841,7 +847,7 @@
         <div class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"
-            style="padding: 20px 0; text-align: center; color: #86868b; font-size: 13px"
+            style="padding: 20px 0; text-align: center; color: var(--t3); font-size: 13px"
           >
             {{
               engineModal.agentType === 'sre'
@@ -1082,7 +1088,7 @@ const ENG_TAG_COLORS = {
   qa: '#a855f7',
   sre: '#f59e0b',
 }
-const SCOPE_COLORS_ALL = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: '#86868b' }
+const SCOPE_COLORS_ALL = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: 'var(--t3)' }
 const SCOPE_LABELS_ALL = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
 const SCOPE_ORDER2 = ['user', 'repo', 'global', 'local']
 const ENG_SCENE_COLORS = {
@@ -2238,9 +2244,9 @@ function toggleEngineId(id) {
 }
 function engStatusColor(st) {
   return (
-    { online: '#34c759', recently_lost: '#f59e0b', offline: '#86868b', about_to_gc: '#ff3b30' }[
+    { online: '#34c759', recently_lost: '#f59e0b', offline: 'var(--t3)', about_to_gc: '#ff3b30' }[
       st
-    ] || '#86868b'
+    ] || 'var(--t3)'
   )
 }
 function engStatusLabel(st) {
@@ -3003,7 +3009,7 @@ onBeforeUnmount(function () {
 .ap-btn:hover {
   background: #0071e3;
   border-color: #0071e3;
-  color: #fff;
+  color: var(--on-accent);
 }
 .ap-btn-d {
   border: 1px solid rgba(255, 59, 48, 0.3);
@@ -3012,11 +3018,11 @@ onBeforeUnmount(function () {
 .ap-btn-d:hover {
   background: #ff3b30;
   border-color: #ff3b30;
-  color: #fff;
+  color: var(--on-accent);
 }
 /* Hero */
 .ap-hero {
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--glass-hero);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: none;
@@ -3038,19 +3044,19 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 22px;
   flex-shrink: 0;
 }
 .ap-hero-title {
   font-size: 17px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   letter-spacing: -0.3px;
 }
 .ap-hero-sub {
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
   margin-top: 3px;
 }
 .ap-stats {
@@ -3061,7 +3067,7 @@ onBeforeUnmount(function () {
 .ap-stat {
   text-align: center;
   padding: 8px 18px;
-  background: #f5f5f7;
+  background: var(--bg);
   border-radius: 12px;
   min-width: 64px;
 }
@@ -3072,7 +3078,7 @@ onBeforeUnmount(function () {
 }
 .ap-stat .l {
   font-size: 10px;
-  color: #86868b;
+  color: var(--t3);
   margin-top: 2px;
 }
 .dbv-rolepill {
@@ -3117,7 +3123,7 @@ onBeforeUnmount(function () {
 }
 .dbv-hostbanner button:hover {
   background: #ff9500;
-  color: #fff;
+  color: var(--on-accent);
 }
 .dbv-hostbanner.error button {
   color: #ff3b30;
@@ -3126,12 +3132,12 @@ onBeforeUnmount(function () {
 }
 .dbv-hostbanner.error button:hover {
   background: #ff3b30;
-  color: #fff;
+  color: var(--on-accent);
 }
 /* 市场卡 */
 .dbv-marketcard {
   margin-bottom: 16px;
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--c) 62%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: none;
@@ -3147,17 +3153,17 @@ onBeforeUnmount(function () {
 .dbv-market-t {
   font-size: 14px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   margin-bottom: 4px;
 }
 .dbv-market-d {
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
   line-height: 1.5;
 }
 /* 场景卡 */
 .dbv-scenecard {
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--c) 62%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: none;
@@ -3189,7 +3195,7 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 16px;
   padding: 16px 20px;
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--c) 62%, transparent);
   backdrop-filter: blur(16px);
   border: none;
   border-radius: 18px;
@@ -3200,7 +3206,7 @@ onBeforeUnmount(function () {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 .scn-row:hover {
-  background: rgba(255, 255, 255, 0.8);
+  background: color-mix(in srgb, var(--c) 82%, transparent);
   box-shadow: 0 3px 16px rgba(0, 0, 0, 0.08);
 }
 .scn-row-icon {
@@ -3212,13 +3218,13 @@ onBeforeUnmount(function () {
   justify-content: center;
   font-size: 16px;
   flex-shrink: 0;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .scn-row-name {
   font-size: 15px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   white-space: nowrap;
   letter-spacing: -0.2px;
 }
@@ -3235,7 +3241,7 @@ onBeforeUnmount(function () {
 }
 .scn-row-desc {
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3296,7 +3302,7 @@ onBeforeUnmount(function () {
 }
 /* 空态 */
 .dbv-emptycard {
-  background: #fff;
+  background: var(--c);
   border: 1px solid #d2d2d7;
   border-radius: 18px;
   padding: 48px 24px;
@@ -3311,12 +3317,12 @@ onBeforeUnmount(function () {
 .dbv-empty-t {
   font-size: 15px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   margin-bottom: 6px;
 }
 .dbv-empty-d {
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
   margin-bottom: 20px;
 }
 /* 头卡（创建/详情） */
@@ -3339,7 +3345,7 @@ onBeforeUnmount(function () {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .dbv-headfields {
@@ -3360,7 +3366,7 @@ onBeforeUnmount(function () {
 }
 .dbv-desc-display {
   font-size: 13px;
-  color: #86868b;
+  color: var(--t3);
   cursor: text;
   padding: 2px 6px;
   margin: -2px -6px;
@@ -3382,10 +3388,10 @@ onBeforeUnmount(function () {
   border: 1px solid #d2d2d7;
   border-radius: 6px;
   outline: none;
-  background: #fff;
+  background: var(--c);
   margin-bottom: 6px;
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-desc-input {
   width: 100%;
@@ -3394,8 +3400,8 @@ onBeforeUnmount(function () {
   border: 1px solid #d2d2d7;
   border-radius: 6px;
   outline: none;
-  background: #fff;
-  color: #86868b;
+  background: var(--c);
+  color: var(--t3);
   font-family: inherit;
 }
 .dbv-iconpicker {
@@ -3404,7 +3410,7 @@ onBeforeUnmount(function () {
   gap: 6px;
   margin-top: 8px;
   padding: 8px;
-  background: #f5f5f7;
+  background: var(--bg);
   border-radius: 10px;
 }
 .dbv-iconpick {
@@ -3417,15 +3423,15 @@ onBeforeUnmount(function () {
   justify-content: center;
   cursor: pointer;
   transition: all 0.15s;
-  background: #f5f5f7;
+  background: var(--bg);
 }
 .dbv-iconpick.on {
   background: #0071e3;
-  color: #fff;
+  color: var(--on-accent);
 }
 /* 详情卡 */
 .det-card-wrap {
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--c) 62%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: none;
@@ -3458,7 +3464,7 @@ onBeforeUnmount(function () {
   min-width: 0;
   max-width: 260px;
   min-height: 260px;
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--c) 62%, transparent);
   backdrop-filter: blur(16px);
   border: none;
   border-radius: 18px;
@@ -3470,7 +3476,7 @@ onBeforeUnmount(function () {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 .ap-nd:hover {
-  background: rgba(255, 255, 255, 0.8);
+  background: color-mix(in srgb, var(--c) 82%, transparent);
   box-shadow: 0 3px 16px rgba(0, 0, 0, 0.08);
 }
 .ap-nd.off {
@@ -3503,7 +3509,7 @@ onBeforeUnmount(function () {
 .ap-nd-name {
   font-size: 14px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -3518,25 +3524,25 @@ onBeforeUnmount(function () {
 }
 .ap-nd-desc {
   font-size: 11px;
-  color: #86868b;
+  color: var(--t3);
   line-height: 1.5;
   margin-bottom: 10px;
   font-weight: 400;
 }
 .ap-nd-off-lbl {
   font-size: 10px;
-  color: #86868b;
+  color: var(--t3);
   margin-bottom: 8px;
 }
 .ap-nd-hr {
   height: 1px;
-  background: #e8e8ed;
+  background: var(--hairline);
   margin: 8px 0;
 }
 .ap-nd-skillbox,
 .ap-nd-engbox {
-  background: #fff;
-  border: 1px solid #e8e8ed;
+  background: var(--c);
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   padding: 8px 10px;
   display: flex;
@@ -3553,28 +3559,28 @@ onBeforeUnmount(function () {
 }
 .ap-nd-lbl {
   font-size: 8px;
-  color: #86868b;
+  color: var(--t3);
   text-transform: uppercase;
   letter-spacing: 0.8px;
   margin-bottom: 3px;
 }
 .ap-nd-none {
   font-size: 11px;
-  color: #86868b;
+  color: var(--t3);
 }
 .dbv-skillname {
   font-size: 11px;
   font-weight: 500;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-skillpick {
   width: 100%;
   padding: 6px 10px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   font-size: 11px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   cursor: pointer;
   text-align: left;
@@ -3584,15 +3590,15 @@ onBeforeUnmount(function () {
 }
 .dbv-skillpick:hover {
   border-color: #0071e3;
-  background: #fff;
+  background: var(--c);
 }
 .ap-nd-engbtn {
   font-size: 10px;
   padding: 3px 10px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   background: transparent;
-  color: #6e6e73;
+  color: var(--t2);
   cursor: pointer;
 }
 .ap-nd-engbtn:hover {
@@ -3632,7 +3638,7 @@ onBeforeUnmount(function () {
 }
 :deep(.dbv-engbadge.gray) {
   background: #86868b14;
-  color: #86868b;
+  color: var(--t3);
 }
 /* PR 订阅 */
 .dbv-prsub {
@@ -3644,11 +3650,11 @@ onBeforeUnmount(function () {
 .dbv-prsub-t {
   font-size: 13px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-prsub-d {
   font-size: 11px;
-  color: #86868b;
+  color: var(--t3);
   margin-top: 3px;
   line-height: 1.5;
 }
@@ -3656,7 +3662,7 @@ onBeforeUnmount(function () {
   width: 44px;
   height: 26px;
   border-radius: 999px;
-  background: #e8e8ed;
+  background: var(--hairline);
   cursor: pointer;
   transition: background 0.2s;
   position: relative;
@@ -3671,7 +3677,8 @@ onBeforeUnmount(function () {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #fff;
+  /* 旋钮固定白：暗色下要压在浅色轨道上才看得见（不随 --c 翻转） */
+  background: var(--on-accent);
   position: absolute;
   top: 2px;
   left: 2px;
@@ -3692,7 +3699,7 @@ onBeforeUnmount(function () {
 .adv-label {
   font-size: 12px;
   font-weight: 600;
-  color: #86868b;
+  color: var(--t3);
   min-width: 80px;
   flex-shrink: 0;
 }
@@ -3700,11 +3707,11 @@ onBeforeUnmount(function () {
   flex: 1;
   max-width: 280px;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 13px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3717,21 +3724,21 @@ onBeforeUnmount(function () {
 .dbv-nb-input {
   flex: 1;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 13px;
   outline: none;
-  background: #f5f5f7;
+  background: var(--bg);
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-nb-sel {
   width: 120px;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 13px;
-  background: #f5f5f7;
+  background: var(--bg);
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3746,7 +3753,7 @@ onBeforeUnmount(function () {
 .dbv-advsec-t {
   font-size: 12px;
   font-weight: 600;
-  color: #86868b;
+  color: var(--t3);
   margin-bottom: 8px;
 }
 .dbv-advsec-d {
@@ -3769,44 +3776,44 @@ onBeforeUnmount(function () {
 .dbv-cfkey {
   flex: 0 0 140px;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 12px;
   outline: none;
-  background: #f5f5f7;
+  background: var(--bg);
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-cfkey-static {
   flex: 0 0 140px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   font-size: 12px;
 }
 .dbv-cfval {
   flex: 1;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 12px;
   outline: none;
-  background: #f5f5f7;
+  background: var(--bg);
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .cf-invalid {
   border-color: var(--r, #dc3545) !important;
 }
 .dbv-cfeye {
-  border: 1px solid #e8e8ed;
-  background: #f5f5f7;
+  border: 1px solid var(--hairline);
+  background: var(--bg);
   border-radius: 8px;
   width: 28px;
   height: 28px;
   padding: 0;
   font-size: 14px;
   cursor: pointer;
-  color: #86868b;
+  color: var(--t3);
   flex-shrink: 0;
 }
 .dbv-cfdel {
@@ -3834,7 +3841,7 @@ onBeforeUnmount(function () {
 }
 .dbv-scope-lbl {
   font-size: 11px;
-  color: #86868b;
+  color: var(--t3);
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -3854,11 +3861,11 @@ onBeforeUnmount(function () {
 .dbv-lrrepo {
   flex: 0 0 200px;
   padding: 8px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 12px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3866,11 +3873,11 @@ onBeforeUnmount(function () {
 .dbv-lrbranch {
   flex: 1;
   padding: 8px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 12px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3879,7 +3886,7 @@ onBeforeUnmount(function () {
 .pl-stat {
   text-align: center;
   padding: 8px 16px;
-  background: #f5f5f7;
+  background: var(--bg);
   border: none;
   border-radius: 14px;
   min-width: 64px;
@@ -3891,7 +3898,7 @@ onBeforeUnmount(function () {
 }
 .pl-stat .l {
   font-size: 10px;
-  color: #86868b;
+  color: var(--t3);
   margin-top: 2px;
 }
 .pl-table {
@@ -3903,7 +3910,7 @@ onBeforeUnmount(function () {
   text-align: left;
   padding: 10px 14px;
   font-weight: 500;
-  color: #86868b;
+  color: var(--t3);
   border-bottom: 1px solid rgba(0, 0, 0, 0.04);
   font-size: 10px;
   text-transform: uppercase;
@@ -3926,14 +3933,14 @@ onBeforeUnmount(function () {
   gap: 12px;
   padding: 10px 0;
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
 }
 /* 技能下拉面板 */
 .dbv-skillpanel {
   position: fixed;
   z-index: 1001;
-  background: #fff;
-  border: 1px solid #e8e8ed;
+  background: var(--c);
+  border: 1px solid var(--hairline);
   border-radius: 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
   padding: 8px;
@@ -3943,11 +3950,11 @@ onBeforeUnmount(function () {
   width: 100%;
   box-sizing: border-box;
   padding: 7px 10px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   font-size: 12px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   margin-bottom: 6px;
   font-family: inherit;
@@ -3960,7 +3967,7 @@ onBeforeUnmount(function () {
   margin: 6px 4px 4px;
   font-size: 10px;
   font-weight: 600;
-  color: #86868b;
+  color: var(--t3);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -3969,7 +3976,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   cursor: pointer;
   font-size: 12px;
-  color: #1d1d1f;
+  color: var(--t);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3978,7 +3985,7 @@ onBeforeUnmount(function () {
   background: rgba(0, 113, 227, 0.06);
 }
 .dbv-skillopt.clear {
-  color: #86868b;
+  color: var(--t3);
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   margin-bottom: 4px;
 }
@@ -4003,7 +4010,7 @@ onBeforeUnmount(function () {
 .dbv-skillnomatch {
   padding: 14px 0;
   text-align: center;
-  color: #86868b;
+  color: var(--t3);
   font-size: 12px;
 }
 /* 引擎弹窗 */
@@ -4017,7 +4024,7 @@ onBeforeUnmount(function () {
   justify-content: center;
 }
 .dbv-engmodal {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--glass-hero-strong);
   backdrop-filter: blur(20px);
   border-radius: 18px;
   padding: 28px;
@@ -4031,12 +4038,12 @@ onBeforeUnmount(function () {
   margin: 0 0 4px;
   font-size: 17px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   letter-spacing: -0.3px;
 }
 .dbv-eng-sub {
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
   margin-bottom: 12px;
 }
 .dbv-detach {
@@ -4062,27 +4069,27 @@ onBeforeUnmount(function () {
   font-size: 11px;
   padding: 3px 10px;
   border-radius: 999px;
-  border: 1px solid #e8e8ed;
-  color: #1d1d1f;
-  background: #f5f5f7;
+  border: 1px solid var(--hairline);
+  color: var(--t);
+  background: var(--bg);
   font-weight: 500;
 }
 .dbv-engfilters > span.on {
   border-color: #0071e3;
-  color: #fff;
+  color: var(--on-accent);
   background: #0071e3;
 }
 .dbv-engsep {
   width: 1px;
   height: 14px;
-  background: #e8e8ed;
+  background: var(--hairline);
   margin: 0 4px;
   padding: 0 !important;
   border: none !important;
   cursor: default !important;
 }
 .dbv-engclear {
-  color: #86868b !important;
+  color: var(--t3) !important;
 }
 .dbv-engsearch {
   width: 100%;
@@ -4090,8 +4097,8 @@ onBeforeUnmount(function () {
   border: none;
   border-radius: 12px;
   font-size: 13px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   margin-bottom: 12px;
   flex-shrink: 0;
@@ -4110,12 +4117,12 @@ onBeforeUnmount(function () {
   margin-bottom: 4px;
   font-size: 11px;
   font-weight: 600;
-  color: #86868b;
+  color: var(--t3);
   text-transform: uppercase;
 }
 .dbv-engpersonalhint {
   font-size: 10px;
-  color: #86868b;
+  color: var(--t3);
   font-weight: 400;
   margin-left: 6px;
   text-transform: none;
@@ -4128,7 +4135,7 @@ onBeforeUnmount(function () {
   border: none;
   border-radius: 14px;
   cursor: pointer;
-  background: #f5f5f7;
+  background: var(--bg);
   transition: all 0.2s ease;
 }
 .dbv-engitem.on {
@@ -4147,27 +4154,27 @@ onBeforeUnmount(function () {
 .dbv-engname {
   font-weight: 600;
   font-size: 13px;
-  color: #1d1d1f;
+  color: var(--t);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
 }
 .dbv-engalias {
   font-size: 10px;
-  color: #86868b;
+  color: var(--t3);
   font-weight: 400;
   margin-left: 4px;
 }
 .dbv-engmeta {
   font-size: 10px;
-  color: #86868b;
+  color: var(--t3);
   margin-top: 3px;
 }
 .dbv-engtag {
   font-size: 9px;
   padding: 2px 7px;
   border-radius: 999px;
-  color: #fff;
+  color: var(--on-accent);
   margin-left: 4px;
   font-weight: 500;
 }
@@ -4185,7 +4192,7 @@ onBeforeUnmount(function () {
 }
 /* 复制/删除弹窗 */
 .dbv-copymodal {
-  background: #fff;
+  background: var(--c);
   border-radius: 18px;
   padding: 28px;
   min-width: 320px;
@@ -4196,33 +4203,33 @@ onBeforeUnmount(function () {
   margin: 0 0 12px;
   font-size: 17px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-copy-hint {
   margin: 0 0 12px;
   font-size: 13px;
-  color: #86868b;
+  color: var(--t3);
   line-height: 1.5;
 }
 .dbv-copy-lbl {
   display: block;
   font-size: 12px;
   font-weight: 600;
-  color: #86868b;
+  color: var(--t3);
   margin-bottom: 6px;
 }
 .dbv-copy-input {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 12px;
   font-size: 13px;
   outline: none;
-  background: #f5f5f7;
+  background: var(--bg);
   margin-bottom: 20px;
   box-sizing: border-box;
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-copy-btns {
   display: flex;
@@ -4247,17 +4254,17 @@ onBeforeUnmount(function () {
 .dbv-scenesearch-input {
   width: 180px;
   padding: 7px 26px 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 999px;
-  background: #f5f5f7;
+  background: var(--bg);
   font-size: 12px;
   outline: none;
-  color: #1d1d1f;
+  color: var(--t);
   font-family: inherit;
 }
 .dbv-scenesearch-input:focus {
   border-color: #0071e3;
-  background: #fff;
+  background: var(--c);
 }
 .dbv-scenesearch-clear {
   position: absolute;
@@ -4267,7 +4274,7 @@ onBeforeUnmount(function () {
   border: none;
   background: transparent;
   cursor: pointer;
-  color: #86868b;
+  color: var(--t3);
   font-size: 12px;
   line-height: 1;
 }
@@ -4278,7 +4285,7 @@ onBeforeUnmount(function () {
   justify-content: flex-end;
   padding: 10px 16px 0;
   font-size: 12px;
-  color: #86868b;
+  color: var(--t3);
 }
 /* Issue #461: 场景访问地址地球仪三态 */
 .dbv-deployglobe {
@@ -4295,8 +4302,8 @@ onBeforeUnmount(function () {
   cursor: pointer;
 }
 .dbv-globe-empty {
-  border: 1px solid #e8e8ed;
-  background: #f5f5f7;
+  border: 1px solid var(--hairline);
+  background: var(--bg);
   border-radius: 999px;
   width: 29px;
   height: 29px;
@@ -4307,23 +4314,23 @@ onBeforeUnmount(function () {
   line-height: 1;
 }
 .dbv-globe-empty:hover {
-  color: #86868b;
+  color: var(--t3);
   border-color: #d2d2d7;
 }
 .dbv-deployurl-input {
   width: 200px;
   padding: 5px 10px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
-  background: #f5f5f7;
+  background: var(--bg);
   font-size: 12px;
   outline: none;
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-deployurl-input:focus {
   border-color: #0071e3;
-  background: #fff;
+  background: var(--c);
 }
 .bt-mini {
   padding: 2px 10px;
@@ -4334,10 +4341,10 @@ onBeforeUnmount(function () {
   width: 680px;
   max-height: 85vh;
   overflow-y: auto;
-  background: rgba(255, 255, 255, 0.92);
+  background: color-mix(in srgb, var(--c) 92%, transparent);
   backdrop-filter: blur(28px) saturate(200%);
   border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--hairline);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
   padding: 28px;
 }
@@ -4362,24 +4369,24 @@ onBeforeUnmount(function () {
 .dbv-rec-t {
   font-size: 13px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--t);
   margin-bottom: 8px;
 }
 .dbv-rec-sel {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 13px;
-  background: #f5f5f7;
-  color: #1d1d1f;
+  background: var(--bg);
+  color: var(--t);
   outline: none;
   cursor: pointer;
   font-family: inherit;
 }
 .dbv-rec-hint {
   font-size: 11px;
-  color: #86868b;
+  color: var(--t3);
   margin-top: 4px;
 }
 .dbv-rec-rules {
@@ -4395,24 +4402,24 @@ onBeforeUnmount(function () {
 .dbv-rec-rowsel {
   flex: 0 0 200px;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 13px;
-  background: #f5f5f7;
+  background: var(--bg);
   outline: none;
   cursor: pointer;
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 .dbv-rec-rowinput {
   flex: 1;
   padding: 7px 12px;
-  border: 1px solid #e8e8ed;
+  border: 1px solid var(--hairline);
   border-radius: 10px;
   font-size: 12px;
   outline: none;
-  background: #f5f5f7;
+  background: var(--bg);
   font-family: inherit;
-  color: #1d1d1f;
+  color: var(--t);
 }
 </style>
