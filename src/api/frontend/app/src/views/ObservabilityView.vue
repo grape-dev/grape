@@ -5349,3 +5349,20 @@ onBeforeUnmount(function () {
   }
 }
 </style>
+
+<style>
+/* v-html 片段样式（非 scoped）：这些块由 JS 拼 HTML 注入，没有 data-v 属性，
+   写在 <style scoped> 里完全不生效 —— 这正是「健康结论 SLO 卡片竖排」的原因。 */
+.obv-slohead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.obv-slogrid { display: flex; gap: 10px; flex-wrap: wrap; }
+.obv-slocard { cursor: pointer; flex: 1 1 240px; min-width: 210px; padding: 4px 10px; border-radius: 10px; }
+.obv-slocard:hover { background: var(--hover-row); }
+.obv-slov { font-size: 18px; font-weight: 600; }
+.obv-slotgt { font-size: 11px; }
+.obv-banner-ok { display: flex; align-items: center; gap: 8px; border-left: 3px solid var(--g); }
+.obv-banner-warn { display: flex; align-items: center; gap: 10px; }
+.obv-banner-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obv-banner-btn { margin-left: auto; white-space: nowrap; padding: 4px 12px; }
+.obv-tokhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.obv-outcome { border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+</style>

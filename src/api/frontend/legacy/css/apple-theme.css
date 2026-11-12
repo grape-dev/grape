@@ -1625,7 +1625,7 @@
     radial-gradient(880px 480px at 96% -16%, rgba(176,122,139,.08), transparent 60%),
     radial-gradient(1000px 640px at 46% 118%, rgba(122,146,176,.12), transparent 66%),
     var(--bg);
-  background-attachment: fixed;
+  background-attachment: scroll;
 }
 /* 玻璃面浮起来：顶部 1px 高光 + 更深的落影 */
 :root[data-theme-mode="dark"] .cd,
@@ -1669,8 +1669,6 @@
 :root[data-theme-mode="dark"] .help-overlay,
 :root[data-theme-mode="dark"] .km-overlay {
   background: rgba(0,0,0,.55);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
 }
 /* 侧栏比主区更薄，让左侧光斑透出来 */
 :root[data-theme-mode="dark"] .sb {
@@ -1690,7 +1688,7 @@
       radial-gradient(880px 480px at 96% -16%, rgba(176,122,139,.08), transparent 60%),
       radial-gradient(1000px 640px at 46% 118%, rgba(122,146,176,.12), transparent 66%),
       var(--bg);
-    background-attachment: fixed;
+    background-attachment: scroll;
   }
   /* 玻璃面浮起来：顶部 1px 高光 + 更深的落影 */
   :root[data-theme-mode="auto"] .cd,
@@ -1734,8 +1732,6 @@
   :root[data-theme-mode="auto"] .help-overlay,
   :root[data-theme-mode="auto"] .km-overlay {
     background: rgba(0,0,0,.55);
-    -webkit-backdrop-filter: blur(6px);
-    backdrop-filter: blur(6px);
   }
   /* 侧栏比主区更薄，让左侧光斑透出来 */
   :root[data-theme-mode="auto"] .sb {
@@ -1820,4 +1816,13 @@
   font-size: 12px;
   padding: 4px 14px;
   min-height: 26px;
+}
+
+/* ── 性能：帮助抽屉未打开时完全不渲染（2026-11-12 卡顿修复）──────────
+ * 原来 #helpOverlay(1500×950) + #helpDrawer(520×950) 常驻 DOM，带 8px/28px 混合，
+ * 合计 ~1.9M px² 的背景采样，滚动/悬停时持续重采样 → 页面发卡、表格 hover 抖动。
+ * 开关靠 JS 给两个元素加/删 .show，这里把「没有 .show」的状态直接 display:none。 */
+.help-overlay:not(.show),
+.help-drawer:not(.show) {
+  display: none !important;
 }

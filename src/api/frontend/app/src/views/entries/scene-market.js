@@ -3,7 +3,7 @@
   ;['bridge.css', 'ag-ui.css', 'viewcss/scene-market.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static/js/assets/' + f + '?v=21'
+    link.href = '/static/js/assets/' + f + '?v=23'
     document.head.appendChild(link)
   })
 })()
