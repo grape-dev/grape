@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**65 通过 / 10 C类 / 16 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**69 通过 / 8 C类 / 14 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -57,7 +57,7 @@ js 测试：**65 通过 / 10 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_event_nav_hash.js（已改写）
 - [x] test_issue_1077_board_col_paging.js（已改写）
 - [ ] test_issue_1102_load_more.js
-- [ ] test_issue_12_host_confirm.js
+- [x] test_issue_12_host_confirm.js（已改写）
 - [x] test_issue_1310_dropdown_display.js（已改写）
 - [ ] test_issue_1310_runtimes_display.js
 - [x] test_issue_1564_scene_scope_violation.js（已修复并改写）
@@ -76,7 +76,7 @@ js 测试：**65 通过 / 10 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_issue_461_scene_deploy_url.js（已改写）
 - [x] test_issue_465_worker_card_name.js（已改写）
 - [x] test_issue_539_review_status_render.js（已改写）
-- [ ] test_issue_543_migrate_orgs.js
+- [x] test_issue_543_migrate_orgs.js（已改写）
 - [x] test_observability_events_flow.js（已改写）
 - [x] test_observability_i18n.js（已改写）
 - [x] test_observability_page_size_162.js（已改写）
@@ -90,7 +90,7 @@ js 测试：**65 通过 / 10 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_engine_guide_simplified.js
 - [x] test_i18n_repos_local_refresh.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_1167_runtime_empty_filter.js（已修复并改写）
-- [ ] test_issue_1477_apikey_time_format.js
+- [ ] test_issue_1477_apikey_time_format.js（**待确认**：fmtTimestamp8 只在 legacy/js/api.js，AccountView 直接渲染 created_at 原文，需看后端是否返回 epoch）
 - [x] test_issue_205_beta_apply_persist.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_273_en_prefix_refresh.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_278_refresh_route.js（修 harness 后恢复，仍为行为测试）
@@ -111,7 +111,7 @@ js 测试：**65 通过 / 10 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_978_skill_unique_key.js
 - [ ] test_password_blocklist.js
 - [x] test_repo_persist_on_refresh.js（修 harness 后恢复，仍为行为测试）
-- [ ] test_repos_host_provider.js
+- [x] test_repos_host_provider.js（已改写）
 - [x] test_sidebar_collapse.js（修 harness 后恢复，仍为行为测试）
 - [ ] test_token_create_deeplink.js
-- [ ] test_unbind_repo_list_invisible.js
+- [x] test_unbind_repo_list_invisible.js（已改写）
