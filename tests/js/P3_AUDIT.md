@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**36 通过 / 31 C类 / 24 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**44 通过 / 23 C类 / 24 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -10,6 +10,7 @@ js 测试：**36 通过 / 31 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
   - 合计 7 个测试 / 30 条实质断言
 
 ## 已知偏差（记录下来，不假装满足）
+- #123：异常任务页「每页条数选择器」未随 Vue 版移植，现固定 10 条/页 + 页码翻页（分页本身正常）。
 - #648：原「卡片自带 attachments 内联渲染、免一次请求」的首屏优化未随 Vue 版移植；loadDetailExtras 一律 GET 端点。性能项，非功能缺陷。
 
 ## 真回归 · RuntimesView 功能缺失（2026-11-11 批次3 审计）
@@ -46,7 +47,7 @@ js 测试：**36 通过 / 31 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
 - #290 openIssueLink（IssuesView.vue:2185）：`tk.is_pr ? '/pull/' : '/issues/'`，违反 #290 验收「查看 Issue 入口统一 /issues/」。**待主人判定**，当前两边都不动。
 
 ## C 类（vm 执行旧页面 JS；被测对象已删，需逐一判定改写/退役）
-- [ ] test_anomaly_page_size.js
+- [x] test_anomaly_page_size.js（已改写）
 - [x] test_chat_conv_title.js（已改写）
 - [x] test_chat_onboard_409_restart.js（已改写）
 - [x] test_chat_onboard_refresh.js（已改写）
@@ -70,17 +71,17 @@ js 测试：**36 通过 / 31 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_issue_407_chat_attachment.js（已改写）
 - [x] test_issue_407_chat_draft.js（已改写）
 - [ ] test_issue_407_dash_draft.js
-- [ ] test_issue_436_runtime_search.js
+- [x] test_issue_436_runtime_search.js（已改写）
 - [ ] test_issue_456_orgs_back_to_workspace.js
 - [ ] test_issue_461_scene_deploy_url.js
-- [ ] test_issue_465_worker_card_name.js
+- [x] test_issue_465_worker_card_name.js（已改写）
 - [ ] test_issue_539_review_status_render.js
 - [ ] test_issue_543_migrate_orgs.js
-- [ ] test_observability_events_flow.js
-- [ ] test_observability_i18n.js
-- [ ] test_observability_page_size_162.js
-- [ ] test_observability_pagination.js
-- [ ] test_observability_sections.js
+- [x] test_observability_events_flow.js（已改写）
+- [x] test_observability_i18n.js（已改写）
+- [x] test_observability_page_size_162.js（已改写）
+- [x] test_observability_pagination.js（已改写）
+- [x] test_observability_sections.js（已改写）
 - [ ] test_pipeline_scroll_layout.js
 - [ ] test_pipeline_search.js
 - [ ] test_scene_apply_detail_refresh.js
