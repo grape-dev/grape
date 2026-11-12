@@ -421,8 +421,12 @@
                 <option value="email">{{ t('whitelist.type_email') }}</option>
                 <option value="domain">{{ t('whitelist.type_domain') }}</option>
               </select>
+            </div>
+            <div class="f-row">
               <label>{{ t('whitelist.value') }}</label>
               <input v-model="wl.value" class="ipt" :placeholder="t('whitelist.value_ph')" />
+            </div>
+            <div class="f-row">
               <label>{{ t('whitelist.remark') }}</label>
               <input v-model="wl.remark" class="ipt" :placeholder="t('whitelist.remark_ph')" />
               <button class="btn btn-p btn-sm" @click="addWhitelist">
@@ -1329,7 +1333,20 @@ if (getToken()) {
 .admv-root {
   min-height: 100vh;
 }
-.admv-root .ipt {
+/* 登录面板是「固定深色场景」：把 auth 局部 token 钉死，不跟主题翻。
+   admin.html 里的 :root 映射写成 var(--t)/var(--glass)，浅色档会把登录框变成
+   白底深字（肉眼还行但跟深色地面冲突）。 */
+.admv-login {
+  --auth-text: #f5f5f7;
+  --auth-text-secondary: rgba(235, 235, 245, 0.62);
+  --auth-bg-surface: rgba(255, 255, 255, 0.06);
+  --auth-border: rgba(255, 255, 255, 0.12);
+  --auth-accent: var(--a);
+  --auth-accent-hover: var(--ah);
+  --auth-error: var(--r);
+}
+/* 登录面板（固定深色场景）的输入框 */
+.admv-login .ipt {
   width: 100%;
   padding: 12px 14px;
   border-radius: 12px;
@@ -1343,11 +1360,36 @@ if (getToken()) {
     border-color 0.2s,
     box-shadow 0.2s;
 }
-.admv-root .ipt::placeholder {
+.admv-login .ipt::placeholder {
   color: var(--auth-text-secondary, #86868b);
 }
-.admv-root .ipt:focus {
+.admv-login .ipt:focus {
   border-color: var(--auth-accent, #0071e3);
+}
+/* 控制台内的输入框/下拉（白名单/弹窗/搜索）：跟随主题的紧凑尺寸。
+   之前这里被 .admv-root .ipt（登录场景样式）通吃 → 15px 字号 + 半透明底，
+   在 flex 行里又被三个 200px 标签挤成 30px 宽。 */
+.ipt {
+  width: 100%;
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--b, #e3e6ee);
+  background: var(--c, #fff);
+  color: var(--t, #101724);
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 0.18s,
+    box-shadow 0.18s;
+}
+.ipt::placeholder {
+  color: var(--t3, #8d97a8);
+}
+.ipt:focus {
+  border-color: var(--a, #3168e0);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--a, #3168e0) 14%, transparent);
 }
 .admv-root .lback {
   margin-top: 18px;
@@ -1665,6 +1707,7 @@ if (getToken()) {
 .f-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -1675,7 +1718,8 @@ if (getToken()) {
   flex-shrink: 0;
 }
 .f-row input {
-  flex: 1;
+  flex: 1 1 200px;
+  min-width: 180px;
   padding: 9px 12px;
   border-radius: var(--rd, 8px);
   border: 1px solid var(--b, #e3e6ee);
