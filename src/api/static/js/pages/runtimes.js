@@ -704,6 +704,14 @@ function renderEngines(data, devices) {
   return html;
 }
 
+// Issue #1932: workers 设备卡片「承载引擎」行仅显示引擎名（不含（凭据名）括号后缀）；
+// 引擎名取值链与 engineDisplayName()（worker-name.js，#1310）的引擎名部分一致，
+// 全空时回退 engineDisplayName()（此场景其值为凭据名/占位符，本身无括号），避免空 chip。
+function engineBaseName(rt) {
+  const en = String((rt && (rt.display_name || rt.engine_name || rt.name || rt.instance_name)) || '').trim();
+  return en || engineDisplayName(rt);
+}
+
 function renderWorkers(data, devices) {
   // Issue #245: scope/type/q 筛选已迁移到后端（runtime-devices 端点），
   // _rtDevTotal 由后端返回筛选后总数；此处仅保留排序，不再做本地二次过滤
@@ -719,7 +727,7 @@ function renderWorkers(data, devices) {
     const _canManage = d.credential_id && _isOwner;
     const _curScope = d.scope || 'global';
     const _isLocal = d.credential_id === 0;
-    const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || engineDisplayName(rt)} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
+    const clis = (d.runtimes || []).map(rt => `<span style="cursor:pointer;color:#235ec7;text-decoration:underline" onclick="event.stopPropagation();openEngineDetail(${rt.id})">${rt.alias || engineBaseName(rt)} v${rt.version || ''}${rt.healthy ? ' ✓' : ' ✗'}</span>`).join(' · ');
     const credColor = d.credential_status === 'revoked' ? 'var(--r)' : 'var(--g)';
     const _wStatus = d.health || 'offline';
     const _wCardLeftBorder = _wStatus === 'online' ? 'none' : (RUNTIME_COLOR[_wStatus] || 'var(--t3)');

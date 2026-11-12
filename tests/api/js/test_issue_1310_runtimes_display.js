@@ -14,7 +14,7 @@
  *   3. 复制图标复制「引擎名（凭据名）」
  *   4. 凭据名为空：卡片显示「未命名设备」占位
  *   5. 排序：按「引擎名（凭据名）」排序（本机直连优先 + 健康序之后）
- *   6. Workers 承载引擎 chip 显示「引擎名（凭据名）」（非 alias || name 裸名）
+ *   6. Workers 承载引擎 chip（#1932 起仅引擎名，无（凭据名）括号；仍非 instance_name 裸名）
  *   7. 引擎详情弹窗标题 = alias || 引擎名（凭据名）
  *   8. alias 编辑回写段不再出现 instance_name 拼接（源码守卫）
  */
@@ -142,15 +142,16 @@ check('排序按「引擎名（凭据名）」', () => {
   assert.strictEqual(sorted.map(x => x.id).join(','), '2,3,1', '应按显示名排序');
 });
 
-// ── 6. Workers 承载引擎 chip 显示「引擎名（凭据名）」 ──
-check('Workers 承载引擎 chip 显示「引擎名（凭据名）」', () => {
+// ── 6. Workers 承载引擎 chip（#1932 起仅显示引擎名，不带（凭据名）括号） ──
+check('Workers 承载引擎 chip 显示引擎名（#1932 去括号）', () => {
   const device = {
     credential_id: 5, name: 'worker-a', device_name: 'dev-worker-a', scope: 'global', owner: 'bob', health: 'online',
     worker_ip: '127.0.0.1', credential_status: 'active', last_seen_at: '',
     runtimes: [mkEngine({ id: 21, name: 'hermes', display_name: 'hermes', instance_name: 'hermes-worker-demo-0003', worker_name: '我的hermes' })],
   };
   const html = fns.renderWorkers({}, [device]);
-  assert.ok(html.includes('hermes（我的hermes）'), 'chip 应显示「hermes（我的hermes）」');
+  assert.ok(html.includes('hermes v1.0 ✓'), 'chip 应显示「hermes v1.0 ✓」');
+  assert.ok(!html.includes('hermes（我的hermes）'), 'chip 不得出现「引擎名（凭据名）」括号内容（#1932）');
   assert.ok(!html.includes('hermes-worker-demo-0003'), 'chip 不得出现设备派生 instance_name');
 });
 

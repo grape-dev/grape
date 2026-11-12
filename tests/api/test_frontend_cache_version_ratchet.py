@@ -19,7 +19,7 @@ FROZEN = {
     "im_channel.js": "31", "issues.js": "139", "knowledge.js": "150",
     "my_feedback.js": "8", "my_feedback_detail.js": "6",
     "observability.js": "78", "organizations.js": "18", "pipeline.js": "48",
-    "repos.js": "64", "runtimes.js": "101", "scene-market.js": "51",
+    "repos.js": "64", "runtimes.js": "102", "scene-market.js": "51",
     "settings.js": "39", "skills.js": "49", "templates.js": "38",
     "worker-name.js": "2", "pwd-blocklist.js": "3",
 }
