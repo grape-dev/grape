@@ -129,6 +129,32 @@ def test_stream_agent_early_close_reclaims_pipes():
         f"fd leaked after early generator close: base={baseline} now={_fd_count()}")
 
 
+def test_abort_cancel_rounds_return_threads_and_fds_to_baseline():
+    """Issue #1982 复审：N 轮 abort/cancel（消费方提前 close 生成器）后，
+    线程数与 fd 同时回基线——reader 线程经作用域兜底 join 回收，不持续累积。"""
+    import threading
+    register_backend(_ChatterBackend.name, _ChatterBackend())
+    _settle()
+    fd_baseline = _fd_count()
+    thread_baseline = threading.active_count()
+    rounds = 5
+    for _ in range(rounds):
+        gen = stream_agent("p", os.getcwd(), "", backend_name=_ChatterBackend.name,
+                           max_exec_seconds=30)
+        first = next(gen)
+        assert first[0] == "text"
+        gen.close()  # 模拟 abort/cancel：消费方提前中断，走 _close_exec_scope 兜底
+        _settle()
+    _settle()
+    now_threads = threading.active_count()
+    now_fds = _fd_count()
+    assert now_threads <= thread_baseline + 1, (
+        f"reader threads accumulated after {rounds} abort/cancel rounds: "
+        f"base={thread_baseline} now={now_threads}")
+    assert now_fds <= fd_baseline + 3, (
+        f"fd leaked after {rounds} abort/cancel rounds: base={fd_baseline} now={now_fds}")
+
+
 def test_install_worker_unit_sets_limit_nofile_and_upgrade_dropin():
     script = os.path.join(ROOT, "scripts", "install-worker.sh")
     content = open(script, encoding="utf-8").read()

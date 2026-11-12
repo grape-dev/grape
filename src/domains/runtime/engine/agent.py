@@ -100,7 +100,13 @@ def _win_acp_queue(proc):
         finally:
             q.put(b"")
 
-    _threading.Thread(target=_pump, daemon=True, name="acp-probe-pump").start()
+    # Issue #1982 复审：线程登记进 _win_acp_threads，_close_proc_pipes 统一 join
+    _t = _threading.Thread(target=_pump, daemon=True, name="acp-probe-pump")
+    _t.start()
+    try:
+        _win_acp_threads.setdefault(key, []).append(_t)
+    except Exception:
+        pass
     return q
 
 
@@ -152,6 +158,9 @@ def _win_acp_read_response(proc, send, buf, req_id: int, timeout: float):
 
 
 _win_acp_stderr: dict = {}
+# Issue #1982 复审：按 id(proc) 登记的 pump/stderr 读线程，_close_proc_pipes 关闭
+# 管道（产生 EOF/读异常）后 join 回收，避免线程对象与缓存残留。
+_win_acp_threads: dict = {}
 
 
 def _win_acp_drain_stderr(proc):
@@ -179,7 +188,13 @@ def _win_acp_drain_stderr(proc):
         except Exception:
             return
 
-    _threading.Thread(target=_drain, daemon=True, name="acp-probe-stderr").start()
+    _t = _threading.Thread(target=_drain, daemon=True, name="acp-probe-stderr")
+    _t.start()
+    # Issue #1982 复审：线程登记进 _win_acp_threads，_close_proc_pipes 统一 join
+    try:
+        _win_acp_threads.setdefault(key, []).append(_t)
+    except Exception:
+        pass
     return buf
 
 
@@ -200,10 +215,24 @@ def _close_proc_pipes(proc, label: str = "") -> None:
             _stream.close()
         except Exception:
             pass
-    # Windows 探活缓存按 id(proc) 持有引用，关闭后一并释放，避免对象常驻
+    # Windows 探活缓存按 id(proc) 持有引用，关闭后一并释放，避免对象常驻；
+    # Issue #1982 复审：先 close（产生 EOF/读异常唤醒读线程）再 join（带超时，
+    # 顺序不可反——读线程阻塞在 read 上时先 join 无法唤醒），未退出的守护线程
+    # 仅告警不阻塞探活路径。
     try:
         _win_acp_pumps.pop(id(proc), None)
         _win_acp_stderr.pop(id(proc), None)
+    except Exception:
+        pass
+    try:
+        for _t in _win_acp_threads.pop(id(proc), None) or []:
+            try:
+                if _t.is_alive():
+                    _t.join(timeout=1.5)
+                if _t.is_alive():
+                    log.warning(f"acp probe reader thread still alive after join(1.5s): {_t.name}")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -405,7 +434,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         latency = round(_time_mod.time() - start, 1)
         _stop = (_prompt_resp.get("result") or {}).get("stopReason", "unknown")
         # Issue #423: refusal 独立标记（协议活着但模型拒绝 ≠ 链路不通）。
-        # 服务端心跳落库对非 ok/fail 状态仅记录、不增 probe_fail_count → 不触发连败摘除。
+        # 服务端心跳落库对非 ok/fail 状态仅记录、不增 probe_fail_count → 不触发连败摘除
+        # （spawn_failed 另有独立计数 probe_spawn_fail_count 兜底，连续超阈值才降级）。
         if _stop == "refusal":
             return {"status": "refused", "latency": latency, "error": "",
                     "output": "ACP initialize+session/new+prompt refused (stopReason=refusal)"}

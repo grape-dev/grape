@@ -78,6 +78,19 @@ def _scope_procs():
     return getattr(_exec_scope, "procs", None)
 
 
+def _track_reader_threads(*threads: _threading.Thread):
+    """把本轮 spawn 的 stdout/stderr reader 线程登记进当前作用域。
+
+    Issue #1982 复审：异常/cancel/requeue 路径由 _close_exec_scope 兜底时，
+    reader 线程此前从未被 join——terminate+close 管道产生 EOF 后线程本应退出，
+    但守护线程不被等待就无法确认回收（线程对象与队列残留至调度周期结束）。
+    登记后在 scope 收尾统一 join（带超时，不阻塞任务路径）。
+    """
+    threads_set = getattr(_exec_scope, "reader_threads", None)
+    if threads_set is not None:
+        threads_set.update(t for t in threads if t is not None)
+
+
 def _track_proc(proc: subprocess.Popen, backend: str = "", cwd: str = ""):
     with _active_procs_lock:
         proc._grape_backend = backend
@@ -98,9 +111,16 @@ def _untrack_proc(proc: subprocess.Popen):
 
 
 def _close_exec_scope(prev_scope):
-    """结束本轮执行作用域：terminate 尚未回收的进程并关闭全部管道。"""
+    """结束本轮执行作用域：terminate 尚未回收的进程、关闭全部管道并 join reader 线程。
+
+    Issue #1982 复审：join 顺序必须是 terminate → close（管道关闭产生 EOF 唤醒
+    readline）→ join；先 join 再 close 会因 reader 阻塞在 readline 上无法唤醒。
+    join 带 1.5s 超时，线程异常存活时仅告警不阻塞任务路径。
+    """
     procs = _scope_procs()
+    reader_threads = getattr(_exec_scope, "reader_threads", None)
     _exec_scope.procs = prev_scope
+    _exec_scope.reader_threads = None
     for proc in list(procs or ()):
         try:
             if proc.poll() is None:
@@ -113,6 +133,15 @@ def _close_exec_scope(prev_scope):
             pass
         with _active_procs_lock:
             _active_procs.discard(proc)
+    for t in list(reader_threads or ()):
+        try:
+            if t.is_alive():
+                t.join(timeout=1.5)
+            if t.is_alive():
+                log.warning("stream-scope reader thread still alive after join(1.5s): "
+                            f"{t.name}; daemon thread, left to finish on EOF")
+        except Exception:
+            pass
 
 
 def active_task_processes(backend: str, cwd: str) -> list:
@@ -911,6 +940,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     """
     prev_scope = _scope_procs()
     _exec_scope.procs = set()
+    _exec_scope.reader_threads = set()
     try:
         yield from _stream_agent_impl(
             prompt, cwd, session_id=session_id, event_type=event_type,
@@ -1237,6 +1267,9 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
                 pass
         _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
         _stderr_thread.start()
+        # Issue #1982 复审：reader 线程登记进作用域，异常/cancel/requeue 兜底路径
+        # （_close_exec_scope）在 terminate+close 产生 EOF 后统一 join 回收。
+        _track_reader_threads(_reader_thread, _stderr_thread)
 
         _raw_count = 0
         _parsed_count = 0
@@ -1409,6 +1442,8 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
             if not _safe_terminate(proc, f"{label}{backend.name}"):
                 error_events.append(f"{backend.name} terminate failed")
             _reader_thread.join(timeout=5)
+            # Issue #1982 复审：terminate+close 已产生 EOF，stderr reader 同步 join 回收
+            _stderr_thread.join(timeout=2)
             _untrack_proc(proc)
             # codearts 方案E2: 超时也要杀 serve
             if _serve_proc and _serve_proc.poll() is None:
@@ -1425,6 +1460,8 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
             return
 
         _reader_thread.join(timeout=5)
+        # Issue #1982 复审：正常结束路径 stdout 已 EOF，stderr reader 同步 join 回收
+        _stderr_thread.join(timeout=2)
 
         stdout_remainder = ""
         try:
