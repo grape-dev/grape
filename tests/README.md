@@ -99,7 +99,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 | 目录 | 内容 | 运行方式 |
 |------|------|----------|
-| `tests/api/js/` | 98 个 Node 前端用例（页面纯函数/渲染逻辑） | `node tests/api/js/test_xxx.js` |
+| `tests/api/js/` | 99 个 Node 前端用例（页面纯函数/渲染逻辑） | `node tests/api/js/test_xxx.js` |
 | `tests/api/playwright/` | 5 个手工 E2E 脚本（浏览器，非 pytest；conftest 已 collect_ignore） | `python tests/api/playwright/test_r12_fullscreen_zindex.py` |
 | `tests/api/curl/` | HTTP 冒烟 shell | `bash tests/api/curl/test_r14_backend_guard.sh <jwt>` |
 

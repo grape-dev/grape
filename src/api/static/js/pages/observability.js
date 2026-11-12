@@ -82,6 +82,12 @@ function _obsFeedbackPageUrl() {
   return url;
 }
 
+// 属性值转义：_escHtml 只处理 & < >，不转义双引号 —— 拼进 title="..."/placeholder="..."
+// 时必须再转一次引号，否则 hash 里的引号可注入内联事件（审查 Critical-1，DOM XSS）
+function _escAttr(s) {
+  return _escHtml(String(s == null ? '' : s)).replace(/"/g, '&quot;');
+}
+
 // 打开轻量反馈面板（未登录不渲染；样式对齐 feedback.js 弹窗：遮罩/圆角/居中）
 function openObsFeedback() {
   let token = '';
@@ -115,13 +121,13 @@ function openObsFeedback() {
       + '<span style="font-size:16px">' + k.icon + '</span><span>' + _escHtml(k.label) + '</span></button>').join('')
     + '</div>'
     + '<textarea id="obsFbText" rows="4" maxlength="' + OBS_FB_MAX_LEN + '" oninput="_obsFbOnInput()" placeholder="'
-    + _escHtml(I18N.t('observability.fb.placeholder')) + '" '
+    + _escAttr(I18N.t('observability.fb.placeholder')) + '" '
     + 'style="width:100%;box-sizing:border-box;padding:10px 14px;border-radius:10px;border:1.5px solid var(--b,rgba(0,0,0,.12));'
     + 'background:var(--c,#fff);font-size:13px;color:var(--t1,#1d1d1f);font-family:inherit;outline:none;resize:vertical;line-height:1.5;"></textarea>'
     + '<div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 12px;">'
     + '<span class="ts t3" id="obsFbCount">' + _escHtml(I18N.t('observability.fb.count', { n: 0, max: OBS_FB_MAX_LEN })) + '</span>'
     + '<span class="ts t3" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'
-    + _escHtml(_obsFeedbackPageUrl()) + '">' + _escHtml(_obsFeedbackPageUrl()) + '</span>'
+    + _escAttr(_obsFeedbackPageUrl()) + '">' + _escHtml(_obsFeedbackPageUrl()) + '</span>'
     + '</div>'
     + '<div style="display:flex;gap:10px;justify-content:flex-end;">'
     + '<button id="obsFbCancel" type="button" onclick="document.getElementById(\'obsFbOverlay\').remove()" '
@@ -180,7 +186,7 @@ function _obsFbSubmit() {
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('observability.fb.submitting'); }
   return API.post('/feedback', {
     category: 'suggestion',
-    title: I18N.t('observability.fb.title'),
+    title: '[observability/' + (_obsSection || 'overview') + '] ' + I18N.t('observability.fb.title'),
     description: desc,
     page_url: _obsFeedbackPageUrl(),
     repo_key: repoKey,

@@ -10,7 +10,7 @@
  *   S6  失败保留内容可重试；成功移除面板
  *   S7  页头入口：登录渲染、未登录不渲染；i18n zh/en 键齐备
  *
- * 运行：node tests/js/test_obs_feedback_entry_1916.js
+ * 运行：node tests/api/js/test_obs_feedback_entry_1916.js
  */
 const path = require('path');
 const fs = require('fs');
@@ -389,6 +389,40 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms === undefined ? 20 : ms
     const css = fs.readFileSync(path.join(ROOT, 'src/api/static/css/app.css'), 'utf8');
     assert.ok(/@media[^{]*\(max-width:\s*768px\)[^}]*obs-fb/.test(css) || /obs-fb[\s\S]{0,400}@media/.test(css + html),
       '应有 obs-fb 相关窄屏媒体查询（CSS 或 inline）');
+  });
+
+  // ── S8 · 面板 DOM 契约真实性 + XSS 转义（审查 Required-2 / Critical-1 回归）──
+  console.log('S8 面板 DOM 契约与 XSS 转义');
+  check('S8.1 面板生成的 HTML 真的含 obsFbText/Count/Submit/Cancel 四个 id', () => {
+    const dom = makeDom();
+    const { obs: o } = loadObs(dom, { token: 'tk_test' });
+    o.renderObservability('overview');
+    o.openObsFeedback();
+    const html = (dom._elements.obsFbOverlay || {}).innerHTML || '';
+    assert.ok(html.length > 200, '面板应有非空 HTML');
+    for (const id of ['obsFbText', 'obsFbCount', 'obsFbSubmit', 'obsFbCancel']) {
+      assert.ok(html.indexOf('id="' + id + '"') >= 0, '面板 HTML 缺 id=' + id);
+    }
+    mountPanelChildren(dom);
+    assert.ok(!!dom._elements.obsFbText, '桩应能对齐真实 id');
+  });
+
+  check('S8.2 恶意 hash 不得注入可执行属性（title 引号已转义）', () => {
+    const evil = '#/" onmouseover="alert(1)" a="';
+    const dom = makeDom();
+    const { obs: o } = loadObs(dom, { hash: evil, token: 'tk_test' });
+    o.renderObservability('overview');
+    o.openObsFeedback();
+    const html = (dom._elements.obsFbOverlay || {}).innerHTML || '';
+    // 判别法：未转义时 hash 里的引号会把 title 属性值截断成 title="#/"，
+    // 其后成为真实属性（注入面）；转义后属性值以 title="#/&quot; 继续。
+    assert.ok(html.indexOf('title="#/"') < 0, 'title 属性值不得在 \"#/\" 处被引号截断（DOM XSS 注入面）');
+    assert.ok(html.indexOf('title="#/&quot;') >= 0, 'title 属性值应转义引号后继续（&quot;）');
+  });
+
+  check('S8.3 落库标题带稳定页面标识前缀（不随提交者语言变化）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/observability.js'), 'utf8');
+    assert.ok(/title: '\[observability\/'/.test(src), 'title 应以 [observability/<section>] 稳定前缀开头');
   });
 
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
