@@ -501,6 +501,14 @@ def has_newer_issue_event(repo_key: str, issue_id: str, completed_at: str) -> bo
     return False
 
 
+# Issue #2050 审查修正：判定「已交棒」的事件状态白名单。
+# failed / cancelled / timeout 是派发失败或被打断，事件里虽然带着 source_seq，
+# 但那一棒并没有交出去——必须让源任务照常进入停滞检测，不能被这个 payload 抑制。
+HANDOFF_LIVE_EVENT_STATUSES = (
+    "queued", "dispatched", "running", "completed", "pending",
+)
+
+
 def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> bool:
     """源段完成后是否已有引用其 event_seq 的结构化 handoff 事件。
 
@@ -526,7 +534,7 @@ def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> boo
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT payload FROM events WHERE repo_key=? AND issue_id=? "
+                "SELECT payload, status FROM events WHERE repo_key=? AND issue_id=? "
                 "AND event_type='a2a_event'",
                 (repo_key, issue_id))
             rows = c.fetchall() or []
@@ -534,7 +542,10 @@ def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> boo
         log.warning(f"[patrol] structured handoff evidence query failed "
                     f"repo={repo_key} issue={issue_id}: {e}")
         return False
-    for (payload_raw,) in rows:
+    for payload_raw, ev_status in rows:
+        if str(ev_status or "").strip().lower() not in HANDOFF_LIVE_EVENT_STATUSES:
+            # 失败/取消的事件不是交棒证据（Issue #2050 审查 C4）。
+            continue
         try:
             payload = payload_raw
             if isinstance(payload_raw, str):

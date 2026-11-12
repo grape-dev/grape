@@ -397,3 +397,41 @@ def test_run_patrol_once_delivers_stall_finding():
         out = patrol_mod.run_patrol_once("runtime")
     assert captured and captured[0]["task_id"] == "t1"
     assert out["broken"] == 1 and out["inserted"] == 1
+
+# ====== 6. 交棒证据口径：失败事件不算交棒（审查 C4） ======
+
+def _handoff_db(source_seq, event_rows):
+    return FakeDb([
+        ("FROM agent_tasks WHERE id=?", [(source_seq,)]),
+        ("FROM events WHERE repo_key=?", event_rows),
+    ])
+
+
+def _call_handoff(db, task_id="t-evidence"):
+    with patch.object(patrol_mod, "db", db), \
+         patch.object(patrol_mod, "db_lock", threading.Lock()):
+        return patrol_mod.structured_handoff_exists("gitcode:o/r", "#2050", task_id)
+
+
+def test_failed_handoff_event_is_not_evidence():
+    db = _handoff_db(42, [(json.dumps({"source_seq": 42}), "failed")])
+    assert _call_handoff(db) is False, \
+        "派发失败的事件不能当成交棒证据，否则停滞被永久抑制（假阴性）"
+
+
+def test_other_source_seq_is_not_evidence():
+    db = _handoff_db(42, [(json.dumps({"source_seq": 7}), "completed")])
+    assert _call_handoff(db) is False
+
+
+@pytest.mark.parametrize("status", ["queued", "dispatched", "running", "completed", "pending"])
+def test_live_handoff_event_is_evidence(status):
+    db = _handoff_db(42, [(json.dumps({"source_seq": 42}), status)])
+    assert _call_handoff(db) is True
+
+
+def test_cross_pipeline_payload_source_seq_is_evidence():
+    payload = {"source_seq": 42, "target_scene_id": "scene-b"}
+    db = _handoff_db(42, [(json.dumps(payload), "running")])
+    assert _call_handoff(db) is True, \
+        "跨流水线 payload 落 source_seq 后必须被认作已交棒（否则合法交棒被判断链）"
