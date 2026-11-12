@@ -128,3 +128,12 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_1982_fd_leak.py tests/runtime/test_issue_1982_probe_state.py -v
+      - name: Engine recovery loop regression tests (issue #2133)
+        # Issue #2133 QA 审查修复（W1 Required）：新增用例 test_issue_2133_recovery.py
+        # 此前未接入 CI 门禁（先例 #1613：tests/im 未接入曾被 QA 要求补齐），闭环回归
+        # （认领闸门挡 spawn_failed / 时间窗告警降级 / 探活 ok 自动加回 / 任务绑定对账）
+        # 只能靠人工本地执行，重构可静默打破而 CI 不红；#1982 探活/fd 用例已由上方
+        # 1982 专项步骤接入（QA 建议一并接入已覆盖），此处跑 2133 闭环回归即可。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_2133_recovery.py -v
