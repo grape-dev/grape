@@ -109,10 +109,9 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 ## 已知既有失败（搬迁前就存在，非目录规整引入）
 
-- `tests/runtime/test_issue_1753_handoff_target_branch.py`：依赖本线未合入的特性
-  （scene advanced options），已改为带原因的 skip。
-  （`test_issue_990_session_token_snapshot.py` 的快照同步实现已于 2026-11-12 移植，
-  20 条用例恢复正常执行，不再 skip。）
+- 之前因“特性未合入”被 skip 的两个模块已全部恢复执行（2026-11-12 移植
+  `sync_task_session_token` 与 session_store 的场景解析族）：`test_issue_990_*` 20 passed、
+  `test_issue_1753_*` 12 passed，不再有 skip 兜底的模块。
 - `tests/arch/test_silent_except_ratchet.py`：分支合并新增文件带入静默 except，基线文件不允许上调豁免。
 - `tests/contracts`：2 条 milestone 契约（旧）。
 - `tests/mgmt` 域整体失败较多（多为鉴权夹具与外部平台 mock 依赖，非搬迁引入）。

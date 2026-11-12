@@ -28,7 +28,25 @@ class OpencodeRuntime(AgentRuntime):
 
         from src.domains.runtime.engine.os_adapter import bun_cache_dir, bun_cache_fallback_dir
         cache_dir = bun_cache_dir()
-        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError as exc:
+            # Issue #857: 缓存只影响性能，目录建不出来就降级到临时目录，别拖垮任务启动
+            fallback = bun_cache_fallback_dir()
+            logging.getLogger(__name__).warning(
+                "bun cache dir %s unusable (%s), falling back to %s",
+                cache_dir, exc, fallback,
+            )
+            cache_dir = fallback
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning(
+                    "bun cache fallback dir %s unusable, bun cache disabled", cache_dir
+                )
+                env.pop("BUN_RUNTIME_TRANSPILER_CACHE_PATH", None)
+                env.pop("JSC_diskCachePath", None)
+                return env
         env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] = cache_dir
         env["JSC_diskCachePath"] = cache_dir
         return env

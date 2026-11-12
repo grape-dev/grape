@@ -454,8 +454,8 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         _is_401 = is_auth_401_error(_err_lower)
         if _is_401:
             try:
-                from src.kernel.token_service import detect_and_mark_expired
-                _vod_error_code = detect_and_mark_expired(repo_key) or ""
+                from src.kernel.token_service import detect_and_mark_repo_token_expired
+                _vod_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                 if _vod_error_code:
                     log.warning(f"VOD handler: token expired during direct exec (error_code={_vod_error_code}), repo={repo_key}")
             except Exception as _ve:

@@ -830,3 +830,124 @@ def remove_issue_sessions(repo_key: str):
 TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH = "target_scene_work_branch"
 # 承接场景未配置 work_branch（含多跳链残留）时，历史权威标记显式失效为该值。
 TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH = "unconfirmed_no_target_scene_work_branch"
+
+
+def _issue_num_or_ident(issue_id) -> "int | str | None":
+    """D105 字符串 ident（gitee IK*）：issue_id 归一为平台原生形态——
+    数字串→int（基线 #995 int 契约不变），非数字 ident（IK*，容忍 # 前缀）
+    原样 str 返回；空/None 返回 None。此前 set_issue_stage/_sync_issue_fields
+    等保存路径一律 int() 强转，字符串 ident 必炸被 except 吞掉 → stage/scene/
+    status 静默不落库（gitee confirm-done 后 stage 恒 'vod' 的写入点）。
+    """
+    _raw = str(issue_id or "").lstrip("#")
+    if not _raw:
+        return None
+    return int(_raw) if _raw.isdigit() else _raw
+
+
+def _scene_binding_active(repo_key: str, scene_id: str) -> bool:
+    """绑定场景是否仍可用（Issue #1745：场景行存在但全部 is_active=0 → 失效）。
+
+    行不存在不算失效（内置/场景市场未落库的绑定沿用 #568 既有契约）；查询异常按有效处理，
+    不因 DB 抖动误清空场景。
+    """
+    if not scene_id:
+        return False
+    try:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT is_active FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND (repo_key=? OR repo_key='')",
+                (scene_id, repo_key or "")).fetchall()
+    except Exception:
+        return True
+    if not rows:
+        return True
+    return any((r[0] if r else 0) for r in rows)
+
+
+def resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
+    """解析 Issue 当前绑定开发场景 ID（Issue 级快照优先，空则回退仓库默认场景）。
+
+    Issue #1753：统一 webhook / runtime.repogit / prompt_builder 的场景解析口径。
+    Issue #1745：绑定场景已停用（幽灵 scene_id 会让 scenes detail 必 404）时回退仓库
+    默认场景；仍不可用则按「未判定=空串」返回。未选定返回空串。
+    """
+    try:
+        scene_id = (get_issue_scene(repo_key, issue_id)[0] or "")
+    except Exception:
+        return ""
+    if not scene_id:
+        return ""
+    if _scene_binding_active(repo_key, scene_id):
+        return scene_id
+    try:
+        from src.domains.mgmt.user.db import get_repo_scene
+        fallback = get_repo_scene(repo_key) or ""
+    except Exception:
+        fallback = ""
+    if fallback and fallback != scene_id and _scene_binding_active(repo_key, fallback):
+        return fallback
+    return ""
+
+
+def get_scene_advanced_options(repo_key: str, scene_id: str) -> dict:
+    """读取场景高级选项（devops_pipeline_scene.advanced_options，未配置/失败返回 {}）。
+
+    Issue #1753：统一 webhook / runtime.repogit / prompt_builder 的场景配置读取口径，
+    避免三处重复裸 SQL 导致字段口径漂移。
+    """
+    if not repo_key or not scene_id:
+        return {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return {}
+        opts = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        return opts if isinstance(opts, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_scene_work_branch(repo_key: str, scene_id: str = "", issue_id: str = "") -> str:
+    """读取场景权威开发基线 work_branch（与运行时 GRAPE_WORK_BRANCH 同源）。
+
+    scene_id 显式给出时直接读取（如跨流水线承接目标场景）；否则按 issue_id 解析当前
+    绑定场景。未配置/查询失败返回空串。
+    """
+    if not scene_id:
+        scene_id = resolve_scene_id(repo_key, issue_id)
+    if not scene_id:
+        return ""
+    return str(get_scene_advanced_options(repo_key, scene_id).get("work_branch", "") or "").strip()
+
+
+def get_issue_status(repo_key: str, issue_id: str) -> str:
+    """读 Issue 当前 status（只读 helper）。无记录或异常返回 ""。
+
+    与 `get_issue_stage` 分离：其返回结构不含 status，需要判 status 的路径
+    （如 PR merged 视同审核通过）单独读取，避免改动既有返回契约。
+    """
+    _num = _issue_num_or_ident(issue_id)
+    if _num is None:
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num))
+            row = c.fetchone()
+        return (row[0] if row and row[0] else "") or ""
+    except Exception as _e:
+        from src.kernel.config import log as _log3
+        _log3.warning(f"get_issue_status failed for {repo_key} #{_num}: {_e}")
+        return ""
+
+# ==== merged from weekly-08 (symbols referenced by decouple modules) ====
