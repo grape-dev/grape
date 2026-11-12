@@ -3363,6 +3363,11 @@ function openBetaApply() {
   }
 
   function init() {
+    // 首屏登录页也必须按 /auth/providers 渲染 OAuth 按钮：
+    // 此前 renderOAuthButtons() 只在 showLogin()（登出/被踢路径）调用，
+    // 直接打开站点时只会看到 index.html 预置的 gitcode/github 两个按钮
+    // —— 管理台新配的 gitee / huawei 登录入口不出现（2026-11-12 实测）。
+    try { renderOAuthButtons(); } catch (e) { /* 渲染失败不阻断 init */ }
     // Issue #231: 最先执行 currentRepo 迁移（localStorage → sessionStorage），
     // 必须在 cache 版本检查之前，避免 localStorage.clear() 抹掉待迁移值，保证已有用户无感知。
     _migrateCurrentRepo();
