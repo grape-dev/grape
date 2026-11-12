@@ -42,20 +42,28 @@ def _ref_line(branch=BRANCH, local="local-sha", remote="old-sha"):
 
 # ===================== 发布闭包 =====================
 
-def test_worker_package_manifest_includes_top_level_lock():
+def test_worker_package_manifest_includes_lock():
+    # #2010 kernel 布局后无顶层 src/lock.py；`from src import lock` 由
+    # src/__init__.py 别名解析到 src.kernel.lock。保障改为：lock 的 canonical
+    # 实现与别名入口都进 worker 包。
     from src.kernel.worker_package import MANIFEST, ROOT
-    assert "src/lock.py" in MANIFEST
-    assert os.path.isfile(os.path.join(ROOT, "src", "lock.py"))
+    assert "src/__init__.py" in MANIFEST
+    assert "src/kernel/" in MANIFEST
+    assert os.path.isfile(os.path.join(ROOT, "src", "kernel", "lock.py"))
+    assert "src.lock" in open(os.path.join(ROOT, "src", "__init__.py")).read()
 
 
-def test_release_pack_manifest_includes_top_level_lock(tmp_path, monkeypatch):
+def test_release_pack_manifest_includes_lock(tmp_path, monkeypatch):
     from scripts import release_pack
     monkeypatch.setattr(release_pack, "OUT_DIR", str(tmp_path))
     pkg = release_pack.pack_tools("test")
     assert pkg and os.path.isfile(pkg)
     with tarfile.open(pkg) as tf:
         names = tf.getnames()
-    assert "src/lock.py" in names, names
+    # #2010 kernel 布局：lock 的 canonical 实现与 src/__init__.py 别名入口
+    # 必须都在工具包里（`from src import lock` 在 worker 侧才可用）。
+    assert "src/kernel/lock.py" in names, names
+    assert "src/__init__.py" in names, names
 
 
 # ===================== 钩子模板 fail-open =====================
