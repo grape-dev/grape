@@ -1752,7 +1752,7 @@ if (getToken()) {
   cursor: default;
 }
 .btn-o {
-  background: #f2f3f5;
+  background: var(--chip-bg);
   color: var(--t, #101724);
   border: 1px solid var(--b, #e3e6ee);
 }
@@ -1766,7 +1766,7 @@ if (getToken()) {
   cursor: pointer;
 }
 .btn-del-sm:hover {
-  background: #fce8e8;
+  background: color-mix(in srgb, var(--r) 12%, transparent);
 }
 
 /* users view inputs */
@@ -1972,7 +1972,7 @@ if (getToken()) {
   border-radius: 6px;
   font-size: 11px;
   font-weight: 500;
-  background: #fce8e8;
+  background: color-mix(in srgb, var(--r) 12%, transparent);
   color: #c93030;
 }
 .tag-w {
@@ -2015,7 +2015,7 @@ if (getToken()) {
   line-height: 1.6;
 }
 .mbox .mbox-ipt {
-  background: #f2f3f5;
+  background: var(--chip-bg);
   color: var(--t, #1d1d1f);
 }
 .mbox .m-actions {
@@ -2034,7 +2034,7 @@ if (getToken()) {
   cursor: pointer;
 }
 .m-btn-o {
-  background: #f2f3f5;
+  background: var(--chip-bg);
   color: var(--t, #1d1d1f);
 }
 .m-btn-p {

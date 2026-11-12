@@ -24,7 +24,13 @@
   --chip-bg:rgba(0,0,0,.05);             /* 中性小标签/分段底 */
   --on-accent:#fff;                      /* 彩色底上的字（两主题同值） */
   --scrim:rgba(0,0,0,.28);               /* 弹窗遮罩 */
-  --glass-hero:rgba(255,255,255,.72);    /* scene 页玻璃（唯一允许玻璃的地方） */
+  --a-text:#0071e3;                      /* 强调「文字」色：light=填充同色，dark 提亮到 #2997ff */
+  --glass:rgba(255,255,255,.72);          /* 玻璃面：light 白 72% / dark 卡片色 62% */
+  --glass-strong:rgba(255,255,255,.85);   /* 强玻璃：弹窗/浮层 */
+  --glass-solid:#ffffff;                  /* 玻璃实心档：需要完全不透的地方 */
+  --glass-blur:20px;
+  --glass-border:rgba(0,0,0,.06);         /* 玻璃/面板描边 */
+  --glass-hero:rgba(255,255,255,.72);
   --glass-hero-strong:rgba(255,255,255,.85);
 }
 
@@ -32,7 +38,7 @@
   --s:#f5f5f7;--s2:#fff;--s3:#eaeaec;
   --bg:#f5f5f7;--c:#fff;--b:#d2d2d7;
   --t:#1d1d1f;--t2:#6e6e73;--t3:#7d7d82;
-  --a:#0071e3;--ah:#0077ed;--g:#34c759;--y:#ff9f0a;
+  --a:#0071e3;--a-text:#0071e3;--ah:#0077ed;--g:#34c759;--y:#ff9f0a;
   --r:#ff3b30;--pu:#af52de;--or:#ff9f0a;--pk:#ff2d92;--sk:#5ac8fa;
   --rd:12px;--r2:18px;
   --sh:0 2px 8px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.06);
@@ -49,4 +55,95 @@
   --scrim:rgba(0,0,0,.28);
   --glass-hero:rgba(255,255,255,.72);
   --glass-hero-strong:rgba(255,255,255,.85);
+  --glass:rgba(255,255,255,.72);          /* 玻璃面：light 白 72% / dark 卡片色 62% */
+  --glass-strong:rgba(255,255,255,.85);   /* 强玻璃：弹窗/浮层 */
+  --glass-solid:#ffffff;                  /* 玻璃实心档：需要完全不透的地方 */
+  --glass-blur:20px;
+  --glass-border:rgba(0,0,0,.06);         /* 玻璃/面板描边 */
+}
+
+/* ── 暗色档（2026-11-12 mac-dark 试点落地）─────────────────────────────
+   收口到本文件的原因：admin.html 只加载 tokens.css，之前暗色变量放在
+   apple-theme.css 里 → 运营台根本没有暗色。现在 index.html / admin.html 同源。
+   两个块必须保持一致（改一处改两处）：强制 dark / auto 跟随系统。 */
+:root[data-theme-mode="dark"] {
+  --s: #1a1a1c;
+  --s2: #262628;
+  --s3: #3a3a3c;
+  --bg: #1e1e20;
+  --c: #2c2c2e;
+  --b: #3a3a3c;
+  --b-strong: #48484a;
+  --t: #ffffff;
+  --t2: rgba(235,235,245,.62);
+  --t3: rgba(235,235,245,.55);
+  --a: #0a84ff;
+  --a-text: #2997ff;
+  --ah: #0077ed;
+  --g: #30d158;
+  --y: #ff9f0a;
+  --r: #ff453a;
+  --pu: #bf5af2;
+  --sk: #64d2ff;
+  --result-fg: #e0e6f0;
+  --result-link: #5b9eff;
+  --result-code: #b8c2d6;
+  --edge: #3a3a3c;
+  --hairline: rgba(255,255,255,.10);
+  --hover-row: rgba(255,255,255,.05);
+  --hover-card: rgba(255,255,255,.045);
+  --hover-accent: rgba(10,132,255,.18);
+  --chip-bg: rgba(255,255,255,.08);
+  --g-fill: #22873c;
+  --on-accent: #fff;
+  --scrim: rgba(0,0,0,.5);
+  --glass: rgba(44,44,46,.62);
+  --glass-strong: rgba(58,58,60,.82);
+  --glass-solid: #2c2c2e;
+  --glass-blur: 16px;
+  --glass-border: rgba(255,255,255,.10);
+  --glass-hero: var(--glass);
+  --glass-hero-strong: var(--glass-strong);
+  --sh: 0 1px 2px rgba(0,0,0,.34);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode="auto"] {
+    --s: #1a1a1c;
+    --s2: #262628;
+    --s3: #3a3a3c;
+    --bg: #1e1e20;
+    --c: #2c2c2e;
+    --b: #3a3a3c;
+    --b-strong: #48484a;
+    --t: #ffffff;
+    --t2: rgba(235,235,245,.62);
+    --t3: rgba(235,235,245,.55);
+    --a: #0a84ff;
+    --ah: #0077ed;
+    --g: #30d158;
+    --y: #ff9f0a;
+    --r: #ff453a;
+    --pu: #bf5af2;
+    --sk: #64d2ff;
+    --result-fg: #e0e6f0;
+    --result-link: #5b9eff;
+    --result-code: #b8c2d6;
+    --edge: #3a3a3c;
+    --hairline: rgba(255,255,255,.10);
+    --hover-row: rgba(255,255,255,.05);
+    --hover-card: rgba(255,255,255,.045);
+    --hover-accent: rgba(10,132,255,.18);
+    --chip-bg: rgba(255,255,255,.08);
+    --g-fill: #22873c;
+    --on-accent: #fff;
+    --scrim: rgba(0,0,0,.5);
+    --glass: rgba(44,44,46,.62);
+    --glass-strong: rgba(58,58,60,.82);
+    --glass-solid: #2c2c2e;
+    --glass-blur: 16px;
+    --glass-border: rgba(255,255,255,.10);
+    --glass-hero: var(--glass);
+    --glass-hero-strong: var(--glass-strong);
+    --sh: 0 1px 2px rgba(0,0,0,.34);
+  }
 }

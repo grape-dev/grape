@@ -1990,7 +1990,7 @@ onMounted(function () {
 .ev__clearbtn {
   border: 1px solid var(--b);
   background: transparent;
-  color: #ff3b30;
+  color: var(--r);
   border-radius: 6px;
   padding: 3px 10px;
   font-size: 12px;
@@ -2019,7 +2019,7 @@ onMounted(function () {
   border-radius: 8px;
   font-size: 11px;
   color: var(--t2);
-  background: #f1f5f9;
+  background: var(--chip-bg);
   text-align: center;
   line-height: 1.4;
 }

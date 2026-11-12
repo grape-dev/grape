@@ -58,7 +58,7 @@
                 <span
                   v-if="canToggle(node.id)"
                   class="ap-nd-toggle"
-                  :style="{ color: node.enabled ? '#ff3b30' : '#34c759' }"
+                  :style="{ color: node.enabled ? 'var(--r)' : 'var(--g)' }"
                   @click.stop="toggleAgent(node.id)"
                   >{{ node.enabled ? '✕' : '✓' }}</span
                 >
@@ -323,7 +323,7 @@
                   <span
                     v-if="flowEditing && canToggle(node.id)"
                     class="ap-nd-toggle"
-                    :style="{ color: node.enabled ? '#ff3b30' : '#34c759' }"
+                    :style="{ color: node.enabled ? 'var(--r)' : 'var(--g)' }"
                     @click.stop="toggleAgent(node.id)"
                     >{{ node.enabled ? '✕' : '✓' }}</span
                   >
@@ -591,7 +591,7 @@
                   <span
                     :style="{
                       fontSize: '11px',
-                      color: p.stage === 'done' ? '#34c759' : 'var(--t3)',
+                      color: p.stage === 'done' ? 'var(--g)' : 'var(--t3)',
                     }"
                     >{{ stageLabel(p.stage) }}</span
                   >
@@ -1046,11 +1046,11 @@ const G = globalThis
 // ═══ 常量 ═══
 const AGENT_META = {
   vod: { icon: '🔍', label: 'VOD', color: '#ff2d92' },
-  issue: { icon: '📋', label: 'Issue', color: '#ff3b30' },
-  coding: { icon: '💻', label: 'Coding', color: '#0071e3' },
+  issue: { icon: '📋', label: 'Issue', color: 'var(--r)' },
+  coding: { icon: '💻', label: 'Coding', color: 'var(--a-text)' },
   qa: { icon: '🧪', label: 'QA', color: '#af52de' },
   sre: { icon: '⚙️', label: 'SRE', color: '#ff9f0a' },
-  chat: { icon: '💬', label: 'Chat', color: '#34c759' },
+  chat: { icon: '💬', label: 'Chat', color: 'var(--g)' },
 }
 const SCENE_ICONS = {
   default: '⚙',
@@ -1096,7 +1096,7 @@ const ENG_TAG_COLORS = {
   qa: '#a855f7',
   sre: '#f59e0b',
 }
-const SCOPE_COLORS_ALL = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: 'var(--t3)' }
+const SCOPE_COLORS_ALL = { global: '#6366f1', user: 'var(--g)', repo: '#f59e0b', local: 'var(--t3)' }
 const SCOPE_LABELS_ALL = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
 const SCOPE_ORDER2 = ['user', 'repo', 'global', 'local']
 const ENG_SCENE_COLORS = {
@@ -1404,7 +1404,7 @@ function resolveOwnerName(data) {
   return [owner, name]
 }
 function agentColor(tag) {
-  return (AGENT_META[tag] || {}).color || tagColors[tag] || '#0071e3'
+  return (AGENT_META[tag] || {}).color || tagColors[tag] || 'var(--a-text)'
 }
 function agentIcon(tag) {
   return (AGENT_META[tag] || {}).icon || '◈'
@@ -2318,7 +2318,7 @@ function toggleEngineId(id) {
 }
 function engStatusColor(st) {
   return (
-    { online: '#34c759', recently_lost: '#f59e0b', offline: 'var(--t3)', about_to_gc: '#ff3b30' }[
+    { online: 'var(--g)', recently_lost: '#f59e0b', offline: 'var(--t3)', about_to_gc: 'var(--r)' }[
       st
     ] || 'var(--t3)'
   )
@@ -3079,21 +3079,21 @@ onBeforeUnmount(function () {
   transition: all 0.2s ease;
   background: transparent;
   border: 1px solid rgba(0, 113, 227, 0.3);
-  color: #0071e3;
+  color: var(--a-text);
   font-family: inherit;
 }
 .ap-btn:hover {
-  background: #0071e3;
-  border-color: #0071e3;
+  background: var(--a);
+  border-color: var(--a-text);
   color: var(--on-accent);
 }
 .ap-btn-d {
   border: 1px solid rgba(255, 59, 48, 0.3);
-  color: #ff3b30;
+  color: var(--r);
 }
 .ap-btn-d:hover {
   background: #ff3b30;
-  border-color: #ff3b30;
+  border-color: var(--r);
   color: var(--on-accent);
 }
 /* Hero */
@@ -3160,7 +3160,7 @@ onBeforeUnmount(function () {
 .dbv-rolepill {
   font-size: 10px;
   font-weight: 500;
-  color: #0071e3;
+  color: var(--a-text);
   background: #e3edfd;
   padding: 2px 8px;
   border-radius: 6px;
@@ -3202,7 +3202,7 @@ onBeforeUnmount(function () {
   color: var(--on-accent);
 }
 .dbv-hostbanner.error button {
-  color: #ff3b30;
+  color: var(--r);
   border-color: rgba(255, 59, 48, 0.3);
   background: rgba(255, 59, 48, 0.1);
 }
@@ -3502,7 +3502,7 @@ onBeforeUnmount(function () {
   background: var(--bg);
 }
 .dbv-iconpick.on {
-  background: #0071e3;
+  background: var(--a);
   color: var(--on-accent);
 }
 /* 详情卡 */
@@ -3677,7 +3677,7 @@ onBeforeUnmount(function () {
   white-space: nowrap;
 }
 .dbv-skillpick:hover {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   background: var(--c);
 }
 .ap-nd-engbtn {
@@ -3690,12 +3690,12 @@ onBeforeUnmount(function () {
   cursor: pointer;
 }
 .ap-nd-engbtn:hover {
-  border-color: #0071e3;
-  color: #0071e3;
+  border-color: var(--a-text);
+  color: var(--a-text);
 }
 .ap-arr {
   font-size: 18px;
-  color: #0071e3;
+  color: var(--a-text);
   font-weight: 700;
   align-self: center;
   margin: 0 4px;
@@ -3713,16 +3713,16 @@ onBeforeUnmount(function () {
   border-radius: 999px;
 }
 :deep(.dbv-engbadge.green) {
-  background: #34c75914;
-  color: #34c759;
+  background: var(--g-fill)14;
+  color: var(--g);
 }
 :deep(.dbv-engbadge.blue) {
-  background: #0071e314;
-  color: #0071e3;
+  background: var(--a)14;
+  color: var(--a-text);
 }
 :deep(.dbv-engbadge.red) {
   background: #ff3b3014;
-  color: #ff3b30;
+  color: var(--r);
 }
 :deep(.dbv-engbadge.gray) {
   background: #86868b14;
@@ -3759,7 +3759,7 @@ onBeforeUnmount(function () {
   display: inline-block;
 }
 .dbv-switch.on {
-  background: #34c759;
+  background: var(--g-fill);
 }
 .dbv-knob {
   width: 22px;
@@ -3910,7 +3910,7 @@ onBeforeUnmount(function () {
   border-radius: 999px;
   border: none;
   background: rgba(255, 59, 48, 0.08);
-  color: #ff3b30;
+  color: var(--r);
   cursor: pointer;
   font-size: 14px;
   display: flex;
@@ -4084,7 +4084,7 @@ onBeforeUnmount(function () {
   background: rgba(0, 113, 227, 0.08);
 }
 .dbv-skillcheck {
-  color: #0071e3;
+  color: var(--a-text);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -4141,7 +4141,7 @@ onBeforeUnmount(function () {
   padding: 10px 14px;
   margin-bottom: 12px;
   font-size: 11px;
-  color: #d32f2f;
+  color: var(--r);
   line-height: 1.6;
 }
 .dbv-engfilters {
@@ -4163,9 +4163,9 @@ onBeforeUnmount(function () {
   font-weight: 500;
 }
 .dbv-engfilters > span.on {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   color: var(--on-accent);
-  background: #0071e3;
+  background: var(--a);
 }
 .dbv-engsep {
   width: 1px;
@@ -4233,7 +4233,7 @@ onBeforeUnmount(function () {
   width: 18px;
   height: 18px;
   cursor: pointer;
-  accent-color: #0071e3;
+  accent-color: var(--a-text);
 }
 .dbv-engbody {
   flex: 1;
@@ -4325,7 +4325,7 @@ onBeforeUnmount(function () {
   gap: 8px;
 }
 .dbv-reveal-err {
-  color: #ff3b30;
+  color: var(--r);
   font-size: 12px;
   margin: -8px 0 12px;
   line-height: 1.4;
@@ -4351,7 +4351,7 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .dbv-scenesearch-input:focus {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   background: var(--c);
 }
 .dbv-scenesearch-clear {
@@ -4417,7 +4417,7 @@ onBeforeUnmount(function () {
   color: var(--t);
 }
 .dbv-deployurl-input:focus {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   background: var(--c);
 }
 .bt-mini {

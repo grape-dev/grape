@@ -597,7 +597,7 @@ const AGENT_META = {
   coding: { icon: '💻', label: 'Coding', color: '#7A92B0' },
   qa: { icon: '🧪', label: 'QA', color: '#9A85A8' },
   sre: { icon: '⚙️', label: 'SRE', color: '#B89B6A' },
-  chat: { icon: '💬', label: 'Chat', color: '#34c759' },
+  chat: { icon: '💬', label: 'Chat', color: 'var(--g)' },
   auto: { icon: '⏰', label: 'Auto', color: '#8E9BAA' },
 }
 const CAT_BG = {
@@ -1964,13 +1964,13 @@ onMounted(function () {
   background: var(--bg, #f5f5f7);
 }
 .sm__scenename:focus {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   background: var(--c);
 }
 .sm__nameerr {
   margin-top: 6px;
   font-size: 11px;
-  color: #ff3b30;
+  color: var(--r);
   line-height: 1.5;
 }
 </style>

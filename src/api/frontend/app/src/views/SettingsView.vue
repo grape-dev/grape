@@ -344,14 +344,14 @@ onMounted(() => {
   background: rgba(255, 59, 48, 0.1);
   border-radius: 6px;
   margin-bottom: 8px;
-  color: #ff3b30;
+  color: var(--r);
   font-size: 12px;
 }
 .sv__badge {
   font-size: 10px;
 }
 .sv__scope {
-  background: #f1f5f9;
+  background: var(--chip-bg);
   font-size: 10px;
 }
 .sv__unhost {
@@ -375,7 +375,7 @@ onMounted(() => {
   margin-bottom: 8px;
 }
 .sv__migrate-repo {
-  background: #f1f5f9;
+  background: var(--chip-bg);
   color: var(--t2);
 }
 .sv__migrate-owner {

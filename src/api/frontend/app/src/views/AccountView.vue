@@ -2312,6 +2312,6 @@ onMounted(function () {
   margin-top: 8px;
 }
 .ac__disabled {
-  background: #f1f5f9;
+  background: var(--chip-bg);
 }
 </style>

@@ -149,7 +149,7 @@
   color: var(--t);              /* override hardcoded #fff → dark text on light glass */
 }
 [data-theme="apple"] .sb-h {
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+  border-bottom: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .sb-h h1 {
   font-weight: 600;
@@ -201,7 +201,7 @@
 
 /* Sidebar footer */
 [data-theme="apple"] .sb-ft {
-  border-top: 1px solid rgba(0,0,0,0.06);
+  border-top: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .sb-ft .av {
   background: linear-gradient(135deg, #0071e3, #af52de);
@@ -246,16 +246,16 @@
   transition: all var(--apple-transition);
 }
 [data-theme="apple"] .bt-p {
-  background: rgba(0,113,227,0.08);
-  color: #0071e3;
-  border: 1px solid rgba(0,113,227,0.12);
+  background: color-mix(in srgb, var(--a) 10%, transparent);
+  color: var(--a-text);
+  border: 1px solid color-mix(in srgb, var(--a) 18%, transparent);
 }
 [data-theme="apple"] .bt-p:hover {
-  background: rgba(0,113,227,0.12);
+  background: color-mix(in srgb, var(--a) 18%, transparent);
 }
 [data-theme="apple"] .bt-o {
   background: var(--c);
-  color: var(--a);
+  color: var(--a-text);
   border: 1px solid var(--b);
 }
 [data-theme="apple"] .bt-o:hover {
@@ -264,9 +264,9 @@
 }
 /* Toggle selected — same tint as .stabs a.ac for visual consistency */
 [data-theme="apple"] .bt-tg {
-  background: rgba(0,113,227,0.08);
-  color: #0071e3;
-  border: 1px solid rgba(0,113,227,0.12);
+  background: color-mix(in srgb, var(--a) 10%, transparent);
+  color: var(--a-text);
+  border: 1px solid color-mix(in srgb, var(--a) 18%, transparent);
 }
 [data-theme="apple"] .bt-tg:hover {
   background: rgba(0,113,227,0.12);
@@ -279,7 +279,7 @@
 /* ── 7. Cards ── */
 [data-theme="apple"] .cd {
   background: var(--c);
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--glass-border);
   border-radius: var(--r2);
   box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
@@ -292,10 +292,10 @@
 [data-theme="apple"] .tg {
   border-radius: var(--r2);
   overflow: hidden;
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .tg th {
-  background: #f5f5f7;
+  background: var(--bg);
   color: var(--t2);
   font-weight: 600;
   font-size: 12px;
@@ -303,7 +303,7 @@
   text-transform: uppercase;
 }
 [data-theme="apple"] .tg td {
-  border-color: rgba(0,0,0,0.06);
+  border-color: var(--glass-border);
 }
 [data-theme="apple"] .tg-row:hover {
   background: rgba(0,113,227,0.03);
@@ -320,10 +320,10 @@
   content: none;
 }
 [data-theme="apple"] .lobby-head {
-  background: rgba(255,255,255,0.72);
+  background: var(--glass);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+  border-bottom: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .lobby-tabs {
   background: rgba(0,0,0,0.04);
@@ -365,7 +365,7 @@
 
 [data-theme="apple"] .lobby-card {
   border-radius: 18px;
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--glass-border);
   box-shadow: 0 2px 8px rgba(0,0,0,0.04);
   transition: all 0.3s cubic-bezier(0.25,0.1,0.25,1);
 }
@@ -515,13 +515,13 @@
   background: rgba(245,245,247,0.6);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  border-right: 1px solid rgba(0,0,0,0.06);
+  border-right: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .chat-hdr {
-  background: rgba(255,255,255,0.72);
+  background: var(--glass);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+  border-bottom: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .conv-item {
   border-radius: 10px;
@@ -535,7 +535,7 @@
 }
 [data-theme="apple"] .chat-in {
   background: var(--c);
-  border-top: 1px solid rgba(0,0,0,0.06);
+  border-top: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .chat-in textarea {
   border-radius: 18px;
@@ -686,16 +686,16 @@
 [data-theme="apple"] .tmpl-card:hover .tmpl-card-ic { transform: scale(1.08) rotate(-3deg) !important; }
 
 /* ── Single Featured Card ── */
-[data-theme="apple"] .feat-single { border-radius: 14px !important; border: 1px solid rgba(0,0,0,0.06) !important; }
+[data-theme="apple"] .feat-single { border-radius: 14px !important; border: 1px solid var(--glass-border) !important; }
 [data-theme="apple"] .feat-single-h { font-weight: 600 !important; font-size: 13px !important; letter-spacing: -0.01em !important; background: rgba(0,0,0,0.02) !important; }
 [data-theme="apple"] .feat-item { border-radius: 0 !important; transition: all 0.2s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .feat-item:hover { background: rgba(0,0,0,0.03) !important; }
 [data-theme="apple"] .feat-item-act { background: rgba(0,113,227,0.08) !important; border-left-color: #0071e3 !important; }
-[data-theme="apple"] .feat-item-ic { border-radius: 6px !important; background: #f0f0f0 !important; }
+[data-theme="apple"] .feat-item-ic { border-radius: 6px !important; background: var(--s3) !important; }
 [data-theme="apple"] .feat-item-name { font-weight: 600 !important; letter-spacing: -0.01em !important; }
 
 /* ── 12s. Horizontal Cards ── */
-[data-theme="apple"] .tmpl-card-h { border-radius: 14px !important; border: 1px solid rgba(0,0,0,0.06) !important; transition: all 0.3s var(--apple-spring-ease) !important; }
+[data-theme="apple"] .tmpl-card-h { border-radius: 14px !important; border: 1px solid var(--glass-border) !important; transition: all 0.3s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .tmpl-card-h:hover { box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important; transform: translateY(-2px) !important; }
 [data-theme="apple"] .tmpl-card-h-ic { border-radius: 12px !important; }
 [data-theme="apple"] .tmpl-card-h-name { font-weight: 600 !important; letter-spacing: -0.01em !important; }
@@ -707,11 +707,11 @@
 /* ── 12. Task Center ── */
 [data-theme="apple"] .tsk-list {
   border-radius: 18px;
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--glass-border);
   box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 [data-theme="apple"] .tsk-row {
-  border-color: rgba(0,0,0,0.06);
+  border-color: var(--glass-border);
   transition: background 0.2s;
 }
 [data-theme="apple"] .tsk-row:hover {
@@ -849,7 +849,7 @@
 /* Task Center — detail panel */
 [data-theme="apple"] .tsk-detail {
   border-radius: 18px !important;
-  border: 1px solid rgba(0,0,0,0.06) !important;
+  border: 1px solid var(--glass-border) !important;
   box-shadow: 0 4px 16px rgba(0,0,0,0.04) !important;
   padding: 24px !important;
 }
@@ -861,7 +861,7 @@
   letter-spacing: -0.01em !important;
 }
 [data-theme="apple"] .tsk-det-meta {
-  border-color: rgba(0,0,0,0.06) !important;
+  border-color: var(--glass-border) !important;
 }
 [data-theme="apple"] .tsk-det-actions {
   gap: 10px !important;
@@ -934,7 +934,7 @@
 /* ── 13. Template Cards ── */
 [data-theme="apple"] .tmpl-card {
   border-radius: 18px;
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--glass-border);
   box-shadow: 0 2px 8px rgba(0,0,0,0.04);
 }
 [data-theme="apple"] .tmpl-card::after {
@@ -961,7 +961,7 @@
   font-size: 11px;
 }
 [data-theme="apple"] .pg-a { background: rgba(0,113,227,0.1); color: var(--a); }
-[data-theme="apple"] .pg-d { background: rgba(0,0,0,0.06); color: var(--t2); }
+[data-theme="apple"] .pg-d { background: var(--chip-bg); color: var(--t2); }
 [data-theme="apple"] .pg-e { background: rgba(255,59,48,0.1); color: var(--r); }
 
 /* ── 15. Error & Loading ── */
@@ -1132,7 +1132,7 @@
 
 [data-theme="apple"] .chat-engine-badge {
   background: rgba(0,0,0,0.05);
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--glass-border);
   color: var(--t2);
   font-size: 12px;
   padding: 3px 12px;
@@ -1336,46 +1336,9 @@
 /* Dark mode auto-adapt (developer.apple.com supports dark) */
 /* ── 强制深色模式（方案A 10-26）：与 auto 暗色变量保持同源镜像 ──
    语义：data-theme-mode="dark" 时无条件应用暗色（不看系统偏好） */
-[data-theme="apple"][data-theme-mode="dark"] {
-  /* 暗色档对齐 grape-release-demo.html（2026-11-11 主人指定配色）：
-     抬升中性色（不是纯黑）+ HIG 暗色系彩 */
-  --s: #1c1c1e;
-  --s2: #2c2c2e;
-  --s3: #3a3a3e;
-  --bg: #161618;
-  --c: #232326;
-  --b: #3a3a3e;
-  --b-strong: #48484c;
-  --t: #f5f5f7;
-  --t2: rgba(235,235,245,.62);
-  --t3: #8e8e93;
-  --a: #0a84ff;
-  --ah: #0077ed;
-  --g: #30d158;
-  --y: #ff9f0a;
-  --r: #ff453a;
-  --pu: #bf5af2;
-  --sk: #64d2ff;
-  --result-fg: #e0e6f0;
-  --result-link: #5b9eff;
-  --result-code: #b8c2d6;
-  /* 主题语义 token 暗色档（与 auto 暗色块同源镜像；改一处必须改两处） */
-  --edge: #3a3a3e;
-  --hairline: rgba(255,255,255,.08);
-  --hover-row: #2c2c2e;
-  --hover-card: #2c2c2e;
-  --hover-accent: rgba(10,132,255,.16);
-  --chip-bg: rgba(255,255,255,.07);
-  --g-fill: #22873c;
-  --on-accent: #fff;
-  --scrim: rgba(0,0,0,.5);
-  --glass-hero: rgba(35,35,38,.72);
-  --glass-hero-strong: rgba(48,48,52,.85);
-  /* 纯黑上阴影不可见 → 收窄阴影，面板靠 --edge 立边界 */
-  --sh: 0 1px 3px rgba(0,0,0,.4);
-}
+/* 暗色变量已收口到 tokens.css（:root[data-theme-mode="dark"]）；此处只留组件级覆盖。 */
 [data-theme="apple"][data-theme-mode="dark"] .sidebar {
-  background: rgba(28,28,30,0.85) !important;
+  background: rgba(26,26,28,0.85) !important;
   border-right-color: rgba(255,255,255,0.08) !important;
 }
 [data-theme="apple"][data-theme-mode="dark"] .msg pre {
@@ -1396,44 +1359,8 @@
 [data-theme="apple"][data-theme-mode="dark"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.16) 0%,rgba(123,60,242,.13) 45%,rgba(216,48,118,.10) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
 
 @media (prefers-color-scheme: dark) {
-  [data-theme="apple"][data-theme-mode="auto"] {
-    /* 与强制 dark 块同源镜像（改一处必须改两处） */
-    --s: #1c1c1e;
-    --s2: #2c2c2e;
-    --s3: #3a3a3e;
-    --bg: #161618;
-    --c: #232326;
-    --b: #3a3a3e;
-    --b-strong: #48484c;
-    --t: #f5f5f7;
-    --t2: rgba(235,235,245,.62);
-    --t3: #8e8e93;
-    --a: #0a84ff;
-    --ah: #0077ed;
-    --g: #30d158;
-    --y: #ff9f0a;
-    --r: #ff453a;
-    --pu: #bf5af2;
-    --sk: #64d2ff;
-    --result-fg: #e0e6f0;
-    --result-link: #5b9eff;
-    --result-code: #b8c2d6;
-    /* 主题语义 token 暗色档（与强制 dark 块同源镜像） */
-    --edge: #3a3a3e;
-    --hairline: rgba(255,255,255,.08);
-    --hover-row: #2c2c2e;
-    --hover-card: #2c2c2e;
-    --hover-accent: rgba(10,132,255,.16);
-    --chip-bg: rgba(255,255,255,.07);
-    --g-fill: #22873c;
-    --on-accent: #fff;
-    --scrim: rgba(0,0,0,.5);
-    --glass-hero: rgba(35,35,38,.72);
-    --glass-hero-strong: rgba(48,48,52,.85);
-    --sh: 0 1px 3px rgba(0,0,0,.4);
-  }
   [data-theme="apple"][data-theme-mode="auto"] .sidebar {
-    background: rgba(28,28,30,0.85) !important;
+    background: rgba(26,26,28,0.85) !important;
     border-right-color: rgba(255,255,255,0.08) !important;
   }
   [data-theme="apple"][data-theme-mode="auto"] .msg pre {
@@ -1465,9 +1392,9 @@
 /* ── 13. Project Workspace ── */
 [data-theme="apple"] .project-hero-btn { border-radius: 980px !important; background: #1d1d1f !important; font-size: 13px !important; font-weight: 500 !important; padding: 8px 20px !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .project-hero-btn:hover { background: #2d2d2f !important; transform: translateY(-1px) !important; }
-[data-theme="apple"] .project-card { border-radius: 10px !important; border: 1px solid rgba(0,0,0,0.06) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
-[data-theme="apple"] .project-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; background: #fafafa !important; }
-[data-theme="apple"] .project-card-ic { border-radius: 50% !important; background: #f0f0f0 !important; font-weight: 500 !important; }
+[data-theme="apple"] .project-card { border-radius: 10px !important; border: 1px solid var(--glass-border) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
+[data-theme="apple"] .project-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; background: var(--hover-card) !important; }
+[data-theme="apple"] .project-card-ic { border-radius: 50% !important; background: var(--s3) !important; font-weight: 500 !important; }
 [data-theme="apple"] .project-card-name { font-weight: 600 !important; letter-spacing: -0.01em !important; font-size: 15px !important; }
 [data-theme="apple"] .project-card-meta { font-size: 12px !important; }
 [data-theme="apple"] .project-card-btn-link { font-size: 13px !important; font-weight: 500 !important; color: #0071e3 !important; }
@@ -1477,25 +1404,25 @@
 [data-theme="apple"] .project-refresh-btn { border-radius: 8px !important; font-size: 12px !important; font-weight: 500 !important; }
 [data-theme="apple"] .project-pager button { border-radius: 50% !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .project-pager button:hover:not(:disabled) { border-color: var(--a) !important; color: var(--a) !important; transform: scale(1.05) !important; }
-[data-theme="apple"] .template-card { border-radius: 10px !important; border: 1px solid rgba(0,0,0,0.06) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
+[data-theme="apple"] .template-card { border-radius: 10px !important; border: 1px solid var(--glass-border) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .template-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; }
-[data-theme="apple"] .template-card-ic { border-radius: 50% !important; background: #f0f0f0 !important; }
+[data-theme="apple"] .template-card-ic { border-radius: 50% !important; background: var(--s3) !important; }
 [data-theme="apple"] .template-card-name { font-weight: 600 !important; }
 [data-theme="apple"] .project-hero-illustration { border-radius: 14px !important; }
 
 /* ── Template list unified ── */
-[data-theme="apple"] .template-card-item { border-radius: 10px !important; border: 1px solid rgba(0,0,0,0.06) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
-[data-theme="apple"] .template-card-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; background: #fafafa !important; }
-[data-theme="apple"] .template-card-item-ic { border-radius: 50% !important; background: #f0f0f0 !important; }
+[data-theme="apple"] .template-card-item { border-radius: 10px !important; border: 1px solid var(--glass-border) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
+[data-theme="apple"] .template-card-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; background: var(--hover-card) !important; }
+[data-theme="apple"] .template-card-item-ic { border-radius: 50% !important; background: var(--s3) !important; }
 [data-theme="apple"] .template-card-item-name { font-weight: 600 !important; letter-spacing: -0.01em !important; }
 [data-theme="apple"] .tmpl-platform-tag { font-size: 9px !important; font-weight: 600 !important; padding: 2px 7px !important; border-radius: 4px !important; background: rgba(49,104,224,0.1) !important; color: #3168e0 !important; }
 [data-theme="apple"] .template-card-item-btn { border-radius: 980px !important; font-size: 12px !important; font-weight: 500 !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .template-card-add { border-radius: 10px !important; }
 [data-theme="apple"] .template-card-add:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; }
-[data-theme="apple"] .tmpl-tab { border-radius: 8px !important; border: 1px solid rgba(0,0,0,0.06) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
+[data-theme="apple"] .tmpl-tab { border-radius: 8px !important; border: 1px solid var(--glass-border) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .tmpl-tab-act { background: #0071e3 !important; color: #fff !important; border-color: transparent !important; box-shadow: 0 4px 14px rgba(0,113,227,0.25) !important; }
 [data-theme="apple"] .tmpl-tab-act:hover { background: #0077ed !important; }
-[data-theme="apple"] .tmpl-search-bar-inline input { border-radius: 8px !important; font-size: 13px !important; border: 1px solid rgba(0,0,0,0.06) !important; }
+[data-theme="apple"] .tmpl-search-bar-inline input { border-radius: 8px !important; font-size: 13px !important; border: 1px solid var(--glass-border) !important; }
 [data-theme="apple"] .tmpl-search-bar-inline input:focus { border-color: #0071e3 !important; box-shadow: 0 0 0 4px rgba(0,113,227,0.1) !important; }
 [data-theme="apple"] .tmpl-search-bar-inline button { border-radius: 980px !important; font-size: 12px !important; font-weight: 500 !important; }
 [data-theme="apple"] .template-layout-side { position: sticky !important; top: 20px !important; }
@@ -1510,7 +1437,7 @@
   background: rgba(0,0,0,0.04);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  border: 0.5px solid rgba(0,0,0,0.06);
+  border: 0.5px solid var(--glass-border);
   transition: all var(--apple-transition);
 }
 [data-theme="apple"] .help-btn:hover {
@@ -1528,7 +1455,7 @@
   -webkit-backdrop-filter: blur(8px);
 }
 [data-theme="apple"] .help-drawer {
-  background: rgba(255,255,255,0.92);
+  background: var(--glass-strong);
   backdrop-filter: blur(40px);
   -webkit-backdrop-filter: blur(40px);
   border-left: 0.5px solid rgba(0,0,0,0.08);
@@ -1536,7 +1463,7 @@
   border-radius: 24px 0 0 24px;
 }
 [data-theme="apple"] .help-drawer-hdr {
-  background: rgba(255,255,255,0.6);
+  background: var(--glass);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-bottom: 0.5px solid rgba(0,0,0,0.08);
@@ -1547,7 +1474,7 @@
 }
 [data-theme="apple"] .help-drawer-close {
   background: rgba(0,0,0,0.05);
-  border: 0.5px solid rgba(0,0,0,0.06);
+  border: 0.5px solid var(--glass-border);
   border-radius: 50%;
   transition: all 0.2s cubic-bezier(0.25,0.1,0.25,1);
 }
@@ -1572,7 +1499,7 @@
   background: rgba(0,0,0,0.5);
 }
 [data-theme="apple"][data-theme-mode="dark"] .help-drawer {
-  background: rgba(30,30,32,0.92);
+  background: rgba(30,30,32,0.90);
   border-left-color: rgba(255,255,255,0.08);
   box-shadow: -12px 0 48px rgba(0,0,0,0.4);
 }
@@ -1595,7 +1522,7 @@
   background: rgba(0,0,0,0.04);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  border: 0.5px solid rgba(0,0,0,0.06);
+  border: 0.5px solid var(--glass-border);
   color: var(--t2);
   transition: all var(--apple-transition);
 }
@@ -1667,4 +1594,23 @@
   background: rgba(255,255,255,0.1);
   border-color: rgba(255,255,255,0.2);
   transform: scale(1.02);
+}
+
+/* ── 21. 玻璃面统一（2026-11-12 mac-dark 试点落地）─────────────────────
+ * 值来自 tokens.css 的 --glass / --glass-blur / --glass-border：
+ *   light = 白 72%（视觉等同原来的实心白卡）/ dark = 卡片色 62% + 16px 模糊。
+ * 描边用 --edge（light 透明 / dark 半透明白），所以浅色档零变化。 */
+.cd, .af .nd, .rc, .cl, .tsk-list, .tsk-detail, .chat-main, .chat-convlist,
+.lobby-card, .apple-card, .scn-card, .ob-bind-card, .ev-result-panel,
+.project-card, .template-card, .template-card-item, .feat-single, .k-card,
+.stat-table, .kb-detail-scroll, .create-repo-modal, .km-modal, .chat-del-pop,
+.chat-hdr, .lobby-head, .tb {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  box-shadow: inset 0 0 0 1px var(--edge), var(--sh);
+}
+/* 浮层/弹窗用强玻璃，保证遮住底下的内容 */
+.create-repo-modal, .km-modal, .chat-del-pop {
+  background: var(--glass-strong);
 }

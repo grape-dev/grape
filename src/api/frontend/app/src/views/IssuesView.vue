@@ -941,7 +941,7 @@ const STATUS_COLORS = {
   in_progress: '#3b82f6',
   awaiting_input: '#f59e0b',
   pending_review: '#10b981',
-  done: '#34c759',
+  done: 'var(--g)',
   cancelled: 'var(--t3)',
 }
 const STAGE_LABELS = computed(() => ({
@@ -961,7 +961,7 @@ const STAGE_COLORS = {
   qa: '#a855f7',
   sre: '#f59e0b',
   pending_review: '#10b981',
-  done: '#34c759',
+  done: 'var(--g)',
   '': 'var(--t3)',
 }
 function statusInfo(tk) {
@@ -1398,7 +1398,7 @@ const detailCardHtml = computed(() => {
     : ''
   const issueLink = vcsUrl(tk.repo_key, (tk.is_pr ? '/pull/' : '/issues/') + tk.issue_number)
   const statusColor = isDone
-    ? '#34c759'
+    ? 'var(--g)'
     : isCancelled
       ? 'var(--t3)'
       : isProc
@@ -1433,7 +1433,7 @@ const agentStatusCardHtml = computed(() => {
       label: t('agent_status.pending'),
     },
     running: { color: '#3b82f6', bg: '#3b82f6', icon: '●', label: t('agent_status.running') },
-    completed: { color: '#34c759', bg: '#34c759', icon: '✓', label: t('agent_status.completed') },
+    completed: { color: 'var(--g)', bg: 'var(--g)', icon: '✓', label: t('agent_status.completed') },
     failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
     cancelled: {
       color: 'var(--t3)',
@@ -1460,7 +1460,7 @@ const agentStatusCardHtml = computed(() => {
     html += `<span class="isk-node-lbl" style="color:${si.color}">${esc(s.label || s.agent || '')}</span>`
     html += '</div>'
     if (i < statuses.length - 1) {
-      const lineCol = isCompletedS ? '#34c759' : isFailedS ? '#ef4444' : 'rgba(0,0,0,.1)'
+      const lineCol = isCompletedS ? 'var(--g)' : isFailedS ? '#ef4444' : 'rgba(0,0,0,.1)'
       html += `<div class="isk-node-line" style="background:${lineCol}"></div>`
     }
   })
@@ -1555,22 +1555,22 @@ const pipelineCardHtml = computed(() => {
       const isCancelledN = ns === 'cancelled' || ns === 4
       const isSkipped = ns === 'skipped' || ns === 5
       const col = isCompleted
-        ? '#34c759'
+        ? 'var(--g)'
         : isCurrent
-          ? '#0071e3'
+          ? 'var(--a-text)'
           : isFailed
-            ? '#ff3b30'
+            ? 'var(--r)'
             : isCancelledN
               ? 'var(--t3)'
               : isSkipped
                 ? 'var(--t3)'
                 : 'var(--t3)'
       const bg = isCompleted
-        ? '#34c759'
+        ? 'var(--g)'
         : isCurrent
-          ? '#0071e3'
+          ? 'var(--a-text)'
           : isFailed
-            ? '#ff3b30'
+            ? 'var(--r)'
             : isCancelledN
               ? 'var(--t3)'
               : isSkipped
@@ -1594,7 +1594,7 @@ const pipelineCardHtml = computed(() => {
       if (i < nodes.length - 1) {
         const nextNs = nodes[i + 1].node_status
         const nextCompleted = nextNs === 'completed' || nextNs === 2
-        const lineCol = nextCompleted || isCompleted ? '#34c759' : 'rgba(0,0,0,.1)'
+        const lineCol = nextCompleted || isCompleted ? 'var(--g)' : 'rgba(0,0,0,.1)'
         html += `<div class="isk-fline" style="background:${lineCol}"></div>`
       }
     })
@@ -1608,7 +1608,7 @@ const pipelineCardHtml = computed(() => {
       const isLast = i === events.length - 1
       const statusCol =
         e.status === 'completed'
-          ? '#34c759'
+          ? 'var(--g)'
           : e.status === 'failed'
             ? '#ef4444'
             : e.status === 'cancelled'
@@ -1706,9 +1706,9 @@ const prStatus = computed(() => {
   return {
     color:
       st === 'completed'
-        ? '#34c759'
+        ? 'var(--g)'
         : st === 'cancelled'
-          ? '#ff3b30'
+          ? 'var(--r)'
           : st === 'processing'
             ? '#3b82f6'
             : 'var(--t3)',
@@ -2128,7 +2128,7 @@ window._grapeConfirm = function (opts, event) {
     (cancelText || t('cancel') || '取消') +
     '</button>' +
     '<button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:' +
-    (danger ? '#ff3b30' : '#0071e3') +
+    (danger ? 'var(--r)' : 'var(--a-text)') +
     ';font-size:11px;font-weight:600;color: var(--on-accent);cursor:pointer;font-family:inherit">' +
     (confirmText || t('confirm') || '确认') +
     '</button></div>'
@@ -3236,7 +3236,7 @@ onBeforeUnmount(function () {
 /* Issue #460：创建弹窗「同步标题到描述」图标 */
 .isk-sync-title {
   cursor: pointer;
-  color: #0071e3;
+  color: var(--a-text);
   font-size: 14px;
   line-height: 1;
   padding: 0 2px;
@@ -3419,10 +3419,10 @@ onBeforeUnmount(function () {
   font-size: 11px;
 }
 .isk-admin-btn {
-  background: #34c759;
+  background: var(--g-fill);
 }
 .isk-danger {
-  color: #d32f2f;
+  color: var(--r);
 }
 .isk-handoff {
   color: var(--a, #0071e3);
@@ -3852,11 +3852,11 @@ onBeforeUnmount(function () {
 }
 .isk :deep(.isk-verdict.pass) {
   background: rgba(52, 199, 89, 0.1);
-  color: #34c759;
+  color: var(--g);
 }
 .isk :deep(.isk-verdict.fail) {
   background: rgba(255, 59, 48, 0.1);
-  color: #ff3b30;
+  color: var(--r);
 }
 .isk :deep(.isk-verdict.neutral) {
   background: rgba(142, 142, 147, 0.1);
@@ -4000,7 +4000,7 @@ onBeforeUnmount(function () {
   resize: vertical;
 }
 .isk-required {
-  color: #d32f2f;
+  color: var(--r);
 }
 .isk-attach-row {
   display: flex;
@@ -4027,7 +4027,7 @@ onBeforeUnmount(function () {
   padding: 0 2px;
 }
 .isk-modal-err {
-  color: #ff3b30;
+  color: var(--r);
   font-size: 12px;
   background: rgba(255, 59, 48, 0.06);
   border: 0.5px solid rgba(255, 59, 48, 0.2);

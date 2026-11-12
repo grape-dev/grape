@@ -665,7 +665,7 @@
             type="radio"
             :value="sc"
             name="scopeRadio"
-            :style="{ accentColor: '#0071e3', width: '16px', height: '16px' }"
+            :style="{ accentColor: 'var(--a-text)', width: '16px', height: '16px' }"
           />
           <span>{{ scopeShort(sc) }}</span>
         </label>
@@ -719,7 +719,7 @@
                   height="22"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="#2563eb"
+                  stroke="var(--a-text)"
                   stroke-width="2"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -1007,7 +1007,7 @@ const HEALTH_BADGE = {
   about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
 }
 const SCOPE_BADGE_CFG = {
-  global: { label: '全局', color: '#3168e0', bg: '#e3edfd' },
+  global: { label: '全局', color: 'var(--a-text)', bg: '#e3edfd' },
   repo: { label: '仓库', color: '#8b5cf6', bg: '#ede9fe' },
   user: { label: '个人', color: '#1ca44c', bg: '#dcfce7' },
   local: { label: '本机', color: '#0e7490', bg: '#cffafe' },
@@ -1041,9 +1041,9 @@ const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
 const DEV_STATUS_COLORS = {
   'cde.0000': '#6b7280',
-  'cde.0001': '#2563eb',
+  'cde.0001': 'var(--a-text)',
   'cde.0002': '#16a34a',
-  'cde.0003': '#2563eb',
+  'cde.0003': 'var(--a-text)',
   'cde.0004': '#16a34a',
   'cde.0005': '#d97706',
   'cde.0006': '#dc2626',
@@ -2398,7 +2398,7 @@ onBeforeUnmount(function () {
   min-width: 0;
 }
 .rtv-search:focus {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   background: var(--c);
 }
 .rtv-searchbtn {
@@ -2414,7 +2414,7 @@ onBeforeUnmount(function () {
   transition: all 0.15s;
 }
 .rtv-searchbtn:hover {
-  background: #0071e3;
+  background: var(--a);
   color: var(--on-accent);
 }
 .rtv-addbtn {
@@ -2531,9 +2531,9 @@ onBeforeUnmount(function () {
   transition: all 0.2s;
 }
 .rtv-chip.on {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   color: var(--on-accent);
-  background: #0071e3;
+  background: var(--a);
 }
 .rtv-chip-dot {
   width: 7px;
@@ -2560,7 +2560,7 @@ onBeforeUnmount(function () {
   font-weight: 400;
 }
 .rtv-clear:hover {
-  color: #d32f2f;
+  color: var(--r);
 }
 .rtv-ddwrap {
   position: relative;
@@ -2673,7 +2673,7 @@ onBeforeUnmount(function () {
 }
 .rtv-hbadge.recently_lost {
   color: var(--y);
-  background: #fef3c7;
+  background: color-mix(in srgb, var(--y) 16%, transparent);
 }
 .rtv-hbadge.offline {
   color: var(--t3);
@@ -2877,8 +2877,8 @@ onBeforeUnmount(function () {
   margin: 0 2px;
 }
 .rtv-pager button.on {
-  border-color: #0071e3;
-  background: #0071e3;
+  border-color: var(--a-text);
+  background: var(--a);
   color: var(--on-accent);
   font-weight: 600;
 }
@@ -3140,7 +3140,7 @@ onBeforeUnmount(function () {
   color: var(--t);
 }
 .rtv-sm-item.on {
-  border-color: #0071e3;
+  border-color: var(--a-text);
   background: rgba(0, 113, 227, 0.06);
   font-weight: 600;
 }
@@ -3367,7 +3367,7 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .rtv-cred-disabled {
-  background: #f1f5f9;
+  background: var(--chip-bg);
   color: var(--t2);
 }
 .rtv-cred-btns {
@@ -3384,7 +3384,7 @@ onBeforeUnmount(function () {
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  background: #fef3c7;
+  background: color-mix(in srgb, var(--y) 16%, transparent);
   border-radius: 8px;
   margin-bottom: 14px;
   font-size: 12px;

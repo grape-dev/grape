@@ -381,7 +381,7 @@
               <label class="apv-lbl-s">{{ tt('form.engine_label') }}</label>
               <div class="apv-pickerbtn" @click="openEnginePicker">
                 <span
-                  :style="{ color: selectedEngines.size ? '#0071e3' : '#34c759', fontWeight: 500 }"
+                  :style="{ color: selectedEngines.size ? 'var(--a-text)' : 'var(--g)', fontWeight: 500 }"
                 >
                   {{
                     selectedEngines.size
@@ -1748,11 +1748,11 @@ const EXEC_ICONS = {
 const EXEC_COLORS = {
   success: '#28a745',
   failed: '#dc3545',
-  running: '#3168e0',
+  running: 'var(--a-text)',
   pending: 'var(--t3)',
   retrying: '#e8a000',
   skipped: 'var(--t3)',
-  dispatched: '#3168e0',
+  dispatched: 'var(--a-text)',
   cancelled: '#e8a000',
 }
 function execIcon(st) {
@@ -1872,7 +1872,7 @@ function sevIcon(sev) {
   return { high: '🔴', medium: '🟡', low: '🔵' }[sev] || '•'
 }
 function sevColor(sev) {
-  return { high: '#dc3545', medium: '#e8a000', low: '#3168e0' }[sev] || 'var(--t3)'
+  return { high: '#dc3545', medium: '#e8a000', low: 'var(--a-text)' }[sev] || 'var(--t3)'
 }
 // 高级选项保存
 function saveAdvanced() {
@@ -2220,7 +2220,7 @@ const ENG_TAG_COLORS = {
   qa: '#a855f7',
   sre: '#f59e0b',
 }
-const SCOPE_COLORS = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: 'var(--t3)' }
+const SCOPE_COLORS = { global: '#6366f1', user: 'var(--g)', repo: '#f59e0b', local: 'var(--t3)' }
 function tagColor(t) {
   return ENG_TAG_COLORS[t] || '#999'
 }
@@ -2266,7 +2266,7 @@ function openSkillPicker() {
 function pickSkill(name) {
   selectedSkill.value = name
 }
-const SKILL_SCOPE_COLORS = { official: '#6366f1', user: '#34c759', repo: '#f59e0b' }
+const SKILL_SCOPE_COLORS = { official: '#6366f1', user: 'var(--g)', repo: '#f59e0b' }
 function skillScopeColor(s) {
   return SKILL_SCOPE_COLORS[s] || '#999'
 }
@@ -2383,7 +2383,7 @@ onBeforeUnmount(function () {
 }
 .apv-c-ck input {
   cursor: pointer;
-  accent-color: #3168e0;
+  accent-color: var(--a-text);
 }
 .apv-c-name {
   cursor: pointer;
@@ -2598,7 +2598,7 @@ onBeforeUnmount(function () {
   padding: 10px 14px;
   margin-top: 12px;
   font-size: 11px;
-  color: #d32f2f;
+  color: var(--r);
   line-height: 1.6;
 }
 .apv-instr-wrap {
@@ -2788,7 +2788,7 @@ onBeforeUnmount(function () {
 .apv-badge {
   font-size: 10px;
   background: rgba(49, 104, 224, 0.12);
-  color: #3168e0;
+  color: var(--a-text);
   padding: 2px 8px;
   border-radius: 8px;
   flex-shrink: 0;
@@ -2929,7 +2929,7 @@ onBeforeUnmount(function () {
   justify-content: center;
   border-radius: 4px;
   background: rgba(49, 104, 224, 0.15);
-  color: #3168e0;
+  color: var(--a-text);
   font-size: 11px;
 }
 .apv-dlg-tools {
@@ -3330,7 +3330,7 @@ onBeforeUnmount(function () {
   width: 18px;
   height: 18px;
   cursor: pointer;
-  accent-color: #0071e3;
+  accent-color: var(--a-text);
 }
 .apv-pick-body {
   flex: 1;
@@ -3358,7 +3358,7 @@ onBeforeUnmount(function () {
 .apv-pick-online {
   font-size: 11px;
   font-weight: 500;
-  color: #34c759;
+  color: var(--g);
   flex-shrink: 0;
 }
 .apv-engtag,
@@ -3424,14 +3424,14 @@ onBeforeUnmount(function () {
 }
 /* Issue #486：超范围引擎分组 */
 .apv-detached-g {
-  color: #d32f2f;
+  color: var(--r);
 }
 .apv-detached {
   background: #fff5f5;
   opacity: 0.85;
 }
 .apv-detached-warn {
-  color: #d32f2f;
+  color: var(--r);
 }
 /* Issue #697：疑似重复徽标与派发提示 */
 .apv-dup-badge {

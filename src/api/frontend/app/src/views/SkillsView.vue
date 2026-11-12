@@ -658,7 +658,7 @@ function agentMetaOf(at) {
   return AGENT_META[at] || {}
 }
 function gradient(s) {
-  return FEAT_GRADIENT[s.agent_type] || { g1: '#3168e0', g2: '#2556c2' }
+  return FEAT_GRADIENT[s.agent_type] || { g1: 'var(--a-text)', g2: '#2556c2' }
 }
 function tagClass(s) {
   return s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d'
