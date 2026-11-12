@@ -596,3 +596,93 @@ class TestManifestCodegraphInstaller:
         from src.kernel.worker_package import MANIFEST, ROOT
         assert "scripts/install-codegraph.sh" in MANIFEST
         assert os.path.isfile(os.path.join(ROOT, "scripts", "install-codegraph.sh"))
+
+class TestRuntimeStateExclusion:
+    """运行期状态不得进入代码指纹/worker 包（2026-11-12 双主指纹漂移事故的判据）。
+
+    事故：指纹覆盖 src/domains/ 全树，主控运行期在 data/ 下生成状态文件，
+    双主生成时机不同 → worker_code_version() 不一致 → worker 无限升级并失联。
+    """
+
+    def test_is_runtime_state_file_rules(self):
+        from src.kernel.worker_package import _is_runtime_state_file as f
+
+        import os as _os
+
+        import src.kernel.worker_package as wp
+
+        # 运行期状态 → 排除（带后缀/状态语义的，路径无关即可判定）
+        for name in ("x.log", "sessions.db", "a.db-wal",
+                     "run.pid", "app.sock", "card_mode.json", "im_state.json",
+                     "runtime_state.json", "status.json", "x.tmp", "m.pyc"):
+            assert f("", name) is True, f"应排除: {name}"
+
+        # 无后缀状态文件（如 im_dingtalk_card_mode）只能靠父目录 data/ 识别（QA I2 加固项）
+        data_dir = _os.path.join(wp.ROOT, "src", "domains", "runtime", "data")
+        assert f(data_dir, "im_dingtalk_card_mode") is True
+        assert f(_os.path.join(wp.ROOT, "src", "domains", "runtime"), "im_dingtalk_card_mode") is False
+
+        # 代码/配置模板 → 不得误伤
+        for name in ("models.json", "modes.json", "config.json", "engine.py",
+                     "pyproject.toml", "MANIFEST", "schema.json"):
+            assert f("", name) is False, f"不应排除: {name}"
+
+    def test_manifest_version_ignores_runtime_state(self):
+        """在 MANIFEST 覆盖目录下写运行期状态文件 → 指纹不变；清理后仍一致。"""
+        import src.kernel.worker_package as wp
+
+        before = wp._manifest_version()
+        data_dir = os.path.join(wp.ROOT, "src", "domains", "runtime", "data")
+        created = []
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+            for fname in ("card_mode.json", "sessions.db", "worker.log"):
+                fp = os.path.join(data_dir, fname)
+                with open(fp, "w", encoding="utf-8") as fh:
+                    fh.write("runtime-state")
+                created.append(fp)
+            assert wp._manifest_version() == before, "运行期状态文件不应影响代码指纹"
+        finally:
+            for fp in created:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+            # 目录若为测试新建则删除（保留真实存在的 data/ 内容）
+            try:
+                if not os.listdir(data_dir):
+                    os.rmdir(data_dir)
+            except OSError:
+                pass
+        assert wp._manifest_version() == before
+
+    def test_tar_filter_excludes_runtime_state_entries(self):
+        import tarfile
+
+        import src.kernel.worker_package as wp
+
+        def ti(name):
+            return tarfile.TarInfo(name)
+
+        # 运行期状态目录/文件 → 不进包（M2：与指纹侧同口径）
+        assert wp._tar_filter(ti("grape-worker/src/domains/runtime/data/card_mode.json")) is None
+        assert wp._tar_filter(ti("grape-worker/src/domains/runtime/logs/x.log")) is None
+        assert wp._tar_filter(ti("grape-worker/src/domains/runtime/sessions.db")) is None
+        assert wp._tar_filter(ti("grape-worker/src/domains/__pycache__/a.pyc")) is None
+        # 正常代码/配置 → 保留
+        for name in ("grape-worker/src/domains/runtime/engine/agent.py",
+                     "grape-worker/src/domains/runtime/config/models.json",
+                     "grape-worker/VERSION", "grape-worker/pyproject.toml"):
+            assert wp._tar_filter(ti(name)) is not None, f"不应排除: {name}"
+
+    def test_built_package_contains_no_runtime_state(self):
+        """真打一个包，断言包内无 data/ 等运行期状态条目（M2 验收）。"""
+        from src.kernel.worker_package import build_package
+        import tarfile as _tf
+
+        pkg = build_package()
+        with _tf.open(pkg) as tf:
+            names = tf.getnames()
+        leaked = [n for n in names if "/data/" in n or n.endswith((".db", ".log", ".pid"))]
+        assert not leaked, f"包内不应含运行期状态: {leaked[:5]}"
+

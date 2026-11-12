@@ -175,10 +175,17 @@ $PkgUrl = "$Server/api/runtime/grape-worker.tar.gz"
 $TmpPkg = Join-Path $env:TEMP "grape-worker-$(Get-Random).tar.gz"
 Log "Downloading package: $PkgUrl"
 try {
-    Invoke-WebRequest -Uri $PkgUrl -OutFile $TmpPkg -UseBasicParsing -TimeoutSec 30
+    # 包体积 ~74MB：30s 超时在慢链路（Windows 桌面/家宽）必挂 —— 2026-11-12 实测
+    # worker 反复 "Download failed" 导致升级永远失败、周期性重启失联。放宽到 600s 并重试一次。
+    Invoke-WebRequest -Uri $PkgUrl -OutFile $TmpPkg -UseBasicParsing -TimeoutSec 600
 } catch {
-    Remove-Item $TmpPkg -ErrorAction SilentlyContinue
-    Fail "Download failed: $PkgUrl (check controller address/network)"
+    Log "Download failed (first attempt), retrying once: $PkgUrl"
+    try {
+        Invoke-WebRequest -Uri $PkgUrl -OutFile $TmpPkg -UseBasicParsing -TimeoutSec 600
+    } catch {
+        Remove-Item $TmpPkg -ErrorAction SilentlyContinue
+        Fail "Download failed: $PkgUrl (check controller address/network)"
+    }
 }
 
 # ===== 3. 解压到安装目录（幂等，升级前备份旧代码供回滚）=====
