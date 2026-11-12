@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**44 通过 / 23 C类 / 24 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**49 通过 / 19 C类 / 23 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -53,9 +53,9 @@ js 测试：**44 通过 / 23 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_chat_onboard_refresh.js（已改写）
 - [x] test_chat_recall_442.js（已改写）
 - [ ] test_chat_task_bubble.js（**待确认**：ChatView 与后端均无去重逻辑，可能随统一流设计移到后端 SSE，需主人确认）
-- [ ] test_event_back_to_task.js
+- [x] test_event_back_to_task.js（已改写）
 - [ ] test_event_nav_hash.js
-- [ ] test_issue_1077_board_col_paging.js
+- [x] test_issue_1077_board_col_paging.js（已改写）
 - [ ] test_issue_1102_load_more.js
 - [ ] test_issue_12_host_confirm.js
 - [ ] test_issue_1310_dropdown_display.js
@@ -63,7 +63,7 @@ js 测试：**44 通过 / 23 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_issue_1564_scene_scope_violation.js（已修复并改写）
 - [ ] test_issue_187_workspace_repo_restore.js
 - [ ] test_issue_273_lang_switch_toast.js
-- [ ] test_issue_341_tasks_deeplink.js
+- [x] test_issue_341_tasks_deeplink.js（已改写）
 - [ ] test_issue_342_event_poll_partial.js
 - [ ] test_issue_348_bot_token_health.js
 - [ ] test_issue_402_scene_copy.js
@@ -75,7 +75,7 @@ js 测试：**44 通过 / 23 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_456_orgs_back_to_workspace.js
 - [ ] test_issue_461_scene_deploy_url.js
 - [x] test_issue_465_worker_card_name.js（已改写）
-- [ ] test_issue_539_review_status_render.js
+- [x] test_issue_539_review_status_render.js（已改写）
 - [ ] test_issue_543_migrate_orgs.js
 - [x] test_observability_events_flow.js（已改写）
 - [x] test_observability_i18n.js（已改写）
@@ -99,7 +99,7 @@ js 测试：**44 通过 / 23 C类 / 24 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_297_multi_image_error_and_persist.js
 - [ ] test_issue_299_org_name_display.js
 - [ ] test_issue_316_scene_repo_tab_removed.js
-- [ ] test_issue_329_cross_pipeline.js
+- [x] test_issue_329_cross_pipeline.js（已改写）
 - [ ] test_issue_335_skill_search.js
 - [ ] test_issue_372_r13_ui_optimization.js
 - [x] test_issue_473_range_filter.js（已修复并改写）
