@@ -34,8 +34,8 @@ def _restore_global_db_state():
     importlib.reload(user_db)
     # 所有 `from src.kernel.session_manager import db` 持旧绑定的模块——全家族重挂
     for mod_name in ("src.domains.mgmt.auth.grape_account_db", "src.domains.mgmt.admin.db",
-                     "src.domains.mgmt.user.org_db", "src.persistence.repositories",
-                     "src.persistence.credential_usage_log", "src.api.deps"):
+                     "src.domains.mgmt.user.org_db", "src.kernel.persistence.repositories",
+                     "src.kernel.persistence.credential_usage_log", "src.api.deps"):
         try:
             importlib.reload(importlib.import_module(mod_name))
         except Exception:

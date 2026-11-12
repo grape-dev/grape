@@ -81,8 +81,8 @@ def test_s80_dual_write_non_platform_columns_no_rows():
 
 
 def test_s80_repo_credential_repository_crud():
-    from src.persistence.uow import uow
-    from src.persistence.repositories import repo_credential_repository as repo
+    from src.kernel.persistence.uow import uow
+    from src.kernel.persistence.repositories import repo_credential_repository as repo
     with uow() as s:
         repo.set(s, "s80:o3/r", "bot", "v1")  # D99 值域归一
         repo.set(s, "s80:o3/r", "webhook", "v2")  # D99 值域归一

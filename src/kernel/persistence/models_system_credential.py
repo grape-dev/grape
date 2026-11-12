@@ -15,8 +15,8 @@ from __future__ import annotations
 from sqlalchemy import Column, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped
 
-from src.persistence.base import Base
-from src.persistence.masking import masked_repr
+from src.kernel.persistence.base import Base
+from src.kernel.persistence.masking import masked_repr
 
 
 class SystemCredentialModel(Base):

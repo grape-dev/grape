@@ -11,7 +11,7 @@ from contextlib import contextmanager
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from src.persistence.engine import get_engine
+from src.kernel.persistence.engine import get_engine
 
 
 @contextmanager

@@ -8,14 +8,14 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.id_gen import uuid7_str as _uuid7
-from src.persistence.dto import (AccountDTO, IdentityDTO, ManagedRepoDTO,
+from src.kernel.id_gen import uuid7_str as _uuid7
+from src.kernel.persistence.dto import (AccountDTO, IdentityDTO, ManagedRepoDTO,
                                  RepoCredentialDTO, SystemCredentialDTO,
                                  UserCredentialDTO)
-from src.persistence.models import (AccountModel, ExternalIdentityModel,
+from src.kernel.persistence.models import (AccountModel, ExternalIdentityModel,
                                     ManagedRepoModel, RepoCredentialModel,
                                     UserCredentialModel)
-from src.persistence.models_system_credential import SystemCredentialModel
+from src.kernel.persistence.models_system_credential import SystemCredentialModel
 
 
 def _account_dto(m: AccountModel) -> AccountDTO:
@@ -106,7 +106,7 @@ class UserCredentialRepository:
         m = session.query(UserCredentialModel).filter_by(
             user_id=str(user_id), provider=provider).first()
         if m is None:
-            from src.id_gen import uuid7_str  # D105：新行补 UUID 主键
+            from src.kernel.id_gen import uuid7_str  # D105：新行补 UUID 主键
             m = UserCredentialModel(id=uuid7_str(), user_id=str(user_id), provider=provider)
             session.add(m)
         m.config_json = config_json or "{}"
@@ -267,7 +267,7 @@ class RepoCredentialRepository:
     def list_by_repo(session: Session, repo_key: str) -> list:
         rows = session.execute(select(RepoCredentialModel).where(
             RepoCredentialModel.repo_key == repo_key)).scalars().all()
-        from src.persistence.dto import RepoCredentialDTO
+        from src.kernel.persistence.dto import RepoCredentialDTO
         return [RepoCredentialDTO(repo_key=m.repo_key, cred_type=m.cred_type,
                                   value=m.value or "") for m in rows]
 

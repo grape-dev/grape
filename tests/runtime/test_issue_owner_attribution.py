@@ -41,7 +41,7 @@ def setup_module():
         c.execute("DELETE FROM grape_accounts WHERE username LIKE 'attr_%'")
         db.commit()
     # 创建人（有映射）——D105：grape_accounts 主键应用层 UUIDv7（lastrowid 对 UUID 主键失效）
-    from src.id_gen import uuid7_str
+    from src.kernel.id_gen import uuid7_str
     _uid_creator = uuid7_str()
     _uid_default = uuid7_str()
     with db_lock:

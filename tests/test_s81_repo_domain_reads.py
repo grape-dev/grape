@@ -67,8 +67,8 @@ def test_s81_webhook_secret_any_flag_off_parity():
 
 
 def test_s81_repository_find_by_full_name_any_provider():
-    from src.persistence.uow import uow
-    from src.persistence.repositories import managed_repo_repository as repo
+    from src.kernel.persistence.uow import uow
+    from src.kernel.persistence.repositories import managed_repo_repository as repo
     _insert("gitee:s81:o3/r3", "sec-3")
     _insert("gitcode:s81:o3/r3", "sec-4")
     with uow() as s:
@@ -78,8 +78,8 @@ def test_s81_repository_find_by_full_name_any_provider():
 
 
 def test_s81_repo_exists_and_webhook_secret():
-    from src.persistence.uow import uow
-    from src.persistence.repositories import managed_repo_repository as repo
+    from src.kernel.persistence.uow import uow
+    from src.kernel.persistence.repositories import managed_repo_repository as repo
     _insert("gitee:s81:o4/r4", "sec-5")
     with uow() as s:
         assert repo.exists(s, "gitee:s81:o4/r4") is True

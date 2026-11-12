@@ -21,7 +21,7 @@ def _reset_dedup_and_capture(monkeypatch):
     vps._fallback_reported.clear()
     captured = []
     monkeypatch.setattr(
-        "src.persistence.credential_usage_log.log_usage",
+        "src.kernel.persistence.credential_usage_log.log_usage",
         lambda credential_id, user_id, **kw: captured.append(kw) or "uuid",
     )
     yield captured

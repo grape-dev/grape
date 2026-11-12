@@ -35,7 +35,10 @@ LEGACY_MODULE_ALIASES = {
     "src.repo_key": "src.kernel.repo_key",
     "src.repo_migrate": "src.kernel.repo_migrate",
     "src.scene_custom_env": "src.kernel.scene_custom_env",
-    "src.kernel.service_diagnostics": "src.kernel.service_diagnostics",
+    "src.service_diagnostics": "src.kernel.service_diagnostics",
+    # 顶层散模块下沉（Issue #2010 收敛）：id_gen 只被 kernel/persistence 与 mgmt 使用，
+    # 归入 kernel 后旧写法仍由本别名一跳解析。
+    "src.id_gen": "src.kernel.id_gen",
     "src.session_manager": "src.kernel.session_manager",
     "src.token_resolver": "src.kernel.token_resolver",
     "src.token_service": "src.kernel.token_service",

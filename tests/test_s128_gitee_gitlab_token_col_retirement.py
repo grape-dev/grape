@@ -132,7 +132,7 @@ def test_s128_cold_start_no_gl_columns(tmp_path):
 
 def test_s128_orm_model_drops_gl_columns():
     """ORM 模型撤列守卫：ManagedRepo 模型不再声明 gitee/gitlab 四列。"""
-    from src.persistence.models import ManagedRepoModel as ManagedRepo
+    from src.kernel.persistence.models import ManagedRepoModel as ManagedRepo
     model_cols = {c.name for c in ManagedRepo.__table__.columns}
     bad = [c for c in _GL_COLS if c in model_cols]
     assert not bad, f"ORM 模型仍声明已撤出列: {bad}"

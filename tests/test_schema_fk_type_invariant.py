@@ -37,8 +37,8 @@ def _restore_global_db_state():
     from src.api import db_setup
     importlib.reload(db_setup)
     for mod_name in ("src.domains.mgmt.user.db", "src.domains.mgmt.auth.grape_account_db", "src.domains.mgmt.admin.db",
-                     "src.domains.mgmt.user.org_db", "src.persistence.repositories",
-                     "src.persistence.credential_usage_log", "src.api.deps"):
+                     "src.domains.mgmt.user.org_db", "src.kernel.persistence.repositories",
+                     "src.kernel.persistence.credential_usage_log", "src.api.deps"):
         try:
             importlib.reload(importlib.import_module(mod_name))
         except Exception:
@@ -123,7 +123,7 @@ def test_fk_uuid_write_typeof_all_text_no_mixed(fresh_db):
     typeof != 'text'——INTEGER 亲和会把纯数字串翻回 int（混型根因），
     本断言让该根因在新表/新列上必红。
     """
-    from src.id_gen import uuid7_str
+    from src.kernel.id_gen import uuid7_str
     con = sqlite3.connect(fresh_db)
     mixed = []
     for table, col in _fk_targets():
@@ -188,7 +188,7 @@ def test_fk_uuid_write_typeof_for_residual_cols(fresh_db):
     这是残留列当下不炸 uuid 用户的原因，锁住这条底线：一旦某列连 uuid 串
     都被改写（如 COLLATE/触发器引入），必红。
     """
-    from src.id_gen import uuid7_str
+    from src.kernel.id_gen import uuid7_str
     con = sqlite3.connect(fresh_db)
     bad = []
     for table, col in (("grape_t_patrol_findings", "owner"),

@@ -13,7 +13,7 @@ def create_org(name: str, slug: str, owner_id: str, description: str = "",
     """创建组织并添加创建者为 owner。D105 第三批：org.id 用 uuid7_str 显式生成
     （TEXT 主键，退役 lastrowid）；owner_id 入库前 str() 归一。"""
     try:
-        from src.id_gen import uuid7_str
+        from src.kernel.id_gen import uuid7_str
         with db_lock:
             c = db.cursor()
             owner_id = str(owner_id)

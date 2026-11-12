@@ -31,9 +31,9 @@ import uuid
 from sqlalchemy import Column, Table, Text
 from sqlalchemy import insert, select
 
-from src.persistence.base import Base
-from src.persistence.masking import masked_repr
-from src.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
+from src.kernel.persistence.base import Base
+from src.kernel.persistence.masking import masked_repr
+from src.kernel.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
 
 
 _DDL = """
@@ -291,7 +291,7 @@ def list_by_credential(credential_id: str, limit: int = 100) -> list[dict]:
     """按凭据查使用历史（审计查询面）。"""
     from sqlalchemy import select
     from src.kernel.session_manager import db
-    from src.persistence.engine import get_engine
+    from src.kernel.persistence.engine import get_engine
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(

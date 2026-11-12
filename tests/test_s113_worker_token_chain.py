@@ -2,7 +2,7 @@
 
 背景：worker 端 chat 任务的用户 token 注入（agent.py:2369-2378）与
 issue_creator 身份解析（engine_select.py:439）依赖
-src.api.deps + src.domains.mgmt.auth.grape_account_db + src.persistence(ORM)。
+src.api.deps + src.domains.mgmt.auth.grape_account_db + src.kernel.persistence(ORM)。
 D84 前的 worker 包缺 deps.py / persistence/ / SQLAlchemy → import 被
 调用方 try/except 吞成 log.warning → user_token 静默为空。
 基线同条件演练同败 = 基线预存降级（非分支回归），D85 闭包补全收口。
@@ -94,12 +94,12 @@ class TestWorkerTokenChain:
         tree = ast.parse(ga)
         toplevel_orm = False
         for node in tree.body:
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src.persistence"):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src.kernel.persistence"):
                 toplevel_orm = True
                 break
         if toplevel_orm:
             assert "src/persistence/" in MANIFEST, (
-                "grape_account_db 顶层 import src.persistence 但 MANIFEST 无该目录"
+                "grape_account_db 顶层 import src.kernel.persistence 但 MANIFEST 无该目录"
                 "（D85 回潮：模块级 ORM import 与包闭包脱同步）"
             )
 

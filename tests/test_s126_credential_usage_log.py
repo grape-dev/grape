@@ -27,7 +27,7 @@ os.environ.setdefault("GRAPE_CREDENTIAL_KEYS", "dev:test")
 _TEST_DIR = Path(__file__).resolve().parent
 _SRC = _TEST_DIR.parent / "src"
 
-from src.persistence.credential_usage_log import (
+from src.kernel.persistence.credential_usage_log import (
     core_table, ensure_table, list_by_credential, log_usage)
 from src.kernel.session_manager import db, db_lock
 
@@ -61,7 +61,7 @@ class TestCredentialUsageLog:
         注：模块 DDL（credential_usage_log._DDL）为准——测试库可能被
         db_setup 的旧声明先建表（另一批次收口），以源码 DDL 断言避免误报。
         """
-        from src.id_gen import uuid7_str
+        from src.kernel.id_gen import uuid7_str
         ensure_table()
         ddl = (_SRC / "persistence" / "credential_usage_log.py").read_text(encoding="utf-8")
         assert re.search(r"user_id\s+TEXT\s+NOT NULL", ddl), "user_id 列声明须 TEXT"
@@ -124,7 +124,7 @@ class TestCredentialUsageLog:
         import sqlite3 as _sq
         import src.kernel.mysql_compat as _mc
         import src.kernel.session_manager as _sm
-        from src.persistence.credential_usage_log import _flush_batch
+        from src.kernel.persistence.credential_usage_log import _flush_batch
 
         def _forbidden(*_a, **_kw):  # pragma: no cover - 命中即违规
             raise AssertionError(

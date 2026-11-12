@@ -13,7 +13,7 @@ from sqlalchemy import text
 @pytest.fixture()
 def orm_env(tmp_path, monkeypatch):
     """隔离 sqlite 库（内存形态走盖章后的最小建表：直接建四张表骨架）。"""
-    from src.persistence.engine import get_engine
+    from src.kernel.persistence.engine import get_engine
     get_engine.cache_clear()
     # 生产同款 onboarding 顺序：注册平台卡 → 补列口子（S64）→ schema 对账
     import json as _json
@@ -39,7 +39,7 @@ def orm_env(tmp_path, monkeypatch):
 
 def test_s78_engine_poc_sqlite(orm_env):
     """S78 PoC：连接/事务/pool_pre_ping 与裸 SQL 路径同库同文件。"""
-    from src.persistence.engine import get_engine
+    from src.kernel.persistence.engine import get_engine
     eng = get_engine()
     # 引擎 PoC：creator+StaticPool 挂接共享连接（URL 形态 sqlite://），
     # 连通性与裸 SQL 同世界（同库同连接）
@@ -57,8 +57,17 @@ def test_s78_engine_poc_sqlite(orm_env):
 
 def test_s78_schema_drift_zero(orm_env):
     """模型 metadata vs 实际表结构：列/可空/归一类型零漂移。"""
-    from src.persistence.reconcile import schema_drift
-    drift = schema_drift(orm_env)
+    from src.kernel.persistence.reconcile import schema_drift
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+    _dynamic = set()
+    for _p in (list_vcs_platforms() or []):
+        _c = get_platform_card(_p)
+        if _c is None:
+            continue
+        for _col in (_c.token_storage_field, _c.webhook_token_field):
+            if _col:
+                _dynamic.add(_col)
+    drift = schema_drift(orm_env, dynamic_columns=_dynamic)
     assert not drift, f"schema drift: {drift}"
 
 
@@ -66,11 +75,11 @@ def test_s78_schema_drift_zero(orm_env):
 
 def test_s78_field_value_reconciliation(orm_env):
     from sqlalchemy import text
-    from src.persistence.repositories import (account_repository,
+    from src.kernel.persistence.repositories import (account_repository,
                                               identity_repository,
                                               managed_repo_repository,
                                               user_credential_repository)
-    from src.persistence.uow import uow
+    from src.kernel.persistence.uow import uow
     eng = orm_env
     with eng.begin() as c:  # 裸 SQL 写（模拟存量路径）
         # D105 后 id 均为应用层生成的 TEXT 主键：裸行必须带显式 id——SQLite 的
@@ -98,7 +107,7 @@ def test_s78_field_value_reconciliation(orm_env):
 
 def test_s78_uow_commit_and_rollback(orm_env):
     from sqlalchemy import text
-    from src.persistence.uow import uow
+    from src.kernel.persistence.uow import uow
     eng = orm_env
     with uow() as s:  # 正常提交
         s.execute(text("INSERT INTO grape_accounts (username, password_hash) VALUES ('u_ok', 'x')"))
@@ -114,13 +123,13 @@ def test_s78_uow_commit_and_rollback(orm_env):
 
 def test_s78_repo_return_shape_guard():
     """Repository 公开方法返回注解不得含 ORM 实体（lotus-core 先例）。"""
-    from src.persistence.reconcile import return_shape_guard
+    from src.kernel.persistence.reconcile import return_shape_guard
     assert not return_shape_guard(), "ORM 实体穿透仓储边界"
 
 
 def test_s78_sensitive_repr_masked(orm_env):
     """token/secret/password 字段 __repr__ 永不出现明文。"""
-    from src.persistence.models import (AccountModel, ExternalIdentityModel,
+    from src.kernel.persistence.models import (AccountModel, ExternalIdentityModel,
                                         ManagedRepoModel)
     a = AccountModel(username="u", password_hash="PLAINTEXT_HASH")
     r = repr(a)
@@ -134,5 +143,5 @@ def test_s78_sensitive_repr_masked(orm_env):
 def test_s78_orm_switch_retired():
     """开关退役锁（S91 收口）：GRAPE_PERSISTENCE_ORM 开关与 orm_enabled 必须不存在，
     ORM 是身份域唯一持久化路径（engine 重绑跟随缺陷已由 S91 修复，退役重新落地）。"""
-    import src.persistence.repositories as _repos
+    import src.kernel.persistence.repositories as _repos
     assert not hasattr(_repos, "orm_enabled"), "GRAPE_PERSISTENCE_ORM 开关必须已退役"

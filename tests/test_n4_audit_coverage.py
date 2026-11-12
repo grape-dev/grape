@@ -4,7 +4,7 @@ import uuid
 
 os.environ.setdefault("GRAPE_CREDENTIAL_KEYS", "dev:test")
 
-from src.persistence.credential_usage_log import list_by_credential
+from src.kernel.persistence.credential_usage_log import list_by_credential
 from src.kernel.session_manager import db, db_lock
 from src.domains.mgmt.user import db as udb
 from src.domains.mgmt.user.credentials_backfill_n1 import backfill_repo_credentials_uuid
@@ -121,7 +121,7 @@ class TestN4Perf:
     def test_p2_retention_cleanup(self):
         """保留期清理：超期行删、新行留（force 跳过节流）。"""
         import datetime
-        from src.persistence.credential_usage_log import (
+        from src.kernel.persistence.credential_usage_log import (
             RETENTION_DAYS, cleanup_expired_retention)
         rk = "n4p2" + uuid.uuid4().hex[:6]
         old_ts = (datetime.datetime.now()
@@ -141,7 +141,7 @@ class TestN4Perf:
 
     def test_p2b_cleanup_throttle_30d(self, monkeypatch):
         """清理节流：30 天窗口内第二次调用零执行（monotonic 进程内节流）。"""
-        from src.persistence import credential_usage_log as cul
+        from src.kernel.persistence import credential_usage_log as cul
         cul._cleanup_last_mono = 0.0  # 重置进程内状态（测试隔离）
         import time
         # 模拟"刚清理过"：_last = now → 窗口内调用直接跳过
@@ -155,7 +155,7 @@ class TestN4Perf:
     def test_p2c_batch_delete(self):
         """分批 DELETE：批量造 2500 超期行（>单批 1000）→ 全清 + 幂等。"""
         import datetime
-        from src.persistence.credential_usage_log import cleanup_expired_retention
+        from src.kernel.persistence.credential_usage_log import cleanup_expired_retention
         old_ts = (datetime.datetime.now()
                   - datetime.timedelta(days=400)).strftime("%Y-%m-%d %H:%M:%S")
         tag = "n4p2c" + uuid.uuid4().hex[:6]
@@ -175,7 +175,7 @@ class TestN4Perf:
 
     def test_p3_async_enqueue_flushes(self):
         """异步入队 → 后台批量落库（flush=True 直写对照）。"""
-        from src.persistence.credential_usage_log import log_usage
+        from src.kernel.persistence.credential_usage_log import log_usage
         import time
         rid = log_usage("n4p3_async", 1, operation="async_test")
         assert rid

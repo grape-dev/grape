@@ -211,7 +211,7 @@ def test_uc15_db_no_duplicate_s80b_block():
 
 def test_uc15_sqlalchemy_in_requirements():
     """D83 P1 闭环守卫：SQLAlchemy 必须在 requirements.txt 与
-    requirements-local.txt（grape_account_db 模块级 import src.persistence，
+    requirements-local.txt（grape_account_db 模块级 import src.kernel.persistence，
     缺失则主服务起不来）。Dockerfile 走 requirements.txt 全量安装自动覆盖，
     无需单独断言。
     D85 更新：requirements-worker.txt **必须含** SQLAlchemy（chat token 注入链

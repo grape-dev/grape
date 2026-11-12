@@ -34,8 +34,8 @@ def _restore_global_db_state():
     from src.api import db_setup
     importlib.reload(db_setup)
     for mod_name in ("src.domains.mgmt.user.db", "src.domains.mgmt.auth.grape_account_db", "src.domains.mgmt.admin.db",
-                     "src.domains.mgmt.user.org_db", "src.persistence.repositories",
-                     "src.persistence.credential_usage_log", "src.api.deps"):
+                     "src.domains.mgmt.user.org_db", "src.kernel.persistence.repositories",
+                     "src.kernel.persistence.credential_usage_log", "src.api.deps"):
         try:
             importlib.reload(importlib.import_module(mod_name))
         except Exception:

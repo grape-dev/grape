@@ -11,8 +11,8 @@ import re
 
 from sqlalchemy import MetaData, Table, inspect
 
-from src.persistence.base import Base
-from src.persistence import models as _models  # noqa: F401 —— 注册模型到 metadata
+from src.kernel.persistence.base import Base
+from src.kernel.persistence import models as _models  # noqa: F401 —— 注册模型到 metadata
 
 _MAPPED_TABLES = ("grape_accounts", "external_identities", "user_credentials",
                   "managed_repos", "grape_t_repo_credentials")
@@ -26,35 +26,20 @@ def _norm_type(t: str) -> str:
     return t
 
 
-def _card_derived_storage_columns() -> "set[str]":
-    """D44/S64：平台卡派生的 managed_repos 动态存储列名（token_storage_field /
-    webhook_token_field，非空才建物理列）。
+def schema_drift(engine, dynamic_columns: "set[str] | list[str] | None" = None) -> "list[str]":
+    """模型 metadata vs 实际表结构：列名集合/主键/可空性/归一类型漂移清单。
 
-    F4/D106 终态：平台专属列**有意**撤出 ORM 模型（config-only 平台凭据唯一
-    落点=grape_t_repo_credentials），本清单即 schema_drift 对 managed_repos 的
-    「in DB, missing in model」豁免集——从卡注册表实时派生，不硬编码。
+    ``dynamic_columns``：managed_repos 上「卡派生、设计上只存在于 DB」的列
+    （如 bot_gitee_token），由调用方从平台卡注册表派生后注入；kernel 层不感知域模型。
     """
-    cols: "set[str]" = set()
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
-    for provider in (list_vcs_platforms() or []):
-        card = get_platform_card(provider)
-        if card is None:
-            continue
-        for col in (card.token_storage_field, card.webhook_token_field):
-            if col:
-                cols.add(col)
-    return cols
-
-
-def schema_drift(engine) -> "list[str]":
-    """模型 metadata vs 实际表结构：列名集合/主键/可空性/归一类型漂移清单。"""
     assert Base.metadata.tables, "模型 metadata 为空——models 模块未注册（静默空集反模式）"
     drift = []
     insp = inspect(engine)
     actual = MetaData()
     actual.reflect(bind=engine, only=[t for t in _MAPPED_TABLES
                                       if insp.has_table(t)])
-    dynamic = _card_derived_storage_columns()
+    # 卡派生动态列由调用方注入（reconcile 属 kernel 层，不得反向 import src.domains —— R1）
+    dynamic = set(dynamic_columns or ())
     for tname in _MAPPED_TABLES:
         model_t = Base.metadata.tables.get(tname)
         actual_t = actual.tables.get(tname)
@@ -84,7 +69,7 @@ def schema_drift(engine) -> "list[str]":
 
 def return_shape_guard() -> "list[str]":
     """Repository 公开方法返回注解不得含 ORM 实体（lotus-core 先例）。"""
-    import src.persistence.repositories as repos
+    import src.kernel.persistence.repositories as repos
     offenders = []
     for name in dir(repos):
         obj = getattr(repos, name)

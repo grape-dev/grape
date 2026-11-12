@@ -166,8 +166,8 @@ def test_s82_global_swap_updates_rc():
 def test_s82_has_bot_reads_rc():
     """deps has_bot 闸门：gitee 仓（仅 rc 有 token）放行。"""
     from src.domains.mgmt.user.db import add_managed_repo, get_managed_repos
-    from src.persistence.uow import uow
-    from src.persistence.repositories import managed_repo_repository as repo
+    from src.kernel.persistence.uow import uow
+    from src.kernel.persistence.repositories import managed_repo_repository as repo
     add_managed_repo("gitee:s82o7/r7", "o", "r", webhook_id=1, org_id=0,
                      host_user_id=0, **{"bot_gitee_token": "bt"})
     # 模拟 deps 的判定：任一托管仓库有 bot token（rc 感知）

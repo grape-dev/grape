@@ -32,8 +32,8 @@ def _restore_global_db_state():
     from src.api import db_setup
     importlib.reload(db_setup)
     for mod_name in ("src.domains.mgmt.user.db", "src.domains.mgmt.auth.grape_account_db", "src.domains.mgmt.admin.db",
-                     "src.domains.mgmt.user.org_db", "src.persistence.repositories",
-                     "src.persistence.credential_usage_log", "src.api.deps"):
+                     "src.domains.mgmt.user.org_db", "src.kernel.persistence.repositories",
+                     "src.kernel.persistence.credential_usage_log", "src.api.deps"):
         try:
             importlib.reload(importlib.import_module(mod_name))
         except Exception:
@@ -52,8 +52,8 @@ def fresh_db(tmp_path):
     # `from src.kernel.session_manager import db` 持旧绑定的消费模块全家族重挂，
     # 否则读写落在上一用例的临时库（同 test_d105_uuid_pk_migration 家族口径）
     for mod_name in ("src.domains.mgmt.user.db", "src.domains.mgmt.auth.grape_account_db", "src.domains.mgmt.admin.db",
-                     "src.domains.mgmt.user.org_db", "src.persistence.repositories",
-                     "src.persistence.credential_usage_log", "src.api.deps"):
+                     "src.domains.mgmt.user.org_db", "src.kernel.persistence.repositories",
+                     "src.kernel.persistence.credential_usage_log", "src.api.deps"):
         try:
             importlib.reload(importlib.import_module(mod_name))
         except Exception:
@@ -109,7 +109,7 @@ def test_new_user_uuid7_full_lifecycle(fresh_db):
     assert any(i["provider"] == "gitee" for i in idents)
 
     # 5) 凭据审计：credential_usage_log（user_id / initiating_actor_id TEXT 通道）
-    from src.persistence.credential_usage_log import log_usage
+    from src.kernel.persistence.credential_usage_log import log_usage
     row_id = log_usage("cred-uc61", uid, initiating_actor_id=uid,
                        operation="test", repo_key="o/r", flush=True)
     assert _is_uuid36(row_id), f"审计行 id 应为 uuid36: {row_id!r}"

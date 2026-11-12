@@ -27,6 +27,7 @@ CANONICAL_MODULES = (
     "featured_order",
     "help_docs_sync",
     "help_page_gen",
+    "id_gen",
     "localfs",
     "lock",
     "mysql_compat",

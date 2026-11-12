@@ -689,7 +689,7 @@ class RepoBotToken(TokenStrategy):
             if _rc and _rc.get("value"):
                 # D90-N4（拍板 1A/2B/3A）：bot token 消费审计（全量，Core 通道）
                 try:
-                    from src.persistence.credential_usage_log import log_usage
+                    from src.kernel.persistence.credential_usage_log import log_usage
                     log_usage(_rc.get("id") or "", 0,
                               credential_kind="repo_credentials",
                               executor_context="token_resolve",
@@ -735,7 +735,7 @@ class RepoBotToken(TokenStrategy):
                     # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
                     # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）
                     try:
-                        from src.persistence.credential_usage_log import log_usage
+                        from src.kernel.persistence.credential_usage_log import log_usage
                         log_usage("", 0, credential_kind="repo_credentials",
                                   executor_context="token_resolve",
                                   operation="repo_bot_hit_legacy_column",
@@ -1400,7 +1400,7 @@ def _audit_source(user_id: str, provider: str, source: str) -> None:
     credential_usage_log（"配了 PAT 走了 OAuth"类问题可从审计排查）。
     """
     try:
-        from src.persistence.credential_usage_log import log_usage
+        from src.kernel.persistence.credential_usage_log import log_usage
         log_usage("", user_id, credential_kind="user_credentials",
                   executor_context="token_resolve",
                   operation=f"user_token_hit_{source}", repo_key=f"{provider}:")
