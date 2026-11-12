@@ -3179,8 +3179,12 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             _scene_source = "repo_default"
         _scene_name = _scene_name_cache.get((_scene_id, _rk), "")
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)
+        # Issue #2072: issue_number 与 DB 列/Pydantic 模型/其他端点一致输出 int。
+        # DB 层（MySQL 兼容层/GitCode 同步混入数据）可能返回字符串编号——响应构造层
+        # 显式归一；非数字值让 int() 抛错（显式报错优于静默字符串化泄漏到调用方）。
+        _issue_number = int(r[3])
         item = {
-            "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": r[3],
+            "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": _issue_number,
             "title": r[4] or "", "task_description": r[5] or "",
             "conversation_id": r[6] or "", "status": r[7],
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
