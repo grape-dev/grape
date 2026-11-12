@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**78 通过 / 6 C类 / 7 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**88 通过 / 0 C类 / 0 D类**（共 88；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -101,7 +101,7 @@ js 测试：**78 通过 / 6 C类 / 7 D类**（共 91；起点 13 通过 / 78 失
 - [x] test_issue_316_scene_repo_tab_removed.js（已改写）
 - [x] test_issue_329_cross_pipeline.js（已改写）
 - [ ] test_issue_335_skill_search.js（**待确认**：SkillsView/RuntimesView 均无 _engineSkillCache，刷新后缓存语义需确认是否仍有必要）
-- [ ] test_issue_372_r13_ui_optimization.js（**待确认**：14 项断言 7 项失效，需人工逐条判定）
+- [x] test_issue_372_r13_ui_optimization.js（已改写为 Vue 入口断言）
 - [x] test_issue_473_range_filter.js（已修复并改写）
 - [x] test_issue_475_runtime_health_hint.js（已修复并改写）
 - [x] test_issue_487_scene_recommend_save.js（已改写）
