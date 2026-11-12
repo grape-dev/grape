@@ -7,7 +7,7 @@
 <link rel="icon" type="image/png" href="/static/logo-64.png">
 <link rel="stylesheet" href="/static/css/tokens.css?v=20261112-3">
 <link rel="stylesheet" href="/static/css/app.css?v=95">
-<link rel="stylesheet" href="/static/css/apple-theme.css?v=28">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=30">
 <link rel="stylesheet" href="/static/css/auth.css?v=11">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
@@ -197,8 +197,8 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <div class="sp"></div>
 <a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回仓库大厅</a>
 <div class="lang-toggle" id="tbLangToggle" style="display:flex;align-items:center;gap:2px;padding:3px;border-radius:8px;border:1px solid var(--b);background:var(--c)">
-<button onclick="_setAppLang('zh')" class="lang-btn" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">中</button>
-<button onclick="_setAppLang('en')" class="lang-btn" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">EN</button>
+<button onclick="_setAppLang('zh')" class="lang-btn" style="padding:3px 12px;border-radius:999px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">中</button>
+<button onclick="_setAppLang('en')" class="lang-btn" style="padding:3px 12px;border-radius:999px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">EN</button>
 </div>
 <a id="tbOrgBtn" onclick="app._toggleOrgDropdown()" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border:0.5px solid var(--b);border-radius:10px;background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;max-width:200px" title="切换组织">
   <span style="font-size:14px">🏢</span>
@@ -328,26 +328,26 @@ function _toggleAppLang(){
 <script src="/static/js/api.js?v=33" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
-<script type="module" src="/static/js/vue/dashboard-view.js?v=23"></script>
-<script type="module" src="/static/js/vue/pipeline.js?v=9"></script>
-<script type="module" src="/static/js/vue/agent-view.js?v=7"></script>
-<script type="module" src="/static/js/vue/event-view.js?v=10"></script>
-<script type="module" src="/static/js/vue/chat-view.js?v=10"></script>
-<script type="module" src="/static/js/vue/im-channel.js?v=8"></script>
-<script type="module" src="/static/js/vue/repos-view.js?v=10"></script>
-<script type="module" src="/static/js/vue/issues-view.js?v=13"></script>
-<script type="module" src="/static/js/vue/account-view.js?v=11"></script>
-<script type="module" src="/static/js/vue/scene-market.js?v=11"></script>
-<script type="module" src="/static/js/vue/skills-view.js?v=10"></script>
-<script type="module" src="/static/js/vue/knowledge-view.js?v=7"></script>
-<script type="module" src="/static/js/vue/runtimes-view.js?v=10"></script>
-<script type="module" src="/static/js/vue/observability-view.js?v=12"></script>
-<script type="module" src="/static/js/vue/organizations.js?v=8"></script>
-<script type="module" src="/static/js/vue/feedback-dialog.js?v=8"></script>
-<script type="module" src="/static/js/vue/my-feedback.js?v=8"></script>
-<script type="module" src="/static/js/vue/my-feedback-detail.js?v=8"></script>
-<script type="module" src="/static/js/vue/autopilot-view.js?v=9"></script>
-<script src="/static/js/app.js?v=214" defer></script>
+<script type="module" src="/static/js/vue/dashboard-view.js?v=24"></script>
+<script type="module" src="/static/js/vue/pipeline.js?v=10"></script>
+<script type="module" src="/static/js/vue/agent-view.js?v=8"></script>
+<script type="module" src="/static/js/vue/event-view.js?v=11"></script>
+<script type="module" src="/static/js/vue/chat-view.js?v=11"></script>
+<script type="module" src="/static/js/vue/im-channel.js?v=9"></script>
+<script type="module" src="/static/js/vue/repos-view.js?v=11"></script>
+<script type="module" src="/static/js/vue/issues-view.js?v=14"></script>
+<script type="module" src="/static/js/vue/account-view.js?v=12"></script>
+<script type="module" src="/static/js/vue/scene-market.js?v=12"></script>
+<script type="module" src="/static/js/vue/skills-view.js?v=11"></script>
+<script type="module" src="/static/js/vue/knowledge-view.js?v=8"></script>
+<script type="module" src="/static/js/vue/runtimes-view.js?v=11"></script>
+<script type="module" src="/static/js/vue/observability-view.js?v=13"></script>
+<script type="module" src="/static/js/vue/organizations.js?v=9"></script>
+<script type="module" src="/static/js/vue/feedback-dialog.js?v=9"></script>
+<script type="module" src="/static/js/vue/my-feedback.js?v=9"></script>
+<script type="module" src="/static/js/vue/my-feedback-detail.js?v=9"></script>
+<script type="module" src="/static/js/vue/autopilot-view.js?v=10"></script>
+<script src="/static/js/app.js?v=215" defer></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

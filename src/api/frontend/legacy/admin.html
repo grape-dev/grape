@@ -23,7 +23,7 @@
 <style>
 /* Batch 17: page shell only — all view styles now live in the Vue chunk (viewcss/admin-view.css).
    Kept: :root auth vars + body base + toast styles (toasts are appended to document.body by the component). */
-:root{--auth-text:#f5f5f7;--auth-text-secondary:#86868b;--auth-accent:#0071e3;--auth-border:rgba(255,255,255,0.1);--auth-bg-surface:rgba(255,255,255,0.05);--auth-error:#ff3b30}
+:root{--auth-text:var(--t,#f5f5f7);--auth-text-secondary:var(--t2,#86868b);--auth-accent:var(--a,#0071e3);--auth-border:var(--glass-border,rgba(255,255,255,0.1));--auth-bg-surface:var(--glass,rgba(255,255,255,0.05));--auth-error:var(--r,#ff3b30);--auth-accent-hover:var(--ah,#0077ed)}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg,#f5f6f8);color:var(--t,#101724);min-height:100vh}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#d2d6de;border-radius:3px}

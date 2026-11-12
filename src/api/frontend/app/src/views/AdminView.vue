@@ -1400,7 +1400,7 @@ if (getToken()) {
 .lbtn {
   width: 100%;
   padding: 14px;
-  border-radius: 980px;
+  border-radius: 999px;
   border: none;
   background: var(--auth-accent, #0071e3);
   color: var(--on-accent);
@@ -1733,40 +1733,53 @@ if (getToken()) {
 }
 .btn {
   padding: 11px 22px;
-  border-radius: 980px;
+  border-radius: 999px;
   border: none;
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
 }
 .btn-sm {
-  padding: 6px 14px;
-  font-size: 13px;
+  padding: 4px 14px;
+  font-size: 12px;
+  border-radius: 999px;
 }
 .btn-p {
   background: var(--a, #3168e0);
   color: var(--on-accent);
+  border: 1px solid transparent;
+  border-radius: 999px;
+}
+.btn-p:hover:not(:disabled) {
+  filter: brightness(1.06);
 }
 .btn-p:disabled {
   opacity: 0.5;
   cursor: default;
 }
 .btn-o {
-  background: var(--chip-bg);
-  color: var(--t, #101724);
-  border: 1px solid var(--b, #e3e6ee);
+  background: transparent;
+  color: var(--a, #3168e0);
+  border: 1px solid color-mix(in srgb, var(--a, #3168e0) 42%, transparent);
+  border-radius: 999px;
+}
+.btn-o:hover {
+  background: var(--a, #3168e0);
+  border-color: var(--a, #3168e0);
+  color: #fff;
 }
 .btn-del-sm {
-  padding: 4px 10px;
-  border: none;
-  border-radius: 8px;
-  background: none;
+  padding: 4px 12px;
+  border: 1px solid color-mix(in srgb, var(--r, #dc2828) 55%, transparent);
+  border-radius: 999px;
+  background: transparent;
   font-size: 12px;
   color: var(--r, #dc2828);
   cursor: pointer;
 }
 .btn-del-sm:hover {
-  background: color-mix(in srgb, var(--r) 12%, transparent);
+  background: var(--r, #dc2828);
+  color: #fff;
 }
 
 /* users view inputs */
