@@ -1438,7 +1438,7 @@ _TASK_STATUS_FLOWS = {
     "processing": ("awaiting_input", "pending_review", "completed", "cancelled", "active"),
     "awaiting_input": ("processing", "pending_review", "cancelled"),
     "pending_review": ("processing", "completed", "cancelled"),
-    "completed": (),
+    "completed": ("pending_review",),
     "cancelled": ("active",),
 }
 

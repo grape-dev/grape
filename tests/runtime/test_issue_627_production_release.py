@@ -7,7 +7,7 @@
 2. 拒绝链全分支：非终态需求 / 重复提交 / 候选不匹配 / 批准过期 / 目标非法 / 未验收 / 未授权 / 会话 token
 3. 拒绝路径保留原验收证据（issue 行与 sre 验收事件不被改动、零写入——不建平台 Issue、不写子单、不增删事件）
 4. 回填三分支：deployed_success / deploy_failed / not_executed（阶段 completed ≠ 发布成功），子单终态即发布结果
-5. _TASK_STATUS_FLOWS / _STAGE_TO_TASK_STATUS 终态语义未修改；旁路 production_release 表已移除
+5. _TASK_STATUS_FLOWS / _STAGE_TO_TASK_STATUS 终态语义未放宽（Issue #1408 仅新增 completed → pending_review 单出口）；旁路 production_release 表已移除
 6. tk_ 会话 token（Agent 执行期）调用创建入口 → 403（未授权拒绝）
 """
 
@@ -541,10 +541,10 @@ class TestBackfillIntegration:
         assert _subissue_count(153) == 0, "普通 sre 任务不得产生发布子单回填"
 
 class TestStateMachineIntact:
-    def test_task_status_flows_completed_still_terminal(self):
-        """_TASK_STATUS_FLOWS 终态语义未修改：completed 仍为空元组（无出边）。"""
+    def test_task_status_flows_completed_single_revert_exit(self):
+        """_TASK_STATUS_FLOWS：completed 仅新增 Issue #1408 的 pending_review 撤销出口。"""
         from src.api.issues_center import _TASK_STATUS_FLOWS
-        assert _TASK_STATUS_FLOWS.get("completed") == ()
+        assert _TASK_STATUS_FLOWS.get("completed") == ("pending_review",)
         assert "completed" in _TASK_STATUS_FLOWS
 
     def test_stage_to_task_status_untouched(self):

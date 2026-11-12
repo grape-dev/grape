@@ -44,6 +44,7 @@ EVENT_TYPES = frozenset({
     "dev_verification_code_used",   # 固定验证码使用（需求8/16）
     "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
     "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
+    "issue_reverted_to_pending_review",  # 需求属主撤销已完成需求回待审核（Issue #1408）
     "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）
     "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
     "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）

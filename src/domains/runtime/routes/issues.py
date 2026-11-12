@@ -622,7 +622,9 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"非法状态: {ns}"})
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, status FROM issue WHERE id=?", (issue_id,))
+        c.execute(
+            "SELECT user_id, status, repo_key, issue_number, stage, completed_at, completed_reason "
+            "FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
@@ -632,14 +634,52 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         cur = row[1]
         if cur != ns and ns not in _TASK_STATUS_FLOWS.get(cur, ()):
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"不允许从 {cur} 迁移到 {ns}"})
-        c.execute(
-            "UPDATE issue SET status=?, "
-            "completed_at=CASE WHEN ? IN ('completed','cancelled') THEN datetime('now') ELSE completed_at END, "
-            "completed_reason=CASE WHEN ?='completed' THEN 'manual' WHEN ?='cancelled' THEN 'cancelled' ELSE completed_reason END "
-            "WHERE id=?",
-            (ns, ns, ns, ns, issue_id)
-        )
+        # Issue #1408：completed → pending_review 为受控撤销出口，同一条 UPDATE 内回退
+        # status/stage 并清空完成信息；仅写这几列，保留 assignee/owner_agent/a2a_seq 等归属与
+        # 平台同步字段（避免抹掉 GitCode 责任人并造成审计归属失真）。
+        _revert_to_review = (cur == "completed" and ns == "pending_review")
+        if _revert_to_review:
+            # 带 status 守卫：多进程/并发下若该需求已被改成其它状态，UPDATE 不命中，
+            # 按 409 返回并跳过审计（避免覆盖并发写入，与 session_store 状态写路径一致）。
+            c.execute(
+                "UPDATE issue SET status='pending_review', stage='pending_review', "
+                "completed_at=NULL, completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE id=? AND status='completed'",
+                (issue_id,)
+            )
+            if c.rowcount == 0:
+                db.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
+        else:
+            c.execute(
+                "UPDATE issue SET status=?, "
+                "completed_at=CASE WHEN ? IN ('completed','cancelled') THEN datetime('now') ELSE completed_at END, "
+                "completed_reason=CASE WHEN ?='completed' THEN 'manual' WHEN ?='cancelled' THEN 'cancelled' ELSE completed_reason END "
+                "WHERE id=?",
+                (ns, ns, ns, ns, issue_id)
+            )
         db.commit()
+    if _revert_to_review:
+        try:
+            from src.domains.mgmt.auth.audit import log_audit
+            log_audit("issue_reverted_to_pending_review", operator_id=user.get("id", 0) or 0,
+                      detail={
+                          "repo_key": row[2],
+                          "issue_id": issue_id,
+                          "issue_number": row[3],
+                          "username": user.get("username", ""),
+                          "from_status": cur,
+                          "to_status": ns,
+                          "from_stage": row[4] or "",
+                          "to_stage": "pending_review",
+                          "prev_completed_at": row[5] or "",
+                          "prev_completed_reason": row[6] or "",
+                      })
+        except Exception as _e:
+            log.warning(f"issue-status: revert audit log failed (issue={issue_id}): {_e}")
+        log.info(f"Issue #{issue_id} reverted completed → pending_review by user {user.get('id', 0)}")
     return {"ok": True, "issue_id": issue_id, "status": ns}
 
 class _IssueConfirmBody(BaseModel):
