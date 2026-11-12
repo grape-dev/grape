@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 
 from pydantic import BaseModel
 
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.domains.mgmt.user import db as user_db
 
 from src.api.deps import require_no_session_token, require_org_member
@@ -1517,7 +1518,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
     import socket as _sock
     _local_hostname = ""
     try:
-        _local_hostname = _sock.gethostname()
+        _local_hostname = engine_host()
     except Exception:
         pass
     _device_by_name = {d.get("device_name", ""): d for d in devices}
@@ -1798,7 +1799,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     from src.domains.mgmt.user import db as user_db
     from src.kernel.config import log
     import socket as _sock
-    _hostname = _sock.gethostname()
+    _hostname = engine_host()
     try:
         discovered = discover_runtimes()
         results = probe_local_engines(discovered)

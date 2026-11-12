@@ -21,6 +21,7 @@ import contextlib
 import io
 import os
 
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.kernel.config import log
 
 
@@ -503,7 +504,7 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
                     from src.domains.runtime.engine.agent import _scan_local_skills_with_detail
                     from src.domains.mgmt.user import db as user_db
                     import socket as _sock
-                    _hostname = _sock.gethostname()
+                    _hostname = engine_host()
                     probed = [r for r in probe_local_engines(discover_runtimes()) if r.get("installed")]
                     if probed:
                         for r in probed:
@@ -614,7 +615,7 @@ async def start_insight_tasks(app, include_table_maintenance: bool = True) -> di
         async def _server_metrics_loop():
             import socket as _sock, hashlib as _hl
             from datetime import datetime, timezone
-            _hostname = _sock.gethostname() or "unknown-server"
+            _hostname = engine_host() or "unknown-server"
             _local_ip = "127.0.0.1"
             try:
                 _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
