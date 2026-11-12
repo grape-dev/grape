@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**30 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -25,7 +25,7 @@ js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 
 ## 功能缺失总表（2026-11-11 全页审计，只读结论）
 
-**已确认缺失（8 项，后端多数仍在支持）**
+**已确认缺失（8 项）→ 2026-11-11 按方案 B 已修复 5 项**：#473/#475/#498/#1167（RuntimesView）+ #1564（DashboardView）。剩 #290（待判定）、#1102（事件分页，暂记账）、#648（内联首屏性能，暂记账）
 
 | # | 页面 | 缺什么 | 证据 |
 |---|---|---|---|
@@ -59,7 +59,7 @@ js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_12_host_confirm.js
 - [ ] test_issue_1310_dropdown_display.js
 - [ ] test_issue_1310_runtimes_display.js
-- [ ] test_issue_1564_scene_scope_violation.js
+- [x] test_issue_1564_scene_scope_violation.js（已修复并改写）
 - [ ] test_issue_187_workspace_repo_restore.js
 - [ ] test_issue_273_lang_switch_toast.js
 - [ ] test_issue_341_tasks_deeplink.js
@@ -88,7 +88,7 @@ js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 ## D 类（断言针对旧实现写法，需按原意在新实现上重写）
 - [ ] test_engine_guide_simplified.js
 - [ ] test_i18n_repos_local_refresh.js
-- [ ] test_issue_1167_runtime_empty_filter.js
+- [x] test_issue_1167_runtime_empty_filter.js（已修复并改写）
 - [ ] test_issue_1477_apikey_time_format.js
 - [ ] test_issue_205_beta_apply_persist.js
 - [ ] test_issue_273_en_prefix_refresh.js
@@ -101,10 +101,10 @@ js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_329_cross_pipeline.js
 - [ ] test_issue_335_skill_search.js
 - [ ] test_issue_372_r13_ui_optimization.js
-- [ ] test_issue_473_range_filter.js
-- [ ] test_issue_475_runtime_health_hint.js
+- [x] test_issue_473_range_filter.js（已修复并改写）
+- [x] test_issue_475_runtime_health_hint.js（已修复并改写）
 - [ ] test_issue_487_scene_recommend_save.js
-- [ ] test_issue_498_health_consistency.js
+- [x] test_issue_498_health_consistency.js（已修复并改写）
 - [ ] test_issue_645_skill_update_fallback.js
 - [ ] test_issue_697_dedup_template.js
 - [ ] test_issue_978_skill_unique_key.js

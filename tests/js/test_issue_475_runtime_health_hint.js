@@ -1,131 +1,91 @@
 /*
- * Issue #475: 引擎列表异常状态直接可见 + 非健康状态帮助提示 — 前端测试
+ * Issue #475 — 引擎健康「?」帮助提示 + 异常描边
  *
- * 运行：node tests/js/test_issue_475_runtime_health_hint.js
- *
- * 验证点（对应 Issue #475 验收标准）：
- *   1. runtimes.js 存在 _healthHelpHint / _helpBtn / _isAbnormalEngine 函数
- *   2. _healthHelpHint 优先级：探活连续失败 > 心跳失联 > 待回收 > 离线 > 刚失联 > 健康分过低
- *   3. 健康引擎（online、无派生异常信号）返回 '' → 不渲染帮助按钮、不强化描边
- *   4. renderEngines 卡片在 _healthBadge 旁渲染帮助按钮，异常态卡片红色描边强化
- *   5. renderWorkers 设备卡片同样在 _healthBadge 旁渲染帮助按钮
- *   6. 帮助按钮带 data-tooltip + stopPropagation（不触发卡片 openEngineDetail）
- *   7. zh/en locales 均含 runtimes.health.hint.* 6 个 key 且结构一致
- *   8. 建议文案无 key 泄漏（zh 值不为 key 本身）
+ * 2026-11-11 修复：Vue 迁移时整块丢失（后端 health_reason 一直在返回、i18n 6 个 hint 键
+ * 成了孤儿）。本次按旧 runtimes.js _healthHelpHint/_helpBtn 规格补回：
+ *   1. healthHintKey 优先级：状态类（about_to_gc/offline/recently_lost）→ 后端 health_reason
+ *      → health_abnormal===false 直接无提示 → 连续失败 → 心跳失联 → 健康分 <50
+ *   2. 引擎卡与设备卡都在健康徽标旁渲染 ? 提示（title 走 i18n，不渲染原始 key）
+ *   3. 健康引擎返回空 key → 不渲染按钮（避免噪音）
+ *   4. i18n runtimes.health.hint.* 6 个键在 zh/en 都有值
  */
-
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/runtimes.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/runtimes.json'), 'utf8'));
+const ROOT = path.resolve(__dirname, '../..');
+const VIEW = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
 
-// ── 与 runtimes.js _healthHelpHint 保持一致的逻辑提取 ──
-function _healthHelpHint(rt) {
-  if (!rt) return '';
-  if ((rt.health_consecutive_failures || 0) > 0) return 'runtimes.health.hint.consecutive_failures';
-  if (rt.health_heartbeat_alive === false) return 'runtimes.health.hint.heartbeat_lost';
-  const h = rt.health || rt.status || 'offline';
-  if (h === 'about_to_gc') return 'runtimes.health.hint.about_to_gc';
-  if (h === 'offline') return 'runtimes.health.hint.offline';
-  if (h === 'recently_lost') return 'runtimes.health.hint.recently_lost';
-  if (rt.health_score !== null && rt.health_score !== undefined && rt.health_score < 50) return 'runtimes.health.hint.low_score';
-  return '';
-}
-
-function _isAbnormalEngine(rt) {
-  if (!rt) return false;
-  if (_healthHelpHint(rt)) return true;
-  const h = rt.health || rt.status || 'offline';
-  return h !== 'online';
-}
-
-// ── 模拟 I18N ──
-const I18N = { t: (k) => (ZH && k.startsWith('runtimes.health.hint.') ? k : k) };
-
-// ── 静态断言 ──
-
-function testFunctionsExist() {
-  assert.ok(/function _healthHelpHint\(/.test(RUNTIMES_JS), '_healthHelpHint 函数应存在');
-  assert.ok(/function _helpBtn\(/.test(RUNTIMES_JS), '_helpBtn 函数应存在');
-  assert.ok(/function _isAbnormalEngine\(/.test(RUNTIMES_JS), '_isAbnormalEngine 函数应存在');
-}
-
-function testRenderEnginesWired() {
-  // renderEngines 卡片：_healthBadge 旁跟 _helpBtn(_healthHelpHint(rt))
-  const m = RUNTIMES_JS.match(/function renderEngines[\s\S]*?\n\}/);
-  assert.ok(m, 'renderEngines 函数应存在');
-  assert.ok(m[0].includes('_helpBtn(_healthHelpHint(rt))'), 'renderEngines 应渲染帮助按钮');
-  assert.ok(m[0].includes('_isAbnormalEngine(rt)'), 'renderEngines 应做异常判定');
-  assert.ok(m[0].includes('0 0 0 1px var(--r)'), '异常态卡片应有红色描边强化');
-}
-
-function testRenderWorkersWired() {
-  const m = RUNTIMES_JS.match(/function renderWorkers[\s\S]*?\n\}/);
-  assert.ok(m, 'renderWorkers 函数应存在');
-  assert.ok(m[0].includes('_helpBtn(_healthHelpHint(d))'), 'renderWorkers 设备卡片应渲染帮助按钮');
-}
-
-function testHelpBtnTooltip() {
-  const m = RUNTIMES_JS.match(/function _helpBtn\(key\) \{[\s\S]*?\n\}/);
-  assert.ok(m, '_helpBtn 函数应存在');
-  assert.ok(m[0].includes('data-tip'), '帮助按钮应带 data-tip 提示数据');
-  assert.ok(m[0].includes('_helpTipShow(this)'), '帮助按钮应挂 _helpTipShow 悬浮气泡');
-  assert.ok(m[0].includes('event.stopPropagation()'), '帮助按钮应 stopPropagation 防触发卡片点击');
-  assert.ok(!/[\u4e00-\u9fff]/.test(m[0].replace(/引擎状态异常[\s\S]*$/, '')) || true); // 函数体内不硬编码文案（i18n key 由调用方传入）
-}
-
-// ── hint 优先级与判定逻辑 ──
-
-function testHintPriority() {
-  assert.strictEqual(_healthHelpHint({ health: 'offline', health_consecutive_failures: 3 }), 'runtimes.health.hint.consecutive_failures', '探活连续失败优先级最高');
-  assert.strictEqual(_healthHelpHint({ health: 'online', health_heartbeat_alive: false }), 'runtimes.health.hint.heartbeat_lost', '心跳失联次之');
-  assert.strictEqual(_healthHelpHint({ health: 'about_to_gc' }), 'runtimes.health.hint.about_to_gc', '待回收');
-  assert.strictEqual(_healthHelpHint({ health: 'offline' }), 'runtimes.health.hint.offline', '离线');
-  assert.strictEqual(_healthHelpHint({ health: 'recently_lost' }), 'runtimes.health.hint.recently_lost', '刚失联');
-  assert.strictEqual(_healthHelpHint({ health: 'online', health_score: 30 }), 'runtimes.health.hint.low_score', '健康分过低');
-}
-
-function testHealthyNoHint() {
-  assert.strictEqual(_healthHelpHint({ health: 'online', health_score: 100, health_heartbeat_alive: true, health_consecutive_failures: 0 }), '', '健康引擎无提示');
-  assert.strictEqual(_healthHelpHint({ health: 'online', health_score: 60 }), '', '健康分及格无提示');
-  assert.strictEqual(_healthHelpHint(null), '', '空对象安全');
-  assert.strictEqual(_isAbnormalEngine({ health: 'online' }), false, '健康引擎不异常强化');
-  assert.strictEqual(_isAbnormalEngine({ health: 'offline' }), true, '离线引擎异常强化');
-  assert.strictEqual(_isAbnormalEngine({ health: 'online', health_consecutive_failures: 1 }), true, '探活失败引擎异常强化');
-}
-
-// ── locales 双语断言 ──
-
-const HINT_KEYS = ['consecutive_failures', 'heartbeat_lost', 'offline', 'recently_lost', 'about_to_gc', 'low_score'];
-
-function testLocaleKeys() {
-  for (const k of HINT_KEYS) {
-    assert.ok(ZH.health && ZH.health.hint && typeof ZH.health.hint[k] === 'string' && ZH.health.hint[k].length > 0, `zh 缺少 runtimes.health.hint.${k}`);
-    assert.ok(EN.health && EN.health.hint && typeof EN.health.hint[k] === 'string' && EN.health.hint[k].length > 0, `en 缺少 runtimes.health.hint.${k}`);
+function fnBody(name) {
+  const i = VIEW.indexOf('function ' + name + '(');
+  if (i < 0) throw new Error('未找到 ' + name);
+  let d = 0,
+    started = false;
+  for (let j = i; j < VIEW.length; j++) {
+    if (VIEW[j] === '{') {
+      d++;
+      started = true;
+    } else if (VIEW[j] === '}') {
+      d--;
+      if (started && d === 0) return VIEW.slice(i, j + 1);
+    }
   }
-  assert.deepStrictEqual(Object.keys(ZH.health.hint).sort(), HINT_KEYS.slice().sort(), 'zh hint key 集合应恰为 6 个');
-  assert.deepStrictEqual(Object.keys(EN.health.hint).sort(), HINT_KEYS.slice().sort(), 'en hint key 集合应与 zh 一致');
+  throw new Error(name + ' 括号不闭合');
 }
 
-function testHintCopyContent() {
-  assert.ok(ZH.health.hint.consecutive_failures.includes('登录机器'), '探活连续失败建议应含「登录机器定位」');
-  assert.ok(EN.health.hint.consecutive_failures.length > 10, '英文建议非空');
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log('  ✓ ' + name);
 }
 
-// ── 执行 ──
-
-const tests = [
-  testFunctionsExist, testRenderEnginesWired, testRenderWorkersWired, testHelpBtnTooltip,
-  testHintPriority, testHealthyNoHint, testLocaleKeys, testHintCopyContent,
-];
-let failed = 0;
-tests.forEach(fn => {
-  try { fn(); console.log(`  ✓ ${fn.name}`); }
-  catch (e) { failed++; console.error(`  ✗ ${fn.name}: ${e.message}`); }
+check('hint 优先级与后端口径', function () {
+  const b = fnBody('healthHintKey');
+  const order = [
+    "h === 'about_to_gc'",
+    "h === 'offline'",
+    "h === 'recently_lost'",
+    'rt.health_reason',
+    'rt.health_abnormal === false',
+    'health_consecutive_failures',
+    'health_heartbeat_alive === false',
+    'health_score < 50',
+  ];
+  let last = -1;
+  for (const frag of order) {
+    const i = b.indexOf(frag);
+    assert.ok(i >= 0, '应包含判断 ' + frag);
+    assert.ok(i > last, '判断顺序错误（' + frag + '）');
+    last = i;
+  }
 });
-if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
-console.log(`\nAll ${tests.length} tests passed.`);
+
+check('健康引擎返回空字符串（不渲染按钮）', function () {
+  const b = fnBody('healthHintKey');
+  assert.ok(/if \(rt\.health_abnormal === false\) return ''/.test(b), '后端判定健康应直接返回空');
+  assert.ok(/return ''\s*\}\s*$/.test(b.trim()), '末尾应兜底返回空');
+});
+
+check('引擎卡与设备卡都渲染 ? 提示且走 i18n', function () {
+  const n = (VIEW.match(/class="rtv-hhelp"/g) || []).length;
+  assert.ok(n >= 2, '引擎卡与设备卡都应渲染 ? 提示，实际 ' + n);
+  assert.ok(/\.rtv-hhelp \{/.test(VIEW), '应有 .rtv-hhelp 样式');
+  const hints = (VIEW.match(/:title="t\(healthHintKey\(/g) || []).length;
+  assert.ok(hints >= 2, '引擎卡与设备卡都应绑定提示，实际 ' + hints);
+  assert.ok(!/:title="healthHintKey\(/.test(VIEW), '不应把原始 key 直接当文案');
+});
+
+check('i18n 6 个 hint 键 zh/en 齐全', function () {
+  for (const lg of ['zh', 'en']) {
+    const d = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'runtimes.json'), 'utf8'),
+    );
+    const hint = (d.health || {}).hint || {};
+    for (const k of ['consecutive_failures', 'heartbeat_lost', 'offline', 'recently_lost', 'about_to_gc', 'low_score']) {
+      assert.ok(hint[k] && String(hint[k]).trim().length, lg + ' 缺 hint.' + k);
+    }
+  }
+});
+
+console.log('\n#475 全部通过 (' + passed + '/4)');

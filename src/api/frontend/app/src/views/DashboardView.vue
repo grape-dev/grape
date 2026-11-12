@@ -297,7 +297,12 @@
               :key="node.id + '-' + i"
             >
               <!-- off 判定用 === false：老场景 nodes 无 enabled 字段（null=启用），!node.enabled 会误判成全灰 -->
-              <div :class="['ap-nd', { off: node.enabled === false }]">
+              <div
+                :class="[
+                  'ap-nd',
+                  { off: node.enabled === false, 'scope-bad': !!scopeViolationOf(node) },
+                ]"
+              >
                 <div
                   class="ap-nd-top"
                   :style="{ background: agentColor(node.tag || node.id) }"
@@ -327,6 +332,9 @@
                   {{ agentDesc(node.tag || node.id) }}
                 </div>
                 <div v-else class="ap-nd-off-lbl">{{ t('not_needed_in_scene') }}</div>
+                <div v-if="scopeViolationOf(node)" class="ap-nd-violation">
+                  {{ scopeViolationHint(scopeViolationOf(node)) }}
+                </div>
                 <div class="ap-nd-hr"></div>
                 <div class="ap-nd-skillbox">
                   <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
@@ -1927,7 +1935,51 @@ function saveCreateScene() {
           app().nav('dash')
         })
     })
-    .catch((e) => app().showToast(t('save_failed', { msg: e.detail?.message || e.message })))
+    .catch((e) => {
+      // Issue #1564：技能 scope 冲突 → 按后端 400 violations[] 对节点标红，就地修正
+      const viols = (e && e.detail && e.detail.violations) || []
+      if (viols.length) {
+        resetScopeViolations(viols)
+        app().showToast(
+          (e.detail && e.detail.message) ||
+            t('skill_scope_mismatch') ||
+            '技能 scope 不匹配，请修正标红节点'
+        )
+        return
+      }
+      app().showToast(t('save_failed', { msg: e.detail?.message || e.message }))
+    })
+}
+// Issue #1564：violations[] → 节点索引（node_id 优先，回退 node_tag）
+const scopeViolations = reactive({})
+function resetScopeViolations(list) {
+  Object.keys(scopeViolations).forEach(function (k) {
+    delete scopeViolations[k]
+  })
+  ;(list || []).forEach(function (v) {
+    const k = (v && (v.node_id || v.node_tag)) || ''
+    if (k) scopeViolations[k] = v
+  })
+}
+function scopeViolationOf(node) {
+  if (!node) return null
+  return scopeViolations[node.id || ''] || scopeViolations[node.tag || ''] || null
+}
+function scopeViolationHint(v) {
+  if (!v) return ''
+  const skill = v.skill || ''
+  const actual = v.actual_scope || ''
+  const expected = v.expected_scope || 'repo'
+  return (
+    (t('skill_scope_mismatch') || '技能 scope 不匹配') +
+    '：' +
+    skill +
+    '（' +
+    actual +
+    ' → ' +
+    expected +
+    '）'
+  )
 }
 function buildNodesPayload(nodes) {
   return nodes
@@ -2104,6 +2156,7 @@ function pickSkill(skillName, skillKey) {
   const node = editNodes.value.find((n) => n.id === skillPanel.agentType)
   if (node) {
     node.skill = skillName || ''
+    if (scopeViolations[node.id || '']) delete scopeViolations[node.id]
     const cache = skillPickCache[skillPanel.agentType] || {}
     // Issue #978：优先按唯一键命中缓存；无 key 时按 name 兜底（同名三档不再覆盖）
     let entry = skillKey ? cache[skillKey] : null
@@ -2591,6 +2644,17 @@ function saveSceneEdit() {
       loadSceneDetail(detail.value.id)
     })
     .catch(function (e) {
+      // Issue #1564：技能 scope 冲突 → 按后端 400 violations[] 对节点标红，就地修正
+      const viols = (e && e.detail && e.detail.violations) || []
+      if (viols.length) {
+        resetScopeViolations(viols)
+        app().showToast(
+          (e.detail && e.detail.message) ||
+            t('skill_scope_mismatch') ||
+            '技能 scope 不匹配，请修正标红节点'
+        )
+        return
+      }
       app().showToast(t('save_failed', { msg: e.detail?.message || e.message }))
     })
 }
@@ -3458,6 +3522,18 @@ onBeforeUnmount(function () {
   padding: 0;
   overflow-x: auto;
   min-height: 280px;
+}
+.ap-nd.scope-bad {
+  border: 1.5px solid var(--r);
+  box-shadow: 0 0 0 3px rgba(255, 59, 48, 0.12);
+}
+.ap-nd-violation {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--r);
+  margin-top: 6px;
+  text-align: left;
+  width: 100%;
 }
 .ap-nd {
   flex: 1 1 0;

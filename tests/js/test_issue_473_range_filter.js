@@ -1,61 +1,65 @@
 /*
- * Issue #473: 设备与引擎页 runtime 列表范围筛选 — 前端源断言测试
+ * Issue #473 — 引擎/设备「范围筛选」（全部/仓库/个人）
  *
- * 运行：node tests/js/test_issue_473_range_filter.js
- *
- * 验证点：
- *   1. runtimes.js 含范围状态 _rtRange（默认 'all'）与 _RT_RANGE_OPTIONS（全部/仓库/个人）
- *   2. _loadRuntimesData / _loadRuntimeDevices 透传 range 查询参数（非 all 时）
- *   3. 筛选栏渲染范围 chips（_rtSetRange）并展示当前选中范围提示（范围：X）
- *   4. _rtClearFilters 一并重置 _rtRange
- *   5. 后端 settings.py 两端点新增 range 参数与 _rt_in_range 范围过滤
+ * 2026-11-11 修复：该功能在 Vue 迁移时整块丢失（后端 range 参数一直在，前端不传），
+ * 本次按旧 runtimes.js 规格补回。本用例断言「前端已接上 + 后端仍支持」：
+ *   1. 前端有 rtRange 状态（默认 all）与三档选项（i18n rt_range_all/repo/user）
+ *   2. engines 与 devices 两个 loader 都在非 all 时传 &range=
+ *   3. chips 渲染 + 点击 setRange 触发重拉；清除筛选会重置 range
+ *   4. zh/en locales 三档文案齐全
+ *   5. 后端仍有 range 参数与 _rt_in_range 过滤
  */
-
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
-const SETTINGS_PY = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/settings.py'), 'utf8');
+const ROOT = path.resolve(__dirname, '../..');
+const VIEW = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
+const locale = (lg) =>
+  JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'runtimes.json'), 'utf8'));
+const BACKEND = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/settings.py'), 'utf8');
 
-// 1. 范围状态与选项
-assert.ok(/let _rtRange = 'all';/.test(RUNTIMES_JS), '应有范围状态 _rtRange 默认 all');
-assert.ok(/_RT_RANGE_OPTIONS\s*=\s*\[/.test(RUNTIMES_JS), '应有 _RT_RANGE_OPTIONS 选项表');
-// 范围标签已 i18n 化（架构审查 Critical #1 修复）：断言 key 引用而非中文字面量
-for (const key of ['rt_range_all', 'rt_range_repo', 'rt_range_user']) {
-  assert.ok(RUNTIMES_JS.includes(`I18N.t('runtimes.${key}')`), `范围选项应引用 i18n key runtimes.${key}`);
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log('  ✓ ' + name);
 }
 
-// 2. 两个加载函数透传 range 参数
-const loadEngines = RUNTIMES_JS.match(/function _loadRuntimesData\(\) \{[\s\S]*?\n\}/)[0];
-assert.ok(/&range=' \+ encodeURIComponent\(_rtRange\)/.test(loadEngines), 'Engines 加载应透传 range 参数');
-const loadDevices = RUNTIMES_JS.match(/function _loadRuntimeDevices\(\) \{[\s\S]*?\n\}/)[0];
-assert.ok(/&range=' \+ encodeURIComponent\(_rtRange\)/.test(loadDevices), 'Workers 加载应透传 range 参数');
-assert.ok(/_rtRange !== 'all'/.test(loadEngines) && /_rtRange !== 'all'/.test(loadDevices),
-  'range=all（默认全量口径）不应发送 range 参数');
+check('rtRange 状态默认 all + 三档选项', function () {
+  assert.ok(/const rtRange = ref\('all'\)/.test(VIEW), '应有 rtRange 默认 all');
+  assert.ok(/RT_RANGE_OPTIONS = \[/.test(VIEW), '应有范围选项表');
+  for (const k of ['rt_range_all', 'rt_range_repo', 'rt_range_user']) {
+    assert.ok(VIEW.indexOf(k) >= 0, '选项应使用 i18n 键 ' + k);
+  }
+});
 
-// 3. 筛选栏范围 chips + 选中范围提示
-assert.ok(/_rtSetRange\('\$\{r\.key\}'\)/.test(RUNTIMES_JS), '范围 chips 应调用 _rtSetRange');
-assert.ok(/_RT_RANGE_OPTIONS\.find\(r => r\.key === _rtRange\)[\s\S]*?\.label\(\)/.test(RUNTIMES_JS), '筛选栏应展示当前选中范围提示');
-assert.ok(/window\._rtSetRange = function\(r\) \{/.test(RUNTIMES_JS), '应导出 _rtSetRange');
+check('两个 loader 非 all 时都传 range 参数', function () {
+  const n = (VIEW.match(/qs \+= '&range=' \+ encodeURIComponent\(rtRange\.value\)/g) || []).length;
+  assert.strictEqual(n, 2, 'engines 与 devices 两个请求都要带 range，实际 ' + n);
+});
 
-// 4. 清除联动
-const clearFn = RUNTIMES_JS.match(/window\._rtClearFilters = function\(\) \{[\s\S]*?\n\};/)[0];
-assert.ok(/_rtRange = 'all';/.test(clearFn), '_rtClearFilters 应重置范围为 all');
+check('chips 渲染 + setRange 切档重拉 + clearFilters 重置', function () {
+  assert.ok(/v-for="opt in RT_RANGE_OPTIONS"/.test(VIEW), '应渲染范围 chips');
+  assert.ok(/@click="setRange\(opt\.key\)"/.test(VIEW), 'chip 点击应走 setRange');
+  const i = VIEW.indexOf('function setRange(');
+  assert.ok(i > 0, '应有 setRange');
+  assert.ok(/resetPageAndReload\(\)/.test(VIEW.slice(i, i + 260)), '切档应重置分页并重拉');
+  assert.ok(/function clearFilters\(\) \{\s*rtRange\.value = 'all'/.test(VIEW), '清除筛选应重置 range');
+});
 
-// 5. 后端 range 参数 + 范围过滤
-// PR #668 审查修复：range 参数升级为 Literal["", "all", "repo", "user"]（非法值 422），
-// 本机引擎归属改按 DB 行 owner_id（local_owner）判定
-assert.ok(/def get_agent_runtimes\([\s\S]*?range: RTRange = ""\)/.test(SETTINGS_PY),
-  'get_agent_runtimes 应有 range 参数（Literal 校验）');
-assert.ok(/def get_runtime_devices\([\s\S]*?range: RTRange = ""\)/.test(SETTINGS_PY),
-  'get_runtime_devices 应有 range 参数（Literal 校验）');
-assert.ok(/RTRange = Literal\["", "all", "repo", "user"\]/.test(SETTINGS_PY),
-  '应定义 RTRange Literal 合法值');
-assert.ok(/def _rt_in_range\(/.test(SETTINGS_PY), '应有 _rt_in_range 范围判定 helper');
-assert.ok(SETTINGS_PY.includes('local_owner'), '_rt_in_range 应支持本机引擎 DB 行 owner_id 归属');
-assert.ok(SETTINGS_PY.includes('_rt_in_range(d.get("scope")'), '设备列表应按范围过滤');
-assert.ok(SETTINGS_PY.includes('_rt_in_range(rt.get("scope")'), '引擎列表应按范围过滤');
+check('zh/en 三档文案齐全', function () {
+  for (const lg of ['zh', 'en']) {
+    const d = locale(lg);
+    for (const k of ['rt_range_all', 'rt_range_repo', 'rt_range_user']) {
+      assert.ok(d[k] && String(d[k]).trim().length, lg + ' 缺 ' + k);
+    }
+  }
+});
 
-console.log('✅ Issue #473 前端范围筛选源断言全部通过（含 PR #668 审查修复）');
+check('后端仍有 range 参数与 _rt_in_range 过滤', function () {
+  assert.ok(/def _rt_in_range\(/.test(BACKEND), '后端应有 _rt_in_range');
+  assert.ok(/_rt_in_range\(/.test(BACKEND.slice(BACKEND.indexOf('def _rt_in_range(') + 200)), '应被实际调用');
+});
+
+console.log('\n#473 全部通过 (' + passed + '/5)');

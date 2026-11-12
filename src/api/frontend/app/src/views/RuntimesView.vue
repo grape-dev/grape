@@ -67,6 +67,14 @@
       <!-- 筛选标签栏 -->
       <div class="rtv-filters">
         <span class="rtv-filter-lbl">筛选</span>
+        <!-- Issue #473：范围筛选（全部/仓库/个人） -->
+        <span
+          v-for="opt in RT_RANGE_OPTIONS"
+          :key="'rg' + opt.key"
+          :class="['rtv-chip', { on: rtRange === opt.key }]"
+          @click="setRange(opt.key)"
+          >{{ t(opt.labelKey) }}</span
+        >
         <span
           v-for="ty in availTypes"
           :key="'t' + ty"
@@ -144,7 +152,14 @@
           </div>
         </template>
         <span
-          v-if="filterType || filterScope || filterScene.length || filterTag.length || search"
+          v-if="
+            filterType ||
+            filterScope ||
+            filterScene.length ||
+            filterTag.length ||
+            search ||
+            (rtRange && rtRange !== 'all')
+          "
           class="rtv-clear"
           @click="clearFilters"
           >✕ 清除</span
@@ -166,23 +181,35 @@
 
       <!-- Engines 卡片网格 -->
       <template v-if="tab === 'engines'">
-        <div v-if="!filteredEngines.length" class="ts t2" style="padding: 12px">
-          {{ t('empty.no_engines') }}
+        <div v-if="!filteredEngines.length">
+          <!-- Issue #1167：有筛选 → 内联「暂无引擎」（筛选栏保留）；无筛选 → 接入引导 -->
+          <div v-if="hasActiveFilters" class="ts t2" style="padding: 12px">
+            {{ t('empty.no_engines') }}
+          </div>
+          <div v-else class="rtv-empty-guide">
+            <div class="rtv-empty-guide-t">{{ t('empty.no_engines_title') }}</div>
+            <div class="rtv-empty-guide-s">{{ t('empty.no_engines_sub') }}</div>
+          </div>
         </div>
         <div v-else class="rtv-grid">
           <div
             v-for="rt in filteredEngines"
             :key="rt.id"
             class="rtv-ecard"
-            :style="{
-              borderLeftColor: RUNTIME_COLOR[rt.health || rt.status || 'offline'] || 'var(--t3)',
-            }"
+            :style="cardLeftBorder(rt.health || rt.status || 'offline', rt)"
             @click="openEngineDetail(rt.id)"
           >
             <img v-if="watermark(rt.name)" :src="watermark(rt.name)" class="rtv-watermark" alt="" />
             <div class="rtv-ecard-head">
               <span :class="['rtv-hbadge', rt.health || 'offline']"
                 ><span class="rtv-dot7"></span>{{ healthLabel(rt.health) }}</span
+              ><span v-if="healthHintKey(rt)" class="rtv-hhelp" :title="t(healthHintKey(rt))"
+                >?</span
+              ><span
+                v-if="workerVersionStale(rt)"
+                class="rtv-vstale"
+                :title="t('label.worker_version_stale_hint')"
+                >⬆ {{ t('label.worker_version_stale') }}</span
               >
               <span :class="['rtv-sbadge', scopeKey(rt)]">{{ scopeBadgeLabel(rt) }}</span>
               <span class="rtv-ename">
@@ -270,12 +297,14 @@
             v-for="d in sortedDevices"
             :key="d.credential_id + '-' + workerDisplayName(d)"
             class="rtv-wcard"
-            :style="cardLeftBorder(d.health)"
+            :style="cardLeftBorder(d.health, d)"
           >
             <div class="rtv-wcard-head">
               <span :class="['rtv-hbadge', d.health || 'offline']"
                 ><span class="rtv-dot7"></span>{{ healthLabel(d.health)
-                }}{{
+                }}<span v-if="healthHintKey(d)" class="rtv-hhelp" :title="t(healthHintKey(d))"
+                  >?</span
+                >{{
                   d.credential_id
                     ? ' · ' + relTime(d.last_seen_at)
                     : ' · ' + t('label.local_direct')
@@ -1061,6 +1090,66 @@ const filterType = ref('')
 const filterScope = ref('')
 const filterScene = ref([])
 const filterTag = ref([])
+// Issue #473：范围筛选（后端 range 参数 all/repo/user）——旧 runtimes.js _RT_RANGE_OPTIONS 移植
+const rtRange = ref('all')
+const RT_RANGE_OPTIONS = [
+  { key: 'all', labelKey: 'rt_range_all' },
+  { key: 'repo', labelKey: 'rt_range_repo' },
+  { key: 'user', labelKey: 'rt_range_user' },
+]
+// Issue #1167：是否存在用户激活的筛选（与 clearFilters 重置范围保持一致）
+const hasActiveFilters = computed(function () {
+  return !!(
+    filterScope.value ||
+    filterType.value ||
+    (Array.isArray(filterScene.value) ? filterScene.value.length : 0) ||
+    (Array.isArray(filterTag.value) ? filterTag.value.length : 0) ||
+    search.value ||
+    (rtRange.value && rtRange.value !== 'all')
+  )
+})
+// Issue #475/#498：健康帮助提示 key —— 后端口径（health_abnormal/health_reason）优先，
+// 旧缓存无字段时回退派生信号推导（与旧 runtimes.js _healthHelpHint 完全同序）
+function healthHintKey(rt) {
+  if (!rt) return ''
+  const h = rt.health || rt.status || 'offline'
+  if (h === 'about_to_gc') return 'health.hint.about_to_gc'
+  if (h === 'offline') return 'health.hint.offline'
+  if (h === 'recently_lost') return 'health.hint.recently_lost'
+  if (rt.health_reason) return 'health.hint.' + rt.health_reason
+  if (rt.health_abnormal === false) return ''
+  if ((rt.health_consecutive_failures || 0) > 0) return 'health.hint.consecutive_failures'
+  if (rt.health_heartbeat_alive === false) return 'health.hint.heartbeat_lost'
+  if (rt.health_score !== null && rt.health_score !== undefined && rt.health_score < 50)
+    return 'health.hint.low_score'
+  return ''
+}
+function isAbnormalEngine(rt) {
+  if (!rt) return false
+  const h = rt.health || rt.status || 'offline'
+  if (h !== 'online') return true
+  if (rt.health_abnormal !== undefined && rt.health_abnormal !== null)
+    return rt.health_abnormal === true
+  return (
+    (rt.health_consecutive_failures || 0) > 0 ||
+    rt.health_heartbeat_alive === false ||
+    (rt.health_score !== null && rt.health_score !== undefined && rt.health_score < 50)
+  )
+}
+function abnormalBorderColor(rt) {
+  const h = rt.health || rt.status || 'offline'
+  if (h === 'about_to_gc' || h === 'offline') return 'var(--r)'
+  if (rt.health_abnormal !== undefined && rt.health_abnormal !== null) {
+    return rt.health_abnormal === true ? 'var(--r)' : ''
+  }
+  if ((rt.health_consecutive_failures || 0) > 0 || rt.health_heartbeat_alive === false)
+    return 'var(--r)'
+  return ''
+}
+// Issue #498：worker 版本落后是独立提示（琥珀标签），不参与异常描边
+function workerVersionStale(rt) {
+  return !!(rt && rt.worker_version_stale)
+}
 const sceneDropdown = ref(false)
 const tagDropdown = ref(false)
 const devAvailScopes = ref([])
@@ -1266,7 +1355,12 @@ function sceneTagSummary(tags) {
     })
     .join('')
 }
-function cardLeftBorder(h) {
+function cardLeftBorder(h, rt) {
+  // Issue #475/#498：在线但健康口径异常 → 红描边强化；其余沿用健康色
+  if (rt && isAbnormalEngine(rt)) {
+    const red = abnormalBorderColor(rt)
+    if (red) return { borderLeft: '3px solid ' + red }
+  }
   return h === 'online'
     ? { borderLeft: '1px solid var(--b)' }
     : { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
@@ -1285,6 +1379,7 @@ const isEmpty = computed(
 function loadRuntimesData() {
   let qs = '?page=' + page.value + '&page_size=' + PAGE_SIZE
   if (filterScope.value) qs += '&scope=' + encodeURIComponent(filterScope.value)
+  if (rtRange.value && rtRange.value !== 'all') qs += '&range=' + encodeURIComponent(rtRange.value)
   const repo = currentRepo()
   if (repo && repo.fullName) qs += '&repo=' + encodeURIComponent(repo.fullName)
   API()
@@ -1309,6 +1404,7 @@ function loadRuntimesData() {
 function loadRuntimeDevices() {
   let qs = '?page=' + devPage.value + '&page_size=' + PAGE_SIZE
   if (filterScope.value) qs += '&scope=' + encodeURIComponent(filterScope.value)
+  if (rtRange.value && rtRange.value !== 'all') qs += '&range=' + encodeURIComponent(rtRange.value)
   if (filterType.value) qs += '&type=' + encodeURIComponent(filterType.value)
   if (search.value) qs += '&q=' + encodeURIComponent(search.value)
   const repo = currentRepo()
@@ -1397,7 +1493,13 @@ function toggleMulti(kind, val) {
   else arr.value.push(val)
   resetPageAndReload()
 }
+function setRange(k) {
+  if (rtRange.value === k) return
+  rtRange.value = k
+  resetPageAndReload()
+}
 function clearFilters() {
+  rtRange.value = 'all'
   filterType.value = ''
   filterScope.value = ''
   filterScene.value = []
@@ -2358,6 +2460,49 @@ onBeforeUnmount(function () {
   color: var(--t3);
 }
 /* 筛选 */
+.rtv-hhelp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--chip-bg);
+  color: var(--t2);
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 4px;
+  cursor: help;
+  flex-shrink: 0;
+}
+.rtv-vstale {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--y);
+  background: var(--chip-bg);
+  padding: 1px 8px;
+  border-radius: 999px;
+  margin-left: 4px;
+  cursor: help;
+}
+.rtv-empty-guide {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 56px 20px;
+  text-align: center;
+}
+.rtv-empty-guide-t {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--t);
+}
+.rtv-empty-guide-s {
+  font-size: 13px;
+  color: var(--t3);
+}
 .rtv-filters {
   display: flex;
   align-items: center;
