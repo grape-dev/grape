@@ -828,7 +828,10 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
             _full = ""
         if _full:
             from src.domains.runtime.engine.skill_materialize import validate_skill_dir
-            ok, missing = validate_skill_dir(os.path.dirname(_full))
+            # validate_skill_dir 返回 (ok, missing, extra, version_drift)；arch 线此处
+            # 仍是旧的两元解包，任何可解析到本地目录的技能都会 ValueError 打断派发
+            # （本轮移植中实测复现），改为可变长解包。
+            ok, missing, *_rest = validate_skill_dir(os.path.dirname(_full))
             if ok:
                 return True, "local skill dir ok", sid
             _st_note = "storage unavailable; " if _storage_unavailable else ""

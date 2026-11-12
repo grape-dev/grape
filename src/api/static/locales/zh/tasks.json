@@ -6,6 +6,7 @@
   "searching": "搜索中...",
   "load_failed": "加载失败: {{msg}}",
   "deeplink_not_found": "未找到需求 #{{n}}，已返回任务列表",
+  "detail_not_in_results": "该需求不在当前筛选结果中",
   "view_list": "列表",
   "view_board": "看板",
   "stage_vod": "VOD",

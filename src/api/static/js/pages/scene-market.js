@@ -801,7 +801,12 @@ function _doExperienceScene(sceneId) {
     clearInterval(_timer);
     setProgress(100, I18N.t('templates.progress_done')||'完成');
     var full_name = r.full_name || '';
-    if (r.message && app && app.showToast) app.showToast(r.message);
+    if (r.hosted === false) {
+      // Host 失败不再误报成功：明确提示仓库已创建但未托管，可去仓库管理页重新托管
+      if (app && app.showToast) app.showToast(r.message || ('仓库已创建，托管失败：' + (r.host_error || '未知原因')));
+    } else if (r.message && app && app.showToast) {
+      app.showToast(r.message);
+    }
     setTimeout(function() {
       modal.remove();
       if (full_name) {
@@ -823,6 +828,10 @@ function _doExperienceScene(sceneId) {
 }
 
 function _selectRepoAndNav(fullName, owner, name) {
+  // 写后取准：清浏览器侧仓库缓存，并强制回源（refresh=1），
+  // 让刚托管/刚解除托管的仓库立刻进入正确分栏（不再等待 30 分钟 TTL）。
+  try { localStorage.removeItem('repo_member_cache'); } catch(e) {}
+  var _memberRefreshPromise = _fetchMemberRepos(true).catch(function() {});
   // 先刷新侧边栏仓库列表（新仓库可能刚托管还没进下拉），完成后再切换仓库
   return API.get('/repos/managed').then(function(d) {
     var repos = d.repos || [];
@@ -833,8 +842,10 @@ function _selectRepoAndNav(fullName, owner, name) {
       }).join('') + '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new')||'添加仓库') + '</option>';
     }
     app.switchRepo(fullName);
+    return _memberRefreshPromise;
   }).catch(function() {
     app.switchRepo(fullName);
+    return _memberRefreshPromise;
   });
 }
 

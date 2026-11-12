@@ -34,29 +34,44 @@ _ACTIVE_STATUS = ("running", "dispatched")
 _WINDOW_DEDUP_STATUS = ("completed",)
 
 
-def _parse_ts(value: str):
-    """解析 events.created_at（naive UTC 空格格式）与 ISO aware 两种形态。"""
-    raw = str(value or "").strip()
+def _parse_ts(value):
+    """解析 events.created_at，统一为 UTC aware datetime（失败返回 None）。
+
+    存储层时间口径（MySQL CST 墙钟 / SQLite UTC）由
+    ``time_utils.normalize_event_time`` 按 ``_db_backend()`` 分流承担——禁止在
+    本模块内写死 ``+8h``（Issue #512 / #1487 同构回归）。已带时区的输入交给
+    ``normalize_event_time`` 后原样转 UTC，不二次偏移。
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc)
+        raw = value.isoformat()
+    else:
+        raw = str(value or "").strip()
     if not raw:
         return None
+    from src.api.time_utils import normalize_event_time
     try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(normalize_event_time(raw)).replace("Z", "+00:00"))
     except Exception:
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
-            try:
-                dt = datetime.strptime(raw, fmt)
-                break
-            except Exception:
-                dt = None
-        if dt is None:
-            return None
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt.astimezone(timezone.utc)
 
 
 def _utc_now():
     return datetime.now(timezone.utc)
+
+
+def _is_excluded(seq, exclude_seq: int) -> bool:
+    """``seq`` 是否即被排除的源事件（精确等值，0/空表示不过滤）。"""
+    if not exclude_seq:
+        return False
+    try:
+        return int(seq or 0) == int(exclude_seq)
+    except (TypeError, ValueError):
+        return False
 
 
 def resolve_scene(repo_key: str, issue_number) -> tuple:
@@ -105,31 +120,44 @@ def _normalize_scene(scene_id: str) -> str:
     return str(scene_id or "").strip()
 
 
-def _query_active_events(repo_key: str, issue_id: str):
+def _query_active_events(repo_key: str, issue_id: str,
+                         statuses=_ACTIVE_STATUS):
+    _statuses = tuple(statuses or _ACTIVE_STATUS)
     try:
         from src.kernel.session_manager import db, db_lock
-        _placeholders = ",".join("?" for _ in _ACTIVE_STATUS)
+        _placeholders = ",".join("?" for _ in _statuses)
         with db_lock:
             c = db.cursor()
             c.execute(
                 "SELECT seq, agent_type, status, created_at, scene_id FROM events "
                 "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
                 f"AND status IN ({_placeholders}) ORDER BY seq DESC LIMIT 50",
-                (repo_key, issue_id, *_ACTIVE_STATUS))
+                (repo_key, issue_id, *_statuses))
             return c.fetchall() or []
     except Exception as _e:
         log.warning(f"A2A guard: active event query failed: {_e}")
         return []
 
 
-def _is_excluded(seq, exclude_seq: int) -> bool:
-    """``seq`` 是否即被排除的源事件（精确等值，0/空表示不过滤）。"""
-    if not exclude_seq:
-        return False
-    try:
-        return int(seq or 0) == int(exclude_seq)
-    except (TypeError, ValueError):
-        return False
+def _collect_downstream(repo_key: str, issue_number, target_agent: str,
+                        scene_id: str, order: list, target_idx: int,
+                        exclude_seq: int, statuses) -> list:
+    """收集同 Issue 同场景、流水线顺序在目标 agent 之后的事件行。"""
+    _downstream = []
+    for seq, agent, status, created_at, row_scene in _query_active_events(
+            repo_key, f"#{issue_number}", statuses):
+        if _is_excluded(seq, exclude_seq):
+            continue
+        agent = str(agent or "").strip()
+        if agent == target_agent or agent not in order:
+            continue
+        _row_scene = _normalize_scene(row_scene)
+        if _row_scene and scene_id and _row_scene != scene_id:
+            continue
+        if order.index(agent) > target_idx:
+            _downstream.append({"seq": seq, "agent": agent, "status": status,
+                                "created_at": created_at})
+    return _downstream
 
 
 def find_running_downstream(repo_key: str, issue_number, target_agent: str,
@@ -137,13 +165,17 @@ def find_running_downstream(repo_key: str, issue_number, target_agent: str,
                             exclude_seq: int = 0) -> dict:
     """目标 agent 为上游且同 Issue 同场景存在 running 下游事件时返回该事件。
 
-    返回 ``{"seq", "agent", "status", "created_at"}``；无命中返回 ``{}``。
+    返回 ``{"seq", "agent", "status", "created_at", "blocking_seqs"}``；无命中
+    返回 ``{}``。``blocking_seqs`` 为排队补派须等待的全部前序：既含 running/
+    dispatched 下游，也含同 Issue 同场景已在排队的下游（与 drain 的活跃语义对齐，
+    避免同一 drain 轮次把排队下游与新入队事件一起补派，Issue #1973 复审残留 1）。
     ``nodes`` 为空（场景未配置/解析失败）时门禁静默失效——此处显式告警，
     便于排查「配置缺失导致误放行」而非无痕。
 
-    Issue #1948：``exclude_seq`` 是本次调用的发起方自身事件 seq。调用方（如下游 qa
-    打回上游 coding）自己的 running 事件不能被判成「下游 running」，否则反向派发会被
-    自锁跳过；只按该 seq 精确排除，其余下游 running 仍照常拦截（#1770 不退化）。
+    Issue #1948 / #1973：``exclude_seq`` 为本次调用的发起方自身事件 seq。调用方
+    （如下游 qa 打回上游 coding）自身 running 事件不应被判定为「下游 running」，
+    否则反向派发会被自锁跳过。仅按该 seq 精确排除，其余下游 running 仍照常拦截
+    （#1770 防抖语义不退化）。
     """
     order = pipeline_order(nodes)
     if not order:
@@ -156,20 +188,30 @@ def find_running_downstream(repo_key: str, issue_number, target_agent: str,
         return {}
     target_idx = order.index(target_agent)
     scene_id = _normalize_scene(scene_id)
-    for seq, agent, status, created_at, row_scene in _query_active_events(
-            repo_key, f"#{issue_number}"):
-        if _is_excluded(seq, exclude_seq):
-            continue
-        agent = str(agent or "").strip()
-        if agent == target_agent or agent not in order:
-            continue
-        _row_scene = _normalize_scene(row_scene)
-        if _row_scene and scene_id and _row_scene != scene_id:
-            continue
-        if order.index(agent) > target_idx:
-            return {"seq": seq, "agent": agent, "status": status,
-                    "created_at": created_at}
-    return {}
+    try:
+        _exclude_seq = int(exclude_seq or 0)
+    except Exception as _ee:
+        log.warning(
+            "A2A guard: invalid exclude_seq=%r, fallback to 0 "
+            "(self event may self-block) repo=%s issue=#%s target=%s: %s",
+            exclude_seq, repo_key, issue_number, target_agent, _ee)
+        _exclude_seq = 0
+    _blocking = _collect_downstream(
+        repo_key, issue_number, target_agent, scene_id, order, target_idx,
+        _exclude_seq, _ACTIVE_STATUS)
+    if not _blocking:
+        return {}
+    # Issue #1973 复审残留 1：同 Issue 同场景已在排队的下游也必须纳入阻塞集合，
+    # 否则它既不在 running 门禁里，也不会被 drain 与新入队事件区分开。
+    _queued_blocking = _collect_downstream(
+        repo_key, issue_number, target_agent, scene_id, order, target_idx,
+        _exclude_seq, ("queued",))
+    _blocking_seqs = sorted({int(_b["seq"] or 0)
+                             for _b in _blocking + _queued_blocking} - {0})
+    # 同一 Issue 可能存在多个活跃下游事件：排队必须等待全部终态，只等最新一个
+    # 会在更早的下游仍 running 时提前补派（#1973 复审 a）。seq 仍返回最新一条，
+    # 兼容既有响应字段；blocking_seqs 供 drain/reconcile 全量核对。
+    return dict(_blocking[0], blocking_seqs=_blocking_seqs)
 
 
 def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
@@ -180,6 +222,9 @@ def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
     仅 ``completed`` 计入窗口去重：``failed`` / ``cancelled`` / ``timeout`` 属失败或
     取消，应允许立即重试（Issue #1770 审查 P2）。running/dispatched/queued 由活跃
     门禁与 #1667 排队语义处理，不在此重复拦截。
+
+    ``exclude_seq`` 指定一行的 seq 精确跳过（手动补发排除源事件自身，默认 0 不过滤；
+    异源候选仍照常拦截）。
 
     返回 ``{"seq", "created_at", "status"}``；无命中返回 ``{}``。
     """
@@ -227,6 +272,8 @@ def find_active_duplicate(repo_key: str, issue_number, target_agent: str,
     审查 P3：同 issue+scene+agent 活跃时不再另建第二个事件空跑）；同上下文重复
     仍交由 #1667 ``duplicate_a2a`` 处理以保留其 ``original_event`` 响应。
     ``include_same_context=True`` 供原子落库复查使用（并发同键只允许落一行）。
+    ``exclude_seq`` 指定一行的 seq 精确跳过（手动补发排除源事件自身，默认 0 不过滤；
+    异源候选仍照常拦截）。
 
     返回 ``{"seq", "agent", "status", "created_at"}``；无命中返回 ``{}``。
     """
@@ -345,11 +392,14 @@ def append_guarded_a2a_event(repo_key: str, issue_number, target_agent: str,
                              scene_id: str, *, title: str, summary: str,
                              payload: dict, actor: str = "", status: str = "running",
                              context_key: str = "", idempotency_key: str = "",
-                             window_seconds: int | None = None):
+                             window_seconds: int | None = None,
+                             exclude_seq: int = 0):
     """原子「门禁复查 + 事件落库」（Issue #1770 审查 P4）。
 
     在同一 ``db_lock``（RLock）内先复查时间窗/活跃重复，再调用 ``append_event``
     落库，消除「门禁查询」与「事件插入」分属不同锁段导致的并发同键双落库。
+    ``exclude_seq`` 透传到三次复查，确保手动补发（a2a-redo）在原子阶段仍能
+    排除源事件自身（Issue #1962）。
     返回 ``(kind, value)``：
 
     - ``("ok", seq)``：已落库；
@@ -360,18 +410,19 @@ def append_guarded_a2a_event(repo_key: str, issue_number, target_agent: str,
     from src.api.event_store import append_event
     with db_lock:
         _dup = find_window_duplicate(
-            repo_key, issue_number, target_agent, scene_id, window_seconds)
+            repo_key, issue_number, target_agent, scene_id, window_seconds,
+            exclude_seq=exclude_seq)
         if _dup:
             return "duplicate_key", _dup
         _active = find_active_duplicate(
             repo_key, issue_number, target_agent, scene_id, context_key,
-            window_seconds)
+            window_seconds, exclude_seq=exclude_seq)
         if _active:
             return "active_dispatch", _active
         # 并发复查：同上下文活跃事件已存在 → 按重复处理，禁止第二次落库。
         _same = find_active_duplicate(
             repo_key, issue_number, target_agent, scene_id, context_key,
-            window_seconds, include_same_context=True)
+            window_seconds, include_same_context=True, exclude_seq=exclude_seq)
         if _same:
             return "duplicate_key", _same
         seq = append_event(

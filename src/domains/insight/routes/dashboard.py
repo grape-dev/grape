@@ -7,6 +7,8 @@ from src.domains.mgmt.user import db as user_db
 from src.api.deps import require_no_session_token, require_org_member
 
 from src.api.time_utils import normalize_event_time
+from src.domains.insight.observability.engine_probe import get_probe_results
+from src.kernel.config import log
 
 from src.domains.insight.observability.engine_probe import get_probe_results
 
@@ -1013,6 +1015,30 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         },
     }
 
+
+@router.get("/ops/engine-select-explain", operation_id="dashboard_ops_engine_select_explain",
+            summary="Engine selection explain", description="Issue #605: explain engine dispatch candidates "
+            "for a (repo, agent_type, scene) — bound engines, per-candidate filter reasons, "
+            "broadcast pool and legacy selection result. Read-only.")
+def get_engine_select_explain(repo: str = "", agent_type: str = "vod", scene_id: str = "",
+                              user: dict = Depends(require_org_member)):
+    """主控侧取证接口（Issue #605）：解释引擎派发候选与过滤原因（只读）。
+
+    - repo：仓库 repo_key（如 gitcode:owner/repo 或 owner/repo）
+    - agent_type：agent 角色（vod/coding/qa/sre/issue）
+    - scene_id：场景 ID（空则无场景绑定口径）
+    返回 explain_engine_selection 结果：bound_engine_ids / candidates（含 reasons）/
+    pool_engine_ids / selected。库内字段（healthy/online/last_seen）与 console 展示
+    不一致的核对可由 candidates 字段直接完成。
+    """
+    from src.domains.runtime.engine.engine_select import explain_engine_selection
+    try:
+        return {"ok": True, **explain_engine_selection(repo, agent_type, scene_id=scene_id)}
+    except Exception as e:
+        log.warning(f"Dashboard: engine-select-explain failed: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
+
 @router.get("/ops/probe-now", operation_id="dashboard_ops_probe_now")
 def probe_engines_now(user: dict = Depends(require_org_member)):
     """需登录：组织成员可见。手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
@@ -1429,21 +1455,46 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
     - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
       维持原值（不额外远程查权限，避免限流）。
+    - Issue #2126: partial 超过 30 分钟仍在复查时按诊断步骤重新判定——bot 相关步骤收敛为 bot_missing，
+      仅 webhook 相关步骤且 webhook 已存在才收敛为完整；空/未知时间不做回收（视为未知）。
     - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
     """
     from src.kernel.config import log as _log
     try:
-        from src.domains.mgmt.user.db import get_host_status, set_host_status, _get_managed_webhook_id
+        from src.domains.mgmt.user.db import get_host_detail, set_host_status, _get_managed_webhook_id
         webhook_id = _get_managed_webhook_id(repo_key)
-        cur = get_host_status(repo_key)
+        detail = get_host_detail(repo_key)
+        cur = detail.get("status", "")
         if not webhook_id:
             # webhook 从未建立 → webhook_missing
             if cur != "webhook_missing":
-                set_host_status(repo_key, "webhook_missing")
+                set_host_status(repo_key, "webhook_missing", "create_webhook",
+                                detail.get("error") or "webhook 未创建")
             return "webhook_missing"
         # webhook 存在：
-        if cur in ("bot_missing", "partial"):
-            # bot 缺失/部分是托管时落库的明确标记，保留（不远程复查）
+        if cur == "partial":
+            if _host_partial_stale(detail.get("updated_at", "")):
+                step = detail.get("step", "") or ""
+                kind = _host_partial_step_kind(step)
+                if kind == "webhook":
+                    # 失败步骤仅涉及 webhook，且 webhook 已存在 → 可判定收尾成功
+                    _log.info(f"Dashboard: recover stale partial hosting for {repo_key} (step={step})")
+                    set_host_status(repo_key, "")
+                    return ""
+                if kind == "token":
+                    # 用户 token 缺失需重新登录，不可自动判定完整，保留诊断供修复
+                    _log.info(f"Dashboard: stale partial needs user token for {repo_key} (step={step})")
+                    return cur
+                # bot 相关步骤（含未知/github_host/host_setup）webhook 存在不代表 bot 已加入
+                # → 收敛为 bot_missing，保留诊断供修复，避免误报完整
+                _log.info(f"Dashboard: stale partial -> bot_missing for {repo_key} (step={step or 'unknown'})")
+                set_host_status(repo_key, "bot_missing", step or "verify_bot",
+                                detail.get("error") or "bot 未确认加入")
+                return "bot_missing"
+            # 刚失败不久的部分完成，保留原状态与诊断（不远程复查）
+            return cur
+        if cur == "bot_missing":
+            # bot 缺失是托管时落库的明确标记，保留（不远程复查）
             return cur
         # 正常（含曾误标 webhook_missing → 现在 webhook_id>0 存在 → 清掉误报）
         if cur != "":
@@ -1452,6 +1503,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     except Exception as e:
         _log.warning(f"Dashboard: host status check failed: {e}")
         return ""
+
 
 @router.get("/{owner}/{repo}", operation_id="dashboard_repo", summary="Repository dashboard", description="Repository-scoped dashboard panel data for the current user.")
 def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member)):
@@ -1761,6 +1813,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 
     # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
     host_status = _check_host_status(owner, repo, _actual_repo_key)
+    # Issue #2126: 同步透出失败步骤/原因与结构化缺失项
+    try:
+        from src.domains.mgmt.user.db import get_host_detail
+        _host_detail = get_host_detail(_actual_repo_key)
+        _host_missing = _host_missing_items(host_status, _host_detail.get("step", ""))
+    except Exception:
+        _host_detail = {"step": "", "error": "", "updated_at": ""}
+        _host_missing = _host_missing_items(host_status)
 
     # 读取当前场景的高级选项（工作分支 + 自定义 key:value）
     advanced_options = {}
@@ -1794,3 +1854,47 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 import re
 
 from src.kernel.repo_key import repo_key_candidates
+
+
+_HOST_PARTIAL_TIMEOUT_SECONDS = 1800  # Issue #2126: 长期 partial 超时回收阈值（30 分钟）
+_HOST_PARTIAL_WEBHOOK_STEPS = {"create_webhook", "configure_webhook_url"}
+_HOST_PARTIAL_TOKEN_STEPS = {"user_token"}
+
+
+# ==== 前置特性补齐（arch 线缺失、weekly-mys 已有）====
+
+def _host_partial_stale(updated_at: str, timeout: int = _HOST_PARTIAL_TIMEOUT_SECONDS) -> bool:
+    """判断 partial 记录是否已超过回收阈值（同一存储时间口径字符串比较）。"""
+    if not updated_at:
+        # Issue #2126: 存量数据/未知时间不得视为超时（Spec：空值视为未知，不做自动回收）
+        return False
+    try:
+        from src.api.time_utils import db_now_str
+        return str(updated_at) <= db_now_str(-timeout)
+    except Exception:
+        return False
+
+
+def _host_partial_step_kind(step: str) -> str:
+    """把 partial 诊断步骤归类为 webhook / token / bot（未知步骤按 bot 保守处理）。"""
+    if step in _HOST_PARTIAL_WEBHOOK_STEPS:
+        return "webhook"
+    if step in _HOST_PARTIAL_TOKEN_STEPS:
+        return "token"
+    return "bot"
+
+
+def _host_missing_items(status: str, step: str = "") -> list[str]:
+    """把托管状态映射为结构化缺失项（bot / webhook / token），供前端直接渲染。"""
+    if status == "bot_missing":
+        return ["bot"]
+    if status == "webhook_missing":
+        return ["webhook"]
+    if status == "partial":
+        kind = _host_partial_step_kind(step)
+        if kind == "webhook":
+            return ["webhook"]
+        if kind == "token":
+            return ["token"]
+        return ["bot"]
+    return []

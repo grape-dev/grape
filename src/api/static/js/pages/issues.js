@@ -158,13 +158,29 @@ function _boardLoadAll(opts) {
 function _renderBoardCols() {
   if (!_boardPagingActive()) { _render(); return; }
   var filtered = _filteredTasks();
+  // Issue #2120：详情态下看板列容器不存在，列重置/轮询响应落地时只刷新详情数据引用并就地重绘，
+  // 不得回退 _render() 整页重绘把详情顶回列表。
+  if (window._currentDetailTask) {
+    var _prevDetail = window._currentDetailTask;
+    var _prevSig = _detailSignature(_prevDetail);
+    var _next = filtered.find(function (t) { return t.id === _prevDetail.id; });
+    if (_next) _mergeDetailFields(_prevDetail, _next);
+    window._tasksById = window._tasksById || {};
+    window._tasksById[_prevDetail.id] = _prevDetail;
+    var _changed = _detailSignature(_prevDetail) !== _prevSig;
+    var _refreshed = _refreshDetailInPlace(_prevDetail, _changed);
+    window._detailPendingRefresh = false;
+    if (!_refreshed && _changed && _prevDetail.is_pr_event) _openPRDetail(_prevDetail);
+    if (_taskSel && _taskSel.id === _prevDetail.id) _taskSel = _prevDetail;
+    return;
+  }
   var missing = false;
   _BOARD_COLS.forEach(function (c) {
     var el = document.getElementById('colList-' + c);
     if (!el) { missing = true; return; }
     var list = filtered.filter(function (t) { return _mapStatusL(t) === c; });
     var top = el.scrollTop;
-    el.innerHTML = _boardColListHtml(c, list);
+    el.innerHTML = _boardColListHtml(c, list, _colCursor[_BOARD_CURSOR_OF_COL[c]]);
     el.scrollTop = top;
     var cnt = document.getElementById('colCount-' + c);
     if (cnt) cnt.textContent = _boardColCountText(c, list.length);
@@ -262,6 +278,13 @@ function toggleTasksMode() {
   _saveTasksSortPref(repo ? repo.fullName : '');
   _resetTaskListAndLoad();
 }
+// Issue #2120：搜索显式提交（Enter / 搜索按钮）——输入过程不写 _taskQuery，
+// 避免点卡片失焦触发搜索请求、响应落地后把详情页顶回列表
+function _submitTaskSearch() {
+  var inp = document.getElementById('tcSearchInput');
+  if (inp) _taskQuery = inp.value;
+  _resetTaskListAndLoad();
+}
 // Issue #926：状态/搜索/排序/换仓变化 → 重置回第 1 屏重新拉取（选中项 _taskSel 保留）
 function _resetTaskListAndLoad() {
   _taskPage = 1;
@@ -320,6 +343,8 @@ function renderTasks(param) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
+  window._currentDetailTask = null;  // Issue #2120：重进需求中心一律回到列表，避免旧详情被 _render 兜底重开
+  _resetDetailFlags();
   _taskFilterPopoverOpen = false;
   window._pendingTaskDetailId = null;  // Issue #175: 清理残留，防止意外跳详情
   // Issue #341: 深链 #tasks/<issue号>——纯数字 param 视为待打开详情的需求编号，
@@ -533,6 +558,8 @@ function loadTasks(opts) {
              (_taskFilterAssignees.length ? '&creators=' + encodeURIComponent(_taskFilterAssignees.join(',')) : '');  // Issue #805: 按创建人过滤
   }
   _tasksLoading = true;
+  // Issue #1961：重置类请求先渲染列表忙态（滚动追加/轮询合并保持局部更新不闪动）
+  if (!_append && !_merge) _renderTaskListBusyIfNeeded();
   API.get(apiUrl).then(d => {
     if (_seq !== _taskReqSeq) return;  // 已被更新的请求取代：旗标归最新请求所有，不由本发清除
     if (window._currentView !== 'tasks') { _tasksLoading = false; return; }  // stale guard
@@ -573,19 +600,59 @@ function loadTasks(opts) {
     } else {
       _tasksAll = _items;
     }
+    // Issue #2120：重置类响应落地时按 id 刷新详情引用（详情不关闭）；
+    // 旧详情对象保留其详情专属字段（附件/描述等列表瘦身可能缺失），新值覆盖共有字段；
+    // 详情对象不在新结果集时保留旧对象并提示一次
+    if (window._currentDetailTask && !_append && !(opts && opts.merge)) {
+      var _prevDetail = window._currentDetailTask;
+      var _prevDetailSig = _detailSignature(_prevDetail);
+      var _dtNext = _tasksAll.find(t => t.id === _prevDetail.id);
+      if (_dtNext) {
+        _mergeDetailFields(_prevDetail, _dtNext);
+        window._currentDetailTask = _prevDetail;
+        window._detailMissingNotified = false;
+        window._detailPendingRefresh = _detailSignature(_prevDetail) !== _prevDetailSig;
+      } else {
+        window._detailPendingRefresh = false;
+        if (!window._detailMissingNotified) {
+          window._detailMissingNotified = true;
+          if (app && app.showToast) app.showToast(I18N.t('tasks.detail_not_in_results', null, '该需求不在当前筛选结果中'));
+        }
+      }
+    }
     // Issue #175: 刷新 _taskSel 指向新对象（旧引用的 status 等字段已过时）；重置加载时保留选中
     if (_taskSel) {
       var updated = _tasksAll.find(t => t.id === _taskSel.id);
       _taskSel = updated || null;
     }
     if (!_taskSel && _tasksAll.length > 0) _taskSel = _tasksAll[0];
+    // Issue #2120：详情态下选中项跟随详情对象，避免局部渲染回退到筛选结果首条
+    if (window._currentDetailTask) _taskSel = window._currentDetailTask;
     // Issue #175: 有待打开详情时不先渲染列表，避免列表闪现后立刻被详情覆盖
     var _openedDetail = false;  // 跟踪本次 loadTasks 是否打开了详情页
+    var _keptDetail = false;    // Issue #2120：详情态重置走局部渲染，详情保留
     if (!window._pendingTaskDetailId && !window._pendingIssueNumber) {
       // Issue #1077：append（滚动追加）/merge（轮询刷新）只做列表局部更新，
       // 不整页 _render()（消除顶部/搜索/筛选/详情闪动与滚动位置重置）
       if ((_append || (opts && opts.merge)) && _tasksAll.length > 0) {
         _partialRenderTasks(_append ? _newItems : null);
+      } else if (window._currentDetailTask) {
+        // Issue #2120：详情态下 #pageContent 已被 _openBoardDetail 整体替换，
+        // taskListBody/taskBoardScroll 容器并不存在 —— 调 _partialRenderTasks 必回退
+        // _render() 整页重绘（重开详情、重置流水线展开量、重拉附件、丢滚动）。
+        // 因此这里只刷新数据引用，并按需就地更新详情内容；_render 兜底闸门仍然保留。
+        window._tasksById = {};
+        _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
+        window._tasksById[window._currentDetailTask.id] = window._currentDetailTask;  // 详情引用优先于列表瘦身对象
+        var _needDetailRefresh = window._detailPendingRefresh;
+        var _detailRefreshed = _refreshDetailInPlace(window._currentDetailTask, _needDetailRefresh);
+        window._detailPendingRefresh = false;
+        // Issue #2120：PR 伪卡片详情无 #_boardDetailContent，就地刷新无从下手 →
+        // 数据确有变化时按需重渲染，避免 PR 详情状态停留在旧值
+        if (!_detailRefreshed && _needDetailRefresh && window._currentDetailTask.is_pr_event) {
+          _openPRDetail(window._currentDetailTask);
+        }
+        _keptDetail = true;
       } else {
         _render();
       }
@@ -638,7 +705,7 @@ function loadTasks(opts) {
       } else {
         _render();  // 任务不存在了，渲染列表
       }
-    } else if (!_openedDetail) {
+    } else if (!_openedDetail && !_keptDetail) {
       // Issue #175: 普通列表刷新时清除详情页状态，防止 _withTaskLoading 误判在详情页。
       // 安全前提：_openBoardDetail 进入详情页时会 clearInterval 停止轮询（L325），
       // 所以轮询触发的 loadTasks 不会在详情页期间执行此清除。如未来改为详情页也保持轮询，需同步调整此处。
@@ -754,7 +821,14 @@ function _filteredTasks() {
 // Issue #1740：清理详情态与详情轮询（返回看板/场景/列表时统一调用）
 function _clearTaskDetailState() {
   window._currentDetailTask = null;
+  _resetDetailFlags();
   if (window._taskPipeTimer) { clearInterval(window._taskPipeTimer); window._taskPipeTimer = null; }
+}
+
+// Issue #2120：详情态标记统一重置，避免多处手写字段漂移
+function _resetDetailFlags() {
+  window._detailMissingNotified = false;
+  window._detailPendingRefresh = false;
 }
 
 // Issue #1740：从详情返回看板——先用缓存立即渲染（各列都有数据），
@@ -790,6 +864,8 @@ window._backToBoard = function() {
 window._openBoardDetail = function(taskId) {
   const t = window._tasksById[taskId];
   if (!t) return;
+  if (!window._currentDetailTask || window._currentDetailTask.id !== t.id) _resetDetailFlags();
+  window._detailPendingRefresh = false;
   window._currentDetailTask = t;
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -813,13 +889,13 @@ window._openBoardDetail = function(taskId) {
   <div style="padding:0;max-width:720px;margin:0 auto">
     <div style="display:flex;align-items:center;gap:12px;padding-bottom:6px">
       <button class="tsk-btn tsk-btn-ghost" onclick="${_backAction}" style="padding:6px 14px">${_backLabel}</button>
-      <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
+      <h1 id="_boardDetailTitle" style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, '/issues/' + t.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('issues.detail.go_conversation')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>
-      ${_renderTaskActionsInline(t)}
+      <span id="_boardDetailStatusActions" style="display:contents">${_renderTaskActionsInline(t)}</span>
       ${_renderCrossPipelineButton(t)}
     </div>
     <div id="_boardDetailContent">${_detailHtml(t)}</div>
@@ -1084,6 +1160,13 @@ function _renderPipelineSection(data) {
   if (_reviewStatus === 'pending_review') {
     html += `<div style="font-size:11px;color:#ff9f0a;background:rgba(255,159,10,.08);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">◉</span><span><b>${I18N.t('tasks.status.tag_pending_review')||'待审核'}</b> — ${I18N.t('issues.review_status.pending_review_hint')||'需求待人工确认：阶段执行完成 ≠ 需求/生产发布完成'}</span></div>`;
   }
+  // Issue #2050: 完成但未接力（stalled）——区分正常完成并展示停滞时长
+  if (data.stalled) {
+    var _stallMin = data.stalled_minutes || 0;
+    var _stallTitle = I18N.t('issues.stall_banner.title', {minutes: _stallMin}) || ('完成但未接力（停滞 ' + _stallMin + ' 分钟）');
+    var _stallHint = I18N.t('issues.stall_banner.hint') || '平台已告警并将在确认窗内自动重派发，可人工核对下一棒';
+    html += `<div style="font-size:11px;color:#ff9f0a;background:rgba(255,159,10,.10);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">⏳</span><span><b>${_stallTitle}</b> — ${_stallHint}</span></div>`;
+  }
   // Issue #539: SRE 验收结论引用（result_ref 摘要 + 可授权查询任务引用）
   var _sreResult = data.sre_result || null;
   if (_sreResult && _sreResult.result_ref) {
@@ -1242,9 +1325,52 @@ function _boardCardHtml(t, colKey, meta) {
   return html;
 }
 
+// Issue #1961：忙态文案——有搜索词用「搜索中...」，否则用「加载中...」
+function _tasksBusyText() {
+  return _taskQuery ? (I18N.t('tasks.searching') || '搜索中...') : (I18N.t('tasks.loading') || '加载中...');
+}
+
+// Issue #1961：列表视图是否处于忙态（本轮请求尚未发出 seq===0，或请求在途）
+function _tasksListBusy() {
+  return _tasksLoading || _taskReqSeq === 0;
+}
+
+// Issue #1961：列表视图忙态 HTML（非忙态返回空串）
+function _tasksListBusyHtml() {
+  if (!_tasksListBusy()) return '';
+  return `<div class="tsk-empty"><div>🗒</div><p>${_tasksBusyText()}</p></div>`;
+}
+
+// Issue #1961：列表视图空态——忙态显示忙态文案，已返回且确实 0 条才显示空态文案
+function _taskListEmptyHtml() {
+  var busy = _tasksListBusyHtml();
+  if (busy) return busy;
+  return `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+}
+
+// Issue #1961：「仓库全部 + 列表」重置类请求在途且本地无数据时，先渲染忙态，
+// 避免上一次搜索结果留下的空态文案在重拉期间被误认为新结果。
+function _renderTaskListBusyIfNeeded() {
+  if (_tasksViewMode !== 'repo_all' || _taskView !== 'list') return false;
+  if (_tasksAll.length > 0) return false;
+  var busy = _tasksListBusyHtml();
+  if (!busy) return false;
+  var body = document.getElementById('taskListBody');
+  if (!body) return false;
+  body.innerHTML = busy;
+  var pager = document.getElementById('taskListPager');
+  if (pager) pager.innerHTML = _taskListPagerHtml([]);
+  return true;
+}
+
 // 某列的卡片容器内容（含空态）
-function _boardColListHtml(colKey, list) {
+// Issue #1961：可选第三参 cur 为该列游标——seq===0（本轮未发出）/ loading（在途）输出忙态，
+// 仅「已返回且 list 为空」才输出空态文案；cur 缺省时保持旧行为。
+function _boardColListHtml(colKey, list, cur) {
   if (list.length === 0) {
+    if (cur && (cur.seq === 0 || cur.loading)) {
+      return `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${_tasksBusyText()}</div>`;
+    }
     return `<div style="padding:24px 12px;text-align:center;color:var(--t3,#86868b);font-size:12px;font-weight:400">${I18N.t('tasks.empty.no_tasks_desc') || '无需求'}</div>`;
   }
   const meta = _boardStageMeta();
@@ -1274,7 +1400,7 @@ function _boardColHtml(colKey, list) {
       <span id="colCount-${colKey}" style="font-size:11px;color:var(--t3,#86868b);font-weight:500;background:rgba(0,0,0,.05);border-radius:999px;padding:1px 8px">${_boardColCountText(colKey, list.length)}</span>
     </div>`;
   html += `<div id="colList-${colKey}" style="flex:1;overflow-y:auto;min-height:0;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px">`;
-  html += _boardColListHtml(colKey, list);
+  html += _boardColListHtml(colKey, list, _colCursor[_BOARD_CURSOR_OF_COL[colKey]]);
   html += `</div>`;
   html += `<div id="colFoot-${colKey}" style="flex-shrink:0">${_boardColFootHtml(colKey, list.length)}</div>`;
   html += `</div>`;
@@ -1430,16 +1556,74 @@ function _partialRenderTasks(newItems) {
     // merge / 分区模式：重绘列表容器内部（顶部与详情区不受影响）
     body.innerHTML = _taskListBodyHtml(filtered);
     if (!body.innerHTML) {
-      body.innerHTML = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+      body.innerHTML = _taskListEmptyHtml();
     }
   }
   pager.innerHTML = _taskListPagerHtml(filtered);
   _observeTaskSentinel();
 }
 
+// Issue #2120：详情字段合并——列表瘦身行可能缺少详情专属字段（task_description/附件等），
+// 只覆盖新对象真实带回的字段，避免 Object.assign 把详情字段清空；返回合并后的旧对象。
+function _mergeDetailFields(prevDetail, next) {
+  if (!prevDetail || !next || prevDetail === next) return prevDetail;
+  Object.keys(next).forEach(function (k) {
+    if (next[k] !== undefined) prevDetail[k] = next[k];
+  });
+  return prevDetail;
+}
+
+// Issue #2120：详情可见字段签名——重置响应落地后判断详情内容是否需要就地刷新
+function _detailSignature(t) {
+  if (!t) return '';
+  var atts = Array.isArray(t.attachments)
+    ? t.attachments.map(function (a) { return (a && (a.filename || a.name)) + ':' + (a && a.size); }).join(',')
+    : '';
+  return [t.title, t.status, t.stage, t.completed_at, t.completed_reason, t.creator,
+    t.scene_name, t.scene_id, t.scene_source, t.is_pr, t.repo_key, t.issue_number,
+    t.created_at, t.is_subtask_mode, t.parent_issue_number, t.task_description,
+    t.attachments_count, atts].join('\u0001');
+}
+
+// Issue #2120：详情态重置响应落地时同步就地刷新内容区、头部标题与状态动作按钮，
+// 避免内容区状态已更新、头部按钮仍显示旧状态（如已 completed 仍展示「确认完成/取消」）
+function _refreshDetailInPlace(t, force) {
+  if (!t) return false;
+  var box = document.getElementById('_boardDetailContent');
+  if (!box) return false;  // 详情 DOM 不在（PR 伪卡片等），交给调用方按需重渲染
+  if (!force && !window._detailPendingRefresh) return true;
+  box.innerHTML = _detailHtml(t);
+  var titleEl = document.getElementById('_boardDetailTitle');
+  if (titleEl) titleEl.textContent = t.title || '';
+  var actionsEl = document.getElementById('_boardDetailStatusActions');
+  if (actionsEl) actionsEl.innerHTML = _renderTaskActionsInline(t);
+  _loadTaskAttachments(t.id);
+  return true;
+}
+
+// Issue #2120：整页渲染兜底——新结果集有该 id 时与旧详情对象合并后再回开（保留详情专属字段），
+// 结果集缺失时注入旧对象回开（详情不关闭）
+function _restoreDetailAfterRender(taskId, prevDetail) {
+  if (!taskId) return false;
+  var t = window._tasksById && window._tasksById[taskId];
+  if (prevDetail && prevDetail.id === taskId) {
+    if (t) _mergeDetailFields(prevDetail, t);
+    window._tasksById = window._tasksById || {};
+    window._tasksById[taskId] = prevDetail;
+    t = prevDetail;
+  }
+  if (!t) return false;
+  window._openBoardDetail(taskId);
+  return true;
+}
+
 function _render() {
   const el = document.getElementById('pageContent');
   if (!el) return;
+  // Issue #2120：入口记录详情 id（独立变量，勿与 _pendingTaskDetailId/_pendingIssueNumber 深链混用），
+  // 渲染完成后重开详情，保证任何未预见的整页渲染路径都不会把详情顶回列表
+  var _detailIdBeforeRender = window._currentDetailTask ? window._currentDetailTask.id : null;
+  var _detailBeforeRender = window._currentDetailTask;
   const filtered = _filteredTasks();
   // 选中项失效时回退到当前过滤列表第一条
   if (_taskSel && !filtered.some(t => t.id === _taskSel.id)) {
@@ -1519,7 +1703,7 @@ function _render() {
 
   let listHtml = _taskListBodyHtml(pageRows);
   if (!listHtml) {
-    listHtml = `<div class="tsk-empty"><div>🗒</div><h3>${I18N.t('tasks.empty.no_tasks_title')}</h3><p>${I18N.t('tasks.empty.no_tasks_desc')}</p></div>`;
+    listHtml = _taskListEmptyHtml();
   }
 
   // Issue #926：滚动加载 sentinel（替代分页控件）——触底自动追加下一屏
@@ -1565,7 +1749,8 @@ function _render() {
     <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
       <div style="position:relative;width:100%;max-width:400px">
         <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--t3,#86868b);pointer-events:none">🔍</span>
-        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_resetTaskListAndLoad()}" onchange="_taskQuery=this.value;_resetTaskListAndLoad()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_submitTaskSearch()}" style="width:100%;padding:9px 62px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        <button class="tsk-btn tsk-btn-ghost" onclick="_submitTaskSearch()" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;color:#0071e3;font-size:12px;padding:4px 8px;cursor:pointer">${I18N.t('common.search')||'搜索'}</button>
       </div>
     </div>
     <div style="flex:1;display:flex;flex-direction:column;min-height:0">
@@ -1574,7 +1759,8 @@ function _render() {
     <div style="display:flex;justify-content:center;margin:8px 0 4px;flex-shrink:0">
       <div style="position:relative;width:100%;max-width:400px">
         <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--t3,#86868b);pointer-events:none">🔍</span>
-        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_taskQuery=this.value;_resetTaskListAndLoad()}" onchange="_taskQuery=this.value;_resetTaskListAndLoad()" style="width:100%;padding:9px 14px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        <input id="tcSearchInput" placeholder="${I18N.t('tasks.search_placeholder')}" value="${_taskQuery}" onkeyup="if(event.key==='Enter'){_submitTaskSearch()}" style="width:100%;padding:9px 62px 9px 36px;border:0.5px solid var(--b,#e5e5ea);border-radius:12px;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;transition:all .2s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 2px rgba(0,0,0,.03)" onfocus="this.style.borderColor='rgba(59,130,246,.4)';this.style.boxShadow='0 0 0 3px rgba(59,130,246,.08)'" onblur="this.style.borderColor='var(--b,#e5e5ea)';this.style.boxShadow='0 1px 2px rgba(0,0,0,.03)'">
+        <button class="tsk-btn tsk-btn-ghost" onclick="_submitTaskSearch()" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;color:#0071e3;font-size:12px;padding:4px 8px;cursor:pointer">${I18N.t('common.search')||'搜索'}</button>
       </div>
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
@@ -1596,6 +1782,11 @@ function _render() {
   _observeTaskSentinel();
   // Issue #1077-F：看板按列分页时，绑定各列滚动触底
   _bindBoardScroll();
+
+  // Issue #2120：兜底重开详情（深链/待打开详情由上方分支负责，避免抢占）
+  if (_detailIdBeforeRender && !window._pendingTaskDetailId && !window._pendingIssueNumber) {
+    _restoreDetailAfterRender(_detailIdBeforeRender, _detailBeforeRender);
+  }
 }
 
 // Issue #926：IntersectionObserver 无限滚动——sentinel 进入视口且 has_more 时按屏递增
@@ -1947,29 +2138,6 @@ window.adminConfirmTaskDone = function(taskId, event) {
   }, event);
 };
 
-// Issue #1408: 撤销完成——需求本人或仓库管理员把 completed 需求退回 pending_review。
-// completed → pending_review 是状态机唯一撤销出口；成功后刷新列表并重拉流水线区（stage 已回退）。
-window.revertTaskCompleted = function(taskId, event) {
-  _grapeConfirm({
-    title: I18N.t('tasks.revert_completed'),
-    message: I18N.t('tasks.revert_completed_message'),
-    confirmText: I18N.t('tasks.revert_completed'),
-    onConfirm: function() {
-      _withTaskLoading(
-        taskId,
-        function() { return API.put('/issues/' + taskId + '/status', {status: 'pending_review'}); },
-        I18N.t('tasks.revert_completed_toast'),
-        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
-      ).then(function(ok) {
-        if (!ok) return;
-        API.get('/issues/' + taskId + '/pipeline').then(function(data) {
-          _renderPipelineSection(data);
-        }).catch(function() {});
-      });
-    }
-  }, event);
-};
-
 function _renderTaskActionsBar(t) {
   // 已废弃——按钮合并到 _detailHtml 底部行
   return '';
@@ -2030,21 +2198,18 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
     overlay.appendChild(text);
     pc.appendChild(overlay);
   }
-  // Issue #1408: 返回 promise（true=成功 / false=失败或中途离开），便于调用方追加后续刷新
-  return apiCall().then(function() {
-    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return false; }  // 导航离开不弹 toast
+  apiCall().then(function() {
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
     if (overlay) overlay.remove();
     app.showToast(successMsg);
     if (taskId && window._currentDetailTask) window._pendingTaskDetailId = taskId;
     loadTasks();
-    return true;
   }).catch(function(e) {
-    if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return false; }  // 导航离开时静默
-    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return false; }  // 导航离开不弹 toast
+    if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return; }  // 导航离开时静默
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
     if (overlay) overlay.remove();
     app.showToast(errorFn(e));
     loadTasks();  // 超时或错误后刷新页面保证可用
-    return false;
   });
 }
 
@@ -2631,5 +2796,12 @@ function _doCrossPipelineSubmit(t, targetSceneId, sceneName) {
   });
 };
 
-// Issue #1408: 原 @deprecated 的 changeTaskStatus（UI 无调用点死代码）已删除，
-// 状态回退改由专用入口 window.revertTaskCompleted 承担（二次确认 + toast + 列表/流水线刷新）。
+// @deprecated 死代码——UI 无调用点。如需启用，catch 里的 alert 应改为 app.showToast。
+function changeTaskStatus(taskId, status) {
+  API.put('/issues/' + taskId + '/status', {status: status})
+    .then(() => loadTasks())
+    .catch(e => {
+      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+      app.showToast(I18N.t('tasks.change_status_failed', {msg: msg}));
+    });
+}

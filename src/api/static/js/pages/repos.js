@@ -66,6 +66,24 @@ window.invalidateProjectsCache = function() {
 };
 let _projectsRepos = [];
 
+// 仓库列表回源地址：写操作后传 refreshFromVcs=true 强制跳过 30 分钟缓存
+function _reposMemberUrl(refreshFromVcs, provider) {
+  var qs = [];
+  if (provider) qs.push('provider=' + encodeURIComponent(provider));
+  if (refreshFromVcs) qs.push('refresh=1');
+  return '/repos/member' + (qs.length ? '?' + qs.join('&') : '');
+}
+
+function _fetchMemberRepos(refreshFromVcs, provider) {
+  return API.get(_reposMemberUrl(refreshFromVcs, provider));
+}
+
+// 「从 GitCode 同步」按钮（仓库管理页头部与未托管空态共用）
+function _syncReposButton(cls) {
+  return '<button class="' + (cls || 'bt bt-p bt-s') + '" onclick="syncRepos()">↻ ' +
+    I18N.t('repos.sync_from_gitcode') + '</button>';
+}
+
 function renderSelectionShell(tab, innerHtml) {
   const d = document.getElementById('pageContent');
   if (!d) return;
@@ -134,7 +152,7 @@ function switchSidebarTab(tab) {
 }
 
 function _enterWorkspaceForPlatform(provider) {
-  API.get('/repos/member' + (provider ? '?provider=' + provider : '')).then(function(d) {
+  _fetchMemberRepos(false, provider).then(function(d) {
     var repos = d.repos || [];
     var hosted = repos.filter(function(r) { return r.is_hosted; });
     if (hosted.length > 0) {
@@ -484,19 +502,20 @@ function _renderProjectTemplates() {
 }
 
 // ====== 仓库管理页（侧边栏「＋ 新增仓库托管」）======
-function renderRepos() {
+function renderRepos(refreshFromVcs) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   renderSelectionShell('projects', '<div class="loading">' + I18N.t('repos.loading') + '</div>');
 
-  API.get('/repos/member').then(d => {
+  // refreshFromVcs: 写操作（解除托管等）成功后强制回源，避免 30 分钟缓存挡住变化
+  _fetchMemberRepos(refreshFromVcs).then(d => {
     const allRepos = d.repos || [];
     const managedRepos = allRepos.filter(r => r.is_joined || r.is_hosted);
     const availableRepos = allRepos.filter(r => !r.is_joined && !r.is_hosted);
 
     let html = `<div class="flex fc jbtw" style="margin-bottom:20px">
       <h2 style="font-size:15px;font-weight:600">${I18N.t('repos.repositories')}</h2>
-      <button class="bt bt-p bt-s" onclick="syncRepos()">↻ ${I18N.t('repos.sync_from_gitcode')}</button>
+      ${_syncReposButton()}
     </div>`;
 
     html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.hosted')} <span class="c">${managedRepos.length}</span></h2></div>`;
@@ -522,7 +541,9 @@ function renderRepos() {
 
     html += `<div class="cd"><div class="cd-h"><h2>${I18N.t('repos.unhosted_title')} <span class="c">${availableRepos.length}</span></h2></div>`;
     if (availableRepos.length === 0) {
-      html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') + '</div>';
+      // 未托管空态兜底：保留「从 GitCode 同步」入口，缓存异常时仍可手动找回仓库
+      html += '<div class="ts t2" style="padding:12px 0">' + I18N.t('repos.managed.no_available') +
+              ' ' + _syncReposButton('bt bt-o bt-s') + '</div>';
     } else {
       html += `<div class="tw"><table>
         <tr><th>${I18N.t('repos.managed.th_repository')}</th><th>Platform</th><th>${I18N.t('repos.managed.th_role')}</th><th>${I18N.t('repos.managed.th_description')}</th><th></th></tr>`;
@@ -723,7 +744,7 @@ function _doUnhost(fullName) {
         const remaining = md.repos || [];
         if (wasCurrent || remaining.length === 0) {
           // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
-          API.get('/repos/member').then(d => {
+          _fetchMemberRepos(true).then(d => {
             const repos = d.repos || [];
             document.getElementById('sidebar').style.display = 'none';
             document.getElementById('tb').style.display = 'none';
@@ -738,7 +759,7 @@ function _doUnhost(fullName) {
         } else {
           // 还有其他托管仓库 → 刷新仓库管理页
           document.getElementById('pageTitle').textContent = I18N.t('repos.unhost.select_repo');
-          renderRepos();
+          renderRepos(true);
         }
       });
     });

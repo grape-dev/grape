@@ -6,6 +6,7 @@
   "searching": "Searching...",
   "load_failed": "Failed to load: {{msg}}",
   "deeplink_not_found": "Issue #{{n}} not found, returned to task list",
+  "detail_not_in_results": "This issue is not in the current filter results",
   "view_list": "List",
   "view_board": "Board",
   "stage_vod": "VOD",

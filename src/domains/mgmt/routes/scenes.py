@@ -21,6 +21,18 @@ EXPERIENCE_TEMPLATE_CREATE_TIMEOUT = 45
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "configs", "agent-skill-mapping.json")
 
+# host 失败详情：只提取面向用户的 message，dict detail 不直接透出；原始异常仅落日志。
+_HOST_WARNING_PREFIX = "托管配置失败："
+
+
+def _host_error_message(exc) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        return str(detail.get("message") or "")
+    if isinstance(detail, str):
+        return detail
+    return ""
+
 # Issue #542：branches 列表进程内 TTL 缓存（分支变更低频，可接受短暂陈旧；
 # TTL 取分析文档建议区间 60~120s 的中值 90s；refresh=1 绕过，建分支主动失效）
 _BRANCHES_CACHE_TTL = 90.0
@@ -768,6 +780,9 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     full_name = f"{gitcode_login}/{repo_name}"
     user_id = user.get("id", 0)
     already_exists = False
+    # 托管结果显式回传：host 失败不再被吞成"成功"，前端据此提示并可重新托管
+    hosted = False
+    host_error = ""
 
     # 查 managed_repos 里是否已托管
     repo_key = _resolve_repo_key(full_name)
@@ -787,13 +802,16 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     if already_hosted:
         # 已托管 → 直接复用
         already_exists = True
+        hosted = True
     elif repo_in_user_repos:
         # 仓库已存在（user_repos 有记录）但未托管 → 直接托管
         already_exists = True
         try:
             from src.domains.mgmt.routes.repos import RepoAction, host_repo
             host_repo(RepoAction(full_name=full_name), user)
+            hosted = True
         except Exception as e:
+            host_error = _host_error_message(e)
             log.warning(f"experience_market_scene: host_repo failed (non-fatal): {e}")
     else:
         # 仓库不存在 → 调 create_from_template（建仓库+推代码+托管）
@@ -810,6 +828,9 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
                 timeout=EXPERIENCE_TEMPLATE_CREATE_TIMEOUT,
             )
             full_name = result.get("full_name", full_name)
+            hosted = bool(result.get("webhook_id"))
+            if result.get("host_warning"):
+                host_error = result.get("host_warning")
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail={"code": 504, "message": "创建模板仓库超时，请重试"})
         except HTTPException as e:
@@ -821,7 +842,9 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
                 try:
                     from src.domains.mgmt.routes.repos import RepoAction, host_repo
                     host_repo(RepoAction(full_name=full_name), user)
+                    hosted = True
                 except Exception as he:
+                    host_error = _host_error_message(he)
                     log.warning(f"experience_market_scene: host_repo failed (non-fatal): {he}")
             else:
                 raise
@@ -895,12 +918,22 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
             )
             db.commit()
 
-    log.info(f"Market scene experienced: market_id={market_id}, repo={full_name}, already_exists={already_exists}")
+    log.info(f"Market scene experienced: market_id={market_id}, repo={full_name}, "
+             f"already_exists={already_exists}, hosted={hosted}, host_error={host_error}")
     msg = f"场景 '{scene['display_name']}' 已创建"
     if already_exists:
         msg = f"已跳转到现有项目 {full_name}，场景 '{scene['display_name']}' 已创建"
+    if not hosted:
+        # Host 失败不再静默：显式告知仓库已创建但未托管，可到仓库管理页重新托管
+        _reason = host_error or "未知原因"
+        # create_from_template 的 host_warning 自带「托管配置失败：」前缀，避免二次包装
+        if _reason.startswith(_HOST_WARNING_PREFIX):
+            _reason = _reason[len(_HOST_WARNING_PREFIX):]
+        msg = f"仓库 {full_name} 已创建，托管失败：{_reason}，可在仓库管理页重新托管"
+        log.warning(f"experience_market_scene: host not completed for {full_name}: {_reason}")
     return {"full_name": full_name, "scene_id": scene_id,
-            "already_exists": already_exists, "message": msg}
+            "already_exists": already_exists, "hosted": hosted,
+            "host_error": host_error, "message": msg}
 
 @router.post("/market/{market_id}/like", operation_id="scenes_market_like_toggle", summary="Toggle scene like", description="Toggles a scene like.")
 def toggle_scene_like(market_id: int, user: dict = Depends(require_no_session_token)):
@@ -2038,7 +2071,7 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
     """
     from src.api.pipeline_config import (
         create_custom_scene, _query_scene_by_id, _query_scenes_from_db)
-    from src.scene_custom_env import normalize_custom_field
+    from src.kernel.scene_custom_env import normalize_custom_field
     import uuid
 
     repo_key = _resolve_repo_key(repo) if repo else ""

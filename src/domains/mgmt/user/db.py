@@ -459,6 +459,9 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     webhook_id INTEGER DEFAULT 0,
     dev_scene TEXT DEFAULT '',      -- 开发场景（仓库已应用场景时写入 scene_id；默认置空=未配置，issue-39 方案 B）
     host_status TEXT DEFAULT '',     -- 托管状态（方案 F：''=完整 / bot_missing / webhook_missing / partial）
+    host_step TEXT DEFAULT '',       -- Issue #2126: 托管失败步骤（invite_bot / create_webhook / ...）
+    host_error TEXT DEFAULT '',      -- Issue #2126: 托管失败可读原因（不含 token/内部 URL）
+    host_updated_at TEXT DEFAULT '', -- Issue #2126: host_status 最近更新时间
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
@@ -699,6 +702,12 @@ def init_db():
         db.execute(_USER_ACCOUNTS_DDL)
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
+        # 兼容旧列迁移（幂等）：托管诊断列（Issue #2126）——CREATE TABLE 只影响新库
+        for _col in ("host_step", "host_error", "host_updated_at"):
+            try:
+                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         db.execute(_OAUTH_STATES_DDL)
         from src.domains.mgmt.user.legacy_column_migrations import run as _legacy_migrations
         _legacy_migrations()
@@ -1616,20 +1625,29 @@ def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list) 
         log.warning(f"Set scene recommend config failed: {e}")
         return False
 
-def set_host_status(repo_key: str, status: str = ""):
-    """写入仓库托管状态（managed_repos.host_status），幂等（方案 F）。
+def set_host_status(repo_key: str, status: str = "", step: str = "", error: str = ""):
+    """写入仓库托管状态与诊断信息（managed_repos.host_status），幂等（方案 F / Issue #2126）。
 
     空串=托管完整；bot_missing=bot 未成功加入；webhook_missing=webhook 未创建；partial=流程部分执行。
+    step/error 记录失败步骤与可读原因（不含 token/内部 URL）；status 为空串时清空诊断字段。
     """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    _status = status or ""
+    if not _status:
+        step, error = "", ""
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET host_status=? WHERE repo_key=?", (status or "", repo_key))
+            c.execute(
+                "UPDATE managed_repos SET host_status=?, host_step=?, host_error=?, "
+                "host_updated_at=datetime('now') WHERE repo_key=?",
+                (_status, step or "", error or "", repo_key))
             db.commit()
     except Exception as e:
         log.warning(f"Set host status failed: {e}")
+
+
 
 def get_host_status(repo_key: str) -> str:
     """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
@@ -1691,36 +1709,37 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
                     "FROM managed_repos m "
                     "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
                     "WHERE u.repo_key IS NOT NULL "
                     "AND (m.org_id=? OR m.org_id IN (SELECT id FROM organization WHERE is_personal=1)) "
-                    "ORDER BY m.repo_key, m.full_name", (user_id, org_id))
+                    "ORDER BY m.full_name", (user_id, org_id))
             elif org_id:
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
                     "FROM managed_repos m "
                     "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
                     "WHERE u.repo_key IS NOT NULL AND m.org_id=? "
-                    "ORDER BY m.repo_key, m.full_name", (user_id, org_id))
+                    "ORDER BY m.full_name", (user_id, org_id))
             else:
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
                     "FROM managed_repos m "
                     "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
                     "WHERE u.repo_key IS NOT NULL "
-                    "ORDER BY m.repo_key, m.full_name", (user_id,))
+                    "ORDER BY m.full_name", (user_id,))
         except Exception as e:
             log.warning(f"get_managed_repos join failed: {e}")
             c.execute(
                 "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
-                "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0 "
-                "FROM managed_repos ORDER BY repo_key, full_name")
+                "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0, "
+                "COALESCE(host_status,'') "
+                "FROM managed_repos ORDER BY full_name")
         rows = c.fetchall()
         # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
         # commit 释放事务，确保下次查询看到最新数据（修复 /repo 返回老列表）。
@@ -1731,7 +1750,9 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
             "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "",
             "bot_username": r[7] or "", "created_at": r[8],
             "is_join": bool(r[9]), "is_admin": bool(r[10]),
+            "host_status": (r[11] or "") if len(r) > 11 else "",
         } for r in rows]
+
 
 def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bool:
     """更新该用户在 user_repos 的管理员状态（用户级）"""
@@ -2791,9 +2812,11 @@ def get_all_managed_repos() -> list[dict]:
     from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos ORDER BY full_name")
+        c.execute("SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, created_at, host_status"
+                  " FROM managed_repos ORDER BY full_name")
         return [{"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2],
-                 "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5]} for r in c.fetchall()]
+                 "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5],
+                 "host_status": r[6] or ""} for r in c.fetchall()]
 
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
@@ -3532,6 +3555,20 @@ def get_user_repos_synced_at(user_id: int) -> str:
         c.execute("SELECT MAX(synced_at) FROM user_repos WHERE user_id=?", (user_id,))
         row = c.fetchone()
         return row[0] or "" if row else ""
+
+
+def invalidate_user_repos(user_id: int):
+    """把用户仓库缓存标记为过期（保留缓存行与 is_join 状态）。
+
+    写操作（托管 / 模板建仓 / 解除托管）成功后调用，令下一次 /repos/member
+    直接回源 VCS 刷新，避免新增或移除的仓库被 30 分钟 TTL 挡在缓存之外。
+    synced_at 置 NULL 后 get_user_repos_synced_at 返回空串，命中 _is_expired。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE user_repos SET synced_at=NULL WHERE user_id=?", (user_id,))
+        db.commit()
+
 
 def clear_user_repos(user_id: int):
     """清除用户仓库缓存"""
@@ -5149,3 +5186,29 @@ _BOT_USERNAME_SINGLE_VALUE_PROVIDERS = frozenset(
 _BOT_USERNAME_FALLBACK_DEFAULT_POOL = frozenset(
     k for k, v in GLOBAL_BOT_USERNAME_SOURCES.items()
     if callable(v) and getattr(v, "_falls_back_to_pool", False))
+
+
+def get_host_detail(repo_key: str) -> dict:
+    """读取仓库托管状态及诊断（Issue #2126），无记录或未迁移时返回空值。"""
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    empty = {"status": "", "step": "", "error": "", "updated_at": ""}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT host_status, host_step, host_error, host_updated_at "
+                "FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if not row:
+                return empty
+            return {
+                "status": str(row[0] or ""),
+                "step": str(row[1] or ""),
+                "error": str(row[2] or ""),
+                "updated_at": str(row[3] or ""),
+            }
+    except Exception as e:
+        log.warning(f"Get host detail failed: {e}")
+        return empty
+

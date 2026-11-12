@@ -1,23 +1,38 @@
 """Events 路由：事件列表、详情、Event 对话（event-conversation-design.md）"""
-
 import asyncio
-
 import os
-
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
-
 from pydantic import BaseModel
-
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
-
 from src.kernel.config import log
-
 from src.api.time_utils import normalize_event_time
-
 from src.kernel.token_service import is_auth_401_error
-from src.api.event_store import update_event_status
 
 router = APIRouter(prefix="/api/events", tags=["events"])
+
+
+def _redispatch_scene_override(evt: dict) -> str:
+    """重派时是否沿用事件行 scene_id 作为 env 场景 override（Issue #1745）。
+
+    仅 PR 订阅事件需要 override（Issue #427：订阅场景可不同于关联 Issue 场景），
+    判定与执行前校正共用 `_is_pr_subscription_task` 单一入口。普通 Issue/A2A/评论
+    事件在跨场景转交后，事件行 scene_id 仍是源场景，若继续作为 override 会覆盖
+    Issue 当前归属场景，导致注入的 GRAPE_SCENE_ID 陈旧；普通事件一律返回空串，
+    交由 build_task_env 按 issue_id 重新解析真值。
+    """
+    _scene = (evt.get("scene_id") or "").strip()
+    if not _scene:
+        return ""
+    from src.api.event_pipeline import _is_pr_subscription_task
+    if _is_pr_subscription_task(
+            issue_id=evt.get("issue_id") or "",
+            event_type=evt.get("event_type") or "",
+            title=evt.get("title") or ""):
+        return _scene
+    log.info(f"[redispatch] seq={evt.get('seq')} drop event scene override: "
+             f"event_scene={_scene}, issue={evt.get('issue_id') or ''}")
+    return ""
+
 
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                          task_id: str = ""):
@@ -78,6 +93,7 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
     except Exception as e:
         log.warning(f"_audit_admin_action failed ({action} event #{target_seq}): {e}")
 
+
 @router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.kernel.session_manager import db, db_lock
@@ -88,13 +104,8 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                 "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output, scene_id FROM events WHERE seq=?",
                 (seq,))
             row = c.fetchone()
-            # Issue #1938：补偿归因（老库缺列时为空 dict → 展示层退回普通回复口径）
-            from src.domains.runtime.engine import cascade as _cascade
-            _cascade_meta = _cascade.fetch_display_meta(
-                c, [seq], {seq: ((row[19] if row else "") or "")})
         except Exception:
             row = None
-            _cascade_meta = {}
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到"})
@@ -139,12 +150,21 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
-    # Issue #1938：补偿归因标注——result 若为系统补偿（原始回报丢失），显式标出
-    # 补偿路径/原始任务终态/最后已知事件状态，并从「Agent 答复结论」口径排除。
-    _cmeta = _cascade_meta.get(seq) or {}
-    result["cascade"] = _cmeta
-    result["result_kind"] = _cmeta.get("result_kind", "agent")
-    result["is_agent_conclusion"] = _cmeta.get("is_agent_conclusion", True)
+    # Issue #574：Skill 展示改 display_name（与场景选择处同款查询条件；display_name 为空时前端回退 Skill ID）
+    _skill_display_name = ""
+    try:
+        if row[13]:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                    (row[13],))
+                _sr = _c.fetchone()
+            if _sr and _sr[0]:
+                _skill_display_name = _sr[0]
+    except Exception:
+        pass
+    result["skill_display_name"] = _skill_display_name
     # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
     _structured_raw = row[20] if len(row) > 20 else None
     _structured = None
@@ -244,14 +264,16 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                         runtime_id = sr[0]
             if runtime_id:
                 c2.execute(
-                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                     "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
                     (runtime_id,))
                 ar = c2.fetchone()
                 if ar:
+                    # Issue #701：engine_device 下发凭据自定义名 rc.name；
+                    # engine_instance 派生仍用 device_name（实例唯一名标识符，供 resolve 匹配）
                     engine_instance = instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0)
-                    engine_device = ar[2] or ""
-                    engine_ip = ar[3] or ""
+                    engine_device = ar[3] or ""
+                    engine_ip = ar[4] or ""
             if not engine_instance and row[12]:
                 # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
                 # Issue #285 + C 方案：runtime_id=0 说明无任何真实绑定（未派发/未认领），
@@ -286,22 +308,23 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     if _resolved_rid:
                         runtime_id = _resolved_rid
                         c2.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
                             (_resolved_rid,))
                         ar2 = c2.fetchone()
                     else:
                         # 回退：旧格式类型名（本机 credential_id=0 优先、其次在线实例）
                         c2.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
                             "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
                             (row[12],))
                         ar2 = c2.fetchone()
                     if ar2:
+                        # Issue #701：engine_device = rc.name（凭据自定义名）；instance 派生仍用 device_name
                         engine_instance = instance_name(ar2[0] or "engine", ar2[2] or "", ar2[1] or 0)
-                        engine_device = ar2[2] or ""
-                        engine_ip = ar2[3] or ""
+                        engine_device = ar2[3] or ""
+                        engine_ip = ar2[4] or ""
     except Exception:
         pass
     result["engine_instance"] = engine_instance
@@ -373,6 +396,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     result["engine_models"] = _ms.get("models", [])
 
     return result
+
 
 @router.post("/{seq}/terminate", operation_id="events_terminate", summary="Terminate event", description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")
 def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
@@ -461,10 +485,14 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
         except Exception as e:
             log.warning(f"Event terminate: task cancel/fail failed: {e}")
 
-    # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
-    #    同时取消 worker 模式的 future（direct 模式杀本地子进程）
+    # 2) direct 模式 → cancel_direct_task（仅单进程模式有效，兜底）
+    #    多进程（Issue #596 三进程拆分）下 direct 执行在 C 进程、terminate 落在 B，
+    #    本进程 _DIRECT_FUTURES 恒为空——真正的杀子进程由状态驱动取消完成：
+    #    上面 fail_task/update_event_status 落库后，C 侧执行流周期探测
+    #    task/event 终态（failed/cancelled）→ _kill_stale_engine 杀引擎并中断。
+    #    （单进程模式 terminate 与 direct 执行同进程，cancel_direct_task 仍生效）
     try:
-        from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task
+        from src.api.event_pipeline import cancel_direct_task
         dc = cancel_direct_task(seq)
         if dc:
             cancelled = True
@@ -483,6 +511,22 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     _audit_admin_action(row[1] or "", seq, "terminate", user, task_id=task_id)
 
     return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
+
+
+def _mark_event_redispatched(seq: int, new_seq, channel: str):
+    """Issue #600：重派接管后原事件标记为 cancelled（被新事件取代），而非 failed。
+
+    failed 属于失败终态，会永久残留为流水线卡片的红色失败段（重派成功后旧失败
+    仍未被覆盖）。cancelled 语义为「已被新 seq 接管」，不参与 any_failed 聚合，
+    流水线节点状态随新事件（同 agent 最新 seq）刷新。经 reset_event_terminal
+    重置后写入，绕开终态保护，与既有 redispatch 语义一致。
+    """
+    from src.api.event_store import reset_event_terminal, update_event_complete
+    reset_event_terminal(seq)
+    update_event_complete(
+        seq, "cancelled", exit_code=None,
+        result=f"事件已重新派发（{channel} 新 seq={new_seq} 接管，原事件已取消）")
+
 
 @router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
 def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
@@ -581,11 +625,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
         log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
         _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
-        # 原 seq 标记 failed（保持历史记录），新 seq 接管
-        # Issue #476：显式 reason，避免 redispatch 产生空 result 无头失败
+        # Issue #600：原事件标记 cancelled（被新任务接管，非失败态），避免流水线卡片残留失败
         try:
-            update_event_status(seq, "failed",
-                                result="事件已重新派发（onboarding 重建任务，原事件标记 failed）")
+            _mark_event_redispatched(seq, "(new)", "onboarding 重建任务")
         except Exception:
             pass
         try:
@@ -642,18 +684,6 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             raise HTTPException(status_code=409, detail={"code": 409,
                 "message": "原执行机器不可用（远端引擎失联），无法本机重试"})
 
-        # cwd 解析（Issue #521 复用分支与快照重建分支共用）：复用旧 queued 行时
-        # 同步刷新 cwd——旧行 cwd 可能是迁移前结构（test_event_conversation
-        # RedispatchRuntimeZero 锁：重派必走当前工作区结构），静默沿用会让
-        # 重派任务在陈旧目录执行。
-        try:
-            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
-            _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
-                                    old.get("issue_id") or "")
-        except Exception as _e:
-            # 静默回退旧 cwd 会掩盖工作区解析回归——至少留痕。
-            log.warning(f"[redispatch] seq={seq} get_agent_workdir failed, fallback old cwd: {_e}")
-            _cwd = old.get("cwd") or ""
         # Issue #521：旧任务仍为 queued → 同事务原子复用原任务行（同机重派不新建副本，
         # 避免"旧 queued 行 + 新 queued 行"双可领取副本）。UPDATE 带 status='queued' 守卫，
         # 窗口期被领取（rowcount=0）则落到下方快照重建分支按新状态处理，不留半状态。
@@ -661,16 +691,16 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             with db_lock:
                 clq = db.cursor()
                 clq.execute(
-                    "UPDATE agent_tasks SET runtime_id=?, cwd=?, started_at=NULL, completed_at=NULL, exit_code=NULL "
+                    "UPDATE agent_tasks SET runtime_id=?, started_at=NULL, completed_at=NULL, exit_code=NULL "
                     "WHERE id=? AND status='queued'",
-                    (_orig_rid, _cwd, task_id))
+                    (_orig_rid, task_id))
                 _lq_reused = clq.rowcount > 0
                 db.commit()
             if _lq_reused:
                 # 本机 direct 引擎 → 直接触发执行（复用原行，task_id 不变）
                 if _cid == 0:
                     try:
-                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_orig_rid) or ""
@@ -678,7 +708,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         _evt_lq = {
                             "repo_key": _rk,
                             "repository": _frk(_rk),
-                            "source": parse_repo_key(_rk)[0],
+                            "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
                             "issue_id": old.get("issue_id") or "",
                             "agent_type": old.get("agent_type") or "",
                             "event_type": old.get("event_type") or "",
@@ -705,14 +735,19 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
 
         # 校验通过 → 复用原 task 快照参数 + 原 runtime_id 新建任务（不调 pick_engine）
-        from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _is_plugin_mode
+        from src.api.event_pipeline import is_plugin_mode as _is_plugin_mode
         _sid = old.get("issue_session_id") or ""
-        # _cwd 已在上方统一解析（复用/重建两分支共用）
+        try:
+            from src.api.event_pipeline import get_agent_workdir
+            _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
+                                    old.get("issue_id") or "")
+        except Exception:
+            _cwd = old.get("cwd") or ""
         _is_local_direct = (_cid == 0)
         # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
         # Issue #427：PR 订阅事件的 scene_id 列即订阅场景，作为 override 传入防止
         # 重派 env 被重新解析回 Issue 场景；普通事件 scene_id 与 issue_id 解析同值
-        from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
+        from src.api.event_pipeline import build_task_env as _bte
         _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
                             agent_type=old.get("agent_type") or "",
                             issue_id=old.get("issue_id") or "",
@@ -735,7 +770,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             event_type=old.get("event_type") or "",
             account=old.get("account") or "",
             user_id=old.get("user_id") or 0,
-            repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取（W10；重派快照陈旧问题随之消除）
+            repo_gitcode_token=old.get("repo_gitcode_token") or "",
             env_extra=_rebuild_env,
             server_url=old.get("server_url") or "",
             issue_session_id=_sid,
@@ -744,7 +779,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # 本机 direct 引擎 → 触发直接执行
         if _is_local_direct and _new_task_id:
             try:
-                from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
+                from src.api.event_pipeline import _execute_agent, start_direct_agent
                 from src.domains.runtime.engine.engine_select import engine_name as _en
                 from src.kernel.repo_key import from_repo_key as _frk
                 _be = _en(_orig_rid) or ""
@@ -753,7 +788,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _evt = {
                     "repo_key": _rk,
                     "repository": _frk(_rk),
-                    "source": parse_repo_key(_rk)[0],
+                    "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
                     "issue_id": old.get("issue_id") or "",
                     "agent_type": old.get("agent_type") or "",
                     "event_type": old.get("event_type") or "",
@@ -783,7 +818,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     if task_id and task_status in ("dispatched", "running"):
         # 非终态 → requeue + reassign engine in one atomic operation
         try:
-            from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+            from src.api.event_pipeline import is_plugin_mode
             _is_plugin = is_plugin_mode()
         except Exception:
             _is_plugin = False
@@ -839,8 +874,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                 " OR (rc.scope = 'user' AND rc.owner_name ="
                                 " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
                             )
-                            from src.kernel.repo_key import repo_key_candidates
-                            _scope_params = repo_key_candidates(_repo_bare) + [_task_uid]
+                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", f"github:{_repo_bare}", _task_uid]
                         # Query 1: prefer remote (credential_id > 0)
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
@@ -881,7 +915,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     from src.domains.runtime.engine.service import runtime_credential_id
                     _cid = runtime_credential_id(_new_rid) or 0
                     if _cid == 0:
-                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name
                         from src.kernel.repo_key import from_repo_key as _frk2
                         _be = engine_name(_new_rid) or ""
@@ -889,7 +923,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         _evt = {
                             "repo_key": evt.get("repo_key", ""),
                             "repository": _frk2(evt.get("repo_key", "")),
-                            "source": parse_repo_key(evt.get("repo_key", ""))[0],
+                            "source": (evt.get("repo_key", "").split(":", 1)[0] if ":" in evt.get("repo_key", "") else "gitcode"),
                             "issue_id": evt.get("issue_id", ""),
                             "agent_type": evt.get("agent_type", ""),
                             "event_type": evt.get("event_type", ""),
@@ -908,7 +942,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
         # Plugin mode: emit event
         try:
-            from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+            from src.api.event_pipeline import is_plugin_mode
             if is_plugin_mode():
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
@@ -943,7 +977,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if not old:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         try:
-            from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+            from src.api.event_pipeline import is_plugin_mode
             _q_is_plugin = is_plugin_mode()
         except Exception:
             _q_is_plugin = False
@@ -974,8 +1008,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     " OR (rc.scope = 'user' AND rc.owner_name ="
                     " (SELECT username FROM grape_accounts WHERE id=?)))"
                 )
-                from src.kernel.repo_key import repo_key_candidates
-                _q_scope_params = repo_key_candidates(_q_bare) + [_q_uid]
+                _q_scope_params = [_q_bare, f"gitcode:{_q_bare}", f"github:{_q_bare}", _q_uid]
             try:
                 with db_lock:
                     cq = db.cursor()
@@ -1047,7 +1080,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             try:
                 from src.domains.runtime.engine.service import runtime_credential_id
                 if (runtime_credential_id(_q_rid) or 0) == 0:
-                    from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
+                    from src.api.event_pipeline import _execute_agent, start_direct_agent
                     from src.domains.runtime.engine.engine_select import engine_name as _en
                     from src.kernel.repo_key import from_repo_key as _frk
                     _q_be = _en(_q_rid) or ""
@@ -1055,7 +1088,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     _q_evt = {
                         "repo_key": _q_rk,
                         "repository": _frk(_q_rk),
-                        "source": parse_repo_key(_q_rk)[0],
+                        "source": (_q_rk.split(":", 1)[0] if ":" in _q_rk else "gitcode"),
                         "issue_id": old.get("issue_id") or "",
                         "agent_type": old.get("agent_type") or "",
                         "event_type": old.get("event_type") or "",
@@ -1073,7 +1106,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _effective_task_id = task_id
     else:
         # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
-        from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+        from src.api.event_pipeline import is_plugin_mode
         if task_id:
             old = get_task(task_id)
             # If prompt is empty (from _create_direct_task), find the last task with a prompt
@@ -1111,7 +1144,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         if _rp_253 is None:
                             # 绑定全灭 → 宁失败不跑飞：事件保持 failed + 人话原因（#259 通路）。
                             # 早退在函数末尾 reset_event_terminal 之前 → 事件不会被掰回 running 悬挂。
-                            from src.domains.runtime.pipeline.event_pipeline import _fail_scene_all_offline
+                            from src.api.event_pipeline import _fail_scene_all_offline
                             _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
                                                     context="Redispatch", repo_key=old.get("repo_key") or "")
                             # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
@@ -1126,7 +1159,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                 pass
                             raise HTTPException(status_code=409, detail={
                                 "code": 409,
-                                "message": "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"})
+                                "message": _msg_541})
                         _pool_253 = _rp_253 or ""
                         _pool_253_authoritative = True
                 except HTTPException:
@@ -1190,8 +1223,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                 " OR (rc.scope = 'user' AND rc.owner_name ="
                                 " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
                             )
-                            from src.kernel.repo_key import repo_key_candidates
-                            _scope_params2 = repo_key_candidates(_repo_bare2) + [_old_uid]
+                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", f"github:{_repo_bare2}", _old_uid]
                         with db_lock:
                             c3 = db.cursor()
                             c3.execute(
@@ -1221,18 +1253,17 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _is_local_direct = (_cid == 0)
                 # cwd
                 try:
-                    from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+                    from src.api.event_pipeline import get_agent_workdir
                     _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
                                             old.get("issue_id") or "")
-                except Exception as _e:
-                    log.warning(f"[redispatch] seq={seq} get_agent_workdir failed (pool path), fallback old cwd: {_e}")
+                except Exception:
                     _cwd = old.get("cwd") or ""
 
                 # Always enqueue (stores full prompt + env), then trigger direct if local
                 # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
                 # Issue #427：PR 订阅事件的 scene_id 列即订阅场景，作为 override 传入防止
                 # 重派 env 被重新解析回 Issue 场景；普通事件 scene_id 与 issue_id 解析同值
-                from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
+                from src.api.event_pipeline import build_task_env as _bte
                 _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
                                     agent_type=old.get("agent_type") or "",
                                     issue_id=old.get("issue_id") or "",
@@ -1255,7 +1286,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     event_type=old.get("event_type") or "",
                     account=old.get("account") or "",
                     user_id=old.get("user_id") or 0,
-                    repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取（W10）
+                    repo_gitcode_token=old.get("repo_gitcode_token") or "",
                     env_extra=_rebuild_env,
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
@@ -1271,7 +1302,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 现贴证广播下 _rid=0 是合法结局（等绑定引擎认领），必须只入队不直跑。
                 if _is_local_direct and _new_task_id and _rid > 0:
                     try:
-                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_rid) or ""
@@ -1280,7 +1311,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         _evt = {
                             "repo_key": _rk,
                             "repository": _frk(_rk),
-                            "source": parse_repo_key(_rk)[0],
+                            "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
                             "issue_id": old.get("issue_id") or "",
                             "agent_type": old.get("agent_type") or "",
                             "event_type": old.get("event_type") or "",
@@ -1311,7 +1342,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             _scene_id = evt.get("scene_id", "") or ""
             if _event_type == "a2a_event" and _issue_id.startswith("#pr_") and _scene_id:
                 try:
-                    from src.domains.runtime.pipeline.event_pipeline import _dispatch_pr_subscription_redispatch
+                    from src.api.event_pipeline import _dispatch_pr_subscription_redispatch
                     _res = _dispatch_pr_subscription_redispatch(evt, seq, _scene_id)
                     if _res:
                         log.info(f"[redispatch] seq={seq} PR subscription re-dispatch ok, scene={_scene_id}")
@@ -1362,9 +1393,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _a2a_result.get("status") == "ok":
                         _new_seq = _a2a_result.get("seq", 0)
                         log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
-                        update_event_status(
-                            seq, "failed",
-                            result=f"事件已重新派发（A2A 新 seq={_new_seq} 接管，原事件标记 failed）")
+                        # Issue #600：原事件标记 cancelled（被新事件接管，非失败态），
+                        # 避免流水线卡片/segments 长期残留失败红卡片
+                        _mark_event_redispatched(seq, _new_seq, "A2A")
                         try:
                             from src.domains.mgmt.user.db import set_meta_value as _smv
                             import time as _tm
@@ -1391,7 +1422,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行
             try:
-                from src.domains.runtime.pipeline.event_pipeline import run_pipeline as _rp
+                from src.api.event_pipeline import run_pipeline as _rp
                 _payload = evt.get("payload_raw") or evt.get("payload") or "{}"
                 if isinstance(_payload, str):
                     try:
@@ -1410,11 +1441,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                  account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""))
                 if _rp_result.get("ok"):
                     log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
-                    # 原 seq 事件标记 failed（保持历史记录），新 seq 接管执行
-                    # Issue #476：显式 reason，避免 redispatch 产生空 result 无头失败
-                    update_event_status(
-                        seq, "failed",
-                        result=f"事件已重新派发（run_pipeline 新 seq={_rp_result.get('seq', 0)} 接管，原事件标记 failed）")
+                    # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）
+                    _mark_event_redispatched(seq, _rp_result.get("seq", 0), "run_pipeline")
                     try:
                         from src.domains.mgmt.user.db import set_meta_value as _smv
                         import time as _tm
@@ -1447,18 +1475,24 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={_effective_task_id or '(new)'} by={user.get('username','')}")
     return {"status": "redispatched", "task_id": _effective_task_id or "(new)", "event_seq": seq}
 
+
+# ====== Event 对话（event-conversation-design.md）======
+
 class ConversationMessage(BaseModel):
     message: str
+
 
 class KnowledgeBody(BaseModel):
     scope: str = "issue"           # project / issue / issue_agent
     content: str = ""
     status: str = "accepted"       # accepted / rejected
 
+
 class A2ARedoBody(BaseModel):
     agent: str = ""
-    # Issue #1962（移植）：补发时排除源事件自身（0 = 缺省由路径 seq 自动填写，保持既有行为可感知）。
+    # Issue #1962：补发时排除源事件自身（0=不排除，缺省保持既有行为）。
     exclude_event_seq: int = 0
+
 
 @router.get("/{seq}/a2a-redo/scene", operation_id="events_a2a_redo_scene", summary="A2A redo scene info", description="Returns scene pipeline nodes for a completed event, used by the A2A redo modal: which agents are in-scene (selectable) and the default preselected next agent.")
 def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
@@ -1499,6 +1533,7 @@ def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
         except Exception as e:
             log.warning(f"[a2a-redo] upstream check failed: {e}")
     return {"scene_id": evt.get("scene_id") or "default", "agents_in_scene": agents_in_scene, "next_agent": next_agent, "upstream_agents": upstream_agents}
+
 
 @router.post("/{seq}/a2a-redo", operation_id="events_a2a_redo", summary="A2A redo (manual handoff)", description="Manually re-sends a downstream A2A handoff for a completed event whose agent did not actually hand off. Does NOT touch the original event/task (unlike redispatch); simply creates a new a2a_event via the standard A2A path.")
 async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(require_no_session_token)):
@@ -1550,16 +1585,21 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
     _redo_user = dict(user or {})
     _redo_user["auth_type"] = "jwt"
     from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
-    # Issue #1962（移植）：补发排除源事件自身，否则同一 completed 事件会在幂等窗内
-    # 把补发再拦成 duplicate_key；显式传入优先，缺省取路径 seq。
-    _exclude_seq = int(getattr(body, "exclude_event_seq", 0) or 0) or int(seq or 0)
+    _exclude_seq = int(body.exclude_event_seq or 0)
+    if not _exclude_seq:
+        # 缺省自排除源事件自身；显式传入优先。
+        _exclude_seq = int(seq or 0)
     _a2a_body = A2AHandoffBody(agent=agent_name, payload={
         "repository": repository,
         "account": actor,
         "issue_number": issue_id,
         "pr_number": "",
+        # Issue #1962：补发排除源事件自身，避免同 Issue 同 agent 的 completed 源事件
+        # 在 120s 去重窗内把补发再次拦成 duplicate_key。
         "exclude_event_seq": _exclude_seq,
-        "context": f"用户手动补发 A2A：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
+        # D5 评审修正③：手工路径必传 compensated_by=manual+操作用户（不给默认值，防审计底线被稀释）；
+        # marker 进 context 使其随 a2a_endpoint 组装落入事件 payload
+        "context": f"用户手动补发 A2A[compensated_by=manual:{user.get('username', '')}]：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
     })
     _res = await a2a_endpoint(None, _a2a_body, _redo_user)  # type: ignore[arg-type]  # jwt 分支不读 request
     # JSONResponse（拦截类 skipped）原样透传
@@ -1578,8 +1618,10 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
     log.info(f"[a2a-redo] seq={seq} → agent={agent_name} by={user.get('username', '')}: {_res}")
     return _res
 
+
 class FlowResetBody(BaseModel):
     to_stage: str = "vod"
+
 
 def _load_event(seq: int) -> dict:
     from src.kernel.session_manager import db, db_lock
@@ -1606,6 +1648,7 @@ def _load_event(seq: int) -> dict:
             "scene_id": row[11] or "",
             "account": row[1].replace("gitcode:", "") if row[1] else ""}
 
+
 def _thread_gate(repo_key: str, issue_id: str) -> dict:
     """门禁：Issue pipeline 结束（stage='done'）→ 关闭评论。无记录默认开放。"""
     if not issue_id:
@@ -1615,6 +1658,7 @@ def _thread_gate(repo_key: str, issue_id: str) -> dict:
     if (st.get("stage") or "vod") == "done":
         return {"open": False, "reason": "该 Issue 流程已结束，评论已关闭"}
     return {"open": True, "reason": ""}
+
 
 def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_type: str,
                         role: str, content: str, created_by: str = "",
@@ -1638,6 +1682,7 @@ def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_typ
         mid = c.lastrowid
     return mid
 
+
 def _list_thread(anchor_seq: int, limit: int = 50) -> list:
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -1650,6 +1695,7 @@ def _list_thread(anchor_seq: int, limit: int = 50) -> list:
             rows = []
     return [{"id": r[0], "role": r[1], "content": r[2], "created_by": r[3] or "", "created_at": normalize_event_time(r[4])} for r in rows]
 
+
 def _require_event_bot_token(request: Request, repo_key: str):
     """agent 端点鉴权：bot token 或会话级临时 token（复作用域）二选一通过。
 
@@ -1659,13 +1705,14 @@ def _require_event_bot_token(request: Request, repo_key: str):
     if not token:
         token = request.headers.get("X-Bot-Token", "") or ""
     from src.domains.mgmt.user.db import get_repo_bot_token_no_global
-    from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
+    from src.api.auth_token import verify_session_token_for_repo
     expected = get_repo_bot_token_no_global(repo_key) or ""
     if expected and token == expected:
         return
     if verify_session_token_for_repo(token, repo_key):
         return
     raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
+
 
 def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:
     from src.kernel.session_manager import db, db_lock
@@ -1684,11 +1731,14 @@ def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:
             pass
     return cancelled
 
+
 # Fix 2：直接执行的无输出超时（每次收到事件重置计时；超过则判定疑似挂起）
 _CONV_NO_OUTPUT_TIMEOUT = float(os.environ.get("CONVERSATION_NO_OUTPUT_TIMEOUT", "300"))
 
+
 class _ConvStuck(Exception):
     """对话执行无输出超时（疑似挂起）。"""
+
 
 async def _iter_with_timeout(aiter, timeout: float):
     """逐事件等待；无事件到达超时 → 抛 _ConvStuck（每次事件重置计时）。"""
@@ -1701,9 +1751,10 @@ async def _iter_with_timeout(aiter, timeout: float):
             return
         yield item
 
+
 async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_seq, repo_key, agent_type, account="", backend_name="hermes"):
     """直接模式单次执行：yield (text/thinking) 事件；以 sentinel 结束（_stuck / _done）。"""
-    from src.domains.runtime.engine.executor import consume_stream_async
+    from src.domains.runtime.agents.executor import consume_stream_async
     acc = ""
     new_oc = ""
     gen = consume_stream_async(
@@ -1729,6 +1780,7 @@ async def _direct_attempt(prompt, ws, session_id, repository, bot_token, anchor_
         yield ("_stuck", "")
         return
     yield ("_done", {"final_text": acc, "new_oc": new_oc})
+
 
 async def _run_conversation(evt: dict, user_message: str, username: str, conv_task_id: str = ""):
     """门禁已通过：写用户消息 → 复用 issue 会话运行 agent → 回写 agent 回复。
@@ -1769,12 +1821,10 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
 
     from src.kernel.repo_key import from_repo_key
     from src.kernel.repo import Repo
-    # D101 方案二（W6 关联）：bot_token 仅作 direct 链日志脱敏（_direct_attempt
-    # → consume_stream_async → stream_agent _tokens），不落 task 行（enqueue 传 ""）
     bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
     # Issue #1819：对话执行同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
-    from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
+    from src.api.event_pipeline import resolve_actor_account
     account = resolve_actor_account(evt, repo_key)
 
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
@@ -1805,7 +1855,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
             event_dialogue_path = resolve_official_skill_path("event-dialogue") \
                 or os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md")
-            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+            from src.api.event_pipeline import get_agent_workdir
             # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
             ws = get_agent_workdir(repo_key, agent_type, issue_id)
             os.makedirs(ws, exist_ok=True)
@@ -1817,13 +1867,13 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             except Exception:
                 runtime_id = 0
             if not runtime_id:
-                from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+                from src.api.event_pipeline import is_plugin_mode
                 if not is_plugin_mode():
                     final_text = "（对话执行失败：无可用引擎/会话）"
             else:
                 # 重派丢 env 修复（2026-10-10 事故）：对话入队同样补全 env_extra
                 # （此前未传 → 无 GRAPE_SERVER_URL/REPO_* 等基础变量）
-                from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
+                from src.api.event_pipeline import build_task_env as _bte
                 _conv_env = _bte(repo_key=repo_key, agent_type=agent_type,
                                  issue_id=issue_id or "", runtime_id=runtime_id or 0,
                                  account=account,
@@ -1836,7 +1886,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                     repo_key=repo_key, agent_type=agent_type,
                     skill="event-dialogue",                 # Fix A：打包下发对话技能
                     skill_path=event_dialogue_path,
-                    account=repository, repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取（W6）
+                    account=account, repo_gitcode_token=bot_token,
                     issue_id=issue_id or "#0",
                     env_extra=_conv_env,
                     pool_agent_type=agent_type if not runtime_id else "",  # plugin 广播模式下需要 pool_tag
@@ -1870,7 +1920,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             final_text = "（对话执行失败：无可用 runtime/会话）"
     else:
         # direct：SSE 流式；cwd 用该 issue 的 agent 目录（Fix 1）；无输出超时则重置会话重试一次（Fix 2）
-        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+        from src.api.event_pipeline import get_agent_workdir
         ws = get_agent_workdir(repo_key, agent_type, issue_id)
         os.makedirs(ws, exist_ok=True)
         result = None
@@ -1910,6 +1960,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                         task_id=conv_task_id, generate_status=2 if conv_task_id else None)
     yield ("done", {"reply": final_text, "messages": _list_thread(anchor_seq)})
 
+
 @router.get("/{seq}/thread", operation_id="events_thread", summary="Event conversation thread", description="Returns the event conversation thread messages.")
 def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
@@ -1925,6 +1976,7 @@ def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
         "knowledge": read_knowledge(evt["repo_key"], agent_type=evt["agent_type"], issue_num=issue_num),
     }
 
+
 @router.delete("/{seq}/chat", operation_id="events_chat_delete", summary="Delete event conversation thread", description="Clears the event conversation thread records.")
 def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
@@ -1937,6 +1989,7 @@ def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)
         c.execute("DELETE FROM event_thread WHERE anchor_seq=?", (seq,))
         db.commit()
     return {"ok": True, "message": "对话已清理"}
+
 
 @router.delete("/{seq}/knowledge/{scope}", operation_id="events_knowledge_delete", summary="Delete issue knowledge", description="Deletes agent knowledge produced for the event (file + DB + refs).")
 def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no_session_token)):
@@ -1967,7 +2020,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
 
     # 2. 删 OBS 对象（从 DB 取实际 obs_key，不用 knowledge_storage_key 重新生成）
     try:
-        from src.domains.runtime.storage import get_storage
+        from src.kernel.storage import get_storage
         storage = get_storage()
         if storage is not None:
             from src.kernel.session_manager import db, db_lock
@@ -2000,6 +2053,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
 
     return {"ok": True, "scope": scope, "message": "知识已删除"}
 
+
 @router.post("/{seq}/chat", operation_id="events_chat_send", summary="Send event conversation", description="Sends a message into the event conversation (non-streaming).")
 async def send_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
     evt = _load_event(seq)
@@ -2013,6 +2067,7 @@ async def send_conversation(seq: int, body: ConversationMessage, user: dict = De
         if evt_type == "done":
             final = data
     return final
+
 
 @router.post("/{seq}/chat/stream", operation_id="events_chat_stream", summary="Event conversation SSE", description="SSE streaming conversation. Direct mode streams live; queue mode returns a single done.")
 async def stream_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
@@ -2039,15 +2094,13 @@ async def stream_conversation(seq: int, body: ConversationMessage, user: dict = 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
 
+
 # ===== 事件对话持久化查询（对齐 Chat Agent v31）=====
 import threading as _conv_threading
-
 import time as _conv_time
-
 import uuid as _conv_uuid
 
 _conv_tasks: dict = {}
-
 _conv_tasks_lock = _conv_threading.Lock()
 
 # 清理过期任务（>30 分钟）
@@ -2058,6 +2111,7 @@ def _cleanup_conv_tasks():
                    if t.get("finished_at") and now - t["finished_at"] > 1800]
         for tid in expired:
             _conv_tasks.pop(tid, None)
+
 
 @router.post("/{seq}/chat/submit", operation_id="events_chat_submit", summary="Submit event conversation (async)", description="Submits a conversation query and immediately returns a task_id; the agent executes in the background.")
 async def submit_conversation(seq: int, body: ConversationMessage, user: dict = Depends(require_no_session_token)):
@@ -2093,6 +2147,7 @@ async def submit_conversation(seq: int, body: ConversationMessage, user: dict = 
     loop.run_in_executor(None, _execute_conv_task, conv_task_id, loop)
 
     return {"task_id": conv_task_id, "seq": seq, "status": "running"}
+
 
 def _execute_conv_task(task_id: str, loop):
     """后台执行对话任务（线程池中运行，call_soon_threadsafe 投递事件到 event loop）。"""
@@ -2131,7 +2186,7 @@ def _execute_conv_task(task_id: str, loop):
         except Exception:
             pass
         # 直接用同步 stream_devops_agent（在线程中运行，不阻塞主 loop）
-        from src.domains.runtime.engine.executor import stream_devops_agent
+        from src.domains.runtime.agents.executor import stream_devops_agent
         _worker_final_text = ""
         repo_key = evt["repo_key"]
         agent_type = evt["agent_type"]
@@ -2140,7 +2195,7 @@ def _execute_conv_task(task_id: str, loop):
         from src.kernel.config import WORKSPACE_DIR
         from src.kernel.repo_key import from_repo_key
         from src.api.knowledge import _issue_num_from
-        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+        from src.api.event_pipeline import get_agent_workdir
         from src.kernel.prompt_builder import build_conversation_prompt
         from src.api.session_store import get_or_create_issue_session
         issue_num = _issue_num_from(issue_id)
@@ -2167,7 +2222,7 @@ def _execute_conv_task(task_id: str, loop):
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
         # Issue #1819：worker 模式对话同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
-        from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
+        from src.api.event_pipeline import resolve_actor_account
         account = resolve_actor_account(evt, repo_key)
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
@@ -2217,8 +2272,8 @@ def _execute_conv_task(task_id: str, loop):
         _is_401 = is_auth_401_error(_err_lower)
         if _is_401:
             try:
-                from src.kernel.token_service import detect_and_mark_repo_token_expired
-                _conv_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
+                from src.kernel.token_service import detect_and_mark_expired
+                _conv_error_code = detect_and_mark_expired(repo_key) or ""
                 if _conv_error_code:
                     log.warning(f"Event dialogue: token expired (error_code={_conv_error_code}), repo={repo_key}")
             except Exception as _ve:
@@ -2263,6 +2318,7 @@ def _execute_conv_task(task_id: str, loop):
     if _mu is not None:
         _mu.finish(session_id=oc_session_id)
 
+
 async def _collect_conv_events(gen, task_id: str, loop):
     """消费 async generator，投递事件到主 loop。"""
     final_text = ""
@@ -2279,6 +2335,7 @@ async def _collect_conv_events(gen, task_id: str, loop):
             loop.call_soon_threadsafe(_push_conv_event, task_id, "done", final_text)
     return {"final_text": final_text}
 
+
 def _push_conv_event(task_id: str, evt_type: str, data):
     """向内存任务缓冲追加事件（在主 event loop 中调用）。"""
     with _conv_tasks_lock:
@@ -2287,6 +2344,7 @@ def _push_conv_event(task_id: str, evt_type: str, data):
             t["events"].append({"type": evt_type, "data": data})
             if evt_type == "text":
                 t["result"] = (t.get("result", "") or "") + (data if isinstance(data, str) else str(data))
+
 
 @router.get("/chat/task/{task_id}/status", operation_id="events_chat_task_status", summary="Event conversation async status", description="Queries conversation task status (memory first, DB fallback).")
 def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
@@ -2316,6 +2374,7 @@ def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token
         return {"task_id": task_id, "status": "error",
                 "result": "", "error": "查询已中断（服务重启），请重新发送消息"}
     return {"task_id": task_id, "status": "not_found"}
+
 
 @router.get("/chat/task/{task_id}/stream", operation_id="events_chat_task_stream", summary="Event conversation async stream", description="Subscribes to conversation task SSE output (buffered replay + live append).")
 async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
@@ -2372,6 +2431,7 @@ async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session
     return StreamingResponse(event_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
 
+
 @router.post("/{seq}/knowledge")
 def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
     """agent 沉淀共享知识（bot token）：写工作区文件 + 登记索引 + 线程留痕，见 event-conversation-design.md §3.1.1。"""
@@ -2397,6 +2457,7 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
                             f"📌 已提交 {body.scope} 级知识沉淀任务：{body.content}")
     return {"ok": True, "scope": body.scope, "task_id": task_id}
 
+
 @router.post("/{seq}/flow/reset")
 def flow_reset(seq: int, body: FlowResetBody, request: Request):
     """agent 流程控制（bot token）：取消该 issue 任务 + 回退阶段 + 线程留痕。见 event-conversation-design.md §3.3③。"""
@@ -2420,6 +2481,7 @@ def flow_reset(seq: int, body: FlowResetBody, request: Request):
                         f"🔄 流程干预：回退到 {to_stage} 阶段，取消 {cancelled} 个任务")
     return {"ok": True, "stage": to_stage, "cancelled": cancelled}
 
+
 @router.get("/{owner}/{repo}", operation_id="events_list", summary="List repository events", description="Paged event list for a repository with optional filters.")
 def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
@@ -2442,9 +2504,8 @@ def list_events(owner: str, repo: str,
     from src.kernel.session_manager import db, db_lock
 
     # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
-    from src.kernel.repo_key import repo_key_candidates
     _owner_repo = f"{owner}/{repo}"
-    _repo_keys = repo_key_candidates(_owner_repo)
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     where_clauses = [f"e.repo_key IN ({_rk_placeholders})"]
@@ -2477,64 +2538,23 @@ def list_events(owner: str, repo: str,
                  "result": r[7] or "", "issue_id": r[8] or "", "task_id": r[9] or ""}
                 for r in c.fetchall()
             ]
-            # Issue #1938：补偿标注——「系统补偿，原始回报丢失」的记录不计入 Agent 答复口径
-            from src.domains.runtime.engine import cascade as _cascade
-            _meta = _cascade.fetch_display_meta(
-                c, [e["seq"] for e in events], {e["seq"]: e["result"] for e in events})
-            for e in events:
-                _m = _meta.get(e["seq"]) or {}
-                e["cascade"] = _m
-                e["result_kind"] = _m.get("result_kind", "agent")
-                e["is_agent_conclusion"] = _m.get("is_agent_conclusion", True)
         except Exception:
             return {"events": [], "total": 0, "page": page, "page_size": page_size}
 
     return {"events": events, "total": total, "page": page, "page_size": page_size}
 
-def _redispatch_scene_override(evt: dict) -> str:
-    """重派时是否沿用事件行 scene_id 作为 env 场景 override（Issue #1745）。
 
-    仅 PR 订阅事件需要 override（Issue #427：订阅场景可不同于关联 Issue 场景），
-    判定与执行前校正共用 `_is_pr_subscription_task` 单一入口。普通 Issue/A2A/评论
-    事件在跨场景转交后，事件行 scene_id 仍是源场景，若继续作为 override 会覆盖
-    Issue 当前归属场景，导致注入的 GRAPE_SCENE_ID 陈旧；普通事件一律返回空串，
-    交由 build_task_env 按 issue_id 重新解析真值。
-    """
-    _scene = (evt.get("scene_id") or "").strip()
-    if not _scene:
-        return ""
-    from src.domains.runtime.pipeline.event_pipeline import _is_pr_subscription_task
-    if _is_pr_subscription_task(
-            issue_id=evt.get("issue_id") or "",
-            event_type=evt.get("event_type") or "",
-            title=evt.get("title") or ""):
-        return _scene
-    log.info(f"[redispatch] seq={evt.get('seq')} drop event scene override: "
-             f"event_scene={_scene}, issue={evt.get('issue_id') or ''}")
-    return ""
-
-def _mark_event_redispatched(seq: int, new_seq, channel: str):
-    """Issue #600：重派接管后原事件标记为 cancelled（被新事件取代），而非 failed。
-
-    failed 属于失败终态，会永久残留为流水线卡片的红色失败段（重派成功后旧失败
-    仍未被覆盖）。cancelled 语义为「已被新 seq 接管」，不参与 any_failed 聚合，
-    流水线节点状态随新事件（同 agent 最新 seq）刷新。经 reset_event_terminal
-    重置后写入，绕开终态保护，与既有 redispatch 语义一致。
-    """
-    from src.api.event_store import reset_event_terminal, update_event_complete
-    reset_event_terminal(seq)
-    update_event_complete(
-        seq, "cancelled", exit_code=None,
-        result=f"事件已重新派发（{channel} 新 seq={new_seq} 接管，原事件已取消）")
-
-def _register_ops_routes() -> None:
-    import src.domains.runtime.routes.events as _self
-    for method, path, func_name, kwargs in _EVENTS_OPS_ENDPOINTS:
-        fn = getattr(_self, func_name, None)
-        if fn is None:
-            continue  # 原函数被重命名/删除时跳过（防御）
-        decorator = getattr(ops_router, method)
-        decorator(path, **kwargs)(fn)
+# ===== Issue #596 P1：B 进程操作端点子路由（ops_router） =====
+# 三进程拆分（grape-three-process-split-design.md §4.1.2 / §2.2）：
+# - GET 查看端点（detail/thread/task status/stream/list、a2a-redo/scene）归 A 进程
+#   （grape_server.py 加载本文件完整 `router`）；
+# - 操作端点（terminate/redispatch/a2a-redo/chat 发送/knowledge 写入/flow reset 等
+#   直接触发事件处理层的 POST/DELETE）归 B 进程（grape_event_server.py 加载
+#   `ops_router`）——重派类操作调用 run_pipeline / enqueue，属 B 的入队职责。
+# 单进程兼容模式（main.py）加载完整 `router`（A+B 全量），行为不变。
+#
+# 实现方式：与 runtime_view.py 同款「原函数对象复用注册」——单一实现源，
+# 改一处两端生效；路径/operation_id 与原定义一致。
 
 ops_router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -2567,5 +2587,16 @@ _EVENTS_OPS_ENDPOINTS = [
     ("post", "/{seq}/knowledge", "add_knowledge", {}),
     ("post", "/{seq}/flow/reset", "flow_reset", {}),
 ]
+
+
+def _register_ops_routes() -> None:
+    import src.domains.runtime.routes.events as _self
+    for method, path, func_name, kwargs in _EVENTS_OPS_ENDPOINTS:
+        fn = getattr(_self, func_name, None)
+        if fn is None:
+            continue  # 原函数被重命名/删除时跳过（防御）
+        decorator = getattr(ops_router, method)
+        decorator(path, **kwargs)(fn)
+
 
 _register_ops_routes()

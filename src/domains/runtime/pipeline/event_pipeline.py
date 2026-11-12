@@ -3359,7 +3359,12 @@ def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_
 
 
 def _parse_queued_row(row):
-    """把 events 行解析为 (qseq, repo_key, agent_type, issue_id, payload, qinfo, linked_seq)。"""
+    """把 events 行解析为 (qseq, repo_key, agent_type, issue_id, payload, qinfo, linked_seqs)。
+
+    Issue #1973（复审 a/b）：``blocking_seqs`` 记录入队时全部阻塞前序（多个下游活跃
+    事件 + 目标 agent 自身活跃事件），补派必须等全部终态；历史行仅 ``existing_seq``
+    时退化为单元素列表，保持兼容。
+    """
     qseq, repo_key, agent_type, issue_id, payload_raw = row
     if not qseq or not repo_key:
         return None
@@ -3372,23 +3377,64 @@ def _parse_queued_row(row):
     qinfo = payload.get("_a2a_queue") or {}
     if not isinstance(qinfo, dict):
         qinfo = {}
+    _linked_seqs = []
+    _raw_seqs = qinfo.get("blocking_seqs")
+    if isinstance(_raw_seqs, (list, tuple)):
+        for _s in _raw_seqs:
+            try:
+                _v = int(_s or 0)
+            except Exception:
+                _v = 0
+            if _v > 0 and _v not in _linked_seqs:
+                _linked_seqs.append(_v)
+    if not _linked_seqs:
+        try:
+            _linked_seq = int(qinfo.get("existing_seq") or 0)
+        except Exception:
+            _linked_seq = 0
+        if _linked_seq > 0:
+            _linked_seqs = [_linked_seq]
+    _linked_seqs.sort()
+    return qseq, repo_key, agent_type, issue_id or "", payload, qinfo, _linked_seqs
+
+
+def _active_prior_seqs(seqs) -> set:
+    """返回给定 seq 中仍处于活跃状态（running/dispatched/queued）的集合。"""
+    _seqs = sorted({int(s) for s in (seqs or []) if s})
+    if not _seqs:
+        return set()
+    _ph = ",".join("?" * len(_seqs))
     try:
-        _linked_seq = int(qinfo.get("existing_seq") or 0)
-    except Exception:
-        _linked_seq = 0
-    return qseq, repo_key, agent_type, issue_id or "", payload, qinfo, _linked_seq
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT seq, status FROM events WHERE seq IN ({_ph})",
+                      tuple(_seqs))
+            rows = c.fetchall() or []
+    except Exception as _e:
+        log.warning(f"a2a queue drain: prior status query failed seqs={_seqs}: {_e}")
+        # 查询失败按「仍活跃」保守处理，避免误补派
+        return set(_seqs)
+    _active = set()
+    for _s, _st in rows:
+        if str(_st or "").strip() in _A2A_PRIOR_ACTIVE:
+            _active.add(int(_s))
+    return _active
 
 
 def drain_queued_a2a(prior_seq: int) -> list:
     """Issue #1667：前序 A2A 事件终态后，派发等待在其后的排队 A2A 事件。
 
     queue=true 的请求在命中活跃事件时先落一条 status='queued' 的 a2a_event
-    （payload._a2a_queue.existing_seq 关联前序事件），本函数在前序事件进入终态时
-    取出这些排队事件，原子置 running 并复用 run_a2a_dispatch 派发。
+    （payload._a2a_queue.blocking_seqs 关联全部阻塞前序，existing_seq 为兼容字段），
+    本函数在前序事件进入终态时取出这些排队事件，且仅当全部阻塞前序不再活跃时
+    原子置 running 并复用 run_a2a_dispatch 派发。
 
     - 原子 UPDATE（status='queued' → 'running'）保证并发终态回调下「仅派发一次」；
     - 派发失败 → _fail_event 置 failed（不无限重试，避免排障黑洞）；
-    - 查询按前序事件的 (repo, issue, agent) 收窄（不再全仓扫描，审查修复④）；
+    - 查询按前序事件的 (repo, issue) 收窄（不再全仓扫描，审查修复④）；
+      Issue #1948 / #1973：不再按 agent 收窄——下游 qa 打回上游 coding 的排队事件
+      agent 与前序不同，须按 issue 维度取出后由 `_a2a_queue.blocking_seqs`
+      精确匹配前序 seq；
     - 重入锁保证 drain 期间由 _fail_event 触发的二次终态钩子不递归；
     - 无排队记录或查询失败 → 返回空列表，不影响终态写入主流程。
     """
@@ -3406,7 +3452,7 @@ def drain_queued_a2a(prior_seq: int) -> list:
             _prior = c.fetchone()
         if not _prior:
             return []
-        _prior_repo, _prior_issue, _prior_agent = _prior[0] or "", _prior[1] or "", _prior[2] or ""
+        _prior_repo, _prior_issue = _prior[0] or "", _prior[1] or ""
         if not _prior_repo:
             return []
         _clauses = ["repo_key=?", "event_type='a2a_event'", "status='queued'"]
@@ -3414,9 +3460,8 @@ def drain_queued_a2a(prior_seq: int) -> list:
         if _prior_issue:
             _clauses.append("issue_id=?")
             _params.append(_prior_issue)
-        if _prior_agent:
-            _clauses.append("agent_type=?")
-            _params.append(_prior_agent)
+        # Issue #1948 / #1973：不再按 agent 收窄——下游 qa 打回上游 coding 的排队事件
+        # agent 与前序不同，加 agent 过滤会让补派永远扫不到（arch 移植残留，已删）。
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -3427,8 +3472,13 @@ def drain_queued_a2a(prior_seq: int) -> list:
             parsed = _parse_queued_row(row)
             if not parsed:
                 continue
-            qseq, repo_key, agent_type, issue_id, payload, qinfo, _linked_seq = parsed
-            if _linked_seq != int(prior_seq):
+            qseq, repo_key, agent_type, issue_id, payload, qinfo, _linked_seqs = parsed
+            if int(prior_seq) not in _linked_seqs:
+                continue
+            # 同 Issue 可能有多个阻塞前序：仅当其余前序也全部终态时才补派，
+            # 否则会在更早/其它下游仍 running 时提前派发（#1973 复审 a/b）。
+            _others = [s for s in _linked_seqs if s != int(prior_seq)]
+            if _active_prior_seqs(_others):
                 continue
             if _claim_and_dispatch_queued(qseq, repo_key, agent_type, issue_id,
                                           payload, qinfo, prior_seq):
@@ -3449,8 +3499,9 @@ def reconcile_queued_a2a(repo_key: str = "") -> list:
     - 「活跃判定 → 排队落库」之间的竞态窗口：前序在间隙内完成，排队行落库时
       已无「终态回调」可触发。
 
-    谓词：queued 事件的 `_a2a_queue.existing_seq` 指向的事件**不再活跃**
-    （不在 running/dispatched/queued，或已不存在）→ 立即按 drain 同样的原子抢占派发。
+    谓词：queued 事件的 `_a2a_queue.blocking_seqs`（兼容 existing_seq）指向的
+    全部事件**都不再活跃**（不在 running/dispatched/queued，或已不存在）
+    → 立即按 drain 同样的原子抢占派发。
     """
     if not _A2A_DRAIN_LOCK.acquire(blocking=False):
         log.info("a2a queue reconcile: another drain/reconcile in progress, skip")
@@ -3471,26 +3522,18 @@ def reconcile_queued_a2a(repo_key: str = "") -> list:
         parsed_rows = [p for p in (_parse_queued_row(r) for r in rows) if p]
         if not parsed_rows:
             return []
-        _prior_seqs = sorted({p[6] for p in parsed_rows if p[6]})
-        _prior_status = {}
-        if _prior_seqs:
-            _ph = ",".join("?" * len(_prior_seqs))
-            with db_lock:
-                c = db.cursor()
-                c.execute(f"SELECT seq, status FROM events WHERE seq IN ({_ph})",
-                          tuple(_prior_seqs))
-                for _s, _st in (c.fetchall() or []):
-                    _prior_status[int(_s)] = _st or ""
+        _prior_seqs = sorted({s for p in parsed_rows for s in p[6]})
+        _prior_active = _active_prior_seqs(_prior_seqs)
         dispatched = []
-        for qseq, _repo, agent_type, issue_id, payload, qinfo, _linked_seq in parsed_rows:
-            if not _linked_seq:
+        for qseq, _repo, agent_type, issue_id, payload, qinfo, _linked_seqs in parsed_rows:
+            if not _linked_seqs:
                 # 无关联前序（历史/异常行）：无法判定，交由人工排障，不盲目派发
                 continue
-            _pst = _prior_status.get(_linked_seq)
-            if _pst in _A2A_PRIOR_ACTIVE:
+            if any(s in _prior_active for s in _linked_seqs):
                 continue
+            _prior = _linked_seqs[0]
             if _claim_and_dispatch_queued(qseq, _repo, agent_type, issue_id,
-                                          payload, qinfo, _linked_seq):
+                                          payload, qinfo, _prior):
                 dispatched.append(qseq)
         if dispatched:
             log.info(f"a2a queue reconcile: dispatched {len(dispatched)} stranded queued "

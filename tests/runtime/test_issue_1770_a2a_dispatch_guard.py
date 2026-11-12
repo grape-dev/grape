@@ -7,89 +7,12 @@
 - 短时间窗内同 Issue 同目标 agent 多次派发产生告警观测；
 - force=true 可越过门禁（保持人工强制派发语义）。
 """
-import os
-import shutil
-import uuid
-
 from src.kernel.session_manager import db, db_lock
 
+from tests.runtime._a2a_guard_support import A2AGuardTestBase
 
-class TestA2ADispatchGuard1770:
-    def _clean(self):
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "DELETE FROM agent_tasks WHERE event_seq IN "
-                "(SELECT seq FROM events WHERE repo_key LIKE 'gitcode:owner/repo%' "
-                "OR repo_key LIKE 'owner/repo%')")
-            c.execute("DELETE FROM events WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
-            c.execute("DELETE FROM event_skipped WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
-            c.execute(
-                "DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' "
-                "OR repo_key LIKE 'owner/repo%' OR id LIKE 'sess-guard-%'")
-            c.execute(
-                "DELETE FROM agent_runtimes WHERE credential_id IN "
-                "(SELECT id FROM runtime_credentials WHERE name LIKE 'guard-cred-%')")
-            c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'guard-cred-%'")
-            c.execute("DELETE FROM skill WHERE skill_name='implementation' AND scope='repo'")
-            try:
-                c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:owner/repo'")
-            except Exception:
-                pass
-            db.commit()
-        try:
-            from src.kernel.config import SKILLS_DIR
-            shutil.rmtree(
-                os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation"),
-                ignore_errors=True)
-        except Exception:
-            pass
 
-    def _seed(self):
-        with db_lock:
-            c = db.cursor()
-            try:
-                c.execute(
-                    "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
-                    "VALUES ('gitcode:owner/repo', 'owner', 'repo', 'owner/repo')")
-            except Exception:
-                pass
-            c.execute(
-                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status) "
-                "VALUES (?,?,?, 'global', 'tester', 'active')",
-                ("g" + uuid.uuid4().hex, "guard-cred-" + uuid.uuid4().hex[:6], "guard-dev"))
-            _cid = c.lastrowid
-            c.execute(
-                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, last_seen_at, scope, owner_id, installed, healthy) "
-                "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'global', '', 1, 1)", (_cid,))
-            _rid = c.lastrowid
-            for _agent in ("coding", "qa"):
-                c.execute(
-                    "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, enable) "
-                    "VALUES (?, 'gitcode:owner/repo', ?, ?, 'idle', 1)",
-                    ("sess-guard-" + _agent, _agent, _rid))
-            try:
-                c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, "
-                    "skill_path, scope, owner_id, is_active) "
-                    "VALUES ('implementation','implementation','test skill','coding',"
-                    "'implementation','repo','gitcode:owner/repo',1)")
-            except Exception:
-                pass
-            db.commit()
-        from src.kernel.config import SKILLS_DIR
-        _sdir = os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation")
-        os.makedirs(_sdir, exist_ok=True)
-        with open(os.path.join(_sdir, "SKILL.md"), "w", encoding="utf-8") as _f:
-            _f.write("# implementation\n\ntest skill\n")
-
-    def teardown_method(self):
-        os.environ.pop("DEVOPS_EXECUTION_MODE", None)
-
-    def _client(self):
-        from fastapi.testclient import TestClient
-        from src.api.main import app
-        return TestClient(app)
+class TestA2ADispatchGuard1770(A2AGuardTestBase):
 
     def _body(self, agent="coding", context="Issue #1770 门禁测试", force=False):
         return {
@@ -103,36 +26,6 @@ class TestA2ADispatchGuard1770:
             },
             "force": force,
         }
-
-    def _setup(self):
-        self._clean()
-        self._seed()
-        os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
-        return self._client()
-
-    def _seed_event(self, agent="qa", status="running", issue_id="#5"):
-        from src.api.event_store import append_event
-        return append_event(
-            repo_key="gitcode:owner/repo", event_type="a2a_event",
-            title=f"A2A: {agent}", issue_id=issue_id,
-            source="a2a", agent_type=agent, summary=f"A2A: → {agent}",
-            payload={"issue_number": "5", "context": f"seed-{agent}"},
-            status=status)
-
-    def _events_for(self, agent="coding", issue_id="#5"):
-        with db_lock:
-            c = db.cursor()
-            return c.execute(
-                "SELECT seq, status FROM events WHERE repo_key='gitcode:owner/repo' "
-                "AND issue_id=? AND event_type='a2a_event' AND agent_type=? ORDER BY seq",
-                (issue_id, agent)).fetchall()
-
-    def _skips_for(self, issue_id="#5"):
-        with db_lock:
-            c = db.cursor()
-            return c.execute(
-                "SELECT reason, detail FROM event_skipped WHERE repo_key='gitcode:owner/repo' "
-                "AND issue_id=? AND event_type='a2a_event' ORDER BY id", (issue_id,)).fetchall()
 
     def test_downstream_running_skips_upstream_dispatch(self):
         client = self._setup()
@@ -332,3 +225,118 @@ class TestA2ADispatchGuard1770:
             row = db.cursor().execute(
                 "SELECT scene_id FROM events WHERE seq=?", (resp["seq"],)).fetchone()
         assert row and row[0] == "default", row
+    def test_exclude_seq_skips_caller_own_running_event(self):
+        """Issue #1973：exclude_seq 精确排除调用方自身 running 事件，其余下游仍拦截。"""
+        from src.api.a2a_dispatch_guard import find_running_downstream
+        self._clean()
+        self._seed()
+        qa_seq = self._seed_event(agent="qa", status="running")
+        nodes = [{"id": "coding", "next": "qa"}, {"id": "qa", "next": ""}]
+
+        own = find_running_downstream(
+            "gitcode:owner/repo", "5", "coding", "default", nodes,
+            exclude_seq=qa_seq)
+        assert own == {}, "调用方自身 running 事件不应判为下游 running"
+
+        other = find_running_downstream(
+            "gitcode:owner/repo", "5", "coding", "default", nodes)
+        assert other and other["seq"] == qa_seq, "异源下游 running 仍应拦截"
+
+    def test_downstream_skip_without_queue_is_explicit_not_queued(self):
+        """Issue #1973：未声明 queue 时必须显式 not_queued，不得返回 ok+skipped。"""
+        client = self._setup()
+        qa_seq = self._seed_event(agent="qa", status="running")
+
+        resp = client.post("/api/a2a", json=self._body(agent="coding"))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["skipped"] == "downstream_running", data
+        assert data["status"] == "not_queued", data
+        assert data["queued"] is False, data
+        assert data["queueable"] is True and data["retry_with_queue"] is True, data
+        assert data["downstream_event"]["seq"] == qa_seq
+
+    def _complete(self, seq):
+        from src.api.event_store import update_event_complete
+        update_event_complete(seq, "completed", result="空跑完成")
+
+    def test_top_level_force_resends_duplicate_key(self):
+        """Issue #1942：幂等窗内顶层 force=true 一次成功重发。"""
+        client = self._setup()
+        first_seq = client.post("/api/a2a", json=self._body(agent="coding")).json()["seq"]
+        assert first_seq > 0
+        self._complete(first_seq)
+
+        dup = client.post("/api/a2a", json=self._body(agent="coding")).json()
+        assert dup["skipped"] == "duplicate_key", dup
+
+        forced = client.post("/api/a2a", json=self._body(agent="coding", force=True))
+        assert forced.status_code == 200, forced.text
+        data = forced.json()
+        assert data.get("skipped") not in ("duplicate_key", "active_dispatch"), data
+        assert data["seq"] > 0 and data["seq"] != first_seq
+
+    def test_payload_force_resends_duplicate_key(self):
+        """Issue #1942：payload.force=true 与顶层 force 等价，可一次成功重发。"""
+        client = self._setup()
+        first_seq = client.post("/api/a2a", json=self._body(agent="coding")).json()["seq"]
+        assert first_seq > 0
+        self._complete(first_seq)
+
+        dup = client.post("/api/a2a", json=self._body(agent="coding")).json()
+        assert dup["skipped"] == "duplicate_key", dup
+
+        body = self._body(agent="coding")
+        body.pop("force", None)
+        body["payload"]["force"] = True
+        forced = client.post("/api/a2a", json=body)
+        assert forced.status_code == 200, forced.text
+        data = forced.json()
+        assert data.get("skipped") not in ("duplicate_key", "active_dispatch"), data
+        assert data["seq"] > 0 and data["seq"] != first_seq
+
+    def test_changing_idempotency_key_still_duplicate(self):
+        """Issue #1942：幂等窗口键 = issue+scene+agent，更换 idempotency_key 无效。"""
+        client = self._setup()
+        first = self._body(agent="coding")
+        first["idempotency_key"] = "task-42:coding"
+        first_seq = client.post("/api/a2a", json=first).json()["seq"]
+        assert first_seq > 0
+        self._complete(first_seq)
+
+        second = self._body(agent="coding")
+        second["idempotency_key"] = "task-43:coding"
+        resp = client.post("/api/a2a", json=second)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["skipped"] == "duplicate_key", data
+        assert data["reason"] == f"duplicate_key:{first_seq}"
+        assert data["seq"] == 0
+        assert len(self._events_for("coding")) == 1
+
+    def test_guard_message_documents_force_position(self):
+        """Issue #1942：三类门禁 message 均说明 force 位置与「换 key 无效」。"""
+        import json as _json
+        from src.domains.runtime.routes.webhook import _a2a_guard_skip_response
+        info = {"seq": 7, "agent": "qa", "status": "running", "created_at": ""}
+        for kind in ("downstream_running", "duplicate_key", "active_dispatch"):
+            resp = _a2a_guard_skip_response(
+                "gitcode:owner/repo", "5", "coding", "default", kind, dict(info))
+            msg = _json.loads(bytes(resp.body).decode())["message"]
+            assert "force=true to dispatch immediately" in msg, (kind, msg)
+            assert "top level" in msg and "payload.force=true" in msg, (kind, msg)
+            assert "equivalent" in msg, (kind, msg)
+            assert "idempotency_key" in msg and "issue+scene+agent" in msg, (kind, msg)
+
+    def test_duplicate_key_message_contains_recovery_hint(self):
+        """Issue #1942：duplicate_key 响应的 message 可直接指导一次成功重发。"""
+        client = self._setup()
+        first_seq = client.post("/api/a2a", json=self._body(agent="coding")).json()["seq"]
+        self._complete(first_seq)
+        data = client.post("/api/a2a", json=self._body(agent="coding")).json()
+        assert data["skipped"] == "duplicate_key", data
+        msg = data["message"]
+        assert "force=true to dispatch immediately" in msg
+        assert "payload.force=true" in msg
+        assert "Changing idempotency_key will not bypass this guard" in msg
+        assert "issue+scene+agent" in msg

@@ -184,6 +184,15 @@ async def create_from_template(body: CreateTemplateRequest,
 
     full_name = f"{owner_login}/{repo_name}"
 
+    # 建仓/复用成功后、push 模板代码与 host 之前立刻失效 user_repos 缓存：
+    # 新仓库需马上进入「未托管」栏（即便后续 push/host 失败，仓库已真实存在，
+    # 也保证可见、可手动处理）。
+    try:
+        from src.domains.mgmt.user import db as _user_db
+        _user_db.invalidate_user_repos(user.get("id", 0))
+    except Exception as _inv_e:
+        log.warning(f"create_from_template: invalidate user_repos failed: {_inv_e}")
+
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
     try:
         bot_token, _ = _load_global_bot_config(provider=provider)
