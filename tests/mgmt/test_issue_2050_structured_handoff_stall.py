@@ -365,7 +365,7 @@ def test_pipeline_enrich_carries_stall_fields():
 def test_contract_schemas_validate_request_and_response():
     jsonschema = pytest.importorskip("jsonschema")
     import os
-    root = os.path.join(os.path.dirname(__file__), "..")
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
     with open(os.path.join(root, "contracts", "a2a_handoff.schema.json"),
               encoding="utf-8") as f:
         request_schema = json.load(f)

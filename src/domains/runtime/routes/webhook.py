@@ -101,6 +101,7 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
                         carried_context, target_scene_id, engine_config,
                         ref_seq: int, idem_key: str, fingerprint: str,
                         context_key: str, existing_seq: int, reason: str,
+                        source_seq: int = 0,
                         runtime_id, backend: str, skill_name: str, skill_id,
                         skill_path: str, evt: dict, summary: str) -> int:
     """Issue #1948（移植）：A2A 排队事件统一落库，供「下游 running」与「活跃去重」两个入队分支复用。
@@ -126,7 +127,8 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
         "carried_context": carried_context if (target_scene_id or carried_context) else {},
         "engine_config": engine_config if (target_scene_id or engine_config) else None,
         "ref_seq": ref_seq,
-        "source_seq": ref_seq,
+        # Issue #2050：结构化 handoff 的源段 seq 显式值优先（缺省回退调用方会话 seq）。
+        "source_seq": source_seq or ref_seq,
         "idempotency_key": idem_key,
         "fingerprint": fingerprint,
         "queued": True,
@@ -1271,6 +1273,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 return JSONResponse(status_code=200, content={
                     "status": "ok", "seq": 0, "agent": target_node or "vod",
                     "skipped": _redirect["error"],
+                    "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq,
                 })
 
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
@@ -1310,7 +1313,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 log.info(f"A2A: idempotent hit key={_idem_key} seq={_existing['seq']}, return existing event")
                 return JSONResponse(status_code=200, content={
                     "status": "ok", "seq": _existing["seq"], "agent": _existing["agent_type"] or agent_name,
-                    "idempotent": True,
+                    "idempotent": True, "handoff_result": HANDOFF_RESULT_OK,
+                    "source_seq": _source_seq,
                     "message": "duplicate idempotency_key, existing event returned",
                     "event": _a2a_event_payload(
                         _existing["seq"], _existing["status"],
@@ -1341,7 +1345,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         from src.api.session_store import is_agent_enabled
         if not is_agent_enabled(repo_key, agent_name):
             log.warning(f"A2A: agent '{agent_name}' disabled for repo={repo_key}, rejected")
-            return JSONResponse(status_code=403, content={"code": 403, "message": f"agent {agent_name} disabled"})
+            return JSONResponse(status_code=403, content={"code": 403, "message": f"agent {agent_name} disabled",
+                                                          "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
 
         # 场景节点校验：目标 agent 不在当前场景的 pipeline nodes 里 → 拦截（不创建事件）
         # 防止 agent skill 硬编码 A2A 目标（如 coding→qa）与自定义场景 pipeline 冲突
@@ -1386,6 +1391,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             target_scene_id=target_scene_id,
                             engine_config=engine_config,
                             ref_seq=_caller_seq, idem_key=_idem_key,
+                            source_seq=_source_seq,
                             fingerprint=_fingerprint,
                             context_key=_a2a_context_key(_idem_key, context),
                             existing_seq=_down["seq"], reason="downstream_running",
@@ -1917,7 +1923,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             log.info(f"A2A: idempotent race hit key={_idem_key} seq={-seq}, return existing event")
             return JSONResponse(status_code=200, content={
                 "status": "ok", "seq": -seq, "agent": (_dup or {}).get("agent_type") or agent_name,
-                "idempotent": True,
+                "idempotent": True, "handoff_result": HANDOFF_RESULT_OK,
+                "source_seq": _source_seq,
                 "message": "duplicate idempotency_key, existing event returned",
                 "event": _a2a_event_payload(
                     -seq, (_dup or {}).get("status", ""),
@@ -1926,7 +1933,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             })
         if not seq:
             log.error(f"A2A: append_event returned 0, cannot create event for agent={agent_name}, issue=#{issue_number}")
-            return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A"})
+            return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A",
+                                                          "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
         log.info(f"A2A: event created, seq={seq}")
 
         # Issue #1770：短时间窗内同 Issue 同目标 agent 多次派发 → 告警日志（编排抖动观测）。
@@ -2048,7 +2056,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     except Exception:
                         from src.api.event_store import update_event_status
                         update_event_status(seq, "failed")
-                return {"status": "failed", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"}
+                return {"status": "failed", "seq": seq, "agent": agent_name,
+                        "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq,
+                        "error": "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"}
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path or "", engine_id,
@@ -2079,7 +2089,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         _fail_event(seq, f"A2A 派发失败：无可用引擎（auto-select 空集，无在线本机引擎，agent={agent_name}）")
                     except Exception:
                         pass
-                    return {"status": "ok", "seq": 0, "agent": agent_name}
+                    return {"status": "ok", "seq": 0, "agent": agent_name,
+                            "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq,
+                            "error": "no available engine (auto-select empty set)"}
             except Exception as _ae:
                 log.warning(f"A2A: auto-select engine failed: {_ae}")
                 # Issue #418：auto-select 异常早退统一走 _fail_event（完整诊断回写）
@@ -2088,7 +2100,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _fail_event(seq, f"A2A 派发失败：无可用引擎（auto-select 异常: {str(_ae)[:150]}）")
                 except Exception:
                     pass
-                return {"status": "ok", "seq": 0, "agent": agent_name}
+                return {"status": "ok", "seq": 0, "agent": agent_name,
+                        "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq,
+                        "error": f"auto-select engine failed: {str(_ae)[:150]}"}
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
             from src.domains.runtime.engine.direct_executor import start_direct_agent
@@ -2248,8 +2262,8 @@ def _handoff_result_of(status: str, seq, skipped: bool = False) -> str:
     try:
         if int(seq or 0) > 0:
             return HANDOFF_RESULT_OK
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as e:
+        log.debug(f"[a2a] handoff_result: non-numeric seq={seq!r}: {e}")
     return HANDOFF_RESULT_FAILED
 
 

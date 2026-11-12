@@ -89,7 +89,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                         title_map: dict = None, stage_map: dict = None,
                         pipe_cfg_cache: dict = None, get_pipe_cfg=None,
                         bot_usernames: set = None, feishu_name_cache: dict = None,
-                        events_by_issue: dict = None) -> dict:
+                        events_by_issue: dict = None, confirm_minutes: int | None = None) -> dict:
     """根据 issue_id 下的事件列表构建单个 Pipeline
 
     参数:
@@ -365,7 +365,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
         "duration": round(total_duration, 1) if total_duration > 0 else None,
         "parent_issue_id": parent_issue_id,
     }
-    attach_stall_state(_out, issue_events, stage, (_st.get("status") if _st else "") or "")
+    attach_stall_state(_out, issue_events, stage, (_st.get("status") if _st else "") or "",
+                       confirm_minutes=confirm_minutes)
     return _out
 
 
@@ -499,7 +500,9 @@ def get_pipeline(owner: str, repo: str,
                 "created_at, actor, duration, repo_key, scene_id, completed_at "
                 f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
             rows = c.fetchall()
-        except Exception:
+        except Exception as e:
+            # 不得静默清空：缺列/下推失败会让整个流水线页空白，必须留可观测信号。
+            log.warning(f"[pipeline] events query failed (pushdown={_pushdown_ok}): {e}")
             rows = []
 
     events = [
@@ -576,10 +579,19 @@ def get_pipeline(owner: str, repo: str,
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
+    # Issue #2050：确认窗一次读取（否则逐行 patrol_runtime_config() → 每行 5 条 meta SELECT）
+    _confirm_minutes = None
+    try:
+        from src.api.patrol import patrol_runtime_config
+        _confirm_minutes = int((patrol_runtime_config() or {}).get("confirm_minutes"))
+    except Exception as e:
+        log.warning(f"[pipeline] confirm_minutes read failed, fallback to default: {e}")
+        _confirm_minutes = None
     pipelines = [_get_issue_pipeline(
         repo_key, iid, events,
         _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
-        _bot_usernames, _feishu_name_cache, _events_by_issue
+        _bot_usernames, _feishu_name_cache, _events_by_issue,
+        confirm_minutes=_confirm_minutes
     ) for iid in (_win_ids if _pushdown_ok else issue_ids)]
     pipelines = [p for p in pipelines if p is not None]
 

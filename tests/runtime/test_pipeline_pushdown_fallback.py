@@ -20,7 +20,7 @@ _SCHEMA = [
     """CREATE TABLE events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT, event_type TEXT,
         agent_type TEXT, title TEXT, summary TEXT, status TEXT, created_at TEXT,
-        actor TEXT, duration INTEGER, repo_key TEXT, scene_id TEXT)""",
+        actor TEXT, duration INTEGER, repo_key TEXT, scene_id TEXT, completed_at TEXT)""",
     """CREATE TABLE issue (
         repo_key TEXT, issue_number INTEGER, title TEXT, status TEXT, stage TEXT,
         owner_agent TEXT, assignee TEXT, scene_id TEXT, parent_issue_id TEXT,

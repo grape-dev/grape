@@ -396,8 +396,9 @@ def extract_legacy_text_handoff(result_text: str) -> str:
                 v = data.get(k)
                 if isinstance(v, str) and v.strip():
                     candidates.insert(0, v)
-    except Exception:
-        pass
+    except Exception as e:
+        # 非 JSON 结论（纯文本）是常态路径，但不得静默：留痕便于区分「没写」与「解析坏」。
+        log.debug(f"[patrol] legacy A2A text: conclusion JSON parse skipped: {e}")
     for text in candidates:
         m = _LEGACY_A2A_LINE_RE.search(text or "")
         if m:
@@ -543,7 +544,9 @@ def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> boo
             ref = int(payload.get("source_seq")
                       or payload.get("source_event_seq")
                       or payload.get("ref_seq") or 0)
-        except Exception:
+        except Exception as e:
+            # payload 损坏（非 JSON / ref 非数字）：跳过该行但留痕，避免证据静默丢失。
+            log.debug(f"[patrol] structured handoff: skip unparsable payload: {e}")
             continue
         if ref == source_seq:
             return True
