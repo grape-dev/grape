@@ -8,6 +8,15 @@ const _PIPE_PER_PAGE = 10;
 // 前端在用户翻到未加载段时按 history_offset 增量拉取并追加，实现全量可翻页。
 let _pipeLoadingMore = false;
 
+// Issue #2050: 停滞徽标统一渲染（看板头部/历史表复用，文案走 i18n）
+function _renderStallBadge(minutes, opts) {
+  opts = opts || {};
+  const cls = opts.cls || 'tg';
+  const style = opts.style || 'color:#fff;background:#ff9f0a';
+  const text = I18N.t('pipeline.stalled_badge', {minutes: minutes || 0}) || ('⏳ 停滞 ' + (minutes || 0) + 'm');
+  return '<span class="' + cls + '" style="' + style + '">' + text + '</span>';
+}
+
 // 计算「已加载数据」能覆盖到的最大页码（active 1 条 + 已加载 history N 条）
 function _pipeLoadedPages(allPipes) {
   return Math.max(1, Math.ceil(allPipes.length / _PIPE_PER_PAGE));
@@ -175,8 +184,9 @@ function selPipe(idx) {
   const statuses = displayPipe.statuses || [];
   const owner = displayPipe.current_owner || '';
   const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>' : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
+  const stallBadge = displayPipe.stalled ? ' &nbsp;' + _renderStallBadge(displayPipe.stalled_minutes) : '';
 
-  let flowHtml = `<div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${window.escHtml(data.repo || '')}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + window.escHtml(displayPipe.title) + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${_pipeData.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${_pipeData.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${_pipeData.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+  let flowHtml = `<div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${window.escHtml(data.repo || '')}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + window.escHtml(displayPipe.title) + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${stallBadge}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${_pipeData.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${_pipeData.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${_pipeData.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
   var pipeNodes = _getPipeNodes(data, displayPipe);
   pipeNodes.forEach(function(node, i) {
     var tag = node.tag || node.id;
@@ -284,12 +294,15 @@ function renderPipeline(data, focusIssueNum) {
     const execBadge = displayPipe.executing
       ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>'
       : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
+    const stallBadgeMain = displayPipe.stalled
+      ? ' &nbsp;' + _renderStallBadge(displayPipe.stalled_minutes)
+      : '';
     // 触发 SRE 部署按钮：stage 非 done 时显示
     const _issueNum = String(iss).replace(/^#/, '');
     const _repoFullName = window.stripRepoPrefix(data.repo_key || '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${window.escHtml(data.repo || '')}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + window.escHtml(displayPipe.title) + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${window.escHtml(data.repo || '')}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + window.escHtml(displayPipe.title) + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${stallBadgeMain}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
       var tag = node.tag || node.id;
@@ -412,7 +425,7 @@ function renderPipeline(data, focusIssueNum) {
       <td>${_parentIssueHtml}</td>
       <td>${dur}</td>
       <td>${agentTags}</td>
-      <td><span class="${stageClass}">${stageName}</span></td>
+      <td><span class="${stageClass}">${stageName}</span>${p.stalled ? '<br>' + _renderStallBadge(p.stalled_minutes, {style: 'font-size:10px;color:#fff;background:#ff9f0a'}) : ''}</td>
       <td>${sceneBadge}</td>
       <td>${owner}</td></tr>`;
   });

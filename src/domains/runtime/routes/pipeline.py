@@ -347,7 +347,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     else:
         display_issue_id = issue_id
 
-    return {
+    from src.api.pipeline_status import attach_stall_state
+    _out = {
         "issue_id": display_issue_id,
         "raw_issue_id": issue_id,
         "title": title,
@@ -364,6 +365,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
         "duration": round(total_duration, 1) if total_duration > 0 else None,
         "parent_issue_id": parent_issue_id,
     }
+    attach_stall_state(_out, issue_events, stage, (_st.get("status") if _st else "") or "")
+    return _out
 
 
 def _running_issue_ids(repo_keys) -> set[str]:
@@ -493,7 +496,7 @@ def get_pipeline(owner: str, repo: str,
                 _params += list(_win_ids)
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key, scene_id "
+                "created_at, actor, duration, repo_key, scene_id, completed_at "
                 f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
             rows = c.fetchall()
         except Exception:
@@ -503,7 +506,8 @@ def get_pipeline(owner: str, repo: str,
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
          "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": "",
          "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key,
-         "scene_id": r[11] if len(r) > 11 else ""}
+         "scene_id": r[11] if len(r) > 11 else "",
+         "completed_at": normalize_event_time(r[12]) if len(r) > 12 else ""}
         for r in rows
     ]
 
@@ -526,7 +530,7 @@ def get_pipeline(owner: str, repo: str,
                     # 一次查询同时获取 title + stage + scene_id + assignee 等
                     c.execute(
                         "SELECT issue_number, title, stage, owner_agent, assignee, "
-                        "scene_id, parent_issue_id, is_subtask_mode "
+                        "scene_id, parent_issue_id, is_subtask_mode, status "
                         "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
                             ",".join("?" * len(_repo_keys)),
                             ",".join("?" * len(_iss_nums))
@@ -540,6 +544,7 @@ def get_pipeline(owner: str, repo: str,
                             "stage": r[2] or "", "owner_agent": r[3] or "",
                             "assignee": r[4] or "", "scene_id": r[5] or "",
                             "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
+                            "status": r[8] if len(r) > 8 else "",
                         }
             except Exception:
                 pass

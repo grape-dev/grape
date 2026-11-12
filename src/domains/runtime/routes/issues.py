@@ -528,6 +528,8 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
             "seq": ev["seq"], "agent": ev.get("agent_type", ""),
             "event_type": ev.get("event_type", ""),
             "status": ev.get("status", ""),
+            "created_at": ev.get("created_at", ""),
+            "completed_at": ev.get("completed_at", ""),
             "runtime": ev.get("runtime", ""), "skill": ev.get("skill", ""),
             "output": {
                 "conclusion": ev.get("summary", ""),
@@ -1225,7 +1227,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         _sre_result = {"task_ref": dict(_UNAVAILABLE_TASK_REF),
                        "result_ref": dict(_UNAVAILABLE_RESULT_REF)}
 
-    return {
+    from src.api.pipeline_status import attach_stall_state
+    _out = {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
         "current_stage": _current_stage,
@@ -1241,6 +1244,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         "review_status": derive_review_status(_current_stage, _issue_task_status),
         "sre_result": _sre_result,
     }
+    attach_stall_state(_out, events, _current_stage, _issue_task_status)
+    return _out
 
 class IssueHandoffBody(BaseModel):
     target_scene_id: str = ""

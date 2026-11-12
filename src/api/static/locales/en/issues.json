@@ -59,5 +59,9 @@
     "sre_pending": "SRE acceptance task in flight, no result yet",
     "sre_unavailable": "No SRE acceptance result (no associated task or result unreadable)",
     "sre_task_ref": "Acceptance task"
+  },
+  "stall_banner": {
+    "title": "Completed but not handed off (stalled {{minutes}} min)",
+    "hint": "Alerted — confirm the next hop manually; scene-order derivation is advisory, no auto-dispatch"
   }
 }

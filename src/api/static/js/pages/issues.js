@@ -1084,6 +1084,13 @@ function _renderPipelineSection(data) {
   if (_reviewStatus === 'pending_review') {
     html += `<div style="font-size:11px;color:#ff9f0a;background:rgba(255,159,10,.08);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">◉</span><span><b>${I18N.t('tasks.status.tag_pending_review')||'待审核'}</b> — ${I18N.t('issues.review_status.pending_review_hint')||'需求待人工确认：阶段执行完成 ≠ 需求/生产发布完成'}</span></div>`;
   }
+  // Issue #2050: 完成但未接力（stalled）——区分正常完成并展示停滞时长
+  if (data.stalled) {
+    var _stallMin = data.stalled_minutes || 0;
+    var _stallTitle = I18N.t('issues.stall_banner.title', {minutes: _stallMin}) || ('完成但未接力（停滞 ' + _stallMin + ' 分钟）');
+    var _stallHint = I18N.t('issues.stall_banner.hint') || '平台已告警：下一棒需人工确认（场景序推导只作建议）';
+    html += `<div style="font-size:11px;color:#ff9f0a;background:rgba(255,159,10,.10);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">⏳</span><span><b>${_stallTitle}</b> — ${_stallHint}</span></div>`;
+  }
   // Issue #539: SRE 验收结论引用（result_ref 摘要 + 可授权查询任务引用）
   var _sreResult = data.sre_result || null;
   if (_sreResult && _sreResult.result_ref) {
