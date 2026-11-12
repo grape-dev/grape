@@ -78,6 +78,8 @@ function loadReposModule(dom, localStorage, apiMock, sessionStore) {
   const console_ = { log: () => {}, error: () => {}, warn: () => {} };
   const sandbox = {
     document: dom,
+    // app.js 依赖 api.js 的 fmtLocalTime（浏览器里 api.js 先于 app.js 加载）
+    fmtLocalTime: (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '-'),
     window,
     localStorage,
     sessionStorage,

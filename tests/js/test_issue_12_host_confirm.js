@@ -92,6 +92,7 @@ function loadRepos(dom, opts) {
 
   var sandbox = {
     document: dom,
+    fmtLocalTime: function (v) { return v ? String(v).replace("T", " ").slice(0, 16) : "-"; },
     window: window_,
     localStorage,
     API,

@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**49 通过 / 19 C类 / 23 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**56 通过 / 19 C类 / 16 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -88,16 +88,16 @@ js 测试：**49 通过 / 19 C类 / 23 D类**（共 91；起点 13 通过 / 78 �
 
 ## D 类（断言针对旧实现写法，需按原意在新实现上重写）
 - [ ] test_engine_guide_simplified.js
-- [ ] test_i18n_repos_local_refresh.js
+- [x] test_i18n_repos_local_refresh.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_1167_runtime_empty_filter.js（已修复并改写）
 - [ ] test_issue_1477_apikey_time_format.js
-- [ ] test_issue_205_beta_apply_persist.js
-- [ ] test_issue_273_en_prefix_refresh.js
-- [ ] test_issue_278_refresh_route.js
+- [x] test_issue_205_beta_apply_persist.js（修 harness 后恢复，仍为行为测试）
+- [x] test_issue_273_en_prefix_refresh.js（修 harness 后恢复，仍为行为测试）
+- [x] test_issue_278_refresh_route.js（修 harness 后恢复，仍为行为测试）
 - [ ] test_issue_286_chat_bubble_layout.js
 - [ ] test_issue_290_view_issue.js
 - [ ] test_issue_297_multi_image_error_and_persist.js
-- [ ] test_issue_299_org_name_display.js
+- [x] test_issue_299_org_name_display.js（修 harness 后恢复，仍为行为测试）
 - [ ] test_issue_316_scene_repo_tab_removed.js
 - [x] test_issue_329_cross_pipeline.js（已改写）
 - [ ] test_issue_335_skill_search.js
@@ -110,8 +110,8 @@ js 测试：**49 通过 / 19 C类 / 23 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_697_dedup_template.js
 - [ ] test_issue_978_skill_unique_key.js
 - [ ] test_password_blocklist.js
-- [ ] test_repo_persist_on_refresh.js
+- [x] test_repo_persist_on_refresh.js（修 harness 后恢复，仍为行为测试）
 - [ ] test_repos_host_provider.js
-- [ ] test_sidebar_collapse.js
+- [x] test_sidebar_collapse.js（修 harness 后恢复，仍为行为测试）
 - [ ] test_token_create_deeplink.js
 - [ ] test_unbind_repo_list_invisible.js

@@ -78,6 +78,7 @@ function makeApi(orgsData) {
 // ── 加载 app.js（IIFE 返回 app 对象）──
 function loadApp(dom, storage, api) {
   global.document = dom;
+  global.fmtLocalTime = (v) => (v ? String(v).replace("T", " ").slice(0, 16) : "-");
   global.localStorage = storage;
   global.API = api;
   global.I18N = { t: (k) => { if (k === 'organizations.my_orgs') return '我的组织'; if (k === 'organizations.switch_org.success') return '已切换组织'; return k; } };

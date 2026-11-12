@@ -74,6 +74,8 @@ function loadApp(dom, localStorage, innerWidth) {
 
   const sandbox = {
     document: dom,
+    // app.js 依赖 api.js 的 fmtLocalTime（浏览器里 api.js 先于 app.js 加载）
+    fmtLocalTime: (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '-'),
     window: win,
     localStorage,
     // Issue #231 后 currentRepo 迁到 sessionStorage（页签级隔离），沙箱需同步提供

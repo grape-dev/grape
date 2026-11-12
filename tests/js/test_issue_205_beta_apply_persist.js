@@ -100,6 +100,7 @@ function loadApp(dom, sessionStorage) {
   const console_ = { log: () => {}, error: () => {}, warn: () => {} };
   const sandbox = {
     document: dom, window,
+    fmtLocalTime: (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '-'),
     localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {}, clear: () => {} },
     sessionStorage,
     API, I18N, console: console_,

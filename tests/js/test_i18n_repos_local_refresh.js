@@ -77,8 +77,9 @@ function testRerenderReposViewExported() {
   assert.ok(APP_JS.indexOf('_rerenderReposView') >= 0,
     '_rerenderReposView should be exported in app return');
   // 在 return 语句中
-  const returnIdx = APP_JS.indexOf('return {nav, search');
-  const returnLine = APP_JS.slice(returnIdx, returnIdx + 500);
+  const returnIdx = APP_JS.indexOf('return {nav,');
+  assert.ok(returnIdx > 0, 'app.js 应有 app 返回语句');
+  const returnLine = APP_JS.slice(returnIdx, returnIdx + 900);
   assert.ok(returnLine.indexOf('_rerenderReposView') >= 0,
     '_rerenderReposView should be in app return statement');
   console.log('  PASS: T6 _rerenderReposView 导出到 app 对象');

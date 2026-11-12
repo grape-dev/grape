@@ -95,6 +95,7 @@ function loadApp(dom, localStorage, opts) {
 
   var sandbox = {
     document: dom,
+    fmtLocalTime: function (v) { return v ? String(v).replace("T", " ").slice(0, 16) : "-"; },
     window: win,
     localStorage,
     sessionStorage: sessionStorageMock,

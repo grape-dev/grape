@@ -102,6 +102,7 @@ function makeApi() {
 // ── 加载 organizations.js（顶层函数声明脚本）──
 function loadOrganizationsPage(dom, storage) {
   global.document = dom;
+  global.fmtLocalTime = (v) => (v ? String(v).replace("T", " ").slice(0, 16) : "-");
   global.localStorage = storage;
   global.I18N = I18N_MOCK;
   global.API = makeApi();
