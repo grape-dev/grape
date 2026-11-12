@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import html as _html
 import json
+import logging
 import os
 import re
 from pathlib import Path
 
 import markdown
+
+_log = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
 HELP_DIR = _REPO_ROOT / "help"
@@ -585,19 +588,39 @@ def generate() -> int:
     return len(data["usage"]) + len(data["api"]) + len(data.get("reference", [])) + len(data.get("developer", []))
 
 
-def write_openapi_contract(schema: dict, help_path: Path | None = None, static_path: Path | None = None) -> int:
+def write_openapi_contract(schema: dict, help_path: Path | None = None,
+                           static_path: Path | None = None, allow_partial: bool = False) -> int:
     """把 OpenAPI 契约 schema 落盘（固定下载 URL=/static/openapi.json）。
 
     规范副本写 help/api/openapi.json（需求要求），提供副本写 static 目录供下载。
-    返回架构 paths 数。
+    返回写入的架构 paths 数；被完整性保护拒绝时返回 0。
+
+    完整性保护（Issue #1931）：四进程拆分后，任一进程的 schema 都只是并集的子集。
+    若调用方误用单进程 schema 覆盖，磁盘上的全量契约会被静默缩小（CLI 随之丢命令组）。
+    规则：**磁盘已有契约里存在本次 schema 缺失的路径时不覆盖**（allow_partial=True 显式放行并告警）。
     """
     import json as _json
 
-    text = _json.dumps(schema, ensure_ascii=False, indent=2)
+    new_paths = set((schema.get("paths") or {}).keys())
+    written_any = False
     for p in (help_path or OPENAPI_HELP_PATH, static_path or OPENAPI_STATIC_PATH):
+        if not allow_partial and p.exists():
+            try:
+                disk_paths = set((_json.loads(p.read_text(encoding="utf-8")).get("paths") or {}).keys())
+            except Exception:
+                disk_paths = set()      # 磁盘契约损坏 → 视为无对照物，正常写入
+            missing = sorted(disk_paths - new_paths)
+            if missing:
+                _log.warning(
+                    "skip contract write %s (schema misses %d path(s) already on disk, e.g. %s)"
+                    " — merge the process specs first (src/api/openapi_merge.py)",
+                    p, len(missing), ", ".join(missing[:3]))
+                continue
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
-    return len(schema.get("paths", {}))
+        p.write_text(_json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+        written_any = True
+
+    return len(new_paths) if written_any else 0
 
 
 if __name__ == "__main__":

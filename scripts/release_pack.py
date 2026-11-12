@@ -53,8 +53,9 @@ def _tar_filter(ti):
         return None
     if ".venv" in ti.name:
         return None
-    # help/api/openapi.json 是生成物（服务启动时落盘，gitignore）——打包跳过
-    if ti.name.endswith("help/api/openapi.json"):
+    # help/api/openapi.json 与 src/api/static/openapi.json 都是生成物（服务启动时落盘，
+    # gitignore）——打包跳过，避免把构建机上的旧契约带进发行包（Issue #1931 A 项）
+    if ti.name.endswith("help/api/openapi.json") or ti.name.endswith("src/api/static/openapi.json"):
         return None
     return ti
 
