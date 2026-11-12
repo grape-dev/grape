@@ -813,6 +813,20 @@ CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
 )
 """
 
+# Issue #2133：引擎生命周期审计（spawn_failed 告警/降级、恢复加回、任务绑定对账留痕）
+_ENGINE_LIFECYCLE_AUDIT_DDL = """
+CREATE TABLE IF NOT EXISTS engine_lifecycle_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    runtime_id  INTEGER NOT NULL,              -- agent_runtimes.id
+    runtime_name TEXT DEFAULT '',              -- 引擎名快照
+    kind        TEXT NOT NULL,                 -- spawn_fail_alarm / spawn_fail_degraded / recovered / manual_readd
+    scene_row_id INTEGER DEFAULT 0,            -- devops_pipeline_scene.id（加回相关）
+    node_tag    TEXT DEFAULT '',               -- 场景节点标签
+    detail      TEXT DEFAULT '{}',             -- JSON：计数/时长/对账任务快照
+    created_at  TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _SKILL_LIKES_DDL = """
 CREATE TABLE IF NOT EXISTS skill_likes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -983,6 +997,8 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
     # 引擎绑定真实性同步：场景引擎解绑审计表
     ("scene_engine_detach_log", _SCENE_ENGINE_DETACH_LOG_DDL),
+    # Issue #2133：引擎生命周期审计（spawn_failed 告警/降级 + 恢复加回 + 任务对账）
+    ("engine_lifecycle_audit", _ENGINE_LIFECYCLE_AUDIT_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
     ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
@@ -5357,6 +5373,33 @@ register_migration(
     name="add-agent-runtimes-probe-spawn-fail-count",
     kind="safe",
     fn=_fn_add_agent_runtimes_probe_spawn_fail_count,
+)
+
+
+def _fn_issue2133_engine_recovery_schema() -> None:
+    """Issue #2133：引擎恢复加回闭环所需结构（存量库幂等补齐）。
+
+    - agent_runtimes 补 spawn_failed 时间窗追踪列：spawn_fail_since（连续
+      spawn_failed 首见时刻）、spawn_fail_warned_at（强告警已发）、
+      spawn_fail_degraded_at（超第二阈值标记 degraded，UI 高亮，不自动摘除）；
+    - agent_runtimes 补 probe_ok_streak（连续探活 ok 次数，恢复判定用）；
+    - 新建 engine_lifecycle_audit（告警/降级/自动加回/一键加回/任务对账审计）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_runtimes", "spawn_fail_since", "TEXT DEFAULT ''")
+        _ensure_column(c, "agent_runtimes", "spawn_fail_warned_at", "TEXT DEFAULT ''")
+        _ensure_column(c, "agent_runtimes", "spawn_fail_degraded_at", "TEXT DEFAULT ''")
+        _ensure_column(c, "agent_runtimes", "probe_ok_streak", "INT DEFAULT 0")
+        db.execute(_ENGINE_LIFECYCLE_AUDIT_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611120005",
+    name="issue2133-engine-recovery-schema",
+    kind="safe",
+    fn=_fn_issue2133_engine_recovery_schema,
 )
 
 

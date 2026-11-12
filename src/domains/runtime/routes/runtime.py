@@ -494,6 +494,11 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                     _platency = (_pdata.get("latency") or 0) if isinstance(_pdata, dict) else 0
                     _plast = (_pdata.get("last_probe") or now) if isinstance(_pdata, dict) else now
                     _perror = (_pdata.get("error") or "") if isinstance(_pdata, dict) else ""
+                    # Issue #2133：拿 runtime_id 供时间窗追踪/恢复加回（按 name+credential 唯一定位）
+                    _prid_row = c.execute(
+                        "SELECT id FROM agent_runtimes WHERE name=? AND credential_id=?",
+                        (_pname, credential_id)).fetchone()
+                    _prid = _prid_row[0] if _prid_row else 0
                     # 取已存 probe_last：相同观测重放 → 幂等（仅刷新字段，不动计数/健康）
                     _existing_last = c.execute(
                         "SELECT probe_last FROM agent_runtimes WHERE name=? AND credential_id=?",
@@ -517,6 +522,13 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                             "WHERE name=? AND credential_id=?",
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
+                        # Issue #2133：连续 ok 计数 + 达 M 次且此前有告警/降级/解绑事实 → 自动加回场景 + 对账
+                        if _prid:
+                            try:
+                                from src.domains.runtime.engine import recovery as _recovery
+                                _recovery.note_probe_ok(c, _prid)
+                            except Exception as _rce:
+                                log.warning(f"runtime probe ok recovery hook failed (runtime={_prid}): {_rce}")
                     elif _pstatus in ("fail", "model_unreachable"):
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, "
@@ -528,6 +540,12 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                         if _pstatus == "model_unreachable":
                             log.warning(f"runtime probe model_unreachable: engine={_pname} "
                                         f"credential={credential_id} error={_perror[:200]}")
+                        if _prid:
+                            try:
+                                from src.domains.runtime.engine import recovery as _recovery
+                                _recovery.note_probe_break(c, _prid)
+                            except Exception as _rce:
+                                log.warning(f"runtime probe break hook failed (runtime={_prid}): {_rce}")
                     elif _pstatus == "spawn_failed":
                         # Issue #1982：子进程起不来（fd 打满/资源不足）= 环境故障，
                         # 不计入「探活连续失败」（probe_fail_count），偶发资源紧张不摘除引擎。
@@ -561,12 +579,25 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                         log.warning(f"runtime probe spawn_failed (not counted as consecutive failure, "
                                     f"spawn_fail_count={_sf_count}/{_PROBE_SPAWN_FAIL_TRIP}): "
                                     f"engine={_pname} credential={credential_id} error={_perror[:200]}")
+                        # Issue #2133：spawn_failed 连续计数 + 持续时长 → 强告警 / degraded 标记（不摘除）
+                        if _prid:
+                            try:
+                                from src.domains.runtime.engine import recovery as _recovery
+                                _recovery.note_spawn_failed(c, _prid)
+                            except Exception as _rce:
+                                log.warning(f"runtime spawn_failed window hook failed (runtime={_prid}): {_rce}")
                     else:
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
                             "WHERE name=? AND credential_id=?",
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
+                        if _prid:
+                            try:
+                                from src.domains.runtime.engine import recovery as _recovery
+                                _recovery.note_probe_break(c, _prid)
+                            except Exception as _rce:
+                                log.warning(f"runtime probe break hook failed (runtime={_prid}): {_rce}")
             # 查该 worker 的已取消任务——通知 worker 立即杀进程
             ph2 = ",".join("?" for _ in body.runtime_ids)
             rows = c.execute(
