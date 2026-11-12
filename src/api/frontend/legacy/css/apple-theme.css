@@ -1356,7 +1356,7 @@
 [data-theme="apple"][data-theme-mode="dark"] .tsk-ic-p, .tsk-det-ic-p { background: linear-gradient(135deg,rgba(234,90,12,.18),rgba(216,48,118,.16)); color: #ffb27a; box-shadow: inset 0 0 0 1px rgba(234,90,12,.14); }
 [data-theme="apple"][data-theme-mode="dark"] .tsk-ic-d, .tsk-det-ic-d { background: linear-gradient(135deg,rgba(28,164,76,.18),rgba(49,104,224,.16)); color: #7ee0a0; box-shadow: inset 0 0 0 1px rgba(28,164,76,.14); }
 [data-theme="apple"][data-theme-mode="dark"] .tsk-ic-pr, .tsk-det-ic-pr { background: linear-gradient(135deg,rgba(49,104,224,.18),rgba(123,60,242,.16)); color: #9dc0ff; box-shadow: inset 0 0 0 1px rgba(49,104,224,.14); }
-[data-theme="apple"][data-theme-mode="dark"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.16) 0%,rgba(123,60,242,.13) 45%,rgba(216,48,118,.10) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+[data-theme="apple"][data-theme-mode="dark"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.09) 0%,rgba(123,60,242,.07) 45%,rgba(216,48,118,.05) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
 
 @media (prefers-color-scheme: dark) {
   [data-theme="apple"][data-theme-mode="auto"] .sidebar {
@@ -1378,7 +1378,7 @@
   [data-theme="apple"][data-theme-mode="auto"] .tsk-ic-p, .tsk-det-ic-p { background: linear-gradient(135deg,rgba(234,90,12,.18),rgba(216,48,118,.16)); color: #ffb27a; box-shadow: inset 0 0 0 1px rgba(234,90,12,.14); }
   [data-theme="apple"][data-theme-mode="auto"] .tsk-ic-d, .tsk-det-ic-d { background: linear-gradient(135deg,rgba(28,164,76,.18),rgba(49,104,224,.16)); color: #7ee0a0; box-shadow: inset 0 0 0 1px rgba(28,164,76,.14); }
   [data-theme="apple"][data-theme-mode="auto"] .tsk-ic-pr, .tsk-det-ic-pr { background: linear-gradient(135deg,rgba(49,104,224,.18),rgba(123,60,242,.16)); color: #9dc0ff; box-shadow: inset 0 0 0 1px rgba(49,104,224,.14); }
-  [data-theme="apple"][data-theme-mode="auto"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.16) 0%,rgba(123,60,242,.13) 45%,rgba(216,48,118,.10) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+  [data-theme="apple"][data-theme-mode="auto"] .project-hero-welcome { background: linear-gradient(135deg,rgba(49,104,224,.09) 0%,rgba(123,60,242,.07) 45%,rgba(216,48,118,.05) 100%); box-shadow: 0 12px 32px rgba(0,0,0,.45); }
 
   /* ── Project Workspace ── */
   [data-theme="apple"][data-theme-mode="auto"] .project-hero-btn { background: #2d2d2f !important; }
@@ -1621,8 +1621,8 @@
  * 规则只作用于 dark，light 档一个像素都不动。 */
 :root[data-theme-mode="dark"] body {
   background:
-    radial-gradient(1100px 560px at 6% -10%, rgba(10,132,255,.20), transparent 62%),
-    radial-gradient(880px 480px at 96% -4%, rgba(176,122,139,.14), transparent 60%),
+    radial-gradient(1100px 560px at 10% -24%, rgba(10,132,255,.10), transparent 62%),
+    radial-gradient(880px 480px at 96% -16%, rgba(176,122,139,.08), transparent 60%),
     radial-gradient(1000px 640px at 46% 118%, rgba(122,146,176,.12), transparent 66%),
     var(--bg);
   background-attachment: fixed;
@@ -1686,8 +1686,8 @@
    * 规则只作用于 dark，light 档一个像素都不动。 */
   :root[data-theme-mode="auto"] body {
     background:
-      radial-gradient(1100px 560px at 6% -10%, rgba(10,132,255,.20), transparent 62%),
-      radial-gradient(880px 480px at 96% -4%, rgba(176,122,139,.14), transparent 60%),
+      radial-gradient(1100px 560px at 10% -24%, rgba(10,132,255,.10), transparent 62%),
+      radial-gradient(880px 480px at 96% -16%, rgba(176,122,139,.08), transparent 60%),
       radial-gradient(1000px 640px at 46% 118%, rgba(122,146,176,.12), transparent 66%),
       var(--bg);
     background-attachment: fixed;

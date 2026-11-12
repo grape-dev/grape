@@ -2963,9 +2963,9 @@ onBeforeUnmount(function () {
   color: var(--t, #1d1d1f);
 }
 .isk-deploy-btn {
-  padding: 4px 10px;
+  padding: 4px 14px;
   font-size: 12px;
-  border-radius: 8px;
+  border-radius: 999px;
 }
 .isk-deploy-link {
   font-size: 12px;
@@ -3012,12 +3012,12 @@ onBeforeUnmount(function () {
   flex-shrink: 0;
 }
 .isk-filter-btn {
-  border: 1px solid var(--b, #e5e5ea);
-  border-radius: 6px;
-  padding: 4px 10px;
+  border: 1px solid var(--b);
+  border-radius: 999px;
+  padding: 4px 14px;
   font-size: 11px;
   cursor: pointer;
-  background: var(--bg, #f5f5f7);
+  background: transparent;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -3124,7 +3124,7 @@ onBeforeUnmount(function () {
   width: 100%;
   padding: 6px 8px;
   border: 0.5px solid var(--b, #e5e5ea);
-  border-radius: 8px;
+  border-radius: 12px;
   font-size: 11px;
   cursor: pointer;
   background: var(--bg, #f5f5f7);
@@ -3414,9 +3414,9 @@ onBeforeUnmount(function () {
   margin-top: 12px;
 }
 .isk-actions .tsk-btn {
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 11px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 12px;
 }
 .isk-admin-btn {
   background: var(--g-fill);
@@ -3836,9 +3836,9 @@ onBeforeUnmount(function () {
   margin-bottom: 12px;
 }
 .isk-dp-actions .tsk-btn {
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 11px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 12px;
 }
 /* QA 审查 */
 .isk :deep(.isk-verdict) {
