@@ -217,39 +217,6 @@
             <h3 class="ac__h3">{{ t('theme') }}</h3>
             <p class="tx t2 ac__desc">{{ t('choose_theme') }}</p>
             <div class="ac__themegrid">
-              <!-- Grape Default 预览卡 -->
-              <div
-                :class="['ac__themecard', { 'ac__themecard--on': theme === 'default' }]"
-                @click="selectTheme('default')"
-              >
-                <div class="ac__themehead">
-                  <span>Grape Default</span
-                  ><span v-if="theme === 'default'" class="ac__cur">{{ t('current') }}</span>
-                </div>
-                <div class="ac__preview ac__preview--default">
-                  <div class="ac__pv-side">
-                    <div class="ac__pv-line" style="width: 24px; background: #1e2940"></div>
-                    <div class="ac__pv-line" style="width: 20px; background: #1e2940"></div>
-                    <div class="ac__pv-line" style="width: 20px; background: #3168e0"></div>
-                    <div class="ac__pv-line" style="width: 20px; background: #1e2940"></div>
-                  </div>
-                  <div class="ac__pv-main">
-                    <div
-                      class="ac__pv-line"
-                      style="width: 60%; background: #101724; height: 4px"
-                    ></div>
-                    <div
-                      class="ac__pv-line"
-                      style="width: 40%; background: #5b667b; height: 3px"
-                    ></div>
-                    <div
-                      class="ac__pv-card"
-                      style="background: var(--c); border-color: var(--hairline)"
-                    ></div>
-                  </div>
-                </div>
-                <p class="ac__themedesc">{{ t('theme_default_desc') }}</p>
-              </div>
               <!-- Liquid Glass 预览卡 -->
               <div
                 :class="['ac__themecard', { 'ac__themecard--on': theme === 'apple' }]"
@@ -1754,14 +1721,15 @@ const theme = ref('apple')
 const mode = ref('light')
 const lang = ref('zh')
 const langSwitching = ref(false)
+// 2026-11-12 默认风格退役（第一步）：外观页只保留 Liquid Glass，setTheme 只接受 apple
 function selectTheme(th) {
   if (!G.app.setTheme) {
     G.app.showToast(t('theme_switch_unavailable'))
     return
   }
-  G.app.setTheme(th)
-  theme.value = th
-  G.app.showToast(th === 'apple' ? t('switched_to_liquid_glass') : t('switched_to_grape_default'))
+  G.app.setTheme('apple')
+  theme.value = 'apple'
+  G.app.showToast(t('switched_to_liquid_glass'))
 }
 function selectMode(m) {
   if (!G.app.setThemeMode) return
@@ -2130,8 +2098,9 @@ onMounted(function () {
   line-height: 1.6;
 }
 .ac__themegrid {
+  /* 默认风格退役后只剩一张卡：单列，最宽 520px，别留半张空位 */
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 520px);
   gap: 16px;
   margin-bottom: 24px;
 }

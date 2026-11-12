@@ -3349,21 +3349,26 @@ function openBetaApply() {
   }
 
   // ── Theme Management (Apple Developer Theme) ──
-  // Theme: 'default' | 'apple'  Mode: 'light' | 'auto' (dark adapt)
-  function getTheme() { return localStorage.getItem('grapeTheme') || 'apple'; }
+  // Theme: 'apple' only（2026-11-12 默认风格退役第一步：老用户的 'default' 在读取时就地迁移）
+  // Mode: 'light' | 'dark' | 'auto'
+  function getTheme() {
+    if (localStorage.getItem('grapeTheme') !== 'apple') {
+      localStorage.setItem('grapeTheme', 'apple');
+      document.documentElement.setAttribute('data-theme', 'apple');
+      setThemeMode(localStorage.getItem('grapeThemeMode') || 'light');
+    }
+    return 'apple';
+  }
   function getThemeMode() { return localStorage.getItem('grapeThemeMode') || 'light'; }
 
   function setTheme(theme) {
+    // 只接受 'apple'：传 'default' 也落到 Liquid Glass（默认风格已退役）
+    theme = 'apple';
     localStorage.setItem('grapeTheme', theme);
     const html = document.documentElement;
-    if (theme === 'apple') {
-      html.setAttribute('data-theme', 'apple');
-      // re-apply mode so dark-auto picks up
-      setThemeMode(getThemeMode());
-    } else {
-      html.removeAttribute('data-theme');
-      html.removeAttribute('data-theme-mode');
-    }
+    html.setAttribute('data-theme', 'apple');
+    // re-apply mode so dark-auto picks up
+    setThemeMode(getThemeMode());
     // dispatch event so pages can react if needed
     window.dispatchEvent(new CustomEvent('themechange', {detail: {theme}}));
   }

@@ -8,12 +8,12 @@
 <script>
 (function(){
   // P2-6: 主题默认值与主应用对齐——未设置时默认 apple
-  var t = localStorage.getItem('grapeTheme') || 'apple';
-  if (t === 'apple') {
-    document.documentElement.setAttribute('data-theme','apple');
-    var m = localStorage.getItem('grapeThemeMode') || 'light';
-    if (m) document.documentElement.setAttribute('data-theme-mode', m);
-  }
+  // 2026-11-12 默认风格退役：老用户的 'default' 就地迁移成 apple
+  var t = localStorage.getItem('grapeTheme');
+  if (t !== 'apple') { t = 'apple'; localStorage.setItem('grapeTheme', 'apple'); }
+  document.documentElement.setAttribute('data-theme','apple');
+  var m = localStorage.getItem('grapeThemeMode') || 'light';
+  if (m) document.documentElement.setAttribute('data-theme-mode', m);
   var lang = localStorage.getItem('grapeLang') || 'zh';
   document.documentElement.setAttribute('lang', lang === 'en' ? 'en' : 'zh-CN');
 
@@ -41,6 +41,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <script src="/static/js/i18n.js?v=20261016-2"></script>
 <script>I18N.init('20261016-8');</script>
 <script src="/static/js/pwd-blocklist.js?v=1" defer></script>
-  <script type="module" src="/static-vue/viewjs/admin-view.js?v=10"></script>
+  <script type="module" src="/static-vue/viewjs/admin-view.js?v=11"></script>
 </body>
 </html>
