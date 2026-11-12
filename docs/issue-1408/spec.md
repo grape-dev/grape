@@ -11,7 +11,7 @@
 - 撤销时清空 `completed_at`、`completed_reason`，并刷新 `updated_at`。
 - 撤销写路径带 `AND status='completed'` 并发守卫：读后写前状态已被并发修改时不覆盖，返回 409。
 - 操作审计留痕（操作者、需求定位、旧/新状态、撤销前完成时间与原因、时间）；审计为 best-effort，失败仅告警、不回滚状态。
-- 权限：仅需求属主，且仅用户身份（JWT/`grape_`）；会话 token（`tk_`）返回 403。
+- 权限：需求本人或仓库 Owner/Admin（真实仓库角色校验，fail-closed），且仅限 `completed → pending_review`；其余迁移仍严格仅限本人。仅用户身份（JWT/`grape_`）；会话 token（`tk_`）返回 403。
 - 幂等：目标状态已是 `pending_review` 时重复提交成功；非法迁移仍 400。
 
 ### Out of Scope
@@ -24,7 +24,7 @@
 - [x] `completed` 需求更新为 `pending_review` 返回成功，回读 `status=pending_review`。
 - [x] stage 由 `done` 回退为 `pending_review`，不再停留在 `done`。
 - [x] `completed_at`、`completed_reason` 清空，`updated_at` 刷新，审计留痕可查（含实际 from_stage、撤销前完成信息）。
-- [x] 非属主、会话 token 调用返回 403；非法迁移仍 400；并发态变更返回 409 且不写审计。
+- [x] 非本人且非仓库 Owner/Admin（仅限 `completed → pending_review`）返回 403；会话 token 调用返回 403；非法迁移仍 400；并发态变更返回 409 且不写审计。
 - [x] 重复提交同一目标状态幂等成功。
 - [x] 回归：`pending_review → processing/completed/cancelled`、`cancel`/`resume` 不受影响。
 - [x] 现有测试全部通过，新增测试覆盖新功能（`pytest tests/ -v`、`pytest tests/ --cov`）。
