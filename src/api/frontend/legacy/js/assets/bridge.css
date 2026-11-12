@@ -135,13 +135,13 @@
 }
 
 /* 性能：整页级容器不要玻璃（blur 面积动辄 1.5M px²，滚动/悬停会持续重采样 → 掉帧+抖动） */
-:root[data-theme-mode="dark"] #pageContent :is(.obv-shell, .det-card-wrap, .tsk-list, .tsk-detail, .k-card, .lobby-card) {
+:root[data-theme-mode="dark"] #pageContent :is(.obv-shell, .det-card-wrap, .tsk-list, .tsk-detail, .k-card, .lobby-card, .obv-chartbox) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   background: var(--c);
 }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme-mode="auto"] #pageContent :is(.obv-shell, .det-card-wrap, .tsk-list, .tsk-detail, .k-card, .lobby-card) {
+  :root[data-theme-mode="auto"] #pageContent :is(.obv-shell, .det-card-wrap, .tsk-list, .tsk-detail, .k-card, .lobby-card, .obv-chartbox) {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
     background: var(--c);
