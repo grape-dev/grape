@@ -27,3 +27,18 @@
 - 越权撤销：复用属主校验并补充非属主、会话 token 测试。
 - 审计缺失：新增审计事件类型并断言落库；审计 detail 保留撤销前完成时间/原因，便于回溯。
 - 并发覆盖：status 守卫 + 409 提示刷新重试，避免把并发写入的终态静默改回待审核。
+
+## 复审补充（PR #1009 审查意见）
+
+| 模块 | 改动 |
+|------|------|
+| `src/domains/runtime/routes/issues.py` | 撤销路径增加仓库 Owner/Admin 放行：非本人且命中 `completed → pending_review` 时，`check_repo_access` + `get_repo_admin_identity`（fail-closed）二次鉴权；本人路径不触发角色查询，其余迁移仍 403 |
+| `src/api/static/js/pages/issues.js` | 新增 `_isTaskOwner1408`/`_canRevertCompleted1408` 与 `window.revertTaskCompleted`；`_renderTaskActionsInline` 仅 `completed` 且本人/管理员渲染「撤销完成」；删除 `@deprecated changeTaskStatus` 死代码；`_withTaskLoading` 返回 promise 以链式刷新流水线区 |
+| `src/api/static/js/locales/{zh,en}/tasks.json` | 新增 `revert_completed` / `_message` / `_hint` / `_toast` 双语 key |
+| `src/api/static/css/app.css` | 新增 `.tsk-btn-revert`（150ms hover 过渡、禁用态 `not-allowed`） |
+| `src/api/static/index.html` + ratchet 冻结映射 | `issues.js?v=138`、`app.css?v=109` |
+| `tests/api/js/test_issue_1408_revert_completed_entry.js` | 新增前端入口回归（本人/管理员可见、越权不渲染、非 completed 不渲染、tooltip/确认/toast/流水线刷新链路、双语文案） |
+| `tests/runtime/test_issue_1408_revert_completed.py` | 新增 `TestAdminRevert`：管理员可撤销他人需求、非管理员 403、无仓库访问 403 且不查角色、放行仅限撤销迁移、本人路径不查角色 |
+
+关键决策补充：管理员放行严格限定在撤销这一条迁移上（其它迁移仍仅本人），且 VCS 角色查询在
+`db_lock` 之外执行，避免网络调用阻塞进程级数据库锁。
