@@ -2804,7 +2804,7 @@ _MIGRATIONS: List[Migration] = []
 
 # 🧊 老轨 _run_all_migrations() 的冻结快照（调用名清单）。
 # 存量库不会跑老轨，任何新增补列/补表一律 register_migration（见该函数 docstring）。
-# tests/atomic/test_migration_track_guard.py 用 AST 比对：本常量与函数体里的实际调用
+# tests/api/test_migration_track_guard.py 用 AST 比对：本常量与函数体里的实际调用
 # 集合必须一致 —— 有人往老轨塞新迁移，测试立刻红；确实要改动老轨（极少见）时，
 # 先评估是否该改成注册式迁移，只有确认必须留老轨才同步改这里，并在 PR 里说明原因。
 LEGACY_TRACK_FROZEN = (
@@ -3264,7 +3264,7 @@ def register_migration(version: str, name: str, kind: str,
     的 issue.vcs_exists 就是这么挂的：升级后四台 794 次 1054，
     /api/issues/mine 从有数据变成 0 条）。
 
-    提交前自查五条（tests/atomic/test_migration_track_guard.py 会卡前 1/2/3/4 条）：
+    提交前自查五条（tests/api/test_migration_track_guard.py 会卡前 1/2/3/4 条）：
     1. version 未被占用：库里已盖章的号 + 源码里其它 register_migration 的号都不能重
        （同号会被判「已执行」永久跳过；历史事故 202611050001 / 202611060001）；
     2. fn 失败要抛出，不要 try/except 吞掉 —— 执行器约定「抛错=不盖章，下次启动重试」，
@@ -4415,7 +4415,7 @@ def _run_all_migrations():
     事故样本：Issue #995 issue.vcs_exists（2026-11-06 升级后列表静默变空）、
              Issue #785 grape_t_patrol_findings（表永远不建）。
 
-    🧪 守卫：tests/atomic/test_migration_track_guard.py 用 AST 比对本函数里的
+    🧪 守卫：tests/api/test_migration_track_guard.py 用 AST 比对本函数里的
        迁移调用清单与 LEGACY_TRACK_FROZEN —— 少一条（删了要同步改常量）或多一条
        （有人又往老轨塞东西）都会让测试变红。要往这里加东西，正确做法是
        register_migration，不是改这个常量。

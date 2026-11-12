@@ -63,10 +63,10 @@ if not os.environ.get("GRAPE_PYTEST_NESTED"):
 # 正在使用的库文件 unlink，D100 混跑序污染复发；上方带守卫版本已覆盖
 # 外层场景，重复段删除。）
 
-# tests/playwright/*.py 是手工 E2E 脚本，不是 pytest 用例。
+# tests/api/playwright/*.py 是手工 E2E 脚本，不是 pytest 用例。
 # 这些脚本在 import 期就启动浏览器并访问 localhost:3000，pytest 收集会直接执行。
-# 手工运行方式：python tests/playwright/test_r12_fullscreen_zindex.py
-collect_ignore_glob = ["playwright/*.py"]
+# 手工运行方式：python tests/api/playwright/test_r12_fullscreen_zindex.py
+collect_ignore_glob = ["api/playwright/*.py"]
 
 
 @pytest.fixture(scope="session", autouse=True)
