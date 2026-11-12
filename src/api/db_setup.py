@@ -7809,12 +7809,8 @@ register_migration(
     fn=_fn_scene_pin_columns,
 )
 
-register_migration(
-    version="202611060001",
-    name="create-branch-guard-state-table",
-    kind="safe",
-    fn=_fn_create_branch_guard_state,
-)
+# （已删除）202611060001 create-branch-guard-state-table 与 backfill 历史盖章撞号；
+# 统一由 202611110001 的自包含迁移承担（见上方 _fn_create_branch_guard_state_v2）。
 
 # G3：门禁脚本→目标 MySQL 连接注入 ----------------------------------------------
 # 临时换绑窗口内需还原的环境变量（get_db_backend/mysql_config 读取的全部开关）
@@ -7823,7 +7819,7 @@ _MYSQL_TARGET_ENV_KEYS = ("DEVOPS_DB_BACKEND", "DEVOPS_DB_HOST", "DEVOPS_DB_PORT
                           "DEVOPS_DB_URL")
 
 register_migration(
-    version="202611050001",
+    version="202611120005",
     name="create-repo-credentials-table",
     kind="safe",
     fn=_fn_create_repo_credentials_table,
