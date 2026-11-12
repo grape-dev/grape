@@ -1614,3 +1614,133 @@
 .create-repo-modal, .km-modal, .chat-del-pop {
   background: var(--glass-strong);
 }
+
+/* ── 22. 暗色层次层（2026-11-12 二轮：让玻璃真的看得见）────────────────
+ * 一轮只换了色值 → 观感差异 <1% 亮度，肉眼几乎无感。pilot 的"贵"来自：
+ * 底部有两处柔光（accent 冷光 + 莫兰迪暖光）、玻璃卡片浮在光上、描边+投影立层级。
+ * 规则只作用于 dark，light 档一个像素都不动。 */
+:root[data-theme-mode="dark"] body {
+  background:
+    radial-gradient(1100px 560px at 6% -10%, rgba(10,132,255,.20), transparent 62%),
+    radial-gradient(880px 480px at 96% -4%, rgba(176,122,139,.14), transparent 60%),
+    radial-gradient(1000px 640px at 46% 118%, rgba(122,146,176,.12), transparent 66%),
+    var(--bg);
+  background-attachment: fixed;
+}
+/* 玻璃面浮起来：顶部 1px 高光 + 更深的落影 */
+:root[data-theme-mode="dark"] .cd,
+:root[data-theme-mode="dark"] .af .nd,
+:root[data-theme-mode="dark"] .rc,
+:root[data-theme-mode="dark"] .cl,
+:root[data-theme-mode="dark"] .tsk-list,
+:root[data-theme-mode="dark"] .tsk-detail,
+:root[data-theme-mode="dark"] .chat-main,
+:root[data-theme-mode="dark"] .chat-convlist,
+:root[data-theme-mode="dark"] .lobby-card,
+:root[data-theme-mode="dark"] .apple-card,
+:root[data-theme-mode="dark"] .scn-card,
+:root[data-theme-mode="dark"] .ob-bind-card,
+:root[data-theme-mode="dark"] .ev-result-panel,
+:root[data-theme-mode="dark"] .project-card,
+:root[data-theme-mode="dark"] .template-card,
+:root[data-theme-mode="dark"] .template-card-item,
+:root[data-theme-mode="dark"] .feat-single,
+:root[data-theme-mode="dark"] .k-card,
+:root[data-theme-mode="dark"] .stat-table,
+:root[data-theme-mode="dark"] .kb-detail-scroll,
+:root[data-theme-mode="dark"] .tb {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.06),
+    inset 0 0 0 1px var(--glass-border),
+    0 10px 30px rgba(0,0,0,.30);
+}
+/* 弹窗/抽屉：强玻璃 + 深投影 + 更实的遮罩，和底下的光斑拉开层次 */
+:root[data-theme-mode="dark"] .create-repo-modal,
+:root[data-theme-mode="dark"] .km-modal,
+:root[data-theme-mode="dark"] .help-drawer,
+:root[data-theme-mode="dark"] .chat-del-pop {
+  background: var(--glass-strong);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  backdrop-filter: blur(28px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    0 24px 64px rgba(0,0,0,.60);
+}
+:root[data-theme-mode="dark"] .help-overlay,
+:root[data-theme-mode="dark"] .km-overlay {
+  background: rgba(0,0,0,.55);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+/* 侧栏比主区更薄，让左侧光斑透出来 */
+:root[data-theme-mode="dark"] .sb {
+  background: rgba(26,26,28,.72) !important;
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+}
+
+@media (prefers-color-scheme: dark) {
+  /* ── 22. 暗色层次层（2026-11-12 二轮：让玻璃真的看得见）────────────────
+   * 一轮只换了色值 → 观感差异 <1% 亮度，肉眼几乎无感。pilot 的"贵"来自：
+   * 底部有两处柔光（accent 冷光 + 莫兰迪暖光）、玻璃卡片浮在光上、描边+投影立层级。
+   * 规则只作用于 dark，light 档一个像素都不动。 */
+  :root[data-theme-mode="auto"] body {
+    background:
+      radial-gradient(1100px 560px at 6% -10%, rgba(10,132,255,.20), transparent 62%),
+      radial-gradient(880px 480px at 96% -4%, rgba(176,122,139,.14), transparent 60%),
+      radial-gradient(1000px 640px at 46% 118%, rgba(122,146,176,.12), transparent 66%),
+      var(--bg);
+    background-attachment: fixed;
+  }
+  /* 玻璃面浮起来：顶部 1px 高光 + 更深的落影 */
+  :root[data-theme-mode="auto"] .cd,
+  :root[data-theme-mode="auto"] .af .nd,
+  :root[data-theme-mode="auto"] .rc,
+  :root[data-theme-mode="auto"] .cl,
+  :root[data-theme-mode="auto"] .tsk-list,
+  :root[data-theme-mode="auto"] .tsk-detail,
+  :root[data-theme-mode="auto"] .chat-main,
+  :root[data-theme-mode="auto"] .chat-convlist,
+  :root[data-theme-mode="auto"] .lobby-card,
+  :root[data-theme-mode="auto"] .apple-card,
+  :root[data-theme-mode="auto"] .scn-card,
+  :root[data-theme-mode="auto"] .ob-bind-card,
+  :root[data-theme-mode="auto"] .ev-result-panel,
+  :root[data-theme-mode="auto"] .project-card,
+  :root[data-theme-mode="auto"] .template-card,
+  :root[data-theme-mode="auto"] .template-card-item,
+  :root[data-theme-mode="auto"] .feat-single,
+  :root[data-theme-mode="auto"] .k-card,
+  :root[data-theme-mode="auto"] .stat-table,
+  :root[data-theme-mode="auto"] .kb-detail-scroll,
+  :root[data-theme-mode="auto"] .tb {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.06),
+      inset 0 0 0 1px var(--glass-border),
+      0 10px 30px rgba(0,0,0,.30);
+  }
+  /* 弹窗/抽屉：强玻璃 + 深投影 + 更实的遮罩，和底下的光斑拉开层次 */
+  :root[data-theme-mode="auto"] .create-repo-modal,
+  :root[data-theme-mode="auto"] .km-modal,
+  :root[data-theme-mode="auto"] .help-drawer,
+  :root[data-theme-mode="auto"] .chat-del-pop {
+    background: var(--glass-strong);
+    -webkit-backdrop-filter: blur(28px) saturate(140%);
+    backdrop-filter: blur(28px) saturate(140%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.08),
+      0 24px 64px rgba(0,0,0,.60);
+  }
+  :root[data-theme-mode="auto"] .help-overlay,
+  :root[data-theme-mode="auto"] .km-overlay {
+    background: rgba(0,0,0,.55);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+  /* 侧栏比主区更薄，让左侧光斑透出来 */
+  :root[data-theme-mode="auto"] .sb {
+    background: rgba(26,26,28,.72) !important;
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+  }
+}

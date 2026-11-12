@@ -3,7 +3,7 @@
   ;['bridge.css', 'ag-ui.css', 'viewcss/knowledge-view.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static/js/assets/' + f + '?v=3'
+    link.href = '/static/js/assets/' + f + '?v=5'
     document.head.appendChild(link)
   })
 })()
