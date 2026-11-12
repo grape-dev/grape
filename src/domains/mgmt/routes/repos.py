@@ -1,4 +1,5 @@
 """仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
+from src.kernel.user_ids import has_user_id
 import os
 import re
 from fastapi import APIRouter, HTTPException, Depends, Request
@@ -1688,7 +1689,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
         # 额外检查：如果是路径 B 仓库，必须是 host_user 本人
         from src.domains.mgmt.user.db import get_host_user_id
         _host_uid = get_host_user_id(repo_key)
-        if _host_uid > 0 and _host_uid != user.get("id", 0):
+        if has_user_id(_host_uid) and str(_host_uid) != str(user.get("id", 0)):
             raise HTTPException(status_code=403, detail={
                 "code": 403, "error_code": "NOT_REPO_OWNER",
                 "message": "只有仓库托管人或管理员可配置 Bot Token"
@@ -1781,7 +1782,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
         _invite_token = ""
         from src.domains.mgmt.user.db import get_host_user_id
         _host_uid = get_host_user_id(repo_key)
-        if _host_uid > 0:
+        if has_user_id(_host_uid):
             # 路径 B: 用 host 用户 token 邀请
             try:
                 from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
@@ -2609,7 +2610,7 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 from src.api.deps import get_user_token_with_refresh
                 uid = user.get("id") or 0
                 username = user.get("username") or ""
-                if not username and uid > 0:
+                if not username and has_user_id(uid):
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(uid) or {}).get("username", "")
                 return get_user_token_with_refresh(username, user_id=uid)

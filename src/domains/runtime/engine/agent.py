@@ -4,6 +4,7 @@
 见 agent-runtime-design.md §7.4 / tech-impl.md §1.4 / skill-delivery-remote.md §3.5。
 流程：discover_runtimes → register → recover_orphans → 循环 claim（带 jitter）→ 执行 → 回报。
 """
+from src.kernel.user_ids import has_user_id
 import sys
 
 # 版本守卫：代码使用 Python 3.10+ 联合类型语法（X | None），<3.10 会在 import 期崩溃。
@@ -2895,7 +2896,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         user_token = ""
         if (task.get("agent_type") or "") == "chat" or (task.get("event_type") or "") == "chat":
             _task_user_id = task.get("user_id") or 0
-            if _task_user_id > 0:
+            if has_user_id(_task_user_id):
                 try:
                     from src.api.deps import get_user_token_with_refresh
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id

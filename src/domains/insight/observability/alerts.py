@@ -860,7 +860,7 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
                           tuple(rks))
             else:
                 c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
-                          " WHERE feishu_open_id!='' AND user_id>0")
+                          " WHERE feishu_open_id!='' AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
             uids = [int(r[0]) for r in c.fetchall() if r and r[0]]
     except Exception as e:
         log.warning(f"obs alert recipients lookup failed: {e}")

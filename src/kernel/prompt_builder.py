@@ -636,8 +636,9 @@ curl -sL -X POST \\
 ### Save User Mapping (INSERT into unified_user_mapping)
 Use Python to save discovered mappings in the bot's sessions.db:
   import sqlite3; db = sqlite3.connect('{DB_PATH}')
-  # FR-18.4: 约束——USER_ID 必须>0（禁止 0 占位行）；GITCODE_USER 为空时不 UPDATE 该列
-  if USER_ID and USER_ID > 0:
+  # FR-18.4: 约束——USER_ID 必须是真实 id（禁止 0/空串占位行）；GITCODE_USER 为空时不 UPDATE 该列
+  # D105：user_id 为 uuid 字符串，禁止数值比较（str > int 会 TypeError），用下面的字符串判空写法
+  if USER_ID and str(USER_ID) not in ("", "0"):
     db.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (USER_ID,))
     # S92/D68：um 平台归属列停写（分支合并——gitcode_user 不再写，feishu 照旧）
     # S99/D74：agent 侧引导模板，语义与 channel_directory.write_back 同构（app 级成对语义见该模块）

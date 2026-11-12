@@ -7,6 +7,7 @@
     IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
 
+from src.kernel.user_ids import has_user_id
 import re, os, asyncio, time, json, uuid
 
 from datetime import datetime
@@ -1668,7 +1669,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
             # R20.28.1: 飞书 Chat direct 模式获取用户 token
             # 路径 B 仓库需要 user_token 注入 USER_*_TOKEN env → GIT_ASKPASS fallback
-            if user_id > 0 and repo_key:
+            if has_user_id(user_id) and repo_key:
                 try:
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     _feishu_acc = get_grape_account_by_id(user_id)
@@ -1706,7 +1707,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
         try:
             from src.kernel.session_manager import get_chat_config as _chat_cfg
             _uid = get_user_id_by_app_id(ctx.app_id) or 0
-            if _uid > 0:
+            if has_user_id(_uid):
                 chat_runtime_id = (_chat_cfg(_uid) or {}).get("runtime_id") or 0
         except Exception:
             chat_runtime_id = 0

@@ -332,7 +332,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
                 c.execute(
                     "SELECT ga.id FROM grape_accounts ga "
-                    "WHERE ga.id>0 AND ga.status=1 "
+                    "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
                     "AND EXISTS (SELECT 1 FROM external_identities ei "
                     "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
                     "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "

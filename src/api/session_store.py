@@ -125,7 +125,7 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
                     from src.kernel.repo_key import um_column_for_repo
                     _col = um_column_for_repo(repo_key)
                     _usr_expr = (f"COALESCE((SELECT m.user_id FROM unified_user_mapping m "
-                                 f"WHERE m.{_col} = ? AND m.user_id > 0 "
+                                 f"WHERE m.{_col} = ? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') "
                                  f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id AND ga.status = 1) "
                                  f"ORDER BY m.user_id LIMIT 1), 0)")
                     _usr_pre = (_assignee,)

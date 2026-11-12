@@ -1,4 +1,5 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
+from src.kernel.user_ids import has_user_id
 import os, subprocess, json, time, signal, contextlib
 from typing import Generator, AsyncGenerator
 from src.kernel.config import log
@@ -682,7 +683,7 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
     # Issue #344: 改用带预刷新的 token 获取函数，避免拿到过期 token。
     if kind == "chat":
-        if not user_token and user_id > 0:
+        if not user_token and has_user_id(user_id):
             try:
                 # D37/S57：repo 上下文按 repo_key 前缀派生 provider；无 repo_key 时
                 # 按用户已绑定身份的第一条（由数据决定，代码不写平台名）
@@ -748,7 +749,7 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
 
     # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
     # #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
-    if user_id > 0:
+    if has_user_id(user_id):
         try:
             from src.domains.mgmt.user.db import get_credentials
             for c in get_credentials(user_id):

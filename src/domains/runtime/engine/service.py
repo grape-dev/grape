@@ -4,6 +4,7 @@
 执行路径：业务层 enqueue_task → agent_tasks(status=queued) → 远端 RuntimeAgent claim（原子抢单+D9）
 → stream_runtime → report/complete/fail。本机引擎走 direct（`_execute_agent`），不走队列。
 """
+from src.kernel.user_ids import has_user_id
 import os, json, re, threading, time, uuid
 from datetime import datetime, timezone, timedelta
 from src.kernel.session_manager import db, db_lock
@@ -94,10 +95,11 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                     _owner_norm = (from_repo_key(_owner) or "").strip()
                     if _repo_norm and _owner_norm != _repo_norm:
                         continue  # repo scope 但仓库不匹配
-                elif _scope == "user" and task_user_id > 0 and _owner_name:
+                elif _scope == "user" and has_user_id(task_user_id) and _owner_name:
                     # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
                     try:
-                        c.execute("SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1", (_owner_name,))
+                        c.execute("SELECT id FROM grape_accounts WHERE username=? "
+                                  "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
                         _ur = c.fetchone()
                         _engine_uid = _ur[0] if _ur else 0
                         if _engine_uid != task_user_id:
@@ -529,7 +531,7 @@ def _collect_server_env(user_id, account):
     codearts AK/SK 注入为 CODEARTS_CLI_AK / CODEARTS_CLI_SK。
     """
     env = {}
-    if user_id and user_id > 0:
+    if has_user_id(user_id):
         try:
             from src.domains.mgmt.user.db import get_credentials
             for c in get_credentials(user_id):

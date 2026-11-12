@@ -3736,7 +3736,7 @@ def _fn_scene_nodes_skill_id_backfill() -> None:
                 with db_lock:
                     r2 = db.cursor().execute(
                         "SELECT user_id FROM unified_user_mapping "
-                        "WHERE gitcode_user=? AND user_id>0 LIMIT 1",
+                        "WHERE gitcode_user=? AND user_id IS NOT NULL AND user_id NOT IN ('', '0') LIMIT 1",
                         (created_by,)).fetchone()
                 if r2:
                     uid = int(r2[0] or 0)

@@ -9,6 +9,7 @@
 
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
+from src.kernel.user_ids import has_user_id
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -213,7 +214,7 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
         try:
             uid = user.get("id") or 0
             username = user.get("username") or ""
-            if not username and uid > 0:
+            if not username and has_user_id(uid):
                 from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                 username = (get_grape_account_by_id(uid) or {}).get("username", "")
             return mod.user_token(username, uid) or ""
