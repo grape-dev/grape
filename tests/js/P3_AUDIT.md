@@ -23,6 +23,25 @@ js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 
 结论：这 4 个测试**报红是对的**，不是测试陈旧。是否恢复功能、还是确认不再需要，待主人拍板。
 
+## 功能缺失总表（2026-11-11 全页审计，只读结论）
+
+**已确认缺失（8 项，后端多数仍在支持）**
+
+| # | 页面 | 缺什么 | 证据 |
+|---|---|---|---|
+| #473 | RuntimesView | 范围筛选（全部/仓库/个人）chips + `range` 传参 | 后端 `settings.py:926/1138/1348` 仍在；Vue 里 `range` 0 处 |
+| #475 | RuntimesView | 健康帮助提示（按钮 + 提示文案） | 后端 `health_reason` 在 `settings.py:1078/1091`；前端 0 消费者；`runtimes.health.hint.*` 6 键成孤儿 |
+| #498 | RuntimesView | 异常口径（`health_abnormal` 优先 + 异常描边） | 同 #475；`_isAbnormalEngine`/`_abnormalBorderColor` 在 Vue 版不存在 |
+| #1167 | RuntimesView | 筛选空态 vs 组织无引擎 的分叉 | `RuntimesView.vue:169-171` 单一 `empty.no_engines` |
+| #290 | IssuesView | 「查看 Issue」入口统一 `/issues/` | `IssuesView.vue:2185` 写回 `is_pr ? '/pull/' : '/issues/'` |
+| #1102 | IssuesView | 事件历史「默认 20 条 + 加载更早」分页 | `IssuesView.vue:1604-1608` 一次性渲染全部 events，无翻页/无按钮 |
+| #1564 | DashboardView | 保存失败按 skill scope `violations[]` 逐节点标红 | `saveSceneEdit` 的 catch 只 `showToast(t('save_failed'))`（约 :1930） |
+| #648 | IssuesView | 卡片自带 attachments 内联首屏（免一次请求） | `loadDetailExtras` 一律 GET `/issues/{id}/attachments`（性能项，非功能） |
+
+**待确认（需运行期验证，静态看不出）**：#407 Chat 附件保活（`ChatView` 有 file/image/upload 逻辑，但"闲置返回不丢"是行为）；#224 Event hash 同步（只有 `replaceState` 1 处）；#1310 agents 下拉（`<option>` 3 处、`display_name` 2 处）。
+
+**其余约 28 个 C 类**：功能在 Vue 实现里找得到（换名/换结构），可按批次改写为源码断言。
+
 ## 真回归（测试报红是对的，勿改断言迁就代码）
 - #290 openIssueLink（IssuesView.vue:2185）：`tk.is_pr ? '/pull/' : '/issues/'`，违反 #290 验收「查看 Issue 入口统一 /issues/」。**待主人判定**，当前两边都不动。
 
