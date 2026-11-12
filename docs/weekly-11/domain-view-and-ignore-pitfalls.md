@@ -102,3 +102,15 @@ git ls-files --others --exclude-standard  # 真正的未跟踪清单（应为空
 5. 备份：`mysqldump --single-transaction` 三库后再重启落地。
 6. 上线后验收：三库盖章、对象存在（`information_schema`）、业务读写往返一次、
    启动日志 `MANUAL REVIEW` / `1146` 均为 0。
+7. **脱敏自查（提交前必跑）**：新增脚本/文档的 docstring 与示例同样属于审查面——QA 会按
+   「内网 IP / 绝对路径」直接判不符合（PR #1269 第 1 轮即因此打回）：
+
+   ```bash
+   # 私有网段用 [.] 写法规避"文档自身被扫描命中"；PAT/口令前缀按需补
+   git diff --name-only upstream/<target>...HEAD | xargs -r grep -nE \
+     '192[.]168[.]|10[.][0-9]+[.][0-9]+[.]|172[.](1[6-9]|2[0-9]|3[01])[.]|120[.]46[.]|1[.]92[.]|[/]home[/]|[/]opt[/]|<厂商PAT前缀>|<登录口令模式>' || echo "clean"
+   ```
+
+   命中即换占位符：`<db-host>` / `<user>` / `<password>` / `<backup-dir>` / `<timestamp>`。
+   注意「举个用法示例」也算暴露面；文档要保留运维细节时，只留代码里已有的标识符
+   （库表名、迁移号段、校验 SQL），不留环境相关值。
