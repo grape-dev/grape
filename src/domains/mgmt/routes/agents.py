@@ -135,8 +135,13 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
                 return {"agent_type": row[0], "display_name": row[1], "description": row[2],
                         "default_backend": row[3] or "", "icon": row[4] or "", "order_num": row[5] or 0,
                         "enable": bool(row[6]) if row[6] is not None else True}
-        except Exception:
-            pass
+        except Exception as e:
+            # Issue #2091/#2096（上游 #10/#15）：缺表/缺列/连接异常不得静默吞成 404「未配置」，
+            # 否则真实 SQL 错误全丢、只能进容器查库。记录原始异常并显式 500。
+            log.error(f"agent_type query failed for {agent_type}: {e}")
+            raise HTTPException(status_code=500, detail={
+                "code": 500, "error_code": "AGENT_TYPE_QUERY_FAILED",
+                "message": f"agent_type 查询失败: {e}"})
     return None
 
 @router.get("/types")
@@ -150,8 +155,12 @@ def list_agent_types():
                 "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type"
             )
             rows = c.fetchall()
-        except Exception:
-            rows = []
+        except Exception as e:
+            # Issue #2091/#2096：返回 200 空数组会把「查询失败」伪装成「还没有数据」
+            log.error(f"agent_type list query failed: {e}")
+            raise HTTPException(status_code=500, detail={
+                "code": 500, "error_code": "AGENT_TYPE_LIST_FAILED",
+                "message": f"agent_type 列表查询失败: {e}"})
 
     COLORS = {"vod": "var(--pk)", "issue": "var(--r)", "coding": "var(--a)", "qa": "var(--pu)", "sre": "var(--or)"}
     BGS = {"vod": "#fde8f0", "issue": "#fce5e5", "coding": "#e3edfd", "qa": "#f3e9fe", "sre": "#fef0e4"}

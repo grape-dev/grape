@@ -2333,6 +2333,86 @@ def _seed_event_action_filter():
         db.commit()
 
 
+# ── Issue #2091（上游 #10）：存量库补种 agent_type ─────────────────────────────
+def _fn_seed_agent_types_from_config() -> None:
+    """从 configs/agent-description.json 补种 agent_type（只补缺失行，不覆盖用户改过的行）。
+
+    种子写入点在老轨 `_run_all_migrations()` 里，存量库（已盖 legacy-stamp）启动时
+    **完全不执行**该函数 → 容器化部署（镜像原先还缺 configs/）时 agent_type 永远为空，
+    `GET /api/agents/types` 返回空数组、Agent 详情 404「Agent 类型未配置」。
+
+    幂等且不覆盖：逐行 `INSERT OR IGNORE`——已有 agent_type 行（用户可能改过
+    display_name/icon）不动，只补缺失的。文件缺失只告警。
+    """
+    filepath = os.path.join(_CONFIG_DIR, "agent-description.json")
+    if not os.path.exists(filepath):
+        log.warning(f"seed-agent-types: {filepath} not found, skip "
+                    f"(container image needs .dockerignore to whitelist configs seeds)")
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log.warning(f"seed-agent-types: failed to read {filepath}: {e}")
+        return
+    if not isinstance(data, dict) or not data:
+        log.warning(f"seed-agent-types: {filepath} empty or not a dict, skip")
+        return
+
+    inserted = 0
+    with db_lock:
+        c = db.cursor()
+        for agent_type, info in data.items():
+            info = info or {}
+            c.execute(
+                "INSERT OR IGNORE INTO agent_type "
+                "(agent_type, display_name, description, default_runtime_id, icon, order_num, "
+                " subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
+                (
+                    agent_type,
+                    info.get("name", agent_type),
+                    info.get("description", ""),
+                    info.get("icon", ""),
+                    info.get("order_num", 0),
+                    json.dumps(info.get("subscribe_events", []), ensure_ascii=False),
+                    1 if info.get("enable", True) else 0,
+                ),
+            )
+            inserted += c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        db.commit()
+    log.info(f"seed-agent-types: upserted {inserted} agent type(s) from agent-description.json")
+
+
+# ── Issue #2095（上游 #14）：存量库补种 event_action_filter 默认规则 ──────────────
+def _fn_seed_event_action_filter_once() -> None:
+    """存量库补种默认事件动作过滤规则；已有数据（含用户自定义）则跳过。
+
+    老轨 `_run_all_migrations()` 在存量库（已盖 legacy-stamp）完全不执行，
+    而 `_seed_event_action_filter()` 的调用点就在那里 → 升级后默认规则永久缺失，
+    webhook 事件的放行/过滤/副作用行为与全新安装不一致且不报错（与 #2091 同源）。
+
+    幂等：表里已有任何行就直接返回，不重灌（避免与用户自定义规则叠加）；
+    真正写入由 `_seed_event_action_filter()` 的 INSERT OR IGNORE 完成。
+    """
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT COUNT(*) FROM event_action_filter")
+            existing = c.fetchone()[0]
+        except Exception as e:
+            log.warning(f"seed-event-action-filter: count query failed, skip: {e}")
+            return
+    if existing > 0:
+        log.info(f"seed-event-action-filter: table already has {existing} row(s), skip")
+        return
+    _seed_event_action_filter()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM event_action_filter")
+        after = c.fetchone()[0]
+    log.info(f"seed-event-action-filter: seeded {after} default rule(s)")
+
+
 def _insert_seed_data(table: str, data: dict):
     """将 JSON 数据插入对应表"""
     with db_lock:
@@ -7432,3 +7512,20 @@ def _backfill_scene_display_names():
                 log.info("Issue #344: cleared cached plaintext tokens from chat_conversations and agent_tasks")
     except Exception as e:
         log.warning(f"Issue #344 token cleanup failed: {e}")
+
+
+# ── Issue #2091（上游 #10）：存量库补种 agent_type（登记在文件末尾，确保 register_migration 已定义）
+register_migration(
+    version="202611150001",
+    name="seed-agent-types-from-config",
+    kind="safe",
+    fn=_fn_seed_agent_types_from_config,
+)
+
+# ── Issue #2095（上游 #14）：存量库补种 event_action_filter 默认规则
+register_migration(
+    version="202611150002",
+    name="seed-event-action-filter-defaults",
+    kind="safe",
+    fn=_fn_seed_event_action_filter_once,
+)
