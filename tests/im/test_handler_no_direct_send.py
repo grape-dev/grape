@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 _HANDLER_FILES = [
-    "src/im/handler_async.py",
-    "src/im/vod_handler_async.py",
+    "src/domains/runtime/im/handler_async.py",
+    "src/domains/runtime/im/vod_handler_async.py",
 ]
 
 # 发送直连模式（Spec 口径：api.reply_* / send_text_to_user / add_reaction 等）

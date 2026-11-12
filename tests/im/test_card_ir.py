@@ -688,7 +688,7 @@ def test_bind_success_card_ir_and_renderer():
 # ---------------------------------------------------------------- 静态检查：业务层禁平台字段
 
 _PLATFORM_FIELD_RE = re.compile(r"lark_md|behaviors|\"tag\"\s*:|'tag'\s*:|<font|<at")
-_BUSINESS_FILES = ["src/im/handler_async.py", "src/im/vod_handler_async.py"]
+_BUSINESS_FILES = ["src/domains/runtime/im/handler_async.py", "src/domains/runtime/im/vod_handler_async.py"]
 
 
 @pytest.mark.parametrize("rel", _BUSINESS_FILES)
