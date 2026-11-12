@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**62 通过 / 13 C类 / 16 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**65 通过 / 10 C类 / 16 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -66,14 +66,14 @@ js 测试：**62 通过 / 13 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_issue_341_tasks_deeplink.js（已改写）
 - [x] test_issue_342_event_poll_partial.js（已改写）
 - [x] test_issue_348_bot_token_health.js（已改写）
-- [ ] test_issue_402_scene_copy.js
-- [ ] test_issue_406_skill_display_name.js
+- [x] test_issue_402_scene_copy.js（已改写）
+- [ ] test_issue_406_skill_display_name.js（**真回归**：DashboardView 无「选 VOD 技能后禁用 SRE」联动，checked disabled 仅分页按钮）
 - [x] test_issue_407_chat_attachment.js（已改写）
 - [x] test_issue_407_chat_draft.js（已改写）
-- [ ] test_issue_407_dash_draft.js
+- [x] test_issue_407_dash_draft.js（已改写）
 - [x] test_issue_436_runtime_search.js（已改写）
 - [ ] test_issue_456_orgs_back_to_workspace.js
-- [ ] test_issue_461_scene_deploy_url.js
+- [x] test_issue_461_scene_deploy_url.js（已改写）
 - [x] test_issue_465_worker_card_name.js（已改写）
 - [x] test_issue_539_review_status_render.js（已改写）
 - [ ] test_issue_543_migrate_orgs.js
@@ -84,7 +84,7 @@ js 测试：**62 通过 / 13 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_observability_sections.js（已改写）
 - [x] test_pipeline_scroll_layout.js（已改写）
 - [x] test_pipeline_search.js（已改写）
-- [ ] test_scene_apply_detail_refresh.js
+- [ ] test_scene_apply_detail_refresh.js（**待确认**：SceneMarket 有 loadDetailData/popstate 重进，应用后刷新语义需运行期验）
 
 ## D 类（断言针对旧实现写法，需按原意在新实现上重写）
 - [ ] test_engine_guide_simplified.js
