@@ -83,6 +83,12 @@ def count_silent_excepts(path: Path):
 # feat/weekly-10-yaw-dev 真新增 57 处（对 weekly-10 multiset diff，另 2 处已改 log），
 # 按族分类登记；豁免行数从该文件计数中扣除后再与基线比较。
 EXEMPT_FILES: dict = {
+    # ── 组Y 上游 aishell-dsh phase-2（#2045）新增：均为协议/计量链路的 fail-open ──
+    # ACP JSON-RPC：会话收尾/管道写失败吞掉，避免污染上层任务状态
+    ('domains/runtime/agents/aishell_acp.py', 'except Exception:'): 1,
+    # 用量采集：解析/换算失败按"无用量"处理，绝不影响任务本身
+    ('domains/runtime/engine/usage_collect.py', 'except (TypeError, ValueError):'): 2,
+    ('domains/runtime/engine/usage_collect.py', 'except ValueError:'): 1,
     # ── 组X 合并后新入库文件（2026-11-12）：全部为 fail-open 语义 ──
     # 遥测上报：OTel SDK 任一失败（无 collector / 网络抖动 / 属性缺失）不得影响业务主流程，
     #   上报路径必须彻底 fail-open（本仓可观测性铁律）
