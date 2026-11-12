@@ -9,6 +9,16 @@ from pathlib import Path
 
 import pytest
 
+def _repo_root():
+    """仓库根（测试树已按 src 镜像分目录，不能再用固定层数推算）。"""
+    from pathlib import Path
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if (parent / "src").is_dir():
+            return parent
+    return p.parents[-1]
+
+
 _HANDLER_FILES = [
     "src/domains/runtime/im/handler_async.py",
     "src/domains/runtime/im/vod_handler_async.py",
@@ -20,10 +30,6 @@ _DIRECT_SEND_RE = re.compile(
     r"send_card_to_chat|send_quick_cmd_card|add_reaction|"
     r"update_card_by_token|update_message|send_raw_card)\b"
 )
-
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("rel", _HANDLER_FILES)

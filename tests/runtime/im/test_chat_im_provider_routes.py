@@ -392,7 +392,7 @@ class TestSlackLogRedaction:
         assert "xoxb-" not in caplog.text
 
     def test_safe_ref_helpers_hash_slack_tokens(self):
-        from src.api.routes.chat import _safe_im_app_ref
+        from src.domains.runtime.routes.chat import _safe_im_app_ref
         from src.domains.runtime.im.engine_wiring import _safe_app_ref
         token = "xoxb-1...cret"
         for ref in (

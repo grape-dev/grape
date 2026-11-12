@@ -25,6 +25,15 @@ from src.domains.runtime.im.adapters.dingtalk.inbound import (
 from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
 from src.domains.runtime.im.channel.capability import Capability
 
+def _repo_root():
+    """仓库根（测试树已按 src 镜像分目录，不能再用固定层数推算）。"""
+    from pathlib import Path
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if (parent / "src").is_dir():
+            return parent
+    return p.parents[-1]
+
 
 def _frame(params: dict, *, chat_in_content: bool = False, typ: str = "actionCallback"):
     content = {
@@ -290,7 +299,7 @@ def test_channel_outbound_card_table_exists(tmp_path):
     import importlib.util
     from pathlib import Path
     import sqlite3
-    mig = Path(__file__).resolve().parents[2] / "scripts" / "migrations" / "001_channel_tables.py"
+    mig = _repo_root() / "scripts" / "migrations" / "001_channel_tables.py"
     spec = importlib.util.spec_from_file_location("mig001_test", mig)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

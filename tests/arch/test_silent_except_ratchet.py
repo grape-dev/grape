@@ -83,9 +83,17 @@ def count_silent_excepts(path: Path):
 # feat/weekly-10-yaw-dev 真新增 57 处（对 weekly-10 multiset diff，另 2 处已改 log），
 # 按族分类登记；豁免行数从该文件计数中扣除后再与基线比较。
 EXEMPT_FILES: dict = {
+    # ── 组X 合并后新入库文件（2026-11-12）：全部为 fail-open 语义 ──
+    # 遥测上报：OTel SDK 任一失败（无 collector / 网络抖动 / 属性缺失）不得影响业务主流程，
+    #   上报路径必须彻底 fail-open（本仓可观测性铁律）
+    ('kernel/otel.py', 'except Exception:'): 8,
+    # 凭据用量队列：空队列取数与满队列入队都是流控常态，非异常
+    ('kernel/persistence/credential_usage_log.py', 'except (queue.Empty, queue.Full):'): 1,
+    # 媒体清理任务：取消/删除临时文件失败不影响消息投递
+    ('domains/runtime/im/engine/media.py', 'except (asyncio.CancelledError, Exception):'): 1,
+    # IM 安装项批量回填：逐条容错（单条脏数据 continue，整体继续）
+    ('domains/mgmt/routes/im.py', 'except Exception:'): 2,
     # ── 组1 卡驱动回退：get_platform_card/卡派生读取失败 → 默认值兜底
-    #    （D44/S65 fail-open：无卡=存量 GitCode/GitHub 形态，吞错即回退语义本体）──
-    ('api/git_repo_api.py', 'except Exception:'): 3,
     # pr_comment_endpoint/dialect 双探 + native_field_for 卡能力缺省回退
     ('kernel/repo_key.py', 'except Exception:'): 2,
     # 方言/host 卡查询回退（映射表为数据非分支）
@@ -102,8 +110,6 @@ EXEMPT_FILES: dict = {
     ('domains/runtime/engine/bot_token_health.py', 'except Exception:'): 1,
     # 健康 JSON 解析回退 None
     ('kernel/token_resolver.py', 'except Exception:'): 2,
-    # 用户 token → 全局 bot token 回退链
-    ('domains/mgmt/routes/repos.py', 'except (TypeError, ValueError):'): 2,
     # collaborator 权限字段类型解析防御，非 admin 判定按回退处理
     ('domains/mgmt/routes/repos.py', 'except Exception:'): 2,
     # provider/卡展示名回退
@@ -135,8 +141,6 @@ EXEMPT_FILES: dict = {
     ('domains/runtime/engine/repogit.py', 'except Exception:'): 1,
     # worktree 清理尽力而为（后续 rmtree ignore_errors 同语义）
     ('domains/runtime/vcs/api_client.py', 'except Exception:'): 2,
-    # 错误体读取/token 获取尽力而为（主流程已有 log.warning）
-    ('persistence/credential_usage_log.py', 'except (queue.Empty, queue.Full):'): 1,
     # N4-p2 非阻塞队列满/空丢弃（审计旁路）
     ('domains/runtime/routes/chat.py', 'except RuntimeError:'): 1,
     # 事件循环未运行时跳过注册（启动竞态合法形态）

@@ -17,6 +17,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.domains.runtime.im import channel_directory as cd
 
+def _repo_root():
+    """仓库根（测试树已按 src 镜像分目录，不能再用固定层数推算）。"""
+    from pathlib import Path
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if (parent / "src").is_dir():
+            return parent
+    return p.parents[-1]
+
 
 @pytest.fixture()
 def um_db(monkeypatch, tmp_path):
@@ -118,6 +127,6 @@ def test_s99_legacy_wrappers_delegate(um_db):
 def test_s99_dependency_direction_guard():
     """护栏 3：身份域/存储层不得反向依赖 channel_directory（单向依赖）。"""
     from pathlib import Path
-    base = Path(__file__).parent.parent.parent / "src"
-    for rel in ("domains/mgmt/auth/grape_account_db.py", "session_manager.py", "domains/mgmt/user/db.py"):
+    base = _repo_root() / "src"
+    for rel in ("domains/mgmt/auth/grape_account_db.py", "kernel/session_manager.py", "domains/mgmt/user/db.py"):
         assert "channel_directory" not in (base / rel).read_text(), f"{rel} 禁止反向依赖"
