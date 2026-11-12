@@ -11,7 +11,7 @@ import os
 import re
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-INDEX_HTML = os.path.join(ROOT, "src", "api", "frontend", "legacy", "index.html")
+INDEX_HTML = os.path.join(ROOT, "src", "api", "frontend", "shell", "index.html")
 SETTINGS_PY = os.path.join(ROOT, "src", "domains", "mgmt", "routes", "settings.py")
 
 

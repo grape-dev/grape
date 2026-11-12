@@ -201,12 +201,12 @@ class TestR14_6FrontEndErrMsg:
 
     def test_errMsg_function_exists(self):
         """app.js 中 errMsg 函数存在。"""
-        app_src = _read('src/api/frontend/legacy/js/app.js')
+        app_src = _read('src/api/frontend/shell/js/app.js')
         assert 'function errMsg(e)' in app_src or 'errMsg = function' in app_src
 
     def test_errMsg_called_in_catch_blocks(self):
         """app.js 中至少有 catch 块调用 errMsg。"""
-        app_src = _read('src/api/frontend/legacy/js/app.js')
+        app_src = _read('src/api/frontend/shell/js/app.js')
         # 查找 errMsg( 调用（不是函数定义）
         calls = re.findall(r'errMsg\(', app_src)
         # 至少有函数定义 + 至少 1 个调用
@@ -240,7 +240,7 @@ class TestR14_8Dashboard403Dedup:
 
     def test_403_handler_has_tried_list(self):
         """app.js 403 处理中有已尝试仓库列表。"""
-        app_src = _read('src/api/frontend/legacy/js/app.js')
+        app_src = _read('src/api/frontend/shell/js/app.js')
         # 查找 403 处理逻辑附近是否有去重
         idx = app_src.find('e.status === 403')
         if idx < 0:
@@ -277,8 +277,8 @@ class TestR14_10EventsJsonSymmetric:
 
     def test_events_json_keys_match(self):
         """zh/events.json 和 en/events.json 的 key 集合完全一致。"""
-        zh_src = _read('src/api/frontend/legacy/locales/zh/events.json')
-        en_src = _read('src/api/frontend/legacy/locales/en/events.json')
+        zh_src = _read('src/api/frontend/shell/locales/zh/events.json')
+        en_src = _read('src/api/frontend/shell/locales/en/events.json')
         zh_keys = set(json.loads(zh_src).keys())
         en_keys = set(json.loads(en_src).keys())
         assert zh_keys == en_keys, \

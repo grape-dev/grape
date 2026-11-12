@@ -76,7 +76,7 @@ check('保存失败分支：有 violations 走标红，否则通用 toast', func
 check('zh/en 均有 skill_scope_mismatch', function () {
   for (const lg of ['zh', 'en']) {
     const d = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'dashboard.json'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'dashboard.json'), 'utf8'),
     );
     const v = JSON.stringify(d);
     assert.ok(v.indexOf('skill_scope_mismatch') >= 0, lg + ' 缺该键');

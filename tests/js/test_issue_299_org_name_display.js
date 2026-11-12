@@ -88,7 +88,7 @@ function loadApp(dom, storage, api) {
   global.sessionStorage = makeStorage();
   global.$ = (id) => dom.getElementById(id);
 
-  const appPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
+  const appPath = path.resolve(__dirname, '../../src/api/frontend/shell/js/app.js');
   const code = fs.readFileSync(appPath, 'utf-8');
   // app.js is an IIFE: (function() { ... return {...}; })()
   // Evaluate in global scope

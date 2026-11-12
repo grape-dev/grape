@@ -18,7 +18,7 @@ const VIEW = fs.readFileSync(
   'utf8',
 );
 const pack = JSON.parse(
-  fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/observability.json'), 'utf8'),
+  fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales/zh/observability.json'), 'utf8'),
 );
 
 function lookup(obj, dotted) {

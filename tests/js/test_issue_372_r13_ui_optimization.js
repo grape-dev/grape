@@ -15,7 +15,7 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '../..');
 const REPOS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/ReposView.vue'), 'utf8');
 const ACCOUNT = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/AccountView.vue'), 'utf8');
-const APP = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/app.js'), 'utf8');
+const APP = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/js/app.js'), 'utf8');
 
 let passed = 0;
 function check(name, fn) {
@@ -50,7 +50,7 @@ check('T41-04 nav(account) 清空 repoTitle（shell）', function () {
 
 check('T41-08/09 pat_no_refresh_hint 文案齐备', function () {
   for (const lg of ['zh', 'en']) {
-    const d = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'app.json'), 'utf8'));
+    const d = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'app.json'), 'utf8'));
     assert.ok(JSON.stringify(d).indexOf('pat_no_refresh_hint') >= 0, lg + ' 缺 pat_no_refresh_hint');
   }
 });

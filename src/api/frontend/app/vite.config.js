@@ -4,7 +4,7 @@ import { fileURLToPath, URL } from 'node:url'
 
 // Vue refactor (phase 2): two output kinds
 // 1. SPA at frontend/static-dist (base /static-vue/) — standalone migrated pages
-// 2. view entry chunks copied to frontend/legacy/js/vue/ — Vue views mounted INSIDE
+// 2. view entry chunks copied to frontend/shell/js/vue/ — Vue views mounted INSIDE
 //    the legacy shell (index.html + app.js), replacing js/pages/*.js modules batch by
 //    batch. These chunks keep the legacy global contract (renderMyFeedback etc.) and
 //    reuse legacy I18N/API/app globals, so behavior stays identical.

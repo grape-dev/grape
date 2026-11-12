@@ -15,9 +15,9 @@ const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
-const REGISTER_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/register.html'), 'utf8');
-const FORGOT_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/forgot.html'), 'utf8');
-const INDEX_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
+const REGISTER_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/register.html'), 'utf8');
+const FORGOT_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/forgot.html'), 'utf8');
+const INDEX_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/index.html'), 'utf8');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -227,13 +227,13 @@ test('U7-5: forgot resetPassword catch 基于 error_code', () => {
 });
 
 test('U7-6: i18n.js t() 支持第三参数 fallback', () => {
-  const i18nJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/i18n.js'), 'utf8');
+  const i18nJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/js/i18n.js'), 'utf8');
   assert.ok(/function t\(key,\s*vars,\s*fallback\)/.test(i18nJs), 't() 签名应为 (key, vars, fallback)');
   assert.ok(i18nJs.includes('fallback !== undefined ? fallback : key'), '缺 key 时应返回 fallback');
 });
 
 test('U7-7: auth.js t() 对齐 i18n.js', () => {
-  const authJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/auth.js'), 'utf8');
+  const authJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/js/auth.js'), 'utf8');
   assert.ok(/function t\(key,\s*vars,\s*fallback\)/.test(authJs), 't() 签名应为 (key, vars, fallback)');
 });
 
@@ -413,12 +413,12 @@ test('U11-5: i18n.js 加载失败 5 秒超时兜底', () => {
 });
 
 test('U11-6: Auth.initI18n() 有 typeof I18N 防御', () => {
-  var authJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/auth.js'), 'utf8');
+  var authJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/js/auth.js'), 'utf8');
   assert.ok(authJs.indexOf("typeof I18N !== 'undefined'") >= 0, 'auth.js 应有 typeof I18N 防御');
 });
 
 test('U11-7: i18n.js 防重复 init', () => {
-  var i18nJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/i18n.js'), 'utf8');
+  var i18nJs = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/js/i18n.js'), 'utf8');
   assert.ok(i18nJs.indexOf('if (_initialized) return') >= 0, 'init 应有 _initialized 防重复');
   assert.ok(i18nJs.indexOf('isInitialized') >= 0, '应暴露 isInitialized 供外部检查');
 });

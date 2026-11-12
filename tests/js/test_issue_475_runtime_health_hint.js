@@ -79,7 +79,7 @@ check('引擎卡与设备卡都渲染 ? 提示且走 i18n', function () {
 check('i18n 6 个 hint 键 zh/en 齐全', function () {
   for (const lg of ['zh', 'en']) {
     const d = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'runtimes.json'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'runtimes.json'), 'utf8'),
     );
     const hint = (d.health || {}).hint || {};
     for (const k of ['consecutive_failures', 'heartbeat_lost', 'offline', 'recently_lost', 'about_to_gc', 'low_score']) {

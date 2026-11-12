@@ -76,7 +76,7 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 def pack_backend(ts):
-    """后端: src/ (含 api/frontend legacy 前端) + scripts/ + 仓库根文件 + configs example + requirements"""
+    """后端: src/ (含 api/frontend shell 前端) + scripts/ + 仓库根文件 + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
@@ -88,7 +88,7 @@ def pack_backend(ts):
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
     # help/ 帮助文档源目录（usage + api + reference + developer markdown）
-    # ⚠️ 必须打入：服务重启时 src/help_page_gen.py 依据 help/ 渲染 src/api/frontend/legacy/help.html；
+    # ⚠️ 必须打入：服务重启时 src/help_page_gen.py 依据 help/ 渲染 src/api/frontend/shell/help.html；
     #    缺失则升级后文档无法再生成（一直用渲染旧内容的 help.html，升级总缺新文档的根因，
     #    2026-10-12 修复）。openapi.json 生成物已被 _tar_filter 过滤。
     help_dir = os.path.join(ROOT, "help")

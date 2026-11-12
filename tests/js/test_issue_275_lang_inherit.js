@@ -63,7 +63,7 @@ function makeEnv(opts) {
 }
 
 // ── 加载 i18n.js 源码（IIFE 赋值 var I18N，用 new Function + sandbox 求值）──
-const i18nPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/i18n.js');
+const i18nPath = path.resolve(__dirname, '../../src/api/frontend/shell/js/i18n.js');
 const src = fs.readFileSync(i18nPath, 'utf8');
 
 function loadI18N(env) {

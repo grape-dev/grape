@@ -3,7 +3,7 @@
  *
  * 运行：node tests/js/test_issue_237_cred_clear.js
  *
- * 验证点（与 src/api/frontend/legacy/js/pages/settings.js saveCredentials 一致）：
+ * 验证点（与 src/api/frontend/shell/js/pages/settings.js saveCredentials 一致）：
  *   1. ******** 掩码值 → 字段不传（代表未修改，后端不动）
  *   2. 空字符串 → 字段传空（清除已有凭据）
  *   3. 真实值 → 字段传真实值（写入）

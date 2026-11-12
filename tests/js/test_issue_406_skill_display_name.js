@@ -61,7 +61,7 @@ check('联动只对 vod 节点、按技能名判定、带恢复标记', function
 check('提示文案 zh/en 齐备', function () {
   for (const lg of ['zh', 'en']) {
     const d = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'dashboard.json'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'dashboard.json'), 'utf8'),
     );
     assert.ok(d.sre_locked_by_vod_skill, lg + ' 缺 sre_locked_by_vod_skill');
   }

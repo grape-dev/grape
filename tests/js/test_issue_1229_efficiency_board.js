@@ -3,7 +3,7 @@
  *
  * 历史：本文件原先断言 src/api/static/js/pages/observability.js 的旧实现（协作者表格版）。
  * Phase 1 结构迁移 + vue-integration 全量 Vue 化后，该老页面已删除、路径整体搬到
- * src/api/frontend/legacy；2026-11-11 移植 2.0 看板（10 段 + 下钻）到 Vue 视图时，
+ * src/api/frontend/shell；2026-11-11 移植 2.0 看板（10 段 + 下钻）到 Vue 视图时，
  * 按 grape-vue-view-port §2「陈旧断言改成读 Vue 源码」重写为源断言。
  *
  * 运行：node tests/js/test_issue_1229_efficiency_board.js
@@ -24,10 +24,10 @@ const fs = require('fs');
 const ROOT = path.resolve(__dirname, '../..');
 const VIEW = path.join(ROOT, 'src/api/frontend/app/src/views/ObservabilityView.vue');
 const zh = JSON.parse(
-  fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/observability.json'), 'utf8')
+  fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales/zh/observability.json'), 'utf8')
 );
 const en = JSON.parse(
-  fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/observability.json'), 'utf8')
+  fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales/en/observability.json'), 'utf8')
 );
 
 const src = fs.readFileSync(VIEW, 'utf8');

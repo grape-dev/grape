@@ -23,7 +23,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/shell/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 // ── 花括号配平提取函数完整源码 ──

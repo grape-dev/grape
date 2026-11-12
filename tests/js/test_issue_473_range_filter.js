@@ -16,7 +16,7 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '../..');
 const VIEW = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
 const locale = (lg) =>
-  JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'runtimes.json'), 'utf8'));
+  JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'runtimes.json'), 'utf8'));
 const BACKEND = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/settings.py'), 'utf8');
 
 let passed = 0;

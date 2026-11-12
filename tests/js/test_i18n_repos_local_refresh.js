@@ -16,9 +16,9 @@ function readFile(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
 }
 
-const APP_JS = readFile('src/api/frontend/legacy/js/app.js');
-const I18N_JS = readFile('src/api/frontend/legacy/js/i18n.js');
-const INDEX_HTML = readFile('src/api/frontend/legacy/index.html');
+const APP_JS = readFile('src/api/frontend/shell/js/app.js');
+const I18N_JS = readFile('src/api/frontend/shell/js/i18n.js');
+const INDEX_HTML = readFile('src/api/frontend/shell/index.html');
 
 // ── T1: app.js 缓存 /repos/member 数据 ──
 function testCachedReposDataExists() {

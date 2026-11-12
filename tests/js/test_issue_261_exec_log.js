@@ -23,7 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ── 模拟 I18N（读取真实语言包 locales/{zh,en}/autopilot.json）──
-const LOCALES_DIR = path.join(__dirname, '..', '..', 'src', 'api', 'frontend', 'legacy', 'locales');
+const LOCALES_DIR = path.join(__dirname, '..', '..', 'src', 'api', 'frontend', 'shell', 'locales');
 const PACKS = {
   zh: JSON.parse(fs.readFileSync(path.join(LOCALES_DIR, 'zh', 'autopilot.json'), 'utf8')),
   en: JSON.parse(fs.readFileSync(path.join(LOCALES_DIR, 'en', 'autopilot.json'), 'utf8')),

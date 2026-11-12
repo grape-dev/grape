@@ -632,7 +632,7 @@ async def upload_feedback_attachment(file: UploadFile = File(...),
         log.info(f"feedback upload: OBS key={file_key} size={len(content)} by={user.get('username')}")
     else:
         # 非 OBS 模式：存到本地
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "frontend", "legacy", "uploads", "feedback")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "frontend", "shell", "uploads", "feedback")
         os.makedirs(static_dir, exist_ok=True)
         local_name = file_key.replace("feedback/", "")
         local_path = os.path.join(static_dir, local_name)

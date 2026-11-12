@@ -39,7 +39,7 @@ check('数据来源是 pipeline 端点', function () {
 check('i18n 键在 zh/en 都有值', function () {
   for (const lg of ['zh', 'en']) {
     const d = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'issues.json'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'issues.json'), 'utf8'),
     );
     const s = JSON.stringify(d);
     for (const k of ['pending_review_hint', 'sre_pending', 'sre_unavailable']) {

@@ -57,7 +57,7 @@ function makeDom() {
 }
 
 // ── 加载 app.js 源码 ──
-const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/shell/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 function makeSessionStore() {

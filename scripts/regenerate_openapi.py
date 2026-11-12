@@ -2,7 +2,7 @@
 
 把当前代码的对外安全路由契约落盘两份：
 - help/api/openapi.json      （规范副本）
-- src/api/frontend/legacy/openapi.json（固定下载 URL /static/openapi.json）
+- src/api/frontend/shell/openapi.json（固定下载 URL /static/openapi.json）
 
 用法：
     python scripts/regenerate_openapi.py [--help-path PATH] [--static-path PATH]
@@ -38,7 +38,7 @@ def main() -> int:
     n = write_openapi_contract(schema, help_path=args.help_path, static_path=args.static_path)
     print(f"OpenAPI: contract dumped ({n} paths)")
     print("  -> help/api/openapi.json")
-    print("  -> src/api/frontend/legacy/openapi.json")
+    print("  -> src/api/frontend/shell/openapi.json")
     return 0
 
 

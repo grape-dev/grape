@@ -16,11 +16,11 @@ function readFile(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
 }
 
-const APP_JS = readFile('src/api/frontend/legacy/js/app.js');
-const ZH_EVENTS = readFile('src/api/frontend/legacy/locales/zh/events.json');
-const EN_EVENTS = readFile('src/api/frontend/legacy/locales/en/events.json');
-const ZH_APP = readFile('src/api/frontend/legacy/locales/zh/app.json');
-const EN_APP = readFile('src/api/frontend/legacy/locales/en/app.json');
+const APP_JS = readFile('src/api/frontend/shell/js/app.js');
+const ZH_EVENTS = readFile('src/api/frontend/shell/locales/zh/events.json');
+const EN_EVENTS = readFile('src/api/frontend/shell/locales/en/events.json');
+const ZH_APP = readFile('src/api/frontend/shell/locales/zh/app.json');
+const EN_APP = readFile('src/api/frontend/shell/locales/en/app.json');
 
 // ── T42-01: app.errMsg() 在 catch 块中被调用 ──
 function testErrMsgCalledInCatch() {

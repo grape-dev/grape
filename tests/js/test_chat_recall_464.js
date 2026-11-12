@@ -83,19 +83,19 @@ test('重新编辑配色：app.css 覆盖规则存在，:link/:visited/:hover �
 });
 
 test('层叠盲区（QA 根因）：apple-theme.css #233 白字规则锚点仍在', () => {
-  const white = findRule(APPLE_CSS, '[data-theme="apple"] .chat-body .msg.r a');
+  const white = findRule(APPLE_CSS, ':root .chat-body .msg.r a');
   assert.ok(white, 'apple-theme.css #233 white rule anchor disappeared (update this test)');
   assert.ok(/color:\s*#fff/.test(white), '#233 white rule must stay color:#fff');
-  const whiteHover = findRule(APPLE_CSS, '[data-theme="apple"] .chat-body .msg.r a:hover');
+  const whiteHover = findRule(APPLE_CSS, ':root .chat-body .msg.r a:hover');
   assert.ok(whiteHover, 'apple-theme.css #233 a:hover rule anchor disappeared');
 });
 
-test('层叠胜出：[data-theme="apple"] 前缀覆盖规则特异性高于 #233，跨文件加载顺序必胜', () => {
+test('层叠胜出：:root 前缀覆盖规则特异性高于 #233，跨文件加载顺序必胜', () => {
   // apple-theme.css 后加载（index.html 第 10 行）且默认主题为 apple，
-  // 同特异性 (0,4,1) 时白字规则层叠胜出 → 覆盖规则必须以 [data-theme="apple"] 前缀升至 (0,5,1)
-  const whiteSel = '[data-theme="apple"] .chat-body .msg.r a';
+  // 同特异性 (0,4,1) 时白字规则层叠胜出 → 覆盖规则必须以 :root 前缀升至 (0,5,1)
+  const whiteSel = ':root .chat-body .msg.r a';
   for (const pseudo of ['', ':link', ':visited']) {
-    const sel = `[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a${pseudo}`;
+    const sel = `:root .chat-body .msg.r.chat-msg-recalled a${pseudo}`;
     const decl = rule(sel);
     assert.ok(decl, `missing specificity-raised override: ${sel}`);
     assert.ok(/color:\s*var\(--a\)/.test(decl), `${sel} must use var(--a)`);
@@ -104,21 +104,22 @@ test('层叠胜出：[data-theme="apple"] 前缀覆盖规则特异性高于 #233
       `${sel} specificity ${specificity(sel)} must beat #233 ${specificity(whiteSel + pseudo)}`
     );
   }
-  const hoverSel = '[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:hover';
+  const hoverSel = ':root .chat-body .msg.r.chat-msg-recalled a:hover';
   const hoverDecl = rule(hoverSel);
   assert.ok(hoverDecl, `missing specificity-raised override: ${hoverSel}`);
   assert.ok(
-    specGte(specificity(hoverSel), specificity('[data-theme="apple"] .chat-body .msg.r a:hover')),
+    specGte(specificity(hoverSel), specificity(':root .chat-body .msg.r a:hover')),
     `${hoverSel} specificity must beat #233 hover`
   );
   assert.ok(!/color:\s*#fff/.test(hoverDecl), 'hover override must not re-introduce #fff');
 });
 
-test('缓存版本：index.html 引用的 app.css ?v= 已 bump（覆盖规则可下发到存量客户端）', () => {
-  const html = fs.readFileSync(path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'index.html'), 'utf8');
+test('缓存版本：index.html 引用的 app.css ?v= 存在（覆盖规则可下发到存量客户端）', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'src', 'api', 'frontend', 'shell', 'index.html'), 'utf8');
   const m = /app\.css\?v=(\d+)/.exec(html);
   assert.ok(m, 'index.html must reference app.css with ?v= cache buster');
-  assert.ok(parseInt(m[1], 10) > 85, `app.css ?v=${m[1]} must be bumped past 85`);
+  // 2026-11-12 合并成单层样式表后改走 /static-vue/assets/css/，版本号从 1 重新起算
+  assert.ok(parseInt(m[1], 10) >= 1, `app.css ?v=${m[1]} must be a valid cache buster`);
 });
 
 test('回归锚点：#442 hover 显示撤回按钮 / recalled 隐藏撤回按钮语义不变', () => {

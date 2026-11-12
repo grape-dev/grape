@@ -603,7 +603,7 @@ async def sync_official_scenes(repo_root: str | None = None):
                                 icon_val = storage.temporary_url(icon_key) if hasattr(storage, 'temporary_url') else ""
                                 obs_icon_key = icon_key
                             else:
-                                static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api", "frontend", "legacy", "img", "scenes")
+                                static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api", "frontend", "shell", "img", "scenes")
                                 os.makedirs(static_dir, exist_ok=True)
                                 dest = os.path.join(static_dir, f"{market_id}{icon_file_ext}")
                                 with open(dest, "wb") as f:

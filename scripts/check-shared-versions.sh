@@ -12,7 +12,7 @@ for file in "${!SHARED_FILES[@]}"; do
   IFS=',' read -ra arr <<< "$consumers"
   prev_ver=""
   for c in "${arr[@]}"; do
-    ver=$(grep -oP "${file}\?v=\K[0-9a-zA-Z-]+" "src/api/frontend/legacy/$c" 2>/dev/null | head -1)
+    ver=$(grep -oP "${file}\?v=\K[0-9a-zA-Z-]+" "src/api/frontend/shell/$c" 2>/dev/null | head -1)
     if [ -z "$ver" ]; then
       echo "WARN: $c does not reference $file"
       continue

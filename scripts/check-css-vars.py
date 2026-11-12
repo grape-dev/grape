@@ -16,7 +16,7 @@ tok_defined, _ = extract_vars('src/api/frontend/app/src/styles/global/tokens.css
 
 # admin.html 内联 CSS 引用的变量
 # 先提取 <style> 块
-with open('src/api/frontend/legacy/admin.html', encoding='utf-8') as f:
+with open('src/api/frontend/shell/admin.html', encoding='utf-8') as f:
     html = f.read()
 m = re.search(r'<style>(.*?)</style>', html, re.DOTALL)
 admin_css = m.group(1) if m else ''

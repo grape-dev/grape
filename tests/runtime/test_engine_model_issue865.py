@@ -16,8 +16,8 @@ from src.session_manager import db, db_lock
 from src.domains.runtime.engine.engine_model import detect_engine_model
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-ZH_PATH = os.path.join(ROOT, "src", "api", "frontend", "legacy", "locales", "zh", "runtimes.json")
-EN_PATH = os.path.join(ROOT, "src", "api", "frontend", "legacy", "locales", "en", "runtimes.json")
+ZH_PATH = os.path.join(ROOT, "src", "api", "frontend", "shell", "locales", "zh", "runtimes.json")
+EN_PATH = os.path.join(ROOT, "src", "api", "frontend", "shell", "locales", "en", "runtimes.json")
 
 
 def _make_token(name="test865-worker"):

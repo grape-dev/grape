@@ -128,7 +128,7 @@ class TestShutdownForceFail:
 
     def test_frontend_fail_reason_no_summary_fallback(self):
         """前端失败原因不再用 summary 兜底（源码断言：只取 data.result + 空态「暂无失败原因」）。"""
-        src = open("src/api/frontend/legacy/js/pages/events.js", encoding="utf-8").read()
+        src = open("src/api/frontend/shell/js/pages/events.js", encoding="utf-8").read()
         i = src.find("function _evFailReasonText")
         assert i >= 0, "未找到 _evFailReasonText"
         j = src.find("\nfunction ", i)

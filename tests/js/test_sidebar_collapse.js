@@ -55,7 +55,7 @@ function makeDom(innerWidth) {
 }
 
 // ── 加载 app.js 源码 ──
-const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/shell/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 function loadApp(dom, localStorage, innerWidth) {
@@ -214,7 +214,7 @@ test('API 暴露: app.toggleSidebar 在公开返回对象中', () => {
 // ─── 测试 10：#sbOverlay 不在 #sidebar 内部（CSS 包含块修复）───
 // QA Critical: transform 会为 fixed 子孙建立包含块，overlay 必须在 #sidebar 外部
 test('DOM 结构: #sbOverlay 是 #sidebar 的兄弟节点而非子节点', () => {
-  const htmlPath = path.resolve(__dirname, '../../src/api/frontend/legacy/index.html');
+  const htmlPath = path.resolve(__dirname, '../../src/api/frontend/shell/index.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
   const sidebarOpen = html.indexOf('id="sidebar"');
   const sidebarClose = html.indexOf('</div>', html.indexOf('id="sidebar"'));

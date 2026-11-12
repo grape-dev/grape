@@ -99,7 +99,7 @@ class TestFrontendIncremental:
     def test_locales_loading_more(self):
         for lang in ("zh", "en"):
             p = os.path.join(os.path.dirname(__file__), "..", "..",
-                             "src", "api", "frontend", "legacy", "locales", lang, "pipeline.json")
+                             "src", "api", "frontend", "shell", "locales", lang, "pipeline.json")
             import json
             d = json.load(open(p, encoding="utf-8"))
             assert d.get("loading_more"), f"{lang} 缺少 loading_more 词条"

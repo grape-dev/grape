@@ -32,7 +32,7 @@ def _load_error_code_i18n() -> dict:
     import json as _json, os
     _result = {}
     _api_root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api")
-    _locales_dir = os.path.join(_api_root, "frontend", "legacy", "locales")
+    _locales_dir = os.path.join(_api_root, "frontend", "shell", "locales")
     if not os.path.isdir(_locales_dir):
         _locales_dir = os.path.join(_api_root, "static", "locales")
     for _lang in ("zh", "en"):

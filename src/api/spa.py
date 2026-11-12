@@ -46,8 +46,8 @@ def install_spa_routes(app: FastAPI) -> None:
     os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
     app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
 
-    # Vue refactor: static root moved to frontend/legacy (phase 1); keep serving under /static
-    _legacy_dir = os.path.join(_api_dir, "frontend", "legacy")
+    # Vue refactor: static root moved to frontend/shell (phase 1); keep serving under /static
+    _legacy_dir = os.path.join(_api_dir, "frontend", "shell")
     STATIC_DIR = _legacy_dir if os.path.isdir(_legacy_dir) else os.path.join(_api_dir, "static")
     if not os.path.isdir(STATIC_DIR):
         return

@@ -37,9 +37,9 @@ console.log('认证页面邮箱配置闪动修复 — 静态断言测试\n');
 
 // ── 加载文件 ──
 const MAIN_PY = read('src/api/main.py');
-const REGISTER_HTML = read('src/api/frontend/legacy/register.html');
-const FORGOT_HTML = read('src/api/frontend/legacy/forgot.html');
-const INDEX_HTML = read('src/api/frontend/legacy/index.html');
+const REGISTER_HTML = read('src/api/frontend/shell/register.html');
+const FORGOT_HTML = read('src/api/frontend/shell/forgot.html');
+const INDEX_HTML = read('src/api/frontend/shell/index.html');
 const GRAPE_AUTH_PY = read('src/domains/mgmt/routes/auth.py');
 
 // ── T01: main.py 含 _serve_auth_page ──
@@ -272,7 +272,7 @@ test('T34: auth.js 不含 handleApiError/errMsg 新增函数', () => {
 
 // ── T35: i18n.js inline pack 含 common.server_error ──
 test('T35: i18n.js inline pack 含 common.server_error', () => {
-  const I18N_JS = read('src/api/frontend/legacy/js/i18n.js');
+  const I18N_JS = read('src/api/frontend/shell/js/i18n.js');
   assert.ok(I18N_JS.indexOf('server_error') >= 0, 'inline pack 应含 server_error');
 });
 
@@ -359,21 +359,21 @@ test('T46: main.py injects __I18N_BOOST__ + early-translate script', () => {
 
 // ── T47: i18n.js 含 _initialized 防重复标志 ──
 test('T47: i18n.js has _initialized guard', () => {
-  const I18N_JS = read('src/api/frontend/legacy/js/i18n.js');
+  const I18N_JS = read('src/api/frontend/shell/js/i18n.js');
   assert.ok(I18N_JS.indexOf('_initialized') >= 0, 'i18n.js 应含 _initialized 标志');
   assert.ok(I18N_JS.indexOf('if (_initialized) return') >= 0, 'init 应检查 _initialized');
 });
 
 // ── T48: i18n.js 含自动 init（readyState 检查） ──
 test('T48: i18n.js has auto-init with readyState check', () => {
-  const I18N_JS = read('src/api/frontend/legacy/js/i18n.js');
+  const I18N_JS = read('src/api/frontend/shell/js/i18n.js');
   assert.ok(I18N_JS.indexOf('readyState') >= 0, '应含 readyState 检查');
   assert.ok(I18N_JS.indexOf('isInitialized') >= 0, '应暴露 isInitialized getter');
 });
 
 // ── T49: i18n.js 含 __I18N_BOOST__ 读取逻辑 ──
 test('T49: i18n.js reads __I18N_BOOST__', () => {
-  const I18N_JS = read('src/api/frontend/legacy/js/i18n.js');
+  const I18N_JS = read('src/api/frontend/shell/js/i18n.js');
   assert.ok(I18N_JS.indexOf('__I18N_BOOST__') >= 0, 'i18n.js 应读取 __I18N_BOOST__');
   assert.ok(I18N_JS.indexOf('_deepMerge') >= 0, '应有 _deepMerge 函数合并 boost');
 });
@@ -409,7 +409,7 @@ test('T53: all pages set __I18N_CACHE_VER__', () => {
 
 // ── T54: i18n.js applyI18nToDOM 移除 i18n-loading class ──
 test('T54: i18n.js applyI18nToDOM removes i18n-loading class', () => {
-  const I18N_JS = read('src/api/frontend/legacy/js/i18n.js');
+  const I18N_JS = read('src/api/frontend/shell/js/i18n.js');
   assert.ok(I18N_JS.indexOf("classList.remove('i18n-loading')") >= 0, 'applyI18nToDOM 应移除 i18n-loading class');
 });
 

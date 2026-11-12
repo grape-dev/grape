@@ -1,7 +1,7 @@
 """task_messages 运行日志（实时日志功能）测试。
 
 覆盖：结构化落库 / seq 单调与 since 增量 / 幂等防重放 / fanout 实时推送 / SSE 端点鉴权与增量接口。
-见 src/api/frontend/legacy/grape-task-logs-analysis.md。
+见 src/api/frontend/shell/grape-task-logs-analysis.md。
 """
 import asyncio
 from src.domains.mgmt.auth import grape_account_db

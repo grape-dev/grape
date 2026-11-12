@@ -15,7 +15,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'frontend', 'legacy');
+const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'frontend', 'shell');
 const _BACKEND = path.join(__dirname, '..', '..', 'src', 'domains', 'mgmt', 'auth', 'password.py');
 
 // ── 与 register.html reqs 同规格的四条件判定 ──

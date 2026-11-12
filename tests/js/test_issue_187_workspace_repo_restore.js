@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '../..');
-const APP = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/app.js'), 'utf8');
+const APP = fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/js/app.js'), 'utf8');
 
 function fnBody(src, name) {
   const i = src.indexOf('  function ' + name + '(') >= 0 ? src.indexOf('  function ' + name + '(') : src.indexOf('function ' + name + '(');

@@ -2,7 +2,7 @@
 """校验 zh/en 语言包 key 集合一致。"""
 import json, sys, os
 
-LOCALES_DIR = 'src/api/frontend/legacy/locales'
+LOCALES_DIR = 'src/api/frontend/shell/locales'
 MODULES = ['common', 'admin']  # admin 涉及的模块
 
 def flat_keys(obj, prefix=''):

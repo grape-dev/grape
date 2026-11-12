@@ -57,7 +57,7 @@ function makeDom() {
 }
 
 // ── 加载 app.js 源码 ──
-const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/shell/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 // app.js 是 IIFE，引用了未定义的全局（API, I18N, fetch, document, window, localStorage, console 等）

@@ -20,7 +20,7 @@ function check(name, fn) {
 
 function loadFn(i18nStub) {
   const src = fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/frontend/legacy/js/worker-name.js'), 'utf8');
+    path.resolve(__dirname, '../../src/api/frontend/shell/js/worker-name.js'), 'utf8');
   const sandbox = { I18N: i18nStub };
   const keys = Object.keys(sandbox);
   const fn = new Function(...keys, src + '\n; return workerDisplayName;');
@@ -52,9 +52,9 @@ check('无 I18N 环境：兜底中文占位「未命名设备」', () => {
 
 check('i18n 双语：占位键存在且中英文值正确', () => {
   const zh = JSON.parse(fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/common.json'), 'utf8'));
+    path.resolve(__dirname, '../../src/api/frontend/shell/locales/zh/common.json'), 'utf8'));
   const en = JSON.parse(fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/frontend/legacy/locales/en/common.json'), 'utf8'));
+    path.resolve(__dirname, '../../src/api/frontend/shell/locales/en/common.json'), 'utf8'));
   assert.strictEqual(zh.unnamed_worker, '未命名设备');
   assert.strictEqual(en.unnamed_worker, 'Unnamed device');
 });

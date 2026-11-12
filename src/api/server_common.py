@@ -597,9 +597,9 @@ def attach_frontend(app: FastAPI) -> None:
     os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
     app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
 
-    # Vue 迁移后的静态根：优先 frontend/legacy（本仓布局），回退 arch 线的 static
+    # Vue 迁移后的静态根：优先 frontend/shell（本仓布局），回退 arch 线的 static
     _api_dir = os.path.dirname(os.path.abspath(__file__))
-    _legacy_dir = os.path.join(_api_dir, "frontend", "legacy")
+    _legacy_dir = os.path.join(_api_dir, "frontend", "shell")
     STATIC_DIR = _legacy_dir if os.path.isdir(_legacy_dir) else os.path.join(_api_dir, "static")
     if os.path.isdir(STATIC_DIR):
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

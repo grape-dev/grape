@@ -288,8 +288,8 @@ def test_handoff_empty_carried_context():
 # === TC-10: I18N locale files contain cross_pipeline entries ===
 def test_i18n_cross_pipeline_entries():
     """TC-10: zh/en issues.json + pipeline.json contain cross_pipeline keys."""
-    zh_issues = json.load(open(os.path.join(ROOT, "src/api/frontend/legacy/locales/zh/issues.json"), encoding="utf-8"))
-    en_issues = json.load(open(os.path.join(ROOT, "src/api/frontend/legacy/locales/en/issues.json"), encoding="utf-8"))
+    zh_issues = json.load(open(os.path.join(ROOT, "src/api/frontend/shell/locales/zh/issues.json"), encoding="utf-8"))
+    en_issues = json.load(open(os.path.join(ROOT, "src/api/frontend/shell/locales/en/issues.json"), encoding="utf-8"))
     assert "cross_pipeline" in zh_issues
     assert "cross_pipeline" in en_issues
     assert "handoff_btn" in zh_issues["cross_pipeline"]
@@ -297,7 +297,7 @@ def test_i18n_cross_pipeline_entries():
     assert "modal_title" in zh_issues["cross_pipeline"]
     assert "continuation_from" in zh_issues["cross_pipeline"]
 
-    zh_pipe = json.load(open(os.path.join(ROOT, "src/api/frontend/legacy/locales/zh/pipeline.json"), encoding="utf-8"))
-    en_pipe = json.load(open(os.path.join(ROOT, "src/api/frontend/legacy/locales/en/pipeline.json"), encoding="utf-8"))
+    zh_pipe = json.load(open(os.path.join(ROOT, "src/api/frontend/shell/locales/zh/pipeline.json"), encoding="utf-8"))
+    en_pipe = json.load(open(os.path.join(ROOT, "src/api/frontend/shell/locales/en/pipeline.json"), encoding="utf-8"))
     assert "cross_scene_handoff" in zh_pipe
     assert "cross_scene_handoff" in en_pipe

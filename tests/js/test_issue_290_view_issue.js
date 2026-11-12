@@ -56,7 +56,7 @@ check('摘要行 #N 链接保留 is_pr 区分（Out of Scope）', function () {
 check('view_issue 文案存在', function () {
   for (const lg of ['zh', 'en']) {
     const d = JSON.parse(
-      fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lg, 'issues.json'), 'utf8'),
+      fs.readFileSync(path.join(ROOT, 'src/api/frontend/shell/locales', lg, 'issues.json'), 'utf8'),
     );
     assert.ok(d.detail && d.detail.view_issue, lg + ' 缺 detail.view_issue');
   }
