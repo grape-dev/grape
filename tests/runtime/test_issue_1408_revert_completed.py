@@ -5,6 +5,8 @@
 - 属主撤销成功且回读一致、stage 回退 pending_review、completed_at/completed_reason 清空、审计留痕；
 - 撤销刷新 updated_at，审计保留撤销前完成时间/原因；
 - 非属主 403、会话 token（tk_）403、非法迁移 400、并发态变更 409、需求不存在 404、缺参 400；
+- 仓库 Owner/Admin 可撤销他人已完成需求（check_repo_access + get_repo_admin_identity fail-closed），
+  管理员放行仅限撤销迁移，本人路径不触发角色查询；
 - 重复提交幂等成功；
 - 回归 pending_review → processing/completed/cancelled 与 cancelled → active。
 
@@ -398,6 +400,80 @@ class TestRevertCompleted:
         out2 = _call(issue_id, "pending_review")
         assert out2["status"] == "pending_review"
         assert _issue_row(issue_id)[0] == "pending_review"
+
+
+class TestAdminRevert:
+    """Issue #1408 复审补充：仓库 Owner/Admin 可撤销他人已完成需求（服务端真实角色校验）。
+
+    口径与 admin-confirm-done 一致：check_repo_access + get_repo_admin_identity fail-closed。
+    管理员放行**仅限** completed → pending_review 这一条撤销迁移。
+    """
+
+    def test_repo_admin_can_revert_others_issue(self):
+        issue_id = _mk_issue(14101, user_id=OWNER_ID)
+        with mock.patch("src.api.deps.check_repo_access") as _cra, \
+                mock.patch("src.domains.mgmt.auth.repo_roles.get_repo_admin_identity",
+                           return_value={"username": "repo_admin_1408", "source": "permission"}):
+            out = _call(issue_id, "pending_review", _OTHER)
+        assert out["ok"] is True
+        assert out["status"] == "pending_review"
+        _cra.assert_called_once()
+        assert _issue_row(issue_id)[0] == "pending_review"
+        audits = _audit_rows(issue_id)
+        assert len(audits) == 1
+        assert audits[0]["actor_role"] == "admin"
+        assert audits[0]["username"] == "repo_admin_1408"
+        assert audits[0]["role_source"] == "permission"
+        assert audits[0]["from_status"] == "completed"
+
+    def test_non_admin_other_user_403(self):
+        issue_id = _mk_issue(14102)
+        with mock.patch("src.api.deps.check_repo_access"), \
+                mock.patch("src.domains.mgmt.auth.repo_roles.get_repo_admin_identity",
+                           return_value=None):
+            with pytest.raises(HTTPException) as ei:
+                _call(issue_id, "pending_review", _OTHER)
+        assert ei.value.status_code == 403
+        assert _issue_row(issue_id)[0] == "completed"
+        assert _audit_rows(issue_id) == []
+
+    def test_repo_access_denied_403_before_role_lookup(self):
+        """无仓库访问权 → 403，且不发起 VCS 角色查询（先访问权、后角色）。"""
+        issue_id = _mk_issue(14103)
+        _denied = HTTPException(
+            status_code=403,
+            detail={"code": 403, "message": "No permission to access this repository"})
+        with mock.patch("src.api.deps.check_repo_access", side_effect=_denied), \
+                mock.patch("src.domains.mgmt.auth.repo_roles.get_repo_admin_identity",
+                           return_value={"username": "repo_admin_1408", "source": "owner"}) as _ident:
+            with pytest.raises(HTTPException) as ei:
+                _call(issue_id, "pending_review", _OTHER)
+        assert ei.value.status_code == 403
+        _ident.assert_not_called()
+        assert _issue_row(issue_id)[0] == "completed"
+        assert _audit_rows(issue_id) == []
+
+    def test_admin_grant_scoped_to_revert_only(self):
+        """管理员放行只覆盖撤销完成；cancelled → active 仍仅限本人（403）。"""
+        issue_id = _mk_issue(14104, status="cancelled", stage="pending_review",
+                             reason="cancelled", completed_at="2026-01-01 00:00:00")
+        with mock.patch("src.domains.mgmt.auth.repo_roles.get_repo_admin_identity",
+                        return_value={"username": "repo_admin_1408", "source": "permission"}):
+            with pytest.raises(HTTPException) as ei:
+                _call(issue_id, "active", _OTHER)
+        assert ei.value.status_code == 403
+        assert _issue_row(issue_id)[0] == "cancelled"
+
+    def test_owner_path_skips_admin_lookup(self):
+        """本人撤销不触发 VCS 角色查询（不引入额外网络调用）。"""
+        issue_id = _mk_issue(14105)
+        with mock.patch("src.domains.mgmt.auth.repo_roles.get_repo_admin_identity") as _ident:
+            out = _call(issue_id, "pending_review")
+        assert out["status"] == "pending_review"
+        _ident.assert_not_called()
+        audits = _audit_rows(issue_id)
+        assert len(audits) == 1
+        assert audits[0]["actor_role"] == "owner"
 
 
 class TestRegression:

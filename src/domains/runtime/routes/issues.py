@@ -607,13 +607,48 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
 class _IssueStatusBody(BaseModel):
     status: str = ""
 
-@router.put("/{issue_id}/status", operation_id="issues_status", summary="Update issue status", description="Transitions Issue status (active/processing/awaiting_input/pending_review/completed/cancelled flow). User-only: user-facing status is mutable by the owner; session token -> 403.")
+def _write_issue_status(c, issue_id: int, ns: str, revert_to_review: bool) -> None:
+    """落库 issue 状态（调用方已持 db_lock 并负责 commit）。
+
+    Issue #1408：completed → pending_review 为受控撤销出口，同一条 UPDATE 内回退
+    status/stage 并清空完成信息；仅写这几列，保留 assignee/owner_agent/a2a_seq 等归属与
+    平台同步字段（避免抹掉 GitCode 责任人并造成审计归属失真）。
+    """
+    if revert_to_review:
+        # 带 status 守卫：多进程/并发下若该需求已被改成其它状态，UPDATE 不命中，
+        # 按 409 返回并跳过审计（避免覆盖并发写入，与 session_store 状态写路径一致）。
+        c.execute(
+            "UPDATE issue SET status='pending_review', stage='pending_review', "
+            "completed_at=NULL, completed_reason=NULL, updated_at=datetime('now') "
+            "WHERE id=? AND status='completed'",
+            (issue_id,)
+        )
+        if c.rowcount == 0:
+            from src.kernel.session_manager import db as _db
+            _db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
+        return
+    c.execute(
+        "UPDATE issue SET status=?, "
+        "completed_at=CASE WHEN ? IN ('completed','cancelled') THEN datetime('now') ELSE completed_at END, "
+        "completed_reason=CASE WHEN ?='completed' THEN 'manual' WHEN ?='cancelled' THEN 'cancelled' ELSE completed_reason END "
+        "WHERE id=?",
+        (ns, ns, ns, ns, issue_id)
+    )
+
+@router.put("/{issue_id}/status", operation_id="issues_status", summary="Update issue status", description="Transitions Issue status (active/processing/awaiting_input/pending_review/completed/cancelled flow). User-only: user-facing status is mutable by the owner, and the completed->pending_review revert is additionally open to repository Owner/Admin members (real repo role check); session token -> 403.")
 def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depends(require_no_session_token)):
     """Issue 状态迁移（active/processing/awaiting_input/pending_review/completed/cancelled 流转规则）。
 
     user_only：状态是**需求中心视角（用户可读）**，且 awaiting_input/completed/cancelled 允许用户直接
     设置（高优先级覆盖）；若放行 tk_ 会话 token，Agent 执行期可随意改状态，与 pipeline 驱动的 stage
     脱钩→冲突/不一致，干扰任务执行。故仅用户（JWT / grape_）可改；读（GET /status，轮询 wait 用）保持 dual。
+
+    Issue #1408：`completed → pending_review`（撤销完成）是唯一放行**仓库管理员**的迁移——需求本人照旧
+    可撤销，仓库 Owner/Admin 也可撤销**他人**误完成的需求（参照 admin-confirm-done 的
+    `get_repo_admin_identity` fail-closed 真实角色校验）。其余迁移仍严格仅限本人。
     """
     from src.api.issues_center import _TASK_STATUS_FLOWS
     from src.kernel.session_manager import db, db_lock
@@ -628,40 +663,38 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        # D105: user["id"] is str; MySQL rows return int — normalize before compare
-        if str(row[0]) not in (str(user["id"]), "0"):
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该需求"})
         cur = row[1]
+        # Issue #1408：撤销完成是唯一的管理员例外出口（completed → pending_review）
+        _revert_to_review = (cur == "completed" and ns == "pending_review")
+        # D105: user["id"] is str; MySQL rows return int — normalize before compare
+        _is_owner = str(row[0]) in (str(user["id"]), "0")
+        if not _is_owner and not _revert_to_review:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该需求"})
         if cur != ns and ns not in _TASK_STATUS_FLOWS.get(cur, ()):
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"不允许从 {cur} 迁移到 {ns}"})
-        # Issue #1408：completed → pending_review 为受控撤销出口，同一条 UPDATE 内回退
-        # status/stage 并清空完成信息；仅写这几列，保留 assignee/owner_agent/a2a_seq 等归属与
-        # 平台同步字段（避免抹掉 GitCode 责任人并造成审计归属失真）。
-        _revert_to_review = (cur == "completed" and ns == "pending_review")
-        if _revert_to_review:
-            # 带 status 守卫：多进程/并发下若该需求已被改成其它状态，UPDATE 不命中，
-            # 按 409 返回并跳过审计（避免覆盖并发写入，与 session_store 状态写路径一致）。
-            c.execute(
-                "UPDATE issue SET status='pending_review', stage='pending_review', "
-                "completed_at=NULL, completed_reason=NULL, updated_at=datetime('now') "
-                "WHERE id=? AND status='completed'",
-                (issue_id,)
-            )
-            if c.rowcount == 0:
-                db.rollback()
-                raise HTTPException(
-                    status_code=409,
-                    detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
-        else:
-            c.execute(
-                "UPDATE issue SET status=?, "
-                "completed_at=CASE WHEN ? IN ('completed','cancelled') THEN datetime('now') ELSE completed_at END, "
-                "completed_reason=CASE WHEN ?='completed' THEN 'manual' WHEN ?='cancelled' THEN 'cancelled' ELSE completed_reason END "
-                "WHERE id=?",
-                (ns, ns, ns, ns, issue_id)
-            )
-        db.commit()
+        # 本人：保持原语义——读改写在同一把 db_lock 内完成（单进程原子）。
+        # 非本人：需先做仓库角色校验（VCS 网络调用），故仅此时出锁鉴权，再带 status 守卫写回。
+        if _is_owner:
+            _write_issue_status(c, issue_id, ns, _revert_to_review)
+            db.commit()
+    _admin_ident = None
+    if not _is_owner:
+        # 仓库访问 + 真实角色校验（fail-closed：未绑定/查询失败均视为非 admin），
+        # 与 admin-confirm-done 同款口径；VCS 权限查询可能耗时，故在 db_lock 之外执行。
+        from src.api.deps import check_repo_access
+        from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
+        check_repo_access(user, row[2])
+        _admin_ident = get_repo_admin_identity(user, row[2])
+        if not _admin_ident:
+            raise HTTPException(status_code=403, detail={
+                "code": 403,
+                "message": "无权操作该需求：仅需求本人或仓库 Owner/Admin 可撤销已完成需求"})
+        with db_lock:
+            _write_issue_status(db.cursor(), issue_id, ns, _revert_to_review)
+            db.commit()
     if _revert_to_review:
+        _actor_role = "admin" if _admin_ident else "owner"
+        _actor_name = (_admin_ident or {}).get("username") or user.get("username", "")
         try:
             from src.domains.mgmt.auth.audit import log_audit
             log_audit("issue_reverted_to_pending_review", operator_id=user.get("id", 0) or 0,
@@ -669,7 +702,9 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
                           "repo_key": row[2],
                           "issue_id": issue_id,
                           "issue_number": row[3],
-                          "username": user.get("username", ""),
+                          "username": _actor_name,
+                          "actor_role": _actor_role,
+                          "role_source": (_admin_ident or {}).get("source", ""),
                           "from_status": cur,
                           "to_status": ns,
                           "from_stage": row[4] or "",
@@ -679,7 +714,8 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
                       })
         except Exception as _e:
             log.warning(f"issue-status: revert audit log failed (issue={issue_id}): {_e}")
-        log.info(f"Issue #{issue_id} reverted completed → pending_review by user {user.get('id', 0)}")
+        log.info(f"Issue #{issue_id} reverted completed → pending_review by user {user.get('id', 0)} "
+                 f"(role={_actor_role})")
     return {"ok": True, "issue_id": issue_id, "status": ns}
 
 class _IssueConfirmBody(BaseModel):
