@@ -286,6 +286,32 @@ def test_clean_cleanup_removes_without_archive(repo):
     assert not os.path.exists(wg.reset_archive_root(repo))
 
 
+def test_non_git_residue_dir_removed(repo):
+    """QA N1：非 git 残留目录（无 .git，`git worktree add` 失败/中断留下）
+    → 直接删除，不再退化为「恒拒绝、只能等僵尸 TTL」。"""
+    issue_dir = repogit.issue_dir_for(repo, "coding", "31")
+    os.makedirs(issue_dir, exist_ok=True)
+    with open(os.path.join(issue_dir, "partial.txt"), "w", encoding="utf-8") as f:
+        f.write("residue\n")
+    assert not os.path.exists(os.path.join(issue_dir, ".git"))
+    assert repogit.cleanup_issue_worktree(repo, "coding", "31") is True
+    assert not os.path.isdir(issue_dir), "非 git 残留必须被回收"
+    assert wg.load_reset_record(repo, "31", "coding") is None, "无可丢内容不应产记录"
+
+
+def test_residue_with_git_marker_still_fail_closed(repo):
+    """N1 判据不得放宽：目录含 .git（此处为损坏的 gitdir 指针文件，git 无法解析）
+    → 仍走归档守卫，扫描失败即拒绝删除（保留现场人工确认）。"""
+    issue_dir = repogit.issue_dir_for(repo, "coding", "32")
+    os.makedirs(issue_dir, exist_ok=True)
+    with open(os.path.join(issue_dir, ".git"), "w", encoding="utf-8") as f:
+        f.write("gitdir: /nonexistent/worktrees/32\n")
+    with open(os.path.join(issue_dir, "partial.txt"), "w", encoding="utf-8") as f:
+        f.write("residue\n")
+    assert repogit.cleanup_issue_worktree(repo, "coding", "32") is False
+    assert os.path.isdir(issue_dir), "含 .git 的残留必须 fail-closed 保留"
+
+
 def test_remove_if_pushed_keeps_unpushed_worktree(repo, git_src):
     """remove_issue_worktree_if_pushed：未推送 → 保留且不归档（未发生重置）。"""
     wt = _wt(repo, "18")
