@@ -29,6 +29,10 @@ SPAWN_FAIL_WARN_SECONDS = max(1, int(os.environ.get("RUNTIME_SPAWN_FAIL_WARN_SEC
 SPAWN_FAIL_DEGRADE_SECONDS = max(1, int(os.environ.get("RUNTIME_SPAWN_FAIL_DEGRADE_SECONDS", "1800")))
 # 恢复判定：连续探活 ok 次数
 RECOVER_OK_STREAK = max(1, int(os.environ.get("RUNTIME_RECOVER_OK_STREAK", "3")))
+# 悬挂释放宽限窗（QA 审查意见）：dispatch→running 上报的正常间隙内不释放悬挂绑定，
+# 与 service.py 离线回收路径（#1071 P3 活性守卫）的 600s 窗口口径对齐（兼容长命令
+# 慢启动）；0 = 关闭时效下限（仅保留 task_messages 活性守卫）。
+RECOVERY_RELEASE_GRACE_SECONDS = max(0, int(os.environ.get("RUNTIME_RECOVERY_RELEASE_GRACE_SECONDS", "600")))
 
 _WARN_HINT = (
     " | spawn_failed warning: consecutive failures reached the alarm window; "
@@ -248,11 +252,24 @@ def _reconcile_task_bindings(c, runtime_id: int, now_iso: str) -> dict:
         log.warning(f"_reconcile_task_bindings: terminalize failed (runtime={runtime_id}): {e}")
 
     try:
+        # 悬挂释放守卫（QA 审查意见，与 service.py #1071 P3 活性守卫口径对齐）：
+        # - worker 已产出消息的任务不释放（task_messages 有记录 = worker 确已收到
+        #   并开工，仅 task_start/running 上报在途，释放会引发重复执行）；
+        # - 时效下限：悬挂未满宽限窗不释放（手动一键加回在引擎健康、任务处于
+        #   「派发→running 上报」间隙时的误释放窗口由 run_token 兜底降为重复执行，
+        #   这里从源头收窄）。
         rows = c.execute(
-            "SELECT id FROM agent_tasks WHERE runtime_id=? AND status='dispatched' "
-            "AND (started_at IS NULL OR started_at='')",
+            "SELECT id, created_at FROM agent_tasks WHERE runtime_id=? AND status='dispatched' "
+            "AND (started_at IS NULL OR started_at='') "
+            "AND NOT EXISTS (SELECT 1 FROM task_messages WHERE task_id=agent_tasks.id)",
             (runtime_id,)).fetchall()
-        for (tid,) in rows:
+        now_ts = _ts(now_iso)
+        for tid, created_at in rows:
+            if RECOVERY_RELEASE_GRACE_SECONDS > 0:
+                created_ts = _ts(created_at) if created_at else None
+                if created_ts is None or now_ts is None \
+                        or now_ts - created_ts < RECOVERY_RELEASE_GRACE_SECONDS:
+                    continue
             c.execute(
                 "UPDATE agent_tasks SET status='queued', runtime_id=0, "
                 "errors=? WHERE id=? AND status='dispatched'",

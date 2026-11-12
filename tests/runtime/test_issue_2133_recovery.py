@@ -6,7 +6,8 @@
 3. 连续 M 次探活 ok 后自动加回场景绑定 + 任务绑定对账（已取消回写终态、
    worker 从未收到的 dispatched 悬挂释放回 queued、busy_slots 收敛）；
 4. 加回幂等（重复加回不重复绑定、不重复回写）；
-5. #1982 复现链路回归：spawn_failed 期间不派单 → ok 恢复后自动出黑名单并加回。
+5. #1982 复现链路回归：spawn_failed 期间不派单 → ok 恢复后自动出黑名单并加回；
+6. QA 审查补充：悬挂释放守卫（task_messages 活性 + 宽限窗）。
 """
 import os
 import sys
@@ -78,22 +79,35 @@ def _insert_detach_log(scene_row_id, scene_id, tag, rid, name):
     return log_id
 
 
-def _insert_task(rid, status, completed_at=None, started_at=None):
+def _insert_task(rid, status, completed_at=None, started_at=None, created_at=None):
     tid = f"t_2133_{uuid.uuid4().hex[:10]}"
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, agent_type, prompt, "
-            "status, completed_at, started_at) VALUES (?,?,?,?,?,?,?,?)",
-            (tid, "sess-2133", rid, "coding", "prompt", status, completed_at, started_at))
+            "status, completed_at, started_at, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (tid, "sess-2133", rid, "coding", "prompt", status, completed_at, started_at,
+             created_at or "2026-11-12T00:00:00+00:00"))
         db.commit()
     return tid
+
+
+def _insert_task_message(tid, seq=1, created_at="2026-11-12T00:30:00+00:00"):
+    """插入一条 task_messages（模拟 worker 已收到任务并产出消息）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO task_messages (task_id, seq, type, content, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (tid, seq, "text", "worker alive", created_at))
+        db.commit()
 
 
 def _cleanup(cid, scene_row_id=0, task_ids=()):
     with db_lock:
         c = db.cursor()
         for tid in task_ids:
+            c.execute("DELETE FROM task_messages WHERE task_id=?", (tid,))
             c.execute("DELETE FROM agent_tasks WHERE id=?", (tid,))
         c.execute("DELETE FROM engine_lifecycle_audit WHERE runtime_id IN "
                   "(SELECT id FROM agent_runtimes WHERE credential_id=?)", (cid,))
@@ -294,3 +308,46 @@ def test_1982_reproduction_spawn_failed_blocks_then_recovers_on_ok():
         assert rid in (nodes[0].get("engine_runtime_ids") or []), "恢复后必须自动加回场景"
     finally:
         _cleanup(cid, scene_row_id)
+
+
+def test_dangling_release_guarded_by_liveness_and_grace_window():
+    """悬挂释放守卫（QA 审查意见，与 service.py #1071 P3 活性守卫口径对齐）。
+
+    - worker 已产出消息（task_messages 有记录）的悬挂绑定不释放——worker 确已
+      收到任务，仅 running 上报在途，释放会引发重复执行；
+    - 悬挂未满宽限窗（created_at 距恢复时刻 < RECOVERY_RELEASE_GRACE_SECONDS）不释放
+      ——引擎健康时手动一键加回撞上「派发→running 上报」正常间隙的误释放窗口；
+    - 无消息且超宽限窗的真悬挂 → 释放回 queued。
+    """
+    cid = _insert_credential()
+    name = f"engine-2133-{uuid.uuid4().hex[:8]}"
+    scene_row_id, scene_id = _insert_scene("coding", eids=[])
+    tasks = []
+    try:
+        rid = _insert_runtime(cid, name, detached_from_scenes_at="2026-11-12T00:00:00+00:00")
+        _insert_detach_log(scene_row_id, scene_id, "coding", rid, name)
+        # 活性守卫命中：有 task_messages → 不释放
+        alive = _insert_task(rid, "dispatched", started_at=None,
+                             created_at="2026-11-12T00:00:00+00:00")
+        _insert_task_message(alive)
+        # 宽限窗命中：无消息但悬挂仅 7 分钟（< 默认 600s 宽限）→ 不释放
+        fresh = _insert_task(rid, "dispatched", started_at=None,
+                             created_at="2026-11-12T00:58:00+00:00")
+        # 真悬挂：无消息且悬挂超宽限窗 → 释放
+        stale = _insert_task(rid, "dispatched", started_at=None,
+                             created_at="2026-11-12T00:00:00+00:00")
+        tasks.extend([alive, fresh, stale])
+
+        with patch.object(recovery, "RECOVER_OK_STREAK", 1):
+            with db_lock:
+                c = db.cursor()
+                out = recovery.note_probe_ok(
+                    c, rid, now_iso="2026-11-12T01:05:00+00:00")
+                db.commit()
+        assert out["recovered"] is True
+        assert out["released"] == [stale], "仅无消息且超宽限窗的真悬挂才释放"
+        assert _task(alive)[0] == "dispatched", "有 task_messages 活性的任务不得释放"
+        assert _task(fresh)[0] == "dispatched", "宽限窗内的悬挂绑定不得释放"
+        assert _task(stale)[0] == "queued"
+    finally:
+        _cleanup(cid, scene_row_id, tasks)
