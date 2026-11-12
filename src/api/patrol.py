@@ -36,6 +36,19 @@ from datetime import datetime, timedelta, timezone
 from src.kernel.config import CONFIG_DIR, log
 
 from src.kernel.session_manager import db, db_lock
+from src.api.pipeline_constants import (
+    DEFAULT_CONFIRM_MINUTES,
+    PAUSED_ISSUE_STATUSES,
+    PIPELINE_SEGMENT_EVENT_TYPES,
+    TARGET_SOURCE_LEGACY_TEXT,
+    TARGET_SOURCE_NOT_HANDOFF,
+    TARGET_SOURCE_PIPELINE,
+    TARGET_SOURCE_TERMINAL,
+    TARGET_SOURCE_TEXT,
+    TARGET_SOURCE_UNKNOWN,
+    TERMINAL_ISSUE_STAGES,
+    TERMINAL_TASK_STATUSES,
+)
 
 # ====== 配置面（决策变更 2026-11-02 负责人拍板）：全部走 configs/patrol-config.json
 # （example 入库、正式文件 gitignored，缺省即全默认=能力全开），不再读任何 env。
@@ -357,6 +370,45 @@ def parse_target_agent(next_step: str) -> str:
     m = _NEXT_STEP_RE.match((next_step or "").strip())
     return m.group(1).strip().lower() if m else ""
 
+# 历史兼容格式：结论文本独立行 `A2A: → qa` / `A2A -> qa`。
+# Issue #2050：结构化 handoff 为主触发源；该文本行降级为人类可读兼容格式，
+# 命中即写审计日志（source=legacy_text），不作为唯一判定门槛。
+# 行尾允许附带人类说明（`（待确认）` / ` - 交接` / ` (cross-pipeline, scene=...)`），
+# 但 agent 名必须是独立 token，避免把整句说明吞成目标名。
+_LEGACY_A2A_LINE_RE = re.compile(
+    r"(?im)^\s*A2A\s*[:：]?\s*(?:→|->)?\s*([a-zA-Z][a-zA-Z0-9_\-]*)\b.*$")
+
+
+def extract_legacy_text_handoff(result_text: str) -> str:
+    """从结论文本解析历史 `A2A: → <agent>` 行，命中返回 agent（并写审计日志）。
+
+    兼容路径仅用于降级：结构化 next_step 缺失时才回退到该文本约定；
+    解析结果会以 a2a-handoff-audit 前缀落日志，便于区分结构化/文本来源。
+    """
+    if not result_text:
+        return ""
+    raw = str(result_text)
+    candidates = [raw]
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            for k in ("conclusion", "issue_summary", "result_text"):
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    candidates.insert(0, v)
+    except Exception:
+        pass
+    for text in candidates:
+        m = _LEGACY_A2A_LINE_RE.search(text or "")
+        if m:
+            agent = m.group(1).strip().lower()
+            if agent and agent not in ("done", "pending_review"):
+                log.info(f"[a2a-handoff-audit] source=legacy_text target={agent} "
+                         f"line={m.group(0).strip()[:80]!r}")
+                return agent
+    return ""
+
+
 def _is_pr_subscription_chain(issue_id: str) -> bool:
     """PR 订阅链伪 ID（`#pr_` 前缀）：a2a 端点设计性拦截、本无交棒语义（D17）。"""
     return (issue_id or "").startswith(_PR_SUB_PREFIX)
@@ -385,9 +437,180 @@ def issue_terminal(repo_key: str, issue_id: str) -> str:
             (repo_key, _native_issue_number(num)))
         row = c.fetchone()
     status = (row[0] or "").strip() if row else ""
-    if status in ("completed", "pending_review", "cancelled"):
+    if status in TERMINAL_TASK_STATUSES or status in PAUSED_ISSUE_STATUSES:
         return status
     return ""
+
+def issue_stage_value(repo_key: str, issue_id: str) -> str:
+    """读 issue 当前 stage（issue 单表权威，issue_state 兜底；失败返回 ''）。"""
+    if not repo_key or not issue_id:
+        return ""
+    num = str(issue_id).lstrip("#")
+    if not num.isdigit():
+        return ""
+    stage = ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT stage FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                      (repo_key, int(num)))
+            row = c.fetchone()
+        if row and row[0]:
+            stage = str(row[0]).strip()
+    except Exception as e:
+        log.warning(f"[patrol] issue stage read failed repo={repo_key} issue={issue_id}: {e}")
+    if not stage:
+        try:
+            from src.api.session_store import get_issue_stage
+            st = get_issue_stage(repo_key, issue_id) or {}
+            stage = str(st.get("stage") or "").strip()
+        except Exception:
+            stage = ""
+    return stage
+
+
+def has_newer_issue_event(repo_key: str, issue_id: str, completed_at: str) -> bool:
+    """任务完成后是否已出现新的「流水线段」事件。
+
+    Issue #2050 兜底判据：末段 completed 且 stage≠done 且超阈值无新段 = 停滞。
+    「无新段」只认流水线 a2a_event，不认 events 表任意行——admin_action /
+    assignee_changed 等审计/元数据事件不会推进链路，若混入则一次后台操作即可
+    永久抑制停滞检测（并让 Recheck 误判 false_positive）。
+    """
+    done_dt = _parse_dt(completed_at)
+    if done_dt is None or not repo_key or not issue_id:
+        return False
+    types = tuple(PIPELINE_SEGMENT_EVENT_TYPES)
+    placeholders = ",".join("?" for _ in types)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT created_at FROM events WHERE repo_key=? AND issue_id=? "
+                f"AND event_type IN ({placeholders})",
+                (repo_key, issue_id, *types))
+            rows = c.fetchall() or []
+    except Exception as e:
+        log.warning(f"[patrol] newer-segment check failed repo={repo_key} issue={issue_id}: {e}")
+        return False
+    for (created,) in rows:
+        dt = _parse_dt(created or "")
+        if dt is not None and dt > done_dt:
+            return True
+    return False
+
+
+def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> bool:
+    """源段完成后是否已有引用其 event_seq 的结构化 handoff 事件。
+
+    Issue #2050 主触发源：``POST /api/a2a`` 会回显并落库 ``source_seq``（显式
+    ``source_event_seq``，缺省由调用方会话反查），据此可直接判定「这一棒已用
+    结构化调用交出去」，无需再依赖结论文本。仅当 payload 引用本任务 event_seq
+    时命中；文本/场景序推导只作为降级路径。
+    """
+    if not repo_key or not issue_id or not task_id:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1", (task_id,))
+            row = c.fetchone()
+        source_seq = int((row[0] if row else 0) or 0)
+    except Exception as e:
+        log.warning(f"[patrol] structured handoff source seq read failed task={task_id}: {e}")
+        return False
+    if source_seq <= 0:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT payload FROM events WHERE repo_key=? AND issue_id=? "
+                "AND event_type='a2a_event'",
+                (repo_key, issue_id))
+            rows = c.fetchall() or []
+    except Exception as e:
+        log.warning(f"[patrol] structured handoff evidence query failed "
+                    f"repo={repo_key} issue={issue_id}: {e}")
+        return False
+    for (payload_raw,) in rows:
+        try:
+            payload = payload_raw
+            if isinstance(payload_raw, str):
+                payload = json.loads(payload_raw or "{}")
+            if not isinstance(payload, dict):
+                continue
+            ref = int(payload.get("source_seq")
+                      or payload.get("source_event_seq")
+                      or payload.get("ref_seq") or 0)
+        except Exception:
+            continue
+        if ref == source_seq:
+            return True
+    return False
+
+
+def derive_next_target_from_scene(repo_key: str, issue_id: str, agent_type: str) -> str:
+    """按当前场景流水线阶段序推导下一棒（无法唯一确定/已到终点 → ''）。"""
+    try:
+        from src.api.a2a_dispatch_guard import resolve_scene, pipeline_order
+        _scene_id, nodes = resolve_scene(repo_key, str(issue_id or "").lstrip("#"))
+        order = pipeline_order(nodes or [])
+    except Exception as e:
+        log.warning(f"[patrol] derive next target failed repo={repo_key} issue={issue_id}: {e}")
+        return ""
+    if not order:
+        return ""
+    stage = issue_stage_value(repo_key, issue_id)
+    cur = ""
+    if agent_type and str(agent_type).strip() in order:
+        cur = str(agent_type).strip()
+    elif stage in order:
+        cur = stage
+    if not cur:
+        return ""
+    idx = order.index(cur)
+    if idx + 1 >= len(order):
+        return ""
+    nxt = order[idx + 1]
+    if nxt in TERMINAL_ISSUE_STAGES:
+        return ""
+    return nxt
+
+
+def resolve_handoff_target(repo_key: str, issue_id: str, agent_type: str,
+                           result_text: str = "") -> tuple[str, str]:
+    """解析本次交棒的目标与来源。
+
+    返回 ``(target_agent, source)``：
+    - ``("qa", "text")``：结构化 next_step 解析成功；
+    - ``("qa", "legacy_text")``：历史 `A2A:` 行兼容解析（已写审计日志）；
+    - ``("qa", "pipeline")``：文本缺失，按场景阶段序唯一推导；
+    - ``("", "terminal")``：已到流水线终点（正常完成，非停滞）；
+    - ``("", "")``：无法唯一确定（交人工处置）。
+    """
+    next_step = extract_next_step(result_text or "")
+    target = parse_target_agent(next_step)
+    if target and target not in TERMINAL_ISSUE_STAGES:
+        return target, TARGET_SOURCE_TEXT
+    if target in TERMINAL_ISSUE_STAGES:
+        return "", TARGET_SOURCE_TERMINAL
+    if next_step and next_step.lower().startswith("a2a"):
+        return "", TARGET_SOURCE_UNKNOWN   # 写了 a2a 但未带目标名：判据保持人工核对（不猜）
+    if next_step:
+        return "", TARGET_SOURCE_NOT_HANDOFF   # 显式非 a2a 意图（如 review）：保持历史跳过口径
+    legacy = extract_legacy_text_handoff(result_text or "")
+    if legacy:
+        return legacy, TARGET_SOURCE_LEGACY_TEXT
+    if not next_step:
+        derived = derive_next_target_from_scene(repo_key, issue_id, agent_type)
+        if derived:
+            return derived, TARGET_SOURCE_PIPELINE
+        stage = issue_stage_value(repo_key, issue_id)
+        if stage in TERMINAL_ISSUE_STAGES:
+            return "", TARGET_SOURCE_TERMINAL
+    return "", TARGET_SOURCE_UNKNOWN
+
 
 def l1_event_exists(repo_key: str, issue_id: str, completed_at: str,
                     target_agent: str = "") -> bool:
@@ -694,15 +917,31 @@ def detect_broken_chains(lookback_cutoff_iso: str = "", known: set = None) -> li
     texts = _fetch_result_texts([t[0] for t in prefiltered])
     for (tid, repo_key, issue_id, agent_type, completed_at, age_min) in prefiltered:
         try:
-            next_step = extract_next_step(texts.get(tid) or "")
-            if not next_step.lower().startswith("a2a"):
+            raw_text = texts.get(tid) or ""
+            next_step = extract_next_step(raw_text)
+            # Issue #2050 主触发源：结构化 handoff 引用本任务 event_seq 即视为已交棒，
+            # 与结论文本无关（文本只是人工可读的降级格式）。
+            if structured_handoff_exists(repo_key, issue_id or "", tid):
                 continue
-            target_agent = parse_target_agent(next_step)
-            if l1_event_exists(repo_key, issue_id, completed_at or "", target_agent):
-                continue  # L1 命中：交棒已发生
-            if l2_downstream_exists(repo_key, issue_id, target_agent, completed_at or "",
-                                    _subtask_parent(repo_key, issue_id or "")):
-                continue  # L2 命中：下游任务已出现
+            target_agent, target_source = resolve_handoff_target(
+                repo_key, issue_id or "", agent_type or "", raw_text)
+            # 显式非 a2a 意图（next_step=review 等）/ 流水线终点：保持不报。
+            if target_source in (TARGET_SOURCE_NOT_HANDOFF, TARGET_SOURCE_TERMINAL):
+                continue
+            if target_agent:
+                if l1_event_exists(repo_key, issue_id, completed_at or "", target_agent):
+                    continue  # L1 命中：交棒已发生
+                if l2_downstream_exists(repo_key, issue_id, target_agent, completed_at or "",
+                                        _subtask_parent(repo_key, issue_id or "")):
+                    continue  # L2 命中：下游任务已出现
+            # Issue #2050 兜底判据：文本缺失/仅场景推导的候选才有「通用新段证据」；
+            # 原有文本 A2A 候选保持 L1/L2 口径，避免同族场景（#1973/#1948）从可报变漏报。
+            if target_source not in (TARGET_SOURCE_TEXT, TARGET_SOURCE_LEGACY_TEXT):
+                if has_newer_issue_event(repo_key, issue_id or "", completed_at or ""):
+                    continue  # 已有新段：链在推进
+            _reason = ("no_handoff_text" if not next_step
+                       else ("handoff_keyword_only" if target_source == TARGET_SOURCE_UNKNOWN
+                             else "handoff_missing"))
             findings.append({
                 "kind": "broken_chain",
                 "task_id": tid,
@@ -713,12 +952,18 @@ def detect_broken_chains(lookback_cutoff_iso: str = "", known: set = None) -> li
                     "agent_type": agent_type or "",
                     "next_step": next_step,
                     "target_agent": target_agent,
+                    "target_source": target_source,
+                    "reason": _reason,
                     "completed_at": completed_at or "",
                     "age_minutes": round(age_min, 1),
                     "l1": "miss", "l2": "miss",
                 }, ensure_ascii=False),
-                "suggestion": (f"补发交棒 → {target_agent}" if target_agent
-                               else "下一棒意图不可解析（next_step 无 agent 名），人工核对"),
+                "suggestion": (
+                    f"文本无交棒声明，按场景序推导建议下一棒 → {target_agent}"
+                    f"（仅告警，不自动派发，需人工确认）"
+                    if target_source == TARGET_SOURCE_PIPELINE else
+                    (f"补发交棒 → {target_agent}" if target_agent
+                     else "段已完成但下一棒无法唯一确定，人工核对（needs_human）")),
             })
         except Exception as e:
             log.warning(f"[patrol] broken-chain judge failed task={tid}: {e}")
