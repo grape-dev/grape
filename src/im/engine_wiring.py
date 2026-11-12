@@ -197,6 +197,21 @@ def _connect(db_path: str):
     _SharedConn 代理，close() 为空操作（不能关掉全局单例）。
     """
     if _is_mysql_backend():
+        # 四进程拆分后每个进程绑定各自域库（mgmt/event/runtime/insight），
+        # 但 IM 渠道表（installation/binding/dedup/inbound_message/lease）是跨进程共享的：
+        # 引擎（mgmt 进程）写入、sweeper（event 进程）清理、用户面接口（mgmt）读取。
+        # 用 GRAPE_IM_DB_NAME 固定到单一域库（dev/prod 均为 runtime），避免"一半表在 mgmt、
+        # 一半在 runtime"导致 sweeper 报 no such table、安装行读不到。
+        global _IM_DB_CONN
+        _im_db = (os.environ.get("GRAPE_IM_DB_NAME") or "").strip()
+        _cur_db = (os.environ.get("DEVOPS_DB_NAME") or "").strip()
+        if _im_db and _im_db != _cur_db:
+            if _IM_DB_CONN is None:
+                from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
+                _cfg = dict(mysql_config())
+                _cfg["database"] = _im_db
+                _IM_DB_CONN = MySQLCompatDB(**_cfg)
+            return _SharedConn(_IM_DB_CONN)
         return _SharedConn(_shared_db())
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA busy_timeout=5000")
@@ -223,6 +238,7 @@ def _reset_backend_cache() -> None:
     """清掉后端探测缓存（仅供测试在切换 DEVOPS_DB_BACKEND 后调用）。"""
     global _MYSQL_BACKEND_CACHE
     _MYSQL_BACKEND_CACHE = None
+_IM_DB_CONN = None  # 独立的 IM 域库连接（GRAPE_IM_DB_NAME 覆盖时使用）
 
 
 def _shared_db():
