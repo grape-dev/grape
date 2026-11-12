@@ -329,6 +329,19 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             name = (rt.get("name") or "").strip().lower()
             if not name:
                 continue
+            # CLI 同名防误识别（2026-11-10，QA #1190 I3 整改）：显式 installed 为假值
+            # 的引擎（如经能力判别排除的非 dsh 版同名 aishell 工具）不建行、不点亮——
+            # 旧循环会把它 UPDATE installed=1 status=online，假行成为派单黑洞（DevSpace
+            # 假 aishell-dsh 实证）。字面 False/0/"false" 三形态都命中；已有同名行顺手
+            # 置 installed=0 收敛（假行点亮的存量状态在下次注册时被压回，无需等
+            # reap_stale_runtimes 的 ~160s 窗口）。缺 installed 字段的旧 worker 上报
+            # 不在此列（向后兼容——旧包误报 True 需 worker 升级后才被此层拦截）。
+            _inst_raw = rt.get("installed")
+            if _inst_raw is not None and str(_inst_raw).strip().lower() in ("false", "0"):
+                c.execute("UPDATE agent_runtimes SET installed=0 "
+                          "WHERE credential_id=? AND lower(name)=?",
+                          (credential_id, name))
+                continue
             _ls_json = skills_by_name.get(name, "[]")
             # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——
             # scope/owner_id/org_id/repo_key 是凭据派生属性，命中既有行后原地同步，

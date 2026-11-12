@@ -1681,12 +1681,13 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             chat_runtime_id = 0
 
         # 引擎类型感知的 has_valid_session：提前解析引擎类型，
-        # codearts 忽略 session_id；只有 opencode/hermes 才真正使用 session 续接。
+        # codearts 忽略 session_id；opencode/hermes/aishell-dsh 真正使用 session 续接
+        # （aishell-dsh 二期起支持 session/resume——uuid 形态 sessionId 跨进程续接）。
         from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
         _rid = chat_runtime_id or (resolve_local_engine(_uid or 0) or 0)
         _engine_name = engine_name(_rid) if _rid else ""
         _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
-        has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes")
+        has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes", "aishell-dsh")
 
         prompt = _build_feishu_chat_prompt(text, repo_key, history, skills, exec_account,
                                            chat_runtime_id, conv_id, user_info=user_info,

@@ -15,11 +15,11 @@ INDEX = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static"
 FROZEN = {
     "account.js": "51", "agents.js": "32", "api.js": "32", "app.js": "253",
     "autopilot.js": "74", "auto-recovery.js": "2", "chat.js": "50",
-    "dashboard.js": "154", "events.js": "66", "feedback.js": "10",
+    "dashboard.js": "154", "events.js": "67", "feedback.js": "10",
     "im_channel.js": "31", "issues.js": "137", "knowledge.js": "150",
     "my_feedback.js": "8", "my_feedback_detail.js": "6",
     "observability.js": "75", "organizations.js": "18", "pipeline.js": "48",
-    "repos.js": "64", "runtimes.js": "99", "scene-market.js": "51",
+    "repos.js": "64", "runtimes.js": "101", "scene-market.js": "51",
     "settings.js": "39", "skills.js": "49", "templates.js": "38",
     "worker-name.js": "2", "pwd-blocklist.js": "3",
 }

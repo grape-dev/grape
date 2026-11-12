@@ -219,16 +219,25 @@ def discover_backends() -> list[dict]:
         "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
         "atomcode": {"cli": "atomcode", "pip": "@atomgit.com/atomcode"},
         "hwcloud": {"cli": "hwcloud", "pip": ""},
-        "aishell-dsh": {"cli": "aishell", "pip": ""},
+        "aishell-dsh": {"cli": "aishell", "pip": "", "capability": "acp"},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []
     for name, info in known.items():
         cli_path = find_cli(info["cli"])
+        installed = bool(cli_path)
+        # CLI 同名防误识别（2026-11-10 实证）：`aishell` 不是 dsh 发行版的独占名——
+        # 其它 aishell 工具（如 DevSpace 镜像内同名 CLI）同样命中 find_cli。能力判别：
+        # dsh 发行版独有 `acp` 子命令（`acp --help` 输出含 Agent Client Protocol），
+        # 缺该能力的同名 CLI 不是 aishell-dsh 引擎，installed 判 False——避免假引擎行
+        # 注册（服务端 register 会把上报的引擎行点亮 online，假行 = 派单黑洞）。
+        if installed and info.get("capability") == "acp":
+            from src.domains.runtime.agents.aishell_acp import aishell_dsh_capable
+            installed = bool(cli_path) and aishell_dsh_capable(cli_path)
         results.append({
             "name": name,
-            "installed": bool(cli_path),
-            "cli_path": cli_path,
+            "installed": installed,
+            "cli_path": cli_path if installed else "",
             "pip_package": info["pip"],
         })
     return results
@@ -656,6 +665,16 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
       chat/任务需要的模型凭据，与 VCS 平台 token 无关。
     - 参数 bot_token/user_token 仅用于日志脱敏（_tokens 列表），不再写入 env。
     """
+    # user_id 类型归一：chat 链路传 str（user["id"]），devops 链路传 int——
+    # 在汇点统一转 int（str 不可比 int，未归一会 TypeError 中断整个任务）。
+    # 归一失败静默为 0 会让 scope=user worker 认领不到（仓库规则：任务 user_id
+    # 必须正确），故失败必须留痕（QA #1230 I3：静默降级不可接受）。
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        log.warning(f"_assemble_env: user_id not int-coercible ({user_id!r}), "
+                    f"degrading to 0 — user-scoped credential injection disabled")
+        user_id = 0
     # grape CLI PATH 注入（Windows 部署缺口：install-worker.ps1 未像 install-worker.sh:615
     # 把 worker venv bin 注册进 PATH，agent shell 里 `grape` 找不到——2026-11-07 真任务
     # 实证 event 1）。目录存在才前缀注入；机器级 PATH 修复后此注入自然冗余无害。

@@ -1283,6 +1283,7 @@ function _tlIcon(type) {
   if (type === 'reasoning') return '🤔';
   if (type === 'error') return '❌';
   if (type === 'text') return '💬';
+  if (type === 'usage') return '📊';
   return '·';
 }
 
