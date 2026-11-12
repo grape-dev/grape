@@ -1012,7 +1012,8 @@ onBeforeUnmount(function () {
 }
 .pl__pbtn.act {
   border-color: var(--c-accent);
-  color: var(--c-accent);
+  background: var(--c-accent);
+  color: var(--on-accent);
   font-weight: 600;
 }
 .pl__pager .dots {

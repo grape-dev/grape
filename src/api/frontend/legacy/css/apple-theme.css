@@ -1401,8 +1401,8 @@
 [data-theme="apple"] .project-card-btn-outline { border-radius: 999px !important; font-size: 12px !important; padding: 4px 14px !important; }
 [data-theme="apple"] .project-search { border-radius: 8px !important; font-size: 13px !important; padding: 6px 12px !important; }
 [data-theme="apple"] .project-search:focus { border-color: #0071e3 !important; box-shadow: 0 0 0 4px rgba(0,113,227,0.1) !important; }
-[data-theme="apple"] .project-refresh-btn { border-radius: 8px !important; font-size: 12px !important; font-weight: 500 !important; }
-[data-theme="apple"] .project-pager button { border-radius: 50% !important; transition: all 0.25s var(--apple-spring-ease) !important; }
+[data-theme="apple"] .project-refresh-btn { border-radius: 999px !important; font-size: 12px !important; font-weight: 500 !important; }
+[data-theme="apple"] .project-pager button { border-radius: 999px !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .project-pager button:hover:not(:disabled) { border-color: var(--a) !important; color: var(--a) !important; transform: scale(1.05) !important; }
 [data-theme="apple"] .template-card { border-radius: 10px !important; border: 1px solid var(--glass-border) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 [data-theme="apple"] .template-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; }

@@ -381,4 +381,19 @@ onMounted(() => {
 .sv__migrate-owner {
   background: var(--c);
 }
+/* 解除托管 = 危险次要按钮：透明底 + 红描边 + 红字，hover 实心红 */
+.sv__unhost-btn {
+  background: transparent;
+  color: var(--r);
+  border: 1px solid color-mix(in srgb, var(--r) 55%, transparent);
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
+}
+.sv__unhost-btn:hover {
+  background: var(--r);
+  border-color: var(--r);
+  color: var(--on-accent);
+}
 </style>
