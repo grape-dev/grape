@@ -20,7 +20,7 @@ BRANCH = "feat/issue-993"
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     try:
         db.execute("DELETE FROM distributed_locks WHERE lock_key LIKE 'branch_guard:%'")
         db.execute("DELETE FROM branch_guard_state")

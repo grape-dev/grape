@@ -8,8 +8,11 @@
 - 鉴权安全：clone 用 `-c http.extraheader` 内联注入（不写 config、不入日志）；push 用 GIT_ASKPASS
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
+
 import base64, os, re, shutil, subprocess, threading, time
+
 from src.kernel import config
+
 from src.kernel.config import log
 
 _HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
@@ -17,8 +20,8 @@ _HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
 _GIT_AGENTS = ("coding", "qa", "sre")
 
 _lock_guard = threading.Lock()
-_repo_locks = {}
 
+_repo_locks = {}
 
 def _lock_for(repo_key: str) -> threading.Lock:
     with _lock_guard:
@@ -26,27 +29,22 @@ def _lock_for(repo_key: str) -> threading.Lock:
             _repo_locks[repo_key] = threading.Lock()
         return _repo_locks[repo_key]
 
-
 def issue_num_from(issue_id: str) -> str:
     """"#5" / "5" → "5"；#0/空 → ''。"""
     s = (issue_id or "").strip().lstrip("#")
     return s if s and s != "0" else ""
 
-
 def is_git_agent(agent_type: str) -> bool:
     """仅 coding/qa/sre 需要本地 git 工作树。"""
     return agent_type in _GIT_AGENTS
-
 
 def repo_base_dir(repo_key: str) -> str:
     from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
-
 def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
     from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), agent_type)
-
 
 def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
                           logger=None) -> bool:
@@ -98,23 +96,31 @@ def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
         _log.warning(f"branch guard check failed {target_branch}: {_e}")
         return False
 
-
 def clone_url_for(repo_key: str) -> str:
+    """按仓库平台卡解析 host 构造 clone URL（D4/G1 修复）。
+
+    未知 provider（带前缀但无平台卡）fail-fast 抛错——替代旧版静默回退
+    gitcode.com 的错误地址（S7 验收）。无前缀 repo_key 由 parse_repo_key
+    默认 gitcode，行为不变。
+    """
     from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
-    host = _HOSTS.get(provider, _HOSTS["gitcode"])
+    host = _host_for_provider(provider)
     return f"https://{host}/{owner}/{repo}.git"
 
+def _basic_auth(token: str, scheme: str = "x_access_token") -> str:
+    user = _AUTH_USER_BY_SCHEME.get(scheme, "x-access-token")
+    return base64.b64encode(f"{user}:{token}".encode()).decode()
 
-def _basic_auth(token: str) -> str:
-    return base64.b64encode(f"x-access-token:{token}".encode()).decode()
+def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "x_access_token"):
+    """执行 git；token 经 `-c http.extraheader` 注入（不落盘、不进日志）。
 
-
-def _run_git(args: list, token: str = "", timeout: int = 900):
-    """执行 git；token 经 `-c http.extraheader` 注入（不落盘、不进日志）。"""
+    scheme 由平台卡 clone_auth 决定（gitcode/github=x-access-token 现状，
+    gitlab=oauth2，gitee=basic_password）。
+    """
     cmd = ["git"]
     if token:
-        cmd += ["-c", f"http.extraheader=Authorization: Basic {_basic_auth(token)}"]
+        cmd += ["-c", f"http.extraheader=Authorization: Basic {_basic_auth(token, scheme)}"]
     cmd += args
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -124,7 +130,6 @@ def _run_git(args: list, token: str = "", timeout: int = 900):
         log.warning(f"repogit git exec failed {args[:3]}: {e}")
         return None
 
-
 # Issue #455: 拉取网络抖动重试——偶发 HTTP/2 帧层错误 / 连接超时 / RPC failed，
 # 有限次退避重试可显著提升 0→1 安装/拉取成功率；4xx 权限/资源类快速失败不放大上游压力。
 _NETWORK_ERR_RE = re.compile(
@@ -133,8 +138,8 @@ _NETWORK_ERR_RE = re.compile(
     r"unable to access|network is unreachable|ssl connect|recv failure|"
     r"could not read from remote repository|"
     r"connection reset by peer|timed out)", re.IGNORECASE)
-_AUTH_STATUS_RE = re.compile(r"returned error: (401|403|404)")
 
+_AUTH_STATUS_RE = re.compile(r"returned error: (401|403|404)")
 
 def _is_git_network_error(result) -> bool:
     """git 结果是否命中网络类错误（可重试）；4xx/无错误返回 False。"""
@@ -145,9 +150,8 @@ def _is_git_network_error(result) -> bool:
         return False  # 401/403/404 权限/资源类，快速失败
     return bool(_NETWORK_ERR_RE.search(err))
 
-
 def _run_git_retry(args: list, token: str = "", timeout: int = 900,
-                   retries: int = 3, base_delay: float = 1.0):
+                   retries: int = 3, base_delay: float = 1.0, scheme: str = "x_access_token"):
     """执行 git；网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。
 
     - 成功（returncode==0）立即返回；
@@ -157,7 +161,7 @@ def _run_git_retry(args: list, token: str = "", timeout: int = 900,
     delay = base_delay
     last = None
     for attempt in range(retries):
-        last = _run_git(args, token=token, timeout=timeout)
+        last = _run_git(args, token=token, timeout=timeout, scheme=scheme)
         if last is not None and last.returncode == 0:
             return last
         if not _is_git_network_error(last):
@@ -170,7 +174,6 @@ def _run_git_retry(args: list, token: str = "", timeout: int = 900,
             delay *= 2
     return last
 
-
 def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
     """确保本机 bare 基线存在并刷新（每机懒建立）。
 
@@ -179,16 +182,17 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
     """
     base = repo_base_dir(repo_key)
     url = clone_url_for(repo_key)
+    _scheme = _clone_auth_scheme_for(repo_key)
     with _lock_for(repo_key):
         try:
             if not os.path.isdir(base):
                 os.makedirs(os.path.dirname(base), exist_ok=True)
-                r = _run_git_retry(["init", "--bare", base], token=token)
+                r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme)
                 if r is None or r.returncode != 0:
                     log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                     return None
-                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token)
-            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token)
+                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme)
+            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme)
             if r is None or r.returncode != 0:
                 log.warning(f"repogit fetch failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                 return None
@@ -196,7 +200,6 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
         except Exception as e:
             log.warning(f"repogit ensure_repo_base failed {repo_key}: {e}")
             return None
-
 
 def ensure_repo_base_multi(linked_repos: list, token: str = "", env: dict = None) -> dict:
     """批量初始化多个关联仓库的 bare mirror（Issue #242）。
@@ -233,7 +236,6 @@ def ensure_repo_base_multi(linked_repos: list, token: str = "", env: dict = None
         result[rk] = base
     return result
 
-
 def linked_repo_token_from_env(repo_key: str, env: dict = None) -> str:
     """从 env 的 GRAPE_LINKED_REPO_TOKENS（JSON {repo_key: token}）解析关联仓 token。
 
@@ -252,7 +254,6 @@ def linked_repo_token_from_env(repo_key: str, env: dict = None) -> str:
     except Exception:
         return ""
 
-
 def _linked_repo_token(repo_key: str, env: dict = None) -> str:
     """关联仓 token 解析：服务端 env 分发优先 → 本地 Repo.bot_token 回退。
 
@@ -269,7 +270,6 @@ def _linked_repo_token(repo_key: str, env: dict = None) -> str:
     except Exception as e:
         log.warning(f"linked repo token resolve failed for {repo_key}: {e}")
         return ""
-
 
 def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
                                   token: str = "", env: dict = None) -> list:
@@ -307,7 +307,6 @@ def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
             log.warning(f"repogit: linked repo worktree failed for {rk} issue={issue_num}")
     return worktrees
 
-
 def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
     """读场景高级选项的 work_branch。
 
@@ -344,7 +343,6 @@ def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_wor
             return cand
     return "main"
 
-
 def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
     """写 GIT_ASKPASS 辅助脚本：从环境变量读 token，token 不落盘。
 
@@ -360,10 +358,19 @@ def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
     返回实际可执行的脚本路径（原脚本或 wrapper）。
     """
     # R20.24.3: fallback 链加入 USER_*_TOKEN（路径 B 仓库用户 token）
+    # D4/G3：新平台（gitee 等）按平台卡 token_env 派生；存量 github/gitcode
+    # 二分硬编码保持原样（S8 回归锁）。
+    from src.kernel.repo_key import parse_repo_key
+    _provider, _, _ = parse_repo_key(repo_key) if ":" in (repo_key or "") else ("gitcode", "", "")
     if repo_key.startswith("github:"):
         token_var = "${BOT_GITHUB_TOKEN:-${USER_GITHUB_TOKEN:-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}}"
-    else:
+    elif repo_key.startswith("gitcode:") or ":" not in (repo_key or ""):
         token_var = "${BOT_GITCODE_TOKEN:-${USER_GITCODE_TOKEN:-${BOT_TOKEN:-$BOT_GITHUB_TOKEN}}}"
+    else:
+        # 平台卡驱动：本平台 BOT → USER → BOT_TOKEN 兜底
+        _bot = f"BOT_{_provider.upper()}_TOKEN"
+        _user = f"USER_{_provider.upper()}_TOKEN"
+        token_var = "${" + _bot + ":-${" + _user + ":-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}}"
     script = os.path.join(issue_dir, ".git-askpass.sh")
     try:
         with open(script, "w", encoding="utf-8") as f:
@@ -387,14 +394,12 @@ def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
     except Exception:
         return ""
 
-
 def askpass_path(issue_dir: str) -> str:
     """返回实际可执行的 askpass 脚本路径（wrapper 优先，否则原脚本）。"""
     wrapper = os.path.join(issue_dir, ".git-askpass-wrapper.sh")
     if os.path.isfile(wrapper):
         return wrapper
     return os.path.join(issue_dir, ".git-askpass.sh")
-
 
 def _install_branch_guard_hook(issue_dir: str, repo_key: str, branch: str) -> None:
     """Issue #993：安装 worktree 级 pre-push 钩子（失败仅告警，不阻断建树）。"""
@@ -404,7 +409,6 @@ def _install_branch_guard_hook(issue_dir: str, repo_key: str, branch: str) -> No
             log.warning(f"repogit branch guard hook install failed {repo_key}:{branch}")
     except Exception as e:
         log.warning(f"repogit branch guard hook install error {repo_key}:{branch}: {e}")
-
 
 def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "", work_branch: str = "") -> str | None:
     """确保共享基线 + Issue 级 worktree（任务 cwd）。已存在则直接复用。
@@ -457,7 +461,6 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             log.warning(f"repogit worktree failed {repo_key}: {e}")
             return None
 
-
 def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num):
     """移除 Issue 级 worktree + 删除目录（sweeper 用）。"""
     base = repo_base_dir(repo_key)
@@ -469,7 +472,6 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num):
             except Exception:
                 pass
     shutil.rmtree(issue_dir, ignore_errors=True)
-
 
 def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, token: str = "") -> bool:
     """任务结束后安全删除 worktree：仅当本地 HEAD 已与远程分支一致（已 push）才删。
@@ -502,3 +504,140 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
     except Exception as e:
         log.warning(f"repogit remove_issue_worktree_if_pushed failed {repo_key}: {e}")
         return False
+
+from src import config
+
+def _host_for_provider(provider: str) -> str:
+    host = _HOSTS.get(provider)
+    if host:
+        return host
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+    except Exception:
+        card = None
+    if card is not None:
+        return card.host
+    raise ValueError(f"unknown vcs provider {provider!r}: no platform card "
+                     f"(clone URL 拒绝静默回退，S7 fail-fast)")
+
+def _clone_auth_scheme_for(repo_key: str) -> str:
+    """按平台卡取 git 传输鉴权 scheme（D4/G2）。默认 x-access-token（现状）。"""
+    from src.kernel.repo_key import parse_repo_key
+    provider, _, _ = parse_repo_key(repo_key)
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None:
+            return card.clone_auth
+    except Exception:
+        pass
+    return "x_access_token"
+
+# scheme → Basic auth 的用户名段（G2：gitlab=oauth2:，gitee=空用户名+token 作密码，
+# gitcode/github=x-access-token 现状不变）
+_AUTH_USER_BY_SCHEME = {
+    "x_access_token": "x-access-token",
+    "oauth2": "oauth2",
+    "basic_password": "",
+}
+
+
+# --- Issue #1954（arch 基线移植）：检测方交付对齐与取证上下文解析 ---
+_INSPECTOR_AGENTS = ("qa",)
+
+def is_inspector_agent(agent_type: str) -> bool:
+    """检测方（inspector）角色：需要按被检交付提交对齐工作区。"""
+    return agent_type in _INSPECTOR_AGENTS
+
+
+def worktree_head_sha(wt_dir: str, token: str = "") -> str:
+    """读 worktree 当前 HEAD sha；不可读 → 空串（调用方降级）。"""
+    if not wt_dir:
+        return ""
+    r = _run_git(["-C", wt_dir, "rev-parse", "--verify", "--quiet", "HEAD"], token=token)
+    if r is None or r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def resolve_delivery_sha(base: str, branch: str, token: str = "",
+                         delivery_ref: str = "", delivery_sha: str = "") -> tuple[str, str]:
+    """解析被检交付提交 sha（Issue #1954）。
+
+    优先级：`origin/{branch}` 远端最新 → 任务上下文显式 delivery_sha → delivery_ref。
+    返回 (sha, source)；无法解析 → ("", "")。只读操作，失败不抛异常。
+    """
+    candidates = []
+    if branch:
+        candidates.append((f"origin/{branch}", f"origin/{branch}"))
+    if delivery_sha:
+        candidates.append((delivery_sha, "delivery_sha"))
+    if delivery_ref:
+        candidates.append((delivery_ref, "delivery_ref"))
+    for rev, label in candidates:
+        r = _run_git(["-C", base, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+                     token=token)
+        if r is not None and r.returncode == 0:
+            sha = (r.stdout or "").strip()
+            if sha:
+                return sha, label
+    return "", ""
+
+
+def _delivery_info(sha: str = "", aligned: bool = False, old_sha: str = "",
+                   new_sha: str = "", reason: str = "") -> dict:
+    """单点装配交付对齐结果（保证 delivery_info 写回协议一致）。"""
+    return {"sha": sha, "aligned": aligned, "old_sha": old_sha,
+            "new_sha": new_sha, "reason": reason}
+
+
+def _record_delivery_info(target: dict | None, info: dict) -> None:
+    """把对齐结果写回调用方传入的 delivery_info（可选）。"""
+    if isinstance(target, dict):
+        target.update(info)
+
+
+def align_worktree_to_delivery(wt_dir: str, delivery_sha: str, token: str = "") -> dict:
+    """复用 worktree 时受控对齐 HEAD 到被检交付 sha（Issue #1954）。
+
+    先查 dirty（含未跟踪文件）：有未提交/未跟踪残留仅告警跳过（不覆盖检测方内容）；
+    干净则以 `checkout --detach` 对齐（detach 不动其它 worktree 共享的分支 ref）。
+    返回 {"aligned": bool, "old_sha": str, "new_sha": str, "reason": str}。
+    """
+    out = {"aligned": False, "old_sha": "", "new_sha": "", "reason": ""}
+    if not wt_dir or not delivery_sha:
+        out["reason"] = "no_delivery_sha"
+        return out
+    old_sha = worktree_head_sha(wt_dir, token=token)
+    out["old_sha"] = old_sha
+    if old_sha == delivery_sha:
+        out["aligned"] = True
+        out["new_sha"] = old_sha
+        out["reason"] = "already_aligned"
+        return out
+    st = _run_git(["-C", wt_dir, "status", "--porcelain", "--untracked-files=normal", "--",
+                   ".", ":(exclude).git-askpass.sh",
+                   ":(exclude).git-askpass-wrapper.sh"], token=token)
+    if st is None or st.returncode != 0:
+        out["reason"] = "status_failed"
+        return out
+    if (st.stdout or "").strip():
+        out["reason"] = "dirty_skip"
+        log.warning(
+            f"repogit: worktree {wt_dir} dirty (tracked/untracked), skip delivery alignment "
+            f"old={old_sha[:12] if old_sha else '?'} target={delivery_sha[:12]}")
+        return out
+    r = _run_git(["-C", wt_dir, "checkout", "--detach", delivery_sha], token=token)
+    if r is None or r.returncode != 0:
+        out["reason"] = "checkout_failed"
+        return out
+    out["aligned"] = True
+    out["new_sha"] = worktree_head_sha(wt_dir, token=token)
+    out["reason"] = "aligned"
+    log.info(
+        f"repogit: worktree {wt_dir} aligned to delivery "
+        f"old={(old_sha or '?')[:12]} new={(out['new_sha'] or '?')[:12]}")
+    return out
+
+

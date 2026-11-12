@@ -3,14 +3,19 @@
 覆盖：账户 CRUD、token、OAuth state、凭据与云主机、托管仓库与 bot token、
 技能、用户仓库缓存、meta、agent_runtimes 缓存与默认引擎。全部走真实测试库（conftest 会话重置）。
 """
+
 import json
+
 import os
+
 import uuid
 
 import pytest
+
 from unittest.mock import patch
 
 from src.domains.mgmt.user import db as udb
+
 from src.kernel.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
@@ -18,120 +23,81 @@ def _jwt_access_token(user_id, username="test"):
     from src.domains.mgmt.user.db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
-
 def _uid():
     return "udb_" + uuid.uuid4().hex[:8]
 
-
 def _mk_user(uname=None):
+    """测试用户构造——走 grape_accounts 现行权威路径（写入冻结后不再有
+    user_accounts 写函数）。返回 dict 兼容旧用例的 u["id"]/u["username"] 访问。"""
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account
     uname = uname or _uid()
-    u = udb.create_user(uname, "pw123")
+    u = create_grape_account(username=uname, email=f"{uname}@test.local",
+                             password="pw123")
     if not u:
-        u = udb.get_user_by_username(uname)
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
+        u = get_grape_account_by_username(uname)
     return u, uname
 
-
 def _cleanup_user(uname):
-    u = udb.get_user_by_username(uname)
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
+    u = get_grape_account_by_username(uname)
     if u:
-        udb.delete_user(u["id"])
+        with db_lock:
+            db.cursor().execute("DELETE FROM grape_accounts WHERE id=?", (u["id"],))
+            db.commit()
     with db_lock:
         db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (uname,))
         db.commit()
 
+class TestAccountsRetired:
+    """user_accounts 死表收敛（D32/D105，UC26）后的等价断言。
 
-# ====== 账户 / 认证 ======
+    原 TestAccounts（create_user/verify_user/delete_user/update_password 死链路）
+    按「基线可改造」口径改编：写入面函数已删除（GC4 守卫锁不许复活），
+    权威账号能力由 grape_accounts 域承载（grape_account_db 自有测试域）。
+    """
 
+    _RETIRED = (
+        "create_user", "verify_user", "delete_user", "update_password",
+        "increment_token_version", "get_token_version", "link_gitcode_user",
+        "link_github_user", "save_user_account", "delete_user_account",
+    )
 
-class TestAccounts:
-    def test_create_and_get(self):
+    def test_deprecated_write_funcs_not_resurrected(self):
+        for fn in self._RETIRED:
+            assert not hasattr(udb, fn), f"{fn} 复活（user_accounts 写入面冻结铁律）"
+
+    def test_authoritative_account_only_in_grape_accounts(self):
+        """账号权威表是 grape_accounts；user_accounts 只留历史读，不再承载新账号。"""
         u, uname = _mk_user()
         try:
-            got = udb.get_user(u["id"])
-            assert got["username"] == uname
-            byname = udb.get_user_by_username(uname)
-            assert byname["id"] == u["id"]
-            assert udb.list_users()  # 非空
+            assert u and u["username"] == uname
+            from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
+            assert get_grape_account_by_username(uname)["id"] == u["id"]
+            assert udb.get_user(u["id"]) is None  # 死表不再持有权威账号行
         finally:
             _cleanup_user(uname)
-
-    def test_create_duplicate_returns_none(self):
-        u, uname = _mk_user()
-        try:
-            assert udb.create_user(uname, "pw") is None
-        finally:
-            _cleanup_user(uname)
-
-    def test_delete_user(self):
-        u, uname = _mk_user()
-        assert udb.delete_user(u["id"]) is True
-        assert udb.delete_user(u["id"]) is False  # 已删除
-        assert udb.get_user(u["id"]) is None
-
-    def test_update_password(self):
-        u, uname = _mk_user()
-        try:
-            assert udb.update_password(u["id"], "newpass") is True
-            assert udb.update_password(999999, "x") is False
-            assert udb.verify_user(uname, "newpass") is not None
-        finally:
-            _cleanup_user(uname)
-
-    def test_verify_user(self):
-        u, uname = _mk_user()
-        try:
-            assert udb.verify_user(uname, "pw123") is not None
-            assert udb.verify_user(uname, "wrong") is None
-            assert udb.verify_user("nobody_exists", "pw123") is None
-        finally:
-            _cleanup_user(uname)
-
-    def test_token_flow(self):
-        u, uname = _mk_user()
-        try:
-            # JWT 无状态——create_access_token + verify_access_token
-            from src.kernel.auth_sdk.jwt_utils import create_access_token, verify_access_token
-            tok = create_access_token(u["id"], u["username"])
-            payload = verify_access_token(tok)
-            assert payload is not None
-            assert int(payload["sub"]) == u["id"]
-            # 坏 token 验证失败
-            assert verify_access_token("bad") is None
-        finally:
-            _cleanup_user(uname)
-
-
-class TestOAuth:
-    def test_save_validate_flow(self):
-        state = "test-state-" + uuid.uuid4().hex[:8]
-        udb.save_oauth_state(state, "gitcode", {"k": 1})
-        data = udb.validate_oauth_state(state, "gitcode")
-        assert data == {"k": 1, "_provider": "gitcode"}
-        # 消耗后失效
-        assert udb.validate_oauth_state(state, "gitcode") is None
-
-    def test_validate_provider_mismatch(self):
-        state = "ts-" + uuid.uuid4().hex[:8]
-        udb.save_oauth_state(state, "gitcode", {})
-        assert udb.validate_oauth_state(state, "feishu") is None
-
-    def test_cleanup_expired(self):
-        udb._cleanup_expired_oauth_states()  # 不应抛错
-
-    def test_get_user_by_gitcode_id(self):
-        u, uname = _mk_user()
-        try:
-            assert udb.get_user_by_gitcode_id("nonexistent_gid") is None
-            assert udb.link_gitcode_user(u["id"], "gid_123", "at", "rt") is True
-            got = udb.get_user_by_gitcode_id("gid_123")
-            assert got and got["id"] == u["id"]
-        finally:
-            _cleanup_user(uname)
-
 
 # ====== 凭据 / 云主机 ======
 
 
+
+    def test_external_identity_binding(self):
+        """gitcode 绑定等价用例：Issue #1588 后绑定关系存 external_identities"""
+        u, uname = _mk_user()
+        try:
+            from src.domains.mgmt.auth.grape_account_db import (
+                create_external_identity, get_external_identity, delete_external_identity)
+            assert get_external_identity("gitcode", "nonexistent_gid") is None
+            assert create_external_identity(u["id"], "gitcode", "gid_123",
+                                            access_token="at", refresh_token="rt") is True
+            got = get_external_identity("gitcode", "gid_123")
+            assert got and str(got["grape_user_id"]) == str(u["id"])
+            delete_external_identity(u["id"], "gitcode")
+        finally:
+            _cleanup_user(uname)
+
+# ====== 凭据 / 云主机 ======
 class TestCredentials:
     def _user(self):
         u, uname = _mk_user()
@@ -168,10 +134,6 @@ class TestCredentials:
 
     def test_get_credentials_unknown_user(self):
         assert udb.get_credentials(999999) == []
-
-
-# ====== 托管仓库 ======
-
 
 class TestManagedRepos:
     def _rk(self):
@@ -211,7 +173,10 @@ class TestManagedRepos:
                           (u["id"], rk, "org", repo_name))
                 db.commit()
             assert udb.update_managed_repo_admin(u["id"], rk, False) is True
-            _bt_result = udb.update_managed_repo_bot_token(rk, "new_bt")
+            # D38 后 webhook 重建走适配器端口（真实 HTTP）——mock 返回 id=1
+            from unittest.mock import patch as _patch
+            with _patch("src.domains.mgmt.user.db._rebuild_webhook_with_bot_token", return_value="1"):
+                _bt_result = udb.update_managed_repo_bot_token(rk, "new_bt")
             assert _bt_result.get("ok") is True
             assert udb.update_managed_repo_bot_username(rk, "grape_bot") is True
             assert udb.get_bot_token_by_repo("org", repo_name) == "new_bt"
@@ -231,19 +196,19 @@ class TestManagedRepos:
         try:
             # 仓库级 token
             assert udb.get_gitcode_token(repo_key=rk) == "repo_bt"
-            # 全局兜底
-            with patch("src.domains.mgmt.user.db._get_global_bot_token", return_value="global_bt"):
+            # 全局兜底（D22 后 TokenResolver 全局策略走 meta key 来源链：
+            # global_bot_<provider>_token ——写 meta 实测，mock 旧接缝失效）
+            udb.set_meta_value("global_bot_gitcode_token", "global_bt")
+            try:
                 assert udb.get_gitcode_token(repo_key="gitcode:org/no-repo") == "global_bt"
+            finally:
+                udb.set_meta_value("global_bot_gitcode_token", "")
             # 空 repo + 无 user → ""
             assert udb.get_gitcode_token() == ""
         finally:
             with db_lock:
                 db.cursor().execute("DELETE FROM managed_repos WHERE repo_key=?", (rk,))
                 db.commit()
-
-
-# ====== 技能 ======
-
 
 class TestSkills:
     def test_skill_by_id_and_resolve(self):
@@ -289,10 +254,6 @@ class TestSkills:
         finally:
             _cleanup_user(uname)
 
-
-# ====== 用户仓库缓存 ======
-
-
 class TestUserRepos:
     def test_save_get_clear(self):
         u, uname = _mk_user()
@@ -321,10 +282,6 @@ class TestUserRepos:
         finally:
             _cleanup_user(uname)
 
-
-# ====== meta / 账户扩展 ======
-
-
 class TestMetaAccounts:
     def test_meta_roundtrip(self):
         key = "udb_key_" + uuid.uuid4().hex[:6]
@@ -335,36 +292,42 @@ class TestMetaAccounts:
             db.cursor().execute("DELETE FROM meta WHERE key=?", (key,))
             db.commit()
 
-    def test_account_extension(self):
-        uname = _uid()
-        udb.save_user_account(uname, {"nickname": "n1"})
-        try:
-            acc = udb.get_user_account(uname)
-            assert acc and acc["name"] == uname and acc["nickname"] == "n1"
-            assert acc["bot_usernames"] == []  # USER_ACCOUNT_FIELDS 不含该列，默认空
-            assert udb.get_user_account("nonexistent_user") is None
-            # 更新（保留 id）
-            udb.save_user_account(uname, {"nickname": "n2"})
-            acc2 = udb.get_user_account(uname)
-            assert acc2["nickname"] == "n2"
-            assert udb.get_all_user_accounts()
-            assert udb.delete_user_account(uname) is True
-            assert udb.delete_user_account(uname) is False
-        finally:
-            _cleanup_user(uname)
+    # test_account_extension 已删除（2026-11-07 写入冻结）——
+    # save_user_account/delete_user_account/get_user_account/get_all_user_accounts
+    # 是 user_accounts 死表读写函数，账户扩展字段的现行覆盖在
+    # grape_accounts 体系（metadata_json 列）。
 
     def test_get_all_bot_usernames(self):
         rk = "gitcode:org/udb_bot_%s" % uuid.uuid4().hex[:4]
         udb.add_managed_repo(rk, "org", "b", bot_username="repo_bot")
         try:
-            names = udb.get_all_bot_usernames()
+            # 全局 bot 用户名走统一入口（DB→文件来源链，Issue #345）——mock 消除文件环境依赖
+            from unittest.mock import patch as _patch
+            with _patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["grape_dev_bot"]):
+                names = udb.get_all_bot_usernames()
             assert "repo_bot" in names
-            assert "grape_dev_bot" in names  # 全局 bot（configs/global-bot-token.json）
+            assert "grape_dev_bot" in names  # 全局 bot（来源链统一入口）
         finally:
             with db_lock:
                 db.cursor().execute("DELETE FROM managed_repos WHERE repo_key=?", (rk,))
                 db.commit()
 
+
+
+    def test_account_profile_extension(self):
+        """账户资料扩展等价用例：Issue #1588 后走 grape_accounts.update_profile"""
+        u, uname = _mk_user()
+        try:
+            from src.domains.mgmt.auth.grape_account_db import (
+                get_grape_account_by_username, get_grape_account_by_id, update_profile)
+            acc = get_grape_account_by_username(uname)
+            assert acc and acc["username"] == uname
+            assert get_grape_account_by_username("nonexistent_user") is None
+            assert update_profile(u["id"], nickname="n2") is True
+            assert get_grape_account_by_id(u["id"])["nickname"] == "n2"
+            assert get_grape_account_by_id("nonexistent_id") is None
+        finally:
+            _cleanup_user(uname)
 
 class TestServerUrls:
     def _reset_meta(self, *keys):
@@ -404,7 +367,8 @@ class TestServerUrls:
     def test_server_base_url_default(self):
         self._reset_meta("webhook_url", "server_base_url")
         with patch("src.kernel.config.read_server_config", return_value={}):
-            assert udb.get_server_base_url() == "http://localhost:8080"
+            # 默认基址 = http://localhost:{GRAPE_PORT}，GRAPE_PORT 默认 3000
+            assert udb.get_server_base_url() == "http://localhost:3000"
 
 
 class TestAliases:
@@ -417,10 +381,6 @@ class TestAliases:
         a1, a2 = udb.get_backend_agents_age(), udb.get_agent_runtimes_age()
         assert a1 is None and a2 is None or abs(a1 - a2) < 1
         assert udb.get_agent_bot_token("") == udb.get_gitcode_token(repo_key="")
-
-
-# ====== agent_runtimes 缓存 ======
-
 
 class TestAgentRuntimes:
     def _clean(self):
@@ -494,3 +454,20 @@ class TestAgentRuntimes:
             assert age is not None and age >= 0
         finally:
             self._clean()
+
+from src.domains.mgmt.auth import grape_account_db as gad
+
+"""用户/凭据/托管/技能/引擎 DB 层单元测试（src/domains/mgmt/domains/mgmt/user/db.py）。
+
+覆盖：OAuth state、凭据与云主机、托管仓库与 bot token、技能、用户仓库缓存、
+meta、agent_runtimes 缓存与默认引擎。全部走真实测试库（conftest 会话重置）。
+
+2026-11-07 user_accounts 写入冻结（铁律：废弃表零写入）：
+- 原 TestAccounts（create_user/verify_user/delete_user/update_password 死链路
+  用例）已删除——替代路径 grape_accounts 体系有自己的测试域（grape_account_db）
+- 测试辅助函数迁移到 grape_accounts（现行权威账号表）：
+  _mk_user → grape_account_db.create_grape_account
+  _cleanup_user → grape_accounts 硬删（测试库清理，生产走 soft_delete_account）
+- link_gitcode_user 用例已删除——替代 create_external_identity 的覆盖在
+  tests/test_issue_372_*.py（身份识别域）
+"""

@@ -10,14 +10,14 @@ import json
 
 import pytest
 
-from src.im.adapters.wecom.inbound import (
+from src.domains.runtime.im.adapters.wecom.inbound import (
     event_to_inbound,
     media_items,
     parse_frame,
     strip_mention,
     template_card_event_to_inbound,
 )
-from src.im.channel.types import ChatType, MsgType, Type
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Type
 
 
 def _msg_frame(msgtype="text", chattype="single", text="@RobotA hello robot",

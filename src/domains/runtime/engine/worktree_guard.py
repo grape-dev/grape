@@ -302,6 +302,44 @@ def load_baseline(wt_dir: str) -> dict:
         return {}
 
 
+def check_delivery_alignment(wt_dir: str, delivery_sha: str, token: str = "") -> dict:
+    """QA 前置自检（Issue #1954）：工作区检出 sha 与被检交付 sha 一致性门禁。
+
+    返回 {"ok", "head_sha", "delivery_sha", "reason", "message"}：
+    - delivery_sha 缺失 / HEAD 不可读 → 降级放行（reason 显式标注，调用方告警）；
+    - HEAD == delivery_sha → 放行；
+    - 不一致 → 阻断（ok=False），文案为「基线不一致」而非「输入缺失」。
+    """
+    delivery = (delivery_sha or "").strip()
+    out = {"ok": True, "head_sha": "", "delivery_sha": delivery, "reason": "", "message": ""}
+    if not delivery:
+        out["reason"] = "delivery_sha_missing"
+        out["message"] = "未提供被检交付 sha，跳过基线一致性自检（降级放行）"
+        return out
+    try:
+        from src.domains.runtime.engine.repogit import worktree_head_sha
+        head = worktree_head_sha(wt_dir, token=token)
+    except Exception as e:
+        out["reason"] = "head_unreadable"
+        out["message"] = f"无法读取工作区检出 sha，跳过自检（降级放行）：{e}"
+        return out
+    out["head_sha"] = head
+    if not head:
+        out["reason"] = "head_unreadable"
+        out["message"] = "无法读取工作区检出 sha，跳过自检（降级放行）"
+        return out
+    if head != delivery:
+        out["ok"] = False
+        out["reason"] = "baseline_mismatch"
+        out["message"] = (
+            f"基线不一致：QA 工作区检出 sha={head[:12]} 与被检交付 sha={delivery[:12]} 不一致，"
+            f"阻断执行以避免检测错误产物。")
+        log.warning(f"worktree guard delivery mismatch {wt_dir}: head={head} delivery={delivery}")
+        return out
+    out["reason"] = "aligned"
+    return out
+
+
 def verify_fidelity(wt_dir: str, token: str = "") -> dict:
     """保真校验（AC2）：当前功能文件指纹 vs 基线。
 

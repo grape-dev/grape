@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.im.feishu_async import BotContext
+from src.domains.runtime.im.feishu_async import BotContext
 from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat, get_conversation,
@@ -18,7 +18,7 @@ from src.kernel.session_manager import (
 @pytest.fixture(autouse=True)
 def _clear_repo_bind_cache():
     """每个测试前清除 _repo_bind_cache，防止跨测试缓存污染。"""
-    from src.im.handler_async import _repo_bind_cache
+    from src.domains.runtime.im.handler_async import _repo_bind_cache
     _repo_bind_cache.clear()
     yield
     _repo_bind_cache.clear()
@@ -26,7 +26,7 @@ def _clear_repo_bind_cache():
 
 def _seed_chat_install(user_id, app_id, row_id=None, channel_type="feishu"):
     """A2 Phase B：IM 凭证只认 grape_t_channel_installation（chat_agent_session.im_* 列已 DROP）。"""
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key) VALUES (?,?, '')",
@@ -54,7 +54,7 @@ def _clean():
         c.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id IN ('cli_nav','cli_jason')")
         c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
         db.commit()
-    from src.im.handler_async import _clear_pending_selection
+    from src.domains.runtime.im.handler_async import _clear_pending_selection
     _clear_pending_selection("nav_chat")
 
 
@@ -80,7 +80,7 @@ def _seed():
 
 
 def _run_cmd(text, chat_id="nav_chat", api=None, ctx=None):
-    from src.im.handler_async import process_command_async
+    from src.domains.runtime.im.handler_async import process_command_async
     ctx = ctx or _ctx()
     api = api or _make_api_mock()
     asyncio.run(process_command_async(ctx, api, text, chat_id, "sender_1", db, account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav"))
@@ -88,7 +88,7 @@ def _run_cmd(text, chat_id="nav_chat", api=None, ctx=None):
 
 
 def _run_msg(text, chat_id="nav_chat", api=None, ctx=None):
-    from src.im.handler_async import process_chat_async
+    from src.domains.runtime.im.handler_async import process_chat_async
     ctx = ctx or _ctx()
     api = api or _make_api_mock()
     parsed = {"type": "message", "text": text, "chat_id": chat_id,
@@ -153,7 +153,7 @@ class _mock_response:
 
 
 def _pending():
-    from src.im.handler_async import _get_pending_selection
+    from src.domains.runtime.im.handler_async import _get_pending_selection
     return _get_pending_selection("nav_chat")
 
 
@@ -161,7 +161,7 @@ def _as_card_dict(card):
     """Issue #1095：handler 构造渠道中立 Card IR → 渲染回 lark dict 供既有断言。"""
     if isinstance(card, dict):
         return card
-    from src.im.channel.renderers.feishu import FeishuCardRenderer
+    from src.domains.runtime.im.channel.renderers.feishu import FeishuCardRenderer
     return FeishuCardRenderer().render(card).payload
 
 
@@ -275,7 +275,7 @@ def test_number_without_pending_goes_normal_chat():
 
 def test_expired_pending_not_intercepted():
     _seed()
-    from src.im.handler_async import _pending_selections
+    from src.domains.runtime.im.handler_async import _pending_selections
     _pending_selections["nav_chat"] = {"action": "repo", "repo_key": "", "items": [], "page": 1,
                                        "expires": 0, "page_size": 10}
     _run_msg("5")
@@ -427,8 +427,8 @@ def test_bind_intent_clears_stale_pointer():
     _seed()
     old = create_conversation(1, "gitcode:navuser/repo-a", title="旧会话")
     join_feishu_chat("nav_chat", old, 1)
-    from src.im.handler_async import detect_bind_intent
-    with patch("src.im.handler_async.detect_bind_intent", return_value="navuser/repo-b"):
+    from src.domains.runtime.im.handler_async import detect_bind_intent
+    with patch("src.domains.runtime.im.handler_async.detect_bind_intent", return_value="navuser/repo-b"):
         _run_msg("绑定到 navuser/repo-b")
     assert get_conversation(old)["im_channel_id"] == ""
     assert get_conversation_by_im("nav_chat", 1) is None
@@ -534,7 +534,7 @@ def test_unbound_with_managed_repos_auto_repo_card():
 # ---- 飞书侧 prompt 按会话类型分流（2026-08-17，feishu-web-chat-unified-design.md §11）----
 
 def _build_prompt(conv_id, text="hi", repo="gitcode:navuser/repo-a", skills=None, account="navuser"):
-    from src.im.handler_async import _build_feishu_chat_prompt
+    from src.domains.runtime.im.handler_async import _build_feishu_chat_prompt
     return _build_feishu_chat_prompt(text, repo, [], skills or ["chat"], account, 0, conv_id)
 
 
@@ -594,7 +594,7 @@ class TestTaskOpenQuickAction:
         cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #3", conv_type="task", issue_number=3)
         ctx = _ctx()
         api = _make_api_mock()
-        from src.im.handler_async import process_command_async
+        from src.domains.runtime.im.handler_async import process_command_async
         asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
                                           account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav",
                                           card_value={"repo_key": "gitcode:navuser/repo-a",
@@ -609,7 +609,7 @@ class TestTaskOpenQuickAction:
         _seed()
         ctx = _ctx()
         api = _make_api_mock()
-        from src.im.handler_async import process_command_async
+        from src.domains.runtime.im.handler_async import process_command_async
         asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
                                           account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav"))
         assert "使用通知卡片" in _card_text(api)
@@ -619,7 +619,7 @@ class TestTaskOpenQuickAction:
         _seed()
         ctx = _ctx()
         api = _make_api_mock()
-        from src.im.handler_async import process_command_async
+        from src.domains.runtime.im.handler_async import process_command_async
         asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
                                           account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav",
                                           card_value={"repo_key": "gitcode:navuser/repo-a",

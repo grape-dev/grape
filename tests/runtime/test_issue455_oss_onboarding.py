@@ -6,25 +6,28 @@
 - M1-④ SQLite 建表补齐 pipeline_instances + 清理存在性探测
 - M1-⑤ GitHub OAuth 落库读回校验（读不到账号/绑定 → 失败响应而非静默 302）
 """
+
 import os
+
 import sqlite3
+
 import sys
+
 import uuid
 
 import pytest
+
 from fastapi.testclient import TestClient
+
 from unittest.mock import patch
 
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.user import db as user_db
 
 client = TestClient(app)
-
-
-# ---------------------------------------------------------------------------
-# M1-① 启动版本检查
-# ---------------------------------------------------------------------------
 
 class TestPythonVersionCheck:
     def test_3_9_exits(self):
@@ -64,11 +67,6 @@ class TestPythonVersionCheck:
             src = f.read()
         assert ">= 3.10" in src
         assert "主服务需要 >= 3.10" in src
-
-
-# ---------------------------------------------------------------------------
-# M1-② 对外基址配置判定 + 健康检查字段
-# ---------------------------------------------------------------------------
 
 class TestServerBaseUrl:
     def test_configured_public(self):
@@ -115,11 +113,6 @@ class TestServerBaseUrl:
         assert data["server_base_url_configured"] is False
         assert data["server_base_url_warning"]
 
-
-# ---------------------------------------------------------------------------
-# M1-④ SQLite 建表补齐 pipeline_instances + 清理存在性探测
-# ---------------------------------------------------------------------------
-
 class TestDbTables:
     def test_pipeline_instances_in_new_tables(self):
         from src.api import db_setup
@@ -154,11 +147,6 @@ class TestDbTables:
         rk = f"gitcode:issue455-{uuid.uuid4().hex[:6]}"
         cleanup_stale_repo_data(rk)  # 不应抛异常（缺表已降级/建表已补齐）
 
-
-# ---------------------------------------------------------------------------
-# M1-⑤ GitHub OAuth 落库读回校验
-# ---------------------------------------------------------------------------
-
 class _FakeReqResp:
     def __init__(self, payload: dict):
         self._payload = payload
@@ -169,16 +157,13 @@ class _FakeReqResp:
     def raise_for_status(self):
         pass
 
-
 def _save_state(provider="github"):
     state = "test-state-455-" + uuid.uuid4().hex[:8]
     user_db.save_oauth_state(state, provider, {})
     return state
 
-
 def _gid():
     return str(20_000_000 + uuid.uuid4().int % 100_000_000)
-
 
 def _cleanup_gh(username: str, gid: str):
     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username, soft_delete_account, delete_external_identity
@@ -190,7 +175,6 @@ def _cleanup_gh(username: str, gid: str):
     if acc:
         delete_external_identity(acc["id"], "github")
         soft_delete_account(acc["id"])
-
 
 class TestGithubOAuthReadback:
     def test_account_readback_failure_redirects_error(self):
@@ -263,10 +247,6 @@ class TestGithubOAuthReadback:
         assert "exchange_code=" in r.headers.get("location", "")
         _cleanup_gh(uname, gid)
 
-# ---------------------------------------------------------------------------
-# M2-⑥/⑦ 托管接口 502 上下文 + 非所有者 403 前置校验
-# ---------------------------------------------------------------------------
-
 class TestHost502Detail:
     """_host_502_detail：上游上下文与可重试性标记"""
 
@@ -297,7 +277,6 @@ class TestHost502Detail:
         assert _upstream_status_code(RuntimeError("GitHub API GET u failed (502): x")) == 502
         assert _upstream_status_code(RuntimeError("random message")) == 0
 
-
 class _FakeHostResp:
     def __init__(self, payload):
         self._payload = payload
@@ -307,7 +286,6 @@ class _FakeHostResp:
 
     def raise_for_status(self):
         pass
-
 
 class TestGithubHostPermissionPrecheck:
     """GitHub 托管前归属/权限前置校验：403/404 明确返回，网络错误不阻断"""
@@ -324,8 +302,18 @@ class TestGithubHostPermissionPrecheck:
             monkeypatch.setattr("src.domains.mgmt.routes.repos.with_oauth_token", lambda *a, **k: None)
         monkeypatch.setattr("src.domains.mgmt.user.db.get_global_github_bot_token", lambda: "")
         monkeypatch.setattr("src.domains.mgmt.user.db.get_global_github_bot_username", lambda: "")
-        monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh",
-                           lambda u, user_id: "gh_tok")
+        # D85 迁移：旧符号 get_user_github_token_with_refresh 已统一为
+        # deps.get_user_token_for（S57/D30 provider 无关入口）；身份探测/网络缝
+        # 迁移点同步 mock（S62/D42 适配器端口 → repo_manager 网络函数）
+        def _f(username, user_id=0, provider="gitcode"):
+            return "gh_tok" if provider == "github" else "gc_tok"
+        monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_for", _f)
+        monkeypatch.setattr("src.api.deps.get_user_token_for", _f)
+        # 注意: 这组用例的语义就是"上游 403/404/网络错误"——异常必须从端口层
+        # （VCSProvider.get_user_login）穿透到 host_repo 的 RuntimeError 状态码
+        # 匹配（L1196-1207 → 403/404 明示）。repo_manager.get_user_*_login 会吞
+        # RuntimeError 返回空（→502），所以不能在那一层 mock 成功返回。
+        # 每个用例用 _upstream_error 覆写端口层异常。
         monkeypatch.setattr("src.domains.mgmt.user.repo_manager.setup_github_webhook", lambda *a, **k: 101)
         monkeypatch.setattr("src.domains.mgmt.user.repo_manager.find_existing_github_webhook", lambda *a, **k: None)
         # host_repo 内局部 import repo_manager._github_req —— patch 模块属性生效
@@ -344,16 +332,24 @@ class TestGithubHostPermissionPrecheck:
 
     def test_upstream_403_returns_403_permission_denied(self, monkeypatch):
         self._base_mocks(monkeypatch)
-
+        # D85: 403/404 语义用例——异常从端口层抛（host_repo 状态码匹配依赖它）
+        monkeypatch.setattr("src.kernel.token_resolver.GitHubProvider.get_user_login",
+            lambda self, token: (_ for _ in ()).throw(RuntimeError("GitHub API GET https://api.github.com/user failed (403): Forbidden")))
         def _gh_req(method, url, token=""):
             raise RuntimeError("GitHub API GET " + url + " failed (403): Forbidden")
         monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 403, r.text
-        assert r.json()["detail"]["error_code"] == "PERMISSION_DENIED"
+        # D85 迁移注记: S62/D42 端口统一后 github 流并入通用 401/403 分支,
+        # error_code 从 PERMISSION_DENIED 演进为 TOKEN_PERMISSION_INSUFFICIENT
+        # (前端 repos.js L531 两个 code 均兼容, 契约兼容)
+        assert r.json()["detail"]["error_code"] == "TOKEN_PERMISSION_INSUFFICIENT"
 
     def test_upstream_404_returns_404(self, monkeypatch):
         self._base_mocks(monkeypatch)
+        # D85: 404 语义——异常从端口层抛（host_repo 状态码匹配 → REPO_NOT_FOUND）
+        monkeypatch.setattr("src.kernel.token_resolver.GitHubProvider.get_user_login",
+            lambda self, token: (_ for _ in ()).throw(RuntimeError("GitHub API GET https://api.github.com/user failed (404): Not Found")))
 
         def _gh_req(method, url, token=""):
             raise RuntimeError("GitHub API GET " + url + " failed (404): Not Found")
@@ -367,8 +363,13 @@ class TestGithubHostPermissionPrecheck:
 
         def _gh_req(method, url, token=""):
             if url.endswith("/user"):
-                return {"login": "Jason7602"}
-            return {"owner": {"login": "SomeoneElse"}, "permissions": {"admin": False, "push": True}}
+                # D85 迁移注记: S62/D42 统一后归属判定 = current_user != owner 时走
+                # collaborators/permission 探测（旧实现另有 GET repos/{login}/{name}
+                # 归属跳, 已并入权限探测短路逻辑）。用例语义"登录者非 owner/非 admin":
+                # /user 返回登录者 OtherUser（≠ 仓库 owner Jason7602），权限探测
+                # 返回非 admin → 403 PERMISSION_DENIED
+                return {"login": "OtherUser"}
+            return {"permission": "read", "role_name": ""}
         monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 403, r.text
@@ -387,10 +388,11 @@ class TestGithubHostPermissionPrecheck:
 
     def test_network_error_does_not_block(self, monkeypatch):
         self._base_mocks(monkeypatch)
-
-        def _gh_req(method, url, token=""):
-            raise RuntimeError("Cannot reach GitHub API: timed out")
-        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
+        # D85 迁移注记: 网络类异常必须从端口层抛——repo_manager.get_user_github_login
+        # 会吞 RuntimeError 返回空（身份空 → 502），host 的"网络错 skip 放行"分支
+        # 收不到异常。端口层抛无状态码 RuntimeError → host 网络分支放行（issue455 语义）
+        monkeypatch.setattr("src.kernel.token_resolver.GitHubProvider.get_user_login",
+            lambda self, token: (_ for _ in ()).throw(RuntimeError("Cannot reach GitHub API: timed out")))
         r = self._host()
         assert r.status_code == 200, r.text  # 网络类：无法确认权限，交由下游既有流程
 
@@ -410,15 +412,9 @@ class TestGithubHostPermissionPrecheck:
             assert data["host"]["upstream_error"]
             assert data["host"]["repo_not_found"]
 
-
-# ---------------------------------------------------------------------------
-# M3-⑧ 拉取路径有限次重试 + M3-⑨ 自检清单文档
-# ---------------------------------------------------------------------------
-
 def _proc(returncode, stderr=""):
     import subprocess
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
-
 
 class TestRepogitRetry:
     def test_network_error_detected(self):
@@ -476,7 +472,6 @@ class TestRepogitRetry:
         src = inspect.getsource(repogit.ensure_repo_base)
         assert "_run_git_retry" in src
 
-
 class TestWorkerPackageRetry:
     def test_network_error_retries_then_success(self):
         import subprocess as _sp
@@ -500,7 +495,6 @@ class TestWorkerPackageRetry:
             with _pytest.raises(_sp.CalledProcessError):
                 _git_retry(["clone", "https://x", "/tmp/x"], retries=3, base_delay=0)
         assert m.call_count == 1
-
 
 class TestChecklistDoc:
     def test_docs_checklist_exists(self):

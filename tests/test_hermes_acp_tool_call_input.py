@@ -26,7 +26,7 @@ from src.domains.runtime.agents.hermes_acp import (  # noqa: E402
     _extract_tool_call_input,
     _input_from_content_blocks,
 )
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.domains.runtime.engine import service  # noqa: E402
 
 
@@ -217,7 +217,7 @@ class TestClipContract:
     def test_env_overridable_limit(self, monkeypatch):
         monkeypatch.setenv("HERMES_TOOL_INPUT_MAX_BYTES", "64")
         import importlib
-        import src.agent.hermes_acp as mod
+        import src.domains.runtime.agents.hermes_acp as mod
         importlib.reload(mod)
         try:
             out = mod._clip_tool_input({"path": "a", "content": "z" * 1024})

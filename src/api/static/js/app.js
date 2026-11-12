@@ -3,9 +3,99 @@
 // 外部/前端约定一律无前缀；dashboard 响应可能带 gitcode:/github: 前缀，需剥离
 // ═══════════════════════════════════════════════════════════════
 function stripRepoPrefix(s) {
-  return String(s || '').replace(/^(gitcode|github|gitlab):/, '');
+  // D90-N5：gitee 入册（D78 挂账的 display strip 收口——正则清单替代逐平台字面量）
+  return String(s || '').replace(/^(gitcode|github|gitlab|gitee):/, '');
 }
 window.stripRepoPrefix = stripRepoPrefix;
+
+// ═══════════════════════════════════════════════════════════════
+// D107-3 平台固定展示序（用户拍板 2026-11-10）：gitcode→github→gitee→
+// gitlab→hwawei/huawei→后续新平台按名依次排后。与后端登录按钮 _ORDER
+// （grape_auth.py）同源对齐；未知平台 indexOf=-1 → 排已知平台之后按名序。
+// 所有平台遍历/分组渲染（repoSelect optgroup、大厅筛选 tab、平台下拉）统一消费。
+// ═══════════════════════════════════════════════════════════════
+window._PLATFORM_ORDER = ['gitcode', 'github', 'gitee', 'gitlab', 'huawei', 'hwcloud'];
+window._platformOrderIndex = function (p) {
+  var i = window._PLATFORM_ORDER.indexOf(p);
+  return i === -1 ? 1000 : i;
+};
+// 平台分组排序：已知序在前、未知按名称字典序排后（新平台零代码自动落尾序）
+window._sortPlatforms = function (platforms) {
+  return (platforms || []).slice().sort(function (a, b) {
+    var ia = window._platformOrderIndex(a), ib = window._platformOrderIndex(b);
+    if (ia !== ib) return ia - ib;
+    if (ia >= 1000) return String(a).localeCompare(String(b));
+    return 0;
+  });
+};
+window._PLATFORM_NAMES = { gitcode: 'GitCode', github: 'GitHub', gitee: 'Gitee', gitlab: 'GitLab', huawei: '华为云', hwcloud: '华为云' };
+
+// ── 全局唯一 HTML 转义 helper（扫雷⑧ S2：以 auth.js Auth.escHtml 口径为准，含 ' →&#39;）──
+// 各页面本地 _esc/_escHtml/_escapeHtml/esc 一律代理到此实现，禁止再各自维护正则链。
+window.escHtml = function (s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+};
+
+// ── PlatformCatalog（S27）：仓库跳转链接 host 数据驱动 ─────────────────
+var _appVcsCatalog = null;
+function _appLoadVcsCatalog() {
+  if (_appVcsCatalog) return Promise.resolve(_appVcsCatalog);
+  return API.get('/settings/vcs/platforms').then(function(d) {
+    _appVcsCatalog = {};
+    (d.platforms || []).forEach(function(p) { _appVcsCatalog[p.provider] = p; });
+    return _appVcsCatalog;
+  }).catch(function() { _appVcsCatalog = {}; return _appVcsCatalog; });
+}
+// D102-F（通用化收口）：平台 host 派生唯一权威——卡目录优先（S27 数据驱动），
+// 目录未就绪时同步兜底表一处维护。_repoWebLink/_vcsUrl/repos.js 等全部消费
+// 本函数，新增平台只改此表（或配卡后走目录，表不认识也行）。
+function _repoWebHost(repoKey) {
+  var prov = ((repoKey || '').split(':')[0] || 'gitcode');
+  if (prov.indexOf('/') !== -1) prov = 'gitcode';  // 裸键（无前缀）兜底
+  var host = (_appVcsCatalog && _appVcsCatalog[prov] && _appVcsCatalog[prov].host) || null;
+  if (host) return host;
+  // 同步兜底（竞态窗口）：已知前缀派生——gitee 仓不误跳 gitcode.com
+  var _KNOWN_HOSTS = {github: 'github.com', gitcode: 'gitcode.com',
+                      gitee: 'gitee.com', gitlab: 'gitlab.com'};
+  return _KNOWN_HOSTS[prov] || 'gitcode.com';
+}
+window._repoWebHost = _repoWebHost;
+
+function _repoWebLink(repoKey, fullName) {
+  return 'https://' + _repoWebHost(repoKey) + '/' + fullName;
+}
+
+// ── 扫雷⑥ P1-9：平台显示名/帮助深链统一收口 ─────────────────────────
+// 主路径消费 PlatformCatalog（_appLoadVcsCatalog，启动即拉取）；
+// 同步首屏/竞态窗口用静态表兜底（一处维护，新平台配卡即生效）。
+var _PROV_NAMES = {gitcode: 'GitCode', github: 'GitHub',
+                   gitee: 'Gitee', gitlab: 'GitLab'};
+function _provName(provider) {
+  var c = _appVcsCatalog;
+  if (c && c[provider] && c[provider].name) return c[provider].name;
+  return _PROV_NAMES[provider] || provider;  // 未知 provider 原样透出
+}
+window._provName = _provName;
+window._PROV_NAMES = _PROV_NAMES;
+// 台阶2：品牌色收口到平台卡目录（configs/platforms brand_color → /settings/vcs/platforms）。
+// 目录未就绪/未配置时返回 ''（调用方落到各自兜底表），与 _provName 同款主路径+兜底分层。
+function _provBrandColor(provider) {
+  var c = _appVcsCatalog;
+  if (c && c[provider] && c[provider].brand_color) return c[provider].brand_color;
+  return '';
+}
+window._provBrandColor = _provBrandColor;
+// OAuth 配置帮助深链：平台卡目录无 oauth 文档字段（合理保留静态表——
+// 卡目录管 VCS 仓库面，帮助文档属开发者门户导航，不宜混入）
+var _PROV_OAUTH_DOC = {
+  gitcode: '/static/help.html#/developer/01-gitcode-integration',
+  github: '/static/help.html#/developer/02-github-integration'
+};
+function _oauthDocUrl(provider) {
+  return _PROV_OAUTH_DOC[provider] || '/static/help.html';
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 场景自定义环境变量（custom_fields）前端共享校验规则（Issue #236）
@@ -124,7 +214,7 @@ window._cfRevealSecretField = function(input, btn) {
   var overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML = '<div style="background:#fff;border-radius:16px;padding:24px;min-width:300px;max-width:380px;box-shadow:0 12px 48px rgba(0,0,0,.15)">' +
-    '<div style="font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:8px">查看明文：' + name + '</div>' +
+    '<div style="font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:8px">查看明文：' + window.escHtml(name) + '</div>' +
     '<div style="font-size:12px;color:#86868b;margin-bottom:12px">查看密钥明文需重新输入 Grape 密码确认，读取动作将记入审计日志。</div>' +
     '<input id="cfRevealPwd" type="password" placeholder="Grape 密码" style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;margin-bottom:16px">' +
     '<div style="display:flex;justify-content:flex-end;gap:8px">' +
@@ -295,9 +385,34 @@ function loadAgentTypes() {
     });
   }
 
+  // 口径统一：前端粗判只认「仓库平台绑定」（平台卡目录内 provider）——
+  // 登录渠道（华为等）不算；目录未就绪时保守视为已绑定，交由后端
+  // /repos/member 的 _no_vcs_binding 权威纠正（D102-C）。
+  function _hasVcsBinding() {
+    var _u = {};
+    try { _u = JSON.parse(localStorage.getItem('user') || '{}'); } catch (e) {}
+    var _bs = _u.bindings || [];
+    if (!_bs.length) return false;
+    var _cat = (typeof _appVcsCatalog === 'object' && _appVcsCatalog) ? _appVcsCatalog : null;
+    if (!_cat) return true;  // 目录未就绪：不误判，交给后端
+    return _bs.some(function(b) { return !!_cat[b.provider]; });
+  }
+
   // 统一路由恢复：密码登录 / OAuth 登录 / 页面刷新共用
   // 优先级：hash 路由 > 有绑定→loadRepos > 无绑定→引导页
   function _restoreNavAfterLogin() {
+    // 口径 v7（用户裁定）：从账号页发起的 OAuth 绑定，回跳后原地返回账号页
+    //（局部刷新安全 tab），不再被路由到工作台/引导页。
+    // 注意：必须在「已有视图早退」之前判定——回调落地时 hash 已置 _currentView。
+    try {
+      if (sessionStorage.getItem('_bindReturnView') === 'account') {
+        sessionStorage.removeItem('_bindReturnView');
+        nav('account');
+        if (typeof renderAccount === 'function') renderAccount('security');
+        return;
+      }
+    } catch (e) {}
+
     // 已有视图（如 loadRepos 同步缓存路径已渲染）→ 不覆盖
     if (window._currentView && window._currentView !== '') return;
 
@@ -315,7 +430,7 @@ function loadAgentTypes() {
       const parts = hash.substring(1).split('/');
       const view = parts[0];
       const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-      if (bindings.length === 0 && !currentRepo()) {
+      if (!_hasVcsBinding() && !currentRepo()) {
         goToRepos();
       } else if (noRepoViews.includes(view) || currentRepo()) {
         nav(view, param);
@@ -323,14 +438,16 @@ function loadAgentTypes() {
         nav('dash');
       }
     } else if (bindings.length > 0) {
-      // 有绑定无 hash → 加载仓库列表
+      // 有仓库平台绑定无 hash → 加载仓库列表（纯登录渠道绑定 → loadRepos 内转引导页）
       loadRepos();
     } else if (currentRepo()) {
       // 无绑定但有当前仓库 → dashboard
       nav('dash');
-    } else {
-      // 无绑定无 hash → 引导页
+    } else if (!_hasVcsBinding()) {
+      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）
       goToRepos();
+    } else {
+      // 有绑定且无 hash/仓库/引导需求 → 停留当前视图（显式空分支：语义=无需路由）
     }
   }
 
@@ -462,7 +579,7 @@ function loadAgentTypes() {
         var bg = isActive ? 'var(--a)' : 'transparent';
         var fg = isActive ? '#fff' : 'var(--t1)';
         var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
-        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+        html += '<div onclick="app.switchOrg(\'' + o.id + '\');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
           + '<span style="font-size:14px">🏢</span>'
           + '<div style="flex:1;min-width:0">'
           + '<div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
@@ -534,7 +651,7 @@ function loadAgentTypes() {
         var bg = isActive ? 'var(--a)' : 'transparent';
         var fg = isActive ? '#fff' : 'var(--t1)';
         var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
-        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\';app._updateLobbyOrgName()" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+        html += '<div onclick="app.switchOrg(\'' + o.id + '\');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\';app._updateLobbyOrgName()" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
           + '<span style="font-size:13px">🏢</span>'
           + '<div style="flex:1;min-width:0">'
           + '<div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
@@ -614,7 +731,8 @@ function loadAgentTypes() {
     var bindSuccess = params.get('bind_success');
     var bindError = params.get('bind_error');
     if (bindSuccess) {
-      var label = bindSuccess === 'gitcode' ? 'GitCode' : 'GitHub';
+      // 扫雷⑥ P1-9：平台名走目录（_provName）——原二分对新平台显示 provider 代号
+      var label = _provName(bindSuccess);
       showToast(I18N.t('app.login.bind_success', {label: label}),
                 I18N.t('app.login.bind_success_desc'));
       // D43: 绑定成功后清除仓库缓存，下次拉取获取含新平台的仓库
@@ -706,10 +824,8 @@ function loadAgentTypes() {
     // 优先级补位：从安全设置返回时安全横幅可能已被处理，补检被抑制的引擎引导
     setTimeout(function() { _checkEngineBanner(); }, 100);
     var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
-    // 先检查绑定状态——未绑定直接回引导页，不走 nav('dash') 避免 403
-    var _u = JSON.parse(localStorage.getItem('user') || '{}');
-    var _bindings = _u.bindings || [];
-    if (_bindings.length === 0) {
+    // 未绑定仓库平台直接回引导页，不走 nav('dash') 避免 403（用户裁定 2026-11-09）
+    if (!_hasVcsBinding()) {
       goToRepos();
       return;
     }
@@ -833,6 +949,7 @@ function loadAgentTypes() {
       } else {
         // 没有已托管仓库 — 清除当前仓库选择，刷新页面显示空态
         sessionStorage.removeItem('currentRepo');
+    sessionStorage.removeItem('_bindReturnView');  // 绑定返回标记不跨会话残留
         initSidebarRepos();
         showToast(I18N.t("organizations.switch_org.no_repos"));
         // 切换组织后所有视图都重新加载（显示空态或刷新数据）
@@ -874,6 +991,19 @@ function loadAgentTypes() {
     }
 
     API.get('/repos/member').then(d => {
+      // D102-N：无仓库平台绑定 → 引导页（与 goToRepos 内联分支同口径）。
+      // 注意：不得把空 repos 写进缓存——缓存同步路径会渲染"选择仓库"空态
+      // 并触发守卫早退，导致永久"加载中"（用户实弹：华为/gitee 登录白屏加载）。
+      if (d._no_vcs_binding) {
+        try { localStorage.removeItem(REPO_CACHE_KEY); } catch (e) {}
+        try {
+          const _u2 = JSON.parse(localStorage.getItem('user') || '{}');
+          if ((_u2.bindings || []).length > 0) { _u2.bindings = []; localStorage.setItem('user', JSON.stringify(_u2)); }
+        } catch (e) {}
+        // 用户裁定（2026-11-09）：无仓库平台绑定 = 直达引导页（工作台空态方案废弃）
+        _renderBindingGuide();
+        return;
+      }
       const repos = d.repos || [];
       // 更新 localStorage 缓存（记录时间）
       try {
@@ -985,24 +1115,29 @@ function loadAgentTypes() {
         sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
         sel.onclick = function() { switchRepo('__add__'); };
       } else {
-        // 按平台分组：optgroup label 为平台名称
-        var gitcodeRepos = repos.filter(function(r) { return !(r.repo_key || '').startsWith('github:'); });
-        var githubRepos = repos.filter(function(r) { return (r.repo_key || '').startsWith('github:'); });
+        // D105e：按 repo_key 真实前缀分组（组名查平台卡目录）——gitee 等新平台仓不再错标 GitCode
+        var groups = {}; var order = [];
+        repos.forEach(function(r) {
+          var rk = r.repo_key || '';
+          var idx = rk.indexOf(':');
+          var prov = idx > 0 ? rk.slice(0, idx) : 'gitcode';   // 裸键（存量无前缀）保持 gitcode 归组
+          if (!groups[prov]) { groups[prov] = []; order.push(prov); }
+          groups[prov].push(r);
+        });
+        var provName = function(p) {
+          var cat = (window._appVcsCatalog && window._appVcsCatalog[p]) || null;
+          if (cat && cat.name) return cat.name;
+          var _n = {gitcode:'GitCode', github:'GitHub', gitee:'Gitee', gitlab:'GitLab'};
+          return _n[p] || p;
+        };
         var html = '';
-        if (gitcodeRepos.length > 0) {
-          html += '<optgroup label="GitCode">';
-          gitcodeRepos.forEach(function(r) {
-            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
+        order.forEach(function(prov) {
+          html += '<optgroup label="' + provName(prov) + '">';
+          groups[prov].forEach(function(r) {
+            html += `<option value="${window.escHtml(r.full_name)}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${window.escHtml(r.full_name)}</option>`;
           });
           html += '</optgroup>';
-        }
-        if (githubRepos.length > 0) {
-          html += '<optgroup label="GitHub">';
-          githubRepos.forEach(function(r) {
-            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
-          });
-          html += '</optgroup>';
-        }
+        });
         html += '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
         sel.innerHTML = html;
         sel.onclick = null;
@@ -1014,7 +1149,7 @@ function loadAgentTypes() {
     const sel = $('repoSelect');
     const current = currentRepo();
     sel.innerHTML = repos.map(r =>
-      `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
+      `<option value="${window.escHtml(r.full_name)}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${window.escHtml(r.full_name)}</option>`
     ).join('');
   }
 
@@ -1111,19 +1246,31 @@ function loadAgentTypes() {
     var name = (_u.nickname || _u.username || 'User').split('@')[0];
     var avatar = (name || 'U')[0].toUpperCase();
 
-    // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
-    API.get('/auth/providers').then(function(d) {
-      var providers = d.providers || [];
-      // #535 修复：写入共享缓存 _accountProvidersData——引导页 → bindProvider →
-      // _accountBindProvider 读同一缓存判断 OAuth tab；此前只有账号安全 tab 填充它，
-      // 引导路径缓存为 null 被保守猜成「未配置」（配合 account.js 的 fetch 兜底双保险）
-      if (typeof _accountProvidersData !== 'undefined') _accountProvidersData = d;
-      _renderOnboardingShell(providers, isZh, name, avatar);
+    // D102-K: 引导页=仓库平台绑定，数据源必须是仓库平台卡目录
+    //（/api/settings/vcs/platforms）——此前误用 /auth/providers（登录渠道
+    // 列表），华为等纯登录渠道混进"绑定代码平台"卡片（用户实弹抓错）。
+    // D102-K 续：并拉 /auth/providers 仅取各平台 OAuth 配置态（登录渠道轴
+    // 的正确用途——配置态判断，不是当绑定列表用）。OAuth 未配置的平台
+    // 卡片并列提示两条路径：OAuth（置灰+未开通）与 PAT（凭据配置）。
+    Promise.all([
+      API.get('/settings/vcs/platforms'),
+      API.get('/auth/providers').catch(function() { return { providers: [] }; })
+    ]).then(function(results) {
+      var _oauthCfg = {};
+      ((results[1] && results[1].providers) || []).forEach(function(p) {
+        _oauthCfg[p.provider] = !!p.configured;
+      });
+      var platforms = ((results[0] && results[0].platforms) || []).map(function(p) {
+        return {provider: p.provider, name: p.name, brand_color: p.brand_color || '',
+                pat_create_url: p.pat_create_url,
+                oauth_configured: !!_oauthCfg[p.provider]};
+      });
+      _renderOnboardingShell(platforms, isZh, name, avatar);
     }).catch(function() {
-      // Fallback: show both platforms
+      // 目录接口失败 → 存量双平台兜底
       _renderOnboardingShell([
-        {provider: 'gitcode', name: 'GitCode', brand_color: '#F54A36'},
-        {provider: 'github', name: 'GitHub', brand_color: '#1F2328'}
+        {provider: 'gitcode', name: 'GitCode', brand_color: '#DA203E'},
+        {provider: 'github', name: 'GitHub', brand_color: '#f0f6fc'}
       ], isZh, name, avatar);
     });
   }
@@ -1131,20 +1278,38 @@ function loadAgentTypes() {
   function _renderOnboardingShell(providers, isZh, name, avatar) {
     var d = document.getElementById('pageContent');
     if (!d) return;
+    var _u = JSON.parse(localStorage.getItem('user') || '{}');
+
+    // ── D102-O 续：引导壳自带工作区 chrome 隐藏（幂等，四入口行为归一）──
+    // 任何入口进来都是全屏独立壳，不再嵌在工作区布局里
+    // （用户实弹 2026-11-08：引导页嵌在工作区壳内渲染）。
+    var _sb = document.getElementById('sidebar');
+    if (_sb) _sb.style.display = 'none';
+    var _tbEl = document.getElementById('tb');
+    if (_tbEl) _tbEl.style.display = 'none';
+    var _mv = document.getElementById('mainView');
+    if (_mv) { _mv.style.position = 'fixed'; _mv.style.inset = '0'; }
 
     // ── 平台绑定卡片 ──
     var platformCards = '';
+    var _isZh = I18N.getLang() === 'zh';
     providers.forEach(function(p) {
       var icon = platformIcon(p.provider, 28);
-      // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
-      var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
-      var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
+      var _brandColor = p.brand_color || '';
       var brandVar = '--brand:' + (_brandColor || 'var(--a)');
+      // 2026-11-08 用户裁定（口径 v2）：引导卡双模式——[账号绑定(OAuth)] +
+      // [配置 PAT 凭据] 并列；OAuth 未配置 → 绑定置灰但 PAT 照常可配
+      // （PAT 写入 /settings/credentials 用户凭据）。三态角标保留：
+      // ①未配置（灰ⓘ）②已配置未绑定（蓝ⓘ）③已绑定（绿✓）。
+      // 2026-11-08 口径 v4：卡样式回归基线（logo+平台名+[绑定] 单按钮），
+      // 点击弹层内双模式（OAuth 配置了→OAuth/PAT 双页签；未配置→仅 PAT 表单）。
+      var _oauthBtn = '<button class="bt bt-p ob-bind-btn" data-i18n="app.login.ob_bind_btn">'
+        + I18N.t('app.login.ob_bind_btn') + '</button>';
+      // 点击绑定 → 弹层内双模式（OAuth 授权 / PAT 配置，_accountBindProvider）
       platformCards += '<div class="ob-bind-card" style="' + brandVar + '" onclick="app.bindProvider(\'' + p.provider + '\')">'
         + '<div class="ob-bind-icon">' + icon + '</div>'
         + '<div class="ob-bind-name">' + _esc(p.name) + '</div>'
-        + '<button class="bt bt-p ob-bind-btn" data-i18n="app.login.ob_bind_btn">'
-        + I18N.t('app.login.ob_bind_btn') + '</button>'
+        + _oauthBtn
         + '</div>';
     });
 
@@ -1331,10 +1496,8 @@ function loadAgentTypes() {
       + '</section>';
   }
 
-  function _esc(s) {
-    if (!s) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
+  function _esc(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml
+
 
   function goToRepos() {
     _obExitMode();
@@ -1357,7 +1520,7 @@ function loadAgentTypes() {
     const _user = JSON.parse(localStorage.getItem('user') || '{}');
     const _bindings = _user.bindings || [];
     if (_bindings.length === 0) {
-      // 未绑定任何平台 → 直接显示新手引导页（不渲染 lobby 壳）
+      // 未绑定任何“仓库平台”（含纯登录渠道如华为账号）→ 直接显示新手引导页（不渲染 lobby 壳）
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
@@ -1386,6 +1549,16 @@ function loadAgentTypes() {
       mv.style.inset = '0';
       mv.style.zIndex = '100';
       $('pageTitle').textContent = I18N.t('app.current_project');
+      // D102-C: 纯登录渠道账号（如华为）——空列表 + "去绑定代码平台"引导
+      if (d._no_vcs_binding) {
+        // 2026-11-08 用户裁定：无仓库平台绑定（含解绑后）直接进绑定引导页
+        try {
+          const _u2 = JSON.parse(localStorage.getItem('user') || '{}');
+          if ((_u2.bindings || []).length > 0) { _u2.bindings = []; localStorage.setItem('user', JSON.stringify(_u2)); }
+        } catch (_e) {}
+        _renderBindingGuide();
+        return;
+      }
       renderRepoSelection(d.repos || []);
       // 加载 lobby 组织下拉名
       _updateTbOrgName();
@@ -1430,7 +1603,7 @@ function loadAgentTypes() {
     var _user = JSON.parse(localStorage.getItem('user') || '{}');
     var _bindings = _user.bindings || [];
     if (_bindings.length === 0) {
-      // 未绑定 → 重新渲染引导页（引导页内部调 /auth/providers，是轻量请求）
+      // 无仓库平台绑定（含纯登录渠道）→ 重新渲染引导页（引导页内部调 /auth/providers，是轻量请求）
       _renderBindingGuide();
       return;
     }
@@ -1604,7 +1777,7 @@ function loadAgentTypes() {
       var _u = JSON.parse(localStorage.getItem('user') || '{}');
       var _bindings = _u.bindings || [];
       if (_bindings.length === 0) {
-        // 未绑定 → 提示用户并跳转到新手引导页
+        // 无仓库平台绑定（含纯登录渠道）→ 提示用户并跳转到新手引导页
         var _isZh = I18N.getLang() === 'zh';
         showToast(I18N.t('app.login.link_platform_first'));
         goToRepos();
@@ -1728,11 +1901,15 @@ function loadAgentTypes() {
       if (!$('repoSelect') || $('repoSelect').options.length <= 1) initSidebarRepos();
       var _rk = repo.repoKey || repo.repo_key || '';
       var _fn = repo.fullName || (repo.owner + '/' + repo.name);
-      var _isGithub = _rk.indexOf('github:') === 0;
-      var _repoLink = _isGithub ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
-      var _logo = _isGithub
-        ? '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
-        : '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+      // 扫雷⑥ P1-9：标题栏 logo 走 platformIcon(provider)（repos.js 全局）——
+      // 原二分对新平台误显 gitcode logo；裸键（无前缀）沿用 gitcode 兜底
+      var _prov = (_rk.match(/^(gitcode|github|gitlab|gitee|huawei):/) || [])[1] || 'gitcode';
+      // S27/F1：仓库跳转 host 来自平台目录（新平台自动正确；目录不可用回退存量双平台）
+      var _repoLink = _repoWebLink(_rk, _fn);
+      var _logo = (typeof platformIcon === 'function')
+        ? '<span style="display:inline-block;vertical-align:-2px;margin-right:5px;color:var(--t2)">'
+          + platformIcon(_prov, 14) + '</span>'
+        : '';  // repos.js 未加载（理论不发生）：不显示图标，文字链接不受影响
       repoTitle.innerHTML = `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
@@ -1997,7 +2174,7 @@ function loadAgentTypes() {
     // B+（Issue #535）：配置状态已知且未配置 → 不发请求直接给出原因+文档入口；
     // 状态未知（providers 未返回/检测失败）→ 走下方 API 的 A 兜底路径
     if (_oauthConfiguredMap && _oauthConfiguredMap[provider] === false) {
-      var _nm0 = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _nm0 = _provName(provider);
       var _lt0 = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
       showToast(
         I18N.t('app.login.oauth_not_configured', {name: _nm0}, _nm0 + ' OAuth 未配置，' + _nm0 + ' 登录暂不可用'),
@@ -2020,11 +2197,9 @@ function loadAgentTypes() {
         return;
       }
       // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册；附帮助文档链接（OAuth App 配置指南）
-      var _nm = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
-      var _doc = {
-        gitcode: '/static/help.html#/developer/01-gitcode-integration',
-        github: '/static/help.html#/developer/02-github-integration'
-      }[provider] || '/static/help.html';
+      // 扫雷⑥ P1-9：平台名走目录；帮助深链收口到 _oauthDocUrl（单一表）
+      var _nm = _provName(provider);
+      var _doc = _oauthDocUrl(provider);
       var _linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
       showToast(
         I18N.t('app.login.oauth_not_configured', {name: _nm}, _nm + ' OAuth 未配置，' + _nm + ' 登录暂不可用'),
@@ -2066,28 +2241,27 @@ function loadAgentTypes() {
       });
       if (anyUnconfigured) {
         var providers = Object.keys(inj).map(function(k) {
-          return { provider: k, name: {gitcode: 'GitCode', github: 'GitHub'}[k] || k, configured: !!inj[k] };
+          return { provider: k, name: _provName(k), configured: !!inj[k] };
         });
         _renderOAuthUnconfiguredHint(container, providers);
       }
     } catch (e) { /* 注入缺失/格式异常 → 维持预渲染常亮 + A 兜底 */ }
   })();
 
-  function _oauthDocUrl(provider) {
-    return {
-      gitcode: '/static/help.html#/developer/01-gitcode-integration',
-      github: '/static/help.html#/developer/02-github-integration'
-    }[provider] || '/static/help.html';
-  }
+  // _oauthDocUrl 已提升到文件头部统一定义（扫雷⑥ P1-9：单一表，消除双份深链映射）
 
   // OAuth provider 图标 SVG（UX-2 修复：内置已知平台图标，未知平台用首字母降级）
   var _OAUTH_ICONS = {
-    gitcode: '<svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>',
-    github: '<svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
+    gitcode: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m15.585 4.586.486-.274q.032.17.06.303c.032.158.06.289.072.418.103 1.118.665 1.941 1.462 2.127 1.165.27 2.264-.177 2.856-1.164.711-1.184.403-2.634-.808-3.507C16.346.061 12.647-.609 8.663.56.072 3.095-2.867 13.65 3.23 20.122c2.608 2.769 5.92 3.964 9.68 3.873 4.817-.113 8.285-2.513 10.5-6.674 1.57-2.952-.137-6.178-3.405-6.849a21 21 0 0 0-5.675-.362 4.8 4.8 0 0 0-1.805.548c-.625.325-.805.998-.735 1.666.065.608.531.972 1.086 1.064 1.118.175 2.25.277 3.378.37.327.027.657.03.986.033.473.005.944.01 1.405.086 1.314.217 1.766 1.284 1.09 2.425a4.7 4.7 0 0 1-.577.766 6.55 6.55 0 0 1-3.318 1.964c-2.333.57-4.669.603-6.99-.13-2.645-.835-4.221-2.777-4.277-5.392A9.1 9.1 0 0 1 5.76 8.907c.36-.654.558-1.327.503-2.067a26 26 0 0 1-.05-.972l-.025-.565q.401.084.792.212c1.011.406 2.007.592 3.102.294a5.6 5.6 0 0 1 1.902-.122 4.76 4.76 0 0 0 2.921-.714c.218-.128.439-.251.681-.387"/></svg>',
+    github: '<svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>',
+    gitee: '<svg width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#C71D23"/><path fill="#FFFFFF" d="M18.074 5.333c.328 0 .593.266.592.593v1.482a.594.594 0 0 1-.593.592H9.777c-.982 0-1.778.796-1.778 1.778v5.63c0 .327.266.592.593.592h5.63c.982 0 1.778-.796 1.778-1.778v-.296a.593.593 0 0 0-.592-.593h-4.15a.592.592 0 0 1-.592-.592v-1.482a.593.593 0 0 1 .593-.592h6.815c.327 0 .593.265.593.592v3.408a4 4 0 0 1-4 4H5.926a.593.593 0 0 1-.593-.593V9.778a4.444 4.444 0 0 1 4.445-4.444h8.296Z"/></svg>',
+    hwcloud: '<svg data-brand="huawei" width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><g transform="matrix(1 0 0 -1 0 897)"><path fill="#C7000B" d="M512 896Q616 896 711 856Q803 817 874.0 746.0Q945 675 984 583Q1024 488 1024.0 384.0Q1024 280 984 185Q945 93 874.0 22.0Q803 -49 711 -88Q616 -128 512.0 -128.0Q408 -128 313 -88Q221 -49 150.0 22.0Q79 93 40 185Q0 280 0.0 384.0Q0 488 40 583Q79 675 150.0 746.0Q221 817 313 856Q408 896 512 896Z"/><path fill="#FFFFFF" d="M352 190H331V134Q331 115 337 109Q348 96 374.0 96.0Q400 96 412 109Q418 115 418 134V190H397V134Q397 122 392.0 116.5Q387 111 374.5 111.0Q362 111 357.0 116.5Q352 122 352 134ZM800 190H778V97H800ZM759 190H724Q700 190 688.5 178.0Q677 166 677.0 141.5Q677 117 693 105Q699 100 707 99Q713 97 724 97H759V114H725Q712 114 706.5 119.0Q701 124 701 136H759V152H701Q702 174 725 174H759ZM539 190H516L550 97H575L594 166L615 97H641L672 190H651L629 119L607 190H582L562 119ZM487 190H464L422 97H444L453 119H497L506 97H529ZM245 190H224V97H245V135H292V97H313V190H292V152H245ZM475 171 490 135H460ZM570 299Q570 299 569.5 299.0Q569 299 568 298L569 295Q588 281 613 266Q646 245 662 240L670 239Q680 238 690 241Q704 245 718 256Q734 269 748 293ZM453 299 276 293Q292 266 313 251Q337 235 361.5 240.5Q386 246 455 295Q456 297 456 298Q455 299 453 299ZM229 449Q220 422 226 395Q229 381 234 372Q246 347 269 331Q281 323 290 320Q307 313 323 312Q325 311 419 312H456L458 313Q459 314 458 315L457 316Q409 349 314 402ZM794 449 784 443Q768 435 761 431L720 408Q688 390 651 368Q646 366 635 359L626 353Q606 341 602.5 339.0Q599 337 593.0 333.5Q587 330 583.5 328.0Q580 326 574.5 322.0Q569 318 567.0 316.0Q565 314 566.5 313.0Q568 312 571 313H708Q746 319 770 343Q779 353 787 366Q793 377 797 392Q798 397 799 407L800 413Q800 420 799 424Q800 430 798 436L797 438Q796 446 794 449ZM312 596Q306 589 299 582Q285 564 276 546Q264 521 265 500Q266 484 274 469Q279 458 287 449L295 442Q323 415 389 377Q430 353 470 333L472 334Q473 335 473 336Q430 428 367 521Q335 568 312 596ZM712 596Q699 579 685 561Q653 518 623 470Q582 402 551 336H552Q551 335 552 334H555Q593 353 635 377Q701 415 729 442L730 443Q739 451 746 462Q757 480 758 501Q760 531 736 567Q724 584 712 596ZM554 672Q551 667 549 663Q542 650 537 632Q530 606 525 573Q520 532 520 481Q520 421 527 350Q527 348 529 348Q530 348 531 349Q562 394 586 436Q630 512 640 556L642 566Q644 578 644 588Q644 602 640 613L635 624Q629 638 618 648Q603 662 582 667ZM470 672Q455 670 442 667Q421 662 406 648Q395 638 388 624L384 613Q378 598 381 576Q382 565 384 556Q394 512 438 436Q462 394 492 349H493Q494 348 495 348H496Q496 349 496 350H497Q508 463 501 547Q496 606 482 645Q475 665 470 672Z"/></g></svg>',
+
   };
 
   function _oauthIcon(provider, name) {
     // 已知平台用内置 SVG，未知平台用首字母降级
+    if (provider === 'huawei') provider = 'hwcloud'; // 键归一：绑定体系用 huawei（2026-11-08）
     if (_OAUTH_ICONS[provider]) return _OAUTH_ICONS[provider];
     var letter = (name || provider || '?')[0].toUpperCase();
     return '<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;font-size:11px;font-weight:700;line-height:1">' + _esc(letter) + '</span>';
@@ -2134,18 +2308,70 @@ function loadAgentTypes() {
           if (existingNames[i].indexOf(key) === -1) { needsRender = true; break; }
         }
       }
+        else {
+          // 预置 DOM 与运行时权威状态对齐：未配置平台补 aria-disabled（不可点）
+          for (var j = 0; j < providers.length; j++) {
+            if (providers[j].configured) existingBtns[j].removeAttribute('aria-disabled');
+            else existingBtns[j].setAttribute('aria-disabled', 'true');
+          }
+        }
       if (needsRender) {
-        container.innerHTML = providers.map(function(p) {
+        // D102-B: 登录按钮溢出折叠（参考 gitee.com/login）——固定序前 4 个
+        // 直接展示，第 5 个起收进"..."展开按钮（点击展开剩余全部）
+        var MAX_VISIBLE = 4;
+        var _mkBtn = function(p) {
           var icon = _oauthIcon(p.provider, p.name);
-          var i18nKey = 'app.login.' + p.provider + '_login';
-          // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
-          var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
-          var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
+var i18nKey = 'app.login.' + p.provider + '_login';
+          // 台阶2：品牌色收口平台卡目录（_provBrandColor，同源）——
+          // 前端 _brandOverride 硬编码表删除（与目录同源后删重）；渠道卡
+          // brand_color（auth/providers.py）为 VCS 卡未覆盖时（hwcloud 等纯登录渠道）兜底。
+          var _brandColor = window._provBrandColor(p.provider) || p.brand_color || '';
           var brandVar = _brandColor ? ' style="--brand:' + _brandColor + '"' : '';
           var ariaVar = p.configured ? '' : ' aria-disabled="true"';
-          return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + ariaVar + brandVar + '>'
-            + icon + '<span data-i18n="' + i18nKey + '">' + p.name + '</span></button>';
-        }).join('');
+          // D102-K: gitee 风格 icon-only（纯 logo 圆形，title/aria 提示平台名）
+          // D102-N: 渠道卡 name 为英文代号时前端显示名映射（华为云/极狐等）
+          var _NAME_MAP = {hwcloud: '华为云', gitcode: 'GitCode', gitee: 'Gitee',
+                           github: 'GitHub', gitlab: 'GitLab'};
+          var _displayName = _NAME_MAP[p.provider] || p.name;
+          // i18n 双通道（D107-1 收口）：渲染时点用 I18N.t 即时组装（语言包已就绪的
+          // 常规场景）；同时挂 data-i18n-title/data-i18n-vars——语言包晚到（首帧
+          // providers 先于 pack 返回）或后续切换语言时，applyI18nToDOM 统一重刷，
+          // 不依赖本函数再次执行。huawei 有专名翻译不套 {name}。
+          var _isHw = (p.provider === 'huawei' || p.provider === 'hwcloud');
+          var _titleKey = _isHw ? 'app.login.oauth_title_huawei' : 'app.login.oauth_title';
+          // 非 huawei：data-i18n-title='KEY' data-i18n-vars='{"name":"X"}'（双引号包裹 title，
+          // 单引号包裹 vars JSON——与静态预置按钮同款转义结构）
+          var _i18nAttrs = _isHw
+            ? 'data-i18n-title="' + _titleKey + '"'
+            : 'data-i18n-title="' + _titleKey + '" data-i18n-vars=\'{"name":"' + _displayName + '"}\'';
+          var _loginTitle;
+          if (_isHw) {
+            _loginTitle = I18N.t('app.login.oauth_title_huawei');
+          } else {
+            _loginTitle = (I18N.t('app.login.oauth_title') || '使用 {name} 账号登录').replace('{name}', _displayName);
+          }
+          // 口径 v7 通用 DOM（用户裁定，gitee.com/login 形态）：纯品牌圆标，
+          // 平台名走 title/aria 提示（hover 显示「使用XX账号登录」），无常显文字
+          return '<button class="oauth-btn icon-only" ' + _i18nAttrs
+            + ' title="' + _esc(_loginTitle) + '"'
+            + ' aria-label="' + _esc(_loginTitle) + '"'
+            + ' onclick="app.oauthLogin(\'' + p.provider + '\')"'
+            + ariaVar + brandVar + '>' + icon
+            + '<span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">' + _esc(_loginTitle) + '</span></button>';
+        };
+        if (providers.length > MAX_VISIBLE) {
+          var visible = providers.slice(0, MAX_VISIBLE);
+          var overflow = providers.slice(MAX_VISIBLE);
+          container.innerHTML = visible.map(_mkBtn).join('')
+            + '<button class="oauth-btn icon-only oauth-more-btn" id="oauthMoreBtn" title="more" '
+            + 'onclick="var m=document.getElementById(\'oauthOverflowWrap\');'
+            + 'var open=(m.style.display!==\'none\');m.style.display=open?\'none\':\'flex\';'
+            + 'this.textContent=open?\'...\':\'‹\';" title="more">...</button>'
+            + '<span id="oauthOverflowWrap" style="display:none;flex-wrap:wrap;gap:inherit">'
+            + overflow.map(_mkBtn).join('') + '</span>';
+        } else {
+          container.innerHTML = providers.map(_mkBtn).join('');
+        }
         if (typeof I18N !== 'undefined' && I18N.apply) I18N.apply();
       } else {
         // 预渲染按钮：按 configured 同步 aria-disabled（不用真 disabled，保留点击可解释）
@@ -2178,7 +2404,7 @@ function loadAgentTypes() {
       return;
     }
     var names = unconfigured.map(function(p) {
-      return {gitcode: 'GitCode', github: 'GitHub'}[p.provider] || (p.name || p.provider);
+      return _provName(p.provider);  // 扫雷⑥ P1-9：目录优先，静态表竞态兜底
     }).join(' / ');
     var linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
     var hint = I18N.t('app.login.oauth_needs_config', {name: names},
@@ -2202,6 +2428,16 @@ function loadAgentTypes() {
   }
 
   // 内测申请表单
+// 扫雷⑥ P1-9：平台下拉目录驱动——目录已就绪按卡渲染；未就绪先用静态表兜底，
+// overlay 挂载后目录返回再原地刷新 options（参照 repos.js projectNewBtn 模式）
+function _betaPlatformOptionsHtml(selected) {
+  var keys = (_appVcsCatalog && Object.keys(_appVcsCatalog).length)
+    ? Object.keys(_appVcsCatalog) : Object.keys(_PROV_NAMES);
+  return keys.map(function(k) {
+    return '<option value="' + _esc(k) + '"' + (k === selected ? ' selected' : '') + '>'
+      + _esc(_provName(k)) + '</option>';
+  }).join('');
+}
 function openBetaApply() {
     var isZh = I18N.getLang() === 'zh';
     var overlay = document.createElement('div');
@@ -2218,10 +2454,7 @@ function openBetaApply() {
         <div style="display:flex;flex-direction:column;gap:12px">
           <div>
             <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_platform')}</label>
-            <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
-              <option value="gitcode">GitCode</option>
-              <option value="github">GitHub</option>
-            </select>
+            <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">${_betaPlatformOptionsHtml('gitcode')}</select>
           </div>
           <div>
             <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_username')}</label>
@@ -2359,6 +2592,11 @@ function openBetaApply() {
     _baRestoreForm();
     overlay.addEventListener('input', _baSaveForm);
     overlay.addEventListener('change', _baSaveForm);
+    // 扫雷⑥ P1-9：目录晚到时原地刷新平台下拉（保留用户已选值）
+    _appLoadVcsCatalog().then(function() {
+      var sel = document.getElementById('betaPlatform');
+      if (sel) sel.innerHTML = _betaPlatformOptionsHtml(sel.value || 'gitcode');
+    });
   }  var _baIdentity = '';
   var _BA_FORM_KEY = 'beta_apply_form';
   function _baCollectFormData() {
@@ -2806,7 +3044,7 @@ function openBetaApply() {
     } catch (e) {}
     // 复用设置页的绑定模态框——OAuth + 手动令牌 + spinner + 转移确认 + 成功反馈
     if (typeof _accountBindProvider === 'function') {
-      _accountBindProvider(provider);
+    _accountBindProvider(provider, true);  // 引导页=双模式（OAuth+PAT，首次打通用）；安全 tab=仅 OAuth
     } else {
       // 兜底：account.js 未加载时直接 OAuth 跳转
       API.get('/auth/bind/' + provider).then(function(d) {
@@ -2870,7 +3108,7 @@ function openBetaApply() {
     var overlay = document.createElement('div');
     overlay.id = 'whitelistModal';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
-    var platName = platform === 'github' ? 'GitHub' : 'GitCode';
+    var platName = _provName(platform);  // 扫雷⑥ P1-9：目录优先（原静态表降级兜底，见 _PROV_NAMES）
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">'
         + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
@@ -3410,14 +3648,17 @@ function openBetaApply() {
   return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
-/** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
+/** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。
+ *  D102-F: github 二分折叠——gitee 仓 Issue/PR 链接此前全落 gitcode.com
+ *  （用户实弹：gitee 仓点"查看 Issue"跳错站）。host 派生与 _repoWebLink
+ *  的已知前缀表同源。 */
 function _vcsUrl(repoKey, path) {
   var rk = repoKey || '';
-  var host = rk.indexOf('github:') === 0 ? 'https://github.com' : 'https://gitcode.com';
   var parts = rk.split(':');
-  var repoPath = parts.length > 1 ? parts[1] : rk;
-  return host + '/' + repoPath + (path || '');
+  var repoPath = parts.length > 1 ? parts.slice(1).join(':') : rk;
+  return 'https://' + _repoWebHost(rk) + '/' + repoPath + (path || '');
 }
+window._vcsUrl = _vcsUrl;  // D102-F: pages/*.js 通用消费（此前各页无法访问）
 document.addEventListener('DOMContentLoaded', function() {
   // 等 i18n 语言包异步加载完成后初始化，避免刷新页面时 I18N.t() 返回 key
   if (typeof I18N !== 'undefined' && !I18N.isLangLoaded(I18N.getLang())) {
@@ -3452,3 +3693,5 @@ function _showAppleConfirm(message, onConfirm, onCancel) {
   document.getElementById('appleConfirmOk').onclick = function() { modal.remove(); if (onConfirm) onConfirm(); };
   document.getElementById('appleConfirmCancel').onclick = function() { modal.remove(); if (onCancel) onCancel(); };
 }
+
+_appLoadVcsCatalog();

@@ -15,18 +15,21 @@
   - skills 已独立项目 (grape-dev/grape-skills)，打包时从独立仓库读取
   - examples/templates 已独立项目 (grape-dev/grape-template)，打包时从独立仓库读取
 """
+
 import hashlib, os, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
 OUT_DIR = "/root/release"
+
 BUCKET = "obs-grape-release"
+
 PREFIX = "release"
 
 # 独立项目路径（可通过环境变量覆盖）
 SKILLS_REPO = os.environ.get("GRAPE_SKILLS_ROOT", "/opt/grape-skills")
-TEMPLATE_REPO = os.environ.get("GRAPE_TEMPLATE_ROOT", "/opt/grape-template")
 
-# ---- 工具函数 ----
+TEMPLATE_REPO = os.environ.get("GRAPE_TEMPLATE_ROOT", "/opt/grape-template")
 
 def _sql_escape_str(v):
     """SQL 字符串字面量转义（导出种子 INSERT 用）：反斜杠与单引号。
@@ -70,8 +73,6 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
             for s, a in src_dir_or_files:
                 tar.add(s, arcname=a, filter=_tar_filter)
 
-# ---- 子包构建 ----
-
 def pack_backend(ts):
     """后端: src/ (含 api/static) + scripts/ + 仓库根文件 + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
@@ -93,14 +94,11 @@ def pack_backend(ts):
         items.append((help_dir, "help"))
     # 仓库根文件 (pyproject.toml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
+    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
     # Issue #699 Phase 0: requirements*.txt merged into pyproject.toml;
     #   Dockerfile/docker-compose.yml/nginx moved to deploy/
-    # 兼容 weekly-11：根目录若仍存在 requirements*.txt / Dockerfile，一并打入（os.path.isfile 保护）
     for rf in ["pyproject.toml", "Makefile",
-               "README.md", "README.zh.md", ".gitignore",
-               "Dockerfile", "docker-compose.yml",
-               "requirements.txt", "requirements-worker.txt",
-               "requirements-local.txt"]:
+               "README.md", "README.zh.md", ".gitignore"]:
         p = os.path.join(ROOT, rf)
         if os.path.isfile(p):
             items.append((p, rf))
@@ -308,24 +306,16 @@ def pack_tools(ts):
     out = os.path.join(OUT_DIR, f"staging/tools/grape-toolkit-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
-    # worker 运行闭包（与 src/worker_package.py MANIFEST 一致）
-    manifest_files = [
-        "src/__init__.py", "src/config.py", "src/repo_key.py", "src/session_manager.py",
-        "src/mysql_compat.py", "src/domains/mgmt/user/__init__.py", "src/domains/mgmt/user/db.py",
-        "src/api/__init__.py", "src/api/routing.py", "src/api/time_utils.py",
-        "src/api/event_store.py", "src/api/event_archive.py", "src/api/session_store.py",
-        "src/api/knowledge.py", "src/api/merge_gate.py",
-        "src/domains/insight/__init__.py", "src/domains/runtime/__init__.py",
-    ]
-    for f in manifest_files:
+    # worker 运行闭包（与 src/worker_package.py MANIFEST 一致——S112 根治后
+    # 由 tools_manifest_files() 从 MANIFEST 派生，字面量块已退役防漂移）
+    for f in tools_manifest_files():
         p = os.path.join(ROOT, f)
         if os.path.isfile(p):
             items.append((p, f))
+        elif os.path.isdir(p):
+            items.append((p, f))  # 目录项整目录打包（D84：只 isfile 会静默跳过）
     # 整目录
-    # worker 侧 runtime engine 会发 OTel span / 任务观测事件（延迟 import），
-    # 包内需带 insight/observability，否则运行时 ModuleNotFoundError（合并后新增依赖）
-    for d in ["src/domains/runtime/agents", "src/domains/runtime/engine",
-              "src/domains/insight/observability"]:
+    for d in ["src/domains/runtime/agents", "src/domains/runtime/engine"]:
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
             items.append((p, d))
@@ -549,8 +539,6 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 """
     return md
 
-# ---- 主流程 ----
-
 def main():
     ts = datetime.datetime.now().strftime("%Y%m%d%H%M")
     if len(sys.argv) > 1 and sys.argv[1] == "--ts":
@@ -681,6 +669,18 @@ def main():
     else:
         print(f"[pack] 上传失败: {r.stderr}")
         sys.exit(1)
+
+
+def tools_manifest_files():
+    # CR-R1：脚本方式运行时 sys.path[0]=scripts/，`from src.kernel.worker_package import
+    # MANIFEST` 会 ModuleNotFoundError（QA 实测 PYTHONPATH=. 才通过）。发布链路
+    # 无统一 PYTHONPATH 约定，此处前置仓库根，保证 pack_tools 闭包稳定。
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+    from src.kernel.worker_package import MANIFEST
+    return [x for x in MANIFEST if x != "requirements-worker.txt"]
+
 
 if __name__ == "__main__":
     main()

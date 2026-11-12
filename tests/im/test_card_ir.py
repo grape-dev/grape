@@ -23,8 +23,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.im.channel.capability import Capability, describe
-from src.im.channel.card import (
+from src.domains.runtime.im.channel.capability import Capability, describe
+from src.domains.runtime.im.channel.card import (
     CARD_IR_ENV,
     Action,
     Block,
@@ -43,10 +43,10 @@ from src.im.channel.card import (
     text_block,
     validate_card_capability,
 )
-from src.im.channel.renderers.dingtalk import DingtalkCardRenderer
-from src.im.channel.renderers.feishu import FeishuCardRenderer
-from src.im.engine.egress import HandlerEgress
-from src.im.engine.metrics import DEGRADED_REASONS, EngineMetrics
+from src.domains.runtime.im.channel.renderers.dingtalk import DingtalkCardRenderer
+from src.domains.runtime.im.channel.renderers.feishu import FeishuCardRenderer
+from src.domains.runtime.im.engine.egress import HandlerEgress
+from src.domains.runtime.im.engine.metrics import DEGRADED_REASONS, EngineMetrics
 
 # ---------------------------------------------------------------- fixtures
 
@@ -278,8 +278,8 @@ def test_validate_card_capability_flags_rich_card_without_renderer():
 
 
 def test_self_check_builtin_channels_clean():
-    from src.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
-    from src.im.adapters.feishu.outbound import FEISHU_CAPABILITIES
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
+    from src.domains.runtime.im.adapters.feishu.outbound import FEISHU_CAPABILITIES
     assert self_check_card_capabilities(
         {"feishu": FEISHU_CAPABILITIES, "dingtalk": DINGTALK_CAPABILITIES}) == []
     # 非内置渠道声明 RICH_CARD 但无 renderer → 告警清单非空
@@ -289,8 +289,8 @@ def test_self_check_builtin_channels_clean():
 
 
 def test_feishu_declares_card_action_dingtalk_does_not():
-    from src.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
-    from src.im.adapters.feishu.outbound import FEISHU_CAPABILITIES
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
+    from src.domains.runtime.im.adapters.feishu.outbound import FEISHU_CAPABILITIES
     assert FEISHU_CAPABILITIES & Capability.CARD_ACTION
     assert not (DINGTALK_CAPABILITIES & Capability.CARD_ACTION)
 
@@ -378,7 +378,7 @@ def test_egress_empty_card_content_hard_guard():
 
 
 def test_egress_dingtalk_renderer_produces_action_card_metadata():
-    from src.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DINGTALK_CAPABILITIES
     replier = _ReplierStub(DINGTALK_CAPABILITIES)
     eg = HandlerEgress(None, replier, metrics=_MetricsStub(),
                        card_renderer=DingtalkCardRenderer())
@@ -436,7 +436,7 @@ def test_egress_legacy_mode_renders_lark_dict_passthrough():
 # ---------------------------------------------------------------- DingtalkSender 空消息护栏
 
 def _dt_sender(monkeypatch=None):
-    from src.im.adapters.dingtalk.outbound import DingtalkSender
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
     sent = {}
 
     async def _text(cid, text, **kw):
@@ -455,7 +455,7 @@ def _dt_sender(monkeypatch=None):
 
 
 def _dt_out(text="", md=None, **kw):
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.channel.message import OutboundMessage
     return OutboundMessage(chat_id="cid1", text=text, metadata=md or kw)
 
 
@@ -485,7 +485,7 @@ def test_dingtalk_sender_refuses_lark_raw_card():
 
 
 def test_dingtalk_empty_action_card_transport_guard():
-    from src.im.adapters.dingtalk.outbound import (
+    from src.domains.runtime.im.adapters.dingtalk.outbound import (
         DingtalkWebhookError,
         WebhookRegistry,
         send_action_card_via_webhook,
@@ -497,7 +497,7 @@ def test_dingtalk_empty_action_card_transport_guard():
 
 
 def test_dingtalk_action_card_falls_back_to_robot_when_webhook_missing():
-    from src.im.adapters.dingtalk.outbound import (
+    from src.domains.runtime.im.adapters.dingtalk.outbound import (
         WebhookRegistry,
         send_action_card_with_fallback,
     )
@@ -527,7 +527,7 @@ def test_dingtalk_action_card_falls_back_to_robot_when_webhook_missing():
 
 def test_flatten_card_keeps_buttons_and_select():
     """附带缺陷修复：_flatten_card 不再丢按钮/下拉（保留动作命令提示）。"""
-    from src.im.engine.egress import _flatten_card
+    from src.domains.runtime.im.engine.egress import _flatten_card
     card = {
         "header": {"title": {"content": "标题"}},
         "elements": [
@@ -573,9 +573,9 @@ def test_metrics_no_arg_record_degraded_still_counts():
 # ---------------------------------------------------------------- 链路 mock 驱动（/repo /chat /task /help + autopilot）
 
 def _run_command(text):
-    from src.im.feishu_async import BotContext
-    from src.im.handler_async import process_command_async
-    from src.session_manager import db as legacy_db
+    from src.domains.runtime.im.feishu_async import BotContext
+    from src.domains.runtime.im.handler_async import process_command_async
+    from src.kernel.session_manager import db as legacy_db
     ctx = BotContext(app_id="cli_card_ir", app_secret="s", bot_type="chat_bot", name="t")
     api = AsyncMock()
     asyncio.run(process_command_async(ctx, api, text, "oc_ir", "sender_1", legacy_db,
@@ -591,7 +591,7 @@ def _last_card(api):
 
 
 def _clean_pending():
-    from src.im.handler_async import _clear_pending_selection, _repo_bind_cache
+    from src.domains.runtime.im.handler_async import _clear_pending_selection, _repo_bind_cache
     _clear_pending_selection("oc_ir")
     _repo_bind_cache.clear()
 
@@ -599,12 +599,12 @@ def _clean_pending():
 def test_repo_chain_emits_card_ir_with_bind_actions():
     from unittest import mock
     _clean_pending()
-    with mock.patch("src.im.handler_async.get_user_id_by_app_id", return_value=1), \
+    with mock.patch("src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=1), \
          mock.patch("src.domains.mgmt.user.db.get_managed_repos", return_value=[
              {"repo_key": "gitcode:owner/a", "is_admin": 1, "is_join": 0},
              {"repo_key": "gitcode:owner/b", "is_admin": 0, "is_join": 1},
          ]), \
-         mock.patch("src.im.handler_async._current_bound_repo", return_value=""):
+         mock.patch("src.domains.runtime.im.handler_async._current_bound_repo", return_value=""):
         api = _run_command("/repo")
     card = _last_card(api)
     assert isinstance(card, Card)
@@ -619,19 +619,19 @@ def test_repo_chain_emits_card_ir_with_bind_actions():
 def test_help_chain_routes_quick_cmd_card():
     _clean_pending()
     with __import__("unittest").mock.patch(
-            "src.im.handler_async.get_user_id_by_app_id", return_value=1):
+            "src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=1):
         api = _run_command("/help")
     assert api.send_quick_cmd_card.called
 
 
 def test_task_chain_without_repo_sends_no_repo_card_ir():
-    from src.im.handler_async import _clear_pending_selection, _repo_bind_cache
+    from src.domains.runtime.im.handler_async import _clear_pending_selection, _repo_bind_cache
     _clear_pending_selection("oc_ir")
     _repo_bind_cache.clear()
     with __import__("unittest").mock.patch(
-            "src.im.handler_async.get_user_id_by_app_id", return_value=1), \
+            "src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=1), \
          __import__("unittest").mock.patch(
-            "src.im.handler_async._current_bound_repo", return_value=""):
+            "src.domains.runtime.im.handler_async._current_bound_repo", return_value=""):
         api = _run_command("/task")
     card = _last_card(api)
     assert isinstance(card, Card)
@@ -642,13 +642,13 @@ def test_task_chain_without_repo_sends_no_repo_card_ir():
 
 
 def test_chat_chain_without_repo_sends_no_repo_card_ir():
-    from src.im.handler_async import _clear_pending_selection, _repo_bind_cache
+    from src.domains.runtime.im.handler_async import _clear_pending_selection, _repo_bind_cache
     _clear_pending_selection("oc_ir")
     _repo_bind_cache.clear()
     with __import__("unittest").mock.patch(
-            "src.im.handler_async.get_user_id_by_app_id", return_value=1), \
+            "src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=1), \
          __import__("unittest").mock.patch(
-            "src.im.handler_async._current_bound_repo", return_value=""):
+            "src.domains.runtime.im.handler_async._current_bound_repo", return_value=""):
         api = _run_command("/chat")
     card = _last_card(api)
     assert isinstance(card, Card)
@@ -657,7 +657,7 @@ def test_chat_chain_without_repo_sends_no_repo_card_ir():
 
 def test_autopilot_state_card_ir_roundtrip_to_legacy_json():
     """autopilot 三态 IR → 飞书渲染 → 回调载荷可被既有 cmd 路由消费。"""
-    from src.im.handler_async import _autopilot_state_card
+    from src.domains.runtime.im.handler_async import _autopilot_state_card
     info = {"task_name": "demo", "summary": "结论", "scenes": [
         {"scene_id": "s1", "name": "场景一"}],
         "findings": {"findings": [
@@ -677,7 +677,7 @@ def test_autopilot_state_card_ir_roundtrip_to_legacy_json():
 
 
 def test_bind_success_card_ir_and_renderer():
-    from src.im.handler_async import _bind_success_card
+    from src.domains.runtime.im.handler_async import _bind_success_card
     card = _bind_success_card("gitcode:owner/a")
     assert card.title == "✅ 绑定成功"
     out = FeishuCardRenderer().render(card).payload

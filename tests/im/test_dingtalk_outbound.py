@@ -4,9 +4,9 @@ import time
 
 import pytest
 
-from src.im.adapters.dingtalk.markdown import DINGTALK_MARKDOWN_LIMIT
-from src.im.adapters.dingtalk.outbound import DingtalkSender
-from src.im.channel import Capability, OutboundMessage
+from src.domains.runtime.im.adapters.dingtalk.markdown import DINGTALK_MARKDOWN_LIMIT
+from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+from src.domains.runtime.im.channel import Capability, OutboundMessage
 
 
 def test_plain_text_goes_text_channel():
@@ -190,7 +190,7 @@ def _install_fake_aiohttp(monkeypatch):
 def test_post_webhook_http_error_raises(monkeypatch):
     _install_fake_aiohttp(monkeypatch)
     _FakeClientSession.response = _FakeResponse(500, {"errcode": 0})
-    from src.im.adapters.dingtalk.outbound import DingtalkWebhookError, _post_webhook
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkWebhookError, _post_webhook
     with pytest.raises(DingtalkWebhookError):
         asyncio.run(_post_webhook("https://webhook", {"msgtype": "text"}))
 
@@ -199,7 +199,7 @@ def test_post_webhook_errcode_nonzero_raises(monkeypatch):
     """HTTP 200 但 errcode!=0（钉钉业务失败）→ raise，不得计成功。"""
     _install_fake_aiohttp(monkeypatch)
     _FakeClientSession.response = _FakeResponse(200, {"errcode": 310000, "errmsg": "sign error"})
-    from src.im.adapters.dingtalk.outbound import DingtalkWebhookError, _post_webhook
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkWebhookError, _post_webhook
     with pytest.raises(DingtalkWebhookError) as ei:
         asyncio.run(_post_webhook("https://webhook", {"msgtype": "text"}))
     assert "310000" in str(ei.value)
@@ -208,7 +208,7 @@ def test_post_webhook_errcode_nonzero_raises(monkeypatch):
 def test_post_webhook_transport_exception_raises(monkeypatch):
     _install_fake_aiohttp(monkeypatch)
     _FakeClientSession.raise_exc = OSError("conn reset")
-    from src.im.adapters.dingtalk.outbound import DingtalkWebhookError, _post_webhook
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkWebhookError, _post_webhook
     with pytest.raises(DingtalkWebhookError):
         asyncio.run(_post_webhook("https://webhook", {"msgtype": "text"}))
 
@@ -216,7 +216,7 @@ def test_post_webhook_transport_exception_raises(monkeypatch):
 def test_post_webhook_success_returns_message_id(monkeypatch):
     _install_fake_aiohttp(monkeypatch)
     _FakeClientSession.response = _FakeResponse(200, {"errcode": 0, "messageId": "dt_1"})
-    from src.im.adapters.dingtalk.outbound import _post_webhook
+    from src.domains.runtime.im.adapters.dingtalk.outbound import _post_webhook
     assert asyncio.run(_post_webhook("https://webhook", {"msgtype": "text"})) == "dt_1"
 
 
@@ -224,8 +224,8 @@ def test_webhook_failure_counts_failed_via_sender(monkeypatch):
     """传输层失败 → DingtalkSender 返回 ok=False（可被 CountingSender 计 failed）。"""
     _install_fake_aiohttp(monkeypatch)
     _FakeClientSession.raise_exc = OSError("boom")
-    from src.im.adapters.dingtalk.outbound import WebhookRegistry
-    from src.im.adapters.dingtalk.outbound import (
+    from src.domains.runtime.im.adapters.dingtalk.outbound import WebhookRegistry
+    from src.domains.runtime.im.adapters.dingtalk.outbound import (
         DingtalkSender, send_markdown_via_webhook, send_text_via_webhook)
     reg = WebhookRegistry()
     reg.register("cid_1", "https://webhook")
@@ -236,7 +236,7 @@ def test_webhook_failure_counts_failed_via_sender(monkeypatch):
 
 def test_webhook_registry_evicts_oldest_beyond_capacity():
     """容量上限：超出 max_entries 淘汰最早登记条目（QA #936 Nice-to-have）。"""
-    from src.im.adapters.dingtalk.outbound import WebhookRegistry
+    from src.domains.runtime.im.adapters.dingtalk.outbound import WebhookRegistry
     reg = WebhookRegistry(max_entries=2)
     reg.register("c1", "https://w/1")
     reg.register("c2", "https://w/2")
@@ -247,7 +247,7 @@ def test_webhook_registry_evicts_oldest_beyond_capacity():
 
 
 def test_registry_meta_and_webhook_ttl():
-    from src.im.adapters.dingtalk.outbound import WebhookRegistry
+    from src.domains.runtime.im.adapters.dingtalk.outbound import WebhookRegistry
     reg = WebhookRegistry(ttl=0.01)
     reg.register("cid", "https://hook", staff_id="s1", chat_type="1")
     assert reg.lookup("cid") == "https://hook"
@@ -265,7 +265,7 @@ def test_empty_text_is_failed_not_success():
 
     sender = DingtalkSender(send_text=send_text, send_markdown=send_text)
     import asyncio
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.channel.message import OutboundMessage
     res = asyncio.run(sender.send(OutboundMessage(chat_id="cid", text="")))
     assert res.ok is False and "empty" in res.error
     assert calls == []          # 没有真的发出去
@@ -285,7 +285,7 @@ def test_string_card_kind_goes_action_card():
     sender = DingtalkSender(send_text=send_text, send_markdown=send_text,
                             send_action_card=send_action_card)
     import asyncio
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.channel.message import OutboundMessage
     out = OutboundMessage(chat_id="cid", text="**📍 当前位置**\n仓库：XOcto/deepseek-harness",
                           metadata={"kind": "card", "title": "DevOps Bot"})
     res = asyncio.run(sender.send(out))
@@ -298,7 +298,7 @@ def test_string_card_without_transport_is_failed():
     """没有 actionCard 通道时必须显式失败，不得静默降级成文本。"""
     sender = DingtalkSender(send_text=lambda *a, **k: "mid", send_markdown=lambda *a, **k: "mid")
     import asyncio
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.channel.message import OutboundMessage
     res = asyncio.run(sender.send(OutboundMessage(
         chat_id="cid", text="**📍 当前位置**", metadata={"kind": "card", "title": "DevOps Bot"})))
     assert res.ok is False and "actionCard" in res.error

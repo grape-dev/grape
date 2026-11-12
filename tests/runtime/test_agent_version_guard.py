@@ -8,7 +8,7 @@ import subprocess, sys, os
 
 def test_agent_module_has_version_guard():
     """agent.py 顶部应含 Python >= 3.10 守卫，且在 import 之前。"""
-    p = os.path.join(os.path.dirname(__file__), "..", "..", "src", "runtime", "agent.py")
+    p = os.path.join(os.path.dirname(__file__), "..", "..", "src", "domains", "runtime", "engine", "agent.py")
     src = open(p, encoding="utf-8").read()
     guard_idx = src.find("requires Python >= 3.10")
     first_import = src.find("import asyncio, json")

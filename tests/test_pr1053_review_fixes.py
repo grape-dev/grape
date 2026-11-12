@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from src.domains.mgmt.routes import autopilot as ap
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 EXEC_ID = 1905300001

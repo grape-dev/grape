@@ -233,7 +233,7 @@ class TestApplyRuntimeState:
     def test_reap_and_heartbeat_go_through_apply(self):
         """service.heartbeat_consolidated / reap_stale_runtimes 走统一写入口（源码级锁定）。"""
         import pathlib
-        src = pathlib.Path(__file__).resolve().parents[1] / "src" / "runtime" / "service.py"
+        src = pathlib.Path(__file__).resolve().parents[1] / "domains" / "runtime" / "engine" / "service.py"
         text = src.read_text(encoding="utf-8")
         assert "apply_runtime_state" in text, "service.py 未接入统一写入口"
         # 直接拼 status 字面量 UPDATE 的路径必须消失（防二次写窗口回潮）

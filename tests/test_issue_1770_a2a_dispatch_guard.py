@@ -11,7 +11,7 @@ import os
 import shutil
 import uuid
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 class TestA2ADispatchGuard1770:
@@ -38,7 +38,7 @@ class TestA2ADispatchGuard1770:
                 pass
             db.commit()
         try:
-            from src.config import SKILLS_DIR
+            from src.kernel.config import SKILLS_DIR
             shutil.rmtree(
                 os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation"),
                 ignore_errors=True)
@@ -77,7 +77,7 @@ class TestA2ADispatchGuard1770:
             except Exception:
                 pass
             db.commit()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         _sdir = os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation")
         os.makedirs(_sdir, exist_ok=True)
         with open(os.path.join(_sdir, "SKILL.md"), "w", encoding="utf-8") as _f:

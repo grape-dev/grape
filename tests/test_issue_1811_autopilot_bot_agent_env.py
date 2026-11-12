@@ -30,9 +30,9 @@ def _patch_autopilot_deps(monkeypatch, tmp_path, mode, *, bot="grape_bot",
     captured = {}
     monkeypatch.setattr(service, "runtime_execution_kind", lambda _id: mode)
     monkeypatch.setattr(scheduler, "_build_autopilot_prompt", lambda *a, **k: "prompt")
-    monkeypatch.setattr("src.domains.runtime.routes.runtime.engine_select.pick_engine", lambda *a, **k: 1)
-    monkeypatch.setattr("src.domains.runtime.routes.runtime.engine_select.engine_name", lambda _id: "engine-1")
-    monkeypatch.setattr("src.domains.runtime.routes.runtime.instances.runtime_instance_name", lambda _id: "inst-1")
+    monkeypatch.setattr("src.domains.runtime.engine.engine_select.pick_engine", lambda *a, **k: 1)
+    monkeypatch.setattr("src.domains.runtime.engine.engine_select.engine_name", lambda _id: "engine-1")
+    monkeypatch.setattr("src.domains.runtime.engine.instances.runtime_instance_name", lambda _id: "inst-1")
     monkeypatch.setattr("src.api.event_pipeline.get_agent_workdir",
                         lambda *a, **k: str(tmp_path))
     monkeypatch.setattr("src.api.event_pipeline.get_agent_display_name",
@@ -42,7 +42,7 @@ def _patch_autopilot_deps(monkeypatch, tmp_path, mode, *, bot="grape_bot",
                             lambda _rk: bot)
     monkeypatch.setattr("src.api.event_pipeline._materialize_direct_workdir",
                         lambda *a, **k: "prompt")
-    monkeypatch.setattr("src.prompt_builder.resolve_task_server_env",
+    monkeypatch.setattr("src.kernel.prompt_builder.resolve_task_server_env",
                         lambda *a, **k: {})
     monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
 
@@ -99,7 +99,7 @@ def test_custom_fields_cannot_override_reserved_bot_vars(monkeypatch, tmp_path):
 def test_repo_level_bot_username_wins(monkeypatch, tmp_path):
     """多 bot 场景：repo 级 managed_repos.bot_username 优先于全局 bot。"""
     import src.domains.mgmt.user.db as udb
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot"])
     with db_lock:
@@ -124,7 +124,7 @@ def test_repo_level_bot_username_wins(monkeypatch, tmp_path):
 def test_global_bot_fallback_when_repo_level_missing(monkeypatch, tmp_path):
     """repo 级缺失时回落全局 bot（gitcode 取第一个），与 event_pipeline 一致。"""
     import src.domains.mgmt.user.db as udb
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot", "other"])
     monkeypatch.setattr(udb, "get_global_github_bot_username", lambda: "gh_bot")

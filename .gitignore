@@ -137,6 +137,7 @@ src/api/static/uploads/
 # git askpass credential script (outputs token env vars, must not be committed)
 .git-askpass.sh
 venv/
+venv
 
 # review bot temp drafts
 .review-body-*.json

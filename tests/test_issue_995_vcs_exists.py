@@ -11,7 +11,7 @@ from src.api.main import app
 from src.domains.mgmt.auth import grape_account_db
 from src.api.jwt_utils import create_access_token
 from src.domains.mgmt.auth.grape_account_db import get_token_version
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 import src.api.issue_vcs_index as vcs_index
 
 client = TestClient(app)

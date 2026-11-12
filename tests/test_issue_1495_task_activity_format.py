@@ -160,7 +160,7 @@ class TestRecoverOrphansFormat:
         assert row == ("queued", 1), f"孤儿应回炉 attempts+1，实际 {row}"
 
 
-# ===== claim 兜底回收调用点（src/runtime/service.py）=====
+# ===== claim 兜底回收调用点（src/domains/runtime/engine/service.py）=====
 
 class TestClaimBackstopFormat:
     def test_space_format_message_blocks_claim_backstop(self, setup_db):

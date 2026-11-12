@@ -1,8 +1,8 @@
 """钉钉入站 golden 翻译测试（Issue #936 P2，设计文档 §7.6 golden 驱动）。"""
 import json
 
-from src.im.adapters.dingtalk.inbound import build_ack_frame, event_to_inbound
-from src.im.channel import ChatType, MsgType, Type
+from src.domains.runtime.im.adapters.dingtalk.inbound import build_ack_frame, event_to_inbound
+from src.domains.runtime.im.channel import ChatType, MsgType, Type
 
 
 def _text_event(msg_id="mid_1", text="hello grape", conv_type="1"):

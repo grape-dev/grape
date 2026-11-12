@@ -176,7 +176,7 @@ function loadCfgOptions() {
       let html = defaultOpt +
         filtered.map((s, i) => {
           const selected = matchCurrent ? (String(s.id) === currentSkillId) : (i === 0);
-          return `<option value="${s.id}" ${selected ? 'selected' : ''}>${s.display_name || s.name}</option>`;
+          return `<option value="${s.id}" ${selected ? 'selected' : ''}>${window.escHtml(s.display_name || s.name)}</option>`;
         }).join('');
       // 项目/个人 scope 下无 skill → 显示空提示
       if (filtered.length === 0) {
@@ -352,8 +352,8 @@ function renderAgent(name, data) {
   const et = m.total_events || 0;
 
   const engineText = data.backend || (data.backends && data.backends.length ? data.backends.join(', ') : '');
-  const _ENGINE_TYPE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
-  const _engineTypeOf = n => { const l = (n || '').toLowerCase(); if (l.includes('hermes')) return 'hermes'; if (l.includes('opencode')) return 'opencode'; if (l.includes('codearts')) return 'codearts'; if (l.includes('codex')) return 'codex'; return ''; };
+  const _ENGINE_TYPE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', atomcode: '#e05a33' };
+  const _engineTypeOf = n => { const l = (n || '').toLowerCase(); if (l.includes('hermes')) return 'hermes'; if (l.includes('opencode')) return 'opencode'; if (l.includes('codearts')) return 'codearts'; if (l.includes('codex')) return 'codex'; if (l.includes('atomcode')) return 'atomcode'; return ''; };
   const _engineDot = _ENGINE_TYPE_DOT[_engineTypeOf(engineText)] || '';
   const engineBadge = engineText
     ? `<span class="ts t3" style="font-weight:600;display:inline-flex;align-items:center;gap:5px">${_engineDot ? `<span style="width:7px;height:7px;border-radius:50%;background:${_engineDot};flex-shrink:0"></span>` : ''}${I18N.t('agents.engine.label', {text: engineText})}</span>`

@@ -58,7 +58,8 @@ function testSixCallsUseThirdArgFallback() {
 }
 
 function testShowSkillUpdateUsesDisplayName() {
-  assert.ok(SKILLS_JS.indexOf("showSkillUpdate(${s.id},'${(s.display_name || s.name || '')") >= 0,
+  // D102-O：skill id 字符串化后为 showSkillUpdate('${s.id}',...)，口径断言不变
+  assert.ok(SKILLS_JS.indexOf("showSkillUpdate('${s.id}','${(s.display_name || s.name || '')") >= 0,
     'showSkillUpdate 应传 s.display_name || s.name（与卡片标题口径一致，并转义单引号）');
   console.log('  PASS: showSkillUpdate 传 display_name || s.name');
 }

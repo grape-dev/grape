@@ -1,8 +1,13 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
+
 import json, os, re, threading, time
+
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request, Response
+
 from pydantic import BaseModel
+
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
+
 from src.kernel.config import log
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
@@ -19,13 +24,13 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "
 # Issue #542：branches 列表进程内 TTL 缓存（分支变更低频，可接受短暂陈旧；
 # TTL 取分析文档建议区间 60~120s 的中值 90s；refresh=1 绕过，建分支主动失效）
 _BRANCHES_CACHE_TTL = 90.0
-_branches_cache: dict = {}
-_branches_cache_lock = threading.Lock()
 
+_branches_cache: dict = {}
+
+_branches_cache_lock = threading.Lock()
 
 def _branches_cache_key(provider: str, owner: str, repo: str) -> str:
     return f"{provider}:{owner}/{repo}"
-
 
 def _branches_cache_get(key: str):
     with _branches_cache_lock:
@@ -34,21 +39,23 @@ def _branches_cache_get(key: str):
             return entry[1]
     return None
 
-
 def _branches_cache_put(key: str, payload: dict):
     with _branches_cache_lock:
         _branches_cache[key] = (time.time(), payload)
 
-
 def _branches_cache_invalidate(owner: str, repo: str):
     """按 owner/repo 失效两平台缓存键（建分支后立即可见）。"""
     with _branches_cache_lock:
-        for prov in ("gitcode", "github"):
+        try:
+            from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+            _pros = _lvp() or []
+        except Exception:
+            _pros = []
+        for prov in _pros:
             _branches_cache.pop(_branches_cache_key(prov, owner, repo), None)
 
-
 def _resolve_repo_key(repo: str) -> str:
-    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    """查 DB 确定 repo_key 实际前缀（S104/D78 候选集卡派生，含 gitee/gitlab）。"""
     from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(repo)
     if ":" in repo:
@@ -57,14 +64,15 @@ def _resolve_repo_key(repo: str) -> str:
         from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
+            from src.kernel.repo_key import repo_key_candidates
+            _rks = tuple(repo_key_candidates(repo))
+            row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({','.join('?' * len(_rks))}) LIMIT 1",
+                            _rks).fetchone()
             if row:
                 return row[0]
     except Exception:
         pass
     return rk
-
 
 def _resolve_scene_repo_key(repo: str, user: dict) -> str:
     """解析场景查询的 repo_key（Issue #534）。
@@ -90,7 +98,6 @@ def _resolve_scene_repo_key(repo: str, user: dict) -> str:
         pass
     return ""
 
-
 def _scene_row_exists(scene_id: str, repo_key: str) -> bool:
     """场景 scene_id 在 repo_key 下是否存在有效 DB 行（Issue #568 二级解析触发判据）。"""
     if not scene_id:
@@ -106,7 +113,6 @@ def _scene_row_exists(scene_id: str, repo_key: str) -> bool:
             return c.fetchone() is not None
     except Exception:
         return False
-
 
 def _resolve_session_bound_scene(scene_id: str, user: dict):
     """会话绑定场景解析（Issue #568：scenes detail 与 a2a handoff 可见性统一的第二级）。
@@ -155,7 +161,6 @@ def _resolve_session_bound_scene(scene_id: str, user: dict):
     from src.api.pipeline_config import get_pipeline_config
     return get_pipeline_config(scene_id, repo_key=_repo_key)
 
-
 def _load_scenes() -> dict:
     """读取 agent-skill-mapping.json 的场景配置（legacy fallback for apply）"""
     if not os.path.exists(_CONFIG_PATH):
@@ -164,14 +169,43 @@ def _load_scenes() -> dict:
         data = json.load(f)
     return data.get("scenes", {})
 
+@router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official). Supports page/page_size (page omitted -> full list, backward compatible) and optional q (name/display_name/description LIKE search) + sort (id/latest); always returns total.")
+def list_scenes(user: dict = Depends(require_no_session_token), repo: str = "",
+                page: int = Query(default=None, ge=1),
+                page_size: int = Query(default=20, ge=1, le=100),
+                q: str = Query(default="", max_length=100),
+                sort: str = Query(default="id", pattern="^(id|latest)$"),
+                fields: str = Query(default="", pattern="^(|minimal)$")):
+    """返回所有可用场景列表（repo，不含 official）。
 
-@router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
-def list_scenes(user: dict = Depends(require_no_session_token), repo: str = ""):
-    """返回所有可用场景列表（repo，不含 official）"""
-    from src.api.pipeline_config import get_scenes
+    分页（场景数量增长后项目场景页不再全量拉取，Issue #501）：
+    - 不带 page 参数：全量返回（老调用方零改动，向后兼容）
+    - page>=1：SQL LIMIT/OFFSET（ORDER BY id 稳定排序），page_size 上限 100
+    - total 始终返回：COUNT 查询（不带 page 时也与数组长度一致）
+    - 检索（Issue #501 增量）：q 非空按 name/display_name/description LIKE 过滤，
+      total 为命中数；sort=id 稳定序 / latest 按创建时间倒序。q/sort 均可选，默认行为不变。
+    """
+    from src.api.pipeline_config import get_scenes, _count_scenes_from_db
     repo_key = _resolve_scene_repo_key(repo, user)
-    scenes = get_scenes(repo_key=repo_key)
-    return {"scenes": scenes}
+    # FastAPI 直调（测试）时 Query 默认值是 Query 实例而非 None/int——规范化
+    if not isinstance(page, int) or page < 1:
+        page = None
+    if not isinstance(page_size, int) or page_size < 1:
+        page_size = 20
+    if not isinstance(q, str):
+        q = ""
+    if sort not in ("id", "latest"):
+        sort = "id"
+    _minimal = (fields == "minimal")
+    # Issue #501: total 走 COUNT（不拉 nodes_json），带 page 时 SQL 层分页；q 过滤两处同 WHERE
+    # fields=minimal（C 方案）：跳过 nodes_json 解析，供只要名字/图标的下拉类调用方
+    total = _count_scenes_from_db(repo_key, q=q)
+    if page is not None:
+        _start = (page - 1) * page_size
+        scenes = get_scenes(repo_key=repo_key, limit=page_size, offset=_start, q=q, sort=sort, minimal=_minimal)
+    else:
+        scenes = get_scenes(repo_key=repo_key, q=q, sort=sort, minimal=_minimal)
+    return {"scenes": scenes, "total": total}
 
 
 @router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
@@ -181,7 +215,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
     不再逐场景调 get_pipeline_config 做二次 DB 查询。
     """
-    from src.api.pipeline_config import get_scenes, get_pipeline_config
+    from src.api.pipeline_config import get_scenes, get_pipeline_config, _count_scenes_from_db
     from src.kernel.repo_key import to_repo_key
     repo_key = _resolve_scene_repo_key(repo, user)
     scene_list = get_scenes(repo_key=repo_key)
@@ -225,78 +259,9 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "is_pinned": int(s.get("is_pinned") or 0),
                        "pinned_at": s.get("pinned_at") or "",
                        "pipeline": cfg})
-    return {"scenes": result, "total": len(result)}
+    _total = len(result)
+    return {"scenes": result, "total": _total}
 
-
-def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
-    """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
-
-    语义与原 with-pipeline 内联版完全一致：
-    - 对每个绑定 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids，
-      返回 None = 该节点绑定引擎全部离线 → 记入 offline_nodes
-    - SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
-      与「配了引擎但全灭」区分开——sre_unbound 单独标记，前端提示「未选择机器」
-    - 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）
-    """
-    offline_nodes: list[str] = []
-    sre_unbound: bool = False
-    try:
-        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _gspei
-        for n in (cfg_nodes or []):
-            if not isinstance(n, dict):
-                continue
-            _tag = n.get("tag") or n.get("id") or ""
-            _eids = n.get("engine_runtime_ids") or []
-            if not _tag or not _eids:
-                # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
-                if _tag and str(_tag).lower() == "sre":
-                    sre_unbound = True
-                continue
-            if n.get("enabled") is False:
-                continue
-            try:
-                if _gspei(scene_id, _tag, repo_key=repo_key) is None:
-                    offline_nodes.append(str(_tag))
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return {"offline_nodes": offline_nodes,
-            "sre_unbound": sre_unbound,
-            "all_offline": bool(offline_nodes) or sre_unbound}
-
-
-@router.get("/{scene_id}/engine-status", operation_id="scenes_engine_status",
-            summary="Scene engine online status",
-            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.")
-def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
-    """返回单个场景的引擎在线状态（需求中心弹窗选中场景时按需调用，1 场景 × M 节点）。
-
-    节点来源与 with-pipeline 一致：DB 场景（get_scenes）优先，查不到回退
-    get_pipeline_config（official 模板 / pipelines.json）。
-    场景不存在时返回 all_offline=False（不拦创建入口）。
-    """
-    from src.api.pipeline_config import get_pipeline_config
-    from src.kernel.repo_key import to_repo_key
-
-    # P3（Issue #501 深审）：与 /scenes 列表同一会话级 repo 解析（#534），
-    # 不再只认显式 repo 参数——避免无 repo 上下文时退化到全局作用域探测错库。
-    repo_key = _resolve_scene_repo_key(repo, user)
-    # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
-    cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
-    # P1（Issue #501 深审）：get_pipeline_config 第 4 级兜底会静默回退
-    # pipelines.json 的 default 场景——不存在的场景 id 会拿别人的节点探测，
-    # 返回误导性 sre_unbound 警告。回退（fallback=True 或解析出的 scene_id
-    # 与请求不一致）时按「场景不存在」处理：不标记、不拦创建入口。
-    if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
-        return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
-    cfg_nodes = cfg.get("nodes") or []
-    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key)
-    status["scene_id"] = scene_id
-    return status
-
-
-# ===== Scene Market API（场景市场）=====
 
 def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> str:
     """解析场景图标为可访问的 URL 或 emoji。
@@ -325,7 +290,6 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> 
     cat = get_scene_category(category_id)
     return cat.get('icon', '⚙') if cat else '⚙'
 
-
 def _parse_scene_skills(nodes_json: str) -> list[str]:
     """从 nodes_json 提取技能名称列表"""
     try:
@@ -334,13 +298,11 @@ def _parse_scene_skills(nodes_json: str) -> list[str]:
         return []
     return [n.get("skill", "") for n in nodes if n.get("skill")]
 
-
 @router.get("/market/categories", operation_id="scenes_market_categories", summary="List scene market categories", description="Scene categories ordered by order_num; only is_active=1.")
 def list_scene_categories(user: dict = Depends(require_no_session_token)):
     """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
     from src.domains.mgmt.user.db import list_scene_categories as _list_cats
     return {"categories": _list_cats()}
-
 
 @router.get("/market", operation_id="scenes_market_list", summary="List scene market", description="Scene market list with search/category/sort/featured/paging/scope filters. limit>0 skips paging.")
 def list_scenes_market(user: dict = Depends(require_no_session_token),
@@ -412,7 +374,6 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
         except Exception:
             pass
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
-
 
 @router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
 def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_session_token)):
@@ -487,6 +448,9 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
                     "language": tpl.get("language", "") or tpl.get("tags", [""])[0] if isinstance(tpl.get("tags"), list) else "",
                     "stars": tpl.get("stats", {}).get("stars", 0) if isinstance(tpl.get("stats"), dict) else 0,
                     "source": tpl.get("source", ""),
+                    # S103/UC10：下发 source_platform——前端 scene-market.js 模板跳转
+                    # 走 _repoWebHost(source_platform+':'+repo) 派生 host 的前提字段
+                    "source_platform": tpl.get("source_platform", ""),
                     "source_repo": tpl.get("source_repo", ""),
                     "icon": tpl.get("icon", ""),
                 }
@@ -529,7 +493,6 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         "preset_custom_fields": scene.get("preset_custom_fields", "[]"),
     }
 
-
 @router.get("/market/{market_id}/applied", operation_id="scenes_market_applied", summary="Check market scene applied", description="Checks whether a market scene is already applied to the current repo: {applied, scene_name}.")
 def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_session_token),
                                 owner: str = "", repo: str = ""):
@@ -554,7 +517,6 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_s
         row = c.fetchone()
 
     return {"applied": bool(row), "scene_name": row[0] if row else ""}
-
 
 class MarketApplyBody(BaseModel):
     display_name: str = ""
@@ -663,7 +625,6 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
     return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
 
-
 @router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check", description="Pre-check before experiencing: {repo_exists, scene_applied, full_name, scene_name}.")
 async def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验前检查：项目仓库是否已存在 + 是否已应用过此场景。
@@ -742,7 +703,6 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
 
     return {"repo_exists": repo_exists, "scene_applied": scene_applied,
             "full_name": full_name, "scene_name": scene_name}
-
 
 @router.post("/market/{market_id}/experience", operation_id="scenes_market_experience", summary="Experience market scene", description="Experiences a scene: creates/reuses the recommended-template project and applies the scene.")
 async def experience_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
@@ -942,7 +902,6 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     return {"full_name": full_name, "scene_id": scene_id,
             "already_exists": already_exists, "message": msg}
 
-
 @router.post("/market/{market_id}/like", operation_id="scenes_market_like_toggle", summary="Toggle scene like", description="Toggles a scene like.")
 def toggle_scene_like(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景点赞 toggle：已赞→取消，未赞→点赞"""
@@ -955,13 +914,9 @@ def toggle_scene_like(market_id: int, user: dict = Depends(require_no_session_to
     liked, like_count = _toggle(user.get("id", 0), market_id)
     return {"liked": liked, "like_count": like_count}
 
-
-# ===== 分支管理（必须在 /{scene_id} 之前声明，避免路由被 scene_id 吞掉）=====
-
 class CreateBranchRequest(BaseModel):
     branch_name: str
     refs: str = "main"
-
 
 def _normalize_owner_repo(owner: str, repo: str) -> tuple[str, str]:
     """清洗路径参数中的 provider 前缀污染（如 owner="github:foo"）。
@@ -974,7 +929,6 @@ def _normalize_owner_repo(owner: str, repo: str) -> tuple[str, str]:
         if prefix in ("github", "gitcode", "gitlab"):
             owner = rest
     return owner, repo
-
 
 def _detect_repo_provider(owner: str, repo: str) -> str:
     """根据 managed_repos.repo_key 前缀判断仓库属于 gitcode 还是 github。
@@ -1017,7 +971,6 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
         return "gitcode"
     return "gitcode"
 
-
 @router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker). Optional provider/repo_key query param overrides platform detection (2026-10-24: same-name GitHub repos could shadow managed GitCode repos). Issue #542: results are cached in-process for 90s; pass refresh=1 to bypass the cache (response carries a `cached` flag).")
 def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str = "",
                        refresh: int = Query(0, description="1=绕过缓存强制刷新（手动刷新入口）"),
@@ -1029,11 +982,13 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     Issue #542：TTL 缓存 90s（分支变更低频），refresh=1 强制穿透；仅缓存成功结果。
     """
     from src.domains.mgmt.user.repo_manager import _req, _github_req
+    from src.kernel.repo_key import parse_repo_key
 
     owner, repo = _normalize_owner_repo(owner, repo)
     if repo_key:
-        # repo_key 优先：自带前缀，直接解析
-        _prov = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+        # repo_key 优先：自带前缀，直接解析（S85/D60③：统一走 parse_repo_key，
+        # 原内联三元把 gitee:/gitlab: 仓折叠成 gitcode）
+        _prov = parse_repo_key(repo_key)[0]
         provider = provider or _prov
     if provider in ("github", "gitcode"):
         _detected = provider
@@ -1110,7 +1065,6 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     _branches_cache_put(_cache_key, payload)
     return {**payload, "cached": False}
 
-
 @router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch", description="Creates a new branch in the repo. Optional provider/repo_key query param overrides platform detection (2026-10-24).")
 def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
                         provider: str = "", repo_key: str = "",
@@ -1120,10 +1074,12 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     provider/repo_key（可选，2026-10-24 新增）：显式指定平台，跳过猜测逻辑。
     """
     from src.domains.mgmt.user.repo_manager import _req, _github_req
+    from src.kernel.repo_key import parse_repo_key
 
     owner, repo = _normalize_owner_repo(owner, repo)
     if repo_key:
-        _prov = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+        # S85/D60③：统一走 parse_repo_key（原内联三元折叠非 gitcode 平台）
+        _prov = parse_repo_key(repo_key)[0]
         provider = provider or _prov
     if provider in ("github", "gitcode"):
         _detected = provider
@@ -1211,7 +1167,6 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
-# ===== Scene Market CRUD（用户自定义场景，Issue-54）=====
 
 class CreateMarketSceneRequest(BaseModel):
     name: str
@@ -1225,7 +1180,6 @@ class CreateMarketSceneRequest(BaseModel):
     category_id: int = 1
     recommended_template: str = ""
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
-
 
 @router.post("/market", operation_id="scenes_market_create", summary="Create market scene", description="Creates a user custom scene in scene_market. scope=repo: repo scene visible to all repo users.")
 def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(require_no_session_token),
@@ -1314,7 +1268,6 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
 
     return {"id": market_id, "message": "场景创建成功"}
 
-
 class UpdateMarketSceneRequest(BaseModel):
     name: str = ""
     display_name: str = ""
@@ -1326,7 +1279,6 @@ class UpdateMarketSceneRequest(BaseModel):
     category_id: int = 0
     recommended_template: str = ""
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
-
 
 @router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
 def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
@@ -1399,7 +1351,6 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     log.info(f"Market scene updated: id={market_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
 
-
 @router.delete("/market/{market_id}", operation_id="scenes_market_delete", summary="Delete market scene", description="Hard-deletes a custom market scene (scope != official).")
 def delete_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
     """硬删除用户自定义场景（scope != 'official'）。"""
@@ -1447,7 +1398,6 @@ def check_scene_name(name: str, scope: str, user: dict = Depends(require_no_sess
         source_user_id=user.get("id", 0), exclude_id=exclude_id,
     )
     return {"exists": exists}
-
 
 @router.post("/market/icon-upload", operation_id="scenes_market_icon_upload", summary="Upload scene icon", description="Uploads a scene icon (temporary file). Allowed jpg/png/webp/gif/svg <= 2MB. Returns {file_id, icon, obs_icon_key}.")
 async def upload_scene_icon(file: UploadFile = File(...),
@@ -1508,7 +1458,6 @@ async def upload_scene_icon(file: UploadFile = File(...),
 
     return {"file_id": file_id, "icon": icon_url, "obs_icon_key": obs_icon_key}
 
-
 def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: dict) -> tuple:
     """将临时图标文件落定为正式文件（重命名 key + 更新 uploaded_files + 更新 scene_market icon 字段）。"""
     from src.domains.mgmt.user.db import (get_uploaded_file, commit_uploaded_file,
@@ -1556,7 +1505,6 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
     # 返回正式路径，由调用方设置到 body 让 update_scene_market 统一更新
     return final_icon, final_obs_key
 
-
 def _delete_scene_icon_file(file_key: str):
     """删除图标物理文件（OBS 或本地）。"""
     if not file_key:
@@ -1578,7 +1526,6 @@ def _delete_scene_icon_file(file_key: str):
                 os.remove(local_path)
         except Exception as e:
             log.warning(f"Scene icon delete (local): {e}")
-
 
 @router.get("/skill-scope-audit", operation_id="scenes_skill_scope_audit", summary="Audit scene skill scope", description="Read-only audit (Issue #1564/#1721): scans active repo scenes and reports nodes whose skill scope conflicts (user-scope skills referenced by repo-shared scenes). Accepts session token (tk_) restricted to its bound repo, read-only. Returns violations[{scene_id,scene_name,node_id,node_tag,skill,actual_scope,expected_scope,suggested_skills}] plus summary counts; never writes.")
 def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1, le=1000),
@@ -1613,7 +1560,7 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
                             detail={"code": 400, "message": "请先选择仓库"})
     if not isinstance(limit, int) or limit < 1:
         limit = 200
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -1660,7 +1607,6 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
         ) if violations else "只读体检：未发现技能 scope 冲突。",
     }
 
-
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Re-bind the node to a repo/official skill before dispatch.")
 def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）。
@@ -1705,10 +1651,6 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
             "display_name": cfg.get("display_name") or cfg["name"],
             "onboarding": cfg.get("onboarding", ""),
             "scene_type": cfg.get("scene_type", "standard")}
-
-
-
-
 
 @router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging). Response contract: each skill item exposes (skill_id, scope, skill_name) which together form the unique selection key for frontend consumers — official/repo/user scoped skills may share the same skill_name, so skill_name alone MUST NOT be used as a selection/cache key.")
 def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
@@ -1765,9 +1707,6 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
             skills.append({"skill_id": r[0], "skill_name": r[1], "display_name": r[2] or r[1], "scope": r[3], "owner_id": r[4] or "", "description": r[5] or "", "agent_type": r[6] or ""})
     return {"skills": skills, "total": total}
 
-
-# ===== Scene CRUD =====
-
 class SceneNodeInput(BaseModel):
     id: str
     tag: str = ""
@@ -1791,9 +1730,6 @@ class CreateSceneRequest(BaseModel):
     scene_type: str = "standard"  # deprecated, 保留向后兼容
     pr_subscription_enabled: bool = False
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
-    # Issue #1844：advanced_options 不在此开放——外部创建必须先建场景再走
-    # PUT /scenes/{id}/advanced-options（复用变量名/保留字/重名/scope/关联仓库校验），
-    # 复制路径由 copy_scene 直接调用 create_custom_scene 内部写入，避免绕过校验。
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
@@ -1803,13 +1739,9 @@ class UpdateSceneRequest(BaseModel):
     pr_subscription_enabled: bool | None = None
     linked_repos: list | None = None  # None=不更新；[] = 清空关联仓库
 
-class PinSceneRequest(BaseModel):
-    pinned: bool
-
 class ApplySceneRequest(BaseModel):
     scene_id: str
     strict: bool = False  # Issue #524: true=任一节点 skipped（声明引擎不健康）时整单拒绝；默认部分应用
-
 
 def _validate_scene_node_roles(nodes: list):
     """Issue #955：场景节点 id（角色名）枚举校验。
@@ -1831,7 +1763,6 @@ def _validate_scene_node_roles(nodes: list):
                 "code": 400,
                 "message": f"节点角色非法：'{_id}'（节点 id 必须为角色名），"
                            f"合法角色：{', '.join(sorted(_roles))}"})
-
 
 def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """校验场景 nodes 的 engine_runtime_ids：
@@ -1914,7 +1845,6 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                         "code": 400,
                         "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
 
-
 @router.post("", operation_id="scenes_create", summary="Create scene", description="Creates a custom scene (associated only with the repo, no user-level).")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
@@ -1973,7 +1903,6 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     log.info(f"Scene created: id={scene_id} repo={repo_key} by user={user.get('id')}")
     return {"scene_id": scene_id, "db_id": db_id, "message": "场景创建成功"}
 
-
 def _scene_copy_source_meta(scene_id: str, repo_key: str):
     """读取复制源场景的 created_by / advanced_options / icon（列缺失时降级为空）。
 
@@ -1982,7 +1911,7 @@ def _scene_copy_source_meta(scene_id: str, repo_key: str):
     ``advanced_options`` 非法 JSON / 非对象时按空配置处理，并以 parse_error=True
     计入复制响应明细（Spec 风险表要求）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -2008,7 +1937,6 @@ def _scene_copy_source_meta(scene_id: str, repo_key: str):
         except Exception:
             opts, parse_error = {}, True
     return created_by, opts, (row[2] or ""), parse_error
-
 
 def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
     """返回「当前用户在该仓库可选引擎 id（按角色）」查询闭包。
@@ -2058,7 +1986,6 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
 
     return _ids
 
-
 def _scene_copy_repo_accessible(user: dict, repo_key: str) -> bool:
     """当前用户是否有权访问关联仓库（口径对齐 check_repo_access，仅不抛异常）。"""
     if not repo_key:
@@ -2069,17 +1996,19 @@ def _scene_copy_repo_accessible(user: dict, repo_key: str) -> bool:
     if not uid:
         return False
     try:
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         from src.domains.mgmt.user import db as user_db
         rk = to_repo_key(repo_key)
-        base = rk.split(":", 1)[1] if ":" in rk else rk
-        candidates = {f"gitcode:{base}", f"github:{base}"}
+        # D16/S25：候选集统一走 repo_key_candidates（平台卡派生，含 gitee/gitlab
+        # 等非主流平台），替代此前的 gitcode/github 双前缀字面量——非主流平台仓
+        # 原实现静默查空（视作无权访问，副本丢关联仓）。
+        from src.kernel.repo_key import repo_key_candidates
+        candidates = set(repo_key_candidates(rk))
         return any((r or {}).get("repo_key") in candidates
                    for r in user_db.get_managed_repos(uid))
     except Exception as e:
         log.warning(f"scene copy: linked repo access check failed: {e}")
         return False
-
 
 def _scene_copy_name(requested: str, source_name: str, existing_names) -> str:
     """副本命名：缺省 <源名>-copy；冲突追加序号；长度 ≤40。"""
@@ -2095,10 +2024,8 @@ def _scene_copy_name(requested: str, source_name: str, existing_names) -> str:
             return cand
     return base
 
-
 class CopySceneRequest(BaseModel):
     name: str = ""
-
 
 @router.post("/{scene_id}/copy", operation_id="scenes_copy", summary="Copy a scene", description="Copies a repo scene. The creator copies all custom-field values; other users only copy the field declarations (values cleared) and lose access to unavailable engines/skills/linked repos.")
 def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
@@ -2292,7 +2219,6 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
         "source_config_parse_error": source_parse_error,
     }
 
-
 @router.put("/{scene_id}", operation_id="scenes_update", summary="Update scene", description="Updates a scene (repo/user scope directly; official immutable).")
 def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """更新场景（repo/user scope 直接更新，official 不可修改）"""
@@ -2352,53 +2278,6 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
 
-
-@router.post("/{scene_id}/pin", operation_id="scenes_pin", summary="Pin scene", description="Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).")
-def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
-              user: dict = Depends(require_no_session_token), repo: str = ""):
-    """设置/取消场景置顶（仓库共享，不区分用户）。
-
-    Issue #1735 复审（MR !1145 Critical-2 / Medium-1）：
-    - 必须带仓库上下文：repo_key 为空时直接 400，禁止落到 `repo_key=''` 的全局/官方行；
-    - 访问权无条件校验（不再以 repo_key 非空为前提）；
-    - 写操作落 audit_logs（scene_pin），可按 actor/target 追溯。
-    """
-    from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
-    from src.api.deps import check_repo_access
-
-    repo_key = ""
-    if repo:
-        repo_key = _resolve_repo_key(repo)
-    else:
-        try:
-            _repo = app_current_repo()
-            if _repo:
-                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
-        except Exception:
-            pass
-
-    if not repo_key:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "请指定仓库（--repo owner/repo）；置顶状态按仓库共享，不接受空仓库上下文"})
-    check_repo_access(user, repo_key)
-
-    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
-    if not existing:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
-
-    # 存在性已校验；MySQL 对「值未变」的 UPDATE 返回 changed=0，不能据此再判 404
-    set_scene_pinned(scene_id, repo_key, body.pinned)
-
-    from src.domains.mgmt.auth import audit as auth_audit
-    auth_audit.log_audit(
-        "scene_pin", operator_id=user.get("id") or 0,
-        ip=(request.client.host if request and request.client else ""),
-        detail={"scene_id": scene_id, "repo_key": repo_key, "pinned": bool(body.pinned)})
-    log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
-    return {"message": "置顶状态已更新", "scene_id": scene_id,
-            "is_pinned": 1 if body.pinned else 0}
-
-
 @router.delete("/{scene_id}", operation_id="scenes_delete", summary="Delete scene", description="Deletes a custom scene (soft delete; official undeletable).")
 def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """删除自定义场景（软删除，官方场景不可删除）"""
@@ -2425,7 +2304,6 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
     log.info(f"Scene deleted: id={scene_id} by user={user.get('id')}")
     return {"message": "场景已删除"}
 
-
 def _collect_scene_skill_scope_violations(nodes: list, repo_key: str,
                                           expected_scope: str = "repo",
                                           username: str | None = None,
@@ -2438,10 +2316,6 @@ def _collect_scene_skill_scope_violations(nodes: list, repo_key: str,
     （保存/apply、audit、派发门禁、scene_precheck）共用同一结论。固定口径：
     repo 级场景引用 user 技能一律冲突（含创建者本人）。
     技能不在 skill 表（官方内置包形态）不计冲突（存量兼容）。
-
-    ``username`` / ``user_id`` / ``allow_own_user`` 为场景复制调用点（#1844）兼容参数：
-    按 #1758 固定口径，**创建者本人的 user 档技能同样冲突**（allow_own_user 仅为兼容保留，
-    不改变判定），复制时统一保留技能名到 skill_pending 并清空绑定。
     """
     from src.api.scene_skill_scope import evaluate
     violations = []
@@ -2467,60 +2341,12 @@ def _collect_scene_skill_scope_violations(nodes: list, repo_key: str,
         })
     return violations
 
-
 _SCENE_SCOPE_VIOLATION_FIELDS = ("node_id", "node_tag", "skill",
                                 "actual_scope", "expected_scope")
-
 
 def _project_scene_scope_violation(v: dict) -> dict:
     """对外 violations[] 的唯一裁剪点（Issue #1564）：去掉内部 owner_id 等字段。"""
     return {k: v[k] for k in _SCENE_SCOPE_VIOLATION_FIELDS}
-
-
-def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
-                            cache: dict | None = None) -> dict:
-    """单节点技能可解析性前置判定（Issue #1721 / #1758）。
-
-    判定统一委托给 ``scene_skill_scope.evaluate``：显式 skill_id 仍需 scope
-    校验（user scope 即使由本人显式绑定也不放行），失效 id 回退按名解析，
-    查询异常按统一 fail-closed 策略处理。detail 只做结果投影，不再 import
-    其它模块的私有判定函数。
-    返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
-    `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
-    """
-    from src.api.scene_skill_scope import evaluate
-    result = evaluate(node, repo_key, "repo", scene_id=scene_id,
-                      cache=cache)
-    return {
-        "resolvable": bool(result["ok"]),
-        "scope_check": {
-            "ok": bool(result["ok"]),
-            "skill": result.get("skill") or "",
-            "actual_scope": result.get("actual_scope") or "",
-            "expected_scope": result.get("expected_scope") or "repo",
-            "reason": result.get("reason") or "",
-        },
-    }
-
-
-def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
-                                    scene_id: str = "") -> list:
-    """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
-
-    复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
-    同一响应内按 skill_id/技能名缓存判定结果，避免重复节点触发多次查询。
-    """
-    result = []
-    _cache = {}
-    for node in nodes or []:
-        if not isinstance(node, dict):
-            result.append(node)
-            continue
-        item = dict(node)
-        item.update(_scene_node_scope_check(node, repo_key, scene_id, cache=_cache))
-        result.append(item)
-    return result
-
 
 def _validate_scene_skill_scope(nodes: list, repo_key: str, expected_scope: str = "repo"):
     """场景节点技能 scope 校验（Issue #657 / #1564 / #1758）：冲突时抛 HTTPException(400)。
@@ -2567,8 +2393,6 @@ def _validate_scene_skill_scope(nodes: list, repo_key: str, expected_scope: str 
         "rebinds": _rebind,
         "violations": [_project_scene_scope_violation(v) for v in violations],
     })
-
-
 
 @router.post("/apply/{owner}/{repo}", operation_id="scenes_apply", summary="Apply scene to repository", description="Applies a scene to a repository.")
 def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
@@ -2704,7 +2528,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=agent_type,
                     runtime_id=runtime_id, skill=skill, skill_id=skill_id,
-                    repo_gitcode_token=None, status="idle",
+                    status="idle",
                     enable=None, subscribe_events=None,
                 )
                 updated += 1
@@ -2728,15 +2552,11 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         "failed": failed_cnt,
     }
 
-
 def app_current_repo():
     """获取当前选中仓库（从前端 header 上下文，这里用 placeholder）"""
     # FastAPI 无 session 级仓库选择；前端通过 query param 或 header 传
     # 这里返回 None，调用方会用 user 信息或其他方式获取 repo
     return None
-
-
-# ===== 场景高级选项：工作分支 + 自定义 {name, value, is_secret} =====
 
 def _merge_preset_custom_fields(scene_id: str, repo_key: str, preset_json: str = "[]") -> None:
     """将场景预置自定义参数声明合并到 devops_pipeline_scene.advanced_options（Issue #246）。
@@ -2793,12 +2613,10 @@ def _merge_preset_custom_fields(scene_id: str, repo_key: str, preset_json: str =
     if appended:
         log.info(f"merge_preset_custom_fields: scene={scene_id} repo={repo_key} appended={appended}")
 
-
 class AdvancedOptionsRequest(BaseModel):
     work_branch: str = "main"
     custom_fields: list = []   # [{name: str, value: str, is_secret: bool?, scope?: list}]
     linked_repos: list = []    # [{repo_key: str, branch: str}] — Issue #242
-
 
 @router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
 def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
@@ -2864,7 +2682,6 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
         pass
     return {"work_branch": "main", "custom_fields": [], "linked_repos": _linked_repos}
 
-
 # ===== Issue #885: 场景自定义变量密钥字段按需取回明文（对齐 #474 reveal 模式）=====
 # GET advanced-options 已收敛为占位（is_secret → value:"" + has_value）；
 # 需要查看明文时走本接口：密码二次确认 + 审计日志（不落明文）+ 当次返回
@@ -2872,7 +2689,6 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
 class SceneAdvancedOptionsRevealBody(BaseModel):
     name: str = ""       # custom_field 变量名（大写）
     password: str = ""   # 二次确认：当前 Grape 密码
-
 
 @router.post("/{scene_id}/advanced-options/reveal", operation_id="scenes_advanced_options_reveal", summary="Reveal a scene custom-field secret once", description="Returns the plaintext value of one is_secret custom field once, after the user re-enters their Grape password. The response carries Cache-Control: no-store and a successful reveal is written to the audit log (scene/repo/field only, never the secret). Repeated reveals within a short window are rate-limited (429).")
 def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsRevealBody,
@@ -2967,7 +2783,6 @@ def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsReve
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
     return {"name": name, "value": value}
-
 
 @router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
 def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
@@ -3155,12 +2970,8 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
     log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch} linked_repos={len(_linked_repos)}")
     return {"message": "高级选项已保存"}
 
-
-# ===== Issue #461: 场景级访问地址（项目场景详情页地球仪图标登记；逻辑与需求中心 repos/deploy-url 一致，存储按 scene_id 维度）=====
-
 class SceneDeployUrlBody(BaseModel):
     deploy_url: str = ""
-
 
 def _scene_deploy_url_guard(scene_id: str, repo: str, user: dict) -> str:
     """场景级 deploy-url 端点公共前置：repo 解析 + 归属校验，返回 repo_key。"""
@@ -3172,7 +2983,6 @@ def _scene_deploy_url_guard(scene_id: str, repo: str, user: dict) -> str:
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
     return repo_key
-
 
 @router.get("/{scene_id}/deploy-url", operation_id="scenes_deploy_url_get", summary="Get scene deployment URL", description="Returns the scene-level access URL registered on the scene detail page.")
 def get_scene_deploy_url(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
@@ -3190,7 +3000,6 @@ def get_scene_deploy_url(scene_id: str, user: dict = Depends(require_no_session_
     except Exception:
         row = None
     return {"deploy_url": (row[0] if row else "") or ""}
-
 
 @router.put("/{scene_id}/deploy-url", operation_id="scenes_deploy_url_set", summary="Set scene deployment URL", description="Registers/updates the scene-level access URL (validated like the repo deploy URL).")
 def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
@@ -3213,9 +3022,8 @@ def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
     log.info(f"Scene deploy url saved: scene={scene_id} repo={repo_key}")
     return {"message": "场景访问地址已更新", "deploy_url": deploy_url}
 
-
 # ── Issue #501：单场景引擎在线状态（按需探测，从 with-pipeline 抽出） ──────────
-# 由 weekly-10 迁入（原实现 src/api/routes/scenes.py）。
+# 由 weekly-10 迁入（原实现 src/domains/mgmt/routes/scenes.py）。
 def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
     """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
 
@@ -3281,3 +3089,94 @@ def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_sessi
     status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key)
     status["scene_id"] = scene_id
     return status
+
+class PinSceneRequest(BaseModel):
+    pinned: bool
+
+@router.post("/{scene_id}/pin", operation_id="scenes_pin", summary="Pin scene", description="Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).")
+def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
+              user: dict = Depends(require_no_session_token), repo: str = ""):
+    """设置/取消场景置顶（仓库共享，不区分用户）。
+
+    Issue #1735 复审（MR !1145 Critical-2 / Medium-1）：
+    - 必须带仓库上下文：repo_key 为空时直接 400，禁止落到 `repo_key=''` 的全局/官方行；
+    - 访问权无条件校验（不再以 repo_key 非空为前提）；
+    - 写操作落 audit_logs（scene_pin），可按 actor/target 追溯。
+    """
+    from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
+    from src.api.deps import check_repo_access
+
+    repo_key = ""
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
+
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "请指定仓库（--repo owner/repo）；置顶状态按仓库共享，不接受空仓库上下文"})
+    check_repo_access(user, repo_key)
+
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+
+    # 存在性已校验；MySQL 对「值未变」的 UPDATE 返回 changed=0，不能据此再判 404
+    set_scene_pinned(scene_id, repo_key, body.pinned)
+
+    from src.domains.mgmt.auth import audit as auth_audit
+    auth_audit.log_audit(
+        "scene_pin", operator_id=user.get("id") or 0,
+        ip=(request.client.host if request and request.client else ""),
+        detail={"scene_id": scene_id, "repo_key": repo_key, "pinned": bool(body.pinned)})
+    log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
+    return {"message": "置顶状态已更新", "scene_id": scene_id,
+            "is_pinned": 1 if body.pinned else 0}
+
+def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
+                            cache: dict | None = None) -> dict:
+    """单节点技能可解析性前置判定（Issue #1721 / #1758）。
+
+    判定统一委托给 ``scene_skill_scope.evaluate``：显式 skill_id 仍需 scope
+    校验（user scope 即使由本人显式绑定也不放行），失效 id 回退按名解析，
+    查询异常按统一 fail-closed 策略处理。detail 只做结果投影，不再 import
+    其它模块的私有判定函数。
+    返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
+    `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
+    """
+    from src.api.scene_skill_scope import evaluate
+    result = evaluate(node, repo_key, "repo", scene_id=scene_id,
+                      cache=cache)
+    return {
+        "resolvable": bool(result["ok"]),
+        "scope_check": {
+            "ok": bool(result["ok"]),
+            "skill": result.get("skill") or "",
+            "actual_scope": result.get("actual_scope") or "",
+            "expected_scope": result.get("expected_scope") or "repo",
+            "reason": result.get("reason") or "",
+        },
+    }
+
+def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
+                                    scene_id: str = "") -> list:
+    """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
+
+    复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
+    同一响应内按 skill_id/技能名缓存判定结果，避免重复节点触发多次查询。
+    """
+    result = []
+    _cache = {}
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            result.append(node)
+            continue
+        item = dict(node)
+        item.update(_scene_node_scope_check(node, repo_key, scene_id, cache=_cache))
+        result.append(item)
+    return result

@@ -3,13 +3,13 @@ import asyncio
 
 import pytest
 
-from src.im.channel.message import MediaRef, MsgType
-from src.im.channel.types import ChatType, Type
-from src.im.engine.media import MediaWorkQueue
-from src.im.engine.router import Router, Installation, Identity
-from src.im.engine.dedup import InboundDedup, InMemoryDedupStore
-from src.im.engine.session import InMemoryBindingStore
-from src.im.channel.message import InboundMessage, Source
+from src.domains.runtime.im.channel.message import MediaRef, MsgType
+from src.domains.runtime.im.channel.types import ChatType, Type
+from src.domains.runtime.im.engine.media import MediaWorkQueue
+from src.domains.runtime.im.engine.router import Router, Installation, Identity
+from src.domains.runtime.im.engine.dedup import InboundDedup, InMemoryDedupStore
+from src.domains.runtime.im.engine.session import InMemoryBindingStore
+from src.domains.runtime.im.channel.message import InboundMessage, Source
 
 
 def _msg(mid, media=None):
@@ -153,7 +153,7 @@ async def _test_worker_cancel_calls_task_done_once_impl():
 
 async def _test_processed_sentry_is_bounded_impl():
     """processed 观察哨有上限裁剪（防生产实例无限增长）。"""
-    from src.im.engine.media import PROCESSED_MAX
+    from src.domains.runtime.im.engine.media import PROCESSED_MAX
 
     async def describe(ref, ctx):
         return "d"

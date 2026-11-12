@@ -18,13 +18,13 @@ import sys
 
 import pytest
 
-from src.im import engine_wiring
-from src.im.engine_wiring import (
+from src.domains.runtime.im import engine_wiring
+from src.domains.runtime.im.engine_wiring import (
     get_active_installation, revoke_installation, sync_installation,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.im.engine_wiring import run_startup_migration  # noqa: E402
+from src.domains.runtime.im.engine_wiring import run_startup_migration  # noqa: E402
 
 
 def _legacy_tables(conn: sqlite3.Connection) -> None:
@@ -122,8 +122,8 @@ def test_sync_does_not_register_lease_carrier(db_path):
     assert _q(db_path, "SELECT bot_app_id FROM global_im_bot_config WHERE bot_app_id='cli_u4'") == []
     assert _q(db_path, "SELECT lease_key FROM grape_t_channel_lease") == [], "sync 不应预铺租约行"
 
-    from src.im.bot_lease import BotLeaseStore
-    from src.session_manager import db as _sdb, db_lock
+    from src.domains.runtime.im.bot_lease import BotLeaseStore
+    from src.kernel.session_manager import db as _sdb, db_lock
     inst_id = _q(db_path, "SELECT id FROM grape_t_channel_installation WHERE legacy_app_id='cli_u4'")[0][0]
     store = BotLeaseStore("t-inst")
     key = f"feishu:{inst_id}"

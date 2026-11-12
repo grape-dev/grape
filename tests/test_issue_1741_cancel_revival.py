@@ -17,7 +17,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from src.api import issues_center as ic
 from src.api.db_setup import init_database
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 init_database()
 

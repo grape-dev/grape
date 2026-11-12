@@ -6,7 +6,7 @@ import os
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
 from src.domains.mgmt.user import db as user_db
-from src.im.devstage_client import (
+from src.domains.runtime.im.devstage_client import (
     DevStageError,
     list_environments as _list_envs,
     create_environment as _create_env,

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
 
 _REPO_KEY = "gitcode:owner/repo"

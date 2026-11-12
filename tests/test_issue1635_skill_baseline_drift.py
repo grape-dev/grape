@@ -244,7 +244,7 @@ def test_official_fallback_source_uses_official_scope(tmp_path, monkeypatch):
         "SKILL.md": SKILL_310,
         "references/issue-runbook.md": "# runbook",
     })
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: os.path.join(official, "SKILL.md"))
     res = sm.materialize_skill_with_fallback(
@@ -258,7 +258,7 @@ def test_official_fallback_source_uses_official_scope(tmp_path, monkeypatch):
 
 def test_degraded_has_source_and_drift(tmp_path, monkeypatch):
     """degraded 结果也构造 source/drift，调用点取用不落空。"""
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     res = sm.materialize_skill_with_fallback(
         str(tmp_path / ".skills"), "issue-cli",
@@ -271,7 +271,7 @@ def test_degraded_has_source_and_drift(tmp_path, monkeypatch):
 
 def test_agent_type_fallback_has_official_source(tmp_path, monkeypatch):
     """agent_type 回退成功同样构造 official source/drift。"""
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     checker = _write_skill(str(tmp_path / "official"), "grape-skill-validator", {
         "SKILL.md": "# checker\n",
@@ -315,7 +315,7 @@ def test_lazy_scope_skill_id_resolved_after_primary(tmp_path, monkeypatch):
         "SKILL.md": SKILL_310,
         "references/issue-runbook.md": "# runbook",
     })
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: os.path.join(official, "SKILL.md"))
     meta = {}
@@ -340,13 +340,13 @@ def test_lazy_scope_skill_id_resolved_after_primary(tmp_path, monkeypatch):
 def test_direct_materialize_call_point_passes_lazy_source(tmp_path, monkeypatch):
     """event_pipeline._materialize_direct_workdir 调用点：按名官方命中后
     物化结果必须携带 official 来源与非空 drift（修复惰性 meta 恒空）。"""
-    import src.config as cfg
+    import src.kernel.config as cfg
     official = _write_skill(str(tmp_path / "official"), "demo-skill", {
         "SKILL.md": "# demo\n",
     })
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: os.path.join(official, "SKILL.md"))
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "issue",
                                 "demo-skill", evt, "",
@@ -363,7 +363,7 @@ def test_direct_materialize_call_point_passes_lazy_source(tmp_path, monkeypatch)
 def test_worker_official_same_name_fallback_uses_official_source(tmp_path, monkeypatch):
     """worker 同名官方包回退：source 用 official/0，不沿用任务原始 skill_id。"""
     import json
-    from src.domains.runtime.routes.runtime import agent as ra
+    from src.domains.runtime.engine import agent as ra
     import src.domains.mgmt.user.db as udb
 
     monkeypatch.setattr(udb, "get_skill_by_id",
@@ -371,7 +371,7 @@ def test_worker_official_same_name_fallback_uses_official_source(tmp_path, monke
     official = _write_skill(str(tmp_path / "official"), "demo-skill", {
         "SKILL.md": "---\nname: demo-skill\nversion: 9.9.9\n---\n# demo\n",
     })
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: os.path.join(official, "SKILL.md"))
     task = {"id": "t-1635", "cwd": str(tmp_path), "skill": "demo-skill",
@@ -388,12 +388,12 @@ def test_worker_official_same_name_fallback_uses_official_source(tmp_path, monke
 def test_worker_agent_type_fallback_builds_source(tmp_path, monkeypatch):
     """agent_type 检查器回退（异名，原技能名无 SKILL.md）也必须构造 source/drift。"""
     import json
-    from src.domains.runtime.routes.runtime import agent as ra
+    from src.domains.runtime.engine import agent as ra
 
     checker = _write_skill(str(tmp_path / "official"), "grape-skill-validator", {
         "SKILL.md": "# checker\n",
     })
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: (os.path.join(checker, "SKILL.md")
                                       if name == "grape-skill-validator" else ""))

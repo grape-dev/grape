@@ -1,15 +1,22 @@
 """Bot 配置：全局常量、事件路由、多账户配置"""
+
 import os, json, logging, logging.handlers, urllib.request, socket
+
 import ssl
 
 # api.gitcode.com 被 GFW SNI 拦截（返回自签名证书），全局禁用 urllib SSL 验证。
 # 影响所有用 urllib.request.urlopen 调 api.gitcode.com 的模块（event_pipeline / auth / repo_manager 等）。
 # requests 库的调用在各调用点单独 verify=False。
 _ssl_ctx = ssl.create_default_context()
+
 _ssl_ctx.check_hostname = False
+
 _ssl_ctx.verify_mode = ssl.CERT_NONE
+
 _https_handler = urllib.request.HTTPSHandler(context=_ssl_ctx)
+
 _opener = urllib.request.build_opener(_https_handler)
+
 urllib.request.install_opener(_opener)
 
 # 抑制 requests 库的 InsecureRequestWarning
@@ -19,29 +26,28 @@ try:
 except Exception:
     pass
 
-# ====== 日志 ======
-# 结构化 JSON 日志（参考 multica logger/logger.go）：
-# - LOG_LEVEL 环境变量控制级别（debug/info/warn/error，默认 info）
-# - JSON 格式输出，字段：timestamp, level, component, request_id, message
-# - request_id 通过 ContextVar 注入（request_id_middleware 设置）
-# - 保留 TimedRotatingFileHandler（按天轮转，保留30天）+ stderr 双输出
-
 import contextlib
+
 import contextvars
 
 request_id_var: contextvars.ContextVar = contextvars.ContextVar("request_id", default="-")
+
 repo_var: contextvars.ContextVar = contextvars.ContextVar("repo_key", default="")
+
 user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
+
 # 本次处理对应的 Issue（issue 号或 issue_id）与事件序号（events.seq）。
 # agent 任务执行期间由 _execute_task 绑定，便于在 Loki 里按 repo/issue/seq 过滤。
 issue_var: contextvars.ContextVar = contextvars.ContextVar("issue_id", default="")
+
 seq_var: contextvars.ContextVar = contextvars.ContextVar("seq", default="")
+
 # 请求级 trace 兜底：BaseHTTPMiddleware 在 call_next 之后已离开 OTel span 上下文
 # （Starlette 为下游 app 单独起 task），此时 get_current_span() 为空 → 日志 trace_id 空白。
 # 中间件在入口解析 traceparent 写入这两个 ContextVar，过滤器优先用当前 span，缺失时回退。
 trace_id_var: contextvars.ContextVar = contextvars.ContextVar("trace_id", default="")
-span_id_var: contextvars.ContextVar = contextvars.ContextVar("span_id", default="")
 
+span_id_var: contextvars.ContextVar = contextvars.ContextVar("span_id", default="")
 
 def _current_span_ids() -> tuple[str, str]:
     """当前 OTel span 的 trace_id / span_id（32/16 位十六进制）。
@@ -59,7 +65,6 @@ def _current_span_ids() -> tuple[str, str]:
         pass
     return "", ""
 
-
 class _RequestIdFilter(logging.Filter):
     """把 ContextVar 中的 request_id / repo_key / user_id 注入到每条 LogRecord 中。"""
 
@@ -73,7 +78,6 @@ class _RequestIdFilter(logging.Filter):
         record.trace_id = _tid or trace_id_var.get()
         record.span_id = _sid or span_id_var.get()
         return True
-
 
 class _JsonFormatter(logging.Formatter):
     """JSON 行格式日志输出器。
@@ -97,7 +101,7 @@ class _JsonFormatter(logging.Formatter):
         import time as _t
         # OTel trace 关联（2026-11-05 MR-1 Step 3）：注入 trace_id/span_id
         try:
-            from src.observability.otel import inject_trace_ids
+            from src.domains.insight.observability.otel import inject_trace_ids
             inject_trace_ids(record)
         except Exception:
             pass
@@ -120,7 +124,6 @@ class _JsonFormatter(logging.Formatter):
             log_entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_entry, ensure_ascii=False)
 
-
 def _parse_level(s: str) -> int:
     s = (s or "").strip().lower()
     if s == "debug":
@@ -131,36 +134,46 @@ def _parse_level(s: str) -> int:
         return logging.ERROR
     return logging.INFO
 
-
 _LOG_LEVEL = _parse_level(os.environ.get("LOG_LEVEL", ""))
+
 _LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
+
 os.makedirs(_LOG_DIR, exist_ok=True)
 
 _file_handler = logging.handlers.TimedRotatingFileHandler(
     os.path.join(_LOG_DIR, "devops-bot.log"),
     when="midnight", interval=1, backupCount=30, encoding="utf-8",
 )
+
 _file_handler.setLevel(_LOG_LEVEL)
+
 _file_handler.setFormatter(_JsonFormatter())
+
 _file_handler.addFilter(_RequestIdFilter())
 
 _stream_handler = logging.StreamHandler()
+
 _stream_handler.setLevel(_LOG_LEVEL)
+
 _stream_handler.setFormatter(_JsonFormatter())
+
 _stream_handler.addFilter(_RequestIdFilter())
 
 logging.basicConfig(
     level=_LOG_LEVEL,
     handlers=[_file_handler, _stream_handler],
 )
+
 log = logging.getLogger("devops-bot")
+
 log.addFilter(_RequestIdFilter())
 
 # ====== 目录常量 ======
 SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".grape", "skills"))
-CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
-EXAMPLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "examples"))
 
+CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
+
+EXAMPLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "examples"))
 
 def _resolve_workspace_dir() -> str:
     """工作区根目录解析（用户要求 2026-08-12：worker 应写入自己家目录，而非共享代码目录）。
@@ -180,10 +193,12 @@ def _resolve_workspace_dir() -> str:
         return os.path.join(home, "grape-workspaces")
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/workspaces"))
 
-
 WORKSPACE_DIR = _resolve_workspace_dir()
+
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
+
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
+
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Chat 工作目录下发的逻辑基准（远端 worker _remap_cwd 的默认映射契约）。
@@ -195,16 +210,23 @@ CHAT_CWD_BASE = os.environ.get("CHAT_CWD_BASE", os.path.expanduser("~/grape_work
 # ====== 对象存储（OBS）配置（见 docs/new-version2/obs-storage/obs-skill-storage-design.md §3 N1）======
 # AK/SK 仅经环境变量注入（gitignored），不入配置文件、不入日志。
 OBS_ENABLED = os.environ.get("OBS_ENABLED", "false").lower() in ("1", "true", "yes")
+
 OBS_ENDPOINT = os.environ.get("OBS_ENDPOINT", "https://obs.cn-north-4.myhuaweicloud.com")
+
 OBS_BUCKET = os.environ.get("OBS_BUCKET", "")
+
 OBS_ACCESS_KEY = os.environ.get("OBS_ACCESS_KEY", "")
+
 OBS_SECRET_KEY = os.environ.get("OBS_SECRET_KEY", "")
+
 OBS_PREFIX = os.environ.get("OBS_PREFIX", "grape/prod")
+
 OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
 
 # ── 技能本地存储兜底（OBS 未启用时单机可用，docs/weekly-06/skill-local-storage-fallback-design.md）──
 # SKILL_STORAGE = auto|obs|local；auto=OBS 有则 OBS 否则本地；obs=仅 OBS；local=强制本地（单机）
 SKILL_STORAGE = os.environ.get("SKILL_STORAGE", "auto").strip().lower()
+
 # 技能对象本地权威落盘根（默认 <部署根>/data/skills/；多机集群请指向 OBS 或共享盘，勿用 local）
 SKILL_STORAGE_DIR = os.path.abspath(os.environ.get("SKILL_STORAGE_DIR", os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
@@ -212,45 +234,58 @@ SKILL_STORAGE_DIR = os.path.abspath(os.environ.get("SKILL_STORAGE_DIR", os.path.
 
 # ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
 BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
+
 BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "180"))
+
 BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "30"))
+
 BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
+
 # BOT_LEASE_GRACE：续约连续失败后进入宽限期，宽限期到才断开（抗瞬时 DB 抖动）
 BOT_LEASE_GRACE = int(os.environ.get("BOT_LEASE_GRACE", "90"))
+
 # BOT_LEASE_RENEW_FAIL_THRESHOLD：连续续约失败多少次（每次 = 一个 renew 周期）才进入宽限期
 BOT_LEASE_RENEW_FAIL_THRESHOLD = int(os.environ.get("BOT_LEASE_RENEW_FAIL_THRESHOLD", "3"))
+
 # IM_LEASE_STICKY：一致性哈希归属（均匀 + 粘性）。=0 退回"先到先得"旧模式（灰度回退）
 IM_LEASE_STICKY = os.environ.get("IM_LEASE_STICKY", "true").lower() in ("1", "true", "yes")
+
 # IM_INSTANCE_TIMEOUT：实例心跳超时（秒）——超过视为失联，其 bot 可被接管
 IM_INSTANCE_TIMEOUT = int(os.environ.get("IM_INSTANCE_TIMEOUT", "45"))
+
 # IM_STEAL_AFTER：lease 已过期但对存活实例的接管保护窗（秒）——超过才允许从存活实例强制接管（防假死）
 IM_STEAL_AFTER = int(os.environ.get("IM_STEAL_AFTER", "60"))
+
 # IM_ACQUIRE_COOLDOWN：抢到 lease 但连接失败后，多长时间内不重抢同一 bot（秒）
 IM_ACQUIRE_COOLDOWN = int(os.environ.get("IM_ACQUIRE_COOLDOWN", "30"))
+
 # IM_INSTANCE_HEARTBEAT：实例心跳/环 owner 过滤的虚拟节点数（一致性哈希均匀度）
 IM_HASH_VNODES = int(os.environ.get("IM_HASH_VNODES", "50"))
+
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
 OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 
 # Cookie 安全——生产 HTTPS 默认 secure=True，开发 HTTP 配 COOKIE_SECURE=false
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
 
-# 注意：此处禁止 import src.domains.mgmt.auth.*（worker 包含 config.py 但不含 src/domains/mgmt/auth/，
-# 顶层 import 会直接打崩 runtime-agent 启动，2026-10-14 五台 worker 心跳全断事故根因）。
-# 服务端如需 is_production，直接 from src.domains.mgmt.auth.security_config import is_production。
-# IS_PRODUCTION 常量已删除：全库零消费（死代码）。
-
 # JWT 密钥安全门禁
 _INSECURE_JWT_SECRETS = {"", "grape-dev-secret-change-in-production", "change-me-in-production"}
 
 # 邮件服务配置（环境变量驱动）
 SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "25"))
+
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "").strip()
+
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+
 SMTP_TLS = os.environ.get("SMTP_TLS", "true").lower() in ("1", "true", "yes")
+
 SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", "noreply@grape.dev").strip()
+
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+
 GRAPE_DEV_VERIFICATION_CODE = os.environ.get("GRAPE_DEV_VERIFICATION_CODE", "").strip()
 
 # ====== 数据库路径（可通过环境变量指向独立测试库，防止测试污染生产库）======
@@ -258,13 +293,12 @@ DB_PATH = os.environ.get("DEVOPS_DB_PATH", os.path.abspath(os.path.join(os.path.
 
 # ====== 多账户配置（从 DB 加载） ======
 ACCOUNTS: dict[str, dict] = {}
-_DEFAULT_ACCOUNT = ""
 
+_DEFAULT_ACCOUNT = ""
 
 def get_account(name=None) -> dict:
     """按名称获取账户配置；无匹配返回空 dict（不兜底 default）"""
     return ACCOUNTS.get(name or "", {})
-
 
 def _load_accounts():
     """D32-补丁：不再从 user_accounts 加载 ACCOUNTS 字典（死代码，无调用方）。
@@ -369,28 +403,18 @@ def _load_accounts():
     except Exception as e:
         log.warning(f"Failed to load server config: {e}")
 
-
 def save_accounts(new_accounts: list):
     """D32-补丁：已废弃——ACCOUNTS 字典无调用方，不再写 user_accounts 老表。"""
     pass
 
-
-# ====== 事件路由 ======
-
-
-def get_domain_agent(evt_type: str, repo_key: str = "", user_id: int = 0) -> str:
+def get_domain_agent(evt_type: str, repo_key: str = "", user_id: str = "") -> str:
     try:
         from src.api.routing import get_domain_agent as _db_route
         return _db_route(evt_type)
     except Exception:
         return ""
 
-
-# ====== 登录白名单 ======
-
 LOGIN_WHITELIST_PATH = os.path.join(CONFIG_DIR, "login-whitelist.json")
-
-# ====== API 慢请求监控 ======
 
 SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("SLOW_REQUEST_THRESHOLD_MS", "500"))
 
@@ -400,9 +424,9 @@ SERVER_CONFIG_PATH = os.path.join(CONFIG_DIR, "server-config.json")
 # ===== Chat 流式响应超时（Issue #399） =====
 # CHAT_STREAM_TIMEOUT：chat agent SSE 流式响应总超时（秒）——DB 轮询/SSE 等待 agent 输出的最长时间
 CHAT_STREAM_TIMEOUT = int(os.environ.get("CHAT_STREAM_TIMEOUT", "300"))
+
 # CHAT_STREAM_HEARTBEAT_INTERVAL：等待期间「思考中」心跳反馈间隔（秒）
 CHAT_STREAM_HEARTBEAT_INTERVAL = int(os.environ.get("CHAT_STREAM_HEARTBEAT_INTERVAL", "15"))
-
 
 def read_server_config() -> dict:
     """读取 configs/server-config.json（gitignored，动态读，改后无需重启）。
@@ -417,7 +441,6 @@ def read_server_config() -> dict:
     except Exception:
         pass
     return {}
-
 
 def get_chat_stream_timeout() -> int:
     """chat agent SSE 流式响应总超时（秒，Issue #399）。
@@ -435,11 +458,11 @@ def get_chat_stream_timeout() -> int:
         pass
     return CHAT_STREAM_TIMEOUT
 
-
 _WL_ENABLED_CACHE = None
-_WL_CACHE_TS = 0.0
-_WL_CACHE_TTL = 60.0  # 60s TTL—meta 配置变更频率极低
 
+_WL_CACHE_TS = 0.0
+
+_WL_CACHE_TTL = 60.0  # 60s TTL—meta 配置变更频率极低
 
 # ====== 运行配置统一读取层（Issue #470：写死配置抽取） ======
 # 单一配置源：超时家族（RUNTIME_TASK_TIMEOUT，默认 3600s）与 DevStage 规格
@@ -455,6 +478,7 @@ _WL_CACHE_TTL = 60.0  # 60s TTL—meta 配置变更频率极低
 RUNTIME_CONFIG_PATH = os.path.join(CONFIG_DIR, "runtime-config.json")
 
 _DEFAULT_TASK_TIMEOUT = 3600
+
 _DEFAULT_DEVSTAGE = {
     "template_id": "4ef59a2b4d3d4909aacd80f6007c00b2",
     "flavor_id": "23ebdfe3b2d34cc4b34a1aaf03d27c54",
@@ -466,13 +490,12 @@ _DEFAULT_DEVSTAGE = {
 # 60s TTL 缓存（meta + 文件读取；login_whitelist 同款模式——配置变更频率极低，
 # 管理台保存后显式失效，最长 60s 后其他实例生效）
 _rt_cfg_cache: dict = {"ts": 0.0, "meta": {}, "file": {}}
-_RT_CFG_CACHE_TTL = 60.0
 
+_RT_CFG_CACHE_TTL = 60.0
 
 def invalidate_runtime_config_cache():
     """失效运行配置缓存（管理台保存后调用，当前实例立即生效）。"""
     _rt_cfg_cache["ts"] = 0.0
-
 
 def _read_runtime_config_file() -> dict:
     try:
@@ -483,7 +506,6 @@ def _read_runtime_config_file() -> dict:
     except Exception:
         pass
     return {}
-
 
 def _read_runtime_meta() -> dict:
     """DB meta 表读取管理台配置值（异常时返回空——worker 端无 DB 等场景）。"""
@@ -496,17 +518,20 @@ def _read_runtime_meta() -> dict:
     except Exception:
         return {}
 
-
 def _rt_cfg_sources() -> tuple:
-    """返回 (meta_dict, file_dict)，带 60s TTL 缓存。"""
+    """返回 (meta_dict, file_dict)，带 60s TTL 缓存。
+
+    扫雷⑩ S3 加锁：check-then-act（ts 判断 + 回填）在并发线程下可能双读
+    meta/文件并交错写入 dict，读侧可能拿到 ts 新而 meta 旧的不一致快照。
+    """
     import time as _t
     now = _t.time()
-    if (now - _rt_cfg_cache["ts"]) >= _RT_CFG_CACHE_TTL:
-        _rt_cfg_cache["meta"] = _read_runtime_meta()
-        _rt_cfg_cache["file"] = _read_runtime_config_file()
-        _rt_cfg_cache["ts"] = now
-    return _rt_cfg_cache["meta"], _rt_cfg_cache["file"]
-
+    with _rt_cfg_lock:
+        if (now - _rt_cfg_cache["ts"]) >= _RT_CFG_CACHE_TTL:
+            _rt_cfg_cache["meta"] = _read_runtime_meta()
+            _rt_cfg_cache["file"] = _read_runtime_config_file()
+            _rt_cfg_cache["ts"] = now
+        return _rt_cfg_cache["meta"], _rt_cfg_cache["file"]
 
 def _positive_int(raw, fallback: int) -> int:
     """解析正整数；None/空/非法/非正 → fallback。"""
@@ -520,13 +545,11 @@ def _positive_int(raw, fallback: int) -> int:
         pass
     return fallback
 
-
 def _first_nonempty(*vals) -> str:
     for v in vals:
         if v is not None and str(v).strip():
             return str(v).strip()
     return ""
-
 
 def get_runtime_task_timeout() -> int:
     """任务超时家族单一来源（秒）。
@@ -553,7 +576,6 @@ def get_runtime_task_timeout() -> int:
         return v
     return _DEFAULT_TASK_TIMEOUT
 
-
 def get_task_recover_stale_seconds() -> int:
     """running 任务服务端回收阈值（秒）——Issue #259 双跑防护。
 
@@ -575,7 +597,6 @@ def get_task_recover_stale_seconds() -> int:
             pass  # 非法 env 不致命——回退跟随超时配置
     return get_runtime_task_timeout()
 
-
 def get_stuck_threshold_minutes() -> int:
     """stuck 预警派生阈值（分钟）。
 
@@ -586,7 +607,6 @@ def get_stuck_threshold_minutes() -> int:
     t = get_runtime_task_timeout()
     return max(1, round(t / 60.0 * 22.0 / 60.0))
 
-
 def get_orphan_threshold_minutes() -> int:
     """running·dispatched 孤儿回收派生阈值（分钟）。
 
@@ -596,7 +616,6 @@ def get_orphan_threshold_minutes() -> int:
     """
     t = get_runtime_task_timeout()
     return max(1, round(t / 60.0 * 6))
-
 
 def get_devstage_template_id() -> str:
     """DevStage（AI DevSpace）模板 ID 单一定义。
@@ -609,7 +628,6 @@ def get_devstage_template_id() -> str:
     v = _first_nonempty(meta.get("devstage_template_id"),
                          (cfg.get("devstage") or {}).get("template_id", ""))
     return v or _DEFAULT_DEVSTAGE["template_id"]
-
 
 def get_devstage_flavor() -> dict:
     """DevStage 环境规格（flavor_id / cores / memory / arch）。
@@ -635,14 +653,11 @@ def get_devstage_flavor() -> dict:
         or _DEFAULT_DEVSTAGE["arch"]
     return {"flavor_id": flavor_id, "cores": cores, "memory": memory, "arch": arch}
 
-
 def _write_runtime_config_for_test(cfg: dict):
     """测试辅助：写 runtime-config.json（仅测试用，运行时只读该文件）。"""
     with open(RUNTIME_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     invalidate_runtime_config_cache()
-
-
 
 def _is_login_whitelist_enabled() -> bool:
     """登录白名单是否启用。
@@ -685,7 +700,6 @@ def _is_login_whitelist_enabled() -> bool:
     _WL_CACHE_TS = now
     return result
 
-
 def invalidate_login_whitelist_cache():
     """Invalidate the login_whitelist_enabled cache.
 
@@ -695,7 +709,6 @@ def invalidate_login_whitelist_cache():
     global _WL_ENABLED_CACHE, _WL_CACHE_TS
     _WL_ENABLED_CACHE = None
     _WL_CACHE_TS = 0.0
-
 
 def is_user_allowed(whitelist_column: str, login: str) -> bool:
     """通用白名单判定——需显式启用才校验，未启用时全部放行。
@@ -748,20 +761,16 @@ def is_user_allowed(whitelist_column: str, login: str) -> bool:
     except Exception:
         return True
 
-
 def is_gitcode_user_allowed(gitcode_login: str) -> bool:
     """白名单判定（GitCode 用户名）——委托通用函数。"""
     return is_user_allowed("gitcode_username", gitcode_login)
-
 
 def is_github_user_allowed(github_login: str) -> bool:
     """白名单判定（GitHub 用户名）——委托通用函数。"""
     return is_user_allowed("github_username", github_login)
 
-
 # ====== 技能目录解析（按 agent_type 一层分组：skills/<agent_type>/<skill>/SKILL.md）======
 _OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat", "auto")
-
 
 def resolve_official_skill_path(skill_name: str) -> str:
     """官方技能 SKILL.md 绝对路径。
@@ -806,7 +815,6 @@ def resolve_official_skill_path(skill_name: str) -> str:
         pass
     return ""
 
-
 _os = os
 
 def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
@@ -831,11 +839,6 @@ def replace_skill_dir_placeholders(prompt: str, base_dir: str = "") -> str:
     prompt = _re.sub(r"\{\{SKILL_DIR\}\}/([^/\s]+)/SKILL\.md", _sub, prompt)
     return prompt.replace("{{SKILL_DIR}}", base)
 
-
-# 延迟到 main.py 中显式调用，避免循环导入
-# _load_accounts()
-
-
 # ====== Agent 文件系统隔离（组件2：bwrap 锁）======
 # 默认关闭（开 = 设 GRAPE_AGENT_SANDBOX=on）；bwrap 沙箱隔离 agent 子进程。
 # 关闭原因：Issue #168 — bwrap 白名单不完整，DevStage worker 三引擎全部失败。
@@ -854,10 +857,12 @@ BWRAP_RO_SYSTEM = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run")
 #   ~/.nvm(Node 运行时) + ~/.local(codearts 二进制) + ~/.cache(Node 缓存) + ~/.codeartsdoer(专属配置)；
 #   未实测（当前环境无 codearts 引擎），目录按推断补齐，留待真实环境 K6 验证。
 BWRAP_RO_ENGINE_COMMON = ("/usr/local",)
+
 BWRAP_RO_ENGINE = {
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
+    "atomcode": ("~/.local", "~/.cargo/bin", "~/.nvm"),
     # hwcloud: 二进制在 ~/.local/bin（同 hermes），settings/会话由 OPENAGENT_CLI_CONFIG
     # 指到 ~/.cache/hwcloud-acp-homes/<cwd-hash>/（BWRAP_RW_ENGINE rw 挂载）。
     "hwcloud": ("~/.local",),
@@ -871,10 +876,12 @@ BWRAP_RO_ENGINE = {
 # ro 会导致写 logs 报 [Errno 30] Read-only file system（2026-09-03 实测踩坑）。
 # codearts 底层同 opencode 用 bun，需 /var/cache/bun-compile 写权限（JIT .so 缓存）。
 _hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+
 BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
     "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": (_hermes_home,),
+    "atomcode": (os.path.expanduser(os.environ.get("ATOMCODE_HOME") or "~/.atomcode"),),
     # hwcloud: 会话 sqlite + per-task settings.json 全在 ~/.cache/hwcloud-acp-homes/
     # （hwcloud_acp._task_home_root，按 cwd-hash 分片；sandbox 模块同 hermes overlay
     # 按 md5(cwd) 动态 rw-bind，这里是根目录兜底挂载）
@@ -883,9 +890,6 @@ BWRAP_RW_ENGINE = {
     "codex": ("~/.codex", "~/.cache"),
 }
 
-
-
-
 # ===== 模型流瞬时异常自动重试（issue #403，判定层收口）=====
 # 对可重试的流类瞬时异常（上游 IAM 瞬断/流中断/exit 0 空输出）在任务终态
 # 收敛点延迟 requeue 重跑：
@@ -893,12 +897,13 @@ BWRAP_RW_ENGINE = {
 # - GRAPE_TRANSIENT_RETRY_BASE：指数退避基数秒（第 n 次重试前等待 base × 2^n，封顶 300s）
 # 注意：非瞬时错误（鉴权/配置）与有写操作证据的失败不重试（transient_retry.py 分类器+闸门）。
 GRAPE_TRANSIENT_RETRY_MAX = max(0, int(os.environ.get("GRAPE_TRANSIENT_RETRY_MAX", "3") or 3))
+
 GRAPE_TRANSIENT_RETRY_BASE = max(1, int(os.environ.get("GRAPE_TRANSIENT_RETRY_BASE", "10") or 10))
 
 # ===== Admin Console =====
 ADMIN_CONSOLE_URL = os.environ.get("ADMIN_CONSOLE_URL", "").rstrip("/")
-ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")
 
+ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")
 
 @contextlib.contextmanager
 def log_context(repo_key=None, issue_id=None, seq=None, user_id=None):
@@ -923,10 +928,13 @@ def log_context(repo_key=None, issue_id=None, seq=None, user_id=None):
         for var, token in reversed(tokens):
             var.reset(token)
 
-
 # ===== bot 建单：智能推荐完成后是否进入完整流水线（Issue #565 反转开关，2026-11-04）=====
 # 旧行为（Issue #565）：bot 建单只做场景判定，scene_id 写库后短路，不重派 VOD 执行棒。
 # 现默认放开：推荐完成即按场景重派 VOD，继续跑完整流水线（issue/coding/qa/sre）。
 # 置 0/false/off 可回退到旧的 scene-only 行为；评论族自循环拦截不受本开关影响。
 GRAPE_BOT_OPENED_FULL_PIPELINE = os.environ.get(
     "GRAPE_BOT_OPENED_FULL_PIPELINE", "1").strip().lower() in ("1", "true", "on", "yes")
+
+import threading
+
+_rt_cfg_lock = threading.Lock()

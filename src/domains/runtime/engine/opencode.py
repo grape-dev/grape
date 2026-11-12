@@ -1,8 +1,10 @@
 """Opencode Runtime 实现"""
-import os
-from src.kernel.config import SKILLS_DIR
-from .base import AgentRuntime
 
+import os
+
+from src.kernel.config import SKILLS_DIR
+
+from .base import AgentRuntime
 
 class OpencodeRuntime(AgentRuntime):
     name = "opencode"
@@ -18,10 +20,12 @@ class OpencodeRuntime(AgentRuntime):
         # prompt 不作为位置参数传递（stdin 传输，见 prompt_via_stdin）
         return args
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         env = os.environ.copy()
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
+        import logging
+
         from src.domains.runtime.engine.os_adapter import bun_cache_dir
         cache_dir = bun_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)

@@ -162,7 +162,7 @@ def test_fallback_repo():
 
 def test_writeback_uses_new_session(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("src.im.handler_async.update_conversation",
+    monkeypatch.setattr("src.domains.runtime.im.handler_async.update_conversation",
                         lambda conv_id, **kw: calls.append((conv_id, kw)))
     new_sid = "ses_new123"
     # 模拟执行后写回

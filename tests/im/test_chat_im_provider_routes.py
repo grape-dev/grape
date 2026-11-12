@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 UID = 95601
 USERNAME = "issue956_tester"
@@ -27,7 +27,7 @@ _PREFIX = "956_"
 
 
 def _ew_conn():
-    from src.im.engine_wiring import _connect, default_db_path, run_startup_migration
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path, run_startup_migration
     run_startup_migration(default_db_path())   # 幂等建表
     return _connect(default_db_path())
 
@@ -59,7 +59,7 @@ def _inst_count(where="1=1", params=()):
 
 
 def _seed_inst(app_id, secret, channel_type, uid=UID):
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     assert sync_installation("user", owner_user_id=str(uid), app_id=app_id,
                              app_secret=secret, channel_type=channel_type)
 
@@ -266,7 +266,7 @@ class TestPutConfigSave:
     def test_occupied_by_vod_rejected_no_dirty_installation(self, _client):
         """该 app_id 已被 repo 轨（VOD）active 安装占用 → 400，且不建脏安装行。"""
         app_id = _PREFIX + uuid.uuid4().hex[:8]
-        from src.im.engine_wiring import sync_installation
+        from src.domains.runtime.im.engine_wiring import sync_installation
         assert sync_installation("repo", repo_key="gitcode:org/repo956",
                                  app_id=app_id, app_secret="vodsec")
         r = _client.put("/api/chat/config", json={
@@ -351,7 +351,7 @@ class TestDualChannelIsolation:
 class TestEngineWiringSingleWrite:
     def test_sync_writes_new_table_not_legacy(self, _client):
         """A2 收尾：sync 只写 grape_t_channel_installation，legacy 列保持不动。"""
-        from src.im import engine_wiring
+        from src.domains.runtime.im import engine_wiring
         app_id = "ding_bw_" + uuid.uuid4().hex[:8]
         assert engine_wiring.sync_installation(
             "user", owner_user_id=str(UID), app_id=app_id, app_secret="s",
@@ -393,7 +393,7 @@ class TestSlackLogRedaction:
 
     def test_safe_ref_helpers_hash_slack_tokens(self):
         from src.domains.runtime.routes.chat import _safe_im_app_ref
-        from src.im.engine_wiring import _safe_app_ref
+        from src.domains.runtime.im.engine_wiring import _safe_app_ref
         token = "xoxb-1...cret"
         for ref in (
             _safe_im_app_ref(token, "slack"),

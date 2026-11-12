@@ -515,7 +515,7 @@ class TestDegradedModuleCandidates:
         import src.domains.runtime.project_info.builder as b
         monkeypatch.setattr(b, "_git_tree_paths", lambda repo_key: [])
         monkeypatch.setattr(b, "_api_tree_paths",
-                            lambda repo_key, owner, rname, token="": ["src", "src/main.py", "README.md"])
+                            lambda repo_key, owner, rname, token="": ["src", "src/api/main.py", "README.md"])
         r = self._degraded_build(monkeypatch)
         assert r["degraded"] is True
         from src.repo_key import workspace_repo_dir

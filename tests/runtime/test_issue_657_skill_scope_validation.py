@@ -16,9 +16,13 @@ apply 阶段无校验；派发阶段 resolve_skill_id 在 repo/official scope �
   4. 早期 smoke 场景回归：user 级技能 + repo 场景全链（apply 拒绝 +
      强行落库后派发 fail-fast）。
 """
+
 import json
+
 import os
+
 import sys
+
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -27,11 +31,12 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 import pytest  # noqa: E402
+
 from fastapi import HTTPException  # noqa: E402
 
 from src.kernel.session_manager import db, db_lock  # noqa: E402
-from src.api.pipeline_config import create_custom_scene, invalidate_scene_cache  # noqa: E402
 
+from src.api.pipeline_config import create_custom_scene, invalidate_scene_cache  # noqa: E402
 
 def _mk_skill_row(scope="user", owner="", sname="", agent_type="issue"):
     """直接插 skill 表行（绕开 create_skill 的目录副作用）。"""
@@ -45,22 +50,18 @@ def _mk_skill_row(scope="user", owner="", sname="", agent_type="issue"):
         db.commit()
         return c.lastrowid
 
-
 def _delete_skills(sname):
     with db_lock:
         db.cursor().execute("DELETE FROM skill WHERE skill_name=?", (sname,))
         db.commit()
 
-
 def _unique_repo():
     return f"r657-{uuid.uuid4().hex[:10]}"
-
 
 def _create_scene(scene_id: str, repo_key: str, nodes: list):
     create_custom_scene(
         scene_id=scene_id, name=f"scene-{scene_id}", description="issue 657 test",
         repo_key=repo_key, nodes=nodes)
-
 
 def _cleanup(repo_key: str, scene_id: str):
     with db_lock:
@@ -74,7 +75,6 @@ def _cleanup(repo_key: str, scene_id: str):
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
         db.commit()
     invalidate_scene_cache(scene_id, repo_key)
-
 
 class TestGetSkillScopeInfo:
     """Issue #657：技能 scope 三态判定（repo → official → user）。"""
@@ -141,7 +141,6 @@ class TestGetSkillScopeInfo:
         assert info["found"] is False
         assert info["matched"] is False
 
-
 class TestApplySceneScopeMismatch:
     """apply 拦截：repo 级场景引用 user 级技能 → 400（含技能名与 scope 值）。"""
 
@@ -198,7 +197,6 @@ class TestApplySceneScopeMismatch:
             assert "nodes" in result
         finally:
             _cleanup(repo_key, scene_id)
-
 
 class TestCreateUpdateSceneScopeMismatch:
     """保存拦截：create/update 场景引用 user 级技能 → 400。"""
@@ -285,7 +283,6 @@ class TestCreateUpdateSceneScopeMismatch:
             _delete_skills(sname)
             _cleanup(repo_key, scene_id)
 
-
 class TestDispatchFailFast:
     """派发兜底：apply 漏过的场景派发时 skill 解析为空 → 立即 skill_resolve_failed
     错误事件、不再派发（非 1800s pending_self_report 超时）。"""
@@ -301,7 +298,7 @@ class TestDispatchFailFast:
 
     def test_run_pipeline_scene_skill_user_scope_fails_fast(self):
         """issue 绑定场景节点技能为 user 级 → 派发前 fail-fast。"""
-        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.api.event_pipeline as ep
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{uuid.uuid4().hex[:8]}"
@@ -373,14 +370,13 @@ class TestDispatchFailFast:
                 db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
                 db.commit()
 
-
 class TestSmokeRegression:
     """早期 smoke 场景回归：user 级技能 + repo 场景全链。"""
 
     def test_user_scope_skill_full_chain(self):
         """user 技能 → repo 场景：apply 拒绝 + 强行落库后派发 fail-fast。"""
         from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest
-        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.api.event_pipeline as ep
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{uuid.uuid4().hex[:8]}"
@@ -425,3 +421,10 @@ class TestSmokeRegression:
             os.environ.pop("DEVOPS_EXECUTION_MODE", None)
             _delete_skills(sname)
             _cleanup(repo_key, scene_id)
+
+from src.kernel.session_manager import db, db_lock  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

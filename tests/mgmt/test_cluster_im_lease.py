@@ -7,8 +7,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.api.db_setup import init_database
-from src.im import bot_lease as bl
-from src.im import feishu_async as fa
+from src.domains.runtime.im import bot_lease as bl
+from src.domains.runtime.im import feishu_async as fa
 from src.kernel.session_manager import db, db_lock
 
 
@@ -28,16 +28,16 @@ def _clean():
 
 class TestImRing:
     """一致性哈希环语义（旧 IM 下线 M1：实现从 feishu_async 的 _im_ring/_im_owner
-    迁到新引擎的 src.im.engine.hashring.build_ring/owner，断言不变）。"""
+    迁到新引擎的 src.domains.runtime.im.engine.hashring.build_ring/owner，断言不变）。"""
 
     @staticmethod
     def _ring(instances):
-        from src.im.engine.hashring import build_ring
+        from src.domains.runtime.im.engine.hashring import build_ring
         return build_ring(instances)
 
     @staticmethod
     def _owner(ring, key):
-        from src.im.engine.hashring import owner
+        from src.domains.runtime.im.engine.hashring import owner
         return owner(ring, key)
 
     def test_deterministic_and_sticky(self):

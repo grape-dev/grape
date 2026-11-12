@@ -12,7 +12,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.engine_model import detect_engine_model
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))

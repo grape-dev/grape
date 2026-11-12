@@ -16,13 +16,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.im.bot_lease import BotLeaseStore
-from src.im.channel import (
+from src.domains.runtime.im.bot_lease import BotLeaseStore
+from src.domains.runtime.im.channel import (
     CancelContext, Channel, ChannelConfig, OutboundMessage, SendResult, Type,
 )
-from src.im.channel.registry import ChannelRegistry as Registry
-from src.im.engine.lease import lease_key
-from src.im.engine.supervisor import Supervisor
+from src.domains.runtime.im.channel.registry import ChannelRegistry as Registry
+from src.domains.runtime.im.engine.lease import lease_key
+from src.domains.runtime.im.engine.supervisor import Supervisor
 
 _NOW_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -179,7 +179,7 @@ def test_list_active_instances_heartbeat_window(sqlite_db):
 
 def test_lease_sql_translates_for_mysql_backend():
     """MySQL 方言翻译后不引入 NOW()（时钟已 Python 参数化，双方言等价）。"""
-    from src.mysql_compat import translate_sql
+    from src.kernel.mysql_compat import translate_sql
     acquire_sql = (
         "UPDATE grape_t_channel_lease "
         "SET lease_token = ?, lease_expires_at = ?, "

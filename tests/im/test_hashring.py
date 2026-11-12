@@ -1,5 +1,5 @@
 """哈希环测试（Issue #742 §7.5 A1）——现有行为固化（现状零覆盖）。"""
-from src.im.engine.hashring import build_ring, owner, owners
+from src.domains.runtime.im.engine.hashring import build_ring, owner, owners
 
 
 def test_owner_empty_ring_returns_empty():

@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import statistics
+
 from datetime import datetime, timedelta, timezone
+
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.api.time_utils import normalize_event_time
@@ -29,18 +31,14 @@ RANGE_SPECS: Dict[str, Tuple[int, int]] = {
     "24h": (24 * 3600,   1800),
     "7d":  (7 * 86400,   10800),
 }
-DEFAULT_RANGE = "24h"
 
+DEFAULT_RANGE = "24h"
 
 class RepoNotVisible(Exception):
     """请求的仓库不在调用者可见范围内 —— 路由层转 404（不是 403，避免探测存在性）。"""
 
-
-# ---------------------------------------------------------------- 时间工具
-
 def _repo_dim(repo_key: str) -> str:
     return f"repo:{repo_key}"
-
 
 def _dt(raw: Any) -> Optional[datetime]:
     """任意存储形态 → 带时区的 UTC datetime；解析不了返回 None（不抛）。"""
@@ -53,11 +51,9 @@ def _dt(raw: Any) -> Optional[datetime]:
         return None
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-
 def _bucket_start(ts: datetime, start: datetime, bucket: int) -> datetime:
     delta = int((ts - start).total_seconds())
     return start + timedelta(seconds=(delta // bucket) * bucket)
-
 
 def _p95(values: List[float]) -> Optional[float]:
     if not values:
@@ -66,16 +62,13 @@ def _p95(values: List[float]) -> Optional[float]:
     idx = max(0, min(len(vs) - 1, int(round(0.95 * (len(vs) - 1)))))
     return round(vs[idx], 1)
 
-
-# ---------------------------------------------------------------- 可见范围
-
 def visible_repo_keys(user: Dict[str, Any]) -> List[str]:
     """调用者可见的仓库 key 列表（gitcode:/github: 前缀）。只读缓存，不触发 VCS 同步。
 
     与 `/repos/member` 同源：user_repos 缓存 + 组织隔离（非个人组织只显示本组织已托管的）。
     缓存为空 → 返回空列表（不降级为"全部可见"，否则等于没有边界）。
     """
-    uid = int(user.get("id") or 0)
+    uid = str(user.get("id") or "")
     if not uid:
         return []
     try:
@@ -84,7 +77,7 @@ def visible_repo_keys(user: Dict[str, Any]) -> List[str]:
         from src.domains.mgmt.user.org_db import is_org_personal
     except Exception:
         return []
-    org_id = int(user.get("org_id") or 0)
+    org_id = str(user.get("org_id") or "")
     try:
         _is_personal = is_org_personal(org_id) if org_id else False
     except Exception:
@@ -99,26 +92,24 @@ def visible_repo_keys(user: Dict[str, Any]) -> List[str]:
         return []
     return sorted({(r or {}).get("repo_key") or "" for r in rows if (r or {}).get("repo_key")})
 
-
 def _scope_keys(user: Dict[str, Any], repo: str) -> List[str]:
     """解析本次查询的仓库范围；越权抛 RepoNotVisible。"""
     visible = visible_repo_keys(user)
     if not repo:
         return visible
     from src.kernel.repo_key import to_repo_key
-    want = {to_repo_key(repo), to_repo_key(repo, "github")}
+    want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
     hit = sorted(want & set(visible))
     if not hit:
         raise RepoNotVisible(repo)
     return hit
-
 
 def _cred_visibility(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[str, List[Any]]:
     """设备/引擎可见性 WHERE 片段 —— 与 dashboard.ops_overview 的 runtime_credentials 口径一致：
     非个人组织按 org_id 隔离；指定仓库时 global + 自己的 user + 该仓的 worker；否则 global + 自己的。
     """
     _uname = user.get("username") or ""
-    org_id = int(user.get("org_id") or 0)
+    org_id = str(user.get("org_id") or "")
     _is_personal = False
     if org_id:
         try:
@@ -133,9 +124,6 @@ def _cred_visibility(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[str, L
         return f" AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key IN ({ph}))", \
                [_uname, *repo_keys]
     return " AND (scope='global' OR (scope='user' AND owner_name=?))", [_uname]
-
-
-# ---------------------------------------------------------------- 取数
 
 def _fetch_tasks(repo_keys: List[str]) -> List[Dict[str, Any]]:
     """范围内任务（不分页，窗口在 Python 侧过滤：时间格式跨方言，交给 normalize 处理）。"""
@@ -156,7 +144,6 @@ def _fetch_tasks(repo_keys: List[str]) -> List[Dict[str, Any]]:
         return []
     return out
 
-
 def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
     """范围内 LLM 用量台账行（table: obs_llm_usage）。"""
     if not repo_keys:
@@ -176,7 +163,6 @@ def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
     except Exception:
         return []
     return out
-
 
 def _fetch_engines(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[int, int]:
     """(在线设备数, 总数) —— 按可见性口径过滤 runtime_credentials。"""
@@ -208,9 +194,6 @@ def _fetch_engines(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[int, int
     except Exception:
         return 0, 0
     return online, total
-
-
-# ---------------------------------------------------------------- 聚合
 
 def build_overview(user: Dict[str, Any], repo: str = "", range_str: str = DEFAULT_RANGE) -> Dict[str, Any]:
     """总览聚合。越权仓库抛 RepoNotVisible（路由层转 404）。"""
@@ -342,3 +325,7 @@ def build_overview(user: Dict[str, Any], repo: str = "", range_str: str = DEFAUL
         },
         "charts": charts,
     }
+
+from src.kernel.config import log
+
+from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一

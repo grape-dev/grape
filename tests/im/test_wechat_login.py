@@ -1,7 +1,7 @@
 """微信扫码绑定状态机测试（Issue #1728 M1）——wait→scaned→need_verifycode→confirmed。"""
 import asyncio
 
-from src.im.adapters.wechat.login import (
+from src.domains.runtime.im.adapters.wechat.login import (
     STATUS_CONFIRMED,
     STATUS_EXPIRED,
     STATUS_NEED_VERIFY,

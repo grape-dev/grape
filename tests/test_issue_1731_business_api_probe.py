@@ -22,7 +22,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 class TestBusinessApiPortConfig:
     def test_server_config_has_highest_priority(self):
         from src.domains.mgmt.user.db import get_business_api_port
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_port": 8081}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value="8091"), \
              patch.dict(os.environ, {"GRAPE_BUSINESS_PORT": "8092"}):
@@ -30,14 +30,14 @@ class TestBusinessApiPortConfig:
 
     def test_meta_value_used_when_config_missing(self):
         from src.domains.mgmt.user.db import get_business_api_port
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value="8091"), \
              patch.dict(os.environ, {"GRAPE_BUSINESS_PORT": "8092"}):
             assert get_business_api_port() == "8091"
 
     def test_server_config_int_value_accepted(self):
         from src.domains.mgmt.user.db import get_business_api_port
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_port": 8081}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {}, clear=False):
@@ -46,14 +46,14 @@ class TestBusinessApiPortConfig:
 
     def test_env_used_when_unconfigured(self):
         from src.domains.mgmt.user.db import get_business_api_port
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {"GRAPE_BUSINESS_PORT": "8092"}):
             assert get_business_api_port() == "8092"
 
     def test_empty_when_unconfigured(self):
         from src.domains.mgmt.user.db import get_business_api_port
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GRAPE_BUSINESS_PORT", None)
@@ -123,7 +123,7 @@ class TestLocalRuntimeProbeAndFallback:
         """单地址部署：业务基址与 runtime 基址取值等价改造前行为。"""
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch("src.domains.mgmt.user.db.get_server_base_url",
                    return_value="https://grape.example.com"), \

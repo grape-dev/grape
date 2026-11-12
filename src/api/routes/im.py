@@ -53,7 +53,7 @@ def _audit_im(user: dict, request: Request | None, action: str, *,
 
 
 def _db_conn():
-    from src.im import engine_wiring
+    from src.domains.runtime.im import engine_wiring
     return engine_wiring._connect(engine_wiring.default_db_path())
 
 
@@ -103,7 +103,7 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
 
     注：旧 BotManager 已下线（A2 M2），active_engine 只剩 new/idle 两态。
     """
-    from src.im import engine_wiring
+    from src.domains.runtime.im import engine_wiring
     eng = _engine()
     mode = engine_wiring.engine_mode()
     health = {}
@@ -139,7 +139,7 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
 def _notify_stats() -> dict:
     """通知扇出计数（A4：任务分配/待澄清/待审核/完成 全渠道）。"""
     try:
-        from src.im.notify import stats
+        from src.domains.runtime.im.notify import stats
         return stats()
     except Exception:
         return {}
@@ -206,7 +206,7 @@ async def im_notify_test(body: NotifyTestBody, user: dict = Depends(get_current_
     用于真机验证「任务分配 / 待澄清 / 待审核 / 完成」通知是否各渠道都收到；
     走与线上完全相同的 notify_user 路径（不去重，方便重复点）。
     """
-    from src.im.notify import notify_user, stats
+    from src.domains.runtime.im.notify import notify_user, stats
     kind = body.kind if body.kind in ("task", "awaiting", "pending_review", "done", "error") else "task"
     res = await notify_user(int(user.get("id") or 0), kind,
                             (body.text or "这是一条多渠道通知测试。"),
@@ -339,7 +339,7 @@ async def im_dingtalk_card_setup_save(
             if not app_id or not secret:
                 raise HTTPException(status_code=400, detail={
                     "code": 400, "message": "安装缺少 app_id/app_secret，先把钉钉应用凭证配好"})
-            from src.im.adapters.dingtalk.cards import DingtalkCardClient, new_out_track_id
+            from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient, new_out_track_id
             client = DingtalkCardClient(app_id, secret)
             ok, data = await client.create_instance(
                 tpl, new_out_track_id("probe"), {"title": "grape", "body_md": "card probe"})
@@ -357,8 +357,8 @@ async def im_dingtalk_card_setup_save(
             cfg["dingtalk_cards"] = {"card": str((cfg.get("dingtalk_cards") or {}).get("card") or "")}
             cfg["cards_enabled"] = False
 
-        from src.im.engine.supervisor import fingerprint
-        from src.im.adapters.dingtalk.cards import set_card_mode_file
+        from src.domains.runtime.im.engine.supervisor import fingerprint
+        from src.domains.runtime.im.adapters.dingtalk.cards import set_card_mode_file
         conn.execute(
             "UPDATE grape_t_channel_installation SET config=?, config_fingerprint=?, "
             "updated_at=datetime('now') WHERE id=?",

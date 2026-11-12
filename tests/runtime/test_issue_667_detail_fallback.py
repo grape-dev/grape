@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.domains.runtime.routes import issues as issues_mod
 from src.api import event_pipeline as ep_mod
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)

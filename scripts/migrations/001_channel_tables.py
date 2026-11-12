@@ -1,7 +1,7 @@
 """迁移 001_channel（Issue #742 §5.1）—— 渠道 4 表 + 双轨安装回填（§5.3 第 1 步）。
 
 双方言：SQLite（DEVOPS_DB_BACKEND=sqlite，默认）与 MySQL（RDS）均可用——
-建表 SQL 写成 SQLite 方言，MySQL 侧经 src.mysql_compat.translate_sql 自动翻译
+建表 SQL 写成 SQLite 方言，MySQL 侧经 src.kernel.mysql_compat.translate_sql 自动翻译
 （? → %s、TEXT 主键 → VARCHAR(191)、datetime('now') → CAST(NOW() AS CHAR) 等）；
 唯一的方言分叉是 uk_channel_installation_legacy 表达式索引，见
 _ensure_legacy_unique_index。幂等：可重复执行。
@@ -290,6 +290,6 @@ def list_installations(conn: sqlite3.Connection) -> list:
 
 
 if __name__ == "__main__":  # 运维手动执行：python scripts/migrations/001_channel_tables.py
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     stats = backfill_installations(db)
     print(f"backfill done: user={stats['user']} repo={stats['repo']}")

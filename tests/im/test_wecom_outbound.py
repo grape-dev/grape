@@ -13,14 +13,14 @@ import time
 
 import pytest
 
-from src.im.adapters.wecom.outbound import (
+from src.domains.runtime.im.adapters.wecom.outbound import (
     WECOM_CAPABILITIES,
     WecomReplyRegistry,
     WecomSender,
     WecomTransport,
     WecomTransportError,
 )
-from src.im.channel import Capability, OutboundMessage
+from src.domains.runtime.im.channel import Capability, OutboundMessage
 
 
 class FakeWS:
@@ -311,7 +311,7 @@ def test_subscribe_secret_never_kept_in_frame_sentinel():
 # ---------------- handler 侧 api 壳（2026-11-06 实障：缺 send_card_to_chat）
 
 def test_adapter_api_send_card_to_chat_uses_send_msg_markdown():
-    from src.im.adapters.wecom.outbound import WecomAdapterApi
+    from src.domains.runtime.im.adapters.wecom.outbound import WecomAdapterApi
 
     sender, transport, registry, ws, _ = _build()
     api = WecomAdapterApi(media_cache=None, sender=sender)
@@ -325,7 +325,7 @@ def test_adapter_api_send_card_to_chat_uses_send_msg_markdown():
 
 
 def test_adapter_api_send_card_to_chat_group_uses_registered_chat_type():
-    from src.im.adapters.wecom.outbound import WecomAdapterApi
+    from src.domains.runtime.im.adapters.wecom.outbound import WecomAdapterApi
 
     sender, transport, registry, ws, _ = _build()
     registry.register("group-1", "req-x", 2)
@@ -337,7 +337,7 @@ def test_adapter_api_send_card_to_chat_group_uses_registered_chat_type():
 
 
 def test_adapter_api_without_sender_is_noop_not_crash():
-    from src.im.adapters.wecom.outbound import WecomAdapterApi
+    from src.domains.runtime.im.adapters.wecom.outbound import WecomAdapterApi
 
     api = WecomAdapterApi(media_cache=None)
     assert asyncio.run(api.send_card_to_chat(None, "zhangsan", "x")) == ""

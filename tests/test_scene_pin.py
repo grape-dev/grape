@@ -50,7 +50,7 @@ def client():
 def _seed():
     """托管仓库 + 归属关系 + alice 仓库 3 个场景（id 升序 a/b/c，created_at 递增）。"""
     from src.domains.mgmt.user import db as user_db
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     user_db.add_managed_repo(ALICE_REPO, "alice", "repo1")
     user_db.add_managed_repo(BOB_REPO, "bob", "repo2")
@@ -97,7 +97,7 @@ def _pin(client, sid, pinned=True, repo=ALICE_SLUG, expect=200):
 
 
 def _pinned_at(sid):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT pinned_at FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=?",
@@ -123,7 +123,7 @@ def test_baseline_ddl_and_migration_registered():
 
 def test_migration_idempotent_on_global_db():
     from src.api.db_setup import _fn_scene_pin_columns
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     _fn_scene_pin_columns()
     _fn_scene_pin_columns()
@@ -218,7 +218,7 @@ def test_unpin_twice_clears_state(client):
     _pin(client, "1735-c")
     _pin(client, "1735-c", False)
     _pin(client, "1735-c", False)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT is_pinned, pinned_at FROM devops_pipeline_scene "
@@ -293,7 +293,7 @@ def test_pin_writes_audit_log(client):
     """Critical-2：置顶是仓库共享状态变更，必须落 audit_logs（可按 actor/target 追溯）。"""
     import json as _json
     _pin(client, "1735-a")
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         rows = db.cursor().execute(
             "SELECT operator_id, detail FROM audit_logs WHERE event_type='scene_pin' "

@@ -1,7 +1,7 @@
 """IM 渠道层 MySQL 适配冒烟（Issue #742/#760/#825 + 本地 MySQL 适配）。
 
 做法：用**临时库**（默认 im_adapt_check，跑完即删）走真实代码路径——
-DEVOPS_DB_BACKEND=mysql 时 src.session_manager.db 就是 MySQLCompatDB，
+DEVOPS_DB_BACKEND=mysql 时 src.kernel.session_manager.db 就是 MySQLCompatDB，
 engine_wiring 的仓储、迁移、去重、绑定、对账全部跑在这条连接上。
 
 用法：
@@ -45,8 +45,8 @@ def check(label: str, ok: bool, extra: str = "") -> None:
 
 
 def main() -> int:
-    from src.mysql_compat import mysql_config
-    from src.im.channel.types import ChatType, MsgType, Scope, Type
+    from src.kernel.mysql_compat import mysql_config
+    from src.domains.runtime.im.channel.types import ChatType, MsgType, Scope, Type
 
     cfg = mysql_config()
     assert os.environ.get("DEVOPS_DB_BACKEND", "").lower() == "mysql", \
@@ -60,7 +60,7 @@ def main() -> int:
     print(f"[1] 临时库 {DB_NAME} 已建（{cfg['host']}:{cfg['port']}）")
 
     # 用临时库的 compat 连接建历史表（A2 Phase B：不再种 legacy im_* 行）
-    from src.mysql_compat import MySQLCompatDB
+    from src.kernel.mysql_compat import MySQLCompatDB
     tmp_cfg = dict(cfg, database=DB_NAME)
     conn = MySQLCompatDB(**tmp_cfg)
     for ddl in LEGACY_DDL:
@@ -69,7 +69,7 @@ def main() -> int:
     print("[2] 历史表就绪（legacy im_* 行不再种：列已 DROP）")
 
     # 切到真实代码路径：session_manager.db 绑到临时库
-    from src.im import engine_wiring as W
+    from src.domains.runtime.im import engine_wiring as W
 
     stats = W.run_startup_migration(W.default_db_path())
     check("启动迁移不跑回填（A2 Phase B 已移到 002 一次性迁移）",
@@ -79,7 +79,7 @@ def main() -> int:
     # 直接走写穿桥建 3 条安装：1 user（app 去重语义由安装表唯一索引保证）+ 2 repo（app 共享）
     W.sync_installation("user", owner_user_id="7", app_id="cli_user_app", app_secret="sec_u")
     W.sync_installation("repo", repo_key="grape-dev/grape", app_id="cli_repo_app", app_secret="sec_r")
-    W.sync_installation("repo", repo_key="XOcto/hello-blog", app_id="cli_repo_app", app_secret="sec_r")
+    W.sync_installation("repo", repo_key="example-org/example-repo", app_id="cli_repo_app", app_secret="sec_r")
     print("[3] 安装行就绪：user app×1 / repo 2 仓（app 共享）")
 
     shares = W._shared_db()
@@ -116,7 +116,7 @@ def main() -> int:
     check("唯一索引拦截重复安装", dup_ok, dup_note)
 
     # 安装提供者枚举（Supervisor 的真实数据源）
-    from src.im.engine.installations import SqliteInstallationProvider
+    from src.domains.runtime.im.engine.installations import SqliteInstallationProvider
     prov = SqliteInstallationProvider(lambda: shares)
     import asyncio
     rows = asyncio.run(prov())
@@ -135,7 +135,7 @@ def main() -> int:
     check("去重 release 后 seen=False", store.seen("inst-1", "mid-1") is False)
 
     # 会话绑定 upsert（同 key 只一行，last_active_at 更新）
-    from src.im.engine.session import SessionBinding
+    from src.domains.runtime.im.engine.session import SessionBinding
     bind = W.SqliteBindingStore("ignored-mysql")
     b = SessionBinding(installation_id="inst-1", binding_key="chat-9", chat_type="group",
                        scope=Scope.USER, repo_key="", agent_type="chat", runtime_session_id="s1",
@@ -155,7 +155,7 @@ def main() -> int:
           f"rows={n} repo={getattr(got, 'repo_key', None)} sid={getattr(got, 'runtime_session_id', None)}")
 
     # ⑦ 持久化 + dedup mark 同事务（含 datetime('now') 翻译）
-    from src.im.channel.message import InboundMessage, Source
+    from src.domains.runtime.im.channel.message import InboundMessage, Source
     msg = InboundMessage(
         event_id="ev-7", message_id="mid-7", type=MsgType.TEXT, text="hello",
         source=Source(channel_type=Type.FEISHU, chat_id="chat-9",
@@ -211,7 +211,7 @@ def main() -> int:
           and len(rows_live) == 3, f"rows={len(rows_live)}")
 
     # [B-1] TTL 清理必须走 MySQL 可用的写法：参数化 cutoff，验证过期行真的被删
-    from src.runtime import cleanup as _cleanup
+    from src.domains.runtime.engine import cleanup as _cleanup
     shares.execute("INSERT INTO grape_t_channel_inbound_dedup (installation_id, message_id, created_at)"
                    " VALUES ('smoke','old',?)", ("2020-01-01 00:00:00",))
     shares.execute("INSERT INTO grape_t_channel_inbound_dedup (installation_id, message_id, created_at)"

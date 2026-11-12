@@ -50,7 +50,7 @@ def test_repo_card_distinguishes_empty_and_failed():
     """三态返回：没有仓库 vs 发送失败必须可区分（2026-11-05 误导文案回归）。"""
     import asyncio
     from unittest.mock import patch
-    from src.im import handler_async as H
+    from src.domains.runtime.im import handler_async as H
 
     class _Egress:
         def __init__(self, ok): self.ok = ok

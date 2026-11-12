@@ -19,7 +19,7 @@ def chat_repo_env(repo_key: str) -> dict:
     rk = (repo_key or "").strip()
     if not rk or rk.startswith("chat:"):
         return {}
-    from src.repo_key import derive_repo_identity, from_repo_key
+    from src.kernel.repo_key import derive_repo_identity, from_repo_key
     full_name, owner, name = derive_repo_identity(from_repo_key(rk), rk)
     if not full_name:
         return {}
@@ -34,7 +34,7 @@ def _resolve_issue_number(issue_number, conv_id: str) -> str:
     value = issue_number
     if not value and conv_id:
         try:
-            from src.session_manager import get_conversation
+            from src.kernel.session_manager import get_conversation
             conv = get_conversation(conv_id)
             if conv and conv.get("conv_type") == "task":
                 value = conv.get("issue_number")
@@ -60,7 +60,7 @@ def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str, *,
     # 恒注入业务 API 基址（Issue #1577：GRAPE_SERVER_URL 承载业务端点，非 runtime 回连地址）；
     # 解析失败仅缺该键，不中断聊天。
     try:
-        from src.prompt_builder import _resolve_business_server_url
+        from src.kernel.prompt_builder import _resolve_business_server_url
         env["GRAPE_SERVER_URL"] = _resolve_business_server_url(runtime_id or 0)
     except Exception as e:
         log.warning(f"chat_session_env_extra: resolve server url failed for conv={conv_id}: {e}")
@@ -68,7 +68,7 @@ def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str, *,
     # Issue #1858：chat 会话同样注入三面基址（VCS/Issue/A2A），与任务派发同源，
     # 避免 chat 场景下 A2A 自调用仍落到业务基址。
     try:
-        from src.prompt_builder import resolve_service_base_env
+        from src.kernel.prompt_builder import resolve_service_base_env
         env.update(resolve_service_base_env(runtime_id or 0))
     except Exception as e:
         log.warning(f"chat_session_env_extra: resolve service bases failed for conv={conv_id}: {e}")

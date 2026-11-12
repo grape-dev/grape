@@ -173,3 +173,41 @@ def test_update_issue_github_unchanged_passthrough(monkeypatch):
     assert payload == {"milestone_id": 7}
     assert [c for c in calls if c[0] == "GET"] == []
     assert resp == {"number": 640}
+
+
+# ==== appended from weekly-08 ====
+def test_update_issue_gitcode_milestone_not_applied_raises_502(monkeypatch):
+    """上游 200 假成功（回读 milestone 仍为空）→ 明确 502 错误，不再静默成功。"""
+    _patch_transport(
+        monkeypatch,
+        get_resp={"title": "issue title", "milestone": None},
+        patch_resp={"number": 640, "state": "open"},
+    )
+    with pytest.raises(HTTPException) as ei:
+        gra.update_issue(
+            "grape-dev", "grape", 640,
+            gra.IssueUpdateBody(milestone_id=999999),
+            user={"auth_type": "session_token"}, p="gitcode",
+        )
+    assert ei.value.status_code == 502
+    assert "milestone_id=999999" in ei.value.detail["message"]
+
+
+# ==== appended from weekly-08 ====
+def test_update_issue_gitcode_stale_milestone_ignored_raises_502(monkeypatch):
+    """审查 Required 用例：Issue 原挂旧里程碑（number=111），新值 850012 被上游静默忽略——
+    回读非空但 number ≠ 请求的 milestone_id → 502（不得 200 假成功并回显错误值）。"""
+    _patch_transport(
+        monkeypatch,
+        get_resp={"title": "issue title", "milestone": {"number": 111, "title": "old-weekly"}},
+        patch_resp={"number": 640, "state": "open"},
+    )
+    with pytest.raises(HTTPException) as ei:
+        gra.update_issue(
+            "grape-dev", "grape", 640,
+            gra.IssueUpdateBody(milestone_id=850012),
+            user={"auth_type": "session_token"}, p="gitcode",
+        )
+    assert ei.value.status_code == 502
+    assert "milestone_id=850012" in ei.value.detail["message"]
+    assert "111" in ei.value.detail["message"]

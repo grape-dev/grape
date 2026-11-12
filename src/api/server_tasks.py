@@ -110,9 +110,9 @@ async def start_mgmt_tasks(app) -> dict:
         log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
     try:
-        from src.im.feishu_async import BotManager
-        from src.im.handler_async import process_chat_async
-        from src.im.vod_handler_async import process_vod_async
+        from src.domains.runtime.im.feishu_async import BotManager
+        from src.domains.runtime.im.handler_async import process_chat_async
+        from src.domains.runtime.im.vod_handler_async import process_vod_async
 
         # psutil CPU 基准预热：interval=None 模式需要先调一次建立基准
         try:
@@ -163,7 +163,7 @@ async def start_mgmt_tasks(app) -> dict:
         from src.kernel.config import BOT_LEASE_DISABLED
         lease_store = None
         if not BOT_LEASE_DISABLED:
-            from src.im.bot_lease import BotLeaseStore, generate_instance_id
+            from src.domains.runtime.im.bot_lease import BotLeaseStore, generate_instance_id
             instance_id = generate_instance_id()
             lease_store = BotLeaseStore(instance_id=instance_id)
             log.info(f"IM WS: lease enabled, instance_id={instance_id}")
@@ -171,7 +171,7 @@ async def start_mgmt_tasks(app) -> dict:
         # weekly-11 起 legacy BotManager 已退役：引擎模式 on 时由 mgmt 侧 engine_wiring
         # 统一启动新引擎，本进程不再装配 legacy WS（否则每次启动刷 BotManager ImportError 告警）。
         try:
-            from src.im import engine_wiring as _ew
+            from src.domains.runtime.im import engine_wiring as _ew
             _engine_on = (_ew.engine_mode() == "on")
         except Exception:
             _engine_on = False

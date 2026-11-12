@@ -16,9 +16,7 @@ object_attributes.iid 永不作 PR 号来源。无真实关联 PR 时静默不�
 3. PR 事件解析失败：不注入 PR_NUMBER，置 PR_NUMBER_PARSE_FAILED=1；Issue 事件不误报。
 4. A2A payload 无 PR 时 pr_number 为空串，不回落 issue_number。
 """
-import pytest
-pytest.skip("arch 分支已重构：_is_pr_entity_event（weekly event_pipeline 内部符号，arch 已重构）", allow_module_level=True)
-from src.api.event_pipeline import (
+from src.domains.runtime.pipeline.event_pipeline import (
     _extract_pr_number,
     _inject_issue_pr_env,
     _is_pr_entity_event,

@@ -35,11 +35,14 @@ function test(name, fn) {
 console.log('Issue #290: 需求中心「查看 Issue」入口统一 — 回归测试\n');
 
 // ── 与 app.js 一致的真实 _vcsUrl（源码提取执行，避免实现漂移）──
+// D102-F/S27：_vcsUrl 依赖 _repoWebHost（平台卡派生 host，无卡同步兜底）——一并提取执行
 function extractVcsUrl() {
   const m = appSrc.match(/function _vcsUrl\(repoKey, path\) \{[\s\S]*?\n\}/);
   if (!m) throw new Error('app.js 中未找到 _vcsUrl 函数');
-  const fn = new Function('return ' + m[0])();
-  return fn;
+  const w = appSrc.match(/function _repoWebHost\(repoKey\) \{[\s\S]*?\n\}/);
+  if (!w) throw new Error('app.js 中未找到 _repoWebHost 函数');
+  const factory = new Function('_appVcsCatalog', w[0] + '\n' + m[0] + '\n return _vcsUrl;');
+  return factory(undefined);  // 无卡环境：走 _KNOWN_HOSTS 同步兜底（与首屏竞态窗口同口径）
 }
 const _vcsUrl = extractVcsUrl();
 

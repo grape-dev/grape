@@ -11,17 +11,22 @@
      （行为兼容）且日志出现降级 warning；
   4. migration backfill：仅含 skill_name 的存量场景节点写回 skill_id。
 """
+
 import json
+
 import uuid
 
 import pytest
 
 from src.domains.mgmt.user import db as udb
-from src.kernel.session_manager import db, db_lock
-from src.api import event_pipeline
-from src.api.pipeline_config import create_custom_scene, get_node_by_tag
-from src.api.db_setup import _fn_scene_nodes_skill_id_backfill
 
+from src.kernel.session_manager import db, db_lock
+
+from src.api import event_pipeline
+
+from src.api.pipeline_config import create_custom_scene, get_node_by_tag
+
+from src.api.db_setup import _fn_scene_nodes_skill_id_backfill
 
 def _insert_scope_skill(sname, scope, owner_id, agent_type="issue"):
     with db_lock:
@@ -38,12 +43,10 @@ def _insert_scope_skill(sname, scope, owner_id, agent_type="issue"):
     assert row, f"insert {scope} skill failed"
     return row[0]
 
-
 def _delete_skills(sname):
     with db_lock:
         db.cursor().execute("DELETE FROM skill WHERE skill_name=?", (sname,))
         db.commit()
-
 
 def _mk_user(prefix="sk979"):
     from src.domains.mgmt.auth import grape_account_db
@@ -53,7 +56,6 @@ def _mk_user(prefix="sk979"):
         u = grape_account_db.get_grape_account_by_username(uname)
     return u
 
-
 def _cleanup_user(uname):
     from src.domains.mgmt.auth import grape_account_db
     u = grape_account_db.get_grape_account_by_username(uname)
@@ -62,7 +64,6 @@ def _cleanup_user(uname):
     with db_lock:
         db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (uname,))
         db.commit()
-
 
 class TestTripleScopeIdLock:
     def test_id_authoritative_over_same_name(self, caplog):
@@ -104,7 +105,6 @@ class TestTripleScopeIdLock:
         finally:
             _delete_skills(sname)
             _cleanup_user(ua["username"])
-
 
 class TestPrSubscriptionUserId:
     def test_user_id_resolves_user_scope(self):
@@ -153,7 +153,6 @@ class TestPrSubscriptionUserId:
                 db.cursor().execute("DELETE FROM devops_pipeline_scene WHERE scene_id=?", (scene_id,))
                 db.commit()
             _cleanup_user(ua["username"])
-
 
 class TestLegacySceneCompat:
     def test_name_only_node_degrades_same_as_before(self, caplog):
@@ -234,7 +233,6 @@ class TestLegacySceneCompat:
                 db.commit()
             _cleanup_user(ua["username"])
 
-
 # ---------------------------------------------------------------------------
 # QA 复审补充：管线级集成测试（PR-sub 分支与 issue 场景覆盖分支，event_pipeline
 # run_pipeline 主路由端到端）+ backfill scene_market repo 档 + get_node_by_tag
@@ -242,9 +240,7 @@ class TestLegacySceneCompat:
 # ---------------------------------------------------------------------------
 from unittest.mock import patch
 
-
 _TEST_REPO = "gitcode:owner979/repo"
-
 
 def _integration_clean():
     with db_lock:
@@ -262,7 +258,6 @@ def _integration_clean():
         c.execute("DELETE FROM runtime_credentials WHERE name LIKE '979-%'")
         db.commit()
 
-
 def _seed_managed_repo():
     with db_lock:
         c = db.cursor()
@@ -272,7 +267,6 @@ def _seed_managed_repo():
             "VALUES (?, 'owner979', 'repo', 'owner979/repo', 0, 'default', 'tk-979', 'wt-979', 'grape_bot')",
             (_TEST_REPO,))
         db.commit()
-
 
 def _seed_pr_sub_scene(scene_id, qa_node, work_branch="mys-local"):
     nodes = [qa_node]
@@ -285,7 +279,6 @@ def _seed_pr_sub_scene(scene_id, qa_node, work_branch="mys-local"):
             (scene_id, scene_id, _TEST_REPO, json.dumps(nodes),
              json.dumps({"work_branch": work_branch})))
         db.commit()
-
 
 def _seed_qa_session():
     with db_lock:
@@ -303,7 +296,6 @@ def _seed_qa_session():
                   ("sess-979-qa", _TEST_REPO, "qa", _rid))
         db.commit()
 
-
 def _make_pr_opened_raw(pr_num=331, target_branch="mys-local"):
     return json.dumps({
         "object_attributes": {
@@ -316,7 +308,6 @@ def _make_pr_opened_raw(pr_num=331, target_branch="mys-local"):
         "user": {"username": "human_user"},
     }).encode()
 
-
 def _make_issue_note_raw(issue_num):
     return json.dumps({
         "project": {"path_with_namespace": "owner979/repo"},
@@ -325,10 +316,9 @@ def _make_issue_note_raw(issue_num):
         "user": {"username": "tester"},
     }).encode()
 
-
 def _run_hook(raw, headers, account="owner979/repo"):
     """走 run_pipeline 主路由，捕获 enqueue_task 全量 kwargs（skill_id 断言用）。"""
-    import src.domains.runtime.pipeline.event_pipeline as ep
+    import src.api.event_pipeline as ep
     from contextlib import ExitStack
     captured = []
 
@@ -340,7 +330,7 @@ def _run_hook(raw, headers, account="owner979/repo"):
         patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0),
         patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
         patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),
-        patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True),
+        patch("src.api.event_pipeline.is_plugin_mode", return_value=True),
         patch("src.domains.runtime.engine.service.get_execution_mode", return_value="remote"),
         patch("src.domains.runtime.engine.service.enqueue_task", side_effect=_fake_enqueue),
         patch("src.domains.runtime.engine.service.verify_skill_materializable",
@@ -353,7 +343,6 @@ def _run_hook(raw, headers, account="owner979/repo"):
             stack.enter_context(p)
         ep.run_pipeline(raw, headers, account=account)
     return captured
-
 
 class TestPRSubPipelineIntegration:
     """PR 订阅派发分支（run_pipeline _is_pr_sub）端到端：节点 skill_id 权威 +
@@ -423,7 +412,6 @@ class TestPRSubPipelineIntegration:
             assert rows >= 1, "应落 skill_resolve_failed 错误事件"
         finally:
             _delete_skills(sname)
-
 
 class TestIssueSceneOverrideIntegration:
     """issue 场景覆盖分支（run_pipeline plugin override）端到端：节点 skill_id
@@ -497,7 +485,6 @@ class TestIssueSceneOverrideIntegration:
         finally:
             _delete_skills(sname)
 
-
 class TestUserMarketSceneNodeLookup:
     """QA④：get_node_by_tag 的 user_id 生效——个人场景（scene_market
     scope='user'）节点可查到，不再静默走降级。"""
@@ -533,7 +520,6 @@ class TestUserMarketSceneNodeLookup:
                 db.commit()
             _cleanup_user(ua["username"])
 
-
 class TestMarketBackfillRepoScope:
     """QA③：backfill 对 scene_market scope='repo' 行按行内 repo_key 解析 repo 档
     （此前空 repo_key 漏 repo 档）。"""
@@ -563,3 +549,5 @@ class TestMarketBackfillRepoScope:
             with db_lock:
                 db.cursor().execute("DELETE FROM scene_market WHERE name=?", (scene_name,))
                 db.commit()
+
+from src.kernel.session_manager import db, db_lock

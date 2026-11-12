@@ -16,17 +16,25 @@ docs/weekly-09/a2a-chain-patrol-design.md / -requirements.md 为本模块的权�
   仿 event_store.py:189 的 event_active_guard 抢占模式。
 - 本 Phase 只读：仅 INSERT grape_t_patrol_findings（唯一约束去重），不改既有表。
 """
+
 from __future__ import annotations
 
 import asyncio
+
 import json
+
 import os
+
 import re
+
 import threading
+
 import time
+
 from datetime import datetime, timedelta, timezone
 
 from src.kernel.config import CONFIG_DIR, log
+
 from src.kernel.session_manager import db, db_lock
 
 # ====== 配置面（决策变更 2026-11-02 负责人拍板）：全部走 configs/patrol-config.json
@@ -45,7 +53,6 @@ _DEFAULTS = {
 }
 
 _INT_KEYS = ("interval_seconds", "confirm_minutes")
-
 
 def _load_patrol_config(path: str = "") -> dict:
     """读 configs/patrol-config.json：缺省/坏 JSON/坏类型 → 逐键回落默认+告警。"""
@@ -78,17 +85,20 @@ def _load_patrol_config(path: str = "") -> dict:
             log.warning(f"[patrol] {os.path.basename(path)} 配置非法（{e}），该键走默认 {default!r}")
     return cfg
 
-
 _cfg = _load_patrol_config()   # 文件值仅作首次 seed 与缺省回退；运行真源是 DB meta（集群共享）
 
 # ====== 运行真源：DB meta 键（每周期重读，改即生效，双机主从共享一份；决策变更 2026-11-02） ======
 _INTERVAL_META = "patrol:interval_seconds"
+
 _CONFIRM_META = "patrol:confirm_minutes"
+
 _LOOKBACK_META = "patrol:lookback_mode"
+
 # 运行期紧急控制键（同属 meta 真源）：
 #   patrol:compensate_enabled   —— 补偿总开关（一键全关）
 #   patrol:compensate_blocklist —— 补偿黑名单（逗号分隔 repo_key；*=全拦）
 _COMPENSATE_ENABLED_META = "patrol:compensate_enabled"
+
 _COMPENSATE_BLOCKLIST_META = "patrol:compensate_blocklist"
 
 _META_KEY_OF = {
@@ -97,7 +107,6 @@ _META_KEY_OF = {
     "lookback_mode": _LOOKBACK_META,
     "compensate_enabled": _COMPENSATE_ENABLED_META,
 }
-
 
 def _meta_int(key: str, default: int, minimum: int = 1) -> int:
     raw = _meta_value(key)
@@ -112,7 +121,6 @@ def _meta_int(key: str, default: int, minimum: int = 1) -> int:
         log.warning(f"[patrol] {key}={raw!r} 非法（{e}），按默认 {default} 处理（fail-fast 不静默）")
         return default
 
-
 def _meta_mode(default: str) -> str:
     raw = _meta_value(_LOOKBACK_META)
     if not raw:
@@ -121,7 +129,6 @@ def _meta_mode(default: str) -> str:
         return raw
     log.warning(f"[patrol] {_LOOKBACK_META}={raw!r} 须为 audit/runtime，按默认 {default!r} 处理")
     return default
-
 
 def patrol_runtime_config() -> dict:
     """每周期读取的运行配置（DB meta 真源，集群共享，改即生效无需重启）。
@@ -135,7 +142,6 @@ def patrol_runtime_config() -> dict:
         "lookback_mode": _meta_mode(_cfg["lookback_mode"]),
         "compensate_enabled": compensate_enabled(),
     }
-
 
 def _seed_meta_from_file() -> int:
     """首次启动：文件配置 seed 进 meta 表（表里已有键不覆盖——login-whitelist 先例，
@@ -160,8 +166,11 @@ def _seed_meta_from_file() -> int:
 
 # ====== 阈值常量（无调参决策的值不进配置文件，少一项就少一处坏值故障面） ======
 _LOOKBACK_RUNTIME_DAYS = 7    # runtime 回看窗（设计定值；audit 模式覆盖全历史不受此影响）
+
 _RUNNING_ZOMBIE_HOURS = 2     # running 无信号僵尸窗（D12 判例定值）
+
 _QUEUED_ZOMBIE_HOURS = 24     # queued 引擎在线观察兜底窗（D12 判例定值）
+
 # 引擎心跳新鲜度不设 patrol 副本：_engine_unreachable 内单源引用
 # src.domains.runtime.engine.engine_select._RUNTIME_STALE_SECONDS（平台既有 RUNTIME_STALE_SECONDS 配置）。
 _LEADER_TTL_MULTIPLIER = 2  # 心跳窗 = 2×周期（集群时钟漂移余量，设计 §八）
@@ -177,7 +186,6 @@ _LEADER_KEY = "patrol:leader"
 # 行为与旧 patrol-comp 键完全等价（单调不劣）；skill 侧渐进覆盖后窗口闭合。
 HANDOFF_KEY_TEMPLATE = "handoff:{task_id}:{target_agent}"
 
-
 def handoff_idempotency_key(task_id: str, target_agent: str) -> str:
     """规范交棒键派生（单源）。task_id/target_agent 缺一即拒——端点幂等键
     非空是唯一索引语义的前提（SQLite/MySQL 唯一索引对 NULL/空互不相等，
@@ -188,12 +196,8 @@ def handoff_idempotency_key(task_id: str, target_agent: str) -> str:
     return HANDOFF_KEY_TEMPLATE.format(task_id=str(task_id).strip(),
                                        target_agent=str(target_agent).strip())
 
-# ====== 时间规范（repo 统一口径：UTC aware ISO） ======
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _parse_dt(s: str):
     """健壮解析库内两种时间格式，返回 aware datetime（None=不可解析）。
@@ -225,17 +229,12 @@ def _parse_dt(s: str):
             dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
-
 def _minutes_since(dt) -> float:
     if dt is None:
         return -1.0
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
-
-
-# ====== D3：谓词 UPDATE 原子选主（rowcount=1 才是主） ======
-
 
 def _meta_value(key: str) -> str:
     """读 meta 键（动态配置源，异常回退空串=未配置）。"""
@@ -244,7 +243,6 @@ def _meta_value(key: str) -> str:
         return (get_meta_value(key) or "").strip()
     except Exception:
         return ""
-
 
 def compensate_enabled() -> bool:
     """补偿总开关（决策变更 2026-11-02：默认开，能力默认生效）。
@@ -265,7 +263,6 @@ def compensate_enabled() -> bool:
     log.warning(f"[patrol] invalid {_COMPENSATE_ENABLED_META}={raw!r}, treated as false")
     return False
 
-
 def compensate_repo_blocked(repo_key: str) -> bool:
     """补偿黑名单（决策变更：白名单删除，改为异常才配置的黑名单）。
 
@@ -280,14 +277,12 @@ def compensate_repo_blocked(repo_key: str) -> bool:
         return True
     return repo_key in items
 
-
 def _leader_expired(cur: str, cutoff: str) -> bool:
     """leader 值过期判定：新格式 `holder|iso` 取时间戳段比较；兼容历史纯 ISO 值。"""
     if not cur:
         return True
     ts = cur.split("|", 1)[1] if "|" in cur else cur
     return ts < cutoff
-
 
 def claim_patrol_leader(holder: str, interval_seconds: int) -> bool:
     """抢占/续约巡检主（评审三轮修正：自续约必须真实生效）。
@@ -341,12 +336,9 @@ def claim_patrol_leader(holder: str, interval_seconds: int) -> bool:
             log.warning(f"[patrol] leader claim failed: {e}")
             return False
 
-
-# ====== D17：断链候选提取与链路模式过滤 ======
-
 _PR_SUB_PREFIX = "#pr_"
-_NEXT_STEP_RE = re.compile(r"^a2a[-:]\s*([a-zA-Z0-9_\-]+)", re.IGNORECASE)
 
+_NEXT_STEP_RE = re.compile(r"^a2a[-:]\s*([a-zA-Z0-9_\-]+)", re.IGNORECASE)
 
 def extract_next_step(result_text: str) -> str:
     """从 result_text 结构化 JSON 提取 next_step（D6：解析 JSON，不加列）。"""
@@ -360,20 +352,14 @@ def extract_next_step(result_text: str) -> str:
         pass
     return ""
 
-
 def parse_target_agent(next_step: str) -> str:
     """`a2a-qa` / `a2a:qa` → `qa`；解析不出返回空（双源判定退化，仅 L1+窗口）。"""
     m = _NEXT_STEP_RE.match((next_step or "").strip())
     return m.group(1).strip().lower() if m else ""
 
-
 def _is_pr_subscription_chain(issue_id: str) -> bool:
     """PR 订阅链伪 ID（`#pr_` 前缀）：a2a 端点设计性拦截、本无交棒语义（D17）。"""
     return (issue_id or "").startswith(_PR_SUB_PREFIX)
-
-
-# ====== L1 / L2 反查（D11：全状态口径 + 关联性约束） ======
-
 
 def issue_terminal(repo_key: str, issue_id: str) -> str:
     """issue 终态判定（评审五轮修正①：人已处置证据——终检/检测双守卫）。
@@ -388,19 +374,20 @@ def issue_terminal(repo_key: str, issue_id: str) -> str:
     if not repo_key or not issue_id:
         return ""
     num = str(issue_id).lstrip("#")
-    if not num.isdigit():
+    # S75/D102-O：字符串 ident（gitee）合法——只拒伪 issue_id（#pr_...）；
+    # 原 isdigit 门槛把 gitee 已收敛 issue 视为未关闭 → 巡检补偿会复活它。
+    if not num or num.startswith("pr_"):
         return ""
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-            (repo_key, int(num)))
+            (repo_key, _native_issue_number(num)))
         row = c.fetchone()
     status = (row[0] or "").strip() if row else ""
     if status in ("completed", "pending_review", "cancelled"):
         return status
     return ""
-
 
 def l1_event_exists(repo_key: str, issue_id: str, completed_at: str,
                     target_agent: str = "") -> bool:
@@ -435,7 +422,6 @@ def l1_event_exists(repo_key: str, issue_id: str, completed_at: str,
         return True
     return False
 
-
 def l2_downstream_exists(repo_key: str, issue_id: str, target_agent: str,
                          completed_at: str, parent_issue: str = "") -> bool:
     """L2：下游关联任务是否存在（任意状态，含 completed/failed）。
@@ -468,7 +454,6 @@ def l2_downstream_exists(repo_key: str, issue_id: str, target_agent: str,
             return True
     return False
 
-
 def _subtask_parent(repo_key: str, issue_id: str) -> str:
     """D17：子任务链的 L2 关联键（评审六轮修正②接线；七轮修正③补双源）。
 
@@ -493,8 +478,7 @@ def _subtask_parent(repo_key: str, issue_id: str) -> str:
     parent = (st.get("parent_issue_id") or "").strip()
     return parent if (sub == 1 and parent) else ""
 
-
-def _resolve_owner(repo_key: str) -> int:
+def _resolve_owner(repo_key: str) -> "str | int":
     """D16：归属人维度，与 D14 托管模式同源。
 
     路径 A 兜底（评审十四轮修正①，UC8-2 补口）：host_user_id 无值时回落
@@ -508,7 +492,7 @@ def _resolve_owner(repo_key: str) -> int:
             c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
             if row and row[0]:
-                return int(row[0])
+                return str(row[0])
     except Exception:
         pass
     try:
@@ -519,14 +503,10 @@ def _resolve_owner(repo_key: str) -> int:
                 "ORDER BY created_at LIMIT 1", (repo_key,))
             row = c.fetchone()
             if row and row[0]:
-                return int(row[0])
+                return str(row[0])
     except Exception:
         pass
     return 0
-
-
-# ====== findings 落库（D7：新表只增；唯一约束 + INSERT OR IGNORE 去重） ======
-
 
 def _known_task_ids() -> set:
     """评审十六轮修正③/S31：已落库 finding 的 (kind, task_id) 集合。
@@ -543,7 +523,6 @@ def _known_task_ids() -> set:
             return {(r[0], r[1]) for r in c.fetchall()}
     except Exception:
         return set()
-
 
 def insert_findings_batch(findings: list, chunk: int = 500) -> int:
     """批量落库（S48/R20-A）：攒批 executemany + 每块单次 commit。
@@ -587,7 +566,6 @@ def insert_findings_batch(findings: list, chunk: int = 500) -> int:
                             f"(chunk {i // chunk}, {len(rows)} rows): {e}")
     return inserted
 
-
 def insert_finding(kind: str, task_id: str = "", event_seq: int = 0,
                    repo_key: str = "", issue_id: str = "",
                    detail: str = "", suggestion: str = "") -> bool:
@@ -616,10 +594,6 @@ def insert_finding(kind: str, task_id: str = "", event_seq: int = 0,
             log.warning(f"[patrol] insert finding failed ({kind}): {e}")
             return False
 
-
-# ====== 断链检测（L1→L2→L3） ======
-
-
 def _fetch_result_texts(task_ids: list, chunk: int = 500) -> dict:
     """按 id 批量回捞 result_text（P1/S45 两段式拉取的阶段 2）。
 
@@ -644,7 +618,6 @@ def _fetch_result_texts(task_ids: list, chunk: int = 500) -> dict:
                 log.warning(f"[patrol] result_text batch fetch failed "
                             f"(chunk {i // chunk}): {e}")
     return out
-
 
 def _iter_completed_tasks(cutoff: str, chunk: int = 500):
     """keyset 分页流式拉取候选（S49/R20-C）。
@@ -678,7 +651,6 @@ def _iter_completed_tasks(cutoff: str, chunk: int = 500):
         for row in rows:
             yield row
         last_id = rows[-1][0]
-
 
 def detect_broken_chains(lookback_cutoff_iso: str = "", known: set = None) -> list[dict]:
     """三层判定断链（Phase 1 只读）。返回 finding 描述列表（不落库，由调用方聚合）。
@@ -752,10 +724,6 @@ def detect_broken_chains(lookback_cutoff_iso: str = "", known: set = None) -> li
             log.warning(f"[patrol] broken-chain judge failed task={tid}: {e}")
     return findings
 
-
-# ====== 僵尸检测（D12：两档 / 确定性归类） ======
-
-
 def _engine_unreachable(runtime_id: int) -> bool:
     """分形态引擎不可达（engine_select.py:103-118 同款规则）：
     远端 credential_id>0 = status!=online 或 last_seen_at 过期；
@@ -786,7 +754,6 @@ def _engine_unreachable(runtime_id: int) -> bool:
         return False
     return not (bool(installed) and bool(healthy))
 
-
 def _scene_missing(repo_key: str, issue_id: str) -> bool:
     """D12 场景存在性：issue 绑定的场景已不存在 → 确定性"永不调度"。
 
@@ -811,7 +778,6 @@ def _scene_missing(repo_key: str, issue_id: str) -> bool:
         return bool(cfg.get("fallback"))
     except Exception:
         return False
-
 
 def detect_zombies(known: set = None) -> list[dict]:
     """running 两档 + queued 确定性归类（Phase 1 只登记/告警，零终态化写——D18）。
@@ -900,10 +866,6 @@ def detect_zombies(known: set = None) -> list[dict]:
             log.warning(f"[patrol] zombie-queued judge failed task={tid}: {e}")
     return findings
 
-
-# ====== D13：停摆链 = 断链的 issue 视图（聚合派生，无独立时间窗） ======
-
-
 def derive_stalled_issues(broken: list[dict]) -> list[dict]:
     by_issue: dict[tuple, list[dict]] = {}
     for f in broken:
@@ -919,11 +881,10 @@ def derive_stalled_issues(broken: list[dict]) -> list[dict]:
         })
     return stalled
 
-
-# ====== findings 保留策略（R11/D21，实现后审计落地：终态行 TTL，防表无界增长） ======
-
 _RETENTION_META = "patrol:findings_retention_days"
+
 _RETENTION_DEFAULT_DAYS = 90
+
 # 只清理终态且不再驱动任何动作的状态。open/claiming 是活性工作队列；
 # needs_human 是未决人工信号（删了=丢线索，零危害口径），均永不清理。
 _TERMINAL_RETENTION_STATUSES = ("dismissed", "false_positive", "compensated",
@@ -932,7 +893,6 @@ _TERMINAL_RETENTION_STATUSES = ("dismissed", "false_positive", "compensated",
 # S40：慢扫描告警阈值（ms）——模块常量（无调参决策依据前不进 meta，
 # 与 _LOOKBACK_RUNTIME_DAYS 同款纪律）；命中=告警不熔断。
 _SLOW_SCAN_WARN_MS = 30000
-
 
 def cleanup_terminal_findings(retention_days: int = -1) -> int:
     """删除超过保留期的终态 findings 行（R11/D21）。
@@ -963,17 +923,12 @@ def cleanup_terminal_findings(retention_days: int = -1) -> int:
             log.warning(f"[patrol] findings retention cleanup failed: {e}")
             return 0
 
-
-# ====== 主循环 ======
-
-
 class PatrolScanInProgress(RuntimeError):
     """single-flight 闸（S41/R16，全入口）：一轮扫描已在执行（自动轮/手动轮任一入口）。"""
 
-
 _scan_gate_lock = threading.Lock()
-_scan_gate_busy = False
 
+_scan_gate_busy = False
 
 def run_patrol_once(mode: str = "") -> dict:
     """单轮巡检（Phase 1 只读）。mode 覆盖全局 LOOKBACK 档（audit=全历史）。
@@ -993,7 +948,6 @@ def run_patrol_once(mode: str = "") -> dict:
     finally:
         with _scan_gate_lock:
             _scan_gate_busy = False
-
 
 def _run_patrol_once_inner(mode: str) -> dict:
     t0 = time.time()
@@ -1023,7 +977,6 @@ def _run_patrol_once_inner(mode: str) -> dict:
                     f"check S31 known-set short-circuit and event/task indexes")
     return {"broken": len(broken), "zombie": len(zombies), "stalled": len(stalled),
             "inserted": inserted, "purged": purged, "duration_ms": duration_ms}
-
 
 async def patrol_loop():
     """巡检主循环（仿 scheduler：全程 try/except + 退避，异常绝不外溢）。
@@ -1073,7 +1026,7 @@ async def patrol_loop():
                 # 无 repo 谓词 = 全仓 queued 扫描，但只派发「前序已不活跃」的行，
                 # 正常在途排队不受影响；持 db_lock 的同步段经 to_thread 卸载。
                 try:
-                    from src.api.event_pipeline import reconcile_queued_a2a
+                    from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                     _drained = await asyncio.to_thread(reconcile_queued_a2a)
                     if _drained:
                         log.info(f"[patrol] a2a queue reconcile: dispatched {len(_drained)}")
@@ -1099,7 +1052,6 @@ async def patrol_loop():
                 return
             backoff = min(backoff * 2, 300)
 
-
 def _hostname() -> str:
     """持有者标识（评审十五轮修正③/S28）：hostname#pid。
 
@@ -1114,3 +1066,5 @@ def _hostname() -> str:
         return f"{socket.gethostname()}#{os.getpid()}"
     except Exception:
         return f"unknown#{os.getpid()}"
+
+from src.domains.runtime.vcs.api_client import _native_issue_number  # S75 清扫漏网点（S76 15 处之外的

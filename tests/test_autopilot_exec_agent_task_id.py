@@ -24,7 +24,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 RT_ID = 15461
 RK = "gitcode:autopilot/test1546"
@@ -127,7 +127,7 @@ class TestReverseLookupUsesAgentTaskId:
 
     def test_direct_agent_task_id_skips_event_seq_query(self):
         """E1-2：agent_task_id 非空只按 id 取行，绝不触发 event_seq 查询。"""
-        from src.domains.runtime.routes.runtime import scheduler
+        from src.domains.runtime.engine import scheduler
         executed = []
 
         class _Cursor:
@@ -187,6 +187,8 @@ def _fresh_migration_conn(tmp_path, name, legacy_stamped):
     conn = sqlite3.connect(str(tmp_path / name))
     conn.execute(db_setup._SCHEMA_MIGRATIONS_DDL)
     conn.execute("CREATE TABLE autopilot_executions (id INTEGER PRIMARY KEY)")
+    # 重放段先补 agent_tasks.trace_context——探表跳过需表存在形态
+    conn.execute("CREATE TABLE agent_tasks (id TEXT PRIMARY KEY)")
     if legacy_stamped:
         conn.execute(
             "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
@@ -197,10 +199,12 @@ def _fresh_migration_conn(tmp_path, name, legacy_stamped):
 
 
 def _counting_migration(db_setup, calls):
+    # G4 撞号根治后：基线 add/repair-autopilot-exec-agent-task-id 在本链零注册，
+    # 列+索引由 202611110003 的幂等重放段（_fn_replay_weekly10_agent_task_idents）承担。
     def _fn():
         calls.append(1)
-        db_setup._fn_add_ap_exec_agent_task_id()
-    return db_setup.Migration("202611090001", "add-autopilot-exec-agent-task-id",
+        db_setup._fn_replay_weekly10_agent_task_idents()
+    return db_setup.Migration("202611110003", "replay-weekly10-migrations-skipped-by-version-collision",
                               "safe", _fn)
 
 
@@ -214,7 +218,7 @@ def _assert_column_and_index(conn, check_stamp=True):
     if check_stamp:
         stamped = conn.execute(
             "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE version=?",
-            ("202611090001",)).fetchone()[0]
+            ("202611110003",)).fetchone()[0]
         assert stamped == 1, "迁移未盖章"
 
 
@@ -222,19 +226,21 @@ class TestMigration:
     def test_registered_safe_migration(self):
         from src.api import db_setup
         by_version = {m.version: m for m in db_setup._MIGRATIONS}
-        assert "202611090001" in by_version
-        mig = by_version["202611090001"]
-        assert mig.name == "add-autopilot-exec-agent-task-id"
+        assert "202611110003" in by_version
+        mig = by_version["202611110003"]
+        assert mig.name == "replay-weekly10-migrations-skipped-by-version-collision"
         assert mig.kind == "safe"
 
     def test_fn_creates_column_and_index_idempotent(self, tmp_path, monkeypatch):
         from src.api import db_setup
         conn = sqlite3.connect(str(tmp_path / "ap1546.db"))
         conn.execute("CREATE TABLE autopilot_executions (id INTEGER PRIMARY KEY)")
+        # 重放段先补 agent_tasks.trace_context——探表跳过需表存在形态
+        conn.execute("CREATE TABLE agent_tasks (id TEXT PRIMARY KEY)")
         conn.commit()
         monkeypatch.setattr(db_setup, "db", _DBFacade(conn))
-        db_setup._fn_add_ap_exec_agent_task_id()
-        db_setup._fn_add_ap_exec_agent_task_id()   # 幂等：二次执行不报错
+        db_setup._fn_replay_weekly10_agent_task_idents()
+        db_setup._fn_replay_weekly10_agent_task_idents()   # 幂等：二次执行不报错
         _assert_column_and_index(conn, check_stamp=False)
         conn.close()
 

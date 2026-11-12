@@ -14,14 +14,14 @@ import json
 
 import pytest
 
-from src.im.adapters.slack.inbound import (
+from src.domains.runtime.im.adapters.slack.inbound import (
     block_actions_to_inbound,
     chat_type_of,
     event_to_inbound,
     parse_json_maybe,
     strip_mentions,
 )
-from src.im.channel.types import ChatType, MsgType, Type
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Type
 
 
 def _envelope(event: dict, event_id="Ev123", envelope_id="e-1", string_payload=True):

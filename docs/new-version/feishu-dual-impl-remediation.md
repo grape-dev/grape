@@ -25,9 +25,9 @@
 生产唯一入口 `src/api/main.py` lifespan：
 
 ```python
-from src.im.feishu_async import BotManager
-from src.im.handler_async import process_chat_async
-from src.im.vod_handler_async import process_vod_async
+from src.domains.runtime.im.feishu_async import BotManager
+from src.domains.runtime.im.handler_async import process_chat_async
+from src.domains.runtime.im.vod_handler_async import process_vod_async
 bot_manager = BotManager(max_concurrent_per_bot=10)
 ```
 
@@ -91,7 +91,7 @@ handler_async.py（纯 async，零同步 HTTP）
 **现状引用**：`handler_async.py:16-19`
 
 ```python
-from src.im.feishu import (
+from src.domains.runtime.im.feishu import (
     resolve_repo, process_command, detect_bind_intent, detect_clean_intent,
     get_chat_members, sync_repo_feishu_mapping,
 )
@@ -173,7 +173,7 @@ from lark_oapi.ws.enum import FrameType, MessageType
 
 - `requirements.txt`：如选方案 A 注明 lark-oapi 用途；如 B 则移除
 - 更新 `docs/new-version/im-ws-async-redesign.md` 与 `docs/new-version/im-ws-multi-boot-fix.md` 引用
-- 全仓 `grep` 确认无残留 `from src.im.feishu import start_ws`、`handler.process_chat`、`vod_handler`、`feishu_bot` 引用
+- 全仓 `grep` 确认无残留 `from src.domains.runtime.im.feishu import start_ws`、`handler.process_chat`、`vod_handler`、`feishu_bot` 引用
 
 ---
 
@@ -225,7 +225,7 @@ from lark_oapi.ws.enum import FrameType, MessageType
 | C8 | `/clean` | 清空 `chat_agent_session.backend_session_id`，回复「已清除」 |
 | C9 | `/help` | 回复含命令列表 |
 | C10 | 未知命令 | 返回空串（不回复） |
-| C11 | **阻塞回归**：命令路径不调用任何 `urlopen`/`requests`/全局 `get_tenant_token()` | patch `src.im.feishu.urlopen` 断言未调用；patch `get_tenant_token` 断言未调用 |
+| C11 | **阻塞回归**：命令路径不调用任何 `urlopen`/`requests`/全局 `get_tenant_token()` | patch `src.domains.runtime.im.feishu.urlopen` 断言未调用；patch `get_tenant_token` 断言未调用 |
 
 #### D. 纯逻辑迁移回归
 

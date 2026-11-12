@@ -11,21 +11,21 @@ import asyncio
 
 import pytest
 
-from src.im.adapters.telegram.markdown import (
+from src.domains.runtime.im.adapters.telegram.markdown import (
     TELEGRAM_TEXT_LIMIT,
     format_html,
     split_text,
 )
-from src.im.adapters.telegram.outbound import (
+from src.domains.runtime.im.adapters.telegram.outbound import (
     TELEGRAM_CAPABILITIES,
     TelegramAdapterApi,
     TelegramApiError,
     TelegramClient,
     TelegramSender,
 )
-from src.im.adapters.telegram.resolvers import TelegramRouteRegistry
-from src.im.channel.capability import Capability
-from src.im.channel.message import OutboundMessage
+from src.domains.runtime.im.adapters.telegram.resolvers import TelegramRouteRegistry
+from src.domains.runtime.im.channel.capability import Capability
+from src.domains.runtime.im.channel.message import OutboundMessage
 
 
 class StubClient:

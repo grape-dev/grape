@@ -41,7 +41,7 @@ def refresh_token(request: Request, response: Response):
     payload = verify_refresh_token(refresh)
     if not payload:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "REFRESH_TOKEN_INVALID", "message": "refresh_token 过期或无效"})
-    uid = int(payload.get("sub", 0))
+    uid = str(payload.get("sub") or "").strip()   # D105 第二批：sub 字符串化（老 int 兼容）
     username = payload.get("username", "")
     token_ver = int(payload.get("ver", 0))
     if not uid:
@@ -84,9 +84,10 @@ def get_profile(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.auth.grape_account_db import get_user_identities, has_password
     identities = get_user_identities(user["id"])
     bindings = [ident["provider"] for ident in identities]
-    # 兼容旧字段
-    gitcode_bound = "gitcode" in bindings or bool(user_db.get_credential(user["id"], "gitcode_oauth"))
-    github_bound = "github" in bindings or bool(user_db.get_credential(user["id"], "github_oauth"))
+    # 兼容旧字段——D100（2026-11-08）R3：<p>_oauth 快照回落判定已删
+    # （快照清退，绑定权威=get_user_identities；快照行 P1=a 冻结不再作为判定源）
+    gitcode_bound = "gitcode" in bindings
+    github_bound = "github" in bindings
 
     return {
         "username": user["username"],

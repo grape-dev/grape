@@ -24,7 +24,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.domains.mgmt.user import db as user_db
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.service import verify_skill_materializable
 
 from src.domains.mgmt.auth.password import hash_password as _hash_pw

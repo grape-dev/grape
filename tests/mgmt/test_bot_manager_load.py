@@ -8,7 +8,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 @pytest.fixture
 def manager():
-    from src.im.feishu_async import BotManager
+    from src.domains.runtime.im.feishu_async import BotManager
     m = BotManager(max_concurrent_per_bot=2)
     return m
 
@@ -43,7 +43,7 @@ def _seed_users_and_config():
 def test_load_from_db_loads_all_users():
     """多用户 chat 配置 + vod 都应被加载（按 app_id 去重）"""
     _seed_users_and_config()
-    from src.im.feishu_async import BotManager
+    from src.domains.runtime.im.feishu_async import BotManager
     m = BotManager(max_concurrent_per_bot=2)
 
     async def run():
@@ -74,7 +74,7 @@ def test_load_from_db_dedup_same_app_id_two_users():
         c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES ('iso_shared','chat_bot')")
         db.commit()
 
-    from src.im.feishu_async import BotManager
+    from src.domains.runtime.im.feishu_async import BotManager
     m = BotManager(max_concurrent_per_bot=2)
 
     async def run():
@@ -98,7 +98,7 @@ def test_load_from_db_empty():
         c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'iso/%'")
         c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'iso%' OR bot_app_id='test'")
         db.commit()
-    from src.im.feishu_async import BotManager
+    from src.domains.runtime.im.feishu_async import BotManager
     m = BotManager(max_concurrent_per_bot=2)
 
     async def run():

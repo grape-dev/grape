@@ -18,6 +18,7 @@ _LAZY = {
     "CodeArtsRuntime": (".codearts", "CodeArtsRuntime"),
     "CodexRuntime": (".codex", "CodexRuntime"),
     "DshRuntime": (".dsh", "DshRuntime"),
+    "AtomCodeRuntime": (".atomcode", "AtomCodeRuntime"),
     # 注册表
     "_RUNTIMES": (".registry", "_RUNTIMES"),
     "register_runtime": (".registry", "register_runtime"),

@@ -7,7 +7,7 @@
 3. **bot 排除** —— bot 用户名不是协作者（bot 是执行方不是需求方）。
 4. **token 归属链** —— obs_llm_usage(run_kind='task') → agent_tasks.issue_id
    → issue 创建人；total = input+output+cache_read+cache_write（不含 reasoning，
-   与 src/observability/tokens.py 同口径）；孤儿任务（无 issue 行/bot 的 issue）丢弃。
+   与 src/domains/insight/observability/tokens.py 同口径）；孤儿任务（无 issue 行/bot 的 issue）丢弃。
 5. **仓库隔离 + 鉴权** —— 只统计 repo 参数指定仓库；匿名请求 401。
 """
 import os
@@ -23,12 +23,12 @@ BOT = "grape_bot"
 
 
 def _db():
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     return db
 
 
 def _exec(sql, params=()):
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     with db_lock:
         c = _db().cursor()
         c.execute(sql, tuple(params))

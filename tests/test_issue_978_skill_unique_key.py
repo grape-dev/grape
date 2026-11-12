@@ -21,7 +21,7 @@ JS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "src", "api", "static", "js", "pages", "dashboard.js"
 )
 SCENES_PY = os.path.join(
-    os.path.dirname(__file__), "..", "src", "api", "routes", "scenes.py"
+    os.path.dirname(__file__), "..", "src", "domains", "mgmt", "routes", "scenes.py"
 )
 SCENES_MD = os.path.join(
     os.path.dirname(__file__), "..", "help", "api", "06-scenes.md"

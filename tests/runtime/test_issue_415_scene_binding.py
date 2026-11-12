@@ -5,25 +5,26 @@
 2. create_task_via_issue 无显式场景 → 写入仓库默认场景
 3. _query_tasks 空场景 → 仓库默认场景展示 + 补绑脚本 dry-run
 """
+
 import os
+
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import pytest  # noqa: E402
+
 from unittest.mock import patch, MagicMock  # noqa: E402
 
 from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 REPO = "gitcode:o/r"
 
-
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_tables():
     """先 init 全部基础表（issue 等），供场景回退/查询测试依赖。"""
     from src.api import db_setup
     db_setup.init_database()
-
 
 @pytest.fixture(autouse=True)
 def _clean(data=None):
@@ -49,7 +50,6 @@ def _clean(data=None):
         db.commit()
     yield
 
-
 def _add_issue(repo_key, number, title="t", scene_id=""):
     with db_lock:
         c = db.cursor()
@@ -59,12 +59,10 @@ def _add_issue(repo_key, number, title="t", scene_id=""):
             (repo_key, number, title, scene_id))
         db.commit()
 
-
 def _set_repo_scene(repo_key, scene_id):
     from src.domains.mgmt.user.db import add_managed_repo, set_repo_scene
     add_managed_repo(repo_key, "o", "r")
     set_repo_scene(repo_key, scene_id)
-
 
 class TestGetIssueSceneFallback:
     def test_falls_back_to_repo_default_scene(self):
@@ -93,7 +91,6 @@ class TestGetIssueSceneFallback:
             scene, uid = get_issue_scene(REPO, "#903")
         assert scene == "issue-scene"
 
-
 class TestCreateTaskSceneFallback:
     def _create(self, scene_id):
         import asyncio
@@ -102,10 +99,10 @@ class TestCreateTaskSceneFallback:
         real_set = None
         from src.api import session_store as _ss
         with patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
-             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 911}), \
-             patch("src.api.deps.get_user_token_with_refresh", return_value="fake_token"), \
+             patch("src.api.issues_center._create_issue_unified", return_value={"number": 911}), \
+             patch("src.api.deps.get_user_token_for_repo", return_value="fake_token"), \
              patch("src.api.issues_center._get_user_id_by_gitcode", return_value=1), \
-             patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline", return_value={"seq": 0, "ok": True}):
+             patch("src.api.event_pipeline.run_pipeline", return_value={"seq": 0, "ok": True}):
             def _fake_set_issue_scene(rk, iid, sid, scene_user_id=0):
                 _calls.append((rk, iid, sid, scene_user_id))
             with patch.object(_ss, "set_issue_scene", side_effect=_fake_set_issue_scene):
@@ -141,7 +138,6 @@ class TestCreateTaskSceneFallback:
         calls = self._create("")
         assert calls == []
 
-
 class TestQueryTasksRepoDefaultDisplay:
     def test_query_tasks_uses_repo_default_scene(self):
         """无场景 Issue 列表/详情 → scene_id 显示仓库默认场景 + repo_default 标记。"""
@@ -164,7 +160,6 @@ class TestQueryTasksRepoDefaultDisplay:
         assert it is not None
         assert it["scene_id"] == "issue-scene"
         assert it["scene_source"] == "vod"
-
 
 class TestBackfillScript:
     def test_dry_run_lists_candidates(self):
@@ -193,3 +188,5 @@ class TestBackfillScript:
         from src.api.session_store import get_issue_scene
         scene, _ = get_issue_scene(REPO, "#931")
         assert scene == "cloud-native"
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

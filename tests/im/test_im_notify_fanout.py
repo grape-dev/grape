@@ -18,9 +18,9 @@ import pytest
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 
-from src.im import notify as N
-from src.im.channel.capability import Capability
-from src.im.channel.message import SendResult
+from src.domains.runtime.im import notify as N
+from src.domains.runtime.im.channel.capability import Capability
+from src.domains.runtime.im.channel.message import SendResult
 
 
 class FakeChannel:
@@ -80,7 +80,7 @@ def _engine_all():
 def test_fanout_all_channels(monkeypatch):
     eng = _engine_all()
     pending = {}
-    import src.im.handler_async as h
+    import src.domains.runtime.im.handler_async as h
     monkeypatch.setattr(h, "_set_pending_selection", lambda cid, p: pending.update({cid: p}))
 
     res = _run(N.notify_user(1, "pending_review", "请确认交付审核点",
@@ -182,7 +182,7 @@ def test_issue_event_without_owner_is_noop(monkeypatch):
 def test_card_contains_issue_and_repo():
     card = N.build_card("pending_review", text="审核点：A/B", repo_key="gitcode:owner/repo",
                         issue_number=12, conv_id="c1")
-    from src.im.channel.card import render_text
+    from src.domains.runtime.im.channel.card import render_text
     txt = render_text(card)
     assert "#12" in txt and "owner/repo" in txt and "审核点" in txt
     assert "task-open" in txt            # 动作命令提示保留

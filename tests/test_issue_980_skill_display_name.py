@@ -24,7 +24,7 @@ UID = "98001"
 
 
 def _seed_skill(skill_name, display_name, scope, owner_id="", is_active=1, skill_id=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         if skill_id:
@@ -43,7 +43,7 @@ def _seed_skill(skill_name, display_name, scope, owner_id="", is_active=1, skill
 
 @pytest.fixture()
 def clean_skills():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM skill WHERE skill_name LIKE 'i980-%'")
@@ -83,7 +83,7 @@ class TestResolveSkillDisplayName:
 
     def test_skill_id_resolves_exact_scope(self, three_scope_same_name):
         from src.api.skill_display import resolve_skill_display_name
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo'", (SN,))
@@ -160,7 +160,7 @@ class TestBuildSkillDisplayMap:
     def test_resolve_node_skill_display_shared_branch(self, three_scope_same_name):
         """共用节点分支：skill_id 精确解析 / 无 skill_id 走批量映射。"""
         from src.api.skill_display import build_skill_display_map, resolve_node_skill_display
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user'", (SN,))
@@ -182,7 +182,7 @@ class TestScenesRouteUsesSharedResolver:
     @pytest.fixture(autouse=True)
     def _seed_scene(self, clean_skills):
         _seed_skill("i980-plain", "唯一技能显示名", "official")
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         nodes_json = (
             '[{"id": "coding", "tag": "coding", "skill": "%s"},'
             ' {"id": "qa", "tag": "qa", "skill": "i980-plain"}]' % SN
@@ -224,7 +224,7 @@ class TestDashboardRouteUsesSharedResolver:
 
     @pytest.fixture(autouse=True)
     def _seed_scene(self, clean_skills):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         nodes_json = '[{"id": "coding", "tag": "coding", "skill": "%s"}]' % SN
         with db_lock:
             c = db.cursor()

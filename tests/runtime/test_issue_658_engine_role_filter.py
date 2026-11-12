@@ -11,7 +11,7 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import engine_select as es
 from src.domains.runtime.engine import service
 

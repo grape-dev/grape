@@ -7,14 +7,14 @@
   - >25 按钮降级为「回复 `/cmd`」文本并计 `card_action_unsupported`；
   - egress 空载荷护栏认识 `{text, reply_markup}` 形态。
 """
-from src.im.adapters.telegram.cards import (
+from src.domains.runtime.im.adapters.telegram.cards import (
     MAX_BUTTONS,
     MAX_CALLBACK_BYTES,
     TelegramCardLedger,
     decode_callback_data,
     encode_callback_data,
 )
-from src.im.channel.card import (
+from src.domains.runtime.im.channel.card import (
     Action,
     Card,
     Tone,
@@ -23,8 +23,8 @@ from src.im.channel.card import (
     row_block,
     text_block,
 )
-from src.im.channel.renderers.telegram import TelegramCardRenderer
-from src.im.engine.egress import _card_payload_empty
+from src.domains.runtime.im.channel.renderers.telegram import TelegramCardRenderer
+from src.domains.runtime.im.engine.egress import _card_payload_empty
 
 RENDERER = TelegramCardRenderer()
 
@@ -133,11 +133,11 @@ def test_empty_guard_accepts_text_only_card_without_buttons():
     assert _card_payload_empty({"text": "  ", "parse_mode": "HTML"}) is True
 
 def test_builtin_wiring_and_capability_self_check():
-    from src.im.adapters.telegram.outbound import TELEGRAM_CAPABILITIES
-    from src.im.channel.card import self_check_card_capabilities
-    from src.im.engine_wiring import _card_renderer_for
+    from src.domains.runtime.im.adapters.telegram.outbound import TELEGRAM_CAPABILITIES
+    from src.domains.runtime.im.channel.card import self_check_card_capabilities
+    from src.domains.runtime.im.engine_wiring import _card_renderer_for
 
-    assert "telegram" in __import__("src.im.channel.card", fromlist=[
+    assert "telegram" in __import__("src.domains.runtime.im.channel.card", fromlist=[
         "BUILTIN_CARD_RENDERERS"]).BUILTIN_CARD_RENDERERS
     assert isinstance(_card_renderer_for("telegram"), TelegramCardRenderer)
     assert self_check_card_capabilities({"telegram": TELEGRAM_CAPABILITIES}) == []

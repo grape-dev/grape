@@ -11,7 +11,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import src.domains.runtime.routes.runtime  # noqa: F401  规避环形导入
+import src.domains.runtime.engine  # noqa: F401  规避环形导入
 from src.api import db_setup as d
 
 
@@ -34,7 +34,9 @@ class _FakeCur:
         return []
 
     def alters(self):
-        return [s for s in self.sqls if not s.startswith("PRAGMA")]
+        # r3 适配：_ensure_column 增加了 information_schema 探表（#表未建跳过），
+        # 该 SELECT 走同一 execute 出网口，不计入 ALTER 计数。
+        return [s for s in self.sqls if s.startswith("ALTER")]
 
 
 def test_strip_null_default_only_touches_null():

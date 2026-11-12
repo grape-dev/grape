@@ -8,22 +8,31 @@
 
 对应设计文档：docs/new-version2/feishu-qr-app-onboarding-plan.md
 """
+
 import asyncio
+
 import time
+
 import uuid
+
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, Query
+
 from pydantic import BaseModel
 
 from src.api.deps import require_no_session_token
+
 from src.kernel.config import log
 
 router = APIRouter(prefix="/api/feishu/onboard", tags=["feishu-onboard"])
 
 _STATUS_PENDING = "pending"
+
 _STATUS_WAITING = "waiting_confirm"
+
 _STATUS_CONNECTED = "connected"
+
 _STATUS_FAILED = "failed"
 
 # 进行中任务最大存活秒数：超过即视为 stale（用户可能已离开/二维码过期/进程重启丢协程），
@@ -54,13 +63,11 @@ _ADDONS = {
     },
 }
 
-
 class StartBody(BaseModel):
     bot_type: str = "chat_bot"  # chat_bot | vod_bot
     repo_key: str = ""
 
-
-def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: int):
+def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: str):  # D105：uuid 字符串
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -69,7 +76,6 @@ def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: int):
             (task_id, bot_type, repo_key, user_id, _STATUS_PENDING),
         )
         db.commit()
-
 
 def _update_task(task_id: str, **fields):
     if not fields:
@@ -81,7 +87,6 @@ def _update_task(task_id: str, **fields):
         c = db.cursor()
         c.execute(f"UPDATE feishu_onboard_task SET {cols} WHERE task_id=?", (*vals, task_id))
         db.commit()
-
 
 def _get_task(task_id: str) -> dict | None:
     from src.kernel.session_manager import db, db_lock
@@ -100,7 +105,6 @@ def _get_task(task_id: str) -> dict | None:
         "qr_url": row[7] or "", "expire_in": row[8] or 0, "error": row[9] or "",
     }
 
-
 def _on_qr(task_id: str, info: dict):
     """SDK 二维码就绪回调（同步）：写入 qr_url + expire_in，状态 → waiting_confirm"""
     _update_task(
@@ -111,14 +115,13 @@ def _on_qr(task_id: str, info: dict):
     )
     log.info(f"Feishu onboard: QR ready for task={task_id}, expire_in={info.get('expire_in')}")
 
-
-def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple[str, str]:
+def _apply_chat_credentials(user_id: str, app_id: str, app_secret: str) -> tuple[str, str]:  # D105：uuid 字符串
     """Chat Agent 落库（A2 收尾）：只写 grape_t_channel_installation，legacy 表不再读写。
 
     返回 (error_msg, old_app_id)。error_msg 非空表示校验/写入失败。
     """
     from src.kernel.session_manager import db, db_lock
-    from src.im.engine_wiring import (_connect, default_db_path, get_active_installation,
+    from src.domains.runtime.im.engine_wiring import (_connect, default_db_path, get_active_installation,
                                        revoke_installation, sync_installation)
     _inst = get_active_installation("user", owner_user_id=str(user_id)) or {}
     old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
@@ -153,7 +156,6 @@ def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple
         return "写入 IM 安装失败，请重试", old_app_id
     return "", old_app_id
 
-
 def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple[str, str]:
     """VOD Agent 落库（A2 收尾）：只写 grape_t_channel_installation；devops 行只用来挂会话。
 
@@ -165,7 +167,7 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
     repo_key = to_repo_key(repo_key)
     import uuid
     from src.kernel.session_manager import db, db_lock
-    from src.im.engine_wiring import (_connect, default_db_path, get_active_installation,
+    from src.domains.runtime.im.engine_wiring import (_connect, default_db_path, get_active_installation,
                                        revoke_installation, sync_installation)
     _inst = get_active_installation("repo", repo_key=repo_key) or {}
     old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
@@ -207,17 +209,21 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
         return "写入 IM 安装失败，请重试", old_app_id
     return "", old_app_id
 
-
 async def _connect_bot(bot_type: str, repo_key: str, app_id: str, app_secret: str, old_app_id: str):
-    """旧 IM 下线 A2 M2：绑定结果已写 grape_t_channel_installation，新引擎 ≤30s 扫描自动建连。
+    """通过 BotManager 动态建连（换绑时先移除旧 bot）。"""
+    try:
+        from src.api.main import bot_manager
+        if bot_manager and bot_manager.api:
+            if old_app_id and old_app_id != app_id:
+                await bot_manager.remove_bot(old_app_id)
+                log.info(f"Feishu onboard: removed old bot {old_app_id[:20]}")
+            await bot_manager.add_bot(app_id, app_secret, bot_type=bot_type)
+            log.info(f"Feishu onboard: added bot {app_id[:20]} ({bot_type})")
+    except Exception as e:
+        log.warning(f"Feishu onboard add_bot failed: {e}")
 
-    保留函数签名（调用点在注册流程里），不再经 legacy BotManager 热加载。
-    """
-    log.info(f"Feishu onboard: installation written app_id={app_id[:20]} ({bot_type}); "
-             f"engine will pick it up within scan interval")
 
-
-async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: int, username: str = ""):
+async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id: str, username: str = ""):  # D105：uuid 字符串
     """后台运行 aregister_app 全流程。"""
     try:
         import lark_oapi as lark
@@ -252,7 +258,7 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
             try:
                 # 用新 bot 的通讯录读权限取扫码者飞书名（contact:user.base:readonly 已在 _ADDONS 申请；
                 # 存量 bot 无权限则留空，由 p2p 确认/sync 兜底，见 feishu-app-scoped-openid-fix.md §2.4）
-                from src.im.feishu_async import FeishuAsync, BotContext
+                from src.domains.runtime.im.feishu_async import FeishuAsync, BotContext
                 _api = FeishuAsync()
                 _n = await _api.get_user_name(
                     BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot"),
@@ -280,7 +286,6 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
         log.warning(f"Feishu onboard exception: task={task_id} err={e}")
     finally:
         _TASKS.pop(task_id, None)
-
 
 @router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
 async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
@@ -341,14 +346,13 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
     log.info(f"Feishu onboard start: task={task_id} bot_type={body.bot_type} user={user['id']}")
     return {"task_id": task_id, "status": _STATUS_PENDING}
 
-
 @router.get("/status", operation_id="feishu_onboard_status", summary="Get Feishu onboarding status", description="Queries the scan-onboarding task status.")
 def onboard_status(task_id: str = Query(...), user: dict = Depends(require_no_session_token)):
     """查询扫码任务状态（前端轮询）。"""
     t = _get_task(task_id)
     if not t:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
-    if t["user_id"] != user["id"]:
+    if str(t["user_id"] or "") != str(user["id"] or ""):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权查看该任务"})
     return {
         "task_id": t["task_id"],
@@ -360,16 +364,14 @@ def onboard_status(task_id: str = Query(...), user: dict = Depends(require_no_se
         "error": t["error"],
     }
 
-
 class CancelBody(BaseModel):
     task_id: str = ""
-
 
 @router.post("/cancel", operation_id="feishu_onboard_cancel", summary="Cancel Feishu onboarding", description="Cancels an in-progress scan task. connected tasks cancel idempotently without affecting saved config.")
 def cancel_onboard(body: CancelBody, user: dict = Depends(require_no_session_token)):
     """取消进行中的扫码任务。已 connected 的任务取消为幂等，不影响已保存配置。"""
     t = _get_task(body.task_id)
-    if not t or t["user_id"] != user["id"]:
+    if not t or str(t["user_id"] or "") != str(user["id"] or ""):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     if t["status"] in (_STATUS_CONNECTED, _STATUS_FAILED):
         return {"message": "任务已结束，无需取消", "status": t["status"]}

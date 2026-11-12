@@ -22,13 +22,13 @@ def _clear_caches():
 
 
 def _make_ctx(app_id="cli_chat"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-test")
 
 
 def _drive_inner(api=None, ctx=None, text="测试执行", **kwargs):
     """驱动 _process_chat_inner_async 到直接执行；返回 api（AsyncMock 捕获调用）。"""
-    from src.im.handler_async import _process_chat_inner_async
+    from src.domains.runtime.im.handler_async import _process_chat_inner_async
     ctx = ctx or _make_ctx()
     api = api or AsyncMock()
     parsed = {
@@ -73,7 +73,7 @@ class TestFeishuDirectInjectsToken:
         with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
              patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
              patch("src.domains.runtime.engine.service.enqueue_task") as m_enq, \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume):
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume):
             _drive_inner(repo_key="gitcode:Jason7602/test", repository="Jason7602/test")
 
         m_enq.assert_not_called()
@@ -99,7 +99,7 @@ class TestFeishuDirectInjectsToken:
 
             with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
                  patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
-                 patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume):
+                 patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume):
                 _drive_inner(repo_key=rk, repository="")
             env = captured.get("env_extra") or {}
             assert "GRAPE_SESSION_TOKEN" not in env, rk
@@ -134,7 +134,7 @@ class TestFeishuHelperUsed:
     def test_handler_uses_public_helper(self):
         """handler_async 直接分支应通过公共 helper 注入，而非各自拼 env（防漂移）。"""
         import inspect
-        import src.im.handler_async as h
+        import src.domains.runtime.im.handler_async as h
         src = inspect.getsource(h)
         assert "chat_session_env_extra" in src, "handler_async 必须调用公共 chat_session_env_extra"
         assert "consume_stream_async(" in src

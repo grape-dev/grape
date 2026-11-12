@@ -10,56 +10,71 @@
 5. _TASK_STATUS_FLOWS / _STAGE_TO_TASK_STATUS 终态语义未修改；旁路 production_release 表已移除
 6. tk_ 会话 token（Agent 执行期）调用创建入口 → 403（未授权拒绝）
 """
+
 import os
+
 import sys
+
 import time
+
 import uuid
+
 from datetime import datetime, timedelta, timezone
+
 from unittest import mock
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.session_manager import db, db_lock
+
+from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
 REPO_KEY = "gitcode:issue627-org/repo"
+
 OWNER = "issue627-org"
+
 REPO = "repo"
 
 _uid = None
+
 _headers = {}
+
 _OTHER_HEADERS = {}   # 非归属用户（未授权调用方）
 
 _SHA = "a" * 40
+
 _SHA2 = "b" * 40
+
 _ENV = "prod-shanghai"
+
 _EVIDENCE = "sre-验收报告#77"
 
 DEFAULT_TTL = 24 * 3600
 
 _MOCK_ISSUE_SEQ = [9000]
+
 _post_mock = None
+
 _patcher = None
 
-
 def _jwt(user):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user["id"], user["username"], get_token_version(user["id"]))
 
-
-def _fake_post_gitcode_issue(api_token, owner, repo, title, body_text="", assignee=""):
-    """Mock 平台建单：返回自增 issue number；真实建单文案可通过捕获验证。"""
+def _fake_post_gitcode_issue(self, title, body="", assignee=""):
+    """Mock 平台建单（VcsApiClient.create_issue 缝）：返回自增 issue number。"""
     _MOCK_ISSUE_SEQ[0] += 1
     return {"number": _MOCK_ISSUE_SEQ[0], "title": title,
-            "body": body_text or "", "html_url": f"https://gitcode.com/{owner}/{repo}/issues/{_MOCK_ISSUE_SEQ[0]}"}
-
+            "body": body or "", "html_url": "issues/" + str(_MOCK_ISSUE_SEQ[0])}
 
 def setup_module():
     global _uid, _headers, _OTHER_HEADERS, _patcher, _post_mock
@@ -85,11 +100,11 @@ def setup_module():
             "VALUES (?,?,?,?,1,1)",
             (_uid["id"], REPO_KEY, OWNER, REPO))
         db.commit()
-    # 平台建单 mock（沿用 test_issues_api 建单测试模式）：测试环境无真实 GitCode
-    _patcher = mock.patch("src.api.issues_center._post_gitcode_issue",
+    # 平台建单 mock（S106：建单链已统一 VcsApiClient.create_issue 卡驱动路径，
+    # 旧缝 _post_gitcode_issue 不再被调用——mock 打到新缝，否则打穿真实 HTTP）
+    _patcher = mock.patch("src.domains.runtime.vcs.api_client.VcsApiClient.create_issue",
                           side_effect=_fake_post_gitcode_issue)
     _post_mock = _patcher.start()
-
 
 def teardown_module():
     global _patcher, _post_mock
@@ -104,7 +119,6 @@ def teardown_module():
         c.execute("DELETE FROM user_repos WHERE repo_key=?", (REPO_KEY,))
         db.commit()
 
-
 def _clean():
     with db_lock:
         c = db.cursor()
@@ -114,7 +128,6 @@ def _clean():
             except Exception:
                 pass
         db.commit()
-
 
 def _seed_issue(status="completed", stage="done", number=77):
     """建 issue 卡片行（用户归属 = _uid），返回卡片 id。"""
@@ -132,7 +145,6 @@ def _seed_issue(status="completed", stage="done", number=77):
         set_issue_stage(REPO_KEY, f"#{number}", stage, "user")
     return tid
 
-
 def _seed_sre_event(number=77, sha=_SHA, status="completed"):
     """建一条已完成 sre 验收事件（payload 携带候选 SHA + 验收证据）。"""
     from src.api.event_store import append_event
@@ -144,7 +156,6 @@ def _seed_sre_event(number=77, sha=_SHA, status="completed"):
                  "context": "sre 验收完成"},
     )
 
-
 def _body(sha=_SHA, env=_ENV, evidence=_EVIDENCE, approved_at=None):
     return {
         "candidate_sha": sha,
@@ -153,13 +164,11 @@ def _body(sha=_SHA, env=_ENV, evidence=_EVIDENCE, approved_at=None):
         "approved_at": approved_at or datetime.now(timezone.utc).isoformat(),
     }
 
-
 def _post_create(issue_card_id, body=None, headers=None):
     if headers is None:
         headers = _headers
     return client.post(f"/api/issues/{issue_card_id}/production-release",
                        json=body or _body(), headers=headers)
-
 
 def _subissue_count(number):
     """统计源需求下已创建的发布子单数（issue 行 parent_issue_number + release_target_env 非空）。"""
@@ -169,7 +178,6 @@ def _subissue_count(number):
                   "AND release_target_env != ''",
                   (REPO_KEY, number))
         return c.fetchone()[0]
-
 
 def _get_subissue_row(number):
     """取源需求下最近一条发布子单 issue 行（方案 C：子单就是 issue 行）。"""
@@ -184,7 +192,6 @@ def _get_subissue_row(number):
             "ORDER BY id DESC LIMIT 1", (REPO_KEY, number))
         return c.fetchone()
 
-
 def _get_issue_row(number):
     with db_lock:
         c = db.cursor()
@@ -192,13 +199,11 @@ def _get_issue_row(number):
                   "WHERE repo_key=? AND issue_number=?", (REPO_KEY, number))
         return c.fetchone()
 
-
 def _get_events_count():
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM events WHERE repo_key=?", (REPO_KEY,))
         return c.fetchone()[0]
-
 
 def _latest_sre_a2a_event(number):
     with db_lock:
@@ -208,9 +213,6 @@ def _latest_sre_a2a_event(number):
             "AND agent_type='sre' AND event_type='a2a_event' ORDER BY seq DESC LIMIT 1",
             (REPO_KEY, f"#{number}"))
         return c.fetchone()
-
-
-# ===================== 创建入口：拒绝链 =====================
 
 class TestCreateRejects:
     def test_reject_non_terminal_issue(self):
@@ -298,9 +300,6 @@ class TestCreateRejects:
         assert _subissue_count(109) == 0, "拒绝路径不得创建发布子单"
         assert _post_mock.call_count == _mocked_calls, "拒绝路径不得调用平台建单"
 
-
-# ===================== 创建入口：成功 + 唯一性 =====================
-
 class TestCreateSuccess:
     def test_create_binds_all_elements(self):
         """成功创建：发布子单绑定 父需求/仓库/候选SHA/证据/目标环境/批准来源，stage=sre 直通。"""
@@ -377,9 +376,6 @@ class TestCreateSuccess:
         assert _it.get("parent_issue_number") == 123
         assert "status" in _it and "result" in _it and "failure_reason" in _it
 
-
-# ===================== 结果三分支回填 =====================
-
 class TestResultBranches:
     def test_fill_deployed_success(self):
         """exit 0 + deploy_url 证据 → deployed_success（子单终态）。"""
@@ -441,7 +437,6 @@ class TestResultBranches:
         assert _get_issue_row(133)[0] == "completed", "源需求终态不变"
         assert _get_subissue_row(133)[7] == "not_executed", "发布结果独立判定"
 
-
 def _create_direct(number, sha=_SHA):
     """绕过 HTTP 直建发布子单（供回填三分支测试用），返回 (sub_issue_number, seq)。"""
     from src.api.issues_center import create_release_subissue
@@ -452,9 +447,6 @@ def _create_direct(number, sha=_SHA):
         approved_at=datetime.now(timezone.utc).isoformat(),
         api_token="test_tok", dispatch=False)
     return (out.get("sub_issue_number"), out.get("seq"))
-
-
-# ===================== 回填集成（complete_task / fail_task） =====================
 
 class TestBackfillIntegration:
     """complete_task/fail_task 钩子按 task.issue_id 反查发布子单回填三分支。"""
@@ -548,7 +540,6 @@ class TestBackfillIntegration:
                       exit_code=0)
         assert _subissue_count(153) == 0, "普通 sre 任务不得产生发布子单回填"
 
-
 class TestStateMachineIntact:
     def test_task_status_flows_completed_still_terminal(self):
         """_TASK_STATUS_FLOWS 终态语义未修改：completed 仍为空元组（无出边）。"""
@@ -569,9 +560,6 @@ class TestStateMachineIntact:
             c = db.cursor()
             row = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='production_release'").fetchone()
         assert row is None, "旁路 production_release 表应已移除"
-
-
-# ===================== PR #799 审查修复保留（R1/R2/R3/R4） =====================
 
 class TestReviewFixesPR799:
     """QA 审查报告 R1（SHA 大小写唯一性）/ R2（fail_task 回填）/ R3（evidence_ref 上限）/ R4（端点同步化）。"""
@@ -681,9 +669,6 @@ class TestReviewFixesPR799:
             account="", user_id=0, repo_gitcode_token="", env_extra={}, skill_path="",
             skill_id=0, pool_tag="", pool_engine_ids="")
         return _task_id, _seq
-
-
-# ===================== PR #818 审查修复（唯一性 DB 兜底 + 失败显式上报 + 回声兜底）=====
 
 class TestReviewFixesPR818:
     """QA note 197606972：R1 唯一性部分唯一索引 / R2 绑定失败显式上报 / Optional 回声兜底。"""
@@ -841,3 +826,7 @@ class TestReviewFixesPR818:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='production_release'"
             ).fetchone()
         assert row is None, "迁移应 DROP 遗留 production_release 表"
+
+from src.kernel.session_manager import db, db_lock
+
+from src.domains.mgmt.auth import grape_account_db

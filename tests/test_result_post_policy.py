@@ -15,7 +15,7 @@ import pathlib
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -106,7 +106,7 @@ class TestLooksLikeErrorText:
         "model_not_found",
     ])
     def test_hits(self, text):
-        from src.api.event_pipeline import _looks_like_error_text
+        from src.domains.runtime.pipeline.event_pipeline import _looks_like_error_text
         assert _looks_like_error_text(text) is True
 
     @pytest.mark.parametrize("text", [
@@ -116,7 +116,7 @@ class TestLooksLikeErrorText:
         "",
     ])
     def test_misses(self, text):
-        from src.api.event_pipeline import _looks_like_error_text
+        from src.domains.runtime.pipeline.event_pipeline import _looks_like_error_text
         assert _looks_like_error_text(text) is False
 
 
@@ -133,7 +133,7 @@ class TestPolicyReading:
         ("", "strict"),
     ])
     def test_valid_and_default(self, monkeypatch, value, expected):
-        from src.api.event_pipeline import _result_post_policy
+        from src.domains.runtime.pipeline.event_pipeline import _result_post_policy
         monkeypatch.setenv("GRAPE_RESULT_POST_POLICY", value)
         assert _result_post_policy() == expected
 
@@ -157,7 +157,7 @@ class TestPolicyModes:
     STRUCTURED = json.dumps({"actions": ["fix"], "conclusion": "已修复"})
 
     def _post(self, monkeypatch, captured, text, agent_result, policy, tid):
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         monkeypatch.setenv("GRAPE_RESULT_POST_POLICY", policy)
         import urllib.request
         monkeypatch.setattr(urllib.request, "urlopen", _make_mock_urlopen(captured))
@@ -255,7 +255,7 @@ class TestPolicyModes:
 
 class TestSuppressionLedger:
     def test_idempotent_same_task_same_text(self, monkeypatch):
-        from src.api.event_pipeline import _record_post_suppressed
+        from src.domains.runtime.pipeline.event_pipeline import _record_post_suppressed
         tid = "t_1545_idem"
         _seed_task(tid=tid)
         monkeypatch.setenv("GRAPE_RESULT_POST_POLICY", "strict")
@@ -288,12 +288,14 @@ class TestSuppressionLedger:
 # =====================================================================
 
 class TestCallSitesExplicit:
+    # 路径按 arch 布局（Issue #699 起 src/api/event_pipeline.py、src/token_resolver.py 均为
+    # sys.modules 别名 shim，实现分别在 domains/runtime/pipeline 与 kernel）。
     FILES = [
-        "src/api/event_pipeline.py",
-        "src/runtime/direct_executor.py",
-        "src/runtime/service.py",
+        "src/domains/runtime/pipeline/event_pipeline.py",
+        "src/domains/runtime/engine/direct_executor.py",
+        "src/domains/runtime/engine/service.py",
         "src/api/pr_merged_sre_retry.py",
-        "src/token_resolver.py",
+        "src/kernel/token_resolver.py",
     ]
     NAMES = {"_post_result_to_issue", "_post_result_to_pr"}
 
@@ -318,4 +320,5 @@ class TestCallSitesExplicit:
                 kws = {k.arg for k in node.keywords if k.arg}
                 assert "agent_result" in kws, \
                     f"{rel}:{node.lineno} 调用 {name} 未显式传 agent_result"
-        assert total == 7, f"应为 7 个调用点，实际 {total}"
+        # 9 = 上列文件的全部调用点（基线 7 处迁移后拆分/新增 2 处，逐点已显式传参）
+        assert total == 9, f"应为 9 个调用点，实际 {total}"

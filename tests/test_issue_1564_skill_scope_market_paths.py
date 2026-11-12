@@ -26,7 +26,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.api.pipeline_config import create_custom_scene, invalidate_scene_cache  # noqa: E402
 
 
@@ -362,7 +362,7 @@ class TestAuditRouteAndFallback:
     def test_audit_falls_back_only_on_missing_display_name_column(self, monkeypatch):
         """缺 display_name 列时定向兜底，正常返回体检结果。"""
         import sqlite3
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
 
         class _FakeCursor:
             def __init__(self):
@@ -388,7 +388,7 @@ class TestAuditRouteAndFallback:
 
     def test_audit_propagates_unrelated_db_error(self, monkeypatch):
         """非缺列 DB 异常不得被吞成空/部分结果，应照常上抛。"""
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
 
         class _FakeCursor:
             def execute(self, sql, params=None):

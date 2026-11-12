@@ -2,7 +2,7 @@
 """Issue #990 MySQL 命名锁探针（只读，不改任何 schema）。
 
 用途：在真实 MySQL/RDS 上验证 ``sync_task_session_token`` 依赖的 GET_LOCK 语义与
-「专用锁连接跨次复用」的收益。生产代码路径：``src/runtime/service.py``
+「专用锁连接跨次复用」的收益。生产代码路径：``src/domains/runtime/engine/service.py``
 （``_acquire_task_token_lock`` / ``_locked_connection``）。
 
 测什么：

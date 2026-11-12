@@ -120,7 +120,7 @@ class TestChatSessionEnvRepoInjection:
 
     def test_issue_number_numeric_task_conversation(self):
         """task 会话纯数字 Issue 编号 → ISSUE_NUMBER 注入（含 # 前缀剥离）。"""
-        from src.session_manager import create_conversation
+        from src.kernel.session_manager import create_conversation
         cid = create_conversation(99991, "gitcode:owner/repo", title="Issue #1735",
                                   conv_type="task", issue_number=1735)
         env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
@@ -138,14 +138,14 @@ class TestChatSessionEnvRepoInjection:
 
     def test_issue_number_non_task_conversation_not_injected(self):
         """非 task 会话 → 不注入 ISSUE_NUMBER。"""
-        from src.session_manager import create_conversation
+        from src.kernel.session_manager import create_conversation
         cid = create_conversation(99991, "gitcode:owner/repo", title="一般对话")
         env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
         assert "ISSUE_NUMBER" not in env
 
     def test_resolve_server_url_failure_degrades(self):
         """业务基址解析抛异常 → helper 不抛，仅缺 GRAPE_SERVER_URL，其余键仍在。"""
-        with patch("src.prompt_builder._resolve_business_server_url", side_effect=Exception("x")):
+        with patch("src.kernel.prompt_builder._resolve_business_server_url", side_effect=Exception("x")):
             env = chat_session_env_extra(99991, "test-conv", "gitcode:owner/repo", runtime_id=0)
         assert "GRAPE_SERVER_URL" not in env
         assert env["REPO_OWNER"] == "owner"
@@ -153,7 +153,7 @@ class TestChatSessionEnvRepoInjection:
 
     def test_skill_declared_keys_present(self):
         """输出键集合 ⊇ chat SKILL 声明的五个变量。"""
-        from src.session_manager import create_conversation
+        from src.kernel.session_manager import create_conversation
         cid = create_conversation(99991, "gitcode:owner/repo", title="Issue #1735",
                                   conv_type="task", issue_number=1735)
         env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)
@@ -162,7 +162,7 @@ class TestChatSessionEnvRepoInjection:
 
     def test_rendered_grape_command_has_no_empty_segments(self):
         """注入后的 env 渲染技能命令 → 无空参数/空路径段。"""
-        from src.session_manager import create_conversation
+        from src.kernel.session_manager import create_conversation
         cid = create_conversation(99991, "gitcode:owner/repo", title="Issue #1735",
                                   conv_type="task", issue_number=1735)
         env = chat_session_env_extra(99991, cid, "gitcode:owner/repo", runtime_id=0)

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 UID = 43102
 USERNAME = "multi_channel_tester"
@@ -43,7 +43,7 @@ def _client():
 
 
 def _ew():
-    from src.im.engine_wiring import _connect, default_db_path, run_startup_migration
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path, run_startup_migration
     path = default_db_path()
     run_startup_migration(path)
     return _connect, path
@@ -77,7 +77,7 @@ def _drop(app_id):
 
 
 def _seed(channel_type, app_id, secret="sec_mc"):
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     _ew()
     assert sync_installation("user", owner_user_id=str(UID), app_id=app_id,
                              app_secret=secret, channel_type=channel_type)
@@ -156,7 +156,7 @@ class TestSaveIsolation:
 class TestInstallationStatusField:
     def test_disabled_channel_still_echoes_with_status(self, _client):
         """已停用（disabled）的渠道仍要回显凭证 + installation_status，前端才能显示「已配置·已停用」。"""
-        from src.im.engine_wiring import _connect, default_db_path
+        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
         dk = _uid()
         _seed("dingtalk", dk)
         conn = _connect(default_db_path())
@@ -171,7 +171,7 @@ class TestInstallationStatusField:
 
     def test_revoked_channel_not_echoed(self, _client):
         """revoked = 用户主动解绑，不能再回显（否则前端会把已解绑的渠道显示成已配置）。"""
-        from src.im.engine_wiring import _connect, default_db_path
+        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
         fe = _uid()
         _seed("feishu", fe)
         conn = _connect(default_db_path())

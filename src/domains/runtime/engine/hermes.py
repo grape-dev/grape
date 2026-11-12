@@ -268,7 +268,7 @@ class HermesRuntime(AgentRuntime):
 
         return None
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR

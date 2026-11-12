@@ -61,7 +61,8 @@ function loadObs(dom, extraInit) {
   const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; }, getLang: () => 'zh' };
   const sandbox = {
-    document: dom, window: { _currentView:'', history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
+    document: dom, window: { _currentView:'', history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{}, _repoWebHost: (rk) => { const p = String(rk || '').split(':')[0]; const H = { github: 'github.com', gitcode: 'gitcode.com', gitee: 'gitee.com', gitlab: 'gitlab.com' }; return H[p] || 'gitcode.com'; } },
+    stripRepoPrefix: (rk) => String(rk || '').replace(/^(github|gitcode|gitee|gitlab):/, ''),
     localStorage: { getItem:()=>null, setItem:()=>{}, removeItem:()=>{}, clear:()=>{} },
     API: { get:()=>Promise.resolve({}), post:()=>Promise.resolve({}) }, I18N,
     console: { log:()=>{}, error:()=>{}, warn:()=>{} }, fmtLocalTime: (s)=>s||'',

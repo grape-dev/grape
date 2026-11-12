@@ -11,25 +11,28 @@
   （用户仅限 user_only，`tk_` → 403；避免 Agent 任意改状态干扰 pipeline）。
 Design: docs/weekly-02/issues-api-design.md
 """
+
 import os
+
 import re
+
 import asyncio
 
 from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
+
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
+
 from src.kernel.config import log
+
 from src.api.time_utils import normalize_event_time
+
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
-                                   _read_issue_status, _find_github_mirror_repo_key,
-                                   cancel_issue_rows)
+                                   _read_issue_status)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
-
-
-# ===================== 辅助 =====================
 
 def _num_from_issue_id(issue_id: str) -> str:
     """从 issue_id 提取编号。
@@ -41,8 +44,13 @@ def _num_from_issue_id(issue_id: str) -> str:
     if _raw.startswith("#pr_"):
         return ""
     m = re.search(r"(\d+)", _raw)
-    return m.group(1) if m else ""
-
+    if m:
+        return m.group(1)
+    # D105 字符串 ident（gitee IK*）：无数字时返回去 # 原始 ident——
+    # 此前回退 ''，gitee 事件被全量归到空键组，events/pipeline/detail 查不到
+    # （2026-11-10 部署实例实测：IKUDWW events 返回空、pipeline 422）。
+    _ident = _raw.lstrip("#")
+    return _ident if re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*", _ident) else ""
 
 def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
     """tk_ 会话 token 限定其绑定仓库：请求 repo_keys 含该 repo 才放行（防 agent 跨仓库读事件）。"""
@@ -52,7 +60,6 @@ def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
             raise HTTPException(
                 status_code=403,
                 detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
-
 
 def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
@@ -156,28 +163,19 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
         })
     return items
 
-
 def _repo_key_of(owner: str, repo: str) -> str:
     from src.kernel.repo_key import to_repo_key
     return to_repo_key(f"{owner}/{repo}")
 
-
 def _repo_keys_of(owner: str, repo: str) -> list[str]:
-    """跨 provider 双查：返回 [gitcode:owner/repo, github:owner/repo] 两个前缀。
+    """跨 provider 候选键全集（S104/D78：repo_key_candidates 卡派生）。
 
-    与 pipeline.py 的双查逻辑一致——用户可能通过 GitHub Webhook 接入仓库，
-    DB 中数据存为 github: 前缀，但前端传入的 owner/repo 无 provider 信息，
-    _repo_key_of 默认返回 gitcode: 前缀会漏查 GitHub 仓库数据。
+    用户可能经任意平台 Webhook 接入仓库，DB 前缀不定——手写双平台互查
+    （gitcode↔github）会漏 gitee/gitlab；候选集含裸键+全平台前缀，
+    repo_key 名空间全局唯一，超集查询安全。
     """
-    from src.kernel.repo_key import to_repo_key
-    _owner_repo = f"{owner}/{repo}"
-    repo_key = to_repo_key(_owner_repo)
-    keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        keys.append(f"gitcode:{_owner_repo}")
-    return keys
+    from src.kernel.repo_key import repo_key_candidates
+    return repo_key_candidates(f"{owner}/{repo}")
 
 
 def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
@@ -247,7 +245,6 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
         log.warning(f"issues: load issue_state failed: {e}")
     return out
 
-
 def _task_status_map(repo_keys: list[str]) -> dict:
     """仓库内 issue_number → tasks.status（任务中心状态）。"""
     from src.kernel.session_manager import db, db_lock
@@ -263,7 +260,6 @@ def _task_status_map(repo_keys: list[str]) -> dict:
             log.warning(f"issues: load tasks status failed: {e}")
     return out
 
-
 def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
 
@@ -275,6 +271,7 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     _query_pr_subscription_events 独立处理，不受影响）。
     """
     from src.kernel.session_manager import db, db_lock
+    import json as _json
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     _num_clause = ""
@@ -329,7 +326,6 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
         out.setdefault(n, []).append(item)
     return out
 
-
 def _issue_title_map(repo_keys: list[str]) -> dict:
     """仓库内 issue_number → 标题（从 events 首条带 title 的事件取）。"""
     g = _group_events_by_issue(repo_keys)
@@ -341,15 +337,17 @@ def _issue_title_map(repo_keys: list[str]) -> dict:
                 break
     return out
 
-
 def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dict,
                     group_map: dict, title_map: dict) -> dict:
     """聚合单个 Issue 展示对象（列表条目）。"""
     stage = stage_map.get(number) or {}
     events = group_map.get(number) or []
     latest = events[-1] if events else None
+    # D105 字符串 ident：数字 ident 保持 int 契约不变；平台字符串 ident（gitee IK*）
+    # 原样透传——对 IK* 裸强转 int 会抛 ValueError（2026-11-10 :3001 实测 500）。
+    _num = str(number)
     return {
-        "number": int(number),
+        "number": int(_num) if _num.isdigit() else _num,
         # Issue #569：内部需求卡片 id（issue 表主键）——awaiting-input/pending-review/review-pass
         # 的 --issue_id 用此值；与 GitCode 侧 issue number 语义不同，与 git-repo issues get 的
         # id（GitCode 侧 id）不可混用。无 issue 卡片行（过渡期兜底）时为 null。
@@ -365,7 +363,6 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
         "events_count": len(events),
         "latest_event": latest,
     }
-
 
 def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
     """Issue #648 性能修复：按仓库前缀一次 ListObjects 拉全量附件清单，内存按 issue 编号分组。
@@ -444,7 +441,6 @@ def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
             continue
     return result
 
-
 def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
     """Issue #648：聚合 issue 附件（复用 issues_center._attach_list，不新建存储）。
 
@@ -467,7 +463,6 @@ def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
             return atts
     return []
 
-
 def _issue_attachments_count(repo_keys: list[str], issue_number) -> int:
     """Issue #926：仅取附件数量（分页瘦身专用）。
 
@@ -488,7 +483,6 @@ def _issue_attachments_count(repo_keys: list[str], issue_number) -> int:
         if n:
             return n
     return 0
-
 
 def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
     """读 event.json 组装 pipeline 路线图（跨 provider 双查）。"""
@@ -525,7 +519,6 @@ def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
         except Exception as e:
             log.warning(f"issues: load pipeline archive failed repo={rk} #{number}: {e}")
     return None
-
 
 def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dict:
     """由 events 表重构 pipeline（weekly-05 主路径），output 用 structured_output。"""
@@ -567,25 +560,11 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
         else:
             seg["is_agent_conclusion"] = True
         segments.append(seg)
-    return {"issue": {"number": int(number)} if str(number).isdigit() else {"number": number},
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    return {"issue": {"number": _native_issue_number(number)},
             "summary": (segments[-1]["output"]["issue_summary"] if segments else ""),
             "status": (segments[-1]["status"] or "unknown") if segments else "unknown",
             "segments": segments}
-
-
-# ===================== 端点 =====================
-
-# ===================== B 类操作（tasks-issues-api-rebound-design.md §三）=====================
-# 迁移自 /api/tasks/{task_id}/...：`{issue_id}` 即原 `{task_id}`（= issue.id），定位/逻辑零改动。
-
-
-def _feishu_api_for_ctx(ctx):
-    """按 ctx 的 app_id 取 FeishuAsync（旧 IM 下线 A2 M2：不再依赖 BotManager.api）。"""
-    if not ctx:
-        return None
-    from src.im.engine_wiring import feishu_api
-    return feishu_api(getattr(ctx, "app_id", "") or "")
-
 
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="Open issue session", description="Opens the Issue conversation entry: validates ownership and returns the current status without flipping it. User-only (front-end navigation preflight).")
 async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -601,10 +580,10 @@ async def start_issue(issue_id: int, user: dict = Depends(require_no_session_tok
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        if row[0] != user["id"]:
+        # D105: user["id"] is str; MySQL rows return int — normalize before compare
+        if str(row[0]) != str(user["id"]):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该需求"})
         return {"status": row[1]}
-
 
 @router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)", description="Returns the Issue status with context for CLI 'grape issues wait' polling.")
 def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
@@ -625,10 +604,8 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
         "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
     }
 
-
 class _IssueStatusBody(BaseModel):
     status: str = ""
-
 
 @router.put("/{issue_id}/status", operation_id="issues_status", summary="Update issue status", description="Transitions Issue status (active/processing/awaiting_input/pending_review/completed/cancelled flow). User-only: user-facing status is mutable by the owner; session token -> 403.")
 def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depends(require_no_session_token)):
@@ -649,7 +626,8 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        if row[0] not in (user["id"], 0):
+        # D105: user["id"] is str; MySQL rows return int — normalize before compare
+        if str(row[0]) not in (str(user["id"]), "0"):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该需求"})
         cur = row[1]
         if cur != ns and ns not in _TASK_STATUS_FLOWS.get(cur, ()):
@@ -664,54 +642,54 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         db.commit()
     return {"ok": True, "issue_id": issue_id, "status": ns}
 
-
 class _IssueConfirmBody(BaseModel):
     confirmation: str = "user_confirmed"
 
-
 def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
-    """confirm-done 后同步关闭 GitCode/GitHub Issue（降级不阻断）。
+    """confirm-done 后同步关闭各平台 Issue（降级不阻断）。
 
     Returns:
-        {"gitcode": "success|failed|skipped|bot_token_failed", "github": "...",
-         "message": str}
-        — gitcode 始终尝试关闭（无 issue_number 时 skipped）；github 仅当 repo_key
-        以 github: 开头时尝试关闭，否则 skipped。
+        {<provider>: "success|failed|skipped|bot_token_failed", ..., "message": str}
+        — 主平台（repo_key 自身平台）始终尝试关闭（无 issue_number 时 skipped）；
+        同仓多平台镜像绑定逐一尝试关闭（S104/D78 候选集）。
         bot_token_failed: bot token 可能失效，issue 未关闭（方向3 降级提示）。
+        键按 provider 派生；gitcode/github 两键恒在（兼容旧消费方）。
     """
     result = {"gitcode": "skipped", "github": "skipped", "message": ""}
-    if not issue_number:
+    if issue_number in (None, "", 0):
         return result
-    try:
-        issue_number = int(issue_number)
-    except (TypeError, ValueError):
-        return result
+    # D105 字符串 ident（gitee IK*）：保持平台原生形态透传（_native_issue_number），
+    # 不做 int() 强转——此前 int('IKUFPS') 必炸走早退，主平台键（gitee）从未写入
+    # result，VCS 侧永不自动关闭（V1 实测：confirm-done 后 gitee issue 仍 open）。
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    issue_number = _native_issue_number(issue_number)
+    _ident_is_numeric = isinstance(issue_number, int) or str(issue_number).isdigit()
 
-    is_github = repo_key.startswith("github:")
-
-    # --- 确定 GitCode 侧的 repo_key 与 issue（GitHub 仓库时 GitCode 侧 skip）---
-    if not is_github:
-        result["gitcode"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=False)
-
-    # --- GitHub 侧：repo_key 本身是 github:，或需要查找镜像 ---
-    if is_github:
-        result["github"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=True)
-    else:
-        # GitCode 仓库可能绑定了 GitHub 镜像，尝试查找并关闭镜像 Issue
-        _gh_rk = _find_github_mirror_repo_key(repo_key)
-        if _gh_rk:
-            result["github"] = _try_close_issue_for_repo(_gh_rk, issue_number, user, is_github=True)
-        # 无镜像 → 保持 skipped
+    # 旧业务语义（用户裁定 2026-11-10 保留原方向性）：镜像外关仅
+    # 「非 github 主仓 → 其 github 孪生行」单向（#656 口径）。github 主仓
+    # 永不外关（含同名仓）；我们分支 194eaf317 的双向全平台口径被用户否决。
+    from src.kernel.repo_key import parse_repo_key
+    _primary = parse_repo_key(repo_key)[0]
+    result[_primary] = _try_close_issue_for_repo(repo_key, issue_number, user)
+    if _primary != "github" and _ident_is_numeric:
+        # 字符串 ident（gitee IK*）无数字语义，github 孪生镜像关闭无从对齐编号，
+        # 保持 skipped（主平台关闭不受影响）。
+        from src.api.issues_center import _mirror_repo_keys
+        for _m_rk in _mirror_repo_keys(repo_key):
+            _m_p = parse_repo_key(_m_rk)[0]
+            if _m_p != "github":
+                continue  # 只外关 github 孪生（旧口径，单向）
+            result[_m_p] = _try_close_issue_for_repo(_m_rk, issue_number, user)
+    # 无绑定 → github 键保持 skipped
 
     # Issue #345: bot_token_failed 时设置用户可见提示
-    if "bot_token_failed" in (result["gitcode"], result["github"]):
+    if "bot_token_failed" in [v for v in result.values() if isinstance(v, str)]:
         from src.domains.runtime.vcs.token_error import BOT_TOKEN_INVALID_MSG
         result["message"] = f"Issue 关闭失败：{BOT_TOKEN_INVALID_MSG}"
 
     return result
 
-
-def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_github: bool) -> str:
+def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict) -> str:
     """对单个 repo_key 执行幂等关闭 Issue，返回 success/failed/skipped。"""
     from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
@@ -723,16 +701,17 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
     token = ""
     _use_user_token_fallback = False
     try:
-        if is_github:
+        if provider == "github":
             # GitHub: bot token 优先，用户 token fallback
             from src.domains.mgmt.user.db import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
             if not token and user.get("id"):
                 # P1-2 修复: 和 GitCode 路径对称——只设 flag 不获取 token，
-                # 让 with_oauth_token 内部用 get_user_github_token_with_refresh 获取（有预刷新）
+                # 让 with_oauth_token 内部用 get_user_token_for 获取（有预刷新；K1 包装器已退役）
                 _use_user_token_fallback = True
         else:
-            # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
+            # Issue #343: 非 github 写操作走仓库 bot token（跳过 agent session token；gitee 等
+            # 同链——get_repo_bot_token 内部 TokenResolver 策略链按 repo_key 派生）
             from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
             if not token:
@@ -751,7 +730,7 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
         try:
             from src.api.oauth_token import with_oauth_token
             from src.domains.runtime.vcs.api_client import VcsApiClient
-            _provider_name = "github" if is_github else "gitcode"
+            _provider_name = provider
             def _do_close(token, _provider=provider, _owner=owner, _repo=repo, _num=issue_number):
                 c = VcsApiClient(_provider, token, _owner, _repo)
                 # 幂等检查
@@ -806,7 +785,6 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
         log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} exception: {e}")
         return "failed"
 
-
 def _find_github_mirror_repo_key(repo_key: str) -> str:
     """查找 GitCode 仓库绑定的 GitHub 镜像 repo_key。
 
@@ -828,7 +806,6 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"confirm-done: find github mirror for {repo_key} failed: {e}")
         return ""
-
 
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Developer confirms the requirement is done: status -> completed, stage -> done (idempotent in terminal state).")
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
@@ -859,7 +836,6 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
     _issue_closed = _close_vcs_issues(_repo_key, _issue_num, user)
     return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done",
             "issue_closed": _issue_closed}
-
 
 def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
     """Issue #393: admin 确认完成时，同步关联流水线到终态。
@@ -897,12 +873,11 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
     # Issue #1667：admin 终审直接 SQL 把 events 置 completed，绕过了终态钩子；
     # 对账扫描兜底派发因此滞留的排队 A2A 事件（Spec 风险表要求）。
     try:
-        from src.api.event_pipeline import reconcile_queued_a2a
+        from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
         reconcile_queued_a2a(repo_key)
     except Exception as _qe:
         log.warning(f"admin-confirm: a2a queue reconcile failed: {_qe}")
     return _synced
-
 
 @router.post("/{issue_id}/admin-confirm-done", operation_id="issues_admin_confirm_done",
              summary="Admin confirms issue done (final review)",
@@ -986,42 +961,6 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
             "confirmed_by": "admin", "synced_tasks": _synced_tasks,
             "issue_closed": _issue_closed}
 
-
-def _cancel_issue_agents(c, repo_key: str, issue_id: str) -> int:
-    """Issue #1741：终止某需求卡片下仍在跑的 agent_tasks，返回终止数量。
-
-    取消端点主路径与「主卡已取消」幂等收口分支共用，避免历史重复行残留 running agent 继续执行。
-    """
-    if not issue_id:
-        return 0
-    c.execute(
-        "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
-        (repo_key, issue_id))
-    _agent_rows = c.fetchall()
-    for _at_id, _at_seq in _agent_rows:
-        try:
-            from src.domains.runtime.engine.service import cancel_task as _cancel_agent
-            _cancel_agent(_at_id)
-        except Exception:
-            pass
-        try:
-            if _at_seq:
-                from src.api.event_pipeline import cancel_direct_task
-                cancel_direct_task(_at_seq)
-        except Exception:
-            pass
-        try:
-            if _at_seq:
-                from src.api.event_store import update_event_status
-                update_event_status(_at_seq, "cancelled")
-        except Exception:
-            pass
-    c.execute(
-        "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
-        (repo_key, issue_id))
-    return len(_agent_rows)
-
-
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
@@ -1057,7 +996,6 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
         db.commit()
     log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
     return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
-
 
 @router.post("/{issue_id}/resume", operation_id="issues_resume", summary="Resume cancelled issue", description="Resumes a cancelled requirement from its pre-cancel stage.")
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -1136,7 +1074,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 urllib.request.urlopen(_req, timeout=5)
                 log.info(f"Issue #{issue_id} resumed → re-dispatched to stage={_resume_stage}")
             except Exception as _e:
-                from src.prompt_builder import format_base_url_candidates
+                from src.kernel.prompt_builder import format_base_url_candidates
                 try:
                     _candidates = format_base_url_candidates("/api/a2a")
                 except Exception:
@@ -1144,7 +1082,6 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}; {_candidates}")
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
-
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -1225,12 +1162,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         "sre_result": _sre_result,
     }
 
-
-# ===== Issue #337: 列表模式详情「移交到其他流水线」（后端代理，复用 #329 handoff 链路）=====
-
 class IssueHandoffBody(BaseModel):
     target_scene_id: str = ""
-
 
 def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
     """按 issue.id 取 (repo_key, issue_number, current_scene_id)；不存在 → 404。"""
@@ -1242,8 +1175,15 @@ def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
     _scene_id = (row[2] or "").strip() or "default"
-    return row[0], row[1] or 0, _scene_id
-
+    # D105 TEXT 域：issue_number 落 TEXT 列（字符串 ident 平台）。
+    # 仅 ASCII 纯数字串还原 int（weekly-10 handoff 响应 int 契约）；其余形态
+    # （IK* 字符串 ident / 全角 / 带空格 / None）一律原样透传——不用
+    # _native_issue_number，因其 str.isdigit 对 None 会产出 'None'、
+    # 对全角 '２００' 也会转 int（依赖隐式特性，窄化边界处拒绝）。
+    _raw_num = row[1] if row[1] is not None else 0
+    _num_s = str(_raw_num).strip()
+    issue_number = int(_num_s) if _num_s and all('0' <= ch <= '9' for ch in _num_s) else _raw_num
+    return row[0], issue_number, _scene_id
 
 @router.get("/{issue_id}/handoff/targets", operation_id="issues_handoff_targets",
             summary="List handoff target pipelines for an issue",
@@ -1257,7 +1197,6 @@ async def targets_issue(issue_id: int, user: dict = Depends(require_no_session_t
     out = get_handoff_targets(repo_key, issue_number, current_scene_id)
     return {"issue_id": issue_id, "issue_number": issue_number, "repo_key": repo_key,
             "current_scene_id": out["current_scene_id"], "targets": out["targets"]}
-
 
 @router.post("/{issue_id}/handoff", operation_id="issues_handoff",
              summary="Hand off issue to another pipeline",
@@ -1342,7 +1281,6 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
              f"by={user.get('username', '')}: {_res}")
     return _res
 
-
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
@@ -1383,10 +1321,9 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
     return {"messages": messages, "conversation_id": conv_id,
             "issue_url": f"https://{_issue_host}/{repo_key}/issues/{issue_number}"}
 
-
 @router.post("/{issue_id}/awaiting-input", operation_id="issues_awaiting-input",
              summary="Agent declares issue awaiting-input (待澄清)",
-             description="vod/issue agent explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue, agent_type must be vod/issue. Colocated with issues clarify (user reply) / issues clarifications (history).")
+             description="vod/issue agent (or any agent_type in the issue's bound scene nodes, Issue #655) explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue. Colocated with issues clarify (user reply) / issues clarifications (history).")
 async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """vod/issue agent 显式声明「待澄清」（澄清三件套之 Agent 发起）。
@@ -1419,8 +1356,43 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                   (issue_id,))
         irow = c.fetchone()
     if not irow:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在",
-                                                       "hint": "awaiting-input 需传需求卡片 id（GRAPE_ISSUE_ID，issue 表主键），非 Issue number；可先 grape issues detail --number $ISSUE_NUMBER --json-out 取 id"})
+        # Issue #667：卡片 id 无行 → 支持按 (会话仓库作用域, body.issue_number) 兜底解析：
+        # 行已存在则复用；VCS 侧存在则 ensure_issue_task 自动补建（缺行同步缺口自动修复）。
+        _fb_num = int(getattr(body, "issue_number", 0) or 0)
+        if _fb_num > 0:
+            from src.kernel.repo_key import to_repo_key as _trk
+            _fb_repo = _trk(session_repo)
+            with _dl:
+                c = _db.cursor()
+                c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
+                          "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+                          (_fb_repo, _fb_num))
+                irow = c.fetchone()
+            if not irow:
+                from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
+                _st, _data = fetch_issue_via_vcs(_fb_repo, str(_fb_num))
+                if _st == "exists":
+                    from src.api.issues_center import ensure_issue_task
+                    _fb_id = ensure_issue_task(_fb_repo, _fb_num,
+                                               title=str((_data or {}).get("title", "") or ""),
+                                               event_type="issue_opened")
+                    with _dl:
+                        c = _db.cursor()
+                        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
+                                  "WHERE id=?", (_fb_id,))
+                        irow = c.fetchone()
+                elif _st == "missing":
+                    raise HTTPException(status_code=404, detail={
+                        "code": 404, "reason": "issue_not_found",
+                        "message": f"Issue #{_fb_num} 不存在（GitCode 侧无此 Issue，可能已删除）",
+                        "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"})
+        if not irow:
+            raise HTTPException(status_code=404, detail={
+                "code": 404, "reason": "internal_card_missing",
+                "message": "需求不存在：内部需求库无该卡片行（同步未落或时序未到，且未能按 issue_number 兜底）",
+                "hint": "awaiting-input 需传需求卡片 id（GRAPE_ISSUE_ID，issue 表主键），非 Issue number；"
+                        "可先 grape issues detail --number $ISSUE_NUMBER --json-out 取 id；"
+                        "卡片缺行时可在 body 附 issue_number（GitCode 侧编号）触发兜底补建（Issue #667）"})
     issue_card_id, repo_key, issue_number = irow[0], irow[1] or "", irow[2] or 0
     assignee, issue_user_id, title, cur_status = irow[3] or "", irow[4] or 0, irow[5] or "", irow[6] or ""
     from src.kernel.repo_key import to_repo_key
@@ -1439,7 +1411,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     user_id = issue_user_id
 
     conv_id = ""
-    if user_id > 0 and changed:
+    if str(user_id or "") not in ("", "0") and changed:
         try:
             conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, "",
                                                 write_context_on_reuse=False)
@@ -1464,15 +1436,18 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
 
     return {"ok": True, "issue_id": issue_card_id, "status": "awaiting_input", "changed": changed}
 
-
-# ===== 待审核（pending_review）—— Agent 显式阶段审核点，语义见 issue-pending-review-explicit-design.md =====
-
 _DEV_OPS_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
-
 def _session_devops_issue(issue_id: int, user: dict) -> dict:
-    """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈devops；issue.repo_key==token.repo_key；返回 issue 行。"""
+    """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈(devops 白名单 ∪ issue 绑定场景节点集)（Issue #655）；
+    issue.repo_key==token.repo_key；返回 issue 行。
+
+    Issue #672：双路径解析——内部主键 miss（404）或 scope 不匹配（403，GitCode number 撞上
+    其它仓库的内部 id）时，把 issue_id 视作 GitCode number 在会话仓库作用域内二次解析；
+    本地亦无行但远端（number+owner/repo）存在时建最小行（同步修复，覆盖存量缺行）。
+    """
     from src.kernel.session_manager import db as _db, db_lock as _dl
+    from src.kernel.repo_key import to_repo_key, parse_repo_key
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期）"})
     _agent = user.get("agent_type") or ""
@@ -1493,10 +1468,9 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
             "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or ""}
 
-
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent 显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。Session-only (tk_)，repo 匹配，agent_type 为 devops agent。与 awaiting-input 对称（等用户双态）。")
+             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""
@@ -1511,7 +1485,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
         return {"ok": True, "issue_id": it["id"], "status": it["status"], "changed": False}
     _changed = _set_issue_pending_review(it["repo_key"], it["issue_number"])
     conv_id = ""
-    if it["user_id"] > 0 and _changed:
+    if str(it["user_id"] or "") not in ("", "0") and _changed:
         try:
             conv_id = _ensure_task_conversation(it["user_id"], it["repo_key"], it["issue_number"], it["title"], "",
                                                 write_context_on_reuse=False)
@@ -1536,7 +1510,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
             from src.kernel.session_manager import get_chat_config
             _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"], it.get("repo_key", ""))
             _ctx = _resolve_user_chat_bot(None, it["user_id"])
-            _api = _feishu_api_for_ctx(ctx)
+            _api = _feishu_api_for_ctx(_ctx)
             _cfg = get_chat_config(it["user_id"]) if it["user_id"] else {"backend": "opencode"}
             asyncio.create_task(_run_pending_review_notify(
                 _ctx, _api, it["user_id"], conv_id, _open_id, review_points,
@@ -1545,16 +1519,13 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
             log.warning(f"Issue pending-review: notify schedule failed: {e}")
     return {"ok": True, "issue_id": it["id"], "status": "pending_review", "changed": _changed}
 
-
 class _ReviewPassBody(BaseModel):
     target: str = "processing"   # processing | done
     evidence: str = ""
 
-
 class _ReviewRejectBody(BaseModel):
     target: str = "processing"   # processing | awaiting_input
     reason: str = ""
-
 
 def _review_outcome(_out: str) -> tuple:
     """拆分内部审核结果码为 (result, reason)。
@@ -1566,7 +1537,6 @@ def _review_outcome(_out: str) -> tuple:
         _reason = _out.split(":", 1)[1] if ":" in _out else "not_pending_review"
         return "noop", _reason
     return _out, ""
-
 
 @router.post("/{issue_id}/review-pass", operation_id="issues_review-pass",
              summary="Agent decides review passed",
@@ -1581,7 +1551,6 @@ async def issue_review_pass(issue_id: int, body: _ReviewPassBody,
     return {"ok": True, "issue_id": it["id"], "status": _st,
             "changed": _result != "noop", "result": _result, "reason": _reason}
 
-
 @router.post("/{issue_id}/review-reject", operation_id="issues_review-reject",
              summary="Agent decides review rejected",
              description="Agent 判定用户未通过审核：仅 pending_review → processing（打回）或 awaiting_input（转澄清）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review）。noop 排查：`grape issues detail --json-out` 查看 issue_task_status。Session-only (tk_)，repo 匹配，devops agent。")
@@ -1595,10 +1564,8 @@ async def issue_review_reject(issue_id: int, body: _ReviewRejectBody,
     return {"ok": True, "issue_id": it["id"], "status": _st,
             "changed": _result != "noop", "result": _result, "reason": _reason}
 
-
 class _IssueClarifyBody(BaseModel):
     message: str = ""
-
 
 @router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="Reply issue clarification", description="Developer replies to an agent clarification: posts a GitCode issue comment and writes to the task conversation.")
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
@@ -1649,36 +1616,16 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
             raise HTTPException(status_code=502, detail={"code": 502,
                                                          "message": f"GitHub 评论失败: {str(e)[:200]}"})
     else:
-        def _post_comment(token: str, _owner=owner, _rname=rname, _issue_num=issue_number, _body=comment_body):
-            import urllib.parse as _up
-            import urllib.request as _ur
-            import urllib.error as _uerr
-            url = f"https://gitcode.com/api/v5/repos/{_owner}/{_rname}/issues/{_issue_num}/comments?access_token={token}"
-            req = _ur.Request(url, data=_up.urlencode({"body": _body}).encode(),
-                              headers={"Content-Type": "application/x-www-form-urlencoded",
-                                       "Accept": "application/json"}, method="POST")
-            try:
-                with _ur.urlopen(req, timeout=30) as resp:
-                    _raw = resp.read()
-                    # Issue #453 代发台账（写点5/7）：澄清评论入账——响应读出后取 ID，不再丢弃
-                    try:
-                        import json as _lj
-                        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-                        from src.kernel.repo_key import to_repo_key
-                        _parsed = _lj.loads(_raw) if _raw.strip() else {}
-                        _cid = extract_content_id(_parsed, "issue_comment") if isinstance(_parsed, dict) else ""
-                        record_outbound("gitcode", to_repo_key(f"{_owner}/{_rname}", "gitcode"),
-                                        "issue_comment", _cid, issue_number=str(_issue_num),
-                                        content_hash=content_hash_md5(_body))
-                    except Exception as _le:
-                        log.warning(f"outbound_ledger record (clarify comment) failed: {_le}")
-            except _uerr.HTTPError as e:
-                raise RuntimeError(f"GitCode comment failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
-            except _uerr.URLError as e:
-                raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
+        # S75：else 分支改走 VcsApiClient 卡客户端（原硬编码 gitcode.com URL，
+        # gitee 仓澄清评论必 404）；台账已由 post_issue_comment 内统一入账
+        from src.kernel.repo_key import parse_repo_key
+        from src.domains.runtime.vcs.api_client import VcsApiClient, _native_issue_number
+        _provider = parse_repo_key(repo_key)[0]
         try:
-            # Issue #343: bot token 直接调用，不需要 refresh 包装
-            _post_comment(api_token)
+            _client = VcsApiClient(_provider, api_token, owner, rname)
+            _resp = _client.post_issue_comment(_native_issue_number(issue_number), comment_body)
+            if isinstance(_resp, dict) and _resp.get("error"):
+                raise RuntimeError(str(_resp.get("error"))[:300])
             log.info(f"Issue clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
         except HTTPException:
             raise
@@ -1689,7 +1636,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
                 raise HTTPException(status_code=502, detail={"code": 502,
                                                              "message": f"评论失败：{BOT_TOKEN_INVALID_MSG}"})
             raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"GitCode 评论失败: {str(e)[:200]}"})
+                                                         "message": f"评论失败: {str(e)[:200]}"})
     if conv_id:
         try:
             from src.kernel.session_manager import add_message
@@ -1703,7 +1650,6 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     except Exception as e:
         log.warning(f"Issue clarify: restore processing failed: {e}")
     return {"ok": True, "message": "澄清已发送到 Issue 并同步到任务会话"}
-
 
 @router.post("/{issue_id}/attachments", operation_id="issues_upload_attachment", summary="Upload issue attachment", description="Uploads an attachment into the issue attachment directory.")
 async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
@@ -1734,7 +1680,6 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
     log.info(f"Issue attachment uploaded: issue={issue_id} file={original_name} -> {safe_name} ({len(content)} bytes)")
     return {"url": url, "filename": original_name, "size": len(content)}
 
-
 @router.get("/{issue_id}/attachments", operation_id="issues_list_attachments", summary="List issue attachments", description="Lists attachments of an issue.")
 def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """列出需求关联的附件文件列表。"""
@@ -1753,7 +1698,6 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
     for dir_name in (["pending", str(issue_number)] if issue_number else ["pending"]):
         attachments.extend(_attach_list(owner, rname, dir_name))
     return {"attachments": attachments}
-
 
 @router.delete("/{issue_id}/attachments/{filename}", operation_id="issues_delete_attachment", summary="Delete issue attachment", description="Deletes an attachment file by UUID filename.")
 def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(require_no_session_token)):
@@ -1777,8 +1721,6 @@ def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(r
         log.info(f"Issue attachment deleted: issue={issue_id} file={filename}")
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
-
-# ===== 创建前临时附件（不进 OpenAPI 契约，前端内部调用）=====
 
 @router.post("/attachments/pre-upload", include_in_schema=False)
 async def pre_upload_attachment(file: UploadFile = File(...),
@@ -1804,7 +1746,6 @@ async def pre_upload_attachment(file: UploadFile = File(...),
     log.info(f"Pre-upload attachment: file={original_name} -> {safe_name} ({len(content)} bytes)")
     return {"url": url, "filename": original_name, "safe_name": safe_name, "size": len(content)}
 
-
 @router.delete("/attachments/pre-upload/{filename}", include_in_schema=False)
 def pre_delete_attachment(filename: str, repo_key: str = "",
                           user: dict = Depends(require_no_session_token)):
@@ -1820,7 +1761,6 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
-
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses.")
 async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
@@ -1835,7 +1775,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     （scene/stage/is_running/agent_statuses）。
     组织隔离：非个人组织只返回 org_id 匹配的 issue。
     """
-    from src.api.issues_center import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
     from src.kernel.repo_key import to_repo_key
     from src.domains.mgmt.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
@@ -1872,9 +1812,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     issues_out = _query_tasks(where, params, _order_by, include_user_id=False)
     return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
 
-
 _STATUS_PRIORITY = {"active": 0, "processing": 1, "awaiting_input": 2, "pending_review": 3}
-
 
 def _status_order_sql() -> str:
     """Issue #926：default 模式状态优先序的 SQL CASE 片段（单一事实源）。
@@ -1888,7 +1826,6 @@ def _status_order_sql() -> str:
     )
     return f"CASE {_cases} ELSE 4 END"
 
-
 def _merge_sort_items(items: list[dict], mode: str, sort_order: str) -> None:
     """Issue #926：与 SQL _order_by 对齐的就地稳定排序（issue 行 + PR 伪卡片统一合并口径）。
 
@@ -1899,7 +1836,6 @@ def _merge_sort_items(items: list[dict], mode: str, sort_order: str) -> None:
     items.sort(key=lambda it: str(it.get("created_at") or ""), reverse=(sort_order == "desc"))
     if mode != "time":
         items.sort(key=lambda it: _STATUS_PRIORITY.get(it.get("status") or "", 4))
-
 
 def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[dict]:
     """Issue #926：PR 伪卡片与 issue 行同口径的服务端过滤（q / statuses）。"""
@@ -1912,7 +1848,6 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
                if _needle in str(it.get("title") or "").lower()
                or _needle in str(it.get("issue_number") or "")]
     return out
-
 
 @router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
 def list_repo_issues(owner: str, repo: str,
@@ -1942,7 +1877,7 @@ def list_repo_issues(owner: str, repo: str,
     - Issue #926：q（标题/编号 LIKE）与 statuses（逗号分隔多状态）为服务端过滤，
       PR 伪卡片同口径过滤（statuses 匹配映射后的 task_status）。
     """
-    from src.api.issues_center import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
     from src.domains.mgmt.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
@@ -2135,7 +2070,6 @@ def list_repo_issues(owner: str, repo: str,
                 "has_more": (_page_row_count or 0) >= per_page}
     return {"issues": issues, "total": len(issues)}
 
-
 @router.post("/{owner}/{repo}", operation_id="issues_create", summary="Create issue (unified entry)", description="Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode.")
 async def create_issue(owner: str, repo: str, body: dict = None,
                        user: dict = Depends(require_org_member)):
@@ -2146,8 +2080,16 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     """
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
     _body = body or {}
+    # D107/B2 补口（2026-11-11 实弹发现）：默认 repo_key 是裸名（{owner}/{repo}），
+    # 建单链 _is_github 按前缀分流——裸名恒走 gitcode 链，github 仓（托管或 member）
+    # 的用户 PAT 回落永不被命中（502 查重打错平台）。入口统一按 managed/user_repos
+    # 解析真前缀（与知识面 _resolve_repo_key 同口径）；显式传 repo_key 不受影响。
+    _rk_in = _body.get("repo_key") or ""
+    if ":" not in _rk_in:
+        from src.domains.mgmt.routes.knowledge import _resolve_repo_key as _resolve_rk
+        _rk_in = _resolve_rk(f"{owner}/{repo}")
     b = TaskCreateBody(
-        repo_key=_body.get("repo_key") or f"{owner}/{repo}",
+        repo_key=_rk_in,
         title=_body.get("title", "") or "",
         description=_body.get("description", "") or "",
         assignee=_body.get("assignee", "") or "",
@@ -2157,19 +2099,64 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     )
     return await create_task_via_issue(b, user)
 
-
-@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)", description="Single issue detail: base fields + events (seq asc) + pipeline segments.")
-def get_issue_detail(owner: str, repo: str, number: int,
+@router.get("/{owner}/{repo}/{number}", operation_id="issues_detail", summary="Issue detail (stage+events+pipeline)", description="Single issue detail: base fields + events (seq asc) + pipeline segments. D105 string-ident: `number` accepts numeric idents and platform string idents (gitee IK*, # prefix tolerated).")
+def get_issue_detail(owner: str, repo: str, number: str,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
     _enforce_session_repo_scope(user, repo_keys)
-    num = str(number)
+    # D105 字符串 ident（gitee IK*）：路径参数改 str——纯数字归一去前导零语义不变，
+    # 非数字（IK*/#IK*）原样透传给 ledger 查找（number: int 会 422 拒掉 gitee ident）。
+    num = number[1:] if number[:1] == "#" else number
+    if num.isdigit():
+        num = str(int(num))
     stage_map = _issue_stage_map(repo_keys)
     status_map = _task_status_map(repo_keys)
     group_map = _group_events_by_issue(repo_keys)
     title_map = _issue_title_map(repo_keys)
     if num not in stage_map and num not in status_map and num not in group_map:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
+        # Issue #672：本地聚合 miss 时按 number+owner/repo 走 git-repo 通道兜底，
+        # 消除 issues detail 与 git-repo issues get 同编号 404/正常分裂（eduSwarm 实测）。
+        _vcs = _vcs_issue_lookup(owner, repo, number, user)
+        if _vcs:
+            _vi = _vcs.get("issue") or {}
+            _asg = _vi.get("assignee") or ""
+            if isinstance(_asg, dict):
+                _asg = _asg.get("login") or _asg.get("username") or ""
+            # Issue #805: VCS 兜底详情透出创建人（GitCode issue 作者 login）
+            _vcs_user = _vi.get("user") or {}
+            _vcs_creator = (_vcs_user.get("login") or _vcs_user.get("username") or "") if isinstance(_vcs_user, dict) else ""
+            from src.domains.runtime.vcs.api_client import _native_issue_number
+            return {
+                "number": _native_issue_number(number),
+                "issue_id": None,
+                "title": (_vi.get("title") or f"Issue #{number}"),
+                "stage": "vod",
+                "task_status": "",
+                "owner_agent": "vod",
+                "scene_id": "",
+                "assignee": _asg,
+                "creator": _vcs_creator,
+                "is_subtask_mode": 0,
+                "parent_issue_id": "",
+                "events_count": 0,
+                "latest_event": None,
+                "events": [],
+                "pipeline": {"issue": {"number": _native_issue_number(number)}, "summary": "", "status": "unknown", "segments": []},
+                "source": "vcs",
+                "vcs_provider": _vcs.get("provider", ""),
+                "vcs_id": _vi.get("id"),
+                "state": _vi.get("state", ""),
+            }
+        # Issue #667：三表未命中 → VCS 兜底核实并自动补建内部行（存在）/
+        # 语义区分 404（不存在 vs 内部缺行且无法核实）
+        _state = _sync_missing_issue_row(repo_keys, number)
+        if _state != "exists":
+            raise _detail_404("issue_not_found" if _state == "missing" else "internal_sync_missing", number)
+        stage_map = _issue_stage_map(repo_keys)
+        status_map = _task_status_map(repo_keys)
+        group_map = _group_events_by_issue(repo_keys)
+        title_map = _issue_title_map(repo_keys)
+        _fallback_synced = True
     base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
     events = group_map.get(num) or []
     pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
@@ -2181,7 +2168,6 @@ def get_issue_detail(owner: str, repo: str, number: int,
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
     return {**base, "events": events, "pipeline": pipeline}
-
 
 @router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list (with structured output)", description="Event list of an issue (seq asc), each with structured output/logs when present. `number` accepts `5` or `#5`.")
 def get_issue_events(owner: str, repo: str, number: str,
@@ -2199,12 +2185,15 @@ def get_issue_events(owner: str, repo: str, number: str,
     events = group_map[num]
     return {"events": events, "segments": events, "total": len(events)}
 
-
 @router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials).")
-def get_issue_pipeline(owner: str, repo: str, number: int,
+def get_issue_pipeline(owner: str, repo: str, number: str,
                        user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
-    num = str(number)
+    # D105 字符串 ident（gitee IK*）：与 issues_detail 同口径（number: int 对 IK* 422）。
+    num = number[1:] if number[:1] == "#" else number
+    if num.isdigit():
+        num = str(int(num))
+        number = num
     group_map = _group_events_by_issue(repo_keys)
     events = group_map.get(num) or []
     # weekly-05：优先 events 表（含结构化 output）；无事件时回退 event.json 档案
@@ -2224,9 +2213,8 @@ def get_issue_pipeline(owner: str, repo: str, number: int,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
     return pipeline
 
-
 # ── Issue #627：已完成需求的生产续接（发布）子单 ──────────────────────────────
-# 由 weekly-10 迁入（原实现 src/api/routes/issues.py）；依赖 issues_center.create_release_subissue
+# 由 weekly-10 迁入（原实现 src/domains/runtime/routes/issues.py）；依赖 issues_center.create_release_subissue
 # 与 session_store.list_release_subissues，均为现有模块。
 from pydantic import Field as _Field
 
@@ -2236,7 +2224,6 @@ class _ProductionReleaseBody(BaseModel):
     # PR #799 R3：与 target_env（≤64）宽严一致，验收证据引用限长（防超大 payload 直接落库）
     evidence_ref: str = _Field(default="", max_length=512)
     approved_at: str = ""
-
 
 @router.post("/{issue_id}/production-release", operation_id="issues_production_release",
              summary="Create production release task for a completed issue (Issue #627)",
@@ -2280,8 +2267,10 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
         _api_token = ""
     if not _api_token:
         try:
-            from src.api.deps import get_user_token_with_refresh
-            _api_token = get_user_token_with_refresh(user.get("username") or "", user_id=user.get("id") or 0) or ""
+            # D37/S57：repo 上下文必须按 repo_key 前缀派生 provider，禁止折叠 gitcode
+            from src.api.deps import get_user_token_for_repo
+            _api_token = get_user_token_for_repo(_repo_key, user.get("username") or "",
+                                                 user_id=user.get("id") or "") or ""
         except Exception:
             _api_token = ""
     try:
@@ -2290,7 +2279,7 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
             candidate_sha=body.candidate_sha or "",
             target_env=body.target_env or "",
             evidence_ref=body.evidence_ref or "",
-            approved_by=int(user.get("id") or 0),
+            approved_by=str(user.get("id") or ""),  # D105：账号 id 已 UUID 字符串化（原 int() 崩溃）
             approved_at=body.approved_at or "",
             api_token=_api_token)
     except ProductionReleaseError as _e:
@@ -2298,7 +2287,6 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
                                                            "error_code": _e.code})
     out["issue_id"] = issue_id
     return out
-
 
 @router.get("/{issue_id}/production-release", operation_id="issues_production_release_list",
             summary="Query production release tasks of an issue (Issue #627)",
@@ -2320,7 +2308,6 @@ async def list_production_releases(issue_id: int, user: dict = Depends(require_n
     releases = list_release_subissues(_repo_key, _issue_num)
     return {"issue_id": issue_id, "issue_number": _issue_num, "repo_key": _repo_key,
             "releases": releases, "total": len(releases)}
-
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -2357,3 +2344,227 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     nodes, _ = compute_node_statuses(nodes, events, _current_stage)
     # Issue #329: extract carried_context for cross-pipeline continuation source annotation
     from src.api.session_store import get_carried_context
+
+from pydantic import BaseModel, Field
+
+from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
+                                   _review_pass, _review_reject, _set_issue_pending_review,
+                                   _read_issue_status, cancel_issue_rows)
+
+def _detail_404(reason: str, number) -> HTTPException:
+    """Issue #667：detail 404 语义区分——「Issue 不存在（VCS 侧亦无）」vs「需求不存在（内部缺行）」。"""
+    if reason == "issue_not_found":
+        return HTTPException(status_code=404, detail={
+            "code": 404, "reason": "issue_not_found",
+            "message": f"Issue #{number} 不存在（GitCode 侧无此 Issue，可能已删除或编号有误）",
+            "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"})
+    return HTTPException(status_code=404, detail={
+        "code": 404, "reason": "internal_sync_missing",
+        "message": f"需求不存在：VCS 侧 Issue #{number} 存在性无法核实且内部需求库缺行（同步未落或时序未到）",
+        "suggestion": "稍后重试（webhook 同步到位后自动恢复）；持续失败请检查仓库 token 与 webhook 同步链路"})
+
+def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
+    """Issue #667 兜底解析：内部三表未命中时按 VCS 核实并自动补建 issue 行。
+
+    返回：
+    - "exists"：已补建（或已存在）内部行，调用方重读聚合后正常返回
+    - "missing"：VCS 侧明确 404（Issue 不存在）
+    - "unknown"：VCS 无法核实（token 缺失/网络异常），调用方按降级语义 404
+    """
+    num = str(number)
+    from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
+    for rk in repo_keys:
+        try:
+            state, data = fetch_issue_via_vcs(rk, num)
+        except Exception:
+            state, data = "unknown", {}
+        if state == "exists":
+            try:
+                from src.api.issues_center import ensure_issue_task
+                # Issue #805: VCS 兜底补建行时带上创建人（GitCode issue 作者）
+                _fb_user = (data or {}).get("user") or {}
+                _fb_creator = (_fb_user.get("login") or _fb_user.get("username") or "") \
+                    if isinstance(_fb_user, dict) else ""
+                ensure_issue_task(rk, int(num), title=str((data or {}).get("title", "") or ""),
+                                  event_type="issue_opened", creator=_fb_creator)
+                return "exists"
+            except Exception as e:
+                log.warning(f"issues: fallback ensure_issue_task failed repo={rk} #{num}: {e}")
+                return "unknown"
+        if state == "missing":
+            return "missing"
+    return "unknown"
+
+def _attach_event_payloads(group_map: dict) -> None:
+    """按需补 structured_output / agent_logs（Issue #859 性能修复，2026-11-03）。
+
+    旧实现把 payload 两列塞进事件主查询：单仓 2 万事件 × 平均 8.3KB 日志 ≈ 166MB
+    传输 + 2 万次 JSON 解析（实测 50ms → 386ms@5KB/条），且全程持 db_lock。
+    现在主查询只取 12 列元数据，再按 seq 只补"每个 issue 最新 N 条"的 payload：
+    单次最多 _EVENT_PAYLOAD_MAX_EVENTS 条、单条最多 _EVENT_PAYLOAD_MAX_CHARS 字符
+    （超出即截断并打 *_truncated 标记，避免 MB 级大字段拖垮响应）。
+    未命中的事件保留 output=None/logs=[]（与原响应形状一致）并标记 payload_omitted。
+    """
+    picks = []
+    for evs in group_map.values():
+        picks.extend(evs[-_EVENT_PAYLOAD_PER_ISSUE:])
+    if len(picks) > _EVENT_PAYLOAD_MAX_EVENTS:
+        picks = picks[-_EVENT_PAYLOAD_MAX_EVENTS:]
+    if not picks:
+        return
+    cap = _EVENT_PAYLOAD_MAX_CHARS
+    seqs = [int(p["seq"]) for p in picks]
+    placeholders = ",".join("?" * len(seqs))
+    from src.kernel.session_manager import db, db_lock
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            # SUBSTR 在 sqlite/MySQL 语义一致；多取 1 字符用于判断是否被截断
+            # payload 不截断：Issue #996 复审指出先 SUBSTR 再 json.loads 会在
+            # >32KB 时解析失败，导致 files/guard_impact 静默丢失；投影后仅保留
+            # files/guard_impact 两个视图，内存占用随行释放。
+            c.execute(
+                f"SELECT seq, SUBSTR(structured_output, 1, {cap + 1}), "
+                f"SUBSTR(agent_logs, 1, {cap + 1}), payload "
+                f"FROM events WHERE seq IN ({placeholders})",
+                seqs)
+            rows = {int(r[0]): (r[1], r[2], r[3] if len(r) > 3 else None)
+                    for r in c.fetchall()}
+    except Exception:
+        return
+    picked = set()
+    for p in picks:
+        picked.add(id(p))
+        raw_so, raw_logs, raw_payload = rows.get(int(p["seq"]), (None, None, None))
+        if raw_payload:
+            from src.api.event_payload_view import payload_view_from_json
+            p.update(payload_view_from_json(raw_payload, seq=p["seq"]))
+        if raw_so:
+            if len(raw_so) > cap:
+                p["output_truncated"] = True
+            else:
+                try:
+                    p["output"] = _json.loads(raw_so)
+                except Exception:
+                    p["output"] = None
+        if raw_logs:
+            if len(raw_logs) > cap:
+                p["logs_truncated"] = True
+            else:
+                try:
+                    p["logs"] = _json.loads(raw_logs)
+                except Exception:
+                    p["logs"] = []
+    for evs in group_map.values():
+        for e in evs:
+            if id(e) not in picked:
+                e["payload_omitted"] = True
+
+def _feishu_api_for_ctx(ctx):
+    """按 ctx 的 app_id 取 FeishuAsync（旧 IM 下线 A2 M2：不再依赖 BotManager.api）。"""
+    if not ctx:
+        return None
+    from src.domains.runtime.im.engine_wiring import feishu_api
+    return feishu_api(getattr(ctx, "app_id", "") or "")
+
+def _cancel_issue_agents(c, repo_key: str, issue_id: str) -> int:
+    """Issue #1741：终止某需求卡片下仍在跑的 agent_tasks，返回终止数量。
+
+    取消端点主路径与「主卡已取消」幂等收口分支共用，避免历史重复行残留 running agent 继续执行。
+    """
+    if not issue_id:
+        return 0
+    c.execute(
+        "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+        (repo_key, issue_id))
+    _agent_rows = c.fetchall()
+    for _at_id, _at_seq in _agent_rows:
+        try:
+            from src.domains.runtime.engine.service import cancel_task as _cancel_agent
+            _cancel_agent(_at_id)
+        except Exception:
+            pass
+        try:
+            if _at_seq:
+                from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task
+                cancel_direct_task(_at_seq)
+        except Exception:
+            pass
+        try:
+            if _at_seq:
+                from src.api.event_store import update_event_status
+                update_event_status(_at_seq, "cancelled")
+        except Exception:
+            pass
+    c.execute(
+        "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+        (repo_key, issue_id))
+    return len(_agent_rows)
+
+def _scene_agent_allowlist(repo_key: str, scene_id: str) -> set:
+    """Issue #655: 场景动态 agent 允许集 —— issue 绑定场景的 nodes[].id 集合。
+
+    兜底（返回空集，仅原白名单生效）：scene_id 为空 / default（视为未绑定）、
+    场景解析失败（异常 / get_pipeline_config 未命中且 fallback）。
+    """
+    sid = (scene_id or "").strip()
+    if not sid or sid == "default":
+        return set()
+    try:
+        from src.api.pipeline_config import get_pipeline_config
+        cfg = get_pipeline_config(sid, repo_key=repo_key or "")
+        if not cfg or cfg.get("fallback"):
+            return set()
+        return {str((n or {}).get("id") or "").strip()
+                for n in cfg.get("nodes") or [] if (n or {}).get("id")}
+    except Exception as e:
+        log.warning(f"[issue-655] scene agent allowlist resolve failed scene={sid}: {e}")
+        return set()
+
+def _vcs_issue_lookup(owner: str, repo: str, number: "int | str", user: dict) -> dict | None:
+    """Issue #672：按 GitCode number + owner/repo 走 git-repo 通道核对远端 issue 是否存在。
+
+    双路径兜底之一（内部需求库 issue_id 解析失败时使用）：provider 双试 gitcode→github，
+    token 优先仓库 bot token（devops 场景），会话用户 token 交叉回退。
+    任何失败都视为未命中（兜底不放大错误），返回 None 或 {"provider", "issue"}。
+    """
+    from src.api.git_repo_api import _PROVIDER_MODULES, _vcs_req, _vcs_url
+    from src.kernel.repo_key import to_repo_key
+    number = str(number)  # int（内部主键）/ str（D105 字符串 ident）归一
+    for _p in list(_PROVIDER_MODULES):
+        try:
+            _mod = _PROVIDER_MODULES.get(_p)
+            if _mod is None:
+                continue
+            _rk = to_repo_key(f"{owner}/{repo}", provider=_p)
+            _tok = ""
+            try:
+                _tok = _mod.bot_token(_rk) or ""
+            except Exception:
+                _tok = ""
+            if not _tok and user.get("auth_type") == "session_token":
+                try:
+                    _tok = _mod.user_token(user.get("username") or "", user.get("id") or 0) or ""
+                except Exception:
+                    _tok = ""
+            if not _tok:
+                continue
+            resp = _vcs_req(_p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, _p), _tok)
+            if isinstance(resp, dict) and (resp.get("number") is not None or resp.get("id")):
+                return {"provider": _p, "issue": resp}
+        except HTTPException as e:
+            if getattr(e, "status_code", 0) == 404:
+                continue
+            log.warning(f"Issue #672 VCS fallback: {_p} {owner}/{repo}#{number} lookup failed: {getattr(e, 'detail', '')}")
+        except Exception as e:
+            log.warning(f"Issue #672 VCS fallback: {_p} {owner}/{repo}#{number} error: {e}")
+    return None
+
+# Issue #859 性能（2026-11-03）：事件 payload 内联额度
+# 每 issue 只内联最新 N 条的 output/logs；单次请求最多 M 条；单条超过 CHARS 就截断。
+_EVENT_PAYLOAD_PER_ISSUE = 1
+
+_EVENT_PAYLOAD_MAX_EVENTS = 200
+
+_EVENT_PAYLOAD_MAX_CHARS = 32768

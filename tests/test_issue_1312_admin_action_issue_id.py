@@ -14,7 +14,7 @@ os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:test1312/repo"
 
@@ -42,7 +42,7 @@ def _event_row(seq):
 class TestAuditInheritsOwnership:
     def test_audit_inherits_target_issue(self):
         from src.api.event_store import append_event
-        from src.domains.insight.observability.events import _audit_admin_action
+        from src.domains.runtime.routes.events import _audit_admin_action
 
         target_seq = append_event(REPO, "issue_comment", title="real issue event",
                                   issue_id="#30", agent_type="issue")
@@ -65,7 +65,7 @@ class TestAuditInheritsOwnership:
         assert p["related"] is True
 
     def test_audit_missing_target_has_no_ownership(self):
-        from src.domains.insight.observability.events import _audit_admin_action
+        from src.domains.runtime.routes.events import _audit_admin_action
 
         _audit_admin_action(REPO, 999999, "terminate", {"username": "ops"})
 

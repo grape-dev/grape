@@ -144,9 +144,11 @@ class TestRefreshTokenLink:
             soft_delete_account(account["id"])
 
     def test_read_from_credentials_no_cred(self):
-        """无 user_credentials 记录返回空。"""
-        rt = user_db._read_refresh_token_from_credentials(99999, "gitcode")
-        assert rt == ""
+        """D100 R2：_read_refresh_token_from_credentials fallback 已删除——
+        本用例改为断言符号不存在（防复活守卫；原语义"无记录返回空"由
+        _read_refresh_token_from_identity 的空值路径覆盖，见上用例）。"""
+        assert not hasattr(user_db, "_read_refresh_token_from_credentials"), \
+            "快照 fallback 函数复活（R2 清退回潮）"
 
     def test_no_provider_hardcoding(self):
         """需求 5：refresh_oauth_token 代码中无 if provider == 'gitcode' 硬编码。"""

@@ -11,7 +11,7 @@ import json
 import os
 import uuid
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 class TestA2ADedupQueue1667:
@@ -69,7 +69,7 @@ class TestA2ADedupQueue1667:
             except Exception:
                 pass
             db.commit()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         _sdir = os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation")
         os.makedirs(_sdir, exist_ok=True)
         with open(os.path.join(_sdir, "SKILL.md"), "w", encoding="utf-8") as _f:
@@ -267,7 +267,7 @@ class TestA2ADedupQueue1667:
                 "result='bypass' WHERE seq=?", (first_seq,))
             db.commit()
 
-        from src.api.event_pipeline import reconcile_queued_a2a
+        from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
         drained = reconcile_queued_a2a()
         assert queue_seq in drained
         assert self._event(queue_seq)["status"] == "running"

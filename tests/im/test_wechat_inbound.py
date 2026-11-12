@@ -1,12 +1,12 @@
 """微信入站翻译测试（Issue #1728 M1/M2）——真实帧形态 fixture。"""
-from src.im.adapters.wechat.inbound import (
+from src.domains.runtime.im.adapters.wechat.inbound import (
     VOICE_NO_TRANSCRIPT,
     dedup_key,
     message_to_inbound,
     messages_to_inbound,
 )
-from src.im.adapters.wechat.resolvers import decode_media_key
-from src.im.channel.types import ChatType, MsgType, Type
+from src.domains.runtime.im.adapters.wechat.resolvers import decode_media_key
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Type
 
 
 def _message(**overrides):

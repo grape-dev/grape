@@ -47,14 +47,14 @@ def audit_recorder(monkeypatch):
 
 
 def _ew():
-    from src.im.engine_wiring import _connect, default_db_path, run_startup_migration
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path, run_startup_migration
     path = default_db_path()
     run_startup_migration(path)
     return _connect, path
 
 
 def _seed(app_id, channel_type="wechat"):
-    from src.im.engine_wiring import sync_installation
+    from src.domains.runtime.im.engine_wiring import sync_installation
     _ew()
     assert sync_installation("user", owner_user_id=str(UID), app_id=app_id,
                              app_secret="sec_audit", channel_type=channel_type)
@@ -118,7 +118,7 @@ def test_chat_config_save_writes_audit(client, audit_recorder):
 def test_sweep_im_tables_purges_old_rows():
     """A7/F4：三张 IM 只增表的过期行会被 sweeper 清掉，新行保留。"""
     from src.domains.runtime.engine import cleanup
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()

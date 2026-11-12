@@ -47,7 +47,7 @@ def _cleanup():
                 pass
         db.commit()
     try:
-        from src.im.handler_async import _repo_bind_cache
+        from src.domains.runtime.im.handler_async import _repo_bind_cache
         _repo_bind_cache.clear()
     except Exception:
         pass
@@ -103,7 +103,7 @@ def _seed_conversation(conv_type="task", repo_key=TASK_REPO):
 
 def _resolve_exec_repo():
     """调用实现函数：返回最终执行仓库 repo_key（带前缀）。"""
-    from src.im.handler_async import _resolve_feishu_exec_repo
+    from src.domains.runtime.im.handler_async import _resolve_feishu_exec_repo
     return _resolve_feishu_exec_repo(GROUP_BOUND, GROUP_CHAT, USER)
 
 
@@ -139,7 +139,7 @@ class TestTaskSessionRepoAlignment:
 
     def test_ut05_task_conv_detector(self):
         """UT-05：task 会话检测（_resolve_task_conversation）。"""
-        from src.im.handler_async import _resolve_task_conversation
+        from src.domains.runtime.im.handler_async import _resolve_task_conversation
         _seed_conversation("task", TASK_REPO)
         conv = _resolve_task_conversation(GROUP_CHAT, USER)
         assert conv is not None
@@ -148,14 +148,14 @@ class TestTaskSessionRepoAlignment:
 
     def test_ut05b_general_not_detected(self):
         """UT-05b：general 会话不应被当作 task 对齐源。"""
-        from src.im.handler_async import _resolve_task_conversation
+        from src.domains.runtime.im.handler_async import _resolve_task_conversation
         _clean_all()
         _seed_conversation("general", GROUP_BOUND)
         assert _resolve_task_conversation(GROUP_CHAT, USER) is None
 
     def test_ut05c_no_conv_not_detected(self):
         """UT-05c：无会话返回 None。"""
-        from src.im.handler_async import _resolve_task_conversation
+        from src.domains.runtime.im.handler_async import _resolve_task_conversation
         _clean_all()
         assert _resolve_task_conversation(GROUP_CHAT, USER) is None
 
@@ -167,15 +167,15 @@ class TestRepoCardUnboundHint:
         """Issue #1095：Card IR → lark dict（外观等价断言用）。"""
         if isinstance(card, dict):
             return card
-        from src.im.channel.renderers.feishu import FeishuCardRenderer
+        from src.domains.runtime.im.channel.renderers.feishu import FeishuCardRenderer
         return FeishuCardRenderer().render(card).payload
 
     """未绑定仓库时 `/repo` 卡片应带明确提示（feishu-task-session-repo-alignment-design.md 补充）。"""
 
     @staticmethod
     def _call(unbound_hint):
-        from src.im.handler_async import _send_repo_card, _repo_bind_cache
-        from src.im.feishu_async import BotContext
+        from src.domains.runtime.im.handler_async import _send_repo_card, _repo_bind_cache
+        from src.domains.runtime.im.feishu_async import BotContext
         _repo_bind_cache.clear()
         api = AsyncMock()
         ctx = BotContext(app_id="cli_test", app_secret="s", bot_type="chat_bot", name="test")
@@ -187,8 +187,8 @@ class TestRepoCardUnboundHint:
         with patch("src.domains.mgmt.user.db.get_managed_repos", return_value=[
             {"repo_key": "gitcode:owner/a", "is_admin": 1, "is_join": 0},
             {"repo_key": "gitcode:owner/b", "is_admin": 0, "is_join": 1},
-        ]), patch("src.im.handler_async._current_bound_repo", return_value=""), \
-             patch("src.im.handler_async._send_card_reply", side_effect=_fake_send_card):
+        ]), patch("src.domains.runtime.im.handler_async._current_bound_repo", return_value=""), \
+             patch("src.domains.runtime.im.handler_async._send_card_reply", side_effect=_fake_send_card):
             asyncio.run(_send_repo_card(ctx, api, "oc_t", "msg1", 2, "cli_test", 1,
                                         unbound_hint=unbound_hint))
         return got[0]
@@ -214,8 +214,8 @@ class TestRepoCardUnboundHint:
 
     def test_ut09c_msg_calls_repo_card_with_hint(self):
         """未绑定仓库消息路径调 _send_repo_card 且传 unbound_hint=True。"""
-        from src.im.handler_async import process_chat_async, _repo_bind_cache
-        from src.im.feishu_async import BotContext
+        from src.domains.runtime.im.handler_async import process_chat_async, _repo_bind_cache
+        from src.domains.runtime.im.feishu_async import BotContext
         _repo_bind_cache.clear()
         api = AsyncMock()
         got = []
@@ -226,9 +226,9 @@ class TestRepoCardUnboundHint:
         # 关键：mock get_user_id_by_app_id→USER，使未绑定分支进入 _send_repo_card
         with patch("src.domains.mgmt.user.db.get_managed_repos", return_value=[
             {"repo_key": "gitcode:owner/a", "is_admin": 1, "is_join": 0}]):
-            with patch("src.im.handler_async._send_card_reply", side_effect=_fake_sc):
-                with patch("src.im.handler_async.get_user_id_by_app_id", return_value=USER):
-                    with patch("src.im.handler_async._current_bound_repo", return_value=""):
+            with patch("src.domains.runtime.im.handler_async._send_card_reply", side_effect=_fake_sc):
+                with patch("src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=USER):
+                    with patch("src.domains.runtime.im.handler_async._current_bound_repo", return_value=""):
                         ctx = BotContext(app_id="cli_test2", app_secret="s", bot_type="chat_bot", name="t")
                         parsed = {"type": "message", "text": "你好", "chat_id": "oc_x", "message_id": "msg_2",
                                   "sender_id": "u1", "sender_open_id": "ou_1", "chat_type": "group"}

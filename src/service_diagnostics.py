@@ -36,7 +36,7 @@ def format_base_url_candidates(endpoint: str = "", runtime_id: int = 0) -> str:
     与 grape-cli #151 的候选地址提示对齐；平台侧自调用告警复用，明确非 0 退出码，
     禁止调用方静默回退 localhost。解析入口延迟导入，避免与 prompt_builder 循环依赖。
     """
-    from src.prompt_builder import resolve_service_base_env
+    from src.kernel.prompt_builder import resolve_service_base_env
 
     env = resolve_service_base_env(runtime_id)
     try:

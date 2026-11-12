@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import threading
+import uuid
 from collections import OrderedDict
 
 from src.config import log
@@ -24,6 +25,7 @@ from src.config import log
 # 失败语义（顺序：显式否定优先于泛化的“失败”）
 _QA_FAIL_TERMS = (
     "不通过", "未通过", "未达标", "不达标",
+    "不合规", "不符合",
     "驳回", "被驳回", "打回",
     "整改", "需整改", "需要整改",
     "禁止合入", "禁止合并", "不可合并", "不能合入", "无法合入",
@@ -35,13 +37,49 @@ _QA_FAIL_TERMS = (
 _QA_FAIL_WORDS = ("阻塞", "阻断")
 # 英文词按词边界匹配（避免 "criticality" 之类子串误命中）
 _QA_FAIL_EN_WORD_RE = re.compile(r"\b(?:critical|required)\b", re.IGNORECASE)
+# 明确失败语义（可表示“仍有失败项”）：部分否定规则只认这些词，避免把
+# `无根本性问题` / `非基本缺陷` 等合法通过措辞吞成 fail（复审 SPEC-1）。
+_QA_HARD_FAIL_TERM_ALT = (
+    r"阻塞|阻断|冲突|critical|required|硬违规|失败|不通过|未通过|未达标|不达标|"
+    r"不合规|不符合|违规|违反|越界|超出范围|最差|驳回|打回|"
+    r"failures?|fails?|blockers?|blocking|fixes?|"
+    r"整改|需修复|需要修复|待修复|修复"
+)
+# 泛名词（问题/缺陷）只参与否定语境剥离（`无根本性问题` → 放行），不参与
+# 部分否定判定（复审 SPEC-1）。
+_QA_GENERIC_FAIL_TERM_ALT = r"问题|缺陷|issues?|problems?|bugs?"
+# 失败词统一词表：否定语境剥离与后置否定共用同一来源，避免多处手写复制（复审 Standards）。
+_QA_FAIL_TERM_ALT = _QA_HARD_FAIL_TERM_ALT + r"|" + _QA_GENERIC_FAIL_TERM_ALT
+# 否定前缀（含「非/并非/不」，复审 SPEC-1：`非全部驳回`/`不完全整改` 亦为部分否定）。
+_QA_NEG_PREFIX_ALT = (
+    r"无|并非|非|不|未|没有|没|不存在|未见|未发现|无需|不需要|"
+    r"no|not|without|zero|none|(?<!\d)0(?!\d)"
+)
+# 程度修饰词单一来源（复审 S1）：否定窗口与部分否定共用，避免两份手写词表漂移。
+_QA_DEGREE_ALT = r"完全|彻底|基本|真正|根本性?"
 _QA_NEGATION_RE = re.compile(
-    r"(?:无|非|不|未|没有|没|不存在|未见|未发现|无需|不需要|no|not|without|zero|none|0)\s*"
-    r"(?:任何|的|个|条|项)?\s*"
-    r"(?:(?:阻塞|阻断|冲突|critical|required|硬违规|失败|不通过|未通过|未达标|不达标|"
-    r"问题|缺陷|违规|违反|越界|超出范围|最差|驳回|打回|"
-    r"failures?|fails?|issues?|problems?|bugs?|blockers?|blocking|fixes?|"
-    r"整改|需修复|需要修复|待修复|修复)[\s、,，/和及:：]*)+",
+    # 数值否定 0 加左右边界：`20 项驳回`/`10 项阻塞` 不得剥离成 unknown（Issue #1963）。
+    r"(?:" + _QA_NEG_PREFIX_ALT + r")\s*"
+    # 修饰窗口显式枚举（不再用超宽字符类，Issue #1963 复审 S1）：只允许语义明确的
+    # 否定/程度修饰词，最多 4 个；`硬打回 2 项`/`需整改 3 项` 无否定词前缀不受影响。
+    # 复审 SPEC-3：补「一」并放宽到 4 个，`无任何一项硬打回` 可完整剥离。
+    r"(?:(?:任何|整体|明显|严重|实质|实际|重大|原则性?|硬性?|"
+    r"所有|全部|都|的|个|条|项|一|" + _QA_DEGREE_ALT + r")\s*){0,4}"
+    r"(?:(?:" + _QA_FAIL_TERM_ALT + r")[\s、,，/和及:：]*)+"
+    # 复审 SPEC-1：允许否定失败词后带一个量词（`无不合规项` / `未发现不符合项`）。
+    r"(?:项|个|条|例|处|次)?",
+    re.IGNORECASE,
+)
+# 部分否定 = 仍存在失败项（“未全部驳回 / 没有全部整改 / 无全部驳回”语义为
+# “并非全部驳回”，即存在驳回项，不能因否定词+「全部/所有」被整段剥空而放行）。
+# 必须放在否定语境剥离之前判定（Issue #1963 复审 SPEC-2）。
+# 复审 SPEC-1：前缀补「非/并非/不」，并覆盖程度词；失败词仅限明确失败语义，
+# 「问题/缺陷」等泛名词排除在外（`无根本性问题` 是合法通过结论，见 case21）。
+_QA_PARTIAL_NEG_FAIL_RE = re.compile(
+    r"(?:" + _QA_NEG_PREFIX_ALT + r")\s*"
+    r"(?:(?:全部|所有)\s*(?:[\s、,，/和及:：]*)?"
+    r"|(?:(?:" + _QA_DEGREE_ALT + r")\s*){1,2})"
+    r"(?:" + _QA_HARD_FAIL_TERM_ALT + r")",
     re.IGNORECASE,
 )
 # “critical: none / required: 0 / required fixes: none / blocking issues: none”
@@ -59,15 +97,18 @@ _QA_NEG_TRAILING_RE = re.compile(
 )
 # 中文后置否定（“阻塞为零 / 阻塞 0 / 阻断: 0 / 未通过项 0”）——中文无词边界，单独处理
 _QA_NEG_CN_TRAILING_RE = re.compile(
-    r"(?:阻塞|阻断|冲突|硬违规|失败|不通过|未通过|问题|缺陷|违规|整改|修复)"
+    # 复审 SPEC-2：新增失败词「不合规/不符合」需接入后置定量否定组，否则
+    # `不符合项 0` / `不合规 0 项` / `不符合项为零` 被误判 fail。
+    r"(?:阻塞|阻断|冲突|硬违规|失败|不通过|未通过|不合规|不符合|问题|缺陷|违规|整改|修复)"
     r"\s*(?:的)?\s*(?:项|个|条|例|处|次|数量|数)?\s*(?:[:：=]|为|是)?\s*"
     r"(?:零|0)\s*(?:项|个|条|例|处|次)?",
 )
 
-# 英文失败/通过按词边界识别（避免 "ok" 命中 "broken"、"fail" 命中 "failsafe" 之类子串误判）
+# 英文失败/通过按词边界识别（避免 "ok" 命中 "broken"、"fail" 命中 "failsafe" 之类子串误判）。
+# 前侧用非 ASCII 字母断言而非 \b：中文属 \w，`13-20全PASS` 的“全PASS”无 \b 边界（Issue #1963）。
 _QA_FAIL_EN_RE = re.compile(
-    r"\b(?:fail|failed|fails|failure|failures|failing|errors?)\b", re.IGNORECASE)
-_QA_PASS_EN_RE = re.compile(r"\b(?:pass|passed|ok)\b", re.IGNORECASE)
+    r"(?<![A-Za-z])(?:fail|failed|fails|failure|failures|failing|errors?)\b", re.IGNORECASE)
+_QA_PASS_EN_RE = re.compile(r"(?<![A-Za-z])(?:pass|passed|ok)\b", re.IGNORECASE)
 
 # 否定式“通过”= 实际未通过（“无法通过/没有通过/not passed”不能被下面的通过语义吞掉）。
 # 否定词与通过词之间允许“全部/完全/达到/测试”等修饰语（未全部通过 / 未达到通过标准 /
@@ -77,15 +118,24 @@ _QA_NEG_PASS_RE = re.compile(
     r"(?:无法|不能|不可|未能|未|没有|没|不会|no\s+way\s+to|"
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
     r"did\s+not|does\s+not|didn't|doesn't|never|not|"
-    # 英文量词否定：none of the tests passed / no tests passed / 0 tests passed
-    r"none|no|zero|0)\s*"
+    # 英文量词否定：none of the tests passed / no tests passed
+    r"none|no)\s*"
     r"(?:(?:全部|所有|全|完全|百分百|100%|能够|能|均|都|达到|达|满足|"
     r"all|every|any|fully|completely|entirely|be|been|"
     r"have|has|had|are|is|were|was|of|the|them|these|those|do|does|did)\s*)*"
     r"(?:(?:测试|用例|检查|项|tests?|checks?|cases?)\s*)*"
     # 测试名后允许助动词（not all tests have passed / tests are not passing）
     r"(?:(?:have|has|had|are|is|were|was|been|be|do|does|did)\s*)*"
-    r"(?:通过|pass(?:ed)?|ok|succeed|approved|合并|合入)",
+    r"(?:通过|pass(?:ed)?|ok|succeed|approved|合并|合入)"
+    # 数值否定（0/zero）：加左边界，且不得跨越「全/所有/全部」——避免把
+    # “13-20 全 PASS”里的“20 全 PASS”当成“0 全 PASS”（Issue #1963）。数值否定只认
+    # 同义量词（项/个/tests/checks），否则“10 全 PASS”之类会被误判。
+    r"|(?:(?<!\d)0(?!\d)|\bzero\b)\s*"
+    # 量词可重复（`0 项测试通过`/`0 项用例通过`/`zero 项测试通过`），与通用分支同口径；
+    # 仅限同义量词，天然无法跨越「全/所有/全部」，避免 `13-20 全 PASS` 误判。
+    r"(?:(?:测试|用例|检查|项|个|条|tests?|checks?|cases?)\s*)*"
+    r"(?:(?:have|has|had|are|is|were|was|been|be|do|does|did)\s*)*"
+    r"(?:通过|pass(?:ed)?|ok|succeed|approved)",
     re.IGNORECASE,
 )
 # 未达标语义（否定词可能在通过词之后）：通过率未达 100% / 未达到通过标准 /
@@ -256,7 +306,7 @@ def latest_qa_event(repo_key: str, issue_number) -> dict | None:
         _scene_clause = "scene_id=?"
         _scene_arg = _scene_id
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         with db_lock:
             c = db.cursor()
@@ -346,7 +396,7 @@ def _classify_qa_text(blob: str) -> str:
        且显式“结论：通过”→ pass；
     2. 零失败率归一为“通过”（失败率为 0）；
     3. 剔除后置定量否定（0 tests failed / 未通过项 0）；
-    4. 否定式通过 / 未达标 / 部分通过 → fail；
+    4. 否定式通过 / 部分否定（未全部驳回）/ 未达标 / 部分通过 → fail；
     5. 剔除否定语境（无违反 / 无阻塞 / no failures）；
     6. 汇总失败词 → fail；
     7. 失败语义 → fail，其次通过语义 → pass；
@@ -362,8 +412,16 @@ def _classify_qa_text(blob: str) -> str:
     # 规则 3：先剔除后置定量否定，否则“未通过 0 项”会被否定式通过误判。
     _normalized = _QA_NEG_TRAILING_RE.sub("", _normalized)
     _normalized = _QA_NEG_CN_TRAILING_RE.sub("", _normalized)
-    # 规则 4：否定式通过/未达标/部分通过优先于泛化的“通过”词。
+    # 规则 3b：整段结论都是“否定失败词”（no failures / 0 tests failed / 无硬打回 /
+    # 阻塞 0 项）时，剔除后为空 → 无失败项，直接放行（Issue #1963 用例 5/11/13/14）。
+    if blob.strip() and not _normalized.strip():
+        return "pass"
+    # 规则 4：否定式通过/部分否定/未达标/部分通过优先于泛化的“通过”词。
     if _QA_NEG_PASS_RE.search(_normalized):
+        return "fail"
+    # 复审 SPEC-2：「未/没有/无 + 全部/所有 + 失败词」= 并非全部失败，仍有失败项，
+    # 不得因否定语境剥离而放行（与「无+失败词」的直接否定区分）。
+    if _QA_PARTIAL_NEG_FAIL_RE.search(_normalized):
         return "fail"
     if _QA_UNMET_STANDARD_RE.search(_normalized):
         return "fail"
@@ -371,6 +429,9 @@ def _classify_qa_text(blob: str) -> str:
         return "fail"
     # 规则 5：剔除否定语境后再做失败/通过语义判定。
     _normalized = _QA_NEGATION_RE.sub("", _normalized)
+    # 整段均为否定语境（无硬打回 / 无整体阻塞 / 无驳回）→ 无失败项，放行。
+    if blob.strip() and not _normalized.strip():
+        return "pass"
     # 规则 6：汇总失败词（最差/违反/越界/需修复/未达）→ fail。
     if _QA_SUMMARY_KEYWORD_RE.search(_normalized):
         return "fail"
@@ -520,7 +581,7 @@ def _latest_pr_number(repo_key: str, issue_number) -> int:
     if not _tags:
         return 0
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         with db_lock:
             c = db.cursor()
@@ -600,6 +661,8 @@ def annotate_qa_failure(repo_key: str, issue_number, qa_info: dict,
         if _is_annotated(_key):
             return "skipped"
         _pr = int(pr_number or 0) or _latest_pr_number(repo_key, _num)
+        # Issue #1963 复审 S2：不保留 conclusion=pass 的模板分流——当前所有调用方都只在
+        # blocked/节点失败（conclusion=fail）时进入本函数，pass 分支不可达；删除投机分支。
         _lines = [
             "[Grape QA Gate] ⚠️ QA 未通过，Issue 暂不自动关闭。",
             "",
@@ -628,26 +691,44 @@ def _post_issue_comment(repo_key: str, issue_number: int, body: str,
         _provider, _owner, _repo = parse_repo_key(repo_key)
         if not _owner or not _repo:
             return "skipped"
-        if _provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_token
-        else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_token
+        # 平台由 repo_key 前缀派生（卡驱动）：不再按平台名分叉取 token。
+        # 注：arch 基线此处 import 了已迁走的 src.user 模块（src/user 在架构布局下不存在），
+        # 会导致注解静默跳过（"No module named 'src.user'"）——按 canonical 模块修正。
+        from src.domains.mgmt.user.db import get_repo_bot_token as _get_token
         _token = _get_token(repo_key=repo_key) or ""
         if not _token:
             log.info(f"qa gate: no bot token for {repo_key}, skip annotation")
             return "skipped"
         _client = VcsApiClient(_provider, _token, _owner, _repo)
-        if _annotation_exists(_client, issue_number, key[2]):
-            _remember_annotation(key)
-            log.info(f"qa gate: annotation already present {repo_key}/#{issue_number}")
+        # Issue #1963（D）：跨进程幂等——远端「先查后发」存在并发窗口，两台主可能同时
+        # 查到不存在并各发一次。用 distributed_locks 表加租约，串行化查+发。
+        # 复审 Standards：holder 必须是「每次调用唯一」而非进程级——否则慢发帖超过 TTL
+        # 时同进程后到线程可用同一 holder 抢到锁，先完成者的 finally 会删掉后者的锁，
+        # 形成同进程重复发帖窗口。TTL 同时放宽到 120s，覆盖远端慢发帖。
+        from src.lock import acquire_lock, release_lock
+        _lock_key = (f"qa_annotate:{repo_key}:{issue_number}:"
+                     f"{hashlib.md5(key[2].encode('utf-8')).hexdigest()[:10]}")
+        _lock_holder = f"qa-annotate-{uuid.uuid4().hex}"
+        if not acquire_lock(_lock_key, ttl=120, holder=_lock_holder):
+            log.info(f"qa gate: annotation lock busy, skip {repo_key}/#{issue_number}")
             return "skipped"
-        _resp = _client.post_issue_comment(issue_number, body)
-        if isinstance(_resp, dict) and "error" not in _resp:
-            _remember_annotation(key)
-            log.info(f"qa gate: annotated {repo_key}/#{issue_number}")
-            return "success"
-        log.warning(f"qa gate: annotate {repo_key}/#{issue_number} -> {_resp}")
-        return "failed"
+        try:
+            # 同进程并发：先到线程已在锁内完成标注，后到者直接跳过（远端标记仅覆盖跨进程）。
+            if _is_annotated(key):
+                return "skipped"
+            if _annotation_exists(_client, issue_number, key[2]):
+                _remember_annotation(key)
+                log.info(f"qa gate: annotation already present {repo_key}/#{issue_number}")
+                return "skipped"
+            _resp = _client.post_issue_comment(issue_number, body)
+            if isinstance(_resp, dict) and "error" not in _resp:
+                _remember_annotation(key)
+                log.info(f"qa gate: annotated {repo_key}/#{issue_number}")
+                return "success"
+            log.warning(f"qa gate: annotate {repo_key}/#{issue_number} -> {_resp}")
+            return "failed"
+        finally:
+            release_lock(_lock_key, holder=_lock_holder)
     except Exception as _e:
         log.warning(f"qa gate: post annotation failed {repo_key}/#{issue_number}: {_e}")
         return "failed"

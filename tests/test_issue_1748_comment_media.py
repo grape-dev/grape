@@ -317,7 +317,7 @@ def _comment_evt(note="", a2a=""):
 
 
 def _inject(monkeypatch, agent_type, note="", a2a="", collected=None):
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     monkeypatch.setattr("src.api.issues_center._attach_list",
                         lambda o, r, n: [], raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_user_images",
@@ -394,7 +394,7 @@ def test_inject_collect_error_visible(monkeypatch):
 
 
 def test_inject_analysis_truncated(monkeypatch):
-    from src.prompt_builder import _COMMENT_MEDIA_ANALYSIS_MAX_CHARS
+    from src.kernel.prompt_builder import _COMMENT_MEDIA_ANALYSIS_MAX_CHARS
     long_analysis = "## 用户上传的视频分析\n" + ("x" * (_COMMENT_MEDIA_ANALYSIS_MAX_CHARS + 100))
     collected = {
         "ok": [{"filename": "user-attachment-1.mp4", "url": "http://srv/v.mp4", "size": 1,
@@ -419,7 +419,7 @@ def test_inject_non_comment_event_does_not_collect(monkeypatch):
         calls["n"] += 1
         return {"ok": [], "failed": []}
 
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     monkeypatch.setattr("src.api.issues_center._attach_list", lambda o, r, n: [], raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_user_images",
                         lambda *a, **k: {"ok": [], "failed": []}, raising=False)
@@ -439,7 +439,7 @@ def test_inject_cache_no_recollect(monkeypatch):
         calls["n"] += 1
         return {"ok": [], "failed": []}
 
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     monkeypatch.setattr("src.api.issues_center._attach_list", lambda o, r, n: [], raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_user_images",
                         lambda *a, **k: {"ok": [], "failed": []}, raising=False)

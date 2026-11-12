@@ -20,7 +20,7 @@ USERNAME = "agent_tester"
 
 def _inst_row(app_id: str):
     """读 grape_t_channel_installation（走 engine_wiring 自己的连接，与写入方同一条路径）。"""
-    from src.im.engine_wiring import _connect, default_db_path
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
     conn = _connect(default_db_path())
     try:
         return conn.execute(
@@ -30,7 +30,7 @@ def _inst_row(app_id: str):
 
 
 def _cleanup_inst(app_id: str) -> None:
-    from src.im.engine_wiring import _connect, default_db_path
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
     conn = _connect(default_db_path())
     try:
         conn.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (app_id,))
@@ -82,7 +82,7 @@ def _seed_session(repo_key, agent_type, rid=0, im_app_id="", im_app_secret="sec"
             (sid, repo_key, agent_type, rid or None, "askill", "idle", "sess_x", "tok"))
         db.commit()
     if im_app_id:
-        from src.im.engine_wiring import sync_installation
+        from src.domains.runtime.im.engine_wiring import sync_installation
         sync_installation("repo", repo_key=repo_key, app_id=im_app_id,
                           app_secret=im_app_secret)
     return sid
@@ -175,7 +175,7 @@ class TestDetail:
         _seed_agent_types()
         rk = "gitcode:org/agvod1"
         sid = _seed_session(rk, "vod", im_app_id="cli_vod")
-        from src.im.engine_wiring import sync_installation
+        from src.domains.runtime.im.engine_wiring import sync_installation
         assert sync_installation("repo", repo_key=rk, app_id="cli_vod", app_secret="s")
         with db_lock:
             c = db.cursor()
@@ -382,7 +382,7 @@ class TestUpdateConfig:
     def test_vod_chat_bot_conflict_400(self, _client):
         """A2 收尾：独占校验查 active 安装行——user 轨已占用的 app_id 不能绑 VOD。"""
         _seed_agent_types()
-        from src.im.engine_wiring import sync_installation
+        from src.domains.runtime.im.engine_wiring import sync_installation
         assert sync_installation("user", owner_user_id=str(UID), app_id="cli_chatx", app_secret="s")
         try:
             r = _client.put("/api/agents/vod/org/repo", json={"im_app_id": "cli_chatx", "im_app_secret": "s"})
@@ -425,7 +425,7 @@ class TestUpdateConfig:
         _seed_agent_types()
         rk = "gitcode:org/agv2"
         _seed_session(rk, "vod", im_app_id="cli_vodx2")
-        from src.im.engine_wiring import sync_installation
+        from src.domains.runtime.im.engine_wiring import sync_installation
         app_id = "cli_vodx2"
         assert sync_installation("repo", repo_key=rk, app_id=app_id, app_secret="stored_sec")
         try:
@@ -450,7 +450,7 @@ class TestUpdateConfig:
                       (rid, sid))
             c.execute("INSERT INTO vod_conversations (agent_session_id, im_chat_id, status) VALUES (?, 'oc_unb', 'active')", (sid,))
             db.commit()
-        from src.im.engine_wiring import revoke_installation, sync_installation
+        from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
         assert sync_installation("repo", repo_key=rk, app_id=app_id, app_secret="sec")
         try:
             # A2 M2：解绑不再经 BotManager 摘 bot，改为把新表安装行置 revoked

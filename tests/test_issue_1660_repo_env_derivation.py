@@ -44,7 +44,7 @@ class TestDeriveRepoIdentity:
 
 class TestBuildTaskEnvDerivesFromFullName:
     def test_redispatch_env_owner_name_match_full_name(self):
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         env = build_task_env("gitcode:acme-org/demo-portal", "coding", "",
                              runtime_id=0, account="alice")
         assert env["REPO_FULL_NAME"] == "acme-org/demo-portal"
@@ -55,7 +55,7 @@ class TestBuildTaskEnvDerivesFromFullName:
         assert env["REPO_OWNER"] != env["ACCOUNT"]
 
     def test_repo_name_never_empty_when_full_name_present(self):
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         env = build_task_env("github:Org/Repo", "qa", "")
         assert env["REPO_FULL_NAME"] == "Org/Repo"
         assert env["REPO_OWNER"] == "Org"
@@ -65,7 +65,7 @@ class TestBuildTaskEnvDerivesFromFullName:
 class TestDirectExecutorDerivesFromRepository:
     def test_direct_branch_source_no_longer_uses_exec_account_for_owner(self):
         import inspect
-        from src.domains.runtime.routes.runtime import direct_executor
+        from src.domains.runtime.engine import direct_executor
         source = inspect.getsource(direct_executor._execute_agent_inner)
         assert "derive_repo_identity" in source
         assert 'REPO_OWNER": (exec_account' not in source

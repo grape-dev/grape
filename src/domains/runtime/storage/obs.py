@@ -64,7 +64,7 @@ class ObsStorage(StorageBackend):
 
     # ---- 写入 ----
     def save_bytes(self, key: str, data: bytes) -> str:
-        from src.observability.otel import external_call_span
+        from src.domains.insight.observability.otel import external_call_span
         with external_call_span("obs", "put %s" % key, {"obs.op": "put", "obs.size": len(data)}):
             try:
                 resp = self.client.putObject(self.bucket, self._full(key), data)
@@ -77,7 +77,7 @@ class ObsStorage(StorageBackend):
                 raise StorageError(f"putObject {key} error: {e}") from e
 
     def save_stream(self, key: str, source: str) -> str:
-        from src.observability.otel import external_call_span
+        from src.domains.insight.observability.otel import external_call_span
         with external_call_span("obs", "putFile %s" % key, {"obs.op": "put_file"}):
             try:
                 resp = self.client.putFile(self.bucket, self._full(key), source)

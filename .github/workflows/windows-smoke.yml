@@ -67,6 +67,13 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/im -q
+      - name: AtomCode engine integration tests
+        # AtomCode CLI 接入的回归卡点：协议映射、用量拆分、空回复不重开会话、
+        # 取消/超时清理提示词文件、沙箱只读挂载、注册完整性、安装器行为。
+        # 不接入 CI 则只能靠人工执行，基线迭代极易漏。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_atomcode_runtime.py -v
       - name: Destructive DDL guard + Issue #536 migration safety tests
         # Issue #536 QA-Impt：CI 显式接入 DDL 卡点与新增用例；base 显式传目标分支
         # （GitCode 注入 CI_MERGE_REQUEST_TARGET_BRANCH_NAME，GitHub 用 PR base），

@@ -24,8 +24,8 @@ from unittest.mock import patch
 import pytest
 
 from src.domains.mgmt.routes import devstage as ds_route
-from src.im import devstage_client as ds_client
-from src.im.devstage_client import DevStageError
+from src.domains.runtime.im import devstage_client as ds_client
+from src.domains.runtime.im.devstage_client import DevStageError
 
 MISSING_ID = "does-not-exist-xyz"
 # 删除不存在的 DevStage 环境时上游实测返回的错误码（parameter invalid）

@@ -12,7 +12,7 @@ import os
 import pytest
 
 JS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "src", "api", "static", "js", "pages", "dashboard.js"
+    os.path.dirname(__file__), "..", "..", "..", "src", "api", "static", "js", "pages", "dashboard.js"
 )
 
 

@@ -15,15 +15,15 @@ import pytest
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 
-from src.im.adapters.dingtalk import cards as cards_mod
-from src.im.adapters.dingtalk.channel import _subscriptions
-from src.im.adapters.dingtalk.inbound import (
+from src.domains.runtime.im.adapters.dingtalk import cards as cards_mod
+from src.domains.runtime.im.adapters.dingtalk.channel import _subscriptions
+from src.domains.runtime.im.adapters.dingtalk.inbound import (
     CARD_CALLBACK_TOPIC,
     card_callback_to_inbound,
     event_to_inbound,
 )
-from src.im.adapters.dingtalk.outbound import DingtalkSender
-from src.im.channel.capability import Capability
+from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+from src.domains.runtime.im.channel.capability import Capability
 
 
 def _frame(params: dict, *, chat_in_content: bool = False, typ: str = "actionCallback"):
@@ -90,7 +90,7 @@ def test_card_frame_not_parsed_as_chat_message():
 
 
 def test_subscriptions_include_card_callback_only_when_enabled(monkeypatch):
-    from src.im.adapters.dingtalk import channel as ch
+    from src.domains.runtime.im.adapters.dingtalk import channel as ch
     # 默认 off：不动消息通道（未开权限的 app 带卡片订阅有被拒风险）
     monkeypatch.setattr(ch, "_card_switch_on", lambda: False)
     topics = [s.get("topic") for s in ch._subscriptions()]
@@ -253,7 +253,7 @@ def test_stringify_params_serializes_non_strings():
 
 def test_outbound_card_cache_then_db_fallback(monkeypatch):
     """发送时写入 → 内存命中；清缓存后回落 DB（模拟进程重启后点旧卡）。"""
-    from src.im.engine import outbound_cards as oc
+    from src.domains.runtime.im.engine import outbound_cards as oc
     oc._clear_cache()
     monkeypatch.setattr(oc, "_save_sync", lambda *a, **k: None)
     store = {}
@@ -274,7 +274,7 @@ def test_outbound_card_cache_then_db_fallback(monkeypatch):
 
 def test_outbound_card_persist_failure_does_not_raise(monkeypatch):
     """台账写失败只告警，不允许影响发送。"""
-    from src.im.engine import outbound_cards as oc
+    from src.domains.runtime.im.engine import outbound_cards as oc
     oc._clear_cache()
 
     def _boom(*a, **k):
@@ -307,7 +307,7 @@ def test_channel_outbound_card_table_exists(tmp_path):
 
 
 def test_out_track_id_of_frame():
-    from src.im.adapters.dingtalk.inbound import out_track_id_of
+    from src.domains.runtime.im.adapters.dingtalk.inbound import out_track_id_of
     assert out_track_id_of(_frame({"action": "cancel", "chat": "c"})) == "grape-inst-abc123"
     assert out_track_id_of({"headers": {}}) == ""
 
@@ -326,16 +326,16 @@ class _StubCardClient:
 
 
 def _register_chat(chat, staff_id="staff_1", chat_type="1"):
-    from src.im.adapters.dingtalk.outbound import default_webhook_registry
+    from src.domains.runtime.im.adapters.dingtalk.outbound import default_webhook_registry
     default_webhook_registry().register(chat, "https://wh", staff_id=staff_id,
                                         chat_type=chat_type)
 
 
 def test_interactive_mode_sends_template_and_remembers(monkeypatch):
     import asyncio
-    from src.im.adapters.dingtalk.outbound import DingtalkSender
-    from src.im.engine import outbound_cards as oc
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+    from src.domains.runtime.im.engine import outbound_cards as oc
+    from src.domains.runtime.im.channel.message import OutboundMessage
     oc._clear_cache()
     _register_chat("cid_inter_1")
     client = _StubCardClient()
@@ -359,8 +359,8 @@ def test_interactive_mode_sends_template_and_remembers(monkeypatch):
 
 def test_interactive_failure_falls_back_to_action_card(monkeypatch):
     import asyncio
-    from src.im.adapters.dingtalk.outbound import DingtalkSender
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+    from src.domains.runtime.im.channel.message import OutboundMessage
     _register_chat("cid_inter_2")
     calls = []
     async def _ac(chat_id, title, text, btns=None, **kw):
@@ -380,8 +380,8 @@ def test_interactive_failure_falls_back_to_action_card(monkeypatch):
 def test_interactive_skipped_without_staff_id(monkeypatch):
     """单聊没有 staff_id（webhook 未登记）→ 不硬发，交给回落路径。"""
     import asyncio
-    from src.im.adapters.dingtalk.outbound import DingtalkSender
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+    from src.domains.runtime.im.channel.message import OutboundMessage
     client = _StubCardClient()
     ac = []
     async def _ac(chat_id, title, text, btns=None, **kw):
@@ -399,8 +399,8 @@ def test_interactive_skipped_without_staff_id(monkeypatch):
 
 def test_interactive_does_not_touch_plain_text():
     import asyncio
-    from src.im.adapters.dingtalk.outbound import DingtalkSender
-    from src.im.channel.message import OutboundMessage
+    from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+    from src.domains.runtime.im.channel.message import OutboundMessage
     client = _StubCardClient()
     texts = []
     async def _t(chat_id, text):
@@ -415,7 +415,7 @@ def test_interactive_does_not_touch_plain_text():
 
 def test_dingtalk_card_mode_decision(monkeypatch, tmp_path):
     """三件齐才 interactive：模板 + 安装 enabled + 全局开关；缺一律回落。"""
-    from src.im import engine_wiring as ew
+    from src.domains.runtime.im import engine_wiring as ew
     switch = tmp_path / "card_mode"
     monkeypatch.setenv("GRAPE_DINGTALK_CARD_MODE_FILE", str(switch))
     monkeypatch.delenv("GRAPE_DINGTALK_CARD_MODE", raising=False)

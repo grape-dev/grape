@@ -323,7 +323,7 @@ def _run_stream_capture_env(monkeypatch, backend, env_extra):
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from unittest import mock
-    import tests.test_executor_token_env as _tenv
+    import tests.runtime.test_executor_token_env as _tenv
 
     fake_popen = _tenv._FakePopen()
     with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=backend), \
@@ -355,7 +355,7 @@ def test_executor_tolerates_backend_without_prepare_env():
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from unittest import mock
-    import tests.test_executor_token_env as _tenv
+    import tests.runtime.test_executor_token_env as _tenv
 
     class _PlainBackend(_tenv._FakeBackend):
         pass  # 无 prepare_env
@@ -380,7 +380,7 @@ def test_executor_swallows_prepare_env_failure():
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from unittest import mock
-    import tests.test_executor_token_env as _tenv
+    import tests.runtime.test_executor_token_env as _tenv
 
     class _BoomBackend(_tenv._FakeBackend):
         def prepare_env(self, env):

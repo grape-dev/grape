@@ -6,23 +6,29 @@
 - 对超 TTL 未活跃的僵尸 workdir 兜底清理；
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
+
 import asyncio, os, shutil, time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+
 from src.kernel import config
+
 from src.kernel.config import log, CHAT_CWD_BASE
+
 from src.kernel.session_manager import db, db_lock
+from src.domains.runtime.engine import repogit
 
 _SWEEP_INTERVAL = int(os.environ.get("SWEEPER_INTERVAL_SECONDS", "900"))  # 15min
+
 _ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "3"))  # 非 done issue workdir 3 天不活跃清理
+
 # Chat / feishu / vod 目录 TTL（默认 3 天未活跃清理，比 issue 的 7 天更短——这些是临时会话目录）
 _SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
+
 # 悬空 agent_tasks 回收 TTL（sweep_stuck_agent_tasks_once，单位分钟）：
 # queued 超时无人认领 / running·dispatched 所属 runtime 已离线或不存在且 started_at 超时 /
 # running·dispatched 超长未收敛（worker 侧任务超时 RUNTIME_TASK_TIMEOUT=1h，6h 仍运行必为孤儿）
 _QUEUED_STALE_MINUTES = int(os.environ.get("SWEEPER_QUEUED_STALE_MINUTES", "180"))
-_DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
 
+_DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
 
 def _long_running_minutes() -> int:
     """running·dispatched 孤儿回收阈值（分钟）。
@@ -43,12 +49,14 @@ def _long_running_minutes() -> int:
     return get_orphan_threshold_minutes()
 
 _QUEUED_STALE_TXT = "中断：queued 超时无 worker 认领（sweeper 兜底回收）"
+
 _DEAD_RUNTIME_TXT = "中断：running/dispatched 悬空，所属 runtime 已离线或不存在（sweeper 兜底回收）"
+
 _LONG_RUNNING_TXT = "中断：running/dispatched 超长未收敛（sweeper 兜底回收，worker 任务超时阈值 1h）"
+
 _DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
-
 
 def _done_issues() -> list[tuple[str, str]]:
     """返回到达终态（stage='done'）的 (repo_key, issue_id) 列表。Phase C3：读 issue 单表。"""
@@ -56,7 +64,6 @@ def _done_issues() -> list[tuple[str, str]]:
         c = db.cursor()
         rows = c.execute("SELECT repo_key, issue_number FROM issue WHERE stage='done'").fetchall()
         return [(r[0], f"#{r[1]}") for r in rows]
-
 
 def _active_issue_sessions() -> set[tuple[str, str, str]]:
     """有 dispatched/running 任务的 (repo_key, agent_type, issue_num) 集合（不清理）。"""
@@ -74,7 +81,6 @@ def _active_issue_sessions() -> set[tuple[str, str, str]]:
         for r in c.fetchall():
             active.add((r[0], r[1], str(r[2]).lstrip("#")))
     return active
-
 
 def _zombie_issue_dirs(ttl: float) -> list[str]:
     """超 TTL 未活跃的 issue workdir。
@@ -145,7 +151,6 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
         log.warning(f"sweeper zombie scan failed: {e}")
     return out
 
-
 def _active_chat_conv_ids() -> set[str]:
     """有活跃任务的 chat conversation ID 集合（不清理）。"""
     try:
@@ -155,7 +160,6 @@ def _active_chat_conv_ids() -> set[str]:
             return {r[0] for r in c.fetchall()}
     except Exception:
         return set()
-
 
 def _stale_session_dirs(ttl: float) -> list[str]:
     """超 TTL 未活跃的 chat / feishu / vod / history 目录。
@@ -285,7 +289,6 @@ def _stale_session_dirs(ttl: float) -> list[str]:
 
     return out
 
-
 def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30) -> int:
     """兜底回收：running 事件超时且无 agent_tasks 活跃任务支撑 → 置 failed（防卡 running 僵尸）。
 
@@ -398,7 +401,6 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         log.warning(f"sweeper event recovery failed: {e}")
     return fixed
 
-
 def _dt_age_minutes(s: str | None, now: float | None = None) -> float | None:
     """解析 created_at/started_at（ISO 或本地 'YYYY-MM-DD HH:MM:SS'）距今分钟数；解析失败返回 None。"""
     if not s:
@@ -424,7 +426,6 @@ def _dt_age_minutes(s: str | None, now: float | None = None) -> float | None:
         dt = dt.replace(tzinfo=timezone.utc)
     _now = now if now is not None else time.time()
     return max(0.0, (_now - dt.timestamp()) / 60.0)
-
 
 def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
                                  dead_runtime_minutes: int | None = None,
@@ -527,7 +528,6 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
         log.info(f"sweeper: recycled {fixed} stuck agent_task(s): {[t for t, _, _, _ in dead]}")
     return fixed
 
-
 def sweep_once() -> int:
     cleaned = 0
     try:
@@ -560,10 +560,11 @@ def sweep_once() -> int:
         # 注意：**不能**放在上面 `if _has_db_tables:` 块里 —— 那个判断查的是 SQLite 的
         # sqlite_master，MySQL 后端恒为 False，钩子会被整块跳过（实测踩过）。
         try:
-            from src.im.bot_lease import purge_stale_instances
+            from src.domains.runtime.im.bot_lease import purge_stale_instances
             cleaned += purge_stale_instances(older_than_hours=24)
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
+
         # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
         cleaned += _sweep_branch_guard_state()
         # A7/F4：IM 只增表（去重/入站流水/卡片台账）TTL 清理
@@ -631,61 +632,6 @@ def sweep_once() -> int:
     except Exception as e:
         log.warning(f"sweep_once failed: {e}")
         return 0
-
-
-
-def _sweep_im_tables() -> int:
-    """A7/F4：IM 只增表按 created_at TTL 清理（sqlite / MySQL 双后端同一写法）。
-
-    时间比较走**应用层预计算 cutoff + `?` 参数**：`datetime('now','-N hours')` 是
-    SQLite 私有修饰符方言，mysql_compat 只翻译无参形式，带修饰符会在 MySQL 报 1305
-    （B1 强制约束，参照 src/runtime/branch_guard.py / src/runtime/table_maintenance.py）。
-
-    - grape_t_channel_inbound_dedup：去重窗口仅 90s，历史行无保留价值 → 24h
-    - grape_t_channel_inbound_message：入站消息流水（问题定位用）→ 24h
-    - grape_t_channel_outbound_card：卡片台账（重启后回调反查用）→ 7d
-    失败记 warning（不静默），单表失败不影响其余表。
-    """
-    cleaned = 0
-    specs = (
-        ("grape_t_channel_inbound_dedup", "created_at", 24),
-        ("grape_t_channel_inbound_message", "created_at", 24),
-        ("grape_t_channel_outbound_card", "created_at", 24 * 7),
-    )
-    now = datetime.now(timezone.utc)
-    try:
-        from src.kernel.session_manager import db, db_lock
-        for table, col, hours in specs:
-            try:
-                cutoff = (now - timedelta(hours=int(hours))).strftime("%Y-%m-%d %H:%M:%S")
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
-                    n = c.rowcount or 0
-                    db.commit()
-                cleaned += n
-                if n:
-                    log.info(f"sweeper: purged {n} rows from {table} (older than {hours}h)")
-            except Exception as e:
-                log.warning(f"sweeper im-table purge failed ({table}): {e}")
-    except Exception as e:
-        log.warning(f"sweeper im-table purge failed: {e}")
-    return cleaned
-
-
-def _sweep_branch_guard_state() -> int:
-    """Issue #993 R9：按 updated_at TTL 清理 branch_guard_state（每分支一行、只增不减）。
-
-    MySQL 后端下不能放在 `_has_db_tables` 判定块里（sqlite_master 检测恒 False）。
-    有 pending 候选的行由 prune_guard_state 保留，避免漏一次漂移比对。
-    """
-    try:
-        from src.domains.runtime.engine.branch_guard import prune_guard_state
-        return prune_guard_state()
-    except Exception as e:
-        log.debug(f"sweeper branch-guard prune skipped: {e}")
-        return 0
-
 
 def _sweep_tmp_residuals() -> int:
     """兜底清理 /tmp 及 ~/.cache 下 agent 残留（sweeper 每 15min 调一次）。
@@ -786,7 +732,6 @@ def _sweep_tmp_residuals() -> int:
 
     return cleaned
 
-
 def _sweep_stale_workspace_repos() -> int:
     """清理不活跃 repo 的 project-info / codebase 目录。
 
@@ -832,7 +777,8 @@ def _sweep_stale_workspace_repos() -> int:
                     continue
                 # 构造 repo_key（workspace 用 owner/repo 结构，检查两种 provider 前缀）
                 _base_key = f"{owner}/{repo_name}"
-                if f"gitcode:{_base_key}" in active_repos or f"github:{_base_key}" in active_repos:
+                from src.kernel.repo_key import repo_key_candidates
+                if any(_rk in active_repos for _rk in repo_key_candidates(_base_key)):
                     continue  # 有活跃任务，跳过
                 # 检查 issue 目录是否有活跃任务
                 issues_root = os.path.join(repo_dir, "issues")
@@ -869,7 +815,6 @@ def _sweep_stale_workspace_repos() -> int:
         log.warning(f"sweeper workspace repo scan failed: {e}")
     return cleaned
 
-
 async def sweep_loop():
     """服务端后台周期清理（main.py lifespan 挂载）。"""
     import asyncio as _aio
@@ -879,15 +824,6 @@ async def sweep_loop():
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
         await asyncio.sleep(_SWEEP_INTERVAL)
-
-
-# ===========================================================================
-# Issue #699 Phase 4：sweep_loop 拆分（设计 §8.2）
-# - sweep_events_loop：Event 进程（僵尸事件回收 + IM 实例清理 + workdir 清理）
-# - sweep_tasks_loop：Worker 进程（悬空 agent_tasks 回收，依赖 local_claimer 在线认领）
-# 单进程模式仍用原有 sweep_loop()（内部 sweep_once 做两件事的并集）。
-# ===========================================================================
-
 
 async def sweep_events_loop() -> None:
     """Event 进程：僵尸事件回收 + IM 实例清理 + workdir 清理。
@@ -903,14 +839,10 @@ async def sweep_events_loop() -> None:
             except Exception as e:
                 log.warning(f"Event sweeper stuck-event sweep failed: {e}")
             try:
-                from src.im.bot_lease import purge_stale_instances
+                from src.domains.runtime.im.bot_lease import purge_stale_instances
                 cleaned += purge_stale_instances(older_than_hours=24)
             except Exception as e:
                 log.debug(f"Event sweeper im-instance purge skipped: {e}")
-            # Issue #993 R9：分支守卫状态表 TTL 清理
-            cleaned += _sweep_branch_guard_state()
-            # A7/F4：IM 只增表 TTL 清理
-            cleaned += _sweep_im_tables()
 
             active = _active_issue_sessions()
             for repo_key, issue_id in _done_issues():
@@ -934,7 +866,6 @@ async def sweep_events_loop() -> None:
             log.warning(f"Event sweeper error: {e}")
         await _aio.sleep(_SWEEP_INTERVAL)
 
-
 async def sweep_tasks_loop() -> None:
     """Worker 进程：悬空 agent_tasks 回收。
 
@@ -952,7 +883,7 @@ async def sweep_tasks_loop() -> None:
         await _aio.sleep(_SWEEP_INTERVAL)
 
 # ── Issue #996：Issue 产物（docs/issue-N/*）清理预检 ─────────────────────────
-# 由 weekly-10 迁入（原实现 src/runtime/cleanup.py）；守卫命中时保守跳过，绝不绕过。
+# 由 weekly-10 迁入（原实现 src/domains/runtime/engine/cleanup.py）；守卫命中时保守跳过，绝不绕过。
 from dataclasses import dataclass as _dc
 
 @_dc(frozen=True)
@@ -963,7 +894,6 @@ class ArtifactScope:
     issue_number: object
     token: str = ""
     provider: str = ""
-
 
 def precheck_issue_artifacts(scope: ArtifactScope, *,
                              targets: list | None = None,
@@ -987,7 +917,6 @@ def precheck_issue_artifacts(scope: ArtifactScope, *,
                                  token=scope.token, provider=scope.provider,
                                  scripts=scripts)
     return {"targets": resolved, "paths": paths, "guard_impact": impact}
-
 
 def clean_issue_artifacts(scope: ArtifactScope, *,
                           targets: list | None = None,
@@ -1024,4 +953,174 @@ def clean_issue_artifacts(scope: ArtifactScope, *,
         return {"deleted": [], "skipped": paths, "error": str(e)[:200]}
     return {"deleted": paths, "skipped": []}
 
+from dataclasses import dataclass
 
+from datetime import datetime, timedelta, timezone
+
+from src import config
+
+def _sweep_im_tables() -> int:
+    """A7/F4：IM 只增表按 created_at TTL 清理（sqlite / MySQL 双后端同一写法）。
+
+    时间比较走**应用层预计算 cutoff + `?` 参数**：`datetime('now','-N hours')` 是
+    SQLite 私有修饰符方言，mysql_compat 只翻译无参形式，带修饰符会在 MySQL 报 1305
+    （B1 强制约束，参照 src/domains/runtime/engine/branch_guard.py / src/domains/runtime/engine/table_maintenance.py）。
+
+    - grape_t_channel_inbound_dedup：去重窗口仅 90s，历史行无保留价值 → 24h
+    - grape_t_channel_inbound_message：入站消息流水（问题定位用）→ 24h
+    - grape_t_channel_outbound_card：卡片台账（重启后回调反查用）→ 7d
+    失败记 warning（不静默），单表失败不影响其余表。
+    """
+    cleaned = 0
+    specs = (
+        ("grape_t_channel_inbound_dedup", "created_at", 24),
+        ("grape_t_channel_inbound_message", "created_at", 24),
+        ("grape_t_channel_outbound_card", "created_at", 24 * 7),
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        from src.kernel.session_manager import db, db_lock
+        for table, col, hours in specs:
+            try:
+                cutoff = (now - timedelta(hours=int(hours))).strftime("%Y-%m-%d %H:%M:%S")
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
+                    n = c.rowcount or 0
+                    db.commit()
+                cleaned += n
+                if n:
+                    log.info(f"sweeper: purged {n} rows from {table} (older than {hours}h)")
+            except Exception as e:
+                log.warning(f"sweeper im-table purge failed ({table}): {e}")
+    except Exception as e:
+        log.warning(f"sweeper im-table purge failed: {e}")
+    return cleaned
+
+def _sweep_branch_guard_state() -> int:
+    """Issue #993 R9：按 updated_at TTL 清理 branch_guard_state（每分支一行、只增不减）。
+
+    MySQL 后端下不能放在 `_has_db_tables` 判定块里（sqlite_master 检测恒 False）。
+    有 pending 候选的行由 prune_guard_state 保留，避免漏一次漂移比对。
+    """
+    try:
+        from src.domains.runtime.engine.branch_guard import prune_guard_state
+        return prune_guard_state()
+    except Exception as e:
+        log.debug(f"sweeper branch-guard prune skipped: {e}")
+        return 0
+
+def _has_issue_state_tables() -> bool:
+    """worker 端本地 SQLite 可能无 events/issue_state 表——统一检测一次。
+
+    与 sweep_once 同语义：表缺失时跳过 DB 依赖的清理。
+    注意：该检测查 SQLite 的 sqlite_master，MySQL 后端恒为 False
+    （sweep_once 注释的实测结论），因此 MySQL 侧需另行兜底——
+    直接 try/except 每个清理步骤（下方两个循环已按此处理）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
+            return c.fetchone() is not None
+    except Exception:
+        return False
+
+def sweep_events_once() -> int:
+    """B 维度清理（单次）：僵尸事件回收 + IM 实例清理 + workdir/目录类清理。
+
+    从 sweep_once 拆出（设计文档 §5.2）：
+    - sweep_stuck_events_once：回收卡 running 的 events（B 独占表）；
+    - purge_stale_instances：IM 实例心跳表清理（A/B 共库可清）；
+    - done-issue workdir 清理（读 issue 表 + issue_agent_session，与事件生命周期强相关）；
+    - 僵尸 workdir / chat / feishu / vod / history 目录 TTL 清理；
+    - /tmp 残留与 workspace repo 级清理（本机文件系统操作，B 所在主机执行）。
+    """
+    cleaned = 0
+    try:
+        _has_db_tables = _has_issue_state_tables()
+        # 兜底回收卡 running 僵尸事件（入队/执行失败未更新终态的历史遗留）
+        if _has_db_tables:
+            try:
+                cleaned += sweep_stuck_events_once()
+            except Exception as e:
+                log.warning(f"sweeper stuck-event sweep failed: {e}")
+        # IM 实例心跳表只增不减（每次重启留一行）→ 周期清理 24h 前的行；
+        # 注意不能放进 _has_db_tables 块（MySQL 后端该检测恒 False，实测踩过）。
+        try:
+            from src.domains.runtime.im.bot_lease import purge_stale_instances
+            cleaned += purge_stale_instances(older_than_hours=24)
+        except Exception as e:
+            log.debug(f"sweeper im-instance purge skipped: {e}")
+        # Issue #993 R9：分支守卫状态表只增不减（每分支一行），按 updated_at 做 TTL 清理。
+        cleaned += _sweep_branch_guard_state()
+        # A7/F4：IM 只增表（去重/入站流水/卡片台账）TTL 清理
+        cleaned += _sweep_im_tables()
+
+        from src.domains.runtime.engine import repogit
+        if _has_db_tables:
+            active = _active_issue_sessions()
+            for repo_key, issue_id in _done_issues():
+                num = str(issue_id or "").lstrip("#")
+                if not num or num == "0":
+                    continue
+                for agent_type in _GIT_AGENTS:
+                    if (repo_key, agent_type, num) in active:
+                        continue
+                    issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
+                    if not os.path.isdir(issue_dir):
+                        continue
+                    try:
+                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
+                        cleaned += 1
+                    except Exception as e:
+                        log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+        # 僵尸兜底
+        ttl = _ZOMBIE_TTL_DAYS * 86400
+        for p in _zombie_issue_dirs(ttl):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                cleaned += 1
+            except Exception as e:
+                log.warning(f"sweeper zombie cleanup failed {p}: {e}")
+        # chat / feishu / vod / history 目录 TTL 清理
+        session_ttl = _SESSION_DIR_TTL_DAYS * 86400
+        session_cleaned = 0
+        for p in _stale_session_dirs(session_ttl):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                session_cleaned += 1
+            except Exception as e:
+                log.warning(f"sweeper session dir cleanup failed {p}: {e}")
+        if session_cleaned:
+            log.info(f"sweeper cleaned {session_cleaned} stale session dir(s)")
+            cleaned += session_cleaned
+        # /tmp 全局兜底清理（见 sweep_once 注释）
+        tmp_cleaned = _sweep_tmp_residuals()
+        if tmp_cleaned:
+            log.info(f"sweeper cleaned {tmp_cleaned} /tmp residual dir(s)/file(s)")
+            cleaned += tmp_cleaned
+        # workspace repo 级别清理：project-info/codebase 目录堆积
+        ws_cleaned = _sweep_stale_workspace_repos()
+        if ws_cleaned:
+            log.info(f"sweeper cleaned {ws_cleaned} stale workspace repo dir(s)")
+            cleaned += ws_cleaned
+        if cleaned:
+            log.info(f"event sweeper cleaned {cleaned} item(s)")
+        return cleaned
+    except Exception as e:
+        log.warning(f"sweep_events_once failed: {e}")
+        return 0
+
+def sweep_tasks_once() -> int:
+    """C 维度清理（单次）：悬空 agent_tasks 回收。
+
+    从 sweep_once 拆出（设计文档 §5.2）。回收依赖 C 进程 local_claimer
+    在线认领（回收的 queued 重派需要执行方），故归 C 进程。
+    """
+    cleaned = 0
+    try:
+        cleaned += sweep_stuck_agent_tasks_once()
+    except Exception as e:
+        log.warning(f"sweeper stuck-task sweep failed: {e}")
+    return cleaned

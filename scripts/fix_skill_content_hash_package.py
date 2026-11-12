@@ -17,7 +17,7 @@
   3. 重建 OBS 磁盘 zip 缓存 index.json：hash 为空的条目按本地缓存 zip 字节
      重算补齐（保留旧 index 备份 index.json.bak-1070）。
 
-校验口径与 src/storage/index.json 条目一致：{"hash": <sha256hex>, "sid": ...}。
+校验口径与 src/domains/runtime/storage/index.json 条目一致：{"hash": <sha256hex>, "sid": ...}。
 """
 import argparse
 import hashlib
@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只扫描报告，不写库")
     args = parser.parse_args()
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # ── 1. 扫描污染行 ──────────────────────────────────────
     with db_lock:
@@ -74,7 +74,7 @@ def main():
     # ── 2. 清洗 + 重算哈希（能取到 OBS zip 则回写正确 sha256）──
     storage = None
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         storage = get_storage()
     except Exception as e:
         print(f"storage 不可用（跳过哈希重算，仅清洗）: {e}")
@@ -86,7 +86,7 @@ def main():
                 fixed_hash = ""
                 if storage:
                     try:
-                        from src.user.db import get_skill_object_key
+                        from src.domains.mgmt.user.db import get_skill_object_key
                         key = get_skill_object_key(sid)
                         if key:
                             data = storage.read_bytes(key)
@@ -103,7 +103,7 @@ def main():
         print(f"已清洗 {len(polluted)} 行（含哈希重算回写）")
 
     # ── 3. 重建 OBS zip 缓存 index.json ───────────────────
-    from src.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
+    from src.domains.runtime.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
     if not os.path.isfile(ZIP_CACHE_INDEX):
         print("zip 缓存 index.json 不存在，跳过索引重建")
         return

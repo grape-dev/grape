@@ -1,16 +1,25 @@
 """Issue #51: 任务生命周期 API 测试——confirm-done / cancel / resume / pipeline"""
+
 import os
+
 import sys
+
 from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.runtime.routes import tasks as tasks_mod
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
@@ -21,9 +30,10 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 _uid = None
-_token = ""
-_headers = {}
 
+_token = ""
+
+_headers = {}
 
 def setup_module():
     global _uid, _token, _headers
@@ -45,8 +55,10 @@ def setup_module():
                   (_uid["id"], "lifecycle_tester", "ou_test_lifecycle", "测试"))
         c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id) VALUES (?,?,?,?,?)",
                   ("gitcode:org/lifecycle", "org", "lifecycle", "org/lifecycle", 1))
+        # check_repo_access 需要 user_repos 归属关系（pipeline 详情接口 403 门禁）
+        c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (?,?,?,?,?,?)",
+                  (_uid["id"], "gitcode:org/lifecycle", "org", "lifecycle", 0, 1))
         db.commit()
-
 
 def teardown_module():
     if _uid:
@@ -56,8 +68,8 @@ def teardown_module():
         c.execute("DELETE FROM grape_accounts WHERE username='test_lifecycle_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lifecycle_tester'")
         c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:org/lifecycle'")
+        c.execute("DELETE FROM user_repos WHERE repo_key='gitcode:org/lifecycle'")
         db.commit()
-
 
 def _clean():
     with db_lock:
@@ -66,7 +78,6 @@ def _clean():
         c.execute("DELETE FROM issue_state WHERE repo_key='gitcode:org/lifecycle'")
         c.execute("DELETE FROM events WHERE repo_key='gitcode:org/lifecycle'")
         db.commit()
-
 
 def _insert_task(status='active', issue_number=100, stage=None):
     """插入测试任务，返回 task_id"""
@@ -84,20 +95,19 @@ def _insert_task(status='active', issue_number=100, stage=None):
         set_issue_stage("gitcode:org/lifecycle", f"#{issue_number}", stage, "test")
     return tid
 
-
 class TestConfirmDone:
-    """POST /api/tasks/{task_id}/confirm-done"""
+    """POST /api/issues/{issue_id}/confirm-done"""
 
     def test_task_not_found(self):
         _clean()
-        r = client.post("/api/tasks/999999/confirm-done", headers=_headers,
+        r = client.post("/api/issues/999999/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
         assert r.status_code == 404
 
     def test_already_done_is_idempotent(self):
         _clean()
         tid = _insert_task(status='completed', issue_number=101)
-        r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
+        r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
         assert r.json()["already_done"] is True
@@ -105,7 +115,7 @@ class TestConfirmDone:
     def test_confirm_done_from_pending_review(self):
         _clean()
         tid = _insert_task(status='processing', issue_number=102, stage='pending_review')
-        r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
+        r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
         assert r.json()["status"] == "completed"
@@ -121,7 +131,7 @@ class TestConfirmDone:
         for _stage in ('vod', 'issue', 'coding', 'qa', 'sre', 'sre_completed', 'pending_review'):
             _clean()
             tid = _insert_task(status='processing', issue_number=200 + hash(_stage) % 100, stage=_stage)
-            r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
+            r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
             assert r.status_code == 200, f"stage={_stage} 应允许确认完成，got {r.status_code}"
             assert r.json()["status"] == "completed"
@@ -131,7 +141,7 @@ class TestConfirmDone:
         """Issue #131: cancelled 状态任务不可确认完成"""
         _clean()
         tid = _insert_task(status='cancelled', issue_number=103, stage='vod')
-        r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
+        r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
         assert r.status_code == 400
         assert "不可确认完成" in r.json()["detail"]["message"]
@@ -140,39 +150,38 @@ class TestConfirmDone:
         """Issue #131: sre 阶段也可直接确认完成"""
         _clean()
         tid = _insert_task(status='processing', issue_number=104, stage='sre')
-        r = client.post(f"/api/tasks/{tid}/confirm-done", headers=_headers,
+        r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                         json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
         assert r.json()["status"] == "completed"
         assert r.json()["stage"] == "done"
 
-
 class TestCancelTask:
-    """POST /api/tasks/{task_id}/cancel"""
+    """POST /api/issues/{issue_id}/cancel"""
 
     def test_task_not_found(self):
         _clean()
-        r = client.post("/api/tasks/999999/cancel", headers=_headers)
+        r = client.post("/api/issues/999999/cancel", headers=_headers)
         assert r.status_code == 404
 
     def test_already_cancelled_is_idempotent(self):
         _clean()
         tid = _insert_task(status='cancelled', issue_number=110)
-        r = client.post(f"/api/tasks/{tid}/cancel", headers=_headers)
+        r = client.post(f"/api/issues/{tid}/cancel", headers=_headers)
         assert r.status_code == 200
         assert r.json()["already_cancelled"] is True
 
     def test_completed_task_cannot_be_cancelled(self):
         _clean()
         tid = _insert_task(status='completed', issue_number=111)
-        r = client.post(f"/api/tasks/{tid}/cancel", headers=_headers)
+        r = client.post(f"/api/issues/{tid}/cancel", headers=_headers)
         assert r.status_code == 400
         assert "不可取消" in r.json()["detail"]["message"]
 
     def test_cancel_active_task(self):
         _clean()
         tid = _insert_task(status='active', issue_number=112, stage='coding')
-        r = client.post(f"/api/tasks/{tid}/cancel", headers=_headers)
+        r = client.post(f"/api/issues/{tid}/cancel", headers=_headers)
         assert r.status_code == 200
         assert r.json()["status"] == "cancelled"
         with db_lock:
@@ -184,30 +193,29 @@ class TestCancelTask:
     def test_cancel_processing_task(self):
         _clean()
         tid = _insert_task(status='processing', issue_number=113, stage='qa')
-        r = client.post(f"/api/tasks/{tid}/cancel", headers=_headers)
+        r = client.post(f"/api/issues/{tid}/cancel", headers=_headers)
         assert r.status_code == 200
         assert r.json()["status"] == "cancelled"
 
-
 class TestResumeTask:
-    """POST /api/tasks/{task_id}/resume"""
+    """POST /api/issues/{issue_id}/resume"""
 
     def test_task_not_found(self):
         _clean()
-        r = client.post("/api/tasks/999999/resume", headers=_headers)
+        r = client.post("/api/issues/999999/resume", headers=_headers)
         assert r.status_code == 404
 
     def test_resume_non_cancelled_task_rejected(self):
         _clean()
         tid = _insert_task(status='active', issue_number=120)
-        r = client.post(f"/api/tasks/{tid}/resume", headers=_headers)
+        r = client.post(f"/api/issues/{tid}/resume", headers=_headers)
         assert r.status_code == 400
-        assert "仅已取消任务可恢复" in r.json()["detail"]["message"]
+        assert "仅已取消需求可恢复" in r.json()["detail"]["message"]
 
     def test_resume_cancelled_task(self):
         _clean()
         tid = _insert_task(status='cancelled', issue_number=121, stage='coding')
-        r = client.post(f"/api/tasks/{tid}/resume", headers=_headers)
+        r = client.post(f"/api/issues/{tid}/resume", headers=_headers)
         assert r.status_code == 200
         assert r.json()["status"] == "processing"
         with db_lock:
@@ -216,19 +224,18 @@ class TestResumeTask:
         assert row[0] == "processing"
         assert row[1] is None
 
-
 class TestTaskPipeline:
-    """GET /api/tasks/{task_id}/pipeline"""
+    """GET /api/issues/{issue_id}/pipeline"""
 
     def test_task_not_found(self):
         _clean()
-        r = client.get("/api/tasks/999999/pipeline", headers=_headers)
+        r = client.get("/api/issues/999999/pipeline", headers=_headers)
         assert r.status_code == 404
 
     def test_pipeline_returns_nodes_and_events(self):
         _clean()
         tid = _insert_task(status='processing', issue_number=130, stage='coding')
-        r = client.get(f"/api/tasks/{tid}/pipeline", headers=_headers)
+        r = client.get(f"/api/issues/{tid}/pipeline", headers=_headers)
         assert r.status_code == 200
         data = r.json()
         assert "nodes" in data
@@ -239,9 +246,14 @@ class TestTaskPipeline:
     def test_pipeline_with_done_stage(self):
         _clean()
         tid = _insert_task(status='completed', issue_number=131, stage='done')
-        r = client.get(f"/api/tasks/{tid}/pipeline", headers=_headers)
+        r = client.get(f"/api/issues/{tid}/pipeline", headers=_headers)
         assert r.status_code == 200
         data = r.json()
         assert data["current_stage"] == "done"
+        # node_status 为状态码枚举：2=completed，5=skipped（流水线已 done 但节点无事件）
         for n in data["nodes"]:
-            assert n["node_status"] == "completed"
+            assert n["node_status"] in (2, 5)
+
+from src.domains.runtime.routes import tasks as tasks_mod
+
+from src.domains.mgmt.auth import grape_account_db

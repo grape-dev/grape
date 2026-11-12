@@ -9,17 +9,22 @@ Each node dispatches via the event bus:
 - serial: multiple agents process sequentially
 - parallel: multiple agents run concurrently, wait for all
 """
+
 import asyncio
+
 import logging
+
 import time
+
 from typing import Any
 
 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
+
 from src.api.pipeline_config import get_pipeline_config, get_node_by_tag, get_next_node, is_node_skipped
+
 from src.kernel.config import log
 
 _bus = get_event_bus()
-
 
 async def dispatch_node(
     scene_id: str,
@@ -33,7 +38,7 @@ async def dispatch_node(
     skill_path: str = "",
     runtime_id: int = 0,
     pool_tag: str = "",
-    user_id: int = 0,
+    user_id: str = "",
 ) -> dict:
     """Dispatch a pipeline node using its configured event mode.
 
@@ -86,7 +91,6 @@ async def dispatch_node(
         return await _dispatch_emit(node, repo_key, issue_id, event_seq, evt,
                                     skill_name, skill_id, skill_path, runtime_id, pool_tag)
 
-
 async def _dispatch_emit(node, repo_key, issue_id, event_seq, evt,
                          skill_name, skill_id, skill_path, runtime_id, pool_tag):
     """emit mode: enqueue task to tag queue, first engine claims."""
@@ -115,7 +119,6 @@ async def _dispatch_emit(node, repo_key, issue_id, event_seq, evt,
         payload={"node_id": node["id"], "pool_tag": _pool_tag, "task_id": result.get("task_id")},
     ))
     return {"status": "dispatched", "node": node["id"], "mode": "emit", "task_id": result.get("task_id")}
-
 
 async def _dispatch_waterfall(node, repo_key, issue_id, event_seq, evt,
                               skill_name, skill_id, skill_path, runtime_id, pool_tag):
@@ -147,7 +150,6 @@ async def _dispatch_waterfall(node, repo_key, issue_id, event_seq, evt,
     return await _dispatch_emit(node, repo_key, issue_id, event_seq, evt,
                                 skill_name, skill_id, skill_path, runtime_id, pool_tag)
 
-
 async def _dispatch_serial(node, repo_key, issue_id, event_seq, evt,
                            skill_name, skill_id, skill_path, runtime_id, pool_tag):
     """serial mode: multiple agents process sequentially.
@@ -176,7 +178,6 @@ async def _dispatch_serial(node, repo_key, issue_id, event_seq, evt,
 
     return {"status": "dispatched", "node": node["id"], "mode": "serial"}
 
-
 async def _dispatch_parallel(node, repo_key, issue_id, event_seq, evt,
                              skill_name, skill_id, skill_path, runtime_id, pool_tag):
     """parallel mode: multiple agents run concurrently, wait for all.
@@ -204,7 +205,6 @@ async def _dispatch_parallel(node, repo_key, issue_id, event_seq, evt,
         return {"status": "failed", "node": node["id"], "mode": "parallel", "errors": errors}
 
     return {"status": "dispatched", "node": node["id"], "mode": "parallel"}
-
 
 def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                           runtime_id, issue_id, pool_tag, skill_id=0, skill_path=""):
@@ -289,4 +289,3 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         return {"task_id": "enqueued"}
     except Exception as e:
         return {"error": str(e)[:200]}
-

@@ -65,8 +65,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    from src.im.engine_wiring import _connect, default_db_path
-    from src.im.engine_wiring import _is_mysql_backend
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+    from src.domains.runtime.im.engine_wiring import _is_mysql_backend
     backend = "mysql" if _is_mysql_backend() else "sqlite"
     conn = _connect(default_db_path())
     rows = rename_tables(conn, dry_run=args.dry_run)

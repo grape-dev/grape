@@ -33,3 +33,6 @@ croniter>=3.0
 
 # 以下为可选依赖（按需安装）：
 # OBS 对象存储：pip install esdk-obs-python crcmod
+
+# Persistence layer (S78+): src/persistence ORM modules import sqlalchemy at module level (required for service start)
+SQLAlchemy>=2.0

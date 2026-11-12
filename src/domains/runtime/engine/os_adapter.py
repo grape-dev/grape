@@ -189,6 +189,11 @@ _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm", "codex.cmd"),
         os.path.join(os.environ.get("APPDATA", ""), "npm", "codex.cmd"),
     ],
+    "atomcode": [
+        os.path.join(os.environ.get("USERPROFILE", ""), ".local", "bin", "atomcode.exe"),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "bin", "atomcode.exe"),
+        os.path.join(os.environ.get("APPDATA", ""), "npm", "atomcode.cmd"),
+    ],
     "cursor": [
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.cmd"),
@@ -320,6 +325,7 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
         #   user-dsh     <dshHome>/skills               （← 平台投送落点，本行即此）
         # 另有 customSkillDirs 可配置，但平台按现有约定只投 user 级。
         "dsh": [os.path.join(home, ".dsh", "skills")],
+        "atomcode": [os.path.join(os.path.expanduser(os.environ.get("ATOMCODE_HOME") or "~/.atomcode"), "skills")],
     }
     return mapping.get(key, [])
 
@@ -448,9 +454,9 @@ def kill_process_tree(pid: int, force: bool = False) -> bool:
             flags = ["/T"]
             if force:
                 flags.append("/F")
-            _sp.run(["taskkill"] + flags + ["/PID", str(pid)],
-                    capture_output=True, timeout=10)
-            return True
+            result = _sp.run(["taskkill"] + flags + ["/PID", str(pid)],
+                             capture_output=True, timeout=10)
+            return result.returncode == 0
         except Exception:
             return False
     import signal as _sig
@@ -468,7 +474,11 @@ def find_process_by_cwd(backend: str, cwd: str) -> list[int]:
 
     Unix: pgrep -f + /proc/{pid}/cwd readlink 校验
     Windows: wmic / Get-CimInstance 查 CommandLine 匹配（无 cwd 校验）
+    AtomCode: 两个平台均使用 executor 登记的进程与精确 cwd。
     """
+    if backend == "atomcode":
+        from src.domains.runtime.agents.executor import active_task_processes
+        return [proc.pid for proc in active_task_processes(backend, cwd)]
     if _IS_WINDOWS:
         import subprocess as _sp
         patterns = {

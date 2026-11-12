@@ -12,16 +12,16 @@ import asyncio
 
 import pytest
 
-from src.im.adapters.telegram.channel import TelegramChannel
-from src.im.adapters.telegram.outbound import TELEGRAM_CAPABILITIES, TelegramApiError
-from src.im.channel.channel import (
+from src.domains.runtime.im.adapters.telegram.channel import TelegramChannel
+from src.domains.runtime.im.adapters.telegram.outbound import TELEGRAM_CAPABILITIES, TelegramApiError
+from src.domains.runtime.im.channel.channel import (
     CancelContext,
     ChannelConfig,
     ChannelError,
     PermanentChannelError,
 )
-from src.im.channel.message import SendResult
-from src.im.channel.types import Type
+from src.domains.runtime.im.channel.message import SendResult
+from src.domains.runtime.im.channel.types import Type
 
 
 class FakeSender:

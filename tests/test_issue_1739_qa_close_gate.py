@@ -19,7 +19,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.api.db_setup import init_database
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _REPO = "gitcode:org/issue1739"
 _NUM = 1739
@@ -192,8 +192,12 @@ def test_auto_finalize_blocked_when_qa_completed_but_failed_text():
         assert _res == "qa_failed_blocked", _res
         _cli.return_value.close_issue.assert_not_called()
     _st, _at, _reason, _stage = _issue_row()
-    assert _st == "processing"
-    assert _stage == "sre"
+    # arch 基线（#1963 移植）口径：门禁拦截后卡片必须落 pending_review（否则既进不了
+    # 待审核列也无人被通知）；本分支保留该基线行为，原期望 "processing" 已过时。
+    # arch #1963（移植）：门禁拦截后 issue 状态与卡片 stage 均落 pending_review
+    # （基线原为 "processing"/"sre"；不自动关闭、不误判完成——断言同上，仅口径更新）
+    assert _st == "pending_review"
+    assert _stage == "pending_review"
     assert not _at
 
 

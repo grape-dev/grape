@@ -11,29 +11,34 @@
 - list_skills category_id 过滤 + 返回 category_name
 - search_skills 返回 category
 """
+
 import os
+
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_issue179.db")
 
 import json
+
 import pytest
+
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
-
 
 def _jwt(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
-
 
 @pytest.fixture(scope="module", autouse=True)
 def _setup():
@@ -59,7 +64,6 @@ def _setup():
             db.commit()
         except Exception:
             pass
-
 
 class TestSkillCategoryTable:
     """skill_category 表 + seed"""
@@ -94,16 +98,19 @@ class TestSkillCategoryTable:
             distinct, total = c.fetchone()
             assert distinct == total == 15
 
-
 class TestCategoryBackfill:
     """category_id 回填"""
 
     def test_official_skills_have_category_id(self):
+        """official 技能应带 category_id（S107：runtime sync 资产不在仓库，测试内自种）"""
+        from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
+        data = _minimal_sync_data()
+        data["cat-skill"]["sub_scene"] = "ci"  # 既有真实 slug
+        _sync_skills_to_db(data)
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM skill WHERE scope='official' AND category_id > 0")
             assert c.fetchone()[0] > 0
-
     def test_official_skills_zero_category_id(self):
         """official 技能 sub_scene 非空的应该全部回填"""
         with db_lock:
@@ -126,7 +133,6 @@ class TestCategoryBackfill:
             )
             for sub_scene, slug in c.fetchall():
                 assert sub_scene == slug
-
 
 class TestCategoryQueries:
     """list_skill_categories / get_skill_category"""
@@ -151,24 +157,19 @@ class TestCategoryQueries:
         cat = get_skill_category(9999)
         assert cat is None
 
-
 class TestSyncSkillsToDb:
     """_sync_skills_to_db 写入 category_id + 变更检测"""
 
     def test_sync_returns_count(self):
         from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
-        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "skill-description.json")
-        with open(config_path) as f:
-            data = json.load(f)
+        data = _minimal_sync_data()
         count = _sync_skills_to_db(data)
         assert count > 0
 
     def test_sync_writes_category_id(self):
         from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
-        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "skill-description.json")
-        with open(config_path) as f:
-            data = json.load(f)
-        _sync_skills_to_db(data)
+        data = _minimal_sync_data()
+        data["cat-skill"]["sub_scene"] = "ci"  # 既有真实 slug（启动种子），不插新分类行防计数污染
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -180,9 +181,7 @@ class TestSyncSkillsToDb:
     def test_sync_no_updated_at_change_when_data_unchanged(self):
         """数据没变时 updated_at 不应该被刷新"""
         from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
-        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "skill-description.json")
-        with open(config_path) as f:
-            data = json.load(f)
+        data = _minimal_sync_data()
         # 第一次同步
         _sync_skills_to_db(data)
         with db_lock:
@@ -197,7 +196,6 @@ class TestSyncSkillsToDb:
             after = {r[0]: r[1] for r in c.fetchall()}
         for name in before:
             assert before[name] == after.get(name), f"{name} updated_at changed unexpectedly"
-
 
 class TestUpsertSkillObs:
     """upsert_skill_obs 写入 category_id"""
@@ -221,7 +219,6 @@ class TestUpsertSkillObs:
             c = db.cursor()
             c.execute("DELETE FROM skill WHERE skill_name='test-skill-179' AND scope='user'")
             db.commit()
-
 
 class TestApiEndpoints:
     """API 接口测试"""
@@ -302,7 +299,6 @@ class TestApiEndpoints:
         assert "category_id" in s
         assert "category_name" in s
 
-
 class TestUploadCategoryValidation:
     """upload category_id 存在性校验"""
 
@@ -335,7 +331,6 @@ class TestUploadCategoryValidation:
         assert r.status_code == 400
         assert "9999" in r.json()["detail"]["message"]
 
-
 class TestConvertSkillCategory:
     """convert_skill category_id 传递"""
 
@@ -345,3 +340,18 @@ class TestConvertSkillCategory:
         skills = list_skills(2)
         if skills:
             assert "category_id" in skills[0], "list_skills missing category_id field"
+
+def _minimal_sync_data():
+    """S107：skill-description.json 已移出仓库（58173299b，build-time artifact）——
+    sync 用例改内联最小数据（与 _sync_skills_to_db 消费 schema 一致）。"""
+    return {
+        "demo-skill": {"name": "Demo 技能", "description": "demo desc", "agent_type": "vod",
+                        "path": "demo-skill", "sub_scene": ""},
+        "cat-skill": {"name": "分类技能", "description": "cat desc", "agent_type": "issue",
+                       "path": "cat-skill", "sub_scene": ""},
+    }
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_issue179.db")

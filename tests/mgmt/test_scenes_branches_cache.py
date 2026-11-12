@@ -7,24 +7,33 @@
 4. TTL 过期后重新穿透；
 5. 失败（502）不入缓存。
 """
+
 import os
+
 import sys
+
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 from unittest.mock import patch
+
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.mgmt.auth import grape_account_db
+
 from src.domains.mgmt.routes import scenes as scenes_mod
 
 OWNER = "test542b"
-REPO = "branches"
-REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
+REPO = "branches"
+
+REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 def _jwt_headers():
     from src.kernel.auth_sdk.jwt_utils import create_access_token
@@ -35,24 +44,20 @@ def _jwt_headers():
     tok = create_access_token(uid["id"], uid["username"], get_token_version(uid["id"]))
     return {"Authorization": f"Bearer {tok}"}
 
-
 client = TestClient(app)
-_headers = None
 
+_headers = None
 
 def setup_module():
     global _headers
     _headers = _jwt_headers()
 
-
 def _purge_cache():
     with scenes_mod._branches_cache_lock:
         scenes_mod._branches_cache.clear()
 
-
 def _api_branches(name):
     return {"name": name, "protected": False}
-
 
 class TestBranchesTTLCache:
 
@@ -69,13 +74,12 @@ class TestBranchesTTLCache:
     def test_cache_hit_within_ttl(self):
         calls = {"n": 0}
 
-        def _fake_req(method, url, token, payload=None):
+        def _fake_list(*a, **k):
             calls["n"] += 1
-            assert method == "GET"
             return [_api_branches("main"), _api_branches("dev")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_req):
+             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_list):
             r1 = self._get()
             assert r1.status_code == 200, r1.text
             assert r1.json()["cached"] is False
@@ -91,12 +95,12 @@ class TestBranchesTTLCache:
     def test_refresh_bypasses_cache(self):
         calls = {"n": 0}
 
-        def _fake_req(method, url, token, payload=None):
+        def _fake_list(*a, **k):
             calls["n"] += 1
             return [_api_branches("main")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_req):
+             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_list):
             self._get()
             r2 = self._get("&refresh=1")
             assert r2.status_code == 200
@@ -107,15 +111,12 @@ class TestBranchesTTLCache:
     def test_create_branch_invalidates_cache(self):
         get_calls = {"n": 0}
 
-        def _fake_get(method, url, token, payload=None):
+        def _fake_get(*a, **k):
             get_calls["n"] += 1
             return [_api_branches("main")]
 
-        def _fake_post(method, url, token, payload=None):
-            return {"name": payload["branch_name"]}
-
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_post):
+             patch("src.domains.mgmt.user.repo_manager._req", return_value={"name": "feat/new"}):
             r_create = client.post(f"/api/scenes/branches/{OWNER}/{REPO}?repo_key={REPO_KEY}",
                                    json={"branch_name": "feat/new", "refs": "main"},
                                    headers=_headers)
@@ -133,12 +134,12 @@ class TestBranchesTTLCache:
     def test_ttl_expiry_refetches(self):
         calls = {"n": 0}
 
-        def _fake_req(method, url, token, payload=None):
+        def _fake_list(*a, **k):
             calls["n"] += 1
             return [_api_branches("main")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_req):
+             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_list):
             self._get()
             # 把缓存时间戳拨回过去（超过 TTL 90s）
             key = scenes_mod._branches_cache_key("gitcode", OWNER, REPO)
@@ -152,8 +153,8 @@ class TestBranchesTTLCache:
         assert calls["n"] == 2, "TTL 过期后应重新穿透"
 
     def test_error_not_cached(self):
-        def _raise(method, url, token, payload=None):
-            raise RuntimeError("GitCode API failed (500)")
+        def _raise(*a, **k):
+            raise RuntimeError("VCS API failed (500)")
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
              patch("src.domains.mgmt.user.repo_manager._req", side_effect=_raise):
@@ -165,3 +166,27 @@ class TestBranchesTTLCache:
 
         with scenes_mod._branches_cache_lock:
             assert not scenes_mod._branches_cache, "失败响应不应入缓存"
+
+from src.domains.runtime.vcs.api_client import VcsApiClient
+
+from src.domains.mgmt.auth import grape_account_db
+
+from src.domains.mgmt.routes import scenes as scenes_mod
+
+"""Issue #542 回归测试：/api/scenes/branches TTL 缓存。
+
+覆盖：
+1. 命中：TTL 内第二次请求不穿透外部 API（mock 仅被调用一次），响应带 cached=True；
+2. refresh=1：绕过缓存强制穿透；
+3. 建分支成功后缓存失效（新分支立即可见）；
+4. TTL 过期后重新穿透；
+5. 失败（502）不入缓存。
+
+D44/S66 接缝：本路由当前实现仍走 repo_manager._req/_github_req（未迁统一命令层），
+mock 目标按实现落点锚定——两者不一致时以实际调用链为准，避免打到真实上游。
+"""
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

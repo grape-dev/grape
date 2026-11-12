@@ -1,11 +1,14 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
-import json, asyncio, hashlib, tempfile, os, threading, time
+
+import json, asyncio, tempfile, os, threading, time
 
 from src.kernel.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
-from src.kernel.prompt_builder import build_general_chat_prompt, resolve_task_server_env
-from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _get_acc
-from src.kernel.token_service import is_auth_401_error
 
+from src.kernel.prompt_builder import build_general_chat_prompt, resolve_task_server_env
+
+from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _get_acc
+
+from src.kernel.token_service import is_auth_401_error
 
 def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响。
@@ -19,13 +22,20 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
                         "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
     return path
+
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
 _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
+
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
+
 from fastapi.responses import StreamingResponse
+
 from pydantic import BaseModel
+
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
+
 from src.domains.mgmt.user import db as user_db
+
 from src.kernel.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
     add_message, get_messages, touch_conversation, update_conversation,
@@ -38,39 +48,6 @@ from src.kernel.session_manager import (
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-# 支持的 IM 渠道（Issue #956 provider 化 → #1254 加 wecom → #1309 加 slack）。
-# 单一来源：回显归一、保存校验、解绑清理三处共用，避免新增渠道时漏改其中一处。
-# Slack 是双令牌渠道：im_app_id 存 Bot Token（xoxb-）、im_app_secret 存 App Token（xapp-）。
-_IM_PROVIDERS = ("feishu", "dingtalk", "wecom", "slack", "telegram", "wechat")
-
-
-def _safe_im_app_ref(app_id: str, provider: str = "") -> str:
-    """日志里的 IM app 标识：Slack 的 app_id 位存 Bot Token → 只输出不可逆摘要。
-
-    非 Slack 渠道保持既有前缀；Slack 渠道或形如 xoxb-/xapp- 的值一律摘要，
-    绝不把令牌片段写进日志。
-    """
-    value = str(app_id or "")
-    prov = str(provider or "").strip().lower()
-    if prov == "slack" or value.startswith(("xoxb-", "xapp-")):
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-        return f"slack:{digest}"
-    if prov == "telegram" or _looks_like_telegram_token(value):
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-        return f"telegram:{digest}"
-    if prov == "wechat":
-        # 微信 ilink bot_token 敏感；app_id 位存 ilink_bot_id（非密），日志仍摘要化避免串号
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-        return f"wechat:{digest}"
-    return value[:30]
-
-
-def _looks_like_telegram_token(value: str) -> bool:
-    """Telegram Bot Token 形态 `123456:ABC-DEF…` → 日志只留摘要，不落明文片段。"""
-    head, sep, tail = str(value or "").partition(":")
-    return bool(sep and head.isdigit() and len(tail) >= 10)
-
-
 class ChatMessage(BaseModel):
     message: str
     repo_key: str = ""
@@ -78,14 +55,10 @@ class ChatMessage(BaseModel):
     image_data: str = ""  # JSON array of base64 strings, or single base64 string
     video_data: str = ""  # base64 encoded video data
 
-
 class FeedbackBody(BaseModel):
     seq: int
     feedback_type: str = "create_issue"
     comment: str = ""
-
-
-# ====== Conversations ======
 
 @router.get("/analyze-image")
 async def analyze_image(request: Request):
@@ -142,7 +115,6 @@ async def analyze_image(request: Request):
 
     return {"url": url, "description": desc or "(无法分析图片内容)"}
 
-
 @router.get("/image/{conv_id}/{filename}")
 def serve_chat_image(conv_id: str, filename: str, thumb: str = Query(default="")):
     """Serve chat image file. No auth — images are referenced by unguessable timestamp filenames.
@@ -188,31 +160,26 @@ def list_conversations(repo_key: str = Query(default=""), user: dict = Depends(r
     convs = get_user_conversations(user["id"], repo_key=repo_key)
     return {"conversations": convs}
 
-
 class NewConversationBody(BaseModel):
     repo_key: str = ""
-
 
 @router.post("/conversations", operation_id="chat_conversations_create", summary="Create conversation", description="Creates a new chat conversation for a repo_key.")
 def new_conversation(body: NewConversationBody, user: dict = Depends(require_no_session_token)):
     cid = create_conversation(user["id"], repo_key=body.repo_key)
     return {"conversation_id": cid}
 
-
 @router.delete("/conversations/{conv_id}", operation_id="chat_conversations_delete", summary="Delete conversation", description="Deletes a conversation and its messages.")
 def remove_conversation(conv_id: str, user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
-    if not conv or conv["user_id"] != user["id"]:
+    if not conv or str(conv["user_id"]) != str(user["id"]):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
     delete_messages_by_conv(conv_id)
     delete_conversation(conv_id)
     return {"message": "对话已删除"}
 
-
 class EnsureIssueConvBody(BaseModel):
     repo_key: str
     issue_number: int
-
 
 @router.post("/conversations/ensure-issue", operation_id="chat_conversations_ensure_issue", summary="Ensure issue conversation", description="Finds or creates an Issue-scoped conversation by repo_key + issue_number (used by task-center jump). Rebuilds a deleted 'Issue #N' conversation with task context.")
 def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(require_no_session_token)):
@@ -255,13 +222,10 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
         pass
     return {"conversation_id": conv_id}
 
-
-# ====== Messages ======
-
 @router.get("/messages/{conv_id}", operation_id="chat_messages", summary="List conversation messages", description="Lists messages of a conversation (limit/before pagination).")
 def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depends(require_no_session_token)):
     conv = get_conversation(conv_id)
-    if not conv or conv["user_id"] != user["id"]:
+    if not conv or str(conv["user_id"]) != str(user["id"]):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "对话未找到"})
     # 任务会话：打开时自动从 GitCode Issue 补拉 agent 评论到会话
     # （agent 通过技能 curl 在 Issue 上发的澄清追问等评论，可能未同步到会话）
@@ -280,10 +244,8 @@ def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depen
     msgs = get_messages(conv_id, before_id=before)
     return {"messages": msgs, "conversation": conv}
 
-
 # Issue #442: chat_task_id → 远端 enqueue_tid 映射（撤回时经 #136 cancel_task 终止远端任务）
 _CHAT_ENQUEUE_MAP: dict[str, str] = {}
-
 
 @router.post("/messages/{msg_id}/recall", operation_id="chat_recall_message", summary="Recall a message", description="Soft-deletes own user message and terminates the agent execution it triggered (reuses #136 stop mechanism). The original text is kept for re-editing.")
 async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_session_token)):
@@ -302,7 +264,7 @@ async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_sessi
     if not msg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "消息不存在"})
     conv = get_conversation(msg["conversation_id"])
-    if not conv or conv["user_id"] != user["id"]:
+    if not conv or str(conv["user_id"]) != str(user["id"]):
         # 不泄露他人消息存在性
         raise HTTPException(status_code=404, detail={"code": 404, "message": "消息不存在"})
     if msg["role"] != "user":
@@ -340,9 +302,6 @@ async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_sessi
              f"terminated={terminated} user={user['username']}")
     return {"recalled": True, "message_id": msg_id, "task_id": task_id, "terminated": terminated}
 
-
-# ====== Send ======
-
 def _auto_title(conv: dict, message: str):
     """首次消息时自动生成对话标题"""
     if conv and not conv.get("title") and message:
@@ -351,19 +310,26 @@ def _auto_title(conv: dict, message: str):
             title += "..."
         update_conversation(conv["id"], title=title)
 
+def _dispatch_push_to_main_loop(coro):
+    """把 web→飞书推送协程投递到主事件循环执行（引擎侧 egress 共享 session 同 loop）。
 
-_feishu_push_ctx_cache: dict = {}
-
-
-def _feishu_push_ctx(app_id: str, app_secret: str):
-    """按 app_id 复用 BotContext（token 缓存挂在 ctx 上，避免每次推送重新换 token）。"""
-    ctx = _feishu_push_ctx_cache.get(app_id)
-    if ctx is None:
-        from src.im.feishu_async import BotContext
-        ctx = BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot")
-        _feishu_push_ctx_cache[app_id] = ctx
-    return ctx
-
+    返回主 loop 的 Future（调用方不等待——fire-and-forget），失败仅告警；
+    拿不到主 loop（启动异常/测试）→ 兜底 asyncio.run 现跑。
+    """
+    import asyncio
+    loop = _CHAT_MAIN_LOOP
+    if loop is not None and loop.is_running():
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            fut.add_done_callback(lambda f: f.exception() if not f.cancelled() and f.exception() else None)
+            return fut
+        except Exception as e:
+            log.warning(f"Chat web->feishu push dispatch failed: {e}")
+    try:
+        asyncio.run(coro)
+    except Exception as e:
+        log.warning(f"Chat web->feishu push (fallback) failed: {e}")
+    return None
 
 async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
     """web 答复推送到飞书（feishu-web-chat-unified-design.md §3.2）。
@@ -384,7 +350,7 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
             open_id = im_channel_id
         if not open_id:
             return
-        from src.im.engine_wiring import get_active_installation
+        from src.domains.runtime.im.engine_wiring import get_active_installation
         inst = get_active_installation("user", owner_user_id=str(user.get("id") or ""),
                                        channel_type="feishu")
         if not inst:
@@ -393,8 +359,8 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
         app_id, app_secret = str(cfg.get("app_id", "")), str(cfg.get("app_secret", ""))
         if not app_id or not app_secret:
             return
-        from src.im.engine_wiring import feishu_api
-        from src.im.feishu_async import BotContext
+        from src.domains.runtime.im.engine_wiring import feishu_api
+        from src.domains.runtime.im.feishu_async import BotContext
         api = feishu_api(app_id)
         ctx = _feishu_push_ctx(app_id, app_secret)
         await api.send_card_to_user(ctx, open_id, f"[来自Web] {text[:1800]}", title="Chat Agent")
@@ -402,7 +368,6 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
                  f"open_id={open_id[:20]} text_len={len(text)}")
     except Exception as e:
         log.warning(f"Chat web->feishu push failed: {e}")
-
 
 def _resolve_gitcode_token(user_token: str, repo_key: str = "") -> str:
     """Resolve GitCode token for agent injection (Issue #344: no session cache).
@@ -421,14 +386,13 @@ def _resolve_gitcode_token(user_token: str, repo_key: str = "") -> str:
             if _result.token:
                 return _result.token
             # R20.8.1: token 过期或未配置 → 检测并标记
-            from src.kernel.token_service import detect_and_mark_expired
-            _error_code = detect_and_mark_expired(repo_key)
+            from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面
+            _error_code = detect_and_mark_repo_token_expired(repo_key)
             if _error_code:
                 log.warning(f"Chat resolve token: token expired (error_code={_error_code}), repo={repo_key}")
         except Exception as e:
             log.warning(f"Chat resolve token failed: {e}")
     return ""
-
 
 def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
     """构建 Web Chat prompt 的用户基本信息（与飞书 user_info 格式一致）。
@@ -449,7 +413,6 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
         return "\n".join(lines)
     except Exception:
         return ""
-
 
 def _save_chat_images(image_data: str, conv_id: str) -> list:
     """Save image(s) from base64 data to filesystem, return list of URL paths."""
@@ -510,13 +473,11 @@ def _save_chat_images(image_data: str, conv_id: str) -> list:
         log.warning(f"Chat: save images failed: {e}")
         return []
 
-
 def _build_image_markers(urls: list) -> str:
     """Build [chat_img:url] markers for message content."""
     if not urls:
         return ""
     return "\n" + "\n".join(f"[chat_img:{u}]" for u in urls)
-
 
 def _understand_image(image_data: str) -> str:
     """Analyze image(s) from base64 data and return description for prompt injection.
@@ -571,7 +532,6 @@ def _understand_image(image_data: str) -> str:
         log.warning(f"Web Chat: image understanding failed: {e}")
         return f"用户上传了图片，但分析出错: {e}"
 
-
 def _understand_video(video_data: str) -> str:
     """Analyze video from base64 data and return description for prompt injection."""
     if not video_data:
@@ -597,11 +557,9 @@ def _understand_video(video_data: str) -> str:
         log.warning(f"Web Chat: video understanding failed: {e}")
         return f"用户上传了视频，但分析出错: {e}"
 
-
 # direct 模式 chat 会话凭据注入（chat-direct-session-token-injection-design.md / feishu-task 版）：
 # 公共 helper 与飞书 IM 共用，防两组逻辑漂移（src/api/chat_session_env.py）。
-from src.api.chat_session_env import chat_session_env_extra
-
+from src.api.chat_session_env import chat_session_env_extra, chat_repo_env
 
 @router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
 async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
@@ -609,7 +567,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     # Issue #344: 不再缓存明文 token 到 chat_conversations，agent 端实时从 external_identities 获取
     if conv_id:
         conv = get_conversation(conv_id)
-        if not conv or conv["user_id"] != user["id"]:
+        if not conv or str(conv["user_id"]) != str(user["id"]):
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
@@ -660,8 +618,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    # S75/D37: 按 repo_key 前缀派生 provider 取 token（原默认 gitcode——双平台
+    # 绑定用户在 gitee 会话拿错 token）
+    from src.api.deps import get_user_token_for_repo
+    user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
@@ -802,8 +762,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
         _is_401 = is_auth_401_error(_err_lower)
         if _is_401:
             try:
-                from src.kernel.token_service import detect_and_mark_expired
-                _error_code = detect_and_mark_expired(repo_key) or ""
+                from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面
+                _error_code = detect_and_mark_repo_token_expired(repo_key) or ""
             except Exception as _e:
                 log.warning(f"Chat post-exec 401 detect failed: {_e}")
             if _error_code:
@@ -823,14 +783,13 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
         _result["error_code"] = _error_code
     return _result
 
-
 @router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
     # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
         conv = get_conversation(conv_id)
-        if not conv or conv["user_id"] != user["id"]:
+        if not conv or str(conv["user_id"]) != str(user["id"]):
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
@@ -851,8 +810,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    # S75/D37: 按 repo_key 前缀派生 provider 取 token（原默认 gitcode——双平台
+    # 绑定用户在 gitee 会话拿错 token）
+    from src.api.deps import get_user_token_for_repo
+    user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
@@ -1101,8 +1062,8 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     _is_401 = is_auth_401_error(_err_lower)
                     if _is_401:
                         try:
-                            from src.kernel.token_service import detect_and_mark_expired
-                            _stream_error_code = detect_and_mark_expired(repo_key) or ""
+                            from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面
+                            _stream_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                             if _stream_error_code:
                                 log.warning(f"[Agent:chat|user:{user['username']}] token expired during stream (error_code={_stream_error_code}), repo={repo_key}")
                         except Exception as _se:
@@ -1189,7 +1150,6 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                  "X-Accel-Buffering": "no"},
     )
 
-
 def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data="", video_data=""):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
@@ -1268,9 +1228,6 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     _log.info(f"Chat enqueued: task={tid} user={user['id']} conv={conv_id} mode={get_execution_mode()}")
     return {"task_id": tid, "reply": "", "conversation_id": conv_id, "queued": True}
 
-
-# ====== Feedback ======
-
 @router.post("/feedback", operation_id="chat_feedback", summary="Submit feedback", description="Submits feedback on a chat turn (seq + type + comment).")
 def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_token)):
     from src.kernel.session_manager import db, db_lock
@@ -1310,9 +1267,6 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
         "bot_token_available": bool(bot_token),
     }
 
-
-# ====== Config ======
-
 def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
     """按引擎唯一键去重（Issue #400）：个人机器 user/repo 双档或历史重复行合并为单条。
 
@@ -1339,7 +1293,6 @@ def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
         seen.add(key)
         out.append(b)
     return out
-
 
 def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
     """解析唯一选中引擎（Issue #400 单选语义）。
@@ -1390,7 +1343,6 @@ def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
             return b
     return None
 
-
 @router.get("/config", operation_id="chat_config_get", summary="Get chat config", description="Returns chat config (backend/settings/personal engines).")
 def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = ""):
     cfg = _get_chat_config(user["id"])
@@ -1439,8 +1391,8 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     # 跨平台：查 DB 确定 repo_key 实际前缀
     _rk_candidates = []
     if repo:
-        _base = repo.split(":", 1)[1] if ":" in repo else repo
-        _rk_candidates = [f"gitcode:{_base}", f"github:{_base}"]
+        from src.kernel.repo_key import repo_key_candidates
+        _rk_candidates = repo_key_candidates(repo)
     with db_lock:
         c = db.cursor()
         try:
@@ -1523,59 +1475,6 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         }
     }
 
-
-def _active_im_installation(user_id):
-    """当前用户 active 的 IM 安装（A2 收尾后凭证真相源；无则 {}）。"""
-    try:
-        from src.im.engine_wiring import get_active_installation
-        return get_active_installation("user", owner_user_id=str(user_id)) or {}
-    except Exception as e:
-        log.warning(f"Chat IM: read installation failed: {e}")
-        return {}
-
-
-def _get_provider_installation(user_id, channel_type: str) -> dict:
-    """按渠道取该用户 active 安装（多渠并存时按渠道隔离旧值，不能取"全局最近一条"）。"""
-    try:
-        from src.im.engine_wiring import get_active_installation
-        return get_active_installation("user", owner_user_id=str(user_id),
-                                       channel_type=str(channel_type or "")) or {}
-    except Exception as e:
-        log.warning(f"Chat IM: read installation({channel_type}) failed: {e}")
-        return {}
-
-
-def _user_im_installations(user_id) -> dict:
-    """该用户每个渠道最新一条可用安装（active/disabled）→ {channel_type: {status, config}}。
-
-    前端多渠并存（如微信 + 企业微信同时启用）时，各渠道表单需要各自的凭证回显；
-    只取"全局最近一条"会让其余渠道恒为空 → 误显示"未接入"。
-    """
-    out: dict = {}
-    try:
-        from src.im.engine_wiring import _connect, default_db_path
-        conn = _connect(default_db_path())
-        try:
-            rows = conn.execute(
-                "SELECT channel_type, status, config FROM grape_t_channel_installation "
-                "WHERE scope='user' AND owner_user_id=? AND status IN ('active','disabled') "
-                "ORDER BY updated_at DESC", (str(user_id),)).fetchall()
-        finally:
-            conn.close()
-        for ctype, st, raw in rows or []:
-            key = str(ctype or "").strip().lower()
-            if not key or key in out:
-                continue
-            try:
-                cfg = json.loads(raw or "{}")
-            except Exception:
-                cfg = {}
-            out[key] = {"status": str(st or ""), "config": cfg if isinstance(cfg, dict) else {}}
-    except Exception as e:
-        log.warning(f"Chat IM: read user installations failed: {e}")
-    return out
-
-
 def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
                             provider: str = "feishu") -> None:
     """Chat IM 解绑清理（Issue #294，#956 补 provider 维度）：注册表释放 + 渠道会话清理。
@@ -1598,7 +1497,7 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
             # A2 收尾：引用判定改看 active 安装行（不含当前用户本人的这条）
             other_refs = 0
             try:
-                from src.im.engine_wiring import _connect, default_db_path
+                from src.domains.runtime.im.engine_wiring import _connect, default_db_path
                 _conn = _connect(default_db_path())
                 try:
                     other_refs = int(_conn.execute(
@@ -1635,7 +1534,6 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
         log.info(f"Chat IM: unbound old app_id={_safe_im_app_ref(old_app_id, provider)} provider={provider} user={user_id} (other_refs={other_refs})")
     except Exception as e:
         log.warning(f"Chat IM: unbind cleanup failed: {e}")
-
 
 @router.put("/config", operation_id="chat_config_update", summary="Update chat config", description="Updates chat config.")
 async def update_chat_config(body: dict, request: Request,
@@ -1699,7 +1597,7 @@ async def update_chat_config(body: dict, request: Request,
     if channel.get("app_id"):
         app_id = channel["app_id"]
         # 强约束：一个 app_id 全局唯一。查 active 安装行：repo 轨=被 VOD 占用，user 轨他人=被别人占用
-        from src.im.engine_wiring import _connect, default_db_path
+        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
         _conn = _connect(default_db_path())
         try:
             _holders = _conn.execute(
@@ -1828,7 +1726,7 @@ async def update_chat_config(body: dict, request: Request,
     # Issue #956：revoke 按「旧渠道类型」匹配安装行（钉钉行走 channel_type=dingtalk，
     # 不传会用默认 feishu 导致 revoke 落空 → 安装行不 revoked、引擎不归零）
     try:
-        from src.im.engine_wiring import revoke_installation, sync_installation
+        from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
         _uid = str(user["id"])
         _old_channel = old_channel
         if explicit_unbind and old_app_id:
@@ -1885,89 +1783,6 @@ async def update_chat_config(body: dict, request: Request,
 
     return {"message": "配置已更新"}
 
-
-# ===== 微信 ilink 扫码绑定（Issue #1728 §5.1）=====
-
-@router.post("/im/wechat/login/start", operation_id="chat_wechat_login_start",
-             summary="Start WeChat ilink QR login",
-             description="Requests an ilink bot QR code and returns login_id + qrcode_img_content; poll status until confirmed.")
-async def chat_wechat_login_start(user: dict = Depends(require_no_session_token)):
-    """取微信 ilink 绑定二维码（进程内状态机 TTL 10 分钟）。"""
-    from src.im.adapters.wechat.login import default_login_manager
-    manager = default_login_manager()
-    try:
-        return await manager.start()
-    except Exception as e:
-        log.warning(f"Chat IM: wechat login start failed: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": "获取微信绑定二维码失败，请稍后重试"})
-
-
-def _persist_wechat_login(user: dict, credentials: dict) -> bool:
-    """confirmed 凭证落 `grape_t_channel_installation`（A2 收尾：不再回写 legacy im_* 三列）。"""
-    bot_token = str(credentials.get("bot_token") or "")
-    bot_id = str(credentials.get("ilink_bot_id") or "")
-    if not bot_token or not bot_id:
-        return False
-    baseurl = str(credentials.get("baseurl") or "")
-    ilink_user_id = str(credentials.get("ilink_user_id") or "")
-    from datetime import datetime as _dt
-    extra = {
-        "bot_token": bot_token,
-        "ilink_user_id": ilink_user_id,
-        "bound_at": _dt.now().isoformat(),
-    }
-    if baseurl:
-        extra["baseurl"] = baseurl
-    try:
-        from src.im.engine_wiring import sync_installation
-        sync_installation(
-            "user", owner_user_id=str(user["id"]), app_id=bot_id,
-            app_secret=bot_token, channel_type="wechat", extra_config=extra)
-    except Exception as e:
-        log.warning(f"Chat IM: wechat login installation write failed: {e}")
-        return False
-    log.info(f"Chat IM: wechat bound app_id={_safe_im_app_ref(bot_id, 'wechat')} user={user['id']}")
-    # C3 审计：扫码绑定=凭证写入类操作，必须留痕（detail 只带 app 摘要，绝不含 bot_token）
-    try:
-        from src.domains.mgmt.auth import audit as auth_audit
-        auth_audit.log_audit(
-            "im_installation_change",
-            user_id=int(user["id"]), operator_id=int(user["id"]),
-            detail={"action": "wechat_qr_bind", "provider": "wechat",
-                    "app_ref": _safe_im_app_ref(bot_id, "wechat"), "scope": "user"},
-        )
-    except Exception as _ae:
-        log.warning(f"Chat IM: wechat bind audit failed: {_ae}")
-    return True
-
-
-@router.get("/im/wechat/login/status", operation_id="chat_wechat_login_status",
-            summary="Get WeChat ilink login status",
-            description="Short-poll proxy for ilink qrcode status: wait|scaned|need_verifycode|confirmed|expired. On confirmed the credential is stored to grape_t_channel_installation.")
-async def chat_wechat_login_status(id: str = Query(""), verify_code: str = Query(""),
-                                   user: dict = Depends(require_no_session_token)):
-    """扫码状态短轮询；`need_verifycode` 时前端提交 PIN（verify_code 透传）。"""
-    from src.im.adapters.wechat.login import default_login_manager
-    manager = default_login_manager()
-    session = manager.get(id)
-    if session is None:
-        return {"status": "expired", "message": "登录会话不存在或已过期"}
-    try:
-        result = await manager.status(id, verify_code=verify_code)
-    except Exception as e:
-        log.warning(f"Chat IM: wechat login status failed: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": "查询扫码状态失败，请稍后重试"})
-    credentials = result.pop("credentials", None)
-    if result.get("status") == "confirmed" and isinstance(credentials, dict):
-        if not credentials.get("_bound"):
-            if _persist_wechat_login(user, credentials):
-                credentials["_bound"] = True
-    result.pop("_bound", None)
-    return result
-
-
-# ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====
-
 def _format_chat_failure_text(enqueue_tid: str) -> str:
     """远端 chat 任务失败 → 友好提示（chat-remote-failure-hint-design §2.4）。
 
@@ -1992,14 +1807,15 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     - 前端用 GET /task/{task_id}/stream 订阅 SSE（可断开重连，缓冲重放）
     - 页面切换/会话切换不中断后端执行
     """
+    _capture_chat_main_loop()  # 后台线程推送回主 loop 用
     from src.api.chat_task_manager import ChatTaskManager
-    from src.api.deps import get_user_token_with_refresh
+    from src.api.deps import get_user_token_for_repo
 
     conv_id = body.conversation_id
     # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
         conv = get_conversation(conv_id)
-        if not conv or conv["user_id"] != user["id"]:
+        if not conv or str(conv["user_id"]) != str(user["id"]):
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
@@ -2019,8 +1835,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    # S75/D37: 按 repo_key 前缀派生 provider 取 token（原默认 gitcode——双平台
+    # 绑定用户在 gitee 会话拿错 token）
+    from src.api.deps import get_user_token_for_repo
+    user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
@@ -2179,8 +1997,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     _is_401 = is_auth_401_error(_err_lower)
                     if _is_401:
                         try:
-                            from src.kernel.token_service import detect_and_mark_expired
-                            _ctm_error_code = detect_and_mark_expired(repo_key) or ""
+                            from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面
+                            _ctm_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                             if _ctm_error_code:
                                 log.warning(f"[Chat submit] token expired (error_code={_ctm_error_code}), repo={repo_key}")
                         except Exception as _ce:
@@ -2300,7 +2118,6 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "running",
             "message_id": message_id}
 
-
 @router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="Async task stream", description="SSE subscribe to task output: replays the buffer then appends live events; DB fallback for finished tasks.")
 async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session_token)):
     """SSE 订阅任务输出 — 先重放缓冲，再实时追加（学习 Admin AI subscribe）。
@@ -2400,14 +2217,15 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
                  "X-Accel-Buffering": "no"},
     )
 
-
 # ===== Chat Agent 持久化查询（旧 v1 机制，保留兼容）=====
 # 内存任务缓冲（task_id → {status, events, result, conv_id, created_at, finished_at}）
 import threading as _threading
-_chat_tasks: dict = {}
-_chat_tasks_lock = _threading.Lock()
-_CHAT_TASK_TTL = 30 * 60  # 30 分钟后清理已完成任务
 
+_chat_tasks: dict = {}
+
+_chat_tasks_lock = _threading.Lock()
+
+_CHAT_TASK_TTL = 30 * 60  # 30 分钟后清理已完成任务
 
 def _chat_task_cleanup():
     """清理过期的已完成任务缓冲。"""
@@ -2419,7 +2237,6 @@ def _chat_task_cleanup():
                    and now - t["finished_at"] > _CHAT_TASK_TTL]
         for tid in expired:
             _chat_tasks.pop(tid, None)
-
 
 @router.post("/send/async", operation_id="chat_send_async", summary="Send message (async)", description="Async message send: DB/engine work runs in executors. Local engines return a fallback stream; remote engines return task_id.")
 async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_session_token)):
@@ -2436,7 +2253,6 @@ async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_
     result.pop("_enqueue_task_id", None)
     return result
 
-
 def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     """send/async 的同步实现（在线程池中执行，不阻塞 event loop）。"""
     import time as _t, uuid as _uuid
@@ -2444,7 +2260,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
         conv = get_conversation(conv_id)
-        if not conv or conv["user_id"] != user["id"]:
+        if not conv or str(conv["user_id"]) != str(user["id"]):
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
     else:
         conv_id = create_conversation(user["id"], body.repo_key)
@@ -2464,8 +2280,10 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    # S75/D37: 按 repo_key 前缀派生 provider 取 token（原默认 gitcode——双平台
+    # 绑定用户在 gitee 会话拿错 token）
+    from src.api.deps import get_user_token_for_repo
+    user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
@@ -2541,9 +2359,9 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     except Exception as e:
         return {"task_id": "", "conversation_id": conv_id, "status": "error", "message": str(e)[:200]}
 
-
 async def _poll_worker(chat_task_id: str, enqueue_task_id: str, conv_id: str):
     """轻量级异步轮询：每 2s 查 worker 任务状态，完成时写入结果。"""
+    _capture_chat_main_loop()
     import time as _t
     while True:
         await asyncio.sleep(2)
@@ -2564,7 +2382,6 @@ async def _poll_worker(chat_task_id: str, enqueue_task_id: str, conv_id: str):
                     t["result"] = final_text
                     t["finished_at"] = _t.time()
             break
-
 
 def _execute_chat_task(task_id: str):
     """后台执行 chat 任务（direct 模式 stream_agent / queue 模式 enqueue + wait）。"""
@@ -2685,8 +2502,8 @@ def _execute_chat_task(task_id: str):
             _is_401 = is_auth_401_error(_err_lower)
             if _is_401:
                 try:
-                    from src.kernel.token_service import detect_and_mark_expired
-                    _task_error_code = detect_and_mark_expired(_task_repo_key) or ""
+                    from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面
+                    _task_error_code = detect_and_mark_repo_token_expired(_task_repo_key) or ""
                     if _task_error_code:
                         _pName = "GitHub" if _task_repo_key.startswith("github:") else "GitCode"
                         final_text = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
@@ -2721,7 +2538,6 @@ def _execute_chat_task(task_id: str):
                 t["finished_at"] = _t.time()
         from src.kernel.config import log
         log.warning(f"Chat task {task_id} failed: {e}")
-
 
 @router.get("/task/{task_id}/status", operation_id="chat_task_status", summary="Async task status", description="Queries chat task status (cross-machine; memory -> legacy cache -> DB fallback).")
 def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
@@ -2790,4 +2606,191 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
                 "source": "db"}
     return {"task_id": task_id, "status": "not_found"}
 
+import json, asyncio, hashlib, tempfile, os, threading, time
 
+# direct 模式 chat 会话凭据注入（chat-direct-session-token-injection-design.md / feishu-task 版）：
+# 公共 helper 与飞书 IM 共用，防两组逻辑漂移（src/api/chat_session_env.py）。
+from src.api.chat_session_env import chat_session_env_extra
+
+def _safe_im_app_ref(app_id: str, provider: str = "") -> str:
+    """日志里的 IM app 标识：Slack 的 app_id 位存 Bot Token → 只输出不可逆摘要。
+
+    非 Slack 渠道保持既有前缀；Slack 渠道或形如 xoxb-/xapp- 的值一律摘要，
+    绝不把令牌片段写进日志。
+    """
+    value = str(app_id or "")
+    prov = str(provider or "").strip().lower()
+    if prov == "slack" or value.startswith(("xoxb-", "xapp-")):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"slack:{digest}"
+    if prov == "telegram" or _looks_like_telegram_token(value):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"telegram:{digest}"
+    if prov == "wechat":
+        # 微信 ilink bot_token 敏感；app_id 位存 ilink_bot_id（非密），日志仍摘要化避免串号
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"wechat:{digest}"
+    return value[:30]
+
+def _looks_like_telegram_token(value: str) -> bool:
+    """Telegram Bot Token 形态 `123456:ABC-DEF…` → 日志只留摘要，不落明文片段。"""
+    head, sep, tail = str(value or "").partition(":")
+    return bool(sep and head.isdigit() and len(tail) >= 10)
+
+def _capture_chat_main_loop() -> None:
+    """主循环入口（chat_submit 等 async handler）顺手记录主事件循环。
+
+    后台线程（ChatTaskManager/_execute_chat_task）的飞书推送要投递回主 loop——
+    共享 aiohttp ClientSession 绑定主 loop，跨 loop 直接 asyncio.run 会抛
+    "Timeout context manager should be used inside a task"。
+    """
+    global _CHAT_MAIN_LOOP
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        if _CHAT_MAIN_LOOP is not loop:
+            _CHAT_MAIN_LOOP = loop
+    except RuntimeError:
+        pass
+
+def _feishu_push_ctx(app_id: str, app_secret: str):
+    """按 app_id 复用 BotContext（token 缓存挂在 ctx 上，避免每次推送重新换 token）。"""
+    ctx = _feishu_push_ctx_cache.get(app_id)
+    if ctx is None:
+        from src.domains.runtime.im.feishu_async import BotContext
+        ctx = BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot")
+        _feishu_push_ctx_cache[app_id] = ctx
+    return ctx
+
+def _active_im_installation(user_id):
+    """当前用户 active 的 IM 安装（A2 收尾后凭证真相源；无则 {}）。"""
+    try:
+        from src.domains.runtime.im.engine_wiring import get_active_installation
+        return get_active_installation("user", owner_user_id=str(user_id)) or {}
+    except Exception as e:
+        log.warning(f"Chat IM: read installation failed: {e}")
+        return {}
+
+def _get_provider_installation(user_id, channel_type: str) -> dict:
+    """按渠道取该用户 active 安装（多渠并存时按渠道隔离旧值，不能取"全局最近一条"）。"""
+    try:
+        from src.domains.runtime.im.engine_wiring import get_active_installation
+        return get_active_installation("user", owner_user_id=str(user_id),
+                                       channel_type=str(channel_type or "")) or {}
+    except Exception as e:
+        log.warning(f"Chat IM: read installation({channel_type}) failed: {e}")
+        return {}
+
+def _user_im_installations(user_id) -> dict:
+    """该用户每个渠道最新一条可用安装（active/disabled）→ {channel_type: {status, config}}。
+
+    前端多渠并存（如微信 + 企业微信同时启用）时，各渠道表单需要各自的凭证回显；
+    只取"全局最近一条"会让其余渠道恒为空 → 误显示"未接入"。
+    """
+    out: dict = {}
+    try:
+        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+        conn = _connect(default_db_path())
+        try:
+            rows = conn.execute(
+                "SELECT channel_type, status, config FROM grape_t_channel_installation "
+                "WHERE scope='user' AND owner_user_id=? AND status IN ('active','disabled') "
+                "ORDER BY updated_at DESC", (str(user_id),)).fetchall()
+        finally:
+            conn.close()
+        for ctype, st, raw in rows or []:
+            key = str(ctype or "").strip().lower()
+            if not key or key in out:
+                continue
+            try:
+                cfg = json.loads(raw or "{}")
+            except Exception:
+                cfg = {}
+            out[key] = {"status": str(st or ""), "config": cfg if isinstance(cfg, dict) else {}}
+    except Exception as e:
+        log.warning(f"Chat IM: read user installations failed: {e}")
+    return out
+
+@router.post("/im/wechat/login/start", operation_id="chat_wechat_login_start",
+             summary="Start WeChat ilink QR login",
+             description="Requests an ilink bot QR code and returns login_id + qrcode_img_content; poll status until confirmed.")
+async def chat_wechat_login_start(user: dict = Depends(require_no_session_token)):
+    """取微信 ilink 绑定二维码（进程内状态机 TTL 10 分钟）。"""
+    from src.domains.runtime.im.adapters.wechat.login import default_login_manager
+    manager = default_login_manager()
+    try:
+        return await manager.start()
+    except Exception as e:
+        log.warning(f"Chat IM: wechat login start failed: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "获取微信绑定二维码失败，请稍后重试"})
+
+def _persist_wechat_login(user: dict, credentials: dict) -> bool:
+    """confirmed 凭证落 `grape_t_channel_installation`（A2 收尾：不再回写 legacy im_* 三列）。"""
+    bot_token = str(credentials.get("bot_token") or "")
+    bot_id = str(credentials.get("ilink_bot_id") or "")
+    if not bot_token or not bot_id:
+        return False
+    baseurl = str(credentials.get("baseurl") or "")
+    ilink_user_id = str(credentials.get("ilink_user_id") or "")
+    from datetime import datetime as _dt
+    extra = {
+        "bot_token": bot_token,
+        "ilink_user_id": ilink_user_id,
+        "bound_at": _dt.now().isoformat(),
+    }
+    if baseurl:
+        extra["baseurl"] = baseurl
+    try:
+        from src.domains.runtime.im.engine_wiring import sync_installation
+        sync_installation(
+            "user", owner_user_id=str(user["id"]), app_id=bot_id,
+            app_secret=bot_token, channel_type="wechat", extra_config=extra)
+    except Exception as e:
+        log.warning(f"Chat IM: wechat login installation write failed: {e}")
+        return False
+    log.info(f"Chat IM: wechat bound app_id={_safe_im_app_ref(bot_id, 'wechat')} user={user['id']}")
+    # C3 审计：扫码绑定=凭证写入类操作，必须留痕（detail 只带 app 摘要，绝不含 bot_token）
+    try:
+        from src.domains.mgmt.auth import audit as auth_audit
+        auth_audit.log_audit(
+            "im_installation_change",
+            user_id=int(user["id"]), operator_id=int(user["id"]),
+            detail={"action": "wechat_qr_bind", "provider": "wechat",
+                    "app_ref": _safe_im_app_ref(bot_id, "wechat"), "scope": "user"},
+        )
+    except Exception as _ae:
+        log.warning(f"Chat IM: wechat bind audit failed: {_ae}")
+    return True
+
+@router.get("/im/wechat/login/status", operation_id="chat_wechat_login_status",
+            summary="Get WeChat ilink login status",
+            description="Short-poll proxy for ilink qrcode status: wait|scaned|need_verifycode|confirmed|expired. On confirmed the credential is stored to grape_t_channel_installation.")
+async def chat_wechat_login_status(id: str = Query(""), verify_code: str = Query(""),
+                                   user: dict = Depends(require_no_session_token)):
+    """扫码状态短轮询；`need_verifycode` 时前端提交 PIN（verify_code 透传）。"""
+    from src.domains.runtime.im.adapters.wechat.login import default_login_manager
+    manager = default_login_manager()
+    session = manager.get(id)
+    if session is None:
+        return {"status": "expired", "message": "登录会话不存在或已过期"}
+    try:
+        result = await manager.status(id, verify_code=verify_code)
+    except Exception as e:
+        log.warning(f"Chat IM: wechat login status failed: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "查询扫码状态失败，请稍后重试"})
+    credentials = result.pop("credentials", None)
+    if result.get("status") == "confirmed" and isinstance(credentials, dict):
+        if not credentials.get("_bound"):
+            if _persist_wechat_login(user, credentials):
+                credentials["_bound"] = True
+    result.pop("_bound", None)
+    return result
+
+# 支持的 IM 渠道（Issue #956 provider 化 → #1254 加 wecom → #1309 加 slack）。
+# 单一来源：回显归一、保存校验、解绑清理三处共用，避免新增渠道时漏改其中一处。
+# Slack 是双令牌渠道：im_app_id 存 Bot Token（xoxb-）、im_app_secret 存 App Token（xapp-）。
+_IM_PROVIDERS = ("feishu", "dingtalk", "wecom", "slack", "telegram", "wechat")
+
+_CHAT_MAIN_LOOP = None
+
+_feishu_push_ctx_cache: dict = {}

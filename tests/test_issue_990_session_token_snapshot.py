@@ -34,7 +34,7 @@ from src.api.deps import get_current_user_or_api_key
 from src.domains.runtime.engine.service import (
     enqueue_task, session_token_for_execution, sync_task_session_token,
 )
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _seed_session_and_runtime(repo_key="gitcode:issue990/r", agent_type="coding"):

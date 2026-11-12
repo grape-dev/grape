@@ -6,7 +6,7 @@ import asyncio
 import os
 from unittest.mock import AsyncMock, patch
 
-from src.im.vod_handler_async import _execute_vod_agent
+from src.domains.runtime.im.vod_handler_async import _execute_vod_agent
 
 
 def _args():
@@ -27,7 +27,7 @@ class TestVodHandlerQueueMode:
                                                "usage_json": "{}"})), \
              patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=1), \
              patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.vod_handler_async.consume_stream_async") as m_consume:
+             patch("src.domains.runtime.im.vod_handler_async.consume_stream_async") as m_consume:
             reply = asyncio.run(_execute_vod_agent(*_args()))
 
         assert reply == "VOD_QUEUE_OK"
@@ -46,7 +46,7 @@ class TestVodHandlerQueueMode:
         with patch("src.domains.runtime.engine.service.enqueue_task") as m_enq, \
              patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=1), \
              patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.vod_handler_async.consume_stream_async", side_effect=_fake_consume):
+             patch("src.domains.runtime.im.vod_handler_async.consume_stream_async", side_effect=_fake_consume):
             reply = asyncio.run(_execute_vod_agent(*_args()))
 
         assert reply == "VOD_LOCAL_OK"

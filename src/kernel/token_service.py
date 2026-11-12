@@ -57,13 +57,36 @@ def resolve_repo_token(repo_key: str):
     return TokenResolver(provider).resolve(repo_key)
 
 
-def detect_and_mark_expired(repo_key: str) -> str:
+def resolve_repo_config_level(repo_key: str):
+    """获取配置级别 TokenResult（不检查过期、不触发 refresh、纯读）。
+
+    D101 方案二（评审 v2 第 3 点）：校验/传输双语义拆分——校验方只取
+    .level 判路径类型，**禁止消费 .token 字段**（token 传输唯一化=claim
+    现取注入）。内部委托 TokenResolver.resolve_config_level（_fetch 纯读，
+    UserToken 走 _fetch_stored 跳过 OAuth refresh）。
+    """
+    if not repo_key:
+        from src.kernel.token_resolver import TokenResult
+        return TokenResult(token="", level="", provider=None, repo_key="")
+    provider = create_provider_from_repo_key(repo_key)
+    return TokenResolver(provider).resolve_config_level(repo_key)
+
+
+def detect_and_mark_repo_token_expired(repo_key: str) -> str:
     """fail_task 401 检测统一入口。供 Chat / 飞书等非 webhook 场景调用。
 
     R20.8.1: Chat agent 401 时调此方法检测 token 过期。
-    返回 error_code（TOKEN_EXPIRED / GLOBAL_TOKEN_EXPIRED / ... / ""）。
+    D101 方案三（T8 b 案）：原 detect_and_mark_expired 退役——
+    "session 级过期"概念随第 1 级删除消亡；本入口语义=三级链通用检测，
+    返回 error_code（REPO_TOKEN_EXPIRED / GLOBAL_TOKEN_EXPIRED /
+    TOKEN_EXPIRED / NO_TOKEN_AVAILABLE / ""）。
     """
     if not repo_key:
         return ""
     provider = create_provider_from_repo_key(repo_key)
     return TokenResolver(provider).detect_and_mark_expired(repo_key)
+
+
+# D101 方案三（T8 b 案）：旧入口 detect_and_mark_expired 已退役（符号消亡，
+# 防复活守卫见 tests/test_d101s_session_cleanup.py）——消费方一律改调
+# detect_and_mark_repo_token_expired（三级链通用检测，语义等同）。

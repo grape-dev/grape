@@ -58,7 +58,7 @@ def sched():
 
     try:
         spec = importlib.util.spec_from_file_location(
-            "sched_notify_test", os.path.join(SRC_DIR, "src", "runtime", "scheduler.py"))
+            "sched_notify_test", os.path.join(SRC_DIR, "src", "domains", "runtime", "engine", "scheduler.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         _SCHED = mod
@@ -166,7 +166,7 @@ def notify_env(sched):
         api = "apiX"
     # 用 sys.modules 打桩三个依赖模块 —— 必须保存并在 teardown 原样还原，
     # 否则后续测试文件会拿到缺属性的假模块（曾导致 test_table* 大面积 ImportError）。
-    _stub_names = ("src.api.main", "src.api.issues_center", "src.prompt_builder")
+    _stub_names = ("src.api.main", "src.api.issues_center", "src.kernel.prompt_builder")
     _saved_mods = {n: sys.modules.get(n) for n in _stub_names}
     fm = types.ModuleType("src.api.main")
     fm.bot_manager = _BM()

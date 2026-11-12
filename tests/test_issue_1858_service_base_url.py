@@ -23,7 +23,7 @@ GW = "https://gw.grape.example.com"
 
 def _patch_bases():
     return patch.multiple(
-        "src.prompt_builder",
+        "src.kernel.prompt_builder",
         _resolve_business_base=lambda runtime_id=0: (BIZ, "server_base_url"),
         _resolve_server_url=lambda runtime_id=0: RT,
     )
@@ -94,14 +94,14 @@ class TestResolveTaskServerEnv:
         assert "vcs" in json.loads(env["GRAPE_BASE_URL_SOURCES"])
 
     def test_build_task_env_carries_three_bases(self):
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         with _patch_bases(), \
              patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""), \
              patch("src.api.event_pipeline._inject_scene_env"), \
              patch("src.api.event_pipeline._inject_bot_agent_env"), \
              patch("src.api.event_pipeline._read_scene_linked_repos", return_value=[]), \
-             patch("src.domains.runtime.routes.runtime.repogit._read_scene_work_branch", return_value=""):
+             patch("src.domains.runtime.engine.repogit._read_scene_work_branch", return_value=""):
             env = build_task_env("gitcode:grape-dev/grape", "coding", "1858", runtime_id=7)
         assert env["GRAPE_VCS_BASE_URL"] == BIZ
         assert env["GRAPE_ISSUE_BASE_URL"] == BIZ
@@ -122,12 +122,12 @@ class TestResolveTaskServerEnv:
             def cursor(self):
                 return _Cur()
 
-        with patch("src.session_manager.db", _Db()), \
-             patch("src.session_manager.db_lock", nullcontext()), \
+        with patch("src.kernel.session_manager.db", _Db()), \
+             patch("src.kernel.session_manager.db_lock", nullcontext()), \
              patch("src.domains.runtime.engine.service._collect_server_env", return_value={}), \
              patch("src.domains.runtime.engine.service.sync_task_session_token", return_value=""), \
              patch("src.api.event_pipeline.reconcile_task_scene_env"), \
-             patch.multiple("src.prompt_builder",
+             patch.multiple("src.kernel.prompt_builder",
                             _resolve_business_base=lambda runtime_id=0: (BIZ, "server_base_url"),
                             _resolve_server_url=lambda runtime_id=0: RT), \
              patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
@@ -139,7 +139,7 @@ class TestResolveTaskServerEnv:
     def test_direct_executor_uses_unified_task_env(self):
         """direct 执行路径复用 resolve_task_server_env（与 enqueue/重派同源）。"""
         import inspect
-        from src.domains.runtime.routes.runtime import direct_executor
+        from src.domains.runtime.engine import direct_executor
         src = inspect.getsource(direct_executor)
         assert "resolve_task_server_env(runtime_id)" in src
 
@@ -222,11 +222,11 @@ class TestServiceDiagnosticsModule:
     def test_a2a_base_skips_business_probe(self):
         """公开 resolve_a2a_base 不得为取 A2A 基址触发业务 API 探测。"""
         from src import prompt_builder
-        with patch("src.prompt_builder._resolve_business_base",
+        with patch("src.kernel.prompt_builder._resolve_business_base",
                    side_effect=AssertionError("business probe must not run")), \
              patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""), \
-             patch("src.prompt_builder._resolve_server_url", return_value=RT):
+             patch("src.kernel.prompt_builder._resolve_server_url", return_value=RT):
             assert prompt_builder.resolve_a2a_base(7) == RT
 
     def test_a2a_base_prefers_gateway_prefix(self):
@@ -284,7 +284,7 @@ class TestFailureDiagnostics:
         assert "GRAPE_A2A_BASE_URL" in text
 
     def test_service_endpoint_mapping(self):
-        from src.prompt_builder import service_for_endpoint
+        from src.kernel.prompt_builder import service_for_endpoint
         assert service_for_endpoint("/api/a2a") == "a2a"
         assert service_for_endpoint("/api/a2a/status") == "a2a"
         assert service_for_endpoint("/api/git-repo/issues/get") == "vcs"

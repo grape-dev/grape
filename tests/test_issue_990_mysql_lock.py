@@ -162,7 +162,7 @@ def test_in_process_serialization_when_guard_busy(monkeypatch):
 
 def test_sync_task_session_token_uses_named_lock_and_rotates(monkeypatch):
     import json
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import src.api.auth_token as at
 
     conn = _Conn()

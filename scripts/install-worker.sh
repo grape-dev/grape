@@ -7,7 +7,7 @@
 #     [--server https://<grape主控>] \
 #     [--device worker-01] \
 #     [--dir ~/grape] \
-#     [--engine auto|opencode|hermes|none]
+#     [--engine auto|opencode|hermes|atomcode|none]
 #
 # 流程：
 #   1. 从主控公开端点下载运行包 grape-worker.tar.gz（无需鉴权，包内无敏感信息）
@@ -40,12 +40,12 @@ while [ $# -gt 0 ]; do
     --dir)     INSTALL_DIR="$2"; shift 2 ;;
     --engine)  ENGINE="$2"; shift 2 ;;
     --root)    ROOT_MODE=1; shift ;;
-    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--dir install-dir] [--engine auto|opencode|hermes|none] [--root]"; exit 1 ;;
+    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--dir install-dir] [--engine auto|opencode|hermes|atomcode|none] [--root]"; exit 1 ;;
   esac
 done
 case "$ENGINE" in
-  auto|opencode|hermes|none) ;;
-  *) echo "[install-worker] Error: --engine only supports auto|opencode|hermes|none (got: $ENGINE)" >&2; exit 1 ;;
+  auto|opencode|hermes|atomcode|none) ;;
+  *) echo "[install-worker] Error: --engine only supports auto|opencode|hermes|atomcode|none (got: $ENGINE)" >&2; exit 1 ;;
 esac
 
 # ===== 工具函数 =====
@@ -466,10 +466,25 @@ install_engine() {
     log "Skipping engine install (--engine none; worker registers fine without engines)"
     return 0
   fi
+  if [ "$ENGINE" = "atomcode" ]; then
+    if command -v atomcode >/dev/null 2>&1; then
+      log "AtomCode engine already present, skipping install"
+    elif command -v npm >/dev/null 2>&1; then
+      log "Installing AtomCode (Rust based, distributed via npm)..."
+      if timeout 300 npm install -g @atomgit.com/atomcode >/dev/null 2>&1 && command -v atomcode >/dev/null 2>&1; then
+        log "AtomCode engine installed; configure model credentials on this worker before use"
+      else
+        log "Warning: AtomCode install failed. Install manually: npm install -g @atomgit.com/atomcode"
+      fi
+    else
+      log "Warning: npm not found. Install AtomCode (Rust based) manually; see help/usage/atomcode.md"
+    fi
+    return 0
+  fi
   # auto：已有任一引擎即跳过；显式指定：仅检查对应引擎
   if [ "$ENGINE" = "auto" ]; then
-    if command -v opencode >/dev/null 2>&1 || command -v hermes >/dev/null 2>&1; then
-      log "Execution engine detected (opencode/hermes), skipping install"
+    if command -v opencode >/dev/null 2>&1 || command -v hermes >/dev/null 2>&1 || command -v atomcode >/dev/null 2>&1; then
+      log "Execution engine detected (opencode/hermes/atomcode), skipping install"
       return 0
     fi
     _want_oc=1; _want_hermes=0

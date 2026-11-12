@@ -5,13 +5,13 @@
   - `edited_message` / 空消息忽略；媒体取最大 photo、document 类型、20MB 超限标记；
   - `callback_query` 短码 `b:2` → `/bind 2`；超长参数走 cid 台账回查。
 """
-from src.im.adapters.telegram.cards import TelegramCardLedger
-from src.im.adapters.telegram.inbound import (
+from src.domains.runtime.im.adapters.telegram.cards import TelegramCardLedger
+from src.domains.runtime.im.adapters.telegram.inbound import (
     callback_query_to_inbound,
     strip_bot_mention,
     update_to_inbound,
 )
-from src.im.channel.types import ChatType, MsgType, Type
+from src.domains.runtime.im.channel.types import ChatType, MsgType, Type
 
 
 def _message(text="hello", chat_type="private", chat_id=123, sender=42, **extra):

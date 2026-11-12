@@ -261,14 +261,17 @@ class TestBindingGuideAndRenderAllProviders:
         source = _read_file("js/app.js")
         assert "function renderOAuthButtons" in source
         idx = source.find("function renderOAuthButtons")
-        # B+（#535）后函数变长（新增置灰+常显说明），窗口从 1200 放宽到 2000
-        func_source = source[idx:idx + 2000]
+        # B+（#535）后函数变长（新增置灰+常显说明），窗口从 1200 放宽到 2000；
+        # D102-B 溢出折叠再加长，放宽到 2600
+        func_source = source[idx:idx + 4000]
         # 不应过滤 configured
         assert "filter(function(p){return p.configured})" not in func_source, \
             "renderOAuthButtons should NOT filter providers by configured"
         # 用 providers（全部）而非 configured（过滤后）做渲染
-        assert "providers.map" in func_source, \
-            "renderOAuthButtons should use providers.map (all providers) for rendering"
+        # D102-B: 溢出折叠重构后渲染走 _mkBtn（providers.map(_mkBtn) 全量映射
+        # 语义不变——折叠只藏显示不做过滤），断言改映射函数名
+        assert "providers.map(_mkBtn)" in func_source, \
+            "renderOAuthButtons should use providers.map(_mkBtn) (all providers) for rendering"
         assert "providers.length" in func_source, \
             "renderOAuthButtons should check providers.length (not configured.length)"
 

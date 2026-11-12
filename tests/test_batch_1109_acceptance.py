@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 
 def _sfx():
@@ -85,7 +85,7 @@ def test_1564_violation_projection_shape():
 # ============================== #1579 ==============================
 def test_1579_note_hook_pr_number_sources():
     """PR 号来源链：payload 结构化字段 > URL 兜底；Note Hook 的 iid(评论 id) 不得当 PR 号。"""
-    from src.api.event_pipeline import _extract_pr_number
+    from src.domains.runtime.pipeline.event_pipeline import _extract_pr_number
     # 1) payload 的 merge_request.iid 命中
     num, src = _extract_pr_number({}, {"merge_request": {"iid": 1011}}, "note_hook_pr")
     assert (num, src) == ("1011", "payload")
@@ -115,7 +115,7 @@ def test_1579_note_hook_pr_number_sources():
 def test_1577_env_split_and_single_address_compat():
     """单地址部署：两变量同值（向前兼容）；双地址：业务基址不被 worker 地址覆盖。"""
     from src.domains.mgmt.user.db import set_meta_value
-    from src.prompt_builder import resolve_task_server_env, _resolve_business_server_url
+    from src.kernel.prompt_builder import resolve_task_server_env, _resolve_business_server_url
     from src.domains.runtime.engine.agent import _apply_local_worker_base_override
 
     set_meta_value("task_business_api_url", "https://grape.example.com/api")

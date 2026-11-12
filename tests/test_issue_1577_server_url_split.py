@@ -13,14 +13,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 class TestBusinessApiUrlGetter:
     def test_from_server_config_explicit(self):
         from src.domains.mgmt.user.db import get_business_api_url
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_url": "https://api.grape.example.com"}), \
              patch("src.domains.mgmt.user.db.get_server_base_url", return_value="https://grape.example.com"):
             assert get_business_api_url() == "https://api.grape.example.com"
 
     def test_from_meta(self):
         from src.domains.mgmt.user.db import get_business_api_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value",
                    side_effect=lambda k: {"task_business_api_url": "https://biz.internal"}.get(k, "")), \
              patch("src.domains.mgmt.user.db.get_server_base_url", return_value="https://grape.example.com"):
@@ -28,14 +28,14 @@ class TestBusinessApiUrlGetter:
 
     def test_fallback_to_server_base_url_when_unconfigured(self):
         from src.domains.mgmt.user.db import get_business_api_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch("src.domains.mgmt.user.db.get_server_base_url", return_value="https://grape.example.com"):
             assert get_business_api_url() == "https://grape.example.com"
 
     def test_trailing_slash_stripped(self):
         from src.domains.mgmt.user.db import get_business_api_url
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_url": "https://api.grape.example.com/"}):
             assert get_business_api_url() == "https://api.grape.example.com"
 
@@ -106,7 +106,7 @@ class TestResolveBusinessServerUrl:
     def test_single_address_equivalence(self):
         """单地址部署（未配拆分项）：业务基址与 runtime 基址取值等价旧行为。"""
         from src import prompt_builder
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch("src.domains.mgmt.user.db.get_server_base_url", return_value="https://grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False):
@@ -116,15 +116,15 @@ class TestResolveBusinessServerUrl:
 
 class TestBuildTaskEnv:
     def _build(self, runtime_id=0):
-        from src.api.event_pipeline import build_task_env
-        with patch("src.prompt_builder._resolve_business_base",
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
+        with patch("src.kernel.prompt_builder._resolve_business_base",
                    return_value=("https://api.grape.example.com", "server_base_url")), \
-             patch("src.prompt_builder._resolve_server_url",
+             patch("src.kernel.prompt_builder._resolve_server_url",
                    return_value="https://worker.grape.example.com"), \
              patch("src.api.event_pipeline._inject_scene_env"), \
              patch("src.api.event_pipeline._inject_bot_agent_env"), \
              patch("src.api.event_pipeline._read_scene_linked_repos", return_value=[]), \
-             patch("src.domains.runtime.routes.runtime.repogit._read_scene_work_branch", return_value=""):
+             patch("src.domains.runtime.engine.repogit._read_scene_work_branch", return_value=""):
             return build_task_env("gitcode:grape-dev/grape", "coding", "123",
                                   runtime_id=runtime_id)
 
@@ -203,7 +203,7 @@ class TestSameUrlHost:
 class TestBusinessApiWarningAndHealth:
     def test_loopback_business_api_warns(self):
         from src.domains.mgmt.user.db import get_url_split_warning
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_url": "http://127.0.0.1:8000"}):
             w = get_url_split_warning()
         assert "task_business_api_url" in w
@@ -215,7 +215,7 @@ class TestBusinessApiWarningAndHealth:
         app = FastAPI()
         app.include_router(router)
         client = TestClient(app)
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_url": "https://api.grape.example.com"}), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             data = client.get("/api/health").json()
@@ -224,7 +224,7 @@ class TestBusinessApiWarningAndHealth:
 
 class TestReservedRuntimeEnv:
     def test_runtime_server_url_reserved_in_scene_custom_env(self):
-        from src.scene_custom_env import is_reserved_name
+        from src.kernel.scene_custom_env import is_reserved_name
         assert is_reserved_name("RUNTIME_SERVER_URL")
 
     def test_config_example_documents_business_api_url(self):

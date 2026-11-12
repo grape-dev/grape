@@ -281,7 +281,7 @@ def _mk_checker_dir(tmp_path, name="grape-skill-validator"):
 
 def test_agent_type_fallback_success(skills_root, tmp_path, monkeypatch):
     # 按名未命中 + 官方包未找到 → agent_type 检查器回退成功，detail 含 skills detail --skill_id
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     checker = _mk_checker_dir(tmp_path)
     resolver = lambda at: ({"skill_name": "grape-skill-validator", "skill_id": 2789,
@@ -299,7 +299,7 @@ def test_agent_type_fallback_success(skills_root, tmp_path, monkeypatch):
 
 def test_agent_type_fallback_resolver_miss_still_degraded(skills_root, tmp_path, monkeypatch):
     # resolver 未命中（无检查器）→ 仍 degraded，不静默空注入
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     res = sm.materialize_skill_with_fallback(
         skills_root, "skill-batch-validator", lambda: ("none", "skill source not found"),
@@ -311,7 +311,7 @@ def test_agent_type_fallback_resolver_miss_still_degraded(skills_root, tmp_path,
 
 def test_agent_type_fallback_no_resolver_degraded(skills_root, monkeypatch):
     # 未注入 resolver（老调用方）→ 行为与旧版一致
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     res = sm.materialize_skill_with_fallback(
         skills_root, "skill-batch-validator", lambda: ("none", "skill zip unavailable"))
@@ -321,7 +321,7 @@ def test_agent_type_fallback_no_resolver_degraded(skills_root, monkeypatch):
 
 def test_direct_materialize_agent_type_fallback(skills_root, tmp_path, monkeypatch):
     # direct 端接线：按名未命中 → 检查器回退，prompt 提示含 --skill_id
-    import src.config as cfg
+    import src.kernel.config as cfg
     checker = _mk_checker_dir(tmp_path)
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(tmp_path / "official" / name / "SKILL.md")
@@ -333,7 +333,7 @@ def test_direct_materialize_agent_type_fallback(skills_root, tmp_path, monkeypat
                                     else None))
     monkeypatch.setattr(udb, "get_skill_path",
                         lambda sid: (os.path.join(checker, "SKILL.md") if sid == 2789 else ""))
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     out = _materialize_direct_workdir(tmp_path, "gitcode:acme/repo", "qa",
                                       "skill-batch-validator", evt, "",
@@ -381,7 +381,7 @@ def test_write_skill_fallback_empty_name(skills_root):
 
 def test_write_skill_fallback_logs_structured_warning(skills_root, caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="src.config"):
+    with caplog.at_level(logging.WARNING, logger="src.kernel.config"):
         sm.write_skill_fallback(skills_root, "demo-skill", "conn refused", stage="zip_b64")
     # 失败日志可检索：含 tag=skill、技能名、stage、失败原因
     txt = caplog.text
@@ -396,9 +396,9 @@ def test_write_skill_fallback_survives_bad_root():
 
 
 def test_direct_materialize_degraded_writes_fallback(skills_root, tmp_path, monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(tmp_path, "gitcode:acme/repo", "issue",
                                 "demo-skill", evt, "", "{{SKILL_DIR}}/demo-skill/SKILL.md")
@@ -409,7 +409,7 @@ def test_direct_materialize_degraded_writes_fallback(skills_root, tmp_path, monk
 
 
 def test_direct_materialize_ok_no_fallback(skills_root, tmp_path, monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     official = tmp_path / "off" / "demo-skill"
     official.mkdir(parents=True)
     (official / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
@@ -418,7 +418,7 @@ def test_direct_materialize_ok_no_fallback(skills_root, tmp_path, monkeypatch):
     (official / "references" / "extra.md").write_text("# e", encoding="utf-8")
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(official / "SKILL.md"))
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(tmp_path, "gitcode:acme/repo", "issue",
                                 "demo-skill", evt, "", "{{SKILL_DIR}}/demo-skill/SKILL.md")
@@ -441,7 +441,7 @@ def test_worker_obs_fail_and_files_empty_writes_fallback(tmp_path, monkeypatch):
     ra, task, env, prompt, skill_dir = _mk_task(
         tmp_path, skill_obs_url="https://obs/expired", skill_files="{}")
     monkeypatch.setattr(ra, "_fetch_skill_zip", lambda url, task_id="": None)
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     out = ra._materialize_worker_skill(task, env, prompt, skill_dir)
     content = _read_fallback(skill_dir)
@@ -463,7 +463,7 @@ def test_worker_zip_without_skill_md_writes_fallback(tmp_path, monkeypatch):
         zf.writestr("empty-dir/", "")  # 无 SKILL.md 的空目录 zip
     monkeypatch.setattr(ra, "_fetch_skill_zip",
                         lambda url, task_id="": empty_zip.getvalue())
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     ra._materialize_worker_skill(task, env, prompt, skill_dir)
     content = _read_fallback(skill_dir)

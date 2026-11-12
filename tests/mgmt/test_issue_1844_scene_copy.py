@@ -26,7 +26,7 @@ from src.api.main import app  # noqa: E402
 from src.api.deps import require_no_session_token  # noqa: E402
 from src.api.pipeline_config import (  # noqa: E402
     create_custom_scene, invalidate_scene_cache)
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 client = TestClient(app)
 

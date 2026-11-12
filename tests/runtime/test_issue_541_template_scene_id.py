@@ -25,7 +25,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 if os.environ["DEVOPS_DB_PATH"] not in sys.path[:0]:
     pass
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.domains.mgmt.user.db import add_managed_repo, get_repo_scene, set_repo_scene  # noqa: E402
 from src.api.pipeline_config import (  # noqa: E402
     apply_market_scene_by_name, create_custom_scene, invalidate_scene_cache)

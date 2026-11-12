@@ -12,7 +12,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
 import src.api.issues_center as ic
-import src.prompt_builder as pb
+import src.kernel.prompt_builder as pb
 
 REPO_KEY = "gitcode:acme-org/demo"
 

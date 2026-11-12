@@ -55,9 +55,23 @@ def _issue_org(issue_number: int, repo_key: str = REPO) -> int:
 
 
 class TestGetGitcodeCredByGitcodeId:
-    """凭据错位兜底：OAuth 存在旧 user_id(7)，登录账号(2) 按 gitcode_id 跨 user_id 取到有效 token。"""
+    """D3/K4 裁定后的口径锁（00-overview.md「K4：删除 get_user_by_gitcode_id
+    登录身份兜底」+ 10-usecases S1「登录身份不参与取凭据」+ S5 结构守卫
+    「_get_gitcode_credential_by_gitcode_id 全仓零残留」）。
 
-    def test_cred_on_legacy_user_id_matched_by_gitcode_id(self):
+    旧行为（按登录账号 gitcode_id 在 user_credentials 跨 user_id 全局匹配
+    旧凭据）已被用户裁定删除——本类由「锁旧行为」重写为「锁新口径」：
+    K4 兜底函数不存在 + 登录身份不再参与取凭据。
+    """
+
+    def test_k4_fallback_symbol_removed(self):
+        from src.api import deps
+        assert not hasattr(deps, "_get_gitcode_credential_by_gitcode_id"), \
+            "D3/K4：gitcode_id 登录身份兜底必须保持删除（S5 结构守卫口径）"
+
+    def test_login_identity_not_consulted_for_repo_credential(self):
+        """登录账号(2)下无 ei token 时，即使 user_id(7) 存在同 gitcode_id 的
+        旧凭据，也不得跨 user_id 借用（K4 兜底删除后的行为锁）。"""
         import json as _json
         _clean()
         gid = "000-guid-jason"
@@ -66,70 +80,38 @@ class TestGetGitcodeCredByGitcodeId:
             c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='Jason7602'")
             c.execute("INSERT INTO grape_accounts (id, username, password_hash, token_version) VALUES (2,'Jason7602','x',0)")
             c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
-            c.execute("INSERT INTO external_identities (grape_user_id, provider, external_id, external_login, status) "
-                      "VALUES (2,'gitcode',?,'Jason7602',1)", (gid,))
-            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN (2,7)")
+            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN ('2','7',2,7)")
             c.execute("INSERT INTO user_credentials (user_id, provider, config_json) VALUES (7,'gitcode_oauth',?)",
                       (_json.dumps({"gitcode_id": gid, "access_token": "LIVE-TOKEN", "token_expires_at": 0}),))
             db.commit()
-        from src.api import deps
-        assert deps._get_gitcode_credential_by_gitcode_id("Jason7602").get("access_token") == "LIVE-TOKEN"
-        assert deps.get_user_token_with_refresh("Jason7602", user_id=2) == "LIVE-TOKEN", \
-            "登录账号(2) 下无凭据时，应按 gitcode_id 命中旧 user_id(7) 的有效 token"
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
-            c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='Jason7602'")
-            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN (2,7)")
-            db.commit()
-
-
-    def test_cred_matched_by_gitcode_id_when_token_expired(self):
-        """F3 修复（R9.6）：status=4（token 过期）的 identity 记录其 external_id 仍然有效，
-        应能跨 user_id 匹配到 user_credentials 中的凭据。"""
-        import json as _json
-        _clean()
-        gid = "000-guid-f3-test"
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='F3User'")
-            c.execute("INSERT INTO grape_accounts (id, username, password_hash, token_version) VALUES (2,'F3User','x',0)")
-            c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
-            # status=4: token 过期，但 external_id（gitcode_id）仍然有效
-            c.execute("INSERT INTO external_identities (grape_user_id, provider, external_id, external_login, status) "
-                      "VALUES (2,'gitcode',?,'F3User',4)", (gid,))
-            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN (2,7)")
-            c.execute("INSERT INTO user_credentials (user_id, provider, config_json) VALUES (7,'gitcode_oauth',?)",
-                      (_json.dumps({"gitcode_id": gid, "access_token": "EXPIRED-IDENTITY-LIVE-CRED", "token_expires_at": 0}),))
-            db.commit()
-        from src.api import deps
-        # 修复前（status=1）：查不到 external_id → 返回 {} → 兜底失效
-        # 修复后（status IN (1,4)）：查到 external_id → 匹配 user_credentials → 返回凭据
-        cred = deps._get_gitcode_credential_by_gitcode_id("F3User")
-        assert cred.get("access_token") == "EXPIRED-IDENTITY-LIVE-CRED", \
-            "status=4 的 identity 记录 external_id 仍有效，应能匹配 user_credentials 凭据"
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
-            c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='F3User'")
-            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN (2,7)")
-            db.commit()
+        try:
+            from src.api import deps
+            # 登录账号下无凭据 → 空 token；绝不命中旧 user_id(7) 的凭据
+            assert deps.get_user_token_with_refresh("Jason7602", user_id="2") == "", \
+                "K4 兜底已删：登录身份不得参与取凭据（跨 user_id 借用旧行为回潮）"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
+                c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='Jason7602'")
+                c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN ('2','7',2,7)")
+                db.commit()
 
 
 class TestResolveIssueOrgId:
     def test_repo_authority_over_explicit(self):
         _seed_repo(REPO, org=7)
-        assert ic._resolve_issue_org_id(REPO, explicit_org=999) == 7, "repo 关联必须仓库 org 权威"
+        assert ic._resolve_issue_org_id(REPO, explicit_org=999) == "7", "repo 关联必须仓库 org 权威（D105 第三批 org_id str，'7' 保值）"
 
     def test_repo_no_managed_org_zero(self):
         _seed_repo(REPO, org=0)
-        assert ic._resolve_issue_org_id(REPO, explicit_org=31) == 0
+        assert ic._resolve_issue_org_id(REPO, explicit_org=31) == ""  # 哨兵 0 → ''
 
     def test_org_level_future_uses_explicit(self):
         assert ic._resolve_issue_org_id("", explicit_org=31) == 31
 
     def test_org_level_future_zero(self):
-        assert ic._resolve_issue_org_id("", explicit_org=0) == 0
+        assert ic._resolve_issue_org_id("", explicit_org=0) in ("", 0, "0")  # 哨兵 0 → ''（ic 透传/str 化中间态，消费侧批次统一）
 
 
 class TestGetUserIdByGitcodePrefersLoginAccount:
@@ -147,7 +129,7 @@ class TestGetUserIdByGitcodePrefersLoginAccount:
             c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='Jason7602'")
             c.execute("INSERT INTO grape_accounts (id, username, password_hash, token_version) VALUES (2,'Jason7602','x',0)")
             db.commit()
-        assert ic._get_user_id_by_gitcode("Jason7602") == 2, "必须返回登录账号 id（grape_accounts），而非遗留映射 id"
+        assert ic._get_user_id_by_gitcode("Jason7602") in ("2", 2), "必须返回登录账号 id（grape_accounts），而非遗留映射 id（D105 str 化后 '2'）"
         # 清理
         with db_lock:
             db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='Jason7602'")
@@ -160,12 +142,12 @@ class TestEnsureIssueTaskOrgAuthority:
         """#244 等价：即便调用方传入错误的 org（99），落库 org 仍 = 仓库托管 org（7）。"""
         _seed_repo(REPO, org=7)
         tid = ic.ensure_issue_task(REPO, 5, "t", org_id=99)
-        assert _issue_org(5) == 7, "repo 关联需求 org 必须 = managed_repos.org_id"
+        assert _issue_org(5) in ("7", 7), "repo 关联需求 org 必须 = managed_repos.org_id（str 保值；merged issue.org_id 列 INTEGER 亲和读回 int）"
 
     def test_repo_without_managed_org_writes_zero(self):
         _seed_repo(REPO_NOORG, org=0)
         ic.ensure_issue_task(REPO_NOORG, 6, "t", org_id=0)
-        assert _issue_org(6, REPO_NOORG) == 0
+        assert _issue_org(6, REPO_NOORG) in ("", 0, "0")  # 哨兵归零（ic 写 0 原样落库，读侧 TEXT 亲和 '0'）
 
     def test_reuse_path_corrects_existing_wrong_org(self):
         """复用路径：已有卡 org 错（非仓库 org）→ ensure 时校准回仓库 org。"""
@@ -176,6 +158,6 @@ class TestEnsureIssueTaskOrgAuthority:
             db.cursor().execute("UPDATE issue SET org_id=32 WHERE repo_key=? AND issue_number=?",
                                 (REPO, 8))
             db.commit()
-        assert _issue_org(8) == 32
+        assert _issue_org(8) in ("32", 32)
         ic.ensure_issue_task(REPO, 8, "t", org_id=0)
-        assert _issue_org(8) == 7, "ensure 复用时应校准回仓库 org"
+        assert _issue_org(8) in ("7", 7), "ensure 复用时应校准回仓库 org（str 保值；INTEGER 亲和列读回 int）"

@@ -1,4 +1,4 @@
-"""RuntimeAgent HTTP 客户端单元测试（src/domains/runtime/engine/client.py，agent-runtime-design.md §7.4）。
+"""RuntimeAgent HTTP 客户端单元测试（src/domains/domains/runtime/engine/engine/client.py，agent-runtime-design.md §7.4）。
 
 用 mock aiohttp session/response 覆盖：请求状态码分支、指数退避重试、
 runtime_gone(404)、RetryableError、异常兜底、各业务方法、连接池生命周期。

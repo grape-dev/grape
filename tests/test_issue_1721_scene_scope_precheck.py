@@ -21,7 +21,7 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.api.pipeline_config import (  # noqa: E402
     create_custom_scene, get_pipeline_config, invalidate_scene_cache)
 from src.api.deps import get_current_user_or_api_key  # noqa: E402

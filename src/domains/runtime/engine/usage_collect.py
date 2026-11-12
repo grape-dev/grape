@@ -141,11 +141,22 @@ class UsageCollector:
             self._baseline = {}
 
     def feed(self, evt_type: str, data: Any) -> None:
-        """流式引擎(codex)在事件循环里喂事件。"""
-        if evt_type != "step_finish" or not isinstance(data, dict):
-            return
-        usage = data.get("usage")
-        if not isinstance(usage, dict):
+        """流式引擎(codex / atomcode)在事件循环里喂事件。
+
+        两种入口（issue #727 起统一入 `_fed`）：
+        - codex：`step_finish` 事件携带 `usage` 拆分 dict；
+        - atomcode：独立 `("usage", {...})` 事件——每轮用量直报，
+          与 hermes 的 PromptResponse 直报同口径。
+        """
+        if evt_type == "usage":
+            if not isinstance(data, dict):
+                return
+            usage = data
+        elif evt_type == "step_finish" and isinstance(data, dict):
+            usage = data.get("usage")
+            if not isinstance(usage, dict):
+                return
+        else:
             return
         self._turn += 1
         rec = dict(usage)
@@ -166,7 +177,7 @@ class UsageCollector:
                 # token 解析轨二期接入（session.v4.jsonl.zstd，方案已定见设计 spec §5）
                 log.info("usage_collect: aishell-dsh usage gap (phase 2 will parse session file)")
                 return []
-            if self.engine == "codex":
+            if self.engine in ("codex", "atomcode"):
                 return self._fed
             if self.engine == "opencode":
                 return self._opencode_usage()

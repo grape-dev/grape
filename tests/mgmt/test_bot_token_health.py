@@ -10,14 +10,18 @@ Tests cover:
 - bot_token_health_loop: lock acquire/release, exception handling, await 调用
 - start_bot_token_health: idempotent startup
 """
+
 import asyncio
+
 import inspect
+
 import json
+
 import time
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 
+from unittest.mock import patch, MagicMock, AsyncMock
 
 def _fake_db(rows):
     """构造 mock db：两次 SELECT 分别返回 gitcode/github 仓库行。"""
@@ -28,60 +32,65 @@ def _fake_db(rows):
     db.cursor.return_value = cur
     return db
 
-
 class TestVerifyBotToken:
     """Per-platform token verification tests."""
 
     def test_gitcode_healthy(self):
-        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="valid_gc_token"), \
-             patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "bot"}):
+        _prov = _mock_provider(verify_ok=True)
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_gc_token"), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is True
         assert result["error_type"] == ""
 
     def test_github_healthy(self):
-        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="valid_gh_token"), \
-             patch("src.domains.mgmt.user.repo_manager._github_req", return_value={"login": "bot"}):
+        _prov = _mock_provider(verify_ok=True)
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_gh_token"), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is True
         assert result["error_type"] == ""
 
     def test_gitcode_401(self):
-        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="bad_token"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=RuntimeError("failed (401): Unauthorized")):
+        _prov = _mock_provider(verify_ok=False, err=RuntimeError("failed (401): Unauthorized"))
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="bad_token"), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
         assert result["error_type"] == "auth"
 
     def test_github_401(self):
-        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="bad_gh_token"), \
-             patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=RuntimeError("failed (401): Bad credentials")):
+        _prov = _mock_provider(verify_ok=False, err=RuntimeError("failed (401): Bad credentials"))
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="bad_gh_token"), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
         assert result["error_type"] == "auth"
 
     def test_gitcode_network_error(self):
-        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="valid_token"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=RuntimeError("Cannot reach GitCode API: timeout")):
+        _prov = _mock_provider(verify_ok=False, err=RuntimeError("Cannot reach GitCode API: timeout"))
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_token"), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
         assert result["error_type"] == "network"
 
     def test_github_network_error(self):
-        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="valid_gh_token"), \
-             patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=RuntimeError("Cannot reach GitHub API: timeout")):
+        _prov = _mock_provider(verify_ok=False, err=RuntimeError("Cannot reach GitHub API: timeout"))
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_gh_token"), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
         assert result["error_type"] == "network"
 
     def test_gitcode_not_configured(self):
-        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value=""):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
@@ -89,13 +98,12 @@ class TestVerifyBotToken:
         assert "GitCode" in result["error"]
 
     def test_github_not_configured(self):
-        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value=""):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
         assert result["error_type"] == "config"
         assert "GitHub" in result["error"]
-
 
 class TestVerifyGlobalBotToken:
     """Aggregate verification — returns per-platform results."""
@@ -146,7 +154,6 @@ class TestVerifyGlobalBotToken:
             result = _verify_global_bot_token()
         assert result["platforms"]["gitcode"]["healthy"] is True
         assert result["platforms"]["github"]["error_type"] == "config"
-
 
 class TestUpdateHealthStatus:
     """Per-platform failure counting + WorstOf aggregation."""
@@ -378,7 +385,6 @@ class TestUpdateHealthStatus:
         assert status["platforms"]["gitcode"]["error_type"] == "network"
         assert status["platforms"]["github"]["error_type"] == "auth"
 
-
 class TestVerifyRepoBotTokensAsync:
     """Issue #519: _verify_repo_bot_tokens 异步化行为测试。
 
@@ -558,7 +564,6 @@ class TestVerifyRepoBotTokensAsync:
             await bth._verify_repo_bot_tokens()
         verify_mock.assert_not_called()
 
-
 class TestHealthLoop:
 
     @pytest.mark.asyncio
@@ -621,7 +626,6 @@ class TestHealthLoop:
         # R17: 锁名改为 token_health_check
         mock_release.assert_called_once_with("token_health_check")
 
-
 class TestStartBotTokenHealth:
     """启动函数测试。"""
 
@@ -640,3 +644,13 @@ class TestStartBotTokenHealth:
                 await t1
             except asyncio.CancelledError:
                 pass
+
+def _mock_provider(verify_ok: bool, err: Exception | None = None):
+    """R18.5.8 卡驱动缝的 mock：VCSProvider.verify_token 行为注入。"""
+    from unittest.mock import MagicMock
+    p = MagicMock()
+    if verify_ok:
+        p.verify_token.return_value = {"login": "bot"}
+    else:
+        p.verify_token.side_effect = err or RuntimeError("verify failed")
+    return p

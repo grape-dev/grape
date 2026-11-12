@@ -5,13 +5,13 @@
 """
 import asyncio
 
-from src.im.channel import (
+from src.domains.runtime.im.channel import (
     CancelContext, Channel, ChannelConfig, OutboundMessage,
     PermanentChannelError, SendResult, Type,
 )
-from src.im.engine.lease import lease_key
-from src.im.channel.registry import ChannelRegistry as Registry
-from src.im.engine.supervisor import Supervisor
+from src.domains.runtime.im.engine.lease import lease_key
+from src.domains.runtime.im.channel.registry import ChannelRegistry as Registry
+from src.domains.runtime.im.engine.supervisor import Supervisor
 
 
 class FakeLeaseStore:
@@ -167,7 +167,7 @@ def test_channel_type_change_rebuilds_with_new_adapter():
 def test_fingerprint_ignores_runtime_cursor():
     """游标等运行期状态不进指纹：微信 ilink 每轮推进 cursor 都会写 config，
     若参与指纹就会每轮热重建渠道（channels 反复归零，2026-11-10 实障）。"""
-    from src.im.engine.supervisor import fingerprint
+    from src.domains.runtime.im.engine.supervisor import fingerprint
 
     base = {"app_id": "a", "app_secret": "s", "cursor": "c1"}
     next_cursor = {"app_id": "a", "app_secret": "s", "cursor": "c2"}

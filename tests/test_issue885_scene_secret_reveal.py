@@ -22,7 +22,7 @@ os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 

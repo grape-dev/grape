@@ -282,18 +282,17 @@ def extract_content_id(resp, content_type: str = "issue_comment") -> str:
 
 
 def extract_event_content_id(provider: str, payload: dict) -> str:
-    """从 webhook payload 提取内容 ID——**分平台提取**（读侧，S13/S16）。
+    """从 webhook payload 提取内容 ID（读侧，S13/S16）。
 
-    - GitCode（Note Hook）：object_attributes.id（issue/PR 评论同源）
-    - GitHub（issue-comment / pull_request_review_comment）：comment.id
-    - issue_opened（按编号对账，豁免之后用）：object_attributes.iid/number 或 issue.number
+    D44/S66：按 payload **形态**派生（行为派生，消平台名分支）：
+    - comment.id 存在 = GitHub 系评论事件（issue-comment / review_comment）
+    - object_attributes.id 存在 = Gitee 系 Note Hook（issue/PR 评论同源）
+    - 两者并存时评论键优先（与存量 github 分支次序一致；Gitee 系 Note Hook
+      无顶层 comment 键，行为不变）；issue_opened 编号对账豁免之后用。
+    - provider 参数保留仅为签名兼容，不参与分支。
     """
     if not isinstance(payload, dict):
         return ""
     _oa = payload.get("object_attributes") if isinstance(payload.get("object_attributes"), dict) else {}
     _c = payload.get("comment") if isinstance(payload.get("comment"), dict) else {}
-    if provider == "gitcode":
-        return str(_oa.get("id") or "")
-    if provider == "github":
-        return str(_c.get("id") or _oa.get("id") or "")
-    return str(_oa.get("id") or _c.get("id") or "")
+    return str(_c.get("id") or _oa.get("id") or "")

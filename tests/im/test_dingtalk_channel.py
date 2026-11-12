@@ -15,15 +15,15 @@ import json
 
 import pytest
 
-from src.im.adapters.dingtalk.channel import DingtalkChannel
-from src.im.adapters.dingtalk.outbound import DingtalkSender
-from src.im.channel.channel import (
+from src.domains.runtime.im.adapters.dingtalk.channel import DingtalkChannel
+from src.domains.runtime.im.adapters.dingtalk.outbound import DingtalkSender
+from src.domains.runtime.im.channel.channel import (
     CancelContext,
     ChannelConfig,
     ChannelError,
     PermanentChannelError,
 )
-from src.im.channel.types import Scope, Type
+from src.domains.runtime.im.channel.types import Scope, Type
 
 # ── golden 帧 ──────────────────────────────────────────
 
@@ -278,7 +278,7 @@ def test_default_endpoint_network_error_is_retryable(monkeypatch):
             raise RuntimeError("network down")
 
     monkeypatch.setattr(httpx, "AsyncClient", _Boom)
-    from src.im.adapters.dingtalk.channel import _default_endpoint
+    from src.domains.runtime.im.adapters.dingtalk.channel import _default_endpoint
     with pytest.raises(ChannelError):
         asyncio.run(_default_endpoint("ding_app_1", "sec"))
 
@@ -313,7 +313,7 @@ def test_default_endpoint_builds_ws_url(monkeypatch):
             return _Resp(dict(self.body))
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
-    from src.im.adapters.dingtalk.channel import _default_endpoint
+    from src.domains.runtime.im.adapters.dingtalk.channel import _default_endpoint
     url, err = asyncio.run(_default_endpoint("ding_app_1", "sec"))
     assert err == "" and url.startswith("wss://x/connect?ticket=")
 
@@ -323,14 +323,14 @@ def test_default_endpoint_builds_ws_url(monkeypatch):
 
 
 def test_permanent_credentials_error_classification():
-    from src.im.adapters.dingtalk.channel import _is_permanent_credentials_error as perm
+    from src.domains.runtime.im.adapters.dingtalk.channel import _is_permanent_credentials_error as perm
     assert perm("invalidAppKey") and perm("401") and perm("appNotExist")
     assert not perm("") and not perm("timeout") and not perm("500")
 
 
 def test_trim_seen_evicts_oldest_in_insertion_order():
     """FIFO 裁剪：按插入序淘汰最旧 msgId（替换 set 迭代序的随机裁剪）。"""
-    from src.im.adapters.dingtalk.channel import _trim_seen
+    from src.domains.runtime.im.adapters.dingtalk.channel import _trim_seen
     seen = {f"m{i}": None for i in range(10)}
     _trim_seen(seen, 8)          # 保留最新 8//2=4 条
     assert list(seen) == ["m6", "m7", "m8", "m9"]
@@ -363,7 +363,7 @@ def _real_shape_frame(msg_id="mid_real"):
 
 def test_real_shape_string_data_dispatch_and_webhook_registered():
     """回归：data 为 JSON 字符串时不得 AttributeError 打断 connect，且要登记 sessionWebhook。"""
-    from src.im.adapters.dingtalk.outbound import default_webhook_registry
+    from src.domains.runtime.im.adapters.dingtalk.outbound import default_webhook_registry
     handled = []
 
     async def handler(ctx, msg):

@@ -15,7 +15,7 @@ Error policy: lookups default to fail-closed.  A caller that must stay
 available during a database hiccup may explicitly pass ``on_error="allow"``
 (the degradation is logged and reflected in ``source == "db_error"``).
 """
-from src.config import log
+from src.kernel.config import log
 
 SCENE_SCOPE_REPO = "repo"
 COMPATIBLE_SCOPES = ("repo", "official")
@@ -100,7 +100,7 @@ def skill_agent_type_by_name(skill_name: str, repo_key: str = "") -> str:
     if not skill_name:
         return ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute(
                 "SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1 "
@@ -125,7 +125,7 @@ def rebind_candidates(skill_name: str, repo_key: str, agent_type: str = "",
         return []
     agent_type = agent_type or skill_agent_type_by_name(skill_name, repo_key)
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         sql = ("SELECT id, skill_name, scope, agent_type FROM skill "
                "WHERE is_active=1 AND skill_name<>? AND "
                "((scope='repo' AND owner_id=?) OR scope='official')")

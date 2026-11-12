@@ -1,3 +1,12 @@
+// 扫雷⑥ P0：兜底 repo_key 前缀不再写死 gitcode——host 首段反推 provider（github.com→github 等）
+function _apFallbackRepoKey(repo) {
+  if (!repo) return '';
+  var host = (typeof window._repoWebHost === 'function') ? window._repoWebHost(repo) : 'gitcode.com';
+  var prov = host.split('.')[0];
+  if (['gitcode','github','gitee','gitlab'].indexOf(prov) === -1) prov = 'gitcode';
+  return prov + ':' + repo;
+}
+
 // Issue #150: Autopilot 自动化管理页面
 // 参照 multica AutopilotsPage 风格设计
 var $ = function(id) { return document.getElementById(id); };
@@ -117,7 +126,7 @@ function _apLoadTasks() {
     return;
   }
   var _apRepoKey = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().repoKey || '') : '';
-  if (!_apRepoKey && repo) _apRepoKey = 'gitcode:' + repo;
+  if (!_apRepoKey && repo) _apRepoKey = _apFallbackRepoKey(repo);
   var url = '/autopilot/tasks?repo_key=' + _apRepoKey;
   API.get(url).then(function(d) {
     if (window._currentView !== 'autopilot') return;
@@ -200,10 +209,10 @@ function _apRenderTable() {
     html += '<div style="display:contents" class="ap-row' + (sel ? ' ap-row-sel' : '') + '" data-id="' + t.id + '">' +
       // checkbox
       '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b)' + rowBg + '">' +
-        '<input type="checkbox" ' + (sel?'checked':'') + ' onclick="event.stopPropagation();_apToggleSelect(' + t.id + ')" style="cursor:pointer;accent-color:#3168e0">' +
+        '<input type="checkbox" ' + (sel?'checked':'') + ' onclick="event.stopPropagation();_apToggleSelect(\'' + t.id + '\')" style="cursor:pointer;accent-color:#3168e0">' +
       '</div>' +
       // name
-      '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b);cursor:pointer;overflow:hidden' + rowBg + '" onclick="event.stopPropagation();_apShowDetail(' + t.id + ')">' +
+      '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b);cursor:pointer;overflow:hidden' + rowBg + '" onclick="event.stopPropagation();_apShowDetail(\'' + t.id + '\')">' +
         '<span style="font-weight:500;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">' + _esc(t.name) + '</span>' +
       '</div>' +
       // cron
@@ -223,7 +232,7 @@ function _apRenderTable() {
       '<div style="padding:0 8px;height:44px;display:flex;align-items:center;border-bottom:1px solid var(--b)' + rowBg + '">' + statusBadge + '</div>' +
       // actions (kebab)
       '<div style="padding:0 4px;height:44px;display:flex;align-items:center;justify-content:center;border-bottom:1px solid var(--b);position:relative' + rowBg + '">' +
-        '<button onclick="event.stopPropagation();_apToggleRowMenu(' + t.id + ', event)" style="border:none;background:transparent;cursor:pointer;padding:4px;border-radius:4px;color:var(--t3);font-size:16px;line-height:1">⋯</button>' +
+        '<button onclick="event.stopPropagation();_apToggleRowMenu(\'' + t.id + '\', event)" style="border:none;background:transparent;cursor:pointer;padding:4px;border-radius:4px;color:var(--t3);font-size:16px;line-height:1">⋯</button>' +
       '</div>' +
     '</div>';
   });
@@ -263,10 +272,10 @@ function _apToggleRowMenu(id, e) {
   menu.id = 'apRowMenu';
   menu.style.cssText = 'position:fixed;z-index:1001;top:' + (rect.bottom + 2) + 'px;left:' + (rect.right - 140) + 'px;width:140px;background:var(--c,#fff);border:1px solid var(--b);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:4px';
   menu.innerHTML =
-    '<div onclick="event.stopPropagation();_apTrigger(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_trigger') + '</div>' +
-    '<div onclick="event.stopPropagation();_apToggleTask(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + (_apTaskEnabled(id) ? _apt('list.menu_pause') : _apt('list.menu_enable')) + '</div>' +
-    '<div onclick="event.stopPropagation();_apEdit(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_edit') + '</div>' +
-    '<div onclick="event.stopPropagation();_apDelete(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:#dc3545;white-space:nowrap" onmouseover="this.style.background=\'rgba(220,53,69,0.08)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_delete') + '</div>';
+    '<div onclick="event.stopPropagation();_apTrigger(\'' + id + '\');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_trigger') + '</div>' +
+    '<div onclick="event.stopPropagation();_apToggleTask(\'' + id + '\');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + (_apTaskEnabled(id) ? _apt('list.menu_pause') : _apt('list.menu_enable')) + '</div>' +
+    '<div onclick="event.stopPropagation();_apEdit(\'' + id + '\');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_edit') + '</div>' +
+    '<div onclick="event.stopPropagation();_apDelete(\'' + id + '\');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:#dc3545;white-space:nowrap" onmouseover="this.style.background=\'rgba(220,53,69,0.08)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_delete') + '</div>';
   document.body.appendChild(menu);
   _apOpenMenuId = id;
 
@@ -491,9 +500,9 @@ function _apShowDialog(tpl, existing) {
   // Issue #486: 引擎列表按该仓库过滤加载
   var _taskRepoKey = existing ? (existing.repo_key || '') : '';
   if (!_taskRepoKey && typeof app !== 'undefined' && app.currentRepo()) {
-    _taskRepoKey = (app.currentRepo().repoKey || '') || ('gitcode:' + (app.currentRepo().fullName || ''));
+    _taskRepoKey = (app.currentRepo().repoKey || '') || _apFallbackRepoKey(app.currentRepo().fullName || '');
   }
-  _apFormRepoKey = (_taskRepoKey || '').replace(/^(gitcode|github):/, '');
+  _apFormRepoKey = window.stripRepoPrefix(_taskRepoKey || '');
   if (_apFormRepoKey.split('/').length !== 2) _apFormRepoKey = '';
   // 先加载引擎列表，再初始化选中状态
   _apSelectedEngines = new Set(engineIds);
@@ -506,7 +515,7 @@ function _apShowDialog(tpl, existing) {
   }
   // 加载工作分支列表（编辑时用 task.repo_key，新建时用当前仓库）
   if (_taskRepoKey) {
-    var _rk = _taskRepoKey.replace(/^(gitcode|github):/, '');
+    var _rk = window.stripRepoPrefix(_taskRepoKey);
     var _parts = _rk.split('/');
     if (_parts.length === 2) {
       API.get('/scenes/branches/' + _parts[0] + '/' + _parts[1] + '?repo_key=' + encodeURIComponent(_taskRepoKey)).then(function(b) {
@@ -603,7 +612,7 @@ function _apOpenEnginePickerInner() {
   var _availScopes = [];
   sorted.forEach(function(e) {
     var n = (e.name || '').toLowerCase();
-    var tn = n.includes('hermes') ? 'hermes' : n.includes('opencode') ? 'opencode' : n.includes('codearts') ? 'codearts' : n.includes('codex') ? 'codex' : '';
+    var tn = n.includes('hermes') ? 'hermes' : n.includes('opencode') ? 'opencode' : n.includes('codearts') ? 'codearts' : n.includes('codex') ? 'codex' : n.includes('atomcode') ? 'atomcode' : '';
     if (tn && _availTypes.indexOf(tn) < 0) _availTypes.push(tn);
     var sc = e.scope || 'global';
     if (_availScopes.indexOf(sc) < 0) _availScopes.push(sc);
@@ -645,13 +654,14 @@ function _apOpenEnginePickerInner() {
       html += groups[s].map(function(e) {
         var checked = _apSelectedEngines.has(e.id);
         var display = engineDisplayName(e);  // Issue #1310：显示「引擎名（凭据名）」
+        var host = e.host_name || e.worker_name || '';
         var tags = e.tags || [];
         // agent_tags 兼容
         if (e.agent_tags && !tags.length) tags = e.agent_tags;
         return '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (checked ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
-          '<input type="checkbox" data-eid="' + e.id + '" ' + (checked ? 'checked' : '') + ' onchange="window._apEngToggle(' + e.id + ')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
+          '<input type="checkbox" data-eid="' + e.id + '" ' + (checked ? 'checked' : '') + ' onchange="window._apEngToggle(\'' + e.id + '\')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
           '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + (e.alias || display) + (e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + display + ')</span>' : '') + _tagBadge(tags) + _scopeBadge(e.scope) + '</div>' +
-          '<div style="font-size:10px;color:#86868b;margin-top:3px">' + (display.length ? '' : e.name) + '</div></div>' +
+          '<div style="font-size:10px;color:#86868b;margin-top:3px">' + (display.length ? '' : e.name) + (host ? ' · ' + host : '') + '</div></div>' +
           '<span style="font-size:11px;font-weight:500;color:#34c759;flex-shrink:0">' + _apt('engine_picker.online') + '</span></label>';
       }).join('');
     });
@@ -663,7 +673,7 @@ function _apOpenEnginePickerInner() {
       html += detached.map(function(eid) {
         var checked = _apSelectedEngines.has(eid);
         return '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:' + (checked ? 'pointer' : 'not-allowed') + ';background:#fff5f5;opacity:.75;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
-          '<input type="checkbox" data-eid="' + eid + '" ' + (checked ? 'checked' : 'disabled') + ' onchange="window._apEngToggle(' + eid + ')" style="width:18px;height:18px;cursor:' + (checked ? 'pointer' : 'not-allowed') + ';accent-color:#d32f2f">' +
+          '<input type="checkbox" data-eid="' + eid + '" ' + (checked ? 'checked' : 'disabled') + ' onchange="window._apEngToggle(\'' + eid + '\')" style="width:18px;height:18px;cursor:' + (checked ? 'pointer' : 'not-allowed') + ';accent-color:#d32f2f">' +
           '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f">#' + eid + '</div>' +
           '<div style="font-size:10px;color:#d32f2f;margin-top:3px">' + _apt('engine_picker.detached_hint') + '</div></div>' +
           '<span style="font-size:11px;font-weight:500;color:#d32f2f;flex-shrink:0">⚠️</span></label>';
@@ -1425,7 +1435,7 @@ function _apSubmitForm() {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   var body = {
     name: name,
-    repo_key: (app.currentRepo() && app.currentRepo().repoKey) ? app.currentRepo().repoKey : ('gitcode:' + repo),
+    repo_key: (app.currentRepo() && app.currentRepo().repoKey) ? app.currentRepo().repoKey : _apFallbackRepoKey(repo),
     instruction: instruction,
     skill_name: skillName,
     cron: _apFormCron,
@@ -1559,12 +1569,12 @@ function _apDetailHTML(t) {
       '<button class="bt bt-o bt-s" onclick="app.nav(\'autopilot\')" style="margin-right:auto">' + _apt('detail.back') + '</button>' +
       '<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
         '<span style="font-size:12px;color:var(--t2)">' + (t.enabled ? _apt('detail.status_enabled') : _apt('detail.status_paused')) + '</span>' +
-        '<span data-ap-toggle="' + t.id + '" onclick="event.stopPropagation();_apToggleEnabled(' + t.id + ', ' + (!t.enabled) + ')" style="position:relative;width:36px;height:20px;border-radius:10px;background:' + (t.enabled ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
+        '<span data-ap-toggle="' + t.id + '" onclick="event.stopPropagation();_apToggleEnabled(\'' + t.id + '\', ' + (!t.enabled) + ')" style="position:relative;width:36px;height:20px;border-radius:10px;background:' + (t.enabled ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
           '<span style="position:absolute;top:2px;left:' + (t.enabled ? '18px' : '2px') + ';width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:left .2s"></span>' +
         '</span>' +
       '</label>' +
-      '<button class="bt bt-o" onclick="_apEdit(' + t.id + ')">' + _apt('detail.edit') + '</button>' +
-      '<button class="bt bt-p" onclick="_apTrigger(' + t.id + ')">' + _apt('detail.trigger') + '</button>' +
+      '<button class="bt bt-o" onclick="_apEdit(\'' + t.id + '\')">' + _apt('detail.edit') + '</button>' +
+      '<button class="bt bt-p" onclick="_apTrigger(\'' + t.id + '\')">' + _apt('detail.trigger') + '</button>' +
       '<button class="bt bt-o" id="apSubscribeBtn" data-task-id="' + t.id + '" onclick="_apToggleSubscribe()">' + _apt('detail.subscribe') + '</button>' +
     '</div>' +
     // 任务信息
@@ -1636,7 +1646,7 @@ function _apAdvancedOptionsHTML(t) {
     // 加载分支列表
     var repoKey = t.repo_key || '';
     if (repoKey) {
-      var rk = repoKey.replace(/^(gitcode|github):/, '');
+      var rk = window.stripRepoPrefix(repoKey);
       var parts = rk.split('/');
       if (parts.length === 2) {
         API.get('/scenes/branches/' + parts[0] + '/' + parts[1] + '?repo_key=' + encodeURIComponent(repoKey)).then(function(b) {
@@ -1733,7 +1743,7 @@ function _apToggleEnabled(id, enabled) {
       if (dot) dot.style.left = enabled ? '18px' : '2px';
       var label = switchEl.parentElement.querySelector('span:first-child');
       if (label) label.textContent = enabled ? _apt('toggle.enable') : _apt('toggle.pause');
-      switchEl.setAttribute('onclick', 'event.stopPropagation();_apToggleEnabled(' + id + ', ' + !enabled + ')');
+      switchEl.setAttribute('onclick', 'event.stopPropagation();_apToggleEnabled(\'' + id + '\', ' + !enabled + ')');
     }
   }).catch(function(e) {
     if (app&&app.showToast) app.showToast(_apt('toggle.failed', {msg: (e.message||e)}));
@@ -1770,7 +1780,7 @@ function _apLoadExecutions(taskId) {
       var eid = e.id;
       _apExecMap[eid] = e;
 
-      html += '<div class="ap-exec-row" onclick="_apToggleExecDetail(' + eid + ', this)">' +
+      html += '<div class="ap-exec-row" onclick="_apToggleExecDetail(\'' + eid + '\', this)">' +
         '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px">' +
           '<span style="font-size:14px;flex-shrink:0">' + icon + '</span>' +
           '<span style="font-size:12px;font-weight:600;color:' + color + ';min-width:70px">' + _esc(e.status) + '</span>' +
@@ -1890,7 +1900,7 @@ function _apLoadFindingsInline(execId, container) {
       html += '<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--b)">' +
         '<span style="font-size:12px;flex-shrink:0">' + icon + '</span>' +
         '<div style="flex:1;min-width:0">' +
-          '<div style="font-size:12px;font-weight:500;color:var(--t)">' + _esc(f.title) + (f.dedup_level === 'suspected_duplicate' ? ' <span style="font-size:10px;padding:1px 6px;border-radius:4px;background:#e8a00020;color:#e8a000" title="' + _esc(f.dedup_note || '') + '">' + _apt('findings.suspected_dup_badge') + '</span>' : '') + '</div>' +
+          '<div style="font-size:12px;font-weight:500;color:var(--t)">' + _esc(f.title) + '</div>' +
           '<div style="font-size:11px;color:var(--t2);margin-top:2px;white-space:pre-wrap">' + _esc(f.description || '') + '</div>' +
           '<div style="font-size:10px;color:' + color + ';margin-top:2px">' + _esc(f.severity || 'medium') + (f.category ? ' · ' + _esc(f.category) : '') + '</div>' +
         '</div>' +
@@ -1914,17 +1924,12 @@ function _apShowFindings(execId) {
     var sevIcons = {high:'🔴', medium:'🟡', low:'🔵'};
     var rows = findings.map(function(f) {
       var icon = sevIcons[f.severity] || '•';
-      // Issue #697：疑似重复（根因不一致）徽标，派发需 owner 确认
-      var dupBadge = f.dedup_level === 'suspected_duplicate'
-        ? '<span style="flex-shrink:0;font-size:10px;padding:1px 6px;border-radius:4px;background:#e8a00020;color:#e8a000" title="' + _esc(f.dedup_note || '') + '">' + _apt('findings.suspected_dup_badge') + '</span>'
-        : '';
       var dispatchBtn = f.dispatched
         ? '<span style="font-size:11px;color:var(--t3)">' + _apt('findings.dispatched_badge') + '</span>'
         : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ', ' + f.id + ', this)" style="font-size:11px">' + _apt('findings.dispatch_btn') + '</button>';
       return '<div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--b)">' +
         '<span style="font-size:14px;flex-shrink:0">' + icon + '</span>' +
         '<span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(f.title) + '</span>' +
-        dupBadge +
         '<span style="flex-shrink:0">' + dispatchBtn + '</span>' +
       '</div>';
     }).join('');
@@ -1962,7 +1967,7 @@ function _apDispatchFinding(execId, findingId, btn) {
 
 function _apShowDispatchDialog(execId, finding, btn) {
   // 从详情页 task 取 repo_key（autopilot 详情页不在 currentRepo 上下文）
-  var repo = _apDetailRepoKey.replace(/^(gitcode|github):/, '');
+  var repo = window.stripRepoPrefix(_apDetailRepoKey);
   API.get('/scenes?repo=' + encodeURIComponent(repo)).then(function(d) {
     var scenes = d.scenes || [];
     var sceneOpts = '<option value="">' + _apt('dispatch.scene_smart') + '</option>' +
@@ -2039,10 +2044,7 @@ function _apShowDetail(id) {
 }
 
 // ===== 工具函数 =====
-function _esc(s) {
-  s = String(s || '');
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
+function _esc(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml
 
 function _apRelativeTime(utcStr) {
   if (!utcStr) return '—';

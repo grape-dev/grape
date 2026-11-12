@@ -56,11 +56,34 @@ def validate_task_dependencies(task: dict, engine_name: str = "") -> None:
         pass
 
     # 4. Repo token for git agents (coding/qa/sre need git access)
+    # D101 方案二（W12，评审 v2 第 4 点）：检查语义钉死——
+    # `repo_key 在册 且 resolve_config_level().level ∉ {"", "user"}`，
+    # 只读配置级别**不实际解密 token 值**。resolve 异常/空 level → 跳过
+    # 检查项（检查器自身故障不阻断任务，空值由 claim 现取自然暴露）；
+    # user level → warning 不拦截（路径 B 任务本就靠 claim 现取注入）。
+    # 误报面收敛到"repo 在册但完全无 bot 配置"单一形态。
     _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
     if agent_type in _GIT_AGENTS:
-        token = task.get("repo_gitcode_token") or ""
-        if not token:
-            missing.append(f"repo_gitcode_token is empty for git agent {agent_type} (task={tid})")
+        _rk = task.get("repo_key") or ""
+        if not _rk:
+            missing.append(f"repo_key is empty for git agent {agent_type} (task={tid})")
+        else:
+            try:
+                from src.kernel.token_service import resolve_repo_config_level
+                _lvl = (resolve_repo_config_level(_rk).level or "")
+                if _lvl == "user":
+                    log.warning(
+                        f"repo token is user-level for git agent {agent_type} "
+                        f"(task={tid}) — claim-time injection will provide it")
+                elif _lvl == "":
+                    log.warning(
+                        f"no repo token config for git agent {agent_type} "
+                        f"(task={tid}, repo={_rk}) — claim-time injection "
+                        f"will likely yield empty token")
+            except Exception as _dce:
+                # 检查器自身故障不阻断任务（跳过，由 claim 现取自然暴露）
+                log.warning(f"dependency_check token level probe failed "
+                            f"(skipped, task={tid}): {_dce}")
 
     # 5. Issue session for git worktree agents (warning, not hard fail)
     issue_session_id = task.get("issue_session_id") or ""

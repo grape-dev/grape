@@ -1,25 +1,32 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
+
 import sys, os, asyncio
 
 # Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.main:app` 的启动方式，
 # 在业务模块导入链触发前显式提示并退出。
 from src.api.version_check import ensure_python_version
+
 ensure_python_version()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
+
 from src.api import server_common
+
 from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community
+
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
+
 from src.domains.insight.routes import dashboard, search, health, latency, observability
+
 from src.domains.mgmt.routes import knowledge
+
 from src.domains.mgmt.routes import patrol
 
-
 bot_manager = None
-
 
 def _startup_security_check():
     """启动安全门禁（fail-closed）。
@@ -84,11 +91,6 @@ def _startup_security_check():
         for e in errors:
             log.error(f"[SECURITY] {e}")
         raise SystemExit(f"生产环境安全门禁失败：{'; '.join(errors)}")
-
-
-# ===== 定时任务启动器（Issue #596 P1 抽出，A 进程 grape_server.py 复用）=====
-# 这些函数把 main.py lifespan 内的巨型闭包循环抽为可复用启动器，
-# 单进程模式（main.py）与 A 进程（grape_server.py）共用同一实现源。
 
 def _start_server_metrics_task():
     """主控机指标上报循环（15s）——启动并返回 task。"""
@@ -199,7 +201,6 @@ def _start_server_metrics_task():
     log.info("Server metrics loop started (15s)")
     return _t
 
-
 def _start_obs_alert_task():
     """可观测性告警中心循环（30s + SLO 独立周期）——启动并返回 task。"""
     from src.kernel.config import log
@@ -255,7 +256,6 @@ def _start_obs_alert_task():
              f" SLO eval interval {_obs_slo.eval_interval_sec()}s (decoupled, Issue #437)")
     return _t
 
-
 def _start_obs_rollup_task():
     """业务指标聚合循环（60s）——启动并返回 task。"""
     from src.kernel.config import log
@@ -288,7 +288,6 @@ def _start_obs_rollup_task():
     log.info("Observability metric rollup started (60s, minute 7d / hour 30d)")
     return _t
 
-
 def _start_obs_sample_task():
     """设备资源采样循环（60s）——启动并返回 task。"""
     from src.kernel.config import log
@@ -303,7 +302,7 @@ def _start_obs_sample_task():
                 r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
                 if r.get("inserted"):
                     log.debug(f"Observability runtime samples: {r}")
-                _nc = await asyncio.to_thread(_obs_log.maybe_cleanup)
+                _nc = await asyncio.to_thread(_obs_logs.maybe_cleanup)
                 if _nc:
                     log.info(f"Observability logs cleaned: {_nc} rows")
                     _obs_loops.beat("obs_log_cleanup")
@@ -315,7 +314,6 @@ def _start_obs_sample_task():
     _t = asyncio.create_task(_obs_sample_loop())
     log.info("Observability runtime sampler started (60s)")
     return _t
-
 
 def _start_active_user_tracker_task():
     """用户活跃状态追踪循环（30s flush + 5min token/guard 清理）——启动并返回 task。"""
@@ -336,7 +334,7 @@ def _start_active_user_tracker_task():
                 _purge_i += 1
                 if _purge_i >= 10:
                     _purge_i = 0
-                    from src.api.auth_token import purge_expired_session_tokens
+                    from src.kernel.auth_sdk.auth_token import purge_expired_session_tokens
                     await asyncio.to_thread(purge_expired_session_tokens)
                     from src.api.event_store import purge_stale_event_guards
                     await asyncio.to_thread(purge_stale_event_guards)
@@ -347,12 +345,17 @@ def _start_active_user_tracker_task():
     log.info("Active user tracker started (30s flush)")
     return _t
 
-
-# ===== main.py lifespan（单进程兼容模式，Issue #596 后保留）=====
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bot_manager
     from src.kernel.config import log
+
+    # 卡死诊断（2026-11-05 事故）：SIGUSR1 手动 dump + 事件循环 stall 自动 dump
+    try:
+        from src.api.diagnostics import install as _diag_install
+        _diag_install(log)
+    except Exception as _diag_err:
+        log.warning(f"[diag] install failed: {_diag_err}")
 
     # 生产环境启动安全门禁
     try:
@@ -372,6 +375,27 @@ async def lifespan(app: FastAPI):
     _worker_h = await server_tasks.start_worker_tasks(app, include_sweep_tasks=False, include_table_maintenance=False)
     _insight_h = await server_tasks.start_insight_tasks(app, include_table_maintenance=False)
 
+    # D102-P：历史 PAT-as-ei-token 一次性回填（幂等，PAT 归位凭据域；
+    # 迁移竞态无虞——哈希比对精确命中才清，双实例并发最坏双写同值）。
+    try:
+        from src.domains.mgmt.auth.grape_account_db import backfill_pat_identity_tokens
+        backfill_pat_identity_tokens()
+    except Exception as _e:
+        from src.kernel.config import log as _log
+        _log.warning(f"pat identity backfill skipped (non-fatal): {_e}")
+
+    # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
+    # 未显式配置时默认 localhost，第三方平台无法回访（登录/托管不可用）。
+    try:
+        from src.domains.mgmt.user.db import get_server_base_url_warning
+        _base_warn = get_server_base_url_warning()
+        if _base_warn:
+            log.warning(f"[CONFIG] {_base_warn}")
+        else:
+            log.info("[CONFIG] server_base_url configured OK")
+    except Exception as _bw:
+        log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
+
     # sweeper：Issue done 后清理 workdir（见 multi-issue-isolation-design.md §3.4.2）——
     # 单进程合并版（僵尸事件 + 悬空任务 + workdir + 临时目录清理）
     _sweep_task = None
@@ -384,6 +408,67 @@ async def lifespan(app: FastAPI):
 
     # P2-C (Issue #357): Large table maintenance — 单进程组合版
     # (agent_tasks 字段置空 + 90 天删除 + task_messages 清理)，分布式锁 key=table_maintenance
+    try:
+        from src.api.patrol import patrol_loop
+        _patrol_task = asyncio.create_task(patrol_loop())
+        log.info("Patrol loop started")
+    except Exception as e:
+        log.warning(f"Patrol loop start failed: {e}")
+
+    # 知识库 OBS 同步：后台定时迁移老数据到 OBS（每小时一次）
+    _knowledge_sync_task = None
+    try:
+        async def _knowledge_sync_wrapper():
+            from src.domains.runtime.storage import get_storage
+            if not get_storage():
+                return  # OBS 未启用，不需要同步
+            from src.api.knowledge import knowledge_sync_loop
+            await knowledge_sync_loop()
+        _knowledge_sync_task = asyncio.create_task(_knowledge_sync_wrapper())
+        log.info("Knowledge sync loop started")
+    except Exception as e:
+        log.warning(f"Knowledge sync loop start failed: {e}")
+
+    # Issue #103：知识写入队列消费者——后台兜底处理 pending 任务
+    _knowledge_write_task = None
+    try:
+        from src.api.knowledge import knowledge_write_worker
+        _knowledge_write_task = asyncio.create_task(knowledge_write_worker())
+        log.info("Knowledge write worker started")
+    except Exception as e:
+        log.warning(f"Knowledge write worker start failed: {e}")
+
+    # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS（每 30 分钟）
+    try:
+        from src.domains.runtime.storage.skill_sync import start_skill_sync_scheduler
+        start_skill_sync_scheduler()
+    except Exception as e:
+        log.warning(f"Skill sync scheduler start failed: {e}")
+
+    # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
+    try:
+        from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
+        start_feedback_reconcile_scheduler()
+    except Exception as e:
+        log.warning(f"Feedback reconcile scheduler start failed: {e}")
+
+    # 官方技能+场景合并定时同步：每 30 分钟串行同步（R31：skill 完成后自动触发场景同步，
+    # 场景同步已合并进 sync_official_skills，不再有独立的 scene_sync scheduler）
+
+    # 临时上传文件定时清理：每小时清理超过 24 小时的孤儿文件（Issue-54）
+    try:
+        from src.domains.runtime.storage.upload_cleanup import start_upload_cleanup_scheduler
+        start_upload_cleanup_scheduler()
+    except Exception as e:
+        log.warning(f"Upload cleanup scheduler start failed: {e}")
+
+    # P2-C (Issue #357): Large table maintenance — nullify old agent_tasks fields
+    # and delete old task_messages. Runs every 6 hours with distributed lock.
+    # Issue #463 P1: also delete terminal agent_tasks older than 90 days.
+    # Issue #596 P3 (§6.2 拆分)：单进程模式同样按两个独立锁 key 执行
+    # （table_maintenance_tasks → agent_tasks 清理；table_maintenance_messages →
+    # task_messages 清理），与多进程模式 A/C 各持一锁的语义一致——
+    # 多进程部署时 A/C 各自抢自己的锁，单进程两个锁都在本进程内顺序拿。
     try:
         from src.domains.runtime.engine.task_lock import run_with_distributed_lock
 
@@ -423,60 +508,246 @@ async def lifespan(app: FastAPI):
     log.info("Process tasks stopped")
 
 
+from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口（控制字符转义）
+
 app = server_common.build_app(
     title="Agentic DevOps API",
     version="2.2.0",
     lifespan=lifespan,
+    default_response_class=SafeJSONResponse,
 )
 
 app.include_router(grape_auth.router)
+
 app.include_router(auth.router)
+
 app.include_router(repos.router)
+
 # Admin 管理后台（/api/admin/*）
 from src.domains.mgmt.admin.routes import router as admin_router
+
 app.include_router(admin_router)
+
 # Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo，与 grape 托管 repos.py 区分）
 from src.api.git_repo_api import router as git_repo_router
+
 app.include_router(git_repo_router)
+
 app.include_router(dashboard.router)
+
 app.include_router(agents.router)
+
 app.include_router(events.router)
+
 app.include_router(chat.router)
+
 app.include_router(settings.router)
+
 app.include_router(skills.router)
+
 app.include_router(search.router)
+
 app.include_router(pipeline.router)
+
 app.include_router(webhook.router)
+
 app.include_router(scenes.router)
+
 app.include_router(templates.router)
+
 app.include_router(tasks.router)
+
 app.include_router(issues.router)
+
 app.include_router(runtime.router)
+
 app.include_router(feishu_onboard.router)
+
 app.include_router(feishu_card.router)
+
 app.include_router(task_logs.router)
+
 app.include_router(knowledge.router)
+
 app.include_router(health.router)
+
 app.include_router(devstage.router)
+
 app.include_router(latency.router)
+
 app.include_router(feedback.router)
+
 app.include_router(autopilot.router)
+
 app.include_router(orgs.router)
+
 app.include_router(community.router)
+
 app.include_router(observability.router)
+
 app.include_router(patrol.router)
 
-# IM 渠道/会话路由（weekly-11 新引擎；四进程入口挂在 grape_server，单进程入口同步挂载）
-from src.api.routes import im as im_routes  # noqa: E402
-app.include_router(im_routes.router)
-
-# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
-
 from src.api.openapi import custom_openapi
+
 app.openapi = lambda: custom_openapi(app)
 
 server_common.init_process_db()
 
 server_common.attach_health(app, service_name="server", readiness=True)
 
+# Issue #825 修复（PR #1231 深度审查）：im 路由必须在 SPA catch-all（/{path:path} GET）
+# 之前注册，否则 GET /api/im/*（status/installations/dingtalk/card-setup）被
+# catch_all 吞掉返回 404。import 在此处无环（im.py 顶层仅依赖 api.deps/kernel.config）。
+from src.domains.runtime.routes import im as im_api
+app.include_router(im_api.router)
 server_common.attach_frontend(app)
+
+from fastapi.middleware.cors import CORSMiddleware
+
+from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口
+
+from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, knowledge, devstage, feedback, autopilot, orgs, community, patrol
+
+from src.domains.insight.routes import dashboard, search, health, latency, observability
+
+from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
+
+
+# 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
+from src.domains.insight.observability import metrics_middleware, start_metrics_server, metrics_endpoint, metrics_enabled
+
+# Issue #596 P1：request_id + HTTP 请求日志中间件抽至 src/api/middleware.py（A/B/C 三入口复用）
+from src.api.middleware import install_request_middleware
+
+# /api/ping（Issue #596 P1：随 health_endpoints 安装，含 /health /healthz /readyz /health/realtime）
+from src.api.health_endpoints import install_health_endpoints
+
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
+from src.api.openapi import custom_openapi
+
+# ===== Issue #596 P1：静态资源 + SPA 路由抽至 src/api/spa.py（A 进程复用）=====
+from src.api.spa import install_spa_routes
+
+from src.api.db_setup import init_database
+
+from src.kernel.config import _load_accounts
+
+# 全局异常处理器（Issue #596 P1：抽至 src/api/exception_handlers.py）
+from src.api.exception_handlers import install_exception_handlers
+
+# ===== 三层健康检查（Issue #596 P1：抽至 src/api/health_endpoints.py）=====
+# /health /healthz /readyz /health/realtime /api/ping 已在上方 install_health_endpoints(app) 处注册。
+@app.get("/metrics")
+async def metrics():
+    """Prometheus 指标端点已禁用——无外部 Prometheus 消费，且无认证暴露 API 路由结构有安全风险。
+    如需启用，配置 METRICS_ADDR 并添加认证后取消下方注释。
+    """
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"error": "metrics endpoint disabled"}, status_code=404)
+
+def _check_and_sync_templates() -> bool:
+    """检查 project-templates.json + examples/ 是否存在，缺失则自动从 grape-template 仓库拉取。
+
+    防止 git merge/pull 后模板文件被删除导致模板页变空（commit 838f2c98 事故）。
+    调用 scripts/sync_templates.sh 执行实际同步。
+    """
+    import os as _os
+    from src.kernel.config import log
+
+    _repo_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    _json_path = _os.path.join(_repo_root, "configs", "project-templates.json")
+    _examples_dir = _os.path.join(_repo_root, "examples")
+
+    # 1. 检查 JSON 文件
+    json_ok = _os.path.isfile(_json_path) and _os.path.getsize(_json_path) > 100
+    # 2. 检查 examples/ 目录有内容（至少有 1 个子目录）
+    examples_ok = _os.path.isdir(_examples_dir) and \
+        any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
+
+    if json_ok and examples_ok:
+        return True  # 一切正常
+
+    # 3. 缺失 → 执行 sync_templates.sh 自动拉取
+    missing = []
+    if not json_ok:
+        missing.append("configs/project-templates.json")
+    if not examples_ok:
+        missing.append("examples/")
+    log.warning(f"Templates: missing {missing}, auto-syncing from grape-template repo...")
+
+    _sync_script = _os.path.join(_repo_root, "scripts", "sync_templates.sh")
+    if not _os.path.isfile(_sync_script):
+        log.error(f"Templates: sync script not found at {_sync_script}")
+        return False
+
+    import subprocess as _sp
+    try:
+        _result = _sp.run(
+            ["bash", _sync_script],
+            capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace",  # Windows 宿主：控制台输出可能是 GBK，固定 utf-8+replace 防 reader 线程解码崩溃
+            # D17 扫雷四轮：尊重外部已设 TEMPLATES_REPO（原写死覆盖导致内网镜像配置失效）
+            env={**_os.environ, "TEMPLATES_REPO": _os.environ.get("TEMPLATES_REPO")
+                 or "https://gitcode.com/grape-dev/grape-template.git"}
+        )
+        if _result.returncode == 0:
+            log.info(f"Templates: auto-sync OK\n{_result.stdout}")
+        else:
+            log.error(f"Templates: auto-sync failed (exit={_result.returncode})\n{_result.stderr}")
+    except Exception as e:
+        log.error(f"Templates: auto-sync exception: {e}")
+        return False
+
+    # 4. 再次检查
+    json_ok = _os.path.isfile(_json_path) and _os.path.getsize(_json_path) > 100
+    examples_ok = _os.path.isdir(_examples_dir) and \
+        any(_os.path.isdir(_os.path.join(_examples_dir, d)) for d in _os.listdir(_examples_dir) if not d.startswith('.'))
+    return json_ok and examples_ok
+
+def _start_vcs_exists_backfill_task():
+    """Issue #995：存量 issue.vcs_exists 异步回填（幂等，启动后延迟执行一次）。
+
+    不阻塞启动；失败仅告警，列表请求仍按 fail-open 语义工作。
+    """
+    from src.kernel.config import log
+
+    async def _worker():
+        await asyncio.sleep(60)
+        try:
+            from src.api.issue_vcs_index import backfill_vcs_exists
+            summary = await asyncio.to_thread(backfill_vcs_exists)
+            log.info(f"VCS existence backfill: {summary}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"VCS existence backfill failed: {e}")
+
+    return asyncio.create_task(_worker(), name="vcs-exists-backfill")
+
+im_engine = None  # 新引擎运行时句柄（2026-11-10 起 IM 只有这一条路）
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+metrics_middleware(app)
+
+if metrics_enabled():
+    start_metrics_server()
+
+install_request_middleware(app)
+
+install_health_endpoints(app, service_name="server")
+
+
+install_spa_routes(app)
+
+init_database()
+
+_load_accounts()
+
+install_exception_handlers(app)

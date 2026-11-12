@@ -5,16 +5,23 @@
 - routes/tasks.py 只保留「执行实例」动作（complete/current），其他路由与业务模块均从本模块导入，
 - 本模块为叶子：**不得 import routes.tasks / routes.issues**（防环形依赖）。
 """
+
 import asyncio
+
 import os
+
 from datetime import datetime
 
 from fastapi import Depends, HTTPException, Query, Request
+
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
+
 from src.api.time_utils import normalize_event_time
+
 from src.kernel.config import log, WORKSPACE_DIR
+
 from src.kernel.session_manager import db, db_lock, get_chat_config, create_conversation, add_message
 
 def _require_session_repo_token(request: Request, repo_key: str) -> dict:
@@ -33,31 +40,27 @@ def _require_session_repo_token(request: Request, repo_key: str) -> dict:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无效或仓库作用域不匹配"})
     return info
 
-
 class TaskNotifyBody(BaseModel):
     assignee: str = ""
     repo_key: str = ""
-    issue_number: int = 0
+    issue_number: int | str = 0
     task_description: str = ""
-
 
 class TaskAwaitingInputBody(BaseModel):
     questions: str = ""
     reason: str = ""
     # Issue #667：卡片 id 缺行时的兜底解析——GitCode 侧 Issue number（会话仓库作用域内），
     # 服务端据此复用/补建内部需求卡行，避免同步缺口导致 404 阻断澄清流程。
-    issue_number: int = 0
-
+    # （S75：字符串 ident 平台合法，int | str 原生保形）
+    issue_number: int | str = 0
 
 class TaskPendingReviewBody(BaseModel):
     review_points: str = ""
     references: str = ""
 
-
 class TaskCloseBody(BaseModel):
     repo_key: str = ""
-    issue_number: int = 0
-
+    issue_number: int | str = 0
 
 def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None:
     """按平台用户名查 user_id（unified_user_mapping.user_id）。
@@ -69,23 +72,45 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
 
     FR-11.2: 按 repo_key 的 provider 分查对应列（gitcode_user / github_login），
     避免 OR 扫两列导致空串交叉命中。repo_key 为空时降级为 gitcode_user 查询（向后兼容）。
+    M5/S51（D31）：身份优先——先按 external_identities（平台登录名权威域，
+    协议无关）反查，命中即返回；未命中回退既有 um 名字域链（零危害：不迁
+    数据不删表，注册名 ≠ 平台登录名错位在身份域天然消解）。
     """
     if not gitcode_user:
         return None
+    # S51 身份优先归属：external_identities 命中即权威
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+        _provider, _, _ = parse_repo_key(repo_key or "")
+        _uid = resolve_user_id_by_platform_login(_provider, gitcode_user)
+        if _uid:
+            return _uid
+    except Exception as _e:
+        # D33/S53：不吞——resolver 自身 SQL 失败有内部 log，但 import 级失败
+        # 原先永久静默回退；留痕供排查（回退 um 兜底行为不变）
+        log.warning(f"_get_user_id_by_gitcode: identity-first resolution failed "
+                    f"(user={gitcode_user!r}, repo={repo_key!r}), falling back to um: {_e}")
     with db_lock:
         c = db.cursor()
         try:
             # FR-CQ-1: 提取为 um_column_for_repo 工具函数
             from src.kernel.repo_key import um_column_for_repo
             _col = um_column_for_repo(repo_key)
+            # D39/S59：无 um 列平台（gitee 等）跳过兜底（不折叠查 gitcode_user，
+            # 跨平台同名误命中消除；身份优先已在前，此处兜底 miss）
+            if not _col:
+                log.warning(f"_get_user_id_by_gitcode: provider has no um column, skip um fallback "
+                            f"(user={gitcode_user!r}, repo={repo_key!r})")
+                return None
             row = c.execute(
                 f"SELECT um.user_id FROM unified_user_mapping um "
-                f"WHERE um.{_col}=? AND um.user_id>0 "
+                f"WHERE um.{_col}=? AND (um.user_id IS NOT NULL AND um.user_id != '' AND um.user_id != '0') "
                 f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.status=1) "
                 f"ORDER BY um.user_id LIMIT 1", (gitcode_user,)).fetchone()
             if not row:
                 row = c.execute(
-                    f"SELECT user_id FROM unified_user_mapping WHERE {_col}=? AND user_id>0 LIMIT 1",
+                    f"SELECT user_id FROM unified_user_mapping WHERE {_col}=? AND (user_id IS NOT NULL AND user_id != '' AND user_id != '0') LIMIT 1",
                     (gitcode_user,)).fetchone()
             if row:
                 return row[0]
@@ -95,69 +120,53 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
             log.warning(f"_get_user_id_by_gitcode: query failed for '{gitcode_user}': {e}")
             return None
 
-
 def _get_feishu_open_id(gitcode_user: str, repo_key: str = "") -> str:
     """按平台用户名查飞书 open_id。
 
     FR-17.2: 有 repo_key 时按 provider 分查对应列；无则只查 gitcode_user（调用方从 grape_accounts.username 取值）。
+    S54（D34）：身份优先——先经 external_identities 解析 user_id 再按 user_id 查
+    open_id（um 平台列空/错位时通知不再静默丢失）；未命中回退 um 名字域（原路径）。
     """
-    if not gitcode_user:
-        return ""
-    # FR-CQ-1: 提取为 um_column_for_repo 工具函数
-    from src.kernel.repo_key import um_column_for_repo
-    _col = um_column_for_repo(repo_key)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(f"SELECT feishu_open_id FROM unified_user_mapping WHERE {_col}=? AND feishu_open_id!='' LIMIT 1", (gitcode_user,))
-            row = c.fetchone()
-            return row[0] if row else ""
-        except Exception:
-            return ""
+    # S99/D74：S54 解析链（身份优先 → um 兜底）迁入 channel_directory，
+    # 本函数保留薄包装（存量消费者不感知）
+    from src.domains.runtime.im.channel_directory import resolve_open_id_for_login
+    return resolve_open_id_for_login(gitcode_user, repo_key)
 
 
-def _get_feishu_open_id_by_user_id(user_id: int) -> str:
+def _get_feishu_open_id_by_user_id(user_id: str) -> str:
     """按平台 user_id 查飞书 open_id（等用户状态通知的 open_id 定位）。
 
     A2A/流水线产生的需求卡 `assignee` 常为空（归属人由 user_id 承载），飞书 open_id 应随 user_id 查询，
     而非 GitCode 用户名（assignee），否则 assignee 为空时通知静默丢失（feishu-openid-by-user-id-design.md）。
     返回 open_id（空串=未配置/缺失）。
     """
-    if not user_id:
-        return ""
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND feishu_open_id!='' LIMIT 1",
-                (user_id,))
-            row = c.fetchone()
-            return row[0] if row else ""
-        except Exception:
-            return ""
+    # S99/D74：实现迁入 channel_directory（薄包装）
+    from src.domains.runtime.im.channel_directory import resolve_open_id_by_user
+    return resolve_open_id_by_user(user_id)
 
-
-def _get_gitcode_user_by_user_id(user_id: int) -> str:
+def _get_gitcode_user_by_user_id(user_id) -> str:
     """按 user_id 反查平台用户名（gitcode_user 优先，github_login 兜底）。
 
     Issue #1337: 建 issue 卡片时回填 created_by 用；查不到返回空串（归入「未归属」）。
+    引擎侧 routes/tasks.py 仍调用本函数；D105 TEXT 化后哨兵为字符串口径
+    （铁律⑬）：`user_id>0` 数值比较对 uuid 字符串会 TypeError/MySQL 恒假。
     """
-    if not user_id:
+    uid = str(user_id or "")
+    if uid in ("", "0", "None"):
         return ""
     with db_lock:
         c = db.cursor()
         try:
             row = c.execute(
                 "SELECT COALESCE(NULLIF(gitcode_user,''), NULLIF(github_login,''))"
-                " FROM unified_user_mapping WHERE user_id=? AND user_id>0 LIMIT 1",
-                (user_id,)).fetchone()
+                " FROM unified_user_mapping WHERE user_id=? AND user_id!='' AND user_id!='0' LIMIT 1",
+                (uid,)).fetchone()
             return (row[0] or "") if row else ""
         except Exception as e:
-            log.warning(f"_get_gitcode_user_by_user_id({user_id}) failed: {e}")
+            log.warning(f"_get_gitcode_user_by_user_id({uid}) failed: {e}")
             return ""
 
-
-def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
+def _ensure_assignee_task_card(user_id: str, assignee: str, repo_key: str, issue_number: int,
                                title: str, task_description: str) -> int | None:
     """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。
 
@@ -177,16 +186,26 @@ def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (assignee, user_id, card_id))
                 db.commit()
             return card_id
+        # Issue #1337-D：created_by 回填（多平台解耦口径——账号域 username，
+        # 平台无关；weekly-10 版曾用 gitcode_user 反查，解耦后废弃）
+        try:
+            _uid_cb = str(user_id or "").strip()
+            _cb = ""
+            if _uid_cb not in ("", "0"):
+                _cb_row = c.execute(
+                    "SELECT username FROM grape_accounts WHERE id=? LIMIT 1", (_uid_cb,)).fetchone()
+                _cb = (_cb_row[0] or "") if _cb_row else ""
+        except Exception:
+            _cb = ""
         c.execute(
             "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, created_by) "
             "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
             (user_id, assignee, repo_key, issue_number, title, task_description,
              _get_issue_subtask_mode(repo_key, issue_number), _get_issue_parent(repo_key, issue_number),
-             _get_issue_parent_id(repo_key, issue_number), _get_gitcode_user_by_user_id(user_id))
+             _get_issue_parent_id(repo_key, issue_number), _cb or (assignee or ""))
         )
         db.commit()
         return c.lastrowid
-
 
 def _build_task_conversation_title(issue_number: int, title: str = "") -> str:
     """生成任务会话标题：`Issue #N · {title}`（title 空回退 `Issue #N`）。
@@ -201,8 +220,7 @@ def _build_task_conversation_title(issue_number: int, title: str = "") -> str:
         return f"Issue #{issue_number} · {clean_title}"
     return f"Issue #{issue_number}"
 
-
-def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
+def _ensure_task_conversation(user_id: str, repo_key: str, issue_number: int,
                               title: str = "", description: str = "",
                               write_context_on_reuse: bool = False) -> str:
     """为任务查找/复用「Issue #N · {title}」对话（任务中心「去对话」入口）。
@@ -253,8 +271,7 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
         return ""
     return conv_id
 
-
-def _resolve_issue_org_id(repo_key: str, explicit_org: int = 0) -> int:
+def _resolve_issue_org_id(repo_key: str, explicit_org: str = "") -> str:
     """解析需求归属组织（issue-244-org-attribution-fix-design.md 方案 B）。
 
     - repo 关联需求（repo_key 非空）：org = `managed_repos.org_id`（仓库权威，单一来源），
@@ -265,8 +282,9 @@ def _resolve_issue_org_id(repo_key: str, explicit_org: int = 0) -> int:
     """
     if repo_key:
         from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
-        return get_org_id_by_repo_key(repo_key) or 0
-    return explicit_org or 0
+        org_id = get_org_id_by_repo_key(repo_key) or ""
+        return "" if str(org_id) == "0" else str(org_id)  # D105-15：哨兵 0/'0' 统一 ''
+    return explicit_org or ""
 
 
 def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
@@ -274,8 +292,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
                       sender: str = "",
-                      org_id: int = 0,
-                      owner_user_id: int = 0,
+                      org_id: str = "",
+                      owner_user_id: str = "",
                       creator: str = "") -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
@@ -315,7 +333,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
     # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
-    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
+    user_id = owner_user_id if str(owner_user_id or "") not in ("", "0") else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
@@ -323,7 +341,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
     # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
     from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
-    _repo_org = get_org_id_by_repo_key(repo_key) or 0
+    _repo_org = get_org_id_by_repo_key(repo_key) or ""
     if org_id and org_id != _repo_org:
         log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
                     f"passed_org={org_id} → repo_org={_repo_org}")
@@ -369,15 +387,16 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 _r2 = c.fetchone()
                 if _r2:
                     _existing_assignee = _r2[0] or ""
-                    _existing_user_id = _r2[1] or 0
+                    _existing_user_id = str(_r2[1] or "").strip()
             except Exception:
                 pass
-            # 归属校准：现有值为 0 或「默认/承载账号」且与解析值不一致 → 校准为解析值
-            # （issue-card-owner-attribution-fix-design.md：只修 0 修不掉非 0 错误归属）
+            # 归属校准：现有值为空/0 或「默认/承载账号」且与解析值不一致 → 校准为解析值
+            # （issue-card-owner-attribution-fix-design.md：只修 0 修不掉非 0 错误归属；
+            #   D105 起 user_id 为 uuid 字符串，一律 str 归一后判定，int 混型不再命中哨兵）
             _DEFAULT_OWNER_UID = 1  # 默认/承载账号 id（可调；与历史「空 assignee 命中默认账号」现场一致）
-            if (user_id > 0 and _existing_user_id not in (None,)
-                    and _existing_user_id in (0, _DEFAULT_OWNER_UID)
-                    and _existing_user_id != user_id):
+            if (str(user_id or "").strip() not in ("", "0")
+                    and _existing_user_id in ("", "0", str(_DEFAULT_OWNER_UID))
+                    and _existing_user_id != str(user_id).strip()):
                 c.execute("UPDATE issue SET user_id=? WHERE id=?", (user_id, task_id))
                 log.info(f"ensure_issue_task: ownership calibrated issue #{issue_number} "
                          f"user_id {_existing_user_id}->{user_id}")
@@ -411,8 +430,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             db.commit()
             task_id = c.lastrowid
             linked = None
-    # 「去对话」配套：user_id>0 且未关联对话时创建/复用 Issue 会话
-    if user_id > 0 and not linked:
+    # 「去对话」配套：str(user_id or "") not in ("", "0") 且未关联对话时创建/复用 Issue 会话
+    if str(user_id or "") not in ("", "0") and not linked:
         try:
             conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, description)
             if conv_id:
@@ -423,7 +442,6 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         except Exception as e:
             log.warning(f"ensure_issue_task conversation link failed: {e}")
     return task_id
-
 
 def close_issue_tasks(repo_key: str, issue_number: int) -> int:
     """webhook 兜底（P5）：Issue closed → 该 issue 所有 active/processing 任务进入 pending_review。
@@ -474,7 +492,6 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
         db.commit()
         return c.rowcount
 
-
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
     """换人：不再把需求标完成（reassigned 语义错位，见 reassign-takeover-no-complete-design.md）。
 
@@ -482,7 +499,6 @@ def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee:
     责任转移由 _ensure_assignee_task_card 更新 assignee 承担。保持 no-op 幂等，不触碰需求状态。
     """
     return 0
-
 
 def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
     """bot 接管：不把需求标完成（bot_takeover 语义错位，见 reassign-takeover-no-complete-design.md）。
@@ -526,17 +542,14 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         db.commit()
         return c.rowcount
 
-
 # 进入 pending_review 时可能写入的哨兵 owner_agent（非真实流水线节点）；
 # resume 回落 stage 时不能直接采用，避免阶段取值非法。
 _RESUME_STAGE_SENTINELS = ("", "bot_takeover", "issue_closed", "pending_review")
-
 
 def _resume_stage(owner_agent: str) -> str:
     """pending_review 恢复到哪个阶段：真实节点用 owner_agent，哨兵回落到默认首节点 issue。"""
     _owner = (owner_agent or "").strip()
     return "issue" if _owner in _RESUME_STAGE_SENTINELS else _owner
-
 
 def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
@@ -576,7 +589,6 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
         log.warning(f"resume issue from waiting failed {repo_key}/#{issue_number}: {_e}")
         return False
 
-
 def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
     """Agent 显式设置阶段审核点（幂等）：`active/processing/awaiting_input → pending_review`，不改 stage。"""
     try:
@@ -594,7 +606,6 @@ def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
     except Exception as _e:
         log.warning(f"set issue pending_review failed {repo_key}/#{issue_number}: {_e}")
         return False
-
 
 def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
     """当前 issue.stage 是否为流水线末节点（next=='done'）。
@@ -619,7 +630,6 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         return False
     except Exception:
         return False
-
 
 def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
                          statuses: tuple = ("pending_review",),
@@ -663,10 +673,8 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
         _notify_done(repo_key, issue_number, "审核已通过，该需求已完成。")
     return _changed
 
-
 # Issue #1599：审核动作未命中原因分类所依赖的终态集合
 _ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
-
 
 def _read_issue_status(repo_key: str, issue_number: int) -> str:
     """回读 issue 表真实 status（空串 = 无行或回读失败，由调用方兜底）。"""
@@ -681,7 +689,6 @@ def _read_issue_status(repo_key: str, issue_number: int) -> str:
     except Exception as _e:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
-
 
 def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) -> str:
     """审核动作未命中时回读真实 status 并给出机器可读原因码。
@@ -700,12 +707,10 @@ def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) ->
         return "noop:terminal"
     return "noop:not_pending_review"
 
-
 # Issue #656: 自动结单完成原因（区别于 review_passed/user_confirmed 人工确认路径）
 _AUTO_FINALIZED_REASON = "auto_finalized"
 
-
-def _pipeline_last_node_check(repo_key: str, issue_number: int, agent_type: str) -> bool:
+def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> bool:
     """完成的 agent 是否为该 issue 流水线末节点（next=='done' 或 next 无下游节点）。"""
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
@@ -736,7 +741,6 @@ def _pipeline_last_node_check(repo_key: str, issue_number: int, agent_type: str)
         log.warning(f"pipeline last-node check failed {repo_key}/#{issue_number}: {_e}")
         return False
 
-
 def _find_github_mirror_repo_key(repo_key: str) -> str:
     """查找 GitCode 仓库绑定的 GitHub 镜像 repo_key（confirm-done 同款逻辑，#656 复用）。
 
@@ -759,21 +763,21 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
         log.warning(f"find github mirror for {repo_key} failed: {e}")
         return ""
 
-
-def _close_vcs_one_auto(repo_key: str, issue_number: int) -> str:
+def _close_vcs_one_auto(repo_key: str, issue_number) -> str:
     """对单个 repo_key 幂等关闭 VCS Issue（bot token，降级不阻断）。"""
     try:
         from src.kernel.repo_key import parse_repo_key
         provider, owner, repo = parse_repo_key(repo_key)
         if not owner or not repo:
             return "skipped"
+        # D44/S65：token 统一入口 TokenResolver 策略链（bot 列→全局→用户
+        # 降级，get_github_token/get_repo_bot_token 内部即此形态）
         token = ""
-        if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_gh
-            token = _get_gh(repo_key=repo_key) or ""
-        else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
-            token = _get_gc(repo_key=repo_key) or ""
+        try:
+            from src.kernel.token_resolver import TokenResolver, create_provider
+            token = TokenResolver(create_provider(provider)).get_token(repo_key) or ""
+        except Exception:
+            token = ""
         if not token:
             log.info(f"auto-finalize: no bot token for {repo_key}, skip VCS close")
             return "skipped"
@@ -794,8 +798,7 @@ def _close_vcs_one_auto(repo_key: str, issue_number: int) -> str:
         log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
         return "failed"
 
-
-def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
+def _close_vcs_issue_auto(repo_key: str, issue_number) -> str:
     """Issue #656: 服务端自动结单后联动关闭 VCS Issue（bot token，降级不阻断）。
 
     与 confirm-done 人工路径语义一致：GitCode 仓库同时尝试关闭绑定的 GitHub 镜像 Issue
@@ -809,11 +812,11 @@ def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
         return "skipped"
     _results = {}
     try:
+        # S104/D78：镜像查找统一 _mirror_repo_keys（全平台，S97 同族；
+        # 手写 github-only 镜像漏 gitee/gitlab 绑定仓）
         _results[repo_key] = _close_vcs_one_auto(repo_key, issue_number)
-        if not repo_key.startswith("github:"):
-            _gh_rk = _find_github_mirror_repo_key(repo_key)
-            if _gh_rk:
-                _results[_gh_rk] = _close_vcs_one_auto(_gh_rk, issue_number)
+        for _m_rk in _mirror_repo_keys(repo_key):
+            _results[_m_rk] = _close_vcs_one_auto(_m_rk, issue_number)
     except Exception as _e:
         log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
         return "failed"
@@ -823,7 +826,6 @@ def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
     if "failed" in _vals:
         return "failed"
     return "skipped"
-
 
 def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dict:
     """该 issue 每个 agent_type 的最新事件状态（seq 最大者），用于「全部节点 completed」检测。
@@ -856,7 +858,6 @@ def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dic
         log.warning(f"auto-finalize: latest event status query failed {repo_key}/{issue_id_tag}: {_e}")
         return out
 
-
 def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: str,
                                      source: str = "pipeline") -> str:
     """Issue #656: 末节点完成后 issue 级自动收尾迁移（自动结单）。
@@ -875,10 +876,13 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
     """
     try:
         _num_s = (issue_id or "").strip().lstrip("#")
-        if not _num_s.isdigit() or _num_s == "0":
+        # S75/D102-O：字符串 ident（gitee "IKTVZQ"）合法——只拒伪 issue_id（#pr_...）、
+        # 空、0；数字与字符串 ident 原生保形（原 isdigit 门槛把 gitee 全族拒成 noop:not_issue，
+        # 自动结单永远不触发）。
+        if not _num_s or _num_s == "0" or _num_s.startswith("pr_"):
             return "noop:not_issue"          # PR 订阅伪 issue_id（#pr_...）等非真实 Issue
-        _num = int(_num_s)
-        _tag = f"#{_num}"
+        _num = _native_issue_number(_num_s)
+        _tag = f"#{_num_s}"
 
         with db_lock:
             c = db.cursor()
@@ -941,15 +945,33 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
             if _st != "completed":
                 return f"noop:node_pending:{_nid}"
 
-        # Issue #1739：QA 结论门禁——同一流水线 qa 最新结论为 fail 时不得自动结单。
-        # 兼容 qa 以 status=completed + result “不通过/阻塞” 自报失败的实际形态。
+        # Issue #1739 + #1963（arch 基线移植）：收尾前统一 QA 结论门禁；拦截后必须落
+        # pending_review，否则卡片停在原 stage（既进不了待审核列，也无人被通知）。
+        # 我方能力保留：命中失败仍返回 qa_failed_blocked[*] 语义（调用方依赖该返回值）。
         try:
             from src.api.qa_gate import gate_or_annotate
             _qa_info = gate_or_annotate(repo_key, _num)
             if _qa_info.get("blocked"):
-                log.info(f"Issue #1739: qa failed → keep issue open "
-                         f"{repo_key}/{_tag} (seq={_qa_info.get('event_seq')})")
-                return "qa_failed_blocked"
+                _stage_ok = True
+                try:
+                    from src.api.session_store import set_issue_stage
+                    try:
+                        set_issue_stage(repo_key, _tag, "pending_review", agent_type)
+                    except Exception as _se:
+                        log.warning(f"Issue #1963: qa blocked → pending_review failed "
+                                    f"{repo_key}/{_tag}: {_se}, retry once")
+                        try:
+                            set_issue_stage(repo_key, _tag, "pending_review", agent_type)
+                        except Exception as _se2:
+                            _stage_ok = False
+                            log.warning(f"Issue #1963: qa blocked → pending_review retry failed "
+                                        f"{repo_key}/{_tag}: {_se2} (compensated on next event)")
+                except Exception as _ie:
+                    _stage_ok = False
+                    log.warning(f"Issue #1963: pending_review staging unavailable: {_ie}")
+                log.info(f"Issue #1739: qa failed → pending_review "
+                         f"{repo_key}/{_tag} (seq={_qa_info.get('event_seq')}, stage_ok={_stage_ok})")
+                return "qa_failed_blocked" if _stage_ok else "qa_failed_blocked_stage_error"
         except Exception as _qe:
             # 门禁自身异常 fail-open，不阻断正常收尾（与原关闭链路一致）
             log.warning(f"Issue #1739: qa gate check failed (fail-open) "
@@ -985,7 +1007,6 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
     except Exception as _e:
         log.warning(f"auto-finalize failed {repo_key}/{issue_id}: {_e}")
         return "noop:error"
-
 
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
@@ -1055,7 +1076,6 @@ def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
         log.warning(f"review_pass failed {repo_key}/#{issue_number}: {_e}")
         return "noop:error"
 
-
 def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
                    reason: str = "") -> str:
     """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。
@@ -1082,7 +1102,6 @@ def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
         log.warning(f"review_reject failed {repo_key}/#{issue_number}: {_e}")
         return "noop:error"
 
-
 def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
     """从 issue_state 读取 is_subtask_mode（任务创建时同步）。
     子任务（有 parent_issue_id）也算多任务模式。"""
@@ -1097,7 +1116,6 @@ def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
         return 1
     return 0
 
-
 def _get_issue_parent_id(repo_key: str, issue_number: int) -> str:
     """从 issue_state 读取 parent_issue_id（文本，如 "#20"；空=普通任务）。"""
     from src.api.session_store import get_issue_stage
@@ -1105,13 +1123,17 @@ def _get_issue_parent_id(repo_key: str, issue_number: int) -> str:
     state = get_issue_stage(repo_key, issue_id) or {}
     return (state.get("parent_issue_id") or "").strip()
 
-
-def _get_issue_parent(repo_key: str, issue_number: int) -> int:
-    """从 issue_state 读取 parent_issue_id 并转为 int（前端兼容 parent_issue_number）。"""
+def _get_issue_parent(repo_key: str, issue_number: int):
+    """从 issue_state 读取 parent_issue_id 并归一（数字→int；IK* 字符串原样保留，
+    与 parent_issue_id（TEXT）双列同源不分叉）。"""
     parent = _get_issue_parent_id(repo_key, issue_number)
     parent_num = str(parent).replace("#", "").strip()
-    return int(parent_num) if parent_num.isdigit() else 0
-
+    if not parent_num:
+        return 0
+    if parent_num.isdigit():
+        return int(parent_num)
+    # issue-ident（IK*）：保留原生形态（issue.parent_issue_number 列可存 TEXT）
+    return parent_num
 
 def _get_issue_title(repo_key: str, issue_number: int) -> str:
     """从 events 表取该 issue 最新事件的标题（零 API 调用）。
@@ -1167,7 +1189,6 @@ def _get_issue_title(repo_key: str, issue_number: int) -> str:
         except Exception:
             return ""
 
-
 def _build_task_context_message(title: str, task_description: str, repo_key: str, issue_number: int) -> str:
     """构建写入会话的任务上下文消息（用户侧可见）"""
     lines = [f"📋 任务分配 · Issue #{issue_number}"]
@@ -1180,25 +1201,19 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     lines.append("请在下方与我沟通处理进度，或提出疑问。")
     return "\n".join(lines)
 
-
 def _vcs_issue_url(repo_key: str, issue_number: int) -> str:
     """repo_key → VCS Issue 公开页 URL（gitcode/github/gitlab 分流）。
 
     无编号 / 坏仓库（缺 owner 或 repo）→ ''。未知 provider 前缀 → 默认 GitCode。
     """
-    from src.kernel.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo, issue_web_url
     if not issue_number:
         return ""
     owner, repo = split_owner_repo(repo_key)
     if not owner or not repo:
         return ""
-    _p = str(repo_key).split(":", 1)[0]
-    if _p == "github":
-        return f"https://github.com/{owner}/{repo}/issues/{issue_number}"
-    if _p == "gitlab":
-        return f"https://gitlab.com/{owner}/{repo}/-/issues/{issue_number}"
-    return f"https://gitcode.com/{owner}/{repo}/issues/{issue_number}"
-
+    # D16/S26：host/路径统一从平台卡派生（新平台自动正确）
+    return issue_web_url(str(repo_key), issue_number)
 
 def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> list:
     """通知卡快捷按钮：进入任务会话（cmd 直达）+ 查看 Issue（VCS 公开页只读）。
@@ -1221,18 +1236,17 @@ def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> lis
         })
     return actions
 
-
 _IM_NOTIFY_TEMPLATES = {
     "task": "blue",
     "awaiting": "orange",
     "pending_review": "red",
 }
+
 _IM_NOTIFY_TITLES = {
     "task": "📋 信息知会",
     "awaiting": "❓ 需求待澄清",
     "pending_review": "🔎 需求待审核",
 }
-
 
 def _build_notify_fields(repo_key: str, issue_number: int) -> list:
     """通知卡结构化键值对字段：仓库 / Issue（带 VCS 链接）/ 需求标题（替代纯文本行，移动端对齐更好）。"""
@@ -1250,39 +1264,24 @@ def _build_notify_fields(repo_key: str, issue_number: int) -> list:
         {"is_short": False, "text": {"tag": "lark_md", "content": f"**📌 需求标题**\n{_title}"}},
     ]
 
-
 def _notify_note() -> str:
     """通知卡底部时间戳（灰字注释）。"""
     return f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
-
-def _notify_done(repo_key: str, issue_number: int, text: str) -> None:
-    """完成通知（A4）：扇出到该用户全部已连接渠道；异常不影响结单主流程。"""
-    try:
-        from src.im.notify import notify_issue_event
-        notify_issue_event(repo_key, int(issue_number or 0), "done", text)
-    except Exception as _e:
-        log.warning(f"[im-notify] done notify failed {repo_key}#{issue_number}: {_e}")
-
-
 _IM_NOTIFY_COUNTERS: dict[str, int] = {}
-
 
 def _im_notify_counter(key: str) -> None:
     """通知计数器（cluster-im-lease-stability-design.md §3.3）。"""
     _IM_NOTIFY_COUNTERS[key] = _IM_NOTIFY_COUNTERS.get(key, 0) + 1
 
-
 def get_im_notify_counters() -> dict:
     return dict(_IM_NOTIFY_COUNTERS)
-
 
 def _im_notify_begin(ntype: str, repo_key, issue_number, user_id, open_id, ctx):
     _im_notify_counter("attempted")
     _ctx_name = getattr(ctx, "name", "") if ctx else ""
     log.info(f"[im-notify] type={ntype} repo={repo_key} issue=#{issue_number} "
              f"user={user_id} open_id={open_id or ''} ctx={_ctx_name or 'none'}")
-
 
 def _im_notify_skip(ntype: str, issue_number, user_id, ctx, open_id):
     if not ctx:
@@ -1294,8 +1293,7 @@ def _im_notify_skip(ntype: str, issue_number, user_id, ctx, open_id):
     _im_notify_counter(f"skipped_{_reason}")
     log.warning(f"[im-notify] type={ntype} issue=#{issue_number} user={user_id} reason={_reason}")
 
-
-async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+async def _run_notify(ctx, api, user_id: str, conv_id: str, open_id: str,
                       task_description: str, repo_key: str, issue_number: int, cfg: dict):
     """任务分配通知：仅静态模板消息 + 飞书通知，不执行任何后台 LLM/ChatAgent。
 
@@ -1319,7 +1317,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
         # 飞书仅作通知（D3）
         _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
         # A4（2026-11-10）：扇出到该用户全部已连接渠道（不再只认飞书本人 bot）
-        from src.im.notify import notify_user
+        from src.domains.runtime.im.notify import notify_user
         notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
                        if (task_description or "").strip() else "你有一条新任务待处理。")
         _res = await notify_user(user_id, "task", notify_text, repo_key=repo_key,
@@ -1333,8 +1331,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
 
-
-async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+async def _run_awaiting_notify(ctx, api, user_id: str, conv_id: str, open_id: str,
                                questions: str, repo_key: str, issue_number: int, cfg: dict):
     """待澄清通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_notify 同规约）。
 
@@ -1354,7 +1351,7 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
 
         _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
         # A4：全渠道扇出（微信/企微/Slack/企微等没有卡片就降级文本+回数字）
-        from src.im.notify import notify_user
+        from src.domains.runtime.im.notify import notify_user
         notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
                        if (questions or "").strip() else "Agent 需要你补充信息。")
         _res = await notify_user(user_id, "awaiting", notify_text, repo_key=repo_key,
@@ -1368,8 +1365,7 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
     except Exception as e:
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
-
-async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+async def _run_pending_review_notify(ctx, api, user_id: str, conv_id: str, open_id: str,
                                      review_points: str, references: str,
                                      repo_key: str, issue_number: int, cfg: dict):
     """待审核通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_awaiting_notify 同规约）。
@@ -1391,7 +1387,7 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
 
         _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
         # A4：全渠道扇出（待审核 = 必须主动触达，用户可能只开着某一个渠）
-        from src.im.notify import notify_user
+        from src.domains.runtime.im.notify import notify_user
         notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
                        if (review_points or "").strip() else "请审核确认交付结果。")
         _res = await notify_user(user_id, "pending_review", notify_text, repo_key=repo_key,
@@ -1405,15 +1401,14 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
-
-def _resolve_user_chat_bot(bm, user_id: int):
-    """按用户取"本人 chat bot"的 BotContext（open_id 为 app 级，必须用本人 bot 发送）。
+def _resolve_user_chat_bot(bm, user_id: str):
+    """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
 
     旧 IM 下线 A2 M2：凭证来源从 legacy BotManager 内存表改为 grape_t_channel_installation；
     入参 bm 保留仅为了旧调用点兼容，**不再使用**。
     用户未配置本人 bot → 返回 None（不通知，不回落他人 bot，避免命名空间不匹配静默失败）。
     """
-    from src.im.engine_wiring import get_active_installation
+    from src.domains.runtime.im.engine_wiring import get_active_installation
     inst = get_active_installation("user", owner_user_id=str(user_id), channel_type="feishu")
     if not inst:
         log.info(f"[im-notify] resolve user={user_id} reason=no_installation")
@@ -1423,10 +1418,9 @@ def _resolve_user_chat_bot(bm, user_id: int):
     if not app_id or not secret:
         log.warning(f"[im-notify] resolve user={user_id} reason=empty_credential")
         return None
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     log.info(f"[im-notify] resolve user={user_id} bot={app_id} ok")
     return BotContext(app_id=app_id, app_secret=secret, bot_type="chat_bot")
-
 
 class TaskCreateBody(BaseModel):
     repo_key: str = ""
@@ -1435,7 +1429,6 @@ class TaskCreateBody(BaseModel):
     assignee: str = ""
     scene_id: str = ""
     is_subtask_mode: int = 0
-
 
 class TaskStatusBody(BaseModel):
     status: str = ""
@@ -1452,7 +1445,6 @@ _TASK_STATUS_FLOWS = {
 class TaskConfirmBody(BaseModel):
     confirmation: str = "user_confirmed"
 
-
 def _cleanup_issue_attachments(repo_key: str, issue_number):
     """删除指定 issue 的所有附件（含用户手工上传）。**破坏性**：整目录清理，
     仅供明确丢弃场景使用；issue 关闭走 `_cleanup_auto_transferred_attachments`。"""
@@ -1463,71 +1455,7 @@ def _cleanup_issue_attachments(repo_key: str, issue_number):
     except Exception as _e:
         log.warning(f"Attachment cleanup failed: {_e}")
 
-
-# Issue #1748 补充：平台自动转存媒体的文件名形态——#315 = user-image-<n>.<ext>；
-# #1748 = <uuid32>.<媒体扩展名>（UUID 命名由 spec 约定）。只回收这两类，
-# 用户手工上传的附件一律保留。
-_AUTO_TRANSFER_PREFIXES = ("user-image-", "user-attachment-")
-def _is_auto_transferred_attachment(name: str) -> bool:
-    """判断附件名是否由平台自动转存（评论媒体/编辑器图片）而来。"""
-    if not name:
-        return False
-    return name.startswith(_AUTO_TRANSFER_PREFIXES)
-
-
-def _cleanup_auto_transferred_attachments(repo_key: str, issue_number) -> int:
-    """Issue #1748：回收平台自动转存的评论媒体/编辑器图片，保留用户手工附件。
-
-    issue 确认完成/取消时调用。单条评论的自动转存副本对已关闭 issue 无复用价值，
-    但用户手工上传的附件（可能是交付依据/证据）不能删，故不做整目录清理。
-    异常一律吞掉，清理失败不影响关闭流程；返回删除数量。
-    """
-    removed = 0
-    try:
-        from src.repo_key import split_owner_repo
-        _owner, _rname = split_owner_repo(repo_key)
-        if not _owner or not _rname:
-            return 0
-        _num = str(issue_number)
-        from src.domains.runtime.storage import get_storage
-        storage = get_storage()
-        if storage:
-            # Issue #1748 复审：OBS 模式下 list_keys + 每对象 delete_object 都是网络往返
-            # （N 个文件 ≈ N+1 RTT），不能挂在「关闭/取消 issue」的同步链路上 →
-            # 丢给后台线程执行，接口立即返回（清理失败只丢日志，不影响业务）。
-            def _reap_obs() -> None:
-                _n = 0
-                try:
-                    for _key in storage.list_keys(_attach_obs_key(_owner, _rname, _num, "")):
-                        if _is_auto_transferred_attachment(os.path.basename(str(_key))):
-                            if storage.delete_object(_key):
-                                _n += 1
-                except Exception as _e:
-                    log.warning(f"Attachment cleanup (obs, async) failed: {_e}")
-                if _n:
-                    log.info(f"Attachment cleanup (auto-transferred): {_n} object(s) "
-                             f"for {_owner}/{_rname}/{_num}")
-            import threading
-            threading.Thread(target=_reap_obs, name="attach-reap", daemon=True).start()
-            return 0
-        _dir = _attach_base_dir(_owner, _rname, _num)
-        if os.path.isdir(_dir):
-            for _name in os.listdir(_dir):
-                if not _is_auto_transferred_attachment(_name):
-                    continue
-                try:
-                    os.remove(os.path.join(_dir, _name))
-                    removed += 1
-                except OSError as _e:
-                    log.warning(f"Attachment cleanup: remove {_name} failed: {_e}")
-            if removed:
-                log.info(f"Attachment cleanup (auto-transferred): {removed} file(s) in {_dir}")
-    except Exception as _e:
-        log.warning(f"Auto-transferred attachment cleanup failed: {_e}")
-    return removed
-
-
-def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "issue_comment"):
+def confirm_issue_done(repo_key: str, issue_number: "int | str", confirmed_by: str = "issue_comment"):
     """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done"""
     with db_lock:
         c = db.cursor()
@@ -1546,23 +1474,6 @@ def confirm_issue_done(repo_key: str, issue_number: int, confirmed_by: str = "is
     _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
 
-
-_CANCELLABLE_ISSUE_STATUSES = ("active", "processing", "awaiting_input", "pending_review")
-
-
-def cancel_issue_rows(c, repo_key: str, issue_number: int) -> int:
-    """Issue #1741：把同一 repo_key+issue_number 的可取消行统一置为终态取消。
-
-    评论取消路径（cancel_issue_task）与 cancel 端点共用，避免跨层重复实现；
-    completed/cancelled 行保持终态不变，重复取消不再刷新 completed_at（幂等）。
-    """
-    c.execute(
-        "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
-        "WHERE repo_key=? AND issue_number=? AND status IN (?,?,?,?)",
-        (repo_key, issue_number, *_CANCELLABLE_ISSUE_STATUSES))
-    return c.rowcount
-
-
 def cancel_issue_task(repo_key: str, issue_number: int):
     """Issue 评论取消任务（Issue #1741：状态集合补齐 awaiting_input/pending_review，避免静默失效）"""
     with db_lock:
@@ -1573,7 +1484,6 @@ def cancel_issue_task(repo_key: str, issue_number: int):
     # Issue #1748 补充：取消后同样回收自动转存媒体（保留用户手工附件）
     _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
-
 
 def resume_issue_task(repo_key: str, issue_number: int):
     """Issue 评论恢复任务"""
@@ -1588,12 +1498,6 @@ def resume_issue_task(repo_key: str, issue_number: int):
     log.info(f"Issue #{issue_number} resumed ({affected} tasks)")
     return affected
 
-
-# ===== Issue #627: 已完成需求的生产续接（发布）子单（方案 C：复用现有子任务机制）=====
-# 发布子单 = issue 行自身（parent_issue_id + is_subtask_mode=1 + release_* 绑定/结果字段），
-# 创建后 stage=sre 直通标准 a2a 派发；子单终态 release_result 即发布结果三分支。
-# 零平行表、不穿透 _TASK_STATUS_FLOWS 终态语义。
-
 class ProductionReleaseError(Exception):
     """发布校验链拒绝（detail 携带 code/message）。"""
 
@@ -1603,12 +1507,10 @@ class ProductionReleaseError(Exception):
         self.message = message
         self.status = status
 
-
 _PRODUCTION_RELEASE_APPROVAL_TTL = int(
     os.environ.get("PRODUCTION_RELEASE_APPROVAL_TTL") or 24 * 3600)
 
 _SHA40_RE = None  # lazy import re
-
 
 def _is_full_sha(candidate_sha: str) -> bool:
     """候选提交须为完整 40 位十六进制 SHA（短 SHA 不足以钉住候选版本）。"""
@@ -1617,7 +1519,6 @@ def _is_full_sha(candidate_sha: str) -> bool:
         import re
         _SHA40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
     return bool(_SHA40_RE.match(candidate_sha or ""))
-
 
 def _latest_sre_acceptance(repo_key: str, issue_number: int) -> dict | None:
     """取该需求最近一条已完成 sre 事件（验收证据锚点）。
@@ -1631,7 +1532,7 @@ def _latest_sre_acceptance(repo_key: str, issue_number: int) -> dict | None:
             c.execute(
                 "SELECT seq, payload FROM events WHERE repo_key=? AND issue_id=? "
                 "AND agent_type='sre' AND status='completed' ORDER BY seq DESC LIMIT 1",
-                (repo_key, f"#{int(issue_number)}"))
+                (repo_key, f"#{issue_number}"))
             row = c.fetchone()
         if not row:
             return None
@@ -1644,7 +1545,6 @@ def _latest_sre_acceptance(repo_key: str, issue_number: int) -> dict | None:
         log.warning(f"_latest_sre_acceptance failed: {_e}")
         return None
 
-
 def is_release_subissue(repo_key: str, issue_number) -> bool:
     """判断 issue 是否为发布子单（release_target_env 非空即发布子单，普通 issue 恒 False）。
 
@@ -1655,7 +1555,9 @@ def is_release_subissue(repo_key: str, issue_number) -> bool:
     """
     try:
         _num = str(issue_number or "").lstrip("#").strip()
-        _num = int(_num)
+        # issue-ident（IK*）：双格式兼容——数字串→int，IK* 原样保留（勿 int() 强转）。
+        from src.domains.runtime.vcs.api_client import _native_issue_number
+        _num = _native_issue_number(_num)
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -1666,7 +1568,6 @@ def is_release_subissue(repo_key: str, issue_number) -> bool:
     except Exception:
         return False
 
-
 def _release_subissue_title(issue_number: int, target_env: str, candidate_sha: str) -> str:
     """发布子单标题：`发布子单：需求 #{N} → {env} @ {sha12}`（平台 Issue 标题，可辨识）。"""
     _sha_short = (candidate_sha or "")[:12]
@@ -1674,30 +1575,28 @@ def _release_subissue_title(issue_number: int, target_env: str, candidate_sha: s
     _title = f"发布子单：需求 #{issue_number} → {_env} @ {_sha_short}"
     return _title[:200]
 
-
 def _release_subissue_body(repo_key: str, issue_number: int, candidate_sha: str,
                            target_env: str, evidence_ref: str,
-                           approved_by: int, approved_at: str) -> str:
+                           approved_by: "str | int", approved_at: str) -> str:
     """发布子单 body：`## 父任务`（现有子任务识别机制）+ `## 发布绑定`（绑定要素落平台）。"""
     from src.kernel.repo_key import from_repo_key
     _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
     _lines = [
         f"## 父任务",
-        f"- 关联父任务：{_repository}#{int(issue_number)}",
+        f"- 关联父任务：{_repository}#{issue_number}",
         "",
         "## 发布绑定",
-        f"- 源需求：{int(issue_number)}",
+        f"- 源需求：{issue_number}",
         f"- 候选提交：{candidate_sha}",
         f"- 目标环境：{target_env}",
         f"- 验收证据：{evidence_ref or '（见源需求 SRE 验收事件）'}",
-        f"- 批准来源：user_id={int(approved_by or 0)}（{approved_at or ''}）",
+        f"- 批准来源：user_id={approved_by or 0}（{approved_at or ''}）",
     ]
     return "\n".join(_lines)
 
-
-def _sync_release_fields(repo_key: str, issue_number: int, parent_issue_number: int,
+def _sync_release_fields(repo_key: str, issue_number: "int | str", parent_issue_number: "int | str",
                          candidate_sha: str, target_env: str, evidence_ref: str,
-                         approved_by: int, approved_at: str) -> None:
+                         approved_by: "str | int", approved_at: str) -> None:
     """将父任务关联（parent_issue_id/parent_issue_number/is_subtask_mode）+ 发布绑定要素
     写回发布子单 issue 行（创建时仅此一次；拒绝路径零写入）。"""
     with db_lock:
@@ -1707,15 +1606,14 @@ def _sync_release_fields(repo_key: str, issue_number: int, parent_issue_number: 
             "release_candidate_sha=?, release_target_env=?, release_evidence_ref=?, "
             "release_approved_by=?, release_approved_at=?, updated_at=datetime('now') "
             "WHERE repo_key=? AND issue_number=?",
-            (f"#{int(parent_issue_number)}", int(parent_issue_number),
-             candidate_sha, target_env, evidence_ref or "", int(approved_by or 0),
-             approved_at or "", repo_key, int(issue_number)))
+            (f"#{_native_issue_number(parent_issue_number)}", _native_issue_number(parent_issue_number),
+             candidate_sha, target_env, evidence_ref or "", approved_by or 0,
+             approved_at or "", repo_key, _native_issue_number(issue_number)))
         db.commit()
 
-
-def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str,
+def create_release_subissue(repo_key: str, issue_number: "int | str", candidate_sha: str,
                             target_env: str, evidence_ref: str = "",
-                            approved_by: int = 0, approved_at: str = "",
+                            approved_by: "str | int" = "", approved_at: str = "",
                             api_token: str = "", dispatch: bool = True) -> dict:
     """为 done/completed 终态需求创建「发布子单」（方案 C：复用现有子任务机制）。
 
@@ -1746,7 +1644,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
     with db_lock:
         c = db.cursor()
         c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
-                  (repo_key, int(issue_number)))
+                  (repo_key, _native_issue_number(issue_number)))
         _row = c.fetchone()
     if not _row:
         raise ProductionReleaseError("issue_not_found", "需求不存在", status=404)
@@ -1808,7 +1706,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
             "SELECT id, issue_number, release_result FROM issue "
             "WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
             "AND release_candidate_sha=? AND release_target_env=? ORDER BY id DESC LIMIT 1",
-            (repo_key, int(issue_number), candidate_sha, target_env))
+            (repo_key, _native_issue_number(issue_number), candidate_sha, target_env))
         _dup = c.fetchone()
     if _dup:
         raise ProductionReleaseError(
@@ -1824,14 +1722,14 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
                                        target_env, evidence_ref, approved_by, _approved_at)
     _sub_num = 0
     try:
-        if _provider == "github":
-            _resp = _post_github_issue(api_token or "", _owner, _rname, _title,
-                                       _body_txt, assignee="")
-        else:
-            _resp = _post_gitcode_issue(api_token or "", _owner, _rname, _title,
-                                        _body_txt, assignee="")
+        # D21/S32：统一命令层建 Issue（存量平台内部委托 _post_*，gitee 走卡路径）
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        _client = VcsApiClient(_provider, api_token or "", _owner, _rname)
+        _resp = _client.create_issue(_title, _body_txt, assignee="")
         if isinstance(_resp, dict):
-            _sub_num = int(_resp.get("number") or _resp.get("iid") or 0)
+            # issue-ident（IK*）：gitee 等平台返回字符串编号，int() 强转必炸——
+            # 统一走 _native_issue_number（模块级已导入；数字串→int，IK* 原样保留）。
+            _sub_num = _native_issue_number(_resp.get("number") or _resp.get("iid") or 0)
     except Exception as _e:
         raise ProductionReleaseError(
             "release_create_failed",
@@ -1842,7 +1740,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
             "创建发布子单 Issue 失败（平台响应无 issue number）", status=502)
     # Issue #453 代发台账：建单入账（webhook 回声对账）
     try:
-        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.kernel.outbound_ledger import record_outbound, content_hash_md5
         record_outbound(_provider, repo_key, "issue", str(_sub_num),
                         issue_number=str(_sub_num),
                         content_hash=content_hash_md5(_body_txt))
@@ -1855,7 +1753,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
         _task_id = ensure_issue_task(
             repo_key, _sub_num, title=_title, description=_body_txt,
             assignee="", event_type="production_release",
-            subtask_mode=1, owner_user_id=int(approved_by or 0))
+            subtask_mode=1, owner_user_id=str(approved_by or ""))
     except Exception as _e:
         log.warning(f"release subissue ensure_issue_task failed: {_e}")
         raise ProductionReleaseError(
@@ -1868,7 +1766,7 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
     # 唯一性查询不计数；失败即抛 release_archive_failed（与建档失败路径一致）。
     # 唯一索引冲突（并发双提交绕过前置查询的兜底命中）映射 409 duplicate。
     try:
-        _sync_release_fields(repo_key, _sub_num, int(issue_number), candidate_sha, target_env,
+        _sync_release_fields(repo_key, _sub_num, _native_issue_number(issue_number), candidate_sha, target_env,
                              evidence_ref, approved_by, _approved_at)
     except Exception as _e:
         _err_txt = str(_e)
@@ -1890,11 +1788,11 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
             "release_archive_failed",
             f"发布子单置 stage=sre 失败（sub_issue_number={_sub_num}，绑定要素已落库，"
             f"请人工核对阶段路由）：{str(_e)[:200]}", status=500)
-    log.info(f"release subissue created: sub=#{_sub_num} parent=#{int(issue_number)} "
+    log.info(f"release subissue created: sub=#{_sub_num} parent=#{_native_issue_number(issue_number)} "
              f"repo={repo_key} sha={candidate_sha[:12]} env={target_env} approved_by={approved_by}")
 
     out = {"ok": True, "sub_issue_number": _sub_num, "issue_id": _task_id,
-           "repo_key": repo_key, "parent_issue_number": int(issue_number),
+           "repo_key": repo_key, "parent_issue_number": _native_issue_number(issue_number),
            "candidate_sha": candidate_sha, "target_env": target_env,
            "evidence_ref": evidence_ref or "", "status": "sre", "seq": 0}
 
@@ -1904,8 +1802,8 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
     # 标准 A2A 派发 sre（服务内直调 a2a_endpoint，与 handoff_issue 同模式：
     # jwt 分支内部再校验 managed_repos，双保险；绑定上下文随 context/events.payload 持久化）
     _seq = _dispatch_release_sre(
-        repo_key, int(issue_number), _sub_num, candidate_sha,
-        target_env, evidence_ref or "", approved_by=int(approved_by or 0))
+        repo_key, _native_issue_number(issue_number), _sub_num, candidate_sha,
+        target_env, evidence_ref or "", approved_by=approved_by or 0)
     if _seq:
         out["seq"] = _seq
     else:
@@ -1913,10 +1811,9 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
         log.warning(f"release subissue #{_sub_num}: sre dispatch returned no seq")
     return out
 
-
 def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: int,
                           candidate_sha: str, target_env: str, evidence_ref: str,
-                          approved_by: int = 0) -> int:
+                          approved_by: "str | int" = "") -> int:
     """为发布子单派发携带发布上下文的 sre a2a_event，返回事件 seq（失败返回 0）。
 
     复用标准 /api/a2a 链路（鉴权、场景节点校验、去重、事件落库、引擎选择全保留）。
@@ -1941,9 +1838,9 @@ def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: in
         "pr_number": "",
         "context": _context,
         "is_subtask_mode": True,
-        "parent_issue": f"#{int(issue_number)}",
+        "parent_issue": f"#{_native_issue_number(issue_number)}",
     })
-    _user = {"id": int(approved_by or 0), "username": "", "auth_type": "jwt"}
+    _user = {"id": str(approved_by or ""), "username": "", "auth_type": "jwt"}
     # a2a_endpoint 为 async：创建端点为同步 def（线程池执行，无运行中 loop），直接
     # asyncio.run；若未来出现 async 调用方，用独立线程跑新 loop 兜底，避免嵌套 loop 报错。
     _res = None
@@ -1979,7 +1876,6 @@ def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: in
     log.warning(f"_dispatch_release_sre: a2a returned no seq (res={_body_txt[:200] or _res})")
     return 0
 
-
 def _has_deploy_url(result_text: str) -> bool:
     """从 sre 结果文本提取部署证据（与 _extract_deploy_url 同口径：artifacts/issue_summary 含 deploy_url）。"""
     import re as _re
@@ -2000,7 +1896,6 @@ def _has_deploy_url(result_text: str) -> bool:
         pass
     return bool(_re.search(r"deploy_url:\s*https?://\S+", _txt))
 
-
 def _backfill_release_subissue_result(repo_key: str, issue_number: int,
                                       exit_code: int, result_text: str = "") -> bool:
     """发布子单终态回填（结果三分支，幂等）。
@@ -2016,7 +1911,7 @@ def _backfill_release_subissue_result(repo_key: str, issue_number: int,
             c.execute(
                 "SELECT release_target_env, release_result FROM issue "
                 "WHERE repo_key=? AND issue_number=?",
-                (repo_key, int(issue_number)))
+                (repo_key, _native_issue_number(issue_number)))
             row = c.fetchone()
         if not row or not (row[0] or ""):
             return False   # 非发布子单
@@ -2047,7 +1942,7 @@ def _backfill_release_subissue_result(repo_key: str, issue_number: int,
                 "stage='done', owner_agent='sre', completed_at=datetime('now'), "
                 "updated_at=datetime('now') "
                 "WHERE repo_key=? AND issue_number=? AND (release_result IS NULL OR release_result='')",
-                (_result, _reason, _completed_reason, repo_key, int(issue_number)))
+                (_result, _reason, _completed_reason, repo_key, _native_issue_number(issue_number)))
             _changed = c.rowcount > 0
             db.commit()
         if _changed:
@@ -2058,76 +1953,20 @@ def _backfill_release_subissue_result(repo_key: str, issue_number: int,
         log.warning(f"_backfill_release_subissue_result write failed: {_e}")
         return False
 
-
 def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
                              provider: str = "gitcode") -> int | None:
     """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。
 
-    Issue #343: 分页循环查全部 open issue，不只看前 50 条。
-    Issue #343: 查重失败时抛异常而非静默返回 None，防止 token 失效时重复建单。
-    Issue #344: GitCode 分支取消 10 页上限（while True 靠末页不足 50 条终止）。
-    Issue #344: GitHub 分支改用 Search API 精确匹配（in:title + repo:scope）。
+    D36/S56：策略下沉 VcsApiClient.find_open_issue_by_title（端口-适配器形态，
+    调用方零平台分支）——github Search API vs 分页遍历、分页终止、
+    {data:[]}/list 响应形态、token 失效抛 RuntimeError（#343/#344 契约）
+    全部在适配器内部实现并由 S55/S56 用例锁死。
     返回 issue number（找到）或 None（真没找到）。token 失效时抛 RuntimeError。
     """
-    import urllib.parse as _ul
-    if provider == "github":
-        # Issue #344: 改用 GitHub Search API 精确匹配 title，不再分页遍历
-        from src.domains.mgmt.user.repo_manager import _github_req
-        try:
-            _q = _ul.quote(f'{title} in:title repo:{owner}/{repo} is:issue is:open')
-            data = _github_req("GET",
-                               f"https://api.github.com/search/issues?q={_q}&per_page=5",
-                               api_token)
-        except Exception as e:
-            raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
-        # GitHub Search API returns {"items": [...]} on success;
-        # error responses like {"message": "rate limit exceeded"} have no "items" key
-        if not isinstance(data, dict) or "items" not in data:
-            _msg = data.get("message", "") if isinstance(data, dict) else str(data)[:200]
-            if _msg:
-                raise RuntimeError(f"幂等查重失败（GitHub API 异常）: {_msg}")
-            return None
-        items = data.get("items") or []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            if str(it.get("title") or "").strip() == title.strip():
-                n = it.get("number")
-                if n:
-                    return int(n)
-        return None
-    # GitCode — Issue #344: 取消 10 页上限，while True 靠末页终止
-    # 安全阀：最多遍历 1000 页（50000 条），防止 API 异常时无限循环
-    from src.domains.mgmt.user.repo_manager import _req
-    page = 1
-    _max_pages = 1000
-    while page <= _max_pages:
-        try:
-            data = _req("GET",
-                        f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=open&per_page=50&page={page}",
-                        api_token)
-        except Exception as e:
-            raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
-        if isinstance(data, dict):
-            _cand = data.get("data") if isinstance(data.get("data"), list) else (data.get("items") or data.get("records") or [])
-            items = _cand or []
-        else:
-            items = data if isinstance(data, list) else []
-        if not items:
-            break
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            if str(it.get("title") or "").strip() == title.strip():
-                st = str(it.get("state") or "").lower()
-                if st in ("open", "opened", "active", "1", "todo"):
-                    n = it.get("number") or it.get("iid") or it.get("id")
-                    if n:
-                        return int(n)
-        if len(items) < 50:
-            break  # 最后一页
-        page += 1
-    return None
+    from src.domains.runtime.vcs.api_client import create_client
+    _rk = f"{provider}:{owner}/{repo}"   # 恒带前缀：client 按 provider 选卡/策略
+    _client = create_client(_rk, api_token)
+    return _client.find_open_issue_by_title(title)
 
 
 def _gitcode_assignee_member_check(api_token: str, owner: str, repo: str, username: str) -> str:
@@ -2164,7 +2003,6 @@ def _gitcode_assignee_member_check(api_token: str, owner: str, repo: str, userna
         log.warning(f"assignee member check failed: {e}")
         return "unknown"
 
-
 def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
                         body_text: str = "", assignee: str = "") -> dict:
     """创建 GitCode Issue（v5 实测：必须 access_token query + form-encoded，勿用 Bearer+JSON body）。
@@ -2195,7 +2033,6 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
     except _uerr.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
-
 def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
                        body_text: str = "", assignee: str = "") -> dict:
     """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
@@ -2206,7 +2043,6 @@ def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
     if assignee:
         body["assignees"] = [assignee]
     return _github_req("POST", f"https://api.github.com/repos/{owner}/{repo}/issues", api_token, body)
-
 
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（追加多任务模式标记）。GitCode 版。"""
@@ -2228,10 +2064,8 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
                         str(issue_num), issue_number=str(issue_num),
                         content_hash=content_hash_md5(body_text))
     except Exception as _le:
-        from src.kernel.config import log as _log
-        _log.warning(f"outbound_ledger record (_patch_issue_body) failed: {_le}")
+        log.warning(f"outbound_ledger record (_patch_issue_body) failed: {_le}")
     return _out
-
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
@@ -2246,10 +2080,8 @@ def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: i
                         str(issue_num), issue_number=str(issue_num),
                         content_hash=content_hash_md5(body_text))
     except Exception as _le:
-        from src.kernel.config import log as _log
-        _log.warning(f"outbound_ledger record (_patch_github_issue_body) failed: {_le}")
+        log.warning(f"outbound_ledger record (_patch_github_issue_body) failed: {_le}")
     return _out
-
 
 def create_standard_task(repo_key: str, title: str, description: str,
                          bot_token: str, assignee: str = "", labels=None) -> dict:
@@ -2272,27 +2104,30 @@ def create_standard_task(repo_key: str, title: str, description: str,
         assignee = owner or ""
     # Issue #344: 查重失败时返回明确错误，不抛异常中断 onboarding 流程
     try:
-        issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
+        issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip(),
+                                              provider=_provider)
     except RuntimeError as e:
         return {"ok": False, "code": 502, "message": f"查重失败，Bot Token 可能失效: {str(e)[:200]}"}
     created = False
     if issue_num is not None:
         # 已有同标题 open Issue → 直接建档（幂等：不再重复创建 Issue）
-        issue_num = int(issue_num)
+        # S70：gitee 字符串 ident 保持原生形态（int() 强转必炸）。
+        from src.domains.runtime.vcs.api_client import _native_issue_number
+        issue_num = _native_issue_number(issue_num)
     else:
-        if _provider == "github":
-            resp = _post_github_issue(bot_token, owner, rname, title.strip(),
-                                      (description or "").strip(), assignee=assignee)
-        else:
-            resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
-                                       (description or "").strip(), assignee=assignee)
+        # D21/S32：统一命令层建 Issue（存量平台内部委托 _post_*，gitee 走卡路径）
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        _client = VcsApiClient(_provider, bot_token, owner, rname)
+        resp = _client.create_issue(title.strip(), (description or "").strip(), assignee=assignee)
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
         if not n:
             return {"ok": False, "code": 502,
-                    "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"}
-        issue_num = int(n)
+                    "message": f"创建 Issue 失败（响应无 issue number）: {str(resp)[:200]}"}
+        # S70：gitee 字符串 ident 保持原生形态。
+        from src.domains.runtime.vcs.api_client import _native_issue_number as _nin
+        issue_num = _nin(n)
         # Issue #453 代发台账（写点6/7）：建任务主通道入账
         try:
             from src.kernel.outbound_ledger import record_outbound, content_hash_md5
@@ -2310,7 +2145,6 @@ def create_standard_task(repo_key: str, title: str, description: str,
             "issue_number": issue_num, "created": created,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
-
 def _refresh_user_gitcode_token(user: dict) -> str:
     """用户自己的 GitCode token 401 时主动刷新一次（带锁，防并发）。
 
@@ -2319,12 +2153,10 @@ def _refresh_user_gitcode_token(user: dict) -> str:
     """
     try:
         from src.api.deps import try_refresh_gitcode_token
-        return try_refresh_gitcode_token(user.get("id") or 0) or ""
+        return try_refresh_gitcode_token(str(user.get("id") or "")) or ""
     except Exception as _e:
-        from src.kernel.config import log as _log
-        _log.warning(f"create_task: refresh user gitcode token failed: {_e}")
+        log.warning(f"create_task: refresh user gitcode token failed: {_e}")
         return ""
-
 
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
@@ -2341,6 +2173,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     owner, rname = split_owner_repo(repo_key)
     # provider 分流：github: → GitHub API，gitcode: → GitCode API
     _is_github = repo_key.startswith("github:")
+    # D35/S55：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode）
+    from src.kernel.repo_key import parse_repo_key as _prk_d35
+    _provider = _prk_d35(repo_key)[0]
     # _preauth_token: autopilot 等内部调用（auth_type=api_key/internal）预注入 bot token
     # JWT 登录用户的 token 是 session JWT 不是 GitCode API token，不能走此路径
     # grape_ 前缀的是用户级 API Key（CLI 用户），同样不是 GitCode token，不能走此路径
@@ -2352,20 +2187,36 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     if _preauth_token:
         api_token = _preauth_token
     elif _is_github:
-        # Issue #343: GitHub 写操作同样走仓库 bot token
+        # Issue #343: GitHub 写操作走仓库 bot token；
+        # B2 补齐（对齐 gitcode/gitee 链）：bot token 缺席时回落用户 token
+        # （get_user_token_for_repo 按 repo_key 前缀派生 provider——github PAT
+        # 绑定后建单不再 400「Bot Token 未配置」）。
         from src.domains.mgmt.user.db import get_github_token
-        api_token = get_github_token(repo_key=repo_key)
+        api_token = get_github_token(repo_key=repo_key) or ""
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
+            from src.api.deps import get_user_token_for_repo
+            api_token = get_user_token_for_repo(repo_key, user["username"],
+                                                user_id=str(user.get("id") or ""))
+        if not api_token:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置，且当前用户未绑定 GitHub Token，请绑定后重试"})
     else:
-        # 用户建单必须用用户自己的 GitCode token：assign 需用户身份（bot token 无 assign 权限，
-        # GitCode 403）。token 缺失/失效 ≠ 回落 bot——明确引导用户重新绑定/登录 GitCode。
-        from src.api.deps import get_user_token_with_refresh
-        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+        # S70（D37/S57 漏点收口，实弹发现）：用户 token 按 repo_key 前缀派生
+        # provider（get_user_token_for_repo）——gitee 仓不再折叠为 gitcode 链
+        # （原 get_user_token_with_refresh 仅 gitcode，gitee PAT 绑定后仍取空 → 400）。
+        # 语义保持：token 缺失/失效 ≠ 回落 bot——明确引导用户重新绑定/登录对应平台。
+        from src.api.deps import get_user_token_for_repo
+        api_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
         if not api_token:
+            _p_name = _provider
+            try:
+                from src.domains.runtime.vcs.platform_card import get_platform_card
+                _c = get_platform_card(_provider)
+                _p_name = (_c.name if _c else _provider) or _provider
+            except Exception:
+                pass
             raise HTTPException(status_code=400, detail={
                 "code": 400,
-                "message": "GitCode Token 未配置或已失效，请重新绑定/登录 GitCode 后重试",
+                "message": f"{_p_name} Token 未配置或已失效，请重新绑定/登录后重试",
             })
     # 是否使用「用户自己的 GitCode token」：用于 401 时区分「用户登录失效」（引导重新绑定）
     # 与「仓库 bot token 失效」（提示检查仓库 Bot Token 配置）两套文案。
@@ -2378,7 +2229,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _creator_login = user["username"]
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities
-        _provider_name = "github" if _is_github else "gitcode"
+        _provider_name = _provider
         for ident in get_user_identities(user["id"]):
             if ident.get("provider") == _provider_name and ident.get("external_login"):
                 _creator_login = ident["external_login"]
@@ -2389,7 +2240,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
         issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                              provider="github" if _is_github else "gitcode")
+                                              provider=_provider)
     except RuntimeError as _dedup_err:
         from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
@@ -2399,7 +2250,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 api_token = _renewed
                 try:
                     issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                                          provider="gitcode")
+                                                          provider=_provider)
                 except RuntimeError as _dedup_err2:
                     _dedup_err = _dedup_err2
                 else:
@@ -2424,6 +2275,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
+        # Issue #649: 本次建单请求级 trace_id（错误响应附带，便于排查定位）
+        import uuid as _uuid
+        _trace_id = f"tr_{_uuid.uuid4().hex[:16]}"
         # Issue #649: 显式 assignee + GitCode → 上游创建前预校验成员资格；
         # 非成员直接给出「非成员」语义错误（含 trace_id），不再无谓打上游 403 再误报。
         if (not _is_github) and assignee:
@@ -2469,13 +2323,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             _desc_with_attach += _attach_md
         # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
         try:
-            if _is_github:
-                resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
-                                          _desc_with_attach, assignee=assignee)
-            else:
-                # Issue #343: GitCode 写操作 token（用户建单恒为用户 token）
-                resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
-                                           _desc_with_attach, assignee=assignee)
+            # D35/S55：统一建单入口（卡驱动；gitee 自动正确，存量平台内置卡对齐）
+            resp = _create_issue_unified(api_token, _provider, owner, rname,
+                                         body.title.strip(), _desc_with_attach,
+                                         assignee=assignee)
         except Exception as _create_err:
             _err_msg = str(_create_err)
             # 从 RuntimeError 消息提取 HTTP code（格式: "failed (403): ..."）
@@ -2488,8 +2339,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _renewed:
                     api_token = _renewed
                     try:
-                        resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
-                                                   _desc_with_attach, assignee=assignee)
+                        resp = _create_issue_unified(api_token, _provider, owner, rname,
+                                                     body.title.strip(), _desc_with_attach,
+                                                     assignee=assignee)
                     except Exception as _create_err2:
                         _create_err = _create_err2
                         _err_msg = str(_create_err2)
@@ -2573,8 +2425,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             n = resp.get("number") or resp.get("iid") or resp.get("id")
         if not n:
             raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
-        issue_num = int(n)
+                                                         "message": f"创建 Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
+        # S70：gitee 等平台 issue ident 为字符串（"IKSZ3I"），int() 强转必炸——
+        # 保持平台原生形态（_native_issue_number：数字串→int，其余原样）。
+        from src.domains.runtime.vcs.api_client import _native_issue_number
+        issue_num = _native_issue_number(n)
         # Issue #453 代发台账（写点6/7，前端建单入口）：入账
         try:
             from src.kernel.outbound_ledger import record_outbound, content_hash_md5
@@ -2635,29 +2490,28 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.info(f"create_task: scene={_scene_to_write} set for #{issue_num}"
                      + ("" if (body.scene_id and body.scene_id != "vod-auto") else " (repo default fallback)"))
     except Exception as _e:
-        from src.kernel.config import log
+        # log 为模块顶部导入（L17）。勿在此加局部 import log——except 内先引用
+        # 后 import 会 UnboundLocalError 吞真实异常（D102-C 教训，曾实弹）。
         log.warning(f"create_task: set_issue_scene failed: {_e}")
     # 3) 自动检测多任务模式：根据场景的 issue skill 是否为 issue-multitask
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
         try:
             from src.api.pipeline_config import _query_scene_by_id
-            from src.kernel.config import log as _log
             _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key)
             if _scene_obj:
                 _nodes = _scene_obj.get("nodes", []) or []
                 _issue_skill = next((n.get("skill", "") for n in _nodes if n.get("id") == "issue"), "")
                 if _issue_skill == "issue-multitask":
                     _auto_subtask_mode = 1
-                    _log.info(f"Auto multi-task mode: scene={body.scene_id} issue skill=issue-multitask")
+                    log.info(f"Auto multi-task mode: scene={body.scene_id} issue skill=issue-multitask")
         except Exception as _e:
-            from src.kernel.config import log as _log
-            _log.warning(f"Auto multi-task detection failed: {_e}")
+            log.warning(f"Auto multi-task detection failed: {_e}")
 
     # 4) 按既有流程幂等建档（同 issue 任务 id 复用）；org 归属由 ensure_issue_task 统一以仓库为准
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
                                 subtask_mode=_auto_subtask_mode,
-                                owner_user_id=int(user.get("id") or 0))
+                                owner_user_id=str(user.get("id") or ""))
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
@@ -2666,7 +2520,6 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             from src.api.session_store import set_subtask_mode
             set_subtask_mode(repo_key, f"#{issue_num}", True)
         except Exception as _e:
-            from src.kernel.config import log
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
@@ -2679,7 +2532,6 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except HTTPException:
             raise  # reauth_required 需要传递给前端
         except Exception as _e:
-            from src.kernel.config import log
             log.warning(f"create_task: patch issue body for multi-task-mode failed: {_e}")
 
     # Issue #89: 同步触发 pipeline 事件，不依赖 webhook（webhook 异步可能丢事件）
@@ -2687,7 +2539,6 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 复用已有 Issue 时创建 a2a_event 事件 → issue Agent 处理
     if created:
         try:
-            from src.kernel.config import log as _log
             from src.api.session_store import set_issue_stage
             # 初始化 issue_state（vod 阶段）
             set_issue_stage(repo_key, f"#{issue_num}", "vod", "vod", assignee=assignee or "")
@@ -2703,7 +2554,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             if _is_github:
                 _pipe_payload = {
                     "action": "opened",
-                    "issue": {"number": int(issue_num), "title": body.title.strip(),
+                    # D102-O 同族收口：issue number 原生保形（gitee 等平台为字符串
+                    # ident，int() 强转会炸同步触发——实弹 IKTVZQ）；流水线进程内
+                    # ident 链已字符串化（D102-G），此处直传原生形态
+                    "issue": {"number": issue_num, "title": body.title.strip(),
                               "user": {"login": _assign} if _assign else {}},
                     "repository": {"full_name": f"{owner}/{rname}"},
                     "sender": {"login": _assign} if _assign else {},
@@ -2714,7 +2568,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             else:
                 _pipe_payload = {
                     "object_kind": "issue",
-                    "object_attributes": {"iid": int(issue_num), "title": body.title.strip(),
+                    "object_attributes": {"iid": issue_num, "title": body.title.strip(),
                                           "action": "open"},
                     "project": {"path_with_namespace": f"{owner}/{rname}"},
                     "user": {"username": _assign} if _assign else {},
@@ -2728,12 +2582,15 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 原版本误缩进进 else（GitCode）分支，GitHub 建单后不再同步触发流水线。
             _pipe_payload["_grape_internal_trigger"] = True
             from src.domains.runtime.pipeline.event_pipeline import run_pipeline
-            _pipe_result = run_pipeline(_pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
-                                        account=repo_key, repo_key_override=repo_key)
-            _log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
+            # 扫雷⑩ S3：create_task_via_issue 是 async 处理器，run_pipeline 同步
+            # 全量执行会阻塞事件循环（建单卡顿最重处）——to_thread 卸载到线程池，
+            # 语义保持同步等待完成（结果仍写入日志/返回链路）。
+            _pipe_result = await asyncio.to_thread(
+                run_pipeline, _pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
+                account=repo_key, repo_key_override=repo_key)
+            log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
         except Exception as _e:
-            from src.kernel.config import log as _log
-            _log.warning(f"create_task: sync pipeline trigger failed: {_e}")
+            log.warning(f"create_task: sync pipeline trigger failed: {_e}")
 
     # task_id 语义 = 需求卡片 issue.id（issues_center P2：主字段 issue_id，兼容保留 task_id）
     return {"ok": True, "issue_id": task_id, "task_id": task_id,
@@ -2742,16 +2599,21 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
 _ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
 # Issue #648：GitCode 同步评论是永久评论，不能写 7 天签名 URL（到期失效）；
 # 同步时重新签发长效链接（10 年）作为永久可访问 URL 的过渡方案
 _ATTACH_SYNC_URL_EXPIRES = 10 * 365 * 24 * 3600
+
 _ATTACH_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".xml", ".html"}
+
 _ATTACH_CODE_EXTS = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".sh", ".sql", ".tf", ".dockerfile"}
+
 _ATTACH_ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z"}
+
 _ATTACH_ALL_EXTS = _ATTACH_IMAGE_EXTS | _ATTACH_DOC_EXTS | _ATTACH_CODE_EXTS | _ATTACH_ARCHIVE_EXTS
+
 _ATTACH_MAX_SIZE = (int(os.environ.get("ATTACH_MAX_SIZE_MB", "200")) * 1024 * 1024
                     )  # 单个附件上限：默认 200MB，可用 ATTACH_MAX_SIZE_MB 覆盖（需同步 nginx client_max_body_size）
-
 
 def _attach_obs_key(owner: str, repo: str, issue_number, filename: str) -> str:
     """生成 OBS 对象键：{PREFIX}/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"""
@@ -2759,11 +2621,9 @@ def _attach_obs_key(owner: str, repo: str, issue_number, filename: str) -> str:
     prefix = (OBS_PREFIX or "").strip("/")
     return f"{prefix}/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
-
 def _attach_base_dir(owner: str, repo: str, issue_number) -> str:
     """附件本地存储目录（OBS 未启用时使用）：data/issue_attachments/{owner}/{repo}/{issue_number}/"""
     return os.path.join(WORKSPACE_DIR, "..", "data", "issue_attachments", owner, repo, str(issue_number))
-
 
 def _attach_save(owner: str, repo: str, issue_number, filename: str, content: bytes) -> str:
     """保存附件。OBS 启用时上传到 OBS，否则写本地磁盘。返回可访问 URL。"""
@@ -2785,7 +2645,6 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
-
 def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
     """删除单个附件。OBS 启用时删 OBS 对象，否则删本地文件。"""
     from src.domains.runtime.storage import get_storage
@@ -2798,7 +2657,6 @@ def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
         os.unlink(fpath)
         return True
     return False
-
 
 def _attach_count(owner: str, repo: str, issue_number) -> int:
     """Issue #926：仅统计附件数量（分页列表瘦身）。
@@ -2816,7 +2674,6 @@ def _attach_count(owner: str, repo: str, issue_number) -> int:
         return sum(1 for f in os.listdir(attach_dir)
                    if os.path.isfile(os.path.join(attach_dir, f)))
     return 0
-
 
 def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     """列出附件。返回 [{filename, url, size, is_image}]。"""
@@ -2859,7 +2716,6 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
             })
     return result
 
-
 def _attachments_markdown_block(attachments) -> str:
     """Issue #648：把附件清单拼为「## 附件」markdown 链接清单（GitCode 同步过渡方案）。
 
@@ -2882,7 +2738,6 @@ def _attachments_markdown_block(attachments) -> str:
         return ""
     return "\n\n## 附件\n" + "\n".join(lines)
 
-
 def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict) -> bool:
     """Issue #648 过渡方案：附件上传后向 VCS issue 同步「## 附件」链接清单评论。
 
@@ -2892,8 +2747,10 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
     try:
         from src.kernel.repo_key import parse_repo_key
         _prov, owner, rname = parse_repo_key(repo_key)
-        if _prov != "gitcode":
-            return False
+        # S74/D49：附件同步评论卡化——原 `if _prov != "gitcode": return
+        # False` 把 gitee 等平台整族静默跳过；token 走 provider 感知策略链
+        # （get_repo_token_with_refresh：devops_agent_session/仓库 bot/全局
+        # bot/用户 token 四级），客户端按 provider 构造。
         _att = dict(attachment) if isinstance(attachment, dict) else {}
         _url = str(_att.get("url") or "")
         # Issue #648：传入 url 是 OBS 7 天签名 URL，GitCode 评论永久存在会到期失效；
@@ -2918,21 +2775,20 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.domains.mgmt.user.db import get_gitcode_token
-        token = get_gitcode_token(repo_key=repo_key) or ""
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        token = get_repo_token_with_refresh(repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
             return False
         from src.domains.runtime.vcs.api_client import VcsApiClient
-        client = VcsApiClient("gitcode", token, owner, rname)
-        client.post_issue_comment(int(issue_number), _md.strip())
+        client = VcsApiClient(_prov, token, owner, rname)
+        client.post_issue_comment(_native_issue_number(issue_number), _md.strip())
         log.info(f"attachment sync comment posted: repo={repo_key} issue=#{issue_number}"
                  f" file={(attachment or {}).get('filename')}")
         return True
     except Exception as e:
         log.warning(f"attachment sync comment failed repo={repo_key} #{issue_number}: {e}")
         return False
-
 
 def _attach_cleanup_dir(owner: str, repo: str, issue_number):
     """删除整个 issue 的附件目录。任务完成/取消时调用。"""
@@ -2950,9 +2806,6 @@ def _attach_cleanup_dir(owner: str, repo: str, issue_number):
         shutil.rmtree(_attach_dir, ignore_errors=True)
         log.info(f"Attachment cleanup: removed {_attach_dir}")
 
-
-# === Issue #315: GitCode 编辑器上传图片（user-images）服务端鉴权下载 ===
-
 def _user_image_ext(url: str, content_type: str = "") -> str:
     """从 URL 末段/Content-Type 推断图片扩展名（默认 .png）。"""
     last = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
@@ -2962,97 +2815,6 @@ def _user_image_ext(url: str, content_type: str = "") -> str:
     ct_map = {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
               "image/svg+xml": ".svg", "image/bmp": ".bmp"}
     return ct_map.get(content_type, ".png")
-
-
-def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo_key: str, *,
-                                extract_urls, download_method: str, max_count: int,
-                                classify, filename_prefix: str, use_uuid: bool = False,
-                                prefilter=None, analyzer=None) -> dict:
-    """Issue #315/#1748 共用采集编排：提取链接 → 鉴权下载 → 白名单校验 → 转存平台附件。
-
-    参数化差异：链接提取函数、下载方法、类型/扩展名判定、文件名策略、预过滤、分析器。
-    token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
-    顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
-    """
-    result: dict = {"ok": [], "failed": []}
-    try:
-        urls: list[str] = []
-        for t in texts or []:
-            if not t:
-                continue
-            for u in extract_urls(str(t)):
-                if u not in urls:
-                    urls.append(u)
-        if not urls:
-            return result
-        # 数量上限：超出部分降级说明（不静默丢弃）
-        for u in urls[max_count:]:
-            result["failed"].append({"url": u, "reason": "exceeds count limit"})
-        urls = urls[:max_count]
-
-        repo_key = repo_key or f"gitcode:{owner}/{repo}"
-        token = ""
-        try:
-            from src.domains.mgmt.user.db import get_gitcode_token
-            token = get_gitcode_token(repo_key=repo_key) or ""
-        except Exception:
-            token = ""
-        if not token:
-            for u in urls:
-                result["failed"].append({"url": u, "reason": "no repo token"})
-            return result
-
-        import uuid
-        from src.domains.runtime.vcs.api_client import create_client
-        client = create_client(repo_key, token)
-        seq = 0
-        for u in urls:
-            if prefilter is not None and not prefilter(u):
-                log.info(f"{filename_prefix} ignored (non-media): {owner}/{repo}/{issue_number}")
-                continue
-            dl = getattr(client, download_method)(u)
-            if "error" in dl:
-                result["failed"].append({"url": u, "reason": str(dl["error"])})
-                continue
-            content_type = str(dl.get("content_type") or "")
-            info = classify(u, content_type)
-            if not info:
-                log.info(f"{filename_prefix} ignored (unsupported type): "
-                         f"{owner}/{repo}/{issue_number} ct={content_type or 'unknown'}")
-                continue
-            kind, ext = info
-            if use_uuid:
-                # MR !1145 Informational-2：#1748 也用固定前缀（user-attachment-<uuid>），
-                # 让「自动转存」可仅凭前缀判定，避免"32 hex + 媒体扩展名"启发式误删
-                # 恰好同形的用户手工附件。
-                filename = f"{filename_prefix}-{uuid.uuid4().hex}{ext}"
-            else:
-                seq += 1
-                filename = f"{filename_prefix}-{seq}{ext}"
-            try:
-                url = _attach_save(owner, repo, issue_number, filename, dl["content"])
-                item = {"filename": filename, "url": url,
-                        "size": dl.get("size", len(dl["content"]))}
-                analysis = ""
-                if analyzer is not None and kind in ("image", "video"):
-                    analysis = analyzer(kind, dl["content"], ext)
-                if kind is not None:
-                    item["kind"] = kind
-                    item["source_url"] = u
-                if analyzer is not None:
-                    item["analysis"] = analysis
-                result["ok"].append(item)
-                log.info(f"{filename_prefix} saved: {owner}/{repo}/{issue_number}/{filename} "
-                         f"({dl.get('size', 0)} bytes, kind={kind}, analyzed={bool(analysis)})")
-            except Exception as e:
-                result["failed"].append({"url": u, "reason": f"save failed: {e}"})
-    except Exception as e:
-        result["error"] = str(e)
-        log.warning(f"_collect_authed_attachments failed: {owner}/{repo}/{issue_number} -> {e}")
-    return result
-
-
-# === Issue #315: GitCode 编辑器上传图片（user-images）服务端鉴权下载 ===
 
 def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_key: str = "") -> dict:
     """提取 Issue 正文/评论中 raw.gitcode.com/user-images 图片链接并鉴权下载转存为平台附件。
@@ -3073,62 +2835,6 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
         classify=_classify, filename_prefix="user-image")
 
 
-# === Issue #1748: 评论媒体附件（gitcode.com/user-attachments，视频/图片）服务端鉴权下载 ===
-
-def _analyze_media_attachment(kind: str, content: bytes, ext: str = "") -> str:
-    """Issue #1748：复用现有图片/视频理解能力分析已下载的评论媒体附件。
-
-    返回带「## 用户上传的图片/视频分析」标题的注入文本；分析不可用时返回空串。
-    分析模块缺失/异常一律降级为空串，由上层注入明确原因，不阻塞主流程。
-    """
-    try:
-        if kind == "image":
-            from src.domains.runtime.agents.image_understanding import understand_image_from_bytes
-            return understand_image_from_bytes(content, ext or ".png")
-        if kind == "video":
-            from src.domains.runtime.agents.image_understanding import understand_video_from_bytes
-            text = understand_video_from_bytes(content, ext or ".mp4")
-            if text and "## 用户上传的视频分析" not in text:
-                text = f"## 用户上传的视频分析\n{text}\n\n## 请基于以上视频信息回答用户问题"
-            return text
-    except Exception as e:
-        log.warning(f"_analyze_media_attachment failed ({kind}): {e}")
-    return ""
-
-
-def _collect_issue_media_attachments(owner: str, repo: str, issue_number, texts,
-                                     repo_key: str = "", analyze: bool = True) -> dict:
-    """Issue #1748：提取评论中的 user-attachments 媒体附件并鉴权下载转存为平台附件。
-
-    评论附件直链需登录态（匿名 401），且事件注入原本不含媒体分析，形成双重断链。
-    本函数在事件构建期用服务端凭证下载，经 `_attach_save` 转存为平台附件，
-    返回无 401 的读取通道 URL，供上层注入媒体分析段落。
-
-    Spec 限定 media-only：非媒体扩展名预过滤、未知类型下载后按 Content-Type 再判，
-    非图片/视频一律不落盘不注入；扩展名仅接受媒体白名单并以 UUID 命名。
-    返回值顶层异常不外抛（带 error 字段），绝不阻塞 prompt 组装主流程。
-    """
-    from src.domains.runtime.vcs.api_client import (
-        extract_gitcode_user_attachment_urls, USER_ATTACHMENT_MAX_COUNT,
-        attachment_kind, _attachment_ext, is_media_attachment_url,
-    )
-
-    def _classify(u: str, content_type: str):
-        kind = attachment_kind(u, content_type)
-        ext = _attachment_ext(u, content_type, kind)
-        if kind not in ("image", "video") or not ext:
-            return None
-        return (kind, ext)
-
-    return _collect_authed_attachments(
-        owner, repo, issue_number, texts, repo_key,
-        extract_urls=extract_gitcode_user_attachment_urls,
-        download_method="download_user_attachment", max_count=USER_ATTACHMENT_MAX_COUNT,
-        classify=_classify, filename_prefix="user-attachment", use_uuid=True,
-        prefilter=is_media_attachment_url,
-        analyzer=_analyze_media_attachment if analyze else None)
-
-
 def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
     """从 tasks 表取 repo_key + issue_number + conversation_id（关联 agent_tasks 的键）。"""
     with db_lock:
@@ -3138,7 +2844,6 @@ def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
     if not row:
         return None
     return row[0], row[1], row[2] or ""
-
 
 def _find_agent_task_ids(repo_key: str, issue_number) -> list[str]:
     """按 repo_key + issue_id 关联 agent_tasks（agent 执行产生的 task_messages 以此为外键）。
@@ -3244,7 +2949,7 @@ def _batch_fetch_issue_state(keys: list) -> dict:
         _flat = []
         for _k in _chunk:
             _n = str(_k[1]).lstrip("#")
-            _flat.extend([_k[0], int(_n) if _n.isdigit() else -1])
+            _flat.extend([_k[0], _native_issue_number(_n) if str(_n or "").strip() else -1])
         try:
             with db_lock:
                 c = db.cursor()
@@ -3254,7 +2959,6 @@ def _batch_fetch_issue_state(keys: list) -> dict:
         except Exception as e:
             log.warning(f"batch issue fetch failed: {e}")
     return out
-
 
 def _batch_running_agent_tasks(keys: list) -> set:
     """批量查"正在运行"的 agent_tasks，返回 {(repo_key, issue_id)}（防 N+1，Issue #85 雷达动画依据）。
@@ -3281,7 +2985,6 @@ def _batch_running_agent_tasks(keys: list) -> set:
         except Exception as e:
             log.warning(f"batch agent_tasks fetch failed: {e}")
     return out
-
 
 def _batch_fetch_agent_statuses(keys: list) -> dict:
     """批量查各 Agent 节点最新事件状态（Issue #126: 与菜单流水线数据源一致）。
@@ -3353,7 +3056,6 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
 
     return out
 
-
 def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str = "") -> dict:
     """Issue #337: 计算某需求「可移交目标流水线」列表（列表模式详情移交入口数据源）。
 
@@ -3388,7 +3090,6 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
         log.warning(f"get_handoff_targets failed repo={repo_key} issue=#{issue_number}: {_e}")
         targets = []
     return {"targets": targets, "current_scene_id": _cur}
-
 
 def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False,
                  limit: int = None, offset: int = 0) -> list[dict]:
@@ -3503,3 +3204,289 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             item["user_id"] = r[15] or 0
         tasks_out.append(item)
     return tasks_out
+
+from src.kernel.config import log
+
+from src.kernel.config import WORKSPACE_DIR
+
+from src.domains.runtime.vcs.api_client import _native_issue_number  # S73：issue ident 平台原生形态
+
+def _mirror_repo_keys(repo_key: str) -> "list[str]":
+    """查找同仓多平台镜像 repo_key 全集（S97/D72 仓库能力抽象）。
+
+    managed_repos 表中同一 owner/repo 可能同时存在多平台记录
+    （gitcode:/github:/gitee:/gitlab:…），通过 full_name 匹配、平台卡集合
+    界定候选前缀。返回除 repo_key 自身外的全部镜像键（顺序稳定）。
+    找不到返回空表。
+    """
+    try:
+        from src.kernel.repo_key import split_owner_repo, repo_key_candidates
+        from src.kernel.session_manager import db, db_lock
+        owner, repo = split_owner_repo(repo_key)
+        if not owner or not repo:
+            return []
+        full = f"{owner}/{repo}"
+        cands = [c for c in repo_key_candidates(full) if c != repo_key]
+        if not cands:
+            return []
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT repo_key FROM managed_repos WHERE repo_key IN "
+                f"({','.join('?' * len(cands))}) ORDER BY repo_key",
+                cands,
+            )
+            return [r[0] for r in c.fetchall()]
+    except Exception as e:
+        log.warning(f"find mirrors for {repo_key} failed: {e}")
+        return []
+
+def _notify_done(repo_key: str, issue_number: int, text: str) -> None:
+    """完成通知（A4）：扇出到该用户全部已连接渠道；异常不影响结单主流程。"""
+    try:
+        from src.domains.runtime.im.notify import notify_issue_event
+        notify_issue_event(repo_key, int(issue_number or 0), "done", text)
+    except Exception as _e:
+        log.warning(f"[im-notify] done notify failed {repo_key}#{issue_number}: {_e}")
+
+def _is_auto_transferred_attachment(name: str) -> bool:
+    """判断附件名是否由平台自动转存（评论媒体/编辑器图片）而来。"""
+    if not name:
+        return False
+    return name.startswith(_AUTO_TRANSFER_PREFIXES)
+
+def _cleanup_auto_transferred_attachments(repo_key: str, issue_number) -> int:
+    """Issue #1748：回收平台自动转存的评论媒体/编辑器图片，保留用户手工附件。
+
+    issue 确认完成/取消时调用。单条评论的自动转存副本对已关闭 issue 无复用价值，
+    但用户手工上传的附件（可能是交付依据/证据）不能删，故不做整目录清理。
+    异常一律吞掉，清理失败不影响关闭流程；返回删除数量。
+    """
+    removed = 0
+    try:
+        from src.kernel.repo_key import split_owner_repo
+        _owner, _rname = split_owner_repo(repo_key)
+        if not _owner or not _rname:
+            return 0
+        _num = str(issue_number)
+        from src.domains.runtime.storage import get_storage
+        storage = get_storage()
+        if storage:
+            # Issue #1748 复审：OBS 模式下 list_keys + 每对象 delete_object 都是网络往返
+            # （N 个文件 ≈ N+1 RTT），不能挂在「关闭/取消 issue」的同步链路上 →
+            # 丢给后台线程执行，接口立即返回（清理失败只丢日志，不影响业务）。
+            def _reap_obs() -> None:
+                _n = 0
+                try:
+                    for _key in storage.list_keys(_attach_obs_key(_owner, _rname, _num, "")):
+                        if _is_auto_transferred_attachment(os.path.basename(str(_key))):
+                            if storage.delete_object(_key):
+                                _n += 1
+                except Exception as _e:
+                    log.warning(f"Attachment cleanup (obs, async) failed: {_e}")
+                if _n:
+                    log.info(f"Attachment cleanup (auto-transferred): {_n} object(s) "
+                             f"for {_owner}/{_rname}/{_num}")
+            import threading
+            threading.Thread(target=_reap_obs, name="attach-reap", daemon=True).start()
+            return 0
+        _dir = _attach_base_dir(_owner, _rname, _num)
+        if os.path.isdir(_dir):
+            for _name in os.listdir(_dir):
+                if not _is_auto_transferred_attachment(_name):
+                    continue
+                try:
+                    os.remove(os.path.join(_dir, _name))
+                    removed += 1
+                except OSError as _e:
+                    log.warning(f"Attachment cleanup: remove {_name} failed: {_e}")
+            if removed:
+                log.info(f"Attachment cleanup (auto-transferred): {removed} file(s) in {_dir}")
+    except Exception as _e:
+        log.warning(f"Auto-transferred attachment cleanup failed: {_e}")
+    return removed
+
+def cancel_issue_rows(c, repo_key: str, issue_number: int) -> int:
+    """Issue #1741：把同一 repo_key+issue_number 的可取消行统一置为终态取消。
+
+    评论取消路径（cancel_issue_task）与 cancel 端点共用，避免跨层重复实现；
+    completed/cancelled 行保持终态不变，重复取消不再刷新 completed_at（幂等）。
+    """
+    c.execute(
+        "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') "
+        "WHERE repo_key=? AND issue_number=? AND status IN (?,?,?,?)",
+        (repo_key, issue_number, *_CANCELLABLE_ISSUE_STATUSES))
+    return c.rowcount
+
+def _create_issue_unified(api_token: str, provider: str, owner: str, repo: str,
+                          title: str, body_text: str = "", assignee: str = "") -> dict:
+    """D35/S55：建单统一入口——VcsApiClient.create_issue（卡驱动路径 + 方言
+    assignee 语义，gitee 自动正确）；存量平台行为由内置卡对齐（github token 头
+    + JSON、gitcode form）。供手工建单链与 onboarding 共用，_post_github_issue /
+    _post_gitcode_issue 的分派收敛至此。失败抛 RuntimeError（调用方 403/422
+    友好化与 401 刷新重试逻辑语义保持）。"""
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+    try:
+        resp = VcsApiClient(provider, api_token, owner, repo).create_issue(
+            title, body_text, assignee=assignee)
+    except Exception as e:
+        raise RuntimeError(f"create issue failed: {e}")
+    if not isinstance(resp, dict) or "error" in resp:
+        raise RuntimeError(f"create issue failed: {str(resp)[:300]}")
+    return resp
+
+def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo_key: str, *,
+                                extract_urls, download_method: str, max_count: int,
+                                classify, filename_prefix: str, use_uuid: bool = False,
+                                prefilter=None, analyzer=None) -> dict:
+    """Issue #315/#1748 共用采集编排：提取链接 → 鉴权下载 → 白名单校验 → 转存平台附件。
+
+    参数化差异：链接提取函数、下载方法、类型/扩展名判定、文件名策略、预过滤、分析器。
+    token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
+    顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
+    """
+    from src.kernel.repo_key import parse_repo_key as _prk
+    _provider = _prk(repo_key or f"gitcode:{owner}/{repo}")[0]
+    result: dict = {"ok": [], "failed": []}
+    try:
+        urls: list[str] = []
+        for t in texts or []:
+            if not t:
+                continue
+            for u in extract_urls(str(t)):
+                if u not in urls:
+                    urls.append(u)
+        if not urls:
+            return result
+        # 数量上限：超出部分降级说明（不静默丢弃）
+        for u in urls[max_count:]:
+            result["failed"].append({"url": u, "reason": "exceeds count limit"})
+        urls = urls[:max_count]
+
+        repo_key = repo_key or f"gitcode:{owner}/{repo}"
+        token = ""
+        try:
+            from src.domains.mgmt.user.db import get_gitcode_token
+            token = get_gitcode_token(repo_key=repo_key) or ""
+        except Exception:
+            token = ""
+        if not token:
+            for u in urls:
+                result["failed"].append({"url": u, "reason": "no repo token"})
+            return result
+
+        import uuid
+        from src.domains.runtime.vcs.api_client import create_client
+        client = create_client(repo_key, token)
+        seq = 0
+        for u in urls:
+            if prefilter is not None and not prefilter(u):
+                log.info(f"{filename_prefix} ignored (non-media): {owner}/{repo}/{issue_number}")
+                continue
+            dl = getattr(client, download_method)(u)
+            if "error" in dl:
+                result["failed"].append({"url": u, "reason": str(dl["error"])})
+                continue
+            content_type = str(dl.get("content_type") or "")
+            info = classify(u, content_type)
+            if not info:
+                log.info(f"{filename_prefix} ignored (unsupported type): "
+                         f"{owner}/{repo}/{issue_number} ct={content_type or 'unknown'}")
+                continue
+            kind, ext = info
+            if use_uuid:
+                # MR !1145 Informational-2：#1748 也用固定前缀（user-attachment-<uuid>），
+                # 让「自动转存」可仅凭前缀判定，避免"32 hex + 媒体扩展名"启发式误删
+                # 恰好同形的用户手工附件。
+                filename = f"{filename_prefix}-{uuid.uuid4().hex}{ext}"
+            else:
+                seq += 1
+                filename = f"{filename_prefix}-{seq}{ext}"
+            try:
+                url = _attach_save(owner, repo, issue_number, filename, dl["content"])
+                item = {"filename": filename, "url": url,
+                        "size": dl.get("size", len(dl["content"]))}
+                analysis = ""
+                if analyzer is not None and kind in ("image", "video"):
+                    analysis = analyzer(kind, dl["content"], ext)
+                if kind is not None:
+                    item["kind"] = kind
+                    item["source_url"] = u
+                if analyzer is not None:
+                    item["analysis"] = analysis
+                result["ok"].append(item)
+                log.info(f"{filename_prefix} saved: {owner}/{repo}/{issue_number}/{filename} "
+                         f"({dl.get('size', 0)} bytes, kind={kind}, analyzed={bool(analysis)})")
+            except Exception as e:
+                result["failed"].append({"url": u, "reason": f"save failed: {e}"})
+    except Exception as e:
+        result["error"] = str(e)
+        log.warning(f"_collect_authed_attachments failed: {owner}/{repo}/{issue_number} -> {e}")
+    return result
+
+def _analyze_media_attachment(kind: str, content: bytes, ext: str = "") -> str:
+    """Issue #1748：复用现有图片/视频理解能力分析已下载的评论媒体附件。
+
+    返回带「## 用户上传的图片/视频分析」标题的注入文本；分析不可用时返回空串。
+    分析模块缺失/异常一律降级为空串，由上层注入明确原因，不阻塞主流程。
+    """
+    try:
+        if kind == "image":
+            from src.domains.runtime.agents.image_understanding import understand_image_from_bytes
+            return understand_image_from_bytes(content, ext or ".png")
+        if kind == "video":
+            from src.domains.runtime.agents.image_understanding import understand_video_from_bytes
+            text = understand_video_from_bytes(content, ext or ".mp4")
+            if text and "## 用户上传的视频分析" not in text:
+                text = f"## 用户上传的视频分析\n{text}\n\n## 请基于以上视频信息回答用户问题"
+            return text
+    except Exception as e:
+        log.warning(f"_analyze_media_attachment failed ({kind}): {e}")
+    return ""
+
+def _collect_issue_media_attachments(owner: str, repo: str, issue_number, texts,
+                                     repo_key: str = "", analyze: bool = True) -> dict:
+    """Issue #1748：提取评论中的 user-attachments 媒体附件并鉴权下载转存为平台附件。
+
+    评论附件直链需登录态（匿名 401），且事件注入原本不含媒体分析，形成双重断链。
+    本函数在事件构建期用服务端凭证下载，经 `_attach_save` 转存为平台附件，
+    返回无 401 的读取通道 URL，供上层注入媒体分析段落。
+
+    Spec 限定 media-only：非媒体扩展名预过滤、未知类型下载后按 Content-Type 再判，
+    非图片/视频一律不落盘不注入；扩展名仅接受媒体白名单并以 UUID 命名。
+    返回值顶层异常不外抛（带 error 字段），绝不阻塞 prompt 组装主流程。
+    """
+    from src.domains.runtime.vcs.api_client import (
+        extract_gitcode_user_attachment_urls, USER_ATTACHMENT_MAX_COUNT,
+        attachment_kind, _attachment_ext, is_media_attachment_url,
+    )
+
+    def _classify(u: str, content_type: str):
+        kind = attachment_kind(u, content_type)
+        ext = _attachment_ext(u, content_type, kind)
+        if kind not in ("image", "video") or not ext:
+            return None
+        return (kind, ext)
+
+    return _collect_authed_attachments(
+        owner, repo, issue_number, texts, repo_key,
+        extract_urls=extract_gitcode_user_attachment_urls,
+        download_method="download_user_attachment", max_count=USER_ATTACHMENT_MAX_COUNT,
+        classify=_classify, filename_prefix="user-attachment", use_uuid=True,
+        prefilter=is_media_attachment_url,
+        analyzer=_analyze_media_attachment if analyze else None)
+
+"""需求中心（Issues Center）领域逻辑（issues_center）。
+
+从 src/domains/runtime/routes/tasks.py 拆分（tasks-module-refactor-and-task-id-disambiguation-design.md）：
+- issue 建档/状态流转/VCS 创建/附件/任务对话/平台映射/需求列表查询等「需求中心」领域函数集中于此，
+- routes/tasks.py 只保留「执行实例」动作（complete/current），其他路由与业务模块均从本模块导入，
+- 本模块为叶子：**不得 import routes.tasks / routes.issues**（防环形依赖）。
+"""
+
+# Issue #1748 补充：平台自动转存媒体的文件名形态——#315 = user-image-<n>.<ext>；
+# #1748 = <uuid32>.<媒体扩展名>（UUID 命名由 spec 约定）。只回收这两类，
+# 用户手工上传的附件一律保留。
+_AUTO_TRANSFER_PREFIXES = ("user-image-", "user-attachment-")
+
+_CANCELLABLE_ISSUE_STATUSES = ("active", "processing", "awaiting_input", "pending_review")

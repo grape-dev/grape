@@ -66,6 +66,7 @@ def build_app(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    default_response_class=None,
 ):
     """Create the shared FastAPI app: CORS + metrics + request-id/log + ping + exception handler.
 
@@ -79,7 +80,7 @@ def build_app(
 
     ensure_user_bin_dirs()
 
-    app = FastAPI(
+    _kw = dict(
         title=title,
         version=version,
         lifespan=lifespan,
@@ -87,6 +88,11 @@ def build_app(
         redoc_url=redoc_url,
         openapi_url=openapi_url,
     )
+    # 增量（Issue #684）：调用方可注入统一 JSON 序列化出口（控制字符/孤立代理项转义）。
+    # 缺省 None = 保持基线 FastAPI 默认行为，不影响其它进程入口。
+    if default_response_class is not None:
+        _kw["default_response_class"] = default_response_class
+    app = FastAPI(**_kw)
 
     app.add_middleware(
         CORSMiddleware,

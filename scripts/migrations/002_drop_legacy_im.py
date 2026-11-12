@@ -13,7 +13,7 @@
        老库（M1 之前）直接升级也不会掉线；
     2) 校验：回填后安装表非空（active 安装数 > 0）；生产确认可用 --dry-run 先看；
     3) ALTER TABLE ... DROP COLUMN ×3（两张表各三列）；
-    4) DROP TABLE IF EXISTS global_im_bot_config。
+    4) global_im_bot_config 退役**推迟**（保留建表与兜底读点一致；见步骤 3 注释）。
 
 用法：
 
@@ -152,21 +152,20 @@ def run(conn, dry_run: bool = False) -> dict:
             except Exception as e:
                 report.setdefault("drop_errors", []).append(f"{table}.{col}: {e}")
 
-    # 3) 删表
+    # 3) 删表——**推迟**（QA 复审 M-5）：bot_lease.py / feishu_async.py 仍有
+    # global_im_bot_config 的租约兜底 SELECT/UPDATE 读点（grape_t_channel_lease
+    # 迁移后的回落路径），此刻 DROP 会打断兜底链。退役随 IM 流整体下线时
+    # 另行执行；此处仅如实报告存在性，db_setup 的建表 DDL 与代码读点保持一致。
     if state["legacy_table"]:
-        try:
-            conn.execute(f"DROP TABLE IF EXISTS {DROP_TABLE}")
-            conn.commit()
-            report["dropped_table"] = True
-        except Exception as e:
-            report.setdefault("drop_errors", []).append(f"{DROP_TABLE}: {e}")
+        report["dropped_table"] = ("skipped: bot_lease/feishu_async lease "
+                                   "fallbacks still reference this table")
 
     report["after"] = plan(conn)
     return report
 
 
 if __name__ == "__main__":  # 运维手动执行
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     _dry = "--dry-run" in sys.argv
     with db_lock:

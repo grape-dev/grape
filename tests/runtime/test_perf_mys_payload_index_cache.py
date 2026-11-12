@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 import pytest
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 import src.domains.runtime.engine  # 环形导入防护（src.domains.runtime.agents.* / routes 侧导入顺序）
 import src.domains.runtime.routes.issues as iss

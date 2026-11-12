@@ -3,26 +3,38 @@
 覆盖 docs/new-version2/feishu-qr-app-onboarding-plan.md §10 的用例：
 - start 参数校验 / 并发限制
 - on_qr_code 回调 → waiting_confirm + qr_url 落库
-- 扫码成功 → connected + grape_t_channel_installation 落库（A2 收尾：legacy im_* 不再写）
+- 扫码成功 → connected + chat_agent_session / devops_agent_session 落库
 - 异常（用户拒绝 / 过期 / 通用错误）→ failed
 - status 端点权限（不存在 / 越权）
 - cancel 幂等
 """
+
 import asyncio
+
 import os
+
 import sys
+
 import uuid
+
 from unittest.mock import patch, AsyncMock
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
+
 os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
+
 from src.kernel.session_manager import db, db_lock
+
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
@@ -32,12 +44,14 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 _uid = None
+
 _username = None
+
 _token = ""
+
 _headers = {}
 
 QR_URL = "https://accounts.feishu.cn/authorize?device_code=abc"
-
 
 def _result():
     """动态生成唯一 app_id/app_secret，避免测试库残留绑定污染（app_id 全局唯一强约束）。"""
@@ -47,7 +61,6 @@ def _result():
         "user_info": {"open_id": "ou_xxx", "tenant_brand": "feishu"},
     }
 
-
 def setup_module():
     global _uid, _username, _token, _headers
     _username = "onboard_" + uuid.uuid4().hex[:8]
@@ -56,7 +69,6 @@ def setup_module():
         _uid = grape_account_db.get_grape_account_by_username(_username)
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
-
 
 def teardown_module():
     global _uid
@@ -70,7 +82,6 @@ def teardown_module():
             db.commit()
         grape_account_db.soft_delete_account(_uid["id"])
 
-
 def _clean_tasks():
     with db_lock:
         c = db.cursor()
@@ -80,42 +91,14 @@ def _clean_tasks():
         db.commit()
     _clean_inst("cli_onboard_%")
 
-
-def _inst_for(scope: str, owner_or_repo: str):
-    """按归属取扫码产生的最新安装行（A2 收尾：凭证真相源）。"""
-    from src.im.engine_wiring import _connect, default_db_path
-    col = "owner_user_id" if scope == "user" else "repo_key"
-    conn = _connect(default_db_path())
-    try:
-        row = conn.execute(
-            "SELECT legacy_app_id, status, config FROM grape_t_channel_installation "
-            f"WHERE scope=? AND {col}=? AND legacy_app_id LIKE 'cli_onboard_%' "
-            "ORDER BY updated_at DESC LIMIT 1", (scope, owner_or_repo)).fetchone()
-    finally:
-        conn.close()
-    return row
-
-
-def _clean_inst(pattern: str):
-    from src.im.engine_wiring import _connect, default_db_path
-    conn = _connect(default_db_path())
-    try:
-        conn.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id LIKE ?", (pattern,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _patch_register(side_effect):
     """patch lark_oapi.aregister_app（SDK 顶层函数），side_effect 为 async 协程工厂。"""
     return patch("lark_oapi.aregister_app", side_effect=side_effect)
-
 
 async def _fake_success(**kwargs):
     """正常流程：先触发 on_qr_code，再返回 RESULT"""
     kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
     return _result()
-
 
 def _await_run(bot_type, repo_key="", patched=None):
     """直接 await 后台协程（同步测试辅助），确保状态已落库。"""
@@ -125,7 +108,6 @@ def _await_run(bot_type, repo_key="", patched=None):
     with patched:
         asyncio.run(f._run_registration(task_id, bot_type, repo_key, _uid["id"]))
     return task_id
-
 
 # ===================== A. start 端点 =====================
 class TestStart:
@@ -281,7 +263,6 @@ class TestStart:
                 c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_stale_pending' OR task_id IN (SELECT task_id FROM feishu_onboard_task WHERE user_id=? AND status!='failed')", (_uid["id"],))
                 db.commit()
 
-
 # ===================== B. 扫码回调 / 状态流转 =====================
 class TestStatusFlow:
     def test_qr_callback_sets_waiting_confirm(self):
@@ -312,7 +293,7 @@ class TestStatusFlow:
     def test_vod_connected_persists_devops_session(self):
         """扫码成功 vod_bot → grape_t_channel_installation(repo 轨) 落库并 active。"""
         _clean_tasks()
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         repo_key = to_repo_key(f"repo_{_uid['id']}")
         with db_lock:
             db.cursor().execute(
@@ -338,7 +319,7 @@ class TestStatusFlow:
         """无既有 vod 行时：repo_key 归一化带前缀 + INSERT 占位行 + 安装行落库。"""
         _clean_tasks()
         repo_key = f"owner{_uid['id']}/sample-repo"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
         with _patch_register(_fake_success) as patched:
             from src.domains.mgmt.routes import feishu_onboard as f
@@ -428,7 +409,6 @@ class TestStatusFlow:
         assert "network down" in t["error"]
         _clean_tasks()
 
-
 # ===================== C. status 端点 =====================
 class TestStatusEndpoint:
     def test_status_connected(self):
@@ -460,7 +440,6 @@ class TestStatusEndpoint:
         assert r.status_code == 403
         grape_account_db.soft_delete_account(user_b["id"])
         _clean_tasks()
-
 
 # ===================== D. cancel 端点 =====================
 class TestCancel:
@@ -502,7 +481,6 @@ class TestCancel:
     def test_cancel_not_found(self):
         r = client.post("/api/feishu/onboard/cancel", json={"task_id": "no_such"}, headers=_headers)
         assert r.status_code == 404
-
 
 # ===================== E. addons schema 看护 =====================
 class TestAddonsSchema:
@@ -550,3 +528,39 @@ class TestAddonsSchema:
         assert "im:chat:readonly" in tenant_scopes
         events = _ADDONS["events"]["items"]["tenant"]
         assert "im.message.receive_v1" in events
+
+from src.domains.mgmt.auth import grape_account_db
+
+def _inst_for(scope: str, owner_or_repo: str):
+    """按归属取扫码产生的最新安装行（A2 收尾：凭证真相源）。"""
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+    col = "owner_user_id" if scope == "user" else "repo_key"
+    conn = _connect(default_db_path())
+    try:
+        row = conn.execute(
+            "SELECT legacy_app_id, status, config FROM grape_t_channel_installation "
+            f"WHERE scope=? AND {col}=? AND legacy_app_id LIKE 'cli_onboard_%' "
+            "ORDER BY updated_at DESC LIMIT 1", (scope, owner_or_repo)).fetchone()
+    finally:
+        conn.close()
+    return row
+
+def _clean_inst(pattern: str):
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+    conn = _connect(default_db_path())
+    try:
+        conn.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id LIKE ?", (pattern,))
+        conn.commit()
+    finally:
+        conn.close()
+
+"""飞书扫码一键建应用（feishu_onboard）测试
+
+覆盖 docs/new-version2/feishu-qr-app-onboarding-plan.md §10 的用例：
+- start 参数校验 / 并发限制
+- on_qr_code 回调 → waiting_confirm + qr_url 落库
+- 扫码成功 → connected + grape_t_channel_installation 落库（A2 收尾：legacy im_* 不再写）
+- 异常（用户拒绝 / 过期 / 通用错误）→ failed
+- status 端点权限（不存在 / 越权）
+- cancel 幂等
+"""

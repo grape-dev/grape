@@ -1,16 +1,23 @@
 """Agent Runtime 抽象基类"""
 import json
+from contextlib import contextmanager
 
 
 class AgentRuntime:
     """Agent Runtime 基类，所有执行引擎实现需继承此类。"""
     name = ""
     binary = ""
+    text_separator = "\n"
     prompt_via_stdin = True  # issue #351: 默认 stdin 传 prompt，规避 argv 经 cmd 壳截断多行提示词
     _serve_port = 0  # codearts 方案E2: serve 端口（pre_exec 设置，build_args 读取）
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         raise NotImplementedError
+
+    @contextmanager
+    def prepare_prompt(self, prompt: str, cwd: str):
+        """Own invocation-local prompt resources for the lifetime of execution."""
+        yield prompt
 
     def parse_output(self, line: str) -> dict | None:
         """NDJSON 逐行解析，返回统一事件 dict 或 None"""
@@ -49,7 +56,7 @@ class AgentRuntime:
             return {"type": "error", "message": err}
         return {"type": "other", "raw": et}
 
-    def get_env(self, account: str = "", user_id: int = 0) -> dict:
+    def get_env(self, account: str = "", user_id: str = "") -> dict:
         return {}
 
     def pre_exec(self, cwd: str, env: dict) -> dict:

@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _MOCK_USER = {"id": 1, "username": "issue1104", "auth_type": "api_key"}
 

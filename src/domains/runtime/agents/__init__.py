@@ -5,4 +5,5 @@
 from .base import AgentBackend
 from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
+from .atomcode import AtomCodeBackend
 from .executor import stream_agent, get_backend, stream_opencode
