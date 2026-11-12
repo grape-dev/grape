@@ -127,8 +127,10 @@ WHITELIST: dict[str, dict[str, str]] = {
     #   executor/base coupling when _execute_agent moves out.
     # vcs.providers <-> vcs.providers.base: small registration cycle in the
     #   vcs provider plugin loader; harmless (parent init completes first).
-    "CYCLE:src.domains.runtime.agents+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.engine.engine_select+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine.registry+src.domains.runtime.engine.service+src.domains.runtime.agents.aishell_acp+src.domains.runtime.agents.atomcode+src.domains.runtime.agents.hwcloud_acp": {
+    "CYCLE:src.domains.runtime.agents+src.domains.runtime.agents.aishell_acp+src.domains.runtime.agents.atomcode+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.hwcloud_acp+src.domains.runtime.agents.opencode": {
         "R5": "agents<->engine M0 forwarding cycle, due Phase 3 direct_executor cleanup."
+             " 2026-11-12：R5 白名单改为「集合相等」口径（QA M-1），键按当前检出 SCC 精确登记；"
+             "成员变化（新增/合并模块）时必须显式更新本键，否则硬门禁红。"
              " Evidence: red at base 13c6d0979 (reproduce: check-arch on the base tree).",
     },
     "CYCLE:src.domains.runtime.vcs.providers+src.domains.runtime.vcs.providers.base": {
@@ -355,8 +357,11 @@ def main() -> int:
     r5 = []
     for comp in sccs:
         key = "CYCLE:" + "+".join(comp)
+        # M-1（2026-11-12 QA 复审）：原为超集匹配（>=），一条大集合白名单可吞掉其内部
+        # 任何新增真环，使 R5 在整域退化为免检。改为集合相等：白名单成员与检出 SCC
+        # 不完全一致即红，成员变化（新增/合并模块）必须显式更新白名单。
         if key not in WHITELIST and not any(
-            k.startswith("CYCLE:") and set(k[6:].split("+")) >= set(comp)
+            k.startswith("CYCLE:") and set(k[6:].split("+")) == set(comp)
             for k in WHITELIST
         ):
             r5.append(comp)

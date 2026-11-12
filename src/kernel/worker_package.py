@@ -56,9 +56,6 @@ MANIFEST = [
     "src/service_diagnostics.py",
     "src/session_manager.py",
     "src/mysql_compat.py",
-    # worker 侧 OTel 关联与效率上报仍在 src/observability/（kernel.config / mysql_compat
-    # 延迟 import otel；合并后 worker 包缺该目录会导致 import 闭包失败）
-    "src/observability/",
     "src/token_service.py",
     "src/token_resolver.py",
     "src/domains/mgmt/user/__init__.py",
