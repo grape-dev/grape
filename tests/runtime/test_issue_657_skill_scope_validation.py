@@ -34,7 +34,7 @@ import pytest  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 from src.api.pipeline_config import create_custom_scene, invalidate_scene_cache  # noqa: E402
 
@@ -348,7 +348,7 @@ class TestDispatchFailFast:
     def test_fail_skill_resolve_event_helper_with_seq(self):
         """_fail_skill_resolve_event（seq>0）→ 既有事件置 failed + agent_tasks 同步。"""
         from src.api.event_store import append_event
-        from src.api.event_pipeline import _fail_skill_resolve_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_skill_resolve_event
         repo_key = f"gitcode:o657/{_unique_repo()}"
         seq = append_event(repo_key=repo_key, event_type="issue_comment",
                            title="t", issue_id="#1", agent_type="issue",

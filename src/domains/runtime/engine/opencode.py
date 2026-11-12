@@ -26,7 +26,7 @@ class OpencodeRuntime(AgentRuntime):
         env["DEVOPS_EVENT_TYPE"] = ""
         import logging
 
-        from src.domains.runtime.engine.os_adapter import bun_cache_dir, bun_cache_fallback_dir
+        from src.domains.runtime.engine.os_adapter import bun_cache_dir
         cache_dir = bun_cache_dir()
         try:
             os.makedirs(cache_dir, exist_ok=True)

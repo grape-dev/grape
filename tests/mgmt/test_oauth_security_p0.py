@@ -227,8 +227,8 @@ class TestRedirectUriInState:
         mock_cfg = {"name": "Test", "redirect_uri": "https://example.com/cb/test",
                      "auth_url": "https://example.com/auth", "scope": "",
                      "pkce_enabled": False}
-        with patch("src.domains.mgmt.auth.providers.get_provider", return_value=mock_cfg), \
-             patch("src.domains.mgmt.auth.providers._get_client_id", return_value="cid"):
+        with patch("src.domains.runtime.vcs.providers.get_provider", return_value=mock_cfg), \
+             patch("src.domains.runtime.vcs.providers._get_client_id", return_value="cid"):
             state = hashlib.sha256(os.urandom(32)).hexdigest()
             build_auth_url("test", state, "https://example.com/cb/test")
         data = user_db.validate_oauth_state(state)

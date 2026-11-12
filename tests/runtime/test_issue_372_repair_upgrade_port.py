@@ -350,4 +350,4 @@ def test_update_repo_bot_token_clears_host_user_id():
     assert row[0] == 0, f"升级后 host_user_id 应为 0，实际: {row[0]}"
     assert row[1] == "BOT_TOKEN", f"bot_gitcode_token 应为 BOT_TOKEN，实际: {row[1]}"
 
-from src.api.event_pipeline import db, db_lock
+from src.domains.runtime.pipeline.event_pipeline import db, db_lock

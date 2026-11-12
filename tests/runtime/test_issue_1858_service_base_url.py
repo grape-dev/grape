@@ -94,7 +94,7 @@ class TestResolveTaskServerEnv:
         assert "vcs" in json.loads(env["GRAPE_BASE_URL_SOURCES"])
 
     def test_build_task_env_carries_three_bases(self):
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         with _patch_bases(), \
              patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""), \

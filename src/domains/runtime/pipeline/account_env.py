@@ -33,7 +33,7 @@ def task_creator_account(user_id) -> str:
     if not uid:
         return ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT username FROM user_accounts WHERE id=?", (uid,))

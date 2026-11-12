@@ -76,7 +76,7 @@
 | 变量名 | 示例 | 说明 |
 |---|---|---|
 | `title` | `📁 选择仓库` | 卡片标题 |
-| `body_md` | `**共 3 个仓库**\n1. XOcto/deepseek-harness` | 列表正文（markdown，引擎已做硬断行） |
+| `body_md` | `**共 3 个仓库**\n1. example-org/deepseek-harness` | 列表正文（markdown，引擎已做硬断行） |
 | `page_text` | `第 1/1 页` | 页码行 |
 | `hint` | `点按钮选择 · 或直接回复数字` | 底部提示 |
 
@@ -97,7 +97,7 @@
 | 变量名 | 示例 |
 |---|---|
 | `title` | `✅ 绑定成功` |
-| `body_md` | `**✅ 已绑定 `XOcto/deepseek-harness`**` |
+| `body_md` | `**✅ 已绑定 `example-org/deepseek-harness`**` |
 | `tone` | `success` / `danger` / `neutral`（模板内 3 个样式分支，或做成图片/色条变量） |
 
 交互组件：`选择会话`（`{"action":"chat_list"}`）、`继续提问`（`{"action":"dismiss"}`）。

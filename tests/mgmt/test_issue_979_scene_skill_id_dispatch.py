@@ -20,7 +20,7 @@ import pytest
 
 from src.domains.mgmt.user import db as udb
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 from src.api import event_pipeline
 

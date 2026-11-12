@@ -218,7 +218,7 @@ class TestFourEntryConsistency:
         from src.domains.mgmt.routes.scenes import (
             _validate_scene_skill_scope, audit_scene_skill_scope,
             get_scene_detail)
-        from src.api.event_pipeline import _evaluate_skill_scope
+        from src.domains.runtime.pipeline.event_pipeline import _evaluate_skill_scope
         from src.api import scene_precheck
 
         repo, scene_id, s_user, s_repo, nodes = self._setup()
@@ -329,7 +329,7 @@ class TestA2A400StructuredFields:
     """R3：a2a 派发失败 400 结构化字段。"""
 
     def test_fail_event_result_carries_scope_fields(self):
-        from src.api.event_pipeline import _fail_skill_resolve_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_skill_resolve_event
         from src.api.scene_skill_scope import evaluate
         repo = _repo_key()
         s = f"usk1758_{_unique()}"

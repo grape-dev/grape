@@ -286,7 +286,7 @@ class TestBuildRetryEnvBotUsername:
     def test_t2_17_retry_env_path_b_bot_username_from_host_user(self):
         """T2-17: build_task_env 路径 B 时 BOT_USERNAME 注入 host_user 的 external_login。"""
         import inspect
-        from src.api.event_pipeline import build_task_env, _inject_bot_agent_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env, _inject_bot_agent_env
         source = inspect.getsource(build_task_env)
         # 验证 build_task_env 中包含 host_user_id fallback 逻辑
         # D90-N5 修正：host fallback 链已收敛——build_task_env → _inject_bot_agent_env
@@ -301,7 +301,7 @@ class TestBuildRetryEnvBotUsername:
     def test_t2_18_retry_env_path_a_uses_global_bot_username(self):
         """T2-18: build_task_env 路径 A 时 BOT_USERNAME 注入全局 bot username（回归保护）。"""
         import inspect
-        from src.api.event_pipeline import build_task_env, _inject_bot_agent_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env, _inject_bot_agent_env
         source = inspect.getsource(build_task_env)
         # 验证全局 bot username 逻辑仍在
         # D90-N5 修正：全局 bot username 在 _inject_bot_agent_env 链内（同上）

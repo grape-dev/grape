@@ -58,8 +58,21 @@ def _db_conn():
 
 
 def _engine():
-    from src.api.main import im_engine
-    return im_engine
+    """当前 IM 引擎实例。
+
+    arch 四进程里引擎挂在 mgmt 入口（grape_server）的模块全局 / app.state；
+    单进程入口（main.py）保留同名全局变量。用 sys.modules 惰性取，避免为了读一个
+    变量而 import 入口模块（会触发 app 构建等副作用）。
+    """
+    import sys as _sys
+    for _mn in ("src.api.grape_server", "src.api.main"):
+        _m = _sys.modules.get(_mn)
+        if _m is not None:
+            _ie = getattr(_m, "im_engine", None)
+            if _ie is not None:
+                return _ie
+    from src.api import main as _main_mod
+    return getattr(_main_mod, "im_engine", None)
 
 
 def _masked_config(raw: str) -> dict:

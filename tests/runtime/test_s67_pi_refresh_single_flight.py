@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db"))
 
-from src.api.event_pipeline import (
+from src.domains.runtime.pipeline.event_pipeline import (
     _spawn_project_info_refresh,
     _PI_REFRESH_GATE,
 )
@@ -57,7 +57,7 @@ class TestPiRefreshSingleFlight:
 
     def test_s67_concurrency_cap(self):
         """全局并发上限：超过 _PI_REFRESH_MAX_CONCURRENT 的派发被跳过。"""
-        from src.api.event_pipeline import _PI_REFRESH_MAX_CONCURRENT
+        from src.domains.runtime.pipeline.event_pipeline import _PI_REFRESH_MAX_CONCURRENT
         started = threading.Semaphore(0)
         release = threading.Event()
         entries = {"n": 0}

@@ -1911,7 +1911,7 @@ def _scene_copy_source_meta(scene_id: str, repo_key: str):
     ``advanced_options`` 非法 JSON / 非对象时按空配置处理，并以 parse_error=True
     计入复制响应明细（Spec 风险表要求）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -2305,7 +2305,11 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
     return {"message": "场景已删除"}
 
 def _collect_scene_skill_scope_violations(nodes: list, repo_key: str,
-                                          expected_scope: str = "repo") -> list:
+                                          expected_scope: str = "repo",
+                                          username: str | None = None,
+                                          user_id: str | int = "",
+                                          allow_own_user: bool = False,
+                                          cache: dict | None = None) -> list:
     """收集场景节点技能 scope 冲突（Issue #657 / #1564 / #1758），不抛异常、一次返回全部冲突。
 
     Issue #1758：判定收敛为单一判官 ``scene_skill_scope.evaluate``，四个入口

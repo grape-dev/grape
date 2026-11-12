@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 _HANDLER_FILES = [
-    "src/im/handler_async.py",
-    "src/im/vod_handler_async.py",
+    "src/domains/runtime/im/handler_async.py",
+    "src/domains/runtime/im/vod_handler_async.py",
 ]
 
 # 发送直连模式（Spec 口径：api.reply_* / send_text_to_user / add_reaction 等）
@@ -58,12 +58,12 @@ def test_repo_card_distinguishes_empty_and_failed():
 
     # 无仓库 → "empty"
     with patch.object(H, "get_managed_repos", create=True, return_value=[]):
-        with patch("src.user.db.get_managed_repos", return_value=[]):
+        with patch("src.domains.mgmt.user.db.get_managed_repos", return_value=[]):
             assert asyncio.run(H._send_repo_card(None, _Egress(True), "cid", "mid", 1, "app")) == "empty"
 
     # 有仓库但发送失败 → "failed"（不得退化成 empty）
     repos = [{"repo_key": "gitcode:o/r", "is_admin": 1, "is_join": 0}]
-    with patch("src.user.db.get_managed_repos", return_value=repos), \
+    with patch("src.domains.mgmt.user.db.get_managed_repos", return_value=repos), \
          patch.object(H, "_current_bound_repo", return_value=""):
         assert asyncio.run(H._send_repo_card(None, _Egress(False), "cid", "mid", 1, "app")) == "failed"
         assert asyncio.run(H._send_repo_card(None, _Egress(True), "cid", "mid", 1, "app")) == "sent"

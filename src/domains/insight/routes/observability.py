@@ -562,7 +562,8 @@ def obs_slo_detail(slo_id: int, repo: str = "", user: dict = Depends(require_org
 def _obs_token_engine_ids(user: dict, repo: str = "") -> list:
     """调用者可见的引擎 id 列表（设备维度可见性），拿不到就返回空（不降级）。"""
     try:
-        from src.domains.insight.observability.overview import visible_repo_keys, visible_runtime_dim_keys
+        from src.domains.insight.observability.overview import visible_repo_keys
+        from src.domains.insight.observability.alerts import visible_runtime_dim_keys
         keys = sorted(visible_repo_keys(user or {}))
         dims = visible_runtime_dim_keys(user or {}, keys)
         return [int(str(d).split(":", 1)[1]) for d in dims if str(d).startswith("runtime:")]

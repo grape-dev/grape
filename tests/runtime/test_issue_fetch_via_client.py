@@ -69,7 +69,7 @@ def _mock_issue_api(monkeypatch, resp_data):
 
 def test_s28_gitee_issue_fetch_via_client(gitee_card, monkeypatch):
     """gitee：_vcs_get_issue 命中卡 api_base + query_token（统一命令层）。"""
-    from src.api.event_pipeline import _vcs_get_issue
+    from src.domains.runtime.pipeline.event_pipeline import _vcs_get_issue
     seen = _mock_issue_api(monkeypatch, {"number": 5, "title": "T5", "state": "open"})
     with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="TK"):
         state, d = _vcs_get_issue("gitee:o/r", "5")
@@ -79,7 +79,7 @@ def test_s28_gitee_issue_fetch_via_client(gitee_card, monkeypatch):
 
 def test_s28_github_regression(monkeypatch):
     """github 回归：token 走 get_github_token，endpoint 原样。"""
-    from src.api.event_pipeline import _vcs_get_issue
+    from src.domains.runtime.pipeline.event_pipeline import _vcs_get_issue
     seen = _mock_issue_api(monkeypatch, {"number": 3, "title": "GH"})
     with patch("src.domains.mgmt.user.db.get_github_token", return_value="GHTK"):
         state, d = _vcs_get_issue("github:o/r", "3")
@@ -89,7 +89,7 @@ def test_s28_github_regression(monkeypatch):
 
 
 def test_s28_missing_and_unknown(monkeypatch):
-    from src.api.event_pipeline import _vcs_get_issue, _fetch_issue_title_via_api
+    from src.domains.runtime.pipeline.event_pipeline import _vcs_get_issue, _fetch_issue_title_via_api
     import urllib.error
     # 404 → missing（映射保持）
     _mock_issue_api(monkeypatch, urllib.error.HTTPError(
@@ -103,7 +103,7 @@ def test_s28_missing_and_unknown(monkeypatch):
 
 
 def test_s28_title_fetch_gitee(gitee_card, monkeypatch):
-    from src.api.event_pipeline import _fetch_issue_title_via_api
+    from src.domains.runtime.pipeline.event_pipeline import _fetch_issue_title_via_api
     _mock_issue_api(monkeypatch, {"number": 7, "title": "Gitee T7"})
     with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="TK"):
         assert _fetch_issue_title_via_api("gitee:o/r", "7") == "Gitee T7"

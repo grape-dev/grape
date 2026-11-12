@@ -65,7 +65,7 @@ class TestOAuthLogin:
 
     def test_success_builds_authorize_url(self, monkeypatch):
         # 需求 11：redirect_uri 从 provider 配置读取
-        import src.domains.mgmt.auth.providers as _prov
+        import src.domains.runtime.vcs.providers as _prov
         _orig_get_provider = _prov.get_provider
         def _mock_get_provider(name):
             cfg = _orig_get_provider(name)

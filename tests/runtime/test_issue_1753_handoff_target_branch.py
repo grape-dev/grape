@@ -21,7 +21,7 @@ for _k in ("DEVOPS_DB_HOST", "DEVOPS_DB_USER", "DEVOPS_DB_PASSWORD", "DEVOPS_DB_
 import pytest
 
 from src.api.db_setup import init_database
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
 from src.api.session_store import (
     TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH,

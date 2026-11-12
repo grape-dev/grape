@@ -89,7 +89,7 @@ def _mock_db(monkeypatch):
     # 在飞 DB 语句 × close 并发 = sqlite UAF 段错误实测现场）
     # （weekly-08 graft：weekly-10 版测试文件为底，保留我们的排空钩）
     try:
-        from src.api.event_pipeline import wait_pi_refresh_drain
+        from src.domains.runtime.pipeline.event_pipeline import wait_pi_refresh_drain
         wait_pi_refresh_drain(timeout=35.0)
     except Exception:
         pass

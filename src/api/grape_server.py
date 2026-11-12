@@ -117,13 +117,10 @@ async def lifespan(app: FastAPI):
     bot_manager = _mgmt_h.get("bot_manager")
     log.info("Grape Mgmt Server lifespan started")
 
-    yield
-
-    if _gsb is not None:
-        await _gsb.shutdown()
-    await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
-    log.info("Grape Mgmt Server lifespan stopped")
-
+    # 2026-11-12 结构修复：此处原本残留了一次 yield + 关闭段（合并时把 weekly 的
+    # "先 yield 再起 IM" 段落拼了进来），导致后面的启动段（IM 引擎、engine probe、
+    # 巡检/知识库/技能同步/反馈/清理/冷静期调度、D32 迁移、OpenAPI 契约落盘）
+    # 全部在**关机**时才执行。改为：启动段全部前置 → 单次 yield → 统一关闭。
     # 对外基址未配置告警（与 main.py 同款）
     try:
         from src.domains.mgmt.user.db import get_server_base_url_warning
@@ -410,6 +407,17 @@ async def lifespan(app: FastAPI):
         await stop_feedback_reconcile_scheduler()
     except Exception:
         pass
+    # GSB 注销 + 定时任务收口（原先被误放在第一次 yield 之后，现归还 shutdown 段）
+    if _gsb is not None:
+        try:
+            await _gsb.shutdown()
+        except Exception as _gsd:
+            log.warning(f"GSB shutdown failed: {_gsd}")
+    try:
+        await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
+    except Exception as _sm:
+        log.warning(f"stop_mgmt_tasks failed: {_sm}")
+    log.info("Grape Mgmt Server lifespan stopped")
     log.info("A process (server) stopped")
 
 

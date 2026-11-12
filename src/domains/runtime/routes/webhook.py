@@ -164,7 +164,7 @@ def _duplicate_a2a_original_refs(repo_key: str, existing_seq: int) -> dict:
     if not existing_seq:
         return _out
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT seq, agent_type, status, created_at, title FROM events WHERE seq=?",
@@ -1378,7 +1378,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             summary=f"A2A: → {agent_name} (queued: downstream_running)")
                         if _dq_qseq > 0:
                             try:
-                                from src.api.event_pipeline import reconcile_queued_a2a
+                                from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                                 reconcile_queued_a2a(repo_key)
                             except Exception as _dqr:
                                 log.warning(f"A2A: downstream queue reconcile failed: {_dqr}")
@@ -1517,7 +1517,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         skill_name = _pipe_skill
                         # Issue #657/#1758: 统一 scope 判官，显式 skill_id 同样校验；
                         # 不匹配 → skill_resolve_failed 事件 + 400 结构化字段。
-                        from src.api.event_pipeline import (
+                        from src.domains.runtime.pipeline.event_pipeline import (
                             _fail_skill_resolve_event, resolve_scene_node_skill_id)
                         from src.api.scene_skill_scope import evaluate as _eval_scope
                         _node_sid = 0
@@ -2121,7 +2121,7 @@ async def pipeline_handoff_endpoint(request: Request, body: A2AHandoffBody,
         })
     return await a2a_endpoint(request, body, user)
 
-from src.api.event_pipeline import run_pipeline, resolve_actor_account
+from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
 
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
 

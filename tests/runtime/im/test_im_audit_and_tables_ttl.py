@@ -1,6 +1,6 @@
 """A2 MR 评审整改回归：IM 安装变更审计（C3） + IM 只增表 TTL 清理（A7/F4）。
 
-审计断言不依赖真实 DB 落库：把 src.auth.audit.log_audit 替换成记录器，
+审计断言不依赖真实 DB 落库：把 src.domains.mgmt.auth.audit.log_audit 替换成记录器，
 验证「启停 / 卡片配置 / 凭证保存解绑」这几条写路径确实产生审计事件，
 且 detail 里绝不出现 secret 明文。
 """
@@ -35,7 +35,7 @@ def client():
 @pytest.fixture()
 def audit_recorder(monkeypatch):
     """捕获 log_audit 调用（事件类型 + detail），不落真实审计表。"""
-    import src.auth.audit as audit
+    import src.domains.mgmt.auth.audit as audit
     calls = []
 
     def _fake(event_type, user_id=0, operator_id=0, ip="", detail=None):
@@ -79,7 +79,7 @@ def _drop(app_id):
 
 
 def test_event_type_registered():
-    import src.auth.audit as audit
+    import src.domains.mgmt.auth.audit as audit
     assert "im_installation_change" in audit.EVENT_TYPES
 
 
@@ -164,7 +164,7 @@ def test_sweep_im_tables_purges_old_rows():
 
 def test_wechat_qr_bind_writes_audit(audit_recorder):
     """C-2：微信 ilink 扫码绑定写凭证也必须落审计（detail 不含 bot_token）。"""
-    from src.api.routes.chat import _persist_wechat_login
+    from src.domains.runtime.routes.chat import _persist_wechat_login
     ok = _persist_wechat_login({"id": UID}, {"bot_token": "tok_secret_abc",
                                              "ilink_bot_id": "wx_bot_" + uuid.uuid4().hex[:6],
                                              "ilink_user_id": "u1"})

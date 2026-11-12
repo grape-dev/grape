@@ -2581,7 +2581,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 审查 P0-1 修正：run_pipeline 调用移回 if/else 之外（两平台共用）——
             # 原版本误缩进进 else（GitCode）分支，GitHub 建单后不再同步触发流水线。
             _pipe_payload["_grape_internal_trigger"] = True
-            from src.api.event_pipeline import run_pipeline
+            from src.domains.runtime.pipeline.event_pipeline import run_pipeline
             # 扫雷⑩ S3：create_task_via_issue 是 async 处理器，run_pipeline 同步
             # 全量执行会阻塞事件循环（建单卡顿最重处）——to_thread 卸载到线程池，
             # 语义保持同步等待完成（结果仍写入日志/返回链路）。

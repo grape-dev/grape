@@ -111,7 +111,7 @@ def test_s51_repo_user_id_identity_first():
 
 def test_s51_resolve_pr_issue_id_card_driven():
     """PR 详情 API 兜底走 create_client.get_pr（卡驱动），按响应解析 issue。"""
-    from src.api.event_pipeline import resolve_pr_issue_id
+    from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
 
     class _C:
         def __init__(self, rk, tok):
@@ -133,7 +133,7 @@ def test_s51_resolve_pr_issue_id_card_driven():
 
 def test_s51_resolve_pr_issue_id_error_response_short_circuits():
     """get_pr 返回 error dict → 兜底链安全终止（返回 ''）。"""
-    from src.api.event_pipeline import resolve_pr_issue_id
+    from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
 
     class _C:
         def __init__(self, rk, tok):

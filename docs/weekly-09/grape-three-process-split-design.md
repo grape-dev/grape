@@ -677,7 +677,7 @@ async def sweep_events_loop():
             cleaned = 0
             cleaned += sweep_stuck_events_once()
             try:
-                from src.im.bot_lease import purge_stale_instances
+                from src.domains.runtime.im.bot_lease import purge_stale_instances
                 cleaned += purge_stale_instances(older_than_hours=24)
             except Exception:
                 pass

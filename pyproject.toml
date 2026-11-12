@@ -37,6 +37,7 @@ dependencies = [
     # --- CLI ---
     "click>=8.0",
     # --- Infrastructure ---
+    "sqlalchemy>=2.0",
     "paramiko>=3.0",
     "prometheus_client>=0.20",
     "psutil>=5.9",

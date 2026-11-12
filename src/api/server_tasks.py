@@ -168,6 +168,17 @@ async def start_mgmt_tasks(app) -> dict:
             lease_store = BotLeaseStore(instance_id=instance_id)
             log.info(f"IM WS: lease enabled, instance_id={instance_id}")
 
+        # weekly-11 起 legacy BotManager 已退役：引擎模式 on 时由 mgmt 侧 engine_wiring
+        # 统一启动新引擎，本进程不再装配 legacy WS（否则每次启动刷 BotManager ImportError 告警）。
+        try:
+            from src.domains.runtime.im import engine_wiring as _ew
+            _engine_on = (_ew.engine_mode() == "on")
+        except Exception:
+            _engine_on = False
+        if _engine_on:
+            log.info("IM WS: legacy BotManager retired (engine mode=on), skip")
+            bot_manager = None
+            raise _LegacyIMRetired()
         bot_manager = BotManager(max_concurrent_per_bot=10, lease_store=lease_store)
         await bot_manager.start()
 
@@ -182,6 +193,8 @@ async def start_mgmt_tasks(app) -> dict:
 
         hc = bot_manager.health_check()
         log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
+    except _LegacyIMRetired:
+        bot_manager = None
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
         bot_manager = None
@@ -405,6 +418,10 @@ async def stop_mgmt_tasks(app, h: dict) -> None:
 # ===========================================================================
 # Event 进程（grape_event_server :38081）
 # ===========================================================================
+
+class _LegacyIMRetired(Exception):
+    """legacy IM 装配已退役（引擎模式 on），非错误。"""
+
 
 async def start_event_tasks(app, include_sweep_events: bool = True) -> dict:
     """Event 进程定时任务（设计 §5.2）。返回关闭句柄字典。

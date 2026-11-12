@@ -431,7 +431,7 @@ def test_dingtalk_card_mode_decision(monkeypatch, tmp_path):
 
 
 def test_card_setup_view():
-    from src.api.routes.im import _card_setup_view
+    from src.domains.runtime.routes.im import _card_setup_view
     v = _card_setup_view("inst_1", {"dingtalk_cards": {"card": "tpl"}, "cards_enabled": True})
     assert v["mode"] == "interactive" and v["configured"] and v["enabled"]
     v = _card_setup_view("inst_1", {"dingtalk_cards": {"card": "tpl"}})

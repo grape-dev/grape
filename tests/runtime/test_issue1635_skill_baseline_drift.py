@@ -346,7 +346,7 @@ def test_direct_materialize_call_point_passes_lazy_source(tmp_path, monkeypatch)
     })
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: os.path.join(official, "SKILL.md"))
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "issue",
                                 "demo-skill", evt, "",

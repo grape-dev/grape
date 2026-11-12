@@ -85,7 +85,7 @@ def test_1564_violation_projection_shape():
 # ============================== #1579 ==============================
 def test_1579_note_hook_pr_number_sources():
     """PR 号来源链：payload 结构化字段 > URL 兜底；Note Hook 的 iid(评论 id) 不得当 PR 号。"""
-    from src.api.event_pipeline import _extract_pr_number
+    from src.domains.runtime.pipeline.event_pipeline import _extract_pr_number
     # 1) payload 的 merge_request.iid 命中
     num, src = _extract_pr_number({}, {"merge_request": {"iid": 1011}}, "note_hook_pr")
     assert (num, src) == ("1011", "payload")

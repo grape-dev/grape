@@ -130,12 +130,8 @@ WHITELIST: dict[str, dict[str, str]] = {
     # (run `python scripts/check-arch.py` on the base tree to reproduce).
     "src/domains/runtime/agents/aishell_acp.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
     "src/domains/runtime/pipeline/event_pipeline.py": {"R6": {"targets": ["src.outbound_ledger", "src.prompt_builder", "src.repo_key"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/engine/direct_executor.py": {"R6": {"targets": ["src.session_manager"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/routes/webhook.py": {"R6": {"targets": ["src.api.event_pipeline", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/routes/events.py": {"R6": {"targets": ["src.api.event_pipeline"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/routes/issues.py": {"R6": {"targets": ["src.api.event_pipeline"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts"}},
+    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env"], "reason": "legacy shim imports; due Phase 5 contracts"}},
     # R5: known import cycles inherited from the pre-Phase-1 layout.
     # agents <-> engine: M0 compat forwarding layer (src.domains.runtime.agents re-exported
     #   src.domains.runtime.engine backends); importing src.domains.runtime.agents before src.domains.runtime.engine fails
@@ -143,12 +139,38 @@ WHITELIST: dict[str, dict[str, str]] = {
     #   executor/base coupling when _execute_agent moves out.
     # vcs.providers <-> vcs.providers.base: small registration cycle in the
     #   vcs provider plugin loader; harmless (parent init completes first).
-    "CYCLE:src.domains.runtime.agents+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.engine.engine_select+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.opencode+src.domains.runtime.engine.registry+src.domains.runtime.engine.service+src.domains.runtime.agents.aishell_acp+src.domains.runtime.agents.atomcode+src.domains.runtime.agents.hwcloud_acp": {
+    "CYCLE:src.domains.runtime.agents+src.domains.runtime.agents.aishell_acp+src.domains.runtime.agents.atomcode+src.domains.runtime.agents.base+src.domains.runtime.agents.codearts+src.domains.runtime.agents.codex+src.domains.runtime.agents.dsh+src.domains.runtime.agents.executor+src.domains.runtime.agents.hermes+src.domains.runtime.agents.hwcloud+src.domains.runtime.agents.hwcloud_acp+src.domains.runtime.agents.opencode": {
         "R5": "agents<->engine M0 forwarding cycle, due Phase 3 direct_executor cleanup."
+             " 2026-11-12：R5 白名单改为「集合相等」口径（QA M-1），键按当前检出 SCC 精确登记；"
+             "成员变化（新增/合并模块）时必须显式更新本键，否则硬门禁红。"
              " Evidence: red at base 13c6d0979 (reproduce: check-arch on the base tree).",
     },
     "CYCLE:src.domains.runtime.vcs.providers+src.domains.runtime.vcs.providers.base": {
         "R5": "pre-existing vcs provider registration cycle (harmless init order)",
+    },
+    "CYCLE:src.domains.runtime.im.channel+src.domains.runtime.im.channel.capability+src.domains.runtime.im.channel.channel+src.domains.runtime.im.channel.message+src.domains.runtime.im.channel.registry+src.domains.runtime.im.channel.types": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.engine+src.domains.runtime.im.engine.dedup+src.domains.runtime.im.engine.hashring+src.domains.runtime.im.engine.lease+src.domains.runtime.im.engine.metrics+src.domains.runtime.im.engine.replier+src.domains.runtime.im.engine.router+src.domains.runtime.im.engine.session+src.domains.runtime.im.engine.supervisor": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.telegram+src.domains.runtime.im.adapters.telegram.cards+src.domains.runtime.im.adapters.telegram.channel+src.domains.runtime.im.adapters.telegram.inbound+src.domains.runtime.im.adapters.telegram.markdown+src.domains.runtime.im.adapters.telegram.outbound+src.domains.runtime.im.adapters.telegram.resolvers": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.slack+src.domains.runtime.im.adapters.slack.cards+src.domains.runtime.im.adapters.slack.channel+src.domains.runtime.im.adapters.slack.inbound+src.domains.runtime.im.adapters.slack.markdown+src.domains.runtime.im.adapters.slack.outbound+src.domains.runtime.im.adapters.slack.resolvers": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.wecom+src.domains.runtime.im.adapters.wecom.cards+src.domains.runtime.im.adapters.wecom.inbound+src.domains.runtime.im.adapters.wecom.markdown+src.domains.runtime.im.adapters.wecom.outbound": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.feishu+src.domains.runtime.im.adapters.feishu.inbound+src.domains.runtime.im.adapters.feishu.markdown+src.domains.runtime.im.adapters.feishu.outbound": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.dingtalk+src.domains.runtime.im.adapters.dingtalk.inbound+src.domains.runtime.im.adapters.dingtalk.markdown+src.domains.runtime.im.adapters.dingtalk.outbound": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.wechat+src.domains.runtime.im.adapters.wechat.channel+src.domains.runtime.im.adapters.wechat.inbound+src.domains.runtime.im.adapters.wechat.login+src.domains.runtime.im.adapters.wechat.media+src.domains.runtime.im.adapters.wechat.outbound+src.domains.runtime.im.adapters.wechat.protocol+src.domains.runtime.im.adapters.wechat.resolvers": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
     },
 }
 
@@ -375,8 +397,11 @@ def main() -> int:
         if _common_prefix_len(comp) >= 4:
             continue
         key = "CYCLE:" + "+".join(comp)
+        # M-1（2026-11-12 QA 复审）：原为超集匹配（>=），一条大集合白名单可吞掉其内部
+        # 任何新增真环，使 R5 在整域退化为免检。改为集合相等：白名单成员与检出 SCC
+        # 不完全一致即红，成员变化（新增/合并模块）必须显式更新白名单。
         if key not in WHITELIST and not any(
-            k.startswith("CYCLE:") and set(k[6:].split("+")) >= set(comp)
+            k.startswith("CYCLE:") and set(k[6:].split("+")) == set(comp)
             for k in WHITELIST
         ):
             r5.append(comp)

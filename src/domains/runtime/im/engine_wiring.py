@@ -197,6 +197,26 @@ def _connect(db_path: str):
     _SharedConn 代理，close() 为空操作（不能关掉全局单例）。
     """
     if _is_mysql_backend():
+        # 四进程拆分后每个进程绑定各自域库，但 IM 渠道表（installation/binding/
+        # dedup/inbound_message/lease）跨进程共享 → 用 GRAPE_IM_DB_NAME 钉到单一域库
+        # （dev/prod 均 runtime），并配 GRAPE_IM_DB_USER/PASSWORD 换成目标库账号
+        # （域库账号按库授权，跨域访问会 CREATE/DML denied）。
+        global _IM_DB_CONN
+        _im_db = (os.environ.get("GRAPE_IM_DB_NAME") or "").strip()
+        _cur_db = (os.environ.get("DEVOPS_DB_NAME") or "").strip()
+        if _im_db and _im_db != _cur_db:
+            if _IM_DB_CONN is None:
+                from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
+                _cfg = dict(mysql_config())
+                _cfg["database"] = _im_db
+                _u = (os.environ.get("GRAPE_IM_DB_USER") or "").strip()
+                _p = os.environ.get("GRAPE_IM_DB_PASSWORD") or ""
+                if _u:
+                    _cfg["user"] = _u
+                if _p:
+                    _cfg["password"] = _p
+                _IM_DB_CONN = MySQLCompatDB(**_cfg)
+            return _SharedConn(_IM_DB_CONN)
         return _SharedConn(_shared_db())
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA busy_timeout=5000")
@@ -223,6 +243,7 @@ def _reset_backend_cache() -> None:
     """清掉后端探测缓存（仅供测试在切换 DEVOPS_DB_BACKEND 后调用）。"""
     global _MYSQL_BACKEND_CACHE
     _MYSQL_BACKEND_CACHE = None
+_IM_DB_CONN = None  # IM 域库独立连接（GRAPE_IM_DB_NAME 覆盖时）
 
 
 def _shared_db():
@@ -1454,7 +1475,10 @@ class ImEngine:
         async def _send_card(chat_id: str, text: str, msg_id: str = "",
                              title: str = "DevOps Bot", template: str = "blue",
                              raw_card: dict | None = None, target_user: str = "",
-                             kind: str = "") -> str:
+                             kind: str = "", update_multi: bool = False, **_kw) -> str:
+            # update_multi：飞书适配器显式传的"多段更新"开关，legacy 传输闭包内部构建
+            # card config 不需要；接受并忽略，避免 TypeError 打断卡片下发。
+            # **_kw：兜底各渠道新增参数，防适配器/传输签名漂移直接 500。
             ctx, api = engine._ctx_for(inst)
             if api is None:
                 return ""

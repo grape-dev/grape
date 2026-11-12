@@ -647,7 +647,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # RedispatchRuntimeZero 锁：重派必走当前工作区结构），静默沿用会让
         # 重派任务在陈旧目录执行。
         try:
-            from src.api.event_pipeline import get_agent_workdir
+            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
             _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
                                     old.get("issue_id") or "")
         except Exception as _e:
@@ -1774,7 +1774,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
     # Issue #1819：对话执行同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
-    from src.api.event_pipeline import resolve_actor_account
+    from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
     account = resolve_actor_account(evt, repo_key)
 
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
@@ -2167,7 +2167,7 @@ def _execute_conv_task(task_id: str, loop):
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
         # Issue #1819：worker 模式对话同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
-        from src.api.event_pipeline import resolve_actor_account
+        from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
         account = resolve_actor_account(evt, repo_key)
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
@@ -2503,7 +2503,7 @@ def _redispatch_scene_override(evt: dict) -> str:
     _scene = (evt.get("scene_id") or "").strip()
     if not _scene:
         return ""
-    from src.api.event_pipeline import _is_pr_subscription_task
+    from src.domains.runtime.pipeline.event_pipeline import _is_pr_subscription_task
     if _is_pr_subscription_task(
             issue_id=evt.get("issue_id") or "",
             event_type=evt.get("event_type") or "",

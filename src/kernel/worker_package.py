@@ -33,7 +33,7 @@ MANIFEST = [
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
     "src/kernel/",
-    # 历史导入路径 src.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
+    # 历史导入路径 src.domains.runtime.routes.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
     # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/（旧路径

@@ -176,7 +176,7 @@ remote（queue_remote）保持现状**（原因：remote 事件的逐条增量�
 ## 六、测试用例设计
 
 > 风格对齐现有 `tests/test_chat_handler.py`：AsyncMock 驱动 `_process_chat_inner_async`、
-> `patch("src.im.handler_async.xxx")` 隔离 DB/引擎；`tests/test_feishu_async.py` 已有
+> `patch("src.domains.runtime.im.handler_async.xxx")` 隔离 DB/引擎；`tests/test_feishu_async.py` 已有
 > `update_message` HTTP 层（200/非200/无token）覆盖，本表不再重复。
 
 | 编号 | 用例 | 断言 | 覆盖 | 实现 |

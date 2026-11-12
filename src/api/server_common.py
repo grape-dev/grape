@@ -330,7 +330,10 @@ def _attach_request_log(app: FastAPI) -> None:
                     "duration_ms": round(duration),
                 }
                 msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
-                if status >= 500:
+                # 同 middleware.py：RUM 反代未配置时 /faro/collect 固定 503（feature-off，非事故）
+                if redacted_path == "/faro/collect" and status == 503:
+                    _log.debug(msg, extra=extra)
+                elif status >= 500:
                     _log.error(msg, extra=extra)
                 elif status == 401:
                     if path.startswith("/api/runtime/"):

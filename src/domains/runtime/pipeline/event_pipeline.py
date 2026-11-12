@@ -3522,6 +3522,24 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     降级判定按 scene 保守处理）。调用方未显式传时：带 pool_engine_ids 且
     evt 带 scene 上下文 → 'scene'，否则 'auto'。
     """
+    # Issue #657/#1758：派发前统一 scope 门禁（单一判官）。
+    # 所有派发路径（issue / PR 订阅 / fallback / vod / 订阅）都经由本函数入队，
+    # 在此兜底校验；arch 移植版只搬了 _evaluate_skill_scope/_fail_skill_resolve_event
+    # 两个 helper，没有接调用点 → user 档技能会被当成"显式授权"放行（979 用例）。
+    if skill_name:
+        try:
+            _gate_scene = evt.get("scene_id") or evt.get("_scene_id") or ""
+            _ev_gate = _evaluate_skill_scope(
+                skill_name, repo_key, skill_id=int(skill_id or 0),
+                node_tag=agent_type or "", scene_id=_gate_scene)
+            if not _ev_gate["ok"]:
+                return _fail_skill_resolve_event(
+                    repo_key, skill_name, _gate_scene, agent_type or "",
+                    _ev_gate["reason"], issue_id=issue_id or "", seq=seq or 0,
+                    scope_info=_ev_gate)
+        except Exception as _gate_e:
+            log.warning(f"Pipeline: skill scope gate check failed: {_gate_e}")
+
     from src.api.event_archive import init_event_json
     from src.domains.runtime.engine.service import enqueue_task, get_execution_mode
     from src.domains.runtime.engine.instances import runtime_instance_name
@@ -5261,7 +5279,10 @@ def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
                 "skill_scope": _skill_scope, "scene_scope": _scene_scope,
                 "rebind_candidates": _rebind,
                 "reason": reason[:300]})
-        else:
+        if True:
+            # 无论原事件是否已创建，都补一条 skill_resolve_failed 事件：
+            # 一是让"派发被拦"在事件中心可见可筛（原事件只是 failed，看不出原因类型），
+            # 二是 IM/命令层与非流水线派发（seq=0）共用同一观测口径。
             from src.api.event_store import append_event
             from src.domains.runtime.vcs.event_types import SKILL_RESOLVE_FAILED
             _seq = append_event(

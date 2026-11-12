@@ -72,7 +72,7 @@ def _mock_db(monkeypatch):
     # D45/S67：关闭连接前排空后台 pi-refresh 线程（在飞 DB 语句 × close
     # 并发 = sqlite UAF 段错误实测现场，同族 fixture 统一接线）
     try:
-        from src.api.event_pipeline import wait_pi_refresh_drain
+        from src.domains.runtime.pipeline.event_pipeline import wait_pi_refresh_drain
         wait_pi_refresh_drain(timeout=35.0)
     except Exception:
         pass

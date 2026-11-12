@@ -241,10 +241,10 @@ def test_raw_card_flattens_to_text_on_card_less_channel():
                        mode="replier", msg_id_validator=_always_valid)
     card = {"header": {"title": {"tag": "plain_text", "content": "📁 选择仓库"}},
             "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                                                 "content": "1. XOcto/hello-blog-2"}}]}
+                                                 "content": "1. example-org/hello-blog-2"}}]}
     ok = asyncio.run(eg.send_raw_card(_ctx(), "m1", card, chat_id="cid1"))
     assert ok is True
     out = sender.calls[0]
     assert out.text.strip(), "卡片压平后不得为空"
-    assert "XOcto/hello-blog-2" in out.text
+    assert "example-org/hello-blog-2" in out.text
     assert m.degraded == 1

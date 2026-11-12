@@ -153,3 +153,17 @@ configs/oauth-providers.json
 .upgrade-backup/
 .project-info/
 _uid_backup*.json
+
+# 域内运行时状态目录（服务运行期写入，不入库）：
+#   src/domains/runtime/data/im_dingtalk_card_mode  ← 钉钉互动卡片全局开关
+# 根目录 data/ 由上面的 data/* 覆盖；这里覆盖 src/ 下的域内 data/。
+src/**/data/
+
+# 凭据与构建产物（§3-4 承前遗留项一并收口；.env 已在上方，这里覆盖 .env.local/.env.* 变体）
+*.pem
+*.key
+dist/
+build/
+.env*
+!.env.example
+!configs/*.env.example

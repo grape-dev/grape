@@ -87,7 +87,7 @@ def _mock_db(monkeypatch):
     # 与 _conn.close() 并发是 sqlite C 层 UAF（实测段错误，faulthandler
     # 两次现场：teardown 关连接 × pi-refresh _write_to_obs 并发执行）。
     try:
-        from src.api.event_pipeline import wait_pi_refresh_drain
+        from src.domains.runtime.pipeline.event_pipeline import wait_pi_refresh_drain
         if not wait_pi_refresh_drain(timeout=35.0):
             import logging
             logging.getLogger("devops-bot").warning(

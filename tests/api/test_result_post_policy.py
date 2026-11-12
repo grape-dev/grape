@@ -15,7 +15,7 @@ import pathlib
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 
@@ -106,7 +106,7 @@ class TestLooksLikeErrorText:
         "model_not_found",
     ])
     def test_hits(self, text):
-        from src.api.event_pipeline import _looks_like_error_text
+        from src.domains.runtime.pipeline.event_pipeline import _looks_like_error_text
         assert _looks_like_error_text(text) is True
 
     @pytest.mark.parametrize("text", [
@@ -116,7 +116,7 @@ class TestLooksLikeErrorText:
         "",
     ])
     def test_misses(self, text):
-        from src.api.event_pipeline import _looks_like_error_text
+        from src.domains.runtime.pipeline.event_pipeline import _looks_like_error_text
         assert _looks_like_error_text(text) is False
 
 
@@ -133,7 +133,7 @@ class TestPolicyReading:
         ("", "strict"),
     ])
     def test_valid_and_default(self, monkeypatch, value, expected):
-        from src.api.event_pipeline import _result_post_policy
+        from src.domains.runtime.pipeline.event_pipeline import _result_post_policy
         monkeypatch.setenv("GRAPE_RESULT_POST_POLICY", value)
         assert _result_post_policy() == expected
 
@@ -157,7 +157,7 @@ class TestPolicyModes:
     STRUCTURED = json.dumps({"actions": ["fix"], "conclusion": "已修复"})
 
     def _post(self, monkeypatch, captured, text, agent_result, policy, tid):
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         monkeypatch.setenv("GRAPE_RESULT_POST_POLICY", policy)
         import urllib.request
         monkeypatch.setattr(urllib.request, "urlopen", _make_mock_urlopen(captured))
@@ -255,7 +255,7 @@ class TestPolicyModes:
 
 class TestSuppressionLedger:
     def test_idempotent_same_task_same_text(self, monkeypatch):
-        from src.api.event_pipeline import _record_post_suppressed
+        from src.domains.runtime.pipeline.event_pipeline import _record_post_suppressed
         tid = "t_1545_idem"
         _seed_task(tid=tid)
         monkeypatch.setenv("GRAPE_RESULT_POST_POLICY", "strict")

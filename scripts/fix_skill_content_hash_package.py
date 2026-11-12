@@ -74,7 +74,7 @@ def main():
     # ── 2. 清洗 + 重算哈希（能取到 OBS zip 则回写正确 sha256）──
     storage = None
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         storage = get_storage()
     except Exception as e:
         print(f"storage 不可用（跳过哈希重算，仅清洗）: {e}")
@@ -103,7 +103,7 @@ def main():
         print(f"已清洗 {len(polluted)} 行（含哈希重算回写）")
 
     # ── 3. 重建 OBS zip 缓存 index.json ───────────────────
-    from src.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
+    from src.domains.runtime.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
     if not os.path.isfile(ZIP_CACHE_INDEX):
         print("zip 缓存 index.json 不存在，跳过索引重建")
         return

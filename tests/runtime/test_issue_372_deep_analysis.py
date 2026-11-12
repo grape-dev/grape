@@ -586,7 +586,7 @@ class TestGetTaskRepoToken:
         _mock_result.token = "BOT_TOKEN"
         _mock_result.level = "repo_bot"
         with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
-            from src.api.event_pipeline import _get_task_repo_token
+            from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("gitcode:owner/repo")
             assert result == "BOT_TOKEN"
 
@@ -597,7 +597,7 @@ class TestGetTaskRepoToken:
         _mock_result.token = "USER_TOKEN"
         _mock_result.level = "user"
         with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
-            from src.api.event_pipeline import _get_task_repo_token
+            from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("gitcode:owner/repo")
             assert result == ""
 
@@ -607,7 +607,7 @@ class TestGetTaskRepoToken:
         _mock_result.token = "GH_USER_TOKEN"
         _mock_result.level = "user"
         with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
-            from src.api.event_pipeline import _get_task_repo_token
+            from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("github:owner/repo")
             assert result == ""
 

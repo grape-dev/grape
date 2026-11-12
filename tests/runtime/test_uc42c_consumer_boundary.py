@@ -112,7 +112,7 @@ def test_uc42c_4_task_row_plaintext_current_state():
     FR-9 立项修复后本用例翻转为密文断言（写入→加密落库、读取→解密回环，
     N3 同款模式）。两头都是行为锁，翻转不丢语义。
     """
-    from src.api.event_pipeline import _get_task_repo_token
+    from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
     rk = "gitcode:uc42c4/repo"
     # 环境现实：本机 configs/global-bot-token.json 文件 fallback 在场（60s 缓存）
     # → gitcode 路径 A 能解析出全局 bot token（全局兜底属 GlobalBot 合法链）。
@@ -132,7 +132,7 @@ def test_uc42c_4_task_row_plaintext_current_state():
 
 def test_uc42c_4b_path_d_user_token_never_in_task_row():
     """路径 D 隔离锁：用户 OAuth token 永不入 task 行（resolve level=user → 返回空）。"""
-    from src.api.event_pipeline import _get_task_repo_token
+    from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
     from src.domains.mgmt.auth.grape_account_db import (
         create_grape_account, create_external_identity, delete_external_identity)
     from src.domains.mgmt.user.db import add_managed_repo

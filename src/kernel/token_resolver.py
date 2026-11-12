@@ -939,6 +939,20 @@ class UserToken(TokenStrategy):
         """用户重新绑定时 create/update_external_identity 已恢复 status=1，无需额外操作。"""
         pass
 
+def detect_and_mark_expired(repo_key: str) -> str:
+    """模块级便捷入口：按 repo_key 造 provider → TokenResolver 验证并标记过期。
+
+    IM 直连执行（vod/chat handler）401 时需要；实现本是 TokenResolver 的方法，
+    原先按模块函数导入必然 ImportError，这里补薄封装，口径与 service.fail_task R18 一致。
+    """
+    try:
+        _provider = create_provider_from_repo_key(repo_key)
+        return TokenResolver(_provider).detect_and_mark_expired(repo_key) or ""
+    except Exception as e:
+        log.warning(f"detect_and_mark_expired({repo_key}) failed: {e}")
+        return ""
+
+
 class TokenResolver:
     """token 获取统一入口。按优先级链执行策略，第一个返回非空 token 的策略胜出。
 

@@ -1369,7 +1369,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                           (_fb_repo, _fb_num))
                 irow = c.fetchone()
             if not irow:
-                from src.api.event_pipeline import fetch_issue_via_vcs
+                from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
                 _st, _data = fetch_issue_via_vcs(_fb_repo, str(_fb_num))
                 if _st == "exists":
                     from src.api.issues_center import ensure_issue_task
@@ -2372,7 +2372,7 @@ def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
     - "unknown"：VCS 无法核实（token 缺失/网络异常），调用方按降级语义 404
     """
     num = str(number)
-    from src.api.event_pipeline import fetch_issue_via_vcs
+    from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
     for rk in repo_keys:
         try:
             state, data = fetch_issue_via_vcs(rk, num)
@@ -2487,7 +2487,7 @@ def _cancel_issue_agents(c, repo_key: str, issue_id: str) -> int:
             pass
         try:
             if _at_seq:
-                from src.api.event_pipeline import cancel_direct_task
+                from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task
                 cancel_direct_task(_at_seq)
         except Exception:
             pass
