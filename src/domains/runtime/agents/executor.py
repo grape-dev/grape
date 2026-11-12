@@ -642,6 +642,18 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
                 pass
 
 
+def _uid_int(value) -> int:
+    """user_id 归一为 int。
+
+    user_id 在库里是 varchar(36)（如 "3"），经 token / env_extra / task payload 一路下来
+    可能是 str；执行器里有多处 `user_id > 0` 之类的数值比较，str 会直接 TypeError
+    （2026-11-12 chat 全引擎失效事故根因）。任何非法值按 0（匿名）处理。
+    """
+    try:
+        return int(str(value).strip() or 0)
+    except (TypeError, ValueError):
+        return 0
+
 def _assemble_env(env: dict, *, kind: str, label: str = "",
                   bot_token: str = "", user_token: str = "", user_id: int = 0,
                   repo_key: str = "", username: str = "") -> None:
@@ -655,6 +667,8 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
       chat/任务需要的模型凭据，与 VCS 平台 token 无关。
     - 参数 bot_token/user_token 仅用于日志脱敏（_tokens 列表），不再写入 env。
     """
+    user_id = _uid_int(user_id)  # str("3") 归一，防 `user_id > 0` TypeError
+
     # grape CLI PATH 注入（Windows 部署缺口：install-worker.ps1 未像 install-worker.sh:615
     # 把 worker venv bin 注册进 PATH，agent shell 里 `grape` 找不到——2026-11-07 真任务
     # 实证 event 1）。目录存在才前缀注入；机器级 PATH 修复后此注入自然冗余无害。
@@ -829,6 +843,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  max_exec_seconds: int = 600) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
 
+    user_id = _uid_int(user_id)  # 入口归一（chat 传 str 时不再崩）
     **会话失效自动重建**：当 opencode 会话在服务端已不存在（如被清理/误删）时，
     opencode 会以 exit=1 + stderr "Session not found" 快速失败。
     本函数检测到该情况自动降级为「不带 session」重跑一次，用新会话继续，

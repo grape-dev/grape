@@ -3404,6 +3404,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         user_token = ""
         if (task.get("agent_type") or "") == "chat" or (task.get("event_type") or "") == "chat":
             _task_user_id = task.get("user_id") or 0
+            try:
+                _task_user_id = int(str(_task_user_id).strip() or 0)
+            except (TypeError, ValueError):
+                _task_user_id = 0
             if _task_user_id > 0:
                 try:
                     from src.api.deps import get_user_token_for, get_user_token_for_repo
