@@ -42,6 +42,52 @@ def _rows(dbs, agent_type=PROBE_TYPE):
         return c.fetchall()
 
 
+def _meta_seeded_keys(dbs) -> set:
+    """读 meta.seeded_keys（无/空 → 空 set）。"""
+    with dbs.db_lock:
+        c = dbs.db.cursor()
+        c.execute("SELECT value FROM meta WHERE key='seeded_keys'")
+        row = c.fetchone()
+        return set(row[0].split(",")) if row and row[0] else set()
+
+
+def test_seed_syncs_meta_seeded_keys_when_absent(probe_config):
+    """Spec 要求：新轨补种成功后必须同步 meta.seeded_keys（QA 第 1 项缺漏）。"""
+    dbs = probe_config
+    with dbs.db_lock:
+        c = dbs.db.cursor()
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', '')")
+        dbs.db.commit()
+    assert not _rows(dbs), "前置：探针类型应不存在"
+    assert "agent_type" not in _meta_seeded_keys(dbs), "前置：meta.seeded_keys 不含 agent_type"
+
+    dbs._fn_seed_agent_types_from_config()
+
+    assert _rows(dbs), "补种应成功"
+    assert "agent_type" in _meta_seeded_keys(dbs), "补种成功后 meta.seeded_keys 应含 agent_type"
+
+
+def test_seed_preserves_existing_seeded_keys_entries(probe_config):
+    """同步不得改写既有记账：其他 seed key 保留，已含 agent_type 时不重复写。"""
+    dbs = probe_config
+    with dbs.db_lock:
+        c = dbs.db.cursor()
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', 'other_seed')")
+        dbs.db.commit()
+    dbs._fn_seed_agent_types_from_config()
+    seeded = _meta_seeded_keys(dbs)
+    assert "other_seed" in seeded and "agent_type" in seeded, f"应合并记账，实得 {seeded}"
+
+    # 幂等：再跑一次，0 行新增，记账保持不变
+    with dbs.db_lock:
+        c = dbs.db.cursor()
+        c.execute("DELETE FROM agent_type WHERE agent_type=?", (PROBE_TYPE,))
+        dbs.db.commit()
+    dbs._fn_seed_agent_types_from_config()
+    seeded2 = _meta_seeded_keys(dbs)
+    assert seeded2 == seeded, f"无新增行时不得改写记账，实得 {seeded2}"
+
+
 def test_seed_fills_missing_agent_type(probe_config):
     dbs = probe_config
     assert not _rows(dbs), "前置：探针类型应不存在"
