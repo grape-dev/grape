@@ -8,7 +8,7 @@
 重建视图，否则 mgmt/insight 侧读该列会 1054、写新表会 1146。
 
 用法：
-  DEVOPS_DB_HOST=192.168.0.59 DEVOPS_DB_USER=root DEVOPS_DB_PASSWORD=... \
+  DEVOPS_DB_HOST=<db-host> DEVOPS_DB_USER=<user> DEVOPS_DB_PASSWORD=<password> \
     python3 scripts/sync_domain_views.py [--dry-run]
 
 目标映射（owner 恒为 grape_runtime_db）：

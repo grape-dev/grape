@@ -112,7 +112,7 @@
   `tests/arch` 22 passed / 1 failed（silent-except ratchet 基线存量）；`check-arch` PASS；`make lint` import OK；
   新增守卫 `tests/kernel/test_migration_parity_stage1.py` 3 passed。
 - 隔离干跑（`grape_mig_probe4`）：四条迁移各跑两遍全部 OK，效果与上面一致，`_DDL_MANUAL_REVIEW` 无与四条相关的条目。
-- 备份：`/home/grape/db-backups/{grape_mgmt_db,grape_runtime_db,grape_insight_db}-202611121546.sql.gz`。
+- 备份：三库 `mysqldump --single-transaction` 产物留档于 `<backup-dir>/{grape_mgmt_db,grape_runtime_db,grape_insight_db}-<timestamp>.sql.gz`。
 
 ## 阶段二（未实施，保持评估结论）
 
