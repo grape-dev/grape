@@ -60,8 +60,10 @@ def _ports() -> dict[str, int]:
     return out or dict(DEFAULT_PORTS)
 
 
-def _http(url: str, method: str = "GET", timeout: float = 8.0):
+def _http(url: str, method: str = "GET", timeout: float = 8.0, headers: dict | None = None):
     req = urllib.request.Request(url, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.headers.get("allow", "")
@@ -213,7 +215,10 @@ def main() -> int:
     def exists_on(port: int, path: str) -> int:
         key = (port, path)
         if key not in probe_cache:
-            code, _ = _http(f"http://127.0.0.1:{port}{concrete(path)}", "GET")
+            # Range: bytes=0-0 → 存在返回 206/200/401/405，未知路径仍 404；
+            # 避免 /api/runtime/grape-worker.tar.gz 这类大文件把 GET 拖到超时（QA #1272 复核）。
+            code, _ = _http(f"http://127.0.0.1:{port}{concrete(path)}", "GET",
+                            headers={"Range": "bytes=0-0"})
             probe_cache[key] = code
         return probe_cache[key]
 
@@ -223,23 +228,39 @@ def main() -> int:
             problems.append({"kind": "no-rule", "path": path, "why": why})
             continue
         role = port_role.get(target, "?")
-        declared = routes.get(role, {}).get(path, set())
-        if declared:
+        owners = sorted(r for r, rs in routes.items() if path in rs)
+        if owners:
+            if role in owners:
+                continue
+            # 归属不符 → 再用 Range-GET 实测目标进程是否其实持有该路径
+            # （mgmt 有一批 include_in_schema=False 的 GET-only 兜底路由，
+            #  例：/api/runtime/install/package 由 worker 声明、mgmt 亦可服务）。
+            code = exists_on(target, path)
+            if code == -1:
+                problems.append({"kind": "unreachable", "path": path, "nginx_to": target,
+                                 "role": role, "why": why})
+            elif code == 404:
+                problems.append({"kind": "drift", "path": path, "nginx_to": target,
+                                 "role": role, "owners": owners, "why": why})
             continue
+        # 所有进程 schema 未声明（include_in_schema=False 的隐藏路由）→ 实测存在性
         code = exists_on(target, path)
         if code == -1:
             problems.append({"kind": "unreachable", "path": path, "nginx_to": target,
                              "role": role, "why": why})
         elif code == 404:
-            owners = sorted(r for r, rs in routes.items() if path in rs)
-            problems.append({"kind": "drift", "path": path, "nginx_to": target,
-                             "role": role, "owners": owners, "why": why})
+            problems.append({"kind": "drift-hidden", "path": path, "nginx_to": target,
+                             "role": role, "why": why})
 
     public_problems = []
     if args.public:
         base = args.public.rstrip("/")
         for path in all_paths:
-            code, _ = _http(base + concrete(path), "GET", timeout=10)
+            methods = {m for rs in routes.values() if path in rs for m in rs[path]}
+            if methods and "GET" not in methods:
+                continue  # POST/PUT-only：GET 会被 SPA 兜底成 404，不可判，跳过
+            code, _ = _http(base + concrete(path), "GET", timeout=10,
+                            headers={"Range": "bytes=0-0"})
             if code == 404:
                 public_problems.append({"kind": "public-404", "path": path})
 
