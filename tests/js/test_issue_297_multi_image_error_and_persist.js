@@ -70,7 +70,7 @@ function testApiJsSafeErrJson() {
 }
 
 function testChatJsSendErrorRender() {
-  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
+  const js = readFile('src/api/frontend/app/src/views/ChatView.vue');
 
   // 旧模式必须移除：无参 request_failed + 裸 e.message 拼接（{{status}} 未渲染 + 异常串入提示）
   assert.ok(
@@ -87,7 +87,7 @@ function testChatJsSendErrorRender() {
 }
 
 function testChatJsSubmitTimeout() {
-  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
+  const js = readFile('src/api/frontend/app/src/views/ChatView.vue');
   assert.ok(
     /hasMedia\s*\?+\s*120000/.test(js),
     '多图/视频 submit 应传加长超时（120000ms），避免大请求体 30s 误超时'

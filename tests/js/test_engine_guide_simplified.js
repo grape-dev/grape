@@ -7,10 +7,10 @@ const fs = require('fs');
 const path = require('path');
 const ROOT = path.resolve(__dirname, '..', '..');
 
-const appSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/app.js'), 'utf-8');
-const rtSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/runtimes.js'), 'utf-8');
+const appSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/app.js'), 'utf-8');
+const rtSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf-8');
 function loadLocale(lang, mod) {
-  return JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales', lang, mod + '.json'), 'utf-8'));
+  return JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales', lang, mod + '.json'), 'utf-8'));
 }
 function lookup(pack, key) {
   let cur = pack;
@@ -149,7 +149,7 @@ function ok(cond, name) {
 // ── Q12: 返回仓库视图的补位链仍在（重弹不缺触发点）──
 {
   ok(appSrc.includes('setTimeout(function() { _checkEngineBanner(); }, 100)'), 'Q12: 既有补位调用守卫在位');
-  const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/dashboard.js'), 'utf-8');
+  const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue'), 'utf-8');
   ok(dashSrc.includes('app._checkEngineBanner()'), 'Q12b: 仓库工作台渲染时重查（返回 dash 即重弹）');
   // 零托管分支不再弹引擎引导（repos 项目大厅不超前引导接引擎）
   const lrFn = appSrc.slice(appSrc.indexOf('function renderReposFromData'), appSrc.indexOf('function renderRepoSelection'));

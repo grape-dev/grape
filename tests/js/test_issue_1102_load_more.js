@@ -27,10 +27,10 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ISSUES_JS = path.join(ROOT, 'src/api/static/js/pages/issues.js');
-const INDEX_HTML = path.join(ROOT, 'src/api/static/index.html');
-const ZH_TASKS = path.join(ROOT, 'src/api/static/locales/zh/tasks.json');
-const EN_TASKS = path.join(ROOT, 'src/api/static/locales/en/tasks.json');
+const ISSUES_JS = path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue');
+const INDEX_HTML = path.join(ROOT, 'src/api/frontend/legacy/index.html');
+const ZH_TASKS = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/tasks.json');
+const EN_TASKS = path.join(ROOT, 'src/api/frontend/legacy/locales/en/tasks.json');
 
 const DEFAULT_BATCH = 20;
 

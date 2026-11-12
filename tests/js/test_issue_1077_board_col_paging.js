@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const SRC = path.join(__dirname, '..', '..', 'src', 'api', 'static', 'js', 'pages', 'issues.js');
+const SRC = path.resolve(__dirname, '../../src/api/frontend/app/src/views/IssuesView.vue');
 
 function elStub(id) {
   return {

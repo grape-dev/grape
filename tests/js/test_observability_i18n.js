@@ -77,7 +77,7 @@ function makeDom() {
   };
 }
 function loadObs(dom, payloads) {
-  const src = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const state = { api: [] };
   const pick = (u) => {
     for (const [pfx, py] of (payloads || [])) if (String(u).indexOf(pfx) === 0) return Promise.resolve(py);

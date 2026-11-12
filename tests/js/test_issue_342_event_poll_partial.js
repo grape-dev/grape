@@ -21,7 +21,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const EVENTS_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/events.js');
+const EVENTS_JS = path.join(ROOT, 'src/api/frontend/app/src/views/EventView.vue');
 const APP_JS = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 
 // ── 极简 DOM mock ──

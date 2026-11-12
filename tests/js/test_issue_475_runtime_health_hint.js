@@ -19,9 +19,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/runtimes.js'), 'utf8');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/runtimes.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/runtimes.json'), 'utf8'));
+const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
+const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/runtimes.json'), 'utf8'));
+const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/runtimes.json'), 'utf8'));
 
 // ── 与 runtimes.js _healthHelpHint 保持一致的逻辑提取 ──
 function _healthHelpHint(rt) {

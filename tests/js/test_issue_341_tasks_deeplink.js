@@ -23,7 +23,7 @@ const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const ISSUES_SRC = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'js', 'pages', 'issues.js'),
+  path.resolve(__dirname, '../../src/api/frontend/app/src/views/IssuesView.vue'),
   'utf8'
 );
 

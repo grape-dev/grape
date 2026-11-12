@@ -108,7 +108,7 @@ function loadOrganizationsPage(dom, storage) {
   global.window = {};
   global.app = { _accountGoBack: () => {}, nav: () => {}, showToast: () => {} };
 
-  const code = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/organizations.js'), 'utf-8');
+  const code = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/Organizations.vue'), 'utf-8');
   const fn = new Function(code + '\nreturn renderOrganizations;');
   return fn();
 }
@@ -135,7 +135,7 @@ function loadApp(dom, storage, session) {
   global.renderRepoSelection = () => {};
   global.platformIcon = () => '';
 
-  const code = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/app.js'), 'utf-8');
+  const code = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js'), 'utf-8');
   const fn = new Function(code + '\nreturn typeof app !== "undefined" ? app : null;');
   return fn();
 }
@@ -168,14 +168,14 @@ async function runTests() {
 
   // Test 3: zh locale key
   {
-    const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/zh/organizations.json'), 'utf-8'));
+    const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/organizations.json'), 'utf-8'));
     assert.strictEqual(zh.back_to_workspace, '← 返回工作台', 'zh organizations.json should have back_to_workspace');
     console.log('  ✅ Test 3: zh locale back_to_workspace = "← 返回工作台"');
   }
 
   // Test 4: en locale key
   {
-    const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/en/organizations.json'), 'utf-8'));
+    const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/en/organizations.json'), 'utf-8'));
     assert.strictEqual(en.back_to_workspace, '← Back to Workspace', 'en organizations.json should have back_to_workspace');
     console.log('  ✅ Test 4: en locale back_to_workspace = "← Back to Workspace"');
   }

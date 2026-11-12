@@ -16,8 +16,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'static');
-const _js = fs.readFileSync(path.join(_STATIC, 'js', 'pages', 'autopilot.js'), 'utf8');
+const _STATIC = path.resolve(__dirname, '../../src/api/frontend/app/src/views/AutopilotView.vue'), 'utf8');
 const _zh = JSON.parse(fs.readFileSync(path.join(_STATIC, 'locales', 'zh', 'autopilot.json'), 'utf8'));
 const _en = JSON.parse(fs.readFileSync(path.join(_STATIC, 'locales', 'en', 'autopilot.json'), 'utf8'));
 

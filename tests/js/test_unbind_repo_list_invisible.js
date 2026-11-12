@@ -25,13 +25,13 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ACCOUNT_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/account.js'), 'utf8');
+const ACCOUNT_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/AccountView.vue'), 'utf8');
 const APP_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/app.js'), 'utf8');
 const API_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/api.js'), 'utf8');
-const REPOS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/repos.js'), 'utf8');
-const SETTINGS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/settings.js'), 'utf8');
-const ISSUES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js'), 'utf8');
-const FEEDBACK_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/feedback.js'), 'utf8');
+const REPOS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/ReposView.vue'), 'utf8');
+const SETTINGS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/SettingsView.vue'), 'utf8');
+const ISSUES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue'), 'utf8');
+const FEEDBACK_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/FeedbackDialog.vue'), 'utf8');
 
 let passed = 0, failed = 0;
 function test(name, fn) {

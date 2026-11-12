@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/static/js/pages/dashboard.js');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue');
 const SCENES_PY = path.join(ROOT, 'src/api/routes/scenes.py');
 const SCENES_MD = path.join(ROOT, 'help/api/06-scenes.md');
 

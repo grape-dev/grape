@@ -20,9 +20,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/static/js/pages/dashboard.js');
-const ZH_DASH = path.join(ROOT, 'src/api/static/locales/zh/dashboard.json');
-const EN_DASH = path.join(ROOT, 'src/api/static/locales/en/dashboard.json');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue');
+const ZH_DASH = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/dashboard.json');
+const EN_DASH = path.join(ROOT, 'src/api/frontend/legacy/locales/en/dashboard.json');
 
 function readDashboardSrc() { return fs.readFileSync(DASHBOARD_JS, 'utf8'); }
 

@@ -34,8 +34,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const CHAT_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/chat.js');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js');
+const CHAT_JS = path.join(ROOT, 'src/api/frontend/app/src/views/ChatView.vue');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue');
 const APP_JS = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 
 // ── 提取 chat.js 附件保活工具函数（源码切片求值，不依赖浏览器）──

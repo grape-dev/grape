@@ -53,7 +53,7 @@ function makeLocalStorage() {
   };
 }
 
-const reposJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/repos.js');
+const reposJsPath = path.resolve(__dirname, '../../src/api/frontend/app/src/views/ReposView.vue');
 const src = fs.readFileSync(reposJsPath, 'utf8');
 
 function loadReposModule(dom, localStorage, apiMock, sessionStore) {

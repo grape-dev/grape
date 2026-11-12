@@ -21,7 +21,7 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const issuesJsPath = path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js');
+const issuesJsPath = path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue');
 const appJsPath = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 const appSrc = fs.readFileSync(appJsPath, 'utf8');

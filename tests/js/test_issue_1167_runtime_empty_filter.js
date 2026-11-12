@@ -20,9 +20,9 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/runtimes.js'), 'utf8');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/runtimes.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/runtimes.json'), 'utf8'));
+const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
+const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/runtimes.json'), 'utf8'));
+const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/runtimes.json'), 'utf8'));
 
 function makeT(locale) {
   return function (key) {

@@ -110,7 +110,7 @@ assert.strictEqual(addRecRuleRow(st), true, 'add-rule allowed after options read
 console.log('  PASS: 规则行添加在选项就绪前被拦截、就绪后放行');
 
 // 6. dashboard.js 源码守卫存在性
-const src = fs.readFileSync(path.join(__dirname, '../../src/api/static/js/pages/dashboard.js'), 'utf8');
+const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/DashboardView.vue'), 'utf8');
 assert.ok(/id="recAddRuleBtn"[^>]*disabled/.test(src), 'add-rule button starts disabled in source');
 assert.ok(/id="recSaveBtn"[^>]*disabled/.test(src), 'save button starts disabled in source');
 assert.ok(src.indexOf('sceneListLoaded') >= 0, 'sceneListLoaded flag present');

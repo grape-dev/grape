@@ -39,8 +39,8 @@ function expect(actual) {
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
-const ISSUES_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js');
-const PIPELINE_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/pipeline.js');
+const ISSUES_JS = path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue');
+const PIPELINE_JS = path.join(ROOT, 'src/api/frontend/app/src/views/Pipeline.vue');
 const ZH_ISSUES = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/issues.json');
 const EN_ISSUES = path.join(ROOT, 'src/api/frontend/legacy/locales/en/issues.json');
 const ZH_PIPE = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/pipeline.json');

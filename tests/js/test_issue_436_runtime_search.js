@@ -56,7 +56,7 @@ function makeDom() {
 
 // 与 tests/js/test_anomaly_page_size.js 相同的 sandbox 加载模式（真实源码 + 状态操作同环境执行）
 function loadObs(dom, extraInit) {
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; }, getLang: () => 'zh' };
   const sandbox = {
     document: dom, window: { _currentView:'', history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
@@ -185,7 +185,7 @@ test('T11 空状态文案使用 no_matching_engine（渲染级）', () => {
   const dom = makeDom();
   const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/observability.json'), 'utf8'));
   // I18N 用真实 zh locale（fake harness 默认桩返回 key 本身，验证不了文案替换）
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const I18N = { t: function(k) { const kk = k.replace(/^observability\./, ''); return (zh[kk] !== undefined) ? zh[kk] : k; } };
   const sandbox = {
     document: dom, window: { history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
@@ -227,7 +227,7 @@ test('T12 i18n 键 zh/en 对齐', () => {
 
 test('T13 同 sandbox 全链路：初始 4 行 → 搜索 → 计数正确（renderOverview 渲染骨架 + _rerenderRuntimeTable）', () => {
   const dom = makeDom();
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; } };
   const sandbox = {
     document: dom, window: { history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
@@ -272,7 +272,7 @@ document.getElementById('obsContent').innerHTML = renderOverview(_obsData.ops, {
 _rtSearch = 'worker-node-03c'; _runtimePage = 0; _rerenderRuntimeTable();__countRows = function(){ return (document.getElementById('obs-runtime-rows').innerHTML.match(/<tr id="rt-/g) || []).length; };
 __cnt = function(){ return document.getElementById('obs-runtime-count').textContent; };
 `;
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; } };
   const sandbox = {
     document: dom, window: { history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },

@@ -55,9 +55,9 @@ function makeDom() {
 function loadObsFns() {
   // Issue #701：统一取值函数 workerDisplayName（worker-name.js）先于页面脚本加载（同 index.html 顺序）
   const helperSrc = fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/static/js/worker-name.js'), 'utf8');
+    path.resolve(__dirname, '../../src/api/frontend/legacy/js/worker-name.js'), 'utf8');
   const src = helperSrc + '\n;\n' + fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
+    path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const I18N = { t: (k, p) => '«' + k + '»' + (p && p.id !== undefined ? ':' + p.id : ''), getLang: () => 'zh' };
   const sandbox = {
     document: makeDom(),

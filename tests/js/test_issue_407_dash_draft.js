@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue');
 const APP_JS = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 
 // ── 提取 dashboard.js 顶部的草稿工具函数（源码切片求值，不依赖浏览器）──

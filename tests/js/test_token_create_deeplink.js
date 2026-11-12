@@ -17,7 +17,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'static');
+const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'frontend', 'legacy');
 const _zh = JSON.parse(fs.readFileSync(path.join(_STATIC, 'locales', 'zh', 'app.json'), 'utf8'));
 const _en = JSON.parse(fs.readFileSync(path.join(_STATIC, 'locales', 'en', 'app.json'), 'utf8'));
 
@@ -73,7 +73,7 @@ for (const lang of ['zh', 'en']) {
 }
 
 // 结构守卫：account.js 实际包含直达 URL 与注入逻辑
-const accSrc = fs.readFileSync(path.join(_STATIC, 'js', 'pages', 'account.js'), 'utf8');
+const accSrc = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AccountView.vue'), 'utf8');
 assert.ok(accSrc.includes('https://github.com/settings/tokens/new?scopes=repo'), 'guard: github deeplink in account.js');
 assert.ok(accSrc.includes('https://gitcode.com/setting/token-classic/create'), 'guard: gitcode deeplink in account.js');
 assert.ok(accSrc.includes("I18N.t('app.account.open_token_page')"), 'guard: button uses i18n');

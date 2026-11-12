@@ -16,9 +16,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const SKILLS_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/skills.js'), 'utf8');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/skills.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/skills.json'), 'utf8'));
+const SKILLS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/SkillsView.vue'), 'utf8');
+const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/skills.json'), 'utf8'));
+const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/skills.json'), 'utf8'));
 
 // ── 与 i18n.js t(key, vars, fallback) 保持一致的语义提取 ──
 // Lookup order: current lang pack → default lang pack → fallback → key itself

@@ -19,7 +19,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const issuesJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/issues.js');
+const issuesJsPath = path.resolve(__dirname, '../../src/api/frontend/app/src/views/IssuesView.vue');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 
 // ── 提取 syncTitleToDesc 函数体 ──
@@ -128,8 +128,8 @@ test('syncTitleToDesc: 标题有首尾空格 → trim 后追加到空描述', ()
 
 // ─── 测试 8：i18n zh/en 含 sync_title_to_desc 键 ───
 test('i18n: zh/en tasks.json 均含 create.sync_title_to_desc 键', () => {
-  const zhPath = path.resolve(__dirname, '../../src/api/static/locales/zh/tasks.json');
-  const enPath = path.resolve(__dirname, '../../src/api/static/locales/en/tasks.json');
+  const zhPath = path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/tasks.json');
+  const enPath = path.resolve(__dirname, '../../src/api/frontend/legacy/locales/en/tasks.json');
   const zh = JSON.parse(fs.readFileSync(zhPath, 'utf8'));
   const en = JSON.parse(fs.readFileSync(enPath, 'utf8'));
   assert.ok(zh.create && zh.create.sync_title_to_desc, 'zh tasks.json 应含 create.sync_title_to_desc');

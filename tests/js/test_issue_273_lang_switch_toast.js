@@ -17,7 +17,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const settingsJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/settings.js');
+const settingsJsPath = path.resolve(__dirname, '../../src/api/frontend/app/src/views/SettingsView.vue');
 const src = fs.readFileSync(settingsJsPath, 'utf8');
 
 // ── 极简 DOM mock（覆盖 settings.js 顶层 + selectLang 用到的 API）──

@@ -102,7 +102,7 @@ def test_zombie_young_grace_env_override():
 
 def test_index_html_js_cache_versions_bumped():
     """C1：dashboard.js / app.js 版本号必须高于打回时的 111 / 213。"""
-    html = open(os.path.join(ROOT, "src/api/static/index.html"), encoding="utf-8").read()
+    html = open(os.path.join(ROOT, "src/api/frontend/legacy/index.html"), encoding="utf-8").read()
     dash_m = re.search(r"pages/dashboard\.js\?v=(\d+)", html)
     app_m = re.search(r"js/app\.js\?v=(\d+)", html)
     assert dash_m and app_m, "index.html 缺少 JS 版本标记"

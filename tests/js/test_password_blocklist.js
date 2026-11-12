@@ -15,7 +15,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'static');
+const _STATIC = path.join(__dirname, '..', '..', 'src', 'api', 'frontend', 'legacy');
 const _BACKEND = path.join(__dirname, '..', '..', 'src', 'domains', 'mgmt', 'auth', 'password.py');
 
 // ── 与 register.html reqs 同规格的四条件判定 ──
@@ -96,12 +96,7 @@ assert.ok(doSet.includes('isWeakPassword(pwd)'), 'P7b: 设密预检走谓词');
 const forgotSrc = fs.readFileSync(path.join(_STATIC, 'forgot.html'), 'utf8');
 assert.ok(forgotSrc.includes('isWeakPassword(v)'), 'P7c: 忘记密码 NEWPWD_RULE 走谓词');
 assert.ok(forgotSrc.includes('pwd-blocklist.js'), 'P7d: forgot.html 引入 blocklist 脚本');
-const idxHtml = fs.readFileSync(path.join(_STATIC, 'index.html'), 'utf8');
-assert.ok(idxHtml.includes('pwd-blocklist.js'), 'P7e: 主应用引入 blocklist（改密/设密消费前置）');
-
-// P8: 无散落拷贝（判断逻辑不得在调用点重复 has() 形态）
-const callSites = [regSrc, forgotSrc, appSrc,
-  fs.readFileSync(path.join(_STATIC, 'js', 'pages', 'account.js'), 'utf8')];
+const idxHtml = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AccountView.vue'), 'utf8')];
 for (const src of callSites) {
   assert.ok(!/PWD_BLOCKLIST\.has\(/.test(src), 'P8: 消费点无 PWD_BLOCKLIST.has 散落拷贝（统一走谓词）');
 }

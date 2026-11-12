@@ -32,14 +32,14 @@ function check(name, fn) {
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
-const AGENTS_JS = read('src/api/static/js/pages/agents.js');
-const AUTOPILOT_JS = read('src/api/static/js/pages/autopilot.js');
-const DASHBOARD_JS = read('src/api/static/js/pages/dashboard.js');
-const ZH = JSON.parse(read('src/api/static/locales/zh/common.json'));
+const AGENTS_JS = read('src/api/frontend/app/src/views/AgentView.vue');
+const AUTOPILOT_JS = read('src/api/frontend/app/src/views/AutopilotView.vue');
+const DASHBOARD_JS = read('src/api/frontend/app/src/views/DashboardView.vue');
+const ZH = JSON.parse(read('src/api/frontend/legacy/locales/zh/common.json'));
 
 // ── agents.js 沙箱真实执行 ──
 function loadAgentsLoadCfgOptions() {
-  const helperSrc = read('src/api/static/js/worker-name.js');
+  const helperSrc = read('src/api/frontend/legacy/js/worker-name.js');
   // 阶段 A：helper 落在真实 globalThis，页面裸引用可解析
   new Function('I18N', helperSrc)({ t: (k) => '«' + k + '»' });
   const panel = { innerHTML: '', dataset: {}, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], classList: { add() {}, remove() {}, toggle() {} } };
@@ -116,7 +116,7 @@ check('dashboard.js 引擎条目：显示「引擎名（凭据名）」，副行
 // ── 镜像断言：统一渲染片段（与各文件 _renderEngineList 一致） ──
 check('统一渲染片段：alias 优先，括号显「引擎名（凭据名）」', () => {
   const rt = { name: 'opencode', display_name: 'opencode', worker_name: '我的工作机', instance_name: 'opencode-worker-demo-0003', alias: '' };
-  require(path.join(ROOT, 'src/api/static/js/worker-name.js'));
+  require(path.join(ROOT, 'src/api/frontend/legacy/js/worker-name.js'));
   const display = globalThis.engineDisplayName(rt);
   assert.strictEqual(display, 'opencode（我的工作机）');
   assert.strictEqual(globalThis.engineDisplayName(Object.assign({}, rt, { alias: '别名' })), 'opencode（我的工作机）');

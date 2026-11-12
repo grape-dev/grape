@@ -20,11 +20,11 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/dashboard.js'), 'utf8').replace(/\r/g, '');
-const issuesSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/issues.js'), 'utf8').replace(/\r/g, '');
-const indexHtml = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
-const zhJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/dashboard.json'), 'utf8'));
-const enJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/dashboard.json'), 'utf8'));
+const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue'), 'utf8').replace(/\r/g, '');
+const issuesSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue'), 'utf8').replace(/\r/g, '');
+const indexHtml = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
+const zhJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/dashboard.json'), 'utf8'));
+const enJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/dashboard.json'), 'utf8'));
 
 let passed = 0, failed = 0;
 function test(name, fn) {

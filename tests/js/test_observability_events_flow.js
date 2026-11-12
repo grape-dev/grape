@@ -30,7 +30,7 @@ function checkAsync(name, fn) {
 const tick = (ms) => new Promise(r => setTimeout(r, ms === undefined ? 25 : ms));
 
 const SRC = fs.readFileSync(
-  path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
 
 // payloads: [[url 前缀, payload|fn(url)], ...]  fn(url) 便于按 before= 返回不同页
 function makeEnv(payloads) {

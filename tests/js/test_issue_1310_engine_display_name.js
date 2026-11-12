@@ -21,7 +21,7 @@ function check(name, fn) {
 
 function loadFns(i18nStub) {
   const src = fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/static/js/worker-name.js'), 'utf8');
+    path.resolve(__dirname, '../../src/api/frontend/legacy/js/worker-name.js'), 'utf8');
   const sandbox = { I18N: i18nStub };
   const keys = Object.keys(sandbox);
   const fn = new Function(...keys, src + '\n; return {workerDisplayName, engineDisplayName};');

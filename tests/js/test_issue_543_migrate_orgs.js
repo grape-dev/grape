@@ -28,7 +28,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const SETTINGS_JS = path.join(ROOT, 'src/api/static/js/pages/settings.js');
+const SETTINGS_JS = path.join(ROOT, 'src/api/frontend/app/src/views/SettingsView.vue');
 
 // ── 极简 DOM mock（只覆盖 _loadMigrateOrgs / _migrateEsc 依赖面）──
 function makeSandbox(opts) {

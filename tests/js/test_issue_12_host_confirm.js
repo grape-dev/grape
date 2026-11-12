@@ -46,7 +46,7 @@ function makeDom() {
 }
 
 // ── 加载 repos.js 源码到 sandbox ──
-const reposJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/repos.js');
+const reposJsPath = path.resolve(__dirname, '../../src/api/frontend/app/src/views/ReposView.vue');
 const src = fs.readFileSync(reposJsPath, 'utf8');
 
 function loadRepos(dom, opts) {

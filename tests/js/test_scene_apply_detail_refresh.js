@@ -18,8 +18,8 @@ const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
 // 归一化 CRLF，避免 \r 干扰子串断言（源文件为 Windows 行尾）
-const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js'), 'utf8').replace(/\r/g, '');
-const marketSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/scene-market.js'), 'utf8').replace(/\r/g, '');
+const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue'), 'utf8').replace(/\r/g, '');
+const marketSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/SceneMarket.vue'), 'utf8').replace(/\r/g, '');
 
 let passed = 0, failed = 0;
 function test(name, fn) {

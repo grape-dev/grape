@@ -16,10 +16,10 @@ function readFile(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
 }
 
-const REPOS_JS = readFile('src/api/frontend/legacy/js/pages/repos.js');
-const TEMPLATES_JS = readFile('src/api/frontend/legacy/js/pages/templates.js');
+const REPOS_JS = readFile('src/api/frontend/app/src/views/ReposView.vue');
+const TEMPLATES_JS = readFile('src/api/frontend/app/src/views/TemplatesView.vue');
 const APP_JS = readFile('src/api/frontend/legacy/js/app.js');
-const ACCOUNT_JS = readFile('src/api/frontend/legacy/js/pages/account.js');
+const ACCOUNT_JS = readFile('src/api/frontend/app/src/views/AccountView.vue');
 const ZH_APP_JSON = readFile('src/api/frontend/legacy/locales/zh/app.json');
 const EN_APP_JSON = readFile('src/api/frontend/legacy/locales/en/app.json');
 

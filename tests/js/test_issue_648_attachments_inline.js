@@ -18,7 +18,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const issuesJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/issues.js');
+const issuesJsPath = path.resolve(__dirname, '../../src/api/frontend/app/src/views/IssuesView.vue');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 
 function extractFn(name) {

@@ -28,10 +28,10 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ISSUES_JS = path.join(ROOT, 'src/api/static/js/pages/issues.js');
-const INDEX_HTML = path.join(ROOT, 'src/api/static/index.html');
-const ZH_ISSUES = path.join(ROOT, 'src/api/static/locales/zh/issues.json');
-const EN_ISSUES = path.join(ROOT, 'src/api/static/locales/en/issues.json');
+const ISSUES_JS = path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue');
+const INDEX_HTML = path.join(ROOT, 'src/api/frontend/legacy/index.html');
+const ZH_ISSUES = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/issues.json');
+const EN_ISSUES = path.join(ROOT, 'src/api/frontend/legacy/locales/en/issues.json');
 
 // ── 极简 DOM mock（只覆盖 _renderPipelineSection 依赖面）──
 function makeSandbox() {

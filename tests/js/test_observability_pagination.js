@@ -59,7 +59,7 @@ function makeDom() {
 }
 
 function loadObs(dom, extraInit) {
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; }, getLang: () => 'zh' };
   const sandbox = {
     document: dom, window: { _currentView:'', history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },

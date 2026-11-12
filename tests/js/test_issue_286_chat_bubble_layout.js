@@ -23,7 +23,7 @@ function readFile(rel) {
 }
 
 function testChatJsUserRight() {
-  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
+  const js = readFile('src/api/frontend/app/src/views/ChatView.vue');
 
   // 历史会话加载（switchConversation 内联模板）
   assert.ok(
@@ -46,7 +46,7 @@ function testChatJsUserRight() {
 }
 
 function testChatJsAgentLeft() {
-  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
+  const js = readFile('src/api/frontend/app/src/views/ChatView.vue');
 
   // renderChatMessages：agent 消息
   assert.ok(

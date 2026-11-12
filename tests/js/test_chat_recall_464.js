@@ -18,12 +18,12 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const CSS = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'static', 'css', 'app.css'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'css', 'app.css'),
   'utf8'
 );
 // Issue #464 QA：apple-theme.css 后加载且默认主题为 apple，必须双文件层叠断言
 const APPLE_CSS = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'static', 'css', 'apple-theme.css'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'css', 'apple-theme.css'),
   'utf8'
 );
 
@@ -115,7 +115,7 @@ test('层叠胜出：[data-theme="apple"] 前缀覆盖规则特异性高于 #233
 });
 
 test('缓存版本：index.html 引用的 app.css ?v= 已 bump（覆盖规则可下发到存量客户端）', () => {
-  const html = fs.readFileSync(path.join(ROOT, 'src', 'api', 'static', 'index.html'), 'utf8');
+  const html = fs.readFileSync(path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'index.html'), 'utf8');
   const m = /app\.css\?v=(\d+)/.exec(html);
   assert.ok(m, 'index.html must reference app.css with ?v= cache buster');
   assert.ok(parseInt(m[1], 10) > 85, `app.css ?v=${m[1]} must be bumped past 85`);

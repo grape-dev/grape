@@ -20,7 +20,7 @@ const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const EVENTS_SRC = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'js', 'pages', 'events.js'),
+  path.resolve(__dirname, '../../src/api/frontend/app/src/views/EventView.vue'),
   'utf8'
 );
 

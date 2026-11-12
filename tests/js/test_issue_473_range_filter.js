@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/runtimes.js'), 'utf8');
+const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/RuntimesView.vue'), 'utf8');
 const SETTINGS_PY = fs.readFileSync(path.join(ROOT, 'src/domains/mgmt/routes/settings.py'), 'utf8');
 
 // 1. 范围状态与选项

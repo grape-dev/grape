@@ -82,7 +82,7 @@ function _pickPayload(extra, url) {
 // extra：额外注入的沙箱全局（如假的 echarts，用于捕获 setOption 的 option）
 function loadObs(dom, extra) {
   const src = fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+    path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   const state = { api: [], intervals: 0 };
   const I18N = { t: (k) => '«' + k + '»', getLang: () => 'zh' };
   const sandbox = {
@@ -741,7 +741,7 @@ check('任务 Tab：入口随渲染出现且只有一处（不再事后 insertBe
     assert.ok(html.includes('openObsAnomalyModal()'), '入口应指向弹窗');
   }
   const src = fs.readFileSync(
-    path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
+    path.resolve(__dirname, '../../src/api/frontend/app/src/views/ObservabilityView.vue'), 'utf8');
   assert.ok(src.indexOf('_obsTaskChipMount') === -1, '旧的 insertBefore 挂载方式应已移除');
 });
 

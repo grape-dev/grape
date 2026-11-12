@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue');
 
 // ── 与 dashboard.js selectAgentSkill 保持一致的纯函数提取 ──
 // Issue #978：缓存结构改为 唯一键 -> {name, display}，选中优先按唯一键（skillKey）命中，

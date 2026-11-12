@@ -166,7 +166,7 @@ function testAppleThemeCss() {
 }
 
 function testLinkifyNoInlineColor() {
-  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
+  const js = readFile('src/api/frontend/app/src/views/ChatView.vue');
 
   // linkifyIssueNumbers 函数体中不应包含内联 color:var(--a)
   const funcMatch = js.match(/function linkifyIssueNumbers[\s\S]*?\n}/);

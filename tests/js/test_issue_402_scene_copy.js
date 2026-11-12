@@ -18,7 +18,7 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js'), 'utf8').replace(/\r/g, '');
+const dashSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/DashboardView.vue'), 'utf8').replace(/\r/g, '');
 const zhJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/dashboard.json'), 'utf8'));
 const enJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/dashboard.json'), 'utf8'));
 

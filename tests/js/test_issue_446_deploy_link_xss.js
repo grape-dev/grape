@@ -22,7 +22,7 @@ function readFile(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
 }
 
-const issuesJs = readFile('src/api/frontend/legacy/js/pages/issues.js');
+const issuesJs = readFile('src/api/frontend/app/src/views/IssuesView.vue');
 
 assert.ok(issuesJs.includes('function _escapeHtml(s)'), 'issues.js 应包含 _escapeHtml 转义函数');
 assert.ok(issuesJs.includes('value="${_escapeHtml(_deployUrl)}"'), 'input value 应使用 _escapeHtml 转义');

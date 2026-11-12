@@ -10,7 +10,7 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const src = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/repos.js'), 'utf8');
+const src = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/ReposView.vue'), 'utf8');
 
 let passed = 0, failed = 0;
 function test(name, fn) {

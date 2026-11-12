@@ -19,11 +19,10 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const API_JS = path.join(ROOT, 'src', 'api', 'static', 'js', 'api.js');
-const SETTINGS_JS = path.join(ROOT, 'src', 'api', 'static', 'js', 'pages', 'settings.js');
-const ACCOUNT_JS = path.join(ROOT, 'src', 'api', 'static', 'js', 'pages', 'account.js');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'api', 'static', 'locales', 'zh', 'app.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'api', 'static', 'locales', 'en', 'app.json'), 'utf8'));
+const API_JS = path.resolve(__dirname, '../../src/api/frontend/app/src/views/SettingsView.vue');
+const ACCOUNT_JS = path.resolve(__dirname, '../../src/api/frontend/app/src/views/AccountView.vue');
+const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'locales', 'zh', 'app.json'), 'utf8'));
+const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'locales', 'en', 'app.json'), 'utf8'));
 
 let passed = 0, failed = 0;
 function report(name, e) {
