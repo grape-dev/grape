@@ -77,7 +77,7 @@ def _get_skill_cached(skill_id: int, cache: dict | None) -> dict | None:
     key = ("id", int(skill_id))
     if cache is not None and key in cache:
         return cache[key]
-    from src.user.db import get_skill_by_id
+    from src.domains.mgmt.user.db import get_skill_by_id
     row = get_skill_by_id(skill_id, raise_on_error=True)
     if cache is not None:
         cache[key] = row
@@ -88,7 +88,7 @@ def _get_scope_info_cached(skill_name: str, repo_key: str, cache: dict | None) -
     key = ("name", skill_name, repo_key or "")
     if cache is not None and key in cache:
         return cache[key]
-    from src.user.db import get_skill_scope_info
+    from src.domains.mgmt.user.db import get_skill_scope_info
     info = get_skill_scope_info(skill_name, repo_key, raise_on_error=True)
     if cache is not None:
         cache[key] = info

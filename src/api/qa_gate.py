@@ -629,9 +629,9 @@ def _post_issue_comment(repo_key: str, issue_number: int, body: str,
         if not _owner or not _repo:
             return "skipped"
         if _provider == "github":
-            from src.user.db import get_github_token as _get_token
+            from src.domains.mgmt.user.db import get_github_token as _get_token
         else:
-            from src.user.db import get_repo_bot_token as _get_token
+            from src.domains.mgmt.user.db import get_repo_bot_token as _get_token
         _token = _get_token(repo_key=repo_key) or ""
         if not _token:
             log.info(f"qa gate: no bot token for {repo_key}, skip annotation")
