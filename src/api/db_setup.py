@@ -5369,7 +5369,10 @@ def _fn_add_agent_runtimes_probe_spawn_fail_count() -> None:
 
 
 register_migration(
-    version="202611120001",
+    # rebase 撞号改号：202611120001 已被 arch-weekly-11 基线迁移
+    # backfill_events_terminal_completed_at_1497 占用，顺延到 0006
+    # （0002-0005 为本线 #2028/#2133 已注册迁移）。
+    version="202611120006",
     name="add-agent-runtimes-probe-spawn-fail-count",
     kind="safe",
     fn=_fn_add_agent_runtimes_probe_spawn_fail_count,
