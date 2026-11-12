@@ -12,7 +12,7 @@ def extract_vars(filepath):
     return defined, referenced
 
 # tokens.css 定义的变量
-tok_defined, _ = extract_vars('src/api/frontend/legacy/css/tokens.css')
+tok_defined, _ = extract_vars('src/api/frontend/app/src/styles/global/tokens.css')
 
 # admin.html 内联 CSS 引用的变量
 # 先提取 <style> 块
