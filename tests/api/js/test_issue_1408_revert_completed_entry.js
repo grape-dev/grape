@@ -8,7 +8,7 @@
  *   2. completed 状态：仓库管理员可撤销他人需求（_isRepoAdmin393 命中）
  *   3. completed 状态：非本人且非管理员 → 不渲染该按钮
  *   4. 非 completed 状态（pending_review/cancelled/processing）一律不渲染
- *   5. 按钮带 tooltip 功能说明（tasks.revert_completed_hint）且使用任务操作区按钮样式
+ *   5. 按钮使用任务操作区按钮样式（hover 过渡）；不再带 title 悬浮 tooltip（二次确认弹窗已承载说明）
  *   6. revertTaskCompleted 存在且 PUT /issues/{id}/status {"status":"pending_review"}
  *   7. 二次确认（_grapeConfirm）+ 成功 toast key + 流水线区刷新链路
  *   8. 旧的 @deprecated changeTaskStatus 死代码已移除
@@ -95,7 +95,7 @@ function renderAs(user, repoCache, task) {
   assert.ok(!html.includes('disabled'), '本人按钮不应置灰');
   assert.ok(html.includes('tasks.revert_completed'), '按钮文案用 tasks.revert_completed');
   assert.ok(html.includes('tsk-btn-revert'), '按钮应复用任务操作区按钮样式（hover 过渡）');
-  assert.ok(html.includes('tasks.revert_completed_hint'), '按钮应带 hover tooltip 功能说明');
+  assert.ok(!html.includes('revert_completed_hint'), '按钮不应再带 title 悬浮 tooltip（说明由二次确认弹窗承载）');
 }
 
 // ── 2: 仓库管理员撤销他人需求 → 渲染可点按钮 ──
@@ -157,7 +157,7 @@ assert.ok(!/function changeTaskStatus\s*\(/.test(src), '@deprecated changeTaskSt
 // ── 9: 双语 locale key 齐备 ──
 const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../src/api/static/locales/zh/tasks.json'), 'utf8'));
 const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../src/api/static/locales/en/tasks.json'), 'utf8'));
-for (const k of ['revert_completed', 'revert_completed_message', 'revert_completed_hint', 'revert_completed_toast']) {
+for (const k of ['revert_completed', 'revert_completed_message', 'revert_completed_toast']) {
   assert.ok(zh[k], 'zh 缺 key: ' + k);
   assert.ok(en[k], 'en 缺 key: ' + k);
 }
@@ -169,6 +169,6 @@ assert.ok(/\.tsk-btn-revert:hover:not\(:disabled\)\{[^}]*background:#fff/.test(c
 assert.ok(/\.tsk-btn-revert\{[^}]*transition:[^}]*\.15s/.test(css), 'hover 过渡应 ≥120ms（实现 150ms）');
 assert.ok(/\.tsk-btn-revert:disabled\{[^}]*cursor:not-allowed/.test(css), '禁用态应 cursor:not-allowed');
 const indexHtml = fs.readFileSync(path.resolve(__dirname, '../../../src/api/static/index.html'), 'utf8');
-assert.ok(/issues\.js\?v=138/.test(indexHtml), 'issues.js 缓存版本应 bump 到 138');
+assert.ok(/issues\.js\?v=139/.test(indexHtml), 'issues.js 缓存版本应 bump 到 139');
 
 console.log('✓ Issue #1408 revert completed entry: all assertions passed');

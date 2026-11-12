@@ -28,7 +28,6 @@
   "resume_task": "Resume Requirement",
   "revert_completed": "Revert completion",
   "revert_completed_message": "Return this completed issue to pending review? Completion info (time/reason) will be cleared, the issue re-enters review and pipeline flow, and the action is audit-logged. The linked VCS issue is NOT reopened.",
-  "revert_completed_hint": "Revert completion - returns this completed issue to pending review: completion info (time/reason) is cleared, the issue re-enters review and pipeline flow, and the action is audit-logged. The linked VCS issue is NOT reopened.",
   "revert_completed_toast": "Issue returned to pending review",
   "confirm_done_message": "SRE deployment is complete. Confirm this requirement as done?",
   "cancel_task_message": "Confirm cancelling this requirement? It can be resumed later.",

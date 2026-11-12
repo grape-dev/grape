@@ -28,7 +28,6 @@
   "resume_task": "恢复需求",
   "revert_completed": "撤销完成",
   "revert_completed_message": "将该已完成需求退回「待审核」？完成信息（完成时间/原因）将被清除，需求重新进入审核与流水线流转；操作会记录审计日志。仓库 Issue 不会被重新打开。",
-  "revert_completed_hint": "撤销完成 — 将该已完成需求退回「待审核」：完成信息（完成时间/原因）将被清除，需求重新进入审核与流水线流转；操作会记录审计日志。仓库 Issue 不会被重新打开。",
   "revert_completed_toast": "需求已退回待审核",
   "confirm_done_message": "SRE 已完成部署，确认此需求已完成？",
   "cancel_task_message": "确认取消此需求？取消后可恢复。",

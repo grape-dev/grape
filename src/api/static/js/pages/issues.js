@@ -1892,7 +1892,7 @@ function _renderTaskActionsInline(t) {
   // Issue #1408: 撤销完成——仅 completed 终态渲染；可见范围 = 需求本人 或 仓库管理员。
   // 非本人且非管理员不渲染；服务端 require_no_session_token + 本人/仓库角色二次鉴权为最终权威。
   if (_status === 'completed' && _canRevertCompleted1408(t)) {
-    html += `<button class="tsk-btn tsk-btn-revert" title="${window.escHtml(I18N.t('tasks.revert_completed_hint'))}" onclick="revertTaskCompleted(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↺ ${I18N.t('tasks.revert_completed')}</button>`;
+    html += `<button class="tsk-btn tsk-btn-revert" onclick="revertTaskCompleted(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↺ ${I18N.t('tasks.revert_completed')}</button>`;
   }
   return html;
 }
