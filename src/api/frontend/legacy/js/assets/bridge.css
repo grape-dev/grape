@@ -21,7 +21,7 @@
   --c-sre: #b89b6a;
   --glass-bg: color-mix(in srgb, var(--c, #fff) 62%, transparent);
   --glass-bg-strong: color-mix(in srgb, var(--c, #fff) 88%, transparent);
-  --glass-blur: 16px;
+  --glass-blur: 10px;
   --glass-border: color-mix(in srgb, var(--b, #d2d2d7) 70%, transparent);
   --r-card: var(--r2, 18px);
   --r-pill: 999px;
@@ -79,8 +79,8 @@
 .obv-wkcard, .obv-kpirow, .eff-card, .ac__themecard, .scn-card, .k-card,
 .ob-bind-card, .ev-result-panel, .tsk-list, .tsk-detail) {
   background: color-mix(in srgb, var(--c) 62%, transparent);
-  -webkit-backdrop-filter: blur(16px);
-  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
     0 10px 30px rgba(0, 0, 0, 0.28);
@@ -91,8 +91,8 @@
 .obv-wkcard, .obv-kpirow, .eff-card, .ac__themecard, .scn-card, .k-card,
 .ob-bind-card, .ev-result-panel, .tsk-list, .tsk-detail) {
     background: color-mix(in srgb, var(--c) 62%, transparent);
-    -webkit-backdrop-filter: blur(16px);
-    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.06),
       0 10px 30px rgba(0, 0, 0, 0.28);

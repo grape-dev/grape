@@ -22,7 +22,7 @@
   /* liquid glass surface */
   --glass-bg: rgba(255, 255, 255, 0.6);
   --glass-bg-strong: rgba(255, 255, 255, 0.78);
-  --glass-blur: 16px;
+  --glass-blur: 10px;
   --glass-border: rgba(255, 255, 255, 0.35);
 
   /* morandi category colors (scene taxonomy — keep parity with legacy) */
@@ -79,7 +79,7 @@
 
   --glass-bg: rgba(44, 44, 46, 0.62);
   --glass-bg-strong: rgba(58, 58, 60, 0.82);
-  --glass-blur: 16px;
+  --glass-blur: 10px;
   --glass-border: rgba(255, 255, 255, 0.08);
 
   --shadow-1: 0 1px 4px rgba(0, 0, 0, 0.3);

@@ -221,8 +221,8 @@
 /* ── 5. Top Bar ── */
 [data-theme="apple"] .tb {
   background: var(--glass-hero);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   border-bottom: 1px solid var(--hairline);
 }
 [data-theme="apple"] .bc b {
@@ -321,8 +321,8 @@
 }
 [data-theme="apple"] .lobby-head {
   background: var(--glass);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   border-bottom: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .lobby-tabs {
@@ -519,8 +519,8 @@
 }
 [data-theme="apple"] .chat-hdr {
   background: var(--glass);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   border-bottom: 1px solid var(--glass-border);
 }
 [data-theme="apple"] .conv-item {
@@ -1675,8 +1675,8 @@
 /* 侧栏比主区更薄，让左侧光斑透出来 */
 :root[data-theme-mode="dark"] .sb {
   background: rgba(26,26,28,.72) !important;
-  -webkit-backdrop-filter: blur(20px);
-  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1740,7 +1740,7 @@
   /* 侧栏比主区更薄，让左侧光斑透出来 */
   :root[data-theme-mode="auto"] .sb {
     background: rgba(26,26,28,.72) !important;
-    -webkit-backdrop-filter: blur(20px);
-    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    backdrop-filter: blur(var(--glass-blur));
   }
 }

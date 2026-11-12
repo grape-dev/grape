@@ -100,7 +100,7 @@
   --glass: rgba(44,44,46,.62);
   --glass-strong: rgba(58,58,60,.82);
   --glass-solid: #2c2c2e;
-  --glass-blur: 16px;
+  --glass-blur: 10px;
   --glass-border: rgba(255,255,255,.10);
   --glass-hero: var(--glass);
   --glass-hero-strong: var(--glass-strong);
@@ -140,7 +140,7 @@
     --glass: rgba(44,44,46,.62);
     --glass-strong: rgba(58,58,60,.82);
     --glass-solid: #2c2c2e;
-    --glass-blur: 16px;
+    --glass-blur: 10px;
     --glass-border: rgba(255,255,255,.10);
     --glass-hero: var(--glass);
     --glass-hero-strong: var(--glass-strong);
