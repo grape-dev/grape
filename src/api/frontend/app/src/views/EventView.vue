@@ -245,7 +245,7 @@
             <button class="bt bt-o bt-s" @click="redispatch.open = false">
               {{ t('redispatch_cancel') }}
             </button>
-            <button class="bt bt-s ev__glass-ok ev__glass-ok--orange" @click="doRedispatch">
+            <button class="bt bt-p bt-s" @click="doRedispatch">
               {{ t('redispatch_confirm') }}
             </button>
           </div>
@@ -292,7 +292,7 @@
           <div class="ev__glass-btns">
             <button class="bt bt-o bt-s" @click="a2aRedo.open = false">取消</button>
             <button
-              class="bt bt-s ev__glass-ok ev__glass-ok--blue"
+              class="bt bt-p bt-s"
               :style="{ opacity: a2aRedo.sel ? 1 : 0.5 }"
               @click="doA2aRedo"
             >
@@ -317,7 +317,7 @@
             <button class="bt bt-o bt-s" @click="localRetry.open = false">
               {{ t('local_retry_cancel') }}
             </button>
-            <button class="bt bt-s ev__glass-ok ev__glass-ok--green" @click="doLocalRetry">
+            <button class="bt bt-g bt-s" @click="doLocalRetry">
               {{ t('local_retry_confirm') }}
             </button>
           </div>
@@ -369,7 +369,7 @@
     <Teleport to="body">
       <div v-if="projectDel.open" class="chat-del-overlay" @click.self="projectDel.open = false">
         <div class="chat-del-pop ev__centerpop">
-          <div class="chat-del-title" style="color: #ff3b30">
+          <div class="chat-del-title" style="color: var(--r)">
             {{ t('knowledge_delete_confirm_project') }}
           </div>
           <div class="chat-del-btns">
@@ -683,7 +683,7 @@ const statusText = computed(() => {
       '</button>'
   if (d.status === 'running' || d.status === 'pending')
     html +=
-      ' <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--r, #e74c3c);border-color:var(--r, #e74c3c)" data-ev-act="terminate" title="' +
+      ' <button class="bt bt-r bt-s" style="margin-left:8px" data-ev-act="terminate" title="' +
       esc(t('terminate_title')) +
       '">' +
       esc(t('btn_terminate')) +
@@ -822,7 +822,7 @@ const processingText = computed(() => {
   const structuredHtml = buildStructuredHtml((arch && arch.output) || tryStructuredResult(result))
   if (structuredHtml)
     return (
-      '<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">' +
+      '<div style="margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:8px;border-left:3px solid var(--a)">' +
       structuredHtml +
       '</div>'
     )
@@ -1863,14 +1863,24 @@ onMounted(function () {
   font-size: 11px;
   margin-left: auto;
 }
+/* 次要按钮（全屏/日志工具）：透明底 + 淡蓝描边 + 蓝字，hover 实心蓝 */
 .ev__fsbtn {
-  border: 1px solid var(--b, #2a3140);
+  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
   background: transparent;
-  color: var(--t2);
-  border-radius: 6px;
-  padding: 3px 10px;
+  color: var(--a);
+  border-radius: 999px;
+  padding: 3px 12px;
   font-size: 12px;
   cursor: pointer;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
+}
+.ev__fsbtn:hover {
+  background: var(--a);
+  border-color: var(--a);
+  color: var(--on-accent);
 }
 .ev__ctxgrid {
   display: grid;
@@ -1987,15 +1997,25 @@ onMounted(function () {
   align-items: center;
   flex-shrink: 0;
 }
+/* 删除/危险（清空对话）：透明底 + 红描边 + 红字，hover 实心红 */
 .ev__clearbtn {
-  border: 1px solid var(--b);
+  border: 1px solid color-mix(in srgb, var(--r) 55%, transparent);
   background: transparent;
   color: var(--r);
-  border-radius: 6px;
-  padding: 3px 10px;
+  border-radius: 999px;
+  padding: 3px 12px;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
+}
+.ev__clearbtn:hover {
+  background: var(--r);
+  border-color: var(--r);
+  color: var(--on-accent);
 }
 .ev__convmsgs {
   flex: 1;
@@ -2104,18 +2124,33 @@ onMounted(function () {
   font-size: 11px;
   margin-left: auto;
 }
+/* 日志弹窗工具按钮（Teleport 到 body，不进 #pageContent，所以样式只能写这里）*/
 .ev__tl-btn {
-  border: 1px solid var(--b, #2a3140);
+  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
   background: transparent;
-  color: var(--t2);
-  border-radius: 6px;
-  padding: 3px 10px;
+  color: var(--a);
+  border-radius: 999px;
+  padding: 3px 12px;
   font-size: 12px;
   cursor: pointer;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
+}
+.ev__tl-btn:hover {
+  background: var(--a);
+  border-color: var(--a);
+  color: var(--on-accent);
 }
 .ev__tl-kill {
-  border-color: var(--r, #e74c3c);
-  color: var(--r, #e74c3c);
+  border-color: color-mix(in srgb, var(--r) 55%, transparent);
+  color: var(--r);
+}
+.ev__tl-kill:hover {
+  background: var(--r);
+  border-color: var(--r);
+  color: var(--on-accent);
 }
 .ev__tl-info {
   display: flex;
@@ -2150,20 +2185,18 @@ onMounted(function () {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.15);
-  backdrop-filter: blur(6px) saturate(150%);
-  -webkit-backdrop-filter: blur(6px) saturate(150%);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
 }
 .ev__glass {
   width: 340px;
-  background: var(--glass-hero);
-  backdrop-filter: blur(28px) saturate(200%);
-  -webkit-backdrop-filter: blur(28px) saturate(200%);
+  background: var(--glass-strong);
+  backdrop-filter: blur(28px);
   border-radius: 18px;
   border: 1px solid var(--hairline);
   box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.12),
-    0 2px 8px rgba(0, 0, 0, 0.06);
+    0 24px 64px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.24);
   overflow: hidden;
   padding: 18px 20px 14px;
 }
@@ -2179,16 +2212,16 @@ onMounted(function () {
   margin-bottom: 10px;
 }
 .ev__glass-ic--orange {
-  background: linear-gradient(135deg, #ff9f0a, #ff6a00);
-  box-shadow: 0 4px 12px rgba(255, 159, 10, 0.3);
+  background: var(--y);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--y) 30%, transparent);
 }
 .ev__glass-ic--blue {
-  background: linear-gradient(135deg, #0a84ff, #0071e3);
-  box-shadow: 0 4px 12px rgba(10, 132, 255, 0.3);
+  background: var(--a);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--a) 30%, transparent);
 }
 .ev__glass-ic--green {
-  background: linear-gradient(135deg, #34c759, #30d158);
-  box-shadow: 0 4px 12px rgba(52, 199, 89, 0.3);
+  background: var(--g-fill);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--g) 30%, transparent);
 }
 .ev__glass-title {
   font-size: 14px;
@@ -2211,24 +2244,6 @@ onMounted(function () {
   gap: 8px;
   justify-content: flex-end;
 }
-.ev__glass-ok {
-  padding: 8px 16px;
-  font-size: 12px;
-  color: var(--on-accent);
-  border: none;
-}
-.ev__glass-ok--orange {
-  background: linear-gradient(135deg, #ff9f0a, #ff6a00);
-  box-shadow: 0 4px 12px rgba(255, 159, 10, 0.35);
-}
-.ev__glass-ok--blue {
-  background: linear-gradient(135deg, #0a84ff, #0071e3);
-  box-shadow: 0 4px 12px rgba(10, 132, 255, 0.35);
-}
-.ev__glass-ok--green {
-  background: linear-gradient(135deg, #34c759, #30d158);
-  box-shadow: 0 4px 12px rgba(52, 199, 89, 0.35);
-}
 .ev__a2a-list {
   display: flex;
   flex-direction: column;
@@ -2242,18 +2257,18 @@ onMounted(function () {
   padding: 8px 10px;
   border-radius: 12px;
   cursor: pointer;
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--b);
   background: color-mix(in srgb, var(--c) 60%, transparent);
   transition: all 0.15s;
 }
 .ev__a2a-item--sel {
-  border-color: rgba(0, 113, 227, 0.45);
-  background: rgba(0, 113, 227, 0.08);
+  border-color: color-mix(in srgb, var(--a) 45%, transparent);
+  background: color-mix(in srgb, var(--a) 8%, transparent);
 }
 .ev__a2a-item--off {
   opacity: 0.4;
   cursor: not-allowed;
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--chip-bg);
 }
 .ev__a2a-ic {
   font-size: 15px;
@@ -2270,7 +2285,7 @@ onMounted(function () {
 }
 .ev__a2a-warn {
   font-size: 10px;
-  color: #c77700;
+  color: var(--y);
   margin-left: auto;
 }
 .ev__a2a-cur {
