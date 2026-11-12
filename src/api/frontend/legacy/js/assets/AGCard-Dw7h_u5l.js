@@ -1,1 +1,0 @@
-import{E as e,R as t,_ as n,k as r,t as i}from"./_plugin-vue_export-helper-Cy1o58R_.js";var a=i({__name:`AGCard`,props:{padded:{type:Boolean,default:!0}},setup(i){return(a,o)=>(e(),n(`div`,{class:t([`a-card`,i.padded&&`a-card--padded`])},[r(a.$slots,`default`,{},void 0,!0)],2))}},[[`__scopeId`,`data-v-aa8e17ab`]]);export{a as t};

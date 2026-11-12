@@ -24,7 +24,7 @@ def test_vue_chunks_carry_cache_busting_version():
     """index.html 必须引用 Vue 视图 chunk 且带 ?v= 版本号（原 #337 的缓存刷新契约）。"""
     html = _read(INDEX_HTML)
     for chunk in ("issues-view", "dashboard-view", "runtimes-view", "event-view"):
-        m = re.search(r"/static/js/vue/%s\.js\?v=(\d+)" % re.escape(chunk), html)
+        m = re.search(r"/static-vue/viewjs/%s\.js\?v=(\d+)" % re.escape(chunk), html)
         assert m, f"index.html 缺少 {chunk}.js 的版本化引用"
         assert int(m.group(1)) >= 1
 

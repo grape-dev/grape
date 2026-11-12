@@ -18,18 +18,10 @@ export default defineConfig({
       closeBundle() {
         const fs = require('node:fs')
         const path = require('node:path')
-        const src = path.resolve(__dirname, '../static-dist/viewjs')
-        const dst = path.resolve(__dirname, '../legacy/js/vue')
-        if (fs.existsSync(src)) {
-          fs.mkdirSync(dst, { recursive: true })
-          for (const f of fs.readdirSync(src)) {
-            fs.copyFileSync(path.join(src, f), path.join(dst, f))
-          }
-          console.log(`copied view chunks -> ${dst}`)
-        }
-        // view css + shared AGButton assets -> legacy/js/assets (stable names, loaded by entry/runtime)
+        // 2026-11-12 单一产物：不再把 chunk 拷到 legacy/js/{vue,assets}（那是同一份构建的副本）。
+        // 旧壳 index.html 直接吃 /static-vue/viewjs/*.js，entry 注入 /static-vue/assets/*.css。
         const assetsDir = path.resolve(__dirname, '../static-dist/assets')
-        const dstAssets = path.resolve(__dirname, '../legacy/js/assets')
+        const dstAssets = assetsDir
         fs.mkdirSync(path.join(dstAssets, 'viewcss'), { recursive: true })
         const viewCssMap = {
           'my-feedback': /^my-feedback-.*\.css$/,
@@ -65,19 +57,12 @@ export default defineConfig({
           .map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8'))
           .join('\n')
         fs.writeFileSync(path.join(dstAssets, 'ag-ui.css'), agCss)
-        // ALL shared js chunks keep hashed names (view chunks import them relatively)
-        for (const f of fs.readdirSync(assetsDir)) {
-          if (f.endsWith('.js') && f !== 'index-CvjDQIka.js') {
-            // skip the SPA index entry (it imports SPA css); everything else is shared
-            if (!/^index-.*\.js$/.test(f)) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
-          }
-        }
         // bridge tokens (hand-maintained, stable name)
         fs.copyFileSync(
           path.resolve(__dirname, './src/styles/bridge.css'),
           path.join(dstAssets, 'bridge.css')
         )
-        console.log(`copied view css/assets -> ${dstAssets}`)
+        console.log(`wrote stable view css/assets -> ${dstAssets}`)
       },
     },
   ],

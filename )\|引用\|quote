@@ -1,0 +1,2 @@
+20:    return bool(repo_key and repo_key.startswith("github:"))
+69:                    if cred_row and (cred_row[0] or "").startswith("127."):

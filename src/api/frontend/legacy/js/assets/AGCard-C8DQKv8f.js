@@ -1,1 +1,0 @@
-import{B as e,O as t,j as n,v as r}from"./runtime-dom.esm-bundler-Bfcl-LsS.js";import{t as i}from"./_plugin-vue_export-helper-BDNMzG2s.js";var a=i({__name:`AGCard`,props:{padded:{type:Boolean,default:!0}},setup(i){return(a,o)=>(t(),r(`div`,{class:e([`a-card`,i.padded&&`a-card--padded`])},[n(a.$slots,`default`,{},void 0,!0)],2))}},[[`__scopeId`,`data-v-aa8e17ab`]]);export{a as t};

@@ -121,7 +121,7 @@ class TestInfra:
         # Vue structure: legacy shell assets + migrated Vue view chunks live under frontend/legacy
         for f in ["/static/js/app.js", "/static/css/app.css", "/static/js/api.js",
                    "/static/js/worker-name.js", "/static/js/pwd-blocklist.js",
-                   "/static/js/vue/dashboard-view.js", "/static/js/vue/issues-view.js",
+                   "/static-vue/viewjs/dashboard-view.js", "/static-vue/viewjs/issues-view.js",
                    "/static-vue/"]:
             r = client.get(f)
             assert r.status_code == 200, f"{f} -> {r.status_code}"
