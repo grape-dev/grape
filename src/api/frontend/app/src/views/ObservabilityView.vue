@@ -1721,6 +1721,13 @@
 </template>
 
 <script setup>
+// ECharts 性能基线（2026-11-12）：dirtyRect 只重绘脏区；像素比封顶 1.5，
+// 否则 2x/3x 屏上每次鼠标移动要把整张 canvas 按 4~9 倍像素重画 → 肉眼「不跟鼠标」。
+const ECHARTS_INIT_OPTS = {
+  useDirtyRect: true,
+  devicePixelRatio: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 1.5),
+}
+
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 
 const G = globalThis
@@ -2097,7 +2104,7 @@ function renderOverviewCharts() {
           // 1) 同一容器只留一个实例（原来每次刷新都 init 一个新的，key 还带 Math.random）
     const prevInst = echarts.getInstanceByDom && echarts.getInstanceByDom(el)
     if (prevInst) prevInst.dispose()
-    const ch = echarts.init(el, null, { useDirtyRect: true })
+    const ch = echarts.init(el, null, ECHARTS_INIT_OPTS)
     // 2) 关掉动画 + 工具框过渡：鼠标在图上滑时 ECharts 每帧重绘 canvas，
     //    再叠加卡片的 backdrop-filter 会被迫重采样 → 掉帧
     if (option.tooltip) {
@@ -2663,7 +2670,7 @@ function renderResChart() {
     }
   }
   try {
-    const ch = echarts.init(el, null, { useDirtyRect: true })
+    const ch = echarts.init(el, null, ECHARTS_INIT_OPTS)
     ch.setOption({
       tooltip: { trigger: 'axis' },
       legend: { top: 0, right: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
@@ -3867,7 +3874,7 @@ function effInitChart(name, option) {
       effCharts[name].dispose()
       effCharts[name] = null
     }
-    const ch = echarts.init(el, null, { useDirtyRect: true })
+    const ch = echarts.init(el, null, ECHARTS_INIT_OPTS)
     ch.setOption(option)
     effCharts[name] = ch
     return ch
@@ -5378,4 +5385,17 @@ onBeforeUnmount(function () {
 .obv-banner-btn { margin-left: auto; white-space: nowrap; padding: 4px 12px; }
 .obv-tokhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .obv-outcome { border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+</style>
+
+<style>
+/* 驾驶舱是数据密集页：卡片全部实心，不做玻璃/大投影。
+ * 理由：canvas 每次重绘都会让上层的 backdrop-filter 重新采样，HiDPI 屏上直接掉帧；
+ * 这里只保留 1px 内描边（视觉上仍是卡片，但合成成本接近普通表格页）。 */
+#pageContent .obv-shell .cd {
+  background: var(--c) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  box-shadow: inset 0 0 0 1px var(--glass-border) !important;
+}
+#pageContent .obv-shell canvas { will-change: auto; }
 </style>
