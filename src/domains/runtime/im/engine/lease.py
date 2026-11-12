@@ -12,7 +12,7 @@ from ..channel.types import Type
 
 
 class LeaseStore(Protocol):
-    """平台无关租约接口（§4.2）。实现：src/domains/runtime/im/bot_lease.py BotLeaseStore。"""
+    """平台无关租约接口（§4.2）。实现：src/im/bot_lease.py BotLeaseStore。"""
 
     def try_acquire(self, key: str, steal_after: int = 60,
                     instance_timeout: float = 45.0) -> Optional[str]: ...

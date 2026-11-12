@@ -97,20 +97,19 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                          task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
-    # P0 (Issue #596): lazy import from event_pipeline to avoid circular import
+    # 迁移注记（Phase 3）：本函数自 event_pipeline 原样迁出，执行链依赖的
+    # pipeline 侧 helper 在此函数级延迟 import（模块级会成环）。
     from src.domains.runtime.pipeline.event_pipeline import (
-        _fail_event, _inject_bot_agent_env, _inject_issue_pr_env,
-        _inject_linked_repo_tokens, _inject_scene_env, _issue_num_from,
-        _materialize_direct_workdir, _post_all_subtasks_done,
-        _post_result_to_issue, _post_result_to_pr,
-        _post_subtask_completion_to_parent, _read_scene_linked_repos,
-        _redispatch_vod_after_recommend, _submit_direct_linked_prs,
-        _sync_issue_comments_to_conversation, _update_direct_task,
-        get_agent_display_name, get_agent_workdir, resolve_actor_account,
-        register_scene_deploy_url, register_sre_deploy_url,
+        _fail_event, _inject_bot_agent_env, _inject_issue_pr_env, _inject_linked_repo_tokens,
+        _inject_scene_env, _issue_num_from, _materialize_direct_workdir, _post_all_subtasks_done,
+        _post_result_to_issue, _post_result_to_pr, _post_subtask_completion_to_parent,
+        _read_scene_linked_repos, _redispatch_vod_after_recommend, _submit_direct_linked_prs,
+        _sync_issue_comments_to_conversation, _update_direct_task, get_agent_display_name,
+        resolve_actor_account,
+        get_agent_workdir, register_scene_deploy_url, register_sre_deploy_url,
     )
     from src.domains.runtime.engine.executor import stream_devops_agent
-    from src.kernel.prompt_builder import build_devops_agent_prompt, resolve_task_server_env
+    from src.kernel.prompt_builder import build_devops_agent_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output, _extract_tool_command,
         append_skipped_event,

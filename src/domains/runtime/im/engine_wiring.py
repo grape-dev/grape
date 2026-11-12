@@ -91,13 +91,18 @@ EGRESS_MODE_FILE_ENV = "GRAPE_IM_EGRESS_MODE_FILE"
 MODE_WATCH_INTERVAL = 5.0      # main.py 侧 mode 轮询周期（秒级切回粒度）
 
 def _repo_root(start: str) -> str:
-    """向上找含 scripts/ 的仓库根（模块搬迁到 domains/ 深层后仍稳）。"""
+    """向上找含 scripts/migrations 的仓库根（模块搬到 domains/ 深层后仍稳）。
+
+    Issue #1690：原实现固定三次 dirname，模块迁到 src/domains/runtime/im/ 后
+    解析成 src/domains/scripts/...（不存在），IM 引擎建表迁移静默失效。
+    """
     cur = os.path.dirname(os.path.abspath(start))
     while cur and cur != "/":
         if os.path.isdir(os.path.join(cur, "scripts", "migrations")):
             return cur
         cur = os.path.dirname(cur)
     return os.path.dirname(os.path.abspath(start))
+
 
 _MIGRATION_PATH = os.path.join(
     _repo_root(__file__), "scripts", "migrations", "001_channel_tables.py",

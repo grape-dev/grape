@@ -56,7 +56,7 @@ def test_merge_blocked_on_conflict_markers(monkeypatch, _client):
               {"filename": "src/b.py", "patch": {"diff": "@@ -1 +1 @@\n+clean\n"}}]]
     recorded = _install(monkeypatch, pages)
     ledger = []
-    monkeypatch.setattr("src.outbound_ledger.record_outbound",
+    monkeypatch.setattr("src.kernel.outbound_ledger.record_outbound",
                         lambda *a, **k: ledger.append((a, k)) or True)
 
     r = _client.put(f"{base}/pulls/5/merge")

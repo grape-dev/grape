@@ -4,7 +4,7 @@ Issue #1667：排队（queue）语义需要在前序事件终态后重新派发�
 把原 webhook.py 内联的派发逻辑抽到本模块，避免 webhook ↔ event_pipeline
 循环依赖，并保证正常路径与排队路径使用同一套派发实现。
 """
-from src.config import log
+from src.kernel.config import log
 
 
 async def _on_handoff_dispatch(event):
@@ -15,7 +15,7 @@ async def _on_handoff_dispatch(event):
     """
     import asyncio
     from src.api.pipeline_executor import dispatch_node
-    from src.config import log
+    from src.kernel.config import log
 
     payload = event.payload or {}
     target_agent = payload.get("target_agent", event.agent_type)

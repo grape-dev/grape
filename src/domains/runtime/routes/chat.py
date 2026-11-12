@@ -2456,7 +2456,7 @@ def _execute_chat_task(task_id: str):
                         t["error"] = str(e)[:500]
         else:
             # 远端引擎：enqueue + wait
-            from src.domains.runtime.engine.service import enqueue_task, wait_task_terminal_sync
+            from src.domains.runtime.engine.service import enqueue_task
             from src.api.session_store import get_or_create_agent_session
             session = get_or_create_agent_session(f"chat:{user.get('id', 0)}", "chat", backend_name, runtime_id=rid)
             tid = enqueue_task(

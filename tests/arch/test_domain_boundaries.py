@@ -33,7 +33,7 @@ def test_kernel_new_import_path():
 
 
 def test_old_import_path_reexport():
-    from src.config import log as old_log
+    from src.kernel.config import log as old_log
     from src.kernel.config import log as new_log
     assert old_log is new_log
 
@@ -61,20 +61,51 @@ def test_legacy_dir_shims_removed():
     """Issue #699 cleanup: legacy top-level shim dirs are gone; imports must fail."""
     import importlib
     import pytest
-    # 与基线 13c6d0979 同清单（含 src.user / src.vcs 顶层 shim 断言：head 树上
-    # 这些目录确不存在、断言可通过——恢复守护面，防顶层 shim 回潮）。
-    # src.domains.mgmt.user / src.domains.runtime.vcs 是 arch 布局的合法真实模块，
-    # 不在"应不可导入"清单。
-    for legacy in ("src.auth", "src.user", "src.admin", "src.runtime", "src.agent",
-                   "src.im", "src.vcs", "src.storage", "src.observability",
-                   "src.project_info", "src.api.routes"):
+    # 只校验「已删除的 legacy 顶层目录」；src.domains.* 是 canonical 实现，必须可导入。
+    for legacy in ("src.auth", "src.user", "src.runtime", "src.project_info", "src.api.routes",
+                   "src.im", "src.vcs", "src.agent", "src.storage", "src.admin", "src.observability"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(legacy)
 
 
+LEGACY_MODULE_TARGETS = {
+    "src.config": "src.kernel.config",
+    "src.featured_order": "src.kernel.featured_order",
+    "src.help_docs_sync": "src.kernel.help_docs_sync",
+    "src.help_page_gen": "src.kernel.help_page_gen",
+    "src.localfs": "src.kernel.localfs",
+    "src.lock": "src.kernel.lock",
+    "src.mysql_compat": "src.kernel.mysql_compat",
+    "src.outbound_ledger": "src.kernel.outbound_ledger",
+    "src.prompt_builder": "src.kernel.prompt_builder",
+    "src.repo": "src.kernel.repo",
+    "src.repo_cleanup": "src.kernel.repo_cleanup",
+    "src.repo_key": "src.kernel.repo_key",
+    "src.repo_migrate": "src.kernel.repo_migrate",
+    "src.scene_custom_env": "src.kernel.scene_custom_env",
+    "src.service_diagnostics": "src.kernel.service_diagnostics",
+    "src.session_manager": "src.kernel.session_manager",
+    "src.token_resolver": "src.kernel.token_resolver",
+    "src.token_service": "src.kernel.token_service",
+    "src.worker_package": "src.kernel.worker_package",
+}
+
+
 def test_top_level_module_shims_still_work():
-    """Thin module-level compat shims kept for external callers."""
-    from src.config import log as old_log
+    """Thin module-level compat shims kept for external callers.
+
+    Issue #2010 的 canonical 实现全部落在 src/kernel，旧路径（src.config、
+    src.lock 等）由 src/__init__.py 的懒加载别名一跳解析，
+    语义等价：别名指向同一个模块对象（monkeypatch 仍然有效）。
+    """
+    import importlib
+
+    for legacy, canonical in LEGACY_MODULE_TARGETS.items():
+        legacy_module = importlib.import_module(legacy)
+        canonical_module = importlib.import_module(canonical)
+        assert legacy_module is canonical_module, f"{legacy} not aliased to {canonical}"
+
+    from src.kernel.config import log as old_log
     from src.kernel.config import log as new_log
     assert old_log is new_log
     from src.api.jwt_utils import create_access_token as old_create

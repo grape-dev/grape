@@ -643,7 +643,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     repository = evt.get("repository", "")
     # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME 派生（缺失回退 repo_key），
     # 禁止以触发人账号充当 REPO_OWNER；REPO_FULL_NAME 归一（剥 provider 前缀）供 runbook 拼 URL。
-    from src.repo_key import derive_repo_identity as _derive
+    from src.kernel.repo_key import derive_repo_identity as _derive
     _full_name, _owner, _repo_name = _derive(repository, repo_key)
     _resolved_account = resolve_actor_account(evt, repo_key)
     env_extra = {
@@ -2699,8 +2699,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         _idem_key = ""
         if event_type in ("issue_comment", "note_hook_pr"):
             try:
-                from src.repo_key import parse_repo_key
-                from src.outbound_ledger import extract_event_content_id
+                from src.kernel.repo_key import parse_repo_key
+                from src.kernel.outbound_ledger import extract_event_content_id
                 _provider = parse_repo_key(repo_key)[0] if repo_key else ""
                 _comment_cid = extract_event_content_id(_provider, payload)
                 if _comment_cid:
@@ -3138,7 +3138,7 @@ def fetch_issue_via_vcs(repo_key: str, issue_number) -> tuple:
     if not num:
         return ("unknown", {})
     import urllib.error
-    from src.repo_key import split_owner_repo, to_repo_key
+    from src.kernel.repo_key import split_owner_repo, to_repo_key
     _rk = to_repo_key(repo_key)
     owner, rname = split_owner_repo(_rk)
     if not owner or not rname:
@@ -3651,10 +3651,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    from src.prompt_builder import resolve_task_server_env
+    from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key 并告警），
     # REPO_FULL_NAME 归一（剥 provider 前缀）与 owner/name 同源口径。
-    from src.repo_key import derive_repo_identity as _derive2
+    from src.kernel.repo_key import derive_repo_identity as _derive2
     _full_name2, _owner2, _repo_name2 = _derive2(repository, repo_key)
     _resolved_account = resolve_actor_account(evt, repo_key)
     env_extra = {
@@ -3898,8 +3898,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     # ── 仓库/服务地址基础四项 ──
     # Issue #1660：REPO_FULL_NAME/OWNER/NAME 统一由派生入口产出；重派只有 repo_key，
     # 以其无前缀全名作为 REPO_FULL_NAME 事实源（不再出现 REPO_NAME 为空却回退带前缀全名）。
-    from src.repo_key import derive_repo_identity as _derive_env
-    from src.repo_key import from_repo_key as _from_rk_env
+    from src.kernel.repo_key import derive_repo_identity as _derive_env
+    from src.kernel.repo_key import from_repo_key as _from_rk_env
     _full_name, _owner, _repo_name = _derive_env(_from_rk_env(repo_key), repo_key)
     env["REPO_FULL_NAME"] = _full_name or repo_key
 
@@ -3912,7 +3912,7 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
         event_type="build_task_env", fallback="account->issue_creator",
         extra={"issue_id": issue_id},
     )
-    from src.prompt_builder import resolve_task_server_env
+    from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1577：GRAPE_SERVER_URL=业务 API 基址，RUNTIME_SERVER_URL=worker runtime 基址。
     env.update(resolve_task_server_env(runtime_id))
 

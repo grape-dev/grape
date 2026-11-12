@@ -3,7 +3,7 @@
 职责：每小时清理 uploaded_files 表中 scope='temp' 且超过 24 小时的孤儿文件，
 同时删除对应的 OBS/本地物理文件。
 
-集群并发安全：通过 distributed_locks 表分布式锁互斥（src/lock.py），
+集群并发安全：通过 distributed_locks 表分布式锁互斥（src/kernel/lock.py），
 同一时间只有一个实例执行清理。
 
 触发方式：

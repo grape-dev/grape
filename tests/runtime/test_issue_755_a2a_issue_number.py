@@ -124,7 +124,7 @@ def test_resolve_unresolved():
 
 def test_vcs_check_verdicts(monkeypatch):
     from src.domains.runtime.routes.webhook import _a2a_issue_vcs_check
-    monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "tok-755")
+    monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token", lambda self, rk: "tok-755")
     monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue", lambda self, n: {"number": n})
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "exists"
     monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue",
@@ -133,7 +133,7 @@ def test_vcs_check_verdicts(monkeypatch):
     monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue",
                         lambda self, n: {"error": "conn timeout"})
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "unknown"
-    monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "")
+    monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token", lambda self, rk: "")
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "unknown"
     # 无 token 时不外呼
     def _no_call(*a, **kw):
@@ -224,7 +224,7 @@ def test_a2a_endpoint_backfills_number(monkeypatch):
     _seed_registered()
     _set_issue(755, scene_id="", carried={"source_issue_number": 1099})
     # 无 token → VCS unknown → 不阻断；DB 命中后也不外呼
-    monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "")
+    monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token", lambda self, rk: "")
     body = {
         "agent": "coding",
         "payload": {
@@ -248,7 +248,7 @@ def test_a2a_endpoint_backfills_number(monkeypatch):
 def test_a2a_endpoint_400_on_vcs_not_found(monkeypatch):
     """方案B：DB 查无 + VCS 明确 404 → 400 拒绝并提示转交建单。"""
     _seed_registered()
-    monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "tok-755")
+    monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token", lambda self, rk: "tok-755")
     monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue",
                         lambda self, n: {"error": "HTTP 404", "status_code": 404})
     body = {
@@ -274,7 +274,7 @@ def test_a2a_endpoint_400_on_vcs_not_found(monkeypatch):
 def test_a2a_endpoint_vcs_unknown_not_blocked(monkeypatch):
     """DB 查无 + VCS unknown（网络/无 token）→ 放行（不误杀正常链路）。"""
     _seed_registered()
-    monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "")
+    monkeypatch.setattr("src.kernel.token_resolver.TokenResolver.get_token", lambda self, rk: "")
     body = {
         "agent": "coding",
         "payload": {

@@ -1,39 +1,26 @@
-"""安装级 Lease 分布式锁——保证同一（渠道 + 安装）同一时刻只有一个实例建连。
+"""飞书 Bot Lease 分布式锁——保证同一 bot 同一时刻只有一个实例连 WebSocket。
 
-A2 M3：锁从 legacy 表 `global_im_bot_config` 迁到独立表 `grape_t_channel_lease`，
-键为 lease_key = "<channel_type>:<installation_id>"（不再翻译成 bot_app_id）。
-
-基于 CAS（lease_token + lease_expires_at，Python UTC 字符串比较）。
+基于 SQLite CAS（lease_token + lease_expires_at）。
 
 参数（config.py）：
   BOT_LEASE_TTL=60             lease 存活时间（秒）
   BOT_LEASE_RENEW_INTERVAL=20  续约间隔（秒）
   BOT_LEASE_SWEEP_INTERVAL=10  sweep 扫描间隔（秒）
 """
-import secrets, socket, time
-from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
 
+import secrets, socket, time
+
+from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
 
 def generate_instance_id() -> str:
     hostname = socket.gethostname() or "unknown"
     return f"{hostname}-{secrets.token_hex(4)}"
 
-
-def split_lease_key(key: str) -> tuple[str, str]:
-    """'<channel_type>:<installation_id>' → (channel_type, installation_id)。"""
-    if ":" in key:
-        channel_type, installation_id = key.split(":", 1)
-        return channel_type, installation_id
-    return "", key
-
-
 def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
-
 def _future(seconds: int):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + seconds))
-
 
 class BotLeaseStore:
     # 心跳"未来值"容差（秒）：晚于 now+该值的心跳一律不算活（覆盖主机时钟漂移；
@@ -76,7 +63,7 @@ class BotLeaseStore:
                             pass
             except Exception as e:
                 log.warning(f"[lease] owner-alive precheck error {key}: {e}")
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 # 时钟口径统一（#869）：写入（_future=Python UTC）与比较（_now=Python UTC）
                 # 同钟——不用 SQL datetime('now')/MySQL NOW()（后者为服务器本地时间 CST，
@@ -113,7 +100,7 @@ class BotLeaseStore:
         的同源连接——两者在生产指向同一个库，只有测试里可能各挂一个 sqlite 文件。
         两处都查不到（表缺失/异常）→ 放行，避免租约整体失效（与旧实现"表缺则跳过"一致）。
         """
-        from src.domains.runtime.im._db import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         try:
             with db_lock:
                 row = db.cursor().execute(
@@ -141,7 +128,7 @@ class BotLeaseStore:
     def renew(self, key: str, token: str) -> bool | None:
         expires_at = _future(self.ttl)
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -159,7 +146,7 @@ class BotLeaseStore:
 
     def release(self, key: str, token: str) -> None:
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -185,7 +172,7 @@ class BotLeaseStore:
         不依赖本方法；这里只服务运维排查与测试。
         """
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             now = _now()
             with db_lock:
                 c = db.cursor()
@@ -217,7 +204,7 @@ class BotLeaseStore:
         results = {}
         expires_at = _future(self.ttl)
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -248,6 +235,46 @@ class BotLeaseStore:
                 results[app_id] = True
             return results
 
+    def check_inactive_bots(self, held_bots: dict[str, str]) -> list[str]:
+        if not held_bots:
+            return []
+        inactive = []
+        try:
+            from src.kernel.session_manager import db, db_lock
+            app_ids = list(held_bots.keys())
+            ph = ",".join(["?"] * len(app_ids))
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"SELECT bot_app_id FROM global_im_bot_config "
+                    f"WHERE bot_app_id IN ({ph}) AND is_active = 0", app_ids,
+                )
+                inactive = [r[0] for r in c.fetchall()]
+        except Exception as e:
+            log.warning(f"[lease] check_inactive error: {e}")
+        return inactive
+
+    def get_lease_status(self, app_ids: list[str]) -> dict[str, dict]:
+        if not app_ids:
+            return {}
+        try:
+            from src.kernel.session_manager import db, db_lock
+            ph = ",".join(["?"] * len(app_ids))
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"SELECT bot_app_id, lease_owner, lease_expires_at, lease_acquired_at "
+                    f"FROM global_im_bot_config WHERE bot_app_id IN ({ph})", app_ids,
+                )
+                return {
+                    r[0]: {"lease_owner": r[1] or "", "lease_expires_at": str(r[2]) if r[2] else "",
+                           "lease_acquired_at": str(r[3]) if r[3] else ""}
+                    for r in c.fetchall()
+                }
+        except Exception as e:
+            log.warning(f"[lease] get_status error: {e}")
+            return {}
+
     # ── 实例注册表 / 心跳（cluster-im-lease-stability-design.md §2.1）──
 
     def heartbeat(self, hostname: str = "", ip: str = "") -> None:
@@ -262,15 +289,9 @@ class BotLeaseStore:
         try:
             from datetime import datetime, timezone
 
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             _ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-            # deadlock fix (2026-11-03): heartbeat runs on the asyncio event loop; an
-            # unbounded db_lock acquire froze the whole A-process. Acquire with timeout
-            # and skip this beat if the lock is busy — the next sweep retries.
-            if not db_lock.acquire(timeout=10):
-                log.warning("[lease] heartbeat skipped: db_lock busy >10s")
-                return False
-            try:
+            with db_lock:
                 c = db.cursor()
                 from src.kernel.session_manager import _is_mysql_backend
                 if _is_mysql_backend():
@@ -292,12 +313,8 @@ class BotLeaseStore:
                         (self.instance_id, hostname, ip, _ts),
                     )
                 db.commit()
-                return True
-            finally:
-                db_lock.release()
         except Exception as e:
             log.warning(f"[lease] heartbeat error: {e}")
-            return False
 
     def _heartbeat_window(self, timeout: float, now_dt=None):
         """心跳有效窗口 (下界, 上界)，都是 UTC 口径的本地时间串（各后端可字符串比较）。
@@ -320,7 +337,7 @@ class BotLeaseStore:
         上下界都要判：下界=失联超时，上界=忽略"未来时间"的心跳（CST 口径脏行/未修实例）。
         """
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 # 各后端时间函数统一用 python 侧计算阈值（sqlite datetime / mysql datetime 均兼容）
@@ -345,7 +362,7 @@ class BotLeaseStore:
     def lease_owner_info(self, key: str) -> dict:
         """返回某租约键当前 owner/token/到期时间（查存活与防误抢）。"""
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -365,7 +382,7 @@ class BotLeaseStore:
         if not owner:
             return False
         try:
-            from src.domains.runtime.im._db import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             _low, _high = self._heartbeat_window(timeout)
             with db_lock:
                 c = db.cursor()
@@ -379,7 +396,6 @@ class BotLeaseStore:
             log.warning(f"[lease] is_owner_alive error: {e}")
             return False
 
-
 def purge_stale_instances(older_than_hours: float = 24.0) -> int:
     """清理长期无心跳的实例行（`grape_im_instance` 只增不减，需周期兜底）。
 
@@ -392,7 +408,7 @@ def purge_stale_instances(older_than_hours: float = 24.0) -> int:
     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
               - timedelta(hours=older_than_hours)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        from src.domains.runtime.im._db import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM grape_im_instance WHERE last_heartbeat < ?", (cutoff,))
@@ -408,3 +424,23 @@ def purge_stale_instances(older_than_hours: float = 24.0) -> int:
         else:
             log.warning(f"[lease] purge_stale_instances error: {_msg}")
         return 0
+
+def split_lease_key(key: str) -> tuple[str, str]:
+    """'<channel_type>:<installation_id>' → (channel_type, installation_id)。"""
+    if ":" in key:
+        channel_type, installation_id = key.split(":", 1)
+        return channel_type, installation_id
+    return "", key
+
+"""安装级 Lease 分布式锁——保证同一（渠道 + 安装）同一时刻只有一个实例建连。
+
+A2 M3：锁从 legacy 表 `global_im_bot_config` 迁到独立表 `grape_t_channel_lease`，
+键为 lease_key = "<channel_type>:<installation_id>"（不再翻译成 bot_app_id）。
+
+基于 CAS（lease_token + lease_expires_at，Python UTC 字符串比较）。
+
+参数（config.py）：
+  BOT_LEASE_TTL=60             lease 存活时间（秒）
+  BOT_LEASE_RENEW_INTERVAL=20  续约间隔（秒）
+  BOT_LEASE_SWEEP_INTERVAL=10  sweep 扫描间隔（秒）
+"""

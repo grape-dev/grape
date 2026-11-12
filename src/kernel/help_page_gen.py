@@ -171,7 +171,7 @@ th{background:var(--c);font-weight:600}
 """
 
 _MIGRATION_COMMENT = """<!--
-  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api + help/reference + help/developer 渲染。
+  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/kernel/help_page_gen.py 依据 help/usage + help/api + help/reference + help/developer 渲染。
   如需更新任何内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 自动重新生成）。
 -->"""
 

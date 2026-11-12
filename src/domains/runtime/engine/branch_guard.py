@@ -5,7 +5,7 @@ PR 已合并后继续向 head 分支 push 无任何提示，修复静默丢失�
 
 设计（docs/issue-993/spec.md）：
 - 写租约：lock key = ``branch_guard:<repo_key>:<head_branch>``，复用
-  ``src.lock`` 的 ``distributed_locks`` 表，跨实例互斥；租约期望的远端 head sha
+  ``src.kernel.lock`` 的 ``distributed_locks`` 表，跨实例互斥；租约期望的远端 head sha
   （expected_remote_sha）与租约同源存 DB ``branch_guard_state`` 表，跨 worker 可见。
 - push 前置守卫：PR 已 merged/closed → fail-closed 阻断并提示新建分支/PR；
   远端 head 与租约记录不一致 → fail-closed 阻断并提示重新 fetch/rebase。
@@ -28,10 +28,10 @@ from datetime import datetime, timedelta, timezone
 class _LazyLog:
     """惰性日志代理（Issue #993 R8）。
 
-    ``src.config`` 的 import 链约 74~113ms（urllib3/urllib.request 等）。pre-push 钩子是
+    ``src.kernel.config`` 的 import 链约 74~113ms（urllib3/urllib.request 等）。pre-push 钩子是
     每次 push 起一个新进程，若在模块顶层 import config，即使本次没有任何 refs/heads/
     （tag 推送、删分支、空 stdin）也要付这笔钱。改成按需取 logger 后，钩子的快路径
-    不再触发 config 链；真正要判分支时 ``src.lock`` 仍会导入 config，那是必要成本。
+    不再触发 config 链；真正要判分支时 ``src.kernel.lock`` 仍会导入 config，那是必要成本。
     """
 
     def __getattr__(self, name):
@@ -546,7 +546,7 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
         # Issue #993 R8：钩子按文件路径直接加载本模块，绕过 src/runtime/__init__.py 的
         # 重型依赖链（base/opencode/service/engine_select …，实测 115ms）。钩子的快路径
         # （tag 推送、删分支、空 stdin）因此从 ~290ms 降到 ~40ms；真正要判分支时
-        # src.lock/session_manager 仍会导入 config，那是必要成本。
+        # src.kernel.lock/session_manager 仍会导入 config，那是必要成本。
         module_path = os.path.join(root, "src", "runtime", "branch_guard.py")
         code = (
             "import sys, importlib.util; "

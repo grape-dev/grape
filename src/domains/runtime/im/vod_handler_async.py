@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING
 
 from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
 from src.api.chat_session_env import chat_repo_env
-from src.domains.runtime.im._db import db, db_lock
-from src.domains.runtime.agents.executor import consume_stream_async
+from src.kernel.session_manager import db, db_lock
+from src.domains.runtime.engine.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.kernel.token_service import is_auth_401_error
+
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
@@ -256,6 +257,7 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     try:
         from src.kernel.prompt_builder import _apply_server_url_placeholders
         return _apply_server_url_placeholders("\n".join(parts))
+
     except Exception:
         return "\n".join(parts)
 
@@ -452,8 +454,8 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         _is_401 = is_auth_401_error(_err_lower)
         if _is_401:
             try:
-                from src.kernel.token_resolver import detect_and_mark_expired
-                _vod_error_code = detect_and_mark_expired(repo_key) or ""
+                from src.kernel.token_service import detect_and_mark_repo_token_expired
+                _vod_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                 if _vod_error_code:
                     log.warning(f"VOD handler: token expired during direct exec (error_code={_vod_error_code}), repo={repo_key}")
             except Exception as _ve:

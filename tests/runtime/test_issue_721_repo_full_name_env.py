@@ -19,13 +19,13 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 # ── from_repo_key 归一 ──
 
 def test_from_repo_key_strips_provider_prefix():
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     assert from_repo_key("gitcode:GTDTeam/CodeArts") == "GTDTeam/CodeArts"
     assert from_repo_key("github:org/repo") == "org/repo"
 
 
 def test_from_repo_key_idempotent_on_clean_input():
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     assert from_repo_key("grape-dev/grape") == "grape-dev/grape"
     assert from_repo_key("") == ""
 
@@ -34,7 +34,7 @@ def test_from_repo_key_idempotent_on_clean_input():
 
 def _env_extra(repository):
     """同步实现注入侧构建（Issue #721 修复后）：REPO_FULL_NAME 归一。"""
-    from src.repo_key import split_owner_repo, from_repo_key
+    from src.kernel.repo_key import split_owner_repo, from_repo_key
     _owner, _repo_name = split_owner_repo(repository)
     return {
         "REPO_FULL_NAME": from_repo_key(repository) or repository,
@@ -61,7 +61,7 @@ def test_env_extra_clean_repository_unchanged():
 
 def _clone_url(repo_full_name):
     """runbook 模板（归一后拼接）：https://gitcode.com/$REPO_FULL_NAME.git"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     _normalized = from_repo_key(repo_full_name or "")
     return f"https://gitcode.com/{_normalized}.git" if _normalized else ""
 
@@ -85,6 +85,6 @@ def test_clone_url_template_empty_value_guard():
 
 def test_injection_checklist_family_keys_present():
     """#584/#595/#721 一致性：三键均为注入清单保留名，不被场景自定义变量覆盖。"""
-    from src.scene_custom_env import is_reserved_name
+    from src.kernel.scene_custom_env import is_reserved_name
     for name in ("REPO_FULL_NAME", "BOT_USERNAME", "PR_NUMBER"):
         assert is_reserved_name(name), f"{name} 应为保留注入名"

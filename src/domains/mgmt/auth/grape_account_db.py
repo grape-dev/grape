@@ -469,7 +469,7 @@ def get_external_identity(provider: str, external_id: str) -> "dict | None":
     # S79：ORM 路径（DTO 携带 DB 原值=密文，解密与裸 SQL 路径同位）
     try:
         with _uow() as session:
-            from src.persistence.engine import get_engine as _ge
+            from src.kernel.persistence.engine import get_engine as _ge
             d = _iar.get_by_platform(session, provider, external_id, statuses=(1,))
         if not d:
             return None
@@ -1539,11 +1539,11 @@ def transfer_external_identity(
 
 import uuid
 
-from src.id_gen import uuid7_str
+from src.kernel.id_gen import uuid7_str
 
-from src.persistence.repositories import identity_admin_repository as _iar
+from src.kernel.persistence.repositories import identity_admin_repository as _iar
 
-from src.persistence.uow import uow as _uow
+from src.kernel.persistence.uow import uow as _uow
 
 def revoke_provider_credentials(grape_user_id: str, provider: str) -> dict:
     """D40/S60 凭据撤销域服务：撤销该 provider 名下用户级凭据形态全集。
@@ -1610,7 +1610,7 @@ def mark_identity_pat(grape_user_id: str, provider: str, pat_login: str = "") ->
     """D102-P：PAT 归属打标——metadata.source='pat'（ei 行只记身份，不承载 token）。"""
     import json as _json
     from sqlalchemy import select as _sel
-    from src.persistence.models import ExternalIdentityModel as _M
+    from src.kernel.persistence.models import ExternalIdentityModel as _M
     try:
         with _uow() as session:
             rows = session.execute(_sel(_M).where(
@@ -1634,7 +1634,7 @@ def backfill_pat_identity_tokens() -> int:
     字段并打标 metadata.source='pat'。PAT 权威存储本就在凭据域，供给链
     fetch_user_token ① 走 <p>_pat，清空不断供。返回迁移行数。"""
     from sqlalchemy import select as _sel
-    from src.persistence.models import ExternalIdentityModel as _M, UserCredentialModel as _C
+    from src.kernel.persistence.models import ExternalIdentityModel as _M, UserCredentialModel as _C
     from src.domains.mgmt.auth.credential_crypto import decrypt
     import json as _json
     moved = 0

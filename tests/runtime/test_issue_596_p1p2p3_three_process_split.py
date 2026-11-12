@@ -9,21 +9,23 @@ Covers (design doc docs/weekly-09/grape-three-process-split-design.md):
 - P2: sweep_once split — sweep_events_loop (B) + sweep_tasks_loop (C)
 - P3: table_maintenance split lock keys (tasks → C, messages → A)
 """
+
 import asyncio
+
 import os
+
 import re
+
 import subprocess
+
 import sys
+
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # worktree root = repo root (tests/ sits at top level)
 
-
-# ---------------------------------------------------------------- P1: entries
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestProcessEntries:
     def test_grape_server_module_importable(self):
         from src.api import grape_server
@@ -75,43 +77,29 @@ class TestProcessEntries:
 
     def test_c_process_has_local_claimer_in_lifespan_source(self):
         from src.api import grape_worker_server
-        src = _entry_source(grape_worker_server)
+        src = Path(grape_worker_server.__file__).read_text(encoding="utf-8")
         assert "start_local_claimer" in src, "C lifespan must start local_claimer"
         assert "sweep_tasks_loop" in src, "C lifespan must start sweep_tasks_loop (P2)"
 
     def test_b_process_has_sweep_events_loop_in_lifespan_source(self):
         from src.api import grape_event_server
-        src = _entry_source(grape_event_server)
+        src = Path(grape_event_server.__file__).read_text(encoding="utf-8")
         assert "sweep_events_loop" in src, "B lifespan must start sweep_events_loop (P2)"
         assert "start_bot_token_health" in src, "B lifespan must start bot_token_health"
 
     def test_a_process_has_table_maintenance_messages_only(self):
         from src.api import grape_server
-        src = _entry_source(grape_server)
+        src = Path(grape_server.__file__).read_text(encoding="utf-8")
         assert "table_maintenance_messages" in src
         assert "table_maintenance_tasks" not in src, \
             "A must not run agent_tasks table maintenance (C responsibility)"
 
     def test_c_process_has_table_maintenance_tasks_only(self):
         from src.api import grape_worker_server
-        src = _entry_source(grape_worker_server)
+        src = Path(grape_worker_server.__file__).read_text(encoding="utf-8")
         assert "table_maintenance_tasks" in src
         assert "table_maintenance_messages" not in src, \
             "C must not run task_messages table maintenance (A responsibility)"
-
-
-def _entry_source(module) -> str:
-    """入口文件源码 + server_tasks 编排源码。
-
-    arch 四进程重构后，逐任务启动收敛到 ``src/api/server_tasks.py``
-    （start_mgmt_tasks / start_event_tasks / start_worker_tasks），
-    入口只调用对应 start_*_tasks；断言"某任务在入口启动"应同时看这两处。
-    """
-    from pathlib import Path as _P
-    from src.api import server_tasks as _st
-    return (_P(module.__file__).read_text(encoding="utf-8")
-            + "\n" + _P(_st.__file__).read_text(encoding="utf-8"))
-
 
 def _iter_app_routes(app):
     """产出 app 上全部注册的 APIRoute 对象（兼容 fastapi>=0.141 惰性 _IncludedRouter）。
@@ -133,13 +121,9 @@ def _iter_app_routes(app):
         except Exception:
             pass
 
-
 def _app_paths(app) -> list[str]:
     """收集 app 上全部注册路由的 path。"""
     return [r.path for r in _iter_app_routes(app)]
-
-
-# ---------------------------------------------------- P1: runtime_view router
 
 class TestRuntimeViewRouter:
     def test_runtime_view_router_importable(self):
@@ -214,19 +198,15 @@ class TestRuntimeViewRouter:
                      "/api/runtime/tasks/claim"):
             assert (path, "POST") not in a, f"A must not serve worker protocol {path}"
 
-
-# ---------------------------------------------------- P1: events ops_router
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestEventsOpsRouter:
     def test_events_module_exposes_ops_router(self):
         from src.domains.runtime.routes import events
-        assert getattr(events, "ops_router", events.router) is not None
+        assert events.ops_router is not None
         assert events.router is not None  # 单进程模式完整 router 保留
 
     def test_ops_router_contains_operation_endpoints(self):
         from src.domains.runtime.routes import events
-        got = {(r.path, tuple(sorted(r.methods))) for r in getattr(events, "ops_router", events.router).routes}
+        got = {(r.path, tuple(sorted(r.methods))) for r in events.ops_router.routes}
         expected = {
             ("/api/events/{seq}/terminate", ("POST",)),
             ("/api/events/{seq}/redispatch", ("POST",)),
@@ -244,12 +224,12 @@ class TestEventsOpsRouter:
     def test_ops_router_excludes_view_endpoints(self):
         """GET 查看端点不在 ops_router（归 A 的完整 router）。"""
         from src.domains.runtime.routes import events
-        for r in getattr(events, "ops_router", events.router).routes:
+        for r in events.ops_router.routes:
             assert "GET" not in r.methods, f"ops_router must not serve GET {r.path}"
 
     def test_ops_router_reuses_original_functions(self):
         from src.domains.runtime.routes import events
-        by_path = {r.path: r.endpoint for r in getattr(events, "ops_router", events.router).routes}
+        by_path = {r.path: r.endpoint for r in events.ops_router.routes}
         assert by_path.get("/api/events/{seq}/terminate") is events.terminate_event
         assert by_path.get("/api/events/{seq}/redispatch") is events.redispatch_event
 
@@ -267,7 +247,7 @@ class TestEventsOpsRouter:
         def _route_ids(routes):
             return {(getattr(r, "path", ""), tuple(sorted(getattr(r, "methods", ()))),
                      id(getattr(r, "endpoint", None))) for r in routes}
-        ops_ids = _route_ids(getattr(events, "ops_router", events.router).routes)
+        ops_ids = _route_ids(events.ops_router.routes)
         full_ids = _route_ids(events.router.routes)
         included = _route_ids(_iter_app_routes(grape_event_server.app))
         assert ops_ids & included, "B process must include events ops_router routes"
@@ -275,11 +255,8 @@ class TestEventsOpsRouter:
         assert not (full_ids - ops_ids) & included, \
             "B process must not include events view routes (GET detail etc.)"
 
-
-# ------------------------------------------------- P1: nginx + systemd files
-
 class TestNginxConfig:
-    NGINX = REPO_ROOT / "deploy/nginx-grape.conf"
+    NGINX = REPO_ROOT / "nginx-grape.conf"
 
     def test_nginx_file_exists(self):
         assert self.NGINX.exists()
@@ -335,8 +312,6 @@ class TestNginxConfig:
         m = re.search(r"location / \{[^}]*proxy_pass http://127\.0\.0\.1:(\d+);", conf, re.S)
         assert m and m.group(1) == "38080", "default location must route to A (38080)"
 
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestSystemdUnits:
     FILES = [
         (REPO_ROOT / "deploy/systemd/grape-server.service", "src.api.grape_server:app", "38080"),
@@ -374,14 +349,10 @@ class TestSystemdUnits:
             content = (REPO_ROOT / "deploy/systemd" / name).read_text(encoding="utf-8")
             assert "OBS_LOG_DB=0" in content, f"{name} must set OBS_LOG_DB=0"
 
-
-# ------------------------------------------------------- P2: sweep split
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestSweepSplit:
     def test_cleanup_exports_split_symbols(self):
         from src.domains.runtime.engine import cleanup
-        for name in ("sweep_stuck_events_once", "sweep_stuck_agent_tasks_once",
+        for name in ("sweep_events_once", "sweep_tasks_once",
                      "sweep_events_loop", "sweep_tasks_loop", "sweep_loop", "sweep_once"):
             assert hasattr(cleanup, name), f"cleanup missing {name}"
 
@@ -393,21 +364,21 @@ class TestSweepSplit:
         assert "sweep_stuck_events_once" in src_once
         assert "sweep_stuck_agent_tasks_once" in src_once
 
-    def test_sweep_stuck_events_once_scope(self):
-        """sweep_stuck_events_once（B 维度）含事件回收，不含 agent_tasks 回收。"""
+    def test_sweep_events_once_scope(self):
+        """sweep_events_once（B 维度）含事件回收，不含 agent_tasks 回收。"""
         import inspect
         from src.domains.runtime.engine import cleanup
-        src_b = inspect.getsource(cleanup.sweep_stuck_events_once)
+        src_b = inspect.getsource(cleanup.sweep_events_once)
         assert "sweep_stuck_events_once" in src_b
         assert "purge_stale_instances" in src_b
         assert "sweep_stuck_agent_tasks_once" not in src_b, \
             "B sweep must not touch agent_tasks recycling (C dimension)"
 
-    def test_sweep_stuck_agent_tasks_once_scope(self):
-        """sweep_stuck_agent_tasks_once（C 维度）只回收悬空 agent_tasks。"""
+    def test_sweep_tasks_once_scope(self):
+        """sweep_tasks_once（C 维度）只回收悬空 agent_tasks。"""
         import inspect
         from src.domains.runtime.engine import cleanup
-        src_c = inspect.getsource(cleanup.sweep_stuck_agent_tasks_once)
+        src_c = inspect.getsource(cleanup.sweep_tasks_once)
         assert "sweep_stuck_agent_tasks_once" in src_c
         assert "sweep_stuck_events_once" not in src_c, \
             "C sweep must not touch events recycling (B dimension)"
@@ -421,17 +392,13 @@ class TestSweepSplit:
             src = inspect.getsource(loop)
             assert "_SWEEP_INTERVAL" in src
 
-    def test_sweep_stuck_agent_tasks_once_returns_int(self):
+    def test_sweep_tasks_once_returns_int(self):
         from src.domains.runtime.engine import cleanup
         # 无 DB 任务时应安全返回 0（worker 端无表场景 try/except 兜底）
-        result = cleanup.sweep_stuck_agent_tasks_once()
+        result = cleanup.sweep_tasks_once()
         assert isinstance(result, int)
         assert result >= 0
 
-
-# ------------------------------------------- P3: table_maintenance split
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestTableMaintenanceSplit:
     def test_main_uses_two_lock_keys(self):
         """单进程模式 main.py 同样用两个独立锁 key（与 A/C 语义一致）。"""
@@ -451,7 +418,7 @@ class TestTableMaintenanceSplit:
 
     def test_a_entry_messages_lock_only(self):
         from src.api import grape_server
-        src = _entry_source(grape_server)
+        src = Path(grape_server.__file__).read_text(encoding="utf-8")
         m = re.search(
             r'async with run_with_distributed_lock\("table_maintenance_messages"[^)]*\):\s*'
             r'[^}]*?cleanup_old_task_messages\(\)', src, re.S)
@@ -461,7 +428,7 @@ class TestTableMaintenanceSplit:
 
     def test_c_entry_tasks_lock_only(self):
         from src.api import grape_worker_server
-        src = _entry_source(grape_worker_server)
+        src = Path(grape_worker_server.__file__).read_text(encoding="utf-8")
         m = re.search(
             r'async with run_with_distributed_lock\("table_maintenance_tasks"[^)]*\):\s*'
             r'[^}]*?cleanup_old_agent_tasks_fields\(\)\s*[^}]*?delete_old_agent_tasks\(\)',
@@ -469,10 +436,6 @@ class TestTableMaintenanceSplit:
         assert m, "C entry: agent_tasks cleanup must run under tasks lock"
         assert "cleanup_old_task_messages" not in src
 
-
-# ------------------------------------------- P3: scheduled-task ownership
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestScheduledTaskOwnership:
     """§6 分配表：A/B/C 各自的定时任务互不越界。"""
 
@@ -537,10 +500,6 @@ class TestScheduledTaskOwnership:
                        "_start_active_user_tracker_task", "_start_server_metrics_task"):
             assert marker in content, f"main.py missing single-process task: {marker}"
 
-
-# ------------------------------------------- 共享模块复用（middleware/health/spa）
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestSharedModules:
     def test_middleware_module_exposes_installer(self):
         from src.api.middleware import install_request_middleware
@@ -584,10 +543,6 @@ class TestSharedModules:
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module("src.api.bot_manager_registry")
 
-
-# ------------------------------------------- IM 单一归属（§10.7）
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
 class TestIMOwnership:
     def test_im_engine_only_in_a_and_main(self):
         """§10.7 + A2：新 IM 引擎只在 A 进程 / 单进程入口启动。"""
@@ -598,7 +553,7 @@ class TestIMOwnership:
 
     def test_a_starts_im_engine(self):
         from src.api import grape_server
-        src = _entry_source(grape_server)
+        src = Path(grape_server.__file__).read_text(encoding="utf-8")
         assert "engine_wiring.start_im_engine" in src
         assert "bot_manager_registry" not in src, "A2: legacy registry must be gone from the A entry"
         assert "import BotManager" not in src, "A2: A entry must not start the legacy BotManager"
@@ -608,28 +563,43 @@ class TestIMOwnership:
         assert "engine_wiring.start_im_engine" in content
         assert "set_bot_manager" not in content
 
+class TestReviewFixBotManagerMigration:
+    """审查 Required #1：多进程下 IM 动态增删 bot 的调用点必须走 registry。"""
 
-# -------------------------- P1-P3 审查修复（A2 后：legacy 调用点已清零 + 状态驱动取消）
-
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
-class TestReviewFixLegacyBotManagerRemoved:
-    """A2（2026-11-10）：多进程 bot 动态增删链路整体下线，路由文件不得再引用 legacy 桥。"""
-
-    ROUTE_FILES = [
-        "src/domains/mgmt/routes/feishu_card.py",
-        "src/api/routes/feishu_onboard.py",
-        "src/domains/runtime/routes/chat.py",
-        "src/domains/mgmt/routes/agents.py",
+    CALL_SITES = [
+        ("src/domains/mgmt/routes/feishu_card.py", 2),
+        ("src/domains/mgmt/routes/feishu_onboard.py", 1),
+        ("src/domains/runtime/routes/chat.py", 1),
+        ("src/domains/mgmt/routes/agents.py", 2),
     ]
 
-    def test_no_route_file_references_legacy_bot_manager(self):
-        for rel in self.ROUTE_FILES:
+    def test_no_route_file_imports_bot_manager_from_main(self):
+        for rel, _ in self.CALL_SITES:
             content = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            assert "bot_manager_registry" not in content, f"{rel} still imports the legacy registry"
-            assert "from src.api.main import bot_manager" not in content, f"{rel} still imports bot_manager"
+            assert "from src.api.main import bot_manager" not in content, \
+                f"{rel} must not import bot_manager from src.api.main (module-level None in A process)"
 
+    def test_call_sites_use_registry(self):
+        for rel, count in self.CALL_SITES:
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            got = content.count("from src.api.bot_manager_registry import get_bot_manager")
+            assert got >= count, \
+                f"{rel} must call get_bot_manager() at {count} site(s), found {got}"
 
-@pytest.mark.skip(reason="weekly 三进程入口口径（A/B/C 逐任务启动）；arch 为四进程 + server_tasks 统一编排，待按四进程重写断言")
+    def test_migrated_sites_still_work_with_registry_slot(self):
+        """registry 槽位注入 mock 后，迁移后的调用点语义等价（非 None 透传）。"""
+        from src.api import bot_manager_registry
+
+        class _FakeBM:
+            api = object()
+
+        bm = _FakeBM()
+        bot_manager_registry.set_bot_manager(bm)
+        try:
+            assert bot_manager_registry.get_bot_manager() is bm
+        finally:
+            bot_manager_registry.set_bot_manager(None)
+
 class TestReviewFixDirectTerminateStateDriven:
     """审查 Required #2：direct 模式跨进程终止改为状态驱动取消（C 侧探测杀引擎）。"""
 
@@ -654,3 +624,19 @@ class TestReviewFixDirectTerminateStateDriven:
         assert "状态驱动取消" in src, "terminate_event must document state-driven cancel for multi-process"
         # cancel_direct_task 保留（单进程模式兜底）
         assert "cancel_direct_task" in src
+
+class TestReviewFixLegacyBotManagerRemoved:
+    """A2（2026-11-10）：多进程 bot 动态增删链路整体下线，路由文件不得再引用 legacy 桥。"""
+
+    ROUTE_FILES = [
+        "src/domains/mgmt/routes/feishu_card.py",
+        "src/domains/mgmt/routes/feishu_onboard.py",
+        "src/domains/runtime/routes/chat.py",
+        "src/domains/mgmt/routes/agents.py",
+    ]
+
+    def test_no_route_file_references_legacy_bot_manager(self):
+        for rel in self.ROUTE_FILES:
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "bot_manager_registry" not in content, f"{rel} still imports the legacy registry"
+            assert "from src.api.main import bot_manager" not in content, f"{rel} still imports bot_manager"

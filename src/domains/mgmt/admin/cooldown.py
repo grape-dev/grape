@@ -202,7 +202,7 @@ def _cleanup_audit_logs():
 def run_cooldown_cleanup():
     """执行一次冷静期清理 + login_failures + audit_logs 过期记录清理。
 
-    集群分布式锁互斥——同一时间只有一个实例执行清理（复用 src/lock.py）。
+    集群分布式锁互斥——同一时间只有一个实例执行清理（复用 src/kernel/lock.py）。
     """
     from src.kernel.lock import acquire_lock, release_lock
 

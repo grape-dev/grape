@@ -7,7 +7,7 @@
   - 单个 `actions` block 最多 **25 个元素**。
 
 本模块只做"块级拼装 + 上限切分"，Card IR → blocks 的业务映射在
-`src/domains/runtime/im/channel/renderers/slack.py`（分层契约：平台字段只出现在适配器与 renderer）。
+`src/im/channel/renderers/slack.py`（分层契约：平台字段只出现在适配器与 renderer）。
 
 按钮回调：点击 → `block_actions` → `actions[0].action_id` + `value`（JSON 串）
 + `user.id`。`value` 就是 `action_payload()` 的序列化（`{"cmd": "/bind 2"}`），

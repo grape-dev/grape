@@ -12,6 +12,7 @@ tests/
 ├── api/                  # src/api 网关层：路由装配、OpenAPI、静态资源、中间件
 ├── mgmt/                 # src/domains/mgmt：auth/user/org/repo/skill/scene/template/feedback/IM
 ├── runtime/              # src/domains/runtime：agent/task/pipeline/event/chat/engine/webhook
+│   └── im/               # src/domains/runtime/im：渠道适配、卡片渲染、引擎接线、去重/租约
 ├── arch/                 # 架构约束（R1–R6）
 ├── atomic/               # 原子切片 / 迁移类
 ├── js/                   # 前端 node:test 用例（原 tests/frontend 已并入）
@@ -23,9 +24,9 @@ tests/
 前端与手工套件不参与 `pytest tests` 收集：
 
 ```bash
-node tests/js/test_chat_recall_464.js          # 单条前端用例
-bash tests/curl/test_r14_backend_guard.sh <jwt>  # 手工后端守卫
-python tests/playwright/test_r12_fullscreen_zindex.py  # 手工 E2E
+node tests/api/js/test_chat_recall_464.js          # 单条前端用例
+bash tests/api/curl/test_r14_backend_guard.sh <jwt>  # 手工后端守卫
+python tests/api/playwright/test_r12_fullscreen_zindex.py  # 手工 E2E
 ```
 
 ## 归属规则
@@ -73,3 +74,47 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 `tests/` 自身已由 `conftest.py` 注入 `sys.path`，共享 helper（如 `mock_db`）
 可直接裸名 import。
+
+## 对齐规则（2026-11-12 复规）
+
+`tests/` 与 `src/` 一一对应，**不再接受平铺的 `tests/test_*.py`**：
+
+| src | tests |
+|-----|-------|
+| `src/kernel/**`（含 `persistence/`） | `tests/kernel/**` |
+| `src/domains/mgmt/**` | `tests/mgmt/**` |
+| `src/domains/runtime/**`（含 `im/`） | `tests/runtime/**（含 im/）` |
+| `src/domains/insight/**` | `tests/insight/**` |
+| `src/domains/contracts/**` | `tests/contracts/**` |
+| `src/api/**` | `tests/api/**` |
+
+例外（不对应单个 src 包）：`arch/`（架构约束与仓级 ratchet）、`atomic/`（迁移原子切片）、
+`js/ playwright/ curl/`（前端与手工套件）。新增用例按「被测代码所在包」落到对应目录；
+跨域场景用例归到主被测域，并在文件 docstring 写明另一侧的契约来源。
+
+搬移后 `ROOT` 计算比平铺时多一层，写新用例时统一用
+`ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))`（域内两层）。
+
+### 前端 / 手工套件（也归到 api，因为前端页面与静态资源由 src/api 托管）
+
+| 目录 | 内容 | 运行方式 |
+|------|------|----------|
+| `tests/api/js/` | 98 个 Node 前端用例（页面纯函数/渲染逻辑） | `node tests/api/js/test_xxx.js` |
+| `tests/api/playwright/` | 5 个手工 E2E 脚本（浏览器，非 pytest；conftest 已 collect_ignore） | `python tests/api/playwright/test_r12_fullscreen_zindex.py` |
+| `tests/api/curl/` | HTTP 冒烟 shell | `bash tests/api/curl/test_r14_backend_guard.sh <jwt>` |
+
+原 `tests/{js,playwright,curl,atomic}` 已全部并入：`atomic` 的 5 个迁移/入口守卫按被测模块落进
+`tests/api/`（它们都直接锁 `src/api/db_setup.py` 与 `src/api/main.py`），JS/playwright/curl 的
+相对路径已整体上移一层（`../../src/...` → `../../../src/...`），node 侧 98/98 语法校验通过。
+
+## 已知既有失败（搬迁前就存在，非目录规整引入）
+
+- 之前因“特性未合入”被 skip 的两个模块已全部恢复执行（2026-11-12 移植
+  `sync_task_session_token` 与 session_store 的场景解析族）：`test_issue_990_*` 20 passed、
+  `test_issue_1753_*` 12 passed，不再有 skip 兜底的模块。
+- `tests/arch/test_silent_except_ratchet.py`：分支合并新增文件带入静默 except，基线文件不允许上调豁免。
+- `tests/contracts`：2 条 milestone 契约（旧）。
+- `tests/mgmt` 域整体失败较多（多为鉴权夹具与外部平台 mock 依赖，非搬迁引入）。
+- D105 三条源码守卫（org 哨兵、user_id 列亲和、`_ensure_column` 口径）已于 2026-11-12 修绿；
+  `org_id` 列在存量 MySQL 上仍是 INT，`org_id=''` 比较会被强制转 0，语义与 TEXT 哨兵一致，
+  全量 TEXT 化留待单独的数据迁移轮次。

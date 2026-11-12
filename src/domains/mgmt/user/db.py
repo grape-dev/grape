@@ -382,7 +382,7 @@ def set_credential(user_id: str, provider: str, config: dict) -> bool:
     """
     try:
         from src.domains.mgmt.auth.credential_crypto import encrypt
-        from src.id_gen import uuid7_str
+        from src.kernel.id_gen import uuid7_str
         plaintext = json.dumps(config, ensure_ascii=False)
         import time as _time
         now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
@@ -677,7 +677,7 @@ def _cleanup_usage_log_retention() -> None:
     """N4-p2：usage_log 保留期清理（启动链 force=True 重启即对齐；运行期
     由 log_usage 惰性触发 + 30 天节流承接）。异常全吞（清理失败不阻断启动）。"""
     try:
-        from src.persistence.credential_usage_log import cleanup_expired_retention
+        from src.kernel.persistence.credential_usage_log import cleanup_expired_retention
         _rc_n = cleanup_expired_retention(force=True)
         if _rc_n:
             log.info(f"usage_log retention cleanup: {_rc_n} rows")
@@ -4744,7 +4744,7 @@ def _upsert_repo_credential(c, repo_key: str, cred_type: str, value: str) -> Non
     F4/D106 修订①：原裸 INSERT 撞 UNIQUE(repo_key, cred_type)（S82 基线
     3 红根因），同仓二次轮换 500——两步法即本助手函数。
     """
-    from src.id_gen import uuid7_str
+    from src.kernel.id_gen import uuid7_str
     _now = time.strftime("%Y-%m-%d %H:%M:%S")
     _enc = _encrypt_repo_secret(value or "")
     _cur = c.execute(
@@ -5014,8 +5014,8 @@ def get_webhook_secret_by_repo_key_any(full_name: str, provider: str = "") -> st
         _rk = _trk_ws(full_name, provider=provider)
     # S81：ORM 路径（ManagedRepoRepository.find_by_full_name_any_provider）
     try:
-        from src.persistence.repositories import managed_repo_repository as _mrr
-        from src.persistence.uow import uow as _uow
+        from src.kernel.persistence.repositories import managed_repo_repository as _mrr
+        from src.kernel.persistence.uow import uow as _uow
         with _uow() as session:
             if _rk:
                 # 串仓隔离：精确 repo_key 单查（不遍历其他平台行）

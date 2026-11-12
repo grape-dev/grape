@@ -1591,7 +1591,8 @@ class BotManager:
             try:
                 c.execute(
                     "SELECT im_app_id, im_app_secret FROM chat_agent_session "
-                    "WHERE im_app_id!='' AND im_app_secret!='' AND user_id>0 AND (repo_key='' OR repo_key IS NULL)"
+                    "WHERE im_app_id!='' AND im_app_secret!='' AND user_id IS NOT NULL "
+                    "AND user_id NOT IN ('', '0') AND (repo_key='' OR repo_key IS NULL)"
                 )
                 for cid, csec in c.fetchall():
                     if cid and cid not in bots:

@@ -202,16 +202,16 @@ class TestFailureFinalizationRuntimePath:
         fake_modules = {
             "src.api.event_pipeline": ep,
             "src.domains.runtime.engine.executor": mock.MagicMock(stream_devops_agent=fake_stream),
-            "src.prompt_builder": mock.MagicMock(
+            "src.kernel.prompt_builder": mock.MagicMock(
                 build_devops_agent_prompt=lambda *a, **k: "test prompt"
             ),
             "src.api.event_store": es,
             "src.domains.runtime.engine.instances": mock.MagicMock(
                 runtime_instance_name=lambda *a, **k: "test-engine"
             ),
-            "src.session_manager": sm,
-            "src.token_service": ts,
-            "src.repo_key": rk,
+            "src.kernel.session_manager": sm,
+            "src.kernel.token_service": ts,
+            "src.kernel.repo_key": rk,
             "src.domains.mgmt.user.db": udb,
             "src.domains.mgmt.auth.grape_account_db": mock.MagicMock(),
             "src.api.deps": mock.MagicMock(),
@@ -262,7 +262,7 @@ class TestFailureFinalizationRuntimePath:
         import inspect
         from src.domains.runtime.engine.direct_executor import _execute_agent_inner
         src = inspect.getsource(_execute_agent_inner)
-        assert "from src.token_service import is_auth_401_error" in src, \
+        assert "from src.kernel.token_service import is_auth_401_error" in src, \
             "is_auth_401_error lazy import missing in _execute_agent_inner"
         assert "import json" in src, \
             "json lazy import missing in _execute_agent_inner"

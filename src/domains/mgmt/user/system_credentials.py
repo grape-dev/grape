@@ -135,9 +135,9 @@ def create(cred_type: str, value, operator_id: int,
     _check_type(cred_type)
     _require_admin(operator_id)
     cipher = _encrypt_value(cred_type, value)
-    from src.persistence.dto import SystemCredentialDTO  # noqa: F401 (形态引用)
-    from src.persistence.repositories import system_credential_repository as repo
-    from src.persistence.uow import uow
+    from src.kernel.persistence.dto import SystemCredentialDTO  # noqa: F401 (形态引用)
+    from src.kernel.persistence.repositories import system_credential_repository as repo
+    from src.kernel.persistence.uow import uow
     try:
         with uow() as session:
             if repo.get(session, scope_type, scope_id, cred_type) is not None:
@@ -179,8 +179,8 @@ def update(cred_type: str, value, operator_id: int,
     _check_type(cred_type)
     _require_admin(operator_id)
     cipher = _encrypt_value(cred_type, value)
-    from src.persistence.repositories import system_credential_repository as repo
-    from src.persistence.uow import uow
+    from src.kernel.persistence.repositories import system_credential_repository as repo
+    from src.kernel.persistence.uow import uow
     with uow() as session:
         old = repo.get(session, scope_type, scope_id, cred_type)
         if old is None:
@@ -205,8 +205,8 @@ def delete(cred_type: str, operator_id: int,
     返回是否删除了行（不存在=False，幂等友好）。"""
     _check_type(cred_type)
     _require_admin(operator_id)
-    from src.persistence.repositories import system_credential_repository as repo
-    from src.persistence.uow import uow
+    from src.kernel.persistence.repositories import system_credential_repository as repo
+    from src.kernel.persistence.uow import uow
     with uow() as session:
         existed = repo.delete(session, scope_type, scope_id, cred_type)
     if existed:
@@ -226,9 +226,9 @@ def get(cred_type: str, scope_type: str = "system", scope_id: str = ""):
     仅供管理面/运维探针用（要审计的消费方走 use()）。
     """
     _check_type(cred_type)
-    from src.persistence.dto import SystemCredentialDTO
-    from src.persistence.repositories import system_credential_repository as repo
-    from src.persistence.uow import uow
+    from src.kernel.persistence.dto import SystemCredentialDTO
+    from src.kernel.persistence.repositories import system_credential_repository as repo
+    from src.kernel.persistence.uow import uow
     with uow() as session:
         m = repo.get(session, scope_type, scope_id, cred_type)
         if m is None:
@@ -242,9 +242,9 @@ def get(cred_type: str, scope_type: str = "system", scope_id: str = ""):
 def list_by_type(cred_type: str) -> list:
     """按类型列出全部（解密后）。管理面"列出某类全部凭据"路径。"""
     _check_type(cred_type)
-    from src.persistence.dto import SystemCredentialDTO
-    from src.persistence.repositories import system_credential_repository as repo
-    from src.persistence.uow import uow
+    from src.kernel.persistence.dto import SystemCredentialDTO
+    from src.kernel.persistence.repositories import system_credential_repository as repo
+    from src.kernel.persistence.uow import uow
     with uow() as session:
         rows = repo.list_by_type(session, cred_type)
         return [SystemCredentialDTO(
@@ -264,9 +264,9 @@ def use(cred_type: str, actor_id: int = 0, executor_context: str = "",
     resolve 的职责，两入口语义分离：use=有审计的权威读取，
     resolve=带回落的容错读取）。
     """
-    from src.persistence.dto import SystemCredentialDTO
-    from src.persistence.repositories import system_credential_repository as repo
-    from src.persistence.uow import uow
+    from src.kernel.persistence.dto import SystemCredentialDTO
+    from src.kernel.persistence.repositories import system_credential_repository as repo
+    from src.kernel.persistence.uow import uow
     with uow() as session:
         m = repo.get(session, scope_type, scope_id, cred_type)
         if m is None:
@@ -278,7 +278,7 @@ def use(cred_type: str, actor_id: int = 0, executor_context: str = "",
             created_at=m.created_at, updated_at=m.updated_at)
     # 消费审计（usage_log 异步队列；失败不阻断——审计非强一致，N4-p3 语义）
     try:
-        from src.persistence.credential_usage_log import log_usage
+        from src.kernel.persistence.credential_usage_log import log_usage
         log_usage(dto.id, user_id=0,
                   credential_kind="system_credentials",
                   initiating_actor_id=actor_id,

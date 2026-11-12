@@ -176,7 +176,7 @@ except Exception as e:
 db.execute("""
     CREATE TABLE IF NOT EXISTS chat_agent_session (
         id TEXT PRIMARY KEY,
-        user_id INTEGER DEFAULT 0,
+        user_id TEXT DEFAULT '',      -- D105：UUID 字符串（原 INTEGER 0 哨兵）
         repo_key TEXT DEFAULT '',
         source TEXT, repository TEXT, status TEXT,
         runtime TEXT DEFAULT 'opencode',
@@ -236,7 +236,7 @@ try:
         # FR-18.4: backfill 改源——只建 (user_id) 空行，不灌注册名
         db.execute(
             "INSERT OR IGNORE INTO unified_user_mapping (user_id) "
-            "SELECT id FROM grape_accounts WHERE id>0"
+            "SELECT id FROM grape_accounts WHERE id IS NOT NULL AND id NOT IN ('', '0')"
         )
         # FR-18.4: 从 external_identities 回填平台列真值（仅填空值不覆盖 PAT 已写真值）
         try:

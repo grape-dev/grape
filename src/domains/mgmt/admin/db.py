@@ -398,7 +398,7 @@ def create_grape_user(username: str, email: str, password: str, nickname: str = 
     from src.domains.mgmt.auth.password import hash_password
     pw_hash = hash_password(password)
     email = (email or "").lower().strip() or None
-    from src.id_gen import uuid7_str
+    from src.kernel.id_gen import uuid7_str
     uid = uuid7_str()                   # D105 第二批：主键应用层 UUIDv7
     try:
         with db_lock:

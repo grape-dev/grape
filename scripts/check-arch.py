@@ -31,25 +31,37 @@ from collections import defaultdict
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(REPO_ROOT, "src")
 
-# Layers scanned (canonical Phase 1 layout only; shims at src/ top level are
-# compatibility surface, not architecture).
+# Layers scanned (canonical Phase 1 layout only; legacy top-level module paths
+# are compatibility surface, not architecture).
 KERNEL = "src/kernel"
 DOMAINS = "src/domains"
 DOMAIN_NAMES = ("mgmt", "runtime", "insight", "contracts")
 
-# Legacy top-level module paths that still exist only as re-export shims.
-# Issue #699 cleanup: every legacy *directory* shim (src/auth, src/user,
-# src/runtime, src/agent, src/im, src/vcs, src/storage, src/observability,
-# src/admin, src/project_info, src/api/routes/*) has been removed once all
-# importers migrated to src.domains.*; only the thin top-level module shims
-# kept for external callers remain forbidden inside kernel/domains.
+# Legacy top-level module paths (Issue #699 thin compat shims). Issue #2010
+# landed the canonical implementations in src/kernel/ and src/__init__.py
+# resolves the old names through lazy aliases straight to those modules (no
+# intermediate subpackage hop). They stay forbidden inside kernel/domains so
+# internal code always targets canonical modules; every legacy *directory*
+# shim (src/auth, src/user, src/runtime, src/agent, src/im, src/vcs,
+# src/storage, src/observability, src/admin, src/project_info,
+# src/api/routes/*) remains removed.
 LEGACY_SHIM_PREFIXES = (
     "src.config", "src.session_manager", "src.lock", "src.repo_key", "src.repo",
     "src.repo_cleanup", "src.repo_migrate", "src.mysql_compat", "src.token_service",
     "src.token_resolver", "src.prompt_builder", "src.worker_package", "src.localfs",
     "src.outbound_ledger", "src.scene_custom_env", "src.featured_order",
-    "src.help_docs_sync", "src.help_page_gen",
+    "src.help_docs_sync", "src.help_page_gen", "src.service_diagnostics",
     "src.api.event_pipeline", "src.api.jwt_utils", "src.api.auth_token",
+)
+
+# R7：已删除的 legacy 顶层路径（#699/#2010 清理后目录不存在）。
+# 与 R6 的区别：R6 管「仍可导入的薄 shim」（要求可导入），R7 管「已删除的路径」
+# （要求**不可**导入，且全仓不得出现 import）。函数内懒加载 import 是历史漏网区：
+# 曾因 `from src.user.db import ...` 未被静态扫描捕获，导致建单时 fail-closed 拒绝
+# ——「技能 scope 查询异常（No module named 'src.user'）」。
+REMOVED_LEGACY_PREFIXES = (
+    "src.user", "src.im", "src.vcs", "src.agent", "src.storage", "src.admin",
+    "src.observability", "src.runtime", "src.project_info", "src.api.routes",
 )
 
 # ── Whitelist: module -> {rule: reason} ────────────────────────────────────
@@ -93,10 +105,6 @@ WHITELIST: dict[str, dict[str, str]] = {
     },
     # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
     # Phase 5 inverts them through src/domains/contracts.
-    "src/kernel/mysql_compat.py": {
-        "R1": {"targets": ["src.domains.insight.observability.otel"],
-              "reason": "deferred otel db-span instrumentation; due Phase 5 -> contracts"},
-    },
     "src/kernel/repo_key.py": {
         "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
               "reason": "deferred platform-card lookups; due Phase 5 -> contracts"},
@@ -116,8 +124,6 @@ WHITELIST: dict[str, dict[str, str]] = {
     # R6: legacy shim imports due Phase 5 contracts. Evidence: check-arch at
     # base 13c6d0979 fails with these 13 R6 findings before this PR's changes
     # (run `python scripts/check-arch.py` on the base tree to reproduce).
-    "src/domains/runtime/agents/aishell_acp.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/pipeline/event_pipeline.py": {"R6": {"targets": ["src.outbound_ledger", "src.prompt_builder", "src.repo_key"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
     "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts"}},
     "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env"], "reason": "legacy shim imports; due Phase 5 contracts"}},
     # R5: known import cycles inherited from the pre-Phase-1 layout.
@@ -271,8 +277,19 @@ def main() -> int:
         return 2
 
     graph: dict[str, list[str]] = {}
-    r1 = r2 = r3 = r4 = r6 = []
-    r1, r2, r3, r4, r6 = [], [], [], [], []
+    r1, r2, r3, r4, r6, r7 = [], [], [], [], [], []
+    r5_intra: list = []  # 包内 re-export 环（>=4 段公共前缀），report-only 输出
+
+    # R7 全仓扫描：src/api 等非 kernel/domains 层不在主循环内，历史漏网正出自这里
+    # （`from src.user.db import ...` 写在 src/api/*.py 的函数体内）。
+    for _path in list(iter_py(SRC)):
+        _mod = module_name(_path)
+        if _mod.startswith(("src.kernel", "src.domains")):
+            continue  # 主循环已覆盖
+        _top, _all = imports_of(_path)
+        for _imp in _all:
+            if any(_imp == _p or _imp.startswith(_p + ".") for _p in REMOVED_LEGACY_PREFIXES):
+                r7.append((_mod, _imp))
 
     file_modules = {module_name(f) for f in files}
     for path in files:
@@ -316,6 +333,8 @@ def main() -> int:
             # R6 applies to every kernel/domains file
             if not _exempt("R6", imp) and any(imp == p or imp.startswith(p + ".") for p in LEGACY_SHIM_PREFIXES):
                 r6.append((mod, imp))
+            if any(imp == p or imp.startswith(p + ".") for p in REMOVED_LEGACY_PREFIXES):
+                r7.append((mod, imp))
 
     # R5 cycle detection (recursive Tarjan SCC)
     sys.setrecursionlimit(10000)
@@ -355,7 +374,26 @@ def main() -> int:
             strongconnect(v)
 
     r5 = []
+    def _common_prefix_len(mods):
+        """公共包前缀的段数（路径式，按 '.' 分段）。"""
+        parts = [m.split(".") for m in mods]
+        n = 0
+        for i in range(min(len(p) for p in parts)):
+            if len({p[i] for p in parts}) == 1:
+                n += 1
+            else:
+                break
+        return n
+
     for comp in sccs:
+        # 同一子包内部的导入环（>=4 段公共前缀，如 src.domains.runtime.im.adapters.feishu.*）
+        # 属于包内 re-export 的初始化顺序问题，Python 可正常加载（父包 __init__ 先完成）；
+        # 真正危险的是跨包/跨域环（公共前缀 <=3 段），仍按 HARD 处理。
+        if _common_prefix_len(comp) >= 4:
+            # 包内 re-export 环（Python 可正常加载）不判 HARD，但**不得静默跳过**：
+            # 登记后在 R5 段落里以 report-only 输出，避免豁免面不可见（QA MED-2）。
+            r5_intra.append(comp)
+            continue
         key = "CYCLE:" + "+".join(comp)
         # M-1（2026-11-12 QA 复审）：原为超集匹配（>=），一条大集合白名单可吞掉其内部
         # 任何新增真环，使 R5 在整域退化为免检。改为集合相等：白名单成员与检出 SCC
@@ -380,13 +418,18 @@ def main() -> int:
     section("R3 domains -> apps (reserved Phase 4)", r3, False)
     section("R4 cross-domain direct imports (Phase 5 contracts)", r4, False)
     section("R5 import cycles (kernel/domains)", [c for c in r5], True)
+    if r5_intra:
+        print("\n== R5 intra-package cycles (report-only, skipped) ==")
+        for comp in r5_intra:
+            print("  " + " <-> ".join(comp))
     section("R6 legacy shim imports", r6, True)
+    section("R7 removed legacy paths", r7, True)
 
     whitelisted = sum(len(v) for v in WHITELIST.values())
     print(f"\nwhitelist entries: {whitelisted} (see WHITELIST in this script)")
     print(f"R4 cross-domain findings: {len(r4)} (tracked for Phase 5)")
 
-    hard_fail = bool(r1 or r2 or r5 or r6) or (args.strict and r4)
+    hard_fail = bool(r1 or r2 or r5 or r6 or r7) or (args.strict and r4)
     if hard_fail:
         print("\nRESULT: FAIL (hard violations above)")
         return 1

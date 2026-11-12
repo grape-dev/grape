@@ -10,7 +10,7 @@ import os
 import time
 
 # prometheus_client 是服务端依赖（A/B/C 都装）；worker 包按最小依赖原则不带它，
-# 但 worker 侧需要通过 src.domains.insight.observability.otel 报 span（架构守护 BLOCKED-1）。
+# 但 worker 侧需要通过 src.kernel.otel 报 span（架构守护 BLOCKED-1）。
 # 因此这里做可选导入：缺失时提供 no-op 指标桩，保证模块可导入（worker 不采集指标）。
 try:
     from prometheus_client import (Counter, Histogram, Gauge, CollectorRegistry,
@@ -307,16 +307,6 @@ TASK_IN_PROGRESS = Gauge(
     registry=registry,
 )
 
-# Issue #1938：事件回报丢失补偿计数（按 agent / 场景 / 补偿路径 / 原始任务终态）。
-# 语义：任务已终态但事件回报未落库，服务端级联收敛并自行生成结论 —— 该计数反映
-# 「Agent 真实答复缺失」的频率与来源，是排查 worker 回报链路的第一手指标。
-CASCADE_COMPENSATION = Counter(
-    "grape_event_cascade_compensation_total",
-    "Event terminal conclusions written by cascade compensation (agent report missing).",
-    ["agent_type", "scene_id", "trigger", "task_status"],
-    registry=registry,
-)
-
 
 # ===== 标签规范化（参考 multica metrics/labels.go）=====
 
@@ -395,21 +385,6 @@ def record_task_failed(task_id: str, source: str, runtime_id: int, failure_reaso
     s = _normalize_source(source)
     m = _normalize_mode(_runtime_mode(runtime_id))
     TASK_FAILED.labels(source=s, runtime_mode=m, failure_reason=failure_reason or "unknown").inc()
-
-
-def record_cascade_compensation(agent_type: str = "", scene_id: str = "",
-                                trigger: str = "", task_status: str = ""):
-    """Issue #1938：事件级联收敛补偿发生时调用（按 agent / 场景 / 补偿路径统计）。
-
-    标签值做规范化（空 → unknown / default，长度截断），避免标签基数爆炸：
-    agent_type 与 scene_id 都是有限枚举集合，trigger / task_status 亦然。
-    """
-    CASCADE_COMPENSATION.labels(
-        agent_type=(agent_type or "unknown")[:64],
-        scene_id=(scene_id or "default")[:64],
-        trigger=(trigger or "unknown")[:64],
-        task_status=(task_status or "unknown")[:64],
-    ).inc()
 
 
 # ===== LLM token 用量指标（参考 multica metrics/business.go llmTokens）=====

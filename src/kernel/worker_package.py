@@ -4,28 +4,19 @@
 写入临时文件缓存，代码变更后失效重建。产物由 GET /api/runtime/install/package
 （rta_ 鉴权）下发。
 """
-
 import hashlib, io, os, re, shutil, subprocess, sys, tarfile, threading
 
 from src.kernel.config import log
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
 CACHE_DIR = os.path.join(ROOT, "data", "cache", "worker-package")
-
 PKG_PATH = os.path.join(CACHE_DIR, "grape-worker.tar.gz")
-
 VERSION_PATH = os.path.join(CACHE_DIR, "VERSION")
-
 WHEELS_DIR = os.path.join(CACHE_DIR, "wheels")
-
 PYPROJECT_PATH = os.path.join(ROOT, "pyproject.toml")
-
 PIP_INDEX = os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
-
 # grape CLI 独立项目：打包成 wheel 随 workers 离线安装（issue-45-worker-offline-grape-cli-design.md）
 GRAPE_CLI_REPO = os.environ.get("GRAPE_CLI_REPO", "https://gitcode.com/grape-dev/grape-cli.git")
-
 # 打包进安装包的 Python 解释器来源：uv 的 standalone 构建（python-build-standalone，
 # 免编译、自包含）。worker 端 install-worker.sh 在系统无 Python>=3.10 时用包内解释器建 venv。
 UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/share/uv/python"))
@@ -45,35 +36,13 @@ MANIFEST = [
     # 历史导入路径 src.domains.runtime.routes.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
-    "src/config.py",
-    "src/repo_key.py",
-    "src/id_gen.py",  # db.init_db 链：credentials_backfill_n1/credential_usage_log/db_setup 顶层 import（D105 UUIDv7）
-    "src/prompt_builder.py",
-    # 架构守护 F1（2026-11-10）：prompt_builder 顶层 import src.service_diagnostics
-    # （#1858 三面基址的候选地址诊断），漏列会让 worker 包内 prompt_builder 导入即
-    # ModuleNotFoundError —— executor 的两处 try/except 静默降级、scheduler 的
-    # resolve_task_server_env 直接抛错。纯 stdlib 单文件，随包下发无副作用。
-    "src/service_diagnostics.py",
-    "src/session_manager.py",
-    "src/mysql_compat.py",
-    "src/token_service.py",
-    "src/token_resolver.py",
+    # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/（旧路径
+    # src.config 等由 src/__init__.py 的别名一跳解析到该目录），故 "src/kernel/"
+    # 这一条即覆盖全部 19 个历史路径；首轮引入的中间子包目录条目已移除。
     "src/domains/mgmt/user/__init__.py",
     "src/domains/mgmt/user/db.py",
-    "src/domains/mgmt/user/legacy_column_migrations.py",  # db.init_db 顶层 import（存量列迁移），worker 闭包必需
-    "src/domains/mgmt/user/credentials_backfill_n1.py",  # db.init_db 顶层 import（凭据 N1 回填），worker 闭包必需
     "src/domains/mgmt/auth/",
-    # D85/S113: grape_account_db 模块级 import src.persistence（chat token 链 +
-    # engine_select 身份解析）；engine 挂 session_manager 同一连接（StaticPool）
-    "src/persistence/",
-    # S75 起 runtime/service.py + api/session_store.py 顶层 import src.domains.runtime.vcs（D84）：
-    # worker 闭包必须整目录携带（依赖面纯 stdlib），否则 agent 启动即 ModuleNotFoundError
-    "src/domains/runtime/vcs/",
     "src/api/__init__.py",
-    # D85/S113: chat 用户 token 注入链（agent.py get_user_token_for_repo）；
-    # deps.py 顶层 import fastapi（worker 清单已加）——函数内的 admin.db/jwt_utils
-    # 等服务端模块全是惰性 import，chat 链不触达
-    "src/api/deps.py",
     "src/api/routing.py",
     "src/api/time_utils.py",
     "src/api/event_store.py",
@@ -85,6 +54,9 @@ MANIFEST = [
     # worker 侧 otel 实现在 src/domains/insight/observability/，已由 "src/domains/" 覆盖
     "src/domains/runtime/agents/",
     "src/domains/runtime/engine/",
+    # S112/D84：engine/service.py 与 api/session_store.py 顶层 import
+    # src.domains.runtime.vcs；缺该目录存量 worker 升级后启动即 ModuleNotFoundError。
+    "src/domains/runtime/vcs/",
 
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
@@ -96,10 +68,12 @@ MANIFEST = [
 
 _build_lock = threading.Lock()
 
+
 def _tar_filter(ti: tarfile.TarInfo):
     if "__pycache__" in ti.name or ti.name.endswith(".pyc"):
         return None
     return ti
+
 
 def _git(args: list[str]) -> None:
     """执行 git（强制 Jason7602 身份替代：grape-cli 为私有仓库，该身份可读）"""
@@ -108,14 +82,15 @@ def _git(args: list[str]) -> None:
         check=True, capture_output=True, text=True, timeout=300,
     )
 
+
 # Issue #455: 拉取网络抖动——git clone/pull 偶发 HTTP/2 / 连接超时，
 # 网络类错误有限次退避重试（4xx 快速失败，不放大上游压力）。
 _GIT_NETWORK_ERR_RE = re.compile(
     r"(could not resolve|connection (timed out|refused|reset by peer)|failed to connect|"
     r"http/2|rpc failed|the remote end hung up|early eof|operation timed out|"
     r"unable to access|network is unreachable|ssl connect|timed out|could not read from remote repository)", re.IGNORECASE)
-
 _GIT_AUTH_ERR_RE = re.compile(r"returned error: (401|403|404)")
+
 
 def _git_retry(args: list[str], retries: int = 3, base_delay: float = 1.0) -> None:
     """git 网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。"""
@@ -136,6 +111,7 @@ def _git_retry(args: list[str], retries: int = 3, base_delay: float = 1.0) -> No
                 delay *= 2
             else:
                 raise
+
 
 def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     """把 grape-cli 构建成 wheel 放入 wheels/（离线随包安装）。
@@ -167,6 +143,7 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
         log.warning(f"worker_package: grape-cli wheel build failed (fallback online install): {e}")
     return whl_dir
 
+
 def _manifest_version() -> str:
     """按 manifest 各文件内容 sha256 计算指纹（代码变更即变化，git 无关，多 master 一致）。"""
     h = hashlib.sha256()
@@ -194,6 +171,7 @@ def _manifest_version() -> str:
                 h.update(b"unreadable")
     return h.hexdigest()[:16]
 
+
 def _requirements_hash() -> str:
     """pyproject.toml [worker] extra 内容指纹（变更即重新下载 wheels）。"""
     h = hashlib.sha256()
@@ -203,6 +181,7 @@ def _requirements_hash() -> str:
     except Exception:
         pass
     return h.hexdigest()[:16]
+
 
 # 打包进包的 Python 精简子集：bin/python3.12 + lib/python3.12(stdlib) + libpython*.so。
 # 剔除 include(编译扩展用)/share(文档)/tcl/tk/itcl/thread(GUI 与调试，worker 不需要)，
@@ -246,6 +225,7 @@ def _python_subset_entries(py_root: str) -> list[str]:
                 out.append(r)
     return sorted(out)
 
+
 # Issue #515: 支持打包的 Linux 架构（与 install-worker.sh uname -m 归一化一致）。
 # 构建机为 aarch64 时，旧实现只会捆绑单架构解释器 → x86_64 目标机选中后
 # `Exec format error` 提前退出、无法到达在线兜底。现按架构双目录捆绑：
@@ -254,8 +234,8 @@ PY_ARCH_ALIASES = {
     "x86_64": "x86_64", "amd64": "x86_64",
     "aarch64": "aarch64", "arm64": "aarch64",
 }
-
 _UV_INSTALL_REQUEST = "3.12"
+
 
 def _py_ver_key(py_root: str) -> tuple:
     """从 standalone 目录名解析版本 key（cpython-<ver>-...），失败返回 0 元组。"""
@@ -263,6 +243,7 @@ def _py_ver_key(py_root: str) -> tuple:
         return tuple(int(x) for x in os.path.basename(py_root).split("-")[1].split("."))
     except Exception:
         return (0, 0, 0)
+
 
 def _arch_label(parts: list[str]) -> str | None:
     """从 uv standalone 目录名分段识别架构标签（兼容两种命名），非支持架构返回 None。
@@ -274,6 +255,7 @@ def _arch_label(parts: list[str]) -> str | None:
         if p in PY_ARCH_ALIASES:
             return PY_ARCH_ALIASES[p]
     return None
+
 
 def _scan_pythons() -> dict[str, str]:
     """扫描 UV_PYTHON_DIR 下可打包的 Linux standalone Python，返回 {arch_label: py_root}。
@@ -305,6 +287,7 @@ def _scan_pythons() -> dict[str, str]:
     except Exception as e:
         log.warning(f"worker_package: scan python dir failed: {e}")
     return found
+
 
 def _find_pythons() -> dict[str, str]:
     """定位可打包的 Python 3.10+ standalone 构建（按架构），缺失架构现场用 uv 补齐。
@@ -343,6 +326,7 @@ def _find_pythons() -> dict[str, str]:
         log.warning("worker_package: no bundled Python found; package will rely on system Python>=3.10")
     return found
 
+
 def _python_fingerprint(py_root: str | None) -> str:
     """python 目录内容指纹（相对路径+size+mtime），变更即触发包重建。"""
     h = hashlib.sha256()
@@ -362,6 +346,7 @@ def _python_fingerprint(py_root: str | None) -> str:
         pass
     return h.hexdigest()[:8]
 
+
 def _pythons_fingerprint(pythons: dict[str, str]) -> str:
     """多架构 python 目录联合指纹（架构标签 + 单目录指纹），任一变化触发包重建。"""
     h = hashlib.sha256()
@@ -369,6 +354,7 @@ def _pythons_fingerprint(pythons: dict[str, str]) -> str:
         h.update(arch.encode("utf-8"))
         h.update(_python_fingerprint(pythons[arch]).encode("utf-8"))
     return h.hexdigest()[:8]
+
 
 # Issue #499: 随包预置多平台 wheels 矩阵——安装端 pip 按 wheel 平台标签自动精确匹配
 # 本机平台（不匹配的 wheel 自动跳过），矩阵外平台（macOS 等）离线失败回退在线安装。
@@ -379,10 +365,12 @@ WHEEL_PLATFORMS = [
     ("win_amd64", "windows amd64"),
 ]
 
+
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
 # pip download cannot parse extras from pyproject.toml directly, so we list the worker
 # deps explicitly here. Keep in sync with pyproject.toml [project.optional-dependencies] worker.
 WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24"]
+
 
 def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:
     """pip download 依赖 wheels 到 dest（可带跨平台 --platform 参数），返回退出码。
@@ -405,9 +393,11 @@ def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -
         log.warning(f"worker_package: pip download wheels exception: {e}")
         return 1
 
+
 def _wheels_cache_key(py_version: str) -> str:
     """wheels 缓存键：py_version + 平台矩阵 + requirements 指纹（任一变更重新下载）。"""
     return f"{py_version}:{'|'.join(p for p, _ in WHEEL_PLATFORMS)}:{_requirements_hash()}"
+
 
 def _ensure_wheels(py_version: str = "") -> str:
     """按平台矩阵下载 worker 依赖 wheels 到缓存目录（多平台预置），返回目录。
@@ -453,6 +443,7 @@ def _ensure_wheels(py_version: str = "") -> str:
         f.write(cur)
     return WHEELS_DIR
 
+
 def _wheels_fingerprint() -> str:
     """wheels 目录内容指纹（文件名+size），纳入包版本使 wheels 变更触发重建。"""
     h = hashlib.sha256()
@@ -468,11 +459,11 @@ def _wheels_fingerprint() -> str:
         pass
     return h.hexdigest()[:8]
 
+
 _cached_package_version = ""
-
 _cached_package_version_ts = 0.0
-
 _PACKAGE_VERSION_TTL = float(os.environ.get("PACKAGE_VERSION_TTL", "60"))
+
 
 def package_version(force: bool = False) -> str:
     """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。
@@ -509,9 +500,9 @@ def package_version(force: bool = False) -> str:
     _cached_package_version_ts = _now
     return ver
 
+
 # 缓存：worker 代码版本（仅 git commit，不含 wheels/python 指纹）
 _cached_code_version = ""
-
 _cached_code_version_ts = 0.0
 
 def worker_code_version() -> str:
@@ -532,6 +523,7 @@ def worker_code_version() -> str:
     _cached_code_version_ts = _now
     return ver
 
+
 def _compute_worker_code_version() -> str:
     """无 TTL 缓存、强制重算的代码版本（打包专用）。
 
@@ -545,6 +537,7 @@ def _compute_worker_code_version() -> str:
     # 不依赖 git HEAD：多 master 的 git 状态可能不一致（不同分支/dirty/commit），
     # 用 manifest 文件内容指纹计算版本，只要文件内容一致 → 版本一致。
     return "h-" + _manifest_version()[:12]
+
 
 def normalize_worker_version(ver: str) -> str:
     """归一化 worker 版本串，兼容老格式（Issue #257 B5）。
@@ -571,6 +564,7 @@ def normalize_worker_version(ver: str) -> str:
         ver = "h-" + ver[2:14]
     return ver
 
+
 def _write_sha256sums(tar: tarfile.TarFile, members: list[tuple[str, bytes]]):
     """将各文件 sha256 写入包内 SHA256SUMS（排除自身）。"""
     lines = []
@@ -583,6 +577,7 @@ def _write_sha256sums(tar: tarfile.TarFile, members: list[tuple[str, bytes]]):
     info.size = len(content)
     tar.addfile(info, io.BytesIO(content))
 
+
 def _build_async():
     """后台构建安装包（daemon 线程，异常仅告警）。"""
     try:
@@ -590,6 +585,7 @@ def _build_async():
         log.info(f"worker_package: async prebuild done -> {PKG_PATH}")
     except Exception as e:
         log.warning(f"worker_package: async prebuild failed: {e}")
+
 
 def ensure_package_ready():
     """确保安装包缓存就绪：缺失或过期时异步后台构建，不阻塞调用方。
@@ -611,6 +607,7 @@ def ensure_package_ready():
             pass
     threading.Thread(target=_build_async, daemon=True, name="worker-pkg-prebuild").start()
 
+
 def _cached_pkg_code_version() -> str:
     """读取缓存包内实际戳的 VERSION（读失败返回空串）。
 
@@ -629,6 +626,7 @@ def _cached_pkg_code_version() -> str:
             return member.read().decode("utf-8", errors="replace").strip()
     except Exception:
         return ""
+
 
 def build_package() -> str:
     """构建安装包并返回路径。缓存命中直接返回；代码变更后重建（原子替换）。"""
@@ -748,5 +746,3 @@ def build_package() -> str:
         with open(VERSION_PATH, "w", encoding="utf-8") as f:
             f.write(ver)
         return PKG_PATH
-
-REQUIREMENTS_PATH = os.path.join(ROOT, "requirements-worker.txt")

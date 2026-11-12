@@ -1,14 +1,10 @@
 """Agent Session 管理 — per (repo_key, agent_type) 独立会话"""
-
 import uuid, json
-
 from datetime import datetime
-
 from src.kernel.session_manager import db, db_lock
-
 from src.kernel.config import log
-
 from src.api.time_utils import normalize_event_time
+
 
 def get_agent_type_enable(agent_type: str) -> int:
     """读 agent_type.enable（全局默认，sre 默认关）。无记录返回 1（默认开）。"""
@@ -22,6 +18,7 @@ def get_agent_type_enable(agent_type: str) -> int:
     except Exception:
         pass
     return 1
+
 
 def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
     """仓库级 Agent 是否启用：优先 devops_agent_session.enable，无会话回退 agent_type.enable。
@@ -39,6 +36,9 @@ def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
         pass
     return bool(get_agent_type_enable(agent_type))
 
+
+# ===== Issue 生命周期状态机（issue_state，见 vod-skill-upgrade-plan.md §3.0.2）=====
+
 def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     """读 Issue 当前阶段。无记录返回 None。
 
@@ -46,8 +46,12 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     `issue_state` 仅作停写过渡期的兜底（存量未清理前的兼容）。
     """
     # 1. issue 单表（权威）
-    _num = _issue_num_or_ident(issue_id)
-    if _num is not None:
+    _num = None
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+    except Exception:
+        _num = None
+    if _num:
         try:
             with db_lock:
                 c = db.cursor()
@@ -86,6 +90,7 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
         pass
     return None
 
+
 def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated_at: bool = True,
                        ensure_row: bool = False, assignee: str = ""):
     """Phase B2.5/C3：将收编字段写回 `issue` 卡片行（按 issue_number）。
@@ -95,8 +100,11 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
     - ensure_row=False：仅 UPDATE 已有行（默认，保持既有行为）。
     幂等：UPDATE 按 repo_key+issue_number，无行建档仅一次。
     """
-    _num = _issue_num_or_ident(issue_id)
-    if _num is None:
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+    except Exception:
+        return
+    if not _num:
         return
     sets = ", ".join(f"{k}=?" for k in fields)
     if not sets:
@@ -113,36 +121,14 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
                 # assignee 为空 → 直接 user_id=0；非空 → 按 provider 查 gitcode_user / github_login。
                 _assignee = assignee or (fields.get("assignee") or "")
                 if _assignee:
-                    # S54（D34）：建档写入路径身份优先——external_identities 命中即权威
-                    # （错位数据的生产端收口；um 名字域兜底保持原路径不变）
-                    _uid_hit = 0
-                    try:
-                        from src.kernel.repo_key import parse_repo_key
-                        from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
-                        _prov, _, _ = parse_repo_key(repo_key or "")
-                        _uid_hit = resolve_user_id_by_platform_login(_prov, _assignee)
-                    except Exception as _ie:
-                        from src.kernel.config import log as _ilog
-                        _ilog.warning(f"_sync_issue_fields: identity-first resolution failed "
-                                      f"(assignee={_assignee!r}, repo={repo_key!r}): {_ie}")
-                    if _uid_hit:
-                        _usr_expr = "?"
-                        _usr_pre = (_uid_hit,)
-                    else:
-                        # FR-CQ-1: um 名字域兜底（原路径不变）
-                        from src.kernel.repo_key import um_column_for_repo
-                        _col = um_column_for_repo(repo_key)
-                        if _col:
-                            _usr_expr = (f"COALESCE((SELECT m.user_id FROM unified_user_mapping m "
-                                         f"WHERE m.{_col} = ? AND (m.user_id IS NOT NULL AND m.user_id != '' AND m.user_id != '0') "
-                                         f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id AND ga.status = 1) "
-                                         f"ORDER BY m.user_id LIMIT 1), 0)")
-                            _usr_pre = (_assignee,)
-                        else:
-                            # D39/S59：无 um 列平台（gitee 等）兜底 miss → 0
-                            # （不折叠查 gitcode_user 造成跨平台误归属）
-                            _usr_expr = "0"
-                            _usr_pre = ()
+                    # FR-CQ-1: 提取为 um_column_for_repo 工具函数
+                    from src.kernel.repo_key import um_column_for_repo
+                    _col = um_column_for_repo(repo_key)
+                    _usr_expr = (f"COALESCE((SELECT m.user_id FROM unified_user_mapping m "
+                                 f"WHERE m.{_col} = ? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') "
+                                 f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id AND ga.status = 1) "
+                                 f"ORDER BY m.user_id LIMIT 1), 0)")
+                    _usr_pre = (_assignee,)
                 else:
                     _usr_expr = "0"
                     _usr_pre = ()
@@ -159,6 +145,7 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
         from src.kernel.config import log as _log2
         _log2.warning(f"sync issue table failed for {repo_key} #{_num}: {e}")
 
+
 def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                     a2a_seq: int | None = None, assignee: str = ""):
     """写入/更新 Issue 阶段（幂等 upsert，兼容 SQLite/MySQL）。assignee 为 Issue 责任人（GitCode 用户名）。
@@ -167,24 +154,6 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     建档由 `_sync_issue_fields` 的 ensure_row 保证（无卡片行建最小行）。
     scene_id 初始为空，由 Task Center set_issue_scene 或智能推荐写入。
     """
-    from src.kernel.config import log
-    # Issue #1599 修复（2026-11-09）：同 stage 重写不得抹掉人工审核点。
-    # 旧实现无条件写 status，重派/重试等幂等重写（set_issue_stage('sre','sre')）会把
-    # pending_review 清成 processing，随后 auto_finalize 绕过「待审核不自动结单」直接 auto_done。
-    # 故**写前**先取旧 stage（必须在 _sync_issue_fields 之前，否则读到的是已更新的新值）。
-    _prev_stage, _prev_known = "", False
-    try:
-        _num_prev = _issue_num_or_ident(issue_id)
-        if _num_prev is not None:
-            with db_lock:
-                _row_prev = db.cursor().execute(
-                    "SELECT stage FROM issue WHERE repo_key=? AND issue_number=?",
-                    (repo_key, _num_prev)).fetchone()
-            _prev_stage = ((_row_prev[0] if _row_prev else "") or "").strip()
-            _prev_known = True
-    except Exception as _e_prev:
-        log.warning(f"set_issue_stage: read previous stage failed ({repo_key} #{issue_id}): {_e_prev}")
-
     # Phase C3：写 issue 单表（无卡片行则建档最小行）
     _sync_issue_fields(repo_key, issue_id, {
         "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
@@ -202,33 +171,36 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     _task_status = _STAGE_TO_TASK_STATUS.get(stage)
     if _task_status:
         try:
-            _issue_num = _issue_num_or_ident(issue_id)
-            if _issue_num is not None:
-                with db_lock:
-                    _c = db.cursor()
-                    _c.execute(
-                        "UPDATE issue SET status=? "
-                        "WHERE repo_key=? AND issue_number=? "
-                        "AND status NOT IN ('completed','cancelled','awaiting_input')",
-                        (_task_status, repo_key, _issue_num))
-                    db.commit()
+            _issue_num = int(issue_id.lstrip("#"))
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "UPDATE issue SET status=? "
+                    "WHERE repo_key=? AND issue_number=? "
+                    "AND status NOT IN ('completed','cancelled','awaiting_input','pending_review')",
+                    (_task_status, repo_key, _issue_num))
+                db.commit()
         except Exception as _e:
             log.warning(f"set_issue_stage: sync task.status failed: {_e}")
+
 
 def get_issue_owner(repo_key: str, issue_id: str) -> str:
     """返回 Issue 当前归属 agent（无记录默认 'vod'）。"""
     st = get_issue_stage(repo_key, issue_id)
     return st["owner_agent"] if st else "vod"
 
+
 def get_issue_stage_name(repo_key: str, issue_id: str) -> str:
     """返回 Issue 当前阶段名（无记录默认 'vod'）。"""
     st = get_issue_stage(repo_key, issue_id)
     return st["stage"] if st else "vod"
 
+
 def get_issue_assignee(repo_key: str, issue_id: str) -> str:
     """返回 Issue 责任人（GitCode assignee 用户名；无记录空）。"""
     st = get_issue_stage(repo_key, issue_id)
     return (st["assignee"] if st else "") or ""
+
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     """读取 Issue 级开发场景。issue_state.scene_id 为空时回退到 issue 表。
@@ -277,91 +249,6 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
         pass
     return "", 0
 
-# Issue #1753 复审：carried_context.target_branch_source 的来源标记共享常量，
-# webhook（写入）与 prompt_builder（判定）统一引用，避免魔法字符串口径漂移。
-TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH = "target_scene_work_branch"
-
-# 承接场景未配置 work_branch（含多跳链残留）时，历史权威标记显式失效为该值。
-TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH = "unconfirmed_no_target_scene_work_branch"
-
-def _scene_binding_active(repo_key: str, scene_id: str) -> bool:
-    """绑定场景是否仍可用（Issue #1745：场景行存在但全部 is_active=0 → 失效）。
-
-    行不存在不算失效（内置/场景市场未落库的绑定沿用 #568 既有契约）；查询异常按有效处理，
-    不因 DB 抖动误清空场景。
-    """
-    if not scene_id:
-        return False
-    try:
-        with db_lock:
-            rows = db.cursor().execute(
-                "SELECT is_active FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND (repo_key=? OR repo_key='')",
-                (scene_id, repo_key or "")).fetchall()
-    except Exception:
-        return True
-    if not rows:
-        return True
-    return any((r[0] if r else 0) for r in rows)
-
-def resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
-    """解析 Issue 当前绑定开发场景 ID（Issue 级快照优先，空则回退仓库默认场景）。
-
-    Issue #1753：统一 webhook / runtime.repogit / prompt_builder 的场景解析口径。
-    Issue #1745：绑定场景已停用（幽灵 scene_id 会让 scenes detail 必 404）时回退仓库
-    默认场景；仍不可用则按「未判定=空串」返回。未选定返回空串。
-    """
-    try:
-        scene_id = (get_issue_scene(repo_key, issue_id)[0] or "")
-    except Exception:
-        return ""
-    if not scene_id:
-        return ""
-    if _scene_binding_active(repo_key, scene_id):
-        return scene_id
-    try:
-        from src.domains.mgmt.user.db import get_repo_scene
-        fallback = get_repo_scene(repo_key) or ""
-    except Exception:
-        fallback = ""
-    if fallback and fallback != scene_id and _scene_binding_active(repo_key, fallback):
-        return fallback
-    return ""
-
-def get_scene_advanced_options(repo_key: str, scene_id: str) -> dict:
-    """读取场景高级选项（devops_pipeline_scene.advanced_options，未配置/失败返回 {}）。
-
-    Issue #1753：统一 webhook / runtime.repogit / prompt_builder 的场景配置读取口径，
-    避免三处重复裸 SQL 导致字段口径漂移。
-    """
-    if not repo_key or not scene_id:
-        return {}
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT advanced_options FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (scene_id, repo_key))
-            row = c.fetchone()
-        if not row or not row[0]:
-            return {}
-        opts = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-        return opts if isinstance(opts, dict) else {}
-    except Exception:
-        return {}
-
-def get_scene_work_branch(repo_key: str, scene_id: str = "", issue_id: str = "") -> str:
-    """读取场景权威开发基线 work_branch（与运行时 GRAPE_WORK_BRANCH 同源）。
-
-    scene_id 显式给出时直接读取（如跨流水线承接目标场景）；否则按 issue_id 解析当前
-    绑定场景。未配置/查询失败返回空串。
-    """
-    if not scene_id:
-        scene_id = resolve_scene_id(repo_key, issue_id)
-    if not scene_id:
-        return ""
-    return str(get_scene_advanced_options(repo_key, scene_id).get("work_branch", "") or "").strip()
 
 def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
     """读取 Issue 真实绑定的场景（Issue #681，推荐入口专用，勿用于展示/A2A）。
@@ -401,12 +288,14 @@ def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
         pass
     return "", 0
 
+
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
     """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},
                        ensure_row=True)
     from src.kernel.config import log
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
+
 
 def get_carried_context(repo_key: str, issue_number: int) -> dict:
     """Issue #329: 读取 issue 表 carried_context 列，返回解析后的 dict（无记录/异常返回 {}）。
@@ -427,11 +316,13 @@ def get_carried_context(repo_key: str, issue_number: int) -> dict:
         pass
     return {}
 
+
 def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
     """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override）。Phase C3：仅写 issue 单表。"""
     val = 1 if allowed else 0
     _sync_issue_fields(repo_key, issue_id, {"allow_scene_override": val}, ensure_row=True)
     log.info(f"SceneOverride: repo={repo_key} issue={issue_id} allowed={val}")
+
 
 def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
     """读取 Issue 是否允许 VOD 覆盖场景。默认 False。Phase C3：读 issue 单表。"""
@@ -452,16 +343,19 @@ def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
             return False
     return False
 
+
 def set_parent_issue(repo_key: str, issue_id: str, parent_issue_id: str):
     """标记 Issue 为子任务（设置 parent_issue_id）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"parent_issue_id": parent_issue_id or ""}, ensure_row=True)
     from src.kernel.config import log
     log.info(f"ParentIssue: repo={repo_key} issue={issue_id} parent={parent_issue_id}")
 
+
 def get_parent_issue(repo_key: str, issue_id: str) -> str:
     """返回 Issue 的 parent_issue_id（空=普通任务）。"""
     st = get_issue_stage(repo_key, issue_id)
     return (st or {}).get("parent_issue_id", "")
+
 
 def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
     """标记 Issue 为多任务模式（父任务）。Phase C3：仅写 issue 单表。"""
@@ -470,14 +364,17 @@ def set_subtask_mode(repo_key: str, issue_id: str, enabled: bool = True):
     from src.kernel.config import log
     log.info(f"SubtaskMode: repo={repo_key} issue={issue_id} enabled={enabled}")
 
+
 def is_subtask(repo_key: str, issue_id: str) -> bool:
     """判断 Issue 是否为子任务（parent_issue_id 非空）。"""
     return bool(get_parent_issue(repo_key, issue_id))
+
 
 def is_subtask_mode_enabled(repo_key: str, issue_id: str) -> bool:
     """判断 Issue 是否启用了多任务模式（父任务标记）。"""
     st = get_issue_stage(repo_key, issue_id)
     return bool((st or {}).get("is_subtask_mode", 0))
+
 
 def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
     """查询父任务的所有子任务（issue 单表）。返回 issue_id/stage/owner_agent。"""
@@ -488,11 +385,11 @@ def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
         c = db.cursor()
         c.execute(
             "SELECT issue_number, stage, owner_agent FROM issue "
-            "WHERE repo_key=? AND parent_issue_id=? "
-            "ORDER BY LENGTH(issue_number), issue_number",
+            "WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_number",
             (repo_key, _pid),
         )
         return [{"issue_id": "#" + str(r[0]), "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
+
 
 def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict]:
     """查询源需求下的发布子单列表（方案 C：子单为 issue 行，release_target_env 非空即发布子单）。
@@ -508,14 +405,14 @@ def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict
             "created_at, completed_at "
             "FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
             "ORDER BY id DESC",
-            (repo_key, _native_issue_number(parent_issue_number)),
+            (repo_key, int(parent_issue_number)),
         )
         out = []
         for r in c.fetchall():
             out.append({
                 "issue_id": r[0],
                 "sub_issue_number": r[1],
-                "parent_issue_number": _native_issue_number(parent_issue_number),
+                "parent_issue_number": int(parent_issue_number),
                 "title": r[2] or "",
                 "status": r[3] or "active",
                 "stage": r[4] or "vod",
@@ -530,6 +427,7 @@ def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict
                 "completed_at": r[13] or "",
             })
         return out
+
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,
                                  backend: str = "", runtime_id: int = 0) -> dict:
@@ -589,9 +487,10 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
                 "last_active_at": now, "enable": bool(_enable), "new": True,
                 "repo_key": repo_key, "agent_type": agent_type}
 
+
 def upsert_agent_session(*, repo_key: str, agent_type: str,
                          runtime_id: int = 0, skill: str = "", skill_id: int = 0,
-                         status: str = "idle",
+                         repo_gitcode_token: str | None = None, status: str = "idle",
                          enable: int | None = None, subscribe_events: str | None = None) -> str:
     """创建或更新 Agent 会话，保留既有主键 id。
 
@@ -600,10 +499,11 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
     导致 vod_conversations.agent_session_id 悬空（"agent_session_id not found, auto-rebind"）。
     修复：已存在 → UPDATE 保留 id；不存在 → INSERT。
 
-    enable/subscribe_events 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
+    enable/subscribe_events/repo_gitcode_token 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
     传具体值 = 覆盖。
-    D101 方案三（T6）：repo_gitcode_token 形参删除——session token 列退役
-    （R25.9 回声治理后全部调用方传 None，死参数；列本体保留兼容存量库 SELECT）。
+    A2 收尾：IM 凭证不再落 devops_agent_session（im_* 三列改读 grape_t_channel_installation）。
+    repo_gitcode_token 同样 None=保留（R25.9 回声治理：session 行只允许存用户显式配置的
+    agent 专属 token，低级别 token 永不回填；清空走 unbind 的专门 SQL 路径）。
     返回会话 id。
     """
     with db_lock:
@@ -616,6 +516,9 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
             sets = ["runtime_id=?", "skill=?", "skill_id=?",
                     "status=?", "last_active_at=datetime('now')"]
             params = [runtime_id, skill, skill_id, status]
+            if repo_gitcode_token is not None:
+                sets.append("repo_gitcode_token=?")
+                params.append(repo_gitcode_token)
             if enable is not None:
                 sets.append("enable=?")
                 params.append(enable)
@@ -630,11 +533,12 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
         _enable = enable if enable is not None else get_agent_type_enable(agent_type)
         _sub = subscribe_events if subscribe_events is not None else "[]"
         c.execute(
-            "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))",
-            (sid, repo_key, agent_type, runtime_id, skill, skill_id,
+            "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+            (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token or "",
              status, _enable, _sub))
         db.commit()
         return sid
+
 
 def update_agent_session(session_id: str, status: str = "idle",
                          oc_session_id: str = None):
@@ -655,6 +559,7 @@ def update_agent_session(session_id: str, status: str = "idle",
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update session {session_id}: {e}")
+
 
 def list_agent_sessions(repo_key: str) -> list[dict]:
     """列出仓库的所有 Agent 会话"""
@@ -681,6 +586,7 @@ def list_agent_sessions(repo_key: str) -> list[dict]:
         except Exception:
             return []
 
+
 def delete_agent_session(repo_key: str, agent_type: str) -> bool:
     """删除单个 Agent 会话"""
     with db_lock:
@@ -692,6 +598,7 @@ def delete_agent_session(repo_key: str, agent_type: str) -> bool:
             return c.rowcount > 0
         except Exception:
             return False
+
 
 def ensure_default_agent_sessions(repo_key: str):
     """基于 agent-skill-mapping.json 的 default 场景，为仓库创建默认 Agent 会话"""
@@ -748,7 +655,7 @@ def ensure_default_agent_sessions(repo_key: str):
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=_at,
                     runtime_id=_rid, skill=_sk, skill_id=_skill_id,
-                    
+                    repo_gitcode_token=None, status="idle",
                     enable=None, subscribe_events=None,
                 )
             except Exception as e:
@@ -756,6 +663,7 @@ def ensure_default_agent_sessions(repo_key: str):
         db.commit()
 
     log.info(f"Auto-created agent sessions for repo={repo_key} from default scene")
+
 
 def remove_agent_sessions(repo_key: str) -> int:
     """删除仓库的所有 Agent 会话"""
@@ -771,6 +679,11 @@ def remove_agent_sessions(repo_key: str) -> int:
         except Exception as e:
             log.warning(f"Failed to remove sessions for {repo_key}: {e}")
             return 0
+
+
+# ===== Issue 级执行会话（多 Issue 并行，见 multi-issue-isolation-design.md §3.3）=====
+# 与 devops_agent_session（repo+agent 配置）分离：issue_agent_session 只承载 Issue 级
+# 会话续接指针（runtime_session_id）+ 状态，作为 agent_tasks.issue_session_id 的串行粒度。
 
 def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict:
     """获取或创建 Issue 级执行会话，per (repo_key, agent_type, issue_id) 独立。
@@ -814,6 +727,7 @@ def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -
         return {"id": sid, "runtime_session_id": _seed, "status": "idle",
                 "last_active_at": now, "session_engine": "", "new": True}
 
+
 def update_issue_session(session_id: str, runtime_session_id: str = None, status: str = None,
                          session_engine: str = None):
     """更新 Issue 级执行会话：续接指针 / 状态 / 引擎名。指针为空则不覆盖（避免丢上下文）。"""
@@ -843,6 +757,7 @@ def update_issue_session(session_id: str, runtime_session_id: str = None, status
         except Exception as e:
             log.warning(f"Failed to update issue session {session_id}: {e}")
 
+
 def get_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict | None:
     """按 (repo, agent, issue) 查 Issue 级执行会话；无记录返回 None。"""
     with db_lock:
@@ -856,6 +771,7 @@ def get_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict | N
         return {"id": row[0], "runtime_session_id": row[1] or "",
                 "status": row[2] or "idle", "last_active_at": row[3] or "",
                 "session_engine": row[4] or ""}
+
 
 def guard_issue_session_pointer(isess: dict, current_engine: str) -> str:
     """session 引擎守卫：校验续接指针的产出引擎与本次执行引擎是否同家。
@@ -877,6 +793,7 @@ def guard_issue_session_pointer(isess: dict, current_engine: str) -> str:
         return ""
     return sid
 
+
 def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:
     """列出仓库的 Issue 级执行会话（运维/前端展示并行情况）。"""
     sql = "SELECT id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at, created_at FROM issue_agent_session WHERE repo_key=?"
@@ -895,6 +812,7 @@ def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:
                  "runtime_session_id": r[4] or "", "status": r[5], "last_active_at": normalize_event_time(r[6]),
                  "created_at": normalize_event_time(r[7])} for r in rows]
 
+
 def remove_issue_sessions(repo_key: str):
     """删除仓库的所有 Issue 级执行会话（随仓库移除清理）。"""
     with db_lock:
@@ -907,7 +825,12 @@ def remove_issue_sessions(repo_key: str):
             log.warning(f"Failed to remove issue sessions for {repo_key}: {e}")
             return 0
 
-from src.domains.runtime.vcs.api_client import _native_issue_number  # S106：list_release_subissues 引用缺失导入（NameError 被 except 吞 → 发布子单列表 500）
+# Issue #1753：carried_context.target_branch_source 的来源标记（webhook 写入 /
+# prompt_builder 判定共用，避免魔法字符串口径漂移）。
+TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH = "target_scene_work_branch"
+# 承接场景未配置 work_branch（含多跳链残留）时，历史权威标记显式失效为该值。
+TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH = "unconfirmed_no_target_scene_work_branch"
+
 
 def _issue_num_or_ident(issue_id) -> "int | str | None":
     """D105 字符串 ident（gitee IK*）：issue_id 归一为平台原生形态——
@@ -920,6 +843,90 @@ def _issue_num_or_ident(issue_id) -> "int | str | None":
     if not _raw:
         return None
     return int(_raw) if _raw.isdigit() else _raw
+
+
+def _scene_binding_active(repo_key: str, scene_id: str) -> bool:
+    """绑定场景是否仍可用（Issue #1745：场景行存在但全部 is_active=0 → 失效）。
+
+    行不存在不算失效（内置/场景市场未落库的绑定沿用 #568 既有契约）；查询异常按有效处理，
+    不因 DB 抖动误清空场景。
+    """
+    if not scene_id:
+        return False
+    try:
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT is_active FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND (repo_key=? OR repo_key='')",
+                (scene_id, repo_key or "")).fetchall()
+    except Exception:
+        return True
+    if not rows:
+        return True
+    return any((r[0] if r else 0) for r in rows)
+
+
+def resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
+    """解析 Issue 当前绑定开发场景 ID（Issue 级快照优先，空则回退仓库默认场景）。
+
+    Issue #1753：统一 webhook / runtime.repogit / prompt_builder 的场景解析口径。
+    Issue #1745：绑定场景已停用（幽灵 scene_id 会让 scenes detail 必 404）时回退仓库
+    默认场景；仍不可用则按「未判定=空串」返回。未选定返回空串。
+    """
+    try:
+        scene_id = (get_issue_scene(repo_key, issue_id)[0] or "")
+    except Exception:
+        return ""
+    if not scene_id:
+        return ""
+    if _scene_binding_active(repo_key, scene_id):
+        return scene_id
+    try:
+        from src.domains.mgmt.user.db import get_repo_scene
+        fallback = get_repo_scene(repo_key) or ""
+    except Exception:
+        fallback = ""
+    if fallback and fallback != scene_id and _scene_binding_active(repo_key, fallback):
+        return fallback
+    return ""
+
+
+def get_scene_advanced_options(repo_key: str, scene_id: str) -> dict:
+    """读取场景高级选项（devops_pipeline_scene.advanced_options，未配置/失败返回 {}）。
+
+    Issue #1753：统一 webhook / runtime.repogit / prompt_builder 的场景配置读取口径，
+    避免三处重复裸 SQL 导致字段口径漂移。
+    """
+    if not repo_key or not scene_id:
+        return {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+        if not row or not row[0]:
+            return {}
+        opts = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        return opts if isinstance(opts, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_scene_work_branch(repo_key: str, scene_id: str = "", issue_id: str = "") -> str:
+    """读取场景权威开发基线 work_branch（与运行时 GRAPE_WORK_BRANCH 同源）。
+
+    scene_id 显式给出时直接读取（如跨流水线承接目标场景）；否则按 issue_id 解析当前
+    绑定场景。未配置/查询失败返回空串。
+    """
+    if not scene_id:
+        scene_id = resolve_scene_id(repo_key, issue_id)
+    if not scene_id:
+        return ""
+    return str(get_scene_advanced_options(repo_key, scene_id).get("work_branch", "") or "").strip()
+
 
 def get_issue_status(repo_key: str, issue_id: str) -> str:
     """读 Issue 当前 status（只读 helper）。无记录或异常返回 ""。
@@ -944,18 +951,3 @@ def get_issue_status(repo_key: str, issue_id: str) -> str:
         return ""
 
 # ==== merged from weekly-08 (symbols referenced by decouple modules) ====
-def _issue_number_key(issue_id) -> str:
-    """issue_number 查询键归一（Issue-ident IK* 兼容）。
-
-    issue_number 已归一全 TEXT（IKTVZQ 改造）：纯数字保值 + IK* 字符串编号原样保留。
-    旧 int(issue_id) 读侧对 IK* 编号抛异常静默 return，导致场景/stage 写读全部断链。
-    """
-    import re as _re
-    t = str(issue_id or "").strip().lstrip("#").strip()
-    if not t or t == "0":
-        return ""
-    if t.isdigit():
-        return str(int(t))
-    if _re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*", t):
-        return t
-    return ""

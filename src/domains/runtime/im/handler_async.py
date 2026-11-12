@@ -2,31 +2,38 @@
 
 核心改造:
   - process_chat_async: 接收 (BotContext, parsed) 替代全局函数调用
-  - 所有飞书API调用通过 ctx + egress 实例方法，按Bot身份隔离
+  - 所有飞书API调用通过 ctx + api 实例方法，按Bot身份隔离
   - 纯逻辑（bind/clean 意图、repo 解析、用户归属）内联本模块，无同步 HTTP；
-    IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await egress 异步方法。
+    IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
+
+from src.kernel.user_ids import has_user_id
 import re, os, asyncio, time, json, uuid
+
 from datetime import datetime
+
 from typing import TYPE_CHECKING
 
-from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR
+from src.kernel.config import log
+from src.kernel.config import WORKSPACE_DIR, SKILLS_DIR
+from src.domains.runtime.im.channel.card import Card
+
 from src.kernel.session_manager import get_or_create_session, update_session, update_conversation, db
+
 from src.kernel.prompt_builder import build_chat_prompt, resolve_task_server_env
-from src.domains.runtime.agents.executor import consume_stream_async
+
+from src.domains.runtime.engine.executor import consume_stream_async
+
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
+
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
+
 from src.api.chat_session_env import chat_session_env_extra
+
 from src.kernel.token_service import is_auth_401_error
-# Issue #1095：业务层只构造渠道中立 Card IR（lark 结构只允许出现在 renderer 内）
-from src.domains.runtime.im.channel.card import (
-    Action, ButtonStyle, Card, Tone,
-    button_block, divider_block, row_block, select_block, simple_card, text_block,
-)
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
-    from src.domains.runtime.im.engine.egress import HandlerEgress
 
 # p2p 首次消息待确认绑定：{app_id: {username: {"open_id", "gitcode_nickname", "expires"}}}
 # 用户确认后才写入 unified_user_mapping，防止错误绑定。
@@ -37,22 +44,21 @@ _pending_binds: dict[str, dict] = {}
 # 造成「还有后续回复」错觉。需要临时恢复时置 env FEISHU_CHAT_DYNAMIC_CARD=1。
 _FEISHU_DYNAMIC_CARD_ENV = "FEISHU_CHAT_DYNAMIC_CARD"
 
-
 def _feishu_dynamic_card_enabled() -> bool:
     return os.environ.get(_FEISHU_DYNAMIC_CARD_ENV, "0") == "1"
 
 # 卡片命令编号选择 pending 态（feishu-repo-navigation-commands-design.md §3.2）：
 #   chat_id -> {action: repo|chat|task, repo_key, page, page_size, items, expires}
 _PENDING_SELECT_TTL = 120.0
-_PENDING_SELECT_PAGE_SIZE = 20
-_pending_selections: dict[str, dict] = {}
 
+_PENDING_SELECT_PAGE_SIZE = 20
+
+_pending_selections: dict[str, dict] = {}
 
 def _set_pending_selection(chat_id: str, payload: dict):
     payload["expires"] = time.time() + _PENDING_SELECT_TTL
     payload["page_size"] = _PENDING_SELECT_PAGE_SIZE
     _pending_selections[chat_id] = payload
-
 
 def _get_pending_selection(chat_id: str) -> dict | None:
     p = _pending_selections.get(chat_id)
@@ -63,27 +69,25 @@ def _get_pending_selection(chat_id: str) -> dict | None:
         return None
     return p
 
-
 def _clear_pending_selection(chat_id: str):
     _pending_selections.pop(chat_id, None)
-
 
 # 最近图片描述缓存：chat_id -> {"desc": str, "expires": float}
 # 用户发图片后，后续追问在 TTL 窗口内自动注入图片描述，避免上下文丢失
 # 导致 opencode 以"非 DevOps 话题"拒绝回答图片相关问题。
 _PENDING_IMAGE_TTL = 1800.0  # 30 分钟（持久化到 DB 后内存缓存仅做近期加速）
+
 _pending_image_desc: dict[str, dict] = {}
 
 # feishu-chat-stream-unified-design.md Step 3：飞书动态卡片的节流阈值
 # - 更新间隔：≥0.8s 节流一次 update_message（防飞书 QPS 限流）
 # - 增量上限：累积 chars 超限转终态卡片（飞书单卡片 ~2000，留余量）
 _MAX_INLINE_LEN = 1500
-_UPDATE_MIN_INTERVAL = 0.8
 
+_UPDATE_MIN_INTERVAL = 0.8
 
 def _set_pending_image(chat_id: str, desc: str):
     _pending_image_desc[chat_id] = {"desc": desc, "expires": time.time() + _PENDING_IMAGE_TTL}
-
 
 def _get_pending_image(chat_id: str) -> str:
     p = _pending_image_desc.get(chat_id)
@@ -94,17 +98,15 @@ def _get_pending_image(chat_id: str) -> str:
         return ""
     return p.get("desc", "")
 
-
 def _clear_pending_image(chat_id: str):
     _pending_image_desc.pop(chat_id, None)
-
 
 # repo 绑定缓存：{(chat_id, app_id): {"repo_key": str, "expires": float}}
 # 防止 DB 抖动（db_lock 竞争/瞬时错误）导致已绑定仓库查不到 → 误弹"选择仓库"卡片。
 # TTL 60s：绑定变更通过 /bind /_bind_repo 显式失效缓存，60s 仅兜底 DB 异常窗口。
 _repo_bind_cache: dict[tuple, dict] = {}
-_REPO_BIND_TTL = 60.0
 
+_REPO_BIND_TTL = 60.0
 
 def _invalidate_repo_bind_cache(chat_id: str, app_id: str = ""):
     """绑定变更时显式失效缓存（/bind /_bind_repo /_handle_selection 调用）。"""
@@ -114,7 +116,6 @@ def _invalidate_repo_bind_cache(chat_id: str, app_id: str = ""):
         keys = [k for k in _repo_bind_cache if k[0] == chat_id]
         for k in keys:
             _repo_bind_cache.pop(k, None)
-
 
 def _current_bound_repo(chat_id: str, account: str, db) -> str:
     """当前飞书聊天绑定的仓库 repo_key（repo_im_group_binding）
@@ -139,7 +140,6 @@ def _current_bound_repo(chat_id: str, account: str, db) -> str:
             return cached.get("repo_key", "")
         return ""
 
-
 def _candidate_card(emoji: str, title: str, items: list[str], page: int, total_pages: int, nav_cmd: str) -> str:
     """卡片命令候选列表（markdown 通用语子集）：标题 + 编号行 + 翻页/取消提示"""
     lines = [f"**{emoji} {title}**"]
@@ -149,7 +149,6 @@ def _candidate_card(emoji: str, title: str, items: list[str], page: int, total_p
         lines.append(f"\n第 {page}/{total_pages} 页 · `{nav_cmd} N` 翻页")
     lines.append("回复数字选择 · `0` 取消")
     return "\n".join(lines)
-
 
 async def _send_card_reply(ctx, egress, msg_id, card, chat_id: str = ""):
     """发送自定义卡片回复（Issue #1008 出站收敛 + #1095 Card IR）。
@@ -166,7 +165,6 @@ async def _send_card_reply(ctx, egress, msg_id, card, chat_id: str = ""):
     if isinstance(card, Card):
         card = FeishuCardRenderer().render(card).payload
     return await legacy_send_card_reply(ctx, egress, msg_id, card)
-
 
 async def _send_repo_card(ctx: "BotContext", egress: "HandlerEgress", chat_id: str, msg_id: str,
                           uid: int, account: str, page: int = 1, unbound_hint: bool = False) -> str:
@@ -222,14 +220,12 @@ async def _send_repo_card(ctx: "BotContext", egress: "HandlerEgress", chat_id: s
     # 会被谎报成"你名下还没有已托管的仓库"（2026-11-05 实障）。
     return "sent" if ok else "failed"
 
-
 # 确认/否认意图
 _CONFIRM_RE = re.compile(r'^(?:是|对|确认|确定|是的|对的|没错|对的是|对，是|嗯|可以|yes|y)\s*$', re.IGNORECASE)
+
 _DENY_RE = re.compile(r'^(?:不是|不对|否|错|不要|取消|no|n)\s*$', re.IGNORECASE)
 
 _PENDING_TTL = 120  # 秒，待确认有效期
-
-# ===== 纯逻辑函数（无网络 IO，仅 SQLite 快查询） =====
 
 _BIND_PATTERNS = [
     re.compile(r'(?:绑定|连接|关联|设置|使用|切换到|帮我绑定)\s*(?:到)?\s*([\w.-]+/[\w.-]+)'),
@@ -241,7 +237,6 @@ _CLEAN_PATTERNS = [
     r'(?:重来|从头开始)(?:吧|一下)?',
 ]
 
-
 def detect_bind_intent(text: str) -> str:
     """自然语言绑定检测：用户说'绑定到 owner/repo' 等，返回 repo_key 或空"""
     for pat in _BIND_PATTERNS:
@@ -252,7 +247,6 @@ def detect_bind_intent(text: str) -> str:
             return repo
     return ""
 
-
 def detect_clean_intent(text: str) -> bool:
     """自然语言清理检测：用户说'清除会话缓存'等"""
     for pat in _CLEAN_PATTERNS:
@@ -260,7 +254,6 @@ def detect_clean_intent(text: str) -> bool:
             log.info("Feishu: detected clean intent")
             return True
     return False
-
 
 def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "", user_id: int = 0) -> str:
     # 1. 自然语言绑定检测
@@ -289,8 +282,7 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "",
             log.warning(f"resolve_repo: conversation fallback failed for chat={chat_id[:20]}: {e}")
     return ""
 
-
-def _resolve_task_conversation(chat_id: str, user_id: int) -> dict | None:
+def _resolve_task_conversation(chat_id: str, user_id: str) -> dict | None:  # D105：uuid 字符串
     """当前群已通过 /task-open 加入的 task 会话（若有）。
 
     feishu-task-session-repo-alignment-design.md 方案 1：
@@ -310,8 +302,7 @@ def _resolve_task_conversation(chat_id: str, user_id: int) -> dict | None:
         return conv
     return None
 
-
-def _resolve_feishu_exec_repo(repo_key: str, chat_id: str, user_id: int) -> str:
+def _resolve_feishu_exec_repo(repo_key: str, chat_id: str, user_id: str) -> str:  # D105：uuid 字符串
     """解析飞书 chat 实际执行仓库（方案 1-A 核心）。
 
     普通消息 resolve_repo 取群绑定仓库（如 devops-bot），但若该群已通过 /task-open
@@ -336,7 +327,6 @@ def _resolve_feishu_exec_repo(repo_key: str, chat_id: str, user_id: int) -> str:
         log.warning(f"_resolve_feishu_exec_repo failed: {e} (keep {repo_key})")
     return repo_key
 
-
 def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
     """通过 im_app_id 查找关联的 user_id。
 
@@ -346,7 +336,7 @@ def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
     A2 收尾（Phase B）删掉了 legacy `chat_agent_session.im_app_id` 那一跳——
     该列已 DROP，安装表是唯一真相。
     """
-    from src.domains.runtime.im._db import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # 新引擎：发送者身份绑定（需要 sender_id）
@@ -355,11 +345,12 @@ def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
                 c.execute(
                     "SELECT i.user_id FROM grape_t_channel_sender_identity i "
                     "JOIN grape_t_channel_installation ci ON ci.id=i.installation_id "
-                    "WHERE ci.legacy_app_id=? AND i.platform_user_id=? AND i.user_id>0 LIMIT 1",
+                    "WHERE ci.legacy_app_id=? AND i.platform_user_id=? "
+                    "AND i.user_id IS NOT NULL AND i.user_id != '' AND i.user_id != '0' LIMIT 1",  # D105：字符串哨兵（TEXT 列 >0 在 MySQL 恒假）
                     (app_id, str(sender_id)))
                 row = c.fetchone()
                 if row:
-                    return int(row[0])
+                    return str(row[0])  # D105：uuid 字符串保形
             except Exception:
                 pass
         # 新引擎：user 轨安装的归属者（单用户 bot 兜底）
@@ -371,20 +362,16 @@ def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
                 (app_id,))
             row = c.fetchone()
             if row:
-                return int(row[0])
+                return str(row[0])  # D105：uuid 字符串保形
         except Exception:
             pass
     return None
 
-
-# ====== Autopilot 飞书卡片交互（autopilot-feishu-subscription-design.md §4.5）======
-
 _SEV_MARK = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-
 
 def _autopilot_exec_row(exec_id: int):
     """查 exec + 所属任务 + 仓库 + 场景列表（一次查全，减少 DB 往返延迟）。"""
-    from src.domains.runtime.im._db import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         row = c.execute(
@@ -405,7 +392,6 @@ def _autopilot_exec_row(exec_id: int):
             "summary": row[3] or "", "status": row[4] or "",
             "scenes": [{"scene_id": r[0], "name": r[1] or r[0]} for r in scene_rows]}
 
-
 def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
     """点击用户对该仓库是否有权限（复用 get_managed_repos，结果短时缓存减少 DB 开销）。"""
     if not uid or not repo_key:
@@ -418,11 +404,10 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
         log.warning(f"[finding-card] access check failed uid={uid}: {e}")
         return False
 
-
 def _autopilot_get_scenes(repo_key: str) -> list:
     """查仓库的场景列表（供派发时选择目标场景）。返回 [{scene_id, name}]。"""
     try:
-        from src.domains.runtime.im._db import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             rows = c.execute(
@@ -432,7 +417,6 @@ def _autopilot_get_scenes(repo_key: str) -> list:
     except Exception as e:
         log.warning(f"[finding-card] get scenes failed: {e}")
         return []
-
 
 def _autopilot_state_card(info: dict, exec_id: int, state: str = "list",
                           finding_id: str = "", scene_id: str = "") -> Card:
@@ -548,7 +532,6 @@ def _autopilot_state_card(info: dict, exec_id: int, state: str = "list",
     return Card(title=f"任务产出 · {info['task_name'][:30]}",
                 tone=Tone.DEFAULT, blocks=tuple(blocks), form="v2")
 
-
 async def _autopilot_finding_list_card(ctx, egress, msg_id, uid, exec_id, action_token=""):
     """唤醒问题详情卡（/finding-list）。首次用 reply 发新卡；后续从 list 态回来用延迟更新原地变。"""
     info = _autopilot_exec_row(exec_id)
@@ -563,7 +546,6 @@ async def _autopilot_finding_list_card(ctx, egress, msg_id, uid, exec_id, action
         await egress.update_card_by_token(ctx, action_token, card)
     else:
         await _send_card_reply(ctx, egress, msg_id, card)
-
 
 async def _autopilot_finding_dispatch(ctx, egress, msg_id, uid, exec_id, finding_id,
                                       scene_id="", action_token="", dedup_confirmed=False):
@@ -613,7 +595,6 @@ async def _autopilot_finding_dispatch(ctx, egress, msg_id, uid, exec_id, finding
         log.warning(f"[finding-card] dispatch failed exec={exec_id} fid={finding_id}: {e}")
         await egress.reply_card(ctx, msg_id, f"**派发异常: {e}**")
 
-
 def _autopilot_dedup_confirm_card(exec_id: int, finding_id: str, scene_id: str, detail: dict):
     """Issue #697：疑似重复确认卡（owner 确认后方可并入派发）。
 
@@ -633,7 +614,6 @@ def _autopilot_dedup_confirm_card(exec_id: int, finding_id: str, scene_id: str, 
         params={"exec_id": exec_id, "finding_id": finding_id, "scene_id": scene_id},
     )))
     return Card(title="疑似重复确认", tone=Tone.WARNING, blocks=tuple(blocks))
-
 
 async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
                                 text: str, chat_id: str, sender_id: str, db,
@@ -833,19 +813,20 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
                 r2 = db.cursor().execute(
                     "SELECT id FROM chat_conversations WHERE user_id=? AND repo_key=? "
                     "AND conv_type='task' AND issue_number=? LIMIT 1",
-                    (uid, _rk, int(_iss) if _iss.isdigit() else 0)).fetchone()
+                    (uid, _rk, _nin_iss(_iss))).fetchone()
                 if r2:
                     cid = r2[0]
             if not cid:
-                if not _iss.isdigit():
+                # S75：字符串 ident（gitee）合法（原 isdigit 门槛拒掉 → 报"无效任务号"）
+                if not str(_iss or "").strip():
                     await egress.reply_card(ctx, msg_id, f"**❌ 无效任务号 {_iss}**")
                     return ""
                 # FR-12.4: uid 无效时不新建 task 会话（防同 Issue 双会话）
-                if not uid or uid == 0:
+                if not uid or str(uid or "") in ("", "0"):
                     log.warning(f"handler_async: skip task conversation creation for {_rk} #{_iss} (uid={uid} invalid, actor resolution failed)")
                     await egress.reply_card(ctx, msg_id, f"**⚠️ 无法确定任务归属人，请稍后重试或联系管理员**")
                     return ""
-                cid = create_conversation(uid, _rk, title=_title, conv_type="task", issue_number=int(_iss))
+                cid = create_conversation(uid, _rk, title=_title, conv_type="task", issue_number=_nin_iss(_iss))  # S75/D102-O：issue number 原生保形（gitee 字符串 ident 强转 int 会炸）
         # 观测：目标会话归属 + 点卡 open_id 反查（awaiting-notify-card-join-fail-analysis.md §5.1）
         _conv_user = ""
         if cid:
@@ -859,12 +840,10 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
         _open_to_user = ""
         if sender_open_id:
             try:
-                from src.domains.runtime.im._db import db as _sdb
-                with db_lock:
-                    _r2 = _sdb.cursor().execute(
-                        "SELECT user_id FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1",
-                        (sender_open_id,)).fetchone()
-                _open_to_user = str(_r2[0]) if _r2 else "unmapped"
+                # S99/D74：open_id 反查收敛 channel_directory
+                from src.domains.runtime.im.channel_directory import reverse_lookup_by_open_id
+                _r2 = reverse_lookup_by_open_id(sender_open_id)
+                _open_to_user = str(_r2["user_id"]) if _r2["user_id"] is not None else "unmapped"
             except Exception as _e:
                 _open_to_user = f"err:{_e}"
         _has_conv = bool(cid)
@@ -896,7 +875,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
                     with db_lock:
                         _r3 = db.cursor().execute(
                             "SELECT title FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                            (_rk, int(_iss) if _iss.isdigit() else 0)).fetchone()
+                            (_rk, _nin_iss(_iss))).fetchone()
                     if _r3 and _r3[0]:
                         _conv_title = f"Issue #{_iss} · {_r3[0]}"
                 except Exception:
@@ -907,7 +886,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
             _issue_url = ""
             try:
                 from src.api.issues_center import _vcs_issue_url
-                _issue_url = _vcs_issue_url(_rk, int(_iss) if _iss.isdigit() else 0) or ""
+                _issue_url = _vcs_issue_url(_rk, _nin_iss(_iss)) or ""
             except Exception:
                 _issue_url = ""
             _issue_link = f"[Issue #{_iss}]({_issue_url})" if _issue_url else f"Issue #{_iss}"
@@ -1072,34 +1051,21 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
 
     return ""
 
-
-def _bind_success_card(repo_key: str) -> Card:
-    """绑定成功卡（Card IR；含 [选择会话] 按钮）。"""
-    return Card(
-        title="✅ 绑定成功",
-        tone=Tone.SUCCESS,
-        blocks=(text_block(f"**✅ 已绑定 `{repo_key}`**\n使用 /chat 选择会话，或直接开始提问。"),),
-        actions=(Action(id="chat", label="📋 选择会话"),),
-    )
-
-
 async def _send_bind_success_card(ctx, egress, msg_id, repo_key):
     """发送绑定成功卡片（含[选择会话]按钮）"""
     await _send_card_reply(ctx, egress, msg_id, _bind_success_card(repo_key))
-
 
 async def _bind_repo(ctx, egress, chat_id, msg_id, repo_key, uid_str):
     """绑定仓库到当前聊天"""
     from src.kernel.session_manager import db_lock, upsert_repo_im_binding
     uid = get_user_id_by_app_id(ctx.app_id) or 0
     with db_lock:
-        upsert_repo_im_binding(chat_id, repo_key, "gitcode", str(uid), ctx.app_id)
+        upsert_repo_im_binding(chat_id, repo_key, _im_binding_provider(repo_key), str(uid or ""), ctx.app_id)  # S77：provider 卡派生
         c = db.cursor()
         c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
         db.commit()
     _invalidate_repo_bind_cache(chat_id, ctx.app_id)
     await _send_bind_success_card(ctx, egress, msg_id, repo_key)
-
 
 def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_account: str,
                               chat_runtime_id: int, conv_id: str, user_info: str = "",
@@ -1142,7 +1108,6 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
                                  has_valid_session=has_valid_session)
     return body
 
-
 async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id: str, msg_id: str,
                             num: str, pending: dict):
     """卡片命令编号选择执行（feishu-repo-navigation-commands-design.md §3.2）。"""
@@ -1181,7 +1146,7 @@ async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id:
                 return
             from src.kernel.session_manager import db_lock, upsert_repo_im_binding
             with db_lock:
-                upsert_repo_im_binding(chat_id, repo_key, "gitcode", str(uid), ctx.app_id)
+                upsert_repo_im_binding(chat_id, repo_key, _im_binding_provider(repo_key), str(uid or ""), ctx.app_id)  # S77：provider 卡派生
                 c = db.cursor()
                 # 绑定即重置会话位置：清掉旧会话指针，下次消息在新仓库下新建会话
                 #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
@@ -1221,7 +1186,7 @@ async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id:
             if not cid:
                 from src.kernel.session_manager import create_conversation
                 # FR-12.4: uid 无效时不新建 task 会话（防同 Issue 双会话）
-                if not uid or uid == 0:
+                if not uid or str(uid or "") in ("", "0"):
                     log.warning(f"handler_async: skip task conversation for {pending.get('repo_key', '')} #{issue_number} (uid={uid} invalid)")
                     await _send_card_reply(ctx, egress, msg_id, simple_card(
                         "⚠️ 无法确定归属",
@@ -1247,7 +1212,6 @@ async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id:
         except Exception:
             pass
 
-
 _HELP_CARD = (
     "**🤖 DevOps Bot 命令**\n"
     "/repo — 列出并绑定仓库（回复编号）\n"
@@ -1260,16 +1224,6 @@ _HELP_CARD = (
     "/help — 本帮助\n\n"
     "回复数字选择 · `0` 取消"
 )
-
-# 未绑定仓库提示卡片（含 [选择仓库] + [帮助] 按钮）——Card IR 构造器（#1095）
-def _no_repo_card() -> Card:
-    return Card(
-        title="⚠️ 未绑定仓库",
-        tone=Tone.DANGER,
-        blocks=(text_block("**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。"),),
-        actions=(Action(id="repo", label="📁 选择仓库"), Action(id="help", label="❓ 帮助")),
-    )
-
 
 async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed: dict):
     """异步消息处理入口 — 通过 ctx + egress 实现Bot隔离"""
@@ -1315,7 +1269,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                         # 视频理解：ffmpeg 抽帧 + VLM 多帧分析
                         import importlib.util as _ilu
                         _spec = _ilu.spec_from_file_location("image_understanding",
-                            os.path.join(os.path.dirname(__file__), "..", "agent", "image_understanding.py"))
+                            os.path.join(os.path.dirname(__file__), "..", "agents", "image_understanding.py"))
                         _mod = _ilu.module_from_spec(_spec)
                         _spec.loader.exec_module(_mod)
                         media_description = _mod.understand_video_from_bytes(file_bytes)
@@ -1347,7 +1301,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                 if image_bytes:
                     import importlib.util as _ilu
                     _spec = _ilu.spec_from_file_location("image_understanding",
-                        os.path.join(os.path.dirname(__file__), "..", "agent", "image_understanding.py"))
+                        os.path.join(os.path.dirname(__file__), "..", "agents", "image_understanding.py"))
                     _mod = _ilu.module_from_spec(_spec)
                     _spec.loader.exec_module(_mod)
                     image_description = _mod.understand_image_from_bytes(image_bytes)
@@ -1544,7 +1498,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
             repo_key = to_repo_key(bind_repo)
             try:
                 from src.kernel.session_manager import upsert_repo_im_binding
-                upsert_repo_im_binding(chat_id, repo_key, "gitcode", parsed.get("sender_id", ""), account)
+                upsert_repo_im_binding(chat_id, repo_key, _im_binding_provider(repo_key), parsed.get("sender_id", ""), account)  # S77：provider 卡派生
                 c = db.cursor()
                 # 绑定即重置会话位置（修复 2026-08-16 绑定/会话发散 bug）
                 c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
@@ -1594,7 +1548,6 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
         except:
             pass
 
-
 def _resolve_oc_sid(conv: dict | None, repo_oc_sid: str) -> str:
     """解析 opencode 会话 id：优先 conversation.runtime_session_id（与 web 同源），空则返回空让 opencode 新建。
 
@@ -1608,7 +1561,6 @@ def _resolve_oc_sid(conv: dict | None, repo_oc_sid: str) -> str:
         if conv_sid:
             return conv_sid
     return ""
-
 
 async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                                      parsed, text, repo_key, repository,
@@ -1645,14 +1597,13 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                 gitcode_login = None
                 nick_name = ""
                 gitcode_nickname = ""
-                c = db.cursor()
-                c.execute("SELECT gitcode_user, feishu_name, gitcode_nickname FROM unified_user_mapping WHERE feishu_open_id=?",
-                          (open_id,))
-                row = c.fetchone()
-                if row:
-                    gitcode_login = row[0]
-                    nick_name = row[1] or ""
-                    gitcode_nickname = row[2] or ""
+                # S99/D74：open_id 反查收敛 channel_directory
+                from src.domains.runtime.im.channel_directory import reverse_lookup_by_open_id as _rlo
+                row = _rlo(open_id)
+                if row["user_id"] is not None:
+                    gitcode_login = row["gitcode_user"]
+                    nick_name = row["feishu_name"]
+                    gitcode_nickname = row["gitcode_nickname"]
                 # 飞书昵称 DB 为空 → 用 open_id 调飞书 API 兜底
                 if not nick_name and open_id:
                     try:
@@ -1686,21 +1637,14 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
             # R20.28.1: 飞书 Chat direct 模式获取用户 token
             # 路径 B 仓库需要 user_token 注入 USER_*_TOKEN env → GIT_ASKPASS fallback
-            try:
-                _uid = int(str(user_id).strip() or 0)
-            except (TypeError, ValueError):
-                _uid = 0
-            if _uid > 0 and repo_key:
+            if has_user_id(user_id) and repo_key:
                 try:
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     _feishu_acc = get_grape_account_by_id(user_id)
                     if _feishu_acc and _feishu_acc.get("username"):
-                        if repo_key.startswith("github:"):
-                            from src.api.deps import get_user_github_token_with_refresh
-                            user_token = get_user_github_token_with_refresh(_feishu_acc["username"], user_id) or ""
-                        else:
-                            from src.api.deps import get_user_token_with_refresh
-                            user_token = get_user_token_with_refresh(_feishu_acc["username"], user_id) or ""
+                        # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode）
+                        from src.api.deps import get_user_token_for_repo
+                        user_token = get_user_token_for_repo(repo_key, _feishu_acc["username"], user_id) or ""
                 except Exception as _te:
                     log.warning(f"[Chat:{ctx.name}] get user token for direct mode failed: {_te}")
             # Issue #344: 不再缓存明文 token 到 chat_conversations，agent 端实时获取
@@ -1731,7 +1675,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
         try:
             from src.kernel.session_manager import get_chat_config as _chat_cfg
             _uid = get_user_id_by_app_id(ctx.app_id) or 0
-            if _uid > 0:
+            if has_user_id(_uid):
                 chat_runtime_id = (_chat_cfg(_uid) or {}).get("runtime_id") or 0
         except Exception:
             chat_runtime_id = 0
@@ -1802,7 +1746,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                         log.info(f"[Chat:{ctx.name}] engine fallback: {_orig_rid}->{_rid} (original offline/local-direct)")
                     else:
                         # 按名找的引擎仍为本机直连 → 扫描在线远端 worker 引擎兜底
-                        from src.domains.runtime.im._db import db as _sdb, db_lock as _slock
+                        from src.kernel.session_manager import db as _sdb, db_lock as _slock
                         _found = 0
                         with _slock:
                             _c = _sdb.cursor()
@@ -2012,8 +1956,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             _is_401 = is_auth_401_error(_err_lower)
             if _is_401:
                 try:
-                    from src.kernel.token_resolver import detect_and_mark_expired
-                    _feishu_error_code = detect_and_mark_expired(repo_key) or ""
+                    from src.kernel.token_service import detect_and_mark_repo_token_expired
+                    _feishu_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                     if _feishu_error_code:
                         _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
                         output = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
@@ -2046,3 +1990,51 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                 await egress.reply_text(ctx, msg_id, "❌ 处理消息时出错，请稍后重试")
         except:
             pass
+
+from src.domains.runtime.vcs.api_client import _native_issue_number as _nin_iss  # S75：ident 原生形态（gitee IK* 字符串）
+
+# Issue #1095：业务层只构造渠道中立 Card IR（lark 结构只允许出现在 renderer 内）
+from src.domains.runtime.im.channel.card import (
+    Action, ButtonStyle, Card, Tone,
+    button_block, divider_block, row_block, select_block, simple_card, text_block,
+)
+
+def _im_binding_provider(repo_key: str) -> str:
+    """S77：repo_im_group_binding 的 provider 按 repo_key 前缀派生（不写死 gitcode）。
+
+    恢复自 feat/weekly-10-yaw-dev——gitee/github 仓绑定时写死 "gitcode" 会让
+    um 列与平台对应错位（test_s77 行为锁）。
+    """
+    from src.kernel.repo_key import parse_repo_key
+    return (parse_repo_key(repo_key)[0] or "gitcode")
+
+def _bind_success_card(repo_key: str) -> Card:
+    """绑定成功卡（Card IR；含 [选择会话] 按钮）。"""
+    return Card(
+        title="✅ 绑定成功",
+        tone=Tone.SUCCESS,
+        blocks=(text_block(f"**✅ 已绑定 `{repo_key}`**\n使用 /chat 选择会话，或直接开始提问。"),),
+        actions=(Action(id="chat", label="📋 选择会话"),),
+    )
+
+# 未绑定仓库提示卡片（含 [选择仓库] + [帮助] 按钮）——Card IR 构造器（#1095）
+def _no_repo_card() -> Card:
+    return Card(
+        title="⚠️ 未绑定仓库",
+        tone=Tone.DANGER,
+        blocks=(text_block("**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。"),),
+        actions=(Action(id="repo", label="📁 选择仓库"), Action(id="help", label="❓ 帮助")),
+    )
+
+"""异步飞书消息处理 — 支持 BotContext 隔离的多Bot消息分发
+
+核心改造:
+  - process_chat_async: 接收 (BotContext, parsed) 替代全局函数调用
+  - 所有飞书API调用通过 ctx + egress 实例方法，按Bot身份隔离
+  - 纯逻辑（bind/clean 意图、repo 解析、用户归属）内联本模块，无同步 HTTP；
+    IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await egress 异步方法。
+"""
+
+if TYPE_CHECKING:
+    from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
+    from src.domains.runtime.im.engine.egress import HandlerEgress

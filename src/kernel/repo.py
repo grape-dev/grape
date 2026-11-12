@@ -48,7 +48,7 @@ class Repo:
     def bot_token(self) -> str:
         """委托 service 层获取 token（R20.11）。
 
-        R20.11.1: 改为调 src/token_service.py 的 get_repo_bot_token()，
+        R20.11.1: 改为调 src/kernel/token_service.py 的 get_repo_bot_token()，
         内部委托 TokenResolver.get_token()——所有调 Repo.bot_token 的场景
         自动继承短路/过期检测。
 

@@ -131,20 +131,23 @@ def check_bare_delete(root: Path):
 def check_worker_manifest(root: Path):
     """Gate 1-5: Worker MANIFEST 是否包含必要文件。"""
     findings = []
-    wp = root / "src" / "worker_package.py"
+    wp = root / "src" / "kernel" / "worker_package.py"
     if not wp.exists():
         return findings
     try:
         text = wp.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return findings
-    required = ["src/auth/", "src/token_service.py", "src/token_resolver.py"]
+    # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/，MANIFEST 以目录条目覆盖
+    # MED-3：必检面回补——原三条（src/auth/、src/token_service.py、src/token_resolver.py）
+    # 在 #2010 收拢后 canonical 落在 src/kernel/；另两条是 worker 启动强依赖的目录。
+    required = ["src/kernel/", "src/domains/", "src/domains/runtime/vcs/"]
     for req in required:
         if req not in text:
             findings.append({
                 "gate": "1-5",
                 "severity": "BLOCKED",
-                "file": "src/worker_package.py",
+                "file": "src/kernel/worker_package.py",
                 "line": 0,
                 "issue": f"Worker MANIFEST 缺少 {req}",
                 "evidence": f"在 MANIFEST 列表中未找到 {req}",

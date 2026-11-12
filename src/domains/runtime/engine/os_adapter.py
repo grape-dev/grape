@@ -354,14 +354,34 @@ def path_separator() -> str:
 
 
 def bun_cache_dir() -> str:
-    """bun JIT 编译缓存目录（跨平台）。
+    r"""bun JIT 编译缓存目录（跨平台）。
 
-    Unix: /var/cache/bun-compile
-    Windows: %LOCALAPPDATA%\\grape\\bun-compile
+    Unix 按三级优先级解析（Issue #857）：
+      1. GRAPE_BUN_CACHE_DIR 环境变量（可含 ~ / $VAR）
+      2. ~/.cache/grape/bun-compile（用户级默认，普通用户可写，无需 root 预建）
+      3. 由 bun_cache_fallback_dir() 兜底到系统临时目录
+    Windows: %LOCALAPPDATA%\grape\bun-compile（不变）
+
+    历史口径曾硬编码 /var/cache/bun-compile，普通用户不可写 → 每个任务都要靠
+    fallback 兜底；改为用户级默认后不再依赖 1777 权限。
     """
     if _IS_WINDOWS:
         return os.path.join(os.environ.get("LOCALAPPDATA", home_dir()), "grape", "bun-compile")
-    return "/var/cache/bun-compile"
+    env_dir = os.environ.get("GRAPE_BUN_CACHE_DIR", "")
+    if env_dir:
+        return os.path.expanduser(os.path.expandvars(env_dir))
+    return os.path.join(home_dir(), ".cache", "grape", "bun-compile")
+
+
+def bun_cache_fallback_dir() -> str:
+    """bun 编译缓存兜底目录（临时目录下，Issue #857 降级用）。
+
+    `/var/cache/bun-compile` 在部分 worker 上不可写（非 root 且未预建），
+    此时退到 `tempfile.gettempdir()/grape/bun-compile`，避免任务启动即失败。
+    """
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), "grape", "bun-compile")
 
 
 def remap_cwd(path: str) -> str:

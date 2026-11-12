@@ -108,7 +108,7 @@ def _split_actions(card: Card) -> tuple[list[Action], list[Action]]:
 
 
 _CARD_ACTION_URL: str | None = None
-_DEFAULT_CARD_URL = "https://card.example.invalid"  # placeholder default; set per deployment
+_DEFAULT_CARD_URL = "https://www.grapedev.cn"
 
 
 def _card_action_url() -> str:

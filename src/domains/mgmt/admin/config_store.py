@@ -31,7 +31,7 @@ _BOT_FIELDS = [
 ]
 
 # 运行参数字段（Issue #470：写死配置抽取到管理台）——写 DB meta，运行时经
-# src/config.py 统一 getter 读取（env > meta > runtime-config.json > 默认）。
+# src/kernel/config.py 统一 getter 读取（env > meta > runtime-config.json > 默认）。
 # 非敏感，明文回显。空值/0 = 未设置（回退下一层），沿用「只保存非空字段」约定。
 _RUNTIME_FIELDS = [
     "runtime_task_timeout",

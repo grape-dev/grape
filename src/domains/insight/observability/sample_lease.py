@@ -5,7 +5,7 @@
 日增约 107 万行 = 设计容量（约 27 万行/天）的 4 倍，写放大与存储持续恶化。
 
 方案（见 docs/issue-702/spec.md）：**全局单写者租约**——
-- 锁 = 仓库既有 `distributed_locks` 表 TTL 租约（`src/lock.py`，SQLite/MySQL 统一语义，
+- 锁 = 仓库既有 `distributed_locks` 表 TTL 租约（`src/kernel/lock.py`，SQLite/MySQL 统一语义，
   `db_setup` 已建表，后台循环既有惯例 autopilot_scheduler / table_maintenance 同款）；
 - key = `obs_runtime_sampler`（全局单锁：采样是批量循环，无需 per-runtime）；
 - TTL = 60s（一轮采样周期）：持有者每轮采样前 renew_lease 续期（UPDATE WHERE
@@ -16,7 +16,7 @@
   持锁分支执行（`rollup.cleanup_expired_samples`，由 `sample_once_under_lease` 编排）。
 
 不采用 MySQL GET_LOCK（Issue Spec 的备选 A）：本仓库有池化连接持命名锁泄漏、连接
-以 Sleep 驻留池导致下次启动排队等满 timeout 的既有事故（src/mysql_compat.py
+以 Sleep 驻留池导致下次启动排队等满 timeout 的既有事故（src/kernel/mysql_compat.py
 `dedicated_connection` 注释，实测 174/79 每次重启卡住需人工 KILL）；GET_LOCK 需池外
 专用连接管理，复杂度更高，且测试后端强制 SQLite（tests/conftest.py）无法覆盖。
 
@@ -39,7 +39,7 @@ LEASE_TTL_SEC = 60
 def acquire_lease() -> bool:
     """抢采样租约：成功返回 True；他主持有未过期 / 锁表异常 → False（本轮跳过）。
 
-    语义（复用 src/lock.py acquire_lock）：
+    语义（复用 src/kernel/lock.py acquire_lock）：
     - 无锁 / 锁已过期 → INSERT/条件 UPDATE 原子抢到（失联接管走这条路径）；
     - 他主持有且未过期 → False；
     - 锁表异常 → False（fail-safe 降级：采样暂停，不放大写入，读侧不受影响）。

@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.domains.runtime.pipeline.event_pipeline import _looks_like_error_text  # noqa: E402
+from src.api.event_pipeline import _looks_like_error_text  # noqa: E402
 from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 

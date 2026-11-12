@@ -35,7 +35,7 @@ def _report_module_fallback(provider: str, executor_context: str) -> None:
         return
     _fallback_reported.add(provider)
     try:
-        from src.persistence.credential_usage_log import log_usage
+        from src.kernel.persistence.credential_usage_log import log_usage
         log_usage("", "", credential_kind="integration_path",
                   executor_context=executor_context,
                   operation=f"module_fallback_{provider}", repo_key=f"{provider}:")

@@ -79,7 +79,7 @@ def main() -> int:
     # 直接走写穿桥建 3 条安装：1 user（app 去重语义由安装表唯一索引保证）+ 2 repo（app 共享）
     W.sync_installation("user", owner_user_id="7", app_id="cli_user_app", app_secret="sec_u")
     W.sync_installation("repo", repo_key="grape-dev/grape", app_id="cli_repo_app", app_secret="sec_r")
-    W.sync_installation("repo", repo_key="example-org/example-repo", app_id="cli_repo_app", app_secret="sec_r")
+    W.sync_installation("repo", repo_key="XOcto/hello-blog", app_id="cli_repo_app", app_secret="sec_r")
     print("[3] 安装行就绪：user app×1 / repo 2 仓（app 共享）")
 
     shares = W._shared_db()

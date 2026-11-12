@@ -12,12 +12,12 @@ import os
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
+from src.api.event_pipeline import resolve_actor_account
 
 _REPO_KEY = "gitcode:owner/repo"
 _REPO_LIKE = "gitcode:owner/repo%"
@@ -226,7 +226,7 @@ class TestDerivedA2AActorBackfill:
             db.commit()
 
     def test_subscription_actor_and_payload_backfill(self):
-        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.api.event_pipeline as ep
         self._seed_dispatch_repo()
         _seed_issue(created_by="creator_user")
         evt = {"repo_key": _REPO_KEY, "issue_id": "#5",
@@ -244,7 +244,7 @@ class TestDerivedA2AActorBackfill:
         assert json.loads(row[1]).get("account") == "creator_user"
 
     def test_pr_subscription_actor_and_payload_backfill(self):
-        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.api.event_pipeline as ep
         _seed_issue(created_by="creator_user")
         evt = {"repo_key": _REPO_KEY, "actor": "pr_actor",
                "payload": {"repository": "owner/repo", "issue_number": "5",
@@ -264,7 +264,7 @@ class TestDerivedA2AActorBackfill:
         assert json.loads(row[1]).get("account") == "pr_actor"
 
     def test_vod_redispatch_actor_and_payload_backfill(self):
-        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.api.event_pipeline as ep
         _seed_issue(created_by="creator_user")
         captured = {}
         evt = {"repo_key": _REPO_KEY, "actor": "",
@@ -277,6 +277,8 @@ class TestDerivedA2AActorBackfill:
 
         with patch("src.api.event_store.append_event", side_effect=_capture_append), \
              patch("src.api.session_store.get_issue_scene", return_value=("default", 1)), \
+             patch.object(ep, "_evaluate_skill_scope",
+                          return_value={"ok": True, "reason": ""}), \
              patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None), \
              patch.object(ep, "_fail_event"):
             ep._redispatch_vod_after_recommend(_REPO_KEY, "#5", "vod", evt, 0)
@@ -284,12 +286,12 @@ class TestDerivedA2AActorBackfill:
         assert captured.get("payload", {}).get("account") == "creator_user"
 
     def test_failed_task_env_account_uses_resolved_actor(self):
-        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.api.event_pipeline as ep
         _seed_issue(created_by="creator_user")
         evt = {"type": "a2a_event", "actor": "",
                "payload": {"repository": "owner/repo", "issue_number": "5", "account": ""},
                "repository": "owner/repo"}
-        with patch("src.prompt_builder.build_devops_agent_prompt", return_value=""), \
+        with patch("src.kernel.prompt_builder.build_devops_agent_prompt", return_value=""), \
              patch.object(ep, "_get_task_repo_token", return_value=""):
             ep._create_failed_task(_REPO_KEY, 0, "qa", "opencode", "qa-skill", "", 0, evt,
                                    issue_id="#5")

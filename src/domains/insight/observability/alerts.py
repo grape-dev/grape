@@ -18,15 +18,11 @@
 from __future__ import annotations
 
 import time
-
 from datetime import datetime, timedelta, timezone
-
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.kernel.config import log
-
 from src.domains.insight.observability import alert_policy as _policy
-
 from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
 # ===== 种子规则 =====
@@ -60,16 +56,6 @@ SEED_RULES: List[Dict[str, Any]] = [
         "comparator": "gt", "threshold": 10, "window_sec": 600, "for_sec": 600,
         "severity": "warning", "seed_source": "GrapeTaskQueueBacklog",
         "description": "排队任务超过 10 个且持续 10 分钟",
-    },
-    # Issue #1938：回报丢失补偿——事件回报未落库、结论由服务端级联收敛补偿生成/回填。
-    # 频发说明 worker 回报链路（report/complete 回调）在丢消息；补偿记录本身不计入 Agent 答复口径。
-    {
-        "name": "cascade_compensation", "kind": "metric", "level": "user",
-        "metric": "cascade_compensation",
-        "comparator": "gt", "threshold": 3, "window_sec": 600, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeCascadeCompensationHigh",
-        "description": "近 10 分钟事件「回报丢失补偿」超过 3 次（Agent 原始回报未落库，"
-                       "结论由系统补偿生成），建议排查该仓库 worker 回报/回调链路",
     },
     {
         "name": "all_runtimes_offline", "kind": "metric", "level": "platform",
@@ -149,20 +135,17 @@ _COMPARATORS = {
 
 # 过程态（不落库）：条件首次满足的时刻 / 平台指标的差分基线
 _pending: Dict[str, float] = {}
-
 _baseline: Dict[str, Any] = {}
 
 EVENT_RETENTION_DAYS = 90   # obs_alert_events 留存（只清已恢复的，见 cleanup_events）
 
 STUCK_MINUTES = 22          # 与 dashboard.ops_overview / grape_task_stuck 一致
-
 FAILURE_WINDOW_SEC = 300
-
 #: 突变检测（P1-3）：环比窗口长度（与 task_success_rate_drop 的 window_sec 一致）
 MUTATION_WINDOW_SEC = 1800
-
 #: 突变检测最小样本：两个窗口各自至少这么多终态任务才出指标（防小样本误报）
 MUTATION_MIN_SAMPLES = 3
+
 
 def _event_source(rule: Dict[str, Any]) -> str:
     """事件来源标记（§6.9 统一事件视图：monitor / gap / mutation）。"""
@@ -170,8 +153,12 @@ def _event_source(rule: Dict[str, Any]) -> str:
         return "gap"
     return "mutation" if str(rule.get("metric") or "").endswith("_mutation") else "monitor"
 
+
+# ---------------------------------------------------------------- 工具
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _dt(raw: Any) -> Optional[datetime]:
     from src.api.time_utils import normalize_event_time
@@ -184,8 +171,12 @@ def _dt(raw: Any) -> Optional[datetime]:
         return None
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
+
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
+
+
+# ---------------------------------------------------------------- 种子 / 规则
 
 def seed_rules() -> int:
     """幂等写入种子规则（按 name 判重，已存在不动，避免覆盖用户改过的阈值）。"""
@@ -211,6 +202,7 @@ def seed_rules() -> int:
         db.commit()
     return n
 
+
 def list_rules(level: str = "") -> List[Dict[str, Any]]:
     """规则列表。level='user' 过滤用户面可见规则；空=全部（平台面用）。"""
     from src.kernel.session_manager import db, db_lock
@@ -234,6 +226,7 @@ def list_rules(level: str = "") -> List[Dict[str, Any]]:
         log.warning(f"obs list_rules failed: {e}")
     return out
 
+
 def set_rule_enabled(rule_id: int, enabled: bool) -> bool:
     from src.kernel.session_manager import db, db_lock
     try:
@@ -246,6 +239,7 @@ def set_rule_enabled(rule_id: int, enabled: bool) -> bool:
     except Exception as e:
         log.warning(f"obs set_rule_enabled failed: {e}")
         return False
+
 
 def set_rule_threshold(rule_id: int, threshold: float) -> bool:
     from src.kernel.session_manager import db, db_lock
@@ -260,6 +254,7 @@ def set_rule_threshold(rule_id: int, threshold: float) -> bool:
         log.warning(f"obs set_rule_threshold failed: {e}")
         return False
 
+
 def set_rule_notify(rule_id: int, channels: str) -> bool:
     from src.kernel.session_manager import db, db_lock
     try:
@@ -273,12 +268,14 @@ def set_rule_notify(rule_id: int, channels: str) -> bool:
         log.warning(f"obs set_rule_notify failed: {e}")
         return False
 
+
 def get_rule(rule_id: int) -> Dict[str, Any]:
     """按 id 取单条规则（含策略字段）。找不到返回 {}。"""
     for r in list_rules():
         if int(r.get("id") or 0) == int(rule_id):
             return r
     return {}
+
 
 def set_rule_policy(rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     """写策略字段（P1-1 / D1，供管理台 L2 接口调用）。
@@ -309,6 +306,9 @@ def set_rule_policy(rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         log.warning(f"obs set_rule_policy failed: {e}")
         return {"ok": False, "errors": [str(e)], "applied": {}}
+
+
+# ---------------------------------------------------------------- 指标计算
 
 def _repo_metrics() -> Dict[str, Dict[str, float]]:
     """按仓库维度的指标：卡住数 / 失败率 / 排队数 / 成功率环比突变。
@@ -415,30 +415,6 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                     m["_mut1_bad"] += float(n1 or 0)
     except Exception as e:
         log.warning(f"obs repo metrics failed: {e}")
-    # ⑤ Issue #1938：事件回报丢失补偿计数（cascade_compensation）
-    #   口径：窗口内被级联收敛补偿的事件数（events.report_missing=1，即 Agent 原始回报丢失、
-    #   结论由服务端补偿生成或回填）。按 repo_key 聚合供 cascade_compensation 告警规则消费。
-    #   独立 try/except：老库未迁出 report_missing 列时降级「不出指标」（未知不告警），
-    #   不拖累上面既有的卡住/失败率/排队口径。
-    try:
-        with db_lock:
-            c = db.cursor()
-            _cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
-            if "report_missing" in _cols:
-                c.execute(
-                    "SELECT repo_key, COUNT(*) FROM events"
-                    " WHERE repo_key IS NOT NULL AND repo_key != ''"
-                    "   AND report_missing=1"
-                    "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                    " GROUP BY repo_key", (fail_cutoff,))
-                for repo_key, n in c.fetchall():
-                    m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
-                                                  "_done": 0.0, "_bad": 0.0,
-                                                  "_mut0_tot": 0.0, "_mut0_bad": 0.0,
-                                                  "_mut1_tot": 0.0, "_mut1_bad": 0.0})
-                    m["cascade_compensation"] = m.get("cascade_compensation", 0.0) + float(n or 0)
-    except Exception as e:
-        log.warning(f"obs repo metrics: cascade compensation agg failed: {e}")
     for m in out.values():
         tot = m["_done"]
         m["task_failure_rate"] = round(m["_bad"] / tot, 4) if tot else 0.0
@@ -451,6 +427,7 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
         else:
             m.pop("task_success_rate_mutation", None)
     return out
+
 
 def _pool_usage(threads_connected, max_connections) -> float:
     """连接使用率 = 当前连接数 / **配置上限**（`max_connections`）。
@@ -470,6 +447,7 @@ def _pool_usage(threads_connected, max_connections) -> float:
     if mc <= 0:
         return 0.0
     return round(tc / mc, 6)
+
 
 def _platform_metrics() -> Dict[str, float]:
     """平台级指标（L2/L3 用）：引擎在线数、DB 连接池、DB 中止连接增量、HTTP 5xx 占比。"""
@@ -578,6 +556,9 @@ def _platform_metrics() -> Dict[str, float]:
 
     return vals
 
+
+# ---------------------------------------------------------------- 求值
+
 def cleanup_events(days: int = EVENT_RETENTION_DAYS) -> int:
     """清理超过留存期的告警事件，返回删除行数。
 
@@ -601,6 +582,7 @@ def cleanup_events(days: int = EVENT_RETENTION_DAYS) -> int:
     except Exception as e:
         log.warning(f"obs alert events cleanup failed: {e}")
         return 0
+
 
 def _open_events_cache(rule_ids: Optional[List[int]] = None) -> Dict[Tuple[int, str], Dict[str, Any]]:
     """整轮一次性预取"开放（firing）事件" → {(rule_id, dim_key): ev}。
@@ -635,6 +617,7 @@ def _open_events_cache(rule_ids: Optional[List[int]] = None) -> Dict[Tuple[int, 
         log.warning(f"obs open events prefetch failed: {e}")
     return out
 
+
 def _open_event(c, rule_id: int, dim_key: str,
                 cache: Optional[Dict[Tuple[int, str], Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     if cache is not None:
@@ -650,6 +633,7 @@ def _open_event(c, rule_id: int, dim_key: str,
             "value": row[3], "silenced_until": row[4] or "",
             "last_notified_at": row[5] or "", "escalated_at": row[6] or "",
             "notify_deferred": int(row[7] or 0), "notify_count": int(row[8] or 0)}
+
 
 def _resolve_open(c, rule_id: int, dim_key: str, now: datetime,
                   cache: Optional[Dict[Tuple[int, str], Dict[str, Any]]] = None) -> bool:
@@ -671,6 +655,7 @@ def _resolve_open(c, rule_id: int, dim_key: str, now: datetime,
     c.execute("UPDATE obs_alert_events SET status='resolved', resolved_at=?, last_seen_at=?,"
               " updated_at=? WHERE id=?", (now_iso, now_iso, now_iso, int(row[0])))
     return True
+
 
 def evaluate_rules() -> Dict[str, Any]:
     """求值一轮：返回 {fired, resolved, evaluated, skipped}。由进程内定时器每 30s 调用。"""
@@ -840,11 +825,15 @@ def evaluate_rules() -> Dict[str, Any]:
             "gap_fired": gap_stats.get("gap_fired", 0),
             "gap_resolved": gap_stats.get("gap_resolved", 0)}
 
+
+# ---------------------------------------------------------------- 通知
+
 def _rule_by_name(name: str) -> Dict[str, Any]:
     for r in list_rules():
         if r.get("name") == name:
             return r
     return {}
+
 
 def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
     """事件的飞书收件人 [(user_id, open_id)]。
@@ -871,7 +860,7 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
                           tuple(rks))
             else:
                 c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
-                          " WHERE feishu_open_id!='' AND (user_id IS NOT NULL AND user_id != '' AND user_id != '0')")
+                          " WHERE feishu_open_id!='' AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
             uids = [int(r[0]) for r in c.fetchall() if r and r[0]]
     except Exception as e:
         log.warning(f"obs alert recipients lookup failed: {e}")
@@ -885,6 +874,7 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
         if oid:
             out.append((uid, oid))
     return out
+
 
 def _mark_notified(event_ids: List[int], now_iso: str) -> None:
     """记录"已通知"：次数 +1、上次通知时间、清延后标记（策略层状态）。"""
@@ -902,6 +892,7 @@ def _mark_notified(event_ids: List[int], now_iso: str) -> None:
     except Exception as e:
         log.warning(f"obs mark notified failed: {e}")
 
+
 def _mark_deferred(event_id: int, now_iso: str) -> None:
     """通知时段外：只记录，等窗口内再补推一次。"""
     from src.kernel.session_manager import db, db_lock
@@ -913,6 +904,7 @@ def _mark_deferred(event_id: int, now_iso: str) -> None:
             db.commit()
     except Exception as e:
         log.warning(f"obs mark deferred failed: {e}")
+
 
 async def _send_event_text(rule: Dict[str, Any], ev: Dict[str, Any], text: str,
                            stats: Dict[str, int]) -> bool:
@@ -953,12 +945,6 @@ async def _send_event_text(rule: Dict[str, Any], ev: Dict[str, Any], text: str,
             log.warning(f"obs alert webhook failed: {e}")
     return did_send
 
-def _bot_manager():
-    try:
-        from src.api import main as api_main
-        return api_main.bot_manager
-    except Exception:
-        return None
 
 async def notify_fired_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
     """投递通知候选（新触发 / 升级 / 时段恢复补推）——**策略层在此生效**。
@@ -1018,6 +1004,7 @@ async def notify_fired_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
                 _mark_notified([int(ev["id"])], now_iso)
     return stats
 
+
 async def flush_aggregates() -> Dict[str, int]:
     """发出已到期的聚合汇总（窗口结束）。由 30s 循环每轮调用。"""
     stats = {"sent": 0, "failed": 0, "no_recipient": 0, "summaries": 0}
@@ -1046,6 +1033,7 @@ async def flush_aggregates() -> Dict[str, int]:
         _mark_notified([int(x) for x in (g.get("event_ids") or [])], now_iso)
     return stats
 
+
 def _aggregate_text(g: Dict[str, Any]) -> str:
     sev = _policy.normalize_severity(g.get("severity"))
     tag = "·升级" if g.get("escalated") else ""
@@ -1059,9 +1047,10 @@ def _aggregate_text(g: Dict[str, Any]) -> str:
             f"受影响 {len(dims)} 个维度：{shown}{more}\n"
             f"最大当前值 {maxv}（阈值 {g.get('threshold')}）")
 
+
 async def send_test_notification(user: Dict[str, Any]) -> Dict[str, Any]:
     """给调用者本人发一条测试告警（验证飞书通道是否真的通）。"""
-    uid = str(user.get("id") or "")  # D105：uuid 字符串主键，不再 int 化
+    uid = int(user.get("id") or 0)
     from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
     open_id = ""
     try:
@@ -1093,6 +1082,7 @@ async def send_test_notification(user: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "app_id": ctx.app_id[:20], "message_id": mid,
             "message": "测试告警已发出，请查看你的飞书私聊"}
 
+
 def _event_text(ev: Dict[str, Any], rule: Dict[str, Any]) -> str:
     rk = ev.get("repo_key") or ""
     where = rk.split(":", 1)[1] if ":" in rk else (rk or "平台")
@@ -1109,6 +1099,7 @@ def _event_text(ev: Dict[str, Any], rule: Dict[str, Any]) -> str:
     return (f"[Grape 告警{tag}·{sev}] {ev.get('rule_name')} @ {where}\n"
             f"当前值 {val}（阈值 {ev.get('threshold')}）\n{desc}")
 
+
 def _notify_webhook(rule: Dict[str, Any], event: Dict[str, Any], text: str = "") -> None:
     """投递到 `OBS_ALERT_WEBHOOK_URL`（IM 自定义机器人入站 webhook，飞书即为该形态）。"""
     import json as _json
@@ -1123,6 +1114,9 @@ def _notify_webhook(rule: Dict[str, Any], event: Dict[str, Any], text: str = "")
     req = _urlreq.Request(hook, data=body, headers={"Content-Type": "application/json"})
     _urlreq.urlopen(req, timeout=5).read()
 
+
+# ---------------------------------------------------------------- 用户面查询
+
 def firing_summary(user: Dict[str, Any]) -> Dict[str, Any]:
     """总览横幅用：可见范围内的 firing 数 + 最近一条。"""
     events = list_events(user, status="firing", limit=20)
@@ -1136,6 +1130,7 @@ def firing_summary(user: Dict[str, Any]) -> Dict[str, Any]:
     deferred = sum(1 for e in events if int(e.get("notify_deferred") or 0) == 1)
     return {"firing": len(events), "critical": critical, "latest": latest,
             "escalated": esc, "deferred": deferred, "by_severity": by_sev}
+
 
 def visible_runtime_dim_keys(user: Dict[str, Any], repo_keys: List[str]) -> List[str]:
     """用户可见设备对应的 `dim_key`（`runtime:<id>`）—— 设备维度事件（数据缺失）的可见性口径。
@@ -1156,6 +1151,7 @@ def visible_runtime_dim_keys(user: Dict[str, Any], repo_keys: List[str]) -> List
         log.warning(f"obs visible runtimes failed: {e}")
     return [f"runtime:{i}" for i in ids]
 
+
 def list_events(user: Dict[str, Any], status: str = "", limit: int = 50,
                 repo: str = "", q: str = "") -> List[Dict[str, Any]]:
     """用户面事件列表：**只出 level='user'** 且落在调用者可见范围内的事件。
@@ -1170,7 +1166,7 @@ def list_events(user: Dict[str, Any], status: str = "", limit: int = 50,
     visible = set(visible_repo_keys(user))
     if repo:
         from src.kernel.repo_key import to_repo_key
-        want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
+        want = {to_repo_key(repo), to_repo_key(repo, "github")}
         hit = sorted(want & visible)
         if not hit:
             raise RepoNotVisible(repo)
@@ -1216,6 +1212,7 @@ def list_events(user: Dict[str, Any], status: str = "", limit: int = 50,
         log.warning(f"obs list_events failed: {e}")
     return out
 
+
 def list_events_all(status: str = "", limit: int = 100, repo: str = "",
                     q: str = "") -> List[Dict[str, Any]]:
     """**L2 专用**：全局事件列表（不过滤可见范围；默认含平台级事件）。
@@ -1230,12 +1227,9 @@ def list_events_all(status: str = "", limit: int = 100, repo: str = "",
            " FROM obs_alert_events WHERE 1=1")
     params: List[Any] = []
     if repo:
-        # S101/D76：IN 参数原子产物（原 IN (?,?) 固定 2 占位符 vs candidates 5 元
-        # → ProgrammingError 被下方 except 吞 → L2 全局事件列表静默空）
-        from src.kernel.repo_key import repo_key_in_params, to_repo_key
-        _ph, _args = repo_key_in_params(to_repo_key(repo))
-        sql += f" AND repo_key IN ({_ph})"
-        params.extend(_args)
+        from src.kernel.repo_key import to_repo_key
+        sql += " AND repo_key IN (?,?)"
+        params.extend([to_repo_key(repo), to_repo_key(repo, "github")])
     if status:
         sql += " AND status=?"
         params.append(status)
@@ -1254,6 +1248,7 @@ def list_events_all(status: str = "", limit: int = 100, repo: str = "",
     except Exception as e:
         log.warning(f"obs list_events_all failed: {e}")
     return out
+
 
 def silence_event(event_id: int, minutes: int, user: Dict[str, Any]) -> bool:
     """静默一个事件：只影响通知，事件仍记录；越权（非可见仓库/设备）不动。"""
@@ -1282,106 +1277,3 @@ def silence_event(event_id: int, minutes: int, user: Dict[str, Any]) -> bool:
     except Exception as e:
         log.warning(f"obs silence_event failed: {e}")
         return False
-
-from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一
-
-# ===== 种子规则 =====
-# 7 条与 deploy/alerts.yml 一一对应（seed_source 记原名）；后 3 条是 P1-3 新增的
-# 数据缺失（kind='gap'）与突变检测（metric 以 _mutation 结尾）规则。
-# level='user'   → 用户面可见（按仓库维度）
-# level='platform' → 仅 L2/L3（DB/主机/全局引擎），用户面查询一律过滤掉
-# kind='metric'（默认）→ 走指标阈值求值；kind='gap' → 走 gap.py 的数据缺失探测
-SEED_RULES: List[Dict[str, Any]] = [
-    {
-        "name": "task_stuck", "kind": "metric", "level": "user", "metric": "task_stuck",
-        "comparator": "gt", "threshold": 0, "window_sec": 300, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeTaskStuck",
-        "description": "有任务运行超过 22 分钟（worker 默认单任务超时 1h，提前预警）",
-    },
-    {
-        "name": "task_failure_rate", "kind": "metric", "level": "user", "metric": "task_failure_rate",
-        "comparator": "gt", "threshold": 0.5, "window_sec": 300, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeTaskFailureRateHigh",
-        "description": "近 5 分钟终态任务失败率超过 50%",
-    },
-    # Issue #516 M3：超时失败聚合告警——识别易超时仓库/场景（长任务需拆分或上调超时配置）
-    {
-        "name": "task_timeout", "kind": "metric", "level": "user", "metric": "task_timeout",
-        "comparator": "gt", "threshold": 0, "window_sec": 600, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeTaskTimeout",
-        "description": "近 10 分钟有任务因超时被强制失败（timed out after），建议预拆分长任务或上调该 skill/仓库超时配置",
-    },
-    {
-        "name": "task_queue_backlog", "kind": "metric", "level": "user", "metric": "task_queued",
-        "comparator": "gt", "threshold": 10, "window_sec": 600, "for_sec": 600,
-        "severity": "warning", "seed_source": "GrapeTaskQueueBacklog",
-        "description": "排队任务超过 10 个且持续 10 分钟",
-    },
-    {
-        "name": "all_runtimes_offline", "kind": "metric", "level": "platform",
-        "metric": "runtimes_online",
-        "comparator": "lte", "threshold": 0, "window_sec": 300, "for_sec": 600,
-        "severity": "critical", "seed_source": "GrapeAllRuntimesOffline",
-        "description": "全部引擎离线（平台级，L2 健康中心可见）",
-    },
-    {
-        "name": "db_pool_usage", "kind": "metric", "level": "platform", "metric": "db_pool_usage",
-        "comparator": "gt", "threshold": 0.8, "window_sec": 300, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeDBPoolUsageHigh",
-        "description": "MySQL 连接使用率超过 80%（平台级）",
-    },
-    {
-        "name": "db_aborted_connects", "kind": "metric", "level": "platform",
-        "metric": "db_aborted_delta",
-        "comparator": "gt", "threshold": 5, "window_sec": 600, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeDBAbortedConnects",
-        "description": "MySQL 中止连接 10 分钟内新增超过 5（平台级）",
-    },
-    {
-        "name": "http_error_rate_5xx", "kind": "metric", "level": "platform", "metric": "http_5xx_rate",
-        "comparator": "gt", "threshold": 0.1, "window_sec": 300, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeHTTPErrorRateHigh",
-        "description": "HTTP 5xx 占比超过 10%（平台级）",
-    },
-    # ----- P1-3：数据缺失（"该报数却没报"）-----
-    {
-        "name": "runtime_silent", "kind": "gap", "level": "user", "metric": "gap_runtime",
-        "comparator": "gt", "threshold": 900, "window_sec": 0, "for_sec": 0,
-        "severity": "warning", "seed_source": "GrapeGapRuntimeSilent",
-        "description": "引擎/设备超过 15 分钟没有心跳上报（可能是 worker 掉线或网络被挡）；"
-                       "从未上报过的凭证不算缺失，超过 7 天没上报视为已退役不再报",
-    },
-    {
-        "name": "repo_silent", "kind": "gap", "level": "user", "metric": "gap_repo",
-        "comparator": "gt", "threshold": 3600, "window_sec": 21600, "for_sec": 0,
-        "severity": "warning", "seed_source": "GrapeGapRepoSilent", "enabled": 0,
-        "description": "近 6 小时有任务活动的仓库，最近 1 小时没有任何任务活动"
-                       "（默认关闭：低活跃仓库天然长期无任务，开启前先看该仓库历史频率）",
-    },
-    # ----- P1-3：突变检测（环比，统计法不上 ML）-----
-    {
-        "name": "task_success_rate_drop", "kind": "metric", "level": "user",
-        "metric": "task_success_rate_mutation",
-        "comparator": "lt", "threshold": -0.2, "window_sec": 1800, "for_sec": 0,
-        "severity": "warning", "seed_source": "GrapeTaskSuccessRateDrop",
-        "description": "任务成功率环比上一窗口下跌超过 20 个百分点"
-                       "（两个 30 分钟窗口各需 ≥3 个终态任务，样本不足不出指标）",
-    },
-    # ----- Issue #463 P3：agent_tasks 表体积治理指标 -----
-    {
-        "name": "agent_tasks_rows_high", "kind": "metric", "level": "platform",
-        "metric": "agent_tasks_rows",
-        "comparator": "gt", "threshold": 500000, "window_sec": 3600, "for_sec": 0,
-        "severity": "warning", "seed_source": "GrapeAgentTasksRowsHigh",
-        "description": "agent_tasks 表行数超过 50 万"
-                       "（Issue #463：90 天终态删行后应回落，持续超限说明删行未生效）",
-    },
-    {
-        "name": "agent_tasks_size_high", "kind": "metric", "level": "platform",
-        "metric": "agent_tasks_mb",
-        "comparator": "gt", "threshold": 2048, "window_sec": 3600, "for_sec": 0,
-        "severity": "warning", "seed_source": "GrapeAgentTasksSizeHigh",
-        "description": "agent_tasks 表体积超过 2GB"
-                       "（Issue #463：7 天置空大字段 + 90 天删行后应回落）",
-    },
-]

@@ -6,6 +6,7 @@
 - pre-upload: 创建需求前临时附件（Web 会话）
 - close / mine / 用户操作类均已移除或迁 /api/issues（见 tasks-issues-api-rebound-design.md）
 """
+from src.kernel.user_ids import has_user_id
 import asyncio
 import os
 from datetime import datetime
@@ -123,7 +124,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
     # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
-    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
+    user_id = owner_user_id if has_user_id(owner_user_id) else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
@@ -172,8 +173,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 pass
             # 归属校准：现有值为 0 或「默认/承载账号」且与解析值不一致 → 校准（issue-card-owner-attribution-fix-design.md）
             _DEFAULT_OWNER_UID = 1
-            if (user_id > 0 and _existing_user_id in (0, _DEFAULT_OWNER_UID)
-                    and _existing_user_id != user_id):
+            if (has_user_id(user_id) and str(_existing_user_id) in ("0", str(_DEFAULT_OWNER_UID))
+                    and str(_existing_user_id) != str(user_id)):
                 c.execute("UPDATE issue SET user_id=? WHERE id=?", (user_id, task_id))
             if target and target != _existing_assignee:
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
@@ -200,7 +201,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = c.lastrowid
             linked = None
     # 「去对话」配套：user_id>0 且未关联对话时创建/复用 Issue 会话
-    if user_id > 0 and not linked:
+    if has_user_id(user_id) and not linked:
         try:
             conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, description)
             if conv_id:

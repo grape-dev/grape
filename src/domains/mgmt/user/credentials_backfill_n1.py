@@ -20,7 +20,7 @@ import uuid
 
 from src.kernel.session_manager import db
 from src.kernel.config import log
-from src.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
+from src.kernel.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
 
 
 def _is_plaintext_credential(config_json: str) -> bool:
