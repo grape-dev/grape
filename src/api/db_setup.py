@@ -3309,7 +3309,7 @@ register_migration(
     # 同号异名（补盖已由 202611110003 承担）。改号到 202611120003。幂等保障：
     # UuidPkMigration 三态自检，MySQL 侧逐列 information_schema 探测后才
     # MODIFY，旧号已盖章的库上重跑零写入。
-    version="202611120005",
+    version="202611120003",
     name="uuid-pk-grape-accounts-and-user-id-cols",
     kind="safe",
     fn=_fn_uuid_pk_grape_accounts_and_user_id_cols,
@@ -3488,7 +3488,7 @@ def _fn_repair_ap_exec_agent_task_id() -> None:
 
 
 register_migration(
-    version="202611120003",
+    version="202611130001",
     name="repair-autopilot-exec-agent-task-id",
     kind="safe",
     fn=_fn_repair_ap_exec_agent_task_id,
