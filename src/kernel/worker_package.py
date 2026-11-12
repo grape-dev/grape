@@ -46,6 +46,8 @@ MANIFEST = [
     "src/api/routing.py",
     "src/api/time_utils.py",
     "src/api/event_store.py",
+    # Issue #2050：流水线常量单源；随包下发的 domains/runtime/routes/webhook.py 顶层导入。
+    "src/api/pipeline_constants.py",
     # event_archive 已于 weekly-05 停写 event.json（数据由 events 表承载）；worker 端无需该模块。
     # 服务端 read 兼容（历史存档回退）保留在服务端代码库，不进 worker 包。
     "src/api/session_store.py",
