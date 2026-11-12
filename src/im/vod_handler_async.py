@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from src.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
 from src.api.chat_session_env import chat_repo_env
-from src.session_manager import db, db_lock
+from src.im._db import db, db_lock
 from src.domains.runtime.agents.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.token_service import is_auth_401_error

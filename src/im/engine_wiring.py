@@ -250,7 +250,7 @@ _IM_DB_CONN = None  # 独立的 IM 域库连接（GRAPE_IM_DB_NAME 覆盖时使�
 
 
 def _shared_db():
-    from src.session_manager import db
+    from src.im._db import db
     return db
 
 
@@ -1596,7 +1596,7 @@ class ImEngine:
             text = str(cmd.get("text", ""))
             fn = engine._process_command or engine._legacy_process_command()
             try:
-                from src.session_manager import db as legacy_db
+                from src.im._db import db as legacy_db
             except Exception:
                 legacy_db = None
             result = await fn(

@@ -165,7 +165,7 @@ def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
 
 def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
     """FR-21.2: 从 external_identities 按 platform login 查 grape_user_id。"""
-    from src.session_manager import db, db_lock
+    from src.im._db import db, db_lock
     with db_lock:
         c = db.cursor()
         row = c.execute(

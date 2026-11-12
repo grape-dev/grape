@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from src.session_manager import db, db_lock
+from src.im._db import db, db_lock
 
 _SEEN_MSG_TTL = 86400 * 2
 _SEEN_MSG_MAX_LOAD = 2000

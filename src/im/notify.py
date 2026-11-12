@@ -206,7 +206,7 @@ def _engine():
 def _issue_owner(repo_key: str, issue_number: int) -> tuple[int, str, str]:
     """(user_id, conv_id, title) —— 通知目标缺失时为空值。"""
     try:
-        from src.session_manager import db, db_lock
+        from src.im._db import db, db_lock
         with db_lock:
             c = db.cursor()
             row = c.execute(

@@ -76,7 +76,7 @@ class BotLeaseStore:
                             pass
             except Exception as e:
                 log.warning(f"[lease] owner-alive precheck error {key}: {e}")
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             with db_lock:
                 # 时钟口径统一（#869）：写入（_future=Python UTC）与比较（_now=Python UTC）
                 # 同钟——不用 SQL datetime('now')/MySQL NOW()（后者为服务器本地时间 CST，
@@ -113,7 +113,7 @@ class BotLeaseStore:
         的同源连接——两者在生产指向同一个库，只有测试里可能各挂一个 sqlite 文件。
         两处都查不到（表缺失/异常）→ 放行，避免租约整体失效（与旧实现"表缺则跳过"一致）。
         """
-        from src.session_manager import db, db_lock
+        from src.im._db import db, db_lock
         try:
             with db_lock:
                 row = db.cursor().execute(
@@ -141,7 +141,7 @@ class BotLeaseStore:
     def renew(self, key: str, token: str) -> bool | None:
         expires_at = _future(self.ttl)
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -159,7 +159,7 @@ class BotLeaseStore:
 
     def release(self, key: str, token: str) -> None:
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -185,7 +185,7 @@ class BotLeaseStore:
         不依赖本方法；这里只服务运维排查与测试。
         """
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             now = _now()
             with db_lock:
                 c = db.cursor()
@@ -217,7 +217,7 @@ class BotLeaseStore:
         results = {}
         expires_at = _future(self.ttl)
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -262,7 +262,7 @@ class BotLeaseStore:
         try:
             from datetime import datetime, timezone
 
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             _ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
             # deadlock fix (2026-11-03): heartbeat runs on the asyncio event loop; an
             # unbounded db_lock acquire froze the whole A-process. Acquire with timeout
@@ -320,7 +320,7 @@ class BotLeaseStore:
         上下界都要判：下界=失联超时，上界=忽略"未来时间"的心跳（CST 口径脏行/未修实例）。
         """
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             with db_lock:
                 c = db.cursor()
                 # 各后端时间函数统一用 python 侧计算阈值（sqlite datetime / mysql datetime 均兼容）
@@ -345,7 +345,7 @@ class BotLeaseStore:
     def lease_owner_info(self, key: str) -> dict:
         """返回某租约键当前 owner/token/到期时间（查存活与防误抢）。"""
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -365,7 +365,7 @@ class BotLeaseStore:
         if not owner:
             return False
         try:
-            from src.session_manager import db, db_lock
+            from src.im._db import db, db_lock
             _low, _high = self._heartbeat_window(timeout)
             with db_lock:
                 c = db.cursor()
@@ -392,7 +392,7 @@ def purge_stale_instances(older_than_hours: float = 24.0) -> int:
     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
               - timedelta(hours=older_than_hours)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        from src.session_manager import db, db_lock
+        from src.im._db import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM grape_im_instance WHERE last_heartbeat < ?", (cutoff,))

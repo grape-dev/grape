@@ -346,7 +346,7 @@ def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
     A2 收尾（Phase B）删掉了 legacy `chat_agent_session.im_app_id` 那一跳——
     该列已 DROP，安装表是唯一真相。
     """
-    from src.session_manager import db, db_lock
+    from src.im._db import db, db_lock
     with db_lock:
         c = db.cursor()
         # 新引擎：发送者身份绑定（需要 sender_id）
@@ -384,7 +384,7 @@ _SEV_MARK = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 def _autopilot_exec_row(exec_id: int):
     """查 exec + 所属任务 + 仓库 + 场景列表（一次查全，减少 DB 往返延迟）。"""
-    from src.session_manager import db, db_lock
+    from src.im._db import db, db_lock
     with db_lock:
         c = db.cursor()
         row = c.execute(
@@ -422,7 +422,7 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
 def _autopilot_get_scenes(repo_key: str) -> list:
     """查仓库的场景列表（供派发时选择目标场景）。返回 [{scene_id, name}]。"""
     try:
-        from src.session_manager import db, db_lock
+        from src.im._db import db, db_lock
         with db_lock:
             c = db.cursor()
             rows = c.execute(
@@ -859,7 +859,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
         _open_to_user = ""
         if sender_open_id:
             try:
-                from src.session_manager import db as _sdb
+                from src.im._db import db as _sdb
                 with db_lock:
                     _r2 = _sdb.cursor().execute(
                         "SELECT user_id FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1",
@@ -1798,7 +1798,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                         log.info(f"[Chat:{ctx.name}] engine fallback: {_orig_rid}->{_rid} (original offline/local-direct)")
                     else:
                         # 按名找的引擎仍为本机直连 → 扫描在线远端 worker 引擎兜底
-                        from src.session_manager import db as _sdb, db_lock as _slock
+                        from src.im._db import db as _sdb, db_lock as _slock
                         _found = 0
                         with _slock:
                             _c = _sdb.cursor()
