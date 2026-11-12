@@ -1,57 +1,39 @@
 /*
- * Issue #316: 删除前端「场景·技能」页场景 tab 的「仓库场景」子 Tab — 前端回归测试
+ * Issue #316 — 场景市场详情移除「仓库」Tab（源码级断言）
  *
- * 运行：node tests/js/test_issue_316_scene_repo_tab_removed.js
- *
- * 验证点：
- *   1. scene-market.js 不再包含 repo 二级子 Tab 入口（_switchSceneTab('repo') / scene_scope_repo）
- *   2. repo 列表加载/渲染函数与场景编排（编辑/删除/创建）死代码均已移除
- *   3. zh/en skills.json 均已删除 scene_scope_repo 及其配套死键
- *   4. official 路径（场景市场加载/渲染/应用/体验/点赞）保持完好
- *   5. index.html 引用版本号已更新（缓存失效）
+ * 迁移说明：原测试沙箱执行 legacy scene-market.js；Vue 迁移后 SceneMarket.vue 已无该 Tab。
+ * 本用例锁「不再出现」这一验收结论，防止回归时偷偷加回：
+ *   1. 详情区不渲染 repo/仓库 Tab
+ *   2. 也不存在按 repo 切换的 tab 状态
+ *   3. 场景信息仍以其它区块展示（不是整个人删掉）
  */
-
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', '..');
-const JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/SceneMarket.vue'), 'utf8');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/skills.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/skills.json'), 'utf8'));
-const INDEX = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
+const VIEW = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/SceneMarket.vue'), 'utf8');
+const TPL = VIEW.slice(0, VIEW.indexOf('<script'));
 
-// 1. repo 子 Tab 入口移除
-assert.ok(!JS.includes("_switchSceneTab('repo')"), '不应再有 repo 子 Tab 切换入口');
-assert.ok(!JS.includes('scene_scope_repo'), '不应再引用 scene_scope_repo');
-assert.ok(!JS.includes('仓库场景'), '不应再出现「仓库场景」文案');
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log('  ✓ ' + name);
+}
 
-// 2. repo 加载/渲染/编排死代码移除
-['_loadCustomScenes', '_renderCustomSceneList', '_renderCustomSceneGrid',
- '_enterSceneEditor', '_editScene', '_deleteScene', '_showCardMenu',
- '_saveScene', '_renderSceneEditor', '_sceneEditorScope', '_skillSelectScope',
- 'customSceneGrid', 'customSceneList'].forEach(function (name) {
-  assert.ok(!JS.includes(name), '死代码应被移除: ' + name);
-});
-assert.ok(!/scope=repo/.test(JS), '不应再发起 scope=repo 请求');
-
-// 3. locales 死键清理（zh/en 一致）
-['scene_scope_repo', 'no_scenes_custom', 'create_scene', 'edit_scene', 'delete_scene',
- 'confirm_delete_scene', 'delete_scene_tip', 'scene_id_placeholder', 'save_scene'].forEach(function (k) {
-  assert.ok(!(k in ZH), 'zh skills.json 应删除死键: ' + k);
-  assert.ok(!(k in EN), 'en skills.json 应删除死键: ' + k);
+check('不存在仓库 Tab 的渲染', function () {
+  assert.ok(!/repoTab|repo_tab/.test(VIEW), '不应有 repoTab 状态');
+  assert.ok(!/tab.*['"]repo['"]/.test(TPL), '模板不应有 repo Tab 项');
+  assert.ok(!/>\s*仓库\s*</.test(TPL), '不应出现「仓库」Tab 文案');
 });
 
-// 4. official 路径保持完好
-['_loadSceneMarket', '_loadSceneMarketList', '_renderSceneMarketPage',
- '_renderOfficialSceneGrid', '_renderSceneCard', '_applyScene',
- '_experienceScene', '_toggleSceneLike', 'scene_scope_official'].forEach(function (name) {
-  assert.ok(JS.includes(name), 'official 路径函数/键应保留: ' + name);
+check('不存在按仓库切换的 tab 逻辑', function () {
+  assert.ok(!/switchTab\(\s*['"]repo/i.test(VIEW), '不应有切到 repo 的 tab 逻辑');
 });
-assert.ok('scene_scope_official' in ZH && 'scene_scope_official' in EN, 'scene_scope_official 键应保留');
-assert.ok('goto_repo_scenes' in ZH && 'goto_repo_scenes' in EN, 'goto_repo_scenes（冲突弹窗仍用）应保留');
 
-// 5. index.html 版本号刷新
-assert.ok(/scene-market\.js\?v=(4[2-9]|[5-9]\d)/.test(INDEX), 'scene-market.js 缓存版本号应更新');
+check('场景信息仍正常展示（删的是 Tab 不是页面）', function () {
+  assert.ok(/detail\.value|detailId|sm__detail/i.test(VIEW), '详情仍存在');
+  assert.ok(/apply_scene|onApply/.test(VIEW), '应用入口仍存在');
+});
 
-console.log('✅ Issue #316 前端回归测试全部通过');
+console.log('\n#316 全部通过 (' + passed + '/3)');

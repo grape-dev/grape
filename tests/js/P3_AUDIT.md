@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**69 通过 / 8 C类 / 14 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**74 通过 / 8 C类 / 9 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -98,17 +98,17 @@ js 测试：**69 通过 / 8 C类 / 14 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_290_view_issue.js
 - [ ] test_issue_297_multi_image_error_and_persist.js
 - [x] test_issue_299_org_name_display.js（修 harness 后恢复，仍为行为测试）
-- [ ] test_issue_316_scene_repo_tab_removed.js
+- [x] test_issue_316_scene_repo_tab_removed.js（已改写）
 - [x] test_issue_329_cross_pipeline.js（已改写）
-- [ ] test_issue_335_skill_search.js
+- [ ] test_issue_335_skill_search.js（**待确认**：SkillsView/RuntimesView 均无 _engineSkillCache，刷新后缓存语义需确认是否仍有必要）
 - [ ] test_issue_372_r13_ui_optimization.js
 - [x] test_issue_473_range_filter.js（已修复并改写）
 - [x] test_issue_475_runtime_health_hint.js（已修复并改写）
-- [ ] test_issue_487_scene_recommend_save.js
+- [x] test_issue_487_scene_recommend_save.js（已改写）
 - [x] test_issue_498_health_consistency.js（已修复并改写）
-- [ ] test_issue_645_skill_update_fallback.js
-- [ ] test_issue_697_dedup_template.js
-- [ ] test_issue_978_skill_unique_key.js
+- [x] test_issue_645_skill_update_fallback.js（已改写）
+- [x] test_issue_697_dedup_template.js（已改写）
+- [x] test_issue_978_skill_unique_key.js（已改写）
 - [ ] test_password_blocklist.js
 - [x] test_repo_persist_on_refresh.js（修 harness 后恢复，仍为行为测试）
 - [x] test_repos_host_provider.js（已改写）
