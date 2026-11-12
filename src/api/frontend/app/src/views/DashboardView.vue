@@ -521,7 +521,7 @@
                 <div class="l">{{ t('stat_active') }}</div>
               </div>
               <div class="pl-stat">
-                <div class="v" style="color: #ff3b30">{{ scenePipeFailed }}</div>
+                <div class="v" style="color: var(--r)">{{ scenePipeFailed }}</div>
                 <div class="l">{{ t('stat_failed') }}</div>
               </div>
               <div class="pl-stat">
@@ -650,7 +650,7 @@
               <div class="l">{{ t('stat_active') }}</div>
             </div>
             <div class="ap-stat">
-              <div class="v" style="color: #ff3b30">{{ metrics.failed_events || 0 }}</div>
+              <div class="v" style="color: var(--r)">{{ metrics.failed_events || 0 }}</div>
               <div class="l">{{ t('stat_failed') }}</div>
             </div>
             <div class="ap-stat">
@@ -3078,21 +3078,21 @@ onBeforeUnmount(function () {
   cursor: pointer;
   transition: all 0.2s ease;
   background: transparent;
-  border: 1px solid rgba(0, 113, 227, 0.3);
-  color: var(--a-text);
+  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
+  color: var(--a);
   font-family: inherit;
 }
 .ap-btn:hover {
   background: var(--a);
-  border-color: var(--a-text);
+  border-color: var(--a);
   color: var(--on-accent);
 }
 .ap-btn-d {
-  border: 1px solid rgba(255, 59, 48, 0.3);
+  border: 1px solid color-mix(in srgb, var(--r) 55%, transparent);
   color: var(--r);
 }
 .ap-btn-d:hover {
-  background: #ff3b30;
+  background: var(--r);
   border-color: var(--r);
   color: var(--on-accent);
 }
@@ -3161,9 +3161,9 @@ onBeforeUnmount(function () {
   font-size: 10px;
   font-weight: 500;
   color: var(--a-text);
-  background: #e3edfd;
+  background: color-mix(in srgb, var(--a) 16%, transparent);
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: 999px;
   vertical-align: middle;
   margin-left: 4px;
 }
@@ -3172,25 +3172,25 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: rgba(255, 243, 205, 0.8);
+  background: color-mix(in srgb, var(--y) 14%, transparent);
   backdrop-filter: blur(8px);
   border: none;
   border-radius: 14px;
   padding: 10px 14px;
   margin-bottom: 12px;
   font-size: 13px;
-  color: #7a5b00;
+  color: var(--y);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 .dbv-hostbanner.error {
-  background: rgba(253, 236, 234, 0.8);
-  color: #c31f1e;
+  background: color-mix(in srgb, var(--r) 12%, transparent);
+  color: var(--r);
 }
 .dbv-hostbanner button {
   margin-left: auto;
-  background: rgba(255, 149, 0, 0.15);
-  color: #ff9500;
-  border: 1px solid rgba(255, 149, 0, 0.3);
+  background: color-mix(in srgb, var(--y) 15%, transparent);
+  color: var(--y);
+  border: 1px solid color-mix(in srgb, var(--y) 30%, transparent);
   border-radius: 999px;
   padding: 6px 16px;
   cursor: pointer;
@@ -3198,16 +3198,16 @@ onBeforeUnmount(function () {
   font-weight: 500;
 }
 .dbv-hostbanner button:hover {
-  background: #ff9500;
+  background: var(--y);
   color: var(--on-accent);
 }
 .dbv-hostbanner.error button {
   color: var(--r);
-  border-color: rgba(255, 59, 48, 0.3);
-  background: rgba(255, 59, 48, 0.1);
+  border-color: color-mix(in srgb, var(--r) 45%, transparent);
+  background: color-mix(in srgb, var(--r) 10%, transparent);
 }
 .dbv-hostbanner.error button:hover {
-  background: #ff3b30;
+  background: var(--r);
   color: var(--on-accent);
 }
 /* 市场卡 */
@@ -3258,7 +3258,7 @@ onBeforeUnmount(function () {
   color: var(--t2);
   background: var(--bg);
   padding: 2px 8px;
-  border-radius: 8px;
+  border-radius: 999px;
   margin-left: 4px;
 }
 .scn-list {
@@ -3347,7 +3347,7 @@ onBeforeUnmount(function () {
 }
 .scn-row-chain .scn-arr {
   font-size: 12px;
-  color: #d2d2d7;
+  color: var(--t3);
   font-weight: 400;
   margin: 0 1px;
 }
@@ -3453,7 +3453,7 @@ onBeforeUnmount(function () {
   background: rgba(0, 0, 0, 0.04);
 }
 .dbv-desc-ph {
-  color: #c7c7cc;
+  color: var(--t3);
   font-style: italic;
 }
 .dbv-name-input {
@@ -3665,7 +3665,7 @@ onBeforeUnmount(function () {
   width: 100%;
   padding: 6px 10px;
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: 999px;
   font-size: 11px;
   background: var(--bg);
   color: var(--t);
@@ -3681,10 +3681,10 @@ onBeforeUnmount(function () {
   background: var(--c);
 }
 .ap-nd-engbtn {
-  font-size: 10px;
-  padding: 3px 10px;
+  font-size: 12px;
+  padding: 3px 12px;
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: 999px;
   background: transparent;
   color: var(--t2);
   cursor: pointer;
@@ -3721,7 +3721,7 @@ onBeforeUnmount(function () {
   color: var(--a-text);
 }
 :deep(.dbv-engbadge.red) {
-  background: #ff3b3014;
+  background: color-mix(in srgb, var(--r) 8%, transparent);
   color: var(--r);
 }
 :deep(.dbv-engbadge.gray) {
@@ -3895,7 +3895,7 @@ onBeforeUnmount(function () {
 .dbv-cfeye {
   border: 1px solid var(--hairline);
   background: var(--bg);
-  border-radius: 8px;
+  border-radius: 999px;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -4039,7 +4039,7 @@ onBeforeUnmount(function () {
   box-sizing: border-box;
   padding: 7px 10px;
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: 999px;
   font-size: 12px;
   background: var(--bg);
   color: var(--t);
@@ -4070,7 +4070,7 @@ onBeforeUnmount(function () {
   gap: 6px;
 }
 .dbv-skillopt:hover {
-  background: rgba(0, 113, 227, 0.06);
+  background: color-mix(in srgb, var(--a) 10%, transparent);
 }
 .dbv-skillopt.clear {
   color: var(--t3);
@@ -4078,10 +4078,10 @@ onBeforeUnmount(function () {
   margin-bottom: 4px;
 }
 .dbv-skillopt.sel {
-  background: rgba(0, 113, 227, 0.08);
+  background: color-mix(in srgb, var(--a) 14%, transparent);
 }
 .dbv-skillopt.sel:hover {
-  background: rgba(0, 113, 227, 0.08);
+  background: color-mix(in srgb, var(--a) 14%, transparent);
 }
 .dbv-skillcheck {
   color: var(--a-text);
@@ -4227,7 +4227,7 @@ onBeforeUnmount(function () {
   transition: all 0.2s ease;
 }
 .dbv-engitem.on {
-  background: rgba(0, 113, 227, 0.06);
+  background: color-mix(in srgb, var(--a) 10%, transparent);
 }
 .dbv-engitem input {
   width: 18px;
@@ -4397,13 +4397,13 @@ onBeforeUnmount(function () {
   height: 29px;
   padding: 0;
   cursor: pointer;
-  color: #c7c7cc;
+  color: var(--t3);
   font-size: 14px;
   line-height: 1;
 }
 .dbv-globe-empty:hover {
   color: var(--t3);
-  border-color: #d2d2d7;
+  border-color: var(--t3);
 }
 .dbv-deployurl-input {
   width: 200px;
