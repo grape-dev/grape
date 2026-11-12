@@ -803,6 +803,18 @@ const ISSUE_DEFAULTS = {
   'detail.go_conversation': '进入对话',
   'detail.copy_task': '复制需求',
   'cross_pipeline.handoff_btn': '移交到其他流水线',
+  attachments: '附件',
+  no_attachments: '暂无附件',
+  upload_attach: '上传附件',
+  attach_load_failed: '附件加载失败',
+  deploy_hint: '部署地址（可选）',
+  deploy_placeholder: 'https://...',
+  'cross_pipeline.issue_label': '需求',
+  'cross_pipeline.target_scene': '目标场景',
+  'cross_pipeline.scene_placeholder': '选择目标场景',
+  'cross_pipeline.assignee_hint': '移交后由目标场景的 Agent 接手',
+  'cross_pipeline.loading_scenes': '场景加载中...',
+
 }
 function t(key, params) {
   const full = 'tasks.' + key
@@ -812,7 +824,11 @@ function t(key, params) {
 function td(key, params) {
   const full = 'issues.' + key
   const v = G.I18N.t(full, params)
-  return v && v !== full ? v : ISSUE_DEFAULTS[key] || key
+  if (v && v !== full) return v
+  // 模板里有 td('view_issue') 与 td('detail.view_issue') 两种写法，默认表两种都要能命中，
+  // 否则按钮会直接显示 view_issue 这种标识符（2026-11-12 主人报的「按钮显示函数名」）
+  const alt = key.indexOf('.') === -1 ? 'detail.' + key : key.replace(/^detail\./, '')
+  return ISSUE_DEFAULTS[key] || ISSUE_DEFAULTS[alt] || key
 }
 function t2(key, params) {
   return td(key, params)
@@ -2982,15 +2998,17 @@ onBeforeUnmount(function () {
 }
 /* 视图 Tab（我的需求/仓库全部） */
 .isk-viewtabs {
-  display: flex;
-  gap: 0;
+  display: inline-flex;
+  gap: 2px;
   margin-top: 8px;
-  border-bottom: 0.5px solid var(--b, #e8e8ed);
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--chip-bg);
+  border-bottom: none;
 }
 .isk-viewtabs button {
   border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  border-radius: 999px;
   padding: 6px 16px;
   font-size: 13px;
   font-weight: 600;
@@ -3000,9 +3018,12 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .isk-viewtabs button.on {
-  border-bottom-color: var(--a, #0071e3);
-  color: var(--on-accent);
+  color: #fff;
   background: var(--a, #0071e3);
+}
+.isk-viewtabs button:not(.on):hover {
+  color: var(--t);
+  background: var(--hover-row);
 }
 /* 筛选 popover */
 .isk-pop-wrap {
