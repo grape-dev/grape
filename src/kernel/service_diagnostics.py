@@ -1,4 +1,4 @@
-"""按服务基址诊断（Issue #1858；Issue #2010 从 src/ 顶层迁入 src/infra）。
+"""按服务基址诊断（Issue #1858；Issue #2010 从 src/ 顶层迁入 src/kernel/）。
 
 与 prompt 构建职责分离，供平台侧 A2A 自调用告警、CLI 指引与回归用例复用：
 - 端点路径 → 服务名（vcs / issue / a2a）映射；
