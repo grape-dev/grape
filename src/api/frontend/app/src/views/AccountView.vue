@@ -345,9 +345,9 @@
                 <div class="ac__keyname">{{ k.name }}</div>
                 <div class="ac__keyprefix">{{ k.prefix }}</div>
                 <div class="ac__keymeta">
-                  {{ t('created') }}: {{ k.created_at || '—' }}
+                  {{ t('created') }}: {{ fmtKeyTime(k.created_at) }}
                   <template v-if="k.last_used_at">
-                    · {{ t('last_used') }}: {{ k.last_used_at }}</template
+                    · {{ t('last_used') }}: {{ fmtKeyTime(k.last_used_at) }}</template
                   >
                 </div>
               </div>
@@ -414,6 +414,16 @@
 </template>
 
 <script setup>
+// Issue #1477：API Key 时间统一走本地时区格式化（后端返回 UTC ISO 串）
+function fmtKeyTime(v) {
+  if (!v) return '—'
+  try {
+    return (G.fmtLocalTime && G.fmtLocalTime(v)) || String(v)
+  } catch (e) {
+    return String(v)
+  }
+}
+
 import { ref, reactive, onMounted } from 'vue'
 
 const G = globalThis
@@ -1766,7 +1776,7 @@ function selectLang(l) {
     .then(function (result) {
       lang.value = l
       if (result.failed === 0) {
-        if (!result.cached) G.app.showToast(G.I18N.t('common.success'))
+        // Issue #273：语言切换成功不再弹「Success」（用户已看到界面语言变化，弹窗是噪音）
       } else if (result.failed < result.total) {
         G.app.showToast(
           G.I18N.t('common.success') +

@@ -172,5 +172,6 @@
   "sre_aksk_required": "Please enter Access Key and Secret Key",
   "sre_add_device_title": "Add device",
   "scene_detail": "Scene Detail",
-  "scene_engine_ctx_missing": "Scene context not ready, open scene edit first"
+  "scene_engine_ctx_missing": "Scene context not ready, open scene edit first",
+  "sre_locked_by_vod_skill": "This VOD skill already covers SRE, so the SRE node was turned off"
 }

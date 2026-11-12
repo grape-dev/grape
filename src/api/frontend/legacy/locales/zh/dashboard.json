@@ -172,5 +172,6 @@
   "sre_aksk_required": "请输入 Access Key 和 Secret Key",
   "sre_add_device_title": "添加设备",
   "scene_detail": "场景详情",
-  "scene_engine_ctx_missing": "场景上下文未就绪，请先进入场景编辑页"
+  "scene_engine_ctx_missing": "场景上下文未就绪，请先进入场景编辑页",
+  "sre_locked_by_vod_skill": "该 VOD 技能已内置 SRE 能力，已自动关闭 SRE 节点"
 }

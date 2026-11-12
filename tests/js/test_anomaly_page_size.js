@@ -35,6 +35,13 @@ check('按页切片渲染（anomalyPageItems）', function () {
   assert.ok(/v-for="s in anomalyPageItems"/.test(VIEW), '列表应按页渲染');
 });
 
+check('每页条数选择器（10/20/50）', function () {
+  assert.ok(/const ANOMALY_PAGE_SIZES = \[10, 20, 50\]/.test(VIEW), '应有 10/20/50 三档');
+  assert.ok(/@change="setAnomalyPageSize"/.test(VIEW), '选择器应绑定切换函数');
+  const i = VIEW.indexOf('function setAnomalyPageSize(');
+  assert.ok(i > 0 && /anomalyPage\.value = 0/.test(VIEW.slice(i, i + 240)), '换页大小应回到第 1 页');
+});
+
 check('上一页/下一页边界禁用 + 页码', function () {
   assert.ok(/:disabled="anomalyPage === 0"/.test(VIEW), '首页禁用上一页');
   assert.ok(/:disabled="anomalyPage >= anomalyTotalPages - 1"/.test(VIEW), '末页禁用下一页');

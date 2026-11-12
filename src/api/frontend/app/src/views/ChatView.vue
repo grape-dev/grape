@@ -893,6 +893,31 @@ function doDeleteConv() {
 // ── 消息渲染 ──
 // ═══════════ Issue #442：消息撤回（二次确认 → 终止该轮执行 → 原文可重新编辑） ═══════════
 const recallTexts = new Map() // msgId → 原文（剥离 [chat_img:] 标记，供「重新编辑」）
+// 飞书/Web 双通道同一条消息可能重复下发（同 id 或同 task 的 agent 回复）→ 渲染前去重，
+// 避免对话框出现两个气泡。规则：普通消息按 id 保留首条；agent 回复按 task_id 保留最新一条。
+function dedupeMessages(list) {
+  const out = []
+  const seenId = new Set()
+  ;(list || []).forEach(function (m) {
+    if (!m) return
+    if (m.id != null) {
+      const k = String(m.id)
+      if (seenId.has(k)) return
+      seenId.add(k)
+    }
+    if (m.role === 'agent' && m.task_id != null) {
+      const idx = out.findIndex(function (x) {
+        return x.role === 'agent' && x.task_id === m.task_id
+      })
+      if (idx >= 0) {
+        out[idx] = m
+        return
+      }
+    }
+    out.push(m)
+  })
+  return out
+}
 function stripChatImgMarkers(content) {
   return String(content || '')
     .replace(/\[chat_img:[^\]]+\]/g, '')
@@ -1000,7 +1025,7 @@ function switchConversation(convId) {
           '</a> · '
       }
       hdrTitle.value = prefix + linkifyIssueNumbers(safeTitle, conv.repo_key || '')
-      messages.value = msgs
+      messages.value = dedupeMessages(msgs)
       bodyLoading.value = false
       nextTick(scrollBody)
       // v31: 最后一条 user 消息带 task_id → 检查运行中任务并 SSE 重连
@@ -1024,7 +1049,7 @@ function switchConversation(convId) {
               if (hasAgentReply) clearStoredTask(convId)
               else {
                 G.API.get('/chat/messages/' + convId).then(function (d2) {
-                  messages.value = d2.messages || []
+                  messages.value = dedupeMessages(d2.messages || [])
                   loadConversations()
                 })
                 clearStoredTask(convId)

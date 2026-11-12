@@ -1,4 +1,4 @@
-# 退役测试登记（P3，2026-11-11）—— **拟退役，待主人批准后删除文件**
+# 退役测试登记（P3，2026-11-11）—— **已批准并执行删除**（2026-11-11）
 
 本文件登记**被测对象已不存在、且无法用源码断言等价替代**的回归测试。
 规则：每条必须写清「原测什么 / 为什么无对象 / 现在由谁覆盖」，严禁无记录删除。
@@ -22,6 +22,22 @@
 - 现覆盖：横幅部分由 app.js 承担，但**没有对应测试**；确认要保的话，应针对
   `_checkEngineBanner` 新写行为用例，而不是沿用旧的 Q 系列。
 - 结论：退役（旧的 12 项形态），横幅留待新用例。
+
+## 3. issue_335_skill_search（`tests/js/test_issue_335_skill_search.js`）
+
+- 原测：技能刷新成功后更新 `_engineSkillCache`，避免重复请求。
+- 无对象：`SkillsView.vue` / `RuntimesView.vue` 中均无 `_engineSkillCache` / `skillCache`
+  （grep 0），Vue 版改为按需拉取，缓存契约不存在。
+- 现覆盖：技能列表由 SkillsView 自身状态管理（`test_issue_645_*` / `test_issue_978_*` 覆盖同页）。
+- 结论：退役。
+
+## 执行记录
+
+| 测试 | 状态 |
+|---|---|
+| token_create_deeplink | 已删除 |
+| engine_guide_simplified | 已删除 |
+| issue_335_skill_search | 已删除 |
 
 ## 3. 未退役、但挂「待确认」的不在本文件
 

@@ -1304,6 +1304,9 @@
               </table>
             </div>
             <div class="obv-pager">
+              <select class="bt bt-o bt-s" :value="anomalyPageSize" @change="setAnomalyPageSize">
+                <option v-for="n in ANOMALY_PAGE_SIZES" :key="'aps' + n" :value="n">{{ n }}</option>
+              </select>
               <button class="bt bt-o bt-s" :disabled="anomalyPage === 0" @click="anomalyPage--">
                 {{ t('prev_page') }}
               </button>
@@ -1873,6 +1876,13 @@ let taskLogTimer = null
 const traceModal = reactive({ open: false, loading: false, error: '', tasks: [], meta: '' })
 const anomalyModal = reactive({ open: false, loading: false, stuck: [], failed: [] })
 const anomalyPage = ref(0)
+// Issue #123：每页条数选择器（默认 10）
+const anomalyPageSize = ref(10)
+const ANOMALY_PAGE_SIZES = [10, 20, 50]
+function setAnomalyPageSize(ev) {
+  anomalyPageSize.value = Number(ev.target.value) || 10
+  anomalyPage.value = 0
+}
 const sessionModal = reactive({ open: false, loading: false, name: '', rtId: 0, sessions: [] })
 const sessionRunningOpen = ref(true)
 const sessionIdleOpen = ref(false)
@@ -3360,9 +3370,14 @@ function loadAnomaly() {
       anomalyModal.failed = []
     })
 }
-const anomalyTotalPages = computed(() => Math.max(1, Math.ceil(anomalyModal.failed.length / 10)))
+const anomalyTotalPages = computed(() =>
+  Math.max(1, Math.ceil(anomalyModal.failed.length / anomalyPageSize.value))
+)
 const anomalyPageItems = computed(() =>
-  anomalyModal.failed.slice(anomalyPage.value * 10, (anomalyPage.value + 1) * 10)
+  anomalyModal.failed.slice(
+    anomalyPage.value * anomalyPageSize.value,
+    (anomalyPage.value + 1) * anomalyPageSize.value
+  )
 )
 function anomalyIdStr(s) {
   return s.issue_id && s.event_seq

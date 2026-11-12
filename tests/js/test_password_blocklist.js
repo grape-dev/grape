@@ -149,8 +149,11 @@ assert.deepStrictEqual(r10, [true, false, true, true], 'P10c: 长度谓词语义
 // Vue 迁移后 admin 页面在 AdminView.vue（原 js/admin.js 已删）
 const adminSrc = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AdminView.vue'), 'utf8');
 const authSrc = fs.readFileSync(path.join(_STATIC, 'js', 'auth.js'), 'utf8');
-assert.ok(adminSrc.includes('isPwdTooShort(newP)') && (adminSrc.match(/isPwdTooShort\(password\)/g) || []).length === 2,
-  'P10d: admin.js 三处长度校验走谓词');
+assert.ok(
+  /isPwdTooShort\(newP\)/.test(adminSrc) && (adminSrc.match(/isPwdTooShort\(password\)/g) || []).length === 2,
+  'P10d: AdminView 三处长度校验走谓词（改密用 newP）',
+);
+assert.ok(!/password\.length < 8/.test(adminSrc), 'P10d: 不应再有散落的 length<8');
 assert.ok(/PWD_MIN_LEN \|\| 8/.test(authSrc), 'P10e: auth.js 评分阈值走常量');
 for (const [name, src] of [['admin', adminSrc], ['forgot', forgotSrc], ['register', regSrc]]) {
   assert.ok(!/length\s*[<>]=?\s*8\b/.test(src), 'P10f: ' + name + ' 无 length<8/>=8 散落硬编码');
@@ -158,6 +161,7 @@ for (const [name, src] of [['admin', adminSrc], ['forgot', forgotSrc], ['registe
 // admin.html 引入 blocklist（admin.js 消费前置）
 const adminHtml = fs.readFileSync(path.join(_STATIC, 'admin.html'), 'utf8');
 assert.ok(adminHtml.includes('pwd-blocklist.js'), 'P10g: admin.html 引入 blocklist');
+assert.ok(/function isPwdTooShort\(/.test(adminSrc), 'P10g2: AdminView 长度谓词内聚');
 
 // P11: 过期意图标记复位（D 审计：_isCreateMode 原三路径复位，侧栏离开泄漏）
 assert.ok(appSrc.includes('window._isCreateMode = false;'), 'P11: nav 离开统一复位 _isCreateMode');
@@ -167,7 +171,7 @@ assert.ok(appSrc.includes('window._isCreateMode = false;'), 'P11: nav 离开统�
 const changePwdFn = adminSrc.slice(adminSrc.indexOf('function changePwd'), adminSrc.indexOf('function logout', adminSrc.indexOf('function changePwd')));
 assert.ok(changePwdFn.includes('isPwdTooShort(newP)'), 'P12: admin 改密长度预检走谓词');
 assert.ok(changePwdFn.includes('isWeakPassword(newP)'), 'P12b: admin 改密弱口令预检（A 项）');
-assert.ok(changePwdFn.includes("admin.pwd_modal.too_common"), 'P12c: 预检文案走 i18n');
+assert.ok(/t\('pwd_modal\.too_common'\)/.test(changePwdFn), 'P12c: 预检文案走 i18n（AdminView 前缀 admin.）');
 for (const lang of ['zh', 'en']) {
   const adminPack = JSON.parse(fs.readFileSync(path.join(_STATIC, 'locales', lang, 'admin.json'), 'utf8'));
   assert.ok(adminPack.pwd_modal && adminPack.pwd_modal.too_common, 'P12d: ' + lang + ' admin.pwd_modal.too_common 键存在');

@@ -643,6 +643,12 @@
 </template>
 
 <script setup>
+// P10d（#406 同类）：密码最小长度口径统一，禁止在调用点散落长度阈值硬编码
+const PWD_MIN_LEN = 8
+function isPwdTooShort(p) {
+  return !p || String(p).length < PWD_MIN_LEN
+}
+
 // Batch 17 (admin): standalone admin site (login + config center + users + whitelists)
 // migrated from legacy/js/admin.js. This page does NOT live in the app.js shell —
 // it is its own document (admin.html) with its own I18N namespace "admin.*".
@@ -1104,7 +1110,7 @@ function submitUserModal() {
       toast(t('users.username_required'), false)
       return
     }
-    if (!password || password.length < 8) {
+    if (isPwdTooShort(password)) {
       toast(t('users.password_required'), false)
       return
     }
@@ -1122,7 +1128,7 @@ function submitUserModal() {
       })
   } else if (userModal.mode === 'reset') {
     const password = um.password.trim()
-    if (!password || password.length < 8) {
+    if (isPwdTooShort(password)) {
       toast(t('users.password_required'), false)
       return
     }
@@ -1156,21 +1162,26 @@ function openPwdModal() {
 }
 function changePwd() {
   const o = pwdModal.old
-  const n = pwdModal.new_
+  const newP = pwdModal.new_
   const c = pwdModal.confirm
-  if (!o || !n) {
+  if (!o || !newP) {
     toast(t('pwd_modal.empty_fields'), false)
     return
   }
-  if (n.length < 8) {
+  if (isPwdTooShort(newP)) {
     toast(t('pwd_modal.too_short'), false)
     return
   }
-  if (n !== c) {
+  // P12b：弱口令预检（pwd-blocklist.js 提供 window.isWeakPassword），避免前端全绿后端 400
+  if (typeof window !== 'undefined' && window.isWeakPassword && window.isWeakPassword(newP)) {
+    toast(t('pwd_modal.too_common'), false)
+    return
+  }
+  if (newP !== c) {
     toast(t('pwd_modal.mismatch'), false)
     return
   }
-  api('/change-password', { method: 'POST', body: { old_password: o, new_password: n } })
+  api('/change-password', { method: 'POST', body: { old_password: o, new_password: newP } })
     .then(() => {
       toast(t('pwd_modal.changed'), true)
       setToken(null)

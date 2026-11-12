@@ -2152,11 +2152,32 @@ const skillGroups = computed(() => {
     })
     .filter((g) => g.items.length)
 })
+// Issue #406：VOD 选「开发者声音分析（CLI 版）」这类技能时，SRE 能力已内置 →
+// 自动关闭 SRE 节点，避免 VOD 场景误配 SRE 引擎。
+const VOD_SKILL_LOCKS_SRE = /开发者声音分析|sound[-_ ]?analysis.*cli|cli.*sound[-_ ]?analysis/i
+function applySreLockForVodSkill(node, skillName) {
+  const tag = node && (node.tag || node.id)
+  if (tag !== 'vod') return
+  const sre = editNodes.value.find(function (n) {
+    return (n.tag || n.id) === 'sre'
+  })
+  if (!sre) return
+  const lock = VOD_SKILL_LOCKS_SRE.test(skillName || '')
+  if (lock && sre.enabled !== false) {
+    sre.enabled = false
+    sre.lockedByVodSkill = true
+    app().showToast(t('sre_locked_by_vod_skill'))
+  } else if (!lock && sre.lockedByVodSkill) {
+    sre.enabled = true
+    sre.lockedByVodSkill = false
+  }
+}
 function pickSkill(skillName, skillKey) {
   const node = editNodes.value.find((n) => n.id === skillPanel.agentType)
   if (node) {
     node.skill = skillName || ''
     if (scopeViolations[node.id || '']) delete scopeViolations[node.id]
+    applySreLockForVodSkill(node, skillName)
     const cache = skillPickCache[skillPanel.agentType] || {}
     // Issue #978：优先按唯一键命中缓存；无 key 时按 name 兜底（同名三档不再覆盖）
     let entry = skillKey ? cache[skillKey] : null

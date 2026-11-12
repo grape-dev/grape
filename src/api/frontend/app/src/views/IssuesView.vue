@@ -2182,7 +2182,8 @@ function openTaskConversation(tk) {
   }
 }
 function openIssueLink(tk) {
-  G.window.open(vcsUrl(tk.repo_key, (tk.is_pr ? '/pull/' : '/issues/') + tk.issue_number), '_blank')
+  // Issue #290：查看 Issue 入口统一 /issues/（PR 专属入口走 openPrLink）
+  G.window.open(vcsUrl(tk.repo_key, '/issues/' + tk.issue_number), '_blank')
 }
 function openPrLink(tk) {
   G.window.open(vcsUrl(tk.repo_key, '/pull/' + tk.issue_number), '_blank')
