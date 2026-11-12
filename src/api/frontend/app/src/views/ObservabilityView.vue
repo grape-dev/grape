@@ -4112,7 +4112,7 @@ onBeforeUnmount(function () {
   cursor: pointer;
   text-align: center;
   padding: 12px 10px;
-  border-radius: 10px;
+  border-radius: 14px;
   border: 1px solid var(--b);
   background: transparent;
   color: inherit;
@@ -4521,7 +4521,7 @@ onBeforeUnmount(function () {
 }
 .obv-evtable td {
   padding: 6px 8px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+  border-bottom: 1px solid var(--hairline);
 }
 /* Token 卡 */
 .obv-tokcard {
@@ -4564,7 +4564,7 @@ onBeforeUnmount(function () {
 .obv-chip {
   cursor: pointer;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: 999px;
   font-size: 12px;
   color: var(--a);
 }
@@ -5134,26 +5134,29 @@ onBeforeUnmount(function () {
 }
 .eff-seg {
   display: inline-flex;
-  border: 1px solid var(--b);
-  border-radius: 6px;
-  overflow: hidden;
+  gap: 2px;
+  padding: 2px;
+  border: none;
+  border-radius: 999px;
+  background: var(--chip-bg);
   margin-left: auto;
 }
 .eff-seg button {
-  background: var(--c);
+  background: transparent;
   border: none;
-  padding: 3px 9px;
-  font-size: 10px;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 11px;
   color: var(--t2);
   cursor: pointer;
   white-space: nowrap;
 }
 .eff-seg button + button {
-  border-left: 1px solid var(--b);
+  border-left: none;
 }
 .eff-seg button.on {
   background: var(--a);
-  color: var(--on-accent);
+  color: #fff;
 }
 .eff-spark {
   display: flex;
