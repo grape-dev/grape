@@ -12,4 +12,17 @@ docs/
 skills/tools/
 skills/huawei-cloud-ecs-servers/
 branches-backup-*.bundle
-configs/
+# configs/ 整目录排除会让镜像里没有任何种子文件（agent_type 无法播种 → Agents 页全 404）。
+# 改为白名单：只放运行必需的种子，并集覆盖新老两代（多带几 KB 无害，少带就会 404）。
+# 刻意排除 global-bot-token.json：它是 .gitignore:19 忽略的运行时 bot token（入库的只有
+# global-bot-token.example.json）。放进白名单会让"跑过 bot 的工作目录"把真实 token 烘进镜像，
+# 随镜像分发泄漏；应用侧 config_store 对缺失该文件有兜底（返回空 dict）。
+configs/**
+!configs/agent-description.json
+!configs/agent-skill-mapping.json
+!configs/default-scene.json
+!configs/engine-selection.json
+!configs/pipelines.json
+!configs/credential-filter.json
+!configs/onboarding-templates.json
+!configs/scene-precheck.json
