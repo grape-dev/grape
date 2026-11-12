@@ -62,6 +62,14 @@ export default defineConfig({
           path.resolve(__dirname, './src/styles/bridge.css'),
           path.join(dstAssets, 'bridge.css')
         )
+        // 全站基础样式（原 legacy/css）：单一来源 = app/src/styles/global，产物固定名进 assets/css/
+        const globalCss = path.resolve(__dirname, './src/styles/global')
+        const dstGlobal = path.join(dstAssets, 'css')
+        fs.mkdirSync(dstGlobal, { recursive: true })
+        for (const f of ['tokens.css', 'app.css', 'auth.css']) {
+          fs.copyFileSync(path.join(globalCss, f), path.join(dstGlobal, f))
+        }
+        console.log('wrote global css -> ' + dstGlobal)
         console.log(`wrote stable view css/assets -> ${dstAssets}`)
       },
     },

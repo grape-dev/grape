@@ -119,7 +119,7 @@ class TestInfra:
 
     def test_spa_static_files(self):
         # Vue structure: legacy shell assets + migrated Vue view chunks live under frontend/legacy
-        for f in ["/static/js/app.js", "/static/css/app.css", "/static/js/api.js",
+        for f in ["/static/js/app.js", "/static-vue/assets/css/app.css", "/static/js/api.js",
                    "/static/js/worker-name.js", "/static/js/pwd-blocklist.js",
                    "/static-vue/viewjs/dashboard-view.js", "/static-vue/viewjs/issues-view.js",
                    "/static-vue/"]:
