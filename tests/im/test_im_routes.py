@@ -46,7 +46,7 @@ def _fake_request():
 
 
 def test_installations_list_masks_secret_and_filters_scope(ui_db):
-    from src.api.routes.im import im_installations
+    from src.domains.runtime.routes.im import im_installations
 
     engine_wiring.sync_installation("user", owner_user_id="1234",
                                            app_id="app_mine", app_secret="s3cr3t")
@@ -61,7 +61,7 @@ def test_installations_list_masks_secret_and_filters_scope(ui_db):
 
 
 def test_toggle_status_hides_from_provider(ui_db):
-    from src.api.routes.im import InstallationStatusBody, im_set_installation_status
+    from src.domains.runtime.routes.im import InstallationStatusBody, im_set_installation_status
     from src.domains.runtime.im.engine.installations import SqliteInstallationProvider
     import asyncio
 
@@ -87,7 +87,7 @@ def test_toggle_status_hides_from_provider(ui_db):
 
 def test_toggle_status_rejects_foreign_installation(ui_db):
     from fastapi import HTTPException
-    from src.api.routes.im import InstallationStatusBody, im_set_installation_status
+    from src.domains.runtime.routes.im import InstallationStatusBody, im_set_installation_status
 
     engine_wiring.sync_installation("user", owner_user_id="9999",
                                            app_id="app_foreign", app_secret="s")
@@ -102,7 +102,7 @@ def test_toggle_status_rejects_foreign_installation(ui_db):
 
 
 def test_status_counts_installations(ui_db):
-    from src.api.routes.im import im_engine_status
+    from src.domains.runtime.routes.im import im_engine_status
 
     engine_wiring.sync_installation("user", owner_user_id="1234",
                                            app_id="app_a", app_secret="s")
