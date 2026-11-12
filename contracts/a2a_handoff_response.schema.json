@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grape.dev/contracts/a2a_handoff_response.schema.json",
+  "title": "A2A structured handoff response",
+  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq.",
+  "type": "object",
+  "properties": {
+    "status": {"type": "string"},
+    "seq": {"type": "integer"},
+    "agent": {"type": "string"},
+    "handoff_result": {"type": "string", "enum": ["ok", "failed", "rejected"]},
+    "source_seq": {"type": "integer", "minimum": 0},
+    "idempotent": {"type": "boolean"},
+    "skipped": {"type": "string"},
+    "queued": {"type": "boolean"},
+    "event": {"type": "object"}
+  },
+  "required": ["handoff_result"],
+  "additionalProperties": true
+}

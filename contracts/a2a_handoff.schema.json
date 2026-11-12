@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grape.dev/contracts/a2a_handoff.schema.json",
+  "title": "A2A structured handoff request",
+  "description": "Issue #2050: structured handoff request contract for POST /api/a2a. source_event_seq is the source pipeline segment seq. Callers SHOULD send it explicitly (top-level preferred, payload.* accepted); when omitted the server derives it from the caller session (source task event_seq), keeping structured handoff the primary trigger source while text A2A lines remain a readable fallback.",
+  "type": "object",
+  "properties": {
+    "agent": {"type": "string", "enum": ["vod", "issue", "coding", "qa", "sre"]},
+    "payload": {
+      "type": "object",
+      "required": ["repository", "issue_number"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "issue_number": {"type": "string", "pattern": "^[0-9]+$"},
+        "context": {"type": "string"},
+        "source_event_seq": {"type": "integer", "minimum": 0},
+        "source_seq": {"type": "integer", "minimum": 0}
+      }
+    },
+    "idempotency_key": {"type": "string", "maxLength": 128, "description": "Idempotency key, e.g. handoff:{task_id}:{target_agent}"},
+    "source_event_seq": {"type": "integer", "minimum": 0, "description": "Source pipeline segment seq (top-level, preferred). Falls back to the caller session's event_seq server-side."},
+    "queue": {"type": "boolean"},
+    "force": {"type": "boolean"}
+  },
+  "required": ["agent", "payload"],
+  "additionalProperties": true
+}
