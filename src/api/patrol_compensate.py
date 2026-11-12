@@ -177,6 +177,10 @@ class RecheckHandler(Handler):
         # 评审五轮修正①（终检版）：issue 已被人收敛 → 误报，放弃补偿。
         # L1/L2 只找"交棒证据"，找不到"人已处置证据"；端点只拦 cancelled，
         # 不拦 completed/pending_review——此处必须自守，否则补偿复活已关 issue。
+        # 注意（QA 第 5 轮 M2）：issue_terminal 覆盖「终态 + 等用户暂停」两族状态。
+        # 此处语义是「已被收敛 → 不补派」，暂停态(awaiting_input)同样不该补派，
+        # 因此不排除 PAUSED_ISSUE_STATUSES；与 :372 的「撤销在途任务」判定口径不同——
+        # 那里暂停态不算收敛，不能对齐取消。两处用途不同，勿混淆。
         _term = _p.issue_terminal(ctx.repo_key, ctx.issue_id or "")
         if _term:
             _set_finding(ctx.finding_id, "false_positive", f"issue 已终态（{_term}），用户已收敛，不补")

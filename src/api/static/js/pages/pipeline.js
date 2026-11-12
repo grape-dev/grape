@@ -13,7 +13,9 @@ function _renderStallBadge(minutes, opts) {
   opts = opts || {};
   const cls = opts.cls || 'tg';
   const style = opts.style || 'color:#fff;background:#ff9f0a';
-  const text = I18N.t('pipeline.stalled_badge', {minutes: minutes || 0}) || ('⏳ 停滞 ' + (minutes || 0) + 'm');
+  // 文案只走 i18n：I18N.t 未命中时返回 key 本身（truthy），|| 兜底是死代码，
+  // 而且会给中文文案 ratchet 平白加计数（QA 第 5 轮 C1）。
+  const text = I18N.t('pipeline.stalled_badge', {minutes: minutes || 0});
   return '<span class="' + cls + '" style="' + style + '">' + text + '</span>';
 }
 

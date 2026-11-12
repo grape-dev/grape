@@ -1087,8 +1087,10 @@ function _renderPipelineSection(data) {
   // Issue #2050: 完成但未接力（stalled）——区分正常完成并展示停滞时长
   if (data.stalled) {
     var _stallMin = data.stalled_minutes || 0;
-    var _stallTitle = I18N.t('issues.stall_banner.title', {minutes: _stallMin}) || ('完成但未接力（停滞 ' + _stallMin + ' 分钟）');
-    var _stallHint = I18N.t('issues.stall_banner.hint') || '平台已告警：下一棒需人工确认（场景序推导只作建议）';
+    // 文案只走 i18n（zh/en 双包已齐）：I18N.t 未命中返回 key 本身，|| 中文兜底
+    // 既无效又抬高中文文案 ratchet 计数（QA 第 5 轮 C1）。
+    var _stallTitle = I18N.t('issues.stall_banner.title', {minutes: _stallMin});
+    var _stallHint = I18N.t('issues.stall_banner.hint');
     html += `<div style="font-size:11px;color:#ff9f0a;background:rgba(255,159,10,.10);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">⏳</span><span><b>${_stallTitle}</b> — ${_stallHint}</span></div>`;
   }
   // Issue #539: SRE 验收结论引用（result_ref 摘要 + 可授权查询任务引用）

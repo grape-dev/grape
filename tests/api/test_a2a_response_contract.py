@@ -79,3 +79,18 @@ def test_indirect_return_targets_are_contract_complete():
         for ln, seg in targets:
             for field in REQUIRED_FIELDS:
                 assert field in seg, f"{fn_name}:{ln} 的 response 缺 {field}（{seg_text} 依赖它）"
+
+def test_session_source_seq_derivation_precedes_early_returns():
+    """Issue #2050 审查 R2：会话兜底必须早于跨流水线 redirect / 幂等 / 门禁等早返回。
+
+    否则这些响应里的 source_seq 恒为 0，跨流水线交棒又会匹配不到证据（假阳性断链）。
+    """
+    src = _source()
+    body = ast.get_source_segment(src, _function(ast.parse(src), "a2a_endpoint")) or ""
+    anchor = body.index("_a2a_ref_seq = _a2a_source_event_seq(")
+    assert anchor < body.index("_cross_pipeline_handoff("), \
+        "跨流水线 redirect 早于会话兜底，source_seq 会落 0"
+    assert anchor < body.index("if _idem_key:"), \
+        "幂等命中查库早于会话兜底，命中响应拿不到 source_seq"
+    assert anchor < body.index("return _a2a_guard_skip_response("), \
+        "门禁跳过早于会话兜底，跳过响应拿不到 source_seq"

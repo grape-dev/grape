@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 
 from src.api.pipeline_constants import (
     DEFAULT_CONFIRM_MINUTES,
-    NON_PIPELINE_EVENT_TYPES,
     PAUSED_ISSUE_STATUSES,
     PIPELINE_SEGMENT_EVENT_TYPES,
     TERMINAL_ISSUE_STAGES,
@@ -110,9 +109,12 @@ def _pipeline_segments(issue_events):
     """
     typed = [e for e in issue_events if str(e.get("event_type") or "").strip()]
     if typed:
+        # PIPELINE_SEGMENT_EVENT_TYPES 与 NON_PIPELINE_EVENT_TYPES 互斥（前者只有
+        # a2a_event，后者是 admin_action/assignee_changed），旧写法里的排除子句恒真，
+        # 已删（QA 第 5 轮 M3）。存在 typed 行时整体忽略无类型行：无类型行来自
+        # archive 快照，同一 issue 同时出现两套时以 DB 的 typed 行为准，避免重复计段。
         return [e for e in typed
-                if str(e.get("event_type") or "").strip() in PIPELINE_SEGMENT_EVENT_TYPES
-                and str(e.get("event_type") or "").strip() not in NON_PIPELINE_EVENT_TYPES]
+                if str(e.get("event_type") or "").strip() in PIPELINE_SEGMENT_EVENT_TYPES]
     return list(issue_events)
 
 

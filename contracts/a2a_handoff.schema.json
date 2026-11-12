@@ -5,13 +5,13 @@
   "description": "Issue #2050: structured handoff request contract for POST /api/a2a. source_event_seq is the source pipeline segment seq. Callers SHOULD send it explicitly (top-level preferred, payload.* accepted); when omitted the server derives it from the caller session (source task event_seq), keeping structured handoff the primary trigger source while text A2A lines remain a readable fallback.",
   "type": "object",
   "properties": {
-    "agent": {"type": "string", "enum": ["vod", "issue", "coding", "qa", "sre"]},
+    "agent": {"type": "string", "description": "Target agent. Built-in roles are vod/issue/coding/qa/sre; custom scene pipelines may target any node tag — the scene nodes list is the single source of truth (POST /api/a2a validates against it, not against a fixed enum)."},
     "payload": {
       "type": "object",
       "required": ["repository", "issue_number"],
       "properties": {
         "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
-        "issue_number": {"type": "string", "pattern": "^[0-9]+$"},
+        "issue_number": {"type": ["integer", "string"], "description": "Numeric issue number (integer or digit string) or a letter-based ident (D102-G)."},
         "context": {"type": "string"},
         "source_event_seq": {"type": "integer", "minimum": 0},
         "source_seq": {"type": "integer", "minimum": 0}

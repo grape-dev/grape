@@ -1255,6 +1255,24 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                        " (derive it from source task_id + target agent, e.g. 'task-42:qa')"})
 
 
+    # ── 鉴权与源段 seq 兜底（必须先于任何会 return 的分支）──
+    # 用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）。
+    # Issue #2050 审查 R2：跨流水线 redirect / 取消拦截 / 幂等命中 / 门禁 / 排队都在
+    # 下面早返回，鉴权与会话反查若放在它们之后，一是未认证调用方可以先触发 redirect，
+    # 二是这些响应拿不到会话兜底的 source_seq（恒为 0），合法跨流水线交棒会被判断链。
+    _a2a_session_info = None
+    if user and user.get("auth_type") in ("jwt", "api_key"):
+        from src.domains.mgmt.user.db import get_managed_repos
+        managed = {r.get("repo_key") for r in get_managed_repos(str(user.get("id") or ""))}
+        if repo_key not in managed:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
+    else:
+        # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
+        _a2a_session_info = _authorize_a2a(request, repo_key)
+    _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)
+    if not _source_seq and _a2a_ref_seq:
+        _source_seq = int(_a2a_ref_seq)
+
     # ── Issue #544 L3：失败留痕 ──
     # 请求指纹（幂等键缺省时核对接口按它查询）；处理异常且尚未建事件 → 落失败留痕事件
     import hashlib as _hashlib
@@ -1305,24 +1323,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             except Exception as _ck_e:
                 log.warning(f"A2A: cancelled check failed: {_ck_e}")
         seq = 0
-
-        # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
-        _a2a_session_info = None
-        if user and user.get("auth_type") in ("jwt", "api_key"):
-            from src.domains.mgmt.user.db import get_managed_repos
-            managed = {r.get("repo_key") for r in get_managed_repos(str(user.get("id") or ""))}
-            if repo_key not in managed:
-                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
-        else:
-            # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
-            _a2a_session_info = _authorize_a2a(request, repo_key)
-
-        # Issue #2050 审查修正：会话兜底必须在任何早返回之前完成。幂等命中、
-        # 门禁跳过、排队等响应都在下面立刻 return，若在此之后才反查 _a2a_ref_seq，
-        # 这些路径的 source_seq 恒为 0，违反「每条响应都回显 source_seq」的契约。
-        _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)
-        if not _source_seq and _a2a_ref_seq:
-            _source_seq = int(_a2a_ref_seq)
 
         # Issue #544 审查修正①：幂等命中查询在鉴权之后——未认证调用方不得
         # 凭已有幂等键探测/获取事件信息（seq/status/issue_id）。

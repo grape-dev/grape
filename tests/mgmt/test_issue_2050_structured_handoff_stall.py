@@ -435,3 +435,52 @@ def test_cross_pipeline_payload_source_seq_is_evidence():
     db = _handoff_db(42, [(json.dumps(payload), "running")])
     assert _call_handoff(db) is True, \
         "跨流水线 payload 落 source_seq 后必须被认作已交棒（否则合法交棒被判断链）"
+
+
+# ====== 7. 契约口径对齐（QA 第 5 轮 M1）与详情端点数据源（R4） ======
+
+def _load_schema(name):
+    import os
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    with open(os.path.join(root, "contracts", name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_contract_accepts_custom_agent_and_int_issue_number():
+    jsonschema = pytest.importorskip("jsonschema")
+    request_schema = _load_schema("a2a_handoff.schema.json")
+    # 自定义场景节点（nodes=单一事实源）与 int 形态单号都必须过契约校验
+    jsonschema.validate({"agent": "my-custom-node",
+                         "payload": {"repository": "o/r", "issue_number": 42}},
+                        request_schema)
+    jsonschema.validate({"agent": "coding",
+                         "payload": {"repository": "o/r", "issue_number": "412"}},
+                        request_schema)
+
+
+def test_contract_rejects_invalid_body():
+    jsonschema = pytest.importorskip("jsonschema")
+    request_schema = _load_schema("a2a_handoff.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"payload": {"repository": "o/r", "issue_number": "1"}},
+                            request_schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"agent": "qa", "payload": {"issue_number": "1"}},
+                            request_schema)
+
+
+def test_issue_detail_events_carry_completed_at():
+    """详情端点（_group_events_by_issue）必须取到 completed_at，否则停滞态恒 unknown。"""
+    from src.domains.runtime.routes import issues as issues_mod
+    from src.kernel import session_manager as sm
+    row = (7, "#2050", "a2a_event", "coding", "t", "acc", "sum", "completed",
+           "2026-11-12 10:00:00", "", "rt", "sk", "", "2026-11-12 10:30:00")
+    db = FakeDb([("FROM events WHERE repo_key IN", [row])])
+    with patch.object(sm, "db", db, create=True), \
+         patch.object(sm, "db_lock", threading.Lock(), create=True):
+        grouped = issues_mod._group_events_by_issue(["gitcode:o/r"], numbers=["2050"])
+    ev = grouped["2050"][0]
+    assert ev["completed_at"] == "2026-11-12 10:30:00"
+    # 值必须能被停滞判定解析（不解析 = 白取一列）
+    state = ps.compute_stall_state([ev], "coding", "processing", confirm_minutes=10)
+    assert state["stall_state"] in ("grace", "stalled"), state
