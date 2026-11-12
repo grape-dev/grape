@@ -465,7 +465,7 @@ CREATE TABLE IF NOT EXISTS issue_state (
     scene_id     TEXT DEFAULT '',          -- Issue 级开发场景（VOD 判定，空=回退仓库默认）
     parent_issue_id TEXT DEFAULT '',      -- 父任务 Issue ID（如 "#20"，空=普通任务）
     is_subtask_mode INTEGER DEFAULT 0,    -- 1=多任务模式（Issue Agent 应拆分子任务）
-    scene_user_id INTEGER DEFAULT 0,       -- 用户级场景的创建者 ID（0=非用户级）
+    scene_user_id VARCHAR(36) DEFAULT '',  -- 用户级场景的创建者 ID（''=非用户级；D105 UUID 字符串）
     allow_scene_override INTEGER DEFAULT 0, -- 允许场景覆盖（B2 收编字段，issue_state 兼容）
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
@@ -1592,12 +1592,16 @@ _ORG_ID_TABLES = [
 
 
 def _migrate_add_org_id_columns():
-    """为核心表幂等添加 org_id 列（0=全局/未归属，兼容现有数据）。"""
+    """为核心表幂等添加 org_id 列（''=全局/未归属哨兵，D105 第三批 org 域 TEXT 化）。
+
+    哨兵由 0 改为 ''：MySQL TEXT/VARCHAR 列与数值 0 比较会把非数字串强转 0
+    （'abc'=0 为 TRUE），未归属行会被误匹配；空串在两种后端语义一致。
+    """
     try:
         with db_lock:
             c = db.cursor()
             for table in _ORG_ID_TABLES:
-                _ensure_column(c, table, "org_id", "INTEGER DEFAULT 0")
+                _ensure_column(c, table, "org_id", "TEXT DEFAULT ''")
             db.commit()
             log.info("org_id columns ensured on all core tables")
     except Exception as e:
@@ -1633,14 +1637,14 @@ def _migrate_create_personal_orgs():
 
 
 def _migrate_data_to_personal_orgs():
-    """将现有数据迁入对应用户的个人组织（幂等，只处理 org_id=0 的行）。"""
+    """将现有数据迁入对应用户的个人组织（幂等，只处理 org_id='' 的行）。"""
     try:
         with db_lock:
             c = db.cursor()
 
             # 1. managed_repos：按 user_repos.is_admin 找管理员迁入
             repos = c.execute(
-                "SELECT repo_key FROM managed_repos WHERE org_id=0 OR org_id IS NULL"
+                "SELECT repo_key FROM managed_repos WHERE org_id='' OR org_id IS NULL"
             ).fetchall()
             for (repo_key,) in repos:
                 admin = c.execute(
@@ -1657,7 +1661,7 @@ def _migrate_data_to_personal_orgs():
 
             # 2. runtime_credentials：scope=user 的按 owner_name 迁入
             creds = c.execute(
-                "SELECT id, owner_name, scope FROM runtime_credentials WHERE org_id=0 OR org_id IS NULL"
+                "SELECT id, owner_name, scope FROM runtime_credentials WHERE org_id='' OR org_id IS NULL"
             ).fetchall()
             for cid, owner_name, scope in creds:
                 if not owner_name or scope == "global":
@@ -1676,7 +1680,7 @@ def _migrate_data_to_personal_orgs():
 
             # 3. skill：scope=user 的按 owner_id 迁入
             skills = c.execute(
-                "SELECT id, owner_id, scope FROM skill WHERE scope='user' AND (org_id=0 OR org_id IS NULL)"
+                "SELECT id, owner_id, scope FROM skill WHERE scope='user' AND (org_id='' OR org_id IS NULL)"
             ).fetchall()
             for sid, owner_id, _ in skills:
                 try:
@@ -1691,7 +1695,7 @@ def _migrate_data_to_personal_orgs():
 
             # 4. skill：scope=repo 的跟随 repo_key 迁移
             repo_skills = c.execute(
-                "SELECT id, owner_id FROM skill WHERE scope='repo' AND (org_id=0 OR org_id IS NULL)"
+                "SELECT id, owner_id FROM skill WHERE scope='repo' AND (org_id='' OR org_id IS NULL)"
             ).fetchall()
             for sid, owner_id in repo_skills:
                 repo_org = c.execute(
@@ -1708,10 +1712,10 @@ def _migrate_data_to_personal_orgs():
                     c.execute(f"""
                         UPDATE {table} SET org_id = (
                             SELECT m.org_id FROM managed_repos m
-                            WHERE m.repo_key = {table}.repo_key AND m.org_id > 0
+                            WHERE m.repo_key = {table}.repo_key AND m.org_id <> ''
                         )
-                        WHERE (org_id = 0 OR org_id IS NULL)
-                          AND repo_key IN (SELECT repo_key FROM managed_repos WHERE org_id > 0)
+                        WHERE (org_id = '' OR org_id IS NULL)
+                          AND repo_key IN (SELECT repo_key FROM managed_repos WHERE org_id <> '')
                     """)
                 except Exception as _e:
                     log.warning(f"org_id backfill for {table} failed: {_e}")
@@ -4741,7 +4745,7 @@ def _migrate_release_subissue_unique_index():
             ("release_candidate_sha", "TEXT DEFAULT ''"),
             ("release_target_env", "TEXT DEFAULT ''"),
             ("release_evidence_ref", "TEXT DEFAULT ''"),
-            ("release_approved_by", "INTEGER DEFAULT 0"),
+            ("release_approved_by", "VARCHAR(36) DEFAULT ''"),
             ("release_approved_at", "TEXT DEFAULT ''"),
             ("release_result", "TEXT DEFAULT ''"),
             ("release_failure_reason", "TEXT DEFAULT ''"),
@@ -6727,7 +6731,7 @@ def _migrate_tables():
             _ensure_column(c, "issue", "owner_agent", "TEXT DEFAULT 'vod'")
             # 批 B：场景相关
             _ensure_column(c, "issue", "scene_id", "TEXT DEFAULT ''")
-            _ensure_column(c, "issue", "scene_user_id", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "scene_user_id", "VARCHAR(36) DEFAULT ''")
             _ensure_column(c, "issue", "allow_scene_override", "INTEGER DEFAULT 0")
             # 批 C：A2A 触发 + 子任务归属 + 更新时间
             _ensure_column(c, "issue", "a2a_seq", "INTEGER")
@@ -6741,7 +6745,7 @@ def _migrate_tables():
             _ensure_column(c, "issue", "release_candidate_sha", "TEXT DEFAULT ''")
             _ensure_column(c, "issue", "release_target_env", "TEXT DEFAULT ''")
             _ensure_column(c, "issue", "release_evidence_ref", "TEXT DEFAULT ''")
-            _ensure_column(c, "issue", "release_approved_by", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "release_approved_by", "VARCHAR(36) DEFAULT ''")
             _ensure_column(c, "issue", "release_approved_at", "TEXT DEFAULT ''")
             _ensure_column(c, "issue", "release_result", "TEXT DEFAULT ''")
             _ensure_column(c, "issue", "release_failure_reason", "TEXT DEFAULT ''")

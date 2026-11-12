@@ -176,7 +176,7 @@ except Exception as e:
 db.execute("""
     CREATE TABLE IF NOT EXISTS chat_agent_session (
         id TEXT PRIMARY KEY,
-        user_id INTEGER DEFAULT 0,
+        user_id TEXT DEFAULT '',      -- D105：UUID 字符串（原 INTEGER 0 哨兵）
         repo_key TEXT DEFAULT '',
         source TEXT, repository TEXT, status TEXT,
         runtime TEXT DEFAULT 'opencode',
