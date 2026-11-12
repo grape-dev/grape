@@ -32,6 +32,208 @@ let _runtimePageSize = 10;     // Runtime 每页条数
 let _timelinePage = 0;         // 任务列表当前页（0 基）
 let _timelinePageSize = 10;    // 任务列表每页条数
 
+// ===== Issue #1916：驾驶舱「找不到你想看的内容？」反馈入口 =====
+// 复用 POST /api/feedback（运营管理台现有反馈通道落库），自动附带页面/路由/用户/筛选上下文。
+let _obsFbKind = 'missing_metric';   // 反馈类型（缺指标/想看某类内容/其他），落 feedback_kind
+let _obsFbPending = false;           // 提交中标志（防重复提交）
+let _obsFbExposed = false;           // 入口曝光打点（会话级去重，避免分区切换刷屏）
+
+const OBS_FB_MAX_LEN = 500;          // 反馈内容上限（字符）
+
+// 打点：faro 可用走 pushEvent（view 事件同源），否则 console 降级，绝不抛错
+function _obsFbTrack(name, attrs) {
+  try {
+    if (window.__faro && window.__faro.api && typeof window.__faro.api.pushEvent === 'function') {
+      window.__faro.api.pushEvent('obs_feedback', Object.assign({ action: name }, attrs || {}));
+    } else {
+      console.info('[obs_feedback]', name, attrs || {});
+    }
+  } catch (e) { /* 打点失败不影响业务 */ }
+}
+
+// 上下文拼装（纯函数，测试 seam）：hash 路由 + 分区/子Tab + 时间范围 + 仓库 + 用户，≤500 字符
+function _obsFeedbackPageUrl() {
+  const q = [];
+  let hash = '';
+  try { hash = window.location.hash || ''; } catch (e) { hash = ''; }
+  q.push('view=observability');
+  if (_obsSection) q.push('section=' + encodeURIComponent(_obsSection));
+  if (_obsTab) q.push('tab=' + encodeURIComponent(_obsTab));
+  // 时间范围：总览用 ov range；设备分区资源曲线用 res range；其余不带
+  let range = '';
+  if (_obsSection === 'overview') range = _obsOvRange;
+  else if (_obsSection === 'devices') range = _obsResRange;
+  if (range) q.push('range=' + encodeURIComponent(range));
+  try {
+    const r = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+    if (r && r.fullName) q.push('repo=' + encodeURIComponent(r.fullName));
+  } catch (e) { /* 仓库信息缺失不阻断 */ }
+  try {
+    const u = JSON.parse(localStorage.getItem('user') || '{}');
+    if (u && u.username) q.push('user=' + encodeURIComponent(u.username));
+  } catch (e) { /* 用户信息缺失不阻断 */ }
+  let url = hash + '?' + q.join('&');
+  if (url.length > 500) {
+    url = url.substring(0, 500);
+    // 避免截断在 percent-encoding 中间产生非法 query：剥掉尾部不完整的 %X 转义
+    let m;
+    while ((m = url.match(/%[0-9a-fA-F]{0,2}$/)) && m[0].length < 3) url = url.substring(0, url.length - m[0].length);
+  }
+  return url;
+}
+
+// 打开轻量反馈面板（未登录不渲染；样式对齐 feedback.js 弹窗：遮罩/圆角/居中）
+function openObsFeedback() {
+  let token = '';
+  try { token = localStorage.getItem('token') || ''; } catch (e) {}
+  if (!token) {
+    if (typeof app !== 'undefined' && app.showToast) app.showToast(I18N.t('observability.fb.login_required'));
+    return;
+  }
+  const old = document.getElementById('obsFbOverlay');
+  if (old) { old.remove(); return; }
+  _obsFbTrack('click', { section: _obsSection });
+  _obsFbKind = 'missing_metric';
+  // 注意：不重置 _obsFbPending —— 在途请求期间取消并重开面板，防重必须仍然生效（防双发）
+
+  const kinds = [
+    { key: 'missing_metric', label: I18N.t('observability.fb.kind_missing_metric'), icon: '📉' },
+    { key: 'want_content', label: I18N.t('observability.fb.kind_want_content'), icon: '🔍' },
+    { key: 'other', label: I18N.t('observability.fb.kind_other'), icon: '📝' },
+  ];
+  const overlay = document.createElement('div');
+  overlay.id = 'obsFbOverlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.25);'
+    + 'backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:1001;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML = '<div style="width:420px;max-width:92vw;max-height:90vh;overflow-y:auto;background:var(--c,#fff);'
+    + 'border-radius:16px;padding:20px 24px;box-shadow:0 12px 50px rgba(0,0,0,.18);'
+    + 'font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;">'
+    + '<div style="font-size:16px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:12px;">' + _escHtml(I18N.t('observability.fb.title')) + '</div>'
+    + '<div style="display:flex;gap:8px;margin-bottom:12px;">'
+    + kinds.map(k => '<button type="button" data-kind="' + k.key + '" ' + (k.key === 'missing_metric' ? 'data-active="1" ' : '')
+      + 'onclick="_obsFbPickKind(this)" class="fb-cat-btn' + (k.key === 'missing_metric' ? ' active' : '') + '">'
+      + '<span style="font-size:16px">' + k.icon + '</span><span>' + _escHtml(k.label) + '</span></button>').join('')
+    + '</div>'
+    + '<textarea id="obsFbText" rows="4" maxlength="' + OBS_FB_MAX_LEN + '" oninput="_obsFbOnInput()" placeholder="'
+    + _escHtml(I18N.t('observability.fb.placeholder')) + '" '
+    + 'style="width:100%;box-sizing:border-box;padding:10px 14px;border-radius:10px;border:1.5px solid var(--b,rgba(0,0,0,.12));'
+    + 'background:var(--c,#fff);font-size:13px;color:var(--t1,#1d1d1f);font-family:inherit;outline:none;resize:vertical;line-height:1.5;"></textarea>'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 12px;">'
+    + '<span class="ts t3" id="obsFbCount">' + _escHtml(I18N.t('observability.fb.count', { n: 0, max: OBS_FB_MAX_LEN })) + '</span>'
+    + '<span class="ts t3" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'
+    + _escHtml(_obsFeedbackPageUrl()) + '">' + _escHtml(_obsFeedbackPageUrl()) + '</span>'
+    + '</div>'
+    + '<div style="display:flex;gap:10px;justify-content:flex-end;">'
+    + '<button id="obsFbCancel" type="button" onclick="document.getElementById(\'obsFbOverlay\').remove()" '
+    + 'style="padding:8px 18px;border-radius:10px;border:none;background:var(--b,rgba(0,0,0,.06));font-size:13px;font-weight:500;'
+    + 'color:var(--t1,#1d1d1f);cursor:pointer;font-family:inherit;">' + _escHtml(I18N.t('observability.fb.cancel')) + '</button>'
+    + '<button id="obsFbSubmit" type="button" disabled onclick="_obsFbSubmit()" '
+    + 'style="padding:8px 22px;border-radius:10px;border:none;background:#0071e3;font-size:13px;font-weight:600;color:#fff;'
+    + 'cursor:pointer;font-family:inherit;">' + _escHtml(I18N.t('observability.fb.submit')) + '</button>'
+    + '</div></div>';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  const ta = document.getElementById('obsFbText');
+  if (ta && typeof ta.focus === 'function') ta.focus();
+}
+
+function _obsFbPickKind(btn) {
+  _obsFbKind = btn.getAttribute('data-kind') || 'missing_metric';
+  document.querySelectorAll('#obsFbOverlay button[data-kind]').forEach(b => {
+    const on = (b === btn);
+    if (on) { b.classList.add('active'); b.setAttribute('data-active', '1'); }
+    else { b.classList.remove('active'); b.removeAttribute('data-active'); }
+  });
+}
+
+function _obsFbOnInput() {
+  const ta = document.getElementById('obsFbText');
+  const cnt = document.getElementById('obsFbCount');
+  const btn = document.getElementById('obsFbSubmit');
+  if (!ta || !btn) return;
+  const len = (ta.value || '').length;
+  if (cnt) cnt.textContent = I18N.t('observability.fb.count', { n: len, max: OBS_FB_MAX_LEN });
+  btn.disabled = (!ta.value || !ta.value.trim() || len > OBS_FB_MAX_LEN);
+}
+
+function _obsFbSubmit() {
+  if (_obsFbPending) return Promise.resolve();   // 提交中防重复
+  const ta = document.getElementById('obsFbText');
+  const btn = document.getElementById('obsFbSubmit');
+  const overlay = document.getElementById('obsFbOverlay');
+  if (!ta || !overlay) return Promise.resolve();
+  const desc = (ta.value || '').trim();
+  if (!desc) {   // 空内容兜底（按钮 disabled 之外的守卫）
+    if (btn) btn.disabled = true;
+    return Promise.resolve();
+  }
+  if (desc.length > OBS_FB_MAX_LEN) {
+    if (typeof app !== 'undefined' && app.showToast) app.showToast(I18N.t('observability.fb.failed'));
+    return Promise.resolve();
+  }
+  let repoKey = '';
+  try {
+    const r = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+    if (r) repoKey = (r.owner || '') + '/' + (r.name || '');
+  } catch (e) {}
+  _obsFbPending = true;
+  if (btn) { btn.disabled = true; btn.textContent = I18N.t('observability.fb.submitting'); }
+  return API.post('/feedback', {
+    category: 'suggestion',
+    title: I18N.t('observability.fb.title'),
+    description: desc,
+    page_url: _obsFeedbackPageUrl(),
+    repo_key: repoKey,
+    feedback_kind: _obsFbKind,
+  }).then(resp => {
+    _obsFbPending = false;
+    if (resp && resp.error) {
+      if (btn) { btn.disabled = false; btn.textContent = I18N.t('observability.fb.submit'); }
+      if (typeof app !== 'undefined' && app.showToast) app.showToast(resp.error);
+      _obsFbTrack('submit_fail', { section: _obsSection, kind: _obsFbKind, reason: String(resp.error) });
+      console.error('[obs_feedback] submit failed:', resp.error);
+      return;
+    }
+    overlay.remove();
+    if (typeof app !== 'undefined' && app.showToast) app.showToast(I18N.t('observability.fb.success'));
+    _obsFbTrack('submit_ok', { section: _obsSection, kind: _obsFbKind });
+  }).catch(err => {
+    _obsFbPending = false;
+    if (btn) { btn.disabled = false; btn.textContent = I18N.t('observability.fb.submit'); }
+    const msg = (err && err.message) || I18N.t('observability.fb.failed');
+    if (typeof app !== 'undefined' && app.showToast) app.showToast(msg);
+    _obsFbTrack('submit_fail', { section: _obsSection, kind: _obsFbKind, reason: msg });
+    console.error('[obs_feedback] submit failed:', msg);
+  });
+}
+
+// 曝光打点（会话级去重）：与 Html 生成分离，独立入口按需触发
+function _obsFbTrackExposeOnce() {
+  if (!_obsFbExposed) { _obsFbExposed = true; _obsFbTrack('expose', { section: _obsSection }); }
+}
+
+// 页头入口按钮（2026-11-12：移到左侧标题右侧、与标题同一行；窄屏收为图标按钮 —— CSS 在 app.css @media 768px）；纯 Html 生成，无副作用
+function _obsFbEntryHtml() {
+  let token = '';
+  try { token = localStorage.getItem('token') || ''; } catch (e) {}
+  if (!token) return '';   // 未登录不渲染入口
+  return '<button class="bt bt-o bt-s obs-fb-entry" onclick="openObsFeedback()" '
+    + 'title="' + _escHtml(I18N.t('observability.fb.entry')) + '" '
+    + 'aria-label="' + _escHtml(I18N.t('observability.fb.entry')) + '" '
+    + 'style="white-space:nowrap;flex-shrink:0">'
+    + '<span class="obs-fb-ico" aria-hidden="true">💭</span>'
+    + '<span class="obs-fb-full"><span style="display:block;text-align:left">' + _escHtml(I18N.t('observability.fb.entry')) + '</span>'
+    + '<span style="display:block;text-align:left;font-weight:400;opacity:.65;font-size:10px">' + _escHtml(I18N.t('observability.fb.entry_sub')) + '</span></span>'
+    + '</button>';
+}
+
+// 组合入口：渲染页头入口 Html 并在真实渲染时触发一次曝光打点
+function _obsFbEntryWithExpose() {
+  const html = _obsFbEntryHtml();
+  if (html) _obsFbTrackExposeOnce();
+  return html;
+}
+
 // 页内大 Tab（2026-10-18：三页并一，明显/大一点，不用老的 .stabs 小字条）
 function _obsBigTabsHtml() {
   const ic = { overview: '📊', devices: '💻', inspect: '▶' };
@@ -76,9 +278,12 @@ function renderObservability(section) {
   pc.innerHTML = `
     <div class="cd" style="padding:0;overflow:hidden">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--b)">
-        <h2 style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px">${I18N.t('observability.title')}
-          <span class="ts t3" style="font-weight:400">/ ${I18N.t('observability.section.' + _obsSection)}</span>
-        </h2>
+        <div style="display:flex;align-items:center;gap:12px;min-width:0">
+          <h2 style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px">${I18N.t('observability.title')}
+            <span class="ts t3" style="font-weight:400">/ ${I18N.t('observability.section.' + _obsSection)}</span>
+          </h2>
+          ${_obsFbEntryWithExpose()}
+        </div>
         ${_obsSection !== 'overview' ? `<div style="display:flex;align-items:center;gap:10px">
           <span class="ts t3" id="obsLastUpdate">-</span>
           <button class="bt bt-o bt-s" onclick="refreshObs()">${I18N.t('observability.refresh')}</button>

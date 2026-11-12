@@ -497,5 +497,21 @@
     "per_page": "{{n}} / page",
     "prev_page": "Prev",
     "next_page": "Next"
+  },
+  "fb": {
+    "entry": "Can't find what you need?",
+    "entry_sub": "Tell us what you want to see",
+    "title": "Cockpit feedback: can't find what I need",
+    "placeholder": "What metric or content do you want? Describe your scenario…",
+    "kind_missing_metric": "Missing metric",
+    "kind_want_content": "Want content",
+    "kind_other": "Other",
+    "submit": "Submit feedback",
+    "submitting": "Submitting…",
+    "cancel": "Cancel",
+    "success": "Feedback received, thanks!",
+    "failed": "Failed to submit feedback, please retry later",
+    "login_required": "Please sign in before submitting feedback",
+    "count": "{n}/{max}"
   }
 }

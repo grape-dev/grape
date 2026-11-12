@@ -1284,3 +1284,11 @@
 }
 .chat-engine-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:10px;background:var(--bg);border:1px solid var(--b);color:var(--t2);font-size:10px;white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
 
+/* Issue #1916：驾驶舱反馈入口 — 窄屏（≤768px）收为图标按钮，不挤压页头控件 */
+@media(max-width:768px){
+  .obs-fb-entry .obs-fb-full{display:none}
+  .obs-fb-entry{padding:4px 8px}
+}
+/* Issue #1916：反馈面板类型单选按钮 — 复用 feedback.js 的 .fb-cat-btn 类名，收敛到样式表，避免两处视觉漂移 */
+.fb-cat-btn{flex:1;padding:8px 4px;border-radius:10px;border:1.5px solid var(--b,rgba(0,0,0,.1));background:var(--c,#fff);color:var(--t2,#3a3a3c);font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;gap:3px;transition:all .15s}
+.fb-cat-btn.active{border-color:#0071e3;background:rgba(0,113,227,.06);color:#0071e3}
