@@ -719,7 +719,7 @@
                   height="22"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="var(--a-text)"
+                  stroke="var(--on-accent)"
                   stroke-width="2"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -848,8 +848,8 @@
           </div>
           <!-- 选项二：AI Devspace -->
           <div class="rtv-sb-sec">
-            <div class="rtv-sb-opt dev" @click="toggleDevSection">
-              <div class="rtv-sb-opt-ic dev">
+            <div class="rtv-sb-opt" @click="toggleDevSection">
+              <div class="rtv-sb-opt-ic">
                 <svg
                   width="22"
                   height="22"
@@ -3251,35 +3251,25 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 14px;
   padding: 16px 18px;
-  background: var(--bg);
-  border: 1px solid var(--b);
+  background: color-mix(in srgb, var(--a) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--a) 20%, transparent);
   border-radius: 12px;
   cursor: pointer;
   transition: all 0.2s;
 }
 .rtv-sb-opt:hover {
-  border-color: var(--a-text);
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--a) 12%, transparent);
-}
-.rtv-sb-opt.dev {
-  background: color-mix(in srgb, var(--a) 8%, transparent);
-  border-color: color-mix(in srgb, var(--a) 20%, transparent);
-}
-.rtv-sb-opt.dev:hover {
   border-color: color-mix(in srgb, var(--a) 50%, transparent);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--a) 12%, transparent);
 }
 .rtv-sb-opt-ic {
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--a) 14%, transparent);
+  background: var(--a);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-}
-.rtv-sb-opt-ic.dev {
-  background: var(--a);
 }
 .rtv-sb-opt-body {
   flex: 1;
