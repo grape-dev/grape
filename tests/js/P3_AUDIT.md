@@ -12,6 +12,17 @@ js 测试：**25 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 ## 已知偏差（记录下来，不假装满足）
 - #648：原「卡片自带 attachments 内联渲染、免一次请求」的首屏优化未随 Vue 版移植；loadDetailExtras 一律 GET 端点。性能项，非功能缺陷。
 
+## 真回归 · RuntimesView 功能缺失（2026-11-11 批次3 审计）
+
+| Issue | 现象 | 证据 |
+|---|---|---|
+| #473 范围筛选 | 前端完全没有范围 chips，也不传 `range` 参数 | 后端仍在支持：`settings.py:926`（docstring 记 #473）、`_rt_in_range` 在 `settings.py:1348`、过滤调用 `:1138`；前端 `RuntimesView.vue` 里 `range` 出现 **0 次** |
+| #475 健康提示 | 无帮助按钮、无异常描边，`health_reason` 无人消费 | 后端仍透出 `health_reason`/`health_abnormal`（`settings.py:1078,1091`）；前端 `health_reason` **0 个消费者**；i18n `runtimes.health.hint.*` 6 个键成了孤儿；页面只有 `healthLabel(rt.health)` |
+| #498 异常口径一致 | 同上（后端口径未接入前端判定） | 同 #475；`_isAbnormalEngine`/`_abnormalBorderColor` 在 Vue 版不存在 |
+| #1167 筛选空态 | 有筛选/无筛选共用同一句 `empty.no_engines`，无「组织无引擎」引导区分 | `RuntimesView.vue:169-171` 单一分支；`clearFilters` 存在但空态未按筛选态分叉 |
+
+结论：这 4 个测试**报红是对的**，不是测试陈旧。是否恢复功能、还是确认不再需要，待主人拍板。
+
 ## 真回归（测试报红是对的，勿改断言迁就代码）
 - #290 openIssueLink（IssuesView.vue:2185）：`tk.is_pr ? '/pull/' : '/issues/'`，违反 #290 验收「查看 Issue 入口统一 /issues/」。**待主人判定**，当前两边都不动。
 
