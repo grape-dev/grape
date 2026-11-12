@@ -79,13 +79,31 @@ _SESSION_ONLY_OPERATIONS = frozenset({
 # session_only 的路径前缀规则（覆盖表补充；新增 git-repo 端点只要进此命名空间即自动标注）
 _SESSION_ONLY_PATH_PREFIXES = ("/api/git-repo/",)
 
+# 显式补收录（2026-11-12 契约审计）：
+#   文档 docs/openapi/*.md 声明为公开、公网实测可达，但依赖链里没有 _PUBLIC_AUTH_DEPS
+#   中的认证依赖 → 被 route_is_public() 判为非对外，契约里缺失 → CLI 没有对应命令、
+#   也没有 x-token-scope 元数据。
+#   · agents/types、skills/template 免鉴权（skills/template 走 query token）→ dual 最接近
+#     （不限制任何凭证类型；调用方无需凭证即可访问）
+#   · events/{seq}/flow/reset 用体内 bot-token 或 tk_ 会话 token 鉴权 → session_only
+# 新增此类端点时在此登记；不要改 route_is_public 的通用判定（避免把内部端点误暴露）。
+_EXTRA_PUBLIC_ENDPOINTS: dict[tuple[str, str], str] = {
+    ("/api/agents/types", "GET"): "dual",
+    ("/api/skills/template", "GET"): "dual",
+    ("/api/events/{seq}/flow/reset", "POST"): "session_only",
+}
+
 
 def route_is_public(route) -> bool:
     """路由是否对外：依赖链中含对外认证依赖即收录进契约。"""
     if not isinstance(route, APIRoute):
         return False
     names = {getattr(d.call, "__name__", "") for d in _iter_deps(route.dependant)}
-    return bool(names & _PUBLIC_AUTH_DEPS)
+    if names & _PUBLIC_AUTH_DEPS:
+        return True
+    path = getattr(route, "path", "") or ""
+    methods = {m.upper() for m in (getattr(route, "methods", None) or set())}
+    return any((path, m) in _EXTRA_PUBLIC_ENDPOINTS for m in methods)
 
 
 def token_scope(route) -> str | None:
@@ -104,6 +122,11 @@ def token_scope(route) -> str | None:
     path = getattr(route, "path", "") or ""
     if op_id in _SESSION_ONLY_OPERATIONS or path.startswith(_SESSION_ONLY_PATH_PREFIXES):
         return "session_only"
+    _methods = {m.upper() for m in (getattr(route, "methods", None) or set())}
+    for _m in _methods:
+        _explicit = _EXTRA_PUBLIC_ENDPOINTS.get((path, _m))
+        if _explicit:
+            return _explicit
     if "require_no_session_token" in names:
         return "user_only"
     if names & _PUBLIC_AUTH_DEPS:

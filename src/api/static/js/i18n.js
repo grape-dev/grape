@@ -69,6 +69,8 @@ var I18N = (function () {
         login: {
           gitcode_login: 'GitCode',
           github_login: 'GitHub',
+          gitee_login: 'Gitee',
+          huawei_login: '华为账号',
           beta_apply: '申请内测',
           admin: '管理后台',
           username: '用户名',
@@ -218,6 +220,8 @@ var I18N = (function () {
         login: {
           gitcode_login: 'GitCode',
           github_login: 'GitHub',
+          gitee_login: 'Gitee',
+          huawei_login: 'HUAWEI ID',
           beta_apply: 'Apply for Beta',
           admin: 'Admin Console',
           username: 'Username',

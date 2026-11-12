@@ -358,12 +358,8 @@ async def lifespan(app: FastAPI):
         # /api/tasks/*、/api/pipeline/handoff 等侧进程端点）——导致契约驱动的
         # `grape` CLI 丢掉 tasks 命令组 / a2a 之外的交办命令。
         # 统一走 build_contract：mgmt 身份下自动合并 event/worker/insight 的 spec。
-        from src.api.openapi_merge import build_contract
-        from src.kernel.help_page_gen import write_openapi_contract
-        _schema = build_contract(app)
-        _n_paths = write_openapi_contract(_schema)
-        log.info(f"OpenAPI: contract dumped ({_n_paths} paths, "
-                 f"version={_schema.get('info', {}).get('version')}) -> /static/openapi.json")
+        from src.api.openapi_merge import dump_contract
+        dump_contract(app)
     except Exception as e:
         log.warning(f"OpenAPI: contract dump failed: {e}")
 

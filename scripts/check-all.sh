@@ -12,6 +12,12 @@ python3 scripts/check-destructive-ddl.py
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，
 # 版本间比对不再静默跳过（QA 审查修复项）。
 python3 scripts/check-openapi-endpoints.py --require-baseline
+# 四进程路由漂移：nginx 分流 vs 各进程实际路由（无 nginx/无进程时自动跳过）
+if [ -f "${GRAPE_NGINX_CONF:-/etc/nginx/conf.d/grape.conf}" ]; then
+  python3 scripts/probe/route_contract_probe.py || exit 1
+else
+  echo "[skip] route_contract_probe: nginx conf 不存在"
+fi
 # check-doc-redaction.py 是针对开源清洗分支（weekly-07-clean）的 docs 门禁：
 # 内部周分支的 docs 合法保留内部信息，直接跑会整片报错，故全仓扫描只作开源合入前手工门禁：
 #   python3 scripts/check-doc-redaction.py

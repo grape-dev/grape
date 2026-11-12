@@ -54,6 +54,8 @@ class ConfigBody(BaseModel):
     github_oauth_client_secret: str = ""
     gitee_oauth_client_id: str = ""
     gitee_oauth_client_secret: str = ""
+    huawei_oauth_client_id: str = ""
+    huawei_oauth_client_secret: str = ""
     bot_usernames: list[str] = []
     webhook_url: str = ""
     gitcode_webhook_token: str = ""

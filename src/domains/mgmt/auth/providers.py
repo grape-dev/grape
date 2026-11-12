@@ -307,15 +307,23 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
     try:
         import requests as _req
         # 统一用配置里的 accept_header，消除 provider if-else 分叉
+        user_url = cfg["user_url"]
+        # 少数平台（如华为 GOpen.User.getInfo）只认查询参数形式的 access_token，
+        # 且忽略 Authorization 头：user_url 用 {access_token} 占位，替换后不再发 Bearer 头。
+        _token_in_url = "{access_token}" in user_url
+        if _token_in_url:
+            user_url = user_url.replace(
+                "{access_token}", urllib.parse.quote(access_token, safe=""))
         headers = {
-            "Authorization": f"Bearer {access_token}",
             "Accept": cfg.get("accept_header", "application/json"),
         }
+        if not _token_in_url:
+            headers["Authorization"] = f"Bearer {access_token}"
 
         _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
         _proxies = {"https": _proxy, "http": _proxy} if _proxy else None
 
-        resp = _req.get(cfg["user_url"], headers=headers, timeout=15, proxies=_proxies)
+        resp = _req.get(user_url, headers=headers, timeout=15, proxies=_proxies)
         resp.raise_for_status()
         user_info = resp.json()
     except Exception as e:
@@ -326,7 +334,8 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
         "external_id": str(user_info.get(cfg["id_field"], "")),
         "external_login": user_info.get(cfg["login_field"], ""),
         "external_name": user_info.get(cfg["name_field"], ""),
-        "external_avatar": user_info.get("avatar_url", ""),
+        # 头像字段各平台不同（华为 headPictureURL / GitHub avatar_url），配置可覆盖
+        "external_avatar": user_info.get(cfg.get("avatar_field", "avatar_url"), ""),
         "access_token": access_token,
         "refresh_token": "",
         "email": user_info.get("email", "") or "",

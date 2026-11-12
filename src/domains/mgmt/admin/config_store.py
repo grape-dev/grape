@@ -52,6 +52,8 @@ _OAUTH_FIELD_MAP = {
     # D90-N5 补齐：gitee 也是 OAuth 平台之一，管理台需能保存其凭据
     "gitee_oauth_client_id": ("gitee", "client_id"),
     "gitee_oauth_client_secret": ("gitee", "client_secret"),
+    "huawei_oauth_client_id": ("huawei", "client_id"),
+    "huawei_oauth_client_secret": ("huawei", "client_secret"),
 }
 
 # 全字段清单（前端展示用）

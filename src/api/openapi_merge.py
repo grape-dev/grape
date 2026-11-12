@@ -102,6 +102,29 @@ def merge_specs(own: dict, peers: list[dict], version: str = CONTRACT_VERSION) -
     return merged
 
 
+_DUMPED = False
+
+
+def dump_contract(app) -> int:
+    """落盘对外契约（幂等）。
+
+    历史上 mgmt 启动有两处各自落盘：server_tasks（合并版 269 条）与 grape_server
+    （仅本进程 265 条）——后写的把合并结果覆盖掉，导致 CLI 契约缺 tasks/pipeline-handoff。
+    这里收敛为唯一入口：进程内只落一次，合并失败自动降级为自身 spec（不阻断启动）。
+    返回写入的路径数。
+    """
+    global _DUMPED
+    if _DUMPED:
+        return 0
+    from src.kernel.help_page_gen import write_openapi_contract
+    schema = build_contract(app)
+    n = write_openapi_contract(schema)
+    _DUMPED = True
+    log.info(f"OpenAPI: contract dumped ({n} paths, version={schema.get('info', {}).get('version')}) "
+             f"-> /static/openapi.json")
+    return n
+
+
 def build_contract(own_app) -> dict:
     """构造对外契约：非 mgmt 进程只返回自身 spec；mgmt 合并四进程。"""
     from src.api.openapi import custom_openapi
