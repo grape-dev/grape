@@ -167,7 +167,8 @@ def note_probe_ok(c, runtime_id: int, now_iso: str = "") -> dict:
         (streak, runtime_id))
     out = {"runtime_id": runtime_id, "ok_streak": streak, "recovered": False}
     if was_active and streak >= RECOVER_OK_STREAK:
-        out.update(_recover_in_tx(c, runtime_id, "auto", force=False, now_iso=now_iso))
+        # force=True：告警/降级/解绑事实已确认，确保恢复动作必留审计（幂等）
+        out.update(_recover_in_tx(c, runtime_id, "auto", force=True, now_iso=now_iso))
     return out
 
 
