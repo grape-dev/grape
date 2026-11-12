@@ -101,6 +101,9 @@ _RULES = {
         "body": "body",
         "related_issue_nums": {"native": None, "transform": _gh_close_body},
         "auto_close_issues": {"native": None, "transform": _gh_auto_close},
+        # GitHub 建 PR 无 prune_source_branch；不加此规则会原样透传成脏字段。
+        # 等价能力是仓库级 delete_branch_on_merge，不在建 PR 时给。
+        "prune_source_branch": {"native": None},
     },
 }
 

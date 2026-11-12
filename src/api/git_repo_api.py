@@ -44,6 +44,9 @@ class PRCreateBody(BaseModel):
     body: str = ""
     related_issue_nums: list = []
     auto_close_issues: bool = False
+    # 合并 PR 后是否删除源分支（GitCode 原生 prune_source_branch；GitHub 无此字段，
+    # 建 PR 时静默丢弃——其等价能力是仓库级 delete_branch_on_merge）。
+    prune_source_branch: bool = False
 
 
 class PRUpdateBody(BaseModel):
@@ -775,6 +778,9 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
         "body": _body,
         "related_issue_nums": related,
         "auto_close_issues": _auto_close,
+        # 必须在 neutral 里显式带上：provider 规则只决定「怎么翻译」，中性字典才是
+        # 上游 payload 的唯一来源，漏了这行字段到不了 VCS 且不报错。
+        "prune_source_branch": body.prune_source_branch,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)

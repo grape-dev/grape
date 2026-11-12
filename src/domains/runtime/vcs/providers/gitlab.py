@@ -84,6 +84,9 @@ _RULES = {
         "body": "description",
         "related_issue_nums": {"native": None, "transform": _drop},
         "auto_close_issues": {"native": None, "transform": _drop},
+        # GitLab 建 MR 无 prune_source_branch；其等价能力是 MR 级 remove_source_branch
+        # （本改动暂不映射，先丢弃避免脏字段）。
+        "prune_source_branch": {"native": None, "transform": _drop},
     },
 }
 

@@ -105,6 +105,8 @@ _RULES = {
         "body": "body",
         "related_issue_nums": {"native": None, "transform": _drop},
         "auto_close_issues": {"native": None, "transform": _drop},
+        # Gitee 建 PR 无 prune_source_branch；不加规则会原样透传成脏字段。
+        "prune_source_branch": {"native": None, "transform": _drop},
     },
 }
 
