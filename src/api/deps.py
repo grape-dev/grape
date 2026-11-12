@@ -576,6 +576,21 @@ def get_user_token_for(username: str, user_id: str = "", provider: str = "gitcod
         return _try_refresh_user_token(user_id, provider) or ""
     return token
 
+def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
+    """兼容入口：GitCode token + 临近过期预刷新。
+
+    多平台解耦（b439764fd）后 provider 语义统一到 ``get_user_token_for``，
+    repos/routes 等存量调用方仍按旧签名调用，这里做一跳转发，避免
+    「函数被删、调用方还在」的导入期崩溃（2026-11-12 合并回归）。
+    """
+    return get_user_token_for(username, user_id=str(user_id or ""), provider="gitcode")
+
+
+def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
+    """兼容入口：GitHub token + 临近过期预刷新（同上，provider='github'）。"""
+    return get_user_token_for(username, user_id=str(user_id or ""), provider="github")
+
+
 def _try_refresh_user_token(user_id: str, provider: str) -> "str | None":
     """按 provider 派发刷新（D40/S60：显式注册表派发，消平台名字面量）。
 
