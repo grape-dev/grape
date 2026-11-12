@@ -116,12 +116,23 @@ def dump_contract(app) -> int:
     global _DUMPED
     if _DUMPED:
         return 0
+    from src.api.openapi import custom_openapi
     from src.kernel.help_page_gen import write_openapi_contract
+
     schema = build_contract(app)
-    n = write_openapi_contract(schema)
-    _DUMPED = True
-    log.info(f"OpenAPI: contract dumped ({n} paths, version={schema.get('info', {}).get('version')}) "
-             f"-> /static/openapi.json")
+    n = len(schema.get("paths") or {})
+    own_n = len((custom_openapi(app).get("paths") or {}))
+    write_openapi_contract(schema)
+    # QA #1272 I2：降级（侧进程 spec 渲染失败、只剩自身 265 条）时不置位，
+    # 保留后续调用点重试的机会；只有合并确实生效（路径数多于自身）才锁存。
+    merged_ok = n > own_n
+    _DUMPED = merged_ok
+    if merged_ok:
+        log.info(f"OpenAPI: contract dumped ({n} paths, "
+                 f"version={schema.get('info', {}).get('version')}) -> /static/openapi.json")
+    else:
+        log.warning(f"OpenAPI: contract dumped DEGRADED ({n} paths, own={own_n}) "
+                    f"-> /static/openapi.json（保留重试，未锁存）")
     return n
 
 

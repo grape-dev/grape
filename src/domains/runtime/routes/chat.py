@@ -26,6 +26,25 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
 # 限制同时运行的 opencode 子进程数（防止大量用户并发导致服务器崩溃）
 _CHAT_AGENT_SEMAPHORE = threading.Semaphore(20)
 
+def _engine_aware_session_gate(cfg: dict, runtime_session_id: str) -> tuple:
+    """会话续接引擎感知门（QA #1230 I-6：四处逐字复制的分支单点化）。
+
+    ses_ 前缀是 opencode 会话形态门；aishell-dsh 后端（二期 resume）的 sessionId
+    为 uuid 形态，保留原值供 session/resume 续聊；其余后端维持原门（非 ses_ 清空，
+    防错认 opencode 会话）。返回 (生效的 runtime_session_id, has_valid_session)。
+    """
+    # M3（QA #1230）：backend 可能是全局引擎名或个人/远端实例名
+    # （aishell-dsh-<device>-<cid>，前端把 instance_name 回填为 backend）——
+    # canonical_engine() 前缀最长匹配判定（与 handler_async 同源），实例名场景
+    # resume 不再静默失效
+    from src.domains.runtime.engine.instances import canonical_engine
+    _sid_engine = canonical_engine((cfg.get("backend") or "").strip().lower())
+    if _sid_engine == "aishell-dsh":
+        return runtime_session_id, bool(runtime_session_id)
+    if runtime_session_id and not runtime_session_id.startswith("ses_"):
+        runtime_session_id = ""
+    return runtime_session_id, bool(runtime_session_id.startswith("ses_"))
+
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 
 from fastapi.responses import StreamingResponse
@@ -624,9 +643,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    if runtime_session_id and not runtime_session_id.startswith("ses_"):
-        runtime_session_id = ""
-    has_valid_session = bool(runtime_session_id.startswith("ses_"))
+    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.kernel.prompt_builder import build_issue_chat_prompt
@@ -816,9 +833,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    if runtime_session_id and not runtime_session_id.startswith("ses_"):
-        runtime_session_id = ""
-    has_valid_session = bool(runtime_session_id.startswith("ses_"))
+    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
         from src.kernel.prompt_builder import build_issue_chat_prompt
@@ -1842,9 +1857,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    if runtime_session_id and not runtime_session_id.startswith("ses_"):
-        runtime_session_id = ""
-    has_valid_session = bool(runtime_session_id.startswith("ses_"))
+    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
     if conv and conv.get("conv_type") == "task":
         from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(body.message, repo_key, history, conv,
@@ -2287,9 +2300,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    if runtime_session_id and not runtime_session_id.startswith("ses_"):
-        runtime_session_id = ""
-    has_valid_session = bool(runtime_session_id.startswith("ses_"))
+    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
     if conv and conv.get("conv_type") == "task":
         from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)

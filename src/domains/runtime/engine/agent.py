@@ -1299,6 +1299,10 @@ def _scan_local_skills() -> list[dict]:
         # hwcloud(AIShell)：~/.hwcloud/skills——修复引擎卡片 skills 列表全空
         # （扫描映射漏此引擎 → local_skills 上报无 entry → DB 空 → 前端空）
         "hwcloud": engine_skill_dirs("hwcloud"),
+        # aishell-dsh（二期技能投送）：用户级 skill 根同 dsh 框架（~/.dsh/skills，
+        # dsh-skill-filesystem roots()；AI Shell 内嵌 dsh 同一文件系统）——
+        # 供引擎卡片 skills 扫描；任务侧物化 dest=<cwd>/.dsh/skills 已实证引擎自读
+        "aishell-dsh": engine_skill_dirs("dsh"),
     }
 
     # 用户自建 skill 目录（通过环境变量配置，可选，跨平台分隔符）
