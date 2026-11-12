@@ -379,10 +379,12 @@ def test_safe_terminate_swallows_failure(monkeypatch):
 
 
 def test_credential_revoked_path_uses_safe_kill_wrapper():
-    """凭据吊销路径必须走容错包装，不能让杀进程异常顶掉原异常。
+    """凭据吊销路径与终态中断路径必须走容错包装，不能让杀进程异常顶掉原异常。
 
     _terminate_proc 在 Windows 下 taskkill 失败会抛 RuntimeError；若不被吞掉，
     该异常会顶掉 CredentialRevokedError，调用方依赖的"上抛让 worker 退出"语义丢失。
+    _abort_task_terminal 同理：异常逸出会跳过 res.dispose()/_cleanup_task_workdir()
+    并顶掉返回的 _error 契约。
     """
     import ast
     from pathlib import Path
@@ -415,6 +417,15 @@ def test_credential_revoked_path_uses_safe_kill_wrapper():
         if "_kill_stale_engine" in names:
             assert "_kill_stale_engine_safe" in names, \
                 "凭据吊销路径未使用 _kill_stale_engine_safe，杀进程异常会顶掉原异常"
+
+    aborts = [n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_abort_task_terminal"]
+    assert aborts, "未找到 _abort_task_terminal"
+    abort_names = called_names(aborts[0])
+    assert "_kill_stale_engine" not in abort_names, \
+        "_abort_task_terminal 不应裸调 _kill_stale_engine，异常会跳过 res.dispose/_cleanup_task_workdir"
+    assert "_kill_stale_engine_safe" in abort_names, \
+        "_abort_task_terminal 必须使用 _kill_stale_engine_safe，杀进程异常不能顶掉 _error 契约"
 
 
 def test_acp_backends_use_safe_terminate():
@@ -500,3 +511,33 @@ def test_executor_emits_usage_fallback_when_usage_event_absent(fake_cli, tmp_pat
     usages = [data for kind, data in events if kind == "usage"]
     assert len(usages) == 1
     assert usages[0] == {"input": 60, "output": 20, "cache_read": 40}
+
+
+def test_abort_task_terminal_survives_kill_failure(monkeypatch):
+    """终态中断路径杀引擎失败时，仍须释放资源并保留 _error/_started 契约。
+
+    Windows 下 taskkill /T /F 失败会抛 RuntimeError（executor._terminate_proc 新语义）；
+    _abort_task_terminal 裸调 _kill_stale_engine 时该异常逸出 → res.dispose() 与
+    _cleanup_task_workdir() 被跳过，且 {"_error": …, "_started": …} 返回契约被顶掉
+    （PR #1102 复审 Required / PR #1957）。AST 契约断言只看调用形态，本用例补运行时行为。
+    """
+    from src.domains.runtime.engine import agent as ra
+
+    seen = {"kill": 0, "dispose": 0, "cleanup": 0}
+
+    class _Res:
+        def dispose(self):
+            seen["dispose"] += 1
+
+    def _boom(task, backend="opencode"):
+        seen["kill"] += 1
+        raise RuntimeError("failed to terminate process tree pid=1")
+
+    monkeypatch.setattr(ra, "_kill_stale_engine", _boom)
+    monkeypatch.setattr(ra, "_cleanup_task_workdir",
+                        lambda task, env=None: seen.__setitem__("cleanup", seen["cleanup"] + 1))
+
+    ret = ra._abort_task_terminal({"id": "t_probe"}, "atomcode", {}, _Res(), True, "probe")
+
+    assert seen == {"kill": 1, "dispose": 1, "cleanup": 1}
+    assert ret == {"_error": "task terminated by server (aborted probe)", "_started": True}

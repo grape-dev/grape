@@ -2617,7 +2617,7 @@ def _abort_task_terminal(task, engine_name, env, res, started: bool, reason: str
     flush 的 terminal 处理块逐行重复，提取为单一实现）。"""
     tid = task.get("id", "")
     log.warning(f"task {tid} report_messages returned None (task terminated?), aborting: {reason}")
-    _kill_stale_engine(task, _backend_for_engine(engine_name))
+    _kill_stale_engine_safe(task, _backend_for_engine(engine_name))
     res.dispose()
     _cleanup_task_workdir(task, env)
     return {"_error": f"task terminated by server (aborted {reason})", "_started": started}
