@@ -108,12 +108,12 @@
                 <input
                   type="checkbox"
                   :checked="filterScene.includes(s)"
-                  :style="{ accentColor: SCENE_TAG_COLORS[s] || '#10b981' }"
+                  :style="{ accentColor: SCENE_TAG_COLORS[s] || '#0b7a55' }"
                   @change="toggleMulti('scene', s)"
                 />
                 <span
                   class="rtv-tagpill"
-                  :style="{ background: SCENE_TAG_COLORS[s] || '#10b981' }"
+                  :style="{ background: SCENE_TAG_COLORS[s] || '#0b7a55' }"
                   >{{ sceneDisplayName(s) }}</span
                 >
               </label>
@@ -141,10 +141,10 @@
                 <input
                   type="checkbox"
                   :checked="filterTag.includes(tg)"
-                  :style="{ accentColor: RT_TAG_COLORS[tg] || '#999' }"
+                  :style="{ accentColor: RT_TAG_COLORS[tg] || '#666' }"
                   @change="toggleMulti('tag', tg)"
                 />
-                <span class="rtv-tagpill" :style="{ background: RT_TAG_COLORS[tg] || '#999' }">{{
+                <span class="rtv-tagpill" :style="{ background: RT_TAG_COLORS[tg] || '#666' }">{{
                   rtTagLabel(tg)
                 }}</span>
               </label>
@@ -518,12 +518,12 @@
                 v-model="edSceneTags"
                 type="checkbox"
                 :value="s.name"
-                :style="{ accentColor: SCENE_TAG_COLORS[s.name] || '#10b981' }"
+                :style="{ accentColor: SCENE_TAG_COLORS[s.name] || '#0b7a55' }"
                 @change="onEdSceneTagChange"
               />
               <span
                 class="rtv-tagpill"
-                :style="{ background: SCENE_TAG_COLORS[s.name] || '#10b981' }"
+                :style="{ background: SCENE_TAG_COLORS[s.name] || '#0b7a55' }"
                 >{{ s.display_name }}</span
               >
             </label>
@@ -1020,22 +1020,24 @@ const ENGINE_DOT = {
   codex: '#10a37f',
   aishell: '#0a8cd8',
 }
+// 场景/引擎标签色：9~11px 白字药丸嵌在饱和色上，饱和度太高白字只有 2.1~3.7:1（看不清）。
+// 统一压深到白字 ≥4.6:1 的同色相档。
 const SCENE_TAG_COLORS = {
-  default: '#10b981',
-  'cloud-native': '#3b82f6',
-  iac: '#f59e0b',
-  'agent-dev': '#8b5cf6',
-  'skill-dev': '#ec4899',
-  'api-skill-dev': '#06b6d4',
-  'blog-publish': '#ef4444',
+  default: '#0b7a55',
+  'cloud-native': '#2563b0',
+  iac: '#9a6100',
+  'agent-dev': '#6d43c9',
+  'skill-dev': '#b02a6c',
+  'api-skill-dev': '#0b7f95',
+  'blog-publish': '#b52b2b',
 }
 const RT_TAG_COLORS = {
-  all: '#6366f1',
-  vod: '#ec4899',
-  issue: '#ef4444',
-  coding: '#3b82f6',
-  qa: '#a855f7',
-  sre: '#f59e0b',
+  all: '#4b4ec9',
+  vod: '#b02a6c',
+  issue: '#b52b2b',
+  coding: '#2563b0',
+  qa: '#6d43c9',
+  sre: '#9a6100',
 }
 const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
@@ -1324,7 +1326,7 @@ function engineTagSummary(tags) {
   return tags
     .map(
       (x) =>
-        `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#999'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
+        `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#666'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
     )
     .join('')
 }
@@ -1335,7 +1337,7 @@ function sceneTagSummary(tags) {
     .map((x) => {
       const dn = sceneDisplayName(x)
       const color = SCENE_TAG_COLORS[x] || '#10b981'
-      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
+      return `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
     })
     .join('')
 }
@@ -2587,8 +2589,11 @@ onBeforeUnmount(function () {
   background: var(--bg);
 }
 .rtv-tagpill {
-  font-size: 9px;
-  padding: 1px 7px;
+  /* 9px 中文在饱和色上肉眼糊成一片；11px + 600 + 深一档的底色 */
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 2px 8px;
   border-radius: 999px;
   color: var(--on-accent);
 }
