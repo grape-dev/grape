@@ -673,7 +673,7 @@
 [data-theme="apple"] .create-repo-modal { border-radius: 18px !important; box-shadow: 0 24px 80px rgba(0,0,0,0.16) !important; }
 [data-theme="apple"] .create-repo-ic { border-radius: 12px !important; width: 40px !important; height: 40px !important; font-size: 18px !important; }
 [data-theme="apple"] .cr-btn { padding: 8px 18px !important; font-size: 13px !important; border-radius: 999px !important; }
-[data-theme="apple"] .cr-btn-primary { background: #0071e3 !important; box-shadow: 0 4px 12px rgba(0,113,227,0.2) !important; }
+[data-theme="apple"] .cr-btn-primary { background: var(--a) !important; box-shadow: none !important; }
 
 /* ── 12o. Template Hero ── */
 [data-theme="apple"] .tmpl-hero { margin-bottom: 32px !important; animation: appleFadeUp 0.5s var(--apple-spring-ease) both !important; }

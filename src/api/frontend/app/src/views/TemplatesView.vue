@@ -831,15 +831,23 @@ defineExpose({ findTemplateById, openCreate })
   flex-direction: column;
   height: 100vh;
 }
+/* 头部：图标+标题一块、关闭按钮固定在右上角。
+   原来 .tv-modal-head 是块级，关闭按钮被挤到第二行（120px 高的"排版错位"）。 */
 .tv-modal-head {
-  padding: 20px 32px 14px;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 18px 56px 14px 28px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--b);
 }
 .tv-modal-head-inner {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
 }
 .tv-modal-ic {
   font-size: 36px;
@@ -875,11 +883,11 @@ defineExpose({ findTemplateById, openCreate })
 }
 .tv-badge-local {
   color: var(--g);
-  background: #e8f5e9;
+  background: color-mix(in srgb, var(--g) 15%, transparent);
 }
 .tv-badge-git {
   color: var(--sk);
-  background: #e3f2fd;
+  background: color-mix(in srgb, var(--sk) 15%, transparent);
 }
 .tv-stars {
   font-size: 11px;
@@ -896,11 +904,25 @@ defineExpose({ findTemplateById, openCreate })
   margin-left: 8px;
 }
 .tv-close {
-  font-size: 22px;
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 20px;
   color: var(--t3);
   cursor: pointer;
-  flex-shrink: 0;
-  padding: 4px 8px;
+  transition:
+    background 0.18s,
+    color 0.18s;
+}
+.tv-close:hover {
+  background: var(--chip-bg);
+  color: var(--t);
 }
 .tv-modal-body {
   flex: 1;
@@ -1040,24 +1062,41 @@ defineExpose({ findTemplateById, openCreate })
   white-space: nowrap;
   flex-shrink: 0;
 }
+/* 输入框/下拉原来没写 color → 继承浏览器默认的纯黑，暗色下发黑看不清 */
 .tv-repo-input {
   flex: 1;
-  padding: 10px 14px;
+  min-width: 0;
+  padding: 9px 12px;
   border: 1px solid var(--b);
-  border-radius: var(--rd);
-  font-size: 14px;
+  border-radius: 10px;
+  font-size: 13px;
   outline: none;
-  background: var(--bg);
+  background: var(--c);
+  color: var(--t);
   box-sizing: border-box;
+  transition:
+    border-color 0.18s,
+    box-shadow 0.18s;
+}
+.tv-repo-input::placeholder {
+  color: var(--t3);
+}
+.tv-repo-input:focus {
+  border-color: var(--a);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--a) 14%, transparent);
 }
 .tv-provider {
-  padding: 8px 12px;
+  padding: 9px 12px;
   border: 1px solid var(--b);
-  border-radius: var(--rd);
+  border-radius: 10px;
   font-size: 13px;
-  background: var(--bg);
+  background: var(--c);
+  color: var(--t);
   outline: none;
   flex-shrink: 0;
+}
+.tv-provider:focus {
+  border-color: var(--a);
 }
 .tv-foot-right {
   display: flex;

@@ -476,9 +476,11 @@ function renderMarkdown(text) {
 
 // Issue 前缀剥离 + #N 链接化（与老 _stripIssuePrefix / linkifyIssueNumbers 等价）
 function stripIssuePrefix(title) {
-  const m = String(title || '').match(/^\[Issue #(\d+)\]\s*(.*)$/)
+  // 后端标题有两种写法：「[Issue #12] 摘要」和「Issue #12 · 摘要」，
+  // 两种都要剥掉，否则列表里会先出现「Issue #12」再被 meta 的「#12」重复一遍。
+  const m = String(title || '').match(/^\[?Issue\s*#(\d+)\]?\s*(?:[·:：\-—]\s*)?(.*)$/i)
   return m
-    ? { issueNumber: parseInt(m[1], 10), title: m[2] }
+    ? { issueNumber: parseInt(m[1], 10), title: (m[2] || '').trim() }
     : { issueNumber: 0, title: String(title || '') }
 }
 function esc(s) {
@@ -530,14 +532,18 @@ function repoKeyOf() {
 }
 function convTitle(c) {
   const s = stripIssuePrefix(c.title || '')
-  const clean = s.title || (c.title ? '' : t('conversation.default_title'))
-  return clean
+  // 只有 Issue 号、没有摘要的会话（标题就是「Issue #12」）→ 标题直接用「Issue #12」，
+  // 这时 meta 不再重复号；有摘要则标题只放摘要。
+  if (s.issueNumber && !s.title) return 'Issue #' + s.issueNumber
+  return s.title || (c.title ? '' : t('conversation.default_title')) || 'Issue #' + s.issueNumber
 }
 function convMeta(c) {
   const s = stripIssuePrefix(c.title || '')
   const issueNum = c.issue_number && c.issue_number > 0 ? c.issue_number : s.issueNumber
   const ts = fmtLocalTime(c.created_at).substring(0, 16)
-  return issueNum > 0 ? '#' + issueNum + ' · ' + ts : ts
+  // 标题已经显示 Issue 号时不再重复
+  if (issueNum > 0 && s.title) return '#' + issueNum + ' · ' + ts
+  return ts
 }
 
 // ── 草稿持久化（Issue #407，sessionStorage 1h）──

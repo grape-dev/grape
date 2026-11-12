@@ -201,7 +201,12 @@
                       </span>
                       <span v-else class="s"></span>
                       <div class="sk-card-btns">
-                        <button class="bt bt-o bt-s" @click.stop="openDetail(s.id)">
+                        <!-- 个人/仓库技能卡整卡可点，去掉重复的「查看」按钮（只留官方技能） -->
+                        <button
+                          v-if="s.scope === 'official'"
+                          class="bt bt-o bt-s"
+                          @click.stop="openDetail(s.id)"
+                        >
                           {{ tt2('action.view') }}
                         </button>
                         <!-- Issue #561：直接覆盖更新（免删了重传；ID/场景引用/点赞保留） -->
