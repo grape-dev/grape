@@ -1826,3 +1826,38 @@
 .help-drawer:not(.show) {
   display: none !important;
 }
+
+/* ── 23. 弹窗统一（2026-11-12 第 11 项）──────────────────────────────
+ * 大弹窗：强玻璃(--glass-strong) + 28px 模糊 + 18px 圆角 + 深投影；
+ * 小浮层（气泡/菜单）：20px 模糊 + 14px 圆角 + 中投影；
+ * 全屏遮罩：45% 黑 + 6px 模糊。
+ * 全部带 !important —— 视图 scoped 规则 (0,2,0) 会压过普通全局规则（同 §23 按钮的教训）。 */
+[data-theme="apple"] :is(.km-modal, .create-repo-modal, .tv-modal, .tv-fork-modal, .kb-scene-modal,
+.apv-pickmodal, .apv-dispmodal, .dbv-copymodal, .dbv-engmodal, .dbv-recmodal, .eff-modal,
+.eff-chart-modal, .obv-alertmodal, .obv-anomalymodal, .obv-logmodal, .obv-sessionmodal,
+.obv-tracemodal, .isk-modal, .ac__modal, .rtv-engdetail, .rtv-scopemodal, .ev__centerpop) {
+  background: var(--glass-strong) !important;
+  -webkit-backdrop-filter: blur(28px) !important;
+  backdrop-filter: blur(28px) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: 18px !important;
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.24) !important;
+}
+[data-theme="apple"] :is(.chat-del-pop, .chat-picker-pop, .cv__pop, .cv__delpop, .isk-popover) {
+  background: var(--glass-strong) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  backdrop-filter: blur(20px) !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: 14px !important;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.28),
+    0 2px 8px rgba(0, 0, 0, 0.16) !important;
+}
+[data-theme="apple"] :is(.km-overlay, .ac__modal-mask, .apv-modal-ov, .isk-modal-ov, .rtv-modal-ov,
+.tv-modal-overlay, .modal-overlay, .create-repo-overlay, .eff-mask, .fb-overlay, .cv__onboard-mask) {
+  background: rgba(0, 0, 0, 0.45) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+  backdrop-filter: blur(6px) !important;
+}

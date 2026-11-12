@@ -152,13 +152,13 @@
  * Skills 174 万 / Scene 184 万+125 万 / Settings 164 万 / Chat 96 万 / Repos 79 万 px²，
  * 全部超过 §6 的 40 万红线。用页面根类限定，别波及已验收页面：
  *   .sv 设置  .sk 技能  .sm 场景中心  .lobby 项目大厅  .cv 对话 */
-:root[data-theme-mode="dark"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv) :is(.cd, .apple-card, .scn-card, .sm__top, .lobby-head, .project-card, .chat-main, .chat-convlist, .chat-hdr, .rc) {
+:root[data-theme-mode="dark"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv) :is(.cd:not(.tv-modal):not(.tv-fork-modal), .apple-card, .scn-card, .sm__top, .lobby-head, .project-card, .chat-main, .chat-convlist, .chat-hdr, .rc) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   background: var(--c);
 }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme-mode="auto"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv) :is(.cd, .apple-card, .scn-card, .sm__top, .lobby-head, .project-card, .chat-main, .chat-convlist, .chat-hdr, .rc) {
+  :root[data-theme-mode="auto"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv) :is(.cd:not(.tv-modal):not(.tv-fork-modal), .apple-card, .scn-card, .sm__top, .lobby-head, .project-card, .chat-main, .chat-convlist, .chat-hdr, .rc) {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
     background: var(--c);
