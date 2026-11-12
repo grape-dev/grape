@@ -49,6 +49,9 @@ _OAUTH_FIELD_MAP = {
     "gitcode_oauth_client_secret": ("gitcode", "client_secret"),
     "github_oauth_client_id": ("github", "client_id"),
     "github_oauth_client_secret": ("github", "client_secret"),
+    # D90-N5 补齐：gitee 也是 OAuth 平台之一，管理台需能保存其凭据
+    "gitee_oauth_client_id": ("gitee", "client_id"),
+    "gitee_oauth_client_secret": ("gitee", "client_secret"),
 }
 
 # 全字段清单（前端展示用）

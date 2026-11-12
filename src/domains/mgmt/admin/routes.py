@@ -52,6 +52,8 @@ class ConfigBody(BaseModel):
     github_bot_username: str = ""
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
+    gitee_oauth_client_id: str = ""
+    gitee_oauth_client_secret: str = ""
     bot_usernames: list[str] = []
     webhook_url: str = ""
     gitcode_webhook_token: str = ""
