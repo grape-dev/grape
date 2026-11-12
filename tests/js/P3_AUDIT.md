@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**56 通过 / 19 C类 / 16 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**62 通过 / 13 C类 / 16 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -54,18 +54,18 @@ js 测试：**56 通过 / 19 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_chat_recall_442.js（已改写）
 - [ ] test_chat_task_bubble.js（**待确认**：ChatView 与后端均无去重逻辑，可能随统一流设计移到后端 SSE，需主人确认）
 - [x] test_event_back_to_task.js（已改写）
-- [ ] test_event_nav_hash.js
+- [x] test_event_nav_hash.js（已改写）
 - [x] test_issue_1077_board_col_paging.js（已改写）
 - [ ] test_issue_1102_load_more.js
 - [ ] test_issue_12_host_confirm.js
-- [ ] test_issue_1310_dropdown_display.js
+- [x] test_issue_1310_dropdown_display.js（已改写）
 - [ ] test_issue_1310_runtimes_display.js
 - [x] test_issue_1564_scene_scope_violation.js（已修复并改写）
 - [ ] test_issue_187_workspace_repo_restore.js
 - [ ] test_issue_273_lang_switch_toast.js
 - [x] test_issue_341_tasks_deeplink.js（已改写）
-- [ ] test_issue_342_event_poll_partial.js
-- [ ] test_issue_348_bot_token_health.js
+- [x] test_issue_342_event_poll_partial.js（已改写）
+- [x] test_issue_348_bot_token_health.js（已改写）
 - [ ] test_issue_402_scene_copy.js
 - [ ] test_issue_406_skill_display_name.js
 - [x] test_issue_407_chat_attachment.js（已改写）
@@ -82,8 +82,8 @@ js 测试：**56 通过 / 19 C类 / 16 D类**（共 91；起点 13 通过 / 78 �
 - [x] test_observability_page_size_162.js（已改写）
 - [x] test_observability_pagination.js（已改写）
 - [x] test_observability_sections.js（已改写）
-- [ ] test_pipeline_scroll_layout.js
-- [ ] test_pipeline_search.js
+- [x] test_pipeline_scroll_layout.js（已改写）
+- [x] test_pipeline_search.js（已改写）
 - [ ] test_scene_apply_detail_refresh.js
 
 ## D 类（断言针对旧实现写法，需按原意在新实现上重写）
