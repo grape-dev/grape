@@ -3,7 +3,8 @@
 覆盖三断点修复场景（mock subprocess / Popen）：
 1. 真实 ACP 握手探测替代 `acp --check`（含失败原因分类）；
 2. venv 解析兼容 bash shim / 软链 realpath / console-script shebang 反推；
-3. ACP 依赖版本不硬钉 0.9.0（已装版本兼容判断 + 无版本号补装）。
+3. 只诊断不自动补装（Issue #1982/#2134：补装 helper 已删除，源码零引用断言
+   + 行为断言双层守住，防止被接回自动补装）。
 """
 import json
 import os
@@ -161,70 +162,59 @@ class TestHermesVenvBin:
         assert ab._hermes_venv_bin(str(launcher)) == ""
 
 
-class TestInstalledAcpVersion:
-    def test_returns_version(self):
-        with patch("subprocess.run", return_value=_run_ok(0, stdout="0.12.1\n")) as m:
-            assert ab._installed_acp_version("/opt/x/venv/bin") == "0.12.1"
-        assert m.call_args.args[0][0] == "/opt/x/venv/bin/python"
-
-    def test_not_installed_empty(self):
-        with patch("subprocess.run", return_value=_run_ok(1, stderr="not found")):
-            assert ab._installed_acp_version("/opt/x/venv/bin") == ""
-
-    def test_exception_empty(self):
-        with patch("subprocess.run", side_effect=Exception("boom")):
-            assert ab._installed_acp_version("/opt/x/venv/bin") == ""
-
-
 class TestEnsureHermesAcp:
-    """Issue #1982：只诊断、不自动补装；失败时带 error 文本。"""
+    """Issue #1982：只诊断、不自动补装；失败时带 error 文本。
+
+    Issue #2134：补装 helper 已删除，「不自动补装」由 patch("subprocess.run")
+    零调用行为断言 + TestAutoInstallRemoved 源码零引用断言共同承载。
+    """
 
     def _detail(self, status, error=""):
         return {"healthy": status == ab.ACP_OK, "status": status,
                 "reason": status, "error": error}
 
     def test_probe_ok_no_install(self):
-        """握手通过 → 不做任何安装。"""
+        """握手通过 → 不做任何安装（subprocess.run 零调用）。"""
         with patch.object(ab, "_acp_probe_detailed", return_value=self._detail(ab.ACP_OK)) as chk, \
-             patch.object(ab, "_pip_install_into") as pip:
+             patch("subprocess.run") as run:
             assert ab._ensure_hermes_acp("/bin/hermes") is True
         chk.assert_called_once_with("/bin/hermes")
-        pip.assert_not_called()
+        run.assert_not_called()
 
     def test_deps_missing_no_autopip(self):
         """依赖缺失 → 仅输出人工诊断，不再自动补装。"""
         with patch.object(ab, "_acp_probe_detailed",
                           return_value=self._detail(ab.ACP_DEPS_MISSING, "No module named 'agent_client_protocol'")), \
              patch.object(ab, "_hermes_venv_bin", return_value="/opt/x/venv/bin"), \
-             patch.object(ab, "_pip_install_into") as pip:
+             patch("subprocess.run") as run:
             assert ab._ensure_hermes_acp("/bin/hermes") is False
-        pip.assert_not_called()
+        run.assert_not_called()
 
     def test_no_subcommand_no_autopip(self):
         """hermes 版本过旧无 acp 子命令 → False，不误报依赖缺失、不补装。"""
         with patch.object(ab, "_acp_probe_detailed",
                           return_value=self._detail(ab.ACP_NO_SUBCOMMAND, "unrecognized arguments")) as probe, \
-             patch.object(ab, "_pip_install_into") as pip:
+             patch("subprocess.run") as run:
             assert ab._ensure_hermes_acp("/bin/hermes") is False
         assert probe.call_count == 1
-        pip.assert_not_called()
+        run.assert_not_called()
 
     def test_spawn_failed_no_autopip(self):
         """Popen EMFILE → spawn_failed 诊断，不归因为依赖缺失、不补装。"""
         with patch.object(ab, "_acp_probe_detailed",
                           return_value=self._detail(ab.ACP_SPAWN_FAILED,
                                                     "OSError: [Errno 24] Too many open files")), \
-             patch.object(ab, "_pip_install_into") as pip:
+             patch("subprocess.run") as run:
             assert ab._ensure_hermes_acp("/bin/hermes") is False
-        pip.assert_not_called()
+        run.assert_not_called()
 
     def test_model_unreachable_no_autopip(self):
         """模型/协议不可达 → model_unreachable 诊断，不补装。"""
         with patch.object(ab, "_acp_probe_detailed",
                           return_value=self._detail(ab.ACP_MODEL_UNREACHABLE, "no JSON-RPC response")), \
-             patch.object(ab, "_pip_install_into") as pip:
+             patch("subprocess.run") as run:
             assert ab._ensure_hermes_acp("/bin/hermes") is False
-        pip.assert_not_called()
+        run.assert_not_called()
 
     def test_empty_cli(self):
         assert ab._ensure_hermes_acp("") is False
@@ -260,25 +250,34 @@ class TestAcpProbeTriState:
         assert det["error"]
 
 
-class TestPipInstallInto:
-    def test_installs_unpinned_acp(self):
-        """不再硬钉 agent-client-protocol==0.9.0，安装无版本约束。"""
-        with patch("subprocess.run", return_value=_run_ok(0)) as m:
-            assert ab._pip_install_into("/opt/x/venv/bin") is True
-        cmd = m.call_args.args[0]
-        assert cmd[-2:] == ["install", "agent-client-protocol"]
-        assert "==" not in cmd[-1]
-        assert cmd[0] == "/opt/x/venv/bin/pip"
+class TestAutoInstallRemoved:
+    """Issue #2134：补装链路死代码已删除——模块内四符号不存在、生产源码零引用。
 
-    def test_falls_back_to_python_m_pip(self):
-        """pip 不存在 → python -m pip 兜底。"""
-        with patch("subprocess.run", side_effect=[FileNotFoundError, _run_ok(0)]) as m:
-            assert ab._pip_install_into("/opt/x/venv/bin") is True
-        assert m.call_args_list[1].args[0][:2] == ["/opt/x/venv/bin/python", "-m"]
+    源断言防止被后续读者接回自动补装（Issue #1982 起只诊断，人工修复指引除外）。
+    """
 
-    def test_all_fail(self):
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert ab._pip_install_into("/opt/x/venv/bin") is False
+    # Issue #2134 删除的四个符号：安装函数 / 版本查询函数 / 安装超时 / 包名常量
+    REMOVED_SYMBOLS = ("_pip_install_into", "_installed_acp_version",
+                       "PIP_INSTALL_TIMEOUT", "ACP_PACKAGE")
+
+    def test_symbols_absent_from_module(self):
+        for sym in self.REMOVED_SYMBOLS:
+            assert not hasattr(ab, sym), f"补装符号 {sym} 不应存在于 acp_bootstrap"
+
+    def test_no_production_references(self):
+        """生产路径（src/ 全部 .py）对四符号名零引用（grep 级断言）。"""
+        src_root = os.path.join(ROOT, "src")
+        for dirpath, _dirnames, filenames in os.walk(src_root):
+            for fn in filenames:
+                if not fn.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                for sym in self.REMOVED_SYMBOLS:
+                    assert sym not in content, (
+                        f"生产源码 {path} 引用了已删除的补装符号 {sym}"
+                        "（Issue #1982/#2134：禁止接回自动补装）")
 
 
 class TestDiscoverLocalRuntimesIntegration:

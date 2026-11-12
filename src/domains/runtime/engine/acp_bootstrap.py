@@ -4,6 +4,9 @@ Issue #1982：删除 ACP 自动补装分支。历史自动补装路径依赖 her
 venv 后的 pip，现场多次证明该路径不可执行（launcher 形态多变、venv 可能只读），
 且 Popen 失败（如 fd 打满 [Errno 24]）被错误归因为「依赖缺失」并给出不可执行的
 补装建议。现只做真实 ACP 握手探测 + 带 error 文本的诊断，不再自动安装任何包。
+Issue #2134：补装链路残留的 pip 安装 helper 与关联常量已随死代码清理删除
+（生产路径零调用、仅测试引用，保留只会诱导后续读者接回自动补装）；依赖缺失的
+人工修复提示改为内联包名。
 
 
 背景：hermes 的 ACP 依赖是可选 extra（pip install hermes[acp]），普通安装不带
@@ -62,8 +65,6 @@ def _resolve_acp_check_timeout() -> int:
 
 
 ACP_CHECK_TIMEOUT = _resolve_acp_check_timeout()  # ACP 握手探测超时（含 hermes 冷启动余量）
-PIP_INSTALL_TIMEOUT = 120     # pip install 超时
-ACP_PACKAGE = "agent-client-protocol"  # 不硬钉版本：安装前做已装版本兼容判断
 
 # 探测失败原因（Issue #1982 三态化：ok / spawn_failed / model_unreachable）
 ACP_OK = "ok"                              # 握手成功
@@ -459,37 +460,6 @@ def _venv_pip(venv_bin: str) -> str:
     return os.path.join(venv_bin, "pip")
 
 
-def _installed_acp_version(venv_bin: str) -> str:
-    """查询 hermes venv 已安装的 agent-client-protocol 版本（未装返回空串）。"""
-    py = _venv_python(venv_bin)
-    try:
-        res = subprocess.run(
-            [py, "-c", "import importlib.metadata as m; print(m.version('agent-client-protocol'))"],
-            capture_output=True, text=True, timeout=30)
-        if res.returncode == 0:
-            return (res.stdout or "").strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _pip_install_into(venv_bin: str) -> bool:
-    """诊断用 helper：显式调用时用 venv 的 pip 安装 ACP 包（不再被自动补装链路调用）。"""
-    py = _venv_python(venv_bin)
-    for cmd in ([_venv_pip(venv_bin)], [py, "-m", "pip"]):
-        try:
-            res = subprocess.run(cmd + ["install", ACP_PACKAGE],
-                                 capture_output=True, text=True, timeout=PIP_INSTALL_TIMEOUT)
-            if res.returncode == 0:
-                return True
-            log.warning(f"hermes ACP 补装失败 ({os.path.basename(cmd[0])}): {(res.stderr or res.stdout or '')[:200]}")
-        except FileNotFoundError:
-            continue
-        except Exception as e:
-            log.warning(f"hermes ACP 补装异常 ({os.path.basename(cmd[0])}): {e}")
-    return False
-
-
 def _ensure_hermes_acp(cli: str) -> bool:
     """检查 hermes ACP 可用性（Issue #1982：只诊断，不自动补装）。
 
@@ -519,8 +489,8 @@ def _ensure_hermes_acp(cli: str) -> bool:
             return False
         if reason == ACP_DEPS_MISSING:
             venv_bin = _hermes_venv_bin(cli)
-            hint = (f"{_venv_pip(venv_bin)} install {ACP_PACKAGE}"
-                    if venv_bin else f"pip install {ACP_PACKAGE}")
+            hint = (f"{_venv_pip(venv_bin)} install agent-client-protocol"
+                    if venv_bin else "pip install agent-client-protocol")
             log.warning(
                 f"hermes ACP 依赖缺失（{cli}，reason={reason}，error={err}）。"
                 f"请人工在 hermes 所属 venv 安装：{hint}（Issue #1982 起不再自动补装）。")
