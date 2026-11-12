@@ -1889,6 +1889,11 @@ function _renderTaskActionsInline(t) {
   if (_status === 'cancelled') {
     html += `<button class="tsk-btn tsk-btn-primary" onclick="resumeTask(${t.id})" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↻ ${I18N.t('tasks.resume_task')}</button>`;
   }
+  // Issue #1408: 撤销完成——仅 completed 终态渲染；可见范围 = 需求本人 或 仓库管理员。
+  // 非本人且非管理员不渲染；服务端 require_no_session_token + 本人/仓库角色二次鉴权为最终权威。
+  if (_status === 'completed' && _canRevertCompleted1408(t)) {
+    html += `<button class="tsk-btn tsk-btn-revert" title="${window.escHtml(I18N.t('tasks.revert_completed_hint'))}" onclick="revertTaskCompleted(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">↺ ${I18N.t('tasks.revert_completed')}</button>`;
+  }
   return html;
 }
 
@@ -1907,6 +1912,25 @@ function _isRepoAdmin393(repoKey) {
   } catch (e) { return false; }
 }
 
+// Issue #1408: 需求本人判定——created_by（username）为建档固化的创建人；
+// 任务列表若带 user_id（repo_all 口径）则一并比对，任一命中即视为本人。
+function _isTaskOwner1408(t) {
+  if (!t) return false;
+  var me = {};
+  try { me = JSON.parse(localStorage.getItem('user') || '{}') || {}; } catch (e) { me = {}; }
+  var meName = String(me.username || me.login || '');
+  if (meName && String(t.creator || '') === meName) return true;
+  var meId = (me.id === undefined || me.id === null) ? '' : String(me.id);
+  return !!(meId && t.user_id !== undefined && t.user_id !== null && String(t.user_id) === meId);
+}
+
+// Issue #1408: 「撤销完成」可见范围 = 需求本人 或 仓库管理员（复用 Issue #393 的 _isRepoAdmin393 口径）。
+function _canRevertCompleted1408(t) {
+  if (!t) return false;
+  if (_isTaskOwner1408(t)) return true;
+  return _isRepoAdmin393(t.repo_key);
+}
+
 window.adminConfirmTaskDone = function(taskId, event) {
   _grapeConfirm({
     title: I18N.t('tasks.admin_confirm_done'),
@@ -1919,6 +1943,29 @@ window.adminConfirmTaskDone = function(taskId, event) {
         I18N.t('tasks.task_done_toast'),
         function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
       );
+    }
+  }, event);
+};
+
+// Issue #1408: 撤销完成——需求本人或仓库管理员把 completed 需求退回 pending_review。
+// completed → pending_review 是状态机唯一撤销出口；成功后刷新列表并重拉流水线区（stage 已回退）。
+window.revertTaskCompleted = function(taskId, event) {
+  _grapeConfirm({
+    title: I18N.t('tasks.revert_completed'),
+    message: I18N.t('tasks.revert_completed_message'),
+    confirmText: I18N.t('tasks.revert_completed'),
+    onConfirm: function() {
+      _withTaskLoading(
+        taskId,
+        function() { return API.put('/issues/' + taskId + '/status', {status: 'pending_review'}); },
+        I18N.t('tasks.revert_completed_toast'),
+        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+      ).then(function(ok) {
+        if (!ok) return;
+        API.get('/issues/' + taskId + '/pipeline').then(function(data) {
+          _renderPipelineSection(data);
+        }).catch(function() {});
+      });
     }
   }, event);
 };
@@ -1983,18 +2030,21 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
     overlay.appendChild(text);
     pc.appendChild(overlay);
   }
-  apiCall().then(function() {
-    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
+  // Issue #1408: 返回 promise（true=成功 / false=失败或中途离开），便于调用方追加后续刷新
+  return apiCall().then(function() {
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return false; }  // 导航离开不弹 toast
     if (overlay) overlay.remove();
     app.showToast(successMsg);
     if (taskId && window._currentDetailTask) window._pendingTaskDetailId = taskId;
     loadTasks();
+    return true;
   }).catch(function(e) {
-    if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return; }  // 导航离开时静默
-    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return; }  // 导航离开不弹 toast
+    if (e && e.name === 'AbortError' && e.silent) { if (overlay) overlay.remove(); return false; }  // 导航离开时静默
+    if (window._currentView !== 'tasks') { if (overlay) overlay.remove(); return false; }  // 导航离开不弹 toast
     if (overlay) overlay.remove();
     app.showToast(errorFn(e));
     loadTasks();  // 超时或错误后刷新页面保证可用
+    return false;
   });
 }
 
@@ -2581,12 +2631,5 @@ function _doCrossPipelineSubmit(t, targetSceneId, sceneName) {
   });
 };
 
-// @deprecated 死代码——UI 无调用点。如需启用，catch 里的 alert 应改为 app.showToast。
-function changeTaskStatus(taskId, status) {
-  API.put('/issues/' + taskId + '/status', {status: status})
-    .then(() => loadTasks())
-    .catch(e => {
-      const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
-      app.showToast(I18N.t('tasks.change_status_failed', {msg: msg}));
-    });
-}
+// Issue #1408: 原 @deprecated 的 changeTaskStatus（UI 无调用点死代码）已删除，
+// 状态回退改由专用入口 window.revertTaskCompleted 承担（二次确认 + toast + 列表/流水线刷新）。

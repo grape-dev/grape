@@ -372,6 +372,10 @@
 .tsk-btn-ok:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(30,127,63,.4)}
 .tsk-btn-ghost{background:var(--c);border:1px solid var(--b);color:var(--t2)}
 .tsk-btn-ghost:hover{border-color:var(--a);color:var(--a);background:#f4f7ff}
+/* Issue #1408：撤销完成按钮——hover 背景变亮 + 150ms 过渡；禁用态降透明度并禁用指针 */
+.tsk-btn-revert{background:#fff4e5;border:1px solid #ffd7a8;color:#8a4a00;transition:background .15s ease,border-color .15s ease,color .15s ease,transform .15s ease}
+.tsk-btn-revert:hover:not(:disabled){background:#fff;border-color:#ff9f0a;color:#6b3a00;transform:translateY(-1px)}
+.tsk-btn-revert:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:860px){.tsk-layout{grid-template-columns:1fr}.tsk-detail{position:static}.tsk-controls{margin-left:0;width:100%}.tsk-search{flex:1}.tsk-search input{flex:1}}
 
 /* ===== Generic pagination ===== */
