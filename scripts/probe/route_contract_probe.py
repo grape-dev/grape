@@ -202,14 +202,39 @@ def main() -> int:
     routes = {role: fetch_routes(port) for role, port in ports.items()}
     alive = {r: len(v) for r, v in routes.items()}
     rules, upstreams = parse_nginx(args.conf)
+
+    # 端口 → 角色：环境变量与 conf upstream 名双源合成。
+    # 两源对同一端口给出不同角色 = 部署口径错配（QA #1272 M3），单条报出后退出，
+    # 否则逐路径会刷成 unreachable/drift 噪音，把真实漂移淹没。
     port_role = {p: r for r, p in ports.items()}
+    config_conflicts = []
+    for name, port in (upstreams or {}).items():
+        role = UPSTREAM_ROLE.get(name)
+        if not role:
+            continue
+        prev = port_role.get(port)
+        if prev and prev != role:
+            config_conflicts.append({"kind": "config-mismatch", "port": port,
+                                     "by_env": prev, "by_upstream": role, "upstream": name})
+        else:
+            port_role.setdefault(port, role)
 
     problems: list[dict] = []
     if not rules:
         problems.append({"kind": "no-nginx-conf",
                          "detail": f"未解析到规则（{args.conf} 不存在或为空）"})
 
+    # 存活断言（QA #1272 M2）：四角色任一取不到 spec（进程没起/端口不通）都必须失败。
+    # 否则 all_paths 为空 → 无 problem → 输出 PASS，新接线的门禁等于恒绿。
+    for role, rs in routes.items():
+        if not rs:
+            problems.append({"kind": "liveness",
+                             "detail": f"{role} 进程未取到路由表（端口 {ports.get(role)} 未启动或不可达）",
+                             "role": role, "port": ports.get(role)})
+
     all_paths = sorted({p for rs in routes.values() for p in rs})
+    if not all_paths:
+        problems.append({"kind": "liveness", "detail": "四进程路由表全为空，探针无法判定"})
     probe_cache: dict[tuple[int, str], int] = {}
 
     def exists_on(port: int, path: str) -> int:
@@ -243,14 +268,8 @@ def main() -> int:
                 problems.append({"kind": "drift", "path": path, "nginx_to": target,
                                  "role": role, "owners": owners, "why": why})
             continue
-        # 所有进程 schema 未声明（include_in_schema=False 的隐藏路由）→ 实测存在性
-        code = exists_on(target, path)
-        if code == -1:
-            problems.append({"kind": "unreachable", "path": path, "nginx_to": target,
-                             "role": role, "why": why})
-        elif code == 404:
-            problems.append({"kind": "drift-hidden", "path": path, "nginx_to": target,
-                             "role": role, "why": why})
+        # 说明：all_paths 取自各进程 spec 并集，hidden 路由（include_in_schema=False）
+        # 不会进入受检集合，故此处无需再判 hidden 分支（QA #1272 I1 指出的死代码）。
 
     public_problems = []
     if args.public:
@@ -263,6 +282,8 @@ def main() -> int:
                             headers={"Range": "bytes=0-0"})
             if code == 404:
                 public_problems.append({"kind": "public-404", "path": path})
+
+    problems.extend(config_conflicts)
 
     report = {
         "ports": ports,
