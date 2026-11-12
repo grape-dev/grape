@@ -313,12 +313,12 @@
               <span :class="['rtv-sbadge', scopeKey(d)]">{{ scopeBadgeLabel(d) }}</span>
               <span class="rtv-wname">{{ workerDisplayName(d) }}</span>
               <span class="rtv-wip">{{ d.worker_ip || '' }}</span>
-              <button v-if="canManage(d)" class="bt bt-o rtv-wbtn" @click="openScopeSwitcher(d)">
+              <button v-if="canManage(d)" class="bt bt-o bt-s rtv-wbtn" @click="openScopeSwitcher(d)">
                 {{ scopeShort(d.scope) }}
               </button>
               <button
                 v-if="d.credential_id && isOwner(d)"
-                class="bt bt-o rtv-wbtn"
+                class="bt bt-o bt-s rtv-wbtn"
                 @click="renameCredential(d.credential_id)"
               >
                 {{ t('action.rename') }}
@@ -342,7 +342,7 @@
               </div>
               <button
                 v-if="d.credential_id && isOwner(d)"
-                class="bt bt-r rtv-wbtn"
+                class="bt bt-r bt-s rtv-wbtn"
                 @click="revokeCredential(d.credential_id)"
               >
                 {{ t('action.revoke') }}
@@ -411,7 +411,7 @@
           <span v-if="engineDetail.alias" class="rtv-ename-s"
             >({{ engineDisplayName(engineDetail) }})</span
           >
-          <button class="bt bt-o rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
+          <button class="bt bt-o bt-s rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
             {{ t('action.edit_alias') }}
           </button>
           <span v-if="engineDetail.is_local" class="rtv-localpill">{{
@@ -1054,22 +1054,6 @@ const DEV_STATUS_COLORS = {
   'cde.1002': '#dc2626',
   'cde.1003': '#dc2626',
   'cde.1004': '#dc2626',
-}
-const DEV_STATUS_BGS = {
-  'cde.0000': '#f3f4f6',
-  'cde.0001': '#dbeafe',
-  'cde.0002': '#dcfce7',
-  'cde.0003': '#dbeafe',
-  'cde.0004': '#dcfce7',
-  'cde.0005': '#fef3c7',
-  'cde.0006': '#fee2e2',
-  'cde.0007': '#fef3c7',
-  'cde.0008': '#fef3c7',
-  'cde.0009': '#f9fafb',
-  'cde.1001': '#fee2e2',
-  'cde.1002': '#fee2e2',
-  'cde.1003': '#fee2e2',
-  'cde.1004': '#fee2e2',
 }
 const BUSY_STATES = ['cde.0001', 'cde.0003', 'cde.0005', 'cde.0006', 'cde.0007', 'cde.0008']
 const PAGE_SIZE = 20
@@ -2133,7 +2117,7 @@ function devStatusColor(st) {
   return DEV_STATUS_COLORS[st] || '#8d97a8'
 }
 function devStatusBg(st) {
-  return DEV_STATUS_BGS[st] || '#f3f4f6'
+  return 'color-mix(in srgb, ' + devStatusColor(st) + ' 15%, transparent)'
 }
 function devStatusLabel(st) {
   return t('devspace.status.' + (st || 'unknown').replace(/\./g, '_'))
@@ -2379,64 +2363,76 @@ onBeforeUnmount(function () {
   align-items: center;
   flex-wrap: wrap;
 }
+/* 搜索：整组一个药丸（输入框无边框 + 图标按钮嵌在右端） */
 .rtv-searchgrp {
   display: flex;
   align-items: center;
   flex: 1;
   max-width: 300px;
+  border: 1px solid var(--b);
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+  transition:
+    border-color 0.18s,
+    background 0.18s;
+}
+.rtv-searchgrp:focus-within {
+  border-color: var(--a-text);
+  background: var(--c);
 }
 .rtv-search {
   flex: 1;
-  padding: 7px 12px 7px 14px;
-  border: 1px solid var(--b);
-  border-radius: 10px 0 0 10px;
+  padding: 7px 6px 7px 14px;
+  border: none;
+  border-radius: 0;
   font-size: 13px;
-  background: var(--bg);
+  background: transparent;
   color: var(--t);
-  transition: border-color 0.2s;
   outline: none;
   min-width: 0;
 }
 .rtv-search:focus {
-  border-color: var(--a-text);
-  background: var(--c);
+  background: transparent;
 }
 .rtv-searchbtn {
-  padding: 7px 14px;
-  border: 1px solid var(--b);
-  border-left: none;
-  border-radius: 0 10px 10px 0;
-  background: var(--bg);
+  border: none;
+  background: transparent;
   color: var(--t3);
-  font-size: 13px;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 3px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: all 0.15s;
+  transition:
+    background 0.18s,
+    color 0.18s;
 }
 .rtv-searchbtn:hover {
-  background: var(--a);
-  color: var(--on-accent);
+  background: color-mix(in srgb, var(--a) 16%, transparent);
+  color: var(--a);
 }
+/* 主操作：实心 accent + 白字（几何由 bridge.css 统一） */
 .rtv-addbtn {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 18px;
   border: none;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  background: var(--a);
   color: var(--on-accent);
-  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.35);
-  transition: all 0.2s;
   font-family: inherit;
+  transition:
+    background 0.18s,
+    filter 0.18s;
 }
 .rtv-addbtn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 20px rgba(59, 130, 246, 0.45);
+  background: var(--ah);
+  filter: brightness(1.06);
 }
 /* 空态 */
 .rtv-empty {
@@ -2669,7 +2665,7 @@ onBeforeUnmount(function () {
 }
 .rtv-hbadge.online {
   color: var(--g);
-  background: #dcfce7;
+  background: color-mix(in srgb, var(--g) 15%, transparent);
 }
 .rtv-hbadge.recently_lost {
   color: var(--y);
@@ -2677,11 +2673,11 @@ onBeforeUnmount(function () {
 }
 .rtv-hbadge.offline {
   color: var(--t3);
-  background: #eef0f3;
+  background: var(--chip-bg);
 }
 .rtv-hbadge.about_to_gc {
   color: var(--r);
-  background: #fee2e2;
+  background: color-mix(in srgb, var(--r) 15%, transparent);
 }
 .rtv-dot7 {
   width: 7px;
@@ -2701,16 +2697,16 @@ onBeforeUnmount(function () {
   color: var(--on-accent);
 }
 .rtv-sbadge.global {
-  background: #3168e0;
+  background: #2f63d6;
 }
 .rtv-sbadge.repo {
-  background: #8b5cf6;
+  background: #7152c9;
 }
 .rtv-sbadge.user {
-  background: #1ca44c;
+  background: #157f3d;
 }
 .rtv-sbadge.local {
-  background: #0e7490;
+  background: #0b6276;
 }
 .rtv-ename {
   display: inline-flex;
@@ -2854,7 +2850,7 @@ onBeforeUnmount(function () {
 }
 .rtv-cli {
   cursor: pointer;
-  color: #235ec7;
+  color: var(--a-text);
   text-decoration: underline;
 }
 /* 分页 */
@@ -2867,9 +2863,10 @@ onBeforeUnmount(function () {
   flex-wrap: wrap;
 }
 .rtv-pager button {
-  padding: 4px 10px;
+  padding: 4px 11px;
+  min-width: 28px;
   border: 1px solid var(--b);
-  border-radius: 6px;
+  border-radius: 999px;
   background: var(--c);
   color: var(--t);
   font-size: 12px;
@@ -2877,13 +2874,14 @@ onBeforeUnmount(function () {
   margin: 0 2px;
 }
 .rtv-pager button.on {
-  border-color: var(--a-text);
+  border-color: var(--a);
   background: var(--a);
   color: var(--on-accent);
   font-weight: 600;
 }
 .rtv-pager button:disabled {
   color: var(--t3);
+  opacity: 0.4;
   cursor: default;
 }
 .rtv-ellipsis {
@@ -2957,8 +2955,8 @@ onBeforeUnmount(function () {
 .rtv-localpill {
   font-size: 11px;
   font-weight: 600;
-  color: #0e7490;
-  background: #cffafe;
+  color: var(--t2);
+  background: var(--chip-bg);
   border-radius: 999px;
   padding: 1px 8px;
 }
@@ -3199,7 +3197,7 @@ onBeforeUnmount(function () {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  background: var(--a);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3224,18 +3222,22 @@ onBeforeUnmount(function () {
 .rtv-sb-close {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
-  border: 1px solid var(--b);
-  background: var(--bg);
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--chip-bg);
   cursor: pointer;
   color: var(--t2);
   font-size: 16px;
   flex-shrink: 0;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
 }
 .rtv-sb-close:hover {
-  background: #fee2e2;
-  color: #dc2626;
-  border-color: #fecaca;
+  background: color-mix(in srgb, var(--r) 16%, transparent);
+  color: var(--r);
+  border-color: color-mix(in srgb, var(--r) 40%, transparent);
 }
 .rtv-sb-body {
   padding: 24px;
@@ -3256,28 +3258,28 @@ onBeforeUnmount(function () {
   transition: all 0.2s;
 }
 .rtv-sb-opt:hover {
-  border-color: #3b82f6;
-  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.08);
+  border-color: var(--a-text);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--a) 12%, transparent);
 }
 .rtv-sb-opt.dev {
-  background: linear-gradient(135deg, rgba(96, 165, 250, 0.08), rgba(167, 139, 250, 0.08));
-  border-color: rgba(96, 165, 250, 0.2);
+  background: color-mix(in srgb, var(--a) 8%, transparent);
+  border-color: color-mix(in srgb, var(--a) 20%, transparent);
 }
 .rtv-sb-opt.dev:hover {
-  border-color: rgba(96, 165, 250, 0.5);
+  border-color: color-mix(in srgb, var(--a) 50%, transparent);
 }
 .rtv-sb-opt-ic {
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: #dbeafe;
+  background: color-mix(in srgb, var(--a) 14%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
 .rtv-sb-opt-ic.dev {
-  background: linear-gradient(135deg, #60a5fa, #a78bfa);
+  background: var(--a);
 }
 .rtv-sb-opt-body {
   flex: 1;
@@ -3307,15 +3309,15 @@ onBeforeUnmount(function () {
 .rtv-sb-loading {
   padding: 32px;
   text-align: center;
-  color: #a78bfa;
+  color: var(--t3);
   font-size: 13px;
 }
 .rtv-spinner {
   display: inline-block;
   width: 24px;
   height: 24px;
-  border: 2.5px solid rgba(59, 130, 246, 0.2);
-  border-top-color: #3b82f6;
+  border: 2.5px solid color-mix(in srgb, var(--a) 20%, transparent);
+  border-top-color: var(--a);
   border-radius: 50%;
   animation: rtvSpin 0.8s linear infinite;
   margin-bottom: 12px;
@@ -3323,8 +3325,8 @@ onBeforeUnmount(function () {
 .rtv-spinner.purple {
   width: 20px;
   height: 20px;
-  border-color: rgba(167, 139, 250, 0.2);
-  border-top-color: #a78bfa;
+  border-color: color-mix(in srgb, var(--a) 20%, transparent);
+  border-top-color: var(--a);
 }
 @keyframes rtvSpin {
   to {
@@ -3388,7 +3390,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   margin-bottom: 14px;
   font-size: 12px;
-  color: #92400e;
+  color: var(--y);
   line-height: 1.5;
 }
 .rtv-cred-lbl {
@@ -3442,36 +3444,53 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 10px;
   border-bottom: 1px solid var(--b);
-  background: linear-gradient(135deg, #60a5fa, #a78bfa);
+  background: color-mix(in srgb, var(--a) 14%, var(--c));
 }
 .rtv-dev-title {
   font-size: 14px;
   font-weight: 600;
   flex: 1;
-  color: var(--on-accent);
+  color: var(--t);
 }
 .rtv-dev-auto {
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--t3);
 }
 .rtv-dev-create {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--a);
   color: var(--on-accent);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: 6px;
-  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 6px 14px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  transition:
+    background 0.18s,
+    filter 0.18s;
+}
+.rtv-dev-create:hover {
+  background: var(--ah);
+  filter: brightness(1.06);
 }
 .rtv-dev-refresh {
-  background: rgba(255, 255, 255, 0.12);
-  color: var(--on-accent);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 6px;
-  padding: 5px 10px;
+  background: transparent;
+  color: var(--a);
+  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
+  border-radius: 999px;
+  padding: 5px 12px;
   font-size: 14px;
+  line-height: 1.2;
   cursor: pointer;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
+}
+.rtv-dev-refresh:hover {
+  background: var(--a);
+  color: var(--on-accent);
+  border-color: var(--a);
 }
 .rtv-dev-body {
   background: var(--bg);
@@ -3556,7 +3575,7 @@ onBeforeUnmount(function () {
 .rtv-dev-progfill {
   width: 40%;
   height: 100%;
-  background: linear-gradient(90deg, #60a5fa, #a78bfa);
+  background: var(--a);
   border-radius: 3px;
   animation: rtvDevPulse 2s ease-in-out infinite;
 }

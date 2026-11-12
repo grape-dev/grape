@@ -104,7 +104,7 @@
  * 删除=红描边红字 hover 实心红、小号 12px、内距 4px 14px、禁用透明度 0.4。
  * 这里只做「几何统一」（圆角/字号/内距），颜色各自继承自己的角色，避免把主次关系改乱。
  * 前缀 #pageContent / #adminVueHost 是为了压过各视图 scoped 的 (0,2,0) 规则。 */
-:is(#pageContent, #adminVueHost) :is(.tsk-btn, .tsk-btn-primary, .tsk-btn-ghost, .ap-btn, .ap-btn-d, .btn, .btn-o,
+:is(#pageContent, #adminVueHost) :where(.tsk-btn, .tsk-btn-primary, .tsk-btn-ghost, .ap-btn, .ap-btn-d, .btn, .btn-o,
 .btn-p, .btn-sm, .lang-btn, .rv-dd-btn, .project-new-btn, .project-refresh-btn,
 .project-card-btn, .project-card-btn-outline, .ev__fsbtn, .ev__dreambtn, .ev__clearbtn,
 .ev__tl-btn, .kb-page-btn, .pl__pbtn, .rtv-searchbtn, .rtv-addbtn, .template-card-item-btn,
@@ -121,7 +121,7 @@
     filter 0.18s ease;
 }
 /* 主按钮级别保持 13px / 7px 18px（视觉重量） */
-:is(#pageContent, #adminVueHost) :is(.ap-btn, .btn-p, .tsk-btn-primary, .isk-deploy-btn, .project-new-btn) {
+:is(#pageContent, #adminVueHost) :is(.ap-btn, .btn-p, .tsk-btn-primary, .isk-deploy-btn, .project-new-btn, .rtv-addbtn) {
   font-size: 13px;
   padding: 7px 18px;
 }
