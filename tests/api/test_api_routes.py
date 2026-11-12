@@ -1,4 +1,5 @@
 """API 路由集成测试 — 覆盖所有 13 个路由模块"""
+
 import sys, os, json, io
 
 # 强制使用独立测试库，防止 TestClient 误连生产库（双保险，即使 conftest 未加载）
@@ -6,9 +7,13 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.mgmt.user import db as user_db
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_username,
     get_token_version as grape_get_token_version,
@@ -29,29 +34,20 @@ client = TestClient(app)
 
 # ====== Test Setup ======
 _uid = None
+
 _token = ""
+
 _headers = {}
 
 def setup_module():
     global _uid, _token, _headers
-    # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
-    from src.domains.mgmt.auth.password import hash_password
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM grape_accounts WHERE username='test_api'")
-        row = c.fetchone()
-        if row:
-            _uid = {"id": row[0], "username": "test_api"}
-        else:
-            c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
-                      ("test_api", None, hash_password("test123"), "test_api"))
-            db.commit()
-            _uid = {"id": c.lastrowid, "username": "test_api"}
+    # D105: 主键 UUID 化后统一走 create_grape_account（应用层生成 UUIDv7 id）
+    _uid = _get_or_create_test_user("test_api", "test123")
     # D32: token 写入 external_identities（get_user_token_with_refresh 从此表读）
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', ?, ?, ?)",
-                  (_uid["id"], "gc_test_api", "test_api", "test_api_token_12345"))
+        c.execute("INSERT OR REPLACE INTO external_identities (id, grape_user_id, provider, external_id, external_login, access_token) VALUES (?, ?, 'gitcode', ?, ?, ?)",
+                  (str(uuid.uuid4()), _uid["id"], "gc_test_api", "test_api", "test_api_token_12345"))
         db.commit()
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
@@ -88,7 +84,6 @@ def teardown_module():
             c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
             db.commit()
 
-
 # ===================== 0. 测试辅助 =====================
 def monkeypatch_fn(module, attr, fake):
     """简易 monkeypatch：替换 module.attr，返回恢复函数（try/finally 用）。
@@ -103,7 +98,6 @@ def monkeypatch_fn(module, attr, fake):
         setattr(module, attr, _orig)
         importlib.reload(module)
     return _restore
-
 
 # ===================== 1. Health & SPA =====================
 class TestInfra:
@@ -124,7 +118,6 @@ class TestInfra:
             r = client.get(f)
             assert r.status_code == 200, f"{f} -> {r.status_code}"
             assert len(r.content) > 100, f"{f} too short"
-
 
 # ===================== 2. Auth =====================
 class TestAuth:
@@ -199,7 +192,6 @@ class TestAuth:
         # May return 400 if OAuth not configured, but should not crash
         assert r.status_code in (200, 400)
 
-
 # ===================== 3. Repos =====================
 class TestRepos:
     def test_member_list(self):
@@ -236,6 +228,14 @@ class TestRepos:
         # 加入一个仓库（「加入」已下线，改用 DB 直插的托管登记等价物）
         user_db.add_managed_repo("gitcode:org/test-managed", "org", "test-managed", webhook_id=0)
         user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-managed", is_join=True)
+        # 登录链路会为用户补建个人组织（_ensure_personal_org），此后 get_managed_repos
+        # 按 org 过滤（org_id=0 的裸行不可见）——直插行必须挂到用户当前组织下
+        from src.domains.mgmt.user.org_db import get_personal_org_id
+        _org_id = get_personal_org_id(_uid["id"]) or 0
+        if _org_id:
+            with db_lock:
+                db.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?", (_org_id, "gitcode:org/test-managed"))
+                db.commit()
 
         # 加入后应出现
         r = client.get("/api/repos/managed", headers=_headers)
@@ -260,17 +260,41 @@ class TestRepos:
         assert not found, "org/test-managed still in managed list after remove"
         print("  [OK] removed repo disappears from managed list")
 
+        # 恢复 setup_module 基线：本测试开头清掉了 gitcode:org/%（含 gitcode:org/test），
+        # TestKnowledge/TestSettings 依赖该仓库的托管+加入关系，必须在测试尾恢复
+        user_db.add_managed_repo("gitcode:org/test", "org", "test", webhook_id=0)
+        user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test", is_join=True, is_admin=True)
+        _org_id2 = get_personal_org_id(_uid["id"]) or _org_id
+        if _org_id2:
+            with db_lock:
+                db.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?", (_org_id2, "gitcode:org/test"))
+                db.commit()
+
     def test_remove_nonexistent(self):
         r = client.post("/api/repos/remove", json={"full_name": "org/nonexistent"}, headers=_headers)
         assert r.status_code == 404
 
     @staticmethod
     def _mock_vcs_perm(access_level):
-        """mock get_member_permission 返回指定 access_level（测试环境无真实 VCS 凭据）"""
+        """mock get_member_permission 返回指定 access_level（测试环境无真实 VCS 凭据）。
+        D105/D42：unmanage 闸门改走 create_provider(...).get_user_login +
+        get_collaborator_permission 真实 VCS 调用——同样打桩，避免假 token 触发
+        真实 GitCode 401 → reauth_required。"""
         from src.domains.mgmt.user import repo_manager
+        import src.kernel.token_resolver as _tr_mod
         def _fake(token, owner, repo, username, **kw):
             return {"access_level": access_level, "role_name": "mocked", "permission": "write"}
-        return monkeypatch_fn(repo_manager, "get_member_permission", _fake)
+        class _FakeProv:
+            def get_user_login(self, token):
+                return "mock-visitor"  # != owner → 走 get_collaborator_permission 判级
+            def get_collaborator_permission(self, token, owner, repo, login):
+                return _fake(token, owner, repo, login)
+        _r1 = monkeypatch_fn(repo_manager, "get_member_permission", _fake)
+        _r2 = monkeypatch_fn(_tr_mod, "create_provider", lambda p: _FakeProv())
+        def _restore():
+            _r1()
+            _r2()
+        return _restore
 
     def test_db_add_then_remove(self):
         """DB 直插托管登记后：remove 一次成功、再 remove 报 404（等价原 join→remove 链路）。
@@ -312,12 +336,13 @@ class TestRepos:
     def test_remove_denied_no_vcs_auth(self):
         """救火闸门：mock 掉 GitCode 用户 token（模拟未授权）→ 403 拒绝"""
         from src.api import deps
-        _restore = monkeypatch_fn(deps, "get_user_token_with_refresh", lambda *a, **k: "")
+        _restore = monkeypatch_fn(deps, "get_user_token_for", lambda *a, **k: "")
         try:
             user_db.add_managed_repo("gitcode:org/test-noauth-deny", "org", "test-noauth-deny", webhook_id=0)
             user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-noauth-deny", is_join=True)
             r = client.post("/api/repos/remove", json={"full_name": "org/test-noauth-deny"}, headers=_headers)
-            assert r.status_code == 403, f"no-auth remove should be denied: {r.text[:200]}"
+            # D105 跟进：无 VCS 凭据现在统一走 oauth_401_retry → 401 reauth_required（同为拒绝语义）
+            assert r.status_code in (401, 403), f"no-auth remove should be denied: {r.text[:200]}"
         finally:
             with db_lock:
                 db.cursor().execute("DELETE FROM managed_repos WHERE repo_key='gitcode:org/test-noauth-deny'")
@@ -328,7 +353,8 @@ class TestRepos:
     def test_host_no_permission(self):
         """非管理员用户尝试托管应返回 502（GitCode API 不可达）或 400/403"""
         r = client.post("/api/repos/host", json={"full_name": "org/nonexistent-repo"}, headers=_headers)
-        assert r.status_code in (400, 403, 502), f"Unexpected status: {r.status_code}: {r.text[:100]}"
+        # D105 跟进：无 VCS 凭据统一返回 401 reauth_required（同为拒绝/不可用语义）
+        assert r.status_code in (400, 401, 403, 502), f"Unexpected status: {r.status_code}: {r.text[:100]}"
 
     def test_host_invalid_format(self):
         """无效的仓库全名"""
@@ -449,7 +475,6 @@ class TestRepos:
         import re
         assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", ts), f"bad synced_at: {ts!r}"
         clear_user_repos(uid)
-
 
 # ===================== 4. Dashboard =====================
 class TestDashboard:
@@ -590,7 +615,6 @@ class TestDashboard:
                 c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-dedup",))
                 db.commit()
 
-
 # ===================== 5. Pipeline =====================
 class TestPipeline:
     def test_pipeline_success(self):
@@ -630,7 +654,6 @@ class TestPipeline:
                 c = db.cursor()
                 c.execute("DELETE FROM events WHERE repo_key=?", (repo_key,))
                 db.commit()
-
 
 # ===================== 6. Agents =====================
 class TestAgents:
@@ -701,7 +724,6 @@ class TestAgents:
                 c.execute("DELETE FROM user_repos WHERE repo_key=?", (repo_key,))
                 db.commit()
 
-
 # ===================== 7. Events =====================
 class TestEvents:
     def test_event_list(self):
@@ -738,7 +760,6 @@ class TestEvents:
         with db_lock:
             db.execute("DELETE FROM events WHERE seq=?", (seq,))
             db.commit()
-
 
 # ===================== 8. Chat =====================
 class TestChat:
@@ -780,15 +801,9 @@ class TestChat:
                 c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
                           "VALUES ('opencode','opencode',0,1,1,'online','global','')")
             db.commit()
-        # D32: 直接用 SQL 创建 grape_accounts 用户
-        from src.domains.mgmt.auth.password import hash_password as _hp
+        # D105: 走 create_grape_account（UUIDv7 id 应用层生成）
         _chat_uname = "chat_def_" + _uuid.uuid4().hex[:6]
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
-                      (_chat_uname, None, _hp("pw123"), _chat_uname))
-            db.commit()
-            user = {"id": c.lastrowid, "username": _chat_uname}
+        user = _get_or_create_test_user(_chat_uname)
         assert user
         tok = _jwt_access_token(user["id"], user["username"])
         hd = {"Authorization": f"Bearer {tok}"}
@@ -834,18 +849,7 @@ class TestChat:
         assert r.json()["im"]["feishu"]["app_id"] == app_a
 
         # 用户 B（新用户，无配置）读不到 A 的 app_id
-        from src.domains.mgmt.auth.password import hash_password as _hp2
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id FROM grape_accounts WHERE username='chat_iso_b'")
-            _row = c.fetchone()
-            if _row:
-                user_b = {"id": _row[0], "username": "chat_iso_b"}
-            else:
-                c.execute("INSERT INTO grape_accounts (username, email, password_hash, status, token_version) VALUES (?,?,?,1,0)",
-                          ("chat_iso_b", None, _hp2("pw123")))
-                db.commit()
-                user_b = {"id": c.lastrowid, "username": "chat_iso_b"}
+        user_b = _get_or_create_test_user("chat_iso_b")
         token_b = _jwt_access_token(user_b["id"], user_b["username"])
         headers_b = {"Authorization": f"Bearer {token_b}"}
         r = client.get("/api/chat/config", headers=headers_b)
@@ -874,18 +878,7 @@ class TestChat:
         assert r.status_code == 200, f"A save failed: {r.text[:200]}"
 
         # 用户 B 尝试绑定同一 app_id → 400
-        from src.domains.mgmt.auth.password import hash_password as _hp3
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id FROM grape_accounts WHERE username='chat_uniq_b'")
-            _row = c.fetchone()
-            if _row:
-                user_b = {"id": _row[0], "username": "chat_uniq_b"}
-            else:
-                c.execute("INSERT INTO grape_accounts (username, email, password_hash, status, token_version) VALUES (?,?,?,1,0)",
-                          ("chat_uniq_b", None, _hp3("pw123")))
-                db.commit()
-                user_b = {"id": c.lastrowid, "username": "chat_uniq_b"}
+        user_b = _get_or_create_test_user("chat_uniq_b")
         token_b = _jwt_access_token(user_b["id"], user_b["username"])
         headers_b = {"Authorization": f"Bearer {token_b}"}
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec_x"}}}, headers=headers_b)
@@ -1101,7 +1094,6 @@ class TestChat:
                 c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"dupname{uniq}%",))
                 db.commit()
 
-
 # ===================== 9. Settings =====================
 class TestSettings:
     def test_credentials(self):
@@ -1162,42 +1154,61 @@ class TestSettings:
         assert cred.get("ak") == "existing_ak"
 
     def test_clear_github_token(self):
-        """Issue #237：传空字符串清除 GitHub token"""
-        # D32: 先写入 github token 到 external_identities
+        """Issue #237：传空字符串清除 GitHub token。
+
+        D105k 四象限（2026-11-11）：预置 ei 带 access_token = OAuth 在场 →
+        清 github PAT 只清凭据域（user_credentials.github_pat），ei 归属行 +
+        OAuth token 保留（回落能力锁）——旧断言锁的是 PAT 直写 ei 的退役形态。"""
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'github', 'gh_test', 'testuser', 'ghp_test_token')",
-                      (_uid["id"],))
+            c.execute("INSERT OR REPLACE INTO external_identities (id, grape_user_id, provider, external_id, external_login, access_token) VALUES (?, ?, 'github', 'gh_test', 'testuser', 'ghp_test_token')",
+                      (str(uuid.uuid4()), _uid["id"]))
             db.commit()
-        # 传空字符串清除
         client.put("/api/settings/credentials", json={
             "github_token": ""
         }, headers=_headers)
-        # D32: 清除后 external_identities 中应无 github 绑定
+        from src.domains.mgmt.user.db import get_credential
+        _pat = get_credential(str(_uid["id"]), "github_pat") or {}
+        assert not _pat.get("token"), f"github_pat must be cleared, got: {_pat}"
         with db_lock:
             c = db.cursor()
             c.execute("SELECT access_token FROM external_identities WHERE grape_user_id=? AND provider='github'", (_uid["id"],))
             row = c.fetchone()
-        assert not row or row[0] == ""
+        assert row and row[0], "ei OAuth binding must survive a PAT-only clear (D105k coexistence lock)"
+        self._restore_repo_membership()
 
     def test_clear_gitcode_token(self):
-        """对称测试：传空字符串清除 GitCode token"""
-        # 先写入 gitcode token 到 external_identities
+        """对称测试：传空字符串清除 GitCode token。
+
+        D105k 四象限（2026-11-11）：同 github——OAuth 在场时 PAT-only 清除
+        保留 ei 归属行（回落能力锁），断言凭据域 gitcode_pat 已清。"""
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', 'gc_test', 'testuser', 'glpat_test_token')",
-                      (_uid["id"],))
+            c.execute("INSERT OR REPLACE INTO external_identities (id, grape_user_id, provider, external_id, external_login, access_token) VALUES (?, ?, 'gitcode', 'gc_test', 'testuser', 'glpat_test_token')",
+                      (str(uuid.uuid4()), _uid["id"]))
             db.commit()
-        # 传空字符串清除
         client.put("/api/settings/credentials", json={
             "gitcode_token": ""
         }, headers=_headers)
-        # 清除后 external_identities 中应无 gitcode 绑定
+        from src.domains.mgmt.user.db import get_credential
+        _pat = get_credential(str(_uid["id"]), "gitcode_pat") or {}
+        assert not _pat.get("token"), f"gitcode_pat must be cleared, got: {_pat}"
         with db_lock:
             c = db.cursor()
             c.execute("SELECT access_token FROM external_identities WHERE grape_user_id=? AND provider='gitcode'", (_uid["id"],))
             row = c.fetchone()
-        assert not row or row[0] == ""
+        assert row and row[0], "ei OAuth binding must survive a PAT-only clear (D105k coexistence lock)"
+        self._restore_repo_membership()
+
+    @staticmethod
+    def _restore_repo_membership():
+        """update_credentials 带 github/gitcode token 字段时会清空该用户 user_repos
+        缓存（产品语义：下次同步重拉）。后续 TestKnowledge 等依赖 gitcode:org/test
+        成员关系，这里立即恢复 setup 基线行。"""
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_join, is_admin) VALUES (?,?,?,?,1,1)",
+                       (_uid["id"], "gitcode:org/test", "org", "test"))
+            db.commit()
 
     def test_notifications(self):
         r = client.get("/api/settings/notifications", headers=_headers)
@@ -1208,8 +1219,16 @@ class TestSettings:
         assert r.status_code == 200
 
     def test_gitcode_repo_update(self):
+        # FR-20.5 闸门（托管人/user_repos.is_admin/role=admin）先于写入——
+        # 播种本用户为该仓库托管人后再操作，验证 200 主路径
+        with db_lock:
+            db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, host_user_id) VALUES (?,?,?,?,?)",
+                       ("gitcode:owner/repo", "owner", "repo", "owner/repo", _uid["id"]))
+            db.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, is_join, is_admin) VALUES (?,?,1,1)",
+                       (_uid["id"], "gitcode:owner/repo"))
+            db.commit()
         r = client.put("/api/settings/gitcode-repo/owner/repo",
-                       json={"bot_token": "test"}, headers=_headers)
+                       json={"bot_token": "xxxx-test-token"}, headers=_headers)
         assert r.status_code == 200
 
     def test_agent_runtimes(self):
@@ -1500,7 +1519,6 @@ class TestSettings:
             id1 = d_p1["devices"][0].get("credential_id")
             id2 = d_p2["devices"][0].get("credential_id")
             assert id1 != id2
-
 
 # ===================== 10. Skills =====================
 class TestSkills:
@@ -1847,7 +1865,6 @@ class TestSkills:
                 c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convother{uniq}%",))
                 db.commit()
 
-
 # ===================== 11. Search =====================
 class TestSearch:
     def test_search_empty(self):
@@ -1858,10 +1875,11 @@ class TestSearch:
         assert "agents" in r.json()
 
     def test_search_no_query(self):
-        # q is required by pattern: min_length=1, so empty gives 422
+        # q 已放宽为可选（Query("") 缺省不触发 min_length 校验）——空 q 返回
+        # 空结果集 200（产品语义以 src/domains/insight/routes/search.py 为准）
         r = client.get("/api/search", headers=_headers)
-        assert r.status_code == 422
-
+        assert r.status_code == 200
+        assert set(r.json().keys()) == {"events", "repos", "agents"}
 
 # ===================== 12. Webhook & A2A =====================
 class TestWebhook:
@@ -1964,7 +1982,6 @@ class TestWebhook:
         assert r.status_code == 400, f"Should reject missing issue_number: {r.text}"
         assert "issue_number" in r.json()["detail"]["message"]
 
-
 # ===================== 13. Token Three-Layer =====================
 class TestTokenLayers:
     def test_bot_token_fallback(self):
@@ -1979,7 +1996,6 @@ class TestTokenLayers:
         # 未托管仓库应返回空串（无 webhook token）
         assert isinstance(token, str)
         assert token == ""
-
 
 # ===================== 14. Event Pipeline (unit) =====================
 class TestEventPipeline:
@@ -2037,8 +2053,6 @@ class TestEventPipeline:
         sc = get_or_create_agent_session(repo, "coding", "opencode")
         assert sc["id"] != sv["id"]  # Independent sessions
         delete_agent_session(repo, "vod"); delete_agent_session(repo, "coding")
-
-
 
 # ===================== 15. Knowledge (Issue #199) =====================
 class TestKnowledge:
@@ -2419,3 +2433,23 @@ class TestKnowledge:
                 db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE id=?", (kid,))
                 db.commit()
 
+import sys, os, json, io, uuid
+
+def _get_or_create_test_user(username, password="pw123", nickname=None):
+    """D105: grape_accounts.id 为 TEXT PK（UUIDv7，应用层生成），
+    裸 INSERT 不带 id 会得到 id=NULL 且 lastrowid 指向 rowid，JWT 按 id 查不到 → 401。
+    统一走 create_grape_account 保证 id 落库即所得。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, username FROM grape_accounts WHERE username=?", (username,))
+        row = c.fetchone()
+        if row:
+            return {"id": row[0], "username": row[1]}
+    acct = create_grape_account(username, email="", password=password,
+                                nickname=nickname or username, email_verified=True)
+    assert acct, f"create test user {username} failed"
+    return {"id": acct["id"], "username": acct["username"]}
+
+# 强制使用独立测试库，防止 TestClient 误连生产库（双保险，即使 conftest 未加载）
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

@@ -196,12 +196,22 @@ def test_sid_watchdog_cleans_ghost_task():
                             heartbeat_interval=999, max_concurrent=20,
                             _test_execute=_fake_execute)
 
-    try:
-        asyncio.run(asyncio.wait_for(_run(), timeout=3.0))
-    except asyncio.TimeoutError:
-        pass
-    finally:
-        os.environ.pop("RUNTIME_SID_WATCHDOG_INTERVAL", None)
+    # 安全隔离（PR #1096 追加）：看门狗会对 active_task_objs 里的任务真实调用
+    # _kill_stale_engine，而该函数在 task["cwd"] 为空时兜底 os.getcwd()（= pytest 的
+    # 工作目录，通常是仓库根），再做 cwd 前缀匹配 + os.killpg(SIGTERM→SIGKILL)。
+    # 若本机正在同一仓库里跑开放引擎（opencode run / hermes acp 等），该调用会命中
+    # 真实引擎进程组并把它杀掉，连带杀掉跑 pytest 的 agent 自身（实测踩过）。
+    # 本用例只验证「幽灵 sid 被清理 + 后续任务可执行」，进程杀戮不在被测范围 → mock 掉。
+    with patch.object(_am, "_kill_stale_engine") as _mkill:
+        try:
+            asyncio.run(asyncio.wait_for(_run(), timeout=3.0))
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            os.environ.pop("RUNTIME_SID_WATCHDOG_INTERVAL", None)
+
+    # 断言看门狗确实走了「清理幽灵 + 杀残留引擎」分支（mock 计数，不碰真实进程）
+    assert _mkill.called, "看门狗应调用 _kill_stale_engine 清理幽灵任务的残留引擎"
 
     # task_b 应该被执行（看门狗清理了幽灵 sid 后不再冲突）
     # 注意：task_a 在 _fake_execute 里 sleep 0.5s 后也会返回（模拟进程最终退出）
@@ -237,9 +247,18 @@ def test_reregister_unpacks_register_tuple():
     （worker 全离线事故，2026-08-17 实测）。
     """
     client = FakeRegClient([54, 55])
-    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test"))
+    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test",
+                                               recover_orphans=True))
     assert result[0] == [54, 55], "应返回真正的 ids 列表，而非 (ids, probe_url) 元组"
     assert client.recovered == [54, 55], "recover_orphans 应逐个收到单值 id，不能收到 [54, 55] 列表"
+
+
+def test_reregister_default_does_not_recover():
+    """Issue #1750 P1-B：默认不回收，只有显式 recover_orphans=True 才逐 rid 回收。"""
+    client = FakeRegClient([54, 55])
+    result = asyncio.run(agent_mod._reregister(client, prev_installed=[], device_name="test"))
+    assert result[0] == [54, 55], "元组解包不受回收开关影响"
+    assert client.recovered == []
 
 
 def test_reregister_handles_empty_ids():

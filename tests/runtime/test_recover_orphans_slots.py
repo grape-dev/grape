@@ -8,13 +8,14 @@
 - UT-5 started_at NULL 兜底 created_at → 仍 skipped_young（Issue #370）
 - UT-6 RECOVER_GRACE_SECONDS 环境变量覆盖默认 300s（Issue #370）
 """
+
 import os, sys, threading
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
 sys.path.insert(0, ROOT)
 
 import pytest
-
 
 @pytest.fixture()
 def setup_db(monkeypatch):
@@ -49,16 +50,30 @@ def setup_db(monkeypatch):
     );
     """)
     monkeypatch.setattr(svc, "db", test_db)
-    monkeypatch.setattr(svc, "db_lock", threading.Lock())
+    _test_lock = threading.Lock()
+    monkeypatch.setattr(svc, "db_lock", _test_lock)
     # runtime.py 路由模块从 session_manager 导入 db/db_lock —— 一并替换
     monkeypatch.setattr(rt, "db", test_db)
-    monkeypatch.setattr(rt, "db_lock", svc.db_lock)
+    monkeypatch.setattr(rt, "db_lock", _test_lock)
     import src.kernel.session_manager as _sm
     monkeypatch.setattr(_sm, "db", test_db)
-    monkeypatch.setattr(_sm, "db_lock", svc.db_lock)
+    monkeypatch.setattr(_sm, "db_lock", _test_lock)
     yield test_db
+    # 混跑污染修复（D46/S68）：本 fixture 只建 3 张表；窗口期内懒加载首次
+    # import 的模块会把该内存库句柄永久捕获（monkeypatch 只还原被点名的
+    # 4 个模块），后续查 managed_repos 等表全灭（混跑 no such table ×239
+    # 家族）。先重绑回共享连接，再关私有连接。
+    import src.kernel.session_manager as _sm2
+    _real_db, _real_lock = _sm2.db, _sm2.db_lock
+    for _m in list(sys.modules.values()):
+        try:
+            if getattr(_m, "db", None) is test_db:
+                _m.db = _real_db
+            if getattr(_m, "db_lock", None) is _test_lock:
+                _m.db_lock = _real_lock
+        except Exception:
+            pass
     test_db.close()
-
 
 def _seed(c, tid, status, runtime_id, attempts=0, agent_type="coding",
           messages_ago=None, started_seconds_ago=600, created_seconds_ago=600,
@@ -88,7 +103,6 @@ def _seed(c, tid, status, runtime_id, attempts=0, agent_type="coding",
         c.execute("INSERT INTO task_messages (task_id, created_at, content) VALUES (?,?,?)",
                   (tid, ts, "alive"))
 
-
 def test_ut1_force_fail_releases_busy_slots(setup_db):
     """UT-1：attempts 封顶 force-fail → busy_slots 释放（旧代码永久泄漏）。"""
     from src.domains.runtime.routes.runtime import runtime_recover_orphans
@@ -104,7 +118,6 @@ def test_ut1_force_fail_releases_busy_slots(setup_db):
     assert row[0] == "failed", "attempts 封顶应 force-fail"
     busy = c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=501").fetchone()[0]
     assert busy == 1, f"force-fail 应释放槽位 2→1，实际 {busy}"
-
 
 def test_ut2_requeue_releases_and_zeroes_runtime(setup_db):
     """UT-2：回炉 → 槽位释放 + runtime_id 归零 + pool_agent_type 回填。"""
@@ -124,7 +137,6 @@ def test_ut2_requeue_releases_and_zeroes_runtime(setup_db):
     busy = c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=502").fetchone()[0]
     assert busy == 2, f"回炉应释放槽位 3→2，实际 {busy}"
 
-
 def test_ut3_active_task_keeps_busy_slots(setup_db):
     """UT-3：活跃任务（近期有消息）跳过 → 状态/槽位都不动。"""
     from src.domains.runtime.routes.runtime import runtime_recover_orphans
@@ -140,7 +152,6 @@ def test_ut3_active_task_keeps_busy_slots(setup_db):
     assert row[0] == "running" and row[1] == 503, "活跃任务应完全跳过"
     busy = c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=503").fetchone()[0]
     assert busy == 2, f"活跃任务槽位不动，实际 {busy}"
-
 
 def test_ut4_young_task_skipped(setup_db):
     """UT-4（Issue #370）：新任务（< 宽限期）→ skipped_young，attempts/状态/槽位不动。"""
@@ -164,7 +175,6 @@ def test_ut4_young_task_skipped(setup_db):
     busy = c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=504").fetchone()[0]
     assert busy == 1, "新任务 skipped，槽位不动"
 
-
 def test_ut5_started_at_null_falls_back_to_created_at(setup_db):
     """UT-5（Issue #370）：started_at 为 NULL → 兜底 created_at；created_at < grace → skipped_young。"""
     from src.domains.runtime.routes.runtime import runtime_recover_orphans
@@ -184,7 +194,6 @@ def test_ut5_started_at_null_falls_back_to_created_at(setup_db):
     assert row[0] == "running" and row[1] == 0, "兜底 skipped 后状态/attempts 不变"
     busy = c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=505").fetchone()[0]
     assert busy == 1, "槽位不动"
-
 
 def test_ut6_recover_grace_seconds_env_override(setup_db, monkeypatch):
     """UT-6（Issue #370）：RECOVER_GRACE_SECONDS 环境变量覆盖默认 300s。

@@ -140,7 +140,7 @@ class TestSyncComment:
         # 当文件名 → 重签发的是不存在的对象键，评论链接 404。
         import src.api.issues_center as ic
         import src.domains.runtime.storage as storage_mod
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
         import src.domains.runtime.vcs.api_client as vac
         keys = []
 

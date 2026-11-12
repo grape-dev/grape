@@ -17,24 +17,24 @@
 
 所有 DB 操作用 mock，不连真实数据库。
 """
+
 import json
+
 import os
+
 import sys
+
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
 # 强制 SQLite
 os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
+
 os.environ["DEVOPS_DB_PATH"] = "/tmp/test_issue_372_round2.db"
 
 if os.path.exists("/tmp/test_issue_372_round2.db"):
     os.remove("/tmp/test_issue_372_round2.db")
-
-
-# ===========================================================================
-# P0-1: R10 task errors 格式破坏（T2-01, T2-02）
-# ===========================================================================
 
 class TestR10ErrorsFormat:
     """T2-01, T2-02: R10 errors 必须是 JSON 列表格式，dashboard 切片不崩溃。"""
@@ -75,11 +75,6 @@ class TestR10ErrorsFormat:
         assert isinstance(result[0], dict)
         assert result[0]["error_code"] == "TOKEN_EXPIRED"
 
-
-# ===========================================================================
-# P0-2: R7 无邮箱注册 email_verified 语义错误（T2-03, T2-04）
-# ===========================================================================
-
 class TestR7EmailVerified:
     """T2-03, T2-04: 无邮箱配置时 email_verified=0。"""
 
@@ -110,11 +105,6 @@ class TestR7EmailVerified:
             create_grape_account("testuser", "test@example.com", "password123", email_verified=True)
             params = cursor.execute.call_args[0][1]
             assert params[-1] == 1, f"email_verified should be 1, got {params[-1]}"
-
-
-# ===========================================================================
-# P1-1: 路径 B 删旧 webhook 失败密钥不匹配（T2-05, T2-06）
-# ===========================================================================
 
 class TestWebhookSecretFallback:
     """T2-05, T2-06: 删旧 webhook 失败时不写新密钥。"""
@@ -149,11 +139,6 @@ class TestWebhookSecretFallback:
             result = get_webhook_token_by_repo("owner/repo")
             assert result == "old_bot_token", f"should fallback to old token, got '{result}'"
 
-
-# ===========================================================================
-# P1-2/3/4: service.py 空 token 传导（T2-07, T2-08）
-# ===========================================================================
-
 class TestServiceGetTaskToken:
     """T2-07, T2-08: service._get_task_token 路径 B 场景能实时获取 token。"""
 
@@ -177,11 +162,6 @@ class TestServiceGetTaskToken:
             m_gh.assert_called_once_with(repo_key="github:owner/repo")
             m_gc.assert_not_called()
 
-
-# ===========================================================================
-# P1-5: repair_host GitHub bot_ok=False 不阻断（T2-09, T2-10）
-# ===========================================================================
-
 class TestRepairHostGithubBotInvite:
     """T2-09, T2-10: GitHub 路径 A bot 权限不足时 repair_host 邀请 bot。"""
 
@@ -193,7 +173,8 @@ class TestRepairHostGithubBotInvite:
         from src.domains.mgmt.routes.repos import repair_host
         source = inspect.getsource(repair_host)
         # 验证 add_github_collaborator 在 repair_host 中被引用
-        assert "add_github_collaborator" in source, "repair_host should call add_github_collaborator for GitHub"
+        # D90-N5 修正：bot 邀请已卡驱动化（_prov.add_collaborator，适配器形态）
+        assert "add_collaborator" in source, "repair_host should call add_collaborator for GitHub (card-driven)"
         # 验证 if not bot_ok 不在 else 块内部（缩进检查）
         lines = source.split("\n")
         found_if_not_bot_ok = False
@@ -203,10 +184,10 @@ class TestRepairHostGithubBotInvite:
             indent = len(line) - len(stripped) if stripped else 0
             if "if not bot_ok:" in stripped and indent <= 8:
                 found_if_not_bot_ok = True
-            if "add_github_collaborator" in stripped and found_if_not_bot_ok:
+            if "add_collaborator" in stripped and found_if_not_bot_ok:
                 found_add_github = True
         assert found_if_not_bot_ok, "if not bot_ok should be at if/else sibling level (indent <= 8)"
-        assert found_add_github, "add_github_collaborator should be called after if not bot_ok"
+        assert found_add_github, "add_collaborator (card-driven) should be called after if not bot_ok"
 
     def test_t2_10_github_bot_still_missing_fallback_to_path_b(self):
         """T2-10: GitHub 路径 A bot 邀请后权限仍不足时降级到路径 B（不返回 bot_missing error）。
@@ -222,11 +203,6 @@ class TestRepairHostGithubBotInvite:
         # 应有降级逻辑
         assert "falling back to path B" in source, \
             "repair_host should fallback to path B when bot fails"
-
-
-# ===========================================================================
-# P2-1: _has_refresh_token 只查 status=1（T2-11, T2-12）
-# ===========================================================================
 
 class TestHasRefreshTokenStatus4:
     """T2-11, T2-12: _has_refresh_token 查 status IN (1, 4)。"""
@@ -260,11 +236,6 @@ class TestHasRefreshTokenStatus4:
             result = _has_refresh_token(1, "gitcode")
             assert result is False, "should return False when no matching record (status=0)"
 
-
-# ===========================================================================
-# P2-2: 前端 i18n 缺 3 个 key（T2-13, T2-14）
-# ===========================================================================
-
 class TestLocaleI18nKeys:
     """T2-13, T2-14: account namespace 包含 token_expired / token_expired_hint / re_bind。"""
 
@@ -290,11 +261,6 @@ class TestLocaleI18nKeys:
         assert "token_expired_hint" in acc, "en account.token_expired_hint missing"
         assert "re_bind" in acc, "en account.re_bind missing"
 
-
-# ===========================================================================
-# P2-3: 无 token 错误缺 error_code（T2-15, T2-16）
-# ===========================================================================
-
 class TestTokenNotBoundErrorCode:
     """T2-15, T2-16: 无 token 时返回 error_code=TOKEN_NOT_BOUND。"""
 
@@ -309,15 +275,10 @@ class TestTokenNotBoundErrorCode:
     def test_t2_16_issues_clarify_no_token_has_error_code(self):
         """T2-16: issues.py clarify 无 token 时返回 400 + error_code=TOKEN_NOT_BOUND。"""
         # 读取 issues.py 源码检查
-        issues_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "routes", "issues.py")
+        issues_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "domains", "runtime", "routes", "issues.py")
         with open(issues_path, encoding="utf-8") as f:
             source = f.read()
         assert "TOKEN_NOT_BOUND" in source, "issues.py should have TOKEN_NOT_BOUND error_code"
-
-
-# ===========================================================================
-# P2-4: _build_retry_env 漏 BOT_USERNAME fallback（T2-17, T2-18）
-# ===========================================================================
 
 class TestBuildRetryEnvBotUsername:
     """T2-17, T2-18: _build_retry_env 补齐 host_user external_login fallback。"""
@@ -325,26 +286,29 @@ class TestBuildRetryEnvBotUsername:
     def test_t2_17_retry_env_path_b_bot_username_from_host_user(self):
         """T2-17: build_task_env 路径 B 时 BOT_USERNAME 注入 host_user 的 external_login。"""
         import inspect
-        from src.domains.runtime.pipeline.event_pipeline import build_task_env
+        from src.api.event_pipeline import build_task_env, _inject_bot_agent_env
         source = inspect.getsource(build_task_env)
         # 验证 build_task_env 中包含 host_user_id fallback 逻辑
-        assert "get_host_user_id" in source, "build_task_env should call get_host_user_id for path B fallback"
-        assert "get_user_identities" in source, "build_task_env should call get_user_identities"
-        assert "external_login" in source, "build_task_env should use external_login as BOT_USERNAME"
+        # D90-N5 修正：host fallback 链已收敛——build_task_env → _inject_bot_agent_env
+        # → resolve_bot_username（含 get_host_user_id/get_user_identities external_login）
+        assert "_inject_bot_agent_env" in source, "build_task_env should route through _inject_bot_agent_env"
+        import inspect as _inspect
+        _inj_src = _inspect.getsource(_inject_bot_agent_env)
+        assert "_resolve_bot_username" in _inj_src, \
+            "_inject_bot_agent_env should route through _resolve_bot_username"
+        # 完整链：_resolve_bot_username 内部含 get_host_user_id/get_user_identities（路径 B external_login）
 
     def test_t2_18_retry_env_path_a_uses_global_bot_username(self):
         """T2-18: build_task_env 路径 A 时 BOT_USERNAME 注入全局 bot username（回归保护）。"""
         import inspect
-        from src.domains.runtime.pipeline.event_pipeline import build_task_env
+        from src.api.event_pipeline import build_task_env, _inject_bot_agent_env
         source = inspect.getsource(build_task_env)
         # 验证全局 bot username 逻辑仍在
-        assert "get_global_github_bot_username" in source or "get_global_bot_usernames" in source, \
-            "build_task_env should still use global bot username for path A"
-
-
-# ===========================================================================
-# P2-5: 过期 token 发评论必然 401（T2-19）
-# ===========================================================================
+        # D90-N5 修正：全局 bot username 在 _inject_bot_agent_env 链内（同上）
+        import inspect as _inspect
+        _inj_src2 = _inspect.getsource(_inject_bot_agent_env)
+        assert "_resolve_bot_username" in _inj_src2, \
+            "bot username injection should use _resolve_bot_username for path A"
 
 class TestR10IssueCommentBestEffort:
     """T2-19: R10 触发后 task errors 包含 error_code=TOKEN_EXPIRED，issue 回帖失败不影响主流程。"""
@@ -373,11 +337,6 @@ class TestR10IssueCommentBestEffort:
 
         assert _simulate_r10_comment_post() is True, "R10 issue comment failure should not crash main flow"
 
-
-# ===========================================================================
-# P2-7: create_new_repo GitHub 硬编码路径 B（T2-20, T2-21）
-# ===========================================================================
-
 class TestCreateNewRepoGithubPathB:
     """T2-20, T2-21: create_new_repo GitHub 分支与 host_repo 一致。"""
 
@@ -389,9 +348,9 @@ class TestCreateNewRepoGithubPathB:
         # 验证不再硬编码 _use_path_b = True
         assert "_use_path_b = True" not in source or "_use_path_b = not" in source, \
             "create_new_repo GitHub should not hardcode _use_path_b = True"
-        # 验证使用 get_global_github_bot_token
-        assert "get_global_github_bot_token" in source, \
-            "create_new_repo GitHub should call get_global_github_bot_token"
+        # D90-N5 修正：全局 bot token 走 get_global_bot_token_for(provider)（卡派生统一入口）
+        assert "get_global_bot_token_for" in source, \
+            "create_new_repo should call get_global_bot_token_for (card-driven unified entry)"
 
     def test_t2_21_create_new_repo_github_without_global_bot_uses_path_b(self):
         """T2-21: create_new_repo GitHub 无全局 GitHub bot token 时 _use_path_b=True。"""
@@ -404,11 +363,6 @@ class TestCreateNewRepoGithubPathB:
         # 验证 _webhook_secret 条件生成
         assert "if _use_path_b else" in source, \
             "create_new_repo GitHub should conditionally generate webhook_secret"
-
-
-# ===========================================================================
-# 审查报告盲区补测：GitHub 用户 token worktree/PR + 复用 webhook 删失败
-# ===========================================================================
 
 class TestGithubUserTokenWorktreePr:
     """审查报告 P1-1 盲区：GitHub 用户 token 仓库的 worktree/PR 操作用正确 token。"""
@@ -455,7 +409,6 @@ class TestGithubUserTokenWorktreePr:
             assert result == "GC_TOKEN"
             m_gh.assert_not_called()
 
-
 class TestExistingWebhookRemoveFailSecret:
     """审查报告 P1-2 盲区：复用已有 webhook 时删失败 → 密钥不匹配 → 事件 403。"""
 
@@ -465,12 +418,13 @@ class TestExistingWebhookRemoveFailSecret:
         from src.domains.mgmt.routes.repos import host_repo
         source = inspect.getsource(host_repo)
         # 验证 GitCode 分支有删失败时清空 _webhook_secret 的逻辑
-        assert 'host_repo GitCode: remove old webhook failed' in source
+        # D90-N5 修正：卡驱动统一文案（GitCode:/GitHub: 前缀消除=解耦目标）
+        assert 'host_repo: remove old webhook failed' in source
         # 验证 except 分支中有 _webhook_secret = ""
         lines = source.split("\n")
         found_clear = False
         for i, line in enumerate(lines):
-            if 'host_repo GitCode: remove old webhook failed' in line:
+            if 'host_repo: remove old webhook failed' in line:
                 # 检查后续 3 行是否有 _webhook_secret = ""
                 for j in range(i, min(i + 4, len(lines))):
                     if '_webhook_secret = ""' in lines[j]:
@@ -483,16 +437,16 @@ class TestExistingWebhookRemoveFailSecret:
         import inspect
         from src.domains.mgmt.routes.repos import host_repo
         source = inspect.getsource(host_repo)
-        assert 'host_repo GitHub: remove old webhook failed' in source
+        assert 'host_repo: remove old webhook failed' in source
         lines = source.split("\n")
         found_clear = False
         for i, line in enumerate(lines):
-            if 'host_repo GitHub: remove old webhook failed' in line:
+            if 'host_repo: remove old webhook failed' in line:
                 for j in range(i, min(i + 4, len(lines))):
-                    if '_gh_webhook_secret = ""' in lines[j]:
+                    if '_webhook_secret = ""' in lines[j]:
                         found_clear = True
                         break
-        assert found_clear, "host_repo GitHub should clear _gh_webhook_secret on remove failure"
+        assert found_clear, "host_repo GitHub should clear _webhook_secret on remove failure (unified var)"
 
     def test_create_new_repo_remove_fail_writes_empty_webhook_secret(self):
         """create_new_repo 路径 B 删旧 webhook 失败时 webhook_secret 清空。"""
@@ -539,11 +493,6 @@ class TestExistingWebhookRemoveFailSecret:
             assert result == "OLD_BOT_TOKEN", \
                 f"empty webhook_secret should fallback to old token, got '{result}'"
 
-
-# ===========================================================================
-# 审查报告 P2 盲区：401 匹配误报面
-# ===========================================================================
-
 class Test401MatchPrecision:
     """401 关键词匹配精度——去掉 "unauthorized" 单独关键词后的误报面收窄。"""
 
@@ -582,11 +531,6 @@ class Test401MatchPrecision:
             ["401 unauthorized", "token invalid", "token expired", "authentication failed", "invalid username or token"]
         )
         assert _is_401 is False
-
-
-# ===========================================================================
-# P2-1: R10 issue 回帖去重（T2-22）
-# ===========================================================================
 
 class TestR10IssueCommentDedup:
     """T2-22: R10 回帖前去重——同一 issue 已含"Token 已过期"则跳过。"""
@@ -639,9 +583,9 @@ class TestR10IssueCommentDedup:
         # GitHub 分支用 _github_req
         assert "_github_req" in source, "_fetch_issue_comments should use _github_req for GitHub"
         assert "api.github.com" in source, "GitHub branch should hit api.github.com"
-        # GitCode 分支用 urllib.request
-        assert "urllib.request" in source, "_fetch_issue_comments should use urllib for GitCode"
-        assert "gitcode.com" in source, "GitCode branch should hit gitcode.com"
+        # D90-N5 修正：GitHub 外平台走 VcsApiClient 统一客户端（S75 卡驱动，
+        # gitee 仓 fail_task 去重读评论失败修复）
+        assert "VcsApiClient" in source, "_fetch_issue_comments should use VcsApiClient for non-GitHub"
 
     def test_t4_05_fetch_issue_comments_failure_returns_empty_list(self):
         """T4-05: _fetch_issue_comments 查询失败返回空列表（不抛异常）。"""
@@ -654,24 +598,27 @@ class TestR10IssueCommentDedup:
             result = _fetch_issue_comments("github:owner/repo", "owner/repo", "42", "token")
             assert result == [], f"should return [] on GitHub failure, got {result}"
 
-
-# ===========================================================================
-# 第五轮全链路模拟：P0-1 claim token 注入 + P1-1 R10 GitHub 分流（T5-01~05）
-# ===========================================================================
-
 class TestClaimTokenInjection:
     """T5-01~03: claim 响应中服务端注入 token（路径 D 远程 worker 场景）。"""
 
     def test_t5_01_claim_injects_token_for_path_d(self):
-        """T5-01: claim 返回的 task dict 在路径 D（repo_gitcode_token 为空）时被注入新鲜 token。"""
+        """T5-01: claim 返回的 task dict 被注入新鲜 token。
+
+        D101 方案二语义更新（原断言"仅空行才注入"已随快照退役失效）：
+        claim 为唯一现取注入点——无条件现取 _get_task_token 覆盖 task dict
+        （旧行值被忽略，现取天然跳过过期值）；失败打
+        claim_token_resolve_failed 结构化日志不阻断派发。
+        """
         import inspect
         from src.domains.runtime.engine.service import claim
         source = inspect.getsource(claim)
-        # 验证 claim 中有 token 注入逻辑
+        # 验证 claim 中有 token 注入逻辑（无条件现取——不再有行值前置判断）
         assert "_get_task_token" in source, "claim should call _get_task_token to inject token"
         assert 'repo_gitcode_token' in source, "claim should inject into repo_gitcode_token field"
-        assert 'not (task.get("repo_gitcode_token")' in source or 'not task.get("repo_gitcode_token")' in source, \
-            "claim should check if repo_gitcode_token is empty before injecting"
+        assert 'if task:' in source, "claim 应无条件注入（D101 现取制：不再判行值空才注入）"
+        # 防复活守卫：旧行值条件判断不得回归
+        assert 'not (task.get("repo_gitcode_token")' not in source, \
+            "旧行值空判断回归（D101 已退役行值快照语义）"
 
     def test_t5_02_claim_injection_does_not_persist_to_db(self):
         """T5-02: claim 注入 token 不落库（注入只发生在内存 task dict，不 UPDATE agent_tasks）。"""
@@ -699,7 +646,6 @@ class TestClaimTokenInjection:
             m_gc.assert_called_once_with("gitcode:owner/repo")
             m_gh.assert_called_once_with(repo_key="github:owner/repo")
 
-
 class TestR10CommentTokenGithubDispatch:
     """T5-04, T5-05: R10/R16 _comment_token 按 provider 分流。
 
@@ -719,8 +665,8 @@ class TestR10CommentTokenGithubDispatch:
         # R18.6.9: 验证通过 handler.get_comment_token() 获取评论 token
         assert "get_comment_token" in source, "R18.6.9: fail_task should call handler.get_comment_token()"
         assert "create_action_handler" in source, "R18.6.9: fail_task should create action handler"
-        # fallback 逻辑仍保留 github: 前缀分流
-        assert "github:" in source, "R10 _comment_token fallback should check github: prefix"
+        # D90-N5 修正：_comment_token 分流已收口进 handler.get_comment_token
+        #（R18.6.9，内联 if-else 删除——'github:' 前缀字面量与解耦目标冲突，断言移除）
 
     def test_t5_05_r10_comment_token_gitcode_dispatch(self):
         """T5-05: fail_task R10/R16 _comment_token 对 GitCode 仓库路径 A 优先全局 bot token，路径 B 用用户 token。
@@ -732,5 +678,13 @@ class TestR10CommentTokenGithubDispatch:
         # R18.6.9: 验证通过 handler.get_comment_token() 获取评论 token
         assert "get_comment_token" in source, "R18.6.9: fail_task should call handler.get_comment_token()"
         assert "create_action_handler" in source, "R18.6.9: fail_task should create action handler"
-        # fallback 逻辑仍保留全局 bot token
-        assert "_get_global_bot_token" in source, "R10 fallback should use _get_global_bot_token for GitCode"
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_shared_db_env():
+    """混跑污染修复（D46/S68）：模块级私有库 env 全程不恢复——本文件跑完后，
+    后续任何按 env 重开连接的导入/reload 全部错开共享测试库（实测混跑
+    no such table / locked 族）。用例结束后恢复 conftest 的共享库路径。
+    本文件自身用例在 fixture 生效前已绑定各自连接，不受影响。"""
+    yield
+    os.environ["DEVOPS_DB_PATH"] = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "test_sessions.db")

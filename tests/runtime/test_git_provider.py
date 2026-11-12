@@ -62,12 +62,14 @@ def test_t7_assignees_converted():
 
 
 def test_t10_unknown_provider_raises():
+    # S107 后 gitlab/gitee 已入 _MODULES；未知 provider 用真实不存在的 "nosuch"。
     with pytest.raises(ValueError):
-        translate_inbound("gitlab", "issues", "create", {}, {})
+        translate_inbound("nosuch", "issues", "create", {}, {})
 
 
 def test_module_import_and_registry():
-    assert set(providers._MODULES) == {"gitcode", "github"}
+    # S107/G2：方言层补齐 gitee/gitlab，注册表四平台。
+    assert set(providers._MODULES) == {"gitcode", "github", "gitee", "gitlab"}
 
 
 def test_provider_required_fail_fast_no_gitcode_default():
@@ -81,11 +83,11 @@ def test_provider_required_fail_fast_no_gitcode_default():
     assert '(owner, repo, "", None)' not in src  # 旧漏传形式已消除
 
     with pytest.raises(ValueError):
-        g._vcs_url("o", "r", "", None, "gitlab")
+        g._vcs_url("o", "r", "", None, "nosuch")
     with pytest.raises(ValueError):
         g._vcs_url("o", "r", "", None, "")
     with pytest.raises(ValueError):
-        g._repo_token("o", "r", {}, "gitlab")
+        g._repo_token("o", "r", {}, "nosuch")
 
 
 def test_all_route_calls_pass_provider():

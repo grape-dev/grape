@@ -3,10 +3,15 @@
 覆盖：env 解析、cwd 路径映射、本机 CLI 发现、超时杀进程、worker 版本读取、
 重注册、主循环（claim 去重 / D9 串行冲突 / 并发上限 / 心跳失败自动重注册）。
 """
+
 import asyncio
+
 import io
+
 import json
+
 import sys
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +19,6 @@ import pytest
 from src.domains.runtime.engine import agent as ra
 
 _is_win = sys.platform == "win32"
-
 
 class TestCollectWorkerMetrics:
     """覆盖 _collect_worker_metrics 的 bandwidth_percent 指标。
@@ -75,7 +79,6 @@ class TestCollectWorkerMetrics:
         # 速率 = 125000*8/1e6 = 1.0 Mbps，阈值 1 Mbps → 100%
         assert metrics["bandwidth_percent"] == 100.0
 
-
 class TestEnvHelpers:
     def test_env_float(self, monkeypatch):
         monkeypatch.setenv("X", "2.5")
@@ -95,7 +98,6 @@ class TestEnvHelpers:
         monkeypatch.setenv("X", "notnum")
         assert ra._env_int("X", 9) == 9
 
-
 class TestRemapCwd:
     def test_no_mapping_default_home(self, monkeypatch):
         monkeypatch.delenv("RUNTIME_CWD_PREFIX_MAP", raising=False)
@@ -114,7 +116,6 @@ class TestRemapCwd:
         assert ra._remap_cwd("/opt/data/c") == "/data/c"
         assert ra._remap_cwd("/elsewhere/x") == "/elsewhere/x"
 
-
 class TestWorkerVersion:
     def test_reads_file(self):
         with patch("builtins.open", return_value=MagicMock(__enter__=MagicMock(return_value=MagicMock(
@@ -124,7 +125,6 @@ class TestWorkerVersion:
     def test_missing_file_returns_empty(self):
         with patch("builtins.open", side_effect=FileNotFoundError):
             assert ra._read_local_worker_version() == ""
-
 
 class TestDiscoverLocalRuntimes:
     def test_success(self):
@@ -149,7 +149,6 @@ class TestDiscoverLocalRuntimes:
                 {"name": "opencode", "cli_path": "", "installed": False}]):
             out = ra._discover_local_runtimes()
         assert out[0]["healthy"] is False
-
 
 @pytest.mark.skipif(_is_win, reason="POSIX-only: pgrep/readlink/killpg")
 class TestKillStaleEngine:
@@ -190,7 +189,6 @@ class TestRegisterNoEngines:
         assert ra._register_failed([1], []) is False
         assert ra._register_failed([1], [{"name": "opencode", "installed": True}]) is False
 
-
 class TestReregister:
     def _client(self, ids):
         c = AsyncMock()
@@ -198,6 +196,22 @@ class TestReregister:
         return c
 
     def test_success_recovers_orphans(self):
+        """显式开关 recover_orphans=True 时逐 rid 回收（兼容旧行为）。"""
+        c = MagicMock()
+        c.register = AsyncMock(return_value=([1, 2], "https://p/probe"))
+        c.recover_orphans = AsyncMock()
+        c.reset_session = AsyncMock()
+        with patch.object(ra, "_discover_local_runtimes",
+                          return_value=[{"name": "opencode", "installed": True, "cli_path": "/bin/oc"}]):
+            result = asyncio.run(ra._reregister(c, [], "dev", recover_orphans=True))
+        assert result is not None
+        ids, engine_by_rid, installed = result
+        assert ids == [1, 2]
+        assert installed and installed[0]["name"] == "opencode"
+        assert c.recover_orphans.await_count == 2
+
+    def test_defaults_to_no_recovery(self):
+        """Issue #1750 P1-B：未显式声明时重注册不回收孤儿。"""
         c = MagicMock()
         c.register = AsyncMock(return_value=([1, 2], "https://p/probe"))
         c.recover_orphans = AsyncMock()
@@ -206,10 +220,8 @@ class TestReregister:
                           return_value=[{"name": "opencode", "installed": True, "cli_path": "/bin/oc"}]):
             result = asyncio.run(ra._reregister(c, [], "dev"))
         assert result is not None
-        ids, engine_by_rid, installed = result
-        assert ids == [1, 2]
-        assert installed and installed[0]["name"] == "opencode"
-        assert c.recover_orphans.await_count == 2
+        assert result[0] == [1, 2]
+        assert c.recover_orphans.await_count == 0
 
     def test_empty_ids_no_engines_is_success(self):
         """C1：无引擎时重注册返回 ([], {}, []) 而非 None——空引擎为正常状态。"""
@@ -252,7 +264,6 @@ class TestReregister:
         sent = c.register.await_args.args[0]
         assert sent and sent[0]["name"] == "hermes"
 
-
 class TestStreamRuntimeAsync:
     async def _collect(self, agen):
         return [evt async for evt in agen]
@@ -270,7 +281,6 @@ class TestStreamRuntimeAsync:
         with patch("src.domains.runtime.engine.executor.stream_runtime", side_effect=_boom):
             events = asyncio.run(self._collect(ra._stream_runtime_async("prompt", "/w")))
         assert events == []
-
 
 class TestExecuteTaskTokenInjection:
     """chat 任务执行必须注入用户级 token（USER_GITCODE_TOKEN 来源）。
@@ -304,8 +314,9 @@ class TestExecuteTaskTokenInjection:
     async def _run(self, task):
         client = AsyncMock()
         fake, holder = self._fake_stream()
+        # S73 seam 迁移：chat token 按 repo_key 派生 provider
         with patch("src.domains.runtime.engine.agent._stream_runtime_async", new=fake), \
-             patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN_ABC") as m_ut, \
+             patch("src.api.deps.get_user_token_for_repo", return_value="USER_TOKEN_ABC") as m_ut, \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser", "id": 7}):
             await ra._execute_task(client, task, "hermes-worker-1")
         return holder["last_kwargs"], m_ut
@@ -322,7 +333,6 @@ class TestExecuteTaskTokenInjection:
         kwargs, m_ut = asyncio.run(self._run(t))
         assert kwargs["user_token"] == ""
         assert kwargs["bot_token"] == "BOT_REPO_TOKEN"
-
 
 class TestRunLoop:
     """用 _test_execute / _test_active 钩子驱动主循环，短暂运行后取消。"""
@@ -348,6 +358,7 @@ class TestRunLoop:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
         m_rr.assert_awaited()
+        assert m_rr.await_args.kwargs.get("recover_orphans") is False
 
     def test_claims_and_executes(self):
         client = AsyncMock()
@@ -413,3 +424,9 @@ class TestRunLoop:
             client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4,
             _test_execute=exec_mock)))
         exec_mock.assert_not_awaited()
+
+"""RuntimeAgent 边端单元测试（src/domains/runtime/engine/agent.py）。
+
+覆盖：env 解析、cwd 路径映射、本机 CLI 发现、超时杀进程、worker 版本读取、
+重注册、主循环（claim 去重 / D9 串行冲突 / 并发上限 / 心跳失败自动重注册）。
+"""

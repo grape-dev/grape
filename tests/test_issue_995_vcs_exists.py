@@ -8,10 +8,10 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 from src.api.jwt_utils import create_access_token
-from src.auth.grape_account_db import get_token_version
-from src.kernel.session_manager import db, db_lock
+from src.domains.mgmt.auth.grape_account_db import get_token_version
+from src.session_manager import db, db_lock
 import src.api.issue_vcs_index as vcs_index
 
 client = TestClient(app)
@@ -190,7 +190,7 @@ class TestIssue995VcsExists:
 
     def test_fetch_gitcode_short_page_not_treated_as_end(self):
         """非空短页不代表末页：分页应继续到空页，避免索引截断导致批量误删。"""
-        import src.user.repo_manager as repo_manager
+        import src.domains.mgmt.user.repo_manager as repo_manager
         pages = {
             1: [{"number": "1"}, {"number": "2"}],
             2: [{"number": "3"}],
@@ -213,7 +213,7 @@ class TestIssue995VcsExists:
         assert len(calls) == 3
 
     def test_fetch_github_short_page_not_treated_as_end(self):
-        import src.user.repo_manager as repo_manager
+        import src.domains.mgmt.user.repo_manager as repo_manager
         pages = {
             1: [{"number": 1}, {"number": 2}],
             2: [{"number": 3}, {"number": 9, "pull_request": {"url": "x"}}],

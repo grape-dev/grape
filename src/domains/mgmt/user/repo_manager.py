@@ -1,13 +1,15 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
+
 import json, urllib.request, urllib.error, urllib.parse, os, shutil, tempfile
+
 import requests as _requests
+
 from src.kernel.config import log
 
 # GitCode API 端点迁移：api.gitcode.com 上 /user/repos 和 /repos/... 已全部 404，
 # 仓库相关 API 改走 gitcode.com（证书正常，不需要 verify=False）。
 # /api/v5/user 仍在 api.gitcode.com 上可用（auth.py 单独使用）。
 API_BASE = "https://gitcode.com/api/v5"
-
 
 class UpstreamAPIError(RuntimeError):
     """上游 Git 平台 API 返回 >=400（Issue #549）：携带真实 status_code / message。
@@ -28,7 +30,6 @@ class UpstreamAPIError(RuntimeError):
         super().__init__(
             f"{provider} API {method} {url} failed ({self.status_code}): {self.message}"
         )
-
 
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -55,7 +56,6 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
         return {}
     except _requests.exceptions.RequestException as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e}")
-
 
 def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str) -> bool:
     """调 /collaborators/{username}/permission 接口精确判断管理/维护权限。
@@ -89,7 +89,6 @@ def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: s
     perm = data.get("permissions") or {}
     return bool(perm.get("admin")) if isinstance(perm, dict) else False
 
-
 # GitCode 成员权限枚举（官方 API：PUT /collaborators/{username} body 用单数字段 permission）
 # 参与者→pull，开发者→push，仓库维护者→admin，自定义角色→customized
 _PERMISSION_TO_GITCODE = {
@@ -100,7 +99,6 @@ _PERMISSION_TO_GITCODE = {
     "member": "pull",
     "reporter": "pull",
 }
-
 
 def add_collaborator(api_token: str, owner: str, repo: str, username: str,
                      permission: str = "maintainer") -> tuple[bool, str]:
@@ -141,7 +139,6 @@ def add_collaborator(api_token: str, owner: str, repo: str, username: str,
         log.warning(f"add_collaborator failed: {e}")
         return False, err
 
-
 def remove_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
     """将用户从仓库协作者移除。返回是否成功（用户不在时视为成功）。
 
@@ -158,7 +155,6 @@ def remove_collaborator(api_token: str, owner: str, repo: str, username: str) ->
         if "404" in str(e):
             return True
         return False
-
 
 def _req_query(method: str, path: str, token: str, params: dict | None = None,
                body: dict | None = None) -> dict:
@@ -184,7 +180,6 @@ def _req_query(method: str, path: str, token: str, params: dict | None = None,
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
 
-
 def list_user_invites(token: str, page: int = 1, per_page: int = 100) -> list[dict]:
     """查询当前 token 用户的项目邀请列表（GET /api/v5/user/invite）。
 
@@ -195,7 +190,6 @@ def list_user_invites(token: str, page: int = 1, per_page: int = 100) -> list[di
                       {"page": page, "per_page": min(per_page, 100)})
     content = data.get("content", []) if isinstance(data, dict) else []
     return content if isinstance(content, list) else []
-
 
 def accept_project_invite(token: str, invitation_token: str) -> bool:
     """接受项目邀请（POST /api/v5/user/invite/accept）。"""
@@ -209,7 +203,6 @@ def accept_project_invite(token: str, invitation_token: str) -> bool:
         log.warning(f"accept_project_invite failed: {e}")
         return False
 
-
 def reject_project_invite(token: str, invitation_token: str) -> bool:
     """拒绝项目邀请（POST /api/v5/user/invite/reject）。"""
     if not token or not invitation_token:
@@ -221,7 +214,6 @@ def reject_project_invite(token: str, invitation_token: str) -> bool:
     except RuntimeError as e:
         log.warning(f"reject_project_invite failed: {e}")
         return False
-
 
 def accept_invite_for_repo(token: str, owner: str, repo: str) -> bool:
     """查询邀请列表，找到匹配 owner/repo 的邀请并接受。返回是否成功。
@@ -245,7 +237,6 @@ def accept_invite_for_repo(token: str, owner: str, repo: str) -> bool:
     log.info(f"accept_invite_for_repo: no matching invite for {target} (total={len(invites)})")
     return False
 
-
 def _extract_http_code(err: Exception) -> int:
     """从异常提取上游 HTTP 状态码：优先 UpstreamAPIError.status_code，正则兜底。"""
     code = getattr(err, "status_code", 0)
@@ -255,10 +246,8 @@ def _extract_http_code(err: Exception) -> int:
     m = re.search(r"\((\d{3})\)", str(err))
     return int(m.group(1)) if m else 0
 
-
 # 可重试的限流/服务端瞬时错误
 _RETRYABLE_CODES = {429, 500, 502, 503, 504}
-
 
 def get_member_permission(token: str, owner: str, repo: str, username: str,
                           _retries: int = 3) -> dict | None:
@@ -288,10 +277,8 @@ def get_member_permission(token: str, owner: str, repo: str, username: str,
     # 重试耗尽：抛限流标记，供调用方区分「未判定」vs「确认无权限」
     raise _RateLimitedError(f"GitCode API rate limited: {last}")
 
-
 class _RateLimitedError(RuntimeError):
     """GitCode API 限流标记（重试耗尽后抛出），调用方可捕获以提示"稍后重试"。"""
-
 
 def fetch_repos_with_role(api_token: str) -> list[dict]:
     """获取用户的项目成员仓库，标注 is_admin。
@@ -351,7 +338,6 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
     log.info(f"fetch_repos total: {len(repos)} repos (current_user={current_user})")
     return repos
 
-
 def get_user_gitcode_login(api_token: str) -> str:
     """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。"""
     if not api_token:
@@ -362,7 +348,6 @@ def get_user_gitcode_login(api_token: str) -> str:
     except RuntimeError as e:
         log.warning(f"get_user_gitcode_login failed: {e}")
         return ""
-
 
 def fetch_user_orgs(api_token: str) -> list[dict]:
     """获取当前 token 用户拥有的 GitCode 组织列表。
@@ -414,7 +399,6 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
             break
     return orgs
 
-
 def create_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
     """在 token 用户个人名下创建一个空仓库（POST /api/v5/user/repos）。
 
@@ -441,7 +425,6 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
 
-
 def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
     import subprocess
@@ -461,7 +444,6 @@ def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
         err = (p.stderr or p.stdout or "").strip()[:500]
         raise RuntimeError(f"git {' '.join(args[:2])} 失败: {err}")
     return (p.stdout or "").strip()
-
 
 def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
     """下载 tarball 并解压到 workdir，然后 git init（统一用于 GitHub/GitCode）。"""
@@ -492,7 +474,6 @@ def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
                 pass
     _run_git(["init"], workdir)
 
-
 def _download_gitcode_tarball(source_repo, workdir, tmp, token):
     """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。"""
     if not token:
@@ -502,14 +483,14 @@ def _download_gitcode_tarball(source_repo, workdir, tmp, token):
     shutil.rmtree(os.path.join(workdir, ".git"), ignore_errors=True)
     _run_git(["init"], workdir)
 
-
 def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
-                          user_token: str, bot_token: str = "", provider: str = "gitcode") -> bool:
+                          user_token: str, bot_token: str = "", provider: str = "gitcode",
+                          user_id: str = "") -> bool:
     """将模板内容推送到新仓库。
 
     template: 配置中的模板对象（含 source / source_repo / id）
     target_repo: 目标仓库名（不含 owner）
-    provider: "gitcode" 或 "github"，决定 push 目标 URL
+    provider：目标平台（push 目标 URL 从平台卡派生）
     来源:
       - source="local" → 复制 examples/{template_id}/（或旧路径 configs/project-templates/{id} 兜底）到临时目录
       - source="git"   → git clone source_repo（用 bot_token 拉取）
@@ -526,6 +507,16 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         raise RuntimeError("模板配置缺失")
 
     source = template.get("source", "git")
+    # D105-17：目标平台卡 fail-closed 前置——未知/未配卡平台在拉取模板源之前
+    # 即显式报错（不再事后才在 push 阶段暴露）
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    _tgt_card = get_platform_card(provider)
+    if _tgt_card is None:
+        raise ValueError(
+            f"未知 VCS 平台 '{provider}'：未配置平台卡，无法派生模板 push 目标。"
+            f"请在平台卡（src/vcs/platform_card）中配置该平台（含 host）后重试"
+        )
+    _tgt_host = _tgt_card.host
     tmp = tempfile.mkdtemp(prefix="ptmpl_")
     try:
         if source == "local":
@@ -543,40 +534,61 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         else:
             source_repo = template.get("source_repo", "")
             clone_url = template.get("clone_url", "")
-            source_platform = template.get("source_platform", "gitcode")
+            # D105-17：source_platform 缺省不再持有在代码里——缺失字段按 gitcode
+            # 处理一次并 log.warning 留痕（存量模板数据迁移由回填完成）
+            if "source_platform" in template:
+                source_platform = template.get("source_platform") or "gitcode"
+            else:
+                source_platform = "gitcode"
+                log.warning(
+                    f"template '{template.get('id', '')}' missing source_platform; "
+                    f"treating as gitcode once (backfill pending)")
+            from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+            if source_platform not in set(list_vcs_platforms()):
+                raise ValueError(
+                    f"模板源平台 '{source_platform}' 未支持（允许 gitcode/github）；"
+                    "请在平台卡配置该平台或改用受支持的模板源")
             if not source_repo and not clone_url:
                 raise RuntimeError("git 模板缺少 source_repo / clone_url 配置")
             workdir = os.path.join(tmp, "repo")
-            if clone_url and source_platform == "github":
-                # GitHub 优选模板：下载 tarball（比 clone 快 10 倍），解压后 init 新仓库
-                gh_headers = {}
-                gh_token = os.environ.get("GITHUB_TOKEN", "")
-                if gh_token:
-                    gh_headers["Authorization"] = f"token {gh_token}"
-                _download_and_extract_tarball(
-                    f"https://api.github.com/repos/{source_repo}/tarball",
-                    workdir, tmp, headers=gh_headers,
-                )
-            elif clone_url and source_platform == "gitcode" and not source_repo:
-                # GitCode 优选模板（有 clone_url 但无 source_repo）：tarball 下载
-                _download_gitcode_tarball(source_repo, workdir, tmp, bot_token or user_token)
-            else:
-                # GitCode 模板：用 source_repo + token，tarball 下载
-                _download_gitcode_tarball(source_repo, workdir, tmp, bot_token or user_token)
+            # S90/D66：源平台分派表（github 源 gh tarball / 其余 gitcode shallow-clone；
+            # github 源误配置无 clone_url 也正确走 gh 下载器——旧逻辑会误用 gitcode 下载器）
+            _TEMPLATE_SOURCE_DOWNLOADERS.get(
+                source_platform, _download_gitcode_tarball)(
+                source_repo or clone_url, workdir, tmp, bot_token or user_token)
 
-        if provider == "github":
-            target_url = f"https://{user_token}@github.com/{owner_login}/{target_repo}.git"
-            # GitHub App token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
+        # D105-17：目标 host 已从平台卡派生（见函数头部 fail-closed 前置校验）
+        # D105-18：workflows 目录处理按【凭据能力】三态判定（非平台名）——
+        # True=声明有权限（不删）；False=声明受限（删）；None=未声明 → 回退
+        # 平台名旧逻辑（存量零回归：github 删 / gitcode 不删，基线冻结）。
+        _wf = (credential_workflows_write(user_id, provider)
+               if user_id else None)
+        _wf_denied = (provider == "github") if _wf is None else (not _wf)
+        if _wf_denied:
+            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被
+            # 拒绝——该怪癖平台卡表达不了（无对应能力位），保留在 github 分支。
+            # push URL 沿用存量 "***" 置换形态（不携带真实 token，鉴权走 git
+            # credential helper），host 已从 github 卡派生。
+            target_url = f"https://***@{_tgt_host}/{owner_login}/{target_repo}.git"
             _wf_dir = os.path.join(workdir, ".github", "workflows")
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
                 log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
         else:
-            target_url = f"https://oauth2:{user_token}@gitcode.com/{owner_login}/{target_repo}.git"
+            # gitcode 家族存量 clone 鉴权形态（oauth2 前缀）保持逐字节不变；
+            # host 已卡派生（修复真二分缺陷：gitee 等目标此前被硬编码推到
+            # gitcode.com）
+            target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
-        _run_git(["config", "user.email", "devops-bot@gitcode.com"], workdir)
+        # D17 扫雷四轮：提交身份 email 的 host 从目标 URL 派生（跨平台正确，
+        # github 仓库不再盖 gitcode 邮戳）
+        _bot_host = _host_of_url(target_url)
+        if not _bot_host:  # D105-17 fail-closed：host 解析失败不再伪装 gitcode
+            # 不回显完整 URL（含 clone 凭据）
+            raise RuntimeError("无法从模板 push 目标 URL 解析 host（fail-closed）")
+        _run_git(["config", "user.email", f"devops-bot@{_bot_host}"], workdir)
         _run_git(["config", "user.name", "DevOps Bot"], workdir)
         _run_git(["add", "-A"], workdir)
         if _git_has_changes(workdir):
@@ -588,7 +600,6 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _run_git_has_origin(workdir: str) -> bool:
     try:
         out = _run_git(["remote"], workdir)
@@ -596,14 +607,12 @@ def _run_git_has_origin(workdir: str) -> bool:
     except RuntimeError:
         return False
 
-
 def _git_has_changes(workdir: str) -> bool:
     try:
         out = _run_git(["status", "--porcelain"], workdir)
         return bool(out.strip())
     except RuntimeError:
         return True
-
 
 def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
                           _retries: int = 3) -> int | None:
@@ -635,7 +644,6 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
                 continue
             return None
     return None
-
 
 def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_password: str = "",
                   _retries: int = 3) -> int:
@@ -681,7 +689,6 @@ def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webho
             raise
     raise RuntimeError(f"setup_webhook failed after retries: {last}")
 
-
 def _get_managed_webhook(repo_key: str) -> int | None:
     """从 managed_repos 表获取 webhook_id（repo_key 带平台前缀）"""
     import sqlite3
@@ -699,15 +706,11 @@ def _get_managed_webhook(repo_key: str) -> int | None:
     except:
         return None
 
-
 def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
     """删除指定仓库上的 webhook。"""
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _req("DELETE", url, api_token)
     return True
-
-
-# ====== Provider 统一配置（Issue #372: 消除散落的 if github else gitcode）======
 
 def get_hosting_provider_config(provider: str) -> dict:
     """返回指定 provider 的托管配置（bot token / bot username / webhook 函数集 / webhook_url 后缀）。
@@ -722,45 +725,57 @@ def get_hosting_provider_config(provider: str) -> dict:
       - webhook_url_suffix: webhook 路由后缀（"/webhook/github" 或 "/webhook/gitcode"）
       - db_token_field: managed_repos 中存 webhook token 的列名
       - db_bot_token_field: managed_repos 中存 bot token 的列名
+    D105-17：github 专属分支保留（github 方言 webhook 函数指针表，见
+    find_existing_github_webhook/setup_github_webhook/remove_github_webhook）；
+    其余平台全部从平台卡派生（webhook_url_suffix 走 _webhook_path_from_card，
+    db 字段名走卡 token_storage_field/webhook_token_field——内置卡缺省派生式
+    与存量 gitcode 列名逐字节一致）。未知/未配卡平台 fail-closed ValueError
+    （不再按 gitcode 存量配置静默放行）。
     """
+    from src.domains.mgmt.user.db import get_global_bot_token_for
     if provider == "github":
-        from src.domains.mgmt.user.db import get_global_github_bot_token, get_global_github_bot_username
+        # github 专属 webhook 函数指针分派（基线审阅冻结：函数为实现绑定，
+        # dialect 无法区分——gitcode 卡 dialect 同为 github；端口收口归 S62 后续）
         return {
-            "bot_token": get_global_github_bot_token(),
-            "bot_username": get_global_github_bot_username(),
+            "bot_token": get_global_bot_token_for(provider),
+            "bot_username": resolve_bot_username(provider),
             "find_webhook": find_existing_github_webhook,
             "setup_webhook": setup_github_webhook,
             "remove_webhook": remove_github_webhook,
-            "webhook_url_suffix": "/webhook/github",
+            # D12/W3：回调后缀从平台卡派生（卡缺省值与历史硬编码一致）
+            "webhook_url_suffix": _webhook_path_from_card(provider, "/webhook/github"),
             "db_token_field": "github_webhook_token",
             "db_bot_token_field": "bot_github_token",
         }
-    else:
-        from src.domains.mgmt.user.db import get_global_gitcode_bot_token, get_global_bot_usernames
-        _us = get_global_bot_usernames()
-        return {
-            "bot_token": get_global_gitcode_bot_token(),
-            "bot_username": _us[0] if _us else "",
-            "find_webhook": find_existing_webhook,
-            "setup_webhook": setup_webhook,
-            "remove_webhook": remove_webhook,
-            "webhook_url_suffix": "/webhook/gitcode",
-            "db_token_field": "gitcode_webhook_token",
-            "db_bot_token_field": "bot_gitcode_token",
-        }
+    # 非 github：卡驱动，无卡 fail-closed（D105-17）
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    _pc = get_platform_card(provider)
+    if _pc is None:
+        raise ValueError(
+            f"未知 VCS 平台 '{provider}'：未配置平台卡，无法派生托管配置。"
+            f"请在平台卡（src/vcs/platform_card）中配置该平台后重试"
+        )
+    return {
+        "bot_token": get_global_bot_token_for(provider),
+        "bot_username": resolve_bot_username(provider),
+        "find_webhook": find_existing_webhook,
+        "setup_webhook": setup_webhook,
+        "remove_webhook": remove_webhook,
+        # 卡派生回调后缀（卡缺失已被上方 fail-closed 拦截，fallback 恒不触发）
+        "webhook_url_suffix": _webhook_path_from_card(provider, f"/webhook/{provider}"),
+        # D105-17：db 字段名从卡派生（内置卡缺省=存量 gitcode 列名）
+        "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
+        "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
+    }
 
-
-# ====== GitHub 仓库管理 ======
 
 _GITHUB_API_BASE = "https://api.github.com"
-
 
 def remove_github_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
     """删除 GitHub 仓库上的 webhook。"""
     url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _github_req("DELETE", url, api_token)
     return True
-
 
 def remove_github_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
     """移除 GitHub 仓库协作者（DELETE /repos/{owner}/{repo}/collaborators/{username}）。"""
@@ -773,7 +788,6 @@ def remove_github_collaborator(api_token: str, owner: str, repo: str, username: 
     except RuntimeError as e:
         log.warning(f"remove_github_collaborator failed: {e}")
         return False
-
 
 def _github_check_installation(api_token: str) -> str:
     """检测 GitHub App installation 状态，返回用户可操作的错误提示。"""
@@ -794,7 +808,6 @@ def _github_check_installation(api_token: str) -> str:
         "请在 GitHub App 设置页 Repository permissions → Administration 设为 Read and write，"
         "然后撤销授权（https://github.com/settings/applications）并重新登录。"
     )
-
 
 def _github_req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {
@@ -817,7 +830,6 @@ def _github_req(method: str, url: str, token: str = "", body: dict | None = None
         raise UpstreamAPIError(method, url, e.code, body, provider="GitHub")
     except urllib.error.URLError as e:
         raise RuntimeError(f"Cannot reach GitHub API: {e.reason}")
-
 
 def fetch_github_repos_with_role(api_token: str) -> list[dict]:
     """获取用户的 GitHub 仓库列表。
@@ -851,7 +863,6 @@ def fetch_github_repos_with_role(api_token: str) -> list[dict]:
         page += 1
     return repos
 
-
 def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
     """检查 GitHub 仓库是否已有指向 webhook_url 的 webhook。
 
@@ -873,7 +884,6 @@ def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_
     except RuntimeError:
         pass
     return None
-
 
 def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_secret: str = "") -> int:
     """在 GitHub 仓库上创建 webhook，返回 webhook_id。"""
@@ -897,7 +907,6 @@ def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str
         raise RuntimeError(f"Created GitHub webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
     return hook_id
 
-
 def get_user_github_login(api_token: str) -> str:
     """获取当前 token 的 GitHub 登录用户名。"""
     if not api_token:
@@ -908,7 +917,6 @@ def get_user_github_login(api_token: str) -> str:
     except RuntimeError as e:
         log.warning(f"get_user_github_login failed: {e}")
         return ""
-
 
 def get_github_repo_permissions(api_token: str, owner: str, repo: str) -> dict | None:
     """获取 token 持有者对指定仓库的权限（GET /repos/{owner}/{repo}）。
@@ -926,7 +934,6 @@ def get_github_repo_permissions(api_token: str, owner: str, repo: str) -> dict |
     except RuntimeError as e:
         log.warning(f"get_github_repo_permissions failed: {e}")
         return None
-
 
 def add_github_collaborator(api_token: str, owner: str, repo: str, username: str, permission: str = "push") -> bool:
     """将用户添加为 GitHub 仓库协作者（PUT /repos/{owner}/{repo}/collaborators/{username}）。
@@ -948,7 +955,6 @@ def add_github_collaborator(api_token: str, owner: str, repo: str, username: str
             return True
         log.warning(f"add_github_collaborator failed: {e}")
         return False
-
 
 def accept_github_invite(api_token: str, owner: str, repo: str) -> bool:
     """接受 GitHub 仓库邀请（PATCH /user/repository_invitations）。
@@ -977,7 +983,6 @@ def accept_github_invite(api_token: str, owner: str, repo: str) -> bool:
         log.warning(f"accept_github_invite failed: {e}")
         return False
 
-
 def get_github_collaborator_permission(api_token: str, owner: str, repo: str, username: str) -> str:
     """查看 GitHub 仓库成员权限（GET /repos/{owner}/{repo}/collaborators/{username}/permission）。
     
@@ -995,7 +1000,6 @@ def get_github_collaborator_permission(api_token: str, owner: str, repo: str, us
     except RuntimeError as e:
         log.warning(f"get_github_collaborator_permission failed: {e}")
         return ""
-
 
 def check_github_is_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
     """检查用户是否已是仓库 collaborator（GET /repos/{owner}/{repo}/collaborators/{username}）。
@@ -1017,7 +1021,6 @@ def check_github_is_collaborator(api_token: str, owner: str, repo: str, username
             return True
         log.warning(f"check_github_is_collaborator failed: {e}")
         return False
-
 
 def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
     """在 token 用户个人名下创建一个空仓库。"""
@@ -1041,3 +1044,97 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
+
+def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
+    """D105-18 委托：见 token_resolver.credential_workflows_write。"""
+    from src.kernel.token_resolver import credential_workflows_write as _cww
+    return _cww(user_id, provider)
+
+def _host_of_url(url: str) -> str:
+    """从 git remote URL 提 host（含 user:token@ 形态）。
+
+    D105-17 fail-closed：解析失败/空 host 返回空串，由调用方显式报错——
+    不再回退 "gitcode.com"（存量兜底会把非 gitcode 平台的失败静默伪装成
+    gitcode 语义）。
+    """
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+def _webhook_path_from_card(provider: str, fallback: str) -> str:
+    """D12/W3：webhook 回调后缀优先取平台卡 webhook_path，无卡用历史默认。"""
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None:
+            return card.webhook_path
+    except Exception:
+        pass
+    return fallback
+
+def resolve_bot_username(provider: str) -> str:
+    """D15/S19：bot 身份统一来源链（抽象解，无平台分支）。
+
+    S88/D64：来源链数据驱动（GLOBAL_BOT_USERNAME_SOURCES）——
+    github=独立单值源 / gitcode=pool / 其余已知平台=仅卡。
+    D105-17 fail-closed：未知/未配卡平台不再兜底 gitcode pool，显式
+    ValueError（消息含平台名 + 配卡指引）。已知平台来源链与卡均空时
+    返回 ""（= 该平台无 bot 协作能力，认领流按无 bot 降级，存量语义）。
+    """
+    from src.domains.mgmt.user.db import GLOBAL_BOT_USERNAME_SOURCES
+    _src = GLOBAL_BOT_USERNAME_SOURCES.get(provider)
+    if _src is None and provider not in _KNOWN_VCS_PROVIDERS():
+        raise ValueError(
+            f"未知 VCS 平台 '{provider}'：无 bot 身份来源且未配置平台卡。"
+            f"请在平台卡（src/vcs/platform_card）中配置该平台（含 bot_username）后重试"
+        )
+    if _src is not None:
+        # S19 修绿：来源链值过滤空串——未配置的单值源（如 gitee 专属
+        # global_bot_gitee_username）不遮蔽卡 bot_identity，回落卡（S88
+        # 「未配置时 gitee 仅走卡」口径与 test_mine7 行为锁一致）。
+        _us = [u for u in _src() if u]
+        if _us:
+            return _us[0]
+    return _card_bot_username(provider)
+
+def _KNOWN_VCS_PROVIDERS():
+    """已知 provider 集合（存量三平台 + 平台卡）。"""
+    _known = {"gitcode", "github", "gitlab"}
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        _known.update(list_vcs_platforms())
+    except Exception:
+        pass
+    return _known
+
+def _card_bot_username(provider: str) -> str:
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None:
+            return card.bot_username
+    except Exception:
+        pass
+    return ""
+
+"""GitCode 存量实现模块——平台通用能力请走 src/token_resolver 适配器端口。
+
+D105-17 治理定位：本模块只承载 GitCode 存量 API 实现（v5 家族请求、邀请制
+协作、webhook 增删查）与 GitHub 专属方言函数（github webhook 函数指针表）。
+跨平台通用能力（建仓/列仓/权限/webhook 端口）一律走 src/token_resolver 的
+VCSProvider 适配器端口（create_provider 工厂分派）。未知/未配卡平台
+fail-closed：不再静默回退 gitcode（_host_of_url / resolve_bot_username /
+get_hosting_provider_config / push_template 目标卡均为显式报错或卡派生）。
+"""
+
+# S90/D66：模板源平台 tarball 下载器分派表（源平台=模板来源，非目标仓库平台；
+# 未知源回落 gitcode shallow-clone 兜底=存量语义）
+_TEMPLATE_SOURCE_DOWNLOADERS = {
+    "github": lambda source_repo, workdir, tmp, token: _download_and_extract_tarball(
+        f"https://api.github.com/repos/{source_repo}/tarball", workdir, tmp,
+        headers=({"Authorization": f"token {os.environ.get('GITHUB_TOKEN', '')}"}
+                 if os.environ.get("GITHUB_TOKEN") else {})),
+    "gitcode": _download_gitcode_tarball,
+}

@@ -284,7 +284,7 @@
   };
   var ERROR_TYPE_CLS = { auth: 'tag-d', network: 'tag-w', config: 'tag-w' };
 
-  function esc(s) { var d = document.createElement('div'); d.textContent = s || ''; var h = d.innerHTML; return h.replace(/"/g, '&quot;'); }
+  function esc(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml
 
   function renderTokenHealth(d) {
     _lastHealthData = d;
@@ -411,13 +411,13 @@
       tr.onclick = function(e) { if (!e.target.closest('.row-actions')) editUser(u.id); };
       var menuItems = '';
       if (u.status !== 2) {
-        menuItems += '<button onclick="editUser(' + u.id + ')">' + I18N.t('admin.users.edit') + '</button>';
-        menuItems += '<button onclick="resetUserPassword(' + u.id + ')">' + I18N.t('admin.users.reset_password') + '</button>';
+        menuItems += '<button onclick="editUser(\'' + u.id + '\')">' + I18N.t('admin.users.edit') + '</button>';
+        menuItems += '<button onclick="resetUserPassword(\'' + u.id + '\')">' + I18N.t('admin.users.reset_password') + '</button>';
       }
       if (u.status === 1) {
-        menuItems += '<button class="danger" onclick="disableUser(' + u.id + ')">' + I18N.t('admin.users.disable') + '</button>';
+        menuItems += '<button class="danger" onclick="disableUser(\'' + u.id + '\')">' + I18N.t('admin.users.disable') + '</button>';
       } else if (u.status === 0 || u.status === 3) {
-        menuItems += '<button onclick="restoreUser(' + u.id + ')">' + I18N.t('admin.users.restore') + '</button>';
+        menuItems += '<button onclick="restoreUser(\'' + u.id + '\')">' + I18N.t('admin.users.restore') + '</button>';
       }
       var nicknameSub = u.nickname ? '<div class="user-sub">' + esc(u.nickname) + '</div>' : '';
       var dotCls = statusDotCls[u.status] || 's-del';
@@ -426,7 +426,7 @@
         '<td style="padding:10px 12px;color:var(--t2,#5b667b)">' + esc(u.email || '—') + '</td>' +
         '<td style="padding:10px 12px"><span class="status-dot ' + dotCls + '"></span>' + (statusMap[u.status]||u.status) + '</td>' +
         '<td style="padding:10px 12px;color:var(--t2,#5b667b)">' + (u.last_login_at || '—') + '</td>' +
-        '<td style="padding:10px 12px" class="row-actions"><button class="row-actions-btn" onclick="event.stopPropagation();toggleRowMenu(' + u.id + ')">⋯</button>' +
+        '<td style="padding:10px 12px" class="row-actions"><button class="row-actions-btn" onclick="event.stopPropagation();toggleRowMenu(\'' + u.id + '\')">⋯</button>' +
         '<div class="row-menu" data-uid="' + u.id + '">' + menuItems + '</div></td>';
       tbody.appendChild(tr);
     });
@@ -608,13 +608,13 @@
         // Build actions menu
         var menuItems = '';
         if (u.status !== 2) {
-          menuItems += '<button onclick="editUser(' + u.id + ')">' + I18N.t('admin.users.edit') + '</button>';
-          menuItems += '<button onclick="resetUserPassword(' + u.id + ')">' + I18N.t('admin.users.reset_password') + '</button>';
+          menuItems += '<button onclick="editUser(\'' + u.id + '\')">' + I18N.t('admin.users.edit') + '</button>';
+          menuItems += '<button onclick="resetUserPassword(\'' + u.id + '\')">' + I18N.t('admin.users.reset_password') + '</button>';
         }
         if (u.status === 1) {
-          menuItems += '<button class="danger" onclick="disableUser(' + u.id + ')">' + I18N.t('admin.users.disable') + '</button>';
+          menuItems += '<button class="danger" onclick="disableUser(\'' + u.id + '\')">' + I18N.t('admin.users.disable') + '</button>';
         } else if (u.status === 0 || u.status === 3) {
-          menuItems += '<button onclick="restoreUser(' + u.id + ')">' + I18N.t('admin.users.restore') + '</button>';
+          menuItems += '<button onclick="restoreUser(\'' + u.id + '\')">' + I18N.t('admin.users.restore') + '</button>';
         }
 
         var nicknameSub = u.nickname ? '<div class="user-sub">' + esc(u.nickname) + '</div>' : '';
@@ -625,7 +625,7 @@
           '<td style="padding:10px 12px;color:var(--t2,#5b667b)">' + esc(u.email || '—') + '</td>' +
           '<td style="padding:10px 12px"><span class="status-dot ' + dotCls + '"></span>' + (statusMap[u.status]||u.status) + '</td>' +
           '<td style="padding:10px 12px;color:var(--t2,#5b667b)">' + (u.last_login_at || '—') + '</td>' +
-          '<td style="padding:10px 12px" class="row-actions"><button class="row-actions-btn" onclick="event.stopPropagation();toggleRowMenu(' + u.id + ')">⋯</button>' +
+          '<td style="padding:10px 12px" class="row-actions"><button class="row-actions-btn" onclick="event.stopPropagation();toggleRowMenu(\'' + u.id + '\')">⋯</button>' +
           '<div class="row-menu" data-uid="' + u.id + '">' + menuItems + '</div></td>';
         tbody.appendChild(tr);
       });

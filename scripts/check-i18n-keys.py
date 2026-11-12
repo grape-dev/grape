@@ -3,7 +3,7 @@
 import json, sys, os
 
 LOCALES_DIR = 'src/api/static/locales'
-MODULES = ['common', 'admin']  # admin 涉及的模块
+MODULES = sorted(f[:-5] for f in os.listdir(f'{LOCALES_DIR}/zh') if f.endswith('.json'))  # 目录派生：全模块覆盖（QA M-3）
 
 def flat_keys(obj, prefix=''):
     keys = set()

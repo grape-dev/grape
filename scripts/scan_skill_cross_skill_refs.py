@@ -5,7 +5,7 @@
   python scripts/scan_skill_cross_skill_refs.py <skills_root> [more_roots...]
   # 例如：python scripts/scan_skill_cross_skill_refs.py data/skills /opt/grape/official-skills
 
-对每个 <root>/<skill_name>/SKILL.md 调用 src.runtime.skill_materialize.
+对每个 <root>/<skill_name>/SKILL.md 调用 src.domains.runtime.engine.skill_materialize.
 parse_skill_md_references（#1070 修复后口径），统计：
   - 带跨技能前缀引用的技能（物化此前必然误判失败的清单，验证修复覆盖）；
   - 引用了不存在自有 references 文件的技能（仍应判败，供物化巡检比对）。
@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.runtime.skill_materialize import (  # noqa: E402
+from src.domains.runtime.engine.skill_materialize import (  # noqa: E402
     parse_skill_md_references,
     validate_skill_dir,
 )

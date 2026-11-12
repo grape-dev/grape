@@ -10,15 +10,16 @@
 - UC6: 非配置类失败走通用文案（不误导查配置）
 - UC7/UC8: 说明行 data-i18n 化，语言切换/包晚到自动刷新
 """
+
 import json
+
 import re
+
 import os
 
 import pytest
 
-
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static")
-
 
 def _read_file(rel_path):
     """读取静态文件内容。"""
@@ -26,17 +27,11 @@ def _read_file(rel_path):
     with open(full, encoding="utf-8") as f:
         return f.read()
 
-
 def _read_json(rel_path):
     """读取 locale JSON。"""
     full = os.path.join(_STATIC_DIR, rel_path)
     with open(full, encoding="utf-8") as f:
         return json.load(f)
-
-
-# ===========================================================================
-# UC1/UC3：置灰 + 常显说明（renderOAuthButtons）
-# ===========================================================================
 
 class TestRenderDisabledWithHint:
     """UC1/UC3: 按 configured 置灰且常显说明行，全部已配置时移除。"""
@@ -77,7 +72,10 @@ class TestRenderDisabledWithHint:
         """UC1: 不过滤 configured——所有平台按钮始终渲染（R7.5 保持）。"""
         source = _read_file("js/app.js")
         idx = source.find("function renderOAuthButtons")
-        func = source[idx:idx + 2500]
+        # 窗口取到下一个顶层 function（函数体经 D107-1 i18n 双通道改造后
+        # 变长，固定 2500 字符窗口会截掉 providers.map 行——锚点改用边界）
+        end = source.find("\n  function ", idx + 10)
+        func = source[idx:end if end > idx else idx + 8000]
         assert "filter(function(p){return p.configured})" not in func, \
             "renderOAuthButtons should NOT filter providers by configured"
         assert "providers.map" in func, \
@@ -93,15 +91,14 @@ class TestRenderDisabledWithHint:
     def test_uc1_hint_links_to_help_doc(self):
         """UC1: 说明行含文档深链（help.html 开发者集成章节）。"""
         source = _read_file("js/app.js")
-        idx = source.find("function _oauthDocUrl")
-        func = source[idx:idx + 400]
-        assert "/static/help.html#/developer/01-gitcode-integration" in func
-        assert "/static/help.html#/developer/02-github-integration" in func
-
-
-# ===========================================================================
-# UC2/UC5：前置拦截 + A 兜底（oauthLogin）
-# ===========================================================================
+        # 扫雷⑥ P1-9 后深链收口为文件头 _PROV_OAUTH_DOC 单一表，
+        # _oauthDocUrl 只做查表回退——断言锚点随之迁到表上
+        idx = source.find("var _PROV_OAUTH_DOC = {")
+        table = source[idx:idx + 400]
+        assert "/static/help.html#/developer/01-gitcode-integration" in table
+        assert "/static/help.html#/developer/02-github-integration" in table
+        fidx = source.find("function _oauthDocUrl")
+        assert "_PROV_OAUTH_DOC[provider]" in source[fidx:fidx + 200]
 
 class TestOauthLoginGateAndFallback:
     """UC2: 状态已知未配置前置拦截；UC5: 状态未知走 API A 兜底。"""
@@ -130,16 +127,17 @@ class TestOauthLoginGateAndFallback:
         source = _read_file("js/app.js")
         assert "app.login.oauth_request_failed" in source, \
             "non-config failures should use generic oauth_request_failed"
-        # 通用分支不携带文档链接（不误导查配置）
-        idx = source.find("app.login.oauth_request_failed")
-        seg = source[idx - 400:idx + 400]
+        # 通用分支不携带文档链接（不误导查配置）——窗口精确圈定
+        # `if (!_isNotConfigured) { showToast(...); return; }` 本分支，
+        # 不越界到下方「未配置」分支（其 _oauthDocUrl 属预期行为）
+        bidx = source.find("if (!_isNotConfigured)")
+        assert bidx > 0, "generic failure branch must exist"
+        tidx = source.find("app.login.oauth_request_failed", bidx)
+        ridx = source.find("return;", tidx)
+        assert bidx < tidx < ridx, "generic branch should end with return"
+        seg = source[bidx:ridx]
         assert "_oauthDocUrl" not in seg, \
             "generic failure branch should not attach config help link"
-
-
-# ===========================================================================
-# UC7/UC8：说明行语言跟随（data-i18n 化）
-# ===========================================================================
 
 class TestHintI18nFollowsLanguage:
     """UC7/UC8: 说明行 data-i18n + data-i18n-vars，语言切换/包晚到自动刷新。"""
@@ -185,11 +183,6 @@ class TestHintI18nFollowsLanguage:
         assert "{name}" in zh["oauth_needs_config"]
         assert "{name}" in en["oauth_needs_config"]
 
-
-# ===========================================================================
-# UC4：正常态不受影响
-# ===========================================================================
-
 class TestAllConfiguredNormal:
     """UC4: 全部已配置时无置灰、无说明行，登录走原流程。"""
 
@@ -208,11 +201,6 @@ class TestAllConfiguredNormal:
         """UC4: redirect_url 重定向逻辑保持原样。"""
         source = _read_file("js/app.js")
         assert "if (d.redirect_url) window.location.href = d.redirect_url;" in source
-
-
-# ===========================================================================
-# UC9/UC10：同类「未配置」提示的体验对齐（S7 P1 收口）
-# ===========================================================================
 
 class TestEmailNotConfiguredFriendlyHint:
     """UC9/UC10: 忘记密码页与账号页三入口的邮箱未配置提示——可行动指引 + 文档链接。"""
@@ -283,11 +271,6 @@ class TestEmailNotConfiguredFriendlyHint:
         assert "email_service_not_configured_card" in zh
         assert "email_service_not_configured_card" in en
 
-
-# ===========================================================================
-# UC13：引导页绑定弹窗的 OAuth tab（配置状态数据流断裂修复）
-# ===========================================================================
-
 class TestBindModalOauthTab:
     """UC13: 已配置 OAuth 时，新手引导页的绑定弹窗应显示 OAuth + 手动令牌双页签。
 
@@ -297,12 +280,19 @@ class TestBindModalOauthTab:
     """
 
     def test_uc13_guide_writes_shared_cache(self):
-        """UC13 层1: 引导页 _renderBindingGuide 把 providers 数据写入共享缓存。"""
+        """UC13 层1（裁定后口径）：D102-K 把引导页数据源改为仓库平台卡目录
+        （/settings/vcs/platforms），若再把该目录写进 _accountProvidersData
+        （登录渠道轴）会污染共享缓存——层1「引导页写缓存」被设计性撤销，
+        引导路径的 OAuth 配置态由层2 缓存缺失主动 fetch /auth/providers 兜住。
+        本锁改为：引导页不得写共享缓存 + 数据源必须是卡目录（防回潮双锁）。"""
         source = _read_file("js/app.js")
         idx = source.find("function _renderBindingGuide")
         func = source[idx:source.find("function _renderOnboardingShell", idx)]
-        assert "_accountProvidersData = d" in func, \
-            "binding guide should populate the shared providers cache"
+        assert "_accountProvidersData" not in func, \
+            "binding guide must NOT write the login-channel shared cache (D102-K data-source split)"
+        assert "API.get('/settings/vcs/platforms')" in func, \
+            "binding guide data source must be the vcs platform catalog (D102-K)"
+        # 层2 兜底仍在（引导路径零依赖入口填缓存）——见 test_uc13_modal_fetches_when_cache_missing
 
     def test_uc13_modal_fetches_when_cache_missing(self):
         """UC13 层2: 绑定弹窗缓存缺失时主动 fetch /auth/providers，不保守猜未配置。"""
@@ -329,11 +319,6 @@ class TestBindModalOauthTab:
         func = source[idx:end]
         assert "if (_providersData)" in func, \
             "cached path must render synchronously without fetching"
-
-
-# ===========================================================================
-# UC12：首帧零闪动（服务端注入 + CSS 驱动，注册页同模式）
-# ===========================================================================
 
 class TestFirstFrameNoFouc:
     """UC12: OAuth 配置状态随 HTML 注入，CSS 首帧置灰，无「先常亮后置灰」闪动。"""
@@ -403,24 +388,17 @@ class TestFirstFrameNoFouc:
         assert "span.setAttribute('data-i18n', 'app.login.oauth_needs_config')" in func, \
             "updater must switch the span to the named key so later language switches render precisely"
 
-
 def _read_file_py(rel_path):
     """读取静态目录之外的仓库文件（main.py 等后端源码）。"""
     full = os.path.join(os.path.dirname(__file__), "..", "..", rel_path)
     with open(full, encoding="utf-8") as f:
         return f.read()
 
-
-# ===========================================================================
-# S8（UC14/UC15）：OAuth 回调兑票链路——TTL 60s + 内联兑票脚本
-# ===========================================================================
-
 def _read_src(rel_path):
     """读取仓库源码文件（src/ 下，非 static）。"""
     full = os.path.join(os.path.dirname(__file__), "..", "..", rel_path)
     with open(full, encoding="utf-8") as f:
         return f.read()
-
 
 class TestUC14ExchangeCodeTTL:
     """UC14: exchange code TTL 10s→60s，原子消费不变。"""
@@ -441,7 +419,6 @@ class TestUC14ExchangeCodeTTL:
         func = src[idx:idx + 1500]
         assert "DELETE FROM exchange_codes WHERE code=? AND expires > ?" in func, \
             "atomic consume DELETE must keep the expiry condition"
-
 
 class TestUC15InlineExchangeScript:
     """UC15: HTML 解析期内联兑票——注入链路 + app.js flag 接力。"""
@@ -500,16 +477,17 @@ class TestUC15InlineExchangeScript:
             "inline fallback packs (zh+en) must both carry the key"
 
     def test_uc15b_cache_bust_versions_bumped(self):
-        """UC15b: app.js 与 i18n.js 引用页 ?v= 递增（锁当前值防回退）。"""
-        html = _read_file("index.html")
-        assert re.search(r'app\.js\?v=210"', html), "app.js cache-bust must be v207"
-        assert re.search(r'i18n\.js\?v=20261030-4"', html), "index i18n.js bust must be 20261030-4"
-        for page, ver in (("forgot.html", 18), ("register.html", 18)):
-            src = _read_file(page)
-            assert re.search(rf'i18n\.js\?v={ver}"', src), f"{page} i18n.js bust must be v{ver}"
-        assert re.search(r'i18n\.js\?v=20261016-3"', _read_file("admin.html")), \
-            "admin.html i18n.js bust must be 20261016-3"
-
+        """UC15b: app.js 与 i18n.js 引用页 ?v= 不低于引入版本（动态下限锁）。"""
+        assert _app_js_version() >= 210, "app.js cache-bust regressed below v210"
+        assert _i18n_bust("index.html") >= "20261030-4", \
+            "index i18n.js bust regressed below 20261030-4"
+        for page in ("forgot.html", "register.html"):
+            m = re.search(r'i18n\.js\?v=(\d+)"', _read_file(page))
+            assert m and int(m.group(1)) >= 18, \
+                f"{page} i18n.js bust regressed below v18"
+        m = re.search(r'i18n\.js\?v=([0-9-]+)"', _read_file("admin.html"))
+        assert m and m.group(1) >= "20261016-3", \
+            "admin.html i18n.js bust regressed below 20261016-3"
 
 class TestUC15cFailureDetailRelay:
     """UC15c: 内联失败路径透传后端 detail（对齐原分支 R5），不留降级尾巴。"""
@@ -541,7 +519,6 @@ class TestUC15cFailureDetailRelay:
         idx2 = src.find("if (!exchangeCode && sessionStorage.getItem('__oauth_exchange_failed__'))")
         relay2 = src[idx2:idx2 + 700]
         assert "_exMsg ||" in relay2, "toast must prefer the backend detail message"
-
 
 class TestUC15dPopupLoginConsumer:
     """UC15d: popup 登录 postMessage 消费方补齐，休眠路径激活。"""
@@ -576,7 +553,6 @@ class TestUC15dPopupLoginConsumer:
         idx = src.find("window.__oauthPopupLoginListener = true")
         block = src[idx:idx + 2000]
         assert "det.message || det.error_code" in block
-
 
 class TestUC16JwtSecretPersistence:
     """S9（UC16）：JWT 签名密钥持久化——代码层结构与门禁红绿（行为级）。
@@ -661,7 +637,6 @@ class TestUC16JwtSecretPersistence:
         assert 0 <= cfg_get < env_fallback, \
             "file (security.json) must take precedence over env fallback"
 
-
 class TestUC16ePollingStopsOnKick:
     """UC16e: 被踢回登录页时停后台轮询（修「数据悄悄不动、不引导重登」）。"""
 
@@ -684,10 +659,8 @@ class TestUC16ePollingStopsOnKick:
         assert "UC16e" in src[decl - 120:decl]
 
     def test_uc16e_cache_bust_bumped(self):
-        """UC16e: app.js ?v= 递增至 207。"""
-        html = _read_file("index.html")
-        assert re.search(r'app\.js\?v=210"', html), "app.js cache-bust must be v207"
-
+        """UC16e: app.js ?v= 不低于 207（showLogin 停轮询随版本下发，动态下限锁）。"""
+        assert _app_js_version() >= 207, "app.js cache-bust regressed below v207"
 
 class TestUC15fInlinePendingRace:
     """UC15f: 内联兑票慢于 app.js init 的竞态——pending 标记 + 等待窗口。"""
@@ -722,10 +695,8 @@ class TestUC15fInlinePendingRace:
         assert "5000" in block, "bounded wait — no unbounded hang"
 
     def test_uc15f_cache_bust_v208(self):
-        """UC15f: app.js ?v= 递增至 208。"""
-        html = _read_file("index.html")
-        assert re.search(r'app\.js\?v=210"', html), "app.js cache-bust must be v208"
-
+        """UC15f: app.js ?v= 不低于 208（pending 标记随版本下发，动态下限锁）。"""
+        assert _app_js_version() >= 208, "app.js cache-bust regressed below v208"
 
 class TestUC15fReentryGuard:
     """UC15f 补强：等待块双重重入守卫（interval 与 5s 超时只放行一次）。"""
@@ -739,10 +710,8 @@ class TestUC15fReentryGuard:
         assert block.count("_pfReenter") >= 3, "both interval and timeout route through the guard"
 
     def test_uc15f_cache_bust_v209(self):
-        """UC15f 补强: app.js ?v= 递增至 209。"""
-        html = _read_file("index.html")
-        assert re.search(r'app\.js\?v=210"', html), "app.js cache-bust must be v209"
-
+        """UC15f 补强: app.js ?v= 不低于 209（重入守卫随版本下发，动态下限锁）。"""
+        assert _app_js_version() >= 209, "app.js cache-bust regressed below v209"
 
 class TestUC15gPopupLangPrefix:
     """UC15g: popup 登录成功跳转保留 /en 语言前缀（外审发现）。"""
@@ -758,6 +727,23 @@ class TestUC15gPopupLangPrefix:
             "redirect must derive the prefix from I18N.getLang like the original branch"
 
     def test_uc15g_cache_bust_v210(self):
-        """UC15g: app.js ?v= 递增至 210。"""
-        html = _read_file("index.html")
-        assert re.search(r'app\.js\?v=210"', html), "app.js cache-bust must be v210"
+        """UC15g: app.js ?v= 不低于 210（语言前缀修复随版本下发，动态下限锁）。"""
+        assert _app_js_version() >= 210, "app.js cache-bust regressed below v210"
+
+def _app_js_version():
+    """动态读取 index.html 当前 app.js 缓存版本号。
+
+    版本门禁改为「下限锁」：只断言不低于引入该 UC 时的历史版本
+    （防回退），不再锁死精确值——精确值随每次静态资源 bump 漂移，
+    逐个测试硬编码会在下一次 bump 时整批假红。"""
+    html = _read_file("index.html")
+    m = re.search(r'app\.js\?v=(\d+)"', html)
+    assert m, "index.html must reference app.js with a numeric ?v= cache-bust"
+    return int(m.group(1))
+
+def _i18n_bust(rel_path):
+    """动态读取页面当前 i18n.js ?v= 缓存版本串。"""
+    html = _read_file(rel_path)
+    m = re.search(r'i18n\.js\?v=([0-9-]+)"', html)
+    assert m, f"{rel_path} must reference i18n.js with a ?v= cache-bust"
+    return m.group(1)

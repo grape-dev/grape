@@ -11,15 +11,18 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
 from pydantic import BaseModel
 
 from src.api.deps import require_org_member
+
 from src.domains.runtime.routes.runtime import _require_credential
+
 from src.kernel.config import log
+
 from src.domains.insight.observability.overview import DEFAULT_RANGE, RANGE_SPECS, RepoNotVisible, build_overview
 
 router = APIRouter(prefix="/api/obs", tags=["observability"])
-
 
 @router.get(
     "/overview",
@@ -47,9 +50,6 @@ def obs_overview(
     except Exception as e:
         log.warning(f"obs/overview failed user={user.get('id')} repo={repo!r} range={_range}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "overview failed"})
-
-
-# ============================================================ 告警（§9）
 
 @router.get(
     "/alerts",
@@ -83,7 +83,6 @@ def obs_alerts(
         log.warning(f"obs/alerts failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "alerts failed"})
 
-
 @router.post(
     "/alerts/{event_id}/silence",
     operation_id="obs_alert_silence",
@@ -102,7 +101,6 @@ def obs_alert_silence(
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "event not found"})
     return {"ok": True, "event_id": event_id, "minutes": max(1, int(minutes))}
-
 
 @router.post(
     "/alerts/rules/{rule_id}/toggle",
@@ -124,7 +122,6 @@ def obs_alert_rule_toggle(
         raise HTTPException(status_code=500, detail={"code": 500, "message": "toggle failed"})
     return {"ok": True, "rule_id": rule_id, "enabled": bool(enabled)}
 
-
 @router.post(
     "/alerts/rules/{rule_id}/threshold",
     operation_id="obs_alert_rule_threshold",
@@ -143,7 +140,6 @@ def obs_alert_rule_threshold(
     if not alerts_mod.set_rule_threshold(rule_id, float(threshold)):
         raise HTTPException(status_code=500, detail={"code": 500, "message": "update failed"})
     return {"ok": True, "rule_id": rule_id, "threshold": float(threshold)}
-
 
 @router.post(
     "/alerts/rules/{rule_id}/notify",
@@ -172,7 +168,6 @@ def obs_alert_rule_notify(
         raise HTTPException(status_code=500, detail={"code": 500, "message": "update failed"})
     return {"ok": True, "rule_id": rule_id, "channels": ",".join(_chans)}
 
-
 @router.post(
     "/alerts/test-notify",
     operation_id="obs_alert_test_notify",
@@ -189,9 +184,6 @@ async def obs_alert_test_notify(user: dict = Depends(require_org_member)):
         log.warning(f"obs/alerts/test-notify failed user={user.get('id')}: {e}")
         return {"ok": False, "reason": "exception", "message": str(e)}
 
-
-# ============================================================ 日志（§6.3）
-
 class LogRecordBody(BaseModel):
     ts: str = ""
     level: str = ""
@@ -202,11 +194,9 @@ class LogRecordBody(BaseModel):
     trace_id: str = ""
     runtime_id: int = 0
 
-
 class LogIngestBody(BaseModel):
     records: list[LogRecordBody] = []
     runtime_id: int = 0
-
 
 @router.post(
     "/logs/ingest",
@@ -244,7 +234,6 @@ def obs_logs_ingest(body: LogIngestBody, credential_id: int = Depends(_require_c
     n = logs_mod.ingest(recs, default_source=src)
     return {"ok": True, "ingested": n, "received": len(recs), "source": src}
 
-
 @router.get(
     "/logs",
     operation_id="obs_logs",
@@ -280,7 +269,6 @@ def obs_logs(
         log.warning(f"obs/logs failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "logs failed"})
 
-
 @router.get(
     "/logs/sources",
     operation_id="obs_logs_sources",
@@ -296,9 +284,6 @@ def obs_logs_sources(user: dict = Depends(require_org_member)):
     except Exception as e:
         log.warning(f"obs/logs/sources failed: {e}")
         return {"sources": [], "levels": {}}
-
-
-# ============================================================ 追踪 / 时间线（§6.4）
 
 @router.get(
     "/trace/{trace}",
@@ -322,7 +307,6 @@ def obs_trace(trace: str, with_steps: bool = True, user: dict = Depends(require_
     if not data.get("tasks"):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "trace not found"})
     return data
-
 
 @router.get(
     "/trace",
@@ -348,7 +332,6 @@ def obs_trace_by_issue(
         raise HTTPException(status_code=404, detail={"code": 404, "message": "trace not found"})
     return data
 
-
 @router.post(
     "/trace/stamp",
     operation_id="obs_trace_stamp",
@@ -359,9 +342,6 @@ def obs_trace_stamp(user: dict = Depends(require_org_member)):
     from src.domains.insight.observability import trace as trace_mod
     n = trace_mod.stamp_missing()
     return {"ok": True, "stamped": n}
-
-
-# ============================================================ 设备资源曲线（设备分区）
 
 @router.get(
     "/runtimes/history",
@@ -463,7 +443,6 @@ def obs_events(
         log.warning(f"obs/events failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "events failed"})
 
-
 @router.get(
     "/events/failed-result-gap",
     operation_id="obs_events_failed_result_gap",
@@ -487,7 +466,6 @@ def obs_events_failed_result_gap(
     except Exception as e:
         log.warning(f"obs/events/failed-result-gap failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "failed-result-gap failed"})
-
 
 @router.get(
     "/metrics/series",
@@ -532,9 +510,6 @@ def obs_metrics_series(
     return {"resolution": res, "hours": span, "dim_keys": dims, "series": data,
             "scanned_repos": len(repo_keys), "global": False}
 
-
-# ===== SLO / 错误预算（P2-1，§6.7）=====
-
 @router.get(
     "/slo",
     operation_id="obs_slo_list",
@@ -563,7 +538,6 @@ def obs_slo_list(repo: str = "", user: dict = Depends(require_org_member)):
         log.warning(f"obs/slo failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "slo failed"})
 
-
 @router.get(
     "/slo/{slo_id}",
     operation_id="obs_slo_detail",
@@ -585,9 +559,6 @@ def obs_slo_detail(slo_id: int, repo: str = "", user: dict = Depends(require_org
         raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
     return data
 
-
-# ===== Token 三级归因（引擎 / 任务 / 阶段事件）=====
-
 def _obs_token_engine_ids(user: dict, repo: str = "") -> list:
     """调用者可见的引擎 id 列表（设备维度可见性），拿不到就返回空（不降级）。"""
     try:
@@ -599,17 +570,15 @@ def _obs_token_engine_ids(user: dict, repo: str = "") -> list:
         log.warning(f"obs tokens visible engines failed: {e}")
         return []
 
-
 def _obs_token_scope(repo: str, user: dict) -> None:
     """越权仓库 → 404（口径同事件视图/指标序列）。"""
     if not repo:
         return
     from src.domains.insight.observability.overview import RepoNotVisible, visible_repo_keys
     from src.kernel.repo_key import to_repo_key
-    want = {to_repo_key(repo), to_repo_key(repo, "github")}
+    want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
     if not (want & set(visible_repo_keys(user or {}))):
         raise RepoNotVisible(repo)
-
 
 @router.get("/tokens/engines", operation_id="obs_tokens_engines",
             summary="Token usage per engine (caller's visible engines/repos)")
@@ -626,7 +595,6 @@ def obs_tokens_engines(range: str = "24h", repo: str = "", user: dict = Depends(
     except Exception as e:
         log.warning(f"obs/tokens/engines failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "tokens failed"})
-
 
 @router.get("/tokens/tasks", operation_id="obs_tokens_tasks",
             summary="Token usage per task/run")
@@ -645,7 +613,6 @@ def obs_tokens_tasks(range: str = "24h", repo: str = "", limit: int = 100, run_k
         log.warning(f"obs/tokens/tasks failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "tokens failed"})
 
-
 @router.get("/tokens/issues/{issue_id}/stages", operation_id="obs_tokens_issue_stages",
             summary="Token usage per stage event of one issue (e.g. vod -> issue)")
 def obs_tokens_issue_stages(issue_id: str, range: str = "30d", repo: str = "",
@@ -662,7 +629,6 @@ def obs_tokens_issue_stages(issue_id: str, range: str = "30d", repo: str = "",
         log.warning(f"obs/tokens/issues failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "tokens failed"})
 
-
 @router.get("/tokens/stages", operation_id="obs_tokens_stages",
             summary="Token usage grouped by issue x stage (visible scope)")
 def obs_tokens_stages(range: str = "24h", repo: str = "", user: dict = Depends(require_org_member)):
@@ -676,3 +642,5 @@ def obs_tokens_stages(range: str = "24h", repo: str = "", user: dict = Depends(r
     except Exception as e:
         log.warning(f"obs/tokens/stages failed user={user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "tokens failed"})
+
+from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一

@@ -537,3 +537,74 @@ class TestLocalPortAutoDiscovery:
         from src.kernel.prompt_builder import _local_port
         assert _local_port() == "3000"
 
+
+
+class TestCommentQuoteStripping:
+    """评论引用块剥离 + 正文优先截断（用户提问被引用块挤出 1000 字符窗口的回归锁）。"""
+
+    def _evt(self, note, body=""):
+        return {
+            "type": "issue_comment",
+            "repository": "acme-org/demo-portal",
+            "repo_key": "gitcode:acme-org/demo-portal",
+            "issue_id": "1",
+            "payload": {"object_attributes": {"note": note, "iid": 1, "body": body}},
+        }
+
+    def _prompt(self, pb, note, body=""):
+        return pb.build_devops_agent_prompt(self._evt(note, body), [], "sess-x", [],
+                                           runtime_id=0, agent_type="coding")
+
+    def test_long_quote_does_not_swallow_user_text(self, pb):
+        """引用 5000 字符 + 一句用户提问 → 提问必须进 prompt（旧实现会被切掉）。"""
+        note = "\n".join("> bot 上一轮回答 " + "x" * 60 for _ in range(70)) + "\n\nshow me the .svg or the .png"
+        prompt = self._prompt(pb, note)
+        assert "show me the .svg or the .png" in prompt
+
+    def test_quote_excerpt_is_bounded(self, pb):
+        note = "\n".join("> 很长的被引用内容 " + "y" * 60 for _ in range(70)) + "\n\n正文一句话"
+        prompt = self._prompt(pb, note)
+        marker = "(User quoted earlier content: "
+        assert marker in prompt
+        excerpt = prompt.split(marker, 1)[1].split(")", 1)[0]
+        assert len(excerpt) <= pb._COMMENT_QUOTE_EXCERPT_CHARS
+        assert "正文一句话" in prompt
+
+    def test_quote_prefix_without_space(self, pb):
+        """GitCode 实测形态 `>[Coding Agent] ...`（无空格）也要剥。"""
+        note = ">[Coding Agent] 实现已完成\n>\n>第二行引用\n\n用户正文"
+        prompt = self._prompt(pb, note)
+        assert "用户正文" in prompt
+        assert "(User quoted earlier content: [Coding Agent] 实现已完成 第二行引用" in prompt
+
+    def test_ui_noise_line_skipped(self, pb):
+        note = "> 引用内容\n\n[@grape_bot](https://gitcode.com/grape_bot) \n\n真正的提问"
+        prompt = self._prompt(pb, note)
+        assert "真正的提问" in prompt
+        assert "Comment: " in prompt
+        comment_seg = [l for l in prompt.splitlines() if l.startswith("Comment: ")][0]
+        assert "grape_bot" not in comment_seg
+
+    def test_pure_quote_falls_back_to_raw(self, pb):
+        """正文为空（纯转发）→ 回退原文，不丢整条评论。"""
+        note = "> 只有引用没有正文\n> 第二行"
+        prompt = self._prompt(pb, note)
+        assert "只有引用没有正文" in prompt
+        assert "(User quoted earlier content" not in prompt
+
+    def test_plain_comment_unchanged(self, pb):
+        prompt = self._prompt(pb, "就是一个普通评论")
+        assert 'Comment: "就是一个普通评论"' in prompt
+
+    def test_long_body_truncated_with_marker(self, pb):
+        prompt = self._prompt(pb, "开" + "长" * 5000)
+        comment_seg = [l for l in prompt.splitlines() if l.startswith("Comment: ")][0]
+        assert "[truncated]" in comment_seg
+        assert len(comment_seg) < pb._COMMENT_BODY_CHAR_LIMIT + 200
+
+    def test_issue_body_truncated_with_marker(self, pb):
+        """issue body 兜底截断也按原文 + 明确标注（走非评论事件分支）。"""
+        evt = self._evt("随便", body="描" * 5000)
+        evt["type"] = "issue_opened"
+        prompt = pb.build_devops_agent_prompt(evt, [], "sess-x", [], runtime_id=0, agent_type="coding")
+        assert "[truncated]" in prompt

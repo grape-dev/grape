@@ -97,7 +97,7 @@ def _node(node_id, *, eids=None, skill="skill-ok", enabled=True, next_="done"):
 
 def _run(monkeypatch, nodes, user=None, resolve_result=999):
     _patch_scene(monkeypatch, nodes)
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "resolve_skill_id", lambda *a, **kw: resolve_result)
     return scene_precheck.precheck_scene(_SCENE_ID, _REPO,
                                          user or {"username": "me", "id": ""})
@@ -219,7 +219,7 @@ def test_user_personal_scene_resolved(monkeypatch):
     # 标准解析未命中，回落 pipelines.json default（fallback）
     monkeypatch.setattr(pc, "get_pipeline_config", lambda *a, **kw: {
         "scene_id": "default", "fallback": True, "nodes": []})
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "resolve_skill_id", lambda *a, **kw: 999)
     try:
         out = scene_precheck.precheck_scene(_SCENE_ID, _REPO,

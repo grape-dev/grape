@@ -5,25 +5,33 @@
 限流：邮箱维度（60s/次，3次/10min）+ IP 维度（10次/10min）。
 原子标记已使用：UPDATE ... SET used=1 WHERE id=? AND used=0。
 """
+
 import hashlib
+
 import hmac
+
 import secrets
+
 import time
 
 from src.kernel.config import log
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.auth.email_service import get_email_service, is_dev_verification_code
 
-# ---------------------------------------------------------------------------
-# 常量
-# ---------------------------------------------------------------------------
-
 CODE_TTL = 600              # 验证码有效期 10 分钟（秒）
+
 CODE_LENGTH = 6
+
 MAX_ATTEMPTS = 5            # 验证码验证失败上限
+
 SEND_INTERVAL = 60          # 同一邮箱发送间隔（秒）
+
 MAX_SEND_PER_WINDOW = 3     # 窗口内最大发送次数
+
 MAX_IP_PER_WINDOW = 5       # IP 维度窗口内最大请求次数（需求 19）
+
 WINDOW_SECONDS = 600        # 窗口大小 10 分钟（秒）
 
 SCENES = frozenset({
@@ -36,15 +44,9 @@ SCENES = frozenset({
     "oauth_associate",
 })
 
-
-# ---------------------------------------------------------------------------
-# 验证码生成
-# ---------------------------------------------------------------------------
-
 def generate_code() -> str:
     """生成 6 位数字验证码。"""
     return f"{secrets.randbelow(1000000):06d}"
-
 
 def _hash_code(code: str) -> str:
     """验证码哈希（P2-8: HMAC-SHA256，用应用密钥做 key，防彩虹表）。
@@ -56,18 +58,11 @@ def _hash_code(code: str) -> str:
     key = _get_signing_secret()[0].encode("utf-8")
     return hmac.new(key, code.encode("utf-8"), hashlib.sha256).hexdigest()
 
-
 def _now_str() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 def _expires_str() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + CODE_TTL))
-
-
-# ---------------------------------------------------------------------------
-# 限流
-# ---------------------------------------------------------------------------
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + CODE_TTL))
 
 def _count_recent_sends(email: str, window: int = WINDOW_SECONDS, scene: str = "") -> int:
     """统计邮箱在窗口内的发送次数。D46 P1-7: 异常时 fail-closed 返回大值。
@@ -75,7 +70,7 @@ def _count_recent_sends(email: str, window: int = WINDOW_SECONDS, scene: str = "
     scene 非空时只统计该场景的发送次数（区分 register/reset_password 等场景，
     避免用户同时操作多个场景时窗口提前用完）。
     """
-    since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - window))
+    since = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - window))
     try:
         with db_lock:
             c = db.cursor()
@@ -95,12 +90,11 @@ def _count_recent_sends(email: str, window: int = WINDOW_SECONDS, scene: str = "
     except Exception:
         return MAX_SEND_PER_WINDOW + 1  # fail-closed
 
-
 def _count_recent_ip_requests(ip: str, window: int = WINDOW_SECONDS) -> int:
     """统计 IP 在窗口内的验证码请求次数。D46 P1-7: 异常时 fail-closed 返回大值。"""
     if not ip:
         return 0
-    since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - window))
+    since = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - window))
     try:
         with db_lock:
             c = db.cursor()
@@ -112,7 +106,6 @@ def _count_recent_ip_requests(ip: str, window: int = WINDOW_SECONDS) -> int:
             return c.fetchone()[0]
     except Exception:
         return MAX_IP_PER_WINDOW + 1  # fail-closed
-
 
 def _last_send_time(email: str, scene: str) -> float:
     """获取该邮箱该场景最近一次发送的时间戳（0 表示无记录）。D46 P1-7: 异常时 fail-closed 返回当前时间。"""
@@ -130,11 +123,6 @@ def _last_send_time(email: str, scene: str) -> float:
         return time.mktime(time.strptime(row[0], "%Y-%m-%d %H:%M:%S"))
     except Exception:
         return time.time()  # fail-closed: 认为刚发过
-
-
-# ---------------------------------------------------------------------------
-# 限流检查
-# ---------------------------------------------------------------------------
 
 def check_rate_limit(rl_key: str, scene: str, ip: str = "") -> dict:
     """仅检查限流，不发送验证码、不写 DB。
@@ -164,11 +152,6 @@ def check_rate_limit(rl_key: str, scene: str, ip: str = "") -> dict:
             return {"ok": False, "message": "请求过于频繁，请稍后再试"}
 
     return {"ok": True, "message": "OK"}
-
-
-# ---------------------------------------------------------------------------
-# 发送验证码
-# ---------------------------------------------------------------------------
 
 def send_code(email: str, scene: str, ip: str = "", rate_limit_key: str = "") -> dict:
     """发送验证码。
@@ -243,11 +226,6 @@ def send_code(email: str, scene: str, ip: str = "", rate_limit_key: str = "") ->
 
     return {"ok": True, "message": "验证码已发送"}
 
-
-# ---------------------------------------------------------------------------
-# 校验验证码
-# ---------------------------------------------------------------------------
-
 def verify_code(email: str, scene: str, code: str) -> dict:
     """校验验证码。
 
@@ -309,11 +287,6 @@ def verify_code(email: str, scene: str, code: str) -> dict:
 
     return {"ok": True}
 
-
-# ---------------------------------------------------------------------------
-# 内部辅助
-# ---------------------------------------------------------------------------
-
 def _mark_used(vc_id: int) -> bool:
     """原子标记验证码已使用（UPDATE ... WHERE used=0）。"""
     try:
@@ -328,7 +301,6 @@ def _mark_used(vc_id: int) -> bool:
     except Exception as e:
         log.warning(f"Mark verification code used failed: {e}")
         return False
-
 
 def _increment_attempts(vc_id: int, current_attempts: int) -> None:
     """原子递增失败次数，超 MAX_ATTEMPTS 标记作废。
@@ -359,7 +331,6 @@ def _increment_attempts(vc_id: int, current_attempts: int) -> None:
             db.commit()
     except Exception as e:
         log.warning(f"Increment attempts failed: {e}")
-
 
 def _cleanup_expired() -> None:
     """清理过期验证码（best-effort）。P2-9: 10% 概率执行，避免每次发送都全表扫描。"""

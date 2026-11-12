@@ -632,6 +632,59 @@
   font-weight: 600;
 }
 
+/* D102-K: gitee 风格"其他方式登录"——纯 logo 圆形图标横排（icon-only），
+   hover 提亮+微浮，title 提示平台名；未配置仍走 aria-disabled 置灰 + 下方 hint */
+.oauth-btn.icon-only {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  min-height: 46px;
+  padding: 0;
+  border-radius: 50%;
+  gap: 0;
+}
+/* D105-5 用户裁定（2026-11-09）：取消品牌实底——中性圆标 + 品牌色图标。
+   品牌色经 --brand 变量只作用于图标，不再做按钮底色。 */
+.oauth-btn.icon-only {
+  background: rgba(255,255,255,0.08);
+  border-color: transparent;
+}
+.oauth-btn.icon-only svg {
+  color: var(--brand, #fff);
+}
+.oauth-btn.icon-only:hover {
+  background: rgba(255,255,255,0.14);
+  border-color: transparent;
+}
+.oauth-btn.icon-only[aria-disabled="true"] {
+  opacity: 0.45;
+  border-color: transparent;
+}
+.oauth-btn.icon-only[aria-disabled="true"] svg {
+  color: #fff;
+}
+.oauth-btn.icon-only[aria-disabled="true"]:hover {
+  filter: none;
+  transform: none;
+}
+/* 间距保障：容器 gap + 按钮间最小间距双保险（防 join('') 渲染挤压） */
+#oauthBtns { justify-content: space-evenly; gap: 14px !important; }
+/* 统一 logo 视觉尺寸（含 gitee 满圆镂空——不再 30px 突出，2026-11-08 用户反馈） */
+.oauth-btn.icon-only svg { width: 22px; height: 22px; }
+/* D105-5 用户裁定：gitee 同步取消实底特例——镂空 G 改品牌橙直接描画
+   （不再依赖白 G+红底），与其余渠道统一中性圆标。 */
+/* D105-13（2026-11-10）：gitee 与华为同款——官方双色在 SVG path 级
+   （红圆 #C71D23 + 白 G #FFFFFF），currentColor 染色置空 */
+.oauth-btn.icon-only[onclick*="oauthLogin('gitee')"] svg {
+  color: transparent !important;
+  fill: transparent !important;
+  width: 26px !important;
+  height: 26px !important;
+}
+
+
+
+
 /* P1-7: OAuth 按钮类 — 替代 inline style */
 .oauth-btn {
   flex: 1;
@@ -830,4 +883,120 @@ html.oauth-configured #oauthUnconfiguredHint {
 
 .lang-switch:active {
   transform: scale(0.95);
+}
+
+/* ═══ 口径 v9（2026-11-09 用户采纳 gitee.com/login 口径）：裸品牌图标——
+   无圆底无边框（transparent），图标 28px 取各渠道品牌色（--brand，深色页浅色变体），
+   hover 完全不变（无 transform/box-shadow/背景变化）。 ═══ */
+#oauthBtns { justify-content: center; gap: 24px !important; }
+.oauth-btn.icon-only {
+  width: auto;
+  height: auto;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  gap: 0;
+}
+/* 键盘焦点环（HIG）：hover 零变化 ≠ focus 零变化——可访问性底线，
+   苹果式 accent 描边 ring，与输入框 focus 同语言。 */
+.oauth-btn.icon-only:focus-visible,
+.oauth-btn.has-label:focus-visible {
+  outline: none;
+  border-radius: 8px;
+  box-shadow: 0 0 0 3px var(--auth-border-focus, #0071e3);
+}
+.oauth-btn.icon-only,
+.oauth-btn.icon-only:hover,
+.oauth-btn.icon-only[onclick*="gitee"],
+.oauth-btn.icon-only[onclick*="gitee"]:hover {
+  background: transparent;
+  border-color: transparent;
+  filter: none;
+}
+.oauth-btn.icon-only svg {
+  width: 28px;
+  height: 28px;
+  /* 深色卡片：暗品牌色（gitee #C71D23 / huawei #C7000B）原值对比不足显黑，
+     白色提亮混合保色相；github 浅色变体 (#f0f6fc) 混白几乎不变。 */
+  color: color-mix(in srgb, var(--brand, #fff) 75%, #fff);
+}
+html[data-theme-mode="light"] .oauth-btn.icon-only svg {
+  color: var(--brand, #111);
+}
+/* 华为：图标 + 下方 huawei 小字（gitee.com/login 形态） */
+.oauth-btn.has-label {
+  width: auto;
+  min-width: 64px;
+  height: auto;
+  min-height: 58px;
+  padding: 5px 8px 4px;
+  border-radius: 0;
+  gap: 5px;
+  flex-direction: column;
+  background: transparent;
+  border: none;
+}
+.oauth-btn.has-label:hover { background: transparent; }
+.oauth-btn.has-label .ob-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 0;
+  background: transparent;
+}
+.oauth-btn.has-label .ob-ic svg { width: 28px; height: 28px; }
+.oauth-btn.has-label .ob-tt {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--t2, #86868b);
+}
+
+/* ═══ hover 零变化（用户终裁）：hover 不允许任何 transform / box-shadow /
+   背景变化；此处显式置 none，覆盖前段可能残留的 hover 效果。 ═══ */
+.oauth-btn.icon-only:hover,
+.oauth-btn.has-label:hover,
+#oauthBtns .oauth-btn:hover {
+  background: transparent;
+  border-color: transparent;
+  filter: none;
+  transform: none;
+  box-shadow: none;
+}
+/* huawei logo: 深红在深卡上明度不足显黑（用户定版）——深色卡纯白；浅色卡保持品牌红 */
+.oauth-btn.icon-only svg[data-brand="huawei"] {
+  color: #fff;
+}
+html[data-theme-mode="light"] .oauth-btn.icon-only svg[data-brand="huawei"] {
+  color: var(--brand, #C7000B);
+}
+
+/* ═══ D105-8（2026-11-10 用户对齐 Gitee 官方登录页口径）：全部第三方登录按钮统一
+   「裸品牌色图标」——无底无边框无字标（gitee.com/login .git-other-login-icon 形态）。
+   华为 = 纯红花瓣 iconfont 色 rgb(239,72,75)；gitee = 红 G；对齐既有 v9 裸图标层。 ═══ */
+.oauth-btn.icon-only[onclick*="oauthLogin('huawei')"] svg {
+  color: #EF484B;
+  fill: #EF484B;
+}
+.oauth-btn.icon-only[onclick*="oauthLogin('huawei')"][aria-disabled="true"] svg {
+  color: #EF484B;
+  fill: #EF484B;
+  opacity: .45;
+}
+
+/* ═══ D105-12（2026-11-10 用户拍板）：华为按钮回归 icon-only 裸图标形态——
+   双色（红圈+白花瓣）在 SVG path 级自带，圈内的 HUAWEI 字形已在花瓣 path 里，
+   外部不再加字标 span。仅保留尺寸对齐（与 v9 层 22px 统一）。═══ */
+.oauth-btn.icon-only[onclick*="oauthLogin('huawei')"] svg {
+  width: 26px !important;
+  height: 26px !important;
+  color: transparent !important;
+  fill: transparent !important;
 }

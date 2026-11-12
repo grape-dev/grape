@@ -390,9 +390,7 @@ function _switchTagFilter(label, id) {
   _reloadSkills();
 }
 
-function _escapeHtml(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+function _escapeHtml(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml（补 ' 转义）
 
 function _renderTagFilters() {
   var container = document.getElementById('tag-filters');
@@ -469,11 +467,11 @@ function _renderFeaturedSkillCard(s) {
     : '';
   const sceneCount = s.scene_count || scenesArr.length || 0;
   const repoCount = s.repo_count || 0;
-  const desc = (s.description || '').replace(/"/g, '&quot;');
+  const desc = _escapeHtml(s.description || '');
   return `<div class="feat-card" style="--fg1:${grad.g1};--fg2:${grad.g2}" onclick="app.nav('skill','${s.id}')">
     <span class="feat-badge">★</span>
     <div class="feat-ico">${meta.icon || '◈'}</div>
-    <div class="feat-name">${s.display_name || s.name}<span class="feat-agent">${meta.label || at}</span></div>
+    <div class="feat-name">${_escapeHtml(s.display_name || s.name)}<span class="feat-agent">${meta.label || at}</span></div>
     <div class="feat-desc">${desc}</div>
     <div class="feat-scenes">${scenesStr || ''}</div>
     <div class="feat-scenes" style="margin-top:auto;padding-top:8px">${sceneCount} 场景在用 · ${repoCount} 仓库在用</div>
@@ -502,8 +500,8 @@ function _renderSkillCard(s, fixedWidth) {
   const actionBtns = fixedWidth ? '' : (() => {
     let btns = '';
     if (s.scope !== 'official') {
-      btns = `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.id}','${s.scope}')">${I18N.t('skills.action.delete')||'删除'}</button>`;
-      btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();showSkillUpdate(${s.id},'${(s.display_name || s.name || '').replace(/'/g, "\\'")}')">${I18N.t('skills.action.update_skill', null, '上传更新')}</button>`;
+      btns = `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.id}','${s.scope}')">${I18N.t('skills.action.delete')}</button>`;
+      btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();showSkillUpdate('${s.id}','${(s.display_name || s.name || '').replace(/'/g, "\\'")}')">${I18N.t('skills.action.update_skill', null, '上传更新')}</button>`;
       if (_currentRepo()) {
         if (s.scope === 'user') {
           btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}','user')">转仓库</button>`;
@@ -521,9 +519,9 @@ function _renderSkillCard(s, fixedWidth) {
       <div class="rh">
         <span style="font-size:20px">📁</span>
         <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
-        <span class="rn">${s.display_name || s.name}</span>
+        <span class="rn">${_escapeHtml(s.display_name || s.name)}</span>
       </div>
-      <div class="rd">${s.description || ''}</div>
+      <div class="rd">${_escapeHtml(s.description || '')}</div>
       <div class="rf">
         <span class="s">${I18N.t('skills.action.view')||'查看'} →</span>
       </div>
@@ -535,14 +533,14 @@ function _renderSkillCard(s, fixedWidth) {
       <span style="font-size:14px">${meta.icon||''}</span>
       <span class="tg ${tagClass}" style="font-size:9px">${meta.label||at}</span>
       ${s.category_name ? `<span class="tg" style="font-size:9px;background:rgba(49,104,224,0.08);color:var(--a)">${_escapeHtml(s.category_name)}</span>` : ''}
-      <span class="rn">${s.display_name || s.name}</span>
+      <span class="rn">${_escapeHtml(s.display_name || s.name)}</span>
       ${featuredBadge}
     </div>
-    <div class="rd" style="margin-bottom:8px" title="${(s.description||'').replace(/"/g,'&quot;')}">${s.description || ''}</div>
+    <div class="rd" style="margin-bottom:8px" title="${_escapeHtml(s.description||'')}">${_escapeHtml(s.description || '')}</div>
     ${scenesStr ? `<div class="ro" style="color:var(--a)" title="${scenesTitle.replace(/"/g,'&quot;')}">${I18N.t('skills.info_scenes')||'所属场景'}：${scenesStr}</div>` : ''}
     ${sceneCount > 0 || (s.repo_count||0) > 0 ? `<div class="ro">${sceneCount} ${I18N.t('skills.scenes_in_use_suffix')||'场景在用'}，${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</div>` : ''}
     <div class="rf">
-      ${isUserSkill ? '<span class="s"></span>' : `<span class="s" style="cursor:pointer" onclick="event.stopPropagation();toggleSkillLike(${s.id},this)">${likeIcon} ${likeCount}</span>`}
+      ${isUserSkill ? '<span class="s"></span>' : `<span class="s" style="cursor:pointer" onclick="event.stopPropagation();toggleSkillLike('${s.id}',this)">${likeIcon} ${likeCount}</span>`}
       <div class="sk-card-btns">
         ${s.scope === 'official' ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">${I18N.t('skills.action.view')||'详情'}</button>` : ''}
         ${actionBtns}
@@ -726,15 +724,15 @@ function renderSkillDetail(data) {
     <button class="det-back" onclick="_backFromSkillDetail()">← ${I18N.t('common.back')||'返回'}</button>
     <div class="det">
       <div class="det-head">
-        <span class="det-ico" style="--fg1:${grad.g1};--fg2:${grad.g2}">${meta.icon || '◈'}</span>
-        <h1 class="det-name">${data.display_name || data.name}</h1>
+        <span class="det-ico" style="--fg1:${grad.g1};--fg2:${grad.g2}">${_escapeHtml(meta.icon) || '◈'}</span>
+        <h1 class="det-name">${_escapeHtml(data.display_name || data.name)}</h1>
         <span class="agent-badge">${meta.label || at}</span>
         <div class="det-actions">
-          ${isUserDetail ? '' : `<button class="det-like ${data.liked_by_me?'liked':''}" onclick="toggleSkillLike(${data.id},this)">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
+          ${isUserDetail ? '' : `<button class="det-like ${data.liked_by_me?'liked':''}" onclick="toggleSkillLike('${data.id}',this)">${likedIcon} <span id="detailLikeCount">${likeCount}</span></button>`}
           ${(data.is_obs || data.zip_url) ? `<button class="det-dl" onclick="downloadSkillZip('${data.id}')">${I18N.t('skills.download_skill')||'下载技能包'}</button>` : ''}
         </div>
       </div>
-      <p class="det-sum">${data.description || ''}</p>
+      <p class="det-sum">${_escapeHtml(data.description || '')}</p>
       <div class="fn-card">
         <div class="fn-label">${I18N.t('skills.info_function')||'内容说明'}</div>
         <div class="fn-body">${contentHtml}</div>
@@ -1045,8 +1043,8 @@ function renderHuaweiCloudPackage(el, data) {
     <div class="cd" style="padding:16px 20px;margin-bottom:14px">
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:28px">📁</span>
-        <div><h3 style="font-size:16px;font-weight:600">${data.display_name||data.name}</h3><div style="font-size:12px;color:var(--t2);margin-top:4px">${data.description||''}</div></div>
-        <button class="bt bt-o bt-s" onclick="togglePkgSkillMd(${data.id})" style="margin-left:auto">${I18N.t('skills.action.view_skill_md')||'查看 SKILL.md'}</button>
+        <div><h3 style="font-size:16px;font-weight:600">${_escapeHtml(data.display_name||data.name)}</h3><div style="font-size:12px;color:var(--t2);margin-top:4px">${data.description||''}</div></div>
+        <button class="bt bt-o bt-s" onclick="togglePkgSkillMd('${data.id}')" style="margin-left:auto">${I18N.t('skills.action.view_skill_md')}</button>
       </div>
     </div>
     <div id="subSkillsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px"><div style="padding:20px;text-align:center;color:var(--t3)">${I18N.t('skills.huawei.loading_sub')||'加载中...'}</div></div>`;
@@ -1057,7 +1055,7 @@ function renderHuaweiCloudPackage(el, data) {
     if (!subs.length) { grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3)">' + (I18N.t('skills.huawei.no_sub_skill')||'暂无子技能') + '</div>'; return; }
     var html = '';
     subs.forEach(function(sub) {
-      html += '<div class="cd" style="padding:14px;cursor:pointer" onclick="loadSubSkillDetail('+data.id+',\''+sub.name+'\')">'
+      html += '<div class="cd" style="padding:14px;cursor:pointer" onclick="loadSubSkillDetail(\''+data.id+'\',\''+sub.name+'\')">'
         + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><span style="font-size:16px">📄</span><span style="font-size:13px;font-weight:600">'+(sub.display_name||sub.name)+'</span></div>'
         + '<div style="font-size:10px;color:var(--t3);margin-bottom:6px">'+sub.name+'</div>'
         + '<div style="font-size:11px;color:var(--t2);line-height:1.5;flex:1">'+(sub.description||'').substring(0,200)+'</div>'
@@ -1081,15 +1079,15 @@ function loadSubSkillDetail(pkgId, subName) {
       <button class="bt bt-o bt-s" onclick="_backFromSubSkill(${pkgId})" style="margin-bottom:12px">← ${I18N.t('skills.huawei.back')||'返回'}</button>
       <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;min-height:500px">
         <div class="cd" style="padding:16px 20px;overflow-y:auto">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:22px">📄</span><h3 style="font-size:15px;font-weight:600">${data.display_name||data.name}</h3></div>
-          <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${data.description||''}</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:22px">📄</span><h3 style="font-size:15px;font-weight:600">${_escapeHtml(data.display_name||data.name)}</h3></div>
+          <div style="font-size:12px;color:var(--t2);margin-bottom:14px;line-height:1.5">${_escapeHtml(data.description||'')}</div>
           <h3 style="font-size:13px;font-weight:600;margin-bottom:6px">SKILL.md</h3>
           <pre style="background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap">${safeContent||(I18N.t('skills.huawei.no_detail')||'无详情')}</pre>
         </div>
         <div class="cd" style="padding:16px 20px;font-size:12px">
           <h3 style="font-size:13px;font-weight:600;margin-bottom:10px">${I18N.t('skills.info_title')||'信息'}</h3>
           <div class="srow"><label>${I18N.t('skills.info_name')||'名称'}</label><span>${data.name}</span></div>
-          <div class="srow"><label>${I18N.t('skills.info_description')||'描述'}</label><span class="t2">${data.description||'—'}</span></div>
+          <div class="srow"><label>${I18N.t('skills.info_description')}</label><span class="t2">${_escapeHtml(data.description||'—')}</span></div>
         </div>
       </div>`;
   }).catch(function(e) {

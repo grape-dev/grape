@@ -17,7 +17,7 @@
   3. 重建 OBS 磁盘 zip 缓存 index.json：hash 为空的条目按本地缓存 zip 字节
      重算补齐（保留旧 index 备份 index.json.bak-1070）。
 
-校验口径与 src/storage/index.json 条目一致：{"hash": <sha256hex>, "sid": ...}。
+校验口径与 src/domains/runtime/storage/index.json 条目一致：{"hash": <sha256hex>, "sid": ...}。
 """
 import argparse
 import hashlib
@@ -86,7 +86,7 @@ def main():
                 fixed_hash = ""
                 if storage:
                     try:
-                        from src.user.db import get_skill_object_key
+                        from src.domains.mgmt.user.db import get_skill_object_key
                         key = get_skill_object_key(sid)
                         if key:
                             data = storage.read_bytes(key)

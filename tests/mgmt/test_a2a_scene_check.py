@@ -97,3 +97,12 @@ def test_t4_cross_repo_same_scene_id_isolated():
     _set_scene(REPO2, "scene-x", [])                          # repo B 空
     assert _scene_node_check(REPO, 5, "coding")["in_scene"] is True
     assert _scene_node_check(REPO2, 5, "coding")["in_scene"] is False
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_shared_db_env():
+    """混跑污染修复（D46/S68）：模块级私有库 env 全程不恢复——本文件跑完后，
+    后续任何按 env 重开连接的导入/reload 全部错开共享测试库（实测混跑
+    no such table / locked 族）。用例结束后恢复 conftest 的共享库路径。
+    本文件自身用例在 fixture 生效前已绑定各自连接，不受影响。"""
+    yield
+    os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_sessions.db")

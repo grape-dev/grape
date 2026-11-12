@@ -14,19 +14,20 @@
 
 所有 DB 操作用 mock，不连真实数据库。
 """
+
 import json
+
 import os
+
 import sys
+
 import urllib.error
+
 from unittest.mock import patch, MagicMock, AsyncMock
+
 from fastapi.testclient import TestClient
 
 import pytest
-
-
-# ===========================================================================
-# 1. get_repo_token_with_refresh 四级 fallback
-# ===========================================================================
 
 class TestGetRepoTokenWithRefresh:
     """测试 token 获取链路的四级降级。
@@ -35,20 +36,19 @@ class TestGetRepoTokenWithRefresh:
     """
 
     def test_level1_devops_agent_session_hits(self):
-        """第一级：devops_agent_session.repo_gitcode_token 有值 → 直接返回。"""
+        """D101 方案三：原第一级（session token）已退役——链首=RepoBotToken。
+        本用例转义为链首语义锁（session 级不存在，RepoBot 命中即返回）。"""
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value="SESSION_TOKEN"), \
-             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="REPO_BOT_TOKEN"), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
              patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
-            assert result == "SESSION_TOKEN"
+            assert result == "REPO_BOT_TOKEN"
 
     def test_level2_managed_repos_hits(self):
         """第二级：managed_repos.bot_gitcode_token 有值 → 直接返回。"""
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="REPO_BOT_TOKEN"), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="REPO_BOT_TOKEN"), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
              patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
@@ -57,31 +57,33 @@ class TestGetRepoTokenWithRefresh:
     def test_level3_global_bot_hits(self):
         """第三级：全局 bot token 有值 → 直接返回。"""
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
              patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "GLOBAL_BOT"
 
     def test_level4_user_token_fallback(self):
-        """第四级：三级全空 → 降级到用户 token。"""
+        """第四级：三级全空 → 降级到用户 token。
+
+        D85 迁移注记：旧入口 get_user_token_with_refresh(username, host_user_id)
+        已统一为 deps.get_user_token_for（S57/D30，provider 派生），db.py L2753
+        函数内 import 自 deps 源——patch deps.get_user_token_for 即可拦截。
+        """
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value=""), \
              patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser"}), \
-             patch("src.api.deps.get_user_token_with_refresh", return_value="USER_OAUTH_TOKEN") as m:
+             patch("src.api.deps.get_user_token_for", return_value="USER_OAUTH_TOKEN") as m:
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "USER_OAUTH_TOKEN"
-            m.assert_called_once_with("testuser", 42)
+            m.assert_called_once_with("testuser", user_id=42, provider="gitcode")
 
     def test_all_empty_returns_empty_string(self):
         """四级全空 → 返回空字符串。"""
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value=""), \
              patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
@@ -92,11 +94,6 @@ class TestGetRepoTokenWithRefresh:
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
         result = get_repo_token_with_refresh("")
         assert result == ""
-
-
-# ===========================================================================
-# 2. get_gitcode_token 向前兼容（内部委托 get_repo_token_with_refresh）
-# ===========================================================================
 
 class TestGetGitcodeTokenCompat:
     """测试 get_gitcode_token 内部委托 get_repo_token_with_refresh。"""
@@ -122,11 +119,6 @@ class TestGetGitcodeTokenCompat:
         from src.domains.mgmt.user.db import get_gitcode_token
         result = get_gitcode_token()
         assert result == ""
-
-
-# ===========================================================================
-# 3. _has_refresh_token
-# ===========================================================================
 
 class TestHasRefreshToken:
     """测试 PAT 场景判断（无 refresh_token）。"""
@@ -163,11 +155,6 @@ class TestHasRefreshToken:
             mock_db.cursor.return_value = cursor
             assert _has_refresh_token(42, "gitcode") is False
 
-
-# ===========================================================================
-# 4. get_user_token_with_refresh PAT 兼容
-# ===========================================================================
-
 class TestGetUserTokenWithRefreshPAT:
     """测试 PAT 场景下跳过刷新。"""
 
@@ -182,22 +169,22 @@ class TestGetUserTokenWithRefreshPAT:
             m_refresh.assert_not_called()
 
     def test_oauth_with_refresh_checks_expiry(self):
-        """OAuth（有 refresh_token）→ 走原过期检查逻辑，过期时触发刷新。"""
+        """OAuth（有 refresh_token）→ 走原过期检查逻辑，过期时触发刷新。
+
+        D85 迁移注记：凭据读取/刷新入口已统一（S57/D30）——
+        _get_gitcode_credential_by_gitcode_id → user_db.get_credential；
+        try_refresh_gitcode_token → provider_link.refresh_token_for。
+        """
         from src.api.deps import get_user_token_with_refresh
         # token_expires_at=0 + fetched_at=0 → 走降级 → age=now-0 > 1800 → need_refresh
         mock_cred = {"token_expires_at": 0, "fetched_at": 0, "access_token": "OAUTH_TOKEN"}
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="OAUTH_TOKEN"), \
              patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=True), \
-             patch("src.api.deps._get_gitcode_credential_by_gitcode_id", return_value=mock_cred), \
-             patch("src.api.deps.try_refresh_gitcode_token", return_value="REFRESHED_TOKEN") as m_refresh:
+             patch("src.domains.mgmt.user.db.get_credential", return_value=mock_cred), \
+             patch("src.kernel.auth_sdk.provider_link.refresh_token_for", return_value="REFRESHED_TOKEN") as m_refresh:
             result = get_user_token_with_refresh("testuser", user_id=42)
             # 无论是否刷新，都应该返回 token（刷新成功返回 REFRESHED_TOKEN，否则返回原 token）
             assert result in ("REFRESHED_TOKEN", "OAUTH_TOKEN")
-
-
-# ===========================================================================
-# 5. get_webhook_token_by_repo 优先 webhook_secret
-# ===========================================================================
 
 class TestGetWebhookTokenByRepo:
     """测试 webhook 验证密钥优先。"""
@@ -223,23 +210,16 @@ class TestGetWebhookTokenByRepo:
             assert result == "OLD_BOT_TOKEN"
 
     def test_empty_repo_returns_empty(self):
-        """无记录 → 空字符串。"""
+        """无记录 → 空字符串。
+
+        D85 迁移注记：S85 后函数前置 get_webhook_secret_by_repo_key_any
+        （ORM 路径，不读 db mock）——mock db 层会使 MagicMock 穿透断言。
+        改真库（测试库无该仓记录 → 前置查询与主查询均空 → 空串）。
+        """
         from src.domains.mgmt.user.db import get_webhook_token_by_repo
-        with patch("src.domains.mgmt.user.db.db") as mock_db, patch("src.domains.mgmt.user.db.db_lock"):
-            cursor = MagicMock()
-            cursor.fetchone.return_value = None
-            mock_db.cursor.return_value = cursor
-            result = get_webhook_token_by_repo("unknown/repo")
-            assert result == ""
+        result = get_webhook_token_by_repo("unknown/repo")
+        assert result == ""
 
-
-# ===========================================================================
-# 6. PAT 绑定端点
-# ===========================================================================
-
-# ===========================================================================
-# 7. 自循环检测标记优先
-# ===========================================================================
 
 class TestSelfLoopDetection:
     """测试 pipeline 步骤顺序：2.0b(开发者指令) → 2.0(自循环) → 2.0a(标记)（R20.6.2）。"""
@@ -258,11 +238,6 @@ class TestSelfLoopDetection:
         assert handler_pos > 0, "handler.is_self_loop_actor not found"
         assert marker_pos > 0, "2.0a marker check not found"
         assert handler_pos < marker_pos, "self-loop check (2.0) should come before marker check (2.0a)"
-
-
-# ===========================================================================
-# 8. is_email_configured
-# ===========================================================================
 
 class TestIsEmailConfigured:
     """测试邮箱服务配置检测。"""
@@ -294,11 +269,6 @@ class TestIsEmailConfigured:
              patch("src.domains.mgmt.auth.email_service._resend_api_key", return_value=""), \
              patch("src.domains.mgmt.auth.email_service._dev_verification_code", return_value="123456"):
             assert is_email_configured() is False
-
-
-# ===========================================================================
-# 8b. 注册流程有邮箱/无邮箱两个场景
-# ===========================================================================
 
 class TestRegisterEmailScenarios:
     """测试注册流程在有无邮箱配置两个场景下的行为。"""
@@ -371,11 +341,6 @@ class TestRegisterEmailScenarios:
             m_send.assert_not_called()
             assert resp.status_code == 200
 
-
-# ===========================================================================
-# 8c. 忘记密码有邮箱/无邮箱两个场景
-# ===========================================================================
-
 class TestForgotPasswordEmailScenarios:
     """测试忘记密码在有无邮箱配置两个场景下的行为。"""
 
@@ -405,11 +370,6 @@ class TestForgotPasswordEmailScenarios:
             # Just verify it doesn't return 503
             assert resp.status_code != 503
 
-
-# ===========================================================================
-# 8d. /auth/providers 返回 email_configured
-# ===========================================================================
-
 class TestProvidersEmailConfigured:
     """测试 /auth/providers 返回 email_configured 字段。"""
 
@@ -435,11 +395,6 @@ class TestProvidersEmailConfigured:
             assert "email_configured" in data
             assert data["email_configured"] is False
 
-
-# ===========================================================================
-# 9. 三个绑定场景测试
-# ===========================================================================
-
 class TestBindingScenarios:
     """测试三种绑定场景的 token 有效期和刷新行为。
 
@@ -451,41 +406,60 @@ class TestBindingScenarios:
     # --- 场景一：OAuth 授权绑定 ---
 
     def test_oauth_bind_stores_refresh_token(self):
-        """场景一：OAuth 授权 → 存入 refresh_token + token_expires_at。"""
+        """场景一：OAuth 授权 → 存入 refresh_token + token_expires_at。
+
+        D85 迁移注记：create_external_identity 已 S79 ORM 化（_uow/_iar，
+        原 mock db 层断言 INSERT 失效）。改真库 + 仓库层 spy——对齐 s79
+        真库写法（不 mock 数据访问层），断言 _iar.create 被调。
+        """
         from src.domains.mgmt.auth.grape_account_db import create_external_identity
-        import time as _time_module
-        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
-             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
-             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"), \
-             patch.object(_time_module, "time", return_value=1000000), \
-             patch.object(_time_module, "strftime", return_value="2026-01-01 00:00:00"):
-            cursor = MagicMock()
-            cursor.fetchone.return_value = None
-            mock_db.cursor.return_value = cursor
-            mock_db.commit.return_value = None
+        import src.domains.mgmt.auth.grape_account_db as _gad
+        with patch.object(_gad, "_iar") as mock_iar, \
+             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"):
+            mock_iar.get_active_by_user_provider.return_value = None  # 无活跃绑定
+            mock_iar.get_by_platform.return_value = None  # 无解绑记录 → 新建分支
             result = create_external_identity(
                 grape_user_id=1, provider="gitcode", external_id="123",
                 external_login="testuser", access_token="oauth_token",
                 refresh_token="rt_abc", expires_in=3600
             )
             assert result is True
-            insert_calls = [c for c in cursor.execute.call_args_list if "INSERT" in str(c)]
-            assert len(insert_calls) > 0
+            assert mock_iar.create.called, "新建分支应调用 _iar.create（旧实现=INSERT）"
 
     def test_oauth_token_triggers_refresh_near_expiry(self):
-        """场景一：OAuth token 临近过期 → 触发刷新。"""
+        """场景一：OAuth token 临近过期 → 触发刷新。
+
+        D100 R1 + D105 后现链（deps.py get_user_token_for）：token 唯一权威=
+        external_identities（登录凭据域），预刷新判定读 ei.token_expires_at
+        （user_credentials <p>_oauth 快照已清退，get_credential 不再被咨询）；
+        过期判定命中后经 _try_refresh_user_token → provider_link.refresh_token_for。
+        对齐 S1/S79 真库写法：create_grape_account（uuid 主键）+ 真实 ei 行
+        （expires_in=300 → 距过期 5 分钟 < 10 分钟阈值）→ 断言刷新被触发。
+        """
         from src.api.deps import get_user_token_with_refresh
-        import time as _time
-        now = int(_time.time())
-        # token 5 分钟后过期 → 距过期不足 10 分钟 → need_refresh=True
-        mock_cred = {"token_expires_at": now + 300, "fetched_at": now, "access_token": "OAUTH_TOKEN"}
-        with patch("src.api.deps._get_oauth_token_from_identity", return_value="OAUTH_TOKEN"), \
-             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=True), \
-             patch("src.api.deps._get_gitcode_credential_by_gitcode_id", return_value=mock_cred), \
-             patch("src.api.deps.try_refresh_gitcode_token", return_value="REFRESHED_TOKEN") as m:
-            result = get_user_token_with_refresh("testuser", user_id=1)
-            m.assert_called_once()
-            assert result == "REFRESHED_TOKEN"
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, create_external_identity
+        from src.kernel.session_manager import db, db_lock
+        import uuid as _uuid
+        _uname = f"oauth_refresh_{_uuid.uuid4().hex[:8]}"
+        acc = create_grape_account(username=_uname, email="", password="t123")
+        assert acc, "create_grape_account 失败（D105 uuid 主键入口）"
+        uid = acc["id"]
+        assert create_external_identity(
+            grape_user_id=uid, provider="gitcode", external_id="ext-oauth-refresh",
+            external_login=_uname, access_token="OAUTH_TOKEN",
+            refresh_token="rt_abc", expires_in=300)
+        try:
+            with patch("src.kernel.auth_sdk.provider_link.refresh_token_for",
+                       return_value="REFRESHED_TOKEN") as m:
+                result = get_user_token_with_refresh(_uname, user_id=uid)
+                m.assert_called_once()
+                assert result == "REFRESHED_TOKEN"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM external_identities WHERE grape_user_id=? AND provider='gitcode'", (uid,))
+                c.execute("DELETE FROM grape_accounts WHERE id=?", (uid,))
+                db.commit()
 
     def test_oauth_token_no_refresh_when_not_expired(self):
         """场景一：OAuth token 未过期 → 不触发刷新。"""
@@ -496,8 +470,8 @@ class TestBindingScenarios:
         mock_cred = {"token_expires_at": now + 3600, "fetched_at": now, "access_token": "OAUTH_TOKEN"}
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="OAUTH_TOKEN"), \
              patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=True), \
-             patch("src.api.deps._get_gitcode_credential_by_gitcode_id", return_value=mock_cred), \
-             patch("src.api.deps.try_refresh_gitcode_token") as m:
+             patch("src.domains.mgmt.user.db.get_credential", return_value=mock_cred), \
+             patch("src.kernel.auth_sdk.provider_link.refresh_token_for") as m:
             result = get_user_token_with_refresh("testuser", user_id=1)
             m.assert_not_called()
             assert result == "OAUTH_TOKEN"
@@ -560,26 +534,25 @@ class TestBindingScenarios:
             assert result == "PAT_TOKEN"
 
     def test_pat_overwrites_oauth_binding(self):
-        """场景三：OAuth 绑定后再绑 PAT → 覆盖更新（create_external_identity UPDATE 分支）。"""
+        """场景三：OAuth 绑定后再绑 PAT → 覆盖更新（create_external_identity 更新分支）。
+
+        D85 迁移注记：ORM 化后活跃重绑走 _iar.get_active_by_user_provider +
+        update_by_id（旧 UPDATE 断言失效）。spy 仓库层断言 update_by_id 被调。
+        """
         from src.domains.mgmt.auth.grape_account_db import create_external_identity
-        import time as _time_module
-        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
-             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
-             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"), \
-             patch.object(_time_module, "time", return_value=1000000), \
-             patch.object(_time_module, "strftime", return_value="2026-01-01 00:00:00"):
-            cursor = MagicMock()
-            cursor.fetchone.return_value = (1,)
-            mock_db.cursor.return_value = cursor
-            mock_db.commit.return_value = None
+        import src.domains.mgmt.auth.grape_account_db as _gad
+        _active = type("ActiveRow", (), {"id": 1, "external_avatar": "", "external_id": "123",
+                                          "external_login": "testuser"})()
+        with patch.object(_gad, "_iar") as mock_iar, \
+             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"):
+            mock_iar.get_active_by_user_provider.return_value = _active
             result = create_external_identity(
                 grape_user_id=1, provider="gitcode", external_id="123",
                 external_login="testuser", access_token="PAT_OVERWRITE",
                 refresh_token="", expires_in=0
             )
             assert result is True
-            update_calls = [c for c in cursor.execute.call_args_list if "UPDATE" in str(c)]
-            assert len(update_calls) > 0
+            assert mock_iar.update_by_id.called, "活跃重绑应调用 _iar.update_by_id（旧实现=UPDATE）"
 
     # --- 绑定弹窗 UI 场景 ---
 
@@ -628,20 +601,20 @@ class TestBindingScenarios:
         # providers 列表非空（至少有一个 provider 定义，不管是否配置）
         assert len(data.get("providers", [])) > 0
 
-
-# ===========================================================================
-# 9. add_managed_repo 签名兼容
-# ===========================================================================
-
 class TestAddManagedRepoSignature:
     """测试 add_managed_repo 新参数向前兼容。"""
 
     def test_new_params_have_defaults(self):
-        """host_user_id 和 webhook_secret 有默认值。"""
+        """host_user_id 和 webhook_secret 有默认值。
+
+        D105 第二批口径（grape-db-migration 哨兵语义 + domains/mgmt/user/db.py:1199 实现）：
+        host_user_id 整型哨兵 0 已随 user_id 族 TEXT 化退役，改空串 ''
+        （MySQL 下整型 0 与 TEXT 列比较会强转误匹配，哨兵必须字面量化）。
+        """
         import inspect
         from src.domains.mgmt.user.db import add_managed_repo
         sig = inspect.signature(add_managed_repo)
-        assert sig.parameters["host_user_id"].default == 0
+        assert sig.parameters["host_user_id"].default == ""
         assert sig.parameters["webhook_secret"].default == ""
 
     def test_old_call_without_new_params_works(self):
@@ -653,11 +626,6 @@ class TestAddManagedRepoSignature:
             # 只传旧参数
             result = add_managed_repo("gitcode:owner/repo", "owner", "repo", webhook_id=123)
             assert result is True
-
-
-# ===========================================================================
-# 10. _get_task_token helper
-# ===========================================================================
 
 class TestGetTaskToken:
     """测试 task token 获取 helper。"""

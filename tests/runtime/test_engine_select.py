@@ -266,9 +266,12 @@ class TestRepoUserIdIssueCreator:
         """
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT INTO grape_accounts (username, password_hash, status) VALUES (?,?,?)",
-                      (username, "x-test-only", status))
-            uid = c.lastrowid
+            # D105：grape_accounts.id 为 TEXT UUID 主键——裸 INSERT + lastrowid 会得
+            # rowid 假 id（列值 NULL），实现链路恒不命中（对齐 F2/identity 族教训）。
+            # 显式生成字符串 uuid，返回值即真实主键。
+            uid = str(__import__("uuid").uuid4())
+            c.execute("INSERT INTO grape_accounts (id, username, password_hash, status) VALUES (?,?,?,?)",
+                      (uid, username, "x-test-only", status))
             # 无平台数字 ID 时给合成值：external_identities 该列 NOT NULL + UNIQUE(provider, external_id)，
             # 同用例内多个账号写 ''/NULL 都会撞约束（合成值不会被 issue_creator 命中）
             c.execute("INSERT INTO external_identities "
@@ -298,7 +301,7 @@ class TestRepoUserIdIssueCreator:
     def test_issue_creator_resolved_to_mapping(self):
         """场景1：issue_creator 匹配 unified_user_mapping → 返回该 user_id（非最小 user_id）。"""
         self._seed(users=[100, 501], mapping=[(501, "creator_alice")])
-        assert es._repo_user_id(self.REPO, issue_creator="creator_alice") == 501
+        assert str(es._repo_user_id(self.REPO, issue_creator="creator_alice")) == str(501)
 
     def test_unknown_issue_creator_returns_zero(self):
         """场景2（Issue #211 更新）：issue_creator 未注册 grape → 返回 0（不再回退取第一个 join 用户）。"""
@@ -308,12 +311,12 @@ class TestRepoUserIdIssueCreator:
     def test_empty_issue_creator_falls_back(self):
         """场景3：issue_creator="" → 回退 user_repos ORDER BY user_id ASC。"""
         self._seed(users=[100, 200])
-        assert es._repo_user_id(self.REPO, issue_creator="") == 100
+        assert str(es._repo_user_id(self.REPO, issue_creator="")) == str(100)
 
     def test_no_issue_creator_arg_falls_back(self):
         """场景4：不传 issue_creator（默认 ""）→ 回退 user_repos ORDER BY user_id ASC。"""
         self._seed(users=[100, 200])
-        assert es._repo_user_id(self.REPO) == 100
+        assert str(es._repo_user_id(self.REPO)) == str(100)
 
     def test_issue_creator_resolved_via_external_login(self):
         """Issue #211 二级回退：issue_creator 匹配 external_identities.external_login（无 unified_user_mapping）。"""
@@ -352,3 +355,5 @@ class TestRepoUserIdIssueCreator:
         # unified_user_mapping 中 gitcode_user="eve_gitcode" → 应返回 uid（而非因 username="dev_eve" 不匹配而走二级）
         self._seed(users=[uid], mapping=[(uid, "eve_gitcode")])
         assert es._repo_user_id(self.REPO, issue_creator="eve_gitcode") == uid
+
+

@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from src.kernel.session_manager import db, db_lock
 
-_REPO = "gitcode:XOcto/i1573-repo"
+_REPO = "gitcode:example-org/i1573-repo"
 _NUM = 1573
 _SCENE = "scene-1573"
 
@@ -39,7 +39,7 @@ def _seed_repo():
         c.execute(
             "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, "
             "webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) "
-            "VALUES (?, 'XOcto', 'i1573-repo', 'XOcto/i1573-repo', 0, ?, '', 'wt-1573', 'grape_bot')",
+            "VALUES (?, 'example-org', 'i1573-repo', 'example-org/i1573-repo', 0, ?, '', 'wt-1573', 'grape_bot')",
             (_REPO, _SCENE))
         nodes = [{"tag": "sre", "id": "sre", "skill": "sre-cli", "enabled": True,
                   "engine_runtime_ids": [77]}]
@@ -88,7 +88,7 @@ def _merged_payload():
             "action": "merge",
             "state": "merged",
         },
-        "project": {"path_with_namespace": "XOcto/i1573-repo"},
+        "project": {"path_with_namespace": "example-org/i1573-repo"},
         "user": {"username": "human_user"},
     }).encode()
 
@@ -100,11 +100,11 @@ def _run_pipeline(monkeypatch):
     monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
     monkeypatch.setattr(es, "get_scene_pool_engine_ids", lambda *a, **kw: None)
     monkeypatch.setattr(retry_mod, "schedule_pr_merged_sre_retry", lambda *a, **kw: True)
-    with patch("src.user.db.get_agent_bot_token", return_value=""), \
-         patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-         patch("src.user.db.get_repo_token_with_refresh", return_value="tok-1573"):
+    with patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+         patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+         patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok-1573"):
         ep.run_pipeline(_merged_payload(), {"X-GitCode-Event": "Merge Request Hook"},
-                        account="XOcto/i1573-repo")
+                        account="example-org/i1573-repo")
 
 
 class TestPRMergedReviewResume:

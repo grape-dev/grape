@@ -9,23 +9,61 @@
  * @param {number} size — 像素尺寸，默认 14
  * @returns {string} SVG HTML 字符串
  */
+// 台阶2：品牌色唯一权威 = 平台卡（configs/platforms brand_color → /settings/vcs/platforms
+// → _provBrandColor）。本表降为同步首屏/目录未就位时的兜底（与 _PROV_NAMES 同款分层）。
 var PLATFORM_BRAND_COLOR = {
-  gitcode: '#F54A36',
-  github: '#1F2328',
+  gitcode: '#DA203E',
+  github: '#0969DA',
+  gitee: '#C71D23', // D44：gitee 官方品牌红（与卡一致）
+  gitlab: '#FC6D26', // D102-N：gitlab 官方橙（与卡一致）
+  huawei: '#C7000B', // D102：华为官方红（渠道卡 brand_color 同值）
 };
 
 function platformIcon(provider, size) {
   size = size || 14;
   var s = 'vertical-align:-2px;flex-shrink:0';
-  var color = PLATFORM_BRAND_COLOR[provider] || 'var(--a)';
+  var color = (window._provBrandColor && window._provBrandColor(provider))
+    || PLATFORM_BRAND_COLOR[provider] || 'var(--a)';
   if (provider === 'github') {
-    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" data-p="' + provider + '" style="' + s + '"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
   }
-  // gitcode
-  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+  if (provider === 'gitcode') {
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" data-p="' + provider + '" style="' + s + '"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+  }
+  // D102：gitee 官方 G 形 logo（自 app.js _OAUTH_ICONS.gitee 移植——
+  // 原先 gitee 落 D44 通用分支图标，引导页品牌显示错误）
+  if (provider === 'gitee') {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" data-p="' + provider + '" style="' + s + '"><path d="M512 1024C229.222 1024 0 794.778 0 512S229.222 0 512 0s512 229.222 512 512-229.222 512-512 512z m259.149-568.883h-290.74a25.293 25.293 0 0 0-25.292 25.293l-0.026 63.206c0 13.952 11.315 25.293 25.267 25.293h177.024c13.978 0 25.293 11.315 25.293 25.267v12.646a75.853 75.853 0 0 1-75.853 75.853h-240.23a25.293 25.293 0 0 1-25.267-25.293V417.203a75.853 75.853 0 0 1 75.827-75.853h353.946a25.293 25.293 0 0 0 25.267-25.292l0.077-63.207a25.293 25.293 0 0 0-25.268-25.293H417.152a189.62 189.62 0 0 0-189.62 189.645V771.15c0 105.004 85.03 190.134 189.997 190.134h235.486a170.68 170.68 0 0 0 170.645-170.68V480.423a25.293 25.293 0 0 0-25.267-25.293z"/></svg>';
+  }
+  // D102-K: 华为云官方八瓣花瓣 logo（与 app.js _OAUTH_ICONS.hwcloud 同源）
+  if (provider === 'hwcloud' || provider === 'huawei') { // 键归一：绑定体系用 huawei（实弹 2026-11-08）
+    // 华为官方 logo（Simple Icons 官方路径——2026-11-08 替换手搓八瓣，形不像被驳回）
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="' + color + '" class="platform-icon" data-p="' + provider + '" style="' + s + '"><path d="M3.67 6.14S1.82 7.91 1.72 9.78v.35c.08 1.51 1.22 2.4 1.22 2.4 1.83 1.79 6.26 4.04 7.3 4.55 0 0 .06.03.1-.01l.02-.04v-.04C7.52 10.8 3.67 6.14 3.67 6.14zM9.65 18.6c-.02-.08-.1-.08-.1-.08l-7.38.26c.8 1.43 2.15 2.53 3.56 2.2.96-.25 3.16-1.78 3.88-2.3.06-.05.04-.09.04-.09zm.08-.78C6.49 15.63.21 12.28.21 12.28c-.15.46-.2.9-.21 1.3v.07c0 1.07.4 1.82.4 1.82.8 1.69 2.34 2.2 2.34 2.2.7.3 1.4.31 1.4.31.12.02 4.4 0 5.54 0 .05 0 .08-.05.08-.05v-.06c0-.03-.03-.05-.03-.05zM9.06 3.19a3.42 3.42 0 00-2.57 3.15v.41c.03.6.16 1.05.16 1.05.66 2.9 3.86 7.65 4.55 8.65.05.05.1.03.1.03a.1.1 0 00.06-.1c1.06-10.6-1.11-13.42-1.11-13.42-.32.02-1.19.23-1.19.23zm8.299 2.27s-.49-1.8-2.44-2.28c0 0-.57-.14-1.17-.22 0 0-2.18 2.81-1.12 13.43.01.07.06.08.06.08.07.03.1-.03.1-.03.72-1.03 3.9-5.76 4.55-8.64 0 0 .36-1.4.02-2.34zm-2.92 13.07s-.07 0-.09.05c0 0-.01.07.03.1.7.51 2.85 2 3.88 2.3 0 0 .16.05.43.06h.14c.69-.02 1.9-.37 3-2.26l-7.4-.25zm7.83-8.41c.14-2.06-1.94-3.97-1.94-3.98 0 0-3.85 4.66-6.67 10.8 0 0-.03.08.02.13l.04.01h.06c1.06-.53 5.46-2.77 7.28-4.54 0 0 1.15-.93 1.21-2.42zm1.52 2.14s-6.28 3.37-9.52 5.55c0 0-.05.04-.03.11 0 0 .03.06.07.06 1.16 0 5.56 0 5.67-.02 0 0 .57-.02 1.27-.29 0 0 1.56-.5 2.37-2.27 0 0 .73-1.45.17-3.14z"/></svg>';
+  }
+
+  // D44：其余平台用通用 git 分支图标 + 平台品牌色——
+  // 不再冒用 gitcode logo（误导品牌），新平台由目录接口自动出现
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 16 16" fill="' + color + '" class="platform-icon" data-p="' + provider + '" style="' + s + '"><path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1.5 0v.878A2.25 2.25 0 0 0 5.75 8.5h1.5v2.128a2.251 2.251 0 1 0 1.5 0V8.5h1.5a2.25 2.25 0 0 0 2.25-2.25v-.878a2.25 2.25 0 1 0-1.5 0v.878a.75.75 0 0 1-.75.75h-4.5A.75.75 0 0 1 5 6.25v-.878Zm3.75 7.378a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm3-8.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/></svg>';
+}
+
+// 台阶2：目录就位后品牌色原地刷新（projectNewBtn 模式——首屏同步兜底色渲染，
+// _appLoadVcsCatalog 异步就位后按卡 brand_color 原地替换 fill，不重绘整页）。
+if (typeof _appLoadVcsCatalog === 'function') {
+  _appLoadVcsCatalog().then(function() {
+    document.querySelectorAll('svg.platform-icon[data-p]').forEach(function(el) {
+      var c = window._provBrandColor(el.getAttribute('data-p'));
+      if (c && el.getAttribute('fill') !== c) el.setAttribute('fill', c);
+    });
+  });
 }
 
 let _projectsContent = '';
+// D105k：凭据域变更（配/清 PAT）后由 account.js 调用——项目页缓存内容失效，
+// 下次进入强制重拉 /repos/member（否则复用"清空期间"的空列表缓存）
+window.invalidateProjectsCache = function() {
+  _projectsContent = '';
+  _projectsRepos = [];
+};
 let _projectsRepos = [];
 
 function renderSelectionShell(tab, innerHtml) {
@@ -159,11 +197,18 @@ function _searchRepos() {
 }
 
 function _buildNewProjectBtn() {
-  // 新建项目按钮——统一单一入口，平台选择在模态框内完成
-  var platforms = _getAvailablePlatforms();
+  // 新建项目按钮——统一单一入口，平台选择在模态框内完成。
+  // 首屏同步渲染（兜底平台），目录就位后原地替换节点（数据驱动，不重绘整个大厅）。
+  _loadPlatformCatalog(function() {
+    var el = document.getElementById('projectNewBtn');
+    if (el) el.outerHTML = _renderNewProjectBtnInner(_getAvailablePlatforms());
+  });
+  return _renderNewProjectBtnInner(_getAvailablePlatforms());
+}
+function _renderNewProjectBtnInner(platforms) {
   var p = platforms.length >= 1 ? platforms[0] : {key: 'gitcode', name: 'GitCode'};
   var plusIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
-  return '<button class="project-new-btn" onclick="openCreateRepoModal()" title="' + I18N.t('repos.lobby.new_project_btn') + '" style="display:inline-flex;align-items:center;gap:6px">' +
+  return '<button id="projectNewBtn" class="project-new-btn" onclick="openCreateRepoModal()" title="' + I18N.t('repos.lobby.new_project_btn') + '" style="display:inline-flex;align-items:center;gap:6px">' +
     plusIcon +
     '<span>' + I18N.t('repos.lobby.new_project_btn') + '</span>' +
     '</button>';
@@ -191,13 +236,39 @@ function _buildProjectListHtml() {
 // 需求17: 平台切换——按平台筛选仓库
 let _activePlatformFilter = ''; // '' = 全部, 'gitcode' / 'github'
 
+// D105e 根修：平台列表数据驱动——唯一权威 = 平台卡目录（/settings/vcs/platforms，
+// app.js PlatformCatalog 同源），绑定交集过滤。新增平台 = 配卡，零前端改动。
+var _platformCatalog = null;
+function _loadPlatformCatalog(cb) {
+  if (_platformCatalog) return cb(_platformCatalog);
+  var fallback = {gitcode:{key:'gitcode',name:'GitCode'},
+                  github:{key:'github',name:'GitHub'},
+                  gitee:{key:'gitee',name:'Gitee'}};
+  var done = false;
+  var finish = function(cat) {
+    if (done) return; done = true;
+    _platformCatalog = (cat && Object.keys(cat).length) ? cat : fallback;
+    cb(_platformCatalog);
+  };
+  if (typeof _appLoadVcsCatalog === 'function') {
+    _appLoadVcsCatalog().then(function(cat) {
+      var m = {};
+      Object.keys(cat || {}).forEach(function(k) { m[k] = {key: k, name: (cat[k] && cat[k].name) || k}; });
+      finish(m);
+    }).catch(function() { finish(fallback); });
+    setTimeout(function() { finish(fallback); }, 4000);   // 目录接口超时兜底
+  } else finish(fallback);
+}
 function _getAvailablePlatforms() {
   var _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
   var bindings = (_lu && _lu.bindings) || [];
-  // Always include platforms that have repos even if not in bindings (edge case)
+  var cat = _platformCatalog || {gitcode:{key:'gitcode',name:'GitCode'},
+                                 github:{key:'github',name:'GitHub'},
+                                 gitee:{key:'gitee',name:'Gitee'}};
   var platforms = [];
-  if (bindings.indexOf('gitcode') >= 0) platforms.push({key: 'gitcode', name: 'GitCode'});
-  if (bindings.indexOf('github') >= 0) platforms.push({key: 'github', name: 'GitHub'});
+  Object.keys(cat).forEach(function(k) {
+    if (bindings.indexOf(k) >= 0) platforms.push({key: k, name: cat[k].name || k});
+  });
   return platforms;
 }
 
@@ -228,8 +299,7 @@ function _filterByPlatform(repos) {
   if (!_activePlatformFilter) return repos;
   return repos.filter(function(r) {
     var rk = r.repo_key || '';
-    if (_activePlatformFilter === 'github') return rk.indexOf('github:') === 0;
-    return rk.indexOf('github:') !== 0; // gitcode = everything not github:
+    return rk.indexOf(_activePlatformFilter + ':') === 0; // D102-F: 前缀精确匹配（原"非 github 即 gitcode"把 gitee 错归 gitcode 桶）
   });
 }
 
@@ -304,7 +374,7 @@ function _loadOrgSection() {
       var borderColor = isActive ? 'var(--a)' : 'var(--b)';
       var badge = o.is_personal ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + ';margin-left:4px">' + I18N.t("organizations.badge_personal") + '</span>' : '';
       var roleTag = '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (o.role || 'member') + '</span>';
-      html += '<div onclick="app.switchOrg(' + o.id + ')" style="cursor:pointer;padding:10px 14px;border-radius:10px;border:1px solid ' + borderColor + ';background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:6px;min-width:160px;transition:all .15s" onmouseover="this.style.transform=\'scale(1.02)\'" onmouseout="this.style.transform=\'\'">'
+      html += '<div onclick="app.switchOrg(\'' + o.id + '\')" style="cursor:pointer;padding:10px 14px;border-radius:10px;border:1px solid ' + borderColor + ';background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:6px;min-width:160px;transition:all .15s" onmouseover="this.style.transform=\'scale(1.02)\'" onmouseout="this.style.transform=\'\'">'
         + '<span style="font-size:16px">🏢</span>'
         + '<div style="flex:1;min-width:0">'
         + '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
@@ -341,22 +411,21 @@ function goRepoPage(dir) {
   }
 }
 
+// D102-F: host/平台名统一消费 app.js 的 _repoWebHost（唯一权威派生器——
+// 卡目录优先+同步兜底一处维护），本文件不再自持字面量表
+function _provOf(rk) { return (rk || '').split(':')[0] || 'gitcode'; }
+
 function _repoUrl(r) {
-  var rk = r.repo_key || '';
   var fn = r.full_name || (r.owner ? r.owner + '/' + r.name : '');
-  if (rk.indexOf('github:') === 0) return 'https://github.com/' + fn;
-  return 'https://gitcode.com/' + fn;
+  return 'https://' + window._repoWebHost(r.repo_key) + '/' + fn;
 }
+var _PROV_NAMES = {github: 'GitHub', gitcode: 'GitCode', gitee: 'Gitee', gitlab: 'GitLab'};
 function _repoPlatform(r) {
-  var rk = r.repo_key || '';
-  if (rk.indexOf('github:') === 0) return 'GitHub';
-  return 'GitCode';
+  return _PROV_NAMES[_provOf(r.repo_key)] || 'GitCode';  // 平台名展示（目录无 name 字段，静态表仅 UI 文案）
 }
 
 function _repoPlatformIcon(r) {
-  var rk = r.repo_key || '';
-  var provider = (rk.indexOf('github:') === 0) ? 'github' : 'gitcode';
-  return platformIcon(provider, 14);
+  return platformIcon(_provOf(r.repo_key), 14);
 }
 
 function _buildProjectCard(r) {
@@ -463,7 +532,7 @@ function renderRepos() {
         const btnHtml = r.can_host
           ? `<button class="bt bt-p bt-s" onclick="event.stopPropagation();hostAndSelect('${r.full_name}','${r.owner}','${r.name}','',event)">${I18N.t('repos.available_btn.join_and_host')}</button>`
           : `<button class="bt bt-o bt-s" onclick="event.stopPropagation();hostNoPermission()">${I18N.t('repos.available_btn.join_and_host')}</button>`;
-        html += `<tr><td><b>${r.full_name}</b></td><td>${_repoPlatformIcon(r)} ${_repoPlatform(r)}</td><td>${roleTag}</td><td>${r.description || ''}</td><td>${btnHtml}</td></tr>`;
+        html += `<tr><td><b>${r.full_name}</b></td><td>${_repoPlatformIcon(r)} ${_repoPlatform(r)}</td><td>${roleTag}</td><td>${window.escHtml(r.description || '')}</td><td>${btnHtml}</td></tr>`;
       });
       html += `</table></div>`;
     }
@@ -505,8 +574,10 @@ function refreshRepos(btn) {
 
 function hostAndSelect(fullName, owner, name, repoKey, event) {
   // 按仓库来源平台透传 provider，避免后端按登录平台误判（host-repo-provider-routing-fix-design.md）
-  var _provider = (String(repoKey || '').indexOf('github:') === 0) ? 'github' :
-                  (String(repoKey || '').indexOf('gitcode:') === 0) ? 'gitcode' : '';
+  // S103/D77：provider 按 repo_key 前缀解析（任意平台卡），gitee 等仓不再传空回落登录平台
+  var _rk = String(repoKey || '');
+  var _pi = _rk.indexOf(':');
+  var _provider = (_pi > 0 && _rk.slice(0, _pi).indexOf('/') === -1) ? _rk.slice(0, _pi) : '';
   var _url = '/repos/host' + (_provider ? '?provider=' + _provider : '');
   var doHost = function() {
     API.post(_url, {full_name: fullName}).then(r => {
@@ -677,6 +748,9 @@ function _doUnhost(fullName) {
 // ====== 创建新项目弹窗 ======
 function openCreateRepoModal(presetProvider) {
   closeCreateRepoModal();
+  _loadPlatformCatalog(function() { _openCreateRepoModalInner(presetProvider); });
+}
+function _openCreateRepoModalInner(presetProvider) {
   var platforms = _getAvailablePlatforms();
   var showPlatformSelect = platforms.length > 1;
   var selectedProvider = presetProvider || (platforms.length > 0 ? platforms[0].key : 'gitcode');

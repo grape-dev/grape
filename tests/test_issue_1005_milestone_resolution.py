@@ -104,7 +104,7 @@ def api_client(monkeypatch):
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {
         "id": 1, "username": "u", "auth_type": "session_token",
         "agent_type": "vod", "user_id": 0, "repo_key": "gitcode:o/hello"}
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "tok")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "tok")
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -116,7 +116,7 @@ def test_milestones_list_adds_id_from_url(api_client, monkeypatch):
     def _fake_req(method, url, token="", body=None):
         return raw if method == "GET" else {}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = api_client.get("/api/git-repo/o/hello/milestones?state=all")
     assert r.status_code == 200
     item = r.json()[0]
@@ -132,7 +132,7 @@ def test_milestones_update_adds_id_from_url(api_client, monkeypatch):
     def _fake_req(method, url, token="", body=None):
         return raw
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = api_client.patch("/api/git-repo/o/hello/milestones/3", json={"state": "closed"})
     assert r.status_code == 200
     assert r.json()["id"] == 3

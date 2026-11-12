@@ -1,0 +1,15 @@
+{
+  "name": "GitLab",
+  "dialect": "gitlab",
+  "host": "gitlab.com",
+  "webhook_path": "/webhook/gitlab",
+  "event_header": "X-Gitlab-Event",
+  "api_base": "https://gitlab.com/api/v4",
+  "api_auth": "private_token",
+  "webhook_verify": "token_compare",
+  "clone_auth": "oauth2",
+  "download_base": "https://gitlab.com",
+  "brand_color": "#FC6D26",
+  "token_storage_field": "",
+  "webhook_token_field": ""
+}

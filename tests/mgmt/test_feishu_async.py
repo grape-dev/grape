@@ -4,24 +4,25 @@
 WS 消息解析（parse_ws_message / _parse_event）、ack 帧构造、BotManager 编排。
 网络（aiohttp/lark）与 WS 连接用 mock，不触真实飞书。
 """
+
 import asyncio
+
 import json
+
 import time
+
 import uuid
 
 import pytest
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.domains.runtime.im import feishu_async as fa
-from src.kernel.session_manager import db, db_lock
 
+from src.kernel.session_manager import db, db_lock
 
 def _app_id():
     return "cli_test_" + uuid.uuid4().hex[:8]
-
-
-# ====== seen 消息去重 ======
-
 
 class TestSeenMsgIds:
     def _clean(self, app_id):
@@ -32,17 +33,17 @@ class TestSeenMsgIds:
     def test_persist_then_load(self):
         app = _app_id()
         try:
-            fa._persist_seen_msg_id(app, "msg-1")
-            fa._persist_seen_msg_id(app, "msg-1")  # 幂等
-            fa._persist_seen_msg_id(app, "msg-2")
-            loaded = fa._load_seen_msg_ids(app)
+            ss._persist_seen_msg_id(app, "msg-1")
+            ss._persist_seen_msg_id(app, "msg-1")  # 幂等
+            ss._persist_seen_msg_id(app, "msg-2")
+            loaded = ss._load_seen_msg_ids(app)
             assert loaded == {"msg-1", "msg-2"}
         finally:
             self._clean(app)
 
     def test_load_returns_empty_when_none(self):
         app = _app_id()
-        assert fa._load_seen_msg_ids(app) == set()
+        assert ss._load_seen_msg_ids(app) == set()
 
     def test_cleanup_removes_expired(self):
         app = _app_id()
@@ -54,15 +55,11 @@ class TestSeenMsgIds:
                 c.execute("INSERT INTO bot_seen_messages (app_id, message_id, seen_at) VALUES (?,?,?)",
                           (app, "new", time.time()))
                 db.commit()
-            fa._cleanup_seen_msg_ids(app)
-            loaded = fa._load_seen_msg_ids(app)
+            ss._cleanup_seen_msg_ids(app)
+            loaded = ss._load_seen_msg_ids(app)
             assert "old" not in loaded and "new" in loaded
         finally:
             self._clean(app)
-
-
-# ====== 状态 / 上下文 ======
-
 
 class TestBotStateContext:
     def test_bot_state_enum(self):
@@ -102,10 +99,6 @@ class TestBotStateContext:
         assert d["state"] == "reconnecting"
         assert "metrics" in d
 
-
-# ====== GitCode 协作者拉取 ======
-
-
 class TestFetchCollaborators:
     def test_single_page(self):
         payload = [{"username": "u1"}, {"username": "u2"}]
@@ -123,10 +116,6 @@ class TestFetchCollaborators:
             collabs = fa._fetch_gitcode_collaborators("owner", "repo", "tok")
         assert collabs == []
 
-
-# ====== WS 消息解析 ======
-
-
 def _receive_payload(message_type="text", content='{"text":"hello"}', sender_open="ou1", chat_id="c1", at="", chat_type="group"):
     msg = {
         "type": "event",
@@ -142,7 +131,6 @@ def _receive_payload(message_type="text", content='{"text":"hello"}', sender_ope
     if at:
         msg["event"]["event"]["message"]["content"] = json.dumps({"text": "@_%s hello" % at})
     return json.dumps(msg)
-
 
 class TestParseWsMessage:
     def test_invalid_json_returns_none(self):
@@ -187,42 +175,36 @@ class TestParseWsMessage:
         payload = json.dumps({"type": "event", "event": {"header": {"event_type": "im.chat.updated"}}})
         assert fa.parse_ws_message(payload) == {"ws_type": "event", "event_type": "im.chat.updated"}
 
-
 class TestParseEvent:
     def test_non_message_returns_none(self):
-        assert fa._parse_event({"header": {"event_type": "im.chat.updated"}}) is None
+        assert fw._parse_event({"header": {"event_type": "im.chat.updated"}}) is None
 
     def test_text_message(self):
         data = json.loads(_receive_payload())
         evt = data["event"]
-        parsed = fa._parse_event(evt)
+        parsed = fw._parse_event(evt)
         assert parsed["type"] == "message" and parsed["text"] == "hello"
         assert parsed["chat_type"] == "group"
 
     def test_post_message(self):
         content = json.dumps({"content": [[{"tag": "text", "text": "a"}, {"tag": "text", "text": "b"}]]})
         data = json.loads(_receive_payload(message_type="post", content=content))
-        parsed = fa._parse_event(data["event"])
+        parsed = fw._parse_event(data["event"])
         assert parsed["text"] == "a b"
-
 
 class TestFrameHelpers:
     def test_get_header_found(self):
         h = [MagicMock(key="k1", value="v1"), MagicMock(key="k2", value="v2")]
-        assert fa._get_header(h, "k2") == "v2"
-        assert fa._get_header(h, "missing") == ""
+        assert fw._get_header(h, "k2") == "v2"
+        assert fw._get_header(h, "missing") == ""
 
     def test_build_ack_frame(self):
         frame = MagicMock()
         frame.SerializeToString.return_value = b"\x01\x02"
-        out = fa._build_ack_frame(frame)
+        out = fw._build_ack_frame(frame)
         frame.payload = json.dumps({"code": 200}).encode("utf-8")
         assert out == b"\x01\x02"
         assert json.loads(frame.payload) == {"code": 200}
-
-
-# ====== BotManager ======
-
 
 class TestBotManager:
     def test_add_get_remove(self):
@@ -284,10 +266,6 @@ class TestBotManager:
         asyncio.run(bm.stop())
         assert bm._bots == {}
 
-
-# ====== FeishuAsync HTTP 层（mock aiohttp session） ======
-
-
 class _FakeResp:
     def __init__(self, data, status=200):
         self._data = data
@@ -295,7 +273,6 @@ class _FakeResp:
 
     async def json(self):
         return self._data
-
 
 class _HttpCtx:
     def __init__(self, resp):
@@ -307,17 +284,14 @@ class _HttpCtx:
     async def __aexit__(self, *a):
         return False
 
-
 def _api_with_session():
     api = fa.FeishuAsync()
     sess = MagicMock()
     api._get_session = AsyncMock(return_value=sess)
     return api, sess
 
-
 def _ctx():
     return fa.BotContext(app_id="cli_h", app_secret="s", name="http")
-
 
 class TestFeishuAsyncHttp:
     def test_get_tenant_token_cached(self):
@@ -472,7 +446,7 @@ class TestFeishuAsyncHttp:
                                      "issue_number": "#7", "conv_id": "c1"}},
             },
         }
-        parsed = fa._parse_card_action(evt)
+        parsed = fw._parse_card_action(evt)
         assert parsed["text"] == "/task-open"
         assert parsed["_card_value"]["repo_key"] == "gitcode:a/b"
         assert parsed["_card_value"]["conv_id"] == "c1"
@@ -530,7 +504,6 @@ class TestFeishuAsyncHttp:
         with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
             assert asyncio.run(api.get_user_name(_ctx(), "")) == ""
 
-
 class TestWsPermanentFailure:
     """永久失效 Bot 自动停用（feishu_async.py _WS_PERMANENT_ERROR_CODES）。"""
 
@@ -574,3 +547,14 @@ class TestWsPermanentFailure:
         assert code == 10014
         assert "endpoint api error" in ctx.metrics.last_error
         sess.get.assert_not_called()
+
+from src.domains.runtime.im import seen_store as ss  # 旧 IM 下线 M1：seen 去重持久化迁到中立模块
+
+from src.domains.runtime.im.adapters.feishu import wire as fw  # M1：WS 帧/事件解析辅助迁到适配器侧
+
+"""飞书异步封装单元测试（src/domains/runtime/im/feishu_async.py）。
+
+覆盖：seen 消息去重持久化、BotState/BotMetrics/BotContext、GitCode 协作者拉取、
+WS 消息解析（parse_ws_message / _parse_event）、ack 帧构造、BotManager 编排。
+网络（aiohttp/lark）与 WS 连接用 mock，不触真实飞书。
+"""

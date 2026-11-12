@@ -9,24 +9,30 @@
   guard_impact{scripts:[...], breaking:true}；
 - 未命中 → breaking=False，清理照常执行，不产生 guard_impact 字段。
 """
+
 from __future__ import annotations
 
 import base64
+
 import fnmatch
+
 import re
 
 from src.kernel.config import log
+
 from src.kernel.repo_key import parse_repo_key
 
 # 守卫脚本目录与文件名模式（只扫脚本目录，避免整仓遍历）
 GUARD_DIRS = ("scripts", "tests")
+
 GUARD_PATTERNS = ("check-*.sh", "check-*.py")
 
 # 一次读取守卫文件的大小上限（防止超大脚本拖垮内存）
 _MAX_SCRIPT_BYTES = 1024 * 1024
-_MAX_PAGES = 10
-_MAX_DIR_DEPTH = 5
 
+_MAX_PAGES = 10
+
+_MAX_DIR_DEPTH = 5
 
 def is_guard_script(path: str) -> bool:
     """相对路径是否属于守卫脚本（scripts/**/check-* 或 tests/**/check-*）。
@@ -41,7 +47,6 @@ def is_guard_script(path: str) -> bool:
         return False
     name = parts[-1]
     return any(fnmatch.fnmatch(name, pat) for pat in GUARD_PATTERNS)
-
 
 def _reference_needles(target_paths) -> list[str]:
     needles = []
@@ -59,7 +64,6 @@ def _reference_needles(target_paths) -> list[str]:
                     needles.append(cand)
     return needles
 
-
 def _path_pattern(needle: str):
     """路径引用匹配（保守优先）。
 
@@ -72,7 +76,6 @@ def _path_pattern(needle: str):
     prefix = r"(?<![A-Za-z0-9_.-])"
     suffix = "" if needle.endswith(("/", "*")) else r"(?![A-Za-z0-9_.-])"
     return re.compile(prefix + escaped + suffix)
-
 
 def scripts_referencing(target_paths, scripts: dict) -> list[str]:
     """返回引用了待删路径的守卫脚本路径列表（scripts: {path: text}）。"""
@@ -88,7 +91,6 @@ def scripts_referencing(target_paths, scripts: dict) -> list[str]:
         if any(pat.search(body) for pat in patterns):
             hits.append(path)
     return sorted(set(hits))
-
 
 def scan_guard_impact(target_paths, scripts: dict) -> dict:
     """纯函数：按守卫脚本文本评估影响，返回 {scripts, breaking}。
@@ -115,7 +117,6 @@ def scan_guard_impact(target_paths, scripts: dict) -> dict:
             hits.append(path)
     return {"scripts": sorted(set(hits)), "breaking": bool(hits)}
 
-
 def _decode_content(item: dict, path: str = "") -> str:
     content = item.get("content")
     if not isinstance(content, str) or not content:
@@ -129,7 +130,6 @@ def _decode_content(item: dict, path: str = "") -> str:
         raw = raw[:_MAX_SCRIPT_BYTES]
     return raw.decode("utf-8", errors="replace")
 
-
 def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
                         provider: str = "") -> dict:
     """拉取仓库已提交守卫脚本文本 {path: text}（contents API，目录预筛）。
@@ -140,7 +140,7 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
 
     p, owner, repo = parse_repo_key(repo_key)
     p = provider or p
-    if p not in ("gitcode", "github"):
+    if get_platform_card(p) is None:
         return {}
     if not owner or not repo:
         return {}
@@ -195,7 +195,6 @@ def fetch_guard_scripts(repo_key: str, ref: str, token: str = "",
         _walk(directory, 0)
     return scripts
 
-
 def delete_issue_artifacts(repo_key: str, ref: str, entries, token: str = "",
                            provider: str = "", message: str = "") -> dict:
     """删除 docs/issue-N 下的产物文件（contents DELETE），Issue #996 删除链路。
@@ -210,7 +209,7 @@ def delete_issue_artifacts(repo_key: str, ref: str, entries, token: str = "",
     p, owner, repo = parse_repo_key(repo_key)
     p = provider or p
     out: dict = {"deleted": [], "failed": []}
-    if p not in ("gitcode", "github") or not owner or not repo:
+    if get_platform_card(p) is None or not owner or not repo:
         out["failed"].append({"path": "", "error": f"unsupported provider: {p}"})
         return out
 
@@ -234,7 +233,6 @@ def delete_issue_artifacts(repo_key: str, ref: str, entries, token: str = "",
         out["deleted"].append(path)
     return out
 
-
 def assess_guard_impact(repo_key: str, ref: str, target_paths,
                         token: str = "", provider: str = "",
                         scripts: dict | None = None) -> dict:
@@ -247,7 +245,6 @@ def assess_guard_impact(repo_key: str, ref: str, target_paths,
             scripts = {}
     return scan_guard_impact(target_paths, scripts)
 
-
 def list_issue_artifacts(repo_key: str, ref: str, issue_number, token: str = "",
                          provider: str = "") -> list[dict]:
     """列出 docs/issue-N 下的产物文件（[{path, sha}]）；目录不存在返回 []。"""
@@ -255,7 +252,7 @@ def list_issue_artifacts(repo_key: str, ref: str, issue_number, token: str = "",
 
     p, owner, repo = parse_repo_key(repo_key)
     p = provider or p
-    if p not in ("gitcode", "github") or not owner or not repo:
+    if get_platform_card(p) is None or not owner or not repo:
         return []
     directory = f"docs/issue-{str(issue_number).lstrip('#')}"
     try:
@@ -278,3 +275,5 @@ def list_issue_artifacts(repo_key: str, ref: str, issue_number, token: str = "",
                     entry["sha"] = item["sha"]
                 out.append(entry)
     return out
+
+from src.domains.runtime.vcs.platform_card import get_platform_card

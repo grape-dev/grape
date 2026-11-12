@@ -6,7 +6,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 
 
 def _read_handler_async() -> str:
-    with open(os.path.join(ROOT, "src", "im", "handler_async.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "src", "domains", "runtime", "im", "handler_async.py"), encoding="utf-8") as f:
         return f.read()
 
 

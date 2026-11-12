@@ -10,11 +10,6 @@ function renderMyFeedbackDetail(feedbackId) {
     return I18N.t('app.feedback.' + key, params);
   }
 
-  function _escapeHtml(s) {
-    if (s === null || s === undefined) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
-
   function statusLabel(st) {
     var map = { open: t('status_open'), in_progress: t('status_in_progress'), resolved: t('status_resolved'), closed: t('status_closed') };
     return map[st] || st;
@@ -55,8 +50,8 @@ function renderMyFeedbackDetail(feedbackId) {
     // 关联 Issue（Issue #673：转换回写后展示链接 + 处理进度文案）
     var issueHtml = t('issue_none');
     if (item.issue_url) {
-      issueHtml = '<a href="' + _escapeHtml(item.issue_url) + '" target="_blank" rel="noopener" ' +
-        'style="color:var(--a);font-weight:600;text-decoration:none">#' + _escapeHtml(item.issue_number || '') + '</a>' +
+      issueHtml = '<a href="' + window.escHtml(item.issue_url) + '" target="_blank" rel="noopener" ' +
+        'style="color:var(--a);font-weight:600;text-decoration:none">#' + window.escHtml(item.issue_number || '') + '</a>' +
         '<span class="ts t3" style="margin-left:6px">' + t('issue_progress', { status: statusLabel(st) }) + '</span>';
     }
 
@@ -66,30 +61,30 @@ function renderMyFeedbackDetail(feedbackId) {
     html += '<button class="bt bt-o bt-s" onclick="app.nav(\'my-feedback\')" style="margin-bottom:12px">' + t('back_to_list') + '</button>';
 
     // 删除按钮（右上角）
-    html += '<button class="bt bt-o bt-s" onclick="_myFbDetailDelete(' + item.id + ', event)" ' +
+    html += '<button class="bt bt-o bt-s" onclick="_myFbDetailDelete(\'' + item.id + '\', event)" ' +
       'style="margin-bottom:12px;margin-left:8px;color:#ff3b30;border-color:rgba(255,59,48,.3)">' + t('delete') + '</button>';
 
     // 标题行
     html += '<div class="cd" style="padding:20px 24px;margin-bottom:14px">' +
       '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">' +
       '<span style="color:' + stColor + ';font-weight:600;font-size:14px;flex-shrink:0">' + statusLabel(st) + '</span>' +
-      '<h2 style="font-size:17px;font-weight:600;margin:0;flex:1">' + (item.title || '—') + '</h2>' +
+      '<h2 style="font-size:17px;font-weight:600;margin:0;flex:1">' + window.escHtml(item.title || '—') + '</h2>' +
       '</div>' +
 
       // 基本信息网格
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px;font-size:13px;color:var(--t2);margin-bottom:16px">' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_type') + '</span> ' + catIcon + ' ' + catLabel + '</div>' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_status') + '</span> <span style="color:' + stColor + ';font-weight:600">' + statusLabel(st) + '</span></div>' +
-      '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_issue') + '</span> ' + issueHtml + '</div>' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_created_at') + '</span> ' + timeStr + '</div>' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_updated_at') + '</span> ' + updateTimeStr + '</div>' +
+      '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_issue') + '</span> ' + issueHtml + '</div>' +
       '</div>' +
       '</div>';
 
     // 详细描述
     html += '<div class="cd" style="padding:16px 24px;margin-bottom:14px">' +
       '<div style="font-size:13px;font-weight:600;color:var(--t2);margin-bottom:8px">' + t('field_description') + '</div>' +
-      '<div style="font-size:14px;color:var(--t1);white-space:pre-wrap;line-height:1.7">' + (item.description || '—') + '</div>' +
+      '<div style="font-size:14px;color:var(--t1);white-space:pre-wrap;line-height:1.7">' + window.escHtml(item.description || '—') + '</div>' +
       '</div>';
 
     // 附件
@@ -99,14 +94,14 @@ function renderMyFeedbackDetail(feedbackId) {
         '<div style="font-size:13px;font-weight:600;color:var(--t2);margin-bottom:10px">' + t('field_attachment') + '</div>' +
         '<div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">';
       if (isImg) {
-        html += '<img src="' + item.attachment_url + '" alt="' + (item.attachment_name || t('attachment_label')) + '" ' +
+        html += '<img src="' + item.attachment_url + '" alt="' + window.escHtml(item.attachment_name || t('attachment_label')) + '" ' +
           'style="max-width:280px;max-height:280px;border-radius:8px;border:1px solid var(--b);cursor:pointer;object-fit:contain" ' +
-          'onclick="window.open(\'' + item.attachment_url + '\',\'_blank\')" />';
+          'onclick="window.open(decodeURIComponent(\'' + encodeURIComponent(item.attachment_url) + '\',\'_blank\')" />';
       }
       html += '<div style="display:flex;align-items:center;gap:8px">' +
         '<span style="font-size:22px">' + (isImg ? '🖼️' : '📎') + '</span>' +
         '<a href="' + item.attachment_url + '" target="_blank" style="color:var(--a);font-weight:500;text-decoration:none">' +
-        (item.attachment_name || t('attachment_label')) + '</a></div>';
+        window.escHtml(item.attachment_name || t('attachment_label')) + '</a></div>';
       html += '</div></div>';
     }
 
@@ -116,10 +111,10 @@ function renderMyFeedbackDetail(feedbackId) {
         '<div style="font-size:13px;font-weight:600;color:var(--t2);margin-bottom:10px">' + t('field_handler') + '</div>' +
         '<div style="font-size:13px;color:var(--t2);line-height:1.8">';
       if (item.handler_name) {
-        html += '<div><span style="color:var(--t3)">' + t('field_handler_name') + '：</span>' + item.handler_name + '</div>';
+        html += '<div><span style="color:var(--t3)">' + t('field_handler_name') + '：</span>' + window.escHtml(item.handler_name) + '</div>';
       }
       if (item.handler_remark) {
-        html += '<div><span style="color:var(--t3)">' + t('field_handler_remark') + '：</span>' + item.handler_remark + '</div>';
+        html += '<div><span style="color:var(--t3)">' + t('field_handler_remark') + '：</span>' + window.escHtml(item.handler_remark) + '</div>';
       }
       html += '</div></div>';
     }

@@ -154,7 +154,7 @@ class TestWorkerExitOnRevoke(unittest.TestCase):
     def test_agent_main_handles_credential_revoked(self):
         """agent.py main 应有 CredentialRevokedError → SystemExit(42) 处理。"""
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                               "src", "runtime", "agent.py"), encoding="utf-8") as f:
+                               "src", "domains", "runtime", "engine", "agent.py"), encoding="utf-8") as f:
             content = f.read()
         self.assertIn("except CredentialRevokedError", content)
         self.assertIn("SystemExit(42)", content)

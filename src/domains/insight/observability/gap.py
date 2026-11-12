@@ -238,14 +238,14 @@ def silent_targets(include_retired: bool = True) -> Dict[str, Any]:
                 if ls is None:
                     runtimes.append({"id": int(rid), "name": name or "", "device_name": device or "",
                                      "scope": scope or "", "owner_name": owner or "",
-                                     "org_id": int(org_id or 0), "last_seen_at": "",
+                                     "org_id": str(org_id or ""), "last_seen_at": "",
                                      "silent_sec": None, "never_reported": True,
                                      "beyond_retire_window": False, "repo_key": repo_key or ""})
                     continue
                 silent = (now - ls).total_seconds()
                 runtimes.append({"id": int(rid), "name": name or "", "device_name": device or "",
                                  "scope": scope or "", "owner_name": owner or "",
-                                 "org_id": int(org_id or 0), "last_seen_at": _iso(ls),
+                                 "org_id": str(org_id or ""), "last_seen_at": _iso(ls),
                                  "silent_sec": round(silent, 1), "never_reported": False,
                                  "beyond_retire_window": silent > GAP_MAX_STALE_SEC,
                                  "repo_key": repo_key or "", "status": status or ""})

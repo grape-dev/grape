@@ -143,7 +143,7 @@ def test_client_merge_pr_params_gitcode(monkeypatch):
         recorded.update({"method": method, "path": path, "data": data})
         return {"merged": True, "sha": "s1"}
 
-    monkeypatch.setattr(c, "_gitcode_request", _fake)
+    monkeypatch.setattr(c, "_request", _fake)  # D22 统一入口（行为等价，见 #453 outbound_ledger 同接缝）
     resp = c.merge_pr(9, merge_method="rebase", title="t1")
     assert resp["merged"] is True
     assert recorded["path"].endswith("/pulls/9/merge")
@@ -158,7 +158,7 @@ def test_client_merge_pr_default_keeps_empty_body(monkeypatch):
         recorded["data"] = data
         return {"merged": True, "sha": "s2"}
 
-    monkeypatch.setattr(c, "_gitcode_request", _fake)
+    monkeypatch.setattr(c, "_request", _fake)  # D22 统一入口（行为等价，见 #453 outbound_ledger 同接缝）
     c.merge_pr(9)
     assert recorded["data"] == {}  # 存量行为（空 dict）不变
 
@@ -171,7 +171,7 @@ def test_client_merge_pr_squash_gitlab(monkeypatch):
         recorded["data"] = data
         return {"merged": True, "sha": "s3"}
 
-    monkeypatch.setattr(c, "_gitlab_request", _fake)
+    monkeypatch.setattr(c, "_request", _fake)  # D22 统一入口
     c.merge_pr(9, merge_method="squash")
     assert recorded["data"] == {"squash": True}
     c.merge_pr(9)

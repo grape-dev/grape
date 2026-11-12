@@ -157,7 +157,7 @@ def test_resume_after_cancel_no_duplicate_card():
 
 def test_route_cancel_and_resume_all_rows_idempotent():
     """历史多行：route cancel/resume 对同一 repo_key+issue_number 全行幂等。"""
-    from src.api.routes.issues import cancel_issue, resume_issue
+    from src.domains.runtime.routes.issues import cancel_issue, resume_issue
 
     _drop_unique_index()
     _seed(5, "awaiting_input")
@@ -187,7 +187,7 @@ def test_route_cancel_and_resume_all_rows_idempotent():
 
 def test_repeat_cancel_is_idempotent_no_completed_at_refresh():
     """重复取消已是 cancelled 的行不得刷新 completed_at，同时仍收口残留可取消行。"""
-    from src.api.routes.issues import cancel_issue
+    from src.domains.runtime.routes.issues import cancel_issue
 
     _drop_unique_index()
     main_id = _seed(6, "awaiting_input")
@@ -214,7 +214,7 @@ def test_repeat_cancel_is_idempotent_no_completed_at_refresh():
 
 def test_already_cancelled_main_closes_duplicate_running_agents():
     """主卡已 cancelled 的幂等分支也要终止历史重复行上残留的 running agent_tasks。"""
-    from src.api.routes.issues import cancel_issue
+    from src.domains.runtime.routes.issues import cancel_issue
 
     _drop_unique_index()
     main_id = _seed(7, "cancelled")

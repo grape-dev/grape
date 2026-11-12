@@ -1,16 +1,22 @@
 """Agent 路由：详情、配置、类型元数据"""
+
 import json
+
 from fastapi import APIRouter, HTTPException, Depends, Query
+
 from pydantic import BaseModel
+
 from src.domains.mgmt.user import db as user_db
+
 from src.api.deps import get_current_user_or_api_key, get_bot_token, require_no_session_token
+
 from src.kernel.config import log
+
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
-
 
 def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[int], user_id: int = 0):
     """更新当前场景 node 的 engine_runtime_ids。
@@ -49,7 +55,6 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
         update_custom_scene(
             scene_id=scene_id, repo_key=repo_key, nodes=nodes)
 
-
 async def _remove_vod_bot(app_id: str) -> None:
     """从 BotManager 移除 VOD bot（仅在该 app_id 已释放、无其他仓库引用时调用）。"""
     if not app_id:
@@ -62,43 +67,58 @@ async def _remove_vod_bot(app_id: str) -> None:
     except Exception as e:
         log.warning(f"VOD BotManager update failed: {e}")
 
-
 def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
-    """VOD IM 解绑清理（Issue #294）：会话 IM 三字段置空 + 释放注册表 + 清理本仓库群会话。
+    """VOD IM 解绑清理（Issue #294）：撤销安装 + 清理本仓库群会话。
 
-    返回 (old_app_id, session_id, released)；无既有会话行时返回 ("", "", False)。
-    - app_id 仍被其他仓库引用 → 只清空本仓库行，不删注册表（released=False）；
-    - 无其他引用 → 删除 global_im_bot_config 行（released=True），并清空 unified_user_mapping
-      中该 app 的 open_id/feishu_name/app_id（open_id 为 app 级，app 释放后失效，重绑需重新 p2p 确认）。
+    A2 收尾：凭证真相源是 grape_t_channel_installation；legacy im_* 三列与 global_im_bot_config
+    登记行不再维护。返回 (old_app_id, session_id, released)：
+    released=True 表示该 app_id 已无任何其他 active 安装引用（app 级 open_id 随之失效）。
     """
     from datetime import datetime, timezone
     from src.kernel.session_manager import db, db_lock
-    old_app_id = ""
-    session_id = ""
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+            (repo_key,)).fetchone()
+    if not row:
+        return "", "", False
+    session_id = row[0]
+    inst = _active_repo_installation(repo_key)
+    old_app_id = str((inst.get("config") or {}).get("app_id", "") or "")
+    if not old_app_id:
+        return "", session_id, False
+
     released = False
+    try:
+        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+        conn = _connect(default_db_path())
+        try:
+            released = int(conn.execute(
+                "SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? "
+                "  AND status='active' AND NOT (scope='repo' AND repo_key=?)",
+                (old_app_id, repo_key)).fetchone()[0]) == 0
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"VOD IM: install ref check failed: {e}")
+
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
-        row = c.fetchone()
-        if not row:
-            return "", "", False
-        session_id = row[0]
-        old_app_id = row[1] or ""
-        c.execute("UPDATE devops_agent_session SET im_app_id='', im_app_secret='', im_provider='', last_active_at=datetime('now') WHERE id=?",
-                  (session_id,))
-        if old_app_id:
-            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
-            released = c.fetchone()[0] == 0
-            if released:
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
-                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
-                          (datetime.now(timezone.utc).isoformat(), old_app_id))
-            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
+        if released:
+            c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
+                      "updated_at=? WHERE app_id=?",
+                      (datetime.now(timezone.utc).isoformat(), old_app_id))
+        c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
         db.commit()
-    if old_app_id:
-        log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
-    return old_app_id, session_id, released
 
+    log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
+    try:
+        from src.domains.runtime.im.engine_wiring import revoke_installation
+        if revoke_installation("repo", repo_key=repo_key, app_id=old_app_id):
+            log.info(f"VOD IM: grape_t_channel_installation revoked for {repo_key}")
+    except Exception as e:
+        log.warning(f"VOD IM: revoke grape_t_channel_installation failed: {e}")
+    return old_app_id, session_id, released
 
 def _get_agent_type_meta(agent_type: str) -> dict | None:
     """从 agent_type 表读取 Agent 元数据"""
@@ -118,7 +138,6 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
         except Exception:
             pass
     return None
-
 
 @router.get("/types")
 def list_agent_types():
@@ -145,7 +164,6 @@ def list_agent_types():
         "color": COLORS.get(r[0], "var(--t2)"),
         "bg": BGS.get(r[0], "var(--bg)"),
     } for r in rows]}
-
 
 @router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config", description="Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo.")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
@@ -190,6 +208,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     events_total = 0
     vod_bot_connected = False
     vod_conversations = []
+    _vod_app_id = ""
 
     with db_lock:
         c = db.cursor()
@@ -201,7 +220,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 _provider, _, _ = parse_repo_key(_repo_keys[0])
             _token_col = "repo_github_token" if _provider == "github" else "repo_gitcode_token"
             c.execute(
-                f"SELECT id, runtime_id, skill, skill_id, {_token_col}, runtime_session_id, status, last_active_at, im_app_id, enable, subscribe_events FROM devops_agent_session WHERE repo_key IN ({_rk_placeholders}) AND agent_type=?",
+                f"SELECT id, runtime_id, skill, skill_id, {_token_col}, runtime_session_id, status, last_active_at, enable, subscribe_events FROM devops_agent_session WHERE repo_key IN ({_rk_placeholders}) AND agent_type=?",
                 (*_repo_keys, name)
             )
             row = c.fetchone()
@@ -222,15 +241,14 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                         instance_name_val = instance_name(brow[0], _dev or "", brow[1] or 0)
                 _sub_evts = []
                 try:
-                    _sub_evts = json.loads(row[10] or "[]") if row[10] else []
+                    _sub_evts = json.loads(row[9] or "[]") if row[9] else []
                 except Exception:
                     _sub_evts = []
                 # R25.8: token 脱敏——不原样外发，只返回存在性布尔（前端无引用，grep 确认零消费）
                 session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_token_exists": bool(row[4]), "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
-                               "im_app_id": row[8] or "",
                                "instance_name": instance_name_val,
                                "runtime_id": row[1] or 0,  # Issue #524: 实际生效引擎 ID（声明/生效区分）
-                               "enable": bool(row[9]) if row[9] is not None else True,
+                               "enable": bool(row[8]) if row[8] is not None else True,
                                "subscribe_events": _sub_evts}
         except Exception:
             pass
@@ -249,12 +267,10 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 ]
             except Exception:
                 pass
-            if session_data.get("im_app_id"):
-                try:
-                    c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_type='vod_bot' AND bot_app_id=?", (session_data["im_app_id"],))
-                    vod_bot_connected = c.fetchone()[0] > 0
-                except Exception:
-                    pass
+            # A2 收尾：VOD 绑定状态读 grape_t_channel_installation（不再查 legacy 登记行）
+            _vod_inst = _active_repo_installation(repo_key)
+            _vod_app_id = str((_vod_inst.get("config") or {}).get("app_id", "") or "")
+            vod_bot_connected = bool(_vod_app_id)
 
         try:
             c.execute(
@@ -322,6 +338,24 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         from src.domains.runtime.engine.instances import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.kernel.session_manager import db, db_lock
+        # Issue #1310：凭据名（runtime_credentials.name）查询；本机直连（cid=0）回退 host_name
+        def _lookup_worker_name(_p):
+            _cid = _p.get("credential_id") or 0
+            _wname = ""
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    if _cid:
+                        c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                        _wr = c.fetchone()
+                        _wname = (_wr[0] or "") if _wr else ""
+                    else:
+                        c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
+                        _wr = c.fetchone()
+                        _wname = (_wr[0] or "") if _wr else ""
+            except Exception:
+                _wname = ""
+            return _wname
         # 查当前场景（Issue #524: 从 managed_repos.dev_scene 解析，声明配置来源）
         _scene_id = ""
         try:
@@ -397,12 +431,11 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "events_page_size": page_size,
         "highlight_issue_id": highlight_issue_id,
         "im": {
-            "im_app_id": session_data.get("im_app_id", ""),
+            "im_app_id": _vod_app_id,
             "connected": vod_bot_connected,
             "conversations": vod_conversations,
         } if name == "vod" else None,
     }
-
 
 class AgentConfig(BaseModel):
     backend: str = ""  # 无字面默认（engine-selection-design.md v2）：单引擎由 backends 集合派发解析
@@ -415,7 +448,6 @@ class AgentConfig(BaseModel):
     im_app_id: str = ""
     im_app_secret: str = ""
     im_unbind: bool = False  # Issue #294：显式解绑标记（防普通保存误清既有 IM 绑定）
-
 
 @router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="Clean agent session", description="Cleans an agent session by clearing runtime_session_id; a new session is created on the next event.")
 def clean_agent_session(name: str, owner: str, repo: str,
@@ -442,7 +474,6 @@ def clean_agent_session(name: str, owner: str, repo: str,
     log.info(f"Agent session cleaned: repo={repo_key}, agent={name}, rows={updated}")
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
 
-
 @router.put("/{name}/{owner}/{repo}", operation_id="agents_update", summary="Update agent config", description="Updates the agent session config (engine/skill/IM bindings).")
 async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfig,
                               user: dict = Depends(require_no_session_token)):
@@ -462,55 +493,42 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     from src.kernel.session_manager import db, db_lock
 
-    # VOD IM 配置：保存到 global_im_bot_config + 类型独占校验 + 清理旧 app_id
+    # VOD IM 配置（A2 收尾）：凭证只落 grape_t_channel_installation；独占校验查 active 安装行，
+    # legacy im_* / global_im_bot_config 不再读写。
     old_app_id = ""
     _vod_unbind_session_id = ""
     _vod_unbind_released = False
     _vod_im_unbind = bool(name == "vod" and body.im_unbind)
     if _vod_im_unbind:
-        # Issue #294：显式解绑（im_unbind=true）——清 IM 三字段 + 释放注册表 + 清理群会话
+        # Issue #294：显式解绑（im_unbind=true）——撤销安装 + 清理群会话
         old_app_id, _vod_unbind_session_id, _vod_unbind_released = _unbind_vod_im(repo_key)
     elif name == "vod" and body.im_app_id:
         app_secret = body.im_app_secret
+        _inst = _active_repo_installation(repo_key)
+        _inst_cfg = (_inst.get("config") or {})
+        old_app_id = str(_inst_cfg.get("app_id", "") or "")
         if app_secret == "********":
+            app_secret = str(_inst_cfg.get("app_secret", "") or "")
+        if app_secret:
+            # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
+            from src.domains.runtime.im.engine_wiring import _connect as _ew_connect, default_db_path as _ew_db_path
+            _conn = _ew_connect(_ew_db_path())
             try:
+                _holders = _conn.execute(
+                    "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
+                    (body.im_app_id,)).fetchall()
+            finally:
+                _conn.close()
+            if any(str(r[0]) == "user" for r in _holders):
+                raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
+            if old_app_id and old_app_id != body.im_app_id:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("SELECT im_app_secret FROM devops_agent_session WHERE im_app_id=? AND im_app_secret!='' LIMIT 1", (body.im_app_id,))
-                    row = c.fetchone()
-                    if row:
-                        app_secret = row[0]
-            except Exception:
-                pass
-        if app_secret:
-            with db_lock:
-                c = db.cursor()
-                # 类型独占校验
-                c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (body.im_app_id,))
-                row = c.fetchone()
-                if row and row[0] == "chat_bot":
-                    raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
-
-                # 如果换了新的 app_id，删除旧的 app_id
-                c.execute("SELECT im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
-                old_row = c.fetchone()
-                old_app_id = old_row[0] if old_row else ""
-                if old_app_id and old_app_id != body.im_app_id:
-                    # 检查是否还有其他 agent_session 引用旧 app_id
-                    c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
-                    other_refs = c.fetchone()[0]
-                    if other_refs == 0:
-                        c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
-                        log.info(f"VOD IM: removed old app_id={old_app_id[:30]}")
-                    # 清理旧 conversations
-                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')", (repo_key,))
-                    log.info(f"VOD IM: cleaned conversations for {repo_key}")
-
-                c.execute(
-                    "INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type, bot_name) VALUES (?, ?, '')",
-                    (body.im_app_id, "vod_bot")
-                )
-                db.commit()
+                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN "
+                              "(SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
+                              (repo_key,))
+                    db.commit()
+                log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
     # Issue #294：解绑-only 请求（未带引擎/技能/订阅信息）→ 仅清 IM 三字段，保留其余 Agent 配置
     if _vod_im_unbind and body.backends is None and not body.skill and not body.skill_id and body.subscribe_events is None:
@@ -518,11 +536,9 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         if not session_id:
             from src.api.session_store import upsert_agent_session
             session_id = upsert_agent_session(
-                repo_key=repo_key, agent_type=name, repo_gitcode_token=None,
-                im_app_id="", im_app_secret="", im_provider="",
+                repo_key=repo_key, agent_type=name,
             )
-        # app_id 已释放（无其他仓库引用）才移除 BotManager 实例，避免影响共用该 app 的仓库
-        await _remove_vod_bot(old_app_id if _vod_unbind_released else "")
+        # 旧 IM（BotManager）已下线：解绑后由新引擎下一轮扫描（≤30s）让渡，无需手工摘 bot
         return {"message": "Agent 配置已更新", "session_id": session_id}
 
     # ---- 引擎配置：写入场景 node 的 engine_runtime_ids ----
@@ -662,28 +678,45 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             session_id = upsert_agent_session(
                 repo_key=repo_key, agent_type=name,
                 runtime_id=runtime_id, skill=skill_name_for_save, skill_id=skill_id,
-                repo_gitcode_token=None, status="idle",
+                status="idle",
                 enable=_enable,
                 subscribe_events=json.dumps(body.subscribe_events, ensure_ascii=False) if body.subscribe_events is not None else "[]",
-                im_app_id=body.im_app_id if name == "vod" and body.im_app_id else None,
-                im_app_secret=app_secret if name == "vod" and body.im_app_id and app_secret else None,
-                im_provider="feishu" if name == "vod" and body.im_app_id else None,
             )
             db.commit()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"保存配置失败: {e}"})
 
-    # VOD IM：通过 BotManager 动态增删 Bot
+    # VOD IM：旧 BotManager 已下线（A2 M2）——保存后由新引擎 30s 扫描接管，无需热加载
+    # Issue #871 写方向反转：保存/换 app 直写 grape_t_channel_installation（secret 快照入
+    # config，请求内生效不依赖扫描窗口），new 模式下自动反向回写 legacy 双轨表。
     if name == "vod" and body.im_app_id and app_secret:
         try:
-            from src.api.main import bot_manager
-            if bot_manager and bot_manager.api:
-                if old_app_id and old_app_id != body.im_app_id:
-                    await bot_manager.remove_bot(old_app_id)
-                    log.info(f"VOD IM: removed old bot {old_app_id[:30]} from BotManager")
-                await bot_manager.add_bot(body.im_app_id, app_secret, bot_type="vod_bot")
-                log.info(f"VOD IM: added bot {body.im_app_id[:30]} to BotManager")
+            from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
+            if sync_installation("repo", repo_key=repo_key, app_id=body.im_app_id,
+                                        app_secret=app_secret):
+                log.info(f"VOD IM: grape_t_channel_installation synced for {repo_key}")
+            if old_app_id and old_app_id != body.im_app_id:
+                revoke_installation("repo", repo_key=repo_key, app_id=old_app_id)
+            # C3 审计：VOD（repo 轨）IM 凭证变更留痕，只记渠道与仓库，不落 secret
+            try:
+                from src.domains.mgmt.auth import audit as auth_audit
+                auth_audit.log_audit("im_installation_change",
+                                     user_id=int(user["id"]), operator_id=int(user["id"]),
+                                     detail={"action": "credential_save", "provider": "feishu",
+                                             "scope": "repo", "repo": repo_key,
+                                             "app_ref": str(body.im_app_id or "")[:8]})
+            except Exception as _ae:
+                log.warning(f"VOD IM audit log failed: {_ae}")
         except Exception as e:
-            log.warning(f"VOD BotManager update failed: {e}")
+            log.warning(f"VOD IM: sync grape_t_channel_installation failed: {e}")
 
     return {"message": "Agent 配置已更新", "session_id": session_id}
+
+def _active_repo_installation(repo_key: str) -> dict:
+    """仓库轨 active 的 IM 安装（A2 收尾后 VOD 凭证真相源；无则 {}）。"""
+    try:
+        from src.domains.runtime.im.engine_wiring import get_active_installation
+        return get_active_installation("repo", repo_key=repo_key) or {}
+    except Exception as e:
+        log.warning(f"VOD IM: read installation failed: {e}")
+        return {}

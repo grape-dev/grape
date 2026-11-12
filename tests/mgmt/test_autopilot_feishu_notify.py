@@ -58,7 +58,7 @@ def sched():
 
     try:
         spec = importlib.util.spec_from_file_location(
-            "sched_notify_test", os.path.join(SRC_DIR, "src", "runtime", "scheduler.py"))
+            "sched_notify_test", os.path.join(SRC_DIR, "src", "domains", "runtime", "engine", "scheduler.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         _SCHED = mod

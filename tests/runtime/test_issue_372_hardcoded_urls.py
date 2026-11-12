@@ -6,15 +6,12 @@
 - T10-05~08: providers.py _get_trusted_host 支持 X-Forwarded-Host
 - T10-09~11: config.py _detect_server_base 端口从 GRAPE_PORT 读取
 """
+
 import os
+
 from unittest.mock import patch, MagicMock
 
 import pytest
-
-
-# ===========================================================================
-# T10-01: settings.py 去掉 localhost 兜底
-# ===========================================================================
 
 class TestSettingsNoLocalhostFallback:
     """测试 settings.py webhook_url 不再有 localhost 兜底。"""
@@ -31,11 +28,6 @@ class TestSettingsNoLocalhostFallback:
         # 应该是 get_webhook_url() or ""
         assert 'get_webhook_url() or ""' in src, \
             "webhook_url should fall back to empty string"
-
-
-# ===========================================================================
-# T10-02~04: events.py A2A re-dispatch 用 get_server_base_url
-# ===========================================================================
 
 class TestA2ARedispatchUrl:
     """测试 A2A re-dispatch URL 从 A2A 控制面基址获取（Issue #1858）。"""
@@ -74,11 +66,6 @@ class TestA2ARedispatchUrl:
             # events.py 中 `or "http://localhost:8000"` 是额外 fallback
             a2a_base = base or "http://localhost:8000"
             assert "localhost" in a2a_base  # 本地开发兼容
-
-
-# ===========================================================================
-# T10-05~08: providers.py _get_trusted_host 支持 X-Forwarded-Host
-# ===========================================================================
 
 class TestGetTrustedHostForwarded:
     """测试 _get_trusted_host 优先读 X-Forwarded-Host。"""
@@ -140,11 +127,6 @@ class TestGetTrustedHostForwarded:
             # 都是 localhost → 返回 Host 头（原行为）
             assert "localhost" in result or "127.0.0.1" in result
 
-
-# ===========================================================================
-# T10-09~11: config.py _detect_server_base 端口从 GRAPE_PORT 读取
-# ===========================================================================
-
 class TestDetectServerBasePort:
     """测试 _detect_server_base 端口从 GRAPE_PORT 环境变量读取。"""
 
@@ -188,11 +170,6 @@ class TestDetectServerBasePort:
         # 应该用 GRAPE_PORT
         assert "GRAPE_PORT" in src, \
             "GRAPE_PORT not used in config.py"
-
-
-# ===========================================================================
-# T10-12~15: 剩余硬编码 localhost:8080 fallback 修复
-# ===========================================================================
 
 class TestRemainingLocalhostFallback:
     """测试剩余硬编码 localhost:8080 fallback 已修复。"""

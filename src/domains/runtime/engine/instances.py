@@ -43,6 +43,7 @@ ENGINE_CANONICAL_PREFIXES = {
     "codearts": "codearts",
     "codex": "codex",
     "dsh": "dsh",
+    "atomcode": "atomcode",
 }
 
 

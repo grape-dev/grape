@@ -14,26 +14,36 @@
 from __future__ import annotations
 
 import hashlib
+
 import json
+
 import os
+
 import queue
+
 import re
+
 import threading
+
 import time
+
 from datetime import datetime, timedelta, timezone
+
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.kernel.config import log
 
 RETENTION_DAYS = 14
+
 CLEANUP_INTERVAL_SEC = 3600      # 最多每小时清一次（由采样循环调用 maybe_cleanup）
+
 MAX_LIMIT = 500
+
 DEFAULT_LIMIT = 100
+
 _DB_LOG_ENABLED = os.environ.get("OBS_LOG_DB", "1").strip() not in ("0", "false", "no")
 
 _LEVELS = ("WARNING", "ERROR", "CRITICAL")
-
-# ---------------------------------------------------------------- 脱敏（入库前）
 
 # 只打码"凭据类"，不动 IP/主机名：设备 IP 在设备页本来就对用户可见，打掉反而没法排障
 _TOKEN_RES = [
@@ -42,7 +52,6 @@ _TOKEN_RES = [
     re.compile(r"://([^:/\s]+):([^@/\s]+)@"),                      # scheme://user:pass@host
     re.compile(r"(?i)(authorization:\s*(?:bearer|token)\s+)\S+"),
 ]
-
 
 def redact(text: str) -> str:
     """把凭据类信息打码（幂等）。入库前调用，用户面查询时再兜一层。"""
@@ -55,16 +64,11 @@ def redact(text: str) -> str:
     s = _TOKEN_RES[3].sub(lambda m: m.group(1) + "***", s)
     return s[:4000]
 
-
 def _dedup_key(source: str, ts: str, level: str, component: str, task_id: str, msg: str) -> str:
     raw = f"{source}|{ts}|{level}|{component}|{task_id}|{msg}"
     return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:24]
 
-
-# ---------------------------------------------------------------- 上下文抽取
-
 _TASK_RE = re.compile(r"\[task\s+(t_[0-9a-fA-F]{6,})\]")
-
 
 def extract_context(msg: str) -> Tuple[str, str]:
     """从日志正文里抽 (task_id, repo_key)。
@@ -84,9 +88,6 @@ def extract_context(msg: str) -> Tuple[str, str]:
     if m2:
         repo_key = (m2.group(1) or "gitcode:") + m2.group(2)
     return task_id, repo_key
-
-
-# ---------------------------------------------------------------- 入库
 
 def ingest(records: List[Dict[str, Any]], default_source: str = "master") -> int:
     """批量入库（幂等：同 dedup_key 跳过）。返回**新写入**行数。
@@ -168,9 +169,6 @@ def ingest(records: List[Dict[str, Any]], default_source: str = "master") -> int
         return 0
     return n
 
-
-# ---------------------------------------------------------------- 主控侧：日志 Handler
-
 class ObsLogHandler:
     """把主控进程的 WARNING/ERROR 日志异步落到 obs_log（不阻塞请求路径）。
 
@@ -229,16 +227,13 @@ class ObsLogHandler:
     def stats(self) -> Dict[str, int]:
         return {"queued": self.q.qsize(), "written": self.written, "dropped": self.dropped}
 
-
 _handler: Optional[ObsLogHandler] = None
-
 
 def get_handler() -> ObsLogHandler:
     global _handler
     if _handler is None:
         _handler = ObsLogHandler()
     return _handler
-
 
 class _LoggingBridge:
     """标准 logging.Handler：主控日志 → obs_log（只 W/E，只走队列，绝不在 emit 里抛）。"""
@@ -275,7 +270,6 @@ class _LoggingBridge:
         self.handler._obs_log_bridge = True                  # type: ignore[attr-defined]
         root.addHandler(self.handler)
 
-
 def install_master_logging() -> Dict[str, Any]:
     """启动主控日志落库（env 可关）。返回状态，供启动日志打印。"""
     if not _DB_LOG_ENABLED:
@@ -285,13 +279,9 @@ def install_master_logging() -> Dict[str, Any]:
     _LoggingBridge().attach()
     return {"enabled": True, "queue": h.q.maxsize}
 
-
-# ---------------------------------------------------------------- 用户面查询
-
 def _visible_repo_keys(user: Dict[str, Any]) -> List[str]:
     from src.domains.insight.observability.overview import visible_repo_keys
     return visible_repo_keys(user)
-
 
 def query(user: Dict[str, Any], level: str = "", source: str = "", repo: str = "",
           task_id: str = "", trace_id: str = "", q: str = "", since: str = "",
@@ -306,7 +296,7 @@ def query(user: Dict[str, Any], level: str = "", source: str = "", repo: str = "
 
     visible = set(_visible_repo_keys(user))
     if repo:
-        want = {to_repo_key(repo), to_repo_key(repo, "github")}
+        want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
         hit = sorted(want & visible)
         if not hit:
             raise RepoNotVisible(repo)
@@ -376,11 +366,7 @@ def query(user: Dict[str, Any], level: str = "", source: str = "", repo: str = "
     return {"total": total, "items": items, "facets": facets,
             "limit": limit, "offset": offset, "scoped_repos": len(visible)}
 
-
-# ---------------------------------------------------------------- 留存
-
 _last_cleanup = 0.0
-
 
 def cleanup(days: int = RETENTION_DAYS) -> int:
     """清理超过留存期的日志。返回删除行数。"""
@@ -397,7 +383,6 @@ def cleanup(days: int = RETENTION_DAYS) -> int:
         log.warning(f"obs_log cleanup failed: {e}")
         return 0
 
-
 def maybe_cleanup(interval: int = CLEANUP_INTERVAL_SEC) -> int:
     """按间隔限流清理（由采样循环每次调用）。"""
     global _last_cleanup
@@ -406,3 +391,5 @@ def maybe_cleanup(interval: int = CLEANUP_INTERVAL_SEC) -> int:
         return 0
     _last_cleanup = now
     return cleanup()
+
+from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一

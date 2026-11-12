@@ -12,7 +12,7 @@ Issue #1229 的升级版：从「按协作者列数字」升级为「看工作�
 - 完成：`status='completed'` 且有 `completed_at`（用于周期/吞吐）；
   `cancelled` 单独统计，不计入"完成"。
 - 周：ISO 周，周一起算。
-- 分位数：nearest-rank（与 src/observability/overview.py::_p95 同风格）。
+- 分位数：nearest-rank（与 src/domains/insight/observability/overview.py::_p95 同风格）。
 """
 import re
 from bisect import bisect_right
@@ -347,21 +347,22 @@ def is_bot_name(name: str, bot_names: Sequence[str] = ()) -> bool:
 
 
 def load_uid_names(c, uids) -> Dict[int, str]:
-    """user_id → 平台用户名（gitcode_user 优先，github_login 兜底）。
+    """user_id → 用户名（账号域 grape_accounts.username，平台无关）。
 
     unified_user_mapping 在部分环境中可能不存在（老库/单测未建表），失败降级为空映射，
     不让归属兜底拖垮整块看板。
     """
-    todo = sorted({int(u) for u in uids if u and int(u) > 0})
+    # 合并重同步（多平台解耦口径）：账号域 grape_accounts.username 平台无关；
+    # uuid id 不做 int() 强转（TEXT 化后 int(uuid) 直接崩）
+    todo = sorted({str(u).strip() for u in uids if str(u or "").strip() not in ("", "0", "None")})
     out: Dict[int, str] = {}
     for i in range(0, len(todo), 500):
         part = todo[i:i + 500]
         ph = ",".join("?" * len(part))
         try:
             c.execute(
-                "SELECT user_id, COALESCE(NULLIF(gitcode_user,''),"
-                " NULLIF(github_login,'')) FROM unified_user_mapping"
-                f" WHERE user_id IN ({ph}) AND user_id>0", tuple(part))
+                "SELECT id, username FROM grape_accounts"
+                f" WHERE id IN ({ph})", tuple(part))
         except Exception:
             return out
         for uid, name in c.fetchall():

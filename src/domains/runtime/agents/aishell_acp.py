@@ -191,10 +191,10 @@ class AishellDshACPBackend:
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
         try:
-            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _safe_terminate
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
-            _terminate_proc = lambda p, l: None
+            _safe_terminate = lambda p, l: None
 
         from src.domains.runtime.engine.resource_stack import TaskResourceStack
         _res = TaskResourceStack(task_id="", cwd=cwd)
@@ -496,7 +496,7 @@ class AishellDshACPBackend:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                _terminate_proc(proc, f"{label}aishell-dsh ACP")
+                _safe_terminate(proc, f"{label}aishell-dsh ACP")
 
             reader_thread.join(timeout=3)
             with queue_lock:
@@ -543,7 +543,7 @@ class AishellDshACPBackend:
             except Exception:
                 pass
             if proc.poll() is None:
-                _terminate_proc(proc, f"{label}aishell-dsh ACP")
+                _safe_terminate(proc, f"{label}aishell-dsh ACP")
             # 会话文件不清理：~/.aishell/sessions 自持久（二期 token 解析数据源）
             _res.dispose(kill_procs=False)
 

@@ -423,7 +423,7 @@ class TestRedirectUriFromProviderConfig:
     def test_example_config_has_redirect_uri(self):
         """oauth-providers.example.json 中每个 provider 有 redirect_uri。"""
         config_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "configs", "oauth-providers.example.json"
+            os.path.dirname(__file__), "..", "..", "..", "configs", "oauth-providers.example.json"
         )
         with open(config_path) as f:
             data = json.load(f)

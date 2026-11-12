@@ -7,26 +7,33 @@
 3. 无法识别的 403 正文 → 通用「上游 403」提示并附脱敏正文，不猜测归因；
 4. 正常代码仓建单（mock 200 返回 number）→ 成功路径不受影响。
 """
+
 import os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 from unittest.mock import patch
+
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
 _uid = None
+
 _headers = {}
 
 OWNER = "test_523"
-REPO = "hello523"
-REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
+REPO = "hello523"
+
+REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 def setup_module():
     global _uid, _headers
@@ -43,7 +50,6 @@ def setup_module():
     except Exception:
         pass
 
-
 def teardown_module():
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -55,10 +61,8 @@ def teardown_module():
                 pass
         db.commit()
 
-
 def _post(body):
     return RuntimeError(f"GitCode API POST issues failed (403): {body}")
-
 
 def _create(title):
     return client.post(f"/api/issues/{OWNER}/{REPO}",
@@ -66,14 +70,13 @@ def _create(title):
                              "assignee": "someone"},
                        headers=_headers)
 
-
 class TestCreate403Attribution:
     def test_403_repo_type_prohibited_not_assignee_blame(self):
         """GitCode Space/模型仓/数据集仓 403 → 仓库类型限制提示，不再误报 assignee 无效。"""
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
-             patch("src.api.issues_center._post_gitcode_issue",
+             patch("src.api.issues_center._create_issue_unified",
                    side_effect=_post("The current operation is prohibited "
                                      "for model repository and dataset repository.")):
             resp = _create("t_523_repotype")
@@ -87,10 +90,10 @@ class TestCreate403Attribution:
 
     def test_403_permission_body_nonmember_semantics(self):
         """Issue #649: 用户/权限类 403 正文 → 归类「非成员/无权指派」语义（含 trace_id），不再误报用户名无效。"""
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
-             patch("src.api.issues_center._post_gitcode_issue",
+             patch("src.api.issues_center._create_issue_unified",
                     side_effect=_post("user someone not found or has no permission")):
             resp = _create("t_523_perm")
         assert resp.status_code == 403, resp.text
@@ -105,10 +108,10 @@ class TestCreate403Attribution:
 
     def test_403_unrecognized_body_falls_back_generic_with_sanitized_body(self):
         """无法识别的 403 正文 → 通用「上游 403」提示附脱敏正文，不猜测归因。"""
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
-             patch("src.api.issues_center._post_gitcode_issue",
+             patch("src.api.issues_center._create_issue_unified",
                    side_effect=_post("some totally unexpected upstream reason")):
             resp = _create("t_523_unknown")
         assert resp.status_code == 403, resp.text
@@ -120,10 +123,10 @@ class TestCreate403Attribution:
     def test_403_body_truncated_to_200_chars(self):
         """超长上游正文截断 ≤200 字符（脱敏后回显）。"""
         long_body = "x" * 500
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
-             patch("src.api.issues_center._post_gitcode_issue",
+             patch("src.api.issues_center._create_issue_unified",
                    side_effect=_post(long_body)):
             resp = _create("t_523_trunc")
         assert resp.status_code == 403, resp.text
@@ -133,10 +136,10 @@ class TestCreate403Attribution:
 
     def test_403_secret_pattern_sanitized(self):
         """正文中 token 类敏感键值被脱敏，不回显。"""
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
-             patch("src.api.issues_center._post_gitcode_issue",
+             patch("src.api.issues_center._create_issue_unified",
                    side_effect=_post("access_token=ghp_secret123 whatever happened")):
             resp = _create("t_523_san")
         assert resp.status_code == 403, resp.text
@@ -146,11 +149,18 @@ class TestCreate403Attribution:
 
     def test_create_ok_normal_repo_unaffected(self):
         """正常代码仓建单（mock 200 返回 number）→ 成功路径不受影响。"""
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
              patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
-             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 523}), \
+             patch("src.api.issues_center._create_issue_unified", return_value={"number": 523}), \
              patch("src.api.issues_center.ensure_issue_task", return_value=523):
             resp = _create("t_523_ok")
         assert resp.status_code == 200, resp.text
         assert resp.json()["issue_number"] == 523
+
+from src.domains.mgmt.auth import grape_account_db
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

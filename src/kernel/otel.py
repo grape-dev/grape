@@ -12,7 +12,7 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 - service.name 由调用方传入（grape-server-a/b/c、grape-webhook、grape-worker），
   resource 统一补 host/env/version
 
-与平台既有确定性 trace id 体系（src/observability/trace.py，tr_<sha1(task_id)>）
+与平台既有确定性 trace id 体系（src/domains/insight/observability/trace.py，tr_<sha1(task_id)>）
 的关系：MR-1 仅 HTTP span 与日志注入（OTel 自动生成 trace id）；MR-2 把任务
 生命周期接入，task_id/pipeline_trace_id 作为 span 属性与业务 id 同源对齐。
 """

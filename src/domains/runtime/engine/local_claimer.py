@@ -25,15 +25,21 @@ deterministic_only=True），领取 runtime_id 绑定到本机引擎的 queued �
 
 开关：GRAPE_LOCAL_CLAIMER（默认开启；关闭时本机引擎不参与广播认领）。
 """
+
 import asyncio
+
 import json
+
 import os
+
 import random
 
 from src.kernel.config import log
 
 CLAIMER_ENABLED = os.environ.get("GRAPE_LOCAL_CLAIMER", "1").strip().lower() in ("1", "true", "yes", "on")
+
 CLAIM_INTERVAL = 3.0  # 与 worker 的 RUNTIME_POLL_INTERVAL 默认值一致
+
 # 本机直连兜底延迟（local-claimer-backstop-design）：任务入队后先给远端 worker 一个
 # 专属认领窗口（worker 3s 轮询 + 0~0.9s jitter，15s ≈ 4-5 轮机会），窗口内本机不抢；
 # 超时后本机作为兜底认领。例外：任务白名单内的远端引擎已全部物理不可达（离线/心跳
@@ -44,11 +50,9 @@ try:
 except ValueError:
     CLAIM_BACKSTOP_DELAY = 15.0
 
-
 def _claimer_enabled() -> bool:
     """循环内实时读取开关（QA 审查建议：支持运行态热切换，无需 reload/restart）。"""
     return os.environ.get("GRAPE_LOCAL_CLAIMER", "1").strip().lower() in ("1", "true", "yes", "on")
-
 
 def _local_direct_engine_ids() -> list[int]:
     """本机 direct 引擎发现：credential_id=0（本机直连）且 scope='global' 且在线。
@@ -71,7 +75,6 @@ def _local_direct_engine_ids() -> list[int]:
         log.warning(f"local_claimer: engine discovery failed: {e}")
         return []
 
-
 def _engine_tags(runtime_id: int) -> list[str]:
     """引擎的认领标签（engine_capabilities，通常为 ['all']）。"""
     try:
@@ -88,7 +91,6 @@ def _engine_tags(runtime_id: int) -> list[str]:
         log.warning(f"local_claimer: tags query failed for {runtime_id}: {e}")
         return []
 
-
 def _task_age_seconds(task: dict) -> float:
     """任务已排队时长（秒）。created_at 为 UTC ISO 格式；解析失败返回大值（视为已超龄，不阻塞兜底）。"""
     created = (task.get("created_at") or "").strip()
@@ -103,7 +105,6 @@ def _task_age_seconds(task: dict) -> float:
     except Exception:
         pass
     return CLAIM_BACKSTOP_DELAY + 1.0
-
 
 def _remote_claimants_reachable(task: dict) -> bool:
     """该任务还有没有物理可达的远端认领方。
@@ -136,7 +137,7 @@ def _remote_claimants_reachable(task: dict) -> bool:
                     return False
                 from src.domains.runtime.engine.service import _check_pool_engines_reachable
                 # 只需远端中任一可达；本机自身可达与否不影响"是否等待"的判断
-                return bool(_check_pool_engines_reachable(remote_ids, _tag, _repo, task_user_id=int(_uid)))
+                return bool(_check_pool_engines_reachable(remote_ids, _tag, _repo, task_user_id=str(_uid or "")))
             # 全广播：全站有没有在线远端 worker（心跳新鲜）
             c.execute(
                 "SELECT COUNT(*) FROM agent_runtimes ar "
@@ -164,7 +165,6 @@ def _remote_claimants_reachable(task: dict) -> bool:
         log.warning(f"local_claimer: remote reachability check failed: {e}")
         return True
 
-
 def _backstop_should_yield(task: dict) -> bool:
     """兜底守卫判定：本机这次认领是否应当让位给远端 worker。
 
@@ -179,7 +179,6 @@ def _backstop_should_yield(task: dict) -> bool:
     if _task_age_seconds(task) >= CLAIM_BACKSTOP_DELAY:
         return False
     return _remote_claimants_reachable(task)
-
 
 def _engine_busy(runtime_id: int) -> bool:
     """引擎满载检查（真实 running 数 >= max_concurrent → 跳过，满载不抢）。
@@ -204,7 +203,6 @@ def _engine_busy(runtime_id: int) -> bool:
         return False
     except Exception:
         return True  # 查询失败保守视为忙（不抢）
-
 
 def _rebuild_evt_from_task(task: dict) -> dict:
     """按任务行 + events 表重建 _execute_agent 所需的 evt。
@@ -247,7 +245,6 @@ def _rebuild_evt_from_task(task: dict) -> dict:
         log.warning(f"local_claimer: evt rebuild failed for seq={seq}: {e}")
     return evt
 
-
 async def _execute_claimed_locally(task: dict, rid: int):
     """认领后的本机执行：复用方案B已验证的 direct 执行通道。
 
@@ -270,7 +267,6 @@ async def _execute_claimed_locally(task: dict, rid: int):
         (task.get("repo_key") or "", seq, task.get("agent_type") or "", backend,
          task.get("skill") or "", evt, rid, tid))
 
-
 async def _claim_deterministic_locally(rid: int) -> dict | None:
     """Phase 3（Issue #699）：确定性认领——领取 runtime_id 绑定到本机引擎 rid 的 queued 任务。
 
@@ -290,7 +286,6 @@ async def _claim_deterministic_locally(rid: int) -> dict | None:
         if task and int(task.get("runtime_id") or 0) != rid:
             return None
     return task
-
 
 async def local_claimer_loop():
     """本机 direct 引擎认领主循环——语义与 worker 的 claim 循环对齐。"""
@@ -362,7 +357,6 @@ async def local_claimer_loop():
             log.warning(f"local_claimer loop error: {e}")
         await asyncio.sleep(CLAIM_INTERVAL + random.uniform(0, 1))
 
-
 def start_local_claimer():
     """幂等启动（双 lifespan 调用安全）。返回 task 或 None。"""
     if not CLAIMER_ENABLED:
@@ -381,3 +375,25 @@ def start_local_claimer():
             return t
     task = loop.create_task(local_claimer_loop(), name="local-claimer")
     return task
+
+"""本机 direct 引擎一等认领器（Local Claimer）。
+
+设计文档：docs/weekly-07/local-claimer-first-class-broadcast-design.md
+
+plugin 广播模式下，本机 direct 引擎（credential_id=0）此前不是认领者——
+依赖方案B/方案A的"入队即 self-run"兜底，绕过 pool_engine_ids 白名单，
+造成 2026-10-14 pvs-zombies-demo2 issue #4 全链路跑错引擎事故。
+
+本模块让本机引擎成为与远端 worker 完全同级的认领者：
+- 直接调用 service.claim_by_tag(tag, runtime_id)——tag 匹配、scope 隔离、
+  引擎满槽、pool_engine_ids 白名单、健康分拦截、会话引擎守卫，全部走
+  同一条检查链，不引入任何新认领规则；
+- 3s 轮询 + jitter，与 worker 的 claim 节奏一致；
+- 认领后复用 direct 执行通道（start_direct_agent + _execute_agent），
+  evt 从 events 表按 event_seq 忠实重建（payload/type/actor 落库齐全）。
+
+双主安全：claim_by_tag 的 UPDATE ... WHERE status='queued' 原子性保证
+不双跑（谁先 UPDATE 成功谁执行，另一方 rowcount=0 自然放弃）。
+
+开关：GRAPE_LOCAL_CLAIMER（默认开启；关闭时本机引擎不参与广播认领）。
+"""

@@ -31,16 +31,16 @@ def _patch_bases():
 
 class TestExplicitServiceBases:
     def test_explicit_service_urls_win_and_sources_traceable(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         mapping = {
             "vcs": "https://vcs.example.com:8081",
             "issue": "https://issue.example.com:8081",
             "a2a": "https://a2a.example.com:8082",
         }
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit",
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit",
                    side_effect=lambda svc: mapping.get(svc, "")), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             env = prompt_builder.resolve_service_base_env(7)
         assert env["GRAPE_VCS_BASE_URL"] == mapping["vcs"]
         assert env["GRAPE_ISSUE_BASE_URL"] == mapping["issue"]
@@ -51,10 +51,10 @@ class TestExplicitServiceBases:
         assert sources["a2a"] == "explicit_a2a_api_url"
 
     def test_gateway_prefix_routing(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=GW):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=GW):
             env = prompt_builder.resolve_service_base_env(7)
         assert env["GRAPE_VCS_BASE_URL"] == GW + "/vcs"
         assert env["GRAPE_ISSUE_BASE_URL"] == GW + "/issue"
@@ -65,10 +65,10 @@ class TestExplicitServiceBases:
         assert sources["a2a"] == "gateway_prefix_a2a"
 
     def test_fallback_keeps_business_and_control_plane_separate(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             env = prompt_builder.resolve_service_base_env(7)
         assert env["GRAPE_VCS_BASE_URL"] == BIZ
         assert env["GRAPE_ISSUE_BASE_URL"] == BIZ
@@ -81,10 +81,10 @@ class TestExplicitServiceBases:
 
 class TestResolveTaskServerEnv:
     def test_injects_three_service_bases_with_source_map(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             env = prompt_builder.resolve_task_server_env(7)
         assert env["GRAPE_SERVER_URL"] == BIZ
         assert env["RUNTIME_SERVER_URL"] == RT
@@ -94,10 +94,10 @@ class TestResolveTaskServerEnv:
         assert "vcs" in json.loads(env["GRAPE_BASE_URL_SOURCES"])
 
     def test_build_task_env_carries_three_bases(self):
-        from src.domains.runtime.pipeline.event_pipeline import build_task_env
+        from src.api.event_pipeline import build_task_env
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""), \
              patch("src.api.event_pipeline._inject_scene_env"), \
              patch("src.api.event_pipeline._inject_bot_agent_env"), \
              patch("src.api.event_pipeline._read_scene_linked_repos", return_value=[]), \
@@ -109,7 +109,7 @@ class TestResolveTaskServerEnv:
 
     def test_worker_env_refresh_injects_three_bases(self):
         """worker 执行前重拉 env：按任务 runtime 下发三面基址（覆盖旧快照）。"""
-        from src.api.routes.runtime import runtime_task_env
+        from src.domains.runtime.routes.runtime import runtime_task_env
 
         class _Cur:
             def execute(self, *_a, **_k):
@@ -130,8 +130,8 @@ class TestResolveTaskServerEnv:
              patch.multiple("src.kernel.prompt_builder",
                             _resolve_business_base=lambda runtime_id=0: (BIZ, "server_base_url"),
                             _resolve_server_url=lambda runtime_id=0: RT), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             got = runtime_task_env("task-1858", credential_id=1)
         assert got["env"]["GRAPE_VCS_BASE_URL"] == BIZ
         assert got["env"]["GRAPE_A2A_BASE_URL"] == RT
@@ -221,31 +221,31 @@ class TestLocalWorkerOverride:
 class TestServiceDiagnosticsModule:
     def test_a2a_base_skips_business_probe(self):
         """公开 resolve_a2a_base 不得为取 A2A 基址触发业务 API 探测。"""
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with patch("src.kernel.prompt_builder._resolve_business_base",
                    side_effect=AssertionError("business probe must not run")), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""), \
              patch("src.kernel.prompt_builder._resolve_server_url", return_value=RT):
             assert prompt_builder.resolve_a2a_base(7) == RT
 
     def test_a2a_base_prefers_gateway_prefix(self):
-        from src.kernel import prompt_builder
-        with patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=GW):
+        from src import prompt_builder
+        with patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=GW):
             assert prompt_builder.resolve_a2a_base(7) == GW + "/a2a"
 
     def test_gateway_config_read_once_per_env_build(self):
         """_build_service_base_env 只解析一次聚合网关基址。"""
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=GW) as gw:
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=GW) as gw:
             prompt_builder.resolve_service_base_env(7)
         assert gw.call_count == 1
 
     def test_candidates_live_in_shared_diagnostics_module(self):
-        from src.kernel.service_diagnostics import (
+        from src.service_diagnostics import (
             format_base_url_candidates,
             service_for_endpoint,
         )
@@ -255,10 +255,10 @@ class TestServiceDiagnosticsModule:
 
 class TestFailureDiagnostics:
     def test_a2a_endpoint_candidates(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             text = prompt_builder.format_base_url_candidates("/api/a2a/status")
         assert "候选 base_url" in text
         assert "GRAPE_A2A_BASE_URL=" + RT in text
@@ -266,18 +266,18 @@ class TestFailureDiagnostics:
         assert "GRAPE_VCS_BASE_URL" not in text
 
     def test_vcs_endpoint_candidates(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             text = prompt_builder.format_base_url_candidates("/api/git-repo/pulls")
         assert "GRAPE_VCS_BASE_URL=" + BIZ in text
 
     def test_unknown_endpoint_lists_all_candidates(self):
-        from src.kernel import prompt_builder
+        from src import prompt_builder
         with _patch_bases(), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             text = prompt_builder.format_base_url_candidates("/api/unknown")
         assert "GRAPE_VCS_BASE_URL" in text
         assert "GRAPE_ISSUE_BASE_URL" in text

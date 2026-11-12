@@ -19,21 +19,25 @@ pull_request_merged 触发的 sre 事件在派发时命中 #259 方案A ——
 边界：不改动 #494（超时归因透出）与 #495（worker CLI 健康）已修复范围；
 执行级瞬时异常（exit 0 空输出等）由 #403 transient_retry 覆盖，此处不重复。
 """
+
 from __future__ import annotations
 
 import os
+
 import threading
 
 from src.kernel.config import log
 
 _DEFAULT_ATTEMPTS = 6    # 首次离线后最多自动重试次数
+
 _DEFAULT_BASE_DELAY = 60  # 首次重试延迟（秒），指数退避
+
 _MAX_DELAY = 300          # 单次延迟上限（秒），总窗口 ≈ 60+120+240+300*3 ≈ 22min
 
 # 进程内调度去重（同 seq 只挂一条重试链）
 _scheduled: set = set()
-_sched_lock = threading.Lock()
 
+_sched_lock = threading.Lock()
 
 def _cfg_attempts() -> int:
     try:
@@ -42,7 +46,6 @@ def _cfg_attempts() -> int:
     except Exception:
         return _DEFAULT_ATTEMPTS
 
-
 def _cfg_base_delay() -> int:
     try:
         return int(os.environ.get("GRAPE_PR_MERGED_SRE_RETRY_DELAY",
@@ -50,21 +53,17 @@ def _cfg_base_delay() -> int:
     except Exception:
         return _DEFAULT_BASE_DELAY
 
-
 def _delay_for(n: int) -> int:
     return min(_cfg_base_delay() * (2 ** max(0, n - 1)), _MAX_DELAY)
-
 
 def _reset_registry() -> None:
     """测试辅助：清空进程内调度去重表。"""
     with _sched_lock:
         _scheduled.clear()
 
-
 def _release_seq(seq: int) -> None:
     with _sched_lock:
         _scheduled.discard(seq)
-
 
 def _normalize_params(repo_key, seq, agent_type, backend, skill_name, skill_id,
                       skill_path, evt, issue_id="", runtime_id=0,
@@ -77,7 +76,6 @@ def _normalize_params(repo_key, seq, agent_type, backend, skill_name, skill_id,
         "issue_id": issue_id or "", "runtime_id": int(runtime_id or 0),
         "scene_id": scene_id or "", "scene_uid": int(scene_uid or 0),
     }
-
 
 def schedule_pr_merged_sre_retry(repo_key, seq, agent_type, backend, skill_name,
                                  skill_id, skill_path, evt, issue_id="",
@@ -107,13 +105,11 @@ def schedule_pr_merged_sre_retry(repo_key, seq, agent_type, backend, skill_name,
              f"attempts={n_attempts} base_delay={base_delay if base_delay is not None else _cfg_base_delay()}s")
     return True
 
-
 def _schedule_attempt(n: int, p: dict, attempts: int, base_delay=None) -> None:
     delay = base_delay if base_delay is not None else _delay_for(n)
     t = threading.Timer(delay, _run_attempt, args=(n, p, attempts, base_delay))
     t.daemon = True
     t.start()
-
 
 def _pick_ready_engine(p: dict):
     """引擎池就绪判定：返回 (engine_id, pool) 或 (None, None)（未就绪）。"""
@@ -128,7 +124,6 @@ def _pick_ready_engine(p: dict):
     if engine_id is None:
         return None, None
     return engine_id, pool
-
 
 def _run_attempt(n: int, p: dict, attempts: int, base_delay=None) -> None:
     """单次重试：就绪 → 重派；未就绪 → 退避续排 / 耗尽收口。"""
@@ -148,7 +143,6 @@ def _run_attempt(n: int, p: dict, attempts: int, base_delay=None) -> None:
             _mark_retry_exhausted(seq, attempts, err=e)
         else:
             _schedule_attempt(n + 1, p, attempts, base_delay)
-
 
 def _claim_for_redispatch(seq: int) -> bool:
     """原子 claim：仅当事件仍为 failed 且无活跃任务时，条件 UPDATE 复位为 running。
@@ -190,7 +184,6 @@ def _claim_for_redispatch(seq: int) -> bool:
         log.warning(f"[496-retry] claim check seq={seq} failed: {e}")
         return False
 
-
 def _redispatch(p: dict, engine_id: int, pool: str) -> bool:
     """引擎恢复后的自动重派：复位事件 → 按原派发段语义重新入队/直连执行。"""
     seq = p["seq"]
@@ -215,7 +208,6 @@ def _redispatch(p: dict, engine_id: int, pool: str) -> bool:
             log.warning(f"[496-retry] seq={seq} fail-close error: {_fe}")
         _release_seq(seq)
         return False
-
 
 def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
     """与 run_pipeline 派发段（引擎选中后的入队/直连分支）保持同一语义。"""
@@ -262,7 +254,6 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
                         p["evt"], engine_id, tid),
                        name=f"ag-{p['agent_type']}-{seq}")
 
-
 def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
     """Issue #544 L4：断链发生时向关联 Issue 发可见提示评论。
 
@@ -271,7 +262,8 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
     以 sre 身份、仓库 bot token 发送；失败只告警不影响主流程。
     """
     num = str(issue_id or "").lstrip("#")
-    if not num.isdigit() or num == "0":
+    # S75/D102-O：字符串 ident 合法（原 isdigit 门槛让 gitee issue 收不到断链提示）
+    if not num or num == "0" or num.startswith("pr_"):
         return False
     try:
         from src.domains.mgmt.user.db import get_repo_token_with_refresh
@@ -290,7 +282,6 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
     except Exception as e:
         log.warning(f"[544-broken-chain] issue comment failed: {e}")
         return False
-
 
 def _mark_retry_exhausted(seq: int, attempts: int, err=None) -> None:
     """重试耗尽收口：failed 事件追加终止说明；running（复位后重派异常）收口回 failed。

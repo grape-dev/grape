@@ -121,7 +121,7 @@ function onFeaturedClick(idx) {
 function _platformTagHtml(t) {
   var p = t.source_platform || '';
   if (!p) return '';
-  var label = p === 'github' ? 'GitHub' : p === 'gitcode' ? 'GitCode' : '';
+  var label = {github: 'GitHub', gitcode: 'GitCode', gitee: 'Gitee'}[p] || '';  // D102: gitee 入册
   if (!label) return '';
   return '<span class="tg tg-d tmpl-platform-tag">' + label + '</span>';
 }
@@ -443,7 +443,7 @@ function _buildPlatformSelect() {
   if (bindings.length <= 1) return ''; // 只有一个平台不需要选择器
   var isZh = I18N.getLang() === 'zh';
   var options = bindings.map(function(p) {
-    var name = p === 'gitcode' ? 'GitCode' : p === 'github' ? 'GitHub' : p;
+    var name = {gitcode: 'GitCode', github: 'GitHub', gitee: 'Gitee'}[p] || p;  // D102: gitee 入册
     return '<option value="' + p + '">' + name + '</option>';
   }).join('');
   return '<select id="ptProvider" style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:13px;background:var(--bg);outline:none;flex-shrink:0">' + options + '</select>';
@@ -464,15 +464,21 @@ function createFromTemplate(templateId, defaultName) {
   var tplSourceRepo = t.source_repo || '';
   var tplUrl = t.html_url || '';
   if (!tplUrl && tplSourceRepo) {
-    tplUrl = tplPlatform === 'github'
-      ? 'https://github.com/' + tplSourceRepo
-      : 'https://gitcode.com/' + tplSourceRepo;
+    // S103/D77：host 走平台卡目录（tplPlatform 前缀构造 repo_key）
+    // 扫雷⑥ P0：此三元为 _repoWebLink/_repoWebHost 不可用时的同步兜底——彼时卡目录派生同样
+    // 不可用，无法配置化，故保留 github/gitcode 二分并注释说明（gitee 等走上方主路径）。
+    tplUrl = (typeof window._repoWebLink === 'function')
+      ? window._repoWebLink((tplPlatform || 'gitcode') + ':' + tplSourceRepo, tplSourceRepo)
+      : (tplPlatform === 'github' ? 'https://github.com/' + tplSourceRepo
+                                  : 'https://gitcode.com/' + tplSourceRepo);
   } else if (!tplUrl && tplSource === 'local') {
+    // 扫雷⑥ P0：grape-dev 内置模板库托管在 gitcode，属模板站配置本身，非 host 二分，保留。
     tplUrl = 'https://gitcode.com/grape-dev/grape-template/tree/main/' + (t.id || '');
   }
 
   var platformTag = tplPlatform === 'github' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitHub</span>'
-    : tplPlatform === 'gitcode' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitCode</span>' : '';
+    : tplPlatform === 'gitcode' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">GitCode</span>'
+    : tplPlatform === 'gitee' ? '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">Gitee</span>' : '';  // D102: gitee 入册
 
   var sourceBadge = tplSource === 'local'
     ? '<span style="font-size:10px;color:var(--g);background:#e8f5e9;padding:2px 8px;border-radius:4px">\u672c\u5730\u6a21\u677f</span>'
@@ -727,7 +733,7 @@ function doCreateFromTemplate(templateId) {
         app.showToast(I18N.t('templates.create_success', {msg: r.message || I18N.t('templates.create_success_default')}));
       }
       var parts = (r.full_name || '').split('/');
-      var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
+      var _rk = r.repo_key || (({github: 'github:', gitcode: 'gitcode:', gitee: 'gitee:'}[r.provider] || 'gitcode:') + r.full_name)  /* D102 */;
       // R13.1: 强制同步仓库列表，确保返回项目大厅时新仓库在列表中
       if (typeof app !== 'undefined' && app._forceSyncRepos) app._forceSyncRepos();
       setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
@@ -762,7 +768,7 @@ function forkTemplate(templateId) {
   var tplIcon = t.icon || '📦';
   var tplPlatform = t.source_platform || 'gitcode';
 
-  var platformLabel = tplPlatform === 'github' ? 'GitHub' : 'GitCode';
+  var platformLabel = {github: 'GitHub', gitcode: 'GitCode', gitee: 'Gitee'}[tplPlatform] || tplPlatform;  // D102: gitee 入册
   var platformTag = '<span class="tg tg-d tmpl-platform-tag" style="margin-left:6px">' + platformLabel + '</span>';
 
   var modal = document.createElement('div');
@@ -824,7 +830,7 @@ function forkTemplate(templateId) {
       app.showToast(I18N.t('templates.fork_success', {msg: r.message || (I18N.t('templates.fork_success_default') || 'Fork 成功')}));
     }
     var parts = (r.full_name || '').split('/');
-    var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
+    var _rk = r.repo_key || (({github: 'github:', gitcode: 'gitcode:', gitee: 'gitee:'}[r.provider] || 'gitcode:') + r.full_name)  /* D102 */;
     // R13.1: 强制同步仓库列表，确保返回项目大厅时新仓库在列表中
     if (typeof app !== 'undefined' && app._forceSyncRepos) app._forceSyncRepos();
     setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);

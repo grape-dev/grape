@@ -5,7 +5,9 @@
 - 数据源从 Grape 平台 organization + org_member 表查询（不再调 GitCode API）。
 - Issue #593：orgs 列表过滤 is_personal 组织（个人组织已由 personal 字段独立返回，避免下拉重复）。
 """
+
 import os
+
 import sys
 
 import pytest
@@ -14,13 +16,16 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.auth.password import hash_password
+
 from src.kernel.auth_sdk.jwt_utils import create_access_token
 
 client = TestClient(app)
-
 
 def _jwt(user_id, username):
     with db_lock:
@@ -30,34 +35,28 @@ def _jwt(user_id, username):
     ver = row[0] if row else 0
     return create_access_token(user_id, username, ver)
 
-
 def _ensure_user(username="test_migrate_orgs"):
-    """创建测试用户。"""
+    """创建测试用户。
+
+    D105 第二批口径（d105-uuid-primary-key-migration-design.md §7.2 B1/B3）：
+    grape_accounts.id 为 TEXT 主键、应用层 uuid7 生成（插入即所得），
+    AUTOINCREMENT/lastrowid 已退役——裸 INSERT 不带 id 只会得到 NULL 主键。
+    统一走 create_grape_account 仓储入口（uuid7 + status=1）。
+    """
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id FROM grape_accounts WHERE username=?", (username,))
-        row = c.fetchone()
-        if row:
-            uid = row[0]
-        else:
-            c.execute(
-                "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                "VALUES (?,?,?,?,1,0)",
-                (username, None, hash_password("t123"), username))
-            db.commit()
-            uid = c.lastrowid
-    return uid, username
-
-
-# ---------------------------------------------------------------------------
-# 1. GET /api/repos/migrate-orgs — 端点鉴权与返回结构
-# ---------------------------------------------------------------------------
+        c.execute("DELETE FROM grape_accounts WHERE username=?", (username,))
+        db.commit()
+    acc = create_grape_account(username=username, email="", password="t123",
+                              nickname=username)
+    assert acc and acc.get("id"), "create_grape_account 未返回 uuid 主键（D105 第二批口径）"
+    return acc["id"], username
 
 def test_migrate_orgs_requires_auth():
     """未带 JWT → 401。"""
     r = client.get("/api/repos/migrate-orgs")
     assert r.status_code == 401
-
 
 def test_migrate_orgs_returns_structure():
     """鉴权后返回 {"orgs": [...], "personal": "..."}，数据来自 Grape organization 表。"""
@@ -79,25 +78,26 @@ def test_migrate_orgs_returns_structure():
         assert "login" in body["orgs"][0]
         assert "name" in body["orgs"][0]
 
-
 def _ensure_personal_org(uid, username):
-    """确保用户有个人组织 + org_member 记录（模拟注册时自动创建）。返回 org_id。"""
+    """确保用户有个人组织 + org_member 记录（模拟注册时自动创建）。返回 org_id。
+
+    D105 第三批口径：organization.id 为 TEXT uuid 主键（create_org 显式生成，
+    lastrowid 已退役）——裸 INSERT 不带 id 只会得到 NULL 主键 + 假 lastrowid。
+    """
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,))
         row = c.fetchone()
         if row:
             return row[0]
-        c.execute(
-            "INSERT INTO organization (name, slug, owner_id, is_personal) "
-            "VALUES (?, ?, ?, 1)",
-            (f"{username}'s Workspace", f"{username}-personal", uid))
-        org_id = c.lastrowid
-        c.execute("INSERT INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
-                  (org_id, uid))
+        # 新 uuid 账号下旧 slug 可能残留——按 slug 清孤儿行防 UNIQUE(1062)
+        c.execute("DELETE FROM organization WHERE slug=?", (f"{username}-personal",))
         db.commit()
-    return org_id
-
+    from src.domains.mgmt.user.org_db import create_org
+    org = create_org(name=f"{username}'s Workspace", slug=f"{username}-personal",
+                     owner_id=uid, is_personal=1)
+    assert org and org.get("id"), "create_org 未返回 uuid 主键（D105 第三批口径）"
+    return org["id"]
 
 def _ensure_team_org(uid, name="Migrate Team Org", slug=None):
     """确保用户有一个团队组织（is_personal=0）+ org_member 记录。返回 org_id。"""
@@ -115,16 +115,13 @@ def _ensure_team_org(uid, name="Migrate Team Org", slug=None):
                           (org_id, uid))
                 db.commit()
             return org_id
-        c.execute(
-            "INSERT INTO organization (name, slug, owner_id, is_personal) "
-            "VALUES (?, ?, ?, 0)",
-            (name, slug, uid))
-        org_id = c.lastrowid
-        c.execute("INSERT INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
-                  (org_id, uid))
+        c.execute("DELETE FROM organization WHERE slug=?", (slug,))
         db.commit()
-    return org_id
-
+    # D105 第三批口径：organization.id = TEXT uuid 主键，走 create_org 显式生成
+    from src.domains.mgmt.user.org_db import create_org
+    org = create_org(name=name, slug=slug, owner_id=uid)
+    assert org and org.get("id"), "create_org 未返回 uuid 主键（D105 第三批口径）"
+    return org["id"]
 
 def test_migrate_orgs_personal_org_excluded_from_orgs():
     """Issue #593：用户有个人组织时，orgs 列表应过滤掉 is_personal 条目（personal 字段已覆盖）。"""
@@ -140,7 +137,6 @@ def test_migrate_orgs_personal_org_excluded_from_orgs():
         f"orgs should NOT contain is_personal entries (covered by personal field), "
         f"got {personal_orgs}")
 
-
 def test_migrate_orgs_personal_field_still_returned():
     """Issue #593：orgs 去重后 personal 字段仍应返回当前用户登录名。"""
     uid, username = _ensure_user()
@@ -152,7 +148,6 @@ def test_migrate_orgs_personal_field_still_returned():
     body = r.json()
     assert body["personal"] == username, (
         f"personal field should still be the username, got {body.get('personal')!r}")
-
 
 def test_migrate_orgs_team_orgs_still_listed():
     """Issue #593：同时存在个人组织 + 团队组织时，orgs 仅含团队组织。"""
@@ -172,7 +167,6 @@ def test_migrate_orgs_team_orgs_still_listed():
     personal_orgs = [o for o in body["orgs"] if o.get("is_personal")]
     assert not personal_orgs, (
         f"personal org should be filtered out, got {personal_orgs}")
-
 
 def test_migrate_orgs_upstream_failure_502(monkeypatch):
     """DB 查询故障 → 502 + 友好提示。"""
@@ -198,3 +192,6 @@ def test_migrate_orgs_upstream_failure_502(monkeypatch):
         assert detail.get("code") == 502
     finally:
         sm.db_lock = original
+
+os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db"))

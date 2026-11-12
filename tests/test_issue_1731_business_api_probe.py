@@ -21,40 +21,40 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 class TestBusinessApiPortConfig:
     def test_server_config_has_highest_priority(self):
-        from src.user.db import get_business_api_port
+        from src.domains.mgmt.user.db import get_business_api_port
         with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_port": 8081}), \
-             patch("src.user.db.get_meta_value", return_value="8091"), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="8091"), \
              patch.dict(os.environ, {"GRAPE_BUSINESS_PORT": "8092"}):
             assert get_business_api_port() == "8081"
 
     def test_meta_value_used_when_config_missing(self):
-        from src.user.db import get_business_api_port
+        from src.domains.mgmt.user.db import get_business_api_port
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value="8091"), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="8091"), \
              patch.dict(os.environ, {"GRAPE_BUSINESS_PORT": "8092"}):
             assert get_business_api_port() == "8091"
 
     def test_server_config_int_value_accepted(self):
-        from src.user.db import get_business_api_port
+        from src.domains.mgmt.user.db import get_business_api_port
         with patch("src.kernel.config.read_server_config",
                    return_value={"task_business_api_port": 8081}), \
-             patch("src.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GRAPE_BUSINESS_PORT", None)
             assert get_business_api_port() == "8081"
 
     def test_env_used_when_unconfigured(self):
-        from src.user.db import get_business_api_port
+        from src.domains.mgmt.user.db import get_business_api_port
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {"GRAPE_BUSINESS_PORT": "8092"}):
             assert get_business_api_port() == "8092"
 
     def test_empty_when_unconfigured(self):
-        from src.user.db import get_business_api_port
+        from src.domains.mgmt.user.db import get_business_api_port
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GRAPE_BUSINESS_PORT", None)
             assert get_business_api_port() == ""
@@ -65,9 +65,9 @@ class TestLocalRuntimeProbeAndFallback:
                  public_url="https://api.grape.example.com"):
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_business_api_url", return_value=public_url), \
-             patch("src.user.db.get_business_api_port", return_value=business_port), \
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_url", return_value=public_url), \
+             patch("src.domains.mgmt.user.db.get_business_api_port", return_value=business_port), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_local_port", return_value=local_port), \
              patch.object(prompt_builder, "_probe_business_api", side_effect=probe) as _probe:
@@ -99,7 +99,7 @@ class TestLocalRuntimeProbeAndFallback:
     def test_explicit_business_api_url_wins_without_probe(self):
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit",
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit",
                    return_value="https://biz.explicit.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_probe_business_api") as probe:
@@ -110,8 +110,8 @@ class TestLocalRuntimeProbeAndFallback:
     def test_remote_runtime_keeps_business_base_without_probe(self):
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_business_api_url",
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False), \
              patch.object(prompt_builder, "_probe_business_api") as probe:
@@ -124,8 +124,8 @@ class TestLocalRuntimeProbeAndFallback:
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db.get_server_base_url",
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_server_base_url",
                    return_value="https://grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False):
             assert prompt_builder._resolve_business_server_url(9) == "https://grape.example.com"
@@ -145,9 +145,9 @@ class TestLocalRuntimeProbeAndFallback:
         """locality 查询异常（未知）也先探测本机业务端口，不直接落 runtime 网关。"""
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_business_api_url", return_value=""), \
-             patch("src.user.db.get_business_api_port", return_value="8081"), \
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_url", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=None), \
              patch.object(prompt_builder, "_probe_business_api", return_value=True) as probe:
             assert prompt_builder._resolve_business_server_url(3) == "http://127.0.0.1:8081"
@@ -159,9 +159,9 @@ class TestAuditSourceAccuracy:
         """本机与 server_base_url 均探测失败：来源不得标成 local_business_port。"""
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_business_api_url", return_value=""), \
-             patch("src.user.db.get_business_api_port", return_value="8081"), \
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_url", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_probe_business_api", return_value=False):
             url, source = prompt_builder._resolve_business_base(3)
@@ -171,10 +171,10 @@ class TestAuditSourceAccuracy:
     def test_unreachable_candidates_with_server_base_url_source(self):
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_business_api_url",
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
-             patch("src.user.db.get_business_api_port", return_value="8081"), \
+             patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_probe_business_api", return_value=False):
             url, source = prompt_builder._resolve_business_base(3)
@@ -185,9 +185,9 @@ class TestAuditSourceAccuracy:
         """求值异常时也不直接落 localhost:local_port，先探测本机业务端口。"""
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit",
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit",
                    side_effect=RuntimeError("boom")), \
-             patch("src.user.db.get_business_api_port", return_value="8081"), \
+             patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_local_port", return_value="8083"), \
              patch.object(prompt_builder, "_probe_business_api",
                           side_effect=lambda u: u == "http://127.0.0.1:8081") as probe:
@@ -199,9 +199,9 @@ class TestAuditSourceAccuracy:
     def test_audit_log_reports_unreachable_fallback(self, caplog):
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
-        with patch("src.user.db.get_business_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_business_api_url", return_value=""), \
-             patch("src.user.db.get_business_api_port", return_value="8081"), \
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_url", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_resolve_server_url",
                           return_value="https://worker.grape.example.com"), \
@@ -311,8 +311,8 @@ class TestTaskServerEnvAuditLog:
                                         "server_base_url")), \
              patch.object(prompt_builder, "_resolve_server_url",
                           return_value="https://worker.grape.example.com"), \
-             patch("src.user.db.get_task_service_api_url_explicit", return_value=""), \
-             patch("src.user.db.get_task_gateway_base_url", return_value=""):
+             patch("src.domains.mgmt.user.db.get_task_service_api_url_explicit", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_task_gateway_base_url", return_value=""):
             with caplog.at_level(logging.INFO, logger="devops-bot"):
                 env = prompt_builder.resolve_task_server_env(7)
         assert env["GRAPE_SERVER_URL"] == "https://api.grape.example.com"
@@ -331,7 +331,7 @@ class TestTaskServerEnvAuditLog:
         """显式基址含 userinfo/query token 时，审计日志必须脱敏。"""
         from src import prompt_builder
         explicit = "https://user:secret@biz.example.com/api?token=tk_abc"
-        with patch("src.user.db.get_business_api_url_explicit", return_value=explicit), \
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=explicit), \
              patch.object(prompt_builder, "_resolve_server_url",
                           return_value="https://worker.grape.example.com"):
             with caplog.at_level(logging.INFO, logger="devops-bot"):
@@ -353,7 +353,7 @@ class TestTaskServerEnvAuditLog:
     def test_audit_log_redacts_schemeless_userinfo_and_query(self, caplog):
         from src import prompt_builder
         explicit = "user:secret@host/api?token=tk_abc"
-        with patch("src.user.db.get_business_api_url_explicit", return_value=explicit), \
+        with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=explicit), \
              patch.object(prompt_builder, "_resolve_server_url",
                           return_value="https://worker.grape.example.com"):
             with caplog.at_level(logging.INFO, logger="devops-bot"):

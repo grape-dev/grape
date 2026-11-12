@@ -3,22 +3,28 @@
 覆盖：结构化落库 / seq 单调与 since 增量 / 幂等防重放 / fanout 实时推送 / SSE 端点鉴权与增量接口。
 见 src/api/static/grape-task-logs-analysis.md。
 """
+
 import asyncio
+
 from src.domains.mgmt.auth import grape_account_db
+
 import json
 
 import pytest
+
 from fastapi.testclient import TestClient
 
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.runtime.engine import service
+
 from src.domains.runtime.engine.task_log_stream import subscribe, unsubscribe, fanout, _subscribers
+
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
-
 
 @pytest.fixture(autouse=True)
 def _clean():
@@ -34,23 +40,20 @@ def _clean():
         c.execute("DELETE FROM agent_tasks WHERE id LIKE 't1' OR id LIKE 't2' OR id LIKE 'test_%' OR repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
         db.commit()
 
-
-def _make_task(task_id="t1", status="running"):
+def _make_task(task_id="t1", status="running", user_id="1"):
+    # 扫雷⑨-H5：task-logs 端点有任务归属校验，测试任务默认归属 uid=1
+    # （与下方用例的 JWT 用户/直调 user={"id": 1} 对齐）。
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT OR IGNORE INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status) "
-                  "VALUES (?, 's1', 1, 'p', ?)", (task_id, status))
+        c.execute("INSERT OR IGNORE INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status, user_id) "
+                  "VALUES (?, 's1', 1, 'p', ?, ?)", (task_id, status, user_id))
         db.commit()
-
 
 def _mk_user_token():
     import uuid
     from src.domains.mgmt.user import db as user_db
     u = grape_account_db.create_grape_account(f"tasklog_{uuid.uuid4().hex[:8]}", email=None, password="pw123456")
     return _jwt_access_token(u["id"], u["username"])
-
-
-# ---------- 结构化落库 ----------
 
 class TestReportMessages:
     def test_normalize_and_persist(self):
@@ -97,9 +100,6 @@ class TestReportMessages:
                                         "data": {"tool": "bash", "input": '{"cmd":"ls","secret":"[REDACTED]"}'}}])
         msgs = service.list_task_messages("t1")
         assert msgs[0]["input"] == {"cmd": "ls", "secret": "[REDACTED]"}
-
-
-# ---------- fanout 实时推送 ----------
 
 class TestFanout:
     def test_fanout_delivers_and_filters_done(self):
@@ -152,9 +152,6 @@ class TestFanout:
             await unsubscribe("t2", q)
         asyncio.run(main())
 
-
-# ---------- seq 贯通 report_messages → fanout ----------
-
 class TestReportMessagesSeq:
     def test_report_messages_fanout_carries_seq(self):
         """report_messages 落库后传给 fanout 的消息含 seq（通过 _seq_messages 构造）。
@@ -172,9 +169,6 @@ class TestReportMessagesSeq:
             assert isinstance(payload.get("seq"), int) and payload["seq"] >= 1
             await unsubscribe("t2", q)
         asyncio.run(main())
-
-
-# ---------- 跨主模拟：DB 尾随补发 ----------
 
 class TestCrossMasterTail:
     """模拟双主场景：消息直接落 DB（另一台 master 的 fanout 不触达本进程），
@@ -297,22 +291,20 @@ class TestCrossMasterTail:
                 _tl._TAIL_POLL_S = _orig_poll
         asyncio.run(main())
 
-
-# ---------- API 端点 ----------
-
 @pytest.fixture
 def client():
     return TestClient(__import__("src.api.main", fromlist=["app"]).app)
-
 
 class TestTaskLogsAPI:
     def test_messages_requires_auth(self, client):
         assert client.get("/api/task-logs/t1/messages").status_code == 401
 
     def test_messages_incremental(self, client):
-        _make_task()
-        service.report_messages("t1", [{"type": "text", "data": "a"}, {"type": "text", "data": "b"}])
         token = _mk_user_token()
+        from src.kernel.auth_sdk.jwt_utils import verify_access_token
+        _uid = str((verify_access_token(token.replace("Bearer ", "")) or {}).get("sub") or "1")
+        _make_task(user_id=_uid)
+        service.report_messages("t1", [{"type": "text", "data": "a"}, {"type": "text", "data": "b"}])
         r = client.get("/api/task-logs/t1/messages?since=1",
                        headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 200
@@ -328,3 +320,5 @@ class TestTaskLogsAPI:
         r = client.get("/api/task-logs/nope/messages",
                        headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 404
+
+from src.domains.mgmt.auth import grape_account_db

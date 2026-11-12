@@ -6,7 +6,7 @@ from .event_types import (
     ISSUE_ASSIGNED, ISSUE_LABELED, ISSUE_COMMENT,
     PR_OPENED, PR_UPDATED, PR_CLOSED, PR_MERGED, PR_REVIEW, PR_COMMENT,
     PUSH, TAG_CREATED, RELEASE_CREATED, BUILD_START,
-    normalize_changes, normalize_files, has_file_changes, FILE_EVENT_TYPES,
+    normalize_changes,
 )
 
 
@@ -81,12 +81,6 @@ class GitCodeBackend(VcsBackend):
         payload["_raw_action"] = action
         payload["_changes"] = changes
 
-        # Issue #996：变更类事件携带文件清单（payload 自带 commits/files 时直接归一）
-        if evt_type in FILE_EVENT_TYPES:
-            _files = normalize_files(payload)
-            if has_file_changes(_files):
-                payload["files"] = _files
-
         return {
             "source": "gitcode", "type": evt_type,
             "repository": repo, "branch": branch,
@@ -107,15 +101,24 @@ class GitCodeBackend(VcsBackend):
         return ""
 
     def _extract_actor(self, payload: dict) -> str:
+        # 顺序修正（2026-11-11）：GitCode 的 sender 可能是"配置 webhook 的账号/仓库 bot"，
+        # 不是操作者。先前的顺序 sender > user 会把人类评论误判成 bot → self_loop 跳过。
+        # 正确优先级：user_name > payload.user（操作者/评论作者）> comment.user > issue.author > sender
         actor = payload.get("user_name", "")
-        if not actor:
-            sender = payload.get("sender", {})
-            if isinstance(sender, dict):
-                actor = sender.get("username", sender.get("login", ""))
         if not actor:
             user = payload.get("user", {})
             if isinstance(user, dict):
                 actor = user.get("username", user.get("login", ""))
+        if not actor:
+            _comment = payload.get("comment", {})
+            if isinstance(_comment, dict):
+                _cu = _comment.get("user", {})
+                if isinstance(_cu, dict):
+                    actor = _cu.get("username", _cu.get("login", ""))
+        if not actor:
+            sender = payload.get("sender", {})
+            if isinstance(sender, dict):
+                actor = sender.get("username", sender.get("login", ""))
         if not actor:
             issue = payload.get("issue", {})
             if isinstance(issue, dict):

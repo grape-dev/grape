@@ -77,7 +77,7 @@ class TestSceneDetailScopeCheck:
 
     def test_detail_marks_user_scope_node_unresolvable(self):
         """报障形态：node skill_id=0，仅 user 级技能 → resolvable=false。"""
-        from src.api.routes.scenes import get_scene_detail
+        from src.domains.mgmt.routes.scenes import get_scene_detail
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
         scene_id = f"sc-{_unique()}"
@@ -125,7 +125,7 @@ class TestSceneDetailScopeCheck:
 
     def test_detail_no_conflict_keeps_existing_fields(self):
         """无冲突场景：仅新增字段，既有节点字段保持不变。"""
-        from src.api.routes.scenes import get_scene_detail
+        from src.domains.mgmt.routes.scenes import get_scene_detail
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
         scene_id = f"sc-{_unique()}"
@@ -152,7 +152,7 @@ class TestSceneDetailScopeCheck:
 
     def test_detail_explicit_user_skill_id_still_conflicts(self):
         """#1758：显式 skill_id 仍需 scope 校验，user scope 不再视为授权。"""
-        from src.api.routes.scenes import get_scene_detail
+        from src.domains.mgmt.routes.scenes import get_scene_detail
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
         scene_id = f"sc-{_unique()}"
@@ -178,7 +178,7 @@ class TestSceneDetailScopeCheck:
 
     def test_detail_invalid_skill_id_falls_back_to_name_gate(self):
         """skill_id 失效（技能被删/停用）→ 回退名字判定，仍报冲突。"""
-        from src.api.routes.scenes import get_scene_detail
+        from src.domains.mgmt.routes.scenes import get_scene_detail
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
         scene_id = f"sc-{_unique()}"
@@ -200,7 +200,7 @@ class TestSceneDetailScopeCheck:
 
     def test_detail_after_rebind_to_repo_skill_is_resolvable(self):
         """AC4 回归：user 技能节点改绑 repo 级技能后详情可解析、派发门禁放行。"""
-        from src.api.routes.scenes import get_scene_detail
+        from src.domains.mgmt.routes.scenes import get_scene_detail
         from src.api.scene_skill_scope import evaluate
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
@@ -237,7 +237,7 @@ class TestSceneDetailScopeCheck:
 
     def test_detail_disabled_and_empty_skill_nodes_are_resolvable(self):
         """禁用节点与无技能节点不产生误报。"""
-        from src.api.routes.scenes import get_scene_detail
+        from src.domains.mgmt.routes.scenes import get_scene_detail
         owner, repo = f"o1721-{_unique()}", _unique()
         repo_key = _repo_key(owner, repo)
         scene_id = f"sc-{_unique()}"
@@ -283,7 +283,7 @@ class TestSkillScopeAuditSessionToken:
             _delete_skill(s)
 
     def test_audit_session_token_reads_bound_repo(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         owner, repo, repo_key, scene_id, s_user, s_repo = self._setup_conflict_scene()
         try:
             result = audit_scene_skill_scope(
@@ -310,7 +310,7 @@ class TestSkillScopeAuditSessionToken:
             self._teardown(repo_key, scene_id, s_user, s_repo)
 
     def test_audit_session_token_explicit_same_repo_allowed(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         owner, repo, repo_key, scene_id, s_user, s_repo = self._setup_conflict_scene()
         try:
             result = audit_scene_skill_scope(
@@ -322,7 +322,7 @@ class TestSkillScopeAuditSessionToken:
             self._teardown(repo_key, scene_id, s_user, s_repo)
 
     def test_audit_session_token_explicit_other_repo_forbidden(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         owner, repo, repo_key, scene_id, s_user, s_repo = self._setup_conflict_scene()
         other_repo = f"gitcode:o1721-{_unique()}/{_unique()}"
         try:
@@ -354,7 +354,7 @@ class TestSkillScopeAuditSessionToken:
         assert body["read_only"] is True
 
     def test_audit_session_token_without_repo_key_forbidden(self):
-        from src.api.routes.scenes import audit_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import audit_scene_skill_scope
         with pytest.raises(HTTPException) as ei:
             audit_scene_skill_scope(
                 repo="", limit=200,

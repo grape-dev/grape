@@ -13,6 +13,8 @@ Uses real SQLite test DB (via conftest.py init_database) + TestClient with
 dependency_overrides to bypass JWT auth.  No mock DB functions — exercises
 the full DB layer (admin/db.py → session_manager.db).
 """
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -183,7 +185,11 @@ class TestUserCRUD:
         assert d["username"] == "crud_test_user"
         assert d["email"] == "crud@example.com"
         assert d["nickname"] == "CRUD Test"
-        assert "id" in d and isinstance(d["id"], int)
+        assert "id" in d and isinstance(d["id"], str)
+        try:
+            uuid.UUID(d["id"])
+        except (ValueError, AttributeError, TypeError):
+            raise AssertionError(f"id is not a valid UUID: {d['id']!r}")
         _cleanup_user("crud_test_user")
 
     def test_create_user_short_password_returns_400(self, client):

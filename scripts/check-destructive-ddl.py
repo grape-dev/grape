@@ -6,7 +6,7 @@ _cleanup 声明块内——即满足以下任一：
   a) 出现在 `_destructive_ddl(...)` 调用的参数行内（唯一入口）；
   b) 出现在 kind="cleanup" 的注册表声明行附近（register_migration(..., "cleanup", ...)）。
 
-检查范围：仅 `git diff origin/<base>...HEAD -- src/api/db_setup.py` 的**新增行**
+检查范围：`git diff origin/<base>...HEAD` 中 src/api/db_setup.py 与 scripts/migrations/*.py 的**新增行**
 （禁止全历史扫描——历史内联语句是 legacy-stamp 打包内容，不在本次整改范围）。
 
 base 解析（QA QA-Impt 修复）：
@@ -26,13 +26,17 @@ base 解析（QA QA-Impt 修复）：
 pre-commit 接入（仓库暂无 .pre-commit-config.yaml，本地 hook 手动安装）：
   ln -sf ../../scripts/check-destructive-ddl.py .git/hooks/pre-commit
 """
+import glob
 import os
 import re
 import subprocess
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TARGET_FILE = "src/api/db_setup.py"
+TARGET_FILES = ["src/api/db_setup.py"] + sorted(
+    os.path.relpath(p, REPO_ROOT)
+    for p in glob.glob(os.path.join(REPO_ROOT, "scripts", "migrations", "*.py"))
+)
 
 # 危险 DDL 形态（大小写不敏感；行内匹配）
 _DESTRUCTIVE_RE = re.compile(
@@ -117,19 +121,22 @@ def _added_lines(base: str):
     返回 (lines, error)。base 无法解析（origin/<base> 与本地 <base> 均不存在）
     时 error 非空——调用方必须 FAIL（QA-Impt：不允许 fail-open 放行）。
     """
-    rc, out = _git("diff", f"origin/{base}...HEAD", "--", TARGET_FILE,
+    rc, out = _git("diff", f"origin/{base}...HEAD", "--", *TARGET_FILES,
                    "--unified=0")
     if rc != 0:
         # origin/<base> 可能不存在（未 fetch），尝试本地分支引用
-        rc, out = _git("diff", f"{base}...HEAD", "--", TARGET_FILE, "--unified=0")
+        rc, out = _git("diff", f"{base}...HEAD", "--", *TARGET_FILES, "--unified=0")
         if rc != 0:
             return [], (f"无法 diff base={base}（origin/{base} 与本地 {base} 均不存在）。"
                         f"CI 必须传入目标分支（参数 / CI_MERGE_REQUEST_TARGET_BRANCH_NAME / "
                         f"GRAPE_WORK_BRANCH），base 不可解析按 FAIL 处理，不做 fail-open。")
     lines = []
+    cur_file = ""
     for ln in out.splitlines():
-        if ln.startswith("+") and not ln.startswith("+++"):
-            lines.append(ln[1:])
+        if ln.startswith("+++ b/"):
+            cur_file = ln[len("+++ b/"):].strip()
+        elif ln.startswith("+") and not ln.startswith("+++"):
+            lines.append((cur_file, ln[1:]))
     return lines, None
 
 
@@ -143,8 +150,20 @@ def main(argv):
         print(f"[check-destructive-ddl] PASS（base={base}，无新增行）")
         return 0
 
-    violations = _classify_added_lines(added)
+    # QA 复审 M-2：scripts/migrations/ 是一次性迁移脚本——受控通道（常量驱动的
+    # 表/列名、逐文件人工评审），其中的危险 DDL 不适用 db_setup 的
+    # _destructive_ddl/cleanup 收口形态；单独计数报告，不判违规。
+    migration_ddl = [(f, l) for f, l in added
+                     if f.startswith("scripts/migrations/") and _DESTRUCTIVE_RE.search(l)]
+    added = [(f, l) for f, l in added if not f.startswith("scripts/migrations/")]
 
+    violations = _classify_added_lines([l for _, l in added])
+
+    if migration_ddl:
+        print(f"[check-destructive-ddl] INFO：scripts/migrations/ 受控通道内新增危险 DDL "
+              f"{len(migration_ddl)} 行（一次性迁移脚本，逐文件评审）：")
+        for f, l in migration_ddl:
+            print(f"  [{f}] + {l.strip()[:100]}")
     if violations:
         print("[check-destructive-ddl] FAIL：以下新增的破坏性 DDL 未走 _destructive_ddl()"
               " 收口或 cleanup 声明块：")

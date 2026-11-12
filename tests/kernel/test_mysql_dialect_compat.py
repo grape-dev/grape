@@ -20,7 +20,9 @@ from fastapi import HTTPException
 def test_s1_u5_provider_whitelist():
     from src.domains.mgmt.routes.grape_auth import unbind_provider
     src = inspect.getsource(unbind_provider)
-    assert 'provider not in ("gitcode", "github")' in src
+    # 31bbbaac8 起白名单改为动态渠道目录（list_providers+vcs 平台卡），不再硬编码两平台；
+    # 守卫改为断言「动态白名单校验存在 + 非法 provider 仍 400」（fail-closed 语义不变）
+    assert "provider not in _allowed" in src, "unbind 白名单校验丢失（方言守卫：防 SQL 注入回潮）"
     with pytest.raises(HTTPException) as ei:
         unbind_provider(provider="foo", confirm=False, user={"id": -1}, request=None)
     assert ei.value.status_code == 400
@@ -100,7 +102,7 @@ def test_s3_session_active_uses_parameterized_cutoff():
     """_check_session_active 的可执行 SQL 不含 SQLite 私有函数变体（标准参数化）。"""
     import ast
     import pathlib
-    srcfile = pathlib.Path("src/api/event_pipeline.py").read_text()
+    srcfile = pathlib.Path("src/domains/runtime/pipeline/event_pipeline.py").read_text()
     tree = ast.parse(srcfile)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "_check_session_active")
@@ -178,3 +180,32 @@ def test_s9_u2_sqlite_param_sqlite_master_native():
         c = db.cursor()
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ("nonexistent_tbl_xyz",))
         assert c.fetchone() is None
+
+
+# ---------------------------------------------------------------- F3 通用 `||` 拼接翻译
+
+def test_f3_u1_generic_concat_translation():
+    """F3-U1：`a || b` 通用翻译为 CONCAT(a, b)（双方言安全：SQLite 原生 || 不动，
+    MySQL 翻译层覆盖占位符/字面量/列/一级函数调用等简单操作数）。"""
+    from src.kernel.mysql_compat import translate_sql
+    # P0 现场一：pr_merged_sre_retry.py 结果追加
+    out = translate_sql("UPDATE events SET result=COALESCE(result,'') || ? WHERE seq=?")
+    assert out == "UPDATE events SET result=CONCAT(COALESCE(result,''), %s) WHERE seq=%s", out
+    # 链式拼接：a || b || c → 嵌套 CONCAT
+    out2 = translate_sql("SELECT name FROM t WHERE k = 'gitcode:' || b || '-' || c")
+    assert out2 == "SELECT name FROM t WHERE k = CONCAT(CONCAT('gitcode:', b), CONCAT('-', c))", out2
+    # 简单列对
+    assert translate_sql("SELECT a||b FROM t") == "SELECT CONCAT(a, b) FROM t"
+
+
+def test_f3_u2_concat_translation_safety():
+    """F3-U2：不安全/无需翻译的形态原样保留——字符串字面量内的 || 不误改，
+    含子查询的拼接不翻译（调用方应改应用层拼接）。"""
+    from src.kernel.mysql_compat import translate_sql
+    lit = "SELECT x FROM t WHERE note = 'keep || inside literal'"
+    assert translate_sql(lit) == lit
+    sub = "SELECT * FROM t WHERE a = (SELECT b FROM u) || c"
+    assert translate_sql(sub) == sub
+    # PRAGMA wal_checkpoint 进入 _PRAGMA_IGNORE_RE 白名单（MySQL 侧忽略）
+    from src.kernel.mysql_compat import _PRAGMA_IGNORE_RE
+    assert _PRAGMA_IGNORE_RE.match("PRAGMA wal_checkpoint(PASSIVE)")

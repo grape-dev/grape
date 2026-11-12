@@ -49,7 +49,7 @@ def _rm_skill(sname):
 # ============================== #1564 ==============================
 def test_1564_user_scope_rejected_in_repo_scope():
     """#1758 固定口径：repo 场景引用 user 技能一律拦（含本人），市场口径同样全拦。"""
-    from src.api.routes.scenes import _collect_scene_skill_scope_violations
+    from src.domains.mgmt.routes.scenes import _collect_scene_skill_scope_violations
     repo = f"gitcode:t{_sfx()}/r-{_sfx()}"
     mine, other, shared = f"usk_{_sfx()}", f"usk_{_sfx()}", f"rsk_{_sfx()}"
     _mk_skill("user", "alice", mine)
@@ -75,7 +75,7 @@ def test_1564_user_scope_rejected_in_repo_scope():
 
 def test_1564_violation_projection_shape():
     """对外 violations[] 只暴露 5 个字段（owner_id 等内部字段不外泄）。"""
-    from src.api.routes.scenes import _project_scene_scope_violation
+    from src.domains.mgmt.routes.scenes import _project_scene_scope_violation
     v = {"node_id": "n1", "node_tag": "qa", "skill": "s", "actual_scope": "user",
          "expected_scope": "repo", "owner_id": "alice"}
     out = _project_scene_scope_violation(v)
@@ -85,7 +85,7 @@ def test_1564_violation_projection_shape():
 # ============================== #1579 ==============================
 def test_1579_note_hook_pr_number_sources():
     """PR 号来源链：payload 结构化字段 > URL 兜底；Note Hook 的 iid(评论 id) 不得当 PR 号。"""
-    from src.domains.runtime.pipeline.event_pipeline import _extract_pr_number
+    from src.api.event_pipeline import _extract_pr_number
     # 1) payload 的 merge_request.iid 命中
     num, src = _extract_pr_number({}, {"merge_request": {"iid": 1011}}, "note_hook_pr")
     assert (num, src) == ("1011", "payload")
@@ -114,7 +114,7 @@ def test_1579_note_hook_pr_number_sources():
 # ============================== #1577 ==============================
 def test_1577_env_split_and_single_address_compat():
     """单地址部署：两变量同值（向前兼容）；双地址：业务基址不被 worker 地址覆盖。"""
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     from src.kernel.prompt_builder import resolve_task_server_env, _resolve_business_server_url
     from src.domains.runtime.engine.agent import _apply_local_worker_base_override
 
@@ -147,7 +147,7 @@ def test_1577_env_split_and_single_address_compat():
 # ============================== #1547 ==============================
 def test_1547_codegraph_unindexed_detection():
     """codegraph 占位文案/空目录树 → 降级；正常输出不误判。"""
-    from src.project_info.builder import _codegraph_unindexed
+    from src.domains.runtime.project_info.builder import _codegraph_unindexed
     assert _codegraph_unindexed(["", "arch", "mod", "chains"]) is True
     assert _codegraph_unindexed(["No files indexed. Run codegraph index first."]) is True
     assert _codegraph_unindexed(["tree/a/b.py", "no relevant code found"]) is True
@@ -189,7 +189,7 @@ def test_1546_agent_task_id_direct_lookup_and_legacy_fallback():
 def test_1599_resume_stage_and_review_outcome():
     """哨兵 owner_agent 回落 issue；noop 拆出机器可读 reason；不改写名义 status。"""
     from src.api.issues_center import _resume_stage
-    from src.api.routes.issues import _review_outcome
+    from src.domains.runtime.routes.issues import _review_outcome
     assert _resume_stage("pending_review") == "issue"
     assert _resume_stage("bot_takeover") == "issue"
     assert _resume_stage("issue_closed") == "issue"

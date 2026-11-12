@@ -171,7 +171,14 @@ pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 npm install -g opencode          # Node.js based
 # or
 pip install codearts-cli         # Python based
+# or install AtomCode
+npm install -g @atomgit.com/atomcode  # Rust based, installed via npm
 ```
+
+Configure AtomCode's model credentials on the execution host. Workers support
+`--engine atomcode`. Session continuation requires a build whose JSONL
+`run.started` event includes `session_id`; older builds can run independent tasks.
+See the [AtomCode setup guide (Chinese)](help/usage/atomcode.md).
 
 ### Environment Check (Optional)
 

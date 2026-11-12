@@ -143,7 +143,7 @@ def _get_verify_secret(kid: str) -> str | None:
     return _ensure_dev_ephemeral_secret()
 
 
-def create_access_token(user_id: int, username: str, token_version: int = 0,
+def create_access_token(user_id: str, username: str, token_version: int = 0,
                         login_provider: str = "", role: str = "") -> str:
     """签发 access token——短有效期（15 分钟），用于 API 请求。
 
@@ -170,7 +170,7 @@ def create_access_token(user_id: int, username: str, token_version: int = 0,
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
-def create_refresh_token(user_id: int, username: str, token_version: int = 0,
+def create_refresh_token(user_id: str, username: str, token_version: int = 0,
                          max_exp: int = None, login_provider: str = "", role: str = "") -> str:
     """签发 refresh token——长有效期（7 天滚动）+ 绝对上限（30 天）。
 

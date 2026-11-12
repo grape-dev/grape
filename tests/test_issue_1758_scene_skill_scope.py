@@ -174,7 +174,7 @@ class TestEvaluate:
 
     def test_lookup_error_fail_closed_by_default(self, monkeypatch):
         from src.api.scene_skill_scope import evaluate
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
 
         def _boom(*a, **kw):
             raise RuntimeError("db down")
@@ -187,7 +187,7 @@ class TestEvaluate:
 
     def test_lookup_error_explicit_degrade_allows(self, monkeypatch):
         from src.api.scene_skill_scope import evaluate
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
 
         def _boom(*a, **kw):
             raise RuntimeError("db down")
@@ -215,10 +215,10 @@ class TestFourEntryConsistency:
         return repo, scene_id, s_user, s_repo, nodes
 
     def test_report_scenario_same_conclusion_across_entries(self):
-        from src.api.routes.scenes import (
+        from src.domains.mgmt.routes.scenes import (
             _validate_scene_skill_scope, audit_scene_skill_scope,
             get_scene_detail)
-        from src.domains.runtime.pipeline.event_pipeline import _evaluate_skill_scope
+        from src.api.event_pipeline import _evaluate_skill_scope
         from src.api import scene_precheck
 
         repo, scene_id, s_user, s_repo, nodes = self._setup()
@@ -271,7 +271,7 @@ class TestFourEntryConsistency:
             _rm_skill(s_repo)
 
     def test_save_returns_all_conflicting_nodes(self):
-        from src.api.routes.scenes import _validate_scene_skill_scope
+        from src.domains.mgmt.routes.scenes import _validate_scene_skill_scope
         repo = _repo_key()
         s1, s2 = f"usk1758_{_unique()}", f"usk1758_{_unique()}"
         try:
@@ -293,7 +293,7 @@ class TestFourEntryConsistency:
 
     def test_rebind_candidates_follow_node_role_not_display_tag(self):
         """回归 QA 审查 AC2：tag 为展示名（非 agent_type）时仍能给出改绑候选。"""
-        from src.api.routes.scenes import (
+        from src.domains.mgmt.routes.scenes import (
             _validate_scene_skill_scope, audit_scene_skill_scope)
         from src.api.scene_skill_scope import evaluate
         repo = _repo_key()
@@ -329,7 +329,7 @@ class TestA2A400StructuredFields:
     """R3：a2a 派发失败 400 结构化字段。"""
 
     def test_fail_event_result_carries_scope_fields(self):
-        from src.domains.runtime.pipeline.event_pipeline import _fail_skill_resolve_event
+        from src.api.event_pipeline import _fail_skill_resolve_event
         from src.api.scene_skill_scope import evaluate
         repo = _repo_key()
         s = f"usk1758_{_unique()}"
@@ -362,10 +362,10 @@ class TestA2A400StructuredFields:
         from fastapi.testclient import TestClient
         from src.api.main import app
         from src.api.deps import get_user_or_none
-        from src.api.routes import webhook as wh
+        from src.domains.runtime.routes import webhook as wh
         import src.api.session_store as store
         import src.api.event_pipeline as ep
-        import src.user.db as user_db
+        import src.domains.mgmt.user.db as user_db
 
         repo = _repo_key()
         owner, name = repo.split(":", 1)[1].split("/", 1)

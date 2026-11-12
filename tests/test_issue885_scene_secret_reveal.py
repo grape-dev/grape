@@ -228,7 +228,7 @@ class TestSceneSecretReveal:
         assert detail.get("name") == "DEPLOY_KEY"
 
     def test_reveal_high_frequency_alert(self):
-        from src.domains.runtime.routes.settings import _REVEAL_MAX_PER_WINDOW
+        from src.domains.mgmt.routes.settings import _REVEAL_MAX_PER_WINDOW
         with db_lock:
             c = db.cursor()
             for _ in range(_REVEAL_MAX_PER_WINDOW):

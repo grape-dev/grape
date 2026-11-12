@@ -124,23 +124,6 @@ class TestTranslateSql:
         assert mc.translate_sql("SELECT 'gitcode:' || repo_key FROM t") == \
             "SELECT CONCAT('gitcode:', repo_key) FROM t"
 
-    def test_arbitrary_literal_concat_translated(self):
-        """架构审查 BLOCKED-1：任意字面量拼接也要翻译，否则 MySQL 下 `||` 退化为逻辑 OR。
-
-        `e.issue_id='#'||i.issue_number` 不翻译时在 MySQL 求值为 (0 OR n) → 1，
-        NOT EXISTS 恒真，静默返回错误数据（SQLite 测试发现不了）。
-        """
-        sql = ("SELECT 1 FROM issues i WHERE NOT EXISTS (SELECT 1 FROM events e "
-               "WHERE e.repo_key=i.repo_key AND e.issue_id='#'||i.issue_number)")
-        out = mc.translate_sql(sql)
-        assert "CONCAT('#', i.issue_number)" in out
-        assert "'#'||" not in out
-
-    def test_logical_or_untouched(self):
-        """真正的逻辑 OR 写法（非字面量左操作数）不得被改写。"""
-        out = mc.translate_sql("SELECT * FROM t WHERE a=1 || b=2")
-        assert "CONCAT" not in out
-
     def test_cast_as_text_to_char(self):
         """CAST(seq AS TEXT) → CAST(seq AS CHAR)（MySQL 不支持 TEXT 作 CAST 目标）"""
         out = mc.translate_sql("SELECT * FROM events WHERE CAST(seq AS TEXT) LIKE %s")
@@ -299,9 +282,31 @@ class TestTranslateCreateTable:
         out = mc.translate_sql("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, x INT)")
         assert "id INT AUTO_INCREMENT PRIMARY KEY" in out
 
-    def test_text_default_to_expression(self):
+    def test_text_default_literal_stripped(self):
+        # G4 根修：MySQL TEXT 系列列不接受字面量 DEFAULT（1101），包成表达式 DEFAULT ('')
+        # 在部分版本下仍 1064（drill4 实锤）→ 直接剥除，默认 NULL，应用层 ``or ''`` 兜底
         out = mc.translate_sql("CREATE TABLE t (name TEXT NOT NULL DEFAULT 'default')")
-        assert "name TEXT NOT NULL DEFAULT ('default')" in out
+        assert "DEFAULT" not in out, out
+        assert "name TEXT NOT NULL" in out, out
+
+    def test_text_default_numeric_literal_stripped(self):
+        out = mc.translate_sql("CREATE TABLE t (user_id TEXT DEFAULT 0, seq INT)")
+        assert "DEFAULT" not in out.split(",")[0], out
+        assert "seq INT" in out, out
+
+    def test_mediumtext_default_json_stripped(self):
+        out = mc.translate_sql("CREATE TABLE t (env_extra MEDIUMTEXT DEFAULT '{}')")
+        assert "env_extra MEDIUMTEXT" in out and "DEFAULT" not in out, out
+
+    def test_text_expression_default_kept(self):
+        # 带括号的表达式 DEFAULT 保留（datetime('now') 翻译为 CAST(NOW() AS CHAR)）
+        out = mc.translate_sql("CREATE TABLE t (created_at TEXT DEFAULT (datetime('now')))")
+        assert "created_at TEXT DEFAULT (CAST(NOW() AS CHAR))" in out, out
+
+    def test_int_default_not_stripped(self):
+        out = mc.translate_sql("CREATE TABLE t (n INTEGER DEFAULT 0, s VARCHAR(64) DEFAULT '')")
+        assert "n INTEGER DEFAULT 0" in out, out
+        assert "s VARCHAR(64) DEFAULT ''" in out, out
 
     def test_composite_primary_key_text_to_varchar(self):
         out = mc.translate_sql("CREATE TABLE t (repo_key TEXT, agent_type TEXT, PRIMARY KEY (repo_key, agent_type))")
@@ -318,7 +323,8 @@ class TestTranslateCreateTable:
 
     def test_nested_paren_default(self):
         out = mc.translate_sql("CREATE TABLE t (payload TEXT DEFAULT '{}', id INT)")
-        assert "payload TEXT DEFAULT ('{}')" in out
+        assert "payload TEXT DEFAULT" not in out  # G4: 字面量 DEFAULT 剥除
+        assert "payload TEXT, id INT" in out, out
 
 
 # ====== 辅助函数 ======

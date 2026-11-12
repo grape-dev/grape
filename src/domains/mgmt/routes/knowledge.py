@@ -35,9 +35,9 @@ def _resolve_repo_key(repo: str) -> str:
     repo_key = to_repo_key(repo)
     if ":" in repo:
         return repo_key  # 已带前缀，直接返回
-    # 查 DB 确定实际前缀
-    base = repo
-    candidates = [f"gitcode:{base}", f"github:{base}"]
+    # 查 DB 确定实际前缀（D16/S25：候选集由平台卡清单派生）
+    from src.kernel.repo_key import repo_key_candidates
+    candidates = repo_key_candidates(repo)
     try:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
@@ -46,6 +46,15 @@ def _resolve_repo_key(repo: str) -> str:
             row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({placeholders}) LIMIT 1", candidates).fetchone()
             if row:
                 return row[0]
+            # member-only 仓回落：managed_repos 无记录但用户已加入（user_repos 带
+            # provider 前缀，如 github:example-user/demo）。带前缀候选优先于裸名精确
+            # 匹配（裸名在 user_repos 中不作为 repo_key 存储），保持候选集顺序。
+            rows = c.execute(f"SELECT repo_key FROM user_repos WHERE repo_key IN ({placeholders})", candidates).fetchall()
+            if rows:
+                found = {r[0] for r in rows}
+                for cand in candidates:
+                    if ":" in cand and cand in found:
+                        return cand
     except Exception:
         pass
     return repo_key

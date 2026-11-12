@@ -173,7 +173,7 @@ function _evStatusText(data) {
     data.status === 'completed' &&
     data.issue_id && !String(data.issue_id).startsWith('#pr_');
   const _statusLabel = data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : data.status === 'cancelled' ? (I18N.t('events.status_cancelled') || '已取消') : (data.status === 'pending' ? (I18N.t('events.status_pending') || '排队中') : I18N.t('events.status_running_prefix') + data.status);
-  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : data.status === 'cancelled' ? 't3' : data.status === 'pending' ? '' : 'ty'}">${_statusLabel}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${(data.status === 'running' || data.status === 'pending') ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
+  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : data.status === 'cancelled' ? 't3' : data.status === 'pending' ? '' : 'ty'}">${_statusLabel}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent('${data.seq}')">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent('${data.seq}')">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent('${data.seq}')">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${(data.status === 'running' || data.status === 'pending') ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask('${data.seq}', '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
 }
 
 // Issue #494：失败态展示错误归因摘要（>200 字符截断 + 展开全文/收起）
@@ -364,7 +364,7 @@ function renderEventDetail(data) {
             <div style="font-size:11px;color:var(--t2);line-height:1.8">
               <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
               <div id="evEngineRow">${_evEngineText(data)}</div>
-              <div><span style="color:var(--t3)">Skill:</span> ${data.skill_display_name || data.skill || agent}</div>
+              <div><span style="color:var(--t3)">Skill:</span> ${_evEsc494(data.skill_display_name || data.skill || agent)}</div>
               <div id="evDurationRow">${_evDurationText(data)}</div>
               <div id="evStatusRow">${_evStatusText(data)}</div>
               <div id="evFailReason">${_evFailReasonText(data)}</div>
@@ -377,7 +377,7 @@ function renderEventDetail(data) {
       </div>
       <!-- 区块2：接收上下文 prompt（可折叠，默认折叠） -->
       <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">
-        <div class="ev-section-header" onclick="_toggleEvSection('promptBody', this);_loadEventPrompt(${data.task && data.task.task_id ? "'" + data.task.task_id + "'" : 'null'}, ${data.seq})" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
+        <div class="ev-section-header" onclick="_toggleEvSection('promptBody', this);_loadEventPrompt(${data.task && data.task.task_id ? "'" + data.task.task_id + "'" : 'null'}, '${data.seq}')" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
           <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▶</span>
           <span style="font-size:12px;font-weight:600">${I18N.t('events.section_prompt')}</span>
           <span id="promptMeta" class="ts t3" style="font-size:11px;margin-left:auto"></span>
@@ -486,7 +486,7 @@ function _loadEventPrompt(taskId, seq) {
 
 function _convBubble(role, content, time, by) {
   if (role === 'system') {
-    return `<div style="display:flex;justify-content:center"><div style="max-width:92%;padding:5px 10px;border-radius:8px;font-size:11px;color:var(--t2);background:#f1f5f9;text-align:center;line-height:1.4">${content || ''}</div></div>`;
+    return `<div style="display:flex;justify-content:center"><div style="max-width:92%;padding:5px 10px;border-radius:8px;font-size:11px;color:var(--t2);background:#f1f5f9;text-align:center;line-height:1.4">${_evEsc494(content || '')}</div></div>`;
   }
   const mine = role === 'user';
   // markdown 渲染（含 HTML 转义防 XSS，见 api.js renderMarkdown），与 chat 对话框对齐
@@ -554,7 +554,7 @@ function renderOutcome(knowledge, messages) {
       + '</div>';
   }).join('');
   const flowRows = (messages || []).filter(m => m.role === 'system' && (m.content || '').indexOf('🔄') === 0)
-    .map(m => `<div style="padding:3px 0;border-bottom:1px dashed var(--b)">${m.content}</div>`).join('');
+    .map(m => `<div style="padding:3px 0;border-bottom:1px dashed var(--b)">${_evEsc494(m.content)}</div>`).join('');
   if (!kCards && !flowRows) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   el.innerHTML = `<h3 style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--a)">${I18N.t('events.outcome_title')}</h3>`
@@ -1157,6 +1157,14 @@ function _closeA2aRedoGlass() {
   window._a2aRedoDoneAgents = [];
 }
 
+// Issue #1962（移植）：补发拦截优先展示结构化 reason（duplicate_key:64868 等）与 original_event。
+function _a2aRedoSkipReason(d) {
+  const reason = (d && d.reason) || (d && d.skipped) || '';
+  const orig = d && d.original_event;
+  const origSeq = orig && orig.seq;
+  return origSeq ? (reason + ' (original_event#' + origSeq + ')') : reason;
+}
+
 function _doA2aRedo(seq) {
   const agent = window._a2aRedoSel || '';
   if (!agent) { app.showToast(I18N.t('events.a2a_select_agent')); return; }
@@ -1167,7 +1175,7 @@ function _doA2aRedo(seq) {
       _closeA2aRedoGlass();
       API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
         if (d && d.skipped) {
-          app.showToast(I18N.t('events.a2a_redo_skipped', {reason: d.skipped}));
+          app.showToast(I18N.t('events.a2a_redo_skipped', {reason: _a2aRedoSkipReason(d)}));
         } else if (d && d.seq) {
           app.showToast(I18N.t('events.a2a_redo_success', {seq: d.seq}));
           app.nav('event', d.seq);
@@ -1184,7 +1192,7 @@ function _doA2aRedo(seq) {
   _closeA2aRedoGlass();
   API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
     if (d && d.skipped) {
-      app.showToast(I18N.t('events.a2a_redo_skipped', {reason: d.skipped}));
+      app.showToast(I18N.t('events.a2a_redo_skipped', {reason: _a2aRedoSkipReason(d)}));
     } else if (d && d.seq) {
       app.showToast(I18N.t('events.a2a_redo_success', {seq: d.seq}));
       app.nav('event', d.seq);

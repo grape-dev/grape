@@ -42,7 +42,7 @@ def _event_row(seq):
 class TestAuditInheritsOwnership:
     def test_audit_inherits_target_issue(self):
         from src.api.event_store import append_event
-        from src.api.routes.events import _audit_admin_action
+        from src.domains.runtime.routes.events import _audit_admin_action
 
         target_seq = append_event(REPO, "issue_comment", title="real issue event",
                                   issue_id="#30", agent_type="issue")
@@ -65,7 +65,7 @@ class TestAuditInheritsOwnership:
         assert p["related"] is True
 
     def test_audit_missing_target_has_no_ownership(self):
-        from src.api.routes.events import _audit_admin_action
+        from src.domains.runtime.routes.events import _audit_admin_action
 
         _audit_admin_action(REPO, 999999, "terminate", {"username": "ops"})
 
@@ -152,7 +152,7 @@ def _patch_pipeline(monkeypatch, conn):
 
 
 def test_pipeline_window_excludes_audit_and_unrelated(monkeypatch):
-    from src.api.routes import pipeline as pipeline_route
+    from src.domains.runtime.routes import pipeline as pipeline_route
 
     _patch_pipeline(monkeypatch, _seed_pipeline_db())
 
@@ -163,7 +163,7 @@ def test_pipeline_window_excludes_audit_and_unrelated(monkeypatch):
 
 
 def test_get_pipeline_stats_exclude_audit_and_unrelated(monkeypatch):
-    from src.api.routes import pipeline as pipeline_route
+    from src.domains.runtime.routes import pipeline as pipeline_route
 
     _patch_pipeline(monkeypatch, _seed_pipeline_db())
     out = pipeline_route.get_pipeline("test1312", "repo", history_limit=50,
@@ -225,7 +225,7 @@ class TestBackfillScript:
 
 
 def test_pipeline_window_scene_filter_excludes_audit(monkeypatch):
-    from src.api.routes import pipeline as pipeline_route
+    from src.domains.runtime.routes import pipeline as pipeline_route
 
     conn = _seed_pipeline_db()
     conn.execute("UPDATE issue SET scene_id='scene-x'")

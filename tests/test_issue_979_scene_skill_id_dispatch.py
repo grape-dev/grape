@@ -11,17 +11,22 @@
      （行为兼容）且日志出现降级 warning；
   4. migration backfill：仅含 skill_name 的存量场景节点写回 skill_id。
 """
+
 import json
+
 import uuid
 
 import pytest
 
 from src.domains.mgmt.user import db as udb
-from src.kernel.session_manager import db, db_lock
-from src.api import event_pipeline
-from src.api.pipeline_config import create_custom_scene, get_node_by_tag
-from src.api.db_setup import _fn_scene_nodes_skill_id_backfill
 
+from src.session_manager import db, db_lock
+
+from src.api import event_pipeline
+
+from src.api.pipeline_config import create_custom_scene, get_node_by_tag
+
+from src.api.db_setup import _fn_scene_nodes_skill_id_backfill
 
 def _insert_scope_skill(sname, scope, owner_id, agent_type="issue"):
     with db_lock:
@@ -38,12 +43,10 @@ def _insert_scope_skill(sname, scope, owner_id, agent_type="issue"):
     assert row, f"insert {scope} skill failed"
     return row[0]
 
-
 def _delete_skills(sname):
     with db_lock:
         db.cursor().execute("DELETE FROM skill WHERE skill_name=?", (sname,))
         db.commit()
-
 
 def _mk_user(prefix="sk979"):
     from src.domains.mgmt.auth import grape_account_db
@@ -53,7 +56,6 @@ def _mk_user(prefix="sk979"):
         u = grape_account_db.get_grape_account_by_username(uname)
     return u
 
-
 def _cleanup_user(uname):
     from src.domains.mgmt.auth import grape_account_db
     u = grape_account_db.get_grape_account_by_username(uname)
@@ -62,7 +64,6 @@ def _cleanup_user(uname):
     with db_lock:
         db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (uname,))
         db.commit()
-
 
 class TestTripleScopeIdLock:
     def test_id_authoritative_over_same_name(self, caplog):
@@ -104,7 +105,6 @@ class TestTripleScopeIdLock:
         finally:
             _delete_skills(sname)
             _cleanup_user(ua["username"])
-
 
 class TestPrSubscriptionUserId:
     def test_user_id_resolves_user_scope(self):
@@ -153,7 +153,6 @@ class TestPrSubscriptionUserId:
                 db.cursor().execute("DELETE FROM devops_pipeline_scene WHERE scene_id=?", (scene_id,))
                 db.commit()
             _cleanup_user(ua["username"])
-
 
 class TestLegacySceneCompat:
     def test_name_only_node_degrades_same_as_before(self, caplog):
@@ -234,7 +233,6 @@ class TestLegacySceneCompat:
                 db.commit()
             _cleanup_user(ua["username"])
 
-
 # ---------------------------------------------------------------------------
 # QA 复审补充：管线级集成测试（PR-sub 分支与 issue 场景覆盖分支，event_pipeline
 # run_pipeline 主路由端到端）+ backfill scene_market repo 档 + get_node_by_tag
@@ -242,9 +240,7 @@ class TestLegacySceneCompat:
 # ---------------------------------------------------------------------------
 from unittest.mock import patch
 
-
 _TEST_REPO = "gitcode:owner979/repo"
-
 
 def _integration_clean():
     with db_lock:
@@ -262,7 +258,6 @@ def _integration_clean():
         c.execute("DELETE FROM runtime_credentials WHERE name LIKE '979-%'")
         db.commit()
 
-
 def _seed_managed_repo():
     with db_lock:
         c = db.cursor()
@@ -272,7 +267,6 @@ def _seed_managed_repo():
             "VALUES (?, 'owner979', 'repo', 'owner979/repo', 0, 'default', 'tk-979', 'wt-979', 'grape_bot')",
             (_TEST_REPO,))
         db.commit()
-
 
 def _seed_pr_sub_scene(scene_id, qa_node, work_branch="mys-local"):
     nodes = [qa_node]
@@ -285,7 +279,6 @@ def _seed_pr_sub_scene(scene_id, qa_node, work_branch="mys-local"):
             (scene_id, scene_id, _TEST_REPO, json.dumps(nodes),
              json.dumps({"work_branch": work_branch})))
         db.commit()
-
 
 def _seed_qa_session():
     with db_lock:
@@ -303,7 +296,6 @@ def _seed_qa_session():
                   ("sess-979-qa", _TEST_REPO, "qa", _rid))
         db.commit()
 
-
 def _make_pr_opened_raw(pr_num=331, target_branch="mys-local"):
     return json.dumps({
         "object_attributes": {
@@ -316,7 +308,6 @@ def _make_pr_opened_raw(pr_num=331, target_branch="mys-local"):
         "user": {"username": "human_user"},
     }).encode()
 
-
 def _make_issue_note_raw(issue_num):
     return json.dumps({
         "project": {"path_with_namespace": "owner979/repo"},
@@ -324,7 +315,6 @@ def _make_issue_note_raw(issue_num):
                               "note": "please review", "id": 1},
         "user": {"username": "tester"},
     }).encode()
-
 
 def _run_hook(raw, headers, account="owner979/repo"):
     """走 run_pipeline 主路由，捕获 enqueue_task 全量 kwargs（skill_id 断言用）。"""
@@ -354,7 +344,6 @@ def _run_hook(raw, headers, account="owner979/repo"):
         ep.run_pipeline(raw, headers, account=account)
     return captured
 
-
 class TestPRSubPipelineIntegration:
     """PR 订阅派发分支（run_pipeline _is_pr_sub）端到端：节点 skill_id 权威 +
     user_id 补传；降级（无 id）时 #657 门禁仍生效。"""
@@ -368,26 +357,28 @@ class TestPRSubPipelineIntegration:
         _integration_clean()
 
     def test_pr_sub_node_skill_id_authoritative_dispatch(self):
-        """节点带 skill_id（user 档）→ 入队 skill_id/skill_path 命中 user 档。"""
-        ua = _mk_user()
+        """节点带 skill_id（repo 档）→ 入队 skill_id/skill_path 命中 repo 档。
+
+        Issue #1758：显式 skill_id 仍需 scope 校验，故这里用 repo 档验证
+        “id 权威覆盖同名 official”而不是 user 档。
+        """
         sname = f"pip979_{uuid.uuid4().hex[:6]}"
         scene_id = f"sc979p_{uuid.uuid4().hex[:8]}"
         try:
             sid_o = _insert_scope_skill(sname, "official", "")
-            sid_u = _insert_scope_skill(sname, "user", str(ua["id"]))
+            sid_repo = _insert_scope_skill(sname, "repo", _TEST_REPO)
             _seed_pr_sub_scene(scene_id, {"id": "qa", "tag": "qa", "skill": sname,
-                                          "skill_id": sid_u, "enabled": True})
-            # 无关联 Issue → uid 兜底反查 _repo_user_id → 补传 user_id（Issue #979）
-            with patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=ua["id"]):
+                                          "skill_id": sid_repo, "enabled": True})
+            with patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=0):
                 captured = _run_hook(_make_pr_opened_raw(pr_num=331),
                                      {"X-GitCode-Event": "Merge Request Hook"})
             assert captured, "PR 订阅应派发 qa 任务"
             for kw in captured:
-                assert kw.get("skill_id") == sid_u, (
-                    f"PR-sub 节点 skill_id 应权威命中 user 档 {sid_u}, got {kw.get('skill_id')}")
+                assert kw.get("skill_id") == sid_repo, (
+                    f"PR-sub 节点 skill_id 应权威命中 repo 档 {sid_repo}, got {kw.get('skill_id')}")
+                assert kw.get("skill_id") != sid_o
                 assert kw.get("skill") == sname
                 assert kw.get("skill_path") == f"/skills/{sname}"
-            # 不应落 skill_resolve_failed（id 命中跳过 #657 名字级门禁）
             with db_lock:
                 failed = db.cursor().execute(
                     "SELECT COUNT(*) FROM events WHERE repo_key=? "
@@ -395,10 +386,9 @@ class TestPRSubPipelineIntegration:
             assert failed == 0
         finally:
             _delete_skills(sname)
-            _cleanup_user(ua["username"])
 
     @pytest.mark.xfail(
-        reason="PR-sub 派发当前回退内置技能而非 #657 名字级 fail-fast；该用例自 src.user 移除后长期无法收集，"
+        reason="PR-sub 派发当前回退内置技能而非 #657 名字级 fail-fast；该用例自 src.domains.mgmt.user 移除后长期无法收集，"
                "待产品口径确认（门禁只覆盖 issue 流水线）",
         strict=False,
     )
@@ -423,10 +413,9 @@ class TestPRSubPipelineIntegration:
         finally:
             _delete_skills(sname)
 
-
 class TestIssueSceneOverrideIntegration:
     """issue 场景覆盖分支（run_pipeline plugin override）端到端：节点 skill_id
-    权威（含仅 user scope + id 命中跳过 #657 门禁）。"""
+    权威（repo 档可覆盖同名 official）；显式 user 档仍需 scope 校验（#1758）。"""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -455,32 +444,29 @@ class TestIssueSceneOverrideIntegration:
             db.commit()
 
     def test_issue_scene_node_skill_id_overrides_official(self):
-        """三档同名（official+user）：节点 skill_id 指向 user 档 → 覆盖分支
-        入队 skill_id 命中 user 档（不落 official）。"""
-        ua = _mk_user()
+        """三档同名（official+repo）：节点 skill_id 指向 repo 档 → 覆盖分支
+        入队 skill_id 命中 repo 档（不落 official）。"""
         sname = f"ovr979_{uuid.uuid4().hex[:6]}"
         scene_id = f"sc979o_{uuid.uuid4().hex[:8]}"
         try:
             sid_o = _insert_scope_skill(sname, "official", "")
-            sid_u = _insert_scope_skill(sname, "user", str(ua["id"]))
+            sid_repo = _insert_scope_skill(sname, "repo", _TEST_REPO)
             self._seed_scene(scene_id, [
-                {"id": "vod", "tag": "vod", "skill": sname, "skill_id": sid_u,
+                {"id": "vod", "tag": "vod", "skill": sname, "skill_id": sid_repo,
                  "enabled": True}])
-            self._seed_issue_with_scene(scene_id, ua["id"])
+            self._seed_issue_with_scene(scene_id, 0)
             captured = _run_hook(_make_issue_note_raw(700), {"X-GitCode-Event": "Note Hook"})
             assert captured, "issue 场景覆盖应派发 vod 任务"
             for kw in captured:
-                assert kw.get("skill_id") == sid_u, (
-                    f"覆盖分支应权威命中 user 档 {sid_u}, got {kw.get('skill_id')}")
+                assert kw.get("skill_id") == sid_repo, (
+                    f"覆盖分支应权威命中 repo 档 {sid_repo}, got {kw.get('skill_id')}")
                 assert kw.get("skill_id") != sid_o
                 assert kw.get("skill_path") == f"/skills/{sname}"
         finally:
             _delete_skills(sname)
-            _cleanup_user(ua["username"])
 
-    def test_issue_scene_id_hit_skips_scope_gate(self):
-        """技能仅 user scope（他人所有，名字解析必失败）但节点 skill_id 显式
-        命中 → 跳过 #657 名字级门禁，正常入队（显式绑定即授权）。"""
+    def test_issue_scene_user_skill_id_still_blocked(self):
+        """#1758：显式 user 档 skill_id 不再视为授权，派发门禁 fail-fast 拦截。"""
         sname = f"ovr979g_{uuid.uuid4().hex[:6]}"
         scene_id = f"sc979g_{uuid.uuid4().hex[:8]}"
         try:
@@ -490,16 +476,14 @@ class TestIssueSceneOverrideIntegration:
                  "enabled": True}])
             self._seed_issue_with_scene(scene_id, 0)
             captured = _run_hook(_make_issue_note_raw(700), {"X-GitCode-Event": "Note Hook"})
-            assert captured, "id 显式命中应跳过 scope 门禁并派发"
-            assert all(kw.get("skill_id") == sid_u2 for kw in captured)
+            assert not captured, "user 档 skill_id 仍需 scope 校验，不应入队"
             with db_lock:
                 failed = db.cursor().execute(
                     "SELECT COUNT(*) FROM events WHERE repo_key=? "
                     "AND event_type='skill_resolve_failed'", (_TEST_REPO,)).fetchone()[0]
-            assert failed == 0
+            assert failed >= 1
         finally:
             _delete_skills(sname)
-
 
 class TestUserMarketSceneNodeLookup:
     """QA④：get_node_by_tag 的 user_id 生效——个人场景（scene_market
@@ -536,7 +520,6 @@ class TestUserMarketSceneNodeLookup:
                 db.commit()
             _cleanup_user(ua["username"])
 
-
 class TestMarketBackfillRepoScope:
     """QA③：backfill 对 scene_market scope='repo' 行按行内 repo_key 解析 repo 档
     （此前空 repo_key 漏 repo 档）。"""
@@ -566,3 +549,5 @@ class TestMarketBackfillRepoScope:
             with db_lock:
                 db.cursor().execute("DELETE FROM scene_market WHERE name=?", (scene_name,))
                 db.commit()
+
+from src.kernel.session_manager import db, db_lock

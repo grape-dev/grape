@@ -149,7 +149,7 @@ def test_download_via_client_exists():
 
 def _patch_collect_env(monkeypatch, token="tk-fake", download_results=None, saved=None, raise_save=False):
     import src.api.issues_center as ic
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="": token, raising=False)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda repo_key="": token, raising=False)
 
     class _FakeClient:
         def download_user_attachment(self, url, **kw):
@@ -207,7 +207,7 @@ def test_collect_non_media_ignored(monkeypatch):
         return _C()
 
     import src.api.issues_center as ic
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="": "tk-fake", raising=False)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda repo_key="": "tk-fake", raising=False)
     monkeypatch.setattr("src.domains.runtime.vcs.api_client.create_client", fake_client)
     r = ic._collect_issue_media_attachments("grape-dev", "grape", 1748, [f"附件 {BARE}"])
     assert r == {"ok": [], "failed": []}

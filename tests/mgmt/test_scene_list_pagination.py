@@ -258,7 +258,7 @@ class TestDeepReviewFixes:
 
     def test_t5_03_engine_status_uses_session_repo_resolution(self):
         """P3：engine-status 与列表同用 _resolve_scene_repo_key（#534 会话级解析）。"""
-        full = os.path.join(sys_path_root, "src", "api", "routes", "scenes.py")
+        full = os.path.join(sys_path_root, "src", "domains", "mgmt", "routes", "scenes.py")
         with open(full, encoding="utf-8") as f:
             body = f.read()
         # get_scene_engine_status 函数体内应调用 _resolve_scene_repo_key，而非 to_repo_key 直转

@@ -2,7 +2,8 @@
 
 钉死四条约定：
 1. **归属链 user_id 兜底** —— created_by/assignee 双空时经 issue.user_id →
-   unified_user_mapping（gitcode_user 优先，github_login 兜底）回收归属。
+   账号域 grape_accounts.username 回收归属（多平台解耦口径——原
+   unified_user_mapping 双列反查已废弃）。
 2. **未归属单列** —— 双空且 user_id 无映射的行计入「(未归属)」档：
    计入 + 未归属 = 去 bot 后原始行数，不静默丢数。
 3. **bot 规则化** —— `*bot` / `*-bot`（大小写不敏感）规则匹配，名单外 bot
@@ -74,8 +75,15 @@ def _seed_mapping(user_id, gitcode_user="", github_login=""):
         " VALUES (?,?,?)", (user_id, gitcode_user, github_login))
 
 
+def _seed_account(user_id, username):
+    """多平台解耦口径：归属/created_by 回退走账号域（grape_accounts.username）。"""
+    _exec(
+        "INSERT OR REPLACE INTO grape_accounts (id, username) VALUES (?,?)",
+        (str(user_id), username))
+
+
 def _grant_repo_access(user_id=133701):
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     base = ("org", "repo")
     _exec("DELETE FROM managed_repos WHERE repo_key=?", (REPO,))
     user_db.add_managed_repo(REPO, base[0], base[1])
@@ -97,7 +105,7 @@ def _client():
 # --------------------------------------------- A：归属链 user_id 兜底
 
 def test_user_id_fallback_via_gitcode_mapping():
-    _seed_mapping(_UID_BASE + 1, gitcode_user="carol")
+    _seed_account(_UID_BASE + 1, "carol")
     _seed_issue(REPO, 601, user_id=_UID_BASE + 1)
     _seed_issue(REPO, 602, user_id=_UID_BASE + 1, status="completed")
     cli, app, _dep = _client()
@@ -112,7 +120,7 @@ def test_user_id_fallback_via_gitcode_mapping():
 
 
 def test_user_id_fallback_github_login_when_no_gitcode():
-    _seed_mapping(_UID_BASE + 2, github_login="carol-gh")
+    _seed_account(_UID_BASE + 2, "carol-gh")
     _seed_issue(REPO, 603, user_id=_UID_BASE + 2)
     cli, app, _dep = _client()
     try:
@@ -224,6 +232,9 @@ def _issue_user_id_nullable():
         orig_ddl, orig_indexes = _ddl_row[0], [r[0] for r in _ix_rows]
         nullable_ddl = orig_ddl.replace(
             "user_id          INTEGER NOT NULL", "user_id          INTEGER")
+        if nullable_ddl == orig_ddl:  # D105 TEXT 化后文案形态
+            nullable_ddl = orig_ddl.replace(
+                "user_id          VARCHAR(36) NOT NULL", "user_id          VARCHAR(36)")
         assert nullable_ddl != orig_ddl, "user_id NOT NULL 放宽未生效（DDL 文案漂移？）"
         c.execute("DROP TABLE IF EXISTS issue_nullable_1337")
         c.execute(nullable_ddl.replace("issue (", "issue_nullable_1337 (", 1))
@@ -287,7 +298,7 @@ def test_issue_row_with_null_user_id_tokens_fall_into_unassigned(_issue_user_id_
 
 def test_ensure_assignee_task_card_writes_created_by():
     from src.api.issues_center import _ensure_assignee_task_card
-    _seed_mapping(_UID_BASE + 4, gitcode_user="dave")
+    _seed_account(_UID_BASE + 4, "dave")
     task_id = _ensure_assignee_task_card(_UID_BASE + 4, "", REPO, 631,
                                          "t", "d")
     assert task_id
@@ -298,7 +309,7 @@ def test_ensure_assignee_task_card_writes_created_by():
 
 
 def test_ensure_issue_task_writes_created_by_from_sender():
-    from src.api.routes.tasks import ensure_issue_task
+    from src.domains.runtime.routes.tasks import ensure_issue_task
     _seed_mapping(_UID_BASE + 5, gitcode_user="erin")
     task_id = ensure_issue_task(REPO, 632, title="t", sender="erin")
     assert task_id

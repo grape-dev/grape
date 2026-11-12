@@ -346,7 +346,7 @@ def test_direct_materialize_call_point_passes_lazy_source(tmp_path, monkeypatch)
     })
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: os.path.join(official, "SKILL.md"))
-    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
+    from src.api.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "issue",
                                 "demo-skill", evt, "",
@@ -364,7 +364,7 @@ def test_worker_official_same_name_fallback_uses_official_source(tmp_path, monke
     """worker 同名官方包回退：source 用 official/0，不沿用任务原始 skill_id。"""
     import json
     from src.domains.runtime.engine import agent as ra
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
 
     monkeypatch.setattr(udb, "get_skill_by_id",
                         lambda sid: {"id": sid, "scope": "user"})

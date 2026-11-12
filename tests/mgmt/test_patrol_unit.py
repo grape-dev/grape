@@ -633,7 +633,7 @@ def test_identity_strategy_sql_seam():
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
         user = pc.HostUserStrategy().resolve("gitcode:patrol-test/b")
-        assert user and user["id"] == 777 and user["auth_type"] == "jwt"
+        assert user and user["id"] == "777" and user["auth_type"] == "jwt"  # D105: str uid
     fake = FakeDb([("FROM managed_repos WHERE repo_key=?", [(0,)])])
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
@@ -642,7 +642,7 @@ def test_identity_strategy_sql_seam():
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
         fb = pc.ManagedUserFallbackStrategy().resolve("gitcode:patrol-test/a")
-        assert fb and fb["id"] == 888
+        assert fb and fb["id"] == "888"  # D105: str uid
     fake = FakeDb([("FROM user_repos WHERE repo_key=?", [])])
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
@@ -1041,7 +1041,7 @@ def test_s26_1_resolve_owner_path_a_fallback():
     ])
     with patch.object(patrol_mod, "db", fake), \
          patch.object(patrol_mod, "db_lock", threading.Lock()):
-        assert patrol_mod._resolve_owner(SENTINEL_REPO) == 888
+        assert patrol_mod._resolve_owner(SENTINEL_REPO) == "888"  # D105: str uid
 
 
 def test_s26_2_resolve_owner_host_user_wins_and_unowned():
@@ -1051,7 +1051,7 @@ def test_s26_2_resolve_owner_host_user_wins_and_unowned():
                    ("FROM user_repos WHERE repo_key=? AND is_admin=1", [(999,)])])
     with patch.object(patrol_mod, "db", fake), \
          patch.object(patrol_mod, "db_lock", threading.Lock()):
-        assert patrol_mod._resolve_owner(SENTINEL_REPO) == 77
+        assert patrol_mod._resolve_owner(SENTINEL_REPO) == "77"  # D105: str uid
     fake2 = FakeDb([("FROM managed_repos WHERE repo_key=?", [(0,)]),
                     ("FROM user_repos WHERE repo_key=? AND is_admin=1", [])])
     with patch.object(patrol_mod, "db", fake2), \

@@ -44,7 +44,7 @@ def _patch_autopilot_deps(monkeypatch, tmp_path, mode, *, bot="grape_bot",
                         lambda *a, **k: "prompt")
     monkeypatch.setattr("src.kernel.prompt_builder.resolve_task_server_env",
                         lambda *a, **k: {})
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
 
     def _capture(*args, **kwargs):
         captured["env_extra"] = args[12]
@@ -98,7 +98,7 @@ def test_custom_fields_cannot_override_reserved_bot_vars(monkeypatch, tmp_path):
 
 def test_repo_level_bot_username_wins(monkeypatch, tmp_path):
     """多 bot 场景：repo 级 managed_repos.bot_username 优先于全局 bot。"""
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     from src.kernel.session_manager import db, db_lock
 
     monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot"])
@@ -123,7 +123,7 @@ def test_repo_level_bot_username_wins(monkeypatch, tmp_path):
 
 def test_global_bot_fallback_when_repo_level_missing(monkeypatch, tmp_path):
     """repo 级缺失时回落全局 bot（gitcode 取第一个），与 event_pipeline 一致。"""
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     from src.kernel.session_manager import db, db_lock
 
     monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot", "other"])

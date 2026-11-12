@@ -337,7 +337,7 @@ function _renderSceneCard(s) {
     : iconVal;
 
   const btns = `<div class="scn-card-btns">
-    <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id},'${s.display_name || s.name}','${(s.skills||[]).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
+    <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id}, decodeURIComponent('${encodeURIComponent(s.display_name || s.name)}'), decodeURIComponent('${encodeURIComponent((s.skills||[]).join(','))}'))">${I18N.t('skills.apply_scene')||'应用'}</button>
     ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
   </div>`;
 
@@ -348,10 +348,10 @@ function _renderSceneCard(s) {
     <div class="scn-card-body">
       <div class="scn-card-head">
         <div class="scn-ic ${catBg}">${iconHtml}</div>
-        <div class="scn-card-title">${s.display_name || s.name}</div>
+        <div class="scn-card-title">${window.escHtml(s.display_name || s.name)}</div>
         ${s.is_featured?'<span class="scn-star">🌟</span>':''}
       </div>
-      <div class="scn-card-desc" title="${(s.market_description || s.description || '').replace(/"/g, '&quot;')}">${s.market_description || s.description || ''}</div>
+      <div class="scn-card-desc" title="${window.escHtml(s.market_description || s.description || '')}">${window.escHtml(s.market_description || s.description || '')}</div>
       <div class="scn-chain">${chain}</div>
       <div class="scn-card-foot">
         <span class="scn-meta">${skills.length} ${I18N.t('skills.skills_suffix')||'技能'} · ${(s.repo_count||0)} ${(I18N.t('skills.repos_in_use')||'仓库在用')}</span>
@@ -524,7 +524,7 @@ window._branchQS = function(owner, repo) {
   try {
     var rk = (app.currentRepo() || {}).repoKey || '';
     if (rk && rk.indexOf(':') > 0) {
-      var bare = rk.replace(/^(gitcode|github):/, '');
+      var bare = window.stripRepoPrefix(rk);  // 扫雷⑥ P0：前缀剥离统一走全局 stripRepoPrefix
       // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
       if (!owner || !repo || bare === (owner + '/' + repo)) {
         return '?repo_key=' + encodeURIComponent(rk);
@@ -880,22 +880,22 @@ function _renderSceneDetailPage(s) {
       <div class="scn-ic ${catBg}" style="width:80px;height:80px;border-radius:18px;font-size:36px">${iconHtml}</div>
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-          <h2 style="font-size:22px;font-weight:700;letter-spacing:-.02em">${s.display_name || s.name}</h2>
-          ${s.name && s.name !== (s.display_name || s.name) ? `<span style="font-size:11px;color:#86868b;background:rgba(0,0,0,.04);padding:3px 10px;border-radius:999px;font-weight:400">${s.name}</span>` : ''}
+          <h2 style="font-size:22px;font-weight:700;letter-spacing:-.02em">${window.escHtml(s.display_name || s.name)}</h2>
+          ${s.name && s.name !== (s.display_name || s.name) ? `<span style="font-size:11px;color:#86868b;background:rgba(0,0,0,.04);padding:3px 10px;border-radius:999px;font-weight:400">${window.escHtml(s.name)}</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap">
           ${s.category_name ? `<span class="tg tg-d" style="font-size:10px">${s.category_name}</span>` : ''}
           ${isOfficial && s.is_featured ? `<span class="tg" style="background:rgba(184,155,106,.12);color:#B89B6A;font-size:10px">🌟 ${I18N.t('skills.featured_tag')||'精选'}</span>` : ''}
           ${s.version ? `<span class="tg tg-d" style="font-size:9px">v${s.version}</span>` : ''}
         </div>
-        <div style="font-size:13px;color:var(--t2);line-height:1.6">${s.market_description || s.description || ''}</div>
+        <div style="font-size:13px;color:var(--t2);line-height:1.6">${window.escHtml(s.market_description || s.description || '')}</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:16px;padding-top:16px;border-top:1px solid rgba(0,0,0,.04)">
       ${isOfficial ? `<span style="cursor:pointer;font-size:13px;color:var(--t2);display:flex;align-items:center;gap:4px" onclick="_toggleSceneLike(${s.id},this)">${likeIcon} <span data-scene-like="${s.id}">${s.like_count||0}</span></span>
       <span style="font-size:11px;color:var(--t3)">${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</span>` : ''}
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
-        <button class="bt bt-o bt-s" onclick="_applyScene(${s.id},'${s.display_name || s.name}','${(s.skills||[]).map(function(x){return x.name||x;}).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
+        <button class="bt bt-o bt-s" onclick="_applyScene(${s.id}, decodeURIComponent('${encodeURIComponent(s.display_name || s.name)}'), decodeURIComponent('${encodeURIComponent((s.skills||[]).map(function(x){return x.name||x;}).join(','))}'))">${I18N.t('skills.apply_scene')||'应用'}</button>
         ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
       </div>
     </div>
@@ -935,7 +935,7 @@ function _renderSceneDetailPage(s) {
           <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skIcon} ${skLabel}</span>
           ${skDeleted ? '<span style="font-size:9px;color:var(--r);font-weight:600;flex-shrink:0">⚠ 已删除</span>' : ''}
         </div>
-        ${roleDesc ? `<div class="det-card-desc" title="${roleDesc.replace(/"/g, '&quot;')}">${roleDesc}</div>` : '<div class="det-card-desc"></div>'}
+        ${roleDesc ? `<div class="det-card-desc" title="${window.escHtml(roleDesc)}">${window.escHtml(roleDesc)}</div>` : '<div class="det-card-desc"></div>'}
         <div class="det-card-sep"></div>
         <div class="det-card-box">
           <div class="det-card-label">${I18N.t('dashboard.label_skill')||'技能'}</div>
@@ -1033,7 +1033,12 @@ function _renderSceneDetailPage(s) {
     const tplSource = tpl.source || '';
     const tplRepo = tpl.source_repo || '';
     const isRemote = tplSource === 'git' && tplRepo;
-    const tplUrl = isRemote ? `https://gitcode.com/${tplRepo}` : '';
+    // S103/D77：模板跳转 host 走平台卡目录（source_platform 由后端下发，gitee 等不再硬编码 gitcode.com）
+    const tplUrl = isRemote
+      ? ((typeof window._repoWebHost === 'function')
+          ? 'https://' + window._repoWebHost((tpl.source_platform || 'gitcode') + ':' + tplRepo) + '/' + tplRepo
+          : `https://gitcode.com/${tplRepo}`)
+      : '';
     const sourceBadge = isRemote
       ? `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(52,199,89,.12);color:#34c759">${I18N.t('skills.gitcode_remote')||'GitCode 远程'}</span>`
       : `<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.04);color:#86868b">${I18N.t('skills.local_template')||'本地模板'}</span>`;

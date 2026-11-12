@@ -15,30 +15,41 @@
 
 运行：python -m pytest tests/test_issue_386_token_validation_400.py -v
 """
+
 import os
+
 import sys
+
 import unittest
+
 from unittest.mock import patch, MagicMock
 
 # 强制使用独立测试库，防止 TestClient 误连生产库（与 test_api_routes.py 同款双保险）
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 
 _uid = None
-_headers = {}
 
+_headers = {}
 
 def setup_module():
     global _uid, _headers
     from src.domains.mgmt.auth.password import hash_password
     from src.kernel.auth_sdk.jwt_utils import create_access_token
+    # D105：grape_accounts.id 为 TEXT uuid 主键（裸 INSERT 不带 id → NULL 主键，
+    # lastrowid 是垃圾值 → 签出的 token 查无此人恒 401 ACCOUNT_DISABLED）。
+    # 统一走 create_grape_account 仓储入口（uuid7 + status=1）。
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, token_version FROM grape_accounts WHERE username='test_386'")
@@ -47,18 +58,15 @@ def setup_module():
             _uid = {"id": row[0]}
             ver = row[1] or 0
         else:
-            c.execute(
-                "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                "VALUES (?,?,?,?,1,0)",
-                ("test_386", None, hash_password("test123"), "test_386"))
-            db.commit()
-            _uid = {"id": c.lastrowid}
+            acc = create_grape_account(username="test_386", email="",
+                                       password="test123", nickname="test_386")
+            assert acc and acc.get("id"), "create_grape_account 未返回 uuid 主键（D105 口径）"
+            _uid = {"id": acc["id"]}
             ver = 0
         # 清理本用户可能残留的 external_identities，保证用例间状态干净
         c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
         db.commit()
-    _headers = {"Authorization": "Bearer " + create_access_token(_uid["id"], "test_386", ver)}
-
+    _headers = {"Authorization": "Bearer " + create_access_token(str(_uid["id"]), "test_386", ver)}
 
 def teardown_module():
     if _uid:
@@ -68,13 +76,11 @@ def teardown_module():
             c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
             db.commit()
 
-
 def _mock_resp(status_code=200, json_data=None):
     m = MagicMock()
     m.status_code = status_code
     m.json.return_value = json_data or {}
     return m
-
 
 class TestGitHubTokenValidation400:
     """GitHub 分支：上游 401 / 其他非 200 → 400；网络异常 → 502"""
@@ -107,7 +113,6 @@ class TestGitHubTokenValidation400:
         assert r.status_code == 502, r.text
         assert r.json()["detail"]["code"] == 502
 
-
 class TestGitCodeTokenValidation400:
     """GitCode 分支：上游 401 / 其他非 200 → 400；网络异常 → 502"""
 
@@ -138,7 +143,6 @@ class TestGitCodeTokenValidation400:
         assert r.status_code == 502, r.text
         assert r.json()["detail"]["code"] == 502
 
-
 class TestClearPathRegression:
     """回归：空字符串清除仍走删除绑定，不触发上游校验"""
 
@@ -158,6 +162,13 @@ class TestClearPathRegression:
                            json={"gitcode_token": ""},
                            headers=_headers)
         assert r.status_code == 200, r.text
+        # D105k 四象限（2026-11-11 与评审 #④ 对齐）：预置的 ei 带 access_token
+        # = OAuth 在场 → 清 gitcode PAT 只清凭据域（user_credentials.gitcode_pat），
+        # ei 归属行 + OAuth token 保留（回落能力锁）——旧断言"ei access_token
+        # 必须被清空"锁的是 PAT 直写 ei 的退役形态。
+        from src.domains.mgmt.user.db import get_credential
+        _pat = get_credential(str(_uid["id"]), "gitcode_pat") or {}
+        assert not _pat.get("token"), f"gitcode_pat must be cleared, got: {_pat}"
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -165,8 +176,14 @@ class TestClearPathRegression:
                 "WHERE grape_user_id=? AND provider='gitcode'",
                 (_uid["id"],))
             row = c.fetchone()
-        assert not row or row[0] == ""
-
+        # OAuth 归属行保留（回落能力）
+        assert row and row[0], "ei OAuth binding must survive a PAT-only clear (D105k coexistence lock)"
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+# 强制使用独立测试库，防止 TestClient 误连生产库（与 test_api_routes.py 同款双保险）
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

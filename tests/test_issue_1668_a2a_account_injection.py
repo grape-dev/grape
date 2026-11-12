@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
+from src.api.event_pipeline import resolve_actor_account
 
 _REPO_KEY = "gitcode:owner/repo"
 _REPO_LIKE = "gitcode:owner/repo%"
@@ -116,7 +116,7 @@ class TestResolveActorAccount:
             account = resolve_actor_account(evt, _REPO_KEY)
         assert account == ""
         warning = "\n".join(r.getMessage() for r in caplog.records if "ACCOUNT_MISSING" in r.getMessage())
-        assert '"fallback": "actor->payload.account"' in warning
+        assert '"fallback": "actor->payload.account->issue_creator"' in warning
 
     def test_non_a2a_ignores_legacy_evt_account(self):
         evt = {"type": "issue_opened", "actor": "", "account": "legacy_account",
@@ -193,7 +193,7 @@ class TestA2AEndpointActorSync:
         app.dependency_overrides[get_user_or_none] = lambda: {
             "id": 1, "username": "caller_login", "auth_type": "jwt"}
         try:
-            with patch("src.user.db.get_managed_repos",
+            with patch("src.domains.mgmt.user.db.get_managed_repos",
                        return_value=[{"repo_key": _REPO_KEY}]):
                 r = self._post(self._body(account=""))
         finally:

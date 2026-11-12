@@ -11,7 +11,7 @@
 #   make clean   - remove build artifacts and caches
 #   make docker  - build and run via docker-compose (from deploy/)
 
-PYTHON ?= python3
+PYTHON ?= $(shell [ -x venv/bin/python ] && echo venv/bin/python || echo python3)
 PORT ?= 3000
 VENV ?= .venv
 # 测试解释器：优先仓库自带的 venv/ 或 .venv/（本仓库部署用 venv/），否则退回 PYTHON

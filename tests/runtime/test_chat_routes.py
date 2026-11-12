@@ -4,22 +4,30 @@
 反馈、chat 配置（GET/PUT、app_id 占用校验、技能解析）、内部辅助函数。
 通过 patch get_chat_config 确定性控制 backend/runtime_id；stream_agent / BotManager 用 mock。
 """
+
 import asyncio
+
 import json
+
 import uuid
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+
 from src.api.deps import get_current_user, get_current_user_or_api_key
+
 from src.kernel.session_manager import db, db_lock, get_chat_config
+
 from src.domains.mgmt.user import db as user_db
 
 UID = 99001
-USERNAME = "chat_tester"
 
+USERNAME = "chat_tester"
 
 @pytest.fixture(autouse=True)
 def _client():
@@ -38,8 +46,8 @@ def _client():
         c2.execute("DELETE FROM agent_runtimes WHERE name LIKE 'chat_rt%'")
         c2.execute("DELETE FROM agent_runtimes WHERE display_name='chat_test_local'")
         c2.execute("DELETE FROM runtime_credentials WHERE name LIKE 'chat_cred%'")
+        c2.execute("DELETE FROM unified_user_mapping WHERE user_id=?", (UID,))
         db.commit()
-
 
 def _local_engine_id():
     """确保存在健康本机 opencode 引擎（credential_id=0），返回其 id。"""
@@ -52,7 +60,6 @@ def _local_engine_id():
                   "VALUES ('opencode','chat_test_local',0,1,1,'online','global','')")
         db.commit()
         return c.lastrowid
-
 
 def _remote_engine_id():
     """创建远端引擎（credential_id>0），返回其 id。"""
@@ -67,17 +74,14 @@ def _remote_engine_id():
         db.commit()
         return c.lastrowid
 
-
 def _fake_stream_agent(prompt, cwd, session_id="", **kw):
     yield ("step_start", "started")
     yield ("text", "联通成功")
     yield ("done", {"exit_code": 0, "text": "联通成功", "oc_session_id": "ses_x"})
 
-
 def _new_conv(client):
     r = client.post("/api/chat/conversations", json={})
     return r.json()["conversation_id"]
-
 
 def _sse_done_text(body):
     """从 SSE body 提取 done 事件的 text。"""
@@ -87,10 +91,6 @@ def _sse_done_text(body):
             if evt.get("type") == "done":
                 return evt.get("text", "")
     return ""
-
-
-# ====== 会话 CRUD ======
-
 
 class TestConversations:
     def test_list_empty(self, _client):
@@ -134,10 +134,6 @@ class TestConversations:
         assert r.status_code == 200
         assert len(r.json()["messages"]) == 1
         assert _client.get("/api/chat/messages/nope").status_code == 404
-
-
-# ====== POST /send ======
-
 
 class TestSend:
     def test_conv_not_found_404(self, _client):
@@ -186,10 +182,6 @@ class TestSend:
         data = r.json()
         assert data["queued"] is True and data["task_id"] == "t1"
         assert m_enq.call_args.kwargs["runtime_id"] == rid
-
-
-# ====== POST /send/stream ======
-
 
 class TestSendStream:
     def test_no_backend_done_event(self, _client):
@@ -259,10 +251,6 @@ class TestSendStream:
         assert any("重试后的回复内容" in (m[0] or "") for m in final_msgs), f"reply not persisted: {final_msgs}"
         assert n_agent >= 1
 
-
-# ====== 反馈 ======
-
-
 class TestFeedback:
     def test_missing_event_404(self, _client):
         r = _client.post("/api/chat/feedback", json={"seq": 999999, "feedback_type": "create_issue"})
@@ -280,10 +268,6 @@ class TestFeedback:
         data = r.json()
         assert data["deprecated"] is True
         assert data["a2a_event"]["type"] == "user_feedback"
-
-
-# ====== Chat 配置 ======
-
 
 class TestConfig:
     def test_get_config(self, _client):
@@ -327,22 +311,23 @@ class TestConfig:
         assert not any("chat_cred_o_rev" in n for n in names), f"他人 revoked 不应出现: {names}"
 
     def test_put_config_vod_conflict(self, _client):
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES ('cli_conflict','vod_bot')")
-            db.commit()
-        r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "cli_conflict", "app_secret": "s"}}})
-        assert r.status_code == 400
-        assert "VOD" in r.json()["detail"]["message"]
+        """A2 收尾：独占校验查 active 安装行——repo 轨已占用的 app_id 不能绑 Chat。"""
+        try:
+            assert _seed_inst("cli_conflict", scope="repo", repo_key="gitcode:org/rv", uid="")
+            r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "cli_conflict", "app_secret": "s"}}})
+            assert r.status_code == 400
+            assert "VOD" in r.json()["detail"]["message"]
+        finally:
+            _clean_inst("cli_conflict")
 
     def test_put_config_other_user_occupied(self, _client):
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('occ-1', 8888, 'cli_occ')")
-            db.commit()
-        r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "cli_occ", "app_secret": "s"}}})
-        assert r.status_code == 400
-        assert "已被其他用户" in r.json()["detail"]["message"]
+        try:
+            assert _seed_inst("cli_occ", uid=8888)
+            r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "cli_occ", "app_secret": "s"}}})
+            assert r.status_code == 400
+            assert "已被其他用户" in r.json()["detail"]["message"]
+        finally:
+            _clean_inst("cli_occ")
 
     def test_put_config_skill_resolution(self, _client):
         sname = "chat_skill_%s" % uuid.uuid4().hex[:4]
@@ -361,94 +346,64 @@ class TestConfig:
     def test_put_config_clear_im(self, _client):
         """Issue #431：body 无 im 键的普通保存不再清空 IM 字段（原断言的是缺陷行为，已修正）。"""
         app_id = "cli_keep_%s" % uuid.uuid4().hex[:6]
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?)",
-                      ("sess-cfg-%d" % UID, UID, "", app_id, "sec", "feishu"))
-            db.commit()
-        r = _client.put("/api/chat/config", json={})
-        assert r.status_code == 200
-        with db_lock:
-            row = db.cursor().execute("SELECT im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
-        assert tuple(row) == (app_id, "sec", "feishu"), f"无 im 键保存不应清空 IM 字段, got {row}"
+        try:
+            assert _seed_inst(app_id, secret="sec")
+            r = _client.put("/api/chat/config", json={})
+            assert r.status_code == 200
+            row = _inst(app_id)
+            assert row and row[1] == "active", f"无 im 键保存不应把安装弄失效, got {row}"
+        finally:
+            _clean_inst(app_id)
 
     def test_put_config_unbind_cleans_im(self, _client):
-        """Issue #294：解绑（app_id 置空）→ 清凭证 + 释放注册表 + 删渠道会话 + 映射对账 + 移除 bot。"""
+        """Issue #294：解绑（app_id 置空）→ 安装置 revoked + 删渠道会话 + 映射对账。"""
         app_id = "cli_unbind_%s" % uuid.uuid4().hex[:6]
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?)",
-                      ("sess-cfg-%d" % UID, UID, "", app_id, "sec", "feishu"))
-            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, 'chat_bot')", (app_id,))
-            c.execute("INSERT OR REPLACE INTO chat_conversations (id, user_id, im_channel_id, title) VALUES (?,?,?,?)",
-                      ("ubc-%s" % app_id, UID, app_id, "t"))
-            c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, app_id) VALUES (?,?,?,?,?)",
-                      (UID, USERNAME, "ou_unbind", "绑定人", app_id))
-            db.commit()
-        bm = MagicMock()
-        bm.api = MagicMock()
-        bm.remove_bot = AsyncMock()
         try:
-            with patch("src.api.main.bot_manager", bm):
-                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "", "app_secret": ""}}})
-            assert r.status_code == 200, r.text
-            bm.remove_bot.assert_awaited_once_with(app_id)
+            assert _seed_inst(app_id, secret="sec")
             with db_lock:
                 c = db.cursor()
-                row = c.execute("SELECT im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
-                reg = c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()[0]
+                c.execute("INSERT OR REPLACE INTO chat_conversations (id, user_id, im_channel_id, title) VALUES (?,?,?,?)",
+                          ("ubc-%s" % app_id, UID, app_id, "t"))
+                c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, app_id) VALUES (?,?,?,?,?)",
+                          (UID, USERNAME, "ou_unbind", "绑定人", app_id))
+                db.commit()
+            r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "", "app_secret": ""}}})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                c = db.cursor()
                 conv = c.execute("SELECT COUNT(*) FROM chat_conversations WHERE im_channel_id=?", (app_id,)).fetchone()[0]
                 um = c.execute("SELECT feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=?", (USERNAME,)).fetchone()
-            assert tuple(row) == ("", "", "")
-            assert reg == 0, "解绑后 chat_bot 注册行应被删除"
+            assert _inst(app_id)[1] == "revoked", "解绑后安装行应置 revoked"
             assert conv == 0, "解绑后该渠道会话应被清理"
             assert um and tuple(um) == ("", "", ""), "解绑后 unified_user_mapping 应清空 open_id/name/app_id"
-            # 接口不再返回该凭证
             r2 = _client.get("/api/chat/config")
             assert r2.json()["im"]["feishu"]["app_id"] == ""
             assert r2.json()["im"]["feishu"]["connected"] is False
         finally:
             with db_lock:
                 c = db.cursor()
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
                 c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (app_id,))
                 c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (USERNAME,))
-                c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (UID,))
                 db.commit()
+            _clean_inst(app_id)
 
     def test_put_config_unbind_then_rebind(self, _client):
         """Issue #294：绑定 → 解绑 → 再绑定（同一凭证）循环无残留。"""
         app_id = "cli_cycle_%s" % uuid.uuid4().hex[:6]
-        bm = MagicMock()
-        bm.api = MagicMock()
-        bm.remove_bot = AsyncMock()
-        bm.add_bot = AsyncMock()
         try:
-            with patch("src.api.main.bot_manager", bm):
-                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}})
-                assert r.status_code == 200, r.text
-                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "", "app_secret": ""}}})
-                assert r.status_code == 200, r.text
-                bm.remove_bot.assert_awaited_with(app_id)
-                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}})
+            r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}})
             assert r.status_code == 200, r.text
-            with db_lock:
-                c = db.cursor()
-                row = c.execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
-                reg = c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()
-            assert row and row[0] == app_id, "重绑后凭证应写回"
-            assert reg and reg[0] == "chat_bot", "重绑后注册表应重建"
+            assert _inst(app_id)[1] == "active"
+            r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "", "app_secret": ""}}})
+            assert r.status_code == 200, r.text
+            assert _inst(app_id)[1] == "revoked"
+            r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}})
+            assert r.status_code == 200, r.text
+            ct, status, cfg = _inst(app_id)
+            assert status == "active", "重绑后安装行应回到 active"
+            assert "sec" in (cfg or ""), "重绑后 secret 应快照进安装 config"
         finally:
-            with db_lock:
-                c = db.cursor()
-                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
-                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (app_id,))
-                c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (UID,))
-                db.commit()
-
-
-# ====== 内部辅助函数 ======
-
+            _clean_inst(app_id)
 
 class TestHelpers:
     def test_build_chat_prompt(self):
@@ -462,14 +417,17 @@ class TestHelpers:
         assert _resolve_gitcode_token("new_tok") == "new_tok"
 
     def test_resolve_token_fallback_repo_token(self):
-        # user_token empty + repo_key → repo bot token fallback
+        # user_token empty + repo_key → 走 token_service 策略链（R18.6.14 起）
+        from types import SimpleNamespace
+
         from src.domains.runtime.routes.chat import _resolve_gitcode_token
-        with patch("src.kernel.repo.Repo") as m_repo:
-            m_repo.return_value.bot_token = "repo_tok"
+        with patch("src.kernel.token_service.resolve_repo_token",
+                   return_value=SimpleNamespace(token="repo_tok")):
             assert _resolve_gitcode_token("", "owner/repo") == "repo_tok"
-        # repo token also empty → return empty string, no exception
-        with patch("src.kernel.repo.Repo") as m_repo:
-            m_repo.return_value.bot_token = ""
+        # 策略链拿不到 token → 标记过期并返回空串，不抛异常
+        with patch("src.kernel.token_service.resolve_repo_token",
+                   return_value=SimpleNamespace(token="")), \
+             patch("src.kernel.token_service.detect_and_mark_repo_token_expired", return_value="NO_TOKEN_AVAILABLE"):
             assert _resolve_gitcode_token("", "owner/repo") == ""
 
     def test_push_to_feishu_no_channel(self):
@@ -477,20 +435,56 @@ class TestHelpers:
         asyncio.run(_push_reply_to_feishu({"id": "c1", "im_channel_id": ""}, {"id": 1, "username": "u"}, "text"))
 
     def test_push_to_feishu_with_channel(self):
+        """web→飞书推送：旧 IM 下线 M2 后改为读 grape_t_channel_installation + FeishuAsync 直发。"""
+        from src.domains.runtime.routes import chat as chat_mod
         from src.domains.runtime.routes.chat import _push_reply_to_feishu
-        with db_lock:
-            db.cursor().execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('push-1', 1, 'cli_push')")
-            db.commit()
+        from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
+        from src.domains.runtime.im.engine_wiring import default_db_path, run_startup_migration
         try:
-            bm = MagicMock()
-            bm.get_bot.return_value = MagicMock()
-            bm.api = MagicMock()
-            bm.api.send_card_to_user = AsyncMock()
-            with patch("src.api.main.bot_manager", bm), \
+            run_startup_migration(default_db_path())
+        except Exception:
+            pass  # 测试库可能缺 legacy 表（回填步骤会跳过），只要建出 grape_t_channel_installation 即可
+        app_id = "cli_push_%s" % uuid.uuid4().hex[:6]
+        assert sync_installation("user", owner_user_id="1", app_id=app_id, app_secret="s")
+        try:
+            fake_api = MagicMock()
+            fake_api.send_card_to_user = AsyncMock()
+            with patch("src.domains.runtime.im.engine_wiring.feishu_api", return_value=fake_api), \
                  patch("src.api.issues_center._get_feishu_open_id", return_value="ou_1"):
-                asyncio.run(_push_reply_to_feishu({"id": "c1", "im_channel_id": "oc_x"}, {"id": 1, "username": "u"}, "hi"))
-            bm.api.send_card_to_user.assert_awaited_once()
+                asyncio.run(_push_reply_to_feishu({"id": "c1", "im_channel_id": "oc_x"},
+                                                  {"id": 1, "username": "u"}, "hi"))
+            fake_api.send_card_to_user.assert_awaited_once()
         finally:
-            with db_lock:
-                db.cursor().execute("DELETE FROM chat_agent_session WHERE id='push-1'")
-                db.commit()
+            revoke_installation("user", owner_user_id="1", app_id=app_id)
+
+def _inst(app_id):
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+    conn = _connect(default_db_path())
+    try:
+        return conn.execute(
+            "SELECT channel_type, status, config FROM grape_t_channel_installation WHERE legacy_app_id=?",
+            (app_id,)).fetchone()
+    finally:
+        conn.close()
+
+def _seed_inst(app_id, secret="s", uid=UID, scope="user", repo_key="", channel_type="feishu"):
+    from src.domains.runtime.im.engine_wiring import sync_installation
+    return sync_installation(scope, owner_user_id=str(uid), repo_key=repo_key,
+                             app_id=app_id, app_secret=secret, channel_type=channel_type)
+
+def _clean_inst(*app_ids):
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path
+    conn = _connect(default_db_path())
+    try:
+        for a in app_ids:
+            conn.execute("DELETE FROM grape_t_channel_installation WHERE legacy_app_id=?", (a,))
+        conn.commit()
+    finally:
+        conn.close()
+
+"""Chat Agent 路由测试（src/domains/runtime/routes/chat.py）。
+
+覆盖：会话 CRUD、send/send-stream 各路径（无引擎/direct/queue/任务会话）、
+反馈、chat 配置（GET/PUT、app_id 占用校验、技能解析）、内部辅助函数。
+通过 patch get_chat_config 确定性控制 backend/runtime_id；stream_agent / BotManager 用 mock。
+"""

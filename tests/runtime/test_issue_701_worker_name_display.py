@@ -112,6 +112,8 @@ class TestWorkerNameDisplayUnification:
                 "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status, created_at) "
                 "VALUES (?, 'sess-701', ?, '', 'completed', ?)",
                 (task_id, rid, _now_iso()))
+            # 扫雷⑨-H5：task-logs info 有任务归属校验，任务归属调用者 uid=1
+            c.execute("UPDATE agent_tasks SET user_id='1' WHERE id=?", (task_id,))
             db.commit()
         try:
             user = {"id": 1, "username": "tester", "org_id": 0}
@@ -137,6 +139,8 @@ class TestWorkerNameDisplayUnification:
                 "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status, created_at) "
                 "VALUES (?, 'sess-701', ?, '', 'completed', ?)",
                 (task_id, rid, _now_iso()))
+            # 扫雷⑨-H5：task-logs info 有任务归属校验，任务归属调用者 uid=1
+            c.execute("UPDATE agent_tasks SET user_id='1' WHERE id=?", (task_id,))
             db.commit()
         try:
             user = {"id": 1, "username": "tester", "org_id": 0}
