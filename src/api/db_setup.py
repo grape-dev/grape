@@ -2380,6 +2380,19 @@ def _fn_seed_agent_types_from_config() -> None:
             )
             inserted += c.rowcount if c.rowcount and c.rowcount > 0 else 0
         db.commit()
+        # Spec 要求：补种成功后同步 meta.seeded_keys（与 _seed_from_json 的老轨记账一致），
+        # 供后续诊断/去重对账；已存在该 key 时不改写（首轨种子已记）。
+        if inserted > 0:
+            c.execute("SELECT value FROM meta WHERE key='seeded_keys'")
+            row = c.fetchone()
+            seeded = set(row[0].split(",")) if row and row[0] else set()
+            if "agent_type" not in seeded:
+                seeded.add("agent_type")
+                c.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', ?)",
+                    (",".join(sorted(seeded)),),
+                )
+                db.commit()
     log.info(f"seed-agent-types: upserted {inserted} agent type(s) from agent-description.json")
 
 
