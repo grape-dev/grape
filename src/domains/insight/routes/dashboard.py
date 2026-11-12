@@ -758,7 +758,6 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         try:
             _local_hostname = ""
             try:
-                import socket as _sock
                 _local_hostname = engine_host()
             except Exception:
                 pass
@@ -1311,7 +1310,6 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id"
         )
         from src.domains.runtime.engine.instances import instance_name as _inst_name
-        import socket as _sock
         _local_hostname = ""
         try:
             _local_hostname = engine_host()

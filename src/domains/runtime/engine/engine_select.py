@@ -639,7 +639,6 @@ def resolve_local_engine(user_id: int = 0) -> int | None:
     if user_id:
         # 方案 A：只挑当前主控机自己的直连引擎（别的 master 的行留显示，不留执行）
         try:
-            import socket as _sock
             _hn = engine_host()
             _own = [m for m in cand if (m.get("host_name") or "") == _hn]
             if _own:

@@ -1515,7 +1515,6 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                             "runtimes": runtimes})
 
     # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
-    import socket as _sock
     _local_hostname = ""
     try:
         _local_hostname = engine_host()
@@ -1798,7 +1797,6 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     from src.domains.runtime.engine.agent import _scan_local_skills
     from src.domains.mgmt.user import db as user_db
     from src.kernel.config import log
-    import socket as _sock
     _hostname = engine_host()
     try:
         discovered = discover_runtimes()
