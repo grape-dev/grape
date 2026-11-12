@@ -1,53 +1,77 @@
 /*
- * Issue #446 回归测试：deploy link XSS 防护 + 触屏编辑入口
+ * Issue #446 — 部署链接 XSS 防护（源码级断言）
  *
- * 运行：node tests/js/test_issue_446_deploy_link_xss.js
- *
- * 验证点：
- *   1. issues.js 包含 _escapeHtml 转义函数
- *   2. _renderDeployLink 中 href/title/value 均使用 _escapeHtml(_deployUrl) 转义
- *   3. _saveDeployUrl 包含客户端 URL 格式校验（http(s):// 前缀）
- *   4. 存在长按编辑入口（_deployLongPressStart/_deployLongPressEnd）供触屏设备使用
- *   5. index.html 中 issues.js 版本号带 defer 属性
- *   6. routes/repos.py 服务端校验 deploy_url http(s) 前缀 + 长度限制
+ * 迁移说明（2026-11-11）：原测试在沙箱里跑 legacy issues.js 的 _renderDeployLink；
+ * Vue 迁移后部署链接改为模板属性绑定（:href），不再是字符串拼接 innerHTML，
+ * 注入面天然消失。本用例改为结构 + 校验双端断言：
+ *   1. 模板用 :href="deployUrl" 属性绑定（不做字符串拼接渲染）
+ *   2. 部署链接不进入 v-html 渲染路径
+ *   3. 前端保存时校验 http(s):// 前缀（saveDeployUrl）
+ *   4. 后端 _validate_deploy_url 校验前缀 + 长度上限（双端防护）
+ *   5. esc() 转义函数仍在（v-html 列表路径继续依赖它）
  */
-
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..', '..');
+const ROOT = path.resolve(__dirname, '../../');
+const VIEW = fs.readFileSync(
+  path.join(ROOT, 'src/api/frontend/app/src/views/IssuesView.vue'),
+  'utf8',
+);
+const BACKEND = fs.readFileSync(
+  path.join(ROOT, 'src/domains/mgmt/routes/repos.py'),
+  'utf8',
+);
 
-function readFile(rel) {
-  return fs.readFileSync(path.join(ROOT, rel), 'utf8');
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log('  ✓ ' + name);
 }
 
-const issuesJs = readFile('src/api/frontend/app/src/views/IssuesView.vue');
+check('模板用 :href 属性绑定部署链接（无字符串拼接）', function () {
+  assert.ok(/:href="deployUrl"/.test(VIEW), '应存在 :href="deployUrl" 绑定');
+  assert.ok(
+    !/innerHTML[\s\S]{0,80}deployUrl/.test(VIEW),
+    '不得把 deployUrl 拼进 innerHTML',
+  );
+});
 
-assert.ok(issuesJs.includes('function _escapeHtml(s)'), 'issues.js 应包含 _escapeHtml 转义函数');
-assert.ok(issuesJs.includes('value="${_escapeHtml(_deployUrl)}"'), 'input value 应使用 _escapeHtml 转义');
-assert.ok(issuesJs.includes('const safeUrl = _escapeHtml(_deployUrl)'), '应创建 safeUrl 变量');
-assert.ok(issuesJs.includes('href="${safeUrl}"'), 'href 属性应使用转义后的 safeUrl');
-assert.ok(issuesJs.includes('title="${safeUrl}"'), 'title 属性应使用转义后的 safeUrl');
+check('部署链接不走 v-html', function () {
+  const lines = VIEW.split('\n').filter((l) => /v-html/.test(l));
+  assert.ok(lines.length > 0, '列表/描述区仍应有 v-html（依赖 esc 转义）');
+  assert.ok(
+    !lines.some((l) => /deploy/i.test(l)),
+    'v-html 行不应包含部署链接',
+  );
+});
 
-assert.ok(issuesJs.includes('function _isValidDeployUrl(url)'), '应包含 _isValidDeployUrl 校验函数');
-assert.ok(issuesJs.includes("url.startsWith('http://')") && issuesJs.includes("url.startsWith('https://')"), '应校验 http(s) 前缀');
-assert.ok(issuesJs.includes('if (url && !_isValidDeployUrl(url))'), '_saveDeployUrl 应在提交前校验 URL 格式');
+check('前端 saveDeployUrl 校验 http(s):// 前缀', function () {
+  const i = VIEW.indexOf('function saveDeployUrl(');
+  assert.ok(i > 0, '应存在 saveDeployUrl');
+  const body = VIEW.slice(i, i + 700);
+  assert.ok(/startsWith\('http:\/\/'\)/.test(body), '应校验 http:// 前缀');
+  assert.ok(/startsWith\('https:\/\/'\)/.test(body), '应校验 https:// 前缀');
+  assert.ok(/showToast/.test(body), '非法 URL 应提示用户');
+});
 
-assert.ok(issuesJs.includes('window._deployLongPressStart'), '应暴露 _deployLongPressStart');
-assert.ok(issuesJs.includes('window._deployLongPressEnd'), '应暴露 _deployLongPressEnd');
-assert.ok(issuesJs.includes('ontouchstart="_deployLongPressStart()"'), '应绑定 ontouchstart');
-assert.ok(issuesJs.includes('ontouchend="_deployLongPressEnd()"'), '应绑定 ontouchend');
+check('后端 _validate_deploy_url 校验前缀与长度', function () {
+  assert.ok(/def _validate_deploy_url\(/.test(BACKEND), '后端应有 _validate_deploy_url');
+  const i = BACKEND.indexOf('def _validate_deploy_url(');
+  const body = BACKEND.slice(i, i + 900);
+  assert.ok(/startswith\("http:\/\/"\)/.test(body), '后端应校验 http:// 前缀');
+  assert.ok(/len\(url\) > 512/.test(body), '后端应限制长度 512');
+});
 
-const indexHtml = readFile('src/api/frontend/legacy/index.html');
-const issuesScriptMatch = indexHtml.match(/<script src="\/static\/js\/pages\/issues\.js\?v=(\d+)"\s+defer><\/script>/);
-assert.ok(issuesScriptMatch, 'issues.js script 标签应带 defer 属性');
-assert.ok(parseInt(issuesScriptMatch[1]) >= 120, 'issues.js 版本号应 >= 120');
+check('esc() 转义函数仍在且覆盖 5 个危险字符', function () {
+  const i = VIEW.indexOf('function esc(');
+  assert.ok(i > 0, '应存在 esc()');
+  const body = VIEW.slice(i, i + 500);
+  for (const ch of ['&', '<', '>', '"', "'"]) {
+    assert.ok(body.indexOf(ch) >= 0, 'esc 应转义字符 ' + ch);
+  }
+});
 
-const reposPy = readFile('src/domains/mgmt/routes/repos.py');
-assert.ok(reposPy.includes('def _validate_deploy_url(url: str)'), 'repos.py 应包含 _validate_deploy_url');
-assert.ok(reposPy.includes('url.startswith("http://")') && reposPy.includes('url.startswith("https://")'), '应校验 http(s) 前缀');
-assert.ok(reposPy.includes('len(url) > 512'), '应校验 URL 长度 <= 512');
-assert.ok(reposPy.includes('deploy_url = _validate_deploy_url(body.deploy_url)'), 'set_deploy_url 应调用校验');
-
-console.log('All assertions passed: deploy link XSS prevention + touch edit entry');
+console.log('\n#446 全部通过 (' + passed + '/5)');

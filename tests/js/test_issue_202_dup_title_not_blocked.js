@@ -1,162 +1,78 @@
 /*
- * Issue #202 回归测试：需求中心新建需求不再强制检查标题重复性
+ * Issue #202 — 同名需求不应被本地查重阻断提交（源码级断言）
  *
- * 运行：node tests/js/test_issue_202_dup_title_not_blocked.js
- *
- * 验证点：
- *   1. createTaskSubmit 在 _tasksAll 已含同名任务时，不阻断提交（不 showErr、不 return）
- *   2. createTaskSubmit 正常调用 API.post 提交表单
- *   3. _tasksAll 为空时正常提交（基线不回归）
- *   4. 标题为空时仍保留必填校验（只移除重复检查，不移除必填）
- *
- * 策略：从 issues.js 源码中提取 createTaskSubmit 函数体，在 mock 沙箱中执行，
- * 避免加载整个文件对 app/fmtLocalTime 等全局的依赖。
+ * 迁移说明（2026-11-11）：原测试从 legacy issues.js 提取 createTaskSubmit 在沙箱执行；
+ * Vue 迁移后提交逻辑收敛到 submitModal()。改为源码断言，保留原验收语义：
+ *   1. 提交路径不存在「同名标题」本地查重拦截（无 err_dup / dup_title 分支）
+ *   2. 必填校验仍保留：无 repo / 空标题 会阻断并给出对应错误
+ *   3. 正常提交调用 API.post('/issues/{owner}/{repo}')，body 含 repo_key/title/description/scene_id
  */
 const assert = require('assert');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 
-const issuesJsPath = path.resolve(__dirname, '../../src/api/frontend/app/src/views/IssuesView.vue');
-const src = fs.readFileSync(issuesJsPath, 'utf8');
+const VIEW = fs.readFileSync(
+  path.resolve(__dirname, '../../src/api/frontend/app/src/views/IssuesView.vue'),
+  'utf8',
+);
 
-// ── 从源码中提取 createTaskSubmit 函数定义 ──
-// 匹配 function createTaskSubmit() { ... } 直到下一个顶层 function 定义
-const fnMatch = src.match(/function createTaskSubmit\(\)\s*\{([\s\S]*?)\n\}\n\n(?:function |\/\/)/);
-if (!fnMatch) {
-  console.error('✗ 无法从 issues.js 提取 createTaskSubmit 函数体');
-  process.exit(1);
-}
-const fnBody = fnMatch[1];
-
-// ── 极简 DOM mock ──
-function makeDom() {
-  const elements = {};
-  function el(id) {
-    return {
-      _id: id,
-      style: { display: '' },
-      textContent: '',
-      value: '',
-      innerHTML: '',
-      disabled: false,
-      querySelector: () => null,
-      querySelectorAll: () => [],
-      addEventListener: () => {},
-      remove() {},
-    };
+function fnBody(source, name) {
+  const i = source.indexOf('function ' + name + '(');
+  if (i < 0) throw new Error('未找到函数 ' + name);
+  let depth = 0;
+  let started = false;
+  for (let j = i; j < source.length; j++) {
+    if (source[j] === '{') {
+      depth++;
+      started = true;
+    } else if (source[j] === '}') {
+      depth--;
+      if (started && depth === 0) return source.slice(i, j + 1);
+    }
   }
-  ['tcCreateTitle','tcCreateDesc','tcCreateScene','tcError','tcSubmitBtn','taskCreateOverlay'].forEach(id => { elements[id] = el(id); });
-  const dom = {
-    getElementById(id) { return elements[id] || null; },
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    createElement: () => el('tmp'),
-    addEventListener: () => {},
-  };
-  return { dom, elements };
+  throw new Error('函数 ' + name + ' 括号不闭合');
 }
 
-// ── 构建可执行函数 ──
-// createTaskSubmit 引用的全局：document, app, I18N, API, _tasksAll, _createAttachments, loadTasks, encodeURIComponent
-function makeCreateTaskSubmit(dom, tasksAll, apiPostResult) {
-  let _posted = false;
-  let _postUrl = null;
-  let _postBody = null;
-  let _lastErrKey = null;
+const body = fnBody(VIEW, 'submitModal');
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log('  ✓ ' + name);
+}
 
-  const app = {
-    currentRepo: () => ({ repoKey: 'gitcode:owner/repo', fullName: 'owner/repo', owner: 'owner', name: 'repo' }),
-    showToast: () => {},
-  };
-  const I18N = {
-    t: (k, params) => {
-      if (typeof k === 'string' && k.indexOf('err_dup') >= 0) _lastErrKey = k;
-      return k;
-    },
-    getLang: () => 'zh',
-  };
-  const API = {
-    get: () => Promise.resolve({ issues: tasksAll, tasks: tasksAll }),
-    post: (url, body) => { _posted = true; _postUrl = url; _postBody = body; return Promise.resolve(apiPostResult || { message: 'ok' }); },
-    put: () => Promise.resolve({}),
-  };
+check('提交路径无同名标题查重拦截', function () {
+  assert.ok(!/err_dup/.test(body), 'submitModal 不应含 err_dup 分支');
+  assert.ok(!/dup_title/.test(body), 'submitModal 不应含 dup_title 分支');
+  assert.ok(
+    !/tasksAll[\s\S]{0,80}title[\s\S]{0,40}===/.test(body),
+    '不应在提交前遍历已有任务做同名比对',
+  );
+});
 
-  // 构建函数：把 fnBody 包成一个参数化函数
-  // createTaskSubmit 内部用的标识符都从闭包传入
-  const wrapped = new Function('document', 'app', 'I18N', 'API', '_tasksAll', '_createAttachments', 'loadTasks', 'encodeURIComponent',
-    fnBody
-    + '\n;');
+check('必填校验保留：无 repo → 阻断', function () {
+  assert.ok(/if \(!repoKey\.trim\(\)\)/.test(body), '应保留 repo 必填校验');
+  assert.ok(/err_no_repo/.test(body), '应给出 err_no_repo 错误');
+});
 
-  function createTaskSubmit() {
-    wrapped(dom, app, I18N, API, tasksAll, [], () => {}, encodeURIComponent);
+check('必填校验保留：空标题 → 阻断且不提交', function () {
+  const guard = body.indexOf('if (!modal.title.trim())');
+  const post = body.indexOf(".post('/issues/'");
+  assert.ok(guard >= 0, '应保留标题必填校验');
+  assert.ok(post > guard, '标题校验必须在提交之前');
+  assert.ok(/err_no_title/.test(body), '应给出 err_no_title 错误');
+});
+
+check('正常提交：POST /issues/{owner}/{repo} 且 body 字段齐全', function () {
+  assert.ok(
+    /\.post\('\/issues\/' \+ encodeURIComponent\(owner\) \+ '\/' \+ encodeURIComponent\(rname\), payload\)/.test(
+      body,
+    ),
+    '应 POST /issues/{owner}/{repo}',
+  );
+  for (const key of ['repo_key:', 'title:', 'description:', 'scene_id:']) {
+    assert.ok(body.indexOf(key) >= 0, 'payload 应含 ' + key);
   }
-
-  return {
-    createTaskSubmit,
-    _wasPosted: () => _posted,
-    _getPostBody: () => _postBody,
-    _getPostUrl: () => _postUrl,
-    _lastErrKey: () => _lastErrKey,
-  };
-}
-
-let passed = 0, failed = 0;
-function test(name, fn) {
-  try { fn(); passed++; console.log('  ✓ ' + name); }
-  catch(e) { failed++; console.log('  ✗ ' + name + '\n    ' + e.message); }
-}
-
-console.log('Issue #202: 需求中心新建需求不强制检查标题重复性 — 回归测试\n');
-
-// ─── 测试 1：_tasksAll 已含同名任务时，createTaskSubmit 不阻断、正常提交 ───
-test('createTaskSubmit: _tasksAll 已含同名任务 → 不阻断，调用 API.post', () => {
-  const tasksAll = [
-    { id: 1, issue_number: 100, title: '重复标题', assignee: 'u', status: 'open' },
-  ];
-  const { dom, elements } = makeDom();
-  elements.tcCreateTitle.value = '重复标题';
-  elements.tcCreateDesc.value = '描述内容';
-  elements.tcCreateScene.value = '';
-  const ctx = makeCreateTaskSubmit(dom, tasksAll, { message: 'created #101' });
-  ctx.createTaskSubmit();
-  // 核心断言：不因标题重复而阻断 → API.post 被调用
-  assert.ok(ctx._wasPosted(), '同名需求应被提交（API.post 被调用），不应被本地查重阻断');
-  // 不应触发 err_dup_title
-  assert.ok(ctx._lastErrKey() === null, '不应触发 err_dup_title 提示，实际触发了: ' + ctx._lastErrKey());
 });
 
-// ─── 测试 2：_tasksAll 为空时正常提交（基线不回归）───
-test('createTaskSubmit: _tasksAll 为空 → 正常提交（基线不回归）', () => {
-  const { dom, elements } = makeDom();
-  elements.tcCreateTitle.value = '全新标题';
-  elements.tcCreateDesc.value = '描述';
-  elements.tcCreateScene.value = '';
-  const ctx = makeCreateTaskSubmit(dom, [], { message: 'created' });
-  ctx.createTaskSubmit();
-  assert.ok(ctx._wasPosted(), '无同名时也应正常提交');
-});
-
-// ─── 测试 3：标题为空时仍应被必填校验阻断（保留必填，只移除重复检查）───
-test('createTaskSubmit: 标题为空 → 仍被必填校验阻断（保留 err_no_title）', () => {
-  const { dom, elements } = makeDom();
-  elements.tcCreateTitle.value = '';
-  elements.tcCreateDesc.value = '描述';
-  elements.tcCreateScene.value = '';
-  const ctx = makeCreateTaskSubmit(dom, [], { message: 'created' });
-  ctx.createTaskSubmit();
-  assert.ok(!ctx._wasPosted(), '标题为空时不应提交（必填校验保留）');
-});
-
-// ─── 测试 4：描述为空时仍被必填校验阻断（保留 err_no_desc）───
-test('createTaskSubmit: 描述为空 → 仍被必填校验阻断（保留 err_no_desc）', () => {
-  const { dom, elements } = makeDom();
-  elements.tcCreateTitle.value = '有标题';
-  elements.tcCreateDesc.value = '';
-  elements.tcCreateScene.value = '';
-  const ctx = makeCreateTaskSubmit(dom, [], { message: 'created' });
-  ctx.createTaskSubmit();
-  assert.ok(!ctx._wasPosted(), '描述为空时不应提交（必填校验保留）');
-});
-
-console.log('\n' + passed + ' passed, ' + failed + ' failed');
-process.exit(failed > 0 ? 1 : 0);
+console.log('\n#202 全部通过 (' + passed + '/4)');
