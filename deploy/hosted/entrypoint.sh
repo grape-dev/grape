@@ -105,14 +105,23 @@ if [ ! -s /app/configs/project-templates.json ] \
     if curl -fsSL --retry 1 --max-time 90 "$TEMPLATES_TARBALL_URL" -o "$TPL_STAGE/t.tgz" \
        && tar xzf "$TPL_STAGE/t.tgz" -C "$TPL_STAGE"; then
       TPL_SRC=$(find "$TPL_STAGE" -mindepth 1 -maxdepth 1 -type d | head -1)
-      mkdir -p /app/examples /app/configs
-      for d in "$TPL_SRC"/*/; do
-        n=$(basename "$d"); [ "$n" = ".git" ] && continue
-        rm -rf "/app/examples/$n"; cp -a "$d" "/app/examples/$n"
-      done
-      [ -f "$TPL_SRC/project-templates.json" ] && cp -a "$TPL_SRC/project-templates.json" /app/configs/project-templates.json
-      echo "[entrypoint] templates synced (TEMPLATES_TARBALL_URL)"
-      TPL_DONE=1
+      # 守卫：归档没有顶层目录时 $TPL_SRC 为空，`for d in "$TPL_SRC"/*/` 会退化成遍历系统根目录
+      # （/bin、/etc、/proc…），对每个根目录执行 rm -rf + cp -a，最坏是 cp /proc 失败后在 set -e 下
+      # 中断启动、或把 /app 递归拷进 /app/examples/app。为空就直接跳过。
+      if [ -z "${TPL_SRC:-}" ]; then
+        echo "[entrypoint] WARN: archive has no top-level directory; skipping template sync" >&2
+      else
+        mkdir -p /app/examples /app/configs
+        for d in "$TPL_SRC"/*/; do
+          n=$(basename "$d"); [ "$n" = ".git" ] && continue
+          rm -rf "/app/examples/$n"; cp -a "$d" "/app/examples/$n"
+        done
+        if [ -f "$TPL_SRC/project-templates.json" ]; then
+          cp -a "$TPL_SRC/project-templates.json" /app/configs/project-templates.json
+        fi
+        echo "[entrypoint] templates synced (TEMPLATES_TARBALL_URL)"
+        TPL_DONE=1
+      fi
     else
       echo "[entrypoint] WARN: TEMPLATES_TARBALL_URL fetch failed" >&2
     fi
@@ -129,14 +138,21 @@ if [ ! -s /app/configs/project-templates.json ] \
         if curl -fsSL --retry 1 --max-time 90 "$TPL_TB" -o "$TPL_STAGE/t.tgz" \
            && tar xzf "$TPL_STAGE/t.tgz" -C "$TPL_STAGE"; then
           TPL_SRC=$(find "$TPL_STAGE" -mindepth 1 -maxdepth 1 -type d | head -1)
-          mkdir -p /app/examples /app/configs
-          for d in "$TPL_SRC"/*/; do
-            n=$(basename "$d"); [ "$n" = ".git" ] && continue
-            rm -rf "/app/examples/$n"; cp -a "$d" "/app/examples/$n"
-          done
-          [ -f "$TPL_SRC/project-templates.json" ] && cp -a "$TPL_SRC/project-templates.json" /app/configs/project-templates.json
-          echo "[entrypoint] templates synced (codeload)"
-          TPL_DONE=1
+          # 同 3b 的守卫：$TPL_SRC 为空时不能进入复制循环（否则遍历 /*/ 并误删误拷）。
+          if [ -z "${TPL_SRC:-}" ]; then
+            echo "[entrypoint] WARN: archive has no top-level directory; skipping template sync" >&2
+          else
+            mkdir -p /app/examples /app/configs
+            for d in "$TPL_SRC"/*/; do
+              n=$(basename "$d"); [ "$n" = ".git" ] && continue
+              rm -rf "/app/examples/$n"; cp -a "$d" "/app/examples/$n"
+            done
+            if [ -f "$TPL_SRC/project-templates.json" ]; then
+              cp -a "$TPL_SRC/project-templates.json" /app/configs/project-templates.json
+            fi
+            echo "[entrypoint] templates synced (codeload)"
+            TPL_DONE=1
+          fi
         else
           echo "[entrypoint] WARN: codeload fetch failed" >&2
         fi
