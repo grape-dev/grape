@@ -16,11 +16,11 @@
    - 删 `ENGINE` 变量、`--engine)` 分支、`case "$ENGINE"` 校验、Unknown argument usage 的 `[--engine ...]`；
    - 删 5.7 `install_engine()` 整段与调用。
 3. **绿（文档）**：faq.md Q3「安装引擎」删 `--engine` 行与 hermes pip 建议，统一"自行安装 + 自动发现注册"口径。
-4. 回归：`pytest tests/test_worker_install_ux.py tests/test_worker_install_arch_check.py tests/test_worker_install_ps1_stderr.py` 全绿；验收 grep 无输出；`bash -n` 语法检查。
-5. 自审查（5 轴 + pre-pr 检查）→ 建 PR（base=`local-liufei`）→ Issue 评论 → A2A QA → tasks complete。
+4. 回归：`pytest tests/runtime/test_worker_install_ux.py tests/runtime/test_worker_install_arch_check.py tests/runtime/test_worker_install_ps1_stderr.py` 全绿；验收 grep 无输出；`bash -n` 语法检查。
+5. 自审查 → 建 PR（base=`arch-weekly-11`）→ 提交评审。
 
 ## Out of Scope 守卫
 
-- 不动 `src/runtime/agent.py` 引擎发现/重注册；
+- 不动 `src/domains/runtime/agent.py` 引擎发现/重注册；
 - 不动 5.8 codearts 信任段、5.9 codegraph 段；
 - 不动 `install-worker.ps1`。

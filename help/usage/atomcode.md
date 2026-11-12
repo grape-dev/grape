@@ -21,9 +21,8 @@ atomcode -p "Reply OK" --ephemeral --no-tools
 该命令会调用已配置的模型；ephemeral 模式不写入会话，no-tools 模式不执行工具。
 二进制版本检测通过只代表 CLI 可启动，不代表模型认证可用。
 
-Worker 安装脚本支持 `--engine atomcode`，例如在原有安装命令后追加该参数。
-安装失败不会阻止 Worker 注册，会在日志中给出手动安装命令。
-默认 `--engine auto` 检测到 AtomCode 时会跳过默认引擎安装。
+Worker 安装脚本**不再**安装任何 agent 引擎（`--engine` 参数已移除）：先自行 `npm install -g @atomgit.com/atomcode`，重启/新建 worker 后由运行态自动发现并注册，无需重启主控。
+未安装引擎不会阻止 Worker 注册；运行态周期重注册会自动发现新装好的引擎（无需重启）。
 
 ## 在 grape 中使用
 

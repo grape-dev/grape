@@ -1,6 +1,6 @@
 # Spec — Issue #1884 去掉 install-worker.sh 的 hermes 自动安装分支
 
-> 决策：B 档（用户评论 199710329 确认，Spec 见评论 199711038）。目标分支 `local-liufei`。
+> 决策：B 档（在 issue discussion 中确认；需求/方案见本目录 spec/plan）。目标分支 `arch-weekly-11`。
 > 前置分支 `fix/install-engine-default-none`（8da9e3ca4）被 B 档整体删除覆盖，建议作废、勿并行合入。
 
 ## Objective
@@ -28,7 +28,7 @@
 
 ### Out of Scope（明确保留，不改）
 
-- worker 运行态引擎自动发现 + 周期重注册逻辑（`src/runtime/agent.py` 等）；
+- worker 运行态引擎自动发现 + 周期重注册逻辑（`src/domains/runtime/agent.py` 等）；
 - codearts 目录信任预配置段（install-worker.sh 5.8 `provision_codearts_trust`）；
 - `scripts/install-worker.ps1`（本就不安装引擎）；
 - `docs/` 历史设计文档（issue-471/499 等历史记录不回写）；

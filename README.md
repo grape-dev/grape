@@ -175,8 +175,10 @@ pip install codearts-cli         # Python based
 npm install -g @atomgit.com/atomcode  # Rust based, installed via npm
 ```
 
-Configure AtomCode's model credentials on the execution host. Workers support
-`--engine atomcode`. Session continuation requires a build whose JSONL
+Configure AtomCode's model credentials on the execution host. The worker installer
+no longer installs engines: run `npm install -g @atomgit.com/atomcode` yourself and
+the running worker discovers and registers it automatically. Session continuation
+requires a build whose JSONL
 `run.started` event includes `session_id`; older builds can run independent tasks.
 See the [AtomCode setup guide (Chinese)](help/usage/atomcode.md).
 

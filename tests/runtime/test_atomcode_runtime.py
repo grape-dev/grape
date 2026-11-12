@@ -286,44 +286,9 @@ def test_registration_skills_and_usage(monkeypatch, tmp_path):
     assert collector.finish()[0]["output"] == 3
 
 
-@pytest.mark.parametrize("engine,present,npm_available,install_expected", [
-    ("atomcode", "0", "1", True),
-    ("atomcode", "1", "1", False),
-    ("atomcode", "0", "0", False),
-    ("auto", "1", "1", False),
-])
-def test_worker_installer(engine, present, npm_available, install_expected):
-    source = (Path(__file__).parents[2] / "scripts/install-worker.sh").read_text()
-    function = source.split("install_engine() {", 1)[1].split("\ninstall_engine\n", 1)[0]
-    harness = r'''
-log() { echo "$*"; }
-command() {
-  if [ "$1" = "-v" ]; then
-    case "$2" in
-      atomcode) [ "$PRESENT" = "1" ]; return $? ;;
-      npm) [ "$NPM_AVAILABLE" = "1" ]; return $? ;;
-      opencode|hermes) return 1 ;;
-    esac
-  fi
-  builtin command "$@"
-}
-npm() { echo "$*" >> "$INSTALL_LOG"; PRESENT=1; }
-timeout() { shift; "$@"; }
-'''
-    import tempfile
-    with tempfile.TemporaryDirectory() as directory:
-        install_log = Path(directory) / "install.log"
-        result = subprocess.run(
-            ["bash", "-c", harness + "\ninstall_engine() {" + function + "\ninstall_engine"],
-            env={**os.environ, "ENGINE": engine, "PRESENT": present,
-                 "NPM_AVAILABLE": npm_available, "INSTALL_LOG": str(install_log)},
-            capture_output=True, text=True, check=True,
-        )
-        assert install_log.exists() == install_expected
-        if install_expected:
-            assert install_log.read_text().strip() == "install -g @atomgit.com/atomcode"
-        if npm_available == "0" and present == "0":
-            assert "npm not found" in result.stdout
+# Issue #1884：安装脚本已整体删除 --engine / install_engine()，原先按脚本切块执行
+# install_engine 的参数化用例（4 条）随之删除——它们断言的正是被移除的能力。
+# 「脚本不再安装引擎」的契约由 tests/runtime/test_worker_install_ux.py 看护。
 
 
 def test_server_side_registration_is_complete():

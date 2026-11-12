@@ -82,7 +82,10 @@ class TestEnglishOnlyOutput:
         """用户可见字符串字面量（含兜底值如「未知版本」）不得含中文。"""
         content = _ps1()
         assert "未知版本" not in content
-        for m in re.finditer(r'"([^"\n]*)"', content):
+        # 注释行里的引号不是「字符串字面量」——先剥掉 PowerShell 注释再扫，
+        # 否则引用了本地化报错文案的注释会被误判（审查 I-3）
+        code = "\n".join(re.sub(r"#.*$", "", ln) for ln in content.split("\n"))
+        for m in re.finditer(r'"([^"\n]*)"', code):
             assert not _CJK.search(m.group(1)), f"ps1 字符串字面量含中文: {m.group(1)}"
 
 
@@ -135,7 +138,7 @@ class TestEngineArgRejected:
 
     def test_engine_arg_exits_1_with_unknown_argument(self):
         r = self._run_script("--engine", "hermes")
-        assert r.returncode != 0, "--engine 应非 0 退出（Issue #1884 验收 2）"
+        assert r.returncode == 1, f"--engine 应以退出码 1 拒绝（验收 2），实为 {r.returncode}"
         assert "Unknown argument" in (r.stdout + r.stderr), (
             "--engine 应落入 Unknown argument 分支"
         )
@@ -143,7 +146,10 @@ class TestEngineArgRejected:
     def test_engine_arg_without_value_exits_1(self):
         # `--engine` 单独出现：旧实现 shift 2 会吞掉缺失值报 unbound；新实现按未知参数拒绝
         r = self._run_script("--engine")
-        assert r.returncode != 0, "--engine（无值）应非 0 退出"
+        assert r.returncode == 1, f"--engine（无值）应以退出码 1 拒绝，实为 {r.returncode}"
+        assert "Unknown argument" in (r.stdout + r.stderr), (
+            "--engine（无值）应落入 Unknown argument 分支（不得静默通过）"
+        )
 
 
 class TestOfflineWheelsFirst:
