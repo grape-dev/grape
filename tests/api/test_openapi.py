@@ -310,6 +310,7 @@ EXPECTED_PUBLIC = {
     "set_password_send_code_api_auth_set_password_send_code_post": ("post", "/api/auth/set-password/send-code"),
     "settings_agent_runtime_detail": ("get", "/api/settings/agent-runtimes/{rid}"),
     "settings_agent_runtime_health_reset": ("post", "/api/settings/agent-runtimes/{rid}/health-reset"),
+    "settings_agent_runtime_readd": ("post", "/api/settings/agent-runtimes/{rid}/readd"),
     "settings_agent_runtimes": ("get", "/api/settings/agent-runtimes"),
     "settings_agent_runtimes_refresh": ("post", "/api/settings/agent-runtimes/refresh"),
     "settings_backend_agents": ("get", "/api/settings/backend-agents"),
