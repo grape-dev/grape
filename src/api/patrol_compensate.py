@@ -30,6 +30,14 @@ from typing import Optional
 from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
+from src.api.pipeline_constants import (
+    PAUSED_ISSUE_STATUSES,
+    TARGET_SOURCE_LEGACY_TEXT,
+    TARGET_SOURCE_NOT_HANDOFF,
+    TARGET_SOURCE_PIPELINE,
+    TARGET_SOURCE_TERMINAL,
+    TARGET_SOURCE_TEXT,
+)
 
 # 评审八轮修正①：claiming 孤儿租约（分钟）。派发是秒级；10 分钟仍未回写=进程崩溃
 # 或异常路径漏写，回收为 open 下轮重试（幂等键保证回收重试不会双发）。
@@ -151,8 +159,21 @@ class RecheckHandler(Handler):
             return False
         ctx.completed_at, ctx.agent_type, result_text = row[0] or "", row[1] or "", row[2] or ""
         ctx.result_text = result_text          # 评审五轮修正②：结论随补偿下发（等价性）
-        next_step = _p.extract_next_step(result_text or "")
-        ctx.target_agent = _p.parse_target_agent(next_step)
+        # Issue #2050：结构化 next_step 为主；文本缺失时按场景阶段序推导下一棒
+        # （pipeline 推导只作告警建议，绝不作派发依据——见下方护栏）。
+        ctx.target_agent, _target_source = _p.resolve_handoff_target(
+            ctx.repo_key, ctx.issue_id or "", ctx.agent_type or "", result_text or "")
+        if _target_source in (TARGET_SOURCE_NOT_HANDOFF, TARGET_SOURCE_TERMINAL):
+            _set_finding(ctx.finding_id, "false_positive",
+                         f"终检无交棒意图（source={_target_source}）")
+            ctx.verdict, ctx.action_meta = "false_positive", f"终检无交棒意图（{_target_source}）"
+            return False
+        # Issue #2050 主触发源：已存在引用本任务 event_seq 的结构化 handoff → 已交棒。
+        if _p.structured_handoff_exists(ctx.repo_key, ctx.issue_id or "",
+                                        ctx.task_id or ""):
+            _set_finding(ctx.finding_id, "false_positive", "终检结构化 handoff 已发生")
+            ctx.verdict, ctx.action_meta = "false_positive", "终检结构化 handoff 已发生"
+            return False
         # 评审五轮修正①（终检版）：issue 已被人收敛 → 误报，放弃补偿。
         # L1/L2 只找"交棒证据"，找不到"人已处置证据"；端点只拦 cancelled，
         # 不拦 completed/pending_review——此处必须自守，否则补偿复活已关 issue。
@@ -171,10 +192,27 @@ class RecheckHandler(Handler):
             _set_finding(ctx.finding_id, "false_positive", "终检 L2 命中（下游任务已出现）")
             ctx.verdict, ctx.action_meta = "false_positive", "终检 L2 命中"
             return False
+        # Issue #2050：仅文本缺失/场景推导的候选才用「通用新段证据」；文本 A2A 候选
+        # 保持 L1/L2 口径，避免同族场景从可报变漏报。
+        if _target_source not in (TARGET_SOURCE_TEXT, TARGET_SOURCE_LEGACY_TEXT):
+            if _p.has_newer_issue_event(ctx.repo_key, ctx.issue_id or "", ctx.completed_at or ""):
+                _set_finding(ctx.finding_id, "false_positive", "终检新段已出现（链已推进）")
+                ctx.verdict, ctx.action_meta = "false_positive", "终检新段已出现"
+                return False
         if not ctx.target_agent:
             # 评审十六轮修正①/S29：next_step 不可解析=数据不自愈，终态 needs_human
             _set_finding(ctx.finding_id, "needs_human", "target_unresolvable：下一棒意图不可解析，人工核对")
             ctx.verdict, ctx.action_meta = "target_unresolvable", "下一棒意图不可解析，转人工"
+            return False
+        # 负责人拍板（A 方案）：场景阶段序推导只作告警建议，不作派发依据。
+        # 替 agent 猜下一棒，猜对是运气、猜错就是给错的人派活；而且它会把
+        # 「agent 未声明交接」这个真缺陷伪装成自愈，下次照样犯。故一律转人工确认。
+        if _target_source == TARGET_SOURCE_PIPELINE:
+            _set_finding(ctx.finding_id, "needs_human",
+                         f"pipeline_target_advisory：文本无交棒声明，按场景序推导建议"
+                         f"下一棒={ctx.target_agent}，不自动派发，待人工确认")
+            ctx.verdict = "pipeline_target_advisory"
+            ctx.action_meta = f"场景推导建议 target={ctx.target_agent}，仅告警不派发"
             return False
         return True
 
@@ -326,6 +364,7 @@ def _post_dispatch_race_check(ctx: "CompensateContext") -> str:
     3. race_detected 回执进 action_meta（观测数据源——毫秒窗在真实流量的
        发生频率由此说话，也是第 3 层零窗根治（FOR UPDATE 行锁事务）的立项
        触发条件）。
+    「等用户」暂停态（PAUSED_ISSUE_STATUSES）不是收敛：不得对齐取消在途任务。
     不撤销派发本身（零破坏：不补偿补偿、不删事件——收回动作只走 _sync）。
     """
     from src.api import patrol as _p
@@ -334,7 +373,7 @@ def _post_dispatch_race_check(ctx: "CompensateContext") -> str:
     except Exception as e:
         log.warning(f"[patrol-comp] post-dispatch terminal check failed: {e}")
         return ""
-    if not term:
+    if not term or term in PAUSED_ISSUE_STATUSES:
         return ""
     aligned = _align_convergence_once(ctx.repo_key, ctx.issue_id or "")
     try:
