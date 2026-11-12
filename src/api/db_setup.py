@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS grape_t_patrol_findings (
     event_seq     INTEGER NOT NULL DEFAULT 0, -- 关联 events.seq（可空时用 0，参与唯一约束）
     repo_key      TEXT DEFAULT '',
     issue_id      TEXT DEFAULT '',
-    owner         INTEGER NOT NULL DEFAULT 0,  -- 归属人 user_id（D16：路径 B=host_user_id；0=unowned 置顶）
+    owner         TEXT NOT NULL DEFAULT 0,  -- 归属人 user_id（D16：路径 B=host_user_id；0=unowned 置顶）
     detail        TEXT DEFAULT '',          -- 判定输入快照
     suggestion    TEXT DEFAULT '',          -- 建议处置（Phase 1 只写建议不执行）
     status        TEXT NOT NULL DEFAULT 'open',  -- open | claiming | compensated | dismissed | false_positive
@@ -247,7 +247,7 @@ _CHAT_CONVERSATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS chat_conversations (
     id TEXT PRIMARY KEY,
     agent_session_id TEXT DEFAULT '',
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     backend_session_id TEXT DEFAULT '',
     user_gitcode_token TEXT DEFAULT '',
     repo_key TEXT DEFAULT '',
@@ -325,7 +325,7 @@ CREATE TABLE IF NOT EXISTS feishu_onboard_task (
     task_id TEXT UNIQUE NOT NULL,
     bot_type TEXT NOT NULL,
     repo_key TEXT DEFAULT '',
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     app_id TEXT DEFAULT '',
     app_secret TEXT DEFAULT '',
@@ -341,7 +341,7 @@ CREATE TABLE IF NOT EXISTS feishu_onboard_task (
 _ISSUE_DDL = """
 CREATE TABLE IF NOT EXISTS issue (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id          INTEGER NOT NULL,
+    user_id          TEXT NOT NULL,
     assignee         TEXT NOT NULL,
     repo_key         TEXT NOT NULL,
     issue_number     INTEGER NOT NULL,
@@ -375,7 +375,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     runtime_session_id TEXT DEFAULT '',
     event_type        TEXT DEFAULT '',
     account           TEXT DEFAULT '',
-    user_id           INTEGER DEFAULT 0,
+    user_id           TEXT DEFAULT 0,
     repo_gitcode_token TEXT DEFAULT '',
     user_gitcode_token TEXT DEFAULT '',           -- chat 专用：用户级 GitCode token（互斥注入，不放 repo_gitcode_token）
     env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON(含服务端已注入的账号/用户凭据,见 skill-delivery-remote.md)
@@ -747,7 +747,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
     is_featured INTEGER DEFAULT 0,
     like_count  INTEGER DEFAULT 0,
     source      TEXT DEFAULT 'official',
-    source_user_id INTEGER DEFAULT 0,
+    source_user_id TEXT DEFAULT 0,
     recommended_template VARCHAR(191) DEFAULT '',
     nodes_json  TEXT DEFAULT '[]',
     onboarding  TEXT DEFAULT 'repo-onboarding',
@@ -770,7 +770,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
 _SCENE_LIKES_DDL = """
 CREATE TABLE IF NOT EXISTS scene_likes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
     scene_id    INTEGER NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, scene_id)
@@ -808,7 +808,7 @@ CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
 _SKILL_LIKES_DDL = """
 CREATE TABLE IF NOT EXISTS skill_likes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
     skill_id    INTEGER NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, skill_id)
@@ -905,7 +905,7 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
 _AUTOPILOT_SUBSCRIPTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS autopilot_subscriptions (
     task_id     INTEGER NOT NULL,
-    user_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (task_id, user_id)
 )
@@ -987,7 +987,7 @@ CREATE TABLE IF NOT EXISTS session_api_tokens (
     session_key TEXT NOT NULL,
     repo_key TEXT NOT NULL DEFAULT '',
     agent_type TEXT NOT NULL DEFAULT '',
-    user_id INTEGER NOT NULL DEFAULT 0,
+    user_id TEXT NOT NULL DEFAULT 0,
     token_sha256 TEXT NOT NULL,
     expires_at INTEGER NOT NULL DEFAULT 0
 )"""),
@@ -1006,7 +1006,7 @@ CREATE TABLE IF NOT EXISTS event_active_guard (
     ("api_tokens", """
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     token_sha256 TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
     scopes TEXT NOT NULL DEFAULT '["public"]',
@@ -1055,7 +1055,7 @@ CREATE TABLE IF NOT EXISTS runtime_health_scores (
     ("user_feedback", """
 CREATE TABLE IF NOT EXISTS user_feedback (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         INTEGER      NOT NULL DEFAULT 0,
+    user_id         TEXT      NOT NULL DEFAULT 0,
     username        TEXT         NOT NULL DEFAULT '',
     category        TEXT         NOT NULL DEFAULT 'bug',
     title           TEXT         NOT NULL,
@@ -1083,12 +1083,12 @@ CREATE TABLE IF NOT EXISTS user_feedback (
 # ===== Organization（组织）特性 =====
 _ORGANIZATION_DDL = """
 CREATE TABLE IF NOT EXISTS organization (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT,
     name            VARCHAR(128) NOT NULL,
     slug            VARCHAR(64) NOT NULL UNIQUE,
     description     TEXT DEFAULT '',
     avatar_url      VARCHAR(512) DEFAULT '',
-    owner_id        INTEGER NOT NULL,
+    owner_id        TEXT NOT NULL,
     is_personal     INTEGER DEFAULT 0,
     settings        TEXT DEFAULT '{}',
     max_members     INTEGER DEFAULT 50,
@@ -1100,10 +1100,10 @@ CREATE TABLE IF NOT EXISTS organization (
 _ORG_MEMBER_DDL = """
 CREATE TABLE IF NOT EXISTS org_member (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    org_id          INTEGER NOT NULL,
-    user_id         INTEGER NOT NULL,
+    org_id          TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
     role            TEXT NOT NULL DEFAULT 'member',
-    invited_by      INTEGER DEFAULT 0,
+    invited_by      TEXT DEFAULT 0,
     joined_at       TEXT DEFAULT (datetime('now')),
     UNIQUE (org_id, user_id)
 )"""
@@ -1111,10 +1111,10 @@ CREATE TABLE IF NOT EXISTS org_member (
 _ORG_INVITATION_DDL = """
 CREATE TABLE IF NOT EXISTS org_invitation (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    org_id          INTEGER NOT NULL,
-    inviter_id      INTEGER NOT NULL,
+    org_id          TEXT NOT NULL,
+    inviter_id      TEXT NOT NULL,
     invitee_email   TEXT DEFAULT '',
-    invitee_user_id INTEGER DEFAULT 0,
+    invitee_user_id TEXT DEFAULT 0,
     role            TEXT NOT NULL DEFAULT 'member',
     status          TEXT DEFAULT 'pending',
     expires_at      TEXT,
@@ -1131,7 +1131,7 @@ _NEW_TABLES.extend([
 # ===== 账号体系新表 =====
 _GRAPE_ACCOUNTS_DDL = """
 CREATE TABLE IF NOT EXISTS grape_accounts (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT PRIMARY KEY,      -- D105 第二批：UUIDv7（应用层生成）；存量整型值字符串化保留
     username        VARCHAR(64) NOT NULL UNIQUE,
     email           VARCHAR(255) DEFAULT NULL,
     email_source    VARCHAR(16) DEFAULT NULL,
@@ -1152,8 +1152,8 @@ CREATE TABLE IF NOT EXISTS grape_accounts (
 
 _EXTERNAL_IDENTITIES_DDL = """
 CREATE TABLE IF NOT EXISTS external_identities (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    grape_user_id     INTEGER NOT NULL,
+    id                TEXT,
+    grape_user_id     TEXT NOT NULL,
     provider          VARCHAR(32) NOT NULL,
     external_id       VARCHAR(128) NOT NULL,
     external_login    VARCHAR(128) DEFAULT '',
@@ -1191,7 +1191,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     seq          INTEGER NOT NULL UNIQUE,
     event_type   VARCHAR(64) NOT NULL,
-    user_id      INTEGER DEFAULT 0,
+    user_id      TEXT DEFAULT 0,
     operator_id  INTEGER DEFAULT 0,
     ip           VARCHAR(64) DEFAULT '',
     detail       TEXT DEFAULT '{}',
@@ -1226,7 +1226,7 @@ CREATE TABLE IF NOT EXISTS login_failures (
 _CREDENTIAL_REVEAL_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS grape_t_credential_reveal_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id      INTEGER NOT NULL,
+    user_id      TEXT NOT NULL,
     provider     VARCHAR(32) NOT NULL,
     field        VARCHAR(16) NOT NULL,
     ip           VARCHAR(64) DEFAULT '',
@@ -1238,7 +1238,7 @@ CREATE TABLE IF NOT EXISTS grape_t_credential_reveal_log (
 _EXCHANGE_CODES_DDL = """
 CREATE TABLE IF NOT EXISTS exchange_codes (
     code         TEXT PRIMARY KEY,
-    user_id      INTEGER NOT NULL,
+    user_id      TEXT NOT NULL,
     username     VARCHAR(64) NOT NULL,
     provider     VARCHAR(32) NOT NULL,
     token_version INTEGER DEFAULT 0,
@@ -1251,13 +1251,13 @@ CREATE TABLE IF NOT EXISTS exchange_codes (
 _BINDING_TICKETS_DDL = """
 CREATE TABLE IF NOT EXISTS binding_tickets (
     ticket           TEXT PRIMARY KEY,
-    initiating_user_id  INTEGER NOT NULL,
+    initiating_user_id  TEXT NOT NULL,
     provider         VARCHAR(32) NOT NULL,
     external_id      VARCHAR(128) NOT NULL,
     external_login   VARCHAR(128) DEFAULT '',
     external_name    VARCHAR(128) DEFAULT '',
     external_avatar  VARCHAR(512) DEFAULT '',
-    original_user_id INTEGER NOT NULL,
+    original_user_id TEXT NOT NULL,
     created_at       REAL NOT NULL,
     expires          REAL NOT NULL
 )
@@ -1286,7 +1286,7 @@ ON grape_accounts(email)
 _COMMUNITY_DDL = """
 CREATE TABLE IF NOT EXISTS community_posts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         INTEGER NOT NULL DEFAULT 0,
+    user_id         TEXT NOT NULL DEFAULT 0,
     username        TEXT NOT NULL DEFAULT '',
     title           TEXT NOT NULL,
     content         TEXT DEFAULT '',
@@ -1302,7 +1302,7 @@ _COMMUNITY_COMMENTS_DDL = """
 CREATE TABLE IF NOT EXISTS community_comments (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     post_id     INTEGER NOT NULL,
-    user_id     INTEGER NOT NULL DEFAULT 0,
+    user_id     TEXT NOT NULL DEFAULT 0,
     username    TEXT NOT NULL DEFAULT '',
     content     TEXT NOT NULL,
     is_deleted  INTEGER DEFAULT 0,
@@ -1313,7 +1313,7 @@ _COMMUNITY_LIKES_DDL = """
 CREATE TABLE IF NOT EXISTS community_post_likes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     post_id     INTEGER NOT NULL,
-    user_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
     UNIQUE(post_id, user_id)
 )"""
 
@@ -1339,7 +1339,7 @@ CREATE TABLE IF NOT EXISTS obs_llm_usage (
     scene_id           TEXT DEFAULT '',
     agent_type         TEXT DEFAULT '',
     engine_id          INTEGER DEFAULT 0,
-    user_id            INTEGER DEFAULT 0,
+    user_id            TEXT DEFAULT 0,
     provider_raw       TEXT DEFAULT '',             -- 引擎上报的原始 provider
     model_raw          TEXT DEFAULT '',             -- 引擎上报的原始模型名
     model_key          TEXT DEFAULT '',             -- 抽样归一化后的模型名(聚合用)
@@ -1372,7 +1372,7 @@ CREATE TABLE IF NOT EXISTS obs_llm_usage_archive (
     scene_id           TEXT DEFAULT '',
     agent_type         TEXT DEFAULT '',
     engine_id          INTEGER DEFAULT 0,
-    user_id            INTEGER DEFAULT 0,
+    user_id            TEXT DEFAULT 0,
     provider_raw       TEXT DEFAULT '',
     model_raw          TEXT DEFAULT '',
     model_key          TEXT DEFAULT '',
@@ -2851,6 +2851,34 @@ def register_migration(version: str, name: str, kind: str,
     _MIGRATIONS.sort(key=lambda m: m.version)
     return mig
 
+
+def _fn_uuid_pk_grape_accounts_and_user_id_cols():
+    """D105 第二批：grape_accounts.id → VARCHAR(36) PK + 29 张引用表 user_id 族列
+    MySQL 侧 INTEGER→VARCHAR(36) 放宽（已拍板口径：主键 UUID、存量值字符串化
+    保留不重编号；引用列 VARCHAR(36) 与 grape_t_system_credentials 对齐）。
+    自省模式接入：不声明 DDL/拷贝 SQL——sqlite_master 原文改造 + PRAGMA 列清单
+    自动生成（UuidPkMigration._auto_sqlite_plan），约束/默认值/UNIQUE 零丢失。
+    第三批 organization 只需同样两行。"""
+    from src.api.uuid_pk_migration import UuidPkMigration
+    UuidPkMigration(
+        pk_table="grape_accounts",
+        uid_widen_cols=("user_id", "grape_user_id", "owner_user_id",
+                        "source_user_id", "host_user_id",
+                        # 202611091100 兜底：patrol_findings.owner / issue.release_approved_by
+                        # 全库按列名扫描仅各自命中一张表（owner 无同名歧义列），一并 VARCHAR(36)
+                        "owner", "release_approved_by"),
+    ).run()
+
+register_migration(
+    # G4 撞号根治：原号 202611090002 与基线 repair-autopilot-exec-agent-task-id
+    # 同号异名（补盖已由 202611110003 承担）。改号到 202611120003。幂等保障：
+    # UuidPkMigration 三态自检，MySQL 侧逐列 information_schema 探测后才
+    # MODIFY，旧号已盖章的库上重跑零写入。
+    version="202611120003",
+    name="uuid-pk-grape-accounts-and-user-id-cols",
+    kind="safe",
+    fn=_fn_uuid_pk_grape_accounts_and_user_id_cols,
+)
 
 def _fn_create_grape_t_patrol_findings() -> None:
     """部署验证实测发现的缺口修复（2026-11-02）：存量库（迁移台账已盖章）
@@ -6020,6 +6048,14 @@ def _migrate_tables():
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "managed_repos", "deploy_url", "VARCHAR(512) DEFAULT ''")
+            # 平台凭据列（多平台解耦后冻结为只读列：写路径已收拢到
+            # grape_t_repo_credentials，但读取/回填路径仍按列名探测，冷启动库缺列会
+            # OperationalError）。逐列幂等补齐。
+            for _cred_col in ("bot_gitcode_token", "gitcode_webhook_token",
+                              "bot_github_token", "github_webhook_token",
+                              "bot_gitee_token", "gitee_webhook_token",
+                              "bot_gitlab_token", "gitlab_webhook_token"):
+                _ensure_column(c, "managed_repos", _cred_col, "TEXT DEFAULT ''")
             db.commit()
             log.info("Added managed_repos.deploy_url column")
     except Exception as e:
