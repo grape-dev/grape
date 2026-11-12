@@ -13,6 +13,11 @@ from src.kernel.config import log
 from src.api.deps import get_user_or_none
 
 from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
+from src.api.pipeline_constants import (
+    HANDOFF_RESULT_FAILED,
+    HANDOFF_RESULT_OK,
+    HANDOFF_RESULT_REJECTED,
+)
 
 router = APIRouter(tags=["webhook"])
 
@@ -121,6 +126,7 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
         "carried_context": carried_context if (target_scene_id or carried_context) else {},
         "engine_config": engine_config if (target_scene_id or engine_config) else None,
         "ref_seq": ref_seq,
+        "source_seq": ref_seq,
         "idempotency_key": idem_key,
         "fingerprint": fingerprint,
         "queued": True,
@@ -191,7 +197,7 @@ def _a2a_guard_skip_response(repo_key: str, issue_number, agent_name: str,
     _wkey = _guard_window_key(issue_number, scene_id, agent_name)
     _base = {"status": "ok", "seq": 0, "agent": agent_name,
              "skipped": kind, "queued": False, "scene": scene_id,
-             "window_key": _wkey}
+             "window_key": _wkey, "handoff_result": HANDOFF_RESULT_REJECTED}
     if kind == "downstream_running":
         _reason = f"downstream_running:{_seq}"
         _detail = (f"target={agent_name} downstream={info.get('agent', '')} "
@@ -660,6 +666,9 @@ class A2AHandoffBody(BaseModel):
     # 两者均可在 payload 中兜底传入；默认保持 #587 duplicate 语义。
     queue: bool = False
     force: bool = False
+    # Issue #2050：源段事件 seq（结构化 handoff 调用必带）。
+    # 兼容 payload.source_event_seq / payload.source_seq。
+    source_event_seq: int = 0
 
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     """目标 agent 是否在当前 Issue 场景的 pipeline nodes 内（nodes=单一事实源）。
@@ -1126,6 +1135,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
     agent_name = body.agent or ""
     payload = body.payload or {}
+    # Issue #2050：结构化 handoff 的源段 seq（body 顶层优先，payload 兼容）。
+    try:
+        _source_seq = int(body.source_event_seq or payload.get("source_event_seq")
+                          or payload.get("source_seq") or 0)
+    except (TypeError, ValueError):
+        _source_seq = 0
 
     if not agent_name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
@@ -1269,7 +1284,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                   (repo_key, _native_issue_number(issue_number)))
                     if _ck_c.fetchone():
                         log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
-                        return {"ok": False, "skipped": "task_cancelled"}
+                        return {"ok": False, "skipped": "task_cancelled",
+                                "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}
             except Exception as _ck_e:
                 log.warning(f"A2A: cancelled check failed: {_ck_e}")
         seq = 0
@@ -1316,7 +1332,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _prsub_row = _prsub_c.fetchone()
                 if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
                     log.info(f"A2A: rejected — PR subscription QA (task={_caller_task_id}, issue={_prsub_row[0]}), A2A disabled")
-                    return {"ok": False, "skipped": "pr_subscription_a2a_disabled"}
+                    return {"ok": False, "skipped": "pr_subscription_a2a_disabled",
+                            "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}
             except Exception as _prsub_e:
                 log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
@@ -1333,7 +1350,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
             if not _scene_ck.get("in_scene"):
                 log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})")
-                return JSONResponse(status_code=409, content={"status": "skipped", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id"), "message": f"agent '{agent_name}' is not in the current scene pipeline (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})"})
+                return JSONResponse(status_code=409, content={"status": "skipped", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id"), "message": f"agent '{agent_name}' is not in the current scene pipeline (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})", "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
 
             # Issue #1770（移植）：A2A 派发门禁三段判定 —— 下游 running / 时间窗去重 / 活跃去重。
             # 场景与节点直接复用上面的 _scene_ck（与 scenes detail 同源，不重复查配置）。
@@ -1387,7 +1404,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                      f"queue_seq={_dq_qseq} downstream_seq={_down['seq']})")
                             return JSONResponse(status_code=200, content={
                                 "status": "ok", "seq": 0, "agent": agent_name,
-                                "skipped": "queued", "queued": True,
+                                "skipped": "queued", "queued": True, "handoff_result": HANDOFF_RESULT_OK,
                                 "reason": "downstream_running",
                                 "downstream_event": _down, "queue_seq": _dq_qseq,
                                 "message": "same issue already has a running downstream event; "
@@ -1397,7 +1414,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             _reused = -_dq_qseq
                             return JSONResponse(status_code=200, content={
                                 "status": "ok", "seq": 0, "agent": agent_name,
-                                "skipped": "queued", "queued": True, "idempotent": True,
+                                "skipped": "queued", "queued": True, "idempotent": True, "handoff_result": HANDOFF_RESULT_OK,
                                 "reason": "downstream_running",
                                 "downstream_event": _down, "queue_seq": _reused,
                                 "message": "same context already queued; existing queued event returned"})
@@ -1720,7 +1737,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         _raw = (row[0] or "").strip()
                         if _raw and _raw != "[]" and _raw != "null":
                             log.info(f"A2A: sre subscribed + pr_number={pr_number}, skip task creation (stage=sre, issue=#{issue_number})")
-                            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed"})
+                            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed", "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
             except Exception:
                 pass
 
@@ -1787,6 +1804,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     return JSONResponse(status_code=200, content={
                         "status": "ok", "seq": 0, "agent": agent_name,
                         "skipped": "queued", "queued": True, "idempotent": True,
+                        "handoff_result": HANDOFF_RESULT_OK,
                         "reason": "active_a2a_event",
                         "existing_seq": _existing_seq, "queue_seq": _reused_seq,
                         "message": "same context already queued; existing queued event returned",
@@ -1796,7 +1814,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     })
                 if not _qseq:
                     log.error(f"A2A: queue event store failed for agent={agent_name}, issue=#{issue_number}")
-                    return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A"})
+                    return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
                 # 审查修复①：覆盖「活跃判定 → 排队落库」竞态窗口——若前序在间隙内已终态，
                 # 终态钩子已在本次写入前执行完，排队行将无人派发；此处立即对账兜底。
                 try:
@@ -1809,6 +1827,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 return JSONResponse(status_code=200, content={
                     "status": "ok", "seq": 0, "agent": agent_name,
                     "skipped": "queued", "queued": True,
+                    "handoff_result": HANDOFF_RESULT_OK,
                     "reason": "active_a2a_event", "existing_seq": _existing_seq,
                     "queue_seq": _qseq,
                     "message": "same issue+agent already has an active a2a event (existing_seq); "
@@ -1820,7 +1839,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 })
             elif _existing_seq:
                 log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing_seq}")
-                return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing_seq})
+                return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing_seq, "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
 
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)
@@ -1857,7 +1876,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _a2a_title = f"A2A: {agent_name}"
         # Issue #476：记录源事件 seq（触发本次交办的调用方事件；无 session 时为 0）
         _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)
-        _a2a_payload = {"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint}
+        # Issue #2050：结构化 handoff 必带源段 seq。显式 body/payload 优先；
+        # 缺省时用会话反查到的调用方 event_seq 兜底，保证所有经 agent 会话发起的
+        # A2A 都落结构化 source_seq（供巡检直接判定「已交棒」，文本仅降级）。
+        if not _source_seq and _a2a_ref_seq:
+            _source_seq = int(_a2a_ref_seq)
+        _a2a_payload = {"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "source_seq": _source_seq, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint}
         if issue_number and not _force:
             # Issue #1770（审查 P4）：门禁复查 + 事件落库在同一 db_lock 内原子完成，
             # 消除并发同键「查询都未命中 → 双落库」的 TOCTOU。
@@ -1971,7 +1995,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _aio.run(bus.emit(handoff_event))
 
                 log.info(f"A2A (plugin): agent/handoff emitted for {agent_name}, seq={seq}, mode={mode}")
-                return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "event-driven"}
+                return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "event-driven",
+                "source_seq": _source_seq, "handoff_result": _handoff_result_of("ok", seq)}
         except Exception as e:
             log.warning(f"A2A plugin event-driven path failed: {e}, falling back to legacy dispatch")
 
@@ -2000,7 +2025,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 pass
             # a2a-input-validation-fix：派发失败必须如实告知调用方（原先返回 status=ok seq=0，
             # agent 误以为交办成功直接结束任务 → 死机）。失败语义走 failed + error 字段。
-            return JSONResponse(status_code=200, content={"status": "failed", "seq": 0, "agent": agent_name, "error": f"no available engine for agent '{agent_name}' (repo={repository}): 目标引擎不可用，任务未派发，请按失败降级流程处理"})
+            return JSONResponse(status_code=200, content={"status": "failed", "seq": 0, "agent": agent_name, "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq, "error": f"no available engine for agent '{agent_name}' (repo={repository}): 目标引擎不可用，任务未派发，请按失败降级流程处理"})
         # Plugin 模式 + engine_id=0：非 direct 模式均走广播（queue_remote + auto）；仅 direct 走本机 direct
         from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _is_plugin
         from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
@@ -2030,7 +2055,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                    f"#{issue_number}" if issue_number else "",
                                    pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid)
             log.info(f"A2A (plugin broadcast): enqueued pool task for {agent_name}, seq={seq}")
-            return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast"}
+            return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast",
+            "source_seq": _source_seq, "handoff_result": _handoff_result_of("ok", seq)}
         # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）
         _be = engine_name(engine_id) or backend
         # engine_id=0：auto/direct 兜底 → 自动选本机在线引擎
@@ -2096,7 +2122,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 pass
         seq = 0
 
-    return {"status": "ok", "seq": seq, "agent": agent_name}
+    return {"status": "ok", "seq": seq, "agent": agent_name,
+            "source_seq": _source_seq,
+            "handoff_result": _handoff_result_of("ok", seq)}
 
 @router.post(
     "/api/pipeline/handoff", operation_id="pipeline_handoff", tags=["pipeline"],
@@ -2186,7 +2214,7 @@ def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: i
     """
     return JSONResponse(status_code=200, content={
         "status": "ok", "seq": 0, "agent": agent_name,
-        "skipped": "duplicate_a2a", "queued": False,
+        "skipped": "duplicate_a2a", "queued": False, "handoff_result": HANDOFF_RESULT_REJECTED,
         "reason": reason, "existing_seq": existing_seq,
         "message": "same issue+agent already has an active a2a event (existing_seq); "
                    "retry with queue=true to queue it, or force=true to dispatch immediately",
@@ -2206,7 +2234,27 @@ def _a2a_event_payload(seq, status, agent, issue_id, created_at=None) -> dict:
         payload["created_at"] = created_at
     return payload
 
-def _augment_a2a_dispatch_response(result, agent_name: str, issue_number) -> dict:
+def _handoff_result_of(status: str, seq, skipped: bool = False) -> str:
+    """Issue #2050：结构化 handoff 返回值归一（ok / failed / rejected）。
+
+    - ok：事件已创建且派发成功（seq>0）；
+    - rejected：门禁/权限/场景校验主动拒绝（未派发，属预期拦截）；
+    - failed：派发链路失败（无引擎/事件落库失败/异常）。
+    """
+    if skipped:
+        return HANDOFF_RESULT_REJECTED
+    if str(status or "") == "failed":
+        return HANDOFF_RESULT_FAILED
+    try:
+        if int(seq or 0) > 0:
+            return HANDOFF_RESULT_OK
+    except (TypeError, ValueError):
+        pass
+    return HANDOFF_RESULT_FAILED
+
+
+def _augment_a2a_dispatch_response(result, agent_name: str, issue_number,
+                                   source_seq: int = 0) -> dict:
     """Issue #1691：成功派发响应补 `event`（seq/status/agent/issue_id）。
 
     与幂等/排队响应口径一致，CLI 可直接读取下游派发状态，无需再猜 seq=0/ok 的语义。
@@ -2214,6 +2262,10 @@ def _augment_a2a_dispatch_response(result, agent_name: str, issue_number) -> dic
     异常时会先 `_fail_event(seq)` 把已建事件置 failed，再返回 `{"status":"ok","seq":0}`，
     此时不得补 `event.status=running`，须保持与事件库真实状态一致。
     """
+    if isinstance(result, dict):
+        result.setdefault("source_seq", int(source_seq or 0))
+        result.setdefault("handoff_result", _handoff_result_of(
+            result.get("status"), result.get("seq"), bool(result.get("skipped"))))
     if isinstance(result, dict) and result.get("status") == "ok":
         dispatch_seq = result.get("seq")
         if isinstance(dispatch_seq, int) and dispatch_seq > 0:
