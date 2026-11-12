@@ -110,3 +110,13 @@ jobs:
           python -m pytest tests/runtime/test_runtime_agent.py::TestReregister -v
           python -m pytest tests/runtime/test_runtime_agent_concurrency.py::test_reregister_unpacks_register_tuple tests/runtime/test_runtime_agent_concurrency.py::test_reregister_default_does_not_recover -v
           python -m pytest tests/runtime/test_runtime_client.py -v
+      - name: Branch guard fail-open + worktree reset archive regression tests (issues #2028/#2041)
+        # Issue #2028（QA 第3/4轮）：branch_guard fail-open/fail-closed 边界、
+        # 存量钩子版本升级与幂等/自愈回归（17 项）+ worker 发布闭包回归（29 项）。
+        # Issue #2041：worktree 重置归档守卫回归（40 项）。两文件此前均未接入
+        # CI，回退只能靠人工 pytest；接入后同类回退由门禁拦截。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_issue_2028_branch_guard_fail_open.py tests/runtime/test_worker_package.py -v
+          python -m pytest tests/test_worktree_reset_archive.py -v

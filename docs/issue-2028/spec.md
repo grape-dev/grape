@@ -1,6 +1,6 @@
 # Issue #2028 Spec：pre-push 分支守卫运行时缺 lock 模块，push 确定性被阻
 
-> 目标分支：`arch-weekly-11` | 优先级：P0 | 类型：bug
+> 目标分支：`arch-weekly-11-zj` | 优先级：P0 | 类型：bug
 
 ## 目标
 
@@ -35,11 +35,31 @@
 
 ## 验收标准
 
-- [ ] 新 worker 包内存在 `src/lock.py`，`from src import lock` 可导入
-- [ ] 无 lock 环境下 `hook_main` ImportError 不阻断 push（exit 0 + stderr 明确告警）
-- [ ] 真实拦截（租约争用 / PR merged / 远端漂移）仍返回非零
-- [ ] `HOOK_TEMPLATE_VERSION` 不匹配的存量钩子被重装；钩子 module_path 实测可加载
+- [x] 新 worker 包内存在 `src/lock.py`，`from src import lock` 可导入
+  （`test_worker_package_manifest_includes_top_level_lock` /
+  `test_release_pack_manifest_includes_top_level_lock`，MR #1216 实跑通过）
+- [x] 无 lock 环境下 `hook_main` ImportError 不阻断 push（exit 0 + stderr 明确告警）
+  （`test_hook_entry_code_fail_open_when_module_missing` /
+  `test_hook_entry_code_fail_open_when_spec_is_none` /
+  `test_hook_main_missing_dependency_reports_locatable_error`，17 项实跑通过；
+  QA 第 4 轮另以生成钩子代码三场景行为实证）
+- [x] 真实拦截（租约争用 / PR merged / 远端漂移）仍返回非零
+  （`test_hook_main_still_fail_closed_on_real_block` +
+  `test_hook_main_release_failure_keeps_block_verdict`：finally 释放异常不翻转判定）
+- [x] `HOOK_TEMPLATE_VERSION` 不匹配的存量钩子被重装；钩子 module_path 实测可加载
+  （`test_install_rewrites_outdated_guard_hook` +
+  `test_install_is_idempotent_for_current_template` +
+  `test_existing_hook_usable_accepts_freshly_installed_hook`：新装钩子幂等校验为
+  True，失效路径三用例覆盖解释器/模块路径/repo_key；module_path 指向
+  canonical 布局由 `test_hook_template_module_path_points_to_existing_canonical_file` 断言）
 - [ ] coding 实跑 `grape git push`（不带 `--no-verify`）成功且租约正常获取
-- [ ] 现有相关测试通过 + 新增测试覆盖
+  （AC5：QA 环境无法复现真实 worker 部署链路，转部署阶段验证；基线
+  `c84a775f7` 后 acquire_lock holder 参数已在位，pre-push 守卫在 #2041 变基
+  推送中已实际执行通过——#1228 PR 描述）
+- [x] 现有相关测试通过 + 新增测试覆盖
+  （`tests/test_issue_2028_branch_guard_fail_open.py` 17 项 +
+  `tests/runtime/test_worker_package.py` 29 项实跑通过；
+  `tests/test_issue_993_branch_guard.py` 与基线差集对照零新增失败，且
+  holder 修复顺带转绿 4 条基线红用例）
 
 关联：#1917（同根因）| 范围外：#1923、#2024
