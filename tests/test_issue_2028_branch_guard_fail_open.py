@@ -91,6 +91,18 @@ def test_hook_entry_code_fail_open_when_module_missing(tmp_path):
     assert "does_not_exist.py" in r.stderr
 
 
+def test_hook_entry_code_fail_open_when_spec_is_none(tmp_path):
+    """Issue #2028 I-3：`spec_from_file_location` 返回 None（无法识别的扩展名等）
+    时 `module_from_spec` 抛 AttributeError，必须走 fail-open（exit 0 + 告警），
+    不得以非零退出 fail-closed。"""
+    bogus = str(tmp_path / "branch_guard")  # 无 .py 扩展名 -> spec is None
+    code = bg._hook_entry_code(str(tmp_path), bogus)
+    r = subprocess.run([sys.executable, "-c", code, REPO_KEY],
+                       input="", text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    assert "fail-open" in r.stderr
+
+
 def test_hook_main_fail_open_on_guard_exception(monkeypatch, capsys):
     def _boom(*a, **k):
         raise RuntimeError("cannot import name lock from src")

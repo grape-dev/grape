@@ -49,7 +49,8 @@ HOOK_MARKER = "# grape-branch-guard (Issue #993)"
 # 模板内容（fail-open/加载路径/自检）变化时必须递增，否则现网存量 worktree 永不升级。
 # 2028-03：固化元数据改为单行 marker 注释（hook-interpreter/hook-module-path/
 # hook-repo-key），修复 _existing_hook_usable 解析多行内联代码恒 False 的缺陷。
-HOOK_TEMPLATE_VERSION = "2028-03"
+# 2028-04：spec 构建并入钩子 try/except（I-3），_spec is None 时不再 fail-closed。
+HOOK_TEMPLATE_VERSION = "2028-04"
 HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
 # 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
 HOOK_DEP_MODULES = ("src.lock", "src.kernel.session_manager")
@@ -570,9 +571,12 @@ def _hook_entry_code(root: str, module_path: str) -> str:
     return (
         "import sys, importlib.util; "
         f"sys.path.insert(0, {json.dumps(root)}); "
-        f"_spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
-        "_m = importlib.util.module_from_spec(_spec); "
         "\ntry:\n"
+        # Issue #2028 I-3：spec 构建也纳入 try——`_spec is None`（扩展名异常等）
+        # 会在 module_from_spec 抛未捕获 AttributeError → 非零退出 fail-closed；
+        # 与 hook_main 统一 fail-open。
+        f"    _spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
+        "    _m = importlib.util.module_from_spec(_spec); "
         "    _spec.loader.exec_module(_m)\n"
         "    _rc = _m.hook_main()\n"
         "except Exception as _e:\n"
