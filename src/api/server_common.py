@@ -817,7 +817,7 @@ document.documentElement.classList.remove('i18n-loading');})();
     @app.get("/admin", include_in_schema=False)
     @app.get("/admin/{path:path}", include_in_schema=False)
     async def serve_admin(path: str = ""):
-        """Admin 独立页面：返回 src/api/static/admin.html（frontend 单页）。"""
+        """Admin 独立页面：返回 <STATIC_DIR>/admin.html（frontend 单页）。"""
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)
         _admin_html = os.path.join(STATIC_DIR, "admin.html")

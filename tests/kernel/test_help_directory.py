@@ -22,7 +22,7 @@ USAGE_DIR = HELP_DIR / "usage"
 API_DIR = HELP_DIR / "api"
 DEVELOPER_DIR = HELP_DIR / "developer"
 OPENAPI_DIR = REPO_ROOT / "docs" / "openapi"
-HELP_HTML = REPO_ROOT / "src" / "api" / "static" / "help.html"
+HELP_HTML = REPO_ROOT / "src" / "api" / "frontend" / "legacy" / "help.html"
 
 EXPECTED_USAGE_FILES = [
     "overview.md",
