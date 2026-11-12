@@ -7,7 +7,8 @@
    worker 从未收到的 dispatched 悬挂释放回 queued、busy_slots 收敛）；
 4. 加回幂等（重复加回不重复绑定、不重复回写）；
 5. #1982 复现链路回归：spawn_failed 期间不派单 → ok 恢复后自动出黑名单并加回；
-6. QA 审查补充：悬挂释放守卫（task_messages 活性 + 宽限窗）、WARN hint 幂等拼接。
+6. QA 审查补充：悬挂释放守卫（task_messages 活性 + 宽限窗）、WARN hint 幂等拼接、
+   readd 端点路由级测试（可见性 404 / 200 响应结构 / 幂等）。
 """
 import os
 import sys
@@ -382,3 +383,44 @@ def test_spawn_fail_hint_append_is_idempotent():
             "已含 hint 的 probe_error 不得重复拼入 WARN hint"
     finally:
         _cleanup(cid)
+
+
+def test_readd_endpoint_route_level():
+    """readd 端点路由级测试（QA Optional）：可见性 404 / 200 响应结构 / 幂等重复点击。"""
+    from fastapi.testclient import TestClient
+    from src.api.deps import require_org_member
+    from src.api.main import app
+    cid = _insert_credential()
+    name = f"engine-2133-{uuid.uuid4().hex[:8]}"
+    scene_row_id, scene_id = _insert_scene("coding", eids=[])
+    try:
+        rid = _insert_runtime(cid, name, healthy=1,
+                              detached_from_scenes_at="2026-11-12T00:00:00+00:00")
+        log_id = _insert_detach_log(scene_row_id, scene_id, "coding", rid, name)
+        USER = {"id": 0, "username": "route-user-2133", "org_id": 0, "org_role": "owner"}
+        app.dependency_overrides[require_org_member] = lambda: USER
+        try:
+            with TestClient(app) as cli:
+                # 可见性复用列表过滤：不存在/不可见 rid → 404
+                r404 = cli.post("/api/settings/agent-runtimes/999999999/readd")
+                assert r404.status_code == 404, r404.text
+                # 正常一键加回 → 200 + 响应结构
+                r = cli.post(f"/api/settings/agent-runtimes/{rid}/readd")
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body["runtime_id"] == rid
+                assert body["recovered"] is True
+                assert body["bindings"] and body["bindings"][0]["rebound"] is True
+                assert _detach_rebound(log_id), "路由触发的加回同样必须标记 rebound"
+                # 幂等：重复点击仍 200，解绑审计已标记 rebound → 无重复绑定动作，
+                # 场景节点引擎列表不重复追加
+                r2 = cli.post(f"/api/settings/agent-runtimes/{rid}/readd")
+                assert r2.status_code == 200, r2.text
+                body2 = r2.json()
+                assert body2["recovered"] is True
+                nodes = _scene_nodes(scene_row_id)
+                assert (nodes[0].get("engine_runtime_ids") or []).count(rid) == 1
+        finally:
+            app.dependency_overrides.pop(require_org_member, None)
+    finally:
+        _cleanup(cid, scene_row_id)
