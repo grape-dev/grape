@@ -49,8 +49,9 @@ function Invoke-PipQuiet {
         [Parameter(Mandatory)][string]$CommandPath,
         [string[]]$Arguments,
         # 第三个位置参数：包名/需求参数（Issue #699 起各调用点传 $workerDeps）
-        # 之前签名只有两个参数，三参调用会报
-        #   "找不到接受自变量 'System.Object[]' 的位置参数"
+        # Before this signature only had two parameters, so three-argument calls
+        # failed with a positional-parameter binding error (the shell message is
+        # localized by the OS language, hence no literal quote here).
         [string[]]$ExtraArguments
     )
     $prevEAP = $ErrorActionPreference
@@ -79,9 +80,10 @@ function Invoke-PipQuiet {
 }
 
 
-# 判定进程是否是 grape worker agent（arch 分支入口 = src.domains.runtime.engine.agent，
-# 旧包/遗留目录 = src.runtime.agent；升级时必须两者都认，否则会误判"进程缺失"→回滚，
-# 且旧 agent 停不掉会与新 agent 双跑）
+# Detect whether the process is a grape worker agent (new architecture entry =
+# src.domains.runtime.engine.agent, legacy installs = src.runtime.agent; both must be
+# accepted during upgrade, otherwise the process is wrongly treated as missing and the
+# upgrade rolls back, while the old agent keeps running next to the new one).
 function Test-GrapeAgentProcess {
     param($Proc)
     if (-not $Proc -or -not $Proc.CommandLine) { return $false }

@@ -6,22 +6,20 @@
 #     --token <rta_...> \
 #     [--server https://<grape主控>] \
 #     [--device worker-01] \
-#     [--dir ~/grape] \
-#     [--engine auto|opencode|hermes|atomcode|none]
+#     [--dir ~/grape]
 #
 # 流程：
 #   1. 从主控公开端点下载运行包 grape-worker.tar.gz（无需鉴权，包内无敏感信息）
 #   2. 解压到普通用户家目录（默认 ~/grape，--dir 可改）
 #   3. 建 venv + 安装最小依赖
 #   4. 写入接入配置（凭据 token + 主系统地址，权限 600）
-#   5. best-effort 安装执行引擎（Issue #471 C2：--engine auto 时有 npm 则装 opencode）
-#      + codearts 目录信任预配置（无 TTY 不再因 folder-trust 闸门致命退出）
+#   5. codearts 目录信任预配置（无 TTY 不再因 folder-trust 闸门致命退出）
 #   6. 后台启动 runtime-agent（免 root，nohup/setsid；root 时自动用 systemd）
 #   7. 启动后自动注册到主控系统（RuntimeAgent registered；无引擎时也注册成功）
 #
 # 幂等：重复执行安全（复用已有目录/venv，仅更新代码与配置并重启）。
-# 引擎（Issue #471 C2）：--engine auto 默认 best-effort 安装 opencode（需 npm）；
-# 未装引擎时 worker 仍正常注册上线（空引擎为正常状态），后续装引擎无需重启自动注册。
+# 执行引擎（opencode/hermes/codearts 等）不由本脚本安装（Issue #1884）：
+# 用户自行安装即可，worker 启动自动发现并注册；运行中装好引擎无需重启（周期重注册）。
 set -euo pipefail
 
 # ===== 参数解析 =====
@@ -30,7 +28,6 @@ SERVER=""
 DEVICE=""
 INSTALL_DIR=""
 ROOT_MODE=0
-ENGINE="${ENGINE:-auto}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,16 +35,10 @@ while [ $# -gt 0 ]; do
     --server)  SERVER="$2"; shift 2 ;;
     --device)  DEVICE="$2"; shift 2 ;;
     --dir)     INSTALL_DIR="$2"; shift 2 ;;
-    --engine)  ENGINE="$2"; shift 2 ;;
     --root)    ROOT_MODE=1; shift ;;
-    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--dir install-dir] [--engine auto|opencode|hermes|atomcode|none] [--root]"; exit 1 ;;
+    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--dir install-dir] [--root]"; exit 1 ;;
   esac
 done
-case "$ENGINE" in
-  auto|opencode|hermes|atomcode|none) ;;
-  *) echo "[install-worker] Error: --engine only supports auto|opencode|hermes|atomcode|none (got: $ENGINE)" >&2; exit 1 ;;
-esac
-
 # ===== 工具函数 =====
 log() { echo "[install-worker] $*"; }
 fail() { echo "[install-worker] Error: $*" >&2; exit 1; }
@@ -457,74 +448,6 @@ if [ "$ROOT_MODE" = "1" ]; then
   fi
 fi
 
-# ===== 5.7 best-effort 安装执行引擎（Issue #471 C2）=====
-# --engine auto（默认）：未装 opencode 且有 npm → npm install -g opencode-ai；
-# --engine opencode/hermes：显式指定安装对应引擎；--engine none：跳过。
-# 安装失败不阻断（worker 无引擎也正常注册上线，后续装好引擎无需重启自动注册）。
-install_engine() {
-  if [ "$ENGINE" = "none" ]; then
-    log "Skipping engine install (--engine none; worker registers fine without engines)"
-    return 0
-  fi
-  if [ "$ENGINE" = "atomcode" ]; then
-    if command -v atomcode >/dev/null 2>&1; then
-      log "AtomCode engine already present, skipping install"
-    elif command -v npm >/dev/null 2>&1; then
-      log "Installing AtomCode (Rust based, distributed via npm)..."
-      if timeout 300 npm install -g @atomgit.com/atomcode >/dev/null 2>&1 && command -v atomcode >/dev/null 2>&1; then
-        log "AtomCode engine installed; configure model credentials on this worker before use"
-      else
-        log "Warning: AtomCode install failed. Install manually: npm install -g @atomgit.com/atomcode"
-      fi
-    else
-      log "Warning: npm not found. Install AtomCode (Rust based) manually; see help/usage/atomcode.md"
-    fi
-    return 0
-  fi
-  # auto：已有任一引擎即跳过；显式指定：仅检查对应引擎
-  if [ "$ENGINE" = "auto" ]; then
-    if command -v opencode >/dev/null 2>&1 || command -v hermes >/dev/null 2>&1 || command -v atomcode >/dev/null 2>&1; then
-      log "Execution engine detected (opencode/hermes/atomcode), skipping install"
-      return 0
-    fi
-    _want_oc=1; _want_hermes=0
-  elif [ "$ENGINE" = "opencode" ]; then
-    if command -v opencode >/dev/null 2>&1; then
-      log "opencode engine already present, skipping install"
-      return 0
-    fi
-    _want_oc=1; _want_hermes=0
-  else
-    if command -v hermes >/dev/null 2>&1 || [ -x "$VENV/bin/hermes" ]; then
-      log "hermes engine already present, skipping install"
-      return 0
-    fi
-    _want_oc=0; _want_hermes=1
-  fi
-  if [ "$_want_oc" = "1" ]; then
-    if command -v npm >/dev/null 2>&1; then
-      log "Installing opencode engine (npm install -g opencode-ai, takes ~1-3 minutes)..."
-      if timeout 300 npm install -g opencode-ai >/dev/null 2>&1 && command -v opencode >/dev/null 2>&1; then
-        log "opencode engine installed"
-        return 0
-      fi
-      log "Warning: opencode install failed (network/mirror issue). Worker still registers; install it later manually if needed: npm install -g opencode-ai"
-    else
-      log "Note: npm not found, cannot auto-install opencode. Worker still registers; after a later manual install no restart is needed:"
-      log "  Install Node.js then run npm install -g opencode-ai (see help/usage/faq.md)"
-    fi
-  fi
-  if [ "$_want_hermes" = "1" ]; then
-    log "Installing hermes engine (pip install 'hermes[acp]')..."
-    if timeout 300 "$VENV/bin/pip" install -q 'hermes[acp]' >/dev/null 2>&1 && [ -x "$VENV/bin/hermes" ]; then
-      log "hermes engine installed ($VENV/bin/hermes)"
-      return 0
-    fi
-    log "Warning: hermes install failed. Worker still registers; install it later manually if needed: pip install 'hermes[acp]'"
-  fi
-  return 0
-}
-install_engine
 
 # ===== 5.8 codearts 目录信任预配置（Issue #471 C2）=====
 # codearts CLI 的 folder-trust 闸门在无 TTY（systemd/nohup）环境下对未信任
