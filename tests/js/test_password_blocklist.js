@@ -96,7 +96,12 @@ assert.ok(doSet.includes('isWeakPassword(pwd)'), 'P7b: 设密预检走谓词');
 const forgotSrc = fs.readFileSync(path.join(_STATIC, 'forgot.html'), 'utf8');
 assert.ok(forgotSrc.includes('isWeakPassword(v)'), 'P7c: 忘记密码 NEWPWD_RULE 走谓词');
 assert.ok(forgotSrc.includes('pwd-blocklist.js'), 'P7d: forgot.html 引入 blocklist 脚本');
-const idxHtml = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AccountView.vue'), 'utf8')];
+const idxHtml = fs.readFileSync(path.join(_STATIC, 'index.html'), 'utf8');
+assert.ok(idxHtml.includes('pwd-blocklist.js'), 'P7e: 主应用引入 blocklist（改密/设密消费前置）');
+
+// P8: 无散落拷贝（判断逻辑不得在调用点重复 has() 形态）
+const callSites = [regSrc, forgotSrc, appSrc,
+  fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AccountView.vue'), 'utf8')];
 for (const src of callSites) {
   assert.ok(!/PWD_BLOCKLIST\.has\(/.test(src), 'P8: 消费点无 PWD_BLOCKLIST.has 散落拷贝（统一走谓词）');
 }
@@ -141,7 +146,8 @@ assert.ok(/window\.isPwdTooShort = function/.test(blSrc), 'P10b: isPwdTooShort �
 const r10 = eval(blSrc + '\n; (function(){ return [isPwdTooShort("abc123"), isPwdTooShort("abcdefg1"), isPwdTooShort(""), isPwdTooShort(null)]; })()');
 assert.deepStrictEqual(r10, [true, false, true, true], 'P10c: 长度谓词语义（短/达标/空/null）');
 // 消费面：forgot/register reqs、admin.js 三处、auth.js 评分均走谓词/常量，无 length<8 散落
-const adminSrc = fs.readFileSync(path.join(_STATIC, 'js', 'admin.js'), 'utf8');
+// Vue 迁移后 admin 页面在 AdminView.vue（原 js/admin.js 已删）
+const adminSrc = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AdminView.vue'), 'utf8');
 const authSrc = fs.readFileSync(path.join(_STATIC, 'js', 'auth.js'), 'utf8');
 assert.ok(adminSrc.includes('isPwdTooShort(newP)') && (adminSrc.match(/isPwdTooShort\(password\)/g) || []).length === 2,
   'P10d: admin.js 三处长度校验走谓词');

@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**74 通过 / 8 C类 / 9 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**78 通过 / 6 C类 / 7 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -59,7 +59,7 @@ js 测试：**74 通过 / 8 C类 / 9 D类**（共 91；起点 13 通过 / 78 失
 - [ ] test_issue_1102_load_more.js
 - [x] test_issue_12_host_confirm.js（已改写）
 - [x] test_issue_1310_dropdown_display.js（已改写）
-- [ ] test_issue_1310_runtimes_display.js
+- [x] test_issue_1310_runtimes_display.js（已改写）
 - [x] test_issue_1564_scene_scope_violation.js（已修复并改写）
 - [ ] test_issue_187_workspace_repo_restore.js
 - [ ] test_issue_273_lang_switch_toast.js
@@ -72,7 +72,7 @@ js 测试：**74 通过 / 8 C类 / 9 D类**（共 91；起点 13 通过 / 78 失
 - [x] test_issue_407_chat_draft.js（已改写）
 - [x] test_issue_407_dash_draft.js（已改写）
 - [x] test_issue_436_runtime_search.js（已改写）
-- [ ] test_issue_456_orgs_back_to_workspace.js
+- [x] test_issue_456_orgs_back_to_workspace.js（已改写）
 - [x] test_issue_461_scene_deploy_url.js（已改写）
 - [x] test_issue_465_worker_card_name.js（已改写）
 - [x] test_issue_539_review_status_render.js（已改写）
@@ -94,14 +94,14 @@ js 测试：**74 通过 / 8 C类 / 9 D类**（共 91；起点 13 通过 / 78 失
 - [x] test_issue_205_beta_apply_persist.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_273_en_prefix_refresh.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_278_refresh_route.js（修 harness 后恢复，仍为行为测试）
-- [ ] test_issue_286_chat_bubble_layout.js
+- [x] test_issue_286_chat_bubble_layout.js（已改写）
 - [ ] test_issue_290_view_issue.js
-- [ ] test_issue_297_multi_image_error_and_persist.js
+- [x] test_issue_297_multi_image_error_and_persist.js（已改写）
 - [x] test_issue_299_org_name_display.js（修 harness 后恢复，仍为行为测试）
 - [x] test_issue_316_scene_repo_tab_removed.js（已改写）
 - [x] test_issue_329_cross_pipeline.js（已改写）
 - [ ] test_issue_335_skill_search.js（**待确认**：SkillsView/RuntimesView 均无 _engineSkillCache，刷新后缓存语义需确认是否仍有必要）
-- [ ] test_issue_372_r13_ui_optimization.js
+- [ ] test_issue_372_r13_ui_optimization.js（**待确认**：14 项断言 7 项失效，需人工逐条判定）
 - [x] test_issue_473_range_filter.js（已修复并改写）
 - [x] test_issue_475_runtime_health_hint.js（已修复并改写）
 - [x] test_issue_487_scene_recommend_save.js（已改写）
@@ -109,7 +109,7 @@ js 测试：**74 通过 / 8 C类 / 9 D类**（共 91；起点 13 通过 / 78 失
 - [x] test_issue_645_skill_update_fallback.js（已改写）
 - [x] test_issue_697_dedup_template.js（已改写）
 - [x] test_issue_978_skill_unique_key.js（已改写）
-- [ ] test_password_blocklist.js
+- [ ] test_password_blocklist.js（**真回归 P10d**：AdminView 三处 `password.length < 8` 硬编码，未走统一谓词 isPwdTooShort）
 - [x] test_repo_persist_on_refresh.js（修 harness 后恢复，仍为行为测试）
 - [x] test_repos_host_provider.js（已改写）
 - [x] test_sidebar_collapse.js（修 harness 后恢复，仍为行为测试）
