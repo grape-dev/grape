@@ -354,7 +354,7 @@ def path_separator() -> str:
 
 
 def bun_cache_dir() -> str:
-    """bun JIT 编译缓存目录（跨平台）。
+    r"""bun JIT 编译缓存目录（跨平台）。
 
     Unix 按三级优先级解析（Issue #857）：
       1. GRAPE_BUN_CACHE_DIR 环境变量（可含 ~ / $VAR）

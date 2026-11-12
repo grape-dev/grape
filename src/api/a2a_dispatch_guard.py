@@ -122,13 +122,28 @@ def _query_active_events(repo_key: str, issue_id: str):
         return []
 
 
+def _is_excluded(seq, exclude_seq: int) -> bool:
+    """``seq`` 是否即被排除的源事件（精确等值，0/空表示不过滤）。"""
+    if not exclude_seq:
+        return False
+    try:
+        return int(seq or 0) == int(exclude_seq)
+    except (TypeError, ValueError):
+        return False
+
+
 def find_running_downstream(repo_key: str, issue_number, target_agent: str,
-                            scene_id: str, nodes: list) -> dict:
+                            scene_id: str, nodes: list,
+                            exclude_seq: int = 0) -> dict:
     """目标 agent 为上游且同 Issue 同场景存在 running 下游事件时返回该事件。
 
     返回 ``{"seq", "agent", "status", "created_at"}``；无命中返回 ``{}``。
     ``nodes`` 为空（场景未配置/解析失败）时门禁静默失效——此处显式告警，
     便于排查「配置缺失导致误放行」而非无痕。
+
+    Issue #1948：``exclude_seq`` 是本次调用的发起方自身事件 seq。调用方（如下游 qa
+    打回上游 coding）自己的 running 事件不能被判成「下游 running」，否则反向派发会被
+    自锁跳过；只按该 seq 精确排除，其余下游 running 仍照常拦截（#1770 不退化）。
     """
     order = pipeline_order(nodes)
     if not order:
@@ -143,6 +158,8 @@ def find_running_downstream(repo_key: str, issue_number, target_agent: str,
     scene_id = _normalize_scene(scene_id)
     for seq, agent, status, created_at, row_scene in _query_active_events(
             repo_key, f"#{issue_number}"):
+        if _is_excluded(seq, exclude_seq):
+            continue
         agent = str(agent or "").strip()
         if agent == target_agent or agent not in order:
             continue
@@ -156,7 +173,8 @@ def find_running_downstream(repo_key: str, issue_number, target_agent: str,
 
 
 def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
-                          scene_id: str, window_seconds: int | None = None) -> dict:
+                          scene_id: str, window_seconds: int | None = None,
+                          exclude_seq: int = 0) -> dict:
     """同 Issue + 同场景 + 同目标 agent 在时间窗内已有 completed 派发时返回该记录。
 
     仅 ``completed`` 计入窗口去重：``failed`` / ``cancelled`` / ``timeout`` 属失败或
@@ -184,6 +202,8 @@ def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
         log.warning(f"A2A guard: window duplicate query failed: {_e}")
         return {}
     for seq, created_at, status, row_scene in rows:
+        if _is_excluded(seq, exclude_seq):
+            continue
         if str(status or "").strip() not in _WINDOW_DEDUP_STATUS:
             continue
         _row_scene = _normalize_scene(row_scene)
@@ -199,7 +219,8 @@ def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
 def find_active_duplicate(repo_key: str, issue_number, target_agent: str,
                           scene_id: str, context_key: str = "",
                           window_seconds: int | None = None,
-                          include_same_context: bool = False) -> dict:
+                          include_same_context: bool = False,
+                          exclude_seq: int = 0) -> dict:
     """同 Issue + 同场景 + 同目标 agent 在短窗内存在活跃事件时返回该事件。
 
     默认仅命中「请求上下文键非空且与活跃事件上下文不同」的场景（Issue #1770
@@ -232,6 +253,8 @@ def find_active_duplicate(repo_key: str, issue_number, target_agent: str,
         log.warning(f"A2A guard: active duplicate query failed: {_e}")
         return {}
     for seq, created_at, status, row_scene, payload_raw in rows:
+        if _is_excluded(seq, exclude_seq):
+            continue
         dt = _parse_ts(created_at)
         if dt is None or dt < cutoff:
             continue
