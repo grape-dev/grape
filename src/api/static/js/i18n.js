@@ -185,7 +185,10 @@ var I18N = (function () {
         },
         help: {
           drawer_title: '📖 使用帮助 & FAQ',
-          loading: '加载中...'
+          loading: '加载中...',
+          fullscreen: '全屏',
+          exit_fullscreen: '退出全屏',
+          open_new_tab: '在新标签页打开'
         },
         loading: '加载中...'
       },
@@ -336,7 +339,10 @@ var I18N = (function () {
         },
         help: {
           drawer_title: '📖 Help & FAQ',
-          loading: 'Loading...'
+          loading: 'Loading...',
+          fullscreen: 'Fullscreen',
+          exit_fullscreen: 'Exit fullscreen',
+          open_new_tab: 'Open in new tab'
         },
         loading: 'Loading...'
       },

@@ -370,7 +370,10 @@
     "link_text": "📖 Help",
     "drawer_title": "📖 Help & FAQ",
     "loading": "Loading...",
-    "iframe_title": "Grape Help"
+    "iframe_title": "Grape Help",
+    "fullscreen": "Fullscreen",
+    "exit_fullscreen": "Exit fullscreen",
+    "open_new_tab": "Open in new tab"
   },
   "feedback": {
     "title": "Feedback",

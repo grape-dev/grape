@@ -350,14 +350,18 @@ function _toggleAppLang(){
 <script src="/static/js/pages/my_feedback.js?v=8" defer></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=6" defer></script>
 <script src="/static/js/pages/autopilot.js?v=74" defer></script>
-<script src="/static/js/app.js?v=254" defer></script>
+<script src="/static/js/app.js?v=255" defer></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>
 <div class="help-drawer" id="helpDrawer">
   <div class="help-drawer-hdr">
     <h2 data-i18n="app.help.drawer_title">📖 使用帮助 & FAQ</h2>
-    <button class="help-drawer-close" onclick="app.closeHelp()">✕</button>
+    <div class="help-drawer-hdr-actions">
+      <button class="help-drawer-close" id="helpNewTabBtn" onclick="app.openHelpNewTab()" data-i18n-title="app.help.open_new_tab" title="在新标签页打开">↗</button>
+      <button class="help-drawer-close" id="helpFullscreenBtn" onclick="app.toggleHelpFullscreen()" data-i18n-title="app.help.fullscreen" title="全屏">⛶</button>
+      <button class="help-drawer-close" onclick="app.closeHelp()" data-i18n-title="common.close" title="关闭">✕</button>
+    </div>
   </div>
   <div class="help-drawer-body">
     <div class="help-loading" data-i18n="app.help.loading">加载中...</div>

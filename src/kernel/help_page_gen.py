@@ -131,7 +131,7 @@ th{background:var(--c);font-weight:600}
 .ds{display:block;padding:4px 10px;border-radius:6px;color:var(--t2);text-decoration:none;font-size:12px;cursor:pointer}
 .ds:hover{color:var(--a)}
 .ds.active{background:var(--c);color:var(--a);font-weight:600}
-.content{flex:1;min-width:0;max-width:940px;padding:26px 32px 90px}
+.content{flex:1;min-width:0;max-width:min(940px,100%);padding:26px 32px 90px;overflow-x:auto}
 .contract{display:flex;align-items:center;gap:14px;background:var(--c);border:1px solid var(--b);border-radius:10px;padding:14px 18px;margin-bottom:24px}
 .contract .ct-info{flex:1;font-size:13px}
 .contract .ct-info b{font-size:14px}

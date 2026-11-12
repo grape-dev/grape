@@ -370,7 +370,10 @@
     "link_text": "📖 帮助",
     "drawer_title": "📖 使用帮助 & FAQ",
     "loading": "加载中...",
-    "iframe_title": "Grape 使用帮助"
+    "iframe_title": "Grape 使用帮助",
+    "fullscreen": "全屏",
+    "exit_fullscreen": "退出全屏",
+    "open_new_tab": "在新标签页打开"
   },
   "feedback": {
     "title": "问题反馈",

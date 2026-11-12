@@ -524,8 +524,10 @@
 .help-overlay.show{opacity:1;pointer-events:auto}
 .help-drawer{position:fixed;top:0;right:0;width:520px;max-width:90vw;height:100vh;background:var(--c);z-index:9991;transform:translateX(100%);transition:transform .35s cubic-bezier(.25,.1,.25,1);display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(0,0,0,.15)}
 .help-drawer.show{transform:translateX(0)}
+.help-drawer.fullscreen{width:100vw;max-width:100vw;transition:width .2s ease,transform .2s ease}
 .help-drawer-hdr{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--b);flex-shrink:0}
 .help-drawer-hdr h2{font-size:16px;font-weight:600;color:var(--t)}
+.help-drawer-hdr-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
 .help-drawer-close{width:28px;height:28px;border-radius:50%;border:none;background:var(--bg);color:var(--t2);font-size:14px;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center}
 .help-drawer-close:hover{background:var(--s3);color:var(--t)}
 .help-drawer-body{flex:1;overflow-y:auto;padding:0}
