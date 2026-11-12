@@ -1446,14 +1446,14 @@ if (getToken()) {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
-  border-radius: 7px;
+  padding: 2px;
+  border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.04);
 }
 .lang-btn {
-  padding: 3px 8px;
-  border-radius: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 500;
   border: none;
@@ -1687,18 +1687,26 @@ if (getToken()) {
 .f-row input:focus {
   border-color: var(--a, #3168e0);
 }
-.f-row .s-btn {
-  padding: 8px 14px;
-  border-radius: var(--rd, 8px);
-  border: 1px solid var(--b, #e3e6ee);
-  background: var(--bg, #f5f6f8);
+/* 次要操作（校验/刷新）：透明底 + 淡蓝描边 + 蓝字，hover 实心蓝。
+   原来只写在 .f-row 下，card-h 里的「刷新」按钮完全没样式（浏览器原生按钮）。 */
+.s-btn {
+  padding: 4px 14px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--a, #3168e0) 42%, transparent);
+  background: transparent;
   font-size: 12px;
   cursor: pointer;
-  color: var(--t, #101724);
+  color: var(--a, #3168e0);
   flex-shrink: 0;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
 }
-.f-row .s-btn:hover {
-  background: #eceef2;
+.s-btn:hover {
+  background: var(--a, #3168e0);
+  border-color: var(--a, #3168e0);
+  color: #fff;
 }
 .f-row .st {
   font-size: 12px;
@@ -1732,12 +1740,15 @@ if (getToken()) {
   margin-top: 8px;
 }
 .btn {
-  padding: 11px 22px;
+  padding: 7px 18px;
   border-radius: 999px;
   border: none;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
+  transition:
+    background 0.18s,
+    filter 0.18s;
 }
 .btn-sm {
   padding: 4px 14px;
@@ -1751,6 +1762,7 @@ if (getToken()) {
   border-radius: 999px;
 }
 .btn-p:hover:not(:disabled) {
+  background: var(--ah, #0077ed);
   filter: brightness(1.06);
 }
 .btn-p:disabled {
@@ -1874,16 +1886,21 @@ if (getToken()) {
 .row-actions-btn {
   padding: 4px 10px;
   border: 1px solid var(--b, #e3e6ee);
-  border-radius: 6px;
-  background: var(--c);
+  border-radius: 999px;
+  background: transparent;
   cursor: pointer;
   font-size: 14px;
   color: var(--t2, #5b667b);
   line-height: 1;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
 }
 .row-actions-btn:hover {
-  background: var(--bg, #f5f6f8);
-  color: var(--t, #101724);
+  background: color-mix(in srgb, var(--a, #3168e0) 10%, transparent);
+  border-color: color-mix(in srgb, var(--a, #3168e0) 42%, transparent);
+  color: var(--a, #3168e0);
 }
 .row-menu {
   position: absolute;
@@ -1954,17 +1971,22 @@ if (getToken()) {
   padding: 0 4px;
 }
 .pager-btn {
-  padding: 5px 12px;
+  padding: 4px 12px;
   border: 1px solid var(--b, #e3e6ee);
-  border-radius: 7px;
-  background: var(--c);
+  border-radius: 999px;
+  background: transparent;
   font-size: 12px;
   cursor: pointer;
   color: var(--t2, #5b667b);
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
 }
 .pager-btn:hover {
-  background: var(--bg, #f5f6f8);
-  color: var(--t, #101724);
+  background: color-mix(in srgb, var(--a, #3168e0) 10%, transparent);
+  border-color: color-mix(in srgb, var(--a, #3168e0) 42%, transparent);
+  color: var(--a, #3168e0);
 }
 .pager-btn:disabled {
   opacity: 0.4;
@@ -2039,19 +2061,33 @@ if (getToken()) {
 }
 .mbox .m-actions button {
   flex: 1;
-  padding: 11px;
-  border-radius: 980px;
+  padding: 9px;
+  border-radius: 999px;
   border: none;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    filter 0.18s;
 }
 .m-btn-o {
-  background: var(--chip-bg);
-  color: var(--t, #1d1d1f);
+  background: transparent;
+  color: var(--a, #0071e3);
+  border: 1px solid color-mix(in srgb, var(--a, #0071e3) 42%, transparent);
+}
+.m-btn-o:hover {
+  background: var(--a, #0071e3);
+  border-color: var(--a, #0071e3);
+  color: #fff;
 }
 .m-btn-p {
   background: var(--a, #0071e3);
   color: var(--on-accent);
+}
+.m-btn-p:hover {
+  background: var(--ah, #0077ed);
+  filter: brightness(1.06);
 }
 </style>
