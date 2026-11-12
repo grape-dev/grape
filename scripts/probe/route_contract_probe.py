@@ -60,7 +60,7 @@ def _ports() -> dict[str, int]:
     return out or dict(DEFAULT_PORTS)
 
 
-def _http(url: str, method: str = "GET", timeout: float = 8.0, headers: dict | None = None):
+def _http(url: str, method: str = "GET", timeout: float = 30.0, headers: dict | None = None):
     req = urllib.request.Request(url, method=method)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
@@ -196,9 +196,19 @@ def main() -> int:
     ap.add_argument("--conf", default=os.environ.get("GRAPE_NGINX_CONF", DEFAULT_CONF))
     ap.add_argument("--public", default="", help="公网基址，附加全量可达性检查")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--warmup", action="store_true",
+                    help="先预热重接口（worker 包 / 安装包），避免首次现场打包把探测拖成假红")
     args = ap.parse_args()
 
     ports = _ports()
+    if args.warmup:
+        heavy = ("/api/runtime/grape-worker.tar.gz", "/api/runtime/install/package")
+        for role, port in ports.items():
+            for hp in heavy:
+                _http(f"http://127.0.0.1:{port}{hp}", "GET", timeout=60.0,
+                      headers={"Range": "bytes=0-0"})
+        print("[warmup] 已预热重接口（worker 包 / 安装包）")
+
     routes = {role: fetch_routes(port) for role, port in ports.items()}
     alive = {r: len(v) for r, v in routes.items()}
     rules, upstreams = parse_nginx(args.conf)
@@ -242,8 +252,10 @@ def main() -> int:
         if key not in probe_cache:
             # Range: bytes=0-0 → 存在返回 206/200/401/405，未知路径仍 404；
             # 避免 /api/runtime/grape-worker.tar.gz 这类大文件把 GET 拖到超时（QA #1272 复核）。
+            # 现场打包类接口（如 /api/runtime/grape-worker.tar.gz）首次访问要现打压缩包，
+            # 部署刚重启时会 >8s；旧默认 8s 会把"慢"误判成 unreachable（假红）。
             code, _ = _http(f"http://127.0.0.1:{port}{concrete(path)}", "GET",
-                            headers={"Range": "bytes=0-0"})
+                            timeout=30.0, headers={"Range": "bytes=0-0"})
             probe_cache[key] = code
         return probe_cache[key]
 
