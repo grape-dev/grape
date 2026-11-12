@@ -7,7 +7,7 @@
    worker 从未收到的 dispatched 悬挂释放回 queued、busy_slots 收敛）；
 4. 加回幂等（重复加回不重复绑定、不重复回写）；
 5. #1982 复现链路回归：spawn_failed 期间不派单 → ok 恢复后自动出黑名单并加回；
-6. QA 审查补充：悬挂释放守卫（task_messages 活性 + 宽限窗）。
+6. QA 审查补充：悬挂释放守卫（task_messages 活性 + 宽限窗）、WARN hint 幂等拼接。
 """
 import os
 import sys
@@ -351,3 +351,34 @@ def test_dangling_release_guarded_by_liveness_and_grace_window():
         assert _task(stale)[0] == "queued"
     finally:
         _cleanup(cid, scene_row_id, tasks)
+
+
+def test_spawn_fail_hint_append_is_idempotent():
+    """WARN hint 走 _append_error（QA Nit 修复回归）。
+
+    上一轮连败已把 hint 拼入 probe_error、时间窗标记被 ok 探活清零后，新连败
+    观测（probe_error 为空 → base 取存量）不得重复拼入 hint。
+    """
+    cid = _insert_credential()
+    name = f"engine-2133-{uuid.uuid4().hex[:8]}"
+    try:
+        rid = _insert_runtime(cid, name, probe_spawn_fail_count=12,
+                              spawn_fail_since="2026-11-12T00:00:00+00:00")
+        stored = "OSError: [Errno 24] Too many open files" + recovery._WARN_HINT
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_runtimes SET probe_error=? WHERE id=?", (stored, rid))
+            db.commit()
+        with patch.object(recovery, "SPAWN_FAIL_WARN_STREAK", 10):
+            with db_lock:
+                c = db.cursor()
+                recovery.note_spawn_failed(c, rid, probe_error="",
+                                           now_iso="2026-11-12T00:20:00+00:00")
+                db.commit()
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT probe_error FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
+        assert (row[0] or "").count("spawn_failed warning") == 1, \
+            "已含 hint 的 probe_error 不得重复拼入 WARN hint"
+    finally:
+        _cleanup(cid)

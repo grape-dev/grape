@@ -101,7 +101,7 @@ def note_spawn_failed(c, runtime_id: int, probe_error: str = "", now_iso: str = 
 
     if not warned_at and (count >= SPAWN_FAIL_WARN_STREAK or elapsed >= SPAWN_FAIL_WARN_SECONDS):
         warned_at = now_iso
-        base_err = base_err + _WARN_HINT
+        base_err = _append_error(base_err, _WARN_HINT)
         result["warned"] = True
         log.warning(
             f"ENGINE_SPAWN_FAIL_ALARM: runtime={runtime_id} engine={name} "
@@ -113,7 +113,7 @@ def note_spawn_failed(c, runtime_id: int, probe_error: str = "", now_iso: str = 
 
     if not degraded_at and elapsed >= SPAWN_FAIL_DEGRADE_SECONDS:
         degraded_at = now_iso
-        base_err = base_err + _DEGRADE_HINT
+        base_err = _append_error(base_err, _DEGRADE_HINT)
         result["degraded"] = True
         log.warning(
             f"ENGINE_SPAWN_FAIL_DEGRADED: runtime={runtime_id} engine={name} "
