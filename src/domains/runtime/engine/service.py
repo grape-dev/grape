@@ -4036,6 +4036,17 @@ def enqueue_async_report(kind: str, task_id: str, payload, seq_start: int | None
         return None
 
 
+def wait_task_terminal_sync(task_id: str, timeout: float = 1800.0,
+                             poll_interval: float = 1.0) -> dict:
+    """同步等待任务终态（供后台线程/同步上下文使用）：内部起独立事件循环跑 async 版本。
+
+    历史调用方（chat 后台线程）引用过这个名字但函数缺失 → 远端引擎分支一进来就
+    ImportError（chat 远端会话必然 500），在此补上同步包装。
+    """
+    import asyncio as _aio
+    return _aio.run(wait_task_terminal(task_id, timeout=timeout, poll_interval=poll_interval))
+
+
 async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 1.0) -> dict:
     """异步轮询任务直到终态（completed/failed/cancelled）。
 

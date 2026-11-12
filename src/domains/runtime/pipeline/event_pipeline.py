@@ -2315,7 +2315,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 # Issue #1573: PR 合并视同审核通过——qa 阶段 pending_review 时用户直接合并
                 # PR 会将卡片永久留在待审核列；此处先恢复 processing，失败降级不阻断后续推进。
                 try:
-                    from src.api.session_store import get_issue_status as _gist
+                    from src.api.issues_center import _read_issue_status as _gist
                     if _gist(repo_key, _rid_sre) == "pending_review":
                         _num_sre = str(_rid_sre).lstrip("#")
                         if _num_sre.isdigit():
@@ -5025,4 +5025,70 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     log.info(f"智能推荐重派: enqueued VOD task, seq={seq}, skill={vod_skill}")
 
 
+def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
+                             event_type: str = "", title: str = "",
+                             prompt: str = "") -> bool:
+    """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 唯一判定入口）。
 
+    保守口径：未判定（`None`）也视为 PR 订阅/需保留订阅场景，避免 PR 订阅任务被
+    误校正为 Issue 场景而重现 #427。详见 `_pr_subscription_state` 三态说明。
+    """
+    return _pr_subscription_state(
+        issue_id, event_seq, event_type, title, prompt) is not False
+
+
+def reconcile_task_scene_env(task_id: str, env: dict) -> str:
+    """执行前用 Issue 归属场景校正任务快照中的 GRAPE_SCENE_ID（Issue #1745）。
+
+    worker 执行前拉取服务端最新 env（`GET /runtimes/{id}/tasks/{task_id}/env`），
+    此前只同步 AK/SK 与会话 token，`GRAPE_SCENE_ID` 仍是入队时快照。跨场景转交后，
+    转交前入队的任务（或重派沿用了源事件场景的任务）会拿到源场景。此处在执行前按
+    `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
+    `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
+    PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理；
+    PR 订阅判定未定（events 查询异常/事件行缺失）或 Issue 归属查询异常时一律跳过，
+    不覆盖快照，避免误清空正确的 GRAPE_SCENE_ID。
+
+    返回校正后的 scene_id（无需校正时为快照原值）。
+    """
+    if not isinstance(env, dict):
+        return ""
+    _snapshot = str(env.get("GRAPE_SCENE_ID") or "")
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            _row = db.cursor().execute(
+                "SELECT repo_key, issue_id, event_seq, event_type, prompt "
+                "FROM agent_tasks WHERE id=?",
+                (task_id,)).fetchone()
+    except Exception:
+        return _snapshot
+    if not _row:
+        return _snapshot
+    _repo_key = _row[0] or ""
+    _issue_id = _row[1] or ""
+    _event_seq = _row[2] or 0
+    _event_type = _row[3] or ""
+    _prompt = _row[4] or ""
+    if not _repo_key or not _issue_id:
+        return _snapshot
+    if _pr_subscription_state(_issue_id, _event_seq, _event_type,
+                              prompt=_prompt) is not False:
+        return _snapshot
+    _authoritative = _issue_authoritative_scene(_repo_key, _issue_id)
+    if _authoritative is None:
+        return _snapshot
+    if not _authoritative:
+        # Issue #1745 复审修复：未绑定场景时与 DIRECT(`_resolve_scene_id`) 同源，
+        # 回退仓库默认场景（dev_scene），不再把快照清成空串——否则同一任务
+        # 本机执行拿 dev_scene、远端 worker 拿空串，出现口径分裂。
+        _dev = _repo_dev_scene(_repo_key)
+        if _dev is None:
+            return _snapshot
+        _authoritative = _dev
+    if _authoritative != _snapshot:
+        env["GRAPE_SCENE_ID"] = _authoritative
+        log.info(scene_env_mismatch_diagnostic(_snapshot, _authoritative) +
+                 f" [scene-env reconcile] task={task_id} issue={_issue_id} repo={_repo_key}")
+        return _authoritative
+    return _snapshot
