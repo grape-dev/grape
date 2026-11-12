@@ -362,7 +362,7 @@ class TestA2A400StructuredFields:
         from fastapi.testclient import TestClient
         from src.api.main import app
         from src.api.deps import get_user_or_none
-        from src.api.routes import webhook as wh
+        from src.domains.runtime.routes import webhook as wh
         import src.api.session_store as store
         import src.api.event_pipeline as ep
         import src.domains.mgmt.user.db as user_db

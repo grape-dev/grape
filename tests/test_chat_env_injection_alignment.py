@@ -1,7 +1,7 @@
 """Issue #1757：chat env 注入对齐（静态收敛 + 执行器兜底）回归测试。
 
 覆盖：
-1. src/api/routes/chat.py 不再出现裸 `env_extra={"USER_ID"...}` 组装，且 chat 调用点统一走 helper（>=8）。
+1. src/domains/runtime/routes/chat.py 不再出现裸 `env_extra={"USER_ID"...}` 组装，且 chat 调用点统一走 helper（>=8）。
 2. `_assemble_env(kind="chat")` 仅在缺失时兜底补齐 REPO_* / GRAPE_SERVER_URL，显式值优先不覆盖。
 3. `_assemble_env` 的 devops 分支零回归（不注入 REPO_* / GRAPE_SERVER_URL）。
 """
@@ -25,17 +25,17 @@ def _read(rel_path: str) -> str:
 class TestChatEnvSingleHelperPath:
     def test_no_naked_env_extra_dict(self):
         """chat.py 中裸 env_extra={"USER_ID"...} 必须 0 命中。"""
-        src = _read("src/api/routes/chat.py")
+        src = _read("src/domains/runtime/routes/chat.py")
         assert 'env_extra={"USER_ID"' not in src
 
     def test_all_chat_sites_use_helper(self):
         """chat.py helper 调用点 >= 8（3 处既有 + 5 处裸 dict 收敛）。"""
-        src = _read("src/api/routes/chat.py")
+        src = _read("src/domains/runtime/routes/chat.py")
         assert src.count("chat_session_env_extra(") >= 8
 
     def test_helper_call_sites_pass_runtime_and_issue(self):
         """helper 调用均补齐 runtime_id / issue_number 实参。"""
-        src = _read("src/api/routes/chat.py")
+        src = _read("src/domains/runtime/routes/chat.py")
         call_sites = src.split("chat_session_env_extra(")[1:]
         assert len(call_sites) >= 8
         for tail in call_sites:

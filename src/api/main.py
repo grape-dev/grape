@@ -466,6 +466,10 @@ app.include_router(community.router)
 app.include_router(observability.router)
 app.include_router(patrol.router)
 
+# IM 渠道/会话路由（weekly-11 新引擎；四进程入口挂在 grape_server，单进程入口同步挂载）
+from src.api.routes import im as im_routes  # noqa: E402
+app.include_router(im_routes.router)
+
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 
 from src.api.openapi import custom_openapi

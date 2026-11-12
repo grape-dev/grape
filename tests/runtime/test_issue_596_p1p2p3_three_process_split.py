@@ -618,8 +618,8 @@ class TestReviewFixLegacyBotManagerRemoved:
     ROUTE_FILES = [
         "src/domains/mgmt/routes/feishu_card.py",
         "src/api/routes/feishu_onboard.py",
-        "src/api/routes/chat.py",
-        "src/api/routes/agents.py",
+        "src/domains/runtime/routes/chat.py",
+        "src/domains/mgmt/routes/agents.py",
     ]
 
     def test_no_route_file_references_legacy_bot_manager(self):

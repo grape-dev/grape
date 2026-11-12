@@ -64,7 +64,7 @@ def test_faro_collect_proxies_to_configured_upstream(monkeypatch):
 
 
 def _relay_app(monkeypatch, target: str, max_body: int | None = None):
-    from src.api.routes import runtime as rt
+    from src.domains.runtime.routes import runtime as rt
 
     monkeypatch.setattr(rt, "OTLP_RELAY_TARGET", target, raising=True)
     if max_body is not None:
@@ -92,7 +92,7 @@ def test_trace_relay_rejects_oversized_body(monkeypatch):
 
 def test_trace_relay_body_limit_default_is_two_mb(monkeypatch):
     """默认上限 2MB（OTLP 批量包余量足够）。"""
-    from src.api.routes import runtime as rt
+    from src.domains.runtime.routes import runtime as rt
 
     monkeypatch.delenv("GRAPE_TRACE_RELAY_MAX_BODY", raising=False)
     client = TestClient(_relay_app(monkeypatch, target="http://127.0.0.1:9"))

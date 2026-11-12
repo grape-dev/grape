@@ -99,7 +99,7 @@ def _fmt_utc(d: dt.datetime) -> str:
     return d.strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ===== recover_orphans 调用点（src/api/routes/runtime.py）=====
+# ===== recover_orphans 调用点（src/domains/runtime/routes/runtime.py）=====
 
 class TestRecoverOrphansFormat:
     def test_space_format_message_within_window_not_orphaned(self, setup_db):

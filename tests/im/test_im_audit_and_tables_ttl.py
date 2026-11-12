@@ -1,6 +1,6 @@
 """A2 MR 评审整改回归：IM 安装变更审计（C3） + IM 只增表 TTL 清理（A7/F4）。
 
-审计断言不依赖真实 DB 落库：把 src.domains.mgmt.routes.auth.audit.log_audit 替换成记录器，
+审计断言不依赖真实 DB 落库：把 src.domains.mgmt.auth.audit.log_audit 替换成记录器，
 验证「启停 / 卡片配置 / 凭证保存解绑」这几条写路径确实产生审计事件，
 且 detail 里绝不出现 secret 明文。
 """
@@ -35,7 +35,7 @@ def client():
 @pytest.fixture()
 def audit_recorder(monkeypatch):
     """捕获 log_audit 调用（事件类型 + detail），不落真实审计表。"""
-    import src.domains.mgmt.routes.auth.audit as audit
+    import src.domains.mgmt.auth.audit as audit
     calls = []
 
     def _fake(event_type, user_id=0, operator_id=0, ip="", detail=None):
@@ -79,7 +79,7 @@ def _drop(app_id):
 
 
 def test_event_type_registered():
-    import src.domains.mgmt.routes.auth.audit as audit
+    import src.domains.mgmt.auth.audit as audit
     assert "im_installation_change" in audit.EVENT_TYPES
 
 
@@ -117,7 +117,7 @@ def test_chat_config_save_writes_audit(client, audit_recorder):
 
 def test_sweep_im_tables_purges_old_rows():
     """A7/F4：三张 IM 只增表的过期行会被 sweeper 清掉，新行保留。"""
-    from src.domains.runtime.routes.runtime import cleanup
+    from src.domains.runtime.engine import cleanup
     from src.session_manager import db, db_lock
 
     with db_lock:

@@ -28,6 +28,8 @@ PR_COMMENT      = "note_hook_pr"
 PUSH            = "push"
 TAG_CREATED     = "tag_created"
 RELEASE_CREATED = "release_created"
+# Issue #657/#1758：派发前技能解析失败（fail-fast 事件类型，weekly-11 引入）
+SKILL_RESOLVE_FAILED = "skill_resolve_failed"
 BUILD_START     = "build_start"
 BUILD_FAILURE   = "build_failure"
 DEPLOY_START    = "deploy_start"

@@ -321,7 +321,7 @@ class TestStatusFlow:
                 (f"vod_{_uid['id']}", repo_key, "vod", "idle"))
             db.commit()
         with _patch_register(_fake_success) as patched:
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             async def _fake_vod(**kwargs):
                 kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
                 return _result()

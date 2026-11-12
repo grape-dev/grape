@@ -353,7 +353,7 @@ class TestAuditRouteAndFallback:
     def test_audit_route_registered_before_scene_id_route(self):
         """只读体检为固定路径，必须注册在 /{scene_id} 之前，否则被路径吞掉。"""
         import inspect
-        from src.api.routes import scenes
+        from src.domains.mgmt.routes import scenes
         src = inspect.getsource(scenes)
         i_audit = src.index('@router.get("/skill-scope-audit"')
         i_detail = src.index('@router.get("/{scene_id}"')

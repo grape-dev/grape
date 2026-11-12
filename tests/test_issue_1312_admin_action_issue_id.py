@@ -152,7 +152,7 @@ def _patch_pipeline(monkeypatch, conn):
 
 
 def test_pipeline_window_excludes_audit_and_unrelated(monkeypatch):
-    from src.api.routes import pipeline as pipeline_route
+    from src.domains.runtime.routes import pipeline as pipeline_route
 
     _patch_pipeline(monkeypatch, _seed_pipeline_db())
 
@@ -163,7 +163,7 @@ def test_pipeline_window_excludes_audit_and_unrelated(monkeypatch):
 
 
 def test_get_pipeline_stats_exclude_audit_and_unrelated(monkeypatch):
-    from src.api.routes import pipeline as pipeline_route
+    from src.domains.runtime.routes import pipeline as pipeline_route
 
     _patch_pipeline(monkeypatch, _seed_pipeline_db())
     out = pipeline_route.get_pipeline("test1312", "repo", history_limit=50,
@@ -225,7 +225,7 @@ class TestBackfillScript:
 
 
 def test_pipeline_window_scene_filter_excludes_audit(monkeypatch):
-    from src.api.routes import pipeline as pipeline_route
+    from src.domains.runtime.routes import pipeline as pipeline_route
 
     conn = _seed_pipeline_db()
     conn.execute("UPDATE issue SET scene_id='scene-x'")

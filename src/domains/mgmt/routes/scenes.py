@@ -225,7 +225,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "is_pinned": int(s.get("is_pinned") or 0),
                        "pinned_at": s.get("pinned_at") or "",
                        "pipeline": cfg})
-    return {"scenes": result, "total": _total}
+    return {"scenes": result, "total": len(result)}
 
 
 def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
@@ -2427,13 +2427,21 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
 
 
 def _collect_scene_skill_scope_violations(nodes: list, repo_key: str,
-                                          expected_scope: str = "repo") -> list:
+                                          expected_scope: str = "repo",
+                                          username: str | None = None,
+                                          user_id: str | int = "",
+                                          allow_own_user: bool = False,
+                                          cache: dict | None = None) -> list:
     """收集场景节点技能 scope 冲突（Issue #657 / #1564 / #1758），不抛异常、一次返回全部冲突。
 
     Issue #1758：判定收敛为单一判官 ``scene_skill_scope.evaluate``，四个入口
     （保存/apply、audit、派发门禁、scene_precheck）共用同一结论。固定口径：
     repo 级场景引用 user 技能一律冲突（含创建者本人）。
     技能不在 skill 表（官方内置包形态）不计冲突（存量兼容）。
+
+    ``username`` / ``user_id`` / ``allow_own_user`` 为场景复制调用点（#1844）兼容参数：
+    按 #1758 固定口径，**创建者本人的 user 档技能同样冲突**（allow_own_user 仅为兼容保留，
+    不改变判定），复制时统一保留技能名到 skill_pending 并清空绑定。
     """
     from src.api.scene_skill_scope import evaluate
     violations = []

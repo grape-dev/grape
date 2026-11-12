@@ -497,7 +497,7 @@ def _fail_skill_resolve_event(repo_key: str, skill_name: str, scene_id: str,
                 "reason": reason[:300]})
         else:
             from src.api.event_store import append_event
-            from src.vcs.event_types import SKILL_RESOLVE_FAILED
+            from src.domains.runtime.vcs.event_types import SKILL_RESOLVE_FAILED
             _seq = append_event(
                 repo_key=repo_key, event_type=SKILL_RESOLVE_FAILED,
                 title=f"技能解析失败: {skill_name}",

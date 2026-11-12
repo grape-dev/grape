@@ -482,7 +482,7 @@ class TestHelpers:
 
     def test_push_to_feishu_with_channel(self):
         """web→飞书推送：旧 IM 下线 M2 后改为读 grape_t_channel_installation + FeishuAsync 直发。"""
-        from src.api.routes import chat as chat_mod
+        from src.domains.runtime.routes import chat as chat_mod
         from src.domains.runtime.routes.chat import _push_reply_to_feishu
         from src.im.engine_wiring import revoke_installation, sync_installation
         from src.im.engine_wiring import default_db_path, run_startup_migration

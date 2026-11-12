@@ -124,7 +124,7 @@ def test_onboard_scan_binding_also_writes_installation(ui_db, monkeypatch):
     """
     import sqlite3
     import src.session_manager as sm
-    from src.api.routes import feishu_onboard
+    from src.domains.mgmt.routes import feishu_onboard
 
     conn = sqlite3.connect(ui_db)
     conn.executescript(

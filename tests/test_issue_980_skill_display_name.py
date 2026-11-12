@@ -259,13 +259,13 @@ class TestSourceContract:
     """源码契约：两处调用点统一替换，official-only 查询不再出现。"""
 
     def test_routes_import_shared_resolver(self):
-        for rel in ("src/api/routes/scenes.py", "src/api/routes/dashboard.py"):
+        for rel in ("src/domains/mgmt/routes/scenes.py", "src/domains/insight/routes/dashboard.py"):
             src = open(os.path.join(os.path.dirname(__file__), "..", rel), encoding="utf-8").read()
             assert "from src.api.skill_display import" in src, f"{rel} 未引入共用解析层"
 
     def test_no_official_only_display_map_left(self):
         pattern = re.compile(
             r"SELECT skill_name,\s*display_name FROM skill WHERE is_active=1 AND scope='official'")
-        for rel in ("src/api/routes/scenes.py", "src/api/routes/dashboard.py"):
+        for rel in ("src/domains/mgmt/routes/scenes.py", "src/domains/insight/routes/dashboard.py"):
             src = open(os.path.join(os.path.dirname(__file__), "..", rel), encoding="utf-8").read()
             assert not pattern.search(src), f"{rel} 仍残留 official-only 显示名映射"
