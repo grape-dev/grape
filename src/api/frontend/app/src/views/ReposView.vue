@@ -660,7 +660,8 @@ function refresh() {
 
 // ── repo actions ──
 function selectRepo(r) {
-  selectRepo(r.full_name, r.owner, r.name, r.repo_key)
+  // 这里必须走 window 全局（app.js 定义）；裸调用会命中自己 → 无限递归，点了没反应
+  G.selectRepo(r.full_name, r.owner, r.name, r.repo_key)
 }
 function selectRepoGlobal(fullName, owner, name, repoKey) {
   sessionStorage.setItem(
