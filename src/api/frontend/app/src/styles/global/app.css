@@ -196,9 +196,9 @@
 .chat-body .msg.r.chat-msg-recalled a,.chat-body .msg.r.chat-msg-recalled a:link,.chat-body .msg.r.chat-msg-recalled a:visited{color:var(--a);text-decoration:underline}
 .chat-body .msg.r.chat-msg-recalled a:hover{text-decoration:underline;background-color:var(--b);border-radius:2px}
 /* Issue #464 QA 复审：apple-theme.css 后加载且默认主题为 apple，同特异性 (0,4,1) 时 #233 白字规则层叠胜出（对比度 1.09:1）。
-   加 [data-theme="apple"] 前缀升至 (0,5,1)，跨文件加载顺序必胜；三态齐全 */
-[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a,[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:link,[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:visited{color:var(--a);text-decoration:underline}
-[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:hover{text-decoration:underline;background-color:var(--b);border-radius:2px}
+   :root 前缀维持 (0,5,1)，跨文件加载顺序必胜；三态齐全 */
+:root .chat-body .msg.r.chat-msg-recalled a,:root .chat-body .msg.r.chat-msg-recalled a:link,:root .chat-body .msg.r.chat-msg-recalled a:visited{color:var(--a);text-decoration:underline}
+:root .chat-body .msg.r.chat-msg-recalled a:hover{text-decoration:underline;background-color:var(--b);border-radius:2px}
 
 /* ===== Task Center (方案 B: 列表工作流风) ===== */
 .tsk-page{width:100%;max-width:1080px;padding:8px 0 48px;position:relative}

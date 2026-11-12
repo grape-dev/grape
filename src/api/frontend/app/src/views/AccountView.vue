@@ -440,7 +440,6 @@ const DEFAULTS = {
   theme: '主题',
   choose_theme: '选择界面主题风格',
   current: '✓ 当前',
-  theme_default_desc: '深色侧栏 + 浅色内容区',
   theme_apple_desc: '毛玻璃效果 + 圆角设计',
   display_mode: '显示模式',
   display_mode_hint: '浅色/深色固定，自动模式跟随系统切换',

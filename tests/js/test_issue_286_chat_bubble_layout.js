@@ -13,7 +13,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '../..');
 const VIEW = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/views/ChatView.vue'), 'utf8');
-const CSS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/css/app.css'), 'utf8');
+const CSS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/app/src/styles/global/app.css'), 'utf8');
 const TPL = VIEW.slice(0, VIEW.indexOf('<script'));
 
 let passed = 0;

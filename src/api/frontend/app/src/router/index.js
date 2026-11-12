@@ -1,18 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import Home from '@/pages/Home.vue'
-import UiShowcase from '@/pages/UiShowcase.vue'
 import BetaApply from '@/pages/BetaApply.vue'
-import ThemeLab from '@/pages/ThemeLab.vue'
 
-// Migration phase: hash-free paths under /static-vue/ (FastAPI serves dist).
-// Each migrated legacy module becomes a route here (batch by batch).
+// 2026-11-12：只保留生产页 beta-apply；Home / UiShowcase / ThemeLab 是开发页，已删除。
 const router = createRouter({
   history: createWebHistory('/static-vue/'),
   routes: [
-    { path: '/', component: Home },
-    { path: '/ui', component: UiShowcase },
+    { path: '/', redirect: '/beta-apply' },
     { path: '/beta-apply', component: BetaApply },
-    { path: '/theme-lab', component: ThemeLab },
+    { path: '/:pathMatch(.*)*', redirect: '/beta-apply' },
   ],
 })
 

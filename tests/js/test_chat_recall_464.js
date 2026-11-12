@@ -18,12 +18,12 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const CSS = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'css', 'app.css'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'app', 'src', 'styles', 'global', 'app.css'),
   'utf8'
 );
 // Issue #464 QA：apple-theme.css 后加载且默认主题为 apple，必须双文件层叠断言
 const APPLE_CSS = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'css', 'apple-theme.css'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'app', 'src', 'styles', 'global', 'app.css'),
   'utf8'
 );
 

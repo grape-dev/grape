@@ -229,15 +229,15 @@ test('DOM 结构: #sbOverlay 是 #sidebar 的兄弟节点而非子节点', () =>
 // ─── 测试 11：apple-theme 窄屏抽屉 transform 过渡 ───
 // QA Required: apple-theme .sb{transition:width} 覆盖了窄屏 transform 过渡
 test('CSS: apple-theme 窄屏 media query 内含 transform 过渡规则', () => {
-  const cssPath = path.resolve(__dirname, '../../src/api/frontend/legacy/css/apple-theme.css');
+  const cssPath = path.resolve(__dirname, '../../src/api/frontend/app/src/styles/global/app.css');
   const css = fs.readFileSync(cssPath, 'utf8');
   // 提取最后一个 @media(max-width:768px) 块
   const mediaIdx = css.lastIndexOf('@media(max-width:768px)');
   assert.ok(mediaIdx > -1, 'apple-theme.css 应有 @media(max-width:768px) 块');
   const mediaBlock = css.substring(mediaIdx);
-  // 精确匹配 [data-theme="apple"] .sb {（而非 .sb-ov / .sb-toggle 等）
-  const sbRuleMatch = mediaBlock.match(/\[data-theme="apple"\]\s+\.sb\s*\{/);
-  assert.ok(sbRuleMatch, 'media query 内应有 [data-theme="apple"] .sb { 规则');
+  // 精确匹配 :root .sb {（而非 .sb-ov / .sb-toggle 等）
+  const sbRuleMatch = mediaBlock.match(/:root\s+\.sb\s*\{/);
+  assert.ok(sbRuleMatch, 'media query 内应有 :root .sb { 规则');
   const sbRuleIdx = sbRuleMatch.index;
   const ruleBlock = mediaBlock.substring(sbRuleIdx);
   const ruleEnd = ruleBlock.indexOf('}');
@@ -278,7 +278,7 @@ test('initSidebarState(): 无折叠状态时不添加 no-transition', () => {
 
 // ─── 测试 14：app.css 含 .sb.no-transition 规则 ───
 test('CSS: app.css 含 .sb.no-transition{transition:none} 规则', () => {
-  const cssPath = path.resolve(__dirname, '../../src/api/frontend/legacy/css/app.css');
+  const cssPath = path.resolve(__dirname, '../../src/api/frontend/app/src/styles/global/app.css');
   const css = fs.readFileSync(cssPath, 'utf8');
   assert.ok(css.includes('.sb.no-transition{transition:none'),
     'app.css 应含 .sb.no-transition{transition:none!important} 规则');
