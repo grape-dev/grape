@@ -100,6 +100,8 @@ scripts/clear_*.py
 scripts/find_*.py
 scripts/phase1_*.py
 scripts/sync_*.py
+# 例外：领域库视图同步工具是迁移落地的一部分（基表加列/建表后必须跑），需入库
+!scripts/sync_domain_views.py
 scripts/trigger_*.py
 scripts/upgrade_*.py
 scripts/verify_*.py
