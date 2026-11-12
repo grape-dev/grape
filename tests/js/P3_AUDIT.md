@@ -1,6 +1,6 @@
 # P3 测试审计台账（2026-11-11，滚动更新）
 
-js 测试：**30 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 失败）
+js 测试：**36 通过 / 31 C类 / 24 D类**（共 91；起点 13 通过 / 78 失败）
 
 ## 已完成
 - 路径债清零：60 文件 62 处引用 → Vue 源码 / frontend/legacy（686c1f62f）
@@ -47,11 +47,11 @@ js 测试：**30 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 
 ## C 类（vm 执行旧页面 JS；被测对象已删，需逐一判定改写/退役）
 - [ ] test_anomaly_page_size.js
-- [ ] test_chat_conv_title.js
-- [ ] test_chat_onboard_409_restart.js
-- [ ] test_chat_onboard_refresh.js
-- [ ] test_chat_recall_442.js
-- [ ] test_chat_task_bubble.js
+- [x] test_chat_conv_title.js（已改写）
+- [x] test_chat_onboard_409_restart.js（已改写）
+- [x] test_chat_onboard_refresh.js（已改写）
+- [x] test_chat_recall_442.js（已改写）
+- [ ] test_chat_task_bubble.js（**待确认**：ChatView 与后端均无去重逻辑，可能随统一流设计移到后端 SSE，需主人确认）
 - [ ] test_event_back_to_task.js
 - [ ] test_event_nav_hash.js
 - [ ] test_issue_1077_board_col_paging.js
@@ -67,8 +67,8 @@ js 测试：**30 通过 / 38 C类 / 28 D类**（共 91；起点 13 通过 / 78 �
 - [ ] test_issue_348_bot_token_health.js
 - [ ] test_issue_402_scene_copy.js
 - [ ] test_issue_406_skill_display_name.js
-- [ ] test_issue_407_chat_attachment.js
-- [ ] test_issue_407_chat_draft.js
+- [x] test_issue_407_chat_attachment.js（已改写）
+- [x] test_issue_407_chat_draft.js（已改写）
 - [ ] test_issue_407_dash_draft.js
 - [ ] test_issue_436_runtime_search.js
 - [ ] test_issue_456_orgs_back_to_workspace.js
