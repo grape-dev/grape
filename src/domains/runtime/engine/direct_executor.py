@@ -432,7 +432,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.error(f"Exec agent: delivery baseline guard blocked execution: {_msg}")
                 if task_id:
                     try:
-                        from src.session_manager import db as _gdbs, db_lock as _gdl
+                        from src.kernel.session_manager import db as _gdbs, db_lock as _gdl
                         with _gdl:
                             _gc = _gdbs.cursor()
                             _gc.execute(

@@ -105,10 +105,6 @@ WHITELIST: dict[str, dict[str, str]] = {
     },
     # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
     # Phase 5 inverts them through src/domains/contracts.
-    "src/kernel/mysql_compat.py": {
-        "R1": {"targets": ["src.domains.insight.observability.otel"],
-              "reason": "deferred otel db-span instrumentation; due Phase 5 -> contracts"},
-    },
     "src/kernel/repo_key.py": {
         "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
               "reason": "deferred platform-card lookups; due Phase 5 -> contracts"},
@@ -128,8 +124,6 @@ WHITELIST: dict[str, dict[str, str]] = {
     # R6: legacy shim imports due Phase 5 contracts. Evidence: check-arch at
     # base 13c6d0979 fails with these 13 R6 findings before this PR's changes
     # (run `python scripts/check-arch.py` on the base tree to reproduce).
-    "src/domains/runtime/agents/aishell_acp.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/pipeline/event_pipeline.py": {"R6": {"targets": ["src.outbound_ledger", "src.prompt_builder", "src.repo_key"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
     "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts"}},
     "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env"], "reason": "legacy shim imports; due Phase 5 contracts"}},
     # R5: known import cycles inherited from the pre-Phase-1 layout.
@@ -284,6 +278,7 @@ def main() -> int:
 
     graph: dict[str, list[str]] = {}
     r1, r2, r3, r4, r6, r7 = [], [], [], [], [], []
+    r5_intra: list = []  # 包内 re-export 环（>=4 段公共前缀），report-only 输出
 
     # R7 全仓扫描：src/api 等非 kernel/domains 层不在主循环内，历史漏网正出自这里
     # （`from src.user.db import ...` 写在 src/api/*.py 的函数体内）。
@@ -395,6 +390,9 @@ def main() -> int:
         # 属于包内 re-export 的初始化顺序问题，Python 可正常加载（父包 __init__ 先完成）；
         # 真正危险的是跨包/跨域环（公共前缀 <=3 段），仍按 HARD 处理。
         if _common_prefix_len(comp) >= 4:
+            # 包内 re-export 环（Python 可正常加载）不判 HARD，但**不得静默跳过**：
+            # 登记后在 R5 段落里以 report-only 输出，避免豁免面不可见（QA MED-2）。
+            r5_intra.append(comp)
             continue
         key = "CYCLE:" + "+".join(comp)
         # M-1（2026-11-12 QA 复审）：原为超集匹配（>=），一条大集合白名单可吞掉其内部
@@ -420,6 +418,10 @@ def main() -> int:
     section("R3 domains -> apps (reserved Phase 4)", r3, False)
     section("R4 cross-domain direct imports (Phase 5 contracts)", r4, False)
     section("R5 import cycles (kernel/domains)", [c for c in r5], True)
+    if r5_intra:
+        print("\n== R5 intra-package cycles (report-only, skipped) ==")
+        for comp in r5_intra:
+            print("  " + " <-> ".join(comp))
     section("R6 legacy shim imports", r6, True)
     section("R7 removed legacy paths", r7, True)
 

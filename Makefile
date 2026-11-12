@@ -17,7 +17,7 @@ VENV ?= .venv
 # 测试解释器：优先仓库自带的 venv/ 或 .venv/（本仓库部署用 venv/），否则退回 PYTHON
 TEST_PYTHON ?= $(firstword $(wildcard venv/bin/python .venv/bin/python) $(PYTHON))
 # 逐域测试的领域顺序（可覆盖：make test-domains DOMAINS="kernel api"）
-DOMAINS ?= arch atomic contracts kernel insight api mgmt runtime
+DOMAINS ?= arch contracts kernel insight api mgmt runtime
 
 .PHONY: help install install-dev install-all test test-fast run sync-skills lint clean docker
 

@@ -54,6 +54,9 @@ MANIFEST = [
     # worker 侧 otel 实现在 src/domains/insight/observability/，已由 "src/domains/" 覆盖
     "src/domains/runtime/agents/",
     "src/domains/runtime/engine/",
+    # S112/D84：engine/service.py 与 api/session_store.py 顶层 import
+    # src.domains.runtime.vcs；缺该目录存量 worker 升级后启动即 ModuleNotFoundError。
+    "src/domains/runtime/vcs/",
 
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）

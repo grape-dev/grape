@@ -305,17 +305,15 @@ def pack_tools(ts):
     out = os.path.join(OUT_DIR, f"staging/tools/grape-toolkit-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
-    # worker 运行闭包（与 src/kernel/worker_package.py MANIFEST 一致）
-    manifest_files = [
-        "src/__init__.py", "src/domains/mgmt/user/__init__.py", "src/domains/mgmt/user/db.py",
-        "src/api/__init__.py", "src/api/routing.py", "src/api/time_utils.py",
-        "src/api/event_store.py", "src/api/event_archive.py", "src/api/session_store.py",
-        "src/api/knowledge.py", "src/api/merge_gate.py",
-    ]
-    for f in manifest_files:
+    # worker 运行闭包：S112 根治——由 tools_manifest_files() 从
+    # src.kernel.worker_package.MANIFEST 派生（字面量块与 MANIFEST 漂移会漏目录，
+    # 曾导致 release 包缺 src/domains/runtime/vcs/，worker 启动即 ModuleNotFoundError）
+    for f in tools_manifest_files():
         p = os.path.join(ROOT, f)
         if os.path.isfile(p):
             items.append((p, f))
+        elif os.path.isdir(p):
+            items.append((p, f))  # 目录项整目录打包（只 isfile 会静默跳过）
     # 整目录
     # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/，旧路径（src.config 等）
     # 由 src/__init__.py 的别名一跳解析到这里；与 worker MANIFEST 目录粒度一致。
@@ -675,6 +673,19 @@ def main():
     else:
         print(f"[pack] 上传失败: {r.stderr}")
         sys.exit(1)
+
+def tools_manifest_files():
+    """worker 运行闭包清单：从 src.kernel.worker_package.MANIFEST 派生（S112）。
+
+    脚本方式运行时 sys.path[0]=scripts/，直接 import 会 ModuleNotFoundError，
+    因此先把仓库根放进 sys.path（发布链路没有统一 PYTHONPATH 约定）。
+    """
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+    from src.kernel.worker_package import MANIFEST
+    return [x for x in MANIFEST if x != "requirements-worker.txt"]
+
 
 if __name__ == "__main__":
     main()

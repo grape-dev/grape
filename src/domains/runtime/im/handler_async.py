@@ -1051,26 +1051,6 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
 
     return ""
 
-_BIND_SUCCESS_CARD_TPL = {
-    "header": {"title": {"tag": "plain_text", "content": "✅ 绑定成功"}, "template": "green"},
-    "elements": [
-        {"tag": "div", "text": {"tag": "lark_md", "content": "**✅ 已绑定 `{repo_key}`**\n使用 /chat 选择会话，或直接开始提问。"}},
-        {"tag": "action", "actions": [
-            {"tag": "button", "text": {"tag": "plain_text", "content": "📋 选择会话"}, "value": {"cmd": "/chat"}},
-        ]},
-    ],
-}
-
-_BIND_SUCCESS_CARD_TPL = {
-    "header": {"title": {"tag": "plain_text", "content": "✅ 绑定成功"}, "template": "green"},
-    "elements": [
-        {"tag": "div", "text": {"tag": "lark_md", "content": "**✅ 已绑定 `{repo_key}`**\n使用 /chat 选择会话，或直接开始提问。"}},
-        {"tag": "action", "actions": [
-            {"tag": "button", "text": {"tag": "plain_text", "content": "📋 选择会话"}, "value": {"cmd": "/chat"}},
-        ]},
-    ],
-}
-
 async def _send_bind_success_card(ctx, egress, msg_id, repo_key):
     """发送绑定成功卡片（含[选择会话]按钮）"""
     await _send_card_reply(ctx, egress, msg_id, _bind_success_card(repo_key))
@@ -1244,18 +1224,6 @@ _HELP_CARD = (
     "/help — 本帮助\n\n"
     "回复数字选择 · `0` 取消"
 )
-
-# 未绑定仓库提示卡片（含 [选择仓库] + [帮助] 按钮）
-_NO_REPO_CARD = {
-    "header": {"title": {"tag": "plain_text", "content": "⚠️ 未绑定仓库"}, "template": "red"},
-    "elements": [
-        {"tag": "div", "text": {"tag": "lark_md", "content": "**⚠️ 未绑定仓库**\n先使用 `/repo` 选择并绑定仓库。"}},
-        {"tag": "action", "actions": [
-            {"tag": "button", "text": {"tag": "plain_text", "content": "📁 选择仓库"}, "value": {"cmd": "/repo"}},
-            {"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}},
-        ]},
-    ],
-}
 
 async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed: dict):
     """异步消息处理入口 — 通过 ctx + egress 实现Bot隔离"""

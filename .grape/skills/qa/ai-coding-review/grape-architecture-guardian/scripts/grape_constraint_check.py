@@ -139,7 +139,9 @@ def check_worker_manifest(root: Path):
     except OSError:
         return findings
     # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/，MANIFEST 以目录条目覆盖
-    required = ["src/kernel/"]
+    # MED-3：必检面回补——原三条（src/auth/、src/token_service.py、src/token_resolver.py）
+    # 在 #2010 收拢后 canonical 落在 src/kernel/；另两条是 worker 启动强依赖的目录。
+    required = ["src/kernel/", "src/domains/", "src/domains/runtime/vcs/"]
     for req in required:
         if req not in text:
             findings.append({

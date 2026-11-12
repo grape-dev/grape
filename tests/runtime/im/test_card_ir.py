@@ -600,7 +600,7 @@ def test_repo_chain_emits_card_ir_with_bind_actions():
     from unittest import mock
     _clean_pending()
     with mock.patch("src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=1), \
-         mock.patch("src.user.db.get_managed_repos", return_value=[
+         mock.patch("src.domains.mgmt.user.db.get_managed_repos", return_value=[
              {"repo_key": "gitcode:owner/a", "is_admin": 1, "is_join": 0},
              {"repo_key": "gitcode:owner/b", "is_admin": 0, "is_join": 1},
          ]), \
@@ -688,7 +688,8 @@ def test_bind_success_card_ir_and_renderer():
 # ---------------------------------------------------------------- 静态检查：业务层禁平台字段
 
 _PLATFORM_FIELD_RE = re.compile(r"lark_md|behaviors|\"tag\"\s*:|'tag'\s*:|<font|<at")
-_BUSINESS_FILES = ["src/im/handler_async.py", "src/im/vod_handler_async.py"]
+_BUSINESS_FILES = ["src/domains/runtime/im/handler_async.py",
+                    "src/domains/runtime/im/vod_handler_async.py"]
 
 
 @pytest.mark.parametrize("rel", _BUSINESS_FILES)

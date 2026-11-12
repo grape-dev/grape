@@ -23,11 +23,32 @@ import re
 _SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src")
 _ROOT = os.path.dirname(_SRC)
 
-# worker 闭包内（非 src/vcs 自身）已知的 src/vcs 顶层 import 面（D84 时点实查）
-_CLOSURE_MODULES_USING_VCS = [
-    os.path.join("src", "domains", "runtime", "engine", "service.py"),      # S75: _nin_evt
-    os.path.join("src", "api", "session_store.py"),    # S106: list_release_subissues
-]
+def _discover_toplevel_vcs_importers():
+    """动态发现 worker 闭包内顶层 import src.domains.runtime.vcs 的模块。
+
+    原实现是一份静态名单（D84 时点 service.py/session_store.py）；两处 import 后来
+    改为函数内惰性导入，名单过期会让守卫变成死名单（QA 复审 C-5）。改为扫描代替
+    名单：任何新增的顶层依赖都会立刻被看见。
+    """
+    roots = [os.path.join(_ROOT, "src", "domains", "runtime"),
+             os.path.join(_ROOT, "src", "api"),
+             os.path.join(_ROOT, "src", "kernel")]
+    found = []
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root):
+            if "__pycache__" in dirpath:
+                continue
+            for fn in files:
+                if not fn.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), _ROOT)
+                if _module_toplevel_vcs_imports(rel):
+                    found.append(rel)
+    return found
+
+
+# 动态名单（每次调用重新扫描，避免静态名单过期）
+_CLOSURE_MODULES_USING_VCS: list = []
 
 
 def _read(rel):
@@ -154,7 +175,7 @@ class TestWorkerPkgClosure:
         if "src/domains/runtime/vcs/" in MANIFEST:
             return  # 闭包已含目录，任何顶层 import 都安全
         offenders = []
-        for rel in _CLOSURE_MODULES_USING_VCS:
+        for rel in _discover_toplevel_vcs_importers():
             hits = _module_toplevel_vcs_imports(rel)
             if hits:
                 offenders.append(f"{rel}: {hits}")
@@ -168,13 +189,12 @@ class TestWorkerPkgClosure:
         名单里每个文件必须真的有顶层 src.domains.runtime.vcs import（名单过期即红），
         防守卫退化为永不命中的死名单。
         """
-        for rel in _CLOSURE_MODULES_USING_VCS:
-            assert os.path.isfile(os.path.join(_ROOT, rel)), f"名单文件不存在: {rel}"
-            hits = _module_toplevel_vcs_imports(rel)
-            assert hits, (
-                f"{rel} 已无顶层 src.domains.runtime.vcs import —— 名单过期，更新 "
-                f"_CLOSURE_MODULES_USING_VCS（保留守卫口径）"
-            )
+        from src.kernel.worker_package import MANIFEST
+        importers = _discover_toplevel_vcs_importers()
+        covered = [p for p in MANIFEST if p.endswith("/") and "runtime/vcs" in p]
+        assert covered, "MANIFEST 缺 src/domains/runtime/vcs/（动态发现到顶层 importer 时必须入包）"
+        for rel in importers:
+            assert os.path.isfile(os.path.join(_ROOT, rel)), f"动态扫码文件消失: {rel}"
 
     def test_vcs_package_dependency_free_of_third_party(self):
         """入包前置守卫：src/vcs 依赖面必须保持纯 stdlib（D84 论证前提）。

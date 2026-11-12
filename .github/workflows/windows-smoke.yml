@@ -62,11 +62,17 @@ jobs:
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/api/js/test_issue_473_range_filter.js
       - name: IM adapter tests (issue #1613)
-        # Issue #1613 QA 审查：tests/im（含新增 Telegram 用例）此前未被流水线执行，
-        # 回归无法被门禁发现；此处接入全量 IM 适配器用例。
+        # Issue #1613 QA 审查：IM 适配器用例此前未被流水线执行，回归无法被门禁发现；
+        # 本仓测试树已按 src 对齐，IM 用例位于 tests/runtime/im/。
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/im -q
+        run: python -m pytest tests/runtime/im -q
+      - name: AtomCode engine integration tests
+        # AtomCode CLI 接入的回归卡点：协议映射、用量拆分、空回复不重开会话、
+        # 取消/超时清理提示词文件、沙箱只读挂载、注册完整性、安装器行为。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_atomcode_runtime.py -v
       - name: Destructive DDL guard + Issue #536 migration safety tests
         # Issue #536 QA-Impt：CI 显式接入 DDL 卡点与新增用例；base 显式传目标分支
         # （GitCode 注入 CI_MERGE_REQUEST_TARGET_BRANCH_NAME，GitHub 用 PR base），
@@ -76,7 +82,7 @@ jobs:
           DDL_BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           python3 scripts/check-destructive-ddl.py "$DDL_BASE"
-          python -m pytest tests/atomic/test_issue_536_migrations.py tests/kernel/test_check_destructive_ddl.py -v
+          python -m pytest tests/api/test_issue_536_migrations.py tests/kernel/test_check_destructive_ddl.py -v
       - name: OpenAPI contract endpoint completeness guard (issue #897)
         # Issue #897 P0：契约 v2.2.0 曾被 A 进程子集落盘覆盖，丢失 /api/a2a、
         # /api/tasks/* 等核心工作流端点导致 CLI 命令组不渲染。CI 卡点：
@@ -89,3 +95,18 @@ jobs:
         run: |
           python3 scripts/check-openapi-endpoints.py --require-baseline
           python -m pytest tests/api/test_check_openapi_endpoints.py -v
+      - name: Recover-orphans active whitelist tests (issue #1750)
+        # Issue #1750：worker 自报活跃白名单 + 回收时机收紧（周期/心跳重注册 rid
+        # 变化携带白名单，启动空白名单）；同时回归 recover_orphans 系列既有用例。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_1750_recover_orphans_active_whitelist.py tests/runtime/test_recover_orphans_slots.py tests/api/test_recover_orphans_optimization.py -v
+      - name: Reregister/client contract regression tests (issue #1750)
+        # Issue #1750：_reregister 默认不回收 + client.recover_orphans 返回 dict 属契约
+        # 变更，须回归受影响既有用例（按 node 接入，避开该文件既有基线红灯）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_runtime_agent.py::TestReregister -v
+          python -m pytest tests/runtime/test_runtime_agent_concurrency.py::test_reregister_unpacks_register_tuple tests/runtime/test_runtime_agent_concurrency.py::test_reregister_default_does_not_recover -v
+          python -m pytest tests/runtime/test_runtime_client.py -v

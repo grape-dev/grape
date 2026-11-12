@@ -3309,7 +3309,7 @@ register_migration(
     # 同号异名（补盖已由 202611110003 承担）。改号到 202611120003。幂等保障：
     # UuidPkMigration 三态自检，MySQL 侧逐列 information_schema 探测后才
     # MODIFY，旧号已盖章的库上重跑零写入。
-    version="202611120003",
+    version="202611120005",
     name="uuid-pk-grape-accounts-and-user-id-cols",
     kind="safe",
     fn=_fn_uuid_pk_grape_accounts_and_user_id_cols,
@@ -3395,7 +3395,7 @@ def _fn_add_agent_tasks_trace_context() -> None:
 
 
 register_migration(
-    version="202611100001",
+    version="202611120004",
     name="add-agent-tasks-trace-context",
     kind="safe",
     fn=_fn_add_agent_tasks_trace_context,
@@ -3464,7 +3464,7 @@ def _fn_add_ap_exec_agent_task_id() -> None:
 register_migration(
     # 撞号避让（2026-11-09 变基）：weekly-10 已用 202611060003 给
     # backfill_events_terminal_completed_at，同号后登记项会被判「已执行」永久跳过。
-    version="202611090001",
+    version="202611120002",
     name="add-autopilot-exec-agent-task-id",
     kind="safe",
     fn=_fn_add_ap_exec_agent_task_id,
@@ -3488,7 +3488,7 @@ def _fn_repair_ap_exec_agent_task_id() -> None:
 
 
 register_migration(
-    version="202611090002",
+    version="202611120003",
     name="repair-autopilot-exec-agent-task-id",
     kind="safe",
     fn=_fn_repair_ap_exec_agent_task_id,
@@ -3980,7 +3980,7 @@ def _fn_backfill_events_terminal_completed_at_1497(conn=None) -> None:
 
 
 register_migration(
-    version="202611080001",
+    version="202611120001",
     name="backfill_events_terminal_completed_at_1497",
     kind="safe",
     fn=_fn_backfill_events_terminal_completed_at_1497,
