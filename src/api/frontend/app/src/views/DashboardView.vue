@@ -2360,17 +2360,8 @@ function loadSceneDetail(sceneId) {
       // 场景判定「新鲜优先」
       const scenesList =
         scenesData.scenes && scenesData.scenes.length
-          ? scenesData.scenes.map(function (s) {
-              return {
-                id: s.id,
-                name: s.name,
-                display_name: s.display_name,
-                scope: 'repo',
-                description: s.description,
-                pr_subscription_enabled: s.pr_subscription_enabled,
-                created_by: s.created_by,
-              }
-            })
+          ? // Issue #1566：整行透传（白名单会丢新字段，别再改回逐字段挑拣）
+            scenesData.scenes.map((s) => Object.assign({}, s, { scope: 'repo' }))
           : dashData2._scenes || []
       const scene = scenesList.find(function (s) {
         return s.id === sceneId

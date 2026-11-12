@@ -294,9 +294,14 @@ def test_1573_pr_merged_resumes_pending_review_then_advances():
 def test_1566_scene_field_passthrough_runs_real_source_line():
     """用 node 执行 dashboard.js 中的真实 map 表达式，断言 description 不被丢弃。"""
     root = os.path.join(os.path.dirname(__file__), "..")
-    js_path = os.path.join(root, "src/api/static/js/pages/dashboard.js")
+    # Vue 迁移后：老页面 JS 已删，等价实现落在 DashboardView.vue
+    js_path = os.path.join(root, "src/api/frontend/app/src/views/DashboardView.vue")
     src = open(js_path, encoding="utf-8").read()
-    m = re.search(r"scenesData\.scenes\.map\(s => Object\.assign\(\{\}, s, \{scope: 'repo'\}\)\)", src)
+    # 允许 prettier 风格差异：\((s) =>`、`{ scope: 'repo' }` 的空格/括号都可变
+    m = re.search(
+        r"scenesData\.scenes\.map\(\s*\(?\s*s\s*\)?\s*=>\s*Object\.assign\(\{\},\s*s,\s*\{\s*scope:\s*'repo'\s*\}\s*\)\s*\)",
+        src,
+    )
     assert m, "未找到 #1566 的整行透传表达式"
     script = (
         "const scenesData={scenes:[{id:1,name:'a',display_name:'A',"
