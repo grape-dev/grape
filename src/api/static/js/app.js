@@ -2308,13 +2308,6 @@ function loadAgentTypes() {
           if (existingNames[i].indexOf(key) === -1) { needsRender = true; break; }
         }
       }
-        else {
-          // 预置 DOM 与运行时权威状态对齐：未配置平台补 aria-disabled（不可点）
-          for (var j = 0; j < providers.length; j++) {
-            if (providers[j].configured) existingBtns[j].removeAttribute('aria-disabled');
-            else existingBtns[j].setAttribute('aria-disabled', 'true');
-          }
-        }
       if (needsRender) {
         // D102-B: 登录按钮溢出折叠（参考 gitee.com/login）——固定序前 4 个
         // 直接展示，第 5 个起收进"..."展开按钮（点击展开剩余全部）
@@ -2387,7 +2380,11 @@ var i18nKey = 'app.login.' + p.provider + '_login';
         });
       }
       _renderOAuthUnconfiguredHint(container, providers);
-    }).catch(function() { /* 预渲染按钮保留，不隐藏（状态未知=A 兜底） */ });
+    }).catch(function(e) {
+      /* 预渲染按钮保留，不隐藏（状态未知=A 兜底）；但要留痕，否则
+         "gitee/huawei 按钮不出现" 这类问题只能靠猜（2026-11-12 实测）。 */
+      try { console.warn('[oauth] providers 渲染失败，保留预置按钮：', e && (e.message || e)); } catch (_) {}
+    });
   }
 
   // B+（Issue #535）：未配置平台的常显说明。FOUC 修复后说明行 DOM 预置在
