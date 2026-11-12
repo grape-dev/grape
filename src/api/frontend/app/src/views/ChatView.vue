@@ -1883,4 +1883,18 @@ onMounted(function () {
 .cv__mono {
   font-family: monospace;
 }
+
+/* 链接（Issue #N、正文里的 #123）用 accent 文字档，别用浏览器默认的深蓝 #0000EE。
+   注意这些 <a> 是 v-html 生成的（没有 data-v），必须走 :deep() 才匹配得到。 */
+.chat-hdr :deep(a),
+.chat-body :deep(a),
+.conv-item :deep(a) {
+  color: var(--a-text);
+  text-decoration: none;
+}
+.chat-hdr :deep(a:hover),
+.chat-body :deep(a:hover),
+.conv-item :deep(a:hover) {
+  text-decoration: underline;
+}
 </style>

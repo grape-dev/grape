@@ -412,8 +412,8 @@
 .create-repo-form{padding:18px 24px 24px;display:flex;flex-direction:column;gap:16px}
 .create-repo-field label{display:block;font-size:12px;font-weight:600;color:var(--t);margin-bottom:7px}
 .cr-req{color:var(--r)}
-.create-repo-field input[type=text],.create-repo-field textarea{width:100%;padding:10px 12px;border:1px solid var(--b);border-radius:10px;font-size:13px;color:var(--t);background:#fbfcfe;outline:none;transition:all .18s;box-sizing:border-box;font-family:inherit}
-.create-repo-field input[type=text]:focus,.create-repo-field textarea:focus{border-color:var(--a);background:var(--c);box-shadow:0 0 0 3px rgba(49,104,224,.1)}
+.create-repo-field input[type=text],.create-repo-field textarea{width:100%;padding:9px 12px;border:1px solid var(--b);border-radius:10px;font-size:13px;color:var(--t);background:var(--c);outline:none;transition:all .18s;box-sizing:border-box;font-family:inherit}
+.create-repo-field input[type=text]:focus,.create-repo-field textarea:focus{border-color:var(--a);background:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--a) 14%,transparent)}
 .create-repo-field textarea{resize:vertical;min-height:64px}
 .cr-hint{font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5}
 .create-repo-vis{display:flex;gap:10px}

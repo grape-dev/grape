@@ -814,22 +814,24 @@ defineExpose({ findTemplateById, openCreate })
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
   display: flex;
-  align-items: stretch;
+  align-items: center;
   justify-content: center;
-  padding: 0;
+  padding: 3vh 24px;
   z-index: 1001;
+  overflow-y: auto;
 }
 .tv-modal {
   width: 100%;
   max-width: 900px;
-  margin: 0 auto;
+  margin: auto;
   padding: 0;
-  border-radius: 12px;
+  border-radius: 18px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  max-height: 88vh;
 }
 /* 头部：图标+标题一块、关闭按钮固定在右上角。
    原来 .tv-modal-head 是块级，关闭按钮被挤到第二行（120px 高的"排版错位"）。 */
@@ -1043,6 +1045,7 @@ defineExpose({ findTemplateById, openCreate })
 .tv-modal-foot {
   padding: 14px 32px;
   flex-shrink: 0;
+  border-radius: 0 0 18px 18px;
   border-top: 1px solid var(--b);
   display: flex;
   align-items: center;
