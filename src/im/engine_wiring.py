@@ -1478,7 +1478,11 @@ class ImEngine:
         async def _send_card(chat_id: str, text: str, msg_id: str = "",
                              title: str = "DevOps Bot", template: str = "blue",
                              raw_card: dict | None = None, target_user: str = "",
-                             kind: str = "") -> str:
+                             kind: str = "", update_multi: bool = False, **_kw) -> str:
+            # update_multi：飞书卡片"多段更新"开关（adapters/feishu/outbound 会显式传）。
+            # legacy 传输闭包走 reply_card/send_card_to_chat，卡片 config 由内部构建，
+            # 首次发送不需要该字段；此处接受并忽略，避免 TypeError 打断卡片下发。
+            # **_kw：吞掉各渠道新增的传输参数，防止适配器与传输闭包签名漂移直接 500。
             ctx, api = engine._ctx_for(inst)
             if api is None:
                 return ""
