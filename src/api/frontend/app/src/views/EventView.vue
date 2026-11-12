@@ -949,12 +949,12 @@ const convDraft = ref('')
 const convStreaming = ref(false)
 const knowledge = ref({})
 const knowledgeCards = computed(() =>
-  Object.keys(knowledge.value).filter(function (s) {
+  Object.keys(knowledge.value || {}).filter(function (s) {
     return knowledge.value[s]
   })
 )
 const flowRows = computed(() =>
-  convMessages.value
+  (Array.isArray(convMessages.value) ? convMessages.value : [])
     .filter(function (m) {
       return m.role === 'system' && (m.content || '').indexOf('🔄') === 0
     })
@@ -984,11 +984,12 @@ function loadConversation() {
   G.API.get('/events/' + seq + '/thread')
     .then(function (d) {
       const gate = d.gate || {}
-      const hasMsgs = Array.isArray(d.messages) && d.messages.length > 0
+      const msgs = Array.isArray(d.messages) ? d.messages : []
+      const hasMsgs = msgs.length > 0
       gateOpen.value = !!gate.open
       gateLoaded.value = true
       convPanelVisible.value = hasMsgs || !!gate.open
-      convMessages.value = d.messages || []
+      convMessages.value = msgs
       knowledge.value = d.knowledge || {}
       nextTick(function () {
         const el = document.getElementById('convMessages')
