@@ -2725,7 +2725,7 @@ onBeforeUnmount(function () {
 .apv-cf-eye {
   border: 1px solid var(--b);
   background: var(--c);
-  border-radius: 6px;
+  border-radius: 999px;
   width: 26px;
   height: 26px;
   padding: 0;
@@ -2745,8 +2745,8 @@ onBeforeUnmount(function () {
 }
 .apv-cf-add {
   margin-top: 8px;
-  font-size: 11px;
-  padding: 4px 10px;
+  font-size: 12px;
+  padding: 4px 14px;
 }
 /* 执行历史 */
 .apv-exec-row {
@@ -2800,8 +2800,8 @@ onBeforeUnmount(function () {
 }
 .apv-logbtn {
   font-size: 10px;
-  color: rgba(0, 113, 227, 0.8);
-  border: 1px solid rgba(0, 113, 227, 0.3);
+  color: var(--a);
+  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
   border-radius: 999px;
   padding: 2px 10px;
   flex-shrink: 0;
@@ -2950,7 +2950,7 @@ onBeforeUnmount(function () {
   font-size: 18px;
   color: var(--t3);
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: 999px;
   line-height: 1;
   background: none;
   border: none;
@@ -3065,14 +3065,14 @@ onBeforeUnmount(function () {
   grid-auto-columns: 1fr;
   gap: 2px;
   padding: 2px;
-  background: var(--bg);
-  border-radius: 6px;
+  background: var(--chip-bg);
+  border-radius: 999px;
 }
 .apv-seg button {
-  padding: 4px 12px;
+  padding: 4px 14px;
   border: none;
-  border-radius: 4px;
-  font-size: 11px;
+  border-radius: 999px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
@@ -3080,9 +3080,9 @@ onBeforeUnmount(function () {
   color: var(--t3);
 }
 .apv-seg button.on {
-  background: var(--c);
-  color: var(--t);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  background: var(--a);
+  color: #fff;
+  
 }
 .apv-mt6 {
   margin-top: 6px;
@@ -3427,7 +3427,7 @@ onBeforeUnmount(function () {
   color: var(--r);
 }
 .apv-detached {
-  background: #fff5f5;
+  background: color-mix(in srgb, var(--r) 8%, transparent);
   opacity: 0.85;
 }
 .apv-detached-warn {
