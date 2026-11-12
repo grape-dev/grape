@@ -1,7 +1,7 @@
 # Task: Issue #2133
 
 - [x] T1 认领闸门显式挡 spawn_failed（service.py）
-- [x] T2 数据库结构：4 个追踪列 + engine_lifecycle_audit + 幂等迁移
+- [x] T2 数据库结构：4 个追踪列 + grape_t_engine_lifecycle_audit + 幂等迁移
 - [x] T3 recovery 模块：时间窗告警/degraded、ok streak、场景加回、任务对账、审计
 - [x] T4 心跳集成：spawn_failed / ok / fail / 其他分支挂接
 - [x] T5 后端一键加回端点（settings）

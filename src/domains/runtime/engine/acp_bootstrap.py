@@ -442,15 +442,6 @@ def _hermes_venv_bin(cli: str) -> str:
     return ""
 
 
-def _venv_python(venv_bin: str) -> str:
-    """venv 的 python 解释器路径（Windows Scripts 下为 python.exe）。"""
-    for name in ("python.exe", "python"):
-        cand = os.path.join(venv_bin, name)
-        if os.path.isfile(cand):
-            return cand
-    return os.path.join(venv_bin, "python")
-
-
 def _venv_pip(venv_bin: str) -> str:
     """venv 的 pip 路径（Windows Scripts 下为 pip.exe；不存在回退 python -m pip）。"""
     for name in ("pip.exe", "pip"):

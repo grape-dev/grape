@@ -22,14 +22,14 @@
 - `_reconcile_task_bindings`：cancelled 且无 completed_at → 回写终态 + errors 留痕；
   dispatched 且 started_at 空（worker 从未收到）→ 释放为 queued/runtime_id=0；
   busy_slots 按真实 active 收敛。
-- 全过程写 `engine_lifecycle_audit`（kind=recovered/manual_readd 等）。
+- 全过程写 `grape_t_engine_lifecycle_audit`（kind=recovered/manual_readd 等）。
 
 ### 4. 一键兜底
 - 后端：`POST /api/settings/agent-runtimes/{rid}/readd`（可见性复用引擎列表过滤）。
 - 前端：`runtimes.js` 引擎卡片 degraded 高亮 + 「一键加回」按钮；加回后刷新列表。
 
 ### 5. 数据库
-`src/api/db_setup.py`：新增 `engine_lifecycle_audit` 表 + 幂等迁移
+`src/api/db_setup.py`：新增 `grape_t_engine_lifecycle_audit` 表 + 幂等迁移
 `202611120005 issue2133-engine-recovery-schema` 补列/建表；`src/kernel/db.py` 注册表同步。
 
 ## 依赖关系

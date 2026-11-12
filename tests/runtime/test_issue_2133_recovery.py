@@ -23,14 +23,14 @@ from src.session_manager import db, db_lock  # noqa: E402
 from src.domains.runtime.engine import recovery  # noqa: E402
 
 
-def _insert_credential():
+def _insert_credential(scope: str = "user"):
     name = f"cred-2133-{uuid.uuid4().hex[:8]}"
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status, last_seen_at) "
-            "VALUES (?, ?, ?, 'global', '', 'active', ?)",
-            (f"hash_{name}", name, f"dev-{name}", "2026-11-12T00:00:00+00:00"))
+            "VALUES (?, ?, ?, ?, 'route-user-2133', 'active', ?)",
+            (f"hash_{name}", name, f"dev-{name}", scope, "2026-11-12T00:00:00+00:00"))
         cid = c.lastrowid
         db.commit()
     return cid
@@ -38,10 +38,14 @@ def _insert_credential():
 
 def _insert_runtime(cid, name, healthy=1, **cols):
     keys = ["credential_id", "name", "status", "healthy", "installed", "scope", "last_seen_at"]
-    vals = [cid, name, "online", healthy, 1, "global", "2026-11-12T00:00:00+00:00"]
+    # scope 默认 user 级：readd/health-reset 口径下全局引擎不开放成员级手动操作
+    vals = [cid, name, "online", healthy, 1, "user", "2026-11-12T00:00:00+00:00"]
     for k, v in cols.items():
-        keys.append(k)
-        vals.append(v)
+        if k in keys:  # 同名列覆盖默认值（如 scope="global"）
+            vals[keys.index(k)] = v
+        else:
+            keys.append(k)
+            vals.append(v)
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -404,6 +408,22 @@ def test_readd_endpoint_route_level():
                 # 可见性复用列表过滤：不存在/不可见 rid → 404
                 r404 = cli.post("/api/settings/agent-runtimes/999999999/readd")
                 assert r404.status_code == 404, r404.text
+                # I-c（QA 第2轮）：全局引擎不开放成员级一键加回 → 403。
+                # 引擎生效 scope 随凭据（cid!=0 时 rt["scope"]=cred.scope），
+                # 故用 global 凭据建第二台引擎。
+                gcid = _insert_credential(scope="global")
+                grid = _insert_runtime(gcid, name + "-global", healthy=1,
+                                       detached_from_scenes_at="2026-11-12T00:00:00+00:00")
+                try:
+                    r403 = cli.post(f"/api/settings/agent-runtimes/{grid}/readd")
+                    assert r403.status_code == 403, r403.text
+                finally:
+                    with db_lock:
+                        db.cursor().execute(
+                            "DELETE FROM agent_runtimes WHERE id=?", (grid,))
+                        db.cursor().execute(
+                            "DELETE FROM runtime_credentials WHERE id=?", (gcid,))
+                        db.commit()
                 # 正常一键加回 → 200 + 响应结构
                 r = cli.post(f"/api/settings/agent-runtimes/{rid}/readd")
                 assert r.status_code == 200, r.text

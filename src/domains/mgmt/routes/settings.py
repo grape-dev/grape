@@ -1794,8 +1794,17 @@ def readd_agent_runtime(rid: int, user: dict = Depends(require_org_member), repo
     重建场景节点绑定 + 任务绑定对账 + 审计留痕；幂等可重复点击。
     """
     result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
-    if not any(item.get("id") == rid for item in result.get("runtimes", [])):
+    rt = None
+    for item in result.get("runtimes", []):
+        if item.get("id") == rid:
+            rt = item
+            break
+    if rt is None:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+    # 鉴权口径与 health-reset（上方端点）一致：全局引擎不开放成员级手动操作，
+    # 仅仓库级/个人级 worker 设备的引擎可一键加回（I-c，QA 第2轮）。
+    if (rt.get("scope") or "global") not in ("user", "repo"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持一键加回，全局引擎不开放"})
     from src.domains.runtime.engine.recovery import recover_engine
     out = recover_engine(rid, trigger="manual", force=True)
     if not out.get("recovered"):

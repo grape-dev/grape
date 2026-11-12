@@ -522,21 +522,30 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
     """
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
     if os.path.isdir(issue_dir) and is_git_agent(agent_type):
-        try:
-            from src.domains.runtime.engine.worktree_guard import archive_worktree_before_reset
-            _res = archive_worktree_before_reset(
-                issue_dir, repo_key, issue_num, agent_type,
-                token=token, base_branch=base_branch,
-                reason=reason or "cleanup", task_id=task_id)
-            if _res.get("risk") and not _res.get("ok"):
-                log.warning(f"repogit: worktree cleanup refused (archive failed) "
-                            f"{repo_key} issue={issue_num} agent={agent_type}: "
-                            f"{_res.get('error', '')}")
+        # N1（QA 第2轮）：非 git 残留目录（worktree add 失败/中断的残片）无
+        # .git——归档守卫对它 git status 必败（exit 128）→ scan_failed=risk
+        # → 拒绝删除，done-issue 路径退化为永不清理（仅僵尸 TTL 兜底）。
+        # 无 .git 即无提交可丢，跳过归档守卫直接清理（口径与
+        # worktree_guard.guard_issue_workdir_removal 的 .git 早退一致）。
+        if not os.path.exists(os.path.join(issue_dir, ".git")):
+            log.info(f"repogit: non-git leftover, skip archive guard and "
+                     f"remove {repo_key} issue={issue_num} agent={agent_type}")
+        else:
+            try:
+                from src.domains.runtime.engine.worktree_guard import archive_worktree_before_reset
+                _res = archive_worktree_before_reset(
+                    issue_dir, repo_key, issue_num, agent_type,
+                    token=token, base_branch=base_branch,
+                    reason=reason or "cleanup", task_id=task_id)
+                if _res.get("risk") and not _res.get("ok"):
+                    log.warning(f"repogit: worktree cleanup refused (archive failed) "
+                                f"{repo_key} issue={issue_num} agent={agent_type}: "
+                                f"{_res.get('error', '')}")
+                    return False
+            except Exception as _ge:
+                log.warning(f"repogit: reset guard failed, refuse cleanup "
+                            f"{repo_key} issue={issue_num}: {_ge}")
                 return False
-        except Exception as _ge:
-            log.warning(f"repogit: reset guard failed, refuse cleanup "
-                        f"{repo_key} issue={issue_num}: {_ge}")
-            return False
     base = repo_base_dir(repo_key)
     if os.path.isdir(base):
         with _lock_for(repo_key):
