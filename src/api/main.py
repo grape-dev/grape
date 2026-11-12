@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 
 from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口
 
-from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability, patrol
+from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability, patrol, takeover
 from src.api.routes import im as im_api  # Issue #825：IM 新引擎状态/安装/模式开关
 
 
@@ -974,6 +974,7 @@ app.include_router(templates.router)
 app.include_router(tasks.router)
 app.include_router(issues.router)
 app.include_router(runtime.router)
+app.include_router(takeover.router)
 app.include_router(im_api.router)
 app.include_router(feishu_onboard.router)
 app.include_router(feishu_card.router)

@@ -26,6 +26,10 @@ EVENT_STATUS_MAP = {
     "completed": STATUS_COMPLETED,
     "failed": STATUS_FAILED,
     "cancelled": STATUS_CANCELLED,
+    # 接管中：原 worker 已被 cancel，Issue 由本地交互式会话来推进。
+    # 展示上等同「进行中」，但服务端不写 running —— runner 已退出，
+    # 声称 running 会误导 claim / 串行槽 / 超时判断。
+    "takeover": STATUS_RUNNING,
 }
 
 # 流水线终态阶段

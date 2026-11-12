@@ -1302,48 +1302,22 @@ def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)
     }
 
 
-@router.get("/issues/takeover-context", operation_id="runtime_takeover_context", summary="Takeover context for an issue", description="Returns the running task's full context (prompt, env_extra, messages) for interactive takeover in dsh-web.")
-def takeover_context(repo_key: str = Query(..., description="Repository key (e.g. gitcode:owner/repo)"),
-                     issue_number: str = Query(..., description="Issue number (without #)"),
-                     user: dict = Depends(require_no_session_token)):
-    """接管上下文：按 Issue 号查正在运行的任务，返回完整字段 + 最近 200 条消息。
+def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, task_id: str) -> str:
+    """任务工作目录：原值为空时按平台同一规则推导。
 
-    一次调用拿到全部续接所需数据：
-    - prompt / env_extra / skill / cwd → 重建执行环境
-    - messages（最近 200 条）→ agent 的思考和操作历史
-    - task_id → 用于后续 cancel
+    `agent_tasks.cwd` 只有部分入队路径会回填；走 claim 的任务常常留空——worker 执行时
+    自己按 get_agent_workdir 算路径，但不回写库。接管要靠这个路径在本地建工作区，
+    空值会让接管直接失败（本地环境实测就是空字符串）。
     """
-    from src.session_manager import db, db_lock
-    _issue_id = f"#{issue_number.lstrip('#')}"
-    # ① 查 running/dispatched 的 task（跨所有 worker，不限 runtime_id）
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id, status, agent_type, skill, prompt, env_extra, cwd, runtime_id, repo_key, issue_id "
-            "FROM agent_tasks "
-            "WHERE repo_key=? AND issue_id=? AND status IN ('running','dispatched') "
-            "ORDER BY created_at DESC LIMIT 1",
-            (repo_key, _issue_id))
-        row = c.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"没有找到 Issue #{issue_number} 正在运行的任务"})
-    task_id, status, agent_type, skill, prompt, env_extra, cwd, runtime_id, task_repo_key, task_issue_id = row
-    # ② 查最近 200 条消息（必须取"最新"而非"最早"，否则长任务接管时看到的
-    #    是几小时前的任务开头，而不是当前进展。先按 seq DESC 取，再反转为正序阅读）
-    messages = service.list_task_messages_recent(task_id, limit=200)
-    return {
-        "task_id": task_id,
-        "status": status,
-        "agent_type": agent_type or "",
-        "skill": skill or "",
-        "prompt": prompt or "",
-        "env_extra": env_extra or "{}",
-        "cwd": cwd or "",
-        "runtime_id": runtime_id or 0,
-        "repo_key": task_repo_key or "",
-        "issue_id": task_issue_id or "",
-        "messages": messages,
-    }
+    if cwd or not repo_key or not agent_type:
+        return cwd
+    try:
+        from src.api.event_pipeline import get_agent_workdir
+        return get_agent_workdir(repo_key, agent_type, issue_id or "")
+    except Exception as e:
+        log.warning(f"cwd fallback failed (task={task_id}): {e}")
+        return cwd
+
 
 
 @router.get("/tasks/{task_id}/detail", operation_id="runtime_task_detail", summary="Task detail (takeover)", description="Returns full task fields for interactive takeover: prompt, env_extra, skill, cwd, etc.")
@@ -1352,6 +1326,8 @@ def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    _cwd = _cwd_or_derived(task.get("cwd") or "", task.get("repo_key") or "",
+                           task.get("agent_type") or "", task.get("issue_id") or "", task_id)
     return {
         "id": task["id"],
         "status": task["status"],
@@ -1359,7 +1335,7 @@ def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)
         "skill": task.get("skill") or "",
         "prompt": task.get("prompt") or "",
         "env_extra": task.get("env_extra") or "{}",
-        "cwd": task.get("cwd") or "",
+        "cwd": _cwd,
         "repo_key": task.get("repo_key") or "",
         "issue_id": task.get("issue_id") or "",
         "runtime_id": task.get("runtime_id") or 0,

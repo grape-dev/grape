@@ -18,7 +18,12 @@ from src.config import log
 # ---- 常量 ----
 SESSION_TOKEN_PREFIX = "tk_"
 API_KEY_PREFIX = "grape_"
+TAKEOVER_TOKEN_PREFIX = "tko_"
+TAKEOVER_SESSION_KEY_PREFIX = "takeover:"
 SESSION_TOKEN_TTL = 6 * 3600  # 会话级临时 token 默认 TTL（秒）——执行超时兜底
+TAKEOVER_TOKEN_TTL = 12 * 3600      # 接管 token 默认 TTL（12h）
+TAKEOVER_TOKEN_MAX_TTL = 24 * 3600  # 续期上限（从首次签发起算）
+TAKEOVER_RENEW_WINDOW = 2 * 3600    # 剩余不足该值时允许续期
 
 # Issue #990：401 恢复指引——随 session token 失效的 401 message 下发，
 # grape CLI 直接透传 detail.message，Agent 据此从运行时进程环境重读 token，
@@ -123,7 +128,7 @@ def verify_session_token(token: str) -> dict | None:
             c = db.cursor()
             c.execute(
                 "SELECT id, session_key, repo_key, agent_type, user_id, expires_at FROM session_api_tokens "
-                "WHERE token_sha256=?",
+                "WHERE token_sha256=? AND COALESCE(kind,'worker')='worker'",
                 (_sha256(token),),
             )
             row = c.fetchone()
@@ -167,7 +172,8 @@ def revoke_session_token(session_key: str) -> bool:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "UPDATE session_api_tokens SET expires_at=? WHERE session_key=?",
+                "UPDATE session_api_tokens SET expires_at=? "
+                "WHERE session_key=? AND COALESCE(kind,'worker')='worker'",
                 # P2-7: 直接存整数
                 (_now() + SESSION_TOKEN_REVOKE_GRACE, session_key),
             )
@@ -191,7 +197,107 @@ def purge_expired_session_tokens() -> int:
         return 0
 
 
-# ===================== 方式 B：用户级长期 API Key =====================
+# ===================== 方式 C：接管会话 token（tko_）=====================
+#
+# 语义：用户在本地交互式会话里接手一条正在跑的任务（见设计文档 §2）。
+# - 前缀 `tko_` + kind='takeover'，与 worker 的 `tk_`（kind='worker'）**互不通用**：
+#   两个 verify 各自带 kind 过滤，拿错前缀一律 None。
+# - session_key = 'takeover:<task_id>'：独立命名空间 —— cancel 时服务的
+#   revoke_session_token(task_id) 只命中 worker 行，不会把接管 token 缩短到 180 秒。
+# - 作用域与任务同 repo/agent；TTL 12h，可续到 24h；finish/abort 立即 DELETE。
+
+def takeover_session_key(task_id: str) -> str:
+    """接管 token 的 session_key（独立命名空间，勿与 worker 的 task_id 混用）。"""
+    tid = str(task_id or "")
+    if tid.startswith(TAKEOVER_SESSION_KEY_PREFIX):
+        return tid
+    return f"{TAKEOVER_SESSION_KEY_PREFIX}{tid}"
+
+
+def issue_takeover_token(*, task_id: str, repo_key: str, agent_type: str,
+                         user_id: int = 0, ttl: int = TAKEOVER_TOKEN_TTL) -> dict | None:
+    """签发接管 token，返回 {token, token_sha256, session_key, expires_at}。
+
+    明文仅此一次返回；库内只存 sha256。失败返回 None（调用方应回滚整个 start 事务）。
+    """
+    token = TAKEOVER_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    key = takeover_session_key(task_id)
+    expires_at = _now() + int(ttl)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO session_api_tokens "
+                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at, kind) "
+                "VALUES (?,?,?,?,?,?, 'takeover')",
+                (key, repo_key or "", agent_type or "", int(user_id or 0), _sha256(token), expires_at),
+            )
+            db.commit()
+            return {"token": token, "token_sha256": _sha256(token),
+                    "session_key": key, "expires_at": expires_at}
+    except Exception as e:
+        log.warning(f"Issue takeover token failed (task={task_id}): {e}")
+        return None
+
+
+def verify_takeover_token(token: str) -> dict | None:
+    """校验接管 token：sha256 + kind='takeover' + 未过期。"""
+    if not token.startswith(TAKEOVER_TOKEN_PREFIX):
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, session_key, repo_key, agent_type, user_id, expires_at "
+                "FROM session_api_tokens WHERE token_sha256=? AND kind='takeover'",
+                (_sha256(token),),
+            )
+            row = c.fetchone()
+        if not row or int(row[5] or 0) <= _now():
+            return None
+        return {
+            "session_token_id": row[0],
+            "session_key": row[1],
+            "repo_key": row[2],
+            "agent_type": row[3],
+            "user_id": row[4],
+            "kind": "takeover",
+        }
+    except Exception as e:
+        log.warning(f"Verify takeover token failed: {e}")
+        return None
+
+
+def revoke_takeover_token(task_id_or_key: str) -> bool:
+    """立即吊销接管 token（finish / abort 用）：DELETE，不留宽限期。"""
+    key = takeover_session_key(task_id_or_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM session_api_tokens WHERE session_key=? AND kind='takeover'", (key,))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Revoke takeover token failed (key={key}): {e}")
+        return False
+
+
+def renew_takeover_token(task_id_or_key: str, new_expires_at: int) -> bool:
+    """续期（由调用方按 issued_at + 上限算好目标时间，见设计文档 §2.5）。"""
+    key = takeover_session_key(task_id_or_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE session_api_tokens SET expires_at=? "
+                "WHERE session_key=? AND kind='takeover' AND expires_at < ?",
+                (int(new_expires_at), key, int(new_expires_at)),
+            )
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Renew takeover token failed (key={key}): {e}")
+        return False
 
 def generate_api_token(user_id: int, name: str = "") -> dict | None:
     """生成用户级 API Key，返回 {token(明文一次), id}；None 表示失败。

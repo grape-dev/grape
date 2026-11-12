@@ -143,11 +143,37 @@ def get_current_user_or_api_key(request: Request) -> dict:
     """
     from src.api.auth_token import (
         SESSION_TOKEN_PREFIX, API_KEY_PREFIX, SESSION_TOKEN_RECOVERY_HINT,
-        verify_session_token, verify_api_token,
+        TAKEOVER_TOKEN_PREFIX, verify_session_token, verify_api_token, verify_takeover_token,
     )
     token = _extract_api_token(request)
     if not token:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "NOT_LOGGED_IN", "message": "Not logged in"})
+
+    # 接管会话（tko_）：与 tk_ 同类（repo 作用域），但只用于"用户接手任务"场景。
+    # 能力矩阵见 src/api/auth_caps.py：repo_session=True，agent_self/user_scope=False。
+    if token.startswith(TAKEOVER_TOKEN_PREFIX):
+        info = verify_takeover_token(token)
+        if not info:
+            raise HTTPException(status_code=401, detail={"code": 401,
+                                                         "error_code": "TAKEOVER_TOKEN_INVALID",
+                                                         "message": "Invalid or expired takeover token"})
+        uid = info["user_id"]
+        try:
+            from src.auth.grape_account_db import get_grape_account_by_id
+            _acc = get_grape_account_by_id(uid) or {}
+        except Exception:
+            _acc = {}
+        return {
+            "id": uid,
+            "username": _acc.get("username", ""),
+            "token": token,
+            "token_type": "takeover",
+            "auth_type": "takeover",
+            "session_key": info["session_key"],
+            "repo_key": info["repo_key"],
+            "agent_type": info["agent_type"],
+            "kind": "takeover",
+        }
 
     if token.startswith(SESSION_TOKEN_PREFIX):
         info = verify_session_token(token)
@@ -235,28 +261,47 @@ def require_admin(authorization: str = Header(None)) -> dict:
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_ADMIN}
 
 
-def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) -> dict:
-    """账户/平台管理端点鉴权：session_token（tk_）→ 403；API Key / JWT 维持现状放行。
+def require_user_or_takeover(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """允许"用户身份"或"接管 token"（tko_）。
 
-    Phase token-scope（docs/weekly-03/token-scope-classification-design.md）：
-    防止 agent 会话凭据（tk_）用于账户/平台管理操作；`grape_` API Key 与 Web JWT 不受影响。
-    经 Depends 复用 get_current_user_or_api_key（override 可注入，测试友好）。
+    唯一用途：接管会话自己上报进展（`POST /api/takeover/sessions/{id}/progress`）。
+    接管 token 没有 user_scope（设计使然），但它对**自己那条会话**写进展是安全的，
+    路由里再用 session_key 校验归属。
     """
-    if user.get("auth_type") == "session_token":
+    if str(user.get("auth_type") or "") == "takeover":
+        return user
+    from src.api.auth_caps import USER_SCOPE, has_capability
+    if not has_capability(user, USER_SCOPE):
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "CAPABILITY_REQUIRED",
+            "message": f"需要 {USER_SCOPE} 能力（当前：{user.get('auth_type') or 'unknown'}）",
+        })
+    return user
+
+
+def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """账户/平台管理端点鉴权 = 需要 `user_scope` 能力。
+
+    Phase token-scope（docs/weekly-03/...）+ ADR-2：能力判定收敛到 `src/api/auth_caps.py`，
+    session_token（tk_）与 takeover（tko_）都没有 user_scope → 403；API Key / JWT / internal 放行。
+    保留函数名是为了不动 30+ 处既有 import 与路由签名。
+    """
+    from src.api.auth_caps import USER_SCOPE, has_capability
+    if not has_capability(user, USER_SCOPE):
         raise HTTPException(status_code=403, detail={"code": 403,
                                                      "message": "Session token not allowed on this endpoint (account/platform management)"})
     return user
 
 
 def require_jwt_only(user: dict = Depends(get_current_user_or_api_key)) -> dict:
-    """高敏感账号管理端点鉴权：仅允许 JWT，禁止 session_token 和 api_key。
+    """高敏感账号管理端点鉴权 = 需要 `interactive_only` 能力（仅 JWT）。
 
     P1-6: API key 不过期、不加密存储、泄露后可永久操控账号。
     修改密码 / 设置密码 / 变更邮箱 / 注销账号 / 绑定解绑 等高敏感操作
     不应通过长期 API key 执行，仅允许 Web JWT（有过期时间 + refresh 轮换）。
     """
-    auth_type = user.get("auth_type", "jwt")
-    if auth_type != "jwt":
+    from src.api.auth_caps import INTERACTIVE_ONLY, has_capability
+    if not has_capability(user, INTERACTIVE_ONLY):
         raise HTTPException(status_code=403, detail={"code": 403,
                                                      "message": "This endpoint requires interactive login (JWT). API keys and session tokens are not allowed."})
     return user
@@ -645,6 +690,9 @@ def check_repo_access(user: dict, repo_key: str) -> None:
     auth_type = user.get("auth_type", "jwt")
     if auth_type in ("session_token", "api_key"):
         return  # 作用域已限定
+    # ADR-2 注：takeover（tko_）**故意不在此列** → 走下面的真实 repo 校验。
+    # 它带真实 user_id，managed_repos 可查；这样"接管 token 只能碰自己的仓库"由归属校验兜底，
+    # 不需要额外的 admin 豁免（见设计文档 §5.6 / §13-4）。
     uid = user.get("id", 0)
     if not uid or not repo_key:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "No permission to access this repository"})

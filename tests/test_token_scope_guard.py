@@ -4,6 +4,7 @@
 - session_token（tk_）→ 403
 - API Key（grape_）→ 放行；JWT → 放行（维持现状）
 - 非 D 类端点（tasks/issues/scenes）不被误拦截；scenes 为 VOD 技能用 session 调用，维持 200。
+- 列表类 dual 端点（skills / repos.member / repos.managed）对 session 放行（agent 必须有此能力）。
 """
 import os, sys
 
@@ -45,11 +46,10 @@ class TestRequireNoSessionTokenUnit:
 class TestDClassEndpoints:
     """D 类（账户/平台管理）端点：session→403；api_key/jwt 通过守卫。"""
 
+    # 注：/api/skills、/api/repos/member|managed 是 **dual**（require_org_member），
+    # 不是 require_no_session_token —— agent 在任务里必须能列仓库/技能，收紧会打挂 tk_ 流程。
+    # 这几条的 session 放行见下面 test_session_allowed_on_dual_listing。
     @pytest.mark.parametrize("path", [
-        "/api/skills",
-        "/api/skills",
-        "/api/repos/member",
-        "/api/repos/managed",
         "/api/auth/profile",
         "/api/chat/conversations",
         "/api/agents/vod/o/r",
@@ -61,6 +61,19 @@ class TestDClassEndpoints:
         finally:
             app.dependency_overrides.clear()
         assert r.status_code == 403, f"{path} session 应 403 实 {r.status_code}"
+
+    @pytest.mark.parametrize("path", ["/api/skills", "/api/repos/member", "/api/repos/managed"])
+    def test_session_allowed_on_dual_listing(self, path):
+        """列表类端点对 session_token 放行（require_org_member = 只校验组织成员）。
+
+        worker/CLI 在任务里靠 tk_ 列仓库与技能；把这里改成 user_only 会直接打断执行链路。
+        """
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: _user("session_token")
+        try:
+            r = TestClient(app).get(path, headers={"Authorization": "Bearer tk_x"})
+        finally:
+            app.dependency_overrides.clear()
+        assert r.status_code != 403, f"{path} 是 dual，session 不应被守卫拦截（实 {r.status_code}）"
 
     @pytest.mark.parametrize("path", [
         "/api/skills",
