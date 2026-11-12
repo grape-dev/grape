@@ -391,6 +391,30 @@ function _workerVersionStaleBadge(rt) {
   return `<span title="${(I18N.t('runtimes.label.worker_version_stale_hint') || '').replace(/"/g, '&quot;')}" style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:var(--y);background:var(--bg);padding:2px 8px;border-radius:999px;white-space:nowrap;cursor:help">⬆ ${I18N.t('runtimes.label.worker_version_stale')}</span>`;
 }
 
+// Issue #2133：spawn_failed 降级高亮 + 场景解绑一键加回兜底入口
+function _engineRecoveryBadges(rt) {
+  if (!rt) return '';
+  let html = '';
+  if (rt.spawn_fail_degraded) {
+    html += `<span title="持续 spawn_failed 超时间窗，已标记 degraded（不自动摘除）" style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#b45309;background:#fef3c7;padding:2px 8px;border-radius:999px;white-space:nowrap">spawn_failed 降级</span>`;
+  }
+  if (rt.detached_from_scenes || rt.spawn_fail_degraded) {
+    html += `<button onclick="event.stopPropagation();readdEngine(${rt.id})" style="font-size:10px;font-weight:600;color:#fff;background:#2563eb;border:none;padding:3px 10px;border-radius:999px;cursor:pointer;white-space:nowrap" title="按解绑记录重建场景绑定并做任务绑定对账">一键加回</button>`;
+  }
+  return html;
+}
+
+window.readdEngine = function (rid) {
+  if (!window.confirm('确认将该引擎重新加回场景并执行任务绑定对账？')) return;
+  API.post('/settings/agent-runtimes/' + rid + '/readd', {}).then(function (d) {
+    app.showToast('引擎已加回：场景绑定 ' + ((d.bindings || []).length) +
+      ' 项，任务对账 ' + ((d.terminalized || []).length + (d.released || []).length) + ' 条');
+    _loadRuntimesData();
+  }).catch(function (e) {
+    app.showToast((e && e.message) ? e.message : '加回失败');
+  });
+};
+
 function _legendHtml() {
   return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
     <span style="font-weight:500;color:var(--t2)">${I18N.t('runtimes.devspace.legend_label')}</span>
@@ -679,6 +703,7 @@ function renderEngines(data, devices) {
         ${_helpBtn(_healthHelpHint(rt))}
         ${_scopeBadge(rt.scope, rt.is_local)}
         ${_workerVersionStaleBadge(rt)}
+        ${_engineRecoveryBadges(rt)}
         <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
           <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_engineName}</span>
           ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${engineDisplayName(rt)})</span>` : ''}
