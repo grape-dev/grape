@@ -815,7 +815,7 @@ CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
 
 # Issue #2133：引擎生命周期审计（spawn_failed 告警/降级、恢复加回、任务绑定对账留痕）
 _ENGINE_LIFECYCLE_AUDIT_DDL = """
-CREATE TABLE IF NOT EXISTS engine_lifecycle_audit (
+CREATE TABLE IF NOT EXISTS grape_t_engine_lifecycle_audit (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     runtime_id  INTEGER NOT NULL,              -- agent_runtimes.id
     runtime_name TEXT DEFAULT '',              -- 引擎名快照
@@ -998,7 +998,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     # 引擎绑定真实性同步：场景引擎解绑审计表
     ("scene_engine_detach_log", _SCENE_ENGINE_DETACH_LOG_DDL),
     # Issue #2133：引擎生命周期审计（spawn_failed 告警/降级 + 恢复加回 + 任务对账）
-    ("engine_lifecycle_audit", _ENGINE_LIFECYCLE_AUDIT_DDL),
+    ("grape_t_engine_lifecycle_audit", _ENGINE_LIFECYCLE_AUDIT_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
     ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
@@ -5386,7 +5386,7 @@ def _fn_issue2133_engine_recovery_schema() -> None:
       spawn_failed 首见时刻）、spawn_fail_warned_at（强告警已发）、
       spawn_fail_degraded_at（超第二阈值标记 degraded，UI 高亮，不自动摘除）；
     - agent_runtimes 补 probe_ok_streak（连续探活 ok 次数，恢复判定用）；
-    - 新建 engine_lifecycle_audit（告警/降级/自动加回/一键加回/任务对账审计）。
+    - 新建 grape_t_engine_lifecycle_audit（告警/降级/自动加回/一键加回/任务对账审计）。
     """
     with db_lock:
         c = db.cursor()

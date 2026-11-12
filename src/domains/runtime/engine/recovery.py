@@ -57,13 +57,13 @@ def _audit(c, runtime_id: int, runtime_name: str, kind: str, detail: dict) -> No
     """写引擎生命周期审计（scene_row_id/node_tag 恒取列默认值，绑定明细在 detail JSON）。"""
     try:
         c.execute(
-            "INSERT INTO engine_lifecycle_audit "
+            "INSERT INTO grape_t_engine_lifecycle_audit "
             "(runtime_id, runtime_name, kind, scene_row_id, node_tag, detail, created_at) "
             "VALUES (?,?,?,0,'',?,?)",
             (runtime_id, runtime_name or "", kind,
              json.dumps(detail, ensure_ascii=False), _now_iso()))
     except Exception as e:
-        log.warning(f"engine_lifecycle_audit insert failed (runtime={runtime_id}, kind={kind}): {e}")
+        log.warning(f"grape_t_engine_lifecycle_audit insert failed (runtime={runtime_id}, kind={kind}): {e}")
 
 
 def _append_error(errors: str, note: str) -> str:

@@ -110,7 +110,7 @@ def _cleanup(cid, scene_row_id=0, task_ids=()):
         for tid in task_ids:
             c.execute("DELETE FROM task_messages WHERE task_id=?", (tid,))
             c.execute("DELETE FROM agent_tasks WHERE id=?", (tid,))
-        c.execute("DELETE FROM engine_lifecycle_audit WHERE runtime_id IN "
+        c.execute("DELETE FROM grape_t_engine_lifecycle_audit WHERE runtime_id IN "
                   "(SELECT id FROM agent_runtimes WHERE credential_id=?)", (cid,))
         c.execute("DELETE FROM scene_engine_detach_log WHERE scene_row_id=?", (scene_row_id,))
         if scene_row_id:
@@ -249,7 +249,7 @@ def test_ok_streak_auto_readds_scene_and_reconciles_tasks_idempotently():
         audit = None
         with db_lock:
             audit = db.cursor().execute(
-                "SELECT kind, detail FROM engine_lifecycle_audit WHERE runtime_id=? "
+                "SELECT kind, detail FROM grape_t_engine_lifecycle_audit WHERE runtime_id=? "
                 "AND kind='recovered' ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
         assert audit is not None, "加回必须写审计记录"
 

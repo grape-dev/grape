@@ -65,7 +65,7 @@ _RUNTIME_TABLES = (
     "event_action_filter", "event_route_config", "agent_tasks", "task_messages", "issue",
     "issue_state", "issue_agent_session", "pipeline_instances", "agent_runtimes",
     "engine_capabilities", "agent_type_runtime_pool", "agent_shared_knowledge",
-    "scene_knowledge_ref", "engine_lifecycle_audit", "agent_type", "backend_agents",
+    "scene_knowledge_ref", "grape_t_engine_lifecycle_audit", "agent_type", "backend_agents",
     "distributed_locks", "meta",
     "chat_conversations", "chat_messages", "chat_agent_session",
     # 存量（db_setup DDL）
