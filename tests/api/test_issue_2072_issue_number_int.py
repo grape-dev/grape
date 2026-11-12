@@ -185,3 +185,73 @@ def test_issue_detail_number_is_int(seeded):
     r = client.get(f"/api/issues/{OWNER}/{REPO}/2072", headers=_auth(uid, uname))
     assert r.status_code == 200
     assert isinstance(r.json()["number"], int)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 非数字 ident 面（gitee IKSQ4O）：数值归一**不得**变成无条件 int() 强转。
+# 审查 Critical 回归：head faaadec1 的 `int(r[3])` 在 ident 行上抛 ValueError，
+# 把 GET /api/issues/mine、/{owner}/{repo}、/{id}/status 打成 500。
+# ─────────────────────────────────────────────────────────────────────────────
+
+IDENT = "IKSQ4O"
+
+
+def test_query_tasks_keeps_non_numeric_ident(seeded, monkeypatch):
+    """归一层：字母 ident 原样透传（不 int()、不抛错）。"""
+    import src.api.issues_center as ic
+    db, db_lock = _db()
+    uid, uname, info = seeded
+    injected = [
+        (103, "o2072_user", REPO_KEY, IDENT, "ident row", "", "conv3", "active",
+         "", "2026-11-12 03:00:00", "", 0, 0, "", "creator", 1, ""),
+        (104, "o2072_user", REPO_KEY, "2073", "numeric str row", "", "conv4", "active",
+         "", "2026-11-12 04:00:00", "", 0, 0, "", "creator", 1, ""),
+    ]
+
+    class _FakeDB:
+        def __getattr__(self, name):
+            return getattr(db, name)
+
+        def cursor(self):
+            return _StrRowFakeCursor(db.cursor(), injected)
+
+    monkeypatch.setattr(ic, "db", _FakeDB())
+    out = ic._query_tasks("user_id=?", [uid], "created_at DESC")
+    nums = {it["issue_number"] for it in out}
+    assert nums == {IDENT, 2073}, f"ident 应原样保留、数值字符串应归 int，实为 {nums!r}"
+
+
+def _insert_ident_row(uid: int) -> int:
+    db, db_lock = _db()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, status, org_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (uid, "o2072_user", REPO_KEY, IDENT, "ident row", "active"))
+        db.commit()
+        row = c.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=?",
+                        (REPO_KEY, IDENT)).fetchone()
+    return row[0]
+
+
+def test_issue_status_card_keeps_non_numeric_ident(seeded):
+    """任务卡轮询 GET /{issue_id}/status：ident 行 200 且原样透传（Critical 回归面）。"""
+    uid, uname, info = seeded
+    card_id = _insert_ident_row(uid)
+    r = client.get(f"/api/issues/{card_id}/status", headers=_auth(uid, uname))
+    assert r.status_code == 200, f"ident 行不应 500，实为 {r.status_code}: {r.text[:200]}"
+    assert r.json()["issue_number"] == IDENT
+
+
+def test_issues_mine_survives_non_numeric_ident(seeded):
+    """列表页混入 ident 行时整页仍 200；ident 原样、数值行仍为 int。"""
+    uid, uname, info = seeded
+    _insert_ident_row(uid)
+    r = client.get("/api/issues/mine", headers=_auth(uid, uname))
+    assert r.status_code == 200, f"ident 行拖垮列表页：{r.status_code} {r.text[:200]}"
+    nums = [it.get("issue_number") for it in r.json()["issues"]]
+    assert IDENT in nums, nums
+    for n in nums:
+        if n != IDENT:
+            assert isinstance(n, int), f"数值行应仍为 int，实为 {type(n).__name__}: {n!r}"

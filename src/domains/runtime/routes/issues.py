@@ -599,9 +599,12 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-    # Issue #2072: issue_number 归一为 int（与 _query_tasks / 详情 _assemble_issue 同口径）
+    # Issue #2072: 数值形态归一为 int，字母 ident（gitee IKSQ4O）原样透传
+    # （与 _query_tasks / 详情 _assemble_issue 同口径，禁止无条件 int() 强转）
+    from src.domains.runtime.vcs.api_client import _native_issue_number
     return {
-        "id": row[0], "status": row[1], "repo_key": row[2], "issue_number": int(row[3]),
+        "id": row[0], "status": row[1], "repo_key": row[2],
+        "issue_number": _native_issue_number(row[3]),
         "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
     }
 

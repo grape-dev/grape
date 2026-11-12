@@ -3179,10 +3179,12 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             _scene_source = "repo_default"
         _scene_name = _scene_name_cache.get((_scene_id, _rk), "")
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)
-        # Issue #2072: issue_number 与 DB 列/Pydantic 模型/其他端点一致输出 int。
-        # DB 层（MySQL 兼容层/GitCode 同步混入数据）可能返回字符串编号——响应构造层
-        # 显式归一；非数字值让 int() 抛错（显式报错优于静默字符串化泄漏到调用方）。
-        _issue_number = int(r[3])
+        # Issue #2072: 数值形态的字符串编号归一为 int（与 DB 列/Pydantic 模型/其他端点一致）。
+        # 但不能无条件 int()——gitee 等平台的 issue_number 是字母 ident（如 IKSQ4O），
+        # 强转会抛 ValueError 把整页打成 500。统一走 _native_issue_number：
+        # 数字→int，非数字 ident→原样 str（仓库既有一等数据形态，见 db_setup 的
+        # 「非数字 ident 按 text 原样存储」与 event_pipeline 的写入口径）。
+        _issue_number = _native_issue_number(r[3])
         item = {
             "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": _issue_number,
             "title": r[4] or "", "task_description": r[5] or "",

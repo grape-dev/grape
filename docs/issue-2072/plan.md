@@ -5,14 +5,14 @@
 DB `issue.issue_number` 为 INT 列，但 MySQL 兼容层/历史 GitCode 同步数据可能产出字符串
 （dev 实测 mine 526 条全为 str），响应构造层无归一 → 字符串泄漏到调用方。
 其他三处同类直出点：
-- `src/api/routes/issues.py` `GET /{issue_id}/status`（任务卡轮询）：`"issue_number": row[3]` 直出；
-- `src/api/routes/issues.py` `GET /{owner}/{repo}`（列表）：走 `_query_tasks`，随主修点归一；
-- `src/api/routes/issues.py` `GET /{owner}/{repo}/{number}`（详情）：`_assemble_issue`/VCS 兜底已 `int()`，无需改。
+- `src/domains/runtime/routes/issues.py` `GET /{issue_id}/status`（任务卡轮询）：`"issue_number": row[3]` 直出；
+- `src/domains/runtime/routes/issues.py` `GET /{owner}/{repo}`（列表）：走 `_query_tasks`，随主修点归一；
+- `src/domains/runtime/routes/issues.py` `GET /{owner}/{repo}/{number}`（详情）：`_assemble_issue`/VCS 兜底已 `int()`，无需改。
 
 ## 修改点
 1. `src/api/issues_center.py` `_query_tasks()`：`"issue_number": int(r[3])`。
    - 归一失败（非数字字符串）由 `int()` 显式抛 ValueError → 500，不静默字符串化（Spec 决策）。
-2. `src/api/routes/issues.py` `get_issue_status()`：`"issue_number": int(row[3])`。
+2. `src/domains/runtime/routes/issues.py` `get_issue_status()`：`"issue_number": int(row[3])`。
 3. 无需改动：详情 `_assemble_issue`、PR 伪卡（`pr_num` 本已 int）、`_task_status_map`（内部 str key，不外泄）。
 
 ## 测试 seam（公开接口层）
