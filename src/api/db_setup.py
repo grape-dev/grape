@@ -5338,6 +5338,28 @@ register_migration(
     _mig_issue627_drop_legacy_production_release)
 
 
+def _fn_add_agent_runtimes_probe_spawn_fail_count() -> None:
+    """Issue #1982 复审：agent_runtimes 补 probe_spawn_fail_count（存量库幂等补列）。
+
+    spawn_failed（EMFILE/ENOMEM/EAGAIN 资源类 spawn 失败）不计入 probe_fail_count
+    （偶发资源紧张不摘除引擎），但必须有独立计数兜底：持续 spawn_failed 连续
+    达到阈值后由心跳降级 healthy=0，避免引擎永远 healthy 持续接单。计数列
+    与 probe_fail_count 同模式（心跳按 last_probe 幂等去重，ok 清零）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_runtimes", "probe_spawn_fail_count", "INT DEFAULT 0")
+        db.commit()
+
+
+register_migration(
+    version="202611120001",
+    name="add-agent-runtimes-probe-spawn-fail-count",
+    kind="safe",
+    fn=_fn_add_agent_runtimes_probe_spawn_fail_count,
+)
+
+
 def _ensure_case_insensitive_indexes():
     """Issue #348: 大小写不敏感唯一约束（DB 层纵深防御）。
 

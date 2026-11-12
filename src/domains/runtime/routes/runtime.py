@@ -27,6 +27,11 @@ from src.domains.runtime.engine import service
 
 from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
 
+# Issue #1982 复审：spawn_failed 独立计数兜底阈值——连续 N 次 spawn_failed（资源类
+# 环境故障长期不恢复）后心跳降级 healthy=0 并在 probe_error 附修复指引；
+# ok/fail/model_unreachable 清零（进程能 spawn 即链断）。env 可调。
+_PROBE_SPAWN_FAIL_TRIP = max(1, int(os.environ.get("RUNTIME_PROBE_SPAWN_FAIL_TRIP", "50")))
+
 def _register_healthy_guard(c, rid: int, reported: bool) -> int:
     """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
 
@@ -39,7 +44,8 @@ def _register_healthy_guard(c, rid: int, reported: bool) -> int:
       （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
       → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
     - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
-      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除）。
+      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除；
+      spawn_failed 另有独立计数 probe_spawn_fail_count 兜底，见 runtime_heartbeat）。
 
     INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
     """
@@ -241,7 +247,8 @@ def _register_healthy_guard(c, rid: int, reported: bool) -> int:
       （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
       → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
     - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
-      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除）。
+      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除；
+      spawn_failed 另有独立计数 probe_spawn_fail_count 兜底，见 runtime_heartbeat）。
 
     INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
     """
@@ -506,14 +513,14 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                     if _pstatus == "ok":
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, "
-                            "probe_fail_count=0, healthy=1 "
+                            "probe_fail_count=0, probe_spawn_fail_count=0, healthy=1 "
                             "WHERE name=? AND credential_id=?",
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
                     elif _pstatus in ("fail", "model_unreachable"):
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, "
-                            "probe_fail_count=probe_fail_count+1, "
+                            "probe_fail_count=probe_fail_count+1, probe_spawn_fail_count=0, "
                             "healthy=CASE WHEN probe_fail_count+1>=2 THEN 0 ELSE healthy END "
                             "WHERE name=? AND credential_id=?",
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
@@ -523,13 +530,36 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                                         f"credential={credential_id} error={_perror[:200]}")
                     elif _pstatus == "spawn_failed":
                         # Issue #1982：子进程起不来（fd 打满/资源不足）= 环境故障，
-                        # 不计入「探活连续失败」，不触发引擎摘除；仅单独告警留痕。
+                        # 不计入「探活连续失败」（probe_fail_count），偶发资源紧张不摘除引擎。
+                        # Issue #1982 复审：但持续资源类故障不能让引擎永远 healthy 继续接单——
+                        # 独立计数 probe_spawn_fail_count，连续达到 _PROBE_SPAWN_FAIL_TRIP 次
+                        # （env RUNTIME_PROBE_SPAWN_FAIL_TRIP 可调，默认 50）后降级 healthy=0，
+                        # probe_error 附修复指引；下次 ok 探活清零计数并恢复 healthy=1。
+                        # fail/model_unreachable 说明进程已成功 spawn，连败链断开 → 同步清零。
                         c.execute(
-                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
+                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, "
+                            "probe_spawn_fail_count=probe_spawn_fail_count+1, "
+                            "healthy=CASE WHEN probe_spawn_fail_count+1>=? THEN 0 ELSE healthy END "
                             "WHERE name=? AND credential_id=?",
-                            (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                            (_pstatus, _platency, _plast, _perror, _PROBE_SPAWN_FAIL_TRIP,
+                             _pname, credential_id)
                         )
-                        log.warning(f"runtime probe spawn_failed (not counted as consecutive failure): "
+                        _sf = c.execute(
+                            "SELECT probe_spawn_fail_count FROM agent_runtimes WHERE name=? AND credential_id=?",
+                            (_pname, credential_id)).fetchone()
+                        _sf_count = (_sf[0] or 0) if _sf else 0
+                        if _sf_count >= _PROBE_SPAWN_FAIL_TRIP:
+                            _sf_hint = (
+                                f" | spawn_failed x{_sf_count}: persistent resource exhaustion "
+                                "(EMFILE/ENOMEM/EAGAIN); fix: raise fd limit (LimitNOFILE=524288 / ulimit -n), "
+                                "free memory, restart worker; engine re-enabled automatically on next ok probe")
+                            c.execute(
+                                "UPDATE agent_runtimes SET probe_error=?, healthy=0 "
+                                "WHERE name=? AND credential_id=?",
+                                (_perror + _sf_hint, _pname, credential_id)
+                            )
+                        log.warning(f"runtime probe spawn_failed (not counted as consecutive failure, "
+                                    f"spawn_fail_count={_sf_count}/{_PROBE_SPAWN_FAIL_TRIP}): "
                                     f"engine={_pname} credential={credential_id} error={_perror[:200]}")
                     else:
                         c.execute(
