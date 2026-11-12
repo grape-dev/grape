@@ -210,6 +210,14 @@ def _connect(db_path: str):
                 from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
                 _cfg = dict(mysql_config())
                 _cfg["database"] = _im_db
+                # 域库账号是按库授权的（grape_dev_mgmt 对 runtime 库无 CREATE/DML 权限），
+                # 跨域访问必须换成目标库账号，否则引擎类迁移会 "CREATE command denied"。
+                _im_user = (os.environ.get("GRAPE_IM_DB_USER") or "").strip()
+                _im_pwd = os.environ.get("GRAPE_IM_DB_PASSWORD") or ""
+                if _im_user:
+                    _cfg["user"] = _im_user
+                if _im_pwd:
+                    _cfg["password"] = _im_pwd
                 _IM_DB_CONN = MySQLCompatDB(**_cfg)
             return _SharedConn(_IM_DB_CONN)
         return _SharedConn(_shared_db())
