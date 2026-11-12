@@ -1891,6 +1891,48 @@ def _strip_null_default(ddl: str) -> str:
     import re as _re
     return _re.sub(r"\s+DEFAULT\s+NULL\s*$", "", (ddl or "").strip(), flags=_re.IGNORECASE)
 
+def _strip_text_default(ddl: str) -> str:
+    """剥离 TEXT 族的显式 DEFAULT（如 `TEXT DEFAULT ''`）。
+
+    2026-11-12 实测（MySQL 8.0.43）：带 DEFAULT 的 TEXT 列 INSTANT 与
+    INPLACE,LOCK=NONE 均不支持（1845），而 MySQL 接受语法后又**静默丢弃默认值**
+    （column_default 为 NULL）——语义上本就等价于无默认。剥离后即可用 INSTANT 补列，
+    避免「迁移盖章、列未建」的假绿（线上 202611120004 即此形态）。
+    """
+    import re as _re
+    d = (ddl or "").strip()
+    if not _re.search(r"\b(?:TINY|MEDIUM|LONG)?TEXT\b", d, _re.IGNORECASE):
+        return ddl
+    return _re.sub(r"\s+DEFAULT\s+.*$", "", d, flags=_re.IGNORECASE)
+
+
+
+_CUL_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_credential_usage_log (
+    id TEXT PRIMARY KEY,
+    credential_id TEXT NOT NULL,
+    credential_kind TEXT NOT NULL DEFAULT 'repo_credentials',
+    user_id VARCHAR(36) NOT NULL,
+    repo_key TEXT DEFAULT '',
+    initiating_actor_id VARCHAR(36) DEFAULT '',
+    executor_context TEXT DEFAULT '',
+    operation TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+)
+"""
+
+_SC_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_system_credentials (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    scope_type VARCHAR(16) NOT NULL,
+    scope_id VARCHAR(64) NOT NULL,
+    cred_type VARCHAR(64) NOT NULL,
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (scope_type, scope_id, cred_type)
+)
+"""
 
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    strict: bool = False):
@@ -1961,9 +2003,25 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                         _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
                         raise _MdlWaitTimeout(str(_nd_err))
                     _inplace_err = _nd_err
+        # TEXT 族的显式 DEFAULT（例如 202611100001 的 "TEXT DEFAULT ''"）在 MySQL 上
+        # INSTANT/INPLACE 均不支持，且 MySQL 会静默丢弃该默认值——剥离后重试即可补列。
+        _ddl_td = _strip_text_default(ddl)
+        if _ddl_td != ddl and _ddl_td != _ddl_nd:
+            _base_td = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_td}"
+            for _algo_td in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
+                try:
+                    c.execute(f"{_base_td}, {_algo_td}")
+                    log.info(f"_ensure_column({tbl}.{col}) 剥离 TEXT 默认值后补列成功（{_algo_td}）")
+                    return
+                except Exception as _td_err:
+                    if _is_mdl_timeout(_td_err):
+                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
+                        raise _MdlWaitTimeout(str(_td_err))
+                    _inplace_err = _td_err
         if allow_copy:
+            _copy_sql = base_sql.replace(ddl, _ddl_td) if _ddl_td != ddl else base_sql
             try:
-                c.execute(base_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
+                c.execute(_copy_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
                 log.info(f"_ensure_column({tbl}.{col}) INPLACE 不支持 → 已按默认算法(COPY)补列")
                 return
             except Exception as _copy_err:
@@ -3390,7 +3448,17 @@ def _fn_add_agent_tasks_trace_context() -> None:
     """
     with db_lock:
         c = db.cursor()
-        _ensure_column(c, "agent_tasks", "trace_context", "TEXT DEFAULT ''")
+        # 非 owner 库（mgmt/insight）的 agent_tasks 是跨库可更新视图：ALTER 必然 1346/1347，
+        # 列只能加在 owner 基表上（grape_runtime_db），可见性由 scripts/sync_domain_views.py
+        # 重建视图保证。视图场景直接跳过，避免每次启动刷 ERROR。
+        _row = c.execute(
+            "SELECT TABLE_TYPE FROM information_schema.tables "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_tasks'").fetchone()
+        if _row and str(_row[0]).upper() == "VIEW":
+            log.info("agent_tasks 在本库为跨库视图，trace_context 归属 owner 基表，跳过 ALTER")
+            return
+        _ensure_column(c, "agent_tasks", "trace_context", "TEXT",
+                       allow_copy=True, strict=True)
         db.commit()
 
 
@@ -3468,6 +3536,134 @@ register_migration(
     name="add-autopilot-exec-agent-task-id",
     kind="safe",
     fn=_fn_add_ap_exec_agent_task_id,
+)
+
+
+def _fn_create_credential_usage_log_table() -> None:
+    """D90 消费端批步 4（P-5 硬前置）：grape_t_credential_usage_log 审计表。
+
+    表名按主控新表 grape_t_xxx 约定定名（规则 2.0 A6，同 003 渠道表口径）——
+    本分支新增表，建表即用规范名，无存量改名场景。
+    credential_id 软引用无外键级联（凭据删除保留审计历史）；credential_kind
+    预留（P-2c 上线零迁移）；executor/initiator 分列。ORM/Core 面：
+    src/persistence/credential_usage_log.py（铁律 9 高频审计写入走 Core insert）。
+    """
+    with db_lock:
+        db.execute(_CUL_DDL)
+        # N4：存量旧形态表幂等补列（repo_key）——ALTER + 吞 duplicate column
+        try:
+            db.execute("ALTER TABLE grape_t_credential_usage_log ADD COLUMN repo_key TEXT DEFAULT ''")
+        except Exception:
+            pass  # duplicate column = 已补
+        # N4-p1：审计查询索引（list_by_credential 高频路径；全量记录下防全表扫）
+        db.execute("CREATE INDEX IF NOT EXISTS idx_cul_credential_id "
+                   "ON grape_t_credential_usage_log (credential_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_cul_repo_key "
+                   "ON grape_t_credential_usage_log (repo_key)")
+        db.commit()
+
+
+def _fn_repair_agent_tasks_trace_context() -> None:
+    """补 202611120004 的失效效果：该迁移在同号事故后已盖章，但 MySQL 上
+    `TEXT DEFAULT ''` 既不能 INSTANT 也不能 INPLACE,LOCK=NONE，_ensure_column
+    只记人工清单便返回 → 三库都出现「已盖章、列不存在」（event_pipeline 已在写
+    trace_context）。本条用无 DEFAULT 的 TEXT + allow_copy 幂等重试。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_tasks", "trace_context", "TEXT",
+                       allow_copy=True, strict=True)
+        db.commit()
+
+
+def _fn_create_system_credentials_table() -> None:
+    """D100 批 1（2026-11-08）：grape_t_system_credentials 系统/组织级凭据表。
+
+    方案稿 docs/weekly-09/d100-credential-type-schema-design.md §1.3：
+    - id UUID 36 应用层生成（表设计铁律 1）
+    - scope_type 值域 {'system'}（org 预留不实现，放开走独立评审）；
+      scope_id system 固定 ''——MySQL UNIQUE 对 NULL 视为互不相等，
+      用 '' 保证 UNIQUE(scope_type, scope_id, cred_type) 真正生效
+    - created_at/updated_at NOT NULL 无 DEFAULT：时间由门面应用层强制
+      赋值（铁律 2），DEFAULT '' 会让漏传静默成空串（时间审计失真）
+    - value 存 credential_crypto 加密后密文（加密在门面写入口完成，
+      本表零明文）——与 rc/N3 通道加密同模式
+    - 零数据动作：A1-A4 存量凭据暂缓收编（用户裁定），落库后为空表
+    双方言：DDL 在 SQLite/MySQL 均原生合法（无 ON CONFLICT、无 DB 侧
+    时间函数），fn 无需后端分支。
+    """
+    with db_lock:
+        db.execute(_SC_DDL)
+        # cred_type 单查索引：管理面"按类型列出"+ 批 2 迁移探针均按
+        # cred_type 单查，UNIQUE 三列组合索引覆盖不了该路径
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sc_cred_type "
+                   "ON grape_t_system_credentials (cred_type)")
+        db.commit()
+
+def _fn_issue_state_scene_user_id_text_normalize() -> None:
+    """202611091200（G3 门禁影子演练实锤）：issue_state.scene_user_id 归一。
+
+    DDL 为 INTEGER DEFAULT 0（0=非用户级哨兵）。用户级场景创建者是账号域 uuid
+    字符串——MySQL INT 列严格模式直接写崩；门禁 user_id 族不变式同样红。
+    MySQL：INT/TEXT → VARCHAR(36) NOT NULL DEFAULT ''，并把存量哨兵 0 改写 ''；
+    读侧统一 `or 0`（''/0 均 falsy），哨兵语义保真。
+    同迁移顺带放宽 unified_user_mapping.dingtalk_user_id（VARCHAR(36)→VARCHAR(191)，
+    门禁 user_id 族不变式红；不进 _ACCOUNT_FK_USER_ID_COLS——守卫测试锁定 33 对）。
+    SQLite：INTEGER 亲和天然容混型、0 哨兵 falsy——幂等零改动（只占盖章位）。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    if get_db_backend() != "mysql":
+        return
+    from src.kernel.session_manager import db
+    c = db.cursor()
+    c.execute(
+        "SELECT DATA_TYPE FROM information_schema.columns "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue_state' "
+        "AND COLUMN_NAME='scene_user_id'")
+    row = c.fetchone()
+    if row and row[0] not in ("varchar", "char"):
+        c.execute("ALTER TABLE issue_state MODIFY scene_user_id "
+                  "VARCHAR(36) NOT NULL DEFAULT ''")
+    if row:
+        # 哨兵改写（幂等）：'0' 字符串 truthy，会破坏读侧 if not scene_uid 兜底
+        c.execute("UPDATE issue_state SET scene_user_id='' WHERE scene_user_id='0'")
+    c.execute(
+        "SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='unified_user_mapping' "
+        "AND COLUMN_NAME='dingtalk_user_id' AND DATA_TYPE='text'")
+    row = c.fetchone()
+    if row:
+        suffix = " NOT NULL" if row[1] == "NO" else ""
+        c.execute(f"ALTER TABLE unified_user_mapping MODIFY dingtalk_user_id "
+                  f"VARCHAR(191){suffix}")
+    db.commit()
+
+register_migration(
+    version="202611140001",
+    name="create-credential-usage-log-table",
+    kind="safe",
+    fn=_fn_create_credential_usage_log_table,
+)
+
+register_migration(
+    version="202611140002",
+    name="create-system-credentials-table",
+    kind="safe",
+    fn=_fn_create_system_credentials_table,
+)
+
+register_migration(
+    version="202611140003",
+    name="repair-agent-tasks-trace-context",
+    kind="safe",
+    fn=_fn_repair_agent_tasks_trace_context,
+)
+
+register_migration(
+    version="202611140004",
+    name="issue-state-scene-user-id-text-normalize",
+    kind="safe",
+    fn=_fn_issue_state_scene_user_id_text_normalize,
 )
 
 

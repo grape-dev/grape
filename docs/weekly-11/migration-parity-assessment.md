@@ -73,3 +73,48 @@
 3. 三库 `information_schema` 断言：两表存在、`agent_tasks.trace_context` 存在、`issue_state.scene_user_id = varchar(36)`；
 4. `pytest tests/kernel/test_migration_no_baseline_version_collision.py` 与 `tests/kernel/test_issue_536_migrations.py` 绿；
 5. 线上盖章表新增 `202611140001-0004` 四条。
+
+---
+
+# 阶段一实施结果（2026-11-12）
+
+已按上文"阶段一"落地并验证，号段 `202611140001-0004`：
+
+| 版本 | 名称 | 落地内容 |
+|---|---|---|
+| 202611140001 | create-credential-usage-log-table | 建 `grape_t_credential_usage_log`（9 列） |
+| 202611140002 | create-system-credentials-table | 建 `grape_t_system_credentials`（7 列 + UNIQUE） |
+| 202611140003 | repair-agent-tasks-trace-context | 给 `agent_tasks` 补 `trace_context TEXT`（无 DEFAULT + allow_copy + strict） |
+| 202611140004 | issue-state-scene-user-id-text-normalize | `issue_state.scene_user_id` INT → VARCHAR(36)，哨兵 0 → ''；顺带放宽 `unified_user_mapping.dingtalk_user_id` 到 VARCHAR(191) |
+
+## 附带修复
+
+1. **`_ensure_column` 新增 `_strip_text_default`**：TEXT 族带任意 DEFAULT 时先剥离再 INSTANT/INPLACE
+   重试，失败才按 `allow_copy` 退 COPY。彻底消除"迁移盖章、列未建"的假绿（202611120004 的病根）。
+2. **既有 202611120004 的 fn** 改为 `TEXT + allow_copy + strict`（新装库直接生效）。
+3. **新增 `scripts/sync_domain_views.py`**（幂等 `CREATE OR REPLACE VIEW`）：
+   **关键新发现**——跨库可更新视图是**建视图时的列快照**，基表加列/新表都不会自动出现在视图里：
+   * `grape_mgmt_db` / `grape_insight_db` 的 `agent_tasks` 视图缺 `trace_context`（48 → 49 列已重建）；
+   * 两张新凭据表在 mgmt/insight 需要视图转发（runtime 为 owner 基表）。
+   本次同步 6 个视图；里程碑内任何"基表加列/建表"都必须跟跑此脚本。
+4. **140003 增加视图跳过分支**：非 owner 库的 `agent_tasks` 是视图时直接 return（列归属 owner 基表），
+   避免每次启动刷 `MANUAL REVIEW`/1347。
+
+## 实测证据（两机）
+
+- 三库盖章：`202611140001-0004` 全部存在（`grape_t_schema_migrations` 为 mgmt 基表，runtime/insight 为视图共享）。
+- 对象断言：`grape_t_credential_usage_log` / `grape_t_system_credentials` 在 `grape_runtime_db` 为基表，
+  mgmt/insight 为视图；`agent_tasks.trace_context` 三库均可见（49 列）；`issue_state.scene_user_id = varchar(36)` 三库一致。
+- 业务实证：`credential_usage_log.log_usage(...)` → 经 mgmt 视图写入 → `list_by_credential` 读回 1 行（清理后为 0），
+  说明审计链路不再静默丢弃。
+- 启动日志：两机四进程重启后 `MANUAL REVIEW` 0 条、`usage_log ... 1146` 0 条（此前每轮都有）。
+- 回归：`tests/kernel` 600 passed / 51 failed（实施前 594/54）；`tests/api` 429 passed / 54 failed；
+  `tests/arch` 22 passed / 1 failed（silent-except ratchet 基线存量）；`check-arch` PASS；`make lint` import OK；
+  新增守卫 `tests/kernel/test_migration_parity_stage1.py` 3 passed。
+- 隔离干跑（`grape_mig_probe4`）：四条迁移各跑两遍全部 OK，效果与上面一致，`_DDL_MANUAL_REVIEW` 无与四条相关的条目。
+- 备份：`/home/grape/db-backups/{grape_mgmt_db,grape_runtime_db,grape_insight_db}-202611121546.sql.gz`。
+
+## 阶段二（未实施，保持评估结论）
+
+base 其余归一/回填迁移（090004/091000/091100/091300/091400/110004）按需移植；
+两条 replay 壳（110002/110003）不移植。移植时统一改用 `202611150001+` 号段。
