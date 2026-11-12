@@ -1443,6 +1443,11 @@ defineExpose({ viewContent, quickEdit })
   color: var(--r);
   border-color: var(--r);
 }
+.kv-del-btn:not(:disabled):hover {
+  background: var(--r);
+  border-color: var(--r);
+  color: #fff;
+}
 .kv-form-row {
   margin-bottom: 12px;
 }

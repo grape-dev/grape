@@ -7,7 +7,7 @@ import SettingsView from '../SettingsView.vue'
   ;['bridge.css', 'ag-ui.css', 'viewcss/repos-view.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static/js/assets/' + f + '?v=15'
+    link.href = '/static/js/assets/' + f + '?v=17'
     document.head.appendChild(link)
   })
 })()
