@@ -12,6 +12,7 @@ tests/
 ├── api/                  # src/api 网关层：路由装配、OpenAPI、静态资源、中间件
 ├── mgmt/                 # src/domains/mgmt：auth/user/org/repo/skill/scene/template/feedback/IM
 ├── runtime/              # src/domains/runtime：agent/task/pipeline/event/chat/engine/webhook
+│   └── im/               # src/domains/runtime/im：渠道适配、卡片渲染、引擎接线、去重/租约
 ├── arch/                 # 架构约束（R1–R6）
 ├── atomic/               # 原子切片 / 迁移类
 ├── js/                   # 前端 node:test 用例（原 tests/frontend 已并入）
@@ -73,3 +74,34 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 `tests/` 自身已由 `conftest.py` 注入 `sys.path`，共享 helper（如 `mock_db`）
 可直接裸名 import。
+
+## 对齐规则（2026-11-12 复规）
+
+`tests/` 与 `src/` 一一对应，**不再接受平铺的 `tests/test_*.py`**：
+
+| src | tests |
+|-----|-------|
+| `src/kernel/**`（含 `persistence/`） | `tests/kernel/**` |
+| `src/domains/mgmt/**` | `tests/mgmt/**` |
+| `src/domains/runtime/**`（含 `im/`） | `tests/runtime/**（含 im/）` |
+| `src/domains/insight/**` | `tests/insight/**` |
+| `src/domains/contracts/**` | `tests/contracts/**` |
+| `src/api/**` | `tests/api/**` |
+
+例外（不对应单个 src 包）：`arch/`（架构约束与仓级 ratchet）、`atomic/`（迁移原子切片）、
+`js/ playwright/ curl/`（前端与手工套件）。新增用例按「被测代码所在包」落到对应目录；
+跨域场景用例归到主被测域，并在文件 docstring 写明另一侧的契约来源。
+
+搬移后 `ROOT` 计算比平铺时多一层，写新用例时统一用
+`ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))`（域内两层）。
+
+## 已知既有失败（搬迁前就存在，非目录规整引入）
+
+- `tests/kernel/test_account_fk_user_id_text_migration.py` / `test_d105_org_domain_text_migration.py` /
+  `test_issue_number_text_migration.py`：import 期缺 `_ACCOUNT_FK_USER_ID_COLS` /
+  `_normalize_account_fk_user_id_text`（D105 迁移族未随分支合入）。
+- `tests/mgmt/test_login_whitelist_null_literal_cleanup.py`、`tests/runtime/test_issue_990_session_token_snapshot.py`：
+  同类 import 漂移。
+- `tests/runtime/test_issue_1753_handoff_target_branch.py`：缺 `TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH`。
+- `tests/arch/test_silent_except_ratchet.py`：分支合并新增文件带入静默 except，基线文件不允许上调豁免。
+- `tests/contracts`：2 条 milestone 契约（旧）。

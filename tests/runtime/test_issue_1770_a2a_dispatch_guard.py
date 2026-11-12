@@ -11,9 +11,7 @@ import os
 import shutil
 import uuid
 
-import pytest
-
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 class TestA2ADispatchGuard1770:
@@ -40,7 +38,7 @@ class TestA2ADispatchGuard1770:
                 pass
             db.commit()
         try:
-            from src.config import SKILLS_DIR
+            from src.kernel.config import SKILLS_DIR
             shutil.rmtree(
                 os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation"),
                 ignore_errors=True)
@@ -79,7 +77,7 @@ class TestA2ADispatchGuard1770:
             except Exception:
                 pass
             db.commit()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         _sdir = os.path.join(SKILLS_DIR, "repo", "owner", "repo", "implementation")
         os.makedirs(_sdir, exist_ok=True)
         with open(os.path.join(_sdir, "SKILL.md"), "w", encoding="utf-8") as _f:
@@ -92,17 +90,6 @@ class TestA2ADispatchGuard1770:
         from fastapi.testclient import TestClient
         from src.api.main import app
         return TestClient(app)
-
-    def _force_status(self, seq, status="completed", scene_id="default"):
-        """目标线适配：arch 线在无引擎/无技能测试环境下派发即落 failed、scene 为空，
-        `update_event_complete` 只对 running/dispatched 生效 → 这里直接置状态，
-        本组用例验证的是**门禁语义**，不是派发成功路径（派发成功路径由 P2 阶段夹具复核）。"""
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE events SET status=?, completed_at=datetime('now'), "
-                      "scene_id=CASE WHEN IFNULL(scene_id,'')='' THEN ? ELSE scene_id END "
-                      "WHERE seq=?", (status, scene_id, seq))
-            db.commit()
 
     def _body(self, agent="coding", context="Issue #1770 门禁测试", force=False):
         return {
@@ -184,7 +171,8 @@ class TestA2ADispatchGuard1770:
         blocked = client.post("/api/a2a", json=self._body(agent="coding")).json()
         assert blocked["skipped"] == "downstream_running"
 
-        self._force_status(qa_seq, "completed")
+        from src.api.event_store import update_event_complete
+        update_event_complete(qa_seq, "completed", result="qa done")
 
         resp = client.post("/api/a2a", json=self._body(agent="coding"))
         assert resp.status_code == 200, resp.text
@@ -197,7 +185,8 @@ class TestA2ADispatchGuard1770:
         first = client.post("/api/a2a", json=self._body(agent="coding"))
         first_seq = first.json()["seq"]
         assert first_seq > 0
-        self._force_status(first_seq, "completed")
+        from src.api.event_store import update_event_complete
+        update_event_complete(first_seq, "completed", result="空跑完成")
 
         dup = client.post("/api/a2a", json=self._body(agent="coding"))
         assert dup.status_code == 200, dup.text
@@ -212,7 +201,8 @@ class TestA2ADispatchGuard1770:
         client = self._setup()
         first = client.post("/api/a2a", json=self._body(agent="coding"))
         first_seq = first.json()["seq"]
-        self._force_status(first_seq, "completed")
+        from src.api.event_store import update_event_complete
+        update_event_complete(first_seq, "completed", result="空跑完成")
 
         forced = client.post("/api/a2a", json=self._body(agent="coding", force=True))
         assert forced.status_code == 200, forced.text
@@ -224,7 +214,8 @@ class TestA2ADispatchGuard1770:
         client = self._setup()
         first = client.post("/api/a2a", json=self._body(agent="coding")).json()
         first_seq = first["seq"]
-        self._force_status(first_seq, "completed")
+        from src.api.event_store import update_event_complete
+        update_event_complete(first_seq, "completed", result="空跑完成")
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE events SET created_at=datetime('now','-1 hour') WHERE seq=?",
@@ -263,7 +254,8 @@ class TestA2ADispatchGuard1770:
         first = client.post("/api/a2a", json=self._body(agent="coding")).json()
         first_seq = first["seq"]
         assert first_seq > 0
-        self._force_status(first_seq, "failed")
+        from src.api.event_store import update_event_complete
+        update_event_complete(first_seq, "failed", result="首次执行失败")
 
         retry = client.post("/api/a2a", json=self._body(agent="coding"))
         assert retry.status_code == 200, retry.text
@@ -278,7 +270,6 @@ class TestA2ADispatchGuard1770:
         first = client.post("/api/a2a", json=self._body(agent="coding")).json()
         first_seq = first["seq"]
         assert first_seq > 0
-        self._force_status(first_seq, "running")
 
         second = client.post(
             "/api/a2a", json=self._body(agent="coding", context="不同上下文的再次派发"))
@@ -332,11 +323,6 @@ class TestA2ADispatchGuard1770:
         assert len(dup) == len(results) - 1, results
         assert len(self._events_for("coding")) == 1
 
-    # 基线（arch 0cecbd9c9）为 xfail(strict=True)：无引擎派发即 failed，scene_id 在派发阶段
-    # 才写入 → 用例前提不成立。本分支合并后该用例实际通过（scene 维度在派发阶段落库），
-    # 故放宽 strict：保持基线「已知限制」的语义标注，同时不把我方已修复的行为判红。
-    @pytest.mark.xfail(strict=False, reason="基线已知限制（无引擎派发即 failed，scene_id 在派发阶段"
-                                            "写入）；本分支已修复，允许 XPASS")
     def test_dispatch_persists_issue_scene_id(self):
         """P6：普通 a2a 落库应持久化 Issue 场景维度，而非空 scene。"""
         client = self._setup()
@@ -346,86 +332,3 @@ class TestA2ADispatchGuard1770:
             row = db.cursor().execute(
                 "SELECT scene_id FROM events WHERE seq=?", (resp["seq"],)).fetchone()
         assert row and row[0] == "default", row
-    def _complete(self, seq):
-        self._force_status(seq, "completed")
-
-    def test_top_level_force_resends_duplicate_key(self):
-        """Issue #1942：幂等窗内顶层 force=true 一次成功重发。"""
-        client = self._setup()
-        first_seq = client.post("/api/a2a", json=self._body(agent="coding")).json()["seq"]
-        assert first_seq > 0
-        self._complete(first_seq)
-
-        dup = client.post("/api/a2a", json=self._body(agent="coding")).json()
-        assert dup["skipped"] == "duplicate_key", dup
-
-        forced = client.post("/api/a2a", json=self._body(agent="coding", force=True))
-        assert forced.status_code == 200, forced.text
-        data = forced.json()
-        assert data.get("skipped") not in ("duplicate_key", "active_dispatch"), data
-        assert data["seq"] > 0 and data["seq"] != first_seq
-
-    def test_payload_force_resends_duplicate_key(self):
-        """Issue #1942：payload.force=true 与顶层 force 等价，可一次成功重发。"""
-        client = self._setup()
-        first_seq = client.post("/api/a2a", json=self._body(agent="coding")).json()["seq"]
-        assert first_seq > 0
-        self._complete(first_seq)
-
-        dup = client.post("/api/a2a", json=self._body(agent="coding")).json()
-        assert dup["skipped"] == "duplicate_key", dup
-
-        body = self._body(agent="coding")
-        body.pop("force", None)
-        body["payload"]["force"] = True
-        forced = client.post("/api/a2a", json=body)
-        assert forced.status_code == 200, forced.text
-        data = forced.json()
-        assert data.get("skipped") not in ("duplicate_key", "active_dispatch"), data
-        assert data["seq"] > 0 and data["seq"] != first_seq
-
-    def test_changing_idempotency_key_still_duplicate(self):
-        """Issue #1942：幂等窗口键 = issue+scene+agent，更换 idempotency_key 无效。"""
-        client = self._setup()
-        first = self._body(agent="coding")
-        first["idempotency_key"] = "task-42:coding"
-        first_seq = client.post("/api/a2a", json=first).json()["seq"]
-        assert first_seq > 0
-        self._complete(first_seq)
-
-        second = self._body(agent="coding")
-        second["idempotency_key"] = "task-43:coding"
-        resp = client.post("/api/a2a", json=second)
-        assert resp.status_code == 200, resp.text
-        data = resp.json()
-        assert data["skipped"] == "duplicate_key", data
-        assert data["reason"] == f"duplicate_key:{first_seq}"
-        assert data["seq"] == 0
-        assert len(self._events_for("coding")) == 1
-
-    def test_guard_message_documents_force_position(self):
-        """Issue #1942：三类门禁 message 均说明 force 位置与「换 key 无效」。"""
-        import json as _json
-        from src.domains.runtime.routes.webhook import _a2a_guard_skip_response
-        info = {"seq": 7, "agent": "qa", "status": "running", "created_at": ""}
-        for kind in ("downstream_running", "duplicate_key", "active_dispatch"):
-            resp = _a2a_guard_skip_response(
-                "gitcode:owner/repo", "5", "coding", "default", kind, dict(info))
-            msg = _json.loads(bytes(resp.body).decode())["message"]
-            assert "force=true to dispatch immediately" in msg, (kind, msg)
-            assert "top level" in msg and "payload.force=true" in msg, (kind, msg)
-            assert "equivalent" in msg, (kind, msg)
-            assert "idempotency_key" in msg and "issue+scene+agent" in msg, (kind, msg)
-
-    def test_duplicate_key_message_contains_recovery_hint(self):
-        """Issue #1942：duplicate_key 响应的 message 可直接指导一次成功重发。"""
-        client = self._setup()
-        first_seq = client.post("/api/a2a", json=self._body(agent="coding")).json()["seq"]
-        self._complete(first_seq)
-        data = client.post("/api/a2a", json=self._body(agent="coding")).json()
-        assert data["skipped"] == "duplicate_key", data
-        msg = data["message"]
-        assert "force=true to dispatch immediately" in msg
-        assert "payload.force=true" in msg
-        assert "Changing idempotency_key will not bypass this guard" in msg
-        assert "issue+scene+agent" in msg

@@ -41,10 +41,10 @@ test: ## Run pytest test suite
 	$(PYTHON) -m pytest tests/ -v
 
 test-domains: ## Run tests per domain in isolated processes (stable order; see tests/README.md)
-	@set -e; for d in $(DOMAINS); do \
+	@rc=0; for d in $(DOMAINS); do \
 		echo "== tests/$$d =="; \
-		$(TEST_PYTHON) -m pytest tests/$$d -q || exit 1; \
-	done
+		$(TEST_PYTHON) -m pytest tests/$$d -q --continue-on-collection-errors || rc=1; \
+	done; exit $$rc
 
 test-fast: ## Run pytest (fast: skip slow/e2e markers)
 	$(PYTHON) -m pytest tests/ -v -m "not e2e_ui and not atomic"
