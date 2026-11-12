@@ -55,6 +55,10 @@ def _legacy_tables(conn: sqlite3.Connection) -> None:
 def db_path(tmp_path, monkeypatch):
     path = str(tmp_path / "authority.db")
     monkeypatch.setenv("DEVOPS_DB_PATH", path)
+    # IM 侧统一走 src.domains.runtime.im._db（连接是模块级单例），
+    # 换库后必须清缓存，否则仍指向旧库/真库 → 写权限用例假红。
+    import src.domains.runtime.im._db as im_db
+    monkeypatch.setattr(im_db, "_conn", None, raising=False)
     conn = sqlite3.connect(path)
     _legacy_tables(conn)
     conn.execute(
@@ -122,16 +126,17 @@ def test_sync_does_not_register_lease_carrier(db_path):
     assert _q(db_path, "SELECT bot_app_id FROM global_im_bot_config WHERE bot_app_id='cli_u4'") == []
     assert _q(db_path, "SELECT lease_key FROM grape_t_channel_lease") == [], "sync 不应预铺租约行"
 
+    from src.domains.runtime.im._db import db as _imdb, db_lock
     from src.domains.runtime.im.bot_lease import BotLeaseStore
-    from src.kernel.session_manager import db as _sdb, db_lock
     inst_id = _q(db_path, "SELECT id FROM grape_t_channel_installation WHERE legacy_app_id='cli_u4'")[0][0]
     store = BotLeaseStore("t-inst")
     key = f"feishu:{inst_id}"
     token = store.try_acquire(key)
     assert token
-    # 租约表走主连接（生产=同一个库；测试里 session_manager 与 db_path 各挂一个 sqlite）
+    # A2 M3 起 IM 侧一切数据访问（含租约表）统一走 src.domains.runtime.im._db，
+    # 不再经过 session_manager 的连接（四进程跨域库只有 IM 域库是权威）。
     with db_lock:
-        row = _sdb.cursor().execute(
+        row = _imdb.cursor().execute(
             "SELECT lease_token FROM grape_t_channel_lease WHERE lease_key=?", (key,)).fetchone()
     assert row and row[0] == token
     store.release(key, token)

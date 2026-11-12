@@ -87,7 +87,7 @@ def _run(num, pending, monkeypatch, bound, upserts):
 def test_same_repo_is_noop_with_explicit_hint(monkeypatch):
     """选中当前已绑定仓库：不写库、不清会话指针、给出"已是当前仓库"提示。"""
     upserts = []
-    eg = _run("1", _pending(["github:AKAKAKAKAtes/111", "gitcode:XOcto/deepseek-harness"],
+    eg = _run("1", _pending(["github:AKAKAKAKAtes/111", "gitcode:example-org/deepseek-harness"],
                             current="github:AKAKAKAKAtes/111"),
               monkeypatch, bound="github:AKAKAKAKAtes/111", upserts=upserts)
     assert upserts == [], "同仓库不应重复 upsert（会顺带清 im_channel_id）"
@@ -101,10 +101,10 @@ def test_same_repo_is_noop_with_explicit_hint(monkeypatch):
 def test_different_repo_binds_and_reports(monkeypatch):
     """选中另一仓库：upsert 真实落值 + 成功卡。"""
     upserts = []
-    eg = _run("2", _pending(["github:AKAKAKAKAtes/111", "gitcode:XOcto/deepseek-harness"],
+    eg = _run("2", _pending(["github:AKAKAKAKAtes/111", "gitcode:example-org/deepseek-harness"],
                             current="github:AKAKAKAKAtes/111"),
               monkeypatch, bound="github:AKAKAKAKAtes/111", upserts=upserts)
-    assert upserts == ["gitcode:XOcto/deepseek-harness"]
+    assert upserts == ["gitcode:example-org/deepseek-harness"]
     assert len(eg.cards) == 1
     assert "绑定成功" in eg.cards[0].title
     assert "cidTEST" not in ha._pending_selections

@@ -37,6 +37,7 @@ def sqlite_db(monkeypatch, tmp_path):
 
     A2 M3 起租约在独立表 grape_t_channel_lease，且抢锁前要校验归属安装仍 active。
     """
+    import src.domains.runtime.im._db as im_db
     import src.session_manager as sm
     conn = sqlite3.connect(str(tmp_path / "lease.db"))
     conn.execute(
@@ -56,6 +57,10 @@ def sqlite_db(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(sm, "db", conn, raising=True)
     monkeypatch.setattr(sm, "db_lock", __import__("threading").RLock(), raising=True)
+    # IM 模块走 src.domains.runtime.im._db（域库统一入口），必须同时注入，
+    # 否则租约/写权限用例打到真库 → 架构守护 Critical（fixture 未随域库迁移）。
+    monkeypatch.setattr(im_db, "_conn", conn, raising=False)
+    monkeypatch.setattr(im_db, "db_lock", __import__("threading").RLock(), raising=False)
     yield conn
     conn.close()
 
@@ -148,7 +153,8 @@ def test_lease_sql_uses_python_clock_not_sql_now(sqlite_db):
         commit=sqlite_db.commit,
     )
     monkey = pytest.MonkeyPatch()
-    monkey.setattr(sm, "db", spy_conn, raising=True)
+    import src.domains.runtime.im._db as im_db
+    monkey.setattr(im_db, "_conn", spy_conn, raising=True)
     try:
         store = BotLeaseStore("r1", ttl=60)
         store.try_acquire(key)

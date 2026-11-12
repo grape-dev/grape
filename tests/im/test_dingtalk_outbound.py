@@ -286,12 +286,12 @@ def test_string_card_kind_goes_action_card():
                             send_action_card=send_action_card)
     import asyncio
     from src.domains.runtime.im.channel.message import OutboundMessage
-    out = OutboundMessage(chat_id="cid", text="**📍 当前位置**\n仓库：XOcto/deepseek-harness",
+    out = OutboundMessage(chat_id="cid", text="**📍 当前位置**\n仓库：example-org/deepseek-harness",
                           metadata={"kind": "card", "title": "DevOps Bot"})
     res = asyncio.run(sender.send(out))
     assert res.ok and res.message_id == "mid_card"
     # markdown 单换行不换行 → 发送前补「两空格硬换行」
-    assert calls == [("card", "DevOps Bot", "**📍 当前位置**  \n仓库：XOcto/deepseek-harness", [])]
+    assert calls == [("card", "DevOps Bot", "**📍 当前位置**  \n仓库：example-org/deepseek-harness", [])]
 
 
 def test_string_card_without_transport_is_failed():
