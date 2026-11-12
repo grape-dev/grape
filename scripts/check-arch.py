@@ -118,12 +118,8 @@ WHITELIST: dict[str, dict[str, str]] = {
     # (run `python scripts/check-arch.py` on the base tree to reproduce).
     "src/domains/runtime/agents/aishell_acp.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
     "src/domains/runtime/pipeline/event_pipeline.py": {"R6": {"targets": ["src.outbound_ledger", "src.prompt_builder", "src.repo_key"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/engine/direct_executor.py": {"R6": {"targets": ["src.session_manager"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/routes/webhook.py": {"R6": {"targets": ["src.api.event_pipeline", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/routes/events.py": {"R6": {"targets": ["src.api.event_pipeline"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/runtime/routes/issues.py": {"R6": {"targets": ["src.api.event_pipeline"], "reason": "legacy shim import; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
-    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env", "src.session_manager"], "reason": "legacy shim imports; due Phase 5 contracts (evidence: red at base 13c6d0979)"}},
+    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts"}},
+    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env"], "reason": "legacy shim imports; due Phase 5 contracts"}},
     # R5: known import cycles inherited from the pre-Phase-1 layout.
     # agents <-> engine: M0 compat forwarding layer (src.domains.runtime.agents re-exported
     #   src.domains.runtime.engine backends); importing src.domains.runtime.agents before src.domains.runtime.engine fails
@@ -137,6 +133,30 @@ WHITELIST: dict[str, dict[str, str]] = {
     },
     "CYCLE:src.domains.runtime.vcs.providers+src.domains.runtime.vcs.providers.base": {
         "R5": "pre-existing vcs provider registration cycle (harmless init order)",
+    },
+    "CYCLE:src.domains.runtime.im.channel+src.domains.runtime.im.channel.capability+src.domains.runtime.im.channel.channel+src.domains.runtime.im.channel.message+src.domains.runtime.im.channel.registry+src.domains.runtime.im.channel.types": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.engine+src.domains.runtime.im.engine.dedup+src.domains.runtime.im.engine.hashring+src.domains.runtime.im.engine.lease+src.domains.runtime.im.engine.metrics+src.domains.runtime.im.engine.replier+src.domains.runtime.im.engine.router+src.domains.runtime.im.engine.session+src.domains.runtime.im.engine.supervisor": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.telegram+src.domains.runtime.im.adapters.telegram.cards+src.domains.runtime.im.adapters.telegram.channel+src.domains.runtime.im.adapters.telegram.inbound+src.domains.runtime.im.adapters.telegram.markdown+src.domains.runtime.im.adapters.telegram.outbound+src.domains.runtime.im.adapters.telegram.resolvers": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.slack+src.domains.runtime.im.adapters.slack.cards+src.domains.runtime.im.adapters.slack.channel+src.domains.runtime.im.adapters.slack.inbound+src.domains.runtime.im.adapters.slack.markdown+src.domains.runtime.im.adapters.slack.outbound+src.domains.runtime.im.adapters.slack.resolvers": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.wecom+src.domains.runtime.im.adapters.wecom.cards+src.domains.runtime.im.adapters.wecom.inbound+src.domains.runtime.im.adapters.wecom.markdown+src.domains.runtime.im.adapters.wecom.outbound": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.feishu+src.domains.runtime.im.adapters.feishu.inbound+src.domains.runtime.im.adapters.feishu.markdown+src.domains.runtime.im.adapters.feishu.outbound": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.dingtalk+src.domains.runtime.im.adapters.dingtalk.inbound+src.domains.runtime.im.adapters.dingtalk.markdown+src.domains.runtime.im.adapters.dingtalk.outbound": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
+    },
+    "CYCLE:src.domains.runtime.im.adapters.wechat+src.domains.runtime.im.adapters.wechat.channel+src.domains.runtime.im.adapters.wechat.inbound+src.domains.runtime.im.adapters.wechat.login+src.domains.runtime.im.adapters.wechat.media+src.domains.runtime.im.adapters.wechat.outbound+src.domains.runtime.im.adapters.wechat.protocol+src.domains.runtime.im.adapters.wechat.resolvers": {
+        "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
     },
 }
 

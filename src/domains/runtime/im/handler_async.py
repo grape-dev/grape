@@ -10,14 +10,14 @@ import re, os, asyncio, time, json, uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from src.config import log, WORKSPACE_DIR, SKILLS_DIR
+from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR
 from src.kernel.session_manager import get_or_create_session, update_session, update_conversation, db
-from src.prompt_builder import build_chat_prompt, resolve_task_server_env
+from src.kernel.prompt_builder import build_chat_prompt, resolve_task_server_env
 from src.domains.runtime.agents.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 from src.api.chat_session_env import chat_session_env_extra
-from src.token_service import is_auth_401_error
+from src.kernel.token_service import is_auth_401_error
 # Issue #1095：业务层只构造渠道中立 Card IR（lark 结构只允许出现在 renderer 内）
 from src.domains.runtime.im.channel.card import (
     Action, ButtonStyle, Card, Tone,
@@ -182,7 +182,7 @@ async def _send_repo_card(ctx: "BotContext", egress: "HandlerEgress", chat_id: s
       - "failed"：有仓库但卡片没发出去 → 调用方必须报"发送失败"，不得说没仓库。
     """
     from src.domains.mgmt.user.db import get_managed_repos
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     repos = get_managed_repos(uid)
     if not repos:
         return "empty"
@@ -320,7 +320,7 @@ def _resolve_feishu_exec_repo(repo_key: str, chat_id: str, user_id: int) -> str:
     执行仓库以会话仓库为准（幂等，一般群绑定则不覆盖）。
     返回带前缀的 repo_key。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     try:
         # 仅当外层 resolve_repo 已给出某仓库（群绑定/命中）且本群已 join task 会话时对齐；
         # 否则回落原 repo_key（覆盖场景由外层保证非空）。
@@ -751,7 +751,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
         from src.kernel.session_manager import get_conversation_by_im
         bound = _current_bound_repo(chat_id, account, db)
         conv = get_conversation_by_im(chat_id, uid) if uid else None
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         # 展示统一去前缀（repo_key.py 约定：外部/前端一律无前缀）
         shown_bound = from_repo_key(bound) if bound else ""
         lines = ["**📍 当前位置**", f"仓库：{shown_bound or '未绑定'}"]
@@ -788,7 +788,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
             if not row:
                 return "📋 当前群未绑定任何仓库。先使用 `/repo` 绑定后再清理。"
             repo_key = row[0]
-            from src.repo_key import to_repo_key, from_repo_key
+            from src.kernel.repo_key import to_repo_key, from_repo_key
             full_key = to_repo_key(repo_key)
             legacy_key = from_repo_key(repo_key)
             c.execute("UPDATE chat_agent_session SET runtime_session_id='', runtime='' WHERE repo_key=? OR repo_key=?", (full_key, legacy_key))
@@ -1119,8 +1119,8 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
         except Exception as e:
             log.warning(f"Feishu: get conversation failed: {e}")
     if conv_obj and conv_obj.get("conv_type") == "task":
-        from src.prompt_builder import build_issue_chat_prompt
-        from src.repo_key import from_repo_key
+        from src.kernel.prompt_builder import build_issue_chat_prompt
+        from src.kernel.repo_key import from_repo_key
         try:
             from src.kernel.session_manager import get_messages
             conv_history = get_messages(conv_id, limit=20)
@@ -1165,7 +1165,7 @@ async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id:
         if action == "repo":
             repo = items[idx]
             repo_key = repo["repo_key"] if isinstance(repo, dict) else repo
-            from src.repo_key import from_repo_key
+            from src.kernel.repo_key import from_repo_key
             _cur_bound = _current_bound_repo(chat_id, ctx.app_id, db)
             log.info(f"[selection] repo num={num} idx={idx} repo_key={repo_key} "
                      f"current={_cur_bound or '-'} chat={chat_id[-12:]}")
@@ -1540,7 +1540,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
 
         bind_repo = detect_bind_intent(text)
         if bind_repo:
-            from src.repo_key import to_repo_key
+            from src.kernel.repo_key import to_repo_key
             repo_key = to_repo_key(bind_repo)
             try:
                 from src.kernel.session_manager import upsert_repo_im_binding
@@ -1555,7 +1555,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
             await _send_bind_success_card(ctx, egress, msg_id, repo_key)
             return
 
-        from src.repo_key import to_repo_key, from_repo_key, parse_repo_key
+        from src.kernel.repo_key import to_repo_key, from_repo_key, parse_repo_key
         repo_key = to_repo_key(repo_key)
         # 方案 1-A：已通过 /task-open 进入 task 会话的群，执行仓库以会话仓库为准
         #（否则 resolve_repo 取群绑定 devops-bot 会在错误仓库空 cwd 跑 opencode → 无答复）
@@ -1751,7 +1751,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
 
         # 与 Web Chat 严格一致：同一 conv_id 同一目录 WORKSPACE_DIR/{provider}/{owner}/{repo}/chat/{uid}/{conv_id}
         # （web-chat-no-response-cwd-fix.md §4；去掉原 feishu/ 段与 sess 尾巴）
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         wsd = os.path.join(workspace_repo_dir(repo_key or ""),
                            "chat", str(user_id or 0), conv_id or "")
         os.makedirs(wsd, exist_ok=True)

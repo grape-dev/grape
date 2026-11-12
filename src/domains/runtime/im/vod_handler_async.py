@@ -6,12 +6,12 @@ import json, os, re, asyncio, time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from src.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
+from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
 from src.api.chat_session_env import chat_repo_env
 from src.domains.runtime.im._db import db, db_lock
 from src.domains.runtime.agents.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
-from src.token_service import is_auth_401_error
+from src.kernel.token_service import is_auth_401_error
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
@@ -135,7 +135,7 @@ def _current_vod_repo(chat_id: str) -> str:
 async def _send_vod_repo_card(ctx: "BotContext", egress: "FeishuAsync", chat_id: str, msg_id: str, page: int = 1) -> bool:
     """生成并发送 `/repo` 卡片（候选=当前 bot 名下已配置 VOD 的仓库），设置 pending。无候选返回 False。"""
     from src.domains.runtime.im.handler_async import _set_pending_selection, _candidate_card, _PENDING_SELECT_PAGE_SIZE
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     repos = _list_vod_repos(ctx.app_id)
     if not repos:
         return False
@@ -157,7 +157,7 @@ async def _handle_vod_selection(ctx: "BotContext", egress: "FeishuAsync", chat_i
     """卡片命令编号选择执行（vod-navigation-commands-design.md §3.2，action=vod_repo）。"""
     try:
         from src.domains.runtime.im.handler_async import _clear_pending_selection, _PENDING_SELECT_PAGE_SIZE
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         if num == "0":
             _clear_pending_selection(chat_id)
             await egress.reply_card(ctx, msg_id, "**✅ 已取消选择**")
@@ -176,7 +176,7 @@ async def _handle_vod_selection(ctx: "BotContext", egress: "FeishuAsync", chat_i
             return
         # 绑定/换绑 vod_conversations（vod-navigation-commands-design.md §3.4）：
         # 已存在 → UPDATE agent_session_id + 清空 runtime_session_id（防旧仓库 opencode 上下文污染）；不存在 → INSERT
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         with db_lock:
             c = db.cursor()
             existing = c.execute("SELECT id FROM vod_conversations WHERE im_chat_id=?", (chat_id,)).fetchone()
@@ -210,7 +210,7 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     parts.append(f"消息内容: {user_msg[:2000]}")
     parts.append("")
 
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
     summary = get_issue_summary(repo_key)
     if summary:
@@ -254,7 +254,7 @@ def _build_vod_prompt(evt: dict, skill_name: str, skill_path: str = "") -> str:
     # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
     # （Issue #1577 / 架构审查 M3；worker 端会再替换一次，幂等）
     try:
-        from src.prompt_builder import _apply_server_url_placeholders
+        from src.kernel.prompt_builder import _apply_server_url_placeholders
         return _apply_server_url_placeholders("\n".join(parts))
     except Exception:
         return "\n".join(parts)
@@ -273,7 +273,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             pass
     # R20.17.1: 不从 session 读旧 token，改为调 TokenResolver.resolve() 获取最新 token
     # R20.17.2: session 中的 repo_gitcode_token 仍保留（兼容 A2A 鉴权），但 VOD handler 不直接使用
-    from src.token_service import resolve_repo_token
+    from src.kernel.token_service import resolve_repo_token
     _token_result = resolve_repo_token(repo_key)
     repo_token = _token_result.token
     if not repo_token:
@@ -283,7 +283,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         return f"⚠️ 仓库 {repo_key} 的 Token 已过期，VOD Agent 无法启动，请在设置页重新绑定 Token"
 
     prompt = _build_vod_prompt(evt, skill, skill_path)
-    from src.repo_key import workspace_repo_dir, parse_repo_key, from_repo_key
+    from src.kernel.repo_key import workspace_repo_dir, parse_repo_key, from_repo_key
     _provider, _, _ = parse_repo_key(repo_key)
     wsd = os.path.join(WORKSPACE_DIR, "vod", _provider or "gitcode", from_repo_key(repo_key).replace("/", "_"))
     os.makedirs(wsd, exist_ok=True)
@@ -313,7 +313,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             _queue_repo_token = repo_token or ""
             if _token_result.level == "user":
                 _queue_repo_token = ""  # 路径 B: repo_gitcode_token 留空，与 pipeline 一致
-            from src.prompt_builder import resolve_task_server_env
+            from src.kernel.prompt_builder import resolve_task_server_env
             tid = enqueue_task(
                 agent_session_id=f"vod:{repo_key}",
                 runtime_id=runtime_id,

@@ -2,7 +2,7 @@
 Auth: IAM5.0 AK/SK signing (SDK-HMAC-SHA256).
 """
 import os, json, hashlib, hmac, datetime, urllib.request, urllib.error, urllib.parse
-from src.config import log
+from src.kernel.config import log
 
 _DEFAULT_BASE_URL = "https://devstation.myhuaweicloud.com"
 SOURCE = "CODEARTS-AGENT"

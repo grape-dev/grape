@@ -11,7 +11,7 @@ A2 M3：锁从 legacy 表 `global_im_bot_config` 迁到独立表 `grape_t_channe
   BOT_LEASE_SWEEP_INTERVAL=10  sweep 扫描间隔（秒）
 """
 import secrets, socket, time
-from src.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
+from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
 
 
 def generate_instance_id() -> str:
