@@ -2097,12 +2097,16 @@ function renderOverviewCharts() {
           // 1) 同一容器只留一个实例（原来每次刷新都 init 一个新的，key 还带 Math.random）
     const prevInst = echarts.getInstanceByDom && echarts.getInstanceByDom(el)
     if (prevInst) prevInst.dispose()
-    const ch = echarts.init(el)
+    const ch = echarts.init(el, null, { useDirtyRect: true })
     // 2) 关掉动画 + 工具框过渡：鼠标在图上滑时 ECharts 每帧重绘 canvas，
     //    再叠加卡片的 backdrop-filter 会被迫重采样 → 掉帧
     if (option.tooltip) {
+      // richText = 工具框画在 canvas 里，不再每帧改 DOM 触发整页 layout（鼠标跟手的关键）
+      option.tooltip.renderMode = 'richText'
+      option.tooltip.confine = true
       option.tooltip.transitionDuration = 0
       option.tooltip.animation = false
+      if (option.tooltip.axisPointer) option.tooltip.axisPointer.animation = false
     }
     ch.setOption(Object.assign({ animation: false }, option))
     chartRefs[el.className + Math.random()] = ch
@@ -2659,7 +2663,7 @@ function renderResChart() {
     }
   }
   try {
-    const ch = echarts.init(el)
+    const ch = echarts.init(el, null, { useDirtyRect: true })
     ch.setOption({
       tooltip: { trigger: 'axis' },
       legend: { top: 0, right: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
@@ -3863,7 +3867,7 @@ function effInitChart(name, option) {
       effCharts[name].dispose()
       effCharts[name] = null
     }
-    const ch = echarts.init(el)
+    const ch = echarts.init(el, null, { useDirtyRect: true })
     ch.setOption(option)
     effCharts[name] = ch
     return ch
