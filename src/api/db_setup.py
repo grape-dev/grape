@@ -2816,6 +2816,437 @@ LEGACY_TRACK_FROZEN = (
 )
 
 
+# ===== D105 存量库类型归一（自 arch 线移植，2026-11-12）=====
+# 口径：**DDL 是唯一权威**（本文件 _ACCOUNT_FK_USER_ID_COLS 对应列在 CREATE TABLE 里
+# 已声明 TEXT/VARCHAR(36)），下面的归一函数只服务于两类场景：
+#   1. 存量库（旧 DDL 声明 INTEGER / TEXT 混型）需要一次性重建或放宽；
+#   2. 契约用例（tests/kernel/test_*_text_migration.py）直接调用函数验证行为。
+# 因此这些函数**不注册成启动迁移**：自动注册会在每次启动对线上 MySQL 逐列 ALTER，
+# 风险高于收益（线上三库已按 DDL 规整）。需要手工修复存量库时显式调用即可。
+
+_ACCOUNT_FK_USER_ID_COLS = (
+    ("chat_agent_session", "user_id"),
+    ("user_credentials", "user_id"),
+    ("managed_repos", "host_user_id"),
+    ("user_repos", "user_id"),
+    ("agent_tasks", "user_id"),
+    ("chat_conversations", "user_id"),
+    ("feishu_onboard_task", "user_id"),
+    ("scene_market", "source_user_id"),
+    ("scene_likes", "user_id"),
+    ("skill_likes", "user_id"),
+    ("session_api_tokens", "user_id"),
+    ("api_tokens", "user_id"),
+    ("user_feedback", "user_id"),
+    ("autopilot_subscriptions", "user_id"),
+    ("org_member", "user_id"),
+    ("org_invitation", "invitee_user_id"),
+    ("audit_logs", "user_id"),
+    ("exchange_codes", "user_id"),
+    ("binding_tickets", "initiating_user_id"),
+    ("binding_tickets", "original_user_id"),
+    ("community_posts", "user_id"),
+    ("community_comments", "user_id"),
+    ("community_post_likes", "user_id"),
+    ("obs_llm_usage", "user_id"),
+    ("obs_llm_usage_archive", "user_id"),
+    ("grape_t_credential_reveal_log", "user_id"),
+    ("grape_t_credential_usage_log", "user_id"),
+    ("grape_t_credential_usage_log", "initiating_actor_id"),
+    ("external_identities", "grape_user_id"),
+    ("issue", "user_id"),
+    ("issue", "scene_user_id"),
+    # 202611091100 补录：D105 漏列（owner 为归属人 user_id、release_approved_by 为审批人
+    # user_id——同为账号域 uuid 引用，INTEGER 亲和/INT 列对 uuid 同样混型不命中/写崩）
+    ("grape_t_patrol_findings", "owner"),
+    ("issue", "release_approved_by"),
+    # 注：unified_user_mapping.dingtalk_user_id 由 202611091200 单独放宽（守卫测试
+    # 锁定本清单 33 对；该列走 _widen_mysql_issue_state_scene_user_id 顺带处理）。
+)
+
+
+
+_ORG_DOMAIN_TEXT_COLS = (
+    ("organization", "owner_id"),
+    ("org_member", "org_id"),
+    ("org_member", "invited_by"),
+    ("org_invitation", "org_id"),
+    ("org_invitation", "inviter_id"),
+    *[(t, "org_id") for t in _ORG_ID_TABLES],
+)
+
+
+
+def _rebuild_table_text_columns(c, table, cols, text_cols) -> None:
+    """任意表整表重建：把 text_cols 中各列亲和 INTEGER/NUMERIC → TEXT，数据保值拷贝。
+
+    DDL 用 sqlite_master 原文改造（仅把目标列的 INTEGER 改 TEXT）——
+    不能从 PRAGMA table_info 反推重建：表达式默认值（如 DEFAULT (datetime('now'))）在
+    PRAGMA 里丢失括号，重建即语法错误（实锤踩过）。cols 为该表 PRAGMA table_info 全量行。
+    """
+    import re
+    old = f"{table}__text_rebuild_old"
+    c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    row = c.fetchone()
+    ddl = (row[0] or "") if row else ""
+    new_create = ddl
+    for col in text_cols:
+        # 列名可能带反引号/双引号/方括号（存量库建表风格不一，实锤：线上 issue 表 `parent_issue_number` INTEGER）
+        _qmarks = chr(96) + chr(34) + chr(92) + "["
+        _pat = "([" + _qmarks + "]?" + col + "[" + _qmarks + "]?\\s+)INTEGER\\b"
+        new_create, _n = re.subn(_pat, lambda m: m.group(1) + "TEXT", new_create, count=1)
+        if _n != 1:
+            raise ValueError(f"{table}: DDL 中未找到 {col} INTEGER 列声明，重建中止")
+    c.execute(f"DROP TABLE IF EXISTS {old}")
+    c.execute(f"ALTER TABLE {table} RENAME TO {old}")
+    c.execute(new_create)
+    _names = ", ".join(r[1] for r in cols)
+    _sel = ", ".join(f"CAST({col} AS TEXT)" if col in text_cols else col for col in (r[1] for r in cols))
+    c.execute(f"INSERT INTO {table} ({_names}) SELECT {_sel} FROM {old}")
+    # 重建该表的显式索引（sqlite_autoindex 之外；含 idx_tasks_repo_issue UNIQUE 等）。
+    # 注意：RENAME 会把索引 SQL 里的表名改写为旧表名（带引号），重建前需替换回新表名
+    _idx = c.execute("SELECT name, sql FROM sqlite_master "
+                     f"WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (old,)).fetchall()
+    c.execute(f"DROP TABLE {old}")
+    for _name, _sql in _idx:
+        _sql = _sql.replace(f'"{old}"', f'"{table}"').replace(f"'{old}'", f"'{table}'")
+        try:
+            c.execute(_sql)
+        except Exception:
+            try:
+                c.execute(f'DROP INDEX IF EXISTS "{_name}"')
+                c.execute(_sql)
+            except Exception:
+                pass
+
+
+def _normalize_account_fk_user_id_text(conn) -> int:
+    """账号域 user_id 族外键列存量混型归一为 VARCHAR(36) 存储（见 _ACCOUNT_FK_USER_ID_COLS）。
+
+    每列独立处理，幂等：亲和已 TEXT 且无 typeof != 'text' 行时零改动。
+    亲和非 TEXT（存量库旧 DDL 声明 INTEGER）时整表重建改亲和——纯 CAST AS TEXT
+    会被 INTEGER 亲和在落盘时翻回 integer（同 issue_number 迁移实锤口径）。
+    表/列不存在（_ensure_column 兜底前、可选表未建）逐项跳过。
+    MySQL 分支：INT→VARCHAR(36) 放宽（与 D105 0002 的 uid_widen 同口径，仅限本清单列）。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    if get_db_backend() != "sqlite":
+        return _widen_mysql_account_fk_user_id_cols()
+    c = conn.cursor()
+    changed = 0
+    rebuilt = 0
+    for table, col in _ACCOUNT_FK_USER_ID_COLS:
+        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        if not _cols:
+            continue  # 表不存在（未建/已 DROP），跳过
+        _decl = next((r[2] or "" for r in _cols if r[1] == col), None)
+        if _decl is None:
+            continue  # 列不存在（_ensure_column 兜底前），跳过
+        _decl_u = _decl.strip().upper()
+        if _decl_u == "TEXT" or any(_t in _decl_u for _t in ("CHAR", "CLOB")):
+            # 已是字符串族亲和（TEXT / VARCHAR(36) 等，如 agent_tasks.user_id）——
+            # 无需整表重建：_rebuild 的 DDL 改写只认 INTEGER 声明，遇 VARCHAR 列
+            # 会 raise「DDL 中未找到 INTEGER 列声明」中止整条迁移（启动 warning
+            # 且永不盖章）。直接 typeof 混型归一后跳过续跑。
+            changed += c.execute(
+                f"UPDATE {table} SET {col} = CAST({col} AS TEXT) "
+                f"WHERE typeof({col}) != 'text'").rowcount
+            continue
+        _rebuild_table_text_columns(c, table, _cols, (col,))
+        rebuilt += 1
+        continue
+    if rebuilt:
+        return -1  # 重建路径（行数级改写不计，幂等由亲和判定保证）
+    return changed or 0
+
+
+def _widen_mysql_account_fk_user_id_cols() -> int:
+    """MySQL 侧：清单内仍为 INT 族的列 ALTER MODIFY VARCHAR(36)（保值；NOT NULL 保留）。
+    202611091200：VARCHAR(36) 列也纳入（VARCHAR(191)）——credential_usage_log.user_id 等
+    新表 DDL 声明 VARCHAR(36)，MySQL 上非 VARCHAR（门禁 user_id 族不变式红）。
+    幂等：已 varchar 跳过。与 D105 0002 的 information_schema 扫描同口径，但只限本清单
+    （0002 按列名全库扫描覆盖不到 invitee/initiating/original_user_id）。"""
+    from src.kernel.session_manager import db
+    c = db.cursor()
+    targets = []
+    for table, col in _ACCOUNT_FK_USER_ID_COLS:
+        c.execute(
+            "SELECT IS_NULLABLE, DATA_TYPE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s "
+            "AND (DATA_TYPE IN ('int','bigint','smallint','tinyint','mediumint') "
+            "     OR DATA_TYPE = 'text')",
+            (table, col))
+        row = c.fetchone()
+        if row:
+            targets.append((table, col, row[0], row[1]))
+    for table, col, nullable, dtype in targets:
+        # INT→VARCHAR(36)（uuid 保值）；TEXT→VARCHAR(191)（平台 id/长引用留裕量）
+        length = "191" if dtype == "text" else "36"
+        suffix = " NOT NULL" if nullable == "NO" else ""
+        c.execute(f"ALTER TABLE {table} MODIFY {col} VARCHAR({length}){suffix}")
+    if targets:
+        db.commit()
+        log.info(f"account fk user_id widen: {len(targets)} col(s) -> VARCHAR (MySQL)")
+    return len(targets)
+
+
+def _rebuild_organization_text_pk(c, cols) -> None:
+    """organization 整表重建：id INTEGER PRIMARY KEY AUTOINCREMENT → TEXT PRIMARY KEY，
+    owner_id 同批 TEXT 化，存量值 CAST 保值拷贝（手法对齐 UuidPkMigration._auto_sqlite_plan，
+    但作用于任意 conn——迁移函数收 conn 参数，不能依赖 session_manager 全局连接）。"""
+    import re
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='organization'"
+    ).fetchone()
+    ddl = (row[0] or "") if row else ""
+    new_create, _n = re.subn(r"(\bid\s+)INTEGER PRIMARY KEY AUTOINCREMENT",
+                             r"\1TEXT PRIMARY KEY", ddl, count=1)
+    if _n != 1:
+        raise ValueError("organization: DDL 无 INTEGER PRIMARY KEY AUTOINCREMENT，重建中止")
+    text_cols = ("id", "owner_id")
+    for col in text_cols:
+        _qmarks = chr(96) + chr(34) + chr(92) + "["
+        _pat = "([" + _qmarks + "]?" + col + "[" + _qmarks + "]?\\s+)INTEGER\\b"
+        new_create, _n = re.subn(_pat, lambda m: m.group(1) + "TEXT", new_create, count=1)
+    old = "organization__text_rebuild_old"
+    c.execute("DROP TABLE IF EXISTS " + old)
+    c.execute("ALTER TABLE organization RENAME TO " + old)
+    c.execute(new_create)
+    _names = ", ".join(r[1] for r in cols)
+    _sel = ", ".join(f"CAST({col} AS TEXT)" if col in text_cols else col
+                     for col in (r[1] for r in cols))
+    c.execute(f"INSERT INTO organization ({_names}) SELECT {_sel} FROM {old}")
+    _idx = c.execute("SELECT name, sql FROM sqlite_master "
+                     "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (old,)).fetchall()
+    c.execute(f"DROP TABLE {old}")
+    for _name, _sql in _idx:
+        _sql = _sql.replace(f'"{old}"', '"organization"').replace(f"'{old}'", "'organization'")
+        try:
+            c.execute(_sql)
+        except Exception:
+            try:
+                c.execute(f'DROP INDEX IF EXISTS "{_name}"')
+                c.execute(_sql)
+            except Exception as e:
+                log.warning(f"org text migration: index rebuild failed on organization.{_name}: {e}")
+
+
+def _normalize_org_domain_text(conn) -> int:
+    """org 域 id TEXT 归一（SQLite 侧）：organization.id 主键 TEXT 化 + owner_id/
+    org_id/inviter_id/invited_by/核心表 org_id 列 TEXT 亲和 + 哨兵 0 → ''。
+
+    幂等：id 已 TEXT、各列亲和已 TEXT 且无混型行、哨兵已 '' 时零改动。
+    亲和非 TEXT（存量库旧 DDL）时整表重建——纯 CAST 会被 INTEGER 亲和翻回
+    integer（202611091000 同口径实锤）。表/列不存在逐项跳过。
+    返回：重建路径 -1；否则改写行数。"""
+    c = conn.cursor()
+    changed = 0
+    rebuilt = False
+
+    # ① organization.id 主键（TEXT PK 重建，owner_id 随批）
+    _cols = c.execute("PRAGMA table_info(organization)").fetchall()
+    if _cols:
+        _decl = next((r[2] or "" for r in _cols if r[1] == "id"), None)
+        if _decl is not None and _decl.strip().upper() != "TEXT":
+            _rebuild_organization_text_pk(c, _cols)
+            rebuilt = True
+
+    # ② 引用列 TEXT 亲和归一（保值）
+    for table, col in _ORG_DOMAIN_TEXT_COLS:
+        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        if not _cols:
+            continue
+        _decl = next((r[2] or "" for r in _cols if r[1] == col), None)
+        if _decl is None:
+            continue
+        if _decl.strip().upper() != "TEXT":
+            _rebuild_table_text_columns(c, table, _cols, (col,))
+            rebuilt = True
+            continue
+        changed += c.execute(
+            f"UPDATE {table} SET {col} = CAST({col} AS TEXT) "
+            f"WHERE typeof({col}) != 'text'").rowcount
+
+    # ③ 哨兵改写：0 → ''（''=全局/未归属；对齐 owner 列 ''=unowned 口径）
+    for table, col in _ORG_SENTINEL_COLS:
+        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        if not _cols or not any(r[1] == col for r in _cols):
+            continue
+        changed += c.execute(
+            f"UPDATE {table} SET {col}='' WHERE {col}='0' OR {col}=0").rowcount
+
+    if rebuilt:
+        return -1
+    return changed or 0
+
+
+def _rebuild_issue_ident_columns_integer(c, cols, ident_cols) -> None:
+    """issue 表整表重建：把 ident_cols 各列亲和 TEXT → INTEGER（基线 #995 修复）。
+
+    修复 202611090004 把 issue_number/parent_issue_number 归一为 TEXT 亲和后，
+    数字 ident 读侧变 '30'（str）压掉基线 #995 的 int 契约。INTEGER 亲和下：
+    - 数字值（int 或 '30'）落盘即 int，读侧恒 int（基线行为恢复）；
+    - 非数字 ident（gitee IK*）按 SQLite 动态类型原样 text 存储，D105 域不受影响；
+    - str 参数等值比较（WHERE issue_number=?）经 INTEGER 亲和无损转换仍命中。
+    拷贝不 CAST：text '30' 写入 INTEGER 亲和列由亲和自动转 int。
+    """
+    import re
+    table = "issue"
+    old = f"{table}__ident_int_rebuild_old"
+    c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    row = c.fetchone()
+    ddl = (row[0] or "") if row else ""
+    if not ddl:
+        return
+    new_create = ddl
+    for col in ident_cols:
+        _qmarks = chr(96) + chr(34) + chr(92) + "["
+        _pat = "([" + _qmarks + "]?" + col + "[" + _qmarks + "]?\\s+)TEXT\\b"
+        new_create, _n = re.subn(_pat, lambda m: m.group(1) + "INTEGER", new_create, count=1)
+        if _n != 1:
+            raise ValueError(f"{table}: DDL 中未找到 {col} TEXT 列声明，重建中止")
+    c.execute(f"DROP TABLE IF EXISTS {old}")
+    c.execute(f"ALTER TABLE {table} RENAME TO {old}")
+    c.execute(new_create)
+    _names = ", ".join(r[1] for r in cols)
+    c.execute(f"INSERT INTO {table} ({_names}) SELECT {_names} FROM {old}")
+    _idx = c.execute("SELECT name, sql FROM sqlite_master "
+                     f"WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (old,)).fetchall()
+    c.execute(f"DROP TABLE {old}")
+    for _name, _sql in _idx:
+        _sql = _sql.replace(f'"{old}"', f'"{table}"').replace(f"'{old}'", f"'{table}'")
+        try:
+            c.execute(_sql)
+        except Exception:
+            try:
+                c.execute(f'DROP INDEX IF EXISTS "{_name}"')
+                c.execute(_sql)
+            except Exception:
+                pass
+
+
+def _widen_mysql_issue_ident_cols() -> int:
+    """MySQL 侧：issue.issue_number / parent_issue_number 存量库旧 DDL 为 INT 族时
+    ALTER MODIFY VARCHAR(191) 放宽（202611091000 account-fk widen 同口径）。
+
+    严格模式下 INT 列写 gitee 等字母 ident 必炸；VARCHAR 列恒 str 存储，
+    天然无 SQLite typeof 混型病，无需逐行 UPDATE。选 VARCHAR(191) 而非 TEXT：
+    两列均在索引内（idx_tasks_repo_issue / uq_issue_release_bind），TEXT 无前缀
+    长度不能直接做索引键，MODIFY 会报 1170。幂等：已非 INT 族（text/varchar）
+    跳过——新 DDL 库零改动。表不存在（首跑建表前）跳过。
+
+    B2：`issue` 为视图（跨 schema DEFINER 视图）时解析基表再 ALTER——直接
+    ALTER 视图名报 1347，迁移失败不盖章，INT 强转 gitee ident 落 0。当前连接
+    无基表 ALTER 权限时异常上抛由迁移框架记录（有权限账号执行一次后幂等跳过）。"""
+    from src.kernel.session_manager import db
+    c = db.cursor()
+    c.execute(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue'")
+    if not c.fetchone()[0]:
+        return 0  # MySQL path: issue 表未建（legacy 全量首跑会按新 DDL 整表建齐）
+    c.execute("SELECT DATABASE()")
+    _cur_db = (c.fetchone() or [""])[0]
+    _base = _mysql_view_base_table(c, "issue")
+    if _base:
+        _bs, _bt = _base
+        _sch = _bs or _cur_db
+        _qual = f"`{_bs}`.`{_bt}`" if _bs else f"`{_bt}`"
+        log.warning(f"issue ident widen: 'issue' is a VIEW -> base table {_qual} "
+                    f"(cross-schema DEFINER view; ALTER on view name errors 1347)")
+    else:
+        _sch = _cur_db
+        _bt = "issue"
+        _qual = "`issue`"
+    targets = []
+    for col in _TEXT_IDENT_COLS:
+        c.execute(
+            "SELECT IS_NULLABLE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME=%s "
+            "AND DATA_TYPE IN ('int','bigint','smallint','tinyint','mediumint')",
+            (_sch, _bt, col))
+        row = c.fetchone()
+        if row:
+            targets.append((col, row[0]))
+    for col, nullable in targets:
+        suffix = " NOT NULL" if nullable == "NO" else ""
+        c.execute(f"ALTER TABLE {_qual} MODIFY {col} VARCHAR(191){suffix}")
+    if targets:
+        db.commit()
+        log.info(f"issue ident widen: {len(targets)} col(s) -> VARCHAR(191) (MySQL)")
+    return len(targets)
+
+
+def _normalize_issue_number_text(conn) -> int:
+    """issue-ident：issue.issue_number / issue.parent_issue_number 存量混型归一为 TEXT 存储。
+
+    gitee 等平台 issue_number 为纯字母 ident，与数字字符串混存同一列后
+    typeof 混型（int/text 混存）——SQL 等值比较跨类型永不命中，str 参数
+    查不到数字存储行。归一后全列恒 text：str 参数直接命中，int 参数经
+    TEXT 亲和自动转换后命中。
+
+    parent_issue_number 同根因：子任务父引用可写 IK* 字符串（issues_center
+    恒 str 写入），SQLite INTEGER 亲和列侥幸能存，MySQL 侧 INT 列严格模式
+    必炸，一并纳入 TEXT 归一。
+
+    关键口径：若列亲和非 TEXT（存量库旧 DDL 声明 INTEGER），纯
+    CAST AS TEXT 会被 INTEGER 亲和在落盘时翻回 integer——必须整表重建
+    把列亲和改为 TEXT 才能恒 text。新 DDL（202611090004 起）已声明 TEXT，
+    只需 UPDATE 兜底 typeof 混型。幂等：亲和已 TEXT 且无混型行时零改动。
+    MySQL 侧本函数不执行（入口提前分派 _widen_mysql_issue_ident_cols）。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    if get_db_backend() != "sqlite":
+        # MySQL path: 分派提到最前——先于任何 PRAGMA/typeof SQLite-only SQL
+        return _widen_mysql_issue_ident_cols()
+    c = conn.cursor()
+    _cols = c.execute("PRAGMA table_info(issue)").fetchall()
+    if not _cols:
+        return 0  # 无 issue 表（首跑 _NEW_TABLES 前调用等），不处理
+    changed = 0
+    rebuilt = False
+    for _col in _TEXT_IDENT_COLS:
+        _decl = next((r[2] or "" for r in _cols if r[1] == _col), None)
+        if _decl is None:
+            continue  # 列不存在（_ensure_column 兜底前），不处理
+        if _decl.strip().upper() in ("INTEGER", "INT", "BIGINT", "SMALLINT",
+                                     "MEDIUMINT", "TINYINT"):
+            # 基线 #995 口径：INTEGER 亲和——数字 ident 落盘即 int、读侧恒 int；
+            # 非数字 ident（gitee IK*）动态类型原样 text，D105 域不受影响；
+            # str 参数等值比较经 INTEGER 亲和无损转换仍命中数字行，无需 typeof 归一。
+            continue
+        # 亲和被 202611090004 归一为 TEXT（存量库）→ 整表重建回 INTEGER。
+        _rebuild_issue_ident_columns_integer(c, _cols, (_col,))
+        rebuilt = True
+    if rebuilt:
+        return -1  # 重建路径（行数级改写不计，幂等由亲和判定保证）
+    return changed or 0
+
+
+def _normalize_whitelist_null_literals(c):
+    """login_whitelist 存量字面 'NULL' 占位清洗（D105d 59 RDS 演练发现）。
+
+    存量库 github_username/gitcode_username 有历史导入留下的字面 'NULL' 字符串，
+    大小写不敏感唯一索引的生成列把它当真实用户名 → 多行 'null' 撞 1062，
+    CREATE UNIQUE INDEX 被 except 吞成 warning，唯一索引静默缺失。
+    统一清成空串（空串在 SQLite 部分索引 WHERE != '' 与 MySQL NULLIF 两条路
+    都不参与唯一约束）。UPDATE 基列会触发 STORED 生成列重算，旧装已建的
+    脏生成列同样被治愈。幂等，可重复执行。
+    """
+    for col in ("github_username", "gitcode_username"):
+        try:
+            c.execute(
+                f"UPDATE login_whitelist SET {col}='' "
+                f"WHERE {col} IS NOT NULL AND UPPER(TRIM({col}))='NULL'"
+            )
+        except Exception as e:
+            log.warning(f"_normalize_whitelist_null_literals({col}) failed: {e}")
+
+
+_ORG_SENTINEL_COLS = _ORG_DOMAIN_TEXT_COLS
+
+_TEXT_IDENT_COLS = ("issue_number", "parent_issue_number")
+
 def register_migration(version: str, name: str, kind: str,
                        fn: Optional[Callable[[], None]] = None) -> Migration:
     """登记一条迁移（新增迁移一律走这里 + kind 规则）。

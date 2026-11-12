@@ -824,3 +824,9 @@ def remove_issue_sessions(repo_key: str):
         except Exception as e:
             log.warning(f"Failed to remove issue sessions for {repo_key}: {e}")
             return 0
+
+# Issue #1753：carried_context.target_branch_source 的来源标记（webhook 写入 /
+# prompt_builder 判定共用，避免魔法字符串口径漂移）。
+TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH = "target_scene_work_branch"
+# 承接场景未配置 work_branch（含多跳链残留）时，历史权威标记显式失效为该值。
+TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH = "unconfirmed_no_target_scene_work_branch"
