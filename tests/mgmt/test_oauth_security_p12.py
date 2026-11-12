@@ -379,7 +379,7 @@ class TestRedirectUriFromProviderConfig:
 
     def test_redirect_uri_from_provider_config(self):
         """provider 配置有 redirect_uri 时直接返回。"""
-        from src.domains.runtime.vcs.providers import get_redirect_uri
+        from src.domains.mgmt.auth.providers import get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "TestProvider", "redirect_uri": "https://example.com/cb/test"}
         with patch("src.domains.runtime.vcs.providers.get_provider", return_value=mock_cfg):
@@ -390,7 +390,7 @@ class TestRedirectUriFromProviderConfig:
 
     def test_redirect_uri_fallback_host_header(self):
         """provider 配置无 redirect_uri 时从 Host header 构造。"""
-        from src.domains.runtime.vcs.providers import get_redirect_uri
+        from src.domains.mgmt.auth.providers import get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "TestProvider"}
         with patch("src.domains.runtime.vcs.providers.get_provider", return_value=mock_cfg):
@@ -401,7 +401,7 @@ class TestRedirectUriFromProviderConfig:
 
     def test_redirect_uri_empty_provider_raises(self):
         """provider 为空字符串时抛 ValueError（统一回调路由已删除）。"""
-        from src.domains.runtime.vcs.providers import get_redirect_uri
+        from src.domains.mgmt.auth.providers import get_redirect_uri
         import pytest as _pytest
         class FakeRequest:
             headers = {"Host": "localhost"}

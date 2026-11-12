@@ -95,7 +95,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_05_forwarded_host_used_for_redirect_uri(self):
         """T10-05: nginx 代理场景，X-Forwarded-Host 含公网域名 → 用公网域名（需设 TRUSTED_HOSTS）。"""
-        from src.domains.runtime.vcs.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         # R11.1: 未设 TRUSTED_HOSTS 时不读 X-Forwarded-Host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}, clear=False):
             req = self._mock_request(host="127.0.0.1:3000", fwd_host="grape.example.com")
@@ -104,7 +104,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_06_fallback_to_host_when_no_forwarded(self):
         """T10-06: 无 X-Forwarded-Host 时 fallback 到 Host 头。"""
-        from src.domains.runtime.vcs.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="1.2.3.4:3000", fwd_host="")
@@ -113,7 +113,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_07_trusted_hosts_validates_forwarded(self):
         """T10-07: TRUSTED_HOSTS 白名单校验 X-Forwarded-Host 的值（不在白名单 → 用 fallback）。"""
-        from src.domains.runtime.vcs.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "trusted.com"}):
             req = self._mock_request(host="127.0.0.1:3000", fwd_host="evil.com")
             result = _get_trusted_host(req)
@@ -122,7 +122,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_08_localhost_forwarded_excluded(self):
         """T10-08: X-Forwarded-Host 是 localhost 时排除，fallback 到 Host 头。"""
-        from src.domains.runtime.vcs.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="1.2.3.4:3000", fwd_host="localhost")
@@ -132,7 +132,7 @@ class TestGetTrustedHostForwarded:
 
     def test_both_localhost_returns_host(self):
         """两个都是 localhost 时保持原行为（开发环境）。"""
-        from src.domains.runtime.vcs.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="localhost:8080", fwd_host="127.0.0.1:3000")

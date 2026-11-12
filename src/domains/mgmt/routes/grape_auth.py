@@ -741,7 +741,7 @@ def delete_account_via_oauth(provider: str, popup: bool = False, prompt: str = "
     popup=True 时 state 携带 popup 标记，回调重定向到中间页走 postMessage。
     prompt=login 时强制第三方平台重新认证（高危操作不允许复用浏览器会话）。
     """
-    from src.domains.runtime.vcs.providers import get_provider, build_auth_url, get_redirect_uri
+    from src.domains.mgmt.auth.providers import get_provider, build_auth_url, get_redirect_uri
     import hashlib as _hashlib
     import os as _os
 
@@ -967,7 +967,7 @@ def bind_provider(provider: str, popup: bool = False, prompt: str = "",
     popup=True 时 state 携带 popup 标记，回调重定向到中间页走 postMessage。
     prompt=login 时强制第三方平台重新认证（用于已绑定场景切换账号，避免复用浏览器会话）。
     """
-    from src.domains.runtime.vcs.providers import get_provider, build_auth_url, get_redirect_uri
+    from src.domains.mgmt.auth.providers import get_provider, build_auth_url, get_redirect_uri
     import hashlib as _hashlib
     import os as _os
 
@@ -1215,7 +1215,7 @@ def _check_whitelist(provider: str, external_login: str) -> bool:
     """P1-4: OAuth 白名单校验——提取公共函数，消除重复。
     返回 True 表示通过（或在无白名单列时直接通过）。
     """
-    from src.domains.runtime.vcs.providers import get_provider as _get_prov_cfg
+    from src.domains.mgmt.auth.providers import get_provider as _get_prov_cfg
     cfg = _get_prov_cfg(provider)
     wl_col = cfg.get("whitelist_column") if cfg else None
     if wl_col:
@@ -1232,7 +1232,7 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
     popup=True 时重定向到轻量中间页 /oauth-popup-callback.html，
     由中间页通过 postMessage 通知父窗口再关闭弹窗。
     """
-    from src.domains.runtime.vcs.providers import _get_trusted_host
+    from src.domains.mgmt.auth.providers import _get_trusted_host
     from src.domains.mgmt.auth.email_service import is_production_env
 
     # 优先用 browser_callback_url 配置（nginx 反代场景 Host header 不可靠）
@@ -1401,7 +1401,7 @@ def oauth_login(provider: str, popup: bool = False, request: Request = None, lan
     需求 1（login CSRF 防护）：login flow 生成 nonce 存入 state + Set-Cookie，
     回调时校验 cookie nonce 与 state nonce 一致。绑定/注销流程不需要此机制。
     """
-    from src.domains.runtime.vcs.providers import get_provider, build_auth_url, get_redirect_uri, _get_client_id
+    from src.domains.mgmt.auth.providers import get_provider, build_auth_url, get_redirect_uri, _get_client_id
     import hashlib as _h, os as _os, secrets as _secrets
     from fastapi.responses import JSONResponse
 
@@ -1941,7 +1941,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
     binding_user_id = state_data.get("binding_user_id")
     delete_account_user_id = state_data.get("delete_account_user_id")
 
-    from src.domains.runtime.vcs.providers import exchange_token, get_user_info, get_redirect_uri
+    from src.domains.mgmt.auth.providers import exchange_token, get_user_info, get_redirect_uri
     # 加固项 §10.6：从 state 恢复 redirect_uri（与发起时绝对一致）
     redirect_uri = state_data.get("redirect_uri", "")
     if not redirect_uri:
@@ -2336,7 +2336,7 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
 @router.get("/providers")
 def list_oauth_providers():
     """列出已配置的 OAuth provider（供前端动态渲染登录按钮）。"""
-    from src.domains.runtime.vcs.providers import list_providers, get_provider
+    from src.domains.mgmt.auth.providers import list_providers, get_provider
     from src.domains.mgmt.user.db import get_meta_value
 
     result = []

@@ -2339,7 +2339,7 @@ def _ensure_whitelist_columns():
     检查列是否存在，不存在则 ALTER TABLE 添加。新增平台无需手动建列。
     """
     try:
-        from src.domains.runtime.vcs.providers import list_providers, get_provider
+        from src.domains.mgmt.auth.providers import list_providers, get_provider
         with db_lock:
             c = db.cursor()
             cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]

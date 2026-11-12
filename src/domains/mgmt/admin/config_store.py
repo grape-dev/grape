@@ -117,7 +117,7 @@ def read_public_config() -> dict:
             if cred_field == "client_id":
                 out[flat_field] = val
     # oauth_status（动态从 provider 列表生成，不硬编码平台名）
-    from src.domains.runtime.vcs.providers import list_providers
+    from src.domains.mgmt.auth.providers import list_providers
     out["oauth_status"] = {
         p: bool(get_meta_value(f"oauth_{p}_client_id"))
         for p in list_providers()
@@ -278,7 +278,7 @@ def save_config(payload: dict) -> dict:
                     set_meta_value(f"oauth_{provider}_{cred_field}", val)
         log.info("admin config_store: oauth-providers.json + meta updated")
         # P2-2: 失效 Provider 内存缓存，下次请求时从 DB 重新加载
-        from src.domains.runtime.vcs.providers import invalidate_provider_cache
+        from src.domains.mgmt.auth.providers import invalidate_provider_cache
         invalidate_provider_cache()
 
     return read_public_config()

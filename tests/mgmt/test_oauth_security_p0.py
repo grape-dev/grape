@@ -220,7 +220,7 @@ class TestRedirectUriInState:
 
     def test_build_auth_url_stores_redirect_uri(self):
         """build_auth_url saves redirect_uri into state_data."""
-        from src.domains.runtime.vcs.providers import build_auth_url, get_redirect_uri
+        from src.domains.mgmt.auth.providers import build_auth_url, get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "Test", "redirect_uri": "https://example.com/cb/test",
                      "auth_url": "https://example.com/auth", "scope": "",

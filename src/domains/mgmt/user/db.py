@@ -3427,7 +3427,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         return None
 
     # 2. 获取 token_url（从 provider 配置）
-    from src.domains.runtime.vcs.providers import get_provider
+    from src.domains.mgmt.auth.providers import get_provider
     cfg = get_provider(provider)
     if not cfg:
         log.warning(f"refresh_oauth: provider {provider} not configured")

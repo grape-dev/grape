@@ -731,7 +731,7 @@ document.documentElement.classList.remove('i18n-loading');})();
 </script>'''
 
         def _inject_email_configured(html: str) -> str:
-            from src.domains.runtime.vcs.providers import get_provider, list_providers
+            from src.domains.mgmt.auth.providers import get_provider, list_providers
             from src.domains.mgmt.user.db import get_meta_value
             configured = _is_email_configured()
             val = 'true' if configured else 'false'

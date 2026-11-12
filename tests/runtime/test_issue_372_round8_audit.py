@@ -81,7 +81,7 @@ class TestT21bGetTrustedHost:
             class MockRequest:
                 headers = {"Host": "1.2.3.4:3000", "X-Forwarded-Host": "evil.com"}
 
-            from src.domains.runtime.vcs.providers import _get_trusted_host
+            from src.domains.mgmt.auth.providers import _get_trusted_host
             result = _get_trusted_host(MockRequest())
             assert "evil.com" not in result
             assert "1.2.3.4" in result
