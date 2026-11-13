@@ -47,6 +47,8 @@ DEFAULT_SYNC_TABLES = (
     # 阶段 1 扩展（2026-11-12）：mgmt 侧同样缺这张跨域表 → 启动刷
     # "Table 'grape_dev_mgmt.grape_t_repo_credentials' doesn't exist"，VCS 凭据链路受影响
     "grape_t_repo_credentials",
+    # 接管会话（weekly-11）：owner=runtime，mgmt 的接入路由与 insight 只读
+    "takeover_sessions",
 )
 
 # 库名/表名直接拼进 DDL（反引号包裹），必须先做标识符白名单校验
