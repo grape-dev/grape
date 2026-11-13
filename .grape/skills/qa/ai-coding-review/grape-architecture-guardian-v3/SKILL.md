@@ -1,6 +1,6 @@
 ---
-name: architecture-guardian-3
-version: 3.0.1
+name: grape-architecture-guardian-v3
+version: 3.1.0
 description: |
   Grape 架构守护 3.0（qa 型架构审查技能）：按 Issue #2403 正文四级规则包（A1-A14 / B1-B5 / C1-C3 / D1-D2 共 24 条）做证据化审查。
   ①7 模式（audit/design/plan/review/security/scale/verify）按需执行 → ②24 条规则逐条四态判定 → ③review 模式对 PR 或具体变更输出唯一裁决

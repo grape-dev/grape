@@ -1,4 +1,4 @@
-# architecture-guardian-3 执行走查表（runbook）
+# grape-architecture-guardian-v3 执行走查表（runbook）
 
 > 目的：把架构守护 3.0 的每一步 + 确切命令固化，Agent **照着执行，不查 `--help` / `grape commands` 逐条探索**。
 > 环境变量直接使用：`$REPO_OWNER` / `$REPO_NAME` / `$REPO_FULL_NAME` / `$ISSUE_NUMBER` / `$PR_NUMBER` / `$GRAPE_ISSUE_ID` / `$GRAPE_SCENE_ID` / `$BOT_USERNAME`。
@@ -58,7 +58,7 @@ grape git-repo contents --owner "$REPO_OWNER" --repo "$REPO_NAME" --path "{path}
 ```bash
 # 技能目录绝对路径（与当前工作目录无关，可对任意被审仓库执行）
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
-[ -d "$SKILL_DIR/scripts" ] || SKILL_DIR=".grape/skills/qa/architecture-guardian-3"
+[ -d "$SKILL_DIR/scripts" ] || SKILL_DIR=".grape/skills/qa/ai-coding-review/grape-architecture-guardian-v3"
 REPO_PATH="${REPO_PATH:-.}"          # 被审仓库根目录（含 src/ 或 tests/ 的层级）
 
 python3 "$SKILL_DIR/scripts/repo_inventory.py" "$REPO_PATH" --json                 # 技术栈盘点 → 决定 Gate 适用性
@@ -69,7 +69,7 @@ python3 "$SKILL_DIR/scripts/dependency_inventory.py" "$REPO_PATH" --json        
 - 三只脚本零依赖（标准库）、**只读**、可独立运行；脚本内部路径按 `Path(__file__).resolve().parent` 解析，不写死绝对路径。
 - 脚本输出是**候选与线索，不是结论**：每条都要按 §8 证据契约复核（证据是否成立、是否需人工复核）。
 - 发现洪水 → `--min-severity high` 收敛 + 只对变更文件逐条人工核验。
-- 脚本不存在（技能未随被审仓库检出）→ 从 grape 主仓按 `git-repo contents --path .grape/skills/qa/architecture-guardian-3/scripts/{f}.py --ref {sha} --raw` 取回后本地执行，不编造脚本输出。
+- 脚本不存在（技能未随被审仓库检出）→ 从 grape 主仓按 `git-repo contents --path .grape/skills/qa/ai-coding-review/grape-architecture-guardian-v3/scripts/{f}.py --ref {sha} --raw` 取回后本地执行，不编造脚本输出。
 
 ### Step 4 · 逐条规则四态判定（必做）
 

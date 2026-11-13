@@ -1,4 +1,4 @@
-# grape CLI 命令参考（architecture-guardian-3 专用子集）
+# grape CLI 命令参考（grape-architecture-guardian-v3 专用子集）
 
 > 事实基线：grape CLI 契约（≥0.3.2）。**只列本 skill 实际用到的命令**，不列全量；契约权威 = `grape commands` 实列。
 
