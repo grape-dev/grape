@@ -363,8 +363,13 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
             from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
             with sm_lock:
                 c = sm_db.cursor()
-                c.execute("SELECT id FROM runtime_credentials WHERE name=?", (env_name,))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_7431a6_f
+                _ru_lib_7431a6 = _ru_lib_7431a6_f(foreign_only=True)
+                if _ru_lib_7431a6 is not None:
+                    row = _ru_lib_7431a6.read_one("runtime_credentials_7431a6", (env_name,))
+                else:
+                    c.execute("SELECT id FROM runtime_credentials WHERE name=?", (env_name,))
+                    row = c.fetchone()
                 if row:
                     cid = row[0]
                     try:

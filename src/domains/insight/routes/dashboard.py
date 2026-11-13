@@ -893,8 +893,13 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     _cred_scope = ''
                     _cred_owner = ''
                     try:
-                        c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
-                        _cr = c.fetchone()
+                        from src.kernel.domain_read import runtime_lib as _ru_lib_aff203_f
+                        _ru_lib_aff203 = _ru_lib_aff203_f(foreign_only=True)
+                        if _ru_lib_aff203 is not None:
+                            _cr = _ru_lib_aff203.read_one("runtime_credentials_aff203", (cid,))
+                        else:
+                            c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
+                            _cr = c.fetchone()
                         if _cr:
                             _cred_scope, _cred_owner = _cr[0] or '', _cr[1] or ''
                     except Exception:
@@ -1055,8 +1060,13 @@ async def get_error_log_sources(user: dict = Depends(require_org_member)):
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (_cred_id,))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_911d7f_f
+                _ru_lib_911d7f = _ru_lib_911d7f_f(foreign_only=True)
+                if _ru_lib_911d7f is not None:
+                    row = _ru_lib_911d7f.read_one("runtime_credentials_911d7f", (_cred_id,))
+                else:
+                    c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (_cred_id,))
+                    row = c.fetchone()
                 if row:
                     _wname = row[1] or row[0] or _wname
         except Exception:
@@ -1719,8 +1729,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             try:
                 with db_lock:
                     _cc = db.cursor()
-                    _cc.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
-                    _cr = _cc.fetchone()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_f8ea2f_f
+                    _ru_lib_f8ea2f = _ru_lib_f8ea2f_f(foreign_only=True)
+                    if _ru_lib_f8ea2f is not None:
+                        _cr = _ru_lib_f8ea2f.read_one("runtime_credentials_f8ea2f", (_cid,))
+                    else:
+                        _cc.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                        _cr = _cc.fetchone()
                     _n = (_cr[0] or "") if _cr else ""
             except Exception:
                 _n = ""

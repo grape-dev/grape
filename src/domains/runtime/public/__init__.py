@@ -1126,6 +1126,14 @@ _READ_QUERIES: dict[str, str] = {
     "agent_runtimes_145cfe": "SELECT ar.id FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id WHERE lower(ar.name)=%s AND ar.scope=%s AND ar.owner_id=%s AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC LIMIT 1",
     "agent_runtimes_b84e88": "SELECT id FROM agent_runtimes WHERE lower(name)=%s AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
     "agent_runtimes_874081": "SELECT id FROM agent_runtimes WHERE name=%s AND scope=%s AND owner_id=%s AND credential_id=0 AND (host_name=%s OR host_name='' OR host_name IS NULL) ORDER BY CASE WHEN host_name=%s THEN 0 ELSE 1 END, id LIMIT 1",
+    "runtime_credentials_619821": "SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at FROM runtime_credentials rc LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id WHERE rc.status != 'revoked'",
+    "runtime_credentials_f8ea2f": "SELECT name FROM runtime_credentials WHERE id=%s",
+    "runtime_credentials_911d7f": "SELECT name, device_name FROM runtime_credentials WHERE id=%s",
+    "runtime_credentials_aff203": "SELECT scope, owner_name FROM runtime_credentials WHERE id=%s",
+    "runtime_credentials_7431a6": "SELECT id FROM runtime_credentials WHERE name=%s",
+    "runtime_credentials_3cd287": "SELECT owner_name FROM runtime_credentials WHERE id=%s",
+    "runtime_credentials_ff9c0b": "SELECT owner_name, status FROM runtime_credentials WHERE id=%s",
+    "runtime_credentials_5b448f": "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials",
     # issue 查 id（mgmt feedback 上下文）
     "issue_id_by_repo_number": "SELECT id FROM issue WHERE repo_key=%s AND issue_number=%s LIMIT 1",
     # 仓库 bot 凭据（mgmt 读；config_store 的 JOIN 拆分后也需要全量 rc 行）

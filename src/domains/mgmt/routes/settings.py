@@ -1299,9 +1299,14 @@ def _build_cred_map(db, db_lock) -> dict:
     else:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, "
-                      "last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_5b448f_f
+            _ru_lib_5b448f = _ru_lib_5b448f_f(foreign_only=True)
+            if _ru_lib_5b448f is not None:
+                rows = _ru_lib_5b448f.read_all("runtime_credentials_5b448f", ())
+            else:
+                c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, "
+                          "last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
+                rows = c.fetchall()
     cred_map = {}
     for r in rows:
         cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
@@ -1959,8 +1964,13 @@ def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(
         _new_org_id = user.get("org_id") or ""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_ff9c0b_f
+        _ru_lib_ff9c0b = _ru_lib_ff9c0b_f(foreign_only=True)
+        if _ru_lib_ff9c0b is not None:
+            row = _ru_lib_ff9c0b.read_one("runtime_credentials_ff9c0b", (cid,))
+        else:
+            c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
+            row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         _owner, _status = row[0] or "", row[1] or ""
@@ -2054,8 +2064,13 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cid,))
-        _row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_3cd287_f
+        _ru_lib_3cd287 = _ru_lib_3cd287_f(foreign_only=True)
+        if _ru_lib_3cd287 is not None:
+            _row = _ru_lib_3cd287.read_one("runtime_credentials_3cd287", (cid,))
+        else:
+            c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cid,))
+            _row = c.fetchone()
         if not _row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         # 扫雷⑨-H2：仅凭据 owner 可吊销（对齐同文件 scope 端点的 owner 校验范式）

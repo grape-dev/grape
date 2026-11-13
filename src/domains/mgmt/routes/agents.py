@@ -386,8 +386,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 with db_lock:
                     c = db.cursor()
                     if _cid:
-                        c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
-                        _wr = c.fetchone()
+                        from src.kernel.domain_read import runtime_lib as _ru_lib_f8ea2f_f
+                        _ru_lib_f8ea2f = _ru_lib_f8ea2f_f(foreign_only=True)
+                        if _ru_lib_f8ea2f is not None:
+                            _wr = _ru_lib_f8ea2f.read_one("runtime_credentials_f8ea2f", (_cid,))
+                        else:
+                            c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                            _wr = c.fetchone()
                         _wname = (_wr[0] or "") if _wr else ""
                     else:
                         from src.kernel.domain_read import runtime_lib as _rt_lib_wn
