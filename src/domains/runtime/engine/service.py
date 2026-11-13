@@ -2105,6 +2105,41 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
         return False
 
 
+def mark_task_takeover(task_id: str) -> dict:
+    """接管标记：任务被本地交互式会话接手，把关联事件从 cancelled 拉回「接管中」。
+
+    为什么需要这一步：`cancel_task` 会让 worker 停下，并把关联事件收敛成
+    cancelled —— 流水线于是显示「已取消 / 中断」。但对人的视角来说，接管意味着
+    这个 Issue 仍有人在推进（本地 dsh 会话里），状态应当是「进行中」，否则一眼
+    看上去像是流水线断了。
+
+    为什么用独立状态 `takeover` 而不是直接写回 `running`：runner 已经退出，
+    服务端再声称 running 会误导 claim/串行槽/超时判断。`takeover` 只表达
+    「有人在本地接手」，pipeline_status 把它映射成 STATUS_RUNNING 供展示。
+
+    幂等：重复调用只是再写一次同状态；任务没有关联事件时返回 no_event。
+    """
+    task = get_task(task_id)
+    if not task:
+        return {"status": "not_found", "task_id": task_id}
+    seq = task.get("event_seq") or 0
+    if not seq:
+        return {"status": "no_event", "task_id": task_id}
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        row = c.fetchone()
+        if not row:
+            return {"status": "event_missing", "task_id": task_id, "event_seq": seq}
+        before = row[0]
+        # completed_at 必须清掉：cancel 时已经写过完成时间，
+        # 留着会让「接管中」的事件看起来已经结束。
+        c.execute("UPDATE events SET status='takeover', completed_at='' WHERE seq=?", (seq,))
+        db.commit()
+    return {"status": "marked", "task_id": task_id, "event_seq": seq,
+            "before": before, "after": "takeover"}
+
+
 def converge_event_to_task(task_id: str) -> dict:
     """Issue #587: 补偿收敛入口——按任务当前终态强制收敛关联事件（幂等，可重复调用）。
 
@@ -3391,6 +3426,12 @@ def fail_task(task_id, error, exit_code=-1):
     except Exception:
         pass
     task = get_task(task_id)
+    # 幂等保护 0（接管修复 2026-11-10）：task 已 cancelled（人工终止 / 被接管）时，
+    # worker 迟到的失败上报不得再动事件。实测：接管把事件标成 takeover 后 4 秒，
+    # worker 的 fail 上报把事件改写成了 failed（cancel 后 worker 必然报失败）。
+    if task and task.get("status") == "cancelled":
+        log.info(f"Task {task_id} already cancelled, skip fail_task (error={str(error)[:60]})")
+        return
     # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
     if task and task.get("status") == "completed":
         log.info(f"Task {task_id} already completed, skip fail_task (error={error[:60]})")

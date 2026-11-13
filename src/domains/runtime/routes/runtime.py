@@ -1184,6 +1184,23 @@ def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)
         "completed_at": task.get("completed_at"),
     }
 
+def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, task_id: str) -> str:
+    """任务工作目录：原值为空时按平台同一规则推导。
+
+    `agent_tasks.cwd` 只有部分入队路径会回填；走 claim 的任务常常留空——worker 执行时
+    自己按 get_agent_workdir 算路径，但不回写库。接管要靠这个路径在本地建工作区，
+    空值会让接管直接失败（本地环境实测就是空字符串）。
+    """
+    if cwd or not repo_key or not agent_type:
+        return cwd
+    try:
+        from src.api.event_pipeline import get_agent_workdir
+        return get_agent_workdir(repo_key, agent_type, issue_id or "")
+    except Exception as e:
+        log.warning(f"cwd fallback failed (task={task_id}): {e}")
+        return cwd
+
+
 @router.get("/issues/takeover-context", operation_id="runtime_takeover_context", summary="Takeover context for an issue", description="Returns the running task's full context (prompt, env_extra, messages) for interactive takeover in dsh-web.")
 def takeover_context(repo_key: str = Query(..., description="Repository key (e.g. gitcode:owner/repo)"),
                      issue_number: str = Query(..., description="Issue number (without #)"),
@@ -1226,13 +1243,14 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
         "issue_id": task_issue_id or "",
         "messages": messages,
     }
-
 @router.get("/tasks/{task_id}/detail", operation_id="runtime_task_detail", summary="Task detail (takeover)", description="Returns full task fields for interactive takeover: prompt, env_extra, skill, cwd, etc.")
 def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务详情（接管用）：返回完整字段供 dsh-web 创建交互式 session。"""
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    _cwd = _cwd_or_derived(task.get("cwd") or "", task.get("repo_key") or "",
+                           task.get("agent_type") or "", task.get("issue_id") or "", task_id)
     return {
         "id": task["id"],
         "status": task["status"],
@@ -1240,7 +1258,7 @@ def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)
         "skill": task.get("skill") or "",
         "prompt": task.get("prompt") or "",
         "env_extra": task.get("env_extra") or "{}",
-        "cwd": task.get("cwd") or "",
+        "cwd": _cwd,
         "repo_key": task.get("repo_key") or "",
         "issue_id": task.get("issue_id") or "",
         "runtime_id": task.get("runtime_id") or 0,

@@ -351,7 +351,10 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
     """解析仓库平台 token（git-repo 透传端点共用）。
 
     ⚠️ 无 provider 默认（默认空串），未注册/未传 provider 直接 fail-fast（不静默 gitcode）。
-    ⚠️ 本接口**仅服务会话级临时 token（tk_）**——用户级 API Key（`grape_`）/ Web JWT **不适用**（403）。
+    ⚠️ 只接受**任务内 agent 身份**：worker 会话 token（tk_）或用户接管 token（tko_）。
+       用户级 API Key（`grape_`）/ Web JWT **不适用**（403）——它们代表"人"，不代表"任务内的 agent"。
+       tko_ 额外限定：只能操作自己那条任务仓库（repo_key 比对）+ 接管会话必须仍 active，
+       finish/abort 会立即吊销 token（此处再校验一次 DB，不只看 token 有效）。
     token 按会话 agent_type 决定平台凭据：
     - chat agent → **用户 token**（用户身份）
     - devops 事件 agent → **仓库 bot token**（仓库身份）
@@ -359,13 +362,37 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
     """
     if not _is_supported_provider(provider):
         raise ValueError(f"Git provider 未支持: {provider}")
-    if user.get("auth_type") != "session_token":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
     from src.kernel.repo_key import to_repo_key
     mod = _provider_module(provider)
     if mod is None:
         raise ValueError(f"Git provider 未支持: {provider}")
     rk = to_repo_key(f"{provider}:{owner}/{repo}")
+    auth_type = str(user.get("auth_type") or "")
+    if auth_type not in ("session_token", "takeover"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    if auth_type == "takeover":
+        # 接管 token（tko_）= 人以 agent 身份在"自己那条任务仓库"里干活：
+        # 只放行同仓库，且接管会话必须仍是 active（finish/abort 会立即吊销 token，这里是二次校验）。
+        tk_repo = str(user.get("repo_key") or "")
+        if tk_repo and tk_repo != rk:
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": f"该接管 token 仅限其任务仓库（{tk_repo}），不能操作 {rk}"})
+        try:
+            from src.runtime import takeover as _tk
+            _sess = None
+            with _tk.db_lock:
+                _c = _tk.db.cursor()
+                _c.execute("SELECT status FROM takeover_sessions WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+                           (str(user.get("session_key") or "").replace("takeover:", ""),))
+                _row = _c.fetchone()
+            _sess = _row[0] if _row else None
+            if _sess != "active":
+                raise HTTPException(status_code=403, detail={
+                    "code": 403, "message": "接管会话已结束，仓库操作被拒绝"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": f"接管会话校验失败：{e}"})
 
     def _bot():
         try:
