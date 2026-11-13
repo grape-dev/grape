@@ -70,6 +70,10 @@ window.selectRepo = function (fullName, owner, name, repoKey) {
     'currentRepo',
     JSON.stringify({ fullName, owner, name, repoKey: repoKey || '' })
   )
+  // 路径跟随仓库：进入项目后地址栏必须是 /app/<owner>/<repo>/，否则深链分享出去指错仓
+  if (window.app && typeof window.app.syncAppPath === 'function') {
+    window.app.syncAppPath(owner, name)
+  }
   const sidebar = document.getElementById('sidebar')
   const mainView = document.getElementById('mainView')
   const tb = document.getElementById('tb')
