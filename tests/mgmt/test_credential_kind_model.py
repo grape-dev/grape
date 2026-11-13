@@ -167,3 +167,64 @@ def test_read_picks_newer_row_after_rollback_write():
         assert got2.get("token") == "new-tok", f"未按 updated_at 取较新行: {got2}"
     finally:
         _drop(uid)
+
+
+def test_same_provider_pat_and_oauth_coexist():
+    """A2b（2026-11-13）：主键含 kind —— 同平台 PAT 与 OAuth 各占一行，互不覆盖。
+
+    扩键前实弹：set_credential(PAT, kind=pat) 后 set_credential(OAuth, kind=oauth)
+    会把归位行 upsert 成 kind='oauth'，PAT 只剩双写旧键副本；A2 收口删旧键行后即丢。
+    """
+    uid = _mk_user("ckind_uq")
+    try:
+        assert user_db.set_credential(uid, "gitee", {"token": "PAT-KEEP"}, kind="pat")
+        assert user_db.set_credential(uid, "gitee", {"access_token": "OAUTH-KEEP"}, kind="oauth")
+
+        rows = _raw_rows(uid)
+        assert ("gitee", "pat") in rows, f"PAT 归位行被 OAuth 覆盖了: {rows}"
+        assert ("gitee", "oauth") in rows, f"OAuth 归位行缺失: {rows}"
+
+        assert (user_db.get_credential(uid, "gitee", kind="pat") or {}).get("token") == "PAT-KEEP"
+        assert (user_db.get_credential(uid, "gitee", kind="oauth") or {}).get("access_token") == "OAUTH-KEEP"
+
+        # 再更新 PAT，不许动 OAuth 行
+        assert user_db.set_credential(uid, "gitee", {"token": "PAT-V2"}, kind="pat")
+        assert (user_db.get_credential(uid, "gitee", kind="oauth") or {}).get("access_token") == "OAUTH-KEEP", \
+            "更新 PAT 时把 OAuth 行改了（主键未含 kind）"
+    finally:
+        _drop(uid)
+
+
+def test_unique_key_includes_kind():
+    """结构守卫：建表 DDL 主键与注册迁移都必须含 kind。"""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    ddl = (root / "src/domains/mgmt/user/db.py").read_text(encoding="utf-8")
+    assert "PRIMARY KEY (user_id, provider, kind)" in ddl, "建表主键未扩 kind"
+    assert "ON CONFLICT(user_id, provider, kind)" in ddl, "upsert 冲突目标未扩 kind"
+    setup = (root / "src/api/db_setup.py").read_text(encoding="utf-8")
+    assert 'version="202611170007"' in setup, "扩主键迁移未注册"
+    assert "user_credentials__uqkind" in setup, "扩主键迁移体缺失"
+    models = (root / "src/kernel/persistence/models.py").read_text(encoding="utf-8")
+    assert 'primary_key=True, default=""' in models, "ORM 的 kind 未进主键"
+
+
+def test_unique_kind_migration_is_idempotent():
+    """迁移幂等：库上唯一键已含 kind 时再跑零写入。"""
+    from src.api import db_setup
+    import src.domains.mgmt.user.db as user_db_mod  # noqa: F401
+
+    with db_lock:
+        c = db.cursor()
+        before = c.execute("SELECT COUNT(*) FROM user_credentials").fetchone()[0]
+    colsets = []
+    real = db_setup._uc_unique_key_columns
+    try:
+        db_setup._uc_unique_key_columns = lambda cur: {"user_id", "provider", "kind"}
+        db_setup._fn_user_credentials_unique_kind()
+    finally:
+        db_setup._uc_unique_key_columns = real
+    with db_lock:
+        c = db.cursor()
+        after = c.execute("SELECT COUNT(*) FROM user_credentials").fetchone()[0]
+    assert before == after, "幂等分支改动了数据"

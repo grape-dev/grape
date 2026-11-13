@@ -360,7 +360,11 @@ def get_user_by_github_id(github_id: str) -> dict | None:
 # 批次逐步补列回填。
 _CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS user_credentials (
-    id TEXT PRIMARY KEY,           -- UUID（36 字符标准形式，应用层生成；N1 2026-11-07）
+    -- A2b（2026-11-13）：主键改为 (user_id, provider, kind)。同平台的 PAT 与 OAuth
+    -- 必须能共存——OAuth 刷新是现役写路径（refresh_oauth_token → kind='oauth'），
+    -- 旧 UNIQUE(user_id, provider) 会把 PAT 归位行 upsert 成覆盖，A2 收口删旧键行后
+    -- PAT 即丢失（验证库实弹复现）。id 因此退化为普通列，不再承担唯一性。
+    id TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL,                -- D105 第二批：grape_accounts.id（UUID TEXT）
     -- provider 值域三族（动态派生，非固定枚举；平台清单由平台卡驱动）：
     --   云凭据裸名:    huawei_cloud / codearts（settings.py 固定白名单）
@@ -374,8 +378,7 @@ CREATE TABLE IF NOT EXISTS user_credentials (
     config_json MEDIUMTEXT NOT NULL,
     created_at TEXT DEFAULT '',
     updated_at TEXT DEFAULT '',
-    UNIQUE (user_id, provider)    -- 复合键降级为唯一约束：保 upsert 语义
-                                  -- 显式契约：一用户一平台一条；同平台多类型须先扩此唯一键（A2 收口后评估）
+    PRIMARY KEY (user_id, provider, kind)   -- upsert 语义键：一用户一平台一类型一条
 )
 """
 
@@ -405,24 +408,14 @@ def set_credential(user_id: "int | str", provider: str, config: dict, kind: str 
             rows.append((uuid7_str(), user_id, legacy, "", target, now, now))
         with db_lock:
             c = db.cursor()
-            # QA R1（2026-11-13）：唯一键仍是 (user_id, provider)，同平台另一种 kind 的
-            # 归位行会被本次 upsert 改写（kind 被覆盖、另一种凭据值丢失）。扩
-            # (user_id, provider, kind) 需重建表（SQLite 旧 UNIQUE 约束在场），列入
-            # A2 收口；在此之前显式告警，不做静默改写。
-            c.execute("SELECT COALESCE(kind,'') FROM user_credentials "
-                      "WHERE user_id=? AND provider=? AND COALESCE(kind,'') NOT IN ('', ?)",
-                      (user_id, provider, kind or ""))
-            _other_kind = c.fetchone()
-            if _other_kind:
-                log.warning(
-                    f"set_credential: provider={provider!r} 已有 kind={_other_kind[0]!r} 的行，"
-                    f"本次 kind={kind!r} 会覆盖它（UNIQUE(user_id, provider) 限制）")
+            # A2b（2026-11-13）：主键已含 kind，同平台 PAT/OAuth 各自一行，互不覆盖。
+            # 原先这里有一处"跨 kind 覆盖"告警（唯一键未扩时期的兜底），扩键后不再可触发。
             for row in rows:
                 c.execute(
                     """INSERT INTO user_credentials (id, user_id, provider, kind, config_json, created_at, updated_at)
                        VALUES (?,?,?,?,?,?,?)
-                       ON CONFLICT(user_id, provider) DO UPDATE
-                       SET kind=excluded.kind, config_json=excluded.config_json, updated_at=excluded.updated_at""",
+                       ON CONFLICT(user_id, provider, kind) DO UPDATE
+                       SET config_json=excluded.config_json, updated_at=excluded.updated_at""",
                     row)
             db.commit()
             return True
@@ -557,8 +550,9 @@ def backfill_credential_kind() -> dict:
                         break
                 if not target_kind:
                     continue  # 裸名凭据（huawei_cloud/codearts 等）：名字即凭据，不存在类型编码
-                c.execute("SELECT 1 FROM user_credentials WHERE user_id=? AND provider=? LIMIT 1",
-                          (user_id, target_provider))
+                c.execute("SELECT 1 FROM user_credentials WHERE user_id=? AND provider=? "
+                          "AND COALESCE(kind,'')=? LIMIT 1",
+                          (user_id, target_provider, target_kind))
                 if c.fetchone():
                     stats["skipped"] += 1
                     continue
