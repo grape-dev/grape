@@ -1020,11 +1020,16 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (target_scene_id, repo_key))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_8c7c25_f
+            _mg_lib_8c7c25 = _mg_lib_8c7c25_f(foreign_only=True)
+            if _mg_lib_8c7c25 is not None:
+                row = _mg_lib_8c7c25.read_one("devops_pipeline_scene_8c7c25", (target_scene_id, repo_key))
+            else:
+                c.execute(
+                    "SELECT scene_id FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (target_scene_id, repo_key))
+                row = c.fetchone()
         if row and row[0]:
             effective_scene_id = row[0]
     except Exception as _e:

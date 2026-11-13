@@ -351,9 +351,14 @@ def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
         import json as _json
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?",
-                      (repo_key, scene_id))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_8b6d22_f
+            _mg_lib_8b6d22 = _mg_lib_8b6d22_f(foreign_only=True)
+            if _mg_lib_8b6d22 is not None:
+                row = _mg_lib_8b6d22.read_one("devops_pipeline_scene_8b6d22", (repo_key, scene_id))
+            else:
+                c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?",
+                          (repo_key, scene_id))
+                row = c.fetchone()
         if row:
             nodes = _json.loads(row[0] or "[]")
             qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
@@ -406,11 +411,16 @@ def _match_pr_subscription(repo_key: str, evt: dict, event_type: str, pr_branch:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1",
-                (repo_key,))
-            rows = c.fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_7a48a2_f
+            _mg_lib_7a48a2 = _mg_lib_7a48a2_f(foreign_only=True)
+            if _mg_lib_7a48a2 is not None:
+                rows = _mg_lib_7a48a2.read_all("devops_pipeline_scene_7a48a2", (repo_key,))
+            else:
+                c.execute(
+                    "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
+                    "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1",
+                    (repo_key,))
+                rows = c.fetchall()
         matches = []
         for scene_id, nodes_json, adv_opts_json in rows:
             # 匹配 work_branch
@@ -1461,11 +1471,16 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         # 从 devops_pipeline_scene 查 scene_id 对应的 QA 节点 skill
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND scene_id=? AND is_active=1",
-                (repo_key, scene_id))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b1eaa2_f
+            _mg_lib_b1eaa2 = _mg_lib_b1eaa2_f(foreign_only=True)
+            if _mg_lib_b1eaa2 is not None:
+                row = _mg_lib_b1eaa2.read_one("devops_pipeline_scene_b1eaa2", (repo_key, scene_id))
+            else:
+                c.execute(
+                    "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
+                    "WHERE repo_key=? AND scene_id=? AND is_active=1",
+                    (repo_key, scene_id))
+                row = c.fetchone()
         if not row:
             log.warning(f"Pipeline: PR subscription redispatch: scene={scene_id} not found")
             return False
@@ -3842,11 +3857,16 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
         import json as _json
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (scene_id, repo_key))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_ab0110_f
+            _mg_lib_ab0110 = _mg_lib_ab0110_f(foreign_only=True)
+            if _mg_lib_ab0110 is not None:
+                row = _mg_lib_ab0110.read_one("devops_pipeline_scene_ab0110", (scene_id, repo_key))
+            else:
+                c.execute(
+                    "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (scene_id, repo_key))
+                row = c.fetchone()
         if not row:
             return []
         # 优先读独立列

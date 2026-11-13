@@ -578,6 +578,14 @@ _READ_QUERIES: dict[str, str] = {
     "managed_repos_e9a379": "SELECT org_id FROM managed_repos WHERE repo_key=%s ORDER BY org_id DESC LIMIT 1",
     "managed_repos_6f73d4": "SELECT repo_key FROM managed_repos WHERE repo_key=%s LIMIT 1",
     "managed_repos_b939bc": "SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=%s",
+    "devops_pipeline_scene_9bcf48": "SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1",
+    "devops_pipeline_scene_b5cd89": "SELECT nodes_json FROM devops_pipeline_scene WHERE id=%s",
+    "devops_pipeline_scene_b5f6ee": "SELECT scene_id, name FROM devops_pipeline_scene WHERE repo_key=%s AND is_active=1 ORDER BY name",
+    "devops_pipeline_scene_ab0110": "SELECT linked_repos, advanced_options FROM devops_pipeline_scene WHERE scene_id=%s AND repo_key=%s AND is_active=1 LIMIT 1",
+    "devops_pipeline_scene_b1eaa2": "SELECT scene_id, nodes_json FROM devops_pipeline_scene WHERE repo_key=%s AND scene_id=%s AND is_active=1",
+    "devops_pipeline_scene_7a48a2": "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene WHERE repo_key=%s AND pr_subscription_enabled=1 AND is_active=1",
+    "devops_pipeline_scene_8b6d22": "SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=%s AND scene_id=%s",
+    "devops_pipeline_scene_8c7c25": "SELECT scene_id FROM devops_pipeline_scene WHERE scene_id=%s AND repo_key=%s AND is_active=1 LIMIT 1",
     # 用户映射（runtime / insight 代码读）
     "um_feishu_open_ids_all": (
         "SELECT DISTINCT user_id FROM unified_user_mapping WHERE feishu_open_id!='' "

@@ -422,9 +422,14 @@ def _autopilot_get_scenes(repo_key: str) -> list:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            rows = c.execute(
-                "SELECT scene_id, name FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,)).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b5f6ee_f
+            _mg_lib_b5f6ee = _mg_lib_b5f6ee_f(foreign_only=True)
+            if _mg_lib_b5f6ee is not None:
+                c = _mg_lib_b5f6ee.read_all("devops_pipeline_scene_b5f6ee", (repo_key,)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT scene_id, name FROM devops_pipeline_scene "
+                    "WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,)).fetchall()
         return [{"scene_id": r[0], "name": r[1] or r[0]} for r in rows]
     except Exception as e:
         log.warning(f"[finding-card] get scenes failed: {e}")

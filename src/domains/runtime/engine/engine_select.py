@@ -896,8 +896,13 @@ def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
     import json as _json
     hits = []
     try:
-        c.execute("SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-        rows = c.fetchall()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_9bcf48_f
+        _mg_lib_9bcf48 = _mg_lib_9bcf48_f(foreign_only=True)
+        if _mg_lib_9bcf48 is not None:
+            rows = _mg_lib_9bcf48.read_all("devops_pipeline_scene_9bcf48", ())
+        else:
+            c.execute("SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
     except Exception as _e:
         log.warning(f"_find_scene_bindings_for_runtime: query failed: {_e}")
         return hits

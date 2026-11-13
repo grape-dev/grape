@@ -189,9 +189,14 @@ def _readd_scene_bindings(c, runtime_id: int, now_iso: str) -> list:
         return added
     for log_id, scene_row_id, node_tag in rows:
         try:
-            srow = c.execute(
-                "SELECT nodes_json FROM devops_pipeline_scene WHERE id=?",
-                (scene_row_id,)).fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b5cd89_f
+            _mg_lib_b5cd89 = _mg_lib_b5cd89_f(foreign_only=True)
+            if _mg_lib_b5cd89 is not None:
+                c = _mg_lib_b5cd89.read_one("devops_pipeline_scene_b5cd89", (scene_row_id,)).fetchone()
+            else:
+                srow = c.execute(
+                    "SELECT nodes_json FROM devops_pipeline_scene WHERE id=?",
+                    (scene_row_id,)).fetchone()
             if not srow:
                 c.execute("UPDATE scene_engine_detach_log SET rebound_at=? WHERE id=?",
                           (now_iso, log_id))
