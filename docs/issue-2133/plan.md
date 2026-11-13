@@ -30,7 +30,7 @@
 
 ### 5. 数据库
 `src/api/db_setup.py`：新增 `grape_t_engine_lifecycle_audit` 表 + 幂等迁移
-`202611150003 issue2133-engine-recovery-schema` 补列/建表；`src/kernel/db.py` 注册表同步。
+`202611150007 issue2133-engine-recovery-schema` 补列/建表；`src/kernel/db.py` 注册表同步。
 
 ## 依赖关系
 心跳侧计数 → 认领闸门读取 → 探活恢复触发加回 → 加回触发对账（单向链路，无循环）。

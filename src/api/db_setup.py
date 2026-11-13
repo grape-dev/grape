@@ -5372,10 +5372,10 @@ register_migration(
     # 迁移号合规（tests/arch/test_migration_version_integrity）：基线快照
     # max_version=202611140004（migration_versions_baseline.json），新迁移号
     # 必须大于 max_version 且不得落在已发布 20261112xxxx 区间。原号
-    # 202611120001 与基线 backfill_events_terminal_completed_at_1497 撞号、
-    # 顺延的 0005/0006 低于 max_version，202611150001/2 又被基线 #2091/#2095
-    # 抢注，最终改号 202611150003/4。
-    version="202611150004",
+    # 202611120001 与基线迁移撞号、顺延号 0005/0006 低于 max_version；
+    # 202611150001/2 被 #2091/#2095 抢注，0003-0006 又被基线 67ed59fb4
+    # 卡驱动凭据合入（repo-credentials 表族）占用，最终改号 202611150007/8。
+    version="202611150008",
     name="add-agent-runtimes-probe-spawn-fail-count",
     kind="safe",
     fn=_fn_add_agent_runtimes_probe_spawn_fail_count,
@@ -5402,7 +5402,7 @@ def _fn_issue2133_engine_recovery_schema() -> None:
 
 
 register_migration(
-    version="202611150003",
+    version="202611150007",
     name="issue2133-engine-recovery-schema",
     kind="safe",
     fn=_fn_issue2133_engine_recovery_schema,
