@@ -108,6 +108,30 @@ _MIGRATION_PATH = os.path.join(
     _repo_root(__file__), "scripts", "migrations", "001_channel_tables.py",
 )
 
+_MIGRATION_004_PATH = os.path.join(
+    _repo_root(__file__), "scripts", "migrations", "004_notify_outbox.py",
+)
+
+# Issue #2261 A：引擎句柄全局注册点。
+# 三进程拆分后引擎实例挂在各入口模块（grape_server/main）的模块属性上，
+# notify._engine() 写死 src.api.main.im_engine 在 A/B/C 进程下恒 None → engine_down。
+# 所有入口都经 start_im_engine()，这里作为唯一注册点；stop() 置空。
+# 注：类型标注为 Optional[object]（ImEngine 定义在下方，前向引用避免 import 环）。
+_CURRENT_ENGINE: "Optional[object]" = None
+
+
+def set_current_engine(engine) -> None:
+    """登记当前进程持有的引擎句柄（start 成功后调用；stop 时置 None）。"""
+    global _CURRENT_ENGINE
+    _CURRENT_ENGINE = engine
+
+
+def get_current_engine():
+    """取当前进程注册的引擎句柄（未启动/已停止 → None）。"""
+    return _CURRENT_ENGINE
+
+
+
 _APP_SEEN_TABLE = (
     "CREATE TABLE IF NOT EXISTS bot_seen_messages ("
     " app_id TEXT, message_id TEXT, seen_at REAL, UNIQUE (app_id, message_id))"
@@ -163,12 +187,25 @@ def _load_migration_module():
     return module
 
 
+def _load_migration_004():
+    """加载 004_notify_outbox（延迟加载，避免模块导入期文件 IO）。"""
+    spec = importlib.util.spec_from_file_location("migrations_004", _MIGRATION_004_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("migrations_004", module)
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_startup_migration(db_path: str) -> dict:
-    """启动迁移（幂等，可重复执行）：001 建渠道表 + wiring 自有消息表。
+    """启动迁移（幂等，可重复执行）：001 建渠道表 + 004 outbox 补列 + wiring 自有消息表。
 
     A2 收尾（Phase B）：从 legacy `im_*` 列回填安装行已移到一次性迁移
     `scripts/migrations/002_drop_legacy_im.py`（先回填再 DROP 列/表）——
     旧列不存在后启动再跑回填会直接 no such column。
+
+    Issue #2261 B1：串接 004（grape_t_channel_outbound_card 补列，通知 outbox）。
 
     必须在 worker 线程内调用；连接由 _connect 按后端选择（MySQL 走池化共享连接，
     SQLite 走本地文件连接），方言统一经 src.kernel.mysql_compat 翻译。
@@ -178,6 +215,12 @@ def run_startup_migration(db_path: str) -> dict:
     try:
         conn.execute(_APP_SEEN_TABLE)     # 测试库无则补空表
         migrations.ensure_channel_tables(conn)
+        try:
+            mig004 = _load_migration_004()
+            if mig004 is not None:
+                mig004.ensure_notify_outbox_columns(conn)
+        except Exception as e:            # outbox 补列失败不阻断启动（可重跑）
+            log.warning("[startup-migration] 004 notify outbox columns failed: %s", e)
         conn.execute(_MESSAGE_TABLE)
         conn.commit()
         return {"user": 0, "repo": 0, "installations": [],
@@ -294,6 +337,18 @@ class _SharedConn:
 def ensure_channel_schema(conn) -> None:
     """建/补齐 IM 渠道 4 表（幂等）。db_setup 启动建表与引擎启动迁移共用同一份 DDL。"""
     _load_migration_module().ensure_channel_tables(conn)
+
+
+def ensure_notify_outbox_schema(conn) -> list:
+    """幂等补 outbox 状态列（Issue #2261 迁移 004）。
+
+    4 进程口径：挂在 db_setup 的 ensure_channel_schema 旁边，四个进程启动都会跑——
+    与引擎开关解耦（A 进程 mode=off 时 run_startup_migration 不会执行，B/C 进程仍要能入队）。
+    """
+    mig004 = _load_migration_004()
+    if mig004 is None:
+        return []
+    return mig004.ensure_notify_outbox_columns(conn)
 
 
 # ---------------------------------------------------------------- UI 写入桥（Issue #871 写方向反转）
@@ -1072,6 +1127,9 @@ class ImEngine:
         self._built_apps.clear()
         self._ctx_cache.clear()
         self._repliers.clear()
+        # Issue #2261 A：注销全局注册点（引擎停止后 notify 不得再取到死句柄）
+        if get_current_engine() is self:
+            set_current_engine(None)
         log.info("IM engine: stopped")
 
     def health(self) -> dict:
@@ -1677,15 +1735,19 @@ class ImEngine:
 # ---------------------------------------------------------------- main.py 入口助手
 
 async def start_im_engine(db_path: Optional[str] = None) -> Optional[ImEngine]:
-    """main.py 启动入口：装配并启动新引擎；失败返回 None（调用方保持 legacy 兜底）。
+    """main.py / grape_server.py 启动入口：装配并启动新引擎；失败返回 None（调用方保持 legacy 兜底）。
 
     MySQL 后端走 session_manager 的池化连接（方言由 src.kernel.mysql_compat 翻译）；
     渠道 4 表由 run_startup_migration → ensure_channel_tables 幂等建/补。
+
+    Issue #2261 A：启动成功后登记到全局注册点（set_current_engine），
+    notify.resolve_engine() 的第一优先级来源。
     """
     try:
         path = db_path or default_db_path()
         engine = ImEngine(path)
         await engine.start()
+        set_current_engine(engine)
         return engine
     except Exception as e:
         log.warning("IM engine start failed: %s", e)
@@ -1695,6 +1757,7 @@ async def start_im_engine(db_path: Optional[str] = None) -> Optional[ImEngine]:
 __all__ = [
     "ImEngine", "engine_mode", "egress_mode", "start_im_engine", "run_startup_migration",
     "default_db_path", "SqliteDedupStore", "SqliteBindingStore",
+    "set_current_engine", "get_current_engine",
     "MODE_WATCH_INTERVAL", "ENGINE_ENV",
     "EGRESS_ENV", "EGRESS_MODE_FILE_ENV", "feishu_api", "get_active_installation",
     "sync_installation", "revoke_installation",

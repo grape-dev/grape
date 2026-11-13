@@ -1776,10 +1776,14 @@ def _create_tables():
 
     # IM 渠道 4 表（Issue #742 §5.1）：DDL 与引擎启动迁移共用 scripts/migrations/001_channel_tables，
     # 在此统一建/补（幂等），保证 MySQL 后端下即使 IM 引擎模式为 off 也表示层完整（P1 回填/对账依赖）。
+    # Issue #2261：通知 outbox 新增列（004_notify_outbox）也挂在这里——四进程都会跑 db_setup，
+    # 而 run_startup_migration 只在 A 进程 start_im_engine(mode=on) 时跑；挂在引擎启动上会让
+    # mode=off / A 未起时旧库缺列，B/C 进程入队直接异常（通知静默丢失）。
     try:
-        from src.domains.runtime.im.engine_wiring import ensure_channel_schema
+        from src.domains.runtime.im.engine_wiring import ensure_channel_schema, ensure_notify_outbox_schema
         with db_lock:
             ensure_channel_schema(db)
+            ensure_notify_outbox_schema(db)
             db.commit()
         log.info("IM channel tables ready "
                  "(grape_t_channel_installation / session_binding / inbound_dedup / sender_identity)")

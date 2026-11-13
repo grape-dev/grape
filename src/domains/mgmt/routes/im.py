@@ -58,8 +58,13 @@ def _db_conn():
 
 
 def _engine():
-    from src.api.main import im_engine
-    return im_engine
+    """本进程的 IM 引擎（4 进程口径：只有 A/mgmt 进程有；B/C/D 返回 None）。
+
+    不再 import src.api.main（四进程部署下不跑单进程入口），统一走 notify.resolve_engine
+    的 注册点 → A 进程模块属性 → app.state 顺序。
+    """
+    from src.domains.runtime.im import notify as _notify
+    return _notify.resolve_engine()
 
 
 def _masked_config(raw: str) -> dict:
@@ -89,6 +94,7 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
     """IM 引擎状态汇总——前端用来显示总开关与真连上的渠道数。
 
     注：旧 BotManager 已下线（A2 M2），active_engine 只剩 new/idle 两态。
+    Issue #2261 C：新增 outbox 段（未送达计数 + 最近未送达明细）。
     """
     from src.domains.runtime.im import engine_wiring
     eng = _engine()
@@ -120,7 +126,58 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
         },
         "scan_interval_sec": 30,
         "notify": _notify_stats(),
+        "outbox": _outbox_status(),
     }
+
+
+def _outbox_status() -> dict:
+    """通知 outbox 状态（#2261 C）：计数 + 最近 20 条未送达。读失败降级空段。"""
+    try:
+        from src.domains.runtime.im import outbox as OB
+        return {
+            "counts": OB.counts(),
+            "recent_undelivered": OB.recent_undelivered(limit=20),
+        }
+    except Exception:
+        return {"counts": {}, "recent_undelivered": []}
+
+
+@router.get("/outbound")
+def im_outbound(status: str = "", limit: int = 50,
+                user: dict = Depends(get_current_user_or_api_key)):
+    """通知出站明细（#2261 C）：status 可筛（pending/sent/failed/expired），倒序。"""
+    status = (status or "").strip().lower()
+    if status and status not in ("pending", "sending", "sent", "failed", "expired"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "status 只支持 pending/sending/sent/failed/expired 或留空"})
+    from src.domains.runtime.im import outbox as OB
+    rows = OB.list_rows(status=status, limit=limit)
+    return {"outbound": rows, "total": len(rows)}
+
+
+@router.post("/outbound/{out_track_id}/retry")
+def im_outbound_retry(out_track_id: str,
+                      user: dict = Depends(get_current_user_or_api_key)):
+    """手动重发（#2261 C）：failed/expired → pending（消费者 ≤1s 接力重投）。"""
+    from src.domains.runtime.im import outbox as OB
+    row = OB.get_row(out_track_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": "outbox 行不存在", "out_track_id": out_track_id})
+    if row.get("status") not in ("failed", "expired"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "只有 failed/expired 状态的行可以重发",
+            "status": row.get("status")})
+    ok = OB.requeue_for_retry(out_track_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail={
+            "code": 409, "message": "重发失败（状态已变化）", "status": row.get("status")})
+    log.info(f"IM outbox retry: {out_track_id} requeued by user={user.get('id')}")
+    _audit_im(user, None, "outbound_retry", installation_id=str(row.get("installation_id") or ""),
+              channel_type=str(row.get("channel_type") or ""),
+              extra={"out_track_id": out_track_id, "kind": (row.get("payload") or {}).get("kind")})
+    return {"out_track_id": out_track_id, "status": "pending", "requeued": True}
 
 
 def _notify_stats() -> dict:

@@ -372,6 +372,14 @@ async def lifespan(app: FastAPI):
 
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
+
+    # Issue #2261 B1：通知 outbox 消费者（单进程并集模式与四进程 A 进程同款接线）。
+    # 先停消费者、再停引擎（关停侧见下方 lifespan 尾部）。无运行 loop/无引擎时静默跳过。
+    try:
+        from src.domains.runtime.im import outbox as _outbox_mod
+        _outbox_mod.attach_outbox_consumer(app, getattr(app.state, "im_engine", None))
+    except Exception as _oe:
+        log.warning(f"IM outbox consumer start failed: {_oe}")
     _event_h = await server_tasks.start_event_tasks(app, include_sweep_events=False)
     _worker_h = await server_tasks.start_worker_tasks(app, include_sweep_tasks=False, include_table_maintenance=False)
     _insight_h = await server_tasks.start_insight_tasks(app, include_table_maintenance=False)
@@ -500,6 +508,15 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("Process tasks: stopping...")
+    # Issue #2261 B1：先停通知 outbox 消费者（cancel+await），再停各域任务/引擎——
+    # 反序会让消费者在 await 途中拿到已停的引擎（发给死渠道）。
+    try:
+        from src.domains.runtime.im import outbox as _outbox_mod
+        if getattr(app.state, "outbox_consumer", None) is not None:
+            await app.state.outbox_consumer.stop()
+        _outbox_mod.stop_outbox_consumer(app)
+    except Exception as _oe:
+        log.warning(f"IM outbox consumer stop failed: {_oe}")
     await server_tasks.stop_insight_tasks(app, _insight_h)
     await server_tasks.stop_worker_tasks(app, _worker_h)
     await server_tasks.stop_event_tasks(app, _event_h)
