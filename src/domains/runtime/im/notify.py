@@ -14,6 +14,13 @@ channel_type="feishu"），用户没绑飞书时这类通知被静默跳过（re
   4. 发送 = 每渠独立、失败重试 RETRY 次、一渠失败不影响其他渠；计数走 stats()。
   5. 幂等 = (user, kind, repo, issue) 在 _DEDUPE_TTL 内只发一轮（agent 重试风暴兜底）。
 
+Issue #2261（2026-11-12）：
+  6. 引擎解析 = resolve_engine() 多源（engine_wiring 注册点 → grape_server → main →
+     app.state），修三进程下恒 None → engine_down 的根因；
+  7. 出站 = 逐渠道落 outbox（src/im/outbox.py，grape_t_channel_outbound_card 补列），
+     本进程可投立即投；engine_down/offline 保持 pending 由租约持有实例接力；
+     no_binding 落 failed 可见可重发。
+
 不负责：LLM / ChatAgent 触发。通知纯静态内容（与 _run_notify 同规约 §十）。
 """
 from __future__ import annotations
@@ -31,6 +38,9 @@ _RETRY_BACKOFF = 0.4      # 秒（第 n 次重试等待 n*_RETRY_BACKOFF）
 _DEDUPE_TTL = 90.0        # 同一事件去重窗口（秒）
 _PENDING_TTL = 1800.0     # 回数字选择的有效期（30 分钟）
 
+# outbox payload 的统一键集（入队与消费重建卡片共用一份口径——QA #1314 S5 data clump）
+_PAYLOAD_KEYS = ("kind", "text", "repo_key", "issue_number", "conv_id", "user_id", "note")
+
 _DEDUPE: dict[str, float] = {}
 _STATS: dict[str, int] = {
     "attempted": 0,        # 通知批次
@@ -41,6 +51,7 @@ _STATS: dict[str, int] = {
     "skipped_no_binding": 0,  # 该渠道没私聊过机器人，无 p2p 会话
     "degraded_text": 0,       # 卡片降级为文本（无 RICH_CARD）
     "deduped": 0,
+    "queued": 0,              # #2261：入队待租约持有实例接力（engine_down/offline 场景）
 }
 
 
@@ -134,6 +145,25 @@ def build_card(kind: str, *, text: str, repo_key: str = "", issue_number: int = 
     return Card(title=title, tone=tone, blocks=tuple(blocks), hint=note or "")
 
 
+def build_cards_from_payload(payload: dict) -> tuple:
+    """outbox payload → (card, text_card)（消费者重投与本进程内联投递共用，QA #1314 S5）。
+
+    payload 键集见 _PAYLOAD_KEYS；text_card 为编号选项降级版（无 RICH_CARD 渠道用）。
+    """
+    payload = payload or {}
+    text = str(payload.get("text", ""))
+    repo_key = str(payload.get("repo_key", ""))
+    issue_number = int(payload.get("issue_number") or 0)
+    conv_id = str(payload.get("conv_id", ""))
+    note = str(payload.get("note", ""))
+    kind = str(payload.get("kind", "task"))
+    card = build_card(kind, text=text, repo_key=repo_key, issue_number=issue_number,
+                      conv_id=conv_id, note=note)
+    text_card = build_card(kind, text=text, repo_key=repo_key, issue_number=issue_number,
+                           conv_id=conv_id, note=note, numbered=True)
+    return card, text_card
+
+
 # ---------------------------------------------------------------- 目标解析
 
 def _conn():
@@ -191,12 +221,62 @@ def p2p_chat_id(installation_id: str) -> str:
     return plain
 
 
-def _engine():
+# 运行中 ASGI app 引用（lifespan 里登记，进程关闭时置空；resolve_engine 兜底用）。
+# 异步函数（无 app 时返回 None），由入口模块 set_running_app 注册。
+_running_asgi_app = None
+
+
+def set_running_app(app) -> None:
+    """入口 lifespan 登记运行中 app（resolve_engine 的 app.state 兜底来源）。"""
+    global _running_asgi_app
+    _running_asgi_app = app
+
+
+def resolve_engine():
+    """多源解析当前进程可用的 IM 引擎句柄（Issue #2261 A）。
+
+    顺序（任一非 None 即返回）：
+      ① src.domains.runtime.im.engine_wiring.get_current_engine() —— 全局注册点（A 进程主来源）
+      ② src.api.grape_server.im_engine                              —— A 进程模块属性（老代码路径兜底）
+      ③ 运行中 ASGI app.state.im_engine                             —— 兜底（模块属性被置空但 app 还活着）
+
+    4 进程口径：只有 A（mgmt）进程起引擎，B/C/D 一律返回 None——它们不投递，
+    只把通知写进 outbox（`engine_down` 落 pending），由 A 的消费者按租约归属补投。
+    不要再 import src.api.main：单进程入口在四进程部署下不跑，且导入整包 app 有副作用。
+    """
+    from src.domains.runtime.im import engine_wiring
+    eng = engine_wiring.get_current_engine()
+    if eng is not None:
+        return eng
     try:
-        from src.api.main import im_engine
-        return im_engine
+        from src.api import grape_server as _gs
+        eng = getattr(_gs, "im_engine", None)
+        if eng is not None:
+            return eng
     except Exception:
-        return None
+        pass
+    try:
+        app = _running_asgi_app
+        if app is not None:
+            eng = getattr(getattr(app, "state", None), "im_engine", None)
+            if eng is not None:
+                return eng
+    except Exception:
+        pass
+    global _ENGINE_WARNED
+    if not _ENGINE_WARNED:
+        _ENGINE_WARNED = True
+        log.warning("[im-notify] no IM engine available in this process "
+                    "(engine_wiring/grape_server/app.state all empty)")
+    return None
+
+
+_ENGINE_WARNED = False
+
+
+def _engine():
+    """兼容别名（既有调用与测试）：resolve_engine 的唯一入口。"""
+    return resolve_engine()
 
 
 def _issue_owner(repo_key: str, issue_number: int) -> tuple[int, str, str]:
@@ -290,6 +370,166 @@ async def _deliver(engine, target: dict, chat_id: str, card,
     return False, degraded, reason
 
 
+def _make_payload(kind: str, text: str, repo_key: str, issue_number: int,
+                  conv_id: str, uid: int, note: str) -> dict:
+    """入队 payload（键集 = _PAYLOAD_KEYS，消费侧 build_cards_from_payload 同口径）。"""
+    return {"kind": kind, "text": text, "repo_key": repo_key or "",
+            "issue_number": int(issue_number or 0), "conv_id": conv_id or "",
+            "user_id": uid, "note": note}
+
+
+def _event_bucket() -> str:
+    """事件桶（90s，与内存去重窗口同量级）：区分「同一 (user,kind,repo,issue) 的新一轮触达」。
+
+    不引入秒级精度是为了让并发多进程在同一事件上仍落到同一桶 → 仍是 1 行 1 次发送。
+    """
+    return str(int(time.time() // 90))
+
+
+async def _backfill_existing_row(track: str, ctype: str,
+                                 sent: list, failed: list, skipped: dict) -> bool:
+    """同单号已存在：读行状态回填本轮结果（不真实重发）。返回是否已回填。"""
+    from src.domains.runtime.im import outbox as OB
+    try:
+        row = await asyncio.to_thread(OB.get_row, track)
+    except Exception:
+        row = None
+    if row is None:
+        return False
+    status = str(row.get("status") or "")
+    if status == "sent":
+        # 终态行的回填只用于「同一事件已在途/已发」的并发去重：不冒充本轮 sent
+        # （架构守护 Critical-2：此前报 sent 会让监控显示正常、实际没发）
+        skipped[ctype] = "deduped_existing"
+        _bump("deduped")
+    elif status in ("pending", "sending"):
+        skipped[ctype] = "queued"
+    else:
+        failed.append(ctype)
+        skipped[ctype] = str(row.get("last_error") or status)
+    return True
+
+
+async def _handle_target(target: dict, *, uid: int, kind: str, text: str,
+                         repo_key: str, issue_number: int, conv_id: str,
+                         note: str, eng, dedupe: bool, OB) -> None:
+    """单渠道：入队 → 认领 → 投递 → 落终态（notify_user 的循环体，QA #1314 S2 抽取）。"""
+    sent: list = target.setdefault("_sent", [])
+    failed: list = target.setdefault("_failed", [])
+    skipped: dict = target.setdefault("_skipped", {})
+    inst = str(target.get("installation_id") or "")
+    ctype = str(target.get("channel_type") or "")
+    cid = str(target.get("chat_id") or "") or await asyncio.to_thread(p2p_chat_id, inst)
+
+    payload = _make_payload(kind, text, repo_key, issue_number, conv_id, uid, note)
+    track = OB.out_track_id(uid, kind, repo_key, issue_number, ctype, inst) if OB else ""
+    inserted = False
+    if OB is not None and track:
+        if not cid:
+            # no_binding 一步落终态（QA #1314 m2：消除「pending → failed」两步写崩溃窗口；
+            # 已存在（replace=False）时 mark_failed_no_attempt 兜底覆盖 pending/sending 行）
+            _bump("skipped_no_binding")
+            skipped[ctype] = "no_binding"
+            try:
+                inserted = await asyncio.to_thread(
+                    OB.enqueue, out_track_id=track, installation_id=inst,
+                    channel_type=ctype, channel_chat_id=cid, payload=payload,
+                    expires_at=OB.new_expiry(), status="failed",
+                    last_error="no_binding", replace=not dedupe)
+                if not inserted:
+                    await asyncio.to_thread(OB.mark_failed_no_attempt, track, "no_binding")
+            except Exception as e:
+                log.warning("[im-notify] outbox no_binding enqueue failed inst=%s: %s", inst, e)
+            return
+        try:
+            inserted = await asyncio.to_thread(
+                OB.enqueue, out_track_id=track, installation_id=inst,
+                channel_type=ctype, channel_chat_id=cid, payload=payload,
+                expires_at=OB.new_expiry(), replace=not dedupe)
+        except Exception as e:
+            log.warning("[im-notify] outbox enqueue failed inst=%s: %s", inst, e)
+
+        if not inserted:
+            # Critical-2：单号已存在且旧行**已落终态** → 这是新一轮触达（事件实例不同），
+            # 必须发出去；用 90s 事件桶派生新单号（同事件并发仍同桶 → 仍只 1 行）。
+            old = await asyncio.to_thread(OB.get_row, track)
+            if old and str(old.get("status") or "") in ("sent", "failed", "expired"):
+                track = OB.out_track_id(uid, kind, repo_key, issue_number, ctype, inst,
+                                        event_key=_event_bucket())
+                try:
+                    inserted = await asyncio.to_thread(
+                        OB.enqueue, out_track_id=track, installation_id=inst,
+                        channel_type=ctype, channel_chat_id=cid, payload=payload,
+                        expires_at=OB.new_expiry(), replace=not dedupe)
+                except Exception as e:
+                    log.warning("[im-notify] outbox re-enqueue failed inst=%s: %s", inst, e)
+
+    if not cid:
+        # OB 不可用（导入失败）的退路：维持旧语义只计数
+        _bump("skipped_no_binding")
+        skipped[ctype] = "no_binding"
+        return
+
+    if OB is not None and track and not inserted:
+        if await _backfill_existing_row(track, ctype, sent, failed, skipped):
+            return
+
+    if eng is None:
+        _bump("sent_failed")
+        _bump("queued")
+        failed.append(ctype)
+        skipped[ctype] = "engine_down"
+        # 行保持 pending（不置失败）：等租约持有者消费 —— 引擎不在本进程不是行的错
+        return
+
+    # 内联投递前原子认领（QA #1314 M1）：pending → sending，与 1s 消费者互斥
+    if OB is not None and track:
+        try:
+            claimed = await asyncio.to_thread(OB.claim_for_sending, track)
+        except Exception:
+            claimed = True                    # 认领不可用 → 退化为旧行为（直投）
+        if not claimed:
+            if await _backfill_existing_row(track, ctype, sent, failed, skipped):
+                return
+
+    _bump("channels")
+    card, text_card = build_cards_from_payload(payload)
+    ok, degraded, reason = await _deliver(eng, target, cid, card, text_card)
+    if not ok and reason == "offline":
+        # 渠道没连上：算"跳过"而不是"失败"（失败留给真连上但发不出去的）。
+        # 行保持 pending：本进程 Supervisor 没连上 ≠ 别的主控没连上（租约路由语义）。
+        _bump("skipped_offline")
+        _bump("queued")
+        skipped[ctype] = "offline"
+        # 认领了的 sending 行回 pending（留给租约持有实例接力）
+        if OB is not None and track:
+            try:
+                await asyncio.to_thread(OB.release_sending, track)
+            except Exception:
+                pass
+        return
+    if degraded:
+        _bump("degraded_text")
+        if ok:
+            _register_numbered_reply(cid, conv_id, repo_key, issue_number)
+    if ok:
+        _bump("sent_ok")
+        sent.append(ctype)
+    else:
+        _bump("sent_failed")
+        failed.append(ctype)
+        skipped[ctype] = reason or "send_failed"
+
+    if OB is not None and track:
+        try:
+            if ok:
+                await asyncio.to_thread(OB.mark_sent, track)
+            else:
+                await asyncio.to_thread(OB.mark_failed, track, reason or "send_failed")
+        except Exception as e:
+            log.warning("[im-notify] outbox mark failed inst=%s: %s", inst, e)
+
+
 async def notify_user(user_id: int, kind: str, text: str, *,
                       repo_key: str = "", issue_number: int = 0, conv_id: str = "",
                       targets: Optional[Iterable[dict]] = None,
@@ -298,6 +538,14 @@ async def notify_user(user_id: int, kind: str, text: str, *,
 
     targets：测试/特殊场景显式指定（[{installation_id, channel_type, chat_id?}]）；
     缺省自动解析「active 安装 ∩ 活渠道 ∩ 有 p2p 绑定」。
+
+    Issue #2261 B1：改「入队 + 本进程可投则立即投递」——
+      1. 逐渠道写 outbox（out_track_id 主键跨进程幂等：A/B/C 并发只 1 行）；
+      2. 无 p2p 绑定 → 一步落 failed/no_binding（不再静默跳过）；
+      3. 本进程引擎可用 → 原子认领（pending→sending）后立即投递（成功置 sent）；
+         认领失败（消费者已持有）→ 不投，回填行状态；引擎不可用 → 行保持 pending，
+         由持有该安装租约的 A 实例消费者接力（≤1s 轮询）；
+      4. 同单号已存在（sent/sending/pending/failed...）→ 本轮不再投递（防重复发送）。
     """
     uid = int(user_id or 0)
     if not uid:
@@ -311,47 +559,27 @@ async def notify_user(user_id: int, kind: str, text: str, *,
         _DEDUPE[key] = now + _DEDUPE_TTL
 
     eng = engine if engine is not None else _engine()
-    _note = f"发送时间：{time.strftime('%Y-%m-%d %H:%M')}"
-    card = build_card(kind, text=text, repo_key=repo_key, issue_number=issue_number,
-                      conv_id=conv_id, note=_note)
-    text_card = build_card(kind, text=text, repo_key=repo_key, issue_number=issue_number,
-                           conv_id=conv_id, note=_note, numbered=True)
-    _bump("attempted")
+    note = f"发送时间：{time.strftime('%Y-%m-%d %H:%M')}"
 
     pick = list(targets) if targets is not None else await asyncio.to_thread(active_targets, uid)
-    sent: list[str] = []
-    failed: list[str] = []
-    skipped: dict[str, str] = {}
+
+    try:
+        from src.domains.runtime.im import outbox as OB
+    except Exception:
+        OB = None                                   # outbox 不可用 → 退化旧行为（直投）
+
+    _bump("attempted")
     for target in pick:
-        cid = str(target.get("chat_id") or "") or await asyncio.to_thread(
-            p2p_chat_id, target["installation_id"])
-        if not cid:
-            _bump("skipped_no_binding")
-            skipped[target["channel_type"]] = "no_binding"
-            continue
-        if eng is None:
-            _bump("sent_failed")
-            failed.append(target["channel_type"])
-            skipped[target["channel_type"]] = "engine_down"
-            continue
-        _bump("channels")
-        ok, degraded, reason = await _deliver(eng, target, cid, card, text_card)
-        if not ok and reason == "offline":
-            # 渠道没连上：算"跳过"而不是"失败"（失败留给真连上但发不出去的）
-            _bump("skipped_offline")
-            skipped[target["channel_type"]] = "offline"
-            continue
-        if degraded:
-            _bump("degraded_text")
-            if ok:
-                _register_numbered_reply(cid, conv_id, repo_key, issue_number)
-        if ok:
-            _bump("sent_ok")
-            sent.append(target["channel_type"])
-        else:
-            _bump("sent_failed")
-            failed.append(target["channel_type"])
-            skipped[target["channel_type"]] = reason or "send_failed"
+        await _handle_target(target, uid=uid, kind=kind, text=text,
+                             repo_key=repo_key, issue_number=issue_number,
+                             conv_id=conv_id, note=note, eng=eng,
+                             dedupe=dedupe, OB=OB)
+
+    sent = [c for t in pick for c in t.pop("_sent", [])]
+    failed = [c for t in pick for c in t.pop("_failed", [])]
+    skipped: dict = {}
+    for t in pick:
+        skipped.update(t.pop("_skipped", {}))
 
     log.info("[im-notify] kind=%s user=%s issue=%s#%s sent=%s failed=%s skipped=%s",
              kind, uid, repo_key, issue_number, sent, failed, skipped)
@@ -391,4 +619,5 @@ def notify_issue_event(repo_key: str, issue_number: int, kind: str, text: str,
 
 
 __all__ = ["notify_user", "notify_issue_event", "schedule_notify", "build_card",
-           "active_targets", "p2p_chat_id", "stats", "issue_url"]
+           "build_cards_from_payload", "active_targets", "p2p_chat_id", "stats",
+           "issue_url", "resolve_engine", "set_running_app"]

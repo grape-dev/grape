@@ -102,12 +102,14 @@ class UserCredentialRepository:
             user_id=str(user_id), provider=provider).first()  # D105：id 列入 PK 后不再用复合 get
         return _cred_dto(m) if m else None
 
-    def set(self, session: Session, user_id: str, provider: str, config_json: str) -> None:
+    def set(self, session: Session, user_id: str, provider: str, config_json: str,
+            kind: str = "") -> None:
         m = session.query(UserCredentialModel).filter_by(
-            user_id=str(user_id), provider=provider).first()
+            user_id=str(user_id), provider=provider, kind=kind or "").first()
         if m is None:
             from src.kernel.id_gen import uuid7_str  # D105：新行补 UUID 主键
-            m = UserCredentialModel(id=uuid7_str(), user_id=str(user_id), provider=provider)
+            m = UserCredentialModel(id=uuid7_str(), user_id=str(user_id), provider=provider,
+                                    kind=kind or "")
             session.add(m)
         m.config_json = config_json or "{}"
         m.updated_at = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -201,6 +203,14 @@ class IdentityAdminRepository:
         m.updated_at = updated_at
         m.status = status
         session.flush()
+
+    @staticmethod
+    def delete_by_id(session: Session, identity_id: str) -> None:
+        """按 id 硬删一行（仅用于同用户同平台换账号时腾出唯一约束位）。"""
+        m = session.get(ExternalIdentityModel, str(identity_id))
+        if m is not None:
+            session.delete(m)
+            session.flush()
 
     @staticmethod
     def create(session: Session, grape_user_id: str, provider: str,

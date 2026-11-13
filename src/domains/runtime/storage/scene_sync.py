@@ -308,49 +308,83 @@ async def _download_repo_zip(client: httpx.AsyncClient, token: str) -> str:
     return repo_root
 
 
-def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
-    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 查 skill_id（优先 official，其次 repo）。
+def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
+                             repo_key: str = ""):
+    """重建 scene_skill_ref（DELETE + INSERT）。
 
-    P46.2：存在性判定与 _check_skills_exist 统一为 _query_active_skill_names 口径。
+    解析顺序（2026-11-13 修，三档同名不再错配）：
+      1. 节点带 skill_id 且 is_active=1 → **直接用它**（Issue #979 权威语义：
+         三档同名时锁定用户实际选中的那一条）；
+      2. 否则按名字回落：repo_key 给定先查本仓 repo 档（owner_id=repo_key），再 official，
+         再任意 repo，最后 user（user 场景/市场模板才可能命中）。
+
+    与原实现的两处差异：
+      · 不再无条件按名字重解析——那会把用户选的 repo/user 档覆盖成 official 档；
+      · repo 档查询带 owner_id=repo_key 过滤——避免跨仓同名技能被本仓场景认领。
     """
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
         for n in nodes:
-            skill_name = n.get("skill", "")
-            if skill_name:
-                # 优先查 official，其次 repo（仓库场景可能引用 repo scope 技能）
-                c.execute(
-                    "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1",
-                    (skill_name,),
-                )
-                sk_row = c.fetchone()
-                if not sk_row:
-                    c.execute(
-                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='repo' LIMIT 1",
-                        (skill_name,),
-                    )
-                    sk_row = c.fetchone()
-                skill_id = sk_row[0] if sk_row else 0
-                if skill_id == 0:
-                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
-                c.execute(
-                    "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
-                    (market_id, skill_id, skill_name),
-                )
+            skill_name = (n.get("skill", "") or "").strip()
+            try:
+                skill_id = int(n.get("skill_id") or 0)
+            except (TypeError, ValueError):
+                skill_id = 0
+            if not skill_name and not skill_id:
+                continue
+
+            resolved = 0
+            if skill_id:
+                row = c.execute(
+                    "SELECT id FROM skill WHERE id=? AND is_active=1", (skill_id,)).fetchone()
+                if row:
+                    resolved = skill_id
+                else:
+                    logger.warning(
+                        f"Scene sync: {scene_name} node skill_id={skill_id} inactive/missing, "
+                        f"fallback to name '{skill_name}'")
+            if not resolved and skill_name:
+                if repo_key:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='repo' AND owner_id=? LIMIT 1",
+                        (skill_name, repo_key)).fetchone()
+                    resolved = row[0] if row else 0
+                if not resolved:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='official' LIMIT 1", (skill_name,)).fetchone()
+                    resolved = row[0] if row else 0
+                if not resolved:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='repo' LIMIT 1", (skill_name,)).fetchone()
+                    resolved = row[0] if row else 0
+                if not resolved:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='user' LIMIT 1", (skill_name,)).fetchone()
+                    resolved = row[0] if row else 0
+            if resolved == 0:
+                logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
+            c.execute(
+                "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
+                (market_id, resolved, skill_name),
+            )
         db.commit()
 
 
-def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
-    """通过场景名查 market_id 后重建 scene_skill_ref。"""
+def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str = ""):
+    """通过场景名查 market_id（official 模板）后重建 scene_skill_ref。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
         row = c.fetchone()
     if row:
-        _rebuild_scene_skill_ref(row[0], nodes, scene_name)
+        _rebuild_scene_skill_ref(row[0], nodes, scene_name, repo_key)
 
 
 def _init_featured_scenes_if_empty():

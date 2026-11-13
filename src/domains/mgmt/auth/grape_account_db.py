@@ -519,6 +519,83 @@ def get_user_identities(grape_user_id: str) -> list[dict]:
         log.warning(f"Get user identities failed: {e}")
         return []
 
+def list_platform_links(grape_user_id: str) -> list[dict]:
+    """用户在各平台的标识统一视图 = 身份行 ∪ 凭据域 `<p>_pat`（A 批裁定）。
+
+    对象模型（2026-11-13 用户拍板）：PAT 是「仓库执行凭据」，不是身份绑定——
+    身份行（external_identities）只由首次 OAuth 登录或设置页 OAuth 绑定产生；
+    PAT 只落凭据域 user_credentials `<p>_pat`（带 login）。但很多调用方真正要
+    问的是「这个用户在平台 X 上是谁」（建单作者名 / host 用户名 / 仓库列表的
+    平台集合 / 注入给 LLM 的登录名清单），这些必须看两者并集，否则纯 PAT 账号
+    在所有身份行消费点上都表现为"未绑定"。
+
+    返回条目与 get_user_identities 字段对齐（provider/external_login/
+    external_name/external_avatar/created_at/status/has_oauth_token），并追加：
+      source        "identity" | "pat"
+      has_pat_token 该平台是否同时有可用 PAT 凭据
+    同 provider 两者并存时以身份行为准（归属来自 OAuth），PAT 只补标记与
+    login（身份行缺 login 时）。
+    """
+    out: list[dict] = []
+    seen: set = set()
+    try:
+        for ident in get_user_identities(grape_user_id):
+            provider = str(ident.get("provider") or "")
+            if not provider:
+                continue
+            item = dict(ident)
+            item["source"] = "identity"
+            item["has_pat_token"] = False
+            out.append(item)
+            seen.add(provider)
+    except Exception as e:
+        log.warning(f"list_platform_links: identity scan failed: {e}")
+
+    try:
+        from src.domains.mgmt.user.db import get_credentials
+        for cred in get_credentials(grape_user_id):
+            provider = str(cred.get("provider") or "")
+            kind = str(cred.get("kind") or "")
+            if kind:
+                # A2 归位形态：类型走 kind 列
+                if kind != "pat":
+                    continue
+                platform = provider
+            elif provider.endswith("_pat"):
+                # 迁移前/双读回退形态：旧复合键 <p>_pat
+                platform = provider[:-len("_pat")]
+            else:
+                continue
+            cfg = cred.get("config") or {}
+            token = str(cfg.get("token") or "").strip() if isinstance(cfg, dict) else ""
+            if platform in seen:
+                if token:
+                    for item in out:
+                        if item.get("provider") == platform:
+                            item["has_pat_token"] = True
+                            if not item.get("external_login"):
+                                item["external_login"] = str(cfg.get("login") or "")
+                continue
+            if not token:
+                continue
+            out.append({
+                "provider": platform,
+                "external_id": "",
+                "external_login": str(cfg.get("login") or "") if isinstance(cfg, dict) else "",
+                "external_name": "",
+                "external_avatar": "",
+                "created_at": "",
+                "status": 1,            # 可用凭据即视为该平台可用
+                "has_oauth_token": False,
+                "source": "pat",
+                "has_pat_token": True,
+            })
+            seen.add(platform)
+    except Exception as e:
+        log.warning(f"list_platform_links: credential scan failed: {e}")
+    return out
+
+
 def get_user_identities_with_tokens(grape_user_id: str) -> list[dict]:
     """获取用户的所有第三方活跃绑定（含 access_token/refresh_token）。
 
@@ -595,12 +672,49 @@ def create_external_identity(
         with _uow() as session:
             active = _iar.get_active_by_user_provider(session, grape_user_id, provider)
             if active is not None:
+                _prev_ext = str(getattr(active, "external_id", "") or "")
+                if _prev_ext and _prev_ext != str(external_id):
+                    # 同平台换账号（换 PAT）。表约束 UNIQUE(grape_user_id, provider)
+                    # 决定同一用户每平台只留一行——旧身份无法另存为解绑行。
+                    # 原实现直接原地改 external_id：目标身份若已有行会撞
+                    # UNIQUE(provider, external_id)，异常被外层 catch 成 return False，
+                    # 而调用方多已写入凭据 → 半成功且无提示。此处显式处理：
+                    # 目标被他人占用 → 拒绝；目标为本用户旧历史行 → 先删再切换。
+                    _other = _iar.get_by_platform_any_status(session, provider, str(external_id))
+                    if (_other is not None
+                            and str(getattr(_other, "grape_user_id", "") or "") != str(grape_user_id)):
+                        log.warning(
+                            "create_external_identity: target identity owned by another user "
+                            "provider=%s external_id=%s owner=%s caller=%s",
+                            provider, external_id,
+                            getattr(_other, "grape_user_id", ""), grape_user_id)
+                        return False
+                    if _other is not None:
+                        _iar.delete_by_id(session, _other.id)
+                    log.warning(
+                        "create_external_identity: switch platform account provider=%s user=%s "
+                        "external_id %s -> %s (single active row per platform; previous "
+                        "identity is replaced by constraint)",
+                        provider, grape_user_id, _prev_ext, external_id)
                 _iar.update_by_id(session, active.id, external_id, external_login,
                                   external_name, external_avatar or (active.external_avatar or ""),
                                   _at_cipher, _rt_cipher, _expires_at_str, _now, status=1)
                 return True
             unbound = _iar.get_by_platform(session, provider, external_id, statuses=(0, 4))
             if unbound is not None:
+                # 归属守卫（2026-11-13）：他人的解绑记录不得静默复活。
+                # 原实现只把 status 改回 1、不改 grape_user_id，一旦调用方漏查
+                # any_status（settings 泛型 platform_tokens 路径曾如此），就会
+                # 出现「身份行仍归 A、PAT 凭据写进 B、前端提示绑定成功」的半转移
+                # 态——既没转移也没报错。合法转移走 transfer_external_identity
+                #（INSERT 新归属行），因此这里只拒绝，不做隐式改归属。
+                if str(getattr(unbound, "grape_user_id", "") or "") != str(grape_user_id):
+                    log.warning(
+                        "create_external_identity: refuse to revive other user's unbound "
+                        "identity provider=%s external_id=%s owner=%s caller=%s",
+                        provider, external_id,
+                        getattr(unbound, "grape_user_id", ""), grape_user_id)
+                    return False
                 _iar.update_by_id(session, unbound.id, external_id, external_login,
                                   external_name, external_avatar or (unbound.external_avatar or ""),
                                   _at_cipher, _rt_cipher, _expires_at_str, _now, status=1)
@@ -1564,9 +1678,11 @@ def revoke_provider_credentials(grape_user_id: str, provider: str) -> dict:
     """
     from src.domains.mgmt.user import db as user_db
     result = {}
-    for key in (f"{provider}_oauth", f"{provider}_pat"):
+    # A2：按 (provider, kind) 撤销——覆盖归位行与双写期旧键行
+    for kind in ("oauth", "pat"):
+        key = f"{provider}_{kind}"
         try:
-            result[key] = bool(user_db.delete_credential(grape_user_id, key))
+            result[key] = bool(user_db.delete_credential(grape_user_id, provider, kind=kind))
         except Exception as _e:
             log.warning(f"revoke_provider_credentials: revoke {key} failed "
                         f"(user={grape_user_id}): {_e}")
@@ -1620,6 +1736,13 @@ def mark_identity_pat(grape_user_id: str, provider: str, pat_login: str = "") ->
             rows = session.execute(_sel(_M).where(
                 _M.grape_user_id == str(grape_user_id), _M.provider == provider,
                 _M.status.in_((1, 4)))).scalars().all()
+            if not rows:
+                # 命不中必须 loud（2026-11-13 复核）：原实现空转静默，上层照样打
+                # "PAT bound" 成功日志，绑定其实没落（身份行缺失/归属在他人名下）。
+                log.warning(
+                    "mark_identity_pat: no active identity for user=%s provider=%s — "
+                    "PAT metadata not marked (identity row may be missing or owned elsewhere)",
+                    grape_user_id, provider)
             for m in rows:
                 try:
                     meta = _json.loads(m.metadata_json or "{}")
@@ -1726,7 +1849,7 @@ def backfill_pat_identity_tokens() -> int:
             prov, uid = m.provider, str(m.grape_user_id)
             try:
                 from src.domains.mgmt.user.db import get_credential as _gc, set_credential as _sc
-                _existing = _gc(uid, f"{prov}_pat") or {}
+                _existing = _gc(uid, prov, kind="pat") or {}
                 if str(_existing.get("token", "") or "").strip() == _tok:
                     # 凭据域已有等值副本：仅清 ei
                     with db_lock:
@@ -1736,7 +1859,7 @@ def backfill_pat_identity_tokens() -> int:
                         db.commit()
                     moved_out += 1
                     continue
-                _sc(uid, f"{prov}_pat", {"token": _tok, "login": m.external_login or ""})
+                _sc(uid, prov, {"token": _tok, "login": m.external_login or ""}, kind="pat")
                 try:
                     meta = _json.loads(m.metadata_json or "{}")
                 except Exception:

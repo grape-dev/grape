@@ -215,6 +215,114 @@ const app = (() => {
     } catch { return null; }
   }
 
+  // ── 需求详情深链：/app/<owner>/<repo>/#tasks/<N>（区分仓库）──
+  // hash 路由只带视图与参数（#tasks/12），仓库维度放在路径里；解析器见 js/deeplink.js。
+  function _appPathCtx() {
+    try {
+      const dl = window.GrapeDeepLink;
+      return (dl && dl.parseAppPath) ? dl.parseAppPath(window.location.pathname || '') : null;
+    } catch (e) { return null; }
+  }
+
+  function _setCurrentRepoFromDeeplink(repo) {
+    try {
+      const owner = repo.owner || String(repo.full_name || '').split('/')[0] || '';
+      const name = repo.name || String(repo.full_name || '').split('/')[1] || '';
+      sessionStorage.setItem('currentRepo', JSON.stringify({
+        fullName: repo.full_name || (owner + '/' + name),
+        owner: owner,
+        name: name,
+        repoKey: repo.repo_key || ''
+      }));
+    } catch (e) {}
+  }
+
+  // 把路径里的仓库落到 currentRepo（深链入口）。返回 Promise<boolean>：
+  //   true = 已切到该仓库；false = 没命中/无权（已提示，路由按无仓库上下文继续）。
+  function _applyAppPathRepo() {
+    const ctx = _appPathCtx();
+    if (!ctx) return Promise.resolve(false);
+    const cur = currentRepo();
+    if (cur && window.GrapeDeepLink.sameRepo(cur.fullName, ctx.full)) return Promise.resolve(true);
+
+    function pick(list) {
+      for (let i = 0; i < (list || []).length; i++) {
+        const r = list[i] || {};
+        const full = r.full_name || ((r.owner || '') + '/' + (r.name || ''));
+        if (window.GrapeDeepLink.sameRepo(full, ctx.full)) {
+          _setCurrentRepoFromDeeplink({full_name: full, owner: r.owner, name: r.name, repo_key: r.repo_key});
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // 缓存先落（秒开），服务端结果为准（缓存可能已解绑/改名）
+    let cachedHit = false;
+    try {
+      const c = JSON.parse(localStorage.getItem(REPO_CACHE_KEY) || 'null');
+      cachedHit = pick(c && c.repos);
+    } catch (e) {}
+
+    return API.get('/repos/member').then(function (d) {
+      if (pick((d && d.repos) || [])) return true;
+      if (cachedHit) {
+        // 缓存里有、服务端没有 → 已被解绑/无权限：清掉，别拿旧仓库打开别人的单
+        try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
+      }
+      showToast(I18N.t('app.deeplink.repo_not_found') ||
+                '无法通过该链接进入：仓库不存在、未托管或你没有权限', '', 6000);
+      return false;
+    }).catch(function () { return cachedHit; });
+  }
+
+  // 深链仓库就绪后再走原有「hash → 视图」恢复逻辑（顺序不能反：先有仓库才能开详情页）
+  // 只有仓库、没有 hash（/app/owner/repo/）：直接进该仓库工作台，而不是弹仓库选择大堂
+  function _bootRestore() {
+    _applyAppPathRepo().then(function (hit) {
+      const h = window.location.hash || '';
+      if (hit && h.length <= 1) { nav('dash'); return; }
+      _restoreNavAfterLogin();
+    });
+  }
+
+  // 仓库切换后同步路径，避免 URL 与当前仓库脱节（深链分享出去指错仓库）
+  // 注意：GitCode 的仓库 name 可能是显示名（≠URL path），统一以 currentRepo().fullName 为准
+  // （与 currentRepo() 里「强制 URL 语义」同口径），否则会拼出 /app/owner/显示名/ 的死链。
+  function _syncAppPath(owner, name) {
+    try {
+      const dl = window.GrapeDeepLink;
+      if (!dl || !dl.buildAppPath) return;
+      const cur = currentRepo();
+      if (cur && cur.fullName) {
+        const parts = String(cur.fullName).split('/');
+        if (parts.length === 2 && parts[0] && parts[1]) {
+          owner = parts[0];
+          name = parts[1];
+        }
+      }
+      const target = dl.buildAppPath(owner, name, _appPathPrefix());
+      if ((window.location.pathname || '') === target) return;
+      window.history.replaceState(window.history.state, '', target + (window.location.hash || ''));
+    } catch (e) {}
+  }
+
+  function _appPathPrefix() {
+    try { return /^\/en(\/|$)/.test(window.location.pathname || '') ? '/en' : ''; } catch (e) { return ''; }
+  }
+
+  // 回仓库选择大堂：把 /app/<owner>/<repo>/ 前缀还原成根路径，
+  // 否则刷新/转发仍指回上一个仓库（视图已变了，路径得跟上）
+  function _syncAppPathToRoot() {
+    try {
+      if (!_appPathCtx()) return;
+      const rootPath = _appPathPrefix() + '/';
+      const next = rootPath + (window.location.hash || '');
+      if ((window.location.pathname || '') === rootPath && !window.location.hash) return;
+      window.history.replaceState(window.history.state, '', next);
+    } catch (e) {}
+  }
+
   // ── Issue #614：会话失效时统一清理明文凭据弹窗 ──
   // showLogin 是所有登出路径（app.logout 手动登出 / doRefresh 失败 /
   // handle401 无 retryFn 踢回登录）的最终汇聚点。在此集中关闭/清空
@@ -289,9 +397,9 @@ function loadAgentTypes() {
     loadAgentTypes();
     // 串行加载：loadProfile 获取 bindings → 根据绑定状态和 hash 路由决定渲染哪个页面
     loadProfile().then(() => {
-      _restoreNavAfterLogin();
+      _bootRestore();
     }).catch(() => {
-      _restoreNavAfterLogin();  // profile 失败时也走统一路由恢复（检查 bindings → 引导页/loadRepos）
+      _bootRestore();  // profile 失败时也走统一路由恢复（深链仓库 → hash 路由 → 引导页/loadRepos）
     });
   }
 
@@ -1032,6 +1140,7 @@ function loadAgentTypes() {
     const parts = val.split('/');
     const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
     sessionStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
+    _syncAppPath(parts[0], parts[1]);   // 路径跟随仓库，深链分享不会指错仓
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
     if (sel) sel.value = val;
@@ -1358,6 +1467,7 @@ function loadAgentTypes() {
 
   function goToRepos() {
     _obExitMode();
+    _syncAppPathToRoot();
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
@@ -3401,7 +3511,7 @@ function openBetaApply() {
     }
   }
 
-return {nav, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
+  return {nav, search, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, toggleHelpFullscreen, openHelpNewTab, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

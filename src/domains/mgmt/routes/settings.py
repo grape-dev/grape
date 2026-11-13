@@ -123,7 +123,7 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
                 {"exists": True, "login": (_cred or {}).get("login", ""),
                  **({"workflows_write": _cred["workflows_write"]}
                     if isinstance(_cred, dict) and "workflows_write" in _cred else {})}
-                if (_cred := user_db.get_credential(user["id"], f"{_p}_pat"))
+                if (_cred := user_db.get_credential(user["id"], _p, kind="pat"))
                 # 存量专用字段平台（契约开关派生）：PAT 走专用字段（token 存 ei），
                 # 存在性对齐专用键——泛型 <p>_pat 凭据域未命中时回退
                 else (
@@ -315,67 +315,14 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     _gh_user = _resp.json()
                     gh_id = str(_gh_user.get("id", ""))
                     gh_login = _gh_user.get("login", "")
-                    # 写入 external_identities（D32: 不再写 user_accounts）
-                    from src.domains.mgmt.auth.grape_account_db import get_external_identity, get_external_identity_any_status, create_external_identity, update_external_identity_tokens, save_binding_ticket
-                    existing = get_external_identity("github", gh_id)
-                    if existing:
-                        if str(existing["grape_user_id"] or "") != str(user["id"] or ""):
-                            raise HTTPException(
-                                status_code=409,
-                                detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
-                            )
-                        # D105k 解耦收口：PAT 权威存储=凭据域 <p>_pat，ei 只落归属行
-                        #（access_token 置空清残留）——ei.access_token 从此 OAuth 独占
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "github_pat", {"token": _gh_tok, "login": gh_login})
-                        _ok = update_external_identity_tokens(existing["grape_user_id"], "github",
-                                                               access_token="",
-                                                               external_name=_gh_user.get("name", ""))
-                        # D105k：不 clear ei token——OAuth+PAT 共存时 ei.token 是
-                        # OAuth 回落凭据，清掉=清除 PAT 后无回落（能力丢失）。
-                        # 历史 PAT 残留由启动回填搬家逻辑按证据分级处理。
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(existing["grape_user_id"], "github", pat_login=gh_login)
-                        if not _ok:
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
-                    else:
-                        # 检查是否存在解绑记录（status=0）属于其他用户
-                        any_status = get_external_identity_any_status("github", gh_id)
-                        if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(user["id"] or ""):
-                            # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
-                            _ticket = save_binding_ticket(
-                                initiating_user_id=user["id"],
-                                provider="github",
-                                external_id=gh_id,
-                                external_login=gh_login,
-                                external_name=_gh_user.get("name", ""),
-                                original_user_id=any_status["grape_user_id"],
-                            )
-                            if not _ticket:
-                                raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
-                            raise HTTPException(
-                                status_code=409,
-                                detail={
-                                    "code": 409,
-                                    "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
-                                    "binding_ticket": _ticket,
-                                    "need_transfer": True,
-                                },
-                            )
-                        # 无解绑记录或解绑记录属于当前用户 → 正常创建（create_internal 自动恢复同账号解绑记录）
-                        # D105k：归属行不带 token，PAT 进凭据域
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "github_pat", {"token": _gh_tok, "login": gh_login})
-                        _ok = create_external_identity(
-                            grape_user_id=user["id"], provider="github",
-                            external_id=gh_id, external_login=gh_login,
-                            external_name=_gh_user.get("name", ""),
-                            access_token="",
-                        )
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(user["id"], "github", pat_login=gh_login)
-                        if not _ok:
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，
+                    # 不是身份绑定——只落凭据域 github_pat，不建/不激活身份行。
+                    # 身份行（external_identities）只由 OAuth 首登或设置页 OAuth
+                    # 绑定产生，因此这里不再有 409 / 转移票据分支。
+                    from src.domains.mgmt.user.db import set_credential as _sc
+                    # 写失败必须 loud：静默 False 会留下「前端看到成功、凭据没落库」
+                    if not _sc(user["id"], "github", {"token": _gh_tok, "login": gh_login}, kind="pat"):
+                        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
                     # Issue #372 §12.8: 同步写入 unified_user_mapping.github_login
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 gitcode_user 等其他平台字段）
@@ -436,72 +383,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     _gc_user = _resp.json()
                     gc_id = str(_gc_user.get("id", ""))
                     gc_login = _gc_user.get("login", "")
-                    from src.domains.mgmt.auth.grape_account_db import (
-                        get_external_identity, get_external_identity_any_status,
-                        create_external_identity, save_binding_ticket,
-                        update_external_identity_tokens, delete_external_identity,
-                    )
-                    existing = get_external_identity("gitcode", gc_id)
-                    if existing:
-                        if str(existing["grape_user_id"] or "") != str(user["id"] or ""):
-                            raise HTTPException(
-                                status_code=409,
-                                detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
-                            )
-                        # D105k 解耦收口：PAT 权威存储=凭据域 <p>_pat，ei 只落归属行
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "gitcode_pat", {"token": _gc_tok, "login": gc_login})
-                        _ok = update_external_identity_tokens(
-                            existing["grape_user_id"], "gitcode",
-                            access_token="",
-                            external_name=_gc_user.get("name", ""),
-                        )
-                        # D105k：不 clear ei token——OAuth+PAT 共存时 ei.token 是
-                        # OAuth 回落凭据，清掉=清除 PAT 后无回落（能力丢失）。
-                        # 历史 PAT 残留由启动回填搬家逻辑按证据分级处理。
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(existing["grape_user_id"], "gitcode", pat_login=gc_login)
-                        if not _ok:
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
-                    else:
-                        # 检查是否存在解绑记录（status=0）属于其他用户
-                        any_status = get_external_identity_any_status("gitcode", gc_id)
-                        if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(user["id"] or ""):
-                            # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
-                            _ticket = save_binding_ticket(
-                                initiating_user_id=user["id"],
-                                provider="gitcode",
-                                external_id=gc_id,
-                                external_login=gc_login,
-                                external_name=_gc_user.get("name", ""),
-                                original_user_id=any_status["grape_user_id"],
-                            )
-                            if not _ticket:
-                                raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
-                            raise HTTPException(
-                                status_code=409,
-                                detail={
-                                    "code": 409,
-                                    "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
-                                    "binding_ticket": _ticket,
-                                    "need_transfer": True,
-                                },
-                            )
-                        # 无解绑记录或解绑记录属于当前用户 → 正常创建
-                        # D105k：归属行不带 token，PAT 进凭据域
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "gitcode_pat", {"token": _gc_tok, "login": gc_login})
-                        _ok = create_external_identity(
-                            grape_user_id=user["id"], provider="gitcode",
-                            external_id=gc_id, external_login=gc_login,
-                            external_name=_gc_user.get("name", ""),
-                            access_token="",
-                        )
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(user["id"], "gitcode", pat_login=gc_login)
-                        if not _ok:
-                            log.error(f"GitCode bind FAILED: create_external_identity returned False for user={user['id']}, gc_id={gc_id}, gc_login={gc_login}")
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，
+                    # 不是身份绑定——只落凭据域 gitcode_pat，不建/不激活身份行。
+                    # 身份行只由 OAuth 首登或设置页 OAuth 绑定产生，故无 409/票据。
+                    from src.domains.mgmt.user.db import set_credential as _sc
+                    # 写失败必须 loud（同 github 分支口径）
+                    if not _sc(user["id"], "gitcode", {"token": _gc_tok, "login": gc_login}, kind="pat"):
+                        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitCode token saved for user={user['username']}, gitcode_login={gc_login}")
                     # Issue #372 §12.8: 同步写入 unified_user_mapping
                     # PAT 绑定的用户 username ≠ GitCode login，启动时回填写入的是 username 而非 gc_login
@@ -542,15 +430,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # D32/S52：config-only 平台 PAT 绑定（泛型 platform_tokens）。github/gitcode
     # 走上方既有专用字段路径（零改动）；新平台验证后双写
     # user_credentials <p>_pat（UserToken 级）+ external_identities（D31 归属源）。
-    # 边界：新平台暂不含跨用户转移票据流（冲突直接 409，文档已注明）；
-    # 空值=清除 PAT 凭据（identity 解绑走既有解绑流程，不在此处删）。
+    # 边界（A 批 2026-11-13）：PAT = 仓库执行凭据，不写身份行、不参与归属冲突，
+    # 因此没有 409/转移票据；空值=清除 PAT 凭据（identity 解绑走既有解绑流程）。
     _platform_tokens = explicit.get("platform_tokens") or {}
     if _platform_tokens:
         from src.domains.runtime.vcs.platform_card import list_vcs_platforms
         _known_platforms = set(list_vcs_platforms())
         from src.domains.mgmt.user.db import set_credential
-        from src.domains.mgmt.auth.grape_account_db import (
-            get_external_identity, create_external_identity, update_external_identity_tokens)
         for _p, _raw_tok in (_platform_tokens.items() if isinstance(_platform_tokens, dict) else []):
             _p = str(_p or "").strip()
             # D105-18：值支持对象形态 {"token":..., "workflows_write": bool}
@@ -587,40 +473,25 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
                 _ext_id = str(_info.get("id"))
                 _ext_login = str(_info.get("login", ""))
-                _existing = get_external_identity(_p, _ext_id)
-                if _existing and str(_existing.get("grape_user_id") or "") != str(user["id"] or ""):
-                    raise HTTPException(status_code=409, detail={
-                        "code": 409, "message": f"该 {_p} 账号已被其他 Grape 账号绑定"})
-                # D102-P 职责分域（2026-11-08 用户裁定）：PAT 与 OAuth token 是
-                # 两种东西——归属行只记身份（external_id/login/name），不承载
-                # token（access_token 恒空）；PAT 权威存储=凭据域 <p>_pat，
-                # 供给链 fetch_user_token ① 命中凭据域（token_resolver）。
-                # 历史形态（PAT 写 identity.access_token）由启动回填迁移。
-                if _existing:
-                    _ok = update_external_identity_tokens(
-                        user["id"], _p, access_token="",
-                        external_name=str(_info.get("name", "")))
-                else:
-                    _ok = create_external_identity(
-                        grape_user_id=user["id"], provider=_p,
-                        external_id=_ext_id, external_login=_ext_login,
-                        external_name=str(_info.get("name", "")),
-                        access_token="")
-                if not _ok:
-                    raise HTTPException(status_code=500, detail={
-                        "code": 500, "message": "凭据保存失败"})
-                from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                mark_identity_pat(user["id"], _p, pat_login=_ext_login)
+                # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
+                # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
+                # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
+                # 凭据写进 B 账号」的半转移态，也就不再需要 409 与转移票据。
+                # 平台登录名来源 = 凭据域 config.login（list_platform_links 并集读）。
                 _pat_cfg = {"token": _tok, "login": _ext_login}
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
-                set_credential(user["id"], f"{_p}_pat", _pat_cfg)
+                # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成
+                # 也照样打 "PAT bound" 成功日志。PAT 不碰身份行后无需补偿身份。
+                if not set_credential(user["id"], _p, _pat_cfg, kind="pat"):
+                    raise HTTPException(status_code=500, detail={
+                        "code": 500, "message": "凭据保存失败"})
                 log.info(f"platform_tokens: {_p} PAT bound for user={user['id']} login={_ext_login}")
             elif not _tok:
                 # D105k：清除 = 级联按 OAuth 共存与否分流（四象限）——
                 # 无 OAuth 平台级解绑（ei 归属行+凭据+user_repos 全清，
                 # 修复"清 PAT 后仓库列表残留"）；有 OAuth 只清 PAT 供给 ② 接管
-                set_credential(user["id"], f"{_p}_pat", {})
+                set_credential(user["id"], _p, {}, kind="pat")
                 _cascade_pat_clear(user, _p)
 
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取

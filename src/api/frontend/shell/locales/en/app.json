@@ -752,5 +752,8 @@
     "CREDENTIAL_INCORRECT": "The account or password is incorrect. Please try again.",
     "ACCOUNT_DEACTIVATED": "This account has been deactivated. Please contact the administrator.",
     "ACCOUNT_DEACTIVATING": "This account is being deactivated and cannot be accessed at this time."
+  },
+  "deeplink": {
+    "repo_not_found": "Cannot open this link: the repository does not exist, is not managed, or you lack access"
   }
 }

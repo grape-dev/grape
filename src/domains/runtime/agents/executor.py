@@ -799,8 +799,9 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                         user_token = get_user_token_for_repo(repo_key, _acc["username"],
                                                              user_id=user_id) or ""
                     else:
-                        from src.domains.mgmt.auth.grape_account_db import get_user_identities
-                        _ids = get_user_identities(str(user_id)) or []
+                        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+                        # A 批：兜底平台也要覆盖"只有 PAT、无 OAuth 身份行"的账号
+                        _ids = list_platform_links(str(user_id)) or []
                         _prov = str((_ids[0] or {}).get("provider") or "") if _ids else ""
                         user_token = (get_user_token_for(_acc["username"], user_id=user_id,
                                                          provider=_prov) or "") if _prov else ""

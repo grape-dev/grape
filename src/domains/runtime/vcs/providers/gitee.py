@@ -121,6 +121,11 @@ def translate(resource: str, op: str, neutral: dict, ctx: dict) -> dict:
 def query_state(state: str) -> str:
     return _QUERY_STATE.get(state, state)
 
+# 托管全流程（bot 合作者 + webhook 建/删/探 + 库回写）已实装：
+# B 批（2026-11-13）接入：gitee 与 gitcode 同属 gitee_v5 方言，webhook/协作者/
+# bot 维护者判定全部走卡派生 api_base（https://gitee.com/api/v5），routes 零平台分支。
+HOSTING_FULL_FLOW = True
+
 # PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
 PR_WEB_PATH = "pulls"
 

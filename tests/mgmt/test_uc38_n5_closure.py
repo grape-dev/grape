@@ -61,18 +61,16 @@ def test_uc38_2_platform_tokens_generic_entry():
     assert "未注册的平台" in src, "泛型入口 fail-closed 分支缺失"
 
 
-def test_uc38_2_platform_tokens_write_path_dual_write():
-    """合法新平台 PAT：verify 后双写形态（user_credentials <p>_pat + external_identities）。
+def test_uc38_2_platform_tokens_write_path_credential_only():
+    """合法新平台 PAT：verify 后只写凭据域 <p>_pat，不写 external_identities。
 
-    行为实弹：mock verify_token 返回平台用户信息，走 update_credentials 真函数，
-    断言双写落库 + 409 冲突拒绝（他人已绑）。
-    用户构造走 grape_accounts 权威路径（user_accounts 写入冻结，对齐 test_user_db）。
+    A 批对象模型（2026-11-13 用户裁定）：PAT 是仓库执行凭据，不是身份绑定——
+    原用例断言「双写 + 409 冲突」已随对象模型归位为「只写凭据 + 无冲突校验」。
     """
     import uuid
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    from fastapi import HTTPException
     from src.domains.mgmt.routes.settings import update_credentials, UpdateCredentials
     from src.domains.mgmt.auth import grape_account_db
     from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
@@ -101,29 +99,23 @@ def test_uc38_2_platform_tokens_write_path_dual_write():
             _cp.return_value = SimpleNamespace(verify_token=_fake_verify)
             update_credentials(body, user={"id": uid})
 
-        # 双写断言①：user_credentials gitee_pat
+        # 断言①：user_credentials gitee_pat（含 login）
         cred = user_db.get_credential(uid, "gitee_pat") or {}
         assert cred.get("token") == "tok_uc38_valid"
         assert cred.get("login") == "uc38login"
-        # 双写断言②：external_identities 归属源
-        ident = grape_account_db.get_external_identity("gitee", "uc38ext1")
-        assert ident and ident["grape_user_id"] == uid
-
-        # 409 冲突：另一 grape 账号绑同一 gitee 身份 → 拒绝
+        # 断言②：不建身份行
+        assert grape_account_db.get_external_identity_any_status("gitee", "uc38ext1") is None
+        # 断言③：另一账号配同一 PAT 也不再 409（PAT 无归属冲突）
         uid2 = _mk_user("uc38b")["id"]
         body2 = UpdateCredentials(platform_tokens={"gitee": "tok_uc38_valid"})
         try:
             with patch("src.kernel.token_resolver.create_provider") as _cp2:
                 _cp2.return_value = SimpleNamespace(verify_token=_fake_verify)
                 update_credentials(body2, user={"id": uid2})
-            raise AssertionError("他人已绑同一平台身份应 409 拒绝")
-        except HTTPException as e:
-            assert e.status_code == 409
+            assert (user_db.get_credential(uid2, "gitee_pat") or {}).get("token") == "tok_uc38_valid"
         finally:
-            grape_account_db.delete_external_identity(uid2, "gitee")
             _cleanup_user({"id": uid2})
     finally:
-        grape_account_db.delete_external_identity(uid, "gitee")
         _cleanup_user({"id": uid})
 
 

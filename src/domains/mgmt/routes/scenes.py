@@ -108,8 +108,9 @@ def _scene_user_provider(user: dict) -> str:
     except Exception:
         _catalog = []
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
-        _bound = {i.get("provider") for i in (get_user_identities(str(user.get("id") or "")) or [])
+        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+        # A 批：场景可用平台 = 身份行 ∪ PAT 凭据域（只配 PAT 也视为该平台可用）
+        _bound = {i.get("provider") for i in (list_platform_links(str(user.get("id") or "")) or [])
                   if i.get("provider")}
     except Exception:
         _bound = set()
@@ -448,6 +449,26 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             pass
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
+def _pick_node_skill_id(node: dict, ref_map: dict) -> int:
+    """节点技能 id 的唯一取法（三档同名防覆盖，2026-11-13）。
+
+    节点自带 skill_id 即用户实际选中的档位（#979 权威）；没有才回退 scene_skill_ref
+    （老场景/老前端产物）。ref 表是按名字重建的，可能已被解析成别的档位，
+    所以**不能**反过来用它覆盖节点上的 id。
+    """
+    node = node if isinstance(node, dict) else {}
+    try:
+        sid = int(node.get("skill_id") or 0)
+    except (TypeError, ValueError):
+        sid = 0
+    if sid:
+        return sid
+    try:
+        return int((ref_map or {}).get(node.get("skill", ""), 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
 def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景详情：完整介绍 + 技能链路详解 + 推荐模板 + 在用仓库列表"""
@@ -494,7 +515,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
             skill_name = node.get("skill", "")
             if not skill_name:
                 continue
-            skill_id = ref_map.get(skill_name, 0)
+            skill_id = _pick_node_skill_id(node, ref_map)
             row = skill_by_id.get(skill_id) if skill_id else None
             skills_detail.append({
                 "skill_id": (row[0] if row else skill_id),
@@ -1340,7 +1361,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # 重建 scene_skill_ref（仓库场景也需要）
     try:
         from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
-        _rebuild_scene_skill_ref(market_id, body.nodes, body.name)
+        _rebuild_scene_skill_ref(market_id, body.nodes, body.name, repo_key)
     except Exception as e:
         log.warning(f"create_market_scene: rebuild scene_skill_ref failed: {e}")
 
@@ -1422,7 +1443,8 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     # 重建 scene_skill_ref
     try:
         from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
-        _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""))
+        _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""),
+                                  scene.get("repo_key", "") or "")
     except Exception as e:
         log.warning(f"update_market_scene: rebuild scene_skill_ref failed: {e}")
 

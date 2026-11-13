@@ -887,9 +887,12 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
             # Issue #372: 检查 1b: 两仓 host_user_id 相同（路径 B 用户 token 托管场景）
             try:
                 from src.domains.mgmt.user.db import get_host_user_id
-                _session_host = get_host_user_id(_session_repo)
-                _target_host = get_host_user_id(repo_key)
-                if _session_host > 0 and _session_host == _target_host:
+                # D105 后 host_user_id 是 UUID TEXT（get_host_user_id 返回 str）——
+                # 原 `_session_host > 0` 会对 str 抛 TypeError 并被下面的 except 吞掉，
+                # 导致 A2A 同信任域判定恒不成立（静默）。按该函数文档口径字符串判定。
+                _session_host = str(get_host_user_id(_session_repo) or "")
+                _target_host = str(get_host_user_id(repo_key) or "")
+                if _session_host not in ("", "0") and _session_host == _target_host:
                     log.info(f"A2A: trust domain (same host_user_id={_session_host}) session_repo={_session_repo} → target_repo={repo_key}")
                     return None
             except Exception:

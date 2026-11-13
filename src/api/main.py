@@ -372,6 +372,14 @@ async def lifespan(app: FastAPI):
 
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
+
+    # Issue #2261 B1：通知 outbox 消费者（单进程并集模式与四进程 A 进程同款接线）。
+    # 先停消费者、再停引擎（关停侧见下方 lifespan 尾部）。无运行 loop/无引擎时静默跳过。
+    try:
+        from src.domains.runtime.im import outbox as _outbox_mod
+        _outbox_mod.attach_outbox_consumer(app, getattr(app.state, "im_engine", None))
+    except Exception as _oe:
+        log.warning(f"IM outbox consumer start failed: {_oe}")
     _event_h = await server_tasks.start_event_tasks(app, include_sweep_events=False)
     _worker_h = await server_tasks.start_worker_tasks(app, include_sweep_tasks=False, include_table_maintenance=False)
     _insight_h = await server_tasks.start_insight_tasks(app, include_table_maintenance=False)
@@ -523,6 +531,15 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("Process tasks: stopping...")
+    # Issue #2261 B1：先停通知 outbox 消费者（cancel+await），再停各域任务/引擎——
+    # 反序会让消费者在 await 途中拿到已停的引擎（发给死渠道）。
+    try:
+        from src.domains.runtime.im import outbox as _outbox_mod
+        if getattr(app.state, "outbox_consumer", None) is not None:
+            await app.state.outbox_consumer.stop()
+        _outbox_mod.stop_outbox_consumer(app)
+    except Exception as _oe:
+        log.warning(f"IM outbox consumer stop failed: {_oe}")
     await server_tasks.stop_insight_tasks(app, _insight_h)
     await server_tasks.stop_worker_tasks(app, _worker_h)
     await server_tasks.stop_event_tasks(app, _event_h)
@@ -634,7 +651,9 @@ server_common.attach_health(app, service_name="server", readiness=True)
 # Issue #825 修复（PR #1231 深度审查）：im 路由必须在 SPA catch-all（/{path:path} GET）
 # 之前注册，否则 GET /api/im/*（status/installations/dingtalk/card-setup）被
 # catch_all 吞掉返回 404。import 在此处无环（im.py 顶层仅依赖 api.deps/kernel.config）。
-from src.domains.runtime.routes import im as im_api
+# 单进程入口与四进程 A 面同一份 IM 路由（含 /outbound、/retry 与 status 的 outbox 段）；
+# 此前挂 runtime 版，两个新增端点只在四进程 A 上存在（架构守护 Medium-2）。
+from src.domains.mgmt.routes import im as im_api
 app.include_router(im_api.router)
 server_common.attach_frontend(app)
 

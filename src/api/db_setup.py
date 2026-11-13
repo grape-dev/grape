@@ -1776,10 +1776,14 @@ def _create_tables():
 
     # IM 渠道 4 表（Issue #742 §5.1）：DDL 与引擎启动迁移共用 scripts/migrations/001_channel_tables，
     # 在此统一建/补（幂等），保证 MySQL 后端下即使 IM 引擎模式为 off 也表示层完整（P1 回填/对账依赖）。
+    # Issue #2261：通知 outbox 新增列（004_notify_outbox）也挂在这里——四进程都会跑 db_setup，
+    # 而 run_startup_migration 只在 A 进程 start_im_engine(mode=on) 时跑；挂在引擎启动上会让
+    # mode=off / A 未起时旧库缺列，B/C 进程入队直接异常（通知静默丢失）。
     try:
-        from src.domains.runtime.im.engine_wiring import ensure_channel_schema
+        from src.domains.runtime.im.engine_wiring import ensure_channel_schema, ensure_notify_outbox_schema
         with db_lock:
             ensure_channel_schema(db)
+            ensure_notify_outbox_schema(db)
             db.commit()
         log.info("IM channel tables ready "
                  "(grape_t_channel_installation / session_binding / inbound_dedup / sender_identity)")
@@ -8134,4 +8138,113 @@ register_migration(
     name="seed-event-action-filter-defaults",
     kind="safe",
     fn=_fn_seed_event_action_filter_once,
+)
+
+
+# ── A2（2026-11-13）：凭据类型归位——provider 存纯名，类型进 kind 列
+def _fn_user_credentials_kind_model() -> None:
+    """user_credentials 加 kind 列 + 存量 `<p>_pat/_oauth` 复合键回填归位行。
+
+    幂等三态：列已存在 → _ensure_column no-op；归位行已存在 → backfill 跳过；
+    旧复合键行保留（双写期，老实例按 `<p>_pat` 仍可读），收口迁移再删。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "user_credentials", "kind", "TEXT NOT NULL DEFAULT ''",
+                       allow_copy=True, strict=True)  # TEXT + 非 NULL DEFAULT：MySQL 需 COPY
+        # QA N3（2026-11-13）：注册式迁移必须 strict=True——静默失败也会盖章，
+        # 下次启动不再重试，线上表现为查询该列 1054（与既有 10 处 strict 用法一致）。
+        db.commit()
+    from src.domains.mgmt.user.db import backfill_credential_kind
+    backfill_credential_kind()
+
+
+register_migration(
+    version="202611170006",
+    name="user-credentials-kind-model",
+    kind="safe",
+    fn=_fn_user_credentials_kind_model,
+)
+
+
+def _uc_unique_key_columns(c) -> set:
+    """user_credentials 当前唯一键的列集合（SQLite: PRAGMA / MySQL: SHOW INDEX）。"""
+    if _mysql_backend():
+        try:
+            rows = c.execute("SHOW INDEX FROM user_credentials").fetchall()
+        except Exception:
+            return set()
+        by_key: dict = {}
+        for r in rows:
+            # MySQL 列序：Table, Non_unique, Key_name, Seq_in_index, Column_name, ...
+            if str(r[1]) in ("0", "0.0"):
+                by_key.setdefault(r[2], set()).add(str(r[4]))
+        for cols in by_key.values():
+            if {"user_id", "provider"} <= cols:
+                return cols
+        return set()
+    for row in c.execute("PRAGMA index_list('user_credentials')").fetchall():
+        name, unique = row[1], row[2]
+        if not unique:
+            continue
+        info = c.execute(f"PRAGMA index_info('{name}')").fetchall()
+        cols = {str(r[2]) for r in info}
+        if {"user_id", "provider"} <= cols:
+            return cols
+    return set()
+
+
+_UC_REBUILD_DDL = """CREATE TABLE user_credentials__uqkind (
+    id TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
+    config_json MEDIUMTEXT NOT NULL,
+    created_at TEXT DEFAULT '',
+    updated_at TEXT DEFAULT '',
+    PRIMARY KEY (user_id, provider, kind)
+)"""
+
+
+def _fn_user_credentials_unique_kind() -> None:
+    """主键扩为 (user_id, provider, kind)（A2b 2026-11-13）。
+
+    为什么必须：OAuth 刷新是现役写路径（refresh_oauth_token → set_credential(kind="oauth")），
+    旧唯一键 (user_id, provider) 会把同平台 PAT 的归位行 upsert 成覆盖。滚动期靠双写
+    `<p>_pat` 旧键行兜住，A2 收口删旧键行后 PAT 直接丢失。实弹复证（验证库副本）：
+    set_credential(PAT, kind=pat) 后 set_credential(OAuth, kind=oauth)，归位行变为
+    kind='oauth'，PAT 只剩旧键副本。
+
+    做法：表级主键无法就地变更，统一「建新表 → 搬数据 → 换名」（SQLite 与 MySQL 都适用；
+    MySQL 8 亦支持 ALTER TABLE ... RENAME TO）。幂等 = 唯一键列已含 kind 直接返回。
+    """
+    with db_lock:
+        c = db.cursor()
+        cols = _uc_unique_key_columns(c)
+        if "kind" in cols:
+            return
+        try:
+            c.execute("DROP TABLE IF EXISTS user_credentials__uqkind")
+            c.execute(_UC_REBUILD_DDL)
+            c.execute(
+                "INSERT INTO user_credentials__uqkind "
+                "(id, user_id, provider, kind, config_json, created_at, updated_at) "
+                "SELECT COALESCE(id,''), user_id, provider, COALESCE(kind,''), "
+                "config_json, COALESCE(created_at,''), COALESCE(updated_at,'') "
+                "FROM user_credentials")
+            c.execute("DROP TABLE user_credentials")
+            c.execute("ALTER TABLE user_credentials__uqkind RENAME TO user_credentials")
+            db.commit()
+            log.info("migration 202611170007: user_credentials "
+                     "主键扩为 (user_id, provider, kind)")
+        except Exception:
+            db.rollback()
+            raise
+
+
+register_migration(
+    version="202611170007",
+    name="user-credentials-unique-kind",
+    kind="safe",
+    fn=_fn_user_credentials_unique_kind,
 )

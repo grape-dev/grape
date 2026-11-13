@@ -11,6 +11,7 @@ _ensure_legacy_unique_index。幂等：可重复执行。
   grape_t_channel_chat_session_binding    会话绑定（合并 repo_im_group_binding + vod_conversations）
   grape_t_channel_inbound_dedup           两阶段去重（bot_seen_messages 双写期保留只读 7 天）
   grape_t_channel_sender_identity         身份绑定（external_identities 的 IM 视图）
+  grape_t_channel_outbound_card           出站卡片台账 + 通知 outbox（#2261 补列，见 004_notify_outbox.py）
 
 回填语义 = load_eligible_bots（feishu_async.py L1520-1617）：
   chat_agent_session(repo_key='', user_id>0, im_app_id!='') → scope='user'（按 app_id 去重）
@@ -33,6 +34,10 @@ def _config_fingerprint(config: dict) -> str:
 def ensure_channel_tables(conn) -> None:
     # executescript 走连接级接口：sqlite3.Connection 与 MySQLCompatDB 都有，
     # 而 cursor 级只有 sqlite3 有（MySQL 兼容层没实现 cursor.executescript）。
+    #
+    # #2261 outbox 状态列的 CHECK 约束：MySQL 8.0.16+ 原生支持，mysql_compat
+    # translate_sql 对 CHECK(...) 原样直译（实测保留）；8.0.16 前的 MySQL 不支持——
+    # 004 补列路径已备好裸列（无 CHECK）回退，方言失败不影响启动。
     #
     # A2 M3：grape_t_channel_lease 是安装级租约独立表（原租约寄生在 legacy 表 global_im_bot_config）。
     #   lease_key = "<channel_type>:<installation_id>"，行在首次抢锁时惰性创建；
@@ -100,7 +105,14 @@ def ensure_channel_tables(conn) -> None:
             chat_type        TEXT NOT NULL DEFAULT 'p2p',
             sender_staff_id  TEXT NOT NULL DEFAULT '',
             card_template_id VARCHAR(191) NOT NULL DEFAULT '',
-            created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            payload          TEXT NOT NULL DEFAULT '{}',
+            status           VARCHAR(32) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','expired')),
+            attempt_count    INTEGER NOT NULL DEFAULT 0,
+            next_retry_at    VARCHAR(32) NOT NULL DEFAULT '',
+            expires_at       VARCHAR(32) NOT NULL DEFAULT '',
+            last_error       TEXT NOT NULL DEFAULT '',
+            updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS grape_t_channel_lease (
