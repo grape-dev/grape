@@ -23,7 +23,7 @@ def _redispatch_scene_override(evt: dict) -> str:
     _scene = (evt.get("scene_id") or "").strip()
     if not _scene:
         return ""
-    from src.api.event_pipeline import _is_pr_subscription_task
+    from src.domains.runtime.pipeline.event_pipeline import _is_pr_subscription_task
     if _is_pr_subscription_task(
             issue_id=evt.get("issue_id") or "",
             event_type=evt.get("event_type") or "",
@@ -492,7 +492,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     #    task/event 终态（failed/cancelled）→ _kill_stale_engine 杀引擎并中断。
     #    （单进程模式 terminate 与 direct 执行同进程，cancel_direct_task 仍生效）
     try:
-        from src.api.event_pipeline import cancel_direct_task
+        from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task
         dc = cancel_direct_task(seq)
         if dc:
             cancelled = True
@@ -700,7 +700,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 本机 direct 引擎 → 直接触发执行（复用原行，task_id 不变）
                 if _cid == 0:
                     try:
-                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_orig_rid) or ""
@@ -735,10 +735,10 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
 
         # 校验通过 → 复用原 task 快照参数 + 原 runtime_id 新建任务（不调 pick_engine）
-        from src.api.event_pipeline import is_plugin_mode as _is_plugin_mode
+        from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _is_plugin_mode
         _sid = old.get("issue_session_id") or ""
         try:
-            from src.api.event_pipeline import get_agent_workdir
+            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
             _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
                                     old.get("issue_id") or "")
         except Exception:
@@ -747,7 +747,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
         # Issue #427：PR 订阅事件的 scene_id 列即订阅场景，作为 override 传入防止
         # 重派 env 被重新解析回 Issue 场景；普通事件 scene_id 与 issue_id 解析同值
-        from src.api.event_pipeline import build_task_env as _bte
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
         _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
                             agent_type=old.get("agent_type") or "",
                             issue_id=old.get("issue_id") or "",
@@ -779,7 +779,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # 本机 direct 引擎 → 触发直接执行
         if _is_local_direct and _new_task_id:
             try:
-                from src.api.event_pipeline import _execute_agent, start_direct_agent
+                from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
                 from src.domains.runtime.engine.engine_select import engine_name as _en
                 from src.kernel.repo_key import from_repo_key as _frk
                 _be = _en(_orig_rid) or ""
@@ -818,7 +818,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     if task_id and task_status in ("dispatched", "running"):
         # 非终态 → requeue + reassign engine in one atomic operation
         try:
-            from src.api.event_pipeline import is_plugin_mode
+            from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
             _is_plugin = is_plugin_mode()
         except Exception:
             _is_plugin = False
@@ -915,7 +915,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     from src.domains.runtime.engine.service import runtime_credential_id
                     _cid = runtime_credential_id(_new_rid) or 0
                     if _cid == 0:
-                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name
                         from src.kernel.repo_key import from_repo_key as _frk2
                         _be = engine_name(_new_rid) or ""
@@ -942,7 +942,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
         # Plugin mode: emit event
         try:
-            from src.api.event_pipeline import is_plugin_mode
+            from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
             if is_plugin_mode():
                 import asyncio as _aio
                 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
@@ -977,7 +977,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if not old:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
         try:
-            from src.api.event_pipeline import is_plugin_mode
+            from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
             _q_is_plugin = is_plugin_mode()
         except Exception:
             _q_is_plugin = False
@@ -1080,7 +1080,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             try:
                 from src.domains.runtime.engine.service import runtime_credential_id
                 if (runtime_credential_id(_q_rid) or 0) == 0:
-                    from src.api.event_pipeline import _execute_agent, start_direct_agent
+                    from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
                     from src.domains.runtime.engine.engine_select import engine_name as _en
                     from src.kernel.repo_key import from_repo_key as _frk
                     _q_be = _en(_q_rid) or ""
@@ -1106,7 +1106,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _effective_task_id = task_id
     else:
         # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
-        from src.api.event_pipeline import is_plugin_mode
+        from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         if task_id:
             old = get_task(task_id)
             # If prompt is empty (from _create_direct_task), find the last task with a prompt
@@ -1144,7 +1144,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         if _rp_253 is None:
                             # 绑定全灭 → 宁失败不跑飞：事件保持 failed + 人话原因（#259 通路）。
                             # 早退在函数末尾 reset_event_terminal 之前 → 事件不会被掰回 running 悬挂。
-                            from src.api.event_pipeline import _fail_scene_all_offline
+                            from src.domains.runtime.pipeline.event_pipeline import _fail_scene_all_offline
                             _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
                                                     context="Redispatch", repo_key=old.get("repo_key") or "")
                             # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
@@ -1253,7 +1253,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _is_local_direct = (_cid == 0)
                 # cwd
                 try:
-                    from src.api.event_pipeline import get_agent_workdir
+                    from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
                     _cwd = get_agent_workdir(old.get("repo_key") or "", old.get("agent_type") or "",
                                             old.get("issue_id") or "")
                 except Exception:
@@ -1263,7 +1263,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
                 # Issue #427：PR 订阅事件的 scene_id 列即订阅场景，作为 override 传入防止
                 # 重派 env 被重新解析回 Issue 场景；普通事件 scene_id 与 issue_id 解析同值
-                from src.api.event_pipeline import build_task_env as _bte
+                from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
                 _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
                                     agent_type=old.get("agent_type") or "",
                                     issue_id=old.get("issue_id") or "",
@@ -1302,7 +1302,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 现贴证广播下 _rid=0 是合法结局（等绑定引擎认领），必须只入队不直跑。
                 if _is_local_direct and _new_task_id and _rid > 0:
                     try:
-                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_rid) or ""
@@ -1342,7 +1342,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             _scene_id = evt.get("scene_id", "") or ""
             if _event_type == "a2a_event" and _issue_id.startswith("#pr_") and _scene_id:
                 try:
-                    from src.api.event_pipeline import _dispatch_pr_subscription_redispatch
+                    from src.domains.runtime.pipeline.event_pipeline import _dispatch_pr_subscription_redispatch
                     _res = _dispatch_pr_subscription_redispatch(evt, seq, _scene_id)
                     if _res:
                         log.info(f"[redispatch] seq={seq} PR subscription re-dispatch ok, scene={_scene_id}")
@@ -1422,7 +1422,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             # 非 A2A 事件：从 events 表恢复参数重走 run_pipeline
             # 构建最小 webhook evt，复用 run_pipeline 路由+引擎选择+入队/执行
             try:
-                from src.api.event_pipeline import run_pipeline as _rp
+                from src.domains.runtime.pipeline.event_pipeline import run_pipeline as _rp
                 _payload = evt.get("payload_raw") or evt.get("payload") or "{}"
                 if isinstance(_payload, str):
                     try:
@@ -1705,7 +1705,7 @@ def _require_event_bot_token(request: Request, repo_key: str):
     if not token:
         token = request.headers.get("X-Bot-Token", "") or ""
     from src.domains.mgmt.user.db import get_repo_bot_token_no_global
-    from src.api.auth_token import verify_session_token_for_repo
+    from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
     expected = get_repo_bot_token_no_global(repo_key) or ""
     if expected and token == expected:
         return
@@ -1824,7 +1824,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
     # Issue #1819：对话执行同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
-    from src.api.event_pipeline import resolve_actor_account
+    from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
     account = resolve_actor_account(evt, repo_key)
 
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, enqueue_task, wait_task_terminal, cancel_task, runtime_execution_kind
@@ -1855,7 +1855,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
             event_dialogue_path = resolve_official_skill_path("event-dialogue") \
                 or os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md")
-            from src.api.event_pipeline import get_agent_workdir
+            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
             # Fix 1：cwd 用该 issue 的 agent 目录（与 issue 会话项目一致）
             ws = get_agent_workdir(repo_key, agent_type, issue_id)
             os.makedirs(ws, exist_ok=True)
@@ -1867,13 +1867,13 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             except Exception:
                 runtime_id = 0
             if not runtime_id:
-                from src.api.event_pipeline import is_plugin_mode
+                from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
                 if not is_plugin_mode():
                     final_text = "（对话执行失败：无可用引擎/会话）"
             else:
                 # 重派丢 env 修复（2026-10-10 事故）：对话入队同样补全 env_extra
                 # （此前未传 → 无 GRAPE_SERVER_URL/REPO_* 等基础变量）
-                from src.api.event_pipeline import build_task_env as _bte
+                from src.domains.runtime.pipeline.event_pipeline import build_task_env as _bte
                 _conv_env = _bte(repo_key=repo_key, agent_type=agent_type,
                                  issue_id=issue_id or "", runtime_id=runtime_id or 0,
                                  account=account,
@@ -1920,7 +1920,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             final_text = "（对话执行失败：无可用 runtime/会话）"
     else:
         # direct：SSE 流式；cwd 用该 issue 的 agent 目录（Fix 1）；无输出超时则重置会话重试一次（Fix 2）
-        from src.api.event_pipeline import get_agent_workdir
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
         ws = get_agent_workdir(repo_key, agent_type, issue_id)
         os.makedirs(ws, exist_ok=True)
         result = None
@@ -2195,7 +2195,7 @@ def _execute_conv_task(task_id: str, loop):
         from src.kernel.config import WORKSPACE_DIR
         from src.kernel.repo_key import from_repo_key
         from src.api.knowledge import _issue_num_from
-        from src.api.event_pipeline import get_agent_workdir
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
         from src.kernel.prompt_builder import build_conversation_prompt
         from src.api.session_store import get_or_create_issue_session
         issue_num = _issue_num_from(issue_id)
@@ -2222,7 +2222,7 @@ def _execute_conv_task(task_id: str, loop):
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
         # Issue #1819：worker 模式对话同样注入个人账号，禁止用仓库全名充当 $ACCOUNT。
-        from src.api.event_pipeline import resolve_actor_account
+        from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
         account = resolve_actor_account(evt, repo_key)
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记

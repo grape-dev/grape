@@ -803,7 +803,8 @@ function _doExperienceScene(sceneId) {
     var full_name = r.full_name || '';
     if (r.hosted === false) {
       // Host 失败不再误报成功：明确提示仓库已创建但未托管，可去仓库管理页重新托管
-      if (app && app.showToast) app.showToast(r.message || ('仓库已创建，托管失败：' + (r.host_error || '未知原因')));
+      if (app && app.showToast) app.showToast(r.message || I18N.t('templates.experience_host_failed',
+        { reason: (r.host_error || I18N.t('templates.unknown_reason')) }));
     } else if (r.message && app && app.showToast) {
       app.showToast(r.message);
     }

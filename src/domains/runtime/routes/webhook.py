@@ -846,7 +846,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
     from src.domains.mgmt.user.db import get_repo_bot_token_no_global
-    from src.api.auth_token import verify_session_token, verify_session_token_for_repo
+    from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
     # 严格匹配：会话 token 绑定仓库 == 目标仓库 → 返回 info（可反查调用方身份）
@@ -1979,7 +1979,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "hint": "retry with the same idempotency_key, or verify via GET /api/a2a/status",
         })
     try:
-        from src.api.event_pipeline import _execute_agent
+        from src.domains.runtime.pipeline.event_pipeline import _execute_agent
         from src.kernel.session_manager import db, db_lock
         backend = ""
         # payload.runtime_id 优先（接管场景：指定路由到本机 worker）
@@ -2032,7 +2032,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if issue_number:
             try:
                 from src.api.session_store import get_issue_scene
-                from src.api.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
+                from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
                 _a2a_issue_scene, _a2a_issue_uid = get_issue_scene(repo_key, f"#{issue_number}")
                 _a2a_issue_scene = _a2a_issue_scene or "default"
                 if is_plugin_mode() and _a2a_issue_scene:
@@ -2043,7 +2043,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         skill_name = _pipe_skill
                         # Issue #657/#1758: 统一 scope 判官，显式 skill_id 同样校验；
                         # 不匹配 → skill_resolve_failed 事件 + 400 结构化字段。
-                        from src.api.event_pipeline import (
+                        from src.domains.runtime.pipeline.event_pipeline import (
                             _fail_skill_resolve_event, resolve_scene_node_skill_id)
                         from src.api.scene_skill_scope import evaluate as _eval_scope
                         _node_sid = 0
@@ -2094,7 +2094,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if not skill_name:
             # Plugin mode: try pipelines.json first
             try:
-                from src.api.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
+                from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
                 if is_plugin_mode():
                     _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_name)
                     if _pipe_skill:
@@ -2221,7 +2221,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
                     _advance_a2a_issue_stage(repo_key, issue_number, agent_name)
                     try:
-                        from src.api.event_pipeline import reconcile_queued_a2a
+                        from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                         reconcile_queued_a2a(repo_key)
                     except Exception as _dqr:
                         log.warning(f"A2A: downstream queue reconcile failed: {_dqr}")
@@ -2344,7 +2344,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 # 审查修复①：覆盖「活跃判定 → 排队落库」竞态窗口——若前序在间隙内已终态，
                 # 终态钩子已在本次写入前执行完，排队行将无人派发；此处立即对账兜底。
                 try:
-                    from src.api.event_pipeline import reconcile_queued_a2a
+                    from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                     reconcile_queued_a2a(repo_key)
                 except Exception as _re:
                     log.warning(f"A2A: queue reconcile after enqueue failed: {_re}")
@@ -2468,7 +2468,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # Issue #418：try 兜底早退统一走 _fail_event（原裸 update_event_status 无诊断字段）
         if seq:
             try:
-                from src.api.event_pipeline import _fail_event
+                from src.domains.runtime.pipeline.event_pipeline import _fail_event
                 _fail_event(seq, f"A2A 派发启动异常: {str(e)[:150]}")
             except Exception:
                 pass

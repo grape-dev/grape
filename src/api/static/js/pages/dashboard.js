@@ -344,11 +344,11 @@ function renderDashboard(data) {
       const _missing = Array.isArray(data.host_missing) ? data.host_missing : [];
       const _missingLabels = _missing.map(function (m) { return _hostMissingLabel(m); });
       const _extra = [];
-      if (_missingLabels.length) _extra.push('缺失项：' + _missingLabels.join('、'));
-      if (data.host_step) _extra.push('失败步骤：' + data.host_step);
-      if (data.host_error) _extra.push('原因：' + data.host_error);
+      if (_missingLabels.length) _extra.push(I18N.t('dashboard.host_missing_prefix') + _missingLabels.join(I18N.t('dashboard.list_sep')));
+      if (data.host_step) _extra.push(I18N.t('dashboard.host_step_prefix') + data.host_step);
+      if (data.host_error) _extra.push(I18N.t('dashboard.host_error_prefix') + data.host_error);
       const _extraTxt = _extra.length ? '（' + _hostEsc(_extra.join('；')) + '）' : '';
-      const _btnTxt = hs === 'webhook_missing' ? '补建 webhook' : '一键修复';
+      const _btnTxt = hs === 'webhook_missing' ? I18N.t('dashboard.host_btn_create_webhook') : I18N.t('dashboard.host_btn_repair');
       const _errCls = (hs === 'bot_missing' || hs === 'partial') ? ' error' : '';
       html += '<div class="host-banner' + _errCls + '">⚠️ ' + _hostEsc(_hostStatusLabel(hs)) + _extraTxt +
         ' <button onclick="window._repairHost()">' + _btnTxt + '</button></div>';
@@ -2796,8 +2796,8 @@ window._repairHost = function () {
       // Issue #2126：修复失败展示结构化缺失项，并刷新横幅展示服务端最新状态与剩余项
       const miss = (d && Array.isArray(d.missing)) ? d.missing : [];
       const missLabels = miss.map(function (m) { return _hostMissingLabel(m, true); });
-      let msg = (d && d.message) || '修复失败，请稍后手动重试';
-      if (missLabels.length) msg += '；仍缺失：' + missLabels.join('、');
+      let msg = (d && d.message) || I18N.t('dashboard.host_repair_failed');
+      if (missLabels.length) msg += I18N.t('dashboard.host_still_missing') + missLabels.join(I18N.t('dashboard.list_sep'));
       app.showToast && app.showToast(msg);
       API.get('/dashboard/' + owner + '/' + name).then(function (dd) {
         try { renderDashboard(dd); } catch (e) {}
@@ -2807,8 +2807,8 @@ window._repairHost = function () {
       const det = (e && e.detail) || {};
       const miss = Array.isArray(det.missing) ? det.missing : [];
       const missLabels = miss.map(function (m) { return _hostMissingLabel(m, true); });
-      let msg = '修复请求失败：' + ((det && det.message) || (e && e.message) || '未知错误');
-      if (missLabels.length) msg += '；仍缺失：' + missLabels.join('、');
+      let msg = I18N.t('dashboard.host_repair_request_failed') + ((det && det.message) || (e && e.message) || I18N.t('dashboard.host_unknown_error'));
+      if (missLabels.length) msg += I18N.t('dashboard.host_still_missing') + missLabels.join(I18N.t('dashboard.list_sep'));
       app.showToast && app.showToast(msg);
     });
 };

@@ -69,6 +69,67 @@ def check_core_endpoints(paths: dict) -> list:
     return errors
 
 
+def check_operation_id_unique(paths: dict) -> list:
+    """校验 operationId 全局唯一（OpenAPI 3 要求）。
+
+    重复 operationId 会让按 operationId 反查生成的 CLI / 契约消费方静默取到
+    另一份实现（Issue: PR #1329 架构守护 CRITICAL-01 —— 同一 method+path 注册
+    两次，第二份为死代码但契约里出现重复 operationId）。本校验补上这道 guard。
+    """
+    seen = {}
+    errors = []
+    for path, ops in (paths or {}).items():
+        if not isinstance(ops, dict):
+            continue
+        for method, op in ops.items():
+            if method.lower() not in ("get", "post", "put", "patch", "delete", "head", "options"):
+                continue
+            oid = (op or {}).get("operationId") if isinstance(op, dict) else None
+            if not oid:
+                continue
+            if oid in seen:
+                errors.append(f"duplicate operationId '{oid}' at {seen[oid]} and {method.upper()} {path}")
+            else:
+                seen[oid] = f"{method.upper()} {path}"
+    return errors
+
+
+def check_route_registration_unique(app_routes) -> list:
+    """校验同一 method+path 未被重复注册。
+
+    渲染后的契约里 `paths` 是字典，同一 method+path 注册两次会被折叠成一份，
+    因此 check_operation_id_unique 抓不到这类重复（FastAPI 只在启动时打
+    UserWarning）。这里直接扫 app.routes，把「同一路由块粘两次」的回归挡在 CI。
+    HEAD/OPTIONS 是框架自动补的方法，跳过以免噪声。
+    """
+    seen = {}
+    errors = []
+    for r in app_routes or []:
+        path = getattr(r, "path", None)
+        methods = getattr(r, "methods", None)
+        if not path or not methods:
+            continue
+        # 只看契约面：SPA 静态兜底（/{path:path}、/account 等）为既有设计；
+        # include_in_schema=False 的路由（如 /api/ping 双注册）不进 OpenAPI 契约，
+        # 不属本 guard 的守护对象。
+        if not str(path).startswith("/api/"):
+            continue
+        if getattr(r, "include_in_schema", True) is False:
+            continue
+        for m in methods:
+            m = str(m).upper()
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            key = (m, path)
+            if key in seen:
+                errors.append(
+                    f"duplicate route registration: {m} {path} "
+                    f"(registered by {type(r).__name__} after {seen[key]})")
+            else:
+                seen[key] = type(r).__name__
+    return errors
+
+
 def core_workflow_paths(paths: dict) -> set:
     """过滤出核心工作流前缀下的端点集合。"""
     return {p for p in paths if p.startswith(CORE_WORKFLOW_PREFIXES)}
@@ -146,6 +207,9 @@ def main() -> int:
     current_version = schema.get("info", {}).get("version", "")
 
     errors = check_core_endpoints(current_paths)
+    errors.extend(check_operation_id_unique(current_paths))
+    from src.api.main import app as _app
+    errors.extend(check_route_registration_unique(_app.routes))
 
     baseline_paths, baseline_version = load_baseline(args.baseline)
     if baseline_paths:

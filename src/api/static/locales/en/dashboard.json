@@ -180,5 +180,15 @@
   "scene_pin": "Pin",
   "scene_pinned": "Pinned",
   "scene_unpin": "Unpin",
-  "scene_pin_failed": "Pin failed: {{msg}}"
+  "scene_pin_failed": "Pin failed: {{msg}}",
+  "host_missing_prefix": "Missing: ",
+  "host_step_prefix": "Failed step: ",
+  "host_error_prefix": "Reason: ",
+  "host_btn_create_webhook": "Recreate webhook",
+  "host_btn_repair": "One-click repair",
+  "host_repair_failed": "Repair failed; please retry manually later",
+  "host_still_missing": "; still missing: ",
+  "host_repair_request_failed": "Repair request failed: ",
+  "host_unknown_error": "Unknown error",
+  "list_sep": ", "
 }

@@ -706,8 +706,9 @@ def init_db():
         for _col in ("host_step", "host_error", "host_updated_at"):
             try:
                 db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_col} TEXT DEFAULT ''")
-            except Exception:
-                pass
+            except Exception as _e:
+                # 幂等：列已存在属预期；其它失败需留痕（#2126 透明化方向，不外抛中断启动）
+                log.warning(f"managed_repos 补充诊断列失败 col={_col}: {_e}")
         db.execute(_OAUTH_STATES_DDL)
         from src.domains.mgmt.user.legacy_column_migrations import run as _legacy_migrations
         _legacy_migrations()

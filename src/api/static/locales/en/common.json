@@ -110,5 +110,17 @@
   "gitcode_reauth_required": "GitCode authorization expired, redirecting to re-authorize...",
   "request_failed": "Request failed ({{status}})",
   "network_upload_error": "Network error, upload failed",
-  "unnamed_worker": "Unnamed device"
+  "unnamed_worker": "Unnamed device",
+  "host_missing_bot": "grape_bot has not joined this project",
+  "host_missing_bot_compact": "grape_bot not joined",
+  "host_missing_webhook": "webhook not created",
+  "host_missing_webhook_url": "Public server URL (webhook_url) is not configured",
+  "host_missing_token": "User token missing or expired",
+  "host_status_bot_missing": "grape_bot was not added to this project",
+  "host_status_bot_missing_compact": "grape_bot not joined",
+  "host_status_webhook_missing": "Project webhook missing; Grape cannot receive repository events",
+  "host_status_webhook_missing_compact": "webhook not created",
+  "host_status_partial": "Hosting setup for this project is incomplete; some Grape features are unavailable",
+  "host_status_partial_compact": "Hosting partially completed",
+  "host_status_fallback": "Hosting setup for this project is incomplete; some Grape features are unavailable"
 }

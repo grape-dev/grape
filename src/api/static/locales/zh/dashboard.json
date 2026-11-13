@@ -180,5 +180,15 @@
   "scene_pin": "置顶",
   "scene_pinned": "已置顶",
   "scene_unpin": "取消置顶",
-  "scene_pin_failed": "置顶操作失败: {{msg}}"
+  "scene_pin_failed": "置顶操作失败: {{msg}}",
+  "host_missing_prefix": "缺失项：",
+  "host_step_prefix": "失败步骤：",
+  "host_error_prefix": "原因：",
+  "host_btn_create_webhook": "补建 webhook",
+  "host_btn_repair": "一键修复",
+  "host_repair_failed": "修复失败，请稍后手动重试",
+  "host_still_missing": "；仍缺失：",
+  "host_repair_request_failed": "修复请求失败：",
+  "host_unknown_error": "未知错误",
+  "list_sep": "、"
 }
