@@ -4585,7 +4585,7 @@ register_migration(
 
 
 # ===== 接管（takeover）v1 结构 =====
-# 设计文档：/root/dsh_grape_docs/TAKEOVER-API-DESIGN-v1.md §4
+# 设计说明：接口约定见仓库内 takeover 文档。
 # - takeover_sessions：接管会话（审计 + 幂等 + 状态机）
 # - session_api_tokens.kind：worker | takeover（区分两类会话凭据）
 # - task_messages.actor：agent | <username>（progress 复用同一份任务日志）

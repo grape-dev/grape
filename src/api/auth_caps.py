@@ -1,4 +1,4 @@
-"""Token 能力矩阵（ADR-2，见 /root/dsh_grape_docs/TAKEOVER-API-DESIGN-v1.md §2.2）。
+"""Token 能力矩阵（ADR-2；接口约定见仓库内 takeover 文档）。
 
 背景
 ----
