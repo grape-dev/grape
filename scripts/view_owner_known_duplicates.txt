@@ -11,3 +11,5 @@
 grape_t_channel_installation
 grape_t_channel_lease
 takeover_sessions
+# P3 跨域写日志表：每个域库各一份（同名不同库，有意为之）
+grape_xwrite_log
