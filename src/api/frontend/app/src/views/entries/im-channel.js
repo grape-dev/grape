@@ -3,7 +3,7 @@
   ;['bridge.css', 'ag-ui.css', 'viewcss/im-channel.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=47'
+    link.href = '/static-vue/assets/' + f + '?v=48'
     document.head.appendChild(link)
   })
 })()

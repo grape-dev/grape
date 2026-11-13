@@ -180,3 +180,18 @@
   border-color: color-mix(in srgb, var(--a) 45%, transparent) !important;
   box-shadow: 0 6px 18px color-mix(in srgb, #000 34%, transparent) !important;
 }
+
+/* ── 驾驶舱「项目场景」页的场景行卡（2026-11-12 反馈）────────────────────
+   `.scn-row` 原来是 `color-mix(var(--c) 62%)`，而它所在的 `.apple-card` 也是同一个
+   62% → 行卡和卡片底一模一样、还没有描边，hover 只把 alpha 62%→82%、阴影 8% 黑，
+   暗色下等于没有。这里：行卡 +6% 白抬一档 + hairline 描边，hover 走 accent 淡染。 */
+:is(.scn-row) {
+  background: color-mix(in srgb, #fff 6%, var(--c)) !important;
+  border: 1px solid var(--b) !important;
+  transition: background .18s, border-color .18s, box-shadow .18s !important;
+}
+:is(.scn-row):hover {
+  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 6%, var(--c))) !important;
+  border-color: color-mix(in srgb, var(--a) 45%, transparent) !important;
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 34%, transparent) !important;
+}
