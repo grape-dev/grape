@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agentic DevOps API",
-    "version": "2.2.2"
+    "version": "2.2.0"
   },
   "paths": {
     "/api/auth/change-password": {
@@ -815,6 +815,16 @@
               "type": "string",
               "default": "",
               "title": "Provider"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Refresh"
             }
           }
         ],
@@ -2540,7 +2550,7 @@
           "git-repo"
         ],
         "summary": "Create milestone",
-        "description": "Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).",
+        "description": "Creates a repository milestone (title required; due_on is REQUIRED on GitCode/Gitee — those upstreams reject an empty due_on with 400, intercepted locally with a readable 400 — and optional on GitHub, ISO datetime). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).",
         "operationId": "gitrepo_milestones_create",
         "parameters": [
           {
@@ -2612,7 +2622,7 @@
           "git-repo"
         ],
         "summary": "Update milestone",
-        "description": "Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open).",
+        "description": "Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open). GitCode caveat (live-fire evidence): its PATCH requires non-empty title AND due_on on every update (partial updates get upstream 400 'title must not be empty' / 'due_on must not be empty') — pass the full field set when updating GitCode milestones.",
         "operationId": "gitrepo_milestones_update",
         "parameters": [
           {
@@ -2884,7 +2894,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -2927,7 +2944,7 @@
           "git-repo"
         ],
         "summary": "Update issue",
-        "description": "Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id maps to upstream `milestone` (number); PATCH auto-fills required repo/title; milestone changes are read-back verified and echoed, or 502 if the milestone was not applied.",
+        "description": "Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.",
         "operationId": "gitrepo_issues_update",
         "parameters": [
           {
@@ -2953,7 +2970,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -3034,7 +3058,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -3105,7 +3136,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -3174,7 +3212,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -3420,7 +3465,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -3463,7 +3515,7 @@
           "git-repo"
         ],
         "summary": "Update pull request",
-        "description": "Updates a pull request (title/body/labels).",
+        "description": "Updates a pull request (title/body/labels/state). `state` accepts open/closed and is forwarded to the provider PATCH body (empty = unchanged); providers without state semantics keep returning the unchanged pull request.",
         "operationId": "gitrepo_pulls_update",
         "parameters": [
           {
@@ -3624,7 +3676,7 @@
           "git-repo"
         ],
         "summary": "Merge pull request",
-        "description": "Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message.",
+        "description": "Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message. WARNING (live-fire evidence 2026-11-13): an empty body is a REAL merge — GitCode PUT /pulls/{n}/merge with no fields merged the PR with upstream defaults ({merged: true}); there is no dry-run on this endpoint.",
         "operationId": "gitrepo_pulls_merge",
         "parameters": [
           {
@@ -3950,7 +4002,7 @@
           "git-repo"
         ],
         "summary": "Delete PR comment",
-        "description": "Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments.",
+        "description": "Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams).",
         "operationId": "gitrepo_pulls_comments_delete",
         "parameters": [
           {
@@ -3985,7 +4037,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Comment Id"
             }
           }
@@ -4150,7 +4202,14 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
               "title": "Number"
             }
           }
@@ -6879,13 +6938,109 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/chat/im/wechat/login/start": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Start WeChat ilink QR login",
+        "description": "Requests an ilink bot QR code and returns login_id + qrcode_img_content; poll status until confirmed.",
+        "operationId": "chat_wechat_login_start",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/chat/im/wechat/login/status": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Get WeChat ilink login status",
+        "description": "Short-poll proxy for ilink qrcode status: wait|scaned|need_verifycode|confirmed|expired. On confirmed the credential is stored to grape_t_channel_installation.",
+        "operationId": "chat_wechat_login_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Id"
+            }
+          },
+          {
+            "name": "verify_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Verify Code"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/settings/credentials": {
       "get": {
         "tags": [
           "settings"
         ],
         "summary": "Get third-party credential status",
-        "description": "Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.",
+        "description": "Returns the status of third-party credentials (VCS platform PATs from the platform-card catalog, plus huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.",
         "operationId": "settings_credentials_get",
         "parameters": [
           {
@@ -7966,6 +8121,69 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/settings/agent-runtimes/{rid}/readd": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Re-add runtime engine to its scenes",
+        "description": "Issue #2133 front-end one-click fallback for engine auto-recovery: rebuilds scene node bindings from the detach audit log, reconciles task bindings (terminalizes cancelled tasks, releases dangling dispatched bindings, converges busy slots) and clears spawn_failed degraded/alarm state. Idempotent; visibility reuses the engine list filter (invisible ids return 404).",
+        "operationId": "settings_agent_runtime_readd",
+        "parameters": [
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Rid"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
     "/api/settings/agent-runtimes/refresh": {
       "post": {
         "tags": [
@@ -8126,7 +8344,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Cid"
             }
           }
@@ -8189,7 +8407,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Cid"
             }
           }
@@ -8252,7 +8470,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Cid"
             }
           }
@@ -10218,7 +10436,7 @@
           "scenes"
         ],
         "summary": "List scenes",
-        "description": "Lists all available scenes for a repo (repo-scoped, non-official).",
+        "description": "Lists all available scenes for a repo (repo-scoped, non-official). Supports page/page_size (page omitted -> full list, backward compatible) and optional q (name/display_name/description LIKE search) + sort (id/latest); always returns total.",
         "operationId": "scenes_list",
         "parameters": [
           {
@@ -10229,6 +10447,61 @@
               "type": "string",
               "default": "",
               "title": "Repo"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(id|latest)$",
+              "default": "id",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(|minimal)$",
+              "default": "",
+              "title": "Fields"
             }
           }
         ],
@@ -11433,7 +11706,7 @@
           "scenes"
         ],
         "summary": "Audit scene skill scope",
-        "description": "Read-only audit (Issue #1564): scans active repo scenes and reports nodes whose skill scope conflicts (user-scope skills referenced by repo-shared scenes). Returns violations[{scene_id,scene_name,node_id,node_tag,skill,actual_scope,expected_scope}] plus summary counts; never writes.",
+        "description": "Read-only audit (Issue #1564/#1721): scans active repo scenes and reports nodes whose skill scope conflicts (user-scope skills referenced by repo-shared scenes). Accepts session token (tk_) restricted to its bound repo, read-only. Returns violations[{scene_id,scene_name,node_id,node_tag,skill,actual_scope,expected_scope,suggested_skills}] plus summary counts; never writes.",
         "operationId": "scenes_skill_scope_audit",
         "parameters": [
           {
@@ -11490,7 +11763,7 @@
             "accessToken": []
           }
         ],
-        "x-token-scope": "user_only"
+        "x-token-scope": "dual"
       }
     },
     "/api/scenes/{scene_id}": {
@@ -11499,7 +11772,7 @@
           "scenes"
         ],
         "summary": "Get scene detail",
-        "description": "Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).",
+        "description": "Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Re-bind the node to a repo/official skill before dispatch.",
         "operationId": "scenes_detail",
         "parameters": [
           {
@@ -11764,6 +12037,86 @@
             "description": "每页条数，1-200"
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/scenes/{scene_id}/copy": {
+      "post": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Copy a scene",
+        "description": "Copies a repo scene. The creator copies all custom-field values; other users only copy the field declarations (values cleared) and lose access to unavailable engines/skills/linked repos.",
+        "operationId": "scenes_copy",
+        "parameters": [
+          {
+            "name": "scene_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scene Id"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CopySceneRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -12274,6 +12627,79 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/scenes/{scene_id}/pin": {
+      "post": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Pin scene",
+        "description": "Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).",
+        "operationId": "scenes_pin",
+        "parameters": [
+          {
+            "name": "scene_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scene Id"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinSceneRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/project-templates": {
       "get": {
         "tags": [
@@ -12710,7 +13136,7 @@
           "issues"
         ],
         "summary": "Update issue status",
-        "description": "Transitions Issue status (active/processing/awaiting_input/pending_review/completed/cancelled flow). User-only: user-facing status is mutable by the owner; session token -> 403.",
+        "description": "Transitions Issue status (active/processing/awaiting_input/pending_review/completed/cancelled flow). User-only: user-facing status is mutable by the owner, and the completed->pending_review revert is additionally open to repository Owner/Admin members (real repo role check); session token -> 403.",
         "operationId": "issues_status",
         "parameters": [
           {
@@ -13217,7 +13643,7 @@
           "issues"
         ],
         "summary": "Agent declares issue awaiting-input (待澄清)",
-        "description": "vod/issue agent explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue, agent_type must be vod/issue. Colocated with issues clarify (user reply) / issues clarifications (history).",
+        "description": "vod/issue agent (or any agent_type in the issue's bound scene nodes, Issue #655) explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue. Colocated with issues clarify (user reply) / issues clarifications (history).",
         "operationId": "issues_awaiting-input",
         "parameters": [
           {
@@ -13280,7 +13706,7 @@
           "issues"
         ],
         "summary": "Agent declares issue pending_review (阶段审核点)",
-        "description": "任意 devops agent 显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。Session-only (tk_)，repo 匹配，agent_type 为 devops agent。与 awaiting-input 对称（等用户双态）。",
+        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。",
         "operationId": "issues_pending-review",
         "parameters": [
           {
@@ -13717,7 +14143,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "pattern": "^(active|processing|awaiting_input|pending_review|completed|)?$",
+              "pattern": "^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$",
               "default": "",
               "title": "Status"
             }
@@ -13972,6 +14398,20 @@
               "title": "Recent Terminal"
             },
             "description": "非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"
+          },
+          {
+            "name": "include_deleted",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "description": "Issue #995：默认过滤 VCS 侧已确认删除的卡片（回写 vcs_exists=0 且已核验）；1=审计模式返回并标记。未核验卡片按存在处理（fail-open 不隐藏）。",
+              "default": 0,
+              "title": "Include Deleted"
+            },
+            "description": "Issue #995：默认过滤 VCS 侧已确认删除的卡片（回写 vcs_exists=0 且已核验）；1=审计模式返回并标记。未核验卡片按存在处理（fail-open 不隐藏）。"
           }
         ],
         "responses": {
@@ -14085,7 +14525,7 @@
           "issues"
         ],
         "summary": "Issue detail (stage+events+pipeline)",
-        "description": "Single issue detail: base fields + events (seq asc) + pipeline segments.",
+        "description": "Single issue detail: base fields + events (seq asc) + pipeline segments. D105 string-ident: `number` accepts numeric idents and platform string idents (gitee IK*, # prefix tolerated).",
         "operationId": "issues_detail",
         "parameters": [
           {
@@ -14111,7 +14551,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Number"
             }
           }
@@ -14253,7 +14693,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Number"
             }
           }
@@ -15563,6 +16003,512 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/takeover/sessions": {
+      "post": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Start takeover (atomic hand-off of a running task)",
+        "description": "开始接管：找任务 → 取消 → 标记 takeover → 签发 tko_ → 返回 bundle。",
+        "operationId": "takeover_start",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__takeover__StartBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "get": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "List takeover sessions for a repo/issue (active by default)",
+        "description": "面板\"接管中\"状态的服务端来源：浏览器刷新/换标签后仍能拿到 active 会话。",
+        "operationId": "takeover_list",
+        "parameters": [
+          {
+            "name": "repo_key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Key"
+            }
+          },
+          {
+            "name": "issue_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Issue Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "active",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/takeover/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Get takeover session (optionally renew token)",
+        "operationId": "takeover_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "renew",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Renew"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/progress": {
+      "post": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Report progress from the local session (written to task_messages)",
+        "operationId": "takeover_progress",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__takeover__ProgressBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/attach": {
+      "post": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Attach the local session id (so the panel can jump back to it)",
+        "operationId": "takeover_attach",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/request-finish": {
+      "post": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Local agent reports completion (content only; user still confirms the hand-off)",
+        "description": "agent（tko_）提交完成内容；推进仍由用户点 finish（user_scope）授权。",
+        "operationId": "takeover_request_finish",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestFinishBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/finish": {
+      "post": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Finish the taken-over node (event finalize + stage advance + optional handoff)",
+        "operationId": "takeover_finish",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/abort": {
+      "post": {
+        "tags": [
+          "takeover"
+        ],
+        "summary": "Abort takeover (stop only; never re-dispatch the same node)",
+        "operationId": "takeover_abort",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbortBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/feishu/onboard/start": {
       "post": {
         "tags": [
@@ -15575,7 +16521,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StartBody"
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__feishu_onboard__StartBody"
               }
             }
           },
@@ -15741,96 +16687,10 @@
         ],
         "responses": {
           "200": {
-            "description": "任务运行信息 + wrote_files 产物清单",
+            "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "agent_name": {
-                      "type": "string"
-                    },
-                    "agent_version": {
-                      "type": "string"
-                    },
-                    "device_name": {
-                      "type": "string"
-                    },
-                    "last_ip": {
-                      "type": "string"
-                    },
-                    "owner_name": {
-                      "type": "string"
-                    },
-                    "prompt": {
-                      "type": "string"
-                    },
-                    "prompt_full_length": {
-                      "type": "integer"
-                    },
-                    "created_at": {
-                      "type": "string"
-                    },
-                    "started_at": {
-                      "type": "string"
-                    },
-                    "completed_at": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "string"
-                    },
-                    "issue_id": {
-                      "type": "string"
-                    },
-                    "event_seq": {
-                      "type": "integer"
-                    },
-                    "repo_key": {
-                      "type": "string"
-                    },
-                    "spec": {
-                      "type": "string"
-                    },
-                    "cpu_percent": {
-                      "type": "number"
-                    },
-                    "memory_percent": {
-                      "type": "number"
-                    },
-                    "disk_percent": {
-                      "type": "number"
-                    },
-                    "load_avg": {
-                      "type": "string"
-                    },
-                    "wrote_files": {
-                      "type": "array",
-                      "description": "任务写过的文件清单（派生自 task_messages 的 write/patch tool_use 入参，不扫工作区；无数据为 []）",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "path": {
-                            "type": "string"
-                          },
-                          "bytes": {
-                            "type": "integer",
-                            "description": "写入内容的 utf-8 字节数（patch 取 new_string）"
-                          },
-                          "tool": {
-                            "type": "string"
-                          },
-                          "seq": {
-                            "type": "integer"
-                          },
-                          "first_seen_at": {
-                            "type": "string"
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
+                "schema": {}
               }
             }
           },
@@ -17413,7 +18273,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           }
@@ -17463,7 +18323,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           }
@@ -17523,7 +18383,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           }
@@ -17629,7 +18489,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           }
@@ -17679,7 +18539,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           }
@@ -17741,7 +18601,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           },
@@ -17750,7 +18610,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "User Id"
             }
           }
@@ -17810,7 +18670,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           },
@@ -17819,7 +18679,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "User Id"
             }
           }
@@ -17871,7 +18731,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Org Id"
             }
           }
@@ -19554,6 +20414,312 @@
         ],
         "x-token-scope": "user_only"
       }
+    },
+    "/api/im/status": {
+      "get": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Engine Status",
+        "description": "IM 引擎状态汇总——前端用来显示总开关与真连上的渠道数。\n\n注：旧 BotManager 已下线（A2 M2），active_engine 只剩 new/idle 两态。",
+        "operationId": "im_engine_status_api_im_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/installations": {
+      "get": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Installations",
+        "description": "安装列表：user 轨按 owner_user_id 过滤，repo 轨按仓库访问权限过滤；secret 掩码。",
+        "operationId": "im_installations_api_im_installations_get",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/notify-test": {
+      "post": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Notify Test",
+        "description": "通知扇出自检（A4 杠杆）：给当前用户的**全部已连接渠道**发一条通知，返回逐渠结果。\n\n用于真机验证「任务分配 / 待澄清 / 待审核 / 完成」通知是否各渠道都收到；\n走与线上完全相同的 notify_user 路径（不去重，方便重复点）。",
+        "operationId": "im_notify_test_api_im_notify_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotifyTestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/installations/{installation_id}": {
+      "put": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Set Installation Status",
+        "description": "引擎侧启停：active（引擎扫描会捡起来）/ disabled（下一轮扫描优雅让渡）。\n\n只改 grape_t_channel_installation.status，不动 legacy 表——所以重启后的启动回填不会把它改回去\n（回填的 upsert 只更新 config/fingerprint，不覆盖 status）。",
+        "operationId": "im_set_installation_status_api_im_installations__installation_id__put",
+        "parameters": [
+          {
+            "name": "installation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Installation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallationStatusBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/dingtalk/card-setup": {
+      "get": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Dingtalk Card Setup",
+        "description": "互动卡片接入状态（前端「卡片按钮」一栏读它）。",
+        "operationId": "im_dingtalk_card_setup_api_im_dingtalk_card_setup_get",
+        "parameters": [
+          {
+            "name": "installation_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "钉钉安装 id",
+              "title": "Installation Id"
+            },
+            "description": "钉钉安装 id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "post": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Dingtalk Card Setup Save",
+        "description": "一键启用：校验模板 + 权限 → 写安装配置 → 引擎 ≤30s 热重建生效。\n\nA2（当前）：用户先在卡片平台导入 `docs/weekly-09/templates/im_card_v1.json` 并发布，\n把 cardTemplateId 交给这里；本接口调一次 create 探活，成功才算配置正确\n（探活只建实例不投放，用户侧无感知）。\nA1（后续增强）：template_id 传空 + `auto=true` 时改为调「卡片平台模板复制」自动开模板。",
+        "operationId": "im_dingtalk_card_setup_save_api_im_dingtalk_card_setup_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DingtalkCardSetupBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
     }
   },
   "components": {
@@ -19574,17 +20740,26 @@
           "idempotency_key": {
             "type": "string",
             "title": "Idempotency Key",
+            "description": "幂等键（Issue #544，1-128 位 [A-Za-z0-9_:.-]）：同仓同键返回已有事件；也可放 payload.idempotency_key（body 顶层优先）。Issue #2248：修复轮应使用带轮次/PR head sha 的新键（如 issue-<N>-a2a-qa-r<轮次>-<sha7>）；命中终态旧事件时 force=true 可越过幂等短路。",
             "default": ""
           },
           "queue": {
             "type": "boolean",
             "title": "Queue",
+            "description": "仅排队，不立即派发：命中同 issue+scene+agent 活跃事件时把本次交办排队，前序事件终态后自动派发；不越过 downstream_running 门禁。也可放 payload.queue（body 顶层优先）。",
             "default": false
           },
           "force": {
             "type": "boolean",
             "title": "Force",
+            "description": "立即派发：越过 downstream_running / duplicate_key / active_dispatch 三类派发门禁并立即新建事件。顶层 force（body 顶层）与 payload.force=true 语义等价，任一处为 true 即生效。Issue #2248：idempotency_key 命中终态旧事件（completed/failed/cancelled/timeout）时，force=true 同样越过幂等命中短路，按派生新轮次键落库；活跃事件命中仍返回原事件。注意：对派发门禁（issue+scene+agent 时间窗）更换 idempotency_key 无效。修复轮建议使用带轮次/PR head sha 的新键（如 issue-<N>-a2a-qa-r<轮次>-<sha7>）。",
             "default": false
+          },
+          "source_event_seq": {
+            "type": "integer",
+            "title": "Source Event Seq",
+            "description": "Issue #2050：源段事件 seq（结构化 handoff 调用必带）。用于审计交棒来源段与幂等键派生；兼容 payload.source_event_seq / payload.source_seq。",
+            "default": 0
           }
         },
         "type": "object",
@@ -19596,10 +20771,31 @@
             "type": "string",
             "title": "Agent",
             "default": ""
+          },
+          "exclude_event_seq": {
+            "type": "integer",
+            "title": "Exclude Event Seq",
+            "default": 0
           }
         },
         "type": "object",
         "title": "A2ARedoBody"
+      },
+      "AbortBody": {
+        "properties": {
+          "redispatch": {
+            "type": "boolean",
+            "title": "Redispatch",
+            "default": true
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "AbortBody"
       },
       "AddMemberBody": {
         "properties": {
@@ -19609,9 +20805,9 @@
             "default": ""
           },
           "user_id": {
-            "type": "integer",
+            "type": "string",
             "title": "User Id",
-            "default": 0
+            "default": ""
           },
           "role": {
             "type": "string",
@@ -19931,6 +21127,41 @@
         "type": "object",
         "title": "ArtifactCleanBody"
       },
+      "AttachBody": {
+        "properties": {
+          "client_session": {
+            "type": "string",
+            "title": "Client Session",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "title": "Host",
+            "default": ""
+          },
+          "client_version": {
+            "type": "string",
+            "title": "Client Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "AttachBody"
+      },
+      "AuthChannelsBody": {
+        "properties": {
+          "providers": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Providers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "providers"
+        ],
+        "title": "AuthChannelsBody"
+      },
       "BetaApplyBody": {
         "properties": {
           "accountType": {
@@ -20002,6 +21233,22 @@
           "file"
         ],
         "title": "Body_issues_upload_attachment"
+      },
+      "Body_saml_callback_api_auth_callback__provider__post": {
+        "properties": {
+          "SAMLResponse": {
+            "type": "string",
+            "title": "Samlresponse",
+            "default": ""
+          },
+          "RelayState": {
+            "type": "string",
+            "title": "Relaystate",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_saml_callback_api_auth_callback__provider__post"
       },
       "Body_scenes_market_icon_upload": {
         "properties": {
@@ -20300,6 +21547,26 @@
             "title": "Github Oauth Client Secret",
             "default": ""
           },
+          "gitee_oauth_client_id": {
+            "type": "string",
+            "title": "Gitee Oauth Client Id",
+            "default": ""
+          },
+          "gitee_oauth_client_secret": {
+            "type": "string",
+            "title": "Gitee Oauth Client Secret",
+            "default": ""
+          },
+          "huawei_oauth_client_id": {
+            "type": "string",
+            "title": "Huawei Oauth Client Id",
+            "default": ""
+          },
+          "huawei_oauth_client_secret": {
+            "type": "string",
+            "title": "Huawei Oauth Client Secret",
+            "default": ""
+          },
           "bot_usernames": {
             "items": {
               "type": "string"
@@ -20390,6 +21657,17 @@
           "repo"
         ],
         "title": "ConvertSkillRequest"
+      },
+      "CopySceneRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "CopySceneRequest"
       },
       "CreateApiKeyBody": {
         "properties": {
@@ -20869,6 +22147,24 @@
         ],
         "title": "DeployUrlBody"
       },
+      "DingtalkCardSetupBody": {
+        "properties": {
+          "installation_id": {
+            "type": "string",
+            "title": "Installation Id"
+          },
+          "template_id": {
+            "type": "string",
+            "title": "Template Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "installation_id"
+        ],
+        "title": "DingtalkCardSetupBody"
+      },
       "DisableUserBody": {
         "properties": {
           "reason": {
@@ -21202,6 +22498,57 @@
         "type": "object",
         "title": "FailBody"
       },
+      "FinishBody": {
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "title": "Outcome",
+            "default": "completed"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "evidence": {
+            "type": "string",
+            "title": "Evidence",
+            "default": ""
+          },
+          "files_written": {
+            "items": {},
+            "type": "array",
+            "title": "Files Written"
+          },
+          "handoff": {
+            "type": "string",
+            "title": "Handoff",
+            "default": "a2a"
+          },
+          "next_agent": {
+            "type": "string",
+            "title": "Next Agent",
+            "default": ""
+          },
+          "actions": {
+            "items": {},
+            "type": "array",
+            "title": "Actions"
+          },
+          "artifacts": {
+            "items": {},
+            "type": "array",
+            "title": "Artifacts"
+          },
+          "issue_summary": {
+            "type": "string",
+            "title": "Issue Summary",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "FinishBody"
+      },
       "FlowResetBody": {
         "properties": {
           "to_stage": {
@@ -21367,6 +22714,19 @@
         "type": "object",
         "title": "HeartbeatBody"
       },
+      "InstallationStatusBody": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "InstallationStatusBody"
+      },
       "IssueCreateBody": {
         "properties": {
           "title": {
@@ -21433,8 +22793,13 @@
           },
           "milestone_id": {
             "type": "integer",
-            "title": "Milestone Id",
-            "default": 0
+            "title": "Milestone id",
+            "description": "Milestone identifier: prefers `id` from `grape git-repo milestones` (Issue #1005), and also accepts the legacy `number` for compatibility. GitCode resolves it to the upstream `milestone` parameter; an unknown/invisible milestone is rejected with 400.",
+            "default": 0,
+            "examples": [
+              3,
+              850012
+            ]
           },
           "state": {
             "type": "string",
@@ -21836,7 +23201,7 @@
           "title"
         ],
         "title": "MilestoneCreateBody",
-        "description": "Issue #632：创建里程碑（对齐 #577 Spec）。title 必填；description/due_on 可选。"
+        "description": "Issue #632：创建里程碑（对齐 #577 Spec）。title 必填；description/due_on 可选——\n但 gitcode/gitee 上游强制 due_on（空值 400 \"due_on must not be empty\"，本地以可读\n400 前置拦截，见 _milestone_due_on）；GitHub due_on 真可选（ISO datetime）。"
       },
       "MilestoneUpdateBody": {
         "properties": {
@@ -21911,6 +23276,32 @@
         },
         "type": "object",
         "title": "NotificationPrefs"
+      },
+      "NotifyTestBody": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": "task"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "default": "这是一条多渠道通知测试。"
+          },
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          },
+          "issue_number": {
+            "type": "integer",
+            "title": "Issue Number",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "NotifyTestBody"
       },
       "OAuthAssociateBody": {
         "properties": {
@@ -22042,6 +23433,11 @@
             "type": "boolean",
             "title": "Auto Close Issues",
             "default": false
+          },
+          "prune_source_branch": {
+            "type": "boolean",
+            "title": "Prune Source Branch",
+            "default": false
           }
         },
         "type": "object",
@@ -22098,10 +23494,33 @@
                 "P1"
               ]
             ]
+          },
+          "state": {
+            "type": "string",
+            "title": "PR state",
+            "description": "New PR state: 'open' or 'closed'. Empty = unchanged. Invalid values are rejected with a local 400.",
+            "default": "",
+            "examples": [
+              "closed",
+              "open"
+            ]
           }
         },
         "type": "object",
         "title": "PRUpdateBody"
+      },
+      "PinSceneRequest": {
+        "properties": {
+          "pinned": {
+            "type": "boolean",
+            "title": "Pinned"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pinned"
+        ],
+        "title": "PinSceneRequest"
       },
       "PolishBody": {
         "properties": {
@@ -22119,26 +23538,20 @@
         "type": "object",
         "title": "PolishBody"
       },
-      "ProgressBody": {
+      "RecoverOrphansBody": {
         "properties": {
-          "summary": {
-            "type": "string",
-            "title": "Summary",
-            "default": ""
-          },
-          "step": {
-            "type": "integer",
-            "title": "Step",
-            "default": 0
-          },
-          "total": {
-            "type": "integer",
-            "title": "Total",
-            "default": 0
+          "active_task_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Active Task Ids",
+            "default": []
           }
         },
         "type": "object",
-        "title": "ProgressBody"
+        "title": "RecoverOrphansBody",
+        "description": "Issue #1750：worker 自报活跃任务白名单（可选）。\n\n调用方（worker）在请求体里显式携带内存 active_tasks 的 task id；命中白名单的\n任务视为「worker 自认仍在执行」，直接 skipped_active，优先于年龄闸门与活跃窗口。\n旧版 worker 发空 body → 默认空列表，行为等同现状（字段可选、平滑兼容）。"
       },
       "RegisterSendCodeBody": {
         "properties": {
@@ -22208,6 +23621,47 @@
           "full_name"
         ],
         "title": "RepoAction"
+      },
+      "RequestFinishBody": {
+        "properties": {
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "evidence": {
+            "type": "string",
+            "title": "Evidence",
+            "default": ""
+          },
+          "files_written": {
+            "items": {},
+            "type": "array",
+            "title": "Files Written"
+          },
+          "actions": {
+            "items": {},
+            "type": "array",
+            "title": "Actions"
+          },
+          "artifacts": {
+            "items": {},
+            "type": "array",
+            "title": "Artifacts"
+          },
+          "next_step": {
+            "type": "string",
+            "title": "Next Step",
+            "default": ""
+          },
+          "issue_summary": {
+            "type": "string",
+            "title": "Issue Summary",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "RequestFinishBody"
       },
       "ResetPasswordBody": {
         "properties": {
@@ -22343,6 +23797,11 @@
             "type": "integer",
             "title": "Skill Id",
             "default": 0
+          },
+          "skill_pending": {
+            "type": "string",
+            "title": "Skill Pending",
+            "default": ""
           },
           "mode": {
             "type": "string",
@@ -22527,22 +23986,6 @@
         "type": "object",
         "title": "SloUpdateBody"
       },
-      "StartBody": {
-        "properties": {
-          "bot_type": {
-            "type": "string",
-            "title": "Bot Type",
-            "default": "chat_bot"
-          },
-          "repo_key": {
-            "type": "string",
-            "title": "Repo Key",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "StartBody"
-      },
       "TaskAwaitingInputBody": {
         "properties": {
           "questions": {
@@ -22556,7 +23999,14 @@
             "default": ""
           },
           "issue_number": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
             "title": "Issue Number",
             "default": 0
           }
@@ -22577,7 +24027,14 @@
             "default": ""
           },
           "issue_number": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
             "title": "Issue Number",
             "default": 0
           },
@@ -22748,6 +24205,12 @@
             "type": "string",
             "title": "Gitcode Token",
             "default": ""
+          },
+          "platform_tokens": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Platform Tokens",
+            "default": {}
           },
           "repo_key": {
             "type": "string",
@@ -23177,6 +24640,32 @@
         ],
         "title": "ValidationError"
       },
+      "VcsPlatformCardBody": {
+        "properties": {
+          "cards": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Cards"
+          },
+          "bot_tokens": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Bot Tokens",
+            "default": {}
+          },
+          "webhook_tokens": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Webhook Tokens",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "cards"
+        ],
+        "title": "VcsPlatformCardBody"
+      },
       "VerifyTokenBody": {
         "properties": {
           "provider": {
@@ -23363,6 +24852,104 @@
         ],
         "title": "FeedbackBody"
       },
+      "src__domains__mgmt__routes__feishu_onboard__StartBody": {
+        "properties": {
+          "bot_type": {
+            "type": "string",
+            "title": "Bot Type",
+            "default": "chat_bot"
+          },
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "StartBody"
+      },
+      "src__domains__mgmt__routes__takeover__ProgressBody": {
+        "properties": {
+          "messages": {
+            "items": {},
+            "type": "array",
+            "title": "Messages"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ProgressBody"
+      },
+      "src__domains__mgmt__routes__takeover__StartBody": {
+        "properties": {
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          },
+          "owner": {
+            "type": "string",
+            "title": "Owner",
+            "default": ""
+          },
+          "repo": {
+            "type": "string",
+            "title": "Repo",
+            "default": ""
+          },
+          "issue_number": {
+            "type": "string",
+            "title": "Issue Number",
+            "default": ""
+          },
+          "agent_type": {
+            "type": "string",
+            "title": "Agent Type",
+            "default": ""
+          },
+          "platform": {
+            "type": "string",
+            "title": "Platform",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "title": "Host",
+            "default": ""
+          },
+          "client_version": {
+            "type": "string",
+            "title": "Client Version",
+            "default": ""
+          },
+          "supports": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Supports"
+          },
+          "host_os": {
+            "type": "string",
+            "title": "Host Os",
+            "default": ""
+          },
+          "host_arch": {
+            "type": "string",
+            "title": "Host Arch",
+            "default": ""
+          },
+          "host_shell": {
+            "type": "string",
+            "title": "Host Shell",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "StartBody"
+      },
       "src__domains__runtime__routes__chat__FeedbackBody": {
         "properties": {
           "seq": {
@@ -23386,28 +24973,47 @@
         ],
         "title": "FeedbackBody"
       },
-      "FeedbackBody": {
+      "src__domains__runtime__routes__runtime__ProgressBody": {
         "properties": {
-          "seq": {
-            "type": "integer",
-            "title": "Seq"
-          },
-          "feedback_type": {
+          "summary": {
             "type": "string",
-            "title": "Feedback Type",
-            "default": "create_issue"
-          },
-          "comment": {
-            "type": "string",
-            "title": "Comment",
+            "title": "Summary",
             "default": ""
+          },
+          "step": {
+            "type": "integer",
+            "title": "Step",
+            "default": 0
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
           }
         },
         "type": "object",
-        "required": [
-          "seq"
-        ],
-        "title": "FeedbackBody"
+        "title": "ProgressBody"
+      },
+      "ProgressBody": {
+        "properties": {
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "step": {
+            "type": "integer",
+            "title": "Step",
+            "default": 0
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ProgressBody"
       }
     },
     "securitySchemes": {
@@ -23426,6 +25032,5 @@
         "name": "access_token"
       }
     }
-  },
-  "tags": []
+  }
 }
