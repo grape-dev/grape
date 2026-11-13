@@ -22,7 +22,7 @@ FROZEN = {
     "observability.js": "78", "organizations.js": "18", "pipeline.js": "50",
     "repos.js": "64", "runtimes.js": "103", "scene-market.js": "51",
     "settings.js": "39", "skills.js": "49", "templates.js": "39",
-    "observability.js": "78", "organizations.js": "18", "pipeline.js": "48",
+    "observability.js": "78", "organizations.js": "18", "pipeline.js": "50",
     "repos.js": "64", "runtimes.js": "103", "scene-market.js": "51",
     "settings.js": "39", "skills.js": "49", "templates.js": "38",
     "worker-name.js": "2", "pwd-blocklist.js": "3",
