@@ -19,9 +19,9 @@ from typing import Any, Callable
 from src.kernel import db_registry
 from src.kernel.session_manager import db as _process_db
 
-LOG_TABLE = "grape_xwrite_log"
-MAX_ATTEMPTS = 5
-RETRY_BACKOFF_S = 30
+LOG_TABLE = "grape_t_xwrite_log"
+MAX_ATTEMPTS = 5  # 补偿重试上限：5 次约覆盖 2.5 分钟退避窗口，与巡检周期同量级
+RETRY_BACKOFF_S = 30  # 重试退避 30s：与 drain 定时器 5 分钟周期错开，避免同拍重试
 
 
 def _ddl() -> str:
@@ -145,6 +145,13 @@ def submit_deferred(target_domain: str, action: str, idempotency_key: str, paylo
 
 
 def drain(apply_fns: dict[str, Callable[[dict[str, Any]], Any]], limit: int = 50) -> dict[str, int]:
+    """重试待补偿行。apply_fns: action → 可调用（接收 payload dict）。
+
+    limit=50：单轮最多处理 50 条，按 5 分钟周期即上限 600 条/小时，
+    对应本平台跨域写峰值（历史 <20 条/小时）的 30 倍余量。
+
+    超过 MAX_ATTEMPTS 标记为 dead（死信，需人工/对账处理）。
+    """
     """重试待补偿行。apply_fns: action → 可调用（接收 payload dict）。
 
     超过 MAX_ATTEMPTS 标记为 dead（死信，需人工/对账处理）。

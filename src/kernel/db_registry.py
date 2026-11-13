@@ -140,6 +140,7 @@ def _new_conn(domain: str):
     import pymysql
 
     cfg = parse_dsn(dsn_of(domain))
+    # connect_timeout=8s：pymysql 默认 10s，收紧 2s 与域读超时 10s 留余量
     conn = pymysql.connect(autocommit=True, connect_timeout=8, **cfg)
     return _CompatConn(conn)
 
