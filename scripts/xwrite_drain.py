@@ -116,6 +116,26 @@ def _handlers() -> dict:
                 int(p["rule_id"]), dict(p.get("fields") or {}), p.get("updated_at", ""))
             out["event_action_filter_delete"] = lambda p: rt.delete_event_action_filter(
                 int(p["rule_id"]))
+            # P3-5f：技能（mgmt 进程写 runtime 基表 skill）
+            out["skill_content_update"] = lambda p: rt.update_skill_content(
+                int(p["skill_id"]), p.get("content_hash", ""), p.get("file_path", ""))
+            out["skill_obs_update"] = lambda p: rt.update_skill_obs(
+                int(p["skill_id"]), p.get("object_key", ""), p.get("display_name", ""),
+                p.get("agent_type", ""), p.get("description", ""), p.get("category_id", ""),
+                p.get("updated_by", ""), p.get("content_hash", ""))
+            out["skill_obs_insert"] = lambda p: rt.insert_skill(
+                p["skill_name"], p.get("display_name") or p["skill_name"],
+                p.get("description", ""), p.get("agent_type", ""), p.get("file_path", ""),
+                p.get("scope", "user"), p.get("owner_id", ""), p.get("created_by", ""),
+                p.get("created_by", ""), p.get("category_id", ""), p.get("content_hash", ""))
+            out["skill_row_create"] = lambda p: rt.create_skill_row(
+                p["skill_name"], p.get("description", ""), p.get("agent_type", ""),
+                p.get("scope", "user"), p.get("owner_id", ""), p.get("created_by", ""))
+            out["skill_row_delete"] = lambda p: rt.delete_skill_row(
+                p["skill_name"], p.get("scope", "user"), p.get("owner_id", ""))
+            out["skill_delete_by_id"] = lambda p: rt.delete_skill_by_id(int(p["skill_id"]))
+            out["skill_like_bump"] = lambda p: rt.adjust_skill_like_count(
+                int(p["skill_id"]), int(p.get("delta", 1)))
     except Exception:  # noqa: BLE001
         pass
     return out

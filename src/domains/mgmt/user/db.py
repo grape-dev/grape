@@ -1187,6 +1187,25 @@ def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> list[tuple[st
 def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:
     """按主键 id 更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
     try:
+        # P3-5f：skill 在 runtime 域；lib 不可用/同域进程时回落原 SQL
+        from src.kernel.domain_read import runtime_lib as _rt_lib_sch
+        from src.kernel import cross_write as _xw_sch
+        _sch_n: dict = {}
+        _sch_done = False
+        _rt_sch = _rt_lib_sch(foreign_only=True)
+        if _rt_sch is not None:
+            _rt_sch_ok = _rt_sch
+
+            def _apply_sch() -> None:
+                _sch_n["n"] = _rt_sch_ok.update_skill_content(int(skill_id), content_hash, file_path)
+
+            _sch_done = _xw_sch.submit_if_lib(
+                _rt_sch_ok, "runtime", "skill_content_update",
+                f"skill-content:{skill_id}:{(content_hash or '')[:12]}",
+                {"skill_id": int(skill_id), "content_hash": content_hash, "file_path": file_path},
+                _apply_sch, log)
+        if _sch_done:
+            return int(_sch_n.get("n") or 0) > 0
         with db_lock:
             c = db.cursor()
             if file_path:
@@ -1407,14 +1426,59 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                     (skill_name, owner))
             row = c.fetchone()
             if row:
-                c.execute(
-                    "UPDATE skill SET file_path=?, display_name=?, "
-                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, "
-                    "content_hash=?, updated_at=datetime('now') WHERE id=?",
-                    (object_key, skill_name, agent_type or "", description or "",
-                     category_id, created_by or "", content_hash or "", row[0]))
+                # P3-5f：skill 在 runtime 域
+                from src.kernel.domain_read import runtime_lib as _rt_lib_uso
+                from src.kernel import cross_write as _xw_uso
+                _uso_done = False
+                _rt_uso = _rt_lib_uso(foreign_only=True)
+                if _rt_uso is not None:
+                    _rt_uso_ok = _rt_uso
+                    _uso_done = _xw_uso.submit_if_lib(
+                        _rt_uso_ok, "runtime", "skill_obs_update",
+                        f"skill-obs:{row[0]}:{(content_hash or '')[:12]}",
+                        {"skill_id": int(row[0]), "object_key": object_key,
+                         "display_name": skill_name, "agent_type": agent_type or "",
+                         "description": description or "", "category_id": category_id,
+                         "updated_by": created_by or "", "content_hash": content_hash or ""},
+                        lambda: _rt_uso_ok.update_skill_obs(
+                            int(row[0]), object_key, skill_name, agent_type or "",
+                            description or "", category_id, created_by or "",
+                            content_hash or ""), log)
+                if not _uso_done:
+                    c.execute(
+                        "UPDATE skill SET file_path=?, display_name=?, "
+                        "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, "
+                        "content_hash=?, updated_at=datetime('now') WHERE id=?",
+                        (object_key, skill_name, agent_type or "", description or "",
+                         category_id, created_by or "", content_hash or "", row[0]))
                 db.commit()
                 return int(row[0])
+            # P3-5f：skill 在 runtime 域（新建行）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_usi
+            from src.kernel import cross_write as _xw_usi
+            _usi_out: dict = {}
+            _usi_done = False
+            _rt_usi = _rt_lib_usi(foreign_only=True)
+            if _rt_usi is not None:
+                _rt_usi_ok = _rt_usi
+
+                def _apply_usi() -> None:
+                    _usi_out["id"] = _rt_usi_ok.insert_skill(
+                        skill_name, skill_name, description or "", agent_type or "",
+                        object_key, scope, owner, created_by or "", created_by or "",
+                        category_id, content_hash or "")
+
+                _usi_done = _xw_usi.submit_if_lib(
+                    _rt_usi_ok, "runtime", "skill_obs_insert",
+                    f"skill-obs-new:{skill_name}:{scope}:{owner}:{(content_hash or '')[:12]}",
+                    {"skill_name": skill_name, "description": description or "",
+                     "agent_type": agent_type or "", "file_path": object_key, "scope": scope,
+                     "owner_id": owner, "created_by": created_by or "",
+                     "category_id": category_id, "content_hash": content_hash or ""},
+                    _apply_usi, log)
+            if _usi_done:
+                db.commit()
+                return int(_usi_out.get("id") or 0)
             cur = c.execute(
                 "INSERT INTO skill (skill_name, display_name, description, agent_type, "
                 "file_path, scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
@@ -1435,12 +1499,29 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
         with db_lock:
             c = db.cursor()
             cb = created_by or str(user_id)
-            if scope == "repo":
-                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'repo',?,?,?)",
-                          (skill_name, skill_name, description, agent_type, skill_name, owner_id or str(user_id), cb, cb))
-            else:
-                c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'user',?,?,?)",
-                          (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
+            # P3-5f：skill 在 runtime 域（INSERT IGNORE 幂等）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_csk
+            from src.kernel import cross_write as _xw_csk
+            _csk_done = False
+            _csk_owner = (owner_id or str(user_id)) if scope == "repo" else str(user_id)
+            _rt_csk = _rt_lib_csk(foreign_only=True)
+            if _rt_csk is not None:
+                _rt_csk_ok = _rt_csk
+                _csk_done = _xw_csk.submit_if_lib(
+                    _rt_csk_ok, "runtime", "skill_row_create",
+                    f"skill-create:{skill_name}:{scope}:{_csk_owner}",
+                    {"skill_name": skill_name, "description": description,
+                     "agent_type": agent_type, "scope": scope, "owner_id": _csk_owner,
+                     "created_by": cb},
+                    lambda: _rt_csk_ok.create_skill_row(skill_name, description, agent_type,
+                                                        scope, _csk_owner, cb), log)
+            if not _csk_done:
+                if scope == "repo":
+                    c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'repo',?,?,?)",
+                              (skill_name, skill_name, description, agent_type, skill_name, owner_id or str(user_id), cb, cb))
+                else:
+                    c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'user',?,?,?)",
+                              (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
             db.commit()
             if scope == "repo":
                 ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
@@ -1455,14 +1536,35 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
     try:
         with db_lock:
             c = db.cursor()
-            if scope == "repo":
-                c.execute("DELETE FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
-                          (skill_name, owner_id or str(user_id)))
+            # P3-5f：skill 在 runtime 域
+            from src.kernel.domain_read import runtime_lib as _rt_lib_dsk
+            from src.kernel import cross_write as _xw_dsk
+            _dsk_n: dict = {}
+            _dsk_done = False
+            _dsk_owner = (owner_id or str(user_id)) if scope == "repo" else str(user_id)
+            _rt_dsk = _rt_lib_dsk(foreign_only=True)
+            if _rt_dsk is not None:
+                _rt_dsk_ok = _rt_dsk
+
+                def _apply_dsk() -> None:
+                    _dsk_n["n"] = _rt_dsk_ok.delete_skill_row(skill_name, scope, _dsk_owner)
+
+                _dsk_done = _xw_dsk.submit_if_lib(
+                    _rt_dsk_ok, "runtime", "skill_row_delete",
+                    f"skill-del:{skill_name}:{scope}:{_dsk_owner}",
+                    {"skill_name": skill_name, "scope": scope, "owner_id": _dsk_owner},
+                    _apply_dsk, log)
+            if _dsk_done:
+                deleted = int(_dsk_n.get("n") or 0) > 0
             else:
-                c.execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
-                          (skill_name, str(user_id)))
+                if scope == "repo":
+                    c.execute("DELETE FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
+                              (skill_name, owner_id or str(user_id)))
+                else:
+                    c.execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
+                              (skill_name, str(user_id)))
+                deleted = c.rowcount > 0
             db.commit()
-            deleted = c.rowcount > 0
             # 删除技能目录
             import shutil
             if scope == "repo":
@@ -4753,17 +4855,34 @@ def toggle_skill_like(user_id: int, skill_id: int) -> tuple[bool, int]:
     """
     with db_lock:
         c = db.cursor()
+
+        def _bump_like(delta: int) -> None:
+            """P3-5f：like_count 在 runtime 域（skill_likes 仍是本域，保持本地）。"""
+            from src.kernel.domain_read import runtime_lib as _rt_lib_lk
+            from src.kernel import cross_write as _xw_lk
+            _rt_lk = _rt_lib_lk(foreign_only=True)
+            if _rt_lk is not None:
+                _rt_lk_ok = _rt_lk
+                if _xw_lk.submit_if_lib(
+                        _rt_lk_ok, "runtime", "skill_like_bump",
+                        f"skill-like:{skill_id}:{delta:+d}",
+                        {"skill_id": int(skill_id), "delta": int(delta)},
+                        lambda: _rt_lk_ok.adjust_skill_like_count(int(skill_id), int(delta)), log):
+                    return
+            c.execute("UPDATE skill SET like_count=like_count" + ("+1" if delta > 0 else "-1")
+                      + " WHERE id=?", (skill_id,))
+
         c.execute("SELECT 1 FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
         if c.fetchone():
             c.execute("DELETE FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
-            c.execute("UPDATE skill SET like_count=like_count-1 WHERE id=?", (skill_id,))
+            _bump_like(-1)
             db.commit()
             c.execute("SELECT like_count FROM skill WHERE id=?", (skill_id,))
             row = c.fetchone()
             return (False, row[0] if row else 0)
         else:
             c.execute("INSERT INTO skill_likes (user_id, skill_id) VALUES (?, ?)", (user_id, skill_id))
-            c.execute("UPDATE skill SET like_count=like_count+1 WHERE id=?", (skill_id,))
+            _bump_like(+1)
             db.commit()
             c.execute("SELECT like_count FROM skill WHERE id=?", (skill_id,))
             row = c.fetchone()

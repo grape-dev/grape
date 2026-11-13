@@ -667,6 +667,81 @@ def delete_event_action_filter(rule_id: int) -> int:
         return int(c.rowcount or 0)
 
 
+# ---------- 技能写原语（P3-5f：mgmt 进程写 runtime 基表 skill） ----------
+
+def update_skill_content(skill_id: int, content_hash: str, file_path: str = "") -> int:
+    """更新技能内容哈希（惰性：file_path 为空则只改 hash）。"""
+    with db_registry.cursor("runtime") as c:
+        if file_path:
+            c.execute("UPDATE skill SET content_hash=%s, file_path=%s WHERE id=%s",
+                      (content_hash, file_path, int(skill_id)))
+        else:
+            c.execute("UPDATE skill SET content_hash=%s WHERE id=%s",
+                      (content_hash, int(skill_id)))
+        return int(c.rowcount or 0)
+
+
+def update_skill_obs(skill_id: int, object_key: str, display_name: str, agent_type: str,
+                     description: str, category_id: str, updated_by: str,
+                     content_hash: str) -> int:
+    """OBS 同步后更新技能元数据（与原 SQL 同列集，updated_at=NOW()）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE skill SET file_path=%s, display_name=%s, agent_type=%s, "
+                  "description=%s, category_id=%s, updated_by=%s, is_active=1, "
+                  "content_hash=%s, updated_at=NOW() WHERE id=%s",
+                  (object_key, display_name, agent_type, description, category_id,
+                   updated_by, content_hash, int(skill_id)))
+        return int(c.rowcount or 0)
+
+
+def insert_skill(skill_name: str, display_name: str, description: str, agent_type: str,
+                 file_path: str, scope: str, owner_id: str, created_by: str,
+                 updated_by: str, category_id: str = "", content_hash: str = "") -> int:
+    """新建技能行（OBS 路径），返回新行 id。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, "
+                  "file_path, scope, owner_id, created_by, updated_by, is_active, "
+                  "category_id, content_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)",
+                  (skill_name, display_name, description, agent_type, file_path, scope,
+                   owner_id, created_by, updated_by, category_id, content_hash))
+        return int(c.lastrowid or 0)
+
+
+def create_skill_row(skill_name: str, description: str, agent_type: str, scope: str,
+                     owner_id: str, created_by: str) -> int:
+    """幂等建技能行（skill_path=skill_name），返回 1=新建 / 0=已存在。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("INSERT IGNORE INTO skill (skill_name, display_name, description, agent_type, "
+                  "skill_path, scope, owner_id, created_by, updated_by) "
+                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (skill_name, skill_name, description, agent_type, skill_name, scope,
+                   owner_id, created_by, created_by))
+        return int(c.rowcount or 0)
+
+
+def delete_skill_row(skill_name: str, scope: str, owner_id: str) -> int:
+    """按 (skill_name, scope, owner_id) 删除技能行。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("DELETE FROM skill WHERE skill_name=%s AND scope=%s AND owner_id=%s",
+                  (skill_name, scope, owner_id))
+        return int(c.rowcount or 0)
+
+
+def delete_skill_by_id(skill_id: int) -> int:
+    """按主键删除技能行。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("DELETE FROM skill WHERE id=%s", (int(skill_id),))
+        return int(c.rowcount or 0)
+
+
+def adjust_skill_like_count(skill_id: int, delta: int) -> int:
+    """点赞计数增减（delta 正负决定 +1/-1，原子自增避免读改写丢更新）。"""
+    op = "+" if int(delta) >= 0 else "-"
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"UPDATE skill SET like_count=like_count{op}1 WHERE id=%s", (int(skill_id),))
+        return int(c.rowcount or 0)
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:

@@ -851,10 +851,23 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
             pass
 
     # 物理删除（按主键 id）
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
-        db.commit()
+    # P3-5f：skill 在 runtime 域；lib 不可用回落本地 SQL
+    from src.kernel.config import log as _log_dsk
+    from src.kernel.domain_read import runtime_lib as _rt_lib_dsk
+    from src.kernel import cross_write as _xw_dsk
+    _dsk_done = False
+    _rt_dsk = _rt_lib_dsk(foreign_only=True)
+    if _rt_dsk is not None:
+        _rt_dsk_ok = _rt_dsk
+        _dsk_done = _xw_dsk.submit_if_lib(
+            _rt_dsk_ok, "runtime", "skill_delete_by_id", f"skill-del-id:{skill_id}",
+            {"skill_id": int(skill_id)},
+            lambda: _rt_dsk_ok.delete_skill_by_id(int(skill_id)), _log_dsk)
+    if not _dsk_done:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
+            db.commit()
 
     if storage is None:
         from src.kernel.config import log
