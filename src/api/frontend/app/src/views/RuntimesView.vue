@@ -210,7 +210,19 @@
                 class="rtv-vstale"
                 :title="t('label.worker_version_stale_hint')"
                 >⬆ {{ t('label.worker_version_stale') }}</span
+              ><span
+                v-if="rt.spawn_fail_degraded"
+                class="rtv-degraded"
+                :title="t('label.spawn_fail_degraded_hint')"
+                >⚠ {{ t('label.spawn_fail_degraded') }}</span
+              ><button
+                v-if="rt.detached_from_scenes || rt.spawn_fail_degraded"
+                class="rtv-readd"
+                :title="t('label.readd_hint')"
+                @click.stop="readdEngine(rt)"
               >
+                ↩ {{ t('label.readd') }}
+              </button>
               <span :class="['rtv-sbadge', scopeKey(rt)]">{{ scopeBadgeLabel(rt) }}</span>
               <span class="rtv-ename">
                 <span class="rtv-ename-b">{{ rt.alias || engineDisplayName(rt) || '—' }}</span>
@@ -1387,6 +1399,26 @@ function loadRuntimesData() {
       loaded.value = true
     })
 }
+// Issue #2133：场景解绑 / spawn_failed 降级的兜底入口——按解绑记录重建场景绑定
+// 并做任务绑定对账（幂等，可重复点）。正式界面不暴露运维面板，只给这一颗按钮。
+function readdEngine(rt) {
+  G.app.showConfirm(t('label.readd_confirm'), function () {
+    G.API.post('/settings/agent-runtimes/' + rt.id + '/readd' + repoQs(), {})
+      .then(function (d) {
+        app().showToast(
+          t('label.readd_done', {
+            b: (d.bindings || []).length,
+            t: (d.terminalized || []).length + (d.released || []).length,
+          })
+        )
+        loadRuntimesData()
+      })
+      .catch(function (e) {
+        app().showToast((e && e.message) || t('label.readd_failed'))
+      })
+  })
+}
+
 function loadRuntimeDevices() {
   let qs = '?page=' + devPage.value + '&page_size=' + PAGE_SIZE
   if (filterScope.value) qs += '&scope=' + encodeURIComponent(filterScope.value)
@@ -2472,6 +2504,37 @@ onBeforeUnmount(function () {
   margin-left: 4px;
   cursor: help;
   flex-shrink: 0;
+}
+.rtv-degraded {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #9a6100;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.rtv-readd {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--a);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rtv-readd:hover {
+  filter: brightness(1.08);
 }
 .rtv-vstale {
   font-size: 10px;

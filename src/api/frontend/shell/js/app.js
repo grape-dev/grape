@@ -1111,26 +1111,46 @@ function loadAgentTypes() {
     var name = (_u.nickname || _u.username || 'User').split('@')[0];
     var avatar = (name || 'U')[0].toUpperCase();
 
-    // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
-    API.get('/auth/providers').then(function(d) {
-      var providers = d.providers || [];
+    // D102-K：引导页=仓库平台绑定，数据源必须是仓库平台卡目录
+    //（/settings/vcs/platforms）——此前误用 /auth/providers（登录渠道列表），
+    // 华为等纯登录渠道混进"绑定代码平台"卡片。
+    // 并拉 /auth/providers 仅取各平台 OAuth 配置态（登录渠道轴的正确用途）。
+    Promise.all([
+      API.get('/settings/vcs/platforms'),
+      API.get('/auth/providers').catch(function() { return { providers: [] }; })
+    ]).then(function(results) {
+      var _oauthCfg = {};
+      ((results[1] && results[1].providers) || []).forEach(function(p) {
+        _oauthCfg[p.provider] = !!p.configured;
+      });
+      var providers = ((results[0] && results[0].platforms) || []).map(function(p) {
+        return {provider: p.provider, name: p.name, brand_color: p.brand_color || '',
+                pat_create_url: p.pat_create_url,
+                configured: !!_oauthCfg[p.provider]};
+      });
       // #535 修复：写入共享缓存 _accountProvidersData——引导页 → bindProvider →
       // _accountBindProvider 读同一缓存判断 OAuth tab；此前只有账号安全 tab 填充它，
       // 引导路径缓存为 null 被保守猜成「未配置」（配合 account.js 的 fetch 兜底双保险）
       if (typeof _accountProvidersData !== 'undefined') _accountProvidersData = d;
       _renderOnboardingShell(providers, isZh, name, avatar);
     }).catch(function() {
-      // Fallback: show both platforms
-      _renderOnboardingShell([
-        {provider: 'gitcode', name: 'GitCode', brand_color: '#F54A36'},
-        {provider: 'github', name: 'GitHub', brand_color: '#1F2328'}
-      ], isZh, name, avatar);
+      // 目录接口失败 → 空壳渲染（不做平台名兜底：硬编码双平台会让纯 PAT 部署
+      // 或新接入平台出现错误候选）
+      _renderOnboardingShell([], isZh, name, avatar);
     });
   }
 
   function _renderOnboardingShell(providers, isZh, name, avatar) {
     var d = document.getElementById('pageContent');
     if (!d) return;
+
+    // D102-O 续：引导壳是全屏独立页，不嵌在工作区布局里（幂等，多入口行为归一）
+    var _sb = document.getElementById('sidebar');
+    if (_sb) _sb.style.display = 'none';
+    var _tbEl = document.getElementById('tb');
+    if (_tbEl) _tbEl.style.display = 'none';
+    var _mv = document.getElementById('mainView');
+    if (_mv) { _mv.style.position = 'fixed'; _mv.style.inset = '0'; }
 
     // ── 平台绑定卡片 ──
     var platformCards = '';
