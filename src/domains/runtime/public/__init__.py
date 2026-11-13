@@ -814,6 +814,40 @@ def clear_repo_credential(repo_key: str, cred_type: str, updated_at: str) -> int
         return int(c.rowcount or 0)
 
 
+def ensure_device_credential(hostname: str, token_hash: str, last_ip: str) -> dict[str, Any]:
+    """本机指标上报的 device 凭据行（scope='global'）幂等登记。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id FROM runtime_credentials WHERE device_name=%s AND scope='global' LIMIT 1",
+                  (hostname,))
+        row = c.fetchone()
+        if row:
+            return {"action": "exists", "id": int(row[0])}
+        try:
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
+                      "VALUES (%s,%s,%s,'global','active',%s)",
+                      (token_hash, hostname, hostname, last_ip))
+            return {"action": "inserted", "id": int(c.lastrowid or 0)}
+        except Exception as exc:  # noqa: BLE001
+            if "UNIQUE" in str(exc) or "1062" in str(exc) or "Duplicate" in str(exc):
+                return {"action": "duplicate", "id": 0}
+            raise
+
+
+def touch_credential_metrics(hostname: str, last_seen_at: str, last_ip: str = "",
+                             cpu_percent: float = 0, memory_percent: float = 0,
+                             disk_percent: float = 0, tmp_percent: float = 0,
+                             bandwidth_percent: float = 0, bandwidth_mbps: float = 0,
+                             load_avg: str = "") -> int:
+    """刷新 device 凭据的在线指标（15s 心跳；同值重放无副作用）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE runtime_credentials SET last_seen_at=%s, last_ip=%s, cpu_percent=%s, "
+                  "memory_percent=%s, disk_percent=%s, tmp_percent=%s, bandwidth_percent=%s, "
+                  "bandwidth_mbps=%s, load_avg=%s WHERE device_name=%s AND scope='global'",
+                  (last_seen_at, last_ip, cpu_percent, memory_percent, disk_percent, tmp_percent,
+                   bandwidth_percent, bandwidth_mbps, load_avg, hostname))
+        return int(c.rowcount or 0)
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -844,4 +878,5 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "delete_skill_row", "delete_skill_by_id", "adjust_skill_like_count",
            "insert_runtime_credential", "rename_runtime_credential",
            "set_runtime_credential_scope", "delete_runtime_credential",
-           "upsert_repo_credential", "clear_repo_credential"]
+           "upsert_repo_credential", "clear_repo_credential",
+           "ensure_device_credential", "touch_credential_metrics"]
