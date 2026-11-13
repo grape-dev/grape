@@ -373,6 +373,13 @@
                   <span class="isk-muted">{{ tk.issue_number ? '#' + tk.issue_number : '' }}</span>
                   <span v-if="tk.is_pr_event" class="isk-pr-pill">PR</span>
                   <span v-else class="isk-stage" :style="stageStyle(tk)">{{ stageLabel(tk) }}</span>
+                  <span
+                    v-if="takeoverOf(tk)"
+                    class="isk-tko-pill"
+                    :title="takeoverTitle(tk)"
+                    @click.stop="abortTakeover(tk)"
+                    >{{ t('takeover.active') }}</span
+                  >
                 </div>
                 <p class="isk-bcard-title">{{ tk.title || '' }}</p>
                 <div class="isk-bcard-meta">
@@ -452,6 +459,13 @@
         <div class="isk-dp-head">
           <button class="tsk-btn tsk-btn-ghost" @click="backFromDetail">{{ backLabel }}</button>
           <h1 class="isk-dp-title">{{ detailView.title || '' }}</h1>
+          <span
+            v-if="takeoverOf(detailView)"
+            class="isk-tko-pill"
+            :title="takeoverTitle(detailView)"
+            @click="abortTakeover(detailView)"
+            >{{ t('takeover.active') }}</span
+          >
         </div>
         <div class="isk-dp-actions">
           <button class="tsk-btn tsk-btn-ghost" @click="openIssueLink(detailView)">
@@ -1320,6 +1334,53 @@ function boardFetch(key, opts) {
       loadError.value = t('load_failed', { msg: e.message })
       loaded.value = true
     })
+}
+// ── 接管会话（Issue #2346 的前端状态面）──
+// 正式界面不建运维面板：任务卡/详情只打一枚「接管中」药丸（谁、在哪台机器），
+// 点它就是结束接管（abort；只停本节点，不重派）。
+const takeovers = ref({})
+function loadTakeovers() {
+  const repo = currentRepo()
+  const key = repo && (repo.repoKey || (repo.owner && repo.name ? repo.owner + '/' + repo.name : ''))
+  if (!key) {
+    takeovers.value = {}
+    return
+  }
+  G.API.get('/takeover/sessions?repo_key=' + encodeURIComponent(key) + '&status=active&limit=50')
+    .then(function (d) {
+      const map = {}
+      ;((d && d.sessions) || []).forEach(function (s) {
+        const k = String(s.issue_id || '').replace('#', '')
+        if (k) map[k] = s
+      })
+      takeovers.value = map
+    })
+    .catch(function () {
+      takeovers.value = {}
+    })
+}
+function takeoverOf(tk) {
+  if (!tk || !tk.issue_number) return null
+  return takeovers.value[String(tk.issue_number)] || null
+}
+function takeoverTitle(tk) {
+  const s = takeoverOf(tk)
+  if (!s) return ''
+  return [s.username, s.host, s.agent_type].filter(Boolean).join(' · ')
+}
+function abortTakeover(tk) {
+  const s = takeoverOf(tk)
+  if (!s) return
+  G.app.showConfirm(t('takeover.abort_confirm'), function () {
+    G.API.post('/takeover/sessions/' + s.id + '/abort', { reason: 'aborted from task board' })
+      .then(function () {
+        G.app.showToast(t('takeover.abort_done'))
+        loadTakeovers()
+      })
+      .catch(function (e) {
+        G.app.showToast((e && e.message) || t('takeover.abort_failed'))
+      })
+  })
 }
 function loadBoardAll(opts) {
   return Promise.all(Object.keys(BOARD_CURSOR_STATUSES).map((k) => boardFetch(k, opts)))
@@ -2938,6 +2999,7 @@ onMounted(function () {
   }
   G.window._pendingTaskDetailId = null
   loadTasks()
+  loadTakeovers()
   startPoll()
   loadDeployLink()
 })
@@ -3828,6 +3890,22 @@ onBeforeUnmount(function () {
   margin: 0 auto;
   flex: 1;
   overflow-y: auto;
+}
+.isk-tko-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #6d43c9;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.isk-tko-pill:hover {
+  filter: brightness(1.1);
 }
 .isk-dp-head {
   display: flex;

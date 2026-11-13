@@ -154,5 +154,11 @@
   "load_earlier_events": "加载更早的事件",
   "filter_options": {
     "created_by_me": "我创建的需求"
+  },
+  "takeover": {
+    "active": "接管中",
+    "abort_confirm": "结束这台接管？只会停当前节点，不会重新派发任务。",
+    "abort_done": "已结束接管",
+    "abort_failed": "结束接管失败"
   }
 }

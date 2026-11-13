@@ -154,5 +154,11 @@
   "load_earlier_events": "Load earlier events",
   "filter_options": {
     "created_by_me": "My Requirements"
+  },
+  "takeover": {
+    "active": "Hands-on",
+    "abort_confirm": "End this takeover? It only stops the current node and never re-dispatches the task.",
+    "abort_done": "Takeover ended",
+    "abort_failed": "Failed to end the takeover"
   }
 }
