@@ -1095,6 +1095,7 @@ _READ_QUERIES: dict[str, str] = {
         "SELECT 1 FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 "
         "AND (tag=%s OR tag='all') LIMIT 1"),
     "engine_tags_enabled": "SELECT tag FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 ORDER BY tag",
+    "events_a24eb5": "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result FROM events WHERE seq=%s",
     # issue 查 id（mgmt feedback 上下文）
     "issue_id_by_repo_number": "SELECT id FROM issue WHERE repo_key=%s AND issue_number=%s LIMIT 1",
     # 仓库 bot 凭据（mgmt 读；config_store 的 JOIN 拆分后也需要全量 rc 行）

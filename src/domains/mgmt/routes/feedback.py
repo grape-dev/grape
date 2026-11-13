@@ -101,11 +101,16 @@ def _collect_feedback_context(event_seq: int, user: dict):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
-                "FROM events WHERE seq=?",
-                (event_seq,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_a24eb5_f
+            _ru_lib_a24eb5 = _ru_lib_a24eb5_f(foreign_only=True)
+            if _ru_lib_a24eb5 is not None:
+                row = _ru_lib_a24eb5.read_one("events_a24eb5", (event_seq,))
+            else:
+                c.execute(
+                    "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
+                    "FROM events WHERE seq=?",
+                    (event_seq,))
+                row = c.fetchone()
         if not row:
             return None
         repo_key = row[1] or ''
