@@ -109,6 +109,8 @@ scripts/check-*-*.py
 !scripts/check-health-contract.py
 !scripts/check-destructive-ddl.py
 !scripts/check-openapi-endpoints.py
+# Issue #2462 A3：跨域读查询名闭包门禁（进入 check-all.sh，须入库）
+!scripts/check_lib_query_names.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh
