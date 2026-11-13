@@ -29,6 +29,11 @@ class TestA2AQueue:
                 c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:owner/repo'")
             except Exception:
                 pass
+            # a2a-input-validation-fix 之后：A2A 还要求 issue 在目标仓真实存在
+            try:
+                c.execute("DELETE FROM issue WHERE repo_key='gitcode:owner/repo'")
+            except Exception:
+                pass
             db.commit()
 
     def _seed_managed_repo(self):
@@ -39,6 +44,12 @@ class TestA2AQueue:
                 c.execute(
                     "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
                     "VALUES ('gitcode:owner/repo', 'owner', 'repo', 'owner/repo')")
+                # A2A 入口校验 issue 必须在目标仓存在（跨仓转交需先建单），种子同步补一条
+                c.execute(
+                    "INSERT INTO issue (user_id, repo_key, issue_number, title, status, stage, "
+                    "owner_agent, scene_id, assignee) "
+                    "VALUES (1, 'gitcode:owner/repo', 5, 'A2A 队列测试', 'processing', 'coding', "
+                    "'coding', 'default', '')")
                 db.commit()
             except Exception:
                 pass
