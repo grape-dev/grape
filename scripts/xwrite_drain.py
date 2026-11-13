@@ -46,6 +46,14 @@ def _handlers() -> dict:
                 require_active=True)
             out["scene_nodes_update"] = lambda p: mg.set_scene_nodes(
                 p["nodes_json"], row_id=int(p["rid"]))
+            # P3-5a：managed_repos（runtime 进程写入 mgmt 基表）
+            out["repo_field_update"] = lambda p: mg.set_repo_fields(
+                p["repo_key"], dict(p.get("fields") or {}))
+            out["repo_ensure"] = lambda p: mg.ensure_repo_row(
+                p["repo_key"],
+                (p.get("fields") or {}).get("repo_owner", ""),
+                (p.get("fields") or {}).get("repo_name", ""),
+                (p.get("fields") or {}).get("full_name", ""))
     except Exception:  # noqa: BLE001
         pass
     return out

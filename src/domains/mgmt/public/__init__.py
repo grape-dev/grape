@@ -103,6 +103,42 @@ def get_repo_field(repo_key: str, field: str) -> Any:
     return row[0] if row else None
 
 
+# ---------- 写原语（跨域写；调用方仍需 cross_write.submit 做幂等/补偿） ----------
+
+# 允许外部域（runtime/insight 进程）写入的 managed_repos 列。
+# 只登记实际接线用到的列；新增列必须先在此登记再接线（避免 lib 变成任意写入口）。
+_REPO_WRITABLE = {"deploy_url", "bot_token_status"}
+
+
+def set_repo_fields(repo_key: str, fields: dict[str, Any]) -> int:
+    """更新 managed_repos 指定列，返回变更行数（幂等：值相同则 0 行）。
+
+    - 只允许 `_REPO_WRITABLE` 内的列，其余列直接 ValueError（不静默忽略）；
+    - repo 不存在时返回 0 —— 与调用方原 `UPDATE ... WHERE repo_key=?` 的 rowcount 语义一致。
+    """
+    unknown = [k for k in fields if k not in _REPO_WRITABLE]
+    if unknown:
+        raise ValueError(f"column(s) {unknown} not writable through mgmt lib")
+    cols = [k for k in fields if k in _REPO_WRITABLE]
+    if not cols:
+        return 0
+    sets = ", ".join(f"{c}=%s" for c in cols)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"UPDATE managed_repos SET {sets} WHERE repo_key=%s",
+                  tuple(fields[c] for c in cols) + (repo_key,))
+        return int(c.rowcount or 0)
+
+
+def ensure_repo_row(repo_key: str, repo_owner: str, repo_name: str, full_name: str = "") -> int:
+    """幂等补录 managed_repos 最小行（已存在则不动），返回 1=新建 / 0=已存在。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute(
+            "INSERT IGNORE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
+            "VALUES (%s, %s, %s, %s)",
+            (repo_key, repo_owner, repo_name, full_name or f"{repo_owner}/{repo_name}"))
+        return int(c.rowcount or 0)
+
+
 def get_repo_org_id(repo_key: str) -> Any:
     """仓库所属 org（managed_repos 无 id 列，按 repo_key 唯一键取）。"""
     row = fetch_one("managed_repos", ["org_id"], "repo_key=%s", (repo_key,), "repo_key")

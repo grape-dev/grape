@@ -1644,6 +1644,31 @@ def _a2a_register_repo(repo_key: str) -> bool:
     """Issue #671：回退放行后幂等补录 managed_repos（最小行，INSERT OR IGNORE，不覆盖既有配置）。"""
     from src.kernel.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
+    # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_a2a
+    _mg_a2a = _mgmt_lib_a2a()
+    if _mg_a2a is not None:
+        try:
+            from src.kernel import cross_write as _xw_a2a
+            _full = f"{_owner}/{_name}"
+            _out_a2a: dict = {}
+
+            def _apply_a2a() -> None:
+                _out_a2a["changed"] = _mg_a2a.ensure_repo_row(repo_key, _owner, _name, _full)
+
+            _res_a2a = _xw_a2a.submit(
+                "mgmt", "repo_ensure", f"repo-ensure:{repo_key}",
+                {"repo_key": repo_key,
+                 "fields": {"repo_owner": _owner, "repo_name": _name, "full_name": _full}},
+                _apply_a2a)
+            if _res_a2a.get("status") == "failed":
+                log.warning(f"A2A: fallback registration queued for retry for {repo_key}: "
+                            f"{_res_a2a.get('error')}")
+                return False
+            log.info(f"A2A: fallback registered managed_repos row: {repo_key}")
+            return True
+        except Exception as _e:
+            log.warning(f"A2A: fallback registration via lib failed, fallback to local SQL: {_e}")
     try:
         from src.kernel.session_manager import db as _reg_db, db_lock as _reg_lock
         with _reg_lock:

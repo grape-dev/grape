@@ -262,6 +262,28 @@ def _verify_single_repo_token(repo_key: str, provider: str):
 
 def _set_repo_bot_token_status(repo_key: str, status: str):
     """更新 managed_repos.bot_token_status。"""
+    # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_bts
+    _mg_bts = _mgmt_lib_bts()
+    if _mg_bts is not None:
+        try:
+            from src.kernel import cross_write as _xw_bts
+            _out_bts: dict = {}
+
+            def _apply_bts() -> None:
+                _out_bts["changed"] = _mg_bts.set_repo_fields(
+                    repo_key, {"bot_token_status": status})
+
+            _res_bts = _xw_bts.submit(
+                "mgmt", "repo_field_update",
+                f"repo-bot-token-status:{repo_key}:{status or 'ok'}",
+                {"repo_key": repo_key, "fields": {"bot_token_status": status}}, _apply_bts)
+            if _res_bts.get("status") == "failed":
+                log.warning(f"_set_repo_bot_token_status: queued for retry ({repo_key}): "
+                            f"{_res_bts.get('error')}")
+            return
+        except Exception as _e:
+            log.warning(f"_set_repo_bot_token_status: lib path failed, fallback to local SQL: {_e}")
     from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:

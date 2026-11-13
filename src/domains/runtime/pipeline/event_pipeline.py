@@ -4349,6 +4349,32 @@ def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
     url = _extract_deploy_url(result_text)
     if not url:
         return ""
+    # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_sru
+    _mg_sru = _mgmt_lib_sru()
+    if _mg_sru is not None:
+        try:
+            import hashlib as _hl_sru
+            from src.kernel import cross_write as _xw_sru
+            _out_sru: dict = {}
+
+            def _apply_sru() -> None:
+                _out_sru["changed"] = _mg_sru.set_repo_fields(repo_key, {"deploy_url": url})
+
+            _key_sru = (f"repo-deploy-url:{repo_key}:"
+                        f"{_hl_sru.sha1(url.encode('utf-8')).hexdigest()[:12]}")
+            _res_sru = _xw_sru.submit(
+                "mgmt", "repo_field_update", _key_sru,
+                {"repo_key": repo_key, "fields": {"deploy_url": url}}, _apply_sru)
+            if _res_sru.get("status") == "failed":
+                log.warning(f"SRE deploy_url register queued for retry: {_res_sru.get('error')}")
+                return ""
+            if int(_out_sru.get("changed") or 0) > 0:
+                log.info(f"SRE deploy_url auto-registered: {url} for {repo_key}")
+                return url
+            return ""
+        except Exception as _e:
+            log.warning(f"SRE deploy_url register via lib failed, fallback to local SQL: {_e}")
     # 登记（repo 不存在时 rowcount=0，不写库）
     try:
         with db_lock:
