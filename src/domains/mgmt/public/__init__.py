@@ -93,6 +93,42 @@ def list_all_user_ids() -> list[str]:
     return sorted({r[0] for r in rows if r[0]})
 
 
+def find_repo_key_in(candidates: list[str]) -> str | None:
+    """在候选 repo_key 中找出库里实际存在的那个（跨平台前缀兼容）。"""
+    cands = [c for c in (candidates or []) if c]
+    if not cands:
+        return None
+    ph = ", ".join(["%s"] * len(cands))
+    rows = fetch_rows("managed_repos", ["repo_key"], f"repo_key IN ({ph})", tuple(cands), "", 1)
+    return rows[0][0] if rows else None
+
+
+def list_alert_user_ids(limit: int = 200) -> list[int]:
+    """告警收件人：有 feishu_open_id 且 user_id 有效的用户（去重、截断）。"""
+    rows = fetch_rows(
+        "unified_user_mapping", ["user_id"],
+        "feishu_open_id<>'' AND user_id IS NOT NULL AND user_id<>'' AND user_id<>'0'",
+        (), "", limit,
+    )
+    out: list[int] = []
+    for r in rows:
+        try:
+            out.append(int(r[0]))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def get_user_id_by_mapping_column(column: str, value: str) -> str | None:
+    """按映射列（gitcode_user / github_login / feishu_open_id …）反查 user_id。"""
+    row = fetch_one(
+        "unified_user_mapping", ["user_id"],
+        f"{column}=%s AND {column}<>'' AND user_id<>'' AND user_id<>'0'",
+        (value,),
+    )
+    return str(row[0]) if row and row[0] else None
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("mgmt") as c:
@@ -104,4 +140,5 @@ def health() -> dict[str, Any]:
 
 
 __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
-           "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids", "health"]
+           "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
+           "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column", "health"]

@@ -1603,11 +1603,17 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 查 DB 中实际使用的 repo_key（可能是 github: 前缀）
     _actual_repo_key = repo_key
     try:
-        with db_lock:
-            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
-            _row = c.fetchone()
-            if _row:
-                _actual_repo_key = _row[0]
+        from src.kernel.domain_read import mgmt_lib
+        _mg = mgmt_lib()
+        _hit = _mg.find_repo_key_in(list(_repo_keys)) if _mg is not None else None
+        if _hit is not None:
+            _actual_repo_key = _hit
+        else:
+            with db_lock:
+                c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
+                _row = c.fetchone()
+                if _row:
+                    _actual_repo_key = _row[0]
     except Exception:
         pass
     try:

@@ -69,6 +69,10 @@ def resolve_open_id_by_user(user_id: str) -> str:
     if not user_id:
         return ""
     from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_read import mgmt_lib
+    _mg = mgmt_lib()
+    if _mg is not None:
+        return _mg.get_feishu_open_id(user_id) or ""
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -102,6 +106,11 @@ def resolve_open_id_for_login(gitcode_user: str, repo_key: str = "") -> str:
     if not _col:
         return ""
     from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_cd
+    _mg2 = _mgmt_lib_cd()
+    if _mg2 is not None:
+        _hit = _mg2.fetch_one("unified_user_mapping", ["feishu_open_id"], f"{_col}=%s AND feishu_open_id<>''", (gitcode_user,), "")
+        return _hit[0] if _hit and _hit[0] else ""
     with db_lock:
         c = db.cursor()
         try:
@@ -119,6 +128,15 @@ def reverse_lookup_by_open_id(open_id: str) -> dict:
     if not open_id:
         return out
     from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_rev
+    _mg3 = _mgmt_lib_rev()
+    if _mg3 is not None:
+        _row = _mg3.fetch_one("unified_user_mapping", ["user_id", "gitcode_user", "feishu_name", "gitcode_nickname"], "feishu_open_id=%s", (open_id,))
+        if _row:
+            out["user_id"], out["gitcode_user"] = _row[0], _row[1]
+            out["feishu_name"] = _row[2] or ""
+            out["gitcode_nickname"] = _row[3] or ""
+        return out
     with db_lock:
         c = db.cursor()
         c.execute(
