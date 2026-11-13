@@ -288,11 +288,20 @@ def start_docker(dc: list[str]) -> None:
     ok(f"容器已启动（{' '.join(dc)}）")
 
     step("Docker：等待 /api/health")
-    if wait_health("http://localhost:8080/api/health", 180):
-        ok("健康检查通过：http://localhost:8080/api/health = 200")
+    # 两种布局都要兼容：arch 布局入口是 nginx(80)，main 布局是 8080
+    probed = 0
+    healthy = None
+    for url in ("http://localhost/api/health", "http://localhost:8080/api/health"):
+        budget = 180 if probed == 0 else 60
+        probed += 1
+        if wait_health(url, budget):
+            healthy = url
+            break
+    if healthy:
+        ok(f"健康检查通过：{healthy} = 200")
     else:
         warn(f"180 秒内未就绪。排障：{' '.join(dc)} logs --tail=50")
-    print(f"\n访问 http://localhost（80）或 http://localhost:8080   ·   停止：{' '.join(dc)} down   ·   清库：{' '.join(dc)} down -v（会删 grape-data 卷）")
+    print(f"\n访问 http://localhost（nginx，arch 布局）或 http://localhost:8080（单进程布局）   ·   停止：{' '.join(dc)} down   ·   清库：{' '.join(dc)} down -v（会删 grape-data 卷）")
 
 
 def main() -> None:

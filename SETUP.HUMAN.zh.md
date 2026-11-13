@@ -101,20 +101,22 @@ git config --global url."https://<你的镜像>/https://github.com/".insteadOf "
 
 本机没有 Python ≥ 3.10 时，脚本会自动切换到 PATH 里可用的新版解释器（`python3.11` / `python3.12` 等）；仍然找不到时会打印用 uv 装解释器的命令 —— 无需 root，也不动系统 Python。
 
-## Docker（可选）
+## Docker（可选 · arch 布局）
 
-用 `python quickstart.py --docker` 可让脚本自动生成 `JWT_SECRET` 并起容器。
+用 `python quickstart.py --docker` 可让脚本自动生成 `JWT_SECRET` 并起容器（脚本会自动定位 `deploy/docker-compose.yml`）。
 
 ```bash
 export JWT_SECRET=$(openssl rand -hex 32)
-# docker-compose.yml 声明了 ${JWT_SECRET:?JWT_SECRET required}，缺失时容器会立刻退出
-docker compose up -d
+# deploy/docker-compose.yml 声明了 ${JWT_SECRET:?JWT_SECRET required}，缺失时容器会立刻退出
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 **Docker 注意事项**
 
+- 编排与镜像都在 `deploy/` 下：`deploy/docker-compose.yml`（grape-server / event-server / worker-server / insight-server 四进程 + nginx）、`deploy/Dockerfile`
 - `JWT_SECRET` 缺失时容器立刻退出；本地试用也要先 export
-- WebUI 在 `http://<主机>/`（compose 映射 80:3000 与 8080:3000）；自检 `curl -fsS http://127.0.0.1:3000/api/health`
+- 入口是 nginx（80）：WebUI 与 API 都在 `http://<主机>/`；自检 `curl -fsS http://127.0.0.1/api/health`
+- 四进程端口：38080（Mgmt / 用户面 API · IM WS · 前端托管）、38081（Event / webhook · A2A）、38082（Worker / runtime 协议 · tasks · chat）、38083（Insight / 可观测与仪表盘）
 
 ## 首次登录与零配置体验
 

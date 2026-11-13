@@ -101,20 +101,22 @@ git config --global url."https://<your-mirror>/https://github.com/".insteadOf "h
 
 If the machine has no Python >= 3.10, the script automatically re-runs itself with a newer interpreter found on `PATH` (`python3.11` / `python3.12`, …); when none exists it prints the uv commands to install one — no root, no changes to the system Python.
 
-## Docker (optional)
+## Docker (optional, arch layout)
 
-`python quickstart.py --docker` lets the script generate `JWT_SECRET` and start the container.
+`python quickstart.py --docker` lets the script generate `JWT_SECRET` and start the containers (it locates `deploy/docker-compose.yml` automatically).
 
 ```bash
 export JWT_SECRET=$(openssl rand -hex 32)
-# docker-compose.yml declares ${JWT_SECRET:?JWT_SECRET required} — without it the container exits immediately
-docker compose up -d
+# deploy/docker-compose.yml declares ${JWT_SECRET:?JWT_SECRET required}; the containers exit immediately without it
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 **Docker notes**
 
-- The container exits immediately when `JWT_SECRET` is missing; export it even for a local trial
-- The WebUI is at `http://<host>/` (compose maps 80:3000 and 8080:3000); health check `curl -fsS http://127.0.0.1:3000/api/health`
+- Orchestration and image live under `deploy/`: `deploy/docker-compose.yml` (grape-server / event-server / worker-server / insight-server plus nginx) and `deploy/Dockerfile`
+- Without `JWT_SECRET` the containers exit immediately; export it even for a local trial
+- nginx (port 80) is the entry point: WebUI and API are both at `http://<host>/`; self-check `curl -fsS http://127.0.0.1/api/health`
+- Process ports: 38080 (Mgmt / user-facing API, IM WS, frontend), 38081 (Event / webhook, A2A), 38082 (Worker / runtime protocol, tasks, chat), 38083 (Insight / observability, dashboards)
 
 ## First sign-in and zero configuration
 
