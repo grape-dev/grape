@@ -382,6 +382,33 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
+def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds: int = 60,
+                        expected_token: str | None = None) -> bool:
+    """IM 渠道租约续约（CAS 语义，可重放）。
+
+    仅当 `lease_token` 为空或等于 `expected_token` 时才写入，避免抢掉别人的租约。
+    返回是否成功写入。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
+    stamp = now.isoformat()
+    if expected_token:
+        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
+               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), updated_at=%s "
+               "WHERE lease_key=%s AND (lease_token IS NULL OR lease_token=%s)")
+        args = (token, owner, expires, stamp, stamp, lease_key, expected_token)
+    else:
+        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
+               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), updated_at=%s "
+               "WHERE lease_key=%s AND lease_token IS NULL")
+        args = (token, owner, expires, stamp, stamp, lease_key)
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, args)
+        return int(c.rowcount or 0) > 0
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -397,4 +424,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
-           "delete_engine_capability", "update_engine_capability", "health"]
+           "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "health"]
