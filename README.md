@@ -1,44 +1,64 @@
-<h1 align="center">Grape</h1>
+<div align="center">
 
-<p align="center">English | <a href="README.zh.md">中文</a></p>
+  <h1><a href="https://www.grapedev.cn/" target="_blank" rel="noopener noreferrer"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/grape-wordmark-dark.png"><img src="assets/grape-wordmark-light.png" alt="Grape" height="56"></picture></a></h1>
 
-<p align="center">
-  <strong>AI Native DevOps —— Turn Any Git Project into an AI-Driven Development Workflow with One Click</strong>
-  <br>
-  No IDE required. Design, develop, test, and ship anywhere, anytime — everyone on your team is a shipper.
-</p>
+  <p>
+    <strong>AI Native DevOps —— Turn Any Git Project into an AI-Driven Development Workflow with One Click</strong>
+    <br>
+    People set requirements and review; agents do the delivery.
+  </p>
+  <p>
+    English / <a href="README.zh.md">中文</a>
+  </p>
+  <p>
+    <a href="https://www.grapedev.cn/">▶ Try it live</a> ·
+    <a href="#5-quick-start">Quick start</a> ·
+    <a href="https://github.com/grape-dev/grape/issues">Issues</a> ·
+    <a href="https://github.com/grape-dev/grape/%62lob/main/CONTRIBUTING.md">Contributing</a>
+  </p>
+  <p>
+    <a href="https://github.com/grape-dev/grape/%62lob/main/LICENSE"><img src="https://img.shields.io/github/license/grape-dev/grape?color=blue&style=flat-square" alt="License: MIT"></a>
+    <a href="https://github.com/grape-dev/grape/tags"><img src="https://img.shields.io/github/v/tag/grape-dev/grape?label=latest%20tag&labelColor=black&style=flat-square" alt="latest tag"></a>
+    <a href="https://github.com/grape-dev/grape/issues"><img src="https://img.shields.io/github/issues/grape-dev/grape?style=flat-square" alt="Issues"></a>
+    <a href="https://github.com/grape-dev/grape/commits/main"><img src="https://img.shields.io/github/last-commit/grape-dev/grape?style=flat-square" alt="Last commit"></a>
+    <a href="https://github.com/grape-dev/grape/graphs/contributors"><img src="https://img.shields.io/github/contributors/grape-dev/grape?color=c4f042&labelColor=black&style=flat-square" alt="contributors"></a>
+  </p>
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#core-values">Core Values</a> ·
-  <a href="#core-capabilities">Core Capabilities</a> ·
-  <a href="#deployment">Deployment</a> ·
-  <a href="#development--testing">Development & Testing</a> ·
-  <a href="#contributing">Contributing</a> ·
-  <a href="#feedback">Feedback</a>
-</p>
+  <p>
+    <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/feishu.svg" width="18" height="18" alt="Feishu">&nbsp;Feishu</a> ·
+    <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/wechat.svg" width="18" height="18" alt="WeChat">&nbsp;WeChat</a>
+  </p>
+</div>
 
 ---
 
-## Core Values
+## 1. What Grape is
 
-Grape redefines the software development workflow — no longer "human-driven with AI assistance", but "AI-driven, human-reviewed".
+Grape turns any Git project into an autonomous AI development team: requirements, implementation, review and deployment are handed off along a single chain of agents, and people only write requirements and review.
 
-| # | Core Value |
-|---|-----------|
-| **1** | **One-Click AI Hosting, Autonomous Evolution** — Connect any Git project to Grape, and the full pipeline from requirements to delivery is driven by Multi-Agent handoff. Issues auto-triage, code auto-implemented, PRs auto-reviewed, builds auto-deployed — iteration velocity **skyrockets**. |
-| **2** | **No IDE, Anywhere Full-Stack R&D** — Feishu or WebUI becomes your development interface. Design, develop, test, ship — no editor required. Everyone on the team can directly contribute to delivery. |
-| **3** | **Open Source as Templates, Instant Experience & Customization** — Every open-source project in the community is your starting template. One-click creation, auto-deployment for experience, Skill-driven customization — an AI development workflow from 0 to 1, ready instantly. |
+**In one line: turn your Git project into an AI-driven autonomous development team.**
 
----
+<p align="center">
+  <img src="assets/screenshots/pipeline.png" alt="Grape pipeline dashboard: VOD -> Issue -> Coding -> QA stages (all done), with the issue/PR task table below showing duration, agents, stage, scene and owner">
+</p>
 
-## What is Grape
+> **Three design principles**
+>
+> - **The repository is the source of truth** — requirements, decisions, review evidence and delivery records all live in the repo, so context survives personnel changes
+> - **AI is a participant in the process** — agents hold roles, context and artifacts, hand over via A2A, and people approve at key points
+> - **Experience is an asset** — every run distils experience, decisions and Q&A, recalled by later tasks
 
-Grape is a Multi-Agent DevOps platform where AI Agents autonomously collaborate to handle every repetitive step of the development workflow. Connect a traditional Git project to Grape and it instantly gains a complete AI-native workflow — from requirements clarification, code implementation, review and verification, to build and deployment.
+## 2. What Grape can do
 
-**In one sentence: turn your Git project into an AI-driven autonomous development team.**
+| Capability | What you get |
+| --- | --- |
+| **Five-stage agent pipeline** | VOD collects voice and files issues → Issue triages and assigns → Coding implements and opens PRs → QA reviews and scans for security → SRE builds, deploys and operates; the Chat agent answers anytime. Any incoming event runs the whole chain automatically. |
+| **One-click hosting for any Git project** | Pick a template or point at an existing repo → the Agent × Skill scene is applied → async onboarding analyses the project and files trial-deployment and exploration issues → from then on every issue / PR is handled automatically. |
+| **Skills library** | 15+ official skills across the lifecycle (voice collection, issue management, implementation, PR review, build/deploy/ops, notifications, onboarding), plus custom skills at official / repository / personal level. |
+| **Multi-tenant and auditable** | GitHub/GitCode OAuth sign-up, login allowlist, per-user credentials; every agent run is logged (logs, duration, verdict) and traceable in the pipeline. |
+| **Pluggable engines** | opencode / codearts and more, chosen by online-healthy-installed. |
 
-## The Problem
+## 3. The Problem
 
 Traditional DevOps relies heavily on manual effort across the pipeline: Issues need manual triage, code needs developers to write, PRs need human review, builds and deployments need manual triggers. More projects, more overhead.
 
@@ -52,270 +72,99 @@ Grape's goal is to **AI-ify every one of these steps**, turning developers from 
 | Build & Deploy | Manual / CI trigger | SRE Agent auto-build, deploy, monitor |
 | Requirements | Manual feedback collection | VOD Agent gathers developer voice, clusters insights |
 
-## Core Capabilities
+## 4. Efficiency, Measured in Production
 
-### Multi-Agent Workflow
+### 1. Organisation efficiency - output per unit time
 
-Once connected, every Issue / PR event is handled by a pipeline of Agents:
+Daily agent tasks across the org rose from 901 to 3,072 (3.4x); per active person from 9.4 to 39.4 (4.2x); demand intake from 98 to 733 issues per day (7.5x). All three are normalised per day and reflect a change in output rhythm rather than in window length.
 
+<p align="center">
+  <img src="assets/metrics/en/org.svg" alt="Organisation efficiency: daily agent tasks 901 -> 3,072 (3.4x); per active person 9.4 -> 39.4 (4.2x); new issues 98 -> 733 per day (7.5x)">
+</p>
+
+### 2. Sustained acceleration - capacity and quality in step
+
+Monthly average agent tasks per day: 171 -> 200 -> 901 -> 3,072, a further 3.4x in the latest period; over the same period the task failure rate fell from 9.1% to 8.0%, so the throughput gain came without a quality regression.
+
+<p align="center">
+  <img src="assets/metrics/en/speedup.svg" alt="Monthly average agent tasks per day 171 -> 200 -> 901 -> 3,072; task failure rate 9.1% -> 8.0%">
+</p>
+
+### 3. Where the gain originates - VOD clarification and QA verification
+
+59% of agent tasks sit at the two ends of the pipeline: VOD converges a vague demand into an executable task (<=3 rounds) before handing it over via A2A, and QA verification must pass before merge (8,386 test cases, 90.3% task completion). Coding accounts for only 12%, which indicates the bottleneck is not code production but whether these two ends are delegated to agents.
+
+<p align="center">
+  <img src="assets/metrics/en/gate.svg" alt="Agent task mix: qa verify 16,545 (33%), vod clarify demand 13,019 (26%), issue 11,073, coding 6,217 (12%), sre 2,918; VOD and QA together 59%">
+</p>
+
+## 5. Quick Start
+
+Two install paths — pick one: hand it to an agent, or do it yourself.
+
+### ① Let an agent install it (recommended)
+
+Send the paragraph below to your AI agent; it will install and start the platform:
+
+**GitHub**
+
+```text
+Install and start the Grape platform for me by following https://github.com/grape-dev/grape/blob/main/SETUP.AGENT.md
 ```
-VOD Agent → Issue Agent → Coding Agent → QA Agent → SRE Agent
- Voice      Requirements    Implementation   Review       Build & Deploy
+
+**GitCode**
+
+```text
+Install and start the Grape platform for me by following https://gitcode.com/grape-dev/grape/blob/main/SETUP.AGENT.md
 ```
 
-- **VOD Agent** — Collects developer feedback, clusters insights, auto-creates Issues
-- **Issue Agent** — Classifies, labels, assigns, triggers Coding
-- **Coding Agent** — Code implementation, PR creation, self-review
-- **QA Agent** — PR review, automated testing, security checks
-- **SRE Agent** — Build & deployment, release management, monitoring
-- **Chat Agent** — Personal assistant via Feishu or WebUI
+Execution engine and model configuration, hosting your first repository, the preflight check and deployment are covered in **[SETUP.AGENT.md](SETUP.AGENT.md)**.
 
-Agents collaborate through the A2A protocol, with each task flowing end-to-end automatically.
+<details>
+<summary><strong>② Manual installation (one command)</strong></summary>
 
-### One-Click AI Native
+**GitHub**
 
-```
-Choose a template / existing Git project
-  → One-click create & host
-  → Auto-apply dev scenario (Agent × Skill mapping)
-  → Async onboarding (analyze project, create experience & exploration Issues)
-  → Every Issue / PR from that point on is handled by the Multi-Agent pipeline
+```bash
+git clone https://github.com/grape-dev/grape.git && python grape/quickstart.py
 ```
 
-### Skills Library
+**GitCode**
 
-15+ official skills covering the full development lifecycle. Support for custom skill uploads (official / repo-level / user-level), configurable per repository.
+```bash
+git clone https://gitcode.com/grape-dev/grape.git && python grape/quickstart.py
+```
 
-### Supported Entry Points
-
-| Entry | Method | Description |
-|-------|--------|-------------|
-| GitCode | HTTP Webhook | Issue / PR / comment / build / deploy events |
-| Feishu | WebSocket long-lived | Multi-bot isolation, 100+ bots supported |
-| WebUI | SPA | Dashboard / Pipeline / Agent detail / Chat / Skills / Settings |
-
-### Other Features
-
-- **Multi-bot Feishu** — 100+ bots isolated in a single process, hot-reload, auto-reconnect
-- **GitCode ↔ Feishu User Mapping** — P2P identity confirmation binding
-- **Multi-tenant** — GitCode OAuth login with whitelist, per-user credential isolation
-- **Event Audit** — Every Agent execution traced (logs, duration, conclusion), Pipeline visualization
-- **Multi-backend** — opencode / codearts, pluggable
-
-## Quick Start
-
-### Prerequisites
-
-| Component | Requirement | Notes |
-|-----------|-------------|-------|
-| **Python** | >= 3.10 (required) | Main service and devbox sandbox both require Python 3.10+ (new-style type annotations/syntax); startup exits with an explicit message below 3.10 |
-| **Node.js** | >= 18 (for Agent CLI) | `npm install -g opencode` |
-| **Git** | any recent version | |
-
-### Windows (PowerShell)
+**Windows PowerShell** (5.1 does not support `&&` — use `;` instead; the GitHub URL works the same way):
 
 ```powershell
-git clone https://github.com/grape-dev/grape.git
-cd grape
-
-# One-click setup: venv + deps + .env + preflight check + start
-.\start.ps1                    # Local dev (minimal deps, SQLite)
-.\start.ps1 -Full              # Full deps (OBS/MySQL/Feishu)
-.\start.ps1 -SkipDoctor        # Skip preflight, just start
-
-# Or manual setup:
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .                   # Minimal (core deps, no OBS/MySQL/Feishu)
-Copy-Item .env.example .env
-New-Item -ItemType Directory -Force -Path data
-python -m src.api.run --dev    # Dev mode, open http://localhost:3000
+git clone https://github.com/grape-dev/grape.git ; python grape/quickstart.py
+git clone https://gitcode.com/grape-dev/grape.git ; python grape/quickstart.py
 ```
 
-> If PowerShell blocks script execution: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+The first sign-in, platform-facing configuration and deployment are covered in **[SETUP.HUMAN.md](SETUP.HUMAN.md)**.
 
-### macOS / Linux
+</details>
 
-```bash
-git clone https://github.com/grape-dev/grape.git
-cd grape
+### Two required steps (self-hosting)
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .                   # Minimal (no OBS/MySQL/Feishu)
-# pip install -e ".[all]"          # Full deps (OBS/MySQL/Feishu)
+| Step | If skipped | How |
+| --- | --- | --- |
+| **Configure OAuth app credentials** | GitCode / GitHub sign-in returns 400 (`not_configured`) and the buttons stay grey | Fill `client_id` / `client_secret` for both providers in `configs/oauth-providers.json`; the callback must be `https://<domain>/api/auth/callback/{gitcode,github}` |
+| **Configure the public base URL** | Falls back to `localhost:3000`; OAuth callbacks cannot reach the service and login/hosting fail | Set `server_base_url` and `webhook_url` in `configs/server-config.json` to the public address |
 
-cp .env.example .env
-mkdir -p data
-python -m src.api.run --dev                # Dev mode, open http://localhost:3000
-```
+## Community
 
-### China Mirror / Network Tips (国内镜像加速 / 网络建议)
+- **Website**: [grapedev.cn](https://www.grapedev.cn/)
+- **Scenes and cases**: [community and use cases](https://www.grapedev.cn/community.html)
+- **Feedback**: [Issues](https://github.com/grape-dev/grape/issues)
+- **Chat**: <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/feishu.svg" width="18" height="18" alt="Feishu">&nbsp;Feishu</a> · <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/wechat.svg" width="18" height="18" alt="WeChat">&nbsp;WeChat</a>
+- **Contributing**: bug fixes, feature requests and new Skills are all welcome — see [CONTRIBUTING.md](https://github.com/grape-dev/grape/%62lob/main/CONTRIBUTING.md)
 
-```bash
-# PyPI mirror
-pip install -e . -i https://mirrors.aliyun.com/pypi/simple/
+## Security and privacy
 
-# Or configure permanently:
-pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-```
-
-> Occasional HTTP/2 frame errors / connection timeouts during git fetch are network jitter; the fetch path retries
-> automatically up to 3 times with backoff. If it still fails, downgrade to HTTP/1.1:
-> `git config --global http.version HTTP/1.1`, or configure a mirror/proxy for your network
-> (e.g. `git config --global url."https://<your-proxy>/https://github.com/".insteadOf "https://github.com/"`).
-
-### Install Agent CLI (at least one)
-
-```bash
-npm install -g opencode          # Node.js based
-# or
-pip install codearts-cli         # Python based
-# or install AtomCode
-npm install -g @atomgit.com/atomcode  # Rust based, installed via npm
-```
-
-Configure AtomCode's model credentials on the execution host. The worker installer
-no longer installs engines: run `npm install -g @atomgit.com/atomcode` yourself and
-the running worker discovers and registers it automatically. Session continuation
-requires a build whose JSONL
-`run.started` event includes `session_id`; older builds can run independent tasks.
-See the [AtomCode setup guide (Chinese)](help/usage/atomcode.md).
-
-### Environment Check (Optional)
-
-```bash
-python scripts/doctor.py         # Run preflight checks
-```
-
-> Full "0→1 Installation Checklist" (staged operations + expected results + troubleshooting):
-> see [docs/0-to-1-checklist.md](docs/0-to-1-checklist.md).
-
-### Configure OAuth App Credentials (required)
-
-```bash
-cp configs/oauth-providers.example.json configs/oauth-providers.json
-# Edit configs/oauth-providers.json and fill in client_id / client_secret for both GitCode and GitHub providers
-```
-
-`configs/oauth-providers.json` is the authoritative OAuth credential file (synced into DB on startup; credentials are written once, idempotently).
-Putting credentials in the wrong file or leaving fields empty makes `/api/auth/login/{provider}` return 400 (`not_configured`).
-
-```jsonc
-{
-  "gitcode": {
-    "client_id": "<your GitCode OAuth App Client ID>",
-    "client_secret": "<your GitCode OAuth App Client Secret>",
-    "redirect_uri": "https://<your-domain>/api/auth/callback/gitcode",
-    "auth_url": "https://gitcode.com/oauth/authorize",
-    "token_url": "https://gitcode.com/oauth/token",
-    "user_url": "https://gitcode.com/api/v5/user",
-    "scope": "all"
-  },
-  "github": {
-    "client_id": "<your GitHub OAuth App Client ID>",
-    "client_secret": "<your GitHub OAuth App Client Secret>",
-    "redirect_uri": "https://<your-domain>/api/auth/callback/github",
-    "auth_url": "https://github.com/login/oauth/authorize",
-    "token_url": "https://github.com/login/oauth/access_token",
-    "user_url": "https://api.github.com/user",
-    "scope": "repo user admin:repo_hook offline_access"
-  }
-}
-```
-
-> See `configs/oauth-providers.example.json` for the full field set. The Callback URL registered in the OAuth App must exactly match the `redirect_uri` above.
-> Legacy OAuth fields in `configs/global-bot-token.json` remain supported (backward compat); use `oauth-providers.json` for new setups.
-
-### Configure Public Base URL (required)
-
-```bash
-cp configs/server-config.example.json configs/server-config.json
-# Edit configs/server-config.json: set server_base_url / webhook_url to a public address
-```
-
-```jsonc
-{
-  "server_base_url": "https://<your-domain>",
-  "webhook_url": "https://<your-domain>/webhook/gitcode"
-}
-```
-
-> Without `server_base_url`, the service falls back to `http://localhost:3000`: OAuth callbacks point to the local machine and GitCode/GitHub cannot reach back, so login/hosting will fail.
-> Startup logs and `/api/health` surface an explicit warning (`server_base_url_configured=false`). Local pure development can ignore it, but you must configure it before OAuth login.
-
-## Deployment
-
-```bash
-python -m src.api.run          # Production: main API 3000 + Webhook 8080
-python -m src.api.run --dev    # Development: single port 3000, hot-reload
-```
-
-Production deployment examples (nginx reverse proxy / systemd / Docker) in `docs/DEPLOYMENT`.
-
-### Configuration
-
-| File | Description |
-|------|-------------|
-| `configs/global-bot-token.json` | Global Bot token (gitignored) |
-| `configs/oauth-providers.json` | OAuth App credentials (GitCode/GitHub client_id/secret etc., copied from `oauth-providers.example.json`, gitignored) |
-| `configs/server-config.json` | Public base URL server_base_url / webhook_url (copied from `server-config.example.json`; without it OAuth callbacks point to localhost and are unreachable) |
-| `configs/agent-description.json` | Agent type seeds (event subscriptions, default backend) |
-| `configs/skill-description.json` | Official skill seeds (synced from the standalone [grape-skills](https://github.com/grape-dev/grape-skills) repo via `scripts/sync_skills.sh`) |
-| `configs/agent-skill-mapping.json` | Dev scenario → Agent × Skill mapping |
-| `configs/project-templates.json` | Project template library (synced from the standalone [grape-template](https://github.com/grape-dev/grape-template) repo via `scripts/sync_templates.sh`) |
-| `configs/login-whitelist.json` | GitCode login whitelist |
-
-## Development & Testing
-
-```bash
-# Install dependencies (local dev minimal set)
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"            # Core + dev/test deps
-
-# Run tests
-mkdir -p data                    # Windows: New-Item -ItemType Directory -Force data
-python -m pytest tests/ -v
-```
-
-Test coverage: event normalization, prompt building, Agent executor (NDJSON parsing / session rebuild), Feishu handler, P2P binding, OAuth whitelist, Pipeline, project templates, repository hosting, Task Center, UI scenarios (Playwright).
-
-## Contributing
-
-1. **Open an Issue** — Describe what you want to do or the problem you've found
-2. **Fork & Develop** — Fork the repo, work on a feature branch
-3. **Add Tests** — Include pytest tests for new/modified features
-4. **Submit a PR** — Describe changes, test results, and linked Issue
-
-### Branch Naming
-
-| Prefix | Purpose |
-|--------|---------|
-| `feat/` | New features |
-| `fix/` | Bug fixes |
-| `refactor/` | Code refactoring (no behavior change) |
-| `docs/` | Documentation |
-| `chore/` | Build, tooling |
-
-### Non-code Contributions Welcome
-
-- **Documentation** — Improve README, supplement design docs, fix typos
-- **Skills** — Contribute new Agent skills to the standalone [grape-skills](https://github.com/grape-dev/grape-skills) repo (`skills/<agent_type>/<skill>/`, Markdown only, no backend changes)
-- **Templates** — Add new project templates to the standalone [grape-template](https://github.com/grape-dev/grape-template) repo (template directory + `project-templates.json` entry)
-- **Bug Reports** — Provide clear repro steps, environment info, and logs
-- **Test Cases** — Add coverage for edge cases
-- **Community** — Answer questions, write tutorials
-
-Every contribution, code or otherwise, makes Grape better.
-
-## Feedback
-
-- **GitHub Issues**: https://github.com/grape-dev/grape/issues
-  - Bugs: include environment, repro steps, and logs
-  - Feature suggestions: describe the use case and expected behavior
-- **Feishu**: feedback directly in your bound group chat after connecting Grape
+Vulnerability reporting and the security model of agent execution: [SECURITY.md](https://github.com/grape-dev/grape/%62lob/main/SECURITY.md).
 
 ## License
 
-MIT
+MIT.
