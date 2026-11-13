@@ -558,7 +558,15 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     _listable = _repo_listable_providers()
     _bound_providers = {i["provider"] for i in _identities if i.get("provider") in _listable}
     if not _bound_providers:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+        # D102-C: 纯登录渠道账号（华为是第一个实例——有登录无仓库平台绑定）
+        # 返回 200 + 空列表 + 标记位（原 400 文案"请先通过 OAuth 登录"与用户
+        # 刚 OAuth 登录完的事实自相矛盾）；前端按标记走"去绑定代码平台"引导页。
+        # 2026-11-13 从 rebase 丢失中恢复（守卫 test_d102c_login_only_channel 红实锤）。
+        return {
+            "repos": [],
+            "_no_vcs_binding": True,
+            "hint": "绑定的登录渠道不是代码托管平台——绑定 Gitee/GitCode 等代码平台后，仓库会显示在这里",
+        }
 
     # 需求 17: 前端显式指定 provider 时只拉该平台（可列仓平台集合=平台卡目录驱动）
     if provider in _listable:

@@ -126,7 +126,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
   <div style="display:flex;gap:10px" id="oauthBtns"></div>
   <!-- D108-b：按钮构建器同步加载（无 defer）+ 解析期内联调用——OAuth 按钮随 HTML
        解析进首帧，不等 defer 脚本；app.js 异步对账复用同一构建器 -->
-  <script src="/static/js/oauth-buttons.js?v=1"></script>
+  <script src="/static/js/oauth-buttons.js?v=2"></script>
   <script>
   (function(){
     var c = document.getElementById('oauthBtns');
@@ -348,7 +348,7 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /faro/collect 反代） -->
 <script src="/static/js/vendor/faro-web-tracing.iife.js?v=1" defer></script><!-- Faro 追踪（fetch 注入 traceparent，前后端 trace 关联） -->
 <script src="/static/js/faro.js?v=7" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
-<script src="/static/js/api.js?v=32" defer></script>
+<script src="/static/js/api.js?v=33" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
 <script src="/static/js/host-status.js?v=1" defer></script><!-- 托管状态/缺失项文案统一映射（Issue #2126：dashboard/repos 共用） -->
@@ -373,7 +373,7 @@ function _toggleAppLang(){
 <script src="/static/js/pages/my_feedback.js?v=8" defer></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=6" defer></script>
 <script src="/static/js/pages/autopilot.js?v=74" defer></script>
-<script src="/static/js/app.js?v=257" defer></script>
+<script src="/static/js/app.js?v=259" defer></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

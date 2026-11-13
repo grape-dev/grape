@@ -703,12 +703,26 @@ def init_db():
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
         # 兼容旧列迁移（幂等）：托管诊断列（Issue #2126）——CREATE TABLE 只影响新库
-        for _col in ("host_step", "host_error", "host_updated_at"):
+        # 域拆分库（arch 四进程）：managed_repos 归属 mgmt 基表，runtime/insight 侧是
+        # 跨库视图——视图上 ALTER 必然 1347（视图侧不能 ALTER）。视图进程直接跳过，
+        # 列归 owner 基表管（与迁移 fn 的视图守卫同款，避免每次启动刷 WARNING）。
+        _mr_is_view = False
+        from src.kernel.session_manager import _is_mysql_backend as _mr_is_mysql
+        if _mr_is_mysql():
             try:
-                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_col} TEXT DEFAULT ''")
-            except Exception as _e:
-                # 幂等：列已存在属预期；其它失败需留痕（#2126 透明化方向，不外抛中断启动）
-                log.warning(f"managed_repos 补充诊断列失败 col={_col}: {_e}")
+                _row = db.cursor().execute(
+                    "SELECT TABLE_TYPE FROM information_schema.tables "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='managed_repos'").fetchone()
+                _mr_is_view = bool(_row and str(_row[0]).upper() == "VIEW")
+            except Exception:
+                pass
+        if not _mr_is_view:
+            for _col in ("host_step", "host_error", "host_updated_at"):
+                try:
+                    db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_col} TEXT DEFAULT ''")
+                except Exception as _e:
+                    # 幂等：列已存在属预期；其它失败需留痕（#2126 透明化方向，不外抛中断启动）
+                    log.warning(f"managed_repos 补充诊断列失败 col={_col}: {_e}")
         db.execute(_OAUTH_STATES_DDL)
         from src.domains.mgmt.user.legacy_column_migrations import run as _legacy_migrations
         _legacy_migrations()
