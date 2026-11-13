@@ -970,12 +970,17 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
 
 def _get_enabled_tasks() -> list[dict]:
     """获取所有启用的 autopilot 任务。"""
-    with db_lock:
-        c = db.cursor()
-        rows = c.execute(
-            "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE enabled=1"
-        ).fetchall()
+    from src.kernel.domain_read import mgmt_lib
+    _mg_tasks = mgmt_lib()
+    if _mg_tasks is not None:
+        rows = _mg_tasks.list_enabled_autopilot_tasks()
+    else:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
+                "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE enabled=1"
+            ).fetchall()
     tasks = []
     for r in rows:
         tasks.append({

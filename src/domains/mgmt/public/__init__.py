@@ -22,6 +22,19 @@ _TABLES: dict[str, set[str]] = {
         "bot_token_status", "host_vcs_username", "host_step", "host_error", "host_updated_at",
         "bot_gitcode_token", "gitcode_webhook_token", "bot_github_token", "github_webhook_token",
     },
+    "scene_market": {
+        "id", "name", "display_name", "version", "description", "market_description", "icon",
+        "category_id", "is_featured", "like_count", "source", "source_user_id",
+        "recommended_template", "nodes_json", "onboarding", "tags", "author", "content_hash",
+        "obs_icon_key", "is_active", "created_by", "updated_by", "created_at", "updated_at",
+        "scope", "repo_key", "preset_custom_fields", "org_id",
+    },
+    "autopilot_tasks": {
+        "id", "name", "repo_key", "scene_id", "description", "cron", "agent_chain",
+        "issue_number", "max_retry", "enabled", "last_run_at", "next_run_at", "created_at",
+        "updated_at", "created_by", "agent_type", "instruction", "skill_name",
+        "engine_runtime_ids", "custom_fields", "work_branch",
+    },
     "grape_accounts": {
         "id", "username", "email", "email_source", "password_hash", "nickname",
         "avatar_url", "status", "token_version", "email_verified", "email_is_placeholder",
@@ -99,6 +112,40 @@ def list_all_user_ids() -> list[str]:
     return sorted({r[0] for r in rows if r[0]})
 
 
+def get_official_scene_id(scene_name: str) -> Any:
+    """按场景名取 official 模板的 id（无则 None）。"""
+    row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
+    return row[0] if row else None
+
+
+def count_rows(table: str, where: str = "", params: tuple = ()) -> int:
+    """计数（表必须在白名单内；不支持任意列表达式，只有 COUNT(*)。"""
+    if table not in _TABLES:
+        raise ValueError(f"table '{table}' 未在 mgmt lib 允许列表内")
+    sql = f"SELECT COUNT(*) FROM {table}" + (f" WHERE {where}" if where else "")
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, params)
+        row = c.fetchone()
+        return int(row[0]) if row else 0
+
+
+def count_official_scenes(featured_only: bool = False) -> int:
+    where = "source='official' AND is_active=1"
+    if featured_only:
+        where += " AND is_featured=1"
+    return count_rows("scene_market", where)
+
+
+def list_enabled_autopilot_tasks() -> list[tuple]:
+    """启用中的自动化任务（调度器用），列序与 scheduler 原查询一致。"""
+    return fetch_rows(
+        "autopilot_tasks",
+        ["id", "name", "repo_key", "agent_type", "instruction", "skill_name",
+         "cron", "max_retry", "created_by", "engine_runtime_ids", "custom_fields", "work_branch"],
+        "enabled=1", (),
+    )
+
+
 def get_account_id_by_username(username: str) -> str | None:
     """按用户名（大小写不敏感）取账号 id。
 
@@ -169,4 +216,6 @@ def health() -> dict[str, Any]:
 __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
-           "get_account_id_by_username", "get_account_username_by_id", "health"]
+           "get_account_id_by_username", "get_account_username_by_id",
+           "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks",
+           "health"]

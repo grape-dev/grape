@@ -379,12 +379,17 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
 def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str = ""):
     """通过场景名查 market_id（official 模板）后重建 scene_skill_ref。"""
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
-        row = c.fetchone()
-    if row:
-        _rebuild_scene_skill_ref(row[0], nodes, scene_name, repo_key)
+    from src.kernel.domain_read import mgmt_lib
+    _mg_scene = mgmt_lib()
+    _scene_id = _mg_scene.get_official_scene_id(scene_name) if _mg_scene is not None else None
+    if _mg_scene is None:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
+            row = c.fetchone()
+        _scene_id = row[0] if row else None
+    if _scene_id:
+        _rebuild_scene_skill_ref(_scene_id, nodes, scene_name, repo_key)
 
 
 def _init_featured_scenes_if_empty():
