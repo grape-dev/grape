@@ -431,7 +431,19 @@ def delete_task(task_id: int, user: dict = Depends(get_current_user)):
     _check_task_access(user, task_id)
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM autopilot_executions WHERE task_id=?", (task_id,))
+        # P3-5h：autopilot_executions 在 runtime 域（task 本身是 mgmt 域，仍本地删）
+        from src.kernel.domain_read import runtime_lib as _rt_lib_dt
+        from src.kernel import cross_write as _xw_dt
+        _dt_done = False
+        _rt_dt = _rt_lib_dt(foreign_only=True)
+        if _rt_dt is not None:
+            _rt_dt_ok = _rt_dt
+            _dt_done = _xw_dt.submit_if_lib(
+                _rt_dt_ok, "runtime", "autopilot_executions_delete",
+                f"autopilot-exec-del:{task_id}", {"task_id": int(task_id)},
+                lambda: _rt_dt_ok.delete_autopilot_executions(int(task_id)), log)
+        if not _dt_done:
+            c.execute("DELETE FROM autopilot_executions WHERE task_id=?", (task_id,))
         c.execute("DELETE FROM autopilot_tasks WHERE id=?", (task_id,))
         db.commit()
     log.info(f"Autopilot: task {task_id} deleted by user={user.get('username', '')}")
@@ -649,11 +661,25 @@ def _append_dedup_note(description: str, finding: dict) -> str:
 
 def _save_findings_json(exec_id: int, findings_data: dict) -> None:
     """Issue #697：findings_json 回写（确认标记/派发号共用，统一加锁提交）。"""
+    _fj = json.dumps(findings_data, ensure_ascii=False)
+    # P3-5h：autopilot_executions 在 runtime 域
+    from src.kernel.domain_read import runtime_lib as _rt_lib_fj
+    from src.kernel import cross_write as _xw_fj
+    _fj_done = False
+    _rt_fj = _rt_lib_fj(foreign_only=True)
+    if _rt_fj is not None:
+        _rt_fj_ok = _rt_fj
+        _fj_done = _xw_fj.submit_if_lib(
+            _rt_fj_ok, "runtime", "autopilot_findings_set",
+            f"autopilot-findings:{exec_id}", {"exec_id": int(exec_id), "findings_json": _fj},
+            lambda: _rt_fj_ok.set_autopilot_findings(int(exec_id), _fj), log)
+    if _fj_done:
+        return
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
-            (json.dumps(findings_data, ensure_ascii=False), exec_id)
+            (_fj, exec_id)
         )
         db.commit()
 

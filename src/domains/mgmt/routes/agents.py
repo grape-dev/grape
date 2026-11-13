@@ -672,13 +672,32 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     _sr = c3.fetchone()
                 if _sr:
                     _now = datetime.now(timezone.utc).isoformat()
+                    # P3-5h：scene_engine_detach_log 在 runtime 域
+                    from src.kernel.domain_read import runtime_lib as _rt_lib_dl
+                    from src.kernel import cross_write as _xw_dl
+                    _dl_n: dict = {}
+                    _dl_done = False
+                    _rt_dl = _rt_lib_dl(foreign_only=True)
                     with db_lock:
-                        c3.execute(
-                            "UPDATE scene_engine_detach_log SET rebound_at=? "
-                            "WHERE scene_row_id=? AND node_tag=? AND (rebound_at='' OR rebound_at IS NULL)",
-                            (_now, _sr[0], name))
-                    if c3.rowcount:
-                        log.info(f"Agent engine rebind: marked {c3.rowcount} detach hints rebound (scene={_dev_scene}, node={name})")
+                        if _rt_dl is not None:
+                            _rt_dl_ok = _rt_dl
+
+                            def _apply_dl() -> None:
+                                _dl_n["n"] = _rt_dl_ok.mark_detach_rebound(_sr[0], name, _now)
+
+                            _dl_done = _xw_dl.submit_if_lib(
+                                _rt_dl_ok, "runtime", "detach_log_rebound",
+                                f"detach-rebound:{_sr[0]}:{name}", {"scene_row_id": _sr[0],
+                                                                    "node_tag": name, "rebound_at": _now},
+                                _apply_dl, log)
+                        if not _dl_done:
+                            c3.execute(
+                                "UPDATE scene_engine_detach_log SET rebound_at=? "
+                                "WHERE scene_row_id=? AND node_tag=? AND (rebound_at='' OR rebound_at IS NULL)",
+                                (_now, _sr[0], name))
+                            _dl_n["n"] = c3.rowcount
+                    if _dl_n.get("n"):
+                        log.info(f"Agent engine rebind: marked {_dl_n['n']} detach hints rebound (scene={_dev_scene}, node={name})")
         except Exception as _re:
             log.warning(f"Agent engine rebind: mark rebound failed: {_re}")
         log.info(f"Agent engine configured: {repo_key}:{name} -> {rids}")

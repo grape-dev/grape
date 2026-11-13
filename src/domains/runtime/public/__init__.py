@@ -591,6 +591,82 @@ def stamp_task_traces(pairs: list[tuple]) -> int:
     return done
 
 
+# ---------- 杂项写原语（P3-5h：mgmt 进程写 runtime 基表） ----------
+
+def mark_detach_rebound(scene_row_id: int, node_tag: str, rebound_at: str) -> int:
+    """把某场景节点的解绑审计行标记为已重建（只动未标过的行）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE scene_engine_detach_log SET rebound_at=%s "
+                  "WHERE scene_row_id=%s AND node_tag=%s "
+                  "AND (rebound_at='' OR rebound_at IS NULL)",
+                  (rebound_at, int(scene_row_id), node_tag))
+        return int(c.rowcount or 0)
+
+
+def delete_autopilot_executions(task_id: int) -> int:
+    """删除某巡检任务的执行记录。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("DELETE FROM autopilot_executions WHERE task_id=%s", (int(task_id),))
+        return int(c.rowcount or 0)
+
+
+def set_autopilot_findings(exec_id: int, findings_json: str) -> int:
+    """回写某次巡检的 findings_json（确认标记/派发号）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE autopilot_executions SET findings_json=%s WHERE id=%s",
+                  (findings_json, int(exec_id)))
+        return int(c.rowcount or 0)
+
+
+def set_repo_im_notifications(auto_impl_enabled: int, notify_enabled: int) -> int:
+    """更新通知偏好（原 SQL 无 WHERE，整表更新 —— 与原实现一致）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=%s, notify_enabled=%s",
+                  (int(auto_impl_enabled), int(notify_enabled)))
+        return int(c.rowcount or 0)
+
+
+_ACTION_FILTER_WRITABLE = {"allow", "actor", "require_changes", "block_changes",
+                           "handle_side_effect", "priority", "enabled"}
+
+
+def add_event_action_filter(fields: dict[str, Any], created_at: str) -> int:
+    """新增事件过滤规则，返回新行 id（调用方的 409 去重在读侧完成）。"""
+    cols = ["event_type", "action", "allow", "actor", "require_changes", "block_changes",
+            "handle_side_effect", "priority", "enabled", "created_at", "updated_at"]
+    vals = [fields.get("event_type", ""), fields.get("action", ""),
+            int(fields.get("allow", 0)), fields.get("actor", "any"),
+            fields.get("require_changes", ""), fields.get("block_changes", ""),
+            fields.get("handle_side_effect", ""), int(fields.get("priority", 100)),
+            int(fields.get("enabled", 1)), created_at, created_at]
+    ph = ", ".join(["%s"] * len(cols))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"INSERT INTO event_action_filter ({', '.join(cols)}) VALUES ({ph})", tuple(vals))
+        return int(c.lastrowid or 0)
+
+
+def update_event_action_filter(rule_id: int, fields: dict[str, Any], updated_at: str) -> int:
+    """按白名单列更新事件过滤规则；返回受影响行数（0 = 不存在，供 404 判定）。"""
+    unknown = [k for k in fields if k not in _ACTION_FILTER_WRITABLE]
+    if unknown:
+        raise ValueError(f"column(s) {unknown} not writable through runtime lib")
+    cols = [k for k in fields if k in _ACTION_FILTER_WRITABLE]
+    if not cols:
+        return 0
+    sets = ", ".join(f"{c}=%s" for c in cols) + ", updated_at=%s"
+    params = tuple(fields[c] for c in cols) + (updated_at, int(rule_id))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"UPDATE event_action_filter SET {sets} WHERE id=%s", params)
+        return int(c.rowcount or 0)
+
+
+def delete_event_action_filter(rule_id: int) -> int:
+    """删除事件过滤规则；返回受影响行数（0 = 不存在，供 404 判定）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("DELETE FROM event_action_filter WHERE id=%s", (int(rule_id),))
+        return int(c.rowcount or 0)
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -611,4 +687,8 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
            "detach_agent_sessions", "clear_agent_session_runtime", "ensure_agent_session",
-           "stamp_task_traces"]
+           "stamp_task_traces",
+           # P3-5h 写原语
+           "mark_detach_rebound", "delete_autopilot_executions", "set_autopilot_findings",
+           "set_repo_im_notifications", "add_event_action_filter",
+           "update_event_action_filter", "delete_event_action_filter"]

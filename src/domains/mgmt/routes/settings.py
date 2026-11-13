@@ -672,14 +672,28 @@ class NotificationPrefs(BaseModel):
 @router.put("/notifications", operation_id="settings_notifications_update", summary="Update notification preferences", description="Updates notification preferences.")
 def update_notifications(body: NotificationPrefs, user: dict = Depends(require_no_session_token)):
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
-                      (1 if body.vod else 0, 1 if body.notifications_enabled else 0))
-            db.commit()
-        except Exception:
-            pass
+    _ai = 1 if body.vod else 0
+    _nt = 1 if body.notifications_enabled else 0
+    # P3-5h：repo_im_group_binding 在 runtime 域
+    from src.kernel.domain_read import runtime_lib as _rt_lib_np
+    from src.kernel import cross_write as _xw_np
+    _np_done = False
+    _rt_np = _rt_lib_np(foreign_only=True)
+    if _rt_np is not None:
+        _rt_np_ok = _rt_np
+        _np_done = _xw_np.submit_if_lib(
+            _rt_np_ok, "runtime", "repo_im_notifications_set", "repo-im-notify",
+            {"auto_impl_enabled": _ai, "notify_enabled": _nt},
+            lambda: _rt_np_ok.set_repo_im_notifications(_ai, _nt), log)
+    if not _np_done:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
+                          (_ai, _nt))
+                db.commit()
+            except Exception:
+                pass
     return {"message": "通知偏好已更新", "prefs": body.model_dump()}
 
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
@@ -2284,11 +2298,31 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             c.execute("SELECT 1 FROM event_action_filter WHERE event_type=? AND action=?", (body.event_type, body.action))
             if c.fetchone():
                 raise HTTPException(status_code=409, detail={"code": 409, "message": "该事件/动作规则已存在"})
-            c.execute(
-                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (body.event_type, body.action, body.allow, body.actor, body.require_changes,
-                 body.block_changes, body.handle_side_effect, body.priority, body.enabled, now, now))
+            # P3-5h：event_action_filter 在 runtime 域
+            from src.kernel.domain_read import runtime_lib as _rt_lib_ar
+            from src.kernel import cross_write as _xw_ar
+            _ar_done = False
+            _ar_fields = {
+                "event_type": body.event_type, "action": body.action, "allow": body.allow,
+                "actor": body.actor, "require_changes": body.require_changes,
+                "block_changes": body.block_changes,
+                "handle_side_effect": body.handle_side_effect,
+                "priority": body.priority, "enabled": body.enabled,
+            }
+            _rt_ar = _rt_lib_ar(foreign_only=True)
+            if _rt_ar is not None:
+                _rt_ar_ok = _rt_ar
+                _ar_done = _xw_ar.submit_if_lib(
+                    _rt_ar_ok, "runtime", "event_action_filter_add",
+                    f"eaf-add:{body.event_type}:{body.action}",
+                    {**_ar_fields, "created_at": now},
+                    lambda: _rt_ar_ok.add_event_action_filter(_ar_fields, now), log)
+            if not _ar_done:
+                c.execute(
+                    "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (body.event_type, body.action, body.allow, body.actor, body.require_changes,
+                     body.block_changes, body.handle_side_effect, body.priority, body.enabled, now, now))
             db.commit()
         except HTTPException:
             raise
@@ -2315,19 +2349,43 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
     sets.append("updated_at=?")
     params.append(now)
     params.append(rule_id)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(f"UPDATE event_action_filter SET {', '.join(sets)} WHERE id=?", params)
-            if c.rowcount == 0:
-                raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
-            db.commit()
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
-    # 失效缓存，让新规则立即生效
+    # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_ur
+    from src.kernel import cross_write as _xw_ur
+    _ur_fields = {f: getattr(body, f) for f in
+                  ("allow", "actor", "require_changes", "block_changes",
+                   "handle_side_effect", "priority", "enabled")
+                  if getattr(body, f) is not None}
+    _ur_n: dict = {}
+    _ur_done = False
+    _rt_ur = _rt_lib_ur(foreign_only=True)
+    if _rt_ur is not None:
+        _rt_ur_ok = _rt_ur
+
+        def _apply_ur() -> None:
+            _ur_n["n"] = _rt_ur_ok.update_event_action_filter(int(rule_id), _ur_fields, now)
+
+        _ur_done = _xw_ur.submit_if_lib(
+            _rt_ur_ok, "runtime", "event_action_filter_update",
+            f"eaf-upd:{rule_id}", {"rule_id": int(rule_id), "fields": _ur_fields,
+                                   "updated_at": now}, _apply_ur, log)
+    if _ur_done:
+        if int(_ur_n.get("n") or 0) == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+    else:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(f"UPDATE event_action_filter SET {', '.join(sets)} WHERE id=?", params)
+                if c.rowcount == 0:
+                    raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+                db.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+
     try:
         from src.api import event_rule
         event_rule.load_event_action_rule(force=True)
@@ -2339,18 +2397,37 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
 def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_session_token)):
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("DELETE FROM event_action_filter WHERE id=?", (rule_id,))
-            if c.rowcount == 0:
-                raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
-            db.commit()
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_dr
+    from src.kernel import cross_write as _xw_dr
+    _dr_n: dict = {}
+    _dr_done = False
+    _rt_dr = _rt_lib_dr(foreign_only=True)
+    if _rt_dr is not None:
+        _rt_dr_ok = _rt_dr
+
+        def _apply_dr() -> None:
+            _dr_n["n"] = _rt_dr_ok.delete_event_action_filter(int(rule_id))
+
+        _dr_done = _xw_dr.submit_if_lib(
+            _rt_dr_ok, "runtime", "event_action_filter_delete", f"eaf-del:{rule_id}",
+            {"rule_id": int(rule_id)}, _apply_dr, log)
+    if _dr_done:
+        if int(_dr_n.get("n") or 0) == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+    else:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("DELETE FROM event_action_filter WHERE id=?", (rule_id,))
+                if c.rowcount == 0:
+                    raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+                db.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     try:
         from src.api import event_rule
         event_rule.load_event_action_rule(force=True)

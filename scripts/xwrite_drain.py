@@ -101,6 +101,21 @@ def _handlers() -> dict:
                 p["session_id"], p["repo_key"], p["agent_type"], p.get("status", "idle"))
             out["agent_tasks_stamp_traces"] = lambda p: rt.stamp_task_traces(
                 [tuple(x) for x in (p.get("pairs") or [])])
+            # P3-5h：杂项（解绑审计 / 巡检执行记录 / 通知偏好 / 事件过滤规则）
+            out["detach_log_rebound"] = lambda p: rt.mark_detach_rebound(
+                int(p["scene_row_id"]), p.get("node_tag", ""), p.get("rebound_at", ""))
+            out["autopilot_executions_delete"] = lambda p: rt.delete_autopilot_executions(
+                int(p["task_id"]))
+            out["autopilot_findings_set"] = lambda p: rt.set_autopilot_findings(
+                int(p["exec_id"]), p.get("findings_json", ""))
+            out["repo_im_notifications_set"] = lambda p: rt.set_repo_im_notifications(
+                int(p.get("auto_impl_enabled", 0)), int(p.get("notify_enabled", 0)))
+            out["event_action_filter_add"] = lambda p: rt.add_event_action_filter(
+                dict(p or {}), p.get("created_at", ""))
+            out["event_action_filter_update"] = lambda p: rt.update_event_action_filter(
+                int(p["rule_id"]), dict(p.get("fields") or {}), p.get("updated_at", ""))
+            out["event_action_filter_delete"] = lambda p: rt.delete_event_action_filter(
+                int(p["rule_id"]))
     except Exception:  # noqa: BLE001
         pass
     return out
