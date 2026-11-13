@@ -1,6 +1,6 @@
 ---
 name: architecture-guardian-3
-version: 3.0.0
+version: 3.0.1
 description: |
   Grape 架构守护 3.0（qa 型架构审查技能）：按 Issue #2403 正文四级规则包（A1-A14 / B1-B5 / C1-C3 / D1-D2 共 24 条）做证据化审查。
   ①7 模式（audit/design/plan/review/security/scale/verify）按需执行 → ②24 条规则逐条四态判定 → ③review 模式对 PR 或具体变更输出唯一裁决
@@ -49,6 +49,7 @@ tools:
 | `REPO_OWNER` / `REPO_NAME` / `REPO_FULL_NAME` | 仓库属主 / 仓库名 / owner/repo | `--owner` / `--repo` / 报告引用 |
 | `ACCOUNT` / `ISSUE_NUMBER` / `PR_NUMBER` | 触发人 actor / Issue 编号 / 待审 PR 编号 | A2A payload / 任务上下文 / 审查对象（未注入从 A2A payload 取） |
 | `GRAPE_SCENE_ID` / `BOT_USERNAME` / `GRAPE_ISSUE_ID` | 场景 ID / Bot 用户名 / Issue 内部 id | A2A 节点核验 / 报告署名 / 平台命令 `--issue_id` |
+| `GRAPE_WORK_BRANCH` | 目标合入分支 / 工作基线（缺省取仓库默认分支） | Prerequisites env 校验 / 确认审查对象的 base 分支 |
 
 > ⚠️ token/URL 类变量为敏感信息：不 printenv 打印、不写入日志/评论/文件。
 
@@ -100,7 +101,7 @@ Grape 项目群的架构守护者（3.0 版）：以 Issue #2403 正文 24 条�
 
 ## Agent feedback 审视（必做，best-effort）
 
-处理结束前审视一次本轮是否遇到 CLI/技能体验问题（命令与 `references/grape-cli-reference.md` 不符、需反复 `--help` 试错、runbook 指引偏差等）。**有明确可执行建议才上报**，无建议不制造反馈；每任务 ≤2 条，429 即停不重试，失败静默跳过：`grape feedback submit --category suggestion --feedback_kind cli_ux --title "..." --description "..."`（description 具体可执行，不含 token/密钥/内部路径）。
+处理结束前审视一次本轮是否遇到 CLI/技能体验问题（命令与 `references/grape-cli-reference.md` 不符、需反复 `--help` 试错、runbook 指引偏差等）。**有明确可执行建议才上报**，无建议不制造反馈；每任务 ≤2 条，429 即停不重试，失败静默跳过（feedback submit 只接受 `--json`，**无** `--category`/`--feedback_kind`/`--title`/`--description` 独立 flag）：`grape feedback submit --json '{"category":"suggestion","feedback_kind":"cli_ux","title":"...","description":"..."}' --json-out`（description 具体可执行，不含 token/密钥/内部路径）。
 
 ## 任务完成流程（必做）
 
@@ -110,7 +111,7 @@ Grape 项目群的架构守护者（3.0 版）：以 Issue #2403 正文 24 条�
 ```bash
 grape tasks complete --json '{
   "result_text": "结论：{审查对象} 架构守护 3.0 审查完成（模式 {mode}）：{APPROVED / APPROVED WITH CONDITIONS / BLOCKED}（N BLOCKED / N Critical / N Medium / N Informational）。\n动作：拉材料 + 3 只读脚本取证 + 24 条规则四态判定 + 报告发布（comment id=XXXX）。\n摘要：一句话概括裁决与合入建议。",
-  "next_step": "a2a_coding",
+  "next_step": "{按 runbook Step 7 裁决取值：a2a_coding（BLOCKED / 需整改且命中 coding 节点）| a2a_sre（APPROVED 放行且命中 sre 节点）| reply_comment（未命中节点 / Issue 号非数字 / Medium 待人工判断）}",
   "actions": ["拉取审查材料", "3 只读脚本取证", "24 条规则四态判定", "发布审查报告"],
   "conclusion": "{审查对象} 审查完成：{裁决 + 合入映射}，{整改/后续}",
   "artifacts": ["评论 comment id=XXXX"],

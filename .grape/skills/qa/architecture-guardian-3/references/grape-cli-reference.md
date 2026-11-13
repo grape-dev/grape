@@ -49,7 +49,7 @@ grape tasks wait --task-id {id}                                                 
 # 卫生与发现
 grape refresh                                                                     # 刷新契约（执行前必做）
 grape commands {关键词}                                                            # 命令发现
-grape feedback submit --category suggestion --feedback_kind skill_quality --title "..." --description "..."
+grape feedback submit --json '{"category":"suggestion","feedback_kind":"skill_quality","title":"...","description":"..."}' --json-out   # 只接受 --json，无独立 flag
 ```
 
 ## 4. 限制声明
@@ -57,6 +57,7 @@ grape feedback submit --category suggestion --feedback_kind skill_quality --titl
 - **命令遮蔽**：`tasks status get` 不可执行，查任务状态用 `tasks wait --task-id`。
 - **无 `grape api` 逃生舱**：v0.2.2 已移除；契约未覆盖的端点无法 CLI 调用，**不 curl 直连**，输出理由。
 - **不存在能力**：仓库创建/删除、任务删除、知识上传、Issue/PR 删除、分支创建/删除、Token 管理、`tasks create`（已移除）、流式输出、交互式提示。`skills upload` / `skills delete` **已存在**，不在此清单。
+- **平台限制**：`git-repo tree` 的 `depth=recursive` 仅 GitHub 支持，GitCode 返回 HTTP 400「暂不支持递归树」；需要全树时用 `--depth single` 按目录逐层拉取，或只读 `grape git ls-tree -r` 兜底。
 - 本技能**不使用**：`pulls merge`（禁合并）、`git-repo issues update`（不改 Issue body）、任何 `grape git` 写子命令、`issues pending-review` / `awaiting-input`（本技能 `flow_nodes=无`）。
 
 ## 5. 退出码

@@ -51,7 +51,7 @@ grape git-repo contents --owner "$REPO_OWNER" --repo "$REPO_NAME" --path "{path}
 
 - 记录：PR 编号、`head sha` 前 8 位、base 分支、变更量（文件数/±行数）、变更文件清单（按目录聚合，用于 B3/B4/A8 判定）。
 - **PR 无关联 Issue 场景**（`$ISSUE_NUMBER` 未注入/非数字）：跳过 Issue 相关命令，结论走 PR 评论；**不发起 A2A**（issue_number 必须为数字）。
-- 变更文件覆盖度：`pulls files` 默认 per_page=100，超大 PR 用 `--page`/`--per-page` 拉全，仍不全则 `git-repo tree --depth recursive` 兜底。
+- 变更文件覆盖度：`pulls files` 默认 `per_page=100`，超大 PR 用 `--page`/`--per_page` 拉全；仍不全则 `git-repo tree --depth single` 按目录**逐层**拉取，或只读 `grape git ls-tree -r` 兜底。⚠️ GitCode 不支持 `--depth recursive`（返回 HTTP 400「暂不支持递归树」），**不要**用它兜底。
 
 ### Step 3 · 跑 3 只读脚本取证（必做）
 
@@ -151,7 +151,7 @@ echo "$SCENE_NODES" | jq -r '[.nodes[]?.tag // .nodes[]?.skill] | unique | join(
 | `pulls get` / API 5xx | `grape tasks wait --task-id` 或 CLI 内置退避重试；仍失败 `grape git ls-remote origin` 核对远端 ref 后再继续 |
 | 脚本 `not a directory` / 输出为空 | `REPO_PATH` 必须是仓库根（含 `src/` 或 `tests/` 的层级），不是子目录 |
 | 脚本结论与代码矛盾 | 以代码/配置 file:line 为准，脚本输出降级为线索并在报告注明 |
-| `pulls files` 清单不全 | `--page`/`--per-page` 翻页拉全 |
+| `pulls files` 清单不全 | `--page`/`--per_page` 翻页拉全；目录层级用 `git-repo tree --depth single` 逐层拉取或 `grape git ls-tree -r`（`--depth recursive` 仅 GitHub 支持，GitCode 返回 400） |
 | 评论发布 422 | 降级 `git-repo issues comments create --number {PR_NUMBER}`；仍失败 → 说明并标注人工介入 |
 | 401 凭据失效 | 说明「凭据已失效」，不换 token |
 | 403 账户/平台类端点 | 需 `grape_`/JWT；本技能一般用不到，不绕行 |
