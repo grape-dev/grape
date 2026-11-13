@@ -468,7 +468,26 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
                 # D99：cred_type 归一 {'bot','webhook'}；两步法 UPDATE→INSERT
                 # （双方言一致，无 ON CONFLICT/REPLACE 方言分支）
                 from src.domains.mgmt.user.db import _encrypt_repo_secret as _enc_rs
+                # P3-5f-3：grape_t_repo_credentials 在 runtime 域（两步法 UPDATE→INSERT 收成一个原语）
+                import time as _t_gb
+                from src.kernel.domain_read import runtime_lib as _rt_lib_gb
+                from src.kernel import cross_write as _xw_gb
+                _rt_gb = _rt_lib_gb(foreign_only=True)
+                _gb_ts = _t_gb.strftime("%Y-%m-%d %H:%M:%S")
                 for _ct in ("bot", "webhook"):
+                    _gb_done = False
+                    if _rt_gb is not None:
+                        _rt_gb_ok = _rt_gb
+                        _gb_val = _enc_rs(new_token)
+                        _gb_done = _xw_gb.submit_if_lib(
+                            _rt_gb_ok, "runtime", "repo_credential_upsert",
+                            f"repo-cred:{repo_key}:{_ct}",
+                            {"repo_key": repo_key, "cred_type": _ct, "value": _gb_val,
+                             "updated_at": _gb_ts},
+                            lambda ct=_ct, v=_gb_val: _rt_gb_ok.upsert_repo_credential(
+                                repo_key, ct, v, _gb_ts), log)
+                    if _gb_done:
+                        continue
                     _cur2 = c.execute(
                         "UPDATE grape_t_repo_credentials SET value=?, updated_at=(datetime('now')) "
                         "WHERE repo_key=? AND cred_type=?",

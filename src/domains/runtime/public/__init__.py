@@ -999,6 +999,84 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
     return out
 
 
+def change_credential_scope(cid: str, scope: str, repo_key: str, owner_id: str,
+                           org_id: str) -> dict[str, Any]:
+    """切换凭据 scope：凭据行 + 其引擎行 + 同凭据重名引擎行合并，**一个事务**。
+
+    合并口径与原 `merge_duplicate_engine_rows` 一致：按 (credential_id, lower(name)) 去重、
+    保留 MAX(id)、迁移 capabilities 与 tags_user_set。返回 {credential, engines, merged}。
+    """
+    import json as _json  # noqa: F401  (保持与其它写原语同风格)
+
+    cid_s = str(cid)
+    out: dict[str, Any] = {"credential": 0, "engines": 0, "merged": {}}
+    with db_registry.transaction("runtime") as c:
+        c.execute("UPDATE runtime_credentials SET scope=%s, repo_key=%s, owner_id=%s, org_id=%s "
+                  "WHERE id=%s", (scope, repo_key or None, owner_id, org_id, cid_s))
+        out["credential"] = int(c.rowcount or 0)
+
+        # ---- 合并同凭据下的重名引擎行（保留 MAX(id)）----
+        rid_map: dict[int, int] = {}
+        c.execute("SELECT id, lower(name), tags_user_set FROM agent_runtimes WHERE credential_id=%s",
+                  (cid_s,))
+        groups: dict[str, list[tuple[int, int]]] = {}
+        for rid, lname, tus in c.fetchall():
+            groups.setdefault(str(lname or ""), []).append((int(rid), int(tus or 0)))
+        replaced_ids: list[int] = []
+        for _lname, items in groups.items():
+            if len(items) < 2:
+                continue
+            items_sorted = sorted(items, key=lambda x: x[0])
+            surviving = items_sorted[-1][0]
+            replaced = [rid for rid, _ in items_sorted[:-1]]
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (surviving,))
+            if not c.fetchone():
+                for rid in replaced:
+                    c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (rid,))
+                    if c.fetchone():
+                        c.execute("UPDATE engine_capabilities SET runtime_id=%s, "
+                                  "updated_at=CURRENT_TIMESTAMP WHERE runtime_id=%s", (surviving, rid))
+                        break
+            if items_sorted[-1][1] == 0 and any(tus for _, tus in items_sorted[:-1]):
+                c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=%s", (surviving,))
+            for rid in replaced:
+                rid_map[rid] = surviving
+            replaced_ids.extend(replaced)
+        if replaced_ids:
+            ph = ",".join(["%s"] * len(replaced_ids))
+            c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(replaced_ids))
+            c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(replaced_ids))
+        out["merged"] = {str(k): v for k, v in rid_map.items()}
+
+        c.execute("UPDATE agent_runtimes SET scope=%s, owner_id=%s, org_id=%s, repo_key=%s "
+                  "WHERE credential_id=%s", (scope, owner_id, org_id, repo_key or None, cid_s))
+        out["engines"] = int(c.rowcount or 0)
+    return out
+
+
+_REASSIGN_TABLES = ("agent_runtimes", "runtime_credentials", "chat_conversations",
+                    "devops_agent_session", "issue", "agent_tasks")
+
+
+def reassign_repo_org_id(repo_key: str, org_id: str) -> dict[str, int]:
+    """仓库迁移时把本域 4 张表的 org_id 一起改到目标组织（表名固定，不接受动态表名）。"""
+    out: dict[str, int] = {}
+    with db_registry.transaction("runtime") as c:
+        for tbl in _REASSIGN_TABLES:
+            try:
+                c.execute(f"UPDATE {tbl} SET org_id=%s WHERE repo_key=%s", (org_id, repo_key))
+                out[tbl] = int(c.rowcount or 0)
+            except Exception as exc:  # noqa: BLE001 - 旧库缺列不致命（与原实现一致）
+                out[tbl] = 0
+                log_msg = f"reassign_repo_org_id({tbl}) skipped: {exc}"
+                try:
+                    import logging
+                    logging.getLogger(__name__).warning(log_msg)
+                except Exception:  # noqa: BLE001
+                    pass
+    return out
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -1032,4 +1110,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "upsert_repo_credential", "clear_repo_credential",
            "ensure_device_credential", "touch_credential_metrics",
            "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
-           "purge_runtime_credential"]
+           "purge_runtime_credential", "change_credential_scope", "reassign_repo_org_id"]

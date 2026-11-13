@@ -368,9 +368,26 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
                 if row:
                     cid = row[0]
                     try:
-                        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
-                        rids = [r[0] for r in c.fetchall()]
-                        if rids:
+                        # P3-5f-2：runtime 半区（会话摘绑+能力+引擎行+凭据）收成一个组合原语，
+                        # 同步直连（删除环境要立刻生效）。返回 rids 供 mgmt 半区删 binding。
+                        from src.kernel.domain_read import runtime_lib as _rt_lib_pv
+                        _rt_pv = _rt_lib_pv(foreign_only=True)
+                        _purged = None
+                        if _rt_pv is not None:
+                            _purged = _rt_pv.purge_runtime_credential(str(cid))
+                            rids = [int(x) for x in (_purged.get("rids") or [])]
+                        else:
+                            c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
+                            rids = [r[0] for r in c.fetchall()]
+                        if _purged is not None:
+                            if rids:
+                                _ph_p = ",".join("?" * len(rids))
+                                c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({_ph_p})", rids)
+                            log.info(f"删除环境 {env_name} 的凭据 (id={cid}) 及关联 runtime（lib）: "
+                                     f"engines={_purged.get('engines')} caps={_purged.get('caps')}")
+                        if _purged is not None:
+                            pass
+                        elif rids:
                             ph = ",".join("?" * len(rids))
                             c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rids)
                             # P3-5g：devops_agent_session 在 runtime 域
@@ -388,8 +405,9 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
                                         [int(x) for x in rids]), log)
                             if not _ds_done:
                                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rids)
-                        c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
-                        c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
+                        if _purged is None:
+                            c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
+                            c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
                         log.info(f"删除环境 {env_name} 的凭据 (id={cid}) 及关联 runtime")
                     except Exception as ex:
                         log.warning(f"清理环境 {env_name} 的凭据失败: {ex}")

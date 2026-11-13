@@ -2339,17 +2339,26 @@ def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_
 
     # 执行 org_id 改写（repo_key 不变，只改 Grape 内的组织归属）
     # 所有同时含 org_id + repo_key 列的表都要更新
-    _ORG_ID_TABLES = (
-        "managed_repos", "devops_pipeline_scene", "issue", "events",
-        "agent_tasks", "agent_runtimes", "agent_shared_knowledge",
-        "chat_conversations", "devops_agent_session", "runtime_credentials",
-        "scene_market", "session_api_tokens",
+    # P3-5f-2：12 张表跨两个域 —— mgmt 表本地改，runtime 表由组合原语改（固定表清单，
+    # 不接受动态表名，避免跨域开任意写口子）。拆分后不可能单事务，故语义改为"按域分期"。
+    _MGMT_ORG_ID_TABLES = (
+        "managed_repos", "devops_pipeline_scene", "events",
+        "agent_shared_knowledge", "scene_market", "session_api_tokens",
     )
     try:
         with db_lock:
             c = db.cursor()
             updated = 0
-            for tbl in _ORG_ID_TABLES:
+            from src.kernel.domain_read import runtime_lib as _rt_lib_mg
+            _rt_mg = _rt_lib_mg(foreign_only=True)
+            if _rt_mg is not None:
+                try:
+                    _rt_res = _rt_mg.reassign_repo_org_id(repo_key, target_org_id)
+                    updated += sum(int(v or 0) for v in (_rt_res or {}).values())
+                    log.info(f"migrate_repo: runtime 侧 org_id 改写 {_rt_res}")
+                except Exception as _e_rt:
+                    log.warning(f"migrate_repo: runtime 侧 org_id 改写失败: {_e_rt}")
+            for tbl in _MGMT_ORG_ID_TABLES:
                 try:
                     c.execute(
                         f"UPDATE {tbl} SET org_id=? WHERE repo_key=?",

@@ -1961,6 +1961,16 @@ def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(
         #   判断走 from_repo_key(owner_id) in user_repos，owner_id 为空 → 同仓库其他成员永远看不到）；
         # - user scope：owner_id 清空（user scope 注册时按 owner_name 从 grape_accounts 重算，不依赖此字段）。
         _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
+        # P3-5f-2：凭据行 + 引擎行 + 重名合并全在 runtime 域 → 一个组合原语（同步直连，切 scope 要立刻生效）
+        from src.kernel.domain_read import runtime_lib as _rt_lib_csc
+        _rt_csc = _rt_lib_csc(foreign_only=True)
+        if _rt_csc is not None:
+            _csc = _rt_csc.change_credential_scope(str(cid), scope, repo_key or "",
+                                                   _new_owner_id, _new_org_id)
+            log.info(f"Credential scope changed via lib: cid={cid} scope={scope} "
+                     f"repo_key={repo_key} org_id={_new_org_id} engines={_csc.get('engines')} "
+                     f"merged={_csc.get('merged')}")
+            return {"scope": scope, "repo_key": repo_key}
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
                   (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
         # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）。
