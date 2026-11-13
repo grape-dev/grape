@@ -67,7 +67,9 @@ def install_request_middleware(app: FastAPI) -> None:
         if not _repo:
             _qp = request.query_params.get("repo", "")
             if _qp:
-                _repo = f"gitcode:{_qp}" if not _qp.startswith("gitcode:") else _qp
+                # 已有 provider 前缀（github:o/r 等任意在册平台）原样保留；裸键才补默认前缀
+                from src.kernel.repo_key import to_repo_key
+                _repo = _qp if ":" in _qp else to_repo_key(_qp)
         token_repo = repo_var.set(_repo)
 
         # 从 Authorization header 提取 user_id
@@ -142,7 +144,11 @@ def install_request_middleware(app: FastAPI) -> None:
                     "duration_ms": round(duration),
                 }
                 msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
-                if status >= 500:
+                # RUM 反代未配置（GRAPE_FARO_UPSTREAM 空）时 /faro/collect 固定 503：
+                # 这是 feature-off 状态而非事故，前端会持续上报 → 降到 debug，避免刷 ERROR。
+                if redacted_path == "/faro/collect" and status == 503:
+                    _log.debug(msg, extra=extra)
+                elif status >= 500:
                     _log.error(msg, extra=extra)
                 elif status == 401:
                     if path.startswith("/api/runtime/"):

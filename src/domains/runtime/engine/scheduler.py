@@ -9,22 +9,33 @@
 - agent 产出中解析问题列表(findings)，用户可手动派发为真实 Issue 走完整流水线
 - event_seq 用 autopilot_executions.id（非0，避免多任务并发覆盖）
 """
+
 from __future__ import annotations
 
 import asyncio
+
 import json
+
 import os
+
 import re
+
 import time
+
 from datetime import datetime, timezone, timedelta
+
 from typing import Optional
 
 from src.kernel.config import log
+
 from src.kernel.session_manager import db, db_lock
 
 _SCHEDULER_INTERVAL = 60  # 秒：调度器扫描间隔
+
 _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
+
 _MAX_RETRY_DELAY = 300    # 秒：退避上限
+
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
 # Issue #537：pending_self_report 超时（worker 未自报）→ timeout_failed 兜底阈值；
@@ -33,7 +44,9 @@ _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id �
 # 在执行中重启主控，重启瞬间 pending_since 重置，1800s 窗口实际退化为「重启后 30 分钟」，
 # 剩余工序经常超 30 分钟被误判 timeout_failed；配合判死前活跃流豁免（见 sweep）双保险。
 PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "5400"))
+
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
+
 # Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
 # 避免「回收器抢在真任务落库前判定终态」的竞态；时区解析规则同 _get_exec_agent_task。
 # 窗口来源：Issue #1546 中派发链路（pick_engine → enqueue_task → 回写 execution）的落库时延，
@@ -43,7 +56,36 @@ ZOMBIE_YOUNG_GRACE_SECONDS = int(os.environ.get("ZOMBIE_YOUNG_GRACE_SECONDS", "1
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
 
-# ====== findings 解析 ======
+
+def _autopilot_issue_ref(task_id) -> str:
+    """P8-consistency：autopilot 任务（agent_type='issue'）的 issue 统计回链键。
+
+    autopilot 巡检任务没有真实 issue 关联，但 agent_tasks.issue_id 是 dashboard issue
+    统计/时间线的分组键（src/domains/insight/routes/dashboard.py:565 按 issue_id IS NOT
+    NULL 回链分组）——创建入队时不落 issue_id，失败任务就整体丢出 issue 统计，导致三页面
+    数字对不上。本函数在任务创建时即产出确定性合成键（同一 autopilot 任务每次触发相同），
+    使直接模式与远端入队模式（含失败路径）的 agent_tasks 行都带回链。
+
+    为什么必须无数字：issue_id 的下游解析链
+    - engine/service.py `_issue_num`（re 搜任意数字）→ collect_knowledge_files 按真实
+      issue 号过滤成员知识；
+    - engine/agent.py / repogit.py worktree 分支派生。
+    含数字的合成 id（如 autopilot-12）会被 `_issue_num` 误挂到真实 issue #12。纯字母键使
+    `_issue_num`→0、get_issue_scene 查不到场景行（回退 default），worktree 门
+    （issue 型非 _GIT_AGENTS）天然短路——合成键只作为统计分组键生效，不驱动任何 issue
+    号解析行为。串行锁继续走 issue_session_id（合成会话 autopilot-<id>），与本键无关。
+    """
+    try:
+        n = int(task_id or 0)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(ord("a") + r) + s
+    return f"autopilot-{s}"
 
 _FINDINGS_PATTERN = re.compile(
     r'<!--\s*autopilot-findings\s*(.*?)\s*-->',
@@ -73,7 +115,6 @@ _FINDINGS_FORMAT_TEMPLATE = """\
 - findings 为空数组表示未发现问题
 - 即使未发现问题也要包含空数组：{"result":"ok","summary":"任务执行完成，未发现问题","findings":[]}"""
 
-
 def _strip_trailing_garbage(raw: str) -> str:
     """剥离 JSON 尾部非 JSON 残余字符。
 
@@ -85,7 +126,6 @@ def _strip_trailing_garbage(raw: str) -> str:
     while s and s[-1] in ('-', ' ', '\t', '\n', '\r'):
         s = s[:-1].rstrip()
     return s
-
 
 def _heal_findings_marker(text: str) -> str:
     """修复 ACP 流式输出在标记头中插入的换行符。
@@ -115,22 +155,18 @@ def _heal_findings_marker(text: str) -> str:
             text = text[:m.start()] + '-->' + text[m.end():]
     return text
 
-
-# ====== Issue #697：dedup 判定级别枚举 + 门禁判定（代码级强制，单一事实源） ======
-# prompt_builder / routes/autopilot.py 均从这里取常量与判定函数，禁止各自复制规则文本。
-
 DEDUP_LEVEL_EXACT = "exact_duplicate"
+
 DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+
 DEDUP_LEVEL_NOT = "not_duplicate"
+
 DEDUP_LEVELS = (DEDUP_LEVEL_EXACT, DEDUP_LEVEL_SUSPECTED, DEDUP_LEVEL_NOT)
 
 # 写入公开 Issue 描述 / 确认人字段的限长（防 LLM 长文注入公开面）
 DEDUP_NOTE_MAX_CHARS = 200
+
 DEDUP_CONFIRMED_BY_MAX_CHARS = 64
-
-# 注：判重规则的 prompt 文本已按运维决定移除（不再改自动化任务的 prompt）；
-# 这里只保留代码侧门禁所需的级别枚举与判定函数。
-
 
 def normalize_dedup_level(raw) -> str:
     """判定级别归一（fail-closed）。
@@ -143,16 +179,13 @@ def normalize_dedup_level(raw) -> str:
         return ""
     return level if level in DEDUP_LEVELS else DEDUP_LEVEL_SUSPECTED
 
-
 def sanitize_dedup_note(raw) -> str:
     """dedup_note 压平换行 + 限长（写入公开 Issue 描述前调用）。"""
     return " ".join(str(raw or "").split())[:DEDUP_NOTE_MAX_CHARS]
 
-
 def sanitize_dedup_confirmed_by(raw) -> str:
     """dedup_confirmed_by 压平 + 限长（确认人身份字段，非自由文本）。"""
     return " ".join(str(raw or "").split())[:DEDUP_CONFIRMED_BY_MAX_CHARS]
-
 
 def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
     """并入挂靠门禁：exact 允许；未分类（空）保持既有行为允许；疑似/未知需 owner 确认。"""
@@ -160,7 +193,6 @@ def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool
     if level in ("", DEDUP_LEVEL_NOT, DEDUP_LEVEL_EXACT):
         return True
     return bool(dedup_confirmed)
-
 
 def parse_findings(agent_output: str) -> dict:
     """从 agent 产出中解析问题列表。
@@ -228,9 +260,6 @@ def parse_findings(agent_output: str) -> dict:
     except json.JSONDecodeError as e:
         return {"summary": "", "findings": [], "parse_error": str(e)}
 
-
-# ====== prompt 构建 ======
-
 def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     """构建定时任务的 prompt。不依赖 issue/scene/pipeline 上下文。"""
     parts = []
@@ -279,9 +308,6 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     parts.append("\n执行以上指令，不要操作 GitCode Issue（不需要回帖/打标签/关 Issue），结果直接输出。")
     return "\n".join(parts)
 
-
-# ====== agent 执行 ======
-
 def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     """执行单个 autopilot agent（在线程池中运行）。
 
@@ -325,17 +351,21 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     ws = get_agent_workdir(repo_key, agent_type, "")
     os.makedirs(ws, exist_ok=True)
 
-    # 3. bot token（按 provider 分流）
+    # 3. bot token 校验（D101 方案二 W5，评审 v2 第 3 点）：传输值退役恒空，
+    # 校验只取来源级别（resolve_config_level 纯读，不检查过期不触发 refresh，
+    # 禁消费 .token）——空启动守卫语义保留（无任何 bot 配置 → 不启动），
+    # token 值传输职责移交 claim 唯一注入点。
     repo_token = ""
     try:
-        if repo_key.startswith("github:"):
-            from src.domains.mgmt.user.db import get_github_token
-            repo_token = get_github_token(repo_key=repo_key) or ""
-        else:
-            from src.domains.mgmt.user.db import get_gitcode_token
-            repo_token = get_gitcode_token(repo_key=repo_key) or ""
+        from src.kernel.token_service import resolve_repo_config_level
+        _lvl = resolve_repo_config_level(repo_key).level or ""
+        if _lvl == "":
+            log.warning(f"Autopilot exec {exec_id}: no bot token configured for {repo_key} (empty short-circuit)")
+        elif _lvl == "user":
+            log.warning(f"Autopilot exec {exec_id}: repo {repo_key} is user-level (claim-time injection)")
+        # repo_token 不再赋值传输——恒空进 enqueue（行值退役）
     except Exception as e:
-        log.warning(f"Autopilot exec {exec_id}: get bot token failed: {e}")
+        log.warning(f"Autopilot exec {exec_id}: token config check failed: {e}")
 
     # 4. 构建 prompt
     prompt = _build_autopilot_prompt(task, repo_key, repository)
@@ -356,15 +386,32 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
-    from src.prompt_builder import resolve_task_server_env
+    from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key）。
-    from src.repo_key import derive_repo_identity
+    from src.kernel.repo_key import derive_repo_identity
     _full_name, _repo_owner, _repo_name = derive_repo_identity(repository, repo_key)
+    # Issue #1819：autopilot 无事件 actor，不得把仓库全名（owner/repo）注入 $ACCOUNT。
+    # 取「任务创建者」账号作来源（autopilot_tasks.created_by → user_accounts.username）；
+    # 查不到才留空并告警。语义是创建者而非本次触发人，detail 里标明 account_source。
+    from src.domains.runtime.pipeline.account_env import log_account_alert, task_creator_account
+    _autopilot_account = task_creator_account(task.get("created_by") or 0)
+    if not _autopilot_account:
+        # created_by=0 的历史任务属常态，按 info 记录以免稀释真实 warning 信号。
+        log_account_alert(
+            "ACCOUNT_MISSING", level="info",
+            event_type="autopilot",
+            repository=repository,
+            repo_key=repo_key,
+            exec_id=exec_id,
+            fallback="autopilot_created_by->none",
+            owner_fallback=False,
+            account_source="task_creator",
+        )
     env_extra = {
         "REPO_FULL_NAME": _full_name or repository,
         "REPO_OWNER": _repo_owner,
         "REPO_NAME": _repo_name,
-        "ACCOUNT": repository,
+        "ACCOUNT": _autopilot_account,
         # Issue #1577：与事件/chat 同源注入两项服务基址，远端 autopilot worker
         # 的业务命令免 --base-url 可用（direct 模式注入本机回环同样正确）。
         **resolve_task_server_env(engine_id),
@@ -387,6 +434,16 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
 
+    # Issue #1811：定时调度与 event_pipeline 同源注入 bot 身份，单点覆盖 DIRECT/REMOTE。
+    # 函数内延迟 import，避免 scheduler ↔ event_pipeline 模块级循环依赖。
+    from src.domains.runtime.pipeline.event_pipeline import _inject_bot_agent_env
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
+    if not env_extra.get("BOT_USERNAME"):
+        log.warning(
+            f"Autopilot exec {exec_id}: BOT_USERNAME unresolved for repo={repository}; "
+            "skill author filtering will degrade"
+        )
+
     # 7. 分流执行
     if _is_direct:
         # DIRECT 模式：本机执行
@@ -400,7 +457,6 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
                                   engine_id, backend, inst_name, ws, prompt,
                                   repo_token, agent_display_name, env_extra, repository, evt)
 
-
 def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                               engine_id, backend, inst_name, ws, prompt,
                               repo_token, agent_display_name, env_extra, repository,
@@ -409,10 +465,12 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
 
     # 创建 agent_tasks 记录（用 exec_id 作为 event_seq，skip_event_config=True 不写 events 表）
+    # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
+    # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
     task_id = _create_direct_task(
         repo_key, exec_id, agent_type, backend, skill_name,
         "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
-        issue_id="", skill_id=0, skip_event_config=True,
+        issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
     )
     if not task_id:
         log.warning(f"Autopilot exec {exec_id}: _create_direct_task failed")
@@ -430,6 +488,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
                                                    skill_mismatch_error)
         from src.domains.runtime.engine.task_log_stream import build_skill_source_message
         _sv = (evt or {}).get(SKILL_CONSISTENCY_KEY) or {}
+        _sk_mat = (evt or {}).get("_skill_materialize") or {}
         if not _sv:
             # 判定缺失（物化异常等）→ 显式降级放行 + 告警，不静默当作通过
             log.warning(f"Autopilot exec {exec_id}: skill consistency verdict missing "
@@ -437,7 +496,9 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         else:
             _src_line = build_skill_source_message(
                 _sv.get("bound", ""), _sv.get("actual", ""), _sv.get("source", ""),
-                ok=_sv.get("ok", True), reason=_sv.get("reason", ""))["data"]["text"]
+                ok=_sv.get("ok", True), reason=_sv.get("reason", ""),
+                source_info=_sk_mat.get("source") or None,
+                drift=_sk_mat.get("drift") or None)["data"]["text"]
             log.info(f"Autopilot exec {exec_id}: skill source {_src_line}")
             if _sv.get("ok") is False:
                 _sv_err = skill_mismatch_error(_sv)
@@ -487,7 +548,6 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         _mu.finish(session_id="")
     except Exception as _ue:
         log.warning(f"Autopilot exec {exec_id}: usage finish failed: {_ue}")
-
 
 def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
                               engine_id, backend, inst_name, ws, prompt,
@@ -581,12 +641,15 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             event_type="autopilot_event",
             account=repository,
             user_id=task.get("created_by") or 0,  # Issue #432: 写任务创建者，user scope 引擎才能认领（原硬编码 0 导致个人级引擎绑定的自动化任务永久 queued）
-            repo_gitcode_token=repo_token,
+            repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取（W5）
             user_gitcode_token="",
             env_extra=env_extra,
             event_seq=exec_id,
-            issue_id="",  # 保持空：issue_id 会驱动场景/成员知识/工作目录按 issue 号解析，
-                          # 合成 id 含数字会被 _issue_num 误挂到真实 issue；串行锁只看 issue_session_id
+            issue_id=_autopilot_issue_ref(task.get("id")),
+            # P8-consistency：issue 回链键创建即落（无数字合成键 autopilot-<letters>）。
+            # 旧注释顾虑已由键的形态消除：纯字母键使 service._issue_num→0、
+            # get_issue_scene 查不到行（回退 default），不会按 issue 号解析场景/成员知识/
+            # 工作目录，也不会误挂真实 issue；串行锁只看 issue_session_id（不变）。
             repo_key=repo_key,
             agent_type=agent_type,
             skill=skill_name,
@@ -627,7 +690,6 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
         log.error(f"Autopilot exec {exec_id}: enqueue failed: {e}")
         _update_execution_result(exec_id, "failed", error=f"入队异常: {e}")
 
-
 def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_text: str):
     """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。"""
     # 更新 agent_tasks 状态（用 task_id 精确更新）
@@ -642,6 +704,8 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
             exit_code=exit_code,
             result_text=final_text[:5000],
             completed_at=datetime.now(timezone.utc).isoformat(),
+            # Issue #1938：补偿归因——该路径由 scheduler 收尾，非任务自报
+            cascade_trigger="sweeper",
         )
     except Exception as e:
         log.warning(f"Autopilot exec {exec_id}: update agent_tasks failed: {e}")
@@ -686,15 +750,13 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
     _notify_subscribers(_exec_task_id(exec_id), exec_id, status,
                         _result_summary, findings_result)
 
-
-# ====== 飞书订阅通知（autopilot-feishu-subscription-design.md §4.4）======
-
 # result 判级 → 卡片模板色（§5.3）；执行失败/取消不查 result 直接红
 _RESULT_TEMPLATE = {"ok": "green", "warning": "yellow", "error": "red", "": "grey"}
+
 _RESULT_TITLE = {"ok": "✅ 任务执行完成", "warning": "⚠️ 任务执行完成（有需关注事项）",
                  "error": "❌ 任务执行需处理", "": "✅ 任务执行完成"}
-_SEVERITY_EMOJI = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
+_SEVERITY_EMOJI = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 def _autopilot_result_level(status: str, findings_result: dict) -> str:
     """终态 → 判级：执行失败/取消直接 error；成功取 findings 的 result 字段（旧数据缺省空）。"""
@@ -702,7 +764,6 @@ def _autopilot_result_level(status: str, findings_result: dict) -> str:
         return "error"
     _r = (findings_result or {}).get("result", "")
     return _r if _r in ("ok", "warning", "error") else ""
-
 
 def build_exec_card(task_name: str, repo_key: str, exec_id: int, status: str,
                     result_summary: str, findings_result: dict, web_url: str) -> dict:
@@ -772,7 +833,6 @@ def build_exec_card(task_name: str, repo_key: str, exec_id: int, status: str,
         },
     }
 
-
 def _lark_findings_elements(findings: list) -> list:
     """findings → 2.0 卡片元素列表（div 列表——emoji 分级 + 标题 + 灰字类别）。空列表返回空。"""
     if not findings:
@@ -786,7 +846,6 @@ def _lark_findings_elements(findings: list) -> list:
     if len(findings) > 10:
         lines.append(f"<font color='grey'>其余 {len(findings) - 10} 个见详情</font>")
     return [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)[:1800]}}]
-
 
 async def _run_autopilot_notify(ctx, api, user_id: int, open_id: str,
                                 card: dict, task_id: int, exec_id: int):
@@ -807,7 +866,6 @@ async def _run_autopilot_notify(ctx, api, user_id: int, open_id: str,
     except Exception as e:
         log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} user={user_id} send failed: {e}")
 
-
 def _exec_task_id(exec_id: int) -> int:
     """exec_id → task_id 反查（通知挂载点用）；查不到返回 0（_notify_subscribers 内 JOIN 不到行 → noop）。"""
     try:
@@ -819,7 +877,6 @@ def _exec_task_id(exec_id: int) -> int:
     except Exception as e:
         log.warning(f"Autopilot: exec task id lookup failed {exec_id}: {e}")
         return 0
-
 
 def _notify_subscribers(task_id: int, exec_id: int, status: str,
                         result_summary: str, findings_result: dict):
@@ -861,14 +918,14 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
                                result_summary, findings_result, _web_url)
         # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
         from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
-        from src.api import main as api_main
-        bm = getattr(api_main, "bot_manager", None)
+        from src.domains.runtime.im.engine_wiring import feishu_api
         _loop = asyncio.get_event_loop()
         for user_id, _, _ in rows:
             try:
                 open_id = _get_feishu_open_id_by_user_id(user_id) or ""
-                ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
-                api = bm.api if bm else None
+                ctx = _resolve_user_chat_bot(None, user_id)
+                # 旧 IM 下线 A2 M2：api 不再来自 BotManager，按本人 bot 的 app_id 取共享客户端
+                api = feishu_api(ctx.app_id) if ctx is not None else None
                 _loop.create_task(_run_autopilot_notify(ctx, api, user_id, open_id,
                                                         card, task_id, exec_id))
             except Exception as e:
@@ -876,7 +933,6 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
                             f"resolve failed: {e}")
     except Exception as e:
         log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} notify failed: {e}")
-
 
 def _update_execution_result(exec_id: int, status: str, result: str = "",
                              error: str = "", findings_json: str = ""):
@@ -912,9 +968,6 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
     except Exception as e:
         log.warning(f"Autopilot: update execution {exec_id} failed: {e}")
 
-
-# ====== 调度器 ======
-
 def _get_enabled_tasks() -> list[dict]:
     """获取所有启用的 autopilot 任务。"""
     with db_lock:
@@ -934,7 +987,6 @@ def _get_enabled_tasks() -> list[dict]:
             "work_branch": r[11] if len(r) > 11 else "",
         })
     return tasks
-
 
 def _is_cron_due(cron_expr: str, last_run: str) -> bool:
     """判断 cron 表达式是否在当前时间窗口（最近 60s）内到期。"""
@@ -964,7 +1016,6 @@ def _is_cron_due(cron_expr: str, last_run: str) -> bool:
         log.warning(f"Autopilot: cron parse failed '{cron_expr}': {e}")
         return False
 
-
 def _compute_next_run(cron_expr: str) -> str:
     """计算 cron 表达式的下次触发时间（本地时区，ISO 格式）。"""
     try:
@@ -977,7 +1028,6 @@ def _compute_next_run(cron_expr: str) -> str:
         return nxt.isoformat()
     except Exception:
         return ""
-
 
 def _create_execution(task_id: int, agent_type: str) -> int:
     """创建执行记录，返回 execution_id。"""
@@ -993,12 +1043,10 @@ def _create_execution(task_id: int, agent_type: str) -> int:
         db.commit()
         return c.lastrowid
 
-
 def _update_execution(exec_id: int, status: str, result: str = "", error: str = "",
                       retry_count: Optional[int] = None):
     """更新执行记录状态（兼容旧调用，内部转 _update_execution_result）。"""
     _update_execution_result(exec_id, status, result=result, error=error)
-
 
 def _update_task_run_info(task_id: int, next_run: str):
     """更新任务最近运行时间和下次预计运行时间。"""
@@ -1010,7 +1058,6 @@ def _update_task_run_info(task_id: int, next_run: str):
             (now_str, next_run, now_str, task_id)
         )
         db.commit()
-
 
 def _parse_iso_aware(value):
     """解析 ISO 时间串为 aware datetime（无时区按 UTC 补齐），失败返回 None。"""
@@ -1024,9 +1071,7 @@ def _parse_iso_aware(value):
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
-
 _AGENT_TASK_SELECT = "id, status, result_text, exit_code, skill, env_extra, runtime_id"
-
 
 def _agent_task_view(row):
     """将 agent_tasks 行（`_AGENT_TASK_SELECT` 列序）映射为 evidence 校验用 dict。"""
@@ -1037,7 +1082,6 @@ def _agent_task_view(row):
         "env_extra": row[5] or "",
         "runtime_id": row[6] or 0,
     }
-
 
 def _get_exec_agent_task(c, exec_id, agent_task_id="", started_at="", created_at=""):
     """按执行记录解析对应 agent_tasks 行（Issue #1546）。
@@ -1083,7 +1127,6 @@ def _get_exec_agent_task(c, exec_id, agent_task_id="", started_at="", created_at
         if _seen is not None and _seen >= _since:
             return _r
     return None
-
 
 async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
                                      poll_interval: float = 10.0) -> str:
@@ -1185,7 +1228,6 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
                         f"worker 执行超时 ({timeout}s)", {})
     return "failed"
 
-
 async def _execute_task(task: dict):
     """执行单个 autopilot 任务（含重试逻辑）。"""
     task_id = task["id"]
@@ -1248,7 +1290,6 @@ async def _execute_task(task: dict):
     finally:
         _RUNNING_TASKS.discard(task_id)
 
-
 def _offline_duration_seconds(last_seen_at: str):
     """引擎已离线秒数；last_seen_at 缺失/解析失败 → None（信息不足，不判死）。
 
@@ -1272,12 +1313,10 @@ def _offline_duration_seconds(last_seen_at: str):
     except Exception:
         return None
 
-
 # Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 600s 视为
 # 「执行中」（worker 还在产出执行流），跳过本轮判死。600s 与调度扫描周期（60s）量级
 # 匹配，避免无限豁免；真沉默任务最多延迟一轮（60s 扫描 + 600s 静默窗）被回收。
 _PENDING_STREAM_ACTIVE_WINDOW_SECONDS = 600
-
 
 def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
     """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 600s → True。
@@ -1304,7 +1343,6 @@ def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
         log.warning(f"pending stream activity check failed for task {task_id}: {_e}")
         return False
 
-
 def _parse_pending_since(value: str) -> float | None:
     """pending_since → epoch 秒。
 
@@ -1330,7 +1368,6 @@ def _parse_pending_since(value: str) -> float | None:
             from src.domains.runtime.engine.health import parse_dt
             return parse_dt(s)
     return dt.timestamp()
-
 
 def _sweep_pending_self_report_timeouts() -> int:
     """pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed。
@@ -1383,7 +1420,9 @@ def _sweep_pending_self_report_timeouts() -> int:
             try:
                 update_task_status(tid, "timeout_failed", exit_code=-1,
                                    errors=json.dumps([_reason], ensure_ascii=False),
-                                   completed_at=_now)
+                                   completed_at=_now,
+                                   # Issue #1938：补偿归因（sweeper 超时兜底）
+                                   cascade_trigger="sweeper")
                 if evt_seq:
                     try:
                         update_event_complete(evt_seq, "failed", exit_code=-1,
@@ -1402,7 +1441,6 @@ def _sweep_pending_self_report_timeouts() -> int:
     except Exception as e:
         log.warning(f"sweep pending_self_report timeouts failed: {e}")
         return 0
-
 
 def _reap_zombie_executions() -> None:
     """僵尸执行回收：主控重启后 _poll_dispatched_completion 协程被杀，
@@ -1519,7 +1557,9 @@ def _reap_zombie_executions() -> None:
                             from src.domains.runtime.engine.service import update_task_status
                             update_task_status(_at_id, "failed", exit_code=-1,
                                 errors=json.dumps([f"worker 引擎离线超过 {_offline_secs:.0f}s，任务无法完成"],
-                                                  ensure_ascii=False))
+                                                  ensure_ascii=False),
+                                # Issue #1938：补偿归因（sweeper 僵尸回收判死）
+                                cascade_trigger="sweeper")
                         except Exception as _tk:
                             log.warning(f"Autopilot zombie recovery: task {_at_id} mark failed failed: {_tk}")
                         log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed "
@@ -1530,7 +1570,6 @@ def _reap_zombie_executions() -> None:
             # pending_self_report → 等待（不判死）；超时由 _sweep_pending_self_report_timeouts 兜底
     except Exception as _ze:
         log.warning(f"Autopilot zombie recovery error: {_ze}")
-
 
 async def scheduler_loop():
     """Autopilot 调度主循环——每 60 秒扫描到期任务。
@@ -1573,9 +1612,7 @@ async def scheduler_loop():
 
         await asyncio.sleep(_SCHEDULER_INTERVAL)
 
-
 _scheduler_task: Optional[asyncio.Task] = None
-
 
 def start_scheduler():
     """启动 Autopilot 调度器（在 FastAPI lifespan 中调用）。"""
@@ -1585,7 +1622,6 @@ def start_scheduler():
         return
     _scheduler_task = asyncio.ensure_future(scheduler_loop())
     log.info("Autopilot scheduler started")
-
 
 async def stop_scheduler():
     """停止 Autopilot 调度器（在 FastAPI lifespan shutdown 中调用）。"""
@@ -1598,7 +1634,6 @@ async def stop_scheduler():
             pass
         _scheduler_task = None
         log.info("Autopilot scheduler stopped")
-
 
 async def trigger_task_now(task_id: int) -> dict:
     """手动触发任务执行（异步入口）。"""

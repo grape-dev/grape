@@ -59,5 +59,9 @@
     "sre_pending": "SRE 验收任务在途，尚无结论",
     "sre_unavailable": "暂无 SRE 验收结论（无关联任务或结果不可读）",
     "sre_task_ref": "验收任务"
+  },
+  "stall_banner": {
+    "title": "完成但未接力（停滞 {{minutes}} 分钟）",
+    "hint": "平台已告警：下一棒需人工确认（场景序推导只作建议，不自动派发）"
   }
 }

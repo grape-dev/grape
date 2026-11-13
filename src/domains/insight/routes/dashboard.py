@@ -1,28 +1,33 @@
 """Dashboard 路由：仓库概览、指标、Agent 状态、运维可观察性"""
+
 from fastapi import APIRouter, Depends
+
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.domains.mgmt.user import db as user_db
+
 from src.api.deps import require_no_session_token, require_org_member
+
 from src.api.time_utils import normalize_event_time
 from src.domains.insight.observability.engine_probe import get_probe_results
 from src.kernel.config import log
 
-router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+from src.domains.insight.observability.engine_probe import get_probe_results
 
+from src.kernel.config import log
+
+router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 def _stuck_minutes() -> int:
     """stuck 预警阈值（分钟，Issue #470：随统一超时配置派生，默认超时 3600s → 22min）。"""
     from src.kernel.config import get_stuck_threshold_minutes
     return get_stuck_threshold_minutes()
 
-
 # ===== Issue #180: 本机带宽占用率差分采样缓存 =====
 _BW_SNAPSHOT = {"ts": 0.0, "bytes": 0}
-
 
 # R16.2.2: error_code → 本地化文案映射
 # 从 i18n locales 文件加载，dashboard API 返回时映射到前端可读文案
 _ERROR_CODE_I18N_CACHE: dict | None = None
-
 
 def _load_error_code_i18n() -> dict:
     """加载 error_code 的 i18n 映射（zh/en 双语）。"""
@@ -48,7 +53,6 @@ def _load_error_code_i18n() -> dict:
     _ERROR_CODE_I18N_CACHE = _result
     return _result
 
-
 def _resolve_error_messages(errors: list, lang: str = "zh") -> list:
     """R16.2.2: 遍历 errors 数组，将 error_code 映射为本地化文案。
 
@@ -69,7 +73,6 @@ def _resolve_error_messages(errors: list, lang: str = "zh") -> list:
         else:
             _result.append(_e)
     return _result
-
 
 def _local_bandwidth() -> tuple:
     """psutil.net_io_counters() 汇总非 loopback 网卡吞吐，两次调用差分算速率。
@@ -106,9 +109,6 @@ def _local_bandwidth() -> tuple:
     except Exception:
         return 0.0, 0.0
 
-
-# ===== 运维可观察性端点（必须在 /{owner}/{repo} 之前注册，否则被通配路由拦截）=====
-
 # ===== 能效看板（Issue #1229，由 weekly-10 迁入）：必须在 /{owner}/{repo} 之前注册 =====
 import re
 
@@ -121,14 +121,11 @@ def _efficiency_bot_usernames() -> set:
         log.warning(f"Dashboard efficiency: bot usernames load failed: {e}")
         return set()
 
-
 _UNASSIGNED_LABEL = "(未归属)"
-
 
 # bot 名形态（Issue #1337）：必须带分隔符或整名就是 bot，避免把真人 login 误杀。
 # 反例（实测）：abbot / robot / talbot 都以 "bot" 结尾但都是真人账号。
 _BOT_NAME_RE = re.compile(r"(?:^|[-_])bot$", re.IGNORECASE)
-
 
 def _is_bot_name(name: str) -> bool:
     """bot 规则识别（Issue #1337）：`bot` / `*_bot` / `*-bot`，大小写不敏感。
@@ -141,9 +138,11 @@ def _is_bot_name(name: str) -> bool:
     n = (name or "").strip()
     return bool(n) and bool(_BOT_NAME_RE.search(n))
 
-
 def _efficiency_uid_name_loader(c):
-    """批量加载 user_id → 平台用户名映射（gitcode_user 优先，github_login 兜底）。
+    """批量加载 user_id → 用户名映射（账号域 grape_accounts.username，平台无关。
+
+    合并重同步：weekly-10 版查 unified_user_mapping 的 gitcode_user/github_login
+    双列——多平台解耦后归属展示统一走账号域名。
 
     分块查询规避 SQLite 变量上限；返回 {user_id: name}（仅含有名字的行）。
     """
@@ -155,17 +154,15 @@ def _efficiency_uid_name_loader(c):
             part = todo[i:i + 500]
             _ph = ",".join("?" * len(part))
             c.execute(
-                "SELECT user_id, COALESCE(NULLIF(gitcode_user,''),"
-                " NULLIF(github_login,'')) FROM unified_user_mapping"
-                f" WHERE user_id IN ({_ph}) AND user_id>0",
-                tuple(part))
+                "SELECT id, username FROM grape_accounts"
+                f" WHERE id IN ({_ph})",
+                tuple(str(u) for u in part))
             for uid, name in c.fetchall():
                 if name:
                     cache[uid] = name
         return cache
 
     return _load
-
 
 @router.get("/efficiency", operation_id="dashboard_efficiency", summary="Efficiency board (deprecated)",
             deprecated=True,
@@ -184,13 +181,13 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
       归属人 = COALESCE(NULLIF(created_by,''), assignee)；完成 = status='completed'；
       排除 bot 创建人与子任务行（is_subtask_mode=1，归属父需求）。
     - token：`obs_llm_usage`（run_kind='task'）按 task_id SUM（五项 token 与
-      src/observability/tokens.py 同口径：total 不含 reasoning），经
+      src/domains/insight/observability/tokens.py 同口径：total 不含 reasoning），经
       `agent_tasks.issue_id` 回链 issue 创建人；孤儿任务（无 issue 行/归属 bot）丢弃。
     - 仓库隔离：repo 支持 owner/repo 与 platform:owner/repo 两种入参，
       双平台前缀（gitcode:/github:）同查；空 repo 返回空态（仓库维度视图）。
     - 任何查询异常降级为该路径空结果（统计不拖垮页面），绝不向上抛。
     """
-    from src.kernel.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key, repo_key_candidates
     from src.kernel.session_manager import db, db_lock
 
     # repo 归一化：入参可带或不带平台前缀；统一双前缀候选（与 get_dashboard 口径一致）
@@ -198,7 +195,7 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
     repo_key_out = ""
     if repo and repo.strip():
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_keys = repo_key_candidates(_base)
         repo_key_out = to_repo_key(_base)
 
     out = {
@@ -337,10 +334,6 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
     out["total_tokens"] = sum(r["total_tokens"] for r in rows)
     return out
 
-
-
-
-
 @router.get("/ops/engine-select-explain", operation_id="dashboard_ops_engine_select_explain",
             summary="Engine selection explain", description="Issue #605: explain engine dispatch candidates "
             "for a (repo, agent_type, scene) — bound engines, per-candidate filter reasons, "
@@ -363,7 +356,6 @@ def get_engine_select_explain(repo: str = "", agent_type: str = "vod", scene_id:
         log.warning(f"Dashboard: engine-select-explain failed: {e}")
         return {"ok": False, "error": str(e)[:200]}
 
-
 @router.get("/efficiency/board", operation_id="dashboard_efficiency_board",
             summary="Efficiency flow board",
             description="能效看板 2.0（flow efficiency）：净流入 / 总工作量 / 在制工作项 / "
@@ -385,15 +377,15 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
     - 仓库隔离：repo 空 → 空态（不做全库聚合）；越权 → 沿用 check_repo_access 的 403/404。
     - 任何查询异常不外抛，按段降级为空结果（与 /efficiency 同策略），不拖垮页面。
     """
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
-    from src.observability.efficiency import build_board
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.insight.observability.efficiency import build_board
 
     repo_keys = []
     repo_key_out = ""
     if repo and repo.strip():
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        repo_keys = repo_key_candidates(_base)
         repo_key_out = to_repo_key(_base)
 
     if not repo_keys:
@@ -430,15 +422,13 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
             "aging": {}, "cycle_time": {},
         }
 
-
 def _eff_repo_keys(repo: str):
     """repo 入参归一化 → (repo_keys, repo_key_out)。空入参返回空（仓库维度视图）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     if not (repo and repo.strip()):
         return [], ""
     base = repo.split(":", 1)[1] if ":" in repo else repo
-    return [f"gitcode:{base}", f"github:{base}"], to_repo_key(base)
-
+    return repo_key_candidates(base), to_repo_key(base)
 
 @router.get("/efficiency/daily", operation_id="dashboard_efficiency_daily",
             summary="Efficiency board daily drill-down",
@@ -447,8 +437,8 @@ def _eff_repo_keys(repo: str):
 def get_efficiency_daily(repo: str = "", week: str = "",
                          user: dict = Depends(require_org_member)):
     from datetime import datetime as _dt
-    from src.session_manager import db, db_lock
-    from src.observability.efficiency import (build_daily, parse_week_label,
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.insight.observability.efficiency import (build_daily, parse_week_label,
                                               _fetch_issue_rows, iso_week_label)
 
     repo_keys, repo_key_out = _eff_repo_keys(repo)
@@ -470,7 +460,6 @@ def get_efficiency_daily(repo: str = "", week: str = "",
         log.warning(f"Dashboard efficiency daily failed: {e}")
         return {"repo": repo_key_out, "empty": True, "error": "aggregation_failed", "days": []}
 
-
 @router.get("/efficiency/issues", operation_id="dashboard_efficiency_issues",
             summary="Efficiency board issue drill-down",
             description="某卡片某一行对应的 issue 列表（含场景）：超龄未关/周期时间/积压龄期的点击下钻。"
@@ -479,8 +468,8 @@ def get_efficiency_daily(repo: str = "", week: str = "",
 def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
                           threshold_days: int = 7, limit: int = 20, offset: int = 0,
                           user: dict = Depends(require_org_member)):
-    from src.session_manager import db, db_lock
-    from src.observability.efficiency import build_issue_list
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.insight.observability.efficiency import build_issue_list
 
     repo_keys, repo_key_out = _eff_repo_keys(repo)
     if not repo_keys:
@@ -512,8 +501,6 @@ def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
         return {"repo": repo_key_out, "items": [], "total": 0, "empty": True,
                 "error": "aggregation_failed"}
 
-
-
 @router.get("/ops/overview", operation_id="dashboard_ops_overview", summary="Ops overview", description="Real-time ops overview: task queue depth, running count, stuck detection and runtime online status.")
 def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     """实时运维概览：任务队列深度、运行数、卡住检测、runtime 在线状态。
@@ -539,7 +526,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     repo_key = ""
     if repo:
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        _repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        _repo_keys = repo_key_candidates(_base)
         repo_key = _repo_keys[0]
         _repo_filter = f" AND repo_key IN ({','.join('?' * len(_repo_keys))})"
         _repo_params = _repo_keys
@@ -776,8 +763,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         try:
             _local_hostname = ""
             try:
-                import socket as _sock
-                _local_hostname = _sock.gethostname()
+                _local_hostname = engine_host()
             except Exception:
                 pass
             c.execute(
@@ -1054,7 +1040,6 @@ def probe_engines_now(user: dict = Depends(require_org_member)):
     threading.Thread(target=_bg_probe, daemon=True).start()
     return {"status": "accepted", "results": get_probe_results()}
 
-
 @router.get("/ops/error-logs/sources", operation_id="dashboard_ops_error_log_sources")
 async def get_error_log_sources(user: dict = Depends(require_org_member)):
     """需登录：组织成员可见。返回可用的日志来源列表（主控 + 各 worker）。"""
@@ -1078,7 +1063,6 @@ async def get_error_log_sources(user: dict = Depends(require_org_member)):
             pass
         sources.append({"source": _wname, "id": int(_cred_id) if _cred_id.isdigit() else 0})
     return {"sources": sources}
-
 
 @router.get("/ops/error-logs", operation_id="dashboard_ops_error_logs")
 async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user_id: str = "", source: str = "", user: dict = Depends(require_org_member)):
@@ -1109,7 +1093,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     _base = ""
     if repo:
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        _repo_filter_list = [f"gitcode:{_base}", f"github:{_base}"]
+        _repo_filter_list = repo_key_candidates(_base)
         _repo_filter = _repo_filter_list[0]
 
     entries = []
@@ -1283,7 +1267,6 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
 
     return {"entries": entries, "files": files_read, "count": len(entries)}
 
-
 @router.get("/ops/timeline", operation_id="dashboard_ops_timeline")
 async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_member)):
     """任务时序图数据：按 issue 分组的事件链（参考 admin RepoService.timeline）。
@@ -1298,7 +1281,7 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
     _repo_keys = []
     if repo:
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        _repo_keys = [f"gitcode:{_base}", f"github:{_base}"]
+        _repo_keys = repo_key_candidates(_base)
         repo_key = _repo_keys[0]
 
     with db_lock:
@@ -1333,10 +1316,9 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id"
         )
         from src.domains.runtime.engine.instances import instance_name as _inst_name
-        import socket as _sock
         _local_hostname = ""
         try:
-            _local_hostname = _sock.gethostname()
+            _local_hostname = engine_host()
         except Exception:
             pass
         rt_name_map = {}
@@ -1395,7 +1377,6 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
 
     return {"repoKey": repo_key, "issues": issues}
 
-
 @router.get("/ops/a2a-health", operation_id="dashboard_ops_a2a_health")
 async def get_a2a_health(user: dict = Depends(require_org_member)):
     """A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。
@@ -1447,28 +1428,52 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
 
     return result
 
-
 def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
 
     - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
     - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
       维持原值（不额外远程查权限，避免限流）。
+    - Issue #2126: partial 超过 30 分钟仍在复查时按诊断步骤重新判定——bot 相关步骤收敛为 bot_missing，
+      仅 webhook 相关步骤且 webhook 已存在才收敛为完整；空/未知时间不做回收（视为未知）。
     - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
     """
     from src.kernel.config import log as _log
     try:
-        from src.domains.mgmt.user.db import get_host_status, set_host_status, _get_managed_webhook_id
+        from src.domains.mgmt.user.db import get_host_detail, set_host_status, _get_managed_webhook_id
         webhook_id = _get_managed_webhook_id(repo_key)
-        cur = get_host_status(repo_key)
+        detail = get_host_detail(repo_key)
+        cur = detail.get("status", "")
         if not webhook_id:
             # webhook 从未建立 → webhook_missing
             if cur != "webhook_missing":
-                set_host_status(repo_key, "webhook_missing")
+                set_host_status(repo_key, "webhook_missing", "create_webhook",
+                                detail.get("error") or "webhook 未创建")
             return "webhook_missing"
         # webhook 存在：
-        if cur in ("bot_missing", "partial"):
-            # bot 缺失/部分是托管时落库的明确标记，保留（不远程复查）
+        if cur == "partial":
+            if _host_partial_stale(detail.get("updated_at", "")):
+                step = detail.get("step", "") or ""
+                kind = _host_partial_step_kind(step)
+                if kind == "webhook":
+                    # 失败步骤仅涉及 webhook，且 webhook 已存在 → 可判定收尾成功
+                    _log.info(f"Dashboard: recover stale partial hosting for {repo_key} (step={step})")
+                    set_host_status(repo_key, "")
+                    return ""
+                if kind == "token":
+                    # 用户 token 缺失需重新登录，不可自动判定完整，保留诊断供修复
+                    _log.info(f"Dashboard: stale partial needs user token for {repo_key} (step={step})")
+                    return cur
+                # bot 相关步骤（含未知/github_host/host_setup）webhook 存在不代表 bot 已加入
+                # → 收敛为 bot_missing，保留诊断供修复，避免误报完整
+                _log.info(f"Dashboard: stale partial -> bot_missing for {repo_key} (step={step or 'unknown'})")
+                set_host_status(repo_key, "bot_missing", step or "verify_bot",
+                                detail.get("error") or "bot 未确认加入")
+                return "bot_missing"
+            # 刚失败不久的部分完成，保留原状态与诊断（不远程复查）
+            return cur
+        if cur == "bot_missing":
+            # bot 缺失是托管时落库的明确标记，保留（不远程复查）
             return cur
         # 正常（含曾误标 webhook_missing → 现在 webhook_id>0 存在 → 清掉误报）
         if cur != "":
@@ -1490,7 +1495,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 
     # 跨平台 repo_key 候选：DB 中可能是 gitcode: 或 github: 前缀
     _owner_repo = f"{owner}/{repo}"
-    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _repo_keys = repo_key_candidates(_owner_repo)
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     from src.kernel.session_manager import db, db_lock
@@ -1500,7 +1505,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         recent_events = []
         try:
             c.execute(
-                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (?,?) ORDER BY seq DESC LIMIT 5",
+                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
                 (_repo_keys)
             )
             recent_events = [
@@ -1517,7 +1522,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                 "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable, COALESCE(rc.status,'') "
                 "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
                 "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                "WHERE s.repo_key IN (?,?) ORDER BY s.agent_type",
+                "WHERE s.repo_key IN (" + _rk_placeholders + ") ORDER BY s.agent_type",
                 (_repo_keys)
             )
             agent_sessions = []
@@ -1538,7 +1543,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         try:
             for atype in ["vod", "issue", "coding", "qa", "sre"]:
                 c.execute(
-                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (?,?) AND agent_type=? ORDER BY seq DESC LIMIT 2",
+                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
                     (_repo_keys + [atype])
                 )
                 agent_recent_events[atype] = [
@@ -1745,17 +1750,17 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         with db_lock:
             # total_issues: 统计不同 issue_id 的数量（去重）
             c.execute(
-                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key IN (?,?) AND issue_id!='' AND issue_id IS NOT NULL",
+                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND issue_id!='' AND issue_id IS NOT NULL",
                 (_repo_keys))
             metrics["total_issues"] = c.fetchone()[0] or 0
             # Auto-Resolution: completed / (completed + failed)
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND status='completed'",
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='completed'",
                 (_repo_keys)
             )
             completed = c.fetchone()[0] or 0
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND status='failed'",
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='failed'",
                 (_repo_keys)
             )
             failed = c.fetchone()[0] or 0
@@ -1768,14 +1773,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             import time as _time
             _week_cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 7 * 86400))
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= ?",
-                (_repo_keys[0], _repo_keys[1], _week_cutoff)
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND created_at >= ?",
+                (*_repo_keys, _week_cutoff)
             )
             metrics["events_week"] = c.fetchone()[0] or 0
 
             # Avg Response: 已完成事件的平均 duration（秒）
             c.execute(
-                "SELECT AVG(duration) FROM events WHERE repo_key IN (?,?) AND status='completed' AND duration IS NOT NULL AND duration > 0",
+                "SELECT AVG(duration) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='completed' AND duration IS NOT NULL AND duration > 0",
                 (_repo_keys)
             )
             avg_dur = c.fetchone()[0]
@@ -1787,6 +1792,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 
     # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
     host_status = _check_host_status(owner, repo, _actual_repo_key)
+    # Issue #2126: 同步透出失败步骤/原因与结构化缺失项
+    try:
+        from src.domains.mgmt.user.db import get_host_detail
+        _host_detail = get_host_detail(_actual_repo_key)
+        _host_missing = _host_missing_items(host_status, _host_detail.get("step", ""))
+    except Exception:
+        _host_detail = {"step": "", "error": "", "updated_at": ""}
+        _host_missing = _host_missing_items(host_status)
 
     # 读取当前场景的高级选项（工作分支 + 自定义 key:value）
     advanced_options = {}
@@ -1795,7 +1808,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             with db_lock:
                 c.execute(
                     "SELECT advanced_options FROM devops_pipeline_scene "
-                    "WHERE scene_id=? AND repo_key IN (?,?) AND is_active=1 LIMIT 1",
+                    "WHERE scene_id=? AND repo_key IN (" + _rk_placeholders + ") AND is_active=1 LIMIT 1",
                     ([dev_scene] + _repo_keys))
                 _adv_row = c.fetchone()
             if _adv_row and _adv_row[0]:
@@ -1816,3 +1829,51 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         "scene_nodes": scene_nodes,
         "host_status": host_status,
     }
+
+import re
+
+from src.kernel.repo_key import repo_key_candidates
+
+
+_HOST_PARTIAL_TIMEOUT_SECONDS = 1800  # Issue #2126: 长期 partial 超时回收阈值（30 分钟）
+_HOST_PARTIAL_WEBHOOK_STEPS = {"create_webhook", "configure_webhook_url"}
+_HOST_PARTIAL_TOKEN_STEPS = {"user_token"}
+
+
+# ==== 前置特性补齐（arch 线缺失、weekly-mys 已有）====
+
+def _host_partial_stale(updated_at: str, timeout: int = _HOST_PARTIAL_TIMEOUT_SECONDS) -> bool:
+    """判断 partial 记录是否已超过回收阈值（同一存储时间口径字符串比较）。"""
+    if not updated_at:
+        # Issue #2126: 存量数据/未知时间不得视为超时（Spec：空值视为未知，不做自动回收）
+        return False
+    try:
+        from src.api.time_utils import db_now_str
+        return str(updated_at) <= db_now_str(-timeout)
+    except Exception:
+        return False
+
+
+def _host_partial_step_kind(step: str) -> str:
+    """把 partial 诊断步骤归类为 webhook / token / bot（未知步骤按 bot 保守处理）。"""
+    if step in _HOST_PARTIAL_WEBHOOK_STEPS:
+        return "webhook"
+    if step in _HOST_PARTIAL_TOKEN_STEPS:
+        return "token"
+    return "bot"
+
+
+def _host_missing_items(status: str, step: str = "") -> list[str]:
+    """把托管状态映射为结构化缺失项（bot / webhook / token），供前端直接渲染。"""
+    if status == "bot_missing":
+        return ["bot"]
+    if status == "webhook_missing":
+        return ["webhook"]
+    if status == "partial":
+        kind = _host_partial_step_kind(step)
+        if kind == "webhook":
+            return ["webhook"]
+        if kind == "token":
+            return ["token"]
+        return ["bot"]
+    return []

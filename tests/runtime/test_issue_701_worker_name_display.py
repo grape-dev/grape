@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 
 def _now_iso():
@@ -112,6 +112,8 @@ class TestWorkerNameDisplayUnification:
                 "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status, created_at) "
                 "VALUES (?, 'sess-701', ?, '', 'completed', ?)",
                 (task_id, rid, _now_iso()))
+            # 扫雷⑨-H5：task-logs info 有任务归属校验，任务归属调用者 uid=1
+            c.execute("UPDATE agent_tasks SET user_id='1' WHERE id=?", (task_id,))
             db.commit()
         try:
             user = {"id": 1, "username": "tester", "org_id": 0}
@@ -137,6 +139,8 @@ class TestWorkerNameDisplayUnification:
                 "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, status, created_at) "
                 "VALUES (?, 'sess-701', ?, '', 'completed', ?)",
                 (task_id, rid, _now_iso()))
+            # 扫雷⑨-H5：task-logs info 有任务归属校验，任务归属调用者 uid=1
+            c.execute("UPDATE agent_tasks SET user_id='1' WHERE id=?", (task_id,))
             db.commit()
         try:
             user = {"id": 1, "username": "tester", "org_id": 0}

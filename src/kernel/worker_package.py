@@ -33,16 +33,12 @@ MANIFEST = [
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
     "src/kernel/",
-    # 历史导入路径 src.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
+    # 历史导入路径 src.domains.runtime.routes.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
     "src/domains/",
-    "src/config.py",
-    "src/repo_key.py",
-    "src/prompt_builder.py",
-    "src/session_manager.py",
-    "src/mysql_compat.py",
-    "src/token_service.py",
-    "src/token_resolver.py",
+    # Issue #2010: 原顶层模块的 canonical 实现都在 src/kernel/（旧路径
+    # src.config 等由 src/__init__.py 的别名一跳解析到该目录），故 "src/kernel/"
+    # 这一条即覆盖全部 19 个历史路径；首轮引入的中间子包目录条目已移除。
     "src/domains/mgmt/user/__init__.py",
     "src/domains/mgmt/user/db.py",
     "src/domains/mgmt/auth/",
@@ -50,6 +46,8 @@ MANIFEST = [
     "src/api/routing.py",
     "src/api/time_utils.py",
     "src/api/event_store.py",
+    # Issue #2050：流水线常量单源；随包下发的 domains/runtime/routes/webhook.py 顶层导入。
+    "src/api/pipeline_constants.py",
     # event_archive 已于 weekly-05 停写 event.json（数据由 events 表承载）；worker 端无需该模块。
     # 服务端 read 兼容（历史存档回退）保留在服务端代码库，不进 worker 包。
     "src/api/session_store.py",
@@ -58,6 +56,9 @@ MANIFEST = [
     # worker 侧 otel 实现在 src/domains/insight/observability/，已由 "src/domains/" 覆盖
     "src/domains/runtime/agents/",
     "src/domains/runtime/engine/",
+    # S112/D84：engine/service.py 与 api/session_store.py 顶层 import
+    # src.domains.runtime.vcs；缺该目录存量 worker 升级后启动即 ModuleNotFoundError。
+    "src/domains/runtime/vcs/",
 
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
@@ -70,8 +71,21 @@ MANIFEST = [
 _build_lock = threading.Lock()
 
 
+def _is_excluded_arcname(arcname: str) -> bool:
+    """归档路径是否属于运行期状态（与指纹侧同一口径，M2：避免"指纹排除但仍下发"）。"""
+    parts = [p for p in arcname.replace("\\", "/").split("/") if p]
+    if not parts:
+        return False
+    for seg in parts[:-1]:
+        if seg in _EXCLUDE_DIR_NAMES:
+            return True
+    return _is_runtime_state_file("", parts[-1])
+
+
 def _tar_filter(ti: tarfile.TarInfo):
     if "__pycache__" in ti.name or ti.name.endswith(".pyc"):
+        return None
+    if _is_excluded_arcname(ti.name):
         return None
     return ti
 
@@ -145,18 +159,58 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     return whl_dir
 
 
+# 运行期状态（不参与指纹）：数据目录、日志/数据库/进程文件、运行时 json 状态。
+# 事故背景（2026-11-12，Windows worker 每隔一小时自动升级并失联）：
+#   指纹覆盖 src/domains/ 全树，主控运行期在 src/domains/runtime/data/ 下生成状态文件
+#   （如 im_dingtalk_card_mode），各主控生成时机不同 → 双主 worker_code_version() 不同
+#   → 心跳 latest_version 与 tar 包 VERSION 永久不一致 → worker 无限升级/重试。
+_EXCLUDE_DIR_NAMES = {"__pycache__", "data", "logs", "log", "cache", "tmp", "run"}
+_EXCLUDE_FILE_SUFFIXES = (
+    ".pyc", ".pyo", ".pyd", ".log", ".db", ".db-wal", ".db-shm",
+    ".sqlite", ".sqlite3", ".pid", ".sock", ".lock", ".tmp",
+)
+# 运行时状态类 json（如 *_state.json / state-*.json / card_mode.json），配置模板不受影响
+_EXCLUDE_JSON_RE = re.compile(r"(^|[._-])(state|runtime_state|mode|status)([._-]|$)", re.IGNORECASE)
+
+
+def _is_runtime_state_file(path: str, name: str) -> bool:
+    """判断是否为运行期状态文件（不进代码指纹、不进 worker 包）。
+
+    目录判定只看**仓库内相对路径**：状态文件（如 im_dingtalk_card_mode）往往没有后缀，
+    只能靠父目录 data/ 识别（QA #1323 I2 指出的前瞻风险）。
+    """
+    try:
+        rel = os.path.relpath(path, ROOT) if path else ""
+    except (ValueError, OSError):
+        rel = ""
+    if rel and not rel.startswith(".."):
+        segs = [x for x in rel.replace("\\", "/").split("/") if x and x != "."]
+        if any(seg in _EXCLUDE_DIR_NAMES for seg in segs):
+            return True
+    if name.endswith(_EXCLUDE_FILE_SUFFIXES):
+        return True
+    if name.endswith(".json") and _EXCLUDE_JSON_RE.search(name[: -len(".json")]):
+        return True
+    return False
+
+
 def _manifest_version() -> str:
-    """按 manifest 各文件内容 sha256 计算指纹（代码变更即变化，git 无关，多 master 一致）。"""
+    """按 manifest 各文件内容 sha256 计算指纹（代码变更即变化，git 无关，多 master 一致）。
+
+    只对**代码/模板**取指纹：运行期生成的数据目录（data/）、日志/数据库/进程文件、
+    运行时状态 json 一律排除——它们随运行时行为漂移，会让双主版本口径不一致
+    （见 _EXCLUDE_DIR_NAMES 上方事故背景）。
+    """
     h = hashlib.sha256()
     for item in MANIFEST:
         path = os.path.join(ROOT, item)
         if os.path.isdir(path):
             for root, dirs, files in os.walk(path):
-                dirs[:] = [d for d in dirs if d != "__pycache__"]
+                dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIR_NAMES]
                 for f in sorted(files):
-                    fp = os.path.join(root, f)
-                    if fp.endswith(".pyc"):
+                    if _is_runtime_state_file(root, f):
                         continue
+                    fp = os.path.join(root, f)
                     h.update(fp.encode("utf-8"))
                     try:
                         with open(fp, "rb") as fh:
@@ -164,6 +218,8 @@ def _manifest_version() -> str:
                     except Exception:
                         h.update(b"unreadable")
         elif os.path.isfile(path):
+            if _is_runtime_state_file(os.path.dirname(path), os.path.basename(path)):
+                continue
             h.update(path.encode("utf-8"))
             try:
                 with open(path, "rb") as fh:
@@ -698,10 +754,11 @@ def build_package() -> str:
                     continue
                 if os.path.isdir(path):
                     for root, dirs, files in os.walk(path):
-                        dirs[:] = [d for d in dirs if d != "__pycache__"]
+                        # 与指纹侧同一口径：运行期状态目录/文件不进包（双主 data/ 内容不同会污染包内容）
+                        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIR_NAMES]
                         for f in sorted(files):
                             fp = os.path.join(root, f)
-                            if fp.endswith(".pyc"):
+                            if f.endswith(".pyc") or _is_runtime_state_file(root, f):
                                 continue
                             arc = os.path.relpath(fp, ROOT).replace(os.sep, "/")
                             _add(arc, fp)

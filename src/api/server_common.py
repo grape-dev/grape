@@ -66,6 +66,7 @@ def build_app(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    default_response_class=None,
 ):
     """Create the shared FastAPI app: CORS + metrics + request-id/log + ping + exception handler.
 
@@ -79,7 +80,7 @@ def build_app(
 
     ensure_user_bin_dirs()
 
-    app = FastAPI(
+    _kw = dict(
         title=title,
         version=version,
         lifespan=lifespan,
@@ -87,6 +88,11 @@ def build_app(
         redoc_url=redoc_url,
         openapi_url=openapi_url,
     )
+    # 增量（Issue #684）：调用方可注入统一 JSON 序列化出口（控制字符/孤立代理项转义）。
+    # 缺省 None = 保持基线 FastAPI 默认行为，不影响其它进程入口。
+    if default_response_class is not None:
+        _kw["default_response_class"] = default_response_class
+    app = FastAPI(**_kw)
 
     app.add_middleware(
         CORSMiddleware,
@@ -246,7 +252,9 @@ def _attach_request_log(app: FastAPI) -> None:
         if not _repo:
             _qp = request.query_params.get("repo", "")
             if _qp:
-                _repo = f"gitcode:{_qp}" if not _qp.startswith("gitcode:") else _qp
+                # 已有 provider 前缀（github:o/r 等任意在册平台）原样保留；裸键才补默认前缀
+                from src.kernel.repo_key import to_repo_key
+                _repo = _qp if ":" in _qp else to_repo_key(_qp)
         token_repo = repo_var.set(_repo)
 
         _uid = ""
@@ -324,7 +332,10 @@ def _attach_request_log(app: FastAPI) -> None:
                     "duration_ms": round(duration),
                 }
                 msg = f"{request.method} {redacted_path} status={status} duration={duration:.0f}ms"
-                if status >= 500:
+                # 同 middleware.py：RUM 反代未配置时 /faro/collect 固定 503（feature-off，非事故）
+                if redacted_path == "/faro/collect" and status == 503:
+                    _log.debug(msg, extra=extra)
+                elif status >= 500:
                     _log.error(msg, extra=extra)
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
@@ -751,10 +762,18 @@ document.documentElement.classList.remove('i18n-loading');})();
             val = 'true' if configured else 'false'
             cls = 'email-configured' if configured else 'email-not-configured'
             boost_json = _get_i18n_boost()
-            oauth_map = {}
-            for key in list_providers():
-                client_id = get_meta_value(f"oauth_{key}_client_id") or ""
-                oauth_map[key] = bool(client_id)
+            # D108（登录按钮零延迟）：注入完整渠道目录（固定展示序），app.js defer
+            # 阶段首帧渲染前同步生成按钮，不再等 /auth/providers AJAX
+            try:
+                from src.domains.mgmt.auth.providers import providers_catalog
+                catalog = providers_catalog()
+            except Exception:
+                catalog = []
+            oauth_map = {p["provider"]: bool(p["configured"]) for p in catalog}
+            if not oauth_map:
+                for key in list_providers():
+                    client_id = get_meta_value(f"oauth_{key}_client_id") or ""
+                    oauth_map[key] = bool(client_id)
             oauth_classes = ' '.join(
                 f'oauth-{key}-not-configured' for key, ok in oauth_map.items() if not ok
             )
@@ -762,6 +781,7 @@ document.documentElement.classList.remove('i18n-loading');})();
             head_inject = (
                 f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls} {oauth_classes}";'
                 f'window.__OAUTH_CONFIGURED__={oauth_json};'
+                f'window.__OAUTH_PROVIDERS__={_json_mod.dumps(catalog)};'
                 f'window.__I18N_BOOST__={boost_json};</script>'
             )
             html = html.replace('</head>', head_inject + '</head>', 1)

@@ -15,17 +15,22 @@
 幂等：以 (task_id, skill_name, title) 为组，同组只建一个 Issue；组内全部回写同一 issue_url。
 失败处理：异常仅记日志、不回写，下轮重试；连续失败可标记 skipped 供 admin 感知。
 """
+
 import os
+
 import asyncio
 
 from src.kernel.session_manager import db, db_lock
+
 from src.kernel.config import log
 
 # 官方技能仓库（owner 唯一固定、无其它值；无 env 覆盖——反馈目标恒为官方技能仓。
 # 与 src/domains/runtime/storage/scene_sync.py 同源：grape-dev/grape-skills）
 _OFFICIAL_SKILLS_REPO = "grape-dev/grape-skills"
+
 # 项目自身组件反馈标识（CLI / 平台）→ 一律进官方技能仓（official-repo-config-unify-design.md §3.2）
 _OFFICIAL_COMPONENT_KINDS = {"cli", "platform"}
+
 # 是否向官方技能仓提交官方技能 / CLI / 平台反馈 Issue；默认允许（1），私有部署可设 0 关闭
 GRAPE_FEEDBACK_OFFICIAL_ISSUE = os.environ.get("GRAPE_FEEDBACK_OFFICIAL_ISSUE", "1").strip()
 
@@ -33,14 +38,12 @@ GRAPE_SKILLS_PROVIDER = os.environ.get("GRAPE_SKILLS_PROVIDER", "gitcode").strip
 
 FEEDBACK_CATEGORY_OTHER = "other"
 
-
 def _provider_module(provider: str):
     from src.domains.runtime.vcs.providers import _MODULES
     mod = _MODULES.get(provider)
     if mod is None:
         raise ValueError(f"Git provider 未支持: {provider}")
     return mod
-
 
 def _official_skills_target():
     """官方技能仓目标：返回 (provider, owner, repo, global_bot_token)；未配置返回 None。
@@ -55,21 +58,16 @@ def _official_skills_target():
         return None
     mod = _provider_module(GRAPE_SKILLS_PROVIDER)
     try:
-        if GRAPE_SKILLS_PROVIDER == "github":
-            from src.domains.mgmt.user.db import get_global_github_bot_token
-            token = get_global_github_bot_token()
-        else:
-            from src.domains.mgmt.user.db import get_global_gitcode_bot_token
-            token = get_global_gitcode_bot_token()
+        # S87/D63：统一 get_global_bot_token_for（github 文件 fallback 语义保留）
+        from src.domains.mgmt.user.db import get_global_bot_token_for
+        token = get_global_bot_token_for(GRAPE_SKILLS_PROVIDER)
     except Exception:
         token = ""
     return (GRAPE_SKILLS_PROVIDER, owner, rname, token)
 
-
 def _feedback_official_issue_enabled() -> bool:
     """默认允许向官方技能仓提交 official / CLI / platform 反馈；显式 '0'/'false'/'no' 视为关闭。"""
     return GRAPE_FEEDBACK_OFFICIAL_ISSUE.lower() not in ("0", "false", "no")
-
 
 def _repo_target(repo_key: str):
     """反馈所属仓库目标：返回 (provider, owner, repo)。"""
@@ -78,7 +76,6 @@ def _repo_target(repo_key: str):
     provider = provider or "gitcode"
     owner, repo = split_owner_repo(repo_key)
     return (provider, owner or "", repo or "")
-
 
 def _repo_bot_token(repo_key: str):
     """反馈所属仓库 bot token（provider 模块解析）。"""
@@ -89,7 +86,6 @@ def _repo_bot_token(repo_key: str):
         return _provider_module(provider).bot_token(repo_key) or ""
     except Exception:
         return ""
-
 
 def _create_provider_issue(provider: str, owner: str, repo: str, token: str,
                            title: str, body: str) -> dict:
@@ -110,17 +106,13 @@ def _create_provider_issue(provider: str, owner: str, repo: str, token: str,
     issue_url = _issue_url(provider, owner, repo, number)
     return {"number": number, "url": issue_url}
 
-
 def _issue_url(provider: str, owner: str, repo: str, number) -> str:
     """拼 Issue 公开页 URL（与 issues_center._vcs_issue_url 同构）。"""
     if not number:
         return ""
-    if provider == "github":
-        return f"https://github.com/{owner}/{repo}/issues/{number}"
-    if provider == "gitlab":
-        return f"https://gitlab.com/{owner}/{repo}/-/issues/{number}"
-    return f"https://gitcode.com/{owner}/{repo}/issues/{number}"
-
+    # D16/S26：host/路径统一从平台卡派生（新平台自动正确）
+    from src.kernel.repo_key import issue_web_url
+    return issue_web_url(f"{provider}:{owner}/{repo}", number)
 
 def _fetch_pending(limit: int):
     """取待转换行：issue_url='' AND is_deleted=0，且
@@ -144,7 +136,6 @@ def _fetch_pending(limit: int):
         "feedback_kind": r[12] or '',
         "source": r[13] or 'agent', "username": r[14] or '',
     } for r in rows]
-
 
 def convert_pending_feedback(limit: int = 20) -> dict:
     """扫描并转换待处理的反馈（agent + 带上下文的 user），返回统计 {converted, skipped, failed}。"""
@@ -203,7 +194,6 @@ def convert_pending_feedback(limit: int = 20) -> dict:
         log.info(f"feedback→issue: converted fid={fid} -> {provider}:{owner}/{repo}#{number}")
     return result
 
-
 def _resolve_target(row):
     """路由：
     - 非官方技能（repo/user 技能类）→ 反馈所属仓库（现状语义，私有 bug 不进公开仓）
@@ -228,7 +218,6 @@ def _resolve_target(row):
     if target is None:
         return ("", "", "", "")
     return target
-
 
 def _build_issue_body(row: dict) -> str:
     """Issue 正文组装 + 消毒（长度/空行/URL 化）。
@@ -272,9 +261,6 @@ def _build_issue_body(row: dict) -> str:
         lines += ["", "## 失败摘要", "```", redact_issue_text(summary, 2000), "```"]
     return "\n".join(lines)
 
-
-# ===================== reconcile worker =====================
-
 def _sync_statuses():
     """reconcile 周期内的反馈状态联动同步（导入放函数内避免循环依赖风险）。
 
@@ -291,7 +277,6 @@ def _sync_statuses():
         sync_external_feedback_statuses(limit=20)
     except Exception:
         log.exception("feedback status sync in reconcile failed")
-
 
 async def feedback_reconcile_loop(interval: float = 300.0):
     """周期性扫描转换（与 skill-sync serial worker 同套路：分布式锁 + 崩溃安全）。"""
@@ -323,9 +308,7 @@ async def feedback_reconcile_loop(interval: float = 300.0):
             log.exception("feedback status sync run failed")
         await asyncio.sleep(interval)
 
-
 _bg_tasks = set()
-
 
 def start_feedback_reconcile_scheduler():
     """启动反馈→Issue reconcile 调度（与 skill-sync scheduler 同款）。"""
@@ -334,7 +317,6 @@ def start_feedback_reconcile_scheduler():
     _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)
     log.info(f"feedback reconcile scheduler started (interval={interval}s)")
-
 
 async def stop_feedback_reconcile_scheduler():
     for t in _bg_tasks:

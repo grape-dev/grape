@@ -172,6 +172,11 @@ class TestRevokeCleansEngineCapabilities:
         from src.domains.mgmt.routes.settings import revoke_runtime_credential
 
         cid = _insert_credential()
+        # 扫雷⑨-H2：revoke 端点有 owner 校验，测试凭据 owner 对齐调用者 username
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE runtime_credentials SET owner_name='tester' WHERE id=?", (cid,))
+            db.commit()
         rid, _ = _insert_runtime(cid)
         with db_lock:
             c = db.cursor()

@@ -200,7 +200,7 @@ def test_api_key_created_at_persisted_and_listed():
     got = auth_token.generate_api_token(uid, name="ci-created")
     assert got and got["token"].startswith("grape_")
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         row = db.cursor().execute(
             "SELECT created_at FROM api_tokens WHERE id=?", (got["id"],)

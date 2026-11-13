@@ -9,19 +9,22 @@ Covers (design doc docs/weekly-09/grape-three-process-split-design.md):
 - P2: sweep_once split — sweep_events_loop (B) + sweep_tasks_loop (C)
 - P3: table_maintenance split lock keys (tasks → C, messages → A)
 """
+
 import asyncio
+
 import os
+
 import re
+
 import subprocess
+
 import sys
+
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # worktree root = repo root (tests/ sits at top level)
-
-
-# ---------------------------------------------------------------- P1: entries
 
 class TestProcessEntries:
     def test_grape_server_module_importable(self):
@@ -98,7 +101,6 @@ class TestProcessEntries:
         assert "table_maintenance_messages" not in src, \
             "C must not run task_messages table maintenance (A responsibility)"
 
-
 def _iter_app_routes(app):
     """产出 app 上全部注册的 APIRoute 对象（兼容 fastapi>=0.141 惰性 _IncludedRouter）。
 
@@ -119,13 +121,9 @@ def _iter_app_routes(app):
         except Exception:
             pass
 
-
 def _app_paths(app) -> list[str]:
     """收集 app 上全部注册路由的 path。"""
     return [r.path for r in _iter_app_routes(app)]
-
-
-# ---------------------------------------------------- P1: runtime_view router
 
 class TestRuntimeViewRouter:
     def test_runtime_view_router_importable(self):
@@ -200,9 +198,6 @@ class TestRuntimeViewRouter:
                      "/api/runtime/tasks/claim"):
             assert (path, "POST") not in a, f"A must not serve worker protocol {path}"
 
-
-# ---------------------------------------------------- P1: events ops_router
-
 class TestEventsOpsRouter:
     def test_events_module_exposes_ops_router(self):
         from src.domains.runtime.routes import events
@@ -259,9 +254,6 @@ class TestEventsOpsRouter:
         # B 不加载完整 router（含 GET 查看）；ops 与 full 无交集即可判定
         assert not (full_ids - ops_ids) & included, \
             "B process must not include events view routes (GET detail etc.)"
-
-
-# ------------------------------------------------- P1: nginx + systemd files
 
 class TestNginxConfig:
     NGINX = REPO_ROOT / "nginx-grape.conf"
@@ -320,7 +312,6 @@ class TestNginxConfig:
         m = re.search(r"location / \{[^}]*proxy_pass http://127\.0\.0\.1:(\d+);", conf, re.S)
         assert m and m.group(1) == "38080", "default location must route to A (38080)"
 
-
 class TestSystemdUnits:
     FILES = [
         (REPO_ROOT / "deploy/systemd/grape-server.service", "src.api.grape_server:app", "38080"),
@@ -357,9 +348,6 @@ class TestSystemdUnits:
         for name in ("grape-event-server.service", "grape-worker-server.service"):
             content = (REPO_ROOT / "deploy/systemd" / name).read_text(encoding="utf-8")
             assert "OBS_LOG_DB=0" in content, f"{name} must set OBS_LOG_DB=0"
-
-
-# ------------------------------------------------------- P2: sweep split
 
 class TestSweepSplit:
     def test_cleanup_exports_split_symbols(self):
@@ -411,9 +399,6 @@ class TestSweepSplit:
         assert isinstance(result, int)
         assert result >= 0
 
-
-# ------------------------------------------- P3: table_maintenance split
-
 class TestTableMaintenanceSplit:
     def test_main_uses_two_lock_keys(self):
         """单进程模式 main.py 同样用两个独立锁 key（与 A/C 语义一致）。"""
@@ -451,9 +436,6 @@ class TestTableMaintenanceSplit:
         assert m, "C entry: agent_tasks cleanup must run under tasks lock"
         assert "cleanup_old_task_messages" not in src
 
-
-# ------------------------------------------- P3: scheduled-task ownership
-
 class TestScheduledTaskOwnership:
     """§6 分配表：A/B/C 各自的定时任务互不越界。"""
 
@@ -466,7 +448,8 @@ class TestScheduledTaskOwnership:
     #     master logging / knowledge migrate / D32）---
     def test_a_starts_user_facing_schedulers(self):
         src = self._entry_src("grape_server")
-        for marker in ("lease_sweep_loop", "knowledge_sync_loop", "knowledge_write_worker",
+        # A2：legacy bot lease sweep 已下线，A 改为启动新 IM 引擎（start_im_engine）
+        for marker in ("start_im_engine", "knowledge_sync_loop", "knowledge_write_worker",
                        "start_skill_sync_scheduler", "start_feedback_reconcile_scheduler",
                        "start_upload_cleanup_scheduler", "start_cooldown_scheduler",
                        "_start_server_metrics_task", "_start_obs_alert_task",
@@ -509,16 +492,13 @@ class TestScheduledTaskOwnership:
     def test_main_single_process_starts_everything(self):
         """单进程兼容模式 main.py 保留全部定时任务（A+B+C 全集）。"""
         content = (REPO_ROOT / "src/api/main.py").read_text(encoding="utf-8")
-        for marker in ("lease_sweep_loop", "knowledge_sync_loop", "start_skill_sync_scheduler",
+        for marker in ("start_im_engine", "knowledge_sync_loop", "start_skill_sync_scheduler",
                        "start_upload_cleanup_scheduler", "start_cooldown_scheduler",
                        "start_bot_token_health", "start_local_claimer", "start_scheduler",
                        "start_health_refresh_scheduler", "probe_local_engines",
                        "reap_stale_runtimes", "_start_obs_alert_task",
                        "_start_active_user_tracker_task", "_start_server_metrics_task"):
             assert marker in content, f"main.py missing single-process task: {marker}"
-
-
-# ------------------------------------------- 共享模块复用（middleware/health/spa）
 
 class TestSharedModules:
     def test_middleware_module_exposes_installer(self):
@@ -557,34 +537,31 @@ class TestSharedModules:
             src = Path(mod.__file__).read_text(encoding="utf-8")
             assert f'service_name="{expect}"' in src, f"{mod.__name__} health service name mismatch"
 
-    def test_bot_manager_registry(self):
-        from src.api import bot_manager_registry
-        bot_manager_registry.set_bot_manager(None)
-        assert bot_manager_registry.get_bot_manager() is None
-
-
-# ------------------------------------------- IM 单一归属（§10.7）
+    def test_legacy_bot_manager_registry_retired(self):
+        """A2（2026-11-10）：legacy BotManager 桥模块已删除，不再有 registry 槽位。"""
+        import importlib
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("src.api.bot_manager_registry")
 
 class TestIMOwnership:
-    def test_im_bot_manager_only_in_a(self):
-        """§10.7：IM WS（BotManager）只在 A 进程启动。"""
+    def test_im_engine_only_in_a_and_main(self):
+        """§10.7 + A2：新 IM 引擎只在 A 进程 / 单进程入口启动。"""
         for mod_name in ("grape_event_server", "grape_worker_server"):
             mod = __import__(f"src.api.{mod_name}", fromlist=["x"])
             src = Path(mod.__file__).read_text(encoding="utf-8")
-            assert "BotManager" not in src, f"{mod_name} must not start IM BotManager"
+            assert "start_im_engine" not in src, f"{mod_name} must not start the IM engine"
 
-    def test_a_starts_bot_manager(self):
+    def test_a_starts_im_engine(self):
         from src.api import grape_server
         src = Path(grape_server.__file__).read_text(encoding="utf-8")
-        assert "BotManager" in src
-        assert "set_bot_manager" in src
+        assert "engine_wiring.start_im_engine" in src
+        assert "bot_manager_registry" not in src, "A2: legacy registry must be gone from the A entry"
+        assert "import BotManager" not in src, "A2: A entry must not start the legacy BotManager"
 
-    def test_main_registers_bot_manager_to_registry(self):
+    def test_main_starts_im_engine(self):
         content = (REPO_ROOT / "src/api/main.py").read_text(encoding="utf-8")
-        assert "set_bot_manager" in content
-
-
-# -------------------------- P1-P3 审查修复（bot_manager 迁移 + 状态驱动取消）
+        assert "engine_wiring.start_im_engine" in content
+        assert "set_bot_manager" not in content
 
 class TestReviewFixBotManagerMigration:
     """审查 Required #1：多进程下 IM 动态增删 bot 的调用点必须走 registry。"""
@@ -623,7 +600,6 @@ class TestReviewFixBotManagerMigration:
         finally:
             bot_manager_registry.set_bot_manager(None)
 
-
 class TestReviewFixDirectTerminateStateDriven:
     """审查 Required #2：direct 模式跨进程终止改为状态驱动取消（C 侧探测杀引擎）。"""
 
@@ -648,3 +624,19 @@ class TestReviewFixDirectTerminateStateDriven:
         assert "状态驱动取消" in src, "terminate_event must document state-driven cancel for multi-process"
         # cancel_direct_task 保留（单进程模式兜底）
         assert "cancel_direct_task" in src
+
+class TestReviewFixLegacyBotManagerRemoved:
+    """A2（2026-11-10）：多进程 bot 动态增删链路整体下线，路由文件不得再引用 legacy 桥。"""
+
+    ROUTE_FILES = [
+        "src/domains/mgmt/routes/feishu_card.py",
+        "src/domains/mgmt/routes/feishu_onboard.py",
+        "src/domains/runtime/routes/chat.py",
+        "src/domains/mgmt/routes/agents.py",
+    ]
+
+    def test_no_route_file_references_legacy_bot_manager(self):
+        for rel in self.ROUTE_FILES:
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "bot_manager_registry" not in content, f"{rel} still imports the legacy registry"
+            assert "from src.api.main import bot_manager" not in content, f"{rel} still imports bot_manager"

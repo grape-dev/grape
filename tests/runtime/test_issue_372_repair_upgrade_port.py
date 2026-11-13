@@ -10,32 +10,29 @@
 - T12-02: auto_upgrade add_collaborator 失败时不写 bot token
 - T12-03: _local_port 优先读 GRAPE_PORT，fallback GRAPE_MAIN_PORT
 """
+
 import os
+
 import sys
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
 sys.path.insert(0, ROOT)
+
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.domains.runtime.pipeline.event_pipeline import db, db_lock
 
 REPO_PREFIX = "gitcode:owner/test-repair-upgrade"
 
-
 def setup_function():
     pass
-
 
 def teardown_function():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM managed_repos WHERE repo_key LIKE ?", (REPO_PREFIX + "%",))
         db.commit()
-
-
-# ===========================================================================
-# T12-01: repair_host 降级后 bot token 字段为空
-# ===========================================================================
 
 def test_repair_host_fallback_bot_token_empty():
     """T12-01: repair_host 降级到路径 B → bot_gitcode_token 为空。
@@ -73,11 +70,6 @@ def test_repair_host_fallback_bot_token_empty():
     assert row[0] == "", f"降级后 bot_gitcode_token 应为空，实际: {row[0]!r}"
     assert row[1] == 888, f"host_user_id 应为 888（路径 B），实际: {row[1]}"
 
-
-# ===========================================================================
-# T12-02: auto_upgrade add_collaborator 失败时不写 bot token
-# ===========================================================================
-
 def test_auto_upgrade_skips_on_collaborator_failure():
     """T12-02: auto_upgrade add_collaborator 返回 ok=False → 跳过，不写 bot token。
 
@@ -102,7 +94,7 @@ def test_auto_upgrade_skips_on_collaborator_failure():
 
     with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[_test_repo]), \
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-         patch("src.api.deps.get_user_token_with_refresh", return_value="HOST_TOKEN"), \
+         patch("src.api.deps.get_user_token_for", return_value="HOST_TOKEN"), \
          patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(False, "permission denied")), \
          patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo"), \
          patch("src.domains.mgmt.user.db._update_repo_bot_token", side_effect=mock_update):
@@ -112,7 +104,6 @@ def test_auto_upgrade_skips_on_collaborator_failure():
     assert len(_updated_tokens) == 0, (
         f"add_collaborator 失败时不应写 bot token，实际调用了 _update_repo_bot_token {_updated_tokens}"
     )
-
 
 def test_auto_upgrade_writes_on_collaborator_success():
     """T12-02b: auto_upgrade add_collaborator 返回 ok=True → 写 bot token。"""
@@ -132,7 +123,7 @@ def test_auto_upgrade_writes_on_collaborator_success():
 
     with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[_test_repo]), \
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-         patch("src.api.deps.get_user_token_with_refresh", return_value="HOST_TOKEN"), \
+         patch("src.api.deps.get_user_token_for", return_value="HOST_TOKEN"), \
          patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(True, "")), \
          patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo"), \
          patch("src.domains.mgmt.user.db.get_webhook_url", return_value="http://example.com/webhook/gitcode"), \
@@ -144,11 +135,6 @@ def test_auto_upgrade_writes_on_collaborator_success():
     assert len(_updated_tokens) == 1, "成功时应写 bot token"
     assert _updated_tokens[0][0] == "gitcode:owner/test-upgrade-ok"
     assert _updated_tokens[0][1] == "BOT_TOKEN"
-
-
-# ===========================================================================
-# T12-03: _local_port 优先读 GRAPE_PORT
-# ===========================================================================
 
 def test_local_port_prefers_grape_port():
     """T12-03: _local_port 优先读 GRAPE_PORT，fallback GRAPE_MAIN_PORT。"""
@@ -189,11 +175,6 @@ def test_local_port_prefers_grape_port():
         else:
             os.environ.pop("GRAPE_MAIN_PORT", None)
 
-
-# ===========================================================================
-# T13-03/04/05: 仓库级 bot token 层 host_user_id 守卫
-# ===========================================================================
-
 def test_get_repo_token_with_refresh_skips_repo_bot_for_path_b():
     """T13-03: get_repo_token_with_refresh 路径 B 仓库跳过仓库级 bot token 层。
 
@@ -208,7 +189,7 @@ def test_get_repo_token_with_refresh_skips_repo_bot_for_path_b():
          patch("src.domains.mgmt.user.db._get_global_bot_token", return_value=""), \
          patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-         patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN"):
+         patch("src.api.deps.get_user_token_for", return_value="USER_TOKEN"):
         cursor = MagicMock()
         # devops_agent_session: empty
         # managed_repos.bot_gitcode_token: "DIRTY_BOT_TOKEN" (should be skipped!)
@@ -219,7 +200,6 @@ def test_get_repo_token_with_refresh_skips_repo_bot_for_path_b():
         assert result == "USER_TOKEN", (
             f"路径 B 仓库应跳过 bot_gitcode_token 层走用户 token，实际: {result!r}"
         )
-
 
 def test_get_repo_bot_token_skips_repo_bot_for_path_b():
     """T13-04: get_repo_bot_token 路径 B 仓库跳过仓库级 bot token 层。"""
@@ -232,13 +212,12 @@ def test_get_repo_bot_token_skips_repo_bot_for_path_b():
          patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
          patch("src.domains.mgmt.user.db.get_bot_token_by_repo", return_value="DIRTY_BOT"), \
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-         patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN"):
+         patch("src.api.deps.get_user_token_for", return_value="USER_TOKEN"):
         result = get_repo_bot_token("gitcode:owner/repo")
         print(f"  result: {result!r}")
         assert result == "USER_TOKEN", (
             f"路径 B 仓库应跳过 bot_gitcode_token 走用户 token，实际: {result!r}"
         )
-
 
 def test_get_github_token_skips_repo_bot_for_path_b():
     """T13-05: get_github_token 路径 B 仓库跳过仓库级 bot token 层。"""
@@ -251,7 +230,7 @@ def test_get_github_token_skips_repo_bot_for_path_b():
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_username", return_value=None), \
          patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""), \
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-         patch("src.api.deps.get_user_github_token_with_refresh", return_value="USER_GH_TOKEN"):
+         patch("src.api.deps.get_user_token_for", return_value="USER_GH_TOKEN"):
         cursor = MagicMock()
         cursor.fetchone.return_value = ("DIRTY_GH_BOT",)
         mock_db.cursor.return_value = cursor
@@ -260,11 +239,6 @@ def test_get_github_token_skips_repo_bot_for_path_b():
         assert result == "USER_GH_TOKEN", (
             f"路径 B 仓库应跳过 bot_github_token 走用户 token，实际: {result!r}"
         )
-
-
-# ===========================================================================
-# T14-01/02: bot_username 降级写空 + _update_repo_bot_token 清 host_user_id
-# ===========================================================================
 
 def test_host_repo_fallback_bot_username_empty():
     """T14-01: host_repo 降级到路径 B 后 bot_username 为空。
@@ -301,7 +275,6 @@ def test_host_repo_fallback_bot_username_empty():
 
     assert row is not None
     assert row[0] == "", f"降级后 bot_username 应为空，实际: {row[0]!r}"
-
 
 def test_repair_host_fallback_bot_username_empty():
     """T14-02: repair_host 降级到路径 B 后 bot_username 为空。
@@ -342,7 +315,6 @@ def test_repair_host_fallback_bot_username_empty():
     assert row[0] == "", f"repair_host 降级后 bot_username 应为空，实际: {row[0]!r}"
     assert row[1] == 888, f"host_user_id 应为 888（路径 B），实际: {row[1]}"
 
-
 def test_update_repo_bot_token_clears_host_user_id():
     """T14-02: _update_repo_bot_token 同时清 host_user_id=0。
 
@@ -377,3 +349,5 @@ def test_update_repo_bot_token_clears_host_user_id():
         row = c.execute("SELECT host_user_id, bot_gitcode_token FROM managed_repos WHERE repo_key=?", (repo_key,)).fetchone()
     assert row[0] == 0, f"升级后 host_user_id 应为 0，实际: {row[0]}"
     assert row[1] == "BOT_TOKEN", f"bot_gitcode_token 应为 BOT_TOKEN，实际: {row[1]}"
+
+from src.domains.runtime.pipeline.event_pipeline import db, db_lock

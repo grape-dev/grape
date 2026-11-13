@@ -54,12 +54,13 @@
 > 全新 worker 未安装任何引擎时，注册依然成功（日志 `RuntimeAgent registered: []` 属正常）。
 > 之后安装引擎**无需重启 worker**——worker 周期性重新发现本机引擎并自动注册（≤5 分钟）。
 
-**安装引擎：**
+**安装引擎（由用户自行安装，worker 启动自动发现并注册；运行中装好引擎无需重启，周期重注册 ≤5 分钟内生效）：**
 
 1. **opencode**：安装 Node.js 后执行 `npm install -g opencode-ai`
-2. **hermes**：`pip install 'hermes[acp]'`（必须带 `[acp]`，否则引擎在线但调不通）
-3. 一行式安装脚本支持 `--engine auto|opencode|hermes|none`：默认 `auto`（检测到 npm 且未装 opencode 时自动安装）
-4. codearts 引擎由华为云 CodeArts CLI 提供，按官方渠道安装
+2. **hermes**：按 Hermes Agent 官方渠道自行安装（注意：PyPI 上的 `hermes` 包为同名无关项目，不要通过 `pip install hermes` 安装）
+3. codearts 引擎由华为云 CodeArts CLI 提供，按官方渠道安装
+
+> 一键安装脚本不安装任何执行引擎（Issue #1884）：`install-worker.sh` 仅负责 worker 自身安装与注册。
 
 **目录信任（codearts，无 TTY 致命退出）：**
 

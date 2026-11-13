@@ -13,16 +13,14 @@
 - R10 token 过期检测与 error_code
 - error_code 国际化
 """
+
 import json
+
 from unittest.mock import patch, MagicMock
+
 from fastapi.testclient import TestClient
 
 import pytest
-
-
-# ===========================================================================
-# 6.1 A2A 鉴权 bot token 通道断裂（P0）
-# ===========================================================================
 
 class TestA2ABotTokenPathB:
     """验收标准 7：路径 B 走 session token 通道 + host 用户 token 兜底。
@@ -51,11 +49,6 @@ class TestA2ABotTokenPathB:
         with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value=""):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == ""
-
-
-# ===========================================================================
-# 6.2 BOT_USERNAME 为空 → 路径 B 用 host_user 的平台用户名
-# ===========================================================================
 
 class TestBotUsernamePathB:
     """验收标准 12：路径 B 场景 git commit author 为 host 用户名（非 "grape_bot"）。"""
@@ -109,11 +102,6 @@ class TestBotUsernamePathB:
             _bot_name = _us[0] if _us else ""
             assert _bot_name == "global_bot"
 
-
-# ===========================================================================
-# 6.3 status=4 token 过期后 _get_oauth_token_from_identity 仍返回 token
-# ===========================================================================
-
 class TestStatus4TokenAccess:
     """验收标准 10：PAT 被撤销后 status=4，_get_oauth_token_from_identity 仍返回 token（R10 回帖需要）。"""
 
@@ -157,11 +145,6 @@ class TestStatus4TokenAccess:
             from src.api.deps import _get_oauth_token_from_identity
             result = _get_oauth_token_from_identity("testuser", "gitcode")
             assert result == ""
-
-
-# ===========================================================================
-# 6.4 多用户托管同一仓库时 host_user_id 不被覆盖
-# ===========================================================================
 
 class TestAddManagedRepoHostUserIdPreserved:
     """验收标准 13：用户 A 托管后用户 B 再托管，host_user_id 不被覆盖。"""
@@ -220,16 +203,17 @@ class TestAddManagedRepoHostUserIdPreserved:
             executed_sql = [call[0][0] for call in cursor.execute.call_args_list]
             assert any("INSERT" in sql for sql in executed_sql)
 
-
-# ===========================================================================
-# 6.5 grape API 发评论自动追加 grape-auto-comment 标记
-# ===========================================================================
-
 class TestGrapeAPICommentMarker:
     """验收标准 14：agent 通过 grape API 发 issue/PR 评论，评论自动带标记。"""
 
     def test_create_issue_comment_appends_marker(self):
-        """issue 评论自动追加 <!-- grape-auto-comment --> 标记。"""
+        """issue 建单自动追加 <!-- grape-auto-comment --> 标记。
+
+        D97 语义对齐重写：marker 的 API 侧写入点是 create_issue（#372 §30，
+        git_repo_api.py L573-576）；create_issue_comment 端点在写侧语义净化后
+        **有意不加** marker（评论台账本质是系统自回帖对账，用户代发评论非
+        agent 回帖——agent 回帖链的 marker 在 token_resolver.post_issue_comment
+        L1443）。旧预期"评论端点也加 marker"为语义演进前行为。"""
         from src.api.main import app
         from src.api.git_repo_api import get_current_user_or_api_key, _provider
         app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "test"}
@@ -237,8 +221,8 @@ class TestGrapeAPICommentMarker:
         client = TestClient(app)
         with patch("src.api.git_repo_api._repo_token", return_value="fake_token"), \
              patch("src.api.git_repo_api._vcs_req", return_value={"id": 999}) as m_req:
-            resp = client.post("/api/git-repo/owner/repo/issues/1/comments",
-                               json={"body": "test comment"},
+            resp = client.post("/api/git-repo/owner/repo/issues",
+                               json={"title": "t", "body": "test comment"},
                                headers={"Authorization": "Bearer test"})
             assert resp.status_code == 200
             sent_body = m_req.call_args[0][4] if len(m_req.call_args[0]) > 4 else m_req.call_args.kwargs.get("body", {})
@@ -279,11 +263,6 @@ class TestGrapeAPICommentMarker:
             assert "<!-- grape-auto-comment -->" in sent_body["body"]
         app.dependency_overrides.clear()
 
-
-# ===========================================================================
-# 6.7 host_repo 缺 webhook_url 空值校验（P2）
-# ===========================================================================
-
 class TestWebhookUrlValidation:
     """验收标准 16：系统未配 webhook_url 时托管返回 400 + error_code=WEBHOOK_URL_NOT_CONFIGURED。"""
 
@@ -294,7 +273,8 @@ class TestWebhookUrlValidation:
         app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "test"}
         client = TestClient(app)
         with patch("src.domains.mgmt.user.db.get_webhook_url", return_value=""), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="token"):
+             patch("src.domains.mgmt.routes.repos.get_user_token_for", return_value="token"), \
+             patch("src.api.deps.get_user_token_for", return_value="token"):
             resp = client.post("/api/repos/host",
                                json={"full_name": "test/repo"},
                                headers={"Authorization": "Bearer test"})
@@ -314,18 +294,17 @@ class TestWebhookUrlValidation:
         assert "if not webhook_url" in source
         assert "WEBHOOK_URL_NOT_CONFIGURED" in source
 
-
-# ===========================================================================
-# 6.8 repair_host GitHub 用错 bot token（P1）—— get_hosting_provider_config
-# ===========================================================================
-
 class TestHostingProviderConfig:
     """验收标准 17：GitHub 仓库 repair_host 用 GitHub bot token + GitHub webhook 函数。"""
 
     def test_github_provider_config_returns_github_bot_token(self):
-        """provider='github' → 返回 get_global_github_bot_token + GitHub webhook 函数。"""
-        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="GH_BOT_TOKEN"), \
-             patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value="gh_bot"):
+        """provider='github' → 返回 get_global_bot_token_for + GitHub webhook 函数。
+
+        D97 缝迁移：S87 统一入口后 bot_token 走 get_global_bot_token_for(provider)、
+        bot_username 走 resolve_bot_username——旧符号 get_global_github_bot_token/
+        get_global_github_bot_username 已退役，patch 旧缝读不到值（假空）。"""
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="GH_BOT_TOKEN"), \
+             patch("src.domains.mgmt.user.repo_manager.resolve_bot_username", return_value="gh_bot"):
             from src.domains.mgmt.user.repo_manager import get_hosting_provider_config
             cfg = get_hosting_provider_config("github")
             assert cfg["bot_token"] == "GH_BOT_TOKEN"
@@ -335,9 +314,9 @@ class TestHostingProviderConfig:
             assert cfg["db_bot_token_field"] == "bot_github_token"
 
     def test_gitcode_provider_config_returns_gitcode_bot_token(self):
-        """provider='gitcode' → 返回 get_global_gitcode_bot_token + GitCode webhook 函数。"""
-        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="GC_BOT_TOKEN"), \
-             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["gc_bot"]):
+        """provider='gitcode' → 返回 get_global_bot_token_for + GitCode webhook 函数（缝同上）。"""
+        with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="GC_BOT_TOKEN"), \
+             patch("src.domains.mgmt.user.repo_manager.resolve_bot_username", return_value="gc_bot"):
             from src.domains.mgmt.user.repo_manager import get_hosting_provider_config
             cfg = get_hosting_provider_config("gitcode")
             assert cfg["bot_token"] == "GC_BOT_TOKEN"
@@ -354,9 +333,10 @@ class TestHostingProviderConfig:
         with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""), \
              patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value=""):
             cfg = get_hosting_provider_config("github")
-            assert cfg["find_webhook"] == find_existing_github_webhook
-            assert cfg["setup_webhook"] == setup_github_webhook
-            assert cfg["remove_webhook"] == remove_github_webhook
+            # D105-19：github_web 方言 → github 家族三件套（partial 绑定卡 api_base）
+            assert cfg["find_webhook"].func is find_existing_github_webhook
+            assert cfg["setup_webhook"].func is setup_github_webhook
+            assert cfg["remove_webhook"].func is remove_github_webhook
 
     def test_gitcode_provider_config_uses_gitcode_webhook_functions(self):
         """GitCode config 的 find/setup/remove webhook 函数是 GitCode 版本。"""
@@ -366,14 +346,10 @@ class TestHostingProviderConfig:
         with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""), \
              patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]):
             cfg = get_hosting_provider_config("gitcode")
-            assert cfg["find_webhook"] == find_existing_webhook
-            assert cfg["setup_webhook"] == setup_webhook
-            assert cfg["remove_webhook"] == remove_webhook
-
-
-# ===========================================================================
-# R10 token 过期检测与 error_code
-# ===========================================================================
+            # D105-19：gitee_v5 方言 → v5 家族三件套（partial 绑定卡 api_base）
+            assert cfg["find_webhook"].func is find_existing_webhook
+            assert cfg["setup_webhook"].func is setup_webhook
+            assert cfg["remove_webhook"].func is remove_webhook
 
 class TestR10TokenExpiryDetection:
     """验收标准 10：PAT 被撤销后 401 → task failed + error_code=TOKEN_EXPIRED。"""
@@ -413,23 +389,43 @@ class TestR10TokenExpiryDetection:
             assert is_identity_expired(42, "gitcode") is False
 
     def test_create_external_identity_restores_status_4_to_1(self):
-        """create_external_identity 恢复 status=4 记录到 status=1。"""
-        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
-             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
-             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="enc"):
-            cursor = MagicMock()
-            # 先查 status=1 → 无；再查 status IN (0,4) → 有
-            cursor.fetchone.side_effect = [None, (123,)]  # existing_active=None, existing_status_04=123
-            mock_db.cursor.return_value = cursor
-            from src.domains.mgmt.auth.grape_account_db import create_external_identity
+        """create_external_identity 恢复 status=4 记录到 status=1。
+
+        D97 行为级重写：S79 ORM 化后三分支走 _iar（Repository），裸 SQL cursor
+        断言失效。改为真库播种 status=4 行 → 调 create → 断言恢复 status=1
+        且 token 更新（对齐 test_s79 对账形态——行为断言而非 SQL 文本断言）。"""
+        import uuid as _uuid
+        from src.domains.mgmt.auth.grape_account_db import create_external_identity
+        from src.kernel.session_manager import db as _db, db_lock as _dl
+
+        uid = 420000 + (_uuid.uuid4().int % 100000)  # 隔离 user_id 防撞
+        ext_id = "uc39r10_" + _uuid.uuid4().hex[:8]
+        with _dl:
+            _db.cursor().execute(
+                "INSERT INTO external_identities (grape_user_id, provider, external_id,"
+                " external_login, access_token, refresh_token, status)"
+                " VALUES (?,?,?,?,?,?,4)",
+                (uid, "gitcode", ext_id, "old_login", "OLD", "OLDRT"))
+            _db.commit()
+        try:
             result = create_external_identity(
-                grape_user_id=42, provider="gitcode",
-                external_id="99999", external_login="testuser",
+                grape_user_id=uid, provider="gitcode",
+                external_id=ext_id, external_login="testuser",
                 access_token="NEW_TOKEN", refresh_token="")
             assert result is True
-            # 验证 UPDATE 语句包含 status=1
-            update_calls = [c for c in cursor.execute.call_args_list if "UPDATE" in str(c) and "status=1" in str(c)]
-            assert len(update_calls) > 0
+            with _dl:
+                row = _db.cursor().execute(
+                    "SELECT status, external_login, access_token FROM external_identities"
+                    " WHERE grape_user_id=? AND provider='gitcode'", (uid,)).fetchone()
+            assert row is not None, "恢复后行应存在（非 INSERT 新行——UNIQUE 约束）"
+            assert row[0] == 1, f"status 应恢复 1，Got {row[0]}"
+            assert row[1] == "testuser", "external_login 应更新"
+            assert row[2] != "OLD" and row[2], "access_token 应更新为新密文"
+        finally:
+            with _dl:
+                _db.cursor().execute(
+                    "DELETE FROM external_identities WHERE grape_user_id=?", (uid,))
+                _db.commit()
 
     def test_fail_task_401_triggers_token_expired(self):
         """fail_task 检测到 401 + 路径 D → 标记 status=4 + 写 error_code。
@@ -460,24 +456,26 @@ class TestR10TokenExpiryDetection:
             # detect_and_mark_expired 返回 TOKEN_EXPIRED → error_code 写入 task errors
             m_update.assert_called_once()
 
-
-# ===========================================================================
-# error_code 国际化
-# ===========================================================================
-
 class TestErrorCodeI18n:
     """验收标准 11：后端返回 error_code，前端映射 i18n 文案。"""
 
     def test_auth_me_returns_token_expired_providers(self):
-        """/auth/me 返回 token_expired_providers 含 error_code。"""
+        """/auth/me 返回 token_expired_providers 含 error_code。
+
+        D97 mock 对齐：S96 后 expired 遍历的是 get_user_identities 返回的实际
+        绑定平台（dict.fromkeys(bindings)）——旧 mock 返回 [] 则恒空（自相矛盾）。
+        改为返回一条 status=4 绑定行 + is_identity_expired=True → 该平台入列。"""
         from src.api.main import app
         from src.api.deps import require_no_session_token
         app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "test"}
         client = TestClient(app)
+        expired_ident = {"provider": "gitcode", "external_login": "u1",
+                         "external_name": "", "external_avatar": "",
+                         "created_at": "2026-11-08", "status": 4}
         with patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id",
                    return_value={"username": "test", "email": "", "nickname": "", "avatar_url": ""}), \
              patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True), \
-             patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[]), \
+             patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[expired_ident]), \
              patch("src.domains.mgmt.auth.grape_account_db.is_identity_expired", return_value=True):
             resp = client.get("/api/auth/me", headers={"Authorization": "Bearer test"})
             assert resp.status_code == 200
@@ -486,6 +484,7 @@ class TestErrorCodeI18n:
             assert len(data["token_expired_providers"]) > 0
             ep = data["token_expired_providers"][0]
             assert ep["error_code"] == "TOKEN_EXPIRED"
+            assert ep["provider"] == "gitcode"
             assert "message" in ep
             assert "rebind_url" in ep
         app.dependency_overrides.clear()
@@ -512,7 +511,8 @@ en_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "fro
         app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "test"}
         client = TestClient(app)
         with patch("src.domains.mgmt.user.db.get_webhook_url", return_value="https://example.com/webhook/gitcode"), \
-             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="token"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_for", return_value="token"), \
+             patch("src.api.deps.get_user_token_for", return_value="token"), \
              patch("src.domains.mgmt.routes.repos.with_oauth_token", side_effect=lambda u, p, fn: fn("token")), \
              patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "notowner"}):
             resp = client.post("/api/repos/host",
@@ -523,11 +523,6 @@ en_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "fro
                 detail = resp.json().get("detail", {})
                 assert detail.get("error_code") == "PERMISSION_DENIED"
         app.dependency_overrides.clear()
-
-
-# ===========================================================================
-# _is_user_token_repo / _is_github_user_token_repo
-# ===========================================================================
 
 class TestIsUserTokenRepo:
     """验收标准：_is_user_token_repo 正确判断路径 D。"""
@@ -579,11 +574,6 @@ class TestIsUserTokenRepo:
             mock_db.cursor.return_value = cursor
             from src.domains.mgmt.user.db import _is_user_token_repo
             assert _is_user_token_repo("gitcode:owner/repo") is False
-
-
-# ===========================================================================
-# _get_task_repo_token 区分 token 来源
-# ===========================================================================
 
 class TestGetTaskRepoToken:
     """验收标准：路径 D 用户 token → task 行写空，运行时实时获取。"""

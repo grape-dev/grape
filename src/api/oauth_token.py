@@ -70,14 +70,9 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
     user_id = user["id"]
     username = user["username"]
 
-    # 获取 token（带预刷新）
-    if provider == "gitcode":
-        from src.api.deps import get_user_token_with_refresh
-        token = get_user_token_with_refresh(username, user_id=user_id)
-    else:
-        # Issue #343 修复: GitHub 也走预刷新逻辑（和 GitCode 完全对称）
-        from src.api.deps import get_user_github_token_with_refresh
-        token = get_user_github_token_with_refresh(username, user_id=user_id)
+    # 获取 token（带预刷新，D3/K2 消除：provider 无关统一入口）
+    from src.api.deps import get_user_token_for
+    token = get_user_token_for(username, user_id=user_id, provider=provider)
 
     _provider_label = provider.capitalize()
 

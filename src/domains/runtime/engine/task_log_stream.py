@@ -68,20 +68,38 @@ def fanout(task_id: str, messages: list):
 
 
 def build_skill_source_message(bound: str, actual: str, source: str,
-                               ok: bool = True, reason: str = "") -> dict:
+                               ok: bool = True, reason: str = "",
+                               source_info: dict | None = None,
+                               drift: dict | None = None) -> dict:
     """Issue #887：技能来源标注消息（worker/服务端执行前上报）。
 
     统一格式「skill 来源：绑定=X / 实际=Y」——worker 通过 report_messages 上报后
     落 task_messages / events.agent_logs（详情页「处理记录」）并 fanout 到 SSE。
     data.skill_source 结构化字段由 _to_payload 透传给前端（issue #887 可观测）。
+
+    Issue #1635：``source_info``（skill_id/scope/type/version/digest）与 ``drift``
+    一并写入 skill_source 并在来源行展示，供溯源与漂移可见。
     """
     skill_source = {"bound": bound or "", "actual": actual or "",
                     "source": source or "", "ok": bool(ok)}
     if reason:
         skill_source["reason"] = str(reason)[:300]
+    _extra_line = ""
+    if isinstance(source_info, dict):
+        for _k in ("skill_id", "scope", "type", "version", "digest"):
+            if _k in source_info and source_info[_k] not in (None, ""):
+                skill_source[_k] = source_info[_k]
+                _extra_line += f" {_k}={source_info[_k]}"
+    if isinstance(drift, dict):
+        skill_source["drift"] = drift
+        _ver = drift.get("version") or {}
+        _extra_line += (f" drift_extra={len(drift.get('extra') or [])}"
+                        f" drift_missing={len(drift.get('missing') or [])}"
+                        f" drift_kind={_ver.get('kind') or 'none'}")
     line = (f"[skill] source: bound={bound or '-'} actual={actual or '-'} "
             f"source={source or '-'} ok={int(bool(ok))}"
-            + (f" reason={str(reason)[:300]}" if reason else ""))
+            + (f" reason={str(reason)[:300]}" if reason else "")
+            + _extra_line)
     return {"type": "log", "data": {"text": line, "skill_source": skill_source}}
 
 

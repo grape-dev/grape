@@ -9,9 +9,10 @@
 - R21.3.4: 超时/5xx 不计入 FAILURE_THRESHOLD
 - R21.3.5: detect_and_mark_expired 区分 401 和超时
 """
-import pytest
-from unittest.mock import patch, MagicMock
 
+import pytest
+
+from unittest.mock import patch, MagicMock
 
 class TestHealthCheckConfig:
     """R17.2.1: 健康检查配置。"""
@@ -23,7 +24,6 @@ class TestHealthCheckConfig:
     def test_failure_threshold_is_1(self):
         from src.domains.runtime.engine.bot_token_health import FAILURE_THRESHOLD
         assert FAILURE_THRESHOLD == 1, "R21.3.4: FAILURE_THRESHOLD should be 1 (1x 401 marks expired)"
-
 
 class TestGlobalTokenHealthCheck:
     """R17.2.2/R17.2.3: 全局 bot token 健康检查标记/清除。"""
@@ -62,7 +62,6 @@ class TestGlobalTokenHealthCheck:
             keys_called = [c.args[0] for c in mock_set.call_args_list]
             assert "global_gitcode_bot_token_status" in keys_called
             assert "global_github_bot_token_status" in keys_called
-
 
 class TestRepoTokenHealthCheck:
     """R17.2.5/R17.2.6: 仓库级 bot token 健康检查。"""
@@ -106,30 +105,30 @@ class TestRepoTokenHealthCheck:
             _verify_single_repo_token("gitcode:owner/repo", "gitcode")
             mock_set_status.assert_not_called()
 
-
 class TestDetectAndMarkExpiredR21:
     """R21.3.5: detect_and_mark_expired 区分 401 和超时。"""
 
     def test_401_marks_expired(self):
-        """R21.3.5: verify_token 401 → 标记过期，返回 error_code。"""
+        """R21.3.5: verify_token 401 → 标记过期，返回 error_code。
+        D101 方案三：链首 RepoBotToken（原 session 级退役）。"""
         from src.kernel.token_resolver import TokenResolver, create_provider
         _resolver = TokenResolver(create_provider("gitcode"))
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value="some_token"), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="some_token"), \
              patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("failed (401)")), \
-             patch("src.kernel.token_resolver.DevopsAgentSessionToken._is_expired", return_value=False), \
-             patch("src.kernel.token_resolver.DevopsAgentSessionToken.mark_expired") as mock_mark:
+             patch("src.kernel.token_resolver.RepoBotToken._is_expired", return_value=False), \
+             patch("src.kernel.token_resolver.RepoBotToken.mark_expired") as mock_mark:
             result = _resolver.detect_and_mark_expired("gitcode:owner/repo")
-            assert result == "SESSION_TOKEN_EXPIRED"
+            assert result == "REPO_TOKEN_EXPIRED"
             mock_mark.assert_called_once()
 
     def test_timeout_does_not_mark(self):
         """R21.3.5: verify_token 超时 → 不标记，返回空。"""
         from src.kernel.token_resolver import TokenResolver, create_provider
         _resolver = TokenResolver(create_provider("gitcode"))
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value="some_token"), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="some_token"), \
              patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("connection timeout")), \
-             patch("src.kernel.token_resolver.DevopsAgentSessionToken._is_expired", return_value=False), \
-             patch("src.kernel.token_resolver.DevopsAgentSessionToken.mark_expired") as mock_mark:
+             patch("src.kernel.token_resolver.RepoBotToken._is_expired", return_value=False), \
+             patch("src.kernel.token_resolver.RepoBotToken.mark_expired") as mock_mark:
             result = _resolver.detect_and_mark_expired("gitcode:owner/repo")
             assert result == ""
             mock_mark.assert_not_called()
@@ -138,10 +137,10 @@ class TestDetectAndMarkExpiredR21:
         """R21.3.5: verify_token 5xx → 不标记，返回空。"""
         from src.kernel.token_resolver import TokenResolver, create_provider
         _resolver = TokenResolver(create_provider("gitcode"))
-        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value="some_token"), \
+        with patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="some_token"), \
              patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("failed (503)")), \
-             patch("src.kernel.token_resolver.DevopsAgentSessionToken._is_expired", return_value=False), \
-             patch("src.kernel.token_resolver.DevopsAgentSessionToken.mark_expired") as mock_mark:
+             patch("src.kernel.token_resolver.RepoBotToken._is_expired", return_value=False), \
+             patch("src.kernel.token_resolver.RepoBotToken.mark_expired") as mock_mark:
             result = _resolver.detect_and_mark_expired("gitcode:owner/repo")
             assert result == ""
             mock_mark.assert_not_called()

@@ -12,7 +12,68 @@ from typing import Any
 
 from src.kernel.db import t_mgmt
 from src.kernel import session_manager
+from src.kernel.config import log
 from src.domains.contracts.mgmt_service import MgmtService
+
+
+def _provider_of_repo_key(repo_key: str) -> str:
+    """repo_key → provider（权威解析走 parse_repo_key，不枚举平台字面量）。"""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        return parse_repo_key(repo_key or "")[0] or ""
+    except Exception as e:  # 解析失败不阻断合同读，落空后按无卡派生
+        log.warning(f"mgmt_local: parse_repo_key({repo_key!r}) failed: {e}")
+        return ""
+
+
+def _provider_credential_columns(provider: str) -> tuple[str, str]:
+    """provider → (bot token 列名, webhook token 列名)。
+
+    D105-17/D106 口径：平台卡 token_storage_field / webhook_token_field 优先；
+    卡缺省（字段为空或无卡）按 bot_<p>_token / <p>_webhook_token 派生——与
+    platform_card builder 的缺省派生逐字节一致（存量 gitcode/github 列名不变）。
+    派生列名只用于「该列存在时回落读」，物理列缺失（gitee/gitlab 终态：凭据
+    只落 grape_t_repo_credentials）由调用方忽略，不报错。
+    """
+    tok_col = wh_col = ""
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider) if provider else None
+        if card is not None:
+            tok_col = card.token_storage_field or ""
+            wh_col = card.webhook_token_field or ""
+    except Exception as e:
+        log.warning(f"mgmt_local: platform card lookup failed for {provider!r}: {e}")
+    if not tok_col and provider:
+        tok_col = f"bot_{provider}_token"
+    if not wh_col and provider:
+        wh_col = f"{provider}_webhook_token"
+    return tok_col, wh_col
+
+
+def _repo_credential(c, repo_key: str, cred_type: str) -> str:
+    """读 grape_t_repo_credentials 单仓库凭据（S82/D58 起为凭据唯一权威）。
+
+    cred_type ∈ {'bot','webhook'}（平台语义由 repo_key 前缀承载，D99）；
+    表不存在（旧库/裁剪库）或读失败 → 空串（调用方回落历史列），并留 warning。
+    """
+    try:
+        row = c.execute(
+            "SELECT value FROM grape_t_repo_credentials "
+            "WHERE repo_key=? AND cred_type=?",
+            (repo_key, cred_type),
+        ).fetchone()
+    except Exception as e:
+        log.warning(f"mgmt_local: grape_t_repo_credentials read failed ({repo_key}, {cred_type}): {e}")
+        return ""
+    if not row or not row[0]:
+        return ""
+    try:
+        from src.domains.mgmt.user.db import _decrypt_repo_secret
+        return _decrypt_repo_secret(row[0]) or ""
+    except Exception as e:
+        log.warning(f"mgmt_local: repo credential decrypt failed ({repo_key}, {cred_type}): {e}")
+        return ""
 
 
 class MgmtServiceLocal(MgmtService):
@@ -26,21 +87,44 @@ class MgmtServiceLocal(MgmtService):
     def _lock(self):
         return session_manager.db_lock
 
+    def _managed_repo_row(self, c, repo_key: str) -> dict:
+        """整行读出为 dict（SELECT *：列名随卡/库版本而变——旧库缺派生列时
+        调用方按 .get() 落空，不做动态列名 SQL 拼接）。"""
+        c.execute(
+            f"SELECT * FROM {t_mgmt('managed_repos')} WHERE repo_key=?",
+            (repo_key,),
+        )
+        row = c.fetchone()
+        if not row:
+            return {}
+        cols = [d[0] for d in c.description] if c.description else []
+        return dict(zip(cols, row)) if cols else dict(row)
+
     def get_repo_webhook_config(self, repo_key: str) -> dict:
-        """B 校验 webhook 时调用——返回 webhook_token, bot_username, org_id。"""
+        """B 校验 webhook 时调用——返回 repo_key, webhook_token, bot_username, org_id。
+
+        凭据按 repo_key 前缀 provider 派生（卡列 → rc 单表优先），不再恒取
+        gitcode_webhook_token（gitee/github/gitlab 仓此前恒空）。
+        """
+        provider = _provider_of_repo_key(repo_key)
+        _, wh_col = _provider_credential_columns(provider)
         with self._lock:
             c = self._db.cursor()
-            c.execute(
-                f"SELECT repo_key, gitcode_webhook_token AS webhook_token, "
-                f"bot_username, org_id "
-                f"FROM {t_mgmt('managed_repos')} WHERE repo_key=?",
-                (repo_key,),
-            )
-            row = c.fetchone()
-            if not row:
+            data = self._managed_repo_row(c, repo_key)
+            if not data:
                 return {}
-            cols = [d[0] for d in c.description] if c.description else []
-            return dict(zip(cols, row)) if cols else dict(row)
+            webhook_token = (
+                _repo_credential(c, repo_key, "webhook")
+                or (data.get(wh_col) if wh_col else "")
+                or data.get("webhook_secret")
+                or ""
+            )
+        return {
+            "repo_key": data.get("repo_key", repo_key),
+            "webhook_token": webhook_token,
+            "bot_username": data.get("bot_username") or "",
+            "org_id": data.get("org_id") or 0,
+        }
 
     def get_agent_session(self, repo_key: str, agent_type: str) -> dict:
         """B 路由判定时调用——返回 runtime_id, skill, skill_id。
@@ -150,20 +234,34 @@ class MgmtServiceLocal(MgmtService):
             return data
 
     def get_bot_config(self, repo_key: str) -> dict:
-        """B/C 读取 Bot 配置——bot_token, bot_username。"""
+        """B/C 读取 Bot 配置——bot_token, bot_username, webhook_token。
+
+        凭据按 repo_key 前缀 provider 派生（平台卡列名 → rc 单表优先）；不再
+        恒取 bot_gitcode_token / gitcode_webhook_token（gitee/github/gitlab 仓
+        经合同给下游的 bot/webhook token 此前恒空）。
+        """
+        provider = _provider_of_repo_key(repo_key)
+        bot_col, wh_col = _provider_credential_columns(provider)
         with self._lock:
             c = self._db.cursor()
-            c.execute(
-                f"SELECT bot_gitcode_token AS bot_token, bot_username, "
-                f"gitcode_webhook_token AS webhook_token "
-                f"FROM {t_mgmt('managed_repos')} WHERE repo_key=?",
-                (repo_key,),
-            )
-            row = c.fetchone()
-            if not row:
+            data = self._managed_repo_row(c, repo_key)
+            if not data:
                 return {}
-            cols = [d[0] for d in c.description] if c.description else []
-            return dict(zip(cols, row)) if cols else dict(row)
+            bot_token = (
+                _repo_credential(c, repo_key, "bot")
+                or (data.get(bot_col) if bot_col else "")
+                or ""
+            )
+            webhook_token = (
+                _repo_credential(c, repo_key, "webhook")
+                or (data.get(wh_col) if wh_col else "")
+                or ""
+            )
+        return {
+            "bot_token": bot_token,
+            "bot_username": data.get("bot_username") or "",
+            "webhook_token": webhook_token,
+        }
 
     def get_skill(self, skill_id: str) -> Any:
         """技能加载——返回技能定义。"""

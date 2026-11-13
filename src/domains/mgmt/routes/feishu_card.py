@@ -11,16 +11,18 @@ WS 断连期间，飞书会向卡片回调地址 POST card.action.trigger 事件
   - WS 断连时，飞书自动走 HTTP 回调（本端点）
   - 两个通道同时存在，通过 _seen_msg_ids 去重
 """
+
 import json
+
 import asyncio
 
 from fastapi import APIRouter, Request
+
 from fastapi.responses import JSONResponse
 
 from src.kernel.config import log
 
 router = APIRouter(prefix="/api/feishu/card-action", tags=["feishu-card"])
-
 
 @router.post("/{app_id}")
 async def handle_card_action(app_id: str, request: Request):
@@ -130,3 +132,11 @@ async def _safe_handle_card(ctx, on_message, parsed):
         await on_message(ctx, parsed)
     except Exception as e:
         log.warning(f"[card-callback] handle error: {e}")
+
+"""飞书卡片按钮点击回调（HTTP 兜底）—— 已随旧 IM 传输层下线（A2 M2）。
+
+卡片点击现在只走 WS 的 `card.action.trigger`（FeishuChannel）；WS 断线由引擎按退避重连，
+不再需要本 HTTP 兜底。保留路由是为了让飞书回调不再重试：统一返回 code=0。
+
+如需恢复 HTTP 兜底，应基于新引擎（grape_t_channel_installation + FeishuChannel）重做，而不是旧 BotManager。
+"""

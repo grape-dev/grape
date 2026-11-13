@@ -67,5 +67,7 @@
   "fork_exists": "⚠️ 仓库已存在（可能已 Fork 过该模板），可直接在仓库管理中托管",
   "fork_no_permission": "⚠️ 无 Fork 权限，请检查 Token 权限设置",
   "fork_success": "Fork 成功：{msg}",
-  "fork_failed": "Fork 失败: {msg}"
+  "fork_failed": "Fork 失败: {msg}",
+  "experience_host_failed": "仓库已创建，托管失败：{{reason}}，可在仓库管理页重新托管",
+  "unknown_reason": "未知原因"
 }

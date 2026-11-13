@@ -189,6 +189,11 @@ _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm", "codex.cmd"),
         os.path.join(os.environ.get("APPDATA", ""), "npm", "codex.cmd"),
     ],
+    "atomcode": [
+        os.path.join(os.environ.get("USERPROFILE", ""), ".local", "bin", "atomcode.exe"),
+        os.path.join(os.environ.get("USERPROFILE", ""), ".cargo", "bin", "atomcode.exe"),
+        os.path.join(os.environ.get("APPDATA", ""), "npm", "atomcode.cmd"),
+    ],
     "cursor": [
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.cmd"),
@@ -320,6 +325,7 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
         #   user-dsh     <dshHome>/skills               （← 平台投送落点，本行即此）
         # 另有 customSkillDirs 可配置，但平台按现有约定只投 user 级。
         "dsh": [os.path.join(home, ".dsh", "skills")],
+        "atomcode": [os.path.join(os.path.expanduser(os.environ.get("ATOMCODE_HOME") or "~/.atomcode"), "skills")],
     }
     return mapping.get(key, [])
 
@@ -348,14 +354,34 @@ def path_separator() -> str:
 
 
 def bun_cache_dir() -> str:
-    """bun JIT 编译缓存目录（跨平台）。
+    r"""bun JIT 编译缓存目录（跨平台）。
 
-    Unix: /var/cache/bun-compile
-    Windows: %LOCALAPPDATA%\\grape\\bun-compile
+    Unix 按三级优先级解析（Issue #857）：
+      1. GRAPE_BUN_CACHE_DIR 环境变量（可含 ~ / $VAR）
+      2. ~/.cache/grape/bun-compile（用户级默认，普通用户可写，无需 root 预建）
+      3. 由 bun_cache_fallback_dir() 兜底到系统临时目录
+    Windows: %LOCALAPPDATA%\grape\bun-compile（不变）
+
+    历史口径曾硬编码 /var/cache/bun-compile，普通用户不可写 → 每个任务都要靠
+    fallback 兜底；改为用户级默认后不再依赖 1777 权限。
     """
     if _IS_WINDOWS:
         return os.path.join(os.environ.get("LOCALAPPDATA", home_dir()), "grape", "bun-compile")
-    return "/var/cache/bun-compile"
+    env_dir = os.environ.get("GRAPE_BUN_CACHE_DIR", "")
+    if env_dir:
+        return os.path.expanduser(os.path.expandvars(env_dir))
+    return os.path.join(home_dir(), ".cache", "grape", "bun-compile")
+
+
+def bun_cache_fallback_dir() -> str:
+    """bun 编译缓存兜底目录（临时目录下，Issue #857 降级用）。
+
+    `/var/cache/bun-compile` 在部分 worker 上不可写（非 root 且未预建），
+    此时退到 `tempfile.gettempdir()/grape/bun-compile`，避免任务启动即失败。
+    """
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), "grape", "bun-compile")
 
 
 def remap_cwd(path: str) -> str:
@@ -448,9 +474,9 @@ def kill_process_tree(pid: int, force: bool = False) -> bool:
             flags = ["/T"]
             if force:
                 flags.append("/F")
-            _sp.run(["taskkill"] + flags + ["/PID", str(pid)],
-                    capture_output=True, timeout=10)
-            return True
+            result = _sp.run(["taskkill"] + flags + ["/PID", str(pid)],
+                             capture_output=True, timeout=10)
+            return result.returncode == 0
         except Exception:
             return False
     import signal as _sig
@@ -468,7 +494,11 @@ def find_process_by_cwd(backend: str, cwd: str) -> list[int]:
 
     Unix: pgrep -f + /proc/{pid}/cwd readlink 校验
     Windows: wmic / Get-CimInstance 查 CommandLine 匹配（无 cwd 校验）
+    AtomCode: 两个平台均使用 executor 登记的进程与精确 cwd。
     """
+    if backend == "atomcode":
+        from src.domains.runtime.agents.executor import active_task_processes
+        return [proc.pid for proc in active_task_processes(backend, cwd)]
     if _IS_WINDOWS:
         import subprocess as _sp
         patterns = {

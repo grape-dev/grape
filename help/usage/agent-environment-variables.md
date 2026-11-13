@@ -31,13 +31,14 @@ GitCode 事件（Issue/PR/评论）
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义）。**格式契约（#721）**：形如 `GTDTeam/CodeArts`——**无 host 前缀、无 provider 前缀（`gitcode:`/`github:`）、无 `.git` 后缀**；注入侧统一 `from_repo_key` 归一（幂等），runbook 拼接 clone URL 前仍应做一次归一兜底（见下「runbook clone URL 模板」） | 全部（devops 事件） | `_execute_agent` |
 | `REPO_OWNER` | **仓库属主（owner，组织或个人的泛化概念）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
-| `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
+| `ACCOUNT` | **个人账号（webhook 触发人 / A2A 触发人，如 `Jason7602`）**；与仓库属主解耦，**解析为空时不会回退为仓库属主** | 全部（devops 事件） | `_execute_agent` / `_enqueue_pipeline_task`（`resolve_actor_account`：a2a_event 为 `payload.account` → `actor` → Issue `created_by`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `GRAPE_ISSUE_ID` | **需求卡片 id（issue 表主键，整数**；awaiting-input / pending-review / review-pass 的 `--issue_id` 用此值，**非 ISSUE_NUMBER**） | 事件任务（有 Issue） | `_execute_agent`（按 `(repo_key, issue_number)` 查卡片） |
-| `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent`（`_inject_issue_pr_env`：`payload.pr_number` → `evt._pr_sub_pr_number` → 嵌套键兜底 `payload.pull_request.number` / `payload.merge_request.number` / `payload.object_attributes.iid`，均为去 `#` 后纯数字，Issue #595。**note_hook_pr**：payload 优先（`noteable_iid` / `merge_request` / `pull_request`），缺失时从结构化 URL（`object_attributes.url` / `merge_request`、`pull_request` 的 `web_url`，形如 .../merge_requests/<N>）兜底，不从事件标题猜号；解析失败注入 `PR_NUMBER_PARSE_FAILED=1` 告警，禁止用 `ISSUE_NUMBER` 顶替，Issue #1579） |
-| `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
+| `PR_NUMBER` | PR 编号 | 事件任务（有真实 PR） | `_execute_agent`（`_inject_issue_pr_env` → `_extract_pr_number`）：`payload.pr_number` → `evt._pr_sub_pr_number` 为显式来源、始终可信；仅 **PR/MR 实体事件**才开放对象结构来源（`payload.pull_request.{number,iid}` / `payload.merge_request.{number,iid}` / `payload.object_attributes.iid`），均为去 `#` 后纯数字，Issue #595。**note_hook_pr**：payload 优先（`noteable_iid` / `merge_request` / `pull_request`），缺失时从结构化 URL（`object_attributes.url` / `merge_request`、`pull_request` 的 `web_url`，形如 .../merge_requests/<N>）兜底，不从事件标题猜号，Issue #1579。**Issue #1802 口径**：Issue 实体事件的 `object_attributes.iid` 是 Issue 自身编号，**永不作 PR 号来源**；无真实关联 PR 时**静默不注入** `PR_NUMBER`（不写占位值、不用 `ISSUE_NUMBER` 顶替）；仅 PR/MR 实体解析失败才注入 `PR_NUMBER_PARSE_FAILED=1` 告警。**URL 兜底取到的号会先做一次存在性校验**（`_pr_number_exists`，60s 缓存；明确 404 才丢弃，查询异常按存在处理） |
+| `BOT_USERNAME` | 全局 bot 用户名（grape_bot）——**作者过滤/幂等查重必须用它**，缺失时不得退化为「按评论形态判定」 | 全部 devops 事件 + 定时调度（autopilot） | 四条执行路径统一 `_inject_bot_agent_env`（`event_pipeline` ×2 / `direct_executor` / `runtime/scheduler`）；`_resolve_bot_username` 解析为空时**打 warning 而非静默降级** |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
-| `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra |
+| `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default）。**#1745**：跨场景转交后以 Issue 当前归属场景为真值；重派/执行前会按 `issues detail.scene_id` 校正陈旧快照（PR 订阅任务保留订阅场景）。未绑定场景时本机执行与远端 worker **同源回退仓库默认场景 `dev_scene`**（不再一边给 dev_scene、一边清空）；绑定的场景已被删除时按「未绑定」处理，不注入幽灵 scene_id | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra；执行前 `reconcile_task_scene_env` |
+| `GRAPE_SCENE_SCOPE_ON_ERROR` | 场景技能 scope 判定降级开关（服务端读，非注入给 agent）：`deny`（默认）= 查询异常 fail-closed；`allow` = 查询异常按放行并标 source=db_error，仅在 DB 抖动阻断派发时临时打开 | 平台进程 | `scene_skill_scope._env_error_policy` |
 | 场景自定义变量（`custom_fields`） | 场景高级选项配置的自定义环境变量，**以变量名直接注入**（如 `MY_API_KEY`、`HUAWEI_AK`），技能 `os.environ.get('VAR_NAME')` 直接读取；支持 `is_secret`（页面掩码）与 `scope`（按 agent 过滤，默认 all） | 配置了 custom_fields 的场景（按 scope 匹配的 agent） | `_inject_scene_env` → env_extra |
 | `BOT_GITCODE_TOKEN` | 仓库 bot token（仓库身份，事件任务） | **非 chat**（devops 事件） | `_assemble_env`（互斥） |
 | `BOT_GITHUB_TOKEN` | GitHub 仓库 bot token | 非 chat（GitHub 仓库） | `_assemble_env`（互斥） |
@@ -45,12 +46,24 @@ GitCode 事件（Issue/PR/评论）
 | `USER_GITHUB_TOKEN` | 当前用户 GitHub token | Chat（GitHub 关联） | `_assemble_env`（互斥） |
 | `DEVOPS_SKILLS_DIR` | 技能目录 | 全部 | 各引擎 get_env |
 | `DEVOPS_EVENT_TYPE` | **触发事件类型**（`issue_opened` / `issue_comment` / `push` / `pr_merge` / `vod_signal` 等）——「在响应什么事件」 | 全部 | 引擎 get_env 默认空，`stream_agent` 覆写为 event_type |
-| `AGENT_NAME` | **Agent 角色显示名**（`Issue Agent` / `QA Agent` / `Coding Agent` / `VOD Agent`…）——「我是谁」，skill 评论前缀 `[$AGENT_NAME]` 用 | 全部 | `stream_agent` 前 `get_agent_display_name(agent_type)` |
+| `AGENT_NAME` | **Agent 角色显示名**（`Issue Agent` / `QA Agent` / `Coding Agent` / `VOD Agent`…）——「我是谁」，skill 评论前缀 `[$AGENT_NAME]` 用；**它不是账号，禁止当评论作者过滤依据**（作者过滤用 `BOT_USERNAME`） | 全部 | `_inject_bot_agent_env` → `get_agent_display_name(agent_type)` |
 | `GIT_ASKPASS` | git 凭据辅助脚本（BOT_GITCODE_TOKEN） | Coding/QA/SRE（git workflow） | `repogit.askpass_path` |
 
 > 注：`HUAWEICLOUD_SDK_AK/SK`、`CODEARTS_CLI_AK/SK`、`GITHUB_PUBLISH_REPO`、`GITCODE_PUBLISH_REPO`、
 > `CLAWHUB_OWNER_HANDLE` **已不再经环境变量注入**（#219 按需获取）——技能需要时通过自定义场景变量（场景高级选项 custom_fields，变量名直接注入）
 > 或按需 API 获取。
+
+> **`ACCOUNT` 取值优先级（Issue #1668）**：
+> 1. `a2a_event`：`payload.account`（A2A 交办方显式携带的触发人）→ 事件 `actor`；
+>    - `/api/a2a` 入口的事件 `actor` 取**已认证调用方登录名**（JWT / API Key 可提供；会话 token 无登录名时为空）；
+>    - 内部派生的 a2a_event（订阅 / PR 订阅 / VOD 重派）继承来源事件的 `actor`；
+> 2. 其余事件：事件 `actor`（webhook 触发人）→ `payload.account`；
+> 3. 仅 `a2a_event`：上述为空时按 `issue_number` 查 `issue.created_by`（Issue 创建人）；
+> 4. 仍为空 → 注入空串，并在服务端事件日志输出结构化告警 `ACCOUNT_MISSING`（含 `event_type` / `issue_number` / `repository` / 实际回退链 `fallback`）。
+>
+> **禁止回退为仓库属主（`REPO_OWNER`）**——个人账号与仓库属主解耦；A2A payload 的 `account` 与事件记录 `actor` 同步使用该解析结果。
+> 订阅 / PR 订阅 / VOD 重派等派生的 a2a_event 会把解析结果同时写入事件 `actor` 与落库 `payload.account`，保证下游任务与事件查询一致。
+> `issue_opened` / PR 等非 A2A 事件的 `ACCOUNT` 仍取 webhook 触发人 `actor`，行为不变。
 
 > **`AGENT_NAME` 与 `DEVOPS_EVENT_TYPE` 的区别**：两者是正交的两个维度——
 > `AGENT_NAME` = **身份**（谁在执行，按 agent_type 的角色显示名，如 `QA Agent`，用于 `[$AGENT_NAME]` 评论前缀）；
@@ -101,6 +114,9 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
    `custom_fields`，变量名直接注入）读取，或在技能 SKILL.md 中声明按需获取方式。
 5. **场景读取**：`printenv GRAPE_SCENE_ID` 确认当前 Issue 绑定的场景（空串=尚未判定）；
    自定义字段以**变量名直接注入**——`printenv <NAME>` / `os.environ.get('<NAME>')` 直接读值。
+   **跨场景转交/重入时以 `issues detail` 返回的 `scene_id` 为权威**，`GRAPE_SCENE_ID` 作兜底：
+   两者不一致时按真实值执行 `scenes detail --scene_id <真实值>` 重取节点后重试，
+   仅当真实场景确实不含目标节点时才进入待确认（Issue #1745）。
 6. **git 操作**：用 `GRAPE_WORK_BRANCH` 作工作基线；`GIT_ASKPASS` 已注入 `$BOT_GITCODE_TOKEN`。
 7. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
    平台已有脱敏（[REDACTED]）。token 仅在进程内有效、删除即失效（GRAPE_SESSION_TOKEN 生命周期=任务）。

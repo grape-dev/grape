@@ -39,7 +39,8 @@ ZIP_CACHE_MAX_VERSIONS = int(os.environ.get("OBS_ZIP_CACHE_MAX_VERSIONS", "1")) 
 MEM_CACHE_MAX_BYTES = int(os.environ.get("OBS_MEM_CACHE_MAX_BYTES", str(50 * 1024 * 1024)))
 
 # 动态片段白名单（拼 key 前必过）
-_RE_USER_ID = re.compile(r"^\d+$")
+# D105：user_id 主键 UUIDv7 化——白名单在存量纯数字外放行 36 位标准 UUID
+_RE_USER_ID = re.compile(r"^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
 _RE_NAME = re.compile(r"^[\w.\-]+$")
 _RE_RAND8 = re.compile(r"^[0-9a-f]{8}$")
 _VALID_SCOPES = ("custom", "repo", "official")
@@ -222,16 +223,19 @@ def skill_key(scope: str, owner: str, skill_name: str, version: int | None = Non
         owner_seg = owner
     elif scope == "repo":
         # provider 段（#444 根治）：repo_key 前缀即 provider；无前缀默认 gitcode
-        _owner = owner or ""
-        _provider = "gitcode"
-        if ":" in _owner:
-            _provider, _owner = _owner.split(":", 1)
-            if not _RE_NAME.match(_provider):
-                raise ValueError(f"invalid provider in repo_key: {owner}")
-        parts = _owner.split("/", 1)
-        if len(parts) != 2 or not _RE_NAME.match(parts[0]) or not _RE_NAME.match(parts[1]):
+        # S87/D63：派生统一走 parse_repo_key（裸键回落 gitcode 存量语义）
+        # S106：修复 S87 引入的变量名笔误（解构目标 _owner 未定义 → UnboundLocalError
+        # 被 convert 路径 502 兜底吞掉，仓库↔个人技能转换全链路不可用）
+        from src.kernel.repo_key import parse_repo_key as _prk_st
+        _provider, _owner, _repo_seg = _prk_st(owner or "")
+        if not _RE_NAME.match(_provider):
+            raise ValueError(f"invalid provider in repo_key: {owner}")
+        # S106：parse_repo_key 返回 (provider, owner, repo) 三段——S87 误把 owner
+        # 当 owner/repo 两段再 split（恒 1 段 → 一切 repo scope 的 skill_key 全炸）；
+        # 正确形态=三段直接重组
+        if not _RE_NAME.match(_owner) or not _RE_NAME.match(_repo_seg):
             raise ValueError(f"invalid repo_key: {owner}")
-        owner_seg = f"{_provider}/{parts[0]}/{parts[1]}"
+        owner_seg = f"{_provider}/{_owner}/{_repo_seg}"
     else:  # official
         owner_seg = ""
     from src.kernel.config import OBS_PREFIX

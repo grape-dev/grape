@@ -10,18 +10,16 @@
 
 所有 DB 操作用 mock，不连真实数据库。
 """
+
 import os
+
 import sys
+
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-
-# ===========================================================================
-# T21: detect_webhook_from_host / _get_trusted_host 安全加固
-# ===========================================================================
 
 class TestT21DetectWebhookFromHost:
     """T21: detect_webhook_from_host TRUSTED_HOSTS 安全加固"""
@@ -69,7 +67,6 @@ class TestT21DetectWebhookFromHost:
             result = detect_webhook_from_host(host=host, forwarded_host="", forwarded_proto="http")
             assert result == "", f"localhost variant {host} should be rejected"
 
-
 class TestT21bGetTrustedHost:
     """T21b: _get_trusted_host 安全加固"""
 
@@ -85,11 +82,6 @@ class TestT21bGetTrustedHost:
             result = _get_trusted_host(MockRequest())
             assert "evil.com" not in result
             assert "1.2.3.4" in result
-
-
-# ===========================================================================
-# T22: _update_repo_bot_token 清空 webhook_secret
-# ===========================================================================
 
 class TestT22UpdateRepoBotToken:
     """T22: _update_repo_bot_token 升级时清空 webhook_secret"""
@@ -119,16 +111,13 @@ class TestT22UpdateRepoBotToken:
             assert "webhook_secret=''" in sql_arg
             assert "bot_github_token=?" in sql_arg
 
-
-# ===========================================================================
-# T24: _query_path_b_repos repo_key 前缀过滤
-# ===========================================================================
-
 class TestT24QueryPathBReposPrefixFilter:
     """T24: _query_path_b_repos repo_key 前缀过滤"""
 
     def test_t24_01_gitcode_query_has_prefix_filter(self):
-        """T24-01: gitcode 查询包含 NOT LIKE 'github:%' 过滤"""
+        """T24-01: gitcode 查询包含前缀过滤（F4b/D106 复原 D43 卡驱动口径：
+        默认平台子句=LIKE 'gitcode:%' OR 裸键 NOT LIKE '%:%'——语义为旧
+        NOT LIKE 'github:%' 的泛化形态，含裸键存量数据归入 gitcode 域）。"""
         from src.domains.mgmt.user.db import _query_path_b_repos
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = []
@@ -137,7 +126,7 @@ class TestT24QueryPathBReposPrefixFilter:
              patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor):
             _query_path_b_repos("gitcode")
             sql_arg = mock_cursor.execute.call_args[0][0]
-            assert "NOT LIKE 'github:%'" in sql_arg
+            assert "LIKE 'gitcode:%'" in sql_arg and "NOT LIKE '%:%'" in sql_arg
 
     def test_t24_02_github_query_has_prefix_filter(self):
         """T24-02: github 查询包含 LIKE 'github:%' 过滤"""
@@ -150,11 +139,6 @@ class TestT24QueryPathBReposPrefixFilter:
             _query_path_b_repos("github")
             sql_arg = mock_cursor.execute.call_args[0][0]
             assert "LIKE 'github:%'" in sql_arg
-
-
-# ===========================================================================
-# T25: GitHub PAT _has_refresh_token 守卫
-# ===========================================================================
 
 class TestT25GithubPatGuard:
     """T25: GitHub PAT _has_refresh_token 守卫"""
@@ -171,11 +155,6 @@ class TestT25GithubPatGuard:
             # 不应该调 get_credential（因为 _has_refresh_token=False 直接 return）
             mock_get_cred.assert_not_called()
             mock_refresh.assert_not_called()
-
-
-# ===========================================================================
-# T26: _get_task_token 公共函数
-# ===========================================================================
 
 class TestT26GetTaskTokenPublic:
     """T26: _get_task_token 公共函数验证"""
@@ -199,11 +178,6 @@ class TestT26GetTaskTokenPublic:
         # 两个模块的 _get_task_token 应该指向 user.db.get_task_token
         assert agent_mod._get_task_token is get_task_token
         assert service_mod._get_task_token is get_task_token
-
-
-# ===========================================================================
-# T27: 前端版本号一致性
-# ===========================================================================
 
 class TestT27FrontendVersionSync:
     """T27: 前端版本号一致性"""
@@ -237,3 +211,5 @@ base = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "fronte
                 if match:
                     versions.add(match.group(1))
         assert len(versions) == 1, f"app.css versions inconsistent: {versions}"
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

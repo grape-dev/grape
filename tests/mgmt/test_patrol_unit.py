@@ -633,7 +633,7 @@ def test_identity_strategy_sql_seam():
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
         user = pc.HostUserStrategy().resolve("gitcode:patrol-test/b")
-        assert user and user["id"] == 777 and user["auth_type"] == "jwt"
+        assert user and user["id"] == "777" and user["auth_type"] == "jwt"  # D105: str uid
     fake = FakeDb([("FROM managed_repos WHERE repo_key=?", [(0,)])])
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
@@ -642,7 +642,7 @@ def test_identity_strategy_sql_seam():
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
         fb = pc.ManagedUserFallbackStrategy().resolve("gitcode:patrol-test/a")
-        assert fb and fb["id"] == 888
+        assert fb and fb["id"] == "888"  # D105: str uid
     fake = FakeDb([("FROM user_repos WHERE repo_key=?", [])])
     with patch.object(pc, "db", fake), \
          patch.object(pc, "db_lock", __import__("threading").Lock()):
@@ -821,7 +821,7 @@ def test_s21_1_handoff_key_single_source_and_nonempty_guard():
 
 
 def test_s22_1_mysql_dialect_compliance():
-    from src.mysql_compat import _CONCAT_RE, _SQLITE_MASTER_SQL_RE
+    from src.kernel.mysql_compat import _CONCAT_RE, _SQLITE_MASTER_SQL_RE
     src_comp = open(os.path.join(ROOT, "src", "api", "patrol_compensate.py"),
                     encoding="utf-8").read()
     assert "action_meta=action_meta||" not in src_comp
@@ -1041,7 +1041,7 @@ def test_s26_1_resolve_owner_path_a_fallback():
     ])
     with patch.object(patrol_mod, "db", fake), \
          patch.object(patrol_mod, "db_lock", threading.Lock()):
-        assert patrol_mod._resolve_owner(SENTINEL_REPO) == 888
+        assert patrol_mod._resolve_owner(SENTINEL_REPO) == "888"  # D105: str uid
 
 
 def test_s26_2_resolve_owner_host_user_wins_and_unowned():
@@ -1051,7 +1051,7 @@ def test_s26_2_resolve_owner_host_user_wins_and_unowned():
                    ("FROM user_repos WHERE repo_key=? AND is_admin=1", [(999,)])])
     with patch.object(patrol_mod, "db", fake), \
          patch.object(patrol_mod, "db_lock", threading.Lock()):
-        assert patrol_mod._resolve_owner(SENTINEL_REPO) == 77
+        assert patrol_mod._resolve_owner(SENTINEL_REPO) == "77"  # D105: str uid
     fake2 = FakeDb([("FROM managed_repos WHERE repo_key=?", [(0,)]),
                     ("FROM user_repos WHERE repo_key=? AND is_admin=1", [])])
     with patch.object(patrol_mod, "db", fake2), \
@@ -1980,7 +1980,14 @@ def test_s45_3_fetch_error_swallowed():
          patch.object(patrol_mod, "patrol_runtime_config",
                       lambda: {"confirm_minutes": 10}):
         out = patrol_mod.detect_broken_chains("")   # 不得抛出
-    assert out == [], "缺文本=next_step 空=不报（不猜）"
+    # Issue #2050 口径变更：缺文本不再等于「不报」——末段 completed + 超窗即产断链 finding，
+    # 目标由 resolve_handoff_target 判定（场景序推导只作建议，补偿侧落 needs_human 不派发）。
+    # 本用例锁定的仍是「单块回捞异常被吞掉、不炸整轮」，故断言该候选按新口径落 finding。
+    assert len(out) == 1 and out[0]["task_id"] == "t-new", \
+        "回捞异常必须被吞掉（不得炸整轮），候选仍按 #2050 停滞口径落 finding"
+    _detail = json.loads(out[0]["detail"])
+    assert _detail["reason"] == "no_handoff_text"
+    assert "人工" in out[0]["suggestion"], "无声明交棒的停滞只告警/转人工，不自动猜目标"
 
 
 # ====== S46【覆盖对账·P1 补口】runtime 窗口分支的两段式行为 ======

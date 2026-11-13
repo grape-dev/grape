@@ -10,8 +10,11 @@
 enabled=false、skill 为空）。配置缺失/解析失败回落默认全开（不因缺配置跳过
 校验），查询/探测异常逐一 fail-open，避免误拦正常建单。
 """
+
 import json
+
 import os
+
 import uuid
 
 from src.kernel.config import CONFIG_DIR, log
@@ -26,14 +29,14 @@ REASON_CODES = (
 )
 
 _PREHECK_CONFIG_PATH = os.path.join(CONFIG_DIR, "scene-precheck.json")
-_TERMINAL_NEXT = {"done", "complete", "end"}
-_HEALTH_THRESHOLD = 30
 
+_TERMINAL_NEXT = {"done", "complete", "end"}
+
+_HEALTH_THRESHOLD = 30
 
 def _default_config() -> dict:
     return {"enforce": True, "reasons": {code: True for code in REASON_CODES},
             "fail_open": False}
-
 
 def load_precheck_config() -> dict:
     """读取预校验开关。
@@ -61,7 +64,6 @@ def load_precheck_config() -> dict:
         log.warning(f"scene_precheck: config load failed, use default (all reasons enabled): {e}")
     return cfg
 
-
 def _normalize_engine_ids(raw) -> list[int]:
     out = []
     for item in raw or []:
@@ -73,17 +75,14 @@ def _normalize_engine_ids(raw) -> list[int]:
             out.append(rid)
     return out
 
-
 def _node_key(node: dict) -> str:
     return str(node.get("id") or node.get("tag") or "").strip()
-
 
 def _node_skill_id(node: dict) -> int:
     try:
         return int(node.get("skill_id") or 0)
     except (TypeError, ValueError):
         return 0
-
 
 def _user_identities(user) -> tuple[set[str], set[str]]:
     """返回可用于 user 档归属比对的用户名集合与数字 uid 集合。
@@ -103,7 +102,7 @@ def _user_identities(user) -> tuple[set[str], set[str]]:
     if uid.isdigit() and int(uid) > 0:
         uids.add(uid)
     try:
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             get_grape_account_by_id,
             get_grape_account_by_username,
         )
@@ -126,7 +125,6 @@ def _user_identities(user) -> tuple[set[str], set[str]]:
     names.discard("")
     uids.discard("")
     return names, uids
-
 
 def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
     """单次批量查询引擎存在性、归属与在线信息（1 次 DB 查询/节点）。"""
@@ -160,7 +158,6 @@ def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
         }
     return out
 
-
 def _read_health_scores(runtime_ids: list[int]) -> dict[int, int]:
     """只读查询健康分（不触发 health_scorer 的现算落库，保持预校验零副作用）。"""
     if not runtime_ids:
@@ -174,7 +171,6 @@ def _read_health_scores(runtime_ids: list[int]) -> dict[int, int]:
             f"WHERE runtime_id IN ({placeholders})",
             tuple(runtime_ids))
         return {int(r[0]): int(r[1] or 0) for r in c.fetchall()}
-
 
 def _available_engines(rows: list[dict]) -> list[dict]:
     """按派发链路同一把尺子判定可用：status/心跳 + 健康分阈值（只读）。"""
@@ -197,7 +193,6 @@ def _available_engines(rows: list[dict]) -> list[dict]:
         log.warning(f"scene_precheck: health score lookup failed, degrade to online check: {e}")
         return healthy
 
-
 def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     skill_name = str(node.get("skill") or "").strip()
     skill_id = _node_skill_id(node)
@@ -217,7 +212,6 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     except Exception as e:
         log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")
         return True
-
 
 def _ownership_problem(rows: list[dict], repo_key: str,
                        names: set[str], uids: set[str]) -> dict | None:
@@ -245,7 +239,6 @@ def _ownership_problem(rows: list[dict], repo_key: str,
                 return {"engine_id": row["runtime_id"], "reason": "repo", "owner": owner_norm}
     return None
 
-
 def _append_problem(problems: list, cfg: dict, reason_code: str, node_tag: str,
                     engine_ids=None, message: str = "", suggestion: str = "") -> None:
     if not cfg["reasons"].get(reason_code, True):
@@ -258,13 +251,11 @@ def _append_problem(problems: list, cfg: dict, reason_code: str, node_tag: str,
         "suggestion": suggestion,
     })
 
-
 def summarize_problems(problems: list, limit: int = 3) -> str:
     """把 problems 压成一行摘要（API / webhook 共用，避免重复实现）。"""
     return "；".join(
         str(p.get("message") or p.get("reason_code") or "")
         for p in (problems or [])[:limit])
-
 
 def problem_reason_codes(problems: list) -> list[str]:
     """按出现顺序去重 reason_code（API / webhook 共用）。"""
@@ -274,7 +265,6 @@ def problem_reason_codes(problems: list) -> list[str]:
         if code and code not in codes:
             codes.append(code)
     return codes
-
 
 def _check_structure(nodes: list, cfg: dict, problems: list) -> None:
     targets = set()
@@ -312,7 +302,6 @@ def _check_structure(nodes: list, cfg: dict, problems: list) -> None:
                 problems, cfg, "scene_node_dangling", key,
                 message=f"节点 {key} 的 next 指向不存在节点：{nxt}",
                 suggestion="修正节点流向或删除悬空引用后再建单")
-
 
 def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str,
                           repo_key: str, names: set[str], uids: set[str],
@@ -356,17 +345,26 @@ def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str
                     f"{[r['runtime_id'] for r in existing]}",
             suggestion="启动引擎或重新选择在线机器后重试")
 
-
-def _check_skill(node: dict, tag: str, repo_key: str, user_id: str,
+def _check_skill(node: dict, tag: str, repo_key: str,
                  cfg: dict, problems: list) -> None:
+    from src.api.scene_skill_scope import evaluate, format_rebind_hint
     skill_name = str(node.get("skill") or "").strip()
     skill_id = _node_skill_id(node)
-    if (skill_name or skill_id) and not _skill_resolvable(node, repo_key, user_id):
-        _append_problem(
-            problems, cfg, "skill_unresolvable", tag, [],
-            message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}",
-            suggestion="重新选择技能或确认技能对当前用户/仓库可见")
-
+    if not (skill_name or skill_id):
+        return
+    result = evaluate(node, repo_key, "repo")
+    if result["ok"]:
+        return
+    _suggestion = "重新选择技能或确认技能对当前用户/仓库可见"
+    _cand = list(result.get("rebind_candidates") or [])
+    if _cand:
+        _suggestion = ("repo 级场景不可引用 user 级技能，"
+                       f"{format_rebind_hint(_cand)}")
+    _append_problem(
+        problems, cfg, "skill_unresolvable", tag, [],
+        message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}"
+                f"（{result.get('reason') or 'skill scope 不匹配'}）",
+        suggestion=_suggestion)
 
 def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
                  cfg: dict, problems: list) -> None:
@@ -382,13 +380,11 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
         eids = _normalize_engine_ids(n.get("engine_runtime_ids"))
         _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
                               cfg, problems)
-        _check_skill(n, tag, repo_key, user_id, cfg, problems)
-
+        _check_skill(n, tag, repo_key, cfg, problems)
 
 def _scene_unresolved(scene: dict | None, scene_id: str) -> bool:
     return (not scene or scene.get("fallback")
             or bool(scene.get("scene_id") and scene.get("scene_id") != scene_id))
-
 
 def _load_user_scene_nodes(scene_id: str, uids: set[str]):
     """标准解析未命中时补查用户个人场景（Issue #979 / #1245）。"""
@@ -406,7 +402,6 @@ def _load_user_scene_nodes(scene_id: str, uids: set[str]):
         if nodes is not None:
             return nodes
     return None
-
 
 def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
     """建单前场景可用性预校验。
@@ -454,3 +449,18 @@ def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
         out["ok"] = True
         out["problems"] = []
     return out
+
+"""Issue #1245: 建单前场景可用性预校验（静态只读）。
+
+目标：在创建 Issue 之前，对所选场景中「存在且 enabled」的节点做四检：
+1) 绑定引擎在 agent_runtimes 存在；
+2) 至少一台可用（沿用派发链路的在线/心跳判定 + 健康分阈值）；
+3) 引擎归属合法（user 档属创建者本人，repo 档属当前仓库）；
+4) 节点技能与 repo 级场景 scope 兼容（Issue #1758 统一委托
+   `scene_skill_scope.evaluate`；user scope 一律不可解析）。
+
+另有结构校验（next 悬空 / 节点 id 重复）与三类豁免（非 SRE 空绑定、
+enabled=false、skill 为空）。配置缺失/解析失败回落默认全开（不因缺配置跳过
+校验）；引擎查询/探测异常仍 fail-open，技能 scope 查询异常按单一判官
+fail-closed，避免与保存/派发结论漂移。
+"""

@@ -9,12 +9,15 @@ global-bot-token.json 保留只读，仅供启动迁移读取（迁移后不再�
 admin 配置中心 save_config 分流：bot 字段写 DB meta，OAuth 字段写 oauth-providers.json + 同步 meta 表。
 前端 API 不变（ConfigBody 扁平结构不变），后端做扁平→嵌套映射。
 """
+
 import json
+
 import os
 
 from src.kernel.config import log, CONFIG_DIR
 
 _GBT_PATH = os.path.join(CONFIG_DIR, "global-bot-token.json")
+
 _OAUTH_PATH = os.path.join(CONFIG_DIR, "oauth-providers.json")
 
 # Bot 字段——写入 DB meta 表（Issue #345: DB 是唯一权威源）
@@ -28,7 +31,7 @@ _BOT_FIELDS = [
 ]
 
 # 运行参数字段（Issue #470：写死配置抽取到管理台）——写 DB meta，运行时经
-# src/config.py 统一 getter 读取（env > meta > runtime-config.json > 默认）。
+# src/kernel/config.py 统一 getter 读取（env > meta > runtime-config.json > 默认）。
 # 非敏感，明文回显。空值/0 = 未设置（回退下一层），沿用「只保存非空字段」约定。
 _RUNTIME_FIELDS = [
     "runtime_task_timeout",
@@ -46,15 +49,18 @@ _OAUTH_FIELD_MAP = {
     "gitcode_oauth_client_secret": ("gitcode", "client_secret"),
     "github_oauth_client_id": ("github", "client_id"),
     "github_oauth_client_secret": ("github", "client_secret"),
+    # D90-N5 补齐：gitee 也是 OAuth 平台之一，管理台需能保存其凭据
+    "gitee_oauth_client_id": ("gitee", "client_id"),
+    "gitee_oauth_client_secret": ("gitee", "client_secret"),
+    "huawei_oauth_client_id": ("huawei", "client_id"),
+    "huawei_oauth_client_secret": ("huawei", "client_secret"),
 }
 
 # 全字段清单（前端展示用）
 ALL_FIELDS = _BOT_FIELDS + list(_OAUTH_FIELD_MAP.keys())
 
-
 def get_config_path() -> str:
     return _GBT_PATH
-
 
 def load_config() -> dict:
     """Read global-bot-token.json; return empty dict if missing or corrupt.
@@ -70,7 +76,6 @@ def load_config() -> dict:
     except Exception as e:
         log.warning(f"admin config_store: load failed: {e}")
     return {}
-
 
 def read_public_config() -> dict:
     """返回脱敏配置（前端展示）。
@@ -154,7 +159,6 @@ def read_public_config() -> dict:
     out["runtime_config_file"] = os.path.exists(RUNTIME_CONFIG_PATH)
     return out
 
-
 def save_config(payload: dict) -> dict:
     """保存配置——分流到 DB meta + oauth-providers.json。
 
@@ -211,7 +215,8 @@ def save_config(payload: dict) -> dict:
                     # 检测从无到有 / 有→有换账号
                     if field in ("gitcode_api_token", "github_bot_token") and val:
                         _old = get_meta_value(meta_key) or ""
-                        provider = "github" if field == "github_bot_token" else "gitcode"
+                        # D43/S63：provider 从字段名派生（gitcode_api_token→gitcode、github_bot_token→github）
+                        provider = field.split("_")[0]
                         if not _old:
                             # 从无到有 → auto_upgrade
                             _upgrade_triggers.append((provider, str(val)))
@@ -236,15 +241,11 @@ def save_config(payload: dict) -> dict:
 
         # Issue #372 §13.2: bot token 从无到有时异步升级路径 B 仓库
         if _upgrade_triggers:
-            from src.domains.mgmt.user.db import get_global_bot_usernames, get_global_github_bot_username
+            from src.domains.mgmt.user.repo_manager import resolve_bot_username
             import threading
             for _provider, _token in _upgrade_triggers:
-                _bot_username = ""
-                if _provider == "github":
-                    _bot_username = get_global_github_bot_username()
-                else:
-                    _us = get_global_bot_usernames()
-                    _bot_username = _us[0] if _us else ""
+                # D30/S50：bot 身份统一来源链（存量平台全局 meta，config-only 走卡）
+                _bot_username = resolve_bot_username(_provider)
                 if _bot_username:
                     from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
                     threading.Thread(
@@ -283,7 +284,6 @@ def save_config(payload: dict) -> dict:
 
     return read_public_config()
 
-
 def _save_oauth_providers(oauth_payload: dict):
     """把 ConfigBody 扁平 OAuth 字段写入 oauth-providers.json（嵌套结构）。
 
@@ -308,32 +308,20 @@ def _save_oauth_providers(oauth_payload: dict):
         json.dump(existing, f, ensure_ascii=False, indent=2)
     os.replace(tmp, _OAUTH_PATH)
 
-
 def verify_token(provider: str, token: str) -> dict:
     """用 token 调平台 /user 接口校验，返回登录名 + 平台。
 
-    - provider=gitcode:  GET https://gitcode.com/api/v5/user
-    - provider=github:   GET https://api.github.com/user
+    D30/S50：卡驱动（create_provider → GenericVcsProvider.verify_token，
+    api_base/api_auth 按平台卡）——任何已配平台可用，gitcode/github
+    存量行为由内置卡对齐。
     """
-    import os as _os
-    _proxies = None
-    _proxy = _os.environ.get("HTTPS_PROXY") or _os.environ.get("https_proxy") or ""
-    if _proxy:
-        _proxies = {"https": _proxy, "http": _proxy}
-    if provider == "github":
-        from src.domains.mgmt.user.repo_manager import _github_req
-        user_data = _github_req("GET", "https://api.github.com/user", token)
-        login = user_data.get("login", "")
-        return {"provider": "github", "login": login, "name": user_data.get("name") or login}
-    from src.domains.mgmt.user.repo_manager import _req
-    user_data = _req("GET", "https://gitcode.com/api/v5/user", token)
-    login = user_data.get("login", "") or ""
-    return {"provider": "gitcode", "login": login, "name": user_data.get("name") or login}
+    from src.kernel.token_resolver import create_provider
+    user_data = create_provider(provider).verify_token(token)
+    if not isinstance(user_data, dict):
+        raise RuntimeError(f"verify_token({provider}): empty user info")
+    login = str(user_data.get("login", "") or "")
+    return {"provider": provider, "login": login, "name": user_data.get("name") or login}
 
-
-# ---------------------------------------------------------------------------
-# R21.1: 全局 bot token 更换（有→有换账号）
-# ---------------------------------------------------------------------------
 
 def _global_bot_token_swap_wrapper(provider: str, old_token: str, new_token: str):
     """R21.1.3/R21.1.7: 后台线程 wrapper——加分布式锁 + 异常隔离。"""
@@ -349,14 +337,13 @@ def _global_bot_token_swap_wrapper(provider: str, old_token: str, new_token: str
     except Exception as e:
         log.warning(f"global_bot_token_swap: failed for {provider}: {e}")
 
-
 def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     """R21.1.2: 全局 bot token 更换流程（有→有换账号）。
 
     7 步流程：
     1. 验证新 token（VCS API GET /user）
     2. 获取新 bot username
-    3. 遍历路径 A 仓库（host_user_id==0 且 bot_gitcode_token==旧 token / bot_github_token==旧 token）
+    3. 遍历路径 A 仓库（str(host_user_id or "") in ("", "0") 且 bot_gitcode_token==旧 token / bot_github_token==旧 token）
     4. 邀新 bot 为协作者（如果新 bot 与旧 bot_username 不同）
     5. 重建 webhook（用新 token 删旧 + 建新，password=新 token）
     6. 写 DB（更新 webhook_token + bot_username）
@@ -388,19 +375,34 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
 
     log.info(f"global_bot_token_swap: starting for {platform_label}, new bot={new_bot_username}")
 
-    # 步骤 3: 遍历路径 A 仓库
-    token_field = "bot_github_token" if provider == "github" else "bot_gitcode_token"
-    webhook_token_field = "github_webhook_token" if provider == "github" else "gitcode_webhook_token"
+    # 步骤 3: 遍历路径 A 仓库（D99：cred_type 归一='bot'，平台由 repo_key 承载）
+    # D90-N2① + D99：grape_t_repo_credentials cred_type 值域=归一常量 {'bot','webhook'}
+    # （用户 PAT 权威=user_credentials 用户级，*_pat 禁绝不变；新增凭据种类须走契约评审）
     repos = []
     try:
         with db_lock:
             c = db.cursor()
+            # S82/D58：凭据唯一权威=grape_t_repo_credentials（managed_repos 列已冻结）
+            # F4/D106 修订（2026-11-11，r3 树既有形态确认）：N3 加密为随机
+            # nonce——密文等值比对恒不命中（旧实现步骤 3 空转，换发从不发生）；
+            # 拉全量 bot 行 Python 侧解密比对，解密失败按明文兼容期原值比对。
+            from src.domains.mgmt.user.db import _decrypt_repo_secret as _dec_rs
+            # D99：cred_type 归一='bot'（值域 {'bot','webhook'}）；token 本身
+            # 平台专属（同一 token 不会跨平台有效），解密等值即平台定界
             c.execute(
-                f"SELECT repo_key, bot_username FROM managed_repos "
-                f"WHERE host_user_id=0 AND {token_field}=?",
-                (old_token,),
+                "SELECT rc.repo_key, mr.bot_username, rc.value FROM grape_t_repo_credentials rc "
+                "JOIN managed_repos mr ON mr.repo_key = rc.repo_key "
+                "WHERE rc.cred_type='bot' "
+                "AND (mr.host_user_id IS NULL OR mr.host_user_id='' OR mr.host_user_id='0')",
             )
             for row in c.fetchall():
+                _raw_val = row[2] or ""
+                try:
+                    _val = _dec_rs(_raw_val)
+                except Exception:
+                    _val = _raw_val
+                if _val != old_token:
+                    continue
                 repos.append({"repo_key": row[0], "old_bot_username": row[1] or ""})
     except Exception as e:
         log.warning(f"global_bot_token_swap: query repos failed: {e}")
@@ -416,8 +418,9 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     if not _wh_url:
         log.warning("global_bot_token_swap: webhook_url not configured")
         return
-    if provider == "github":
-        _wh_url = _wh_url.replace("/webhook/gitcode", "/webhook/github")
+    # D43/S63：按目标平台卡重建回调 URL（D12 既有函数）
+    from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider
+    _wh_url = _rebuild_webhook_url_for_provider(_wh_url, provider)
 
     # 遍历每个仓库执行步骤 4-6
     for repo_info in repos:
@@ -432,8 +435,8 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
         # 步骤 4: 邀新 bot（如果与旧 bot 不同）
         if new_bot_username != old_bot_username:
             try:
-                _permission = "push" if provider == "github" else "maintainer"
-                _vcs.add_collaborator(new_token, owner, repo_name, new_bot_username, _permission)
+                # D43/S63：权限缺省=适配器存量默认（GitHub push / Gitee 系 maintainer）
+                _vcs.add_collaborator(new_token, owner, repo_name, new_bot_username)
             except Exception as e:
                 log.warning(f"global_bot_token_swap: add_collaborator failed for {repo_key} (continuing): {e}")
 
@@ -457,10 +460,24 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    f"UPDATE managed_repos SET {token_field}=?, {webhook_token_field}=?, "
-                    f"webhook_id=?, bot_username=? WHERE repo_key=?",
-                    (new_token, new_token, str(_new_hook_id), new_bot_username, repo_key),
+                    "UPDATE managed_repos SET webhook_id=?, bot_username=? WHERE repo_key=?",
+                    (str(_new_hook_id), new_bot_username, repo_key),
                 )
+                # S82/D58：凭据单写 rc（managed_repos 列已冻结）
+                # N3：value 通道加密
+                # D99：cred_type 归一 {'bot','webhook'}；两步法 UPDATE→INSERT
+                # （双方言一致，无 ON CONFLICT/REPLACE 方言分支）
+                from src.domains.mgmt.user.db import _encrypt_repo_secret as _enc_rs
+                for _ct in ("bot", "webhook"):
+                    _cur2 = c.execute(
+                        "UPDATE grape_t_repo_credentials SET value=?, updated_at=(datetime('now')) "
+                        "WHERE repo_key=? AND cred_type=?",
+                        (_enc_rs(new_token), repo_key, _ct))
+                    if _cur2.rowcount == 0:
+                        c.execute(
+                            "INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value) "
+                            "VALUES (?, ?, ?, ?)",
+                            (str(__import__("uuid").uuid4()), repo_key, _ct, _enc_rs(new_token)))
                 db.commit()
         except Exception as e:
             log.warning(f"global_bot_token_swap: DB update failed for {repo_key}: {e}")

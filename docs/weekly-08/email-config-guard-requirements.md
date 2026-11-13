@@ -256,7 +256,7 @@ function _accountShowChangeEmail() {
 在 set_password_send_code（L565）、change_email_send_code（L640）、delete_account_send_code（L716）入口处，仿照 forgot_password_send_code（L458）：
 
 ```python
-from src.auth.email_service import is_email_configured
+from src.domains.mgmt.auth.email_service import is_email_configured
 if not is_email_configured():
     raise HTTPException(status_code=503, detail={
         "code": 503,
@@ -306,7 +306,7 @@ if not is_email_configured():
 
 ## 五、验证场景
 
-### 5.1 无邮件服务实例（本机 124.70.82.58）+ 有邮箱账号
+### 5.1 无邮件服务实例（本机公网 IP，见部署配置）+ 有邮箱账号
 
 | # | 场景 | 期望行为 | 验证方法 |
 |---|------|----------|----------|

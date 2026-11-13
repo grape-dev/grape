@@ -6,8 +6,11 @@
 3. **`for_sec` 语义**：条件需持续满足才触发（抖动不触发），条件恢复后转 resolved
 4. **开放事件唯一**：同一 (规则, 维度) 反复求值不会刷出重复行，而是更新 last_seen_at
 """
+
 import os
+
 import sys
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -17,9 +20,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.domains.insight.observability import alerts as al  # noqa: E402
 
 UID = 7788
-REPO = "gitcode:org/alert-mine"
-OTHER = "gitcode:org/alert-theirs"
 
+REPO = "gitcode:org/alert-mine"
+
+OTHER = "gitcode:org/alert-theirs"
 
 def _clean():
     from src.kernel.session_manager import db, db_lock
@@ -36,7 +40,6 @@ def _clean():
             pass
         db.commit()
 
-
 def _grant(repo_key):
     from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
@@ -45,7 +48,6 @@ def _grant(repo_key):
         c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join)"
                   " VALUES (?,?,?,?,1,1)", (UID, repo_key, owner, name))
         db.commit()
-
 
 def _task(tid, repo_key, status, started_min_ago=None, completed_min_ago=None):
     from src.kernel.session_manager import db, db_lock
@@ -60,10 +62,8 @@ def _task(tid, repo_key, status, started_min_ago=None, completed_min_ago=None):
                    (now - timedelta(hours=1)).isoformat(), st, ct))
         db.commit()
 
-
 def _rules_by_name():
     return {r["name"]: r for r in al.list_rules()}
-
 
 def _events(**kw):
     from src.kernel.session_manager import db, db_lock
@@ -80,7 +80,6 @@ def _events(**kw):
         cols = [d[0] for d in c.description]
         return [dict(zip(cols, r)) for r in c.fetchall()]
 
-
 def _set_rule(name, **fields):
     from src.kernel.session_manager import db, db_lock
     sets = ", ".join(f"{k}=?" for k in fields)
@@ -88,7 +87,6 @@ def _set_rule(name, **fields):
         c = db.cursor()
         c.execute(f"UPDATE obs_alert_rules SET {sets} WHERE name=?", (*fields.values(), name))
         db.commit()
-
 
 @pytest.fixture(autouse=True)
 def _setup():
@@ -117,9 +115,6 @@ def _setup():
     yield
     _clean()
 
-
-# ---------------------------------------------------------------- 种子
-
 def test_seed_rules_idempotent_and_levels():
     n1 = al.seed_rules()
     assert n1 == 0, "二次种子不应重复插入"
@@ -132,12 +127,14 @@ def test_seed_rules_idempotent_and_levels():
                           # Issue #463 P3：表体积
                           "agent_tasks_rows_high", "agent_tasks_size_high",
                           # Issue #516 M3：超时失败聚合告警
-                          "task_timeout"}
-    assert len(al.list_rules()) == 13, "种子规则应为 13 条（8 指标 + 2 缺失 + 1 突变 + 2 表体积）"
+                          "task_timeout",
+                          # Issue #1938：事件回报丢失补偿（用户面可见，仓库维度计数）
+                          "cascade_compensation"}
+    assert len(al.list_rules()) == 14, "种子规则应为 14 条（9 指标 + 2 缺失 + 1 突变 + 2 表体积）"
     user_rules = {r["name"] for r in al.list_rules(level="user")}
     assert user_rules == {"task_stuck", "task_failure_rate", "task_queue_backlog",
                           "runtime_silent", "repo_silent", "task_success_rate_drop",
-                          "task_timeout"}
+                          "task_timeout", "cascade_compensation"}
     for name in ("db_pool_usage", "db_aborted_connects", "http_error_rate_5xx",
                  "all_runtimes_offline"):
         assert rules[name]["level"] == "platform"
@@ -151,9 +148,6 @@ def test_seed_rules_idempotent_and_levels():
     assert al._event_source(rules["runtime_silent"]) == "gap"
     assert al._event_source(rules["task_success_rate_drop"]) == "mutation"
     assert al._event_source(rules["task_stuck"]) == "monitor"
-
-
-# ---------------------------------------------------------------- 求值
 
 def test_stuck_task_fires_and_resolves():
     _task("t_alrt_stuck", REPO, "running", started_min_ago=40)
@@ -185,7 +179,6 @@ def test_stuck_task_fires_and_resolves():
     assert _events(rule_name="task_stuck", status="firing", repo_key=REPO) == []
     assert len(_events(rule_name="task_stuck", status="resolved", repo_key=REPO)) == 1
 
-
 def test_for_sec_requires_sustained_condition():
     """条件刚满足时不能立刻触发（抑制抖动）。"""
     _task("t_alrt_jit", REPO, "running", started_min_ago=40)
@@ -200,7 +193,6 @@ def test_for_sec_requires_sustained_condition():
             al._pending[k] = datetime.now(timezone.utc).timestamp() - 301
     r2 = al.evaluate_rules()
     assert r2["fired"] >= 1, r2
-
 
 def test_failure_rate_and_backlog_metrics():
     # 5 分钟内 2 失败 1 完成 → 失败率 0.667 > 0.5
@@ -219,9 +211,6 @@ def test_failure_rate_and_backlog_metrics():
     assert "task_queue_backlog" in evs, evs.keys()
     assert float(evs["task_queue_backlog"]["value"]) == 3
 
-
-# ---------------------------------------------------------------- 用户面边界
-
 def test_other_users_events_are_not_visible():
     # 自己仓库 + 他人仓库各造一个卡住任务
     _task("t_alrt_mine", REPO, "running", started_min_ago=40)
@@ -235,7 +224,6 @@ def test_other_users_events_are_not_visible():
     assert len(mine) == 1, f"只应看到自己仓库的事件: {mine}"
     assert mine[0]["repo_key"] == REPO
     assert al.firing_summary(user)["firing"] == 1
-
 
 def test_platform_events_never_reach_user_face():
     """平台级事件（即使被求值出来）绝不出现在用户面。"""
@@ -258,7 +246,6 @@ def test_platform_events_never_reach_user_face():
     # 静默平台级事件也不行（等价 404）
     ev = [e for e in _events(level="platform") if e["rule_name"] == row[1]][0]
     assert al.silence_event(int(ev["id"]), 30, user) is False
-
 
 def test_user_events_survive_visible_device_dims():
     """回归（真机踩到、单测曾漏过）：带**可见设备维度**时，SQL 里不能出现字面 `%`。
@@ -364,7 +351,6 @@ def test_user_events_survive_visible_device_dims():
             c.execute("DELETE FROM runtime_credentials WHERE name='t_alrt_rt9001'")
             db.commit()
 
-
 def test_events_for_invisible_repo_are_404_and_not_silenceable():
     from src.domains.insight.observability.overview import RepoNotVisible
     _task("t_alrt_theirs2", OTHER, "running", started_min_ago=40)
@@ -376,12 +362,10 @@ def test_events_for_invisible_repo_are_404_and_not_silenceable():
     assert ev, "他人仓库事件应落库"
     assert al.silence_event(int(ev[0]["id"]), 30, user) is False, "他人仓库事件不能静默"
 
-
 def test_no_visible_repo_returns_empty():
     user = {"id": 999999, "username": "nobody", "org_id": 0}
     assert al.list_events(user) == []
     assert al.firing_summary(user)["firing"] == 0
-
 
 def test_silence_marks_event_but_keeps_recording():
     _task("t_alrt_sil", REPO, "running", started_min_ago=40)
@@ -393,9 +377,6 @@ def test_silence_marks_event_but_keeps_recording():
     assert row["silenced_until"], "静默时间应写入"
     assert row["status"] == "firing", "静默不影响记录（事件仍在 firing）"
 
-
-# ---------------------------------------------------------------- 通知（飞书）
-
 class _FakeApi:
     def __init__(self, ok=True):
         self.ok = ok
@@ -405,16 +386,13 @@ class _FakeApi:
         self.sent.append((open_id, text))
         return "om_test_msg_id" if self.ok else ""
 
-
 class _FakeCtx:
     app_id = "cli_test_bot_123456"
-
 
 class _FakeBM:
     def __init__(self, api, ctx=None):
         self.api = api
         self._ctx = ctx if ctx is not None else _FakeCtx()
-
 
 def _bind_open_id(uid, open_id, username="u-notify"):
     from src.kernel.session_manager import db, db_lock
@@ -425,7 +403,6 @@ def _bind_open_id(uid, open_id, username="u-notify"):
                   (int(uid), username, open_id, "测试"))
         db.commit()
 
-
 def _unbind_open_id(uid):
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -433,17 +410,15 @@ def _unbind_open_id(uid):
         c.execute("DELETE FROM unified_user_mapping WHERE user_id=?", (int(uid),))
         db.commit()
 
-
 def test_notify_skips_when_no_channel_configured():
     """notify_channels 为空 → 只记录不推送（种子默认如此，避免误打扰）。"""
     from src.domains.insight.observability import alerts as al2
     import asyncio
     _set_rule("task_stuck", notify_channels="")
-    stats = asyncio.run(
+    stats = _run(
         al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                   "threshold": 0, "metric": "task_stuck", "severity": "warning"}]))
     assert stats["sent"] == 0 and stats["skipped"] == 1, stats
-
 
 def test_notify_feishu_uses_recipients_own_bot(monkeypatch=None):
     """配了 feishu → 用收件人本人的 chat bot 发私聊；收件人取该仓库成员。"""
@@ -454,34 +429,18 @@ def test_notify_feishu_uses_recipients_own_bot(monkeypatch=None):
     _bind_open_id(UID, "ou_test_open_id")
     _set_rule("task_stuck", notify_channels="feishu")
     fake_api = _FakeApi(ok=True)
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(fake_api)
-    # 打桩“取本人 bot”与“按 user_id 取 open_id”，避免依赖真实 IM 层
-    import src.api.issues_center as ic
-    orig_resolve = ic._resolve_user_chat_bot
-    orig_oid = ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id" if int(uid) == UID else ""
+    # 打桩“取本人 bot（BotContext）”与“按 user_id 取 open_id” + 共享 api 客户端
     try:
-        stats = asyncio.run(
-            al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 3,
-                                      "threshold": 0, "metric": "task_stuck", "severity": "warning",
-                                      "silenced_until": ""}]))
+        with _fake_feishu(fake_api):
+            stats = _run(
+                al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 3,
+                                          "threshold": 0, "metric": "task_stuck", "severity": "warning",
+                                          "silenced_until": ""}]))
     finally:
-        ic._resolve_user_chat_bot = orig_resolve
-        ic._get_feishu_open_id_by_user_id = orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
     assert stats["sent"] == 1, stats
     assert fake_api.sent and fake_api.sent[0][0] == "ou_test_open_id"
     assert "task_stuck" in fake_api.sent[0][1] and REPO.split(":")[1] in fake_api.sent[0][1]
-
 
 def test_notify_send_failure_counted_not_raised():
     """飞书返回空 message_id（token/权限问题）→ 计 failed，不影响求值。"""
@@ -491,29 +450,12 @@ def test_notify_send_failure_counted_not_raised():
     import src.api.issues_center as ic
 
     _set_rule("task_stuck", notify_channels="feishu")
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(_FakeApi(ok=False))
-    orig_resolve = ic._resolve_user_chat_bot
-    orig_oid = ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_x"
-    try:
-        stats = asyncio.run(
+    with _fake_feishu(_FakeApi(ok=False), open_id="ou_x"):
+        stats = _run(
             al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                       "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                       "silenced_until": ""}]))
-    finally:
-        ic._resolve_user_chat_bot = orig_resolve
-        ic._get_feishu_open_id_by_user_id = orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
     assert stats["failed"] >= 1, stats
-
 
 def test_notify_skips_silenced_event():
     import asyncio
@@ -521,12 +463,11 @@ def test_notify_skips_silenced_event():
     from src.domains.insight.observability import alerts as al2
     _set_rule("task_stuck", notify_channels="feishu")
     future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
-    stats = asyncio.run(
+    stats = _run(
         al2.notify_fired_events([{"rule_name": "task_stuck", "repo_key": REPO, "value": 1,
                                   "threshold": 0, "metric": "task_stuck", "severity": "warning",
                                   "silenced_until": future}]))
     assert stats["skipped"] == 1 and stats["sent"] == 0, stats
-
 
 def test_test_notification_reports_reason():
     """测试通道：未绑定 open_id / 未配 bot 要给出**可操作的原因**，不能只说失败。"""
@@ -550,26 +491,26 @@ def test_test_notification_reports_reason():
     orig_bm = getattr(api_main, "bot_manager", None)
     api_main.bot_manager = _FakeBM(_FakeApi())
     try:
-        r = asyncio.run(
-            al2.send_test_notification({"id": UID, "username": "u"}))
-        assert r["ok"] is False and r["reason"] == "no_bot", r
-        # 3) 正常路径
-        ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-        r = asyncio.run(
-            al2.send_test_notification({"id": UID, "username": "u"}))
-        assert r["ok"] is True and r["message_id"], r
-    finally:
-        ic._get_feishu_open_id_by_user_id = orig_oid
-        ic._resolve_user_chat_bot = orig_resolve
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
+        # 1) 未绑定飞书身份
         _unbind_open_id(UID)
+        r = _run(
+            al2.send_test_notification({"id": UID, "username": "u"}))
+        assert r["ok"] is False and r["reason"] == "no_open_id", r
 
+        # 2) 绑定了但没有可用安装（BotContext 为 None）
+        _bind_open_id(UID, "ou_test_open_id")
+        with _fake_feishu(_FakeApi(), has_ctx=False):
+            r = _run(
+                al2.send_test_notification({"id": UID, "username": "u"}))
+            assert r["ok"] is False and r["reason"] == "no_bot", r
+
+            # 3) 正常路径
+            with _fake_feishu(_FakeApi()):
+                r = _run(
+                    al2.send_test_notification({"id": UID, "username": "u"}))
+                assert r["ok"] is True and r["message_id"], r
+    finally:
+        _unbind_open_id(UID)
 
 def test_notify_route_sets_channels_and_rejects_unknown():
     from fastapi.testclient import TestClient
@@ -595,9 +536,6 @@ def test_notify_route_sets_channels_and_rejects_unknown():
     finally:
         app.dependency_overrides.pop(require_org_member, None)
 
-
-# ---------------------------------------------------------------- DB 连接池口径（误报修复）
-
 def test_pool_usage_uses_configured_limit_not_high_water_mark():
     """分母必须是 max_connections（配置上限），不能用 Max_used_connections（历史峰值）。
 
@@ -616,7 +554,6 @@ def test_pool_usage_uses_configured_limit_not_high_water_mark():
     assert al2._pool_usage(74, None) == 0.0
     assert al2._pool_usage(None, 8000) == 0.0
 
-
 def test_platform_metrics_pool_usage_is_sane_on_real_db():
     """真库上取数：使用率应远低于阈值（本机 max_connections=8000）。"""
     from src.domains.insight.observability import alerts as al2
@@ -626,14 +563,12 @@ def test_platform_metrics_pool_usage_is_sane_on_real_db():
     v = m["db_pool_usage"]
     assert 0.0 <= v < 0.5, f"连接池使用率异常偏高，检查口径：{v}"
 
-
 def test_gauge_for_configured_limit_is_exposed():
     """新增 grape_db_max_connections 指标（外部 Prometheus 也要能用正确分母）。"""
     from src.domains.insight.observability import DB_MAX_CONNECTIONS, DB_MAX_USED_CONNECTIONS
     assert DB_MAX_CONNECTIONS._name == "grape_db_max_connections"
     assert DB_MAX_USED_CONNECTIONS._name == "grape_db_max_used_connections"
     assert "NOT the configured limit" in DB_MAX_USED_CONNECTIONS._documentation
-
 
 def test_metrics_endpoint_triggers_scrape_hook():
     """DB/业务度量是"拉取时采样"：/metrics 导出前必须触发采样，否则这些 gauge 恒为 0。
@@ -652,7 +587,6 @@ def test_metrics_endpoint_triggers_scrape_hook():
     finally:
         o.on_metrics_scrape = orig
 
-
 def test_mysql_metrics_collector_sets_gauge_when_available():
     """MySQL 后端下采集器应把配置上限写进 gauge（SQLite 后端跳过）。"""
     from prometheus_client import generate_latest
@@ -666,9 +600,6 @@ def test_mysql_metrics_collector_sets_gauge_when_available():
             v = float(line.split()[1])
             assert v >= 0
             break
-
-
-# ---------------------------------------------------------------- 路由层
 
 def test_routes_banner_panel_and_rule_ops():
     from fastapi.testclient import TestClient
@@ -711,9 +642,6 @@ def test_routes_banner_panel_and_rule_ops():
     finally:
         app.dependency_overrides.pop(require_org_member, None)
 
-
-# ---------------------------------------------------------------- 策略层（P1-1 / D1）
-
 def _insert_event(rule_id, rule_name, repo_key, first_iso=None, deferred=0, last_notified=""):
     """造一条 firing 事件（绕过求值，专注策略链路）。返回事件 id。"""
     from src.kernel.session_manager import db, db_lock
@@ -729,7 +657,6 @@ def _insert_event(rule_id, rule_name, repo_key, first_iso=None, deferred=0, last
         db.commit()
         return int(c.lastrowid)
 
-
 def _reload_ev(ev, rule_id):
     """把库里的通知状态合并回事件 dict（真实循环每轮都是重新读状态的）。"""
     rows = _events(rule_id=int(rule_id))
@@ -740,7 +667,6 @@ def _reload_ev(ev, rule_id):
             "notify_deferred": int(r.get("notify_deferred") or 0),
             "escalated_at": r.get("escalated_at") or "",
             "silenced_until": r.get("silenced_until") or ""}
-
 
 def test_rule_policy_roundtrip_and_validation():
     """策略字段可写可读；**非法配置不写库**（返回 errors，脏值不覆盖好值）。"""
@@ -764,14 +690,12 @@ def test_rule_policy_roundtrip_and_validation():
 
     assert al.set_rule_policy(999999, {"severity": "info"})["errors"] == ["rule not found"]
 
-
 def test_list_rules_exposes_policy_fields():
     """规则列表必须带策略字段（管理台 T-A1 靠它回显）。"""
     r = _rules_by_name()["task_queue_backlog"]
     for k in ("repeat_sec", "aggregate_mode", "aggregate_window_sec",
               "notify_window_json", "escalate_json"):
         assert k in r, f"缺字段 {k}"
-
 
 def test_admin_api_lists_global_rules_and_writes_policy():
     """管理台 L2 接口：全局规则列表（含 platform）+ 策略写入；非法 400 / 不存在 404。"""
@@ -806,7 +730,6 @@ def test_admin_api_lists_global_rules_and_writes_policy():
     finally:
         app.dependency_overrides.pop(require_admin, None)
 
-
 def test_evaluate_escalates_long_running_event_once():
     """开放事件持续超过 escalate_json.after_sec → 产生升级候选并把级别抬高（只升一次）。"""
     rid = _rules_by_name()["task_stuck"]["id"]
@@ -822,7 +745,6 @@ def test_evaluate_escalates_long_running_event_once():
     r2 = al.evaluate_rules()
     assert [e for e in r2["new_events"] if e.get("escalated")] == []
 
-
 def test_escalation_not_due_before_threshold():
     rid = _rules_by_name()["task_stuck"]["id"]
     al.set_rule_policy(rid, {"escalate_json": '{"after_sec":7200,"severity":"critical"}'})
@@ -830,7 +752,6 @@ def test_escalation_not_due_before_threshold():
                   first_iso=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat())
     r = al.evaluate_rules()
     assert [e for e in r["new_events"] if e.get("escalated")] == []
-
 
 def test_evaluate_renominates_open_event_when_repeat_due():
     """repeat_sec>0：开放事件到期后**重新进通知候选**（真机演练发现的缺口：只抑制不复推）。"""
@@ -857,7 +778,6 @@ def test_evaluate_renominates_open_event_when_repeat_due():
     r3 = al.evaluate_rules()
     assert not any(int(e.get("id") or 0) == ev_id for e in r3["new_events"]), r3["new_events"]
 
-
 def test_deferred_event_is_resent_only_inside_window():
     """通知时段外只记录（notify_deferred=1）；窗口内才补推（且不每天反复提醒）。"""
     now_cst = datetime.now(timezone(timedelta(hours=8)))
@@ -882,7 +802,6 @@ def test_deferred_event_is_resent_only_inside_window():
     r2 = al.evaluate_rules()
     assert not any(e["repo_key"] == REPO for e in r2["new_events"]), r2["new_events"]
 
-
 def test_notify_repeat_suppression_and_state_writeback():
     """repeat_sec=0：只通知一次（第二次跳过）；成功后写 notify_count/last_notified_at。"""
     import asyncio
@@ -892,44 +811,31 @@ def test_notify_repeat_suppression_and_state_writeback():
 
     _bind_open_id(UID, "ou_test_open_id")
     fake_api = _FakeApi(ok=True)
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(fake_api)
-    orig_resolve, orig_oid = ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id"
     rid = _rules_by_name()["task_stuck"]["id"]
     ev = {"rule_name": "task_stuck", "repo_key": REPO, "value": 1, "threshold": 0,
           "metric": "task_stuck", "severity": "warning", "silenced_until": ""}
     loop = asyncio.new_event_loop()
     try:
-        al.set_rule_policy(rid, {"notify_channels": "feishu", "repeat_sec": 0})
-        ev["id"] = _insert_event(rid, "task_stuck", REPO)
-        s1 = loop.run_until_complete(al.notify_fired_events([dict(ev)]))
-        assert s1["sent"] == 1, s1
-        row = _events(rule_id=rid)[0]
-        assert row["last_notified_at"] and int(row["notify_count"]) == 1, row
+        with _fake_feishu(fake_api):
+            al.set_rule_policy(rid, {"notify_channels": "feishu", "repeat_sec": 0})
+            ev["id"] = _insert_event(rid, "task_stuck", REPO)
+            s1 = loop.run_until_complete(al.notify_fired_events([dict(ev)]))
+            assert s1["sent"] == 1, s1
+            row = _events(rule_id=rid)[0]
+            assert row["last_notified_at"] and int(row["notify_count"]) == 1, row
 
-        # 第二轮：真实循环会带库里的 last_notified_at 进来 → 重复抑制
-        s2 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
-        assert s2["sent"] == 0 and s2["skipped"] == 1, s2
+            # 第二轮：真实循环会带库里的 last_notified_at 进来 → 重复抑制
+            s2 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
+            assert s2["sent"] == 0 and s2["skipped"] == 1, s2
 
-        # repeat_sec>0 且未到间隔 → 仍抑制
-        al.set_rule_policy(rid, {"repeat_sec": 3600})
-        s3 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
-        assert s3["sent"] == 0 and s3["skipped"] == 1, s3
+            # repeat_sec>0 且未到间隔 → 仍抑制
+            al.set_rule_policy(rid, {"repeat_sec": 3600})
+            s3 = loop.run_until_complete(al.notify_fired_events([_reload_ev(ev, rid)]))
+            assert s3["sent"] == 0 and s3["skipped"] == 1, s3
     finally:
         loop.close()
-        ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id = orig_resolve, orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
         AGGREGATOR.clear()
-
 
 def test_notify_aggregate_buffers_then_flushes_summary():
     """聚合规则：不发单条 → 进缓冲；窗口到期 → 一条汇总（含维度与最大当前值）。"""
@@ -941,41 +847,71 @@ def test_notify_aggregate_buffers_then_flushes_summary():
 
     _bind_open_id(UID, "ou_test_open_id")
     fake_api = _FakeApi(ok=True)
-    orig_bm = getattr(api_main, "bot_manager", None)
-    api_main.bot_manager = _FakeBM(fake_api)
-    orig_resolve, orig_oid = ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id
-    ic._resolve_user_chat_bot = lambda bm, uid: bm._ctx if bm else None
-    ic._get_feishu_open_id_by_user_id = lambda uid: "ou_test_open_id"
     rid = _rules_by_name()["task_stuck"]["id"]
     loop = asyncio.new_event_loop()
     try:
-        al.set_rule_policy(rid, {"notify_channels": "feishu", "aggregate_mode": "rule",
-                                 "aggregate_window_sec": 300, "repeat_sec": 0})
-        ev = {"id": _insert_event(rid, "task_stuck", REPO), "rule_name": "task_stuck",
-              "repo_key": REPO, "value": 4, "threshold": 0, "metric": "task_stuck",
-              "severity": "warning", "silenced_until": ""}
-        s = loop.run_until_complete(al.notify_fired_events([ev]))
-        assert s["aggregated"] == 1 and s["sent"] == 0, s
-        assert AGGREGATOR.pending() == 1
-        g = list(AGGREGATOR._groups.values())[0]
-        text = al._aggregate_text(g)
-        assert "汇总" in text and "task_stuck" in text and "受影响" in text, text
+        with _fake_feishu(fake_api):
+            al.set_rule_policy(rid, {"notify_channels": "feishu", "aggregate_mode": "rule",
+                                     "aggregate_window_sec": 300, "repeat_sec": 0})
+            ev = {"id": _insert_event(rid, "task_stuck", REPO), "rule_name": "task_stuck",
+                  "repo_key": REPO, "value": 4, "threshold": 0, "metric": "task_stuck",
+                  "severity": "warning", "silenced_until": ""}
+            s = loop.run_until_complete(al.notify_fired_events([ev]))
+            assert s["aggregated"] == 1 and s["sent"] == 0, s
+            assert AGGREGATOR.pending() == 1
+            g = list(AGGREGATOR._groups.values())[0]
+            text = al._aggregate_text(g)
+            assert "汇总" in text and "task_stuck" in text and "受影响" in text, text
 
-        # 强制窗口到期 → flush 发出汇总
-        g["window_end"] = datetime.now(timezone.utc) - _td(seconds=1)
-        f = loop.run_until_complete(al.flush_aggregates())
-        assert f["summaries"] == 1 and f["sent"] == 1, f
-        assert "汇总" in fake_api.sent[-1][1], fake_api.sent
-        assert AGGREGATOR.pending() == 0
+            # 强制窗口到期 → flush 发出汇总
+            g["window_end"] = datetime.now(timezone.utc) - _td(seconds=1)
+            f = loop.run_until_complete(al.flush_aggregates())
+            assert f["summaries"] == 1 and f["sent"] == 1, f
+            assert "汇总" in fake_api.sent[-1][1], fake_api.sent
+            assert AGGREGATOR.pending() == 0
     finally:
         loop.close()
-        ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id = orig_resolve, orig_oid
-        if orig_bm is None:
-            try:
-                del api_main.bot_manager
-            except Exception:
-                pass
-        else:
-            api_main.bot_manager = orig_bm
         _unbind_open_id(UID)
         AGGREGATOR.clear()
+
+import contextlib
+
+import types
+
+def _run(coro):
+    """独立跑一个协程：不依赖"当前事件循环"。
+
+    踩过：同一次 pytest 里前面的用例用了 asyncio.run()（结束时把当前 loop 置 None），
+    后面再 asyncio.get_event_loop() 就抛 RuntimeError: no current event loop。
+    """
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+@contextlib.contextmanager
+def _fake_feishu(fake_api, open_id="ou_test_open_id", has_ctx=True):
+    """把告警链的飞书依赖打桩成 _FakeApi。
+
+    A2 M2 后的真实契约：
+      _resolve_user_chat_bot(None, uid) → BotContext(app_id)（无安装则 None）
+      engine_wiring.feishu_api(app_id)  → 共享 FeishuAsync
+    两个桩必须成对出现，否则会掉进"无 api → skipped/failed"分支。
+    """
+    import src.api.issues_center as ic
+    import src.domains.runtime.im.engine_wiring as ew
+
+    orig = (ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id, ew.feishu_api)
+    ic._resolve_user_chat_bot = (
+        (lambda bm, uid: types.SimpleNamespace(app_id="appX")) if has_ctx else (lambda bm, uid: None)
+    )
+    ic._get_feishu_open_id_by_user_id = lambda uid: open_id
+    ew.feishu_api = lambda app_id="": fake_api
+    try:
+        yield
+    finally:
+        ic._resolve_user_chat_bot, ic._get_feishu_open_id_by_user_id, ew.feishu_api = orig
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

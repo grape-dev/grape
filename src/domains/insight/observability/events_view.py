@@ -23,18 +23,22 @@ started_at / duration_sec / ongoing / state / value / threshold / next_step / ke
   按 `kind` 映射；不写死在文案里，避免和后端文案耦合
 - 变更/审计事件是**瞬时事件**（`duration_sec` 可能为 0）
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
+
 from typing import Any, Dict, List, Optional, Set
 
 from src.api.time_utils import normalize_event_time
+
 from src.kernel.config import log
 
 #: 用户面可用来源（`audit` 只在 L2）
 #: `slo` = SLO 违约（P2-1）：仓库范围的对用户可见（level='user'），平台范围的是 level='platform'
 #: → `alerts.list_events` 只出 user 级，故 L1 天然看不到平台 SLO 违约，无需额外过滤。
 L1_SOURCES = ("monitor", "gap", "mutation", "slo", "task", "change")
+
 L2_SOURCES = L1_SOURCES + ("audit",)
 
 #: 处置建议：kind → 下一步动作（前端渲染成跳转）
@@ -50,38 +54,36 @@ _NEXT_STEP = {
     "change": "issue",
 }
 
-
 #: 关键字检索上限（防畸形输入）。注意：SQL 里一律 `LIKE ?` + 参数绑定，**不把关键字拼进 SQL 文本**
 #: —— 本轮踩过"SQL 文本含字面 `%` 又带参数"的地雷（pymysql 当格式符 → 异常被 try 吞掉 → 静默丢数据）。
 Q_MAX = 64
-
 
 def norm_q(q: Any) -> str:
     """规范关键字：去空白 + 截断。用户输入的 `%`/`_` 与日志检索（`logs.search`）一致，
     直接当通配符用（不做转义）——两端行为一致比"更严格"更重要。"""
     return str(q or "").strip()[:Q_MAX]
 
-
 def _like(v: str) -> str:
     return f"%{v}%"
 
-
 #: 事件状态全集（`state` 过滤允许值）。旧值 firing/resolved 保持兼容并带别名（见 `_STATE_ALIAS`）。
 STATES = ("firing", "resolved", "stuck", "failed", "done", "cancelled", "completed")
+
 #: 旧别名：前端历史上用 firing/resolved 同时指代任务侧的 stuck/failed
 _STATE_ALIAS = {"firing": ("firing", "stuck"), "resolved": ("resolved", "failed")}
+
 #: 点事件来源（`duration_sec` 恒 0，前端不显示时长）
 _POINT_SOURCES = ("change", "audit")
+
 #: 结果码（前端渲染"结果徽标"，与告警级别**分列**）
 _OUTCOME = {"task_failed": "failed", "task_stuck": "stuck", "change": "merged"}
+
 #: 处置动作的顺序补充（primary 来自各来源的 `_NEXT_STEP`，这里补"顺路能看什么"）
 _NEXT_STEP_EXTRA = {"timeline": ("logs",), "logs": ("timeline",), "issue": ("timeline",),
                     "device": ("logs",), "": ()}
 
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def _dt(raw: Any) -> Optional[datetime]:
     s = normalize_event_time(raw)
@@ -94,7 +96,6 @@ def _dt(raw: Any) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def _dur(started: Optional[datetime], ended: Optional[datetime], now: datetime) -> tuple:
     """返回 (duration_sec, ongoing)。"""
     if not started:
@@ -103,19 +104,16 @@ def _dur(started: Optional[datetime], ended: Optional[datetime], now: datetime) 
         return max(0, int((ended - started).total_seconds())), False
     return max(0, int((now - started).total_seconds())), True
 
-
 def _device_id(dim_key: Any) -> str:
     """从 `dim_key` 取设备 id（`runtime:<id>`）——缺口/设备类事件的设备维度。"""
     dk = str(dim_key or "")
     return dk.split(":", 1)[1] if dk.startswith("runtime:") else ""
-
 
 def _state_ok(item: Dict[str, Any], state: str) -> bool:
     """`state` 过滤（含旧别名 firing→stuck、resolved→failed）。"""
     if not state:
         return True
     return str(item.get("state") or "") in _STATE_ALIAS.get(state, (state,))
-
 
 def _finalize(item: Dict[str, Any]) -> Dict[str, Any]:
     """补齐 S1 契约字段（**旧字段一律保留**，前端可灰度）：
@@ -160,7 +158,6 @@ def _finalize(item: Dict[str, Any]) -> Dict[str, Any]:
     item["next_step"] = steps
     return item
 
-
 def parse_cursor(raw: Any) -> Optional[tuple]:
     """解析游标 `"<started_at>|<key>"`（`next_cursor` 的原样回传）。非法 → None（当首页）。"""
     s = str(raw or "").strip()
@@ -168,7 +165,6 @@ def parse_cursor(raw: Any) -> Optional[tuple]:
         return None
     ts, _, key = s.partition("|")
     return (ts.strip(), key.strip()) if ts.strip() else None
-
 
 def _alert_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                   global_scope: bool = False, q: str = "") -> List[Dict[str, Any]]:
@@ -213,6 +209,17 @@ def _alert_events(user: Dict[str, Any], state: str, repo: str, limit: int,
         })
     return out
 
+def _err_text(e: Any) -> str:
+    """错误条目 → 文本：`agent_tasks.errors` 的 JSON 元素可能是 dict（错误对象，
+    含 message/localized_message/error_code），直接 `[:200]` 切片会抛
+    `KeyError: slice(None, 200, None)` → /api/obs/events 整接口 500（P8）。"""
+    if isinstance(e, dict):
+        for k in ("localized_message", "message", "error_code"):
+            if e.get(k):
+                return str(e.get(k))
+        return str(next(iter(e.values()), ""))
+    return str(e or "")
+
 
 def _task_hay(item: Dict[str, Any]) -> str:
     """任务事件的检索串（含错误摘要）。"""
@@ -222,7 +229,6 @@ def _task_hay(item: Dict[str, Any]) -> str:
     if isinstance(errs, list):
         parts.extend(str(e) for e in errs)
     return " ".join(parts).lower()
-
 
 def _task_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                  repo_keys: Optional[Set[str]] = None, global_scope: bool = False,
@@ -270,7 +276,7 @@ def _task_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                 "last_seen_at": normalize_event_time(t.get("completed_at")) or "",
                 "duration_sec": dur, "ongoing": ongoing, "state": "failed",
                 "value": None, "threshold": None, "metric": "",
-                "detail": (errs[0] if errs else (t.get("result_text") or ""))[:200],
+                "detail": (_err_text(errs[0]) if errs else str(t.get("result_text") or ""))[:200],
                 "exit_code": t.get("exit_code"),
                 "silenced": False, "escalated": False, "next_step": "timeline",
             })
@@ -281,13 +287,11 @@ def _task_events(user: Dict[str, Any], state: str, repo: str, limit: int,
         out = [x for x in out if ql in _task_hay(x)]
     return out
 
-
 def _visible_filter(items: List[Dict[str, Any]], repo_keys: Set[str]) -> List[Dict[str, Any]]:
     """按可见仓库收敛（任务来源用：ops_overview 只按组织过滤）。"""
     if not repo_keys:
         return []
     return [x for x in items if (x.get("repo_key") or "") in repo_keys]
-
 
 def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                    repo_keys: Set[str], all_repos: bool = False, q: str = "") -> List[Dict[str, Any]]:
@@ -341,7 +345,6 @@ def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
         })
     return out
 
-
 def _audit_events(state: str, limit: int, q: str = "") -> List[Dict[str, Any]]:
     """审计类来源（**仅 L2**）：平台动作流水（登录/改配置等）。"""
     from src.kernel.session_manager import db, db_lock
@@ -377,7 +380,6 @@ def _audit_events(state: str, limit: int, q: str = "") -> List[Dict[str, Any]]:
         })
     return out
 
-
 def unified_events(user: Dict[str, Any], sources: Optional[List[str]] = None, state: str = "",
                    repo: str = "", limit: int = 100, allow_audit: bool = False,
                    global_scope: bool = False, q: Any = "", before: Any = "") -> Dict[str, Any]:
@@ -401,7 +403,7 @@ def unified_events(user: Dict[str, Any], sources: Optional[List[str]] = None, st
             log.warning(f"obs events: visible keys failed: {e}")
         if repo:
             from src.kernel.repo_key import to_repo_key
-            want_keys = {to_repo_key(repo), to_repo_key(repo, "github")}
+            want_keys = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一
             hit = sorted(want_keys & repo_keys)
             if not hit:
                 from src.domains.insight.observability.overview import RepoNotVisible
@@ -457,3 +459,5 @@ def unified_events(user: Dict[str, Any], sources: Optional[List[str]] = None, st
             "truncated_sources": truncated,
             "by_source": counts, "q": kw, "state": str(state or ""),
             "sources": list(want), "global": bool(allow_audit)}
+
+from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一

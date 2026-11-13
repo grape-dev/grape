@@ -6,25 +6,34 @@
 非标准平台：通过 OAuthProvider 子类扩展。
 
 平台配置包含：平台名称、OAuth 端点、授权范围、字段映射、pkce_enabled、
-whitelist_column、accept_header。
+accept_header。
+
+白名单列名声明字段（whitelist_column）已随 2026-11-12 行式化改造退役：
+login_whitelist 同表加 provider/username 行式两列，登录校验直接按渠道
+key 查行（is_user_allowed(provider, login)），卡不再声明白名单元数据。
 """
+
 import hashlib
+
 import os
+
 import secrets
+
 import time
+
 import urllib.parse
+
 import urllib.request
+
 import json
+
 from typing import Protocol
 
 from src.kernel.config import log
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.user import db as user_db
-
-
-# ---------------------------------------------------------------------------
-# Provider 注册表
-# ---------------------------------------------------------------------------
 
 # 代码内置默认——和生产环境当前行为一致，确保旧配置文件向前兼容。
 # 当 meta 表无 oauth_providers_config 时（旧文件未更新），使用此默认。
@@ -40,7 +49,6 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "nickname",
         "pkce_enabled": True,
         "brand_color": "#e7330f",
-        "whitelist_column": "gitcode_username",
         "accept_header": "application/json",
     },
     "github": {
@@ -55,18 +63,20 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "name",
         "pkce_enabled": True,
         "brand_color": "#24292f",
-        "whitelist_column": "github_username",
         "accept_header": "application/vnd.github+json",
     },
 }
 
 # 运行时内存缓存——从 meta 表加载，无则用代码内置默认
 _PROVIDERS_CACHE: dict[str, dict] = {}
-_loaded: bool = False
-_cache_ts: float = 0.0          # P2-2: 上次加载时间戳
-_CACHE_TTL: float = 300.0       # P2-2: 缓存 TTL 5 分钟（兜底，admin 改配置时主动失效）
-_providers_lock = __import__("threading").Lock()
 
+_loaded: bool = False
+
+_cache_ts: float = 0.0          # P2-2: 上次加载时间戳
+
+_CACHE_TTL: float = 300.0       # P2-2: 缓存 TTL 5 分钟（兜底，admin 改配置时主动失效）
+
+_providers_lock = __import__("threading").Lock()
 
 def _load_providers():
     """从 meta 表加载 provider 配置，无则用代码内置默认。
@@ -104,7 +114,6 @@ def _load_providers():
         _loaded = True
         _cache_ts = time.time()
 
-
 def invalidate_provider_cache():
     """P2-2: 主动失效 Provider 缓存——admin 改 OAuth 配置后调用，无需重启服务。"""
     global _loaded
@@ -112,24 +121,46 @@ def invalidate_provider_cache():
         _loaded = False
     log.info("OAuth provider cache invalidated")
 
-
 def get_provider(provider: str) -> "dict | None":
-    """获取 Provider 配置。"""
-    if not _loaded:
-        _load_providers()
-    return _PROVIDERS_CACHE.get(provider)
+    """获取 Provider 配置。
 
+    D102-D（R1，2026-11-08）：无条件走 _load_providers（内含 TTL 双重检查
+    锁，热路径成本=一次内存时间比较）——原惰性守卫形态导致 TTL
+    过期后登录端点永不重载（带外写库 40 分钟不可见，实测复现）。
+    对齐 platform_card.get_platform_card 现行形态（统一入口先例）。
+    """
+    _load_providers()
+    return _PROVIDERS_CACHE.get(provider)
 
 def list_providers() -> list[str]:
     """列出所有已配置的 Provider。"""
-    if not _loaded:
-        _load_providers()
+    _load_providers()
     return list(_PROVIDERS_CACHE.keys())
 
 
-# ---------------------------------------------------------------------------
-# PKCE
-# ---------------------------------------------------------------------------
+def providers_catalog() -> "list[dict]":
+    """登录渠道目录（D108 登录按钮零延迟渲染）。
+
+    返回固定展示序的 [{provider, name, configured, brand_color}]——
+    服务端 HTML head 注入（window.__OAUTH_PROVIDERS__）与 /auth/providers
+    路由共用此单一来源：登录页按钮在首帧渲染前同步生成，不等 AJAX。
+    """
+    from src.domains.mgmt.user.db import get_meta_value
+    # D102-B: 登录按钮固定展示序（用户拍板：gitcode→github→gitee→gitlab→
+    # hwcloud→其余按名）——不随 providers 配置加载序漂移
+    _ORDER = {"gitcode": 0, "github": 1, "gitee": 2, "gitlab": 3, "hwcloud": 4}
+    keys = sorted(list_providers(), key=lambda k: (_ORDER.get(k, 99), k))
+    result = []
+    for key in keys:
+        cfg = get_provider(key) or {}
+        client_id = get_meta_value(f"oauth_{key}_client_id") or ""
+        result.append({
+            "provider": key,
+            "name": cfg.get("name", key),
+            "configured": bool(client_id),
+            "brand_color": cfg.get("brand_color", ""),
+        })
+    return result
 
 def generate_pkce() -> tuple[str, str]:
     """生成 PKCE code_verifier 和 code_challenge（S256）。
@@ -142,16 +173,10 @@ def generate_pkce() -> tuple[str, str]:
     code_challenge = base64url_encode(challenge_bytes)
     return code_verifier, code_challenge
 
-
 def base64url_encode(data: bytes) -> str:
     """Base64 URL-safe 编码（无 padding）。"""
     import base64
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-# ---------------------------------------------------------------------------
-# OAuth State 管理（复用现有 oauth_states 表）
-# ---------------------------------------------------------------------------
 
 def save_oauth_state(state: str, provider: str, data: "dict | None" = None,
                      pkce_verifier: str = "") -> None:
@@ -164,15 +189,9 @@ def save_oauth_state(state: str, provider: str, data: "dict | None" = None,
         state_data["pkce_verifier"] = pkce_verifier
     user_db.save_oauth_state(state, provider, state_data)
 
-
 def validate_oauth_state(state: str, provider: str) -> "dict | None":
     """验证并消费 OAuth state，返回 data（含 PKCE verifier）或 None。"""
     return user_db.validate_oauth_state(state, provider)
-
-
-# ---------------------------------------------------------------------------
-# 统一授权 URL 构造
-# ---------------------------------------------------------------------------
 
 def build_auth_url(provider: str, state: str, redirect_uri: str,
                    extra_state_data: "dict | None" = None,
@@ -224,11 +243,6 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
 
     auth_url = f"{cfg['auth_url']}?{urllib.parse.urlencode(params)}"
     return {"redirect_url": auth_url, "code_verifier": code_verifier}
-
-
-# ---------------------------------------------------------------------------
-# Token 交换 + 用户信息获取
-# ---------------------------------------------------------------------------
 
 def exchange_token(provider: str, code: str, redirect_uri: str,
                    code_verifier: str = "") -> "tuple[dict | None, str]":
@@ -300,7 +314,6 @@ def exchange_token(provider: str, code: str, redirect_uri: str,
         log.warning(f"Exchange token for {provider} failed: {e}")
         return None, "token_exchange_failed"
 
-
 def get_user_info(provider: str, access_token: str) -> "dict | None":
     """获取第三方平台用户信息。
 
@@ -321,15 +334,23 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
     try:
         import requests as _req
         # 统一用配置里的 accept_header，消除 provider if-else 分叉
+        user_url = cfg["user_url"]
+        # 少数平台（如华为 GOpen.User.getInfo）只认查询参数形式的 access_token，
+        # 且忽略 Authorization 头：user_url 用 {access_token} 占位，替换后不再发 Bearer 头。
+        _token_in_url = "{access_token}" in user_url
+        if _token_in_url:
+            user_url = user_url.replace(
+                "{access_token}", urllib.parse.quote(access_token, safe=""))
         headers = {
-            "Authorization": f"Bearer {access_token}",
             "Accept": cfg.get("accept_header", "application/json"),
         }
+        if not _token_in_url:
+            headers["Authorization"] = f"Bearer {access_token}"
 
         _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
         _proxies = {"https": _proxy, "http": _proxy} if _proxy else None
 
-        resp = _req.get(cfg["user_url"], headers=headers, timeout=15, proxies=_proxies)
+        resp = _req.get(user_url, headers=headers, timeout=15, proxies=_proxies)
         resp.raise_for_status()
         user_info = resp.json()
     except Exception as e:
@@ -340,19 +361,21 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
         "external_id": str(user_info.get(cfg["id_field"], "")),
         "external_login": user_info.get(cfg["login_field"], ""),
         "external_name": user_info.get(cfg["name_field"], ""),
-        "external_avatar": user_info.get("avatar_url", ""),
+        # 头像字段各平台不同（华为 headPictureURL / GitHub avatar_url），配置可覆盖
+        "external_avatar": user_info.get(cfg.get("avatar_field", "avatar_url"), ""),
         "access_token": access_token,
         "refresh_token": "",
         "email": user_info.get("email", "") or "",
         "email_verified": bool(user_info.get("email_verified", False)),
     }
 
-    # P2-2: GitHub /user 接口默认不返回 email（用户设了私密），
-    # 需额外调 /user/emails 接口获取主邮箱。
-    if provider == "github" and not result["email"]:
+    # P2-2: 渠道 /user 接口默认不返回 email 时，按渠道卡 emails_endpoint 补抓
+    # 主邮箱（S89/D65 能力位；github 内置 /user/emails，其余渠道空=无补抓）。
+    _emails_ep = _channel_emails_endpoint(provider, cfg)
+    if _emails_ep and not result["email"]:
         try:
             emails_resp = _req.get(
-                "https://api.github.com/user/emails",
+                _emails_ep,
                 headers=headers, timeout=15, proxies=_proxies,
             )
             emails_resp.raise_for_status()
@@ -368,28 +391,20 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
 
     return result
 
-
-# ---------------------------------------------------------------------------
-# Client ID/Secret 读取
-# ---------------------------------------------------------------------------
-
 def _get_client_id(provider: str) -> str:
     """获取 OAuth client_id——统一用 provider 名拼 meta key。"""
     return user_db.get_meta_value(f"oauth_{provider}_client_id") or ""
 
-
 def _get_client_secret(provider: str) -> str:
     """获取 OAuth client_secret——统一用 provider 名拼 meta key。"""
     return user_db.get_meta_value(f"oauth_{provider}_client_secret") or ""
-
 
 def get_redirect_uri(request, provider: str = "") -> str:
     """获取 OAuth 回调 URI。
 
     需求 11：从 provider 配置的 redirect_uri 字段读取（完整地址，含路径）。
     需求 3：路径为 /api/auth/callback/{provider}。
-    fallback 1：server_base_url 配置（nginx 反代场景，Host header 不可靠）。
-    fallback 2：从 Host header 构造（开发环境直连）。
+    开发环境 fallback：provider 未配 redirect_uri 时从 Host header 构造。
     """
     # 优先从 provider 配置读取
     if provider:
@@ -397,11 +412,11 @@ def get_redirect_uri(request, provider: str = "") -> str:
         if cfg and cfg.get("redirect_uri"):
             return cfg["redirect_uri"]
 
+    # fallback：从 Host header 构造（开发环境）
     # provider 为空意味着调用方未传 provider，属于编程错误——统一回调路由已删除
     if not provider:
         raise ValueError("get_redirect_uri requires a non-empty provider after callback route split")
     path = f"/api/auth/callback/{provider}"
-
     # fallback 1：server_base_url 配置（nginx 反代场景优先用配置而非 Host header）
     try:
         from src.domains.mgmt.user.db import get_browser_callback_url
@@ -412,6 +427,7 @@ def get_redirect_uri(request, provider: str = "") -> str:
         pass
 
     # fallback 2：从 Host header 构造（开发环境直连）
+    # 生产环境强制 https，防止 X-Forwarded-Proto 伪造
     from src.domains.mgmt.auth.security_config import is_production
     if is_production():
         scheme = "https"
@@ -419,7 +435,6 @@ def get_redirect_uri(request, provider: str = "") -> str:
         scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
     host = _get_trusted_host(request)
     return f"{scheme}://{host}{path}"
-
 
 def _get_trusted_host(request) -> str:
     """获取可信 Host（BUG-1 修复 + Issue #372 §15.3 X-Forwarded-Host 支持）。
@@ -459,3 +474,86 @@ def _get_trusted_host(request) -> str:
 
     # 未设置 TRUSTED_HOSTS → 返回候选值（开发环境兼容）
     return candidate
+
+def is_oidc_channel(cfg: "dict | None") -> bool:
+    """渠道卡是否为 OIDC 类型。
+
+    兼容两种键：卡内 `type`（oauth_providers_config 现行口径，华为卡即此）
+    与 `channel_type`（D102-E 方案稿曾用的键——回调兜底曾只读它导致兜底
+    永不触发，华为登录全挂；两键任一为 oidc 即判定为 OIDC 渠道）。
+    """
+    if not cfg:
+        return False
+    return str(cfg.get("type") or cfg.get("channel_type") or "").strip().lower() == "oidc"
+
+def _channel_emails_endpoint(provider: str, cfg: "dict | None" = None) -> str:
+    """S89/D65：渠道卡 emails 补抓端点（email 补抓能力位）。
+
+    github 内置 /user/emails（其 /user 接口默认不返回邮箱）；其余渠道空=
+    无补抓（用户信息接口自带邮箱或该渠道无此机制）。卡可配置覆盖。
+    """
+    try:
+        raw = (cfg or {}).get("emails_endpoint")
+        if raw is not None:
+            return str(raw)
+        if provider == "builtin_default_github_only_marker":
+            pass
+    except Exception:
+        pass
+    # 内置默认：仅 github 渠道有补抓端点（存量语义，经渠道内置卡派生）
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None and card.git_tree_family == "github_api":
+            return f"https://{card.host.rstrip('/')}/user/emails" if card.host != "github.com" else "https://api.github.com/user/emails"
+    except Exception:
+        pass
+    return ""
+
+# 代码内置默认——和生产环境当前行为一致，确保旧配置文件向前兼容。
+# 当 meta 表无 oauth_providers_config 时（旧文件未更新），使用此默认。
+_DEFAULT_PROVIDERS: dict[str, dict] = {
+    "gitcode": {
+        "name": "GitCode",
+        "auth_url": "https://gitcode.com/oauth/authorize",
+        "token_url": "https://gitcode.com/oauth/token",
+        "user_url": "https://gitcode.com/api/v5/user",
+        "scope": "all",
+        "id_field": "id",
+        "login_field": "login",
+        "name_field": "nickname",
+        "pkce_enabled": True,
+        "brand_color": "#e7330f",
+        "accept_header": "application/json",
+    },
+    "github": {
+        "name": "GitHub",
+        "auth_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token",
+        "user_url": "https://api.github.com/user",
+        # D46 P1-12: 缩减 scope——仅需读取用户信息和邮箱，不需要 repo 写权限
+        "scope": "read:user user:email",
+        "id_field": "id",
+        "login_field": "login",
+        "name_field": "name",
+        "pkce_enabled": True,
+        "brand_color": "#24292f",
+        "accept_header": "application/vnd.github+json",
+    },
+    # D90-N5（2026-11-07）：gitee OAuth 登录渠道卡——OAuth 配置化平台化收口。
+    # endpoints 按 Gitee 官方 OAuth 文档。管理员在管理面填
+    # oauth_gitee_client_id/secret 即启用（无需改代码）。
+    "gitee": {
+        "name": "Gitee",
+        "auth_url": "https://gitee.com/oauth/authorize",
+        "token_url": "https://gitee.com/oauth/token",
+        "user_url": "https://gitee.com/api/v5/user",
+        "scope": "user_info emails",
+        "id_field": "id",
+        "login_field": "login",
+        "name_field": "name",
+        "pkce_enabled": True,
+        "brand_color": "#c71d23",
+        "accept_header": "application/json",
+    },
+}

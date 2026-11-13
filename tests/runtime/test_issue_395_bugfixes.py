@@ -14,27 +14,36 @@
 运行：python -m pytest tests/test_issue_395_bugfixes.py -v
 （沿用 test_issue_386_token_validation_400.py 的 TestClient + mock 模式，不发真实网络请求）
 """
+
 import os
+
 import sys
+
 import re
+
 import unittest
+
 from unittest.mock import patch, MagicMock
 
 # 强制使用独立测试库，防止 TestClient 误连生产库（与 test_api_routes.py 同款双保险）
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 from fastapi.testclient import TestClient
+
 from fastapi import HTTPException
+
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 
 _uid = None
-_headers = {}
 
+_headers = {}
 
 def setup_module():
     global _uid, _headers
@@ -59,7 +68,6 @@ def setup_module():
         db.commit()
     _headers = {"Authorization": "Bearer " + create_access_token(_uid["id"], "test_395", ver)}
 
-
 def teardown_module():
     if _uid:
         with db_lock:
@@ -72,7 +80,6 @@ def teardown_module():
             c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
             c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
             db.commit()
-
 
 def _create_test_org(name: str, owner_id: int, add_owner_member: bool = True) -> int:
     """建一个真实组织（非个人）并返回 org_id。"""
@@ -90,16 +97,12 @@ def _create_test_org(name: str, owner_id: int, add_owner_member: bool = True) ->
         db.commit()
     return org_id
 
-
 def _add_org_member(org_id: int, user_id: int, role: str):
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO org_member (org_id, user_id, role) VALUES (?,?,?)",
                   (org_id, user_id, role))
         db.commit()
-
-
-# ===================== #380 knowledge 分页校验（AT-KNW-06） =====================
 
 class TestKnowledgePagination422:
     """GET /api/knowledge 越界分页参数 → 422（不再 500 回显 SQL）"""
@@ -150,7 +153,6 @@ class TestKnowledgePagination422:
         assert r.status_code != 422, f"valid params got 422: {r.text[:300]}"
         assert r.status_code != 500, f"valid params got 500: {r.text[:300]}"
 
-
 class TestGlobalExceptionSanitized:
     """#380 第三层：全局异常处理器不回显异常原文（DB 错误原文不进 message）"""
 
@@ -173,9 +175,6 @@ class TestGlobalExceptionSanitized:
         assert "1064" not in body, f"MySQL error leaked: {body}"
         assert "SQL" not in body, f"SQL detail leaked: {body}"
         assert "服务器内部错误" in body
-
-
-# ===================== #381 org 写接口鉴权绑定路径 org_id（AT-ORGP-03） =====================
 
 class TestOrgWriteAuthBoundToPath:
     """PUT/DELETE /api/orgs/{org_id} 鉴权必须绑定路径 org_id（404/403/200 语义正确）"""
@@ -293,9 +292,6 @@ class TestOrgWriteAuthBoundToPath:
             c.execute("SELECT COUNT(*) FROM organization WHERE id=?", (org_id,))
             assert c.fetchone()[0] == 0
 
-
-# ===================== #382 a2a repository 非 str → 400（AT-A2A-03） =====================
-
 class TestA2ARepositoryTypeValidation:
     """POST /api/a2a payload.repository 非字符串类型 → 400（不再 500）"""
 
@@ -330,9 +326,6 @@ class TestA2ARepositoryTypeValidation:
             # 400 只允许来自 repository 格式（org/test 合法，不应 400）
             assert "repository" not in r.text or "must be" not in r.text
 
-
-# ===================== #383 host_repo 上游异常分流（AT-REPO-06） =====================
-
 def _run(coro):
     import inspect
     if inspect.iscoroutine(coro):
@@ -340,9 +333,18 @@ def _run(coro):
         return asyncio.run(coro)
     return coro
 
-
 class TestHostRepoUpstreamErrorMapping:
-    """host_repo：上游 404 → 404；上游 401/403 → 403；上游 5xx → 5xx 固定文案不泄露"""
+    """host_repo 上游异常分流（D97 缝迁移重写：mock 缝从已删符号
+    get_user_token_with_refresh 迁至卡驱动端口 create_provider().get_user_login——
+    对齐 ed04df860 簇1 _mock_provider 手法与 UC18 网络缝口径）。
+
+    现行语义（S62/D42 适配器端口后，完整生产链实测锚定）：
+    (404)→404 REPO_NOT_FOUND；401→with_oauth_token 刷新域 401 reauth_required；
+    403 业务权限（非 token 关键词）→403 TOKEN_PERMISSION_INSUFFICIENT；
+    403+token 关键词→同 401 刷新域；5xx/网络错→身份前置放行→下游
+    _host_502_detail 兜底 502（retryable=true，上游报文不透出 #383/#395）。
+    五用例按现行语义重写——旧预期（401/403 直连分流、5xx 固定文案）为
+    重构前行为。"""
 
     def _host(self, upstream_exc):
         import src.domains.mgmt.routes.repos as repos_mod
@@ -351,89 +353,103 @@ class TestHostRepoUpstreamErrorMapping:
             full_name = "at_none/at_none"
 
         fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
-        gbt_json = '{"gitcode_api_token": "gbt", "bot_usernames": ["hwc-dev-bot"]}'
 
+        class _FakeProv:
+            """卡驱动端口行为注入：get_user_login 抛指定上游异常（身份前置缝）。"""
+
+            def get_user_login(self, token):
+                raise upstream_exc
+
+            def webhook_token_field(self):
+                return "bot_gitcode_token"
+
+            def token_storage_field(self):
+                return "bot_gitcode_token"
+
+        # TestClient 形态（对齐 test_repos_host_provider）：HTTPException 被转成
+        # 响应，返回 status_code；None=请求成功（放行分支）
+        # 注意：webhook_url 检查在身份前置之前（L1111 get_webhook_url）——
+        # 必须给非空值，否则 400 WEBHOOK_URL_NOT_CONFIGURED 先于被测分支
+        fake_user = dict(fake_user)
         with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
              patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
-             patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="bot_tok"), \
-             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["hwc-dev-bot"]), \
-             patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://webhook"), \
-             patch.object(repos_mod, "get_user_token_with_refresh", return_value="user_tok"), \
-             patch.object(repos_mod, "get_user_github_token_with_refresh", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_webhook_url", return_value="http://wk.example/webhook/gitcode"), \
+             patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.kernel.token_resolver.create_provider", return_value=_FakeProv()), \
+             patch.object(repos_mod, "get_user_token_for", return_value="user_tok"), \
+             patch("src.api.deps.get_user_token_for", return_value="user_tok"), \
              patch.object(repos_mod, "_get_user_provider_and_token",
                           return_value=("gitcode", "user_tok")), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=upstream_exc), \
-             patch.object(repos_mod, "with_oauth_token",
-                          side_effect=lambda user, provider, fn, *a, **kw: fn("user_tok", *a, **kw)), \
-             patch("builtins.open", MagicMock()) as mock_open:
-            mock_f = MagicMock()
-            mock_f.__enter__.return_value.read.return_value = gbt_json
-            mock_open.return_value = mock_f
-            try:
-                _run(repos_mod.host_repo(FakeBody(), fake_user))
-                return None  # 未抛异常（不应发生）
-            except HTTPException as e:
-                return e
+             patch("builtins.open", MagicMock()):
+            r = client.post("/api/repos/host", json={"full_name": "at_none/at_none"},
+                            headers=_headers)
+            return r.status_code, r.json().get("detail", r.text)
 
     def test_upstream_404_returns_404_fixed_message(self):
-        e = self._host(RuntimeError(
+        code, detail = self._host(RuntimeError(
             "GitCode API GET https://gitcode.com/api/v5/repos/at_none/at_none failed (404): "
             "{\"message\":\"Not Found\"}"))
-        assert e is not None, "should raise HTTPException"
-        assert e.status_code == 404, f"Got {e.status_code}"
-        assert e.detail["code"] == 404
-        assert e.detail["message"] == "仓库不存在或无权访问"
-        assert "gitcode.com/api" not in e.detail["message"]
-        assert "failed (404)" not in e.detail["message"]
+        assert code == 404, f"404 应显式拒绝（REPO_NOT_FOUND），Got {code}: {str(detail)[:120]}"
+        assert detail.get("error_code") == "REPO_NOT_FOUND"
+        msg = str(detail.get("message", ""))
+        assert "gitcode.com/api" not in msg, "内部 URL 泄露"
+        assert "failed (404)" not in msg, "上游原始错误泄露"
 
-    def test_upstream_403_returns_403_fixed_message(self):
-        # 403(业务禁止) 在 with_oauth_token 内部处理：token 预刷新得 "" → 直接 401 reauth，
-        # 因此 403 分流走不到；此用例改为验证 403(token 类) 经 with_oauth_token → 401 语义
-        e = self._host(RuntimeError(
-            "GitCode API GET https://gitcode.com/api/v5/user failed (403): token forbidden"))
-        assert e is not None
-        assert e.status_code in (401, 403), f"Got {e.status_code}"
-        msg = str(e.detail.get("message", ""))
+    def test_upstream_403_maps_403_token_insufficient(self):
+        # 现行语义（完整生产链）：403 业务权限（消息不含 token/forbidden 关键词）
+        # → with_oauth_token._is_token_error=False → 透传 → host_repo 分流
+        # (403) → 403 TOKEN_PERMISSION_INSUFFICIENT。
+        # 403+token 关键词走 with_oauth_token 刷新域（→401 reauth，非本分支）。
+        code, detail = self._host(RuntimeError(
+            "GitCode API GET https://gitcode.com/api/v5/user failed (403): permission denied for this operation"))
+        assert code == 403, f"Got {code}: {str(detail)[:120]}"
+        assert detail.get("error_code") == "TOKEN_PERMISSION_INSUFFICIENT"
+        msg = str(detail.get("message", ""))
         assert "gitcode.com/api" not in msg, f"internal URL leaked: {msg}"
         assert "failed (403)" not in msg, f"upstream raw error leaked: {msg}"
 
-    def test_upstream_401_returns_401_reauth_no_leak(self):
-        # 401(token 失效)：测试中 with_oauth_token 被旁路（直接执行 fn），RuntimeError(401)
-        # 穿透到 host_repo 的 RuntimeError 分流 → 403 固定文案；生产路径经 with_oauth_token
-        # 刷新重试后仍 401 → 401 reauth_required。两种语义都不泄露内部 URL。
-        e = self._host(RuntimeError(
+    def test_upstream_401_maps_reauth_required(self):
+        # 现行语义（完整生产链）：401 → with_oauth_token._is_token_error=True →
+        # refresh_oauth_token（真库无 refresh_token → None）→ 401 reauth_required。
+        # host_repo 的 (401)→403 直连分支被刷新域前置拦截，生产不可达。
+        code, detail = self._host(RuntimeError(
             "GitCode API GET https://gitcode.com/api/v5/user failed (401): unauthorized"))
-        assert e is not None
-        assert e.status_code in (401, 403), f"Got {e.status_code}"
-        if e.status_code == 401:
-            assert e.detail.get("action") == "reauth_required"
-        else:
-            assert e.detail.get("error_code") == "TOKEN_PERMISSION_INSUFFICIENT"
-            assert "Token 权限不足" in e.detail.get("message", "")
-        msg = str(e.detail.get("message", ""))
-        assert "gitcode.com/api" not in msg, f"internal URL leaked: {msg}"
-        assert "failed (401)" not in msg, f"upstream raw error leaked: {msg}"
+        assert code == 401, f"Got {code}: {str(detail)[:120]}"
+        assert detail.get("action") == "reauth_required"
+        msg = str(detail.get("message", ""))
+        assert "gitcode.com/api" not in msg
+        assert "failed (401)" not in msg
 
-    def test_upstream_500_keeps_5xx_no_leak(self):
-        e = self._host(RuntimeError(
+    def test_upstream_500_maps_502_retryable(self):
+        # 现行语义（完整生产链）：5xx → 身份前置放行（issue455 语义）→ 下游
+        # webhook 创建段失败 → _host_502_detail 兜底：502 结构化 detail
+        # （retryable=true + 自愈提示），上游原始报文不透出（#383/#395 防泄露）
+        code, detail = self._host(RuntimeError(
             "GitCode API GET https://gitcode.com/api/v5/repos/at_none/at_none failed (500): "
             "internal server error"))
-        assert e is not None
-        assert e.status_code >= 500, f"Got {e.status_code}"
-        msg = str(e.detail.get("message", ""))
+        assert code == 502, f"Got {code}: {str(detail)[:160]}"
+        assert detail.get("retryable") is True
+        msg = str(detail.get("message", ""))
         assert "gitcode.com/api" not in msg, f"internal URL leaked: {msg}"
         assert "failed (500)" not in msg, f"upstream raw error leaked: {msg}"
-        assert "托管服务暂时不可用" in msg
+        assert "internal server error" not in msg, "上游原始报文泄露"
 
-    def test_network_error_keeps_5xx_fixed_message(self):
-        e = self._host(RuntimeError("Cannot reach GitCode API: connection refused"))
-        assert e is not None
-        assert e.status_code >= 500, f"Got {e.status_code}"
-        msg = str(e.detail.get("message", ""))
-        assert "gitcode.com" not in msg
-        assert "Cannot reach" not in msg
-        assert "托管服务暂时不可用" in msg
-
+    def test_network_error_maps_502_retryable(self):
+        # 现行语义：网络错（无状态码）→ 前置放行 → 下游兜底 502 retryable
+        code, detail = self._host(RuntimeError("Cannot reach GitCode API: connection refused"))
+        assert code == 502, f"Got {code}: {str(detail)[:160]}"
+        assert detail.get("retryable") is True
+        msg = str(detail.get("message", ""))
+        assert "Cannot reach" not in msg, "上游原始错误泄露"
+        assert "gitcode.com" not in msg, "内部域名泄露"
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+# 强制使用独立测试库，防止 TestClient 误连生产库（与 test_api_routes.py 同款双保险）
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

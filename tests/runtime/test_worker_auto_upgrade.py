@@ -256,7 +256,7 @@ class TestWorkerAutoUpgrade:
         client.get_task_state.return_value = "running"
         with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-sameversion"), \
              patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=[1])), \
+             patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=([1], {}, []))), \
              patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
@@ -278,7 +278,7 @@ class TestWorkerAutoUpgrade:
         client.get_task_state.return_value = "running"
         with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-oldversion1234"), \
              patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=[1])), \
+             patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=([1], {}, []))), \
              patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
              patch("random.uniform", return_value=0):
             asyncio.run(self._drive(ra._run_loop(

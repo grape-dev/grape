@@ -4,6 +4,7 @@
 执行路径：业务层 enqueue_task → agent_tasks(status=queued) → 远端 RuntimeAgent claim（原子抢单+D9）
 → stream_runtime → report/complete/fail。本机引擎走 direct（`_execute_agent`），不走队列。
 """
+from src.kernel.user_ids import has_user_id
 import os, json, re, threading, time, uuid
 from datetime import datetime, timezone, timedelta
 from src.kernel.session_manager import db, db_lock
@@ -94,10 +95,11 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                     _owner_norm = (from_repo_key(_owner) or "").strip()
                     if _repo_norm and _owner_norm != _repo_norm:
                         continue  # repo scope 但仓库不匹配
-                elif _scope == "user" and task_user_id > 0 and _owner_name:
+                elif _scope == "user" and has_user_id(task_user_id) and _owner_name:
                     # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
                     try:
-                        c.execute("SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1", (_owner_name,))
+                        c.execute("SELECT id FROM grape_accounts WHERE username=? "
+                                  "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
                         _ur = c.fetchone()
                         _engine_uid = _ur[0] if _ur else 0
                         if _engine_uid != task_user_id:
@@ -340,7 +342,7 @@ def _runtime_timeout_env_kv() -> dict:
     _execute_task env.update(env_extra) 后：
       - 看门狗 _watchdog_timeout_for(env) 任务级优先
       - hermes/hwcloud _global_timeout_for(max_exec, env) 任务级优先
-    worker 本地 os.environ 显式设置仍最高优（优先级语义见 src/config.py）。
+    worker 本地 os.environ 显式设置仍最高优（优先级语义见 src/kernel/config.py）。
     """
     return {"RUNTIME_TASK_TIMEOUT": str(_get_runtime_task_timeout_cfg())}
 
@@ -529,7 +531,7 @@ def _collect_server_env(user_id, account):
     codearts AK/SK 注入为 CODEARTS_CLI_AK / CODEARTS_CLI_SK。
     """
     env = {}
-    if user_id and user_id > 0:
+    if has_user_id(user_id):
         try:
             from src.domains.mgmt.user.db import get_credentials
             for c in get_credentials(user_id):
@@ -826,7 +828,10 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
             _full = ""
         if _full:
             from src.domains.runtime.engine.skill_materialize import validate_skill_dir
-            ok, missing = validate_skill_dir(os.path.dirname(_full))
+            # validate_skill_dir 返回 (ok, missing, extra, version_drift)；arch 线此处
+            # 仍是旧的两元解包，任何可解析到本地目录的技能都会 ValueError 打断派发
+            # （本轮移植中实测复现），改为可变长解包。
+            ok, missing, *_rest = validate_skill_dir(os.path.dirname(_full))
             if ok:
                 return True, "local skill dir ok", sid
             _st_note = "storage unavailable; " if _storage_unavailable else ""
@@ -1021,11 +1026,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _task_span = None
     _task_trace_context = ""
     try:
-        from src.observability.otel import start_task_span, snapshot_trace_context
+        from src.kernel.otel import start_task_span, snapshot_trace_context
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.observability.trace import pipeline_trace_id
+                from src.domains.insight.observability.trace import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
@@ -2688,7 +2693,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     覆盖 complete 与 fail 两个终态（fail_task 单独埋同款）。未启用/坏数据 → 零影响。
     """
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _fin_span, _ = start_task_span(f"task {task_id} finish", {
             "task_id": task_id, "exit_code": exit_code,
             "result_len": len(result_text or ""),
@@ -3274,30 +3279,17 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
 
 
 def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) -> list:
-    """查询 issue 已有评论列表（按 provider 分流）。
+    """查询 issue 已有评论列表（按卡驱动平台路由）。
 
     Issue #372 R10 P2-1: fail_task 发"Token 已过期"回帖前去重用。
-    GitHub: GET /repos/{owner}/{repo}/issues/{num}/comments
-    GitCode: GET /api/v5/repos/{repo}/issues/{num}/comments
+    D29/S49 follow-up：读取统一走 event_pipeline 的卡驱动 helper
+    （github/gitcode/gitee/gitlab 同一条代码路径；原 "github 否则 gitcode v5"
+    二分会让 gitee/gitlab 仓读不到评论）。
     返回评论 dict 列表（每项含 body 字段），失败返回空列表。
     """
     try:
-        if repo_key.startswith("github:"):
-            from src.kernel.repo_key import split_owner_repo
-            from src.domains.mgmt.user.repo_manager import _github_req
-            _o, _r = split_owner_repo(repo_key)
-            _result = _github_req(
-                "GET",
-                f"https://api.github.com/repos/{_o}/{_r}/issues/{issue_num}/comments",
-                token,
-            )
-            return _result if isinstance(_result, list) else []
-        else:
-            import urllib.request, json as _json
-            _url = f"https://gitcode.com/api/v5/repos/{repo}/issues/{issue_num}/comments?per_page=100"
-            _req = urllib.request.Request(_url, headers={"Authorization": f"Bearer {token}"})
-            _resp = urllib.request.urlopen(_req, timeout=15)
-            return _json.loads(_resp.read())
+        from src.domains.runtime.pipeline.event_pipeline import _list_issue_comments_card
+        return _list_issue_comments_card(repo_key, repo, issue_num, token)
     except Exception:
         return []
 
@@ -3389,7 +3381,7 @@ def friendly_failure_hint(task: dict | None) -> tuple[str, str]:
 def fail_task(task_id, error, exit_code=-1):
     # MR-2（2026-11-05）：task.finish span（fail 终态，与 complete_task 同款串联）
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
             "task_id": task_id, "exit_code": exit_code,
             "outcome": "failed", "error_head": str(error or "")[:200],
@@ -3455,7 +3447,7 @@ def fail_task(task_id, error, exit_code=-1):
     # 架构审查 P2-6：放在全部幂等判定（completed / failed / timeout_failed / 过期上报 /
     # 瞬时重试）之后——被跳过的重放调用不再产生误导性的 finish FAIL span。
     try:
-        from src.observability.otel import start_task_span
+        from src.kernel.otel import start_task_span
         _fin_span, _ = start_task_span(f"task {task_id} finish FAIL", {
             "task_id": task_id, "exit_code": exit_code,
             "outcome": "failed", "error_head": str(error or "")[:200],
@@ -3654,7 +3646,9 @@ def fail_task(task_id, error, exit_code=-1):
                         _issue_num = _issue_num_from(_issue_id)
                         _repo = from_repo_key(_rk) or task.get("account") or ""
                         if _issue_num and _repo:
-                            _pName = "GitHub" if _expired_provider == "github" else "GitCode"
+                            # S76/D51：平台展示名按 repo_key 前缀取卡 name（gitee 仓不再显示 GitCode）
+                            from src.domains.runtime.vcs.platform_card import display_name_for_repo_key
+                            _pName = display_name_for_repo_key(_rk)
                             _msg = (
                                 f"<!-- grape-auto-comment -->\n"
                                 f"⚠️ {_pName} Token 已过期或被撤销，本次任务未能完成。"
@@ -4243,3 +4237,260 @@ def _check_stale_queued_tasks():
                     _fail_task_pool_unreachable(c, tid, _engine_ids, task_tag or "")
     except Exception as e:
         log.warning(f"_check_stale_queued_tasks failed: {e}")
+
+
+# ===== Issue #990：任务会话 token 快照同步（自 arch 线移植，2026-11-12）=====
+# `GET /api/runtime/tasks/{id}/env` 依赖 sync_task_session_token 保证「shell 环境快照」
+# 与「运行时注入值」一致；本线合并时只带进了调用方，缺实现 → 该端点 500 →
+# 远端 worker 取不到 env、引擎不启动，任务被误报为 "task timed out after 3600s"。
+_SESSION_TOKEN_LOCK_TIMEOUT = 10  # 秒：同任务跨进程轮换锁等待上限
+# Issue #990 复审：GET_LOCK 是连接级锁，连接一断就释放，因此这条专用连接可以**跨次复用**。
+# guard 保证「同进程内一次只有一个线程持锁」——同一连接上对同名 GET_LOCK 会重入计数。
+_lock_conn_state: dict = {"conn": None, "guard": threading.Lock()}
+
+class _TaskTokenLockSkipped(Exception):
+    """已存在未结束事务，无法取得 SQLite 写锁：本轮同步 fail-closed（不触碰调用方事务）。"""
+
+
+def _locked_connection():
+    """取复用的专用锁连接（失效则重建）。失败返回 None（调用方 fail-closed）。"""
+    conn = _lock_conn_state.get("conn")
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            return conn
+        except Exception as e:
+            log.warning(f"sync_task_session_token: lock conn unhealthy, reconnecting: {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _lock_conn_state["conn"] = None
+    factory = getattr(db, "dedicated_connection", None)
+    if factory is None:
+        log.warning("sync_task_session_token: mysql backend without dedicated_connection; "
+                    "cannot serialize cross-process token rotation")
+        return None
+    try:
+        conn = factory()
+    except Exception as e:
+        log.warning(f"sync_task_session_token: dedicated lock conn failed: {e}")
+        return None
+    _lock_conn_state["conn"] = conn
+    return conn
+
+
+def _session_token_lock_name(task_id: str) -> str:
+    """MySQL 命名锁名（≤64 字符）：按库名隔离，避免同一 MySQL 实例多环境互相排队。"""
+    dbname = "default"
+    try:
+        from src.kernel.mysql_compat import mysql_config
+        dbname = (mysql_config().get("database") or "default")
+    except Exception:
+        pass
+    # MySQL 锁名长度上限 64；task_id 通常 < 32，库名截断兜底。
+    return ("grape_sess_tk_%s_%s" % (task_id, dbname))[:64]
+
+
+def _acquire_task_token_lock(task_id: str):
+    """在复用的池外专用连接上获取 MySQL 服务器级命名锁（跨进程串行化）。
+
+    为什么不用 ``SELECT ... FOR UPDATE``：``src/mysql_compat.py`` 对任何 SELECT
+    执行后立即 ``commit()``，行锁随即释放，多 worker 仍可并发轮换互相作废旧 token。
+    GET_LOCK 是连接级、服务器级互斥，且锁连接独立于业务连接，可稳定覆盖读+轮换+回写
+    整个临界区（对应 QA 建议的「分布式锁」方案）。
+
+    返回 (locked_conn, lock_name)；获取失败返回 (None, "")，调用方必须 fail-closed。
+    进程内的 guard 先串行化（同一连接重入计数会漏释放），再用 GET_LOCK 跨进程互斥。
+    """
+    guard = _lock_conn_state["guard"]
+    if not guard.acquire(timeout=_SESSION_TOKEN_LOCK_TIMEOUT):
+        log.warning("sync_task_session_token: in-process token lock busy; fail closed without rotating")
+        return None, ""
+    try:
+        dconn = _locked_connection()
+        if dconn is None:
+            guard.release()
+            return None, ""
+        lock_name = _session_token_lock_name(task_id)
+        try:
+            cur = dconn.cursor()
+            cur.execute("SELECT GET_LOCK(%s, %s)", (lock_name, _SESSION_TOKEN_LOCK_TIMEOUT))
+            row = cur.fetchone()
+            if not row or row[0] != 1:
+                log.warning(f"sync_task_session_token: mysql named lock not acquired ({lock_name}); "
+                            "fail closed without rotating")
+                guard.release()
+                return None, ""
+            return dconn, lock_name
+        except Exception as e:
+            log.warning(f"sync_task_session_token: mysql named lock error ({lock_name}): {e}")
+            _drop_locked_connection()
+            guard.release()
+            return None, ""
+    except Exception:
+        guard.release()
+        raise
+
+
+def sync_task_session_token(task_id: str) -> str:
+    """同步任务的会话 token：保证 shell 环境快照与运行时注入值一致（Issue #990）。
+
+    `agent_tasks.env_extra` 是任务创建时的 shell 环境快照；运行时进程执行前会经
+    `GET /tasks/{id}/env` 刷新 env。若两端各自签发 token，快照会保留旧值 → Agent 用
+    旧 token 调 grape 全量 401。
+
+    规则：
+    - 快照 token 有效（session_key / repo_key / agent_type 匹配且未过期）→ 原样返回，不轮换；
+    - 失效或作用域不匹配 → 在同一事务内作废旧 token、签发新 token 并回写
+      `agent_tasks.env_extra`，使快照与运行时注入值保持一致。
+
+    跨进程原子性：SQLite 用 ``BEGIN IMMEDIATE`` 取库级写锁；MySQL 用池外专用连接上的
+    ``GET_LOCK`` 命名锁串行化（服务端多 worker 运行，线程级 ``db_lock`` 不足以覆盖跨进程
+    竞争；兼容层的 ``FOR UPDATE`` 会被 SELECT 后自动 commit 提前放锁，故不可用）。锁不可
+    获取时 fail-closed 返回空串。过期、签发、快照回写共享同一事务；任一步失败即回滚并
+    返回空串，绝不返回未落库的新 token。
+
+    返回同步后的 token；任务不存在、无仓库/agent 上下文、取锁失败或持久化失败时返回空串。
+    """
+    if not task_id:
+        return ""
+    from src.kernel.auth_sdk.auth_token import verify_session_token, rotate_session_token
+    from src.kernel.session_manager import _is_mysql_backend
+    is_mysql = _is_mysql_backend()
+    lock_conn, lock_name = (None, "")
+    if is_mysql:
+        lock_conn, lock_name = _acquire_task_token_lock(task_id)
+        if lock_conn is None:
+            return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            try:
+                if is_mysql:
+                    # 已持有服务器级命名锁 → 临界区内普通 SELECT 即可（无需 FOR UPDATE）。
+                    row = c.execute(
+                        "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
+                        (task_id,),
+                    ).fetchone()
+                else:
+                    try:
+                        c.execute("BEGIN IMMEDIATE")
+                    except Exception as e:
+                        if "within a transaction" in str(e).lower():
+                            # 已有未结束事务：无法取得写锁，fail-closed；不回滚调用方事务。
+                            raise _TaskTokenLockSkipped(str(e))
+                        raise
+                    row = c.execute(
+                        "SELECT repo_key, agent_type, user_id, env_extra FROM agent_tasks WHERE id=?",
+                        (task_id,),
+                    ).fetchone()
+                if not row:
+                    db.commit()
+                    return ""
+                repo_key, agent_type = (row[0] or ""), (row[1] or "")
+                try:
+                    user_id = int(row[2] or 0)
+                except (TypeError, ValueError):
+                    user_id = 0
+                try:
+                    env = json.loads(row[3] or "{}")
+                except Exception:
+                    env = {}
+                if not isinstance(env, dict):
+                    env = {}
+                if not repo_key or not agent_type:
+                    db.commit()
+                    return ""
+
+                snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
+                info = verify_session_token(snapshot_token) if snapshot_token else None
+                token_ok = bool(
+                    info
+                    and info.get("session_key") == task_id
+                    and info.get("repo_key") == repo_key
+                    and info.get("agent_type") == agent_type
+                )
+                if token_ok:
+                    db.commit()
+                    return snapshot_token
+
+                new_token = rotate_session_token(
+                    session_key=task_id, repo_key=repo_key,
+                    agent_type=agent_type, user_id=user_id, commit=False)
+                env["GRAPE_SESSION_TOKEN"] = new_token
+                c.execute(
+                    "UPDATE agent_tasks SET env_extra=? WHERE id=?",
+                    (json.dumps(env, ensure_ascii=False), task_id),
+                )
+                db.commit()
+                return new_token
+            except _TaskTokenLockSkipped as e:
+                log.warning(f"sync_task_session_token: sqlite write lock unavailable for {task_id}: {e}")
+                return ""
+            except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                log.warning(f"sync_task_session_token: sync failed for {task_id}: {e}")
+                return ""
+    finally:
+        if lock_conn is not None:
+            _release_task_token_lock(lock_conn, lock_name)
+
+
+def session_token_for_execution(task_id: str, *, session_key_fallback: str,
+                                repo_key: str, agent_type: str,
+                                user_id: int = 0) -> str:
+    """direct 执行前的 token 解析：优先复用/同步任务快照，绝不制造未落库 token。
+
+    - 有任务行：走 ``sync_task_session_token``，失败时返回空串（不另签未回写快照的 token，
+      否则运行时注入值与 shell 环境快照再次漂移，正是 #990 的症状）；
+    - 无任务行（如纯 direct 会话）：按 ``session_key_fallback`` 新签。
+    """
+    if task_id:
+        token = sync_task_session_token(task_id)
+        if token:
+            return token
+        if get_task(task_id) is not None:
+            log.warning(f"session_token_for_execution: task {task_id} snapshot sync failed; "
+                        "skip issuing an unpersisted token")
+            return ""
+        session_key = task_id
+    else:
+        session_key = session_key_fallback
+    from src.kernel.auth_sdk.auth_token import issue_session_token
+    return issue_session_token(
+        session_key=session_key, repo_key=repo_key,
+        agent_type=agent_type, user_id=user_id)
+
+
+def _release_task_token_lock(dconn, lock_name: str):
+    """释放命名锁并归还进程内 guard（连接保留复用；断链时下次自动重建）。"""
+    try:
+        cur = dconn.cursor()
+        cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+        cur.fetchone()
+    except Exception as e:
+        log.warning(f"sync_task_session_token: release lock {lock_name} failed (conn drop will release): {e}")
+        _drop_locked_connection()
+    finally:
+        try:
+            _lock_conn_state["guard"].release()
+        except RuntimeError:
+            # 未持锁（异常路径已释放）：无需处理
+            pass
+
+
+def _drop_locked_connection():
+    """连接出错/断链时丢弃，下次重建（连接断开即释放其上的命名锁）。"""
+    conn = _lock_conn_state.get("conn")
+    _lock_conn_state["conn"] = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass

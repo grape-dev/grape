@@ -57,7 +57,7 @@ class TestEventPipelineReExport:
             _DIRECT_FUTURES_LOCK as de_lock, start_direct_agent as de_sda,
             _execute_agent as de_ea, _execute_agent_inner as de_eai,
         )
-        from src.api.event_pipeline import (
+        from src.domains.runtime.pipeline.event_pipeline import (
             _DIRECT_POOL as ep_pool, _DIRECT_FUTURES as ep_futures,
             _DIRECT_FUTURES_LOCK as ep_lock, start_direct_agent as ep_sda,
             _execute_agent as ep_ea, _execute_agent_inner as ep_eai,
@@ -93,7 +93,7 @@ class TestLocalClaimerImport:
         import src.domains.runtime.engine.local_claimer as lc
         source = inspect.getsource(lc._execute_claimed_locally)
         assert "from src.domains.runtime.engine.direct_executor import" in source
-        assert "from src.api.event_pipeline import _execute_agent" not in source
+        assert "from src.domains.runtime.pipeline.event_pipeline import _execute_agent" not in source
 
 
 class TestCallSiteMigration:
@@ -107,7 +107,7 @@ class TestCallSiteMigration:
 class TestBackwardCompatibility:
 
     def test_import_from_event_pipeline_still_works(self):
-        from src.api.event_pipeline import _execute_agent, start_direct_agent
+        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
         assert callable(_execute_agent)
         assert callable(start_direct_agent)
 
@@ -117,7 +117,7 @@ class TestBackwardCompatibility:
         assert callable(start_direct_agent)
 
     def test_cancel_direct_task_uses_reexported_futures(self):
-        from src.api.event_pipeline import cancel_direct_task, _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK
+        from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task, _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK
         assert callable(cancel_direct_task)
         assert _DIRECT_FUTURES is not None
         assert _DIRECT_FUTURES_LOCK is not None
@@ -202,16 +202,16 @@ class TestFailureFinalizationRuntimePath:
         fake_modules = {
             "src.api.event_pipeline": ep,
             "src.domains.runtime.engine.executor": mock.MagicMock(stream_devops_agent=fake_stream),
-            "src.prompt_builder": mock.MagicMock(
+            "src.kernel.prompt_builder": mock.MagicMock(
                 build_devops_agent_prompt=lambda *a, **k: "test prompt"
             ),
             "src.api.event_store": es,
             "src.domains.runtime.engine.instances": mock.MagicMock(
                 runtime_instance_name=lambda *a, **k: "test-engine"
             ),
-            "src.session_manager": sm,
-            "src.token_service": ts,
-            "src.repo_key": rk,
+            "src.kernel.session_manager": sm,
+            "src.kernel.token_service": ts,
+            "src.kernel.repo_key": rk,
             "src.domains.mgmt.user.db": udb,
             "src.domains.mgmt.auth.grape_account_db": mock.MagicMock(),
             "src.api.deps": mock.MagicMock(),
@@ -262,9 +262,9 @@ class TestFailureFinalizationRuntimePath:
         import inspect
         from src.domains.runtime.engine.direct_executor import _execute_agent_inner
         src = inspect.getsource(_execute_agent_inner)
-        assert "from src.token_service import is_auth_401_error" in src, \
+        assert "from src.kernel.token_service import is_auth_401_error" in src, \
             "is_auth_401_error lazy import missing in _execute_agent_inner"
         assert "import json" in src, \
             "json lazy import missing in _execute_agent_inner"
-        assert "from src.session_manager import db, db_lock" in src, \
+        assert "from src.kernel.session_manager import db, db_lock" in src, \
             "db/db_lock lazy import missing in _execute_agent_inner"

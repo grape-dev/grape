@@ -9,16 +9,18 @@ diff/files 接口兜底补齐，写入 payload.files，供 QA 增量复核与产
 - 失败 fail-open：拿不到清单只告警，不阻断事件流水线；
 - GitLab 当前无统一 git-repo provider，API 兜底跳过（payload 自带 changes 仍可用）。
 """
+
 from __future__ import annotations
 
 from src.kernel.config import log
+
 from src.kernel.repo_key import parse_repo_key
-from src.vcs.event_types import (
+
+from src.domains.runtime.vcs.event_types import (
     FILE_EVENT_TYPES, normalize_files, has_file_changes,
 )
 
 _MAX_PAGES = 20
-
 
 def _pr_number(payload: dict) -> str:
     pr = payload.get("pull_request") or payload.get("merge_request") or {}
@@ -33,7 +35,6 @@ def _pr_number(payload: dict) -> str:
             return str(n)
     return str(payload.get("pr_number") or "")
 
-
 def fetch_files_via_api(source: str, payload: dict, repo_key: str, token: str,
                         provider: str = "") -> list:
     """调 provider API 取事件变更文件原始列表（供 normalize_files 归一）。
@@ -45,7 +46,7 @@ def fetch_files_via_api(source: str, payload: dict, repo_key: str, token: str,
 
     p, owner, repo = parse_repo_key(repo_key)
     p = provider or p
-    if p not in ("gitcode", "github"):
+    if get_platform_card(p) is None:
         return []
     if not owner or not repo:
         return []
@@ -77,7 +78,6 @@ def fetch_files_via_api(source: str, payload: dict, repo_key: str, token: str,
         if isinstance(detail, dict):
             return detail.get("files") or []
     return []
-
 
 def enrich_event_files(evt: dict, repo_key: str, token: str = "",
                        fetcher=None) -> dict:
@@ -123,3 +123,5 @@ def enrich_event_files(evt: dict, repo_key: str, token: str = "",
                  f"added={len(files['added'])} modified={len(files['modified'])} "
                  f"deleted={len(files['deleted'])} truncated={files.get('truncated')}")
     return files
+
+from src.domains.runtime.vcs.platform_card import get_platform_card

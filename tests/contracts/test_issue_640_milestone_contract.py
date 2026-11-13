@@ -71,7 +71,7 @@ def test_update_issue_gitcode_backfills_repo_title_and_echoes_milestone(monkeypa
     assert len(patches) == 1
     payload = patches[0][2]
     assert payload["milestone"] == 850012          # 上游参数名（非 milestone_id）
-    assert payload["repo"] == "grape-dev/grape"    # PATCH 必填 repo 自动补齐
+    assert payload["repo"] == "grape"              # PATCH 必填 repo：裸仓库名（ISSUE_BODY_REPO_BARE；全称 404 NOT_EXIST）
     assert payload["title"] == "issue title"       # PATCH 必填 title 回取回填
     assert "milestone_id" not in payload
     # 写后回读：响应回显 milestone（Id 由 url 尾部补齐）
@@ -157,11 +157,13 @@ def test_update_issue_gitcode_no_milestone_no_readback(monkeypatch):
     assert resp == {"number": 640, "state": "opened"}
 
 
-def test_update_issue_github_unchanged_passthrough(monkeypatch):
-    """GitHub 语义不变：milestone_id 同名透传，不做 repo/title 补齐与回读。"""
+def test_update_issue_github_milestone_maps_and_verifies(monkeypatch):
+    """GitHub 契约（2026-11-13 P1-full 实弹修复）：milestone_id 映射为上游 `milestone`
+    字段（同名直传 milestone_id 会被上游静默忽略，200 假成功）；不做 repo/title 补齐；
+    写后回读校验与 gitcode 同口径（GET 一次），一致则回显 milestone。"""
     calls = _patch_transport(
         monkeypatch,
-        get_resp={},
+        get_resp={"milestone": {"number": 7, "title": "weekly"}},
         patch_resp={"number": 640},
     )
     resp = gra.update_issue(
@@ -170,6 +172,35 @@ def test_update_issue_github_unchanged_passthrough(monkeypatch):
         user={"auth_type": "session_token"}, p="github",
     )
     payload = [c for c in calls if c[0] == "PATCH"][0][2]
-    assert payload == {"milestone_id": 7}
-    assert [c for c in calls if c[0] == "GET"] == []
-    assert resp == {"number": 640}
+    assert payload == {"milestone": 7}          # 上游契约字段名（非 milestone_id）
+    assert "milestone_id" not in payload
+    gets = [c for c in calls if c[0] == "GET"]
+    assert len(gets) == 1                       # 仅回读校验这一次 GET（无 repo/title 补齐）
+    assert resp["milestone"]["number"] == 7     # 回读一致 → 回显 milestone
+
+
+# ==== appended from weekly-08；语义随 Issue #1005/#1076 更新（502 → 422/400）====
+def test_update_issue_gitcode_milestone_not_applied_raises_422(monkeypatch):
+    """上游 200 假成功（回读 milestone 仍为空）→ 422「上游忽略」可读错误，不再静默成功；
+    请求前 issue 本就无里程碑（before=None）→ 无回滚 PATCH（仅 1 次 PATCH）。"""
+    calls = _patch_transport(
+        monkeypatch,
+        get_resp={"title": "issue title", "milestone": None},
+        patch_resp={"number": 640, "state": "open"},
+    )
+    with pytest.raises(HTTPException) as ei:
+        gra.update_issue(
+            "grape-dev", "grape", 640,
+            gra.IssueUpdateBody(milestone_id=850012),
+            user={"auth_type": "session_token"}, p="gitcode",
+        )
+    assert ei.value.status_code == 422
+    assert "milestone_id=850012" in ei.value.detail["message"]
+    assert "上游忽略" in ei.value.detail["message"]
+    assert "空" in ei.value.detail["message"]
+    assert len([c for c in calls if c[0] == "PATCH"]) == 1  # 无回滚 PATCH
+
+
+# appended from weekly-08 的 stale-502 用例与本文件上方
+# test_update_issue_gitcode_stale_milestone_ignored_raises_422 场景完全相同
+# （原挂 111、新值 850012 被忽略），已由 422 版本取代，删除避免同场景双语义。

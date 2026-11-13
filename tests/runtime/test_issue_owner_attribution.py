@@ -40,15 +40,16 @@ def setup_module():
         c = db.cursor()
         c.execute("DELETE FROM grape_accounts WHERE username LIKE 'attr_%'")
         db.commit()
-    # 创建人（有映射）
+    # 创建人（有映射）——D105：grape_accounts 主键应用层 UUIDv7（lastrowid 对 UUID 主键失效）
+    from src.kernel.id_gen import uuid7_str
+    _uid_creator = uuid7_str()
+    _uid_default = uuid7_str()
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                  "VALUES ('attr_creator', NULL, ?, 'attr_creator', 1, 0)", (hash_password("x"),))
-        _uid_creator = c.lastrowid
-        c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
-                  "VALUES ('attr_default', NULL, ?, 'attr_default', 1, 0)", (hash_password("x"),))
-        _uid_default = c.lastrowid
+        c.execute("INSERT INTO grape_accounts (id, username, email, password_hash, nickname, status, token_version) "
+                  "VALUES (?, 'attr_creator', NULL, ?, 'attr_creator', 1, 0)", (_uid_creator, hash_password("x"),))
+        c.execute("INSERT INTO grape_accounts (id, username, email, password_hash, nickname, status, token_version) "
+                  "VALUES (?, 'attr_default', NULL, ?, 'attr_default', 1, 0)", (_uid_default, hash_password("x"),))
         # 创建人 gitcode/github 登录映射（与 _get_user_id_by_gitcode 一致：user_id>0 + grape_accounts 命中）
         c.execute("INSERT INTO unified_user_mapping (user_id, gitcode_user, github_login, updated_at) "
                   "VALUES (?, 'attr_creator', 'attr_creator', datetime('now'))", (_uid_creator,))
@@ -82,8 +83,8 @@ def test_QA01_create_passes_creator_user_id():
     """create_task_via_issue 以登录 user.id 建档 → 卡 user_id = 登录 id（不依赖字符串映射）。"""
     from src.api.issues_center import create_task_via_issue, TaskCreateBody, ensure_issue_task
     with patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
-         patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 1}), \
-         patch("src.api.deps.get_user_token_with_refresh", return_value="tok"), \
+         patch("src.api.issues_center._create_issue_unified", return_value={"number": 1}), \
+         patch("src.api.deps.get_user_token_for_repo", return_value="tok"), \
          patch("src.api.issues_center.ensure_issue_task", wraps=ensure_issue_task), \
          patch("src.api.issues_center._get_user_id_by_gitcode", return_value=None):  # 字符串映射失效
         import asyncio

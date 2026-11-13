@@ -44,6 +44,48 @@ def split_owner_repo(owner_repo: str) -> tuple[str, str]:
     return owner, repo
 
 
+def _catalog_providers() -> set[str]:
+    """平台前缀名单：数据驱动单一入口，禁止平台字面量枚举。
+
+    权威 = 平台卡注册表（configs/platforms/*.json + DB 卡，platform_card 统一
+    装载）；注册表导入失败时直接扫卡目录文件名兜底——与主路径同源同集
+    （对称，不会出现主路径可见、兜底不可见的 403），仍不引入字面量。
+    """
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        return {str(p).lower() for p in list_vcs_platforms() if p}
+    except Exception:
+        return _catalog_providers_from_dir()
+
+
+def _catalog_providers_from_dir() -> set[str]:
+    """卡目录兜底：configs/platforms/*.json 文件名即平台名（无字面量）。"""
+    try:
+        import os as _os
+        _dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                             "configs", "platforms")
+        return {f[:-len(".json")].lower() for f in _os.listdir(_dir) if f.endswith(".json")}
+    except Exception:
+        return set()
+
+
+def strip_provider_prefix(owner: str) -> str:
+    """剥离 owner 段的 provider 前缀（gitcode:/github:/gitee:…），URL/workspace 拼接用。
+
+    Issue #466：带前缀路径（/api/repos/gitcode:owner/repo、/api/git-repo/github:owner/repo）
+    的 owner path 段含前缀；token 解析需要带前缀 repo_key（幂等），但上游 URL /
+    clone_url / workspace 须用裸 owner。前缀集由 _catalog_providers 数据驱动派生
+    ——禁止平台字面量枚举（S85 全仓派生清零 / platform_whitelist_ratchet）。
+    未知前缀原样返回。
+    """
+    s = str(owner or "")
+    low = s.lower()
+    for p in _catalog_providers():
+        if low.startswith(f"{p}:"):
+            return s[len(p) + 1:]
+    return s
+
+
 def derive_repo_identity(repository: str = "", repo_key: str = "") -> tuple[str, str, str]:
     """由 REPO_FULL_NAME（repository）统一派生 (full_name, owner, name)。
 
@@ -59,7 +101,7 @@ def derive_repo_identity(repository: str = "", repo_key: str = "") -> tuple[str,
         nonlocal _log
         try:
             if _log is None:
-                from src.config import log as _log
+                from src.kernel.config import log as _log
             _log.warning(msg)
         except Exception:
             pass
@@ -113,8 +155,26 @@ def um_column_for_provider(provider: str) -> str:
     """根据 provider 字符串返回 unified_user_mapping 对应列名。
 
     gitcode → "gitcode_user"；github → "github_login"。
+    D39/S59：其余平台（gitee 等无 um 列）返回空串，调用方须跳过——
+    此前未知平台折叠 gitcode_user 会造成双向污染（绑定链把 gitee
+    登录名写进 gitcode_user、归属兜底跨平台同名误命中，FR-17.1 反例）。
     """
-    return "github_login" if provider == "github" else "gitcode_user"
+    return _UM_PROVIDER_COLUMNS.get(provider or "", "")
+
+
+# D39/S59：um 平台列白名单（存量列名；um 表退役归批次 1，新平台不再加列）
+_UM_PROVIDER_COLUMNS = {"gitcode": "gitcode_user", "github": "github_login"}
+
+# D44/S66：平台 login 与 grape 账号名**同源**的白名单（历史迁移形态：grape
+# 账号名即 gitcode 登录名）。同源平台的协作者 login 可直接写 um 平台列；
+# 异源平台（github login 是平台真名）必须按 login 解析 grape 账号（uid），
+# 只绑 IM 身份——FR-21.2 语义，白名单派生而非平台名 if 分支。
+_UM_LOGIN_IS_ACCOUNT = {"gitcode"}
+
+
+def um_login_is_grape_account(provider: str) -> bool:
+    """平台 login 是否与 grape 账号名同源（决定 um 写入策略，见上白名单注释）。"""
+    return (provider or "") in _UM_LOGIN_IS_ACCOUNT
 
 
 def um_column_for_repo(repo_key: str) -> str:
@@ -140,3 +200,103 @@ BASELINE_DESC_MAP = {
 # fallback：文件名不在 MAP 中时使用
 BASELINE_NAME_FALLBACK = "项目基线分析"
 BASELINE_DESC_FALLBACK = "VOD 基线分析自动生成"
+
+
+def repo_key_candidates(base: str) -> "list[str]":
+    """裸 repo_key 的跨平台前缀候选集（D16/S25，抽象解）。
+
+    候选集 = 全部平台卡 provider 前缀（含裸 key 本身），按"已有平台"派生，
+    不再硬编码 gitcode/github 双前缀——新平台（gitee 等）配置即加入候选，
+    check_repo_access / knowledge / chat 等跨平台解析统一走此函数。
+    """
+    if not base:
+        return []
+    cands = [base] if ":" not in base else [base]
+    stripped = base.split(":", 1)[-1]
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        providers = list_vcs_platforms()
+    except Exception:
+        # 卡目录不可用：退化到内核层前缀目录（card 注册表 → 卡目录文件名扫描），
+        # 仍不硬编码双平台；最坏情况只剩裸键自身（调用方按默认前缀处理）。
+        providers = sorted(_catalog_providers())
+    for p in sorted(providers):
+        _rk = f"{p}:{stripped}"
+        if _rk not in cands:
+            cands.append(_rk)
+    return cands
+
+
+def repo_key_in_params(repo: str) -> "tuple[str, tuple[str, ...]]":
+    """repo_key 候选集 IN 参数原子产物（S101/D76）：一次调用同时产出
+    (占位符串, 参数元组)——占位符数与参数数由同一构造保证，杜绝
+    36ca1cfb4 形态的"参数动态化、占位符半截工程"（两次独立调用之间
+    卡缓存 TTL 失效重载可致数量漂移）。
+
+    空候选集防御（恒假语义，非语法防御）：repo_key_candidates("") == []
+    → 返回 ("NULL", ())——IN (NULL) 三值逻辑恒 UNKNOWN，不匹配任何行，
+    优于 IN ('')（会误匹配 repo_key='' 的行）。注意与旧代码不等价：
+    旧形态空集生成 IN () 语法炸；本 helper 恒假，逐批替换站点需带
+    "空候选集不匹配任何行"用例。
+
+    已知边界（记档不阻塞）：调用点仍需自行拼 `IN (` + _ph + `)` 与列名/
+    表别名——这是灵活性（owner_id/repo_key/别名各异）与收敛度的折衷。
+
+    用法：
+        _ph, _args = repo_key_in_params(repo)
+        f"... WHERE repo_key IN ({_ph})", _args
+    """
+    _cands = tuple(repo_key_candidates(repo))
+    if not _cands:
+        return "NULL", ()
+    return ",".join("?" * len(_cands)), _cands
+
+
+def issue_web_url(repo_key: str, issue_number) -> str:
+    """issue 的平台 web 链接（D16/S26）：host/路径从平台卡方言派生，无平台分支。
+
+    gitlab 方言路径为 /-/issues/<n>，github 系为 /issues/<n>。
+    """
+    provider, owner, repo = parse_repo_key(repo_key)
+    host = _host_for_provider(provider)
+    seg = "-/issues" if _dialect_of(provider) == "gitlab" else "issues"
+    return f"https://{host}/{owner}/{repo}/{seg}/{issue_number}"
+
+
+def pr_web_url(repo_key: str, pr_number) -> str:
+    """PR 的平台 web 链接（D16/S26）：host 从平台卡派生；gitlab 方言用 merge_requests 路径。"""
+    provider, owner, repo = parse_repo_key(repo_key)
+    host = _host_for_provider(provider)
+    path = "merge_requests" if _dialect_of(provider) == "gitlab" else "pulls"
+    return f"https://{host}/{owner}/{repo}/{path}/{pr_number}"
+
+
+def _dialect_of(provider: str) -> str:
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None:
+            return card.dialect
+    except Exception:
+        pass
+    # D44/S65：方言回退=映射表（数据非分支）
+    return _DIALECT_FALLBACK.get(provider or "", "github")
+
+
+# D44/S65：无卡平台方言回退映射（存量双平台；新平台应有卡，不走此回退）
+_DIALECT_FALLBACK = {"github": "github", "gitlab": "gitlab"}
+
+
+def _host_for_provider(provider: str) -> str:
+    """host 统一来源：平台卡（缺省回退存量双平台映射）。"""
+    _legacy = {"gitcode": "gitcode.com", "github": "github.com", "gitlab": "gitlab.com"}
+    if provider in _legacy:
+        return _legacy[provider]
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None:
+            return card.host
+    except Exception:
+        pass
+    return "gitcode.com"

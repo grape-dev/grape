@@ -210,8 +210,12 @@ def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:
         rk = repo_key or ""
         keys = [rk]
         if ":" in rk:
-            prov, rest = rk.split(":", 1)
-            keys.append((f"github:{rest}" if prov == "gitcode" else f"gitcode:{rest}"))
+            # D16/S25：跨平台候选走统一函数（新平台自动正确）
+            from src.kernel.repo_key import repo_key_candidates
+            for _alt in repo_key_candidates(rk):
+                if _alt != rk:
+                    keys.append(_alt)
+                    break
         _num = str(issue_num).lstrip("#")
         gmap = _group_events_by_issue(keys)
         events = gmap.get(_num) or []

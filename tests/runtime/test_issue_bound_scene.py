@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import pytest  # noqa: E402
 from unittest.mock import patch, MagicMock  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 REPO = "gitcode:o/r681"
 
@@ -171,13 +171,13 @@ class TestPipelineRecommendEntry:
             })
             return None
 
-        from src.token_resolver import TokenResult
+        from src.kernel.token_resolver import TokenResult
         _sess = lambda rk: TokenResult(token="SESSION_PAT", level="session",
                                        provider=MagicMock(), repo_key=RK)
         return captured, [
             patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
-            patch("src.token_resolver.TokenResolver.resolve_config_level", side_effect=_sess),
-            patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor", return_value=True),
+            patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", side_effect=_sess),
+            patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor", return_value=True),
             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0),
             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
             patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),

@@ -16,17 +16,16 @@
 
 所有 DB 操作用 mock，不连真实数据库。
 """
+
 import json
+
 import os
+
 import sys
+
 from unittest.mock import patch, MagicMock
 
 import pytest
-
-
-# ===========================================================================
-# T8-01 ~ T8-03: get_repo_token_with_refresh B→A 演进兼容
-# ===========================================================================
 
 class TestBToACompatGetRepoTokenWithRefresh:
     """测试 B→A 演进兼容修复：路径 B 仓库跳过全局 bot token 层。
@@ -57,11 +56,6 @@ class TestBToACompatGetRepoTokenWithRefresh:
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "GLOBAL_BOT"
 
-
-# ===========================================================================
-# T8-04: get_repo_bot_token 路径 B 跳过全局 bot token
-# ===========================================================================
-
 class TestBToACompatGetRepoBotToken:
     """测试 get_repo_bot_token 路径 B 仓库跳过全局 bot token 层。"""
 
@@ -75,11 +69,6 @@ class TestBToACompatGetRepoBotToken:
             result = get_repo_bot_token("gitcode:owner/repo")
             assert result == "USER_TOKEN"
             assert result != "GLOBAL_BOT"
-
-
-# ===========================================================================
-# T8-05: get_github_token 路径 B 跳过全局 GitHub bot token
-# ===========================================================================
 
 class TestBToACompatGetGithubToken:
     """测试 get_github_token 路径 B 仓库跳过全局 GitHub bot token 层。"""
@@ -96,11 +85,6 @@ class TestBToACompatGetGithubToken:
             assert result == "GH_USER_TOKEN"
             assert result != "GH_GLOBAL_BOT"
 
-
-# ===========================================================================
-# T8-06: repair_host 后 bot_gitcode_token 被写入，第 2 步命中
-# ===========================================================================
-
 class TestBToAAfterRepair:
     """测试 repair_host 后路径 B 仓库自动切路径 A。"""
 
@@ -113,11 +97,6 @@ class TestBToAAfterRepair:
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
-
-
-# ===========================================================================
-# T8-07 ~ T8-09: save_config 触发自动升级
-# ===========================================================================
 
 class TestSaveConfigAutoUpgrade:
     """测试 save_config 在 bot token 从无到有时触发自动升级。"""
@@ -195,11 +174,6 @@ class TestSaveConfigAutoUpgrade:
             save_config({"gitcode_api_token": ""})
             mock_thread.assert_not_called()
 
-
-# ===========================================================================
-# T8-10 ~ T8-12: auto_upgrade_path_b_repos 逻辑
-# ===========================================================================
-
 class TestAutoUpgradePathBRepos:
     """测试 auto_upgrade_path_b_repos 遍历+升级逻辑。"""
 
@@ -226,7 +200,7 @@ class TestAutoUpgradePathBRepos:
             {"repo_key": "gitcode:owner/repo", "repo_owner": "owner", "repo_name": "repo", "host_user_id": 10}
         ]), \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-             patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN"), \
+             patch("src.api.deps.get_user_token_for", return_value="USER_TOKEN"), \
              patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(True, None)), \
              patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo"), \
              patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update, \
@@ -247,7 +221,7 @@ class TestAutoUpgradePathBRepos:
             {"repo_key": "gitcode:owner/repo", "repo_owner": "owner", "repo_name": "repo", "host_user_id": 10}
         ]), \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
-             patch("src.api.deps.get_user_token_with_refresh", return_value=""), \
+             patch("src.api.deps.get_user_token_for", return_value=""), \
              patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update, \
              patch("time.sleep"):
             # host token 过期返回空 → 跳过，不调 _update_repo_bot_token

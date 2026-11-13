@@ -1,18 +1,25 @@
 """Project Templates 路由：模板列表获取与一键创建"""
+
 import json, os, re, asyncio, base64
+
 from fastapi import APIRouter, HTTPException, Depends
+
 from pydantic import BaseModel
+
 from src.api.deps import require_no_session_token, require_org_member
+
 from src.kernel.config import log, CONFIG_DIR, EXAMPLE_DIR
+
 from src.domains.mgmt.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
-from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token, get_user_github_token_with_refresh
+
+# D3/S5：token 取用统一走 get_user_token_for（卡派生 provider），不再导入
+# K1 分叉包装器族（github 专用预刷新包装器等）——本文件 0 调用点，防符号回潮。
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
 
 _CONFIG_PATH = os.path.join(CONFIG_DIR, "project-templates.json")
 
 _REPO_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
-
 
 def _load_templates() -> dict:
     """读取 configs/project-templates.json，非法/缺失返回空结构"""
@@ -27,7 +34,6 @@ def _load_templates() -> dict:
         log.warning(f"Failed to load project-templates.json: {e}")
         return {"categories": []}
 
-
 def _find_template(template_id: str) -> dict | None:
     """在配置中按 template_id 查找模板（含其分类 scene_id 上下文）"""
     for cat in _load_templates().get("categories", []):
@@ -38,27 +44,17 @@ def _find_template(template_id: str) -> dict | None:
                 return ctx
     return None
 
-
 def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
     """Read global bot config, return (bot_token, bot_username). Token and username
     are both selected by provider.
 
     Issue #345: Use unified DB entry (DB-first with file fallback).
+    D44/S66：统一走来源链（get_global_bot_token_for / resolve_bot_username，
+    meta key + 卡 bot_identity 派生），无平台名分支。
     """
-    from src.domains.mgmt.user.db import (
-        get_global_gitcode_bot_token,
-        get_global_github_bot_token,
-        get_global_bot_usernames,
-        get_global_github_bot_username,
-    )
-    if provider == "github":
-        bot_token = get_global_github_bot_token()
-        bot_username = get_global_github_bot_username()
-    else:
-        bot_token = get_global_gitcode_bot_token()
-        us = get_global_bot_usernames()
-        bot_username = us[0] if us else ""
-    return bot_token, bot_username
+    from src.domains.mgmt.user.db import get_global_bot_token_for
+    from src.domains.mgmt.user.repo_manager import resolve_bot_username
+    return get_global_bot_token_for(provider), resolve_bot_username(provider)
 
 
 @router.get("", operation_id="project_templates_list", summary="List template categories", description="Lists configured template categories and templates.")
@@ -66,7 +62,6 @@ def list_templates(user: dict = Depends(require_no_session_token)):
     """返回配置化的模板分类与模板列表"""
     data = _load_templates()
     return {"categories": data.get("categories", [])}
-
 
 @router.get("/{template_id}/readme", operation_id="project_template_readme", summary="Get template README", description="Gets template README (local preferred; git sources fetched from GitCode/GitHub).")
 def get_template_readme(template_id: str, user: dict = Depends(require_no_session_token)):
@@ -87,45 +82,28 @@ def get_template_readme(template_id: str, user: dict = Depends(require_no_sessio
                 log.warning(f"read local readme failed: {e}")
         return {"content": "", "source": "local"}
 
-    # 2. git 来源：从 GitCode/GitHub API 拉取
+    # 2. git 来源：统一命令层拉取（D44/S66：方言模板按卡，无平台名分支）
     source_repo = tpl.get("source_repo", "")
     source_platform = tpl.get("source_platform", "gitcode")
     if not source_repo:
         return {"content": "", "source": "git"}
 
     try:
-        import requests
-        if source_platform == "github":
-            url = f"https://api.github.com/repos/{source_repo}/readme"
-            headers = {"Accept": "application/vnd.github.v3+json"}
-            github_token = os.environ.get("GITHUB_TOKEN", "")
-            if github_token:
-                headers["Authorization"] = f"token {github_token}"
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
-                return {"content": content, "source": "github"}
-        else:
-            url = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
-            gitcode_pat = os.environ.get("GITCODE_PAT", "")
-            headers = {}
-            if gitcode_pat:
-                headers["PRIVATE-TOKEN"] = gitcode_pat
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
-                return {"content": content, "source": "gitcode"}
-            # 尝试小写 readme.md
-            url2 = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/readme.md"
-            r2 = requests.get(url2, headers=headers, timeout=10)
-            if r2.status_code == 200:
-                content = base64.b64decode(r2.json().get("content", "")).decode("utf-8")
-                return {"content": content, "source": "gitcode"}
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        _card = get_platform_card(source_platform)
+        # token 走平台卡用户级 env（空=匿名拉取，公开仓库仍可用）
+        _token = os.environ.get(_card.user_token_env_name(), "") if _card else ""
+        _owner, _name = source_repo.split("/", 1) if "/" in source_repo else ("", "")
+        if not _owner or not _name:
+            return {"content": "", "source": "git"}
+        data = VcsApiClient(source_platform, _token, _owner, _name).get_readme()
+        if data.get("content"):
+            return {"content": data["content"], "source": source_platform}
     except Exception as e:
         log.warning(f"fetch readme for {template_id} failed: {e}")
 
     return {"content": "", "source": "git"}
-
 
 @router.get("/{template_id}/preview", operation_id="project_template_preview", summary="Get template preview HTML", description="Gets template preview HTML (local template reads examples/{id}/preview.html).")
 def get_template_preview(template_id: str, user: dict = Depends(require_no_session_token)):
@@ -146,12 +124,44 @@ def get_template_preview(template_id: str, user: dict = Depends(require_no_sessi
 
     return {"content": "", "source": "none"}
 
-
 class CreateTemplateRequest(BaseModel):
     template_id: str
     repo_name: str = ""
-    provider: str = ""  # gitcode | github，空时自动选择
+    provider: str = ""  # 平台卡 provider（gitcode/gitee/gitlab/…），空时按卡目录 ∩ 已绑定平台自动选
 
+
+def _pick_platform_token(user: dict) -> tuple[str, str]:
+    """卡目录 ∩ 用户已绑定平台 → (provider, token)；无可用返回 ("", "")。
+
+    - 平台集合唯一权威 = 仓库平台卡目录（list_vcs_platforms）；
+    - 候选 = 用户 external_identities 已绑定平台（PAT-only 绑定同样在册）；
+    - 优先 login_provider 命中的平台，其余按卡目录顺序；
+    - token 统一走 get_user_token_for（provider 传参，PAT > OAuth）。
+    """
+    from src.api.deps import get_user_token_for
+    from src.domains.mgmt.auth.grape_account_db import get_user_identities
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+    _uid = str(user.get("id") or "")
+    _uname = user.get("username") or ""
+    try:
+        _catalog = list(_lvp())
+    except Exception:
+        _catalog = []
+    try:
+        _bound = {i.get("provider") for i in (get_user_identities(_uid) or []) if i.get("provider")}
+    except Exception:
+        _bound = set()
+    _login = (user.get("login_provider") or "").strip()
+    _ordered = [p for p in _catalog if p in _bound]
+    _ordered.sort(key=lambda p: 0 if p == _login else 1)  # 稳定排序：login_provider 优先
+    for _p in _ordered:
+        try:
+            _tok = get_user_token_for(_uname, user_id=_uid, provider=_p)
+        except Exception:
+            _tok = ""
+        if _tok:
+            return _p, _tok
+    return "", ""
 
 @router.post("/create", operation_id="project_template_create", summary="Create project from template", description="One-shot create: create repo -> write template code -> auto-host -> apply dev scene.")
 async def create_from_template(body: CreateTemplateRequest,
@@ -163,17 +173,25 @@ async def create_from_template(body: CreateTemplateRequest,
     tpl = ctx["template"]
 
     # 按 provider 分流：前端显式传 provider 时用指定平台，否则自动选择
-    from src.domains.mgmt.routes.repos import _get_user_provider_and_token
-    if body.provider in ("gitcode", "github"):
-        if body.provider == "gitcode":
-            api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-        else:
-            api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+    # D88/S115：卡在册即走显式平台（消基线白名单二元分叉 in ("gitcode","github")——
+    # D71 登记收口项）。下游全链路已卡驱动：建仓/身份（create_provider 卡工厂）、
+    # 模板 push（S90 卡派生 host）、bot 配置（卡派生 meta key）、host_repo 托管。
+    from src.domains.runtime.vcs.platform_card import get_platform_card as _gate_card
+    if body.provider and _gate_card(body.provider) is not None:
+        # D44/S66：显式平台 token 统一走 D3 入口（provider 传参，无平台名分支）
         provider = body.provider
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""), provider=provider)
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
     else:
-        provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
+        # 卡目录 ∩ 用户已绑定平台（尊重 login_provider）——平台卡在册即可选，
+        # 不再用存量双平台分支函数（gitee/gitlab 单绑定用户此前恒 400）
+        provider, api_token = _pick_platform_token(user)
+        if not provider:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": "当前账号没有可用的仓库平台：请先在「设置 → 凭据」绑定平台（GitCode/GitHub/Gitee/GitLab 等）并配置访问令牌",
+            })
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
@@ -185,18 +203,14 @@ async def create_from_template(body: CreateTemplateRequest,
     #    继续走 push + 托管流程（空仓库可复用；非空仓库 push 冲突时再报错）
     repo_created = False
     try:
-        if provider == "github":
-            from src.domains.mgmt.user.repo_manager import get_user_github_login, create_github_repo
-            owner_login = get_user_github_login(api_token)
-            if not owner_login:
-                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前 GitHub 用户身份"})
-            create_github_repo(api_token, repo_name, description=tpl.get("description", ""))
-        else:
-            gitcode_login = get_user_gitcode_login(api_token)
-            if not gitcode_login:
-                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-            owner_login = gitcode_login
-            create_repo(api_token, repo_name, description=tpl.get("description", ""))
+        # D44/S66：建仓+取 login 统一走适配器端口（存量平台子类委托原实现，
+        # config-only 平台卡驱动自动正确，无平台名分支）
+        from src.kernel.token_resolver import create_provider
+        _prov_adapter = create_provider(provider)
+        owner_login = _prov_adapter.get_user_login(api_token)
+        if not owner_login:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法获取当前 {provider} 用户身份"})
+        _prov_adapter.create_repo(api_token, repo_name, description=tpl.get("description", ""))
         repo_created = True
     except HTTPException:
         raise
@@ -210,6 +224,15 @@ async def create_from_template(body: CreateTemplateRequest,
 
     full_name = f"{owner_login}/{repo_name}"
 
+    # 建仓/复用成功后、push 模板代码与 host 之前立刻失效 user_repos 缓存：
+    # 新仓库需马上进入「未托管」栏（即便后续 push/host 失败，仓库已真实存在，
+    # 也保证可见、可手动处理）。
+    try:
+        from src.domains.mgmt.user import db as _user_db
+        _user_db.invalidate_user_repos(user.get("id", 0))
+    except Exception as _inv_e:
+        log.warning(f"create_from_template: invalidate user_repos failed: {_inv_e}")
+
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
     try:
         bot_token, _ = _load_global_bot_config(provider=provider)
@@ -217,7 +240,8 @@ async def create_from_template(body: CreateTemplateRequest,
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None,
             functools.partial(push_template_to_repo, tpl, owner_login, repo_name,
-                              api_token, bot_token=bot_token, provider=provider))
+                              api_token, bot_token=bot_token, provider=provider,
+                              user_id=user.get("id", "") or ""))
     except Exception as e:
         log.warning(f"template push failed: {e}")
         if not repo_created:
@@ -289,12 +313,7 @@ async def create_from_template(body: CreateTemplateRequest,
         tpl_scene_id = tpl.get("scene_id") or ctx.get("scene_id") or ""
         if tpl_scene_id and tpl_scene_id != "default":
             try:
-                from src.api.pipeline_config import apply_market_scene_by_name
-                apply_market_scene_by_name(repo_key, tpl_scene_id, user.get("id", 0))
-                # 写入 managed_repos.dev_scene，供 onboarding 读取并绑定到 Issue
-                from src.domains.mgmt.user.db import set_repo_scene
-                set_repo_scene(repo_key, tpl_scene_id)
-                log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key} (dev_scene updated)")
+                _apply_template_scene(repo_key, tpl_scene_id, str(user.get("id") or ""))
             except Exception as e:
                 log.warning(f"template scene override failed for '{tpl_scene_id}': {e}")
 
@@ -309,3 +328,30 @@ async def create_from_template(body: CreateTemplateRequest,
             "provider": provider,
             "scene_id": tpl.get("scene_id") or ctx.get("scene_id") or "",
             "repo_key": _to_rk(full_name, provider=provider) if provider else ""}
+
+import json, os, re, asyncio
+
+from src.domains.mgmt.user.repo_manager import push_template_to_repo
+
+from src.api.deps import get_user_token_for
+
+def _apply_template_scene(repo_key: str, tpl_scene_id: str, user_id: str = "") -> str:
+    """把模板自带场景应用到仓库并写 managed_repos.dev_scene，返回仓内副本真实 scene_id。
+
+    Issue #541：dev_scene 必须写 apply_market_scene_by_name 回传的真实 ID
+    （custom-{uuid}），不能再写模板场景名——否则 onboarding Issue 绑定到
+    仓内不存在的场景，派发侧回退全局模板行（无引擎）→ SRE 派发失败。
+    应用失败（模板名查不到/应用被拒）返回空串并保留托管时已应用的默认场景。
+    """
+    from src.api.pipeline_config import apply_market_scene_by_name
+    real_scene_id = apply_market_scene_by_name(repo_key, tpl_scene_id, user_id) or ""
+    if not real_scene_id:
+        log.warning(f"template scene override: apply '{tpl_scene_id}' to {repo_key} failed, "
+                    f"keep default scene")
+        return ""
+    # 写入 managed_repos.dev_scene，供 onboarding 读取并绑定到 Issue
+    from src.domains.mgmt.user.db import set_repo_scene
+    set_repo_scene(repo_key, real_scene_id)
+    log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key} "
+             f"(dev_scene={real_scene_id})")
+    return real_scene_id

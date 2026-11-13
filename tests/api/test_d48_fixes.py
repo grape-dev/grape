@@ -120,7 +120,8 @@ class TestAdminCannotDisableSelf:
         mock_get.return_value = {"id": 1, "username": "admin", "email": "admin@test.com"}
         r = client.post("/api/admin/users/1/disable", json={"reason": "test"})
         assert r.status_code == 400
-        assert "不可禁用自己的账号" in r.json()["detail"]["message"]
+        assert "不可禁用自己的账号" in r.json()["detail"]["message"] or \
+               "Cannot disable your own account" in r.json()["detail"]["message"]  # i18n 双语兼容
         assert not mock_disable.called
 
     @patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id")

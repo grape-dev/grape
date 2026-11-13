@@ -23,7 +23,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 
 def _empty_created_by_rows(repo_key: str = "", limit: int = 0) -> list[dict]:
@@ -45,7 +45,7 @@ def _empty_created_by_rows(repo_key: str = "", limit: int = 0) -> list[dict]:
 
 def _resolve_creator(repo_key: str, issue_number: int) -> str:
     """经 VCS issue 详情读创建人 login；无法核实返回空串。"""
-    from src.api.event_pipeline import fetch_issue_via_vcs
+    from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
     try:
         state, data = fetch_issue_via_vcs(repo_key, issue_number)
     except Exception:

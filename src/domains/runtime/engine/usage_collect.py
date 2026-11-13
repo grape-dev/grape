@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -97,6 +98,124 @@ def _sum_tokens(row: Dict[str, Any]) -> int:
 
 # ---------------------------------------------------------------- 采集器
 
+def _aishell_sessions_dir_key(cwd: str) -> str:
+    """QA #1230 R1：cwd → ~/.aishell/sessions 目录键（'/' ':' '\\' 折叠为 '-'）。
+
+    例：/tmp → --tmp--；C:\\Users\\dev → --C-Users-dev--（引擎侧 ':\\' 折叠为
+    单个 '-'，QA 纯字符串复现实证）。纯字符串逻辑，用例锁死该规则。
+    """
+    return "--" + re.sub(r"[:/\\]+", "-", cwd.strip("/\\")).strip("-") + "--"
+
+
+def _aishell_records_so_far(cwd: str, session_id: str) -> int:
+    """M1 水位：会话文件当前已存在的 usage 记录条数（新文件/解析失败=0）。"""
+    try:
+        return len(parse_aishell_session_usage(cwd, session_id))
+    except Exception:
+        return 0
+
+
+def parse_aishell_session_usage(cwd: str, session_id: str,
+                                   sessions_root: str = "") -> List[Dict[str, Any]]:
+    """二期解析轨：解析 aishell(dsh) 会话账本 session.v4.jsonl.zstd 的 token 记录。
+
+    落盘路径（实测）：~/.aishell/sessions/--<cwd 每个路径分隔符转 '-' -->--/<sessionId>/
+    session.v4.jsonl.zstd；token 记录内嵌于 assistant/message 事件的模型响应
+    replayState（字段 inputTokens/outputTokens/totalTokens/cacheReadTokens，实测样本
+    issue #16 vod 会话）。每任务独立会话文件——无需基线/watermark，全量解析即本次任务用量。
+
+    zstd 三级依赖（设计 spec §5）：zstandard 包 → zstd CLI → 两者皆缺=显式缺口
+    （log.warning + 返回 []，不假装通过）。
+    fail-open：文件不存在（任务未产生模型步）、行 JSON 漂移、解码异常——跳过/返回 []，
+    不炸采集链。
+    Windows 转义形态（:、\、/ 折叠为 '-'）按设计文档 §270 口径实现并由纯字符串用例锁死。
+    """
+    if not cwd or not session_id:
+        return []
+    import os as _os
+    home = sessions_root or _os.path.expanduser("~/.aishell/sessions")
+    # 目录键规则（实测 ~/.aishell/sessions 样本 + QA #1230 R1 纯字符串推导实锤）：
+    # '--' + 去首尾分隔符、'/' ':' '\\' 全部折叠为 '-' + '--'
+    # 例：/tmp → --tmp--；/home/dev/project → --home-dev-project--；
+    #     C:\Users\dev\AppData\Local\Temp\task-1 → --C-Users-dev-AppData-Local-Temp-task-1--
+    #     （引擎侧 ':\' 折叠为单个 '-'——旧两候选分别残留 ':' 或 '\' 均不命中，
+    #      Windows worker 账本恒空且静默，R1 已由 QA 字符串复现实证）
+    dir_key = _aishell_sessions_dir_key(cwd)
+    path = _os.path.join(home, dir_key, session_id, "session.v4.jsonl.zstd")
+    if not _os.path.isfile(path):
+        return []  # 任务未产生会话文件（未跑模型步）——正常空
+    data = None
+    # 三级依赖：zstandard 包
+    try:
+        import zstandard
+        with open(path, "rb") as fh:
+            # stream_reader 借用 fh（closefd 行为不保证）——显式 with 兜底释放，
+            # 防每任务一泄漏累积成 EMFILE（#1982 同族风险面）
+            data = zstandard.ZstdDecompressor().stream_reader(fh).read()
+    except ImportError:
+        pass
+    except Exception as e:
+        log.warning(f"usage_collect: zstandard read failed ({path}): {e}")
+        return []
+    if data is None:
+        # 二级：zstd CLI
+        import subprocess as _sp
+        try:
+            # timeout=30：CLI 解压预算对齐仓内既有 subprocess 读取先例（repogit.py:79
+            # / agent.py:2097 / event_pipeline.py:4173 均为 timeout=30）——会话文件
+            # <1MB，正常 <1s，30s 仅兜底 NFS/冷盘极端场景
+            zcli = _sp.run(["zstd", "-dc", path], capture_output=True, timeout=30)
+        except (FileNotFoundError, _sp.SubprocessError) as _cli_e:
+            # I-1：zstandard 包缺失且系统无 zstd CLI——依赖缺失是关键诊断信息，
+            # 专用告警（避免被 finish() 通用 except 折叠成一条 "finish failed"）
+            log.warning("usage_collect: no zstd backend available (zstandard pkg "
+                        "missing, 'zstd' CLI unavailable: %s) — aishell-dsh usage "
+                        "gap is explicit, install one of them to enable the parse "
+                        "track" % _cli_e)
+            return []
+        if zcli.returncode != 0:
+            log.warning("usage_collect: no zstd backend (zstandard pkg missing and "
+                        "'zstd' CLI failed rc=%d) — aishell-dsh usage gap is explicit" % zcli.returncode)
+            return []
+        data = zcli.stdout
+    try:
+        text = data.decode("utf-8", "replace")
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+
+    def _walk(o):
+        """递归提取含 inputTokens 的 usage dict（v4 事件嵌套深，通用提取防漂移）。"""
+        if isinstance(o, dict):
+            if isinstance(o.get("inputTokens"), (int, float)) or isinstance(o.get("outputTokens"), (int, float)):
+                try:
+                    inp = int(o.get("inputTokens", 0) or 0)
+                    otp = int(o.get("outputTokens", 0) or 0)
+                    tot = int(o.get("totalTokens", 0) or 0) or (inp + otp)
+                    out.append({"input": inp, "output": otp,
+                                "cache_read": int(o.get("cacheReadTokens", 0) or 0),
+                                "total": tot})
+                except (TypeError, ValueError):
+                    pass
+                return
+            for v in o.values():
+                _walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                _walk(v)
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            _walk(json.loads(line))
+        except Exception:
+            continue  # v4 行漂移：fail-open 跳行
+    return out
+
+
 class UsageCollector:
     """任务级用量采集器:start() 记基线 → 执行 → finish() 取本次增量。
 
@@ -123,11 +242,11 @@ class UsageCollector:
         self._started = True
         try:
             if self.engine == "aishell-dsh":
-                # aishell-dsh 一期无 token 账本（协议面 usage_update 仅上下文占用；
-                # token 在 session.v4.jsonl.zstd，二期解析轨接入）。显式缺口：
-                # 不落基线、不误入 hwcloud/aishell 别名分支。
-                log.info("usage_collect: aishell-dsh token billing lands in phase 2 "
-                         "(session.v4.jsonl.zstd parse); gap is explicit, not silent")
+                # M1（QA #1230）：resume 复用同一 session_id 时全量解析会重复计入
+                # 历史轮次——start 记水位（会话文件已存在的记录条数），finish 只
+                # 解析水位之后部分（对齐 hwcloud 按字节偏移的先例）。新会话文件
+                # 不存在时水位为 0（全量即增量，行为不变）。
+                self._baseline = {"aishell_dsh_records": _aishell_records_so_far(self.cwd, self.session_id)}
                 return
             if self.engine == "hermes":
                 self._baseline = {"hermes": self._hermes_snapshot()}
@@ -141,11 +260,22 @@ class UsageCollector:
             self._baseline = {}
 
     def feed(self, evt_type: str, data: Any) -> None:
-        """流式引擎(codex)在事件循环里喂事件。"""
-        if evt_type != "step_finish" or not isinstance(data, dict):
-            return
-        usage = data.get("usage")
-        if not isinstance(usage, dict):
+        """流式引擎(codex / atomcode)在事件循环里喂事件。
+
+        两种入口（issue #727 起统一入 `_fed`）：
+        - codex：`step_finish` 事件携带 `usage` 拆分 dict；
+        - atomcode：独立 `("usage", {...})` 事件——每轮用量直报，
+          与 hermes 的 PromptResponse 直报同口径。
+        """
+        if evt_type == "usage":
+            if not isinstance(data, dict):
+                return
+            usage = data
+        elif evt_type == "step_finish" and isinstance(data, dict):
+            usage = data.get("usage")
+            if not isinstance(usage, dict):
+                return
+        else:
             return
         self._turn += 1
         rec = dict(usage)
@@ -162,11 +292,12 @@ class UsageCollector:
             self.session_id = session_id
         try:
             if self.engine == "aishell-dsh":
-                # 一期显式缺口：不误入 hwcloud/aishell 别名分支（防归因混账），
-                # token 解析轨二期接入（session.v4.jsonl.zstd，方案已定见设计 spec §5）
-                log.info("usage_collect: aishell-dsh usage gap (phase 2 will parse session file)")
-                return []
-            if self.engine == "codex":
+                # 二期解析轨：session.v4.jsonl.zstd 全量解析（zstd 三级依赖 + fail-open），
+                # resume 场景按 start() 水位截取增量（M1）
+                recs = parse_aishell_session_usage(self.cwd, self.session_id)
+                _skip = int((self._baseline or {}).get("aishell_dsh_records") or 0)
+                return recs[_skip:] if _skip > 0 else recs
+            if self.engine in ("codex", "atomcode"):
                 return self._fed
             if self.engine == "opencode":
                 return self._opencode_usage()

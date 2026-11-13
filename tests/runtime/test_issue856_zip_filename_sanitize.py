@@ -73,7 +73,7 @@ def wdb(tmp_path, monkeypatch):
     sqlite3_conn.commit()
     db_obj = _DB(sqlite3_conn)
     db_lock = threading.Lock()
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     import src.domains.mgmt.user.db as user_db
     monkeypatch.setattr(sm, "db", db_obj)
     monkeypatch.setattr(sm, "db_lock", db_lock)

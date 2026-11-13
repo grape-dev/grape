@@ -6,6 +6,7 @@
 - pre-upload: 创建需求前临时附件（Web 会话）
 - close / mine / 用户操作类均已移除或迁 /api/issues（见 tasks-issues-api-rebound-design.md）
 """
+from src.kernel.user_ids import has_user_id
 import asyncio
 import os
 from datetime import datetime
@@ -123,7 +124,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
     # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
-    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
+    user_id = owner_user_id if has_user_id(owner_user_id) else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
@@ -172,8 +173,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 pass
             # 归属校准：现有值为 0 或「默认/承载账号」且与解析值不一致 → 校准（issue-card-owner-attribution-fix-design.md）
             _DEFAULT_OWNER_UID = 1
-            if (user_id > 0 and _existing_user_id in (0, _DEFAULT_OWNER_UID)
-                    and _existing_user_id != user_id):
+            if (has_user_id(user_id) and str(_existing_user_id) in ("0", str(_DEFAULT_OWNER_UID))
+                    and str(_existing_user_id) != str(user_id)):
                 c.execute("UPDATE issue SET user_id=? WHERE id=?", (user_id, task_id))
             if target and target != _existing_assignee:
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
@@ -200,7 +201,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = c.lastrowid
             linked = None
     # 「去对话」配套：user_id>0 且未关联对话时创建/复用 Issue 会话
-    if user_id > 0 and not linked:
+    if has_user_id(user_id) and not linked:
         try:
             conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, description)
             if conv_id:
@@ -211,6 +212,14 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         except Exception as e:
             log.warning(f"ensure_issue_task conversation link failed: {e}")
     return task_id
+
+
+def _feishu_api_for_ctx(ctx):
+    """按 ctx 的 app_id 取 FeishuAsync（旧 IM 下线 A2 M2：不再依赖 BotManager.api）。"""
+    if not ctx:
+        return None
+    from src.domains.runtime.im.engine_wiring import feishu_api
+    return feishu_api(getattr(ctx, "app_id", "") or "")
 
 
 @router.post("/notify", operation_id="tasks_notify", summary="Task assign/notify (Agent runtime)", description="Called by issue agents after assign/reassign/takeover: creates a task, refreshes the assignee, writes the conversation and sends static template + Feishu notifications. Session-only (tk_), repo scope must match.")
@@ -273,14 +282,12 @@ async def notify_task(body: TaskNotifyBody, request: Request,
     if not open_id:
         log.warning(f"Task notify: assignee={body.assignee} 无飞书 open_id（unified_user_mapping.feishu_open_id 为空），跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
     cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
-    from src.api import main as api_main
-    bm = api_main.bot_manager
     # open_id 为 app 级（feishu-app-scoped-openid-fix.md）：必须用**用户本人 chat bot** 发送，
     # 否则命名空间不匹配 → send_card_to_user 静默失败。用户未配置本人 bot → 不通知（不回落其它 bot）。
-    ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
+    ctx = _resolve_user_chat_bot(None, user_id)
     if not ctx:
         log.warning(f"Task notify: assignee={body.assignee} 未配置本人 chat bot，跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
-    api = bm.api if bm else None
+    api = _feishu_api_for_ctx(ctx)
     asyncio.create_task(_run_notify(ctx, api, user_id, conv_id, open_id,
                                     body.task_description, body.repo_key, body.issue_number, cfg))
 
@@ -457,23 +464,22 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
             task["latest_event"] = evs[-1] if evs else None
             from src.api.session_store import get_issue_stage
             st = get_issue_stage(_repo, f"#{_num}")
-            _host = "github.com" if _repo.startswith("github:") else "gitcode.com"
-            from src.kernel.repo_key import split_owner_repo
-            _owner, _rname = split_owner_repo(_repo)
+            # 平台 host/路径段按卡方言派生（issue_web_url 单源），不再 host 二分
+            from src.kernel.repo_key import issue_web_url
             with db_lock:
                 c2 = db.cursor()
                 c2.execute("SELECT id, issue_number, title, assignee, status "
-                           "FROM issue WHERE repo_key=? AND issue_number=?", (_repo, int(_num)))
+                           "FROM issue WHERE repo_key=? AND issue_number=?", (_repo, _num))  # D105 字符串 ident 透传
                 ir = c2.fetchone()
             task["issue"] = {
                 "id": ir[0] if ir else None,
-                "issue_number": ir[1] if ir else int(_num),
+                "issue_number": ir[1] if ir else _num,
                 "title": ir[2] if ir else "",
                 "assignee": ir[3] if ir else (st or {}).get("assignee", ""),
                 "stage": (st or {}).get("stage", "vod"),
                 "status": ir[4] if ir else "",
                 "scene_id": (st or {}).get("scene_id", ""),
-                "url": f"https://{_host}/{_owner}/{_rname}/issues/{_num}",
+                "url": issue_web_url(_repo, _num),
             }
         except Exception as _e:
             from src.kernel.config import log

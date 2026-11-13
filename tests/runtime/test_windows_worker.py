@@ -276,13 +276,13 @@ class TestInstallPs1Endpoint:
 
     def test_install_ps1_script_exists(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "install-worker.ps1"
         )
         assert os.path.isfile(script_path), "install-worker.ps1 not found"
 
     def test_install_ps1_contains_param_block(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "install-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -291,7 +291,7 @@ class TestInstallPs1Endpoint:
 
     def test_install_ps1_contains_download_logic(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "install-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -299,7 +299,7 @@ class TestInstallPs1Endpoint:
 
     def test_install_ps1_contains_venv_creation(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "install-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -307,7 +307,7 @@ class TestInstallPs1Endpoint:
 
     def test_install_ps1_contains_config_writing(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "install-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -316,7 +316,7 @@ class TestInstallPs1Endpoint:
 
     def test_install_ps1_contains_sandbox_degradation_notice(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "install-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -324,13 +324,13 @@ class TestInstallPs1Endpoint:
 
     def test_start_worker_ps1_exists(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "start-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "start-worker.ps1"
         )
         assert os.path.isfile(script_path), "start-worker.ps1 not found"
 
     def test_start_worker_ps1_contains_daemon_loop(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "start-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "start-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -339,7 +339,7 @@ class TestInstallPs1Endpoint:
 
     def test_start_worker_ps1_contains_env_loading(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "start-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "start-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -347,7 +347,7 @@ class TestInstallPs1Endpoint:
 
     def test_start_worker_ps1_uses_windows_python_path(self):
         script_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "scripts", "start-worker.ps1"
+            os.path.dirname(__file__), "..", "..", "..", "scripts", "start-worker.ps1"
         )
         with open(script_path, "r", encoding="utf-8") as f:
             content = f.read()

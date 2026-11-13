@@ -136,7 +136,7 @@ def list_grape_users(page: int = 1, per_page: int = 20, q: str = "") -> dict:
     }
 
 
-def get_grape_user_detail(user_id: int) -> dict | None:
+def get_grape_user_detail(user_id: str) -> dict | None:
     """获取用户详情（含绑定信息和是否有密码）。"""
     from src.kernel.session_manager import db, db_lock
     from src.domains.mgmt.auth.grape_account_db import get_user_identities, has_password
@@ -167,7 +167,7 @@ def get_grape_user_detail(user_id: int) -> dict | None:
     }
 
 
-def disable_grape_user(user_id: int, reason: str = "") -> bool:
+def disable_grape_user(user_id: str, reason: str = "") -> bool:
     """禁用用户（status=0）。"""
     from src.kernel.session_manager import db, db_lock
     try:
@@ -186,7 +186,7 @@ def disable_grape_user(user_id: int, reason: str = "") -> bool:
         return False
 
 
-def restore_grape_user(user_id: int) -> bool:
+def restore_grape_user(user_id: str) -> bool:
     """恢复用户（status=0 禁用 或 status=3 冷静期 → status=1）。"""
     from src.kernel.session_manager import db, db_lock
     try:
@@ -263,37 +263,68 @@ def delete_signup_whitelist(item_id: int) -> bool:
 # ===== OAuth Login Whitelist CRUD (Issue #332) =====
 
 def list_login_whitelist() -> list[dict]:
-    """List OAuth login whitelist entries."""
+    """List OAuth login whitelist entries.
+
+    2026-11-12 行式化（weekly-11）：统一行形态条目——新模式行直接返回
+    (provider, username)；老列式行按 f"{provider}_username" 规律展开成条目
+    （legacy=true 标记，供前端展示与删除路由按 provider 清列）。
+    新增渠道零 DDL 零卡字段，条目自动出现。
+    """
     try:
         with db_lock:
             c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
+            whitelist_cols = [col for col in cols
+                              if col.endswith("_username") and col != "id"]
+            has_row_cols = {"provider", "username"} <= set(cols)
+            select_parts = ["id"] + (["provider", "username"] if has_row_cols else []) \
+                + whitelist_cols + ["remark", "created_at"]
             c.execute(
-                "SELECT id, gitcode_username, github_username, remark, created_at "
-                "FROM login_whitelist ORDER BY created_at DESC"
+                f"SELECT {', '.join(select_parts)} FROM login_whitelist ORDER BY created_at DESC"
             )
             rows = c.fetchall()
     except Exception as e:
         log.warning(f"List login whitelist failed: {e}")
         return []
-    return [
-        {"id": r[0], "gitcode_username": r[1] or "", "github_username": r[2] or "",
-         "remark": r[3] or "", "created_at": r[4] or ""}
-        for r in rows
-    ]
+    out = []
+    for r in rows:
+        item_id, remark, created_at = r[0], r[-2] or "", r[-1] or ""
+        legacy_start = 1
+        prov, uname = "", ""
+        if has_row_cols:
+            prov, uname = r[1], r[2]
+            legacy_start = 3
+            # 新模式行
+            if prov:
+                out.append({"id": item_id, "provider": prov, "username": uname or "",
+                            "remark": remark, "created_at": created_at,
+                            "legacy": False})
+        # 老列式行展开（每列非空值一条）
+        for i, col in enumerate(whitelist_cols, start=legacy_start):
+            val = r[i] or ""
+            if val:
+                out.append({"id": item_id, "provider": col[:-len("_username")],
+                            "username": val, "remark": remark,
+                            "created_at": created_at, "legacy": True})
+    return out
 
 
+# 2026-11-12 行式化（weekly-11）：_whitelist_column_for 退役——列名派生已内联到
+# 各调用点（is_user_allowed 老列兜底 / delete 清列），渠道卡 whitelist_column 字段删除。
 def add_login_whitelist(provider: str, username: str, remark: str = "") -> bool:
     """Add OAuth login whitelist entry.
 
-    provider: 'gitcode' or 'github'
+    2026-11-12 行式化（weekly-11）：只写新模式行 (provider, username)，
+    永不写老列（老列=存量只读兜底）。provider 合法性（渠道目录在册）由
+    路由层校验；幂等性由部分唯一索引 uq_login_whitelist_row 保证
+    （INSERT OR IGNORE + rowcount）。
     """
-    col = "gitcode_username" if provider == "gitcode" else "github_username"
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                f"INSERT OR IGNORE INTO login_whitelist ({col}, remark) VALUES (?, ?)",
-                (username, remark),
+                "INSERT OR IGNORE INTO login_whitelist (provider, username, remark) VALUES (?, ?, ?)",
+                (provider, username, remark),
             )
             db.commit()
             return c.rowcount > 0
@@ -302,14 +333,59 @@ def add_login_whitelist(provider: str, username: str, remark: str = "") -> bool:
         return False
 
 
-def delete_login_whitelist(item_id: int) -> bool:
-    """Delete OAuth login whitelist entry."""
+def delete_login_whitelist(item_id: int, provider: str = "") -> bool:
+    """Delete OAuth login whitelist entry.
+
+    2026-11-12 行式化（weekly-11）：provider 缺省删整行；带 provider 时保
+    删除粒度——老列式行只清对应派生列 f"{provider}_username"（一人多平台
+    老行互不误伤），新模式行按 (id AND provider) 删。
+    """
+    import re as _re
+    if provider and not _re.match(r'^[a-z0-9_]+$', provider):
+        log.warning(f"delete_login_whitelist: invalid provider='{provider}'")
+        return False
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM login_whitelist WHERE id=?", (item_id,))
+            if not provider:
+                c.execute("DELETE FROM login_whitelist WHERE id=?", (item_id,))
+                db.commit()
+                return c.rowcount > 0
+            # 新模式行：按 (id, provider) 删
+            c.execute(
+                "DELETE FROM login_whitelist WHERE id=? AND provider=?",
+                (item_id, provider),
+            )
+            deleted = c.rowcount
+            # 老列式行：清对应派生列（列不存在捕获跳过）
+            col = f"{provider}_username"
+            cleared = 0
+            try:
+                c.execute(
+                    f"UPDATE login_whitelist SET {col}='' WHERE id=? AND {col}!=''",
+                    (item_id,),
+                )
+                cleared = c.rowcount
+            except Exception:
+                cleared = 0
             db.commit()
-            return c.rowcount > 0
+            if deleted or cleared:
+                # 行全空（无 provider、无任何老列值）则整行删——remark 残留不算
+                # 白名单语义数据，留着只会成不可见的僵尸行
+                cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
+                wl_cols = [col for col in cols if col.endswith("_username")]
+                sel = ", ".join(["provider"] + wl_cols)
+                row = c.execute(
+                    f"SELECT {sel} FROM login_whitelist WHERE id=?", (item_id,)
+                ).fetchone()
+                if row is not None:
+                    prov_v = row[0] or ""
+                    legacy_empty = all((v or "") == "" for v in row[1:])
+                    if not prov_v and legacy_empty:
+                        c.execute("DELETE FROM login_whitelist WHERE id=?", (item_id,))
+                        db.commit()
+                return True
+            return False
     except Exception as e:
         log.warning(f"Delete login whitelist failed: {e}")
         return False
@@ -363,16 +439,17 @@ def create_grape_user(username: str, email: str, password: str, nickname: str = 
     from src.domains.mgmt.auth.password import hash_password
     pw_hash = hash_password(password)
     email = (email or "").lower().strip() or None
+    from src.kernel.id_gen import uuid7_str
+    uid = uuid7_str()                   # D105 第二批：主键应用层 UUIDv7
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO grape_accounts (username, email, email_source, password_hash, nickname, status, token_version, email_verified) "
-                "VALUES (?,?, 'user',?,?,1,0,1)",  # P2-3: email_verified=1 (admin-created users are pre-verified)
-                (username, email, pw_hash, nickname),
+                "INSERT INTO grape_accounts (id, username, email, email_source, password_hash, nickname, status, token_version, email_verified) "
+                "VALUES (?,?,?, 'user',?,?,1,0,1)",  # P2-3: email_verified=1 (admin-created users are pre-verified)
+                (uid, username, email, pw_hash, nickname),
             )
             db.commit()
-            uid = c.lastrowid
             return {"id": uid, "username": username, "email": email or "", "nickname": nickname}
     except Exception as e:
         err = str(e).lower()
@@ -387,7 +464,7 @@ def create_grape_user(username: str, email: str, password: str, nickname: str = 
         return None
 
 
-def update_grape_user(user_id: int, email: str = None, nickname: str = None) -> bool | str:
+def update_grape_user(user_id: str, email: str = None, nickname: str = None) -> bool | str:
     """Edit user info (email, nickname).
 
     email semantics:
@@ -429,7 +506,7 @@ def update_grape_user(user_id: int, email: str = None, nickname: str = None) -> 
         return False
 
 
-def reset_grape_user_password(user_id: int, new_password: str) -> bool:
+def reset_grape_user_password(user_id: str, new_password: str) -> bool:
     """Reset user password and invalidate old tokens.
 
     Uses bcrypt hashing (auth.password.hash_password) for security parity

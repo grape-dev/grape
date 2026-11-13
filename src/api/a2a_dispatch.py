@@ -4,7 +4,7 @@ Issue #1667：排队（queue）语义需要在前序事件终态后重新派发�
 把原 webhook.py 内联的派发逻辑抽到本模块，避免 webhook ↔ event_pipeline
 循环依赖，并保证正常路径与排队路径使用同一套派发实现。
 """
-from src.config import log
+from src.kernel.config import log
 
 
 async def _on_handoff_dispatch(event):
@@ -15,7 +15,7 @@ async def _on_handoff_dispatch(event):
     """
     import asyncio
     from src.api.pipeline_executor import dispatch_node
-    from src.config import log
+    from src.kernel.config import log
 
     payload = event.payload or {}
     target_agent = payload.get("target_agent", event.agent_type)
@@ -52,7 +52,7 @@ async def _on_handoff_dispatch(event):
             if isinstance(_err, list):
                 _err = "; ".join(str(x) for x in _err)
             try:
-                from src.api.event_pipeline import _fail_event
+                from src.domains.runtime.pipeline.event_pipeline import _fail_event
                 _ref_seq = (payload.get("evt") or {}).get("ref_seq") or payload.get("ref_seq") or 0
                 _fail_event(
                     event.seq,
@@ -75,7 +75,7 @@ async def _on_handoff_dispatch(event):
     except Exception as e:
         log.warning(f"agent/handoff listener failed: {e}")
         try:
-            from src.api.event_pipeline import _fail_event
+            from src.domains.runtime.pipeline.event_pipeline import _fail_event
             _ref_seq = (payload.get("evt") or {}).get("ref_seq") or payload.get("ref_seq") or 0
             _fail_event(
                 event.seq,
@@ -107,7 +107,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     返回与 /api/a2a 兼容的响应字典。
     """
     try:
-        from src.api.event_pipeline import is_plugin_mode
+        from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
         if is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
             import asyncio as _aio
@@ -191,7 +191,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
         # Issue #418：早退统一走 _fail_event，回写 result/exit_code/completed_at
         # （原裸 update_event_status 落库无诊断字段，排障需倒查日志）
         try:
-            from src.api.event_pipeline import _fail_event
+            from src.domains.runtime.pipeline.event_pipeline import _fail_event
             _fail_event(seq, f"A2A 派发失败：无可用引擎（pick_engine=None，agent={agent_name}，repo={repository}）")
         except Exception:
             pass
@@ -199,10 +199,10 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
         # agent 误以为交办成功直接结束任务 → 死机）。失败语义走 failed + error 字段。
         return {"status": "failed", "seq": 0, "agent": agent_name, "error": f"no available engine for agent '{agent_name}' (repo={repository}): 目标引擎不可用，任务未派发，请按失败降级流程处理"}
     # Plugin 模式 + engine_id=0：非 direct 模式均走广播（queue_remote + auto）；仅 direct 走本机 direct
-    from src.api.event_pipeline import is_plugin_mode as _is_plugin
+    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _is_plugin
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
     if engine_id == 0 and _is_plugin() and get_execution_mode() != EXEC_MODE_DIRECT:
-        from src.api.event_pipeline import _enqueue_pipeline_task
+        from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task
         _be = backend or "opencode"
         _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
         if _pool_eids is None:
@@ -211,12 +211,12 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} engines all offline, skip (Issue #259)")
             # 引擎绑定真实性同步：改走统一 helper，人话原因落 events.result/agent_tasks.errors
             try:
-                from src.api.event_pipeline import _fail_scene_all_offline
+                from src.domains.runtime.pipeline.event_pipeline import _fail_scene_all_offline
                 _fail_scene_all_offline(seq, _a2a_scene, agent_name, "A2A", repo_key=repo_key or "")
             except Exception:
                 # Issue #418：helper 异常兜底同样走 _fail_event（原裸 update_event_status）
                 try:
-                    from src.api.event_pipeline import _fail_event
+                    from src.domains.runtime.pipeline.event_pipeline import _fail_event
                     _fail_event(seq, f"A2A 派发失败：场景绑定的引擎全部离线（scene={_a2a_scene}，agent={agent_name}，回写降级）")
                 except Exception:
                     from src.api.event_store import update_event_status
@@ -241,7 +241,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     # engine_id=0：auto/direct 兜底 → 自动选本机在线引擎
     if not engine_id:
         try:
-            from src.session_manager import db as _edb, db_lock as _edl
+            from src.kernel.session_manager import db as _edb, db_lock as _edl
             with _edl:
                 _ec = _edb.cursor()
                 _ec.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
@@ -254,7 +254,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                 log.info(f"A2A: engine_id=0 no online engine for {agent_name}, seq={seq}, skip")
                 # Issue #418：auto-select 空集早退统一走 _fail_event（完整诊断回写）
                 try:
-                    from src.api.event_pipeline import _fail_event
+                    from src.domains.runtime.pipeline.event_pipeline import _fail_event
                     _fail_event(seq, f"A2A 派发失败：无可用引擎（auto-select 空集，无在线本机引擎，agent={agent_name}）")
                 except Exception:
                     pass
@@ -263,14 +263,14 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             log.warning(f"A2A: auto-select engine failed: {_ae}")
             # Issue #418：auto-select 异常早退统一走 _fail_event（完整诊断回写）
             try:
-                from src.api.event_pipeline import _fail_event
+                from src.domains.runtime.pipeline.event_pipeline import _fail_event
                 _fail_event(seq, f"A2A 派发失败：无可用引擎（auto-select 异常: {str(_ae)[:150]}）")
             except Exception:
                 pass
             return {"status": "ok", "seq": 0, "agent": agent_name}
     kind = runtime_execution_kind(engine_id)
     if kind == EXEC_MODE_DIRECT:
-        from src.api.event_pipeline import start_direct_agent, _create_direct_task, _execute_agent
+        from src.domains.runtime.pipeline.event_pipeline import start_direct_agent, _create_direct_task, _execute_agent
         _issue_id = f"#{issue_number}" if issue_number else ""
         evt["_skill_id"] = skill_id
         _a2a_task_id = _create_direct_task(repo_key, seq, agent_name, _be,
@@ -281,7 +281,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
         ), name=f"a2a-{agent_name}-{seq}")
         log.info(f"A2A: started agent execution for {agent_name} (direct, engine={engine_id})")
     else:
-        from src.api.event_pipeline import _enqueue_pipeline_task
+        from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task
         _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                skill_name or agent_name, evt,
                                skill_id, skill_path, engine_id,

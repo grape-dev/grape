@@ -37,26 +37,26 @@ def _pr_merged_payload(title="feat: issue #282", issues=None, branch="feat/issue
 class TestIncidentReplay:
     def test_pr116_original_shape_resolves_282(self):
         """PR #116 原始形态（title 含 issue #282、issues=[#282,#274]、head=feat/issue-282）→ #282"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         assert resolve_pr_issue_id(_pr_merged_payload()) == "#282"
 
     def test_issues_list_disordered_still_max(self):
         """多 issue 列表乱序 [#274,#282] → #282（不依赖列表顺序）"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="some work", branch="feat/x",
                                issues=[{"number": 274}, {"number": 282}])
         assert resolve_pr_issue_id(p) == "#282"
 
     def test_branch_wins_over_body_background_ref(self):
         """分支名 feat/issue-282 + issues 列表仅含背景引用 #274 → 分支强信号 #282"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="some work", branch="feat/issue-282",
                                issues=[{"number": 274}])
         assert resolve_pr_issue_id(p) == "#282"
 
     def test_title_signal_when_branch_generic(self):
         """分支无 issue-N + title 含 #282 → 标题信号 #282"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="fix: resolve issue #282", branch="feat/x",
                                issues=[])
         assert resolve_pr_issue_id(p) == "#282"
@@ -66,32 +66,32 @@ class TestIncidentReplay:
 
 class TestPriorityOrder:
     def test_branch_beats_title_and_issues(self):
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="fix #274", branch="feat/issue-282",
                                issues=[{"number": 274}])
         assert resolve_pr_issue_id(p) == "#282"
 
     def test_title_beats_issues_max(self):
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="fix #300", branch="feat/x",
                                issues=[{"number": 274}, {"number": 282}])
         assert resolve_pr_issue_id(p) == "#300"
 
     def test_no_signal_returns_empty(self):
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="no ref here", branch="feat/x", issues=[])
         assert resolve_pr_issue_id(p) == ""
 
     def test_title_self_reference_skipped(self):
         """title 自引用（/pulls/N == PR 自身编号）跳过 → issues 最大兜底"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title=f"see /pulls/116", branch="feat/x",
                                issues=[{"number": 274}, {"number": 282}])
         assert resolve_pr_issue_id(p) == "#282"
 
     def test_issues_containing_pr_self_number_skipped(self):
         """issues 列表混入 PR 自身编号（116）→ 跳过，取剩余最大 #282"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = _pr_merged_payload(title="work", branch="feat/x",
                                issues=[{"number": 116}, {"number": 274}, {"number": 282}])
         assert resolve_pr_issue_id(p) == "#282"
@@ -101,20 +101,20 @@ class TestPriorityOrder:
 
 class TestResolveIssueIdMaxFallback:
     def test_issues_fallback_takes_max(self):
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         p = {"object_attributes": {"iid": 116, "source_branch": "feat/x"},
              "issues": [{"number": 274}, {"number": 282}]}
         assert resolve_issue_id(p) == "#282"
 
     def test_single_issue_unchanged(self):
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         p = {"object_attributes": {"iid": 116, "source_branch": "feat/x"},
              "issues": [{"number": 23}]}
         assert resolve_issue_id(p) == "#23"
 
     def test_non_pr_event_object_attributes_first(self):
         """Issue 类事件 object_attributes 优先（Issue #89 行为不变）"""
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         p = {"object_attributes": {"iid": 55, "action": "open"},
              "issues": [{"number": 50}]}
         assert resolve_issue_id(p) == "#55"
@@ -124,17 +124,17 @@ class TestResolveIssueIdMaxFallback:
 
 class TestGithubShape:
     def test_github_pull_request_head_ref_branch(self):
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = {"pull_request": {"number": 116, "title": "fix", "head": {"ref": "feat/issue-282"}}}
         assert resolve_pr_issue_id(p) == "#282"
 
     def test_github_title_hash(self):
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = {"pull_request": {"number": 116, "title": "fix #282", "head": {"ref": "main"}}}
         assert resolve_pr_issue_id(p) == "#282"
 
     def test_github_no_signal_empty(self):
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         p = {"pull_request": {"number": 116, "title": "plain", "head": {"ref": "main"}}}
         assert resolve_pr_issue_id(p) == ""
 
@@ -143,14 +143,14 @@ class TestGithubShape:
 
 class TestNormIssueId:
     def test_double_hash_normalized(self):
-        from src.api.event_pipeline import _norm_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _norm_issue_id
         assert _norm_issue_id("##274") == "#274"
         assert _norm_issue_id("#274") == "#274"
         assert _norm_issue_id("274") == "#274"
         assert _norm_issue_id(" #274 ") == "#274"
 
     def test_invalid_values(self):
-        from src.api.event_pipeline import _norm_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _norm_issue_id
         assert _norm_issue_id("") == ""
         assert _norm_issue_id(None) == ""
         assert _norm_issue_id("0") == ""
@@ -159,7 +159,7 @@ class TestNormIssueId:
 
     def test_number_field_already_hashed(self):
         """payload issue.number 字段自带 # 前缀 → 不再拼出 ##274"""
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         assert resolve_issue_id({"issues": [{"number": "#274"}]}) == "#274"
         assert resolve_issue_id({"issue_number": "#5"}) == "#5"
 
@@ -172,7 +172,7 @@ class TestUnifiedEventResolution:
 
     def test_resolved_once_and_cached(self):
         """同一 evt 多调用点解析一致（_resolved_issue_id 只计算一次）"""
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = self._evt(_pr_merged_payload())
         first = _resolve_event_issue_id(evt, "gitcode:grape-dev/grape")
         assert first == "#282"
@@ -183,7 +183,7 @@ class TestUnifiedEventResolution:
         assert evt["_resolved_issue_id"] == "#282"
 
     def test_resolve_called_once_across_calls(self):
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = self._evt(_pr_merged_payload())
         calls = {"n": 0}
         import src.api.event_pipeline as ep
@@ -203,19 +203,19 @@ class TestUnifiedEventResolution:
         assert calls["n"] == 1
 
     def test_non_pr_event_uses_resolve_issue_id(self):
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = self._evt({"issue": {"number": 21}}, evt_type="issue_comment")
         assert _resolve_event_issue_id(evt, "gitcode:o/r") == "#21"
 
     def test_fallback_to_evt_issue_id(self):
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = self._evt({"object_attributes": {"title": "no ref"}}, evt_type="push")
         evt["issue_id"] = "#99"
         assert _resolve_event_issue_id(evt, "gitcode:o/r") == "#99"
 
     def test_token_upgrade_only_when_empty(self):
         """首次无 token 解析为空 → 带 token 补一次 API 兜底；非空结果一经产生即锁定"""
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = self._evt(_pr_merged_payload(title="no ref", branch="feat/x", issues=[]))
         assert _resolve_event_issue_id(evt, "gitcode:o/r") == ""
         # 带 token（无网络环境下 API 兜底失败返回空，但不再重算）
@@ -229,7 +229,7 @@ class TestUnifiedEventResolution:
 class TestQaReviewFixes:
     def test_max_issue_non_numeric_exclude_does_not_raise(self):
         """Issue #528: exclude_num 非数字（non-numeric pr_number）时不抛 ValueError"""
-        from src.api.event_pipeline import _max_issue_from_issues
+        from src.domains.runtime.pipeline.event_pipeline import _max_issue_from_issues
         issues = [{"number": "#282"}, {"number": "#274"}]
         # 不抛异常，非数字 exclude 视为无效（不排除任何编号）
         assert _max_issue_from_issues(issues, exclude_num="abc") == "#282"
@@ -238,7 +238,7 @@ class TestQaReviewFixes:
         assert _max_issue_from_issues(issues, exclude_num="") == "#282"
 
     def test_max_issue_exclude_with_hash_and_spaces(self):
-        from src.api.event_pipeline import _max_issue_from_issues
+        from src.domains.runtime.pipeline.event_pipeline import _max_issue_from_issues
         issues = [{"number": "#282"}, {"number": "#274"}]
         # 带前缀/空白的合法 exclude 仍正确排除
         assert _max_issue_from_issues(issues, exclude_num=" #282 ") == "#274"
@@ -246,7 +246,7 @@ class TestQaReviewFixes:
 
     def test_resolve_pr_issue_id_non_numeric_pr_number(self):
         """Issue #528 复合场景：pr_number 非数字 + issues 非空 → 不抛异常"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {"iid": "BUG-404", "title": "no ref", "source_branch": "feat/x"},
             "issues": [{"number": "#282"}, {"number": "#274"}],
@@ -255,11 +255,11 @@ class TestQaReviewFixes:
 
     def test_fallback_evt_issue_id_normalized(self):
         """QA review: evt["issue_id"] 兜底值统一过 _norm_issue_id（补 # 前缀）"""
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = {"type": "push", "payload": {}, "issue_id": "282"}
         assert _resolve_event_issue_id(evt, "gitcode:o/r") == "#282"
 
     def test_fallback_evt_issue_id_invalid_returns_empty(self):
-        from src.api.event_pipeline import _resolve_event_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import _resolve_event_issue_id
         evt = {"type": "push", "payload": {}, "issue_id": "not-a-number"}
         assert _resolve_event_issue_id(evt, "gitcode:o/r") == ""

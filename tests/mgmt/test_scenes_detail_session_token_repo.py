@@ -16,8 +16,11 @@ from fastapi.testclient import TestClient
 
 
 def _fresh_imports():
-    for m in [k for k in sys.modules if k.startswith("src.")]:
-        del sys.modules[m]
+    # 混跑污染修复（D46/S68）：原实现清空全部 src.* 模块缓存——模块缓存/
+    # 单例/DB 句柄绑定被推倒重来，后续文件按"当时 env"重开连接，是全量
+    # 混跑 E 族连片（app ImportError ×56、no such table ×239 家族）的
+    # 放大器。保留函数名为空操作（兼容调用点），模块缓存一律不动。
+    return
 
 
 def _reset_db():
@@ -70,7 +73,9 @@ def _client():
     import src.kernel.auth_sdk.auth_token as at
     _fresh_imports()
     import src.api.main as m
-    importlib.reload(m)
+    # 混跑污染修复（D46/S68）：不再 reload(main)——reload 中途异常会留下
+    # 残缺模块，后续 56 个文件 `from src.api.main import app` 全炸；本文件
+    # 用例只依赖共享库行数据（_reset_db 清行），现有 app 即可。
     return TestClient(m.app)
 
 

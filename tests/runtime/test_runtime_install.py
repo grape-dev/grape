@@ -174,7 +174,7 @@ class TestInstallPs1Bom:
         """install-worker.ps1 的 PYTHONUTF8=1 应收敛在 Invoke-PipQuiet 内（设完即恢复），
         不得在脚本顶层设置——顶层设置会被 Start-Process 拉起的常驻 worker daemon
         继承，静默改变其运行时默认编码（Issue #1409 PR #1010 M1 整改）。"""
-        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.ps1")
+        p = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1")
         content = open(p, encoding="utf-8").read()
         assert '$env:PYTHONUTF8 = "1"' in content, "PYTHONUTF8=1 sentinel missing"
         # 顶层设置 = 出现在 Invoke-PipQuiet 函数体之外

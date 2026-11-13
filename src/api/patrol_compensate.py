@@ -12,17 +12,32 @@
   最坏伤害半径的分界线。
 - D18：本模块同样零 agent_tasks 终态化写路径。
 """
+
 from __future__ import annotations
 
 import asyncio
+
 import json
+
 import uuid as _uuid
+
 from dataclasses import dataclass, field
+
 from datetime import datetime, timedelta, timezone
+
 from typing import Optional
 
 from src.kernel.config import log
+
 from src.kernel.session_manager import db, db_lock
+from src.api.pipeline_constants import (
+    PAUSED_ISSUE_STATUSES,
+    TARGET_SOURCE_LEGACY_TEXT,
+    TARGET_SOURCE_NOT_HANDOFF,
+    TARGET_SOURCE_PIPELINE,
+    TARGET_SOURCE_TERMINAL,
+    TARGET_SOURCE_TEXT,
+)
 
 # 评审八轮修正①：claiming 孤儿租约（分钟）。派发是秒级；10 分钟仍未回写=进程崩溃
 # 或异常路径漏写，回收为 open 下轮重试（幂等键保证回收重试不会双发）。
@@ -40,10 +55,8 @@ _RETRY_COOLDOWN_MINUTES = 30
 # （_sync 谓词只动 queued/dispatched/running，重复调用零副作用）。
 _RACE_ALIGN_DELAY_SECONDS = 5
 
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 @dataclass
 class CompensateContext:
@@ -66,10 +79,6 @@ class CompensateContext:
     verdict: str = ""          # 最终处置标签（compensated/false_positive/auth_unavailable/...）
     action_meta: str = ""      # 落库回执
 
-
-# ====== findings 读写（与 patrol.py 表共享，动作侧语义） ======
-
-
 def _load_finding(fid: str) -> Optional[CompensateContext]:
     with db_lock:
         c = db.cursor()
@@ -81,7 +90,6 @@ def _load_finding(fid: str) -> Optional[CompensateContext]:
         return None
     return CompensateContext(finding_id=row[0], kind=row[1] or "", task_id=row[2] or "",
                              repo_key=row[3] or "", issue_id=row[4] or "", status=row[5] or "")
-
 
 def _set_finding(fid: str, status: str, meta: str) -> None:
     # 仓库规范：UPDATE 禁 SQL CASE/条件逻辑——先读现值，Python 拼接，普通 UPDATE
@@ -96,17 +104,12 @@ def _set_finding(fid: str, status: str, meta: str) -> None:
             (status, merged[:2000], _now_iso(), fid))
         db.commit()
 
-
 class Handler:
     """责任链处理器基类：handle 返回 True=放行，False=已短路（verdict 已写入 ctx）。"""
     name: str = "handler"
 
     def handle(self, ctx: CompensateContext) -> bool:
         raise NotImplementedError
-
-
-# ====== 1. 门卫（D19）：开关 + 白名单 ======
-
 
 class GateHandler(Handler):
     name = "gate"
@@ -120,10 +123,6 @@ class GateHandler(Handler):
             ctx.verdict, ctx.action_meta = "repo_blocklisted", "仓库在补偿黑名单"
             return False
         return True
-
-
-# ====== 2. 抢占（R4）：状态原子流转，防双发 ======
-
 
 class ClaimHandler(Handler):
     name = "claim"
@@ -140,10 +139,6 @@ class ClaimHandler(Handler):
                 return False
         ctx.status = "claiming"
         return True
-
-
-# ====== 3. 终检（D11②）：L1（全状态）+ L2 再查一次 ======
-
 
 class RecheckHandler(Handler):
     name = "recheck"
@@ -164,11 +159,28 @@ class RecheckHandler(Handler):
             return False
         ctx.completed_at, ctx.agent_type, result_text = row[0] or "", row[1] or "", row[2] or ""
         ctx.result_text = result_text          # 评审五轮修正②：结论随补偿下发（等价性）
-        next_step = _p.extract_next_step(result_text or "")
-        ctx.target_agent = _p.parse_target_agent(next_step)
+        # Issue #2050：结构化 next_step 为主；文本缺失时按场景阶段序推导下一棒
+        # （pipeline 推导只作告警建议，绝不作派发依据——见下方护栏）。
+        ctx.target_agent, _target_source = _p.resolve_handoff_target(
+            ctx.repo_key, ctx.issue_id or "", ctx.agent_type or "", result_text or "")
+        if _target_source in (TARGET_SOURCE_NOT_HANDOFF, TARGET_SOURCE_TERMINAL):
+            _set_finding(ctx.finding_id, "false_positive",
+                         f"终检无交棒意图（source={_target_source}）")
+            ctx.verdict, ctx.action_meta = "false_positive", f"终检无交棒意图（{_target_source}）"
+            return False
+        # Issue #2050 主触发源：已存在引用本任务 event_seq 的结构化 handoff → 已交棒。
+        if _p.structured_handoff_exists(ctx.repo_key, ctx.issue_id or "",
+                                        ctx.task_id or ""):
+            _set_finding(ctx.finding_id, "false_positive", "终检结构化 handoff 已发生")
+            ctx.verdict, ctx.action_meta = "false_positive", "终检结构化 handoff 已发生"
+            return False
         # 评审五轮修正①（终检版）：issue 已被人收敛 → 误报，放弃补偿。
         # L1/L2 只找"交棒证据"，找不到"人已处置证据"；端点只拦 cancelled，
         # 不拦 completed/pending_review——此处必须自守，否则补偿复活已关 issue。
+        # 注意（QA 第 5 轮 M2）：issue_terminal 覆盖「终态 + 等用户暂停」两族状态。
+        # 此处语义是「已被收敛 → 不补派」，暂停态(awaiting_input)同样不该补派，
+        # 因此不排除 PAUSED_ISSUE_STATUSES；与 :372 的「撤销在途任务」判定口径不同——
+        # 那里暂停态不算收敛，不能对齐取消。两处用途不同，勿混淆。
         _term = _p.issue_terminal(ctx.repo_key, ctx.issue_id or "")
         if _term:
             _set_finding(ctx.finding_id, "false_positive", f"issue 已终态（{_term}），用户已收敛，不补")
@@ -184,34 +196,45 @@ class RecheckHandler(Handler):
             _set_finding(ctx.finding_id, "false_positive", "终检 L2 命中（下游任务已出现）")
             ctx.verdict, ctx.action_meta = "false_positive", "终检 L2 命中"
             return False
+        # Issue #2050：仅文本缺失/场景推导的候选才用「通用新段证据」；文本 A2A 候选
+        # 保持 L1/L2 口径，避免同族场景从可报变漏报。
+        if _target_source not in (TARGET_SOURCE_TEXT, TARGET_SOURCE_LEGACY_TEXT):
+            if _p.has_newer_issue_event(ctx.repo_key, ctx.issue_id or "", ctx.completed_at or ""):
+                _set_finding(ctx.finding_id, "false_positive", "终检新段已出现（链已推进）")
+                ctx.verdict, ctx.action_meta = "false_positive", "终检新段已出现"
+                return False
         if not ctx.target_agent:
             # 评审十六轮修正①/S29：next_step 不可解析=数据不自愈，终态 needs_human
             _set_finding(ctx.finding_id, "needs_human", "target_unresolvable：下一棒意图不可解析，人工核对")
             ctx.verdict, ctx.action_meta = "target_unresolvable", "下一棒意图不可解析，转人工"
             return False
+        # 负责人拍板（A 方案）：场景阶段序推导只作告警建议，不作派发依据。
+        # 替 agent 猜下一棒，猜对是运气、猜错就是给错的人派活；而且它会把
+        # 「agent 未声明交接」这个真缺陷伪装成自愈，下次照样犯。故一律转人工确认。
+        if _target_source == TARGET_SOURCE_PIPELINE:
+            _set_finding(ctx.finding_id, "needs_human",
+                         f"pipeline_target_advisory：文本无交棒声明，按场景序推导建议"
+                         f"下一棒={ctx.target_agent}，不自动派发，待人工确认")
+            ctx.verdict = "pipeline_target_advisory"
+            ctx.action_meta = f"场景推导建议 target={ctx.target_agent}，仅告警不派发"
+            return False
         return True
-
-
-# ====== 4. 身份解析（D14 策略族） ======
-
 
 class IdentityStrategy:
     """身份策略接口：返回 user dict 或 None（降级）。"""
     def resolve(self, repo_key: str) -> Optional[dict]:
         raise NotImplementedError
 
-
 class HostUserStrategy(IdentityStrategy):
-    """路径 B：用户 PAT 托管（host_user_id>0）→ 托管用户平台身份。"""
+    """路径 B：用户 PAT 托管（str(host_user_id or "") not in ("", "0")）→ 托管用户平台身份。"""
     def resolve(self, repo_key: str):
         with db_lock:
             c = db.cursor()
             c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
         if row and row[0]:
-            return {"id": int(row[0]), "auth_type": "jwt", "username": f"host-user-{row[0]}"}
+            return {"id": str(row[0]), "auth_type": "jwt", "username": f"host-user-{row[0]}"}
         return None
-
 
 class ManagedUserFallbackStrategy(IdentityStrategy):
     """路径 A：bot token 托管 → 托管用户映射（user_repos 管理员）。"""
@@ -223,9 +246,8 @@ class ManagedUserFallbackStrategy(IdentityStrategy):
                 "ORDER BY created_at LIMIT 1", (repo_key,))
             row = c.fetchone()
         if row and row[0]:
-            return {"id": int(row[0]), "auth_type": "jwt", "username": f"managed-user-{row[0]}"}
+            return {"id": str(row[0]), "auth_type": "jwt", "username": f"managed-user-{row[0]}"}
         return None
-
 
 class IdentityHandler(Handler):
     """身份策略编排（D14 顺序）：路径 B → 路径 A 映射 → 无主体降级（绝不冒用）。"""
@@ -243,24 +265,17 @@ class IdentityHandler(Handler):
         ctx.verdict, ctx.action_meta = "auth_unavailable", "无托管主体，降级挂起"
         return False
 
-
-# ====== 5. 模式恢复（D15 策略族） ======
-
-
 class ModeStrategy:
     """模式恢复策略：返回 payload 模式字段 dict；不可恢复抛 ModeUnrecoverable。"""
     def recover(self, repo_key: str, issue_id: str) -> dict:
         raise NotImplementedError
 
-
 class ModeUnrecoverable(Exception):
     pass
-
 
 class PlainChainMode(ModeStrategy):
     def recover(self, repo_key: str, issue_id: str) -> dict:
         return {"is_subtask_mode": False, "parent_issue": ""}
-
 
 class SubtaskChainMode(ModeStrategy):
     def recover(self, repo_key: str, issue_id: str) -> dict:
@@ -272,7 +287,6 @@ class SubtaskChainMode(ModeStrategy):
                 raise ModeUnrecoverable("子任务模式但 parent_issue 缺失")
             return {"is_subtask_mode": True, "parent_issue": parent}
         return {"is_subtask_mode": False, "parent_issue": ""}
-
 
 class ModeHandler(Handler):
     name = "mode"
@@ -295,10 +309,6 @@ class ModeHandler(Handler):
             ctx.mode_payload["carried_context"] = {}
         return True
 
-
-# ====== 6. 派发（D5 适配器）：直调 a2a_endpoint，compensated_by 必传 ======
-
-
 def _conclusion_snippet(result_text: str) -> str:
     """评审七轮修正④：结论优先取结构化 conclusion 字段。
 
@@ -314,10 +324,6 @@ def _conclusion_snippet(result_text: str) -> str:
     except Exception:
         pass
     return (result_text or "").strip()
-
-
-# ====== S33【评审十七轮修正】派发后终态回查 + 对齐收敛 ======
-
 
 def _align_convergence_once(repo_key: str, issue_id: str) -> int:
     """对齐收敛（S33）：复用 completed 路径的官方收敛动作 _sync_issue_pipeline_terminal。
@@ -336,22 +342,21 @@ def _align_convergence_once(repo_key: str, issue_id: str) -> int:
     返回收敛任务数；-1=调用失败（只记日志，不重试不 claiming）。
     """
     num = str(issue_id or "").lstrip("#")
-    if not repo_key or not num.isdigit():
+    # S75/D102-O：字符串 ident 合法（原 isdigit 门槛把 gitee issue 的收敛对齐整个跳过）
+    if not repo_key or not num or num.startswith("pr_"):
         return 0
     try:
         from src.domains.runtime.routes.issues import _sync_issue_pipeline_terminal
-        return _sync_issue_pipeline_terminal(repo_key, int(num)) or 0
+        return _sync_issue_pipeline_terminal(repo_key, _native_issue_number(num)) or 0
     except Exception as e:
         log.warning(f"[patrol-comp] align convergence failed (repo={repo_key} issue={issue_id}): {e}")
         return -1
-
 
 async def _align_convergence_delayed(repo_key: str, issue_id: str,
                                       delay: int = _RACE_ALIGN_DELAY_SECONDS) -> int:
     """延迟二次扫：下游任务异步诞生晚于首轮 _sync 时兜底收回（幂等）。"""
     await asyncio.sleep(delay)
     return _align_convergence_once(repo_key, issue_id)
-
 
 def _post_dispatch_race_check(ctx: "CompensateContext") -> str:
     """派发成功后的终态回查（S33 第 1 层观测 + 第 2 层对齐收敛触发）。
@@ -363,6 +368,7 @@ def _post_dispatch_race_check(ctx: "CompensateContext") -> str:
     3. race_detected 回执进 action_meta（观测数据源——毫秒窗在真实流量的
        发生频率由此说话，也是第 3 层零窗根治（FOR UPDATE 行锁事务）的立项
        触发条件）。
+    「等用户」暂停态（PAUSED_ISSUE_STATUSES）不是收敛：不得对齐取消在途任务。
     不撤销派发本身（零破坏：不补偿补偿、不删事件——收回动作只走 _sync）。
     """
     from src.api import patrol as _p
@@ -371,7 +377,7 @@ def _post_dispatch_race_check(ctx: "CompensateContext") -> str:
     except Exception as e:
         log.warning(f"[patrol-comp] post-dispatch terminal check failed: {e}")
         return ""
-    if not term:
+    if not term or term in PAUSED_ISSUE_STATUSES:
         return ""
     aligned = _align_convergence_once(ctx.repo_key, ctx.issue_id or "")
     try:
@@ -380,7 +386,6 @@ def _post_dispatch_race_check(ctx: "CompensateContext") -> str:
     except RuntimeError:
         pass  # 无运行循环（同步调用语境）：只做首轮对齐
     return f"race_detected:{term}→aligned:{aligned}+delayed-resweep"
-
 
 class DispatchHandler(Handler):
     name = "dispatch"
@@ -492,9 +497,6 @@ class DispatchHandler(Handler):
             summary = "<opaque response>"
         return code == 200, f"HTTP {code} {summary}"
 
-
-# ====== 责任链编排 ======
-
 def build_chain() -> list[Handler]:
     """同步责任链五处理器（D20）：门卫→抢占→终检→身份→模式。
 
@@ -504,7 +506,6 @@ def build_chain() -> list[Handler]:
     任一同步处理器拒绝即短路、派发永不执行。
     """
     return [GateHandler(), ClaimHandler(), RecheckHandler(), IdentityHandler(), ModeHandler()]
-
 
 async def compensate_finding(finding_id: str) -> str:
     """对单条 finding 执行补偿责任链，返回最终处置标签。
@@ -535,7 +536,6 @@ async def compensate_finding(finding_id: str) -> str:
     log.info(f"[patrol-comp] dispatch finding={finding_id} verdict={ctx.verdict} ok={ok}")
     return ctx.verdict
 
-
 def reclaim_stale_claimings() -> int:
     """claiming 孤儿租约回收（评审八轮修正①；部署复验修正：无条件执行，不受补偿开关门控）。
 
@@ -564,7 +564,6 @@ def reclaim_stale_claimings() -> int:
             log.info(f"[patrol] claiming 孤儿回收 {recycled} 条（租约 {_CLAIMING_LEASE_MINUTES}min）")
     return recycled
 
-
 async def compensate_open_findings(limit: int = 20) -> dict:
     """补偿本轮 open 的断链 finding（开关在门卫处理器里判，关=空转零动作）。
 
@@ -589,3 +588,5 @@ async def compensate_open_findings(limit: int = 20) -> dict:
         verdict = await compensate_finding(fid)
         counts[verdict] = counts.get(verdict, 0) + 1
     return counts
+
+from src.domains.runtime.vcs.api_client import _native_issue_number  # S75：issue ident 平台原生保形（此前裸名调用 NameError 被 except 吞 → 收敛对齐静默失败）

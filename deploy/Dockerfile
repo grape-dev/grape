@@ -2,9 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# 镜像可复现：引擎与 codegraph 版本固定（opencode 1.18.x 与 1.19.x 的 provider schema 不同，
+# 不 pin 会出现同一份代码在不同时间构建出不同引擎）。模板仓 ref 可用 --build-arg 固定到 tag。
+ARG OPENCODE_VERSION=1.19.5
+ARG CODEGRAPH_VERSION=1.6.2
+ARG TEMPLATES_REF=main
+
 # 系统依赖——gcc/g++ 编译 C 扩展（bcrypt/cffi 等）
+# git/curl/ca-certificates：模板同步（scripts/sync_templates.sh 走 git clone）、
+# 配置种子兜底下载、TLS 证书链
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ && \
+    gcc g++ git curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Python 依赖（Issue #699 Phase 0: pyproject.toml replaces requirements.txt）
@@ -12,33 +20,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 RUN pip install --no-cache-dir -e ".[all]"
 
+# 执行引擎 opencode（宿主与托管都需要：缺它任务直接报 "no available engine"）。
+# node 22 是引擎运行时，装完**不卸载**——历史坑：purge nodejs/npm 会把引擎依赖的 node 一起删掉。
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm i -g opencode-ai@${OPENCODE_VERSION} && \
+    npm cache clean --force && \
+    rm -rf /var/lib/apt/lists/* && \
+    opencode --version
+
 # Issue #666 (M3): 引擎基线镜像预装 codegraph（project-info 全量生成引擎）。
 # 分发形式：npm 平台二进制包 @colbymchenry/codegraph（自包含：内置 node 运行时 + Rust 内核，
 # bin/codegraph 可直接执行，见 scripts/install-codegraph.sh 注释）——非 pip 包。
-# 构建期用 nodejs/npm 在线安装，装完卸载 nodejs/npm 保持镜像精简（二进制自包含不依赖系统 node）。
+# 安装位置：独立 prefix /opt/codegraph；bin 软链到 /usr/local/bin。
 # best-effort：安装失败不阻断镜像构建，运行时走降级路径并显式告警（src/project_info/builder.py）。
-# 安装位置：独立 prefix /opt/codegraph（QA 修复 #666：规避 apt purge nodejs/npm 时
-# npm 全局目录 /usr/lib/node_modules 被连带清理的风险）；bin 软链到 /usr/local/bin。
-# purge 后最终复核 codegraph --version（不可用则清理失效软链并告警，镜像仍可构建）。
-RUN set -x; \
-    apt-get update && apt-get install -y --no-install-recommends nodejs npm; \
-    if npm install -g --prefix /opt/codegraph @colbymchenry/codegraph; then \
-        ln -sf /opt/codegraph/bin/codegraph /usr/local/bin/codegraph; \
-    else \
-        echo "warning: codegraph install failed, project-info will run degraded with warning"; \
-    fi; \
-    apt-get purge -y nodejs npm; \
-    apt-get autoremove -y; \
-    rm -rf /var/lib/apt/lists/*; \
-    if codegraph --version >/dev/null 2>&1; then \
-        codegraph --version; \
-    else \
-        echo "warning: codegraph missing after node purge, project-info will run degraded with warning"; \
-        rm -f /usr/local/bin/codegraph; \
-    fi
+# 与上游差异：不再 purge nodejs——引擎（opencode）依赖 node，purge 会连带破坏引擎。
+RUN ( npm install -g --prefix /opt/codegraph @colbymchenry/codegraph@${CODEGRAPH_VERSION} \
+      && ln -sf /opt/codegraph/bin/codegraph /usr/local/bin/codegraph \
+      || echo "warning: codegraph install failed, project-info will run degraded with warning" ) \
+ && ( codegraph --version \
+      || ( echo "warning: codegraph unavailable, project-info will run degraded with warning"; rm -f /usr/local/bin/codegraph ) )
 
 # 代码
 COPY . .
+
+# 官方项目模板：configs/project-templates.json 与 examples/<模板>/ 都不入库，
+# 必须构建期铺入，否则 UI 模板页为空。必须放在 COPY . . 之后：脚本在 scripts/ 下，
+# 且不能被随后的一次 COPY 覆盖。可用 --build-arg TEMPLATES_REF=<tag> 固定模板版本。
+# best-effort：模板仓不可达不阻断构建（运行时 entrypoint 会再试一次），
+# 与 codegraph 的降级风格一致；如需硬保证，可在构建后检查 /app/configs/project-templates.json。
+RUN TEMPLATES_REF=${TEMPLATES_REF} bash scripts/sync_templates.sh \
+    || echo "warning: template sync failed at build time; the runtime entrypoint will retry"
 
 # 默认 .env（Issue #452: SQLite + OBS 关闭，生产环境通过环境变量覆盖）
 # 审查修复: COPY .env.example .env，确保容器内始终有 /app/.env，不再依赖宿主 bind mount
@@ -50,6 +62,13 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Issue #452: 内网/Docker 环境关闭公网 IP 探测
 ENV GRAPE_AUTO_DETECT_URL=false
+
+# 托管平台启动引导：补 JWT 密钥、对外基址、引擎模型配置。
+# 默认惰性——只有检测到平台环境变量（RAILWAY_* / PUBLIC_DOMAIN / SERVER_BASE_URL / LLM_API_KEY）
+# 或显式 GRAPE_HOSTED_BOOTSTRAP=1 才接管；否则原样 exec 下面的 CMD，自建行为不变。
+COPY deploy/hosted/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 EXPOSE 3000
 

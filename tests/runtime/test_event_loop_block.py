@@ -73,6 +73,9 @@ class TestEventLoopBlock:
             "account": "owner/repo",
             "user_id": 0,
             "repo_gitcode_token": "tok",
+            # D101 W12: dependency_check 对 git agent 要求 repo_key 在册
+            #（fixture 补齐——本文件测事件循环调度，非凭据链）
+            "repo_key": "gitcode:owner/repo",
             "issue_id": "#5",
             "agent_type": "vod",
             "env_extra": "{}",
@@ -191,6 +194,7 @@ class TestEventLoopBlock:
             "issue_session_id": "sess-7",
             "cwd": str(tmp_path / "issues" / "7" / "coding"),
             "skill_files": _json.dumps({"implementation": {"SKILL.md": "# impl\n", "ref.md": "ref\n"}}),
+            # repo_key 已由 _build_task 补齐（D101 W12 git agent 前置检查要求）
         })
 
         # 记录 ensure_issue_worktree 调用时 .skills 是否已存在

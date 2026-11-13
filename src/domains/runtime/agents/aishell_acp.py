@@ -10,7 +10,7 @@
 - model option 的 value 不透明（JSON 串，如 '["<provider>","<model>"]'），必须从
   options 原样取，自拼报 -32602
 - session/update 实测 5 类：agent_thought_chunk / agent_message_chunk /
-  usage_update（{used,size} 上下文占用，非计费——一期忽略）/ tool_call /
+  usage_update（{used,size} 上下文占用，非计费——二期消费为 usage 事件）/ tool_call /
   tool_call_update；tool_call_update 的输出在 content[] 内容块（与 hwcloud 的
   rawOutput 不同）
 - 无 request_permission（免审直执行）；无 turn_end 通知，PromptResponse 收口
@@ -135,7 +135,7 @@ class AishellDshACPBackend:
         """基础 env（D3/D4：模型凭据设备预配置，grape 不注 key/不透传）。"""
         env = os.environ.copy()
         try:
-            from src.config import SKILLS_DIR
+            from src.kernel.config import SKILLS_DIR
             env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         except Exception:
             pass
@@ -157,7 +157,7 @@ class AishellDshACPBackend:
 
         事件：step_start / text / reasoning / tool_use / tool_finish /
         tool_result / step_finish / done{exit_code,text,oc_session_id,errors,stderr}
-        一期每任务 session/new（resume 属二期，另立 issue）。
+        二期起支持 resume：传入上一轮 oc_session_id 时走 session/resume 续聊（未命中自愈回退 session/new）。
         """
         label = f"{agent_label} " if agent_label else ""
         # CLI 定位统一走 find_cli（PATH 优先 + ~/.local/bin 兜底）——pip --user
@@ -191,10 +191,10 @@ class AishellDshACPBackend:
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
         try:
-            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _terminate_proc
+            from src.domains.runtime.agents.executor import _track_proc, _untrack_proc, _safe_terminate
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
-            _terminate_proc = lambda p, l: None
+            _safe_terminate = lambda p, l: None
 
         from src.domains.runtime.engine.resource_stack import TaskResourceStack
         _res = TaskResourceStack(task_id="", cwd=cwd)
@@ -258,6 +258,9 @@ class AishellDshACPBackend:
                 _enqueue("tool_finish", content)
             elif msg_type == "tool_result":
                 _enqueue("tool_result", content)
+            elif msg_type == "usage":
+                _flush_text()
+                _enqueue("usage", content)
 
         client.on_message = _on_message
         client.on_prompt_done = lambda result: (
@@ -362,22 +365,47 @@ class AishellDshACPBackend:
 
             log.info(f"{label}aishell-dsh ACP initialized")
 
-            # ── 2. session/new（一期每任务新会话）──
+            # ── 2. session/resume（二期续聊）/ session/new ──
             yield ("step_start", "Step 1 started (session: ACP)")
-            result, err = client.request("session/new", {
-                "cwd": cwd if cwd else ".",
-                "mcpServers": [],
-            }, timeout=100)
-            if err:
-                error_events.append(f"session/new failed: {err}")
-                yield ("done", _done_result(-1, "", session_id, error_events, ""))
-                return
-            new_session_id = _extract_session_id(result) or ""
-            log.info(f"{label}aishell-dsh ACP session: {new_session_id[:24]}...")
+            new_session_id = ""
+            if session_id:
+                # 二期 resume chat：跨进程 session/resume 续接上下文（configOptions
+                # 随会话持久，设计实测保留）。判据（QA #1230 I-5 统一口径）：无 err 即
+                # 命中——resume 响应形态 {configOptions:[...]} 不含 sessionId 字段，
+                # 不能比对返回 id；引擎对不可续接状态（如会话仍 active）会返回
+                # -32602 错误而非静默空回，err 时回退 session/new 自愈（丢一轮上下文
+                # 但任务不断）。
+                result, err = client.request("session/resume", {
+                    "sessionId": session_id,
+                    "cwd": cwd if cwd else ".",
+                }, timeout=100)
+                if not err:
+                    # resume 响应形态（实测 + 设计记录「resume 形状」）：{'configOptions': [...]}
+                    # ——不带 sessionId 字段；无 err 即命中（引擎对不存在的会话会报
+                    # -32602「session is already active」/错误码，静默空 id ≠ miss）。
+                    # sessionId 即请求值；configOptions 随会话持久（模型路由跳过重设）。
+                    new_session_id = session_id
+                    log.info(f"{label}aishell-dsh ACP session resumed: {new_session_id[:24]}...")
+                else:
+                    log.warning(f"{label}aishell-dsh ACP resume failed: {err} — falling back to session/new")
+            if not new_session_id:
+                result, err = client.request("session/new", {
+                    "cwd": cwd if cwd else ".",
+                    "mcpServers": [],
+                }, timeout=100)
+                if err:
+                    error_events.append(f"session/new failed: {err}")
+                    yield ("done", _done_result(-1, "", session_id, error_events, ""))
+                    return
+                new_session_id = _extract_session_id(result) or ""
+                log.info(f"{label}aishell-dsh ACP session: {new_session_id[:24]}...")
 
             # ── 3. 模型路由（踩坑①/②：默认 trial 无凭据必失败；value 从 options
-            #    原样取，自拼报 -32602）──
-            model_value = (env or {}).get("AISHELL_DSH_MODEL") or _select_model_option(result)
+            #    原样取，自拼报 -32602）。resume 命中时跳过——模型选择随会话持久
+            #    （二期实测 configOptions 保留），每轮续聊重置反而抹掉用户改的配置 ──
+            _resumed = bool(session_id) and new_session_id == session_id
+            model_value = "" if _resumed else (
+                (env or {}).get("AISHELL_DSH_MODEL") or _select_model_option(result))
             if model_value:
                 set_res, set_err = client.request("session/set_config_option", {
                     "sessionId": new_session_id,
@@ -489,6 +517,20 @@ class AishellDshACPBackend:
                         yield (et, data)
                     event_queue.clear()
 
+            # 二期 resume chat：优雅 session/close —— 必须在 proc.stdin.close()/wait/
+            # terminate 之前发出（QA #1230 C2：后置位 = 请求写不进已关闭的 stdin，死
+            # 代码；且 _ACPSimpleClient.request 以返回 err 而非异常报告失败——
+            # try/except 永不触发，失败零观测）。best-effort：close 失败不影响任务
+            # 结果（会话文件自持久，resume miss 自愈回退 session/new）。
+            if new_session_id:
+                # timeout=15：收尾路径同步阻塞上限——session/new 预算 100s 的约 1/7，
+                # 取 ACP 握手类请求（非对话轮）量级：实测 close 正常 <1s，15s 仅兜底
+                # 引擎 flush 慢/冷盘；超时只损失优雅关闭（best-effort 已声明，会话
+                # 文件自持久，resume miss 自愈回退 session/new），不阻塞任务收尾更久
+                _cres, _cerr = client.request("session/close", {"sessionId": new_session_id}, timeout=15)
+                if _cerr:
+                    log.warning(f"{label}aishell-dsh ACP session/close best-effort failed: {_cerr}")
+
             try:
                 proc.stdin.close()
             except Exception:
@@ -496,7 +538,7 @@ class AishellDshACPBackend:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                _terminate_proc(proc, f"{label}aishell-dsh ACP")
+                _safe_terminate(proc, f"{label}aishell-dsh ACP")
 
             reader_thread.join(timeout=3)
             with queue_lock:
@@ -510,6 +552,7 @@ class AishellDshACPBackend:
                 stderr_output = "".join(_stderr_chunks)[:500]
             except Exception:
                 pass
+
 
             if stop_reason == "end_turn" and not error_events:
                 exit_code = 0
@@ -543,9 +586,89 @@ class AishellDshACPBackend:
             except Exception:
                 pass
             if proc.poll() is None:
-                _terminate_proc(proc, f"{label}aishell-dsh ACP")
+                _safe_terminate(proc, f"{label}aishell-dsh ACP")
             # 会话文件不清理：~/.aishell/sessions 自持久（二期 token 解析数据源）
             _res.dispose(kill_procs=False)
+
+
+def aishell_dsh_capable(cli_path: str) -> bool:
+    """CLI 能力判别：该 aishell 是否 dsh 发行版（含 ACP 子命令）。
+
+    `aishell` 不是 dsh 发行版独占的 CLI 名——同名工具（DevSpace 镜像内等）
+    会被 find_cli 命中。dsh 发行版独有能力是 `acp` 子命令：
+    `<cli> acp --help` 退出 0 且输出（stdout+stderr）含 "Agent Client Protocol"。
+    缺该能力的同名 CLI 不是 aishell-dsh（发现层 installed=False，服务端不建行）。
+
+    口径与缓存（QA #1190 M1/I1/I2/I4 整改）：
+    - 超时对齐同仓 Windows 冷启动实测口径（agent.py 版本探测 timeout=20，
+      hermes.exe 冷启 8s+ 实证；env RUNTIME_ENGINE_CAP_TIMEOUT 可调）——宁可
+      慢判，不把冷启动中的真引擎静默判 False（漏注册在 Windows 上不自愈）。
+    - 结果按 cli_path 进程内缓存，TTL 同 RUNTIME_PROBE_INTERVAL（默认 600s），
+      避免每轮发现重复拉起子进程（挂起型假 CLI 每次要烧满超时预算）。
+    - 判 False 时 log.warning 一次（按 (cli_path, reason) 进程内去重）——超时/
+      非零退出/无签名/异常四种原因不再折叠成静默 False（#1965 诊断盲区反向）。
+    - 解码显式 utf-8+replace、判定读 stdout+stderr，防中文 Windows 默认编码
+      静默误判（QA 本机复现 UnicodeDecodeError 被吞）。
+    """
+    if not cli_path:
+        return False
+    import os as _os
+    import subprocess as _sp
+    import time as _time
+    # env 数值解析：范围校验 + 非法值告警（QA #1230 I4——对齐 routes/runtime.py:206
+    # 既有口径 1~86400：非法/越界不再静默回退默认，TTL<=0 等价关缓存会让发现层每轮
+    # 重新拉起子进程，挂起型同名 CLI 每次烧满超时预算，必须显式可见）
+    def _env_float(name: str, default: float) -> float:
+        _raw = _os.environ.get(name, "")
+        try:
+            _v = float(_raw) if _raw else default
+        except ValueError:
+            log.warning(f"aishell_dsh_capable: env {name}={_raw!r} not numeric, "
+                        f"falling back to default {default}")
+            return default
+        if not (1.0 <= _v <= 86400.0):
+            log.warning(f"aishell_dsh_capable: env {name}={_raw!r} out of range "
+                        f"[1, 86400], falling back to default {default}")
+            return default
+        return _v
+
+    _timeout = _env_float("RUNTIME_ENGINE_CAP_TIMEOUT", 20.0)
+    _ttl = _env_float("RUNTIME_PROBE_INTERVAL", 600.0)
+    now = _time.monotonic()
+    _hit = aishell_dsh_capable._cache.get(cli_path)
+    if _hit and now - _hit[0] < _ttl:
+        return _hit[1]
+    capable = False
+    reason = "unknown"
+    try:
+        # stdin=DEVNULL：交互式同名工具不得抢占父进程 stdin（挂起由 timeout 兜底）
+        _r = _sp.run([cli_path, "acp", "--help"], capture_output=True, text=True,
+                     stdin=_sp.DEVNULL, encoding="utf-8", errors="replace",
+                     timeout=_timeout)
+        _out = ((_r.stdout or "") + (_r.stderr or "")).lower()
+        if _r.returncode != 0:
+            reason = f"exit={_r.returncode}"
+        elif "agent client protocol" not in _out:
+            reason = "no ACP signature in output"
+        else:
+            capable = True
+    except _sp.TimeoutExpired:
+        reason = f"timeout after {_timeout}s"
+    except Exception as _exc:
+        reason = f"{type(_exc).__name__}: {_exc}"
+    aishell_dsh_capable._cache[cli_path] = (now, capable)
+    if not capable:
+        _key = (cli_path, reason)
+        if _key not in aishell_dsh_capable._warned:
+            aishell_dsh_capable._warned.add(_key)
+            log.warning("aishell-dsh capability probe failed: %s (%s) — "
+                        "same-name tool without acp, or real CLI cold start slower than %.0fs "
+                        "(engine will report installed=False)", cli_path, reason, _timeout)
+    return capable
+
+
+aishell_dsh_capable._cache = {}    # cli_path -> (monotonic_ts, capable)
+aishell_dsh_capable._warned = set()  # (cli_path, reason) 告警去重
 
 
 def _select_model_option(session_new_result) -> str:
@@ -602,7 +725,23 @@ class _AishellACPClient(_ACPSimpleClient):
                 return
 
         if update_type_norm == "usage_update":
-            return  # {used,size} 上下文占用，非计费——一期忽略（二期消费）
+            # 二期消费：{used,size} 为上下文占用（非计费）——发 usage 事件进任务
+            # 实时流（前端 events.js 对未知 type 有默认渲染 + 📊 icon），账本类
+            # token 计量仍走 session.v4.jsonl.zstd 解析轨（usage_collect），两不混淆。
+            _u = update.get("used")
+            _z = update.get("size")
+            if _u is None or _z is None:
+                _c = update.get("content") if isinstance(update.get("content"), dict) else {}
+                _u = _u if _u is not None else _c.get("used")
+                _z = _z if _z is not None else _c.get("size")
+            try:
+                _u_f, _z_f = float(_u), float(_z)
+                _pct = f" ({_u_f / _z_f * 100:.0f}%)" if _z_f else ""
+                # 文案英文语言中立：事件流内容会直达所有 locale 的用户界面
+                self.on_message("usage", f"context usage {_u_f:.0f} / {_z_f:.0f} tokens{_pct}")
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+            return
 
         if update_type_norm == "agent_message_chunk":
             text = update.get("content", {}).get("text", "")

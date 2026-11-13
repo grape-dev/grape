@@ -67,5 +67,7 @@
   "fork_exists": "⚠️ Repository already exists (may have been forked), manage it in repo settings",
   "fork_no_permission": "⚠️ No fork permission, please check token settings",
   "fork_success": "Fork succeeded: {msg}",
-  "fork_failed": "Fork failed: {msg}"
+  "fork_failed": "Fork failed: {msg}",
+  "experience_host_failed": "Repository created but hosting failed: {{reason}}. You can re-host it from the repositories page.",
+  "unknown_reason": "unknown reason"
 }

@@ -6,17 +6,25 @@
   列表为空时回退会话主引擎（session.runtime_id），无则 None（engine_unavailable）。
 - 本机直连（credential_id=0）为最低优先级成员：选中即 direct；远端引擎入队该引擎（确定路由）。
 """
+
 import os
+
 import json
+
 import random
+
 import time as _time
+
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.kernel.config import CONFIG_DIR, log
+from src.kernel.session_manager import db
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
 
 # resolve_local_engine 结果缓存（30s TTL）——避免每条飞书消息都查 DB agent_runtimes 表
 # （handler_async + chat.py 两处各调一次，叠加 _remote_runtime_ready 再查，单条消息 5+ 次 DB 查询）
 _resolve_local_cache: dict = {}  # {"result": int|None, "expires": float}
+
 _RESOLVE_LOCAL_TTL = 30.0
 
 # 远端引擎心跳超时阈值（秒）：last_seen_at 超过此值视为死引擎（AI DevSpace 被删后残留 runtime）。
@@ -25,7 +33,9 @@ _RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 
 # 默认优先级档位（小=高优先）
 _PRIO_REPO = 10
+
 _PRIO_GLOBAL = 50
+
 _PRIO_LOCAL = 90
 
 # ===== Issue #658 修订（2026-11-03 用户裁定）：引擎角色不按类型默认映射 =====
@@ -43,7 +53,6 @@ KNOWN_AGENT_ROLES = {"coding", "issue", "qa", "vod", "chat", "sre"}
 # 兼容别名（既有内部引用保留；外部模块请使用 KNOWN_AGENT_ROLES）
 _KNOWN_AGENT_ROLES = KNOWN_AGENT_ROLES
 
-
 def node_agent_role(node) -> str:
     """Issue #955：解析节点角色名（agent_type）——id 优先、tag 兜底。
 
@@ -54,18 +63,15 @@ def node_agent_role(node) -> str:
         return ""
     return (node.get("id") or node.get("tag") or "").strip()
 
-
 def node_matches_agent_role(node, role) -> bool:
     """Issue #955：节点是否匹配指定角色——id 优先、tag 兜底（存量兼容）。"""
     if not isinstance(node, dict) or not role:
         return False
     return node.get("id") == role or node.get("tag") == role
 
-
 def is_agent_role(tag: str) -> bool:
     """pool_tag 是否为已知节点角色（Issue #658 认领侧守卫的适用判定）。"""
     return (tag or "").strip().lower() in KNOWN_AGENT_ROLES
-
 
 def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:
     """解析引擎有效角色集（双轨：显式 role_tags 声明 > 引擎类型默认映射兜底）。
@@ -88,11 +94,9 @@ def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:
     name = (engine_name or "").strip().lower()
     return _DEFAULT_ENGINE_ROLE_TAGS.get(name)
 
-
 def _member_role_tags(m: dict) -> list | None:
     """从候选引擎成员 dict 取有效角色集（成员未带 role_tags 字段时按 name 解析）。"""
     return engine_role_tags(m.get("name") or "", m.get("role_tags") or "")
-
 
 def _filter_by_role(members: list[dict], agent_type: str) -> list[dict]:
     """Issue #658 角色硬过滤（派发候选筛选最前置）：agent_type ∈ engine 有效角色集。
@@ -109,7 +113,6 @@ def _filter_by_role(members: list[dict], agent_type: str) -> list[dict]:
             out.append(m)
     return out
 
-
 def _role_no_candidates_detail(members: list[dict], agent_type: str) -> str:
     """角色硬过滤后无候选的显式错误信息（含 agent_type 与各候选引擎 role_tags）。"""
     at = (agent_type or "").strip().lower()
@@ -119,7 +122,6 @@ def _role_no_candidates_detail(members: list[dict], agent_type: str) -> str:
         parts.append(f"{m.get('name') or '?'}(id={m.get('runtime_id')}):{','.join(roles) if roles else 'any'}")
     return (f"no engine matches agent_type '{at}' by role_tags "
             f"(available engines: {'; '.join(parts) or 'none'})")
-
 
 def _log_role_no_candidates(stage: str, repo_key: str, agent_type: str, scene_id: str,
                             members: list[dict]) -> None:
@@ -137,7 +139,6 @@ _DEFAULT_CFG = {
     "local_priority": _PRIO_LOCAL,
 }
 
-
 def load_engine_selection() -> dict:
     """读 configs/engine-selection.json；缺失/损坏回默认（默认也是"必选已注册引擎"，不回落 opencode）。"""
     try:
@@ -152,12 +153,10 @@ def load_engine_selection() -> dict:
         log.warning(f"load_engine_selection failed: {e}")
     return dict(_DEFAULT_CFG)
 
-
 def _norm_repo(repo_key: str) -> str:
     """仓库标识归一化为 owner/repo（与 runtime_credentials.owner_id 对齐）。"""
     from src.kernel.repo_key import from_repo_key
     return (from_repo_key(repo_key or "") or "").strip()
-
 
 def engine_name(runtime_id: int) -> str:
     """按已注册引擎 id 反查类型名（agent_runtimes.name）；查不到返回空串。
@@ -177,11 +176,9 @@ def engine_name(runtime_id: int) -> str:
             return ""
     return row[0] or "" if row else ""
 
-
 def _db():
     from src.kernel.session_manager import db, db_lock
     return db, db_lock
-
 
 def _member_scope(m: dict, repo: str) -> str:
     """成员档位：repo（仓库级专属）/ global（远端全局）/ local（本机直连）。"""
@@ -194,7 +191,6 @@ def _member_scope(m: dict, repo: str) -> str:
         if oid and oid == repo:
             return "repo"
     return "global"
-
 
 def _health_ok(m: dict) -> bool:
     """健康判定：唯一真源 src.domains.runtime.engine.health.engine_health_ok
@@ -242,7 +238,6 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
         return deduped
     return out
 
-
 def engine_unique_key(m: dict) -> str:
     """引擎候选的唯一键（Issue #400 单选约束 / 候选去重）。
 
@@ -269,7 +264,6 @@ def engine_unique_key(m: dict) -> str:
         ins = f"{name.lower()}-cred{cid}"
     return f"{scope}:{ins.lower()}"
 
-
 def dedupe_engines(members: list[dict]) -> list[dict]:
     """按唯一键去重（保留首个出现项，即查询/排序中的权威行）。
 
@@ -288,9 +282,6 @@ def dedupe_engines(members: list[dict]) -> list[dict]:
         seen.add(key)
         out.append(m)
     return out
-
-
-# ===== 引擎档位 / 优先级（供 pick_engine 多引擎选择）=====
 
 def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
     """从 user_repos 表反查 repo_key 对应的 user_id。
@@ -317,6 +308,14 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
             if issue_creator:
                 if not issue_creator.strip():
                     return 0
+                # M5/S51（D31）：身份优先——external_identities（平台登录名权威域）
+                # 命中即权威；原二级回退里已有同一身份查询，此处置前并保留原链兜底
+                from src.kernel.repo_key import parse_repo_key
+                from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+                _provider, _, _ = parse_repo_key(repo_key)
+                _uid = resolve_user_id_by_platform_login(_provider, issue_creator)
+                if _uid:
+                    return _uid
                 # 1. 优先查 unified_user_mapping（Issue #76 修复，OAuth 登录用户）
                 # FR-CQ-1: 提取为 um_column_for_repo，消除 if/else 分支
                 from src.kernel.repo_key import parse_repo_key, um_column_for_repo
@@ -324,7 +323,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 _col = um_column_for_repo(repo_key)
                 c.execute(
                     f"SELECT user_id FROM unified_user_mapping "
-                    f"WHERE {_col}=? AND {_col}!='' AND user_id>0 LIMIT 1",
+                    f"WHERE {_col}=? AND {_col}!='' AND user_id!='' AND user_id!='0' LIMIT 1",
                     (issue_creator,))
                 row = c.fetchone()
                 if row:
@@ -334,7 +333,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
                 c.execute(
                     "SELECT ga.id FROM grape_accounts ga "
-                    "WHERE ga.id>0 AND ga.status=1 "
+                    "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
                     "AND EXISTS (SELECT 1 FROM external_identities ei "
                     "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
                     "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
@@ -376,7 +375,6 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
         except Exception:
             return 0
 
-
 def _engine_scope_info(runtime_id: int) -> tuple[str, str]:
     """返回引擎行档位 (scope, owner_id)：本机直连（credential_id=0）→ local；失败返回 ('global', '')。"""
     db, lock = _db()
@@ -396,7 +394,6 @@ def _engine_scope_info(runtime_id: int) -> tuple[str, str]:
         return "local", ""
     return row[3] or row[0] or "global", row[4] or row[1] or ""
 
-
 def _default_priority(runtime_id: int, repo: str, cfg: dict) -> int:
     """按档位派生默认优先级：repo=10 / global=50 / local=local_priority。"""
     scope, owner_id = _engine_scope_info(runtime_id)
@@ -404,9 +401,6 @@ def _default_priority(runtime_id: int, repo: str, cfg: dict) -> int:
     if scope == "repo" and from_repo_key(owner_id or "") == repo:
         return _PRIO_REPO
     return int(cfg.get("local_priority", _PRIO_LOCAL)) if scope == "local" else _PRIO_GLOBAL
-
-
-# ===== 派发选择 =====
 
 def _engines_by_ids(engine_ids: list[int], repo: str, cfg: dict) -> list[dict]:
     """按 runtime_id 列表查引擎详情（含 scope/priority），供 pick_engine 多引擎选择。"""
@@ -439,7 +433,6 @@ def _engines_by_ids(engine_ids: list[int], repo: str, cfg: dict) -> list[dict]:
         })
     return members
 
-
 def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
     """过滤绑定集合，只保留标签匹配 agent_type 的引擎。"""
     if not agent_type or not members:
@@ -458,12 +451,6 @@ def _filter_by_tags(members: list[dict], agent_type: str) -> list[dict]:
                 result.append(m)
     return result
 
-
-# ===== 健康度过滤增强层（Issue #134）=====
-# 健康度过滤作为派发链路的增强层插入，不改变广播协议/分发语义/A2A 事件流转。
-# 仅在 pick_engine 的候选机器筛选阶段生效：过滤低健康分引擎，全部不健康时降级兜底。
-
-
 def _filter_by_health(members: list[dict]) -> list[dict]:
     """健康度过滤增强层：从候选引擎中过滤出健康的。
 
@@ -479,7 +466,6 @@ def _filter_by_health(members: list[dict]) -> list[dict]:
         log.warning(f"_filter_by_health failed, skipping health filter: {e}")
         return members  # 模块异常时不过滤（不阻塞派发）
 
-
 def _best_health_fallback(members: list[dict]) -> int | None:
     """全部不健康时的降级兜底：取健康分最高的引擎。"""
     try:
@@ -490,7 +476,6 @@ def _best_health_fallback(members: list[dict]) -> int | None:
         log.warning(f"_best_health_fallback failed: {e}")
         # 兜底的兜底：取第一个候选
         return members[0]["runtime_id"] if members else None
-
 
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 scene_id: str = "", user_id: int = 0,
@@ -575,7 +560,6 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
         return int(fallback_runtime_id)
     return None
 
-
 def _sre_no_broadcast(agent_type: str) -> bool:
     """SRE Agent 是否禁止广播（sre-repo-worker-relax-design §1.1）。
 
@@ -584,7 +568,6 @@ def _sre_no_broadcast(agent_type: str) -> bool:
     广播到任意用户贡献的机器责任边界不清（sre-repo-worker-relax 安全边界）。
     """
     return str(agent_type or "").strip().lower() == "sre"
-
 
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
                               issue_creator: str = "") -> str | None:
@@ -630,7 +613,6 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
             log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
     return ""
 
-
 def resolve_local_engine(user_id: int = 0) -> int | None:
     """返回一个健康的本机直连引擎（credential_id=0 且 installed+healthy）；无则 None。
 
@@ -638,7 +620,8 @@ def resolve_local_engine(user_id: int = 0) -> int | None:
     无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
     避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
 
-    user_id > 0（chat 场景，per-user-random-default-engine 设计）：候选限定**当前这台
+    user_id 非空且非哨兵（chat 场景，per-user-random-default-engine 设计；D105 后为 uuid
+    str）：候选限定**当前这台
     主控机**的直连引擎（host_name=本机 hostname，ELB 分流下请求落哪台就直连哪台，
     跨主机的直连行无法本机拉进程），再按 user_id 稳定取模挑选——同一用户在同一台
     机器上恒定同一引擎，不同用户自然散开，避免全员滑向同一个默认引擎（此前取
@@ -656,8 +639,7 @@ def resolve_local_engine(user_id: int = 0) -> int | None:
     if user_id:
         # 方案 A：只挑当前主控机自己的直连引擎（别的 master 的行留显示，不留执行）
         try:
-            import socket as _sock
-            _hn = _sock.gethostname()
+            _hn = engine_host()
             _own = [m for m in cand if (m.get("host_name") or "") == _hn]
             if _own:
                 cand = _own
@@ -671,14 +653,21 @@ def resolve_local_engine(user_id: int = 0) -> int | None:
         return None
     if user_id:
         # 稳定取模：同一用户恒定命中同一引擎（会话连续），用户间均匀散开
+        # D105：user_id 为 uuid str（调用方 user.get("id")），int() 直接 ValueError →
+        # 非数字串降级为稳定 md5 派生数值（同输入恒同结果，保持取模语义）
+        _seed_src = str(user_id)
+        try:
+            _seed = int(_seed_src)
+        except ValueError:
+            import hashlib as _hl
+            _seed = int(_hl.md5(_seed_src.encode("utf-8")).hexdigest()[:12], 16)
         _ids = sorted(r["runtime_id"] for r in cand)
-        result = _ids[int(user_id) % len(_ids)]
+        result = _ids[_seed % len(_ids)]
     else:
         result = min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
     _resolve_local_cache["result"] = result
     _resolve_local_cache["expires"] = _time.time() + _RESOLVE_LOCAL_TTL
     return result
-
 
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
     """托管默认选择：按 专属→全局→本机直连 优先级从仓库可选引擎中选一个（用于种子绑定集合）。
@@ -698,9 +687,6 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
             return min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
         return random.choice(cand)["runtime_id"]
     return None
-
-
-# ===== 候选引擎查询（供绑定配置下拉 / 展示）=====
 
 def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str = "") -> list[dict]:
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
@@ -729,9 +715,11 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         c = db.cursor()
         try:
             if scope == "repo":
-                # 按当前仓库过滤：owner_id 可能带平台前缀（gitcode:/github:）也可能不带，三种都匹配
-                # （跨平台候选与 runtime.py list_runtime_tasks / deps.py check_repo_access 同款）
+                # 按当前仓库过滤：owner_id 可能带平台前缀也可能不带——候选集由
+                # repo_key_in_params 原子产物派生（S100/D75：占位符与参数同源构造，
+                # arity 由构造保证；候选面 = 全部平台卡前缀，与 knowledge.py 同口径）
                 if repo:
+                    _ph, _args = repo_key_in_params(repo)
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
@@ -739,8 +727,8 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         " COALESCE(r.alias,''), COALESCE(r.scene_tags,''), COALESCE(r.org_id,0)"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' "
-                        "AND (rc.owner_id=? OR rc.owner_id=? OR rc.owner_id=?) ORDER BY r.id",
-                        (repo, f"gitcode:{repo}", f"github:{repo}"))
+                        f"AND rc.owner_id IN ({_ph}) ORDER BY r.id",
+                        _args)
                 else:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
@@ -825,14 +813,10 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         })
     return out
 
-
-# ====== 引擎绑定真实性同步（docs/weekly-06/engine-binding-truth-sync-design.md）======
-
 # 引擎离线判定为真死、触发场景绑定清理的阈值（秒）。默认 0 = 禁用自动解绑（只提示不清理）；
 # 需要自动清理时显式设置 ENGINE_DETACH_AFTER_SECONDS（如 28800 = 8h：心跳 15s，8h 无恢复
 # = 连续 ~1920 个心跳周期全丢，机器不会自己回来）。
 _ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "0"))
-
 
 def cleanup_scene_engine_bindings(rid_list: list) -> int:
     """从所有活跃场景的 nodes_json 中移除对 rid_list 引擎的绑定（Issue #250 原逻辑抽出共享）。
@@ -882,7 +866,6 @@ def cleanup_scene_engine_bindings(rid_list: list) -> int:
         db.commit()
     return len(changed_rows)
 
-
 def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
     """查所有活跃场景中绑定了 runtime_id 的 (row_id, repo_key, scene_id, node_tag, before_ids)。
 
@@ -908,7 +891,6 @@ def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
                              node.get("tag") or node.get("id") or "", eids))
     return hits
 
-
 def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
     """查仍绑定 runtime_id 的 autopilot 巡检任务 [{id, name}]（两表协同提示用，不删绑定）。"""
     import json as _json
@@ -927,7 +909,6 @@ def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
         if isinstance(eids, list) and runtime_id in eids:
             out.append({"id": tid, "name": tname or f"task-{tid}"})
     return out
-
 
 def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
                               repo_key: str = "") -> list:
@@ -983,7 +964,6 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
         except Exception as e:
             log.warning(f"get_detached_engine_hints: query failed: {e}")
     return out
-
 
 def _detach_dead_engine_bindings() -> dict:
     """引擎绑定真实性同步核心：离线超阈值的引擎，真实清理场景绑定 + 审计留痕。
@@ -1069,7 +1049,6 @@ def _detach_dead_engine_bindings() -> dict:
         log.info(f"_detach_dead_engine_bindings: {stats} (threshold={_ENGINE_DETACH_AFTER_SECONDS}s)")
     return stats
 
-
 # ── Issue #605：候选过滤原因（由 weekly-10 迁入，只读解释，不改选择行为） ──
 def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
     """计算单个候选引擎会被过滤掉的原因列表（与实际过滤链同一口径，只读不改行为）。
@@ -1123,7 +1102,6 @@ def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
         except Exception:
             pass
     return reasons
-
 
 # ── Issue #605：引擎派发解释（由 weekly-10 迁入） ──
 def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
@@ -1180,9 +1158,6 @@ def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
                                       scene_id=scene_id, user_id=user_id, issue_creator=issue_creator)
     return out
 
-
-
-
 def scene_dispatch_failure_reason(scene_id: str, agent_type: str, repo_key: str = "",
                                   user_id: int = 0, issue_creator: str = "") -> str:
     """Issue #541：场景派发失败原因判定（调用方在 get_scene_pool_engine_ids 返回 None 后使用）。
@@ -1224,3 +1199,204 @@ def scene_dispatch_failure_reason(scene_id: str, agent_type: str, repo_key: str 
         return (f"场景绑定的引擎已注销或不存在（scene={scene_id}, agent={agent_type}, "
                 f"engines={ids}），请检查引擎注册状态后重新配置（Issue #653）")
     return f"场景绑定的引擎全部离线（scene={scene_id}, agent={agent_type}, engines={ids}），请检查引擎在线状态"
+
+from src.kernel.repo_key import repo_key_in_params
+
+def _decision_log(event: str, **fields) -> None:
+    """engine_select 决策结构化日志（Issue #605）：单行 JSON，便于 grep/采集。"""
+    try:
+        payload = {"event": event}
+        payload.update(fields)
+        log.info("engine_select_decision " + json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+
+def merge_duplicate_engine_rows(credential_id: int, c=None) -> dict:
+    from src.kernel.session_manager import db
+    """按 (credential_id, lower(name)) 去重合并引擎行（Issue #654），保留 MAX(id)。
+
+    与 scope 切换/重注册的「保留最新行」口径一致。被替换行的配置迁移到存活行：
+    - engine_capabilities：存活行无 capabilities 行时，被替换行的 capabilities 改指向存活行
+      （priority/标签/max_concurrent 继承，不静默回默认 50/'all'）；
+    - tags_user_set：存活行=0 且任一被替换行=1 时置 1（用户手动配置过的标记继承）。
+    返回 {old_rid: surviving_rid} 映射（无重复行时为空 dict），供调用方
+    remap_engine_references 改写引擎 id 引用 + 输出结构化变更事件。
+    事务边界：传入 cursor（c）时由调用方 commit；c=None 时自取 db_lock 并 commit。
+    """
+    from src.kernel.session_manager import db, db_lock
+    _own_tx = c is None
+    if _own_tx:
+        # db_lock 可重入，with 只是保证互斥
+        with db_lock:
+            c = db.cursor()
+            return _merge_duplicate_engine_rows_locked(credential_id, c, _own_tx)
+    return _merge_duplicate_engine_rows_locked(credential_id, c, _own_tx)
+
+def _merge_duplicate_engine_rows_locked(credential_id: int, c, commit: bool) -> dict:
+    rid_map = {}
+    try:
+        rows = c.execute(
+            "SELECT id, lower(name), tags_user_set FROM agent_runtimes WHERE credential_id=?",
+            (credential_id,)).fetchall()
+    except Exception as _e:
+        log.warning(f"merge_duplicate_engine_rows: query failed: {_e}")
+        return rid_map
+    groups = {}
+    for rid, lname, tus in rows:
+        groups.setdefault(lname, []).append((rid, tus or 0))
+    replaced_ids = []
+    for lname, items in groups.items():
+        if len(items) < 2:
+            continue
+        items_sorted = sorted(items, key=lambda x: x[0])
+        surviving = items_sorted[-1][0]
+        replaced = [rid for rid, _ in items_sorted[:-1]]
+        # capabilities 迁移：存活行无 → 被替换行首个有 capabilities 的改指向存活行
+        try:
+            has_cap = c.execute(
+                "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1",
+                (surviving,)).fetchone()
+            if not has_cap:
+                for rid in replaced:
+                    cap = c.execute(
+                        "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1",
+                        (rid,)).fetchone()
+                    if cap:
+                        c.execute(
+                            "UPDATE engine_capabilities SET runtime_id=?, "
+                            "updated_at=CURRENT_TIMESTAMP WHERE runtime_id=?",
+                            (surviving, rid))
+                        break
+        except Exception as _e:
+            log.warning(f"merge_duplicate_engine_rows: migrate capabilities failed: {_e}")
+        # tags_user_set 继承
+        try:
+            if items_sorted[-1][1] == 0 and any(tus for _, tus in items_sorted[:-1]):
+                c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (surviving,))
+        except Exception as _e:
+            log.warning(f"merge_duplicate_engine_rows: inherit tags_user_set failed: {_e}")
+        for rid in replaced:
+            rid_map[rid] = surviving
+        replaced_ids.extend(replaced)
+    if replaced_ids:
+        _ph = ",".join("?" * len(replaced_ids))
+        try:
+            # 未迁移的 capabilities 残留一并清理（避免悬空 runtime_id）
+            c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph})", replaced_ids)
+            c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({_ph})", replaced_ids)
+        except Exception as _e:
+            log.warning(f"merge_duplicate_engine_rows: delete replaced rows failed: {_e}")
+        if commit:
+            db.commit()
+    return rid_map
+
+def remap_scene_engine_bindings(rid_map: dict) -> int:
+    """将所有活跃场景 nodes_json 的 engine_runtime_ids 按 rid_map {old: new} 重映射（Issue #654）。
+
+    cleanup_scene_engine_bindings 的泛化：不是移除引用而是改指向存活引擎行，
+    场景配置的引擎绑定在引擎行替换（scope 切换去重/重注册）后不悬空。
+    返回被修改的场景数。
+    """
+    if not rid_map:
+        return 0
+    import json as _json
+    from datetime import datetime, timezone
+    from src.kernel.session_manager import db, db_lock
+    changed_rows = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
+        except Exception as _e:
+            log.warning(f"remap_scene_engine_bindings: query scenes failed: {_e}")
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        for row_id, nodes_str in rows:
+            try:
+                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
+            except Exception:
+                continue
+            changed = False
+            for node in nodes:
+                eids = node.get("engine_runtime_ids") or []
+                if not eids:
+                    continue
+                new_eids = [rid_map.get(eid, eid) for eid in eids]
+                if new_eids != eids:
+                    node["engine_runtime_ids"] = new_eids
+                    changed = True
+            if changed:
+                try:
+                    c.execute(
+                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
+                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
+                    changed_rows.append(row_id)
+                except Exception as _e:
+                    log.warning(f"remap_scene_engine_bindings: update scene {row_id} failed: {_e}")
+        db.commit()
+    return len(changed_rows)
+
+def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_row_replaced") -> dict:
+    """引擎行替换后统一 remap 引擎 id 引用（Issue #654），输出结构化变更事件日志。
+
+    覆盖的引用面（每表独立 try/except，旧库缺列/缺表不致命）：
+    - devops_pipeline_scene.nodes_json 的 engine_runtime_ids（场景绑定）
+    - autopilot_tasks.engine_runtime_ids（任务级意图声明）
+    - devops_agent_session.runtime_id / chat_agent_session.runtime_id（agent backend 引用）
+    - agent_type.default_runtime_id / agent_type_runtime_pool.runtime_id
+
+    事件日志格式（可追溯）：JSON 单行，含 cid、reason、影响引擎数、旧→新 id 映射、
+    各表命中行数。返回 {"scenes": n, "sessions": n, ...} 统计。
+    """
+    if not rid_map:
+        return {}
+    import json as _json
+    from src.kernel.session_manager import db, db_lock
+    stats = {"scenes": 0, "autopilot_tasks": 0, "devops_agent_session": 0,
+             "chat_agent_session": 0, "agent_type": 0, "agent_type_runtime_pool": 0}
+    old_ids = list(rid_map.keys())
+    _ph = ",".join("?" * len(old_ids))
+    with db_lock:
+        c = db.cursor()
+        # 1. 场景 nodes_json（结构化 JSON，逐节点替换）
+        try:
+            stats["scenes"] = remap_scene_engine_bindings(rid_map)
+        except Exception as _e:
+            log.warning(f"remap_engine_references: remap scenes failed: {_e}")
+        # 2. autopilot_tasks.engine_runtime_ids（JSON 列表字符串）
+        try:
+            c.execute(f"SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''")
+            for tid, eids_str in c.fetchall():
+                try:
+                    eids = _json.loads(eids_str) if eids_str else []
+                except Exception:
+                    continue
+                if not isinstance(eids, list):
+                    continue
+                new_eids = [rid_map.get(eid, eid) for eid in eids]
+                if new_eids != eids:
+                    c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+                              (_json.dumps(new_eids), tid))
+                    stats["autopilot_tasks"] += 1
+        except Exception as _e:
+            log.warning(f"remap_engine_references: remap autopilot_tasks failed: {_e}")
+        # 3. agent backend 引用（整型列，CASE 批量替换）
+        for table, col in (("devops_agent_session", "runtime_id"),
+                           ("chat_agent_session", "runtime_id"),
+                           ("agent_type", "default_runtime_id"),
+                           ("agent_type_runtime_pool", "runtime_id")):
+            try:
+                case = "CASE " + " ".join(
+                    f"WHEN {col}={old} THEN {new}" for old, new in rid_map.items()) + f" ELSE {col} END"
+                c.execute(f"UPDATE {table} SET {col}={case} WHERE {col} IN ({_ph})", old_ids)
+                stats[table] = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+            except Exception as _e:
+                log.warning(f"remap_engine_references: remap {table}.{col} failed: {_e}")
+        db.commit()
+    # 结构化变更事件（Issue #654 验收：cid、影响引擎数、旧→新 id 映射）
+    event = {"event": "engine_reference_remap", "credential_id": cid, "reason": reason,
+             "engines_affected": len(rid_map), "id_mapping": {str(k): v for k, v in rid_map.items()},
+             **stats}
+    log.info("engine_change_event: " + _json.dumps(event, ensure_ascii=False))
+    return stats

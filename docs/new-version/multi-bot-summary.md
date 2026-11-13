@@ -77,7 +77,7 @@ def _get_conn_url(self):
 
 ```python
 # 异步获取 WS URL（通过 run_in_executor 在线程池中执行同步 HTTP）
-from src.im.feishu_bot import _get_ws_endpoint_async
+from src.domains.runtime.im.feishu_bot import _get_ws_endpoint_async
 ws_url = await _get_ws_endpoint_async(app_id, app_secret)
 
 # 注入 client 绕过 _get_conn_url 的同步请求

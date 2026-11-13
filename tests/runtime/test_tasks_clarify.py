@@ -1,15 +1,23 @@
 """Task Center 澄清消息测试：拉取 agent 澄清 + 开发者回复（发 GitCode Issue 评论 + 写会话）。"""
+
 import os
+
 from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
+
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
@@ -19,10 +27,12 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 _uid = None
-_token = ""
-_headers = {}
-_task_id = None
 
+_token = ""
+
+_headers = {}
+
+_task_id = None
 
 def setup_module():
     global _uid, _token, _headers, _task_id
@@ -59,7 +69,7 @@ def setup_module():
         c.execute("DELETE FROM agent_tasks WHERE id='t_clarify_test'")
         c.execute(
             "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, repo_key, issue_id, agent_type, skill, prompt, status) "
-            "VALUES ('t_clarify_test', 'sess_clarify_test', 0, 'gitcode:tc_clarify/demo', 10, 'issue', 'issue', 'test', 'completed')")
+            "VALUES ('t_clarify_test', 'sess_clarify_test', 0, 'gitcode:tc_clarify/demo', '#10', 'issue', 'issue', 'test', 'completed')")
         c.execute("DELETE FROM task_messages WHERE task_id='t_clarify_test'")
         c.execute(
             "INSERT INTO task_messages (task_id, seq, type, tool, content, created_at) "
@@ -69,10 +79,9 @@ def setup_module():
             "VALUES ('t_clarify_test', 2, 'step_start', '', 'Step 1', datetime('now'))")
         db.commit()
 
-
 def test_get_clarifications():
     """拉取 agent 澄清消息：只返回 text/reasoning/error/tool_use，不含 step_start 噪音。"""
-    r = client.get(f"/api/tasks/{_task_id}/clarifications", headers=_headers)
+    r = client.get(f"/api/issues/{_task_id}/clarifications", headers=_headers)
     assert r.status_code == 200, r.text
     d = r.json()
     msgs = d["messages"]
@@ -84,9 +93,14 @@ def test_get_clarifications():
     assert not any(m["type"] == "step_start" for m in msgs), "不应含 step_start 噪音"
     assert d["issue_url"], "应返回 issue_url"
 
-
 def test_reply_clarification():
     """开发者回复澄清：mock GitCode POST 评论 + 验证会话消息写入。"""
+    # S108：#343 写操作走仓库 bot token（rc 单表权威）——fixture 种凭据
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO grape_t_repo_credentials (id, repo_key, cred_type, value) VALUES ('tc-clarify-uuid', 'gitcode:tc_clarify/demo', 'bot', 'fake-token')  -- D99")
+        db.commit()
+
     def _fake_urlopen(req, timeout=30):
         class _Resp:
             def read(self): return b'{"id":1}'
@@ -94,19 +108,19 @@ def test_reply_clarification():
             def __exit__(self, *a): pass
         return _Resp()
     with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-        r = client.post(f"/api/tasks/{_task_id}/clarify", headers=_headers,
+        r = client.post(f"/api/issues/{_task_id}/clarify", headers=_headers,
                         json={"message": "选择方案 A，请继续"})
     assert r.status_code == 200, r.text
     assert r.json()["ok"] is True
 
-
 def test_clarify_empty_message():
     """空消息 → 400。"""
-    r = client.post(f"/api/tasks/{_task_id}/clarify", headers=_headers, json={"message": ""})
+    r = client.post(f"/api/issues/{_task_id}/clarify", headers=_headers, json={"message": ""})
     assert r.status_code == 400
-
 
 def test_clarify_task_not_found():
     """不存在的 task → 404。"""
-    r = client.get("/api/tasks/999999/clarifications", headers=_headers)
+    r = client.get("/api/issues/999999/clarifications", headers=_headers)
     assert r.status_code == 404
+
+from src.domains.mgmt.auth import grape_account_db

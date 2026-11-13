@@ -283,9 +283,7 @@ def test_vcs_api_client_class_intact():
     assert hasattr(client, "post_issue_comment")
     assert hasattr(client, "get_issue")
     assert hasattr(client, "close_issue")
-    assert hasattr(client, "_gitcode_request")
-    assert hasattr(client, "_github_request")
-    assert hasattr(client, "_gitlab_request")
+    assert hasattr(client, "_request")
     assert hasattr(client, "_do_request")
 
 

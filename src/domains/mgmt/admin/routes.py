@@ -52,6 +52,10 @@ class ConfigBody(BaseModel):
     github_bot_username: str = ""
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
+    gitee_oauth_client_id: str = ""
+    gitee_oauth_client_secret: str = ""
+    huawei_oauth_client_id: str = ""
+    huawei_oauth_client_secret: str = ""
     bot_usernames: list[str] = []
     webhook_url: str = ""
     gitcode_webhook_token: str = ""
@@ -217,7 +221,11 @@ def put_config(body: ConfigBody, admin: dict = Depends(require_admin)):
 @router.post("/config/verify-token", operation_id="admin_config_verify_token",
              summary="Verify platform token", description="Calls platform /user API to validate token and returns username.")
 def verify_platform_token(body: VerifyTokenBody, admin: dict = Depends(require_admin)):
-    if body.provider not in ("gitcode", "github"):
+    # D88/S115：卡派生判定（消基线二元白名单——D71 登记收口项）。下游
+    # config_store.verify_token D30/S50 已卡驱动（任何已配平台可用），白名单
+    # 是入口与下游能力脱节的最后一米。未知平台照旧 400 INVALID_PROVIDER。
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    if get_platform_card(body.provider) is None:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode or github"})
     if not body.token:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_REQUIRED", "message": "token is required"})
@@ -257,7 +265,7 @@ def admin_list_users(page: int = 1, per_page: int = 20, q: str = "",
 
 @router.get("/users/{user_id}", operation_id="admin_user_detail",
              summary="Get grape user detail")
-def admin_user_detail(user_id: int, admin: dict = Depends(require_admin)):
+def admin_user_detail(user_id: str, admin: dict = Depends(require_admin)):
     """获取用户详情（含绑定信息、是否有密码）。"""
     detail = admin_db.get_grape_user_detail(user_id)
     if not detail:
@@ -267,7 +275,7 @@ def admin_user_detail(user_id: int, admin: dict = Depends(require_admin)):
 
 @router.post("/users/{user_id}/disable", operation_id="admin_user_disable",
               summary="Disable grape user")
-def admin_disable_user(user_id: int, body: DisableUserBody,
+def admin_disable_user(user_id: str, body: DisableUserBody,
                        admin: dict = Depends(require_admin)):
     """禁用用户（status=0）。"""
     # 需求21: 管理员不可禁用自己
@@ -294,7 +302,7 @@ def admin_disable_user(user_id: int, body: DisableUserBody,
 
 @router.post("/users/{user_id}/restore", operation_id="admin_user_restore",
               summary="Restore grape user (from disabled or cooldown)")
-def admin_restore_user(user_id: int, admin: dict = Depends(require_admin)):
+def admin_restore_user(user_id: str, admin: dict = Depends(require_admin)):
     """恢复用户（status=0 禁用 或 status=3 冷静期 → status=1）。"""
     ok = admin_db.restore_grape_user(user_id)
     if not ok:
@@ -396,7 +404,7 @@ def get_bot_token_health(admin: dict = Depends(require_admin)):
 # ===== OAuth Login Whitelist Management (Issue #332) =====
 
 class LoginWhitelistBody(BaseModel):
-    provider: str  # "gitcode" or "github"
+    provider: str  # OAuth 渠道 key（gitcode/github/gitee/hwcloud...，渠道目录在册即可）
     username: str
     remark: str = ""
 
@@ -408,17 +416,35 @@ class ToggleLoginWhitelistBody(BaseModel):
 @router.get("/whitelist", operation_id="admin_login_whitelist_list",
              summary="List OAuth login whitelist")
 def admin_list_login_whitelist(admin: dict = Depends(require_admin)):
-    """Issue #332: List OAuth login whitelist entries."""
+    """Issue #332: List OAuth login whitelist entries.
+
+    2026-11-12 行式化（weekly-11）：条目统一行形态（provider+username，
+    老列式条目 legacy=true）；附 providers 渠道目录元数据（provider/name，
+    卡 name 仅展示用）供前端下拉动态渲染——新增渠道零前端改动。
+    """
+    from src.domains.mgmt.auth.providers import list_providers, get_provider
+    providers = [
+        {"provider": key, "name": (get_provider(key) or {}).get("name", key)}
+        for key in list_providers()
+    ]
     return {"whitelist": admin_db.list_login_whitelist(),
-            "enabled": admin_db.get_login_whitelist_enabled()}
+            "enabled": admin_db.get_login_whitelist_enabled(),
+            "providers": providers}
 
 
 @router.post("/whitelist", operation_id="admin_login_whitelist_add",
               summary="Add OAuth login whitelist entry")
 def admin_add_login_whitelist(body: LoginWhitelistBody, admin: dict = Depends(require_admin)):
-    """Issue #332: Add OAuth login whitelist entry."""
-    if body.provider not in ("gitcode", "github"):
-        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode or github"})
+    """Issue #332: Add OAuth login whitelist entry.
+
+    2026-11-12 行式化（weekly-11）：校验=登录渠道目录在册即可（登录域自治，
+    跨域 VCS 卡判定已删——华为有渠道卡无 VCS 卡，双轴下被挡即耦合实锤）。
+    白名单列不再存在（行式 INSERT），D88 担心的"VCS 卡在册无渠道卡 INSERT
+    409 谎报"路径随 _whitelist_column_for 退役消失。
+    """
+    from src.domains.mgmt.auth.providers import list_providers
+    if body.provider not in list_providers():
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_CHANNEL_NOT_CONFIGURED", "message": f"平台 {body.provider} 未配置 OAuth 登录渠道，无法加入登录白名单"})
     if not body.username.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_REQUIRED", "message": "username required"})
     ok = admin_db.add_login_whitelist(body.provider, body.username.strip(), body.remark)
@@ -432,14 +458,18 @@ def admin_add_login_whitelist(body: LoginWhitelistBody, admin: dict = Depends(re
 
 @router.delete("/whitelist/{item_id}", operation_id="admin_login_whitelist_delete",
                 summary="Delete OAuth login whitelist entry")
-def admin_delete_login_whitelist(item_id: int, admin: dict = Depends(require_admin)):
-    """Issue #332: Delete OAuth login whitelist entry."""
-    ok = admin_db.delete_login_whitelist(item_id)
+def admin_delete_login_whitelist(item_id: int, provider: str = "", admin: dict = Depends(require_admin)):
+    """Issue #332: Delete OAuth login whitelist entry.
+
+    2026-11-12 行式化（weekly-11）：可选 provider 参数定位老列式条目
+    （只清对应平台列，一人多平台老行互不误伤）；缺省删整行/新行。
+    """
+    ok = admin_db.delete_login_whitelist(item_id, provider=provider)
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "error_code": "WHITELIST_ENTRY_NOT_FOUND", "message": "Entry not found"})
     from src.domains.mgmt.auth.audit import log_audit
     log_audit("admin_whitelist_deleted", operator_id=admin["id"],
-              detail={"item_id": item_id})
+              detail={"item_id": item_id, "provider": provider or ""})
     return {"message": "Deleted"}
 
 
@@ -494,7 +524,7 @@ def admin_create_user(body: CreateUserBody, admin: dict = Depends(require_admin)
         raise HTTPException(status_code=500, detail={"code": 500, "error_code": "CREATE_USER_FAILED", "message": "Create user failed"})
     if not isinstance(result, dict):
         raise HTTPException(status_code=500, detail={"code": 500, "error_code": "CREATE_USER_FAILED", "message": "Create user failed"})
-    uid = int(result["id"])
+    uid = str(result["id"])  # uuid7 主键（TEXT）——uuid 账号改造漏改修复，勿回退 int()
     username = result["username"]
     # P2-1: 创建个人组织——与注册流程一致
     try:
@@ -511,7 +541,7 @@ def admin_create_user(body: CreateUserBody, admin: dict = Depends(require_admin)
 
 @router.put("/users/{user_id}", operation_id="admin_user_edit",
              summary="Edit user info")
-def admin_edit_user(user_id: int, body: EditUserBody, admin: dict = Depends(require_admin)):
+def admin_edit_user(user_id: str, body: EditUserBody, admin: dict = Depends(require_admin)):
     """Issue #332: Edit user email/nickname."""
     result = admin_db.update_grape_user(user_id, body.email, body.nickname)
     if result == "conflict":
@@ -526,7 +556,7 @@ def admin_edit_user(user_id: int, body: EditUserBody, admin: dict = Depends(requ
 
 @router.post("/users/{user_id}/reset-password", operation_id="admin_user_reset_password",
               summary="Reset user password")
-def admin_reset_password(user_id: int, body: ResetPasswordBody, admin: dict = Depends(require_admin)):
+def admin_reset_password(user_id: str, body: ResetPasswordBody, admin: dict = Depends(require_admin)):
     """Issue #332: Reset user password (invalidates old tokens)."""
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "PASSWORD_TOO_SHORT", "message": "password min 8 chars"})
@@ -796,3 +826,263 @@ def admin_obs_slo_create(body: SloCreateBody, admin: dict = Depends(require_admi
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
     return {"ok": True, "id": sid, "slo": slo_mod.get_slo(sid)}
+
+
+class VcsPlatformCardBody(BaseModel):
+    cards: dict  # {provider: {dialect, host, webhook_path, api_base, ...}}
+    # D11（2026-11-12）：bot token 是凭据不入卡（build_platform_card 拒未知键），
+    # 单独通道按各卡 global_bot_meta_key 写 meta；留空/缺席=不改
+    bot_tokens: dict = {}  # {provider: token}
+    # D13/S20（2026-11-12）：webhook token 同为凭据通道——按 {provider}_webhook_token
+    # meta key 落库（gitcode 为 managed_repos 列 seed 兜底的既有键形态）
+    webhook_tokens: dict = {}  # {provider: token}
+
+@router.get("/vcs-platforms", operation_id="admin_vcs_platforms_list",
+            summary="List vcs platform cards (repo hosting platforms)")
+def vcs_platforms_list(admin: dict = Depends(require_admin)):
+    """D10（2026-11-12）：全字段回读——编辑回写零丢失（S70 反例锁：
+    子集字段 GET→编辑→PUT 回写会让未返回字段落回 Builder 默认值，
+    gitee issue_write_form 丢失建单 404 的实弹事故同型）。
+    event_map/fields 用 PUT 清洗同款别名键，保证 GET→PUT 回环合法。
+    resources/capabilities 属高级配置（卡文件口径），不进管理面编辑，不回读。
+    bot_token_configured=global_bot_meta_key 已配置（值不回读）。
+    """
+    import dataclasses as _dc
+    import json as _json
+    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+    # D19：探活数据按平台并入各卡（meta bot_token_health，per-provider 结构）
+    _h, _checked_at = {}, ""
+    try:
+        _raw_h = get_meta_value("bot_token_health")
+        if _raw_h:
+            _hd = _json.loads(_raw_h) or {}
+            _h = _hd.get("platforms") or {}
+            _checked_at = _hd.get("checked_at") or ""
+    except Exception:
+        _h, _checked_at = {}, ""
+    out = {}
+    for provider in list_vcs_platforms():
+        card = get_platform_card(provider)
+        if card is None:
+            continue
+        d = _dc.asdict(card)
+        d.pop("provider", None)
+        d.pop("resources", None)
+        d.pop("capabilities", None)
+        d["event_map"] = d.pop("event_map_overrides", {})
+        d["fields"] = d.pop("fields_overrides", {})
+        d["token_env"] = card.token_env
+        bot_key = card.global_bot_meta_key or f"global_bot_{provider}_token"
+        d["bot_token_configured"] = bool(get_meta_value(bot_key))
+        # D13/S20：webhook token 凭据态（值不回读）；按卡 webhook_token_field
+        # 判该平台有无 webhook 存储语义（gitcode/github 列在册）
+        d["webhook_token_configured"] = bool(get_meta_value(f"{provider}_webhook_token"))
+        d["webhook_token_supported"] = bool(card.webhook_token_field)
+        # D19（2026-11-12 拍板）：探活状态跟平台走——每卡并入自己的
+        # bot_token_health（healthy/degraded/unhealthy+错误摘要），顶层附
+        # checked_at（整体最近探活时间）。全局汇总卡退役，列表逐行展示。
+        d["bot_token_health"] = _h.get(provider, {})
+        out[provider] = d
+    return {"cards": out, "bot_token_health_checked_at": _checked_at}
+
+@router.put("/vcs-platforms", operation_id="admin_vcs_platforms_put",
+            summary="Save vcs platform cards (validated by PlatformCard builder)")
+def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_admin)):
+    import json as _json
+    from src.domains.runtime.vcs.platform_card import build_platform_card, PlatformCardError
+    from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+    from src.kernel.session_manager import db, db_lock
+
+    cleaned = {}
+    errors = []
+    for provider, raw in (body.cards or {}).items():
+        try:
+            card = build_platform_card(provider, raw or {})
+            # S70（实弹发现）：清洗白名单须覆盖能力位整族——原白名单丢
+            # issue_write_form/branch_create_form 等字段，卡经 admin 保存即静默
+            # 降级（gitee 落回 repo_path → 建单 404）。以 Builder 校验后的卡为准
+            # 全字段持久化（值对象 → dict，不手抄白名单防再漏）。
+            import dataclasses as _dc
+            cleaned[provider] = {
+                "name": card.name, "dialect": card.dialect, "host": card.host,
+                "webhook_path": card.webhook_path, "event_header": card.event_header,
+                "api_base": card.api_base, "api_auth": card.api_auth,
+                "webhook_verify": card.webhook_verify, "clone_auth": card.clone_auth,
+                "token_env": card.token_env, "bot_username": card.bot_username,
+                # F4/终态口径：cli_repo 维度已退役（CLI 源是安装面全局配置，
+                # 非平台维度；tests/test_bot_identity_cli_catalog.py 已锁）——
+                # 本清洗白名单原保留 card.cli_repo 导致每次 PUT AttributeError 500。
+                "user_images_base": card.user_images_base,
+                "download_base": card.download_base,
+                "issue_search": card.issue_search,
+                "issue_write_form": card.issue_write_form,
+                "branch_create_form": card.branch_create_form,
+                "pr_comment_endpoint": card.pr_comment_endpoint,
+                "pr_labels_via_issues": card.pr_labels_via_issues,
+                "git_tree_family": card.git_tree_family,
+                "token_storage_field": card.token_storage_field,
+                "webhook_token_field": card.webhook_token_field,
+                "session_token_field": card.session_token_field,
+                "global_bot_meta_key": card.global_bot_meta_key,
+                "global_bot_status_meta_key": card.global_bot_status_meta_key,
+                "pat_create_url": card.pat_create_url,
+                # D10（2026-11-12）：GET 全字段回读后编辑回环必须零丢失——
+                # brand_color/legacy_token_symbol 补进清洗（原 PUT 会把它们
+                # 落回 Builder 派生默认，用户自定义值静默丢失）
+                "brand_color": card.brand_color,
+                "legacy_token_symbol": card.legacy_token_symbol,
+                "event_map": card.event_map_overrides,
+                "fields": card.fields_overrides,
+            }
+        except PlatformCardError as e:
+            errors.append(f"{provider}: {e}")
+    if errors:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "platform card validation failed",
+            "errors": errors})
+
+    # 唯一性校验：host / webhook_path 全局唯一（D14 invariant）
+    hosts, paths = {}, {}
+    for provider, raw in cleaned.items():
+        if raw["host"] in hosts:
+            errors.append(f"{provider}: host 与 {hosts[raw['host']]} 重复")
+        hosts[raw["host"]] = provider
+        if raw["webhook_path"] in paths:
+            errors.append(f"{provider}: webhook_path 与 {paths[raw['webhook_path']]} 重复")
+        paths[raw["webhook_path"]] = provider
+    if errors:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "platform card validation failed",
+            "errors": errors})
+
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
+            (_json.dumps(cleaned, ensure_ascii=False),))
+        # D11（2026-11-12）：bot token 凭据通道——按各卡 global_bot_meta_key 写 meta
+        for provider, token in (body.bot_tokens or {}).items():
+            token = str(token or "").strip()
+            if not token:
+                continue
+            if provider not in cleaned:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"bot_tokens 含不在册平台: {provider}"})
+            card = build_platform_card(provider, cleaned[provider])
+            bot_key = card.global_bot_meta_key or f"global_bot_{provider}_token"
+            db.cursor().execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (bot_key, token))
+        # D13/S20：webhook token 凭据通道（{provider}_webhook_token meta key）
+        for provider, token in (body.webhook_tokens or {}).items():
+            token = str(token or "").strip()
+            if not token:
+                continue
+            if provider not in cleaned:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"webhook_tokens 含不在册平台: {provider}"})
+            db.cursor().execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (f"{provider}_webhook_token", token))
+        db.commit()
+    invalidate_platform_card_cache()
+    from src.domains.mgmt.auth.audit import log_audit
+    log_audit("admin_vcs_platforms_saved", operator_id=admin["id"],
+              detail={"providers": sorted(cleaned.keys())})
+    return {"message": "VCS platform cards saved (cache invalidated)",
+            "cards": sorted(cleaned.keys())}
+
+class AuthChannelsBody(BaseModel):
+    providers: dict  # {provider: {name, type, auth_url, ..., client_id?, client_secret?}}
+
+@router.get("/auth-channels", operation_id="admin_auth_channels_list",
+            summary="List login channel cards (oauth login providers, creds masked)")
+def auth_channels_list(admin: dict = Depends(require_admin)):
+    """D10（2026-11-12）：附完整原始卡字段（编辑详情用，GET→PUT 回环零丢失）。
+    client_id 非敏感回显明文（settings GET 同口径）；client_secret 值不回读，
+    只回 client_secret_set 布尔（编辑留空=不改）。"""
+    from src.domains.mgmt.auth.providers import list_providers, get_provider, _get_client_id
+    from src.domains.mgmt.user.db import get_meta_value
+    out = []
+    for provider in list_providers():
+        card = get_provider(provider) or {}
+        full = {k: v for k, v in card.items()
+                if k not in ("client_id", "client_secret")}
+        out.append({
+            "provider": provider,
+            "name": card.get("name", provider),
+            "type": card.get("type", "oauth2"),
+            "auth_url": card.get("auth_url", ""),
+            "configured": bool(_get_client_id(provider)),
+            "card": full,
+            "client_id": _get_client_id(provider) or "",
+            "client_secret_set": bool(get_meta_value(f"oauth_{provider}_client_secret")),
+        })
+    return {"providers": out}
+
+@router.put("/auth-channels", operation_id="admin_auth_channels_put",
+            summary="Save login channel cards (merge; client creds to meta keys)")
+def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admin)):
+    import json as _json
+    from src.kernel.auth_sdk.channel_strategy import get_channel_strategy, ChannelAuthError
+    from src.domains.mgmt.auth.providers import _DEFAULT_PROVIDERS, invalidate_provider_cache
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+    from src.domains.mgmt.auth.audit import log_audit
+
+    incoming = body.providers or {}
+    if not incoming:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "providers 不能为空"})
+
+    # 逐卡校验（S45 构建即校验：缺字段报字段名）+ 剥离凭据
+    protocol_cards, creds = {}, {}
+    for provider, raw in incoming.items():
+        provider = str(provider or "").strip()
+        raw = raw or {}
+        if not provider or not provider.replace("_", "").isalnum():
+            raise HTTPException(status_code=400, detail={"code": 400,
+                "message": f"provider 名非法: {provider!r}"})
+        ctype = str(raw.get("type") or "oauth2")
+        strategy = get_channel_strategy(ctype)
+        if strategy is None:
+            raise HTTPException(status_code=400, detail={"code": 400,
+                "message": f"{provider}: 未注册的渠道类型 {ctype!r}"})
+        try:
+            strategy.validate_card({**raw, "provider_key": provider})
+        except ChannelAuthError as e:
+            raise HTTPException(status_code=400, detail={"code": 400,
+                "message": f"渠道卡校验失败: {provider}: {e}"})
+        card = {k: v for k, v in raw.items()
+                if k not in ("client_id", "client_secret")}
+        card.setdefault("type", ctype)
+        protocol_cards[provider] = card
+        creds[provider] = (str(raw.get("client_id") or "").strip(),
+                           str(raw.get("client_secret") or "").strip())
+
+    # 合并式保存（零危害：不挤掉存量渠道——覆盖式写会杀掉 gitcode/github）
+    with _sm_dl:
+        c = _sm_db.cursor()
+        row = c.execute("SELECT value FROM meta WHERE key='oauth_providers_config'").fetchone()
+        merged = dict(_DEFAULT_PROVIDERS)
+        if row and row[0]:
+            try:
+                merged.update(_json.loads(row[0]))
+            except Exception:
+                pass
+        merged.update(protocol_cards)
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('oauth_providers_config', ?)",
+                  (_json.dumps(merged, ensure_ascii=False),))
+        for provider, (cid, csec) in creds.items():
+            if cid:
+                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                          (f"oauth_{provider}_client_id", cid))
+            if csec:
+                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                          (f"oauth_{provider}_client_secret", csec))
+        _sm_db.commit()
+    invalidate_provider_cache()
+    log_audit("admin_auth_channels_saved", operator_id=admin["id"],
+              detail={"providers": sorted(protocol_cards.keys())})
+    return {"message": "Login channel cards saved (merge, cache invalidated)",
+            "providers": sorted(merged.keys())}

@@ -8,18 +8,21 @@ from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
 
 
-def create_org(name: str, slug: str, owner_id: int, description: str = "",
+def create_org(name: str, slug: str, owner_id: str, description: str = "",
                is_personal: int = 0) -> dict | None:
-    """创建组织并添加创建者为 owner。"""
+    """创建组织并添加创建者为 owner。D105 第三批：org.id 用 uuid7_str 显式生成
+    （TEXT 主键，退役 lastrowid）；owner_id 入库前 str() 归一。"""
     try:
+        from src.kernel.id_gen import uuid7_str
         with db_lock:
             c = db.cursor()
+            owner_id = str(owner_id)
+            org_id = uuid7_str()
             c.execute(
-                "INSERT INTO organization (name, slug, description, owner_id, is_personal) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (name, slug, description, owner_id, is_personal)
+                "INSERT INTO organization (id, name, slug, description, owner_id, is_personal) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (org_id, name, slug, description, owner_id, is_personal)
             )
-            org_id = c.lastrowid
             c.execute(
                 "INSERT OR IGNORE INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
                 (org_id, owner_id)
@@ -31,7 +34,7 @@ def create_org(name: str, slug: str, owner_id: int, description: str = "",
         return None
 
 
-def get_org(org_id: int) -> dict | None:
+def get_org(org_id: str) -> dict | None:
     """获取组织详情。"""
     with db_lock:
         c = db.cursor()
@@ -55,7 +58,7 @@ def get_org_by_slug(slug: str) -> dict | None:
         return dict(zip(cols, row))
 
 
-def list_user_orgs(user_id: int) -> list[dict]:
+def list_user_orgs(user_id: str) -> list[dict]:
     """列出用户加入的所有组织（含角色和成员数）。"""
     with db_lock:
         c = db.cursor()
@@ -72,7 +75,7 @@ def list_user_orgs(user_id: int) -> list[dict]:
         return [dict(zip(cols, r)) for r in rows]
 
 
-def update_org(org_id: int, name: str = "", description: str = "",
+def update_org(org_id: str, name: str = "", description: str = "",
                avatar_url: str = "", settings: str = "",
                max_members: int = 0, max_workers: int = 0) -> bool:
     """更新组织信息（仅非空/非零字段）。"""
@@ -107,7 +110,7 @@ def update_org(org_id: int, name: str = "", description: str = "",
         return c.rowcount > 0
 
 
-def delete_org(org_id: int) -> bool:
+def delete_org(org_id: str) -> bool:
     """删除组织（个人组织不可删）。"""
     with db_lock:
         c = db.cursor()
@@ -123,7 +126,7 @@ def delete_org(org_id: int) -> bool:
         return True
 
 
-def get_org_members(org_id: int) -> list[dict]:
+def get_org_members(org_id: str) -> list[dict]:
     """列出组织成员（含用户信息）。"""
     with db_lock:
         c = db.cursor()
@@ -139,8 +142,8 @@ def get_org_members(org_id: int) -> list[dict]:
         return [dict(zip(cols, r)) for r in rows]
 
 
-def add_org_member(org_id: int, user_id: int, role: str = "member",
-                   invited_by: int = 0) -> bool:
+def add_org_member(org_id: str, user_id: str, role: str = "member",
+                   invited_by: str = "") -> bool:
     """添加成员到组织。"""
     try:
         with db_lock:
@@ -157,7 +160,7 @@ def add_org_member(org_id: int, user_id: int, role: str = "member",
         return False
 
 
-def update_member_role(org_id: int, user_id: int, role: str) -> bool:
+def update_member_role(org_id: str, user_id: str, role: str) -> bool:
     """修改成员角色。"""
     with db_lock:
         c = db.cursor()
@@ -169,7 +172,7 @@ def update_member_role(org_id: int, user_id: int, role: str) -> bool:
         return c.rowcount > 0
 
 
-def remove_org_member(org_id: int, user_id: int) -> bool:
+def remove_org_member(org_id: str, user_id: str) -> bool:
     """移除成员（owner 不可移除）。"""
     with db_lock:
         c = db.cursor()
@@ -190,7 +193,7 @@ def remove_org_member(org_id: int, user_id: int) -> bool:
         return True
 
 
-def get_member_role(user_id: int, org_id: int) -> str:
+def get_member_role(user_id: str, org_id: str) -> str:
     """获取用户在组织中的角色。"""
     with db_lock:
         c = db.cursor()
@@ -201,23 +204,23 @@ def get_member_role(user_id: int, org_id: int) -> str:
         return row[0] if row else ""
 
 
-def is_org_member(user_id: int, org_id: int) -> bool:
+def is_org_member(user_id: str, org_id: str) -> bool:
     """检查用户是否是组织成员。"""
     return bool(get_member_role(user_id, org_id))
 
 
-def get_personal_org_id(user_id: int) -> int:
-    """获取用户的个人组织 ID（未找到返回 0）。"""
+def get_personal_org_id(user_id: str) -> str:
+    """获取用户的个人组织 ID（未找到返回 ''）。D105 第三批：org_id 哨兵 0 → ''。"""
     with db_lock:
         c = db.cursor()
         row = c.execute(
             "SELECT id FROM organization WHERE owner_id=? AND is_personal=1",
-            (user_id,)
+            (str(user_id),)
         ).fetchone()
-        return row[0] if row else 0
+        return str(row[0]) if row else ""
 
 
-def is_org_personal(org_id: int) -> bool:
+def is_org_personal(org_id: str) -> bool:
     """判断指定组织是否是个人组织。"""
     if not org_id:
         return False
@@ -230,11 +233,11 @@ def is_org_personal(org_id: int) -> bool:
         return bool(row and row[0])
 
 
-def get_org_id_by_repo_key(repo_key: str) -> int:
-    """通过 repo_key 查 managed_repos.org_id。"""
+def get_org_id_by_repo_key(repo_key: str) -> str:
+    """通过 repo_key 查 managed_repos.org_id（未归属返回 ''）。"""
     with db_lock:
         c = db.cursor()
         row = c.execute(
             "SELECT org_id FROM managed_repos WHERE repo_key=?", (repo_key,)
         ).fetchone()
-        return (row[0] if row else 0) or 0
+        return str(row[0]) if row and row[0] else ""

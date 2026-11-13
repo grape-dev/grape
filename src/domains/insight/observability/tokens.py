@@ -15,9 +15,11 @@
   （与 `metric_rollup` 同款处理，勿改成字符串比较）。
 - 可见性：一律显式过滤，**空集合 → 空结果**（绝不降级成全量）。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.kernel.config import log
@@ -25,20 +27,20 @@ from src.kernel.config import log
 #: token 明细列（顺序即展示顺序）
 TOKEN_COLS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
               "reasoning_tokens")
+
 #: 支持的时间窗（小时）
 RANGES = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
+
 DEFAULT_RANGE = "24h"
+
 #: 每类返回的最大行数
 MAX_ROWS = 200
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
-
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
-
 
 def _dt(raw: Any) -> Optional[datetime]:
     from src.api.time_utils import normalize_event_time
@@ -50,7 +52,6 @@ def _dt(raw: Any) -> Optional[datetime]:
     except (ValueError, TypeError):
         return None
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-
 
 def window_of(range_str: str, now: Optional[datetime] = None) -> Tuple[datetime, datetime]:
     """把 `1h/6h/24h/7d/30d`（或纯小时数）折算成 (start, end)。"""
@@ -64,14 +65,12 @@ def window_of(range_str: str, now: Optional[datetime] = None) -> Tuple[datetime,
     end = now or _now()
     return end - timedelta(hours=hours), end
 
-
 def tokens_of(row: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
     for col in TOKEN_COLS:
         out[col[:-7]] = float(row.get(col) or 0)
     out["total"] = sum(out[k] for k in ("input", "output", "cache_read", "cache_write"))
     return out
-
 
 def _sum_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     agg: Dict[str, Any] = {c[:-7]: 0.0 for c in TOKEN_COLS}
@@ -89,7 +88,6 @@ def _sum_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     out["cost_usd"] = round(cost, 6)
     out["rows"] = len(rows)
     return out
-
 
 def _by(rows: List[Dict[str, Any]], key: Callable[[Dict[str, Any]], Tuple],
         fields: Tuple[str, ...]) -> List[Dict[str, Any]]:
@@ -109,7 +107,6 @@ def _by(rows: List[Dict[str, Any]], key: Callable[[Dict[str, Any]], Tuple],
         out.append(item)
     return out
 
-
 def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = False,
            engine_ids: Optional[List[int]] = None
            ) -> Tuple[str, List[Any], bool]:
@@ -124,7 +121,7 @@ def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = 
     if repo:
         from src.kernel.repo_key import to_repo_key
         from src.domains.insight.observability.overview import visible_repo_keys
-        want = {to_repo_key(repo), to_repo_key(repo, "github")}
+        want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
         hit = sorted(want & set(visible_repo_keys(user or {})))
         if not hit:
             return "", [], False
@@ -146,7 +143,6 @@ def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = 
     if not conds:
         return "", [], False
     return "(" + " OR ".join(conds) + ")", params, True
-
 
 def _fetch(start: datetime, end: datetime, where: str, params: List[Any],
            task_id: str = "", issue_id: str = "", limit: int = 20000) -> List[Dict[str, Any]]:
@@ -185,9 +181,6 @@ def _fetch(start: datetime, end: datetime, where: str, params: List[Any],
         out.append(r)
     return out
 
-
-# ---------------------------------------------------------------- 三级聚合
-
 def engine_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
                   global_scope: bool = False, engine_ids: Optional[List[int]] = None,
                   now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -210,7 +203,6 @@ def engine_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
     out.update({"engines": engines[:MAX_ROWS], "total": _sum_rows(rows), "rows": len(rows)})
     return out
 
-
 def task_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
                 global_scope: bool = False, run_kind: str = "",
                 limit: int = MAX_ROWS, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -231,7 +223,6 @@ def task_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
     tasks.sort(key=lambda x: x["total"], reverse=True)
     out.update({"tasks": tasks[:max(1, int(limit))], "total": _sum_rows(rows), "rows": len(rows)})
     return out
-
 
 def stage_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
                  global_scope: bool = False, issue_id: str = "",
@@ -254,7 +245,6 @@ def stage_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
     out.update({"stages": stages, "total": _sum_rows(rows), "rows": len(rows)})
     return out
 
-
 def issue_stages(issue_id: str, user=None, repo: str = "", range_str: str = "30d",
                  global_scope: bool = False, now: Optional[datetime] = None) -> Dict[str, Any]:
     """单个 issue 的阶段明细（任务视图里"这个 issue 每个阶段花了多少"）。"""
@@ -266,7 +256,6 @@ def issue_stages(issue_id: str, user=None, repo: str = "", range_str: str = "30d
     data["issue_id"] = str(issue_id)
     return data
 
-
 def summary(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
             global_scope: bool = False, now: Optional[datetime] = None) -> Dict[str, Any]:
     """三层合计（用于验收硬断言：Σ引擎 = Σ任务 = Σ阶段）。"""
@@ -276,7 +265,6 @@ def summary(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
     return {"engines": e["total"]["total"], "tasks": t["total"]["total"],
             "stages": s["total"]["total"], "rows": e.get("rows", 0),
             "equal": e["total"]["total"] == t["total"]["total"] == s["total"]["total"]}
-
 
 def _engine_names(ids: List[int]) -> Dict[int, str]:
     """engine_id → 显示名（优先 device_name，退回 name）。"""
@@ -295,3 +283,5 @@ def _engine_names(ids: List[int]) -> Dict[int, str]:
     except Exception as e:
         log.warning(f"obs tokens engine names failed: {e}")
     return out
+
+from src.kernel.repo_key import repo_key_candidates  # S94/D69：候选集统一

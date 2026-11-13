@@ -12,25 +12,23 @@ D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
   link_gitcode_user/link_github_user → create_external_identity
   get_user_by_gitcode_id/get_user_by_github_id → get_external_identity
 """
-import json, hashlib, re, time, os, warnings, threading
-from src.kernel.session_manager import db, db_lock
-from src.kernel.config import log
 
+import json, hashlib, re, time, os, warnings, threading
+
+from src.kernel.session_manager import db, db_lock
+
+from src.kernel.config import log
 
 def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: str) -> None:
     """延迟绑定 apply_runtime_state（Issue #1496）。
 
-    src/runtime/service.py 反向 import 本模块（get_task_token），模块级
+    src/domains/runtime/engine/service.py 反向 import 本模块（get_task_token），模块级
     `from src.domains.runtime.engine.health import apply_runtime_state` 会形成
     user.db → runtime.health → runtime/__init__ → service → user.db 环；
     运行期（调用点）再解析则无环。
     """
     from src.domains.runtime.engine.health import apply_runtime_state
     apply_runtime_state(c, runtime_id, status, last_seen_at)
-
-# OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
-# OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
-
 
 def _deprecated_user_accounts_fn(replacement: str = ""):
     """装饰器：标记 user_accounts 老表函数为 deprecated。
@@ -48,7 +46,6 @@ def _deprecated_user_accounts_fn(replacement: str = ""):
             return fn(*args, **kwargs)
         return wrapper
     return decorator
-
 
 # ====== 用户账户表（合并 users + bot_accounts） ======
 _USER_ACCOUNTS_DDL = """
@@ -82,41 +79,8 @@ CREATE TABLE IF NOT EXISTS user_accounts (
 )
 """
 
-
 def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
-
-
-@_deprecated_user_accounts_fn("create_grape_account")
-def create_user(username: str, password: str, created_by: int = 0) -> dict | None:
-    """创建普通用户，返回用户信息或 None。
-
-    新用户自动创建个人组织（is_personal=1），实现组织特性向后兼容。
-    """
-    pw_hash = _hash_password(password)
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("INSERT INTO user_accounts (username, password_hash, password, created_by, created_at) VALUES (?,?,?,?,datetime('now'))",
-                      (username, pw_hash, password, created_by))
-            db.commit()
-            uid = c.lastrowid
-            log.info(f"User created: {username} (id={uid}, by={created_by})")
-
-            # 自动创建个人组织
-            from src.domains.mgmt.user.org_db import create_org
-            slug = f"personal-{uid}"
-            create_org(
-                name=f"{username}的个人空间", slug=slug,
-                owner_id=uid, is_personal=1
-            )
-            log.info(f"Personal org created for user {uid}")
-
-            return {"id": uid, "username": username}
-    except Exception as e:
-        log.warning(f"Create user failed: {e}")
-        return None
-
 
 @_deprecated_user_accounts_fn("get_grape_account_by_id")
 def get_user(user_id: int) -> dict | None:
@@ -128,7 +92,6 @@ def get_user(user_id: int) -> dict | None:
         return None
     return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
 
-
 @_deprecated_user_accounts_fn("get_grape_account_by_username")
 def get_user_by_username(username: str) -> dict | None:
     with db_lock:
@@ -139,86 +102,12 @@ def get_user_by_username(username: str) -> dict | None:
         return None
     return {"id": row[0], "username": row[1], "password_hash": row[2], "created_by": row[3], "created_at": row[4]}
 
-
 @_deprecated_user_accounts_fn("admin/db.py list_grape_accounts")
 def list_users() -> list[dict]:
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, username, created_by, created_at FROM user_accounts ORDER BY id")
         return [{"id": r[0], "username": r[1], "created_by": r[2], "created_at": r[3]} for r in c.fetchall()]
-
-
-@_deprecated_user_accounts_fn("grape_account_db.soft_delete_account")
-def delete_user(user_id: int) -> bool:
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM user_accounts WHERE id=?", (user_id,))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Delete user failed: {e}")
-        return False
-
-
-@_deprecated_user_accounts_fn("grape_account_db.update_password")
-def update_password(user_id: int, new_password: str) -> bool:
-    try:
-        pw_hash = _hash_password(new_password)
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_accounts SET password_hash=?, password=? WHERE id=?", (pw_hash, new_password, user_id))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Update password failed: {e}")
-        return False
-
-
-@_deprecated_user_accounts_fn("grape_account_db.verify_grape_account")
-def verify_user(username: str, password: str) -> dict | None:
-    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None。
-
-    被管理员禁用的用户（is_disabled=1）返回 None（Issue #281：admin 禁用后旧体系登录口立即失效）。
-    """
-    user = get_user_by_username(username)
-    if not user:
-        return None
-    if user["password_hash"] != _hash_password(password):
-        return None
-    token_version = get_token_version(user["id"])
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT is_disabled FROM user_accounts WHERE id=?", (user["id"],))
-        row = c.fetchone()
-    if row and row[0]:
-        return None
-    return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"], "token_version": token_version}
-
-
-# ====== JWT token_version 管理 ======
-
-@_deprecated_user_accounts_fn("grape_account_db.get_token_version")
-def get_token_version(user_id: int) -> int:
-    """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效。
-    用户不存在时返回 -1（不等于任何有效 token 的 ver=0，使旧 token 失效）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT token_version FROM user_accounts WHERE id=?", (user_id,))
-        row = c.fetchone()
-    if not row:
-        return -1  # 用户不存在 → 任何 token 都失效
-    return (row[0] if row[0] is not None else 0)
-
-
-@_deprecated_user_accounts_fn("grape_account_db.increment_token_version")
-def increment_token_version(user_id: int) -> None:
-    """token_version+1——改密码/logout 时调用，使所有旧 token 失效"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE user_accounts SET token_version=token_version+1 WHERE id=?", (user_id,))
-        db.commit()
-
 
 def batch_update_last_active(uids: list) -> None:
     """批量更新用户最后活跃时间——定时任务调用，分批每 1000 个"""
@@ -236,12 +125,11 @@ def batch_update_last_active(uids: list) -> None:
             )
         db.commit()
 
-
 # ====== Token 管理 ======
 # 用户 session token 与 admin token 分开管理
 _user_tokens: dict[str, float] = {}
-_user_token_map: dict[str, int] = {}  # token → user_id
 
+_user_token_map: dict[str, int] = {}  # token → user_id
 
 def create_session_token(user_id: int) -> str:
     token = hashlib.sha256(f"user:{user_id}:{time.time()}:{os.urandom(8).hex()}".encode()).hexdigest()
@@ -249,21 +137,15 @@ def create_session_token(user_id: int) -> str:
     _user_token_map[token] = user_id
     return token
 
-
 def validate_token(token: str) -> int | None:
     """验证 token，返回 user_id 或 None"""
     if token in _user_tokens and time.time() < _user_tokens[token]:
         return _user_token_map.get(token)
     return None
 
-
 def clear_token(token: str):
     _user_tokens.pop(token, None)
     _user_token_map.pop(token, None)
-
-
-# ====== GitCode OAuth 联邦登录 ======
-
 
 def _cleanup_expired_oauth_states():
     try:
@@ -273,7 +155,6 @@ def _cleanup_expired_oauth_states():
             db.commit()
     except Exception:
         pass
-
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
     """保存 OAuth state（防 CSRF，10 分钟过期，DB 共享存储——集群多实例可用）。
@@ -300,7 +181,6 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
         log.info(f"save_oauth_state: state={state[:20]}... saved OK")
     except Exception as e:
         log.warning(f"save_oauth_state failed: {e}")
-
 
 # P0-3: exchange_code 一次性交换码——替代 URL 传递 access_token
 def save_exchange_code(code: str, user_id: int, username: str,
@@ -352,7 +232,6 @@ def save_exchange_code(code: str, user_id: int, username: str,
         log.warning(f"save_exchange_code failed: {e}")
         return False
 
-
 def validate_exchange_code(code: str) -> dict | None:
     """验证并原子消费 exchange code（SELECT + DELETE + rowcount 检查）。
 
@@ -391,7 +270,6 @@ def validate_exchange_code(code: str) -> dict | None:
         log.warning(f"validate_exchange_code failed: {e}")
         return None
 
-
 def cleanup_expired_exchange_codes() -> int:
     """清理过期的 exchange codes（防积累）。"""
     import time as _t
@@ -403,7 +281,6 @@ def cleanup_expired_exchange_codes() -> int:
             return c.rowcount
     except Exception:
         return 0
-
 
 def validate_oauth_state(state: str, provider: str = "") -> dict | None:
     """验证并原子消费 OAuth state（SELECT + DELETE + rowcount 检查）。
@@ -455,12 +332,6 @@ def validate_oauth_state(state: str, provider: str = "") -> dict | None:
         log.warning(f"validate_oauth_state failed: {e}")
         return None
 
-
-
-
-
-
-
 @_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     """通过 GitCode 用户 ID 查找本地用户"""
@@ -471,28 +342,6 @@ def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     if not row:
         return None
     return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
-
-
-@_deprecated_user_accounts_fn("grape_account_db.create_external_identity")
-def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_token: str = "") -> bool:
-    """绑定本地用户与 GitCode 用户，存储 access_token 到 user_credentials"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_accounts SET gitcode_id=? WHERE id=?", (gitcode_id, user_id))
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, "gitcode_oauth", json.dumps({
-                          "gitcode_id": gitcode_id,
-                          "access_token": access_token,
-                          "refresh_token": refresh_token,
-                          "fetched_at": int(time.time())
-                      })))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Link GitCode user failed: {e}")
-        return False
-
 
 @_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
 def get_user_by_github_id(github_id: str) -> dict | None:
@@ -505,54 +354,51 @@ def get_user_by_github_id(github_id: str) -> dict | None:
         return None
     return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
 
-
-@_deprecated_user_accounts_fn("grape_account_db.create_external_identity")
-def link_github_user(user_id: int, github_id: str, access_token: str, refresh_token: str = "") -> bool:
-    """绑定本地用户与 GitHub 用户，存储 access_token 到 user_credentials"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE user_accounts SET github_id=? WHERE id=?", (github_id, user_id))
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, "github_oauth", json.dumps({
-                          "github_id": github_id,
-                          "access_token": access_token,
-                          "refresh_token": refresh_token,
-                          "fetched_at": int(time.time())
-                      })))
-            db.commit()
-            return True
-    except Exception as e:
-        log.warning(f"Link GitHub user failed: {e}")
-        return False
-
-
 # ====== 凭据表 ======
+# 铁律（2026-11-07）：所有新增表必须有 UUID 主键 id——应用层 uuid7_str() 生成、
+# TEXT 存储、36 字符标准形式（8-4-4-4-12，不混 32 hex）。存量无 id 表随各域
+# 批次逐步补列回填。
 _CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS user_credentials (
-    user_id INTEGER NOT NULL,
-    provider TEXT NOT NULL,       -- 'gitcode','feishu','huawei','codearts'
+    id TEXT PRIMARY KEY,           -- UUID（36 字符标准形式，应用层生成；N1 2026-11-07）
+    user_id TEXT NOT NULL,                -- D105 第二批：grape_accounts.id（UUID TEXT）
+    -- provider 值域三族（动态派生，非固定枚举；平台清单由平台卡驱动）：
+    --   云凭据裸名:    huawei_cloud / codearts（settings.py 固定白名单）
+    --   PAT:           <platform>_pat（gitcode_pat/github_pat/gitee_pat…，settings.py）
+    --   OAuth 副本:    <platform>_oauth（gitcode_oauth/github_oauth…，refresh_oauth_token 迁移期双写）
+    provider TEXT NOT NULL,
     config_json MEDIUMTEXT NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, provider)
+    created_at TEXT DEFAULT '',
+    updated_at TEXT DEFAULT '',
+    UNIQUE (user_id, provider)    -- 复合键降级为唯一约束：保 upsert 语义
 )
 """
 
-# ====== 凭据 CRUD ======
+def set_credential(user_id: str, provider: str, config: dict) -> bool:
+    """保存凭据（通道层加密，2026-11-07 N1）。
 
-def set_credential(user_id: int, provider: str, config: dict) -> bool:
-    """保存凭据"""
+    config_json 整体 encrypt()（AES-GCM，key rotation）后落库——调用方零感知。
+    UUID 主键（N1 连带）：写入用 ON CONFLICT DO UPDATE（conflict 分支不动 id）。
+    """
     try:
+        from src.domains.mgmt.auth.credential_crypto import encrypt
+        from src.kernel.id_gen import uuid7_str
+        plaintext = json.dumps(config, ensure_ascii=False)
+        import time as _time
+        now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
         with db_lock:
             c = db.cursor()
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, provider, json.dumps(config, ensure_ascii=False)))
+            c.execute(
+                """INSERT INTO user_credentials (id, user_id, provider, config_json, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(user_id, provider) DO UPDATE
+                   SET config_json=excluded.config_json, updated_at=excluded.updated_at""",
+                (uuid7_str(), user_id, provider, encrypt(plaintext), now, now))
             db.commit()
             return True
     except Exception as e:
         log.warning(f"Set credential failed: {e}")
         return False
-
 
 def get_credentials(user_id: int) -> list[dict]:
     """获取用户凭据（D32-补丁：从 user_credentials 表 + external_identities 读，不查 user_accounts）"""
@@ -564,7 +410,7 @@ def get_credentials(user_id: int) -> list[dict]:
         rows = c.fetchall()
     for provider, config_json in rows:
         try:
-            cfg = json.loads(config_json) if config_json else {}
+            cfg = _load_credential_json(config_json) if config_json else {}
             result.append({"provider": provider, "config": cfg})
         except Exception:
             pass
@@ -582,20 +428,15 @@ def get_credentials(user_id: int) -> list[dict]:
         log.warning(f"get_credentials: read external_identities failed: {e}")
     return result
 
-
 def get_credential(user_id: int, provider: str) -> dict | None:
-    """获取指定凭据"""
+    """获取指定凭据（读侧自动解密，历史明文行兼容）"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT config_json FROM user_credentials WHERE user_id=? AND provider=?", (user_id, provider))
         row = c.fetchone()
     if not row:
         return None
-    try:
-        return json.loads(row[0])
-    except Exception:
-        return None
-
+    return _load_credential_json(row[0]) or None
 
 def delete_credential(user_id: int, provider: str) -> bool:
     try:
@@ -608,7 +449,6 @@ def delete_credential(user_id: int, provider: str) -> bool:
         log.warning(f"Delete credential failed: {e}")
         return False
 
-
 # ====== 托管仓库表 ======
 _MANAGED_REPOS_DDL = """
 CREATE TABLE IF NOT EXISTS managed_repos (
@@ -619,10 +459,13 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     webhook_id INTEGER DEFAULT 0,
     dev_scene TEXT DEFAULT '',      -- 开发场景（仓库已应用场景时写入 scene_id；默认置空=未配置，issue-39 方案 B）
     host_status TEXT DEFAULT '',     -- 托管状态（方案 F：''=完整 / bot_missing / webhook_missing / partial）
+    host_step TEXT DEFAULT '',       -- Issue #2126: 托管失败步骤（invite_bot / create_webhook / ...）
+    host_error TEXT DEFAULT '',      -- Issue #2126: 托管失败可读原因（不含 token/内部 URL）
+    host_updated_at TEXT DEFAULT '', -- Issue #2126: host_status 最近更新时间
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
-    host_user_id INTEGER DEFAULT 0,       -- Issue #372: 路径 B 托管用户 ID（无全局 bot token 时）
+    host_user_id TEXT DEFAULT '',         -- Issue #372: 路径 B 托管用户 ID（无全局 bot token 时；UUID TEXT，D105 后恒 str，''=未配置）
     webhook_secret TEXT DEFAULT '',       -- Issue #372: webhook 验证密钥（与 token 解耦）
     created_at TEXT DEFAULT (datetime('now'))
 )
@@ -636,7 +479,6 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     expires REAL NOT NULL
 )
 """
-
 
 # ====== 用户仓库缓存表（user_repos）======
 # 定义须在 _migrate_repo_key_tables 之前（init_db 会在模块底部调用迁移）
@@ -655,7 +497,6 @@ CREATE TABLE IF NOT EXISTS user_repos (
     PRIMARY KEY (user_id, repo_key)
 )
 """
-
 
 def _migrate_repo_key_tables():
     """repo_key 统一整改迁移（幂等）。
@@ -835,83 +676,49 @@ def _migrate_repo_key_tables():
         except Exception as e:
             log.warning(f"Add managed_repos.scene_recommend_config failed: {e}")
 
+def _cleanup_usage_log_retention() -> None:
+    """N4-p2：usage_log 保留期清理（启动链 force=True 重启即对齐；运行期
+    由 log_usage 惰性触发 + 30 天节流承接）。异常全吞（清理失败不阻断启动）。"""
+    try:
+        from src.kernel.persistence.credential_usage_log import cleanup_expired_retention
+        _rc_n = cleanup_expired_retention(force=True)
+        if _rc_n:
+            log.info(f"usage_log retention cleanup: {_rc_n} rows")
+    except Exception:
+        pass
+
 
 def init_db():
-    """初始化用户相关表（幂等）"""
+    """初始化用户相关表（幂等）。
+
+    迁移段全部收敛到独立一次性模块（生命周期：上线=调用行，下线=删文件+删行）：
+    - src/domains/mgmt/user/legacy_column_migrations.py：存量列补齐/重映射/孤儿清理/user_accounts 死表收敛
+    - src/domains/mgmt/user/credentials_backfill_n1.py：N1 凭据 UUID 主键补列 + 明文加密回填
+    每个模块幂等（重跑零写入），各自 docstring 记录下线判据。
+    （合并重同步：weekly-08 s122 模块化结构恢复；模块覆盖面已逐标记核验，
+    重复用户清理随 D32 user_accounts 死表收敛退役。）
+    """
     with db_lock:
         db.execute(_USER_ACCOUNTS_DDL)
-        # 兼容旧列迁移（幂等）：nickname 列
-        for col in ["nickname"]:
-            try:
-                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
-            except Exception:
-                pass
-        # 兼容旧列迁移（幂等）：last_active_at（用户在线状态判定）
-        try:
-            db.execute("ALTER TABLE user_accounts ADD COLUMN last_active_at TEXT DEFAULT NULL")
-        except Exception:
-            pass
-        # 兼容旧列迁移（幂等）：github_id / github_api_token（GitHub OAuth 登录）
-        for col in ["github_id", "github_api_token"]:
-            try:
-                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
-            except Exception:
-                pass
-        # 兼容旧列迁移（幂等）：华为云 IAM 列（存量库升级；CREATE TABLE 只影响新库）
-        for col in ["hw_iam_domain", "hw_iam_user", "hw_iam_password", "hw_iam_account_type"]:
-            try:
-                db.execute(f"ALTER TABLE user_accounts ADD COLUMN {col} TEXT DEFAULT ''")
-            except Exception:
-                pass
         db.execute(_CREDENTIALS_DDL)
         db.execute(_MANAGED_REPOS_DDL)
-        db.execute(_OAUTH_STATES_DDL)
-        # 兼容旧列迁移（幂等）：managed_repos 新增 github 列
-        for col in ["bot_github_token", "github_webhook_token"]:
+        # 兼容旧列迁移（幂等）：托管诊断列（Issue #2126）——CREATE TABLE 只影响新库
+        for _col in ("host_step", "host_error", "host_updated_at"):
             try:
-                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
-            except Exception:
-                pass
-        # 兼容旧列迁移（幂等）：login_whitelist 新增 github_username 列
-        try:
-            db.execute("ALTER TABLE login_whitelist ADD COLUMN github_username TEXT DEFAULT ''")
-        except Exception:
-            pass
+                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_col} TEXT DEFAULT ''")
+            except Exception as _e:
+                # 幂等：列已存在属预期；其它失败需留痕（#2126 透明化方向，不外抛中断启动）
+                log.warning(f"managed_repos 补充诊断列失败 col={_col}: {_e}")
+        db.execute(_OAUTH_STATES_DDL)
+        from src.domains.mgmt.user.legacy_column_migrations import run as _legacy_migrations
+        _legacy_migrations()
+        from src.domains.mgmt.user.credentials_backfill_n1 import run as _n1_backfill
+        _n1_backfill()
         # repo_key 统一整改迁移（managed_repos 去 user_id + user_repos 加前缀/is_join）
         _migrate_repo_key_tables()
-        # 从旧表迁移数据（幂等）
-        try:
-            cnt = db.execute("SELECT COUNT(*) FROM user_accounts").fetchone()[0]
-        except Exception:
-            cnt = 0
-        if cnt == 0:
-            try:
-                db.execute("""
-                    INSERT OR IGNORE INTO user_accounts
-                        (id, username, password_hash, gitcode_id,
-                         gitcode_api_token,
-                         feishu_app_id, feishu_app_secret,
-                         huawei_cloud_ak, huawei_cloud_sk,
-                         CODEARTS_CLI_AK, CODEARTS_CLI_SK,
-                         password,
-                         created_by, created_at)
-                    SELECT
-                        u.id, u.username, u.password_hash, u.gitcode_id,
-                        COALESCE(b.gitcode_api_token, ''),
-                        COALESCE(b.feishu_app_id, ''),
-                        COALESCE(b.feishu_app_secret, ''),
-                        COALESCE(b.huawei_cloud_ak, ''),
-                        COALESCE(b.huawei_cloud_sk, ''),
-                        COALESCE(b.CODEARTS_CLI_AK, ''),
-                        COALESCE(b.CODEARTS_CLI_SK, ''),
-                        COALESCE(b.password, ''),
-                        u.created_by, u.created_at
-                    FROM users u
-                    LEFT JOIN bot_accounts b ON u.username = b.name
-                """)
-                db.commit()
-            except Exception:
-                pass
+        # D32 死表收敛（2026-11-07 起）：原「从 users/bot_accounts 回填 user_accounts」
+        # 写入已退役——账号唯一权威表是 grape_accounts，回填只会在死表留影子数据。
+        # 守卫：tests/test_user_accounts_write_freeze_guard.py（GC1/2/3 零写入）。
         # 修复 user_credentials.user_id 与 user_accounts.id 不匹配（合并后 id 可能变化）
         # 2026-10-17 修复（账号体系重构遗留）：user_credentials 的 user_id 现在指向
         # grape_accounts.id（新体系），但下面的重映射/清理曾锚定旧表 user_accounts——
@@ -931,16 +738,10 @@ def init_db():
             db.commit()
         except Exception:
             pass
-        # 清理重复用户（同一 username 只保留最小 id）
+        # D32 死表收敛：原「同一 username 只保留最小 id」的 user_accounts DELETE 清扫
+        # 已退役（ours@64144d06a 口径）——grape_accounts 唯一性由 UNIQUE 约束保证，
+        # 死表不再需要去重写入。孤儿凭据清理保留（锚 grape_accounts，非死表）：
         try:
-            db.execute("""
-                DELETE FROM user_accounts WHERE id NOT IN (
-                    SELECT MIN(id) FROM user_accounts GROUP BY username
-                )
-            """)
-            # P2-A (Issue #357): Batched DELETE for user_credentials to avoid deadlock.
-            # 2026-10-17 修复：白名单从 user_accounts（旧表）改为 grape_accounts（新体系），
-            # 否则新体系 id 的凭据行每次启动被误删（AK/SK 丢失事故根因）。
             from src.kernel.mysql_compat import get_db_backend as _get_be
             _is_mysql = _get_be() == "mysql"
             while True:
@@ -1097,9 +898,7 @@ def init_db():
         cleanup_expired_exchange_codes()
     except Exception:
         pass
-
-
-# ====== 自定义技能 CRUD ======
+    _cleanup_usage_log_retention()
 
 SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "skills", "custom")
@@ -1110,7 +909,6 @@ def ensure_skill_dir(user_id: int, skill_name: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
 
-
 def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
     """确保仓库技能目录存在，返回路径（skills/repo/{owner}/{repo}/{skill}）"""
     from src.kernel.repo_key import from_repo_key
@@ -1118,9 +916,12 @@ def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
 
+def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
+    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）
 
-def get_skill_by_id(skill_id) -> dict | None:
-    """按 skill 表主键 id 查询 skill 信息（含 skill_name、skill_path、scope、agent_type、content_hash）"""
+    Issue #1758: raise_on_error=True 时数据库异常上抛，供单一 scope 判官按
+    fail-closed 策略处理；默认 False 维持既有吞异常返回 None 的兼容语义。
+    """
     if not skill_id:
         return None
     try:
@@ -1138,9 +939,10 @@ def get_skill_by_id(skill_id) -> dict | None:
                 "content_hash": row[9] or "",
             }
     except Exception as e:
+        if raise_on_error:
+            raise
         log.warning(f"get_skill_by_id failed: {e}")
         return None
-
 
 def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
     """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
@@ -1157,7 +959,6 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
     except Exception as e:
         log.warning(f"get_skill_content_hash failed: {e}")
         return (0, "", "")
-
 
 def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = "") -> tuple[int, str, str, int]:
     """按 (skill_name, scope, owner_id) 精确读取技能 hash（Issue #444 读时校验用）。
@@ -1182,7 +983,6 @@ def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = "") -> tu
         log.warning(f"get_skill_hash_by_key failed: {e}")
         return (0, "", "", 0)
 
-
 def get_skill_hash_by_id(skill_id: int) -> tuple[int, str, str, int]:
     """按主键 id 读取技能 hash（Issue #444 id 锚点校验：校验层跟 id 走）。
 
@@ -1203,7 +1003,6 @@ def get_skill_hash_by_id(skill_id: int) -> tuple[int, str, str, int]:
         log.warning(f"get_skill_hash_by_id failed: {e}")
         return (0, "", "", 0)
 
-
 def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> list[tuple[str, str]]:
     """按 (skill_name, scope) 取全部匹配行的 (owner_id, content_hash)（Issue #444 P1-1）。
 
@@ -1223,7 +1022,6 @@ def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> list[tuple[st
         log.warning(f"get_skill_hashes_by_name_scope failed: {e}")
         return []
 
-
 def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:
     """按主键 id 更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
     try:
@@ -1238,7 +1036,6 @@ def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str =
     except Exception as e:
         log.warning(f"update_skill_content_hash failed: {e}")
         return False
-
 
 def resolve_skill_id(skill_name: str, owner_id: str = "",
                      repo_key: str = "", user_id: str | int = "") -> int:
@@ -1278,7 +1075,6 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
     except Exception as e:
         log.warning(f"resolve_skill_id failed: {e}")
     return 0
-
 
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
                            repo_key: str = "", user_id: str | int = "",
@@ -1328,8 +1124,8 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
         out["degraded"] = True
     return out
 
-
-def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
+def get_skill_scope_info(skill_name: str, repo_key: str = "",
+                         *, raise_on_error: bool = False) -> dict:
     """技能 scope 与场景（repo 级）scope 匹配判定（Issue #657）。
 
     按 repo → official → user（任意 owner）顺序查 skill 表：
@@ -1340,6 +1136,8 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
       由调用方走内置包兜底/派发侧门禁，维持存量场景兼容）。
 
     返回 {found, matched, scope, skill_id, owner_id}。
+    Issue #1758: raise_on_error=True 时数据库异常上抛（供单一 scope 判官
+    fail-closed）；默认 False 维持吞异常返回 found=False 的兼容语义。
     """
     info = {"found": False, "matched": False, "scope": "", "skill_id": 0, "owner_id": ""}
     if not skill_name:
@@ -1371,9 +1169,10 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
                             skill_id=row[0], owner_id=row[1] or "")
                 return info
     except Exception as e:
+        if raise_on_error:
+            raise
         log.warning(f"get_skill_scope_info failed: {e}")
     return info
-
 
 def get_skill_path(skill_id) -> str:
     """按 skill_id 返回 skill 的实际 SKILL.md 绝对路径（official/user/repo scope 处理）
@@ -1394,8 +1193,7 @@ def get_skill_path(skill_id) -> str:
         return os.path.join(SKILL_DIR, str(skill.get("owner_id") or ""), sp, "SKILL.md")
     if skill.get("scope") == "repo":
         from src.kernel.repo_key import from_repo_key
-        return os.path.join(os.path.dirname(SKILL_DIR), "repo",
-                            from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
+        return os.path.join(SKILLS_DIR, "repo", from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
     # 官方技能：优先按 configs/skill-description.json 的 path 解析（skills/<agent_type>/<skill>/SKILL.md），
     # 兼容旧平铺布局（skills/<skill>/SKILL.md）
     from src.kernel.config import resolve_official_skill_path
@@ -1403,9 +1201,6 @@ def get_skill_path(skill_id) -> str:
     if resolved:
         return resolved
     return os.path.join(SKILLS_DIR, sp, "SKILL.md")
-
-
-# ====== OBS 技能库辅助（obs-skill-storage-design.md §3 N9）======
 
 def get_skill_object_key(skill_id) -> str:
     """按 skill_id 返回 OBS 对象键（v2.5：读 file_path——真实存储路径；无则空串）。"""
@@ -1422,11 +1217,9 @@ def get_skill_object_key(skill_id) -> str:
         return sp
     return ""
 
-
 def get_skill_current_version(skill_id) -> int:
     """（v2.4 废弃保留：固定 key 模型无版本概念，返回 0 兼容旧调用。）"""
     return 0
-
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                      description: str, object_key: str, created_by: str = "",
@@ -1473,8 +1266,6 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
         log.warning(f"upsert_skill_obs failed: {e}")
         return None
 
-
-
 def create_skill(user_id: int, skill_name: str, agent_type: str = "", description: str = "",
                  parent_agent_type: str = "", scope: str = "user", owner_id: str = "",
                  created_by: str = "") -> bool:
@@ -1497,7 +1288,6 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
     except Exception as e:
         log.warning(f"Create skill failed: {e}")
         return False
-
 
 def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: str = "") -> bool:
     try:
@@ -1525,13 +1315,11 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
         log.warning(f"Delete skill failed: {e}")
         return False
 
-
 def list_skills(user_id: int) -> list[dict]:
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
         return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "category_id": r[7] or 0, "created_at": ""} for r in c.fetchall()]
-
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
     """保存 SKILL.md 内容"""
@@ -1544,7 +1332,6 @@ def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
         log.warning(f"Save SKILL.md failed: {e}")
         return False
 
-
 def get_skill_md(user_id: int, skill_name: str) -> str | None:
     """读取 SKILL.md 内容（大小写容错）"""
     base = os.path.join(SKILL_DIR, str(user_id), skill_name)
@@ -1555,16 +1342,12 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
                 return f.read()
     return None
 
-
-
-
-# ====== 托管仓库 CRUD ======
-
 def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
                      bot_username: str = "", dev_scene: str = "",
                      github_webhook_token: str = "", bot_github_token: str = "",
-                     org_id: int = 0, host_user_id: int = 0, webhook_secret: str = "") -> bool:
+                     org_id: int = 0, host_user_id: str = "", webhook_secret: str = "",
+                     **extra_cols) -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。
 
     org_id > 0 时绑定到指定组织；org_id=0 时为全局（兼容旧逻辑）。
@@ -1574,6 +1357,59 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
     from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
     full_name = from_repo_key(repo_key)
+    # D44/S64：动态平台列（config-only 平台卡派生列，如 bot_gitee_token）
+    # ——identifier 白名单校验，非法列名拒绝写入。
+    # S74/D49：响亮失败（raise）——原静默 return False，而全仓 10 个调用点
+    # 零返回值检查（S64 事故形状："托管成功"但配置未落库）。
+    import re as _re_amr
+    _extra = {}
+    for _k, _v in (extra_cols or {}).items():
+        if not _re_amr.match(r'^[a-z_]+$', _k or ""):
+            log.warning(f"add_managed_repo: illegal extra column {_k!r}, rejected")
+            raise ValueError(f"add_managed_repo: illegal extra column {_k!r}")
+        _extra[_k] = _v
+    # S82/D58：双写移除——grape_t_repo_credentials 成为平台凭据唯一权威写目标，
+    # managed_repos 平台凭据列冻结（存量值已由 backfill 迁入；读取方
+    # S80b 起全部 rc 优先）。凭据写收拢为单事务单写。
+    _CRED_COLS = ("bot_gitcode_token", "gitcode_webhook_token",
+                  "bot_github_token", "github_webhook_token",
+                  "bot_gitee_token", "gitee_webhook_token",
+                  "bot_gitlab_token", "gitlab_webhook_token")
+    # F4/D106（凭据存储终态化第一批）：归一逻辑键——卡 token_storage_field
+    # 为空的平台（gitee/gitlab 终态）调用方传 'bot'/'webhook'；列名键
+    # （存量调用方/gitcode/github）与逻辑键统一经 _cred_type_of 归一映射。
+    # 两种键形态都只落 grape_t_repo_credentials（cred_type ∈ {'bot','webhook'}，
+    # 平台由 repo_key 前缀承载），不触碰 managed_repos 列。
+    _LOGICAL_CRED_KEYS = ("bot", "webhook")
+
+    def _cred_type_of(_key: str) -> str:
+        # bot 列家族（bot_/bot）→ 'bot'；webhook 列家族 → 'webhook'
+        if _key == "bot" or _key.startswith("bot_"):
+            return "bot"
+        return "webhook"
+
+    _cred_writes = []
+    for _k in list(_extra.keys()):
+        if _k in _CRED_COLS or _k in _LOGICAL_CRED_KEYS:
+            _cred_writes.append((_k, _extra.pop(_k) or ""))
+    for _k, _v in (("bot_gitcode_token", bot_gitcode_token),
+                   ("gitcode_webhook_token", gitcode_webhook_token),
+                   ("bot_github_token", bot_github_token),
+                   ("github_webhook_token", github_webhook_token)):
+        if _v:
+            _cred_writes.append((_k, _v))
+    # D90-N2①（2026-11-07）：grape_t_repo_credentials cred_type 值域守卫——bot 级专属
+    # （_CRED_COLS 白名单），禁 *_pat 形态（用户 PAT 权威=user_credentials 用户级，
+    # 两存储面粒度/消费链不同、互不同步）。拒绝+抛错（现状零此类写入，不会误伤）。
+    # 同口径覆盖 _extra：*_pat 键（PAT 语义）在本函数任何路径（rc 写/动态列）都非法。
+    _bad_ct = [k for k, _ in _cred_writes if k not in _CRED_COLS and k not in _LOGICAL_CRED_KEYS]
+    _bad_ct += [k for k in _extra if k.endswith("_pat")]
+    _bad_ct = sorted(set(_bad_ct))
+    if _bad_ct:
+        raise ValueError(
+            f"grape_t_repo_credentials cred_type 越界（bot 级专属，禁 *_pat）: {_bad_ct}——"
+            f"用户 PAT 请走 set_credential(user_id, '<p>_pat')；新增 bot 类型须改 "
+            f"_CRED_COLS 并走契约评审")
     try:
         with db_lock:
             c = db.cursor()
@@ -1587,57 +1423,101 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
             existing = c.fetchone()
             if existing:
                 # 已有记录——UPDATE（不覆盖 host_user_id/webhook_secret/bot_token，除非调用方显式传非空值）
-                _existing_host = existing[0] or 0
-                # R14.15: 路径 A 成功时（调用方传 bot_token 非空 + host_user_id=0）显式清零，
+                _existing_host = existing[0] or ""
+                # R14.15: 路径 A 成功时（调用方传 bot_token 非空 + host_user_id 空）显式清空，
                 # 防止旧的 host_user_id 残留导致读取层继续走用户 token 降级。
-                # 路径 B rebind 时（调用方传 host_user_id=0 + bot_token 空）保留已有值。
-                if host_user_id > 0:
+                # 路径 B rebind 时（调用方传 host_user_id 空 + bot_token 空）保留已有值。
+                if str(host_user_id or "") not in ("", "0"):
                     _final_host = host_user_id
                 elif bot_gitcode_token or bot_github_token:
-                    # 路径 A：显式传了 bot token → 清零 host_user_id
-                    _final_host = 0
+                    # 路径 A：显式传了 bot token → 清空 host_user_id（''=未配置哨兵，TEXT 化口径）
+                    _final_host = ""
                 else:
                     # 未传 bot token → 保留已有 host_user_id（路径 B rebind / scene 变更等）
                     _final_host = _existing_host
                 # R14.12: webhook_secret 空串时保留已有值（防覆盖路径 B 密钥）
                 _final_secret = webhook_secret if webhook_secret else (existing[1] or "")
-                # R14.12: bot_token 空串时保留已有值（防 B→A 升级后覆盖 bot token）
-                _final_bot_gc = bot_gitcode_token if bot_gitcode_token else (existing[2] or "")
-                _final_bot_gh = bot_github_token if bot_github_token else (existing[3] or "")
+                # S82：凭据列冻结——UPDATE 不再写 managed_repos 凭据列
+                # （凭据唯一权威=grape_t_repo_credentials，存量值已 backfill 迁入）
+                # D44/S64：动态列——未传的 extra 列保留已有值（与基线列保留语义一致）
+                _extra_set, _extra_vals, _extra_cols_sql = {}, [], []
+                if _extra:
+                    try:
+                        _ex_row = c.execute(
+                            f"SELECT {', '.join(_extra.keys())} FROM managed_repos WHERE repo_key=?",
+                            (repo_key,)).fetchone()
+                    except Exception:
+                        _ex_row = None
+                    _ex_existing = dict(zip(_extra.keys(), _ex_row or ()))
+                    for _k, _v in _extra.items():
+                        _final_v = _v if _v else (_ex_existing.get(_k) or "")
+                        _extra_set[_k] = _final_v
+                        _extra_cols_sql.append(f"{_k}=?")
+                        _extra_vals.append(_final_v)
                 try:
                     c.execute(
                         "UPDATE managed_repos SET repo_owner=?, repo_name=?, full_name=?, webhook_id=?, dev_scene=?, "
-                        "bot_gitcode_token=?, gitcode_webhook_token=?, bot_username=?, github_webhook_token=?, "
-                        "bot_github_token=?, org_id=?, host_user_id=?, webhook_secret=? WHERE repo_key=?",
+                        "bot_username=?, org_id=?, host_user_id=?, webhook_secret=?"
+                        f"{', ' + ', '.join(_extra_cols_sql) if _extra_cols_sql else ''} WHERE repo_key=?",
                         (repo_owner, repo_name, full_name, webhook_id, dev_scene or "",
-                         _final_bot_gc, gitcode_webhook_token, bot_username, github_webhook_token,
-                         _final_bot_gh, org_id, _final_host, _final_secret, repo_key))
+                         bot_username, org_id, _final_host, _final_secret, *_extra_vals, repo_key))
                 except Exception:
                     # 列不存在时降级（兼容未迁移的库）
                     c.execute(
                         "UPDATE managed_repos SET repo_owner=?, repo_name=?, full_name=?, webhook_id=?, dev_scene=?, "
-                        "bot_gitcode_token=?, gitcode_webhook_token=?, bot_username=?, github_webhook_token=?, "
-                        "bot_github_token=?, org_id=? WHERE repo_key=?",
+                        "bot_username=?, org_id=? WHERE repo_key=?",
                         (repo_owner, repo_name, full_name, webhook_id, dev_scene or "",
-                         bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token,
-                         bot_github_token, org_id, repo_key))
+                         bot_username, org_id, repo_key))
             else:
-                # 无记录——INSERT
+                # 无记录——INSERT（S82：凭据列冻结，写 ''，凭据唯一权威=grape_t_repo_credentials）
                 try:
                     c.execute(
-                        "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret))
+                        "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret"
+                        f"{', ' + ', '.join(_extra.keys()) if _extra else ''}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+                        f"{', ' + ', '.join(['?'] * len(_extra)) if _extra else ''})",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", "", "", bot_username, "", "", org_id, host_user_id, webhook_secret, *(_extra.values())))
                 except Exception:
                     # 列不存在时降级
                     c.execute(
                         "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id))
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", "", "", bot_username, "", "", org_id))
+            # S82/D98/D99/F4：grape_t_repo_credentials 单写（唯一权威；cred_type 归一
+            # 值域 {'bot','webhook'}，列名/逻辑键经 _cred_type_of 归一映射，
+            # N3 value 加密；upsert 两步法防 UNIQUE 冲突）。
+            for _k, _cv in _cred_writes:
+                _upsert_repo_credential(c, repo_key, _cred_type_of(_k), _cv)
+            # F4/D106 修订①（评审新增）：写 rc 成功后，同一事务内置空
+            # managed_repos 对应平台 token 列（渐进收敛——每次凭据轮换
+            # 自动完成一条迁移；只置空本次实际写过的 cred 种类对应的列，
+            # 防误清未回填的另类历史值）。SQL 精确限定 UPDATE managed_repos
+            # ——meta 表存在同名全局键 gitcode_webhook_token，严禁误伤。
+            # 列存在性守卫：冷启动库无这些列，PRAGMA 探测后跳过。
+            if _cred_writes:
+                try:
+                    _mr_cols = {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}
+                    from src.kernel.repo_key import parse_repo_key as _prk_amr
+                    _provider = _prk_amr(repo_key)[0]
+                    _written_types = {_cred_type_of(_k) for _k, _ in _cred_writes}
+                    _blank_cols = []
+                    if "bot" in _written_types and f"bot_{_provider}_token" in _mr_cols:
+                        _blank_cols.append(f"bot_{_provider}_token")
+                    if "webhook" in _written_types and f"{_provider}_webhook_token" in _mr_cols:
+                        _blank_cols.append(f"{_provider}_webhook_token")
+                    if _blank_cols:
+                        c.execute(
+                            "UPDATE managed_repos SET "
+                            + ", ".join(f"{_b}=''" for _b in _blank_cols)
+                            + " WHERE repo_key=?", (repo_key,))
+                except Exception as _be:
+                    # 置空失败不阻断凭据主写（收敛是渐进目标；下次轮换再试）
+                    log.warning(f"add_managed_repo: legacy column blank-out skipped ({_be})")
             db.commit()
             return True
     except Exception as e:
+        # S74/D49 响亮失败：SQL/凭据写入硬失败一律 raise（原静默 return False
+        # 与全仓调用点零返回值检查叠加，造成"托管成功但未落库"事故形状）。
         log.warning(f"Add managed repo failed: {e}")
-        return False
-
+        raise
 
 def set_repo_scene(repo_key: str, scene_id: str):
     """写入仓库开发场景（managed_repos.dev_scene），幂等。
@@ -1654,7 +1534,6 @@ def set_repo_scene(repo_key: str, scene_id: str):
     except Exception as e:
         log.warning(f"Set repo scene failed: {e}")
 
-
 def get_repo_scene(repo_key: str) -> str:
     """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。"""
     from src.kernel.repo_key import to_repo_key
@@ -1668,7 +1547,6 @@ def get_repo_scene(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
         return ""
-
 
 def get_scene_recommend_config(repo_key: str) -> dict:
     """读取仓库智能推荐配置（managed_repos.scene_recommend_config）。
@@ -1696,7 +1574,6 @@ def get_scene_recommend_config(repo_key: str) -> dict:
     except Exception as e:
         log.warning(f"Get scene recommend config failed: {e}")
     return {"fallback_scene": "", "rules": []}
-
 
 def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list) -> bool:
     """写入仓库智能推荐配置（managed_repos.scene_recommend_config），幂等。
@@ -1749,21 +1626,28 @@ def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list) 
         log.warning(f"Set scene recommend config failed: {e}")
         return False
 
-
-def set_host_status(repo_key: str, status: str = ""):
-    """写入仓库托管状态（managed_repos.host_status），幂等（方案 F）。
+def set_host_status(repo_key: str, status: str = "", step: str = "", error: str = ""):
+    """写入仓库托管状态与诊断信息（managed_repos.host_status），幂等（方案 F / Issue #2126）。
 
     空串=托管完整；bot_missing=bot 未成功加入；webhook_missing=webhook 未创建；partial=流程部分执行。
+    step/error 记录失败步骤与可读原因（不含 token/内部 URL）；status 为空串时清空诊断字段。
     """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    _status = status or ""
+    if not _status:
+        step, error = "", ""
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET host_status=? WHERE repo_key=?", (status or "", repo_key))
+            c.execute(
+                "UPDATE managed_repos SET host_status=?, host_step=?, host_error=?, "
+                "host_updated_at=datetime('now') WHERE repo_key=?",
+                (_status, step or "", error or "", repo_key))
             db.commit()
     except Exception as e:
         log.warning(f"Set host status failed: {e}")
+
 
 
 def get_host_status(repo_key: str) -> str:
@@ -1780,7 +1664,6 @@ def get_host_status(repo_key: str) -> str:
         log.warning(f"Get host status failed: {e}")
         return ""
 
-
 def _get_managed_webhook_id(repo_key: str) -> int:
     """读取仓库本地记录的 webhook_id（方案 X：以本地 >0 判定 webhook 存在，不远程查）。"""
     from src.kernel.repo_key import to_repo_key
@@ -1795,7 +1678,6 @@ def _get_managed_webhook_id(repo_key: str) -> int:
         log.warning(f"Get managed webhook id failed: {e}")
         return 0
 
-
 def get_global_bot_credential() -> tuple[str, str]:
     """读取全局 bot 配置，返回 (bot_token, bot_username)。
 
@@ -1805,7 +1687,6 @@ def get_global_bot_credential() -> tuple[str, str]:
     us = get_global_bot_usernames()
     user = us[0] if us else ""
     return tok, user
-
 
 def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
     """返回该用户可见（JOIN user_repos）的托管仓库；对外 full_name 无前缀、repo_key 带前缀。
@@ -1829,7 +1710,7 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
                     "FROM managed_repos m "
                     "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
                     "WHERE u.repo_key IS NOT NULL "
@@ -1839,7 +1720,7 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
                     "FROM managed_repos m "
                     "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
                     "WHERE u.repo_key IS NOT NULL AND m.org_id=? "
@@ -1848,7 +1729,7 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
                     "FROM managed_repos m "
                     "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
                     "WHERE u.repo_key IS NOT NULL "
@@ -1857,7 +1738,8 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
             log.warning(f"get_managed_repos join failed: {e}")
             c.execute(
                 "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
-                "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0 "
+                "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0, "
+                "COALESCE(host_status,'') "
                 "FROM managed_repos ORDER BY full_name")
         rows = c.fetchall()
         # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
@@ -1869,6 +1751,7 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
             "bot_gitcode_token": r[5] or "", "gitcode_webhook_token": r[6] or "",
             "bot_username": r[7] or "", "created_at": r[8],
             "is_join": bool(r[9]), "is_admin": bool(r[10]),
+            "host_status": (r[11] or "") if len(r) > 11 else "",
         } for r in rows]
 
 
@@ -1885,7 +1768,6 @@ def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bo
         log.warning(f"Update managed repo admin failed: {e}")
         return False
 
-
 def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str) -> str:
     """R14.16: 统一 webhook 重建逻辑——删旧 webhook + 用 bot token 建新 webhook。
 
@@ -1896,27 +1778,21 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
     """
     from src.kernel.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
-    _wh_url = get_webhook_url()
+    _wh_url = _webhook_url_for_provider(get_webhook_url(), provider)
     if not _wh_url:
         log.warning(f"_rebuild_webhook_with_bot_token: webhook_url not configured for {repo_key}")
         return ""
-    if provider == "github":
-        _wh_url = _wh_url.replace("/webhook/gitcode", "/webhook/github")
     try:
         owner, repo_name = split_owner_repo(repo_key)
     except Exception:
         log.warning(f"_rebuild_webhook_with_bot_token: cannot split repo_key {repo_key}")
         return ""
-    # 删旧 webhook
+    # S58/D36：删旧/建新一律走适配器端口（create_provider），无平台分支
+    from src.kernel.token_resolver import create_provider
     _old_hook_id = _get_managed_webhook_id(repo_key)
     if _old_hook_id:
         try:
-            if provider == "github":
-                from src.domains.mgmt.user.repo_manager import remove_github_webhook
-                remove_github_webhook(bot_token, owner, repo_name, _old_hook_id)
-            else:
-                from src.domains.mgmt.user.repo_manager import remove_webhook
-                remove_webhook(bot_token, owner, repo_name, _old_hook_id)
+            create_provider(provider).remove_webhook(bot_token, owner, repo_name, _old_hook_id)
         except Exception as _re:
             log.warning(f"_rebuild_webhook_with_bot_token: remove old webhook failed for {repo_key}: {_re}")
             # 删旧失败 → 不继续建新（旧 webhook 仍在，新建会创建第二个）
@@ -1924,18 +1800,13 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
             # 旧 webhook 的实际密码（旧 secret/token）与 DB 新值不匹配 → webhook 403
             # 这是 loud fail（有日志），用户可 repair_host 恢复
             return ""
-    # 用 bot token 建新 webhook
+    # 用 bot token 建新 webhook（凭据形态由各 provider 端口内聚）
     try:
-        if provider == "github":
-            from src.domains.mgmt.user.repo_manager import setup_github_webhook
-            return str(setup_github_webhook(bot_token, owner, repo_name, _wh_url, webhook_secret=""))
-        else:
-            from src.domains.mgmt.user.repo_manager import setup_webhook
-            return str(setup_webhook(bot_token, owner, repo_name, _wh_url, webhook_password=bot_token))
+        return str(create_provider(provider).setup_repo_webhook(
+            bot_token, owner, repo_name, _wh_url))
     except Exception as _se:
         log.error(f"_rebuild_webhook_with_bot_token: setup new webhook FAILED for {repo_key}: {_se}")
         return ""
-
 
 def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     """写入仓库级 bot token（管理员手动设置 bot token 用）。
@@ -1959,15 +1830,38 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     except Exception as e:
         log.warning(f"update_managed_repo_bot_token: check existence failed: {e}")
         return {"ok": False, "warning": "", "related_repos": []}
-    provider = "github" if repo_key.startswith("github:") else "gitcode"
+    # F4b/D38/S58 复原（r3 集成树合并回归修复）：provider 从 repo_key 前缀
+    # 解析（parse_repo_key）——原硬编码 github/gitcode 把 gitee/gitlab 仓
+    # 错路由到 gitcode 列；解析失败回退存量二值口径。
+    # S58/D36 守卫口径：provider 一律 repo_key 前缀派生（parse_repo_key 是纯函数，
+    # 裸 key 自带存量默认；不再保留平台字面量二次回退）
+    from src.kernel.repo_key import parse_repo_key as _prk_umr
+    provider = _prk_umr(repo_key)[0]
     # FR-6.2: 检测共用 bot token 的关联仓库（信任域影响提示）
     _related_repos = []
     try:
-        _bot_token_col = "bot_github_token" if provider == "github" else "bot_gitcode_token"
+        # D38/S58：列名走适配器卡派生（内置卡=存量列名，config-only 平台=bot_<p>_token）
+        from src.kernel.token_resolver import create_provider
+        _bot_token_col = create_provider(provider).token_storage_field()
+        import re as _re
+        # F4/D106：卡列空平台（gitee/gitlab 终态）无列可查——改查 grape_t_repo_credentials
+        # （rc 唯一权威；密文+明文双形态比对与列路径同口径）。
+        if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _bot_token_col or ""):
+            _bot_token_col = ""
         with db_lock:
             c = db.cursor()
-            c.execute(f"SELECT repo_key FROM managed_repos WHERE {_bot_token_col}=? AND repo_key!=?",
-                      (bot_token, repo_key))
+            # N3：列值已加密——比对值须同形态（明文兼容期列里可能新旧混合，
+            # 两种形态都查：密文等值 + 明文等值）
+            _enc = _encrypt_repo_secret(bot_token)
+            if _bot_token_col:
+                _q = (f"SELECT repo_key FROM managed_repos "
+                      f"WHERE ({_bot_token_col}=? OR {_bot_token_col}=?) AND repo_key!=?")
+                c.execute(_q, (_enc, bot_token, repo_key))
+            else:
+                _q = ("SELECT repo_key FROM grape_t_repo_credentials "
+                      "WHERE cred_type='bot' AND (value=? OR value=?) "
+                      "AND repo_key LIKE ? AND repo_key!=?")
+                c.execute(_q, (_enc, bot_token, f"{provider}:%", repo_key))
             _related_repos = [r[0] for r in c.fetchall()]
     except Exception:
         pass
@@ -1985,7 +1879,6 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
                            webhook_token=bot_token, webhook_id=_new_hook_id)
     return {"ok": True, "warning": _warning, "related_repos": _related_repos}
 
-
 def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
     try:
         with db_lock:
@@ -1997,6 +1890,103 @@ def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
         log.warning(f"Update managed repo bot username failed: {e}")
         return False
 
+def resolve_managed_repo_key(repo_owner: str, repo_name: str) -> str:
+    """owner/repo → 带前缀 repo_key（按 managed_repos 候选集探针解析真实前缀）。
+
+    P9 抽取自 get_bot_token_by_repo 的探针段——单仓 bot-token 端点与
+    token 读取链共用同一解析，避免两处前缀口径漂移。
+    """
+    from src.kernel.repo_key import to_repo_key, repo_key_candidates
+    repo_key = to_repo_key(f"{repo_owner}/{repo_name}")
+    # 实弹验证 2026-11-10：裸 to_repo_key 默认 gitcode: 前缀，gitee/github 仓查错行。
+    # 候选集探针按 managed_repos 解析真实前缀（幂等）。
+    try:
+        _rks = tuple(repo_key_candidates(f"{repo_owner}/{repo_name}"))
+        if _rks:
+            with db_lock:
+                _row = db.cursor().execute(
+                    f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({','.join('?' * len(_rks))}) LIMIT 1",
+                    _rks).fetchone()
+            if _row and _row[0]:
+                repo_key = _row[0]
+    except Exception:
+        pass
+    return repo_key
+
+
+def repo_has_bot_credential(repo_key: str) -> bool:
+    """P9：per-repo bot 凭据存在性判定（repo_key 前缀 → 卡派生，读序=卡列→rc 单表→
+    存量列回落，与 get_bot_token_by_repo 同一实现，消除双口径）。
+
+    - 卡 token_storage_field 非空（gitcode/github 存量列）→ 查 managed_repos 对应列；
+    - 卡 token_storage_field 为空（gitee/gitlab 终态，无物理列）→ 查
+      grape_t_repo_credentials（repo_key × cred_type='bot'）；
+    - 【存量列回落】rc 未命中/表不存在（老部署冷启动库无 rc 表）时，若
+      managed_repos 存在遗留列 bot_<provider>_token（gitee 老数据形态，live-w10
+      实测 gitee bot 凭据落在旧列），读该列——与白名单行式化「行式双读存量列」
+      同原则：终态口径不能让存量数据失真。
+    - 路径 B 仓库（host_user_id > 0）无仓库级 bot token——同 get_bot_token_by_repo 口径。
+    """
+    return bool(_repo_bot_token_value(repo_key))
+
+
+def _repo_bot_token_value(repo_key: str) -> str:
+    """仓库 bot token 读序实现（卡列 → rc 单表 → 存量列回落）。
+
+    repo_has_bot_credential（存在性）与 get_bot_token_by_repo（取值）共用，
+    单一读序单一来源。读不到返回 ''。
+    """
+    # R12.12 同口径：路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
+    if str(get_host_user_id(repo_key) or "") not in ("", "0"):
+        return ""
+    from src.kernel.repo_key import parse_repo_key
+    provider = parse_repo_key(repo_key or "")[0] or "gitcode"
+    _col = ""
+    try:
+        from src.kernel.token_resolver import create_provider
+        _col = create_provider(provider).token_storage_field()
+    except Exception:
+        _col = ""
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _col or ""):
+        _col = ""
+    with db_lock:
+        c = db.cursor()
+        # ① 卡声明列（gitcode/github 终态）
+        if _col:
+            try:
+                c.execute(
+                    f"SELECT {_col} FROM managed_repos "
+                    f"WHERE repo_key=? AND {_col}!='' LIMIT 1", (repo_key,))
+                row = c.fetchone()
+                if row:
+                    return _decrypt_repo_secret(row[0] or "")
+            except Exception:
+                pass
+        # ② rc 单表（空卡列平台终态；老库无表→吞异常走③）
+        try:
+            c.execute(
+                "SELECT value FROM grape_t_repo_credentials "
+                "WHERE repo_key=? AND cred_type='bot' LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row:
+                return _decrypt_repo_secret(row[0] or "")
+        except Exception:
+            pass
+        # ③ 存量列回落（空卡列平台的老数据形态：gitee bot 凭据落 bot_gitee_token 列）
+        _legacy = f"bot_{provider}_token"
+        if _legacy != _col:
+            try:
+                c.execute(
+                    f"SELECT {_legacy} FROM managed_repos "
+                    f"WHERE repo_key=? AND {_legacy}!='' LIMIT 1", (repo_key,))
+                row = c.fetchone()
+                if row:
+                    return _decrypt_repo_secret(row[0] or "")
+            except Exception:
+                pass
+        return ""
+
 
 def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
     """按 owner/repo 查仓库 bot token（内部按带前缀 repo_key 命中）。
@@ -2005,19 +1995,10 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
     所有调用方（scenes/feishu_async/chat/agents/session_store/settings 等 12 处）
     自动继承路径 B 跳过逻辑，与 get_repo_token_with_refresh / get_repo_bot_token 对齐。
     """
-    from src.kernel.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{repo_owner}/{repo_name}")
-    # R12.12: 路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
-    if get_host_user_id(repo_key) > 0:
-        return ""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_key=? AND bot_gitcode_token!='' LIMIT 1", (repo_key,))
-        row = c.fetchone()
-        if row:
-            return row[0]
-    return ""
-
+    repo_key = resolve_managed_repo_key(repo_owner, repo_name)
+    # P9 收口：取值与存在性同一实现（卡列→rc 单表→存量列回落，含路径 B 守卫），
+    # 消灭本函数写死的 bot_gitcode_token 列读（gitee/gitlab 老列数据此前恒空）
+    return _repo_bot_token_value(repo_key)
 
 def get_repo_bot_token_no_global(repo_key: str) -> str:
     """仓库级 bot token（不含全局兜底）：managed_repos.bot_gitcode_token / devops_agent_session.repo_gitcode_token。
@@ -2039,13 +2020,12 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
     resolver.strategies = [s for s in resolver.strategies if s.level != "global_bot"]
     return resolver.read_stored_token(repo_key)
 
-
 # Issue #345: 全局 bot token 内存缓存——TTL 60 秒
 # bot token 变更频率极低（admin 偶尔改一次），60 秒 TTL 意味着最多 60 秒后所有实例看到新值。
 # 集群下不需要缓存失效通知（无 Redis），TTL 自然过期即可。
 _global_bot_cache: dict[str, tuple] = {}  # key → (value, expire_ts)
-_GLOBAL_BOT_CACHE_TTL = 60
 
+_GLOBAL_BOT_CACHE_TTL = 60
 
 def _cached_get_meta(key: str, file_fallback_fn=None) -> str:
     """带 TTL 缓存的 meta 读取，DB 无值时 fallback 到文件。
@@ -2072,14 +2052,28 @@ def _cached_get_meta(key: str, file_fallback_fn=None) -> str:
             _migrated = False
         if not _migrated:
             val = file_fallback_fn()
-    _global_bot_cache[key] = (val, now + _GLOBAL_BOT_CACHE_TTL)
-    return val
-
+            # D92：文件 fallback 命中必须告警——文件是隐形的第二权威源，
+            # 静默生效会让"meta 被误删/迁移未完成"不可见（与 D91 GlobalBot
+            # 缺失告警同一原则：配置态可观测）。命中≠错误（迁移期合法），
+            # 但下线判定需要知道还有多少流量走文件。
+            if val:
+                from src.kernel.config import log
+                log.warning(
+                    f"global bot token from FILE fallback (meta key={key} empty, "
+                    f"migrated={_migrated}): 隐形第二权威源命中——若迁移已完成请检查 "
+                    f"meta 值；下线文件 fallback 前需确认此告警不再出现"
+                )
+    if val:
+        _global_bot_cache[key] = (val, now + _GLOBAL_BOT_CACHE_TTL)
+        return val
+    # D22：空值不缓存——admin 写库后 60s 内不再被陈旧空缓存顶住
+    # （空值读取直接穿透 DB，代价可忽略；文件 fallback 结果同样不缓存空）
+    _global_bot_cache.pop(key, None)
+    return ""
 
 def _invalidate_global_bot_cache():
     """清除全局 bot token 缓存（admin 改配置后调用）。"""
     _global_bot_cache.clear()
-
 
 def _read_gbt_file_field(field: str) -> str:
     """从 global-bot-token.json 读取指定字段（文件 fallback 用）。"""
@@ -2094,7 +2088,6 @@ def _read_gbt_file_field(field: str) -> str:
     except Exception as e:
         log.warning(f"Failed to read {field} from global-bot-token.json: {e}")
     return ""
-
 
 def _read_gbt_file_usernames() -> str:
     """从 global-bot-token.json 读取 bot_usernames（JSON 数组，返回原始字符串）。"""
@@ -2111,7 +2104,6 @@ def _read_gbt_file_usernames() -> str:
         pass
     return ""
 
-
 def get_global_gitcode_bot_token() -> str:
     """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
 
@@ -2120,36 +2112,47 @@ def get_global_gitcode_bot_token() -> str:
     return _cached_get_meta("global_bot_gitcode_token",
                             file_fallback_fn=lambda: _read_gbt_file_field("gitcode_api_token"))
 
-
 def get_global_github_bot_token() -> str:
     """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存，GitHub 版）。"""
     return _cached_get_meta("global_bot_github_token",
                             file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
 
-
 def get_global_github_bot_username() -> str:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
+    """统一入口：github 卡 bot_username 优先 → meta 兜底（D15，2026-11-12）。
 
-    GitHub bot username 不在 bot_usernames 列表中（那是 GitCode 的），
-    需要单独存储。用于 GitHub 仓库托管时移除 bot 协作者身份。
+    B 层收敛：GitHub bot 身份归仓库平台卡字段（get_platform_card("github").bot_username），
+    存量 meta global_bot_github_username（+文件 fallback）保留为卡空时的兜底
+    （兼容窗口）。消费方（event_pipeline self-comment / repos 解绑协作者）零改动。
+
+    Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
     """
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        _card = get_platform_card("github")
+        if _card is not None and _card.bot_username:
+            return _card.bot_username
+    except Exception:
+        pass
     return _cached_get_meta("global_bot_github_username",
                             file_fallback_fn=lambda: _read_gbt_file_field("github_bot_username"))
 
-
 def get_global_bot_usernames() -> list[str]:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。"""
-    raw = _cached_get_meta("global_bot_usernames",
-                           file_fallback_fn=_read_gbt_file_usernames)
-    if raw:
-        try:
-            import json
-            val = json.loads(raw)
-            return val if isinstance(val, list) else []
-        except Exception:
-            pass
-    return []
+    """统一入口：各卡 bot_username 纯卡派生并集（D16→D22，2026-11-12 拍板）。
 
+    self-comment 检测的 bot 名单 = list_vcs_platforms() 各卡 bot_username
+    非空并集（新平台卡配 bot 自动进名单）。meta global_bot_usernames 兜底
+    读链按用户拍板退役；存量 meta 键成死配置，清理挂账下批。
+    """
+    out: list[str] = []
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+        for _p in list_vcs_platforms():
+            _card = get_platform_card(_p)
+            if _card is not None and _card.bot_username and _card.bot_username not in out:
+                out.append(_card.bot_username)
+    except Exception:
+        pass
+    return out
 
 def _get_global_bot_token() -> str:
     """读取全局 GitCode bot token——向后兼容包装。
@@ -2159,22 +2162,20 @@ def _get_global_bot_token() -> str:
     """
     return get_global_gitcode_bot_token()
 
-
-def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
+def get_gitcode_token(repo_key: str = "", user_id: str = "") -> str:
     """统一获取 GitCode API Token。
 
     Issue #372: 内部改为调 get_repo_token_with_refresh（统一入口），
     保留 user_id 参数兼容原有调用方。
 
     - repo_key 非空 → get_repo_token_with_refresh（四级 fallback + 用户 token 降级）
-    - user_id > 0 → user token（通过 get_user_gitcode_token 从 external_identities 读）
+    - str(user_id or "") not in ("", "0") → user token（通过 get_user_gitcode_token 从 external_identities 读）
     """
     if repo_key:
         return get_repo_token_with_refresh(repo_key)
-    if user_id > 0:
+    if str(user_id or "") not in ("", "0"):
         return get_user_gitcode_token(user_id)
     return ""
-
 
 def get_repo_bot_token(repo_key: str = "") -> str:
     """获取仓库级 bot token（不含 agent session token）。
@@ -2193,9 +2194,12 @@ def get_repo_bot_token(repo_key: str = "") -> str:
     from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
-    resolver.strategies = resolver.strategies[1:]  # 跳过第 1 级 session token
+    # R18：跳过第 1 级 session token（DevopsAgentSessionToken）——D101 方案三该级
+    # 退役后 resolver 策略已为 [RepoBot, Global, User]，原 strategies[1:] 切片会
+    # 误跳 RepoBot 级（bot token 静默丢失）。按类名过滤，两代 resolver 均正确。
+    resolver.strategies = [s for s in resolver.strategies
+                           if type(s).__name__ != "DevopsAgentSessionToken"]
     return resolver.get_token(repo_key)
-
 
 def get_task_token(task: dict) -> str:
     """Issue #372 R11.4: 获取 task 的 GitCode/GitHub token（公共函数）。
@@ -2220,11 +2224,12 @@ def get_task_token(task: dict) -> str:
             pass
     return ""
 
-
-def get_host_user_id(repo_key: str) -> int:
+def get_host_user_id(repo_key: str) -> "str | int":
     """Issue #372: 查 managed_repos.host_user_id（路径 B 托管用户 ID）。
 
-    返回 host_user_id（>0 表示用户托管），0 表示未配置或仓库不存在。
+    D105 后 id 域为 uuid 字符串：返回 str(host_user_id)（D105 uuid TEXT），
+    未配置/仓库不存在返回 0（历史哨兵；调用方统一用
+    str(x or "") not in ("", "0") 判定，''/'0'/0 均视为未配置）。
     """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
@@ -2238,12 +2243,11 @@ def get_host_user_id(repo_key: str) -> int:
                 (repo_key,),
             )
             row = c.fetchone()
-            if row and row[0]:
-                return int(row[0])
+            if row and str(row[0] or "") not in ("", "0"):
+                return str(row[0])
     except Exception as e:
         log.warning(f"get_host_user_id: query managed_repos failed: {e}")
     return 0
-
 
 def get_webhook_secret(repo_key: str) -> str:
     """Issue #372: 查 managed_repos.webhook_secret（webhook 验证密钥，与 token 解耦）。
@@ -2267,7 +2271,6 @@ def get_webhook_secret(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"get_webhook_secret: query managed_repos failed: {e}")
     return ""
-
 
 def get_webhook_verify_token(repo_key: str) -> str:
     """R20.12.1: 获取 webhook 验证用的 token/password。不走 TokenResolver，独立查询。
@@ -2305,7 +2308,6 @@ def get_webhook_verify_token(repo_key: str) -> str:
     # 3. fallback：兼容旧数据（未迁移的仓库）
     return get_repo_bot_token_no_global(repo_key) or ""
 
-
 def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
     """R20.1.3/R20.1.4: 获取路径 B 仓库的 host 用户 VCS 平台用户名。
 
@@ -2330,9 +2332,13 @@ def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
         log.warning(f"get_host_vcs_username: query managed_repos failed: {e}")
     # 2. fallback: 从 external_identities 查
     if not provider:
-        provider = "github" if repo_key.startswith("github:") else "gitcode"
+        # S85/D60③/S59：provider 一律由 repo_key 前缀派生（parse_repo_key，
+        # 不枚举平台字面量）——原二元 `github if startswith("github:") else
+        # gitcode` 会把 gitee:/gitlab: 仓折叠成 gitcode，host 用户名查询静默落空。
+        from src.kernel.repo_key import parse_repo_key
+        provider = parse_repo_key(repo_key)[0]
     host_user_id = get_host_user_id(repo_key)
-    if host_user_id > 0:
+    if str(host_user_id or "") not in ("", "0"):
         try:
             c2 = db.cursor()
             c2.execute(
@@ -2347,7 +2353,6 @@ def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
             log.warning(f"get_host_vcs_username: query external_identities failed: {e}")
     return ""
 
-
 def sync_host_vcs_username(repo_key: str, login: str):
     """R20.1.5: 同步 host_vcs_username 到 managed_repos（verify_token 返回 login 变更时调用）。"""
     from src.kernel.repo_key import to_repo_key
@@ -2357,12 +2362,11 @@ def sync_host_vcs_username(repo_key: str, login: str):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET host_vcs_username=? WHERE repo_key=? AND host_user_id>0",
+            c.execute("UPDATE managed_repos SET host_vcs_username=? WHERE repo_key=? AND (host_user_id IS NOT NULL AND host_user_id != '' AND host_user_id != '0')",
                       (login, repo_key))
             db.commit()
     except Exception as e:
         log.warning(f"sync_host_vcs_username: update failed: {e}")
-
 
 def get_repo_token_with_refresh(repo_key: str) -> str:
     """Issue #372 R2: 仓库级 token 获取（含用户 token 降级 + 刷新）。
@@ -2386,6 +2390,23 @@ def get_repo_token_with_refresh(repo_key: str) -> str:
     return TokenResolver(provider).get_token(repo_key)
 
 
+def get_repo_token_for(repo_key: str) -> str:
+    """仓库 token 统一读入口（2026-11-13 if/else 收口配套）：
+
+    单一入口=provider.resolve_repo_token（GenericVcsProvider 基类能力）：
+    TokenResolver 标准策略链 + 卡能力位 owner_identity_token_fallback 派生的
+    owner-identity 回落（github 卡声明，新平台卡内声明即得）。
+    消费方（qa_gate/issues 路由/issue_vcs_index/event_pipeline）不再按
+    平台名分叉选 getter——本函数自身也零平台分支。
+    """
+    from src.kernel.token_resolver import create_provider_from_repo_key
+    _prov = create_provider_from_repo_key(repo_key)
+    try:
+        return _prov.resolve_repo_token(repo_key) or ""
+    except Exception as e:
+        log.warning(f"get_repo_token_for failed (repo_key={repo_key}): {e}")
+        return ""
+
 def _is_user_token_repo(repo_key: str) -> bool:
     """Issue #372 R2.4: 判断仓库是否走路径 D（用户 token 降级）。
 
@@ -2401,7 +2422,7 @@ def _is_user_token_repo(repo_key: str) -> bool:
     # 与 DevopsAgentSessionToken._fetch 的 host_user_id 守卫对齐（R22.2.4）。
     # 防止路径 A→B 降级后 session token 残留导致 _is_user_token_repo 误返回 False。
     _hid = get_host_user_id(repo_key)
-    if _hid > 0:
+    if str(_hid or "") not in ("", "0"):
         # 路径 B 仓库：session token 层无关，直接跳到 bot_gitcode_token 检查
         pass
     else:
@@ -2442,9 +2463,8 @@ def _is_user_token_repo(repo_key: str) -> bool:
     if _hid == 0:
         if _get_global_bot_token():
             return False
-    # 路径 D: host_user_id > 0 → 用户 token
-    return _hid > 0
-
+    # 路径 D: host_user_id 非空哨兵 → 用户 token
+    return str(_hid or "") not in ("", "0")
 
 def _is_github_user_token_repo(repo_key: str) -> bool:
     """Issue #372 R2.4: 判断 GitHub 仓库是否走用户 token 降级路径。
@@ -2497,9 +2517,8 @@ def _is_github_user_token_repo(repo_key: str) -> bool:
     if _hid == 0:
         if get_global_github_bot_token():
             return False
-    # 4. host_user_id > 0 → 用户 token
-    return _hid > 0
-
+    # 4. host_user_id 非空哨兵 → 用户 token
+    return str(_hid or "") not in ("", "0")
 
 def get_github_token(repo_key: str = "") -> str:
     """统一获取 GitHub API Token（对应 get_gitcode_token 的 GitHub 版）。
@@ -2532,7 +2551,6 @@ def get_github_token(repo_key: str = "") -> str:
         log.warning(f"get_github_token: D32-patch fallback failed: {e}")
     return ""
 
-
 def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
     """Issue #372 §13.2: 查询路径 B 仓库（bot_gitcode_token 空 + host_user_id > 0）。
 
@@ -2545,18 +2563,33 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
     try:
         with db_lock:
             c = db.cursor()
-            if provider == "github":
+            # D43/S63：列名与前缀子句卡/目录派生——token 列走适配器；
+            # 默认平台（内置卡序首）含裸键（无前缀存量数据），其余平台按前缀
+            from src.kernel.token_resolver import create_provider as _cp_pb
+            _tok_col = _cp_pb(provider).token_storage_field()
+            _prefix_clause = _path_b_prefix_clause(provider)
+            # F4/D106: card column empty (gitee/gitlab final state) — path B determination changed to
+            # "no non-empty bot row in rc" (NOT EXISTS; decryption comparison is not usable in SQL,
+            # empty-value rows are treated as absent, consistent with the read-side rc semantics).
+            if not _tok_col:
                 c.execute(
                     "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
-                    "WHERE (bot_github_token IS NULL OR bot_github_token='') "
-                    "AND host_user_id > 0 AND repo_key LIKE 'github:%'"
+                    f"WHERE (host_user_id IS NOT NULL AND host_user_id != '' AND host_user_id != '0') "
+                    f"AND {_prefix_clause} "
+                    "AND NOT EXISTS (SELECT 1 FROM grape_t_repo_credentials rc "
+                    "  WHERE rc.repo_key = managed_repos.repo_key AND rc.cred_type='bot' "
+                    "  AND rc.value IS NOT NULL AND rc.value != '')"
                 )
-            else:
-                c.execute(
-                    "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
-                    "WHERE (bot_gitcode_token IS NULL OR bot_gitcode_token='') "
-                    "AND host_user_id > 0 AND repo_key NOT LIKE 'github:%'"
-                )
+                rows = c.fetchall()
+                return [
+                    {"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2], "host_user_id": r[3]}
+                    for r in (rows or [])
+                ]
+            c.execute(
+                "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
+                f"WHERE ({_tok_col} IS NULL OR {_tok_col}='') "
+                f"AND (host_user_id IS NOT NULL AND host_user_id != '' AND host_user_id != '0') AND {_prefix_clause}"
+            )
             rows = c.fetchall()
         return [
             {"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2], "host_user_id": r[3]}
@@ -2565,7 +2598,6 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
     except Exception as e:
         log.warning(f"_query_path_b_repos: query failed: {e}")
         return []
-
 
 def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitcode",
                            webhook_token: str = "", webhook_id: str = ""):
@@ -2588,28 +2620,71 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
         except (ValueError, TypeError):
             _wh_id = 0
     try:
+        from src.kernel.token_resolver import create_provider
+        _prov = create_provider(provider)
+        _tok_col = _prov.token_storage_field()
+        _wt_col = _prov.webhook_token_field()
+        import re as _re
+        # F4/D106（凭据存储终态化第一批）：卡字段为空（gitee/gitlab 终态）时
+        # 无物理列可写——列写分支跳过，凭据单写 rc（'bot' + 'webhook' 两行，
+        # webhook 值沿用列时代语义 webhook_token or bot_token），并在同一事务
+        # 置空存量库遗留平台列（渐进收敛，SQL 精确限定 UPDATE managed_repos，
+        # 严禁触碰 meta 同名全局键）。有列平台（gitcode/github）行为不变。
+        _card_cols = bool(_tok_col and _wt_col)
+        if _card_cols:
+            for _col in (_tok_col, _wt_col):
+                if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _col or ""):
+                    raise ValueError(f"非法存储列名: {_col!r}")
         with db_lock:
             c = db.cursor()
-            if provider == "github":
-                # R14.1: 同步写入 github_webhook_token=bot_token, webhook_id, 清 webhook_secret
-                # R16.3.3: 清 bot_token_status
+            if _card_cols:
+                # R14.1: 同步写入 <p>_webhook_token=bot_token, webhook_id, 清 webhook_secret
+                # R16.3.3: 清 bot_token_status（N3：列值通道加密）
                 c.execute(
-                    "UPDATE managed_repos SET bot_github_token=?, host_user_id=0, webhook_secret='', "
-                    "bot_token_status='', github_webhook_token=?, webhook_id=? WHERE repo_key=?",
-                    (bot_token, webhook_token or bot_token, _wh_id, repo_key),
+                    f"UPDATE managed_repos SET {_tok_col}=?, host_user_id='', webhook_secret='', "
+                    f"bot_token_status='', {_wt_col}=?, webhook_id=? WHERE repo_key=?",
+                    (_encrypt_repo_secret(bot_token), _encrypt_repo_secret(webhook_token or bot_token),
+                     _wh_id, repo_key),
                 )
             else:
-                # R14.1: 同步写入 gitcode_webhook_token=bot_token, webhook_id, 清 webhook_secret
-                # R16.3.3: 清 bot_token_status
+                # F4/D106：rc 单写平台的基线列更新（token 值不进列）
                 c.execute(
-                    "UPDATE managed_repos SET bot_gitcode_token=?, host_user_id=0, webhook_secret='', "
-                    "bot_token_status='', gitcode_webhook_token=?, webhook_id=? WHERE repo_key=?",
-                    (bot_token, webhook_token or bot_token, _wh_id, repo_key),
+                    "UPDATE managed_repos SET host_user_id='', webhook_secret='', "
+                    "bot_token_status='', webhook_id=? WHERE repo_key=?",
+                    (_wh_id, repo_key),
                 )
+            # D98→D99（2026-11-08）：补写 rc——手动设置/auto_upgrade 路径 A 的
+            # rc 权威面同步（any_repo_credential_for_repos 等 rc-only 读者）。
+            # cred_type 归一='bot'（D99 值域，无平台名）；两步法 upsert
+            # （_upsert_repo_credential，唯一约束竞态 retry UPDATE）。
+            # F4/D106：rc 单写平台（卡列空）同时落 'webhook' 行（对齐列时代
+            # {_wt_col}=webhook_token or bot_token 语义）；有列平台 webhook 值
+            # 仍在列（回落面不变），rc webhook 行按 D99 收口语义仅在非空时补。
+            _upsert_repo_credential(c, repo_key, "bot", bot_token)
+            # D99 收口补漏：webhook token 同步写 rc（cred_type='webhook'，N3 加密）——
+            # 全局换发链同仓换 webhook token，rc 权威面不能只覆盖 bot 一类
+            _wv = webhook_token or bot_token or ""
+            if _wv:
+                _upsert_repo_credential(c, repo_key, "webhook", _wv)
+            # F4/D106（评审新增①）：rc 单写平台（卡列空）写 rc 成功后，同一事务
+            # 置空 managed_repos 存量平台 token 列（渐进收敛；列不存在即跳过——
+            # 冷启动库零命中）。SQL 精确限定 UPDATE managed_repos，严禁触碰
+            # meta（meta 有同名全局键 gitcode_webhook_token，非本域）。
+            if not _card_cols:
+                try:
+                    _mr_cols = {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}
+                    _blank = [f"bot_{provider}_token", f"{provider}_webhook_token"]
+                    _blank = [b for b in _blank if b in _mr_cols]
+                    if _blank:
+                        c.execute(
+                            "UPDATE managed_repos SET "
+                            + ", ".join(f"{_b}=''" for _b in _blank)
+                            + " WHERE repo_key=?", (repo_key,))
+                except Exception as _be:
+                    log.warning(f"_update_repo_bot_token: legacy column blank-out skipped ({_be})")
             db.commit()
     except Exception as e:
         log.warning(f"_update_repo_bot_token: update failed: {e}")
-
 
 def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
     """Issue #372 §13.2: 异步升级路径 B 仓库——邀 bot + 写 bot_gitcode_token。
@@ -2633,51 +2708,35 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
     for repo in repos:
         try:
             # 获取 host 用户的 token（用于邀请 bot 为协作者）
+            # D39/S57：host token 统一入口——provider 由本函数参数携带
+            # （gitee 不折叠 gitcode；github/gitcode 与 D37 等价锁覆盖）
             host_user_id = repo["host_user_id"]
             host_token = ""
-            if provider == "github":
-                from src.api.deps import get_user_github_token_with_refresh
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
-                acc = get_grape_account_by_id(host_user_id)
-                if acc and acc.get("username"):
-                    host_token = get_user_github_token_with_refresh(acc["username"], host_user_id) or ""
-            else:
-                from src.api.deps import get_user_token_with_refresh
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
-                acc = get_grape_account_by_id(host_user_id)
-                if acc and acc.get("username"):
-                    host_token = get_user_token_with_refresh(acc["username"], host_user_id) or ""
+            from src.api.deps import get_user_token_for
+            from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+            acc = get_grape_account_by_id(host_user_id)
+            if acc and acc.get("username"):
+                host_token = get_user_token_for(acc["username"], host_user_id, provider=provider) or ""
             if not host_token:
                 skipped += 1
                 continue  # host user token 过期，跳过
 
-            # 邀请 bot 为协作者
+            # 邀请 bot 为协作者（D39/S59：走适配器端口，权限默认值/
+            # 邀请-接受形态由各 provider 内聚——Gitee 系 maintainer 邀请制、
+            # GitHub push 邀请制、generic 直加平台无确认步骤；调用方零平台分支）
             owner = repo["repo_owner"]
             repo_name = repo["repo_name"]
-            if provider == "github":
-                # R12.2: GitHub 需要显式 accept（原注释"不需显式 accept"是错误的）
-                from src.domains.mgmt.user.repo_manager import add_github_collaborator, accept_github_invite
-                _gh_ok = add_github_collaborator(host_token, owner, repo_name, bot_username, "push")
-                if not _gh_ok:
-                    skipped += 1
-                    log.warning(f"auto_upgrade: add_github_collaborator failed for {repo['repo_key']}, skipping")
-                    continue
-                if not accept_github_invite(bot_token, owner, repo_name):
-                    skipped += 1
-                    log.warning(f"auto_upgrade: accept_github_invite failed for {repo['repo_key']}, skipping")
-                    continue
-            else:
-                from src.domains.mgmt.user.repo_manager import add_collaborator, accept_invite_for_repo
-                _ok, _err = add_collaborator(host_token, owner, repo_name, bot_username, "maintainer")
-                if not _ok:
-                    skipped += 1
-                    log.warning(f"auto_upgrade: add_collaborator failed for {repo['repo_key']}: {_err}, skipping")
-                    continue
-                # R12.8: 校验 accept 返回值，失败则 skip 不写 token
-                if not accept_invite_for_repo(bot_token, owner, repo_name):
-                    skipped += 1
-                    log.warning(f"auto_upgrade: accept_invite_for_repo failed for {repo['repo_key']}, skipping")
-                    continue
+            from src.kernel.token_resolver import create_provider
+            _prov = create_provider(provider)
+            if not _prov.add_collaborator(host_token, owner, repo_name, bot_username):
+                skipped += 1
+                log.warning(f"auto_upgrade: add_collaborator failed for {repo['repo_key']} (provider={provider}), skipping")
+                continue
+            # R12.2/R12.8: 邀请制平台需显式 accept，失败则 skip 不写 token
+            if not _prov.accept_collaborator_invite(bot_token, owner, repo_name):
+                skipped += 1
+                log.warning(f"auto_upgrade: accept_collaborator_invite failed for {repo['repo_key']} (provider={provider}), skipping")
+                continue
 
             # R14.16: 统一走 _rebuild_webhook_with_bot_token（与手动设置入口共用）
             # 部分失败处理：删旧失败 → 不建新（返回空），旧 webhook 保留；
@@ -2715,50 +2774,31 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
         log.info(f"auto_upgrade_path_b_repos: {upgraded} repos upgraded from path B to path A for {provider}. "
                  f"Host comments will no longer be self-loop filtered. Webhook rebuilt with bot token.")
 
-
 def get_agent_bot_token(repo_key: str) -> str:
     """获取 Agent 执行的 GitCode Bot Token（兼容包装，统一走 get_gitcode_token）"""
     return get_gitcode_token(repo_key=repo_key)
 
+def get_user_gitcode_token(user_id: str) -> str:
+    """获取用户的 GitCode API token（薄委托 get_user_platform_token，S87/D63）。
 
-def get_user_gitcode_token(user_id: int) -> str:
-    """获取用户的 GitCode API token（D32-补丁：通过 get_credentials 从 external_identities 读）"""
-    if not user_id or user_id <= 0:
-        return ""
-    try:
-        creds = get_credentials(user_id)
-        for c in creds:
-            if c.get("provider") == "gitcode":
-                return c.get("config", {}).get("token", "") or ""
-    except Exception as e:
-        log.warning(f"get_user_gitcode_token failed for user={user_id}: {e}")
-    return ""
+    D105 ID-conversion：user_id 为 grape_accounts TEXT 主键（uuid 串），
+    防御性接受 int 兼容形态，由 get_user_platform_token 统一判空。
+    """
+    return get_user_platform_token(user_id, "gitcode")
 
-
-def get_user_github_token_by_id(user_id: int) -> str:
-    """获取用户的 GitHub API token（D32-补丁：通过 get_credentials 从 external_identities 读）。
+def get_user_github_token_by_id(user_id: str) -> str:
+    """获取用户的 GitHub API token（薄委托 get_user_platform_token，S87/D63）。
 
     Issue #343: 原名 get_user_github_token(user_id: int) 与 deps.py 的
     get_user_github_token(username: str) 同名不同签名，极易混淆。
     改名为 get_user_github_token_by_id 消除歧义。
     保留 get_user_github_token 作为别名向后兼容（内部调用）。
     """
-    if not user_id or user_id <= 0:
-        return ""
-    try:
-        creds = get_credentials(user_id)
-        for c in creds:
-            if c.get("provider") == "github":
-                return c.get("config", {}).get("token", "") or ""
-    except Exception as e:
-        log.warning(f"get_user_github_token_by_id failed for user={user_id}: {e}")
-    return ""
+    return get_user_platform_token(user_id, "github")
 
-
-def get_user_github_token(user_id: int) -> str:
+def get_user_github_token(user_id: str) -> str:
     """向后兼容别名，委托给 get_user_github_token_by_id。"""
     return get_user_github_token_by_id(user_id)
-
 
 def _get_username_by_id(user_id: int) -> str:
     """根据 user_id 查 username（D32-补丁：查 grape_accounts，不查 user_accounts）。"""
@@ -2769,7 +2809,6 @@ def _get_username_by_id(user_id: int) -> str:
     except Exception:
         return ""
 
-
 def refresh_gitcode_oauth_token(user_id: int) -> str | None:
     """用 refresh_token 刷新 GitCode OAuth access_token（Issue #52）。
 
@@ -2777,16 +2816,45 @@ def refresh_gitcode_oauth_token(user_id: int) -> str | None:
     """
     return refresh_oauth_token(user_id, "gitcode")
 
-
-def get_webhook_token_by_repo(full_name: str) -> str:
+def get_webhook_token_by_repo(full_name: str, provider: str = "") -> str:
     """根据 full_name（owner/repo）查找 repo 的预期 webhook token（按 provider 分流）。
 
     Issue #372: 优先返回 webhook_secret（路径 B 随机密钥，与 token 解耦），
     为空时 fallback 到 gitcode_webhook_token / github_webhook_token（路径 A 兼容）。
+    扫雷⑦（中危④）：provider 给定时精确平台行单查（gitcode:/github:/gitee:…），
+    跨平台同名仓不互串预期 token；secret 列 → 平台 token 列（gitcode/github）→
+    grape_t_repo_credentials('webhook') 逐级回落，全链只碰本平台 repo_key。
     """
     from src.kernel.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
+        if provider:
+            _pk = to_repo_key(full_name, provider=provider)
+            try:
+                c.execute("SELECT webhook_secret FROM managed_repos WHERE repo_key=? LIMIT 1", (_pk,))
+                row = c.fetchone()
+            except Exception:
+                row = None
+            if row and row[0]:
+                return row[0]
+            # 2026-11-13 if/else 收口：平台 webhook token 存量列经卡能力位
+            # webhook_token_field 派生（空=无列平台，gitee/gitlab F4 终态）——
+            # 消除 `provider in (gitcode,github)` 二元枚举与列名映射硬编码；
+            # 有列平台（gitcode/github 派生列名）行为不变。
+            try:
+                from src.domains.runtime.vcs.platform_card import get_platform_card
+                _wt_col = (getattr(get_platform_card(provider), "webhook_token_field", "") or "") \
+                    if provider else ""
+                if _wt_col:
+                    c.execute(
+                        f"SELECT {_wt_col} FROM managed_repos "
+                        "WHERE repo_key=? LIMIT 1", (_pk,))
+                    row = c.fetchone()
+                    if row and row[0]:
+                        return _decrypt_repo_secret(row[0])
+            except Exception:
+                pass
+            return get_repo_credential_value(_pk, "webhook")
         # 同时查 gitcode: 和 github: 前缀
         gc_key = to_repo_key(full_name)  # 默认 gitcode:
         gh_key = to_repo_key(full_name, provider="github")
@@ -2804,17 +2872,29 @@ def get_webhook_token_by_repo(full_name: str) -> str:
             )
             row = c.fetchone()
             if not row:
+                # S85/D60②：列冻结补漏——S82 后新仓凭据只在 rc
+                _rc_w = get_repo_credential_value(gc_key, "webhook")  # D99 归一（平台由 repo_key 承载）
+                if _rc_w:
+                    return _rc_w
                 return ""
-            return row[1] or row[0] or ""
+            # N3：列值通道加密，读侧解密
+            return _decrypt_repo_secret(row[1] or row[0] or "")
         if not row:
+            # S85/D60②：列冻结补漏（gitcode/github 侧）——S82 后新仓凭据只在 rc
+            _rc_w = get_repo_credential_value(gc_key, "webhook")  # D99 归一
+            if _rc_w:
+                return _rc_w
             return ""
         # 优先 webhook_secret（路径 B），fallback 到 webhook_token（路径 A）
         webhook_secret = row[0] or ""
         if webhook_secret:
             return webhook_secret
         # GitHub 仓库有 github_webhook_token，GitCode 有 gitcode_webhook_token
-        return row[2] or row[1] or ""
-
+        # N3：列值通道加密，读侧解密；空值时 S85 列冻结补漏——rc 回落
+        _tok = _decrypt_repo_secret(row[2] or row[1] or "")
+        if not _tok:
+            _tok = get_repo_credential_value(gc_key, "webhook")  # D99 归一
+        return _tok
 
 def remove_managed_repo(repo_key: str) -> dict | None:
     """删除仓库级托管行，返回被删除的记录（含 webhook_id）或 None；同时复位所有用户 is_join。
@@ -2831,31 +2911,24 @@ def remove_managed_repo(repo_key: str) -> dict | None:
                 return None
             c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
             c.execute("UPDATE user_repos SET is_join=0 WHERE repo_key=?", (repo_key,))
-            # R19.3.4: 清理 devops_agent_session 中的 token 字段
-            try:
-                c.execute(
-                    "UPDATE devops_agent_session SET repo_gitcode_token='', repo_github_token='', token_status='' "
-                    "WHERE repo_key=?", (repo_key,))
-            except Exception:
-                pass  # 列可能不存在（未 ALTER），忽略
+            # D101 方案三（T5）：解绑清理段删除——repo_gitcode_token/repo_github_token
+            # 列已退役（无写入方），无物可清；token_status 语义随 session 级消亡。
             db.commit()
             return {"full_name": from_repo_key(repo_key), "webhook_id": row[1]}
     except Exception as e:
         log.warning(f"Remove managed repo failed: {e}")
         return None
 
-
 def get_all_managed_repos() -> list[dict]:
     """Admin 用：获取所有托管记录（repo_key 带前缀，full_name 无前缀）"""
     from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos ORDER BY full_name")
+        c.execute("SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, created_at, host_status"
+                  " FROM managed_repos ORDER BY full_name")
         return [{"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2],
-                 "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5]} for r in c.fetchall()]
-
-
-# ====== 用户账户 CRUD ======
+                 "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5],
+                 "host_status": r[6] or ""} for r in c.fetchall()]
 
 USER_ACCOUNT_FIELDS = [
     "id", "username", "password_hash", "gitcode_id",
@@ -2871,7 +2944,6 @@ USER_ACCOUNT_FIELDS = [
     "hw_iam_domain", "hw_iam_user", "hw_iam_password",
     "hw_iam_account_type",
 ]
-
 
 def get_all_user_accounts() -> list[dict]:
     """获取所有用户账户"""
@@ -2890,7 +2962,6 @@ def get_all_user_accounts() -> list[dict]:
         result.append(d)
     return result
 
-
 @_deprecated_user_accounts_fn("grape_account_db.get_grape_account_by_username")
 def get_user_account(username: str) -> dict | None:
     """获取单个用户账户"""
@@ -2907,31 +2978,6 @@ def get_user_account(username: str) -> dict | None:
     except (json.JSONDecodeError, TypeError):
         d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
     return d
-
-
-def save_user_account(username: str, data: dict):
-    """创建或更新用户账户（保留 id，不会因 INSERT OR REPLACE 产生新 id）"""
-    fields = {k: data.get(k, "") for k in USER_ACCOUNT_FIELDS if k not in ("id", "username", "created_at")}
-    set_clause = ",".join(f"{k}=?" for k in fields)
-    vals = list(fields.values())
-    with db_lock:
-        c = db.cursor()
-        existing = c.execute("SELECT id FROM user_accounts WHERE username=?", (username,)).fetchone()
-        if existing:
-            c.execute(f"UPDATE user_accounts SET {set_clause} WHERE username=?", vals + [username])
-        else:
-            c.execute(f"INSERT INTO user_accounts ({','.join(fields.keys())},username) VALUES ({','.join('?' for _ in fields)},?)", vals + [username])
-        db.commit()
-
-
-@_deprecated_user_accounts_fn("grape_account_db.soft_delete_account")
-def delete_user_account(username: str) -> bool:
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username=?", (username,))
-        db.commit()
-        return c.rowcount > 0
-
 
 def get_all_bot_usernames() -> list[str]:
     """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）。
@@ -2951,7 +2997,6 @@ def get_all_bot_usernames() -> list[str]:
     result.extend(get_global_bot_usernames())
     return list(set(r for r in result if r))
 
-
 def get_meta_value(key: str) -> str:
     """从 meta 表读取配置值"""
     with db_lock:
@@ -2963,7 +3008,6 @@ def get_meta_value(key: str) -> str:
         except Exception:
             return ""
 
-
 def set_meta_value(key: str, value: str):
     """写入配置值到 meta 表"""
     with db_lock:
@@ -2973,7 +3017,6 @@ def set_meta_value(key: str, value: str):
             db.commit()
         except Exception as e:
             log.warning(f"set_meta_value failed: {key}: {e}")
-
 
 def get_server_base_url() -> str:
     """返回服务端 API 基址（A2A/tasks 等协议端点用，不含 /webhook/gitcode 后缀）。
@@ -3005,7 +3048,6 @@ def get_server_base_url() -> str:
     _port = os.environ.get("GRAPE_PORT", "3000")
     return f"http://localhost:{_port}"
 
-
 def _server_base_url_configured_value() -> str:
     """读取显式配置的对外基址（server-config.json > meta），空串表示未配置。
 
@@ -3024,9 +3066,7 @@ def _server_base_url_configured_value() -> str:
     except Exception:
         return ""
 
-
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1")
-
 
 def is_server_base_url_configured() -> bool:
     """对外基址是否已显式配置（非空且非本机回环地址）。
@@ -3045,7 +3085,6 @@ def is_server_base_url_configured() -> bool:
     _host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
     return _host not in _LOOPBACK_HOSTS
 
-
 def _split_face_public(key: str) -> bool:
     """拆分配置项（browser_callback_url/worker_connect_url）是否已配置且非回环。"""
     _v = _split_url_configured_value(key)
@@ -3053,7 +3092,6 @@ def _split_face_public(key: str) -> bool:
         return False
     _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
     return _host not in _LOOPBACK_HOSTS
-
 
 def _split_face_warning(key: str) -> str:
     """单个拆分项指向回环时的告警文案（面向对应语义：浏览器回调/worker 回连）。"""
@@ -3064,7 +3102,6 @@ def _split_face_warning(key: str) -> str:
         f"{key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
         f"请在 configs/server-config.json 配置对外可访问地址后重启。"
     )
-
 
 def get_server_base_url_warning() -> str:
     """未显式配置对外基址时的告警文案；已配置返回空串。
@@ -3098,7 +3135,6 @@ def get_server_base_url_warning() -> str:
         "配置示例见 configs/server-config.example.json。"
     )
 
-
 def get_webhook_url() -> str:
     """返回服务端 webhook 地址（GitCode 事件回调注册用，含 /webhook/gitcode 后缀）。
 
@@ -3116,7 +3152,6 @@ def get_webhook_url() -> str:
         return (get_meta_value("webhook_url") or "").strip()
     except Exception:
         return ""
-
 
 def detect_webhook_from_host(host: str, forwarded_host: str = "", forwarded_proto: str = "") -> str:
     """Issue #372 §14.2.2: 从入站请求头推导 webhook_url。
@@ -3166,7 +3201,6 @@ def detect_webhook_from_host(host: str, forwarded_host: str = "", forwarded_prot
         proto = "http"
     # host 可能含端口（如 1.2.3.4:3000），保留端口
     return f"{proto}://{raw}/webhook/gitcode"
-
 
 def migrate_oauth_providers():
     """从配置文件同步 OAuth 配置到 meta 表——统一入口。
@@ -3229,8 +3263,6 @@ def migrate_oauth_providers():
             log.info(f"Loaded OAuth credentials from global-bot-token.json (fallback): {loaded}")
     except Exception as e:
         log.warning(f"migrate_oauth_providers: fallback sync failed: {e}")
-    # 协议参数不写——由 _DEFAULT_PROVIDERS 兜底
-
 
 def _sync_providers_from_config(data: dict):
     """从 oauth-providers.json 格式的配置同步到 meta 表。
@@ -3268,7 +3300,6 @@ def _sync_providers_from_config(data: dict):
     log.info(f"Synced OAuth providers from oauth-providers.json: "
              f"providers={list(providers_cfg.keys())}, credentials={loaded_creds}")
 
-
 def migrate_accounts_from_json():
     """首次运行加载配置：迁移旧数据到 meta 表。
 
@@ -3303,15 +3334,15 @@ def migrate_accounts_from_json():
                             c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                                       (meta_key, val))
                             migrated = True
-                c.execute("DELETE FROM user_accounts WHERE username='default'")
+                # 写入冻结铁律（2026-11-07）：原 DELETE default 账户语句已删除——
+                # 行留着无害（零业务读），配置已迁移即达成目的。守卫: GC1-GC3。
                 db.commit()
                 if migrated:
                     log.info("Migrated OAuth config from default account to meta table")
                 else:
-                    log.info("Deleted default account (no config to migrate)")
+                    log.info("Default account config checked (no config to migrate)")
     except Exception as e:
         log.warning(f"Migrate/delete default account failed: {e}")
-
 
 def link_user_provider(user_id: int, provider: str, external_id: str,
                         access_token: str, refresh_token: str = "") -> bool:
@@ -3337,7 +3368,6 @@ def link_user_provider(user_id: int, provider: str, external_id: str,
     except Exception as e:
         log.warning(f"Link {provider} user failed: {e}")
         return False
-
 
 def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
     """从 external_identities 读 refresh_token（权威存储，解密）。
@@ -3371,7 +3401,6 @@ def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
         log.warning(f"_read_refresh_token_from_identity failed: {e}")
         return ""
 
-
 def _read_refresh_token_from_credentials(user_id: int, provider: str) -> str:
     """从 user_credentials 读 refresh_token（迁移期 fallback）。
 
@@ -3383,7 +3412,6 @@ def _read_refresh_token_from_credentials(user_id: int, provider: str) -> str:
     if not cred or not cred.get("refresh_token"):
         return ""
     return cred["refresh_token"]
-
 
 def refresh_oauth_token(user_id: int, provider: str) -> str | None:
     """通用 OAuth token 刷新——用 provider 配置里的 token_url，消除硬编码 URL。
@@ -3398,7 +3426,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
 
     返回新的 access_token，失败返回 None。
     """
-    import urllib.request, urllib.parse, json as _json
+    import urllib.request, urllib.error, urllib.parse, json as _json
 
     # 1. 从 external_identities 读 refresh_token（权威存储）
     rt = _read_refresh_token_from_identity(user_id, provider)
@@ -3438,6 +3466,51 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         )
         resp = urllib.request.urlopen(req, timeout=10)
         token_data = _json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # P-6⑤ 失败二分（D90 决议）：invalid_grant/400 = 凭据彻底失效 → status=4
+        #（重新登录引导）；其余（网络/5xx）走 R21.4.2 暂时性重试。
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")[:500]
+        except Exception:
+            pass
+        if e.code == 400 or "invalid_grant" in body:
+            log.warning(f"refresh_oauth: invalid_grant/400 → credential expired flow "
+                        f"user={user_id}, provider={provider}")
+            try:
+                with db_lock:
+                    db.execute(
+                        "UPDATE external_identities SET status=4, updated_at=datetime('now') "
+                        "WHERE grape_user_id=? AND provider=? AND status=1",
+                        (user_id, provider))
+                    db.commit()
+            except Exception as _me:
+                log.warning(f"mark expired failed: {_me}")
+            return None
+        log.warning(f"refresh_oauth: refresh failed (transient) for user={user_id}, provider={provider}: {e}")
+        # R21.4.2: refresh 失败时重读 external_identities 获取最新 refresh_token 重试一次
+        # 场景：双主集群下另一实例已刷新了 token，本实例持有的旧 refresh_token 已失效
+        _new_rt = _read_refresh_token_from_identity(user_id, provider)
+        if _new_rt and _new_rt != rt:
+            log.info(f"refresh_oauth: retrying with updated refresh_token for user={user_id}, provider={provider}")
+            try:
+                req2 = urllib.request.Request(
+                    token_url,
+                    data=urllib.parse.urlencode({
+                        "grant_type": "refresh_token",
+                        "refresh_token": _new_rt,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    }).encode(),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"
+                )
+                resp2 = urllib.request.urlopen(req2, timeout=10)
+                token_data = _json.loads(resp2.read())
+            except Exception as e2:
+                log.warning(f"refresh_oauth: retry also failed for user={user_id}, provider={provider}: {e2}")
+                return None
+        else:
+            return None
     except Exception as e:
         log.warning(f"refresh_oauth: refresh failed for user={user_id}, provider={provider}: {e}")
         # R21.4.2: refresh 失败时重读 external_identities 获取最新 refresh_token 重试一次
@@ -3501,14 +3574,15 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
     log.info(f"refresh_oauth: success for user={user_id}, provider={provider}")
     return new_access
 
-
 # 启动时初始化 + 迁移
 init_db()
+
 migrate_accounts_from_json()
 
 # 迁移旧路径 skills 到新路径
 _OLD_SKILL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))))), "skills", "custom")
+
 if os.path.isdir(_OLD_SKILL_DIR) and _OLD_SKILL_DIR != SKILL_DIR:
     try:
         import shutil
@@ -3525,15 +3599,10 @@ if os.path.isdir(_OLD_SKILL_DIR) and _OLD_SKILL_DIR != SKILL_DIR:
     except Exception as e:
         log.warning(f"Skill dir migration failed: {e}")
 
-
-# ====== 用户仓库缓存表（user_repos）======
-# DDL 定义已移至文件前部（_migrate_repo_key_tables 之前），此处仅保留 init 函数
-
 def init_user_repos_table():
     with db_lock:
         db.execute(_USER_REPOS_DDL)
         db.commit()
-
 
 def save_user_repos(user_id: int, repos: list[dict]):
     """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）
@@ -3560,7 +3629,6 @@ def save_user_repos(user_id: int, repos: list[dict]):
             )
         db.commit()
 
-
 def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
     """读取用户仓库缓存（对外返回 full_name 无前缀）。
 
@@ -3578,7 +3646,6 @@ def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
             for r in c.fetchall()
         ]
 
-
 def mark_user_repo_join(user_id: int, repo_key: str, is_join: bool = True, is_admin: bool = False):
     """标记用户已加入某仓库（user_repos.is_join），无对应缓存行则插入最小记录。"""
     from src.kernel.repo_key import parse_repo_key
@@ -3593,7 +3660,6 @@ def mark_user_repo_join(user_id: int, repo_key: str, is_join: bool = True, is_ad
                 (user_id, repo_key, owner, repo, int(is_admin), int(is_join)))
         db.commit()
 
-
 def get_user_repos_synced_at(user_id: int) -> str:
     """返回用户仓库缓存的最近同步时间（synced_at），无缓存返回空串"""
     with db_lock:
@@ -3603,12 +3669,24 @@ def get_user_repos_synced_at(user_id: int) -> str:
         return row[0] or "" if row else ""
 
 
+def invalidate_user_repos(user_id: int):
+    """把用户仓库缓存标记为过期（保留缓存行与 is_join 状态）。
+
+    写操作（托管 / 模板建仓 / 解除托管）成功后调用，令下一次 /repos/member
+    直接回源 VCS 刷新，避免新增或移除的仓库被 30 分钟 TTL 挡在缓存之外。
+    synced_at 置 NULL 后 get_user_repos_synced_at 返回空串，命中 _is_expired。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE user_repos SET synced_at=NULL WHERE user_id=?", (user_id,))
+        db.commit()
+
+
 def clear_user_repos(user_id: int):
     """清除用户仓库缓存"""
     with db_lock:
         db.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
         db.commit()
-
 
 def has_user_repos(user_id: int) -> bool:
     """检查是否有缓存"""
@@ -3617,16 +3695,11 @@ def has_user_repos(user_id: int) -> bool:
         c.execute("SELECT COUNT(*) FROM user_repos WHERE user_id=?", (user_id,))
         return c.fetchone()[0] > 0
 
-
 init_user_repos_table()
-
-
-# ====== Agent Runtimes 缓存表 ======
 
 def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """[兼容别名] 见 save_agent_runtimes"""
     return save_agent_runtimes(agents, scope, owner_id, host_name)
-
 
 _NAIVE_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$")
 
@@ -3634,9 +3707,10 @@ _NAIVE_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$")
 # 避免每轮本机直连重探（10min）都全表 SELECT。monotonic 时钟不受墙钟跳变影响；
 # 判断与标记在专用锁内原子完成（与 db_lock 同语义的互斥保障），并发刷新不会重复扫描。
 _AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL = 3600
-_agent_runtimes_migrate_throttle_lock = threading.Lock()
-_agent_runtimes_migrate_last_mono = 0.0
 
+_agent_runtimes_migrate_throttle_lock = threading.Lock()
+
+_agent_runtimes_migrate_last_mono = 0.0
 
 def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_seconds: int | None = None) -> int:
     """幂等修正 agent_runtimes 中"超前当前 UTC"的行（Issue #512）。
@@ -3706,7 +3780,6 @@ def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_sec
             except Exception:
                 pass
     return changed
-
 
 def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
@@ -3822,11 +3895,9 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             except Exception:
                 pass
 
-
 def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
     """[兼容别名] 见 get_agent_runtimes"""
     return get_agent_runtimes(scope, owner_id)
-
 
 def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list[dict]:
     """读取 agent runtimes 缓存（含 status/last_seen_at，供健康态派生）。
@@ -3841,8 +3912,6 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
         else:
             c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return _rows_to_runtimes(c.fetchall())
-
-
 
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
@@ -3865,11 +3934,9 @@ def _rows_to_runtimes(rows) -> list[dict]:
         for r in rows
     ]
 
-
 def get_backend_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
     """[兼容别名] 见 get_runtime_id_by_name"""
     return get_runtime_id_by_name(name, scope, owner_id)
-
 
 def get_local_direct_runtime_id(name: str) -> int | None:
     """按引擎名查本机直连（credential_id=0 且已装）runtime id。
@@ -3886,7 +3953,6 @@ def get_local_direct_runtime_id(name: str) -> int | None:
             (name.strip().lower(),))
         row = c.fetchone()
         return row[0] if row else None
-
 
 def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
     """按 name+scope+owner_id 查找 runtime id（多实例：优先 online + 最近心跳，见 multi-runtime-instance-design §4.3 S2）。
@@ -3910,11 +3976,9 @@ def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "")
         row = c.fetchone()
         return row[0] if row else None
 
-
 def ensure_default_backend(name: str = "opencode", scope: str = "global"):
     """[兼容别名] 见 ensure_default_runtime"""
     return ensure_default_runtime(name, scope)
-
 
 def is_known_engine_name(name: str) -> bool:
     """是否为已知执行引擎类型名（discover_backends 白名单或已注册的自定义引擎）。
@@ -3927,7 +3991,7 @@ def is_known_engine_name(name: str) -> bool:
     if not name:
         return False
     # 静态白名单（避免 lazy import 循环引用导致 always False）
-    _KNOWN = {"opencode", "codearts", "hermes", "codex", "cursor"}
+    _KNOWN = {"opencode", "codearts", "hermes", "codex", "cursor", "atomcode"}
     if name in _KNOWN:
         return True
     try:
@@ -3944,7 +4008,6 @@ def is_known_engine_name(name: str) -> bool:
         pass
     return False
 
-
 def _local_engine_info(name: str) -> tuple[bool, str]:
     """按引擎类型名返回本机是否已安装 + cli_path（discover_backends 真实探测，见 engine-selection §7.3）。"""
     try:
@@ -3955,7 +4018,6 @@ def _local_engine_info(name: str) -> tuple[bool, str]:
     except Exception:
         pass
     return False, ""
-
 
 def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
     """确保默认 runtime 存在（幂等），返回 id（多实例：优先 online，见 multi-runtime-instance-design §4.3 S2）。
@@ -3998,11 +4060,9 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         db.commit()
         return c.lastrowid
 
-
 def get_backend_agents_age() -> float | None:
     """[兼容别名] 见 get_agent_runtimes_age"""
     return get_agent_runtimes_age()
-
 
 def get_agent_runtimes_age() -> float | None:
     """返回缓存数据的 age（秒），无缓存返回 None"""
@@ -4016,9 +4076,6 @@ def get_agent_runtimes_age() -> float | None:
     updated = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
     return (datetime.datetime.now() - updated).total_seconds()
 
-
-# ====== Scene Market CRUD（场景市场）======
-
 def list_scene_categories() -> list[dict]:
     """返回启用的场景分类列表，按 order_num 排序"""
     with db_lock:
@@ -4030,7 +4087,6 @@ def list_scene_categories() -> list[dict]:
         return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
                 for r in c.fetchall()]
 
-
 def get_scene_category(category_id: int) -> dict | None:
     """按 id 查场景分类"""
     with db_lock:
@@ -4040,7 +4096,6 @@ def get_scene_category(category_id: int) -> dict | None:
     if not row:
         return None
     return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
-
 
 def list_skill_categories() -> list[dict]:
     """返回启用的技能分类列表，按 order_num 排序"""
@@ -4053,7 +4108,6 @@ def list_skill_categories() -> list[dict]:
         return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
                 for r in c.fetchall()]
 
-
 def get_skill_category(category_id: int) -> dict | None:
     """按 id 查技能分类"""
     with db_lock:
@@ -4063,7 +4117,6 @@ def get_skill_category(category_id: int) -> dict | None:
     if not row:
         return None
     return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
-
 
 def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
                       featured_only: int = 0, limit: int = 0,
@@ -4159,7 +4212,6 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
         })
     return result, total
 
-
 def get_scene_market_by_id(market_id: int) -> dict | None:
     """按主键 id 查场景市场详情"""
     with db_lock:
@@ -4189,9 +4241,6 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "preset_custom_fields": row[21] or "[]",
     }
 
-
-# ====== Scene Market CRUD（用户自定义场景，Issue-54）======
-
 def create_scene_market(name: str, display_name: str = "", description: str = "",
                         scope: str = "repo", repo_key: str = "", source_user_id: int = 0,
                         nodes_json: str = "[]", icon: str = "", obs_icon_key: str = "",
@@ -4218,7 +4267,6 @@ def create_scene_market(name: str, display_name: str = "", description: str = ""
         )
         db.commit()
         return c.lastrowid
-
 
 def update_scene_market(market_id: int, name: str = "", display_name: str = "",
                         description: str = "", nodes_json: str = "",
@@ -4300,7 +4348,6 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
                 raise ValueError(f"场景标识已存在")
             raise
 
-
 def delete_scene_market(market_id: int) -> bool:
     """硬删除用户自定义场景（scope != 'official'）。
     场景市场无回收站需求，删除即销毁，name 立即释放。
@@ -4316,7 +4363,6 @@ def delete_scene_market(market_id: int) -> bool:
         )
         db.commit()
         return c.rowcount > 0
-
 
 def check_scene_name_exists(name: str, scope: str, repo_key: str = "",
                             source_user_id: int = 0, exclude_id: int = 0) -> bool:
@@ -4350,9 +4396,6 @@ def check_scene_name_exists(name: str, scope: str, repo_key: str = "",
         c.execute(sql2, params2)
         return c.fetchone() is not None
 
-
-# ====== Uploaded Files CRUD（Issue-54 图标上传）======
-
 def insert_uploaded_file(file_key: str, original_name: str = "", file_size: int = 0,
                          mime_type: str = "", file_type: str = "scene_icon",
                          created_by: str = "") -> int:
@@ -4369,7 +4412,6 @@ def insert_uploaded_file(file_key: str, original_name: str = "", file_size: int 
         db.commit()
         return c.lastrowid
 
-
 def commit_uploaded_file(file_id: int, ref_table: str, ref_id: int) -> bool:
     """将临时文件标记为已提交（scope='committed'）。返回是否成功。"""
     with db_lock:
@@ -4381,7 +4423,6 @@ def commit_uploaded_file(file_id: int, ref_table: str, ref_id: int) -> bool:
         )
         db.commit()
         return c.rowcount > 0
-
 
 def get_uploaded_file(file_id: int) -> dict | None:
     """按 id 查上传文件记录。"""
@@ -4403,7 +4444,6 @@ def get_uploaded_file(file_id: int) -> dict | None:
         "is_active": row[9], "created_by": row[10] or "",
         "created_at": str(row[11] or ""),
     }
-
 
 def get_uploaded_files_by_ref(ref_table: str, ref_id: int) -> list[dict]:
     """按关联表+ID 查已提交的文件列表。"""
@@ -4427,7 +4467,6 @@ def get_uploaded_files_by_ref(ref_table: str, ref_id: int) -> list[dict]:
         for r in rows
     ]
 
-
 def delete_uploaded_file(file_id: int) -> str:
     """软删除上传文件记录，返回 file_key（供调用方删物理文件）。空串=未找到。"""
     with db_lock:
@@ -4446,7 +4485,6 @@ def delete_uploaded_file(file_id: int) -> str:
         db.commit()
         return row[0] or ""
 
-
 def list_temp_uploaded_files_before(hours: int = 24) -> list[dict]:
     """查超过指定小时数的临时文件（供定时清理用）。"""
     from src.kernel.mysql_compat import get_db_backend
@@ -4462,7 +4500,6 @@ def list_temp_uploaded_files_before(hours: int = 24) -> list[dict]:
         rows = c.fetchall()
     return [{"id": r[0], "file_key": r[1], "file_type": r[2] or ""} for r in rows]
 
-
 def hard_delete_uploaded_file(file_id: int) -> str:
     """硬删除上传文件记录（清理时用），返回 file_key。空串=未找到。"""
     with db_lock:
@@ -4475,16 +4512,12 @@ def hard_delete_uploaded_file(file_id: int) -> str:
         db.commit()
         return row[0] or ""
 
-
-# ====== Scene Likes CRUD（场景点赞）======
-
 def is_scene_liked(user_id: int, scene_id: int) -> bool:
     """检查用户是否已点赞某场景"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT 1 FROM scene_likes WHERE user_id=? AND scene_id=?", (user_id, scene_id))
         return c.fetchone() is not None
-
 
 def toggle_scene_like(user_id: int, scene_id: int) -> tuple[bool, int]:
     """场景点赞 toggle：已赞→取消，未赞→点赞。
@@ -4508,7 +4541,6 @@ def toggle_scene_like(user_id: int, scene_id: int) -> tuple[bool, int]:
             row = c.fetchone()
             return (True, row[0] if row else 0)
 
-
 def batch_scene_liked(user_id: int, scene_ids: list[int]) -> dict[int, bool]:
     """批量查询用户对多个场景的点赞状态，返回 {scene_id: bool}"""
     if not scene_ids or not user_id:
@@ -4523,16 +4555,12 @@ def batch_scene_liked(user_id: int, scene_ids: list[int]) -> dict[int, bool]:
         liked_ids = {r[0] for r in c.fetchall()}
     return {sid: (sid in liked_ids) for sid in scene_ids}
 
-
-# ====== Skill Likes CRUD（技能点赞）======
-
 def is_skill_liked(user_id: int, skill_id: int) -> bool:
     """检查用户是否已点赞某技能"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT 1 FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
         return c.fetchone() is not None
-
 
 def toggle_skill_like(user_id: int, skill_id: int) -> tuple[bool, int]:
     """技能点赞 toggle：已赞→取消，未赞→点赞。
@@ -4556,7 +4584,6 @@ def toggle_skill_like(user_id: int, skill_id: int) -> tuple[bool, int]:
             row = c.fetchone()
             return (True, row[0] if row else 0)
 
-
 def batch_skill_liked(user_id: int, skill_ids: list[int]) -> dict[int, bool]:
     """批量查询用户对多个技能的点赞状态，返回 {skill_id: bool}"""
     if not skill_ids or not user_id:
@@ -4570,9 +4597,6 @@ def batch_skill_liked(user_id: int, skill_ids: list[int]) -> dict[int, bool]:
         )
         liked_ids = {r[0] for r in c.fetchall()}
     return {sid: (sid in liked_ids) for sid in skill_ids}
-
-
-# ====== 技能统计查询（通过 scene_skill_ref 关联表）======
 
 def get_skill_usage_stats(skill_ids: list[int] | None = None) -> dict[int, dict]:
     """返回技能的使用统计 {skill_id: {scene_count, repo_count}}。
@@ -4609,7 +4633,6 @@ def get_skill_usage_stats(skill_ids: list[int] | None = None) -> dict[int, dict]
         )
         return {r[0]: {"scene_count": r[1], "repo_count": r[2]} for r in c.fetchall()}
 
-
 def get_skill_scenes(skill_id: int) -> list[dict]:
     """返回某技能所属的场景列表 [{id, name, display_name}]"""
     with db_lock:
@@ -4621,7 +4644,6 @@ def get_skill_scenes(skill_id: int) -> list[dict]:
             (skill_id,),
         )
         return [{"id": r[0], "name": r[1], "display_name": r[2] or r[1]} for r in c.fetchall()]
-
 
 def batch_skill_scenes(skill_ids: list[int]) -> dict[int, list[dict]]:
     """批量查询多个技能所属的场景列表，返回 {skill_id: [{id, name, display_name}]}"""
@@ -4645,7 +4667,6 @@ def batch_skill_scenes(skill_ids: list[int]) -> dict[int, list[dict]]:
         result[sid].append({"id": r[1], "name": r[2], "display_name": r[3] or r[2]})
     return result
 
-
 def get_scene_repo_count(market_scene_id: int) -> int:
     """统计某场景的在用仓库数（devops_pipeline_scene WHERE market_scene_id=?）"""
     with db_lock:
@@ -4656,7 +4677,6 @@ def get_scene_repo_count(market_scene_id: int) -> int:
         )
         row = c.fetchone()
     return row[0] if row else 0
-
 
 def batch_scene_repo_count(market_scene_ids: list[int]) -> dict[int, int]:
     """批量统计多个场景的在用仓库数"""
@@ -4674,7 +4694,6 @@ def batch_scene_repo_count(market_scene_ids: list[int]) -> dict[int, int]:
         rows = {r[0]: r[1] for r in c.fetchall()}
     return {mid: rows.get(mid, 0) for mid in market_scene_ids}
 
-
 def get_scene_repos(market_scene_id: int) -> list[dict]:
     """返回某场景的在用仓库列表 [{repo_key, full_name}]"""
     from src.kernel.repo_key import from_repo_key
@@ -4687,7 +4706,6 @@ def get_scene_repos(market_scene_id: int) -> list[dict]:
         )
         rows = c.fetchall()
     return [{"repo_key": r[0], "full_name": from_repo_key(r[0])} for r in rows if r[0]]
-
 
 def get_featured_skills(limit: int = 5) -> list[dict]:
     """精选技能列表：is_featured=1 的 official 技能。
@@ -4749,7 +4767,6 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
                      "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
                     for r in c.fetchall()]
 
-
 def get_browser_callback_url() -> str:
     """浏览器回调基址（OAuth 回调 / 附件 URL / 前端展示用）。
 
@@ -4760,7 +4777,6 @@ def get_browser_callback_url() -> str:
     if _v:
         return _v
     return get_server_base_url()
-
 
 def get_worker_connect_url() -> str:
     """worker 回连基址（devstage RUNTIME_SERVER_URL / 任务 server_url / 远程 worker 地址）。
@@ -4774,7 +4790,6 @@ def get_worker_connect_url() -> str:
         return _v
     return get_server_base_url()
 
-
 def get_business_api_url_explicit() -> str:
     """显式配置的 task_business_api_url（未配置返回空串，不回落 server_base_url）。
 
@@ -4782,7 +4797,6 @@ def get_business_api_url_explicit() -> str:
     本机 runtime 也要尊重显式业务基址配置（QA 复审 Spec 偏离项）。
     """
     return _split_url_configured_value("task_business_api_url")
-
 
 def get_business_api_url() -> str:
     """主控业务 API 基址（任务内 grape 业务命令 issues / git-repo 等全量端点用）。
@@ -4797,7 +4811,6 @@ def get_business_api_url() -> str:
         return _v
     return get_server_base_url()
 
-
 def _split_url_configured_value(key: str) -> str:
     """读取拆分配置项（server-config.json > meta），空串表示未配置。
 
@@ -4806,16 +4819,15 @@ def _split_url_configured_value(key: str) -> str:
     """
     try:
         from src.kernel.config import read_server_config
-        _v = (read_server_config().get(key) or "").strip().rstrip("/")
+        _v = str(read_server_config().get(key) or "").strip().rstrip("/")
         if _v:
             return _v
     except Exception:
         pass
     try:
-        return (get_meta_value(key) or "").strip().rstrip("/")
+        return str(get_meta_value(key) or "").strip().rstrip("/")
     except Exception:
         return ""
-
 
 def get_url_split_warning() -> str:
     """Issue #471 E1：拆分配置项错误的明确报错引导；配置正确返回空串。"""
@@ -4832,3 +4844,477 @@ def get_url_split_warning() -> str:
                 f"请在 configs/server-config.json 配置对外可访问地址后重启。"
             )
     return " ".join(warnings)
+
+import json, hashlib, re, time, os, threading, warnings
+
+
+def resolve_official_checker_skill(agent_type: str) -> dict | None:
+    """Issue #617：按 agent_type 回退官方检查器技能（skill 按名未命中时的兜底）。
+
+    场景节点引用了官方库不存在的技能名（如 skill-batch-validator）时，materialize
+    按名必然失败。此处按节点 agent_type 在 skill 表取 is_active=1 且 scope='official'
+    的官方技能兜底：
+    - 优先取技能名含 validator/check/review/lint/inspect 的“检查器”技能（id 最小）；
+    - 否则取该 agent_type 下 id 最小的官方技能。
+    返回技能 dict（含 id/skill_name/skill_path/file_path）或 None。
+    """
+    if not agent_type:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
+                "file_path, scope, owner_id, content_hash FROM skill "
+                "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
+                (agent_type,))
+            rows = c.fetchall()
+        if not rows:
+            return None
+        pick = next((r for r in rows
+                     if re.search(r"valid|check|review|lint|inspect", r[1] or "", re.IGNORECASE)),
+                    rows[0])
+        return {
+            "id": pick[0], "skill_name": pick[1], "display_name": pick[2] or pick[1],
+            "description": pick[3] or "", "agent_type": pick[4] or "",
+            "skill_path": pick[5] or pick[1], "file_path": pick[6] or "",
+            "scope": pick[7] or "official", "owner_id": pick[8] or "",
+            "content_hash": pick[9] or "",
+        }
+    except Exception as e:
+        log.warning(f"resolve_official_checker_skill failed for {agent_type}: {e}")
+        return None
+
+def _upsert_repo_credential(c, repo_key: str, cred_type: str, value: str) -> None:
+    """D98/D99/N4：grape_t_repo_credentials 幂等 upsert（UPDATE → rowcount==0 → INSERT）。
+
+    供 add_managed_repo / _update_repo_bot_token 等写入口共用；
+    id 首写 uuid7（主键，更新不碰），value 走 _encrypt_repo_secret。
+    F4/D106 修订①：原裸 INSERT 撞 UNIQUE(repo_key, cred_type)（S82 基线
+    3 红根因），同仓二次轮换 500——两步法即本助手函数。
+    """
+    from src.kernel.id_gen import uuid7_str
+    _now = time.strftime("%Y-%m-%d %H:%M:%S")
+    _enc = _encrypt_repo_secret(value or "")
+    _cur = c.execute(
+        "UPDATE grape_t_repo_credentials SET value=?, updated_at=? WHERE repo_key=? AND cred_type=?",
+        (_enc, _now, repo_key, cred_type),
+    )
+    if _cur.rowcount == 0:
+        try:
+            c.execute(
+                "INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value, updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (uuid7_str(), repo_key, cred_type, _enc, _now),
+            )
+        except Exception:
+            # 并发插入撞唯一约束 → retry UPDATE
+            c.execute(
+                "UPDATE grape_t_repo_credentials SET value=?, updated_at=? WHERE repo_key=? AND cred_type=?",
+                (_enc, _now, repo_key, cred_type),
+            )
+
+def repo_cred_write_keys(tok_col: str, wh_col: str) -> "tuple[str, str]":
+    """F4/D106（凭据存储终态化第一批）：托管写路径的凭据 kwargs 键归一。
+
+    卡派生列名非空（gitcode/github）→ 保留列名键（存量调用形态，进
+    add_managed_repo 后路由 rc）；卡字段为空（gitee/gitlab 终态）→ 归一
+    逻辑键 'bot'/'webhook'（同一路由）。防止空串键进 add_managed_repo 的
+    identifier 白名单被拒。"""
+    return (tok_col or "bot", wh_col or "webhook")
+
+def managed_repo_exists(repo_key: str) -> bool:
+    """判定 repo_key 是否已存在于 managed_repos（Issue #671：A2A 回退/自愈链路共用）。"""
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            return bool(c.fetchone())
+    except Exception as e:
+        log.warning(f"Managed repo exists check failed: {e}")
+        return False
+
+def _webhook_url_for_provider(base_url: str, provider: str) -> str:
+    """webhook 回调 URL 的平台段由平台卡 webhook_path 决定（数据驱动，无平台字面量）。"""
+    if not base_url:
+        return base_url
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        _card = get_platform_card(provider)
+        _path = getattr(_card, "webhook_path", "") if _card is not None else ""
+    except Exception:
+        _path = ""
+    if not _path:
+        return base_url
+    import urllib.parse as _up
+    _u = _up.urlsplit(base_url)
+    return _up.urlunsplit((_u.scheme, _u.netloc, _path, "", ""))
+
+def clear_repo_bot_token(repo_key: str) -> bool:
+    """R15.5 清除仓库级 bot token 的 db 层统一入口（F4/D106）。
+
+    有列平台（gitcode/github）：清列（存量语义）；卡列空平台
+    （gitee/gitlab 终态）：清 rc 权威行（value=''）。同时清
+    bot_token_status。返回仓库行是否存在（调用方 404 判定）。
+    SQL 精确限定 managed_repos / grape_t_repo_credentials，不触碰 meta
+    （meta 有同名全局键 gitcode_webhook_token，非本域）。
+    """
+    import re as _re_crbt
+    from src.kernel.repo_key import to_repo_key, parse_repo_key
+    # db/db_lock 晚绑定（调用时取 session_manager 属性——路由层测试按
+    # patch("src.kernel.session_manager.db") 打桩，模块级早期绑定会漏进真实库）
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+    repo_key = to_repo_key(repo_key)
+    provider = parse_repo_key(repo_key)[0]
+    try:
+        from src.kernel.token_resolver import create_provider
+        _col = create_provider(provider).token_storage_field()
+    except Exception:
+        _col = ""
+    _has_col = bool(_re_crbt.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _col or ""))
+    _now = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with _sm_dl:
+            c = _sm_db.cursor()
+            if _has_col:
+                c.execute(
+                    f"UPDATE managed_repos SET {_col}='', bot_token_status='' "
+                    f"WHERE repo_key=?", (repo_key,))
+                found = c.rowcount > 0
+            else:
+                c.execute(
+                    "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
+                    "WHERE repo_key=? AND cred_type='bot'", (_now, repo_key))
+                c.execute(
+                    "UPDATE managed_repos SET bot_token_status='' WHERE repo_key=?",
+                    (repo_key,))
+                found = c.rowcount > 0
+            _sm_db.commit()
+        return found
+    except Exception as e:
+        log.warning(f"clear_repo_bot_token failed: {e}")
+        return False
+
+def get_business_api_port() -> str:
+    """本机业务 API 端口（单机多进程部署时与 runtime 端口解耦，Issue #1731）。
+
+    优先 task_business_api_port（server-config.json > meta），其次环境变量
+    `GRAPE_BUSINESS_PORT`；未配置返回空串，由调用方回退 `_local_port()` 兼容默认
+    （GRAPE_PORT > GRAPE_MAIN_PORT > 3000）。runtime 端口可能指向 runtime 网关
+    （如 8083）而非业务 API（如 8081），故业务端口需独立配置。
+    """
+    _v = _split_url_configured_value("task_business_api_port")
+    if _v:
+        return _v
+    return str(os.environ.get("GRAPE_BUSINESS_PORT") or "").strip()
+
+def get_task_service_api_url_explicit(service: str) -> str:
+    """显式配置的按服务任务基址（vcs/issue/a2a）；未配置返回空串。
+
+    Issue #1858：同一 base_url 无法同时承载 8081 业务 API 与 8082 A2A 时，
+    运维可分别配置 `task_vcs_api_url` / `task_issue_api_url` / `task_a2a_api_url`。
+    """
+    key = _TASK_SERVICE_API_KEYS.get((service or "").strip().lower(), "")
+    return _split_url_configured_value(key) if key else ""
+
+def get_task_gateway_base_url() -> str:
+    """可选聚合网关基址（按 /vcs /issue /a2a 前缀路由三面）；未配置返回空串。
+
+    Issue #1858：网关就绪时作为默认分服务变量的替代（二者择一，显式服务键优先）。
+    """
+    return _split_url_configured_value("task_gateway_base_url")
+
+def _load_credential_json(raw: str) -> dict:
+    """读侧统一解密+反序列化（N1 通道加密配套）。
+
+    优先 decrypt()（密文格式 {kid}:{nonce}:{ct}），解密产物/明文行统一
+    json.loads。decrypt 的明文兼容（无冒号分隔符原样返回）天然覆盖历史
+    明文行——读路径零迁移。解析失败返回 {}（与原 json.loads 失败语义一致，
+    不抛不阻断）。"""
+    from src.domains.mgmt.auth.credential_crypto import decrypt
+    try:
+        return json.loads(decrypt(raw))
+    except Exception:
+        return {}
+
+def _rebuild_webhook_url_for_provider(webhook_url: str, provider: str) -> str:
+    """D12/W3：按目标平台重建 webhook 回调 URL。
+
+    历史实现是字符串替换（把 /webhook/gitcode 替换成 /webhook/github）——
+    新平台没有对应的替换规则。改为：剥掉旧平台路径后缀，按目标平台卡
+    webhook_path 重建；无卡平台回退历史替换行为。
+    """
+    if not webhook_url:
+        return webhook_url
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+    except Exception:
+        card = None
+    if card is None:
+        # D43/S63：无卡平台不做字符串替换（内置三平台恒有卡，此分支仅未知
+        # provider 保守原样返回）
+        return webhook_url
+    base = webhook_url
+    if "/webhook/" in base:
+        base = base.split("/webhook/")[0]
+    return base.rstrip("/") + card.webhook_path
+
+def get_global_bot_token_for(provider: str) -> str:
+    """统一入口（D15 抽象来源链）：任意平台的全局 bot token。
+
+    meta key 按 provider 派生（与 VCSProvider.global_bot_meta_key 同模式）；
+    文件 fallback 仅存量两平台（历史迁移兼容）；config-only 平台走 meta。
+    """
+    key = f"global_bot_{provider}_token"
+    field = _GLOBAL_BOT_FILE_FIELDS.get(provider)
+    if field:
+        return _cached_get_meta(key, file_fallback_fn=lambda: _read_gbt_file_field(field))
+    return _cached_get_meta(key)
+
+def get_global_gitee_bot_username() -> str:
+    """统一入口：DB meta 表读取（60s 缓存）。
+
+    扫雷⑦（中危②）：gitee 全局 bot username 单值源——与 token 链
+    get_global_bot_token_for("gitee")（meta 键 global_bot_gitee_token）同构，
+    单 bot 账号单值形态（参照 github，非 gitcode 多账号 pool）。
+    未配置返回空串（resolve_bot_username 回落卡 bot_identity）。
+    """
+    return _cached_get_meta("global_bot_gitee_username")
+
+def get_global_bot_usernames_for(provider: str) -> list[str]:
+    """S87/D63：按 provider 的全局 bot username 集合（self-loop 判定统一口径）。
+
+    github=独立 meta 键单值（global_bot_github_username）；gitee=专属单值
+    （global_bot_gitee_username，未配置回落 gitcode usernames 集合——存量
+    config-only 同源语义保持）；其余平台=gitcode usernames 集合。
+    D15 抽象不变量（test_guard_no_new_platform_branches）：按来源链/名单数据
+    派生，src/ 不得出现平台名 == 字面分支。
+    """
+    _src = GLOBAL_BOT_USERNAME_SOURCES.get(provider)
+    if _src is None:
+        return get_global_bot_usernames()
+    _vals = [u for u in _src() if u]
+    if _vals and provider in _BOT_USERNAME_SINGLE_VALUE_PROVIDERS:
+        return _vals[:1]
+    if _vals:
+        return _vals
+    # 单值源未配置：回落名单内平台走默认 pool（gitcode 同源语义），其余保持空
+    if provider in _BOT_USERNAME_FALLBACK_DEFAULT_POOL:
+        return get_global_bot_usernames()
+    return []
+
+def _single(has_fallback: bool):
+    def _mark(fn):
+        fn._falls_back_to_pool = has_fallback
+        return fn
+    return _mark
+
+def _path_b_prefix_clause(provider: str) -> str:
+    """D43/S63：路径 B 查询的 repo_key 前缀子句（目录派生）。
+
+    默认平台（内置卡声明序首，存量=gitcode）匹配自身前缀或裸键（无前缀
+    存量数据）；其余平台（github/gitee 等）精确前缀。
+    """
+    try:
+        from src.domains.runtime.vcs.platform_card import _DEFAULT_CARDS_RAW
+        _default = next(iter(_DEFAULT_CARDS_RAW))
+    except Exception:
+        _default = ""
+    if provider == _default:
+        return f"(repo_key LIKE '{provider}:%' OR repo_key NOT LIKE '%:%')"
+    return f"repo_key LIKE '{provider}:%'"
+
+def get_user_platform_token(user_id: str, provider: str) -> str:
+    """S87/D63：孪生函数泛化——任意平台的用户级 API token（user_credentials）。
+
+    get_user_gitcode_token / get_user_github_token_by_id 均为本函数薄委托
+    （名字保留向后兼容，Issue #343 歧义消解历史见各自 docstring）。
+    """
+    if not user_id or str(user_id or "") in ("", "0") or not provider:
+        return ""
+    try:
+        creds = get_credentials(user_id)
+        for c in creds:
+            if c.get("provider") == provider:
+                return c.get("config", {}).get("token", "") or ""
+    except Exception as e:
+        log.warning(f"get_user_platform_token failed for user={user_id} provider={provider}: {e}")
+    return ""
+
+def get_webhook_secret_by_repo_key_any(full_name: str, provider: str = "") -> str:
+    """按任意 provider 前缀的 repo_key 查 webhook_secret（D14 通用面，只读）。
+
+    遍历 managed_repos 中 repo_key = "<provider>:full_name" 的所有平台行，
+    返回第一个非空 webhook_secret；无命中返回空串。存量平台行为由调用方
+    （get_webhook_token_by_repo）的后续分流兜底，不受本函数影响。
+
+    扫雷⑦（中危④）：provider 给定时收窄为该平台精确 repo_key 单查——
+    跨平台同名仓（github:o/r 与 gitlab:o/r 同时托管）不再互串 secret。
+    provider 为空保持存量任意 provider 遍历（兼容旧调用方）。
+    """
+    _rk = ""
+    if provider:
+        from src.kernel.repo_key import to_repo_key as _trk_ws
+        _rk = _trk_ws(full_name, provider=provider)
+    # S81：ORM 路径（ManagedRepoRepository.find_by_full_name_any_provider）
+    try:
+        from src.kernel.persistence.repositories import managed_repo_repository as _mrr
+        from src.kernel.persistence.uow import uow as _uow
+        with _uow() as session:
+            if _rk:
+                # 串仓隔离：精确 repo_key 单查（不遍历其他平台行）
+                return _mrr.get_webhook_secret(session, _rk) or ""
+            for d in _mrr.find_by_full_name_any_provider(session, full_name):
+                if d.webhook_secret:
+                    return d.webhook_secret
+    except Exception as e:
+        log.warning(f"get_webhook_secret_by_repo_key_any ORM failed: {e}")
+    return ""
+
+def any_repo_credential_for_repos(repo_keys: "list[str]") -> bool:
+    """S82/D58：任一仓库在 grape_t_repo_credentials 有非空凭据（has_bot 闸门 rc 感知）。"""
+    keys = [k for k in (repo_keys or []) if k]
+    if not keys:
+        return False
+    try:
+        with db_lock:
+            ph = ",".join(["?"] * len(keys))
+            row = db.cursor().execute(
+                f"SELECT 1 FROM grape_t_repo_credentials WHERE repo_key IN ({ph}) "
+                "AND value IS NOT NULL AND value != '' LIMIT 1", keys).fetchone()
+            return bool(row)
+    except Exception as e:
+        log.warning(f"any_repo_credential_for_repos failed: {e}")
+        return False
+
+def get_repo_credential_meta(repo_key: str, cred_type: str) -> "dict | None":
+    """D90-N4：读 rc 凭据 + 审计锚点（id）一次查询。
+
+    返回 {"value": 解密后明文, "id": 行 UUID}；无行返回 None。
+    供 RepoBotToken 命中审计用（value 与 id 同事务一致）。
+    """
+    try:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT value, id FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?",
+                (repo_key, cred_type)).fetchone()
+            if not row:
+                return None
+            return {"value": _decrypt_repo_secret(row[0] or ""),
+                    "id": row[1] or ""}
+    except Exception as e:
+        log.warning(f"get_repo_credential_meta failed: {e}")
+        return None
+
+def _decrypt_repo_secret(raw: str) -> str:
+    """D90-N3：repo 凭据读侧统一解密（bot token 通道加密配套）。
+
+    decrypt 的明文兼容（无冒号分隔符原样返回）覆盖历史明文行——
+    向前兼容：存量库零迁移可读。空串直通。失败抛错（D46 P1-10 同口径，
+    解密失败调用方必须知道）。"""
+    if not raw:
+        return raw
+    from src.domains.mgmt.auth.credential_crypto import decrypt
+    return decrypt(raw)
+
+def _encrypt_repo_secret(plaintext: str) -> str:
+    """D90-N3：repo 凭据写侧统一加密（空串直通——空=无凭据，非机密）。"""
+    if not plaintext:
+        return plaintext
+    from src.domains.mgmt.auth.credential_crypto import encrypt
+    return encrypt(plaintext)
+
+def get_repo_credential_value(repo_key: str, cred_type: str) -> str:
+    """S80b：读 grape_t_repo_credentials 单表值（S82 起 rc 唯一权威、无条件；
+    空串=无值，调用方回落 managed_repos 列=历史回落）。
+    N3：返回前统一解密（历史明文行经 decrypt 明文兼容原样返回）。"""
+    try:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT value FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?",
+                (repo_key, cred_type)).fetchone()
+            return _decrypt_repo_secret(row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"get_repo_credential_value failed: {e}")
+        return ""
+
+
+"""用户系统数据库：users/credentials/vms/skills 表管理
+
+D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
+Issue #1588 B 批：老表包装函数（create_user/get_user/get_user_by_username/list_users/
+delete_user/update_password/verify_user/get_token_version/increment_token_version/
+get_user_by_gitcode_id/link_gitcode_user/get_all_user_accounts/get_user_account/
+save_user_account/delete_user_account 等 16 个包装、其私有别名与字段常量）
+已整体删除——新代码一律使用 src/domains/mgmt/auth/grape_account_db.py：
+  账号 CRUD → create_grape_account/get_grape_account_by_id/get_grape_account_by_username
+  密码/校验 → update_password/verify_grape_account
+  token_version → grape_account_db.get_token_version/increment_token_version
+  外部绑定 → create_external_identity/get_external_identity
+"""
+
+_SPLIT_KEY_USAGE = {
+    "browser_callback_url": "浏览器回调",
+    "worker_connect_url": "worker 回连",
+    "task_business_api_url": "任务业务 API",
+}
+
+# Issue #1858：任务环境按服务注入基址——业务面（VCS / Issue）与控制面（A2A）分离。
+# 显式配置键（server-config.json > meta）；未配置由 prompt_builder 按聚合网关前缀
+# 或业务/回连基址回退，且来源在 env 中显式记录（不乱冒充）。
+_TASK_SERVICE_API_KEYS = {
+    "vcs": "task_vcs_api_url",
+    "issue": "task_issue_api_url",
+    "a2a": "task_a2a_api_url",
+}
+
+_GLOBAL_BOT_FILE_FIELDS = {"gitcode": "gitcode_api_token", "github": "github_bot_token"}
+
+GLOBAL_BOT_USERNAME_SOURCES = {
+    "github": _single(has_fallback=False)(lambda: [get_global_github_bot_username()]),
+    "gitee": _single(has_fallback=True)(lambda: [get_global_gitee_bot_username()]),
+    "gitcode": get_global_bot_usernames,
+}
+
+# S87/D63：单值源平台 & 回落默认 pool——从 GLOBAL_BOT_USERNAME_SOURCES 的
+# 结构派生：callable 值=单值源；值属性 _falls_back_to_pool=True=未配置时回落
+# gitcode 池（github 独立键不回落，见 SOURCES 声明处的属性标记）。
+# 新增平台在 SOURCES 一处声明即被两个 frozenset 正确归类，零平台字面枚举。
+_BOT_USERNAME_SINGLE_VALUE_PROVIDERS = frozenset(
+    k for k, v in GLOBAL_BOT_USERNAME_SOURCES.items()
+    if hasattr(v, "_falls_back_to_pool"))
+
+_BOT_USERNAME_FALLBACK_DEFAULT_POOL = frozenset(
+    k for k, v in GLOBAL_BOT_USERNAME_SOURCES.items()
+    if callable(v) and getattr(v, "_falls_back_to_pool", False))
+
+
+def get_host_detail(repo_key: str) -> dict:
+    """读取仓库托管状态及诊断（Issue #2126），无记录或未迁移时返回空值。"""
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    empty = {"status": "", "step": "", "error": "", "updated_at": ""}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT host_status, host_step, host_error, host_updated_at "
+                "FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if not row:
+                return empty
+            return {
+                "status": str(row[0] or ""),
+                "step": str(row[1] or ""),
+                "error": str(row[2] or ""),
+                "updated_at": str(row[3] or ""),
+            }
+    except Exception as e:
+        log.warning(f"Get host detail failed: {e}")
+        return empty
+

@@ -32,7 +32,7 @@ def test_github_actor_matches_github_login():
     mock_db.cursor.return_value = mock_cursor
 
     with patch("src.domains.runtime.engine.engine_select._db", return_value=(mock_db, MagicMock())):
-        result = _repo_user_id("github:owner/test-repo", issue_creator="yangaiwu")
+        result = _repo_user_id("github:owner/test-repo", issue_creator="octocat-tester")
 
     assert result == 14, (
         f"GitHub actor 应通过 github_login 命中 user_id=14，实际 {result}"

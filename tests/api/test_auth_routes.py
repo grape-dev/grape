@@ -33,6 +33,18 @@ class _FakeReqResp:
         pass
 
 
+def _assert_whitelist_empty():
+    """断言白名单表为空（不重复发无 WHERE 全表 DELETE）。
+
+    清表由 TestOAuthCallback.setup_method 统一负责；测试库已由
+    conftest.py 隔离到 data/test_sessions.db（绝不触碰生产 data/sessions.db），
+    且 pytest 串行执行（addopts -p no:randomly，未启用 xdist），故此处只做状态断言。
+    """
+    with db_lock:
+        cnt = db.cursor().execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+    assert cnt == 0, f"login_whitelist 应为空（setup_method 未生效）：{cnt} 行"
+
+
 def _cleanup(username: str, gitcode_id: str):
     with db_lock:
         c = db.cursor()
@@ -65,6 +77,9 @@ class TestOAuthLogin:
 
     def test_success_builds_authorize_url(self, monkeypatch):
         # 需求 11：redirect_uri 从 provider 配置读取
+        # 真实读链：mgmt/auth/providers.get_redirect_uri → get_provider（本模块
+        # :124）——runtime.vcs.providers 包无 get_provider（vcs providers 是方言
+        # 翻译模块），历史 mock 挂错模块 AttributeError（基线红）。
         import src.domains.mgmt.auth.providers as _prov
         _orig_get_provider = _prov.get_provider
         def _mock_get_provider(name):
@@ -112,7 +127,7 @@ class TestOAuthCallback:
         with db_lock:
             c = db.cursor()
             try:
-                c.execute("DELETE FROM login_whitelist")
+                c.execute("DELETE FROM login_whitelist WHERE id > 0")  # F5：ratchet 禁无 WHERE 整表 DELETE
                 db.commit()
             except Exception:
                 pass
@@ -211,6 +226,61 @@ class TestOAuthCallback:
         _cleanup(uname, gid)
 
 
+    def test_bound_user_bypasses_whitelist_when_enabled(self):
+        """口径锁（2026-11-12 拍板）：白名单是准入闸，已绑定用户登录不查白名单。
+
+        实查依据：live 库验收账号（gitee external_login=gitee-login） 在白名单
+        清空+开关开启（fail-closed）后仍 login_success —— grape_auth.py:1590 命中
+        binding 即直接登录，1719 的 _check_whitelist 到不了。此处用真实
+        is_user_allowed（不 mock），且表为空+开关开启，确保走的就是 fail-closed 状态。
+        """
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, create_external_identity
+        import src.kernel.config as cfg
+        uname = "oauth_bound_" + uuid.uuid4().hex[:6]
+        gid = _gid()
+        u = create_grape_account(username=uname, email="", password="pw")
+        create_external_identity(u["id"], "gitcode", gid, uname, "已绑定")
+        _assert_whitelist_empty()               # 表空（由 setup_method 已清理，此处只断言不重删）
+        cfg._WL_ENABLED_CACHE = True            # 开关开（钉住缓存，避免 meta mock 干扰）
+        cfg._WL_CACHE_TS = float("inf")
+        state = _save_state()
+        try:
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
+                 patch("requests.post",
+                       return_value=_FakeReqResp({"access_token": "at3", "refresh_token": "rt"})), \
+                 patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "已绑定"})):
+                r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
+                               follow_redirects=False)
+            assert r.status_code == 302
+            assert "WHITELIST" not in r.headers.get("location", ""), r.headers.get("location")
+            assert "exchange_code=" in r.headers["location"]
+        finally:
+            cfg.invalidate_login_whitelist_cache()
+            _cleanup(uname, gid)
+
+    def test_unbound_user_denied_when_whitelist_empty_and_enabled(self):
+        """对照组（fail-closed 端到端）：同一状态下未绑定用户必须被白名单拒绝。"""
+        import src.kernel.config as cfg
+        uname = "oauth_unbound_" + uuid.uuid4().hex[:6]
+        gid = _gid()
+        _assert_whitelist_empty()               # 表空（由 setup_method 已清理，此处只断言不重删）
+        cfg._WL_ENABLED_CACHE = True
+        cfg._WL_CACHE_TS = float("inf")
+        state = _save_state()
+        try:
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
+                 patch("requests.post",
+                       return_value=_FakeReqResp({"access_token": "at4", "refresh_token": "rt"})), \
+                 patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新"})):
+                r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
+                               follow_redirects=False)
+            assert r.status_code == 302
+            assert "WHITELIST" in r.headers.get("location", "")
+        finally:
+            cfg.invalidate_login_whitelist_cache()
+            _cleanup(uname, gid)
+
+
     def test_no_gitcode_id_redirect(self):
         state = _save_state()
         with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
@@ -231,11 +301,13 @@ class TestOAuthCallback:
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True), \
-             patch("src.domains.mgmt.user.db.create_user", return_value=None):
+             patch("src.domains.mgmt.routes.grape_auth.create_grape_account_oauth",
+                   return_value=None):
 
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
-        # grape_auth callback 建号失败（create_grape_account_oauth=None，Issue #1588 后无 create_user）
+        # grape_auth callback 建号失败（create_grape_account_oauth=None；D32 后 user_accounts
+        # 死表写函数已删除，建号唯一路径是 grape_accounts）
         # 仍走 302 重定向（oauth_error），不 500
         assert r.status_code == 302
 

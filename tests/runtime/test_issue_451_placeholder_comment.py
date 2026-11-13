@@ -231,7 +231,7 @@ class TestIssue679SkipEmptyPosting:
 
     def test_pr_result_empty_skips_comment(self):
         """PR 订阅回帖：result_text 为空时不发评论。"""
-        from src.api.event_pipeline import _post_result_to_pr
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_pr
         captured = {}
         with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
@@ -241,7 +241,7 @@ class TestIssue679SkipEmptyPosting:
 
     def test_pr_result_json_without_conclusion_skips_comment(self):
         """PR 订阅回帖：纯 JSON 无 conclusion 时不发评论。"""
-        from src.api.event_pipeline import _post_result_to_pr
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_pr
         captured = {}
         with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
@@ -251,7 +251,7 @@ class TestIssue679SkipEmptyPosting:
 
     def test_pr_result_plain_text_posts(self):
         """PR 订阅回帖：纯文本正文正常发布（行为不变）。"""
-        from src.api.event_pipeline import _post_result_to_pr
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_pr
         captured = {}
         with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
@@ -262,7 +262,7 @@ class TestIssue679SkipEmptyPosting:
 
     def test_issue_result_json_conclusion_posts(self):
         """issue 回帖主路径：结构化 conclusion 正常发布（行为不变）。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         result_text = json.dumps({"conclusion": "分析完成，评级 ready"})
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):

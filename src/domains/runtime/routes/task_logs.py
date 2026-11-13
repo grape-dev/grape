@@ -5,31 +5,35 @@
 
 鉴权：登录用户（Bearer token）。前端用 fetch + ReadableStream 消费（同 chat SSE 模式）。
 """
+
 import asyncio
+
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
 from fastapi.responses import StreamingResponse
 
 from src.api.deps import require_no_session_token
+
 from src.kernel.config import log
+
 from src.domains.runtime.engine.service import list_task_messages, list_wrote_files
 
 router = APIRouter(prefix="/api/task-logs", tags=["task-logs"])
 
 # 无消息时的心跳间隔：防代理/浏览器超时断连
 _HEARTBEAT_S = 15
+
 # DB 增量尾随周期：跨 master 场景下，worker 上报落在另一台 master（fanout 不互通），
 # 本进程 SSE 每 _TAIL_POLL_S 秒查一次 task_messages（共享 DB）补发增量。
 # 延迟 = 尾随周期 + ingestion 批处理（~0.2s），1.5s 可接受；环境变量可调。
 _TAIL_POLL_S = float(os.getenv("TASK_LOG_TAIL_POLL_S", "1.5"))
 
-
 def _require_task_exists(task_id: str):
     from src.domains.runtime.engine.service import get_task
     if not get_task(task_id):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
-
 
 _WROTE_FILES_SCHEMA = {
     "type": "object",
@@ -70,25 +74,20 @@ _WROTE_FILES_SCHEMA = {
     },
 }
 
-
-@router.get("/{task_id}/info", operation_id="task_logs_info", summary="Task runtime info",
-            description="Task runtime info: agent/device/machine + received context (prompt).",
-            responses={200: {"description": "任务运行信息 + wrote_files 产物清单", "content": {"application/json": {"schema": _WROTE_FILES_SCHEMA}}}})
+@router.get("/{task_id}/info", operation_id="task_logs_info", summary="Task runtime info", description="Task runtime info: agent/device/machine + received context (prompt).")
 def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务关联的执行引擎/机器信息 + 接收上下文（prompt）。
 
     返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length,
-           created_at, started_at, completed_at, status, issue_id, event_seq, repo_key,
-           wrote_files}
+           created_at, started_at, completed_at, status, issue_id, event_seq, repo_key}
     agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.name/last_ip/owner_name。
     Issue #701：device_name 字段下发凭据自定义名 rc.name（空则空值，前端统一占位），
     不再下发边端自报 device_name。
     prompt 为 agent 接收到的完整上下文（截断至 8000 字符），prompt_full_length 为原始长度。
-    wrote_files（Issue #977）：任务写过的文件清单 [{path, bytes, tool, seq, first_seen_at}]，
-    派生自 task_messages 的 write/patch tool_use 入参，不扫工作区；无写入返回 []（兼容老前端）。
     """
     from src.kernel.session_manager import db, db_lock
     from src.api.time_utils import normalize_event_time
+    _require_task_access(task_id, user)  # 扫雷⑨-H5：任务归属校验
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -110,7 +109,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     runtime_id = row[18] if len(row) > 18 else 0
     # Issue #1255：执行模型（用量优先、配置模型回落，与事件详情同一取值函数，口径一致）
     try:
-        from src.observability.llm_usage import task_model_summary
+        from src.domains.insight.observability.llm_usage import task_model_summary
         model_summary = task_model_summary(task_id, int(runtime_id or 0))
     except Exception:
         model_summary = {"model": "", "source": "unknown", "models": []}
@@ -145,14 +144,12 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         "models": model_summary.get("models", []),
     }
 
-
 @router.get("/{task_id}/messages", operation_id="task_logs_messages", summary="Task messages", description="Incremental messages: everything after `since` (monotonic seq).")
 def get_task_messages(task_id: str, user: dict = Depends(require_no_session_token),
                             since: int = Query(0, ge=0)):
     """增量拉取：since 之后的消息（seq 单调递增）。"""
-    _require_task_exists(task_id)
+    _require_task_access(task_id, user)  # 扫雷⑨-H5：任务归属校验（兼 404）
     return list_task_messages(task_id, since=since)
-
 
 @router.get("/{task_id}/stream", operation_id="task_logs_stream", summary="Task message stream (SSE)", description="SSE live stream: buffered messages after `since`, then a live subscription with heartbeat.")
 async def stream_task_messages(task_id: str, request: Request,
@@ -164,7 +161,7 @@ async def stream_task_messages(task_id: str, request: Request,
     超时则查 task_messages（共享 DB）补发 since=last_seq 之后的增量——
     解决双主 fanout 不互通导致远端 worker 事件面板不刷新（#379）。
     """
-    _require_task_exists(task_id)
+    _require_task_access(task_id, user)  # 扫雷⑨-H5：任务归属校验（兼 404）
     from src.domains.runtime.engine.task_log_stream import subscribe, unsubscribe, sse_frame
 
     async def gen():
@@ -223,3 +220,27 @@ async def stream_task_messages(task_id: str, request: Request,
             "X-Accel-Buffering": "no",  # 关 nginx 缓冲，保证流式实时
         },
     )
+
+def _require_task_access(task_id: str, user: dict):
+    """扫雷⑨-H5：任务归属校验（三端点共用）。
+
+    - session_token / api_key：作用域已限定，与 check_repo_access 同口径豁免；
+    - 本人：agent_tasks.user_id == 当前用户 id（任务创建者）；
+    - 仓库协作者：任务带 repo_key 时走 check_repo_access（managed_repos 归属）；
+    - 其余（非本人且无 repo_key 归属）→ 403 fail-closed。
+    """
+    from src.domains.runtime.engine.service import get_task
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    auth_type = user.get("auth_type", "jwt")
+    if auth_type in ("session_token", "api_key"):
+        return task
+    if str(task.get("user_id") or "") == str(user.get("id") or ""):
+        return task
+    repo_key = task.get("repo_key") or ""
+    if repo_key:
+        from src.api.deps import check_repo_access
+        check_repo_access(user, repo_key)
+        return task
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该任务"})

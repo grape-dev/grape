@@ -21,7 +21,7 @@ class TestHistoryOffsetSource:
 
     def test_source_contains_offset_fields(self):
         p = os.path.join(os.path.dirname(__file__), "..", "..",
-                         "src", "api", "routes", "pipeline.py")
+                         "src", "domains", "runtime", "routes", "pipeline.py")
         src = open(p, encoding="utf-8").read()
         assert "history_offset: int = Query(0" in src, "缺少 history_offset 查询参数"
         assert '"history_offset": _offset' in src, "返回体缺少 history_offset 字段"
@@ -29,7 +29,7 @@ class TestHistoryOffsetSource:
 
     def test_source_offset_clamped(self):
         p = os.path.join(os.path.dirname(__file__), "..", "..",
-                         "src", "api", "routes", "pipeline.py")
+                         "src", "domains", "runtime", "routes", "pipeline.py")
         src = open(p, encoding="utf-8").read()
         assert "_offset = min(max(int(history_offset or 0), 0), history_total)" in src, \
             "history_offset 应被 clamp 到 [0, history_total]"

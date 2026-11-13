@@ -38,19 +38,31 @@ class TestRenderOAuthButtonsNotHide:
     """T3-01, T3-02: 未配 OAuth App 时不隐藏按钮，oauthLogin 用新提示文案。"""
 
     def test_t3_01_render_oauth_buttons_not_hide_when_no_configured(self):
-        """T3-01: renderOAuthButtons 在 configured.length === 0 时不设置 display='none'。"""
+        """T3-01: 渠道列表为空时不得隐藏 oauth section。
+
+        2026-11-13（QA B3）按 D108 零闪新实现更新：renderOAuthButtons 现为
+        「head 注入目录同步构建 + /auth/providers 异步对账」双路径，空列表语义
+        下沉到 _applyProvidersToDOM——断言随实现下沉，仍锁「不设 display='none'
+        隐藏 section + 空列表强制可见」两段核心语义（不得静默漂移）。
+        """
         source = _read_file("js/app.js")
         # 找到 renderOAuthButtons 函数
         assert "function renderOAuthButtons" in source
-        # R7.5 修复后不再过滤 configured，改为检查 providers.length
         idx = source.find("function renderOAuthButtons")
         func_source = source[idx:idx + 1200]
-        # 不应隐藏 section
+        # 不应隐藏 section（renderOAuthButtons 本体）
         assert "display = 'none'" not in func_source, \
             "renderOAuthButtons should NOT hide section"
-        # 应检查 providers.length（不是 configured.length）
-        assert "providers.length === 0" in func_source, \
-            "renderOAuthButtons should check providers.length (not configured.length)"
+        # D108 拆分后的对账/构建回调体——空列表语义在此，且是"确保可见"非隐藏
+        apply_idx = source.find("function _applyProvidersToDOM")
+        assert apply_idx > 0, "D108 split helper _applyProvidersToDOM missing"
+        apply_source = source[apply_idx:apply_idx + 1200]
+        assert "providers.length === 0" in apply_source, \
+            "_applyProvidersToDOM should keep the empty-list branch"
+        assert "display = 'none'" not in apply_source, \
+            "_applyProvidersToDOM should NOT hide section"
+        assert "section.style.display = ''" in apply_source, \
+            "empty list must force the section visible (not hide)"
 
     def test_t3_02_oauth_login_uses_hint_text(self):
         """T3-02: oauthLogin catch 时使用 oauth_not_configured_hint 文案。"""
@@ -261,14 +273,17 @@ class TestBindingGuideAndRenderAllProviders:
         source = _read_file("js/app.js")
         assert "function renderOAuthButtons" in source
         idx = source.find("function renderOAuthButtons")
-        # B+（#535）后函数变长（新增置灰+常显说明），窗口从 1200 放宽到 2000
-        func_source = source[idx:idx + 2000]
+        # B+（#535）后函数变长（新增置灰+常显说明），窗口从 1200 放宽到 2000；
+        # D102-B 溢出折叠再加长，放宽到 2600
+        func_source = source[idx:idx + 4000]
         # 不应过滤 configured
         assert "filter(function(p){return p.configured})" not in func_source, \
             "renderOAuthButtons should NOT filter providers by configured"
         # 用 providers（全部）而非 configured（过滤后）做渲染
-        assert "providers.map" in func_source, \
-            "renderOAuthButtons should use providers.map (all providers) for rendering"
+        # D102-B: 溢出折叠重构后渲染走 _mkBtn（providers.map(_mkBtn) 全量映射
+        # 语义不变——折叠只藏显示不做过滤），断言改映射函数名
+        assert "providers.map(_mkBtn)" in func_source, \
+            "renderOAuthButtons should use providers.map(_mkBtn) (all providers) for rendering"
         assert "providers.length" in func_source, \
             "renderOAuthButtons should check providers.length (not configured.length)"
 

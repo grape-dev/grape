@@ -1,0 +1,19 @@
+{
+  "name": "Gitee",
+  "dialect": "github",
+  "host": "gitee.com",
+  "webhook_path": "/webhook/gitee",
+  "event_header": "X-Gitee-Event",
+  "api_base": "https://gitee.com/api/v5",
+  "api_auth": "query_token",
+  "webhook_verify": "token_compare",
+  "webhook_dialect": "gitee_v5",
+  "pr_head_filter": "bare_ref",
+  "clone_auth": "basic_password",
+  "issue_write_form": "owner_param",
+  "branch_create_form": "form",
+  "pat_create_url": "https://gitee.com/profile/personal_access_tokens",
+  "brand_color": "#C71D23",
+  "token_storage_field": "",
+  "webhook_token_field": ""
+}

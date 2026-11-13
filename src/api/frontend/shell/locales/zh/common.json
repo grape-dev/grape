@@ -110,5 +110,17 @@
   "gitcode_reauth_required": "GitCode 授权已过期，正在跳转重新授权...",
   "request_failed": "请求失败 ({{status}})",
   "network_upload_error": "网络错误，上传失败",
-  "unnamed_worker": "未命名设备"
+  "unnamed_worker": "未命名设备",
+  "host_missing_bot": "grape_bot 未加入项目",
+  "host_missing_bot_compact": "grape_bot 未加入",
+  "host_missing_webhook": "webhook 未创建",
+  "host_missing_webhook_url": "服务公网地址（webhook_url）未配置",
+  "host_missing_token": "用户 Token 缺失或已过期",
+  "host_status_bot_missing": "该项目 grape_bot 未成功加入项目",
+  "host_status_bot_missing_compact": "grape_bot 未加入",
+  "host_status_webhook_missing": "项目 webhook 缺失，Grape 无法接收仓库事件",
+  "host_status_webhook_missing_compact": "webhook 未创建",
+  "host_status_partial": "该项目托管流程未完成，Grape 部分功能不可用",
+  "host_status_partial_compact": "托管部分完成",
+  "host_status_fallback": "该项目托管流程未完成，Grape 部分功能不可用"
 }

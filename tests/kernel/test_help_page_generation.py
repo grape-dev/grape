@@ -240,3 +240,48 @@ class TestApiEndpointStandardization:
                 if pattern.match(text):
                     found = True
         assert found, "no endpoint heading matches METHOD /path pattern"
+
+class TestIssue2089NarrowAdaptation:
+    """Issue #2089: 帮助页容器自适应——宽容器铺满、窄容器横向滚动、900px 断点回归。
+
+    病灶：抽屉 520px 落在 @media(max-width:900px) 内被压成移动版式；
+    .content max-width:940px 固定上限导致全屏抽屉下大片留白；
+    宽表格（API 参数表）在窄容器无横向滚动容器被裁切。
+    """
+
+    def test_content_max_width_fluid(self):
+        """宽容器自适应：.content 上限改为 min(940px,100%)，全屏（≥1200px）铺满而非固定 940px 留白。"""
+        assert "max-width:min(940px,100%)" in gen._CSS, ".content max-width 未流式化"
+
+    def test_content_h_scroll_container(self):
+        """窄容器滚动：.content 自身 overflow-x:auto，宽表格/长代码横向滚动不裁切。"""
+        m = re.search(r"\.content\{[^}]*\}", gen._CSS)
+        assert m, ".content rule missing in _CSS"
+        assert "overflow-x:auto" in m.group(0), ".content 缺 overflow-x:auto（横向滚动容器）"
+
+    def test_pre_h_scroll_kept(self):
+        """pre 保留 overflow-x:auto（长代码行滚动）。"""
+        m = re.search(r"pre\{[^}]*\}", gen._CSS)
+        assert m and "overflow-x:auto" in m.group(0)
+
+    def test_mobile_breakpoint_side_toggle_kept(self):
+        """900px 断点回归：目录侧栏仍可 burger 展开（.side/.side.open + .burger 显示）。"""
+        block = re.search(r"@media\(max-width:900px\)\{(.*?)\n\}", gen._CSS, re.DOTALL)
+        assert block, "900px media query missing"
+        css = block.group(1).replace(" ", "")
+        assert ".side.open{display:block}" in css, ".side.open 展开规则丢失"
+        assert ".burger{display:inline-block}" in css, ".burger 按钮规则丢失"
+        assert ".content{padding:20px18px90px}" in css, ".content 移动 padding 被改动"
+
+    def test_side_sticky_layout_kept(self):
+        """宽容器回归：>900px 时目录常驻（.body flex + .side sticky 不变）。"""
+        m_body = re.search(r"\.body\{[^}]*\}", gen._CSS)
+        m_side = re.search(r"\.side\{[^}]*\}", gen._CSS)
+        assert m_body and "display:flex" in m_body.group(0), ".body flex 骨架被改动"
+        assert m_side and "position:sticky" in m_side.group(0), ".side sticky 被改动"
+
+    def test_generated_html_carries_fluid_css(self):
+        """落盘产物 help.html 同步携带新 CSS 契约（生成器重跑后生效）。"""
+        text = _page_text()
+        assert "max-width:min(940px,100%)" in text, "help.html 产物未更新（需重跑生成器）"
+        assert "overflow-x:auto" in text

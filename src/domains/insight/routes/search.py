@@ -14,7 +14,7 @@ def global_search(q: str = Query("", min_length=1),
     q_lower = q.lower()
 
     # 当前用户有权访问的仓库集合——事件搜索仅限这些仓库
-    managed = user_db.get_managed_repos(user.get("id", 0))
+    managed = user_db.get_managed_repos(str(user.get("id") or ""))
     user_repo_keys = {r["repo_key"] for r in managed}
 
     if type in ("all", "event"):

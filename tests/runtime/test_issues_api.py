@@ -3,16 +3,22 @@
 覆盖：仓库 Issue 列表（stage/status 聚合）、创建 Issue、详情（stage+events+pipeline）、
 事件列表、pipeline 路线图；认证、聚合隔离、404 兜底。
 """
+
 import os, json, io, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
+
 from src.kernel.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
@@ -23,12 +29,14 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 _uid = None
+
 _headers = {}
 
 OWNER = "test_issues"
-REPO = "hello"
-REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
+REPO = "hello"
+
+REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 def setup_module():
     global _uid, _headers
@@ -44,7 +52,6 @@ def setup_module():
     except Exception:
         pass
 
-
 def teardown_module():
     with db_lock:
         c = db.cursor()
@@ -55,7 +62,6 @@ def teardown_module():
                 pass
         db.commit()
 
-
 def _mk_issue_state(number, stage="qa", owner="qa", scene="default", assignee="grape_bot"):
     """Phase C3：经 set_issue_stage 写（issue 单表权威；同时建 issue 卡片行）。"""
     from src.api.session_store import set_issue_stage, set_issue_scene
@@ -63,7 +69,6 @@ def _mk_issue_state(number, stage="qa", owner="qa", scene="default", assignee="g
     set_issue_stage(REPO_KEY, iid, stage, owner, assignee=assignee)
     if scene:
         set_issue_scene(REPO_KEY, iid, scene, 0)
-
 
 def _mk_event(number, ev_type="issue_opened", agent="vod", status="completed"):
     with db_lock:
@@ -75,7 +80,6 @@ def _mk_event(number, ev_type="issue_opened", agent="vod", status="completed"):
         seq = c.lastrowid
         db.commit()
         return seq
-
 
 def _mk_task(number, status="processing"):
     """确保 issue 卡片行存在并按需更新 status（不清零 stage 等收编字段）。"""
@@ -91,9 +95,6 @@ def _mk_task(number, status="processing"):
             "UPDATE issue SET status=? WHERE repo_key=? AND issue_number=?",
             (status, REPO_KEY, number))
         db.commit()
-
-
-# ===================== 列表 =====================
 
 class TestListIssues:
     def test_empty_repo(self):
@@ -134,9 +135,6 @@ class TestListIssues:
     def test_requires_auth(self):
         resp = client.get(f"/api/issues/{OWNER}/{REPO}")
         assert resp.status_code == 401
-
-
-# ===================== 详情 =====================
 
 class TestIssueDetail:
     def test_detail_not_found(self):
@@ -181,9 +179,6 @@ class TestIssueDetail:
         assert d["stage"] == "vod"  # 无 issue_state → 兜底 vod
         assert len(d["events"]) == 1
 
-
-# ===================== 事件列表 =====================
-
 class TestIssueEvents:
     def test_events_scope(self):
         _mk_issue_state(10, stage="qa")
@@ -207,9 +202,6 @@ class TestIssueEvents:
         resp = client.get(f"/api/issues/{OWNER}/{REPO}/99998/events", headers=_headers)
         assert resp.status_code == 404
 
-
-# ===================== Pipeline =====================
-
 class TestIssuePipeline:
     def test_pipeline_without_archive(self):
         _mk_issue_state(13, stage="sre")
@@ -226,9 +218,6 @@ class TestIssuePipeline:
         resp = client.get(f"/api/issues/{OWNER}/{REPO}/99997/pipeline", headers=_headers)
         assert resp.status_code == 404
 
-
-# ===================== 创建 =====================
-
 class TestCreateIssue:
     def test_create_missing_fields(self):
         resp = client.post(f"/api/issues/{OWNER}/{REPO}", json={"title": ""}, headers=_headers)
@@ -238,7 +227,7 @@ class TestCreateIssue:
         from unittest.mock import patch
         _mk_issue_state(20, stage="vod")  # 预置避免走 GitCode API
         # Issue #343 改为：用户建单用用户自己的 GitCode token + _post_gitcode_issue
-        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 20}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
+        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"),              patch("src.api.issues_center._create_issue_unified", return_value={"number": 20}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_ensure.return_value = 20
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",
@@ -254,7 +243,7 @@ class TestCreateIssue:
         from unittest.mock import patch
         # Issue #343 改为：用户建单用用户自己的 GitCode token + _post_gitcode_issue
         # 幂等查重 mock 为「无同名 open Issue」，避免打到真实 GitCode API
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"),              patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 21}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
+        with patch("src.api.deps.get_user_token_for_repo", return_value="test_tok"),              patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.api.issues_center._create_issue_unified", return_value={"number": 21}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_ensure.return_value = 21
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",
@@ -275,7 +264,7 @@ class TestCreateIssue:
         from unittest.mock import patch
         def _raise_401(*a, **k):
             raise RuntimeError("GitCode API GET https://gitcode.com/api/v5/repos/o/r/issues?state=open failed (401): UNAUTHORIZED")
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="dead_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", side_effect=_raise_401), \
              patch("src.api.issues_center._refresh_user_gitcode_token", return_value=""):
             resp = client.post(f"/api/issues/{OWNER}/{REPO}",
@@ -297,10 +286,10 @@ class TestCreateIssue:
             if calls["n"] == 1:
                 raise RuntimeError("GitCode API GET ... failed (401): UNAUTHORIZED")
             return None  # 刷新后重试成功：无同名 open issue
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="dead_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", side_effect=_dedup), \
              patch("src.api.issues_center._refresh_user_gitcode_token", return_value="new_tok"), \
-             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 23}), \
+             patch("src.api.issues_center._create_issue_unified", return_value={"number": 23}), \
              patch("src.api.issues_center.ensure_issue_task", return_value=23):
             resp = client.post(f"/api/issues/{OWNER}/{REPO}",
                                json={"title": "t_401b", "description": "d", "repo_key": REPO_KEY},
@@ -314,7 +303,7 @@ class TestCreateIssue:
         from unittest.mock import patch
         def _raise_401(*a, **k):
             raise RuntimeError("GitCode API GET ... failed (401): UNAUTHORIZED")
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="dead_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", side_effect=_raise_401), \
              patch("src.api.issues_center._refresh_user_gitcode_token", return_value="new_tok"):
             resp = client.post(f"/api/issues/{OWNER}/{REPO}",
@@ -330,9 +319,9 @@ class TestCreateIssue:
         from unittest.mock import patch
         def _raise_401(*a, **k):
             raise RuntimeError("GitCode API POST issues failed (401): UNAUTHORIZED")
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="dead_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
-             patch("src.api.issues_center._post_gitcode_issue", side_effect=_raise_401), \
+             patch("src.api.issues_center._create_issue_unified", side_effect=_raise_401), \
              patch("src.api.issues_center._refresh_user_gitcode_token", return_value=""):
             resp = client.post(f"/api/issues/{OWNER}/{REPO}",
                                json={"title": "t_post401", "description": "d", "repo_key": REPO_KEY},
@@ -352,9 +341,9 @@ class TestCreateIssue:
             if calls["post"] == 1:
                 raise RuntimeError("GitCode API POST issues failed (401): UNAUTHORIZED")
             return {"number": 24}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+        with patch("src.api.deps.get_user_token_for_repo", return_value="dead_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
-             patch("src.api.issues_center._post_gitcode_issue", side_effect=_post), \
+             patch("src.api.issues_center._create_issue_unified", side_effect=_post), \
              patch("src.api.issues_center._refresh_user_gitcode_token", return_value="new_tok"), \
              patch("src.api.issues_center.ensure_issue_task", return_value=24):
             resp = client.post(f"/api/issues/{OWNER}/{REPO}",
@@ -371,7 +360,8 @@ class TestCreateIssue:
         def _raise_401(*a, **k):
             raise RuntimeError("GitHub API GET ... failed (401): unauthorized")
         with patch("src.domains.mgmt.user.db.get_github_token", return_value="gh_bot_tok"), \
-             patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=_raise_401):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient._do_request",
+                   return_value={"error": "HTTP 401"}):
             resp = client.post("/api/issues/gh_owner/gh_repo",
                                json={"title": "t_gh", "description": "d",
                                      "repo_key": "github:gh_owner/gh_repo"},
@@ -380,8 +370,6 @@ class TestCreateIssue:
         detail = resp.json()["detail"]
         assert "Bot Token" in detail["message"], detail
         assert "action" not in detail, detail
-
-# ===================== Issue #542：真分页 + 终态截断 =====================
 
 class TestListIssuesPaging:
     """Issue #542：/api/issues/{o}/{r} 真分页（page/per_page）与默认终态截断（recent_terminal）。
@@ -517,9 +505,8 @@ class TestListIssuesPaging:
             assert it["events_count"] == 1
             assert it["latest_event"]["title"] == f"Real {it['issue_number']}"
 
-    def test_pagination_pr_cards_merged_into_window(self):
-        """Issue #926：PR 伪卡片并入统一 LIMIT/OFFSET 分页窗口——
-        PR 卡计入 total，按合并序分布到各页，逐页累计无重复无丢失。"""
+    def test_pagination_pr_cards_only_on_first_page(self):
+        """分页模式：PR 订阅伪卡片只混入第 1 页（不逐页重复），has_more 不受 PR 卡片影响。"""
         self._mk_many(5600, 4, "completed")
         with db_lock:
             c = db.cursor()
@@ -531,19 +518,21 @@ class TestListIssuesPaging:
                     (self.P_REPO_KEY, f"#pr_{pr}_scene-x", "note_hook_pr", "qa",
                      f"PR #{pr} review", f"Sum pr{pr}", "completed"))
             db.commit()
-        # 逐页拉取（per_page=2），累计编号无重复无丢失，total 计入 PR 卡
-        seen, pg = [], 1
-        total = None
-        while True:
-            d = self._get(f"?mode=time&per_page=2&page={pg}").json()
-            total = d["total"]
-            seen.extend([it.get("issue_number") for it in d["issues"]])
-            if not d["has_more"]:
-                break
-            pg += 1
-            assert pg < 20, "分页终止保护"
-        assert total == 4 + 2  # issue 4 行 + PR 卡 2 张（Issue #926 计入 total）
-        assert len(seen) == total
-        assert len(set(seen)) == total, "PR 卡与 issue 行逐页无重复"
-        pr_cards = [n for n in seen if n in (11, 12)]
-        assert len(pr_cards) == 2, "两张 PR 卡都应出现在某一页"
+        d1 = self._get("?mode=time&per_page=2&page=1").json()
+        assert d1["total"] == 4  # PR 伪卡片不计入 issue 行 total
+        pr_cards = [it for it in d1["issues"] if it.get("is_pr_event")]
+        assert len(pr_cards) == 2, "第 1 页应混入 PR 伪卡片"
+        # issue 行 2 条 + PR 卡片 2 条
+        assert len([it for it in d1["issues"] if not it.get("is_pr_event")]) == 2
+        assert d1["has_more"] is True  # 2/4 行 < 4（不被 PR 卡片虚增）
+        d2 = self._get("?mode=time&per_page=2&page=2").json()
+        assert not [it for it in d2["issues"] if it.get("is_pr_event")], "第 2 页不应重复 PR 伪卡片"
+        assert len(d2["issues"]) == 2
+        assert d2["has_more"] is False
+
+from src.domains.mgmt.auth import grape_account_db
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

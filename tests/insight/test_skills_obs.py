@@ -3,9 +3,13 @@
 覆盖：上传（规范化重打包/版本递增/DB 回写）、详情（提取 + zip_url）、
 转换（copyObject）、删除（对象清理）、模板（临时 URL 返回）。
 """
+
 import io
+
 import os
+
 import sys
+
 import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -14,15 +18,23 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db")
 
 import pytest  # noqa: E402
+
 import sys as _sys
 
 _is_win = _sys.platform == "win32"
+
 from fastapi.testclient import TestClient  # noqa: E402
+
 from src.api.main import app  # noqa: E402
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db  # noqa: E402
+
 from src.kernel.session_manager import db, db_lock  # noqa: E402
+
 from src.domains.runtime.storage import StorageBackend  # noqa: E402
+
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
@@ -32,11 +44,14 @@ def _jwt_access_token(user_id, username="test"):
 client = TestClient(app)
 
 _uid = None
-_headers = {}
 
+_headers = {}
 
 def setup_module():
     global _uid, _headers
+    # S106：独立 throwaway DB 需先建表（no such table: skill ×5 根因）
+    from src.api.db_setup import init_database
+    init_database()
     # D32 适配（同 test_auth_token.py OMIT-4）：鉴权链路（deps.get_current_user）只查
     # grape_accounts，旧 user_db.create_user 写死表 user_accounts 导致全用例 401。
     # 改用 create_grape_account；唯一后缀避免跨运行 UNIQUE 冲突。
@@ -53,14 +68,12 @@ def setup_module():
     _token = create_access_token(_uid["id"], _uid["username"], _get_tv(_uid["id"]))
     _headers = {"Authorization": f"Bearer {_token}"}
 
-
 def teardown_module():
     # 清理本模块创建的技能记录
     with db_lock:
         db.execute("DELETE FROM skill WHERE owner_id IN (?, ?)",
                    (str(_uid["id"]), "testobs/repo1"))
         db.commit()
-
 
 class FakeStorage(StorageBackend):
     """内存 OBS 模拟：记录对象/复制/删除/URL。"""
@@ -125,7 +138,6 @@ class FakeStorage(StorageBackend):
             return True
         return False
 
-
 @pytest.fixture(autouse=True)
 def _obs_env(monkeypatch):
     """启用 OBS 分支：monkeypatch get_storage 返回 FakeStorage，并清理缓存状态。"""
@@ -138,7 +150,6 @@ def _obs_env(monkeypatch):
         db.execute("DELETE FROM skill WHERE skill_name LIKE 'obs-test%'")
         db.commit()
     yield fake
-
 
 def _make_skill_zip(skill_name: str, with_script: bool = False, binary_extra: str = "",
                     version: "str | None" = "1.0.0", mjs_script: bool = False,
@@ -170,7 +181,6 @@ def _make_skill_zip(skill_name: str, with_script: bool = False, binary_extra: st
             zf.writestr(f"{skill_name}/{binary_extra}", b"\x7fELF\x02\x01\x01\x00evil")
     return buf.getvalue()
 
-
 def _skill_id(skill_name, scope="user"):
     """sqlite3 直连测试库查技能 id——不依赖 session_manager 模块（避免 test_session_manager
     等测试替换全局模块导致的顺序污染）。"""
@@ -184,7 +194,6 @@ def _skill_id(skill_name, scope="user"):
         return row[0] if row else None
     finally:
         conn.close()
-
 
 def _ensure_official_build_debug():
     """官方 build-debug 技能缺失时补插（test_repos_remove_cleanup 等会清空 skill 表）。"""
@@ -200,7 +209,6 @@ def _ensure_official_build_debug():
         conn.commit()
     finally:
         conn.close()
-
 
 class TestSkillsObs:
     @pytest.fixture(autouse=True)
@@ -354,11 +362,11 @@ class TestSkillsObs:
         assert r.status_code == 200, r.text
         assert len(_obs_env.copied) == 1
         src, dst = _obs_env.copied[0]
-        assert "/skills/custom/" in src and "/skills/repo/testobs/repo1/" in dst
+        assert "/skills/custom/" in src and "/skills/repo/gitcode/testobs/repo1/" in dst  # S106：#444 键形 repo 段含 provider
         assert dst in _obs_env.objects  # 目标对象存在
         with db_lock:
             row = db.execute(
-                "SELECT file_path FROM skill WHERE skill_name='obs-test-convert' AND scope='repo' AND owner_id='testobs/repo1'").fetchone()
+                "SELECT file_path FROM skill WHERE skill_name='obs-test-convert' AND scope='repo' AND owner_id='gitcode:testobs/repo1'").fetchone()  # S106：#444 后 owner_id=带前缀 repo_key（与 upload 一致）
         assert row and row[0] == dst, f"repo 记录 file_path 应为目标固定 key, got {row}"
 
     def test_delete_obs_removes_object(self, _obs_env):
@@ -374,7 +382,10 @@ class TestSkillsObs:
             keys = db.execute(
                 "SELECT file_path FROM skill WHERE skill_name='obs-test-delete' AND scope='user'").fetchall()
         assert len(keys) == 1  # DB 仅一条记录（固定 key）
-        r = client.delete("/api/skills/obs-test-delete?scope=user", headers=_headers)
+        _sid = conn_db_id = None
+        with db_lock:
+            _sid = db.execute("SELECT id FROM skill WHERE skill_name='obs-test-delete' AND scope='user'").fetchone()[0]
+        r = client.delete(f"/api/skills/by-id/{_sid}?scope=user", headers=_headers)  # S106：名称 DELETE 路由已移除，按现行 by-id API
         assert r.status_code == 200, r.text
         # 固定 key 单对象删除（v2.4：每技能仅 1 对象）
         assert len(_obs_env.deleted) == 1, f"deleted={_obs_env.deleted}"
@@ -383,8 +394,14 @@ class TestSkillsObs:
             row = db.execute("SELECT COUNT(*) FROM skill WHERE skill_name='obs-test-delete' AND scope='user'").fetchone()
         assert row[0] == 0
 
-    def test_template_obs_returns_url(self, _obs_env):
+    def test_template_obs_returns_url(self, _obs_env, tmp_path, monkeypatch):
         """模板下载（OBS 模式）→ 返回 {url, expires_in}。"""
+        # S106：skills/_template 由 scripts/sync_templates.sh 同步生成（非仓库文件）——
+        # 测试内自造最小模板目录并 patch SKILLS_DIR，消除环境依赖
+        _tdir = tmp_path / "_template"
+        _tdir.mkdir(parents=True)
+        (_tdir / "SKILL.md").write_text("---\nname: tpl\n---\ntest", encoding="utf-8")
+        monkeypatch.setattr("src.kernel.config.SKILLS_DIR", str(tmp_path))
         r = client.get("/api/skills/template", headers=_headers)
         assert r.status_code == 200
         data = r.json()
@@ -496,3 +513,10 @@ class TestSkillsObs:
         assert r.status_code == 400, r.text
         errs = r.json()["detail"].get("errors") or []
         assert any("2048" in e for e in errs), f"errors 应含 2048 提示: {errs}"
+
+from src.domains.mgmt.auth import grape_account_db  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+os.environ["DEVOPS_DB_PATH"] = os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db")

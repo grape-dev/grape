@@ -89,7 +89,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                         title_map: dict = None, stage_map: dict = None,
                         pipe_cfg_cache: dict = None, get_pipe_cfg=None,
                         bot_usernames: set = None, feishu_name_cache: dict = None,
-                        events_by_issue: dict = None) -> dict:
+                        events_by_issue: dict = None, confirm_minutes: int | None = None) -> dict:
     """根据 issue_id 下的事件列表构建单个 Pipeline
 
     参数:
@@ -347,7 +347,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     else:
         display_issue_id = issue_id
 
-    return {
+    from src.api.pipeline_status import attach_stall_state
+    _out = {
         "issue_id": display_issue_id,
         "raw_issue_id": issue_id,
         "title": title,
@@ -364,6 +365,9 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
         "duration": round(total_duration, 1) if total_duration > 0 else None,
         "parent_issue_id": parent_issue_id,
     }
+    attach_stall_state(_out, issue_events, stage, (_st.get("status") if _st else "") or "",
+                       confirm_minutes=confirm_minutes)
+    return _out
 
 
 def _running_issue_ids(repo_keys) -> set[str]:
@@ -461,12 +465,12 @@ def get_pipeline(owner: str, repo: str,
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    # 同时查 gitcode: 和 github: 前缀的事件（用户可能切换了 provider）
-    _repo_keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        _repo_keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        _repo_keys.append(f"gitcode:{_owner_repo}")
+    # 同时查各平台前缀的事件（用户可能切换了 provider）
+    # S104/D78：候选集卡派生（合并重同步——weekly-10 版回退成写死
+    # gitcode/github 互查，gitee/gitlab 仓的流水线历史因此查不出来；
+    # 恢复 weekly-08 的 repo_key_candidates 全平台候选）
+    from src.kernel.repo_key import repo_key_candidates
+    _repo_keys = repo_key_candidates(_owner_repo)
 
     from src.kernel.session_manager import db, db_lock
 
@@ -493,17 +497,20 @@ def get_pipeline(owner: str, repo: str,
                 _params += list(_win_ids)
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key, scene_id "
+                "created_at, actor, duration, repo_key, scene_id, completed_at "
                 f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
             rows = c.fetchall()
-        except Exception:
+        except Exception as e:
+            # 不得静默清空：缺列/下推失败会让整个流水线页空白，必须留可观测信号。
+            log.warning(f"[pipeline] events query failed (pushdown={_pushdown_ok}): {e}")
             rows = []
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
          "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": "",
          "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key,
-         "scene_id": r[11] if len(r) > 11 else ""}
+         "scene_id": r[11] if len(r) > 11 else "",
+         "completed_at": normalize_event_time(r[12]) if len(r) > 12 else ""}
         for r in rows
     ]
 
@@ -526,7 +533,7 @@ def get_pipeline(owner: str, repo: str,
                     # 一次查询同时获取 title + stage + scene_id + assignee 等
                     c.execute(
                         "SELECT issue_number, title, stage, owner_agent, assignee, "
-                        "scene_id, parent_issue_id, is_subtask_mode "
+                        "scene_id, parent_issue_id, is_subtask_mode, status "
                         "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
                             ",".join("?" * len(_repo_keys)),
                             ",".join("?" * len(_iss_nums))
@@ -540,6 +547,7 @@ def get_pipeline(owner: str, repo: str,
                             "stage": r[2] or "", "owner_agent": r[3] or "",
                             "assignee": r[4] or "", "scene_id": r[5] or "",
                             "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
+                            "status": r[8] if len(r) > 8 else "",
                         }
             except Exception:
                 pass
@@ -571,10 +579,19 @@ def get_pipeline(owner: str, repo: str,
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
+    # Issue #2050：确认窗一次读取（否则逐行 patrol_runtime_config() → 每行 5 条 meta SELECT）
+    _confirm_minutes = None
+    try:
+        from src.api.patrol import patrol_runtime_config
+        _confirm_minutes = int((patrol_runtime_config() or {}).get("confirm_minutes"))
+    except Exception as e:
+        log.warning(f"[pipeline] confirm_minutes read failed, fallback to default: {e}")
+        _confirm_minutes = None
     pipelines = [_get_issue_pipeline(
         repo_key, iid, events,
         _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
-        _bot_usernames, _feishu_name_cache, _events_by_issue
+        _bot_usernames, _feishu_name_cache, _events_by_issue,
+        confirm_minutes=_confirm_minutes
     ) for iid in (_win_ids if _pushdown_ok else issue_ids)]
     pipelines = [p for p in pipelines if p is not None]
 
@@ -610,7 +627,9 @@ def get_pipeline(owner: str, repo: str,
 
     # 按 Issue 最新活动倒序：用预建索引中的最大 seq 排序（O(N)，避免反复遍历全量 events）
     _max_seq_cache = {iid: max((e["seq"] for e in evts), default=0) for iid, evts in _events_by_issue.items()}
-    pipelines.sort(key=lambda p: _max_seq_cache.get(p["issue_id"], 0), reverse=True)
+    # Issue #1816：PR 伪 issue 的 issue_id 已在返回体改写为展示值 PR#N，缓存键是原始 id
+    # （#pr_<n>_<scene>），必须用 raw_issue_id 查，否则键恒 0 沉底并按 PR 号正序。
+    pipelines.sort(key=lambda p: _max_seq_cache.get(p.get("raw_issue_id") or p["issue_id"], 0), reverse=True)
 
 
     # 执行态派生（前端 B，见 multi-issue-isolation-design.md §4.4）：由 agent_tasks 实时派生，

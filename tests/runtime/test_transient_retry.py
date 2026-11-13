@@ -542,19 +542,21 @@ def test_worker_manifest_covers_transient_retry_deps():
     entries = set(re.findall(r'"(src/[^"]+)"', manifest_src))
     deps = [
         "src/domains/runtime/engine/transient_retry.py",   # 本体（经目录条目或显式）
-        "src/config.py",
-        "src/session_manager.py",
+        "src/kernel/config.py",                             # Issue #2010: 原 src/config.py
+        "src/kernel/session_manager.py",                    # Issue #2010: 原 src/session_manager.py
         "src/api/event_store.py",
-        "src/token_service.py",
+        "src/kernel/token_service.py",                      # Issue #2010: 原 src/token_service.py
     ]
-    runtime_dir_covered = "src/domains/runtime/engine/" in entries or any(
-        e.startswith("src/domains/runtime/engine/") for e in entries)
+
+    def _covered(target: str) -> bool:
+        """显式条目命中，或被某个目录条目（如 src/kernel/）覆盖。"""
+        if target in entries:
+            return True
+        return any(e.endswith("/") and target.startswith(e) for e in entries)
+
     for d in deps:
-        if d == "src/domains/runtime/engine/transient_retry.py":
-            assert runtime_dir_covered or d in entries, (
-                f"worker MANIFEST misses {d}: add it or keep the src/domains/runtime/engine/ dir entry")
-        else:
-            assert d in entries, f"worker MANIFEST misses dependency {d}"
+        assert _covered(d), (
+            f"worker MANIFEST misses {d}: add the file or keep its parent dir entry")
     # MANIFEST 对象本身可导入（清单语法漂移早暴露）
     assert hasattr(wp, "MANIFEST") and isinstance(wp.MANIFEST, (list, tuple))
 

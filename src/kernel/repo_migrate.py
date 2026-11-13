@@ -16,17 +16,17 @@
 不重建 webhook / 不重新邀请 bot：webhook_id / bot_token / webhook_token / bot_username
 等托管字段随 managed_repos 行整体迁移保留。
 """
+
 from __future__ import annotations
 
 import os
+
 import shutil
 
 from src.kernel.config import log
 
-
 class RepoMigrateError(Exception):
     """迁移失败（DB 事务已回滚，可安全重试）。"""
-
 
 # 以 repo_key 为索引的关联表（与 repo_cleanup._REPO_KEY_TABLES 对齐，不含 managed_repos/user_repos）
 _REPO_KEY_TABLES = (
@@ -47,9 +47,6 @@ _REPO_KEY_TABLES = (
     "pipeline_instances",
 )
 
-# 子表（经父表 id 关联，无 repo_key 列）——迁移不改其内容，父表 repo_key 改写后自动跟随
-
-
 def _normalize_keys(repo_key: str) -> list[str]:
     """repo_key 带/不带 provider 前缀双写兼容（与 repo_cleanup 对称）。"""
     if not repo_key:
@@ -59,7 +56,6 @@ def _normalize_keys(repo_key: str) -> list[str]:
     base = f"{owner}/{repo}" if owner and repo else repo_key
     keys = [repo_key, f"{provider}:{base}", base]
     return list(dict.fromkeys(k for k in keys if k))
-
 
 def _existing_tables(c) -> set[str]:
     """探测当前库中实际存在的表。"""
@@ -74,14 +70,12 @@ def _existing_tables(c) -> set[str]:
         except Exception:
             return set()
 
-
 def _table_has_repo_key(c, table: str) -> bool:
     try:
         cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
         return "repo_key" in cols
     except Exception:
         return False
-
 
 def _unique_on_repo_key(c, table: str) -> bool:
     """探测表是否有 UNIQUE(repo_key) 或 repo_key 为主键。"""
@@ -97,7 +91,6 @@ def _unique_on_repo_key(c, table: str) -> bool:
     except Exception:
         pass
     return False
-
 
 def _update_managed_repos(c, old: str, new: str, new_owner: str, new_repo: str) -> int:
     """managed_repos：repo_key 是主键，不能直接 UPDATE 主键值 → DELETE 旧行 + INSERT 新行。
@@ -128,7 +121,7 @@ def _update_managed_repos(c, old: str, new: str, new_owner: str, new_repo: str) 
             "webhook_secret, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (new, new_owner, new_repo, new_full, webhook_id, dev_scene or "", host_status or "",
              bot_gc or "", wh_gc or "", bot_user or "", wh_gh or "", bot_gh or "",
-             org_id or 0, host_uid or 0, wh_secret or "", created_at))
+             org_id or "", host_uid or 0, wh_secret or "", created_at))
     except Exception:
         # 列不全时降级（兼容未迁移的库）
         c.execute(
@@ -136,9 +129,8 @@ def _update_managed_repos(c, old: str, new: str, new_owner: str, new_repo: str) 
             "webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, "
             "org_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (new, new_owner, new_repo, new_full, webhook_id, dev_scene or "",
-             bot_gc or "", wh_gc or "", bot_user or "", org_id or 0))
+             bot_gc or "", wh_gc or "", bot_user or "", org_id or ""))
     return 1
-
 
 def _update_user_repos(c, old: str, new: str, new_owner: str, new_repo: str) -> int:
     """user_repos：复合主键 (user_id, repo_key)，UNIQUE 冲突时删旧留新。
@@ -172,7 +164,6 @@ def _update_user_repos(c, old: str, new: str, new_owner: str, new_repo: str) -> 
     c.execute("DELETE FROM user_repos WHERE repo_key=?", (old,))
     return cnt
 
-
 def _update_repo_key_tables(c, old_keys: list[str], new: str) -> int:
     """其余 _REPO_KEY_TABLES：UPDATE repo_key（UNIQUE 冲突时删旧留新）。"""
     placeholders = ",".join("?" for _ in old_keys)
@@ -205,7 +196,6 @@ def _update_repo_key_tables(c, old_keys: list[str], new: str) -> int:
             cnt += c.rowcount
     return cnt
 
-
 def _update_skill(c, old_keys: list[str], new: str) -> int:
     """skill(scope='repo')：owner_id 存 repo_key，UNIQUE(skill_name, scope, owner_id)。"""
     existing = _existing_tables(c)
@@ -230,7 +220,6 @@ def _update_skill(c, old_keys: list[str], new: str) -> int:
             cnt += c.rowcount
     return cnt
 
-
 def _update_meta(c, old_keys: list[str], new: str) -> int:
     """meta：onboarded:* / cleanup_pending:* 改写。"""
     existing = _existing_tables(c)
@@ -251,7 +240,6 @@ def _update_meta(c, old_keys: list[str], new: str) -> int:
                 c.execute("UPDATE meta SET `key`=? WHERE `key`=?", (new_k, old_k))
                 cnt += c.rowcount
     return cnt
-
 
 def migrate_repo_key(repo_key: str, new_owner: str, new_repo: str,
                      operator_id: int = 0) -> dict:
@@ -310,7 +298,6 @@ def migrate_repo_key(repo_key: str, new_owner: str, new_repo: str,
     _audit(repo_key, new, operator_id, stats)
     return stats
 
-
 def _migrate_workspace_dir(old: str, new: str) -> int:
     """工作区知识基线目录物理迁移：old → new。"""
     from src.kernel.repo_key import workspace_repo_dir
@@ -340,7 +327,6 @@ def _migrate_workspace_dir(old: str, new: str) -> int:
     except Exception as e:
         log.warning(f"Migrate workspace dir move failed ({old_dir}->{new_dir}): {e}")
         return 0
-
 
 def _audit(old: str, new: str, operator_id: int, detail: dict) -> None:
     try:

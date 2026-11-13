@@ -21,6 +21,7 @@ import contextlib
 import io
 import os
 
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.kernel.config import log
 
 
@@ -151,11 +152,8 @@ async def start_mgmt_tasks(app) -> dict:
         # 4 进程拆分后由 mgmt 作为契约 owner 合并四进程 spec（tasks/patrol/pipeline-handoff
         # 迁到 worker/insight，不合并会让契约驱动的 `grape` CLI 丢掉整组命令）
         try:
-            from src.api.openapi_merge import build_contract
-            from src.kernel.help_page_gen import write_openapi_contract
-            _schema = build_contract(app)
-            _n_paths = write_openapi_contract(_schema)
-            log.info(f"OpenAPI: contract dumped ({_n_paths} paths, version={_schema.get('info', {}).get('version')}) -> /static/openapi.json")
+            from src.api.openapi_merge import dump_contract
+            dump_contract(app)
         except Exception as e:
             log.warning(f"OpenAPI: contract dump failed: {e}")
 
@@ -168,6 +166,17 @@ async def start_mgmt_tasks(app) -> dict:
             lease_store = BotLeaseStore(instance_id=instance_id)
             log.info(f"IM WS: lease enabled, instance_id={instance_id}")
 
+        # weekly-11 起 legacy BotManager 已退役：引擎模式 on 时由 mgmt 侧 engine_wiring
+        # 统一启动新引擎，本进程不再装配 legacy WS（否则每次启动刷 BotManager ImportError 告警）。
+        try:
+            from src.domains.runtime.im import engine_wiring as _ew
+            _engine_on = (_ew.engine_mode() == "on")
+        except Exception:
+            _engine_on = False
+        if _engine_on:
+            log.info("IM WS: legacy BotManager retired (engine mode=on), skip")
+            bot_manager = None
+            raise _LegacyIMRetired()
         bot_manager = BotManager(max_concurrent_per_bot=10, lease_store=lease_store)
         await bot_manager.start()
 
@@ -182,6 +191,8 @@ async def start_mgmt_tasks(app) -> dict:
 
         hc = bot_manager.health_check()
         log.info(f"IM WS: {hc['total_bots']} bot(s), {hc['connected']} connected")
+    except _LegacyIMRetired:
+        bot_manager = None
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
         bot_manager = None
@@ -406,6 +417,10 @@ async def stop_mgmt_tasks(app, h: dict) -> None:
 # Event 进程（grape_event_server :38081）
 # ===========================================================================
 
+class _LegacyIMRetired(Exception):
+    """legacy IM 装配已退役（引擎模式 on），非错误。"""
+
+
 async def start_event_tasks(app, include_sweep_events: bool = True) -> dict:
     """Event 进程定时任务（设计 §5.2）。返回关闭句柄字典。
 
@@ -489,7 +504,7 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
                     from src.domains.runtime.engine.agent import _scan_local_skills_with_detail
                     from src.domains.mgmt.user import db as user_db
                     import socket as _sock
-                    _hostname = _sock.gethostname()
+                    _hostname = engine_host()
                     probed = [r for r in probe_local_engines(discover_runtimes()) if r.get("installed")]
                     if probed:
                         for r in probed:
@@ -600,7 +615,7 @@ async def start_insight_tasks(app, include_table_maintenance: bool = True) -> di
         async def _server_metrics_loop():
             import socket as _sock, hashlib as _hl
             from datetime import datetime, timezone
-            _hostname = _sock.gethostname() or "unknown-server"
+            _hostname = engine_host() or "unknown-server"
             _local_ip = "127.0.0.1"
             try:
                 _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)

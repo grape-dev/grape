@@ -12,6 +12,16 @@
 - 失败不阻塞服务，打 WARNING 日志
 """
 import asyncio
+
+def _repo_root(start: str) -> str:
+    """向上找仓库根（含 configs/ 或 scripts/ 的目录），模块搬迁后仍稳。"""
+    cur = os.path.dirname(os.path.abspath(start))
+    while cur and cur != "/":
+        if os.path.isdir(os.path.join(cur, "configs")) or os.path.isdir(os.path.join(cur, "scripts")):
+            return cur
+        cur = os.path.dirname(cur)
+    return os.path.dirname(os.path.abspath(start))
+
 import hashlib
 import io
 import json
@@ -38,7 +48,7 @@ def _load_config():
 
     # 读 configs/scene-sync.json（环境变量优先覆盖）
     try:
-        cfg_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "configs", "scene-sync.json")
+        cfg_path = os.path.join(_repo_root(__file__), "configs", "scene-sync.json")
         if os.path.exists(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -75,11 +85,24 @@ def _parse_repo_host_path(repo_url: str) -> tuple:
     p = urlparse(repo_url)
     host = (p.netloc or "").lower()
     path = p.path.strip("/")
+    # D16：下载基址优先按平台卡（host 匹配卡 → 卡 download_base；新平台自动正确）
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+        for _prov in list_vcs_platforms():
+            _card = get_platform_card(_prov)
+            if _card is not None and (host == _card.host or host.endswith("." + _card.host)):
+                if _card.download_base:
+                    return _card.download_base, path
+                break
+    except Exception:
+        pass
     if host.endswith("github.com"):
         return "https://codeload.github.com", path
     if host.endswith("gitcode.com"):
         return "https://raw.gitcode.com", path
-    # 回退：按旧逻辑剥前缀（未知 host 仍走 gitcode raw）
+    # 回退：未知 host 走旧 gitcode raw 行为，但显式告警（不再静默回退错误平台）
+    from src.kernel.config import log as _log
+    _log.warning(f"scene_sync: unknown repo host {host!r}, falling back to gitcode raw semantics")
     return "https://raw.gitcode.com", repo_url.replace("https://gitcode.com/", "").rstrip("/")
 
 
@@ -231,7 +254,7 @@ def _get_sync_token() -> str:
         return token
     # 2. configs/scene-sync.json
     try:
-        cfg_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "configs", "scene-sync.json")
+        cfg_path = os.path.join(_repo_root(__file__), "configs", "scene-sync.json")
         if os.path.exists(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 token = json.load(f).get("gitcode_api_token", "")

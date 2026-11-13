@@ -7,24 +7,55 @@
 - 每 operation 有 operation_id / summary / security
 - 三通道认证调实际对外端点（JWT / api_key / session_token）
 """
+
 import os
+
 import sys
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db"))
+
 os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.api import auth_token, openapi
+
 from src.kernel.auth_sdk.jwt_utils import create_access_token
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
 # 预期进契约的对外端点（M1.4/M3 显式 operation_id）
 EXPECTED_PUBLIC = {
+    # r4 契约登记完整化：入列白名单依赖链（get_current_user_or_api_key 系）的新端点。
+    # 其中 im_* 六条为 weekly-10 IM 引擎合入后即已在 schema 中（基线自带登记缺口，
+    # 此处一并补齐锁死）；其余为多平台解耦 r3/r4 新增对外端点。
+    "im_engine_status_api_im_status_get": ("get", "/api/im/status"),
+    "im_installations_api_im_installations_get": ("get", "/api/im/installations"),
+    "im_notify_test_api_im_notify_test_post": ("post", "/api/im/notify-test"),
+    "im_set_installation_status_api_im_installations__installation_id__put": ("put", "/api/im/installations/{installation_id}"),
+    "im_dingtalk_card_setup_api_im_dingtalk_card_setup_get": ("get", "/api/im/dingtalk/card-setup"),
+    "im_dingtalk_card_setup_save_api_im_dingtalk_card_setup_post": ("post", "/api/im/dingtalk/card-setup"),
+    "gitrepo_issue_artifacts_clean": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean"),
+    "dashboard_efficiency_board": ("get", "/api/dashboard/efficiency/board"),
+    "dashboard_efficiency_daily": ("get", "/api/dashboard/efficiency/daily"),
+    "dashboard_efficiency_issues": ("get", "/api/dashboard/efficiency/issues"),
+    "chat_wechat_login_start": ("post", "/api/chat/im/wechat/login/start"),
+    "chat_wechat_login_status": ("get", "/api/chat/im/wechat/login/status"),
+    "scenes_skill_scope_audit": ("get", "/api/scenes/skill-scope-audit"),
+    "scenes_pin": ("post", "/api/scenes/{scene_id}/pin"),
+    "issues_awaiting-input": ("post", "/api/issues/{issue_id}/awaiting-input"),
+    "issues_pending-review": ("post", "/api/issues/{issue_id}/pending-review"),
+    "issues_review-pass": ("post", "/api/issues/{issue_id}/review-pass"),
+    "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),
+    "runtime_takeover_context": ("get", "/api/runtime/issues/takeover-context"),
+    "runtime_task_detail": ("get", "/api/runtime/tasks/{task_id}/detail"),
     "a2a_handoff": ("post", "/api/a2a"),
     "a2a_status": ("get", "/api/a2a/status"),
     "agents_clean": ("post", "/api/agents/{name}/{owner}/{repo}/clean"),
@@ -251,6 +282,7 @@ EXPECTED_PUBLIC = {
     "scenes_branch_create": ("post", "/api/scenes/branches/{owner}/{repo}"),
     "scenes_branches": ("get", "/api/scenes/branches/{owner}/{repo}"),
     "scenes_check_name": ("get", "/api/scenes/check-name"),
+    "scenes_copy": ("post", "/api/scenes/{scene_id}/copy"),
     "scenes_create": ("post", "/api/scenes"),
     "scenes_delete": ("delete", "/api/scenes/{scene_id}"),
     "scenes_deploy_url_get": ("get", "/api/scenes/{scene_id}/deploy-url"),
@@ -350,18 +382,15 @@ NOT_IN_CONTRACT = [
     "/api/feedback/{fid}/status",        # 管理类（require_admin）
 ]
 
-
 def _schema():
     r = client.get("/openapi.json")
     assert r.status_code == 200
     return r.json()
 
-
 def test_docs_endpoints_accessible():
     assert client.get("/docs").status_code == 200
     assert client.get("/redoc").status_code == 200
     assert client.get("/openapi.json").status_code == 200
-
 
 def test_contract_version_and_security_schemes():
     s = _schema()
@@ -372,14 +401,12 @@ def test_contract_version_and_security_schemes():
     assert schemes["privateKey"]["in"] == "header"
     assert schemes["accessToken"]["in"] == "query"
 
-
 def test_only_public_security_routes_in_contract():
     s = _schema()
     paths = set(s["paths"])
     assert {p for _, p in EXPECTED_PUBLIC.values()} <= paths
     for p in NOT_IN_CONTRACT:
         assert p not in paths, f"内部路由不应进契约: {p}"
-
 
 def test_public_ops_have_operation_id_summary_security():
     s = _schema()
@@ -396,7 +423,6 @@ def test_public_ops_have_operation_id_summary_security():
     assert op_ids == set(EXPECTED_PUBLIC)
     assert seen == set(EXPECTED_PUBLIC.values())
 
-
 # ===================== x-token-scope 强制（openapi-x-token-scope-design.md §3.2/§五） =====================
 def test_public_ops_have_x_token_scope():
     """L2：每个公开 op 必须有合法 x-token-scope（user_only/session_only/dual），不允许遗漏。"""
@@ -405,7 +431,6 @@ def test_public_ops_have_x_token_scope():
         for method, op in ops.items():
             scope = op.get("x-token-scope")
             assert scope in {"user_only", "session_only", "dual"},                 f"缺 x-token-scope: {method} {path} -> {scope!r}"
-
 
 def test_x_token_scope_consistency():
     """L3：session_only 覆盖表与前缀规则 ↔ 契约双相一致；抽查 user_only/dual 命中。"""
@@ -478,7 +503,6 @@ def test_x_token_scope_consistency():
     for path, method in session_samples.items():
         assert (method, path) in actual_session_only,             f"期望 session_only: {method} {path}"
 
-
 def _user():
     """创建临时测试账号，返回 (id, username)。
     username 必须原样用于签 JWT——deps.py 的 #343 一致性校验要求
@@ -486,7 +510,6 @@ def _user():
     import uuid
     u = grape_account_db.create_grape_account(f"openapi_{uuid.uuid4().hex[:6]}", email=None, password="pw")
     return u["id"], u["username"]
-
 
 def test_three_channels_can_call_public_api():
     from src.kernel.session_manager import db, db_lock
@@ -530,10 +553,14 @@ def test_three_channels_can_call_public_api():
     assert client.get("/api/scenes",
                       headers={"PRIVATE-TOKEN": api_key}).status_code == 200
 
-
 def test_public_api_401_without_or_invalid_token():
     assert client.get("/api/issues/mine").status_code == 401
     assert client.get("/api/issues/mine",
                       headers={"Authorization": "Bearer <bad-token>"}).status_code == 401
     assert client.get("/api/scenes",
                       headers={"PRIVATE-TOKEN": "grape_bad"}).status_code == 401
+
+from src.domains.mgmt.auth import grape_account_db
+
+os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
+    os.path.dirname(__file__), "..", "data", "test_sessions.db"))

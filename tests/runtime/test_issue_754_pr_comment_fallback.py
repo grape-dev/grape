@@ -51,7 +51,7 @@ def test_pull_comment_405_falls_back_to_issue_channel(monkeypatch, _client):
 
     monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     ledger = []
-    monkeypatch.setattr("src.outbound_ledger.record_outbound",
+    monkeypatch.setattr("src.kernel.outbound_ledger.record_outbound",
                         lambda *a, **k: ledger.append((a, k)) or True)
 
     r = _client.post(f"{base}/pulls/9/comments", json={"body": "post-merge trace"})
@@ -86,7 +86,7 @@ def _http_error_405(url):
 
 def test_post_result_to_pr_405_fallback(monkeypatch):
     """内部 QA 回帖路径：GitCode pulls 评论 405 → issues 评论通道兜底。"""
-    from src.api.event_pipeline import _post_result_to_pr
+    from src.domains.runtime.pipeline.event_pipeline import _post_result_to_pr
 
     calls = []
 

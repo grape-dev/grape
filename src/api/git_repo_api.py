@@ -9,8 +9,9 @@
 
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
+from src.kernel.user_ids import has_user_id
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.api.deps import get_current_user_or_api_key
 from src.kernel.config import log
@@ -32,8 +33,80 @@ _FULL_SHA_RE = _re.compile(r"^[0-9a-fA-F]{40}$")
 # provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
 _SUPPORTED_PROVIDERS = set(_PROVIDER_MODULES)
 
+
+def _provider_module(provider: str):
+    """provider → 模块消费面（代码模块优先；纯配卡平台走通用垫片；无则 None）。
+
+    统一入口：URL/凭据/契约开关消费全部经此取模块，避免逐处 `_PROVIDER_MODULES[p]`
+    KeyError 或平台名字面量分支（台阶3：卡驱动平台与代码模块同消费面）。
+    """
+    mod = _PROVIDER_MODULES.get(provider)
+    if mod is not None:
+        return mod
+    try:
+        from src.domains.runtime.vcs.providers import module_for
+        return module_for(provider)
+    except Exception:
+        return None
+
+
+def _is_supported_provider(provider: str) -> bool:
+    """有代码模块或有 resources 卡即视为可服务（无则 fail-fast，不静默降级）。"""
+    return _provider_module(provider) is not None
+
+
+def _pflag(provider: str, name: str, default=False):
+    """读 provider 契约开关（S40-S42，2026-11-13 上翻：卡能力键优先→模块开关回退）。
+
+    解析序（与 owner_identity_token_fallback / git_tree_family 等既有卡能力位
+    同口径，新平台纯配卡接入零 Python 模块）：
+      ① 卡能力键（小写下划线，如 milestone_verify_readback）：configs/platforms/
+         <p>.json 或 meta 卡覆盖声明——管理面"能力"tab 自动可见可编辑，
+         field_docs 词条内置配置指导；
+      ② provider 模块开关（providers/<p>.py 模块级常量，存量形态）；
+      ③ default。
+    卡显式声明（含 False）优先于模块——卡可纠正模块默认；键缺席=模块回退，
+    存量行为零变化。
+    """
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+        if card is not None:
+            _key = name.lower()
+            _d = getattr(card, "__dataclass_fields__", None)
+            if _d is not None and _key in _d:
+                _v = getattr(card, _key, None)
+                if _v is not None:  # None=键缺席语义（S40-S42），回退模块开关
+                    return bool(_v)
+    except Exception:
+        pass
+    mod = _provider_module(provider)
+    if mod is None:
+        return default
+    return bool(getattr(mod, name, default))
+
+
+def _strip_owner_prefix(provider: str, owner: str) -> str:
+    """剥离 owner 的 `provider:` 前缀（repo_key 派生面与裸 owner 等价，Issue #466）。"""
+    _owner = str(owner or "")
+    _prefix = f"{provider}:"
+    if _prefix and _owner.startswith(_prefix):
+        return _owner[len(_prefix):]
+    return _owner
+
+
+def _quote_owner_repo(owner: str, repo: str, provider: str) -> tuple[str, str]:
+    """owner/repo 去前缀 + 逐段 percent-encode。"""
+    import urllib.parse
+    return (urllib.parse.quote(_strip_owner_prefix(provider, owner), safe=""),
+            urllib.parse.quote(str(repo or ""), safe=""))
+
 # Issue #707：issues update `state` 合法中性集合（入口层前置校验；strip/lower 归一后匹配）
 _UPDATE_STATE_NEUTRAL = {"open", "opened", "reopen", "closed", "close"}
+
+# Issue #1005：milestone_id 契约层拒绝文案（指向合法取值来源）
+_MILESTONE_ID_INT_HINT = ("'milestone_id' must be an integer milestone number "
+                          "(use the `number` field from `grape git-repo milestones`, not the REST internal id)")
 
 
 class PRCreateBody(BaseModel):
@@ -43,6 +116,9 @@ class PRCreateBody(BaseModel):
     body: str = ""
     related_issue_nums: list = []
     auto_close_issues: bool = False
+    # 合并 PR 后是否删除源分支（GitCode 原生 prune_source_branch；GitHub 无此字段，
+    # 建 PR 时静默丢弃——其等价能力是仓库级 delete_branch_on_merge）。
+    prune_source_branch: bool = False
 
 
 class PRUpdateBody(BaseModel):
@@ -57,6 +133,18 @@ class PRUpdateBody(BaseModel):
         description="Comma-separated label string or label array. "
                     "GitHub channel forwards an array; GitCode channel forwards a comma-separated string.",
         examples=["bug,P1", ["bug", "P1"]],
+    )
+    # B3②（2026-11-13 P1-full 实弹）：PR 关闭/重开（state 透传）。原先未声明该
+    # 字段——pydantic 静默丢弃后 payload 为空 → github 400 'Body should be a JSON
+    # object'；gitee/gitcode v5 200 但无任何变更（state 仍 open，纯 no-op）。
+    # 上游口径三平台核实：github PATCH /pulls 接受 state=open/closed；gitcode
+    # 官方文档为 state 且实弹生效（state_event 反而 400）；gitee v5 文档 state。
+    state: str = Field(
+        "",
+        title="PR state",
+        description="New PR state: 'open' or 'closed'. Empty = unchanged. "
+                    "Invalid values are rejected with a local 400.",
+        examples=["closed", "open"],
     )
 
 
@@ -96,7 +184,40 @@ class IssueUpdateBody(BaseModel):
         examples=["bug,P1", ["bug", "P1"]],
     )
     assignee: str = ""
-    milestone_id: int = 0
+    # Issue #1005：milestone_id 取值口径 id 优先、number 兼容（GitCode 解析后以上游
+    # `milestone` 参数写入；不存在/不可见 400）。非数字在契约层拒绝（ValidationError，
+    # 文案指向合法取值来源）。
+    milestone_id: int = Field(
+        0,
+        title="Milestone id",
+        description="Milestone identifier: prefers `id` from `grape git-repo milestones` "
+                    "(Issue #1005), and also accepts the legacy `number` for compatibility. "
+                    "GitCode resolves it to the upstream `milestone` parameter; "
+                    "an unknown/invisible milestone is rejected with 400.",
+        examples=[3, 850012],
+    )
+
+    @field_validator("milestone_id", mode="before")
+    @classmethod
+    def _validate_milestone_id(cls, v):
+        if v is None or v == "":
+            return 0
+        if isinstance(v, bool):
+            raise ValueError(_MILESTONE_ID_INT_HINT)
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return 0
+            try:
+                v = int(s)
+            except ValueError:
+                raise ValueError(_MILESTONE_ID_INT_HINT)
+        if not isinstance(v, int):
+            raise ValueError(_MILESTONE_ID_INT_HINT)
+        if v < 0:
+            raise ValueError("'milestone_id' must be a non-negative milestone id or number")
+        return v
+
     state: str = Field(
         "",
         title="Issue state event",
@@ -117,7 +238,9 @@ class LabelCreateBody(BaseModel):
 
 
 class MilestoneCreateBody(BaseModel):
-    """Issue #632：创建里程碑（对齐 #577 Spec）。title 必填；description/due_on 可选。"""
+    """Issue #632：创建里程碑（对齐 #577 Spec）。title 必填；description/due_on 可选——
+    但 gitcode/gitee 上游强制 due_on（空值 400 "due_on must not be empty"，本地以可读
+    400 前置拦截，见 _milestone_due_on）；GitHub due_on 真可选（ISO datetime）。"""
     title: str
     description: str = ""
     due_on: str = ""
@@ -163,13 +286,52 @@ def _provider_labels(provider: str, value: str | list[str] | None) -> str | list
     """
     if value is None or value == "":
         return ""
-    if provider == "github":
+    _mod = _PROVIDER_MODULES.get(provider)
+    if getattr(_mod, "LABELS_ARRAY_FORM", False):
         return _normalize_labels(value)
     if isinstance(value, list):
         normalized = _normalize_labels(value)
         return ",".join(normalized) if normalized else ""
     return value
 
+
+def _pr_comment_endpoint(provider: str) -> str:
+    """PR 评论端点族：卡能力位 pr_comment_endpoint（github=issues，其余=pulls）。"""
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    card = get_platform_card(provider)
+    return (getattr(card, "pr_comment_endpoint", "") or "pulls")
+
+
+def _pr_cap(p: str, cap: str, default):
+    """S88/D64：读平台卡能力位（无卡/异常返回 default=存量语义）。"""
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(p)
+        if card is not None:
+            return getattr(card, cap, default)
+    except Exception:
+        pass
+    return default
+
+
+def _tree_family(p: str) -> str:
+    """S89/D65：树 API 家族（卡 git_tree_family 派生；无卡回退 v5=存量语义）。
+
+    github_api=default_branch 字段/recursive 树/无斜杠 ref 直连；
+    v5=branches[0]/commits?sha 预校验/recursive 拒绝（gitcode/gitee 存量语义，
+    gitee 将来实弹验证后可经卡配置翻转）。
+    （squash 合并一度丢失，2026-11-13 按 b439764fd 原形恢复——树族接口分叉
+    统一经卡配置派生，新增平台改 configs/platforms/<p>.json 的 git_tree_family
+    即可，代理层零平台枚举。）
+    """
+    return _pr_cap(p, "git_tree_family", "v5")
+
+
+def _pr_labels_via_issues(provider: str) -> bool:
+    """PR 标签通道：卡能力位 pr_labels_via_issues（github 的 PATCH /pulls 拒 labels）。"""
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    card = get_platform_card(provider)
+    return bool(getattr(card, "pr_labels_via_issues", False))
 
 def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
     """Git provider（gitcode/github）：由认证 token 的 repo_key 前缀派生，不接受调用方参数。
@@ -180,7 +342,7 @@ def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
     """
     from src.kernel.repo_key import parse_repo_key
     p = parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
-    if p not in _SUPPORTED_PROVIDERS:
+    if not _is_supported_provider(p):
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
     return p
 
@@ -195,12 +357,14 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
     - devops 事件 agent → **仓库 bot token**（仓库身份）
     - 一种缺失 → 交叉回退；均缺失 → 502。
     """
-    if provider not in _SUPPORTED_PROVIDERS:
+    if not _is_supported_provider(provider):
         raise ValueError(f"Git provider 未支持: {provider}")
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
     from src.kernel.repo_key import to_repo_key
-    mod = _PROVIDER_MODULES[provider]
+    mod = _provider_module(provider)
+    if mod is None:
+        raise ValueError(f"Git provider 未支持: {provider}")
     rk = to_repo_key(f"{provider}:{owner}/{repo}")
 
     def _bot():
@@ -213,7 +377,7 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
         try:
             uid = user.get("id") or 0
             username = user.get("username") or ""
-            if not username and uid > 0:
+            if not username and has_user_id(uid):
                 from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                 username = (get_grape_account_by_id(uid) or {}).get("username", "")
             return mod.user_token(username, uid) or ""
@@ -239,20 +403,63 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
 
 def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
                provider: str = "") -> str:
-    """拼 provider 原生 URL。无默认 provider（空串）→ fail-fast，不静默 gitcode。"""
-    if provider not in _SUPPORTED_PROVIDERS:
+    """拼 provider 原生 URL。无默认 provider（空串）→ fail-fast，不静默 gitcode。
+
+    三类模块钩子消费（无钩子=github 缺省契约，行为零变更）：
+    - `repo_segment(owner, repo)`：仓库资源段（gitlab=/projects/{owner}%2Frepo；
+      卡驱动=卡内模板；无钩子=/repos/{owner}/{repo}）；
+    - `PATH_MAP`：网关子路径首段 → 原生资源段（gitlab /pulls→/merge_requests）；
+    - owner 可带 `provider:` 前缀（repo_key 派生面），拼 URL 前剥离。
+    """
+    mod = _provider_module(provider)
+    if mod is None:
         raise ValueError(f"Git provider 未支持: {provider}")
     import urllib.parse
-    api_base = _PROVIDER_MODULES[provider].API_BASE
-    base = f"{api_base}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}"
+    _seg_fn = getattr(mod, "repo_segment", None)
+    if callable(_seg_fn):
+        _repo_seg = _seg_fn(_strip_owner_prefix(provider, owner), repo)
+    else:
+        _o, _r = _quote_owner_repo(owner, repo, provider)
+        _repo_seg = f"repos/{_o}/{_r}"
+    base = f"{mod.API_BASE}/{_repo_seg}"
+    _sub = subpath or ""
+    # PATH_MAP 首段映射：'/pulls' → '/merge_requests'（映射值自带前导 /）
+    _path_map = dict(getattr(mod, "PATH_MAP", None) or {})
+    if _path_map and _sub.startswith("/"):
+        _head, _slash, _rest = _sub[1:].partition("/")
+        _mapped = _path_map.get("/" + _head)
+        if _mapped:
+            _sub = str(_mapped) + (("/" + _rest) if _rest else "")
     # Issue #714：subpath 以 / 为分隔逐段 percent-encode（+→%2B、中文→UTF-8、空格→%20），
     # / 保留路径分隔语义；纯 ASCII 段（/branches、issue 编号等）编码后不变，存量行为零变更。
-    url = base + "/".join(urllib.parse.quote(seg, safe="") for seg in subpath.split("/"))
+    url = base + "/".join(urllib.parse.quote(seg, safe="") for seg in _sub.split("/"))
     if params:
         q = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "", [])})
         if q:
             url += "?" + q
     return url
+
+
+def _issue_write_url(owner: str, repo: str, number, p: str) -> str:
+    """issue 写端点 URL（owner-path 契约；create/update 同款机制）。
+
+    `ISSUE_UPDATE_OWNER_PATH=True`（gitcode/gitee v5 官方契约）→
+    `{API_BASE}/repos/{owner}/issues[/{number}]`（路径无 repo 段，body 必带 repo）；
+    number 为空（create 场景）→ 尾段省略，即 POST /repos/{owner}/issues；
+    缺省 False（github 基线）→ /repos/{owner}/{repo}/issues[/{number}]。
+    """
+    if _pflag(p, "ISSUE_UPDATE_OWNER_PATH"):
+        mod = _provider_module(p)
+        if mod is None:
+            raise ValueError(f"Git provider 未支持: {p}")
+        import urllib.parse
+        _o = urllib.parse.quote(_strip_owner_prefix(p, owner), safe="")
+        if number is None or str(number) == "":
+            return f"{mod.API_BASE}/repos/{_o}/issues"
+        return f"{mod.API_BASE}/repos/{_o}/issues/{number}"
+    if number is None or str(number) == "":
+        return _vcs_url(owner, repo, "/issues", None, p)
+    return _vcs_url(owner, repo, f"/issues/{number}", None, p)
 
 
 def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None = None):
@@ -262,7 +469,10 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
     （404 → 404，403 → 403…，不截断），502 仅保留给代理自身故障（连接失败/超时/非上游异常）。
     """
     try:
-        return _PROVIDER_MODULES[provider].request(method, url, token, body)
+        _mod = _provider_module(provider)
+        if _mod is None:
+            raise ValueError(f"Git provider 未支持: {provider}")
+        return _mod.request(method, url, token, body)
     except HTTPException:
         raise
     except UpstreamAPIError as e:
@@ -324,11 +534,12 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
             ref = _default_ref(p, owner, repo, user)
         # 分支/引用名含 `/`（如 feat/issue-11）裸拼进 git/trees/{ref} 会被 GitCode 当
         # 路径分隔符拆成两段 → 404（grape-skills#95）。先解析为无斜杠的 tree/commit sha
-        # 再取树；sha 不含 `/`，彻底免 URL 编码歧义。GitHub 无斜杠 ref 保持直连（零回归）。
-        if p == "github" and "/" not in ref:
+        # 再取树；sha 不含 `/`，彻底免 URL 编码歧义。S89/D65：树家族卡派生——
+        # github_api 族（github）无斜杠 ref 保持直连（零回归）。
+        if _tree_family(p) == "github_api" and "/" not in ref:
             return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
                             _repo_token(owner, repo, user, p))
-        if p != "github" and _FULL_SHA_RE.fullmatch(ref):
+        if _tree_family(p) != "github_api" and _FULL_SHA_RE.fullmatch(ref):
             # 完整 tree/commit sha：直连 git/trees/{sha}，不做存在性预校验（sha 非分支名，
             # commits?sha= 对 tree sha 会 404，预校验反成回归）。
             return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
@@ -343,9 +554,9 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
         return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
                         _repo_token(owner, repo, user, p))
     # 递归
-    if p != "github":
+    if _tree_family(p) != "github_api":
         raise HTTPException(status_code=400, detail={"code": 400,
-            "message": "该平台（GitCode）暂不支持递归树：recursive 返回破碎树（丢失 blob），请用单层或 Git 仓库等效接口"})
+            "message": f"该平台（{p}）暂不支持递归树：recursive 返回破碎树（丢失 blob），请用单层或 Git 仓库等效接口"})
     if not ref:
         ref = _default_ref(p, owner, repo, user)
     # GitHub：git/trees/{sha} 需要 tree sha → 先取默认分支最新 commit 的 tree sha
@@ -355,9 +566,10 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
 
 
 def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
-    """解析默认分支（ref 空时）：GitCode 用 branches[0]，GitHub 用 default_branch 或 branches[0]。"""
+    """解析默认分支（ref 空时）：S89/D65 树家族卡派生——github_api 族读仓库详情
+    default_branch，v5 系用 branches[0]。无平台枚举。"""
     try:
-        if p == "github":
+        if _tree_family(p) == "github_api":
             data = _vcs_req(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
             if isinstance(data, dict) and data.get("default_branch"):
                 return data["default_branch"]
@@ -382,7 +594,7 @@ def _ref_to_tree_sha(p: str, owner: str, repo: str, ref: str, user: dict) -> str
       「ref 不存在 → 404」归一处理（不再保序降级返回原 ref）；上游错误（含 404）
       按 #549 透传。
     """
-    if p == "github":
+    if _tree_family(p) == "github_api":
         return _github_tree_sha(owner, repo, ref, user)
     try:
         # GitCode: /commits?sha={ref}&per_page=1 → 首条 commit 的 commit.tree.sha
@@ -452,9 +664,15 @@ def list_labels(owner: str, repo: str, user: dict = Depends(get_current_user_or_
 @router.post("/{owner}/{repo}/labels", operation_id="gitrepo_labels_create", summary="Create label", description="Creates a repository label (name required, color optional).")
 def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
-    # Issue #580: color 归一化——GitHub 通道要求不带 # 的 6 位 hex，带 # 返回 422；GitCode 对两种格式均宽容
+    # 色值形态按 provider 契约开关派生（无平台枚举）：
+    # - LABEL_COLOR_PREFIX_HASH=True（gitcode）→ 必须带 # 前缀（无 # 上游 400
+    #   "Color must be a valid color code"）；
+    # - 缺省（github 基线）→ 不带 #（带 # 返回 422）。
+    _color = (body.color or "").strip().lstrip("#")
+    if _pflag(p, "LABEL_COLOR_PREFIX_HASH"):
+        _color = f"#{_color}"
     return _vcs_req(p, "POST", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p),
-                    {"name": body.name, "color": body.color.lstrip("#")})
+                    {"name": body.name, "color": _color})
 
 
 # ===================== Milestones ==============
@@ -463,19 +681,164 @@ def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depe
 _MILESTONE_STATE_MAP = {"active": "open", "opened": "open", "closed": "closed"}
 
 
+def _milestone_id_from_url(url):
+    """Issue #1005：GitCode 里程碑列表不返回 id，仅 url 尾部含真实 id（…/milestones/3）。"""
+    if not isinstance(url, str):
+        return None
+    m = _re.search(r"/milestones/(\d+)(?:[/?#]|$)", url)
+    return int(m.group(1)) if m else None
+
+
 def _normalize_milestone_states(data):
-    """milestone(s) 返回条目 state 字段归一化（active/opened→open），其余字段原样透传。"""
+    """milestone(s) 返回条目归一化：state active/opened→open，并从 url 尾部补 id。
+
+    Issue #1005：上游里程碑对象只有 number（如 850012），真实 id 仅在 url 尾部
+    （…/milestones/3）。补 id 后 `milestone_id` 可优先传 id，同时保留 number 兼容。
+    """
     if isinstance(data, list):
         return [_normalize_milestone_states(item) for item in data]
-    if isinstance(data, dict) and "state" in data:
+    if isinstance(data, dict):
         out = dict(data)
-        out["state"] = _MILESTONE_STATE_MAP.get(str(data["state"]).lower(), data["state"])
+        if "state" in out:
+            out["state"] = _MILESTONE_STATE_MAP.get(str(out["state"]).lower(), out["state"])
+        if out.get("id") is None:
+            _mid = _milestone_id_from_url(out.get("url"))
+            if _mid is not None:
+                out["id"] = _mid
         return out
     return data
 
 
 # Issue #900：per_page 上限（超出钳制到该值而非 422，与 Spec「大 per_page 不被 422」对齐）
 _MILESTONES_MAX_PER_PAGE = 100
+
+# Issue #1005：里程碑全量扫描翻页上限（fetch 解析路径 21 页 / exists 校验路径 10 页）
+_MILESTONE_FETCH_MAX_PAGES = 21
+_MILESTONE_SCAN_MAX_PAGES = 10
+
+
+def _fetch_gitcode_milestones(owner: str, repo: str, user: dict, p: str, want=None):
+    """Issue #1005：分页取全量里程碑（用于 milestone_id 的 id/number 解析）。
+
+    ``want`` 给定时（issues update 的解析路径）：一旦本页出现匹配的 id/number 就停止翻页，
+    把常见情形的上游往返从「整表 6~10 次」降到 1~2 次（Issue #1076 复审的延迟尖峰）。
+    未命中时仍按空页/重复页扫到底，保证「不存在」判定不被短页欺骗。
+    """
+    items = []
+    prev_page = None
+    for page in range(1, _MILESTONE_FETCH_MAX_PAGES + 1):
+        data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
+                                           {"state": "all", "per_page": _MILESTONES_MAX_PER_PAGE,
+                                            "page": page}, p),
+                        _repo_token(owner, repo, user, p))
+        # 上游可能静默钳制 per_page，不能用「本页不足 per_page」判断末页（Issue #1076 审查）。
+        if not isinstance(data, list) or not data:
+            break
+        if data == prev_page:
+            # 上游忽略 page 参数时返回同一页，继续翻页无意义。
+            break
+        prev_page = data
+        items.extend(_normalize_milestone_states(data))
+        if want is not None and _resolve_gitcode_milestone(items, want) is not None:
+            break
+    return items
+
+
+def _resolve_gitcode_milestone(milestones, milestone_id):
+    """Issue #1005：milestone_id 取值口径 id 优先、number 兼容。"""
+    try:
+        want = int(milestone_id)
+    except (TypeError, ValueError):
+        return None
+    for m in milestones:
+        if not isinstance(m, dict) or m.get("id") is None:
+            continue
+        try:
+            if int(m.get("id")) == want:
+                return m
+        except (TypeError, ValueError):
+            continue
+    for m in milestones:
+        if not isinstance(m, dict) or m.get("number") is None:
+            continue
+        try:
+            if int(m.get("number")) == want:
+                return m
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _normalize_issue_milestone(resp):
+    """Issue #1005：issues get/update 回显的 milestone 同样补 id（供 QA 断言）。"""
+    if isinstance(resp, dict) and isinstance(resp.get("milestone"), dict):
+        out = dict(resp)
+        out["milestone"] = _normalize_milestone_states(resp["milestone"])
+        return out
+    return resp
+
+
+def _gitcode_milestone_number_exists(owner: str, repo: str, number: int,
+                                     user: dict, p: str) -> tuple[bool, list[int]]:
+    """返回 (number 是否存在, 已扫描到的 number 列表)。上游故障由 _vcs_req 抛 5xx。"""
+    token = _repo_token(owner, repo, user, p)
+    found = False
+    numbers: list[int] = []
+    prev_page = None
+    for page in range(1, _MILESTONE_SCAN_MAX_PAGES + 1):
+        data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
+                                           {"state": "all", "page": page,
+                                            "per_page": _MILESTONES_MAX_PER_PAGE}, p), token)
+        if not isinstance(data, list) or not data:
+            break
+        if data == prev_page:
+            # 上游忽略 page 参数时返回同一页，继续翻页无意义。
+            break
+        prev_page = data
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                n = int(item.get("number"))
+            except (TypeError, ValueError):
+                continue
+            if n not in numbers:
+                numbers.append(n)
+            if n == number:
+                found = True
+        # Issue #1076 审查：上游可能静默钳制 per_page，不能用「本页不足 per_page」判断末页
+        # （否则后续页的有效 number 会被误判不存在 → 422）；只以空页/non-list 为终止条件。
+    return found, numbers
+
+# 纯日期形态 YYYY-MM-DD（v5 只认日期 / GitHub 只认 datetime 的分界判据）
+_DATE_ONLY_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _milestone_due_on(provider: str, due_on: str, *, required: bool = False) -> str:
+    """milestones due_on 方言归一（provider 契约开关派生，无平台枚举）。
+
+    - `MILESTONE_DUE_ON_REQUIRED=True`（gitcode/gitee）且缺失/空 → 本地 400 可读
+      文案（零上游外呼；不静默补缺省——假日期会污染逾期/排序口径）；
+    - `MILESTONE_DUE_DATE_ONLY=True`（gitcode）→ 截为 YYYY-MM-DD（ISO 时间戳 400）；
+    - `MILESTONE_DUE_TIME_ONLY=True`（github）→ 纯日期补 T00:00:00Z（纯日期 422）；
+    - 全缺省 → 原样透传（通用契约）。
+    """
+    due = (due_on or "").strip()
+    if not due:
+        if required and _pflag(provider, "MILESTONE_DUE_ON_REQUIRED"):
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": (f"'{provider}' 创建里程碑必须提供 due_on（到期日）：该上游 due_on "
+                            f"不可为空（空值返回 400 \"due_on must not be empty\"）；"
+                            f"GitHub 可省略（due_on 可选）。示例：\"2026-12-31\"。")})
+        return ""
+    if _pflag(provider, "MILESTONE_DUE_DATE_ONLY"):
+        if not _DATE_ONLY_RE.match(due):
+            due = due[:10]
+    elif _pflag(provider, "MILESTONE_DUE_TIME_ONLY"):
+        if _DATE_ONLY_RE.match(due):
+            due = f"{due}T00:00:00Z"
+    return due
 
 
 @router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones",
@@ -512,22 +875,25 @@ def list_milestones(owner: str, repo: str, state: str = Query("all",
     return _normalize_milestone_states(data)
 
 
-@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).")
+@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; due_on is REQUIRED on GitCode/Gitee — those upstreams reject an empty due_on with 400, intercepted locally with a readable 400 — and optional on GitHub, ISO datetime). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).")
 def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    # Issue #632（对齐 #577）：GitHub/GitCode milestones 字段语义一致 → 直调透传（同 labels 模式）
-    payload = {k: v for k, v in {"title": body.title, "description": body.description,
-                                 "due_on": body.due_on}.items() if v != ""}
+    # Issue #632（对齐 #577）：字段语义一致 → 直调透传（同 labels 模式）；due_on 走
+    # provider 契约开关归一（必填拦截 / 日期化 / datetime 化，见 _milestone_due_on）。
+    payload = {k: v for k, v in
+               {"title": body.title, "description": body.description,
+                "due_on": _milestone_due_on(p, body.due_on, required=True)}.items() if v != ""}
     data = _vcs_req(p, "POST", _vcs_url(owner, repo, "/milestones", None, p),
                     _repo_token(owner, repo, user, p), payload)
     return _normalize_milestone_states(data)
 
 
-@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open).")
+@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open). GitCode caveat (live-fire evidence): its PATCH requires non-empty title AND due_on on every update (partial updates get upstream 400 'title must not be empty' / 'due_on must not be empty') — pass the full field set when updating GitCode milestones.")
 def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    payload = {k: v for k, v in {"title": body.title, "description": body.description,
-                                 "due_on": body.due_on, "state": body.state}.items() if v != ""}
+    payload = {k: v for k, v in
+               {"title": body.title, "description": body.description,
+                "due_on": _milestone_due_on(p, body.due_on), "state": body.state}.items() if v != ""}
     data = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/milestones/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     return _normalize_milestone_states(data)
@@ -553,7 +919,17 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
         _body = _body + "\n<!-- grape-auto-comment -->"
     neutral = {"title": body.title, "body": _body, "assignee": body.assignee}
     payload = translate_inbound(p, "issues", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
-    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
+    # P1（fixw11）：create 套用 gitee v5 owner-path 契约（与 update 同款机制，
+    # 复用 _issue_write_url/ISSUE_UPDATE_OWNER_PATH+ISSUE_BODY_REPO_BARE 能力位，
+    # 勿另造）：POST /repos/{owner}/issues（路径无 repo 段，恒 404 'project or
+    # enterprise' 的 repo 路径形态废弃），body 必带 repo=仓名（gitee 纯仓名 /
+    # gitcode 历史全称，与 update 端点同派生）。
+    if _pflag(p, "ISSUE_UPDATE_OWNER_PATH"):
+        payload.setdefault("repo", repo if _pflag(p, "ISSUE_BODY_REPO_BARE") else f"{owner}/{repo}")
+        _url = _issue_write_url(owner, repo, None, p)
+    else:
+        _url = _vcs_url(owner, repo, "/issues", None, p)
+    resp = _vcs_req(p, "POST", _url, _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S12 写入点1）：建 Issue 入账，webhook 回流按编号对账
     try:
         from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
@@ -568,13 +944,15 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
 
 
 @router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue.")
-def get_issue(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
+def get_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
               p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
+    # Issue #1005：回显的 milestone 同样补 id（供 QA 断言），state 归一与列表口径一致。
+    return _normalize_issue_milestone(resp)
 
 
-@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id maps to upstream `milestone` (number); PATCH auto-fills required repo/title; milestone changes are read-back verified and echoed, or 502 if the milestone was not applied.")
-def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
+@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.")
+def update_issue(owner: str, repo: str, number: int | str, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
     # 路径 B 场景 actor=用户 → webhook 事件 → 自循环检测标记层需能拦截
@@ -602,29 +980,74 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     }
     payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
     _want_milestone = bool(body.milestone_id)
-    # Issue #640：GitCode PATCH /repos/{owner}/issues/{number} body 必填 repo+title（路径不含 repo 维度
-    # 的必填语义），仅传元数据字段（如 milestone_id）会被上游 400 拒绝 —— 复用 close_issue 已验证模式：
-    # 服务端自动补 repo，title 缺失时先 GET 回取当前值回填，调用方无感
-    if p == "gitcode":
-        payload.setdefault("repo", f"{owner}/{repo}")
+    _resolved_milestone = None
+    _resolved_number = None
+    # Issue #1005：milestone_id 取值口径 id 优先、number 兼容。先解析到具体里程碑，
+    # 再以解析出的上游 number 写 PATCH（id 与 number 混用不再静默落空）。
+    if _pflag(p, "MILESTONE_ID_RESOLVE_TO_NUMBER") and _want_milestone:
+        _milestones = _fetch_gitcode_milestones(owner, repo, user, p, want=body.milestone_id)
+        _resolved_milestone = _resolve_gitcode_milestone(_milestones, body.milestone_id)
+        if _resolved_milestone is None:
+            _available = []
+            for _m in _milestones:
+                if not isinstance(_m, dict) or _m.get("number") is None:
+                    continue
+                _n = str(_m.get("number"))
+                if _n not in _available:
+                    _available.append(_n)
+            _avail_txt = ", ".join(_available[:20]) or "无"
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"milestone_id={body.milestone_id} 不存在：可访问的里程碑列表中未找到 "
+                           f"id/number 匹配项（里程碑已删除或当前身份无权限查看）。"
+                           f"合法取值来源为 `grape git-repo milestones` 返回的 `id`（优先）或 `number` 字段。"
+                           f"当前仓库可用 number: {_avail_txt}"})
+        try:
+            _resolved_number = int(_resolved_milestone.get("number"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail={
+                "code": 422,
+                "message": f"milestone_id={body.milestone_id} 匹配到里程碑但缺少可用 number，无法写上游 PATCH"})
+        payload["milestone"] = _resolved_number
+    # owner-path 契约（ISSUE_UPDATE_OWNER_PATH，gitcode/gitee v5 官方形态）：
+    # PATCH URL 路径无 repo 段，body 必带 repo；ISSUE_BODY_REPO_BARE=True 时 repo
+    # 取裸仓库名（全称 404 NOT_EXIST / "Not Found Project"）。repo+title 为路径不含
+    # repo 维度的必填语义，仅传元数据字段（如 milestone_id）会被上游 400 拒绝 ——
+    # 服务端自动补 repo，title 缺失时先 GET 回取当前值回填，调用方无感。
+    # Issue #1005：milestone 请求也会 GET 一次 issue（供回滚基准），与 title 回取合并为同一次。
+    _owner_path = _pflag(p, "ISSUE_UPDATE_OWNER_PATH")
+    _pre_issue = None
+    if _owner_path and (_want_milestone or "title" not in payload):
+        payload.setdefault("repo", repo if _pflag(p, "ISSUE_BODY_REPO_BARE") else f"{owner}/{repo}")
+        try:
+            _pre_issue = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                                  _repo_token(owner, repo, user, p))
+        except HTTPException:
+            raise
+        except Exception as _e:
+            raise HTTPException(status_code=502, detail={
+                "code": 502,
+                "message": f"{p} PATCH 必填 title 回取失败（update_issue #{number}）：{_e}"})
         if "title" not in payload:
-            try:
-                _info = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
-                                 _repo_token(owner, repo, user, p))
-                _title = str(_info.get("title") or "").strip() if isinstance(_info, dict) else ""
-            except HTTPException:
-                raise
-            except Exception as _e:
-                raise HTTPException(status_code=502, detail={
-                    "code": 502,
-                    "message": f"GitCode PATCH 必填 title 回取失败（update_issue #{number}）：{_e}"})
+            _title = str(_pre_issue.get("title") or "").strip() if isinstance(_pre_issue, dict) else ""
             if not _title:
                 # Issue #640 审查意见：title 必填非空，回取为空仍发空串会被上游 400 拒绝 → 明确报错
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
-                    "message": f"GitCode PATCH 必填 title 回取为空（update_issue #{number}），无法补齐必填字段"})
+                    "message": f"{p} PATCH 必填 title 回取为空（update_issue #{number}），无法补齐必填字段"})
             payload["title"] = _title
-    resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+    # Issue #1076/#1005：写入前已把 milestone_id 解析为具体里程碑（id 优先、number 兼容），
+    # 不存在的值在解析阶段已 400 拦截，绝不发 PATCH，既有 milestone 因而不被清空。
+    # 这里仅记录请求前的 milestone number，供写后回读失败时回滚。
+    _before_ms_num = None
+    if _pflag(p, "MILESTONE_ID_RESOLVE_TO_NUMBER") and _want_milestone:
+        _before_ms = _pre_issue.get("milestone") if isinstance(_pre_issue, dict) else None
+        _before_raw = _before_ms.get("number") if isinstance(_before_ms, dict) else _before_ms
+        try:
+            _before_ms_num = int(_before_raw) if _before_raw is not None else None
+        except (TypeError, ValueError):
+            _before_ms_num = None
+    resp = _vcs_req(p, "PATCH", _issue_write_url(owner, repo, number, p),
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
     # S19：非 body 修改（assignee/labels/state）记 issue_meta（编号键）——元数据回声对账
@@ -639,35 +1062,81 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             record_outbound(p, _rk, "issue_meta", str(number), issue_number=str(number))
     except Exception as _e:
         log.warning(f"outbound_ledger record (update_issue) failed: {_e}")
-    # Issue #640：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
-    # 仅当请求含 milestone_id 且 provider=gitcode 时执行一次 GET 回读：
-    #   - 未落库或落库值 number ≠ 请求的 milestone_id（如原挂旧里程碑、新值被上游静默忽略）
-    #     → 返回明确 502 结构化错误（不再是 200 假成功、不回显错误值）
-    #   - 一致 → 响应回显 milestone（上游 PATCH 响应可能不回显，以回读值为准）
-    if p == "gitcode" and _want_milestone and isinstance(resp, dict) and "error" not in resp:
+    # Issue #640/#1005/#1076：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
+    # 仅当请求含 milestone_id 且 provider=gitcode/github 时执行一次 GET 回读：
+    #   - 未落库或落库 number ≠ 目标 number（如原挂旧里程碑、新值被上游静默忽略）
+    #     → 422 可读错误（不再 502），gitcode 并尽量回滚到请求前的 milestone，
+    #     保证失败路径不破坏既有值；502 仅保留给回读时上游真实不可用。
+    #   - 一致 → 响应回显 milestone（补 id，上游 PATCH 响应可能不回显，以回读值为准）。
+    #   - github 并入（2026-11-13 P1-full 实弹）：milestone_id 未映射为上游 `milestone`
+    #     时同样 200 假成功——映射已修，回读守卫兜底上游静默忽略（比对基准=请求值）。
+    if _want_milestone and isinstance(resp, dict) and "error" not in resp and _pflag(p, "MILESTONE_VERIFY_READBACK"):
         try:
             _after = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                               _repo_token(owner, repo, user, p))
-            _ms = _after.get("milestone") if isinstance(_after, dict) else None
-            _ms_num = _ms.get("number") if isinstance(_ms, dict) else _ms
-            if _ms_num is None or int(_ms_num) != int(body.milestone_id):
-                _cur = _ms_num if _ms_num is not None else "空"
-                raise HTTPException(status_code=502, detail={
-                    "code": 502,
-                    "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "
-                               f"milestone={_cur}（原值/空，与请求不一致——新值可能被上游静默忽略或 "
-                               f"里程碑 number 无效），请用 milestones list 核对里程碑 number 后重试"})
-            resp = dict(resp)
-            resp["milestone"] = _ms
         except HTTPException:
             raise
         except Exception as _e:
-            log.warning(f"milestone readback verify (update_issue #{number}) failed: {_e}")
+            raise HTTPException(status_code=502, detail={
+                "code": 502,
+                "message": f"milestone 回读校验失败（update_issue #{number}，上游不可用）：{_e}"})
+        _ms = _after.get("milestone") if isinstance(_after, dict) else None
+        _ms_raw = _ms.get("number") if isinstance(_ms, dict) else _ms
+        try:
+            _ms_num = int(_ms_raw) if _ms_raw is not None else None
+        except (TypeError, ValueError):
+            _ms_num = None
+        _target = _resolved_number if _pflag(p, "MILESTONE_ID_RESOLVE_TO_NUMBER") else body.milestone_id
+        if _ms_num != _target:
+            _cur = _ms_num if _ms_num is not None else "空"
+            _rollback_note = ""
+            # 失败原子性（gitcode）：仅当 PATCH 后值与原值不同（被清空/改成其它）时回滚到原里程碑。
+            if _pflag(p, "MILESTONE_ID_RESOLVE_TO_NUMBER") and _before_ms_num is not None and _ms_num != _before_ms_num:
+                _rollback_ok = False
+                try:
+                    _vcs_req(p, "PATCH", _issue_write_url(owner, repo, number, p),
+                             _repo_token(owner, repo, user, p),
+                             {"repo": repo if _pflag(p, "ISSUE_BODY_REPO_BARE") else f"{owner}/{repo}",
+                              "title": payload.get("title", ""), "milestone": _before_ms_num})
+                    _rollback_ok = True
+                except Exception as _re:
+                    log.warning(f"milestone rollback (update_issue #{number}) failed: {_re}")
+                    _rollback_note = f"；回滚原 milestone={_before_ms_num} 失败"
+                if _rollback_ok:
+                    # Issue #1076 审查：回滚 PATCH 可能被上游静默忽略，必须回读确认才能宣称已回滚。
+                    try:
+                        _rolled = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                                           _repo_token(owner, repo, user, p))
+                        _rolled_ms = _rolled.get("milestone") if isinstance(_rolled, dict) else None
+                        _rolled_raw = _rolled_ms.get("number") if isinstance(_rolled_ms, dict) else _rolled_ms
+                        try:
+                            _rolled_num = int(_rolled_raw) if _rolled_raw is not None else None
+                        except (TypeError, ValueError):
+                            _rolled_num = None
+                    except Exception as _re:
+                        log.warning(f"milestone rollback readback (update_issue #{number}) failed: {_re}")
+                        _rollback_note = (f"；已请求回滚为原 milestone={_before_ms_num}，"
+                                          f"但回读确认失败，未确认恢复")
+                    else:
+                        if _rolled_num == _before_ms_num:
+                            _rollback_note = f"；已回滚为原 milestone={_before_ms_num}"
+                        else:
+                            _rolled_txt = _rolled_num if _rolled_num is not None else "空"
+                            _rollback_note = (f"；回滚原 milestone={_before_ms_num} 后回读仍为 "
+                                              f"{_rolled_txt}，原值未恢复")
+            raise HTTPException(status_code=422, detail={
+                "code": 422,
+                "message": f"milestone_id={body.milestone_id} 未生效（上游忽略）：上游 PATCH 返回 200 但回读校验 "
+                           f"milestone={_cur}（与请求不一致——新值可能被上游静默忽略）。"
+                           f"合法取值来源为 `grape git-repo milestones` 返回的 `id`（优先）或 `number` 字段"
+                           f"{_rollback_note}"})
+        resp = dict(resp)
+        resp["milestone"] = _normalize_milestone_states(_ms)
     return resp
 
 
 @router.post("/{owner}/{repo}/issues/{number}/close", operation_id="gitrepo_issues_close", summary="Close issue", description="Closes an issue on the Git provider. Provider-adapted: GitHub PATCH state=closed; GitCode PATCH state=close with the required repo/title (title auto-fetched). Returns the updated issue, or 502 if the provider does not apply the close.")
-def close_issue(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
+def close_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
     """关闭 Issue（对外接口，供 grape-cli / agent 使用）。平台差异复用 VcsApiClient.close_issue（#209 实测）：
     - GitHub：PATCH {"state": "closed"}
@@ -682,14 +1151,14 @@ def close_issue(owner: str, repo: str, number: int, user: dict = Depends(get_cur
 
 
 @router.get("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_list", summary="List issue comments", description="Lists comments on an issue.")
-def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
+def list_issue_comments(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
                         p: str = Depends(_provider)):
     return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p))
 
 
 @router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
-def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
+def create_issue_comment(owner: str, repo: str, number: int | str, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
@@ -736,16 +1205,68 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     if not related and _body:
         from src.domains.runtime.vcs.issue_ref_filter import extract_related_issue_nums
         related = extract_related_issue_nums(_body)
+    # Issue #1739：关联 Issue 的同一流水线 qa 最新结论为 fail 时，不得因建 PR 自动关闭
+    # Issue（GitCode close_related_issue 会在合入时关闭关联 Issue）——强制关闭开关为 false，
+    # 并在 Issue 上标注 QA 失败原因与 PR，便于回流修复；门禁异常 fail-open 保持原行为。
+    # 门禁不受调用方 auto_close_issues 影响：默认 false 时同样必须校验并标注（AC1/AC2）。
+    _auto_close = body.auto_close_issues
+    _auto_close_explicit = "auto_close_issues" in getattr(body, "model_fields_set", set())
+    _qa_failures: list[dict] = []
+    _qa_rk = ""
+    if related:
+        try:
+            from src.api.qa_gate import collect_qa_failures
+            from src.kernel.repo_key import to_repo_key
+
+            _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+            _qa_failures = collect_qa_failures(_qa_rk, related)
+            if _qa_failures:
+                _auto_close = False
+                for _f in _qa_failures:
+                    log.info(f"qa gate: force auto_close_issues=false "
+                             f"{_qa_rk}/#{_f['issue']} "
+                             f"(qa seq={_f['info'].get('event_seq')})")
+        except Exception as _e:
+            log.warning(f"qa gate: create_pull check failed (fail-open) "
+                        f"{owner}/{repo}: {_e}")
+    # Issue #1739（AC3）：GitHub 无原生关闭开关，历史语义是关联 Issue 即追加
+    # `Closes #N`（auto_close_issues 被 provider 丢弃）。仅当本次 QA 门禁判定失败时
+    # 才降级为 `Related to #N`；qa 通过 / 无 qa 阶段必须沿用原 `Closes` 语义，避免
+    # 正常关闭链路因默认 auto_close_issues=false 而悄悄失效。
+    # 但调用方显式传 auto_close_issues=false 时必须尊重其关闭意愿，不得用默认值冒充。
+    # CLOSING_REFS_AUTO_CLOSE_DEFAULT 能力位派生（S89/D65 同族口径，provider
+    # 模块契约开关）：声明该开关的平台（github——closing keywords 上游自动关闭）
+    # 在 qa 通过且调用方未显式关闭时沿用 Closes 语义；v5 系（gitcode 有原生
+    # close_related_issue 字段/gitee 上游不认 closing keywords）不注入。
+    if (_pflag(p, "CLOSING_REFS_AUTO_CLOSE_DEFAULT")
+            and not _qa_failures and not _auto_close_explicit):
+        _auto_close = True
     neutral = {
         "title": body.title,
         "head": body.head,
         "base": body.base,
         "body": _body,
         "related_issue_nums": related,
-        "auto_close_issues": body.auto_close_issues,
+        "auto_close_issues": _auto_close,
+        # 必须在 neutral 里显式带上：provider 规则只决定「怎么翻译」，中性字典才是
+        # 上游 payload 的唯一来源，漏了这行字段到不了 VCS 且不报错。
+        "prune_source_branch": body.prune_source_branch,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    # Issue #1739：QA 失败被门禁拦截时，在建 PR 成功后补充 Issue 标注（关联本次 PR）。
+    # 多 Issue PR：每个 qa 失败的关联 Issue 都要标注，不能只标首个。
+    if _qa_failures and _qa_rk:
+        try:
+            from src.api.qa_gate import annotate_qa_failures
+            from src.kernel.outbound_ledger import extract_content_id
+
+            _pr_s = str(extract_content_id(resp, "issue") or "").strip()
+            _pr_num = int(_pr_s) if _pr_s.isdigit() else 0
+            annotate_qa_failures(_qa_rk, _qa_failures, pr_number=_pr_num)
+        except Exception as _e:
+            log.warning(f"qa gate: create_pull annotation failed (fail-open) "
+                        f"{owner}/{repo}: {_e}")
     # Issue #453 台账（S29-G2，网关 PR 端点族补全）：建 PR 入账——同族 update_pull/merge_pull
     # 已入账，此端点原先漏账（外部 API 调用者经网关建 PR 的回流无台账防线）。
     # best-effort：入账失败不阻断、不影响响应。bot 建 PR 回流由 S24 豁免先于台账判定放行给
@@ -762,12 +1283,12 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
 
 
 @router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request.")
-def get_pull(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
+def get_pull(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
              p: str = Depends(_provider)):
     return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _repo_token(owner, repo, user, p))
 
 
-@router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels).")
+@router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels/state). `state` accepts open/closed and is forwarded to the provider PATCH body (empty = unchanged); providers without state semantics keep returning the unchanged pull request.")
 def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: PR body 追加 grape-auto-comment 标记
@@ -778,9 +1299,17 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
     # GitHub "Update a pull request" 端点不接受 labels 字段（真实调用 422），PR 标签
     # 必须走 PATCH /issues/{n}（GitHub PR 复用 issue 元数据端点）——labels 单独拆分请求。
     _labels = _provider_labels(p, body.labels)
-    _gh_labels = _labels if p == "github" else ""
+    _via_issues = _pr_labels_via_issues(p)
+    _gh_labels = _labels if _via_issues else ""
+    # B3②：state 前置校验（非法值本地 400，不透传上游误导文案）
+    _state = (body.state or "").strip().lower()
+    if _state and _state not in ("open", "closed"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"invalid state '{body.state}' (open/closed)"})
     payload = {k: v for k, v in {"title": body.title, "body": _body,
-                                  "labels": "" if p == "github" else _labels}.items() if v != ""}
+                                  "state": _state,
+                                  "labels": "" if _via_issues else _labels}.items() if v != ""}
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     if _gh_labels != "":
@@ -830,7 +1359,7 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
                     {"inner_issue_nums": _inner})
     # Issue #453 台账（对齐 update_pull：PR 变更入账，best-effort 不阻断）
     try:
-        from src.outbound_ledger import record_outbound
+        from src.kernel.outbound_ledger import record_outbound
         from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", str(number),
                         issue_number=str(issue_number))
@@ -840,9 +1369,87 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
             "remaining_issue_nums": _remaining, "pr": resp}
 
 
+def _fetch_pull_detail(owner: str, repo: str, number: int, p: str,
+                       token: str) -> dict | None:
+    """best-effort 取 PR 详情：成功返回 dict，上游异常返回 None（fail-open 放行）。
+
+    供合入门禁与 base 快照复用同一次响应，避免合入路径重复 GET 同一 PR。
+    """
+    try:
+        _detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), token)
+        return _detail if isinstance(_detail, dict) else None
+    except Exception as _e:
+        log.warning(f"qa gate: pull detail fetch failed (fail-open) "
+                    f"{owner}/{repo}#{number}: {_e}")
+        return None
+
+
+def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
+                       repo_key: str, pr_detail: dict | None = None,
+                       detail_loaded: bool = False) -> None:
+    """合入前 QA 结论门禁（Issue #1739）：qa 最新结论 fail 时标注并 409 阻断。
+
+    - 关联来源 = PR body 的 #N 引用 + PR 详情 ``issues`` 关联（``inner_issue_nums``
+      显式关联的 PR body 可能不含 #N，只读 body 会被绕过）；
+    - 多 Issue PR 逐一校验并标注全部失败 Issue；
+    - ``pr_detail``/``detail_loaded``：复用调用方已取得的 PR 详情，避免重复请求；
+    - 仅本门禁自身的 409 才阻断合入；查询异常（PR 详情 404/502 等）fail-open，
+      不破坏合入可用性。
+    """
+    from src.api.merge_gate import record_gate_log
+    from src.api.qa_gate import annotate_qa_failures, collect_qa_failures
+    from src.kernel.repo_key import to_repo_key
+    from src.domains.runtime.vcs.issue_ref_filter import extract_related_issue_nums
+
+    _failures: list[dict] = []
+    try:
+        _pr = pr_detail if detail_loaded else _fetch_pull_detail(
+            owner, repo, number, p, token)
+        _pr_body = ""
+        _rel_nums = []
+        if isinstance(_pr, dict):
+            _pr_body = str(_pr.get("body") or _pr.get("description") or "")
+            _linked = _pr.get("issues")
+            if isinstance(_linked, list):
+                for _it in _linked:
+                    _n = _it.get("number") if isinstance(_it, dict) else None
+                    if isinstance(_n, int) and _n > 0:
+                        _rel_nums.append(_n)
+        if _pr_body:
+            _rel_nums.extend(extract_related_issue_nums(_pr_body))
+        _rel_nums = list(dict.fromkeys(_rel_nums))  # 去重且保序
+        if _rel_nums:
+            _failures = collect_qa_failures(to_repo_key(f"{owner}/{repo}", p), _rel_nums)
+    except Exception as _e:
+        log.warning(f"qa gate: merge pre-check failed (fail-open) {owner}/{repo}#{number}: {_e}")
+        return
+    if not _failures:
+        return
+    _qa_rk = to_repo_key(f"{owner}/{repo}", p)
+    annotate_qa_failures(_qa_rk, _failures, pr_number=number)
+    _first = _failures[0]
+    record_gate_log(repo_key, number, "pre_merge_qa", "blocked",
+                    {"qa_failed": {"issue": _first["issue"],
+                                   "event_seq": _first["info"].get("event_seq"),
+                                   "status": _first["info"].get("status")},
+                     "qa_failed_issues": [f["issue"] for f in _failures]})
+    _all_ids = ", ".join(f"#{f['issue']}" for f in _failures)
+    raise HTTPException(status_code=409, detail={
+        "code": 409,
+        "message": (f"merge blocked by QA gate (Issue #1739): latest qa conclusion "
+                    f"is fail for issue(s) {_all_ids} "
+                    f"(seq={_first['info'].get('event_seq')}); "
+                    f"fix and re-run qa before merge. reason: "
+                    f"{(_first['info'].get('reason') or '')[:200]}"),
+        "gate": {"phase": "pre_merge_qa", "issue": _first["issue"],
+                 "issues": [f["issue"] for f in _failures],
+                 "event_seq": _first["info"].get("event_seq"),
+                 "status": _first["info"].get("status")}})
+
+
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge",
             summary="Merge pull request",
-            description="Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message.")
+            description="Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message. WARNING (live-fire evidence 2026-11-13): an empty body is a REAL merge — GitCode PUT /pulls/{n}/merge with no fields merged the PR with upstream defaults ({merged: true}); there is no dry-run on this endpoint.")
 def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = None,
                user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #558：merge_method/title 透传（空值过滤，缺省保持 body=None 存量行为）
@@ -855,10 +1462,18 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     _token = _repo_token(owner, repo, user, p)
     # Issue #752（M1）：合入前冲突标记扫描门禁——PR 变更文件硬命中 `<<<<<<< `/`    # → 阻断 409（防残留进入基线分支，AC1）；仅孤立 `=======` 软命中 → 告警放行（防误杀
     # markdown 下划线）；扫描自身异常 fail-open。每次决策写合入日志（AC3）。
-    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, get_pull_base, record_gate_log
+    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, record_gate_log
     _repo_key = f"{owner}/{repo}"
+    # Issue #1739 审查：PR 详情只取一次，base 快照与 QA 门禁复用同一响应。
+    _pr_detail = _fetch_pull_detail(owner, repo, number, p, _token)
     # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
-    _base_info = get_pull_base(owner, repo, number, p, _token)
+    _base_info = {"ref": "", "sha": ""}
+    _base = (_pr_detail or {}).get("base") if isinstance(_pr_detail, dict) else None
+    if isinstance(_base, dict):
+        _base_info = {"ref": _base.get("ref") or "", "sha": _base.get("sha") or ""}
+    # Issue #1739：合入前 QA 结论门禁（统一入口见 ``_pre_merge_qa_gate``）。
+    _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key,
+                       pr_detail=_pr_detail, detail_loaded=True)
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
@@ -868,7 +1483,7 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
                 f"unresolved merge conflict markers found in PR changed files: {_files}")
         # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
         try:
-            from src.outbound_ledger import record_outbound
+            from src.kernel.outbound_ledger import record_outbound
             from src.kernel.repo_key import to_repo_key
             record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
                             issue_number=str(number), origin_channel="api")
@@ -878,7 +1493,8 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
         try:
             _trace_body = (f"[Grape] merge blocked: unresolved conflict markers in PR files: {_files}. "
                            f"Manual fix required before merge. (Issue #752)")
-            _trace_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
+            _ep = _pr_comment_endpoint(p)
+            _trace_path = f"/{_ep}/{number}/comments"
             _vcs_req(p, "POST", _vcs_url(owner, repo, _trace_path, None, p), _token,
                      {"body": _trace_body})
         except Exception as _ce:
@@ -945,11 +1561,11 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     # Issue #585 Bug 1: GitHub POST /pulls/{n}/comments 是 inline review comment 端点
     # （必填 commit_id/path/line），仅传 body 必然 422；PR 本身是 issue，改用
     # /issues/{n}/comments 发普通 PR 评论（仅需 body），与 GitCode 行为对齐。
-    _comments_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
+    _comments_path = f"/{_pr_comment_endpoint(p)}/{number}/comments"
     # Issue #754：GitCode 已 merged PR 上 POST /pulls/{n}/comments 返回 405
     # （not allowed to be reviewed after being merged）→ 等价留痕通道回写兜底：
     # PR=issue 语义（同 #585 方案），改走 /issues/{n}/comments，闭环说明不再散落 Issue。
-    _fallback_path = None if p == "github" else f"/issues/{number}/comments"
+    _fallback_path = None if _pr_comment_endpoint(p) == "issues" else f"/issues/{number}/comments"
     _token = _repo_token(owner, repo, user, p)
     try:
         resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _comments_path, None, p),
@@ -998,6 +1614,12 @@ def _resolve_pull_comment_note_id(p: str, owner: str, repo: str, number: int,
         raise HTTPException(status_code=422, detail={
             "code": 422,
             "message": "comment_id 非法：仅支持 note_id（数字，推荐）或 create 响应返回的十六进制 id（兼容形态）"})
+    # 仅声明 PR_COMMENT_ID_HEX 的方言（gitcode/gitee v5 同族）存在 hex→note_id 解析语义；
+    # 缺省（github 等通用契约）评论 id 本就是数字，hex 形态直接拒绝。
+    if not _pflag(p, "PR_COMMENT_ID_HEX"):
+        raise HTTPException(status_code=422, detail={
+            "code": 422,
+            "message": f"comment_id={cid} 非法：{p} 的评论 id 为数字 note_id，不接受十六进制 id"})
 
     def _first_digit_id(obj) -> str | None:
         if not isinstance(obj, dict):
@@ -1054,11 +1676,15 @@ def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, bod
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
-@router.delete("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_delete", summary="Delete PR comment", description="Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments.")
-def delete_pull_comment(owner: str, repo: str, number: int, comment_id: int,
+@router.delete("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_delete", summary="Delete PR comment", description="Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams).")
+def delete_pull_comment(owner: str, repo: str, number: int, comment_id: str,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # 上游 comment id 全局唯一（不含 PR number）：透传 DELETE /pulls/comments/{id}
-    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+    # hex id（gitcode/gitee 32 位）先解析为数字 note_id——上游 DELETE 只认数字
+    # （hex 直传 400 Orchestration error）。数字 id 直传，零额外请求（向后兼容）。
+    note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
+                                            _repo_token(owner, repo, user, p))
+    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -1148,9 +1774,11 @@ class ArtifactCleanBody(BaseModel):
                          "API. `dry_run` defaults to true, so a plain call reports impact and "
                          "deletions without touching the repo. Guard hits always skip deletion "
                          "(never bypassed). Failures are returned per path, not swallowed.")
-def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int, body: ArtifactCleanBody | None = None,
+def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int | str, body: ArtifactCleanBody | None = None,
                                    user: dict = Depends(get_current_user_or_api_key),
                                    p: str = Depends(_provider)):
+    # 2026-11-13 P1-full 实弹：gitee issue ident 为 IK* 字符串——int 路径参数直接 422
+    # （与 issues 族其余端点 int | str 口径对齐）。
     body = body or ArtifactCleanBody(dry_run=True, ref='', message='')
     from src.kernel.repo_key import to_repo_key
     from src.domains.runtime.engine.cleanup import ArtifactScope, precheck_issue_artifacts

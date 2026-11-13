@@ -69,6 +69,8 @@ var I18N = (function () {
         login: {
           gitcode_login: 'GitCode',
           github_login: 'GitHub',
+          gitee_login: 'Gitee',
+          huawei_login: '华为账号',
           beta_apply: '申请内测',
           admin: '管理后台',
           username: '用户名',
@@ -89,6 +91,8 @@ var I18N = (function () {
           oauth_view_config_help: '查看配置帮助',
           oauth_needs_config: '{name} 登录需要管理员先配置 OAuth 后才能使用',
           oauth_needs_config_generic: '部分第三方登录需要管理员先配置 OAuth 后才能使用',
+          oauth_title: '使用 {name} 账号登录',
+          oauth_title_huawei: '使用华为账号登录',
           oauth_request_failed: '登录请求失败，请稍后重试',
           oauth_exchange_failed: 'OAuth登录失败，请重试',
           empty_input: '请输入用户名和密码',
@@ -181,7 +185,10 @@ var I18N = (function () {
         },
         help: {
           drawer_title: '📖 使用帮助 & FAQ',
-          loading: '加载中...'
+          loading: '加载中...',
+          fullscreen: '全屏',
+          exit_fullscreen: '退出全屏',
+          open_new_tab: '在新标签页打开'
         },
         loading: '加载中...'
       },
@@ -216,6 +223,8 @@ var I18N = (function () {
         login: {
           gitcode_login: 'GitCode',
           github_login: 'GitHub',
+          gitee_login: 'Gitee',
+          huawei_login: 'HUAWEI ID',
           beta_apply: 'Apply for Beta',
           admin: 'Admin Console',
           username: 'Username',
@@ -236,6 +245,8 @@ var I18N = (function () {
           oauth_view_config_help: 'View setup guide',
           oauth_needs_config: '{name} sign-in requires the admin to configure OAuth first',
           oauth_needs_config_generic: 'Some third-party sign-ins require the admin to configure OAuth first',
+          oauth_title: 'Sign in with {name}',
+          oauth_title_huawei: 'Sign in with Huawei ID',
           oauth_request_failed: 'Sign-in request failed, please retry later',
           oauth_exchange_failed: 'OAuth login failed, please retry',
           empty_input: 'Please enter username and password',
@@ -328,7 +339,10 @@ var I18N = (function () {
         },
         help: {
           drawer_title: '📖 Help & FAQ',
-          loading: 'Loading...'
+          loading: 'Loading...',
+          fullscreen: 'Fullscreen',
+          exit_fullscreen: 'Exit fullscreen',
+          open_new_tab: 'Open in new tab'
         },
         loading: 'Loading...'
       },
@@ -686,9 +700,19 @@ var I18N = (function () {
       var titleEl = titleEls[k];
       var titleKey = titleEl.getAttribute('data-i18n-title');
       if (!titleKey) continue;
-      var titleTranslated = t(titleKey);
+      // 与 data-i18n 同款变量机制：title 也支持 data-i18n-vars JSON（登录按钮
+      // 「使用 {name} 账号登录」即用此通道，无 vars 时维持纯键翻译）。
+      var titleVarsAttr = titleEl.getAttribute('data-i18n-vars');
+      var titleVars = null;
+      if (titleVarsAttr) {
+        try { titleVars = JSON.parse(titleVarsAttr); } catch (e) {}
+      }
+      var titleTranslated = t(titleKey, titleVars);
       if (titleTranslated && titleTranslated !== titleKey) {
         titleEl.setAttribute('title', titleTranslated);
+        if (titleEl.hasAttribute('aria-label')) {
+          titleEl.setAttribute('aria-label', titleTranslated);
+        }
       }
     }
 

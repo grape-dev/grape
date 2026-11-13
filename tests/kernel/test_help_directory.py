@@ -32,10 +32,12 @@ EXPECTED_USAGE_FILES = [
     "pipeline.md",
     "skills.md",
     "runtimes.md",
+    "atomcode.md",
     "ai-shell-devbridge-deploy.md",
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
+    "server-environment-variables.md",
 ]
 
 EXPECTED_REFERENCE_FILES = [

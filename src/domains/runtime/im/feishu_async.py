@@ -8,26 +8,34 @@
 传输层使用 aiohttp + websockets 直连飞书 Connections OpenAPI；
 WS 协议帧解析复用 lark-oapi 的 protobuf 定义（Frame / FrameType / MessageType）。
 """
+
 import json, asyncio, time, logging, re
+
 from dataclasses import dataclass, field
+
 from enum import Enum
+
 from typing import Callable, Awaitable, Optional, Any
 
 import aiohttp
+
 import websockets
+
 from lark_oapi.ws.pb.pbbp2_pb2 import Frame
+
 from lark_oapi.ws.enum import FrameType, MessageType
 
 from src.kernel.config import log
+
 from src.domains.runtime.im.lark_md import to_lark_elements
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
+
 WS_ENDPOINT_URL = "https://open.feishu.cn/callback/ws/endpoint"
 
-
 _SEEN_MSG_TTL = 86400 * 2
-_SEEN_MSG_MAX_LOAD = 2000
 
+_SEEN_MSG_MAX_LOAD = 2000
 
 def _load_seen_msg_ids(app_id: str) -> set:
     try:
@@ -41,7 +49,6 @@ def _load_seen_msg_ids(app_id: str) -> set:
     except Exception:
         return set()
 
-
 def _persist_seen_msg_id(app_id: str, message_id: str):
     try:
         from src.kernel.session_manager import db, db_lock
@@ -52,7 +59,6 @@ def _persist_seen_msg_id(app_id: str, message_id: str):
             db.commit()
     except Exception:
         pass
-
 
 def _cleanup_seen_msg_ids(app_id: str):
     try:
@@ -65,7 +71,6 @@ def _cleanup_seen_msg_ids(app_id: str):
     except Exception:
         pass
 
-
 class BotState(Enum):
     IDLE = "idle"
     CONNECTING = "connecting"
@@ -73,7 +78,6 @@ class BotState(Enum):
     RECONNECTING = "reconnecting"
     STOPPED = "stopped"
     FAILED = "failed"
-
 
 @dataclass
 class BotMetrics:
@@ -98,7 +102,6 @@ class BotMetrics:
             "last_error": self.last_error,
             "disconnect_reasons": dict(self.disconnect_reasons),
         }
-
 
 @dataclass
 class BotContext:
@@ -132,7 +135,6 @@ class BotContext:
     _running: bool = False
     _handle_tasks: set = field(default_factory=set)
     _seen_msg_ids: set = field(default_factory=set)
-    _lease_token: str = ""  # 本实例持有的 lease token（问题 A：重连后检查）
 
     def __post_init__(self):
         if not self.name:
@@ -156,7 +158,6 @@ class BotContext:
             "max_concurrent": self.max_concurrent,
         }
 
-
 def _fetch_gitcode_collaborators(owner: str, repo: str, api_token: str) -> list:
     """分页拉取 GitCode 仓库协作者（同步 urllib，快速场景）。
 
@@ -178,7 +179,6 @@ def _fetch_gitcode_collaborators(owner: str, repo: str, api_token: str) -> list:
         page += 1
     return collabs
 
-
 def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
     """分页拉取 GitHub 仓库协作者（同步 urllib，快速场景）。"""
     collabs = []
@@ -198,7 +198,6 @@ def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
         page += 1
     return collabs
 
-
 def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
     """FR-21.2: 从 external_identities 按 platform login 查 grape_user_id。"""
     from src.kernel.session_manager import db, db_lock
@@ -209,7 +208,6 @@ def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
             "WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1",
             (provider, login)).fetchone()
         return row[0] if row else 0
-
 
 class FeishuAsync:
     """纯异步飞书API客户端 — 基于 aiohttp，无阻塞调用"""
@@ -784,8 +782,8 @@ class FeishuAsync:
             # R20.9.1: token 过期时跳过 sync + 飞书群发通知卡片
             try:
                 _error_code = ""
-                from src.kernel.token_service import detect_and_mark_expired
-                _error_code = detect_and_mark_expired(repo_key) or ""
+                from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面改名
+                _error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                 if _error_code:
                     _msg = f"⚠️ 仓库 {repo_key} 的 Token 已过期，协作者映射同步已跳过，请重新绑定 Token"
                     await self.send_card_to_chat(ctx, chat_id, _msg, title="Token 过期通知")
@@ -794,15 +792,16 @@ class FeishuAsync:
             return 0
 
         try:
-            if provider == "github":
-                collabs = _fetch_github_collaborators(owner, repo, api_token)
-            else:
-                collabs = _fetch_gitcode_collaborators(owner, repo, api_token)
+            # D44/S66：协作者拉取统一走适配器端口（存量平台子类委托原实现，
+            # generic/config-only 平台卡驱动自动正确，无平台名分支）
+            from src.kernel.token_resolver import create_provider
+            collabs = create_provider(provider).list_collaborators(api_token, owner, repo)
         except Exception as e:
             log.warning(f"[{ctx.name}] sync mapping: failed to fetch collaborators for {repo_key}: {e}")
             return 0
 
         from src.kernel.session_manager import update_unified_user_info
+        from src.kernel.repo_key import um_login_is_grape_account
         matched = 0
         for collab in collabs:
             # GitCode 协作者字段: nick_name/username；GitHub: login/name
@@ -812,18 +811,19 @@ class FeishuAsync:
                 continue
             for m in members:
                 if m.get("name") == nick:
-                    if provider == "github":
-                        # FR-21.2: GitHub 协作者 login 是 GitHub 真名，不能写 gitcode_user 列
-                        # 先从 external_identities 查 grape_user_id，再只写飞书三列
-                        _uid = _resolve_uid_by_platform_login(login, "github")
+                    # D44/S66：um 写入策略按同源白名单派生（无平台名分支）：
+                    # 同源平台（login=grape 账号名，存量 gitcode）写 gitcode_user 列；
+                    # 异源平台（github 等及新平台）按平台 login 解析 grape 账号（uid）
+                    # 后只绑飞书身份（FR-21.2 语义，gitee 等不再污染 gitcode_user）
+                    if um_login_is_grape_account(provider):
+                        update_unified_user_info(login, m["open_id"], nick, gitcode_nickname=nick, app_id=ctx.app_id)
+                        matched += 1
+                    else:
+                        _uid = _resolve_uid_by_platform_login(login, provider)
                         if _uid:
                             from src.kernel.session_manager import bind_feishu_identity
                             bind_feishu_identity(_uid, m["open_id"], feishu_name=nick, app_id=ctx.app_id)
                             matched += 1
-                    else:
-                        # GitCode 协作者 username 就是平台 login，写 gitcode_user 列正确
-                        update_unified_user_info(login, m["open_id"], nick, gitcode_nickname=nick, app_id=ctx.app_id)
-                        matched += 1
                     break
         log.info(f"[{ctx.name}] sync mapping: {repo_key} -> {matched} users matched from {len(members)} group members")
         return matched
@@ -842,9 +842,6 @@ class FeishuAsync:
         except Exception as e:
             log.warning(f"[{ctx.name}] get_user_name failed: {e}")
         return ""
-
-
-# ── 消息解析 ───────────────────────────────────────────────
 
 def parse_ws_message(raw: str) -> dict | None:
     """解析飞书 WS 原始 JSON 消息，返回标准化的消息 dict 或 None"""
@@ -922,15 +919,11 @@ def parse_ws_message(raw: str) -> dict | None:
 
     return None
 
-
-# ── Protobuf 帧解析辅助 ─────────────────────────────────────
-
 def _get_header(headers, key: str) -> str:
     for h in headers:
         if h.key == key:
             return h.value
     return ""
-
 
 def _build_ack_frame(frame) -> bytes:
     """构造飞书 WS ack 帧：payload 替换为 {"code":200}，其余字段不变，原样回传。
@@ -941,7 +934,6 @@ def _build_ack_frame(frame) -> bytes:
     """
     frame.payload = json.dumps({"code": 200}).encode("utf-8")
     return frame.SerializeToString()
-
 
 def _parse_card_action(event_data: dict) -> dict | None:
     """解析飞书消息快捷菜单 / 卡片按钮点击事件（card.action.trigger）
@@ -1023,7 +1015,6 @@ def _parse_card_action(event_data: dict) -> dict | None:
         # 供"卡片原地状态流转"方案（选问题→选场景→确认 同一张卡）使用
         "_action_token": str(event.get("token") or "")[:200],
     }
-
 
 def _parse_event(event_data: dict) -> dict | None:
     """从飞书事件 JSON 提取标准化消息 dict"""
@@ -1123,9 +1114,6 @@ def _parse_event(event_data: dict) -> dict | None:
         "file_key": file_key if msg_type in ("media", "file") else "",
     }
 
-
-# ── 单Bot WS 协程 ─────────────────────────────────────────
-
 async def _disable_bot(app_id: str):
     """永久停用 Bot（凭证失效/App 不存在），写入 DB is_active=0 防止重启后重载。
     同时释放 lease（遗漏修复 3）——防止 lease 脏数据。
@@ -1141,10 +1129,6 @@ async def _disable_bot(app_id: str):
     except Exception as e:
         log.warning(f"BotManager: disable bot {app_id} failed: {e}")
 
-
-# ── 一致性哈希环 / lease 过期解析（cluster-im-lease-stability-design.md §2.2/§2.3）──
-
-
 def _im_ring(instances: list, vnodes: int = 50) -> list:
     """一致性哈希环：[(hash, instance)] 升序。实例均匀打点，增删只影响邻近。"""
     import hashlib
@@ -1155,7 +1139,6 @@ def _im_ring(instances: list, vnodes: int = 50) -> list:
             ring.append((h, inst))
     ring.sort()
     return ring
-
 
 def _im_owner(ring: list, app_id: str) -> str:
     """app_id 顺时针落到的实例（归属）。ring 空 → ''。"""
@@ -1168,7 +1151,6 @@ def _im_owner(ring: list, app_id: str) -> str:
             return inst
     return ring[0][1]
 
-
 def _lease_expiry_ts(exp: str) -> float:
     """'YYYY-MM-DD HH:MM:SS'(UTC) → epoch 秒；解析失败返回 0。"""
     try:
@@ -1176,7 +1158,6 @@ def _lease_expiry_ts(exp: str) -> float:
         return datetime.strptime(exp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
     except Exception:
         return 0.0
-
 
 async def run_bot(ctx: BotContext, api: FeishuAsync,
                   on_message: Callable[[BotContext, dict], Awaitable[None]]):
@@ -1430,7 +1411,6 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
     cleanup_task.cancel()
     log.info(f"[{ctx.name}] stopped")
 
-
 async def _safe_handle(ctx: BotContext, api: FeishuAsync,
                        on_message: Callable, parsed: dict):
     """安全处理单条消息 — semaphore限流 + 异常隔离"""
@@ -1441,9 +1421,6 @@ async def _safe_handle(ctx: BotContext, api: FeishuAsync,
             ctx.metrics.messages_failed += 1
             ctx.metrics.last_error = f"handle error: {e}"
             log.warning(f"[{ctx.name}] message handle error: {e}")
-
-
-# ── BotManager ─────────────────────────────────────────────
 
 class BotManager:
     """编排所有Bot的启动/停止/健康检查/热加载
@@ -1614,7 +1591,8 @@ class BotManager:
             try:
                 c.execute(
                     "SELECT im_app_id, im_app_secret FROM chat_agent_session "
-                    "WHERE im_app_id!='' AND im_app_secret!='' AND user_id>0 AND (repo_key='' OR repo_key IS NULL)"
+                    "WHERE im_app_id!='' AND im_app_secret!='' AND user_id IS NOT NULL "
+                    "AND user_id NOT IN ('', '0') AND (repo_key='' OR repo_key IS NULL)"
                 )
                 for cid, csec in c.fetchall():
                     if cid and cid not in bots:
@@ -1912,3 +1890,21 @@ class BotManager:
             "bots": {app_id: ctx.to_dict() for app_id, ctx in self._bots.items()},
             "lease": lease_status,
         }
+
+from src.domains.runtime.im.seen_store import (  # Issue: 旧 IM 下线 M1 —— 原模块内实现迁到中立模块
+    _SEEN_MSG_MAX_LOAD, _SEEN_MSG_TTL, _cleanup_seen_msg_ids, _load_seen_msg_ids, _persist_seen_msg_id,
+)
+
+"""纯异步飞书多Bot连接管理器 — 支持100+Bot单进程隔离运行
+
+架构:
+  BotContext  — 单Bot完整隔离上下文（token缓存/并发槽/指标/WS连接）
+  FeishuAsync — aiohttp 飞书API客户端（token/消息发送/WS端点获取）
+
+注：旧 `BotManager`（编排启动/停止/健康检查/热加载 + 自建 WS 帧泵）已于 2026-11-10
+（A2 M1/M2）下线；收发出站改由新引擎 FeishuChannel + Replier 承担，本模块只保留
+BotContext / FeishuAsync 两件基础设施。
+
+传输层使用 aiohttp + websockets 直连飞书 Connections OpenAPI；
+WS 协议帧解析复用 lark-oapi 的 protobuf 定义（Frame / FrameType / MessageType）。
+"""

@@ -1,5 +1,6 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
-import os, subprocess, json, time, signal
+from src.kernel.user_ids import has_user_id
+import os, subprocess, json, time, signal, contextlib
 from typing import Generator, AsyncGenerator
 from src.kernel.config import log
 from .base import AgentBackend
@@ -8,6 +9,7 @@ from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
 from .codex import CodexBackend
 from .dsh import DshBackend
+from .atomcode import AtomCodeBackend
 from .hwcloud import HwcloudBackend
 from .aishell_acp import AishellDshACPBackend
 
@@ -34,6 +36,7 @@ _BACKENDS = {
     "hermes": HermesBackend(),
     "codex": CodexBackend(),
     "dsh": DshBackend(),
+    "atomcode": AtomCodeBackend(),
     "hwcloud": HwcloudBackend(),
     "aishell-dsh": AishellDshACPBackend(),
 }
@@ -45,14 +48,32 @@ _active_procs: set[subprocess.Popen] = set()
 _active_procs_lock = _threading.Lock()
 
 
-def _track_proc(proc: subprocess.Popen):
+def _track_proc(proc: subprocess.Popen, backend: str = "", cwd: str = ""):
     with _active_procs_lock:
+        proc._grape_backend = backend
+        proc._grape_cwd = os.path.normcase(os.path.realpath(cwd)) if cwd else ""
         _active_procs.add(proc)
 
 
 def _untrack_proc(proc: subprocess.Popen):
     with _active_procs_lock:
         _active_procs.discard(proc)
+
+
+def active_task_processes(backend: str, cwd: str) -> list:
+    """Select only live child processes owned by this executor and exact workdir."""
+    key = os.path.normcase(os.path.realpath(cwd))
+    with _active_procs_lock:
+        return [proc for proc in _active_procs
+                if getattr(proc, "_grape_backend", "") == backend
+                and getattr(proc, "_grape_cwd", "") == key
+                and proc.poll() is None]
+
+
+def terminate_task_agents(backend: str, cwd: str) -> None:
+    for proc in active_task_processes(backend, cwd):
+        _terminate_proc(proc, f"{backend} task cancellation", grace_seconds=3)
+        _untrack_proc(proc)
 
 
 def terminate_active_agents(grace_seconds: int = 5):
@@ -196,17 +217,27 @@ def discover_backends() -> list[dict]:
         "hermes": {"cli": "hermes", "pip": "hermes"},
         "codex": {"cli": "codex", "pip": "@openai/codex"},
         "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
+        "atomcode": {"cli": "atomcode", "pip": "@atomgit.com/atomcode"},
         "hwcloud": {"cli": "hwcloud", "pip": ""},
-        "aishell-dsh": {"cli": "aishell", "pip": ""},
+        "aishell-dsh": {"cli": "aishell", "pip": "", "capability": "acp"},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []
     for name, info in known.items():
         cli_path = find_cli(info["cli"])
+        installed = bool(cli_path)
+        # CLI 同名防误识别（2026-11-10 实证）：`aishell` 不是 dsh 发行版的独占名——
+        # 其它 aishell 工具（如 DevSpace 镜像内同名 CLI）同样命中 find_cli。能力判别：
+        # dsh 发行版独有 `acp` 子命令（`acp --help` 输出含 Agent Client Protocol），
+        # 缺该能力的同名 CLI 不是 aishell-dsh 引擎，installed 判 False——避免假引擎行
+        # 注册（服务端 register 会把上报的引擎行点亮 online，假行 = 派单黑洞）。
+        if installed and info.get("capability") == "acp":
+            from src.domains.runtime.agents.aishell_acp import aishell_dsh_capable
+            installed = bool(cli_path) and aishell_dsh_capable(cli_path)
         results.append({
             "name": name,
-            "installed": bool(cli_path),
-            "cli_path": cli_path,
+            "installed": installed,
+            "cli_path": cli_path if installed else "",
             "pip_package": info["pip"],
         })
     return results
@@ -228,9 +259,20 @@ def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
 
     流程：SIGTERM 整个进程组 → 等待 ≤ grace_seconds → 超时 SIGKILL 兜底 → proc.wait() 确认回收。
     agent 子进程由 start_new_session=True 放入独立进程组，killpg 可连带清理其 fork 出的
-    node/git/shell 等孙进程，避免残留。Windows 无进程组概念时 fallback terminate/kill。
+    node/git/shell 等孙进程，避免残留。Windows 使用 taskkill /T /F 终止整个进程树。
     """
     if proc.poll() is not None:
+        return
+    from src.domains.runtime.engine.os_adapter import is_windows, kill_process_tree
+    if is_windows():
+        # Killing only the npm/.cmd launcher can leave the native CLI and tools
+        # running. Use the owned PID and wait for its process tree to be killed.
+        if not kill_process_tree(proc.pid, force=True) and proc.poll() is None:
+            raise RuntimeError(f"{label}: failed to terminate process tree pid={proc.pid}")
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning(f"{label} process tree pid={proc.pid} still alive 5s after taskkill")
         return
     pgid = None
     if hasattr(os, "getpgid"):
@@ -270,6 +312,21 @@ def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
     except Exception:
         pass
     log.warning(f"{label} force killed (SIGKILL) after grace {grace_seconds}s")
+
+
+def _safe_terminate(proc, label: str = "", grace_seconds: float = 10.0) -> bool:
+    """容错版 _terminate_proc：终止失败只记日志，不向上抛。
+
+    Windows 下 taskkill /T /F 失败会抛 RuntimeError（_terminate_proc 新语义）。
+    杀不掉引擎不该让 worker 整体退出，也不该覆盖调用方正在处理的原始异常
+    （如 finally 块里覆盖 try 内的真实错误）。返回是否成功终止。
+    """
+    try:
+        _terminate_proc(proc, label, grace_seconds=grace_seconds)
+        return True
+    except Exception as _te:
+        log.warning(f"{label} terminate failed: {_te}")
+        return False
 
 
 # ── 引擎异常退出遗言采集与自愈（issue #317）──
@@ -537,7 +594,7 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
 
     # 技能路径占位符替换（direct 模式）
     try:
-        from src.config import replace_skill_dir_placeholders
+        from src.kernel.config import replace_skill_dir_placeholders
         prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
@@ -608,6 +665,16 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
       chat/任务需要的模型凭据，与 VCS 平台 token 无关。
     - 参数 bot_token/user_token 仅用于日志脱敏（_tokens 列表），不再写入 env。
     """
+    # user_id 类型归一：chat 链路传 str（user["id"]），devops 链路传 int——
+    # 在汇点统一转 int（str 不可比 int，未归一会 TypeError 中断整个任务）。
+    # 归一失败静默为 0 会让 scope=user worker 认领不到（仓库规则：任务 user_id
+    # 必须正确），故失败必须留痕（QA #1230 I3：静默降级不可接受）。
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        log.warning(f"_assemble_env: user_id not int-coercible ({user_id!r}), "
+                    f"degrading to 0 — user-scoped credential injection disabled")
+        user_id = 0
     # grape CLI PATH 注入（Windows 部署缺口：install-worker.ps1 未像 install-worker.sh:615
     # 把 worker venv bin 注册进 PATH，agent shell 里 `grape` 找不到——2026-11-07 真任务
     # 实证 event 1）。目录存在才前缀注入；机器级 PATH 修复后此注入自然冗余无害。
@@ -635,23 +702,60 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
     # Issue #344: 改用带预刷新的 token 获取函数，避免拿到过期 token。
     if kind == "chat":
-        if not user_token and user_id > 0:
+        if not user_token and has_user_id(user_id):
             try:
-                from src.api.deps import get_user_token_with_refresh
+                # D37/S57：repo 上下文按 repo_key 前缀派生 provider；无 repo_key 时
+                # 按用户已绑定身份的第一条（由数据决定，代码不写平台名）
+                from src.api.deps import get_user_token_for, get_user_token_for_repo
                 from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                 _acc = get_grape_account_by_id(user_id)
                 if _acc:
-                    user_token = get_user_token_with_refresh(_acc["username"], user_id=user_id) or ""
+                    if repo_key:
+                        user_token = get_user_token_for_repo(repo_key, _acc["username"],
+                                                             user_id=user_id) or ""
+                    else:
+                        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+                        _ids = get_user_identities(str(user_id)) or []
+                        _prov = str((_ids[0] or {}).get("provider") or "") if _ids else ""
+                        user_token = (get_user_token_for(_acc["username"], user_id=user_id,
+                                                         provider=_prov) or "") if _prov else ""
             except Exception as e:
-                log.warning(f"Fallback resolve user gitcode token failed: {e}")
+                log.warning(f"Fallback resolve user platform token failed: {e}")
                 user_token = ""
         if user_token:
             log.info(f"{label}chat task: user token present (len={len(user_token)}), NOT injecting into env (P2)")
         else:
             log.warning(f"{label}NO user platform token available for chat; VCS ops go through grape CLI + session token")
+        # chat env 兜底（Issue #1757）：仅补缺失键，env_extra 显式值优先，绝不覆盖。
+        # Issue #1757 复审：仓库身份统一走 derive_repo_identity（与 chat_repo_env / 事件链同源），
+        # 不再自己调 split_owner_repo，避免两份派生逻辑漂移。
+        if repo_key and not repo_key.startswith("chat:") and "REPO_OWNER" not in env:
+            try:
+                from src.kernel.repo_key import derive_repo_identity
+                full_name, owner, name = derive_repo_identity(repo_key, repo_key)
+                if owner and name:
+                    env.setdefault("REPO_FULL_NAME", full_name or repo_key)
+                    env.setdefault("REPO_OWNER", owner)
+                    env.setdefault("REPO_NAME", name)
+            except Exception as e:
+                log.warning(f"{label}chat env fallback repo split failed: {e}")
+        if "GRAPE_SERVER_URL" not in env:
+            try:
+                from src.kernel.prompt_builder import _local_port
+                env["GRAPE_SERVER_URL"] = f"http://127.0.0.1:{_local_port()}"
+            except Exception as e:
+                log.warning(f"{label}chat env fallback server url failed: {e}")
     elif bot_token:
         log.info(f"{label}devops event task: bot token present (len={len(bot_token)}), NOT injecting into env (P2)")
         # GitHub bot token 不再注入（agent 侧一律 grape CLI 转发）
+
+    # Issue #1858：旧快照/旁路路径三面基址兜底（仅补缺失键，不覆盖显式值）。
+    # A2A 回退 worker 回连基址（控制面语义），不与业务基址混用。
+    if env.get("GRAPE_SERVER_URL"):
+        env.setdefault("GRAPE_VCS_BASE_URL", env["GRAPE_SERVER_URL"])
+        env.setdefault("GRAPE_ISSUE_BASE_URL", env["GRAPE_SERVER_URL"])
+        env.setdefault("GRAPE_A2A_BASE_URL",
+                       env.get("RUNTIME_SERVER_URL") or env["GRAPE_SERVER_URL"])
 
     # VCS API base URL + 名称注入（skill 中 $VCS_API_BASE 引用，适配多 VCS provider）
     if repo_key:
@@ -664,7 +768,7 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
 
     # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
     # #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
-    if user_id > 0:
+    if has_user_id(user_id):
         try:
             from src.domains.mgmt.user.db import get_credentials
             for c in get_credentials(user_id):
@@ -756,6 +860,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     """
     label = f"{agent_label} " if agent_label else ""
     backend = get_backend(backend_name)
+    # text_separator 是 AgentRuntime 基类的新增能力；自定义后端可能没有——缺失按换行拼接。
+    _text_sep = getattr(backend, "text_separator", "\n")
 
     # ── hermes ACP 专用路径 ──
     if backend_name == "hermes":
@@ -849,6 +955,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     # 单次进程执行：返回 (full_text, new_session_id, exit_code, stderr, error_events)
     def _run_once(use_session_id: str):
+        # prepare_prompt 是 AgentRuntime 基类的新增能力；自定义后端（不继承基类）
+        # 可能没有——缺失时退化为原行为，不让执行直接崩。
+        _prepare = getattr(backend, "prepare_prompt", None)
+        if _prepare is None:
+            with contextlib.nullcontext(prompt) as invocation_prompt:
+                yield from _run_once_impl(use_session_id, invocation_prompt)
+        else:
+            with _prepare(prompt, cwd) as invocation_prompt:
+                yield from _run_once_impl(use_session_id, invocation_prompt)
+
+    def _run_once_impl(use_session_id: str, invocation_prompt: str):
         # codearts 方案E2: 每次执行启动独立的 codearts serve
         # serve 信息存在局部变量 _serve_port/_serve_proc 中，不写到单例 backend 上
         # build_args 从 backend._serve_port 读取（同一 _run_once 内设置，串行无并发问题）
@@ -877,7 +994,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         else:
             _serve_env = env
 
-        args = backend.build_args(prompt, use_session_id)
+        args = backend.build_args(invocation_prompt, use_session_id)
         log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
         log.info(f"{label}{backend.name} cwd: {cwd}")
 
@@ -950,6 +1067,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 from src.domains.runtime.agents.sandbox import build_bwrap_cmd
                 _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
                 if _wrap:
+                    if backend.name == "atomcode":
+                        # bwrap hides host /tmp. Expose only this invocation's
+                        # prompt, outside the checkout and read-only.
+                        _wrap = _wrap[:-1] + ["--ro-bind", invocation_prompt, invocation_prompt, "--"]
                     _cmd = _wrap + _cmd
                     log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
             except Exception as _bw_e:
@@ -962,7 +1083,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             stdin=stdin_pipe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
-        _track_proc(proc)
+        _track_proc(proc, backend=backend.name, cwd=cwd)
         # issue #351: prompt 经 stdin 传输（不进 argv，规避 cmd 壳多行截断）
         _stdin = getattr(proc, "stdin", None)
         if backend.prompt_via_stdin and _stdin is not None:
@@ -972,6 +1093,11 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         collected_text = []
         new_session_id = use_session_id
         error_events = []
+        _terminal_seen = False
+        # atomcode 用量兜底：正常路径每轮 usage 事件直报；若进程被提前终止导致
+        # usage 事件缺失，退回 turn.completed 的整轮汇总（同一口径，不重复计入）。
+        _usage_seen = False
+        _usage_fallback = None
         # issue #317：引擎遗言尾部缓冲（exit!=0 且 stderr 空时补采进 errors）
         _log_tail = []
         step_count = 0
@@ -1053,6 +1179,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         yield ("raw", _redact(line, _tokens))
                         continue
                     _parsed_count += 1
+                    _terminal_seen = _terminal_seen or parsed.get("terminal", False)
+                    if backend.name == "atomcode" and parsed.get("usage_total"):
+                        _usage_fallback = parsed["usage_total"]
                     et = parsed["type"]
                     if et == "step_start":
                         step_count += 1
@@ -1073,6 +1202,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                             "input": _redact(json.dumps(parsed.get("input", {}), ensure_ascii=False, default=str), _tokens),
                         })
                     elif et == "step_finish":
+                        if backend.name == "atomcode" and parsed.get("usage"):
+                            _usage_seen = True
+                            yield ("usage", parsed["usage"])
                         _tok = parsed.get("tokens", "")
                         yield ("step_finish", f"Step {step_count} done" + (f", tokens={_tok}" if _tok else ""))
                     elif et == "error":
@@ -1108,7 +1240,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     log.warning(f"{label}{backend.name} no output for {_silent_window:.0f}s"
                                 f"(extend_total={_silent_extend_total:.0f}s), terminating")
                     # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
-                    _terminate_proc(proc, f"{label}{backend.name}")
+                    # 终止失败不吞掉 done 事件：收尾窗口照常走，失败原因进 errors
+                    if not _safe_terminate(proc, f"{label}{backend.name}"):
+                        error_events.append(f"{backend.name} terminate failed")
                     # 收尾窗口内尝试读取 SIGTERM 后 opencode 冲刷的最终输出（避免把已产出的收尾当卡死）
                     _grace_tail = ""
                     try:
@@ -1131,18 +1265,32 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         _parsed = backend.parse_output(_gl)
                         if _parsed:
                             _parsed_count += 1
+                            if backend.name == "atomcode":
+                                _terminal_seen = _terminal_seen or _parsed.get("terminal", False)
+                                if _parsed.get("usage_total"):
+                                    _usage_fallback = _parsed["usage_total"]
+                                if _parsed["type"] == "error":
+                                    error_events.append(_redact(_parsed["message"], _tokens))
                             if _parsed["type"] == "text":
                                 collected_text.append(_parsed["text"])
                             elif _parsed["type"] == "tool_use":
                                 pass
                     # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
                     _killed = "-9" if _grace_tail.strip() == "" else "grace"
+                    _grace_exit = -9 if not _grace_tail.strip() else (proc.returncode if proc.returncode is not None else -1)
+                    if backend.name == "atomcode":
+                        if not _terminal_seen:
+                            error_events.append("AtomCode JSONL ended without a terminal event")
+                        if error_events and _grace_exit == 0:
+                            _grace_exit = 1
                     log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
                     # Issue #494：静默超时强杀必须带明确归因（不再只写英文 killed 短语）
                     from src.domains.runtime.agents.failure_attribution import timeout_error_text
+                    if backend.name == "atomcode" and not _usage_seen and _usage_fallback:
+                        yield ("usage", _usage_fallback)
                     yield ("done", {
-                        "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
-                        "text": _redact("\n".join(collected_text), _tokens),
+                        "exit_code": _grace_exit,
+                        "text": _redact(_text_sep.join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
                         "errors": error_events + ([timeout_error_text(
                             _silent_window, f"{backend.name} 无输出静默超时被终止")] if _grace_tail.strip() == "" else []),
@@ -1173,7 +1321,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             proc.wait(timeout=120)
         except subprocess.TimeoutExpired:
             log.warning(f"{label}{backend.name} did not exit after stdout EOF, terminating")
-            _terminate_proc(proc, f"{label}{backend.name}")
+            if not _safe_terminate(proc, f"{label}{backend.name}"):
+                error_events.append(f"{backend.name} terminate failed")
             _reader_thread.join(timeout=5)
             _untrack_proc(proc)
             # codearts 方案E2: 超时也要杀 serve
@@ -1204,10 +1353,20 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 if not line:
                     continue
                 parsed = backend.parse_output(line)
+                if parsed and backend.name == "atomcode":
+                    _terminal_seen = _terminal_seen or parsed.get("terminal", False)
+                    if parsed.get("usage_total"):
+                        _usage_fallback = parsed["usage_total"]
+                    if parsed["type"] == "error":
+                        error_events.append(_redact(parsed["message"], _tokens))
+                    elif parsed["type"] == "step_start" and parsed.get("sessionID"):
+                        new_session_id = parsed["sessionID"]
+                    elif parsed.get("usage"):
+                        yield ("usage", parsed["usage"])
                 if parsed and parsed["type"] == "text":
                     collected_text.append(parsed["text"])
 
-        full_text = "\n".join(collected_text)
+        full_text = _text_sep.join(collected_text)
         # issue #416：stderr 尾巴（末尾 ≥2000B，崩溃栈在末尾），不再保头 500B
         stderr_output = _stderr_tail.text()
 
@@ -1242,6 +1401,11 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # 结合系统日志启发式判定 OOM。
         _exit_code = proc.returncode
         _final_errors = list(error_events)
+        if backend.name == "atomcode":
+            if not _terminal_seen:
+                _final_errors.append("AtomCode JSONL ended without a terminal event")
+            if _final_errors and _exit_code == 0:
+                _exit_code = 1
         # Issue #494：超时类死亡显式归因——returncode=124（timeout 命令）/ -15（SIGTERM）
         # 时 stderr 常为空，尾采拿不到原因，直接构造「执行超时」文案进 errors。
         from src.domains.runtime.agents.failure_attribution import process_exit_attribution
@@ -1267,6 +1431,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 log.warning(f"{label}{backend.name} abnormal exit={_exit_code} with empty stderr, "
                             f"supplemented errors from stdout tail ({len(_log_tail)} lines)")
 
+        if backend.name == "atomcode" and not _usage_seen and _usage_fallback:
+            yield ("usage", _usage_fallback)
         yield ("done", {
             "exit_code": _exit_code, "text": _redact(full_text, _tokens),
             "oc_session_id": new_session_id,
@@ -1305,7 +1471,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         and (done.get("parsed_count") or 0) >= 1
     )
     session_missing = (
-        session_id
+        backend.name != "atomcode"
+        and session_id
         and done.get("exit_code", 0) != 0
         and ("session not found" in _stderr or "session not found" in _errors.lower() or _stale_fail)
     )
@@ -1329,7 +1496,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     # 且与上方 session_missing 重跑共享"每流最多一次重试"额度（session_missing=True
     # 时本分支不再触发），防止叠加双跑产生重复评论。
     _abrupt_exit = (
-        done.get("exit_code", 0) != 0
+        backend.name != "atomcode"
+        and done.get("exit_code", 0) != 0
         and not (done.get("stderr") or "").strip()
         and (done.get("parsed_count") or 0) >= 1
         and not session_missing
@@ -1370,6 +1538,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         )
     )
     if _invalid_done and not session_missing:
+        if backend.name == "atomcode":
+            # Preserve the session and fail explicitly; never silently start a
+            # fresh conversation when the model returns an empty completion.
+            done["exit_code"] = 1
+            done.setdefault("errors", []).append("AtomCode completed without a text response; session preserved")
+            yield ("done", done)
+            return
         _tc = done.get("text_count") or 0
         _kc = done.get("tool_count") or 0
         if _tc == 0 and _kc == 0:

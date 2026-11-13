@@ -283,6 +283,42 @@ def test_repo_out_of_scope_raises():
 
 # ---------------------------------------------------------------- 路由层
 
+def test_failed_task_errors_dict_entries_do_not_500():
+    """P8 回归：`agent_tasks.errors` 的 JSON 元素可以是 dict（错误对象，
+    `_resolve_error_messages` 原样保留并附加 localized_message）。旧实现对
+    `errs[0]` 直接 `[:200]` 切片 → `KeyError: slice(None, 200, None)` →
+    /api/obs/events 整接口 500。任何 limit 都必须 200 且 detail 为文本。"""
+    _mk_task("t_ev_d0", REPO, "failed", started_min_ago=20, completed_min_ago=15)
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (
+            '[{"error_code":"E_NET","message":"conn refused","localized_message":"网络中断"}]', "t_ev_d0"))
+        db.commit()
+    for lim in (1, 5, 50):
+        data = ev.unified_events(USER, limit=lim)
+        assert isinstance(data["events"], list), lim
+        failed = [x for x in data["events"] if x["key"] == "task:t_ev_d0:failed"]
+        if failed:                                   # limit 太小时可能不在本页
+            assert isinstance(failed[0]["detail"], str), failed[0]
+            assert failed[0]["detail"] in ("conn refused", "网络中断"), failed[0]["detail"]
+
+    # 路由层同样不得 500
+    from fastapi.testclient import TestClient
+    from src.api.deps import require_org_member
+    from src.api.main import app
+    app.dependency_overrides[require_org_member] = lambda: USER
+    try:
+        with TestClient(app) as cli:
+            for lim in (1, 5, 50):
+                r = cli.get("/api/obs/events", params={"limit": lim})
+                assert r.status_code == 200, (lim, r.text)
+            r = cli.get("/api/obs/events", params={"limit": 50, "repo": "org/ev-mine"})
+            assert r.status_code == 200, r.text
+    finally:
+        app.dependency_overrides.pop(require_org_member, None)
+
+
 def test_l1_and_l2_routes():
     from fastapi.testclient import TestClient
     from src.api.deps import require_admin, require_org_member

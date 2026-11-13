@@ -24,7 +24,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.domains.mgmt.user import db as user_db
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.service import verify_skill_materializable
 
 from src.domains.mgmt.auth.password import hash_password as _hash_pw
@@ -111,7 +111,7 @@ class TestVerifySkillMaterializable:
 
     def test_unresolvable_with_official_bundle_passes(self):
         """sid=0 但官方内置包存在 → 放行（worker official fallback 完整物化）。"""
-        with patch("src.config.resolve_official_skill_path", return_value="/fake/SKILL.md"), \
+        with patch("src.kernel.config.resolve_official_skill_path", return_value="/fake/SKILL.md"), \
              patch("os.path.isfile", return_value=True):
             ok, _reason, sid = verify_skill_materializable("some_official_like_630")
         assert ok and sid == 0
@@ -301,8 +301,8 @@ class TestPipelineEnqueueGate:
                             lambda *a, **k: None)
         monkeypatch.setattr("src.api.event_store.update_event_config", lambda *a, **k: None)
         monkeypatch.setattr("src.domains.runtime.engine.instances.runtime_instance_name", lambda *a, **k: "opencode-1")
-        monkeypatch.setattr("src.prompt_builder.build_devops_agent_prompt", lambda *a, **k: "prompt-630")
-        monkeypatch.setattr("src.prompt_builder._resolve_server_url", lambda *a, **k: "http://srv")
+        monkeypatch.setattr("src.kernel.prompt_builder.build_devops_agent_prompt", lambda *a, **k: "prompt-630")
+        monkeypatch.setattr("src.kernel.prompt_builder._resolve_server_url", lambda *a, **k: "http://srv")
         _enqueued = []
         monkeypatch.setattr("src.domains.runtime.engine.service.enqueue_task",
                             lambda **k: _enqueued.append(k) or "t_ok630")

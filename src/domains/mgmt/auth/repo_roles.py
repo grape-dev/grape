@@ -13,8 +13,8 @@
 Fail-closed 原则：任何查询失败（网络/401/403/404/限流）一律返回 None（非 admin），
 宁可拒绝合法 admin（其可稍后重试），绝不放行无权限用户。
 """
-from src.kernel.config import log
 
+from src.kernel.config import log
 
 def _split_repo_key(repo_key: str) -> tuple[str, str, str]:
     """拆 repo_key → (provider, owner, name)。无前缀默认 gitcode。"""
@@ -32,7 +32,6 @@ def _split_repo_key(repo_key: str) -> tuple[str, str, str]:
         return "gitcode", parts[0], parts[1]
     return "", "", ""
 
-
 def _get_gitcode_login(user: dict) -> str:
     """取用户绑定的 GitCode 用户名（external_identities.external_login，status=1）。"""
     try:
@@ -44,7 +43,6 @@ def _get_gitcode_login(user: dict) -> str:
         log.warning(f"repo_roles: get gitcode login failed (user={user.get('id')}): {e}")
     return ""
 
-
 def _get_github_login(user: dict) -> str:
     """取用户绑定的 GitHub 用户名。"""
     try:
@@ -55,7 +53,6 @@ def _get_github_login(user: dict) -> str:
     except Exception as e:
         log.warning(f"repo_roles: get github login failed (user={user.get('id')}): {e}")
     return ""
-
 
 def _check_gitcode_admin(token: str, owner: str, repo: str, username: str) -> bool:
     """GitCode admin 判定（单次查询，异常向上抛由调用方 fail-closed）。
@@ -85,13 +82,11 @@ def _check_gitcode_admin(token: str, owner: str, repo: str, username: str) -> bo
     perm = data.get("permissions") or {}
     return bool(perm.get("admin")) if isinstance(perm, dict) else False
 
-
 def _check_github_admin(token: str, owner: str, repo: str, username: str) -> bool:
     """GitHub admin 判定。"""
     from src.domains.mgmt.user.repo_manager import get_github_collaborator_permission
     role = get_github_collaborator_permission(token, owner, repo, username)
     return str(role or "").lower() == "admin"
-
 
 def is_repo_admin(user: dict, repo_key: str) -> bool:
     """判定用户是否为 repo_key 仓库的 admin（Owner/Admin）。
@@ -99,7 +94,6 @@ def is_repo_admin(user: dict, repo_key: str) -> bool:
     fail-closed：未绑定平台、无 token、API 失败 → False。
     """
     return get_repo_admin_identity(user, repo_key) is not None
-
 
 def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
     """返回 {username, source}（admin 时），非 admin / 判定失败返回 None。
@@ -110,10 +104,7 @@ def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
     if not owner or not repo or not user:
         return None
 
-    if provider == "github":
-        username = _get_github_login(user)
-    else:
-        username = _get_gitcode_login(user)
+    username = _get_platform_login(user, provider)
     if not username:
         return None
 
@@ -124,14 +115,16 @@ def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
     # 实时查 VCS permission（with_oauth_token：预刷新 + 401 重试一次）
     try:
         from src.api.oauth_token import with_oauth_token
-        provider_name = "github" if provider == "github" else "gitcode"
 
         def _check(token, _owner=owner, _repo=repo, _u=username, _p=provider):
-            if _p == "github":
-                return _check_github_admin(token, _owner, _repo, _u)
-            return _check_gitcode_admin(token, _owner, _repo, _u)
+            # D44/S66：统一走适配器端口（形态归一，无平台名分支）；
+            # generic 平台返回 None → fail-closed 非 admin
+            from src.kernel.token_resolver import create_provider
+            perm = create_provider(_p).get_collaborator_permission(
+                token, _owner, _repo, _u)
+            return _is_admin_permission(perm)
 
-        if with_oauth_token(user, provider_name, _check):
+        if with_oauth_token(user, provider, _check):
             return {"username": username, "source": "permission"}
         return None
     except Exception as e:
@@ -139,3 +132,46 @@ def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
         log.info(f"repo_roles: admin check failed for user={user.get('id')} "
                  f"repo={repo_key} (fail-closed): {e}")
         return None
+
+def _get_platform_login(user: dict, provider: str) -> str:
+    """D44/S66：取用户绑定的平台用户名（external_identities.external_login，status=1）。
+
+    身份域按 provider 检索，无平台名分支——统一替代 _get_gitcode_login /
+    _get_github_login 二函数（调用方折叠为传参）。合并重同步：weekly-10 带回的
+    双平台专属函数已删，本函数为 weekly-08 通用形态。
+    """
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities_with_tokens
+        for ident in get_user_identities_with_tokens(user.get("id", "") or ""):
+            if ident.get("provider") == provider:
+                return ident.get("external_login", "") or ""
+    except Exception as e:
+        log.warning(f"repo_roles: get {provider} login failed (user={user.get('id')}): {e}")
+    return ""
+
+def _is_admin_permission(perm) -> bool:
+    """D44/S66：admin 终审口径判定（形态归一，无平台名分支）。
+
+    适配器 get_collaborator_permission 端口返回三种形态：
+    - dict（GitCode permission：role_name/access_level/permission/permissions.admin）
+    - str（GitHub role_name 字符串）
+    - None（generic 平台未实弹验证 → fail-closed 非 admin）
+
+    Issue #491：role_name=="Admin"（自定义管理员角色，数字等级可能 <50）最前判定。
+    """
+    if isinstance(perm, str):
+        return perm.lower() == "admin"
+    if not isinstance(perm, dict):
+        return False
+    if str(perm.get("role_name", "") or "").lower() == "admin":
+        return True
+    try:
+        access_level = int(perm.get("access_level", 0) or 0)
+    except (TypeError, ValueError):
+        access_level = 0
+    if access_level >= 50:  # 50=Admin（40=Maintainer 不满足终审口径）
+        return True
+    if str(perm.get("permission", "") or "").lower() == "admin":
+        return True
+    sub = perm.get("permissions") or {}
+    return bool(sub.get("admin")) if isinstance(sub, dict) else False

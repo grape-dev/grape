@@ -382,7 +382,7 @@ class TestRedirectUriFromProviderConfig:
         from src.domains.mgmt.auth.providers import get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "TestProvider", "redirect_uri": "https://example.com/cb/test"}
-        with patch("src.domains.mgmt.auth.providers.get_provider", return_value=mock_cfg):
+        with patch("src.domains.runtime.vcs.providers.get_provider", return_value=mock_cfg):
             class FakeRequest:
                 headers = {"Host": "localhost"}
             result = get_redirect_uri(FakeRequest(), "test")
@@ -393,7 +393,7 @@ class TestRedirectUriFromProviderConfig:
         from src.domains.mgmt.auth.providers import get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "TestProvider"}
-        with patch("src.domains.mgmt.auth.providers.get_provider", return_value=mock_cfg):
+        with patch("src.domains.runtime.vcs.providers.get_provider", return_value=mock_cfg):
             class FakeRequest:
                 headers = {"Host": "localhost:8000", "X-Forwarded-Proto": "https"}
             result = get_redirect_uri(FakeRequest(), "test")
@@ -423,7 +423,7 @@ class TestRedirectUriFromProviderConfig:
     def test_example_config_has_redirect_uri(self):
         """oauth-providers.example.json 中每个 provider 有 redirect_uri。"""
         config_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "configs", "oauth-providers.example.json"
+            os.path.dirname(__file__), "..", "..", "..", "configs", "oauth-providers.example.json"
         )
         with open(config_path) as f:
             data = json.load(f)

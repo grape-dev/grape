@@ -8,6 +8,7 @@
 """
 import os
 import re
+import subprocess
 
 SH = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "install-worker.sh")
 PS1 = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "install-worker.ps1")
@@ -81,8 +82,74 @@ class TestEnglishOnlyOutput:
         """用户可见字符串字面量（含兜底值如「未知版本」）不得含中文。"""
         content = _ps1()
         assert "未知版本" not in content
-        for m in re.finditer(r'"([^"\n]*)"', content):
+        # 注释行里的引号不是「字符串字面量」——先剥掉 PowerShell 注释再扫，
+        # 否则引用了本地化报错文案的注释会被误判（审查 I-3）
+        code = "\n".join(re.sub(r"#.*$", "", ln) for ln in content.split("\n"))
+        for m in re.finditer(r'"([^"\n]*)"', code):
             assert not _CJK.search(m.group(1)), f"ps1 字符串字面量含中文: {m.group(1)}"
+
+
+class TestNoEngineInstallInScript:
+    """Issue #1884（B 档）：安装脚本不再安装任何 agent 引擎。
+
+    背景：--engine hermes 分支 `pip install 'hermes[acp]'` 装到的是 PyPI 同名
+    无关项目（科研元数据发布工具），且仅凭 `[ -x "$VENV/bin/hermes" ]` 判定
+    成功 → "装错 + 误报成功"。B 档整体删除 --engine 参数与 install_engine()，
+    引擎一律由用户自行安装，worker 启动自动发现并注册（运行态逻辑不改）。
+    """
+
+    def test_sh_no_engine_install_traces(self):
+        """验收 1：脚本无引擎安装痕迹（install_engine/--engine/_want_hermes/hermes[acp]/npm 装 opencode）。"""
+        content = _sh()
+        offending = [pat for pat in (
+            "install_engine", "--engine", "_want_hermes",
+            "hermes[acp]", "npm install -g opencode-ai",
+        ) if pat in content]
+        assert not offending, (
+            "install-worker.sh 仍含引擎安装痕迹（Issue #1884 B 档应整体删除）: " + ", ".join(offending)
+        )
+
+    def test_sh_engine_env_default_removed(self):
+        """ENGINE 变量与取值校验（case "$ENGINE"）应一并删除。"""
+        content = _sh()
+        assert 'ENGINE="${ENGINE' not in content, "不应再读取 ENGINE 变量"
+        assert 'case "$ENGINE"' not in content, "不应再有 --engine 取值校验"
+
+    def test_faq_no_engine_arg_or_hermes_pip(self):
+        """验收 4：faq.md 不再出现 --engine 与 hermes[acp]。"""
+        faq = os.path.join(os.path.dirname(__file__), "..", "..", "help", "usage", "faq.md")
+        assert os.path.isfile(faq), "help/usage/faq.md should exist"
+        with open(faq, encoding="utf-8") as f:
+            content = f.read()
+        assert "--engine" not in content, "faq.md 仍出现 --engine 说明"
+        assert "hermes[acp]" not in content, "faq.md 仍出现 pip install 'hermes[acp]' 建议"
+
+
+class TestEngineArgRejected:
+    """验收 2：传 --engine 走 Unknown argument 分支，退出码 1（公开 CLI 行为 seam）。"""
+
+    def _run_script(self, *args):
+        # 未知参数在参数解析期即被拒绝（set -euo pipefail + 首个参数前不产生
+        # 副作用），无需 token；加超时防御未来可能的前置网络调用。
+        return subprocess.run(
+            ["bash", SH, *args],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_engine_arg_exits_1_with_unknown_argument(self):
+        r = self._run_script("--engine", "hermes")
+        assert r.returncode == 1, f"--engine 应以退出码 1 拒绝（验收 2），实为 {r.returncode}"
+        assert "Unknown argument" in (r.stdout + r.stderr), (
+            "--engine 应落入 Unknown argument 分支"
+        )
+
+    def test_engine_arg_without_value_exits_1(self):
+        # `--engine` 单独出现：旧实现 shift 2 会吞掉缺失值报 unbound；新实现按未知参数拒绝
+        r = self._run_script("--engine")
+        assert r.returncode == 1, f"--engine（无值）应以退出码 1 拒绝，实为 {r.returncode}"
+        assert "Unknown argument" in (r.stdout + r.stderr), (
+            "--engine（无值）应落入 Unknown argument 分支（不得静默通过）"
+        )
 
 
 class TestOfflineWheelsFirst:

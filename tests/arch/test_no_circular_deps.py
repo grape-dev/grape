@@ -54,11 +54,15 @@ def test_r5_detects_injected_cycle():
         assert "src.domains.mgmt.user" in top and "src.domains.mgmt.user" in all_imports
         assert ns["layer_of"]("src.domains.mgmt.user") == "mgmt"
 
-    # legacy shim prefix list is populated with paths that still exist as shims
+    # legacy shim prefix list is populated with paths that are still importable.
+    # Issue #2010: the modules moved into src/repos, src/authn, src/help and
+    # src/infra; src/__init__.py resolves the old names through lazy aliases,
+    # so file existence is no longer the right check.
     assert len(ns["LEGACY_SHIM_PREFIXES"]) >= 15
+    import importlib.util
+
     for p in ns["LEGACY_SHIM_PREFIXES"]:
-        rel = p.replace(".", os.sep) + ".py"
-        assert os.path.isfile(os.path.join(REPO_ROOT, rel)), f"stale shim prefix {p} (no such module)"
+        assert importlib.util.find_spec(p) is not None, f"stale shim prefix {p} (not importable)"
     # whitelist is structured module -> {rule: reason}
     assert ns["WHITELIST"]
     for mod, rules in ns["WHITELIST"].items():

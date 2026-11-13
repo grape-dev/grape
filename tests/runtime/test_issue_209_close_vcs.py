@@ -8,31 +8,39 @@
 - 幂等：已 completed 的 Issue 再次 confirm-done 不调用关闭 API
 - 幂等：VCS Issue 已 closed 时 close 被跳过（skipped）
 """
+
 import os
+
 import sys
+
 from unittest.mock import patch, MagicMock
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
+
 from src.api.main import app
+
 from src.kernel.session_manager import db, db_lock
+
 from src.domains.mgmt.user import db as user_db
+
 from src.domains.mgmt.auth import grape_account_db
+
 from src.domains.runtime.vcs.api_client import VcsApiClient
 
 client = TestClient(app)
 
 _uid = None
-_headers = {}
 
+_headers = {}
 
 def _jwt_access_token(user_id, username="test209"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
-
 
 def setup_module():
     global _uid, _headers
@@ -55,7 +63,6 @@ def setup_module():
             ("gitcode:org/issue209", "org", "issue209", "org/issue209", 1))
         db.commit()
 
-
 def teardown_module():
     if _uid:
         grape_account_db.soft_delete_account(_uid["id"])
@@ -66,14 +73,12 @@ def teardown_module():
         c.execute("DELETE FROM managed_repos WHERE repo_key='github:org/issue209'")
         db.commit()
 
-
 def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/test%' OR repo_key LIKE 'gitcode:org/pipeline-test%' OR repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%'")
         c.execute("DELETE FROM issue_state WHERE repo_key='gitcode:org/issue209'")
         db.commit()
-
 
 def _insert_task(status='processing', issue_number=300, repo_key="gitcode:org/issue209"):
     """插入测试任务，返回 task_id"""
@@ -87,16 +92,14 @@ def _insert_task(status='processing', issue_number=300, repo_key="gitcode:org/is
         db.commit()
         return c.lastrowid
 
-
-# ===================== VcsApiClient.close_issue 单元测试 =====================
-
 class TestVcsApiClientCloseIssue:
     """VcsApiClient.close_issue / get_issue_state 三平台测试"""
 
     def test_close_issue_gitcode(self):
-        """GitCode v5：PATCH 前先取 title（必填），body 用 state=close + repo + title"""
+        """GitCode v5：PATCH 前先取 title（必填），body 用 state=close + repo + title
+        （S108：断言迁移到统一 _request 缝——_gitcode_request 平行族已消）"""
         c = VcsApiClient("gitcode", "fake-token", "org", "repo")
-        with patch.object(c, "get_issue", return_value={"title": "hello", "state": "open", "number": 5}),              patch.object(c, "_gitcode_request", return_value={"state": "closed", "number": 5}) as m:
+        with patch.object(c, "get_issue", return_value={"title": "hello", "state": "open", "number": 5}),              patch.object(c, "_request", return_value={"state": "closed", "number": 5}) as m:
             resp = c.close_issue(5)
         m.assert_called_once_with(
             "PATCH", "/repos/org/repo/issues/5",
@@ -106,7 +109,7 @@ class TestVcsApiClientCloseIssue:
     def test_close_issue_github(self):
         """GitHub 平台：PATCH /repos/{owner}/{repo}/issues/{n}"""
         c = VcsApiClient("github", "fake-token", "org", "repo")
-        with patch.object(c, "_github_request", return_value={"state": "closed", "number": 5}) as m:
+        with patch.object(c, "_request", return_value={"state": "closed", "number": 5}) as m:
             resp = c.close_issue(5)
         m.assert_called_once_with("PATCH", "/repos/org/repo/issues/5", {"state": "closed"})
         assert resp["state"] == "closed"
@@ -114,7 +117,7 @@ class TestVcsApiClientCloseIssue:
     def test_close_issue_gitlab(self):
         """GitLab 平台：PUT /projects/{id}/issues/{n} with state_event"""
         c = VcsApiClient("gitlab", "fake-token", "org", "repo")
-        with patch.object(c, "_gitlab_request", return_value={"state": "closed"}) as m:
+        with patch.object(c, "_request", return_value={"state": "closed"}) as m:
             resp = c.close_issue(5)
         m.assert_called_once()
         path = m.call_args[0][1]
@@ -141,9 +144,6 @@ class TestVcsApiClientCloseIssue:
         c = VcsApiClient("gitcode", "fake-token", "org", "repo")
         with patch.object(c, "get_issue", return_value={"error": "HTTP 404"}):
             assert c.get_issue_state(5) == ""
-
-
-# ===================== confirm_issue_done 集成测试 =====================
 
 class TestConfirmDoneCloseIssues:
     """confirm-done 同步关闭 VCS Issue 测试"""
@@ -199,18 +199,19 @@ class TestConfirmDoneCloseIssues:
         """无 issue_number 时两侧均 skipped"""
         from src.domains.runtime.routes.issues import _close_vcs_issues
         result = _close_vcs_issues("gitcode:org/repo", None, {"id": 1, "username": "u"})
-        assert result == {"gitcode": "skipped", "github": "skipped"}
+        assert result == {"gitcode": "skipped", "github": "skipped", "message": ""}  # S108：message 键（S97）
 
     def test_close_vcs_issues_no_token_skipped(self):
-        """无 token 时返回 skipped（不报错）"""
+        """bot token 未配置且用户 token 缺失 → failed 降级（不抛 500）
+        （S108：S97 token 分派后主缝=get_repo_bot_token；用户 fallback 走
+        with_oauth_token，双双无 token 时现状语义=failed，非 skipped）"""
         _clean()
         tid = _insert_task(status='processing', issue_number=304)
-        # patch token 获取返回空
-        with patch("src.api.deps.get_user_token_with_refresh", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_repo_bot_token", return_value=""),              patch("src.api.deps.get_user_token_with_refresh", return_value=""):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
-        assert r.json()["issue_closed"]["gitcode"] == "skipped"
+        assert r.json()["issue_closed"]["gitcode"] == "failed"
 
     def test_close_vcs_issues_already_closed_skips_api(self):
         """VCS Issue 已 closed → get_issue_state 返回 closed → close_issue 不被调用"""
@@ -218,7 +219,7 @@ class TestConfirmDoneCloseIssues:
         tid = _insert_task(status='processing', issue_number=305)
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "closed"
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.domains.mgmt.user.db.get_repo_bot_token", return_value="fake-token"),              patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -233,7 +234,7 @@ class TestConfirmDoneCloseIssues:
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "open"
         mock_client.close_issue.return_value = {"state": "closed", "number": 306}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.domains.mgmt.user.db.get_repo_bot_token", return_value="fake-token"),              patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -247,8 +248,10 @@ class TestConfirmDoneCloseIssues:
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "open"
         mock_client.close_issue.return_value = {"error": "HTTP 403"}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.domains.mgmt.user.db.get_repo_bot_token", return_value="fake-token"),              patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
         assert r.json()["issue_closed"]["gitcode"] == "failed"
+
+from src.domains.mgmt.auth import grape_account_db

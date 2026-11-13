@@ -26,9 +26,9 @@ _cached_fingerprint_ts = None
 _FINGERPRINT_PATHS = (
     "src/api/db_setup.py",
     "src/api/main.py",
-    "src/config.py",
-    "src/session_manager.py",
-    "src/mysql_compat.py",
+    "src/kernel/config.py",
+    "src/kernel/session_manager.py",
+    "src/kernel/mysql_compat.py",
 )
 
 

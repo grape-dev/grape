@@ -161,7 +161,7 @@ async def start_vod_ws_async(bot_app_id: str, bot_app_secret: str):
     import lark_oapi.ws.client as _lark_ws
     _lark_ws.loop = asyncio.get_running_loop()
 
-    from src.im.vod_handler import process_vod_message
+    from src.domains.runtime.im.vod_handler import process_vod_message
 
     def _handle_vod(event):
         # ... 同上，消息处理逻辑 ...
@@ -214,8 +214,8 @@ async def lifespan(app: FastAPI):
             c.execute("SELECT DISTINCT bot_app_id, bot_app_secret, bot_type FROM im_bot_config")
             rows = c.fetchall()
 
-        from src.im.feishu import start_ws_async, start_vod_ws_async
-        from src.im.handler import process_chat
+        from src.domains.runtime.im.feishu import start_ws_async, start_vod_ws_async
+        from src.domains.runtime.im.handler import process_chat
 
         for bot_app_id, bot_app_secret, bot_type in rows:
             try:

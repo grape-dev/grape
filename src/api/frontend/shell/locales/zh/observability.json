@@ -497,5 +497,21 @@
     "per_page": "每页 {{n}}",
     "prev_page": "上一页",
     "next_page": "下一页"
+  },
+  "fb": {
+    "entry": "找不到你想看的内容？",
+    "entry_sub": "告诉我们你想看什么",
+    "title": "驾驶舱反馈：找不到想看的内容",
+    "placeholder": "想看什么指标或内容？说说你的场景…",
+    "kind_missing_metric": "缺指标",
+    "kind_want_content": "想看某类内容",
+    "kind_other": "其他",
+    "submit": "提交反馈",
+    "submitting": "提交中…",
+    "cancel": "取消",
+    "success": "已收到反馈，感谢！",
+    "failed": "反馈提交失败，请稍后重试",
+    "login_required": "请先登录后再提交反馈",
+    "count": "{n}/{max}"
   }
 }
