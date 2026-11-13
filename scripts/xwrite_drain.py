@@ -1,0 +1,59 @@
+"""补偿队列定时排水：`python scripts/xwrite_drain.py [stats|drain]`。
+
+由 systemd timer（deploy/systemd/grape-xwrite-drain.timer）每 5 分钟调用一次。
+环境要求：与 mgmt 进程一致（DEVOPS_DB_* 指向本域库），
+跨域调用另需 GRAPE_DSN_* + GRAPE_DOMAIN_LIB=1。
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+from src.kernel import cross_write
+
+
+def _handlers() -> dict:
+    """可用的补偿处理器：目标域 lib 必须在环境中可用，否则对应 action 不注册。"""
+    out: dict = {}
+    try:
+        from src.domains.runtime import public as rt
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({"warning": f"runtime lib import failed: {exc}"}))
+        return out
+    if not rt.available():
+        print(json.dumps({"warning": "runtime lib unavailable (DSN/lib flag missing)"}))
+        return out
+    out.update({
+        "engine_cap_upsert": lambda p: rt.upsert_engine_capability(
+            p["rid"], p["tag"], priority=int(p.get("priority", 50))),
+        "engine_cap_update": lambda p: rt.update_engine_capability(
+            p["rid"], p["tag"], int(p.get("priority", 50)), int(p.get("enabled", 1))),
+        "engine_cap_delete": lambda p: rt.delete_engine_capability(p["rid"], p.get("tag")),
+        "engine_cap_delete_all": lambda p: rt.delete_engine_capability(p["rid"]),
+    })
+    try:
+        from src.domains.mgmt import public as mg
+        if mg.available():
+            out["scene_featured_init"] = lambda p: mg.mark_default_featured(list(p.get("names") or []))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def main() -> int:
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "drain"
+    if cmd == "stats":
+        print(json.dumps(cross_write.stats(), ensure_ascii=False))
+        return 0
+    handlers = _handlers()
+    if not handlers:
+        print(json.dumps({"skipped": "no handlers available (lib not configured)"}, ensure_ascii=False))
+        return 0
+    result = cross_write.drain(handlers)
+    print(json.dumps({"drain": result, "handlers": sorted(handlers)}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

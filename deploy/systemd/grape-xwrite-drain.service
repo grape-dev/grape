@@ -1,0 +1,21 @@
+[Unit]
+Description=Grape cross-domain write compensation drain
+Documentation=file:/root/wt-arch/deploy/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/wt-arch
+EnvironmentFile=-/etc/grape/grape.env
+# 运行期从 mgmt 进程提取的库配置（含口令，0600）
+EnvironmentFile=-/etc/grape/xwrite.env
+# 与 mgmt 进程同一套库配置；跨域处理器还需 GRAPE_DSN_* + GRAPE_DOMAIN_LIB=1
+Environment=DEVOPS_DB_HOST=192.168.0.59
+Environment=DEVOPS_DB_NAME=grape_dev_mgmt
+Environment=DEVOPS_DB_USER=grape_dev_mgmt
+Environment=DEVOPS_DB_BACKEND=mysql
+Environment=PYTHONPATH=/root/wt-arch
+ExecStart=/root/grape/.venv/bin/python /root/wt-arch/scripts/xwrite_drain.py drain
+StandardOutput=journal
+StandardError=journal
