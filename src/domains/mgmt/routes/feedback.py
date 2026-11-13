@@ -21,6 +21,21 @@ from src.api.deps import (
 from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
 
+
+def _task_via_lib():
+    """GRAPE_TASKS_VIA_LIB=1 且 runtime lib 可用时走 lib（三库三机模式）。"""
+    import os as _os
+
+    if _os.environ.get("GRAPE_TASKS_VIA_LIB") != "1":
+        return None
+    try:
+        from src.domains.runtime import public as _rt
+
+        return _rt if _rt.available() else None
+    except Exception as _exc:  # noqa: BLE001
+        log.warning(f"task read via lib unavailable: {_exc}")
+        return None
+
 # 每个 Agent 任务（tk_ / session_key）最大反馈条数（feedback-openapi-expose-design.md §四.9）
 FEEDBACK_MAX_PER_AGENT_TASK = 2
 
@@ -125,14 +140,18 @@ def _collect_feedback_context(event_seq: int, user: dict):
         skill_name = ''
         skill_scope = ''
         try:
-            with db_lock:
-                c3 = db.cursor()
-                c3.execute(
-                    "SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
-                    "result_text, skill FROM agent_tasks WHERE event_seq=? "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (event_seq,))
-                tr = c3.fetchone()
+            _rt = _task_via_lib()
+            if _rt is not None:
+                tr = _rt.latest_task_for_event(event_seq)
+            else:
+                with db_lock:
+                    c3 = db.cursor()
+                    c3.execute(
+                        "SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
+                        "result_text, skill FROM agent_tasks WHERE event_seq=? "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (event_seq,))
+                    tr = c3.fetchone()
             if tr:
                 task = {
                     "task_id": tr[0], "task_status": tr[1] or '', "runtime_id": tr[2] or 0,
@@ -222,13 +241,17 @@ def _resolve_token_task_context(user: dict) -> dict:
     runtime_id = 0
     if task_id:
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
-                    "FROM agent_tasks WHERE id=? LIMIT 1",
-                    (task_id,))
-                r = c.fetchone()
+            _rt2 = _task_via_lib()
+            if _rt2 is not None:
+                r = _rt2.task_brief(task_id)
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
+                        "FROM agent_tasks WHERE id=? LIMIT 1",
+                        (task_id,))
+                    r = c.fetchone()
             if r:
                 event_seq = r[0]
                 agent_type = agent_type or (r[1] or '')

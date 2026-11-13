@@ -149,3 +149,30 @@ def test_count_skills_sql(monkeypatch):
     assert rt.count_skills(active_only=False) == 500
     assert "WHERE" not in cur2.executed[0][0]
 
+def test_latest_task_for_event_returns_tuple(monkeypatch):
+    row = (11, "completed", 3, 0, "t0", "t1", "ok", "vod/x")
+    cur = install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=row))
+    assert rt.latest_task_for_event(99) == row
+    sql, args = cur.executed[0]
+    assert "FROM agent_tasks WHERE event_seq=%s" in sql and args == (99,)
+    assert "ORDER BY created_at DESC LIMIT 1" in sql
+
+
+def test_latest_task_for_event_missing(monkeypatch):
+    install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=None))
+    assert rt.latest_task_for_event(-1) is None
+
+
+def test_task_brief_returns_tuple(monkeypatch):
+    row = (42, "hermes", "skill-a", 7, "gitcode:o/r")
+    cur = install(monkeypatch, FakeCursor(rows=[], desc=[("event_seq",)], first=row))
+    assert rt.task_brief(5) == row
+    sql, args = cur.executed[0]
+    assert "SELECT event_seq, agent_type, skill, runtime_id, repo_key" in sql
+    assert "FROM agent_tasks WHERE id=%s LIMIT 1" in sql and args == (5,)
+
+
+def test_task_brief_missing(monkeypatch):
+    install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=None))
+    assert rt.task_brief(-1) is None
+

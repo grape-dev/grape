@@ -107,6 +107,26 @@ def append_task_message(task_id: str, actor: str, content: str,
             return {"ok": True, "deduped": False, "id": getattr(c, "lastrowid", None), "seq": seq}
 
 
+def latest_task_for_event(event_seq: int) -> tuple | None:
+    """事件对应的最近一条任务（id, status, runtime_id, exit_code, started_at,
+    completed_at, result_text, skill）；无则 None。与 mgmt feedback 原查询同列序。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
+                  "result_text, skill FROM agent_tasks WHERE event_seq=%s "
+                  "ORDER BY created_at DESC LIMIT 1", (event_seq,))
+        row = c.fetchone()
+        return tuple(row) if row else None
+
+
+def task_brief(task_id: int) -> tuple | None:
+    """任务摘要（event_seq, agent_type, skill, runtime_id, repo_key）；无则 None。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT event_seq, agent_type, skill, runtime_id, repo_key "
+                  "FROM agent_tasks WHERE id=%s LIMIT 1", (task_id,))
+        row = c.fetchone()
+        return tuple(row) if row else None
+
+
 _SKILL_DETAIL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
                       "skill_path", "file_path", "scope", "owner_id", "content_hash")
 
@@ -174,4 +194,5 @@ def health() -> dict[str, Any]:
 
 __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
-           "get_skill_content_hash", "count_skills", "health"]
+           "get_skill_content_hash", "count_skills", "latest_task_for_event",
+           "task_brief", "health"]
