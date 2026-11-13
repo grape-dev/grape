@@ -1,7 +1,7 @@
 {
   "_comment": "表归属清单：DDL 守卫据此阻止进程创建'别家'的表；同表多份的裁决记录在 configs/table_ownership_notes.md",
   "schema_version": 1,
-  "generated_from": "information_schema of 192.168.0.59 (dev)",
+  "generated_from": "information_schema of <dev-db-host> (dev)",
   "tables": {
     "admin_accounts": "mgmt",
     "admin_agent_alert": "mgmt",

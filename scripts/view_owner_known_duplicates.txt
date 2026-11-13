@@ -5,7 +5,6 @@
 #
 # 2026-11-13 清理：11 张已裁决 owner=runtime，其中 9 张的副本已删除；
 #   剩余 2 张因 mgmt 代码仍直接读写自己库的副本，待 P3（改走 runtime lib）后删除。
-#   复现路径：/root/workdoc/grape/dryrun-duplicate-tables-20261113.md
 # 2026-11-13 偏差：grape_t_channel_lease 的 mgmt 副本已恢复 —— src/domains/runtime/im/bot_lease.py
 #   会被 mgmt 进程加载执行（代码目录 ≠ 运行进程），删掉后稳定报 1146。待 P3 迁到 runtime lib 再删。
 grape_t_channel_installation

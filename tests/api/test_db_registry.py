@@ -14,8 +14,8 @@ def _reset():
 
 
 def test_parse_dsn_basic():
-    cfg = db_registry.parse_dsn("mysql://u:p@10.0.0.1:3307/grape_dev_runtime")
-    assert cfg == {"host": "10.0.0.1", "port": 3307, "user": "u", "password": "p",
+    cfg = db_registry.parse_dsn("mysql://u:p@127.0.0.1:3307/grape_dev_runtime")
+    assert cfg == {"host": "127.0.0.1", "port": 3307, "user": "u", "password": "p",
                    "database": "grape_dev_runtime", "charset": "utf8mb4"}
 
 
