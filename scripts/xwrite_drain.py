@@ -136,6 +136,22 @@ def _handlers() -> dict:
             out["skill_delete_by_id"] = lambda p: rt.delete_skill_by_id(int(p["skill_id"]))
             out["skill_like_bump"] = lambda p: rt.adjust_skill_like_count(
                 int(p["skill_id"]), int(p.get("delta", 1)))
+            # P3-5f-3：凭据（mgmt 进程写 runtime 基表 runtime_credentials / grape_t_repo_credentials）
+            out["runtime_credential_insert"] = lambda p: rt.insert_runtime_credential(
+                p.get("token_hash", ""), p["name"], p.get("scope", "user"),
+                p.get("owner_id", ""), p.get("owner_name", ""), p.get("repo_key", ""),
+                p.get("org_id", ""))
+            out["runtime_credential_rename"] = lambda p: rt.rename_runtime_credential(
+                str(p["cid"]), p["name"])
+            out["runtime_credential_scope_set"] = lambda p: rt.set_runtime_credential_scope(
+                str(p["cid"]), p.get("scope", "user"), p.get("repo_key", ""),
+                p.get("owner_id", ""), p.get("org_id", ""))
+            out["runtime_credential_delete"] = lambda p: rt.delete_runtime_credential(
+                str(p["cid"]))
+            out["repo_credential_upsert"] = lambda p: rt.upsert_repo_credential(
+                p["repo_key"], p["cred_type"], p.get("value", ""), p.get("updated_at", ""))
+            out["repo_credential_clear"] = lambda p: rt.clear_repo_credential(
+                p["repo_key"], p.get("cred_type", "bot"), p.get("updated_at", ""))
     except Exception:  # noqa: BLE001
         pass
     return out

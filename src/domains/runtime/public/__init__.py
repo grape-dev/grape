@@ -742,6 +742,78 @@ def adjust_skill_like_count(skill_id: int, delta: int) -> int:
         return int(c.rowcount or 0)
 
 
+# ---------- 凭据写原语（P3-5f-3：mgmt 进程写 runtime 基表） ----------
+
+def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: str,
+                              owner_name: str, repo_key: str, org_id: str) -> dict[str, Any]:
+    """新建 runtime 凭据。名称全局唯一：撞唯一约束时返回 duplicate（**不抛异常**），
+    调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。"""
+    with db_registry.cursor("runtime") as c:
+        try:
+            c.execute("INSERT INTO runtime_credentials "
+                      "(token_hash, name, scope, owner_id, owner_name, repo_key, org_id) "
+                      "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                      (token_hash, name, scope, owner_id, owner_name, repo_key, org_id))
+            return {"action": "inserted", "id": int(c.lastrowid or 0)}
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "UNIQUE" in msg or "1062" in msg or "Duplicate" in msg:
+                return {"action": "duplicate", "id": 0}
+            raise
+
+
+def rename_runtime_credential(cid: str, name: str) -> int:
+    """改名（仅 active 行），返回受影响行数。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE runtime_credentials SET name=%s WHERE id=%s AND status='active'",
+                  (name, str(cid)))
+        return int(c.rowcount or 0)
+
+
+def set_runtime_credential_scope(cid: str, scope: str, repo_key: str, owner_id: str,
+                                 org_id: str) -> int:
+    """一次性同步 scope / repo_key / owner_id / org_id。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE runtime_credentials SET scope=%s, repo_key=%s, owner_id=%s, org_id=%s "
+                  "WHERE id=%s", (scope, repo_key, owner_id, org_id, str(cid)))
+        return int(c.rowcount or 0)
+
+
+def delete_runtime_credential(cid: str) -> int:
+    """删除凭据行。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("DELETE FROM runtime_credentials WHERE id=%s", (str(cid),))
+        return int(c.rowcount or 0)
+
+
+def upsert_repo_credential(repo_key: str, cred_type: str, value: str,
+                           updated_at: str) -> dict[str, Any]:
+    """仓库凭据幂等 upsert（UPDATE → rowcount==0 → INSERT，并发撞唯一约束再回退 UPDATE）。"""
+    from src.kernel.id_gen import uuid7_str
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE grape_t_repo_credentials SET value=%s, updated_at=%s "
+                  "WHERE repo_key=%s AND cred_type=%s", (value, updated_at, repo_key, cred_type))
+        if int(c.rowcount or 0) > 0:
+            return {"action": "updated", "id": 0}
+        try:
+            _new_id = uuid7_str()
+            c.execute("INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value, updated_at) "
+                      "VALUES (%s,%s,%s,%s,%s)", (_new_id, repo_key, cred_type, value, updated_at))
+            return {"action": "inserted", "id": _new_id}
+        except Exception:  # noqa: BLE001
+            c.execute("UPDATE grape_t_repo_credentials SET value=%s, updated_at=%s "
+                      "WHERE repo_key=%s AND cred_type=%s", (value, updated_at, repo_key, cred_type))
+            return {"action": "updated_after_conflict", "id": 0}
+
+
+def clear_repo_credential(repo_key: str, cred_type: str, updated_at: str) -> int:
+    """清空仓库凭据值（value=''，保留行）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE grape_t_repo_credentials SET value='', updated_at=%s "
+                  "WHERE repo_key=%s AND cred_type=%s", (updated_at, repo_key, cred_type))
+        return int(c.rowcount or 0)
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -766,4 +838,10 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            # P3-5h 写原语
            "mark_detach_rebound", "delete_autopilot_executions", "set_autopilot_findings",
            "set_repo_im_notifications", "add_event_action_filter",
-           "update_event_action_filter", "delete_event_action_filter"]
+           "update_event_action_filter", "delete_event_action_filter",
+           # P3-5f 写原语（skill / 凭据）
+           "update_skill_content", "update_skill_obs", "insert_skill", "create_skill_row",
+           "delete_skill_row", "delete_skill_by_id", "adjust_skill_like_count",
+           "insert_runtime_credential", "rename_runtime_credential",
+           "set_runtime_credential_scope", "delete_runtime_credential",
+           "upsert_repo_credential", "clear_repo_credential"]

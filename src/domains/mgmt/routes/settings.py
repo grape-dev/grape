@@ -1814,20 +1814,46 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _cred_org_id = "" if _is_personal else _org_id
     token = "rta_" + secrets.token_urlsafe(32)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
-            cred_id = c.lastrowid
-            db.commit()
-        except Exception as e:
-            msg = str(e)
-            if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
-                # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
-                # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
-                raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
-            raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
+    # P3-5f-3：runtime_credentials 在 runtime 域；重名判定由原语以返回值上报
+    # （若让唯一约束异常冒泡，意图会被判为可重试失败而无限重放）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_cc
+    from src.kernel import cross_write as _xw_cc
+    _cc_out: dict = {}
+    _cc_done = False
+    _rt_cc = _rt_lib_cc(foreign_only=True)
+    if _rt_cc is not None:
+        _rt_cc_ok = _rt_cc
+        _cc_hash = hashlib.sha256(token.encode()).hexdigest()
+        _cc_owner_id = repo_key if scope == "repo" else ""
+
+        def _apply_cc() -> None:
+            _cc_out.update(_rt_cc_ok.insert_runtime_credential(
+                _cc_hash, name, scope, _cc_owner_id, owner, repo_key, _cred_org_id))
+
+        _cc_done = _xw_cc.submit_if_lib(
+            _rt_cc_ok, "runtime", "runtime_credential_insert", f"rc-insert:{name}",
+            {"token_hash": _cc_hash, "name": name, "scope": scope,
+             "owner_id": _cc_owner_id, "owner_name": owner, "repo_key": repo_key,
+             "org_id": _cred_org_id}, _apply_cc, log)
+    if _cc_done:
+        if _cc_out.get("action") == "duplicate":
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
+        cred_id = int(_cc_out.get("id") or 0)
+    else:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
+                          (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
+                cred_id = c.lastrowid
+                db.commit()
+            except Exception as e:
+                msg = str(e)
+                if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
+                    # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
+                    # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
+                raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
     try:
@@ -1847,12 +1873,35 @@ def rename_runtime_credential(cid: str, body: RuntimeCredBody, user: dict = Depe
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'", (name, cid))
-            if c.rowcount == 0:
-                row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
-                raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
+            # P3-5f-3：runtime_credentials 在 runtime 域（改名仅动 active 行）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_rn
+            from src.kernel import cross_write as _xw_rn
+            _rn_n: dict = {}
+            _rn_done = False
+            _rt_rn = _rt_lib_rn(foreign_only=True)
+            if _rt_rn is not None:
+                _rt_rn_ok = _rt_rn
+
+                def _apply_rn() -> None:
+                    _rn_n["n"] = _rt_rn_ok.rename_runtime_credential(str(cid), name)
+
+                _rn_done = _xw_rn.submit_if_lib(
+                    _rt_rn_ok, "runtime", "runtime_credential_rename", f"rc-rename:{cid}:{name}",
+                    {"cid": str(cid), "name": name}, _apply_rn, log)
+            if _rn_done:
+                _rn_rc = int(_rn_n.get("n") or 0)
+                if _rn_rc == 0:
+                    row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
+            else:
+                c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'", (name, cid))
+                if c.rowcount == 0:
+                    row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
             db.commit()
         except HTTPException:
             raise
