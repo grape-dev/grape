@@ -1492,7 +1492,10 @@ def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
                     _n = _it.get("number") if isinstance(_it, dict) else None
                     if isinstance(_n, int) and _n > 0:
                         _rel_nums.append(_n)
-        if _pr_body:
+        # Issue #2429：显式 issues 关联是本 PR 的权威 Issue 链；此时不再叠加 body
+        # 里的自然语言 #N，避免“同 Issue #214 / 参考 #178”这类交叉引用把其他
+        # Issue 的历史归档结论带入当前 PR 的合入门禁。无显式关联时才回退 body。
+        if _pr_body and not _rel_nums:
             _rel_nums.extend(extract_related_issue_nums(_pr_body))
         _rel_nums = list(dict.fromkeys(_rel_nums))  # 去重且保序
         if _rel_nums:

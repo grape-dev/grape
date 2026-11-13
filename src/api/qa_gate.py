@@ -57,6 +57,31 @@ _QA_NEG_TRAILING_RE = re.compile(
     r"|\b(?:no|zero|0)\s+(?:\w+\s+){0,3}?(?:failures?|fails?|failed|errors?)\b",
     re.IGNORECASE,
 )
+# Issue #2429：量词结构 + 已闭环上下文豁免。"上轮 2 条 Required 均已闭环" /
+# "N 条 Critical 已修复" 指代已处理项，英文词不得计入失败词。
+_QA_CLOSED_CTX_RE = re.compile(
+    r"(?:(?:上轮|此前|本轮|之前|前轮|历史)\s*)?"
+    r"(?:(?:\d+|若干|[Nn]|几)\s*(?:条|项|个)\s*)?"
+    r"\b(?:critical|required)\b"
+    r"(?:\s*(?:问题|项|缺陷|items?|issues?|fix(?:es)?))?"
+    r"\s*(?:均已|均已经|已|已经)\s*(?:全部)?\s*(?:闭环|修复|处理|解决|关闭|完成)",
+    re.IGNORECASE,
+)
+# Issue #2429：反向未闭环结构必须优先判 fail（未修复/未闭环/未处理…），
+# 不能被上下文豁免或否定剔除吞掉。
+_QA_UNRESOLVED_RE = re.compile(
+    r"(?:尚未|未|没有|没)\s*(?:被|全部|完全|能)?\s*"
+    r"(?:修复|闭环|处理|解决|关闭|完成)",
+)
+# Issue #2429：显式“不存在失败项”也属通过语义（无 Critical/Required、
+# no blocking issues、0 failures），在失败语义之后放行。
+_QA_ABSENCE_RE = re.compile(
+    r"(?:无|没有|不存在|未见|未发现|无需|不需要|no|not|without|zero|none|0)\s*"
+    r"(?:任何|的|个|条|项)?\s*"
+    r"(?:critical|required|阻塞|阻断|冲突|硬违规|失败|不通过|未通过|"
+    r"failures?|fails?|issues?|problems?|bugs?|blockers?|blocking)",
+    re.IGNORECASE,
+)
 # 中文后置否定（“阻塞为零 / 阻塞 0 / 阻断: 0 / 未通过项 0”）——中文无词边界，单独处理
 _QA_NEG_CN_TRAILING_RE = re.compile(
     r"(?:阻塞|阻断|冲突|硬违规|失败|不通过|未通过|问题|缺陷|违规|整改|修复)"
@@ -78,7 +103,7 @@ _QA_NEG_PASS_RE = re.compile(
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
     r"did\s+not|does\s+not|didn't|doesn't|never|not|"
     # 英文量词否定：none of the tests passed / no tests passed / 0 tests passed
-    r"none|no|zero|0)\s*"
+    r"none|no|zero|(?<![\d.])0(?![\d]))\s*"
     r"(?:(?:全部|所有|全|完全|百分百|100%|能够|能|均|都|达到|达|满足|"
     r"all|every|any|fully|completely|entirely|be|been|"
     r"have|has|had|are|is|were|was|of|the|them|these|those|do|does|did)\s*)*"
@@ -327,10 +352,10 @@ def _classify_qa_text(blob: str) -> str:
        且显式“结论：通过”→ pass；
     2. 零失败率归一为“通过”（失败率为 0）；
     3. 剔除后置定量否定（0 tests failed / 未通过项 0）；
-    4. 否定式通过 / 未达标 / 部分通过 → fail；
-    5. 剔除否定语境（无违反 / 无阻塞 / no failures）；
+    4. 否定式通过 / 未达标 / 部分通过 / 反向未闭环 → fail；
+    5. 剔除“量词 + 已闭环”上下文与否定语境（无违反 / 无阻塞 / no failures）；
     6. 汇总失败词 → fail；
-    7. 失败语义 → fail，其次通过语义 → pass；
+    7. 失败语义 → fail，其次显式无失败/通过语义 → pass；
     8. 不可判定 → unknown（fail-open）。
     """
     # 规则 1：真实 qa 失败结论多为项数汇总，不能依赖“失败/不通过”字面；
@@ -350,14 +375,21 @@ def _classify_qa_text(blob: str) -> str:
         return "fail"
     if _QA_PARTIAL_PASS_RE.search(_normalized):
         return "fail"
-    # 规则 5：剔除否定语境后再做失败/通过语义判定。
+    # 规则 4b：反向“未闭环”结构优先于上下文豁免（上轮 2 条 Required 未修复）。
+    if _QA_UNRESOLVED_RE.search(blob):
+        return "fail"
+    # 规则 5：先剔除“量词 + 已闭环”豁免，再剔除否定语境，最后做失败/通过判定。
+    _closed_context = bool(_QA_CLOSED_CTX_RE.search(_normalized))
+    _normalized = _QA_CLOSED_CTX_RE.sub("", _normalized)
     _normalized = _QA_NEGATION_RE.sub("", _normalized)
     # 规则 6：汇总失败词（最差/违反/越界/需修复/未达）→ fail。
     if _QA_SUMMARY_KEYWORD_RE.search(_normalized):
         return "fail"
-    # 规则 7：失败语义优先于通过语义。
+    # 规则 7：失败语义优先于通过语义；已闭环上下文/显式无失败项也视为通过。
     if _qa_fail_by_terms(_normalized):
         return "fail"
+    if _closed_context or _QA_ABSENCE_RE.search(blob):
+        return "pass"
     if _qa_pass_by_terms(_normalized):
         return "pass"
     return "unknown"
