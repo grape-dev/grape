@@ -20421,7 +20421,7 @@
           "im"
         ],
         "summary": "Im Engine Status",
-        "description": "IM 引擎状态汇总——前端用来显示总开关与真连上的渠道数。\n\n注：旧 BotManager 已下线（A2 M2），active_engine 只剩 new/idle 两态。",
+        "description": "IM 引擎状态汇总——前端用来显示总开关与真连上的渠道数。\n\n注：旧 BotManager 已下线（A2 M2），active_engine 只剩 new/idle 两态。\nIssue #2261 C：新增 outbox 段（未送达计数 + 最近未送达明细）。",
         "operationId": "im_engine_status_api_im_status_get",
         "responses": {
           "200": {
@@ -20429,6 +20429,123 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/outbound": {
+      "get": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Outbound",
+        "description": "通知出站明细（#2261 C）：status 可筛（pending/sent/failed/expired），倒序。",
+        "operationId": "im_outbound_api_im_outbound_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/outbound/{out_track_id}/retry": {
+      "post": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Outbound Retry",
+        "description": "手动重发（#2261 C）：failed/expired → pending（消费者 ≤1s 接力重投）。",
+        "operationId": "im_outbound_retry_api_im_outbound__out_track_id__retry_post",
+        "parameters": [
+          {
+            "name": "out_track_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Out Track Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
