@@ -2520,9 +2520,19 @@ def _fn_login_whitelist_row_columns() -> None:
       MySQL 生成列 username_lower + UNIQUE(provider, username_lower)
       （复用 _ensure_case_insensitive_indexes 的生成列模式，不依赖 8.0.13 函数索引）
     - fn 失败要抛（strict=True）：列没建成不盖章，下次启动重试
+    - 域拆分库（arch-weekly-11 四进程）：login_whitelist 归属 mgmt 基表，
+      runtime/insight 侧是跨库视图，ALTER 必然 1346/1347（视图侧不能 ALTER）。
+      视图场景直接跳过——与 add-agent-tasks-trace-context 迁移同款守卫。
     """
     with db_lock:
         c = db.cursor()
+        if _mysql_backend():
+            _row = c.execute(
+                "SELECT TABLE_TYPE FROM information_schema.tables "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='login_whitelist'").fetchone()
+            if _row and str(_row[0]).upper() == "VIEW":
+                log.info("login_whitelist 在本库为跨库视图，补列归属 owner 基表，跳过 ALTER")
+                return
         _ensure_column(c, "login_whitelist", "provider", "VARCHAR(32) DEFAULT NULL", strict=True)
         _ensure_column(c, "login_whitelist", "username", "VARCHAR(128) DEFAULT ''", strict=True)
         if _mysql_backend():
