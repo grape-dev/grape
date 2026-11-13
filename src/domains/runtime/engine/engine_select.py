@@ -857,10 +857,19 @@ def cleanup_scene_engine_bindings(rid_list: list) -> int:
                     changed = True
             if changed:
                 try:
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
-                    changed_rows.append(row_id)
+                    # P3-4b：场景节点写走 mgmt lib（幂等意图 + expected_hash 防并发覆盖）
+                    from src.domains.runtime.engine.scene_nodes_write import (
+                        write_scene_nodes as _wsn_cl, content_hash as _ch_cl)
+                    _rc_cl = _wsn_cl(_json.dumps(nodes, ensure_ascii=False), row_id,
+                                     _ch_cl(nodes_str or ""), c, now, log)
+                    if _rc_cl in ("updated", "local", "skipped"):
+                        changed_rows.append(row_id)
+                    elif _rc_cl == "mismatch":
+                        log.warning(f"cleanup_scene_engine_bindings: scene {row_id} "
+                                    f"changed concurrently, transform skipped")
+                    else:
+                        log.warning(f"cleanup_scene_engine_bindings: scene {row_id} "
+                                    f"lib write failed, intent queued for retry")
                 except Exception as _e:
                     log.warning(f"cleanup_scene_engine_bindings: update scene {row_id} failed: {_e}")
         db.commit()
@@ -1328,10 +1337,19 @@ def remap_scene_engine_bindings(rid_map: dict) -> int:
                     changed = True
             if changed:
                 try:
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
-                    changed_rows.append(row_id)
+                    # P3-4b：场景节点写走 mgmt lib（幂等意图 + expected_hash 防并发覆盖）
+                    from src.domains.runtime.engine.scene_nodes_write import (
+                        write_scene_nodes as _wsn_rm, content_hash as _ch_rm)
+                    _rc_rm = _wsn_rm(_json.dumps(nodes, ensure_ascii=False), row_id,
+                                     _ch_rm(nodes_str or ""), c, now, log)
+                    if _rc_rm in ("updated", "local", "skipped"):
+                        changed_rows.append(row_id)
+                    elif _rc_rm == "mismatch":
+                        log.warning(f"remap_scene_engine_bindings: scene {row_id} "
+                                    f"changed concurrently, transform skipped")
+                    else:
+                        log.warning(f"remap_scene_engine_bindings: scene {row_id} "
+                                    f"lib write failed, intent queued for retry")
                 except Exception as _e:
                     log.warning(f"remap_scene_engine_bindings: update scene {row_id} failed: {_e}")
         db.commit()

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Grape runtime-domain cross-domain write compensation drain every 5 minutes
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=grape-xwrite-drain-runtime.service
+
+[Install]
+WantedBy=timers.target

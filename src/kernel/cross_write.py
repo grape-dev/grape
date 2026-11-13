@@ -103,15 +103,23 @@ def submit(target_domain: str, action: str, idempotency_key: str, payload: Any,
             return {"status": "duplicate", "key": idempotency_key,
                     "previous": (row[0] if row else "unknown")}
 
+        # 意图行先落盘再执行：apply_fn 走的是**另一个域的独立连接**（自带 autocommit），
+        # 日志行若留待调用方事务提交，会出现
+        #   ① 调用方回滚 → 跨域写已生效却没有补偿记录（不可对账）；
+        #   ② 调用方迟迟不提交 → 意图行对其他进程不可见、且持行锁阻塞 drain（实测 1205）。
+        _process_db.commit()
+
         try:
             apply_fn()
             c.execute(f"UPDATE {LOG_TABLE} SET status='applied', attempts=attempts+1, "
                       "updated_at=? WHERE idempotency_key=?", (now, idempotency_key))
+            _process_db.commit()
             return {"status": "applied", "key": idempotency_key}
         except Exception as exc:  # noqa: BLE001
             c.execute(f"UPDATE {LOG_TABLE} SET status='failed', attempts=attempts+1, "
                       "last_error=?, next_retry_at=?, updated_at=? WHERE idempotency_key=?",
                       (str(exc)[:500], now + RETRY_BACKOFF_S, now, idempotency_key))
+            _process_db.commit()
             return {"status": "failed", "key": idempotency_key, "error": str(exc)[:200]}
     finally:
         c.close()
@@ -122,6 +130,10 @@ def submit_deferred(target_domain: str, action: str, idempotency_key: str, paylo
 
     意图行与调用方业务写同库同事务，提交后由 drain() 落地 —— 不会出现
     "能力行已写、引擎行回滚"的孤儿写；代价是短暂最终一致。
+
+    **注意**：MySQL 后端 `autocommit=False`，本函数刻意不 commit（语义就是把意图行
+    交给调用方事务）。调用方必须在同一事务里 commit，否则意图行随回滚丢失，
+    等于登记了一条不会落地的写。
     """
     if not idempotency_key:
         raise ValueError("idempotency_key 必填")
@@ -171,12 +183,14 @@ def drain(apply_fns: dict[str, Callable[[dict[str, Any]], Any]], limit: int = 50
             if attempts >= MAX_ATTEMPTS:
                 c.execute(f"UPDATE {LOG_TABLE} SET status='dead', updated_at=? WHERE id=?",
                           (now, row_id))
+                _process_db.commit()   # 逐行落盘：中途异常也不丢已完成的行
                 out["dead"] += 1
                 continue
             fn = apply_fns.get(action)
             if fn is None:
                 c.execute(f"UPDATE {LOG_TABLE} SET last_error=?, next_retry_at=?, updated_at=? "
                           "WHERE id=?", ("no handler for action", now + RETRY_BACKOFF_S, now, row_id))
+                _process_db.commit()
                 out["failed"] += 1
                 continue
             out["retried"] += 1
@@ -184,6 +198,7 @@ def drain(apply_fns: dict[str, Callable[[dict[str, Any]], Any]], limit: int = 50
                 fn(json.loads(payload_json or "{}"))
                 c.execute(f"UPDATE {LOG_TABLE} SET status='applied', attempts=attempts+1, "
                           "updated_at=? WHERE id=?", (now, row_id))
+                _process_db.commit()
                 out["applied"] += 1
             except Exception as exc:  # noqa: BLE001
                 new_attempts = attempts + 1
@@ -191,7 +206,9 @@ def drain(apply_fns: dict[str, Callable[[dict[str, Any]], Any]], limit: int = 50
                 c.execute(f"UPDATE {LOG_TABLE} SET status=?, attempts=?, last_error=?, "
                           "next_retry_at=?, updated_at=? WHERE id=?",
                           (status, new_attempts, str(exc)[:500], now + RETRY_BACKOFF_S, now, row_id))
+                _process_db.commit()
                 out["dead" if status == "dead" else "failed"] += 1
+        _process_db.commit()
         return out
     finally:
         c.close()

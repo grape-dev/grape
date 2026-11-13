@@ -209,9 +209,15 @@ def _readd_scene_bindings(c, runtime_id: int, now_iso: str) -> list:
                 if runtime_id not in eids:
                     eids.append(runtime_id)
                     node["engine_runtime_ids"] = eids
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (json.dumps(nodes, ensure_ascii=False), now_iso, scene_row_id))
+                    # P3-4b：场景节点写走 mgmt lib（幂等意图 + expected_hash 防并发覆盖）
+                    from src.domains.runtime.engine.scene_nodes_write import (
+                        write_scene_nodes as _wsn_rb, content_hash as _ch_rb)
+                    _rc_rb = _wsn_rb(
+                        json.dumps(nodes, ensure_ascii=False), scene_row_id,
+                        _ch_rb(srow[0] or "") if srow[0] else "", c, now_iso, log)
+                    if _rc_rb in ("mismatch", "failed"):
+                        # 判失败不标 rebound，保留审计行等下一轮重建（与原异常路径同语义）
+                        raise RuntimeError(f"scene nodes write {_rc_rb} (scene={scene_row_id})")
                     added.append({"scene_row_id": scene_row_id, "node_tag": node_tag,
                                   "rebound": True})
                 else:

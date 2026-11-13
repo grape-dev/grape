@@ -36,6 +36,16 @@ def _handlers() -> dict:
         from src.domains.mgmt import public as mg
         if mg.available():
             out["scene_featured_init"] = lambda p: mg.mark_default_featured(list(p.get("names") or []))
+            # P3-2：场景内容同步（runtime 进程写入）。payload 带完整 fields 才能重放。
+            out["scene_upsert"] = lambda p: mg.upsert_scene_content(
+                p["name"], dict(p.get("fields") or {}))
+            # P3-4b：场景 deploy_url / nodes_json（runtime 进程写入 mgmt 基表）
+            out["scene_deploy_url"] = lambda p: mg.set_scene_deploy_url(
+                p["url"], scene_id=p.get("scene_id") or None,
+                row_id=p.get("rid") or None, repo_key=p.get("repo_key") or None,
+                require_active=True)
+            out["scene_nodes_update"] = lambda p: mg.set_scene_nodes(
+                p["nodes_json"], row_id=int(p["rid"]))
     except Exception:  # noqa: BLE001
         pass
     return out

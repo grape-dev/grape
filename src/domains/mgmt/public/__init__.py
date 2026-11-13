@@ -187,9 +187,15 @@ def _scene_where(scene_id: str | None, row_id: int | None, repo_key: str | None)
 
 
 def set_scene_deploy_url(deploy_url: str, scene_id: str | None = None, row_id: int | None = None,
-                         repo_key: str | None = None) -> int:
-    """更新场景部署地址（幂等：值相同则 0 行变更）。"""
+                         repo_key: str | None = None, require_active: bool = False) -> int:
+    """更新场景部署地址（幂等：值相同则 0 行变更）。
+
+    require_active=True 时只改 `is_active=1` 的场景行 —— 与 SRE 收尾登记
+    （event_pipeline.register_scene_deploy_url）原 SQL 的 where 口径一致。
+    """
     where, params = _scene_where(scene_id, row_id, repo_key)
+    if require_active:
+        where += " AND is_active=1"
     with db_registry.cursor("mgmt") as c:
         c.execute(f"UPDATE devops_pipeline_scene SET deploy_url=%s WHERE {where}",
                   (deploy_url,) + params)

@@ -1,0 +1,28 @@
+[Unit]
+Description=Grape cross-domain write compensation drain (runtime domain log)
+Documentation=file:/opt/grape/deploy/README.md
+After=network-online.target
+
+# 为什么需要第二个排水单元：
+#   `grape_t_xwrite_log` 在每个域库各一份（有意为之，见 cross_write 模块说明）。
+#   mgmt 排水单元只能看到 mgmt 库里的意图（mgmt 进程发起：engine_cap_*）。
+#   runtime 进程（event/worker，DEVOPS_DB_NAME=grape_dev_runtime）发起的意图
+#   （scene_upsert / scene_nodes_update / scene_deploy_url）落在 runtime 库，
+#   必须由**指向 runtime 库**的排水单元处理，否则失败意图永远不会重试。
+# 目标域仍是 mgmt：跨域处理器由 GRAPE_DSN_MGMT + GRAPE_DOMAIN_LIB=1 提供。
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/grape
+EnvironmentFile=-/etc/grape/grape.env
+# 运行期从 runtime 进程提取的库配置（含口令，0600）
+EnvironmentFile=-/etc/grape/xwrite-runtime.env
+# 库主机/账号/口令一律由 EnvironmentFile 提供，单元内不得写死任何地址
+Environment=DEVOPS_DB_NAME=grape_dev_runtime
+Environment=DEVOPS_DB_USER=grape_dev_runtime
+Environment=DEVOPS_DB_BACKEND=mysql
+Environment=PYTHONPATH=/opt/grape
+ExecStart=/opt/grape/.venv/bin/python /opt/grape/scripts/xwrite_drain.py drain
+StandardOutput=journal
+StandardError=journal

@@ -671,9 +671,14 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
         def _apply_scene() -> None:
             _out.update(_mg_scene.upsert_scene_content(name, fields))
 
+        # payload 必须带完整 fields：失败意图要能被 drain 按幂等内容重放
+        # （只带 name/hash 时补偿端无内容可写，等于登记了一条永远补不了的意图）
         _res = _xw_scene.submit(
             "mgmt", "scene_upsert", f"scene-upsert:{name}:{content_hash}",
-            {"name": name, "content_hash": content_hash}, _apply_scene)
+            {"name": name, "content_hash": content_hash, "fields": fields}, _apply_scene)
+        if _res.get("status") == "failed":
+            # 与原路径失败语义一致：抛出去由调用方计 failed 并跳过 icon/ref 重建
+            raise RuntimeError(f"scene upsert via lib failed: {_res.get('error')}")
         if _res.get("status") == "duplicate":
             stats["skipped"] += 1
             return int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0), "skipped"

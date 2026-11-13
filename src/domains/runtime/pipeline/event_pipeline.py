@@ -4385,6 +4385,34 @@ def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) ->
     url = _extract_deploy_url(result_text)
     if not url:
         return ""
+    # P3-4b：场景表是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图；
+    # lib 不可用（开关未开/DSN 未配）时回落原本地 SQL，行为与原路径一致。
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_sdu
+    _mg_sdu = _mgmt_lib_sdu()
+    if _mg_sdu is not None:
+        try:
+            import hashlib as _hl_sdu
+            from src.kernel import cross_write as _xw_sdu
+            _out_sdu: dict = {}
+
+            def _apply_sdu() -> None:
+                _out_sdu["changed"] = _mg_sdu.set_scene_deploy_url(
+                    url, scene_id=scene_id, repo_key=repo_key, require_active=True)
+
+            _key_sdu = (f"scene-deploy-url:{scene_id}:{repo_key}:"
+                        f"{_hl_sdu.sha1(url.encode('utf-8')).hexdigest()[:12]}")
+            _res_sdu = _xw_sdu.submit(
+                "mgmt", "scene_deploy_url", _key_sdu,
+                {"url": url, "scene_id": scene_id, "repo_key": repo_key}, _apply_sdu)
+            if _res_sdu.get("status") == "failed":
+                log.warning(f"scene deploy_url register queued for retry: {_res_sdu.get('error')}")
+                return ""
+            if int(_out_sdu.get("changed") or 0) > 0:
+                log.info(f"scene deploy_url auto-registered: {url} for scene {scene_id} ({repo_key})")
+                return url
+            return ""
+        except Exception as _e:
+            log.warning(f"scene deploy_url register via lib failed, fallback to local SQL: {_e}")
     try:
         with db_lock:
             c = db.cursor()
