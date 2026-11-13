@@ -135,7 +135,7 @@ def test_load_baseline_invalid_json_fails(tmp_path, capsys):
 def test_repo_baseline_snapshot_exists_and_versioned():
     # QA 审查修复项：CI 基线必须 checked-in（help/api/openapi.json 被
     # .gitignore 忽略且为启动期生成物，不能作 CI 基线）
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     baseline = os.path.join(repo_root, "help", "api", "openapi-baseline.json")
     assert os.path.isfile(baseline), \
         "checked-in baseline snapshot help/api/openapi-baseline.json is required"
