@@ -430,6 +430,36 @@ def release_channel_lease(lease_key: str, token: str) -> bool:
         return int(c.rowcount or 0) > 0
 
 
+def heartbeat_instance(instance_id: str, hostname: str = "", ip: str = "",
+                       im_enabled: int = 1) -> None:
+    """实例心跳 UPSERT（`grape_im_instance` 为 runtime 基表）。
+
+    时间列统一存 UTC 字符串 "%Y-%m-%d %H:%M:%S"（与 outbox / bot_lease 口径一致），
+    用原生 MySQL `ON DUPLICATE KEY UPDATE`，不依赖方言翻译层。
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with db_registry.cursor("runtime") as c:
+        c.execute("INSERT INTO grape_im_instance "
+                  "(instance_id, hostname, ip, joined_at, last_heartbeat, im_enabled) "
+                  "VALUES (%s, %s, %s, %s, %s, %s) "
+                  "ON DUPLICATE KEY UPDATE hostname=VALUES(hostname), ip=VALUES(ip), "
+                  "last_heartbeat=VALUES(last_heartbeat), im_enabled=VALUES(im_enabled)",
+                  (instance_id, hostname, ip, now, now, int(im_enabled)))
+
+
+def list_active_instances(timeout_s: float = 45.0) -> list[str]:
+    """列出 timeout 秒内仍有心跳的 instance_id（用于判断谁在活跃持有租约）。"""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=float(timeout_s))).strftime("%Y-%m-%d %H:%M:%S")
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT instance_id FROM grape_im_instance "
+                  "WHERE last_heartbeat >= %s AND im_enabled=1 ORDER BY instance_id", (cutoff,))
+        return [r[0] for r in c.fetchall()]
+
+
 def release_all_leases(pairs: list[tuple[str, str]]) -> int:
     """批量释放：pairs 为 [(lease_key, token)]，返回实际释放条数。"""
     released = 0
@@ -482,4 +512,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "release_all_leases", "health"]
+           "release_all_leases", "heartbeat_instance", "list_active_instances", "health"]
