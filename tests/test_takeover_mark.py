@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 import pytest
 
 from src.api.pipeline_status import EVENT_STATUS_MAP, STATUS_CANCELLED, STATUS_RUNNING
-from src.runtime import service
-from src.session_manager import db, db_lock
+from src.domains.runtime.engine import service
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:testtakeover/repo"
 ISSUE = "#17"
@@ -24,7 +24,7 @@ ISSUE = "#17"
 def _bind_db():
     """绑定到被测 service 模块的连接（同 takeover 测试：防全树收集时句柄陈旧）。"""
     global db, db_lock
-    from src.runtime import service as _svc
+    from src.domains.runtime.engine import service as _svc
     db, db_lock = _svc.db, _svc.db_lock
 
 

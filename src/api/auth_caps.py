@@ -126,8 +126,8 @@ def _warn_unknown(auth_type: str) -> None:
         return
     _warned.add(auth_type)
     try:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"auth_caps: unknown auth_type '{auth_type}' → all capabilities denied "
                     f"(add it to src/api/auth_caps.CAPABILITIES if this is a new token type)")
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"auth_caps best-effort skipped: {_e}")

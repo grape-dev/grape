@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.api.event_pipeline import resolve_actor_account
+from src.domains.runtime.pipeline.event_pipeline import resolve_actor_account
 
 _REPO_KEY = "gitcode:owner/repo"
 _REPO_LIKE = "gitcode:owner/repo%"

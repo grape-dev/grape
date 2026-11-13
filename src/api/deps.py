@@ -165,7 +165,7 @@ def get_current_user_or_api_key(request: Request) -> dict:
                                                          "message": "Invalid or expired takeover token"})
         uid = info["user_id"]
         try:
-            from src.auth.grape_account_db import get_grape_account_by_id
+            from src.domains.mgmt.user.grape_account_db import get_grape_account_by_id
             _acc = get_grape_account_by_id(uid) or {}
         except Exception:
             _acc = {}

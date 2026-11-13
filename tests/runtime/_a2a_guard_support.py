@@ -114,7 +114,7 @@ class A2AGuardTestBase:
 
     def _seed_caller_session(self, event_seq, agent="qa", session_key="task-1973"):
         """为调用方签发会话 token，并把 agent_tasks.event_seq 指到其自身事件。"""
-        from src.api.auth_token import issue_session_token
+        from src.kernel.auth_sdk.auth_token import issue_session_token
         with db_lock:
             c = db.cursor()
             c.execute(

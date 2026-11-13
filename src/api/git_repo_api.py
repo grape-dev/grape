@@ -368,6 +368,11 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
         raise ValueError(f"Git provider 未支持: {provider}")
     rk = to_repo_key(f"{provider}:{owner}/{repo}")
     auth_type = str(user.get("auth_type") or "")
+    # 只接受「任务内 agent 身份」：worker 会话 token（tk_）或接管 token（tko_）。
+    # 用户级 API Key / Web JWT 代表"人"，不代表任务内 agent，一律 403。
+    if auth_type not in ("session_token", "takeover"):
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用）"})
     if auth_type == "takeover":
         # 接管 token（tko_）= 人以 agent 身份在"自己那条任务仓库"里干活：
         # 只放行同仓库，且接管会话必须仍是 active（finish/abort 会立即吊销 token，这里是二次校验）。
@@ -376,7 +381,7 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
             raise HTTPException(status_code=403, detail={
                 "code": 403, "message": f"该接管 token 仅限其任务仓库（{tk_repo}），不能操作 {rk}"})
         try:
-            from src.runtime import takeover as _tk
+            from src.domains.runtime.engine import takeover as _tk
             _sess = None
             with _tk.db_lock:
                 _c = _tk.db.cursor()

@@ -12,10 +12,10 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.auth_token import verify_takeover_token
+from src.kernel.auth_sdk.auth_token import verify_takeover_token
 from src.api.deps import get_current_user_or_api_key
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +28,9 @@ def _bind_db():
     globals 可以保证种子与读取指向同一个连接。
     """
     global db, db_lock
-    from src.runtime import takeover as _svc
+    from src.domains.runtime.engine import takeover as _svc
     db, db_lock = _svc.db, _svc.db_lock
-from src.runtime import takeover as svc
+from src.domains.runtime.engine import takeover as svc
 
 REPO = "gitcode:o/r"
 
@@ -316,7 +316,7 @@ def _last_token() -> str:
 
 def test_abort_redispatches_same_node_never_next(client, monkeypatch):
     """放弃接管：重派**当前节点**（交还流水线），但绝不派发下一节点。"""
-    import src.api.routes.events as evmod
+    import src.domains.runtime.routes.events as evmod
 
     _seed(issue_number=2, task_id="t_flow_2", seq=9002)
     sid = _start(client, issue=2).json()["takeover_id"]
@@ -345,7 +345,7 @@ def test_takeover_token_cannot_use_user_only_endpoints(client):
     tok = None
     with db_lock:
         c = db.cursor()
-        from src.api.auth_token import issue_takeover_token
+        from src.kernel.auth_sdk.auth_token import issue_takeover_token
         tok = issue_takeover_token(task_id="t_flow_3", repo_key=REPO, agent_type="coding", user_id=1)["token"]
     app.dependency_overrides.clear()   # 走真实认证
     try:
@@ -529,7 +529,7 @@ def test_git_repo_guard_allows_takeover_for_own_repo_only(client, monkeypatch):
 
 def test_abort_redispatches_node_by_default(client, monkeypatch):
     """放弃接管 = 交还流水线：默认调用平台 redispatch（新建任务/事件回 running）。"""
-    import src.api.routes.events as evmod
+    import src.domains.runtime.routes.events as evmod
 
     _seed(issue_number=8, task_id="t_flow_8", seq=9008)
     sid = _start(client, issue=8).json()["takeover_id"]
@@ -556,7 +556,7 @@ def test_abort_redispatches_node_by_default(client, monkeypatch):
 
 def test_abort_can_skip_redispatch(client, monkeypatch):
     """需要"只停不重派"的调用方显式 redispatch=false。"""
-    import src.api.routes.events as evmod
+    import src.domains.runtime.routes.events as evmod
     _seed(issue_number=9, task_id="t_flow_9", seq=9009)
     sid = _start(client, issue=9).json()["takeover_id"]
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {

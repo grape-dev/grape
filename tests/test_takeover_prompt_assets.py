@@ -1,7 +1,7 @@
 """接管 prompt 的资产点名（§8 ①② 缺口修复）：项目图谱要点名、沉淀知识要有/无都说清。"""
 from __future__ import annotations
 
-from src.runtime.takeover import render_takeover_prompt as R
+from src.domains.runtime.engine.takeover import render_takeover_prompt as R
 
 
 def _render(project_files: list[str] | None = None,

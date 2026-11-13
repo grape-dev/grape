@@ -5,7 +5,7 @@
 """
 import json
 
-from src.config import log
+from src.kernel.config import log
 
 
 def normalize_account(value) -> str:
