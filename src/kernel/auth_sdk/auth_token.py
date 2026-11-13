@@ -279,3 +279,198 @@ def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
             log.warning(f"Rotate session token failed for {session_key}: {e}")
             raise
     return token
+
+
+# ===================== 方式 C：接管会话 token（tko_）=====================
+#
+# 语义：用户在本地交互式会话里接手一条正在跑的任务（见设计文档 §2）。
+# - 前缀 `tko_` + kind='takeover'，与 worker 的 `tk_`（kind='worker'）**互不通用**：
+#   两个 verify 各自带 kind 过滤，拿错前缀一律 None。
+# - session_key = 'takeover:<task_id>'：独立命名空间 —— cancel 时服务的
+#   revoke_session_token(task_id) 只命中 worker 行，不会把接管 token 缩短到 180 秒。
+# - 作用域与任务同 repo/agent；TTL 12h，可续到 24h；finish/abort 立即 DELETE。
+
+def takeover_session_key(task_id: str) -> str:
+    """接管 token 的 session_key（独立命名空间，勿与 worker 的 task_id 混用）。"""
+    tid = str(task_id or "")
+    if tid.startswith(TAKEOVER_SESSION_KEY_PREFIX):
+        return tid
+    return f"{TAKEOVER_SESSION_KEY_PREFIX}{tid}"
+
+
+def issue_takeover_token(*, task_id: str, repo_key: str, agent_type: str,
+                         user_id: int = 0, ttl: int = TAKEOVER_TOKEN_TTL) -> dict | None:
+    """签发接管 token，返回 {token, token_sha256, session_key, expires_at}。
+
+    明文仅此一次返回；库内只存 sha256。失败返回 None（调用方应回滚整个 start 事务）。
+    """
+    token = TAKEOVER_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    key = takeover_session_key(task_id)
+    expires_at = _now() + int(ttl)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO session_api_tokens "
+                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at, kind) "
+                "VALUES (?,?,?,?,?,?, 'takeover')",
+                (key, repo_key or "", agent_type or "", int(user_id or 0), _sha256(token), expires_at),
+            )
+            db.commit()
+            return {"token": token, "token_sha256": _sha256(token),
+                    "session_key": key, "expires_at": expires_at}
+    except Exception as e:
+        log.warning(f"Issue takeover token failed (task={task_id}): {e}")
+        return None
+
+
+def verify_takeover_token(token: str) -> dict | None:
+    """校验接管 token：sha256 + kind='takeover' + 未过期。"""
+    if not token.startswith(TAKEOVER_TOKEN_PREFIX):
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, session_key, repo_key, agent_type, user_id, expires_at "
+                "FROM session_api_tokens WHERE token_sha256=? AND kind='takeover'",
+                (_sha256(token),),
+            )
+            row = c.fetchone()
+        if not row or int(row[5] or 0) <= _now():
+            return None
+        return {
+            "session_token_id": row[0],
+            "session_key": row[1],
+            "repo_key": row[2],
+            "agent_type": row[3],
+            "user_id": row[4],
+            "kind": "takeover",
+        }
+    except Exception as e:
+        log.warning(f"Verify takeover token failed: {e}")
+        return None
+
+
+def revoke_takeover_token(task_id_or_key: str) -> bool:
+    """立即吊销接管 token（finish / abort 用）：DELETE，不留宽限期。"""
+    key = takeover_session_key(task_id_or_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM session_api_tokens WHERE session_key=? AND kind='takeover'", (key,))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Revoke takeover token failed (key={key}): {e}")
+        return False
+
+
+def renew_takeover_token(task_id_or_key: str, new_expires_at: int) -> bool:
+    """续期（由调用方按 issued_at + 上限算好目标时间，见设计文档 §2.5）。"""
+    key = takeover_session_key(task_id_or_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE session_api_tokens SET expires_at=? "
+                "WHERE session_key=? AND kind='takeover' AND expires_at < ?",
+                (int(new_expires_at), key, int(new_expires_at)),
+            )
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Renew takeover token failed (key={key}): {e}")
+        return False
+
+def generate_api_token(user_id: int, name: str = "") -> dict | None:
+    """生成用户级 API Key，返回 {token(明文一次), id}；None 表示失败。
+
+    明文仅创建返回一次；落库 sha256；同名（user_id, name）冲突时返回 None。
+    """
+    token = API_KEY_PREFIX + secrets.token_urlsafe(40)
+    name = (name or "").strip()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO api_tokens (user_id, token_sha256, name, created_at) VALUES (?,?,?,?)",
+                # created_at 用 UTC ISO（与其它表时间列一致，settings.py 经
+                # normalize_event_time 归一后给前端 +00:00 口径）；
+                # last_used_at 仍走 _now() 的秒级时间戳（前端两条链路都兼容）
+                (user_id, _sha256(token), name, _utc_iso()),
+            )
+            db.commit()
+            return {"token": token, "id": c.lastrowid}
+    except Exception as e:
+        log.warning(f"Generate api token failed: {e}")
+        return None
+
+
+def verify_api_token(token: str) -> dict | None:
+    """校验用户级 API Key：sha256 查表 → 未吊销即有效。更新 last_used_at。"""
+    if not token.startswith(API_KEY_PREFIX):
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, user_id, name, scopes, revoked FROM api_tokens WHERE token_sha256=?",
+                (_sha256(token),),
+            )
+            row = c.fetchone()
+        if not row or row[4] != 0:
+            return None
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE api_tokens SET last_used_at=? WHERE id=?",
+                    (str(_now()), row[0]),
+                )
+                db.commit()
+        except Exception:
+            pass
+        return {"api_token_id": row[0], "user_id": row[1], "name": row[2], "scopes": row[3]}
+    except Exception as e:
+        log.warning(f"Verify api token failed: {e}")
+        return None
+
+
+def revoke_api_token(user_id: int, token_id: int) -> bool:
+    """吊销用户级 API Key（软删：revoked=1，保审计）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE api_tokens SET revoked=1 WHERE id=? AND user_id=?", (token_id, user_id))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"Revoke api token failed: {e}")
+        return False
+
+
+def list_api_tokens(user_id: int) -> list[dict]:
+    """列出用户全部未吊销 API Key（不含明文/sha256）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, name, scopes, created_at, last_used_at FROM api_tokens "
+                "WHERE user_id=? AND revoked=0 ORDER BY id DESC",
+                (user_id,),
+            )
+            rows = c.fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "scopes": r[2],
+                "created_at": r[3],
+                "last_used_at": r[4],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.warning(f"List api tokens failed: {e}")
+        return []

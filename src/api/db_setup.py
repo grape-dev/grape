@@ -4558,6 +4558,161 @@ register_migration(
 )
 
 
+# ===== 接管（takeover）v1 结构 =====
+# 设计文档：/root/dsh_grape_docs/TAKEOVER-API-DESIGN-v1.md §4
+# - takeover_sessions：接管会话（审计 + 幂等 + 状态机）
+# - session_api_tokens.kind：worker | takeover（区分两类会话凭据）
+# - task_messages.actor：agent | <username>（progress 复用同一份任务日志）
+_TAKEOVER_SESSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS takeover_sessions (
+    id                VARCHAR(64) PRIMARY KEY,
+    active_key        VARCHAR(64) DEFAULT NULL,
+    task_id           VARCHAR(64) NOT NULL,
+    event_seq         INTEGER NOT NULL DEFAULT 0,
+    repo_key          VARCHAR(255) NOT NULL DEFAULT '',
+    issue_id          VARCHAR(32) NOT NULL DEFAULT '',
+    agent_type        VARCHAR(32) NOT NULL DEFAULT '',
+    user_id           INTEGER NOT NULL DEFAULT 0,
+    username          VARCHAR(128) NOT NULL DEFAULT '',
+    runtime_id        INTEGER NOT NULL DEFAULT 0,
+    platform          VARCHAR(32) NOT NULL DEFAULT '',
+    host              VARCHAR(128) NOT NULL DEFAULT '',
+    client_version    VARCHAR(64) NOT NULL DEFAULT '',
+    status            VARCHAR(16) NOT NULL DEFAULT 'active',
+    token_sha256      VARCHAR(64) NOT NULL DEFAULT '',
+    token_expires_at  INTEGER NOT NULL DEFAULT 0,
+    token_issued_at   INTEGER NOT NULL DEFAULT 0,
+    handoff_seq       INTEGER NOT NULL DEFAULT 0,
+    next_agent        VARCHAR(32) NOT NULL DEFAULT '',
+    bundle_json       MEDIUMTEXT,
+    warnings_json     TEXT,
+    summary           MEDIUMTEXT,
+    evidence          MEDIUMTEXT,
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now')),
+    finished_at       TEXT DEFAULT ''
+)
+"""
+
+
+def _fn_takeover_client_session_v1() -> None:
+    """接管会话记录"本地那个 dsh session 的 id"（面板可跳回；多端时知道是哪台机器）。"""
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "takeover_sessions", "client_session", "VARCHAR(128) NOT NULL DEFAULT ''")
+        db.commit()
+
+
+register_migration(
+    version="202611120002",
+    name="takeover-client-session-v1",
+    kind="safe",
+    fn=_fn_takeover_client_session_v1,
+)
+
+
+def _fn_takeover_finish_request_v1() -> None:
+    """接管会话记录"agent 提交完成申请"：时间戳 + 文件清单（finish 时直接用）。"""
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "takeover_sessions", "finish_requested_at", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "takeover_sessions", "finish_files", "TEXT NOT NULL DEFAULT ''")
+        db.commit()
+
+
+def _fn_takeover_result_json_v1() -> None:
+    """接管会话的结构化结论（与 worker self-complete 同构的 5 字段）。
+
+    result_json = {"conclusion","actions","artifacts","next_step","issue_summary"}
+    finish 时既写这本列（供面板/GET 回读），也传给 update_event_complete 的
+    structured_output → 事件详情页「Agent 处理记录与答复结论」结构化渲染。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "takeover_sessions", "result_json", "TEXT NOT NULL DEFAULT ''")
+        db.commit()
+
+
+def _fn_takeover_host_os_v1() -> None:
+    """接管会话记录宿主 OS / 架构 / shell（跨平台适配：服务端按它渲染脚本与 prompt）。"""
+    from src.session_manager import db
+    c = db.cursor()
+    for col, typ in (("host_os", "TEXT DEFAULT ''"), ("host_arch", "TEXT DEFAULT ''"),
+                     ("host_shell", "TEXT DEFAULT ''")):
+        try:
+            c.execute(f"ALTER TABLE takeover_sessions ADD COLUMN {col} {typ}")
+        except Exception:
+            pass
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+
+register_migration(
+    version="202611120005",
+    name="takeover-host-os-v1",
+    kind="safe",
+    fn=_fn_takeover_host_os_v1,
+)
+
+
+register_migration(
+    version="202611120004",
+    name="takeover-result-json-v1",
+    kind="safe",
+    fn=_fn_takeover_result_json_v1,
+)
+
+
+register_migration(
+    version="202611120003",
+    name="takeover-finish-request-v1",
+    kind="safe",
+    fn=_fn_takeover_finish_request_v1,
+)
+
+
+def _fn_takeover_schema_v1() -> None:
+    """接管功能的一次性结构迁移（幂等；SQLite/MySQL 双后端）。
+
+    active_key 承担"一条任务只能有一个进行中接管"：active 时写 task_id、结束置 NULL。
+    用 NULL 唯一索引而不是 `WHERE status='active'` 部分索引 —— MySQL 不支持部分索引，
+    而两种后端都允许多个 NULL。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute(_TAKEOVER_SESSIONS_DDL)
+        _ensure_column(c, "session_api_tokens", "kind", "VARCHAR(16) NOT NULL DEFAULT 'worker'")
+        _ensure_column(c, "task_messages", "actor", "VARCHAR(128) NOT NULL DEFAULT 'agent'")
+        _ensure_column(c, "takeover_sessions", "token_issued_at", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "takeover_sessions", "handoff_seq", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "takeover_sessions", "next_agent", "VARCHAR(32) NOT NULL DEFAULT ''")
+        db.commit()
+
+        # 索引：MySQL 不支持 CREATE INDEX IF NOT EXISTS → 逐个 try，重复即忽略
+        for ddl in (
+            "CREATE INDEX IF NOT EXISTS ix_sat_kind_key ON session_api_tokens(kind, session_key)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_takeover_active ON takeover_sessions(active_key)",
+            "CREATE INDEX IF NOT EXISTS ix_takeover_task ON takeover_sessions(task_id)",
+            "CREATE INDEX IF NOT EXISTS ix_takeover_status ON takeover_sessions(status, updated_at)",
+        ):
+            try:
+                c.execute(ddl)
+            except Exception as e:
+                msg = str(e).lower()
+                if "already exists" not in msg and "duplicate" not in msg:
+                    log.warning(f"takeover schema index skipped: {ddl} ({e})")
+        db.commit()
+
+
+register_migration(
+    version="202611120001",
+    name="takeover-sessions-v1",
+    kind="safe",
+    fn=_fn_takeover_schema_v1,
+)
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 

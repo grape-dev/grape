@@ -848,7 +848,8 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
                           completed_at: str = "", result: str = "",
                           structured_output: dict = None,
-                          revive_from_timeout_failed: bool = False):
+                          revive_from_timeout_failed: bool = False,
+                          allow_from_takeover: bool = False):
     """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result, structured_output）
 
     幂等保护：终态事件不允许被其他终态覆盖。
@@ -877,6 +878,14 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
             # 检查当前状态：已终态的事件不允许被其他终态覆盖
             c.execute("SELECT status FROM events WHERE seq=?", (seq,))
             row = c.fetchone()
+            # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
+            # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
+            # （finish/abort，allow_from_takeover=True）能落终态。
+            if row and row[0] == "takeover" and status in ("completed", "failed", "cancelled"):
+                if not allow_from_takeover:
+                    log.info(f"Event {seq} is taken over by a human, skip {status} overwrite")
+                    return
+                log.info(f"Event {seq}: takeover -> {status} (by takeover service)")
             if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
                 _revive_ok = (revive_from_timeout_failed
                               and row[0] == "failed" and status == "completed")
