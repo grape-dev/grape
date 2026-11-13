@@ -589,14 +589,19 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
         if _storage is not None:
             files = {}
             from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                rows = db.cursor().execute(
-                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
-                    "AND archived=0 "
-                    "ORDER BY id DESC",
-                    (repo_key,)
-                ).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kb
+            _mg_kb = _mgmt_lib_kb()
+            if _mg_kb is not None:
+                rows = _mg_kb.list_baseline_knowledge_files(repo_key)
+            else:
+                with db_lock:
+                    rows = db.cursor().execute(
+                        "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                        "AND archived=0 "
+                        "ORDER BY id DESC",
+                        (repo_key,)
+                    ).fetchall()
             for fp, ok in rows:
                 if fp and ok:
                     fname = os.path.basename(fp)
@@ -671,14 +676,19 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
         if _storage is not None:
             files = {}
             from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                rows = db.cursor().execute(
-                    "SELECT file_path, obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
-                    "AND archived=0 "
-                    "ORDER BY id DESC",
-                    (repo_key,)
-                ).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kb
+            _mg_kb = _mgmt_lib_kb()
+            if _mg_kb is not None:
+                rows = _mg_kb.list_baseline_knowledge_files(repo_key)
+            else:
+                with db_lock:
+                    rows = db.cursor().execute(
+                        "SELECT file_path, obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+                        "AND archived=0 "
+                        "ORDER BY id DESC",
+                        (repo_key,)
+                    ).fetchall()
             for fp, ok in rows:
                 if fp and ok:
                     fname = os.path.basename(fp)

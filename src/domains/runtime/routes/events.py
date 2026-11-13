@@ -2024,13 +2024,19 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
         storage = get_storage()
         if storage is not None:
             from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                obs_rows = db.cursor().execute(
-                    "SELECT obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
-                    "AND obs_key!='' AND obs_key IS NOT NULL",
-                    (evt["repo_key"], scope, _ag, _in)
-                ).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_obs
+            _mg_obs = _mgmt_lib_obs()
+            if _mg_obs is not None:
+                obs_rows = [(k,) for k in
+                            _mg_obs.list_knowledge_obs_keys(evt["repo_key"], scope, _ag, _in)]
+            else:
+                with db_lock:
+                    obs_rows = db.cursor().execute(
+                        "SELECT obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                        "AND obs_key!='' AND obs_key IS NOT NULL",
+                        (evt["repo_key"], scope, _ag, _in)
+                    ).fetchall()
             for (obs_key,) in obs_rows:
                 storage.delete_object(obs_key)
     except Exception:

@@ -117,6 +117,26 @@ def list_all_user_ids() -> list[str]:
     return sorted({r[0] for r in rows if r[0]})
 
 
+def list_baseline_knowledge_files(repo_key: str) -> list[tuple]:
+    """基线知识（scope='baseline'）的 (file_path, obs_key)，按 id 倒序。"""
+    return fetch_rows(
+        "agent_shared_knowledge", ["file_path", "obs_key"],
+        "repo_key=%s AND scope='baseline' AND obs_key<>'' AND obs_key IS NOT NULL AND archived=0",
+        (repo_key,), "id DESC",
+    )
+
+
+def list_knowledge_obs_keys(repo_key: str, scope: str, agent_type: str, issue_num: int) -> list[str]:
+    """按（仓库/scope/agent/issue）取非空 obs_key（事件清理时删对象用）。"""
+    rows = fetch_rows(
+        "agent_shared_knowledge", ["obs_key"],
+        "repo_key=%s AND scope=%s AND agent_type=%s AND issue_num=%s "
+        "AND obs_key<>'' AND obs_key IS NOT NULL",
+        (repo_key, scope, agent_type, issue_num), "id DESC",
+    )
+    return [r[0] for r in rows if r[0]]
+
+
 def get_official_scene_id(scene_name: str) -> Any:
     """按场景名取 official 模板的 id（无则 None）。"""
     row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
@@ -222,5 +242,6 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
+           "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks",
            "health"]
