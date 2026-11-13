@@ -2229,10 +2229,15 @@ def _repo_bot_token_value(repo_key: str) -> str:
                 pass
         # ② rc 单表（空卡列平台终态；老库无表→吞异常走③）
         try:
-            c.execute(
-                "SELECT value FROM grape_t_repo_credentials "
-                "WHERE repo_key=? AND cred_type='bot' LIMIT 1", (repo_key,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _rt_lib_bt
+            _bt_lib = _rt_lib_bt(foreign_only=True)
+            if _bt_lib is not None:
+                row = _bt_lib.read_one("repo_bot_token_value", (repo_key,))
+            else:
+                c.execute(
+                    "SELECT value FROM grape_t_repo_credentials "
+                    "WHERE repo_key=? AND cred_type='bot' LIMIT 1", (repo_key,))
+                row = c.fetchone()
             if row:
                 return _decrypt_repo_secret(row[0] or "")
         except Exception:

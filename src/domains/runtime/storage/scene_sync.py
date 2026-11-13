@@ -446,8 +446,15 @@ def _init_featured_scenes_if_empty():
         return
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
-        featured_count = c.fetchone()[0]
+        # P4：scene_market 在 mgmt 域，删视图后走 mgmt lib 读
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_fc
+        _fc_lib = _mg_lib_fc(foreign_only=True)
+        if _fc_lib is not None:
+            _fc = _fc_lib.read_one("scene_market_featured_count", ())
+            featured_count = int(_fc[0]) if _fc else 0
+        else:
+            c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
+            featured_count = c.fetchone()[0]
         if featured_count == 0:
             placeholders = ",".join("?" * len(default_featured))
             c.execute(
@@ -724,12 +731,17 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
 
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT id, version, content_hash, is_active FROM scene_market "
-            "WHERE name=? AND source='official' LIMIT 1",
-            (name,),
-        )
-        row = c.fetchone()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_ap
+        _ap_lib = _mg_lib_ap(foreign_only=True)
+        if _ap_lib is not None:
+            row = _ap_lib.read_one("scene_market_official_by_name", (name,))
+        else:
+            c.execute(
+                "SELECT id, version, content_hash, is_active FROM scene_market "
+                "WHERE name=? AND source='official' LIMIT 1",
+                (name,),
+            )
+            row = c.fetchone()
 
         if row:
             scene_id, old_version, old_hash, preserved_active = row

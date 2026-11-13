@@ -574,6 +574,11 @@ _READ_QUERIES: dict[str, str] = {
     "knowledge_id_baseline": (
         "SELECT id FROM agent_shared_knowledge "
         "WHERE repo_key=%s AND scope='baseline' AND name=%s AND archived=0 LIMIT 1"),
+    "scene_market_official_by_name": (
+        "SELECT id, version, content_hash, is_active FROM scene_market "
+        "WHERE name=%s AND source='official' LIMIT 1"),
+    "scene_market_featured_count": (
+        "SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1"),
     "knowledge_ids_scoped": (
         "SELECT id FROM agent_shared_knowledge "
         "WHERE repo_key=%s AND scope=%s AND agent_type=%s AND issue_num=%s"),
