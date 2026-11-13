@@ -1434,6 +1434,9 @@ window._openSkillDropdown = function(agentType, btn) {
     panel.style.cssText = 'position:fixed;z-index:1001;width:' + Math.max(rect.width, 240) + 'px;left:' + rect.left + 'px;top:' + top + 'px;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.12);padding:8px;box-sizing:border-box';
 
     var current = btn.getAttribute('data-current') || '';
+    // 2026-11-13：按钮上带了节点真实 skill_id（三档同名时唯一可靠身份）→ 优先按 id 回显
+    var _curId = parseInt(btn.getAttribute('data-skill-id') || '0', 10) || 0;
+    if (_curId > 0) current = 'id:' + _curId;
     // Issue #978：current 为唯一键（用户本次会话选中）或旧值（初始渲染写入的裸 skill_name）。
     // 同名计数：旧值仅在该名字全局唯一时才允许命中，避免同名三行同时勾选。
     var _nameCount = {};
@@ -1581,6 +1584,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
       return {
         id: at, tag: at,
         skill: node.skill || ag.skill || ag.skill_display_name || '',
+        skill_id: node.skill_id || ag.skill_id || 0,
         // Issue #406：editNodes 携带 skill_display_name，避免编辑模式首次打开或重渲染时显示退化为内部 id
         skill_display_name: node.skill_display_name || ag.skill_display_name || '',
         mode: node.mode || 'emit',
@@ -1620,13 +1624,13 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   if (_editDraft && _editDraft.nodes) {
     editNodes.forEach(function(en) {
       var dn = _editDraft.nodes.find(function(n) { return n.id === en.id; });
-      if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.skill_pending = dn.skill_pending || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; }
+      if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_id = dn.skill_id || 0; en.skill_display_name = dn.skill_display_name || ''; en.skill_pending = dn.skill_pending || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; }
     });
     if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
   }
   // Issue #407: 编辑草稿自动保存
   function _saveEditDraft() {
-    _saveDashDraft(owner, name, 'edit', sceneId, { nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, skill_pending: n.skill_pending, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }) });
+    _saveDashDraft(owner, name, 'edit', sceneId, { nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_id: n.skill_id || 0, skill_display_name: n.skill_display_name, skill_pending: n.skill_pending, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }) });
   }
 
   // 编辑操作函数
@@ -1651,6 +1655,13 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     // Issue #978：优先按唯一键（skill_id 优先，回退 (scope, skill_name)）命中缓存条目，
     // 同名三档技能 display_name 互不覆盖；无 key 时按 name 兜底（单同名场景行为不变）。
     node.skill = skillName || '';
+    // 2026-11-13：把选中项的 skill_id 一起记到节点上（保存/派发按 id 锁定档位；
+    // 三档同名时只带名字会被后端按 official 优先重解析成别的技能）
+    var _sidFromKey = 0;
+    if (skillKey && skillKey.indexOf('id:') === 0) {
+      _sidFromKey = parseInt(skillKey.slice(3), 10) || 0;
+    }
+    node.skill_id = skillName ? _sidFromKey : 0;
     var cache = (window._skillPickCache || {})[agentType] || {};
     var entry = skillKey ? cache[skillKey] : null;
     if (!entry && skillName) {
@@ -1687,7 +1698,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     }
     const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
-      return { id: n.id, tag: n.tag, skill: n.skill || '', skill_pending: n.skill_pending || '', mode: n.mode || 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: n.skip || [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
+      return { id: n.id, tag: n.tag, skill: n.skill || '', skill_id: n.skill_id || 0, skill_pending: n.skill_pending || '', mode: n.mode || 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: n.skip || [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
     API.put('/scenes/' + encodeURIComponent(sceneId) + '?repo=' + encodeURIComponent(owner + '/' + name), { nodes: nodesPayload }).then(() => {
       window._dashboardEditing = false;
@@ -1839,7 +1850,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     // Skill 下拉（Issue #292：分组 + 搜索下拉面板，禁用时显示已停用）
     let skillHtml;
     if (enabled) {
-      skillHtml = `<button type="button" class="ap-skill-select" data-current="${_skillEsc(node.skill || '')}" onclick="event.stopPropagation();_openSkillDropdown('${tag}', this)" style="width:100%;padding:6px 10px;border:1px solid #e8e8ed;border-radius:8px;font-size:11px;background:#f5f5f7;color:${skillDisplay ? '#1d1d1f' : '#86868b'};outline:none;cursor:pointer;transition:all .15s;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">${skillDisplay ? _skillEsc(skillDisplay) : I18N.t('dashboard.select_skill')}</button>` + (_pendingSkill ? `<div style="font-size:10px;color:#ff9f0a;margin-top:4px;line-height:1.3">⚠ ${I18N.t('dashboard.skill_pending_hint', {skill: _skillEsc(_pendingSkill)}, '需重选技能（原：' + _skillEsc(_pendingSkill) + '）')}</div>` : '');
+      skillHtml = `<button type="button" class="ap-skill-select" data-current="${_skillEsc(node.skill || '')}" data-skill-id="${node.skill_id || 0}" onclick="event.stopPropagation();_openSkillDropdown('${tag}', this)" style="width:100%;padding:6px 10px;border:1px solid #e8e8ed;border-radius:8px;font-size:11px;background:#f5f5f7;color:${skillDisplay ? '#1d1d1f' : '#86868b'};outline:none;cursor:pointer;transition:all .15s;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">${skillDisplay ? _skillEsc(skillDisplay) : I18N.t('dashboard.select_skill')}</button>` + (_pendingSkill ? `<div style="font-size:10px;color:#ff9f0a;margin-top:4px;line-height:1.3">⚠ ${I18N.t('dashboard.skill_pending_hint', {skill: _skillEsc(_pendingSkill)}, '需重选技能（原：' + _skillEsc(_pendingSkill) + '）')}</div>` : '');
     } else {
       skillHtml = `<span style="font-size:11px;color:#86868b">${I18N.t('dashboard.agent_disabled')||'已停用'}</span>`;
     }
@@ -2151,7 +2162,7 @@ function _enterCreateStandardMode(data, owner, name) {
   const allAgentTypes = ['vod','issue','coding','qa','sre'];
   // 默认全部启用，skill 为空；SRE 同样默认启用（不再强制置灰）：
   // 无可用个人机器时卡片保持亮态，徽章显示「没有可用的个人机器」并提供「重新检测个人机器」按钮
-  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', skill_display_name: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
+  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', skill_id: 0, skill_display_name: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
   window._isCreateMode = true;
   window._sceneNodeViolations = {};
   window._dashboardEditing = true;
@@ -2278,7 +2289,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (_nameInput && _draft.sceneName) _nameInput.value = _draft.sceneName;
     if (_descInput && _draft.sceneDesc) _descInput.value = _draft.sceneDesc;
     if (_draft.icon) { _createSceneIcon = _draft.icon; var _iconEl = document.getElementById('createSceneIconDisplay'); if (_iconEl) _iconEl.textContent = _draft.icon; }
-    if (_draft.nodes) { editNodes.forEach(function(en) { var dn = _draft.nodes.find(function(n) { return n.id === en.id; }); if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.skill_pending = dn.skill_pending || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; } }); var _fc = document.getElementById('flowCardsContainer'); if (_fc) _fc.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes); }
+    if (_draft.nodes) { editNodes.forEach(function(en) { var dn = _draft.nodes.find(function(n) { return n.id === en.id; }); if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_id = dn.skill_id || 0; en.skill_display_name = dn.skill_display_name || ''; en.skill_pending = dn.skill_pending || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; } }); var _fc = document.getElementById('flowCardsContainer'); if (_fc) _fc.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes); }
   }
 
   // Issue #307: 加载托管仓库列表供关联仓库选择
@@ -2294,7 +2305,7 @@ function _enterCreateStandardMode(data, owner, name) {
   function _saveCreateDraft() {
     var _n = (document.getElementById('createSceneName') || {}).value || '';
     var _d = (document.getElementById('createSceneDesc') || {}).value || '';
-    _saveDashDraft(owner, name, 'create', null, { sceneName: _n, sceneDesc: _d, icon: _createSceneIcon, nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, skill_pending: n.skill_pending, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }), prSubEnabled: _createPrSubEnabled });
+    _saveDashDraft(owner, name, 'create', null, { sceneName: _n, sceneDesc: _d, icon: _createSceneIcon, nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_id: n.skill_id || 0, skill_display_name: n.skill_display_name, skill_pending: n.skill_pending, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }), prSubEnabled: _createPrSubEnabled });
   }
   var _nameI = document.getElementById('createSceneName');
   var _descI = document.getElementById('createSceneDesc');
@@ -2355,6 +2366,13 @@ function _enterCreateStandardMode(data, owner, name) {
     // Issue #978：优先按唯一键（skill_id 优先，回退 (scope, skill_name)）命中缓存条目，
     // 同名三档技能 display_name 互不覆盖；无 key 时按 name 兜底（单同名场景行为不变）。
     node.skill = skillName || '';
+    // 2026-11-13：把选中项的 skill_id 一起记到节点上（保存/派发按 id 锁定档位；
+    // 三档同名时只带名字会被后端按 official 优先重解析成别的技能）
+    var _sidFromKey = 0;
+    if (skillKey && skillKey.indexOf('id:') === 0) {
+      _sidFromKey = parseInt(skillKey.slice(3), 10) || 0;
+    }
+    node.skill_id = skillName ? _sidFromKey : 0;
     var cache = (window._skillPickCache || {})[agentType] || {};
     var entry = skillKey ? cache[skillKey] : null;
     if (!entry && skillName) {
@@ -2456,7 +2474,7 @@ function _enterCreateStandardMode(data, owner, name) {
     }
     const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
       const nextAgent = i < arr.length - 1 ? arr[i + 1].id : 'done';
-      return { id: n.id, tag: n.tag, skill: n.skill || '', skill_pending: n.skill_pending || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
+      return { id: n.id, tag: n.tag, skill: n.skill || '', skill_id: n.skill_id || 0, skill_pending: n.skill_pending || '', mode: 'emit', next: nextAgent, handoff: i < arr.length - 1 ? 'a2a' : 'complete', skip: [], enabled: true, engine_runtime_ids: n.engine_runtime_ids || [] };
     });
     API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, pr_subscription_enabled: _createPrSubEnabled }).then(r => {
       window._dashboardEditing = false;

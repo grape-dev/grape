@@ -112,9 +112,15 @@ class TestBackendContract:
 
 
 class TestSavePayloadUnchanged:
-    """保存 payload 不含唯一键字段（不改保存语义）。"""
+    """保存 payload 带 skill_id（2026-11-13 起；#978 当时刻意不改保存语义）。
 
-    def test_payload_excludes_skill_key(self, js_content):
+    偏离说明（显式记录）：#978 只解决「前端下拉区分同名」，保存仍只发名字；
+    结果后端 `_rebuild_scene_skill_ref` 按名字重解析，三档同名一律落 official——
+    用户选中的档位在保存那一步被丢掉。#979 已给节点模型加 skill_id 并让派发按 id 权威解析，
+    本轮把前端这最后一段接上：payload 必须带 `skill_id`（0 表示无 id 的老场景）。
+    """
+
+    def test_payload_carries_skill_id(self, js_content):
         import re
         payload_pattern = re.compile(
             r"\{\s*id:\s*n\.id,\s*tag:\s*n\.tag,\s*skill:\s*n\.skill\s*\|\|\s*''[^}]*\}"
@@ -122,8 +128,8 @@ class TestSavePayloadUnchanged:
         matches = payload_pattern.findall(js_content)
         assert len(matches) >= 2
         for i, p in enumerate(matches):
-            assert "skill_key" not in p and "skill_id" not in p, (
-                f"第 {i + 1} 处 nodesPayload 不应含唯一键字段"
+            assert "skill_id: n.skill_id || 0" in p, (
+                f"第 {i + 1} 处 nodesPayload 必须带 skill_id（三档同名锁定档位）"
             )
 
 
@@ -135,3 +141,31 @@ class TestJsSyntax:
             ["node", "--check", JS_PATH], capture_output=True, text=True
         )
         assert result.returncode == 0, result.stderr
+
+
+class TestSkillIdCarriedToBackend:
+    """2026-11-13 补齐：选中项的 skill_id 必须一路带到后端（否则三档同名必错配）。
+
+    链路：按钮 data-skill-id → 下拉按 id 回显 → selectAgentSkill 写 node.skill_id
+          → nodesPayload 带 skill_id → 后端 _rebuild_scene_skill_ref 优先用它。
+    """
+
+    def test_button_carries_skill_id(self, js_content):
+        assert "data-skill-id=" in js_content, "技能按钮需带节点真实 skill_id 供精确回显"
+
+    def test_dropdown_prefers_node_skill_id(self, js_content):
+        assert "_curId > 0) current = 'id:' + _curId" in js_content, (
+            "下拉回显应优先按 data-skill-id 精确勾选（同名其他档不勾选）"
+        )
+
+    def test_select_agent_skill_stores_skill_id(self, js_content):
+        assert js_content.count("node.skill_id = skillName ? _sidFromKey : 0;") == 2, (
+            "编辑/创建两处 selectAgentSkill 都要写 node.skill_id"
+        )
+
+    def test_draft_keeps_skill_id(self, js_content):
+        assert js_content.count("en.skill_id = dn.skill_id || 0;") == 2, "草稿恢复要带回 skill_id"
+        assert js_content.count("skill_id: n.skill_id || 0, skill_display_name") == 2, (
+            "草稿保存要带 skill_id（刷新/切页不丢档位）"
+        )
+
