@@ -18,8 +18,11 @@
 import hashlib, os, re, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
-# 输出目录可用环境变量覆盖（发布机路径部署相关，不写死在脚本里）
-OUT_DIR = os.environ.get("GRAPE_RELEASE_OUT_DIR", "/root/release")
+# 输出目录可用环境变量覆盖；默认放在仓库同级目录（不在脚本里写死部署机绝对路径）
+OUT_DIR = os.environ.get(
+    "GRAPE_RELEASE_OUT_DIR",
+    os.path.abspath(os.path.join(ROOT, os.pardir, "grape-release-out")),
+)
 BUCKET = "obs-grape-release"
 PREFIX = "release"
 
