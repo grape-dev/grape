@@ -172,6 +172,56 @@ _SCENE_CONTENT_COLS = (
 _SCENE_REQUIRED = ("name", "source", "scope")
 
 
+def _scene_where(scene_id: str | None, row_id: int | None, repo_key: str | None):
+    """按（scene_id / id / repo_key 组合）定位场景行，返回 (where, params)。"""
+    parts, params = [], []
+    if row_id is not None:
+        parts.append("id=%s"); params.append(int(row_id))
+    if scene_id:
+        parts.append("scene_id=%s"); params.append(scene_id)
+    if repo_key:
+        parts.append("repo_key=%s"); params.append(repo_key)
+    if not parts:
+        raise ValueError("必须给 scene_id / id / repo_key 之一")
+    return " AND ".join(parts), tuple(params)
+
+
+def set_scene_deploy_url(deploy_url: str, scene_id: str | None = None, row_id: int | None = None,
+                         repo_key: str | None = None) -> int:
+    """更新场景部署地址（幂等：值相同则 0 行变更）。"""
+    where, params = _scene_where(scene_id, row_id, repo_key)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"UPDATE devops_pipeline_scene SET deploy_url=%s WHERE {where}",
+                  (deploy_url,) + params)
+        return int(c.rowcount or 0)
+
+
+def set_scene_nodes(nodes_json: str, scene_id: str | None = None, row_id: int | None = None,
+                    repo_key: str | None = None, expected_hash: str | None = None) -> dict[str, Any]:
+    """更新场景节点（内容哈希幂等；可带 expected_hash 防并发覆盖）。
+
+    返回 {"action": updated|skipped|mismatch, "changed": n, "hash": ...}
+    """
+    import hashlib
+
+    new_hash = hashlib.sha1(nodes_json.encode("utf-8")).hexdigest()[:12]
+    where, params = _scene_where(scene_id, row_id, repo_key)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT nodes_json FROM devops_pipeline_scene WHERE {where} LIMIT 1", params)
+        row = c.fetchone()
+        if row is None:
+            return {"action": "mismatch", "changed": 0, "hash": new_hash}
+        old_raw = row[0] or ""
+        old_hash = hashlib.sha1(old_raw.encode("utf-8")).hexdigest()[:12] if old_raw else ""
+        if old_hash == new_hash:
+            return {"action": "skipped", "changed": 0, "hash": new_hash}
+        if expected_hash and old_hash != expected_hash:
+            return {"action": "mismatch", "changed": 0, "hash": new_hash}
+        c.execute(f"UPDATE devops_pipeline_scene SET nodes_json=%s, updated_at=NOW() WHERE {where}",
+                  (nodes_json,) + params)
+        return {"action": "updated", "changed": int(c.rowcount or 0), "hash": new_hash}
+
+
 def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "official",
                          scope: str = "official", repo_key: str = "", source_user_id: str = "") -> dict[str, Any]:
     """写入场景内容（只写内容列，**绝不触碰 is_active / is_featured**）。
@@ -315,6 +365,6 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
-           "upsert_scene_content", "set_scene_icon", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
+           "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            "health"]
