@@ -153,3 +153,6 @@ configs/oauth-providers.json
 src/api/frontend/app/node_modules/
 src/api/frontend/static-dist/
 _uid_backup*.json
+
+# 2026-11-12 legacy→shell 改名的临时兼容软链（重启 API 后 rm 掉它并删掉下面这行）
+src/api/frontend/legacy
