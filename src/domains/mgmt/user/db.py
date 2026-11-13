@@ -4050,6 +4050,15 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     scope=None 时返回全量（含 user/repo 个人行，供视图层自行按可见性过滤，
     如 settings.get_agent_runtimes 的 Engines 列表）。
     """
+    import os as _os
+    if _os.environ.get("GRAPE_RUNTIMES_VIA_LIB") == "1":
+        try:
+            from src.domains.runtime import public as _rt
+            if _rt.available():
+                return _rows_to_runtimes(_rt.list_runtimes_rows(scope, owner_id))
+        except Exception as _exc:  # noqa: BLE001
+            import logging as _log
+            _log.getLogger(__name__).warning(f"runtimes via lib failed, fallback: {_exc}")
     with db_lock:
         c = db.cursor()
         if scope is None:

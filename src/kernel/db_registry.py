@@ -117,6 +117,33 @@ def domain_db(domain: str):
     return None
 
 
+def uses_own_dsn(domain: str) -> bool:
+    """该域是否在用"自己的 DSN"（即表名必须裸写、不能再跨 schema）。"""
+    return bool(lib_enabled() and dsn_of(domain) and domain_db(domain) is not None)
+
+
+def connection_for(domain: str):
+    """返回 (conn, qualifier)。
+
+    qualifier(name) 给出**适配该连接**的表名：
+      - 自己的 DSN（连接已绑定该库）→ 裸表名
+      - 复用进程库（跨 schema 读）→ 带库前缀（t_<domain>()）
+    """
+    conn = domain_db(domain)
+    if conn is None:
+        raise RuntimeError(
+            f"domain '{domain}' 连接不可用：需要 GRAPE_DSN_{domain.upper()} + GRAPE_DOMAIN_LIB=1"
+        )
+    if uses_own_dsn(domain):
+        return conn, (lambda name: name)
+    from src.kernel import db as _dbmod
+
+    qual = getattr(_dbmod, f"t_{domain}", None)
+    if qual is None:  # 未知域兜底：裸名
+        return conn, (lambda name: name)
+    return conn, qual
+
+
 def domain_lock(domain: str) -> Any:
     """与该域连接配套的锁（跨域写需要串行化的地方用）。"""
     with _lock:

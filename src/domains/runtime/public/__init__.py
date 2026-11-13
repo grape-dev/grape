@@ -39,6 +39,30 @@ def list_runtimes(org_id: int | None = None, limit: int = 200) -> list[dict[str,
         return _rows(c)
 
 
+_RUNTIME_COLS = (
+    "id", "name", "display_name", "installed", "cli_path", "version", "healthy",
+    "pip_package", "updated_at", "scope", "owner_id", "credential_id", "status",
+    "last_seen_at", "local_skills", "skill_scan_result", "agent_tags", "host_name",
+    "max_concurrent", "scene_tags", "alias", "worker_version", "org_id",
+    "spawn_fail_degraded_at", "detached_from_scenes_at", "probe_spawn_fail_count",
+)
+
+
+def list_runtimes_rows(scope: str | None = "global", owner_id: str = "") -> list[tuple]:
+    """与 mgmt 侧原 SELECT 完全同列序的行集（供灰度切换时零差异比对）。"""
+    cols = ", ".join(_RUNTIME_COLS)
+    if scope is None:
+        sql = f"SELECT {cols} FROM agent_runtimes ORDER BY name"
+        args: tuple = ()
+    else:
+        sql = (f"SELECT {cols} FROM agent_runtimes "
+               f"WHERE scope=%s AND (owner_id=%s OR owner_id='') ORDER BY name")
+        args = (scope, owner_id)
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, args)
+        return [tuple(r) for r in c.fetchall()]
+
+
 def get_runtime(runtime_id: int) -> dict[str, Any]:
     with db_registry.cursor("runtime") as c:
         c.execute("SELECT * FROM agent_runtimes WHERE id=%s", (runtime_id,))
@@ -93,5 +117,5 @@ def health() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160], "dsn_configured": bool(db_registry.dsn_of("runtime"))}
 
 
-__all__ = ["available", "list_runtimes", "get_runtime", "task_stats",
-           "append_task_message", "health"]
+__all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
+           "task_stats", "append_task_message", "health"]

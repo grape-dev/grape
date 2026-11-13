@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.kernel import db_registry, session_manager
 from src.kernel.db import t_runtime
-from src.kernel import session_manager
 from src.domains.contracts.runtime_service import RuntimeService
 
 
@@ -19,12 +19,21 @@ class RuntimeServiceLocal(RuntimeService):
     """同实例模式：直接查 grape_runtime schema（SQLite 用 rt_ 前缀）。"""
 
     @property
+    def _own_dsn(self) -> bool:
+        """runtime 是否走自己的 DSN（lib 模式）。"""
+        return db_registry.uses_own_dsn("runtime")
+
+    @property
     def _db(self):
-        return session_manager.db
+        return db_registry.domain_db("runtime") or session_manager.db
 
     @property
     def _lock(self):
-        return session_manager.db_lock
+        return db_registry.domain_lock("runtime") if self._own_dsn else session_manager.db_lock
+
+    def _t(self, name: str) -> str:
+        """表名：自有 DSN → 裸名；跨 schema 复用进程库 → t_runtime(name)。"""
+        return name if self._own_dsn else t_runtime(name)
 
     def get_events(self, repo_key: str, limit: int = 50) -> list:
         """A 用户面事件列表——返回 events 行列表。"""
@@ -34,7 +43,7 @@ class RuntimeServiceLocal(RuntimeService):
                 f"SELECT seq, repo_key, event_type, source, issue_id, title, "
                 f"summary, actor, agent_type, status, exit_code, duration, "
                 f"created_at, started_at, completed_at "
-                f"FROM {t_runtime('events')} WHERE repo_key=? "
+                f"FROM {self._t('events')} WHERE repo_key=? "
                 f"ORDER BY seq DESC LIMIT ?",
                 (repo_key, limit),
             )
@@ -49,7 +58,7 @@ class RuntimeServiceLocal(RuntimeService):
         with self._lock:
             c = self._db.cursor()
             c.execute(
-                f"SELECT * FROM {t_runtime('events')} WHERE seq=?",
+                f"SELECT * FROM {self._t('events')} WHERE seq=?",
                 (seq,),
             )
             row = c.fetchone()
@@ -66,7 +75,7 @@ class RuntimeServiceLocal(RuntimeService):
                 f"SELECT id, agent_session_id, runtime_id, event_seq, issue_id, "
                 f"repo_key, agent_type, skill, status, exit_code, "
                 f"started_at, completed_at, created_at "
-                f"FROM {t_runtime('agent_tasks')} WHERE repo_key=? "
+                f"FROM {self._t('agent_tasks')} WHERE repo_key=? "
                 f"ORDER BY created_at DESC LIMIT ?",
                 (repo_key, limit),
             )
@@ -83,7 +92,7 @@ class RuntimeServiceLocal(RuntimeService):
             c.execute(
                 f"SELECT id, task_id, seq, type, tool, content, "
                 f"input_json, output, created_at "
-                f"FROM {t_runtime('task_messages')} "
+                f"FROM {self._t('task_messages')} "
                 f"WHERE task_id=? AND id>? ORDER BY seq ASC",
                 (task_id, after_id),
             )
@@ -101,7 +110,7 @@ class RuntimeServiceLocal(RuntimeService):
                 f"SELECT id, credential_id, name, display_name, provider, "
                 f"installed, cli_path, version, healthy, status, "
                 f"last_seen_at, scope, owner_id "
-                f"FROM {t_runtime('agent_runtimes')} ORDER BY id"
+                f"FROM {self._t('agent_runtimes')} ORDER BY id"
             )
             rows = c.fetchall()
             if not rows:
@@ -117,7 +126,7 @@ class RuntimeServiceLocal(RuntimeService):
             c.execute(
                 f"SELECT id, repo_key, issue_id, stage, owner_agent, "
                 f"assignee, a2a_seq, scene_id, updated_at, created_at "
-                f"FROM {t_runtime('issue_state')} "
+                f"FROM {self._t('issue_state')} "
                 f"WHERE repo_key=? AND issue_id=?",
                 (repo_key, issue_id),
             )
@@ -147,7 +156,7 @@ class RuntimeServiceLocal(RuntimeService):
             set_clauses.append("updated_at=datetime('now')")
             params.extend([repo_key, issue_id])
             c.execute(
-                f"UPDATE {t_runtime('issue_state')} "
+                f"UPDATE {self._t('issue_state')} "
                 f"SET {', '.join(set_clauses)} "
                 f"WHERE repo_key=? AND issue_id=?",
                 params,
@@ -163,7 +172,7 @@ class RuntimeServiceLocal(RuntimeService):
                 c.execute(
                     f"SELECT id, agent_session_id, user_id, backend_session_id, "
                     f"repo_key, im_channel_id, title, status, created_at, updated_at "
-                    f"FROM {t_runtime('chat_conversations')} "
+                    f"FROM {self._t('chat_conversations')} "
                     f"WHERE repo_key=? AND status!='deleted' "
                     f"ORDER BY updated_at DESC LIMIT ?",
                     (repo_key, limit),
@@ -172,7 +181,7 @@ class RuntimeServiceLocal(RuntimeService):
                 c.execute(
                     f"SELECT id, agent_session_id, user_id, backend_session_id, "
                     f"repo_key, im_channel_id, title, status, created_at, updated_at "
-                    f"FROM {t_runtime('chat_conversations')} "
+                    f"FROM {self._t('chat_conversations')} "
                     f"WHERE status!='deleted' "
                     f"ORDER BY updated_at DESC LIMIT ?",
                     (limit,),
@@ -191,7 +200,7 @@ class RuntimeServiceLocal(RuntimeService):
                 c.execute(
                     f"SELECT id, conversation_id, role, content, created_at, "
                     f"task_id, generate_status, deleted "
-                    f"FROM {t_runtime('chat_messages')} "
+                    f"FROM {self._t('chat_messages')} "
                     f"WHERE conversation_id=? AND id<? "
                     f"ORDER BY id DESC LIMIT ?",
                     (conv_id, before, limit),
@@ -200,7 +209,7 @@ class RuntimeServiceLocal(RuntimeService):
                 c.execute(
                     f"SELECT id, conversation_id, role, content, created_at, "
                     f"task_id, generate_status, deleted "
-                    f"FROM {t_runtime('chat_messages')} "
+                    f"FROM {self._t('chat_messages')} "
                     f"WHERE conversation_id=? "
                     f"ORDER BY id DESC LIMIT ?",
                     (conv_id, limit),
