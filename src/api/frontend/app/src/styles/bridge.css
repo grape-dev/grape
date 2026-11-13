@@ -152,46 +152,96 @@
  * Skills 174 万 / Scene 184 万+125 万 / Settings 164 万 / Chat 96 万 / Repos 79 万 px²，
  * 全部超过 §6 的 40 万红线。用页面根类限定，别波及已验收页面：
  *   .sv 设置  .sk 技能  .sm 场景中心  .lobby 项目大厅  .cv 对话 */
-:root[data-theme-mode="dark"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv, .dbv, .rtv, .imc) :is(.cd:not(.tv-modal):not(.tv-fork-modal), .apple-card, .scn-card, .sm__top, .lobby-head, .project-card, .chat-main, .chat-convlist, .chat-hdr, .rc, .dbv-scenecard, .dbv-marketcard, .dbv-emptycard, .dbv-skillpanel, .scn-row, .rtv-ecard, .rtv-wcard, .rtv-summary, .a-card) {
+:root[data-theme-mode="dark"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv, .dbv, .rtv, .imc) :is(.cd:not(.tv-modal):not(.tv-fork-modal), .apple-card, .scn-card, .sm__top, .lobby-head, .chat-main, .chat-convlist, .chat-hdr, .rc, .dbv-scenecard, .dbv-marketcard, .dbv-emptycard, .dbv-skillpanel, .rtv-ecard, .rtv-wcard, .rtv-summary, .a-card) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   background: var(--c);
 }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme-mode="auto"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv, .dbv, .rtv, .imc) :is(.cd:not(.tv-modal):not(.tv-fork-modal), .apple-card, .scn-card, .sm__top, .lobby-head, .project-card, .chat-main, .chat-convlist, .chat-hdr, .rc, .dbv-scenecard, .dbv-marketcard, .dbv-emptycard, .dbv-skillpanel, .scn-row, .rtv-ecard, .rtv-wcard, .rtv-summary, .a-card) {
+  :root[data-theme-mode="auto"] #pageContent :is(.sv, .sk, .sm, .lobby, .cv, .dbv, .rtv, .imc) :is(.cd:not(.tv-modal):not(.tv-fork-modal), .apple-card, .scn-card, .sm__top, .lobby-head, .chat-main, .chat-convlist, .chat-hdr, .rc, .dbv-scenecard, .dbv-marketcard, .dbv-emptycard, .dbv-skillpanel, .rtv-ecard, .rtv-wcard, .rtv-summary, .a-card) {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
     background: var(--c);
   }
 }
 
-/* ── 项目大厅项目卡：亮面 + 可点的 hover（2026-11-12 反馈）───────────────
-   页面底 --c（暗色 #2c2c2e），项目卡原先也用 --c；hover 的 --hover-card 在暗色是
-   rgba(255,255,255,.043) → 反而比常态更暗，加上 6% 黑阴影，等于没有反馈。
-   这里：卡面 +5% 白抬一档，hover 走 accent 8% 淡染 + 45% 蓝边 + 34% 深投影。
-   app.css 里 `.project-card:hover` 用了 !important，所以这里也必须 !important 才能压过。 */
-:is(.project-card) {
-  background: color-mix(in srgb, #fff 5%, var(--c)) !important;
-  border: 1px solid var(--b) !important;
-  transition: background .18s, border-color .18s, box-shadow .18s, transform .18s !important;
+/* ── 玻璃抬升（2026-11-12 反馈：不要蓝色，要毛玻璃质感）────────────────────
+   静止态：白色系渐变高光 + inset 亮线 + 轻投影 —— 玻璃观感，但**不挂 backdrop blur**
+   （驾驶舱 6 行 × 1112×70 ≈ 468k px²，挂上就破 §6 的 400k 预算）。
+   hover：真正上 backdrop-filter: blur(18px)（同一时刻只有一行 ≈ 78k，仍在预算内），
+   玻璃抬亮 + 投影加深 + 上浮 2px。全程白色系，没有 accent 蓝。
+   选择器特意镜像上面暗色 plain 规则的结构（同 (1,4,0)），靠“更晚声明”取胜；
+   hover 多一个 :hover 直接 (1,5,0) 压过去。 */
+
+/* 1) 静止态：暗色 / 自动(暗) */
+:root[data-theme-mode='dark'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .07), rgba(255, 255, 255, .02)),
+    var(--c) !important;
+  border: 1px solid rgba(255, 255, 255, .10) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 1px 2px rgba(0, 0, 0, .24) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  transition: background .22s ease, border-color .22s ease, box-shadow .22s ease,
+              transform .22s ease, backdrop-filter .22s ease !important;
 }
-:root :is(.project-card):hover {
-  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 5%, var(--c))) !important;
-  border-color: color-mix(in srgb, var(--a) 45%, transparent) !important;
-  box-shadow: 0 6px 18px color-mix(in srgb, #000 34%, transparent) !important;
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .07), rgba(255, 255, 255, .02)),
+    var(--c) !important;
+  border: 1px solid rgba(255, 255, 255, .10) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 1px 2px rgba(0, 0, 0, .24) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  transition: background .22s ease, border-color .22s ease, box-shadow .22s ease,
+              transform .22s ease, backdrop-filter .22s ease !important;
+  }
+}
+/* 静止态：浅色 */
+:root:not([data-theme-mode='dark']) #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .86), rgba(255, 255, 255, .66)),
+    var(--c) !important;
+  border: 1px solid rgba(0, 0, 0, .08) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1), 0 1px 2px rgba(0, 0, 0, .06) !important;
+  transition: background .22s ease, border-color .22s ease, box-shadow .22s ease,
+              transform .22s ease, backdrop-filter .22s ease !important;
 }
 
-/* ── 驾驶舱「项目场景」页的场景行卡（2026-11-12 反馈）────────────────────
-   `.scn-row` 原来是 `color-mix(var(--c) 62%)`，而它所在的 `.apple-card` 也是同一个
-   62% → 行卡和卡片底一模一样、还没有描边，hover 只把 alpha 62%→82%、阴影 8% 黑，
-   暗色下等于没有。这里：行卡 +6% 白抬一档 + hairline 描边，hover 走 accent 淡染。 */
-:is(.scn-row) {
-  background: color-mix(in srgb, #fff 6%, var(--c)) !important;
-  border: 1px solid var(--b) !important;
-  transition: background .18s, border-color .18s, box-shadow .18s !important;
+/* 2) hover：真毛玻璃 */
+:root[data-theme-mode='dark'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card):hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .06)),
+    var(--c) !important;
+  border-color: rgba(255, 255, 255, .20) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24),
+              0 12px 30px rgba(0, 0, 0, .42), 0 2px 6px rgba(0, 0, 0, .28) !important;
+  -webkit-backdrop-filter: blur(18px) !important;
+  backdrop-filter: blur(18px) !important;
+  transform: translateY(-2px) !important;
 }
-:is(.scn-row):hover {
-  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 6%, var(--c))) !important;
-  border-color: color-mix(in srgb, var(--a) 45%, transparent) !important;
-  box-shadow: 0 6px 18px color-mix(in srgb, #000 34%, transparent) !important;
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card):hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .06)),
+    var(--c) !important;
+  border-color: rgba(255, 255, 255, .20) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24),
+              0 12px 30px rgba(0, 0, 0, .42), 0 2px 6px rgba(0, 0, 0, .28) !important;
+  -webkit-backdrop-filter: blur(18px) !important;
+  backdrop-filter: blur(18px) !important;
+  transform: translateY(-2px) !important;
+  }
+}
+:root:not([data-theme-mode='dark']) #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card):hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .98), rgba(255, 255, 255, .86)),
+    var(--c) !important;
+  border-color: rgba(0, 0, 0, .12) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1),
+              0 10px 26px rgba(0, 0, 0, .12), 0 2px 6px rgba(0, 0, 0, .06) !important;
+  -webkit-backdrop-filter: blur(18px) !important;
+  backdrop-filter: blur(18px) !important;
+  transform: translateY(-2px) !important;
 }
