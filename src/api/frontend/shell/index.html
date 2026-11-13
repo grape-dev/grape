@@ -18,7 +18,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='39';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='40';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -324,7 +324,7 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /faro/collect 反代） -->
 <script src="/static/js/vendor/faro-web-tracing.iife.js?v=1" defer></script><!-- Faro 追踪（fetch 注入 traceparent，前后端 trace 关联） -->
 <script src="/static/js/faro.js?v=7" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
-<script src="/static/js/api.js?v=33" defer></script>
+<script src="/static/js/api.js?v=34" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
 <script type="module" src="/static-vue/viewjs/dashboard-view.js?v=64"></script>
@@ -359,7 +359,7 @@ function _toggleAppLang(){
     <div class="help-loading" data-i18n="app.help.loading">加载中...</div>
   </div>
 </div>
-<script src="/static/js/oauth-buttons.js?v=1"></script>
+<script src="/static/js/oauth-buttons.js?v=2"></script>
 <script src="/static/js/host-status.js?v=1" defer></script><!-- Issue #2126：托管状态/缺失项文案统一映射 -->
 </body>
 </html>
