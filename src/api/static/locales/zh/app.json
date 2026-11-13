@@ -753,5 +753,8 @@
     "CREDENTIAL_INCORRECT": "账号或密码不正确，请重新输入",
     "ACCOUNT_DEACTIVATED": "该账号已被停用，请联系管理员",
     "ACCOUNT_DEACTIVATING": "该账号正在注销中，暂时无法登录"
+  },
+  "deeplink": {
+    "repo_not_found": "无法通过该链接进入：仓库不存在、未托管或你没有权限"
   }
 }

@@ -697,6 +697,8 @@ function hostNoPermission() {
 
 function selectRepo(fullName, owner, name, repoKey) {
   sessionStorage.setItem('currentRepo', JSON.stringify({fullName, owner, name, repoKey: repoKey || ''}));
+  // 深链索引：进入仓库后把 /app/<owner>/<repo>/ 写进地址栏，用户直接复制 URL 即为可分享深链
+  try { if (window.app && window.app.syncAppPath) window.app.syncAppPath(owner, name); } catch (e) {}
   const sidebar = document.getElementById('sidebar');
   const mainView = document.getElementById('mainView');
   const tb = document.getElementById('tb');

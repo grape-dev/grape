@@ -27,7 +27,7 @@ else if(localStorage.getItem('token')){document.documentElement.setAttribute('da
   setTimeout(function(){if(document.documentElement.getAttribute('data-logged-in')==='pending'){document.documentElement.removeAttribute('data-logged-in');}},8000);}})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='42';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='43';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -358,7 +358,7 @@ function _toggleAppLang(){
 <script src="/static/js/pages/events.js?v=67" defer></script>
 <script src="/static/js/pages/chat.js?v=50" defer></script>
 <script src="/static/js/pages/im_channel.js?v=31" defer></script>
-<script src="/static/js/pages/repos.js?v=66" defer></script>
+<script src="/static/js/pages/repos.js?v=67" defer></script>
 <script src="/static/js/pages/templates.js?v=39" defer></script>
 <script src="/static/js/pages/issues.js?v=142" defer></script>
 <script src="/static/js/pages/settings.js?v=39" defer></script>
@@ -373,7 +373,8 @@ function _toggleAppLang(){
 <script src="/static/js/pages/my_feedback.js?v=8" defer></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=6" defer></script>
 <script src="/static/js/pages/autopilot.js?v=74" defer></script>
-<script src="/static/js/app.js?v=259" defer></script>
+<script src="/static/js/deeplink.js?v=1" defer></script>
+<script src="/static/js/app.js?v=260" defer></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>
