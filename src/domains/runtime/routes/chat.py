@@ -453,10 +453,11 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
         lines.append(f"  Grape 账号：{username}")
         # 平台登录名（按卡目录顺序，身份域权威）
         try:
-            from src.domains.mgmt.auth.grape_account_db import get_user_identities
+            from src.domains.mgmt.auth.grape_account_db import list_platform_links
             from src.domains.runtime.vcs.platform_card import (
                 list_vcs_platforms as _lvp, display_name_for_repo_key as _dname)
-            _idents = [i for i in (get_user_identities(str(user.get("id") or "")) or [])
+            # A 批：注入登录名清单取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
+            _idents = [i for i in (list_platform_links(str(user.get("id") or "")) or [])
                        if (i.get("external_login") or "").strip()]
             _order = {p: n for n, p in enumerate(_lvp())}
             _idents.sort(key=lambda i: _order.get(i.get("provider") or "", len(_order)))

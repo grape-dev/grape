@@ -71,6 +71,11 @@ class UserCredentialModel(Base):
     id: Mapped[str] = Column("id", String(36), primary_key=True)  # D105：UUID（N1 铁律 1，应用层生成）
     user_id: Mapped[str] = Column("user_id", String(36), primary_key=True)  # D105 第二批
     provider: Mapped[str] = Column("provider", Text, primary_key=True)
+    # A2（2026-11-13）：凭据类型列（provider 存纯名，类型独立）。必须与迁移
+    # 202611170006 的物理列一致；缺映射时走 ORM 插入会不带该列，MySQL 严格模式下
+    # 报 1364 "Field 'kind' doesn't have a default value"（_strip_text_default 会把
+    # TEXT NOT NULL DEFAULT '' 的默认值剥掉）。
+    kind: Mapped[str] = Column("kind", Text, nullable=False, default="")
     config_json: Mapped[str] = Column("config_json", Text, nullable=False, default="{}")
     created_at: Mapped[str] = Column("created_at", Text, default="")
     updated_at: Mapped[str] = Column("updated_at", Text, default="")

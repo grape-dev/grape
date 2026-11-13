@@ -8133,3 +8133,29 @@ register_migration(
     kind="safe",
     fn=_fn_seed_event_action_filter_once,
 )
+
+
+# ── A2（2026-11-13）：凭据类型归位——provider 存纯名，类型进 kind 列
+def _fn_user_credentials_kind_model() -> None:
+    """user_credentials 加 kind 列 + 存量 `<p>_pat/_oauth` 复合键回填归位行。
+
+    幂等三态：列已存在 → _ensure_column no-op；归位行已存在 → backfill 跳过；
+    旧复合键行保留（双写期，老实例按 `<p>_pat` 仍可读），收口迁移再删。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "user_credentials", "kind", "TEXT NOT NULL DEFAULT ''",
+                       allow_copy=True, strict=True)  # TEXT + 非 NULL DEFAULT：MySQL 需 COPY
+        # QA N3（2026-11-13）：注册式迁移必须 strict=True——静默失败也会盖章，
+        # 下次启动不再重试，线上表现为查询该列 1054（与既有 10 处 strict 用法一致）。
+        db.commit()
+    from src.domains.mgmt.user.db import backfill_credential_kind
+    backfill_credential_kind()
+
+
+register_migration(
+    version="202611170006",
+    name="user-credentials-kind-model",
+    kind="safe",
+    fn=_fn_user_credentials_kind_model,
+)

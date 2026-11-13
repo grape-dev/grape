@@ -162,8 +162,12 @@ class _P:
 
 
 def test_s52_platform_tokens_gitee_pat_entry(gitee_card):
-    """settings.platform_tokens={"gitee": tok} → 验证后双写：
-    user_credentials gitee_pat（UserToken 级）+ external_identities（归属源）。"""
+    """settings.platform_tokens={"gitee": tok} → 验证后只写凭据域：
+    user_credentials gitee_pat（含 login）；**不写** external_identities。
+
+    A 批对象模型（2026-11-13 用户裁定）：PAT 是仓库执行凭据，不是身份绑定。
+    原断言为「双写身份行」，随对象模型归位改为「只写凭据 + 身份行零行」。
+    """
     from src.domains.mgmt.routes.settings import UpdateCredentials, update_credentials
     user = _fake_user()
     try:
@@ -173,29 +177,37 @@ def test_s52_platform_tokens_gitee_pat_entry(gitee_card):
         from src.domains.mgmt.user.db import get_credential
         cred = get_credential(user["id"], "gitee_pat")
         assert cred and cred.get("token") == "gitee-pat-1" and cred.get("login") == "gitee-bob"
-        from src.domains.mgmt.auth.grape_account_db import get_external_identity
-        ident = get_external_identity("gitee", "70001")
-        assert ident and ident["grape_user_id"] == user["id"]
-        assert ident["external_login"] == "gitee-bob"
+        from src.domains.mgmt.auth.grape_account_db import get_external_identity_any_status
+        assert get_external_identity_any_status("gitee", "70001") is None, \
+            "PAT 保存不应创建身份行（身份行只由 OAuth 绑定产生）"
     finally:
         _cleanup_user()
 
 
-def test_s52_platform_tokens_conflict_409(gitee_card):
-    """身份已绑定其他账号 → 409（不抢绑；新平台暂不含票据转移流，文档已注明）。"""
+def test_s52_platform_tokens_no_identity_conflict(gitee_card):
+    """同一 gitee 账号的 PAT 可被多个 grape 账号各自配置，且不建身份行。
+
+    A 批对象模型（原断言为「他人已绑 → 409」）：PAT = 仓库执行凭据，不是身份
+    归属——归属行（external_identities）只由 OAuth 绑定产生，因此 PAT 保存不再
+    有冲突校验，也不会改动他人已有的活跃身份行。
+    """
     from src.domains.mgmt.routes.settings import UpdateCredentials, update_credentials
-    from fastapi import HTTPException
     user = _fake_user(502)
     other = _fake_user(503)
     try:
-        from src.domains.mgmt.auth.grape_account_db import create_external_identity
+        from src.domains.mgmt.auth.grape_account_db import (
+            create_external_identity, get_external_identity)
         create_external_identity(grape_user_id=other["id"], provider="gitee",
                                   external_id="70001", external_login="gitee-bob")
         body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
         with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
-            with pytest.raises(HTTPException) as ei:
-                update_credentials(body, user=user)
-        assert ei.value.status_code == 409
+            update_credentials(body, user=user)
+        from src.domains.mgmt.user.db import get_credential
+        cred = get_credential(user["id"], "gitee_pat")
+        assert cred and cred.get("token") == "gitee-pat-1"
+        ident = get_external_identity("gitee", "70001")
+        assert ident and str(ident["grape_user_id"]) == str(other["id"]), \
+            "PAT 保存篡改了他人身份行归属"
     finally:
         _cleanup_user(502)
         _cleanup_user(503)

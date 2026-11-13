@@ -577,7 +577,7 @@ def get_user_token_for(username: str, user_id: str = "", provider: str = "gitcod
     if user_id:
         try:
             from src.domains.mgmt.user.db import get_credential
-            _pat = str((get_credential(user_id, f"{provider}_pat") or {}).get("token", "") or "")
+            _pat = str((get_credential(user_id, provider, kind="pat") or {}).get("token", "") or "")
             if _pat:
                 return _pat
         except Exception as e:

@@ -108,8 +108,9 @@ def _scene_user_provider(user: dict) -> str:
     except Exception:
         _catalog = []
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
-        _bound = {i.get("provider") for i in (get_user_identities(str(user.get("id") or "")) or [])
+        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+        # A 批：场景可用平台 = 身份行 ∪ PAT 凭据域（只配 PAT 也视为该平台可用）
+        _bound = {i.get("provider") for i in (list_platform_links(str(user.get("id") or "")) or [])
                   if i.get("provider")}
     except Exception:
         _bound = set()

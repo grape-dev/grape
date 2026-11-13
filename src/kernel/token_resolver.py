@@ -443,7 +443,7 @@ class GenericVcsProvider(VCSProvider):
         # —— ① PAT（用户显式配置）——
         try:
             from src.domains.mgmt.user.db import get_credential
-            cfg = get_credential(user_id, f"{provider}_pat") or {}
+            cfg = get_credential(user_id, provider, kind="pat") or {}
             pat_token = str(cfg.get("token", "") or "")
         except Exception:
             pat_token = ""
@@ -1465,7 +1465,7 @@ def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
     """
     try:
         from src.domains.mgmt.user.db import get_credential
-        cfg = get_credential(user_id, f"{provider}_pat") or {}
+        cfg = get_credential(user_id, provider, kind="pat") or {}
         if "workflows_write" not in cfg:
             return None
         return cfg.get("workflows_write") is True

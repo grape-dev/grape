@@ -367,18 +367,30 @@ CREATE TABLE IF NOT EXISTS user_credentials (
     --   PAT:           <platform>_pat（gitcode_pat/github_pat/gitee_pat…，settings.py）
     --   OAuth 副本:    <platform>_oauth（gitcode_oauth/github_oauth…，refresh_oauth_token 迁移期双写）
     provider TEXT NOT NULL,
+    -- A2 凭据类型（2026-11-13 对象模型归位）：provider 存纯平台名/纯凭据名，
+    -- 类型独立成列——pat | oauth(deprecated) | cloud | api_key，''=未分类。
+    -- 写入方向：新写一律带 kind；读取双读（新形态 → 旧复合键 provider=f"{p}_{kind}" 回退）。
+    kind TEXT NOT NULL DEFAULT '',
     config_json MEDIUMTEXT NOT NULL,
     created_at TEXT DEFAULT '',
     updated_at TEXT DEFAULT '',
     UNIQUE (user_id, provider)    -- 复合键降级为唯一约束：保 upsert 语义
+                                  -- 显式契约：一用户一平台一条；同平台多类型须先扩此唯一键（A2 收口后评估）
 )
 """
 
-def set_credential(user_id: str, provider: str, config: dict) -> bool:
+def _legacy_credential_key(provider: str, kind: str) -> str:
+    """A2 双写期的旧复合键：<provider>_<kind>（kind='' 时无旧键）。"""
+    return f"{provider}_{kind}" if kind else ""
+
+
+def set_credential(user_id: "int | str", provider: str, config: dict, kind: str = "") -> bool:
     """保存凭据（通道层加密，2026-11-07 N1）。
 
-    config_json 整体 encrypt()（AES-GCM，key rotation）后落库——调用方零感知。
-    UUID 主键（N1 连带）：写入用 ON CONFLICT DO UPDATE（conflict 分支不动 id）。
+    A2（2026-11-13 对象模型归位）：provider 存纯名字（平台名 / 凭据名），类型走
+    kind 列 —— 类型不再编码进 provider 字符串。双写期同时写旧复合键行
+    （provider=f"{provider}_{kind}"，kind=''），保证滚动升级窗口里老实例读得到；
+    收口迁移删除旧键行后关闭双写。
     """
     try:
         from src.domains.mgmt.auth.credential_crypto import encrypt
@@ -386,32 +398,70 @@ def set_credential(user_id: str, provider: str, config: dict) -> bool:
         plaintext = json.dumps(config, ensure_ascii=False)
         import time as _time
         now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
+        target = encrypt(plaintext)
+        rows = [(uuid7_str(), user_id, provider, kind or "", target, now, now)]
+        legacy = _legacy_credential_key(provider, kind)
+        if legacy:
+            rows.append((uuid7_str(), user_id, legacy, "", target, now, now))
         with db_lock:
             c = db.cursor()
-            c.execute(
-                """INSERT INTO user_credentials (id, user_id, provider, config_json, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?)
-                   ON CONFLICT(user_id, provider) DO UPDATE
-                   SET config_json=excluded.config_json, updated_at=excluded.updated_at""",
-                (uuid7_str(), user_id, provider, encrypt(plaintext), now, now))
+            # QA R1（2026-11-13）：唯一键仍是 (user_id, provider)，同平台另一种 kind 的
+            # 归位行会被本次 upsert 改写（kind 被覆盖、另一种凭据值丢失）。扩
+            # (user_id, provider, kind) 需重建表（SQLite 旧 UNIQUE 约束在场），列入
+            # A2 收口；在此之前显式告警，不做静默改写。
+            c.execute("SELECT COALESCE(kind,'') FROM user_credentials "
+                      "WHERE user_id=? AND provider=? AND COALESCE(kind,'') NOT IN ('', ?)",
+                      (user_id, provider, kind or ""))
+            _other_kind = c.fetchone()
+            if _other_kind:
+                log.warning(
+                    f"set_credential: provider={provider!r} 已有 kind={_other_kind[0]!r} 的行，"
+                    f"本次 kind={kind!r} 会覆盖它（UNIQUE(user_id, provider) 限制）")
+            for row in rows:
+                c.execute(
+                    """INSERT INTO user_credentials (id, user_id, provider, kind, config_json, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(user_id, provider) DO UPDATE
+                       SET kind=excluded.kind, config_json=excluded.config_json, updated_at=excluded.updated_at""",
+                    row)
             db.commit()
             return True
     except Exception as e:
         log.warning(f"Set credential failed: {e}")
         return False
 
-def get_credentials(user_id: int) -> list[dict]:
-    """获取用户凭据（D32-补丁：从 user_credentials 表 + external_identities 读，不查 user_accounts）"""
+def get_credentials(user_id: "int | str") -> list[dict]:
+    """获取用户凭据（D32-补丁：从 user_credentials 表 + external_identities 读，不查 user_accounts）
+
+    A2：返回 kind 维度；双写期旧复合键行（provider 形如 `<name>_pat/_oauth` 且
+    kind='') 与对应的新形态行重复，这里过滤掉旧键行，调用方只看到归位形态。
+    """
     result = []
     # 1. user_credentials 表（huawei_cloud/codearts/feishu 等非 OAuth 凭据）
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT provider, config_json FROM user_credentials WHERE user_id=?", (user_id,))
+        c.execute("SELECT provider, COALESCE(kind,''), config_json, COALESCE(updated_at,'') "
+                  "FROM user_credentials WHERE user_id=?", (user_id,))
         rows = c.fetchall()
-    for provider, config_json in rows:
+    # QA R2（2026-11-13）：与 get_credential 同口径——归位行与旧复合键行按 updated_at
+    # 取较新者。原实现"归位行存在就隐藏旧键行"，在回退窗口（旧实例只写旧键）会一直
+    # 显示 stale 值，列表侧与单点读不一致。
+    picked = {(str(p), str(k or "")): (str(u or ""), cfg) for p, k, cfg, u in rows}
+    for (p, k), (upd, cfg_json) in list(picked.items()):
+        if not k and (p.endswith("_pat") or p.endswith("_oauth")):
+            base, tail = p.rsplit("_", 1)
+            norm = picked.get((base, tail))
+            if norm is None:
+                continue  # 迁移前形态：没有归位行时旧键行照常展示
+            if norm[0] >= upd:
+                picked.pop((p, k))                       # 归位行不旧 → 隐藏旧键行
+            else:
+                picked[(base, tail)] = (upd, cfg_json)   # 旧键更新 → 顶替展示
+                picked.pop((p, k))
+    for (p, k), (_upd, cfg_json) in picked.items():
         try:
-            cfg = _load_credential_json(config_json) if config_json else {}
-            result.append({"provider": provider, "config": cfg})
+            cfg = _load_credential_json(cfg_json) if cfg_json else {}
+            result.append({"provider": p, "kind": k or "", "config": cfg})
         except Exception:
             pass
     # 2. external_identities（gitcode/github OAuth token）
@@ -419,7 +469,7 @@ def get_credentials(user_id: int) -> list[dict]:
     # 改用 get_user_identities_with_tokens 读取解密后的 token。
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities_with_tokens
-        for ident in get_user_identities_with_tokens(user_id):
+        for ident in get_user_identities_with_tokens(str(user_id)):
             provider = ident.get("provider", "")
             token = ident.get("access_token", "")
             if provider and token:
@@ -428,26 +478,105 @@ def get_credentials(user_id: int) -> list[dict]:
         log.warning(f"get_credentials: read external_identities failed: {e}")
     return result
 
-def get_credential(user_id: int, provider: str) -> dict | None:
-    """获取指定凭据（读侧自动解密，历史明文行兼容）"""
+def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict | None:
+    """获取指定凭据（读侧自动解密，历史明文行兼容）。
+
+    A2 双读序：① 归位形态 (provider, kind) → ② 旧复合键 f"{provider}_{kind}" →
+    ③ 该 provider 的未分类行（历史 kind=''）。滚动升级期三种形态都可能存在。
+
+    A2 收口前补丁（2026-11-13）：三态按 **updated_at 取较新者**，不再单按优先级命中。
+    理由：回退窗口里旧实例只写 `<p>_pat` 行，归位行会变成 stale 副本；只认归位形态
+    就会把旧值读回来（用户看到"凭据莫名回退"）。同 updated_at 时归位形态优先，保持
+    结果确定性。
+    """
+    cands = [(provider, kind or "", 0)]
+    if kind:
+        cands += [(f"{provider}_{kind}", "", 1), (provider, "", 2)]
+    pick = None  # (updated_at, -priority, config_json)
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT config_json FROM user_credentials WHERE user_id=? AND provider=?", (user_id, provider))
-        row = c.fetchone()
-    if not row:
+        for prov, k, prio in cands:
+            c.execute("SELECT config_json, COALESCE(updated_at,'') FROM user_credentials "
+                      "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
+                      (user_id, prov, k))
+            row = c.fetchone()
+            if row and row[0]:
+                cand = (str(row[1] or ""), -prio, row[0])
+                if pick is None or cand[:2] > pick[:2]:
+                    pick = cand
+    if pick is None:
         return None
-    return _load_credential_json(row[0]) or None
+    return _load_credential_json(pick[2]) or None
 
-def delete_credential(user_id: int, provider: str) -> bool:
+def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bool:
+    """删除凭据（A2：同时删归位行与双写期旧键行，避免残留可读副本）。"""
     try:
+        keys = [(provider, kind or "")]
+        legacy = _legacy_credential_key(provider, kind)
+        if legacy:
+            keys.append((legacy, ""))
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM user_credentials WHERE user_id=? AND provider=?", (user_id, provider))
+            deleted = False
+            for prov, k in keys:
+                c.execute("DELETE FROM user_credentials "
+                          "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
+                          (user_id, prov, k))
+                deleted = deleted or c.rowcount > 0
             db.commit()
-            return c.rowcount > 0
+            return deleted
     except Exception as e:
         log.warning(f"Delete credential failed: {e}")
         return False
+
+def backfill_credential_kind() -> dict:
+    """A2 归位回填（幂等）：把 `<p>_pat` / `<p>_oauth` 复合键拆成 (provider=<p>, kind)。
+
+    - 只处理 kind='' 的历史行；已有归位行（同 user_id + provider）时跳过（重复跑零写入）。
+    - **保留旧复合键行**：滚动升级窗口里老实例仍按 `<p>_pat` 读；收口迁移再删。
+    - 裸名凭据（huawei_cloud/codearts）：名字即凭据名，不存在类型编码，保持 kind=''。
+    返回 {"pat": n, "oauth": n, "skipped": n} 供启动日志/预检。
+    """
+    stats = {"pat": 0, "oauth": 0, "skipped": 0}
+    try:
+        from src.kernel.id_gen import uuid7_str
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, user_id, provider, COALESCE(kind,''), config_json "
+                      "FROM user_credentials")
+            rows = c.fetchall()
+            for _row_id, user_id, provider, kind, cfg in rows:
+                if kind:
+                    continue
+                target_provider, target_kind = provider, ""
+                for suffix, k in (("_pat", "pat"), ("_oauth", "oauth")):
+                    if provider.endswith(suffix):
+                        base = provider[:-len(suffix)]
+                        if base:
+                            target_provider, target_kind = base, k
+                        break
+                if not target_kind:
+                    continue  # 裸名凭据（huawei_cloud/codearts 等）：名字即凭据，不存在类型编码
+                c.execute("SELECT 1 FROM user_credentials WHERE user_id=? AND provider=? LIMIT 1",
+                          (user_id, target_provider))
+                if c.fetchone():
+                    stats["skipped"] += 1
+                    continue
+                now = __import__("time").strftime("%Y-%m-%d %H:%M:%S",
+                                                  __import__("time").gmtime())
+                c.execute(
+                    "INSERT INTO user_credentials (id, user_id, provider, kind, config_json, "
+                    "created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (uuid7_str(), user_id, target_provider, target_kind, cfg, now, now))
+                stats[target_kind] += 1
+            db.commit()
+        if any(stats.values()):
+            log.info(f"credential kind backfill: {stats}")
+        return stats
+    except Exception as e:
+        log.warning(f"backfill_credential_kind failed: {e}")
+        raise  # 迁移约定：抛错=不盖章，下次启动重试
+
 
 # ====== 托管仓库表 ======
 _MANAGED_REPOS_DDL = """
@@ -3369,9 +3498,10 @@ def link_user_provider(user_id: int, provider: str, external_id: str,
     try:
         with db_lock:
             c = db.cursor()
-            # 统一写入 user_credentials
-            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
-                      (user_id, provider_key, json.dumps({
+            # A2：显式写 kind 列 —— DDL 的 DEFAULT '' 在 MySQL 严格模式下会被
+            # _strip_text_default 剥掉（TEXT 不能带默认），不写列会报 1364。
+            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, kind, config_json, updated_at) VALUES (?,?,?,?,datetime('now'))",
+                      (user_id, provider_key, "", json.dumps({
                           f"{provider}_id": external_id,
                           "access_token": access_token,
                           "refresh_token": refresh_token,
@@ -3421,8 +3551,7 @@ def _read_refresh_token_from_credentials(user_id: int, provider: str) -> str:
     使用同一密钥解密——如果 external_identities 解密失败，
     user_credentials 大概率也解密失败。
     """
-    provider_key = f"{provider}_oauth"
-    cred = get_credential(user_id, provider_key)
+    cred = get_credential(user_id, provider, kind="oauth")
     if not cred or not cred.get("refresh_token"):
         return ""
     return cred["refresh_token"]
@@ -3570,8 +3699,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
 
     # 5. 同步更新 user_credentials（迁移期保留，上层 deps.py 读 fetched_at/token_expires_at 判断过期）
     # Issue #343: cred 不存在时创建新条目，否则预刷新永远跳过（user_credentials 无 gitcode_oauth → 死路）
-    provider_key = f"{provider}_oauth"
-    cred = get_credential(user_id, provider_key)
+    cred = get_credential(user_id, provider, kind="oauth")
     new_cred = dict(cred) if cred else {}
     new_cred["access_token"] = new_access
     if new_refresh:
@@ -3583,7 +3711,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         # deps.py get_user_token_with_refresh 读此处 token_expires_at 做 (epoch - now) < 600 数值比较。
         new_cred["token_expires_at"] = int(time.time()) + new_expires_in
         new_cred["expires_in"] = new_expires_in
-    set_credential(user_id, provider_key, new_cred)
+    set_credential(user_id, provider, new_cred, kind="oauth")
 
     log.info(f"refresh_oauth: success for user={user_id}, provider={provider}")
     return new_access

@@ -779,7 +779,24 @@ def get_hosting_provider_config(provider: str) -> dict:
         # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）
         "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
         "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
+        # B 批（2026-11-13）：建 webhook 的鉴权参数按方言派生——Gitee 系用
+        # webhook_password（路径 B=secret / 路径 A=token），GitHub 系用
+        # webhook_secret（仅路径 B）。调用方零平台分支。
+        "setup_webhook_kwargs": _setup_kwargs_fn(_wd),
     }
+
+
+def _setup_kwargs_fn(dialect: str):
+    """返回 setup_webhook 鉴权参数构造器（入参 secret/wh_token/use_path_b）。"""
+    def _github_style(secret: str, _wh_token: str, use_path_b: bool) -> dict:
+        return {"webhook_secret": secret} if use_path_b else {}
+
+    def _gitee_style(secret: str, wh_token: str, use_path_b: bool) -> dict:
+        return {"webhook_password": secret if use_path_b else wh_token}
+
+    if dialect == "github_web":
+        return _github_style
+    return _gitee_style
 
 
 _GITHUB_API_BASE = "https://api.github.com"
@@ -1222,3 +1239,152 @@ def _template_source_downloader(source_platform: str, ref: str = ""):
             "请在 configs/platforms/ 配置该平台卡（含 download_base）后重试")
     return lambda source_repo, workdir, tmp, token: _download_card_archive(
         card, source_repo, workdir, tmp, token, ref=ref)
+
+
+# ── 协作者增删家族（B 批 2026-11-13）：与 webhook 三件套同一分派轴 ──
+# 路由层不再写 `if provider == "github": add_github_collaborator / else
+# add_collaborator`；新平台卡声明已支持方言即复用家族，零代码接入。
+# 按名字注册（惰性解析）：注册表持有函数对象会让存量测试的 patch（模块属性）
+# 失效——patch 只换模块属性，家族表里的旧引用仍是真函数。用 globals()[name]
+# 在调用期解析，测试接缝始终有效。
+_COLLAB_FUNC_NAMES = {
+    "github_web": ("add_github_collaborator", "remove_github_collaborator"),
+    "gitee_v5": ("add_collaborator", "remove_collaborator"),
+}
+
+
+def get_collaborator_funcs(provider: str):
+    """返回该平台的 (add, remove) 协作者函数对（卡驱动，未支持方言 fail-closed）。"""
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    _pc = get_platform_card(provider)
+    if _pc is None:
+        raise ValueError(
+            f"未知 VCS 平台 '{provider}'：未配置平台卡，无法派生协作者能力。")
+    _wd = getattr(_pc, "webhook_dialect", "") or ""
+    _names = _COLLAB_FUNC_NAMES.get(_wd)
+    if _names is None:
+        raise ValueError(
+            f"平台 '{provider}' 协作者形态未支持（webhook_dialect={_wd!r}）："
+            f"请声明已实现的方言（{'/'.join(_COLLAB_FUNC_NAMES)}）")
+    return tuple(globals()[n] for n in _names)
+
+
+# ── bot 权限判定 / 邀请接受家族（B 批续，2026-11-13）：与协作者家族同轴分派 ──
+def _gh_bot_is_maintainer(bot_token: str, owner: str, repo: str, bot_username: str = "") -> bool:
+    _perm = get_github_repo_permissions(bot_token, owner, repo)
+    return bool(_perm and (_perm.get("admin") or _perm.get("maintain") or _perm.get("push")))
+
+
+def _gc_bot_is_maintainer(bot_token: str, owner: str, repo: str, bot_username: str = "") -> bool:
+    perm = get_member_permission(bot_token, owner, repo, bot_username)
+    try:
+        return bool(perm and int(perm.get("access_level") or 0) >= 40)
+    except (TypeError, ValueError):
+        return False
+
+
+_BOT_MAINTAINER_NAMES = {
+    "github_web": "_gh_bot_is_maintainer",
+    "gitee_v5": "_gc_bot_is_maintainer",
+}
+_INVITE_PERMISSION = {"github_web": "push", "gitee_v5": "maintainer"}
+
+# agent git 凭据的仓 token 读取器登记（B 批：repos.py 不再按平台名分派）
+_REPO_TOKEN_GETTERS = {
+    # 键必须是 **provider**，不能用 webhook_dialect：gitee_v5 被 gitcode 与 gitee
+    # 共用，按方言登记会让 gitee 仓走 GitCode 的读取器（读 gitcode 凭据 → 随 Basic
+    # 认证发往 gitee.com，跨平台凭据错发；QA C1 2026-11-13 实锤）。
+    # 未登记的 provider（如 gitee/gitlab）落 _repo_platform_token 的端口分支，
+    # 走 get_user_token_for / TokenResolver，provider 语义天然正确。
+    "github": {
+        "bot": ("src.domains.mgmt.user.db", "get_github_token"),
+        "user": ("src.api.deps", "get_user_github_token_with_refresh"),
+        "use_provider_key": True,
+    },
+    "gitcode": {
+        "bot": ("src.domains.mgmt.user.db", "get_gitcode_token"),
+        "user": ("src.api.deps", "get_user_token_with_refresh"),
+        "use_provider_key": False,
+    },
+}
+_ACCEPT_NAMES = {"github_web": "accept_github_invite", "gitee_v5": "accept_invite_for_repo"}
+
+
+def _dialect_of(provider: str) -> str:
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    _pc = get_platform_card(provider)
+    if _pc is None:
+        raise ValueError(
+            f"未知 VCS 平台 '{provider}'：未配置平台卡，无法派生协作者能力。")
+    return getattr(_pc, "webhook_dialect", "") or ""
+
+
+def repo_token_getters(provider: str) -> dict:
+    """agent git 凭据的 bot/user token 读取器（**按 provider** 登记，未登记=走端口）。
+
+    键是 provider 而不是 webhook_dialect：方言表达的是 webhook/协作者形态家族，
+    不表达「token 落在哪个平台的库里」；gitee_v5 被 gitcode 与 gitee 共用，按方言
+    分发会把 gitee 仓的凭据读成 gitcode 的（跨平台凭据错发）。
+    use_provider_key 表示读仓 token 时 repo_key 是否带平台前缀（GitHub 系带，
+    GitCode 存量数据无前缀）。
+    """
+    return dict(_REPO_TOKEN_GETTERS.get(provider, {}))
+
+
+def bot_is_maintainer(provider: str, bot_token: str, owner: str, repo: str,
+                      bot_username: str = "") -> bool:
+    """bot 是否已是该仓库 maintainer 及以上（方言分派，调用方零平台分支）。"""
+    _wd = _dialect_of(provider)
+    _name = _BOT_MAINTAINER_NAMES.get(_wd)
+    if _name is None:
+        raise ValueError(f"平台 '{provider}' bot 权限判定未支持（webhook_dialect={_wd!r}）")
+    return globals()[_name](bot_token, owner, repo, bot_username)
+
+
+def invite_permission_for(provider: str) -> str:
+    """邀请协作者时的 permission 值（方言派生：github 系=push / gitee 系=maintainer）。"""
+    return _INVITE_PERMISSION.get(_dialect_of(provider), "push")
+
+
+def vcs_user_login(provider: str, token: str) -> str:
+    """token 持有者在该平台的登录名（卡驱动 /user；空串=无法确认）。"""
+    from src.kernel.token_resolver import create_provider
+    info = create_provider(provider).verify_token(token)
+    return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
+
+
+def vcs_user_permission(provider: str, token: str, owner: str, repo: str, login: str) -> dict:
+    """归一化某用户在该仓库的权限：{is_maintainer, role, access_level}（方言分派）。"""
+    _wd = _dialect_of(provider)
+    if _wd == "github_web":
+        role = (get_github_collaborator_permission(token, owner, repo, login) or "").lower()
+        return {"is_maintainer": role in ("admin", "maintain"), "role": role, "access_level": 0}
+    data = get_member_permission(token, owner, repo, login) or {}
+    try:
+        lvl = int(data.get("access_level", 0) or 0)
+    except (TypeError, ValueError):
+        lvl = 0
+    ok = lvl >= 40 or str(data.get("permission", "") or "").lower() == "admin"
+    return {"is_maintainer": ok, "role": str(data.get("role_name", "") or ""), "access_level": lvl}
+
+
+def invite_bot_collaborator(provider: str, api_token: str, bot_token: str,
+                            owner: str, repo: str, bot_username: str) -> bool:
+    """邀请 bot 为协作者并接受邀请（方言分派：permission 值 + accept 家族）。"""
+    _wd = _dialect_of(provider)
+    _add, _ = get_collaborator_funcs(provider)
+    _perm = _INVITE_PERMISSION.get(_wd, "push")
+    try:
+        _res = _add(api_token, owner, repo, bot_username, _perm)
+    except TypeError:
+        _res = _add(api_token, owner, repo, bot_username)
+    ok = _res[0] if isinstance(_res, tuple) else bool(_res)
+    if not ok:
+        return False
+    _accept_name = _ACCEPT_NAMES.get(_wd)
+    if _accept_name is not None:
+        try:
+            globals()[_accept_name](bot_token, owner, repo)
+        except Exception as _ae:
+            log.warning(f"invite_bot_collaborator: accept failed ({provider}): {_ae}")
+    return True

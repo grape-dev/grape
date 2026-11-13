@@ -882,10 +882,13 @@ def _resolve_bot_username(repo_key: str) -> str:
         # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
         from src.domains.mgmt.user.db import get_host_user_id
         _hid = get_host_user_id(_rk)
-        if _hid > 0:
+        # D105 后 host_user_id 是 UUID TEXT，返回 str —— `_hid > 0` 会对 str 抛
+        # TypeError 并被外层 except 吞掉（登录名解析恒空）。按文档口径字符串判定。
+        if str(_hid or "") not in ("", "0"):
             try:
-                from src.domains.mgmt.auth.grape_account_db import get_user_identities
-                for _ident in get_user_identities(_hid):
+                from src.domains.mgmt.auth.grape_account_db import list_platform_links
+                # A 批：host 平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
+                for _ident in list_platform_links(_hid):
                     if _ident.get("provider") == _prov:
                         return _ident.get("external_login") or ""
             except Exception:

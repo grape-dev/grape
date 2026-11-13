@@ -172,9 +172,11 @@ class TestRepairHostGithubBotInvite:
         import inspect
         from src.domains.mgmt.routes.repos import repair_host
         source = inspect.getsource(repair_host)
-        # 验证 add_github_collaborator 在 repair_host 中被引用
-        # D90-N5 修正：bot 邀请已卡驱动化（_prov.add_collaborator，适配器形态）
-        assert "add_collaborator" in source, "repair_host should call add_collaborator for GitHub (card-driven)"
+        # 验证 bot 邀请入口在 repair_host 中被引用
+        # D90-N5 修正：bot 邀请已卡驱动化；B 批（2026-11-13）进一步收敛为
+        # invite_bot_collaborator（方言分派 add+accept），故结构锁跟随新入口。
+        assert "invite_bot_collaborator" in source, \
+            "repair_host should call invite_bot_collaborator (card-driven)"
         # 验证 if not bot_ok 不在 else 块内部（缩进检查）
         lines = source.split("\n")
         found_if_not_bot_ok = False
@@ -184,10 +186,10 @@ class TestRepairHostGithubBotInvite:
             indent = len(line) - len(stripped) if stripped else 0
             if "if not bot_ok:" in stripped and indent <= 8:
                 found_if_not_bot_ok = True
-            if "add_collaborator" in stripped and found_if_not_bot_ok:
+            if "invite_bot_collaborator" in stripped and found_if_not_bot_ok:
                 found_add_github = True
         assert found_if_not_bot_ok, "if not bot_ok should be at if/else sibling level (indent <= 8)"
-        assert found_add_github, "add_collaborator (card-driven) should be called after if not bot_ok"
+        assert found_add_github, "invite_bot_collaborator (card-driven) should be called after if not bot_ok"
 
     def test_t2_10_github_bot_still_missing_fallback_to_path_b(self):
         """T2-10: GitHub 路径 A bot 邀请后权限仍不足时降级到路径 B（不返回 bot_missing error）。
