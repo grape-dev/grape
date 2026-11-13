@@ -859,11 +859,17 @@ def _resolve_bot_username(repo_key: str) -> str:
         from src.kernel.session_manager import db, db_lock
         from src.kernel.repo_key import to_repo_key
         _rk = to_repo_key(repo_key)
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-            row = c.fetchone()
-            _bot_name = row[0] if row else ""
+        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_bot
+        _bot_name = ""
+        _mg_bot = _mgmt_lib_bot()
+        if _mg_bot is not None:
+            _bot_name = _mg_bot.get_repo_field(_rk, "bot_username") or ""
+        if not _bot_name:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+                row = c.fetchone()
+                _bot_name = row[0] if row else ""
         if _bot_name:
             return _bot_name
         # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
@@ -5311,6 +5317,10 @@ def _repo_dev_scene(repo_key: str):
         return None
     try:
         from src.kernel.session_manager import db, db_lock
+        from src.kernel.domain_read import mgmt_lib
+        _mg = mgmt_lib()
+        if _mg is not None:
+            return _mg.get_repo_field(repo_key, "dev_scene") or ""
         with db_lock:
             row = db.cursor().execute(
                 "SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,)).fetchone()
