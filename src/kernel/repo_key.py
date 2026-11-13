@@ -217,7 +217,9 @@ def repo_key_candidates(base: str) -> "list[str]":
         from src.domains.runtime.vcs.platform_card import list_vcs_platforms
         providers = list_vcs_platforms()
     except Exception:
-        providers = ["gitcode", "github"]
+        # 卡目录不可用：退化到内核层前缀目录（card 注册表 → 卡目录文件名扫描），
+        # 仍不硬编码双平台；最坏情况只剩裸键自身（调用方按默认前缀处理）。
+        providers = sorted(_catalog_providers())
     for p in sorted(providers):
         _rk = f"{p}:{stripped}"
         if _rk not in cands:

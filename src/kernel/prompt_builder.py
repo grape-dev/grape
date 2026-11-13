@@ -33,37 +33,44 @@ def _local_port() -> str:
         pass
     return "3000"
 
-def _is_github_repo(repo_key: str) -> bool:
-    """判断 repo_key 是否为 GitHub 仓库。"""
-    return bool(repo_key and repo_key.startswith("github:"))
+def _vcs_module(repo_key: str):
+    """repo_key → provider 模块（能力位/常量载体；未在册返回 None）。"""
+    try:
+        from src.domains.runtime.vcs.providers import module_for
+        from src.kernel.repo_key import parse_repo_key
+        return module_for(parse_repo_key(repo_key or "")[0])
+    except Exception:
+        return None
 
 def _vcs_api_base(repo_key: str) -> str:
     """返回 VCS API 基础 URL（卡派生；无卡回退存量二分默认）。"""
     card = _vcs_card(repo_key)
     if card is not None:
         return card.api_base
-    return "https://api.github.com" if _is_github_repo(repo_key) else "https://gitcode.com/api/v5"
+    mod = _vcs_module(repo_key)
+    return str(getattr(mod, "API_BASE", "") or "")
 
 def _vcs_token_env(repo_key: str) -> str:
     """返回 VCS token 环境变量名（卡派生，与 repogit askpass 链同源）。"""
     card = _vcs_card(repo_key)
-    if card is not None:
-        return f"USER_{card.provider.upper()}_TOKEN"
-    return "USER_GITHUB_TOKEN" if _is_github_repo(repo_key) else "USER_GITCODE_TOKEN"
+    from src.kernel.repo_key import parse_repo_key
+    provider = (card.provider if card is not None else parse_repo_key(repo_key or "")[0]) or ""
+    return f"USER_{provider.upper()}_TOKEN"
 
 def _vcs_bot_token_env(repo_key: str) -> str:
     """返回 VCS bot token 环境变量名（卡派生）。"""
     card = _vcs_card(repo_key)
-    if card is not None:
-        return f"BOT_{card.provider.upper()}_TOKEN"
-    return "BOT_GITHUB_TOKEN" if _is_github_repo(repo_key) else "BOT_GITCODE_TOKEN"
+    from src.kernel.repo_key import parse_repo_key
+    provider = (card.provider if card is not None else parse_repo_key(repo_key or "")[0]) or ""
+    return f"BOT_{provider.upper()}_TOKEN"
 
 def _vcs_name(repo_key: str) -> str:
     """返回 VCS 平台名称（卡派生）。"""
     card = _vcs_card(repo_key)
     if card is not None:
         return card.name
-    return "GitHub" if _is_github_repo(repo_key) else "GitCode"
+    from src.kernel.repo_key import parse_repo_key
+    return parse_repo_key(repo_key or "")[0] or ""
 
 def _runtime_is_local(runtime_id: int = 0) -> bool | None:
     """判断 runtime 是否本机直连/本机 worker。
@@ -548,7 +555,7 @@ def build_role_definition(skills=None, agent_type="", repo_key="") -> str:
         "You are a DevOps operations assistant. Your domain:",
         "- Code review, build diagnosis, deployment guard, incident triage",
         "- Issue/PR analysis, changelog generation, repository management",
-        "- Repository (GitCode/GitHub) API operations",
+        "- Repository (platform) API operations",
         "",
         "## SECURITY (MUST FOLLOW):",
         f"1. Access ALL {_vcs} operations ONLY through the `grape` CLI (`grape git/git-repo/issues/...`, carrying GRAPE_SESSION_TOKEN). NEVER read, guess, or use any platform token from the database, config files, logs, environment, or history. Do NOT call VCS APIs with raw tokens.",
@@ -666,7 +673,7 @@ def _build_base_chat_role(repo_key="") -> str:
     return f"""You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
-- Repository (GitCode/GitHub) API operations
+- Repository (platform) API operations
 
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
 

@@ -788,22 +788,16 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict) -> s
     token = ""
     _use_user_token_fallback = False
     try:
-        if provider == "github":
-            # GitHub: bot token 优先，用户 token fallback
-            from src.domains.mgmt.user.db import get_github_token as _get_gh
-            token = _get_gh(repo_key=repo_key) or ""
-            if not token and user.get("id"):
-                # P1-2 修复: 和 GitCode 路径对称——只设 flag 不获取 token，
-                # 让 with_oauth_token 内部用 get_user_token_for 获取（有预刷新；K1 包装器已退役）
-                _use_user_token_fallback = True
-        else:
-            # Issue #343: 非 github 写操作走仓库 bot token（跳过 agent session token；gitee 等
-            # 同链——get_repo_bot_token 内部 TokenResolver 策略链按 repo_key 派生）
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
-            token = _get_gc(repo_key=repo_key) or ""
-            if not token:
-                # bot token 未配置，fallback 用户 token（走 with_oauth_token 保护）
-                _use_user_token_fallback = True
+        # Issue #343: 写操作走仓库 bot token 优先（跳过 agent session token）。
+        # 2026-11-13 if/else 收口：单一读链 get_repo_token_for——provider 基类
+        # resolve_repo_token 派生（TokenResolver 策略链 + 卡能力位
+        # owner_identity_token_fallback 的 owner-identity 回落，原 github 专属
+        # get_github_token 尾段语义），所有平台含新平台同链零分支。
+        from src.domains.mgmt.user.db import get_repo_token_for as _get_rt
+        token = _get_rt(repo_key=repo_key) or ""
+        if not token:
+            # bot token 未配置，fallback 用户 token（走 with_oauth_token 保护）
+            _use_user_token_fallback = True
     except Exception as e:
         log.warning(f"confirm-done close_issue: get token for {repo_key} failed: {e}")
 
@@ -1407,7 +1401,7 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
     if conv_id:
         from src.kernel.session_manager import get_messages
         conv_messages = get_messages(conv_id, limit=30)
-    _issue_host = "github.com" if repo_key.startswith("github:") else "gitcode.com"
+    _issue_host = host_for_repo_key(repo_key)  # 卡 host 派生（无平台名二分）
     return {"messages": messages, "conversation_id": conv_id,
             "issue_url": f"https://{_issue_host}/{repo_key}/issues/{issue_number}"}
 
@@ -1866,7 +1860,6 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     组织隔离：非个人组织只返回 org_id 匹配的 issue。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
-    from src.kernel.repo_key import to_repo_key
     from src.domains.mgmt.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
@@ -1874,14 +1867,15 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     clauses = []
     params = []
     if repo_key:
-        # 跨 provider 双查：前端传入 owner/repo 无 provider 信息，
-        # to_repo_key 默认 gitcode: 前缀会漏查 GitHub 仓库数据。
-        _rk = to_repo_key(repo_key)
-        _rk_alt = ("github:" + repo_key) if _rk.startswith("gitcode:") else ("gitcode:" + repo_key)
-        _rk_list = [_rk, _rk_alt]
-        _rk_ph = ",".join("?" * len(_rk_list))
-        clauses.append(f"repo_key IN ({_rk_ph})")
-        params.extend(_rk_list)
+        # 跨 provider 候选：前端传入 owner/repo 可能无 provider 信息。
+        # P1-10：候选集由平台卡目录派生（repo_key_candidates），不再只查
+        # gitcode/github 双前缀——gitee/gitlab 仓的 issue 也要命中。
+        from src.kernel.repo_key import repo_key_candidates
+        _rk_list = repo_key_candidates(repo_key)
+        if _rk_list:
+            _rk_ph = ",".join("?" * len(_rk_list))
+            clauses.append(f"repo_key IN ({_rk_ph})")
+            params.extend(_rk_list)
     clauses.append("user_id=?")
     params.append(user["id"])
     if status:
@@ -1951,12 +1945,17 @@ def list_repo_issues(owner: str, repo: str,
                      page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
                      per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
                      recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
+                     include_deleted: int = Query(0, ge=0, le=1, description="Issue #995：默认过滤 VCS 侧已确认删除的卡片（回写 vcs_exists=0 且已核验）；1=审计模式返回并标记。未核验卡片按存在处理（fail-open 不隐藏）。"),
                      user: dict = Depends(require_org_member)):
     """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
 
     - 按 owner/repo 定位仓库，返回全部卡片富化（scene/stage/is_running/agent_statuses）+ events_count/latest_event
     - 排序按 created_at + 状态优先级（mode 可切换纯时间序）
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
+    - Issue #995 VCS 存在性过滤：默认隐藏「已确认删除」（vcs_exists=0 且
+      vcs_checked_at 已核验）的卡片，include_deleted=1 审计返回并标记
+      （vcs_check/is_vcs_deleted 回显）；未核验（vcs_checked_at 空）fail-open
+      不隐藏。过滤条件进同一 WHERE，分页 total/has_more 与过滤集合一致。
     - Issue #542 三种模式：
       * per_page>0：真分页（COUNT + LIMIT/OFFSET，响应含 total/page/per_page/has_more）
         Issue #926：PR 伪卡片并入同一分页窗口（issue 行窗口取 offset+per_page+PR 数，
@@ -1993,6 +1992,11 @@ def list_repo_issues(owner: str, repo: str,
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
     params: list = list(repo_keys)
+    # Issue #995 VCS 存在性过滤（spec 验收面，2026-11-13 补齐）：默认隐藏
+    # 「已确认删除」（vcs_exists=0 且已核验）的卡片；include_deleted=1 审计
+    # 旁路。未核验（vcs_checked_at 空）不进过滤——fail-open 不隐藏。
+    if not include_deleted:
+        clauses.append("NOT (vcs_exists=0 AND vcs_checked_at IS NOT NULL AND vcs_checked_at!='')")
     if status:
         clauses.append("status=?")
         params.append(status)
@@ -2475,7 +2479,9 @@ def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
                 _fb_user = (data or {}).get("user") or {}
                 _fb_creator = (_fb_user.get("login") or _fb_user.get("username") or "") \
                     if isinstance(_fb_user, dict) else ""
-                ensure_issue_task(rk, int(num), title=str((data or {}).get("title", "") or ""),
+                # D105 字符串 ident（gitee IK*）：原生形态直接透传（ensure_issue_task
+                # 内部按字符串入 SQL/文案；int() 会把 IK* 崩掉）
+                ensure_issue_task(rk, num, title=str((data or {}).get("title", "") or ""),
                                   event_type="issue_opened", creator=_fb_creator)
                 return "exists"
             except Exception as e:

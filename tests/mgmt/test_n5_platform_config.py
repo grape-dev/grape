@@ -1,9 +1,10 @@
 """N5 配置化平台化收口守卫（OAuth/PAT 全平台配置化 + 白名单列驱动 + display strip）。
 
 UC↔用例映射（requirements UC37）：
-- UC37① gitee OAuth 渠道卡在册（providers 内置默认，whitelist_column 派生列）
-- UC37② login_whitelist 动态建列（gitee_username 自动出现）
-- UC37③ admin 白名单列驱动（add 接受 gitee / list 返回 gitee 列）
+- UC37① gitee OAuth 渠道卡在册（providers 内置默认；2026-11-12 行式化后卡不再
+  声明白名单元数据 whitelist_column，白名单按渠道 key 行查）
+- UC37② login_whitelist 行式列 provider/username 由注册式迁移补齐（替代动态建列）
+- UC37③ admin 白名单行式（add 写 (provider, username) 行 / list 返回行形态条目）
 - UC37④ display strip 收口（observability 零内联 replace('gitcode:')，统一 stripRepoPrefix）
 - UC37⑤ 前端 manual 绑定新平台走 platform_tokens 泛型（提交体形态守卫）
 """
@@ -19,22 +20,22 @@ from src.domains.mgmt.user import db as udb
 
 
 def test_uc37_1_gitee_channel_card_registered():
-    """gitee OAuth 渠道卡在册（providers 内置默认 + whitelist_column）。"""
+    """gitee OAuth 渠道卡在册（providers 内置默认；行式化后无 whitelist_column）。"""
     from src.domains.mgmt.auth.providers import list_providers, get_provider
     assert "gitee" in list_providers()
     cfg = get_provider("gitee") or {}
-    assert cfg.get("whitelist_column") == "gitee_username"
+    assert "whitelist_column" not in cfg, "行式化后卡不再声明白名单元数据（回潮）"
     assert cfg.get("auth_url") == "https://gitee.com/oauth/authorize"
     assert cfg.get("token_url") == "https://gitee.com/oauth/token"
 
 
-def test_uc37_2_login_whitelist_dynamic_column():
-    """login_whitelist 动态建列：gitee_username 随渠道卡自动出现。"""
-    from src.api.db_setup import _ensure_whitelist_columns
-    _ensure_whitelist_columns()
+def test_uc37_2_login_whitelist_row_columns():
+    """login_whitelist 行式列 provider/username 由注册式迁移补齐（幂等）。"""
+    from src.api.db_setup import _fn_login_whitelist_row_columns
+    _fn_login_whitelist_row_columns()
     with db_lock:
         cols = {r[1] for r in db.execute("PRAGMA table_info(login_whitelist)").fetchall()}
-    assert "gitee_username" in cols
+    assert {"provider", "username"} <= cols
 
 
 def test_uc37_3_admin_whitelist_column_driven():
@@ -44,11 +45,11 @@ def test_uc37_3_admin_whitelist_column_driven():
     try:
         assert add_login_whitelist("gitee", uname, "n5") is True
         rows = list_login_whitelist()
-        hit = [r for r in rows if r.get("gitee_username") == uname]
+        hit = [r for r in rows if r.get("provider") == "gitee" and r.get("username") == uname]
         assert hit, f"gitee 白名单行未返回: {rows[:2]}"
     finally:
         with db_lock:
-            db.execute("DELETE FROM login_whitelist WHERE gitee_username=?", (uname,))
+            db.execute("DELETE FROM login_whitelist WHERE provider='gitee' AND username=?", (uname,))
             db.commit()
 
 

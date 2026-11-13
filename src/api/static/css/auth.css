@@ -681,6 +681,14 @@
   width: 26px !important;
   height: 26px !important;
 }
+/* 2026-11-12 修复（用户实弹，仅动 github 不碰其他渠道）：github 品牌色只有
+   黑/白两态——#24292f 近黑（深底隐没、浅底显灰，用户裁定不要），#0969DA 蓝
+   亦被否。github 图标恒白（章鱼猫白标，与红系渠道同等醒目）；!important 压过
+   light 模式的 var(--brand) 染色规则。brand_color=#24292f 保留在卡上供
+   其他消费点（引导页平台卡等）用正确品牌色。 */
+.oauth-btn.icon-only[onclick*="oauthLogin('github')"] svg {
+  color: #fff !important;
+}
 
 
 

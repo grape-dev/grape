@@ -6,7 +6,11 @@
 非标准平台：通过 OAuthProvider 子类扩展。
 
 平台配置包含：平台名称、OAuth 端点、授权范围、字段映射、pkce_enabled、
-whitelist_column、accept_header。
+accept_header。
+
+白名单列名声明字段（whitelist_column）已随 2026-11-12 行式化改造退役：
+login_whitelist 同表加 provider/username 行式两列，登录校验直接按渠道
+key 查行（is_user_allowed(provider, login)），卡不再声明白名单元数据。
 """
 
 import hashlib
@@ -45,7 +49,6 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "nickname",
         "pkce_enabled": True,
         "brand_color": "#e7330f",
-        "whitelist_column": "gitcode_username",
         "accept_header": "application/json",
     },
     "github": {
@@ -60,7 +63,6 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "name",
         "pkce_enabled": True,
         "brand_color": "#24292f",
-        "whitelist_column": "github_username",
         "accept_header": "application/vnd.github+json",
     },
 }
@@ -134,6 +136,31 @@ def list_providers() -> list[str]:
     """列出所有已配置的 Provider。"""
     _load_providers()
     return list(_PROVIDERS_CACHE.keys())
+
+
+def providers_catalog() -> "list[dict]":
+    """登录渠道目录（D108 登录按钮零延迟渲染）。
+
+    返回固定展示序的 [{provider, name, configured, brand_color}]——
+    服务端 HTML head 注入（window.__OAUTH_PROVIDERS__）与 /auth/providers
+    路由共用此单一来源：登录页按钮在首帧渲染前同步生成，不等 AJAX。
+    """
+    from src.domains.mgmt.user.db import get_meta_value
+    # D102-B: 登录按钮固定展示序（用户拍板：gitcode→github→gitee→gitlab→
+    # hwcloud→其余按名）——不随 providers 配置加载序漂移
+    _ORDER = {"gitcode": 0, "github": 1, "gitee": 2, "gitlab": 3, "hwcloud": 4}
+    keys = sorted(list_providers(), key=lambda k: (_ORDER.get(k, 99), k))
+    result = []
+    for key in keys:
+        cfg = get_provider(key) or {}
+        client_id = get_meta_value(f"oauth_{key}_client_id") or ""
+        result.append({
+            "provider": key,
+            "name": cfg.get("name", key),
+            "configured": bool(client_id),
+            "brand_color": cfg.get("brand_color", ""),
+        })
+    return result
 
 def generate_pkce() -> tuple[str, str]:
     """生成 PKCE code_verifier 和 code_challenge（S256）。
@@ -497,7 +524,6 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "nickname",
         "pkce_enabled": True,
         "brand_color": "#e7330f",
-        "whitelist_column": "gitcode_username",
         "accept_header": "application/json",
     },
     "github": {
@@ -512,12 +538,10 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "name",
         "pkce_enabled": True,
         "brand_color": "#24292f",
-        "whitelist_column": "github_username",
         "accept_header": "application/vnd.github+json",
     },
     # D90-N5（2026-11-07）：gitee OAuth 登录渠道卡——OAuth 配置化平台化收口。
-    # endpoints 按 Gitee 官方 OAuth 文档；whitelist_column 与 N5-3 的
-    # login_whitelist.gitee_username 列对应。管理员在管理面填
+    # endpoints 按 Gitee 官方 OAuth 文档。管理员在管理面填
     # oauth_gitee_client_id/secret 即启用（无需改代码）。
     "gitee": {
         "name": "Gitee",
@@ -530,7 +554,6 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "name_field": "name",
         "pkce_enabled": True,
         "brand_color": "#c71d23",
-        "whitelist_column": "gitee_username",
         "accept_header": "application/json",
     },
 }

@@ -109,6 +109,16 @@ class VCSProvider(ABC):
         """获取用户 token（带刷新）。
         统一走 get_user_token_for(username, user_id, provider)。"""
 
+    def resolve_repo_token(self, repo_key: str) -> str:
+        """仓库 token 统一读链（2026-11-13 if/else 收口，基类默认能力）。
+
+        默认走 TokenResolver 标准策略链；owner-identity 回落由
+        GenericVcsProvider 按卡能力位 owner_identity_token_fallback 派生
+        （配置驱动，新平台卡内声明即得）。存量专用实现（如有）子类覆写。
+        """
+        from src.kernel.token_resolver import TokenResolver
+        return TokenResolver(self).get_token(repo_key) or ""
+
     def get_collaborator_permission(self, api_token: str, owner: str,
                                     repo: str, username: str) -> "dict | str | None":
         """D42/S62 端口：查协作者权限（dict/str/None 三形态归一）。
@@ -180,6 +190,57 @@ class GenericVcsProvider(VCSProvider):
         if not isinstance(info, dict) or not info:
             raise RuntimeError(f"{self._card.name} token verify: empty user info")
         return info
+
+    def resolve_repo_token(self, repo_key: str) -> str:
+        """仓库 token 统一读链（2026-11-13 if/else 收口，基类能力）：
+
+        标准策略链（TokenResolver：session→repo_bot→global→user(host_user_id)）
+        → 全空且卡声明 owner_identity_token_fallback=true 时，按仓库 owner
+        用户名查其该平台 identity token（D32-补丁语义下沉，原为
+        db.get_github_token 尾段专属回落）。
+
+        抽象口径：所有平台（含未来 config-only 新平台）经此单一入口获得
+        与原平台专属 getter 等价的能力面；新平台要回落语义只需卡内声明
+        owner_identity_token_fallback，零代码分支。
+        """
+        from src.kernel.token_resolver import TokenResolver
+        token = TokenResolver(self).get_token(repo_key)
+        if token:
+            return token
+        if not getattr(self._card, "owner_identity_token_fallback", False):
+            return ""
+        try:
+            from src.kernel.repo_key import to_repo_key, parse_repo_key
+            _rk = to_repo_key(repo_key, provider=self.provider_name)
+            if not _rk:
+                return ""
+            _p, owner, _name = parse_repo_key(_rk)
+            return self.fetch_owner_identity_token(owner)
+        except Exception as e:
+            log.warning(f"resolve_repo_token fallback failed (provider={self.provider_name}, "
+                        f"repo_key={repo_key}): {e}")
+        return ""
+
+    def fetch_owner_identity_token(self, owner: str) -> str:
+        """owner 的本平台 identity token（能力位 owner_identity_token_fallback
+        的执行体，基类默认按 external_identities 直查——OAuth 标准形态）。
+
+        平台有特殊解析（如 github 存量委托）时子类覆写。
+        """
+        if not owner:
+            return ""
+        try:
+            from src.domains.mgmt.auth.grape_account_db import (
+                get_grape_account_by_username, get_user_identities_with_tokens)
+            acc = get_grape_account_by_username(owner)
+            if acc:
+                for ident in get_user_identities_with_tokens(acc["id"]):
+                    if ident.get("provider") == self.provider_name and ident.get("access_token"):
+                        return ident["access_token"]
+        except Exception as e:
+            log.warning(f"fetch_owner_identity_token failed (provider={self.provider_name}, "
+                        f"owner={owner}): {e}")
+        return ""
 
     def get_user_login(self, token: str) -> str:
         return str(self.verify_token(token).get("login", ""))
@@ -494,6 +555,10 @@ class GitHubProvider(GenericVcsProvider):
             from src.domains.runtime.vcs.platform_card import build_platform_card
             card = build_platform_card("github", {})
         super().__init__(card)
+        # resolve_repo_token/fetch_owner_identity_token 走 GenericVcsProvider 基类：
+        # 卡能力位 owner_identity_token_fallback=true（configs/platforms/github.json）
+        # 派生回落语义，基类默认实现按 provider_name="github" 查 external_identities
+        # ——与原 db.get_github_token 尾段（D32-补丁）同链等价。
 
     def get_user_login(self, token: str) -> str:
         from src.domains.mgmt.user.repo_manager import get_user_github_login

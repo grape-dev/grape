@@ -872,7 +872,7 @@ def test_list_issue_comments_paginates_all_pages():
         return _pages.get(_page, [])
 
     _client = VcsApiClient("github", "tok", "org", "repo")
-    with patch.object(_client, "_github_request", side_effect=_fake_github_request):
+    with patch.object(_client, "_request", side_effect=_fake_github_request):
         _out = _client.list_issue_comments(9, per_page=2)
     assert [c["body"] for c in _out] == ["a", "b", "c"]
     assert any("page=1" in _c for _c in _calls)
@@ -885,7 +885,7 @@ def test_list_issue_comments_stops_when_upstream_ignores_page():
 
     _same = [{"body": "a"}, {"body": "b"}]
     _client = VcsApiClient("gitcode", "tok", "org", "repo")
-    with patch.object(_client, "_gitcode_request", return_value=_same):
+    with patch.object(_client, "_request", return_value=_same):
         _out = _client.list_issue_comments(9, per_page=2)
     assert [c["body"] for c in _out] == ["a", "b"]
 

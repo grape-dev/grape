@@ -85,9 +85,11 @@ def _norm_path(rel: str) -> str:
     return rel
 
 _COMPARE_BASELINE_RAW = {
-    # ── repo_manager：github 专属实现分派（D105-17 审阅冻结，治理后合理保留）──
-    ('domains/mgmt/user/repo_manager.py', '_wf_denied = (provider == "github") if _wf is None else (not _wf)'): 1,
-    ('domains/mgmt/user/repo_manager.py', 'if provider == "github":'): 1,
+    # ── repos.py hosting 分支（D71 冻结面，weekly-11 卡驱动改造后 17→13；
+    #    托管全流程分支仍按实现绑定保留，后续随 S62 端口收口）──
+    ('domains/mgmt/routes/repos.py', 'if provider == "github":'): 13,
+    # ── repo_manager：github 专属实现分派（D105-17 审阅冻结——D105-19 平台化到位
+    #    收口后该冻结解除：webhook 函数指针/平台默认三态改卡派生，对应基线点已摘除）──
     # ① push workflows 判定（D105-18 三态 None 回退路径，github 实现绑定保留：
     # GitHub App token 无 workflows 权限）；② webhook
     # 函数指针分派 `if provider == "github"`：1——两处均为 github 实现绑定，
@@ -95,29 +97,26 @@ _COMPARE_BASELINE_RAW = {
     # token_resolver 适配器端口（S62 后续）。
     # G2 数据化改造后已消失：gitee 单平台比较行（原豁免 1 处，行已不在）
     ('domains/mgmt/user/db.py', 'if provider != "github":'): 1,
-    ('domains/runtime/vcs/platform_card.py', 'return "GitHub" if provider == "github" else "GitCode"'): 1,
-    ('domains/runtime/vcs/platform_card.py', 'return "github.com" if provider == "github" else "gitcode.com"'): 1,
     # ── 合并裁定重同步（dc17f2812 后 weekly-10 恢复面，pristine 实锤）──
-    ('api/issue_vcs_index.py', 'elif provider == "gitcode":'): 1,  # weekly-10-native (merge adjudication dc17f2812)
-    ('api/issue_vcs_index.py', 'if provider == "github":'): 1,  # weekly-10-native (merge adjudication dc17f2812)
-    ('api/routes/scenes.py', 'if provider == "github":'): 2,  # weekly-10-native (merge adjudication dc17f2812)
+    # 2026-11-13 if/else 收口摘除（行已消失，整键移除）：issue_vcs_index.py
+    #   github/gitcode 专属 fetch 分叉退役 → 统一 _fetch_numbers_via_port 路径；
+    #   issues.py confirm-done getter 分叉退役 → db.get_repo_token_for 统一入口。
     # F4b 凭据终态化后摘除：user/db.py 写路径收敛到 repo_cred_write_keys 逻辑键路由，
     # 旧的二元列名比较行（bot_github/gitcode 三元式）已消失；存量读侧/健康检查
     # 能力分叉仍有 5 处单平台比较（实数冻结，F4b 收敛后 7→5）。
-    ('domains/mgmt/user/db.py', 'if provider == "github":'): 1,  # dual-platform capability fork, reviewed freeze (5->4 G2 routing; ->1 S58 webhook 走 provider 端口)
+    # 2026-11-13 if/else 收口（行已消失，整键移除）：user/db.py 单平台 getter
+    #   分叉退役——S82 走 repo_cred_write_keys 逻辑键路由、webhook 列经卡能力位
+    #   webhook_token_field 派生、token 读链统一 get_repo_token_for。
     # ── r3 增量合并裁定重同步（base tip 9c4c770b8 / 本分支增量逐一实锤审阅）：──
     # IM 引擎通知出口按 provider 选渠道形态——weekly-10 原生（im/ 引擎目录整体并入）。
-    ('domains/runtime/im/notify.py', 'if provider == "github":'): 1,  # weekly-10 IM engine native (r3 merge adjudication)
-    ('domains/runtime/im/notify.py', 'if provider == "gitlab":'): 1,  # weekly-10 IM engine native (r3 merge adjudication)
     # config-driven API 客户端的 per-platform API 形态分叉（分页/分支引用等
     # 上游 API 差异；配置权威由 test_api_client_config_driven 守卫，此处为
     # D71 形态能力分叉冻结，非判定回潮）。
-    ('domains/runtime/vcs/api_client.py', 'if self.provider == "gitcode":'): 2,  # per-API shape fork (D105 config-driven client, reviewed freeze)
-    ('domains/runtime/vcs/api_client.py', 'elif self.provider == "github":'): 2,  # per-API shape fork (D105 config-driven client, reviewed freeze)
-    ('domains/runtime/vcs/api_client.py', 'elif self.provider == "gitlab":'): 1,  # per-API shape fork (D105 config-driven client, reviewed freeze)
     # Issue #343：GitHub 写操作 bot token 优先/用户 token 回落的能力分叉
     # （GitCode 路径对称差异，登记冻结）。
-    ('api/routes/issues.py', 'if provider == "github":'): 1,  # Issue #343 github bot-token-first capability fork (reviewed freeze)
+    # removed 2026-11-13 if/else closure: confirm-done token getter unified into
+    # db.get_repo_token_for (card-capability derived, zero platform literals).
+    ('api/routes/issues.py', 'if provider == "github":'): 0,  # removed 2026-11-13: get_repo_token_for unified entry
 }
 
 # (相对 src/ 的路径, 行内容 strip 后) → 基线豁免出现次数。
@@ -128,15 +127,17 @@ BASELINE_RAW = {
     ('domains/runtime/engine/repogit.py', '_HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}'): 1,
     # ── repo_key：um 平台列白名单（D39/S59 冻结）+ 存量迁移遍历 + 方言自映射 ──
     ('repo_key.py', '_UM_PROVIDER_COLUMNS = {"gitcode": "gitcode_user", "github": "github_login"}'): 1,
-    ('repo_key.py', 'providers = ["gitcode", "github"]'): 1,
     ('repo_key.py', '_DIALECT_FALLBACK = {"github": "github", "gitlab": "gitlab"}'): 1,
     # ── docstring/注释提及两平台（非判定）──
     ('token_resolver.py', '"""provider 标识: "gitcode" / "github"。"""'): 1,
     ('domains/mgmt/user/db.py', 'provider: "gitcode" 查 GitCode 路径 B 仓库，"github" 查 GitHub 路径 B 仓库。'): 1,
     ('domains/mgmt/user/db.py', 'provider: "gitcode" 或 "github"'): 1,
     ('api/oauth_token.py', 'provider: "gitcode" 或 "github"'): 1,
-    ('domains/mgmt/admin/db.py', "provider: 'gitcode' or 'github'"): 1,
-    ('domains/mgmt/admin/routes.py', 'provider: str  # "gitcode" or "github"'): 1,
+    # 2026-11-12 行式化批次摘除（基线点已删除）：
+    # - domains/mgmt/admin/db.py "provider: 'gitcode' or 'github'"（add_login_whitelist
+    #   docstring，行式化后写 (provider, username) 行）
+    # - domains/mgmt/admin/routes.py 'provider: str  # "gitcode" or "github"'
+    #   （LoginWhitelistBody 注释改渠道 key 通配）
     ('domains/runtime/engine/bot_token_health.py', 'provider: "gitcode" 或 "github"'): 1,
     ('domains/runtime/engine/service.py', '_expired_provider = _provider.provider_name  # "gitcode" / "github"'): 1,
     ('api/event_pipeline.py', 'D29/S49：评论投递族原先的 "github"/"gitcode" 字面量统一收敛到此。'): 1,
@@ -149,34 +150,30 @@ BASELINE_RAW = {
     ('api/routes/issues.py', 'result = {"gitcode": "skipped", "github": "skipped", "message": ""}'): 1,
     ('api/routes/issues.py', '"issue_closed": {"gitcode": "skipped", "github": "skipped"}}'): 2,
     # ── repos 路由：存量平台集合遍历/并集兜底（D71 冻结）──
-    ('api/routes/repos.py', '_platforms = {"gitcode", "github"}'): 2,
-    ('api/routes/repos.py', 'for _p in ("github", "gitcode"):'): 1,
-    ('api/routes/repos.py', 'return set(list_vcs_platforms()) | {"gitcode", "github"}'): 1,
     # ── 扫雷⑦ 批B1：credential_registry 实锚卡驱动（同 repos.py 口径，
     #    gitcode/github 存量兜底恒在，非二元能力判定）──
     ('domains/mgmt/user/credential_registry.py', 'return tuple(sorted(set(list_vcs_platforms()) | {"gitcode", "github"}))'): 1,
-    # ── scenes/settings：并行收口批次引入的 try/except 异常回退分支（卡派生失败兜底）──
-    ('api/routes/settings.py', '_probe_platforms = ["gitcode", "github"]'): 1,
     # G3 已清除：settings token 字段派生改 SETTINGS_TOKEN_FIELD_SUFFIX 契约开关（行已消失）
-    # ── settings 路由：存量 PAT 字段映射 / 默认平台集合（D71 冻结）──
+    # ── settings 路由：存量 PAT 字段映射（D71 冻结）──
+    # weekly-11 P1 摘除：_DEFAULT_PLATFORMS 白名单 / _probe_platforms 双平台兜底 / scenes
+    # 双前缀候选与显式 provider 白名单 / scenes `if provider == "github"` 传输分叉，
+    # 均由平台卡目录（list_vcs_platforms / get_platform_card / VcsApiClient）取代。
     ('api/routes/settings.py', '_LEGACY_PAT_FIELD_PROVIDERS = {"gitcode", "github"}'): 1,
-    ('api/routes/settings.py', '_DEFAULT_PLATFORMS = {"gitcode", "github"}'): 1,
     # ── webhook：卡派生判定之后的存量能力兜底（D88/S115 收口残留面）──
     # 旧基线点 'if _provider not in ("gitcode", "github") or not _owner or not _name:'
     # 是 M2 合并版 webhook 形态；F1 搬迁回 r2 恢复版（dd45db977）后该行不存在，
     # 由下行我们的卡驱动守卫行顶替（F1 relocation 实测在位 ×1）。
     ('api/routes/webhook.py', 'if get_platform_card(provider) is None or provider in ("gitcode", "github"):'): 1,  # our card-driven guard (r2 webhook, reviewed freeze)
-    # ── domains/mgmt/user/db.py：webhook token 存量列兜底（D71 形态冻结，_webhook_token_col_for
-    #    同族——gitcode/github 两平台才有 webhook token 存量列，非能力判定）──
-    ('domains/mgmt/user/db.py', 'if provider in ("gitcode", "github"):'): 1,  # D71 legacy webhook-token column fallback (reviewed freeze)
+    # ── domains/mgmt/user/db.py：webhook token 存量列兜底（已收口摘除）──
+    # 2026-11-13 if/else 收口（行已消失，整键移除）：get_webhook_token_by_repo
+    #   的 gitcode/github 二元枚举退役 → 卡能力位 webhook_token_field 派生
+    #   （_webhook_token_col_for 硬编码列名映射同步删除）。
     # ── 合并裁定重同步（dc17f2812 后 weekly-10 恢复面）：
     # 以下均为 weekly-10 原生代码（pristine weekly-10 逐一实锤在位），
     # 按“weekly-10 为准”合并策略登记豁免，非新增回潮。
     ('api/event_pipeline.py', '_ledger_record_comment("github" if _is_github_repo(repo_key) else "gitcode",'): 0,  # 摘除：weekly-10 收口后行已消失（防呆见 test_baseline_points_still_exist）
     ('api/feedback_status.py', 'else "gitlab" if host.startswith("gitlab") else "gitcode")'): 1,  # weekly-10-native (merge adjudication dc17f2812)
     ('api/routes/issues.py', '_provider_name = "github" if is_github else "gitcode"'): 0,  # 摘除：r3 后已卡派生为 _provider_name = provider
-    ('api/routes/scenes.py', 'for prov in ("github", "gitcode"):'): 1,  # weekly-10-native (merge adjudication dc17f2812)
-    ('api/routes/scenes.py', 'if provider in ("github", "gitcode"):'): 2,  # weekly-10-native (merge adjudication dc17f2812)
     ('domains/runtime/engine/direct_executor.py', 'log.info(f"Exec agent: bot_token={\'set\' if repo_gitcode_token else \'none\'} (provider={\'github\' if repo_key.startswith(\'github:\') else \'gitcode\'})")'): 1,  # weekly-10-native (merge adjudication dc17f2812)
 }
 

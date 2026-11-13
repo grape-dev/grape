@@ -3013,75 +3013,29 @@ def _ledger_record_comment(provider: str, repo_key: str, repository: str, issue_
         log.warning(f"outbound_ledger record comment failed (non-blocking): {e}")
 
 
-def _gitcode_post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_token: str,
-                                          repo_key: str = "", origin_task: str = "") -> None:
-    """GitCode 裸 urllib 发 Issue 评论 + 记账（S16-1：该路径原先连响应体都不读）。
-
-    供 _post_result_to_issue / _post_subtask_completion_to_parent / _post_all_subtasks_done
-    共用；失败抛异常（调用方原有 try/except 兜底）。
-    """
-    import urllib.request, json as _json
-    _data = _json.dumps({"body": comment}).encode("utf-8")
-    _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_num}/comments"
-    _req = urllib.request.Request(_url, data=_data,
-        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-    _resp = urllib.request.urlopen(_req, timeout=15)
-    _body_resp = b""
-    try:
-        _body_resp = _resp.read()
-    except Exception:
-        pass
-    _parsed = {}
-    try:
-        _parsed = _json.loads(_body_resp) if _body_resp else {}
-    except Exception:
-        _parsed = {}
-    _ledger_record_comment("gitcode", repo_key, repository, issue_num, comment,
-                           _parsed if isinstance(_parsed, dict) else {}, origin_task=origin_task)
-
-
 def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
     """调 VCS API 获取 Issue 责任人（assignee.login）。失败返回空。
 
-    根据 repo_key provider 分流 GitHub/GitCode。
+    读路径统一走卡驱动命令层 `_vcs_get_issue`（D18/S28：github/gitcode/gitee/
+    gitlab 同一条代码路径）——此前的 "github 否则 gitcode v5" 二分会让
+    gitee/gitlab 仓打成 gitcode API（读不到数据）。
+    无 token / 网络异常 / 404 一律降级返回空串（不抛异常）。
     用于 pipeline 责任人显示（issue_state.assignee），取代"从事件 payload 猜 assignee"。
     """
     num = _issue_num_from(issue_id)
     if not num:
         return ""
-    try:
-        from src.kernel.repo_key import split_owner_repo
-        owner, rname = split_owner_repo(repo_key)
-
-        if _is_github_repo(repo_key):
-            from src.domains.mgmt.user.db import get_github_token
-            tok = get_github_token(repo_key=repo_key) or ""
-            if not tok:
-                # FR-12.1: token 空时记 warning（不再静默）
-                log.warning(f"_fetch_issue_assignee: no github token for {repo_key}, assignee resolution degraded")
-                return ""
-            d = _github_fetch_issue(owner, rname, num, tok)
-            asg = d.get("assignee") or {}
-            login = asg.get("login", "") if isinstance(asg, dict) else ""
-            return login or ""
-        # GitCode 原逻辑
-        import urllib.request
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        tok = get_repo_token_with_refresh(repo_key) or ""
-        if not tok:
-            # FR-12.1: token 空时记 warning（不再静默）
-            log.warning(f"_fetch_issue_assignee: no gitcode token for {repo_key}, assignee resolution degraded")
-            return ""
-        req = urllib.request.Request(
-            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
-            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
-        import json as _json
-        d = _json.load(urllib.request.urlopen(req, timeout=15))
-        asg = d.get("assignee") or {}
-        login = asg.get("login", "") if isinstance(asg, dict) else ""
-        return login or ""
-    except Exception:
+    _state, _d = _vcs_get_issue(repo_key, num)
+    if _state == "unknown":
+        # FR-12.1: 无法核实（无 token / 网络异常）时记 warning，不静默
+        log.warning(f"_fetch_issue_assignee: no resolvable token or VCS API error for "
+                    f"{repo_key}#{num}, assignee resolution degraded")
         return ""
+    if not isinstance(_d, dict):
+        return ""
+    asg = _d.get("assignee") or {}
+    login = asg.get("login", "") if isinstance(asg, dict) else ""
+    return login or ""
 
 
 def _issue_num_from(issue_id: str) -> str:
@@ -3092,38 +3046,19 @@ def _issue_num_from(issue_id: str) -> str:
 def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     """调 VCS API 获取 Issue 标题。失败返回空。
 
-    根据 repo_key provider 分流 GitHub/GitCode。
+    读路径统一走卡驱动命令层 `_vcs_get_issue`（同 `_fetch_issue_assignee`）：
+    取代 "github 否则 gitcode v5" 二分，gitee/gitlab 仓不再打成 gitcode API。
+    无法核实 / 404 一律返回空串（不抛异常）。
     用于 pipeline 展示兜底：当 tasks/events 表中 title 均为占位符时，
     通过 API 获取真实标题并回写。
     """
     num = _issue_num_from(issue_id)
     if not num:
         return ""
-    try:
-        from src.kernel.repo_key import split_owner_repo
-        owner, rname = split_owner_repo(repo_key)
-
-        if _is_github_repo(repo_key):
-            from src.domains.mgmt.user.db import get_github_token
-            tok = get_github_token(repo_key=repo_key) or ""
-            if not tok:
-                return ""
-            d = _github_fetch_issue(owner, rname, num, tok)
-            return d.get("title", "") or ""
-        # GitCode 原逻辑
-        import urllib.request
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        tok = get_repo_token_with_refresh(repo_key) or ""
-        if not tok:
-            return ""
-        req = urllib.request.Request(
-            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
-            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
-        import json as _json
-        d = _json.load(urllib.request.urlopen(req, timeout=15))
-        return d.get("title", "") or ""
-    except Exception:
+    _state, _d = _vcs_get_issue(repo_key, num)
+    if _state != "exists" or not isinstance(_d, dict):
         return ""
+    return _d.get("title", "") or ""
 
 
 def fetch_issue_via_vcs(repo_key: str, issue_number) -> tuple:
@@ -3133,41 +3068,12 @@ def fetch_issue_via_vcs(repo_key: str, issue_number) -> tuple:
     - ("exists", {issue dict})：VCS 侧存在（data 至少含 title，可能为空标题）
     - ("missing", {})：VCS 侧明确 404（Issue 已删除/不存在）
     - ("unknown", {})：无法核实（无 token / 网络异常 / 非法编号），调用方按降级语义处理
+
+    D18/S28 follow-up：实现收敛到卡驱动 `_vcs_get_issue`（返回契约同源）。
+    此前的 "github 否则 gitcode v5" 二分会让 gitee/gitlab/gitee-类原生标识
+    （如 IKUG2T）仓的核实恒为 unknown。
     """
-    num = _issue_num_from(str(issue_number or ""))
-    if not num:
-        return ("unknown", {})
-    import urllib.error
-    from src.kernel.repo_key import split_owner_repo, to_repo_key
-    _rk = to_repo_key(repo_key)
-    owner, rname = split_owner_repo(_rk)
-    if not owner or not rname:
-        return ("unknown", {})
-    try:
-        if _is_github_repo(_rk):
-            from src.domains.mgmt.user.db import get_github_token
-            tok = get_github_token(repo_key=_rk) or ""
-            if not tok:
-                return ("unknown", {})
-            d = _github_fetch_issue(owner, rname, num, tok)
-            return ("exists", d if isinstance(d, dict) else {})
-        import urllib.request
-        import json as _json
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        tok = get_repo_token_with_refresh(_rk) or ""
-        if not tok:
-            return ("unknown", {})
-        req = urllib.request.Request(
-            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
-            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
-        d = _json.load(urllib.request.urlopen(req, timeout=15))
-        return ("exists", d if isinstance(d, dict) else {})
-    except urllib.error.HTTPError as _he:
-        if int(_he.code) == 404:
-            return ("missing", {})
-        return ("unknown", {})
-    except Exception:
-        return ("unknown", {})
+    return _vcs_get_issue(repo_key, _issue_num_from(str(issue_number or "")))
 
 
 def _parse_parent_issue_from_payload(payload: dict) -> str:
@@ -4643,21 +4549,14 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
                                         result_text: str, bot_token: str, repo_key: str = ""):
     """子任务完成后，在父 Issue 评论登记完成情况。"""
     try:
-        import urllib.request, json as _json
         from src.api.event_store import parse_agent_output_json
         _out = parse_agent_output_json(result_text)
         _summary = (_out.get("conclusion", "") if _out else "") or result_text[:200]
         _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
         _comment += "\n<!-- grape-auto-comment -->"
-        if _is_github_repo(repo_key):
-            from src.kernel.repo_key import split_owner_repo
-            _owner, _repo = split_owner_repo(repo_key)
-            _gh_resp = _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
-            # Issue #453 台账（审查 P1-1 补漏）：subtask 完成回帖入账
-            _ledger_record_comment("github", repo_key, repository, parent_issue_num, _comment, _gh_resp)
-        else:
-            _gitcode_post_issue_comment_ledgered(repository, parent_issue_num, _comment, bot_token,
-                                                 repo_key=repo_key)
+        # D29/S49：父 issue 回帖唯一走卡驱动（github/gitcode/gitee/gitlab 同路径）
+        _post_issue_comment_ledgered(repository, parent_issue_num, _comment, bot_token,
+                                      repo_key=repo_key)
         log.info(f"Subtask #{sub_issue_num} completion posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post subtask completion failed: {e}")
@@ -4667,7 +4566,6 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
                             repo_key: str = ""):
     """所有子任务完成后，在父 Issue 发汇总报告。"""
     try:
-        import urllib.request, json as _json
         _lines = [f"### \u5168\u90e8\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\n"]
         for s in subtasks:
             _sid = s.get("issue_id", "?")
@@ -4677,15 +4575,9 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         _lines.append(f"\n\u7236\u4efb\u52a1 #{parent_issue_num} \u7684\u6240\u6709\u5b50\u4efb\u52a1\u5df2\u5b8c\u6210\u3002")
         _comment = "\n".join(_lines)
         _comment += "\n<!-- grape-auto-comment -->"
-        if _is_github_repo(repo_key):
-            from src.kernel.repo_key import split_owner_repo
-            _owner, _repo = split_owner_repo(repo_key)
-            _gh_resp = _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
-            # Issue #453 台账（审查 P1-1 补漏）：全部完成汇总回帖入账
-            _ledger_record_comment("github", repo_key, repository, parent_issue_num, _comment, _gh_resp)
-        else:
-            _gitcode_post_issue_comment_ledgered(repository, parent_issue_num, _comment, bot_token,
-                                                 repo_key=repo_key)
+        # D29/S49：父 issue 回帖唯一走卡驱动（github/gitcode/gitee/gitlab 同路径）
+        _post_issue_comment_ledgered(repository, parent_issue_num, _comment, bot_token,
+                                      repo_key=repo_key)
         log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")
@@ -4823,23 +4715,12 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     # 2) 从 VCS API 拉取 Issue 评论
     comments = []
     try:
-        if _is_github_repo(rk):
-            # GitHub API
-            from src.kernel.repo_key import split_owner_repo
-            _owner, _repo = split_owner_repo(rk)
-            comments = _github_list_issue_comments(_owner, _repo, str(issue_number), bot_token)
-        else:
-            # GitCode API 原逻辑
-            import urllib.request
-            import json as _json
-            if not repository:
-                from src.kernel.repo_key import from_repo_key
-                repository = from_repo_key(rk)
-            api_url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
-            req = urllib.request.Request(api_url)
-            req.add_header("Authorization", f"Bearer {bot_token}")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                comments = _json.loads(resp.read())
+        # D29/S49：评论读取唯一走卡驱动（github/gitcode/gitee/gitlab 同路径），
+        # 取代 "github 否则 gitcode v5" 二分（gitee/gitlab 仓原路径读不到评论）。
+        if not repository:
+            from src.kernel.repo_key import from_repo_key
+            repository = from_repo_key(rk)
+        comments = _list_issue_comments_card(rk, repository, str(issue_number), bot_token)
     except Exception as e:
         log.warning(f"Sync issue comments: fetch from VCS failed: {e}")
         return
@@ -5027,11 +4908,9 @@ def _notify_scene_precheck_failure(repo_key: str, issue_id: str, problems: list,
         if not token:
             log.warning(f"scene_precheck notify: no bot token for {repo_key}, skip comment")
             return
-        if _is_github_repo(repo_key):
-            _github_post_issue_comment(owner, rname, str(num), body, token)
-        else:
-            _gitcode_post_issue_comment_ledgered(f"{owner}/{rname}", num, body, token,
-                                                 repo_key=repo_key)
+        # D29/S49：回帖唯一走卡驱动（github/gitcode/gitee/gitlab 同路径）
+        _post_issue_comment_ledgered(f"{owner}/{rname}", num, body, token,
+                                     repo_key=repo_key)
         log.info(f"scene_precheck notify: posted reason comment to {repo_key}#{num}")
     except Exception as e:
         log.warning(f"scene_precheck notify: comment failed for {repo_key}#{num}: {e}")

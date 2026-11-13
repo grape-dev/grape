@@ -9,15 +9,22 @@
 <link rel="stylesheet" href="/static/css/tokens.css?v=20261016-1">
 <link rel="stylesheet" href="/static/css/app.css?v=109">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=27">
-<link rel="stylesheet" href="/static/css/auth.css?v=31">
+<link rel="stylesheet" href="/static/css/auth.css?v=33">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
 // Early auth check — prevents login/workbench flash on page load.
-// Checks localStorage (returning user), URL ?token= (legacy OAuth), or ?exchange_code= (new OAuth).
-(function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
+// Checks URL ?token= (legacy OAuth), ?exchange_code= (new OAuth), or localStorage token.
+// D108-b（登录页零闪动收口）：URL 携带兑换码/token（OAuth 回跳）= 确定要进工作台，
+// 直接置 logged-in；仅 localStorage 有 token = 未验证态——首帧进 pending（启动指示），
+// 不预渲染工作台：token 失效时登录页只需一次揭晓（不再「工作台闪现→登录弹回」）。
+(function(){var p=new URLSearchParams(location.search);
+if(p.get('token')||p.get('exchange_code')){document.documentElement.setAttribute('data-logged-in','1');}
+else if(localStorage.getItem('token')){document.documentElement.setAttribute('data-logged-in','pending');
+  // 兜底：验票链路异常未决时 8s 后降级到登录页（防启动指示永挂）
+  setTimeout(function(){if(document.documentElement.getAttribute('data-logged-in')==='pending'){document.documentElement.removeAttribute('data-logged-in');}},8000);}})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
 (function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='42';})();
@@ -30,6 +37,13 @@ setTimeout(function(){document.documentElement.classList.remove('i18n-loading');
 /* Logged-in: hide login overlay, show workbench */
 [data-logged-in="1"] .auth-page{opacity:0;pointer-events:none}
 [data-logged-in="1"] .sb{display:flex}
+/* D108-b: token 未验证（pending）——登录页与工作台都先不渲染，只显启动指示；
+   验票完成后 JS 置 logged-in=1（工作台）或移除属性（登录页一次到位） */
+[data-logged-in="pending"] .auth-page{opacity:0;pointer-events:none}
+[data-logged-in="pending"] #bootSpinner{display:flex}
+#bootSpinner{display:none;position:fixed;inset:0;align-items:center;justify-content:center;z-index:9999}
+#bootSpinner::before{content:'';width:28px;height:28px;border-radius:50%;border:3px solid rgba(128,128,128,.25);border-top-color:rgba(128,128,128,.75);animation:bootspin .8s linear infinite}
+@keyframes bootspin{to{transform:rotate(360deg)}}
 /* i18n loading: hide [data-i18n] text until translations applied (prevents zh→en flash) */
 html.i18n-loading [data-i18n]{visibility:hidden}
 html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
@@ -38,6 +52,8 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <script src="/static/js/i18n.js?v=20261112-1" defer></script>
 </head>
 <body>
+<!-- D108-b：token 验证中的启动指示（纯 CSS，data-logged-in=pending 时显示） -->
+<div id="bootSpinner" aria-hidden="true"></div>
 <div class="auth-page" id="loginView">
 <div class="auth-card">
 <img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
@@ -98,22 +114,28 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
   }
 })();
 </script>
-<!-- OAuth 分隔线 + 按钮（预渲染，避免 API 延时导致布局抖动） -->
+<!-- OAuth 分隔线 + 按钮容器（2026-11-12 拍板移除静态预置双按钮：多渠道场景下
+     预置 gitcode/github 先渲染再被 renderOAuthButtons 的全量按钮替换，造成闪动；
+     且预置按钮与渠道目录漂移（merge 回潮产物）。容器留空，统一由
+     renderOAuthButtons 按 /auth/providers 渲染。 -->
 <div id="oauthSection" style="margin-top:20px">
   <div style="margin:0 0 16px;text-align:center;position:relative">
     <div style="position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(255,255,255,0.08)"></div>
     <span style="position:relative;background:transparent;padding:0 16px;font-size:11px;color:#6e6e73;letter-spacing:0.5px" data-i18n="app.login.or_oauth">或使用第三方登录</span>
   </div>
-  <div style="display:flex;gap:10px" id="oauthBtns">
-    <button class="oauth-btn" style="--brand:#F54A36" onclick="app.oauthLogin('gitcode')">
-      <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>
-      <span data-i18n="app.login.gitcode_login">GitCode</span>
-    </button>
-    <button class="oauth-btn" style="--brand:#1F2328" onclick="app.oauthLogin('github')">
-      <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>
-      <span data-i18n="app.login.github_login">GitHub</span>
-    </button>
-  </div>
+  <div style="display:flex;gap:10px" id="oauthBtns"></div>
+  <!-- D108-b：按钮构建器同步加载（无 defer）+ 解析期内联调用——OAuth 按钮随 HTML
+       解析进首帧，不等 defer 脚本；app.js 异步对账复用同一构建器 -->
+  <script src="/static/js/oauth-buttons.js?v=1"></script>
+  <script>
+  (function(){
+    var c = document.getElementById('oauthBtns');
+    var inj = window.__OAUTH_PROVIDERS__;
+    if (c && window.__renderOAuthButtonList && inj && inj.length) {
+      window.__renderOAuthButtonList(c, inj);
+    }
+  })();
+  </script>
   <!-- 未配置常显说明（#535）：预置 DOM + CSS 按注入类首帧显示（注册页同模式，零闪动；
        全部已配置时 CSS 隐藏，JS 按运行时权威状态再纠正）。data-i18n 随语言切换。
        预置文案用中性兜底（不点名平台）——JS 到场后按真实未配置名单更新为精确文案，
@@ -329,17 +351,17 @@ function _toggleAppLang(){
 <script src="/static/js/api.js?v=32" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
-<script src="/static/js/pages/dashboard.js?v=154" defer></script>
+<script src="/static/js/pages/dashboard.js?v=155" defer></script>
 <script src="/static/js/pages/pipeline.js?v=50" defer></script>
 <script src="/static/js/pages/agents.js?v=32" defer></script>
 <script src="/static/js/pages/events.js?v=67" defer></script>
 <script src="/static/js/pages/chat.js?v=50" defer></script>
 <script src="/static/js/pages/im_channel.js?v=31" defer></script>
 <script src="/static/js/pages/repos.js?v=64" defer></script>
-<script src="/static/js/pages/templates.js?v=38" defer></script>
+<script src="/static/js/pages/templates.js?v=39" defer></script>
 <script src="/static/js/pages/issues.js?v=141" defer></script>
 <script src="/static/js/pages/settings.js?v=39" defer></script>
-<script src="/static/js/pages/account.js?v=51" defer></script>
+<script src="/static/js/pages/account.js?v=52" defer></script>
 <script src="/static/js/pages/scene-market.js?v=51" defer></script>
 <script src="/static/js/pages/skills.js?v=49" defer></script>
 <script src="/static/js/pages/knowledge.js?v=150" defer></script>
@@ -350,7 +372,7 @@ function _toggleAppLang(){
 <script src="/static/js/pages/my_feedback.js?v=8" defer></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=6" defer></script>
 <script src="/static/js/pages/autopilot.js?v=74" defer></script>
-<script src="/static/js/app.js?v=255" defer></script>
+<script src="/static/js/app.js?v=257" defer></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

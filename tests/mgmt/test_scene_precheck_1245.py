@@ -336,8 +336,8 @@ def test_webhook_failure_comment_contains_reason_code(monkeypatch):
     def _fake_comment(repository, issue_num, comment, token, repo_key="", origin_task=""):
         captured.update(repository=repository, issue_num=issue_num, comment=comment, token=token)
 
-    monkeypatch.setattr(ep, "_gitcode_post_issue_comment_ledgered", _fake_comment)
-    monkeypatch.setattr(ep, "_is_github_repo", lambda repo_key: False)
+    # D29/S49：回帖唯一入口=卡驱动 helper（原 GitCode 裸 urllib 入口已退役）
+    monkeypatch.setattr(ep, "_post_issue_comment_ledgered", _fake_comment)
     import src.kernel.token_service as ts
     monkeypatch.setattr(ts, "get_repo_bot_token", lambda repo_key: "bot-token")
     ep._notify_scene_precheck_failure(

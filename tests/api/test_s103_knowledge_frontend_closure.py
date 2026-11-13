@@ -58,7 +58,9 @@ def test_uc9_frontend_binary_gone():
     assert "indexOf('github:')" not in seg and "indexOf('gitcode:')" not in seg, \
         "provider 必须按任意平台前缀解析"
     dash = _read("api/static/js/pages/dashboard.js")
-    assert "_repoWebHost(dashData.repo)" in dash, "issue host 必须走卡目录"
+    # 2026-11-13 适配：dashboard 的 issue 链接载体升级为 _vcsUrl（内部委托 _repoWebHost，仍走卡目录）
+    assert ("_vcsUrl(dashData.repo" in dash or "_repoWebHost(dashData.repo)" in dash), \
+        "issue host 必须走卡目录"
     tpl = _read("api/static/js/pages/templates.js")
     assert "_repoWebLink(" in tpl, "模板跳转必须走卡目录"
     sm = _read("api/static/js/pages/scene-market.js")
@@ -79,7 +81,7 @@ def test_uc11_cache_version_bumped():
     """UC11：index.html 对四个改动页面模块 + app.js 的 ?v= 均已 bump（只升不降）。"""
     idx = _read("api/static/index.html")
     for frag, minv in [("dashboard.js?v=", 110), ("repos.js?v=", 64),
-                       ("templates.js?v=", 38), ("scene-market.js?v=", 51), ("app.js?v=", 253)]:
+                       ("templates.js?v=", 39), ("scene-market.js?v=", 51), ("app.js?v=", 253)]:
         m = re.search(re.escape(frag) + r"(\d+)", idx)
         assert m and int(m.group(1)) >= minv, f"{frag} 版本必须 >= {minv}"
 

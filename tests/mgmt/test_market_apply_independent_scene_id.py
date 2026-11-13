@@ -2,7 +2,7 @@
 
 覆盖验收：
 1. 首次应用 → scene_id 为 custom-*（不再是模板名），name 为用户输入
-2. 同仓库重复应用同一市场场景（幂等命中）→ 更新已有行，名称更新为本次输入
+2. 同仓库重复应用同一市场场景（幂等命中）→ 200 复用既有场景（reused=true，scene_id 不变，不新增行）
 3. 撞名 → 409，message 引导换名
 4. 未传 display_name → 回退模板 display_name
 5. 同仓库应用另一模板（模拟另一用户）→ 独立行，互不影响
@@ -62,17 +62,17 @@ def test_apply_generates_unique_scene_id_and_editable_name():
             row = c.fetchone()
         assert row and row[0] == sid1 and row[1] == "小明的VOD", row
 
-        # 2) 同仓库重复应用同一市场场景 → 全新场景（weekly-09 修订：幂等更新路径已删除，
-        #    同一用户基于同一模板创建多个自己的场景是正当需求）
+        # 2) 同仓库重复应用同一市场场景 → 幂等复用（P3 契约对齐 OpenAPI：
+        #    Idempotent per market_scene_id + repo_key，200 复用既有场景）
         r2 = client.post(f"/api/scenes/market/{mid}/apply{qs}", json={"display_name": "小明的VOD2号"})
         assert r2.status_code == 200, r2.text
-        sid2 = r2.json()["scene_id"]
-        assert sid2 != sid1, "重复应用应为全新场景（不再幂等更新）"
-        assert sid2.startswith("custom-")
+        body2 = r2.json()
+        assert body2.get("reused") is True, f"重复 apply 应标记 reused=true: {body2}"
+        assert body2["scene_id"] == sid1, f"重复 apply 应复用首个场景, got {body2['scene_id']} vs {sid1}"
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE repo_key='gitcode:t/r1'")
-            assert c.fetchone()[0] == 2, "同仓库两次应用应有两条独立行"
+            assert c.fetchone()[0] == 1, "同仓库重复 apply 不应新增行"
 
         # 3) 撞名 → 409（r2 仓库先应用一次造出同名场景，再用另一模板对 r2 应用同名）
         r3a = client.post(f"/api/scenes/market/{mid}/apply?owner=t&repo=r2&repo_key=gitcode:t/r2",
@@ -115,7 +115,7 @@ def test_apply_generates_unique_scene_id_and_editable_name():
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE repo_key='gitcode:t/r1'")
-            assert c.fetchone()[0] == 3, "r1 仓库应用3次（同模板2次+另一模板1次）应各自独立成行"
+            assert c.fetchone()[0] == 2, "r1 仓库应用2次（同模板1次+另一模板1次）各自独立成行"
 
         print("ALL PASS")
     finally:

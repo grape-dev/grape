@@ -14,19 +14,19 @@ from src.kernel.gsb.provider import get_local_service as _get_local
 router = APIRouter(prefix="/internal", tags=["internal-mgmt"])
 
 
-@router.get("/repos/{repo_key}/webhook-config")
+@router.get("/repos/{repo_key:path}/webhook-config")
 async def get_repo_webhook_config(repo_key: str) -> dict:
     """供 MgmtServiceRemote.get_repo_webhook_config() 调用。"""
     return _get_local("mgmt").get_repo_webhook_config(repo_key)
 
 
-@router.get("/sessions/{repo_key}/{agent_type}")
+@router.get("/sessions/{repo_key:path}/{agent_type}")
 async def get_agent_session(repo_key: str, agent_type: str) -> dict:
     """供 MgmtServiceRemote.get_agent_session() 调用。"""
     return _get_local("mgmt").get_agent_session(repo_key, agent_type)
 
 
-@router.get("/scenes/{repo_key}")
+@router.get("/scenes/{repo_key:path}")
 async def get_scenes(repo_key: str) -> list:
     """供 MgmtServiceRemote.get_scene_config() 调用。"""
     return _get_local("mgmt").get_scene_config(repo_key)
@@ -44,7 +44,7 @@ async def verify_token(body: dict) -> dict:
     return _get_local("mgmt").verify_session_token(body.get("token_hash", ""))
 
 
-@router.get("/repos/{repo_key}/bot-config")
+@router.get("/repos/{repo_key:path}/bot-config")
 async def get_bot_config(repo_key: str) -> dict:
     """供 MgmtServiceRemote.get_bot_config() 调用。"""
     return _get_local("mgmt").get_bot_config(repo_key)

@@ -29,6 +29,25 @@ _REPO_DELETE_EVENT_HEADERS = {
 
 _REPO_DELETE_ACTION_EVENTS = {"delete", "deleted", "destroyed"}
 
+
+def _expected_webhook_token(repo: str, provider: str) -> str:
+    """webhook 校验的预期 token（四进程/分域库兼容读法）。
+
+    Issue #699 四进程拆分遗留（yaw 实弹 2026-11-13 发现）：webhook 端点挂载在
+    event 进程（连 runtime 库），而 managed_repos / grape_t_repo_credentials 是
+    mgmt 域表——直查本地库在分域库形态下 1146 → 误判 unmanaged 404。改走 GSB
+    服务总线（get_service("mgmt").get_repo_webhook_config）：单机=LocalProvider
+    行为与直查完全一致；集群+remote=内部 API 跨进程读 mgmt 库。
+    """
+    try:
+        from src.kernel.gsb.provider import get_service
+        cfg = get_service("mgmt").get_repo_webhook_config(f"{provider}:{repo}") or {}
+        return str(cfg.get("webhook_token") or "")
+    except Exception as e:
+        log.warning(f"webhook expected-token lookup via GSB failed (repo={repo}): {e}")
+        return ""
+
+
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
     """识别 webhook 事件是否为仓库删除（Issue #340 触发路径二）。
 
@@ -446,8 +465,8 @@ async def gitcode_webhook(request: Request):
 
     # 2. 用 repo 查 managed_repos 的预期 token
     # 扫雷⑦（中危④）：显式传 provider——跨平台同名仓不互串预期 token
-    from src.domains.mgmt.user.db import get_webhook_token_by_repo
-    expected = get_webhook_token_by_repo(repo, provider="gitcode")
+    # Issue #699 四进程：经 GSB 读 mgmt 域（event 进程本地库无 managed_repos）
+    expected = _expected_webhook_token(repo, "gitcode")
     log.info(f"Webhook: expected_token={'found' if expected else 'none (unmanaged repo)'}")
 
     # 3. 未托管仓库拒绝：不在 managed_repos 的仓库不接收事件（防止幽灵 webhook / 无主事件 / 绕过校验）
@@ -503,8 +522,8 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
 
     log.info(f"GitHub Webhook: extracted repo={repo}, event={event_header}")
 
-    from src.domains.mgmt.user.db import get_webhook_token_by_repo
-    expected = get_webhook_token_by_repo(repo, provider="github")
+    # Issue #699 四进程：经 GSB 读 mgmt 域
+    expected = _expected_webhook_token(repo, "github")
 
     if not expected:
         log.warning(f"GitHub Webhook rejected: unmanaged repo={repo}")
@@ -2558,8 +2577,8 @@ async def generic_vcs_webhook(provider: str, request: Request):
 
     # 未托管仓库拒绝（与 gitcode 端点同语义：防幽灵 webhook）
     # 扫雷⑦（中危④）：显式传 provider——跨平台同名仓不互串预期 token
-    from src.domains.mgmt.user.db import get_webhook_token_by_repo
-    expected = get_webhook_token_by_repo(repo, provider=str(provider or "").lower())
+    # Issue #699 四进程：经 GSB 读 mgmt 域
+    expected = _expected_webhook_token(repo, str(provider or "").lower())
     if not expected:
         log.warning(f"generic webhook rejected: unmanaged repo={repo} provider={provider}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
@@ -2574,6 +2593,20 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=code, content={"code": code, "message": f"invalid webhook signature: {reason}"})
 
     _repo_key = f"{provider}:{repo}"
+
+    # Issue #340 触发路径三（P1-11）：平台卡通用端点的仓库删除级联——验签通过后处理，
+    # 与 gitcode/github 专用端点同语义（此前通用端点只调度流水线，删仓后托管记录残留）。
+    try:
+        import json as _json
+        _raw_payload = _json.loads(body.decode() or "{}")
+    except Exception:
+        _raw_payload = {}
+    if _is_repo_delete_event(event_header, _raw_payload if isinstance(_raw_payload, dict) else {}):
+        _del_result = _handle_repo_deleted(repo, provider, f"event={event_header}")
+        _code = 200 if _del_result.get("status") == "repo_deleted" else 500
+        log.info(f"generic webhook: provider={provider} repo={repo} repo-deleted handled: {_del_result.get('status')}")
+        return JSONResponse(status_code=_code, content=_del_result)
+
     log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} verified, pipeline scheduled")
     _aio.ensure_future(_aio.to_thread(run_pipeline, body, headers,
                                       account=repo, repo_key_override=_repo_key))

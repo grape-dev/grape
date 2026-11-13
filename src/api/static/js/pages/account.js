@@ -890,10 +890,16 @@ function _accountManualBindForm(provider, isZh, pName, oauthConfigured) {
   var tokenCreateLabel = tokenCreateUrl ? (tokenCreateUrl.split('/')[2] || '') : '';
   // 帮助文案第一步做成超链接，直达令牌创建页（新标签页打开）
   // D102：帮助文案按 provider 查表（gitee 曾错用 gitcode 文案——引导指错站点）
-  var _helpKey = {github: 'app.account.github_token_help',
+  // 帮助文案按 provider 查表（专用文案只给平台卡在册且已写死步骤的存量平台）；
+  // 其余平台（gitlab 等）走通用文案 + 卡目录 pat_create_url 的 host——
+  // 此前 gitlab 落到 gitcode_token_help，把用户导向 GitCode 站点（错站）。
+  var _helpMap = {github: 'app.account.github_token_help',
                   gitee: 'app.account.gitee_token_help',
-                  gitcode: 'app.account.gitcode_token_help'}[provider] || 'app.account.gitcode_token_help';
-  var helpSteps = I18N.t(_helpKey);
+                  gitcode: 'app.account.gitcode_token_help'};
+  var _helpKey = _helpMap[provider] || 'app.account.pat_token_help_generic';
+  var helpSteps = _helpKey === 'app.account.pat_token_help_generic'
+    ? I18N.t(_helpKey, {host: (tokenCreateUrl ? (tokenCreateUrl.split('/')[2] || '') : '') || provider})
+    : I18N.t(_helpKey);
   // 单一直达入口（方案 A）：通栏按钮是唯一的令牌创建链接，帮助步骤保持纯文本
   // （步骤 2/3 是权限/复制指引有增量；第 1 步链接与按钮同目标，属重复入口，已移除）
   var createLinkBtn = '<a href="' + tokenCreateUrl + '" target="_blank" rel="noopener noreferrer" class="bt" '

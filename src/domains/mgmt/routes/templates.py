@@ -127,7 +127,41 @@ def get_template_preview(template_id: str, user: dict = Depends(require_no_sessi
 class CreateTemplateRequest(BaseModel):
     template_id: str
     repo_name: str = ""
-    provider: str = ""  # gitcode | github，空时自动选择
+    provider: str = ""  # 平台卡 provider（gitcode/gitee/gitlab/…），空时按卡目录 ∩ 已绑定平台自动选
+
+
+def _pick_platform_token(user: dict) -> tuple[str, str]:
+    """卡目录 ∩ 用户已绑定平台 → (provider, token)；无可用返回 ("", "")。
+
+    - 平台集合唯一权威 = 仓库平台卡目录（list_vcs_platforms）；
+    - 候选 = 用户 external_identities 已绑定平台（PAT-only 绑定同样在册）；
+    - 优先 login_provider 命中的平台，其余按卡目录顺序；
+    - token 统一走 get_user_token_for（provider 传参，PAT > OAuth）。
+    """
+    from src.api.deps import get_user_token_for
+    from src.domains.mgmt.auth.grape_account_db import get_user_identities
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+    _uid = str(user.get("id") or "")
+    _uname = user.get("username") or ""
+    try:
+        _catalog = list(_lvp())
+    except Exception:
+        _catalog = []
+    try:
+        _bound = {i.get("provider") for i in (get_user_identities(_uid) or []) if i.get("provider")}
+    except Exception:
+        _bound = set()
+    _login = (user.get("login_provider") or "").strip()
+    _ordered = [p for p in _catalog if p in _bound]
+    _ordered.sort(key=lambda p: 0 if p == _login else 1)  # 稳定排序：login_provider 优先
+    for _p in _ordered:
+        try:
+            _tok = get_user_token_for(_uname, user_id=_uid, provider=_p)
+        except Exception:
+            _tok = ""
+        if _tok:
+            return _p, _tok
+    return "", ""
 
 @router.post("/create", operation_id="project_template_create", summary="Create project from template", description="One-shot create: create repo -> write template code -> auto-host -> apply dev scene.")
 async def create_from_template(body: CreateTemplateRequest,
@@ -143,7 +177,6 @@ async def create_from_template(body: CreateTemplateRequest,
     # D71 登记收口项）。下游全链路已卡驱动：建仓/身份（create_provider 卡工厂）、
     # 模板 push（S90 卡派生 host）、bot 配置（卡派生 meta key）、host_repo 托管。
     from src.domains.runtime.vcs.platform_card import get_platform_card as _gate_card
-    from src.domains.mgmt.routes.repos import _get_user_provider_and_token
     if body.provider and _gate_card(body.provider) is not None:
         # D44/S66：显式平台 token 统一走 D3 入口（provider 传参，无平台名分支）
         provider = body.provider
@@ -151,7 +184,14 @@ async def create_from_template(body: CreateTemplateRequest,
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
     else:
-        provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), str(user.get("id") or ""))
+        # 卡目录 ∩ 用户已绑定平台（尊重 login_provider）——平台卡在册即可选，
+        # 不再用存量双平台分支函数（gitee/gitlab 单绑定用户此前恒 400）
+        provider, api_token = _pick_platform_token(user)
+        if not provider:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": "当前账号没有可用的仓库平台：请先在「设置 → 凭据」绑定平台（GitCode/GitHub/Gitee/GitLab 等）并配置访问令牌",
+            })
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 

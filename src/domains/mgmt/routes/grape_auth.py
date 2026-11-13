@@ -1139,15 +1139,12 @@ def _ensure_personal_org(user_id: str, username: str, lang: str = "zh"):
 
 def _check_whitelist(provider: str, external_login: str) -> bool:
     """P1-4: OAuth 白名单校验——提取公共函数，消除重复。
-    返回 True 表示通过（或在无白名单列时直接通过）。
+    2026-11-12 行式化（weekly-11）：直接按渠道 key 行查（is_user_allowed
+    行式双读：新行优先→老列兜底），不再读渠道卡 whitelist_column（字段已退役）。
+    返回 True 表示通过。
     """
-    from src.domains.mgmt.auth.providers import get_provider as _get_prov_cfg
-    cfg = _get_prov_cfg(provider)
-    wl_col = cfg.get("whitelist_column") if cfg else None
-    if wl_col:
-        from src.kernel.config import is_user_allowed
-        return is_user_allowed(wl_col, external_login)
-    return True
+    from src.kernel.config import is_user_allowed
+    return is_user_allowed(provider, external_login)
 
 def _build_redirect_url(request: Request, path: str = "/", params: dict | None = None,
                         hash_frag: str = "", popup: bool = False) -> str:
@@ -2270,28 +2267,10 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
 @router.get("/providers")
 def list_oauth_providers():
     """列出已配置的 OAuth provider（供前端动态渲染登录按钮）。"""
-    from src.domains.mgmt.auth.providers import list_providers, get_provider
-    from src.domains.mgmt.user.db import get_meta_value
-
-    # D102-B: 登录按钮固定展示序（用户拍板：gitcode→github→gitee→gitlab→
-    # hwcloud→其余按名）——不随 providers 配置加载序漂移
-    _ORDER = {"gitcode": 0, "github": 1, "gitee": 2, "gitlab": 3, "hwcloud": 4}
-    keys = sorted(list_providers(), key=lambda k: (_ORDER.get(k, 99), k))
-
-    result = []
-    for key in keys:
-        cfg = get_provider(key) or {}
-        client_id = get_meta_value(f"oauth_{key}_client_id") or ""
-
-        result.append({
-            "provider": key,
-            "name": cfg.get("name", key),
-            "configured": bool(client_id),
-            "brand_color": cfg.get("brand_color", ""),
-        })
+    from src.domains.mgmt.auth.providers import providers_catalog
     # R7: 返回 email_configured 供前端判断无邮箱配置降级
     from src.domains.mgmt.auth.email_service import is_email_configured
-    return {"providers": result, "email_configured": is_email_configured()}
+    return {"providers": providers_catalog(), "email_configured": is_email_configured()}
 
 @router.get("/transfer-context", operation_id="grape_auth_transfer_context")
 def get_transfer_context(user: dict = Depends(require_jwt_only)):

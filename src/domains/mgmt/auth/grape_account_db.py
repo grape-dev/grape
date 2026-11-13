@@ -1115,24 +1115,28 @@ def sync_external_login_on_rename(
     _sync_um_platform_col(grape_user_id, provider, new_login)
 
     # 4) login_whitelist 联动（与 2026-10-29 现网修数口径一致；冲突保留旧行）
+    # 2026-11-12 行式化（weekly-11）：双写——新行按 (provider, username) 行式
+    # UPDATE；老列按 provider key 派生列名 UPDATE（列不存在捕获跳过，新装/
+    # 无老列渠道零影响）。渠道卡 whitelist_column 字段已退役，不再读卡。
     try:
-        # D20/S30：白名单列名取登录渠道卡 whitelist_column（既有通用机制），
-        # 未配列的平台（含未配卡的）跳过联动——与二元 if 时代行为一致
-        wl_col = ""
-        try:
-            from src.domains.mgmt.auth.providers import get_provider
-            wl_col = str((get_provider(provider) or {}).get("whitelist_column") or "")
-        except Exception:
-            wl_col = ""
-        if wl_col:
+        import re as _re
+        if _re.match(r'^[a-z0-9_]+$', provider or ""):
             with db_lock:
                 c = db.cursor()
                 # login_whitelist 表无 updated_at 列（DDL 仅 created_at），只改用户名不碰时间戳
                 c.execute(
-                    f"UPDATE login_whitelist SET {wl_col}=? "
-                    f"WHERE {wl_col}=? AND {wl_col}!=''",
-                    (new_login, old_login),
+                    "UPDATE login_whitelist SET username=? "
+                    "WHERE provider=? AND username=? AND username!=''",
+                    (new_login, provider, old_login),
                 )
+                col = f"{provider}_username"
+                try:
+                    c.execute(
+                        f"UPDATE login_whitelist SET {col}=? WHERE {col}=?",
+                        (new_login, old_login),
+                    )
+                except Exception:
+                    pass  # 该渠道无老列（新装/未声明列存量）——跳过联动
                 db.commit()
     except Exception as e:
         log.warning(f"Sync login_whitelist failed for user {grape_user_id} provider {provider}: {e}")

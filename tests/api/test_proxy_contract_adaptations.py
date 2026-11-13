@@ -183,3 +183,61 @@ def test_numeric_comment_id_passes_through_unresolved(monkeypatch):
     assert not [c for c in calls if c["method"] == "GET"]  # 无解析查询
     deletes = [c for c in calls if c["method"] == "DELETE"]
     assert deletes[0]["url"].endswith(f"/pulls/comments/{_NOTE_ID}")
+
+
+# ---------- ⑦ create 套用 owner-path 契约（fixw11 P1：gitee 建 issue 404） ----------
+
+def test_create_issue_owner_path_url_gitee_bare_repo_name(monkeypatch):
+    """gitee：POST /repos/{owner}/issues（无 repo 段），body.repo=纯仓名——恒 404
+    'project or enterprise' 的 repo 路径形态废弃（与 update 同款机制/能力位）。"""
+    calls = _patch_transport(monkeypatch)
+    gra.create_issue("grape-dev", "grape",
+                     gra.IssueCreateBody(title="fixw11-p1", body="hello"),
+                     user=_USER, p="gitee")
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    url = posts[0]["url"]
+    assert url == f"{gitee.API_BASE}/repos/grape-dev/issues"
+    assert "/repos/grape-dev/grape/issues" not in url  # 路径无 repo 段
+    payload = posts[0]["payload"]
+    assert payload["repo"] == "grape"  # ⑥ 纯仓库名（非全称）
+    assert payload["title"] == "fixw11-p1"
+
+
+def test_create_issue_owner_path_url_gitcode(monkeypatch):
+    """gitcode：官方契约同 POST /repos/{owner}/issues + body.repo（docs 实锤）。"""
+    calls = _patch_transport(monkeypatch)
+    gra.create_issue("grape-dev", "grape",
+                     gra.IssueCreateBody(title="fixw11-p1", body="hello"),
+                     user=_USER, p="gitcode")
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    url = posts[0]["url"]
+    assert url == f"{gitcode.API_BASE}/repos/grape-dev/issues"
+    assert "/repos/grape-dev/grape/issues" not in url
+    assert posts[0]["payload"]["repo"]  # body 必带 repo
+
+
+def test_create_issue_github_keeps_repo_path(monkeypatch):
+    """github 无开关 → 维持 POST /repos/{owner}/{repo}/issues（零回归，body 无 repo）。"""
+    calls = _patch_transport(monkeypatch)
+    gra.create_issue("grape-dev", "grape",
+                     gra.IssueCreateBody(title="fixw11-p1", body="hello"),
+                     user=_USER, p="github")
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert posts[0]["url"] == f"{github.API_BASE}/repos/grape-dev/grape/issues"
+    assert "repo" not in posts[0]["payload"]
+
+
+def test_issue_endpoints_accept_string_ident(monkeypatch):
+    """gitee issue 编号是 IK*/I* 字符串 ident（非数字）：detail/comments 路径按
+    number 设计需兼容 str（_vcs_url 逐段 percent-encode，ident 原样透传）。"""
+    calls = _patch_transport(monkeypatch)
+    gra.get_issue("grape-dev", "grape", "IK3ABCD9", user=_USER, p="gitee")
+    gets = [c for c in calls if c["method"] == "GET"]
+    assert gets[0]["url"] == f"{gitee.API_BASE}/repos/grape-dev/grape/issues/IK3ABCD9"
+    gra.create_issue_comment("grape-dev", "grape", "IK3ABCD9",
+                             gra.CommentBody(body="c"), user=_USER, p="gitee")
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert posts[0]["url"] == f"{gitee.API_BASE}/repos/grape-dev/grape/issues/IK3ABCD9/comments"

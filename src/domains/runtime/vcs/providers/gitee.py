@@ -31,6 +31,9 @@ ISSUE_BODY_REPO_BARE = True
 #   400 "due_on is missing/empty"，补后 200；日期形态宽容，无需 DATE_ONLY 开关）。
 #   代理层入口拦截给可读 400；GitHub 方言无此约束。
 MILESTONE_DUE_ON_REQUIRED = True
+# PR 评论 id 为 32 位 hex（与 gitcode 同族）：update/delete 上游只认数字
+# note_id，代理层写前先解析（#623 解析器复用）。
+PR_COMMENT_ID_HEX = True
 
 
 def _redact_url(url: str) -> str:
@@ -117,3 +120,13 @@ def translate(resource: str, op: str, neutral: dict, ctx: dict) -> dict:
 
 def query_state(state: str) -> str:
     return _QUERY_STATE.get(state, state)
+
+# PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
+PR_WEB_PATH = "pulls"
+
+
+def repo_segment(owner: str, repo: str) -> str:
+    """资源根片段（github 方言）：repos/{owner}/{repo}（URL 段编码）。"""
+    import urllib.parse
+    return (f"repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}")

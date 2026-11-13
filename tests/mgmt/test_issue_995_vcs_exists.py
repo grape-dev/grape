@@ -65,13 +65,27 @@ class TestIssue995VcsExists:
     def _get(self, qs=""):
         return client.get(f"/api/issues/{self.P_OWNER}/{self.P_REPO}{qs}", headers=self._headers)
 
-    def _patch_numbers(self, mapping, confirm_state="missing"):
+    def _patch_numbers(self, mapping, confirm_state="missing", sync_apply=True):
+        """mock VCS 索引 + 单条复核，并按产品模型同步回写一次。
+
+        产品模型（#995 实现即此形态）：vcs_issue_numbers 由后台任务调用 →
+        _apply_existence 回写 issue.vcs_exists/vcs_checked_at 列 → 列表按列
+        SQL 过滤（不实时调索引）。原测试假设"列表实时调索引过滤"，交互模型
+        自 #995 落地起即不匹配（8 用例从诞生起红，2026-11-13 对齐）：mock 后
+        同步触发一次回写，列表才有列值可依。unknown/None 索引跳过回写——
+        fail-open 语义正由"未回写=未核验"体现。
+        """
         vcs_index.clear_cache()
         import src.api.event_pipeline as event_pipeline
         original = (vcs_index.vcs_issue_numbers, event_pipeline.fetch_issue_via_vcs)
         vcs_index.vcs_issue_numbers = lambda rk: mapping.get(rk)
         event_pipeline.fetch_issue_via_vcs = (
             lambda rk, num: (confirm_state, {}) if confirm_state else ("unknown", {}))
+        if sync_apply:
+            _apply = vcs_index._apply_existence
+            for rk, nums in mapping.items():
+                if nums is not None:
+                    _apply(rk, nums)
         return original
 
     def _restore(self, original):
@@ -248,10 +262,12 @@ class TestIssue995VcsExists:
             assert c.fetchone()[0] == 0
 
     def test_apply_write_failure_maps_unavailable_and_fail_open(self):
-        """回写失败必须 fail-open（status=unavailable），卡片不隐藏。"""
+        """回写被拦截（未核验）必须 fail-open，卡片不隐藏。"""
         self._mk(50)
         self._mk(51)
-        original = self._patch_numbers({self.P_REPO_KEY: frozenset({50})})
+        # sync_apply=False：本用例锁定"回写未发生"时的列表表现（回写失败→
+        # 未核验 → fail-open 不隐藏）；回写成功则 51 会被标删，语义不同。
+        original = self._patch_numbers({self.P_REPO_KEY: frozenset({50})}, sync_apply=False)
         original_apply = vcs_index._apply_existence
         vcs_index._apply_existence = lambda rk, nums: None
         try:

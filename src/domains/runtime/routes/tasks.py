@@ -464,23 +464,22 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
             task["latest_event"] = evs[-1] if evs else None
             from src.api.session_store import get_issue_stage
             st = get_issue_stage(_repo, f"#{_num}")
-            _host = "github.com" if _repo.startswith("github:") else "gitcode.com"
-            from src.kernel.repo_key import split_owner_repo
-            _owner, _rname = split_owner_repo(_repo)
+            # 平台 host/路径段按卡方言派生（issue_web_url 单源），不再 host 二分
+            from src.kernel.repo_key import issue_web_url
             with db_lock:
                 c2 = db.cursor()
                 c2.execute("SELECT id, issue_number, title, assignee, status "
-                           "FROM issue WHERE repo_key=? AND issue_number=?", (_repo, int(_num)))
+                           "FROM issue WHERE repo_key=? AND issue_number=?", (_repo, _num))  # D105 字符串 ident 透传
                 ir = c2.fetchone()
             task["issue"] = {
                 "id": ir[0] if ir else None,
-                "issue_number": ir[1] if ir else int(_num),
+                "issue_number": ir[1] if ir else _num,
                 "title": ir[2] if ir else "",
                 "assignee": ir[3] if ir else (st or {}).get("assignee", ""),
                 "stage": (st or {}).get("stage", "vod"),
                 "status": ir[4] if ir else "",
                 "scene_id": (st or {}).get("scene_id", ""),
-                "url": f"https://{_host}/{_owner}/{_rname}/issues/{_num}",
+                "url": issue_web_url(_repo, _num),
             }
         except Exception as _e:
             from src.kernel.config import log

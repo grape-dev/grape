@@ -97,3 +97,6 @@ def translate(resource: str, op: str, neutral: dict, ctx: dict) -> dict:
 
 def query_state(state: str) -> str:
     return _QUERY_STATE.get(state, state)
+
+# PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
+PR_WEB_PATH = "merge_requests"

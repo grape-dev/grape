@@ -100,11 +100,32 @@ async def analyze_image(request: Request):
     else:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing url parameter"})
 
-    # 域名白名单（防 SSRF）
+    # 域名白名单（防 SSRF）：由平台卡派生（card.host + card.user_images_base）
+    # ——gitcode CDN（cdn-img/cdn-files/raw 等 *_<host> 子域）自动覆盖，
+    # 新平台的图床配卡即入册，业务代码零平台名/CDN 字面量。
     parsed = urlparse(url)
-    _allowed = ("cdn-img.gitcode.com", "cdn-files.gitcode.com")
+    _allowed_hosts = set()
+    try:
+        from src.domains.runtime.vcs.platform_card import (
+            list_vcs_platforms as _lvp, get_platform_card as _gpc)
+        for _p in _lvp():
+            _c = _gpc(_p)
+            if _c is None:
+                continue
+            if getattr(_c, "host", ""):
+                _allowed_hosts.add(_c.host)
+            _ib = (getattr(_c, "user_images_base", "") or "").strip()
+            if _ib:
+                _h = urlparse(_ib).hostname
+                if _h:
+                    _allowed_hosts.add(_h)
+    except Exception as _e:
+        log.warning(f"analyze-image: platform card allowlist unavailable: {_e}")
+    _host = (parsed.hostname or "").lower()
     _allowed_suffixes = (".myhuaweicloud.com",)  # OBS 附件域名（桶名动态）
-    if parsed.hostname not in _allowed and not any(parsed.hostname.endswith(s) for s in _allowed_suffixes):
+    if _host not in _allowed_hosts and not any(
+            _host == h or _host.endswith("." + h) for h in _allowed_hosts) \
+            and not any(_host.endswith(s) for s in _allowed_suffixes):
         return {"error": "domain not allowed", "url": url}
 
     # 下载图片到临时文件
@@ -416,19 +437,37 @@ def _resolve_gitcode_token(user_token: str, repo_key: str = "") -> str:
 def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
     """构建 Web Chat prompt 的用户基本信息（与飞书 user_info 格式一致）。
 
-    user 为 FastAPI 当前用户 dict（username 即 GitCode 登录名）；
-    acc 为 grape_accounts 行（含 nickname）。注入后使 Web Agent
-    感知说话者身份（chat-prompt-overview.md §2.1，补 Web Chat 无 user_info 缺口）。
+    user 为 FastAPI 当前用户 dict；acc 为 grape_accounts 行（含 nickname）。
+    注入后使 Web Agent 感知说话者身份（chat-prompt-overview.md §2.1，补 Web Chat
+    无 user_info 缺口）。
+
+    P1 收口：平台登录名按身份域（external_identities）逐条注入，平台名取平台卡目录
+    ——不再写死 `GitCode login:`（华为等纯登录渠道没有 grape 侧 VCS login，写死会
+    给 agent 一个不存在的身份）。无平台绑定时只注入中性的 grape 账号名。
     """
     try:
         username = (user.get("username") or "").strip()
         if not username:
             return ""
         lines = ["## 用户基本信息"]
-        lines.append(f"  GitCode login: {username}")
+        lines.append(f"  Grape 账号：{username}")
+        # 平台登录名（按卡目录顺序，身份域权威）
+        try:
+            from src.domains.mgmt.auth.grape_account_db import get_user_identities
+            from src.domains.runtime.vcs.platform_card import (
+                list_vcs_platforms as _lvp, display_name_for_repo_key as _dname)
+            _idents = [i for i in (get_user_identities(str(user.get("id") or "")) or [])
+                       if (i.get("external_login") or "").strip()]
+            _order = {p: n for n, p in enumerate(_lvp())}
+            _idents.sort(key=lambda i: _order.get(i.get("provider") or "", len(_order)))
+            for _i in _idents:
+                _p = _i.get("provider") or ""
+                lines.append(f"  {_dname(f'{_p}:x/x')} 登录名：{_i['external_login']}")
+        except Exception as _e:
+            log.warning(f"_build_web_user_info: platform identities unavailable: {_e}")
         nickname = (acc or {}).get("nickname") or ""
         if nickname and nickname != username:
-            lines.append(f"  GitCode 昵称：{nickname}")
+            lines.append(f"  昵称：{nickname}")
         return "\n".join(lines)
     except Exception:
         return ""
@@ -784,7 +823,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
             except Exception as _e:
                 log.warning(f"Chat post-exec 401 detect failed: {_e}")
             if _error_code:
-                _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
+                # 平台名取卡目录（gitee/gitlab 不再被显示成 GitCode）
+                from src.domains.runtime.vcs.platform_card import display_name_for_repo_key
+                _pName = display_name_for_repo_key(repo_key)
                 reply = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
 
     add_message(conv_id, "agent", reply)
@@ -2516,7 +2557,8 @@ def _execute_chat_task(task_id: str):
                     from src.kernel.token_service import detect_and_mark_repo_token_expired  # D101 T8 门面
                     _task_error_code = detect_and_mark_repo_token_expired(_task_repo_key) or ""
                     if _task_error_code:
-                        _pName = "GitHub" if _task_repo_key.startswith("github:") else "GitCode"
+                        from src.domains.runtime.vcs.platform_card import display_name_for_repo_key as _dn
+                        _pName = _dn(_task_repo_key)
                         final_text = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
                 except Exception as _te:
                     from src.kernel.config import log as _cte_log

@@ -96,7 +96,14 @@ class TestGitCodeTreeSlashRef:
         未知 ref 返回 200 空树，无法归一 404，Spec 接受多一次上游请求）。
         """
         recorded = []
-        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _routed_req_mock(recorded, {}))
+        # 用例修复（2026-11-13）：原版路由表为空——commits mock 返回 echo，解析不到
+        # tree sha，按 #734 正确语义归一 404；且引用了未定义的 tree_sha。对齐 QA-01
+        # 同构形态：/commits 路由返回带 tree sha 的 commit。
+        tree_sha = "abc123def456"
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
+            _routed_req_mock(recorded, {
+                "/commits": _commit_with_tree("c111222333", tree_sha),
+            }))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=main")
         assert r.status_code == 200
         commits = [c for c in recorded if "/commits" in c["url"] and "sha=main" in c["url"]]

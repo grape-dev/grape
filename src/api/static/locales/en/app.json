@@ -569,6 +569,7 @@
     "github_token_help": "1. Go to github.com → Settings<br>2. Developer settings → Personal access tokens<br>3. Generate new token (repo scope)",
     "gitee_token_help": "1. Go to gitee.com → Settings<br>2. Personal Access Tokens → Generate new token<br>3. Select projects scope",
     "gitcode_token_help": "1. Go to gitcode.com → Settings<br>2. Personal Access Tokens → New<br>3. Select project read/write scope",
+    "pat_token_help_generic": "1. Go to {{host}} → Settings<br>2. Personal Access Tokens → New token<br>3. Select project read/write scope",
     "access_token": "Access Token",
     "paste_token": "Paste token",
     "how_to_get_token": "How to get a token?",

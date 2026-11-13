@@ -551,22 +551,27 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             if not source_repo and not clone_url:
                 raise RuntimeError("git 模板缺少 source_repo / clone_url 配置")
             workdir = os.path.join(tmp, "repo")
-            # S90/D66：源平台分派表（github 源 gh tarball / 其余 gitcode shallow-clone；
-            # github 源误配置无 clone_url 也正确走 gh 下载器——旧逻辑会误用 gitcode 下载器）
-            _TEMPLATE_SOURCE_DOWNLOADERS.get(
-                source_platform, _download_gitcode_tarball)(
+            # S90/D66：源平台分派表（github 源 gh tarball / gitcode shallow-clone）；
+            # 表外平台按平台卡 download_base 派生通用归档下载器——卡未声明
+            # download_base 时显式报错（不再静默回落 gitcode 下载器拉错平台）。
+            _template_source_downloader(source_platform)(
                 source_repo or clone_url, workdir, tmp, bot_token or user_token)
 
         # D105-17：目标 host 已从平台卡派生（见函数头部 fail-closed 前置校验）
-        # D105-18：workflows 目录处理按【凭据能力】三态判定（非平台名）——
+        # D105-18：workflows 目录处理按【凭据能力】三态判定——
         # True=声明有权限（不删）；False=声明受限（删）；None=未声明 → 回退
-        # 平台名旧逻辑（存量零回归：github 删 / gitcode 不删，基线冻结）。
+        # D105-19：平台默认值从平台卡 workflows_write 位读（github 内置卡=False，
+        # 其余 True）——provider=="github" 平台名硬分派消除，语义与存量逐字节等价。
         _wf = (credential_workflows_write(user_id, provider)
                if user_id else None)
-        _wf_denied = (provider == "github") if _wf is None else (not _wf)
+        if _wf is None:
+            from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc
+            _pc_wf = _gpc(provider)
+            _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
+        _wf_denied = not _wf
         if _wf_denied:
             # token 无 workflows 权限，push 含 .github/workflows 的仓库会被
-            # 拒绝——该怪癖平台卡表达不了（无对应能力位），保留在 github 分支。
+            # 拒绝——怪癖以卡 workflows_write=False 声明（github 内置卡）。
             # push URL 沿用存量 "***" 置换形态（不携带真实 token，鉴权走 git
             # credential helper），host 已从 github 卡派生。
             target_url = f"https://***@{_tgt_host}/{owner_login}/{target_repo}.git"
@@ -615,16 +620,17 @@ def _git_has_changes(workdir: str) -> bool:
         return True
 
 def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
-                          _retries: int = 3) -> int | None:
+                          _retries: int = 3, api_base: str = API_BASE) -> int | None:
     """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id（429/5xx 退避重试）。
 
     FR-5.1: 空列表返回 None（不确定），调用方走新建分支；非空但无匹配也返回 None。
+    D105-19：api_base 从平台卡派生（gitee_v5 方言家族通用），默认 gitcode.com。
     """
     if not webhook_url:
         return None
     import time
     from src.kernel.config import log as _log
-    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
+    url = f"{api_base}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     for i in range(_retries):
         try:
             hooks = _req("GET", url, api_token)
@@ -646,7 +652,7 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
     return None
 
 def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_password: str = "",
-                  _retries: int = 3) -> int:
+                  _retries: int = 3, api_base: str = API_BASE) -> int:
     """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id（429/5xx 退避重试）。
 
     R20.16.2: webhook_password 为空时不再 fallback 到 get_repo_token_with_refresh，
@@ -657,7 +663,7 @@ def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webho
         # R20.16.2: 不再 fallback 到 get_repo_token_with_refresh，用 api_token 做 password
         webhook_password = api_token
     import time
-    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
+    url = f"{api_base}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
         "url": webhook_url,
         "password": webhook_password,
@@ -706,9 +712,10 @@ def _get_managed_webhook(repo_key: str) -> int | None:
     except:
         return None
 
-def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
+def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
+                   api_base: str = API_BASE) -> bool:
     """删除指定仓库上的 webhook。"""
-    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
+    url = f"{api_base}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _req("DELETE", url, api_token)
     return True
 
@@ -725,29 +732,15 @@ def get_hosting_provider_config(provider: str) -> dict:
       - webhook_url_suffix: webhook 路由后缀（"/webhook/github" 或 "/webhook/gitcode"）
       - db_token_field: managed_repos 中存 webhook token 的列名
       - db_bot_token_field: managed_repos 中存 bot token 的列名
-    D105-17：github 专属分支保留（github 方言 webhook 函数指针表，见
-    find_existing_github_webhook/setup_github_webhook/remove_github_webhook）；
-    其余平台全部从平台卡派生（webhook_url_suffix 走 _webhook_path_from_card，
+    D105-19（平台化到位）：webhook 函数集按平台卡 webhook_dialect 分派
+    （github_web→find_existing_github_webhook/setup_github_webhook/remove_github_webhook；
+    gitee_v5→find_existing_webhook/setup_webhook/remove_webhook），api_base 从卡派生。
+    其余全部从平台卡派生（webhook_url_suffix 走 _webhook_path_from_card，
     db 字段名走卡 token_storage_field/webhook_token_field——内置卡缺省派生式
-    与存量 gitcode 列名逐字节一致）。未知/未配卡平台 fail-closed ValueError
-    （不再按 gitcode 存量配置静默放行）。
+    与存量列名逐字节一致）。未知/未配卡平台、webhook_dialect 未声明均
+    fail-closed ValueError（不再按 gitcode 存量配置静默放行）。
     """
     from src.domains.mgmt.user.db import get_global_bot_token_for
-    if provider == "github":
-        # github 专属 webhook 函数指针分派（基线审阅冻结：函数为实现绑定，
-        # dialect 无法区分——gitcode 卡 dialect 同为 github；端口收口归 S62 后续）
-        return {
-            "bot_token": get_global_bot_token_for(provider),
-            "bot_username": resolve_bot_username(provider),
-            "find_webhook": find_existing_github_webhook,
-            "setup_webhook": setup_github_webhook,
-            "remove_webhook": remove_github_webhook,
-            # D12/W3：回调后缀从平台卡派生（卡缺省值与历史硬编码一致）
-            "webhook_url_suffix": _webhook_path_from_card(provider, "/webhook/github"),
-            "db_token_field": "github_webhook_token",
-            "db_bot_token_field": "bot_github_token",
-        }
-    # 非 github：卡驱动，无卡 fail-closed（D105-17）
     from src.domains.runtime.vcs.platform_card import get_platform_card
     _pc = get_platform_card(provider)
     if _pc is None:
@@ -755,15 +748,35 @@ def get_hosting_provider_config(provider: str) -> dict:
             f"未知 VCS 平台 '{provider}'：未配置平台卡，无法派生托管配置。"
             f"请在平台卡（src/vcs/platform_card）中配置该平台后重试"
         )
+    # D105-19（平台化到位，用户拍板）：webhook 三件套按卡 webhook_dialect 分派
+    # （github_web=GitHub web-hooks 家族 / gitee_v5=v5 hooks 家族），api_base 从卡
+    # 派生（不再硬编码 api.github.com / gitcode.com）；provider=="github" 特例分支
+    # 消除——同为 github API 方言的 gitcode/gitee webhook 形态实为 v5，卡声明即分派。
+    # 分派走 _WEBHOOK_FUNC_FAMILIES 注册表：新平台要么复用既有家族（卡声明
+    # webhook_dialect + 自己的 api_base，零代码），要么注册新家族（表加一行 +
+    # platform_card 枚举加一项，消费侧零改动）。函数以 functools.partial 绑定卡
+    # api_base，指针签名（token/owner/repo/url）不变。
+    import functools
+    _wd = getattr(_pc, "webhook_dialect", "") or ""
+    _family = _WEBHOOK_FUNC_FAMILIES.get(_wd)
+    if _family is None:
+        raise ValueError(
+            f"平台 '{provider}' webhook 形态未支持（webhook_dialect={_wd!r}）："
+            f"请在平台卡声明已实现的 webhook_dialect"
+            f"（{'/'.join(_WEBHOOK_FUNC_FAMILIES)}）后再托管"
+        )
+    _ab = _pc.api_base
+    _find_w, _setup_w, _remove_w = (
+        functools.partial(_fn, api_base=_ab) for _fn in _family)
     return {
         "bot_token": get_global_bot_token_for(provider),
         "bot_username": resolve_bot_username(provider),
-        "find_webhook": find_existing_webhook,
-        "setup_webhook": setup_webhook,
-        "remove_webhook": remove_webhook,
+        "find_webhook": _find_w,
+        "setup_webhook": _setup_w,
+        "remove_webhook": _remove_w,
         # 卡派生回调后缀（卡缺失已被上方 fail-closed 拦截，fallback 恒不触发）
         "webhook_url_suffix": _webhook_path_from_card(provider, f"/webhook/{provider}"),
-        # D105-17：db 字段名从卡派生（内置卡缺省=存量 gitcode 列名）
+        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）
         "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
         "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
     }
@@ -771,9 +784,10 @@ def get_hosting_provider_config(provider: str) -> dict:
 
 _GITHUB_API_BASE = "https://api.github.com"
 
-def remove_github_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bool:
+def remove_github_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
+                          api_base: str = _GITHUB_API_BASE) -> bool:
     """删除 GitHub 仓库上的 webhook。"""
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
+    url = f"{api_base}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _github_req("DELETE", url, api_token)
     return True
 
@@ -863,15 +877,17 @@ def fetch_github_repos_with_role(api_token: str) -> list[dict]:
         page += 1
     return repos
 
-def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
+def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                                 api_base: str = _GITHUB_API_BASE) -> int | None:
     """检查 GitHub 仓库是否已有指向 webhook_url 的 webhook。
 
     FR-5.1: 空列表返回 None（不确定），加 log 可观测。
+    D105-19：api_base 从平台卡派生（github_web 方言家族通用），默认 github.com。
     """
     if not webhook_url:
         return None
     from src.kernel.config import log as _log
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
+    url = f"{api_base}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     try:
         hooks = _github_req("GET", url, api_token)
         if isinstance(hooks, list):
@@ -885,11 +901,12 @@ def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_
         pass
     return None
 
-def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_secret: str = "") -> int:
+def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_secret: str = "",
+                         api_base: str = _GITHUB_API_BASE) -> int:
     """在 GitHub 仓库上创建 webhook，返回 webhook_id。"""
     if not webhook_secret:
         webhook_secret = api_token
-    url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
+    url = f"{api_base}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
         "name": "web",
         "active": True,
@@ -906,6 +923,16 @@ def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str
     if not hook_id:
         raise RuntimeError(f"Created GitHub webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
     return hook_id
+
+
+# D105-19：webhook 三件套实现家族注册表（键=平台卡 webhook_dialect）。
+# 新增家族：实现 (find, setup, remove) 三件套（api_base 关键字参数）→ 表加一行
+# → platform_card._VALID_WEBHOOK_DIALECTS 加一项 → 新平台卡声明即启用。
+_WEBHOOK_FUNC_FAMILIES: dict[str, tuple] = {
+    "github_web": (find_existing_github_webhook, setup_github_webhook, remove_github_webhook),
+    "gitee_v5": (find_existing_webhook, setup_webhook, remove_webhook),
+}
+
 
 def get_user_github_login(api_token: str) -> str:
     """获取当前 token 的 GitHub 登录用户名。"""
@@ -1129,8 +1156,9 @@ fail-closed：不再静默回退 gitcode（_host_of_url / resolve_bot_username /
 get_hosting_provider_config / push_template 目标卡均为显式报错或卡派生）。
 """
 
-# S90/D66：模板源平台 tarball 下载器分派表（源平台=模板来源，非目标仓库平台；
-# 未知源回落 gitcode shallow-clone 兜底=存量语义）
+# S90/D66：模板源平台 tarball 下载器分派表（源平台=模板来源，非目标仓库平台）。
+# 表内为「需要平台专属取件形态」的存量实现；表外平台一律按平台卡派生
+# （见 _template_source_downloader），不再回落到 gitcode 下载器。
 _TEMPLATE_SOURCE_DOWNLOADERS = {
     "github": lambda source_repo, workdir, tmp, token: _download_and_extract_tarball(
         f"https://api.github.com/repos/{source_repo}/tarball", workdir, tmp,
@@ -1138,3 +1166,59 @@ _TEMPLATE_SOURCE_DOWNLOADERS = {
                  if os.environ.get("GITHUB_TOKEN") else {})),
     "gitcode": _download_gitcode_tarball,
 }
+
+# 卡驱动通用归档下载的默认分支（模板源未声明分支时）
+_TEMPLATE_SOURCE_DEFAULT_REF = "main"
+
+
+def _download_card_archive(card, source_repo: str, workdir: str, tmp: str,
+                           token: str, ref: str = "") -> None:
+    """按平台卡 download_base 下载模板源归档（通用 tarball，git init 收口）。
+
+    路径形态按卡方言派生（方言是卡字段，非平台名）：gitlab 方言
+    `{base}/{o}/{r}/-/archive/{ref}/{r}-{ref}.tar.gz`；github/v5 方言
+    `{base}/{o}/{r}/archive/refs/heads/{ref}.tar.gz`（raw 系基址同形）。
+    鉴权按卡 api_auth 派生（private_token → PRIVATE-TOKEN，其余 Bearer）。
+    """
+    base = (getattr(card, "download_base", "") or "").rstrip("/")
+    if not base:
+        raise RuntimeError(
+            f"模板源平台 '{card.provider}' 的平台卡未声明 download_base："
+            "无法下载模板源归档（改为在 configs/platforms/<provider>.json "
+            "配置 download_base，或改用 source='local'/有下载器实现的源平台）")
+    _ref = ref or _TEMPLATE_SOURCE_DEFAULT_REF
+    _path = (source_repo or "").strip().strip("/")
+    _owner, _, _repo = _path.partition("/")
+    if not _owner or not _repo:
+        raise RuntimeError(f"模板源仓库标识非法（需 owner/repo）: {source_repo!r}")
+    if getattr(card, "dialect", "") == "gitlab":
+        url = f"{base}/{_owner}/{_repo}/-/archive/{_ref}/{_repo}-{_ref}.tar.gz"
+    else:
+        url = f"{base}/{_owner}/{_repo}/archive/refs/heads/{_ref}.tar.gz"
+    headers: dict = {}
+    if token:
+        if getattr(card, "api_auth", "") == "private_token":
+            headers = {"PRIVATE-TOKEN": token}
+        else:
+            headers = {"Authorization": f"Bearer {token}"}
+    _download_and_extract_tarball(url, workdir, tmp, headers=headers or None)
+
+
+def _template_source_downloader(source_platform: str, ref: str = ""):
+    """解析模板源下载器：分派表优先，表外按平台卡 download_base 派生。
+
+    无卡/卡未声明 download_base → 显式可读报错（fail-closed：不再静默用
+    gitcode 下载器拉 gitee/gitlab 源模板）。返回签名
+    (source_repo, workdir, tmp, token) -> None 的可调用对象。
+    """
+    _impl = _TEMPLATE_SOURCE_DOWNLOADERS.get(source_platform)
+    if _impl is not None:
+        return _impl
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    card = get_platform_card(source_platform)
+    if card is None:
+        raise ValueError(
+            f"模板源平台 '{source_platform}' 无平台卡：无法派生模板下载方式。"
+            "请在 configs/platforms/ 配置该平台卡（含 download_base）后重试")
+    return lambda source_repo, workdir, tmp, token: _download_card_archive(
+        card, source_repo, workdir, tmp, token, ref=ref)

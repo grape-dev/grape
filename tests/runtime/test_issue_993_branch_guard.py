@@ -168,7 +168,7 @@ def test_list_prs_gitcode_paginates_until_short_page():
     c = VcsApiClient("gitcode", "tok", "owner", "repo")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setattr(c, "_gitcode_request", _req)
+        monkeypatch.setattr(c, "_request", _req)
         items = c.list_prs(state="all", head=BRANCH)
     finally:
         monkeypatch.undo()
@@ -189,7 +189,7 @@ def test_list_prs_github_uses_head_owner_branch():
     c = VcsApiClient("github", "tok", "owner", "repo")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setattr(c, "_github_request", _req)
+        monkeypatch.setattr(c, "_request", _req)
         c.list_prs(state="all", head=BRANCH)
     finally:
         monkeypatch.undo()
@@ -208,7 +208,7 @@ def test_list_prs_gitlab_encodes_project_path():
     c = VcsApiClient("gitlab", "tok", "owner", "repo")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setattr(c, "_gitlab_request", _req)
+        monkeypatch.setattr(c, "_request", _req)
         c.list_prs(state="all", head=BRANCH)
     finally:
         monkeypatch.undo()
@@ -221,7 +221,7 @@ def test_list_prs_error_passthrough():
     c = VcsApiClient("gitcode", "tok", "owner", "repo")
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setattr(c, "_gitcode_request",
+        monkeypatch.setattr(c, "_request",
                             lambda method, path: {"error": "HTTP 403"})
         assert c.list_prs() == {"error": "HTTP 403"}
     finally:

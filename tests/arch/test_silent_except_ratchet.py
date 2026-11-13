@@ -99,9 +99,14 @@ EXEMPT_FILES: dict = {
     ('domains/runtime/im/engine/media.py', 'except (asyncio.CancelledError, Exception):'): 1,
     # IM 安装项批量回填：逐条容错（单条脏数据 continue，整体继续）
     ('domains/mgmt/routes/im.py', 'except Exception:'): 2,
-    # ── 组1 卡驱动回退：get_platform_card/卡派生读取失败 → 默认值兜底
+    # ── 组1 卡驱动回退：get_platform_card/卡派生读取失败 → 默认值兜底 ──
     # pr_comment_endpoint/dialect 双探 + native_field_for 卡能力缺省回退
     ('kernel/repo_key.py', 'except Exception:'): 2,
+    # _pr_cap（S88/D64 卡能力位读取，2026-11-13 自 b439764fd 恢复）+
+    # _pflag 卡优先解析（S40-S42，2026-11-13 代理能力位上翻）：两处均为
+    # 卡读取异常回退 default/模块开关=存量语义（组1 同族 fail-open）。
+    # 注：同键两行会被 dict 字面量后定义覆盖，计数合并为 2。
+    ('api/git_repo_api.py', 'except Exception:'): 2,
     # 方言/host 卡查询回退（映射表为数据非分支）
     ('domains/mgmt/user/repo_manager.py', 'except Exception:'): 3,
     # webhook_path/平台名单/bot_username 卡回退
@@ -120,6 +125,13 @@ EXEMPT_FILES: dict = {
     ('domains/mgmt/routes/repos.py', 'except Exception:'): 2,
     # provider/卡展示名回退
 
+    # ── 组3 PR#1318 验收/平台化新增（2026-11-12 QA 第3轮登记）：均为刻意 fail-open ──
+    # 上游 issue number 解析（gitee IK* 字符串/None 混型），坏条目跳过不炸列表
+    ('api/issue_vcs_index.py', 'except (TypeError, ValueError):'): 1,
+    # bot token 三段读序（卡列→rc 单表→存量列回落）逐步探测：表/列不存在=走下一段
+    # （P9：老库无 rc 表、卡列平台无物理列均为合法形态，靠异常探测非错误）；
+    # grape_account_db 白名单改名联动的豁免已并入下方组2同键条目（4→5）
+    ('domains/mgmt/user/db.py', 'except Exception:'): 5,
     # ── 组2 幂等迁移/存量兼容（duplicate column、旧形态探测尽力而为）──
     ('api/db_setup.py', 'except Exception:'): 9,
     # G3/D105 迁移族：duplicate column 幂等跳过、旧表重建搬移尽力而为；
@@ -129,8 +141,9 @@ EXEMPT_FILES: dict = {
     ('domains/mgmt/user/legacy_column_migrations.py', 'except Exception:'): 5,
     # 幂等补列/回填，失败=目标形态已达成
     ('domains/mgmt/user/credentials_backfill_n1.py', 'except Exception:'): 2,
-    # duplicate column 幂等语义（行内注释已声明）
-    ('domains/mgmt/auth/grape_account_db.py', 'except Exception:'): 4,
+    # duplicate column 幂等语义（行内注释已声明）；+1 = PR#1318 白名单改名联动
+    # （渠道无老列的新装/未声明列存量跳过该渠道 UPDATE，fail-open 刻意）
+    ('domains/mgmt/auth/grape_account_db.py', 'except Exception:'): 5,
     # 回填搬家解密防御（解不开=非本密钥体系→跳过不动）+ rollback
     # 尽力而为；其中 1 处为 D105k 原基线上调项，重锚后转登记
 

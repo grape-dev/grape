@@ -32,6 +32,14 @@ GITEE_CARD = {
     "api_base": "https://gitee.com/api/v5", "api_auth": "query_token",
     "webhook_verify": "token_compare", "clone_auth": "basic_password",
     "bot_username": "g_grape_bot",
+    # S58 复核（2026-11-13）：内置 configs/platforms/gitee.json 已是 F4/D106 终态
+    # （token_storage_field/webhook_token_field 显式空串=凭据只落 rc 单表），meta 卡
+    # 与内置卡 per-key 合并后键缺席不复活退役列——"列平台语义"场景须 meta 显式
+    # 声明列名覆盖（platform_card._explicit_or_default：键存在即尊重原值）。
+    # 本组用例锁定的是"有列平台"的写路径行为（列写+rc 同步 D98 / related_repos /
+    # _update_repo_bot_token 直调），终态无列行为见 test_s120。
+    "token_storage_field": "bot_gitee_token",
+    "webhook_token_field": "gitee_webhook_token",
 }
 
 

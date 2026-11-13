@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, 
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
+from src.api.oauth_token import with_oauth_token
 
 from src.kernel.config import log
 
@@ -73,6 +74,66 @@ def _resolve_repo_key(repo: str) -> str:
     except Exception:
         pass
     return rk
+
+
+class _SceneUserIdentityMissing(RuntimeError):
+    """平台返回空 login（用户平台身份缺失/无效）——客户端状态问题，非上游故障。
+
+    继承 RuntimeError 以保持 with_oauth_token 的 401(token) 刷新重试语义（按消息
+    文本判定）不变；刷新后仍拿不到 login 时传播到调用方，按 4xx 处理而非 502。
+    """
+
+
+def _scene_user_provider(user: dict) -> str:
+    """场景体验的用户平台选择：仓库平台卡目录 ∩ 用户已绑定平台。
+
+    login_provider 命中的平台优先，其余按卡目录顺序；无可用平台返回 ""。
+    禁止平台名字面量（gitee/gitlab/华为等一律由卡目录派生）。
+    """
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        _catalog = list(list_vcs_platforms())
+    except Exception:
+        _catalog = []
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        _bound = {i.get("provider") for i in (get_user_identities(str(user.get("id") or "")) or [])
+                  if i.get("provider")}
+    except Exception:
+        _bound = set()
+    if not _catalog or not _bound:
+        return ""
+    _login = (user.get("login_provider") or "").strip()
+    _ordered = [p for p in _catalog if p in _bound]
+    _ordered.sort(key=lambda p: 0 if p == _login else 1)  # 稳定排序：login_provider 优先
+    return _ordered[0] if _ordered else ""
+
+
+def _scene_user_login_via_card(user: dict, provider: str) -> str:
+    """token → 平台 login（卡工厂端口 create_provider(p).get_user_login）。
+
+    经 with_oauth_token 包一层：401/403(token) 预刷新+重试语义与存量一致
+    （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
+    """
+    from src.kernel.token_resolver import create_provider
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+
+    _prov = create_provider(provider)
+    _card = get_platform_card(provider)
+    _name = _card.name if _card is not None else provider
+
+    def _get_login(token):
+        login = _prov.get_user_login(token)
+        if not login:
+            # P3 小项二：消息不再伪造 "(401)"——HTTP 401（token 失效）由 _http 的
+            # RuntimeError 自带 (401) 触发 with_oauth_token 刷新重试；而 API 200 但
+            # login 为空 = 身份缺失（客户端状态），不触发刷新，直接传播给调用方
+            # 按 409 MISSING_IDENTITY 处理。
+            raise _SceneUserIdentityMissing(f"{_name} API GET /user returned empty login: no usable user identity")
+        return login
+
+    return with_oauth_token(user, provider, _get_login)
+
 
 def _resolve_scene_repo_key(repo: str, user: dict) -> str:
     """解析场景查询的 repo_key（Issue #534）。
@@ -577,10 +638,25 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
             if missing:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景引用了已删除的技能: {', '.join(sorted(missing))}，无法应用"})
 
-    # weekly-09 修订（主人确认）：删除「同模板重应用=幂等更新」路径——
-    # 那是旧世界（scene_id=模板名，重复应用必然撞同一行）的产物。现在每次应用
-    # 都是一个全新场景（custom-{uuid}），同一用户基于同一模板创建多个自己的场景
-    # 是正当需求，不应被覆盖语义挡住。market_scene_id 仅作来源标记保留。
+    # weekly-09 修订 + P3 契约对齐：scope=repo 的场景无 user 维度，同一仓库对同一
+    # 市场模板只需一份——OpenAPI 声明的幂等（见下）即为最终语义；market_scene_id
+    # 兼作来源标记与幂等键。
+
+    # P3 小项一 契约对齐（OpenAPI 声明 Idempotent per market_scene_id + repo_key）：
+    # 同一 market_scene_id + repo_key 已存在活跃场景 → 200 复用既有场景，不重复创建。
+    # weekly-09 的"每次应用全新 custom-{uuid}"仍适用于首次应用及不同模板/不同仓库。
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT scene_id, name FROM devops_pipeline_scene "
+            "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+            (market_id, repo_key),
+        )
+        existing = c.fetchone()
+    if existing:
+        log.info(f"Market scene idempotent reuse: market_id={market_id}, scene_id={existing[0]}, repo={repo_key}")
+        return {"message": f"场景 '{existing[1]}' 已应用于该仓库，复用既有场景",
+                "scene_id": existing[0], "reused": True}
 
     # display_name 来源：用户输入（应用弹窗可编辑）→ 模板 display_name → 模板 name。
     # weekly-09：每次应用都弹窗让用户确认/改名；撞名 409 让用户改名重试。
@@ -594,7 +670,8 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
         )
         conflict = c.fetchone()
     if conflict:
-        raise HTTPException(status_code=409, detail={"code": 409, "message": f"仓库中已存在名为'{display_name}'的场景，请更换名称后重试", "field": "display_name"})
+        # P3 小项一：明确这是「同名冲突」（另一个场景已占用该名称），而非重复 apply 同一市场场景
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名冲突：仓库中已存在名为'{display_name}'的场景（非重复应用，重复 apply 同一市场场景会幂等复用），请更换名称后重试", "field": "display_name"})
 
     # 新建（scope='repo'）。
     # weekly-09：scene_id 不再用模板 name（扁平命名空间会互相覆盖/409 挡路），
@@ -634,8 +711,6 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     from src.domains.mgmt.user.db import get_scene_market_by_id
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import to_repo_key
-    from src.api.oauth_token import with_oauth_token
-    from src.domains.mgmt.user.repo_manager import get_user_gitcode_login
     from src.domains.mgmt.routes.templates import _find_template
 
     scene = get_scene_market_by_id(market_id)
@@ -653,20 +728,22 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
     # Issue #343 修复: 不吞 401 异常——token 过期时正确抛给前端，不返回假数据
-    # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
-    # 让原始 401 RuntimeError 穿透到 with_oauth_token，_is_token_error 能匹配 (401) 格式触发刷新。
-    from src.domains.mgmt.user.repo_manager import _req
-    def _get_login(token):
-        data = _req("GET", "https://gitcode.com/api/v5/user", token)
-        login = data.get("login", "") if isinstance(data, dict) else ""
-        if not login:
-            raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
-        return login
-    gitcode_login = with_oauth_token(user, "gitcode", _get_login)
-    if not gitcode_login:
+    # 卡驱动：平台 = 卡目录 ∩ 已绑定平台（login_provider 优先），
+    # login 走 create_provider(p).get_user_login（无平台名分支）。
+    _provider = _scene_user_provider(user)
+    if not _provider:
+        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
+    try:
+        user_login = _scene_user_login_via_card(user, _provider)
+    except HTTPException:
+        raise
+    except Exception as _e:
+        log.warning(f"experience-check: resolve {_provider} login failed: {_e}")
+        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
+    if not user_login:
         return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
 
-    full_name = f"{gitcode_login}/{repo_name}"
+    full_name = f"{user_login}/{repo_name}"
     repo_key = _resolve_repo_key(full_name)
     user_id = user.get("id", 0)
 
@@ -683,7 +760,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
             # user_repos 里有记录也算已存在
             c.execute(
                 "SELECT 1 FROM user_repos WHERE user_id=? AND owner=? AND name=? LIMIT 1",
-                (user_id, gitcode_login, repo_name),
+                (user_id, user_login, repo_name),
             )
             if c.fetchone():
                 repo_exists = True
@@ -710,8 +787,8 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
 
     流程：
     1. 查 scene_market 拿 recommended_template + nodes_json + onboarding
-    2. 查模板的 default_repo_name + 用户的 gitcode_login
-    3. 查 user_repos 里是否已有 {gitcode_login}/{default_repo_name}
+    2. 查模板的 default_repo_name + 用户的平台 login（卡目录 ∩ 绑定平台）
+    3. 查 user_repos 里是否已有 {平台 login}/{default_repo_name}
        - 已有仓库 → 检查是否已托管，未托管则先托管
        - 没有仓库 → 调 create_from_template 创建+托管
     4. 创建/复用用户级 devops_pipeline_scene（scope='user', scene_id=custom-{uuid}）
@@ -719,15 +796,13 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     6. 返回 {full_name, scene_id, already_exists, message}
 
     P1-C (Issue #357): External HTTP calls run in thread pool with 10s timeout
-    to prevent 124s single-request queue blocking. gitcode_login cached 60s.
+    to prevent 124s single-request queue blocking. 平台 login 走 with_oauth_token（预刷新语义不变）。
     """
     import asyncio
     import uuid
     from src.domains.mgmt.user.db import get_scene_market_by_id
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import to_repo_key
-    from src.api.oauth_token import with_oauth_token
-    from src.domains.mgmt.user.repo_manager import get_user_gitcode_login
     from src.domains.mgmt.routes.templates import _find_template
 
     scene = get_scene_market_by_id(market_id)
@@ -744,28 +819,44 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     tpl = tpl_ctx["template"]
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
-    # 拿用户的 GitCode login
-    # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
-    # 让原始 401 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+    # 拿用户的平台 login（卡驱动：平台 = 卡目录 ∩ 已绑定平台，login_provider 优先）
+    # P1-1 返工：login 为空按 (401) 抛错，让 with_oauth_token 触发刷新重试。
     # P1-C: Run in thread pool with 10s timeout to avoid blocking event loop.
-    from src.domains.mgmt.user.repo_manager import _req
-    def _get_login(token):
-        data = _req("GET", "https://gitcode.com/api/v5/user", token)
-        login = data.get("login", "") if isinstance(data, dict) else ""
-        if not login:
-            raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
-        return login
+    _provider = _scene_user_provider(user)
+    if not _provider:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "当前账号没有可用的仓库平台：请先在「设置 → 凭据」绑定平台（GitCode/GitHub/Gitee/GitLab 等）",
+        })
     try:
-        gitcode_login = await asyncio.wait_for(
-            asyncio.to_thread(with_oauth_token, user, "gitcode", _get_login),
+        user_login = await asyncio.wait_for(
+            asyncio.to_thread(_scene_user_login_via_card, user, _provider),
             timeout=10,
         )
+    except HTTPException:
+        raise
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail={"code": 504, "message": "获取 GitCode 用户身份超时，请重试"})
-    if not gitcode_login:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户 GitCode 身份"})
+        raise HTTPException(status_code=504, detail={"code": 504, "message": "获取平台用户身份超时，请重试"})
+    except _SceneUserIdentityMissing as _e:
+        # P3 小项二：身份缺失是客户端状态问题（无可用平台身份），非网关/上游故障
+        # ——语义纠正为 409 MISSING_IDENTITY 并附明确指引；上游真故障仍走 502 分支。
+        log.warning(f"experience_market_scene: {_provider} identity missing: {_e}")
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "MISSING_IDENTITY",
+            "message": f"无法获取当前用户 {_provider} 身份：请先在「设置 → 凭据」绑定/重新授权 {_provider} 平台身份后重试",
+        })
+    except Exception as _e:
+        log.warning(f"experience_market_scene: resolve {_provider} login failed: {_e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法获取当前用户 {_provider} 身份"})
+    if not user_login:
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "MISSING_IDENTITY",
+            "message": f"无法获取当前用户 {_provider} 身份：请先在「设置 → 凭据」绑定/重新授权 {_provider} 平台身份后重试",
+        })
 
-    full_name = f"{gitcode_login}/{repo_name}"
+    full_name = f"{user_login}/{repo_name}"
     user_id = user.get("id", 0)
     already_exists = False
 
@@ -780,7 +871,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
         if not already_hosted:
             c.execute(
                 "SELECT 1 FROM user_repos WHERE user_id=? AND owner=? AND name=? LIMIT 1",
-                (user_id, gitcode_login, repo_name),
+                (user_id, user_login, repo_name),
             )
             repo_in_user_repos = c.fetchone() is not None
 
@@ -924,20 +1015,21 @@ def _normalize_owner_repo(owner: str, repo: str) -> tuple[str, str]:
     to_repo_key 对已带冒号的串幂等返回，会掩盖污染并让 DB 查询
     "碰巧"命中；必须在拼外部 API URL 前把前缀剥掉。
     """
-    if ":" in owner:
-        prefix, _, rest = owner.partition(":")
-        if prefix in ("github", "gitcode", "gitlab"):
-            owner = rest
-    return owner, repo
+    # 前缀集由平台卡目录派生（strip_provider_prefix）——gitee/gitlab 等新平台
+    # 与存量双平台同口径，禁止平台名字面量枚举
+    from src.kernel.repo_key import strip_provider_prefix
+    return strip_provider_prefix(owner), repo
 
 def _detect_repo_provider(owner: str, repo: str) -> str:
-    """根据 managed_repos.repo_key 前缀判断仓库属于 gitcode 还是 github。
+    """判断 owner/repo 属于哪个平台：managed_repos 事实源 → user_repos 无歧义命中。
+
+    平台集合唯一权威 = 仓库平台卡目录（list_vcs_platforms），不再按
+    gitcode/github 双前缀硬编码（gitee/gitlab 仓同样可判定）。
 
     两轮干净结构（2026-10-24 修复，生产 github 同名碰撞事故）：
-    - 第一轮**只查 managed_repos**（平台托管事实源），github/gitcode 都查，命中即返回；
-    - 第二轮才查 user_repos，且**同名冲突（两平台都有用户绑定记录）时不返回、回退默认
-      gitcode**——用户绑定记录没有资格裁决平台归属的歧义。
-    - 默认返回 'gitcode'。
+    - 第一轮**只查 managed_repos**（平台托管事实源），全部在册平台都查，命中即返回；
+    - 第二轮才查 user_repos，且**同名冲突（多平台都有用户绑定记录）时不返回、
+      回退卡目录首个平台**——用户绑定记录没有资格裁决平台归属的歧义。
 
     旧实现按 provider 外层循环、managed/user 内层交错，导致"user_repos 里 github: 同名
     记录"压过"managed_repos 里 gitcode: 记录"：GitHub 上存在别人建的同名仓（只有一个
@@ -946,6 +1038,12 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     """
     from src.domains.mgmt.user.db import db_lock, db
     from src.kernel.repo_key import to_repo_key
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+
+    try:
+        _provs = list(list_vcs_platforms())
+    except Exception:
+        _provs = []
 
     def _hit(table: str, rk: str) -> bool:
         try:
@@ -956,20 +1054,21 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
         except Exception:
             return False
 
+    if not _provs:
+        return ""
+
     # 第一轮：managed_repos（托管事实源，查到即返回）
-    for prov in ("github", "gitcode"):
+    for prov in _provs:
         rk = to_repo_key(f"{owner}/{repo}", provider=prov)
         if _hit("managed_repos", rk):
             return prov
 
-    # 第二轮：user_repos（仅无歧义时采用；同名冲突回退默认）
-    _gh = _hit("user_repos", to_repo_key(f"{owner}/{repo}", provider="github"))
-    _gc = _hit("user_repos", to_repo_key(f"{owner}/{repo}", provider="gitcode"))
-    if _gh and not _gc:
-        return "github"
-    if _gc and not _gh:
-        return "gitcode"
-    return "gitcode"
+    # 第二轮：user_repos（仅无歧义时采用；同名冲突回退卡目录首个平台）
+    _hits = [prov for prov in _provs
+             if _hit("user_repos", to_repo_key(f"{owner}/{repo}", provider=prov))]
+    if len(_hits) == 1:
+        return _hits[0]
+    return _provs[0]
 
 @router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker). Optional provider/repo_key query param overrides platform detection (2026-10-24: same-name GitHub repos could shadow managed GitCode repos). Issue #542: results are cached in-process for 90s; pass refresh=1 to bypass the cache (response carries a `cached` flag).")
 def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str = "",
@@ -981,7 +1080,6 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     前端托管仓场景应直接传（/repos/managed 返回的 repo_key 自带前缀）。
     Issue #542：TTL 缓存 90s（分支变更低频），refresh=1 强制穿透；仅缓存成功结果。
     """
-    from src.domains.mgmt.user.repo_manager import _req, _github_req
     from src.kernel.repo_key import parse_repo_key
 
     owner, repo = _normalize_owner_repo(owner, repo)
@@ -990,10 +1088,16 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         # 原内联三元把 gitee:/gitlab: 仓折叠成 gitcode）
         _prov = parse_repo_key(repo_key)[0]
         provider = provider or _prov
-    if provider in ("github", "gitcode"):
+    # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
+    # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
         _detected = _detect_repo_provider(owner, repo)
+        if not _detected:
+            raise HTTPException(status_code=400, detail={"code": 400,
+                    "message": "无法识别仓库所属平台：请通过 provider/repo_key 显式指定"})
     provider = _detected
 
     # Issue #542：缓存命中直接返回（不穿透外部 API；响应附 cached 标记）
@@ -1003,50 +1107,29 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         if _cached is not None:
             return {**_cached, "cached": True}
 
-    if provider == "github":
-        from src.domains.mgmt.user.db import get_github_token
-        from src.kernel.repo_key import to_repo_key
-        rk = to_repo_key(f"{owner}/{repo}", provider="github")
-        token = get_github_token(repo_key=rk)
-        if not token:
-            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法查询分支"})
-        branches = []
-        try:
-            page = 1
-            while page <= 5:
-                url = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}"
-                data = _github_req("GET", url, token)
-                if not isinstance(data, list) or not data:
-                    break
-                for b in data:
-                    branches.append({
-                        "name": b.get("name", ""),
-                        "protected": bool(b.get("protected", False)),
-                    })
-                if len(data) < 100:
-                    break
-                page += 1
-        except Exception as e:
-            log.warning(f"List branches failed for GitHub {owner}/{repo}: {e}")
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
-        payload = {"branches": branches}
-        _branches_cache_put(_cache_key, payload)
-        return {**payload, "cached": False}
-
-    # GitCode（原逻辑）
-    # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    _card = get_platform_card(provider)
+    _pname = _card.name if _card is not None else provider
+    _rk = to_repo_key(f"{owner}/{repo}", provider=provider)
+    # R12.13: get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
+    token = get_repo_token_with_refresh(_rk) or ""
     if not token:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
+        raise HTTPException(status_code=503, detail={"code": 503, "message": f"{_pname} Bot Token 未配置，无法查询分支"})
 
+    # 卡驱动（VcsApiClient）：dialect 决定路径（gitlab 走 /projects/{o}%2F{r}/repository/branches），
+    # api_base/api_auth 来自平台卡；不再有"非 github ⇒ gitcode.com/api/v5"的分叉。
+    _client = VcsApiClient(provider, token, owner, repo)
+    _path = _client._generic_path(f"/repos/{owner}/{repo}/branches", "/repository/branches")
     branches = []
     try:
         page = 1
         while page <= 5:
-            url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches?per_page=100&page={page}"
-            data = _req("GET", url, token)
+            data = _client._card_or_legacy_get(f"{_path}?per_page=100&page={page}")
+            if isinstance(data, dict) and data.get("error"):
+                raise RuntimeError(f"{data.get('error')} {data.get('detail', '')}".strip())
             if not isinstance(data, list) or not data:
                 break
             for b in data:
@@ -1058,7 +1141,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
                 break
             page += 1
     except Exception as e:
-        log.warning(f"List branches failed for {owner}/{repo}: {e}")
+        log.warning(f"List branches failed for {_pname} {owner}/{repo}: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
 
     payload = {"branches": branches}
@@ -1073,7 +1156,6 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
 
     provider/repo_key（可选，2026-10-24 新增）：显式指定平台，跳过猜测逻辑。
     """
-    from src.domains.mgmt.user.repo_manager import _req, _github_req
     from src.kernel.repo_key import parse_repo_key
 
     owner, repo = _normalize_owner_repo(owner, repo)
@@ -1081,92 +1163,55 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         # S85/D60③：统一走 parse_repo_key（原内联三元折叠非 gitcode 平台）
         _prov = parse_repo_key(repo_key)[0]
         provider = provider or _prov
-    if provider in ("github", "gitcode"):
+    # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
+    # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
         _detected = _detect_repo_provider(owner, repo)
+        if not _detected:
+            raise HTTPException(status_code=400, detail={"code": 400,
+                    "message": "无法识别仓库所属平台：请通过 provider/repo_key 显式指定"})
     provider = _detected
 
-    if provider == "github":
-        from src.domains.mgmt.user.db import get_github_token
-        from src.kernel.repo_key import to_repo_key
-        rk = to_repo_key(f"{owner}/{repo}", provider="github")
-        token = get_github_token(repo_key=rk)
-        if not token:
-            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitHub Bot Token 未配置，无法创建分支"})
-        if not body.branch_name or not body.branch_name.strip():
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
-        try:
-            # GitHub 创建分支：先获取 base branch 的 sha，再创建 ref
-            base_ref = body.refs or "main"
-            # 尝试获取 base branch 的 commit sha
-            sha = None
-            try:
-                branch_info = _github_req("GET",
-                    f"https://api.github.com/repos/{owner}/{repo}/branches/{base_ref}", token)
-                sha = branch_info.get("commit", {}).get("sha", "")
-            except Exception:
-                pass
-            if not sha:
-                # fallback: 获取默认分支
-                repo_info = _github_req("GET", f"https://api.github.com/repos/{owner}/{repo}", token)
-                default_branch = repo_info.get("default_branch", "main")
-                branch_info = _github_req("GET",
-                    f"https://api.github.com/repos/{owner}/{repo}/branches/{default_branch}", token)
-                sha = branch_info.get("commit", {}).get("sha", "")
-            if not sha:
-                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取基准分支 SHA"})
-            url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
-            _github_req("POST", url, token, {
-                "ref": f"refs/heads/{body.branch_name.strip()}",
-                "sha": sha,
-            })
-            log.info(f"Branch created: {body.branch_name} in GitHub {owner}/{repo}")
-            # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
-            _branches_cache_invalidate(owner, repo)
-            return {"name": body.branch_name.strip(), "message": "分支已创建"}
-        except RuntimeError as e:
-            err_msg = str(e)
-            if "422" in err_msg or "already exists" in err_msg:
-                raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
-            if "403" in err_msg:
-                raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
-
-    # GitCode（原逻辑）
-    # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
-    if not token:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法创建分支"})
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    _card = get_platform_card(provider)
+    _pname = _card.name if _card is not None else provider
 
     if not body.branch_name or not body.branch_name.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
 
+    _rk = to_repo_key(f"{owner}/{repo}", provider=provider)
+    # R12.13: get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
+    token = get_repo_token_with_refresh(_rk) or ""
+    if not token:
+        raise HTTPException(status_code=503, detail={"code": 503, "message": f"{_pname} Bot Token 未配置，无法创建分支"})
+
+    # 卡驱动（VcsApiClient.create_branch）：gitlab /projects 形态、refs_sha 形态、
+    # form 形态全部由卡能力位（dialect / branch_create_form）决定。
+    _client = VcsApiClient(provider, token, owner, repo)
     try:
-        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo}/branches"
-        result = _req("POST", url, token, {
-            "branch_name": body.branch_name.strip(),
-            "refs": body.refs or "main",
-        })
-        log.info(f"Branch created: {body.branch_name} in {owner}/{repo}")
-        # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
-        _branches_cache_invalidate(owner, repo)
-        return {"name": body.branch_name.strip(), "message": "分支已创建"}
-    except RuntimeError as e:
-        err_msg = str(e)
-        if "409" in err_msg:
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
-        if "403" in err_msg:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
+        result = _client.create_branch(body.branch_name.strip(), body.refs or "main")
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+    if isinstance(result, dict) and result.get("error"):
+        _code = result.get("status_code") or 0
+        _detail = str(result.get("detail") or result.get("error") or "")
+        if _code in (409, 422) or "already exists" in _detail or "已存在" in _detail:
+            raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
+        if _code == 403:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {result.get('error')}"})
+
+    log.info(f"Branch created: {body.branch_name} in {_pname} {owner}/{repo}")
+    # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
+    _branches_cache_invalidate(owner, repo)
+    return {"name": body.branch_name.strip(), "message": "分支已创建"}
+
 
 class CreateMarketSceneRequest(BaseModel):
     name: str

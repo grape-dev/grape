@@ -30,6 +30,8 @@ _VALID_API_AUTH = {"query_token", "bearer_header", "token_header", "private_toke
 _VALID_ISSUE_WRITE_FORM = {"repo_path", "owner_param"}
 _VALID_BRANCH_CREATE_FORM = {"form", "refs_sha"}
 _VALID_WEBHOOK_VERIFY = ("hmac", "token_compare")
+# D105-19：托管 webhook 形态（分派 webhook 三件套的实现家族）
+_VALID_WEBHOOK_DIALECTS = ("github_web", "gitee_v5")
 _VALID_CLONE_AUTH = ("x_access_token", "oauth2", "basic_password")
 
 
@@ -50,6 +52,15 @@ class PlatformCard:
     api_base: str
     api_auth: str                     # query_token | bearer_header
     webhook_verify: str = "hmac"      # hmac | token_compare
+    # D105-19（用户拍板平台化到位）：托管 webhook 形态进卡——github_web=GitHub web-hooks
+    # （config.url 匹配 / name=web 形态）；gitee_v5=v5 hooks（顶层 url 匹配 / form 形态）。
+    # 必须显式声明（不按 dialect 派生——同为 github API 方言的 gitcode/gitee webhook
+    # 形态实为 v5，派生会静默换家族）；未声明时托管消费侧 fail-closed（D105-17 冻结
+    # 因此解除）。
+    webhook_dialect: str = ""
+    # D105-19：平台默认 workflows 写权限（三态回退位，替代 provider=="github" 硬分派）。
+    # github=False（App token 无 workflow scope，push 前删 .github/workflows）；其余平台 True。
+    workflows_write: bool = True
     clone_auth: str = "x_access_token"  # x_access_token | oauth2 | basic_password
     token_env: str = ""               # BOT_<PROVIDER>_TOKEN 环境变量名（空=派生）
     bot_username: str = ""            # B2：bot 身份（空=无 bot 协作能力）
@@ -58,6 +69,29 @@ class PlatformCard:
     issue_search: bool = False        # D36/S56：有无 issue 搜索端点（策略能力位，非平台名）
     issue_write_form: str = "repo_path"  # D41/S61：issue 写端点形态（repo_path=存量 /repos/{o}/{r}/issues；owner_param=gitee /repos/{o}/issues+repo 入 body，实弹观测）
     branch_create_form: str = "form"     # D44/S66：建分支形态（form=Gitee 系 v5 POST /branches {branch_name,refs}；refs_sha=GitHub 查 sha→POST /git/refs，存量两形态）
+    # D105-19 补充：PR 列表 head 过滤参数形态（owner_ref=GitHub "owner:branch"，缺省
+    # =存量 github 语义；bare_ref=裸分支名——gitcode 实弹实测：owner:ref 形态返回空
+    # 列表、裸 ref 命中，gitee v5 同家族口径）。发错形态=服务端过滤成空→branch_guard
+    # fail-open 守卫失效，故形态进卡不按 dialect 猜。
+    pr_head_filter: str = "owner_ref"
+    # 2026-11-13 if/else 收口：仓库 token 统一读链补充回落能力位（见 build 卡注释）
+    owner_identity_token_fallback: bool = False
+    # S40-S42（2026-11-13 代理能力位上翻）：providers/<p>.py 模块开关的卡键形态
+    # （小写下划线）。默认 None=键缺席 → _pflag 回退模块开关（存量行为零变化）；
+    # 卡显式声明（含 False）优先。Builder 只接受 bool；管理面"能力"tab 经卡驱动
+    # 自动可见可编辑（field_docs 词条内置指导）。新平台纯配卡接入零 Python 模块。
+    milestone_verify_readback: "bool | None" = None          # issue 改 milestone 后 GET 回读校验
+    milestone_id_resolve_to_number: "bool | None" = None     # milestone_id 先解析为上游 number
+    milestone_due_on_required: "bool | None" = None          # milestones 建立强制 due_on
+    milestone_due_date_only: "bool | None" = None            # due_on 只认 YYYY-MM-DD
+    milestone_due_time_only: "bool | None" = None            # due_on 只认 ISO datetime
+    closing_refs_auto_close_default: "bool | None" = None    # closing keywords 上游自动关闭
+    labels_array_form: "bool | None" = None                  # labels 必须数组形态
+    labels_color_prefix_hash: "bool | None" = None           # labels 颜色 # 前缀 hex
+    issue_update_owner_path: "bool | None" = None            # issue 更新 owner-path 形态
+    issue_body_repo_bare: "bool | None" = None               # issue 写 body repo=纯仓名
+    pr_comment_id_hex: "bool | None" = None                  # PR 评论 id 32 位 hex
+    legacy_repo_token_getter: "bool | None" = None           # 存量四级 fallback 读链
     # S88/D64：github 独有怪癖能力位（非方言——gitee 同 github 方言但 API 跟随 gitcode v5）
     pr_comment_endpoint: str = "pulls"        # github="issues"（其 /pulls/{n}/comments 是 inline-review 端点）
     pr_labels_via_issues: bool = False        # github=True（PATCH /pulls 不接受 labels 字段，422 实测）
@@ -304,6 +338,19 @@ def _explicit_or_default(raw: dict, key: str, default: str) -> str:
     return default
 
 
+def _opt_bool(raw: dict, key: str) -> "bool | None":
+    """S40-S42：可选布尔能力键——键缺席/空值→None（=回退模块开关），显式
+    布尔（含 False）尊重。与 _explicit_or_default 同"显式声明优先"口径。"""
+    if key in raw:
+        v = raw.get(key)
+        if isinstance(v, bool):
+            return v
+        if v is None or str(v).strip() == "":
+            return None
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+    return None
+
+
 def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     """Builder：dict → PlatformCard，校验失败抛 PlatformCardError（S18 校验面）。"""
     if not provider or not isinstance(provider, str) or not provider.replace("_", "").isalnum():
@@ -328,6 +375,12 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     webhook_verify = raw.get("webhook_verify", "hmac" if dialect == "github" else "token_compare")
     if webhook_verify not in _VALID_WEBHOOK_VERIFY:
         raise PlatformCardError(f"{provider}: webhook_verify 必须是 {'/'.join(_VALID_WEBHOOK_VERIFY)}")
+    # D105-19：webhook 形态（github_web/gitee_v5）。必须卡显式声明——同为 github
+    # API 方言的 gitcode/gitee webhook 形态实为 v5，从 dialect 派生会静默换家族，
+    # 故不做缺省推导；未声明时托管消费侧 fail-closed（显式报错，不猜）。
+    webhook_dialect = str(raw.get("webhook_dialect") or "")
+    if webhook_dialect and webhook_dialect not in _VALID_WEBHOOK_DIALECTS:
+        raise PlatformCardError(f"{provider}: webhook_dialect 必须是 {'/'.join(_VALID_WEBHOOK_DIALECTS)}: {webhook_dialect!r}")
     clone_auth = raw.get("clone_auth", "x_access_token")
     if clone_auth not in _VALID_CLONE_AUTH:
         raise PlatformCardError(f"{provider}: clone_auth 必须是 {'/'.join(_VALID_CLONE_AUTH)}")
@@ -337,9 +390,18 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     issue_write_form = str(raw.get("issue_write_form") or "repo_path")
     if issue_write_form not in _VALID_ISSUE_WRITE_FORM:
         raise PlatformCardError(f"{provider}: issue_write_form 必须是 {'/'.join(_VALID_ISSUE_WRITE_FORM)}: {issue_write_form!r}")
-    branch_create_form = str(raw.get("branch_create_form") or "form")
+    branch_create_form = str(raw.get("branch_create_form", "form"))
     if branch_create_form not in _VALID_BRANCH_CREATE_FORM:
         raise PlatformCardError(f"{provider}: branch_create_form 必须是 {'/'.join(_VALID_BRANCH_CREATE_FORM)}: {branch_create_form!r}")
+    pr_head_filter = str(raw.get("pr_head_filter") or "owner_ref")
+    if pr_head_filter not in ("owner_ref", "bare_ref"):
+        raise PlatformCardError(f"{provider}: pr_head_filter 必须是 owner_ref/bare_ref: {pr_head_filter!r}")
+    # 2026-11-13 if/else 收口配套：仓库 token 统一读链的补充回落能力位。
+    # true = 标准策略链（session→repo_bot→global→user(host_user_id)）全空后，
+    # 再按仓库 owner 用户名查其该平台 identity token（D32-补丁语义下沉，
+    # 原为 db.get_github_token 尾段专属回落）。新平台需要该语义时卡内声明即可，
+    # 零代理/DB 层平台分支。
+    owner_identity_token_fallback = bool(raw.get("owner_identity_token_fallback", False))
     pr_comment_endpoint = str(raw.get("pr_comment_endpoint") or "pulls")
     if pr_comment_endpoint not in ("pulls", "issues"):
         raise PlatformCardError(f"{provider}: pr_comment_endpoint 必须是 pulls/issues: {pr_comment_endpoint!r}")
@@ -358,6 +420,8 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         api_base=api_base,
         api_auth=api_auth,
         webhook_verify=webhook_verify,
+        webhook_dialect=webhook_dialect,
+        workflows_write=bool(raw.get("workflows_write", True)),
         clone_auth=clone_auth,
         token_env=token_env,
         bot_username=str(raw.get("bot_username") or ""),
@@ -366,6 +430,22 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         issue_search=bool(raw.get("issue_search", False)),
         issue_write_form=str(raw.get("issue_write_form", "repo_path")),
         branch_create_form=str(raw.get("branch_create_form", "form")),
+        pr_head_filter=pr_head_filter,
+        owner_identity_token_fallback=owner_identity_token_fallback,
+        # S40-S42：代理能力键上翻——键缺席 None（_pflag 回退模块开关，存量零变化），
+        # 显式声明（含 False）优先。raw.get(...) or None 归一空串/缺省→None。
+        milestone_verify_readback=_opt_bool(raw, "milestone_verify_readback"),
+        milestone_id_resolve_to_number=_opt_bool(raw, "milestone_id_resolve_to_number"),
+        milestone_due_on_required=_opt_bool(raw, "milestone_due_on_required"),
+        milestone_due_date_only=_opt_bool(raw, "milestone_due_date_only"),
+        milestone_due_time_only=_opt_bool(raw, "milestone_due_time_only"),
+        closing_refs_auto_close_default=_opt_bool(raw, "closing_refs_auto_close_default"),
+        labels_array_form=_opt_bool(raw, "labels_array_form"),
+        labels_color_prefix_hash=_opt_bool(raw, "labels_color_prefix_hash"),
+        issue_update_owner_path=_opt_bool(raw, "issue_update_owner_path"),
+        issue_body_repo_bare=_opt_bool(raw, "issue_body_repo_bare"),
+        pr_comment_id_hex=_opt_bool(raw, "pr_comment_id_hex"),
+        legacy_repo_token_getter=_opt_bool(raw, "legacy_repo_token_getter"),
         pr_comment_endpoint=str(raw.get("pr_comment_endpoint", "pulls")),
         pr_labels_via_issues=bool(raw.get("pr_labels_via_issues", False)),
         git_tree_family=str(raw.get("git_tree_family", "v5")),
@@ -393,6 +473,7 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
 _DEFAULT_CARDS_RAW: dict[str, dict] = {
     "gitcode": {
         "name": "GitCode", "dialect": "github", "host": "gitcode.com",
+        "webhook_dialect": "gitee_v5", "pr_head_filter": "bare_ref",
         "webhook_path": "/webhook/gitcode", "event_header": "X-GitCode-Event",
         "api_base": "https://gitcode.com/api/v5", "api_auth": "query_token",
         "webhook_verify": "hmac", "clone_auth": "x_access_token",
@@ -402,6 +483,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
     },
     "github": {
         "name": "GitHub", "dialect": "github", "host": "github.com",
+        "webhook_dialect": "github_web", "workflows_write": False,
         "issue_search": True, "branch_create_form": "refs_sha",
         "webhook_path": "/webhook/github", "event_header": "X-GitHub-Event",
         "api_base": "https://api.github.com", "api_auth": "token_header",
@@ -442,8 +524,8 @@ def _repo_root(start: str) -> str:
 _CONFIGS_DIR = os.path.join(_repo_root(__file__), "configs", "platforms")
 
 
-def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
-    """S83/D59：从 configs/platforms/*.json 读内置卡（每平台一个文件 =
+def _builtin_raws_from_dir(dir_path: str) -> "dict[str, dict]":
+    """S83/D59：从 configs/platforms/*.json 读内置卡 raw（每平台一个文件 =
     能力聚合点，替代代码内 dict 作为值的载体；_DEFAULT_CARDS_RAW 保留为
     目录缺失时的代码兜底）。
 
@@ -455,7 +537,7 @@ def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
     import glob as _glob
     import json as _json
     valid_fields = {f.name for f in _dc.fields(PlatformCard)}
-    cards = {}
+    raws = {}
     for path in sorted(_glob.glob(os.path.join(dir_path, "*.json"))):
         provider = os.path.splitext(os.path.basename(path))[0]
         try:
@@ -470,10 +552,18 @@ def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
                       f"（合法键=PlatformCard 字段），整卡拒绝——修文件或扩展 Builder")
             continue
         try:
-            cards[provider] = build_platform_card(provider, raw)
+            build_platform_card(provider, raw)  # 校验预演（非法整卡拒绝）
+            raws[provider] = raw
         except PlatformCardError as e:
             log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
-    return cards
+    return raws
+
+
+def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
+    """S83/D59：configs/platforms/*.json → 平台卡（raw 读取复用
+    _builtin_raws_from_dir，守卫语义一致）。"""
+    return {p: build_platform_card(p, raw)
+            for p, raw in _builtin_raws_from_dir(dir_path).items()}
 
 
 def _load_cards() -> None:
@@ -492,23 +582,38 @@ def _load_cards() -> None:
             log.debug(f"platform_card: read meta failed ({e}), using defaults")
         # S83/D59 优先级链：meta（admin 运行时覆盖）> configs/platforms/ 文件
         # （内置默认载体，每平台一个文件）> _DEFAULT_CARDS_RAW（代码兜底，
-        # 目录缺失时才用）
+        # 目录缺失时才用）。
+        # D105-19：meta 对文件卡是【逐键覆盖】——meta 只覆盖它声明的键，缺席键
+        # 落到文件卡值。存量 meta 常是整卡全量 dump（admin UI 保存形态），若做
+        # 整卡替换，代码/文件新增的卡字段（如 webhook_dialect）会被 stale dump
+        # 静默抹掉，导致托管消费侧 fail-closed。显式置空语义不变（键存在即尊重）。
         if os.path.isdir(_CONFIGS_DIR):
-            cards.update(builtin_cards_from_dir(_CONFIGS_DIR))
+            _base_raws = _builtin_raws_from_dir(_CONFIGS_DIR)
         else:
             log.warning(f"platform_card: 配置目录缺失 {_CONFIGS_DIR}，回退代码内置默认")
-            for provider, raw in _DEFAULT_CARDS_RAW.items():
-                cards[provider] = build_platform_card(provider, raw)
+            _base_raws = {p: dict(raw) for p, raw in _DEFAULT_CARDS_RAW.items()}
         if raw_cfg:
             try:
                 data = json.loads(raw_cfg)
                 for provider, raw in (data or {}).items():
-                    try:
-                        cards[provider] = build_platform_card(provider, raw)
-                    except PlatformCardError as e:
-                        log.warning(f"platform_card: 跳过非法平台卡 {provider}: {e}")
+                    _merged = dict(_base_raws.get(provider) or {})
+                    _merged.update(raw or {})
+                    _base_raws[provider] = _merged
             except Exception as e:
                 log.warning(f"platform_card: vcs_providers_config 解析失败: {e}")
+        cards = {}
+        for provider, raw in _base_raws.items():
+            try:
+                cards[provider] = build_platform_card(provider, raw)
+            except PlatformCardError as e:
+                # meta 合并产物非法：退回纯文件卡（meta 覆盖被拒），不静默丢平台
+                _fb = (_builtin_raws_from_dir(_CONFIGS_DIR).get(provider)
+                       if os.path.isdir(_CONFIGS_DIR) else None)
+                if _fb is not None:
+                    log.warning(f"platform_card: {provider} meta 合并卡非法（{e}），回退文件卡")
+                    cards[provider] = build_platform_card(provider, _fb)
+                else:
+                    log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
         _CACHE.clear()
         _CACHE.update(cards)
         _loaded = True
@@ -546,7 +651,7 @@ def display_name_for_repo_key(repo_key: str) -> str:
             return card.name or provider
     except Exception:
         pass
-    return "GitHub" if provider == "github" else "GitCode"
+    return provider or "unknown"  # 无卡：回退 provider key（不冒充具体平台）
 
 
 def host_for_repo_key(repo_key: str) -> str:
@@ -560,4 +665,4 @@ def host_for_repo_key(repo_key: str) -> str:
             return card.host or provider
     except Exception:
         pass
-    return "github.com" if provider == "github" else "gitcode.com"
+    return f"{provider}.com" if provider else ""  # 无卡：按 provider 推导（不冒充具体平台）

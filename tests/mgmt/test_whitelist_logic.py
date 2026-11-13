@@ -24,7 +24,7 @@ def _make_mock_db(table_count=0, whitelist_rows=None):
         if "COUNT(*)" in sql_upper:
             mock_cursor.fetchone.return_value = (table_count,)
             return mock_cursor
-        elif "SELECT 1 FROM LOGIN_WHITELIST" in sql_upper:
+        elif "FROM LOGIN_WHITELIST WHERE PROVIDER=?" in sql_upper:
             mock_cursor.fetchone.return_value = whitelist_rows
             return mock_cursor
         mock_cursor.fetchone.return_value = None
@@ -41,7 +41,7 @@ def _make_mock_db(table_count=0, whitelist_rows=None):
     return mock_db, mock_lock
 
 
-def _run_is_user_allowed(meta_value, table_count, whitelist_rows, column, login):
+def _run_is_user_allowed(meta_value, table_count, whitelist_rows, provider, login):
     """Patch all dependencies and run is_user_allowed in isolation."""
     _reset_whitelist_cache()
     mock_db, mock_lock = _make_mock_db(table_count, whitelist_rows)
@@ -55,50 +55,54 @@ def _run_is_user_allowed(meta_value, table_count, whitelist_rows, column, login)
          patch('src.domains.mgmt.user.db.get_meta_value', return_value=meta_value):
         _reset_whitelist_cache()
         from src.kernel.config import is_user_allowed
-        return is_user_allowed(column, login)
+        # 2026-11-12 行式化：参数=渠道 key（列名注入面已随列名参数退役）
+        return is_user_allowed(provider, login)
 
 
 def test_whitelist_disabled_allows_all():
     """meta unset + empty table -> allow all."""
-    result = _run_is_user_allowed("", 0, None, "gitcode_username", "anyuser")
+    result = _run_is_user_allowed("", 0, None, "gitcode", "anyuser")
     assert result is True
 
 
 def test_whitelist_enabled_blocks_non_whitelisted():
     """meta=true + login not in table -> deny."""
-    result = _run_is_user_allowed("true", 1, None, "gitcode_username", "bob")
+    result = _run_is_user_allowed("true", 1, None, "gitcode", "bob")
     assert result is False
 
 
 def test_whitelist_enabled_allows_whitelisted():
     """meta=true + login in table -> allow."""
-    result = _run_is_user_allowed("true", 1, (1,), "gitcode_username", "alice")
+    result = _run_is_user_allowed("true", 1, (1,), "gitcode", "alice")
     assert result is True
 
 
 def test_whitelist_cross_platform_isolation():
     """gitcode whitelist does not affect github."""
     # gitcode: alice in whitelist -> allow
-    result1 = _run_is_user_allowed("true", 1, (1,), "gitcode_username", "alice")
+    result1 = _run_is_user_allowed("true", 1, (1,), "gitcode", "alice")
     assert result1 is True
     # github: bob not in whitelist -> deny
     result2 = _run_is_user_allowed("true", 1, None, "github_username", "bob")
     assert result2 is False
 
 
-def test_whitelist_empty_table_enabled_allows_all():
-    """P2-6: switch on but table empty -> allow all (no lockout)."""
-    result = _run_is_user_allowed("true", 0, None, "gitcode_username", "anyuser")
-    assert result is True
+def test_whitelist_empty_table_enabled_denies_all():
+    """fail-closed（2026-11-12 拍板，取代 P2-6）：switch on but table empty -> deny all.
+
+    管理台走独立密码链，可登入补条目，故不构成不可逆锁死。
+    """
+    result = _run_is_user_allowed("true", 0, None, "gitcode", "anyuser")
+    assert result is False
 
 
 def test_whitelist_invalid_column():
     """SQL injection attempt in column name -> deny."""
-    result = _run_is_user_allowed("true", 1, (1,), "gitcode_username; DROP TABLE--", "alice")
+    result = _run_is_user_allowed("true", 1, (1,), "gitcode; DROP TABLE--", "alice")
     assert result is False
 
 
 def test_whitelist_explicit_disabled_allows_all():
     """meta=false -> switch explicitly off, allow all even with table data."""
-    result = _run_is_user_allowed("false", 1, (1,), "gitcode_username", "bob")
+    result = _run_is_user_allowed("false", 1, (1,), "gitcode", "bob")
     assert result is True

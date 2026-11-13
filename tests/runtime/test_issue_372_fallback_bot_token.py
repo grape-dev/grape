@@ -86,12 +86,18 @@ def test_path_a_fallback_bot_token_empty():
     row = _get_bot_gitcode_token(repo_key)
     assert row is not None, "managed_repos 应有记录"
     assert row[0] == "", f"路径 A 降级后 bot_gitcode_token 应为空，实际: {row[0]!r}"
-    assert row[1] == 999, f"host_user_id 应为 999（路径 B），实际: {row[1]}"
+    # D105：user_id 族列 TEXT 化——host_user_id 读回为字符串口径
+    assert str(row[1]) == "999", f"host_user_id 应为 999（路径 B），实际: {row[1]!r}"
 
 
 def test_path_a_normal_bot_token_written():
-    """T11-02: 路径 A 正常（未降级）→ bot_gitcode_token 为全局 bot token。"""
-    from src.domains.mgmt.user.db import add_managed_repo
+    """T11-02: 路径 A 正常（未降级）→ bot token 落 grape_t_repo_credentials。
+
+    S82/D58 复核（2026-11-13）：add_managed_repo 凭据列冻结（managed_repos
+    平台凭据列不写，唯一权威=grape_t_repo_credentials cred_type='bot'，
+    值 N3 密文）——原断言 bot_gitcode_token 列值在列冻结后恒空（陈旧）。
+    """
+    from src.domains.mgmt.user.db import add_managed_repo, get_repo_credential_meta
     import uuid
 
     repo_key = f"{REPO_PREFIX}-normal-{uuid.uuid4().hex[:6]}"
@@ -111,8 +117,12 @@ def test_path_a_normal_bot_token_written():
 
     row = _get_bot_gitcode_token(repo_key)
     assert row is not None
-    assert row[0] == "GLOBAL_BOT_OK", f"路径 A 正常时 bot_gitcode_token 应为全局 bot token，实际: {row[0]!r}"
-    assert row[1] == 0, f"host_user_id 应为 0（路径 A），实际: {row[1]}"
+    # S82：凭据唯一权威 rc——写入值在 grape_t_repo_credentials（cred_type='bot'）
+    _rc = get_repo_credential_meta(repo_key, "bot") or {}
+    assert _rc.get("value") == "GLOBAL_BOT_OK", \
+        f"路径 A 正常时 bot token 应落 rc，实际: {_rc.get('value')!r}"
+    # D105：user_id 族列 TEXT 化——host_user_id 读回为字符串口径
+    assert str(row[1]) == "0", f"host_user_id 应为 0（路径 A），实际: {row[1]!r}"
 
 
 def test_path_b_from_start_bot_token_empty():

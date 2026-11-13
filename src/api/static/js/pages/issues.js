@@ -853,9 +853,11 @@ window._openPRDetail = function(t) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
-  var _vcsBase = t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com';
-  var _vcsPath = '/pull/' + t.issue_number;
-  var _vcsUrl = 'https://' + _vcsBase + '/' + t.repo_key.replace(/^(github|gitcode):/, '') + _vcsPath;
+  // host 走平台卡目录（_vcsUrl），PR 路径按 dialect 派生（_prWebPath：pulls/merge_requests）
+  var _vcsPath = '/' + ((typeof window._prWebPath === 'function') ? window._prWebPath(t.repo_key) : 'pull') + '/' + t.issue_number;
+  var _vcsUrl = (typeof window._vcsUrl === 'function') ? window._vcsUrl(t.repo_key, _vcsPath) : '';
+  var _repoFullName = (String(t.repo_key || '').split(':').length > 1)
+    ? String(t.repo_key).split(':').slice(1).join(':') : String(t.repo_key || '');
   var _statusColor = t.status === 'completed' ? '#34c759' : t.status === 'cancelled' ? '#ff3b30' : t.status === 'processing' ? '#3b82f6' : '#86868b';
   var _statusText = t.status === 'completed' ? '审查完成' : t.status === 'cancelled' ? '审查失败' : t.status === 'processing' ? '审查中' : '待处理';
   var _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
@@ -879,7 +881,7 @@ window._openPRDetail = function(t) {
       <div style="${_cardTitle}">PR 审查</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">状态</span><b style="${_valueStyle};color:${_statusColor}">${_statusText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">PR</span><b style="${_valueStyle}"><a href="${_vcsUrl}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${_repoFullName}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">触发者</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">触发时间</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       <div style="${_rowStyle};border-bottom:none"><span style="${_labelStyle}">事件数</span><b style="${_valueStyle}">${t.events_count || 0}</b></div>

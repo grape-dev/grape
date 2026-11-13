@@ -119,7 +119,7 @@ def test_s128_cold_start_no_gl_columns(tmp_path):
     import os
     env = dict(os.environ)
     env.update({"DEVOPS_DB_PATH": str(db_file), "DEVOPS_DB_BACKEND": "sqlite",
-                "OBS_LOG_DB": "0", "PYTHONPATH": os.path.dirname(str(__file__)) + "/..",
+                "OBS_LOG_DB": "0", "PYTHONPATH": os.path.abspath(os.path.join(os.path.dirname(str(__file__)), "..", "..")),
                 "DEVOPS_WORKSPACE_DIR": str(tmp_path / "ws")})
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
                           text=True, env=env, cwd=str(tmp_path), timeout=180)

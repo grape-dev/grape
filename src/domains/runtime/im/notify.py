@@ -71,19 +71,15 @@ _KIND_META = {
 
 
 def issue_url(repo_key: str, issue_number: int) -> str:
-    """repo_key → Issue 公开页（gitcode/github/gitlab 分流；坏值 → 空）。"""
+    """repo_key → Issue 公开页（host/路径按平台卡方言派生；坏值 → 空）。"""
     try:
-        from src.kernel.repo_key import split_owner_repo
-        owner, repo = split_owner_repo(repo_key or "")
+        # P1-12：host/路径段按平台卡方言派生（kernel.repo_key.issue_web_url 单源），
+        # 不再二分 github/gitlab/其余 gitcode —— gitee 仓此前会指向 gitcode.com。
+        from src.kernel.repo_key import issue_web_url
         n = int(issue_number or 0)
-        if not owner or not repo or not n:
+        if not repo_key or not n:
             return ""
-        provider = str(repo_key).split(":", 1)[0]
-        if provider == "github":
-            return f"https://github.com/{owner}/{repo}/issues/{n}"
-        if provider == "gitlab":
-            return f"https://gitlab.com/{owner}/{repo}/-/issues/{n}"
-        return f"https://gitcode.com/{owner}/{repo}/issues/{n}"
+        return issue_web_url(repo_key, n)
     except Exception:
         return ""
 

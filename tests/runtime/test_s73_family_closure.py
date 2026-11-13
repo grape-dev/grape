@@ -2,8 +2,9 @@
 
 家族 B：int() 强转 issue 号——事件管道未设防（gitee 字符串 ident "IKSZ3I"
 回流即 ValueError；云层放行后必炸点）。
-家族 A：盖章迁移罩住幂等派生 DDL——_ensure_whitelist_columns 同型
-（gitee 登录渠道后注册 → login_whitelist 无 gitee 列）。
+家族 A：盖章迁移罩住幂等派生 DDL——（2026-11-12 行式化后口径变更：
+动态按卡建列机制退役，白名单行走注册式迁移 202611150001 的
+provider/username 两列 + gitee 渠道行查即生效，无需 gitee_username 列）。
 家族 C：get_user_token_with_refresh 残留调用点（repo 上下文在作用域
 却折叠 gitcode）。
 
@@ -57,21 +58,38 @@ def _drop_whitelist_col(col):
         db.commit()
 
 
-# ------------------------------------------------ 家族 A：白名单列每启动补齐
+# ------------------------------------------------ 家族 A：白名单行式列每启动补齐
 
 def test_s73_whitelist_column_created_on_every_boot(gitee_channel):
-    """config-only 渠道后注册 → 列必须补（原盖章段一次性跳过；且卡未声明
-    whitelist_column 时按 {provider}_username 派生）。"""
+    """行式化（2026-11-12）：注册式迁移补 provider/username 两列幂等；
+    gitee 渠道行查白名单零列依赖（卡无需声明任何白名单元数据）。"""
     _drop_whitelist_col("gitee_username")
-    with db_lock:
-        cols = [r[1] for r in db.cursor().execute("PRAGMA table_info(login_whitelist)")]
-    assert "gitee_username" not in cols
     from src.api.db_setup import init_database
     init_database()
     with db_lock:
         cols = [r[1] for r in db.cursor().execute("PRAGMA table_info(login_whitelist)")]
-    assert "gitee_username" in cols, (
-        "gitee 渠道注册后 init_database 未补白名单列（盖章库跳过/未派生）")
+    # 行式两列在（注册式迁移幂等补齐）
+    assert {"provider", "username"} <= set(cols)
+    # gitee 渠道白名单按行查——无需 gitee_username 列即生效
+    from src.domains.mgmt.admin.db import add_login_whitelist
+    from src.kernel.config import is_user_allowed, invalidate_login_whitelist_cache
+    from src.domains.mgmt.user.db import set_meta_value
+    _u = "s73wl_user"
+    with db_lock:
+        db.execute("DELETE FROM login_whitelist WHERE username=?", (_u,))
+        db.commit()
+    assert add_login_whitelist("gitee", _u) is True
+    set_meta_value("login_whitelist_enabled", "true")
+    invalidate_login_whitelist_cache()
+    try:
+        assert is_user_allowed("gitee", _u) is True
+        assert is_user_allowed("gitcode", _u) is False
+    finally:
+        set_meta_value("login_whitelist_enabled", "false")
+        invalidate_login_whitelist_cache()
+        with db_lock:
+            db.execute("DELETE FROM login_whitelist WHERE username=?", (_u,))
+            db.commit()
 
 
 # ------------------------------------------------ 家族 B：事件管道 ident 守卫

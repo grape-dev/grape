@@ -195,12 +195,10 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    # 同时查 gitcode: 和 github: 前缀（用户可能切换了 provider）
-    _repo_keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        _repo_keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        _repo_keys.append(f"gitcode:{_owner_repo}")
+    # 同时查全部在册平台前缀（用户可能切换了 provider）——候选集由平台卡目录
+    # 派生（repo_key_candidates），gitee/gitlab 等新平台 session 同样命中。
+    from src.kernel.repo_key import repo_key_candidates
+    _repo_keys = repo_key_candidates(_owner_repo)
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     # Issue #108: 归一化 issue_number → #N 格式，供前端高亮匹配
@@ -227,7 +225,9 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             _provider = "gitcode"
             if _repo_keys:
                 _provider, _, _ = parse_repo_key(_repo_keys[0])
-            _token_col = "repo_github_token" if _provider == "github" else "repo_gitcode_token"
+            # 会话 token 列按 provider 从端口派生（模块/卡 session_token_field 能力位）
+            from src.kernel.token_resolver import create_provider
+            _token_col = create_provider(_provider).session_token_field()
             c.execute(
                 f"SELECT id, runtime_id, skill, skill_id, {_token_col}, runtime_session_id, status, last_active_at, enable, subscribe_events FROM devops_agent_session WHERE repo_key IN ({_rk_placeholders}) AND agent_type=?",
                 (*_repo_keys, name)

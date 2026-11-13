@@ -7,6 +7,8 @@
   "api_base": "https://gitee.com/api/v5",
   "api_auth": "query_token",
   "webhook_verify": "token_compare",
+  "webhook_dialect": "gitee_v5",
+  "pr_head_filter": "bare_ref",
   "clone_auth": "basic_password",
   "issue_write_form": "owner_param",
   "branch_create_form": "form",
