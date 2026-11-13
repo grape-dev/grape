@@ -1452,20 +1452,18 @@ onMounted(function () {
   min-width: 0;
   max-width: 260px;
   min-height: 260px;
-  background: color-mix(in srgb, #fff 4%, var(--c));
+  background: var(--bg);
   border-radius: 18px;
   padding: 16px;
-  border: 1px solid var(--b);
   display: flex;
   flex-direction: column;
-  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+  transition: all 0.2s;
   position: relative;
-  box-shadow: 0 1px 3px color-mix(in srgb, #000 12%, transparent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 .sm__fcard:hover {
-  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 4%, var(--c)));
-  border-color: color-mix(in srgb, var(--a) 42%, transparent);
-  box-shadow: 0 8px 22px color-mix(in srgb, #000 26%, transparent);
+  background: var(--c);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
   transform: translateY(-1px);
 }
 .sm__fcard--del {
@@ -1591,21 +1589,19 @@ onMounted(function () {
   gap: 12px;
 }
 .sm__scard {
-  background: color-mix(in srgb, #fff 4%, var(--c));
+  background: var(--bg);
   border-radius: 18px;
   padding: 16px;
-  border: 1px solid var(--b);
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+  transition: all 0.2s;
   cursor: pointer;
-  box-shadow: 0 1px 3px color-mix(in srgb, #000 12%, transparent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 .sm__scard:hover {
-  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 4%, var(--c)));
-  border-color: color-mix(in srgb, var(--a) 42%, transparent);
-  box-shadow: 0 8px 22px color-mix(in srgb, #000 26%, transparent);
+  background: var(--c);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
   transform: translateY(-1px);
 }
 .sm__scard--del {
