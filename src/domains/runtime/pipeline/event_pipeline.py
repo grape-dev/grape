@@ -867,8 +867,13 @@ def _resolve_bot_username(repo_key: str) -> str:
         if not _bot_name:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_3564e6_f
+                _mg_lib_3564e6 = _mg_lib_3564e6_f(foreign_only=True)
+                if _mg_lib_3564e6 is not None:
+                    row = _mg_lib_3564e6.read_one("managed_repos_3564e6", (_rk,))
+                else:
+                    c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+                    row = c.fetchone()
                 _bot_name = row[0] if row else ""
         if _bot_name:
             return _bot_name
@@ -2910,8 +2915,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         _mr_org = _mg_org.get_repo_org_id(repo_key)
                         _mr = (_mr_org,) if _mr_org else None
                     else:
-                        _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
-                        _mr = _c.fetchone()
+                        from src.kernel.domain_read import mgmt_lib as _mg_lib_e9a379_f
+                        _mg_lib_e9a379 = _mg_lib_e9a379_f(foreign_only=True)
+                        if _mg_lib_e9a379 is not None:
+                            _mr = _mg_lib_e9a379.read_one("managed_repos_e9a379", (repo_key,))
+                        else:
+                            _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                            _mr = _c.fetchone()
                     _mr_org_id = (_mr[0] if _mr and _mr[0] else 0)
                     _is_personal = is_org_personal(_mr_org_id) if _mr_org_id else True
                     if _mr_org_id and not _is_personal:

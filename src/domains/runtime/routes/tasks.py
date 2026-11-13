@@ -134,8 +134,13 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             from src.kernel.session_manager import db as _org_db, db_lock as _org_db_lock
             with _org_db_lock:
                 _oc = _org_db.cursor()
-                _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
-                _or = _oc.fetchone()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_e9a379_f
+                _mg_lib_e9a379 = _mg_lib_e9a379_f(foreign_only=True)
+                if _mg_lib_e9a379 is not None:
+                    _or = _mg_lib_e9a379.read_one("managed_repos_e9a379", (repo_key,))
+                else:
+                    _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                    _or = _oc.fetchone()
                 if _or and _or[0]:
                     org_id = _or[0]
         except Exception:

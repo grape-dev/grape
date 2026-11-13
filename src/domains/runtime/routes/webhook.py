@@ -82,9 +82,14 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     try:
         with db_lock:
             c = _db.cursor()
-            c.execute("SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
-                      (repo_key,))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b939bc_f
+            _mg_lib_b939bc = _mg_lib_b939bc_f(foreign_only=True)
+            if _mg_lib_b939bc is not None:
+                row = _mg_lib_b939bc.read_one("managed_repos_b939bc", (repo_key,))
+            else:
+                c.execute("SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
+                          (repo_key,))
+                row = c.fetchone()
             if row and row[0] and row[1]:
                 _owner, _repo_name = row[0], row[1]
     except Exception:

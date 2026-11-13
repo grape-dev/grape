@@ -881,8 +881,13 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
         gh_key = f"github:{owner}/{repo}"
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_6f73d4_f
+            _mg_lib_6f73d4 = _mg_lib_6f73d4_f(foreign_only=True)
+            if _mg_lib_6f73d4 is not None:
+                row = _mg_lib_6f73d4.read_one("managed_repos_6f73d4", (gh_key,))
+            else:
+                c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
+                row = c.fetchone()
         return row[0] if row else ""
     except Exception as e:
         log.warning(f"confirm-done: find github mirror for {repo_key} failed: {e}")

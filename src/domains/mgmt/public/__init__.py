@@ -574,6 +574,10 @@ _READ_QUERIES: dict[str, str] = {
     "knowledge_id_baseline": (
         "SELECT id FROM agent_shared_knowledge "
         "WHERE repo_key=%s AND scope='baseline' AND name=%s AND archived=0 LIMIT 1"),
+    "managed_repos_3564e6": "SELECT bot_username FROM managed_repos WHERE repo_key=%s AND bot_username!='' LIMIT 1",
+    "managed_repos_e9a379": "SELECT org_id FROM managed_repos WHERE repo_key=%s ORDER BY org_id DESC LIMIT 1",
+    "managed_repos_6f73d4": "SELECT repo_key FROM managed_repos WHERE repo_key=%s LIMIT 1",
+    "managed_repos_b939bc": "SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=%s",
     # 用户映射（runtime / insight 代码读）
     "um_feishu_open_ids_all": (
         "SELECT DISTINCT user_id FROM unified_user_mapping WHERE feishu_open_id!='' "
