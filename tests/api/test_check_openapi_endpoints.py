@@ -31,6 +31,19 @@ def _full_paths():
     return {ep: {} for ep in CORE_WORKFLOW_ENDPOINTS}
 
 
+def _pin_contract_copy(monkeypatch, tmp_path):
+    """把库内契约副本指到临时文件。
+
+    G6 副本守卫（`check_checked_in_copy`）比的是"渲染契约 vs 库内副本"；本文件的用例
+    故意只注入 7 个核心端点当渲染结果，若指向真实副本必然被判成漂移——那是用例口径
+    与守卫口径不一致，不是被测行为。副本守卫本身由 `test_repo_baseline_snapshot_*`
+    与 `check-all.sh` 对真实副本把关。
+    """
+    copy = tmp_path / "contract-copy.json"
+    copy.write_text(json.dumps({"paths": _full_paths()}), encoding="utf-8")
+    monkeypatch.setattr(coe, "CONTRACT_COPY", str(copy))
+
+
 def test_parse_version():
     assert parse_version("2.2.0") == (2, 2)
     assert parse_version("v2.1") == (2, 1)
@@ -140,6 +153,7 @@ def test_require_baseline_fails_when_missing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(coe, "build_current_contract",
                         lambda: {"paths": _full_paths(),
                                  "info": {"version": "2.2.1"}})
+    _pin_contract_copy(monkeypatch, tmp_path)
     absent = str(tmp_path / "absent.json")
     monkeypatch.setattr(sys, "argv", [
         "check-openapi-endpoints.py", "--baseline", absent,
@@ -154,6 +168,7 @@ def test_no_require_baseline_skips_silently(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(coe, "build_current_contract",
                         lambda: {"paths": _full_paths(),
                                  "info": {"version": "2.2.1"}})
+    _pin_contract_copy(monkeypatch, tmp_path)
     absent = str(tmp_path / "absent.json")
     monkeypatch.setattr(sys, "argv", [
         "check-openapi-endpoints.py", "--baseline", absent])
@@ -166,6 +181,7 @@ def test_update_baseline_writes_current_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(coe, "build_current_contract",
                         lambda: {"paths": _full_paths(),
                                  "info": {"version": "2.2.1"}})
+    _pin_contract_copy(monkeypatch, tmp_path)
     target = tmp_path / "new-baseline.json"
     target.write_text(json.dumps(
         {"info": {"version": "2.2.0"},

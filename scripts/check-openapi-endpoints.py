@@ -52,6 +52,10 @@ CORE_WORKFLOW_PREFIXES = (
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.|$)")
 
+# 库内契约副本（`/static/openapi.json` 的实际下载源）。提成常量是为了让单测能把
+# 它指到临时文件：注入「当前契约」的用例（如只给 7 个核心端点）不该被真实副本人为判定为漂移。
+CONTRACT_COPY = os.path.join("src", "api", "frontend", "shell", "openapi.json")
+
 
 def parse_version(version: str):
     """解析 '2.2.0' / 'v2.2' -> (major, minor)；不可解析返回 None。"""
@@ -246,8 +250,7 @@ def main() -> int:
     from src.api.main import app as _app
     errors.extend(check_route_registration_unique(_app.routes))
     # G6 守卫：库内契约副本（/static/openapi.json 下载源）不得与代码漂移
-    errors.extend(check_checked_in_copy(
-        current_paths, os.path.join("src", "api", "frontend", "shell", "openapi.json")))
+    errors.extend(check_checked_in_copy(current_paths, CONTRACT_COPY))
 
     baseline_paths, baseline_version = load_baseline(args.baseline)
     if baseline_paths:
