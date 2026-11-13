@@ -112,22 +112,23 @@ def _provider_from_hint(full_name: str) -> str:
 # hooks 探测 404 语义：这些平台把 hooks-404 视为"仓库可能刚被删"（需 bot token 复核）；
 # 其余平台 hooks-404 是权限/不可见信号，一律跳过不判（m2 事故：GitHub 非 admin 查 hooks 回 404）。
 def _provider_from_token(user: dict) -> tuple[str, str]:
-    """托管兜底：按「平台 token 是否可用」选择 provider（github 优先），
-    不按登录平台短路（登录平台 ≠ 仓库平台，见 host-repo-provider-routing-fix-design.md）。
+    """托管兜底：按「平台 token 是否可用」依次选择 provider。
 
-    注意：仅在**无法从仓库来源判定平台**时兜底，且返回的必是已实装托管全流程的平台
+    兜底顺序由策略表 `_DEFAULT_TOKEN_PROVIDER_ORDER` 驱动（不再是 github→gitcode
+    的写死阶梯，2026-11-13 收尾）；新平台只需进表。
+    不按登录平台短路（登录平台 ≠ 仓库平台，见 host-repo-provider-routing-fix-design.md）。
+    只在**无法从仓库来源判定平台**时兜底，且返回的必是已实装托管全流程的平台
     （其余平台由 host_repo 显式 422，不走到这里）。
     """
-    gh = None
-    try:
-        gh = get_user_github_token_with_refresh(user["username"], user_id=user.get("id", 0))
-    except Exception:
-        gh = None
-    if gh:
-        return "github", gh
-    gc = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    if gc:
-        return "gitcode", gc
+    from src.api.deps import get_user_token_for as _tok_for
+    uid = str(user.get("id") or "")
+    for _p in _DEFAULT_TOKEN_PROVIDER_ORDER:
+        try:
+            _tok = _tok_for(user["username"], user_id=uid, provider=_p)
+        except Exception:
+            _tok = ""
+        if _tok:
+            return _p, _tok
     return "", ""
 
 
