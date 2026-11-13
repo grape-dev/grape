@@ -23,5 +23,5 @@
 
 ## T5: 自审查 + 建 PR
 - [x] 5 轴自审查 + 敏感增量扫描
-- [x] 建 PR（base=weekly-clean-mys）
+- [x] 建 PR（base=集成线，分支名已脱敏）
 - [x] Issue 评论告知 + A2A QA

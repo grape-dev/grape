@@ -160,4 +160,4 @@ engines = (query_engines(repo_key, "user", agent_type="sre", username=_uname)
 2. i18n 两份 locale
 3. 前端弹窗体系删除 + 必选强调 + 保存拦截
 4. 版本号 bump → 浏览器验收 → 相关测试
-5. 分支：`feat/sre-repo-worker-relax`，基于 weekly-clean-mys 最新头；提交全英文，push/MR 待主人明示
+5. 分支：`feat/sre-repo-worker-relax`，基于集成线最新头；提交全英文，push/MR 待主人明示
