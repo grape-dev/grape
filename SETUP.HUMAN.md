@@ -101,7 +101,7 @@ git config --global url."https://<your-mirror>/https://github.com/".insteadOf "h
 
 If the machine has no Python >= 3.10, the script automatically re-runs itself with a newer interpreter found on `PATH` (`python3.11` / `python3.12`, …); when none exists it prints the uv commands to install one — no root, no changes to the system Python.
 
-## Docker (optional, arch layout)
+## Docker (optional, four-process compose layout)
 
 `python quickstart.py --docker` lets the script generate `JWT_SECRET` and start the containers (it locates `deploy/docker-compose.yml` automatically).
 

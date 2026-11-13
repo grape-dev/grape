@@ -77,6 +77,13 @@ def compose_file() -> Path | None:
     return None
 
 
+def layout_label(cf: Path | None) -> str:
+    """按 compose 文件位置给出自释性的布局说法（不暴露内部分支代号）。"""
+    if cf and cf.parent.name == "deploy":
+        return "四进程 compose 布局（nginx 入口）"
+    return "单服务 compose 布局"
+
+
 def port_busy(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
@@ -288,7 +295,7 @@ def start_docker(dc: list[str]) -> None:
     ok(f"容器已启动（{' '.join(dc)}）")
 
     step("Docker：等待 /api/health")
-    # 两种布局都要兼容：arch 布局入口是 nginx(80)，main 布局是 8080
+    # 两种布局都要兼容：四进程 compose 布局入口是 nginx(80)，单服务布局是 8080
     probed = 0
     healthy = None
     for url in ("http://localhost/api/health", "http://localhost:8080/api/health"):
@@ -301,7 +308,9 @@ def start_docker(dc: list[str]) -> None:
         ok(f"健康检查通过：{healthy} = 200")
     else:
         warn(f"180 秒内未就绪。排障：{' '.join(dc)} logs --tail=50")
-    print(f"\n访问 http://localhost（nginx，arch 布局）或 http://localhost:8080（单进程布局）   ·   停止：{' '.join(dc)} down   ·   清库：{' '.join(dc)} down -v（会删 grape-data 卷）")
+    label = layout_label(cf)
+    entry = "http://localhost" if (cf and cf.parent.name == "deploy") else "http://localhost（80）或 http://localhost:8080"
+    print(f"\n入口 {entry}（{label}）   ·   停止：{' '.join(dc)} down   ·   清库：{' '.join(dc)} down -v（会删 grape-data 卷）")
 
 
 def main() -> None:

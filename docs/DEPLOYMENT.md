@@ -11,7 +11,7 @@ python -m src.api.run          # Production: main API 3000 + Webhook 8080
 python -m src.api.run --dev    # Development: single port 3000, hot-reload
 ```
 
-Production deployment examples (nginx reverse proxy / systemd / Docker) live in `docs/` (see `docs/DOCUMENTATION-GUIDE.md`); the compose file and `nginx-grape.conf` are at the repo root. Alert rules ship in `deploy/alerts.yml`.
+Production deployment examples ship with the code under `deploy/`: nginx configs (`deploy/nginx-grape*.conf`), systemd units (`deploy/systemd/`), and the compose file (`deploy/docker-compose.yml`). The documentation map is `docs/DOCUMENTATION-GUIDE.md`; alert rules ship in `deploy/alerts.yml`.
 
 ## Database
 
@@ -54,7 +54,7 @@ The `DEVOPS_DB_HOST` / `DEVOPS_DB_PORT` / `DEVOPS_DB_USER` / `DEVOPS_DB_PASSWORD
 - Pool sizing is env-driven: `DB_POOL_MIN` (2) / `DB_POOL_MAX_CACHED` (16) / `DB_POOL_MAX_CONNECTIONS` (32); `DB_POOL_DISABLED=1` falls back to the legacy per-thread connection.
 - MySQL 8 defaults to `caching_sha2_password`: `pymysql` with `cryptography` (already pulled in by `python-jose[cryptography]`) completes the handshake; if it still fails, create the account with `mysql_native_password`.
 - The admin console reads its featured-order list from a separate admin database (default `grape_admin_db`, overridable via `ADMIN_DB_*`): if unreachable it degrades silently and does not affect the main flow.
-- `docker-compose.yml` starts the app only, **no MySQL service**; for Docker + MySQL point the config at an external instance (`./configs` is mounted into the container — restart the container after editing).
+- `deploy/docker-compose.yml` starts the app only, **no MySQL service**; for Docker + MySQL point the config at an external instance (`./configs` is mounted into the container — restart the container after editing).
 - Switching backends does not move data: existing SQLite data must be migrated by hand (the repo only ships `scripts/export_mysql_to_sqlite.py`, the MySQL → SQLite direction).
 - Failure cheat sheet: `ModuleNotFoundError: pymysql` → driver missing; `Access denied` → wrong account, grants or database name; garbled CJK text → database is not `utf8mb4`; data "disappears" after a restart → still on SQLite and the `grape-data` volume was removed by `down -v`.
 

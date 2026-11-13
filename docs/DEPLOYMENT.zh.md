@@ -11,7 +11,7 @@ python -m src.api.run          # 生产：主 API 3000 + Webhook 8080
 python -m src.api.run --dev    # 开发：单端口 3000，热加载
 ```
 
-nginx 反向代理 / systemd / Docker 等生产部署示例见 `docs/`（先读 `docs/DOCUMENTATION-GUIDE.md`），compose 文件与 `nginx-grape.conf` 在仓库根目录，告警规则在 `deploy/alerts.yml`。
+nginx 反向代理 / systemd / Docker 等生产部署示例随代码放在 `deploy/` 下：nginx 配置（`deploy/nginx-grape*.conf`）、systemd 单元（`deploy/systemd/`）、编排文件（`deploy/docker-compose.yml`）；文档地图见 `docs/DOCUMENTATION-GUIDE.md`，告警规则在 `deploy/alerts.yml`。
 
 ## 数据库
 
@@ -54,7 +54,7 @@ mysql -h<host> -u<user> -p -e "CREATE DATABASE IF NOT EXISTS grape_db CHARACTER 
 - 连接池参数用环境变量调：`DB_POOL_MIN`(2) / `DB_POOL_MAX_CACHED`(16) / `DB_POOL_MAX_CONNECTIONS`(32)；出问题可设 `DB_POOL_DISABLED=1` 回到每线程裸连接。
 - MySQL 8 默认 `caching_sha2_password`：`pymysql` 配合 `cryptography`（随 `python-jose[cryptography]` 已在依赖里）即可握手；若仍失败，改用 `mysql_native_password` 建账号。
 - 管理台的精选排序另读一个 admin 库（默认 `grape_admin_db`，`ADMIN_DB_*` 可覆盖）：连不上会静默降级，不影响主流程。
-- `docker-compose.yml` 只起应用、**不含 MySQL 服务**；Docker + MySQL 要把配置指向外部实例（`./configs` 已挂载进容器，改完重启容器生效）。
+- `deploy/docker-compose.yml` 只起应用、**不含 MySQL 服务**；Docker + MySQL 要把配置指向外部实例（`./configs` 已挂载进容器，改完重启容器生效）。
 - 切换后端不会自动搬数据：SQLite 上的历史数据要自行迁移（仓库只带 `scripts/export_mysql_to_sqlite.py` 这条 MySQL → SQLite 的反向导出）。
 - 故障对照：`ModuleNotFoundError: pymysql` → 驱动没装；`Access denied` → 账号、授权或库名不对；中文乱码 → 库不是 `utf8mb4`；重启后数据"消失" → 仍在 SQLite 且 `grape-data` 卷被 `down -v` 删了。
 
