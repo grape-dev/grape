@@ -264,6 +264,81 @@ def set_scene_nodes(nodes_json: str, scene_id: str | None = None, row_id: int | 
         return {"action": "updated", "changed": int(c.rowcount or 0), "hash": new_hash}
 
 
+# ---------- 知识库写原语（P3-5b：agent_shared_knowledge / scene_knowledge_ref / scene_skill_ref） ----------
+
+def upsert_baseline_knowledge(repo_key: str, display_name: str, description: str,
+                              file_path: str, obs_key: str, content_hash: str) -> dict[str, Any]:
+    """baseline 知识 upsert（定位 repo_key + scope='baseline' + name + archived=0）。
+
+    与 `runtime/project_info/builder._write_to_obs` 原 SQL 等价；返回 {"action","id"}，
+    id 供 `scene_knowledge_ref` 关联使用（原实现同样依赖 lastrowid / 命中行 id）。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM agent_shared_knowledge "
+                  "WHERE repo_key=%s AND scope='baseline' AND name=%s AND archived=0 LIMIT 1",
+                  (repo_key, display_name))
+        row = c.fetchone()
+        if row:
+            kid = int(row[0])
+            c.execute("UPDATE agent_shared_knowledge SET status='accepted', obs_key=%s, "
+                      "content_hash=%s, created_by='system', source='system', name=%s, "
+                      "description=%s WHERE id=%s",
+                      (obs_key, content_hash, display_name, description, kid))
+            return {"action": "updated", "id": kid, "changed": int(c.rowcount or 0)}
+        c.execute("INSERT INTO agent_shared_knowledge "
+                  "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, "
+                  "content_hash, created_by, source, name, description) "
+                  "VALUES ('baseline', %s, '', 0, %s, 'accepted', %s, %s, 'system', 'system', %s, %s)",
+                  (repo_key, file_path, obs_key, content_hash, display_name, description))
+        return {"action": "inserted", "id": int(c.lastrowid or 0), "changed": 1}
+
+
+def ensure_scene_knowledge_ref(knowledge_id: int, scene_id: str = "", agent_type: str = "",
+                               issue_num: int = 0, created_by: str = "system") -> int:
+    """幂等建立 scene_knowledge_ref 关联（INSERT IGNORE），返回 1=新建 / 0=已存在。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT IGNORE INTO scene_knowledge_ref "
+                  "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+                  "VALUES (%s, %s, %s, %s, 1, %s)",
+                  (int(knowledge_id), scene_id, agent_type, int(issue_num), created_by))
+        return int(c.rowcount or 0)
+
+
+def delete_event_knowledge(repo_key: str, scope: str, agent_type: str, issue_num: int) -> dict[str, int]:
+    """删除某事件的知识记录：先按 knowledge_id 删 ref，再删主表（顺序与原实现一致）。"""
+    with db_registry.cursor("mgmt") as c:
+        params = (repo_key, scope, agent_type, int(issue_num))
+        c.execute("SELECT id FROM agent_shared_knowledge WHERE repo_key=%s AND scope=%s "
+                  "AND agent_type=%s AND issue_num=%s", params)
+        kids = [int(r[0]) for r in c.fetchall()]
+        refs_deleted = 0
+        if kids:
+            ph = ",".join(["%s"] * len(kids))
+            c.execute(f"DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ({ph})", tuple(kids))
+            refs_deleted = int(c.rowcount or 0)
+        c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=%s AND scope=%s "
+                  "AND agent_type=%s AND issue_num=%s", params)
+        return {"knowledge": len(kids), "refs_deleted": refs_deleted,
+                "rows_deleted": int(c.rowcount or 0)}
+
+
+def replace_scene_skill_ref(scene_id: int, refs: list[dict[str, Any]]) -> dict[str, int]:
+    """重建某场景的技能引用：先删该 scene_id 全部，再 INSERT IGNORE 逐条（幂等）。
+
+    refs: [{"skill_id": int, "skill_name": str}]
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=%s", (int(scene_id),))
+        deleted = int(c.rowcount or 0)
+        inserted = 0
+        for r in refs or []:
+            c.execute("INSERT IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) "
+                      "VALUES (%s, %s, %s)",
+                      (int(scene_id), int(r.get("skill_id") or 0), str(r.get("skill_name") or "")))
+            inserted += int(c.rowcount or 0)
+        return {"deleted": deleted, "inserted": inserted}
+
+
 def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "official",
                          scope: str = "official", repo_key: str = "", source_user_id: str = "") -> dict[str, Any]:
     """写入场景内容（只写内容列，**绝不触碰 is_active / is_featured**）。

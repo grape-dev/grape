@@ -323,9 +323,14 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
       · repo 档查询带 owner_id=repo_key 过滤——避免跨仓同名技能被本仓场景认领。
     """
     from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ssr
+    _mg_ssr = _mgmt_lib_ssr(foreign_only=True)
+    refs: list = []
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        # lib 模式：先解析完再一次性重建（避免先 DELETE 再远端失败留下空引用）
+        if _mg_ssr is None:
+            c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
         for n in nodes:
             skill_name = (n.get("skill", "") or "").strip()
             try:
@@ -369,11 +374,38 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
                     resolved = row[0] if row else 0
             if resolved == 0:
                 logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
-            c.execute(
-                "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
-                (market_id, resolved, skill_name),
-            )
-        db.commit()
+            if _mg_ssr is not None:
+                refs.append({"skill_id": int(resolved), "skill_name": skill_name})
+            else:
+                c.execute(
+                    "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
+                    (market_id, resolved, skill_name),
+                )
+        if _mg_ssr is None:
+            db.commit()
+    if _mg_ssr is not None:
+        _write_scene_skill_ref_via_lib(_mg_ssr, market_id, refs, scene_name)
+
+
+def _write_scene_skill_ref_via_lib(_mg, market_id: int, refs: list, scene_name: str = "") -> None:
+    """lib 模式重建 scene_skill_ref：一条幂等意图，payload 带完整 refs（可重放）。"""
+    from src.kernel import cross_write as _xw
+    _ordered = sorted(refs, key=lambda r: (int(r.get("skill_id") or 0), str(r.get("skill_name") or "")))
+    _sig = hashlib.sha1(json.dumps(_ordered, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+    _out: dict = {}
+    try:
+        _res = _xw.submit(
+            "mgmt", "scene_skill_ref_replace", f"scene-skill-ref:{int(market_id)}:{_sig}",
+            {"scene_id": int(market_id), "refs": refs},
+            lambda: _out.update(_mg.replace_scene_skill_ref(int(market_id), refs)))
+        if _res.get("status") == "failed":
+            logger.warning(f"Scene sync: {scene_name} scene_skill_ref queued for retry: "
+                           f"{_res.get('error')}")
+        else:
+            logger.info(f"Scene sync: {scene_name} scene_skill_ref rebuilt via lib "
+                        f"(deleted={_out.get('deleted')}, inserted={_out.get('inserted')})")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Scene sync: {scene_name} scene_skill_ref lib path failed: {e}")
 
 
 def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str = ""):

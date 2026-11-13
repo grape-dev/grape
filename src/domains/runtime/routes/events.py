@@ -2043,6 +2043,23 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
         pass
 
     # 3. 删 DB 记录（agent_shared_knowledge + scene_knowledge_ref）
+    # P3-5b：知识表是 mgmt 基表；runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kdel
+    _mg_kdel = _mgmt_lib_kdel(foreign_only=True)
+    if _mg_kdel is not None:
+        try:
+            from src.kernel import cross_write as _xw_kdel
+            _res_kdel = _xw_kdel.submit(
+                "mgmt", "knowledge_event_delete",
+                f"knowledge-event-delete:{evt['repo_key']}:{scope}:{_ag}:{_in}",
+                {"repo_key": evt["repo_key"], "scope": scope, "agent_type": _ag,
+                 "issue_num": int(_in)},
+                lambda: _mg_kdel.delete_event_knowledge(evt["repo_key"], scope, _ag, int(_in)))
+            if _res_kdel.get("status") == "failed":
+                log.warning(f"event knowledge delete queued for retry: {_res_kdel.get('error')}")
+            return {"ok": True, "scope": scope, "message": "知识已删除"}
+        except Exception as _e_kdel:
+            log.warning(f"event knowledge delete via lib failed, fallback to local SQL: {_e_kdel}")
     with db_lock:
         c = db.cursor()
         rows = c.execute(

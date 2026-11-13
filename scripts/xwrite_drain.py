@@ -54,6 +54,16 @@ def _handlers() -> dict:
                 (p.get("fields") or {}).get("repo_owner", ""),
                 (p.get("fields") or {}).get("repo_name", ""),
                 (p.get("fields") or {}).get("full_name", ""))
+            # P3-5b：知识库（runtime 进程写入 mgmt 基表）
+            out["knowledge_baseline_upsert"] = lambda p: mg.upsert_baseline_knowledge(
+                p["repo_key"], p["display_name"], p.get("description", ""),
+                p.get("file_path", ""), p.get("obs_key", ""), p.get("content_hash", ""))
+            out["knowledge_ref_ensure"] = lambda p: mg.ensure_scene_knowledge_ref(
+                int(p["knowledge_id"]))
+            out["knowledge_event_delete"] = lambda p: mg.delete_event_knowledge(
+                p["repo_key"], p["scope"], p.get("agent_type", ""), int(p.get("issue_num", 0)))
+            out["scene_skill_ref_replace"] = lambda p: mg.replace_scene_skill_ref(
+                int(p["scene_id"]), list(p.get("refs") or []))
     except Exception:  # noqa: BLE001
         pass
     return out
