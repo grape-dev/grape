@@ -19,8 +19,15 @@ def _rows(cur) -> list[dict[str, Any]]:
 
 
 def available() -> bool:
-    """runtime 库是否可连（供调用方降级判断）。"""
-    return db_registry.domain_db("runtime") is not None
+    """本域 lib 是否可用：**必须配置了本域自有 DSN**（`uses_own_dsn`）。
+
+    收紧原因（架构审查 F2）：lib 写原语使用 MySQL 方言（`%s` / `ON DUPLICATE KEY` /
+    `NOW()`）。若允许"复用进程库"的路径也返回可用，在 sqlite 后端（单实例/测试拓扑）
+    开启 lib 开关会导致绑定参数错误。要求自有 DSN 后，lib 只在三库三机拓扑下生效，
+    复用进程库时一律走调用方原有 SQL 兜底。
+    """
+    from src.kernel import db_registry
+    return db_registry.uses_own_dsn("runtime")
 
 
 def list_runtimes(org_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:

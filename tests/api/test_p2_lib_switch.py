@@ -153,3 +153,26 @@ def test_compat_cursor_translates_qmark(monkeypatch):
     assert "%s" in raw.sql and "?" not in raw.sql.split("LIKE")[0]
     assert raw.args == ("v",)
 
+
+
+def test_available_requires_own_dsn(monkeypatch):
+    """F2：未配自有 DSN 时 lib 不可用（sqlite 复用路径不再误判为可用）。"""
+    from src.domains.runtime import public as rt
+    from src.domains.mgmt import public as mg
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: False)
+    assert rt.available() is False
+    assert mg.available() is False
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: True)
+    assert rt.available() is True
+    assert mg.available() is True
+
+
+def test_available_ignores_process_db_reuse(monkeypatch):
+    """即使域连接可复用进程库，只要没有自有 DSN 也不应判为可用。"""
+    from src.domains.runtime import public as rt
+
+    monkeypatch.setattr(db_registry, "domain_db", lambda d: object())
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: False)
+    assert rt.available() is False

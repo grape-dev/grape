@@ -54,7 +54,15 @@ _TABLES: dict[str, set[str]] = {
 
 
 def available() -> bool:
-    return db_registry.domain_db("mgmt") is not None
+    """本域 lib 是否可用：**必须配置了本域自有 DSN**（`uses_own_dsn`）。
+
+    收紧原因（架构审查 F2）：lib 写原语使用 MySQL 方言（`%s` / `ON DUPLICATE KEY` /
+    `NOW()`）。若允许"复用进程库"的路径也返回可用，在 sqlite 后端（单实例/测试拓扑）
+    开启 lib 开关会导致绑定参数错误。要求自有 DSN 后，lib 只在三库三机拓扑下生效，
+    复用进程库时一律走调用方原有 SQL 兜底。
+    """
+    from src.kernel import db_registry
+    return db_registry.uses_own_dsn("mgmt")
 
 
 def _check(table: str, columns: list[str]) -> None:
