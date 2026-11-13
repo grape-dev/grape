@@ -27,17 +27,17 @@
 新建 qa 技能，规则包/模板/脚本作为技能沉淀物，平台交互全走 grape CLI。
 1. SKILL.md：frontmatter（name=grape-architecture-guardian-v3、agent_type=qa、description 首 57 字内含触发条件）；Prerequisites（`grape --version` ≥0.3.2 / `grape refresh` / `${VAR:+ok}` 校验）；环境变量表；平台交互表；收尾 `grape tasks complete`。
 2. 规则包落地：24 条 + 4 级定义 + 级别→合入映射（BLOCKED→不建议合入；Critical→条件整改后可合入；Medium→报告标注需人工判断；Informational→不影响合入）+ 发现项证据契约。
-3. 资产移植：以 2.0 平台版（skill id 已脱敏）的 references/templates/scripts 为内容基线，以仓库 2.0（grape-architecture-guardian）的 runbook/平台范式为交互基线；全部路径改写为技能目录相对路径（bash 用 `SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`，python 用 `Path(__file__).resolve().parent`），清除 `C:\Users\...` 类绝对路径。
+3. 资产移植：以仓库 2.0（`.grape/skills/qa/ai-coding-review/grape-architecture-guardian`）的 references/templates/scripts 为内容基线，并以其 runbook/平台范式为交互基线（VOD Issue #2403 评论 200528547 §三.1 口径）；全部路径改写为技能目录相对路径（bash 用 `SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`，python 用 `Path(__file__).resolve().parent`），清除 `C:\Users\...` 类绝对路径。
 4. 审查 runbook：Step0 前置+上下文 → Step1 拉材料（Issue 或 PR 的 diff/文件/commits，只读）→ Step2 跑 3 脚本取证 → Step3 逐条规则四态判定（符合/不符合/不适用/证据不足）→ Step4 汇总报告 → Step5 评论发布（`[QA Agent]` 前缀）→ Step6 `tasks complete`（+ A2A coding 整改）。
 5. 自检：全文无未标源数字；A3（50tps）/A4（200ms）标注来源=明确业务要求（Issue #2403 原文），不得表述为实测或行业标准。
 
 ### 关键设计决策
 | 决策 | 选项 | 选择 | 理由 |
 |------|------|------|------|
-| 2.0 基线 | 2.0 平台通用版（id 已脱敏）/ 仓库 grape 版 | 内容取平台通用版，平台交互取仓库版 | 需求单要求保留 7 模式与两类沉淀物；仓库版已完成平台化 |
+| 2.0 基线 | 仓库 2.0 `grape-architecture-guardian` / 平台通用版 | 内容与平台交互均取仓库 2.0（VOD §三.1） | 需求单要求保留 7 模式与两类沉淀物；仓库 2.0 已完成平台化且为实际资产 |
 | 规则编号 | 沿用 2.0 的 16 条 / Issue 原文 A/B/C/D | Issue 原文 24 条 | 用户正文是唯一权威，2.0 编号为其子集 |
 | 目录位置 | 复用 ai-coding-review 分组 / qa 下独立 | `.grape/skills/qa/ai-coding-review/grape-architecture-guardian-v3/` | 独立技能，与 2.0 隔离防覆盖 |
-| flow_nodes | 沿用 2.0 pending-review / 无 | 无 | 需求单明确 flow_nodes=无 |
+| flow_nodes | 沿用 2.0 pending-review / 无 | pending-review | 与仓库 2.0 基线一致：Medium 级置审核点，人工判断是否合入 PR |
 
 ## 平台交互（grape CLI）
 | 交互场景 | 命令 | 说明 |
@@ -50,7 +50,7 @@
 | 交办整改 | `a2a handoff`（agent=coding） | agent 名，非技能名 |
 
 ## 流程设计
-flow_nodes: 无（3.0 以「审查报告 + 待决策清单」产出，不置平台 waiting 状态；Medium 项在报告首屏列「需人工判断是否合入」清单，不调用 pending-review）
+flow_nodes: pending-review（3.0 以「审查报告 + 待决策清单」产出；存在 Medium 级不符合时按 runbook Step 6b 调用 `issues pending-review` 置审核点，由人工判断是否合入 PR，用户回复后 `issues review-pass` / `issues review-reject` 续接）
 
 ## Affected Modules
 | 模块 | 改动类型 | 说明 |
@@ -73,7 +73,7 @@ flow_nodes: 无（3.0 以「审查报告 + 待决策清单」产出，不置平�
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
 | 平台化改造丢失两条硬规则（首要防退化项） | High | 验收含可自检项，逐条核对 |
-| Medium 不置平台节点，可能被忽略 | Med | 报告首屏列 Medium 清单 + 「需人工判断是否合入」 |
+| Medium 审核点未续接，可能被忽略 | Med | 报告首屏列 Medium 清单 + runbook Step 6b 置 pending-review 并续接 review-pass/review-reject |
 | B5 无内容、D1/D2 无细则 | Low | 占位保留，不编造 |
 | BLOCKED 误判阻断合入 | Med | 无 file:line 证据不判 BLOCKED，标注需人工复核 |
 | 50tps / 200ms 被当成实测结论 | Low | 固定标注来源=明确业务要求 |

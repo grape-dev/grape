@@ -93,7 +93,7 @@ python3 "$SKILL_DIR/scripts/dependency_inventory.py" "$REPO_PATH" --json        
 | `BLOCKED` | 存在 BLOCKED 级不符合（且有 file:line/commit sha 证据） | **给出具体技术缺陷**（规则 + file:line + 故障场景），不是风格偏好 |
 
 - 报告**首屏**必须依次给出：唯一裁决 → 级别统计 `{N} BLOCKED / {N} Critical / {N} Medium / {N} Informational` → **「需人工判断是否合入」的 Medium 清单**（规则编号 + 一句话影响）→ 合入映射。
-- **Medium 项只进首屏清单，不置平台 waiting 状态**（本技能 `flow_nodes=无`，不调用 `issues pending-review`）。
+- **Medium 项进首屏清单 + 置平台审核点**（本技能 `flow_nodes=pending-review`，见 Step 6b）。
 - `BLOCKED` 须可复核：无证据不判死；裁决与被判规则、证据一一对应。
 - 每条发现按 §8 证据契约输出；**禁止编造数值风险分**。
 - 其他模式：`audit` → `templates/audit-report.md`；`design` → `templates/architecture-decision.md`；`plan` → `templates/migration-plan.md`；`verify` 逐条给「已关闭/未关闭/证据不足」并附验证方式。
@@ -128,6 +128,18 @@ grape git-repo issues comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" 
 - 已有同轮同 head sha 的报告（`[QA Agent]` 前缀）→ 不重复发布，直接收尾。
 - 发布失败重试 ≤3 次；仍失败 → 另一入口评论说明 + 标注人工介入（`pulls comments create` 返回 422 时可降级 `issues comments create --number {PR_NUMBER}`）。
 
+### Step 6b · Medium 级置 pending-review 人工判断（必做，存在 Medium 级不符合时）
+
+> flow_nodes: pending-review 落地步骤。Medium 级不遵从需人工判断是否合入 PR。
+
+```bash
+grape issues pending-review --issue_id "${GRAPE_ISSUE_ID}" \
+  --json '{"review_points":"{N} 项 Medium 级不遵从（{规则 ID 清单}），需人工判断是否合入 PR #{PR_NUMBER}","references":"PR #{PR_NUMBER} + 审查报告 comment id=XXXX"}' --json-out
+```
+
+- 审核点置入后，报告结论标注「Medium 待人工判断」；用户回复后 `grape issues review-pass --json '{"target":"done/processing"}'` / `grape issues review-reject --json '{"reason":"..."}'` 续接（幂等，`changed:false` 忽略）。
+- 无 Medium 级不符合 → 跳过本步。
+
 ### Step 7 · 收尾 / 交办（必做，任何分支执行到最后）
 
 1. 输出人类可读摘要：审查对象、模式、唯一裁决、四级计数、报告 comment id、待决策清单条数。
@@ -141,6 +153,7 @@ echo "$SCENE_NODES" | jq -r '[.nodes[]?.tag // .nodes[]?.skill] | unique | join(
 - `BLOCKED` / 需整改 → 命中 `coding` 节点时交办：`grape a2a handoff --json '{"agent":"coding","payload":{"repository":"'"$REPO_FULL_NAME"'","account":"'"$ACCOUNT"'","issue_number":'"$ISSUE_NUMBER"',"pr_number":'"$PR_NUMBER"',"context":"架构守护 3.0 审查结论 {裁决}，{N} 项 BLOCKED / {N} 项 Critical 需按报告整改（含 file:line 与修复顺序）"}}' --json-out`，`next_step=a2a_coding`。
 - `APPROVED` 且流程需要放行 → 命中 `sre` 节点时交办 `{"agent":"sre",...}`，`next_step=a2a_sre`。
 - 未命中目标节点 / `$ISSUE_NUMBER` 非数字 / Medium 待人工判断 → **不 A2A**，报告已发布即收尾，`next_step=reply_comment`。
+- **Medium 审核点续接**：已置 pending-review 时，本轮 `next_step=reply_comment`（**不终态化**）；用户回复后按 `grape issues review-pass --json '{"target":"done|processing"}'`（通过）或 `grape issues review-reject --json '{"reason":"..."}'`（驳回）续接并同步 `next_step`，幂等（`changed:false` 忽略）。
 - 最后 `grape tasks complete`（模板见 SKILL.md），`already:true` 忽略。
 
 ## 错误排查速查
@@ -163,6 +176,6 @@ echo "$SCENE_NODES" | jq -r '[.nodes[]?.tag // .nodes[]?.skill] | unique | join(
 - ❌ 编造数值风险分、编造标准条款 ID。
 - ❌ 数值无来源仍写最终值（必须 `<undecided: 需要何种测量>` + `INSUFFICIENT DATA TO VERIFY`）。
 - ❌ 为 B5 编造约束条款。
-- ❌ 调用 `issues pending-review`（本技能 `flow_nodes=无`，Medium 走报告首屏人工清单）。
+- ❌ Medium 级不符合存在却跳过 Step 6b 置 pending-review 审核点（`flow_nodes=pending-review` 必做）。
 - ❌ A2A 交办写技能名（交办 **agent**：`coding` / `sre`）。
 - ❌ 因「等待」跳过最终收尾（`tasks complete`）。

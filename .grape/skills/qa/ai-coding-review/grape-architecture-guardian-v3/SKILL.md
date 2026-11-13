@@ -1,6 +1,6 @@
 ---
 name: grape-architecture-guardian-v3
-version: 3.1.0
+version: 3.2.0
 description: |
   Grape 架构守护 3.0（qa 型架构审查技能）：按 Issue #2403 正文四级规则包（A1-A14 / B1-B5 / C1-C3 / D1-D2 共 24 条）做证据化审查。
   ①7 模式（audit/design/plan/review/security/scale/verify）按需执行 → ②24 条规则逐条四态判定 → ③review 模式对 PR 或具体变更输出唯一裁决
@@ -64,7 +64,7 @@ Grape 项目群的架构守护者（3.0 版）：以 Issue #2403 正文 24 条�
 
 ## 处理流程
 
-> ⚠️ 先读 `references/architecture-guardian-3-runbook.md`，按走查表逐步执行（Step 0 前置+上下文 → 1 模式执行矩阵 → 2 拉材料 → 3 跑 3 只读脚本 → 4 逐条 24 规则四态判定 → 5 汇总报告与唯一裁决 → 6 发布评论 → 7 收尾/交办），**照抄执行，不要 `grape --help` / `grape commands` 逐条探索**。
+> ⚠️ 先读 `references/architecture-guardian-3-runbook.md`，按走查表逐步执行（Step 0 前置+上下文 → 1 模式执行矩阵 → 2 拉材料 → 3 跑 3 只读脚本 → 4 逐条 24 规则四态判定 → 5 汇总报告与唯一裁决 → 6 发布评论 → 6b Medium 置 pending-review → 7 收尾/交办/审批续接），**照抄执行，不要 `grape --help` / `grape commands` 逐条探索**。
 > ⚠️ 规则逐条对照 `references/grape-architecture-rules-v3.md`，不凭记忆转述；本技能收尾一律用 `grape tasks complete`（情形一），评论发完 ≠ 任务完成。
 
 模式：`audit` 审既有系统 → `templates/audit-report.md`；`design` 实现前设计 → `templates/architecture-decision.md`；`plan` 重建/迁移 → `templates/migration-plan.md`；`review` 门禁 PR 或具体变更 → 唯一裁决 + `templates/finding.md`；`security` 深度安全 → `references/security.md`；`scale` 深度扩展性/性能 → `references/scalability.md`；`verify` 验证整改生效 → 逐条「已关闭/未关闭/证据不足」。
@@ -76,7 +76,7 @@ Grape 项目群的架构守护者（3.0 版）：以 Issue #2403 正文 24 条�
 - **review 唯一裁决**：`APPROVED`（0 BLOCKED、0 Critical）｜`APPROVED WITH CONDITIONS`（有 Critical 可整改或仅需条件整改，列出条件）｜`BLOCKED`（有 BLOCKED 级不符合**且有证据**，须给具体技术缺陷，不是风格偏好；无证据不判死，标「需人工复核」）。
 - **合入映射**：BLOCKED → 不建议合入；Critical → 条件整改（条件未满足前不建议合入）；Medium → 人工判断（只进报告首屏清单）；Informational → 不影响合入。
 - **发现项契约**：每条含规则编号 + Severity + `file:line`/`commit sha` + 问题 + 故障场景 + 验证方式 + **修复顺序与依赖**；**禁止编造数值风险分**。
-- **flow_nodes=无**：不调用 `issues pending-review` / `awaiting-input`，Medium 通过报告首屏人工清单交付。
+- **流程节点 flow_nodes=pending-review（Medium 人工判断，必做）**：存在 Medium 级不符合项时，按 runbook Step 6b 调用 `grape issues pending-review --issue_id ${GRAPE_ISSUE_ID} --json '{"review_points":"...","references":"PR #{N} + 报告评论 id"}'` 置审核点；用户回复后 `grape issues review-pass --json '{"target":"done/processing"}'` / `grape issues review-reject --json '{"reason":"..."}'` 续接（幂等，`changed:false` 忽略）。无 Medium 级不符合 → 不置审核点。
 
 ## 操作边界
 
@@ -111,7 +111,7 @@ Grape 项目群的架构守护者（3.0 版）：以 Issue #2403 正文 24 条�
 ```bash
 grape tasks complete --json '{
   "result_text": "结论：{审查对象} 架构守护 3.0 审查完成（模式 {mode}）：{APPROVED / APPROVED WITH CONDITIONS / BLOCKED}（N BLOCKED / N Critical / N Medium / N Informational）。\n动作：拉材料 + 3 只读脚本取证 + 24 条规则四态判定 + 报告发布（comment id=XXXX）。\n摘要：一句话概括裁决与合入建议。",
-  "next_step": "{按 runbook Step 7 裁决取值：a2a_coding（BLOCKED / 需整改且命中 coding 节点）| a2a_sre（APPROVED 放行且命中 sre 节点）| reply_comment（未命中节点 / Issue 号非数字 / Medium 待人工判断）}",
+  "next_step": "{按 runbook Step 7 裁决取值：a2a_coding（BLOCKED / 需整改且命中 coding 节点）| a2a_sre（APPROVED 放行且命中 sre 节点）| reply_comment（未命中节点 / Issue 号非数字 / 已置 pending-review 审核点待用户回复）}",
   "actions": ["拉取审查材料", "3 只读脚本取证", "24 条规则四态判定", "发布审查报告"],
   "conclusion": "{审查对象} 审查完成：{裁决 + 合入映射}，{整改/后续}",
   "artifacts": ["评论 comment id=XXXX"],

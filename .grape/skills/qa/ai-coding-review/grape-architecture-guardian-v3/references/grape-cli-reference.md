@@ -40,6 +40,11 @@ grape git-repo pulls comments create --owner {owner} --repo {repo} --number {pr}
 grape git-repo issues comments create --owner {owner} --repo {repo} --number {n} \
   --json '{"body":"[QA Agent] ..."}' --json-out
 
+# 审核点（Medium 级，flow_nodes=pending-review）
+grape issues pending-review --issue_id {issue_id} --json '{"review_points":"...","references":"..."}' --json-out
+grape issues review-pass --json '{"target":"done|processing"}' --json-out
+grape issues review-reject --json '{"reason":"..."}' --json-out
+
 # 收尾 / 交办
 grape scenes detail --scene_id {scene_id} --json-out                              # A2A 前节点核验
 grape a2a handoff --json '{"agent":"coding","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"..."}}' --json-out
@@ -58,7 +63,7 @@ grape feedback submit --json '{"category":"suggestion","feedback_kind":"skill_qu
 - **无 `grape api` 逃生舱**：v0.2.2 已移除；契约未覆盖的端点无法 CLI 调用，**不 curl 直连**，输出理由。
 - **不存在能力**：仓库创建/删除、任务删除、知识上传、Issue/PR 删除、分支创建/删除、Token 管理、`tasks create`（已移除）、流式输出、交互式提示。`skills upload` / `skills delete` **已存在**，不在此清单。
 - **平台限制**：`git-repo tree` 的 `depth=recursive` 仅 GitHub 支持，GitCode 返回 HTTP 400「暂不支持递归树」；需要全树时用 `--depth single` 按目录逐层拉取，或只读 `grape git ls-tree -r` 兜底。
-- 本技能**不使用**：`pulls merge`（禁合并）、`git-repo issues update`（不改 Issue body）、任何 `grape git` 写子命令、`issues pending-review` / `awaiting-input`（本技能 `flow_nodes=无`）。
+- 本技能**不使用**：`pulls merge`（禁合并）、`git-repo issues update`（不改 Issue body）、任何 `grape git` 写子命令、`awaiting-input`。Medium 级不符合时按 runbook Step 6b 使用 `issues pending-review` / `issues review-pass` / `issues review-reject` 置审核点并续接（`flow_nodes=pending-review`）。
 
 ## 5. 退出码
 
