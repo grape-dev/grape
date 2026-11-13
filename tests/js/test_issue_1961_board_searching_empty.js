@@ -53,8 +53,8 @@ function makeI18N(dict, prefix) {
 // ── 1. 静态断言：locale 键真实落盘 + 版本号 bump ──
 assert.strictEqual(zhTasks.searching, '搜索中...', 'zh tasks.json 应真实存在 searching 键');
 assert.strictEqual(enTasks.searching, 'Searching...', 'en tasks.json 应真实存在 searching 键');
-assert.ok(/issues\.js\?v=140/.test(indexHtml), 'index.html 中 issues.js 版本号应 bump 到 v=140');
-assert.ok(!/issues\.js\?v=138/.test(indexHtml), 'index.html 不应残留旧版本 v=139');
+assert.ok(/issues\.js\?v=142/.test(indexHtml), 'index.html 中 issues.js 版本号应 bump 到 v=142');
+assert.ok(!/issues\.js\?v=138/.test(indexHtml), 'index.html 不应残留旧版本 v=141');
 
 // ── 2. 静态断言：调用点补传列游标 + 列表空态走统一判定 ──
 assert.ok(src.includes('function _boardColListHtml(colKey, list, cur)'), '_boardColListHtml 应支持可选列游标第三参');

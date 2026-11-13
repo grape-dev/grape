@@ -5,9 +5,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from src.kernel.config import log
 from src.api.deps import get_user_or_none
-from src.api.event_pipeline import run_pipeline, resolve_actor_account
+from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
-from src.domains.runtime.pipeline.constants import (
+from src.api.pipeline_constants import (
     HANDOFF_RESULT_FAILED,
     HANDOFF_RESULT_OK,
     HANDOFF_RESULT_REJECTED,
@@ -328,7 +328,7 @@ def _advance_a2a_issue_stage(repo_key: str, issue_number, agent_name: str) -> No
 
 
 def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: int,
-                                 reason: str = "active_a2a_event"):
+                                 reason: str = "active_a2a_event", source_seq: int = 0):
     """Issue #729：同 issue 同 agent 重复 A2A 的拦截响应体（含原任务产物引用）。
 
     Issue #1667：补充 queued=False / reason，明确与「排队」响应区分；
@@ -338,6 +338,7 @@ def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: i
     return JSONResponse(status_code=200, content={
         "status": "ok", "seq": 0, "agent": agent_name,
         "skipped": "duplicate_a2a", "queued": False, "handoff_result": HANDOFF_RESULT_REJECTED,
+        "source_seq": int(source_seq or 0),
         "reason": reason, "existing_seq": existing_seq,
         "message": "same issue+agent already has an active a2a event (existing_seq); "
                    "retry with queue=true to queue it. " + _a2a_force_resend_hint(),
@@ -1017,7 +1018,7 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
 def _cross_pipeline_handoff(
     repo_key: str, issue_number: str, target_scene_id: str, target_node: str,
     carried_context: dict, target_assignee: str, engine_config, context: str,
-    repository: str, account: str,
+    repository: str, account: str, source_seq: int = 0,
 ) -> dict:
     """Issue #329: Cross-pipeline handoff — redirect A2A to target scene's vod node.
 
@@ -1297,6 +1298,10 @@ def _cross_pipeline_handoff(
                 "target_scene_id": target_scene_id,
                 "carried_context": _cc,
                 "engine_config": engine_config,
+                # Issue #2050 / R3：跨流水线交棒同样要落结构化 source_seq，否则
+                # patrol.structured_handoff_exists 匹配不到 → 合法交棒被判断链。
+                "source_seq": int(source_seq or 0),
+                "ref_seq": int(source_seq or 0),
             },
             status="running",
             scene_id=target_scene_id,
@@ -1355,7 +1360,12 @@ def _cross_pipeline_handoff(
                 log.info(f"A2A #329: cross-pipeline direct run_pipeline seq={seq}")
             except Exception as _de3:
                 log.warning(f"A2A #329: direct run_pipeline also failed: {_de3}")
-        return {"ok": True, "response": {"status": "ok", "seq": seq, "agent": target_node, "scene": target_scene_id, "cross_pipeline": True}}
+        # Issue #2050：成功路径也是 A2A 响应，按契约回显 handoff_result / source_seq。
+        return {"ok": True, "response": {
+            "status": "ok", "seq": seq, "agent": target_node, "scene": target_scene_id,
+            "cross_pipeline": True, "handoff_result": HANDOFF_RESULT_OK,
+            "source_seq": int(source_seq or 0),
+        }}
     except Exception as _de:
         log.warning(f"A2A #329: dispatch failed: {_de}")
         return {"ok": False, "error": "dispatch_failed"}
@@ -1778,10 +1788,30 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         target_assignee = payload.get("target_assignee", "")
         engine_config = payload.get("engine_config")
 
+        _a2a_session_info = None
+        if user and user.get("auth_type") in ("jwt", "api_key"):
+            from src.domains.mgmt.user.db import get_managed_repos
+            managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
+            if repo_key not in managed:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
+        else:
+            # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
+            _a2a_session_info = _authorize_a2a(request, repo_key)
+
+        # Issue #1948 / #1973：解析调用方自身事件 seq，供派发门禁精确排除自身
+        # running 事件（下游 qa 打回上游 coding 时不能把自己判成「下游 running」自锁）。
+        _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)
+        # Issue #2050：结构化 handoff 必带源段 seq。显式 body/payload 优先；
+        # 缺省时用会话反查到的调用方 event_seq 兜底，保证所有经 agent 会话发起的
+        # A2A 都落结构化 source_seq（供巡检直接判定「已交棒」，文本仅降级）。
+        if not _source_seq and _a2a_ref_seq:
+            _source_seq = int(_a2a_ref_seq)
+
         if target_scene_id and issue_number:
             _redirect = _cross_pipeline_handoff(
                 repo_key, issue_number, target_scene_id, target_node or "vod",
                 carried_context, target_assignee, engine_config, context, repository, account,
+                source_seq=_source_seq,
             )
             if _redirect.get("ok"):
                 log.info(f"A2A #329: cross-pipeline handoff redirected to scene={target_scene_id} node={target_node or 'vod'}")
@@ -1789,14 +1819,19 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             if _redirect.get("error"):
                 log.info(f"A2A #329: cross-pipeline handoff skipped: {_redirect['error']}")
                 # Issue #729：拦截响应透传 original_event（含 task_ref/result_ref）
+                # Issue #2050：契约字段直接落字面量，静态扫描可核（required: handoff_result/source_seq）
                 _skip_content = {
                     "status": "ok", "seq": 0, "agent": target_node or "vod",
-                    "skipped": _redirect["error"], "handoff_result": HANDOFF_RESULT_REJECTED,
-                    "source_seq": _source_seq,
+                    "skipped": _redirect["error"],
                 }
                 if _redirect.get("original_event"):
                     _skip_content["original_event"] = _redirect["original_event"]
-                return JSONResponse(status_code=200, content=_skip_content)
+                return JSONResponse(status_code=200, content={
+                    "status": "ok", "seq": 0, "agent": target_node or "vod",
+                    "skipped": _redirect["error"],
+                    "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq,
+                    **({"original_event": _redirect["original_event"]} if _redirect.get("original_event") else {}),
+                })
 
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
         if issue_number and repo_key:
@@ -1815,15 +1850,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         seq = 0
 
         # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
-        _a2a_session_info = None
-        if user and user.get("auth_type") in ("jwt", "api_key"):
-            from src.domains.mgmt.user.db import get_managed_repos
-            managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
-            if repo_key not in managed:
-                raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
-        else:
-            # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
-            _a2a_session_info = _authorize_a2a(request, repo_key)
 
         # Issue #671：注册表未命中 → GitCode 可达性回退（鉴权之后执行，
         # 未认证调用方不触发外呼，维持原 400 not hosted 拒绝语义）。
@@ -2129,14 +2155,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # Issue #1962：手动补发的源事件自排除（0 = 不过滤），预检与原子复查共用。
         _exclude_seq = 0
 
-        # Issue #1948 / #1973：解析调用方自身事件 seq，供派发门禁精确排除自身
-        # running 事件（下游 qa 打回上游 coding 时不能把自己判成「下游 running」自锁）。
-        _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)
-        # Issue #2050：结构化 handoff 必带源段 seq。显式 body/payload 优先；
-        # 缺省时用会话反查到的调用方 event_seq 兜底，保证所有经 agent 会话发起的
-        # A2A 都落结构化 source_seq（供巡检直接判定「已交棒」，文本仅降级）。
-        if not _source_seq and _a2a_ref_seq:
-            _source_seq = int(_a2a_ref_seq)
 
         # Issue #1770：A2A 派发门禁——下游 running 时不再派发上游 + 时间窗去重
         # + 短窗活跃重复拦截 + 短窗告警。
@@ -2343,7 +2361,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing_seq}")
                 # Issue #729：拦截响应携带原任务产物引用（task_ref/result_ref），
                 # 下游凭引用可续接原任务产物，无需重新定位
-                return _duplicate_a2a_skip_response(agent_name, repo_key, _existing_seq)
+                return _duplicate_a2a_skip_response(agent_name, repo_key, _existing_seq,
+                                                source_seq=_source_seq)
 
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)

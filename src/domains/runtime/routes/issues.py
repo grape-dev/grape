@@ -286,11 +286,13 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             # Issue #1938：补取 result 列（与事件列表/详情/PR 订阅三处调用点同口径），
             # 供 fetch_display_meta 兜底识别存量（#587 时代）补偿记录的历史固定文案。
             # 列序固定：0 seq … 8 created_at、9 entity_type（#252 PR 事件过滤）、
-            # 10 runtime、11 skill、12 result。本视图不取 structured_output/agent_logs
-            # （Issue 列表一次加载全仓库事件，不加载整份执行日志）。
+            # 10 runtime、11 skill、12 result、13 completed_at（Issue #2050：
+            # 详情 view 的停滞判定要读末段完成时间，缺这列会让 stall_state 恒为 unknown）。
+            # 本视图不取 structured_output/agent_logs（Issue 列表一次加载全仓库事件，
+            # 不加载整份执行日志）。
             c.execute(
                 f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, "
-                f"created_at, entity_type, runtime, skill, result "
+                f"created_at, entity_type, runtime, skill, result, completed_at "
                 f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
                 repo_keys + _num_params)
             rows = c.fetchall()
@@ -317,6 +319,9 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             "status": r[7], "created_at": normalize_event_time(r[8]),
             "runtime": r[10] if len(r) > 10 else "",
             "skill": r[11] if len(r) > 11 else "",
+            # Issue #2050：末段完成时间（停滞判定输入；缺失时保持空串，
+            # 由 compute_stall_state 明确判为 unknown，不回退 created_at）。
+            "completed_at": (r[13] or "") if len(r) > 13 else "",
         }
         # Issue #1938：补偿记录标注 + 「Agent 答复结论」口径（合成补偿不计入）
         _cm = _cascade_map.get(r[0]) or {}
@@ -528,6 +533,8 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
             "seq": ev["seq"], "agent": ev.get("agent_type", ""),
             "event_type": ev.get("event_type", ""),
             "status": ev.get("status", ""),
+            "created_at": ev.get("created_at", ""),
+            "completed_at": ev.get("completed_at", ""),
             "runtime": ev.get("runtime", ""), "skill": ev.get("skill", ""),
             "output": {
                 "conclusion": ev.get("summary", ""),
@@ -1225,7 +1232,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         _sre_result = {"task_ref": dict(_UNAVAILABLE_TASK_REF),
                        "result_ref": dict(_UNAVAILABLE_RESULT_REF)}
 
-    return {
+    from src.api.pipeline_status import attach_stall_state
+    _out = {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
         "current_stage": _current_stage,
@@ -1241,6 +1249,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         "review_status": derive_review_status(_current_stage, _issue_task_status),
         "sre_result": _sre_result,
     }
+    attach_stall_state(_out, events, _current_stage, _issue_task_status)
+    return _out
 
 class IssueHandoffBody(BaseModel):
     target_scene_id: str = ""

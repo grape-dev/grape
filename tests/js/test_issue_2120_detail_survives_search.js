@@ -45,8 +45,8 @@ assert.ok(!src.includes('onchange="_taskQuery=this.value;_resetTaskListAndLoad()
 assert.ok(src.includes('function _submitTaskSearch()'), '应定义 _submitTaskSearch 显式提交入口');
 const submitRefs = src.match(/_submitTaskSearch\(\)/g) || [];
 assert.ok(submitRefs.length >= 5, 'Enter + 搜索按钮（看板/列表两处）均应调用 _submitTaskSearch，实际 ' + submitRefs.length);
-assert.ok(/issues\.js\?v=140/.test(indexHtml), 'index.html 中 issues.js 版本号应 bump 到 v=140');
-assert.ok(!/issues\.js\?v=138/.test(indexHtml), 'index.html 不应残留旧版本 v=139');
+assert.ok(/issues\.js\?v=142/.test(indexHtml), 'index.html 中 issues.js 版本号应 bump 到 v=142');
+assert.ok(!/issues\.js\?v=138/.test(indexHtml), 'index.html 不应残留旧版本 v=141');
 assert.strictEqual(zhTasks.detail_not_in_results, '该需求不在当前筛选结果中', 'zh tasks.json 应存在 detail_not_in_results');
 assert.strictEqual(enTasks.detail_not_in_results, 'This issue is not in the current filter results', 'en tasks.json 应存在 detail_not_in_results');
 

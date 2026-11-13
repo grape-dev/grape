@@ -47,5 +47,6 @@
   "next_page": "Next",
   "cross_scene_handoff": "Cross-Scene Handoff",
   "no_issues": "No issues",
-  "loading_more": "Loading…"
+  "loading_more": "Loading…",
+  "stalled_badge": "⏳ stalled {{minutes}}m"
 }

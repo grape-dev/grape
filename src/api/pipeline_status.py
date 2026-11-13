@@ -10,6 +10,15 @@ Issue #539：pipeline 汇总新增「需求级业务状态」（review_status）
 
 import json as _json
 import re
+from datetime import datetime, timezone
+
+from src.api.pipeline_constants import (
+    DEFAULT_CONFIRM_MINUTES,
+    PAUSED_ISSUE_STATUSES,
+    PIPELINE_SEGMENT_EVENT_TYPES,
+    TERMINAL_ISSUE_STAGES,
+    TERMINAL_TASK_STATUSES,
+)
 
 # 状态码（与菜单流水线页现有 0/1/2/3 兼容，新增 4/5）
 STATUS_PENDING = 0
@@ -80,6 +89,112 @@ def compute_node_statuses(nodes, issue_events, current_stage):
         statuses.append(status)
 
     return nodes, statuses
+
+
+# ===================== Issue #2050：停滞态（stalled）可见性 =====================
+
+STALL_STATE_RUNNING = "running"
+STALL_STATE_COMPLETED = "completed"
+STALL_STATE_PAUSED = "paused"
+STALL_STATE_GRACE = "grace"
+STALL_STATE_STALLED = "stalled"
+STALL_STATE_UNKNOWN = "unknown"
+
+
+def _pipeline_segments(issue_events):
+    """取流水线段事件（排除 admin_action / assignee_changed 等非段事件）。
+
+    当事件行带 ``event_type`` 时只认 a2a_event（真实的 agent 执行段）；
+    历史 archive 段没有 event_type 字段时按全量段兼容（无法区分类型）。
+    """
+    typed = [e for e in issue_events if str(e.get("event_type") or "").strip()]
+    if typed:
+        # PIPELINE_SEGMENT_EVENT_TYPES 与 NON_PIPELINE_EVENT_TYPES 互斥（前者只有
+        # a2a_event，后者是 admin_action/assignee_changed），旧写法里的排除子句恒真，
+        # 已删（QA 第 5 轮 M3）。存在 typed 行时整体忽略无类型行：无类型行来自
+        # archive 快照，同一 issue 同时出现两套时以 DB 的 typed 行为准，避免重复计段。
+        return [e for e in typed
+                if str(e.get("event_type") or "").strip() in PIPELINE_SEGMENT_EVENT_TYPES]
+    return list(issue_events)
+
+
+def _parse_stall_ts(value):
+    """解析事件时间（统一复用巡检的时间规范：UTC aware ISO / MySQL CST）。"""
+    if not value:
+        return None
+    try:
+        from src.api.patrol import _parse_dt
+        return _parse_dt(str(value))
+    except Exception:
+        return None
+
+
+def compute_stall_state(issue_events, stage, task_status="", confirm_minutes=None):
+    """判定流水线是否「完成但未接力（stalled）」并给出停滞时长（分钟）。
+
+    判据与巡检兜底一致：末个流水线段（a2a_event）completed、issue 未到终态，
+    且距末段 ``completed_at`` 已超过确认窗（默认 patrol:confirm_minutes）。
+    admin_action / assignee_changed 等审计事件不参与末段判定；存在 running 段
+    时视为正常在途（running）。「等用户」暂停态（awaiting_input 等
+    PAUSED_ISSUE_STATUSES）既非停滞也非完成，返回 paused，不得上板为 stalled。
+    缺少 completed_at 时不回退 created_at（后者含任务运行时长，会高估停滞时长）
+    ——数据异常返回 unknown。返回新增可选字段（旧字段语义不变）：
+    ``stall_state`` / ``stalled`` / ``stalled_minutes``。
+    """
+    stage = (stage or "").strip()
+    task_status = (task_status or "").strip()
+    out = {"stall_state": STALL_STATE_UNKNOWN, "stalled": False, "stalled_minutes": 0}
+    events = [e for e in (issue_events or []) if isinstance(e, dict)]
+    if task_status in PAUSED_ISSUE_STATUSES:
+        out["stall_state"] = STALL_STATE_PAUSED
+        return out
+    if not events:
+        return out
+    events.sort(key=lambda e: e.get("seq") or 0)
+    segments = _pipeline_segments(events)
+    if not segments:
+        return out
+    last = segments[-1]
+    last_status = str(last.get("status") or "").strip()
+    if last_status in ("running", "dispatched", "queued", "pending"):
+        out["stall_state"] = STALL_STATE_RUNNING
+        return out
+    if stage in TERMINAL_ISSUE_STAGES or task_status in TERMINAL_TASK_STATUSES:
+        out["stall_state"] = STALL_STATE_COMPLETED
+        return out
+    if last_status != "completed":
+        out["stall_state"] = STALL_STATE_UNKNOWN
+        return out
+    ts = _parse_stall_ts(last.get("completed_at") or "")
+    if ts is None:
+        return out
+    minutes = max(0, int((datetime.now(timezone.utc) - ts).total_seconds() // 60))
+    if confirm_minutes is None:
+        try:
+            from src.api.patrol import patrol_runtime_config
+            confirm_minutes = patrol_runtime_config().get(
+                "confirm_minutes", DEFAULT_CONFIRM_MINUTES)
+        except Exception:
+            confirm_minutes = DEFAULT_CONFIRM_MINUTES
+    try:
+        confirm_minutes = int(confirm_minutes)
+    except (TypeError, ValueError):
+        confirm_minutes = DEFAULT_CONFIRM_MINUTES
+    out["stalled_minutes"] = minutes
+    if minutes >= max(confirm_minutes, 0):
+        out["stall_state"] = STALL_STATE_STALLED
+        out["stalled"] = True
+    else:
+        out["stall_state"] = STALL_STATE_GRACE
+    return out
+
+
+def attach_stall_state(target, issue_events, stage, task_status="", confirm_minutes=None):
+    """把停滞态字段叠加到 pipeline/详情响应对象（dict 或无操作）。"""
+    if not isinstance(target, dict):
+        return target
+    target.update(compute_stall_state(issue_events, stage, task_status, confirm_minutes))
+    return target
 
 
 # ===================== Issue #539：需求级业务状态 + 阶段任务/结果引用 =====================
@@ -319,4 +434,5 @@ def enrich_pipeline_business_status(pipeline, stage, task_status, task_refs=None
         else:
             out["task_ref"] = dict(_UNAVAILABLE_TASK_REF)
             out["result_ref"] = dict(_UNAVAILABLE_RESULT_REF)
+    attach_stall_state(pipeline, pipeline.get("segments") or [], stage, task_status)
     return pipeline

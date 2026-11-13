@@ -13,12 +13,12 @@ INDEX = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static"
 
 # 冻结映射：index.html 中 pages 模块的当前版本（2026-11-11 第 3 轮 bump 后快照）
 FROZEN = {
-    "account.js": "51", "agents.js": "32", "api.js": "32", "app.js": "253",
+    "account.js": "51", "agents.js": "32", "api.js": "32", "app.js": "255",
     "autopilot.js": "74", "auto-recovery.js": "2", "chat.js": "50",
     "dashboard.js": "154", "events.js": "67", "feedback.js": "10",
-    "im_channel.js": "31", "issues.js": "139", "knowledge.js": "150",
+    "im_channel.js": "31", "issues.js": "141", "knowledge.js": "150",
     "my_feedback.js": "8", "my_feedback_detail.js": "6",
-    "observability.js": "78", "organizations.js": "18", "pipeline.js": "48",
+    "observability.js": "78", "organizations.js": "18", "pipeline.js": "50",
     "repos.js": "64", "runtimes.js": "102", "scene-market.js": "51",
     "settings.js": "39", "skills.js": "49", "templates.js": "38",
     "worker-name.js": "2", "pwd-blocklist.js": "3",

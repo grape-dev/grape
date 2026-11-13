@@ -17,6 +17,6 @@
     "queued": {"type": "boolean"},
     "event": {"type": "object"}
   },
-  "required": ["handoff_result"],
+  "required": ["handoff_result", "source_seq"],
   "additionalProperties": true
 }

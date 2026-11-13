@@ -78,6 +78,9 @@ _RULES = {
         "body": "body",
         "related_issue_nums": {"native": "inner_issue_nums", "transform": _gc_related},
         "auto_close_issues": "close_related_issue",
+        # 中性名与 GitCode 原生名一致（apply_rules 无规则时会原样透传），此处显式
+        # 声明仅为语义可读：后来人不必翻文档确认「这个字段到底支不支持」。
+        "prune_source_branch": "prune_source_branch",
     },
 }
 
