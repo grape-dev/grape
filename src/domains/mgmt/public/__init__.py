@@ -586,6 +586,10 @@ _READ_QUERIES: dict[str, str] = {
     "devops_pipeline_scene_7a48a2": "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene WHERE repo_key=%s AND pr_subscription_enabled=1 AND is_active=1",
     "devops_pipeline_scene_8b6d22": "SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=%s AND scene_id=%s",
     "devops_pipeline_scene_8c7c25": "SELECT scene_id FROM devops_pipeline_scene WHERE scene_id=%s AND repo_key=%s AND is_active=1 LIMIT 1",
+    "grape_accounts_3dd020": "SELECT ga.id FROM grape_accounts ga WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 AND EXISTS (SELECT 1 FROM external_identities ei WHERE ei.grape_user_id=ga.id AND ei.provider=%s AND ei.status=1 AND LOWER(ei.external_login)=LOWER(%s) AND ei.external_login!='') LIMIT 1",
+    "grape_accounts_d0ac07": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s)",
+    "grape_accounts_0b3fdc": "SELECT id FROM grape_accounts WHERE username=%s AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1",
+    "grape_accounts_e047af": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s) LIMIT 1",
     # 用户映射（runtime / insight 代码读）
     "um_feishu_open_ids_all": (
         "SELECT DISTINCT user_id FROM unified_user_mapping WHERE feishu_open_id!='' "

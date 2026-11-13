@@ -197,8 +197,13 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
 
     with db_lock:
         c = db.cursor()
-        row = c.execute("SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
-                        (repo_key,)).fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_dcd716_f
+        _ru_lib_dcd716 = _ru_lib_dcd716_f(foreign_only=True)
+        if _ru_lib_dcd716 is not None:
+            c = _ru_lib_dcd716.read_one("devops_agent_session_dcd716", (repo_key,)).fetchone()
+        else:
+            row = c.execute("SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
+                            (repo_key,)).fetchone()
         old_session_id = row[0] if row else ""
         # P3-5g：devops_agent_session / vod_conversations 在 runtime 域
         from src.kernel.domain_read import runtime_lib as _rt_lib_av

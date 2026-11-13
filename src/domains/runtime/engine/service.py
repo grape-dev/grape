@@ -103,9 +103,14 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                         if _mg_acc is not None:
                             _engine_uid = _mg_acc.get_account_id_by_username(_owner_name) or 0
                         else:
-                            c.execute("SELECT id FROM grape_accounts WHERE username=? "
-                                      "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
-                            _ur = c.fetchone()
+                            from src.kernel.domain_read import mgmt_lib as _mg_lib_0b3fdc_f
+                            _mg_lib_0b3fdc = _mg_lib_0b3fdc_f(foreign_only=True)
+                            if _mg_lib_0b3fdc is not None:
+                                _ur = _mg_lib_0b3fdc.read_one("grape_accounts_0b3fdc", (_owner_name,))
+                            else:
+                                c.execute("SELECT id FROM grape_accounts WHERE username=? "
+                                          "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
+                                _ur = c.fetchone()
                             _engine_uid = _ur[0] if _ur else 0
                         if _engine_uid != task_user_id:
                             continue  # user scope 但用户不匹配
@@ -1697,8 +1702,13 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     "  )) ORDER BY t.created_at ASC LIMIT 1"
                 )
             elif scope == "user":
-                c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)", (owner_name,))  # D32-补丁 #348: case-insensitive
-                uid_row = c.fetchone()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_d0ac07_f
+                _mg_lib_d0ac07 = _mg_lib_d0ac07_f(foreign_only=True)
+                if _mg_lib_d0ac07 is not None:
+                    uid_row = _mg_lib_d0ac07.read_one("grape_accounts_d0ac07", (owner_name,))  # D32-补丁 #348: case-insensitive)
+                else:
+                    c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)", (owner_name,))  # D32-补丁 #348: case-insensitive
+                    uid_row = c.fetchone()
                 uid = uid_row[0] if uid_row else 0
                 params.append(uid)
                 sql = (

@@ -2604,9 +2604,14 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 else:
                     # 场景未声明引擎 → 旧回退链：session 旧绑定 → 默认引擎
                     try:
-                        _cur = c.execute(
-                            "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                            (repo_key, agent_type)).fetchone()
+                        from src.kernel.domain_read import runtime_lib as _ru_lib_a36e5f_f
+                        _ru_lib_a36e5f = _ru_lib_a36e5f_f(foreign_only=True)
+                        if _ru_lib_a36e5f is not None:
+                            c = _ru_lib_a36e5f.read_one("devops_agent_session_a36e5f", (repo_key, agent_type)).fetchone()
+                        else:
+                            _cur = c.execute(
+                                "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                                (repo_key, agent_type)).fetchone()
                         if _cur and _cur[0]:
                             runtime_id = _cur[0]
                     except Exception:

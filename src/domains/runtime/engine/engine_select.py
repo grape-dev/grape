@@ -331,15 +331,20 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 # 2. 二级回退：查 grape_accounts（D32-补丁）
                 # FR-18.3/FR-25.2: EXISTS 用 external_identities 验证平台 login，
                 # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
-                c.execute(
-                    "SELECT ga.id FROM grape_accounts ga "
-                    "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
-                    "AND EXISTS (SELECT 1 FROM external_identities ei "
-                    "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
-                    "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
-                    "LIMIT 1",
-                    (_provider, issue_creator))
-                row = c.fetchone()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_3dd020_f
+                _mg_lib_3dd020 = _mg_lib_3dd020_f(foreign_only=True)
+                if _mg_lib_3dd020 is not None:
+                    row = _mg_lib_3dd020.read_one("grape_accounts_3dd020", (_provider, issue_creator))
+                else:
+                    c.execute(
+                        "SELECT ga.id FROM grape_accounts ga "
+                        "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
+                        "AND EXISTS (SELECT 1 FROM external_identities ei "
+                        "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
+                        "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
+                        "LIMIT 1",
+                        (_provider, issue_creator))
+                    row = c.fetchone()
                 if row:
                     return row[0]
                 # 按 external_id 查（issue_creator 可能是平台数字 ID）

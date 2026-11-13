@@ -321,8 +321,13 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     if _aid:
                         owner_id = str(_aid)
                 else:
-                    c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (cred_row[1],))
-                    urow = c.fetchone()
+                    from src.kernel.domain_read import mgmt_lib as _mg_lib_e047af_f
+                    _mg_lib_e047af = _mg_lib_e047af_f(foreign_only=True)
+                    if _mg_lib_e047af is not None:
+                        urow = _mg_lib_e047af.read_one("grape_accounts_e047af", (cred_row[1],))
+                    else:
+                        c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (cred_row[1],))
+                        urow = c.fetchone()
                     if urow:
                         owner_id = str(urow[0])
             except Exception:
