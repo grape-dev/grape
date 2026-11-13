@@ -33,10 +33,12 @@
 """
 import argparse
 import os
-import re
 import sys
 
 import pymysql
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from view_ddl_builder import ViewDDLError, build_view_ddl, check_ident  # noqa: E402
 
 DEFAULT_OWNER_DB = "grape_runtime_db"
 DEFAULT_TARGET_DBS = ("grape_mgmt_db", "grape_insight_db")
@@ -51,8 +53,7 @@ DEFAULT_SYNC_TABLES = (
     "takeover_sessions",
 )
 
-# 库名/表名直接拼进 DDL（反引号包裹），必须先做标识符白名单校验
-_IDENT_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+# 库名/表名直接拼进 DDL（反引号包裹），标识符白名单校验复用 view_ddl_builder
 
 
 def _split_list(raw: str) -> tuple[str, ...]:
@@ -64,13 +65,6 @@ def _split_list(raw: str) -> tuple[str, ...]:
             out.append(item)
     return tuple(out)
 
-
-def _check_ident(kind: str, value: str) -> str:
-    if not value:
-        raise ValueError(f"{kind} 不得为空")
-    if not _IDENT_RE.match(value):
-        raise ValueError(f"{kind} 非法（只允许字母/数字/下划线）: {value!r}")
-    return value
 
 
 def resolve_config(owner=None, target=None, tables=None, env=None):
@@ -103,11 +97,11 @@ def resolve_config(owner=None, target=None, tables=None, env=None):
     else:
         sync_tables = _split_list(env.get("GRAPE_SYNC_TABLES", "")) or DEFAULT_SYNC_TABLES
 
-    owner_db = _check_ident("owner 库名", owner_db)
+    owner_db = check_ident("owner 库名", owner_db)
     for db in target_dbs:
-        _check_ident("target 库名", db)
+        check_ident("target 库名", db)
     for tbl in sync_tables:
-        _check_ident("表名", tbl)
+        check_ident("表名", tbl)
     return owner_db, target_dbs, sync_tables
 
 
@@ -152,7 +146,7 @@ def main():
 
     try:
         owner_db, target_dbs, sync_tables = resolve_config(args.owner, args.target, args.tables)
-    except ValueError as exc:
+    except (ValueError, ViewDDLError) as exc:
         print(f"[FATAL] {exc}", file=sys.stderr)
         return 2
     print(f"owner={owner_db} targets={target_dbs} tables={sync_tables}")
@@ -172,9 +166,7 @@ def main():
         if not cols:
             print(f"SKIP {table}: owner 侧无列信息")
             continue
-        select_list = ", ".join(f"`{owner_db}`.`{table}`.`{c}` AS `{c}`" for c in cols)
-        ddl = (f"CREATE OR REPLACE VIEW `{table}` AS SELECT {select_list} "
-               f"FROM `{owner_db}`.`{table}`")
+        ddl = build_view_ddl(owner_db, table, cols)
         for target in target_dbs:
             conn = connect(host, user, pwd, target)
             try:

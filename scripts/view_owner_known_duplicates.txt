@@ -1,0 +1,21 @@
+# 已知「同名表在多个域库都是基表」的登记清单（owner 不确定 → 脚本不判定、不修复）
+#
+# 用途：domain_view_freshness.py --known-duplicates 本文件 --strict-owner
+#       出现在此清单里的表只告警；**不在**清单里的多份基表会让检查以 exit 2 失败，
+#       强制先定 owner（"谁拥有谁写"）再继续。
+#
+# 格式：每行一个表名；# 开头为注释。
+# 退出本清单的条件：该表已清理成「唯一 owner 基表 + 其余域库视图」。
+#
+# 当前 11 张（需人工排期清理，清理后请删除对应行）：
+branch_guard_state
+grape_t_channel_chat_session_binding
+grape_t_channel_inbound_dedup
+grape_t_channel_inbound_message
+grape_t_channel_installation
+grape_t_channel_lease
+grape_t_channel_outbound_card
+grape_t_channel_sender_identity
+grape_t_credential_usage_log
+grape_t_system_credentials
+takeover_sessions

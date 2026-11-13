@@ -27,9 +27,17 @@ echo "=== Running all contract checks ==="
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，
 # 版本间比对不再静默跳过（QA 审查修复项）。
 "$PY" scripts/check-openapi-endpoints.py --require-baseline || exit 1
+# 跨库视图新鲜度（缺列 1054 / 视图多余列 / 孤儿视图 1146 / 列类型漂移；
+# 缺视图默认只报告（owner-only 新表不卡门禁），需要跨域的表登记在 create-missing 清单；
+# 未配置 DB_HOST 时跳过，配置了但连不上则失败）
+"$PY" scripts/domain_view_freshness.py --check --skip-if-unavailable \
+    --strict-owner --known-duplicates scripts/view_owner_known_duplicates.txt \
+    --create-missing-tables scripts/view_create_missing_allowlist.txt \
+    --narrowed-tables scripts/view_narrowed_allowlist.txt || exit 1
 # 四进程路由漂移：nginx 分流 vs 各进程实际路由（无 nginx/无进程时自动跳过）
 if [ -f "${GRAPE_NGINX_CONF:-/etc/nginx/conf.d/grape.conf}" ]; then
-  "$PY" scripts/probe/route_contract_probe.py || exit 1
+  # --warmup：先预热 worker 包/安装包等重接口，避免部署刚重启时的冷启动超时被误判为 unreachable
+  "$PY" scripts/probe/route_contract_probe.py --warmup || exit 1
 else
   echo "[skip] route_contract_probe: nginx conf 不存在"
 fi

@@ -1,0 +1,9 @@
+# 允许自动补建缺失视图的表清单（不在清单内的缺失视图只报告，不补建）
+#
+# 语义：owner 基表在非归属库必须有同名视图才会被读到；但并非所有表都需要跨域读，
+#       只有明确要跨域的表才登记在这里（与 sync_domain_views.py 的 DEFAULT_SYNC_TABLES 同源）。
+# 新增：登记后跑 deploy-after-migrate.sh 即会补建；删除：该表已不需要跨域视图。
+agent_tasks
+grape_t_credential_usage_log
+grape_t_system_credentials
+grape_t_repo_credentials

@@ -10,6 +10,14 @@ Environment=PYTHONUNBUFFERED=1
 Environment=GRAPE_PROCESS_ROLE=server
 Environment=GRAPE_PORT=38080
 EnvironmentFile=/etc/grape/grape.env
+# 跨库视图体检（只检查）：迁移发生在进程 import 期，启动前无法修复本次发布的漂移。
+# 修复请用 scripts/deploy-after-migrate.sh（迁移 → 修复 → 复核 → 重启）；
+# 该脚本非 0 时不得重启进程。前缀 - 表示体检失败不阻断启动。
+ExecStartPre=-/opt/grape/.venv/bin/python scripts/domain_view_freshness.py \
+    --check --skip-if-unavailable --strict-owner \
+    --known-duplicates scripts/view_owner_known_duplicates.txt \
+    --create-missing-tables scripts/view_create_missing_allowlist.txt \
+    --narrowed-tables scripts/view_narrowed_allowlist.txt
 ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_server:app \
     --host 0.0.0.0 --port 38080 --workers 2
 Restart=always
