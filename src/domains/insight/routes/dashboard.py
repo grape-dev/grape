@@ -1504,14 +1504,22 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 
         recent_events = []
         try:
-            c.execute(
-                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
-                (_repo_keys)
-            )
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_d1
+            _rt_d1 = _runtime_lib_d1()
+            if _rt_d1 is not None:
+                _rows_d1 = _rt_d1.query_events(
+                    "seq, event_type, agent_type, title, summary, status, created_at",
+                    f"repo_key IN ({_rk_placeholders})", tuple(_repo_keys), "seq DESC", 5)
+            else:
+                c.execute(
+                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
+                    (_repo_keys)
+                )
+                _rows_d1 = c.fetchall()
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
                  "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
-                for r in c.fetchall()
+                for r in _rows_d1
             ]
         except Exception:
             pass
