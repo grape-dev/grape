@@ -1,0 +1,651 @@
+{
+  "_comment": "表归属清单：DDL 守卫据此阻止进程创建'别家'的表；同表多份的裁决记录在 configs/table_ownership_notes.md",
+  "schema_version": 1,
+  "generated_from": "information_schema of 192.168.0.59 (dev)",
+  "tables": {
+    "admin_accounts": "mgmt",
+    "admin_agent_alert": "mgmt",
+    "admin_ai_chat_message": "mgmt",
+    "admin_ai_chat_session": "mgmt",
+    "admin_ai_history": "mgmt",
+    "admin_ai_template": "mgmt",
+    "admin_audit_log": "mgmt",
+    "admin_permission_menus": "mgmt",
+    "admin_role_menu_rel": "mgmt",
+    "admin_roles": "mgmt",
+    "admin_user_role_rel": "mgmt",
+    "admin_users": "mgmt",
+    "agent_runtimes": "runtime",
+    "agent_shared_knowledge": "mgmt",
+    "agent_tasks": "runtime",
+    "agent_type": "runtime",
+    "agent_type_runtime_pool": "runtime",
+    "api_latency_log": "insight",
+    "api_tokens": "mgmt",
+    "audit_logs": "mgmt",
+    "autopilot_executions": "runtime",
+    "autopilot_subscriptions": "mgmt",
+    "autopilot_tasks": "mgmt",
+    "backup_agent_runtimes_revoked_20260817": "mgmt",
+    "backup_devops_agent_runtime_binding_20260817": "mgmt",
+    "backup_devops_agent_runtime_binding_20260827_234600": "mgmt",
+    "backup_devops_agent_session_20260817": "mgmt",
+    "backup_runtime_credentials_revoked_20260817": "mgmt",
+    "binding_tickets": "mgmt",
+    "bot_seen_messages": "runtime",
+    "branch_guard_state": "runtime",
+    "chat_agent_session": "runtime",
+    "chat_conversations": "runtime",
+    "chat_messages": "runtime",
+    "cloud_sandboxes": "mgmt",
+    "community_comments": "mgmt",
+    "community_post_likes": "mgmt",
+    "community_posts": "mgmt",
+    "credential_reveal_log": "mgmt",
+    "devops_agent_runtime_binding": "mgmt",
+    "devops_agent_session": "runtime",
+    "devops_pipeline_scene": "mgmt",
+    "distributed_locks": "runtime",
+    "egress_admin_exception": "mgmt",
+    "egress_admin_policy": "mgmt",
+    "engine_capabilities": "runtime",
+    "engine_sandbox_config": "mgmt",
+    "engine_sandbox_paths": "mgmt",
+    "engine_sandbox_whitelist": "mgmt",
+    "event_action_filter": "runtime",
+    "event_active_guard": "runtime",
+    "event_route_config": "runtime",
+    "event_skipped": "runtime",
+    "event_thread": "runtime",
+    "events": "runtime",
+    "exchange_codes": "mgmt",
+    "external_identities": "mgmt",
+    "featured_templates": "mgmt",
+    "feishu_onboard_task": "mgmt",
+    "flyway_schema_history": "mgmt",
+    "global_im_bot_config": "runtime",
+    "grape_accounts": "mgmt",
+    "grape_im_instance": "runtime",
+    "grape_t_channel_chat_session_binding": "runtime",
+    "grape_t_channel_inbound_dedup": "runtime",
+    "grape_t_channel_inbound_message": "runtime",
+    "grape_t_channel_installation": "runtime",
+    "grape_t_channel_lease": "runtime",
+    "grape_t_channel_outbound_card": "runtime",
+    "grape_t_channel_sender_identity": "runtime",
+    "grape_t_credential_reveal_log": "mgmt",
+    "grape_t_credential_usage_log": "runtime",
+    "grape_t_engine_lifecycle_audit": "runtime",
+    "grape_t_merge_gate_log": "mgmt",
+    "grape_t_patrol_findings": "mgmt",
+    "grape_t_repo_credentials": "runtime",
+    "grape_t_schema_migrations": "mgmt",
+    "grape_t_system_credentials": "runtime",
+    "gsb_service_registry": "mgmt",
+    "issue": "runtime",
+    "issue_agent_session": "runtime",
+    "issue_state": "runtime",
+    "knowledge_write_queue": "mgmt",
+    "login_failures": "mgmt",
+    "login_whitelist": "mgmt",
+    "managed_repos": "mgmt",
+    "meta": "mgmt",
+    "oauth_states": "mgmt",
+    "obs_alert_events": "insight",
+    "obs_alert_rules": "insight",
+    "obs_llm_usage": "insight",
+    "obs_llm_usage_archive": "insight",
+    "obs_log": "insight",
+    "obs_metric_rollup": "insight",
+    "obs_runtime_samples": "insight",
+    "obs_slo": "insight",
+    "obs_slo_snapshots": "insight",
+    "org_invitation": "mgmt",
+    "org_member": "mgmt",
+    "organization": "mgmt",
+    "outbound_content_ledger": "mgmt",
+    "pipeline_instances": "runtime",
+    "repo_im_group_binding": "runtime",
+    "repo_platform_tokens": "mgmt",
+    "runtime_credentials": "runtime",
+    "runtime_health_scores": "runtime",
+    "sandbox_provider_config": "mgmt",
+    "sandbox_templates": "mgmt",
+    "sandbox_whitelist": "mgmt",
+    "scene_category": "mgmt",
+    "scene_engine_detach_log": "runtime",
+    "scene_knowledge_ref": "mgmt",
+    "scene_likes": "mgmt",
+    "scene_market": "mgmt",
+    "scene_skill_ref": "mgmt",
+    "session_api_tokens": "mgmt",
+    "signup_whitelist": "mgmt",
+    "skill": "runtime",
+    "skill_category": "mgmt",
+    "skill_likes": "mgmt",
+    "takeover_sessions": "runtime",
+    "task_messages": "runtime",
+    "task_proxy_tokens": "mgmt",
+    "tasks": "runtime",
+    "template_usage": "mgmt",
+    "unified_user_mapping": "mgmt",
+    "uploaded_files": "mgmt",
+    "user_accounts": "mgmt",
+    "user_credentials": "mgmt",
+    "user_feedback": "mgmt",
+    "user_llm_credentials": "mgmt",
+    "user_repos": "mgmt",
+    "user_vm_repos": "mgmt",
+    "user_vms": "mgmt",
+    "verification_codes": "mgmt",
+    "vod_conversations": "runtime"
+  },
+  "views": {
+    "admin_accounts": [
+      "insight",
+      "runtime"
+    ],
+    "admin_agent_alert": [
+      "insight",
+      "runtime"
+    ],
+    "admin_ai_chat_message": [
+      "insight",
+      "runtime"
+    ],
+    "admin_ai_chat_session": [
+      "insight",
+      "runtime"
+    ],
+    "admin_ai_history": [
+      "insight",
+      "runtime"
+    ],
+    "admin_ai_template": [
+      "insight",
+      "runtime"
+    ],
+    "admin_audit_log": [
+      "insight",
+      "runtime"
+    ],
+    "admin_permission_menus": [
+      "insight",
+      "runtime"
+    ],
+    "admin_role_menu_rel": [
+      "insight",
+      "runtime"
+    ],
+    "admin_roles": [
+      "insight",
+      "runtime"
+    ],
+    "admin_user_role_rel": [
+      "insight",
+      "runtime"
+    ],
+    "admin_users": [
+      "insight",
+      "runtime"
+    ],
+    "agent_runtimes": [
+      "insight",
+      "mgmt"
+    ],
+    "agent_shared_knowledge": [
+      "insight",
+      "runtime"
+    ],
+    "agent_tasks": [
+      "insight",
+      "mgmt"
+    ],
+    "agent_type": [
+      "insight",
+      "mgmt"
+    ],
+    "agent_type_runtime_pool": [
+      "insight",
+      "mgmt"
+    ],
+    "api_latency_log": [
+      "mgmt",
+      "runtime"
+    ],
+    "api_tokens": [
+      "insight",
+      "runtime"
+    ],
+    "audit_logs": [
+      "insight",
+      "runtime"
+    ],
+    "autopilot_executions": [
+      "insight",
+      "mgmt"
+    ],
+    "autopilot_subscriptions": [
+      "insight",
+      "runtime"
+    ],
+    "autopilot_tasks": [
+      "insight",
+      "runtime"
+    ],
+    "backup_agent_runtimes_revoked_20260817": [
+      "insight",
+      "runtime"
+    ],
+    "backup_devops_agent_runtime_binding_20260817": [
+      "insight",
+      "runtime"
+    ],
+    "backup_devops_agent_runtime_binding_20260827_234600": [
+      "insight",
+      "runtime"
+    ],
+    "backup_devops_agent_session_20260817": [
+      "insight",
+      "runtime"
+    ],
+    "backup_runtime_credentials_revoked_20260817": [
+      "insight",
+      "runtime"
+    ],
+    "binding_tickets": [
+      "insight",
+      "runtime"
+    ],
+    "bot_seen_messages": [
+      "insight",
+      "mgmt"
+    ],
+    "chat_agent_session": [
+      "insight",
+      "mgmt"
+    ],
+    "chat_conversations": [
+      "insight",
+      "mgmt"
+    ],
+    "chat_messages": [
+      "insight",
+      "mgmt"
+    ],
+    "cloud_sandboxes": [
+      "insight",
+      "runtime"
+    ],
+    "community_comments": [
+      "insight",
+      "runtime"
+    ],
+    "community_post_likes": [
+      "insight",
+      "runtime"
+    ],
+    "community_posts": [
+      "insight",
+      "runtime"
+    ],
+    "credential_reveal_log": [
+      "insight",
+      "runtime"
+    ],
+    "devops_agent_runtime_binding": [
+      "insight",
+      "runtime"
+    ],
+    "devops_agent_session": [
+      "insight",
+      "mgmt"
+    ],
+    "devops_pipeline_scene": [
+      "insight",
+      "runtime"
+    ],
+    "distributed_locks": [
+      "insight",
+      "mgmt"
+    ],
+    "egress_admin_exception": [
+      "insight",
+      "runtime"
+    ],
+    "egress_admin_policy": [
+      "insight",
+      "runtime"
+    ],
+    "engine_capabilities": [
+      "insight",
+      "mgmt"
+    ],
+    "engine_sandbox_config": [
+      "insight",
+      "runtime"
+    ],
+    "engine_sandbox_paths": [
+      "insight",
+      "runtime"
+    ],
+    "engine_sandbox_whitelist": [
+      "insight",
+      "runtime"
+    ],
+    "event_action_filter": [
+      "insight",
+      "mgmt"
+    ],
+    "event_active_guard": [
+      "insight",
+      "mgmt"
+    ],
+    "event_route_config": [
+      "insight",
+      "mgmt"
+    ],
+    "event_skipped": [
+      "insight",
+      "mgmt"
+    ],
+    "event_thread": [
+      "insight",
+      "mgmt"
+    ],
+    "events": [
+      "insight",
+      "mgmt"
+    ],
+    "exchange_codes": [
+      "insight",
+      "runtime"
+    ],
+    "external_identities": [
+      "insight",
+      "runtime"
+    ],
+    "featured_templates": [
+      "insight",
+      "runtime"
+    ],
+    "feishu_onboard_task": [
+      "insight",
+      "runtime"
+    ],
+    "flyway_schema_history": [
+      "insight",
+      "runtime"
+    ],
+    "global_im_bot_config": [
+      "insight",
+      "mgmt"
+    ],
+    "grape_accounts": [
+      "insight",
+      "runtime"
+    ],
+    "grape_im_instance": [
+      "insight",
+      "mgmt"
+    ],
+    "grape_t_credential_reveal_log": [
+      "insight",
+      "runtime"
+    ],
+    "grape_t_credential_usage_log": [
+      "mgmt"
+    ],
+    "grape_t_engine_lifecycle_audit": [
+      "insight",
+      "mgmt"
+    ],
+    "grape_t_merge_gate_log": [
+      "insight",
+      "runtime"
+    ],
+    "grape_t_patrol_findings": [
+      "insight",
+      "runtime"
+    ],
+    "grape_t_repo_credentials": [
+      "insight",
+      "mgmt"
+    ],
+    "grape_t_schema_migrations": [
+      "insight",
+      "runtime"
+    ],
+    "grape_t_system_credentials": [
+      "mgmt"
+    ],
+    "gsb_service_registry": [
+      "insight",
+      "runtime"
+    ],
+    "issue": [
+      "insight",
+      "mgmt"
+    ],
+    "issue_agent_session": [
+      "insight",
+      "mgmt"
+    ],
+    "issue_state": [
+      "insight",
+      "mgmt"
+    ],
+    "knowledge_write_queue": [
+      "insight",
+      "runtime"
+    ],
+    "login_failures": [
+      "insight",
+      "runtime"
+    ],
+    "login_whitelist": [
+      "insight",
+      "runtime"
+    ],
+    "managed_repos": [
+      "insight",
+      "runtime"
+    ],
+    "meta": [
+      "insight",
+      "runtime"
+    ],
+    "oauth_states": [
+      "insight",
+      "runtime"
+    ],
+    "obs_alert_events": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_alert_rules": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_llm_usage": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_llm_usage_archive": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_log": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_metric_rollup": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_runtime_samples": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_slo": [
+      "mgmt",
+      "runtime"
+    ],
+    "obs_slo_snapshots": [
+      "mgmt",
+      "runtime"
+    ],
+    "org_invitation": [
+      "insight",
+      "runtime"
+    ],
+    "org_member": [
+      "insight",
+      "runtime"
+    ],
+    "organization": [
+      "insight",
+      "runtime"
+    ],
+    "outbound_content_ledger": [
+      "insight",
+      "runtime"
+    ],
+    "pipeline_instances": [
+      "insight",
+      "mgmt"
+    ],
+    "repo_im_group_binding": [
+      "insight",
+      "mgmt"
+    ],
+    "repo_platform_tokens": [
+      "insight",
+      "runtime"
+    ],
+    "runtime_credentials": [
+      "insight",
+      "mgmt"
+    ],
+    "runtime_health_scores": [
+      "insight",
+      "mgmt"
+    ],
+    "sandbox_provider_config": [
+      "insight",
+      "runtime"
+    ],
+    "sandbox_templates": [
+      "insight",
+      "runtime"
+    ],
+    "sandbox_whitelist": [
+      "insight",
+      "runtime"
+    ],
+    "scene_category": [
+      "insight",
+      "runtime"
+    ],
+    "scene_engine_detach_log": [
+      "insight",
+      "mgmt"
+    ],
+    "scene_knowledge_ref": [
+      "insight",
+      "runtime"
+    ],
+    "scene_likes": [
+      "insight",
+      "runtime"
+    ],
+    "scene_market": [
+      "insight",
+      "runtime"
+    ],
+    "scene_skill_ref": [
+      "insight",
+      "runtime"
+    ],
+    "session_api_tokens": [
+      "insight",
+      "runtime"
+    ],
+    "signup_whitelist": [
+      "insight",
+      "runtime"
+    ],
+    "skill": [
+      "insight",
+      "mgmt"
+    ],
+    "skill_category": [
+      "insight",
+      "runtime"
+    ],
+    "skill_likes": [
+      "insight",
+      "runtime"
+    ],
+    "task_messages": [
+      "insight",
+      "mgmt"
+    ],
+    "task_proxy_tokens": [
+      "insight",
+      "runtime"
+    ],
+    "tasks": [
+      "insight",
+      "mgmt"
+    ],
+    "template_usage": [
+      "insight",
+      "runtime"
+    ],
+    "unified_user_mapping": [
+      "insight",
+      "runtime"
+    ],
+    "uploaded_files": [
+      "insight",
+      "runtime"
+    ],
+    "user_accounts": [
+      "insight",
+      "runtime"
+    ],
+    "user_credentials": [
+      "insight",
+      "runtime"
+    ],
+    "user_feedback": [
+      "insight",
+      "runtime"
+    ],
+    "user_llm_credentials": [
+      "insight",
+      "runtime"
+    ],
+    "user_repos": [
+      "insight",
+      "runtime"
+    ],
+    "user_vm_repos": [
+      "insight",
+      "runtime"
+    ],
+    "user_vms": [
+      "insight",
+      "runtime"
+    ],
+    "verification_codes": [
+      "insight",
+      "runtime"
+    ],
+    "vod_conversations": [
+      "insight",
+      "mgmt"
+    ]
+  }
+}

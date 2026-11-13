@@ -440,3 +440,18 @@ def test_definer_invalid_rejected():
     log = lambda *a, **kw: None
     dvf.repair(conn, res, definer="bad definer", log=log)
     assert not any("CREATE OR REPLACE" in q for q in conn.executed)
+
+def test_ignore_missing_tables_suppresses_noise(monkeypatch, capsys, tmp_path):
+    """登记为「不需要跨域视图」的表：缺失视图不进 missing_view、不判红。"""
+    conn = _conn()
+    del conn.tables[("grape_dev_mgmt", "t1")]
+    del conn.columns[("grape_dev_mgmt", "t1")]
+    ignore = tmp_path / "ignore.txt"
+    ignore.write_text("# 不需要视图\nt1\n", encoding="utf-8")
+    rc, out = _run(monkeypatch, capsys, conn,
+                   ["--check", "--databases", "grape_dev_runtime,grape_dev_mgmt",
+                    "--ignore-missing-tables", str(ignore)])
+    assert rc == 0
+    assert "MISSING" not in out.out
+    assert "已按 --ignore-missing-tables" in out.out
+

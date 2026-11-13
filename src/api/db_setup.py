@@ -1766,6 +1766,8 @@ _SEED_FILES = [
 def _create_tables():
     """幂等创建新表"""
     for name, ddl in _NEW_TABLES:
+        if _owned_skip(name, "create table"):
+            continue
         try:
             with db_lock:
                 db.execute(ddl)
@@ -1998,8 +2000,40 @@ def _is_base_table(c, tbl: str) -> bool:
         return True   # 查询失败按基表处理，保持既有行为
 
 
+def _owned_skip(table: str, what: str = "") -> bool:
+    """表归属守卫：别家域的表不建/不改（防止拆库后四进程各建一份全量表）。
+
+    见 src/kernel/table_ownership.py；`GRAPE_DDL_OWNER_GUARD=0` 可关闭。
+    守卫自身异常一律放行（不能因守卫故障阻断启动）。
+    """
+    try:
+        from src.kernel import table_ownership as _own
+        owner = _own.foreign_owner(table)
+        if owner:
+            log.info(f"[DDL_SKIP] {what} `{table}`: owner={owner} current={_own.current_domain()}")
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[DDL_SKIP] ownership guard error on `{table}`: {exc}")
+    return False
+
+
+def _index_table(ddl: str) -> str:
+    """从 ``CREATE [UNIQUE] INDEX ... ON <table>(...)`` 取表名。"""
+    try:
+        low = ddl.lower()
+        i = low.find(" on ")
+        if i < 0:
+            return ""
+        name = ddl[i + 4:].strip().split("(")[0].strip().strip('`"')
+        return name.split()[0] if name else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    strict: bool = False):
+    if _owned_skip(tbl, "ensure column"):
+        return False
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
@@ -2276,6 +2310,9 @@ def _create_indexes():
         log.warning(f"ensure unique idx_tasks_repo_issue prep failed: {e}")
 
     for idx in indexes:
+        _idx_tbl = _index_table(idx)
+        if _idx_tbl and _owned_skip(_idx_tbl, "create index"):
+            continue
         try:
             with db_lock:
                 db.execute(idx)

@@ -43,6 +43,7 @@ fi
 KNOWN_DUPES="scripts/view_owner_known_duplicates.txt"
 CREATE_MISSING="scripts/view_create_missing_allowlist.txt"
 NARROWED="scripts/view_narrowed_allowlist.txt"
+IGNORE_MISSING="scripts/view_ignore_missing_tables.txt"
 
 echo "=== [1/3] 执行数据库迁移（幂等；与本脚本后续修复的顺序不可颠倒）==="
 if [ -n "$SKIP_MIGRATE" ] || [ -n "$DRY" ]; then
@@ -71,6 +72,7 @@ ARGS=(--repair --strict --strict-owner)
 [ -f "$KNOWN_DUPES" ] && ARGS+=(--known-duplicates "$KNOWN_DUPES")
 [ -f "$CREATE_MISSING" ] && ARGS+=(--create-missing-tables "$CREATE_MISSING")
 [ -f "$NARROWED" ] && ARGS+=(--narrowed-tables "$NARROWED")
+[ -f "$IGNORE_MISSING" ] && ARGS+=(--ignore-missing-tables "$IGNORE_MISSING")
 "$PY" scripts/domain_view_freshness.py "${ARGS[@]}" ${DRY}
 rc=$?
 

@@ -336,6 +336,8 @@ def main(argv=None) -> int:
     ap.add_argument("--known-duplicates", default="", help="已知多份基表白名单文件")
     ap.add_argument("--create-missing-tables", default="",
                     help="允许补建缺失视图的表清单文件（不在清单内只报告）")
+    ap.add_argument("--ignore-missing-tables", default="",
+                    help="登记「不需要跨域视图」的表清单（缺失视图不再计入报告）")
     ap.add_argument("--narrowed-tables", default="",
                     help="有意只暴露部分列的表清单（不自动补列）")
     ap.add_argument("--definer", default="", help="重建视图时显式指定的 DEFINER（user@host）")
@@ -398,8 +400,15 @@ def main(argv=None) -> int:
         known = _load_table_list(args.known_duplicates)
         create_missing = _load_table_list(args.create_missing_tables)
         narrowed = _load_table_list(args.narrowed_tables)
+        ignore_missing = _load_table_list(args.ignore_missing_tables)
 
         result = scan(conn, dbs, narrowed=narrowed)
+        if ignore_missing:
+            filt = [mv for mv in result["missing_view"] if mv[1] not in ignore_missing]
+            result["ignored_missing_view"] = [mv for mv in result["missing_view"] if mv[1] in ignore_missing]
+            result["missing_view"] = filt
+        else:
+            result["ignored_missing_view"] = []
         unknown_dups = [(t, d) for t, d in result["duplicates"] if t not in known]
 
         repair_info = None
@@ -414,6 +423,13 @@ def main(argv=None) -> int:
                                  definer=args.definer, log=log)
             if not args.dry_run:
                 result = scan(conn, dbs, narrowed=narrowed)
+                if ignore_missing:
+                    result["ignored_missing_view"] = [mv for mv in result["missing_view"]
+                                                      if mv[1] in ignore_missing]
+                    result["missing_view"] = [mv for mv in result["missing_view"]
+                                              if mv[1] not in ignore_missing]
+                else:
+                    result["ignored_missing_view"] = []
 
         bad = bool(result["stale"] or result["type_drift"] or result["orphan_view"]
                    or result["duplicate_view_stale"])
@@ -435,6 +451,7 @@ def main(argv=None) -> int:
                 "type_drift": [{"view": f"{d}.{t}", "owner": o, "columns": m}
                                for d, t, o, m in result["type_drift"]],
                 "missing_view": [{"view": f"{d}.{t}", "owner": o} for d, t, o in result["missing_view"]],
+                "ignored_missing_view": [{"view": f"{d}.{t}"} for d, t, _o in result.get("ignored_missing_view", [])],
                 "orphan_view": [{"view": f"{d}.{v}", "owner": f"{o}.{t}"}
                                 for d, v, o, t in result["orphan_view"]],
                 "duplicate_base_tables": [{"table": t, "dbs": d} for t, d in result["duplicates"]],
@@ -455,6 +472,8 @@ def main(argv=None) -> int:
               f"缺列/多余列 {len(result['stale'])}  缺视图 {len(result['missing_view'])}  "
               f"孤儿视图 {len(result['orphan_view'])}  类型漂移 {len(result['type_drift'])}  "
               f"副本视图漂移 {len(result['duplicate_view_stale'])}")
+        if result.get("ignored_missing_view"):
+            print(f"  （另有 {len(result['ignored_missing_view'])} 条缺失已按 --ignore-missing-tables 登记为「不需要跨域视图」）")
         for db, tbl, owner, missing, extra, _keep in result["stale"]:
             print(f"  STALE {db}.{tbl} ← {owner}: 缺 {len(missing)} 列 "
                   f"{missing[:6]}{'…' if len(missing) > 6 else ''}"

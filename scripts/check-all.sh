@@ -33,7 +33,8 @@ echo "=== Running all contract checks ==="
 "$PY" scripts/domain_view_freshness.py --check --skip-if-unavailable \
     --strict-owner --known-duplicates scripts/view_owner_known_duplicates.txt \
     --create-missing-tables scripts/view_create_missing_allowlist.txt \
-    --narrowed-tables scripts/view_narrowed_allowlist.txt || exit 1
+    --narrowed-tables scripts/view_narrowed_allowlist.txt \
+    --ignore-missing-tables scripts/view_ignore_missing_tables.txt || exit 1
 # 四进程路由漂移：nginx 分流 vs 各进程实际路由（无 nginx/无进程时自动跳过）
 if [ -f "${GRAPE_NGINX_CONF:-/etc/nginx/conf.d/grape.conf}" ]; then
   # --warmup：先预热 worker 包/安装包等重接口，避免部署刚重启时的冷启动超时被误判为 unreachable

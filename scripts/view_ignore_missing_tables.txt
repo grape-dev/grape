@@ -1,0 +1,18 @@
+# 登记「不需要跨域视图」的表（缺失视图不再计入报告 / 不再判红）
+#
+# 语义：lib 模式下跨域读走域 lib（各自 DSN），不需要在每个非归属库建视图。
+# 这里的表两类：
+#   1) 原本就没人跨域读（实测 mgmt/insight 0 引用）
+#   2) 正在从"视图读"迁移到"lib 读"的表
+#
+# 维护：P2/P3 把跨域读改成 lib 后，把表继续留在这里；P4 删视图时统一清理本文件。
+branch_guard_state
+grape_t_channel_chat_session_binding
+grape_t_channel_inbound_dedup
+grape_t_channel_inbound_message
+grape_t_channel_lease
+grape_t_channel_outbound_card
+grape_t_channel_sender_identity
+grape_t_credential_usage_log
+grape_t_system_credentials
+takeover_sessions
