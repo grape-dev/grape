@@ -389,6 +389,56 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
+def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
+                        ttl_seconds: int = 60) -> bool:
+    """抢占渠道租约（CAS + 过期回收），可重放。
+
+    条件：租约为空、已过期，或本来就属于自己（同 token 重入）。
+    行不存在时插入（并发插入由 lease_key 主键保证只有一方成功）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
+    stamp = now.isoformat()
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
+                  "lease_expires_at=%s, lease_acquired_at=?, updated_at=%s "
+                  "WHERE lease_key=%s AND (lease_token IS NULL OR lease_token=%s "
+                  "OR lease_expires_at IS NULL OR lease_expires_at < %s)"
+                  .replace("lease_acquired_at=?", "lease_acquired_at=IFNULL(lease_acquired_at, %s)"),
+                  (token, owner, expires, stamp, stamp, lease_key, token, stamp))
+        if int(c.rowcount or 0) > 0:
+            return True
+        try:
+            c.execute("INSERT INTO grape_t_channel_lease "
+                      "(lease_key, channel_type, lease_token, lease_owner, lease_expires_at, "
+                      "lease_acquired_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                      (lease_key, lease_key.split(":")[0] if ":" in lease_key else "", token,
+                       owner, expires, stamp, stamp))
+            return True
+        except Exception:  # noqa: BLE001 - 并发抢占时主键冲突即为失败
+            return False
+
+
+def release_channel_lease(lease_key: str, token: str) -> bool:
+    """释放租约：仅当 token 匹配时清空（幂等：已释放则返回 False）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE grape_t_channel_lease SET lease_token=NULL, lease_owner=NULL, "
+                  "lease_expires_at=NULL, updated_at=NOW() "
+                  "WHERE lease_key=%s AND lease_token=%s", (lease_key, token))
+        return int(c.rowcount or 0) > 0
+
+
+def release_all_leases(pairs: list[tuple[str, str]]) -> int:
+    """批量释放：pairs 为 [(lease_key, token)]，返回实际释放条数。"""
+    released = 0
+    for lease_key, token in pairs or []:
+        if release_channel_lease(lease_key, token):
+            released += 1
+    return released
+
+
 def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds: int = 60,
                         expected_token: str | None = None) -> bool:
     """IM 渠道租约续约（CAS 语义，可重放）。
@@ -431,4 +481,5 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
-           "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "health"]
+           "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
+           "release_all_leases", "health"]
