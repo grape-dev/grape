@@ -164,3 +164,19 @@
     background: var(--c);
   }
 }
+
+/* ── 项目大厅项目卡：亮面 + 可点的 hover（2026-11-12 反馈）───────────────
+   页面底 --c（暗色 #2c2c2e），项目卡原先也用 --c；hover 的 --hover-card 在暗色是
+   rgba(255,255,255,.043) → 反而比常态更暗，加上 6% 黑阴影，等于没有反馈。
+   这里：卡面 +5% 白抬一档，hover 走 accent 8% 淡染 + 45% 蓝边 + 34% 深投影。
+   app.css 里 `.project-card:hover` 用了 !important，所以这里也必须 !important 才能压过。 */
+:is(.project-card) {
+  background: color-mix(in srgb, #fff 5%, var(--c)) !important;
+  border: 1px solid var(--b) !important;
+  transition: background .18s, border-color .18s, box-shadow .18s, transform .18s !important;
+}
+:root :is(.project-card):hover {
+  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 5%, var(--c))) !important;
+  border-color: color-mix(in srgb, var(--a) 45%, transparent) !important;
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 34%, transparent) !important;
+}
