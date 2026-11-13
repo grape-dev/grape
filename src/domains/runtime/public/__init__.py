@@ -970,6 +970,35 @@ def set_agent_tags(runtime_id: int, tags: list[str]) -> int:
         return int(c.rowcount or 0)
 
 
+def purge_runtime_credential(cid: str, detach_sessions: bool = True,
+                            drop_capabilities: bool = True) -> dict[str, Any]:
+    """吊销凭据：删凭据行 + 级联其引擎行（可选摘绑会话 / 删能力），**一个事务**。
+
+    返回 {rids, sessions, caps, engines, deleted}；mgmt 侧还要清理场景 JSON，
+    所以把 rids 交回调用方（跨域边界不传 mgmt 表名）。
+    """
+    cid_s = str(cid)
+    out: dict[str, Any] = {"rids": [], "sessions": 0, "caps": 0, "engines": 0, "deleted": 0}
+    with db_registry.transaction("runtime") as c:
+        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=%s", (cid_s,))
+        rids = [int(r[0]) for r in c.fetchall()]
+        out["rids"] = rids
+        if rids:
+            ph = ",".join(["%s"] * len(rids))
+            if detach_sessions:
+                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                          tuple(rids))
+                out["sessions"] = int(c.rowcount or 0)
+            if drop_capabilities:
+                c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(rids))
+                out["caps"] = int(c.rowcount or 0)
+            c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(rids))
+            out["engines"] = int(c.rowcount or 0)
+        c.execute("DELETE FROM runtime_credentials WHERE id=%s", (cid_s,))
+        out["deleted"] = int(c.rowcount or 0)
+    return out
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -1002,4 +1031,5 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "set_runtime_credential_scope", "delete_runtime_credential",
            "upsert_repo_credential", "clear_repo_credential",
            "ensure_device_credential", "touch_credential_metrics",
-           "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags"]
+           "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
+           "purge_runtime_credential"]

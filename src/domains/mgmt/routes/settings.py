@@ -2039,6 +2039,22 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
         _owner = _row[0] or ""
         if _owner != (user.get("username") or ""):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可吊销"})
+        # P3-5f-2：吊销是安全动作，必须**立刻**生效（token 不能有窗口期）→ 同步直连组合原语，
+        # 不排队等排水。runtime 半区（会话摘绑 + 能力 + 引擎行 + 凭据行）一次事务完成；
+        # mgmt 半区（场景 nodes_json 悬空引用）由本函数收尾提交。
+        from src.kernel.domain_read import runtime_lib as _rt_lib_purge
+        _rt_purge = _rt_lib_purge(foreign_only=True)
+        if _rt_purge is not None:
+            _purged = _rt_purge.purge_runtime_credential(str(cid))
+            _purged_rids = [int(x) for x in (_purged.get("rids") or [])]
+            if _purged_rids:
+                from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings as _csb_purge
+                # commit=False：修掉"在调用方事务中途提前提交"的旧缺陷
+                _csb_purge(_purged_rids, commit=False)
+            db.commit()
+            log.info(f"revoke {cid} via lib: engines={_purged.get('engines')} "
+                     f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+            return {"message": f"凭据 {cid} 已吊销并删除"}
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
         rid_list = [r[0] for r in c.fetchall()]
         if rid_list:

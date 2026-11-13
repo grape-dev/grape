@@ -818,7 +818,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
 # = 连续 ~1920 个心跳周期全丢，机器不会自己回来）。
 _ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "0"))
 
-def cleanup_scene_engine_bindings(rid_list: list) -> int:
+def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
     """从所有活跃场景的 nodes_json 中移除对 rid_list 引擎的绑定（Issue #250 原逻辑抽出共享）。
 
     返回被修改的场景数。供两处调用：
@@ -872,7 +872,8 @@ def cleanup_scene_engine_bindings(rid_list: list) -> int:
                                     f"lib write failed, intent queued for retry")
                 except Exception as _e:
                     log.warning(f"cleanup_scene_engine_bindings: update scene {row_id} failed: {_e}")
-        db.commit()
+        if commit:
+            db.commit()
     return len(changed_rows)
 
 def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
