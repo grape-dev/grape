@@ -631,11 +631,36 @@ function bindProvider(provider) {
       }
   })
 }
+// 2026-11-13 合入 arch-weekly-11 补齐（其实现原在 static/js/pages/account.js）：令牌创建页直达链接。
+// github/gitcode 用官方实测过的预选参数链接；其余平台取 /auth/providers 的
+// pat_create_url（来自平台卡）；都没有就不渲染按钮（宁缺勿指错站）。
+const PAT_CREATE_URLS = {
+  github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
+  gitcode: 'https://gitcode.com/setting/token-classic/create',
+}
+function patCreateUrl(provider, providerInfo) {
+  if (PAT_CREATE_URLS[provider]) return PAT_CREATE_URLS[provider]
+  if (providerInfo && providerInfo.pat_create_url) return providerInfo.pat_create_url
+  return ''
+}
+// D102 错站修复：帮助文案按平台查表，未命中走通用文案（带 host），
+// 不再让 gitee/gitlab 落到 gitcode 文案。
+const PAT_HELP_KEYS = {
+  github: 'github_token_help',
+  gitcode: 'gitcode_token_help',
+  gitee: 'gitee_token_help',
+}
 function manualBindForm(provider) {
-  const helpSteps = provider === 'github' ? t('github_token_help') : t('gitcode_token_help')
   const providerInfo = providers.value.find(function (p) {
     return p.provider === provider
   })
+  const createUrl = patCreateUrl(provider, providerInfo)
+  const createHost = createUrl ? createUrl.split('/')[2] || '' : ''
+  const helpKey = PAT_HELP_KEYS[provider] || 'pat_token_help_generic'
+  const helpSteps =
+    helpKey === 'pat_token_help_generic'
+      ? t(helpKey, { host: createHost || provider })
+      : t(helpKey)
   const oauthConfigured = !!(providerInfo && providerInfo.configured)
   let html = ''
   if (!oauthConfigured) {
@@ -643,6 +668,13 @@ function manualBindForm(provider) {
       '<div style="background:var(--bg);border:1px solid var(--b);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;gap:8px;align-items:flex-start"><span style="font-size:14px;flex-shrink:0">ℹ️</span><div style="font-size:12px;color:var(--t2);line-height:1.6">' +
       esc(t('pat_no_refresh_hint')) +
       '</div></div>'
+  }
+  if (createUrl) {
+    html +=
+      '<a href="' + esc(createUrl) + '" target="_blank" rel="noopener noreferrer" class="bt" ' +
+      'style="display:block;text-align:center;text-decoration:none;margin:0 0 12px;color:var(--a);border:1px solid var(--a)">' +
+      esc(t('open_token_page') + (createHost ? ' ' + createHost : '')) +
+      '</a>'
   }
   html +=
     '<div class="srow"><label>' +

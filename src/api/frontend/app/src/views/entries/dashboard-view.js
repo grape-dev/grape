@@ -3,7 +3,7 @@
   ;['bridge.css', 'ag-ui.css', 'viewcss/dashboard-view.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=55'
+    link.href = '/static-vue/assets/' + f + '?v=56'
     document.head.appendChild(link)
   })
 })()
