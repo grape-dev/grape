@@ -5369,10 +5369,12 @@ def _fn_add_agent_runtimes_probe_spawn_fail_count() -> None:
 
 
 register_migration(
-    # rebase 撞号改号：202611120001 已被 arch-weekly-11 基线迁移
-    # backfill_events_terminal_completed_at_1497 占用，顺延到 0006
-    # （0002-0005 为本线 #2028/#2133 已注册迁移）。
-    version="202611120006",
+    # 迁移号合规（tests/arch/test_migration_version_integrity）：基线快照
+    # max_version=202611140004（migration_versions_baseline.json），新迁移号
+    # 必须大于 max_version 且不得落在已发布 20261112xxxx 区间。原号
+    # 202611120001 与基线 backfill_events_terminal_completed_at_1497 撞号、
+    # 顺延的 0005/0006 亦低于 max_version，统一改号 202611150001/2。
+    version="202611150002",
     name="add-agent-runtimes-probe-spawn-fail-count",
     kind="safe",
     fn=_fn_add_agent_runtimes_probe_spawn_fail_count,
@@ -5399,7 +5401,7 @@ def _fn_issue2133_engine_recovery_schema() -> None:
 
 
 register_migration(
-    version="202611120005",
+    version="202611150001",
     name="issue2133-engine-recovery-schema",
     kind="safe",
     fn=_fn_issue2133_engine_recovery_schema,
