@@ -1095,6 +1095,10 @@ _READ_QUERIES: dict[str, str] = {
         "SELECT 1 FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 "
         "AND (tag=%s OR tag='all') LIMIT 1"),
     "engine_tags_enabled": "SELECT tag FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 ORDER BY tag",
+    # 仓库 IM 开关（mgmt 的 _apply_ak_sk 读）
+    "repo_im_flags_latest": (
+        "SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding "
+        "ORDER BY id DESC LIMIT 1"),
     # 账号 / 外部身份（按 engine_select._repo_user_id 的真实 SQL 登记，别自己编列名）
     "account_id_by_platform_login": (
         "SELECT ga.id FROM grape_accounts ga "

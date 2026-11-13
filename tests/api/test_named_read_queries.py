@@ -68,3 +68,25 @@ def test_account_queries_match_the_real_call_sites():
     assert "LOWER(ei.external_login)=LOWER(%s)" in login_sql
     ext_sql = rt._READ_QUERIES["grape_user_id_by_external_id"]
     assert "FROM external_identities" in ext_sql and "external_id=%s" in ext_sql
+
+# ---------- mgmt 域命名查询（runtime 代码读 mgmt 表） ----------
+def test_mgmt_registry_exists_and_is_whitelisted(monkeypatch):
+    from src.domains.mgmt import public as mp
+
+    @contextlib.contextmanager
+    def _ctx(domain):
+        assert domain == "mgmt"
+        yield FakeCursor(one=("uid-1",))
+
+    monkeypatch.setattr(db_registry, "cursor", _ctx)
+    assert mp.read_one("grape_user_id_by_external_id", ("gitcode", "123")) == ("uid-1",)
+    with pytest.raises(KeyError):
+        mp.read_one("select * from user_accounts", ())
+
+
+def test_mgmt_knowledge_queries_match_call_sites():
+    from src.domains.mgmt import public as mp
+    b = mp._READ_QUERIES["knowledge_id_baseline"]
+    assert "scope='baseline'" in b and "archived=0" in b
+    s = mp._READ_QUERIES["knowledge_ids_scoped"]
+    assert "agent_type=%s" in s and "issue_num=%s" in s

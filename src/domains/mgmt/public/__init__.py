@@ -561,3 +561,40 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            "health"]
+
+
+# ---------- 命名查询白名单（P4 读路径：runtime 域代码读 mgmt 表） ----------
+_READ_QUERIES: dict[str, str] = {
+    "grape_user_id_by_external_id": (
+        "SELECT ei.grape_user_id FROM external_identities ei "
+        "WHERE ei.provider=%s AND ei.status=1 AND ei.external_id=%s LIMIT 1"),
+    "grape_user_id_by_external_login": (
+        "SELECT ei.grape_user_id FROM external_identities ei "
+        "WHERE ei.provider=%s AND ei.external_login=%s AND ei.status=1 LIMIT 1"),
+    "knowledge_id_baseline": (
+        "SELECT id FROM agent_shared_knowledge "
+        "WHERE repo_key=%s AND scope='baseline' AND name=%s AND archived=0 LIMIT 1"),
+    "knowledge_ids_scoped": (
+        "SELECT id FROM agent_shared_knowledge "
+        "WHERE repo_key=%s AND scope=%s AND agent_type=%s AND issue_num=%s"),
+}
+
+
+def read_one(query: str, params: tuple = ()) -> Any | None:
+    """按白名单执行单行读；未知查询名抛 KeyError（不静默）。"""
+    sql = _READ_QUERIES.get(query)
+    if sql is None:
+        raise KeyError(f"unknown mgmt read query: {query}")
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, params)
+        return c.fetchone()
+
+
+def read_all(query: str, params: tuple = ()) -> list[Any]:
+    """按白名单执行多行读；未知查询名抛 KeyError。"""
+    sql = _READ_QUERIES.get(query)
+    if sql is None:
+        raise KeyError(f"unknown mgmt read query: {query}")
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, params)
+        return list(c.fetchall() or [])

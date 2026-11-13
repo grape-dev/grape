@@ -646,8 +646,14 @@ def get_notifications(user: dict = Depends(require_no_session_token)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding ORDER BY id DESC LIMIT 1")
-            row = c.fetchone()
+            # P4：repo_im_group_binding 在 runtime 域，删视图后走 lib 读
+            from src.kernel.domain_read import runtime_lib as _rt_lib_imf
+            _imf = _rt_lib_imf(foreign_only=True)
+            if _imf is not None:
+                row = _imf.read_one("repo_im_flags_latest", ())
+            else:
+                c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding ORDER BY id DESC LIMIT 1")
+                row = c.fetchone()
             auto_impl = bool(row[0]) if row else True
             notify = bool(row[1]) if row else True
         except Exception:

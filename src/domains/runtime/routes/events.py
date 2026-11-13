@@ -2062,10 +2062,15 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
             log.warning(f"event knowledge delete via lib failed, fallback to local SQL: {_e_kdel}")
     with db_lock:
         c = db.cursor()
-        rows = c.execute(
-            "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-            (evt["repo_key"], scope, _ag, _in)
-        ).fetchall()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_kids
+        _kids_lib = _mg_lib_kids(foreign_only=True)
+        if _kids_lib is not None:
+            rows = _kids_lib.read_all("knowledge_ids_scoped", (evt["repo_key"], scope, _ag, _in))
+        else:
+            rows = c.execute(
+                "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+                (evt["repo_key"], scope, _ag, _in)
+            ).fetchall()
         for (kid,) in rows:
             c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
         c.execute(

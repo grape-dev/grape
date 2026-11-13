@@ -306,11 +306,16 @@ def _write_to_obs(repo_key: str, name: str, content: str):
         with db_lock:
             c = db.cursor()
             # Issue #190：查重改用 name（不受 file_path 格式变化影响）
-            existing = c.execute(
-                "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
-                (repo_key, display_name)
-            ).fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_kn
+            _kn_lib = _mg_lib_kn(foreign_only=True)
+            if _kn_lib is not None:
+                existing = _kn_lib.read_one("knowledge_id_baseline", (repo_key, display_name))
+            else:
+                existing = c.execute(
+                    "SELECT id FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
+                    (repo_key, display_name)
+                ).fetchone()
             if existing:
                 # 已存在 → UPDATE（保留原 id，ref 不失效）
                 kid = existing[0]
