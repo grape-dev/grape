@@ -451,11 +451,16 @@ def _detect_stale_official_scenes(repo_scene_names: set, traversal_complete: boo
         return 0
     try:
         from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            stale = [name for (_id, name) in
-                     c.execute("SELECT id, name FROM scene_market WHERE source='official'").fetchall()
-                     if name not in repo_scene_names]
+        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_stale
+        _mg_stale = _mgmt_lib_stale()
+        if _mg_stale is not None:
+            _rows_stale = _mg_stale.fetch_rows("scene_market", ["id", "name"], "source='official'")
+        else:
+            with db_lock:
+                c = db.cursor()
+                _rows_stale = c.execute(
+                    "SELECT id, name FROM scene_market WHERE source='official'").fetchall()
+        stale = [name for (_id, name) in _rows_stale if name not in repo_scene_names]
     except Exception:
         logger.exception("Scene sync: stale detection query failed")
         return 0

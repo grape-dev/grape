@@ -285,7 +285,11 @@ def _check_where(where: str) -> None:
 
 def query_events(select: str, where: str = "", params: tuple = (), order_by: str = "",
                  limit: int = 0, offset: int = 0) -> list[tuple]:
-    """events 受控查询：列/表达式白名单 + where 片段校验（占位符用 `?` 亦可）。"""
+    """events 受控查询：列/表达式白名单 + where 片段校验。
+
+    **占位符必须用 `?`**：lib 连接走 mysql_compat 的方言翻译，`%s` 会被当作字面百分号
+    转义掉（实测报 `not all arguments converted during string formatting`）。
+    """
     _check_select(select)
     if where:
         _check_where(where)
