@@ -59,9 +59,11 @@ ok(DL.sameRepo('acme/demo', 'acme/demo2') === false, 'sameRepo 不同仓库');
 
 // 4. index.html 接线与版本串
 const dlIdx = indexHtml.indexOf('/static/js/deeplink.js?v=1');
-const appIdx = indexHtml.indexOf('/static/js/app.js?v=258');
+const _appVer = /\/static\/js\/app\.js\?v=(\d+)/.exec(indexHtml);
+const appIdx = _appVer ? indexHtml.indexOf(_appVer[0]) : -1;
 ok(dlIdx > 0, 'index.html 引用了 deeplink.js?v=1');
-ok(appIdx > 0, 'app.js 版本串已 bump 到 258');
+// 版本号只要求「不低于引入本特性时的 258」：合并到其它周线时会被继续 bump（如 260）
+ok(_appVer && Number(_appVer[1]) >= 258, 'app.js 版本串不低于 258（本特性引入时的基线）');
 ok(dlIdx < appIdx, 'deeplink.js 必须先于 app.js 执行（defer 按文档顺序）');
 ok(indexHtml.indexOf("__I18N_CACHE_VER__='43'") > 0, 'i18n 缓存版本已 bump（新增文案）');
 
