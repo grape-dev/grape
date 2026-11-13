@@ -1401,9 +1401,17 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
     if conv_id:
         from src.kernel.session_manager import get_messages
         conv_messages = get_messages(conv_id, limit=30)
+    # host_for_repo_key 在本文件从未 import（出生即坏，base 5aa5d1bd0 同样）：
+    # 这行每次调用都 NameError → 澄清/追问历史接口 500。平台卡按需导入，
+    # 与 src/api/qa_gate.py 同一写法（避免模块顶层引入平台卡缓存）。
+    from src.domains.runtime.vcs.platform_card import host_for_repo_key
+    from src.kernel.repo_key import split_owner_repo
     _issue_host = host_for_repo_key(repo_key)  # 卡 host 派生（无平台名二分）
+    # repo_key 带平台前缀（gitee:owner/repo），拼 URL 前必须拆掉，否则
+    # https://gitee.com/gitee:owner/repo/issues/1（2026-11-13 同批修）
+    _owner, _repo = split_owner_repo(repo_key)
     return {"messages": messages, "conversation_id": conv_id,
-            "issue_url": f"https://{_issue_host}/{repo_key}/issues/{issue_number}"}
+            "issue_url": f"https://{_issue_host}/{_owner}/{_repo}/issues/{issue_number}"}
 
 @router.post("/{issue_id}/awaiting-input", operation_id="issues_awaiting-input",
              summary="Agent declares issue awaiting-input (待澄清)",
