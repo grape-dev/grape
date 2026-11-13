@@ -395,7 +395,8 @@ def _write_scene_skill_ref_via_lib(_mg, market_id: int, refs: list, scene_name: 
     _out: dict = {}
     try:
         _res = _xw.submit(
-            "mgmt", "scene_skill_ref_replace", f"scene-skill-ref:{int(market_id)}:{_sig}",
+            "mgmt", "scene_skill_ref_replace",
+            _xw.unique_key(f"scene-skill-ref:{int(market_id)}:{_sig}"),
             {"scene_id": int(market_id), "refs": refs},
             lambda: _out.update(_mg.replace_scene_skill_ref(int(market_id), refs)))
         if _res.get("status") == "failed":

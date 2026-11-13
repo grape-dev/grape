@@ -264,6 +264,64 @@ def set_scene_nodes(nodes_json: str, scene_id: str | None = None, row_id: int | 
         return {"action": "updated", "changed": int(c.rowcount or 0), "hash": new_hash}
 
 
+# ---------- 用户映射 / 外部身份写原语（P3-5c，均为 runtime/IM 代码写 mgmt 基表） ----------
+
+def upsert_user_mapping_feishu(user_id: str, open_id: str, feishu_name: str, app_id: str) -> dict[str, Any]:
+    """建行（INSERT IGNORE）+ 回写飞书三元组（open_id/name/app_id），与原实现两条 SQL 等价。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT IGNORE INTO unified_user_mapping (user_id) VALUES (%s)", (str(user_id),))
+        created = int(c.rowcount or 0)
+        c.execute("UPDATE unified_user_mapping SET feishu_open_id=%s, feishu_name=%s, app_id=%s, "
+                  "updated_at=NOW() WHERE user_id=%s",
+                  (open_id, feishu_name, app_id, str(user_id)))
+        return {"action": "updated", "created": created, "changed": int(c.rowcount or 0)}
+
+
+def clear_user_mapping_feishu(user_id: str = "", app_id: str = "") -> int:
+    """清空飞书映射（user_id 或 app_id 二选一定位；两者都给则同时约束）。返回变更行数。"""
+    if not user_id and not app_id:
+        raise ValueError("user_id / app_id 至少给一个")
+    sets = "feishu_open_id='', feishu_name='', app_id='', updated_at=NOW()"
+    if app_id and not user_id:
+        # app 释放：条件里必须带 app_id（原 SQL 同）
+        sql = f"UPDATE unified_user_mapping SET {sets} WHERE app_id=%s"
+        params: tuple = (app_id,)
+    else:
+        sql = f"UPDATE unified_user_mapping SET {sets} WHERE user_id=%s"
+        params = (str(user_id),)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, params)
+        return int(c.rowcount or 0)
+
+
+def set_user_mapping_nickname(user_id: str, nickname: str) -> dict[str, Any]:
+    """建行（INSERT IGNORE）+ 更新 gitcode_nickname。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT IGNORE INTO unified_user_mapping (user_id) VALUES (%s)", (str(user_id),))
+        created = int(c.rowcount or 0)
+        c.execute("UPDATE unified_user_mapping SET gitcode_nickname=%s, updated_at=NOW() "
+                  "WHERE user_id=%s", (nickname or "", str(user_id)))
+        return {"action": "updated", "created": created, "changed": int(c.rowcount or 0)}
+
+
+def delete_feishu_onboard_task(app_id: str) -> int:
+    """删除该 app 的飞书扫码接入任务（含 app_secret/qr_url 敏感数据）。"""
+    if not app_id:
+        return 0
+    with db_registry.cursor("mgmt") as c:
+        c.execute("DELETE FROM feishu_onboard_task WHERE app_id=%s", (app_id,))
+        return int(c.rowcount or 0)
+
+
+def mark_external_identity_expired(grape_user_id: str, provider: str) -> int:
+    """凭据失效：external_identities.status 1 → 4（只改 status=1 的行，与原 SQL 同）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE external_identities SET status=4 "
+                  "WHERE grape_user_id=%s AND provider=%s AND status=1",
+                  (str(grape_user_id), provider))
+        return int(c.rowcount or 0)
+
+
 # ---------- 知识库写原语（P3-5b：agent_shared_knowledge / scene_knowledge_ref / scene_skill_ref） ----------
 
 def upsert_baseline_knowledge(repo_key: str, display_name: str, description: str,

@@ -64,6 +64,18 @@ def _handlers() -> dict:
                 p["repo_key"], p["scope"], p.get("agent_type", ""), int(p.get("issue_num", 0)))
             out["scene_skill_ref_replace"] = lambda p: mg.replace_scene_skill_ref(
                 int(p["scene_id"]), list(p.get("refs") or []))
+            # P3-5c：用户映射 / 外部身份 / 飞书接入任务（runtime/IM 进程写 mgmt 基表）
+            out["user_mapping_feishu_upsert"] = lambda p: mg.upsert_user_mapping_feishu(
+                str(p["user_id"]), p.get("open_id", ""), p.get("feishu_name", ""),
+                p.get("app_id", ""))
+            out["user_mapping_feishu_clear"] = lambda p: mg.clear_user_mapping_feishu(
+                user_id=str(p.get("user_id") or ""), app_id=p.get("app_id") or "")
+            out["user_mapping_nickname_set"] = lambda p: mg.set_user_mapping_nickname(
+                str(p["user_id"]), p.get("nickname", ""))
+            out["feishu_onboard_task_delete"] = lambda p: mg.delete_feishu_onboard_task(
+                p.get("app_id", ""))
+            out["external_identity_expire"] = lambda p: mg.mark_external_identity_expired(
+                str(p["grape_user_id"]), p["provider"])
     except Exception:  # noqa: BLE001
         pass
     return out

@@ -372,7 +372,7 @@ def _write_baseline_db_via_lib(repo_key: str, display_name: str, name: str, file
 
         _res = _xw.submit(
             "mgmt", "knowledge_baseline_upsert",
-            f"knowledge-baseline:{repo_key}:{display_name}:{(content_hash or '')[:12]}",
+            _xw.unique_key(f"knowledge-baseline:{repo_key}:{display_name}:{(content_hash or '')[:12]}"),
             {"repo_key": repo_key, "display_name": display_name, "description": _desc,
              "file_path": file_path, "obs_key": storage_key, "content_hash": content_hash},
             _apply_upsert)
@@ -383,7 +383,7 @@ def _write_baseline_db_via_lib(repo_key: str, display_name: str, name: str, file
         kid = int(_out.get("id") or 0)
         if kid:
             # ref 用独立意图（key 按 id 幂等）；主表写入失败时不会留下无主 ref
-            _xw.submit("mgmt", "knowledge_ref_ensure", f"knowledge-ref:{kid}",
+            _xw.submit("mgmt", "knowledge_ref_ensure", _xw.unique_key(f"knowledge-ref:{kid}"),
                        {"knowledge_id": kid},
                        lambda: _mg.ensure_scene_knowledge_ref(kid))
         return True

@@ -95,3 +95,28 @@ def test_dead_letter_after_max_attempts():
 def test_requires_idempotency_key():
     with pytest.raises(ValueError):
         cw.submit("runtime", "x", "", {}, lambda: None)
+
+
+def test_unique_key_keeps_prefix_and_differs_per_call():
+    k1 = cw.unique_key("scene-nodes:1:abc")
+    k2 = cw.unique_key("scene-nodes:1:abc")
+    assert k1.startswith("scene-nodes:1:abc:")
+    assert k1 != k2
+
+
+def test_content_key_dedupes_forever_unique_key_does_not():
+    """状态往复（置 A → 清空 → 再置 A）必须能重放：内容键会被永久去重，唯一键不会。"""
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+
+    # 内容键：第二次同键直接 duplicate，不再执行
+    cw.submit("runtime", "state_set", "state:u1:A", {}, fn)
+    assert cw.submit("runtime", "state_set", "state:u1:A", {}, fn)["status"] == "duplicate"
+    assert calls["n"] == 1
+
+    # 唯一键：每次都提交（幂等由目标原语负责）
+    cw.submit("runtime", "state_set", cw.unique_key("state:u1:A"), {}, fn)
+    cw.submit("runtime", "state_set", cw.unique_key("state:u1:A"), {}, fn)
+    assert calls["n"] == 3

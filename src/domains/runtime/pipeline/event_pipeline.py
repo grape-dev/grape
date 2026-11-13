@@ -4361,8 +4361,9 @@ def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
             def _apply_sru() -> None:
                 _out_sru["changed"] = _mg_sru.set_repo_fields(repo_key, {"deploy_url": url})
 
-            _key_sru = (f"repo-deploy-url:{repo_key}:"
-                        f"{_hl_sru.sha1(url.encode('utf-8')).hexdigest()[:12]}")
+            _key_sru = _xw_sru.unique_key(
+                f"repo-deploy-url:{repo_key}:"
+                f"{_hl_sru.sha1(url.encode('utf-8')).hexdigest()[:12]}")
             _res_sru = _xw_sru.submit(
                 "mgmt", "repo_field_update", _key_sru,
                 {"repo_key": repo_key, "fields": {"deploy_url": url}}, _apply_sru)
@@ -4425,8 +4426,9 @@ def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) ->
                 _out_sdu["changed"] = _mg_sdu.set_scene_deploy_url(
                     url, scene_id=scene_id, repo_key=repo_key, require_active=True)
 
-            _key_sdu = (f"scene-deploy-url:{scene_id}:{repo_key}:"
-                        f"{_hl_sdu.sha1(url.encode('utf-8')).hexdigest()[:12]}")
+            _key_sdu = _xw_sdu.unique_key(
+                f"scene-deploy-url:{scene_id}:{repo_key}:"
+                f"{_hl_sdu.sha1(url.encode('utf-8')).hexdigest()[:12]}")
             _res_sdu = _xw_sdu.submit(
                 "mgmt", "scene_deploy_url", _key_sdu,
                 {"url": url, "scene_id": scene_id, "repo_key": repo_key}, _apply_sdu)

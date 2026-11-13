@@ -57,7 +57,7 @@ def write_scene_nodes(nodes_json: str, row_id: int, expected_hash: str, c,
         _out.update(_mg.set_scene_nodes(nodes_json, row_id=int(row_id),
                                         expected_hash=expected_hash or None))
 
-    key = f"scene-nodes:{row_id}:{content_hash(nodes_json)}"
+    key = cross_write.unique_key(f"scene-nodes:{row_id}:{content_hash(nodes_json)}")
     res = cross_write.submit(
         "mgmt", action, key, {"rid": int(row_id), "nodes_json": nodes_json}, _apply)
     if res.get("status") == "duplicate":

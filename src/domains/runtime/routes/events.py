@@ -2051,7 +2051,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
             from src.kernel import cross_write as _xw_kdel
             _res_kdel = _xw_kdel.submit(
                 "mgmt", "knowledge_event_delete",
-                f"knowledge-event-delete:{evt['repo_key']}:{scope}:{_ag}:{_in}",
+                _xw_kdel.unique_key(f"knowledge-event-delete:{evt['repo_key']}:{scope}:{_ag}:{_in}"),
                 {"repo_key": evt["repo_key"], "scope": scope, "agent_type": _ag,
                  "issue_num": int(_in)},
                 lambda: _mg_kdel.delete_event_knowledge(evt["repo_key"], scope, _ag, int(_in)))

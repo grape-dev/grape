@@ -1657,7 +1657,7 @@ def _a2a_register_repo(repo_key: str) -> bool:
                 _out_a2a["changed"] = _mg_a2a.ensure_repo_row(repo_key, _owner, _name, _full)
 
             _res_a2a = _xw_a2a.submit(
-                "mgmt", "repo_ensure", f"repo-ensure:{repo_key}",
+                "mgmt", "repo_ensure", _xw_a2a.unique_key(f"repo-ensure:{repo_key}"),
                 {"repo_key": repo_key,
                  "fields": {"repo_owner": _owner, "repo_name": _name, "full_name": _full}},
                 _apply_a2a)

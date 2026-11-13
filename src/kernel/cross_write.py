@@ -75,6 +75,22 @@ def _now() -> int:
     return int(time.time())
 
 
+def unique_key(base: str) -> str:
+    """为「可反复发生的状态变更」生成意图键：可读内容前缀 + 唯一后缀（**不跨调用去重**）。
+
+    为什么不能只用内容哈希做键（实测踩坑）：内容哈希键是**永久去重**的，遇到
+    「置 A → 清空 → 再置 A」这类状态往复会静默跳过第二次写入 —— 现场表现是
+    "飞书解绑后重新绑定同一个 app 不生效"。同理还有 token 状态 ok↔expired、
+    deploy_url A→B→A、知识内容回退、行删除后重建。
+    这些写原语自身都是幂等的（同值 0 行变更 / INSERT IGNORE / 条件 UPDATE /
+    DELETE+INSERT 重建），重复执行无副作用，所以用唯一后缀保证"每次真实调用都被提交一次"。
+    代价是日志行按调用数增长，去重职责从"键"移交给"原语幂等性"。
+    """
+    import uuid
+
+    return f"{base}:{uuid.uuid4().hex[:12]}"
+
+
 def submit(target_domain: str, action: str, idempotency_key: str, payload: Any,
            apply_fn: Callable[[], Any]) -> dict[str, Any]:
     """登记意图并立即尝试执行一次。

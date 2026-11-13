@@ -276,7 +276,7 @@ def _set_repo_bot_token_status(repo_key: str, status: str):
 
             _res_bts = _xw_bts.submit(
                 "mgmt", "repo_field_update",
-                f"repo-bot-token-status:{repo_key}:{status or 'ok'}",
+                _xw_bts.unique_key(f"repo-bot-token-status:{repo_key}:{status or 'ok'}"),
                 {"repo_key": repo_key, "fields": {"bot_token_status": status}}, _apply_bts)
             if _res_bts.get("status") == "failed":
                 log.warning(f"_set_repo_bot_token_status: queued for retry ({repo_key}): "

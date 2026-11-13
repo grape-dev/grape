@@ -41,6 +41,9 @@ def _clean_key(key: str) -> None:
     from src.kernel.session_manager import db
     cw.ensure_log_table()
     db.cursor().execute(f"DELETE FROM {cw.LOG_TABLE} WHERE idempotency_key=?", (key,))
+    # 键现在带唯一后缀（unique_key），按前缀清理旧行
+    db.cursor().execute(f"DELETE FROM {cw.LOG_TABLE} WHERE idempotency_key LIKE ?",
+                        (f"{key}:%",))
 
 
 def test_lib_unavailable_uses_local_sql(monkeypatch):
@@ -63,7 +66,7 @@ def test_lib_updated_records_applied_intent(monkeypatch):
     from src.kernel.session_manager import db
     row = db.cursor().execute(
         f"SELECT status, target_domain, action FROM {cw.LOG_TABLE} "
-        "WHERE idempotency_key=?", (key,)).fetchone()
+        "WHERE idempotency_key LIKE ?", (f"{key}:%",)).fetchone()
     assert row[0] == "applied" and row[1] == "mgmt" and row[2] == "scene_nodes_update"
 
 
@@ -82,7 +85,7 @@ def test_lib_mismatch_is_not_retried(monkeypatch):
                                  None) == snw.MISMATCH
     from src.kernel.session_manager import db
     row = db.cursor().execute(
-        f"SELECT status FROM {cw.LOG_TABLE} WHERE idempotency_key=?", (key,)).fetchone()
+        f"SELECT status FROM {cw.LOG_TABLE} WHERE idempotency_key LIKE ?", (f"{key}:%",)).fetchone()
     assert row[0] == "applied"       # 不进入重试队列
 
 
@@ -95,8 +98,8 @@ def test_lib_failure_queues_and_drain_replays(monkeypatch):
                                  None) == snw.FAILED
 
     from src.kernel.session_manager import db
-    db.cursor().execute(f"UPDATE {cw.LOG_TABLE} SET next_retry_at=0 WHERE idempotency_key=?",
-                        (key,))
+    db.cursor().execute(f"UPDATE {cw.LOG_TABLE} SET next_retry_at=0 WHERE idempotency_key LIKE ?",
+                        (f"{key}:%",))
     lib2 = _FakeLib()
     _patch_lib(monkeypatch, lib2)
     out = cw.drain({"scene_nodes_update": lambda p: lib2.set_scene_nodes(
@@ -106,14 +109,15 @@ def test_lib_failure_queues_and_drain_replays(monkeypatch):
     assert json.loads(lib2.calls[0]["nodes_json"]) == [{"t": 1}]
 
 
-def test_duplicate_content_does_not_rewrite(monkeypatch):
-    key = f"scene-nodes:15:{snw.content_hash('[]')}"
-    _clean_key(key)
+def test_same_content_twice_submits_each_call(monkeypatch):
+    """键不再跨调用去重（状态往复必须能重放），幂等由 lib 原语负责（第二次 skipped）。"""
     lib = _FakeLib()
     _patch_lib(monkeypatch, lib)
-    snw.write_scene_nodes('[]', 15, "", _FakeCursor(), "now-iso", None)
+    assert snw.write_scene_nodes('[]', 15, "", _FakeCursor(), "now-iso", None) == snw.UPDATED
+    lib.result = {"action": "skipped", "changed": 0, "hash": "h"}
     assert snw.write_scene_nodes('[]', 15, "", _FakeCursor(), "now-iso", None) == snw.SKIPPED
-    assert len(lib.calls) == 1        # 幂等键命中，没有第二次写
+    assert len(lib.calls) == 2
+    assert lib.calls[0]["nodes_json"] == lib.calls[1]["nodes_json"] == '[]'
 
 
 def test_content_hash_matches_lib_formula():
