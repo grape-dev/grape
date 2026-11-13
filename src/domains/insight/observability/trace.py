@@ -272,12 +272,19 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
     if seqs:
         ph2 = ",".join("?" * len(seqs))
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT seq, event_type, actor, issue_id, title, status, created_at"
-                          f" FROM events WHERE seq IN ({ph2}) ORDER BY seq", tuple(seqs))
-                cols = [d[0] for d in c.description]
-                events = [dict(zip(cols, r)) for r in c.fetchall()]
+            _COLS = ["seq", "event_type", "actor", "issue_id", "title", "status", "created_at"]
+            _where = f"seq IN ({ph2})"
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_tr
+            _rt_tr = _runtime_lib_tr()
+            if _rt_tr is not None:
+                _rows = _rt_tr.query_events(", ".join(_COLS), _where, tuple(seqs), "seq")
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT seq, event_type, actor, issue_id, title, status, created_at"
+                              f" FROM events WHERE seq IN ({ph2}) ORDER BY seq", tuple(seqs))
+                    _rows = list(c.fetchall())
+            events = [dict(zip(_COLS, r)) for r in _rows]
         except Exception as e:
             log.warning(f"obs trace events failed: {e}")
 

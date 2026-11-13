@@ -245,7 +245,8 @@ def list_engine_tags(runtime_id: int, enabled_only: bool = True) -> list[str]:
 _EVENT_COLS = {
     "seq", "repo_key", "issue_id", "event_type", "agent_type", "title", "summary", "actor",
     "status", "created_at", "started_at", "completed_at", "runtime", "skill", "exit_code",
-    "duration", "entity_type", "org_id",
+    "duration", "entity_type", "org_id", "source", "result", "scene_id", "payload",
+    "agent_logs", "structured_output", "idempotency_key",
 }
 
 
@@ -302,6 +303,33 @@ def query_events(select: str, where: str = "", params: tuple = (), order_by: str
         return [tuple(r) for r in c.fetchall()]
 
 
+def group_events(by: str, where: str = "", params: tuple = (),
+                 order_by: str = "", limit: int = 0) -> list[tuple]:
+    """按列分组计数：返回 [(组值..., 计数)]。
+
+    `by` 只允许白名单列（可用逗号分隔多列），不接受表达式。
+    """
+    cols = [c.strip() for c in by.split(",") if c.strip()]
+    if not cols:
+        raise ValueError("by 不能为空")
+    for col in cols:
+        if col not in _EVENT_COLS:
+            raise ValueError(f"分组列 '{col}' 不在 events 允许列表内")
+    if where:
+        _check_where(where)
+    sql = f"SELECT {', '.join(cols)}, COUNT(*) FROM events"
+    if where:
+        sql += f" WHERE {where}"
+    sql += f" GROUP BY {', '.join(cols)}"
+    if order_by:
+        sql += f" ORDER BY {order_by}"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, params)
+        return [tuple(r) for r in c.fetchall()]
+
+
 def count_events(where: str = "", params: tuple = ()) -> int:
     rows = query_events("COUNT(*)", where, params)
     return int(rows[0][0]) if rows else 0
@@ -321,4 +349,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
-           "list_engine_tags", "query_events", "count_events", "health"]
+           "list_engine_tags", "query_events", "count_events", "group_events", "health"]
