@@ -1989,8 +1989,17 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
         # Issue #417：级联清理 engine_capabilities（否则悬空能力标签残留）
         if rid_list:
             try:
-                _ph_ec = ",".join("?" for _ in rid_list)
-                c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph_ec})", rid_list)
+                from src.kernel.domain_read import runtime_lib as _rt_blk
+                _rtb = _rt_blk()
+                if _rtb is not None:
+                    from src.kernel import cross_write as _xw_blk
+                    for _rid in rid_list:
+                        _xw_blk.submit("runtime", "engine_cap_delete_all",
+                                       f"cap-del-all:{cid}:{_rid}", {"rid": _rid},
+                                       lambda r=_rid: _rtb.delete_engine_capability(r))
+                else:
+                    _ph_ec = ",".join("?" for _ in rid_list)
+                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph_ec})", rid_list)
             except Exception as _ece:
                 log.warning(f"revoke {cid}: 清理 engine_capabilities 失败: {_ece}")
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
