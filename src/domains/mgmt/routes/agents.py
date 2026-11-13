@@ -108,7 +108,19 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
             c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
                       "updated_at=? WHERE app_id=?",
                       (datetime.now(timezone.utc).isoformat(), old_app_id))
-        c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
+        # P3-5g：vod_conversations 在 runtime 域
+        from src.kernel.domain_read import runtime_lib as _rt_lib_vd
+        from src.kernel import cross_write as _xw_vd
+        _vd_done = False
+        _rt_vd = _rt_lib_vd(foreign_only=True)
+        if _rt_vd is not None:
+            _rt_vd_ok = _rt_vd
+            _vd_done = _xw_vd.submit_if_lib(
+                _rt_vd_ok, "runtime", "vod_conversations_delete",
+                f"vod-conv-del:{session_id}", {"agent_session_ids": [str(session_id)]},
+                lambda: _rt_vd_ok.delete_vod_conversations(agent_session_ids=[str(session_id)]), log)
+        if not _vd_done:
+            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
         db.commit()
 
     log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
@@ -506,9 +518,28 @@ def clean_agent_session(name: str, owner: str, repo: str,
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
-                  (repo_key, name))
-        updated = c.rowcount
+        # P3-5g：devops_agent_session 在 runtime 域；需要 rowcount 判"是否清理了会话"
+        from src.kernel.domain_read import runtime_lib as _rt_lib_cs
+        from src.kernel import cross_write as _xw_cs
+        _cs_n: dict = {}
+        _rt_cs = _rt_lib_cs(foreign_only=True)
+        _cs_done = False
+        if _rt_cs is not None:
+            _rt_cs_ok = _rt_cs
+
+            def _apply_cs() -> None:
+                _cs_n["n"] = _rt_cs_ok.clear_agent_session_runtime(repo_key, name)
+
+            _cs_done = _xw_cs.submit_if_lib(
+                _rt_cs_ok, "runtime", "agent_session_runtime_clear",
+                f"agent-sess-clear:{repo_key}:{name}", {"repo_key": repo_key, "agent_type": name},
+                _apply_cs, log)
+        if _cs_done:
+            updated = int(_cs_n.get("n") or 0)
+        else:
+            c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
+                      (repo_key, name))
+            updated = c.rowcount
         db.commit()
     log.info(f"Agent session cleaned: repo={repo_key}, agent={name}, rows={updated}")
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
@@ -561,12 +592,24 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             if any(str(r[0]) == "user" for r in _holders):
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
             if old_app_id and old_app_id != body.im_app_id:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN "
-                              "(SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
-                              (repo_key,))
-                    db.commit()
+                # P3-5g：vod_conversations 在 runtime 域
+                from src.kernel.domain_read import runtime_lib as _rt_lib_vr
+                from src.kernel import cross_write as _xw_vr
+                _vc_done = False
+                _rt_vr = _rt_lib_vr(foreign_only=True)
+                if _rt_vr is not None:
+                    _rt_vr_ok = _rt_vr
+                    _vc_done = _xw_vr.submit_if_lib(
+                        _rt_vr_ok, "runtime", "vod_conversations_delete",
+                        f"vod-conv-del-repo:{repo_key}", {"repo_key": repo_key},
+                        lambda: _rt_vr_ok.delete_vod_conversations(repo_key=repo_key), log)
+                if not _vc_done:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN "
+                                  "(SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
+                                  (repo_key,))
+                        db.commit()
                 log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
     # Issue #294：解绑-only 请求（未带引擎/技能/订阅信息）→ 仅清 IM 三字段，保留其余 Agent 配置

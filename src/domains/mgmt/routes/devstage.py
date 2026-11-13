@@ -373,7 +373,21 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
                         if rids:
                             ph = ",".join("?" * len(rids))
                             c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rids)
-                            c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rids)
+                            # P3-5g：devops_agent_session 在 runtime 域
+                            from src.kernel.domain_read import runtime_lib as _rt_lib_ds
+                            from src.kernel import cross_write as _xw_ds
+                            _ds_done = False
+                            _rt_ds = _rt_lib_ds(foreign_only=True)
+                            if _rt_ds is not None:
+                                _rt_ds_ok = _rt_ds
+                                _ds_done = _xw_ds.submit_if_lib(
+                                    _rt_ds_ok, "runtime", "agent_sessions_detach",
+                                    f"agent-sess-detach:{sorted(int(x) for x in rids)}",
+                                    {"runtime_ids": [int(x) for x in rids]},
+                                    lambda: _rt_ds_ok.detach_agent_sessions(
+                                        [int(x) for x in rids]), log)
+                            if not _ds_done:
+                                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rids)
                         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
                         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
                         log.info(f"删除环境 {env_name} 的凭据 (id={cid}) 及关联 runtime")

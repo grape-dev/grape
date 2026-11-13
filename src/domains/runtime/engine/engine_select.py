@@ -1384,6 +1384,8 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
             log.warning(f"remap_engine_references: remap scenes failed: {_e}")
         # 2. autopilot_tasks.engine_runtime_ids（JSON 列表字符串）
         try:
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_at
+            _mg_at = _mgmt_lib_at(foreign_only=True)
             c.execute(f"SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''")
             for tid, eids_str in c.fetchall():
                 try:
@@ -1394,9 +1396,33 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
                     continue
                 new_eids = [rid_map.get(eid, eid) for eid in eids]
                 if new_eids != eids:
-                    c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
-                              (_json.dumps(new_eids), tid))
-                    stats["autopilot_tasks"] += 1
+                    _new_json = _json.dumps(new_eids)
+                    if _mg_at is not None:
+                        # P3-5d：mgmt 基表，跨域写走 lib；同域（mgmt 进程）自动回落本地 SQL
+                        try:
+                            import hashlib as _hl_at
+                            from src.kernel import cross_write as _xw_at
+                            _sig_at = _hl_at.sha1(_new_json.encode("utf-8")).hexdigest()[:12]
+                            _res_at = _xw_at.submit(
+                                "mgmt", "autopilot_engine_ids_set",
+                                _xw_at.unique_key(f"autopilot-eids:{tid}:{_sig_at}"),
+                                {"task_id": int(tid), "engine_runtime_ids": _new_json},
+                                lambda t=tid, j=_new_json: _mg_at.set_autopilot_engine_ids(int(t), j))
+                            if _res_at.get("status") == "failed":
+                                log.warning(f"remap_engine_references: autopilot task {tid} "
+                                            f"queued for retry: {_res_at.get('error')}")
+                            else:
+                                stats["autopilot_tasks"] += 1
+                        except Exception as _e_at:
+                            log.warning(f"remap_engine_references: autopilot task {tid} lib path "
+                                        f"failed, fallback to local SQL: {_e_at}")
+                            c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+                                      (_new_json, tid))
+                            stats["autopilot_tasks"] += 1
+                    else:
+                        c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+                                  (_new_json, tid))
+                        stats["autopilot_tasks"] += 1
         except Exception as _e:
             log.warning(f"remap_engine_references: remap autopilot_tasks failed: {_e}")
         # 3. agent backend 引用（整型列，CASE 批量替换）

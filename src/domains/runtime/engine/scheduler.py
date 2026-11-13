@@ -1056,6 +1056,22 @@ def _update_execution(exec_id: int, status: str, result: str = "", error: str = 
 def _update_task_run_info(task_id: int, next_run: str):
     """更新任务最近运行时间和下次预计运行时间。"""
     now_str = datetime.now().astimezone().isoformat()
+    # P3-5d：autopilot_tasks 是 mgmt 基表；runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ri
+    _mg_ri = _mgmt_lib_ri(foreign_only=True)
+    if _mg_ri is not None:
+        try:
+            from src.kernel import cross_write as _xw_ri
+            _res_ri = _xw_ri.submit(
+                "mgmt", "autopilot_run_info_set",
+                _xw_ri.unique_key(f"autopilot-run:{task_id}:{now_str}"),
+                {"task_id": int(task_id), "last_run_at": now_str, "next_run_at": next_run},
+                lambda: _mg_ri.set_autopilot_run_info(int(task_id), now_str, next_run))
+            if _res_ri.get("status") == "failed":
+                log.warning(f"_update_task_run_info queued for retry: {_res_ri.get('error')}")
+            return
+        except Exception as _e_ri:
+            log.warning(f"_update_task_run_info lib path failed, fallback to local SQL: {_e_ri}")
     with db_lock:
         c = db.cursor()
         c.execute(

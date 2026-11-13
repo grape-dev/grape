@@ -76,6 +76,31 @@ def _handlers() -> dict:
                 p.get("app_id", ""))
             out["external_identity_expire"] = lambda p: mg.mark_external_identity_expired(
                 str(p["grape_user_id"]), p["provider"])
+            # P3-5d：巡检任务（runtime 进程写 mgmt 基表）
+            out["autopilot_run_info_set"] = lambda p: mg.set_autopilot_run_info(
+                int(p["task_id"]), p.get("last_run_at", ""), p.get("next_run_at", ""))
+            out["autopilot_engine_ids_set"] = lambda p: mg.set_autopilot_engine_ids(
+                int(p["task_id"]), p.get("engine_runtime_ids", ""))
+    except Exception:  # noqa: BLE001
+        pass
+    # P3-5g：mgmt / insight 进程写 runtime 基表（会话、任务、trace 回填）
+    try:
+        from src.domains.runtime import public as rt
+        if rt.available():
+            out["user_rows_purge"] = lambda p: rt.purge_user_rows(str(p["user_id"]))
+            out["chat_conversations_delete"] = lambda p: rt.delete_chat_conversations(
+                p.get("im_channel_id", ""))
+            out["vod_conversations_delete"] = lambda p: rt.delete_vod_conversations(
+                agent_session_ids=p.get("agent_session_ids") or None,
+                repo_key=p.get("repo_key") or "")
+            out["agent_sessions_detach"] = lambda p: rt.detach_agent_sessions(
+                [int(x) for x in (p.get("runtime_ids") or [])])
+            out["agent_session_runtime_clear"] = lambda p: rt.clear_agent_session_runtime(
+                p["repo_key"], p["agent_type"])
+            out["agent_session_ensure"] = lambda p: rt.ensure_agent_session(
+                p["session_id"], p["repo_key"], p["agent_type"], p.get("status", "idle"))
+            out["agent_tasks_stamp_traces"] = lambda p: rt.stamp_task_traces(
+                [tuple(x) for x in (p.get("pairs") or [])])
     except Exception:  # noqa: BLE001
         pass
     return out

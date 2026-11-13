@@ -49,8 +49,14 @@ def mgmt_lib(foreign_only: bool = False) -> ModuleType | None:
     return lib
 
 
-def runtime_lib() -> ModuleType | None:
-    return _lib("runtime", "GRAPE_RUNTIME_READ_VIA_LIB")
+def runtime_lib(foreign_only: bool = False) -> ModuleType | None:
+    lib = _lib("runtime", "GRAPE_RUNTIME_READ_VIA_LIB")
+    if lib is not None and foreign_only:
+        from src.kernel import db_registry
+
+        if db_registry.current_domain() == "runtime":
+            return None
+    return lib
 
 
 def insight_lib() -> ModuleType | None:

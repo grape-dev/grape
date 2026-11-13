@@ -140,10 +140,22 @@ def _apply_chat_credentials(user_id: str, app_id: str, app_secret: str) -> tuple
         return "该凭证已被其他用户使用，不能重复绑定", old_app_id
 
     if old_app_id and old_app_id != app_id:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-            db.commit()
+        # P3-5g：chat_conversations 在 runtime 域；lib 可用走跨域写，否则回落本地 SQL
+        from src.kernel.domain_read import runtime_lib as _rt_lib_cc
+        from src.kernel import cross_write as _xw_cc
+        _cc_done = False
+        _rt_cc = _rt_lib_cc(foreign_only=True)
+        if _rt_cc is not None:
+            _rt_cc_ok = _rt_cc
+            _cc_done = _xw_cc.submit_if_lib(
+                _rt_cc_ok, "runtime", "chat_conversations_delete",
+                f"chat-conv-del:{old_app_id}", {"im_channel_id": old_app_id},
+                lambda: _rt_cc_ok.delete_chat_conversations(old_app_id), log)
+        if not _cc_done:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
+                db.commit()
         log.info(f"Feishu onboard: replaced old app_id={old_app_id[:20]} with {app_id[:20]}")
     try:
         if sync_installation("user", owner_user_id=str(user_id),
@@ -188,15 +200,40 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
         row = c.execute("SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'",
                         (repo_key,)).fetchone()
         old_session_id = row[0] if row else ""
+        # P3-5g：devops_agent_session / vod_conversations 在 runtime 域
+        from src.kernel.domain_read import runtime_lib as _rt_lib_av
+        from src.kernel import cross_write as _xw_av
+        _rt_av = _rt_lib_av(foreign_only=True)
         if old_app_id and old_app_id != app_id and old_session_id:
-            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (old_session_id,))
+            _av_del = False
+            if _rt_av is not None:
+                _rt_av_ok = _rt_av
+                _av_del = _xw_av.submit_if_lib(
+                    _rt_av_ok, "runtime", "vod_conversations_delete",
+                    f"vod-conv-del:{old_session_id}", {"agent_session_ids": [str(old_session_id)]},
+                    lambda: _rt_av_ok.delete_vod_conversations(
+                        agent_session_ids=[str(old_session_id)]), log)
+            if not _av_del:
+                c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (old_session_id,))
             log.info(f"Feishu onboard: replaced vod app_id={old_app_id[:20]} with {app_id[:20]}")
         if not old_session_id:
-            c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at) "
-                "VALUES (?,?,?,?,datetime('now'))",
-                (str(uuid.uuid4()), repo_key, "vod", "idle"),
-            )
+            _new_sid = str(uuid.uuid4())
+            _av_ins = False
+            if _rt_av is not None:
+                _rt_av_ok2 = _rt_av
+                _av_ins = _xw_av.submit_if_lib(
+                    _rt_av_ok2, "runtime", "agent_session_ensure",
+                    f"agent-session:{_new_sid}",
+                    {"session_id": _new_sid, "repo_key": repo_key, "agent_type": "vod",
+                     "status": "idle"},
+                    lambda: _rt_av_ok2.ensure_agent_session(_new_sid, repo_key, "vod", "idle"),
+                    log)
+            if not _av_ins:
+                c.execute(
+                    "INSERT INTO devops_agent_session (id, repo_key, agent_type, status, last_active_at) "
+                    "VALUES (?,?,?,?,datetime('now'))",
+                    (_new_sid, repo_key, "vod", "idle"),
+                )
         db.commit()
     try:
         if sync_installation("repo", repo_key=repo_key,

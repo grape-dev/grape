@@ -496,6 +496,101 @@ def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds
         return int(c.rowcount or 0) > 0
 
 
+# ---------- 会话/任务写原语（P3-5g：mgmt / insight 进程写 runtime 基表） ----------
+
+def purge_user_rows(user_id: str) -> dict[str, int]:
+    """账号删除级联：按 user_id 一并清理 runtime 域业务数据。
+
+    覆盖 agent_tasks / chat_agent_session / chat_conversations / issue 四表。原实现是
+    mgmt 侧在同一事务里逐表 DELETE —— 拆成四条意图会丢"一起删"的语义，故做成一个原语。
+    """
+    uid = str(user_id)
+    out: dict[str, int] = {}
+    with db_registry.cursor("runtime") as c:
+        for table in ("agent_tasks", "chat_agent_session", "chat_conversations", "issue"):
+            c.execute(f"DELETE FROM {table} WHERE user_id=%s", (uid,))
+            out[table] = int(c.rowcount or 0)
+    return out
+
+
+def delete_chat_conversations(im_channel_id: str = "") -> int:
+    """按 IM 渠道清空 chat 会话（换绑 / 解绑清理）。"""
+    if not im_channel_id:
+        return 0
+    with db_registry.cursor("runtime") as c:
+        c.execute("DELETE FROM chat_conversations WHERE im_channel_id=%s", (im_channel_id,))
+        return int(c.rowcount or 0)
+
+
+def delete_vod_conversations(agent_session_ids: list[str] | None = None,
+                             repo_key: str = "") -> int:
+    """删 VOD 会话：按 agent_session_id 列表，或按某 repo 的 vod 会话（二者择一）。"""
+    with db_registry.cursor("runtime") as c:
+        if agent_session_ids:
+            ids = [str(i) for i in agent_session_ids if str(i)]
+            if not ids:
+                return 0
+            ph = ",".join(["%s"] * len(ids))
+            c.execute(f"DELETE FROM vod_conversations WHERE agent_session_id IN ({ph})", tuple(ids))
+        elif repo_key:
+            c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN "
+                      "(SELECT id FROM devops_agent_session WHERE repo_key=%s AND agent_type='vod')",
+                      (repo_key,))
+        else:
+            return 0
+        return int(c.rowcount or 0)
+
+
+def detach_agent_sessions(runtime_ids: list[int] | None = None) -> int:
+    """把引用被删/被换引擎的 agent 会话摘绑（runtime_id=0）。"""
+    rids = [int(r) for r in (runtime_ids or [])]
+    if not rids:
+        return 0
+    ph = ",".join(["%s"] * len(rids))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                  tuple(rids))
+        return int(c.rowcount or 0)
+
+
+def clear_agent_session_runtime(repo_key: str, agent_type: str) -> int:
+    """清掉某仓库某 agent 的 runtime_session_id（重开会话用）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE devops_agent_session SET runtime_session_id='' "
+                  "WHERE repo_key=%s AND agent_type=%s", (repo_key, agent_type))
+        return int(c.rowcount or 0)
+
+
+def ensure_agent_session(session_id: str, repo_key: str, agent_type: str,
+                         status: str = "idle") -> int:
+    """幂等建 agent 会话行（已存在则不动），返回 1=新建 / 0=已存在。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("INSERT IGNORE INTO devops_agent_session "
+                  "(id, repo_key, agent_type, status, last_active_at) "
+                  "VALUES (%s, %s, %s, %s, NOW())",
+                  (str(session_id), repo_key, agent_type, status))
+        return int(c.rowcount or 0)
+
+
+def stamp_task_traces(pairs: list[tuple]) -> int:
+    """批量补写 agent_tasks 的 trace_id / pipeline_trace_id（insight 回填，幂等）。
+
+    pairs: [(task_id, trace_id, pipeline_trace_id), ...]
+    """
+    if not pairs:
+        return 0
+    done = 0
+    with db_registry.cursor("runtime") as c:
+        for tid, tid_trace, ptrace in pairs:
+            try:
+                c.execute("UPDATE agent_tasks SET trace_id=%s, pipeline_trace_id=%s WHERE id=%s",
+                          (tid_trace, ptrace, str(tid)))
+                done += int(c.rowcount or 0)
+            except Exception:  # noqa: BLE001
+                continue
+    return done
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -512,4 +607,8 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "release_all_leases", "heartbeat_instance", "list_active_instances", "health"]
+           "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
+           "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
+           "detach_agent_sessions", "clear_agent_session_runtime", "ensure_agent_session",
+           "stamp_task_traces"]

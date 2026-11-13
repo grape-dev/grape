@@ -1980,10 +1980,23 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
         rid_list = [r[0] for r in c.fetchall()]
         if rid_list:
             ph = ",".join("?" for _ in rid_list)
-            try:
-                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
-            except Exception as _e:
-                log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
+            # P3-5g：devops_agent_session 在 runtime 域；lib 可用走跨域写
+            from src.kernel.domain_read import runtime_lib as _rt_lib_rv
+            from src.kernel import cross_write as _xw_rv
+            _rv_done = False
+            _rt_rv = _rt_lib_rv(foreign_only=True)
+            if _rt_rv is not None:
+                _rt_rv_ok = _rt_rv
+                _rv_done = _xw_rv.submit_if_lib(
+                    _rt_rv_ok, "runtime", "agent_sessions_detach",
+                    f"agent-sess-detach:{sorted(int(x) for x in rid_list)}",
+                    {"runtime_ids": [int(x) for x in rid_list]},
+                    lambda: _rt_rv_ok.detach_agent_sessions([int(x) for x in rid_list]), log)
+            if not _rv_done:
+                try:
+                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
+                except Exception as _e:
+                    log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
         # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
         _cleanup_scene_engine_runtime_ids(rid_list)
         # Issue #417：级联清理 engine_capabilities（否则悬空能力标签残留）

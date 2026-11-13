@@ -75,6 +75,26 @@ def _now() -> int:
     return int(time.time())
 
 
+def submit_if_lib(lib, target_domain: str, action: str, key_base: str, payload: Any,
+                  apply_fn: Callable[[], Any], log=None) -> bool:
+    """lib 可用则提交一条幂等意图并返回 True；lib 为 None 或提交异常返回 False。
+
+    统一封装「跨域写四段式」的公共部分，供 mgmt→runtime（P3-5g/5h）等写点复用：
+    调用方拿到 False 时执行**原来的本地 SQL**，保证单机/sqlite 拓扑零回归。
+    """
+    if lib is None:
+        return False
+    try:
+        res = submit(target_domain, action, unique_key(key_base), payload, apply_fn)
+        if res.get("status") == "failed" and log is not None:
+            log.warning(f"cross write {action} queued for retry: {res.get('error')}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if log is not None:
+            log.warning(f"cross write {action} via lib failed, fallback to local SQL: {exc}")
+        return False
+
+
 def unique_key(base: str) -> str:
     """为「可反复发生的状态变更」生成意图键：可读内容前缀 + 唯一后缀（**不跨调用去重**）。
 

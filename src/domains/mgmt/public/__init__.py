@@ -322,6 +322,24 @@ def mark_external_identity_expired(grape_user_id: str, provider: str) -> int:
         return int(c.rowcount or 0)
 
 
+# ---------- 巡检任务写原语（P3-5d；autopilot_tasks 是 mgmt 基表） ----------
+
+def set_autopilot_run_info(task_id: int, last_run_at: str, next_run_at: str) -> int:
+    """更新巡检任务的运行时间（updated_at 与原实现一致，取 last_run_at）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE autopilot_tasks SET last_run_at=%s, next_run_at=%s, updated_at=%s "
+                  "WHERE id=%s", (last_run_at, next_run_at, last_run_at, int(task_id)))
+        return int(c.rowcount or 0)
+
+
+def set_autopilot_engine_ids(task_id: int, engine_runtime_ids_json: str) -> int:
+    """更新巡检任务绑定的引擎列表（JSON 字符串，原样写回）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=%s WHERE id=%s",
+                  (engine_runtime_ids_json, int(task_id)))
+        return int(c.rowcount or 0)
+
+
 # ---------- 知识库写原语（P3-5b：agent_shared_knowledge / scene_knowledge_ref / scene_skill_ref） ----------
 
 def upsert_baseline_knowledge(repo_key: str, display_name: str, description: str,

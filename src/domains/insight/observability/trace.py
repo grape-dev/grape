@@ -75,15 +75,37 @@ def stamp_missing(limit: int = 5000) -> int:
             c.execute("SELECT id, repo_key, issue_id FROM agent_tasks"
                       " WHERE trace_id IS NULL OR trace_id='' LIMIT ?", (int(limit),))
             rows = c.fetchall()
-            for tid, rk, iss in rows:
-                try:
-                    c.execute("UPDATE agent_tasks SET trace_id=?, pipeline_trace_id=? WHERE id=?",
-                              (task_trace_id(tid), pipeline_trace_id(rk or "", iss or "", tid), tid))
-                    done += 1
-                except Exception:
-                    pass
-            if done:
-                db.commit()
+            # P3-5g：agent_tasks 在 runtime 域；insight 进程整批补写收成一条意图
+            # （逐行 submit 会产生上千条意图行，且丢失"一批补完"的语义）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_sm
+            from src.kernel import cross_write as _xw_sm
+            _sm_done = False
+            _rt_sm = _rt_lib_sm(foreign_only=True)
+            if _rt_sm is not None and rows:
+                _rt_sm_ok = _rt_sm
+                _pairs = [(tid, task_trace_id(tid),
+                           pipeline_trace_id(rk or "", iss or "", tid)) for tid, rk, iss in rows]
+                _sm_n: dict = {}
+
+                def _apply_sm() -> None:
+                    _sm_n["n"] = _rt_sm_ok.stamp_task_traces(_pairs)
+
+                _sm_done = _xw_sm.submit_if_lib(
+                    _rt_sm_ok, "runtime", "agent_tasks_stamp_traces",
+                    f"agent-traces:{len(_pairs)}:{_pairs[0][0]}",
+                    {"pairs": [[str(p[0]), p[1], p[2]] for p in _pairs]}, _apply_sm, log)
+                if _sm_done:
+                    done = int(_sm_n.get("n") or 0)
+            if not _sm_done:
+                for tid, rk, iss in rows:
+                    try:
+                        c.execute("UPDATE agent_tasks SET trace_id=?, pipeline_trace_id=? WHERE id=?",
+                                  (task_trace_id(tid), pipeline_trace_id(rk or "", iss or "", tid), tid))
+                        done += 1
+                    except Exception:
+                        pass
+                if done:
+                    db.commit()
     except Exception as e:
         log.warning(f"obs trace stamp_missing failed: {e}")
         return 0
