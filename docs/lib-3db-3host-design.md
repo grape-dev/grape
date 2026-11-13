@@ -297,7 +297,7 @@
 
 ### B.2 未入库（运行机本地脚本，需先还纳入库才能作为出口条件）
 
-下列脚本是改造期在运维机上直接运行的（`/root/` 下单文件，非仓库内容）。
+下列脚本是改造期在运维机上直接运行的（运维机本地目录下的单文件，不在仓库内）。
 它们**不在本分支**，因此 W1/W2 的 `p4_verify_all.py` 出口条件在仓库内**不可复现**；
 进入 B2 前必须先还纳（登记路径 + 依赖 + 调用口径），否则每轮验收只能由掌握该脚本的人手工完成。
 
@@ -320,7 +320,7 @@
 |---|---|---|---|
 | F1 | 意图表命名 `grape_t_` 规范 | ✅ 已整改 | `src/kernel/cross_write.py:22` = `grape_t_xwrite_log`；`scripts/view_owner_known_duplicates.txt:14` 同步登记 |
 | F2 | lib 写原语的 MySQL 方言（`%s` / `ON DUPLICATE KEY` / `NOW()`）在 sqlite 复用路径下不可用 | ✅ 已整改（按收紧可用性） | `src/domains/{mgmt,runtime}/public/__init__.py` 的 `available()` 改为 `db_registry.uses_own_dsn(<domain>)`；`src/domains/contracts/local/*.py` 同口径 |
-| F3 | 提交物携带内网地址 / 本机绝对路径 | ⚠️ 本轮补整改 | `deploy/systemd/*.service` 已脱敏（`/opt/grape` + `EnvironmentFile`），但 `docs/lib-3db-3host-design.md` 仍含真实内网 IP 与 `/root/` 路径 → 本批改为 `<dev-db-host>` / `<insight-copy-host>` / `<runtime-copy-host>` 占位 |
+| F3 | 提交物携带内网地址 / 本机绝对路径 | ⚠️ 本轮补整改 | `deploy/systemd/*.service` 已脱敏（`/opt/grape` + `EnvironmentFile`），但 `docs/lib-3db-3host-design.md` 仍含真实内网 IP 与本机绝对路径 → 本批改为 `<dev-db-host>` / `<insight-copy-host>` / `<runtime-copy-host>` 占位 |
 | F4 | 新增常量无来源登记 | ✅ 已整改 | `src/kernel/cross_write.py:23-24` 的 `MAX_ATTEMPTS` / `RETRY_BACKOFF_S` 已带 rationale 注释 |
 | I3 | mgmt lib 白名单含凭据列（`webhook_secret` / `bot_gitcode_token` / `gitcode_webhook_token` / `bot_github_token` / `github_webhook_token` / `password_hash`） | ⏳ 待人工裁决，当前无调用方 | `src/domains/mgmt/public/__init__.py:17-30` 登记；`src/` 全量检索无 `fetch_rows/fetch_one/read_one/read_all` 取这些列的调用点 |
 | I4 | `insight_lib()` 无对应 `src.domains.insight.public` 模块 | ⏳ 记录备查 | `src/kernel/domain_read.py:62` 定义但无调用方；该域读仍走 `src/domains/contracts/local/insight_local.py` |
