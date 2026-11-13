@@ -896,3 +896,55 @@ def test_mgmt_router_mounted_on_a_process_only():
     # A 进程：/api/im 由 include_router 惰性挂载，openapi 里能看到全部路径
     assert "/api/im/status" in gs.app.openapi()["paths"]
     assert not any(p.startswith("/api/im") for p in c), "C 进程不应挂载 /api/im"
+
+# ---------------------------------------------------------------- 7. 性能整改（20261113）
+
+def test_purge_index_present_after_migration(outbox_db):
+    """005：outbox 表上有 (status, updated_at) 索引（未送达查询与保留期清理共用）。"""
+    conn = sqlite3.connect(outbox_db)
+    idx = {r[1] for r in conn.execute("PRAGMA index_list(grape_t_channel_outbound_card)")}
+    conn.close()
+    assert "idx_outbound_card_status_updated" in idx
+
+
+def test_purge_only_deletes_aged_terminal_rows(outbox_db, clean_notify):
+    """保留期只删过期终态行：pending（还要投）与新鲜行一律保留；0 天=关闭。"""
+    from src.domains.runtime.im import outbox as OB
+    old = OB._future_str(-10 * 86400)
+    now = OB._now_str()
+    conn = sqlite3.connect(outbox_db)
+    for track, status, ts in (("old-sent", "sent", old), ("old-failed", "failed", old),
+                              ("old-pending", "pending", old), ("new-sent", "sent", now)):
+        conn.execute(
+            "INSERT OR REPLACE INTO grape_t_channel_outbound_card "
+            "(out_track_id, installation_id, channel_type, channel_chat_id, status, "
+            " attempt_count, next_retry_at, expires_at, last_error, payload, "
+            " updated_at, created_at) VALUES (?,?,?,?,?,0,'','','','{}',?,?)",
+            (track, "inst-p", "feishu", "c", status, ts, ts))
+    conn.commit()
+    conn.close()
+    assert OB.purge_old_rows(retention_days=7, limit=500) == 2
+    left = {r[0] for r in sqlite3.connect(outbox_db).execute(
+        "SELECT out_track_id FROM grape_t_channel_outbound_card")}
+    assert left == {"old-pending", "new-sent"}
+    assert OB.purge_old_rows(retention_days=0) == 0
+
+
+def test_bulk_mark_keeps_attempt_semantics(outbox_db, clean_notify):
+    """mark_sent_many / mark_failed_many 与逐行版同语义（attempt 递增、第 5 次 failed）。"""
+    from src.domains.runtime.im import outbox as OB
+    t1, t2 = "bulk-a", "bulk-b"
+    for t in (t1, t2):
+        OB.enqueue(out_track_id=t, installation_id="inst-x", channel_type="feishu",
+                   channel_chat_id="c", payload={"kind": "task", "text": "t"},
+                   expires_at=OB.new_expiry())
+        OB.claim_for_sending(t)
+    assert OB.mark_sent_many([t1]) == 1
+    assert OB.get_row(t1)["status"] == "sent"
+    assert OB.mark_failed_many([(t2, "net")]) == {t2: "pending"}
+    assert OB.get_row(t2)["attempt_count"] == 1
+    for _ in range(4):
+        OB.claim_for_sending(t2)
+        OB.mark_failed_many([(t2, "net")])
+    assert OB.get_row(t2)["status"] == "failed"
+    assert OB.mark_failed_many([("nope", "x")]) == {"nope": ""}

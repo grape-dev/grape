@@ -112,6 +112,10 @@ _MIGRATION_004_PATH = os.path.join(
     _repo_root(__file__), "scripts", "migrations", "004_notify_outbox.py",
 )
 
+_MIGRATION_005_PATH = os.path.join(
+    _repo_root(__file__), "scripts", "migrations", "005_outbox_purge_index.py",
+)
+
 # Issue #2261 A：引擎句柄全局注册点。
 # 三进程拆分后引擎实例挂在各入口模块（grape_server/main）的模块属性上，
 # notify._engine() 写死 src.api.main.im_engine 在 A/B/C 进程下恒 None → engine_down。
@@ -198,6 +202,17 @@ def _load_migration_004():
     return module
 
 
+def _load_migration_005():
+    """加载 005_outbox_purge_index（延迟加载，避免模块导入期文件 IO）。"""
+    spec = importlib.util.spec_from_file_location("migrations_005", _MIGRATION_005_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("migrations_005", module)
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_startup_migration(db_path: str) -> dict:
     """启动迁移（幂等，可重复执行）：001 建渠道表 + 004 outbox 补列 + wiring 自有消息表。
 
@@ -221,6 +236,12 @@ def run_startup_migration(db_path: str) -> dict:
                 mig004.ensure_notify_outbox_columns(conn)
         except Exception as e:            # outbox 补列失败不阻断启动（可重跑）
             log.warning("[startup-migration] 004 notify outbox columns failed: %s", e)
+        try:
+            mig005 = _load_migration_005()
+            if mig005 is not None:
+                mig005.ensure_purge_index(conn)
+        except Exception as e:            # 索引缺失只影响性能，不阻断启动
+            log.warning("[startup-migration] 005 purge index failed: %s", e)
         conn.execute(_MESSAGE_TABLE)
         conn.commit()
         return {"user": 0, "repo": 0, "installations": [],
@@ -346,9 +367,15 @@ def ensure_notify_outbox_schema(conn) -> list:
     与引擎开关解耦（A 进程 mode=off 时 run_startup_migration 不会执行，B/C 进程仍要能入队）。
     """
     mig004 = _load_migration_004()
-    if mig004 is None:
-        return []
-    return mig004.ensure_notify_outbox_columns(conn)
+    added = mig004.ensure_notify_outbox_columns(conn) if mig004 is not None else []
+    # 005：保留期清理/未送达查询所需的 (status, updated_at) 索引（幂等，失败只告警）
+    try:
+        mig005 = _load_migration_005()
+        if mig005 is not None:
+            mig005.ensure_purge_index(conn)
+    except Exception as e:
+        log.warning("[startup-migration] 005 purge index failed: %s", e)
+    return added
 
 
 # ---------------------------------------------------------------- UI 写入桥（Issue #871 写方向反转）
