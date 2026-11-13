@@ -33,7 +33,8 @@ class _FakeLib:
 
 
 def _patch_lib(monkeypatch, lib):
-    monkeypatch.setattr("src.kernel.domain_read.mgmt_lib", lambda: lib)
+    # 写路径会传 foreign_only=True；替身需接受该关键字
+    monkeypatch.setattr("src.kernel.domain_read.mgmt_lib", lambda **kw: lib)
 
 
 def _clean_key(key: str) -> None:

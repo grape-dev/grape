@@ -4351,7 +4351,7 @@ def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
         return ""
     # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_sru
-    _mg_sru = _mgmt_lib_sru()
+    _mg_sru = _mgmt_lib_sru(foreign_only=True)
     if _mg_sru is not None:
         try:
             import hashlib as _hl_sru
@@ -4414,7 +4414,7 @@ def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) ->
     # P3-4b：场景表是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图；
     # lib 不可用（开关未开/DSN 未配）时回落原本地 SQL，行为与原路径一致。
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_sdu
-    _mg_sdu = _mgmt_lib_sdu()
+    _mg_sdu = _mgmt_lib_sdu(foreign_only=True)
     if _mg_sdu is not None:
         try:
             import hashlib as _hl_sdu

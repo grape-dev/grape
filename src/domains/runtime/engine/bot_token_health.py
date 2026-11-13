@@ -264,7 +264,7 @@ def _set_repo_bot_token_status(repo_key: str, status: str):
     """更新 managed_repos.bot_token_status。"""
     # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_bts
-    _mg_bts = _mgmt_lib_bts()
+    _mg_bts = _mgmt_lib_bts(foreign_only=True)
     if _mg_bts is not None:
         try:
             from src.kernel import cross_write as _xw_bts

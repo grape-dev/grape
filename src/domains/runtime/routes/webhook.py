@@ -1646,7 +1646,7 @@ def _a2a_register_repo(repo_key: str) -> bool:
     _provider, _owner, _name = parse_repo_key(repo_key)
     # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_a2a
-    _mg_a2a = _mgmt_lib_a2a()
+    _mg_a2a = _mgmt_lib_a2a(foreign_only=True)
     if _mg_a2a is not None:
         try:
             from src.kernel import cross_write as _xw_a2a

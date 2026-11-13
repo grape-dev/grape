@@ -663,7 +663,7 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
 
     # lib 模式（三库三机）：跨域写走 mgmt lib + 幂等键；hash 未变时 upsert 内部直接 skipped
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_scene
-    _mg_scene = _mgmt_lib_scene()
+    _mg_scene = _mgmt_lib_scene(foreign_only=True)
     if _mg_scene is not None:
         from src.kernel import cross_write as _xw_scene
         _out: dict = {}

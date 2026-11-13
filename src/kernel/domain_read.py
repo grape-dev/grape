@@ -32,8 +32,21 @@ def _lib(domain: str, env_flag: str) -> ModuleType | None:
         return None
 
 
-def mgmt_lib() -> ModuleType | None:
-    return _lib("mgmt", "GRAPE_MGMT_READ_VIA_LIB")
+def mgmt_lib(foreign_only: bool = False) -> ModuleType | None:
+    """mgmt 域 lib。`foreign_only=True` 时，**当前进程本身就是 mgmt 域则返回 None**。
+
+    为什么写路径要传 foreign_only：mgmt 进程也挂载了 runtime 路由
+    （`grape_server.py` 里 include 了 events/chat/pipeline/runtime），同一段代码
+    可能在两个进程里执行。若在 mgmt 进程里也走 lib，写会落到**独立连接**（autocommit），
+    失去调用方事务的回滚能力；同域写必须留在本地事务里。
+    """
+    lib = _lib("mgmt", "GRAPE_MGMT_READ_VIA_LIB")
+    if lib is not None and foreign_only:
+        from src.kernel import db_registry
+
+        if db_registry.current_domain() == "mgmt":
+            return None
+    return lib
 
 
 def runtime_lib() -> ModuleType | None:

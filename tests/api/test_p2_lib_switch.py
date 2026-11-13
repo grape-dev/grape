@@ -176,3 +176,29 @@ def test_available_ignores_process_db_reuse(monkeypatch):
     monkeypatch.setattr(db_registry, "domain_db", lambda d: object())
     monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: False)
     assert rt.available() is False
+
+
+def test_mgmt_lib_foreign_only_skips_own_domain(monkeypatch):
+    """写路径防同域误走 lib：当前进程就是 mgmt 时返回 None（留在本地事务）。
+
+    mgmt 进程也 include 了 runtime 路由（events/chat/pipeline），同一段代码可能
+    在 mgmt 进程里执行；此时走 lib 会换成独立连接（autocommit），丢事务回滚能力。
+    """
+    from src.kernel import domain_read
+
+    sentinel = object()
+    monkeypatch.setattr(domain_read, "_lib", lambda d, f: sentinel)
+    monkeypatch.setattr(db_registry, "current_domain", lambda: "mgmt")
+
+    assert domain_read.mgmt_lib() is sentinel              # 读侧不受影响
+    assert domain_read.mgmt_lib(foreign_only=True) is None  # 写侧同域 → 不委派
+
+
+def test_mgmt_lib_foreign_only_allows_runtime_process(monkeypatch):
+    from src.kernel import domain_read
+
+    sentinel = object()
+    monkeypatch.setattr(domain_read, "_lib", lambda d, f: sentinel)
+    monkeypatch.setattr(db_registry, "current_domain", lambda: "runtime")
+
+    assert domain_read.mgmt_lib(foreign_only=True) is sentinel

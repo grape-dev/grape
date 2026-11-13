@@ -42,7 +42,7 @@ def write_scene_nodes(nodes_json: str, row_id: int, expected_hash: str, c,
     """
     from src.kernel.domain_read import mgmt_lib
 
-    _mg = mgmt_lib()
+    _mg = mgmt_lib(foreign_only=True)
     if _mg is None:
         c.execute(
             "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
