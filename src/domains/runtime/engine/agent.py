@@ -34,6 +34,7 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
+from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
 #   丢失路径 B 托管仓库的实时获取+自动刷新回退，6/29 近期任务 token 为空会受影响。）
@@ -99,7 +100,13 @@ def _win_acp_queue(proc):
         finally:
             q.put(b"")
 
-    _threading.Thread(target=_pump, daemon=True, name="acp-probe-pump").start()
+    # Issue #1982 复审：线程登记进 _win_acp_threads，_close_proc_pipes 统一 join
+    _t = _threading.Thread(target=_pump, daemon=True, name="acp-probe-pump")
+    _t.start()
+    try:
+        _win_acp_threads.setdefault(key, []).append(_t)
+    except Exception:
+        pass
     return q
 
 
@@ -151,6 +158,9 @@ def _win_acp_read_response(proc, send, buf, req_id: int, timeout: float):
 
 
 _win_acp_stderr: dict = {}
+# Issue #1982 复审：按 id(proc) 登记的 pump/stderr 读线程，_close_proc_pipes 关闭
+# 管道（产生 EOF/读异常）后 join 回收，避免线程对象与缓存残留。
+_win_acp_threads: dict = {}
 
 
 def _win_acp_drain_stderr(proc):
@@ -178,8 +188,53 @@ def _win_acp_drain_stderr(proc):
         except Exception:
             return
 
-    _threading.Thread(target=_drain, daemon=True, name="acp-probe-stderr").start()
+    _t = _threading.Thread(target=_drain, daemon=True, name="acp-probe-stderr")
+    _t.start()
+    # Issue #1982 复审：线程登记进 _win_acp_threads，_close_proc_pipes 统一 join
+    try:
+        _win_acp_threads.setdefault(key, []).append(_t)
+    except Exception:
+        pass
     return buf
+
+
+def _close_proc_pipes(proc, label: str = "") -> None:
+    """Issue #1982：显式关闭引擎子进程 stdin/stdout/stderr 管道（幂等）。
+
+    探活/任务路径的 Popen 均使用 PIPE；若只在 finally 里 terminate/kill 而不关闭
+    管道，fd 只在对象被 GC 时释放，长跑 worker 会持续累积匿名 pipe 直到 EMFILE。
+    关闭异常一律吞掉（句柄已关闭/已失效/被读线程持有均属正常）。
+    """
+    if proc is None:
+        return
+    for _name in ("stdin", "stdout", "stderr"):
+        _stream = getattr(proc, _name, None)
+        if _stream is None:
+            continue
+        try:
+            _stream.close()
+        except Exception:
+            pass
+    # Windows 探活缓存按 id(proc) 持有引用，关闭后一并释放，避免对象常驻；
+    # Issue #1982 复审：先 close（产生 EOF/读异常唤醒读线程）再 join（带超时，
+    # 顺序不可反——读线程阻塞在 read 上时先 join 无法唤醒），未退出的守护线程
+    # 仅告警不阻塞探活路径。
+    try:
+        _win_acp_pumps.pop(id(proc), None)
+        _win_acp_stderr.pop(id(proc), None)
+    except Exception:
+        pass
+    try:
+        for _t in _win_acp_threads.pop(id(proc), None) or []:
+            try:
+                if _t.is_alive():
+                    _t.join(timeout=1.5)
+                if _t.is_alive():
+                    log.warning(f"acp probe reader thread still alive after join(1.5s): {_t.name}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
@@ -379,7 +434,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         latency = round(_time_mod.time() - start, 1)
         _stop = (_prompt_resp.get("result") or {}).get("stopReason", "unknown")
         # Issue #423: refusal 独立标记（协议活着但模型拒绝 ≠ 链路不通）。
-        # 服务端心跳落库对非 ok/fail 状态仅记录、不增 probe_fail_count → 不触发连败摘除。
+        # 服务端心跳落库对非 ok/fail 状态仅记录、不增 probe_fail_count → 不触发连败摘除
+        # （spawn_failed 另有独立计数 probe_spawn_fail_count 兜底，连续超阈值才降级）。
         if _stop == "refusal":
             return {"status": "refused", "latency": latency, "error": "",
                     "output": "ACP initialize+session/new+prompt refused (stopReason=refusal)"}
@@ -391,6 +447,13 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": f"timeout ({_ACP_PROBE_TIMEOUT + _ACP_PROMPT_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "hermes CLI not found"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if _is_spawn_failure(e):
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
@@ -404,6 +467,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_pipes(proc)
         # 探针临时 cwd 清理（hwcloud 探针同款；session 随子进程 terminate 终止）
         try:
             _shutil.rmtree(_probe_cwd, ignore_errors=True)
@@ -564,6 +628,13 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
 
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "hwcloud CLI not found"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if _is_spawn_failure(e):
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
@@ -577,6 +648,7 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_pipes(proc)
 
 
 
@@ -745,6 +817,13 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
             return out
         return {"status": "fail", "latency": latency,
                 "error": f"prompt stopReason={stop_reason or 'none'}"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if _is_spawn_failure(e):
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         return {"status": "fail", "latency": round(_time_mod.time() - start, 1),
                 "error": str(e)[:200]}
@@ -759,6 +838,7 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_pipes(proc)
 
 
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
@@ -810,6 +890,13 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": f"timeout ({_PROBE_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "CLI not found"}
+    except OSError as e:
+        latency = round(_time_mod.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if _is_spawn_failure(e):
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
@@ -1196,11 +1283,10 @@ def _env_int(name, default):
 def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
 
-    hermes 额外做 ACP 依赖自举（hermes-acp-auto-bootstrap-design.md）：
-    --version 探测不出 ACP 依赖缺失（可选 extra），必须 `hermes acp --check`
-    才能暴露；缺失时自动补装 agent-client-protocol==0.9.0，补装失败则
-    healthy=False（引擎照常注册，但服务端 engine_select 只挑 healthy，
-    不会再把任务派到一台调不通的机器上）。
+    hermes 额外做 ACP 握手探测（hermes-acp-auto-bootstrap-design.md / Issue #1982）：
+    --version 探测不出 ACP 依赖缺失（可选 extra），必须真实握手才能暴露；
+    探测失败只输出带 error 文本的诊断（不再自动补装），healthy=False 时引擎
+    照常注册，但服务端 engine_select 只挑 healthy，不会把任务派到调不通的机器。
     """
     from src.domains.runtime.engine.registry import discover_runtimes
     from src.domains.runtime.engine.acp_bootstrap import _ensure_hermes_acp
@@ -1220,7 +1306,7 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
-        # hermes：ACP 依赖可用才算真健康（缺失时已尝试自动补装）
+        # hermes：ACP 握手通过才算真健康（失败只诊断，不自动补装）
         if healthy and (r["name"] or "").lower() == "hermes":
             healthy = _ensure_hermes_acp(cli)
         # display_name：展示名映射（hwcloud → AIShell；register 接口落 DB display_name 列）
@@ -2823,6 +2909,18 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         log.info(f"task {tid}: retry resumed from checkpoint {os.path.basename(_ckpt.path)}")
     elif int(task.get("_grape_resume_attempt") or 0) >= 2:
         log.info(f"task {tid}: retry without usable checkpoint, running from scratch")
+    # Issue #2041：worktree 重置保全告知——上一轮若发生过「归档后重置」，此处把
+    # 机器可读字段（worktree_reset/lost_commits/bundle_path/archived_at/reset_reason）
+    # 注入 env（GRAPE_WORKTREE_RESET*）与 prompt 提示块（含恢复命令），禁止下一轮
+    # 基于上一轮「实现已在本地」的过时自述推进。无记录 → 零改动（可单测）。
+    try:
+        from src.domains.runtime.engine.worktree_guard import inject_reset_context
+        prompt, _reset_notified = inject_reset_context(task, env, prompt)
+        if _reset_notified:
+            log.warning(f"task {tid}: worktree was reset before this run, "
+                        f"reset context injected into env/prompt")
+    except Exception as _rge:
+        log.warning(f"task {tid}: worktree reset context inject failed: {_rge}")
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
     # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)

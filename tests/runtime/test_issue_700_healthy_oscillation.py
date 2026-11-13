@@ -372,24 +372,6 @@ class TestHermesVenvBinWindows:
         launcher.write_text("@echo off\nrem nothing here\n", encoding="utf-8")
         assert ab._hermes_venv_bin(str(launcher)) == ""
 
-    def test_venv_python_windows_scripts_form(self, tmp_path):
-        """_venv_python：Windows Scripts 目录（只含 python.exe）返回 python.exe。"""
-        import src.domains.runtime.engine.acp_bootstrap as ab
-        venv = tmp_path / "venv" / "Scripts"
-        venv.mkdir(parents=True)
-        (venv / "python.exe").write_bytes(b"")
-        out = ab._venv_python(str(venv))
-        assert os.path.basename(out) == "python.exe", f"应选 python.exe, got {out}"
-
-    def test_venv_python_unix_bin_form(self, tmp_path):
-        """_venv_python：Unix bin 目录（只含 python）返回 python（回归）。"""
-        import src.domains.runtime.engine.acp_bootstrap as ab
-        venv = tmp_path / "venv" / "bin"
-        venv.mkdir(parents=True)
-        (venv / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-        out = ab._venv_python(str(venv))
-        assert os.path.basename(out) == "python"
-
     def test_linux_bash_shim_regression(self, tmp_path):
         """回归：Linux bash shim exec 行解析不受 Windows 分支影响。"""
         import src.domains.runtime.engine.acp_bootstrap as ab

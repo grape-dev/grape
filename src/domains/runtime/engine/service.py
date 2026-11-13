@@ -1578,6 +1578,12 @@ def _has_verified_executor(probe_status: str, worker_version: str,
     "has no verified executor ... skip claiming"）。改为按 installed+healthy 判定：
     既放行真实可用的本机引擎，也保留「未安装 / 探活失败(healthy=0) 不得认领」的 9491 保护。
     """
+    # Issue #2133：spawn_failed（子进程起不来：fd/内存/资源类故障）必须挡在认领闸门外——
+    # PR !1202 后该状态不摘除且 healthy 可能仍为 1（worker_version 也非空），若只追加到下面的
+    # probe_status 黑名单，`bool(worker_version)` 会短路放行。故先做显式拦截。
+    # 状态驱动：探活 ok 后 probe_status 离开 spawn_failed，自动恢复认领（无需清理持久黑名单）。
+    if (probe_status or "").strip().lower() == "spawn_failed":
+        return False
     if not (credential_id or 0):
         return bool(installed) and bool(healthy)
     return bool(worker_version) or probe_status not in ("pending", "failed")

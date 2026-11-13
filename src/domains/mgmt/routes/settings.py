@@ -1147,6 +1147,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         rt["spec"] = cred.get("spec") or ""
+        # Issue #2133：spawn_failed 时间窗降级 / 场景解绑恢复入口（前端 degraded 高亮 + 一键加回）
+        rt["spawn_fail_degraded"] = bool(rt.get("spawn_fail_degraded_at"))
+        rt["detached_from_scenes"] = bool(rt.get("detached_from_scenes_at"))
         # B5 (Issue #257): worker 版本是否落后（服务端最新版本 vs worker 上报版本）
         try:
             from src.kernel.worker_package import worker_code_version, normalize_worker_version
@@ -1781,6 +1784,39 @@ def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member
              f"health_reset_at={data.get('updated_at')} health_score={data.get('health_score')}")
     return {"runtime_id": rid, "health_reset_at": data.get("health_reset_at"),
             "health_score": data.get("health_score")}
+
+
+@router.post("/agent-runtimes/{rid}/readd", operation_id="settings_agent_runtime_readd", summary="Re-add runtime engine to its scenes", description="Issue #2133 front-end one-click fallback for engine auto-recovery: rebuilds scene node bindings from the detach audit log, reconciles task bindings (terminalizes cancelled tasks, releases dangling dispatched bindings, converges busy slots) and clears spawn_failed degraded/alarm state. Idempotent; visibility reuses the engine list filter (invisible ids return 404).")
+def readd_agent_runtime(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
+    """引擎一键加回（Issue #2133 前端兜底）。
+
+    与心跳侧自动加回复用同一实现 ``recovery.recover_engine``：
+    重建场景节点绑定 + 任务绑定对账 + 审计留痕；幂等可重复点击。
+    """
+    result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
+    rt = None
+    for item in result.get("runtimes", []):
+        if item.get("id") == rid:
+            rt = item
+            break
+    if rt is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+    # 鉴权口径与 health-reset（上方端点）一致：全局引擎不开放成员级手动操作，
+    # 仅仓库级/个人级 worker 设备的引擎可一键加回（I-c，QA 第2轮）。
+    if (rt.get("scope") or "global") not in ("user", "repo"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持一键加回，全局引擎不开放"})
+    from src.domains.runtime.engine.recovery import recover_engine
+    out = recover_engine(rid, trigger="manual", force=True)
+    if not out.get("recovered"):
+        log.warning(f"engine readd failed runtime={rid} operator={user.get('username') or user.get('id')} "
+                    f"reason={out.get('reason', '')}")
+        raise HTTPException(status_code=503, detail={"code": 503, "message": f"引擎加回失败: {out.get('reason', '')}"})
+    log.info(f"engine readd ok runtime={rid} operator={user.get('username') or user.get('id')} "
+             f"bindings={len(out.get('bindings') or [])} "
+             f"terminalized={len(out.get('terminalized') or [])} "
+             f"released={len(out.get('released') or [])}")
+    return {"runtime_id": rid, **out}
+
 
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")
 def refresh_agent_runtimes(user: dict = Depends(require_org_member)):

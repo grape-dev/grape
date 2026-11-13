@@ -815,6 +815,20 @@ CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
 )
 """
 
+# Issue #2133：引擎生命周期审计（spawn_failed 告警/降级、恢复加回、任务绑定对账留痕）
+_ENGINE_LIFECYCLE_AUDIT_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_engine_lifecycle_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    runtime_id  INTEGER NOT NULL,              -- agent_runtimes.id
+    runtime_name TEXT DEFAULT '',              -- 引擎名快照
+    kind        TEXT NOT NULL,                 -- spawn_fail_alarm / spawn_fail_degraded / recovered / manual_readd
+    scene_row_id INTEGER DEFAULT 0,            -- devops_pipeline_scene.id（加回相关）
+    node_tag    TEXT DEFAULT '',               -- 场景节点标签
+    detail      TEXT DEFAULT '{}',             -- JSON：计数/时长/对账任务快照
+    created_at  TEXT DEFAULT (datetime('now'))
+)
+"""
+
 _SKILL_LIKES_DDL = """
 CREATE TABLE IF NOT EXISTS skill_likes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -985,6 +999,8 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
     # 引擎绑定真实性同步：场景引擎解绑审计表
     ("scene_engine_detach_log", _SCENE_ENGINE_DETACH_LOG_DDL),
+    # Issue #2133：引擎生命周期审计（spawn_failed 告警/降级 + 恢复加回 + 任务对账）
+    ("grape_t_engine_lifecycle_audit", _ENGINE_LIFECYCLE_AUDIT_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
     ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
@@ -5603,6 +5619,61 @@ register_migration(
 register_migration(
     "202611020004", "issue627_drop_legacy_production_release", "cleanup",
     _mig_issue627_drop_legacy_production_release)
+
+
+def _fn_add_agent_runtimes_probe_spawn_fail_count() -> None:
+    """Issue #1982 复审：agent_runtimes 补 probe_spawn_fail_count（存量库幂等补列）。
+
+    spawn_failed（EMFILE/ENOMEM/EAGAIN 资源类 spawn 失败）不计入 probe_fail_count
+    （偶发资源紧张不摘除引擎），但必须有独立计数兜底：持续 spawn_failed 连续
+    达到阈值后由心跳降级 healthy=0，避免引擎永远 healthy 持续接单。计数列
+    与 probe_fail_count 同模式（心跳按 last_probe 幂等去重，ok 清零）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_runtimes", "probe_spawn_fail_count", "INT DEFAULT 0")
+        db.commit()
+
+
+register_migration(
+    # 迁移号合规（tests/arch/test_migration_version_integrity）：基线快照
+    # max_version=202611140004（migration_versions_baseline.json），新迁移号
+    # 必须大于 max_version 且不得落在已发布 20261112xxxx 区间。原号
+    # 202611120001 与基线迁移撞号、顺延号 0005/0006 低于 max_version；
+    # 202611150001/2 被 #2091/#2095 抢注，0003-0006 又被基线 67ed59fb4
+    # 卡驱动凭据合入（repo-credentials 表族）占用，最终改号 202611150007/8。
+    version="202611150008",
+    name="add-agent-runtimes-probe-spawn-fail-count",
+    kind="safe",
+    fn=_fn_add_agent_runtimes_probe_spawn_fail_count,
+)
+
+
+def _fn_issue2133_engine_recovery_schema() -> None:
+    """Issue #2133：引擎恢复加回闭环所需结构（存量库幂等补齐）。
+
+    - agent_runtimes 补 spawn_failed 时间窗追踪列：spawn_fail_since（连续
+      spawn_failed 首见时刻）、spawn_fail_warned_at（强告警已发）、
+      spawn_fail_degraded_at（超第二阈值标记 degraded，UI 高亮，不自动摘除）；
+    - agent_runtimes 补 probe_ok_streak（连续探活 ok 次数，恢复判定用）；
+    - 新建 grape_t_engine_lifecycle_audit（告警/降级/自动加回/一键加回/任务对账审计）。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_runtimes", "spawn_fail_since", "TEXT DEFAULT ''")
+        _ensure_column(c, "agent_runtimes", "spawn_fail_warned_at", "TEXT DEFAULT ''")
+        _ensure_column(c, "agent_runtimes", "spawn_fail_degraded_at", "TEXT DEFAULT ''")
+        _ensure_column(c, "agent_runtimes", "probe_ok_streak", "INT DEFAULT 0")
+        db.execute(_ENGINE_LIFECYCLE_AUDIT_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611150007",
+    name="issue2133-engine-recovery-schema",
+    kind="safe",
+    fn=_fn_issue2133_engine_recovery_schema,
+)
 
 
 def _ensure_case_insensitive_indexes():

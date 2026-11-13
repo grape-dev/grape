@@ -558,12 +558,21 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$VENV/bin/python -m src.domains.runtime.engine.agent
 Restart=always
 RestartSec=5
+LimitNOFILE=524288
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=$INSTALL_DIR/.venv/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]
 WantedBy=multi-user.target
+EOF
+  # Issue #1982：已装实例升级时，unit 文件可能保留旧模板（无 LimitNOFILE），
+  # 用 drop-in 落地 fd 上限并 daemon-reload；新装/重装同样幂等生效。
+  _DROPIN_DIR="/etc/systemd/system/runtime-agent.service.d"
+  mkdir -p "$_DROPIN_DIR"
+  cat > "$_DROPIN_DIR/limit-nofile.conf" <<EOF
+[Service]
+LimitNOFILE=524288
 EOF
   systemctl daemon-reload
   systemctl enable runtime-agent >/dev/null 2>&1 || true

@@ -391,6 +391,37 @@ function _workerVersionStaleBadge(rt) {
   return `<span title="${(I18N.t('runtimes.label.worker_version_stale_hint') || '').replace(/"/g, '&quot;')}" style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:var(--y);background:var(--bg);padding:2px 8px;border-radius:999px;white-space:nowrap;cursor:help">⬆ ${I18N.t('runtimes.label.worker_version_stale')}</span>`;
 }
 
+// Issue #2133：spawn_failed 降级高亮 + 场景解绑一键加回兜底入口
+function _engineRecoveryBadges(rt) {
+  if (!rt) return '';
+  let html = '';
+  if (rt.spawn_fail_degraded) {
+    html += `<span title="${(I18N.t('runtimes.label.spawn_fail_degraded_hint') || '').replace(/"/g, '&quot;')}" style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:#b45309;background:#fef3c7;padding:2px 8px;border-radius:999px;white-space:nowrap">⚠ ${I18N.t('runtimes.label.spawn_fail_degraded')}</span>`;
+  }
+  if (rt.detached_from_scenes || rt.spawn_fail_degraded) {
+    html += `<button onclick="event.stopPropagation();readdEngine(${rt.id}, event)" style="font-size:10px;font-weight:600;color:#fff;background:#2563eb;border:none;padding:3px 10px;border-radius:999px;cursor:pointer;white-space:nowrap" title="${(I18N.t('runtimes.label.readd_hint') || '').replace(/"/g, '&quot;')}">↩ ${I18N.t('runtimes.label.readd')}</button>`;
+  }
+  return html;
+}
+
+window.readdEngine = function (rid, event) {
+  // 4.3 禁用原生 confirm()：走 _grapeConfirm 弹层（issues.js:1978 定义，全局可用）
+  _grapeConfirm({
+    title: I18N.t('runtimes.label.readd'),
+    message: I18N.t('runtimes.label.readd_confirm'),
+    onConfirm: function () {
+      API.post('/settings/agent-runtimes/' + rid + '/readd', {}).then(function (d) {
+        app.showToast(I18N.t('runtimes.label.readd_done')
+          .replace('{b}', (d.bindings || []).length)
+          .replace('{t}', (d.terminalized || []).length + (d.released || []).length));
+        _loadRuntimesData();
+      }).catch(function (e) {
+        app.showToast((e && e.message) ? e.message : I18N.t('runtimes.label.readd_failed'));
+      });
+    }
+  }, event);
+};
+
 function _legendHtml() {
   return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
     <span style="font-weight:500;color:var(--t2)">${I18N.t('runtimes.devspace.legend_label')}</span>
@@ -679,6 +710,7 @@ function renderEngines(data, devices) {
         ${_helpBtn(_healthHelpHint(rt))}
         ${_scopeBadge(rt.scope, rt.is_local)}
         ${_workerVersionStaleBadge(rt)}
+        ${_engineRecoveryBadges(rt)}
         <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
           <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_engineName}</span>
           ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${engineDisplayName(rt)})</span>` : ''}

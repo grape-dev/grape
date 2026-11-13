@@ -455,6 +455,19 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: delivery baseline guard error: {e}")
 
+    # Issue #2041：worktree 重置保全告知（direct 入口与 worker _execute_task 同口径）——
+    # 上一轮发生过「归档后重置」时，把机器可读记录注入 env_extra + prompt 提示块，
+    # 禁止基于「实现已在本地」的过时自述推进。无记录 → 零改动。
+    try:
+        from src.domains.runtime.engine.worktree_guard import inject_reset_context
+        _task_view = {"repo_key": repo_key, "agent_type": agent_type, "issue_id": issue_id}
+        prompt, _reset_notified = inject_reset_context(_task_view, env_extra, prompt)
+        if _reset_notified:
+            log.warning(f"Exec agent: worktree was reset before this run "
+                        f"(issue={issue_id} agent={agent_type}), reset context injected")
+    except Exception as _rge:
+        log.warning(f"Exec agent: worktree reset context inject failed: {_rge}")
+
     # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees
     # → 注入 GRAPE_LINKED_WORKTREES（供 _submit_linked_repo_prs 消费 / SRE 构建部署消费）

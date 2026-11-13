@@ -461,10 +461,97 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             log.warning(f"repogit worktree failed {repo_key}: {e}")
             return None
 
-def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num):
-    """移除 Issue 级 worktree + 删除目录（sweeper 用）。"""
-    base = repo_base_dir(repo_key)
+
+# Issue #2041：归档产物超时（具名常量，rationale 见 docs/issue-2041/plan.md「归档 bundle 取值」）。
+# bundle 只打包 HEAD 链（不含 --all 的其它分支/基线），体积≈本分支历史；取默认 900s 的
+# 2 倍覆盖大仓冷缓存打包，同时不超过 sweeper 15min 周期的 2 倍，避免单 issue 长期
+# 占用串行 sweep 线程（超时 → 归档失败 → 保留现场，下轮重试）。
+_BUNDLE_CREATE_TIMEOUT = 1800
+# 从本地 bundle fetch 无网络依赖，600s 足够；超出即视为异常（失败 → 拒绝删除）。
+_BUNDLE_FETCH_TIMEOUT = 600
+
+
+def bundle_create(wt_dir: str, bundle_path: str, token: str = "") -> tuple:
+    """Issue #2041：`git bundle create <path> HEAD` 封装（提交链归档）。
+
+    只打包 HEAD 可达提交：linked worktree 与主仓共享 refs，`--all` 会把其它 issue
+    分支与基线一并打包（归档体积≈整仓、sweeper 长时间阻塞），而恢复路径只需要
+    `git fetch <bundle> && git reset --hard FETCH_HEAD` 对应的 HEAD 链。
+
+    返回 (ok, err)；token 经 `-c http.extraheader` 内联注入（不落盘、不进日志）。
+    """
+    r = _run_git(["-C", wt_dir, "bundle", "create", bundle_path, "HEAD"],
+                 token=token, timeout=_BUNDLE_CREATE_TIMEOUT)
+    if r is None:
+        return False, "git exec failed"
+    if r.returncode != 0:
+        return False, (r.stderr or "")[:300]
+    return True, ""
+
+
+def bundle_verify(wt_dir: str, bundle_path: str, token: str = "") -> bool:
+    """Issue #2041：`git bundle verify` 封装——在 worktree 上下文校验 bundle
+    可用（含 prerequisites 满足），归档成功与否以此为准。"""
+    r = _run_git(["-C", wt_dir, "bundle", "verify", bundle_path], token=token)
+    return r is not None and r.returncode == 0
+
+
+def fetch_from_bundle(wt_dir: str, bundle_path: str, token: str = "") -> tuple:
+    """Issue #2041：从 bundle 恢复——`git fetch <bundle>`（FETCH_HEAD 指向 bundle
+    的 HEAD，随后可 `git reset --hard FETCH_HEAD` 还原提交内容）。"""
+    r = _run_git(["-C", wt_dir, "fetch", bundle_path], token=token,
+                 timeout=_BUNDLE_FETCH_TIMEOUT)
+    if r is None:
+        return False, "git exec failed"
+    if r.returncode != 0:
+        return False, (r.stderr or "")[:300]
+    return True, ""
+
+
+def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
+                           token: str = "", base_branch: str = "",
+                           reason: str = "", task_id: str = "") -> bool:
+    """移除 Issue 级 worktree + 删除目录（sweeper 用）。
+
+    Issue #2041：删除/重置前过保全守卫——存在未推送提交或白名单外的未提交/
+    未跟踪改动时先归档（bundle + 补丁 + untracked 快照 + 机器可读记录，
+    见 worktree_guard.archive_worktree_before_reset），归档成功才放行删除；
+    归档失败或守卫异常拒绝删除（宁可残留，不可丢改动）。
+
+    QA N1：非 git 残留目录（无 .git，如 `git worktree add` 失败/中断留下的普通
+    目录）直接跳过归档守卫——其中没有版本库内容可丢，而 `git status` 在非仓库上
+    必然失败（exit 128）→ scan_failed/risk → 归档 ok=False → 恒拒绝删除，
+    使 done-issue 清扫路径对这类目录永不回收、只能等僵尸 TTL 兜底。
+    判据与 worktree_guard.guard_issue_workdir_removal 一致（无 .git 直接放行）。
+
+    返回 True=已删除；False=保留（守卫拒绝/未删除）。
+    """
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
+    _git_marker = os.path.join(issue_dir, ".git")
+    _has_git = os.path.isfile(_git_marker) or os.path.isdir(_git_marker)
+    if os.path.isdir(issue_dir) and not _has_git and is_git_agent(agent_type):
+        # N1（QA 第2轮）：非 git 残留（无 .git，worktree add 失败/中断的残片）——
+        # 没有提交可丢，跳过归档守卫直接回收（口径与 guard_issue_workdir_removal
+        # 一致）。单条 info 日志保留删除可观测性（QA 第5/6轮 I-i）。
+        log.info(f"repogit: non-git leftover, remove directly "
+                 f"{repo_key} issue={issue_num} agent={agent_type} reason={reason or 'cleanup'}")
+    elif _has_git and is_git_agent(agent_type):
+        try:
+            from src.domains.runtime.engine.worktree_guard import archive_worktree_before_reset
+            _res = archive_worktree_before_reset(
+                issue_dir, repo_key, issue_num, agent_type,
+                token=token, base_branch=base_branch,
+                reason=reason or "cleanup", task_id=task_id)
+            if _res.get("risk") and not _res.get("ok"):
+                log.warning(f"repogit: worktree cleanup refused (archive failed) "
+                            f"{repo_key} issue={issue_num} agent={agent_type}: "
+                            f"{_res.get('error', '')}")
+                return False
+        except Exception as _ge:
+            log.warning(f"repogit: reset guard failed, refuse cleanup "
+                        f"{repo_key} issue={issue_num}: {_ge}")
+            return False
+    base = repo_base_dir(repo_key)
     if os.path.isdir(base):
         with _lock_for(repo_key):
             try:
@@ -472,12 +559,13 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num):
             except Exception:
                 pass
     shutil.rmtree(issue_dir, ignore_errors=True)
+    return True
 
 def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, token: str = "") -> bool:
     """任务结束后安全删除 worktree：仅当本地 HEAD 已与远程分支一致（已 push）才删。
 
     用 `git ls-remote` 直连远程核对（不依赖 bare mirror 的 fetch，避免 fetch 滞后误判）。
-    返回 True=已删除；False=保留（未 push / 远程无此分支 / 异常）。宁可残留，不可误删丢代码。
+    返回 True=已删除；False=保留（未 push / 远程无此分支 / 异常 / 归档失败）。宁可残留，不可误删丢代码。
     """
     if not is_git_agent(agent_type):
         return False
@@ -499,8 +587,10 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
         remote_head = remote_out.split()[0]
         if local_head != remote_head:
             return False  # 本地与远程不一致 = 有未推送提交，保留
-        cleanup_issue_worktree(repo_key, agent_type, issue_num)
-        return True
+        # Issue #2041：HEAD 虽已推送，未提交改动仍需先归档（守卫在 cleanup 内），
+        # 归档失败 → 保留（不吞异常信号）。
+        return cleanup_issue_worktree(repo_key, agent_type, issue_num, token=token,
+                                      reason="task_terminal_pushed")
     except Exception as e:
         log.warning(f"repogit remove_issue_worktree_if_pushed failed {repo_key}: {e}")
         return False

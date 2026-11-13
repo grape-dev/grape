@@ -82,6 +82,24 @@ def _active_issue_sessions() -> set[tuple[str, str, str]]:
             active.add((r[0], r[1], str(r[2]).lstrip("#")))
     return active
 
+
+def _resolve_repo_git_token(repo_key: str) -> str:
+    """sweeper 侧的仓库执行 token（Issue #2041）。
+
+    未推送判定的远端事实复核（worktree_guard._remote_branch_head → `ls-remote`）
+    需要鉴权；sweeper 不在任务上下文内，只能自行解析。解析失败/无 token → 空串，
+    判定自动回退本地 ref 链（保守，不改变「宁可残留，不可丢改动」口径）。
+    """
+    if not repo_key:
+        return ""
+    try:
+        from src.kernel.repo import Repo
+        return Repo(repo_key).bot_token or ""
+    except Exception as e:
+        log.warning(f"sweeper git token resolve failed {repo_key}: {e}")
+        return ""
+
+
 def _zombie_issue_dirs(ttl: float) -> list[str]:
     """超 TTL 未活跃的 issue workdir。
 
@@ -572,6 +590,15 @@ def sweep_once() -> int:
 
         from src.kernel.repo_key import split_owner_repo
         from src.domains.runtime.engine import repogit
+        # Issue #2041：未推送判定需远端事实复核（ls-remote 鉴权）；单次 sweep 内
+        # 每仓只解析一次 token，失败降级空串（判定回退本地 ref 链）。
+        _tok_cache: dict = {}
+
+        def _tok(key: str) -> str:
+            if key not in _tok_cache:
+                _tok_cache[key] = _resolve_repo_git_token(key)
+            return _tok_cache[key]
+
         if _has_db_tables:
             from src.domains.runtime.engine import repogit
             active = _active_issue_sessions()
@@ -586,14 +613,26 @@ def sweep_once() -> int:
                     if not os.path.isdir(issue_dir):
                         continue
                     try:
-                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
-                        cleaned += 1
+                        # Issue #2041：删除前过保全守卫（未推送/脏 → 先归档），
+                        # 守卫拒绝（归档失败）→ 返回 False，不计数（目录保留）。
+                        if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
+                                                          token=_tok(repo_key),
+                                                          reason="sweep_done_issue"):
+                            cleaned += 1
                     except Exception as e:
                         log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
         # 僵尸兜底
         ttl = _ZOMBIE_TTL_DAYS * 86400
         for p in _zombie_issue_dirs(ttl):
             try:
+                # Issue #2041：workdir 删除前过保全闸（未推送/脏 → 先归档，
+                # 归档失败拒绝删除，目录保留待下轮重试）；非 worktree 残留照旧清理。
+                from src.domains.runtime.engine.worktree_guard import (
+                    guard_issue_workdir_removal, parse_issue_workdir)
+                _zrk, _znum, _zag = parse_issue_workdir(p)
+                if not guard_issue_workdir_removal(p, reason="zombie_ttl",
+                                                   token=_tok(_zrk)):
+                    continue
                 shutil.rmtree(p, ignore_errors=True)
                 cleaned += 1
             except Exception as e:
@@ -845,6 +884,14 @@ async def sweep_events_loop() -> None:
                 log.debug(f"Event sweeper im-instance purge skipped: {e}")
 
             active = _active_issue_sessions()
+            # Issue #2041：远端事实复核需 ls-remote 鉴权；单次 sweep 每仓解析一次。
+            _tok_cache: dict = {}
+
+            def _tok(key: str) -> str:
+                if key not in _tok_cache:
+                    _tok_cache[key] = _resolve_repo_git_token(key)
+                return _tok_cache[key]
+
             for repo_key, issue_id in _done_issues():
                 num = str(issue_id or "").lstrip("#")
                 if not num or num == "0":
@@ -856,8 +903,11 @@ async def sweep_events_loop() -> None:
                     if not os.path.isdir(issue_dir):
                         continue
                     try:
-                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
-                        cleaned += 1
+                        # Issue #2041：同 sweep_once——守卫拒绝时不计数（目录保留）。
+                        if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
+                                                          token=_tok(repo_key),
+                                                          reason="event_sweep_done_issue"):
+                            cleaned += 1
                     except Exception as e:
                         log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
             if cleaned:
