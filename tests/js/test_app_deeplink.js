@@ -36,7 +36,7 @@ ok(DL.parseAppPath('/app/acme/demo').full === 'acme/demo', '不带结尾斜杠')
 ok(DL.parseAppPath('/app/acme/demo/#tasks/12').full === 'acme/demo', 'pathname 自带 hash 也能解析');
 ok(DL.parseAppPath('/app/acme/demo?x=1').full === 'acme/demo', '带 query');
 ok(DL.parseAppPath('/app/Octo-Org/Demo.Portal/').full === 'Octo-Org/Demo.Portal', '大小写与点号保留');
-ok(DL.parseAppPath('/app/%E9%A9%AC%E5%B2%A9%E6%9D%BE/demo/').owner === '马岩松', 'URL 编码解码');
+ok(DL.parseAppPath('/app/%E6%BC%94%E7%A4%BA%E7%94%A8%E6%88%B7/demo/').owner === '演示用户', 'URL 编码解码');
 
 // 2. 非法路径
 ['/', '', '/app/', '/app/acme/', '/app/acme/demo/extra', '/app//demo/', '/app/acme//',
@@ -52,7 +52,7 @@ ok(DL.parseAppPath('/en/app/acme/demo/').prefix === '/en', '英文站前缀被�
 ok(DL.parseAppPath('/en/app/acme/demo/').full === 'acme/demo', '英文站深链仓库正确');
 ok(DL.buildAppPath('acme', 'demo', '/en') === '/en/app/acme/demo/', '/en 前缀回拼');
 ok(DL.parseAppPath('/ent/app/acme/demo/') === null, '/ent 不是语言前缀');
-ok(DL.buildAppPath('马岩松', 'demo') === '/app/%E9%A9%AC%E5%B2%A9%E6%9D%BE/demo/', 'buildAppPath 编码');
+ok(DL.buildAppPath('演示用户', 'demo') === '/app/%E6%BC%94%E7%A4%BA%E7%94%A8%E6%88%B7/demo/', 'buildAppPath 编码');
 ok(DL.buildAppPath('', 'demo') === '/', '缺 owner 回根路径');
 ok(DL.sameRepo('Acme/Demo', 'acme/demo') === true, 'sameRepo 大小写不敏感');
 ok(DL.sameRepo('acme/demo', 'acme/demo2') === false, 'sameRepo 不同仓库');
