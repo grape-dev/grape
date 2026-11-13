@@ -2901,11 +2901,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 from src.kernel.session_manager import db as _db, db_lock as _dbl
                 from src.domains.mgmt.user.org_db import is_org_personal
                 log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
+                from src.kernel.domain_read import mgmt_lib as _mgmt_lib_org
+                _mg_org = _mgmt_lib_org()
                 with _dbl:
                     _c = _db.cursor()
-                    # 推断仓库关联的 org_id
-                    _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
-                    _mr = _c.fetchone()
+                    # 推断仓库关联的 org_id（lib 模式由 mgmt 域直接给；否则走原查询）
+                    if _mg_org is not None:
+                        _mr_org = _mg_org.get_repo_org_id(repo_key)
+                        _mr = (_mr_org,) if _mr_org else None
+                    else:
+                        _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                        _mr = _c.fetchone()
                     _mr_org_id = (_mr[0] if _mr and _mr[0] else 0)
                     _is_personal = is_org_personal(_mr_org_id) if _mr_org_id else True
                     if _mr_org_id and not _is_personal:
