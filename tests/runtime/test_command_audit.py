@@ -52,7 +52,7 @@ def test_disabled_values(monkeypatch, val):
 
 def test_simple_redirect_no_protected(monkeypatch):
     _on(monkeypatch)
-    info = ca.audit_command("cd /home/mys/grape && pytest -q > /tmp/test.log 2>&1")
+    info = ca.audit_command("cd /opt/workspace/app && pytest -q > /tmp/test.log 2>&1")
     assert info["targets"] == ["/tmp/test.log"]
     assert info["protected"] == [] and info["skipped"] is False
 

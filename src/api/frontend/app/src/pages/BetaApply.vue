@@ -1,36 +1,36 @@
 <template>
   <div class="beta">
-    <AGCard class="beta__card">
+    <AGCard v-if="ready" class="beta__card">
       <div class="beta__logo">
         <img :src="logoSrc" alt="Grape" />
-        <h1>申请内测</h1>
-        <p>加入 Grape 早期体验计划</p>
+        <h1>{{ t('title') }}</h1>
+        <p>{{ t('subtitle') }}</p>
       </div>
 
-      <div class="beta__step-title">基础信息</div>
+      <div class="beta__step-title">{{ t('step_basic') }}</div>
       <div class="beta__field">
-        <label>平台 <span class="beta__req">*</span></label>
+        <label>{{ t('lbl_platform') }} <span class="beta__req">*</span></label>
         <select v-model="form.fAccountType">
           <option value="gitcode">GitCode</option>
           <option value="github">GitHub</option>
         </select>
       </div>
       <div class="beta__field">
-        <label>用户名 <span class="beta__req">*</span></label>
-        <input v-model="form.fAccountName" type="text" placeholder="GitCode 或 GitHub 用户名" />
+        <label>{{ t('lbl_username') }} <span class="beta__req">*</span></label>
+        <input v-model="form.fAccountName" type="text" :placeholder="t('ph_username')" />
       </div>
       <div class="beta__field">
-        <label>邮箱 <span class="beta__req">*</span></label>
+        <label>{{ t('lbl_email') }} <span class="beta__req">*</span></label>
         <input v-model="form.fEmail" type="email" placeholder="user@example.com" />
       </div>
       <div class="beta__field">
-        <label>手机号</label>
-        <input v-model="form.fPhone" type="text" placeholder="选填" />
+        <label>{{ t('lbl_phone') }}</label>
+        <input v-model="form.fPhone" type="text" :placeholder="t('ph_phone_optional')" />
       </div>
 
-      <div class="beta__step-title">身份选择</div>
+      <div class="beta__step-title">{{ t('step_identity') }}</div>
       <div class="beta__field">
-        <label>您的身份是？ <span class="beta__req">*</span></label>
+        <label>{{ t('lbl_identity') }} <span class="beta__req">*</span></label>
         <div class="beta__id-grid">
           <div
             v-for="id in identities"
@@ -40,8 +40,8 @@
           >
             <span class="icon">{{ id.icon }}</span>
             <div class="info">
-              <div class="title">{{ id.title }}</div>
-              <div class="desc">{{ id.desc }}</div>
+              <div class="title">{{ t(id.key) }}</div>
+              <div class="desc">{{ t(id.descKey) }}</div>
             </div>
           </div>
         </div>
@@ -50,40 +50,40 @@
       <!-- student branch -->
       <div v-if="identity === 'student'" class="beta__branch">
         <div class="beta__field">
-          <label>您目前的学历是？ <span class="beta__req">*</span></label>
+          <label>{{ t('lbl_education') }} <span class="beta__req">*</span></label>
           <div class="beta__radio-group">
             <label
               v-for="opt in educationOpts"
               :key="opt"
-              :class="['beta__radio-item', { selected: radio.education === opt }]"
+              :class="['beta__radio-item', { selected: radio.education === v(opt) }]"
             >
-              <input v-model="radio.education" type="radio" :value="opt" style="display: none" />
-              {{ opt }}
+              <input v-model="radio.education" type="radio" :value="v(opt)" style="display: none" />
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.education"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
           </div>
         </div>
         <div class="beta__field">
-          <label>您的专业方向是？ <span class="beta__req">*</span></label>
+          <label>{{ t('lbl_major') }} <span class="beta__req">*</span></label>
           <div class="beta__radio-group">
             <label
               v-for="opt in majorOpts"
               :key="opt"
-              :class="['beta__radio-item', { selected: radio.major === opt }]"
+              :class="['beta__radio-item', { selected: radio.major === v(opt) }]"
             >
-              <input v-model="radio.major" type="radio" :value="opt" style="display: none" />
-              {{ opt }}
+              <input v-model="radio.major" type="radio" :value="v(opt)" style="display: none" />
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.major"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
@@ -94,62 +94,62 @@
       <!-- enterprise branch -->
       <div v-if="identity === 'enterprise'" class="beta__branch">
         <div class="beta__field">
-          <label>您所在企业的规模？ <span class="beta__req">*</span></label>
+          <label>{{ t('lbl_company_size') }} <span class="beta__req">*</span></label>
           <div class="beta__radio-group">
             <label
               v-for="opt in companySizeOpts"
               :key="opt"
-              :class="['beta__radio-item', { selected: radio.companySize === opt }]"
+              :class="['beta__radio-item', { selected: radio.companySize === v(opt) }]"
             >
-              <input v-model="radio.companySize" type="radio" :value="opt" style="display: none" />
-              {{ opt }}
+              <input v-model="radio.companySize" type="radio" :value="v(opt)" style="display: none" />
+              {{ t(opt) }}
             </label>
           </div>
         </div>
         <div class="beta__field">
-          <label>您在企业中的角色？ <span class="beta__req">*</span></label>
+          <label>{{ t('lbl_role') }} <span class="beta__req">*</span></label>
           <div class="beta__radio-group">
             <label
               v-for="opt in roleOpts"
               :key="opt"
-              :class="['beta__radio-item', { selected: radio.role === opt }]"
+              :class="['beta__radio-item', { selected: radio.role === v(opt) }]"
             >
-              <input v-model="radio.role" type="radio" :value="opt" style="display: none" />
-              {{ opt }}
+              <input v-model="radio.role" type="radio" :value="v(opt)" style="display: none" />
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.role"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
           </div>
         </div>
         <div class="beta__field">
-          <label>您计划将产品用于什么场景？ <span class="beta__req">*</span>（多选）</label>
+          <label>{{ t('lbl_use_case') }} <span class="beta__req">*</span>{{ t('multiselect_suffix') }}</label>
           <div class="beta__checkbox-group">
             <label
               v-for="opt in entUseCaseOpts"
               :key="opt"
               :class="[
                 'beta__checkbox-item',
-                { selected: checks.entUseCases.some((c) => c.v === opt) },
+                { selected: checks.entUseCases.some((c) => c.v === v(opt)) },
               ]"
             >
               <input
                 type="checkbox"
-                ::value="opt"
-                :checked="checks.entUseCases.some((c) => c.v === opt)"
+                ::value="v(opt)"
+                :checked="checks.entUseCases.some((c) => c.v === v(opt))"
                 style="display: none"
-                @change="toggleCheck('entUseCases', opt, $event)"
+                @change="toggleCheck('entUseCases', v(opt), $event)"
               />
-              {{ opt }}
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.entUseCases"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
@@ -160,49 +160,49 @@
       <!-- opc branch -->
       <div v-if="identity === 'opc'" class="beta__branch">
         <div class="beta__field">
-          <label>您目前主要从事什么？ <span class="beta__req">*</span></label>
+          <label>{{ t('lbl_occupation') }} <span class="beta__req">*</span></label>
           <div class="beta__radio-group">
             <label
               v-for="opt in occupationOpts"
               :key="opt"
-              :class="['beta__radio-item', { selected: radio.occupation === opt }]"
+              :class="['beta__radio-item', { selected: radio.occupation === v(opt) }]"
             >
-              <input v-model="radio.occupation" type="radio" :value="opt" style="display: none" />
-              {{ opt }}
+              <input v-model="radio.occupation" type="radio" :value="v(opt)" style="display: none" />
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.occupation"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
           </div>
         </div>
         <div class="beta__field">
-          <label>您目前主要使用产品解决什么问题？ <span class="beta__req">*</span>（多选）</label>
+          <label>{{ t('lbl_opc_use_case') }} <span class="beta__req">*</span>{{ t('multiselect_suffix') }}</label>
           <div class="beta__checkbox-group">
             <label
               v-for="opt in opcUseCaseOpts"
               :key="opt"
               :class="[
                 'beta__checkbox-item',
-                { selected: checks.opcUseCases.some((c) => c.v === opt) },
+                { selected: checks.opcUseCases.some((c) => c.v === v(opt)) },
               ]"
             >
               <input
                 type="checkbox"
-                ::value="opt"
-                :checked="checks.opcUseCases.some((c) => c.v === opt)"
+                ::value="v(opt)"
+                :checked="checks.opcUseCases.some((c) => c.v === v(opt))"
                 style="display: none"
-                @change="toggleCheck('opcUseCases', opt, $event)"
+                @change="toggleCheck('opcUseCases', v(opt), $event)"
               />
-              {{ opt }}
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.opcUseCases"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
@@ -213,12 +213,12 @@
       <!-- other branch -->
       <div v-if="identity === 'other'" class="beta__branch">
         <div class="beta__field">
-          <label>请简单描述您的身份/职业 <span class="beta__req">*</span></label>
-          <input v-model="form.fOtherDesc" type="text" placeholder="如：自由职业者、研究者等" />
+          <label>{{ t('lbl_other_desc') }} <span class="beta__req">*</span></label>
+          <input v-model="form.fOtherDesc" type="text" :placeholder="t('ph_other_desc')" />
         </div>
         <div class="beta__field">
           <label
-            >您目前主要使用 AI 产品解决什么问题？ <span class="beta__req">*</span>（多选）</label
+            >{{ t('lbl_other_use_case') }} <span class="beta__req">*</span>{{ t('multiselect_suffix') }}</label
           >
           <div class="beta__checkbox-group">
             <label
@@ -226,22 +226,22 @@
               :key="opt"
               :class="[
                 'beta__checkbox-item',
-                { selected: checks.otherUseCases.some((c) => c.v === opt) },
+                { selected: checks.otherUseCases.some((c) => c.v === v(opt)) },
               ]"
             >
               <input
                 type="checkbox"
-                ::value="opt"
-                :checked="checks.otherUseCases.some((c) => c.v === opt)"
+                ::value="v(opt)"
+                :checked="checks.otherUseCases.some((c) => c.v === v(opt))"
                 style="display: none"
-                @change="toggleCheck('otherUseCases', opt, $event)"
+                @change="toggleCheck('otherUseCases', v(opt), $event)"
               />
-              {{ opt }}
+              {{ t(opt) }}
               <input
-                v-if="opt === '其他'"
+                v-if="opt === 'opt_other'"
                 v-model="other.otherUseCases"
                 type="text"
-                placeholder="请输入"
+                :placeholder="t('ph_enter')"
                 class="beta__other-text"
               />
             </label>
@@ -249,17 +249,17 @@
         </div>
       </div>
 
-      <div class="beta__step-title">申请理由</div>
+      <div class="beta__step-title">{{ t('step_reason') }}</div>
       <div class="beta__field">
         <textarea
           v-model="form.fReason"
           rows="3"
-          placeholder="选填，告诉我们您为什么想加入内测"
+          :placeholder="t('ph_reason')"
         ></textarea>
       </div>
 
       <AGButton block size="lg" :disabled="submitting" class="beta__submit" @click="submitForm">
-        {{ submitting ? '提交中...' : '提交申请' }}
+        {{ submitting ? t('submitting') : t('submit') }}
       </AGButton>
     </AGCard>
 
@@ -268,9 +268,9 @@
     <div v-if="success" class="beta__success-overlay">
       <div class="beta__success-box">
         <div class="check">✓</div>
-        <h2>申请已提交</h2>
-        <p>请等待审核，我们将在 1-3 个工作日内通过邮箱回复您</p>
-        <p class="countdown">{{ countdown }} 秒后跳转到主页...</p>
+        <h2>{{ t('success_title') }}</h2>
+        <p>{{ t('success_body') }}</p>
+        <p class="countdown">{{ t('countdown_suffix', { n: countdown }) }}</p>
       </div>
     </div>
   </div>
@@ -278,51 +278,55 @@
 
 <script setup>
 import { reactive, ref, watch, onMounted } from 'vue'
+
+const G = globalThis
 import AGCard from '@/components/ui/AGCard.vue'
 const logoSrc = '/static/logo-64.png'
 import AGButton from '@/components/ui/AGButton.vue'
 
 const _FORM_KEY = 'beta_apply_form'
 
+// 选项一律存 i18n key：显示走当前语言包，提交值仍取 zh 规范文本（后端契约不变）
 const identities = [
-  { type: 'student', icon: '🎓', title: '学生', desc: '在校学生用户' },
-  { type: 'enterprise', icon: '🏢', title: '企业', desc: '企业团队用户' },
-  { type: 'opc', icon: '💼', title: 'OPC', desc: '独立开发者/创作者' },
-  { type: 'other', icon: '📋', title: '其他', desc: '其他身份' },
+  { type: 'student', icon: '🎓', key: 'id_student', descKey: 'id_student_desc' },
+  { type: 'enterprise', icon: '🏢', key: 'id_enterprise', descKey: 'id_enterprise_desc' },
+  { type: 'opc', icon: '💼', key: 'id_opc', descKey: 'id_opc_desc' },
+  { type: 'other', icon: '📋', key: 'id_other', descKey: 'id_other_desc' },
 ]
-const educationOpts = ['本科生', '硕士研究生', '博士研究生', '其他']
-const majorOpts = [
-  '计算机/软件工程',
-  '人工智能',
-  '数据科学',
-  '电子/自动化',
-  '其他理工科',
-  '经管/商科',
-  '其他',
-]
-const companySizeOpts = ['1-10人', '11-50人', '51-200人', '201-1000人', '1000人以上']
-const roleOpts = ['开发人员', '技术负责人/架构师', '产品经理', '项目经理', '管理人员', '其他']
+const educationOpts = ['edu_bachelor', 'edu_master', 'edu_phd', 'opt_other']
+const majorOpts = ['major_cs', 'major_ai', 'major_ds', 'major_ee', 'major_stem', 'major_business', 'opt_other']
+const companySizeOpts = ['size_1_10', 'size_11_50', 'size_51_200', 'size_201_1000', 'size_1000_plus']
+const roleOpts = ['role_dev', 'role_architect', 'role_pm', 'role_pjm', 'role_mgmt', 'opt_other']
 const entUseCaseOpts = [
-  '软件开发',
-  'AI Agent / Agent 开发',
-  '自动化办公',
-  '企业内部工具',
-  '数据分析',
-  '运维 / DevOps',
-  '其他',
+  'ent_uc_software',
+  'ent_uc_agent',
+  'ent_uc_office',
+  'ent_uc_internal',
+  'ent_uc_data',
+  'ent_uc_ops',
+  'opt_other',
 ]
-const occupationOpts = ['软件/IT', 'AI/Agent', '电商', '内容创作', 'SaaS', '咨询/服务', '其他']
+const occupationOpts = ['occ_software', 'occ_ai', 'occ_ecommerce', 'occ_content', 'occ_saas', 'occ_consulting', 'opt_other']
 const opcUseCaseOpts = [
-  '产品开发',
-  '编程开发',
-  'Agent 开发',
-  '自动化任务',
-  '内容生产',
-  '数据处理/分析',
-  '运营',
-  '其他',
+  'opc_uc_product',
+  'opc_uc_coding',
+  'opc_uc_agent',
+  'opc_uc_automation',
+  'opc_uc_content',
+  'opc_uc_data',
+  'opc_uc_ops',
+  'opt_other',
 ]
-const otherUseCaseOpts = ['学习', '工作', '编程', '创业', '内容创作', '数据分析', '自动化', '其他']
+const otherUseCaseOpts = [
+  'other_uc_study',
+  'other_uc_work',
+  'other_uc_coding',
+  'other_uc_startup',
+  'other_uc_content',
+  'other_uc_data',
+  'other_uc_automation',
+  'opt_other',
+]
 
 const form = reactive({
   fAccountType: 'gitcode',
@@ -333,6 +337,31 @@ const form = reactive({
   fOtherDesc: '',
 })
 const identity = ref('')
+
+// 语言包：zh 永远装载（提供提交用规范文本），当前语言用于显示
+const ready = ref(false)
+const pack = ref({})
+const zhPack = ref({})
+function t(key, vars) {
+  let out = pack.value[key] || zhPack.value[key] || key
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) out = out.split('{' + k + '}').join(String(v))
+  }
+  return out
+}
+function v(key) {
+  return zhPack.value[key] || key
+}
+async function loadPacks() {
+  const lang = G.localStorage.getItem('grapeLang') || 'zh'
+  const fetchPack = async (l) => {
+    const r = await fetch('/static/locales/' + l + '/beta_apply.json')
+    return r.ok ? await r.json() : {}
+  }
+  zhPack.value = await fetchPack('zh')
+  pack.value = lang === 'zh' ? zhPack.value : await fetchPack(lang)
+  ready.value = true
+}
 const radio = reactive({ education: '', major: '', companySize: '', role: '', occupation: '' })
 const other = reactive({
   education: '',
@@ -382,15 +411,15 @@ function collectFormData() {
     ro_occupation: other.occupation,
     c_entUseCases: checks.entUseCases.map((c) => ({
       v: c.v,
-      ...(c.v === '其他' ? { o: other.entUseCases } : {}),
+      ...(c.v === v('opt_other') ? { o: other.entUseCases } : {}),
     })),
     c_opcUseCases: checks.opcUseCases.map((c) => ({
       v: c.v,
-      ...(c.v === '其他' ? { o: other.opcUseCases } : {}),
+      ...(c.v === v('opt_other') ? { o: other.opcUseCases } : {}),
     })),
     c_otherUseCases: checks.otherUseCases.map((c) => ({
       v: c.v,
-      ...(c.v === '其他' ? { o: other.otherUseCases } : {}),
+      ...(c.v === v('opt_other') ? { o: other.otherUseCases } : {}),
     })),
   }
 }
@@ -404,7 +433,8 @@ function saveForm() {
 watch([form, identity, radio, other, checks], () => saveForm(), { deep: true })
 
 // Issue #205 parity: restore from sessionStorage, then URL params override platform/username
-onMounted(() => {
+onMounted(async () => {
+  await loadPacks()
   try {
     const raw = sessionStorage.getItem(_FORM_KEY)
     if (raw) {
@@ -427,7 +457,7 @@ onMounted(() => {
       for (const dn of ['entUseCases', 'opcUseCases', 'otherUseCases']) {
         if (Array.isArray(data['c_' + dn])) {
           checks[dn] = data['c_' + dn]
-          const oth = data['c_' + dn].find((c) => c.v === '其他')
+          const oth = data['c_' + dn].find((c) => c.v === v('opt_other'))
           if (oth && oth.o) other[dn] = oth.o
         }
       }
@@ -443,7 +473,7 @@ onMounted(() => {
 })
 
 function otherOr(value, otherValue, fallback) {
-  if (value === '其他') return otherValue.trim() ? otherValue.trim() : fallback
+  if (value === v('opt_other')) return otherValue.trim() ? otherValue.trim() : fallback
   return value
 }
 
@@ -458,7 +488,7 @@ function buildSurveyData() {
     const size = radio.companySize
     const role = otherOr(radio.role, other.role, '')
     const cases = checks.entUseCases.map((c) =>
-      c.v === '其他' ? (other.entUseCases.trim() ? other.entUseCases.trim() : '其他') : c.v
+      c.v === '其他' ? (other.entUseCases.trim() ? other.entUseCases.trim() : v('opt_other')) : c.v
     )
     if (!size || !radio.role || !role || cases.length === 0) return null
     return { identity: 'enterprise', companySize: size, role, useCases: cases }
@@ -466,7 +496,7 @@ function buildSurveyData() {
   if (identity.value === 'opc') {
     const occ = otherOr(radio.occupation, other.occupation, '')
     const cases = checks.opcUseCases.map((c) =>
-      c.v === '其他' ? (other.opcUseCases.trim() ? other.opcUseCases.trim() : '其他') : c.v
+      c.v === '其他' ? (other.opcUseCases.trim() ? other.opcUseCases.trim() : v('opt_other')) : c.v
     )
     if (!radio.occupation || !occ || cases.length === 0) return null
     return { identity: 'opc', occupation: occ, useCases: cases }
@@ -474,7 +504,7 @@ function buildSurveyData() {
   if (identity.value === 'other') {
     const desc = form.fOtherDesc.trim()
     const cases = checks.otherUseCases.map((c) =>
-      c.v === '其他' ? (other.otherUseCases.trim() ? other.otherUseCases.trim() : '其他') : c.v
+      c.v === '其他' ? (other.otherUseCases.trim() ? other.otherUseCases.trim() : v('opt_other')) : c.v
     )
     if (!desc || cases.length === 0) return null
     return { identity: 'other', description: desc, useCases: cases }
@@ -485,12 +515,12 @@ function buildSurveyData() {
 function submitForm() {
   const accountName = form.fAccountName.trim()
   const email = form.fEmail.trim()
-  if (!accountName) return showToast('请填写用户名')
-  if (!email) return showToast('请填写邮箱')
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showToast('邮箱格式不正确')
-  if (!identity.value) return showToast('请选择身份')
+  if (!accountName) return showToast(t('err_username'))
+  if (!email) return showToast(t('err_email'))
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showToast(t('err_email_format'))
+  if (!identity.value) return showToast(t('err_identity'))
   const surveyData = buildSurveyData()
-  if (!surveyData) return showToast('请完成身份相关的必填问题')
+  if (!surveyData) return showToast(t('err_required'))
 
   submitting.value = true
   const payload = {
@@ -530,12 +560,12 @@ function submitForm() {
         showToast(d.detail.message)
         submitting.value = false
       } else {
-        showToast('提交失败，请稍后重试')
+        showToast(t('err_submit'))
         submitting.value = false
       }
     })
     .catch((e) => {
-      showToast('网络错误: ' + e)
+      showToast(t('err_network', { msg: e }))
       submitting.value = false
     })
 }

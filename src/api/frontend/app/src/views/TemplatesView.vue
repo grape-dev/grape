@@ -143,7 +143,7 @@
                 }}</span>
               </div>
               <div style="font-size: 12px; color: var(--t3); margin-top: 4px">
-                {{ tOr('templates.forking', 'Fork 中...') }}
+                {{ t('templates.forking') }}
               </div>
             </div>
           </div>
@@ -175,10 +175,10 @@
               </div>
               <div class="tv-modal-meta">
                 <span v-if="modal.t.source === 'local'" class="tv-badge tv-badge-local"
-                  >本地模板</span
+                  >{{ t('templates.local_badge') }}</span
                 >
                 <span v-else-if="modal.t.source === 'git'" class="tv-badge tv-badge-git"
-                  >云端项目</span
+                  >{{ t('templates.cloud_badge') }}</span
                 >
                 <span
                   v-if="modal.t.stats && modal.t.stats.show && modal.t.stats.stars"
@@ -193,7 +193,7 @@
                   :href="tplUrl(modal.t)"
                   target="_blank"
                   class="tv-external"
-                  >查看原项目 ↗</a
+                  >{{ t('templates.view_origin') }}</a
                 >
               </div>
             </div>
@@ -208,19 +208,19 @@
               <span style="font-size: 48px; opacity: 0.3">{{ modal.t.icon || '📦' }}</span>
             </div>
           </div>
-          <div class="tv-section-title">📝 模板描述</div>
+          <div class="tv-section-title">{{ t('templates.section_desc') }}</div>
           <p class="tv-desc">{{ modal.t.description || '' }}</p>
           <template v-if="modal.highlights.length">
-            <div class="tv-section-title">✨ 模板亮点</div>
+            <div class="tv-section-title">{{ t('templates.section_highlights') }}</div>
             <div v-for="h in modal.highlights" :key="h" class="tv-highlight">
               <span class="tv-hi-dot">◆</span><span>{{ h }}</span>
             </div>
           </template>
           <div class="tv-readme-wrap">
-            <div class="tv-section-title">📖 项目文档</div>
-            <div class="tv-readme">{{ modal.readme || '加载中...' }}</div>
+            <div class="tv-section-title">{{ t('templates.section_readme') }}</div>
+            <div class="tv-readme">{{ modal.readme || t('templates.readme_loading') }}</div>
           </div>
-          <div class="tv-section-title">💡 流水线预览（{{ modal.t.scene_id || 'default' }}）</div>
+          <div class="tv-section-title">{{ t('templates.section_pipeline', { id: modal.t.scene_id || 'default' }) }}</div>
           <div class="tv-stages">
             <template v-for="(s, i) in pipelineStages(modal.t)" :key="i">
               <span class="tv-stage"
@@ -251,11 +251,11 @@
           </div>
           <div class="tv-foot-right">
             <button v-if="tplUrl(modal.t)" class="bt bt-o bt-s" @click="openUrl(tplUrl(modal.t))">
-              查看源代码 ↗
+              {{ t('templates.view_source') }}
             </button>
             <button class="bt bt-o bt-s" @click="closeModal">{{ t('templates.cancel') }}</button>
             <button v-if="modal.t.source === 'git'" class="bt bt-o bt-s" @click="forkOne">
-              {{ tOr('templates.fork_one_click', '一键 Fork') }}
+              {{ t('templates.fork_one_click') }}
             </button>
             <button
               class="bt bt-p bt-s tv-create-btn"
@@ -419,83 +419,70 @@ function fmtStars(n) {
 
 // ── pipeline stages / tag highlights / local previews (data copied verbatim from legacy) ──
 const PIPELINE_STAGES = {
-  default: ['需求分析', 'Issue运营', '编码实现', 'PR审查', '云部署'],
-  'hello-demo': ['需求分析', 'Issue分类', '编码实现', 'PR审查', '云部署'],
-  'cloud-native': ['需求分析', 'Issue运营', '编码实现', 'PR审查', '云部署'],
-  iac: ['IaC需求', 'IaC Issue', 'IaC编码', 'IaC审查', 'IaC部署'],
-  'agent-dev': ['需求分析', 'Issue运营', '编码实现', 'PR审查', '云部署'],
-  'skill-dev': ['需求分析', 'Skill Issue', 'Skill创建', 'Skill测试', 'Skill发布'],
-  'api-skill-dev': ['需求分析', 'Skill Issue', 'API Skill创建', 'API Skill测试', 'Skill发布'],
-  'blog-publish': ['博客需求', 'Issue运营', '博客生成', '博客发布'],
-  harmony: ['需求分析', 'Issue运营', '编码实现', 'PR审查', '云部署'],
+  default: ['require', 'issue_ops', 'coding', 'pr_review', 'deploy'],
+  'hello-demo': ['require', 'issue_classify', 'coding', 'pr_review', 'deploy'],
+  'cloud-native': ['require', 'issue_ops', 'coding', 'pr_review', 'deploy'],
+  iac: ['iac_require', 'iac_issue', 'iac_coding', 'iac_review', 'iac_deploy'],
+  'agent-dev': ['require', 'issue_ops', 'coding', 'pr_review', 'deploy'],
+  'skill-dev': ['require', 'skill_issue', 'skill_create', 'skill_test', 'skill_publish'],
+  'api-skill-dev': ['require', 'skill_issue', 'api_skill_create', 'api_skill_test', 'skill_publish'],
+  'blog-publish': ['blog_require', 'issue_ops', 'blog_generate', 'blog_publish'],
+  harmony: ['require', 'issue_ops', 'coding', 'pr_review', 'deploy'],
 }
 function pipelineStages(x) {
-  return PIPELINE_STAGES[x.scene_id || 'default'] || PIPELINE_STAGES.default
+  const keys = PIPELINE_STAGES[x.scene_id || 'default'] || PIPELINE_STAGES.default
+  return keys.map((k) => G.I18N.t('templates.stage.' + k))
 }
 
 const TAG_HIGHLIGHTS = {
-  python: 'Python 编程实践',
-  flask: 'Flask Web 框架',
-  fastapi: 'FastAPI 现代 API',
-  web: 'Web 应用开发',
-  api: 'RESTful API 设计',
-  cli: '命令行工具开发',
-  game: '游戏逻辑与渲染',
-  pygame: 'Pygame 游戏引擎',
-  starter: '适合新手快速入门',
-  test: '单元测试实践',
-  html: '前端页面开发',
-  css: 'CSS 样式设计',
-  js: 'JavaScript 交互',
-  frontend: '前端三件套',
-  blog: '博客系统搭建',
-  docker: '容器化部署',
-  k8s: 'Kubernetes 编排',
-  terraform: '基础设施即代码',
-  ai: 'AI 能力集成',
-  agent: 'Agent 自动化',
-  automation: '自动化工作流',
-  skill: '华为云 Skill 开发',
-  harmonyos: '鸿蒙应用开发',
-  arkts: 'ArkTS 语言',
-  ecommerce: '电商应用',
-  mcp: 'MCP 协议集成',
-  vue: 'Vue.js 框架',
-  golang: 'Go 语言开发',
-  gateway: 'API 网关',
-  iac: 'IaC 基础设施',
-  spider: '爬虫与数据采集',
-  crawler: '数据抓取',
-  markdown: 'Markdown 工具',
-  tool: '实用工具',
-  popular: '社区热门项目',
-  content: '内容创作',
-  video: '视频生成',
-  'multi-agent': '多 Agent 协作',
-  'mood-tracker': '心情追踪器',
-  snake: '经典贪吃蛇',
-  distributed: '分布式架构',
-  node: 'Node.js 开发',
-  fullstack: '全栈开发',
-  platform: '平台型项目',
-  mobile: '移动应用',
-  'self-hosted': '自托管部署',
-  monitoring: '监控与告警',
-  security: '安全合规',
-  devops: 'DevOps 全流程',
-  helm: 'Helm 包管理',
-  cncf: 'CNCF 生态项目',
+  python: 'tag.python',
+  flask: 'tag.flask',
+  fastapi: 'tag.fastapi',
+  web: 'tag.web',
+  api: 'tag.api',
+  cli: 'tag.cli',
+  game: 'tag.game',
+  pygame: 'tag.pygame',
+  starter: 'tag.starter',
+  test: 'tag.test',
+  html: 'tag.html',
+  css: 'tag.css',
+  js: 'tag.js',
+  frontend: 'tag.frontend',
+  blog: 'tag.blog',
+  docker: 'tag.docker',
+  k8s: 'tag.k8s',
+  terraform: 'tag.terraform',
+  ai: 'tag.ai',
+  agent: 'tag.agent',
+  automation: 'tag.automation',
+  skill: 'tag.skill',
+  harmonyos: 'tag.harmonyos',
+  arkts: 'tag.arkts',
+  ecommerce: 'tag.ecommerce',
+  mcp: 'tag.mcp',
+  vue: 'tag.vue',
+  golang: 'tag.golang',
+  gateway: 'tag.gateway',
+  iac: 'tag.iac',
+  spider: 'tag.spider',
+  crawler: 'tag.crawler',
+  markdown: 'tag.markdown',
+  tool: 'tag.tool',
+  helm: 'tag.helm',
+  cncf: 'tag.cncf',
 }
 function highlightsOf(x) {
   const out = []
   ;(x.tags || []).forEach((tg) => {
-    const desc = TAG_HIGHLIGHTS[tg.toLowerCase()]
+    const key = TAG_HIGHLIGHTS[tg.toLowerCase()]
+    const desc = key ? G.I18N.t(key) : ''
     if (desc && out.indexOf(desc) < 0) out.push(desc)
   })
   const st = x.stats || {}
   if (st.language && !out.some((h) => h.indexOf(st.language) >= 0)) {
-    const ld = TAG_HIGHLIGHTS[(st.language || '').toLowerCase()]
-    if (ld) out.push(ld)
+    const lkey = TAG_HIGHLIGHTS[(st.language || '').toLowerCase()]
+    if (lkey) out.push(G.I18N.t(lkey))
   }
   return out
 }

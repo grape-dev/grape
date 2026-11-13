@@ -620,10 +620,16 @@ def attach_frontend(app: FastAPI) -> None:
     if os.path.isdir(_VUE_DIST_DIR):
         class _VueSPAStaticFiles(StaticFiles):
             async def get_response(self, path, scope):
+                # SPA 兜底只兜「路径不存在」：其余异常（权限/IO/磁盘错）必须冒泡，
+                # 否则真实 5xx 会被伪装成 200 的 index.html，故障定位被掩盖。
+                from starlette.exceptions import HTTPException as _HTTPExc
+
                 try:
                     return await super().get_response(path, scope)
-                except Exception:
-                    return await super().get_response("index.html", scope)
+                except _HTTPExc as e:
+                    if e.status_code == 404:
+                        return await super().get_response("index.html", scope)
+                    raise
         app.mount("/static-vue", _VueSPAStaticFiles(directory=_VUE_DIST_DIR, html=True), name="static_vue")
 
     if os.path.isdir(STATIC_DIR):
