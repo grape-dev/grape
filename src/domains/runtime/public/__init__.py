@@ -107,6 +107,21 @@ def append_task_message(task_id: str, actor: str, content: str,
             return {"ok": True, "deduped": False, "id": getattr(c, "lastrowid", None), "seq": seq}
 
 
+def aggregate_counts() -> dict[str, dict[str, int]]:
+    """events / agent_tasks / agent_runtimes 按 status 的计数（供 insight 看板）。"""
+    out: dict[str, dict[str, int]] = {}
+    with db_registry.cursor("runtime") as c:
+        for key, table in (("events_by_status", "events"),
+                           ("tasks_by_status", "agent_tasks"),
+                           ("runtimes_by_status", "agent_runtimes")):
+            try:
+                c.execute(f"SELECT status, COUNT(*) FROM {table} GROUP BY status")
+                out[key] = {(r[0] or ""): r[1] for r in c.fetchall()}
+            except Exception:  # noqa: BLE001
+                out[key] = {}
+    return out
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -118,4 +133,4 @@ def health() -> dict[str, Any]:
 
 
 __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
-           "task_stats", "append_task_message", "health"]
+           "task_stats", "append_task_message", "aggregate_counts", "health"]

@@ -102,3 +102,54 @@ def test_list_runtimes_rows_scope_global(monkeypatch):
     rt.list_runtimes_rows("global", "u1")
     sql, args = cur.executed[0]
     assert "WHERE scope=%s" in sql and args == ("global", "u1")
+
+def test_insight_local_table_and_lock_switch(monkeypatch):
+    from src.domains.contracts.local import insight_local as mod
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: True, raising=True)
+    assert mod._t("obs_log") == "obs_log"
+    svc = mod.InsightServiceLocal()
+    own = db_registry.domain_lock("insight")
+    assert svc._lock is own
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: False, raising=True)
+    assert mod._t("obs_log") == mod.t_insight("obs_log")
+    import src.kernel.session_manager as sm
+    assert svc._lock is sm.db_lock
+
+
+def test_mgmt_local_table_and_lock_switch(monkeypatch):
+    from src.domains.contracts.local import mgmt_local as mod
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: True, raising=True)
+    assert mod._t("managed_repos") == "managed_repos"
+    svc = mod.MgmtServiceLocal()
+    own = db_registry.domain_lock("mgmt")
+    assert svc._lock is own
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: False, raising=True)
+    assert mod._t("managed_repos") == mod.t_mgmt("managed_repos")
+    import src.kernel.session_manager as sm
+    assert svc._lock is sm.db_lock
+
+
+def test_compat_cursor_translates_qmark(monkeypatch):
+    """自有 DSN 连接必须走方言翻译：? → %s 且字面 % 被转义。"""
+    from src.kernel import db_registry as r
+
+    class Raw:
+        def __init__(self):
+            self.sql = None
+            self.args = None
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+            self.args = params
+            return 0
+
+    raw = Raw()
+    cur = r._CompatCursor(raw)
+    cur.execute("SELECT * FROM t WHERE a=? AND b LIKE 'x:%'", ("v",))
+    assert "%s" in raw.sql and "?" not in raw.sql.split("LIKE")[0]
+    assert raw.args == ("v",)
+

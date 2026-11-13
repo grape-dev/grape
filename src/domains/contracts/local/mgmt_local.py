@@ -10,8 +10,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.kernel import db_registry, session_manager
 from src.kernel.db import t_mgmt
-from src.kernel import session_manager
+
+_DOMAIN = "mgmt"
+
+
+def _t(name: str) -> str:
+    """表名：自有 DSN → 裸名；共享进程库 → 跨 schema 前缀（与 RuntimeServiceLocal 同口径）。"""
+    return name if db_registry.uses_own_dsn(_DOMAIN) else t_mgmt(name)
+from src.kernel import db_registry, session_manager
 from src.kernel.config import log
 from src.domains.contracts.mgmt_service import MgmtService
 
@@ -80,18 +88,22 @@ class MgmtServiceLocal(MgmtService):
     """同实例模式：直接查 grape_mgmt schema（SQLite 用 mgmt_ 前缀）。"""
 
     @property
+    def _own_dsn(self) -> bool:
+        return db_registry.uses_own_dsn(_DOMAIN)
+
+    @property
     def _db(self):
-        return session_manager.db
+        return db_registry.domain_db(_DOMAIN) or session_manager.db
 
     @property
     def _lock(self):
-        return session_manager.db_lock
+        return db_registry.domain_lock(_DOMAIN) if self._own_dsn else session_manager.db_lock
 
     def _managed_repo_row(self, c, repo_key: str) -> dict:
         """整行读出为 dict（SELECT *：列名随卡/库版本而变——旧库缺派生列时
         调用方按 .get() 落空，不做动态列名 SQL 拼接）。"""
         c.execute(
-            f"SELECT * FROM {t_mgmt('managed_repos')} WHERE repo_key=?",
+            f"SELECT * FROM {_t('managed_repos')} WHERE repo_key=?",
             (repo_key,),
         )
         row = c.fetchone()
@@ -136,7 +148,7 @@ class MgmtServiceLocal(MgmtService):
             c = self._db.cursor()
             c.execute(
                 f"SELECT id, repo_key, agent_type, skill, status "
-                f"FROM {t_mgmt('devops_agent_session')} "
+                f"FROM {_t('devops_agent_session')} "
                 f"WHERE repo_key=? AND agent_type=?",
                 (repo_key, agent_type),
             )
@@ -148,7 +160,7 @@ class MgmtServiceLocal(MgmtService):
             # 补全 runtime_id：从 agent_type_runtime_pool 查询绑定的引擎
             try:
                 c.execute(
-                    f"SELECT runtime_id FROM {t_mgmt('agent_type_runtime_pool')} "
+                    f"SELECT runtime_id FROM {_t('agent_type_runtime_pool')} "
                     f"WHERE agent_type=? AND enabled=1 "
                     f"ORDER BY priority ASC, weight DESC LIMIT 1",
                     (agent_type,),
@@ -166,7 +178,7 @@ class MgmtServiceLocal(MgmtService):
             c = self._db.cursor()
             c.execute(
                 f"SELECT scene_id, nodes_json, name "
-                f"FROM {t_mgmt('devops_pipeline_scene')} WHERE repo_key=? "
+                f"FROM {_t('devops_pipeline_scene')} WHERE repo_key=? "
                 f"AND is_active=1",
                 (repo_key,),
             )
@@ -185,7 +197,7 @@ class MgmtServiceLocal(MgmtService):
             c = self._db.cursor()
             # 读场景 nodes_json 获取 agent_type 列表
             c.execute(
-                f"SELECT nodes_json FROM {t_mgmt('devops_pipeline_scene')} "
+                f"SELECT nodes_json FROM {_t('devops_pipeline_scene')} "
                 f"WHERE scene_id=?",
                 (scene_id,),
             )
@@ -207,7 +219,7 @@ class MgmtServiceLocal(MgmtService):
             # 查池绑定
             placeholders = ",".join("?" * len(agent_types))
             c.execute(
-                f"SELECT DISTINCT runtime_id FROM {t_mgmt('agent_type_runtime_pool')} "
+                f"SELECT DISTINCT runtime_id FROM {_t('agent_type_runtime_pool')} "
                 f"WHERE agent_type IN ({placeholders}) AND enabled=1",
                 list(agent_types),
             )
@@ -219,7 +231,7 @@ class MgmtServiceLocal(MgmtService):
             c = self._db.cursor()
             c.execute(
                 f"SELECT id, session_key, repo_key, agent_type, user_id, expires_at "
-                f"FROM {t_mgmt('session_api_tokens')} "
+                f"FROM {_t('session_api_tokens')} "
                 f"WHERE token_sha256=?",
                 (token_hash,),
             )
@@ -274,12 +286,12 @@ class MgmtServiceLocal(MgmtService):
             if not skill_id_int:
                 # 按名称查
                 c.execute(
-                    f"SELECT * FROM {t_mgmt('skill')} WHERE skill_name=? LIMIT 1",
+                    f"SELECT * FROM {_t('skill')} WHERE skill_name=? LIMIT 1",
                     (skill_id,),
                 )
             else:
                 c.execute(
-                    f"SELECT * FROM {t_mgmt('skill')} WHERE id=? LIMIT 1",
+                    f"SELECT * FROM {_t('skill')} WHERE id=? LIMIT 1",
                     (skill_id_int,),
                 )
             row = c.fetchone()

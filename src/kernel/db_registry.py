@@ -73,12 +73,75 @@ def parse_dsn(dsn: str) -> dict:
     }
 
 
+class _CompatCursor:
+    """把 sqlite 方言 SQL（? / INSERT OR IGNORE / PRAGMA）翻译成 MySQL 再执行。"""
+
+    def __init__(self, raw):
+        self._raw = raw
+        self._pycur = None
+
+    def execute(self, sql: str, params=None):
+        from src.kernel.mysql_compat import translate_sql
+
+        sql2 = translate_sql(sql) or sql
+        if params is not None and not isinstance(params, (tuple, list, dict)):
+            params = (params,)
+        if params is None:
+            return self._raw.execute(sql2)
+        return self._raw.execute(sql2, params)
+
+    def executemany(self, sql: str, seq):
+        from src.kernel.mysql_compat import translate_sql
+
+        return self._raw.executemany(translate_sql(sql) or sql, seq)
+
+    def fetchall(self):
+        return self._raw.fetchall()
+
+    def fetchone(self):
+        return self._raw.fetchone()
+
+    def fetchmany(self, n=1):
+        return self._raw.fetchmany(n)
+
+    def close(self):
+        return self._raw.close()
+
+    def __getattr__(self, item):
+        return getattr(self._raw, item)
+
+
+class _CompatConn:
+    """包装 pymysql 连接，返回带方言翻译的游标。"""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def cursor(self, *a, **kw):
+        return _CompatCursor(self._raw.cursor(*a, **kw))
+
+    def commit(self):
+        return self._raw.commit()
+
+    def rollback(self):
+        return self._raw.rollback()
+
+    def close(self):
+        return self._raw.close()
+
+    def ping(self, *a, **kw):
+        return self._raw.ping(*a, **kw)
+
+    def __getattr__(self, item):
+        return getattr(self._raw, item)
+
+
 def _new_conn(domain: str):
     import pymysql
 
     cfg = parse_dsn(dsn_of(domain))
     conn = pymysql.connect(autocommit=True, connect_timeout=8, **cfg)
-    return conn
+    return _CompatConn(conn)
 
 
 def domain_db(domain: str):
