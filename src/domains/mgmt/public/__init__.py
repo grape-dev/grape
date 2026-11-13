@@ -143,6 +143,19 @@ def get_autopilot_task_brief(task_id: int) -> tuple | None:
     return tuple(row) if row else None
 
 
+def mark_default_featured(names: list[str]) -> int:
+    """把指定 official 场景标记为精选（幂等：已精选的行重复更新无副作用）。"""
+    names = [n for n in (names or []) if n]
+    if not names:
+        return 0
+    ph = ", ".join(["%s"] * len(names))
+    sql = (f"UPDATE scene_market SET is_featured=1, updated_at=NOW() "
+           f"WHERE name IN ({ph}) AND source='official' AND is_active=1")
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, tuple(names))
+        return int(c.rowcount or 0)
+
+
 def get_official_scene_id(scene_name: str) -> Any:
     """按场景名取 official 模板的 id（无则 None）。"""
     row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
@@ -248,6 +261,6 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
-           "list_baseline_knowledge_files", "list_knowledge_obs_keys",
+           "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            "health"]

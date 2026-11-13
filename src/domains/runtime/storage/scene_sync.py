@@ -398,6 +398,19 @@ def _init_featured_scenes_if_empty():
     独立于远端同步——即使没有 token 无法拉远端场景包，本地已有 official 场景也需要精选标记。
     """
     default_featured = ("default", "cloud-native", "iac")
+    from src.kernel.domain_read import mgmt_lib as _mg_lib_feat
+    _mg_feat = _mg_lib_feat()
+    if _mg_feat is not None:
+        _featured = _mg_feat.count_official_scenes(featured_only=True)
+        if _featured == 0:
+            from src.kernel import cross_write as _xw_feat
+            _xw_feat.submit("mgmt", "scene_featured_init", "scene-featured-init:v1",
+                            {"names": list(default_featured)},
+                            lambda: _mg_feat.mark_default_featured(list(default_featured)))
+            log.info(f"Scene sync: initialized featured scenes (lib): {', '.join(default_featured)}")
+        else:
+            log.info(f"Scene sync: {_featured} featured scenes already exist, skip init")
+        return
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
