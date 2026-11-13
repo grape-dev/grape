@@ -16,9 +16,10 @@ const path = require('path');
 const fs = require('fs');
 
 const root = path.resolve(__dirname, '../..');
-const DL = require(path.join(root, 'src/api/static/js/deeplink.js'));
-const appJs = fs.readFileSync(path.join(root, 'src/api/static/js/app.js'), 'utf8');
-const indexHtml = fs.readFileSync(path.join(root, 'src/api/static/index.html'), 'utf8');
+const SHELL = path.join(root, 'src/api/frontend/shell');
+const DL = require(path.join(SHELL, 'js/deeplink.js'));
+const appJs = fs.readFileSync(path.join(SHELL, 'js/app.js'), 'utf8');
+const indexHtml = fs.readFileSync(path.join(SHELL, 'index.html'), 'utf8');
 
 let pass = 0;
 function ok(cond, msg) {
@@ -65,7 +66,8 @@ ok(dlIdx > 0, 'index.html 引用了 deeplink.js?v=1');
 // 版本号只要求「不低于引入本特性时的 258」：合并到其它周线时会被继续 bump（如 260）
 ok(_appVer && Number(_appVer[1]) >= 258, 'app.js 版本串不低于 258（本特性引入时的基线）');
 ok(dlIdx < appIdx, 'deeplink.js 必须先于 app.js 执行（defer 按文档顺序）');
-ok(indexHtml.indexOf("__I18N_CACHE_VER__='43'") > 0, 'i18n 缓存版本已 bump（新增文案）');
+const _i18nVer = /__I18N_CACHE_VER__='(\d+)'/.exec(indexHtml);
+ok(_i18nVer && Number(_i18nVer[1]) >= 43, 'i18n 缓存版本已 bump（新增文案，不低于 43）');
 
 // 5. app.js 接线（结构断言：防回退成「只认 hash、不认仓库」）
 ok(appJs.indexOf('function _bootRestore()') > 0, 'app.js 有 _bootRestore');
@@ -78,19 +80,20 @@ ok(appJs.indexOf("API.get('/repos/member')") > 0, '深链仓库以 /repos/member
 ok(appJs.indexOf("window.history.replaceState(window.history.state, '', target +") > 0,
    '路径同步用 replaceState（不新增历史条目）');
 
-// 5b. 仓库大堂进入项目（repos.js selectRepo）也要把路径写上，否则地址栏永远是 /
-const reposJs = fs.readFileSync(path.join(root, 'src/api/static/js/pages/repos.js'), 'utf8');
-ok(appJs.indexOf('syncAppPath: _syncAppPath') > 0, 'app 导出 syncAppPath 供 repos.js 调用');
-ok(reposJs.indexOf('window.app.syncAppPath(owner, name)') > 0, 'selectRepo 进入项目时同步深链路径');
+// 5b. 仓库大堂进入项目（Vue 侧 window.selectRepo）也要把路径写上，否则地址栏永远是 /
+const reposEntry = fs.readFileSync(
+  path.join(root, 'src/api/frontend/app/src/views/entries/repos-view.js'), 'utf8');
+ok(appJs.indexOf('syncAppPath: _syncAppPath') > 0, 'app 导出 syncAppPath 供仓库大堂调用');
+ok(reposEntry.indexOf('window.app.syncAppPath(owner, name)') > 0, 'selectRepo 进入项目时同步深链路径');
 {
-  const m = /pages\/repos\.js\?v=(\d+)/.exec(indexHtml);
-  ok(m && Number(m[1]) >= 67, 'repos.js 版本串已 bump（改过内容）');
+  const m = /static-vue\/viewjs\/repos-view\.js\?v=(\d+)/.exec(indexHtml);
+  ok(m && Number(m[1]) >= 52, 'repos-view.js 版本串已 bump（改过内容）');
 }
 
 // 6. 语言包键（zh/en 都要有，否则缺键返回键名且 || 兜底失效）
 ['zh', 'en'].forEach(function (lang) {
   const d = JSON.parse(fs.readFileSync(
-    path.join(root, 'src/api/static/locales', lang, 'app.json'), 'utf8'));
+    path.join(SHELL, 'locales', lang, 'app.json'), 'utf8'));
   ok(d.deeplink && typeof d.deeplink.repo_not_found === 'string' && d.deeplink.repo_not_found,
      lang + ' 有 app.deeplink.repo_not_found');
 });
