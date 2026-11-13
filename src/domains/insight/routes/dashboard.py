@@ -1286,18 +1286,22 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
 
     with db_lock:
         c = db.cursor()
+        _COLS_A = ("seq, event_type, issue_id, title, actor, agent_type, skill, status, "
+                   "duration, created_at, payload, repo_key")
         if _repo_keys:
-            c.execute(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
-                "FROM events WHERE repo_key IN (" + ",".join("?" * len(_repo_keys)) + ") AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at",
-                _repo_keys
-            )
+            _where_A = ("repo_key IN (" + ",".join("?" * len(_repo_keys)) +
+                        ") AND issue_id IS NOT NULL AND issue_id <> ''")
+            _params_A = tuple(_repo_keys)
         else:
-            c.execute(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
-                "FROM events WHERE issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at"
-            )
-        rows = c.fetchall()
+            _where_A = "issue_id IS NOT NULL AND issue_id <> ''"
+            _params_A = ()
+        from src.kernel.domain_read import runtime_lib as _rt_ev_a
+        _rt_a = _rt_ev_a()
+        if _rt_a is not None:
+            rows = _rt_a.query_events(_COLS_A, _where_A, _params_A, "created_at")
+        else:
+            c.execute(f"SELECT {_COLS_A} FROM events WHERE {_where_A} ORDER BY created_at", _params_A)
+            rows = c.fetchall()
 
         # 查 agent_tasks 建立 (issue_id, event_seq) → (task_id, runtime_id) 映射
         c.execute(
@@ -1412,12 +1416,20 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT seq, event_type, repo_key, issue_id, status, created_at, payload "
-                "FROM events WHERE event_type LIKE '%a2a%' OR event_type LIKE '%A2A%' "
-                "ORDER BY created_at DESC LIMIT 10"
-            )
-            for row in c.fetchall():
+            _COLS_B = "seq, event_type, repo_key, issue_id, status, created_at, payload"
+            _where_B = "(event_type LIKE ? OR event_type LIKE ?)"
+            _params_B = ("%a2a%", "%A2A%")
+            from src.kernel.domain_read import runtime_lib as _rt_ev_b
+            _rt_b = _rt_ev_b()
+            if _rt_b is not None:
+                _rows_B = _rt_b.query_events(_COLS_B, _where_B, _params_B, "created_at DESC", 10)
+            else:
+                c.execute(
+                    f"SELECT {_COLS_B} FROM events WHERE {_where_B} ORDER BY created_at DESC LIMIT 10",
+                    _params_B
+                )
+                _rows_B = c.fetchall()
+            for row in _rows_B:
                 result["recent_a2a"].append({
                     "seq": row[0], "event_type": row[1] or "", "repo_key": row[2] or "",
                     "issue_id": row[3] or "", "status": row[4] or "",
@@ -1549,15 +1561,24 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         # 每个 Agent 的最近 2 个事件（供 Dashboard Agent 卡片展示，替代假数据）
         agent_recent_events = {}
         try:
+            from src.kernel.domain_read import runtime_lib as _rt_ev_c
+            _rt_c = _rt_ev_c()
             for atype in ["vod", "issue", "coding", "qa", "sre"]:
-                c.execute(
-                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
-                    (_repo_keys + [atype])
-                )
+                if _rt_c is not None:
+                    _rows_C = _rt_c.query_events(
+                        "seq, event_type, agent_type, title, summary, status, created_at",
+                        f"repo_key IN ({_rk_placeholders}) AND agent_type=?",
+                        tuple(_repo_keys) + (atype,), "seq DESC", 2)
+                else:
+                    c.execute(
+                        "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
+                        (_repo_keys + [atype])
+                    )
+                    _rows_C = c.fetchall()
                 agent_recent_events[atype] = [
                     {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
                      "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
-                    for r in c.fetchall()
+                    for r in _rows_C
                 ]
         except Exception:
             pass

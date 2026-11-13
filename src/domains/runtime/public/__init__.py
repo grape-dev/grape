@@ -339,6 +339,15 @@ def count_events(where: str = "", params: tuple = ()) -> int:
     return int(rows[0][0]) if rows else 0
 
 
+def get_autopilot_execution(exec_id: int) -> tuple | None:
+    """取自动化执行行 (task_id, findings_json, result, status)；不存在返回 None。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT task_id, findings_json, result, status "
+                  "FROM autopilot_executions WHERE id=%s", (int(exec_id),))
+        row = c.fetchone()
+        return tuple(row) if row else None
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -353,4 +362,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
-           "list_engine_tags", "query_events", "count_events", "group_events", "health"]
+           "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "health"]

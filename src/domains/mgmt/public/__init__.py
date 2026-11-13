@@ -137,6 +137,12 @@ def list_knowledge_obs_keys(repo_key: str, scope: str, agent_type: str, issue_nu
     return [r[0] for r in rows if r[0]]
 
 
+def get_autopilot_task_brief(task_id: int) -> tuple | None:
+    """取自动化任务 (repo_key, name)；不存在返回 None（跨域 JOIN 拆解用）。"""
+    row = fetch_one("autopilot_tasks", ["repo_key", "name"], "id=%s", (int(task_id),))
+    return tuple(row) if row else None
+
+
 def get_official_scene_id(scene_name: str) -> Any:
     """按场景名取 official 模板的 id（无则 None）。"""
     row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
@@ -243,5 +249,5 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
            "list_baseline_knowledge_files", "list_knowledge_obs_keys",
-           "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks",
+           "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            "health"]
