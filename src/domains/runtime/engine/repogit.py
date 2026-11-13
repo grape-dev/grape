@@ -529,7 +529,13 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
     _git_marker = os.path.join(issue_dir, ".git")
     _has_git = os.path.isfile(_git_marker) or os.path.isdir(_git_marker)
-    if _has_git and is_git_agent(agent_type):
+    if os.path.isdir(issue_dir) and not _has_git and is_git_agent(agent_type):
+        # N1（QA 第2轮）：非 git 残留（无 .git，worktree add 失败/中断的残片）——
+        # 没有提交可丢，跳过归档守卫直接回收（口径与 guard_issue_workdir_removal
+        # 一致）。单条 info 日志保留删除可观测性（QA 第5/6轮 I-i）。
+        log.info(f"repogit: non-git leftover, remove directly "
+                 f"{repo_key} issue={issue_num} agent={agent_type} reason={reason or 'cleanup'}")
+    elif _has_git and is_git_agent(agent_type):
         try:
             from src.domains.runtime.engine.worktree_guard import archive_worktree_before_reset
             _res = archive_worktree_before_reset(
