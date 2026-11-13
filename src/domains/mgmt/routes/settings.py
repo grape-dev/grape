@@ -2214,12 +2214,17 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
                 rows = [(r[0], r[1], r[2], r[3], None, None)
                         for r in _rtl_et.list_engine_capabilities(rid)]
             else:
-                c.execute(
-                    "SELECT id, tag, priority, enabled, created_at, updated_at "
-                    "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
-                    (rid,)
-                )
-                rows = c.fetchall()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_440c87_f
+                _ru_lib_440c87 = _ru_lib_440c87_f(foreign_only=True)
+                if _ru_lib_440c87 is not None:
+                    rows = _ru_lib_440c87.read_all("engine_capabilities_440c87", (rid,))
+                else:
+                    c.execute(
+                        "SELECT id, tag, priority, enabled, created_at, updated_at "
+                        "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
+                        (rid,)
+                    )
+                    rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"tags": [
@@ -2393,9 +2398,14 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
                 c.execute("SELECT id, event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, "
                           "priority, enabled FROM event_action_filter ORDER BY event_type, action")
             else:
-                c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
-                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
-            rows = c.fetchall()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_3d22a6_f
+                _ru_lib_3d22a6 = _ru_lib_3d22a6_f(foreign_only=True)
+                if _ru_lib_3d22a6 is not None:
+                    rows = _ru_lib_3d22a6.read_all("event_action_filter_3d22a6", ())
+                else:
+                    c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
+                              "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+                rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"rules": [

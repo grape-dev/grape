@@ -109,10 +109,15 @@ def stable_seq(source: str, model_key: str, turn: int = 0) -> int:
 def _attribution(task_id: str, cursor) -> Dict[str, Any]:
     """从 agent_tasks 反查归属维度。查不到就返回空(不阻塞落库)。"""
     try:
-        cursor.execute(
-            "SELECT repo_key, agent_type, runtime_id, user_id, issue_id "
-            "FROM agent_tasks WHERE id=?", (task_id,))
-        row = cursor.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_29ab8e_f
+        _ru_lib_29ab8e = _ru_lib_29ab8e_f(foreign_only=True)
+        if _ru_lib_29ab8e is not None:
+            row = _ru_lib_29ab8e.read_one("agent_tasks_29ab8e", (task_id,))
+        else:
+            cursor.execute(
+                "SELECT repo_key, agent_type, runtime_id, user_id, issue_id "
+                "FROM agent_tasks WHERE id=?", (task_id,))
+            row = cursor.fetchone()
     except Exception as e:  # pragma: no cover - 表缺失/连接异常
         log.warning(f"llm_usage attribution lookup failed task={task_id}: {e}")
         return {}

@@ -212,10 +212,15 @@ def _resolve_session_bound_scene(scene_id: str, user: dict):
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1",
-                (_session_key,))
-            _row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_6e9804_f
+            _ru_lib_6e9804 = _ru_lib_6e9804_f(foreign_only=True)
+            if _ru_lib_6e9804 is not None:
+                _row = _ru_lib_6e9804.read_one("agent_tasks_6e9804", (_session_key,))
+            else:
+                c.execute(
+                    "SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1",
+                    (_session_key,))
+                _row = c.fetchone()
         if _row:
             _issue_id = _row[0] or ""
             # agent_tasks 绑定仓库为权威（issue 归属仓库；跨流水线/关联仓库信任域

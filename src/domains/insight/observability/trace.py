@@ -72,9 +72,14 @@ def stamp_missing(limit: int = 5000) -> int:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, issue_id FROM agent_tasks"
-                      " WHERE trace_id IS NULL OR trace_id='' LIMIT ?", (int(limit),))
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_3e8d71_f
+            _ru_lib_3e8d71 = _ru_lib_3e8d71_f(foreign_only=True)
+            if _ru_lib_3e8d71 is not None:
+                rows = _ru_lib_3e8d71.read_all("agent_tasks_3e8d71", (int(limit),))
+            else:
+                c.execute("SELECT id, repo_key, issue_id FROM agent_tasks"
+                          " WHERE trace_id IS NULL OR trace_id='' LIMIT ?", (int(limit),))
+                rows = c.fetchall()
             # P3-5g：agent_tasks 在 runtime 域；insight 进程整批补写收成一条意图
             # （逐行 submit 会产生上千条意图行，且丢失"一批补完"的语义）
             from src.kernel.domain_read import runtime_lib as _rt_lib_sm
@@ -232,8 +237,13 @@ def resolve_tasks(trace: str) -> List[Dict[str, Any]]:
             c = db.cursor()
             if t.startswith("t_"):
                 # 先按任务号定位，再用它的 pipeline_trace_id 取同流程全部任务
-                c.execute("SELECT trace_id, pipeline_trace_id FROM agent_tasks WHERE id=?", (t,))
-                got = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_3b1cff_f
+                _ru_lib_3b1cff = _ru_lib_3b1cff_f(foreign_only=True)
+                if _ru_lib_3b1cff is not None:
+                    got = _ru_lib_3b1cff.read_one("agent_tasks_3b1cff", (t,))
+                else:
+                    c.execute("SELECT trace_id, pipeline_trace_id FROM agent_tasks WHERE id=?", (t,))
+                    got = c.fetchone()
                 if not got:
                     return []
                 keys = [t, got[0] or "", got[1] or ""]

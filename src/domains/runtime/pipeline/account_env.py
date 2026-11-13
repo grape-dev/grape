@@ -36,8 +36,13 @@ def task_creator_account(user_id) -> str:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT username FROM user_accounts WHERE id=?", (uid,))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_e2eb04_f
+            _mg_lib_e2eb04 = _mg_lib_e2eb04_f(foreign_only=True)
+            if _mg_lib_e2eb04 is not None:
+                row = _mg_lib_e2eb04.read_one("user_accounts_e2eb04", (uid,))
+            else:
+                c.execute("SELECT username FROM user_accounts WHERE id=?", (uid,))
+                row = c.fetchone()
         return normalize_account(row[0] if row else "")
     except Exception as e:
         log.warning(f"ACCOUNT_TASK_CREATOR_LOOKUP_FAILED user_id={uid}: {e}")

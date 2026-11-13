@@ -899,10 +899,15 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
         # 查订阅者 + 任务信息（JOIN 取 name/repo_key；订阅表缺失时抛错被外层捕获）
         with db_lock:
             c = db.cursor()
-            rows = c.execute(
-                "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s "
-                "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?",
-                (task_id,)).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_13648d_f
+            _mg_lib_13648d = _mg_lib_13648d_f(foreign_only=True)
+            if _mg_lib_13648d is not None:
+                c = _mg_lib_13648d.read_all("autopilot_subscriptions_13648d", (task_id,)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s "
+                    "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?",
+                    (task_id,)).fetchall()
         if not rows:
             return
         _task_name = rows[0][1] or f"task-{task_id}"
@@ -1671,11 +1676,17 @@ async def trigger_task_now(task_id: int) -> dict:
     """手动触发任务执行（异步入口）。"""
     with db_lock:
         c = db.cursor()
-        row = c.execute(
-            "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE id=?",
-            (task_id,)
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_e3fa0b_f
+        _mg_lib_e3fa0b = _mg_lib_e3fa0b_f(foreign_only=True)
+        if _mg_lib_e3fa0b is not None:
+            c = _mg_lib_e3fa0b.read_one("autopilot_tasks_e3fa0b", (task_id,)
         ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
+                "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE id=?",
+                (task_id,)
+            ).fetchone()
     if not row:
         return {"ok": False, "message": "task not found"}
     task = {

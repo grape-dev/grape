@@ -104,9 +104,14 @@ def backfill_repo_credentials_encrypt() -> int:
     """
     try:
         from src.domains.mgmt.auth.credential_crypto import encrypt
-        rows = db.execute(
-            "SELECT repo_key, cred_type, value FROM grape_t_repo_credentials "
-            "WHERE value != ''").fetchall()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_d590a7_f
+        _ru_lib_d590a7 = _ru_lib_d590a7_f(foreign_only=True)
+        if _ru_lib_d590a7 is not None:
+            db = _ru_lib_d590a7.read_all("grape_t_repo_credentials_d590a7", ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT repo_key, cred_type, value FROM grape_t_repo_credentials "
+                "WHERE value != ''").fetchall()
         plain = [(rk, ct, val) for rk, ct, val in rows
                  if ":" not in val]  # 明文判定：密文恒为 kid:nonce:ct 三段
         for rk, ct, val in plain:
@@ -126,9 +131,14 @@ def backfill_repo_credentials_uuid() -> int:
     """步骤 4（D90-N4 → D99 退役）：id 已是主键（建表自带，不可空）——
     本函数保留为壳（调用链稳定），语义=断言校验（残留空 id 行=数据异常告警）。"""
     try:
-        need = db.execute(
-            "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
-            "WHERE id IS NULL OR id=''").fetchall()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_8fc7c2_f
+        _ru_lib_8fc7c2 = _ru_lib_8fc7c2_f(foreign_only=True)
+        if _ru_lib_8fc7c2 is not None:
+            db = _ru_lib_8fc7c2.read_all("grape_t_repo_credentials_8fc7c2", ).fetchall()
+        else:
+            need = db.execute(
+                "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
+                "WHERE id IS NULL OR id=''").fetchall()
         if need:
             # D99 主键化后不应出现——出现即数据异常（旧库未走新 DDL），响亮告警
             log.warning(f"grape_t_repo_credentials: {len(need)} rows with empty id "

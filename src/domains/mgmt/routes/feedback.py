@@ -267,11 +267,16 @@ def _resolve_token_task_context(user: dict) -> dict:
             else:
                 with db_lock:
                     c = db.cursor()
-                    c.execute(
-                        "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
-                        "FROM agent_tasks WHERE id=? LIMIT 1",
-                        (task_id,))
-                    r = c.fetchone()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_b6b789_f
+                    _ru_lib_b6b789 = _ru_lib_b6b789_f(foreign_only=True)
+                    if _ru_lib_b6b789 is not None:
+                        r = _ru_lib_b6b789.read_one("agent_tasks_b6b789", (task_id,))
+                    else:
+                        c.execute(
+                            "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
+                            "FROM agent_tasks WHERE id=? LIMIT 1",
+                            (task_id,))
+                        r = c.fetchone()
             if r:
                 event_seq = r[0]
                 agent_type = agent_type or (r[1] or '')

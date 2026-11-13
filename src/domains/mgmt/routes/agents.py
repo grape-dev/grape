@@ -138,11 +138,16 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type WHERE agent_type=?",
-                (agent_type,)
-            )
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_b07f0c_f
+            _ru_lib_b07f0c = _ru_lib_b07f0c_f(foreign_only=True)
+            if _ru_lib_b07f0c is not None:
+                row = _ru_lib_b07f0c.read_one("agent_type_b07f0c", (agent_type,))
+            else:
+                c.execute(
+                    "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type WHERE agent_type=?",
+                    (agent_type,)
+                )
+                row = c.fetchone()
             if row:
                 return {"agent_type": row[0], "display_name": row[1], "description": row[2],
                         "default_backend": row[3] or "", "icon": row[4] or "", "order_num": row[5] or 0,
@@ -163,10 +168,15 @@ def list_agent_types():
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type"
-            )
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_7eae90_f
+            _ru_lib_7eae90 = _ru_lib_7eae90_f(foreign_only=True)
+            if _ru_lib_7eae90 is not None:
+                rows = _ru_lib_7eae90.read_all("agent_type_7eae90", ())
+            else:
+                c.execute(
+                    "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type"
+                )
+                rows = c.fetchall()
         except Exception as e:
             # Issue #2091/#2096：返回 200 空数组会把「查询失败」伪装成「还没有数据」
             log.error(f"agent_type list query failed: {e}")

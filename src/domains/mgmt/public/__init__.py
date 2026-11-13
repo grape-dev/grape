@@ -590,6 +590,11 @@ _READ_QUERIES: dict[str, str] = {
     "grape_accounts_d0ac07": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s)",
     "grape_accounts_0b3fdc": "SELECT id FROM grape_accounts WHERE username=%s AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1",
     "grape_accounts_e047af": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s) LIMIT 1",
+    "autopilot_tasks_e3fa0b": "SELECT id, name, repo_key, agent_type, instruction, skill_name, cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE id=%s",
+    "autopilot_subscriptions_13648d": "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=%s",
+    "user_accounts_e2eb04": "SELECT username FROM user_accounts WHERE id=%s",
+    "scene_market_c969bb": "SELECT id, name FROM scene_market WHERE source='official'",
+    "scene_market_0d2dd0": "SELECT id FROM scene_market WHERE name=%s AND source='official' LIMIT 1",
     # 用户映射（runtime / insight 代码读）
     "um_feishu_open_ids_all": (
         "SELECT DISTINCT user_id FROM unified_user_mapping WHERE feishu_open_id!='' "

@@ -418,8 +418,13 @@ def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str
     if _mg_scene is None:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_0d2dd0_f
+            _mg_lib_0d2dd0 = _mg_lib_0d2dd0_f(foreign_only=True)
+            if _mg_lib_0d2dd0 is not None:
+                row = _mg_lib_0d2dd0.read_one("scene_market_0d2dd0", (scene_name,))
+            else:
+                c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
+                row = c.fetchone()
         _scene_id = row[0] if row else None
     if _scene_id:
         _rebuild_scene_skill_ref(_scene_id, nodes, scene_name, repo_key)
@@ -511,8 +516,13 @@ def _detect_stale_official_scenes(repo_scene_names: set, traversal_complete: boo
         else:
             with db_lock:
                 c = db.cursor()
-                _rows_stale = c.execute(
-                    "SELECT id, name FROM scene_market WHERE source='official'").fetchall()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_c969bb_f
+                _mg_lib_c969bb = _mg_lib_c969bb_f(foreign_only=True)
+                if _mg_lib_c969bb is not None:
+                    c = _mg_lib_c969bb.read_all("scene_market_c969bb", ).fetchall()
+                else:
+                    _rows_stale = c.execute(
+                        "SELECT id, name FROM scene_market WHERE source='official'").fetchall()
         stale = [name for (_id, name) in _rows_stale if name not in repo_scene_names]
     except Exception:
         logger.exception("Scene sync: stale detection query failed")
