@@ -48,6 +48,21 @@ if [ -n "${GRAPE_PR_FILES:-}" ]; then
   # shellcheck disable=SC2086
   python3 scripts/check-doc-redaction.py --files $GRAPE_PR_FILES || exit 1
 fi
+# PR #1377 复审 I-5：check-all 全绿 ≠ 守卫绿。两条前端缓存棘轮（页面模块 ?v= 冻结表、
+# 语言包内容指纹/cacheVer 单调）与 node 前端用例此前不在本门禁内，导致「check-all exit 0」
+# 掩盖了 head 上真实失败的守卫。此处纳入统一门禁。
+"$PY" -m pytest -q tests/api/test_frontend_cache_version_ratchet.py \
+                      tests/api/test_i18n_locale_cache_ratchet.py || exit 1
+if command -v node >/dev/null 2>&1; then
+  _rc=0
+  for _f in tests/js/test_*.js; do
+    node "$_f" >/dev/null || { echo "[FAIL] $_f" >&2; _rc=1; }
+  done
+  [ "$_rc" = 0 ] || exit 1
+  echo "[ok] tests/js (node)"
+else
+  echo "[skip] tests/js: node 不可用"
+fi
 # smoke-admin.sh needs a running server (localhost:3000); run manually after deploy
 # ./scripts/smoke-admin.sh
 echo "=== Contract checks complete ==="
