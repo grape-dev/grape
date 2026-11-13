@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Grape cross-domain write reconciliation once a day
+
+[Timer]
+# 每天 03:20（CST）：避开整点巡检与 5 分钟排水窗口，且此时流水线基本静默。
+OnCalendar=*-*-* 03:20:00
+AccuracySec=5min
+Persistent=true
+Unit=grape-xwrite-reconcile.service
+
+[Install]
+WantedBy=timers.target

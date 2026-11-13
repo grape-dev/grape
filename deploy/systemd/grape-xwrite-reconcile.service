@@ -1,0 +1,23 @@
+[Unit]
+Description=Grape cross-domain write reconciliation and intent-log archive
+Documentation=file:/opt/grape/deploy/README.md
+After=network-online.target
+
+# 三个域库各有一份 grape_t_xwrite_log。本作业一次连三个域：
+#   1) 归档「applied 且超过 7 天」的意图行（unique_key 之后行数按调用量增长）
+#   2) 汇总 pending/failed/dead 与死信明细
+#   3) 有 dead 或连不上域库 → 非零退出（systemd 标红，便于巡检发现）
+# 不做定时器错峰：它不与排水单元争用同一批行（只删 applied 历史行）。
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/grape
+EnvironmentFile=-/etc/grape/grape.env
+# 三域 DSN（含口令，0600）
+EnvironmentFile=-/etc/grape/domain-lib.env
+Environment=PYTHONPATH=/opt/grape
+Environment=XWRITE_ARCHIVE_DAYS=7
+ExecStart=/opt/grape/.venv/bin/python /opt/grape/scripts/xwrite_reconcile.py daily
+StandardOutput=journal
+StandardError=journal
