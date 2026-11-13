@@ -117,6 +117,33 @@ def submit(target_domain: str, action: str, idempotency_key: str, payload: Any,
         c.close()
 
 
+def submit_deferred(target_domain: str, action: str, idempotency_key: str, payload: Any) -> dict[str, Any]:
+    """只登记意图，不立即执行（供"必须与本地事务一起提交"的场景，如新建引擎+默认能力）。
+
+    意图行与调用方业务写同库同事务，提交后由 drain() 落地 —— 不会出现
+    "能力行已写、引擎行回滚"的孤儿写；代价是短暂最终一致。
+    """
+    if not idempotency_key:
+        raise ValueError("idempotency_key 必填")
+    ensure_log_table()
+    now = _now()
+    c = _process_db.cursor()
+    try:
+        try:
+            c.execute(
+                f"INSERT INTO {LOG_TABLE} (idempotency_key, target_domain, action, payload_json, "
+                "status, attempts, next_retry_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)",
+                (idempotency_key, target_domain, action,
+                 json.dumps(payload, ensure_ascii=False, default=str), now, now),
+            )
+            return {"status": "deferred", "key": idempotency_key}
+        except Exception:
+            return {"status": "duplicate", "key": idempotency_key}
+    finally:
+        c.close()
+
+
 def drain(apply_fns: dict[str, Callable[[dict[str, Any]], Any]], limit: int = 50) -> dict[str, int]:
     """重试待补偿行。apply_fns: action → 可调用（接收 payload dict）。
 
@@ -171,3 +198,26 @@ def stats() -> dict[str, int]:
         return {r[0]: r[1] for r in c.fetchall()}
     finally:
         c.close()
+
+
+if __name__ == "__main__":  # pragma: no cover - 运维入口
+    import sys
+
+    from src.domains.runtime import public as _rt
+
+    _handlers = {
+        "engine_cap_upsert": lambda p: _rt.upsert_engine_capability(
+            p["rid"], p["tag"], priority=p.get("priority", 50)),
+        "engine_cap_update": lambda p: _rt.update_engine_capability(
+            p["rid"], p["tag"], p.get("priority", 50), p.get("enabled", 1)),
+        "engine_cap_delete": lambda p: _rt.delete_engine_capability(p["rid"], p.get("tag")),
+        "engine_cap_delete_all": lambda p: _rt.delete_engine_capability(p["rid"]),
+    }
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "drain"
+    if cmd == "stats":
+        print(stats())
+    elif cmd == "drain":
+        print(drain(_handlers))
+    else:
+        print("usage: python -m src.kernel.cross_write [drain|stats]")
+

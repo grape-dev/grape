@@ -4021,16 +4021,28 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     # 新本机直连引擎默认写入 "all" 标签（与远端 worker 注册行为对齐）：
                     # 全广播模式下无 worker 时任务由本机直连认领，缺标签会导致任务永久卡 queued。
                     # 已有 capabilities 行（用户手动配置过）则不覆盖。
-                    c.execute(
-                        "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-                    if not c.fetchone():
-                        _now_ec = _now_iso
+                    from src.kernel.domain_read import runtime_lib as _rt_def
+                    _rtd2 = _rt_def()
+                    if _rtd2 is not None:
+                        # 跨域写：引擎行已在本事务内，能力行走幂等键 cap-default:{rid} 补偿
+                        if not _rtd2.has_engine_capability(rid):
+                            from src.kernel import cross_write as _xw_def
+                            _xw_def.submit("runtime", "engine_cap_upsert", f"cap-default:{rid}",
+                                           {"rid": rid, "tag": "all", "priority": 50},
+                                           lambda: _rtd2.upsert_engine_capability(rid, "all", priority=50))
+                            from src.domains.mgmt.routes.settings import _sync_agent_tags
+                            _sync_agent_tags(rid, c)
+                    else:
                         c.execute(
-                            "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                            "VALUES (?, 'all', 1, 50, 1, ?, ?)",
-                            (rid, _now_ec, _now_ec))
-                        from src.domains.mgmt.routes.settings import _sync_agent_tags
-                        _sync_agent_tags(rid, c)
+                            "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
+                        if not c.fetchone():
+                            _now_ec = _now_iso
+                            c.execute(
+                                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                                "VALUES (?, 'all', 1, 50, 1, ?, ?)",
+                                (rid, _now_ec, _now_ec))
+                            from src.domains.mgmt.routes.settings import _sync_agent_tags
+                            _sync_agent_tags(rid, c)
             # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
             # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
             #（见 multi-runtime-instance-design §5.1 防误删）。
