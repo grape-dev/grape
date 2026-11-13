@@ -165,83 +165,65 @@
   }
 }
 
-/* ── 玻璃抬升（2026-11-12 反馈：不要蓝色，要毛玻璃质感）────────────────────
-   静止态：白色系渐变高光 + inset 亮线 + 轻投影 —— 玻璃观感，但**不挂 backdrop blur**
-   （驾驶舱 6 行 × 1112×70 ≈ 468k px²，挂上就破 §6 的 400k 预算）。
-   hover：真正上 backdrop-filter: blur(18px)（同一时刻只有一行 ≈ 78k，仍在预算内），
-   玻璃抬亮 + 投影加深 + 上浮 2px。全程白色系，没有 accent 蓝。
-   选择器特意镜像上面暗色 plain 规则的结构（同 (1,4,0)），靠“更晚声明”取胜；
-   hover 多一个 :hover 直接 (1,5,0) 压过去。 */
+/* ── 卡片抬升（2026-11-12 二次反馈：抬升可以，但不要毛玻璃）─────────────────
+   实心亮面 + 描边 + 投影的"抬起来"效果：静止比页面底亮一档，hover 再亮一点、
+   描边加强、投影加深、上浮 2px。全程 **不挂 backdrop-filter**（暗色预算 0 px²），
+   也不用渐变高光/inset 亮线——那些是把卡片做成玻璃的手法，这次明确不要。
+   选择器镜像上面暗色 plain 规则的 (1,4,0)，靠更晚声明取胜；hover 多一个 :hover。 */
 
-/* 1) 静止态：暗色 / 自动(暗) */
 :root[data-theme-mode='dark'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card) {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, .07), rgba(255, 255, 255, .02)),
-    var(--c) !important;
-  border: 1px solid rgba(255, 255, 255, .10) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 1px 2px rgba(0, 0, 0, .24) !important;
+  background: color-mix(in srgb, #fff 6%, var(--c)) !important;
+  border: 1px solid var(--b) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .22) !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
-  transition: background .22s ease, border-color .22s ease, box-shadow .22s ease,
-              transform .22s ease, backdrop-filter .22s ease !important;
+  transition: background .2s ease, border-color .2s ease,
+              box-shadow .2s ease, transform .2s ease !important;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode='auto'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card) {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, .07), rgba(255, 255, 255, .02)),
-    var(--c) !important;
-  border: 1px solid rgba(255, 255, 255, .10) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 1px 2px rgba(0, 0, 0, .24) !important;
+  background: color-mix(in srgb, #fff 6%, var(--c)) !important;
+  border: 1px solid var(--b) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .22) !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
-  transition: background .22s ease, border-color .22s ease, box-shadow .22s ease,
-              transform .22s ease, backdrop-filter .22s ease !important;
+  transition: background .2s ease, border-color .2s ease,
+              box-shadow .2s ease, transform .2s ease !important;
   }
 }
-/* 静止态：浅色 */
 :root:not([data-theme-mode='dark']) #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card) {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, .86), rgba(255, 255, 255, .66)),
-    var(--c) !important;
-  border: 1px solid rgba(0, 0, 0, .08) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1), 0 1px 2px rgba(0, 0, 0, .06) !important;
-  transition: background .22s ease, border-color .22s ease, box-shadow .22s ease,
-              transform .22s ease, backdrop-filter .22s ease !important;
+  background: var(--c) !important;
+  border: 1px solid var(--b) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .06) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  transition: background .2s ease, border-color .2s ease,
+              box-shadow .2s ease, transform .2s ease !important;
 }
 
-/* 2) hover：真毛玻璃 */
 :root[data-theme-mode='dark'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card):hover {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .06)),
-    var(--c) !important;
-  border-color: rgba(255, 255, 255, .20) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24),
-              0 12px 30px rgba(0, 0, 0, .42), 0 2px 6px rgba(0, 0, 0, .28) !important;
-  -webkit-backdrop-filter: blur(18px) !important;
-  backdrop-filter: blur(18px) !important;
+  background: color-mix(in srgb, #fff 10%, var(--c)) !important;
+  border-color: color-mix(in srgb, #fff 18%, var(--b)) !important;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .34), 0 2px 6px rgba(0, 0, 0, .22) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
   transform: translateY(-2px) !important;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode='auto'] #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card):hover {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .06)),
-    var(--c) !important;
-  border-color: rgba(255, 255, 255, .20) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .24),
-              0 12px 30px rgba(0, 0, 0, .42), 0 2px 6px rgba(0, 0, 0, .28) !important;
-  -webkit-backdrop-filter: blur(18px) !important;
-  backdrop-filter: blur(18px) !important;
+  background: color-mix(in srgb, #fff 10%, var(--c)) !important;
+  border-color: color-mix(in srgb, #fff 18%, var(--b)) !important;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .34), 0 2px 6px rgba(0, 0, 0, .22) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
   transform: translateY(-2px) !important;
   }
 }
 :root:not([data-theme-mode='dark']) #pageContent :is(.dbv, .sv, .sk, .sm, .lobby, .cv, .rtv, .imc) :is(.scn-row, .project-card):hover {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, .98), rgba(255, 255, 255, .86)),
-    var(--c) !important;
-  border-color: rgba(0, 0, 0, .12) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1),
-              0 10px 26px rgba(0, 0, 0, .12), 0 2px 6px rgba(0, 0, 0, .06) !important;
-  -webkit-backdrop-filter: blur(18px) !important;
-  backdrop-filter: blur(18px) !important;
+  background: #fff !important;
+  border-color: var(--b-strong) !important;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .12), 0 2px 6px rgba(0, 0, 0, .06) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
   transform: translateY(-2px) !important;
 }
