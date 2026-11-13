@@ -5303,22 +5303,11 @@ def clear_repo_bot_token(repo_key: str) -> bool:
                     f"WHERE repo_key=?", (repo_key,))
                 found = c.rowcount > 0
             else:
-                # P3-5f-3：grape_t_repo_credentials 在 runtime 域（managed_repos 仍是本域）
-                from src.kernel.domain_read import runtime_lib as _rt_lib_crc
-                from src.kernel import cross_write as _xw_crc
-                _crc_done = False
-                _rt_crc = _rt_lib_crc(foreign_only=True)
-                if _rt_crc is not None:
-                    _rt_crc_ok = _rt_crc
-                    _crc_done = _xw_crc.submit_if_lib(
-                        _rt_crc_ok, "runtime", "repo_credential_clear",
-                        f"repo-cred-clear:{repo_key}",
-                        {"repo_key": repo_key, "cred_type": "bot", "updated_at": _now},
-                        lambda: _rt_crc_ok.clear_repo_credential(repo_key, "bot", _now), log)
-                if not _crc_done:
-                    c.execute(
-                        "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
-                        "WHERE repo_key=? AND cred_type='bot'", (_now, repo_key))
+                # 注：本函数当前**零调用方**（审计实测）。暂不接 lib —— 不给死代码加
+                # 跨域依赖；P4 前要么删除、要么随 5f-2 一起接 purge 原语。
+                c.execute(
+                    "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
+                    "WHERE repo_key=? AND cred_type='bot'", (_now, repo_key))
                 c.execute(
                     "UPDATE managed_repos SET bot_token_status='' WHERE repo_key=?",
                     (repo_key,))

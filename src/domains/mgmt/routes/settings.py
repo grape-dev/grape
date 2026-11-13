@@ -1826,15 +1826,15 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         _cc_hash = hashlib.sha256(token.encode()).hexdigest()
         _cc_owner_id = repo_key if scope == "repo" else ""
 
-        def _apply_cc() -> None:
+        # 同步直连，**不进幂等意图队列**：token 明文只在本次响应里出现一次，
+        # 若落成可重放意图，排水重放时会造出无主凭据（孤儿 token，无法对账）。
+        try:
             _cc_out.update(_rt_cc_ok.insert_runtime_credential(
                 _cc_hash, name, scope, _cc_owner_id, owner, repo_key, _cred_org_id))
-
-        _cc_done = _xw_cc.submit_if_lib(
-            _rt_cc_ok, "runtime", "runtime_credential_insert", f"rc-insert:{name}",
-            {"token_hash": _cc_hash, "name": name, "scope": scope,
-             "owner_id": _cc_owner_id, "owner_name": owner, "repo_key": repo_key,
-             "org_id": _cred_org_id}, _apply_cc, log)
+            _cc_done = True
+        except Exception as _e_cc:
+            log.warning(f"create_runtime_credential via lib failed, fallback to local SQL: {_e_cc}")
+            _cc_done = False
     if _cc_done:
         if _cc_out.get("action") == "duplicate":
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
