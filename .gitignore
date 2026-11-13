@@ -127,7 +127,7 @@ configs/scene-sync.json
 # 这两份直接入仓（部署即用），启动期就地刷新；旧的 src/api/static/ 已删除
 help/api/openapi.json
 
-# grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
+# grape-cli 已拆为独立仓库管理（本地 clone 目录不入仓）
 cli/
 src/api/static/uploads/
 *.log
