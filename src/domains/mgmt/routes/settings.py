@@ -1253,19 +1253,43 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
         return "about_to_gc"
     return "offline"
 
+def _creds_via_lib():
+    """GRAPE_CREDENTIALS_VIA_LIB=1 且 runtime lib 可用时返回 lib 模块（三库三机模式）。"""
+    import os as _os
+
+    if _os.environ.get("GRAPE_CREDENTIALS_VIA_LIB") != "1":
+        return None
+    try:
+        from src.domains.runtime import public as _rt
+
+        return _rt if _rt.available() else None
+    except Exception as _exc:  # noqa: BLE001
+        log.warning(f"credentials via lib unavailable: {_exc}")
+        return None
+
+
 def _build_cred_map(db, db_lock) -> dict:
-    """构建 credential_id -> 凭据信息映射，两个端点共用。"""
+    """构建 credential_id -> 凭据信息映射，两个端点共用。
+
+    只读取**密文/元数据列**（不涉及解密）；lib 模式下由 runtime 自己的连接取数。
+    """
+    _rt = _creds_via_lib()
+    if _rt is not None:
+        rows = _rt.list_credential_rows()
+    else:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, "
+                      "last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
+            rows = c.fetchall()
     cred_map = {}
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
-        for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
-            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
-                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
-                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or "", "org_id": corg_id or "",
-                             "spec": cspec or ""}
+    for r in rows:
+        cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
+        cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
+                         "owner_id": cowner_id or "", "owner_name": cowner_name or "",
+                         "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
+                         "repo_key": crepo_key or "", "org_id": corg_id or "",
+                         "spec": cspec or ""}
     return cred_map
 
 def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = ""):

@@ -107,6 +107,22 @@ def append_task_message(task_id: str, actor: str, content: str,
             return {"ok": True, "deduped": False, "id": getattr(c, "lastrowid", None), "seq": seq}
 
 
+_CRED_COLS = ("id", "name", "device_name", "scope", "owner_id", "owner_name",
+              "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec")
+
+
+def list_credential_rows() -> list[tuple]:
+    """runtime_credentials 全量行（列序与 mgmt._build_cred_map 原查询一致）。
+
+    只返回**密文/元数据列**（spec 为密文结构），解密仍由调用方负责，
+    lib 不接触明文凭据。
+    """
+    cols = ", ".join(_CRED_COLS)
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT {cols} FROM runtime_credentials")
+        return [tuple(r) for r in c.fetchall()]
+
+
 def latest_task_for_event(event_seq: int) -> tuple | None:
     """事件对应的最近一条任务（id, status, runtime_id, exit_code, started_at,
     completed_at, result_text, skill）；无则 None。与 mgmt feedback 原查询同列序。"""
@@ -195,4 +211,4 @@ def health() -> dict[str, Any]:
 __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
-           "task_brief", "health"]
+           "task_brief", "list_credential_rows", "health"]

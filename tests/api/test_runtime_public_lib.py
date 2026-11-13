@@ -176,3 +176,19 @@ def test_task_brief_missing(monkeypatch):
     install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=None))
     assert rt.task_brief(-1) is None
 
+def test_list_credential_rows_columns_and_passthrough(monkeypatch):
+    row = (1, "rt-cred", "dev-1", "global", "", "alice", "active", "t0", "1.2.3.4", "", 1, "")
+    cur = install(monkeypatch, FakeCursor(rows=[row], desc=[("id",)]))
+    out = rt.list_credential_rows()
+    assert out == [row]
+    sql, _args = cur.executed[0]
+    for col in ("id", "name", "device_name", "scope", "owner_id", "owner_name",
+                "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec"):
+        assert col in sql
+    assert "FROM runtime_credentials" in sql
+
+
+def test_list_credential_rows_empty(monkeypatch):
+    install(monkeypatch, FakeCursor(rows=[], desc=[("id",)]))
+    assert rt.list_credential_rows() == []
+
