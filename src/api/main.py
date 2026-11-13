@@ -348,7 +348,7 @@ def _start_active_user_tracker_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot_manager
+    global bot_manager, im_engine
     from src.kernel.config import log
 
     # 卡死诊断（2026-11-05 事故）：SIGUSR1 手动 dump + 事件循环 stall 自动 dump
@@ -384,6 +384,29 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         from src.kernel.config import log as _log
         _log.warning(f"pat identity backfill skipped (non-fatal): {_e}")
+
+    # ===== IM 引擎（2026-11-13 补齐）=====
+    # weekly-11 退役 legacy BotManager 后，server_tasks 在 engine_mode=on 时直接 skip；
+    # 而新引擎原先只在 grape_server.py（四进程 A 进程）里启动 → 单进程入口出现
+    # "谁也不起" 的空档（安装行 active 但 connected 恒 false）。
+    # 这里与 grape_server 对齐补启，失败只告警不阻断主服务。
+    try:
+        from src.domains.runtime.im import engine_wiring as _im_wiring
+
+        if _im_wiring.engine_mode() == "on":
+            _im_engine = await _im_wiring.start_im_engine()
+            if _im_engine is not None:
+                # 路由侧（routes/im.py:_engine）优先读模块全局，再读 app.state → 两处都挂
+                im_engine = _im_engine
+                app.state.im_engine = _im_engine
+                log.info("IM engine started (mode=on, instance=%s)",
+                         getattr(_im_engine, "instance_id", ""))
+            else:
+                log.warning("IM engine: start failed (legacy fallback retired)")
+        else:
+            log.info("IM engine mode=off: IM 总开关关闭，不启动任何 IM 链路")
+    except Exception as _im_err:
+        log.warning(f"IM engine startup failed: {_im_err}")
 
     # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
     # 未显式配置时默认 localhost，第三方平台无法回访（登录/托管不可用）。
@@ -506,6 +529,14 @@ async def lifespan(app: FastAPI):
     await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
     if _sweep_task:
         _sweep_task.cancel()
+    # IM 引擎优雅停机（渠道长轮询/Socket 协程跟着收）
+    try:
+        _im = getattr(app.state, "im_engine", None)
+        if _im is not None:
+            await _im.stop()
+            log.info("IM engine stopped")
+    except Exception as _e:
+        log.warning(f"IM engine stop failed: {_e}")
     log.info("Process tasks stopped")
 
 
