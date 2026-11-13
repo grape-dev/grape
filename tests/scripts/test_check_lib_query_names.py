@@ -1,8 +1,9 @@
 """Issue #2462 B1：A3 门禁（scripts/check_lib_query_names.py）单测。
 
 验证「跨域读查询名 ⊆ 目标域 lib 白名单」的静态判定：
-句柄变量、行内调用、命名查询字面量、动态查询名、作用域隔离、
-未登记名字、注册表缺失、fail-closed 退出码。
+句柄变量、直连 public 模块的隐式句柄、工厂返回的句柄、行内调用、
+命名查询字面量、动态查询名、作用域隔离、未登记名字、注册表缺失、
+探活口跳过、同行多域去重、fail-closed 退出码。
 """
 import importlib.util
 import sys
@@ -35,6 +36,31 @@ from src.kernel.domain_read import mgmt_lib
 
 def repo_field(key):
     return mgmt_lib().get_repo_field(key, "bot_username")
+'''
+
+#: 直连 public 模块（`GRAPE_*_VIA_LIB` 开关分支的真实写法）
+_DIRECT_SNIPPET = '''
+from src.domains.runtime import public as _rt
+
+
+def skill_by_id(skill_id):
+    if _rt.available():
+        return _rt.get_skill_by_id(skill_id)
+    return None
+'''
+
+#: 工厂返回隐式句柄，调用方另取变量（settings.py `_creds_via_lib` 的写法）
+_FACTORY_SNIPPET = '''
+from src.domains.runtime import public as _rt
+
+
+def _creds_via_lib():
+    return _rt if _rt.available() else None
+
+
+def build():
+    _rt = _creds_via_lib()
+    return _rt.list_credential_rows()
 '''
 
 
@@ -103,6 +129,61 @@ def outer():
         usage = clqn.collect_usage(snippet, "sample.py")
         assert [(u.kind, u.name) for u in usage] == [("query", "runtime_x")]
 
+    def test_direct_public_module_import_is_tracked(self):
+        """`from src.domains.<domain> import public as _rt` 是隐式句柄，跨域读引用必须可见。"""
+        usage = clqn.collect_usage(_DIRECT_SNIPPET, "sample.py")
+        assert [(u.domain, u.kind, u.name) for u in usage] == [
+            ("runtime", "attr", "get_skill_by_id")]
+
+    def test_probe_name_is_skipped_on_usage_side(self):
+        """`_rt.available()` 是探活口，经隐式句柄调用同样不计成未注册函数。"""
+        assert all(u.name != "available" for u in clqn.collect_usage(_DIRECT_SNIPPET, "sample.py"))
+
+    def test_direct_public_module_named_query(self):
+        snippet = '''
+from src.domains.runtime import public as _rt
+
+
+def f(name):
+    return _rt.read_one("skill_x", (name,))
+'''
+        usage = clqn.collect_usage(snippet, "sample.py")
+        assert [(u.domain, u.kind, u.name) for u in usage] == [("runtime", "query", "skill_x")]
+
+    def test_function_local_import_does_not_leak_to_other_scopes(self):
+        """函数内 import 的隐式句柄不外泄：别的函数里同名局部变量不是句柄。"""
+        snippet = '''
+def reader():
+    from src.domains.runtime import public as _rt
+    return _rt.list_runtimes_rows()
+
+
+def other(cached):
+    for _rt in cached:
+        yield _rt.get("last_seen_at")
+'''
+        usage = clqn.collect_usage(snippet, "sample.py")
+        assert [(u.domain, u.name) for u in usage] == [("runtime", "list_runtimes_rows")]
+
+    def test_factory_returning_module_alias_resolves_handle(self):
+        """同文件单跳工厂（`return _rt if ... else None`）返回的句柄可用。"""
+        usage = clqn.collect_usage(_FACTORY_SNIPPET, "sample.py")
+        assert [(u.domain, u.name) for u in usage] == [("runtime", "list_credential_rows")]
+
+    def test_same_line_multi_domain_is_not_deduped(self):
+        """同一行两个域的同名引用各自保留（dedup key 含 domain）。"""
+        snippet = '''
+from src.domains.runtime import public as rt
+from src.domains.mgmt import public as mg
+
+
+def f():
+    return rt.read_one("shared_x"), mg.read_one("shared_x")
+'''
+        usage = clqn.collect_usage(snippet, "sample.py")
+        assert {(u.domain, u.kind, u.name) for u in usage} == {
+            ("runtime", "query", "shared_x"), ("mgmt", "query", "shared_x")}
+
 
 class TestRegistry:
     def test_registry_exposes_functions_and_named_queries(self):
@@ -144,6 +225,22 @@ class TestCheckVerdict:
         reports = clqn.check([tmp_path], registry={
             "mgmt": clqn.DomainRegistry(functions={"fetch_rows"}, queries=set())})
         assert reports[0].unregistered_names == {"get_repo_field"}
+
+    def test_unregistered_direct_import_name_fails(self, tmp_path):
+        """直连 public 模块引用的未注册名必须判 FAIL（A3 覆盖面缺口回归锚点）。"""
+        self._write(tmp_path, _DIRECT_SNIPPET)
+        reports = clqn.check([tmp_path], registry={
+            "runtime": clqn.DomainRegistry(functions={"read_one", "read_all"}, queries=set())})
+        assert not reports[0].ok
+        assert reports[0].unregistered_names == {"get_skill_by_id"}
+
+    def test_probe_call_does_not_add_unregistered_name(self, tmp_path):
+        """`available()` 探活不进入未注册名集合，注册面只需覆盖真正的查询面。"""
+        self._write(tmp_path, _DIRECT_SNIPPET)
+        reports = clqn.check([tmp_path], registry={
+            "runtime": clqn.DomainRegistry(functions={"get_skill_by_id"}, queries=set())})
+        assert reports[0].ok
+        assert reports[0].names == {"get_skill_by_id"}
 
     def test_dynamic_query_fails_even_when_registry_is_complete(self, tmp_path):
         self._write(tmp_path, '''

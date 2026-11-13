@@ -24,9 +24,30 @@ lib 模式只把**登记过的查询面**暴露给跨域调用方：
 | `lib.read_one("<name>", ...)` / `lib.read_all("<name>", ...)` | 目标域 public 模块的 `_READ_QUERIES` 键 |
 | `lib.<其它函数>(...)` / `lib.<属性>` | 目标域 public 模块的非下划线可调用对象（`available` 为探活口，不计） |
 
-- 作用域按函数各自独立解析：同一文件里不同函数可以对同名变量赋不同域的句柄。
+**句柄来源（三者等价，均识别为跨域读句柄）**
+
+| 形态 | 说明 |
+|---|---|
+| `from src.kernel.domain_read import <domain>_lib` + `x = <domain>_lib(...)` | 显式句柄（lib 入口函数） |
+| `from src.domains.<domain> import public as x` + `x.<func>` | 直连 public 模块的**隐式句柄**（`GRAPE_*_VIA_LIB` 开关分支的写法） |
+| `x = <同文件工厂>()`，工厂体 `return <隐式句柄>[ if ... else None]` | 工厂返回的句柄（单跳；如 `_creds_via_lib()` / `_task_via_lib()`） |
+
+- 作用域按函数各自独立解析：同一文件里不同函数可以对同名变量赋不同域的句柄；
+  隐式句柄只在声明它的作用域内可见（函数内 `import` 不外泄，本地赋值/循环变量会遮蔽继承来的别名）。
 - 查询名不是字符串字面量（拼接/变量）→ 记 `dynamic`，静态无法证明闭合，判 FAIL
   （A3 要求闭包，动态名意味着白名单约束在这条路径上失效）。
+- 探活口 `available`（及注册表侧扣除）在使用侧同样跳过：`x.available()` 不是查询名引用。
+
+**已知不覆盖的写法（静态盲区，靠 review 兜底；不在本门禁的证明范围）**
+
+- `x := <domain>_lib(...)` 海象赋值产生的句柄（`_handle_vars` 只认 `Assign`/`AnnAssign`）；
+  海象赋值**声明**的同名变量也不参与遮蔽判断（`_local_targets` 只收 `Assign`/`AnnAssign`/`For`/`With`）；
+- `lambda` 体内部对句柄的引用（`_scope_nodes` 不进入 `Lambda`/嵌套函数/类）；
+- 同行多域同名引用在 `LibUsage` 去重键上的历史形态（已按 `line+kind+name+domain` 去重，
+  同一行不同域不再互相吞掉，但同名同域的重复引用只记一次）；
+- 跨文件的句柄传递（`f(lib)` 形参、返回值再赋值超过一跳）；
+- `import src.domains.<domain>.public as x` / `from src.domains.<domain>.public import <func>`
+  两种等价写法（本仓库无此形态，出现时需扩展 `_module_aliases`）。
 
 **用法**
 
@@ -150,31 +171,136 @@ def _iter_scope_bodies(tree: ast.AST):
             yield node.body
 
 
-def _lib_aliases(tree: ast.AST) -> dict[str, str]:
-    """收集 `domain_read` 入口函数的本地别名 → 域。"""
+def _lib_aliases(tree: ast.AST) -> tuple[dict[str, str], bool]:
+    """收集 `domain_read` 入口函数的本地别名 → 域；并报告是否存在直连 public 模块的 import。"""
     aliases: dict[str, str] = {}
+    has_public = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
-        if not (node.module or "").endswith(IMPORT_SUFFIX):
-            continue
-        for alias in node.names:
-            domain = LIB_FUNCS.get(alias.name)
-            if domain:
-                aliases[alias.asname or alias.name] = domain
+        if (node.module or "").endswith(IMPORT_SUFFIX):
+            for alias in node.names:
+                domain = LIB_FUNCS.get(alias.name)
+                if domain:
+                    aliases[alias.asname or alias.name] = domain
+        elif _public_module_domain(node):
+            has_public = True
+    return aliases, has_public
+
+
+def _public_module_domain(node: ast.ImportFrom) -> str | None:
+    """`from src.domains.<domain> import public` 的域名；其它形态 → None。"""
+    module = node.module or ""
+    bare = module[len("src."):] if module.startswith("src.") else module
+    if not bare.startswith("domains."):
+        return None
+    parts = bare.split(".")
+    # domains.<domain> + import public [as X]
+    if len(parts) == 2 and parts[1] and any(a.name == "public" for a in node.names):
+        return parts[1]
+    return None
+
+
+def _module_aliases_from(node: ast.ImportFrom) -> dict[str, str]:
+    """单个 import 语句引入的 public 模块别名（`as X` 或裸 `public`）→ 域。"""
+    domain = _public_module_domain(node)
+    if domain is None:
+        return {}
+    return {(a.asname or a.name): domain for a in node.names if a.name == "public"}
+
+
+def _module_aliases(nodes: Sequence[ast.AST]) -> dict[str, str]:
+    """一个作用域内 `from src.domains.<domain> import public as X` 的别名 → 域。
+
+    直连 public 模块拿到的是**隐式句柄**：`X.<func>` 与 `<domain>_lib().<func>` 等价，
+    A3 口径同样要求其引用名 ⊆ 注册表。
+    """
+    aliases: dict[str, str] = {}
+    for node in nodes:
+        if isinstance(node, ast.ImportFrom):
+            aliases.update(_module_aliases_from(node))
     return aliases
 
 
-def _is_lib_call(node: ast.AST | None, aliases: dict[str, str]) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in aliases
-    )
+def _local_targets(nodes: Sequence[ast.AST]) -> set[str]:
+    """作用域内被本地赋值/循环变量/`with ... as x` 绑定的名字（同名会遮蔽继承来的别名）。"""
+    targets: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            bound: Sequence[ast.AST | None] = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            bound = (node.target,)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            bound = (node.target,)
+        elif isinstance(node, ast.With):
+            bound = [item.optional_vars for item in node.items]
+        else:
+            continue
+        for target in bound:
+            stack: list[ast.AST] = [target] if target is not None else []
+            while stack:
+                current = stack.pop()
+                if isinstance(current, ast.Name):
+                    targets.add(current.id)
+                elif isinstance(current, (ast.Tuple, ast.List)):
+                    stack.extend(current.elts)
+                elif isinstance(current, ast.Starred):
+                    stack.append(current.value)
+    return targets
 
 
-def _handle_vars(nodes: Sequence[ast.AST], aliases: dict[str, str]) -> dict[str, str]:
-    """一个作用域内 `x = <domain>_lib(...)` 的句柄变量 → 域。"""
+def _alias_only_domain(expr: ast.AST, aliases: dict[str, str]) -> str | None:
+    """表达式是否**直接**是某个域句柄（含 `x if cond else None` 三元分支）。"""
+    if isinstance(expr, ast.Name):
+        return aliases.get(expr.id)
+    if isinstance(expr, ast.IfExp):
+        return _alias_only_domain(expr.body, aliases) or _alias_only_domain(expr.orelse, aliases)
+    return None
+
+
+def _scope_aliases(nodes: Sequence[ast.AST], inherited: dict[str, str]) -> dict[str, str]:
+    """本作用域可见的隐式句柄：本作用域内 import 的 + 模块级继承（被本地绑定遮蔽的除外）。"""
+    aliases = {**inherited, **_module_aliases(nodes)}
+    if not aliases:
+        return {}
+    shadowed = _local_targets(nodes)
+    return {name: domain for name, domain in aliases.items() if name not in shadowed}
+
+
+def _factory_domains(module_nodes: Sequence[ast.AST],
+                     module_aliases: dict[str, str]) -> dict[str, str]:
+    """同文件里 `def f(): ... return <隐式句柄>[ if ... else None]` 的工厂 → 域（单跳）。"""
+    factories: dict[str, str] = {}
+    for node in module_nodes:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        nodes = list(_scope_nodes(node.body))
+        scope = _scope_aliases(nodes, module_aliases)
+        if not scope:
+            continue
+        for stmt in nodes:
+            if not isinstance(stmt, ast.Return) or stmt.value is None:
+                continue
+            domain = _alias_only_domain(stmt.value, scope)
+            if domain:
+                factories[node.name] = domain
+                break
+    return factories
+
+
+def _call_domain(node: ast.AST | None, aliases: dict[str, str],
+                 factories: dict[str, str] | None) -> str | None:
+    """`f(...)` 的返回是否为某域句柄：lib 入口函数，或同文件单跳工厂。"""
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        return None
+    if node.func.id in aliases:
+        return aliases[node.func.id]
+    return (factories or {}).get(node.func.id)
+
+
+def _handle_vars(nodes: Sequence[ast.AST], aliases: dict[str, str],
+                 factories: dict[str, str] | None = None) -> dict[str, str]:
+    """一个作用域内 `x = <domain>_lib(...)` / `x = <工厂>()` 的句柄变量 → 域。"""
     handles: dict[str, str] = {}
     for node in nodes:
         targets: Sequence[ast.AST] = ()
@@ -183,36 +309,41 @@ def _handle_vars(nodes: Sequence[ast.AST], aliases: dict[str, str]) -> dict[str,
             targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             targets, value = (node.target,), node.value
-        if not _is_lib_call(value, aliases):
+        domain = _call_domain(value, aliases, factories)
+        if not domain:
             continue
-        domain = aliases[value.func.id]  # type: ignore[union-attr]
         for target in targets:
             if isinstance(target, ast.Name):
                 handles[target.id] = domain
     return handles
 
 
-def _resolve_lib_expr(node: ast.AST, handles: dict[str, str], aliases: dict[str, str]) -> str | None:
-    """表达式是否来自某个域的 lib 句柄；是则返回域名。"""
-    if isinstance(node, ast.Name) and node.id in handles:
-        return handles[node.id]
-    if _is_lib_call(node, aliases):
-        return aliases[node.func.id]  # type: ignore[union-attr]
-    return None
+def _resolve_lib_expr(node: ast.AST, handles: dict[str, str], aliases: dict[str, str],
+                      factories: dict[str, str] | None = None) -> str | None:
+    """表达式是否来自某个域的 lib 句柄（变量 / 隐式模块别名 / 入口函数 / 工厂）；是则返回域名。"""
+    if isinstance(node, ast.Name):
+        if node.id in handles:
+            return handles[node.id]
+        return aliases.get(node.id)
+    return _call_domain(node, aliases, factories)
 
 
 def collect_usage(source: str, filename: str) -> list[LibUsage]:
     """从一份源码里收集所有跨域读查询面引用（去重，按行序）。"""
     tree = ast.parse(source, filename=filename)
-    aliases = _lib_aliases(tree)
-    if not aliases:
+    lib_aliases, has_public_import = _lib_aliases(tree)
+    if not lib_aliases and not has_public_import:
         return []
+    module_nodes = list(_scope_nodes(getattr(tree, "body", [])))
+    module_aliases = _scope_aliases(module_nodes, {})
+    factories = (_factory_domains(getattr(tree, "body", []), module_aliases)
+                 if has_public_import else {})
 
-    seen: set[tuple[int, str, str]] = set()
+    seen: set[tuple[int, str, str, str]] = set()
     usage: list[LibUsage] = []
 
     def _add(u: LibUsage) -> None:
-        key = (u.line, u.kind, u.name)
+        key = (u.line, u.kind, u.name, u.domain)
         if key in seen:
             return
         seen.add(key)
@@ -222,7 +353,8 @@ def collect_usage(source: str, filename: str) -> list[LibUsage]:
         nodes = list(_scope_nodes(scope_body))
         if not nodes:
             continue
-        handles = _handle_vars(nodes, aliases)
+        aliases = {**lib_aliases, **_scope_aliases(nodes, module_aliases)}
+        handles = _handle_vars(nodes, aliases, factories)
 
         # 先标出「作为命名查询调用入口」的 Attribute，避免重复计成普通函数引用
         named_query_funcs: set[int] = set()
@@ -230,9 +362,9 @@ def collect_usage(source: str, filename: str) -> list[LibUsage]:
             if (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr in NAMED_QUERY_ATTRS
-                    and _resolve_lib_expr(node.func.value, handles, aliases)):
+                    and _resolve_lib_expr(node.func.value, handles, aliases, factories)):
                 named_query_funcs.add(id(node.func))
-                domain = _resolve_lib_expr(node.func.value, handles, aliases)
+                domain = _resolve_lib_expr(node.func.value, handles, aliases, factories)
                 first = node.args[0] if node.args else None
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
                     _add(LibUsage(filename, node.lineno, domain or "", KIND_QUERY, first.value))
@@ -242,11 +374,13 @@ def collect_usage(source: str, filename: str) -> list[LibUsage]:
         for node in nodes:
             if not isinstance(node, ast.Attribute) or id(node) in named_query_funcs:
                 continue
-            domain = _resolve_lib_expr(node.value, handles, aliases)
+            if node.attr in PROBE_NAMES:
+                continue
+            domain = _resolve_lib_expr(node.value, handles, aliases, factories)
             if domain:
                 _add(LibUsage(filename, node.lineno, domain, KIND_ATTR, node.attr))
 
-    return sorted(usage, key=lambda u: (u.line, u.kind, u.name))
+    return sorted(usage, key=lambda u: (u.line, u.kind, u.name, u.domain))
 
 
 def collect_registry(domain: str) -> DomainRegistry | None:
