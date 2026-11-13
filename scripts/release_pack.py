@@ -82,15 +82,26 @@ def pack_backend(ts):
     items = []
     # src/ 目录
     src_dir = os.path.join(ROOT, "src")
+    # R-2：Vue 前端产物（src/api/frontend/static-dist/）是本目录的一部分，但它由
+    # `npm run build` 生成且被 .gitignore 忽略——干净 checkout/构建机必须先构建。
+    # 缺它出包不会报错，只会让 shell/index.html 引用的 /static-vue/** 全部 404
+    # （页面退回空壳），属静默缺件，故这里 fail-loud。
+    dist_index = os.path.join(ROOT, "src", "api", "frontend", "static-dist", "index.html")
+    if not os.path.isfile(dist_index):
+        print("[FATAL] 缺少 Vue 前端构建产物: src/api/frontend/static-dist/index.html")
+        print("        打包前请先构建：cd src/api/frontend/app && npm ci && npm run build")
+        sys.exit(1)
     items.append((src_dir, "src"))
     # scripts/ 目录 (install-worker.sh, sync_templates.sh, sync_skills.sh 等)
     scripts_dir = os.path.join(ROOT, "scripts")
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
     # help/ 帮助文档源目录（usage + api + reference + developer markdown）
-    # ⚠️ 必须打入：服务重启时 src/help_page_gen.py 依据 help/ 渲染 src/api/frontend/shell/help.html；
-    #    缺失则升级后文档无法再生成（一直用渲染旧内容的 help.html，升级总缺新文档的根因，
-    #    2026-10-12 修复）。openapi.json 生成物已被 _tar_filter 过滤。
+    # ⚠️ 必须打入：服务重启时 src/kernel/help_page_gen.py 依据 help/ 渲染
+    #    src/api/frontend/shell/help.html；缺失则升级后文档无法再生成（一直用渲染旧内容的
+    #    help.html，升级总缺新文档的根因，2026-10-12 修复）。
+    #    仅 help/api/openapi.json（启动时落盘的生成物、gitignore）被 _tar_filter 跳过；
+    #    shell/openapi.json 是入仓的部署即用副本，正常打入。
     help_dir = os.path.join(ROOT, "help")
     if os.path.isdir(help_dir):
         items.append((help_dir, "help"))

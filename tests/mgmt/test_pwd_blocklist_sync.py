@@ -14,8 +14,8 @@ import re
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-PRODUCT = ROOT / "src" / "api" / "static" / "js" / "pwd-blocklist.js"
-REGISTER_HTML = ROOT / "src" / "api" / "static" / "register.html"
+PRODUCT = ROOT / "src" / "api" / "frontend" / "shell" / "js" / "pwd-blocklist.js"
+REGISTER_HTML = ROOT / "src" / "api" / "frontend" / "shell" / "register.html"
 
 HEADER = (
     "// 自动生成：与后端 src/domains/mgmt/auth/password.py _WEAK_PASSWORDS 同源（后端更新后须重新生成，scripts/gen-pwd-blocklist.py）\n"

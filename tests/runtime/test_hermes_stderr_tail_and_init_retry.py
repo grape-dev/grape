@@ -1,6 +1,6 @@
 """#416 修复：hermes ACP stderr 尾采 + 退出码上报 + initialize 超时配置化重试。
 
-背景（设计文档 E7/T5/T6，docs/weekly-clean-mys/grape-failure-analysis-20261020.md）：
+背景（设计文档 E7/T5/T6，见内部巡检台账 grape-failure-analysis-20261020）：
 - E7/T5：Windows worker 上 hermes ACP「Starting hermes-agent ACP」后即死，
   exit_code=-1、errors 空、stderr 只保前 200/500B → 崩溃栈丢失，零诊断；
 - T6：initialize 100s 固定超时，引擎冷启动慢直接失败且不可重试。

@@ -7,7 +7,7 @@
  *   2. 列表按 filename 逐项渲染（图片缩略图与非图片条目同列表）
  *   3. 上传 / 删除走 /issues/{id}/attachments 端点
  *   4. 端点失败 → error 态（不白屏）
- * 已知偏差（记入 tests/js/P3_AUDIT.md）：原「卡片自带 attachments 直接内联渲染、
+ * 已知偏差（内部台账记录，不入公开仓）：原「卡片自带 attachments 直接内联渲染、
  * 不发请求」的首屏优化未随 Vue 版移植，loadDetailExtras 一律 GET 端点（性能项，非功能缺陷）。
  */
 const assert = require('assert');

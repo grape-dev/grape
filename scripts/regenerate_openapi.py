@@ -37,8 +37,9 @@ def main() -> int:
     schema = custom_openapi(app)
     n = write_openapi_contract(schema, help_path=args.help_path, static_path=args.static_path)
     print(f"OpenAPI: contract dumped ({n} paths)")
-    print("  -> help/api/openapi.json")
-    print("  -> src/api/frontend/shell/openapi.json")
+    from src.kernel.help_page_gen import OPENAPI_HELP_PATH, OPENAPI_STATIC_PATH
+    print(f"  -> {args.help_path or OPENAPI_HELP_PATH}")
+    print(f"  -> {args.static_path or OPENAPI_STATIC_PATH}")
     return 0
 
 

@@ -123,7 +123,7 @@ diag_*.py
 configs/scene-sync.json
 .coverage
 
-# help.html / openapi.json 生成物现在落 src/api/frontend/legacy/（= STATIC_DIR，服务从这里出）
+# help.html / openapi.json 生成物现在落 src/api/frontend/shell/（= STATIC_DIR，服务从这里出）
 # 这两份直接入仓（部署即用），启动期就地刷新；旧的 src/api/static/ 已删除
 help/api/openapi.json
 
@@ -156,14 +156,12 @@ _uid_backup*.json
 
 
 # ── 合入 arch-weekly-11 新增忽略项（2026-11-13）──
+# 只保留既有规则未覆盖的项；指向已删除目录（src/api/static/）的条目已移除，
+# 与上文重复的 venv / dist/ 也已移除。
 !scripts/sync_domain_views.py
-src/api/static/help.html
-src/api/static/openapi.json
-venv
 src/**/data/
 *.pem
 *.key
-dist/
 build/
 .env*
 !.env.example

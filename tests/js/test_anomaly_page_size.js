@@ -4,7 +4,7 @@
  * 迁移说明：原测试沙箱执行 legacy observability.js；Vue 迁移后为 anomalyPage +
  * anomalyPageItems computed + 页脚分页。
  *   1. 分页态：anomalyPage（0 基）、anomalyTotalPages（客户端分页，固定 10 条/页）
- *   已知偏差（记入 P3_AUDIT.md）：#123 的「每页条数选择器」未随 Vue 版移植，
+ *   已知偏差（内部台账记录，不入公开仓）：#123 的「每页条数选择器」未随 Vue 版移植，
  *   现在是固定 10 条/页 + 页码翻页。本用例只锁现存分页契约。
  *   2. 请求/渲染按页切片（anomalyPageItems），不是一次全渲染
  *   3. 上一页/下一页按钮带边界禁用 + 「N / M」页码
