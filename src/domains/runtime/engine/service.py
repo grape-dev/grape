@@ -98,10 +98,15 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                 elif _scope == "user" and has_user_id(task_user_id) and _owner_name:
                     # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
                     try:
-                        c.execute("SELECT id FROM grape_accounts WHERE username=? "
-                                  "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
-                        _ur = c.fetchone()
-                        _engine_uid = _ur[0] if _ur else 0
+                        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_acc
+                        _mg_acc = _mgmt_lib_acc()
+                        if _mg_acc is not None:
+                            _engine_uid = _mg_acc.get_account_id_by_username(_owner_name) or 0
+                        else:
+                            c.execute("SELECT id FROM grape_accounts WHERE username=? "
+                                      "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
+                            _ur = c.fetchone()
+                            _engine_uid = _ur[0] if _ur else 0
                         if _engine_uid != task_user_id:
                             continue  # user scope 但用户不匹配
                     except Exception:

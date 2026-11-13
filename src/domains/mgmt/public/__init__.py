@@ -22,6 +22,12 @@ _TABLES: dict[str, set[str]] = {
         "bot_token_status", "host_vcs_username", "host_step", "host_error", "host_updated_at",
         "bot_gitcode_token", "gitcode_webhook_token", "bot_github_token", "github_webhook_token",
     },
+    "grape_accounts": {
+        "id", "username", "email", "email_source", "password_hash", "nickname",
+        "avatar_url", "status", "token_version", "email_verified", "email_is_placeholder",
+        "created_by_oauth", "last_active_at", "last_login_at", "created_at", "updated_at",
+        "username_lower",
+    },
     "unified_user_mapping": {
         "user_id", "gitcode_user", "gitcode_nickname", "feishu_open_id", "feishu_name",
         "github_login", "dingtalk_user_id", "updated_at", "app_id", "gitcode_id",
@@ -93,6 +99,27 @@ def list_all_user_ids() -> list[str]:
     return sorted({r[0] for r in rows if r[0]})
 
 
+def get_account_id_by_username(username: str) -> str | None:
+    """按用户名（大小写不敏感）取账号 id。
+
+    注意：grape_accounts.id 是 **UUID 字符串**（不是自增整数），因此返回 str。
+    """
+    if not username:
+        return None
+    row = fetch_one("grape_accounts", ["id"], "username_lower=LOWER(%s)", (username,))
+    if row is None:
+        row = fetch_one("grape_accounts", ["id"], "LOWER(username)=LOWER(%s)", (username,))
+    return str(row[0]) if row and row[0] not in (None, "") else None
+
+
+def get_account_username_by_id(account_id: str) -> str:
+    """按账号 id（UUID 字符串）取用户名；不存在返回空串。"""
+    if not account_id:
+        return ""
+    row = fetch_one("grape_accounts", ["username"], "id=%s", (str(account_id),))
+    return (row[0] or "") if row else ""
+
+
 def find_repo_key_in(candidates: list[str]) -> str | None:
     """在候选 repo_key 中找出库里实际存在的那个（跨平台前缀兼容）。"""
     cands = [c for c in (candidates or []) if c]
@@ -141,4 +168,5 @@ def health() -> dict[str, Any]:
 
 __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
-           "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column", "health"]
+           "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
+           "get_account_id_by_username", "get_account_username_by_id", "health"]

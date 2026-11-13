@@ -198,6 +198,20 @@ def aggregate_counts() -> dict[str, dict[str, int]]:
     return out
 
 
+_REPO_CRED_COLS = ("id", "repo_key", "cred_type", "value", "updated_at")
+
+
+def list_repo_credentials(repo_key: str = "") -> list[tuple]:
+    """仓库凭据行（只返回密文 value 列，解密归调用方）。"""
+    cols = ", ".join(_REPO_CRED_COLS)
+    with db_registry.cursor("runtime") as c:
+        if repo_key:
+            c.execute(f"SELECT {cols} FROM grape_t_repo_credentials WHERE repo_key=%s", (repo_key,))
+        else:
+            c.execute(f"SELECT {cols} FROM grape_t_repo_credentials")
+        return [tuple(r) for r in c.fetchall()]
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -211,4 +225,4 @@ def health() -> dict[str, Any]:
 __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
-           "task_brief", "list_credential_rows", "health"]
+           "task_brief", "list_credential_rows", "list_repo_credentials", "health"]

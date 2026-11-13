@@ -162,11 +162,18 @@ async def _verify_repo_bot_tokens():
             # bot 凭据族过滤保留（webhook_token 不是 bot token，不进巡检）
             from src.kernel.repo_key import parse_repo_key as _prk_health
             # D99：cred_type 归一——bot 凭据族='bot' 精确匹配（LIKE 反模式消除）
-            c.execute(
-                "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
-                "WHERE value IS NOT NULL AND value != '' AND cred_type = 'bot'"
-            )
-            for row in c.fetchall():
+            from src.domains.runtime import public as _rt_health
+            _rows_cred = None
+            if _rt_health.available():
+                _rows_cred = [(r[1], r[2]) for r in _rt_health.list_repo_credentials()
+                              if r[3] and r[2] == "bot"]
+            if _rows_cred is None:
+                c.execute(
+                    "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
+                    "WHERE value IS NOT NULL AND value != '' AND cred_type = 'bot'"
+                )
+                _rows_cred = c.fetchall()
+            for row in _rows_cred:
                 repos_to_check.append((row[0], _prk_health(row[0])[0]))
     except Exception as e:
         log.warning(f"_verify_repo_bot_tokens: query failed: {e}")
