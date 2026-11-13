@@ -228,21 +228,25 @@ def autopilot_js():
 
 
 class TestFrontendSource:
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_events_js_prioritizes_skill_display_name(self, events_js):
         assert "data.skill_display_name || data.skill" in events_js, (
             "events.js Skill 行应优先取 data.skill_display_name，回退 data.skill"
         )
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_autopilot_js_uses_display_name_in_detail_card(self, autopilot_js):
         assert "t.display_name || t.skill_name" in autopilot_js, (
             "autopilot.js 详情页卡片应优先取 display_name，回退 skill_name"
         )
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_autopilot_js_uses_display_name_in_refresh_card(self, autopilot_js):
         assert "task.display_name || task.skill_name" in autopilot_js, (
             "autopilot.js 编辑刷新卡片应优先取 display_name，回退 skill_name"
         )
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_js_syntax_valid(self):
         for name in ("events.js", "autopilot.js"):
             path = os.path.join(BASE_SRC, name)

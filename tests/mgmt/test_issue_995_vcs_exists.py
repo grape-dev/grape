@@ -11,11 +11,7 @@ from src.api.main import app
 from src.domains.mgmt.auth import grape_account_db
 from src.api.jwt_utils import create_access_token
 from src.domains.mgmt.auth.grape_account_db import get_token_version
-HEAD:tests/test_issue_995_vcs_exists.py
 from src.kernel.session_manager import db, db_lock
-
-from src.kernel.session_manager import db, db_lock
-origin/arch-weekly-11:tests/mgmt/test_issue_995_vcs_exists.py
 import src.api.issue_vcs_index as vcs_index
 
 client = TestClient(app)

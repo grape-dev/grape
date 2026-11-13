@@ -241,7 +241,7 @@ class TestHasRefreshTokenStatus4:
 class TestLocaleI18nKeys:
     """T2-13, T2-14: account namespace 包含 token_expired / token_expired_hint / re_bind。"""
 
-_LOCALE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell", "locales")
+    _LOCALE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell", "locales")
 
     def test_t2_13_zh_locale_has_token_expired_keys(self):
         """T2-13: zh/app.json account 对象包含三个 key。"""

@@ -20,14 +20,14 @@ SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / 
 LOCALES = SHELL / "locales"
 
 # 2026-11-13 快照：templates(+66 键) / tasks / admin 文案变更并 bump 四页 cacheVer 之后
-LOCALE_FINGERPRINT = "180ee6e447ffd932"
+LOCALE_FINGERPRINT = "55b6fb084de9af1d"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    "index.html": ("43", "42"),
-    "admin.html": ("20261113-1", "20261016-8"),
-    "register.html": ("35", "34"),
-    "forgot.html": ("35", "34"),
+    "index.html": ("44", "42"),
+    "admin.html": ("20261113-2", "20261016-8"),
+    "register.html": ("36", "34"),
+    "forgot.html": ("36", "34"),
 }
 
 # 各页面 cacheVer 的取法（三份 auth 页是内联 IIFE，admin 走 I18N.init）

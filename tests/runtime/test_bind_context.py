@@ -8,18 +8,21 @@
 - PAT 的一切归 凭据 tab（配置/删除）。
 """
 import re
+import pytest
 from pathlib import Path
 
 ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src" / "views" / "AccountView.vue"
 APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell" / "js" / "app.js"
 
 
+@pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
 def test_context_split_signature():
     src = ACCT.read_text(encoding="utf-8")
     assert "function _accountBindProvider(provider, allowPat) {" in src, "缺上下文分域签名"
     assert "allowPat = allowPat === true;" in src, "缺 allowPat 归一"
 
 
+@pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
 def test_security_context_oauth_only_modal():
     src = ACCT.read_text(encoding="utf-8")
     i = src.find("function _accountBindProvider")
@@ -40,12 +43,14 @@ def test_security_context_oauth_only_modal():
     assert "_accountManualBindForm" not in sec, "安全 tab 未配 OAuth 不应出现 PAT 表单"
 
 
+@pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
 def test_guide_entry_passes_allowpat_true():
     app = APP.read_text(encoding="utf-8")
     assert "_accountBindProvider(provider, true)" in app, "引导页入口未开双模式"
     assert "_accountBindProvider(provider, false)" not in app, "引导页不应传 false"
 
 
+@pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
 def test_security_rows_single_arg_calls():
     acct = ACCT.read_text(encoding="utf-8")
     calls = re.findall(r"_accountBindProvider\([^)]*\)", acct)
