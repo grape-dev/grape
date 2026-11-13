@@ -27,9 +27,11 @@
   - `_set_migration_session_lock_timeout(dconn, 10)` 在专用连接 GET_LOCK 后下发；
   - `_backfill_in_batches()`：LIMIT 1000 循环 + 每批独立事务 + 单批失败隔离；
 - `scripts/check-destructive-ddl.py` + check-all.sh 挂载 + .gitignore 白名单；
-- `scripts/set_min_code_version.py`：部署脚本配套（全集群升级完成后写 meta + 回读核验）；
-- 测试：`tests/atomic/test_issue_536_migrations.py`（26 用例）+
-  `tests/test_check_destructive_ddl.py`（9 用例）。
+- `scripts/set_min_code_version.py`：部署脚本配套（**停写窗口内、重启新版本之前**写 meta + 回读核验；
+  该值是全局 cleanup 开关，写早了会让尚未升级的节点连带跳过收尾 DDL；2026-11-13 口径修订：
+  重建表类迁移（202611170007）在 meta 未设置时拒绝执行，所以写入时机从「部署末步」前移）；
+- 测试：`tests/api/test_issue_536_migrations.py`（26 用例）+
+  `tests/kernel/test_check_destructive_ddl.py`（9 用例）。
 
 ## 边界守卫（已验证）
 
@@ -40,8 +42,8 @@
 ## 验收命令
 
 ```bash
-pytest tests/atomic/test_issue_536_migrations.py tests/test_check_destructive_ddl.py -v  # 35 用例
+pytest tests/api/test_issue_536_migrations.py tests/kernel/test_check_destructive_ddl.py -v  # 35 用例
 python3 scripts/check-destructive-ddl.py                                                # PASS
-python3 scripts/set_min_code_version.py <版本>                                          # 部署末步
+python3 scripts/set_min_code_version.py <版本>                                          # 停写窗口内、重启前写（非部署末步）
 ```
 

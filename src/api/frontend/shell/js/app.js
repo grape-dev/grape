@@ -403,6 +403,22 @@ function loadAgentTypes() {
     });
   }
 
+  // 口径统一：前端粗判只认「仓库平台绑定」（平台卡目录内 provider）——
+  // 登录渠道（华为等）不算；目录未就绪时保守视为已绑定，交由后端
+  // /repos/member 的 _no_vcs_binding 权威纠正（D102-C）。
+  // 注：Vue 线未搬 _appVcsCatalog 目录（旧壳的 _appLoadVcsCatalog 已随页面删除），
+  // 因此目录恒为 null → 本函数当前等价于「bindings 非空」；保留它为了语义与
+  // arch-weekly-11 同源，将来恢复目录即自动生效（arch 合并 d2787875）。
+  function _hasVcsBinding() {
+    var _u = {};
+    try { _u = JSON.parse(localStorage.getItem('user') || '{}'); } catch (e) {}
+    var _bs = _u.bindings || [];
+    if (!_bs.length) return false;
+    var _cat = (typeof _appVcsCatalog === 'object' && _appVcsCatalog) ? _appVcsCatalog : null;
+    if (!_cat) return true;  // 目录未就绪：不误判，交给后端
+    return _bs.some(function(b) { return !!_cat[b]; });
+  }
+
   // 统一路由恢复：密码登录 / OAuth 登录 / 页面刷新共用
   // 优先级：hash 路由 > 有绑定→loadRepos > 无绑定→引导页
   function _restoreNavAfterLogin() {
@@ -423,7 +439,7 @@ function loadAgentTypes() {
       const parts = hash.substring(1).split('/');
       const view = parts[0];
       const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-      if (bindings.length === 0 && !currentRepo()) {
+      if (!_hasVcsBinding() && !currentRepo()) {
         goToRepos();
       } else if (noRepoViews.includes(view) || currentRepo()) {
         nav(view, param);
@@ -431,14 +447,16 @@ function loadAgentTypes() {
         nav('dash');
       }
     } else if (bindings.length > 0) {
-      // 有绑定无 hash → 加载仓库列表
+      // 有仓库平台绑定无 hash → 加载仓库列表（纯登录渠道绑定 → loadRepos 内转引导页）
       loadRepos();
     } else if (currentRepo()) {
       // 无绑定但有当前仓库 → dashboard
       nav('dash');
-    } else {
-      // 无绑定无 hash → 引导页
+    } else if (!_hasVcsBinding()) {
+      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）
       goToRepos();
+    } else {
+      // 有绑定且无 hash/仓库/引导需求 → 停留当前视图（显式空分支：语义=无需路由）
     }
   }
 
@@ -814,10 +832,8 @@ function loadAgentTypes() {
     // 优先级补位：从安全设置返回时安全横幅可能已被处理，补检被抑制的引擎引导
     setTimeout(function() { _checkEngineBanner(); }, 100);
     var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
-    // 先检查绑定状态——未绑定直接回引导页，不走 nav('dash') 避免 403
-    var _u = JSON.parse(localStorage.getItem('user') || '{}');
-    var _bindings = _u.bindings || [];
-    if (_bindings.length === 0) {
+    // 未绑定仓库平台直接回引导页，不走 nav('dash') 避免 403（用户裁定 2026-11-09）
+    if (!_hasVcsBinding()) {
       goToRepos();
       return;
     }

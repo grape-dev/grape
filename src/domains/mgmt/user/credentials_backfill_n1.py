@@ -56,14 +56,16 @@ def backfill_uuid() -> None:
         # 双方言键：业务复合键 (user_id, provider)——不用 SQLite 方言 rowid
         #（MySQL 无 rowid 列，此前 except 吞错导致存量 MySQL 库回填静默空转）
         need = db.execute(
-            "SELECT user_id, provider FROM user_credentials "
+            "SELECT user_id, provider, COALESCE(kind,'') FROM user_credentials "
             "WHERE id IS NULL OR id=''").fetchall()
-        for user_id, provider in need:
+        for user_id, provider, kind in need:
+            # A2b（2026-11-13）：唯一键扩为 (user_id, provider, kind)，同平台 PAT/OAuth
+            # 各一行 —— WHERE 不带 kind 会把两行一起改写（QA M1）。
             db.execute(
                 "UPDATE user_credentials SET id=?, "
                 "created_at=CASE WHEN created_at IS NULL OR created_at='' THEN ? ELSE created_at END "
-                "WHERE user_id=? AND provider=?",
-                (uuid7_str(), now, user_id, provider))
+                "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
+                (uuid7_str(), now, user_id, provider, kind))
         if need:
             db.commit()
             log.info(f"user_credentials UUID backfill: {len(need)} rows")
@@ -77,13 +79,15 @@ def backfill_encryption() -> None:
         from src.domains.mgmt.auth.credential_crypto import encrypt
         # 双方言键：业务复合键（同 backfill_uuid，MySQL 兼容）
         rows = db.execute(
-            "SELECT user_id, provider, config_json FROM user_credentials").fetchall()
-        plain = [(uid, prov, cfg) for uid, prov, cfg in rows
+            "SELECT user_id, provider, COALESCE(kind,''), config_json FROM user_credentials").fetchall()
+        plain = [(uid, prov, kind, cfg) for uid, prov, kind, cfg in rows
                  if _is_plaintext_credential(cfg)]
-        for uid, prov, cfg in plain:
+        for uid, prov, kind, cfg in plain:
+            # A2b：同平台多 kind 各一行，WHERE 必须带 kind（QA M1）
             db.execute(
-                "UPDATE user_credentials SET config_json=? WHERE user_id=? AND provider=?",
-                (encrypt(cfg), uid, prov))
+                "UPDATE user_credentials SET config_json=? "
+                "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
+                (encrypt(cfg), uid, prov, kind))
         if plain:
             db.commit()
             log.info(f"user_credentials plaintext encryption backfill: {len(plain)} rows")

@@ -97,9 +97,15 @@ class IdentityRepository:
 
 
 class UserCredentialRepository:
-    def get(self, session: Session, user_id: str, provider: str) -> "UserCredentialDTO | None":
+    def get(self, session: Session, user_id: str, provider: str,
+            kind: str = "") -> "UserCredentialDTO | None":
+        # A2b（QA I3）：主键扩为 (user_id, provider, kind) 后，同平台多 kind 各一行，
+        # 不传 kind 的 .first() 结果不确定 → 默认 '' 显式定位未分类行。
+        # ⚠️ 边界：kind='' 的默认值意味着**只取未分类行**，不是「任意行」。拿它读
+        # PAT/OAuth 归位行（kind='pat'/'oauth'）会拿不到；需要具体类型时必须显式传
+        # kind，需要模糊读走 get_credentials()（带双读回落）。
         m = session.query(UserCredentialModel).filter_by(
-            user_id=str(user_id), provider=provider).first()  # D105：id 列入 PK 后不再用复合 get
+            user_id=str(user_id), provider=provider, kind=kind or "").first()
         return _cred_dto(m) if m else None
 
     def set(self, session: Session, user_id: str, provider: str, config_json: str,

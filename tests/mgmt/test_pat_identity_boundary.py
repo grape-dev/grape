@@ -313,3 +313,30 @@ def test_t6_mark_identity_pat_missing_row_logs_warning(caplog):
         grape_account_db.mark_identity_pat("no-such-user-id", "gitee", pat_login="x")
     assert any("mark_identity_pat" in r.message for r in caplog.records), \
         f"缺归属行时未告警: {[r.message for r in caplog.records]}"
+
+
+def test_t7_platform_tokens_change_invalidates_repo_cache(gitee_card):
+    """T7：泛型 platform_tokens 变更必须清 user_repos 缓存。
+
+    行为缺口：缓存失效判定只认 `<p>_token` / `<p>_pat`，而卡片驱动的新平台走的是
+    `platform_tokens` 复数键 —— 不清缓存时 /repos/member 会在 TTL 内直接早退返回
+    旧快照，新平台的仓库要等过期或手动刷新才出现。
+    清除路径复用同一个条件语句，所以这条同时守住「清 PAT 后列表残留」。
+    """
+    from unittest.mock import patch
+    from src.domains.mgmt.routes.settings import UpdateCredentials, update_credentials
+    from src.domains.mgmt.user import db as user_db
+
+    a = _mk_user("patb_t7")
+    try:
+        user_db.save_user_repos(a["id"], [{"repo_key": "gitcode:o/r", "owner": "o", "name": "r"}])
+        assert user_db.get_user_repos(a["id"]), "前置：缓存应已写入"
+
+        body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
+        with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
+            update_credentials(body, user={"id": a["id"]})
+
+        assert not user_db.get_user_repos(a["id"]), \
+            "platform_tokens 变更后 user_repos 缓存未失效（项目页会继续显示旧快照）"
+    finally:
+        _drop_user(a["id"])

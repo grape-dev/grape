@@ -31,8 +31,18 @@ check('外链域名按前缀拼', function () {
 });
 
 check('筛选按前缀严格匹配（非 includes）', function () {
-  assert.ok(/platformFilter\.value === 'github'\)[^\n]*rk\.indexOf\('github:'\) === 0/.test(VIEW), '筛选应按前缀');
+  // arch-weekly-11 d2787875 (D102-F)：筛选改成「被选平台前缀精确匹配 + 裸键归 gitcode」，
+  // 原「非 github 即 gitcode」把 gitee 错归 gitcode 桶 —— 这里锁新口径。
+  assert.ok(/return rk\.indexOf\(platformFilter\.value \+ ':'\) === 0/.test(VIEW), '筛选应按前缀精确匹配');
+  assert.ok(/if \(!rk\) return platformFilter\.value === 'gitcode'/.test(VIEW), '裸键应归 gitcode');
   assert.ok(!/platformFilter[\s\S]{0,60}\.includes\(/.test(VIEW), '不应退化为 contains 匹配');
 });
 
-console.log('\nprovider 推导全部通过 (' + passed + '/3)');
+check('平台栏数据源 = 有仓库的平台 ∪ 身份绑定兜底', function () {
+  // d2787875：PAT 不产生身份行，bindings 当权威会让纯 PAT 平台整条平台栏消失。
+  assert.ok(/repos\.value\.forEach\(\(r\) => \{[\s\S]{0,160}repo_key/.test(VIEW), '平台应取自仓库 repo_key');
+  assert.ok(/if \(!Object\.keys\(keys\)\.length\)[\s\S]{0,120}bindings\.forEach/.test(VIEW), '无仓库时回退 bindings');
+  assert.ok(/rk\.indexOf\(':'\) > 0 \? rk\.split\(':'\)\[0\] : 'gitcode'/.test(VIEW), '裸键归 gitcode');
+});
+
+console.log('\nprovider 推导全部通过 (' + passed + '/4)');

@@ -473,6 +473,9 @@ const user = computed(() => {
 })
 const userName = computed(() => user.value)
 const avatar = computed(() => (user.value || 'U')[0].toUpperCase())
+// 平台名册（与 arch-weekly-11 d2787875 同源：旧壳 _getAvailablePlatforms 的 cat 兜底）
+const PLATFORM_NAMES = { gitcode: 'GitCode', github: 'GitHub', gitee: 'Gitee', gitlab: 'GitLab' }
+const PLATFORM_ORDER = ['gitcode', 'github', 'gitee', 'gitlab']
 const platforms = computed(() => {
   const bindings = (() => {
     try {
@@ -482,10 +485,28 @@ const platforms = computed(() => {
       return []
     }
   })()
-  const list = []
-  if (bindings.indexOf('gitcode') >= 0) list.push({ key: 'gitcode', name: 'GitCode' })
-  if (bindings.indexOf('github') >= 0) list.push({ key: 'github', name: 'GitHub' })
-  return list
+  // 平台栏数据源 = 当前账号实际有仓库的平台（repo_key 前缀）∪ 身份绑定（无仓库时兜底）。
+  // 不能用 bindings 当权威：PAT 是「仓库执行凭据」、不产生身份行（A2 对象模型），
+  // 纯 PAT 平台永远不在 bindings 里 → 平台栏不渲染（platforms.length <= 1）→
+  // 该平台的仓库只能靠翻页找（2026-11-13 实测：gitee 7 条落第 7/8 页、无页签）。
+  const keys = {}
+  repos.value.forEach((r) => {
+    const rk = (r && r.repo_key) || ''
+    const k = rk.indexOf(':') > 0 ? rk.split(':')[0] : 'gitcode' // 裸键归 gitcode
+    if (k) keys[k] = true
+  })
+  if (!Object.keys(keys).length) {
+    bindings.forEach((b) => {
+      keys[b] = true // 尚无仓库（新账号/加载中）→ 回退身份绑定
+    })
+  }
+  const rank = (k) => {
+    const i = PLATFORM_ORDER.indexOf(k)
+    return i < 0 ? PLATFORM_ORDER.length : i
+  }
+  return Object.keys(keys)
+    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    .map((k) => ({ key: k, name: PLATFORM_NAMES[k] || k }))
 })
 const hostedCount = computed(() => repos.value.filter((r) => r.is_hosted).length)
 
@@ -495,8 +516,8 @@ const allRepos = computed(() => {
   if (platformFilter.value) {
     list = list.filter((r) => {
       const rk = r.repo_key || ''
-      if (platformFilter.value === 'github') return rk.indexOf('github:') === 0
-      return rk.indexOf('github:') !== 0
+      if (!rk) return platformFilter.value === 'gitcode' // 裸键归 gitcode（与平台栏同口径，评审 I-2）
+      return rk.indexOf(platformFilter.value + ':') === 0 // D102-F: 前缀精确匹配（原「非 github 即 gitcode」把 gitee 错归 gitcode 桶）
     })
   }
   return list.sort((a, b) => {

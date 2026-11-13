@@ -47,15 +47,16 @@ class TestMainVerdict:
 
     def test_violation_lines_reported(self, monkeypatch, capsys):
         monkeypatch.setattr(cdd, "_added_lines",
-                            lambda base: (['c.execute("ALTER TABLE t DROP COLUMN c")'], None))
+                            lambda base: ([("src/api/db_setup.py",
+                                            'c.execute("ALTER TABLE t DROP COLUMN c")')], None))
         rc = cdd.main(["check-destructive-ddl", "fake-base"])
         assert rc == 1
         assert "FAIL" in capsys.readouterr().out
 
     def test_collected_violation_lines_pass(self, monkeypatch, capsys):
         monkeypatch.setattr(cdd, "_added_lines", lambda base: ([
-            '_destructive_ddl(c, "ALTER TABLE t DROP COLUMN c", kind_hint="cleanup")',
-            'c.execute("ALTER TABLE t ADD COLUMN c INT")',
+            ("src/api/db_setup.py", '_destructive_ddl(c, "ALTER TABLE t DROP COLUMN c", kind_hint="cleanup")'),
+            ("src/api/db_setup.py", 'c.execute("ALTER TABLE t ADD COLUMN c INT")'),
         ], None))
         rc = cdd.main(["check-destructive-ddl", "fake-base"])
         assert rc == 0
@@ -136,3 +137,27 @@ class TestBaseResolution:
         out = capsys.readouterr().out
         assert rc == 2
         assert "no-such-base-xyz-536" in out
+
+
+class TestTableLevelDdl:
+    """G-1：表级破坏性 DDL 与列级同等对待（否则重建迁移可回退成裸 DDL 而 CI 全绿）。"""
+
+    def test_bare_drop_table_is_destructive(self):
+        assert cdd._classify_added_lines(['c.execute("DROP TABLE user_credentials")'])
+
+    def test_bare_rename_table_is_destructive(self):
+        assert cdd._classify_added_lines(['c.execute("RENAME TABLE a TO b, c TO a")'])
+
+    def test_alter_table_rename_to_is_destructive(self):
+        assert cdd._classify_added_lines(
+            ['c.execute("ALTER TABLE user_credentials__uqkind RENAME TO user_credentials")'])
+
+    def test_truncate_table_is_destructive(self):
+        assert cdd._classify_added_lines(['c.execute("TRUNCATE TABLE user_credentials")'])
+
+    def test_collected_table_ddl_passes(self):
+        assert cdd._classify_added_lines(
+            ['_destructive_ddl(c, "DROP TABLE user_credentials__uqkind", kind_hint="cleanup")']) == []
+
+    def test_table_ddl_membership_check_passes(self):
+        assert cdd._classify_added_lines(['                if "DROP TABLE" in sql:']) == []

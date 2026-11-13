@@ -27,10 +27,12 @@ pre-commit 接入（仓库暂无 .pre-commit-config.yaml，本地 hook 手动安
   ln -sf ../../scripts/check-destructive-ddl.py .git/hooks/pre-commit
 """
 import glob
+import io
 import os
 import re
 import subprocess
 import sys
+import tokenize
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TARGET_FILES = ["src/api/db_setup.py"] + sorted(
@@ -39,8 +41,12 @@ TARGET_FILES = ["src/api/db_setup.py"] + sorted(
 )
 
 # 危险 DDL 形态（大小写不敏感；行内匹配）
+# 列级 + 表级都要覆盖：表级形态（DROP/RENAME TABLE、ALTER ... RENAME TO）一旦漏掉，
+# 把重建迁移回退成裸 DDL 时 CI 仍全绿（评审 G-1）。
 _DESTRUCTIVE_RE = re.compile(
-    r"\b(DROP\s+COLUMN|RENAME\s+COLUMN|MODIFY\s+COLUMN)\b", re.IGNORECASE)
+    r"\b(DROP\s+COLUMN|RENAME\s+COLUMN|MODIFY\s+COLUMN|"
+    r"DROP\s+TABLE|RENAME\s+TABLE|TRUNCATE\s+TABLE)\b"
+    r"|\bALTER\s+TABLE\s+\S+\s+RENAME\s+TO\b", re.IGNORECASE)
 # 收口形态 a：_destructive_ddl( 调用行
 _COLLECTED_RE = re.compile(r"_destructive_ddl\s*\(", re.IGNORECASE)
 # 收口形态 b：cleanup 声明（注册表登记行）
@@ -49,36 +55,77 @@ _CLEANUP_DECL_RE = re.compile(
     re.IGNORECASE)
 # 探测逻辑行（'DROP COLUMN' in sql 之类的成员判断，非 DDL 语句本身）
 _MEMBERSHIP_RE = re.compile(
-    r"[\"'](DROP|RENAME|MODIFY)\s+COLUMN[\"']\s+in\b", re.IGNORECASE)
+    r"[\"'](DROP|RENAME|MODIFY|TRUNCATE)\s+(COLUMN|TABLE)[\"']\s+in\b",
+    re.IGNORECASE)
 
 
 def _paren_balance(line: str) -> int:
     return line.count("(") - line.count(")")
 
 
+def _hidden_lines(path: str) -> set:
+    """文件里属于 STRING / COMMENT 令牌的行号（1 基）。
+
+    按令牌判断而不是「三引号出现次数奇偶」——后者在 diff hunk 从 docstring 中间开始
+    时状态是错的（hunk 里看不到开头的 `\"\"\"`），把 docstring 正文当代码扫，
+    实测误报 db_setup.py 里一句 `ALTER TABLE ... RENAME TO` 说明文字（2026-11-13）。
+    """
+    rc, src = _git("show", f"HEAD:{path}")
+    if rc != 0:
+        return set()
+    hidden = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type in (tokenize.STRING, tokenize.COMMENT):
+                hidden.update(range(tok.start[0], tok.end[0] + 1))
+    except (tokenize.TokenError, IndentationError):
+        pass  # 语法不完整时退化为只跳过显式注释行，不误判为通过
+    return hidden
+
+
 def _classify_added_lines(added):
     """按序状态机解析新增行，返回未收口的危险 DDL 行。
 
-    跳过：注释行、docstring 内行、_destructive_ddl/register_migration 调用的
-    括号延续行（多行调用形态）、探测逻辑行（'DROP COLUMN' in sql）。
+    added 项可为 (file, lineno, text) / (file, text) / text：
+    - 带 lineno 时用 tokenize 精确屏蔽字符串与注释行（真实 diff 路径）；
+    - 不带 lineno（单元测试/旧调用点）时退回「三引号奇偶」启发式。
+    lineno < 0 表示 hunk 边界（括号深度不可跨 hunk 推断，遇到就归零）。
     """
     violations = []
     collected_depth = 0
+    hidden_cache = {}
     in_docstring = False
-    for ln in added:
+    for item in added:
+        if isinstance(item, str):
+            path, lineno, ln = "", None, item
+        elif len(item) == 2:
+            path, ln = item
+            lineno = None
+        else:
+            path, lineno, ln = item
+        if lineno is not None and lineno < 0:
+            collected_depth = 0
+            continue
         stripped = ln.strip()
+        tri = (ln.count('"""') + ln.count("'''")) % 2 == 1
         if collected_depth > 0:
             collected_depth = max(collected_depth + _paren_balance(ln), 0)
             continue
-        if in_docstring:
-            if (ln.count('"""') + ln.count("'''")) % 2 == 1:
-                in_docstring = False
-            continue
-        if stripped.startswith("#"):
-            continue
-        if (ln.count('"""') + ln.count("'''")) % 2 == 1:
-            in_docstring = True
-            continue
+        if lineno is None:
+            if in_docstring:
+                if tri:
+                    in_docstring = False
+                continue
+            if stripped.startswith("#"):
+                continue
+            if tri:
+                in_docstring = True
+                continue
+        else:
+            if path not in hidden_cache:
+                hidden_cache[path] = _hidden_lines(path)
+            if lineno in hidden_cache[path] or stripped.startswith("#"):
+                continue
         if _MEMBERSHIP_RE.search(ln):
             continue
         # 收口形态行先登记括号深度（开括号行本身可不含 DDL 关键词）
@@ -132,11 +179,18 @@ def _added_lines(base: str):
                         f"GRAPE_WORK_BRANCH），base 不可解析按 FAIL 处理，不做 fail-open。")
     lines = []
     cur_file = ""
+    new_lineno = 0
     for ln in out.splitlines():
         if ln.startswith("+++ b/"):
             cur_file = ln[len("+++ b/"):].strip()
+        elif ln.startswith("@@"):
+            m = re.search(r"\+(\d+)(?:,\d+)?", ln)
+            new_lineno = int(m.group(1)) if m else 0
+            # hunk 边界：括号深度/文档状态不能跨 hunk 继承（-1 为哨兵行号）
+            lines.append((cur_file, -1, ln))
         elif ln.startswith("+") and not ln.startswith("+++"):
-            lines.append((cur_file, ln[1:]))
+            lines.append((cur_file, new_lineno, ln[1:]))
+            new_lineno += 1
     return lines, None
 
 
@@ -153,11 +207,21 @@ def main(argv):
     # QA 复审 M-2：scripts/migrations/ 是一次性迁移脚本——受控通道（常量驱动的
     # 表/列名、逐文件人工评审），其中的危险 DDL 不适用 db_setup 的
     # _destructive_ddl/cleanup 收口形态；单独计数报告，不判违规。
-    migration_ddl = [(f, l) for f, l in added
+    # 归一成 (file, lineno, text)：兼容测试/旧调用点给出的 (file, text) 与裸文本。
+    norm = []
+    for t in added:
+        if isinstance(t, str):
+            norm.append(("", None, t))
+        elif len(t) == 2:
+            norm.append((t[0], None, t[1]))
+        else:
+            norm.append(tuple(t))
+    added = norm
+    migration_ddl = [(f, l) for f, _n, l in added
                      if f.startswith("scripts/migrations/") and _DESTRUCTIVE_RE.search(l)]
-    added = [(f, l) for f, l in added if not f.startswith("scripts/migrations/")]
+    added = [t for t in added if not t[0].startswith("scripts/migrations/")]
 
-    violations = _classify_added_lines([l for _, l in added])
+    violations = _classify_added_lines(added)
 
     if migration_ddl:
         print(f"[check-destructive-ddl] INFO：scripts/migrations/ 受控通道内新增危险 DDL "
