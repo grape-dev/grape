@@ -1095,6 +1095,8 @@ _READ_QUERIES: dict[str, str] = {
         "SELECT 1 FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 "
         "AND (tag=%s OR tag='all') LIMIT 1"),
     "engine_tags_enabled": "SELECT tag FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 ORDER BY tag",
+    # issue 查 id（mgmt feedback 上下文）
+    "issue_id_by_repo_number": "SELECT id FROM issue WHERE repo_key=%s AND issue_number=%s LIMIT 1",
     # 仓库 bot 凭据（mgmt 读；config_store 的 JOIN 拆分后也需要全量 rc 行）
     "repo_bot_token_value": (
         "SELECT value FROM grape_t_repo_credentials WHERE repo_key=%s AND cred_type='bot' LIMIT 1"),

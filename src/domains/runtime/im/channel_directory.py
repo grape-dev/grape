@@ -97,10 +97,15 @@ def resolve_open_id_by_user(user_id: str) -> str:
         return _mg.get_feishu_open_id(user_id) or ""
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND feishu_open_id!='' LIMIT 1",
-            (user_id,))
-        row = c.fetchone()
+        from src.kernel.domain_read import mgmt_lib as _mg_oid
+        _oid = _mg_oid(foreign_only=True)
+        if _oid is not None:
+            row = _oid.read_one("um_feishu_open_id_by_user", (user_id,))
+        else:
+            c.execute(
+                "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND feishu_open_id!='' LIMIT 1",
+                (user_id,))
+            row = c.fetchone()
         return row[0] if row and row[0] else ""
 
 
@@ -161,10 +166,15 @@ def reverse_lookup_by_open_id(open_id: str) -> dict:
         return out
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT user_id, gitcode_user, feishu_name, gitcode_nickname "
-            "FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1", (open_id,))
-        row = c.fetchone()
+        from src.kernel.domain_read import mgmt_lib as _mg_umrow
+        _umrow = _mg_umrow(foreign_only=True)
+        if _umrow is not None:
+            row = _umrow.read_one("um_row_by_feishu_open_id", (open_id,))
+        else:
+            c.execute(
+                "SELECT user_id, gitcode_user, feishu_name, gitcode_nickname "
+                "FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1", (open_id,))
+            row = c.fetchone()
     if row:
         out["user_id"] = row[0]
         out["gitcode_user"] = row[1]

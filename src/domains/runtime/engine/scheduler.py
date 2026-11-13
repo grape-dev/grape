@@ -977,10 +977,16 @@ def _get_enabled_tasks() -> list[dict]:
     else:
         with db_lock:
             c = db.cursor()
-            rows = c.execute(
-                "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-                "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE enabled=1"
-            ).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mg_apf
+            _apf = _mg_apf(foreign_only=True)
+            if _apf is not None:
+                rows = _apf.read_all("autopilot_tasks_enabled_full", ())
+            else:
+                rows = c.execute(
+                    "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
+                    "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+                    "FROM autopilot_tasks WHERE enabled=1"
+                ).fetchall()
     tasks = []
     for r in rows:
         tasks.append({
@@ -1610,7 +1616,12 @@ async def scheduler_loop():
                         continue
                     with db_lock:
                         c = db.cursor()
-                        row = c.execute("SELECT last_run_at FROM autopilot_tasks WHERE id=?", (task_id,)).fetchone()
+                        from src.kernel.domain_read import mgmt_lib as _mg_aplr
+                        _aplr = _mg_aplr(foreign_only=True)
+                        if _aplr is not None:
+                            row = _aplr.read_one("autopilot_task_last_run", (task_id,))
+                        else:
+                            row = c.execute("SELECT last_run_at FROM autopilot_tasks WHERE id=?", (task_id,)).fetchone()
                         last_run = row[0] if row else ""
                     if _is_cron_due(task["cron"], last_run):
                         log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")

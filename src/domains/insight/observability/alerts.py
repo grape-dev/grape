@@ -861,7 +861,13 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
             with db_lock:
                 c = db.cursor()
                 if rk:
-                    c.execute("SELECT DISTINCT user_id FROM user_repos WHERE repo_key=?", (rk,))
+                    from src.kernel.domain_read import mgmt_lib as _mg_ur
+                    _ur = _mg_ur(foreign_only=True)
+                    if _ur is not None:
+                        _rows_ur = _ur.read_all("user_ids_by_repo", (rk,))
+                    else:
+                        c.execute("SELECT DISTINCT user_id FROM user_repos WHERE repo_key=?", (rk,))
+                        _rows_ur = c.fetchall()
                 elif event.get("repo_keys"):
                     # 聚合汇总：多个仓库的收件人取并集
                     rks = [str(x) for x in (event.get("repo_keys") or []) if str(x).strip()]
@@ -869,9 +875,15 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
                     c.execute(f"SELECT DISTINCT user_id FROM user_repos WHERE repo_key IN ({ph})",
                               tuple(rks))
                 else:
-                    c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
-                              " WHERE feishu_open_id!='' AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
-                uids = [int(r[0]) for r in c.fetchall() if r and r[0]]
+                    from src.kernel.domain_read import mgmt_lib as _mg_um_all
+                    _um_all = _mg_um_all(foreign_only=True)
+                    if _um_all is not None:
+                        _rows_um = _um_all.read_all("um_feishu_open_ids_all", ())
+                    else:
+                        c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
+                                  " WHERE feishu_open_id!='' AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
+                        _rows_um = c.fetchall()
+                uids = [int(r[0]) for r in _rows_um if r and r[0]]
     except Exception as e:
         log.warning(f"obs alert recipients lookup failed: {e}")
         return []

@@ -373,10 +373,16 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 row = c.fetchone()
                 return row[0] if row else 0
             # issue_creator 为空：保留原逻辑（取第一个 join 用户）
-            c.execute(
-                "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 ORDER BY user_id LIMIT 1",
-                (repo, f"gitcode:{repo}"))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_fj
+            _fj = _mg_fj(foreign_only=True)
+            if _fj is not None:
+                row = _fj.read_one("first_join_user_by_repo", (repo, f"gitcode:{repo}"))
+            else:
+                c.execute(
+                    "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 "
+                    "ORDER BY user_id LIMIT 1",
+                    (repo, f"gitcode:{repo}"))
+                row = c.fetchone()
             return row[0] if row else 0
         except Exception:
             return 0
@@ -912,8 +918,13 @@ def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
     import json as _json
     out = []
     try:
-        c.execute("SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1")
-        rows = c.fetchall()
+        from src.kernel.domain_read import mgmt_lib as _mg_apb
+        _apb = _mg_apb(foreign_only=True)
+        if _apb is not None:
+            rows = _apb.read_all("autopilot_tasks_enabled_brief", ())
+        else:
+            c.execute("SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1")
+            rows = c.fetchall()
     except Exception as _e:
         log.warning(f"_find_autopilot_tasks_for_runtime: query failed: {_e}")
         return out

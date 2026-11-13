@@ -125,9 +125,14 @@ def _collect_feedback_context(event_seq: int, user: dict):
         try:
             with db_lock:
                 c2 = db.cursor()
-                c2.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                           (repo_key, issue_number))
-                ir = c2.fetchone()
+                from src.kernel.domain_read import runtime_lib as _rt_lib_is
+                _is_lib = _rt_lib_is(foreign_only=True)
+                if _is_lib is not None:
+                    ir = _is_lib.read_one("issue_id_by_repo_number", (repo_key, issue_number))
+                else:
+                    c2.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                               (repo_key, issue_number))
+                    ir = c2.fetchone()
                 if ir:
                     issue_id_int = ir[0]
         except Exception:

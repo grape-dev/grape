@@ -574,6 +574,27 @@ _READ_QUERIES: dict[str, str] = {
     "knowledge_id_baseline": (
         "SELECT id FROM agent_shared_knowledge "
         "WHERE repo_key=%s AND scope='baseline' AND name=%s AND archived=0 LIMIT 1"),
+    # 用户映射（runtime / insight 代码读）
+    "um_feishu_open_ids_all": (
+        "SELECT DISTINCT user_id FROM unified_user_mapping WHERE feishu_open_id!='' "
+        "AND user_id IS NOT NULL AND user_id NOT IN ('', '0')"),
+    "um_feishu_open_id_by_user": (
+        "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=%s AND feishu_open_id!='' LIMIT 1"),
+    "um_row_by_feishu_open_id": (
+        "SELECT user_id, gitcode_user, feishu_name, gitcode_nickname "
+        "FROM unified_user_mapping WHERE feishu_open_id=%s LIMIT 1"),
+    # 仓库成员
+    "user_ids_by_repo": "SELECT DISTINCT user_id FROM user_repos WHERE repo_key=%s",
+    "first_join_user_by_repo": (
+        "SELECT user_id FROM user_repos WHERE (repo_key=%s OR repo_key=%s) AND is_join=1 "
+        "ORDER BY user_id LIMIT 1"),
+    # 巡检任务
+    "autopilot_tasks_enabled_brief": (
+        "SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1"),
+    "autopilot_tasks_enabled_full": (
+        "SELECT id, name, repo_key, agent_type, instruction, skill_name, cron, max_retry, "
+        "created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE enabled=1"),
+    "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=%s",
     "scene_market_official_by_name": (
         "SELECT id, version, content_hash, is_active FROM scene_market "
         "WHERE name=%s AND source='official' LIMIT 1"),
