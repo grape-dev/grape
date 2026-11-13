@@ -614,89 +614,16 @@ async def sync_official_scenes(repo_root: str | None = None):
                 nodes_json = json.dumps(nodes, ensure_ascii=False)
                 preset_custom_fields = json.dumps(scene_data.get("custom_fields", []), ensure_ascii=False)
 
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT id, version, content_hash, is_active FROM scene_market "
-                        "WHERE name=? AND source='official' LIMIT 1",
-                        (name,),
-                    )
-                    row = c.fetchone()
-
-                    if row:
-                        scene_id, old_version, old_hash, preserved_active = row
-                        if old_hash == content_hash:
-                            stats["skipped"] += 1
-                            continue
-
-                        # hash 变了
-                        if _parse_version(version) <= _parse_version(old_version or "0.0.0"):
-                            logger.warning(
-                                f"Scene sync: {name} content changed but version not updated "
-                                f"(old={old_version}, new={version}), updating anyway"
-                            )
-
-                        # 先 UPDATE 不带 icon（icon 等 OBS 上传后单独 UPDATE）
-                        # 保留 admin 设置的 is_active（SELECT 读回写），is_featured 不在 SET 中所以不被覆盖
-                        c.execute(
-                            "UPDATE scene_market SET "
-                            "display_name=?, version=?, description=?, market_description=?, "
-                            "category_id=?, recommended_template=?, nodes_json=?, "
-                            "onboarding=?, tags=?, author=?, content_hash=?, preset_custom_fields=?, "
-                            "is_active=?, updated_at=datetime('now') "
-                            "WHERE id=?",
-                            (display_name, version, description, market_desc,
-                             category_id, recommended_template, nodes_json,
-                             onboarding, tags_str, author, content_hash,
-                             preset_custom_fields, preserved_active if preserved_active is not None else 1, scene_id),
-                        )
-                        db.commit()
-                        market_id = scene_id
-                        stats["updated"] += 1
-                        log.info(f"Scene sync: updated '{name}' v{version}")
-                    else:
-                        c.execute(
-                            "INSERT INTO scene_market "
-                            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
-                            "category_id, is_featured, like_count, source, source_user_id, "
-                            "recommended_template, nodes_json, onboarding, tags, author, "
-                            "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
-                            (name, display_name, version, description, market_desc,
-                             "", "", category_id, recommended_template, nodes_json,
-                             onboarding, tags_str, author, content_hash,
-                             preset_custom_fields),
-                        )
-                        db.commit()
-                        market_id = c.lastrowid
-                        stats["added"] += 1
-                        log.info(f"Scene sync: added '{name}' v{version}")
-
-                    # icon 上传：用 market_id 作为 OBS key（全局唯一）
-                    if icon_file_data:
-                        try:
-                            from src.domains.runtime.storage import get_storage
-                            storage = get_storage()
-                            icon_key = f"scene-icons/{market_id}{icon_file_ext}"
-                            if storage:
-                                storage.save_bytes(icon_key, icon_file_data)
-                                icon_val = storage.temporary_url(icon_key) if hasattr(storage, 'temporary_url') else ""
-                                obs_icon_key = icon_key
-                            else:
-                                static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api", "frontend", "shell", "img", "scenes")
-                                os.makedirs(static_dir, exist_ok=True)
-                                dest = os.path.join(static_dir, f"{market_id}{icon_file_ext}")
-                                with open(dest, "wb") as f:
-                                    f.write(icon_file_data)
-                                icon_val = f"/static/img/scenes/{market_id}{icon_file_ext}"
-                                obs_icon_key = ""
-                            # UPDATE icon 字段
-                            with db_lock:
-                                cur = db.cursor()
-                                cur.execute("UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?", (icon_val, obs_icon_key, market_id))
-                                db.commit()
-                        except Exception as e:
-                            logger.warning(f"Scene sync: {name} icon storage failed: {e}")
+                action, market_id = _persist_scene_row(name, {
+                    "display_name": display_name, "version": version, "description": description,
+                    "market_desc": market_desc, "category_id": category_id,
+                    "recommended_template": recommended_template, "nodes_json": nodes_json,
+                    "onboarding": onboarding, "tags_str": tags_str, "author": author,
+                    "content_hash": content_hash, "preset_custom_fields": preset_custom_fields,
+                }, stats)
+                if action == "skipped":
+                    continue
+                _apply_scene_icon(name, market_id, icon_file_data, icon_file_ext)
 
                 # g. 重建 scene_skill_ref（含 skill_id）
                 _rebuild_scene_skill_ref_by_name(name, nodes)
@@ -725,3 +652,99 @@ async def sync_official_scenes(repo_root: str | None = None):
             # （与 skill_sync 原有泄漏同款）。删除父目录。
             shutil.rmtree(os.path.dirname(tmp_dir), ignore_errors=True)
 
+
+def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
+    """写入/更新场景内容，返回 (scene_id, action)。
+
+    action ∈ {"skipped", "updated", "added"}；skipped 时 scene_id 为已存在的行 id。
+    只更新内容列，`is_active` 保留库内既有值（admin 设置不被覆盖）。
+    """
+    content_hash = fields["content_hash"]
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, version, content_hash, is_active FROM scene_market "
+            "WHERE name=? AND source='official' LIMIT 1",
+            (name,),
+        )
+        row = c.fetchone()
+
+        if row:
+            scene_id, old_version, old_hash, preserved_active = row
+            if old_hash == content_hash:
+                stats["skipped"] += 1
+                return scene_id, "skipped"
+
+            if _parse_version(fields["version"]) <= _parse_version(old_version or "0.0.0"):
+                logger.warning(
+                    f"Scene sync: {name} content changed but version not updated "
+                    f"(old={old_version}, new={fields['version']}), updating anyway"
+                )
+
+            c.execute(
+                "UPDATE scene_market SET "
+                "display_name=?, version=?, description=?, market_description=?, "
+                "category_id=?, recommended_template=?, nodes_json=?, "
+                "onboarding=?, tags=?, author=?, content_hash=?, preset_custom_fields=?, "
+                "is_active=?, updated_at=datetime('now') "
+                "WHERE id=?",
+                (fields["display_name"], fields["version"], fields["description"],
+                 fields["market_desc"], fields["category_id"],
+                 fields["recommended_template"], fields["nodes_json"],
+                 fields["onboarding"], fields["tags_str"], fields["author"],
+                 content_hash, fields["preset_custom_fields"],
+                 preserved_active if preserved_active is not None else 1, scene_id),
+            )
+            db.commit()
+            stats["updated"] += 1
+            log.info(f"Scene sync: updated '{name}' v{fields['version']}")
+            return scene_id, "updated"
+
+        c.execute(
+            "INSERT INTO scene_market "
+            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
+            "category_id, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, tags, author, "
+            "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
+            (name, fields["display_name"], fields["version"], fields["description"],
+             fields["market_desc"], "", "", fields["category_id"],
+             fields["recommended_template"], fields["nodes_json"],
+             fields["onboarding"], fields["tags_str"], fields["author"],
+             content_hash, fields["preset_custom_fields"]),
+        )
+        db.commit()
+        new_id = c.lastrowid
+        stats["added"] += 1
+        log.info(f"Scene sync: added '{name}' v{fields['version']}")
+        return new_id, "added"
+
+
+def _apply_scene_icon(name: str, market_id: int, icon_file_data, icon_file_ext: str) -> None:
+    """上传图标并回写 icon 列（OBS key 以 market_id 生成，故必须在落库之后调用）。"""
+    if not icon_file_data:
+        return
+    try:
+        from src.domains.runtime.storage import get_storage
+        storage = get_storage()
+        icon_key = f"scene-icons/{market_id}{icon_file_ext}"
+        if storage:
+            storage.save_bytes(icon_key, icon_file_data)
+            icon_val = storage.temporary_url(icon_key) if hasattr(storage, 'temporary_url') else ""
+            obs_icon_key = icon_key
+        else:
+            static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                      "api", "frontend", "shell", "img", "scenes")
+            os.makedirs(static_dir, exist_ok=True)
+            dest = os.path.join(static_dir, f"{market_id}{icon_file_ext}")
+            with open(dest, "wb") as f:
+                f.write(icon_file_data)
+            icon_val = f"/static/img/scenes/{market_id}{icon_file_ext}"
+            obs_icon_key = ""
+        with db_lock:
+            cur = db.cursor()
+            cur.execute("UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?",
+                        (icon_val, obs_icon_key, market_id))
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Scene sync: {name} icon storage failed: {e}")
