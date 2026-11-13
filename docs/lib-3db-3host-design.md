@@ -21,7 +21,7 @@
 ### 1.2 硬不变量（任何阶段不得破坏）
 
 1. **同域写必须同事务**：`foreign_only=True` 守卫保证本域写不走 lib 连接（否则丢原子性）。
-2. **双主同 HEAD**：0007 / 0001 的 `/root/wt-arch` 任一时刻同 commit；nginx `ip_hash` 按 IP 钉机，两台行为必须一致。
+2. **双主同 HEAD**：0007 / 0001 的 `/opt/grape` 任一时刻同 commit；nginx `ip_hash` 按 IP 钉机，两台行为必须一致。
 3. **只展示一次的副作用禁止入意图队列**：建凭据 token、吊销凭据必须**同步直连**（重放会造孤儿/留窗口）。
 4. **组合写收成一个原语**：探测即快照（`save_agent_runtimes`）、账号级联（`purge_user_rows`）、吊销级联（`purge_runtime_credential`）不得拆成多条意图。
 5. **意图表有上限**：`applied` 行按 7 天归档，`dead` 行必须人工处理，不得静默堆积。
@@ -34,11 +34,11 @@
 
 | 项 | 实测 |
 |---|---|
-| 三库位置 | **全部在 `192.168.0.59` 同一实例**（`grape_dev_mgmt` / `grape_dev_runtime` / `grape_dev_insight`） |
+| 三库位置 | **全部在 `<dev-db-host>` 同一实例**（`grape_dev_mgmt` / `grape_dev_runtime` / `grape_dev_insight`） |
 | 跨域视图 | **137 个**：mgmt 46（→runtime 36、→insight 10）；runtime 91（→mgmt 81、→insight 10） |
 | 视图可更新性 | mgmt 侧 runtime 表均为 `IS_UPDATABLE=YES` → 今天跨域写"能用"全靠视图 |
-| insight 副本 | `.59` = **126 表 / api_latency_log 5849 行**（实库）；`.164` = 14 表 / 5125 行（旧副本） |
-| runtime 副本 | `.243` 存在一份 `grape_dev_runtime`（45 表、无 `xwrite_log`），与 `.59` 是否同步**未验证** |
+| insight 副本 | `<dev-db-host>` = **126 表 / api_latency_log 5849 行**（实库）；`<insight-copy-host>` = 14 表 / 5125 行（旧副本） |
+| runtime 副本 | `<runtime-copy-host>` 存在一份 `grape_dev_runtime`（45 表、无 `xwrite_log`），与 `<dev-db-host>` 是否同步**未验证** |
 | 多份基表 | `takeover_sessions`（mgmt 基表 + runtime 空表）、`grape_t_channel_installation`（runtime 11 行 + mgmt 0 行）、`grape_t_channel_lease`（两库都有数据） |
 
 ### 2.2 代码改造进度
@@ -138,8 +138,8 @@
 
 | 表/副本 | 现状 | 裁定（待确认） | 动作 |
 |---|---|---|---|
-| `grape_dev_insight@.164` | 14 表 / 5125 行，代码零引用 | **退役** | 备份后 DROP DATABASE；保留 `.59` 为唯一实库 |
-| `grape_dev_runtime@.243` | 45 表 / 无 `xwrite_log`，同步性未验证 | **先比对后退役** | 逐表 `CHECKSUM TABLE` + 行数比对；差异为空 → 退役，否则以 `.59` 为准回灌 |
+| `grape_dev_insight@<insight-copy-host>` | 14 表 / 5125 行，代码零引用 | **退役** | 备份后 DROP DATABASE；保留 `<dev-db-host>` 为唯一实库 |
+| `grape_dev_runtime@<runtime-copy-host>` | 45 表 / 无 `xwrite_log`，同步性未验证 | **先比对后退役** | 逐表 `CHECKSUM TABLE` + 行数比对；差异为空 → 退役，否则以 `<dev-db-host>` 为准回灌 |
 | `takeover_sessions` | mgmt 有数据可能、runtime 空表 | **owner=mgmt**（已裁定） | P4 时 DROP runtime 空表 |
 | `grape_t_channel_installation` | runtime 11 行、mgmt 0 行 | **owner=runtime**（已裁定） | P4 时 DROP mgmt 空表 |
 | `grape_t_channel_lease` | mgmt 12 行 / runtime 11 行，**同 10 个 key 的 owner 与时间戳全部不同**；runtime `updated_at` 更新（01:12 vs 17:22），mgmt 含 `__sim_*` 测试行 | **owner=runtime（已裁定）** | P4 删 mgmt 副本；⚠️ mgmt 进程若读 lease 会读到陈旧数据（潜在 bug，见 §7） |
@@ -166,7 +166,7 @@
 
 | 步骤 | 动作 | 回滚 |
 |---|---|---|
-| 1 | **insight → 独立主机**：`mysqldump` 导出 → 目标机导入 → 校验（行数 + CHECKSUM）→ 改 `DEVOPS_DB_HOST` + `GRAPE_DSN_INSIGHT` | 改回 `.59` 地址（配置项，非代码） |
+| 1 | **insight → 独立主机**：`mysqldump` 导出 → 目标机导入 → 校验（行数 + CHECKSUM）→ 改 `DEVOPS_DB_HOST` + `GRAPE_DSN_INSIGHT` | 改回 `<dev-db-host>` 地址（配置项，非代码） |
 | 2 | **runtime → 独立主机**：同上；额外验证三个排水单元与 IM 表（`GRAPE_IM_DB_NAME` 需同步改） | 同上 |
 | 3 | mgmt 留在原机（或反向迁出） | 同上 |
 
@@ -252,8 +252,8 @@
 |---|---|---|
 | D1 | 动态列名口径 | (a) 按列枚举登记（推荐） (b) 通用 `read_column(col, ...)` 白名单校验 |
 | D2 | 动态 IN 列表口径 | (a) 逐 key 扇出 + Python 合并（推荐） (b) 支持"占位符个数模板" `..._in1..inN` |
-| D3 | `.164` insight 副本 | (a) 备份后退役（推荐） (b) 保留观察 |
-| D4 | `.243` runtime 副本 | (a) 先 CHECKSUM 比对再退役（推荐） (b) 直接退役 |
+| D3 | `<insight-copy-host>` insight 副本 | (a) 备份后退役（推荐） (b) 保留观察 |
+| D4 | `<runtime-copy-host>` runtime 副本 | (a) 先 CHECKSUM 比对再退役（推荐） (b) 直接退役 |
 | D5 | ~~`grape_t_channel_lease` 双份数据~~ | **已裁定：runtime 权威**（证据见 §2.1）；待补：mgmt 侧陈旧读点的行为影响 |
 | D6 | 迁机顺序 | (a) insight → runtime → mgmt（推荐，依赖最少） (b) 其它 |
 | D7 | 跨主机延迟预算 | 需给 P99 目标（建议 < 20ms），决定是否改心跳聚合 |
@@ -286,12 +286,41 @@
 
 ## 附录 B：关键脚本
 
+### B.1 已入库（可复现、可门禁）
+
 | 脚本 | 用途 |
 |---|---|
-| `/root/p4_view_inventory.py` | 视图清单 × 目标域 × 代码引用归属 |
-| `/root/p4_read_converter.py` | 读点候选清单（只读） |
-| `/root/p4_read_rewriter.py` | 生成可审阅补丁（AST 自检） |
-| `/root/p4_verify_all.py` | 双通道验证（三环境，FAIL/UNCOVERED 分离） |
-| `/root/p4pilot_verify.py` | 手工参数的双通道样本 |
 | `scripts/xwrite_drain.py` | 三分区排水（50 个 handler） |
 | `scripts/xwrite_reconcile.py` | 对账 / 归档 / 死信重投 |
+| `scripts/check_lib_query_names.py` | **A3 门禁**：代码引用的跨域读查询名 ⊆ 目标域 lib 注册表（AST 静态比对，退出码 0/1/2） |
+| `scripts/domain_view_freshness.py` / `scripts/sync_domain_views.py` | 跨库视图列新鲜度检查与重建（视图退役期使用） |
+
+### B.2 未入库（运行机本地脚本，需先还纳入库才能作为出口条件）
+
+下列脚本是改造期在运维机上直接运行的（`/root/` 下单文件，非仓库内容）。
+它们**不在本分支**，因此 W1/W2 的 `p4_verify_all.py` 出口条件在仓库内**不可复现**；
+进入 B2 前必须先还纳（登记路径 + 依赖 + 调用口径），否则每轮验收只能由掌握该脚本的人手工完成。
+
+| 运行机本地脚本 | 用途 | 还纳状态 |
+|---|---|---|
+| `p4_view_inventory.py` | 视图清单 × 目标域 × 代码引用归属 | 待还纳 |
+| `p4_read_converter.py` | 读点候选清单（只读） | 待还纳 |
+| `p4_read_rewriter.py` | 生成可审阅补丁（AST 自检） | 待还纳 |
+| `p4_verify_all.py` | 双通道验证（三环境，FAIL/UNCOVERED 分离） | 待还纳（**B2 入口阻塞**） |
+| `p4pilot_verify.py` | 手工参数的双通道样本 | 待还纳 |
+
+## 附录 C：B1 基线同步与 QA 复核结论（Issue #2462）
+
+基线同步：`arch-weekly-11`（`798fd75`）合入 `arch-weekly-11-ljt`，本分支据此继续开发；
+同步后 `docs/lib-3db-3host-design.md` 与 `src/kernel/{domain_read,cross_write,db_registry}.py` 均在位。
+
+对合入代码的逐项复核（证据为文件行号，非转述）：
+
+| 编号 | 复核项 | 结论 | 证据 |
+|---|---|---|---|
+| F1 | 意图表命名 `grape_t_` 规范 | ✅ 已整改 | `src/kernel/cross_write.py:22` = `grape_t_xwrite_log`；`scripts/view_owner_known_duplicates.txt:14` 同步登记 |
+| F2 | lib 写原语的 MySQL 方言（`%s` / `ON DUPLICATE KEY` / `NOW()`）在 sqlite 复用路径下不可用 | ✅ 已整改（按收紧可用性） | `src/domains/{mgmt,runtime}/public/__init__.py` 的 `available()` 改为 `db_registry.uses_own_dsn(<domain>)`；`src/domains/contracts/local/*.py` 同口径 |
+| F3 | 提交物携带内网地址 / 本机绝对路径 | ⚠️ 本轮补整改 | `deploy/systemd/*.service` 已脱敏（`/opt/grape` + `EnvironmentFile`），但 `docs/lib-3db-3host-design.md` 仍含真实内网 IP 与 `/root/` 路径 → 本批改为 `<dev-db-host>` / `<insight-copy-host>` / `<runtime-copy-host>` 占位 |
+| F4 | 新增常量无来源登记 | ✅ 已整改 | `src/kernel/cross_write.py:23-24` 的 `MAX_ATTEMPTS` / `RETRY_BACKOFF_S` 已带 rationale 注释 |
+| I3 | mgmt lib 白名单含凭据列（`webhook_secret` / `bot_gitcode_token` / `gitcode_webhook_token` / `bot_github_token` / `github_webhook_token` / `password_hash`） | ⏳ 待人工裁决，当前无调用方 | `src/domains/mgmt/public/__init__.py:17-30` 登记；`src/` 全量检索无 `fetch_rows/fetch_one/read_one/read_all` 取这些列的调用点 |
+| I4 | `insight_lib()` 无对应 `src.domains.insight.public` 模块 | ⏳ 记录备查 | `src/kernel/domain_read.py:62` 定义但无调用方；该域读仍走 `src/domains/contracts/local/insight_local.py` |
